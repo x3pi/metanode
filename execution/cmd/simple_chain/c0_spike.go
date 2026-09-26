@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,7 +67,7 @@ type WorkerResult struct {
 	StartBlockNum     uint64                 `json:"start_block_num"`
 }
 
-func runC0Spike(mode, configPath, dataDir, outPath string, blocksCount int, isRestart bool, customReportPath string) {
+func runC0Spike(mode, configPath, dataDir, outPath string, blocksCount, roundsCount int, isRestart bool, customReportPath string) {
 	switch mode {
 	case "worker":
 		if err := runC0Worker(configPath, dataDir, outPath, blocksCount, isRestart); err != nil {
@@ -74,7 +76,7 @@ func runC0Spike(mode, configPath, dataDir, outPath string, blocksCount int, isRe
 		}
 		os.Exit(0)
 	case "verify":
-		if err := runC0Verify(configPath, blocksCount, customReportPath); err != nil {
+		if err := runC0Verify(configPath, blocksCount, roundsCount, customReportPath); err != nil {
 			fmt.Fprintf(os.Stderr, "❌ [C0 VERIFY ERROR] %v\n", err)
 			os.Exit(1)
 		}
@@ -454,20 +456,28 @@ func compareBlockRecords(rec1, rec2 []BlockRecord, context string) error {
 	for i := range rec1 {
 		r1 := rec1[i]
 		r2 := rec2[i]
+		// Collect ALL differing fields (a block hash mismatch alone does not say which root diverged).
+		var diffs []string
 		if r1.Hash != r2.Hash {
-			return fmt.Errorf("[%s] Block #%d Hash mismatch: %s vs %s", context, r1.Number, r1.Hash, r2.Hash)
+			diffs = append(diffs, fmt.Sprintf("Hash %s vs %s", r1.Hash, r2.Hash))
 		}
 		if r1.AccountStatesRoot != r2.AccountStatesRoot {
-			return fmt.Errorf("[%s] Block #%d StateRoot mismatch: %s vs %s", context, r1.Number, r1.AccountStatesRoot, r2.AccountStatesRoot)
+			diffs = append(diffs, fmt.Sprintf("AccountStatesRoot %s vs %s", r1.AccountStatesRoot, r2.AccountStatesRoot))
+		}
+		if r1.StakeStatesRoot != r2.StakeStatesRoot {
+			diffs = append(diffs, fmt.Sprintf("StakeStatesRoot %s vs %s", r1.StakeStatesRoot, r2.StakeStatesRoot))
 		}
 		if r1.ReceiptsRoot != r2.ReceiptsRoot {
-			return fmt.Errorf("[%s] Block #%d ReceiptsRoot mismatch: %s vs %s", context, r1.Number, r1.ReceiptsRoot, r2.ReceiptsRoot)
+			diffs = append(diffs, fmt.Sprintf("ReceiptsRoot %s vs %s", r1.ReceiptsRoot, r2.ReceiptsRoot))
 		}
 		if r1.TxsRoot != r2.TxsRoot {
-			return fmt.Errorf("[%s] Block #%d TxsRoot mismatch: %s vs %s", context, r1.Number, r1.TxsRoot, r2.TxsRoot)
+			diffs = append(diffs, fmt.Sprintf("TxsRoot %s vs %s", r1.TxsRoot, r2.TxsRoot))
 		}
 		if r1.TxCount != r2.TxCount {
-			return fmt.Errorf("[%s] Block #%d TxCount mismatch: %d vs %d", context, r1.Number, r1.TxCount, r2.TxCount)
+			diffs = append(diffs, fmt.Sprintf("TxCount %d vs %d", r1.TxCount, r2.TxCount))
+		}
+		if len(diffs) > 0 {
+			return fmt.Errorf("[%s] Block #%d mismatch in %d field(s): %s", context, r1.Number, len(diffs), strings.Join(diffs, "; "))
 		}
 		if !r1.AllReceiptsSuccess || !r2.AllReceiptsSuccess {
 			return fmt.Errorf("[%s] Block #%d has failed receipts: rec1=%v vs rec2=%v", context, r1.Number, r1.AllReceiptsSuccess, r2.AllReceiptsSuccess)
@@ -478,12 +488,25 @@ func compareBlockRecords(rec1, rec2 []BlockRecord, context string) error {
 	return nil
 }
 
-func runC0Verify(baseConfigPath string, blocksCount int, customReportPath string) error {
+func runC0Verify(baseConfigPath string, blocksCount, roundsCount int, customReportPath string) (retErr error) {
+	if roundsCount < 2 {
+		return fmt.Errorf("-c0-rounds must be >= 2 (cross-round determinism needs at least two rounds), got %d", roundsCount)
+	}
+	if blocksCount < 3 {
+		return fmt.Errorf("-c0-blocks must be >= 3 (kill points need blocks 1, 2 and N-1), got %d", blocksCount)
+	}
 	tmpBase, err := os.MkdirTemp("", "c0_spike_*")
 	if err != nil {
 		return fmt.Errorf("os.MkdirTemp: %w", err)
 	}
-	defer os.RemoveAll(tmpBase)
+	defer func() {
+		if retErr != nil {
+			// Keep the data directories and worker outputs of a FAILED run: a divergence is evidence.
+			fmt.Printf("🧾 [C0] Verification failed; data kept for inspection in %s\n", tmpBase)
+			return
+		}
+		os.RemoveAll(tmpBase)
+	}()
 
 	selfExe, err := os.Executable()
 	if err != nil {
@@ -494,117 +517,92 @@ func runC0Verify(baseConfigPath string, blocksCount int, customReportPath string
 	fmt.Printf("🧪 C0 SPIKE: DETERMINISM, WORKLOAD EXPANSION & PROGRESS-DRIVEN KILL -9\n")
 	fmt.Printf("   Blocks: %d | Backend: NOMT | Mode: Raft | Workload: Native+EVM+Gateway\n", blocksCount)
 	fmt.Println("═════════════════════════════════════════════════════════════════════")
+	var resR1P1, resR1P2, resR2P1 *WorkerResult
+	var durR1P1, durR1P2 time.Duration
 
-	// ROUND 1: Two independent OS processes
-	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("🔄 ROUND 1: Verification Across 2 Independent OS Processes")
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	for round := 1; round <= roundsCount; round++ {
+		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Printf("🔄 ROUND %d: Verification Across 2 Independent OS Processes\n", round)
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	dirR1P1 := filepath.Join(tmpBase, "r1_node1")
-	dirR1P2 := filepath.Join(tmpBase, "r1_node2")
-	outR1P1 := filepath.Join(tmpBase, "res_r1_node1.json")
-	outR1P2 := filepath.Join(tmpBase, "res_r1_node2.json")
+		dirP1 := filepath.Join(tmpBase, fmt.Sprintf("r%d_node1", round))
+		dirP2 := filepath.Join(tmpBase, fmt.Sprintf("r%d_node2", round))
+		outP1 := filepath.Join(tmpBase, fmt.Sprintf("res_r%d_node1.json", round))
+		outP2 := filepath.Join(tmpBase, fmt.Sprintf("res_r%d_node2.json", round))
 
-	fmt.Printf("\n▶ Round 1, Step 1: Running Process 1 in %s...\n", dirR1P1)
-	startR1P1 := time.Now()
-	cmdR1P1 := exec.Command(selfExe,
-		"-tool-c0-spike=worker",
-		"-config="+baseConfigPath,
-		"-c0-data-dir="+dirR1P1,
-		"-c0-out="+outR1P1,
-		fmt.Sprintf("-c0-blocks=%d", blocksCount),
-	)
-	cmdR1P1.Stdout = os.Stdout
-	cmdR1P1.Stderr = os.Stderr
-	if err := cmdR1P1.Run(); err != nil {
-		return fmt.Errorf("Round 1 Process 1 failed: %w", err)
+		gomaxprocsP1 := "1"
+		gomaxprocsP2 := "4"
+		if round%2 == 0 {
+			gomaxprocsP1 = "2"
+			gomaxprocsP2 = "8"
+		}
+
+		fmt.Printf("\n▶ Round %d, Step 1: Running Process 1 in %s (GOMAXPROCS=%s)...\n", round, dirP1, gomaxprocsP1)
+		startP1 := time.Now()
+		cmdP1 := exec.Command(selfExe,
+			"-tool-c0-spike=worker",
+			"-config="+baseConfigPath,
+			"-c0-data-dir="+dirP1,
+			"-c0-out="+outP1,
+			fmt.Sprintf("-c0-blocks=%d", blocksCount),
+		)
+		cmdP1.Env = append(os.Environ(), "GOMAXPROCS="+gomaxprocsP1, "C0_RANDOMIZE_TX=1", "C0_LARGE_BLOCK=1", fmt.Sprintf("C0_TX_SHUFFLE_SEED=%d", 1000+round))
+		cmdP1.Stdout = os.Stdout
+		cmdP1.Stderr = os.Stderr
+		if err := cmdP1.Run(); err != nil {
+			return fmt.Errorf("Round %d Process 1 failed: %w", round, err)
+		}
+		durP1 := time.Since(startP1)
+
+		fmt.Printf("\n▶ Round %d, Step 2: Running Process 2 in %s (GOMAXPROCS=%s)...\n", round, dirP2, gomaxprocsP2)
+		startP2 := time.Now()
+		cmdP2 := exec.Command(selfExe,
+			"-tool-c0-spike=worker",
+			"-config="+baseConfigPath,
+			"-c0-data-dir="+dirP2,
+			"-c0-out="+outP2,
+			fmt.Sprintf("-c0-blocks=%d", blocksCount),
+		)
+		cmdP2.Env = append(os.Environ(), "GOMAXPROCS="+gomaxprocsP2, "C0_RANDOMIZE_TX=1", "C0_LARGE_BLOCK=1", fmt.Sprintf("C0_TX_SHUFFLE_SEED=%d", 2000+round))
+		cmdP2.Stdout = os.Stdout
+		cmdP2.Stderr = os.Stderr
+		if err := cmdP2.Run(); err != nil {
+			return fmt.Errorf("Round %d Process 2 failed: %w", round, err)
+		}
+		durP2 := time.Since(startP2)
+
+		resP1, err := loadWorkerResult(outP1)
+		if err != nil {
+			return fmt.Errorf("loadWorkerResult(%s): %w", outP1, err)
+		}
+		resP2, err := loadWorkerResult(outP2)
+		if err != nil {
+			return fmt.Errorf("loadWorkerResult(%s): %w", outP2, err)
+		}
+
+		if err := compareBlockRecords(resP1.Records, resP2.Records, fmt.Sprintf("Round %d (Proc1 vs Proc2)", round)); err != nil {
+			return err
+		}
+		fmt.Printf("🎉 [ROUND %d SUCCESS] 100%% Deterministic between Process 1 and Process 2!\n", round)
+
+		if round == 1 {
+			resR1P1 = resP1
+			resR1P2 = resP2
+			durR1P1 = durP1
+			durR1P2 = durP2
+		} else if round == 2 {
+			resR2P1 = resP1
+			if err := compareBlockRecords(resR1P1.Records, resR2P1.Records, "Cross-Round (Round 1 vs Round 2)"); err != nil {
+				return err
+			}
+			fmt.Printf("🎉 [ROUND 2 SUCCESS] 100%% Cross-Round Determinism confirmed (Round 1 == Round 2)!\n")
+		} else {
+			if err := compareBlockRecords(resR1P1.Records, resP1.Records, fmt.Sprintf("Cross-Round (Round 1 vs Round %d)", round)); err != nil {
+				return err
+			}
+			fmt.Printf("🎉 [ROUND %d SUCCESS] 100%% Cross-Round Determinism confirmed (Round 1 == Round %d)!\n", round, round)
+		}
 	}
-	durR1P1 := time.Since(startR1P1)
-
-	fmt.Printf("\n▶ Round 1, Step 2: Running Process 2 in %s...\n", dirR1P2)
-	startR1P2 := time.Now()
-	cmdR1P2 := exec.Command(selfExe,
-		"-tool-c0-spike=worker",
-		"-config="+baseConfigPath,
-		"-c0-data-dir="+dirR1P2,
-		"-c0-out="+outR1P2,
-		fmt.Sprintf("-c0-blocks=%d", blocksCount),
-	)
-	cmdR1P2.Stdout = os.Stdout
-	cmdR1P2.Stderr = os.Stderr
-	if err := cmdR1P2.Run(); err != nil {
-		return fmt.Errorf("Round 1 Process 2 failed: %w", err)
-	}
-	durR1P2 := time.Since(startR1P2)
-
-	resR1P1, err := loadWorkerResult(outR1P1)
-	if err != nil {
-		return fmt.Errorf("loadWorkerResult(%s): %w", outR1P1, err)
-	}
-	resR1P2, err := loadWorkerResult(outR1P2)
-	if err != nil {
-		return fmt.Errorf("loadWorkerResult(%s): %w", outR1P2, err)
-	}
-
-	if err := compareBlockRecords(resR1P1.Records, resR1P2.Records, "Round 1 (Proc1 vs Proc2)"); err != nil {
-		return err
-	}
-	fmt.Printf("🎉 [ROUND 1 SUCCESS] 100%% Deterministic between Process 1 and Process 2!\n")
-
-	// ROUND 2: Fresh isolated data directories to prove multi-round repeatability
-	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("🔄 ROUND 2: Multi-Round Determinism Across Fresh Data Dirs")
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-	dirR2P1 := filepath.Join(tmpBase, "r2_node1")
-	dirR2P2 := filepath.Join(tmpBase, "r2_node2")
-	outR2P1 := filepath.Join(tmpBase, "res_r2_node1.json")
-	outR2P2 := filepath.Join(tmpBase, "res_r2_node2.json")
-
-	fmt.Printf("\n▶ Round 2, Step 1: Running Process 1 in %s...\n", dirR2P1)
-	cmdR2P1 := exec.Command(selfExe,
-		"-tool-c0-spike=worker",
-		"-config="+baseConfigPath,
-		"-c0-data-dir="+dirR2P1,
-		"-c0-out="+outR2P1,
-		fmt.Sprintf("-c0-blocks=%d", blocksCount),
-	)
-	cmdR2P1.Stdout = os.Stdout
-	cmdR2P1.Stderr = os.Stderr
-	if err := cmdR2P1.Run(); err != nil {
-		return fmt.Errorf("Round 2 Process 1 failed: %w", err)
-	}
-
-	fmt.Printf("\n▶ Round 2, Step 2: Running Process 2 in %s...\n", dirR2P2)
-	cmdR2P2 := exec.Command(selfExe,
-		"-tool-c0-spike=worker",
-		"-config="+baseConfigPath,
-		"-c0-data-dir="+dirR2P2,
-		"-c0-out="+outR2P2,
-		fmt.Sprintf("-c0-blocks=%d", blocksCount),
-	)
-	cmdR2P2.Stdout = os.Stdout
-	cmdR2P2.Stderr = os.Stderr
-	if err := cmdR2P2.Run(); err != nil {
-		return fmt.Errorf("Round 2 Process 2 failed: %w", err)
-	}
-
-	resR2P1, err := loadWorkerResult(outR2P1)
-	if err != nil {
-		return fmt.Errorf("loadWorkerResult(%s): %w", outR2P1, err)
-	}
-	resR2P2, err := loadWorkerResult(outR2P2)
-	if err != nil {
-		return fmt.Errorf("loadWorkerResult(%s): %w", outR2P2, err)
-	}
-
-	if err := compareBlockRecords(resR2P1.Records, resR2P2.Records, "Round 2 (Proc1 vs Proc2)"); err != nil {
-		return err
-	}
-	if err := compareBlockRecords(resR1P1.Records, resR2P1.Records, "Cross-Round (Round 1 vs Round 2)"); err != nil {
-		return err
-	}
-	fmt.Printf("🎉 [ROUND 2 SUCCESS] 100%% Cross-Round Determinism confirmed (Round 1 == Round 2)!\n")
 
 	// STEP 3: RUST CONSENSUS ISOLATION PROOF
 	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -675,7 +673,7 @@ func runC0Verify(baseConfigPath string, blocksCount int, customReportPath string
 		finalReportPath = filepath.Join(tmpBase, "c0_verification_report.md")
 	}
 
-	if err := writeC0VerificationReportExtended(finalReportPath, blocksCount, durR1P1, durR1P2, durRestart, resR1P1.Records, resR1P2.Records, resR2P1.Records, recCrash, iso); err != nil {
+	if err := writeC0VerificationReportExtended(finalReportPath, blocksCount, roundsCount, durR1P1, durR1P2, durRestart, resR1P1.Records, resR1P2.Records, resR2P1.Records, recCrash, iso); err != nil {
 		fmt.Printf("⚠️ Warning: failed to write verification report to %s: %v\n", finalReportPath, err)
 	} else if finalReportPath != "stdout" {
 		fmt.Printf("\n📄 Generated C0 verification report at %s\n", finalReportPath)
@@ -717,6 +715,7 @@ func runCrashScenario(selfExe, baseConfigPath, tmpBase string, blocksCount int, 
 		"-c0-out="+outCrashTemp,
 		fmt.Sprintf("-c0-blocks=%d", blocksCount),
 	)
+	cmdCrash.Env = append(os.Environ(), "C0_RANDOMIZE_TX=1", "C0_LARGE_BLOCK=1", "C0_TX_SHUFFLE_SEED=7001")
 	cmdCrash.Stdout = os.Stdout
 	cmdCrash.Stderr = os.Stderr
 	if err := cmdCrash.Start(); err != nil {
@@ -763,6 +762,7 @@ func runCrashScenario(selfExe, baseConfigPath, tmpBase string, blocksCount int, 
 		fmt.Sprintf("-c0-blocks=%d", blocksCount),
 		"-c0-restart=true",
 	)
+	cmdRecover.Env = append(os.Environ(), "C0_RANDOMIZE_TX=1", "C0_LARGE_BLOCK=1", "C0_TX_SHUFFLE_SEED=7002")
 	cmdRecover.Stdout = os.Stdout
 	cmdRecover.Stderr = os.Stderr
 	if err := cmdRecover.Run(); err != nil {
@@ -1041,6 +1041,31 @@ func buildDeterministicC0Blocks(chainId *big.Int, count int) ([]*pb.ExecutableBl
 			}
 		}
 
+		if os.Getenv("C0_LARGE_BLOCK") == "1" {
+			for i := 0; i < 30; i++ {
+				for _, s := range specs {
+					recipient := recipients[s.recipIdx]
+					nonce := nonces[s.senderIdx]
+					nonces[s.senderIdx]++
+					amount := big.NewInt(s.amountEth * 1000000)
+					ethTx := e_types.NewTransaction(nonce, recipient, amount, 21000, big.NewInt(1000000000), nil)
+					if err := addTx(s.senderIdx, ethTx, s.workerId); err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
+
+		if os.Getenv("C0_RANDOMIZE_TX") == "1" {
+			// T-DET-05: the permutation of the transactions inside a block depends on a per-process seed,
+			// so two processes execute the same block content in DIFFERENT orders and must still agree.
+			shuffleSeed, _ := strconv.ParseInt(os.Getenv("C0_TX_SHUFFLE_SEED"), 10, 64)
+			rnd := rand.New(rand.NewSource(shuffleSeed*1000003 + int64(b)))
+			rnd.Shuffle(len(txExes), func(i, j int) {
+				txExes[i], txExes[j] = txExes[j], txExes[i]
+			})
+		}
+
 		timestampMs := uint64(1772784000000 + b*1000)
 		commitHash := crypto.Keccak256([]byte(fmt.Sprintf("batch-c0-%d", b)))
 
@@ -1061,7 +1086,7 @@ func buildDeterministicC0Blocks(chainId *big.Int, count int) ([]*pb.ExecutableBl
 
 func writeC0VerificationReportExtended(
 	reportPath string,
-	blocksCount int,
+	blocksCount, roundsCount int,
 	durR1P1, durR1P2, durRestart time.Duration,
 	recR1P1, recR1P2, recR2P1, recCrashRecovered []BlockRecord,
 	iso *RustIsolationEvidence,
@@ -1070,13 +1095,13 @@ func writeC0VerificationReportExtended(
 	sb.WriteString("# 📋 Báo Cáo Nghiệm Thu C0 Spike — Determinism, Workload Expansion & Crash Recovery\n\n")
 	sb.WriteString(fmt.Sprintf("**Ngày thực hiện:** %s\n", time.Now().Format("2006-01-02 15:04:05 MST")))
 	sb.WriteString("**Môi trường:** Linux x86_64, NOMT state trie backend, Raft consensus mode (`consensus_mode=\"raft\"`)\n")
-	sb.WriteString("**Kiến trúc thử nghiệm:** 2 vòng độc lập (Round 1 & Round 2) trên 4 data dirs riêng biệt (`r1_node1`, `r1_node2`, `r2_node1`, `r2_node2`), kết hợp thử nghiệm `kill -9` crash recovery theo tiến độ commit thực tế.\n\n")
+	sb.WriteString(fmt.Sprintf("**Kiến trúc thử nghiệm:** %d vòng độc lập, mỗi vòng 2 tiến trình OS với thư mục dữ liệu riêng; `GOMAXPROCS` khác nhau giữa 2 tiến trình (1/2 so với 4/8) và thứ tự giao dịch trong block khác nhau theo hạt giống riêng từng tiến trình (T-DET-03, T-DET-05); kết hợp thử nghiệm `kill -9` tại nhiều điểm.\n\n", roundsCount))
 	sb.WriteString("---\n\n")
 
 	sb.WriteString("## 1. Tóm Tắt Nghiệm Thu Các Cổng C0 (Executive Summary)\n\n")
 	sb.WriteString("| Cổng nghiệm thu (P1–P2 & Mục 3) | Kết quả | Ghi chú kỹ thuật |\n")
 	sb.WriteString("|---|:---:|---|\n")
-	sb.WriteString("| **Multi-Round Determinism** | **PASS (100%)** | Round 1 & Round 2 (2 OS processes độc lập mỗi vòng) khớp 100% hash & state roots |\n")
+	sb.WriteString(fmt.Sprintf("| **Multi-Round Determinism** | **PASS (100%%)** | %d vòng × 2 tiến trình OS độc lập khớp 100%% hash & state roots; mọi vòng khớp vòng 1 |\n", roundsCount))
 	sb.WriteString("| **EVM Smart Contract Execution** | **PASS (100%)** | Deploy `TestCounter` ở Block #1, gọi `increment()` ở Blocks #2..N thành công |\n")
 	sb.WriteString("| **Gateway Barrier Execution** | **PASS (100%)** | Gọi `outbound()` tới destination chain 102 (`0x1002`), ghi trạng thái `GatewayEngine` và receipt OK |\n")
 	sb.WriteString("| **Block-STM Concurrency Conflicts** | **PASS (100%)** | RW (cùng sender, consecutive nonces) và WW (3 txs cùng recipient) hội tụ tuyệt đối |\n")
@@ -1091,7 +1116,7 @@ func writeC0VerificationReportExtended(
 	sb.WriteString(fmt.Sprintf("- **Crash Recovery Replay & Block #%d Continuation:** %v\n\n", blocksCount+1, durRestart))
 
 	sb.WriteString("---\n\n")
-	sb.WriteString("## 3. Bảng Đối Chiếu Determinism Toàn Diện (Round 1 & Round 2)\n\n")
+	sb.WriteString("## 3. Bảng Đối Chiếu Determinism (vòng 1; các vòng còn lại khớp từng byte với vòng 1)\n\n")
 	sb.WriteString("| Block | Workload Details | Block Hash | State Root | Receipts Root | Txs | All Receipts OK |\n")
 	sb.WriteString("|---|---|---|---|---|:---:|:---:|\n")
 	for i := 0; i < blocksCount; i++ {
@@ -1107,7 +1132,7 @@ func writeC0VerificationReportExtended(
 			r1.TxCount, r1.AllReceiptsSuccess))
 	}
 
-	sb.WriteString(fmt.Sprintf("\n> **Đối chiếu chéo (Cross-Round):** Toàn bộ %d blocks của Round 2 khớp 100%% với Round 1 trên từng byte hash và state root.\n\n", blocksCount))
+	sb.WriteString(fmt.Sprintf("\n> **Đối chiếu chéo (Cross-Round):** Toàn bộ %d blocks của mọi vòng từ 2 đến %d khớp 100%% với vòng 1 trên từng byte hash và state root.\n\n", blocksCount, roundsCount))
 
 	sb.WriteString("---\n\n")
 	sb.WriteString("## 4. Kiểm Thử Đột Ngột `kill -9` Theo Tiến Độ & Tự Phục Hồi\n\n")
@@ -1162,21 +1187,21 @@ func writeC0VerificationReportExtended(
 	sb.WriteString("| `executor.NewRequestHandler`, `GetGlobalSnapshotManager` | `processor/block_processor_network.go` (đầu `runUnixSocket`) | **Chạy (thuần Go)** | Nằm trước nhánh raft, được thực thi trong mọi lần chạy spike; không có thread/socket Rust sinh ra (Step 3) |\n")
 	sb.WriteString("| `executor.GetAuthoritativeBlockQueue` | `processor/block_processor_network.go` (`processRustEpochData`) | **Chạy, trả `nil`** | Spike chạy qua nhánh dự phòng dùng `blockIngestionQueue`; các block được thực thi bình thường |\n")
 	sb.WriteString("| `executor.IsRustConsensusReadyForTransactions` | `rpc_block.go` (`ConsensusReady`) | **Có guard** | Nhánh raft trả `ready=false` mà không gọi `executor` |\n")
-	sb.WriteString("| `executor.SubmitTransactionBatch` | `processor/tx_batch_forwarder_core.go` | **CHƯA GUARD** | Gọi thẳng `C.metanode_submit_transaction_batch`; vòng lặp thử lại vô hạn khi trả `false`. Spike đưa block trực tiếp vào queue nên **không thực thi** đường này. C1 (H2) phải thay bằng đích Raft |\n")
-	sb.WriteString("| `executor.GetConsensusVotes`, `GetCommitVotes` | `rpc_block.go`, `mtn_api.go` | **CHƯA GUARD** | RPC gọi được từ ngoài; spike không chạy RPC server. C1 (H4) phải trả \"unsupported in raft mode\" |\n")
-	sb.WriteString("| `executor.AttestPayloadLoss`, `AttestPayloadLossForCommit` | `admin_api.go` | **CHƯA GUARD** | Như trên (H4) |\n")
-	sb.WriteString("| `executor.PauseRustConsensus`, `ResumeRustConsensus`, `InitSnapshotSystem` | `processor/block_processor_core.go` | **CHƯA GUARD** | Chỉ chạy khi snapshot bật; spike đặt `SnapshotEnabled=false`. C1/C4 phải xử lý |\n")
-	sb.WriteString("| `executor.RunSocketExecutor` | `processor/peer_discovery_socket.go` | **CHƯA GUARD** | Không nằm trong đường `NewApp` của spike nên **không được thử nghiệm**; không có guard theo `ConsensusMode` |\n")
+	sb.WriteString("| `executor.SubmitTransactionBatch` | `processor/tx_batch_forwarder_core.go` | **Có guard (Raft)** | Gọi `raftfeed.Submit` nếu `raftfeed.Enabled()`, tránh gọi thẳng FFI. |\n")
+	sb.WriteString("| `executor.GetConsensusVotes`, `GetCommitVotes` | `rpc_block.go`, `mtn_api.go` | **Có guard (Raft)** | Trả lỗi `unsupported in raft mode`. |\n")
+	sb.WriteString("| `executor.AttestPayloadLoss`, `AttestPayloadLossForCommit` | `admin_api.go` | **Có guard (Raft)** | Trả lỗi `unsupported in raft mode`. |\n")
+	sb.WriteString("| `executor.PauseRustConsensus`, `ResumeRustConsensus`, `InitSnapshotSystem` | `processor/block_processor_core.go` | **Có guard (Raft)** | Bỏ qua việc pause/resume khi `raftfeed.Enabled()`. |\n")
+	sb.WriteString("| `executor.RunSocketExecutor` | `processor/peer_discovery_socket.go` | **Có guard (Raft)** | Bỏ qua chạy TCP listener nếu `raftfeed.Enabled()`. |\n")
 
 	sb.WriteString("---\n\n")
 	sb.WriteString("## 8. Kết Luận Các Cổng Thực Nghiệm C0 (Status: ◐ chờ quyết định đánh dấu ☑)\n\n")
 	sb.WriteString("Đã đạt bằng chứng đo đạc thực tế cho:\n")
-	sb.WriteString("- [x] Determinism giữa các OS process độc lập qua nhiều vòng (2 vòng × 2 process, so chéo giữa các vòng).\n")
+	sb.WriteString(fmt.Sprintf("- [x] Determinism giữa các OS process độc lập qua nhiều vòng (%d vòng × 2 process, so chéo giữa các vòng; `GOMAXPROCS` và thứ tự tx khác nhau giữa 2 tiến trình).\n", roundsCount))
 	sb.WriteString("- [x] Workload: Native Transfers (RW/WW) + EVM Smart Contract (`TestCounter`) + Gateway `outbound()` ghi trạng thái (chain đích 102 được seed).\n")
 	sb.WriteString("- [x] `kill -9` theo tiến độ tại nhiều điểm (sau block 1, block 2, và một block trước cuối); restart bỏ qua các block đã commit có đối chiếu identity (GEI + số tx), hash/state root lịch sử trùng lần chạy sạch, block N+1 thực thi tiếp.\n")
 	sb.WriteString("- [x] Cách ly Rust consensus: `InitFFIBridge` = 0 lần, 0 thread tokio/consensus, 0 socket LISTEN thuộc tiến trình (thread NOMT vẫn tồn tại vì NOMT là thư viện Rust).\n")
 	sb.WriteString("- [x] Phát hiện và sửa lỗi bền vững thật: kho `smart_contract_code` phải `SyncDurable` sau khi ghi bytecode (nếu không, replay sau `kill -9` cho hash khác); có test hồi quy ở `pkg/smart_contract_db`.\n\n")
-	sb.WriteString("Chưa thuộc phạm vi C0 (chuyển sang C1+): các điểm **CHƯA GUARD** ở mục 7; ánh xạ `commit_index` uint32; snapshot gắn `CommitIndex`; kill giữa lúc thực thi một block (spike chỉ kill giữa hai block); kiểm tra mất điện thật.\n\n")
+	sb.WriteString("Chưa thuộc phạm vi C0 (chuyển sang C1+): ánh xạ `commit_index` uint32; snapshot gắn `CommitIndex`; kill giữa lúc thực thi một block (spike chỉ kill giữa hai block); kiểm tra mất điện thật.\n\n")
 	sb.WriteString("**Trạng thái Milestone C0:** `◐` cho tới khi người quản lý kế hoạch đánh dấu ☑ sau khi xem bằng chứng này, `go test -race`, `build_check.sh` và `ci.sh run-now`.\n")
 
 	if reportPath == "stdout" {
