@@ -25,6 +25,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/node"
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	mt_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
@@ -646,10 +647,14 @@ func NewBlockProcessor(
 
 		// Register Rust Consensus pause/resume callbacks
 		snapshotManager.SetRustPauseCallback(func() {
-			executor.PauseRustConsensus()
+			if !raftfeed.Enabled() {
+				executor.PauseRustConsensus()
+			}
 		})
 		snapshotManager.SetRustResumeCallback(func() {
-			executor.ResumeRustConsensus()
+			if !raftfeed.Enabled() {
+				executor.ResumeRustConsensus()
+			}
 		})
 
 		// Fix: Synchronize snapshot triggering with the asynchronous commit pipeline

@@ -12,6 +12,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 
 	"github.com/meta-node-blockchain/meta-node/executor"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
@@ -216,7 +217,12 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 			// Gửi batch qua FFI (synchronous zero-copy injection)
 			for {
-				success := executor.SubmitTransactionBatch(bTransaction)
+				var success bool
+				if raftfeed.Enabled() {
+					success = raftfeed.Submit(bTransaction)
+				} else {
+					success = executor.SubmitTransactionBatch(bTransaction)
+				}
 				if success {
 					if shouldLogSend {
 						logger.Debug("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",

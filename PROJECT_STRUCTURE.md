@@ -200,7 +200,7 @@ metanode/
 
 *CLI Flags & Config:*
 - `--tool-c0-spike=verify|worker`: Tool mode for C0 multi-process spike verification harness.
-- `-c0-data-dir`, `-c0-out`, `-c0-blocks`, `-c0-restart`, `-c0-report`: Parameters for C0 spike execution (`-c0-report` defaults to a temp file; the spike never writes into the repo).
+- `-c0-data-dir`, `-c0-out`, `-c0-blocks`, `-c0-rounds` (>= 2), `-c0-restart`, `-c0-report`: Parameters for C0 spike execution (`-c0-report` defaults to a temp file; the spike never writes into the repo; a failed `verify` keeps its temp data directory). Workers read `C0_LARGE_BLOCK`, `C0_RANDOMIZE_TX` and `C0_TX_SHUFFLE_SEED` from the environment.
 - `pkg/blockchain/tx_processor/gateway_harness_hooks.go` (no-op) / `gateway_handler_c0spike.go` (`//go:build c0spike`): test-harness hooks for the Gateway handler; the production build is unchanged.
 - `consensus_mode`: "raft" (Rollup Raft ingestion queue mode) or empty (default Rust BFT consensus).
 
@@ -246,6 +246,7 @@ metanode/
 | `cross_chain/` | Cross-chain types, Root Anchor ledger, GatewayEngine (per-action self-signed cert model; GovernanceEngine propose/vote/execute removed 2026-09-04, RecoveryCommittee + DeclareChainDeadWithCert + UpdateCommitteeWithRecoveryCert removed 2026-09-24 — `UnregisterChainWithCert` is now self-authorized by the leaving chain's own committee with an `UnregisterNonce` replay guard, and `DeadChains` is set only by `SlashOnEquivocation`), AssetRegistryEngine, Ceremony, Root Anchor RPC client, Relayer reference engine, and `relayer_daemon/` automated service (Milestones A-I) | 🟢 LOW |
 | `blockchain/tx_processor/` | Transaction processor, VM dispatch, `GatewayHandler` native bridge contract dispatcher, `CommitteeAttestationWorker`, `CommitAttestationWorker` | 🔴 HIGH — EVM state |
 | `rollup/` | Pure deterministic Rollup State Machine (Phase B1), no I/O, idempotent lifecycle management for cross-node transfers | 🟢 LOW — pure logic |
+| `rollup/raftfeed/` | `consensus_mode="raft"` switch (`Enabled()`) and the future Raft batch/block source (C1 **stub**: `Submit`/`Ready` fail closed); used by default-off guards on Rust-consensus entry points | 🟡 MED — guards on RPC/forwarder paths |
 
 ---
 

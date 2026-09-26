@@ -5,6 +5,7 @@ import (
 
 	"github.com/meta-node-blockchain/meta-node/executor"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 )
 
 // runPeerDiscoverySocket starts the TCP socket listener for peer discovery queries
@@ -12,6 +13,10 @@ import (
 func (bp *BlockProcessor) runPeerDiscoverySocket(peerRPCPort int) {
 	if peerRPCPort <= 0 {
 		logger.Warn("⚠️ [PEER DISCOVERY] peer_rpc_port not configured or invalid, skipping TCP listener")
+		return
+	}
+	if raftfeed.Enabled() {
+		logger.Info("🌐 [PEER DISCOVERY] TCP socket listener skipped (unsupported in raft mode)")
 		return
 	}
 

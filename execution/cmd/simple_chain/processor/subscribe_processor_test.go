@@ -29,7 +29,9 @@ func TestNewSubscribeProcessor(t *testing.T) {
 func TestProcessSubscribeToAddress_SingleSubscription(t *testing.T) {
 	sender := NewMockMessageSender()
 	sp := &SubscribeProcessor{
-		messageSender: sender,
+		subscribers:                    make(map[e_common.Address][]network.Connection),
+		mapConnectionSubcribeAddresses: make(map[network.Connection][]e_common.Address),
+		messageSender:                  sender,
 	}
 
 	addr := e_common.HexToAddress("0xaaaa000000000000000000000000000000000001")
@@ -43,9 +45,8 @@ func TestProcessSubscribeToAddress_SingleSubscription(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify subscriber was stored
-	val, ok := sp.subscribers.Load(subscribeAddr)
+	conns, ok := sp.subscribers[subscribeAddr]
 	require.True(t, ok, "subscriber address should be stored")
-	conns := val.([]network.Connection)
 	assert.Len(t, conns, 1, "should have exactly 1 subscriber")
 }
 
@@ -55,7 +56,9 @@ func TestProcessSubscribeToAddress_SingleSubscription(t *testing.T) {
 func TestProcessSubscribeToAddress_DuplicateSubscription(t *testing.T) {
 	sender := NewMockMessageSender()
 	sp := &SubscribeProcessor{
-		messageSender: sender,
+		subscribers:                    make(map[e_common.Address][]network.Connection),
+		mapConnectionSubcribeAddresses: make(map[network.Connection][]e_common.Address),
+		messageSender:                  sender,
 	}
 
 	addr := e_common.HexToAddress("0xaaaa000000000000000000000000000000000001")
@@ -72,9 +75,8 @@ func TestProcessSubscribeToAddress_DuplicateSubscription(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should still have only one connection for this address (dedup)
-	val, ok := sp.subscribers.Load(subscribeAddr)
+	conns, ok := sp.subscribers[subscribeAddr]
 	require.True(t, ok)
-	conns := val.([]network.Connection)
 	assert.Len(t, conns, 1, "duplicate subscription should not add another connection")
 }
 
@@ -84,7 +86,9 @@ func TestProcessSubscribeToAddress_DuplicateSubscription(t *testing.T) {
 func TestProcessSubscribeToAddress_MultipleAddresses(t *testing.T) {
 	sender := NewMockMessageSender()
 	sp := &SubscribeProcessor{
-		messageSender: sender,
+		subscribers:                    make(map[e_common.Address][]network.Connection),
+		mapConnectionSubcribeAddresses: make(map[network.Connection][]e_common.Address),
+		messageSender:                  sender,
 	}
 
 	connAddr := e_common.HexToAddress("0xaaaa000000000000000000000000000000000001")
@@ -100,15 +104,14 @@ func TestProcessSubscribeToAddress_MultipleAddresses(t *testing.T) {
 	require.NoError(t, err)
 
 	// Both addresses should have subscribers
-	_, ok1 := sp.subscribers.Load(addr1)
-	_, ok2 := sp.subscribers.Load(addr2)
+	_, ok1 := sp.subscribers[addr1]
+	_, ok2 := sp.subscribers[addr2]
 	assert.True(t, ok1, "addr1 should have subscribers")
 	assert.True(t, ok2, "addr2 should have subscribers")
 
 	// Reverse map should track both addresses for this connection
-	val, ok := sp.mapConnectionSubcribeAddresses.Load(conn)
+	addresses, ok := sp.mapConnectionSubcribeAddresses[conn]
 	require.True(t, ok)
-	addresses := val.([]e_common.Address)
 	assert.Len(t, addresses, 2, "connection should be subscribed to 2 addresses")
 }
 
@@ -118,7 +121,9 @@ func TestProcessSubscribeToAddress_MultipleAddresses(t *testing.T) {
 func TestRemoveSubscriber_Single(t *testing.T) {
 	sender := NewMockMessageSender()
 	sp := &SubscribeProcessor{
-		messageSender: sender,
+		subscribers:                    make(map[e_common.Address][]network.Connection),
+		mapConnectionSubcribeAddresses: make(map[network.Connection][]e_common.Address),
+		messageSender:                  sender,
 	}
 
 	addr1 := e_common.HexToAddress("0xaaaa000000000000000000000000000000000001")
@@ -136,11 +141,11 @@ func TestRemoveSubscriber_Single(t *testing.T) {
 	sp.RemoveSubcriber(conn1)
 
 	// Verify subscriber was removed
-	_, ok := sp.subscribers.Load(subscribeAddr)
+	_, ok := sp.subscribers[subscribeAddr]
 	assert.False(t, ok, "subscriber should be removed after RemoveSubcriber")
 
 	// Verify reverse map was cleaned up
-	_, ok = sp.mapConnectionSubcribeAddresses.Load(conn1)
+	_, ok = sp.mapConnectionSubcribeAddresses[conn1]
 	assert.False(t, ok, "reverse map entry should be removed")
 }
 
@@ -150,7 +155,9 @@ func TestRemoveSubscriber_Single(t *testing.T) {
 func TestRemoveSubscriber_OneOfMultiple(t *testing.T) {
 	sender := NewMockMessageSender()
 	sp := &SubscribeProcessor{
-		messageSender: sender,
+		subscribers:                    make(map[e_common.Address][]network.Connection),
+		mapConnectionSubcribeAddresses: make(map[network.Connection][]e_common.Address),
+		messageSender:                  sender,
 	}
 
 	addr1 := e_common.HexToAddress("0xaaaa000000000000000000000000000000000001")
@@ -171,17 +178,16 @@ func TestRemoveSubscriber_OneOfMultiple(t *testing.T) {
 	sp.RemoveSubcriber(conn1)
 
 	// Second connection should still be subscribed
-	val, ok := sp.subscribers.Load(subscribeAddr)
+	conns, ok := sp.subscribers[subscribeAddr]
 	require.True(t, ok, "subscriber should still exist for second connection")
-	conns := val.([]network.Connection)
 	assert.Len(t, conns, 1, "should have exactly 1 subscriber remaining")
 
 	// First connection's reverse map should be gone
-	_, ok = sp.mapConnectionSubcribeAddresses.Load(conn1)
+	_, ok = sp.mapConnectionSubcribeAddresses[conn1]
 	assert.False(t, ok, "first connection's reverse map should be removed")
 
 	// Second connection's reverse map should still exist
-	_, ok = sp.mapConnectionSubcribeAddresses.Load(conn2)
+	_, ok = sp.mapConnectionSubcribeAddresses[conn2]
 	assert.True(t, ok, "second connection's reverse map should remain")
 }
 
@@ -191,7 +197,9 @@ func TestRemoveSubscriber_OneOfMultiple(t *testing.T) {
 func TestRemoveSubscriber_NonExistent(t *testing.T) {
 	sender := NewMockMessageSender()
 	sp := &SubscribeProcessor{
-		messageSender: sender,
+		subscribers:                    make(map[e_common.Address][]network.Connection),
+		mapConnectionSubcribeAddresses: make(map[network.Connection][]e_common.Address),
+		messageSender:                  sender,
 	}
 
 	addr := e_common.HexToAddress("0xaaaa000000000000000000000000000000000001")
@@ -207,7 +215,9 @@ func TestRemoveSubscriber_NonExistent(t *testing.T) {
 func TestSubscribeProcessor_ConcurrentAccess(t *testing.T) {
 	sender := NewMockMessageSender()
 	sp := &SubscribeProcessor{
-		messageSender: sender,
+		subscribers:                    make(map[e_common.Address][]network.Connection),
+		mapConnectionSubcribeAddresses: make(map[network.Connection][]e_common.Address),
+		messageSender:                  sender,
 	}
 
 	var wg sync.WaitGroup

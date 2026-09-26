@@ -224,3 +224,59 @@ func TestGatewayHandler_ClaimUnbondedBond_CreditsRealBalanceAfterUnbondingPeriod
 		t.Fatalf("expected genesisWallet balance to be credited to 2000, got %v (err=%v)", as.Balance(), err)
 	}
 }
+
+func TestGatewayHandler_UnregisterChainWithCert_FailsOnBadCert(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler: %v", err)
+	}
+
+	chainKP := bls.GenerateKeyPair()
+	chainPop := cross_chain.PopSign(chainKP.PrivateKey(), chainKP.PublicKey())
+	genesisWallet := common.HexToAddress("0xC2222222C2222222C2222222C2222222C2222222")
+
+	engine := cross_chain.NewGatewayEngine(991, map[uint64]cross_chain.ChainRegistry{
+		102: {
+			ChainID: 102, Epoch: 0, GenesisWallet: genesisWallet,
+			Committee: []cross_chain.ValidatorEntry{
+				{PubkeyBLS: chainKP.BytesPublicKey(), Stake: 10000, PopSignature: chainPop.Bytes()},
+			},
+		},
+	}, nil)
+	if err := saveGatewayEngine(cs, engine); err != nil {
+		t.Fatalf("saveGatewayEngine: %v", err)
+	}
+
+	caller := common.HexToAddress("0xC3333333C3333333C3333333C3333333C3333333")
+
+	// Create a BAD cert (wrong private key)
+	badKP := bls.GenerateKeyPair()
+	digest := cross_chain.ComputeUnregisterChainMessage(102, 0, 0)
+	badSig := bls.Sign(badKP.PrivateKey(), digest)
+	unregCalldata, err := h.abi.Pack("unregisterChainWithCert", new(big.Int).SetUint64(102), uint64(0), uint64(0), badSig.Bytes(), []byte{0x01})
+	if err != nil {
+		t.Fatalf("pack unregisterChainWithCert: %v", err)
+	}
+
+	unregTx := newTx(caller, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, unregCalldata))
+	rcp, _, failed := h.HandleTransaction(context.Background(), cs, unregTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 10_000)
+	if !failed {
+		t.Fatalf("expected unregisterChainWithCert to fail closed due to invalid signature")
+	}
+	if rcp == nil || len(rcp.Return()) == 0 {
+		t.Fatalf("a rejected unregister must carry a reason in the receipt")
+	}
+
+	// Fail closed means NO state change: the chain stays registered and its unregister nonce is not consumed.
+	reloaded, err := loadGatewayEngine(cs)
+	if err != nil {
+		t.Fatalf("loadGatewayEngine: %v", err)
+	}
+	if _, stillRegistered := reloaded.ChainRegistry[102]; !stillRegistered {
+		t.Fatalf("chain 102 must remain registered after a rejected unregister")
+	}
+	if n := reloaded.UnregisterNonce[102]; n != 0 {
+		t.Fatalf("a rejected unregister must not consume the nonce, got %d", n)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
 	"github.com/meta-node-blockchain/meta-node/executor"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 	"github.com/meta-node-blockchain/meta-node/pkg/snapshot"
 )
 
@@ -40,6 +41,9 @@ func (api *AdminApi) AttestPayloadLoss(ctx context.Context, password string, com
 	if subtle.ConstantTimeCompare([]byte(password), []byte(api.App.config.Securepassword)) != 1 {
 		return -1, errInvalidCredentials
 	}
+	if raftfeed.Enabled() {
+		return -1, fmt.Errorf("unsupported in raft mode")
+	}
 	return executor.AttestPayloadLoss(commitIndex, txDigestHex), nil
 }
 
@@ -57,6 +61,9 @@ func (api *AdminApi) AttestPayloadLoss(ctx context.Context, password string, com
 func (api *AdminApi) AttestPayloadLossForCommit(ctx context.Context, password string, commitIndex uint32) (int32, error) {
 	if subtle.ConstantTimeCompare([]byte(password), []byte(api.App.config.Securepassword)) != 1 {
 		return -1, errInvalidCredentials
+	}
+	if raftfeed.Enabled() {
+		return -1, fmt.Errorf("unsupported in raft mode")
 	}
 	return executor.AttestPayloadLossForCommit(commitIndex), nil
 }

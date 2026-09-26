@@ -19,6 +19,7 @@ import (
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
@@ -387,11 +388,11 @@ func (api *MetaAPI) BlockNumber() string {
 func (api *MetaAPI) ConsensusReady() map[string]interface{} {
 	var ready bool
 	var notReadyNote string
-	if api.App != nil && api.App.config != nil && api.App.config.ConsensusMode == "raft" {
-		// Raft consensus mode: Raftfeed RPC transaction forwarding is not yet fully wired to a live Raft cluster.
-		// Fail-closed to prevent clients from dispatching transactions into an unforwarded void.
-		ready = false
-		notReadyNote = "Raft consensus mode is active but Raftfeed cluster forwarding is not yet accepting transactions (under C0/Phase D implementation)."
+	if raftfeed.Enabled() {
+		ready = raftfeed.Ready()
+		if !ready {
+			notReadyNote = "Raft consensus mode is active but Raftfeed cluster forwarding is not yet ready (under C1 implementation)."
+		}
 	} else {
 		ready = executor.IsRustConsensusReadyForTransactions()
 		if !ready {
@@ -884,6 +885,9 @@ func (api *MetaAPI) GetBlockTraces(ctx context.Context, startBlock uint64, endBl
 
 // GetConsensusVotes returns real-time consensus vote status directly from Rust CommitVoteMonitor.
 func (api *MetaAPI) GetConsensusVotes(ctx context.Context) (map[string]interface{}, error) {
+	if raftfeed.Enabled() {
+		return nil, fmt.Errorf("unsupported in raft mode")
+	}
 	votesJSON, err := executor.GetConsensusVotes()
 	if err != nil {
 		return nil, err
@@ -897,6 +901,9 @@ func (api *MetaAPI) GetConsensusVotes(ctx context.Context) (map[string]interface
 
 // GetCommitVotes returns detailed consensus vote information for a specific commit index.
 func (api *MetaAPI) GetCommitVotes(ctx context.Context, commitIndex uint32) (map[string]interface{}, error) {
+	if raftfeed.Enabled() {
+		return nil, fmt.Errorf("unsupported in raft mode")
+	}
 	votesJSON, err := executor.GetCommitVotes(commitIndex)
 	if err != nil {
 		return nil, err
