@@ -194,3 +194,66 @@ func TestCommitWorker_ConcurrentFenceDrain(t *testing.T) {
 
 	wg.Wait()
 }
+
+// failingChangelogPayload stands in for a NOMT payload whose changelog cannot be made durable.
+type failingChangelogPayload struct{ err error }
+
+func (p failingChangelogPayload) WriteChangelog() error { return p.err }
+
+func newFailClosedTestBlock() *block.Block {
+	header := block.NewBlockHeader(
+		e_common.HexToHash("0x1"), 20,
+		e_common.HexToHash("0x2"), e_common.HexToHash("0x3"),
+		e_common.HexToHash("0x4"), e_common.HexToAddress("0x5"),
+		1000, e_common.HexToHash("0x6"), 1,
+	)
+	return block.NewBlock(header, nil, nil)
+}
+
+// A changelog that cannot be made durable must stop the commit: the error is reported, the block is not
+// acknowledged (DoneChan stays open) and the root error is recorded so later blocks and fences are refused.
+// Without this, a block could be published with no NOMT recovery data (a fork after a crash).
+func TestCommitWorker_ChangelogFailureIsFatal(t *testing.T) {
+	cases := []struct {
+		name    string
+		account interface{}
+		stake   interface{}
+		want    string
+	}{
+		{"account", failingChangelogPayload{errors.New("disk full")}, nil, "account changelog durability failed"},
+		{"stake", nil, failingChangelogPayload{errors.New("disk full")}, "stake changelog durability failed"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			bp := &BlockProcessor{commitChannel: make(chan CommitJob, 4)}
+			go bp.commitWorker()
+			defer close(bp.commitChannel)
+
+			errCh := make(chan error, 1)
+			doneCh := make(chan struct{})
+			bp.commitChannel <- CommitJob{
+				Block:              newFailClosedTestBlock(),
+				AccountNomtPayload: tc.account,
+				StakeNomtPayload:   tc.stake,
+				DoneChan:           doneCh,
+				ErrChan:            errCh,
+			}
+
+			select {
+			case err := <-errCh:
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.want)
+				assert.Contains(t, err.Error(), "disk full")
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out: a failed changelog write was not reported")
+			}
+			select {
+			case <-doneCh:
+				t.Fatal("DoneChan signaled although the changelog was not durable")
+			case <-time.After(100 * time.Millisecond):
+			}
+			require.Error(t, bp.GetLastCommitErr(), "root error must be recorded so later work is refused")
+		})
+	}
+}

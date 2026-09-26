@@ -305,7 +305,7 @@ func TestBlockChain_Concurrent_DirtyStorage(t *testing.T) {
 
 type mockMappingStorage struct {
 	storage.Storage
-	batchPutErr     error
+	batchPutErr      error
 	syncDurableErr   error
 	syncDurableCalls int
 	putCalls         [][2][]byte

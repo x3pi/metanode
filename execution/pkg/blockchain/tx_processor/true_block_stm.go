@@ -390,6 +390,24 @@ func (stm *TrueBlockSTM) execOne(
 	stm.estimatedStorage[txIndex] = nil
 	stm.waitersMu[txIndex].Unlock()
 
+	// markSuspended must be called BEFORE this tx is made visible to other workers (re-queued or added to a
+	// waiters list). If we did not finish execution we MUST put the estimates taken over above back, otherwise
+	// the next re-execution never removes them and everyone reading them spins forever. Restoring in the
+	// deferred function instead is too late: once re-queued, another worker may already have taken ownership
+	// and finished, so a later restore would resurrect the estimates with no consumer left to remove them
+	// (a permanent ESTIMATE = livelock).
+	markSuspended := func() {
+		suspended = true
+		stm.waitersMu[txIndex].Lock()
+		if stm.estimatedAccounts[txIndex] == nil {
+			stm.estimatedAccounts[txIndex] = oldAccEstimates
+		}
+		if stm.estimatedStorage[txIndex] == nil {
+			stm.estimatedStorage[txIndex] = oldStoreEstimates
+		}
+		stm.waitersMu[txIndex].Unlock()
+	}
+
 	defer func() {
 		if !suspended {
 			// Remove estimates from previous abort
@@ -426,18 +444,6 @@ func (stm *TrueBlockSTM) execOne(
 				atomic.AddInt32(activeTasks, 1)
 				pushTask(ctx, execCh, w)
 			}
-		} else {
-			// If suspended, we didn't finish execution, so we MUST put the estimates
-			// back into the arrays. Otherwise they are lost and the next re-execution
-			// won't remove them, causing a livelock for anyone waiting on them!
-			stm.waitersMu[txIndex].Lock()
-			if stm.estimatedAccounts[txIndex] == nil {
-				stm.estimatedAccounts[txIndex] = oldAccEstimates
-			}
-			if stm.estimatedStorage[txIndex] == nil {
-				stm.estimatedStorage[txIndex] = oldStoreEstimates
-			}
-			stm.waitersMu[txIndex].Unlock()
 		}
 
 		if atomic.AddInt32(activeTasks, -1) == 0 {
@@ -498,25 +504,13 @@ func (stm *TrueBlockSTM) execOne(
 	if err != nil || fromAccount == nil || fromAccount.Nonce() != tx.GetNonce() {
 		if errors.Is(err, mvcc.ErrEstimateHit) {
 			atomic.AddInt32(&stm.abortCount, 1)
-			suspended = true
+			markSuspended()
 			blockingVer := mvccDB.BlockingVersion
 			if blockingVer == mvcc.BaseVersion {
 				blockingVer = scDB.BlockingVersion
 			}
-			if blockingVer != mvcc.BaseVersion {
-				stm.waitersMu[blockingVer].Lock()
-				s := atomic.LoadUint64(&stm.txState[blockingVer])
-				_, st := unpackState(s)
-				// if st == 1 /*TX_STATUS_EXECUTED*/ || st == 2 /*TX_STATUS_VALIDATING*/ || st == 3 /*TX_STATUS_VALIDATED*/ {
-				if st == 1 || st == 2 || st == 3 {
-					stm.waitersMu[blockingVer].Unlock()
-					atomic.AddInt32(activeTasks, 1)
-					pushTask(ctx, execCh, txIndex)
-					return
-				}
-				stm.waiters[blockingVer] = append(stm.waiters[blockingVer], uint32(txIndex))
-				stm.waitersMu[blockingVer].Unlock()
-			}
+			// Only reads happened so far, so there is no partial write set to record.
+			stm.suspendOnEstimate(ctx, blockingVer, txIndex, execCh, activeTasks, nil, nil)
 			return
 		}
 
@@ -685,6 +679,17 @@ func (stm *TrueBlockSTM) execOne(
 		var authGasUsed uint64
 		if len(tx.AuthorizationList()) > 0 {
 			authGasUsed = processAuthorizationList(tx, chainState.GetConfig().ChainId.Uint64(), mvccDB, chainState.GetSmartContractDB())
+			// processAuthorizationList reads each authority through mvccDB; an ESTIMATE hit there makes it skip that
+			// authority silently (the tx would still succeed with the authorization dropped), so wait for the
+			// blocking tx and re-execute instead. Pass mvccDB/scDB: their Set* calls already wrote earlier
+			// authorities into the shared MVCC map, and the next incarnation must know to clean those up if it
+			// no longer writes them (e.g. the authorization has become invalid).
+			if mvccDB.BlockingVersion != mvcc.BaseVersion {
+				atomic.AddInt32(&stm.abortCount, 1)
+				markSuspended()
+				stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
+				return
+			}
 		}
 
 		if tx.IsRegularTransaction() {
@@ -692,6 +697,16 @@ func (stm *TrueBlockSTM) execOne(
 			var newAccountGas uint64
 			toAddr := tx.ToAddress()
 			toAcc, errTo := mvccDB.AccountState(toAddr)
+			if errors.Is(errTo, mvcc.ErrEstimateHit) {
+				// The recipient has an ESTIMATE from a lower tx that is being re-executed. Reading it as "not
+				// found" would mis-price the new-account surcharge and silently drop the credit below, so wait
+				// for that tx instead. Pass mvccDB/scDB: processAuthorizationList above may already have written
+				// authorities into the shared MVCC map, and the next incarnation must be able to clean those up.
+				atomic.AddInt32(&stm.abortCount, 1)
+				markSuspended()
+				stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
+				return
+			}
 			if errTo == nil {
 				if toAcc == nil || (toAcc.Nonce() == 0 && (toAcc.Balance() == nil || toAcc.Balance().Sign() == 0) && len(toAcc.PublicKeyBls()) == 0) {
 					newAccountGas = params.CallNewAccountGas
@@ -734,7 +749,19 @@ func (stm *TrueBlockSTM) execOne(
 					[]types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			} else {
-				mvccDB.AddBalance(tx.ToAddress(), tx.Amount())
+				if errAdd := mvccDB.AddBalance(tx.ToAddress(), tx.Amount()); errAdd != nil {
+					// ErrEstimateHit here used to be ignored: the sender was debited and a success receipt was
+					// produced but the recipient was never credited (a lost update that depends on timing).
+					// Suspend and re-execute instead; the partial sender write is recorded so the next
+					// incarnation cleans it up.
+					if errors.Is(errAdd, mvcc.ErrEstimateHit) {
+						atomic.AddInt32(&stm.abortCount, 1)
+						markSuspended()
+						stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
+						return
+					}
+					logger.Error("native transfer credit failed for tx %s: %v", tx.Hash().Hex(), errAdd)
+				}
 
 				// Create receipt for native transfer
 				rcp = receipt.NewReceipt(
@@ -761,22 +788,9 @@ func (stm *TrueBlockSTM) execOne(
 			}
 			if blockingVer != mvcc.BaseVersion {
 				atomic.AddInt32(&stm.abortCount, 1)
-				suspended = true
-				stm.waitersMu[blockingVer].Lock()
-
-				// Prevent Race Condition: Check if blockingVer has already finished executing.
-				s := atomic.LoadUint64(&stm.txState[blockingVer])
-				_, st := unpackState(s)
-				// if st == 1 /*TX_STATUS_EXECUTED*/ || st == 2 /*TX_STATUS_VALIDATING*/ || st == 3 /*TX_STATUS_VALIDATED*/ {
-				if st == 1 || st == 2 || st == 3 {
-					stm.waitersMu[blockingVer].Unlock()
-					atomic.AddInt32(activeTasks, 1)
-					pushTask(ctx, execCh, txIndex)
-					return
-				}
-
-				stm.waiters[blockingVer] = append(stm.waiters[blockingVer], uint32(txIndex))
-				stm.waitersMu[blockingVer].Unlock()
+				markSuspended()
+				// The tx may already have written authorities (EIP-7702) into the shared MVCC map.
+				stm.suspendOnEstimate(ctx, blockingVer, txIndex, execCh, activeTasks, mvccDB, scDB)
 				return
 			}
 
@@ -912,25 +926,11 @@ func (stm *TrueBlockSTM) execOne(
 				}
 				if blockingVer != mvcc.BaseVersion {
 					atomic.AddInt32(&stm.abortCount, 1)
-					suspended = true
-
-					// IMPORTANT: Save WriteSets so the next incarnation cleans up any partial writes
-					stm.rwMu.Lock()
-					stm.writeSets[txIndex] = mvccDB.WriteSet
-					stm.scWriteSets[txIndex] = scDB.WriteSet
-					stm.rwMu.Unlock()
-
-					stm.waitersMu[blockingVer].Lock()
-					s := atomic.LoadUint64(&stm.txState[blockingVer])
-					_, st := unpackState(s)
-					if st == 1 || st == 2 || st == 3 {
-						stm.waitersMu[blockingVer].Unlock()
-						atomic.AddInt32(activeTasks, 1)
-						pushTask(ctx, execCh, txIndex)
-						return
-					}
-					stm.waiters[blockingVer] = append(stm.waiters[blockingVer], uint32(txIndex))
-					stm.waitersMu[blockingVer].Unlock()
+					markSuspended()
+					// suspendOnEstimate saves the UNION of the previous and this incarnation's write sets, so the
+					// next incarnation still cleans up keys an earlier incarnation wrote (replacing the set with
+					// only the partial one left those stale entries untracked).
+					stm.suspendOnEstimate(ctx, blockingVer, txIndex, execCh, activeTasks, mvccDB, scDB)
 					return
 				}
 			} else {
@@ -974,6 +974,60 @@ func (stm *TrueBlockSTM) execOne(
 	// 6. Push to validation AFTER cascading is fully complete
 	atomic.AddInt32(activeTasks, 1)
 	pushTask(ctx, validateCh, txIndex)
+}
+
+// suspendOnEstimate parks txIndex until the tx that owns blockingVer (an ESTIMATE it hit) has finished
+// executing, or re-queues it immediately if that tx already has. Callers call markSuspended() first and return
+// afterwards. If mvccDB/scDB are given, their write sets are saved first so the next incarnation cleans up
+// any partial writes this incarnation already made.
+func (stm *TrueBlockSTM) suspendOnEstimate(
+	ctx context.Context,
+	blockingVer mvcc.Version,
+	txIndex uint32,
+	execCh chan<- uint32,
+	activeTasks *int32,
+	mvccDB *mvcc.MVCCAccountStateDB,
+	scDB *mvcc.MVCCSmartContractDB,
+) {
+	if mvccDB != nil && scDB != nil {
+		// Keep the previous incarnation's write set too (union): the next incarnation's cleanup must still
+		// see every key an earlier incarnation wrote, or a stale entry could survive if it is not rewritten.
+		stm.rwMu.Lock()
+		merged := make(map[common.Address]bool, len(stm.writeSets[txIndex])+len(mvccDB.WriteSet))
+		for a := range stm.writeSets[txIndex] {
+			merged[a] = true
+		}
+		for a := range mvccDB.WriteSet {
+			merged[a] = true
+		}
+		stm.writeSets[txIndex] = merged
+		mergedSc := make(map[string]bool, len(stm.scWriteSets[txIndex])+len(scDB.WriteSet))
+		for k := range stm.scWriteSets[txIndex] {
+			mergedSc[k] = true
+		}
+		for k := range scDB.WriteSet {
+			mergedSc[k] = true
+		}
+		stm.scWriteSets[txIndex] = mergedSc
+		stm.rwMu.Unlock()
+	}
+	if blockingVer == mvcc.BaseVersion {
+		// Should not happen (an ESTIMATE hit always records its version); retry rather than lose the tx.
+		atomic.AddInt32(activeTasks, 1)
+		pushTask(ctx, execCh, txIndex)
+		return
+	}
+	stm.waitersMu[blockingVer].Lock()
+	s := atomic.LoadUint64(&stm.txState[blockingVer])
+	_, st := unpackState(s)
+	if st == 1 || st == 2 || st == 3 {
+		stm.waitersMu[blockingVer].Unlock()
+		atomic.AddInt32(activeTasks, 1)
+		pushTask(ctx, execCh, txIndex)
+		return
+	}
+	stm.waiters[blockingVer] = append(stm.waiters[blockingVer], txIndex)
+	stm.waitersMu[blockingVer].Unlock()
 }
 
 // validateOne checks whether txIndex's recorded read set is still consistent
