@@ -321,6 +321,9 @@ func (manager *TrieDatabaseManager) FindAndSetTrieDatabasesByMvmID(mvmId common.
 
 // DiscardAllTrieDatabases loại bỏ tất cả các thay đổi đang chờ xử lý trong tất cả các TrieDatabase và xóa sạch bộ nhớ.
 func (manager *TrieDatabaseManager) DiscardAllTrieDatabases() {
+	if manager == nil {
+		return
+	}
 	for id, trieDB := range manager.trieDatabases {
 		trieDB.Discard()
 		logger.Info("Discarded TrieDatabase", "id", id)
@@ -330,6 +333,9 @@ func (manager *TrieDatabaseManager) DiscardAllTrieDatabases() {
 
 // ClearAllTrieDatabases xóa sạch bộ nhớ cache của TrieDatabases (dùng cho Sub-node khi nhận block mới)
 func (manager *TrieDatabaseManager) ClearAllTrieDatabases() {
+	if manager == nil {
+		return
+	}
 	for id, trieDB := range manager.trieDatabases {
 		if trieDB.trieR != nil {
 			if closer, ok := trieDB.trieR.(interface{ Close() }); ok {

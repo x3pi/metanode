@@ -205,15 +205,26 @@ PROCESS_LOOP:
 
 			// Write changelog synchronously BEFORE CommitBlockState to guarantee sequential progression
 			// and visibility of historical states when block counter is advanced.
+			changelogDurable := true
 			if bp.pendingAccountPayload != nil {
-				if payload, ok := bp.pendingAccountPayload.(interface{ WriteChangelog() }); ok {
-					payload.WriteChangelog()
+				if payload, ok := bp.pendingAccountPayload.(interface{ WriteChangelog() error }); ok {
+					if err := payload.WriteChangelog(); err != nil {
+						logger.Error("🔄 [TRANSITION GUARD] Account changelog durability failed for block #%d: %v", lastBlockNum, err)
+						changelogDurable = false
+					}
 				}
 			}
 			if bp.pendingStakePayload != nil {
-				if payload, ok := bp.pendingStakePayload.(interface{ WriteChangelog() }); ok {
-					payload.WriteChangelog()
+				if payload, ok := bp.pendingStakePayload.(interface{ WriteChangelog() error }); ok {
+					if err := payload.WriteChangelog(); err != nil {
+						logger.Error("🔄 [TRANSITION GUARD] Stake changelog durability failed for block #%d: %v", lastBlockNum, err)
+						changelogDurable = false
+					}
 				}
+			}
+			if !changelogDurable {
+				logger.Error("🔄 [TRANSITION GUARD] Refusing to publish block #%d without durable NOMT recovery data", lastBlockNum)
+				return
 			}
 
 			if _, err := bp.chainState.CommitBlockState(lastBlock,

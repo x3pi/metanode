@@ -8,18 +8,25 @@ import (
 // It is completely free of I/O, storage access, system clocks, or network calls.
 // Transition errors return ErrInvalidTransition (or specific error) without panicking.
 // Repeated events leading to the same state are treated as idempotent no-ops (emitting no actions).
-func Next(current State, event Event) (State, []Action, error) {
+func Next(current State, recordRole Role, event Event) (State, []Action, error) {
+	if recordRole != RoleSender && recordRole != RoleReceiver {
+		return current, nil, fmt.Errorf("%w: record role must be SENDER or RECEIVER, got %s", ErrInvalidRole, recordRole)
+	}
+
 	expectedRole := event.Type.Role()
 	if expectedRole == RoleUnknown {
 		return current, nil, fmt.Errorf("%w: unknown event type '%s'", ErrInvalidTransition, event.Type)
 	}
 
 	// 1. Role invariant checks
-	if event.Role != RoleUnknown && event.Role != expectedRole {
-		return current, nil, fmt.Errorf("%w: event role %s does not match expected %s", ErrInvalidRole, event.Role, expectedRole)
+	if expectedRole != recordRole {
+		return current, nil, fmt.Errorf("%w: event %s role %s does not match record role %s", ErrInvalidRole, event.Type, expectedRole, recordRole)
 	}
-	if current != StateNone && current.Role() != expectedRole {
-		return current, nil, fmt.Errorf("%w: cannot process %s event in %s state %s", ErrInvalidRole, expectedRole, current.Role(), current)
+	if event.Role != RoleUnknown && event.Role != recordRole {
+		return current, nil, fmt.Errorf("%w: event role %s does not match record role %s", ErrInvalidRole, event.Role, recordRole)
+	}
+	if current != StateNone && current.Role() != recordRole {
+		return current, nil, fmt.Errorf("%w: cannot process %s event in %s state %s", ErrInvalidRole, recordRole, current.Role(), current)
 	}
 
 	switch event.Type {

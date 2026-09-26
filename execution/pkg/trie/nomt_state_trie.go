@@ -1232,7 +1232,7 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 			knownKeys[hexKey] = origKey
 		}
 		reg.mu.RUnlock()
-		
+
 		n.registry.mu.RLock()
 		for hexKey, origKey := range n.registry.keys {
 			knownKeys[hexKey] = origKey
@@ -1470,7 +1470,6 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 	tBegin := time.Since(t0)
 	tRead := time.Duration(0)
 	tWrite := time.Duration(0)
-
 
 	if len(reads) > 0 {
 		tReadStart := time.Now()
@@ -1743,16 +1742,17 @@ func (n *NomtStateTrie) ExtractPendingPayload() *NomtPayload {
 	}
 }
 
-func (p *NomtPayload) WriteChangelog() {
+func (p *NomtPayload) WriteChangelog() error {
 	if p == nil || p.trie == nil || p.trie.changelogDB == nil || len(p.changes) == 0 {
-		return
+		return nil
 	}
 	if err := p.trie.changelogDB.WriteBlockChanges(p.blockNum, p.changes); err != nil {
 		logger.Error("❌ [NomtPayload.WriteChangelog] Failed to write changelog (namespace=%s): %v", string(p.trie.namespace), err)
-	} else {
-		logger.Debug("📜 [NomtPayload.WriteChangelog] Successfully wrote %d changes for block %d (namespace=%s)", len(p.changes), p.blockNum, string(p.trie.namespace))
+		return err
 	}
+	logger.Debug("📜 [NomtPayload.WriteChangelog] Successfully wrote %d changes for block %d (namespace=%s)", len(p.changes), p.blockNum, string(p.trie.namespace))
 	p.changes = nil // Prevent duplicate writes in CommitAsync
+	return nil
 }
 
 func (p *NomtPayload) CommitAsync() {

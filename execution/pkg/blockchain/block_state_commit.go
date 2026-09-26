@@ -13,6 +13,7 @@ package blockchain
 
 import (
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/failpoint"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
@@ -241,7 +242,24 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 			logger.Error("❌ [COMMIT STATE] Failed to commit mappings for block #%d: %v", blockNum, err)
 			return blockNum, err
 		}
-		// Mappings are durable via PebbleDB's WAL. Flush calls are removed to avoid I/O bottlenecks.
+	}
+
+	// ─── 8a. Durable replay/query dependencies ────────────────────────────
+	// A process crash may leave the canonical block visible from its Pebble
+	// WAL even before the block barrier below. Recovery bypasses such a block,
+	// so its receipt and transaction-state tries must already be readable.
+	if cfg.persistToDB && cs.storageManager != nil {
+		failpoint.Hit("before-receipts-barrier")
+		if err := storage.SyncDurable(cs.storageManager.GetStorageReceipt()); err != nil {
+			return blockNum, err
+		}
+		failpoint.Hit("after-receipts-barrier")
+
+		failpoint.Hit("before-transaction-state-barrier")
+		if err := storage.SyncDurable(cs.storageManager.GetStorageTransaction()); err != nil {
+			return blockNum, err
+		}
+		failpoint.Hit("after-transaction-state-barrier")
 	}
 
 	// ─── 8b. Durability barrier: block DB BEFORE NOMT ────────────────────
@@ -253,14 +271,18 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 	// database durable first guarantees NOMT can never be ahead of the durable tip.
 	// On failure return the error so the caller does not persist NOMT for this block.
 	if cfg.persistToDB {
+		failpoint.Hit("before-block-barrier")
 		if err := storage.SyncDurable(cs.blockDatabase.GetDB()); err != nil {
 			logger.Error("❌ [COMMIT STATE] Failed to make block #%d durable before NOMT commit: %v", blockNum, err)
 			return blockNum, err
 		}
+		failpoint.Hit("after-block-barrier")
 	}
 
 	// ─── 9. Auto-update epoch from block header ──────────────────────────
 	cs.CheckAndUpdateEpochFromBlock(header.Epoch(), header.TimeStamp())
+
+	failpoint.Hit("before-done-signal")
 
 	logger.Debug("✅ [COMMIT STATE] Block #%d committed (persist=%v, rebuild=%v, txMap=%v, commit=%v)",
 		blockNum, cfg.persistToDB, cfg.rebuildTries, cfg.saveTxMapping, cfg.commitMaps)

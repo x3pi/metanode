@@ -5,6 +5,9 @@ import (
 
 	e_common "github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
+	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -304,4 +307,40 @@ func TestVerifyDraftBlock(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+type mockPayloadDiscarder struct {
+	discarded bool
+}
+
+func (m *mockPayloadDiscarder) Discard() {
+	m.discarded = true
+}
+
+func TestBlockProcessor_RevertDraftBlock(t *testing.T) {
+	bp := &BlockProcessor{}
+	mockAcc := &mockPayloadDiscarder{}
+	mockStake := &mockPayloadDiscarder{}
+	bp.pendingAccountPayload = mockAcc
+	bp.pendingStakePayload = mockStake
+
+	bp.revertDraftBlock(nil, 100)
+
+	assert.True(t, mockAcc.discarded, "pendingAccountPayload.Discard() must be called on revert")
+	assert.True(t, mockStake.discarded, "pendingStakePayload.Discard() must be called on revert")
+	assert.Nil(t, bp.pendingAccountPayload, "pendingAccountPayload must be reset to nil")
+	assert.Nil(t, bp.pendingStakePayload, "pendingStakePayload must be reset to nil")
+}
+
+func TestCommitToMemoryParallel_ReceiptsErrorPropagation(t *testing.T) {
+	p_trie.SetStateBackend(p_trie.BackendMPT)
+	bp := &BlockProcessor{}
+	memDB := storage.NewMemoryDb()
+	txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(e_common.Hash{}, memDB)
+	require.NoError(t, err)
+
+	// Passing nil receipts triggers error in receipts.CommitPipeline()
+	_, _, _, _, _, commitErr := bp.commitToMemoryParallel(txDB, nil, false, nil, 1)
+	assert.Error(t, commitErr, "commitToMemoryParallel must return error when receipts task fails")
+	assert.Contains(t, commitErr.Error(), "Receipts")
 }

@@ -51,6 +51,7 @@ type CommitJob struct {
 	Receipts       types.Receipts
 	TxDB           *transaction_state_db.TransactionStateDB
 	DoneChan       chan struct{}
+	ErrChan        chan error
 	// MappingWg is waited on before broadcasting receipts.
 	// Ensures async SetTxHashMapBlockNumber goroutine finishes before clients can query TXs.
 	MappingWg *sync.WaitGroup
@@ -149,6 +150,10 @@ type BlockProcessor struct {
 
 	commitChannel  chan CommitJob
 	lastBlockMutex sync.Mutex
+
+	// P1: Track first commit error in pipeline for fail-closed behavior
+	lastCommitErrMu sync.RWMutex
+	lastCommitErr   error
 
 	indexingChannel chan uint64
 	indexingLocks   sync.Map
@@ -257,7 +262,7 @@ type BlockProcessor struct {
 }
 
 // PauseExecution acquires the exclusive execution lock to pause block processing (used for atomic snapshots)
-func (bp *BlockProcessor) PauseExecution() {
+func (bp *BlockProcessor) PauseExecution() error {
 	logger.Info("🔒 [PAUSE] PauseExecution: ENTER — commitChannel=%d/%d, snapshotGate=%v",
 		len(bp.commitChannel), cap(bp.commitChannel), bp.snapshotGateOpen.Load())
 
@@ -271,7 +276,11 @@ func (bp *BlockProcessor) PauseExecution() {
 	// (which needs ExecutionMutex.RLock() to process speculative results) will be
 	// blocked by the Lock(), and WaitForPersistence() will wait forever -> Deadlock.
 	logger.Info("🔒 [PAUSE] PauseExecution: calling WaitForPersistence...")
-	bp.WaitForPersistence()
+	if err := bp.WaitForPersistence(); err != nil {
+		logger.Error("🚨 [PAUSE] PauseExecution: WaitForPersistence reported error: %v — aborting pause to prevent corrupt snapshot", err)
+		bp.openSnapshotGate()
+		return fmt.Errorf("WaitForPersistence failed before pause: %w", err)
+	}
 	logger.Info("🔒 [PAUSE] PauseExecution: WaitForPersistence DONE, waiting for ExecutionMutex.Lock()...")
 
 	// 3. Lock execution mutex (gates network handlers)
@@ -309,6 +318,7 @@ func (bp *BlockProcessor) PauseExecution() {
 	}
 LOCK_ACQUIRED:
 	logger.Info("🔒 [PAUSE] PauseExecution: ExecutionMutex.Lock() ACQUIRED — system fully paused")
+	return nil
 }
 
 // ResumeExecution releases the exclusive execution lock
@@ -618,7 +628,7 @@ func NewBlockProcessor(
 		logger.Info("📸 [SNAPSHOT-INIT] ✅ Block commit callback registered (log rotation + snapshot)")
 
 		// Wire up the pause and resume callbacks for atomic database snapshots
-		snapshotManager.SetPauseCallback(func() { bp.PauseExecution() })
+		snapshotManager.SetPauseCallback(func() error { return bp.PauseExecution() })
 		snapshotManager.SetResumeCallback(func() { bp.ResumeExecution() })
 
 		// Set callback to fetch atomic StateRoot during snapshot
@@ -660,8 +670,12 @@ func NewBlockProcessor(
 		// Fix: Synchronize snapshot triggering with the asynchronous commit pipeline
 		// This guarantees that pebbleDB and fully flush to memory tables and NOMT
 		// has synced the current block before snapshot logic begins closing DB handlers
-		snapshotManager.SetWaitPersistenceCallback(func() {
-			bp.WaitForPersistence()
+		snapshotManager.SetWaitPersistenceCallback(func() error {
+			if err := bp.WaitForPersistence(); err != nil {
+				logger.Error("🚨 [SNAPSHOT] WaitForPersistence callback reported error: %v", err)
+				return err
+			}
+			return nil
 		})
 
 		// Wrap the force flush callback
@@ -1062,27 +1076,63 @@ func (bp *BlockProcessor) GetLeaderAddress(leaderAddress []byte, leaderAuthorInd
 //
 // FORK-SAFETY (May 2026): Blocks indefinitely — NEVER returns early.
 // If commitWorker is slow/stuck, we wait and log diagnostics.
+// SetLastCommitErr records the first error encountered during block commit.
+// Thread-safe and fail-closed: once set to non-nil, subsequent errors will not overwrite the root error.
+func (bp *BlockProcessor) SetLastCommitErr(err error) {
+	bp.lastCommitErrMu.Lock()
+	defer bp.lastCommitErrMu.Unlock()
+	if bp.lastCommitErr == nil && err != nil {
+		bp.lastCommitErr = err
+	}
+}
+
+// GetLastCommitErr returns the recorded commit error, if any.
+func (bp *BlockProcessor) GetLastCommitErr() error {
+	bp.lastCommitErrMu.RLock()
+	defer bp.lastCommitErrMu.RUnlock()
+	return bp.lastCommitErr
+}
+
+// ClearLastCommitErr clears the recorded commit error (used in recovery or tests).
+func (bp *BlockProcessor) ClearLastCommitErr() {
+	bp.lastCommitErrMu.Lock()
+	defer bp.lastCommitErrMu.Unlock()
+	bp.lastCommitErr = nil
+}
+
+// WaitForPersistence blocks until all pending async persistence jobs are processed.
 // Returning early would allow snapshot to capture incomplete state → FORK on restore.
 // Principle: thà pending không fork.
+//
+// Returns any commit error encountered by previous block commits or fence jobs.
 //
 // SIMPLIFICATION (May 2026): Removed persistChannel fence — persistWorker was
 // a no-op (PersistAsync runs inline since May 2026). Now only 2 steps:
 //  1. Drain commitWorker via fence job
 //  2. Wait for background persistence (FlushAll + BackupDb) via backupDbWg
-func (bp *BlockProcessor) WaitForPersistence() {
+func (bp *BlockProcessor) WaitForPersistence() error {
 	logger.Info("⏳ [PERSIST] WaitForPersistence: ENTER — commitChannel=%d/%d", len(bp.commitChannel), cap(bp.commitChannel))
-	done := make(chan struct{})
+	done := make(chan error, 1)
 
 	go func() {
-		defer close(done)
-
 		// 1. Drain Commit Worker (this also implicitly drains any pending GEI updates
 		// that were forwarded to commitChannel before this call)
 		logger.Info("⏳ [PERSIST] WaitForPersistence: sending commit fence...")
+		errChan := make(chan error, 1)
 		commitDone := make(chan struct{})
-		bp.commitChannel <- CommitJob{DoneChan: commitDone}
+		bp.commitChannel <- CommitJob{DoneChan: commitDone, ErrChan: errChan}
 		logger.Info("⏳ [PERSIST] WaitForPersistence: commit fence sent, waiting for commitWorker to process...")
-		<-commitDone
+		var commitErr error
+		select {
+		case err := <-errChan:
+			commitErr = err
+		case <-commitDone:
+		}
+		if commitErr != nil {
+			logger.Error("🚨 [PERSIST] WaitForPersistence: commit fence received error: %v", commitErr)
+			done <- commitErr
+			return
+		}
 		logger.Info("⏳ [PERSIST] WaitForPersistence: commit fence DONE.")
 
 		// CRITICAL FIX: Wait for NOMT Async commits to finish!
@@ -1140,6 +1190,7 @@ func (bp *BlockProcessor) WaitForPersistence() {
 		// 2. Wait for background persistence (FlushAll + BackupDb)
 		bp.backupDbWg.Wait()
 		logger.Info("⏳ [PERSIST] WaitForPersistence: backupDbWg.Wait() DONE — all persistence complete")
+		done <- bp.GetLastCommitErr()
 	}()
 
 	// Block indefinitely with diagnostic logging — NEVER return early
@@ -1148,12 +1199,12 @@ func (bp *BlockProcessor) WaitForPersistence() {
 	waitStart := time.Now()
 	for {
 		select {
-		case <-done:
+		case err := <-done:
 			// All workers drained successfully
 			if d := time.Since(waitStart); d > 1*time.Second {
 				logger.Warn("⚠️ [PERSIST-DIAG] WaitForPersistence took %v (slow but complete)", d)
 			}
-			return
+			return err
 		case <-ticker.C:
 			logger.Warn("🔒 [PERSIST-DIAG] WaitForPersistence: still draining after %v. "+
 				"commitChannel=%d/%d. "+
@@ -1176,7 +1227,9 @@ func (bp *BlockProcessor) WaitForPersistence() {
 func (bp *BlockProcessor) StopWait() {
 	logger.Info("🛑 [SHUTDOWN] Draining BlockProcessor pipeline...")
 	waitStart := time.Now()
-	bp.WaitForPersistence()
+	if err := bp.WaitForPersistence(); err != nil {
+		logger.Error("🚨 [SHUTDOWN] WaitForPersistence reported error: %v", err)
+	}
 	bp.stopOnce.Do(func() {
 		if bp.stopChan != nil {
 			close(bp.stopChan)

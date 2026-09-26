@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -18,6 +19,7 @@ type RequestHandler struct {
 	storageManager                     *storage.StorageManager
 	chainState                         *blockchain.ChainState
 	genesisPath                        string
+	snapshotManagerMu                  sync.RWMutex
 	snapshotManager                    *SnapshotManager // Automatic snapshot management
 	connectionsManager                 network.ConnectionsManager
 	messageSender                      network.MessageSender
@@ -44,14 +46,31 @@ func NewRequestHandler(storageManager *storage.StorageManager, chainState *block
 
 // SetSnapshotManager configures the snapshot manager for the request handler
 func (rh *RequestHandler) SetSnapshotManager(sm *SnapshotManager) {
+	rh.snapshotManagerMu.Lock()
 	rh.snapshotManager = sm
+	rh.snapshotManagerMu.Unlock()
 }
 
 func (rh *RequestHandler) getSnapshotManager() *SnapshotManager {
-	if rh.snapshotManager == nil {
-		rh.snapshotManager = GetGlobalSnapshotManager()
+	rh.snapshotManagerMu.RLock()
+	sm := rh.snapshotManager
+	rh.snapshotManagerMu.RUnlock()
+	if sm != nil {
+		return sm
 	}
-	return rh.snapshotManager
+
+	sm = GetGlobalSnapshotManager()
+	if sm == nil {
+		return nil
+	}
+
+	rh.snapshotManagerMu.Lock()
+	if rh.snapshotManager == nil {
+		rh.snapshotManager = sm
+	}
+	sm = rh.snapshotManager
+	rh.snapshotManagerMu.Unlock()
+	return sm
 }
 
 // SetNetworkComponents sets ConnectionsManager and MessageSender for broadcasting to Sub nodes

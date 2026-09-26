@@ -1,8 +1,7 @@
 # Thiết kế Kiến trúc Raft Sequencer Cluster & Node Float Account (Cross-Node Value Transfer)
 
 > **Tổng quan:** Mỗi cụm Sequencer (sử dụng thuật toán đồng thuận Raft) là 1 `chainID` độc lập, tự quản state/balance/contract của user thuộc cụm đó. Cụm Raft bao gồm 1 Leader xử lý giao dịch và các Follower đồng bộ trạng thái, đảm bảo tính sẵn sàng cao (High Availability - HA) và tuân thủ tuyệt đối quy tắc Zero-Fork của dự án. Parent Chain (Root Anchor) giữ 2 việc: sổ danh bạ (Account Registry, ChainRegistry) và **`NodeFloatAccount`** — quỹ liên-node **tiền thật** cho từng cụm, không phải trần phân bổ trừu tượng. `NodeFloatAccount` không có bước "nạp quỹ" rời rạc — nó là 1 bất biến tự động, luôn ≥ và tự hội tụ về đúng tổng số dư user của cụm đó (mục 3.2). Chuyển giá trị cross-node = ghi sổ chuyển khoản atomic trực tiếp giữa 2 `NodeFloatAccount` (mục 3.3), không cần "khoá batch → attest → claim". Giao dịch nội bộ cùng cụm vẫn tức thời, không đụng Parent Chain.
-> **⚠️ Cập nhật quyết định (2026-09-25) — đọc trước:** chế độ vận hành của node thực thi đã chốt là **`consensus_mode = "raft"` của `simple_chain`** (không binary mới, không RPC mới; giữ nguyên RPC, tx pool, `tx_batch_forwarder`, xử lý block Go, NOMT/MVM/Xapian; **chỉ thay Rust đồng thuận bằng Raft** `hashicorp/raft`, bầu leader tự động, cùng 1 khoá ký trên mọi replica, thực thi chỉ sau khi Raft commit). Tài liệu này mô tả **mô hình giá trị liên-node (Float Account)**, **không** mô tả cách nhân bản/dự phòng node; mọi chỗ ngầm hiểu "1 node = 1 tiến trình duy nhất" hoặc dự phòng kiểu khác phải đọc theo `SEQUENCER_STEP_BY_STEP_PLAN.md` mục 0.1 và 0.6. Bước **A1** (viết lại phần này cho khớp Raft) vẫn chưa làm.
-
+> **Chế độ vận hành đã chốt (Bước A1):** Chế độ vận hành của node thực thi là **`consensus_mode = "raft"`** tích hợp trực tiếp trong `simple_chain` (không binary mới, không RPC mới; giữ nguyên JSON-RPC, tx pool, `tx_batch_forwarder`, xử lý block Go, NOMT/MVM/Xapian; thay thế Rust consensus engine bằng `hashicorp/raft`, bầu leader tự động, cùng 1 khoá ký BLS trên mọi replica, và thực thi block chỉ sau khi Raft commit theo quy chuẩn `SEQUENCER_STEP_BY_STEP_PLAN.md` mục 0.1 và 0.6).
 
 > ⚠️ **Nền tảng kỹ thuật:** đăng ký chain (stake), `SecurityBond`, `SlashOnEquivocation`, `UnregisterChainWithCert` (tự ký) dùng nguyên `GatewayEngine` có sẵn (`execution/pkg/cross_chain/gateway.go`) — chỉ riêng cơ chế **di chuyển giá trị giữa các node** là thiết kế riêng (Float Account), thay cho mô hình mint-theo-trần-rồi-claim.
 
@@ -38,6 +37,45 @@ Cụm Sequencer giữ 100% device key để ký hộ — nếu Leader/toàn bộ
 ### 2.4. 1 Cụm Raft = 1 `chainID` riêng (ĐÃ CHỐT)
 
 Mỗi cụm Raft đăng ký `chainID` riêng qua `RegisterChainViaStake`, đại diện như một node duy nhất trên Parent Chain. Lý do: `GatewayEngine` (`ChainRegistry`, `SecurityBond`) hoạt động ở đúng granularity `chainID`, ngầm giả định đây là 1 đơn vị tin cậy duy nhất. Cụm Raft che giấu độ phức tạp nội bộ (bầu Leader, replicate log), chỉ xuất ra ngoài 1 danh tính (BLS Public Key của cụm) và giao tiếp với Parent Chain như 1 thực thể đồng nhất. Hệ quả: chữ ký gửi lên Parent Chain do Leader đương nhiệm ký đại diện cho toàn cụm, không có redundancy signer thật trên góc nhìn của Parent Chain, nhưng có tính HA (High Availability) mạnh mẽ nhờ Raft nội bộ.
+
+### 2.5. Chu trình Thực thi Raft Sequencer (Raft Execution Pipeline — A1)
+
+Nhằm đảm bảo 100% tuân thủ **Zero-Fork Invariant** (Part 2.5 của `AGENTS.md`), toàn bộ luồng giao dịch trong chế độ `consensus_mode = "raft"` được thực thi theo mô hình State Machine Replication (SMR) tuần tự, chặt chẽ:
+
+1. **Gom giao dịch (Batching):**
+   - `tx_batch_forwarder` gom các giao dịch từ mempool vào một `BatchRecord` (hàng đợi có trần buffer giới hạn rõ ràng, chống memory leak).
+   - Chỉ duy nhất Leader đương nhiệm mới nhận và gom batch. Các Replica từ chối nhận propose trực tiếp từ client và chuyển hướng RPC về Leader (hoặc proxy request sang Leader).
+2. **Đề xuất Raft Log (Raft Propose):**
+   - Leader serialize `BatchRecord` thành chuỗi bytes và gọi `raft.Apply(payload, timeout)`.
+   - Entry được ghi vào Raft Log cục bộ và gửi RPC `AppendEntries` đồng thời tới tất cả Followers.
+3. **Quorum Commit bền vững (Majority Durable Commit):**
+   - Khi đa số thành viên ($2f+1$ nodes) ghi nhận và `fsync()` log xuống đĩa thành công, Raft leader đánh dấu entry là **Committed**.
+   - Tuyệt đối không dùng timeout cục bộ để quyết định dispatch block; chỉ commit khi có xác nhận đa số từ mạng Raft.
+4. **Áp dụng máy trạng thái (`FSM.Apply`):**
+   - Khi Raft engine thông báo log entry đã commit, hàm callback `FSM.Apply()` trên mỗi node (Leader lẫn Followers) được kích hoạt.
+   - `FSM.Apply()` deserialize `BatchRecord` và tái tạo cấu trúc `ExecutableBlock` một cách tất định (deterministic), bảo đảm mọi replica nhận đúng cùng một dãy byte block và thứ tự giao dịch giống nhau 100%.
+5. **Thực thi Block Go (Go Block Execution):**
+   - `ExecutableBlock` được chuyển sang `BlockProcessor` để thực thi qua Block-STM và MVM.
+   - Trạng thái tài khoản/hợp đồng được cập nhật vào NOMT State Trie qua FFI C++/Rust.
+   - Toàn bộ thay đổi vật lý được chốt bền vững tại barrier bước 8b (`storage.SyncDurable(blockDB)`) trước khi NOMT hoàn tất commit.
+6. **Xuất bản hành động ngoại vi (Outbox Actions & External Responses):**
+   - Tín hiệu `DoneChan`, response thành công cho RPC client, và các giao dịch chuyển khoản liên-node (`transferFloat`) gửi lên Parent Chain **CHỈ ĐƯỢC PHÁT HÀNH** sau khi block đã commit thành công và an toàn trên đĩa.
+   - Nếu bất kỳ bước nào trong chu trình commit gặp lỗi, node kích hoạt cơ chế fail-closed lập tức (`revertDraftBlock()`), giữ trạng thái pending hoặc khởi động lại, tuyệt đối không dispatch partial state.
+
+### 2.6. Quản trị Cụm & Cấu hình Vận hành (Cluster Operations & Topology — A1)
+
+1. **Bầu Leader Tự Động & Chuyển giao Sự Cố (Leader Election & Failover):**
+   - Các replica duy trì heartbeat định kỳ. Nếu Leader hiện tại gặp sự cố hoặc mất mạng, một cuộc bầu cử mới tự động diễn ra theo chuẩn Raft (thời gian bầu chọn thông thường từ 150ms – 300ms).
+   - **Lưu ý bất biến Zero-Fork:** Timeout bầu Leader của Raft **chỉ dùng để chọn Leader mới**. Nó **hoàn toàn khác** và **tuyệt đối không được dùng** để quyết định dispatch block dở dang hay cưỡng chế commit khi chưa đạt quorum.
+2. **Khoá ký chung của cụm (Shared Custody Key):**
+   - Mọi thành viên trong cụm Raft chia sẻ cùng một khoá ký BLS (`NodeBlsPrivateKey`) đại diện cho `chainID`.
+   - Chỉ duy nhất Leader đương nhiệm được phép dùng khoá này để ký các giao dịch `TransferFloat`, `MarkClaimed`, `RefundFloat` gửi lên Parent Chain.
+   - Việc chuyển giao vai trò Leader tự động chuyển giao quyền ký đại diện mà không cần Parent Chain phải thực hiện cập nhật danh bạ `ChainRegistry`.
+3. **Ánh xạ Commit Index & Snapshot:**
+   - Chỉ số `CommitIndex` (uint32) của blockchain được đồng bộ ánh xạ 1:1 với Raft Log Index (uint64).
+   - Tại các ranh giới epoch, `SnapshotAll()` chụp lại toàn bộ state trie NOMT và lưu snapshot metadata của Raft, cho phép truncate log cũ nhằm giải phóng dung lượng đĩa an toàn.
+4. **Điều chỉnh Thành viên Động (Dynamic Membership):**
+   - Thêm hoặc loại bỏ replica trong cụm được thực hiện thông qua cơ chế thay đổi cấu hình Raft chuẩn (`AddVoter`, `RemoveServer`), bảo đảm chuỗi không bị dừng lại khi bảo trì hạ tầng.
 
 ---
 

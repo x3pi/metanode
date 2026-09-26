@@ -5,6 +5,7 @@ package processor
 import (
 	"fmt"
 	runtime_debug "runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
+	"github.com/meta-node-blockchain/meta-node/pkg/failpoint"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
@@ -29,13 +31,35 @@ func (bp *BlockProcessor) commitWorker() {
 	for job := range bp.commitChannel {
 		if job.Block == nil {
 			logger.Info("🔧 [COMMIT] commitWorker: received FENCE job (commitChannel=%d/%d)", len(bp.commitChannel), cap(bp.commitChannel))
+			lastErr := bp.GetLastCommitErr()
+			if lastErr != nil {
+				logger.Error("🚨 [COMMIT] commitWorker: FENCE aborted due to prior commit error: %v — refusing to update consensus progress", lastErr)
+				if job.ErrChan != nil {
+					job.ErrChan <- lastErr
+				}
+				// Do NOT update consensus progress, and do NOT close DoneChan!
+				continue
+			}
+
+			// Only persist consensus progress if NO prior commit errors occurred
 			if job.GlobalExecIndex > 0 || job.CommitIndex > 0 || job.Epoch > 0 {
 				// FENCE jobs have no block — use job.Epoch from async update
 				bp.updateAndPersistConsensusState(job.GlobalExecIndex, job.CommitIndex, job.Epoch)
 			}
+			if job.ErrChan != nil {
+				job.ErrChan <- nil
+			}
 			if job.DoneChan != nil {
 				close(job.DoneChan)
 				logger.Info("🔧 [COMMIT] commitWorker: FENCE signaled (DoneChan closed)")
+			}
+			continue
+		}
+
+		if priorErr := bp.GetLastCommitErr(); priorErr != nil {
+			logger.Error("🚨 [COMMIT-WORKER] Skipping commit for block #%d due to prior commit error: %v", job.Block.Header().BlockNumber(), priorErr)
+			if job.ErrChan != nil {
+				job.ErrChan <- fmt.Errorf("skipped block #%d: prior commit error: %w", job.Block.Header().BlockNumber(), priorErr)
 			}
 			continue
 		}
@@ -52,6 +76,7 @@ func (bp *BlockProcessor) commitWorker() {
 
 		// T2-6: Construct batch_id for end-to-end tracing
 		batchID := fmt.Sprintf("E%dC0G%d", job.Block.Header().Epoch(), job.GlobalExecIndex)
+		failpoint.SetRunContext(batchID, blockNum)
 
 		logger.Debug("[batch_id=%s] 📋 [COMMIT] CommitWorker: Block %d (txs=%d) dequeued, queueLen=%d",
 			batchID, blockNum, txCount, len(bp.commitChannel))
@@ -80,13 +105,27 @@ func (bp *BlockProcessor) commitWorker() {
 		// Write changelog synchronously in commitWorker BEFORE CommitBlockState to guarantee sequential progression
 		// and visibility of historical states when block counter is advanced.
 		if job.AccountNomtPayload != nil {
-			if payload, ok := job.AccountNomtPayload.(interface{ WriteChangelog() }); ok {
-				payload.WriteChangelog()
+			if payload, ok := job.AccountNomtPayload.(interface{ WriteChangelog() error }); ok {
+				if err := payload.WriteChangelog(); err != nil {
+					commitErr := fmt.Errorf("block #%d account changelog durability failed: %w", blockNum, err)
+					bp.SetLastCommitErr(commitErr)
+					if job.ErrChan != nil {
+						job.ErrChan <- commitErr
+					}
+					continue
+				}
 			}
 		}
 		if job.StakeNomtPayload != nil {
-			if payload, ok := job.StakeNomtPayload.(interface{ WriteChangelog() }); ok {
-				payload.WriteChangelog()
+			if payload, ok := job.StakeNomtPayload.(interface{ WriteChangelog() error }); ok {
+				if err := payload.WriteChangelog(); err != nil {
+					commitErr := fmt.Errorf("block #%d stake changelog durability failed: %w", blockNum, err)
+					bp.SetLastCommitErr(commitErr)
+					if job.ErrChan != nil {
+						job.ErrChan <- commitErr
+					}
+					continue
+				}
 			}
 		}
 
@@ -94,60 +133,68 @@ func (bp *BlockProcessor) commitWorker() {
 		logger.Debug("📋 [COMMIT-WORKER] CommitBlockState for block #%d (txs=%d, lastBlockNum_before=%d, commitChannelLen=%d/%d)",
 			blockNum, txCount, lastBlockBeforeCommit, len(bp.commitChannel), cap(bp.commitChannel))
 		if _, err := bp.chainState.CommitBlockState(job.Block, blockchain.WithPersistToDB(), blockchain.WithSaveTxMapping(), blockchain.WithCommitMappings()); err != nil {
-			logger.Error("commitWorker: CommitBlockState failed for block #%d: %v", blockNum, err)
-		} else {
-			// Flush NOMT payloads asynchronously now that the block is safely written to block database (PebbleDB)
-			if job.AccountNomtPayload != nil {
-				if payload, ok := job.AccountNomtPayload.(interface{ CommitAsync() }); ok {
-					payload.CommitAsync()
-				}
+			logger.Error("🚨 [COMMIT-WORKER] CommitBlockState failed for block #%d: %v — aborting post-commit processing", blockNum, err)
+			bp.SetLastCommitErr(fmt.Errorf("block #%d CommitBlockState failed: %w", blockNum, err))
+			if job.ErrChan != nil {
+				job.ErrChan <- err
 			}
-			if job.StakeNomtPayload != nil {
-				if payload, ok := job.StakeNomtPayload.(interface{ CommitAsync() }); ok {
-					payload.CommitAsync()
-				}
-			}
-			// NOTE (investigated at length 2026-09-02, measuring sustained
-			// real-transfer throughput): ClearNoncesCache() wipes noncesCache
-			// to empty on every commit, forcing the next mempool tick to
-			// re-fetch expected nonces from AccountStateReadOnly. That read
-			// hits the NOMT account-state trie, which the CommitAsync() calls
-			// above only *trigger* -- they don't wait for the underlying
-			// write to land -- so a re-fetch racing a commit still in flight
-			// can read the trie before this block's nonce changes were
-			// applied to it, caching a STALE (pre-this-block) expected
-			// nonce. This is a real, narrow race, traced live via
-			// METANODE_TX_TRACE, but every fix attempted for it this session
-			// made things WORSE, not better (see ProcessTransactionsInPoolSub's
-			// matching comment for the full history: reordering this clear
-			// after CommitAsync() narrowed but didn't close the window;
-			// removing the clear regressed a 1M-tx live test to ~50%
-			// confirmed; layering a never-cleared "floor" on top of that
-			// regressed further, because the true source of the bad
-			// cache-advance turned out to be a *different* bug entirely --
-			// ProcessTransactionsInPoolSub optimistically advancing nonces
-			// for validated transactions the caller then truncates and
-			// re-queues, not this clear). Left as a known, bounded
-			// limitation: the "future" transactions this race strands
-			// self-correct via FutureTxTimeout's requeue-and-retry path
-			// within, at worst, one more commit cycle, rather than being
-			// stuck forever. Do not remove or further narrow this call
-			// without also fixing the truncation-vs-cache-advance ordering
-			// bug described there; on its own this clear is what keeps
-			// noncesCache honest for the common case, including for
-			// multi-validator clusters where a committed block can contain
-			// transactions this node's own mempool never validated.
-			if bp.transactionProcessor != nil && bp.transactionProcessor.TxValidatorPool != nil {
-				bp.transactionProcessor.ClearNoncesCache()
-			}
+			// Do NOT signal DoneChan or close DoneChan! No false-success!
+			continue
+		}
 
-			// Remove from pending store now that it is fully committed
-			bp.RemovePendingCommitBlock(blockNum)
-			lastBlockAfterCommit := storage.GetLastBlockNumber()
-			if lastBlockAfterCommit != blockNum {
-				logger.Error("🚨 [COMMIT-WORKER] Block #%d CommitBlockState completed but lastBlockNumber=%d (expected %d) — BLOCK MAY HAVE BEEN REJECTED!",
-					blockNum, lastBlockAfterCommit, blockNum)
+		// Flush NOMT payloads asynchronously now that the block is safely written to block database (PebbleDB)
+		failpoint.Hit("before-nomt-commit")
+		if job.AccountNomtPayload != nil {
+			if payload, ok := job.AccountNomtPayload.(interface{ CommitAsync() }); ok {
+				payload.CommitAsync()
 			}
+		}
+		if job.StakeNomtPayload != nil {
+			if payload, ok := job.StakeNomtPayload.(interface{ CommitAsync() }); ok {
+				payload.CommitAsync()
+			}
+		}
+		failpoint.Hit("after-nomt-commit")
+		// NOTE (investigated at length 2026-09-02, measuring sustained
+		// real-transfer throughput): ClearNoncesCache() wipes noncesCache
+		// to empty on every commit, forcing the next mempool tick to
+		// re-fetch expected nonces from AccountStateReadOnly. That read
+		// hits the NOMT account-state trie, which the CommitAsync() calls
+		// above only *trigger* -- they don't wait for the underlying
+		// write to land -- so a re-fetch racing a commit still in flight
+		// can read the trie before this block's nonce changes were
+		// applied to it, caching a STALE (pre-this-block) expected
+		// nonce. This is a real, narrow race, traced live via
+		// METANODE_TX_TRACE, but every fix attempted for it this session
+		// made things WORSE, not better (see ProcessTransactionsInPoolSub's
+		// matching comment for the full history: reordering this clear
+		// after CommitAsync() narrowed but didn't close the window;
+		// removing the clear regressed a 1M-tx live test to ~50%
+		// confirmed; layering a never-cleared "floor" on top of that
+		// regressed further, because the true source of the bad
+		// cache-advance turned out to be a *different* bug entirely --
+		// ProcessTransactionsInPoolSub optimistically advancing nonces
+		// for validated transactions the caller then truncates and
+		// re-queues, not this clear). Left as a known, bounded
+		// limitation: the "future" transactions this race strands
+		// self-correct via FutureTxTimeout's requeue-and-retry path
+		// within, at worst, one more commit cycle, rather than being
+		// stuck forever. Do not remove or further narrow this call
+		// without also fixing the truncation-vs-cache-advance ordering
+		// bug described there; on its own this clear is what keeps
+		// noncesCache honest for the common case, including for
+		// multi-validator clusters where a committed block can contain
+		// transactions this node's own mempool never validated.
+		if bp.transactionProcessor != nil && bp.transactionProcessor.TxValidatorPool != nil {
+			bp.transactionProcessor.ClearNoncesCache()
+		}
+
+		// Remove from pending store now that it is fully committed
+		bp.RemovePendingCommitBlock(blockNum)
+		lastBlockAfterCommit := storage.GetLastBlockNumber()
+		if lastBlockAfterCommit != blockNum {
+			logger.Error("🚨 [COMMIT-WORKER] Block #%d CommitBlockState completed but lastBlockNumber=%d (expected %d) — BLOCK MAY HAVE BEEN REJECTED!",
+				blockNum, lastBlockAfterCommit, blockNum)
 		}
 		saveDuration := time.Since(startSave)
 		pipeline.GlobalBlockTraceStore.UpdateSaveDBTime(blockNum, saveDuration.Microseconds())
@@ -238,6 +285,9 @@ func (bp *BlockProcessor) commitWorker() {
 		// Sub-nodes will fetch the block from Master's primary BlockDatabase
 		// via the existing network sync mechanism (HandleSyncBlocksRequest).
 		// ══════════════════════════════════════════════════════════════════
+		if job.ErrChan != nil {
+			job.ErrChan <- nil
+		}
 		if job.DoneChan != nil {
 			logger.Debug("📤 [SNAPSHOT] Sending doneChan signal for block #%d (block committed to primary DB, GEI persisted, BLS signed)",
 				blockNum)
@@ -401,14 +451,23 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	go func() {
 		defer wg.Done()
 		start := time.Now()
-		_, err := txDB.Commit()
+		var err error
+		if txDB == nil {
+			err = fmt.Errorf("txDB instance is nil")
+		} else {
+			_, err = txDB.Commit()
+		}
 		resultsChan <- taskResult{name: "txDB", err: err, duration: time.Since(start)}
 	}()
 	go func() {
 		defer wg.Done()
 		start := time.Now()
 		var err error
-		receiptPipelineResult, err = receipts.CommitPipeline()
+		if receipts == nil {
+			err = fmt.Errorf("receipts instance is nil")
+		} else {
+			receiptPipelineResult, err = receipts.CommitPipeline()
+		}
 		resultsChan <- taskResult{name: "Receipts", err: err, duration: time.Since(start)}
 	}()
 
@@ -460,7 +519,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	var commitErrors []string
 	for result := range resultsChan {
 		if result.err != nil {
-			logger.Error("🚨 [COMMIT] Parallel commit error (%s): %v — skipping persist for this component", result.name, result.err)
+			logger.Error("🚨 [COMMIT] Parallel commit error (%s): %v", result.name, result.err)
 			commitErrors = append(commitErrors, fmt.Sprintf("%s: %v", result.name, result.err))
 			if result.name == "AccountPipeline" {
 				accountPipelineResult = nil
@@ -476,14 +535,9 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		}
 	}
 	if len(commitErrors) > 0 {
-		for _, errStr := range commitErrors {
-			if len(errStr) > 15 && (errStr[:15] == "AccountPipeline" || errStr[:13] == "StakePipeline") {
-				logger.Error("🚨 [COMMIT] CRITICAL pipeline task failed: %s — block MUST be reverted to prevent fork", errStr)
-				return nil, nil, nil, nil, nil, fmt.Errorf("critical commit failure: %s", errStr)
-			}
-		}
-		logger.Error("🚨 [COMMIT] %d non-critical commit tasks failed: %v — node continues (will self-heal)",
-			len(commitErrors), commitErrors)
+		errMsg := strings.Join(commitErrors, "; ")
+		logger.Error("🚨 [COMMIT] Parallel commit task(s) failed: %s — block MUST be reverted to prevent fork", errMsg)
+		return nil, nil, nil, nil, nil, fmt.Errorf("parallel commit failure: %s", errMsg)
 	}
 
 	var accountPersistDuration, stakePersistDuration, receiptPersistDuration time.Duration
@@ -497,15 +551,15 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			}
 		}
 		bp.pendingAccountPayload = accountPipelineResult.NomtPayload
-		go func(res *account_state_db.PipelineCommitResult) {
-			startPersist := time.Now()
-			if err := bp.chainState.GetAccountStateDB().PersistAsync(res); err != nil {
-				logger.Error("🚨 [COMMIT] PersistAsync failed for AccountStateDB: %v", err)
-			}
-			if d := time.Since(startPersist); d > 10*time.Millisecond {
-				logger.Debug("[PERF] AccountStateDB PersistAsync (async): %v", d)
-			}
-		}(accountPipelineResult)
+		startPersist := time.Now()
+		if err := bp.chainState.GetAccountStateDB().PersistAsync(accountPipelineResult); err != nil {
+			logger.Error("🚨 [COMMIT] PersistAsync failed for AccountStateDB: %v", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("AccountStateDB PersistAsync failed: %w", err)
+		}
+		accountPersistDuration = time.Since(startPersist)
+		if accountPersistDuration > 10*time.Millisecond {
+			logger.Debug("[PERF] AccountStateDB PersistAsync (inline): %v", accountPersistDuration)
+		}
 	}
 	if stakePipelineResult != nil {
 		stakeBatch = stakePipelineResult.StakeBatch
@@ -516,26 +570,26 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			}
 		}
 		bp.pendingStakePayload = stakePipelineResult.NomtPayload
-		go func(res *stake_state_db.StakePipelineCommitResult) {
-			startPersist := time.Now()
-			if err := bp.chainState.GetStakeStateDB().PersistAsync(res); err != nil {
-				logger.Error("🚨 [COMMIT] PersistAsync failed for StakeStateDB: %v", err)
-			}
-			if d := time.Since(startPersist); d > 10*time.Millisecond {
-				logger.Debug("[PERF] StakeStateDB PersistAsync (async): %v", d)
-			}
-		}(stakePipelineResult)
+		startPersist := time.Now()
+		if err := bp.chainState.GetStakeStateDB().PersistAsync(stakePipelineResult); err != nil {
+			logger.Error("🚨 [COMMIT] PersistAsync failed for StakeStateDB: %v", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("StakeStateDB PersistAsync failed: %w", err)
+		}
+		stakePersistDuration = time.Since(startPersist)
+		if stakePersistDuration > 10*time.Millisecond {
+			logger.Debug("[PERF] StakeStateDB PersistAsync (inline): %v", stakePersistDuration)
+		}
 	}
 	if receiptPipelineResult != nil {
-		go func(res *types.ReceiptPipelineResult) {
-			startPersist := time.Now()
-			if err := receipts.PersistAsync(res); err != nil {
-				logger.Error("🚨 [COMMIT] PersistAsync failed for Receipts: %v", err)
-			}
-			if d := time.Since(startPersist); d > 10*time.Millisecond {
-				logger.Debug("[PERF] Receipts PersistAsync (async): %v", d)
-			}
-		}(receiptPipelineResult)
+		startPersist := time.Now()
+		if err := receipts.PersistAsync(receiptPipelineResult); err != nil {
+			logger.Error("🚨 [COMMIT] PersistAsync failed for Receipts: %v", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("Receipts PersistAsync failed: %w", err)
+		}
+		receiptPersistDuration = time.Since(startPersist)
+		if receiptPersistDuration > 10*time.Millisecond {
+			logger.Debug("[PERF] Receipts PersistAsync (inline): %v", receiptPersistDuration)
+		}
 	}
 
 	// Capture contract batches while we are sequentially safe inside commitToMemoryParallel

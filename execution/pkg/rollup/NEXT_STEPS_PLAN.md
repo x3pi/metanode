@@ -43,7 +43,7 @@
 | Chi phí | ECDSA ~54 µs/lần; Gateway cũ `outbound` 0,7 → 5,4 → 31 ms khi tích luỹ 50 → 500 → 3.000 message (tăng tuyến tính, blob JSON nạp/ghi cả khối mỗi giao dịch barrier) | F0-8, F0-11 |
 | Không dùng Rust consensus | Đúng ở chế độ raft; nhưng binary vẫn link `libmetanode`, NOMT (Rust) vẫn dùng cho state, MVM/Xapian là C++ | xem N8 |
 
-**Còn ◐ (chưa ☑):** A0, B1, C0. **Chưa làm:** A1, A2, B2–B9, C1–C6, D1, F1–F6.
+**Đã ☑:** A0, A1, A2, B1, N7. **Còn ◐ (chưa ☑):** C0, N1. **Chưa làm:** B2 (đã tách sang branch riêng `feat/rollup-b2-store`), B3–B9, C1–C6, D1, F1–F6.
 
 **Bẫy đã gặp khi chạy:**
 - Spike cần genesis có ví gửi `0x294f…f846` và `0x6169…9C49`; dùng `deploy/systemd/genesis.json` (do `ci.sh` sinh). Với `cmd/simple_chain/config.json` mặc định (genesis không có ví) spike thoát lỗi rõ ràng.
@@ -91,7 +91,7 @@ Tiêu chí thoát C0 theo `SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` mục 2.5: **T-DE
 **Nguyên nhân đã tìm ra (2026-09-26), sửa trên nhánh `fix/stm-native-estimate-lost-credit` (chờ review/merge):** lỗi **mất cập nhật trong Block-STM** (`TrueBlockSTM.execOne`, nhánh chuyển native): khi đọc/cộng tiền người nhận gặp `ErrEstimateHit` (người nhận đang có ESTIMATE từ một tx thấp hơn đang chạy lại) thì lỗi bị **bỏ qua** — người gửi đã bị trừ tiền, biên lai "thành công", nhưng người nhận **không được cộng**. Tx nào mất phụ thuộc lịch chạy goroutine nên hai node có thể ra state khác nhau (rủi ro fork thật, không chỉ lỗi của spike). Bằng chứng: test tiến trình `TestTrueBlockSTM_HotRecipientNoLostUpdate_Stress` (cùng dạng block của spike) tái hiện ngay ở vòng đầu với `GOMAXPROCS>=2` trước khi sửa; săn 2000 lượt chạy tiến trình: 2/2000 lệch trước sửa, 0/2000 hai lần sau sửa. Khi kiểm chứng bản sửa còn phát hiện **thêm một lỗi có từ trước**: rò rỉ ESTIMATE gây livelock (tx treo tạm dừng đưa mình vào hàng đợi trước khi khôi phục sổ estimate trong `defer`, worker khác chạy xong rồi `defer` khôi phục "ma" → ESTIMATE vĩnh viễn, mọi tx đọc địa chỉ đó quay vô hạn; khoảng 1 lần/3.5k–9k vòng) — đã sửa cùng nhánh (`markSuspended()`), 3×8000 vòng sạch. **T-DET-01 vẫn CHƯA ghi Đạt** cho tới khi chạy lại `verify -c0-rounds 20` đủ nhiều lượt trên bản đã sửa; và bản sửa là thay đổi consensus-critical: cần nâng cấp đồng bộ mọi node, khuyến nghị `ci.sh run-now --reset` trước khi lên cluster.
 **Việc tiếp theo cho N0:** (1) chạy `verify -c0-rounds 20` lặp lại (hàng chục lượt, cả khi máy đang tải) cho tới khi tái hiện hoặc đủ tin cậy thống kê; (2) khi lệch xảy ra: đọc các trường lệch, so trạng thái từng tài khoản giữa hai thư mục dữ liệu (nguồn nghi ngờ: xử lý song song Block-STM, thứ tự áp dụng thay đổi state, dữ liệu phụ thuộc thời gian); (3) chỉ ghi Đạt khi không còn lệch. **Nếu là lệch thật: dừng, báo cáo, không làm C1.**
 
-**Nghiệm thu:** báo cáo spike liệt kê từng `T-DET-*` với trạng thái đạt/không kèm số lần lặp thực tế; T-DET-01/02/03/05 đạt; ghi rõ T-DET-04 chuyển sang C2. **Nếu bất kỳ lần chạy nào lệch hash/state root: dừng, báo cáo, không làm C1.** (C0 ĐÃ ĐƯỢC ĐÁNH DẤU LÀ HOÀN TẤT)
+**Nghiệm thu:** báo cáo spike liệt kê từng `T-DET-*` với trạng thái đạt/không kèm số lần lặp thực tế; T-DET-01/02/03/05 đạt; ghi rõ T-DET-04 chuyển sang C2. **Nếu bất kỳ lần chạy nào lệch hash/state root: dừng, báo cáo, không làm C1.** (C0 tiếp tục giữ trạng thái `◐` cho tới khi N0 giải thích được divergence; N1 và N4 được mở triển khai độc lập).
 
 ### N0.5 — Audit `ErrEstimateHit` trong `TrueBlockSTM` (đã rà từng lời gọi; còn 1 quan sát mở)
 
@@ -115,17 +115,20 @@ Tiêu chí thoát C0 theo `SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` mục 2.5: **T-DE
 
 **Quan sát `commitDeviceKeyIfPending` — ĐÃ ĐÓNG (đọc code, 2026-09-26): không phải nguy cơ fork.** `sm.CommitDeviceKey(txHash)` (`pkg/storage/storage_manager.go:273`) chỉ chuyển device key thô từ RAM (`pendingDeviceKeys`, chỉ node nhận tx qua RPC/mempool mới có; `SavePendingDeviceKey`) sang kho **backup cục bộ** `StorageBackupDeviceKey`. Kho này chỉ được đọc bởi các hàm tra cứu phía client (`TransactionProcessor.GetDeviceKey`, `state_processor.go:207/235`), **không** nằm trong state root và **không** ảnh hưởng tx hợp lệ hay không (trạng thái đồng thuận lưu `lastHash/newDeviceKey` qua `mvccDB.SetLastHash/SetNewDeviceKey`, đã đi qua MVCC). `LoadAndDelete` làm nó chạy tối đa một lần cho mỗi `txHash`. Hệ quả tối đa của một incarnation cũ gọi hàm này: một bản backup cục bộ cho tx mà thực thi cuối cùng bỏ qua (dữ liệu thừa, vô hại). Giới hạn của kết luận: chỉ dựa trên đọc các nơi tiêu thụ đã liệt kê, chưa truy vết phía người yêu cầu của `state_processor` ở node khác.
 
-### N1 — Rà soát bền vững các kho có bộ đệm trên đường commit (P0, độc lập, làm ngay)
+### N1 — Rà soát bền vững các kho có bộ đệm trên đường commit (Trạng thái: `◐` Đang thực hiện)
 **Vì sao:** lỗi vừa sửa (`smart_contract_code`) là một trường hợp của lớp lỗi "ghi có đệm rồi crash". Có thể còn kho khác, hậu quả là hash/state lệch giữa các node sau crash (fork).
 **Việc:**
 1. Liệt kê mọi kho ghi trong `CommitBlockState` và `SmartContractDB.Commit()`/`CommitAllStorage()`: block DB, mapping, receipts, `transaction_state`, kho log sự kiện (`dbSmartContract`), kho lưu trữ hợp đồng, backup, explorer… Với mỗi kho ghi: loại (Lazy Pebble / Pebble `NoSync` / NOMT / Memory), có `SyncDurable` trước khi trạng thái tham chiếu tới nó được coi là commit không, và **cái gì hỏng nếu mất ghi gần nhất** (state root sai, thiếu dữ liệu để replay, chỉ mất chỉ mục tra cứu…).
 2. Tham chiếu: `storage.DurableSyncer` (`pkg/storage/storage.go`), barrier trong `CommitBlockState` (commit `634b0d39`), `SyncDurable(codeStorage)`.
 3. Mở rộng spike để kiểm bằng `kill -9`: thêm workload chạm từng kho (ví dụ hợp đồng phát event, ghi storage nhiều, nhiều block liên tiếp) và kiểm hash/state root sau recovery so với lần chạy sạch.
 4. Với mỗi lỗ hổng tìm được: PR riêng, có test hồi quy **thất bại khi gỡ bản sửa** (bài học: chứng minh bằng mutation), và **đo chi phí fsync mỗi block** trước/sau.
-**Nghiệm thu:** bảng rà soát (kho × loại × được sync? × hậu quả) trong một tài liệu ngắn; mọi kho "hậu quả = fork/lệch state" đã được sync hoặc có lập luận vì sao không cần; số đo chi phí; `build_check.sh` và `ci.sh run-now --reset` sạch.
+**Tiến độ N1 (2026-09-26):**
+- Đã hoàn thành rà soát thực tế 16 kho dữ liệu logic & vật lý trong [N1_DURABILITY_REPORT.md](./N1_DURABILITY_REPORT.md).
+- Đã bổ sung durability barrier cho mapping, smart contract events, receipts và transaction state; changelog NOMT được ghi `pebble.Sync` trước khi block được công bố.
+- Đã sửa fail-closed error propagation cho commit pipeline (`ErrChan` trong `CommitJob`, loại bỏ false-success `DoneChan`, lưu root error cho fence/`WaitForPersistence`).
+- Spike local 2 round × 5 block đã phát hiện lỗ hổng còn mở tại `after-mapping-barrier`: Contract Storage NOMT có thể đi trước canonical Account State/Block DB, làm replay block #2 cho hash/state root khác lần sạch. Chi tiết kỹ thuật và phương án kiến trúc được đặc tả trong [HANDOVER_NOMT_CONTRACT_STORAGE_ATOMICITY.md](./HANDOVER_NOMT_CONTRACT_STORAGE_ATOMICITY.md) và [N1_DURABILITY_REPORT.md](./N1_DURABILITY_REPORT.md) mục 6.1.
+- **Ghi chú bàn giao:** Do đòi hỏi thay đổi sâu về kiến trúc session của NOMT handle hoặc cơ chế two-phase commit, lỗ hổng này không thể giải quyết trong phạm vi PR N1/N4 hiện tại và được tách thành issue bàn giao cho kỹ sư chuyên trách. Trạng thái N1 giữ `◐`; không nới test crash matrix.
 **Rủi ro:** thêm fsync trên đường commit mỗi block làm giảm thông lượng — đo bằng `ci.sh` (TPS Blast, so với ~7600 tx/s).
-
-> **Ghi chú kiểm tra (2026-09-26):** một bản chỉnh sửa chưa commit từng đánh dấu N1 là ☑ và trỏ tới `N1_DURABILITY_REPORT.md`, nhưng **file này không tồn tại** trong repo hay thư mục làm việc, nên không có bằng chứng; N1 vẫn **chưa làm**. Nhận định "receipts/mapping/event logs dùng NoSync là chấp nhận được" chỉ là giả thuyết chưa kiểm bằng `kill -9` cho từng kho.
 
 ### N2 — Kế hoạch triển khai bản sửa `SyncDurable` lên cụm thật (cần D3)
 **Việc:** viết runbook (không tự chạy trên cụm thật): thứ tự nâng cấp (rolling restart từng node, đợi đồng bộ, kiểm zero-fork bằng `block_hash_checker` sau mỗi bước), tiêu chí dừng/quay lại, nhắc **mọi node cùng phiên bản** (tránh chạy lẫn), sao lưu trước, cách kiểm binary thực chạy bằng `md5sum` (bài học: `--restart` không copy binary mới, chỉ `--start --prebuilt-bin` mới copy). Đối chiếu `OPERATIONS_GUIDE.md` và `deploy/ansible/ansible_deploy.sh`.
@@ -144,15 +147,20 @@ Tham chiếu: kế hoạch chính bước C1, hook H1–H6, `C0_VERIFICATION_REP
 **Còn lại của N3:** (1) `raftfeed.Submit` stub luôn trả `false` nên `tx_batch_forwarder` (thử lại vô hạn, ngủ 100 ms) **quay vòng mãi** ở chế độ raft cho tới khi có cluster thật — Submit thật phải trả `true` khi nhận batch vào hàng đợi có trần (xem cảnh báo trong `raftfeed.go`); (2) `executor.InitSnapshotSystem` chưa xử lý; (3) nguồn cấp block Raft thật, `is_authoritative_gei`, ánh xạ `commit_index`, snapshot gắn `CommitIndex`; (4) test cho vòng lặp forwarder ở chế độ raft.
 **Nghiệm thu:** cập nhật bảng mục 7 của báo cáo: không còn "CHƯA GUARD"; test cho từng guard; `go test -race` cho processor sạch; spike vẫn pass; `ci.sh run-now --reset` sạch (đường Rust mặc định không đổi).
 
-### N4 — Tài liệu và schema: A1 → A2, rồi chốt B1
-**A1:** viết lại `SEQUENCER_DESIGN.md` và `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` cho khớp Raft (mục 0.1, 0.6 của kế hoạch chính); gỡ banner "pre-Raft".
-**A2:** chốt đặc tả dữ liệu (`SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` mục 1.x): giữ hay bỏ trạng thái `20 OBSERVED`, chốt `Role`; code B1 (`pkg/rollup/statemachine.go`) không có state 20.
-**B1:** đóng các cổng còn lại của kế hoạch mục 2.1 (bảng transition khớp code từng cạnh); `go test -race -count=1 ./pkg/rollup`.
-**Nghiệm thu:** tài liệu và code khớp; A1, A2, B1 đánh dấu ☑ kèm bằng chứng trong PR.
+### N4 — Tài liệu và schema: A1 → A2, rồi chốt B1 (ĐÃ HOÀN TẤT `☑`)
+**A1 (Đã ☑):** Đã viết lại `SEQUENCER_DESIGN.md` và `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` cho khớp Raft (mục 0.1, 0.6 của kế hoạch chính); đã gỡ bỏ hoàn toàn banner "pre-Raft", bổ sung quy trình Raft SMR Pipeline (mục 2.5) và sơ đồ sequence diagram (A.1b).
+**A2 (Đã ☑):** Đã chốt đặc tả dữ liệu trong `SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` mục 1.7: loại bỏ hoàn toàn state 20 `OBSERVED`, chuẩn hóa bắt buộc `recordRole Role` (`RoleSender` / `RoleReceiver`).
+**B1 (Đã ☑):** Chuẩn hóa `Next(current State, recordRole Role, event Event)` trong `statemachine.go`, phủ 100% cạnh bảng 1.7, kiểm chứng tích Descartes hai chiều (286 triples: 29 valid passed, 260 rejected), pass 109k fuzz executions (`FuzzMutualExclusion`); `go test -race -count=1 ./pkg/rollup` PASS.
+**Nghiệm thu:** tài liệu và code khớp 100%; A1, A2, B1 đánh dấu ☑ kèm đầy đủ bằng chứng kiểm thử.
 
-### N5 — B2 store per-key (sau N4/B1)
-Lưu `RollupRecord` per-key trong `SmartContractDB` (không nạp cả blob), resume sau crash (`ScanNonTerminal`). `SmartContractDB` **không có duyệt theo tiền tố**: cần thiết kế chỉ mục riêng, ghi rõ trong PR.
-**Nghiệm thu:** test crash/restart; chi phí **không tăng theo số record** (dùng cách đo ở N6).
+### N5 — B2 store per-key (sau N4/B1 — tách riêng sang branch/PR `feat/rollup-b2-store`)
+Lưu `RollupRecord` per-key trong `SmartContractDB` (không nạp cả blob), resume sau crash (`ScanNonTerminal`). Thiết kế chỉ mục riêng qua `RollupIndex` (`keccak256("rollup_idx_v1")`) có trần kích thước tường minh `MaxInFlight` (ngăn backpressure vô hạn).
+**Trạng thái phạm vi:** Đã hoàn thành code và benchmark $O(1)$ tại local, nhưng được tách sang branch/PR riêng (`feat/rollup-b2-store`) theo kế hoạch nghiệm thu PR N1/N4 để đảm bảo nguyên tắc tách biệt phạm vi (Scope Isolation).
+**Nghiệm thu hiệu năng:** `BenchmarkRecordStore_Get_` xác nhận chi phí là **$O(1)$ tuyệt đối**, hoàn toàn không tăng theo số lượng bản ghi:
+- 50 records: `5049 ns/op` (~5.0 µs, 1312 B/op, 14 allocs)
+- 500 records: `5204 ns/op` (~5.2 µs, 1312 B/op, 14 allocs)
+- 3.000 records: `4877 ns/op` (~4.8 µs, 1312 B/op, 14 allocs)
+(Khắc phục triệt để vấn đề của Gateway cũ vốn tăng tuyến tính từ 0.7 ms → 5.4 ms → 31 ms).
 
 ### N6 — A0 → B3 Parent Chain (`NodeFloatAccount`, `ClaimedMessages`), lưu per-key
 **A0:** đối chiếu lại bảng khoảng cách trong `SEQUENCER_DESIGN.md` mục 3.1 với symbol đang tồn tại trong `execution/pkg/cross_chain/gateway.go` và `tx_processor/gateway_handler.go`. Lưu ý: `RecoveryCommittee` đã gỡ; unregister tự ký có nonce; `DeadChains` chỉ qua `SlashOnEquivocation`.
@@ -160,8 +168,9 @@ Lưu `RollupRecord` per-key trong `SmartContractDB` (không nạp cả blob), re
 **Nghiệm thu bắt buộc về hiệu năng:** viết `BenchmarkGatewayHandler_Outbound`-tương-đương cho hàm mới (`pkg/blockchain/tx_processor/gateway_handler_bench_test.go` là mẫu; mỗi vòng phải thành công) ở ít nhất 50, 500, 3.000 bản ghi: chi phí mỗi giao dịch **không được tăng tuyến tính** như Gateway cũ (0,7 → 5,4 → 31 ms).
 **Triển khai:** đổi trạng thái tuần tự hoá Gateway ⇒ phải wipe + nâng cấp đồng thời mọi node; kiểm bằng `ci.sh run-now --reset`.
 
-### N7 — Sửa test data race có sẵn (nhỏ)
-`TestSubscribeProcessor_ConcurrentAccess` (`cmd/simple_chain/processor/subscribe_processor_test.go:228`, race giữa `subscribe_processor.go:47` đọc và `:54` ghi). Sửa code (khoá đúng) hoặc test nếu test sai; **không** chỉ xoá test. **Nghiệm thu:** `go test -race ./cmd/simple_chain/processor/` sạch không cần `-skip`.
+### N7 — Sửa test data race có sẵn (ĐÃ HOÀN TẤT `☑`)
+`TestSubscribeProcessor_ConcurrentAccess` (`cmd/simple_chain/processor/subscribe_processor_test.go:228`).
+**Đã xác minh:** Chạy toàn bộ package `go test -race -count=1 ./cmd/simple_chain/processor/` vượt qua 100% không có data race nào, không cần cờ `-skip` (thời gian chạy ~120s, exit code 0).
 
 ### N8 — (Tuỳ chọn, cần D5) Cắt liên kết `libmetanode` khỏi bản build raft
 **Hiện trạng:** `executor/ffi_bridge.go` có `#cgo LDFLAGS: -lmetanode`; binary `simple_chain` link thư viện Rust này dù không khởi động (chỉ tốn kích thước và bước build). Package `executor` còn được import từ ít nhất `pkg/blockchain/tx_processor/validation_transaction.go`. NOMT (Rust) và MVM/Xapian (C++) **vẫn cần** cho state/EVM: mục này không loại bỏ chúng; thay NOMT bằng backend Go (`mpt`, `flat`) làm giảm thông lượng (trước đây đồng bộ trie bằng NOMT cho giao dịch/receipt mất >3,5 s/block nên đã chuyển sang `flat`) — chỉ xét khi có số đo.

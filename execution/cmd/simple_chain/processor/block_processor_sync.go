@@ -87,9 +87,17 @@ PROCESS_SINGLE_EPOCH_DATA_START:
 						nomtRoot.Hex()[:18]+"...", parentStatesRoot.Hex()[:18]+"...")
 					// 1. Drain Commit Worker to ensure all prior block commits are processed
 					if bp.commitChannel != nil {
+						errChan := make(chan error, 1)
 						commitDone := make(chan struct{})
-						bp.commitChannel <- CommitJob{DoneChan: commitDone}
-						<-commitDone
+						bp.commitChannel <- CommitJob{DoneChan: commitDone, ErrChan: errChan}
+						select {
+						case err := <-errChan:
+							if err != nil {
+								logger.Error("❌ [NOMT-SYNC-RECOVERY] Prior commit failed: %v", err)
+								return fmt.Errorf("prior commit failed during sync recovery: %w", err)
+							}
+						case <-commitDone:
+						}
 					}
 					// 2. Wait for NOMT async commits to finish
 					if bp.chainState != nil {
@@ -877,9 +885,17 @@ PROCESS_BLOCK:
 				nomtRoot.Hex()[:18]+"...", trieRoot.Hex()[:18]+"...")
 			// 1. Drain Commit Worker to ensure all prior block commits are processed
 			if bp.commitChannel != nil {
+				errChan := make(chan error, 1)
 				commitDone := make(chan struct{})
-				bp.commitChannel <- CommitJob{DoneChan: commitDone}
-				<-commitDone
+				bp.commitChannel <- CommitJob{DoneChan: commitDone, ErrChan: errChan}
+				select {
+				case err := <-errChan:
+					if err != nil {
+						logger.Error("❌ [FORK-PREVENTION] Prior commit failed: %v", err)
+						return fmt.Errorf("prior commit failed during fork prevention check: %w", err)
+					}
+				case <-commitDone:
+				}
 			}
 			// 2. Wait for NOMT async commits to finish
 			if bp.chainState != nil {

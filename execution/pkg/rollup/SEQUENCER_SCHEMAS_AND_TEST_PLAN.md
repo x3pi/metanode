@@ -241,9 +241,13 @@ message ObservationCursor {
 
 **Quy tắc bắt buộc — chỉ state xác định mới vào chain state.** Thông tin chỉ có ý nghĩa cục bộ và **không xác định giữa các replica** (số lần thử lại, thời điểm thử gần nhất, kết quả gọi mạng) **không được** ghi vào `RollupRecord`; chúng nằm trong bộ nhớ hoặc kho cục bộ của worker. Nếu vi phạm, các replica sẽ có state root khác nhau.
 
-### 1.7. Bảng chuyển trạng thái đầy đủ  **[ĐỀ XUẤT]**
+### 1.7. Bảng chuyển trạng thái đầy đủ  **[ĐÃ CHỐT A2+B1]**
 
-Hàm lõi (`B1`): `Next(state, event) (newState, []Action, error)`. Không I/O, không thời gian, idempotent.
+Hàm lõi (`B1`): `Next(current State, recordRole Role, event Event) (newState, []Action, error)`.
+- Thuần túy (pure state machine): Không I/O, không truy cập storage, không thời gian hệ thống, hoàn toàn xác định (deterministic).
+- Idempotent: Replay sự kiện cùng trạng thái không sinh lỗi và không phát lại action lần hai.
+- Role Invariant: `recordRole` là thuộc tính bền vững của `RollupRecord` (`RoleSender` = 1 hoặc `RoleReceiver` = 2), không được phép là `RoleUnknown`. Mọi chuyển đổi trạng thái (kể cả từ `StateNone`) đều bắt buộc kiểm tra `recordRole` khớp với `current.Role()` và `event.Type.Role()`.
+- Trạng thái `20 OBSERVED`: Đã loại bỏ hoàn toàn theo Quyết định A2 (Phương án B); hành động `ActionMarkClaimed` được phát hành trực tiếp cùng bước chuyển sang state 21 hoặc 22.
 
 ```
 State (uint32):
@@ -251,10 +255,9 @@ State (uint32):
   10 LOCAL_APPLIED_PENDING_SEND     (gửi)
   11 SENT_CONFIRMED                 (gửi)
   12 RECLAIM_SUBMITTED              (gửi)
-  13 REFUND_IN_TRANSIT              (gửi)  ← mới, xem "lỗ hổng" bên dưới
+  13 REFUND_IN_TRANSIT              (gửi)
   19 CONFIRMED_SUCCESS              (gửi, terminal)
   18 CONFIRMED_REFUNDED             (gửi, terminal)
-  20 OBSERVED                       (nhận)
   21 MARKED_CLAIMED_PENDING_CREDIT  (nhận)
   22 MARKED_CLAIMED_PENDING_REFUND  (nhận)
   23 REFUND_SENT                    (nhận)
@@ -262,6 +265,7 @@ State (uint32):
   28 REFUNDED                       (nhận, terminal)
   27 SKIPPED_DUP                    (nhận, terminal)
 Outcome: 0 NONE, 1 CREDITED, 2 REFUND
+Role: 1 SENDER, 2 RECEIVER
 ```
 
 **Phía gửi**

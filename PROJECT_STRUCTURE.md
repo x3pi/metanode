@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-09-25
+> **Last updated:** 2026-09-26
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -96,6 +96,7 @@ metanode/
 │  │  ├── models/       ← Shared data models  │   │
 │  │  ├── config/       ← Node configuration  │   │
 │  │  ├── rollup/       ← Pure Rollup FSM (cross-node state machine) │   │
+│  │  ├── failpoint/    ← Zero-overhead crash injection harness (c0spike) │   │
 │  │  └── metrics/      ← Prometheus metrics  │   │
 │  └──────────────────────────────────────────┘   │
 └──────────────────┬──────────────────────────────┘
@@ -195,7 +196,7 @@ metanode/
 | `tx_async_queue.go` | 338 | Async tx submission queue |
 | `debug_api.go` | 870 | Debug/admin endpoints |
 | `startup_integrity_check.go` | 272 | Post-crash integrity verification |
-| `c0_spike.go` | ~1200 | C0 spike harness (`//go:build c0spike`): multi-round determinism, EVM+Gateway workload, progress-driven `kill -9` at several points, measured Rust-consensus isolation |
+| `c0_spike.go` | ~1300 | C0 spike harness (`//go:build c0spike`): multi-round determinism, EVM+Gateway workload, per-store durability failpoints with run-scoped markers (`C0_RUN_ID`), `kill -9` recovery, measured Rust-consensus isolation |
 | `c0_spike_stub.go` | 25 | Stub for production binary (`//go:build !c0spike`), exits cleanly if invoked without build tag |
 
 *CLI Flags & Config:*

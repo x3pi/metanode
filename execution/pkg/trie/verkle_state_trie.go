@@ -327,8 +327,10 @@ func (vt *VerkleStateTrie) PreWarm(keys [][]byte) {
 // The result is cached so that the subsequent Commit() call can reuse it
 // without recomputing HashPointToBytes.
 func (vt *VerkleStateTrie) Hash() e_common.Hash {
-	vt.mu.RLock()
-	defer vt.mu.RUnlock()
+	// go-verkle's Commit mutates internal commitment caches, so concurrent
+	// callers must be serialized even though this wrapper only returns a hash.
+	vt.mu.Lock()
+	defer vt.mu.Unlock()
 
 	if len(vt.dirty) == 0 {
 		return vt.rootHash
@@ -344,8 +346,8 @@ func (vt *VerkleStateTrie) Hash() e_common.Hash {
 	commitBytes := verkle.HashPointToBytes(commitment)
 	hash := e_common.Hash(commitBytes)
 
-	// Cache the result. Note: Hash() uses RLock so we can't write to vt fields
-	// directly. The caching will take effect in Commit() which has full Lock.
+	vt.cachedCommitHash = hash
+	vt.commitHashValid = true
 	return hash
 }
 

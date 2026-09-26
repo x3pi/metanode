@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
+	"github.com/meta-node-blockchain/meta-node/pkg/failpoint"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -925,16 +926,21 @@ func (bc *BlockChain) Commit() error {
 	})
 
 	if len(batch) > 0 {
-		// TPS OPTIMIZATION: Write mapping batch to LevelDB/PebbleDB asynchronously.
-		// Since read queries query in-memory caches first (which are updated synchronously),
-		// returning immediately here avoids blocking the block commit worker thread
-		// on disk I/O, speeding up block execution by ~100ms per block.
-		go func(b [][2][]byte) {
-			err := bc.storageManager.GetStorageMapping().BatchPut(b)
-			if err != nil {
-				logger.Error("Storage BatchPut failed: %v", err)
+		// N1-FIX-01: Write mapping batch synchronously with error propagation.
+		// A fire-and-forget goroutine here drops errors and creates a race condition
+		// where mapping writes can be lost if the process crashes shortly after block commit.
+		if bc.storageManager != nil && bc.storageManager.GetStorageMapping() != nil {
+			if err := bc.storageManager.GetStorageMapping().BatchPut(batch); err != nil {
+				logger.Error("❌ [BLOCKCHAIN MAPPING] Storage BatchPut failed: %v", err)
+				return err
 			}
-		}(batch)
+			failpoint.Hit("before-mapping-barrier")
+			if err := storage.SyncDurable(bc.storageManager.GetStorageMapping()); err != nil {
+				logger.Error("❌ [BLOCKCHAIN MAPPING] Storage SyncDurable failed: %v", err)
+				return err
+			}
+			failpoint.Hit("after-mapping-barrier")
+		}
 	}
 
 	// mapToProcess sẽ được GC dọn dẹp sau khi hàm này kết thúc

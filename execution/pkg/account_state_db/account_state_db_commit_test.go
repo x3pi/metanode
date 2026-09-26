@@ -1,10 +1,12 @@
 package account_state_db
 
 import (
+	"fmt"
 	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -97,4 +99,52 @@ func TestCommitPipeline_PreservesState(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, big.NewInt(9999).Cmp(as.TotalBalance()))
 	assert.Equal(t, uint64(42), as.Nonce())
+}
+
+type errorStorageForTest struct {
+	*testMemoryDB
+	failBatchPut bool
+}
+
+func (e *errorStorageForTest) BatchPut(b [][2][]byte) error {
+	if e.failBatchPut {
+		return fmt.Errorf("injected disk failure in BatchPut")
+	}
+	return e.testMemoryDB.BatchPut(b)
+}
+
+func TestPersistAsync_ErrorPropagationAndGateUnblock(t *testing.T) {
+	memDB := newTestMemoryDB()
+	errStorage := &errorStorageForTest{testMemoryDB: memDB}
+	tr, err := p_trie.New(common.Hash{}, errStorage, true)
+	require.NoError(t, err)
+	adb := NewAccountStateDB(tr, errStorage)
+
+	addr := testAddr(0xFE)
+	err = adb.AddBalance(addr, big.NewInt(12345))
+	require.NoError(t, err)
+
+	_, err = adb.IntermediateRoot(true)
+	require.NoError(t, err)
+
+	result, err := adb.CommitPipeline()
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, result.PersistChannel)
+
+	// Inject error before PersistAsync
+	errStorage.failBatchPut = true
+
+	// PersistAsync should return the injected error
+	err = adb.PersistAsync(result)
+	assert.Error(t, err, "PersistAsync must return error when underlying BatchPut fails")
+	assert.Contains(t, err.Error(), "injected disk failure")
+
+	// Gate MUST be unblocked (closed) to prevent consensus deadlock
+	select {
+	case <-result.PersistChannel:
+		// Passed: channel was closed in defer
+	default:
+		t.Fatal("PersistChannel must be closed even on failure to avoid consensus deadlock")
+	}
 }

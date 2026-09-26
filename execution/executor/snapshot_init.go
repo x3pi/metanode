@@ -3,6 +3,7 @@ package executor
 import (
 	"encoding/binary"
 	"path/filepath"
+	"sync"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
@@ -14,7 +15,16 @@ import (
 )
 
 // Global snapshot manager instance
-var globalSnapshotManager *SnapshotManager
+var (
+	globalSnapshotManagerMu sync.RWMutex
+	globalSnapshotManager   *SnapshotManager
+)
+
+func setGlobalSnapshotManager(sm *SnapshotManager) {
+	globalSnapshotManagerMu.Lock()
+	globalSnapshotManager = sm
+	globalSnapshotManagerMu.Unlock()
+}
 
 // InitSnapshotSystem khởi tạo hệ thống snapshot dựa trên config
 // Gọi 1 lần duy nhất khi khởi động node
@@ -25,7 +35,7 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 
 		// Tạo lightweight SnapshotManager (disabled) chỉ để đăng ký callback cho log rotation
 		sm := &SnapshotManager{enabled: false}
-		globalSnapshotManager = sm
+		setGlobalSnapshotManager(sm)
 
 		// Lấy epoch hiện tại từ chainState
 		if chainState != nil {
@@ -83,7 +93,6 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 	sm := NewSnapshotManager(dataDir, snapshotDir, maxSnapshots, blocksDelay)
 	sm.SetSnapshotFrequency(cfg.SnapshotFrequencyBlocks)
 	sm.SetSnapshotBlockOffset(cfg.SnapshotBlockOffset)
-	globalSnapshotManager = sm
 
 	// FATAL CHECK: Nếu snapshot được bật (Synconly node) nhưng ổ cứng không hỗ trợ reflink (btrfs/xfs)
 	if cfg.SnapshotEnabled && !sm.reflinkSupported {
@@ -213,10 +222,14 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 	logger.Info("📸 [SNAPSHOT]    Frequency: every %d blocks (offset=%d)", cfg.SnapshotFrequencyBlocks, cfg.SnapshotBlockOffset)
 	logger.Info("📸 [SNAPSHOT]    HTTP server port: %d", serverPort)
 
+	setGlobalSnapshotManager(sm)
 	return sm
 }
 
 // GetGlobalSnapshotManager trả về global snapshot manager instance
 func GetGlobalSnapshotManager() *SnapshotManager {
-	return globalSnapshotManager
+	globalSnapshotManagerMu.RLock()
+	sm := globalSnapshotManager
+	globalSnapshotManagerMu.RUnlock()
+	return sm
 }
