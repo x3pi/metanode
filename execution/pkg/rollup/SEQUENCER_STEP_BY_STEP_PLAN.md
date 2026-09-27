@@ -162,7 +162,7 @@ flowchart TD
 
 ## GIAI ĐOẠN B — Logic rollup chạy end-to-end (trên node hiện có làm bệ thử)
 
-> Giai đoạn B không phụ thuộc nguồn thứ tự và không phụ thuộc HA: nó chạy trên `simple_chain` 1 validator hiện có làm bệ thử, sau đó chạy y nguyên trên Rollup Node (C1). Không sửa code cũ ngoài `pkg/cross_chain` và `gateway_handler.go` ở B3 (đã ghi blast radius).
+> Giai đoạn B không phụ thuộc nguồn thứ tự và không phụ thuộc HA: B1/B2 chạy trên `simple_chain` 1 validator hiện có làm bệ thử phía node thực thi, sau đó chạy y nguyên trên Rollup Node (C1). **B3 (2026-09-27):** không còn sửa `pkg/cross_chain`/`gateway_handler.go` — Parent Chain là 1 package/node mới hoàn toàn (`execution/pkg/parentchain/`), không đụng code EVM hiện có, xem chi tiết ở B3.
 
 ### B1. State machine thuần  ·  `M`
 **Mục tiêu:** bảng chuyển trạng thái deterministic, không I/O, không storage, không thời gian.
@@ -184,35 +184,43 @@ flowchart TD
 
 **Test:** reload sau "crash" thấy đúng record; 2 `MessageID` khác nhau không đè nhau.
 
-### B3. Parent Chain: `NodeFloatAccount` + `ClaimedMessages`  ·  `L`
-- Trong `execution/pkg/cross_chain/` (cạnh `gateway.go`): `NodeFloatAccount[chainID]` (tiền thật, không âm), `ClaimedMessages[messageID]`; thao tác `DepositToFloat`, `TransferFloat` (atomic `FA[src] -= V, FA[dst] += V`), `MarkClaimed`, `ReclaimFloat`.
-- **Storage per-key**, không nhét vào blob `gateway_engine_state_v1`.
-- `ReclaimFloat` chỉ thành công khi `blockTime` on-chain ≥ mốc timeout **và** `MessageID` chưa `Claimed`; `DeadChains` **không** chặn Reclaim (mục 6.3).
-- Velocity-limit outflow cho `TransferFloat` (#11) tái dùng `checkAndRecordVelocity`; **không áp** cho hoàn tiền/Reclaim (#14).
-- Nối vào `gateway_handler.go` (`handleWrite`, `handleView`) + ABI (`rootanchor/gatewayAbi.go`, `tx_processor/abi_contract/`). Tx Gateway chạy dạng barrier (`true_block_stm.go`, `runBarrierTx`).
-- Bất biến `Σ NodeFloatAccount == genesis_total_supply`: hàm kiểm tra + đưa vào `consensus/metanode/scripts/invariant_monitor_daemon.py` (đã có) hoặc test.
+> **Viết lại 2026-09-27** theo kiến trúc Parent Chain kiểu mới đã chốt toàn bộ (`SEQUENCER_DESIGN.md` mục 0, mục 0.6 đã đóng — không EVM/`GatewayEngine`, không `Committee`/bond/slash/`DeadChains`, khoá theo `FloatIdentityKey`, đăng ký permissionless không nonce). Nội dung B3-B8 gốc (dùng `GatewayEngine`/ABI/tx barrier/`rootanchor.Client`) đã bị thay hẳn — xem lịch sử git nếu cần đối chiếu, không giữ song song trong file này nữa.
 
-**Test:** FA không âm, tổng bảo toàn sau chuỗi Transfer/Reclaim ngẫu nhiên; Reclaim trước timeout bị từ chối; Reclaim sau `Claimed` bị từ chối; race Reclaim vs `Claimed`: đúng 1 bên thắng; `Claimed` lần 2 bị từ chối (#9, #10); Reclaim từ FA chain `DeadChains` vẫn chạy, Transfer mới bị chặn; hoàn tiền không bị velocity chặn (#14); persist qua reload.
+### B3. Parent Chain kiểu mới: state native + RPC tối giản  ·  `L`
+- Package mới `execution/pkg/parentchain/` — chạy như 1 node/binary riêng (không phải trong `simple_chain`, không NOMT/MVM/EVM). Tái dùng Rust consensus-core (BFT-DAG) + P2P hiện có (mục 0.2) cho 1 cụm validator riêng, tách biệt hoàn toàn khỏi mọi cụm thực thi (mục 0.6).
+- **State (4 bảng, mục 0.4), storage per-key** (giống nguyên tắc B2, backend cụ thể — LevelDB hay tương đương — chọn khi bắt tay code):
+  - `ChainRegistry[Keccak256(FloatIdentityKey)] = {FloatIdentityKey, chainID EVM (chỉ mô tả)}` — **không có `Committee`** (mục 0.3).
+  - `NodeFloatAccount[Keccak256(FloatIdentityKey)] = balance (*big.Int, không âm)`.
+  - `ClaimedMessages[MessageID] = outcome (none/credited/refund/reclaimed)`.
+  - `AccountRegistry[user_address] = FloatIdentityKey`.
+- **Giao dịch native** (không ABI/contract-call): `DepositToFloat`, `TransferFloat` (atomic `FA[src] -= V, FA[dst] += V`), `MarkClaimed`, `ReclaimFloat`, `RegisterAccount`.
+- **Không có tx "đăng ký cụm" riêng:** `ChainRegistry`+`NodeFloatAccount` entry cho 1 `FloatIdentityKey` **không tồn tại mặc định** — được tạo tự động đúng lúc giao dịch `DepositToFloat`/`TransferFloat` đầu tiên ký hợp lệ bởi `FloatIdentityKey` đó được chấp nhận (mục 0.3). Permissionless, không bond, không whitelist.
+- **`RegisterAccount`:** cần đúng 2 chữ ký trong 1 tx — ECDSA/secp256k1 của `user_address` + BLS của `FloatIdentityKey` cụm nhận; thiếu 1 trong 2 thì từ chối. **Không cần `nonce`** — hành động 1-lần-duy-nhất, rule "entry đã tồn tại thì từ chối" tự nó chống trùng/replay (mục 0.6).
+- `ReclaimFloat` chỉ thành công khi thời điểm on-chain ≥ mốc timeout **và** `MessageID` chưa `Claimed` (mục 3.6) — không còn khái niệm `DeadChains` chặn/không-chặn Reclaim vì `DeadChains` đã bỏ hẳn (mục 0.6).
+- Velocity-limit outflow cho `TransferFloat` (#11, mục 4.2-4.4) vẫn giữ — logic nghiệp vụ này không đổi (mục 0.5); **không áp** cho hoàn tiền/Reclaim (#14).
+- **Không có `SecurityBond`/`SlashOnEquivocation`/`DeadChains`/Snapshot-Archival pipeline** — bỏ hẳn, không phải hoãn (mục 0.6, 4.1, 6.2, 6.3). Mọi tx đi kèm `nonce` (trừ `RegisterAccount`) và commit tuần tự vào 1 sổ cái duy nhất — không có "equivocation" để bắt.
+- Bất biến `Σ NodeFloatAccount == tổng tiền thật đã DepositToFloat từ trước tới nay` (mục 4.3): hàm kiểm tra + test tự động định kỳ.
 
-**Blast radius lớn nhất của kế hoạch** (`GatewayEngine`, `gateway_handler.go` ~2,7k dòng). Bắt buộc `codegraph_impact` trước khi sửa.
+**Test:** FA không âm, tổng bảo toàn sau chuỗi Transfer/Reclaim ngẫu nhiên; Reclaim trước timeout bị từ chối; Reclaim sau `Claimed` bị từ chối; race Reclaim vs `Claimed`: đúng 1 bên thắng; `Claimed` lần 2 bị từ chối (#9, #10); hoàn tiền không bị velocity chặn (#14); `RegisterAccount` thiếu 1 trong 2 chữ ký bị từ chối; `RegisterAccount` lần 2 cho cùng `user_address` bị từ chối (không ghi đè); `DepositToFloat`/`TransferFloat` đầu tiên tới 1 `FloatIdentityKey` chưa từng thấy tự tạo đúng `ChainRegistry`+`NodeFloatAccount` entry; persist qua reload.
 
-### B4. Handler gửi cross-node phía node  ·  `M`
+**Blast radius:** package mới hoàn toàn, không đụng `GatewayEngine`/`gateway_handler.go`/ABI. Vẫn nên chạy `codegraph_impact` nếu sau này có chỗ nào tái dùng type/hàm từ `pkg/cross_chain` (ví dụ `checkAndRecordVelocity`).
+
+### B4. Handler gửi cross-node phía node thực thi  ·  `M`
 - Giao dịch cross-node của user → record `LOCAL_APPLIED_PENDING_SEND` (mục 13.3 bước 1–2): kiểm tra chữ ký/balance/nonce, serialize chống race cùng 1 user, trừ balance + cấp `sourceSeq` + tính `MessageID` + ghi record trong 1 lần ghi. Chuyển trạng thái **chỉ qua `Next`**.
-
-**Đã xác minh:** tx barrier được chọn theo địa chỉ đích (`true_block_stm.go:185`). Hai lựa chọn: thêm method vào `GatewayHandler` (tự thành barrier, nhưng thừa hưởng việc nạp/ghi cả blob `GatewayEngine` mỗi tx) hoặc thêm 1 hằng số địa chỉ mới cạnh `GATEWAY_CONTRACT_ADDRESS` (barrier riêng, tránh blob nhưng đụng danh sách địa chỉ). Chốt sau A0. **Hệ quả cần đo ở B8:** tx barrier chạy tuần tự nên thông lượng cross-node của chain bị giới hạn bởi tốc độ xử lý tuần tự.
+- **Khoá ký gửi lên Parent Chain:** mỗi cụm thực thi giữ 1 khoá BLS `FloatIdentityKey` riêng, cố định — **tách biệt hoàn toàn** với khoá đồng thuận nội bộ giữa các replica (Raft/BFT-DAG). Leader đương nhiệm dùng đúng khoá `FloatIdentityKey` này để ký `TransferFloat`/`DepositToFloat`/`MarkClaimed`/`ReclaimFloat` gửi lên Parent Chain — không phải `QuorumCert` đa chữ ký (mục 0.3).
 
 **Test:** balance không đủ → từ chối, không có record; 2 tx đồng thời cùng user chỉ 1 tx qua nếu chỉ đủ tiền cho 1; crash sau khi ghi → reload thấy đúng 1 record và balance đã trừ.
 
 ### B5. Worker gửi lên Parent Chain  ·  `M`
-- File mới cạnh `committee_attestation_worker.go`: quét record `LOCAL_APPLIED_PENDING_SEND` → dựng và ký Transfer → `rootanchor.Client.SubmitTransaction` → khi confirm phát `ParentConfirmed`.
+- File mới cạnh `committee_attestation_worker.go`: quét record `LOCAL_APPLIED_PENDING_SEND` → dựng và ký (`FloatIdentityKey`) Transfer → gửi qua **RPC riêng, tối giản của Parent Chain kiểu mới** (client package mới, ví dụ `execution/pkg/parentchain/client/`, KHÔNG phải `rootanchor.Client`/`eth_*` — mục 0.6) → khi confirm phát `ParentConfirmed`.
 - **Bảng record chính là Retry Queue** (không thêm queue thứ hai): gửi lại đúng tx đã có cho cùng `MessageID`.
 - Channel tín hiệu có buffer giới hạn; `select` có `default` không chặn (mẫu `OnEpochAdvanced`). Idempotent: gửi lại 1 Transfer đã confirm được coi là "đã xong", không phải lỗi.
 - **Chừa điểm móc cho C3:** worker gọi 1 hàm `isReleasable(record)` trước khi gửi; ở Phase B hàm này luôn trả `true`.
 
-**Test:** mock `rootanchor.Client` — lỗi mạng giữa chừng → retry đúng tx cũ; restart giữa chừng → không gửi trùng; channel đầy → không block.
+**Test:** mock client Parent Chain — lỗi mạng giữa chừng → retry đúng tx cũ; restart giữa chừng → không gửi trùng; channel đầy → không block.
 
 ### B6. Watcher + luồng nhận  ·  `L`
-- **Việc mới ở Parent Chain:** `rootanchor.Client` **chưa có** method liệt kê credit đến (`client.go` chỉ có `GetChainRegistry`, các `Get*AttestationShares`, `SubmitTransaction`…). Thêm view `getInboundTransfers(chainID, cursor)` (phân trang bằng cursor) + method client.
+- **Việc mới ở Parent Chain:** RPC mới cần 1 view liệt kê credit đến, phân trang bằng cursor — ví dụ `GetInboundTransfers(floatIdentityKey, cursor)` — cộng method client tương ứng (thay cho `rootanchor.Client`/`getInboundTransfers(chainID,...)` cũ).
 - Watcher đọc theo cursor (cursor lưu trong store → sống sót qua restart và **được nhân bản cùng state**) → `CreditObserved`.
 - Luồng nhận qua `Next`: kiểm tra chưa xử lý (`SKIPPED_DUP`) → kiểm tra tài khoản/contract → `MarkClaimed` lên Parent Chain **trước** → credit local (`CREDITED`), hoặc gửi Transfer hoàn **chỉ `Value`, không hoàn `GasFee`** (`REFUNDED`).
 - Bằng chứng quan sát đi qua interface `EvidenceVerifier` (ở Phase B chỉ là chính validator duy nhất) — để dành chỗ nếu sau này nâng lên nhiều validator.
@@ -221,17 +229,17 @@ flowchart TD
 **Test:** credit đến account hợp lệ → `CREDITED`; không hợp lệ → `REFUNDED` đúng `Value`; cùng `MessageID` tới 2 lần → xử lý 1 lần; **crash giữa `MARKED_CLAIMED_PENDING_CREDIT` và credit** → restart credit tiếp, không re-mark, không credit trùng (#13); **crash giữa `MARKED_CLAIMED_PENDING_REFUND` và gửi hoàn** → restart gửi hoàn tiếp, không hoàn 2 lần (#9).
 
 ### B7. Reclaim + resume toàn bộ sau crash  ·  `M`
-- Record ở `SENT_CONFIRMED` mà Parent Chain báo đủ điều kiện Reclaim (so `blockTime` on-chain) → `ReclaimEligible` → `RECLAIM_SUBMITTED` → `ReclaimWon`/`ReclaimLost`.
+- Record ở `SENT_CONFIRMED` mà Parent Chain báo đủ điều kiện Reclaim (so thời điểm on-chain) → `ReclaimEligible` → `RECLAIM_SUBMITTED` → `ReclaimWon`/`ReclaimLost`.
 - Khi khởi động: `ScanNonTerminal` đưa **mọi** record không terminal về đúng bước tiếp theo. Đây là điểm mà "replica được nâng lên làm leader và tiếp quản" ở C4 dựa vào.
 
 **Test:** kill giả lập tại **từng** trạng thái không terminal → restart → tới đúng terminal; `ReclaimLost` quay về `SENT_CONFIRMED` rồi kết thúc theo nhánh `Claimed`.
 
 ### B8. E2E trên 1 máy  ·  `M`
-- Dựng Root Anchor devnet (recipe có sẵn) + 2 chain × 1 validator (Node 1, Node 2); script E2E gửi thật qua RPC.
-- Chạy các case `SEQUENCER_DESIGN.md` mục 9.3: **(1)** Transfer thành công, **(2)** thất bại → hoàn đúng `Value`, không hoàn `GasFee`, **(6)** crash giữa refund, **(8)** Reclaim khi Node 2 chậm + race, **(9)** crash giữa `Claimed` và credit.
-- Đo chu kỳ xử lý bình thường → chốt tham số timeout Reclaim ở A2. Kiểm `Σ NodeFloatAccount == supply` sau mỗi kịch bản.
+- Dựng devnet Parent Chain kiểu mới (cụm validator riêng, mục 0.6 — số node cụ thể chốt khi code B3) + 2 chain thực thi × 1 validator (Node 1, Node 2); script E2E gửi thật qua RPC Parent Chain mới.
+- Chạy các case `SEQUENCER_DESIGN.md` mục 9.3 (bỏ mọi case liên quan `DeadChains`, đã không còn áp dụng): **(1)** Transfer thành công, **(2)** thất bại → hoàn đúng `Value`, không hoàn `GasFee`, **(6)** crash giữa refund, **(8)** Reclaim khi Node 2 chậm + race, **(9)** crash giữa `Claimed` và credit, cộng **(10)** `RegisterAccount` 2 chữ ký end-to-end (user ký secp256k1 thật, cụm ký BLS thật).
+- Đo chu kỳ xử lý bình thường → chốt tham số timeout Reclaim ở A2. Kiểm `Σ NodeFloatAccount == tổng đã DepositToFloat` sau mỗi kịch bản.
 
-**Hoàn thành khi:** 5 case đạt lặp lại nhiều lần liên tiếp, bất biến giữ nguyên.
+**Hoàn thành khi:** các case đạt lặp lại nhiều lần liên tiếp, bất biến giữ nguyên.
 
 ### B9. Cổng chất lượng Phase B  ·  `S`
 - `build_check.sh` sạch; `go test -race` sạch; review độc lập các điểm dễ sót #9, #10, #12, #13, #14.

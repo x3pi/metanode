@@ -1,9 +1,64 @@
 # Thiết kế Kiến trúc Raft Sequencer Cluster & Node Float Account (Cross-Node Value Transfer)
 
-> **Tổng quan:** Mỗi cụm Sequencer (sử dụng thuật toán đồng thuận Raft) là 1 `chainID` độc lập, tự quản state/balance/contract của user thuộc cụm đó. Cụm Raft bao gồm 1 Leader xử lý giao dịch và các Follower đồng bộ trạng thái, đảm bảo tính sẵn sàng cao (High Availability - HA) và tuân thủ tuyệt đối quy tắc Zero-Fork của dự án. Parent Chain (Root Anchor) giữ 2 việc: sổ danh bạ (Account Registry, ChainRegistry) và **`NodeFloatAccount`** — quỹ liên-node **tiền thật** cho từng cụm, không phải trần phân bổ trừu tượng. `NodeFloatAccount` không có bước "nạp quỹ" rời rạc — nó là 1 bất biến tự động, luôn ≥ và tự hội tụ về đúng tổng số dư user của cụm đó (mục 3.2). Chuyển giá trị cross-node = ghi sổ chuyển khoản atomic trực tiếp giữa 2 `NodeFloatAccount` (mục 3.3), không cần "khoá batch → attest → claim". Giao dịch nội bộ cùng cụm vẫn tức thời, không đụng Parent Chain.
-> **Chế độ vận hành đã chốt (Bước A1):** Chế độ vận hành của node thực thi là **`consensus_mode = "raft"`** tích hợp trực tiếp trong `simple_chain` (không binary mới, không RPC mới; giữ nguyên JSON-RPC, tx pool, `tx_batch_forwarder`, xử lý block Go, NOMT/MVM/Xapian; thay thế Rust consensus engine bằng `hashicorp/raft`, bầu leader tự động, cùng 1 khoá ký BLS trên mọi replica, và thực thi block chỉ sau khi Raft commit theo quy chuẩn `SEQUENCER_STEP_BY_STEP_PLAN.md` mục 0.1 và 0.6).
+> **Tổng quan:** Mỗi cụm Sequencer (sử dụng thuật toán đồng thuận Raft) là 1 cụm thực thi độc lập, tự quản state/balance/contract của user thuộc cụm đó. Cụm Raft bao gồm 1 Leader xử lý giao dịch và các Follower đồng bộ trạng thái, đảm bảo tính sẵn sàng cao (High Availability - HA) và tuân thủ tuyệt đối quy tắc Zero-Fork của dự án. Parent Chain (**kiểu node mới**, mục 0) giữ 3 việc: sổ danh bạ cụm (ChainRegistry), tra cứu tài khoản (Account Registry), và **`NodeFloatAccount`** — quỹ liên-cụm **tiền thật**, không phải trần phân bổ trừu tượng. `NodeFloatAccount` không có bước "nạp quỹ" rời rạc — nó là 1 bất biến tự động, luôn ≥ và tự hội tụ về đúng tổng số dư user của cụm đó (mục 3.2). Chuyển giá trị cross-node = ghi sổ chuyển khoản atomic trực tiếp giữa 2 `NodeFloatAccount` trên Parent Chain (mục 3.3), không cần "khoá batch → attest → claim", và **bắt buộc phải đi qua Parent Chain** (không P2P trực tiếp giữa 2 cụm). Giao dịch nội bộ cùng cụm vẫn tức thời, không đụng Parent Chain.
+> **Chế độ vận hành đã chốt (Bước A1):** Chế độ vận hành của node thực thi (mỗi cụm Sequencer) là **`consensus_mode = "raft"`** tích hợp trực tiếp trong `simple_chain` (không binary mới, không RPC mới; giữ nguyên JSON-RPC, tx pool, `tx_batch_forwarder`, xử lý block Go, NOMT/MVM/Xapian; thay thế Rust consensus engine bằng `hashicorp/raft`, bầu leader tự động, cùng 1 khoá ký BLS trên mọi replica, và thực thi block chỉ sau khi Raft commit theo quy chuẩn `SEQUENCER_STEP_BY_STEP_PLAN.md` mục 0.1 và 0.6). Đây là quy định cho **node thực thi**, không phải cho Parent Chain — Parent Chain là 1 loại node hoàn toàn khác, xem mục 0.
 
-> ⚠️ **Nền tảng kỹ thuật:** đăng ký chain (stake), `SecurityBond`, `SlashOnEquivocation`, `UnregisterChainWithCert` (tự ký) dùng nguyên `GatewayEngine` có sẵn (`execution/pkg/cross_chain/gateway.go`) — chỉ riêng cơ chế **di chuyển giá trị giữa các node** là thiết kế riêng (Float Account), thay cho mô hình mint-theo-trần-rồi-claim.
+---
+
+## 0. Parent Chain là 1 loại node MỚI (quyết định 2026-09-27 — thay thế mọi tham chiếu "Root Anchor/GatewayEngine có sẵn" bên dưới)
+
+> ⚠️ **Đọc mục này TRƯỚC.** Toàn bộ tài liệu bên dưới (mục 1–13) được viết TRƯỚC quyết định này, khi Parent Chain còn được giả định là Root Anchor — 1 chain tương thích EVM có sẵn, chạy `GatewayEngine` như 1 precompile contract (`GATEWAY_CONTRACT_ADDRESS`, `execution/pkg/cross_chain/gateway.go`). Quyết định 2026-09-27 **thay thế** giả định đó. Các mục bên dưới vẫn giữ nguyên phần **logic nghiệp vụ** (luồng Transfer/Deposit/Refund/Reclaim, các bất biến, các vấn đề bảo mật #1-#16) — phần đó vẫn đúng và không đổi. Phần **không còn đúng** là bất kỳ chỗ nào giả định Parent Chain "có sẵn", "dùng nguyên `GatewayEngine`", hoặc dùng `chainID` làm khoá bảo mật/lưu trữ — các mục 2.1, 3.1, 4.1, 5, 6.2, 7 có đánh dấu ⚠️ **SUPERSEDED (mục 0)** ở đúng chỗ bị ảnh hưởng.
+
+### 0.1. Vì sao đổi
+
+Parent Chain (Root Anchor) trước đây được giả định là 1 chain tương thích EVM đầy đủ (account-state trie, MVM/EVM, NOMT, RPC `eth_*`), chạy `GatewayEngine` như 1 precompile contract. Việc này kéo theo 2 vấn đề:
+
+1. **Không cần thiết:** Parent Chain kiểu mới (mục 0.2) chỉ cần giữ 3 loại state đơn giản (ChainRegistry, `NodeFloatAccount`, Account Registry) — không có lý do gì để mang theo toàn bộ hạ tầng EVM/contract/account-state chỉ để lưu 3 bảng đó.
+2. **Rủi ro trùng `chainID` với chainId kiểu EVM:** Trong `pkg/cross_chain` hiện có, `chainID` (khoá của `ChainRegistry`, `PerChainAllocation`...) **chính là** `config.ConfigApp.ChainId` — chainId kiểu EVM của từng cụm thực thi (ví dụ 991). ChainId kiểu EVM không đảm bảo duy nhất toàn cục (nhiều chain riêng có thể tự chọn trùng số, ví dụ 1337, 31337), nên dùng nó làm khoá đăng ký/lưu trữ trên Parent Chain có rủi ro trùng thật. Quyết định: **không dùng `chainID` làm định danh bảo mật/lưu trữ nữa** — xem mục 0.3.
+
+### 0.2. Parent Chain kiểu mới — thành phần dùng chung vs. viết mới
+
+- **Dùng chung (không viết lại):** Rust consensus-core (BFT-DAG) và lớp mạng P2P hiện có của dự án.
+- **Viết mới hoàn toàn (Go), không NOMT/MVM/EVM, không account-state trie kiểu `simple_chain`:**
+  - State chỉ gồm 3 bảng (mục 0.4): **ChainRegistry**, **`NodeFloatAccount` (Balance theo `FloatIdentityKey`)**, **Account Registry**.
+  - Giao dịch là **native** (Go, không qua ABI/`abi_contract`/dispatch kiểu contract-call): `TransferFloat`, `DepositToFloat`, `MarkClaimed`, `ReclaimFloat`, đăng ký/tra cứu Account Registry, đăng ký/cập nhật `ChainRegistry`.
+  - Không có RPC `eth_*` kiểu EVM, không có khái niệm gas/EVM revert — mỗi giao dịch native có tập điều kiện hợp lệ riêng, thất bại thì từ chối rõ ràng (không "revert" kiểu EVM).
+- **Cụm thực thi (node Raft, `simple_chain`) gửi giao dịch tới Parent Chain kiểu mới này** — kênh cụ thể (RPC/giao thức) **chưa chốt**, xem mục 0.6 (việc còn mở).
+
+### 0.3. Định danh: bỏ hẳn `chainID` (kiểu EVM) làm khoá bảo mật — dùng `FloatIdentityKey`
+
+- Mỗi cụm thực thi có 1 khoá BLS **riêng, cố định** — gọi là **`FloatIdentityKey`** — là danh tính DUY NHẤT của cụm đó trên Parent Chain. ✅ **ĐÃ CHỐT (2026-09-27): bỏ hẳn khái niệm `Committee` khỏi Parent Chain.** Đồng thuận đa thành viên (Raft/BFT-DAG nội bộ cụm thực thi) là chuyện RIÊNG của cụm đó — Parent Chain không cần biết, không lưu, không xác thực bất kỳ thứ gì liên quan tới thành viên/committee nội bộ. Parent Chain chỉ biết đúng 1 khoá `FloatIdentityKey` cho mỗi cụm.
+- **`ChainRegistry` được đánh khoá bằng `Keccak256(FloatIdentityKey)`, không còn bằng `chainID`.** ChainId kiểu EVM của cụm đó (ví dụ 991, dùng nội bộ cho JSON-RPC/ký giao dịch của chính cụm) vẫn có thể lưu như 1 trường mô tả thuần hiển thị — **không bao giờ** dùng trong bất kỳ khoá lưu trữ hay nội dung ký nào trên Parent Chain.
+- **`NodeFloatAccount`** đánh khoá bằng `Keccak256(FloatIdentityKey)` — không phải `chainID`.
+- **Xác thực (Transfer/Deposit/MarkClaimed/Reclaim):** 1 chữ ký BLS đơn từ `FloatIdentityKey` của cụm liên quan — không có `QuorumCert`/`Committee` nào khác trên Parent Chain, vì Parent Chain không còn khái niệm Committee nữa (xem trên).
+- ✅ **ĐÃ CHỐT (2026-09-27) — Không có transaction "đăng ký cụm" riêng:** `ChainRegistry` entry và `NodeFloatAccount` cho 1 `FloatIdentityKey` **không tồn tại mặc định** trong state (giống hệt account EVM — không phải "tồn tại với giá trị 0", mà là hoàn toàn không có entry). Entry đầu tiên được tạo ra tự động đúng lúc giao dịch **`DepositToFloat`/`TransferFloat` đầu tiên nhắm tới `FloatIdentityKey` đó** được ký hợp lệ và có tiền thật đi kèm — 1 giao dịch duy nhất vừa tạo danh tính vừa ghi số dư, không cần bước "khởi tạo" tách biệt. Permissionless hoàn toàn: không bond, không whitelist, không admin duyệt — vì bản thân việc ghi state đã bị chặn tự nhiên bởi yêu cầu "phải có tiền thật di chuyển", không tốn gì để spam.
+
+### 0.4. State đầy đủ của Parent Chain kiểu mới
+
+| Bảng | Khoá | Giá trị | Vai trò |
+|---|---|---|---|
+| `ChainRegistry` | `Keccak256(FloatIdentityKey)` | `FloatIdentityKey`, `chainID` EVM (chỉ mô tả) — **không có `Committee`** (mục 0.3) | Danh tính từng cụm; nguồn tra `FloatIdentityKey` để xác thực chữ ký đơn cho các thao tác Float; entry chỉ tồn tại sau giao dịch tiền đầu tiên (mục 0.3), không có bước đăng ký riêng |
+| `NodeFloatAccount` (Balance) | `Keccak256(FloatIdentityKey)` | số dư (`*big.Int`, tiền thật, không âm) | Quỹ liên-cụm; xem mục 3 |
+| `ClaimedMessages` | `MessageID` | outcome (none/credited/refund/reclaimed) | Chống xử lý trùng, chặn race Reclaim-vs-Claimed; xem mục 3.3/3.6 |
+| Account Registry | `user_address` | `FloatIdentityKey` (hoặc khoá đã hash của cụm sở hữu) | Tra cứu cụm sở hữu 1 địa chỉ user — mục 5.1, trước đây "Mở rộng `AccountManager` contract có sẵn" (không còn đúng — xem mục 0.2, không có contract nào cả) |
+
+### 0.5. Điều KHÔNG đổi
+
+- Toàn bộ **logic nghiệp vụ** mục 3 (Deposit/Transfer/Refund/Reclaim), mục 3.5 (bất khả thi thanh khoản), mục 4.2-4.4 (velocity-limit outflow #11/#14), mục 6.1/6.3 (mất kết nối, bài toán phân bổ khi node chết), mục 13 (state machine nội bộ 1 node) — vẫn đúng nguyên vẹn, chỉ đổi *nơi và cách* Parent Chain lưu trữ/xác thực, không đổi *luật chơi*.
+- Cụm thực thi (`simple_chain`, `consensus_mode="raft"`) không đổi gì — mục 2.2, 2.5, 2.6 vẫn đúng nguyên vẹn.
+
+### 0.6. Quyết định đã chốt (2026-09-27) & việc còn mở
+
+✅ **Đã chốt:**
+- **Kênh giao dịch:** RPC riêng, tối giản, dành riêng cho Parent Chain kiểu mới — chỉ phục vụ các native tx (`TransferFloat`, `DepositToFloat`, `MarkClaimed`, `ReclaimFloat`, tra cứu Account Registry...), không tái dùng hình dạng JSON-RPC `eth_*`/tx-pool của `simple_chain`.
+- **Đăng ký cụm mới:** permissionless, không cần bond, không có tx "Register" riêng — xem mục 0.3 (state sinh tự động qua giao dịch tiền đầu tiên).
+- **`Committee`:** bỏ hẳn khỏi Parent Chain — xem mục 0.3.
+- **Consensus cho Parent Chain:** 1 cụm validator BLS/BFT-DAG riêng, độc lập hoàn toàn với mọi cụm thực thi (không dùng chung máy/khoá với 231/230 hay bất kỳ cụm Raft nào) — cấu hình cụ thể (số node, ngưỡng, genesis) làm ở giai đoạn triển khai.
+- **`SecurityBond`/`SlashOnEquivocation`/`DeadChains` mục 4.1, 6.2 — BỎ HẲN, không phải hoãn:** Lý do kỹ thuật (2026-09-27): mọi giao dịch ghi lên Parent Chain (kể cả publish `AccountTreeRoot` snapshot mục 6.3) đều đi kèm `nonce` tăng dần và commit thẳng vào đúng 1 sổ cái tuần tự duy nhất của Parent Chain — khác hẳn hệ cũ (nơi commit-root được gossip/attest off-chain qua `QuorumCert` cho nhiều observer trước khi lên chain, nên mới cần phát hiện equivocation hậu kiểm). Vì Parent Chain chỉ chấp nhận đúng 1 giao dịch cho mỗi `nonce`, **không có cách nào để 1 `FloatIdentityKey` khiến 2 nội dung khác nhau cùng được chấp nhận cho cùng 1 nonce** — bản thân tính tuần tự hoá đã chặn tận gốc lớp rủi ro mà `SlashOnEquivocation` từng xử lý, không cần cơ chế phát hiện/phạt nào thêm. Hệ quả: `NodeFloatAccount` của 1 cụm chết hẳn (không còn ai gửi giao dịch ký được nữa) bị khoá vĩnh viễn, không có đường giải ngân ở bản đầu — chấp nhận như hệ quả, giống quyết định hoãn Migration Account 2026-09-24. Pipeline Snapshot+DA-check+Delay 72h (mục 6.3) do đó **cũng bỏ theo** (không còn trigger `DeadChains` nào để kích hoạt) — không phải việc còn mở, mà là quyết định KHÔNG xây ở bản đầu.
+- **Đăng ký Account Registry cần 2 chữ ký trong cùng 1 giao dịch, KHÔNG cần `nonce`:** chữ ký ECDSA/secp256k1 thật của chính `user_address` (chứng minh chính chủ đồng ý — khớp mục 12 Q1) **và** chữ ký BLS của `FloatIdentityKey` (cụm xác nhận nhận user này) — thiếu 1 trong 2 thì Parent Chain từ chối ghi. Đây là hành động 1-lần-duy-nhất không ghi đè, nên rule "entry đã tồn tại thì từ chối" tự nó đã đủ chống trùng/replay — không cần `nonce` như các tx lặp lại (`TransferFloat`/`DepositToFloat`). Cập nhật cho mục 5.1.
+- **Đổi/thu hồi `FloatIdentityKey` khi nghi lộ khoá:** **HOÃN, không triển khai ở bản đầu** — chấp nhận mất/lộ `FloatIdentityKey` là không phục hồi được (tương đương "cụm chết", xử lý như mục 6.2/6.3 đã bỏ: `NodeFloatAccount` khoá vĩnh viễn), giống quyết định hoãn Migration Account 2026-09-24. Không thiết kế cơ chế phục hồi phức tạp trước go-live.
+
+✅ **Mục 0.6 ĐÃ ĐÓNG (2026-09-27) — không còn việc mở nào.** Tất cả các điểm trên đã được quyết định; tài liệu mục 4.1/5.1/6.2/6.3/9 đã cập nhật khớp.
 
 ---
 
@@ -19,10 +74,13 @@
 ## 2. Phân chia Vai trò
 
 ### 2.1. Parent Chain / Root Anchor
-- **Account Registry:** `user_address -> chainID` (mục 5.1).
-- **ChainRegistry:** danh tính + `NodeBlsPublicKey` từng node (có sẵn trong `GatewayEngine`).
-- **`NodeFloatAccount`** (thay cho `PerChainAllocation`-làm-trần): `chainID -> balance` — **tiền thật**, Parent Chain trực tiếp enforce không cho âm. Đây là state duy nhất Parent Chain giữ ngoài registry — vẫn **không giữ balance của từng user cuối** (state đó vẫn 100% ở local mỗi node).
-- **`SecurityBondLedger` + `SlashOnEquivocation`:** phạm vi bảo vệ: đăng ký chain + chống khai khống PHÂN BỔ khi node chết (mục 4.1).
+
+> ⚠️ **SUPERSEDED (mục 0):** "có sẵn trong `GatewayEngine`" không còn đúng — Parent Chain là 1 loại node mới, không dùng `GatewayEngine`. Khoá lưu trữ đổi từ `chainID` sang `FloatIdentityKey` (mục 0.3/0.4). Nội dung 3 gạch đầu dòng dưới đây (VAI TRÒ) vẫn đúng, chỉ đổi *nơi lưu*.
+
+- **Account Registry:** `user_address -> FloatIdentityKey` của cụm sở hữu (mục 5.1, mục 0.4).
+- **ChainRegistry:** danh tính + `FloatIdentityKey` + `Committee` từng cụm — viết mới native trên Parent Chain kiểu mới (mục 0.2/0.4), không còn "có sẵn trong `GatewayEngine`".
+- **`NodeFloatAccount`** (thay cho `PerChainAllocation`-làm-trần): `Keccak256(FloatIdentityKey) -> balance` — **tiền thật**, Parent Chain trực tiếp enforce không cho âm. Đây là state duy nhất Parent Chain giữ ngoài 2 bảng registry — vẫn **không giữ balance của từng user cuối** (state đó vẫn 100% ở local mỗi node).
+- **`SecurityBondLedger` + `SlashOnEquivocation`:** phạm vi bảo vệ (Ý TƯỞNG, chưa đổi): đăng ký chain + chống khai khống PHÂN BỔ khi node chết (mục 4.1). ⚠️ **Cơ chế implement cụ thể chưa thiết kế lại cho node kiểu mới — việc còn mở, mục 0.6.**
 
 ### 2.2. Raft Sequencer Cluster (Execution Layer)
 - **State nội bộ:** LevelDB riêng đồng bộ qua Raft (Leader -> Followers) — balance, nonce, contract state của user thuộc cụm. Tuân thủ tuyệt đối Zero-Fork nội bộ.
@@ -34,7 +92,9 @@
 
 Cụm Sequencer giữ 100% device key để ký hộ — nếu Leader/toàn bộ cụm bị hack, kẻ tấn công ký được giao dịch nội bộ giả mà không để lại bằng chứng phân biệt được với user thật. Không giải quyết triệt để bằng kỹ thuật được (đánh đổi cố hữu của mô hình ký hộ); giảm thiểu bằng: (1) ngưỡng rút + delay cho giao dịch lớn, (2) anomaly detection, (3) tuỳ chọn non-custodial cho tài khoản lớn, (4) **Signed Receipt + kênh report cho user** khi nghi ngờ cụm thực thi sai (mục 15) — bắt buộc xây cả 4 làm baseline trước go-live. ✅ **ĐÃ CHỐT (2026-09-24):** chấp nhận custodial thuần cho giai đoạn thử nghiệm/quy mô nhỏ, đánh giá lại khi quy mô tài sản tăng (Q9-rủi-ro, `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1). ⚠️ **4 biện pháp trên chỉ GIẢM THIỆT HẠI, không phải PHỤC HỒI** — khi khoá đã thực sự bị lộ/mất, con đường phục hồi là đổi khoá của chainID đó bằng `ApplyCommitteeUpdate` (khi khoá cũ còn ký được) (việc đổi khoá do chính khoá hiện hành ký). Với Rollup Cluster mọi thành viên giữ cùng 1 khoá nên mất khoá chỉ xảy ra khi mất khoá trên **mọi** thành viên (`SEQUENCER_STEP_BY_STEP_PLAN.md` mục 0.2, C4). `RecoveryCommittee` đã bị gỡ hoàn toàn 2026-09-24, nên nếu mất khoá trên mọi node thì chain không đổi khoá được (mục 6.2) — cần đưa vào runbook (mục 9.2), không phải chi tiết ngầm hiểu.
 
-### 2.4. 1 Cụm Raft = 1 `chainID` riêng (ĐÃ CHỐT)
+### 2.4. 1 Cụm Raft = 1 `chainID` riêng (ĐÃ CHỐT — granularity, tên gọi `chainID` ở đây SUPERSEDED)
+
+> ⚠️ **SUPERSEDED một phần (mục 0.3):** Ý chính của mục này — mỗi cụm Raft là 1 đơn vị tin cậy duy nhất, che giấu độ phức tạp nội bộ, xuất ra ngoài đúng 1 danh tính — **vẫn đúng**. Nhưng danh tính đó không còn là `chainID`/`RegisterChainViaStake`/`GatewayEngine` (hệ CŨ) — đó là **`FloatIdentityKey`** đăng ký vào `ChainRegistry` của Parent Chain kiểu mới (mục 0.3/0.4). Câu "chữ ký gửi lên Parent Chain do Leader đương nhiệm ký đại diện cho toàn cụm" cũng cần hiểu lại: Leader ký bằng chính `FloatIdentityKey` của cụm (1 khoá BLS cố định, tách biệt khoá đồng thuận nội bộ giữa các replica) — không phải `QuorumCert` đa chữ ký của `Committee`.
 
 Mỗi cụm Raft đăng ký `chainID` riêng qua `RegisterChainViaStake`, đại diện như một node duy nhất trên Parent Chain. Lý do: `GatewayEngine` (`ChainRegistry`, `SecurityBond`) hoạt động ở đúng granularity `chainID`, ngầm giả định đây là 1 đơn vị tin cậy duy nhất. Cụm Raft che giấu độ phức tạp nội bộ (bầu Leader, replicate log), chỉ xuất ra ngoài 1 danh tính (BLS Public Key của cụm) và giao tiếp với Parent Chain như 1 thực thể đồng nhất. Hệ quả: chữ ký gửi lên Parent Chain do Leader đương nhiệm ký đại diện cho toàn cụm, không có redundancy signer thật trên góc nhìn của Parent Chain, nhưng có tính HA (High Availability) mạnh mẽ nhờ Raft nội bộ.
 
@@ -83,6 +143,8 @@ Nhằm đảm bảo 100% tuân thủ **Zero-Fork Invariant** (Part 2.5 của `AG
 
 ### 3.1. Vì sao Node Float Account thay vì trần phân bổ + bond (Phân tích khoảng cách A0 & Quyết định kiến trúc)
 
+> ⚠️ **SUPERSEDED (mục 0):** Bảng gap-analysis và mục "Tái sử dụng an toàn" dưới đây so sánh với `GatewayEngine`/`gateway.go` với giả định Parent Chain là Root Anchor kiểu EVM chạy Gateway như 1 precompile — giả định đó không còn đúng (mục 0.2). Không còn "blob JSON `gateway_engine_state_v1`" nào để so sánh per-key-vs-blob (điểm 1 của "Lý do kỹ thuật cốt lõi"), không còn Block-STM barrier tx (điểm 2 — Parent Chain kiểu mới không chạy Block-STM/EVM), và **không còn tái dùng `ChainRegistry`/`SlashOnEquivocation` từ `GatewayEngine`** (điểm 4) — cả hai giờ viết mới, native (mục 0.2/0.4). Phần **quyết định thật sự còn giữ nguyên**: `NodeFloatAccount` và `ClaimedMessages` lưu per-key (nay per-key là lựa chọn DUY NHẤT, không có blob nào khác để so sánh), tách rời khỏi cơ chế `outbound`/`attestCommit`/`claimMessage` cũ (cơ chế cũ đó thuộc về Root Anchor kiểu EVM cũ, không chạy trên Parent Chain kiểu mới nữa — không phải "giữ nguyên vẹn song song" như bảng dưới mô tả, vì Parent Chain kiểu mới không có 2 hệ song song, chỉ có 1).
+
 Mô hình `PerChainAllocation`-làm-trần + `SecurityBond` tách biệt (răn đe SAU KHI phát hiện gian lận) cần 3 bước cho mỗi giao dịch cross-node (`Outbound` → `BatchOutboundCommit`+`QuorumCert` → `ClaimMessage` với hard-cap `FundedAmount`/`ClaimedAmount`), và khi node chết cần cả 1 pipeline nặng (Snapshot, Archival, Velocity, Delay 72h, chống DA-Withholding) mới rút lại được tài sản treo.
 
 `NodeFloatAccount` là tiền thật, Parent Chain tự enforce không cho âm — chuyển giá trị cross-node là 1 lệnh ghi sổ atomic, không cần "khoá rồi chờ claim".
@@ -108,12 +170,14 @@ Chốt chọn: **(ii) Xây dựng `NodeFloatAccount` và `ClaimedMessages` song 
 
 #### Bảng Quyền sở hữu & Bất biến (Ownership & Invariant Table)
 
+> ⚠️ **Cập nhật khoá theo mục 0.3/0.4:** "Root Anchor per-key" bên dưới nay là Parent Chain kiểu mới, khoá bằng `Keccak256(FloatIdentityKey)` chứ không phải `chainID`; "SmartContractDB per-key" của `RollupRecord` KHÔNG đổi (đó là local state của Rollup Node, vẫn dùng NOMT/SmartContractDB như hiện nay — chỉ Parent Chain đổi hạ tầng).
+
 | Cấu trúc dữ liệu | Nơi lưu trữ & Chủ sở hữu | Bất biến bắt buộc (Invariants) | Quyền gọi (Caller Authorization) |
 |---|---|---|---|
-| `NodeFloatAccount[chainID]` | Parent Chain (Root Anchor per-key: `rollup_fa_v1`) | `FA[chainID] >= 0`; $\sum FA == \text{genesis\_total\_supply}$ | `depositToFloat` (User nạp tiền); `transferFloat` (Node gửi đã xác thực); `refundFloat` (Node nhận khi revert); `reclaimFloat` (Parent Chain khi timeout). |
-| `ClaimedMessages[messageID]` | Parent Chain (Root Anchor per-key: `rollup_claimed_v1`) | Write-once (Idempotent), ghi nhận `Outcome` (CREDITED hoặc REFUND); một khi đã ghi thì `reclaimFloat` bị từ chối vĩnh viễn. | Node đích (`markClaimed` kèm chữ ký node). |
-| `RollupRecord[messageID]` | Local Rollup Node (SmartContractDB per-key: `rollup_msg_v1`) | Trạng thái chuyển đổi đơn điệu qua pure state machine `Next()`. Không bao giờ vừa SUCCESS vừa REFUNDED. | Engine thực thi nội bộ của Rollup Node. |
-| `ReplayGuard / Nonce` | Parent Chain (`UnregisterNonce`, `sourceSeq`) | Đơn điệu tăng dần (strictly monotonic), chống replay các chứng chỉ hoặc giao dịch đã gửi. | Committee của node hoặc User ký giao dịch. |
+| `NodeFloatAccount[Keccak256(FloatIdentityKey)]` | Parent Chain (kiểu mới, mục 0.4) | `FA[id] >= 0`; $\sum FA == \text{tổng đã nạp}$ (mục 4.3) | `depositToFloat` (User nạp tiền, permissionless); `transferFloat`/`refundFloat` (ký đơn bởi `FloatIdentityKey` nguồn); `reclaimFloat` (ký đơn bởi `FloatIdentityKey` nguồn, sau timeout). |
+| `ClaimedMessages[messageID]` | Parent Chain (kiểu mới, mục 0.4) | Write-once (Idempotent), ghi nhận `Outcome` (CREDITED hoặc REFUND hoặc RECLAIMED); một khi đã ghi thì thao tác còn lại (Claim hoặc Reclaim) bị từ chối vĩnh viễn. | Node đích (`markClaimed`, ký đơn bởi `FloatIdentityKey` đích). |
+| `RollupRecord[messageID]` | Local Rollup Node (SmartContractDB per-key: `rollup_msg_v1`) — **không đổi** | Trạng thái chuyển đổi đơn điệu qua pure state machine `Next()`. Không bao giờ vừa SUCCESS vừa REFUNDED. | Engine thực thi nội bộ của Rollup Node. |
+| `ReplayGuard / Nonce` (sourceSeq) | Parent Chain (kiểu mới), theo `Keccak256(FloatIdentityKey)` | Đơn điệu tăng dần (strictly monotonic), chống replay chữ ký đã gửi. | `FloatIdentityKey` của cụm nguồn tự ký. |
 
 ⚠️ **Giới hạn thật còn lại:** Parent Chain "không lưu state ứng dụng" nên vẫn không thể tự verify 1 node có credit đúng cho user cục bộ của mình hay không. Đây **không phải** 1 "bước Nạp quỹ" rời rạc nào (mục 3.2: không có bước đó, không có gì để khai khống ở đây) — mà là rủi ro custody đã biết (mục 2.3/#8: node toàn quyền với state cục bộ). Cách duy nhất bắt được sai lệch này là ở thời điểm node chết, qua Snapshot/Allocation-proof pipeline (mục 6.3).
 
@@ -132,7 +196,7 @@ Chốt chọn: **(ii) Xây dựng `NodeFloatAccount` và `ClaimedMessages` song 
 
 1. User A (Node 1) gửi yêu cầu chuyển cho User B (Node 2).
 2. Vì `NodeFloatAccount` luôn ≥ balance của A (mục 3.5), không có kịch bản "Float không đủ" cần phân biệt với mất-kết-nối — bước này chỉ là **kiểm tra số dư cục bộ của A** (bình thường, không liên quan Parent Chain) trước khi trừ. Việc đọc-kiểm tra-rồi-ghi cần node tự serialize/khoá nội bộ, để tránh 2 yêu cầu cùng lúc từ CÙNG 1 user A đọc thấy "đủ" rồi cùng trừ vượt quá số dư thật.
-3. Qua được bước kiểm tra: Leader của Cụm 1 trừ balance cục bộ của A (đồng thời replicate log qua Raft), đồng thời gửi 1 giao dịch **duy nhất, atomic** lên Parent Chain: `NodeFloatAccount[1] -= V`, `NodeFloatAccount[2] += V`, kèm metadata (`Target: B`, `MessageID` duy nhất, `Payload` nếu là contract-call). Chữ ký là do Leader của Cụm 1 tự ký đại diện cho toàn cụm, gộp luôn vào transaction này.
+3. Qua được bước kiểm tra: Leader của Cụm 1 trừ balance cục bộ của A (đồng thời replicate log qua Raft), đồng thời gửi 1 giao dịch **duy nhất, atomic** lên Parent Chain: `NodeFloatAccount[FloatIdentityKey_1] -= V`, `NodeFloatAccount[FloatIdentityKey_2] += V`, kèm metadata (`Target: B`, `MessageID` duy nhất, `Payload` nếu là contract-call). Chữ ký là **1 chữ ký BLS đơn** từ `FloatIdentityKey` của Cụm 1 (mục 0.3 — không phải `QuorumCert` đa số của `Committee`, và Leader dùng khoá `FloatIdentityKey` này, tách biệt với khoá ký nội bộ giữa các replica của cụm), gộp luôn vào transaction này.
 4. Ngay khi transaction confirm trên Parent Chain: **tiền đã thật sự nằm ở `NodeFloatAccount[2]`** — không có khái niệm "Pending chờ claim" cho phần GIÁ TRỊ.
 5. Node 2 theo dõi Parent Chain, thấy có credit mới addressed cho mình. **Chống xử lý trùng bắt buộc (#10):** Node 2 phải tự kiểm tra `MessageID` này đã xử lý (credit hoặc refund) chưa trước khi làm bất cứ gì — tự giữ 1 bảng "MessageID đã xử lý" cục bộ (không có hàm trung tâm nào làm hộ).
 6. Node 2 kiểm tra local: `B` có phải account hợp lệ đang được chính mình quản lý không.
@@ -168,7 +232,9 @@ Khác với node chết hẳn (mục 6), trường hợp này là Node 2 **vẫn
 
 ### 4.1. Vai trò của `SecurityBond` trong mô hình Float Account
 
-Không cần bất biến "Bond-vs-Deposit" nào — `NodeFloatAccount` là 1 bất biến tự động (mục 3.2), không có bước "nạp quỹ" rời rạc để node khai khống, nên không còn gì để giới hạn thiệt hại ở bước đó. `SecurityBond` còn 2 con đường có sẵn trong `GatewayEngine`: (1) `SlashOnEquivocation` — **permissionless** — khi double-sign; sau khi `RecoveryCommittee`/`DeclareChainDeadWithCert` bị gỡ (2026-09-24), đây là đường DUY NHẤT forfeit bond và đặt `DeadChains`; (2) rút bond hợp lệ qua `UnregisterChainWithCert` do chính committee của chain tự ký, sau unbonding period (mục 6.2). Còn đúng 1 vai trò MỚI cần bảo vệ: chống **node khai khống PHÂN BỔ** khi chết (gán tổng tiền thật cho 1 địa chỉ nó kiểm soát thay vì chia đúng cho user) — cơ chế bảo vệ xem mục 6.3 (Snapshot + DA-Withholding + Delay 72h). ✅ **ĐÃ CHỐT — `SlashOnEquivocation` bắt được double-sign `AccountTreeRoot`, không cần xây thêm gì:** xem xác nhận từ code ở mục 6.2.
+> ⚠️ **SUPERSEDED — ĐÃ CHỐT BỎ HẲN (2026-09-27, mục 0.6):** Mọi cơ chế nhắc tới dưới đây (`SecurityBond`, `SlashOnEquivocation`, `RecoveryCommittee`/`DeclareChainDeadWithCert` đã gỡ, `UnregisterChainWithCert`) là code có sẵn trong `GatewayEngine` (`gateway.go`) — chạy trên Root Anchor kiểu EVM CŨ. Parent Chain kiểu mới **không xây cơ chế tương đương, không phải vì thiếu mà vì không cần**: mọi giao dịch (kể cả publish `AccountTreeRoot`) đi kèm `nonce` và commit thẳng vào 1 sổ cái tuần tự duy nhất trên Parent Chain — không có đường nào để 2 nội dung khác nhau cùng được chấp nhận cho cùng 1 nonce, nên không có "equivocation" nào để phát hiện/phạt (lý do đầy đủ ở mục 0.6). Hệ quả: không có bond, không có slash, không có `DeadChains`. Cụm chết hẳn → `NodeFloatAccount` khoá vĩnh viễn, chấp nhận đây là hệ quả ở bản đầu. Giữ nguyên văn dưới đây làm tài liệu tham khảo LỊCH SỬ, không phải mô tả implementation.
+
+Không cần bất biến "Bond-vs-Deposit" nào — `NodeFloatAccount` là 1 bất biến tự động (mục 3.2), không có bước "nạp quỹ" rời rạc để node khai khống, nên không còn gì để giới hạn thiệt hại ở bước đó. `SecurityBond` còn 2 con đường có sẵn trong `GatewayEngine` (hệ CŨ): (1) `SlashOnEquivocation` — **permissionless** — khi double-sign; sau khi `RecoveryCommittee`/`DeclareChainDeadWithCert` bị gỡ (2026-09-24), đây là đường DUY NHẤT forfeit bond và đặt `DeadChains`; (2) rút bond hợp lệ qua `UnregisterChainWithCert` do chính committee của chain tự ký, sau unbonding period (mục 6.2). Còn đúng 1 vai trò MỚI cần bảo vệ: chống **node khai khống PHÂN BỔ** khi chết (gán tổng tiền thật cho 1 địa chỉ nó kiểm soát thay vì chia đúng cho user) — cơ chế bảo vệ xem mục 6.3 (Snapshot + DA-Withholding + Delay 72h). ✅ **ĐÃ CHỐT (cho hệ CŨ) — `SlashOnEquivocation` bắt được double-sign `AccountTreeRoot`, không cần xây thêm gì:** xem xác nhận từ code ở mục 6.2. **Cho Parent Chain kiểu mới: cần làm lại tương đương, chưa có.**
 
 ### 4.2. Velocity-limit cho Transfer: không cần để chống mint sai — nhưng vẫn cần vì lý do khác
 
@@ -198,13 +264,15 @@ Mỗi Transfer là ghi sổ trực tiếp trên số dư THẬT đã có sẵn t
 
 ### 5.1. Account Registry
 
+> ⚠️ **SUPERSEDED (mục 0.3/0.4), ĐÃ CHỐT cơ chế đăng ký mới (2026-09-27):** Account Registry vẫn nằm trên Parent Chain (mục 0.4), nhưng key/value và cơ chế đăng ký bên dưới viết cho hệ CŨ (`chainID`, `handleSetBlsPublicKey` — 1 EVM tx handler, không tồn tại trên Parent Chain kiểu mới không-EVM). Bảng đúng cho kiểu mới: key vẫn `user_address`, value là **`FloatIdentityKey`** (hoặc `Keccak256(FloatIdentityKey)`) của cụm sở hữu. **Xác thực: 1 giao dịch native duy nhất mang 2 chữ ký** — (1) chữ ký ECDSA/secp256k1 thật của chính `user_address` (chứng minh chính chủ đồng ý, khớp mục 12 Q1) **và** (2) chữ ký BLS của `FloatIdentityKey` (cụm xác nhận nhận user này) — thiếu 1 trong 2 thì Parent Chain từ chối ghi. Permissionless (không admin-confirm, không gate riêng) — chặn spam bằng chính yêu cầu "phải có chữ ký thật của user_address", giống nguyên lý mục 0.3 cho đăng ký cụm. **Không cần `nonce`:** đây là hành động 1-lần-duy-nhất, không ghi đè — bản thân rule "entry đã tồn tại thì từ chối" (dòng "Đăng ký 1 lần, chống ghi đè" bên dưới) đã đủ chống trùng/replay, khác với `TransferFloat`/`DepositToFloat` (có thể lặp lại nhiều lần, cần `nonce` để phân biệt thứ tự). Phần "chặn double-registration bằng serialize tại Parent Chain" và "vốn khởi tạo không rút từ pool Reserve" vẫn đúng nguyên lý.
+
 | Bảng | Key | Value | Vai trò |
 |---|---|---|---|
 | Account Registry | `user_address` | `chainID` (của node sở hữu) | Định tuyến `Target` đến đúng node; node đó tự kiểm tra hợp lệ trước khi credit (mục 3.3 bước 4) |
 
 - **Đăng ký 1 lần, chống ghi đè:** chỉ chấp nhận lần đầu, hoặc cần chữ ký của node hiện tại để chuyển nhượng (Migration, mục 5.3).
 - **Chặn double-registration:** cơ chế chặn nằm ở chính write vào Account Registry trên Parent Chain (transaction xử lý tuần tự = điểm serialize duy nhất) — không coi admin-confirm cục bộ tại node là đã chốt quyền sở hữu (chi tiết đầy đủ mục 12 Q1).
-- **An toàn trước DoS:** đăng ký qua `handleSetBlsPublicKey` + admin confirm (2 bước, có gate) — không permissionless.
+- **An toàn trước DoS (hệ CŨ):** đăng ký qua `handleSetBlsPublicKey` + admin confirm (2 bước, có gate) — không permissionless. **Hệ kiểu mới: 2 chữ ký secp256k1+BLS trong 1 tx, permissionless — xem ghi chú SUPERSEDED ở trên.**
 - **Vốn khởi tạo khi đăng ký node mới (đã đóng — Q5):** `RegisterChainViaStake` dùng đúng số tiền thật operator/nhà đầu tư tự bỏ ra từ ví của họ (bond đăng ký) — không rút từ 1 "pool Reserve" do Parent Chain khởi tạo genesis. `NodeFloatAccount` của node mới không cần "vốn khởi đầu" riêng nào cả — nó bắt đầu ở 0 và tự động tăng đúng bằng số tiền user đầu tiên tự nạp vào tài khoản của họ (mục 3.2).
 
 ### 5.2. Contract Registry — KHÔNG dùng registry toàn cục
@@ -227,6 +295,8 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 
 ### 6.2. Node chết hẳn — ai xác nhận, xử lý ra sao
 
+> ⚠️ **SUPERSEDED — ĐÃ CHỐT BỎ HẲN (2026-09-27, mục 0.6):** Toàn bộ cơ chế cụ thể dưới đây (`SlashOnEquivocation`, `DeadChains`, `UnregisterChainWithCert`, `ApplyCommitteeUpdate`, `ComputeCommitRootAttestMessage`, `epoch_sync.go`) là code CÓ SẴN của `GatewayEngine` hệ CŨ (Root Anchor kiểu EVM) — **không có bản native tương đương trên Parent Chain kiểu mới, và quyết định là KHÔNG XÂY**, không phải chưa kịp xây: mọi giao dịch trên Parent Chain kiểu mới (kể cả publish `AccountTreeRoot`) đi kèm `nonce`, commit thẳng vào 1 sổ cái tuần tự duy nhất — không có cách nào 2 nội dung khác nhau cùng được chấp nhận cho cùng 1 nonce, nên không có "equivocation" nào để `SlashOnEquivocation` bắt (lý do đầy đủ mục 0.6). Hệ quả: không `Committee` (nên không có `ApplyCommitteeUpdate`), không bond/`DeadChains`, không unbonding period. `FloatIdentityKey` mất/lộ hoàn toàn tương đương "node chết" — không có đường phục hồi ở bản đầu (giống rủi ro #8 cũ, nhưng nay là quyết định thiết kế chứ không phải khoảng trống). Đọc phần dưới như tài liệu THAM CHIẾU LỊCH SỬ, không phải mô tả cơ chế của node kiểu mới.
+
 - Tiêu chí trigger: 2 lớp — (1) tự động cảnh báo sau N lần bỏ lỡ chu kỳ hoạt động bình thường liên tiếp, (2) **bắt buộc xác nhận thủ công của operator** trước khi failover/thay node (`SEQUENCER_STEP_BY_STEP_PLAN.md` C5) — không tự động hoá vì hậu quả quá lớn. (Không còn bước "tuyên bố chết": `DeclareChainDeadWithCert` đã bị gỡ 2026-09-24.)
 - ⚠️ **CẬP NHẬT 2026-09-24 — `RecoveryCommittee` đã bị gỡ hoàn toàn** (code, config, tooling deploy). Thẩm quyền còn lại trên Parent Chain:
 
@@ -240,7 +310,7 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 
 ### 6.3. Rút lại giá trị khi node chết — bài toán PHÂN BỔ
 
-> ⚠️ **CẬP NHẬT 2026-09-24:** `DeclareChainDeadWithCert` đã bị gỡ; `DeadChains` chỉ được đặt qua `SlashOnEquivocation`. Toàn bộ pipeline phân bổ bên dưới (Snapshot → DA-check → Delay 72h → `ClaimDeadChainBalance`) chỉ chạy được khi chain đã bị slash. Node chết hẳn mà không double-sign: `NodeFloatAccount[node]` và bond bị khoá, không có đường giải ngân — hệ quả đã được chấp nhận (quyết định 2026-09-24), giảm thiểu bằng các replica nhân bản batch trên đa số (`SEQUENCER_STEP_BY_STEP_PLAN.md`). Vì vậy Snapshot & Archival (roadmap mục 10 bước 5) hạ ưu tiên: chỉ đáng xây nếu sau này có lại một cơ chế tuyên bố chết.
+> ⚠️ **SUPERSEDED — TOÀN BỘ MỤC 6.3 BỎ Ở BẢN ĐẦU, KHÔNG PHẢI HOÃN (2026-09-27, mục 0.6):** Vì không còn `DeadChains`/`SlashOnEquivocation` (mục 6.2), pipeline Snapshot→DA-check→Delay 72h→`ClaimDeadChainBalance` bên dưới **không có trigger nào để chạy** trên Parent Chain kiểu mới — quyết định là KHÔNG xây pipeline này ở bản đầu, không phải "chưa cần" hay "hạ ưu tiên" như ghi chú 2026-09-24 cũ. Cụm chết hẳn (không còn ai gửi giao dịch ký được bằng `FloatIdentityKey` nữa) → `NodeFloatAccount` khoá vĩnh viễn, không có đường giải ngân, chấp nhận là hệ quả thiết kế. Đọc phần dưới như tài liệu THAM CHIẾU Ý TƯỞNG (đã từng được thiết kế kỹ cho hệ cũ), không phải việc cần làm cho node kiểu mới.
 
 `NodeFloatAccount` là 1 bất biến tự động (mục 3.2) — mọi số dư user LUÔN tự động phản ánh trong `NodeFloatAccount` ngay khi phát sinh, không có phần "chưa kịp nạp" nằm chờ dài hạn nào cả. Khi node chết, chỉ còn đúng **1 bài toán duy nhất**: `NodeFloatAccount[node chết]` chắc chắn có THẬT (Parent Chain tự verify được, mục 4.3) — nhưng **Parent Chain không biết tổng đó phải CHIA cho user nào bao nhiêu**, vì phân bổ chi tiết chỉ tồn tại trên local node đã chết.
 
@@ -259,7 +329,9 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 
 ## 7. Tóm tắt Cấu trúc Data Model
 
-### Tại Parent Chain / Root Anchor
+> ⚠️ **SUPERSEDED (mục 0.4) — bảng "Tại Parent Chain / Root Anchor" dưới đây là hệ CŨ.** Cột "Nguồn" ("Mở rộng `AccountManager` contract có sẵn", "Có sẵn (`gateway.go`)") giả định Parent Chain là 1 chain EVM chạy `GatewayEngine` — không còn đúng, Parent Chain kiểu mới không có contract/account-state EVM nào cả (mục 0.2). Bảng đúng cho kiểu mới nằm ngay dưới bảng cũ (giữ bảng cũ lại làm tham chiếu lịch sử/ý tưởng nghiệp vụ, không phải mô tả implementation hiện tại).
+
+### Tại Parent Chain / Root Anchor (⚠️ hệ CŨ — xem bảng "kiểu mới" bên dưới)
 | Bảng / Struct | Nguồn | Vai trò |
 |---|---|---|
 | Account Registry | Mở rộng `AccountManager` contract có sẵn | `user_address -> chainID` |
@@ -268,6 +340,15 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 | **`ClaimedMessages`** | Cần xây | `MessageID -> bool` — đánh dấu đã xử lý (credit local hoặc hoàn tiền), dùng để chống xử lý trùng (#10), chống hoàn tiền 2 lần (#9), và làm điều kiện chặn Reclaim (mục 3.6, #12) |
 | `SecurityBondLedger` | Có sẵn | Bond, bảo vệ đăng ký chain + chống khai khống PHÂN BỔ khi node chết (mục 4.1) |
 | `DeadChains` | Có sẵn | Node đã tuyên bố chết, chặn outflow mới — **loại trừ tường minh Reclaim** (mục 6.3), vốn cũng là 1 outflow từ FA node chết nhưng là cơ chế thu hồi hợp lệ, không phải giao dịch mới cần chặn |
+
+### Tại Parent Chain kiểu mới (mục 0 — bảng ĐANG áp dụng)
+| Bảng / Struct | Nguồn | Vai trò |
+|---|---|---|
+| Account Registry | Viết mới, native (không contract) | `user_address -> FloatIdentityKey` (hoặc `Keccak256(FloatIdentityKey)`) của cụm sở hữu |
+| `ChainRegistry` | Viết mới, native | Khoá bằng `Keccak256(FloatIdentityKey)` — `FloatIdentityKey`, `Committee` (đa thành viên, có thể đổi), `chainID` EVM (chỉ mô tả) |
+| **`NodeFloatAccount`** | Viết mới, native | Khoá bằng `Keccak256(FloatIdentityKey)` — tiền thật, cùng bất biến/luật chơi mục 3 |
+| **`ClaimedMessages`** | Viết mới, native | `MessageID -> outcome` (none/credited/refund/reclaimed) — cùng vai trò chống trùng như bảng cũ |
+| `SecurityBondLedger` / `DeadChains` / permissionless-slash tương đương | **Chưa thiết kế lại — việc còn mở (mục 0.6, 4.1, 6.2)** | Vai trò ý tưởng giữ nguyên (bond đăng ký, chống khai khống phân bổ khi node chết); cơ chế implement cụ thể cho node kiểu mới CHƯA có |
 
 ### Tại mỗi BLS Node (Local DB)
 | Bảng / Struct | Key | Value | Vai trò |
@@ -285,6 +366,8 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 ---
 
 ## 9. Production Readiness Checklist
+
+> ⚠️ **SUPERSEDED (2026-09-27, mục 0.6 — đã chốt, không phải "còn mở" nữa):** Mục 9.2/9.3/10 bên dưới còn nhiều chỗ trích dẫn cơ chế hệ CŨ (`SlashOnEquivocation`, `ApplyCommitteeUpdate`, `ComputeCommitRootAttestMessage`, `SecurityBondLedger`, `PerChainAllocation`, contract Account Registry, `Committee`) — các cơ chế này **bị bỏ hẳn** trên Parent Chain kiểu mới, không phải "chưa xây": không có `Committee`/bond/slash/`DeadChains` (mục 0.6, 4.1, 6.2, 6.3), không có Snapshot/Archival Pipeline (mục 6.3 bỏ hẳn). Mọi checklist item nhắc tới các cơ chế này (#6, #7 phần "đổi khoá bằng ApplyCommitteeUpdate", #16) coi như **không áp dụng** cho node kiểu mới — cần loại khỏi checklist thật khi go-live, không phải thay tên hàm. Ý định vận hành còn lại (backup, runbook, review bảo mật, thứ tự roadmap) vẫn là hướng dẫn ĐÚNG cần giữ. Không rewrite chi tiết từng dòng ở đây để tránh trùng lặp — đọc song song với mục 0 khi dùng các mục 9/10 này.
 
 ### 9.1. Decision Log
 
@@ -309,6 +392,8 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 ---
 
 ## 10. Lộ trình triển khai
+
+> ⚠️ **SUPERSEDED một phần (mục 0.2):** Bước 1-2 dưới đây được viết khi giả định Parent Chain đã tồn tại sẵn (Root Anchor/EVM) và chỉ cần "xây thêm" `NodeFloatAccount` vào đó. Với kiến trúc kiểu mới, bước 2 thực ra là **dựng cả 1 node type mới từ đầu** (Rust consensus-core + P2P dùng chung, toàn bộ Go state/tx layer viết mới — mục 0.2), không phải thêm 1 bảng vào chain có sẵn — 3 bảng (`ChainRegistry`, `NodeFloatAccount`, Account Registry) ra đời CÙNG LÚC với node type mới đó, không phải lần lượt. Các bước 3-9 (luồng nghiệp vụ) vẫn đúng thứ tự và nội dung.
 
 1. ✅ **Đã chốt 5/5 mục từng chặn triển khai** (`RecoveryCommittee` = đã gỡ hoàn toàn (2026-09-24), Q9-rủi-ro = chấp nhận giai đoạn thử nghiệm, report node sai = Hướng A, Migration = hoãn, `SlashOnEquivocation`/`AccountTreeRoot` = có bắt được, chỉ cần ký đúng message — chi tiết `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1) — có thể bắt đầu bước 2.
 2. **Xây `NodeFloatAccount` trên Parent Chain** — cấu trúc dữ liệu mới, thay thế vai trò "trần phân bổ" của `PerChainAllocation` cho mục đích cross-node.
@@ -438,6 +523,8 @@ sequenceDiagram
 ---
 
 ## 14. Trao đổi dữ liệu Node ↔ Parent Chain & Doanh thu
+
+> ⚠️ **SUPERSEDED một phần (mục 0.2):** Mục 14 dưới đây dùng khái niệm "gas"/"tốn gas" và `RegisterChainViaStake`/`PostSecurityBond` kiểu EVM — Parent Chain kiểu mới không có gas/EVM revert (mục 0.2: mỗi giao dịch native có tập điều kiện hợp lệ riêng, thất bại thì từ chối rõ ràng) và chưa có cơ chế đăng ký/bond native tương đương (mục 0.6, việc còn mở). **Danh sách "gửi lên/lấy về" và ý tưởng doanh thu (14.3) vẫn là nội dung nghiệp vụ hữu ích, giữ nguyên tham khảo** — chỉ cần đọc "tốn gas" thành "tốn phí giao dịch native" (cơ chế phí cụ thể chưa thiết kế) khi áp dụng cho kiểu mới.
 
 ### 14.1. Node gửi gì lên Parent Chain, lấy gì về
 
