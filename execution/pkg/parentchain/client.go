@@ -10,7 +10,8 @@ import (
 // TransferEvent represents an observed incoming transfer on the Parent Chain.
 type TransferEvent struct {
 	MsgID       common.Hash
-	SourceChain uint64
+	SourcePubKey cm.PublicKey
+	DestPubKey   cm.PublicKey
 	SourceSeq   uint64
 	Sender      common.Address
 	Target      common.Address
@@ -38,4 +39,7 @@ type Client interface {
 	
 	// GetInboundTransfers returns incoming transfers and the new cursor
 	GetInboundTransfers(pubKey cm.PublicKey, cursor uint64) ([]*TransferEvent, uint64, error)
+	
+	GetTransferRecord(msgID common.Hash) (FloatTransferRecord, bool, error)
+	GetClaimed(msgID common.Hash) (FloatOutcome, error)
 }
