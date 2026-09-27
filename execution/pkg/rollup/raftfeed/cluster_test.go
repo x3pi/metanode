@@ -2,6 +2,7 @@ package raftfeed
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -143,6 +144,7 @@ func (h *harness) start(m *member) {
 	nd, err := startNode(ClusterConfig{
 		Raft: h.rcfg(m), Sink: sink, Durable: m.disk.last.Load, Secret: h.secret,
 		Transport: tr, ForwardListener: ln, Tune: h.tune, WrapLogStore: h.wrap[m.id], BlockHash: h.blockHashFor(m), ForwardAddrOf: h.fwdOf,
+		StateSource: &diskStateSource{d: m.disk}, StateTransferDir: filepath.Join(m.dir, "state_transfer"),
 		OnFatal: func(e error) { h.fatalMu.Lock(); h.fatals[m.id] = e; h.fatalMu.Unlock() },
 	})
 	if err != nil {
@@ -1126,5 +1128,58 @@ func TestCluster_SubmitIsNotAcknowledgedBeforeCommit(t *testing.T) {
 	select {
 	case <-res: // committed after healing, or reported uncommitted (already consumed above): both are honest
 	case <-time.After(submitCommitTimeout + 3*time.Second):
+	}
+}
+
+// diskStateSource stands in for the execution layer's consistent snapshot: it serialises the member's simulated
+// DB (the blocks its pipeline made durable) into files.
+type diskStateSource struct{ d *disk }
+
+func (s *diskStateSource) Snapshot(dst string) (StateMeta, error) {
+	s.d.mu.Lock()
+	defer s.d.mu.Unlock()
+	if err := os.MkdirAll(filepath.Join(dst, "history"), 0o755); err != nil {
+		return StateMeta{}, err
+	}
+	var buf []byte
+	for _, b := range s.d.received {
+		raw, err := proto.Marshal(b)
+		if err != nil {
+			return StateMeta{}, err
+		}
+		buf = binary.BigEndian.AppendUint32(buf, uint32(len(raw)))
+		buf = append(buf, raw...)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "history", "blocks.bin"), buf, 0o644); err != nil {
+		return StateMeta{}, err
+	}
+	meta := StateMeta{LastBlock: uint64(len(s.d.received))}
+	if n := len(s.d.received); n > 0 {
+		meta.BlockHash = common.BytesToHash(s.d.received[n-1].CommitHash).Hex()
+	}
+	return meta, nil
+}
+
+// loadDiskState reads what diskStateSource wrote into a member's simulated DB.
+func loadDiskState(t *testing.T, root string, to *member) {
+	t.Helper()
+	buf, err := os.ReadFile(filepath.Join(root, "history", "blocks.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	to.disk.mu.Lock()
+	defer to.disk.mu.Unlock()
+	to.disk.received = nil
+	for len(buf) > 0 {
+		n := binary.BigEndian.Uint32(buf)
+		var b pb.ExecutableBlock
+		if err := proto.Unmarshal(buf[4:4+n], &b); err != nil {
+			t.Fatal(err)
+		}
+		to.disk.received = append(to.disk.received, &b)
+		buf = buf[4+n:]
+	}
+	if n := len(to.disk.received); n > 0 {
+		to.disk.last.Store(to.disk.received[n-1].BlockNumber)
 	}
 }

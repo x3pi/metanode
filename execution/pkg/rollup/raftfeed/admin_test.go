@@ -614,3 +614,47 @@ func TestC4_NodeRefusesPromotingAReplicaThatHasNotExecuted(t *testing.T) {
 		t.Fatalf("check does not show the execution lag: %+v", r)
 	}
 }
+
+// While snapshots are held no replica compacts its log (so a state copied meanwhile stays newer than the leader's
+// latest snapshot); releasing resumes it; a forgotten hold releases itself.
+func TestC4_HoldSnapshotsStopsCompactionAndReleases(t *testing.T) {
+	h := newHarness(t, 3)
+	h.tune = func(c *raft.Config) {
+		c.SnapshotInterval = 50 * time.Millisecond
+		c.SnapshotThreshold = 10
+		c.TrailingLogs = 5
+	}
+	h.startAll()
+	l := h.leader()
+	if errs := h.admin().HoldSnapshots(h.members(), true); len(errs) > 0 {
+		t.Fatal(errs)
+	}
+	for i := 0; i < 80; i++ {
+		h.submit(l, testBatch(t, uint64(i)))
+	}
+	h.waitBlocks(80, h.m...)
+	time.Sleep(600 * time.Millisecond) // many snapshot intervals
+	for _, m := range h.m {
+		st := m.node.Status()
+		if !st.SnapshotsHeld || st.LastSnapshotIndex != 0 || st.FirstLogIndex > 1 {
+			t.Fatalf("%s compacted while snapshots were held: %+v", m.id, st)
+		}
+	}
+	if errs := h.admin().HoldSnapshots(h.members(), false); len(errs) > 0 {
+		t.Fatal(errs)
+	}
+	waitFor(t, "compaction after the release", 10*time.Second, func() bool { return l.node.Status().LastSnapshotIndex > 0 })
+}
+
+func TestC4_ForgottenSnapshotHoldReleasesItself(t *testing.T) {
+	old := snapshotHoldMax
+	snapshotHoldMax = 150 * time.Millisecond
+	t.Cleanup(func() { snapshotHoldMax = old })
+	h := newHarness(t, 3)
+	h.startAll()
+	l := h.leader()
+	if err := l.node.HoldSnapshots(true); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the hold to expire", 5*time.Second, func() bool { return !l.node.Status().SnapshotsHeld })
+}

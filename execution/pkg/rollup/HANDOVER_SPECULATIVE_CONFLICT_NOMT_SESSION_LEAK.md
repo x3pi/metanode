@@ -56,3 +56,6 @@ To remove the need for the gate the executor needs an ordering rule for the NOMT
 - Tests: `speculative_ir_gate_test.go` (waits for the predecessor, opens in GEI order, refuses a stale parent, cancel frees a waiter; mutants fail).
 - Live (C1, delivery gate disabled, 2 senders x 1500 txs): 5 of 5 runs complete, 0 watchdog, 4-16 conflicts per run all resolved as `stale parent` (previously: hung in 3/3 without any fix, 7/9 with part 1 only). 3-node raft cluster, 100k tx x several runs: 9.2-10.7k tx/s, 0 watchdog.
 - Rust mode: speculation there is lock-step, the gate is satisfied immediately. Full `ci.sh run-now --reset` result recorded in the PR.
+
+## Follow-up (2026-09-27, PR #145): the gate must not hold the execution read lock
+The gate of part 2 waited for the committer while the worker held `ExecutionMutex.RLock`. A pending writer (`PauseExecution` for a snapshot, P2P sync) blocks new readers, the committer needs the read lock to commit the predecessor, the writer waits for the worker: deadlock (seen live as PauseExecution stuck at "waiting for ExecutionMutex.Lock()"). The gate now releases the read lock while it waits and re-acquires it before returning; the stale-parent check runs after re-acquiring. Test: `TestIRGate_DoesNotHoldExecutionLockWhileWaiting`.
