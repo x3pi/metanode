@@ -53,13 +53,31 @@ func (se *SpeculativeExecutor) waitCommitted(ctx context.Context, need uint64) e
 	}
 }
 
+// executionLock is the RWMutex the speculative worker holds (as a reader) while it runs. The gate must not wait
+// for the committer while holding it: a writer that is pending (PauseExecution for a snapshot, P2P sync) blocks
+// new readers, the committer needs the read lock to commit the predecessor, and the writer waits for us — a cycle.
+type executionLock struct{ release, reacquire func() }
+
+func (se *SpeculativeExecutor) isCommitted(need uint64) bool {
+	done, _ := se.committedAtLeast(need)
+	return done || storage.GetLastGlobalExecIndex() >= need
+}
+
 // newIRGate builds the tx_processor.IRGate of the speculative execution of block gei that was cloned from a tip
-// whose header hash is specParent: it waits until gei-1 is committed, then refuses to continue if the tip moved.
-// Result: speculative executions reach the NOMT handle strictly in GEI order, and only when they are still valid.
-func (se *SpeculativeExecutor) newIRGate(gei uint64, specParent common.Hash, tipHash func() (common.Hash, bool)) func(context.Context) error {
+// whose header hash is specParent: it waits until gei-1 is committed (giving up the execution read lock while it
+// waits), then refuses to continue if the tip moved. Result: speculative executions reach the NOMT handle strictly
+// in GEI order, and only when they are still valid.
+func (se *SpeculativeExecutor) newIRGate(gei uint64, specParent common.Hash, tipHash func() (common.Hash, bool), lock *executionLock) func(context.Context) error {
 	return func(ctx context.Context) error {
-		if gei > 1 {
-			if err := se.waitCommitted(ctx, gei-1); err != nil {
+		if gei > 1 && !se.isCommitted(gei-1) {
+			if lock != nil {
+				lock.release()
+			}
+			err := se.waitCommitted(ctx, gei-1)
+			if lock != nil {
+				lock.reacquire() // always: the worker's deferred RUnlock must stay balanced
+			}
+			if err != nil {
 				return err
 			}
 		}
