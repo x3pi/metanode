@@ -336,7 +336,8 @@ func TestE2E_TransferReclaimWon(t *testing.T) {
 		t.Fatalf("Failed to handle transfer: %v", err)
 	}
 	
-	node1.sendWorker.processPending()
+	node1.sendWorker.processPending() // step 1: submit
+	node1.sendWorker.processPending() // step 2: poll-confirm (StateSendSubmitted -> StateSentConfirmed)
 	// Deliberately DO NOT process node2 receive worker. It "ignores" the transfer.
 
 	// Ensure ReclaimWorker thinks time has passed by advancing time in the DB
@@ -409,7 +410,8 @@ func TestE2E_TransferReclaimLost_DoubleCreditPrevention(t *testing.T) {
 		t.Fatalf("Failed to handle transfer: %v", err)
 	}
 	
-	node1.sendWorker.processPending()
+	node1.sendWorker.processPending() // step 1: submit
+	node1.sendWorker.processPending() // step 2: poll-confirm (StateSendSubmitted -> StateSentConfirmed)
 
 	// Hack time to allow Reclaim to be sent
 	parentChain.mu.Lock()
@@ -427,12 +429,13 @@ func TestE2E_TransferReclaimLost_DoubleCreditPrevention(t *testing.T) {
 	}
 
 	// 1. Node 2 processes it and sends a refund, calling MarkClaimed(Refund)
-	node2.receiveWorker.pollAndProcess()
-	
+	node2.receiveWorker.pollAndProcess() // step 1: submit MarkClaimed(Refund)
+	node2.receiveWorker.pollAndProcess() // step 2: poll-confirm + actually send the compensating Transfer
+
 	// 2. Node 1 tries to reclaim. It submits Reclaim (this will fail in ParentChain because MarkClaimed(Refund) was already processed)
 	node1.reclaimWorker.processReclaims()
-	
-	// Let Node 1 process the Refund transfer
+
+	// Let Node 1 start processing the Refund transfer (submit MarkClaimed(Credited) for it)
 	node1.receiveWorker.pollAndProcess()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -445,7 +448,8 @@ func TestE2E_TransferReclaimLost_DoubleCreditPrevention(t *testing.T) {
 			t.Fatalf("Timeout waiting for DoubleCreditPrevention test")
 		case <-time.After(50 * time.Millisecond):
 			node1.reclaimWorker.processReclaims() // keep polling reclaim outcome
-			
+			node1.receiveWorker.pollAndProcess()  // keep polling to actually credit the incoming refund
+
 			bal1 := node1.StateDB.GetBalance(sender)
 			rec1, _, _ := node1.Store.Get(msgID)
 			
@@ -490,13 +494,16 @@ func TestE2E_Refund_DoubleCreditPrevention(t *testing.T) {
 		t.Fatalf("Failed to handle transfer: %v", err)
 	}
 	
-	node1.sendWorker.processPending()
+	node1.sendWorker.processPending() // step 1: submit
+	node1.sendWorker.processPending() // step 2: poll-confirm (StateSendSubmitted -> StateSentConfirmed)
 
 	// 1. Node 2 processes it and sends a refund, calling MarkClaimed(Refund)
-	node2.receiveWorker.pollAndProcess()
+	node2.receiveWorker.pollAndProcess() // step 1: submit MarkClaimed(Refund)
+	node2.receiveWorker.pollAndProcess() // step 2: poll-confirm + actually send the compensating Transfer
 	node2.sendWorker.processPending()
-	
-	// 2. Node 1 receives Refund
+
+	// 2. Node 1 receives Refund (submit MarkClaimed(Credited), then poll-confirm + credit)
+	node1.receiveWorker.pollAndProcess()
 	node1.receiveWorker.pollAndProcess()
 
 	// 3. Hack time to allow Reclaim to trigger checkReclaimOutcome

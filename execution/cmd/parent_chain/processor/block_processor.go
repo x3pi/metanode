@@ -2,7 +2,9 @@ package processor
 
 import (
 	"log"
+	"time"
 	
+	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
@@ -52,7 +54,51 @@ func (bp *BlockProcessor) loop() {
 func (bp *BlockProcessor) processBlock(block *pb.ExecutableBlock) {
 	log.Printf("Parent Chain: Processing block %d (GEI %d) with %d txs", block.BlockNumber, block.GlobalExecIndex, len(block.Transactions))
 	
-	// Parent chain logic goes here:
-	// Iterate through block.Transactions, parse as Parent Chain native TXs, and apply via bp.store functions.
-	// Since this is a new chain type, the exact tx parsing depends on the RPC design.
+	blockTime := block.CommitTimestampMs / 1000
+	if blockTime == 0 {
+		blockTime = uint64(time.Now().Unix())
+	}
+
+	for i, txExe := range block.Transactions {
+		tx, err := parentchain.UnmarshalParentChainTx(txExe.Digest)
+		if err != nil {
+			log.Printf("Parent Chain: failed to unmarshal tx %d in block %d: %v", i, block.BlockNumber, err)
+			continue
+		}
+
+		var sig cm.Sign
+		if len(tx.Cert) > 0 {
+			sig = cm.Sign(tx.Cert)
+		}
+		var pubKey cm.PublicKey
+		if len(tx.PubKey) > 0 {
+			copy(pubKey[:], tx.PubKey)
+		}
+
+		switch tx.Type {
+		case parentchain.TxTypeDepositToFloat:
+			err = parentchain.DepositToFloat(bp.store, pubKey, tx.ChainID, tx.Amount, tx.MsgID, blockTime)
+		case parentchain.TxTypeTransferFloat:
+			var toPubKey cm.PublicKey
+			if len(tx.ToPubKey) > 0 {
+				copy(toPubKey[:], tx.ToPubKey)
+			}
+			_, err = parentchain.TransferFloat(
+				bp.store, pubKey, toPubKey, tx.ChainID, tx.Sender, tx.Target,
+				tx.Amount, tx.Payload, tx.Nonce, sig, tx.IsRefund, 0, blockTime,
+			)
+		case parentchain.TxTypeMarkClaimed:
+			err = parentchain.MarkClaimed(bp.store, tx.MsgID, tx.Outcome, sig)
+		case parentchain.TxTypeReclaimFloat:
+			err = parentchain.ReclaimFloat(bp.store, tx.MsgID, sig, blockTime, 60) // 60s timeout for reclaim by default
+		case parentchain.TxTypeRegisterAccount:
+			err = parentchain.RegisterAccount(bp.store, tx.UserAddress, pubKey, tx.UserSig, sig)
+		default:
+			log.Printf("Parent Chain: unknown tx type %s", tx.Type)
+		}
+
+		if err != nil {
+			log.Printf("Parent Chain: tx %d failed: %v", i, err)
+		}
+	}
 }

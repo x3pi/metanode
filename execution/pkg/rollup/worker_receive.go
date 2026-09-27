@@ -3,6 +3,7 @@ package rollup
 import (
 	"log"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
@@ -141,6 +142,8 @@ func (w *ReceiveWorker) pollAndProcess() {
 			w.processMarkClaimedPendingCredit(rec)
 		case StateMarkedClaimedPendingRefund:
 			w.processMarkClaimedPendingRefund(rec)
+		case StateMarkClaimedSubmitted:
+			w.processMarkClaimedSubmitted(rec)
 		}
 	}
 }
@@ -190,98 +193,117 @@ func (w *ReceiveWorker) isValidDestination(addr common.Address) bool {
 }
 
 func (w *ReceiveWorker) processMarkClaimedPendingCredit(rec *MessageRecord) {
-	// Sign MarkClaimed
 	cert := w.signMarkClaimed(rec.MessageID, parentchain.FloatOutcomeCredited)
-	
-	// Call ParentChain
 	_, err := w.client.SendMarkClaimed(rec.MessageID, parentchain.FloatOutcomeCredited, cert)
 	if err != nil {
-		return // wait for retry
-	}
-
-	// Advance
-	event := Event{
-		Type:   EventClaimedConfirmed,
-		Role:   RoleReceiver,
-		Target: rec.Target,
-		Value:  rec.Value,
-	}
-	newState, actions, err := Next(rec.State, RoleReceiver, event)
-	if err != nil {
-		log.Printf("ReceiveWorker: Next(EventClaimedConfirmed) error: %v, Value: %v", err, event.Value)
-	}
-	// Apply CreditLocal
-	for _, action := range actions {
-		if action.Type == ActionCreditLocal {
-			// in real EVM we would add balance
-			w.stateDB.SubBalance(action.Target, new(big.Int).Neg(action.Amount))  
+		if !strings.Contains(err.Error(), "already resolved") {
+			return // wait for retry
 		}
 	}
-	
-	rec.State = newState
-	w.store.Put(rec)
+
+	// Advance to submitted
+	event := Event{
+		Type: EventRPCSubmitted,
+		Role: RoleReceiver,
+	}
+	newState, _, err := Next(rec.State, RoleReceiver, event)
+	if err == nil {
+		rec.State = newState
+		w.store.Put(rec)
+	}
 }
 
 func (w *ReceiveWorker) processMarkClaimedPendingRefund(rec *MessageRecord) {
 	cert := w.signMarkClaimed(rec.MessageID, parentchain.FloatOutcomeRefund)
 	_, err := w.client.SendMarkClaimed(rec.MessageID, parentchain.FloatOutcomeRefund, cert)
-	
-	// TODO: CRITICAL KNOWN ISSUE
-	// If the node crashes exactly here (after SendMarkClaimed succeeds but before we send the
-	// refund TransferFloat below), the next retry will call SendMarkClaimed again.
-	// Since the ParentChain already marked it as resolved, it might return ErrFloatAlreadyResolved.
-	// If we just return early on error without sending the TransferFloat, the refund is stuck FOREVER.
-	// We need a mechanism to differentiate "already resolved, just need to send the TransferFloat"
-	// versus "actual failure".
 	if err != nil {
-		return 
-	}
-
-	// After MarkClaimed is confirmed for refund, we must send the actual refund Transfer
-	// In Phase B, we send it directly or we change state to StateRefundSent
-	event := Event{
-		Type:   EventClaimedConfirmed,
-		Role:   RoleReceiver,
-		Sender: rec.Sender,
-		Value:  rec.Value,
-	}
-	newState, actions, _ := Next(rec.State, RoleReceiver, event)
-	
-	// Here we would also initiate a SendTransfer back.
-	for _, action := range actions {
-		if action.Type == ActionSendRefund {
-			seq, err := w.store.GetNextFloatSeq()
-			if err != nil {
-				log.Printf("ReceiveWorker: failed to get next float seq: %v", err)
-				return
-			}
-			
-			isRefund := true
-			refundCert := w.signTransfer(rec.SourcePubKey, rec.Target, rec.Sender, rec.Value, seq)
-			
-			_, sendErr := w.client.SendTransferFloat(
-				w.blsKeyPair.PublicKey(),
-				rec.SourcePubKey, // destination is the source of the original transfer
-				0, // destChainID
-				rec.Target,
-				rec.Sender,
-				action.Amount,
-				nil,
-				seq,
-				refundCert,
-				isRefund,
-			)
-			if sendErr != nil {
-				log.Printf("ReceiveWorker: failed to send refund transfer: %v", sendErr)
-				return // Will retry
-			}
-			
-			_ = w.store.IncrementFloatSeq()
+		if !strings.Contains(err.Error(), "already resolved") {
+			return 
 		}
 	}
 
-	rec.State = newState
-	w.store.Put(rec)
+	// Advance to submitted
+	event := Event{
+		Type: EventRPCSubmitted,
+		Role: RoleReceiver,
+	}
+	newState, _, err := Next(rec.State, RoleReceiver, event)
+	if err == nil {
+		rec.State = newState
+		w.store.Put(rec)
+	}
+}
+
+func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) {
+	// Poll ParentChain to check if it has actually been confirmed
+	outcome, err := w.client.GetClaimed(rec.MessageID)
+	if err != nil {
+		log.Printf("ReceiveWorker: failed to poll GetClaimed for msgID %x: %v", rec.MessageID, err)
+		return
+	}
+	
+	if outcome == parentchain.FloatOutcomeCredited || outcome == parentchain.FloatOutcomeRefund {
+		// Advance based on confirmed outcome
+		var smOutcome Outcome
+		if outcome == parentchain.FloatOutcomeCredited {
+			smOutcome = OutcomeCredited
+		} else {
+			smOutcome = OutcomeRefund
+		}
+		
+		event := Event{
+			Type:    EventClaimedConfirmed,
+			Role:    RoleReceiver,
+			Target:  rec.Target,
+			Sender:  rec.Sender,
+			Value:   rec.Value,
+			Outcome: smOutcome,
+		}
+		newState, actions, err := Next(rec.State, RoleReceiver, event)
+		if err != nil {
+			log.Printf("ReceiveWorker: Next(EventClaimedConfirmed) error: %v", err)
+			return
+		}
+		
+		// Apply Actions (CreditLocal or SendRefund)
+		for _, action := range actions {
+			if action.Type == ActionCreditLocal {
+				w.stateDB.SubBalance(action.Target, new(big.Int).Neg(action.Amount))
+			} else if action.Type == ActionSendRefund {
+				// Handle SendRefund (similar to what was in processMarkClaimedPendingRefund)
+				seq, err := w.store.GetNextFloatSeq()
+				if err != nil {
+					log.Printf("ReceiveWorker: failed to get next float seq: %v", err)
+					return
+				}
+				
+				isRefund := true
+				refundCert := w.signTransfer(rec.SourcePubKey, rec.Target, rec.Sender, rec.Value, seq)
+				
+				_, sendErr := w.client.SendTransferFloat(
+					w.blsKeyPair.PublicKey(),
+					rec.SourcePubKey, // destination is the source of the original transfer
+					0, // destChainID
+					rec.Target,
+					rec.Sender,
+					action.Amount,
+					nil,
+					seq,
+					refundCert,
+					isRefund,
+				)
+				if sendErr != nil {
+					log.Printf("ReceiveWorker: failed to send refund transfer: %v", sendErr)
+					return // Will retry
+				}
+				
+				_ = w.store.IncrementFloatSeq()
+			}
+		}
+		
+		rec.State = newState
+		w.store.Put(rec)
+	}
 }
 
 func (w *ReceiveWorker) signMarkClaimed(msgID common.Hash, outcome parentchain.FloatOutcome) []byte {

@@ -13,8 +13,9 @@ import (
 )
 
 type mockParentChainClient struct {
-	sentTransfers []common.Hash
-	failNext      bool
+	sentTransfers  []common.Hash
+	failNext       bool
+	claimedOutcome parentchain.FloatOutcome
 }
 
 func (m *mockParentChainClient) SendTransferFloat(
@@ -56,7 +57,7 @@ func (m *mockParentChainClient) GetTransferRecord(msgID common.Hash) (parentchai
 }
 
 func (m *mockParentChainClient) GetClaimed(msgID common.Hash) (parentchain.FloatOutcome, error) {
-	return parentchain.FloatOutcomeReclaimed, nil
+	return m.claimedOutcome, nil
 }
 
 func (m *mockParentChainClient) GetFloatSeq(pubKey cm.PublicKey) (uint64, error) {
@@ -100,15 +101,26 @@ func TestSendWorker(t *testing.T) {
 		t.Errorf("Expected 0 sent, got %d", len(client.sentTransfers))
 	}
 
-	// Test 2: Success advances state
+	// Test 2: Success submits the tx (step 1 of 2: submit, not yet confirmed)
 	worker.processPending()
-	
+
 	rec, _, _ = store.Get(msgID)
-	if rec.State != StateSentConfirmed {
-		t.Errorf("Expected state SENT_CONFIRMED, got %v", rec.State)
+	if rec.State != StateSendSubmitted {
+		t.Errorf("Expected state SEND_SUBMITTED after submit, got %v", rec.State)
 	}
 	if len(client.sentTransfers) != 1 {
 		t.Errorf("Expected 1 sent, got %d", len(client.sentTransfers))
+	}
+
+	// Test 2b: next cycle polls GetTransferRecord and confirms (step 2 of 2)
+	worker.processPending()
+
+	rec, _, _ = store.Get(msgID)
+	if rec.State != StateSentConfirmed {
+		t.Errorf("Expected state SENT_CONFIRMED after poll-confirm, got %v", rec.State)
+	}
+	if len(client.sentTransfers) != 1 {
+		t.Errorf("Expected still 1 sent (poll must not resend), got %d", len(client.sentTransfers))
 	}
 
 	// Test 3: Idempotent processing (won't send again because it's no longer PENDING)

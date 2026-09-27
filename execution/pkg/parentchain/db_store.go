@@ -203,3 +203,63 @@ func (s *DBStore) GetAllChainRegistryKeys() ([]common.Hash, error) {
 	}
 	return keys, iter.Error()
 }
+
+var PrefixInbound = []byte("in:")
+
+func (s *DBStore) AppendInboundTransfer(destKeyHash common.Hash, event *TransferEvent) error {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	
+	// Create a unique key using destination key hash + msg ID (or timestamp) to keep them ordered
+	// For simplicity, we can use PrefixInbound + destKeyHash + event.BlockTime + MsgID
+	key := make([]byte, 0, len(PrefixInbound)+32+8+32)
+	key = append(key, PrefixInbound...)
+	key = append(key, destKeyHash.Bytes()...)
+	
+	var timeBytes [8]byte
+	for i := 7; i >= 0; i-- {
+		timeBytes[i] = byte(event.BlockTime >> (8 * (7 - i)))
+	}
+	key = append(key, timeBytes[:]...)
+	key = append(key, event.MsgID.Bytes()...)
+	
+	return s.db.Put(key, data, nil)
+}
+
+func (s *DBStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([]*TransferEvent, uint64, error) {
+	prefix := make([]byte, 0, len(PrefixInbound)+32)
+	prefix = append(prefix, PrefixInbound...)
+	prefix = append(prefix, destKeyHash.Bytes()...)
+	
+	iter := s.db.NewIterator(nil, nil)
+	defer iter.Release()
+	
+	var allEvents []*TransferEvent
+	for iter.Next() {
+		k := iter.Key()
+		if len(k) >= len(prefix) && string(k[:len(prefix)]) == string(prefix) {
+			var event TransferEvent
+			if err := json.Unmarshal(iter.Value(), &event); err == nil {
+				allEvents = append(allEvents, &event)
+			}
+		}
+	}
+	
+	if err := iter.Error(); err != nil {
+		return nil, cursor, err
+	}
+	
+	if cursor >= uint64(len(allEvents)) {
+		return nil, cursor, nil
+	}
+	
+	count := uint64(len(allEvents)) - cursor
+	if count > 50 {
+		count = 50
+	}
+	
+	res := allEvents[cursor : cursor+count]
+	return res, cursor + count, nil
+}

@@ -50,6 +50,14 @@ var allValidTransitions = []TransitionFixture{
 	{
 		FromState:   StateLocalAppliedPendingSend,
 		Role:        RoleSender,
+		EventType:   EventRPCSubmitted,
+		Event:       Event{Type: EventRPCSubmitted, Role: RoleSender},
+		ToState:     StateSendSubmitted,
+		ActionCount: 0,
+	},
+	{
+		FromState:   StateSendSubmitted,
+		Role:        RoleSender,
 		EventType:   EventParentConfirmed,
 		Event:       Event{Type: EventParentConfirmed},
 		ToState:     StateSentConfirmed,
@@ -61,6 +69,14 @@ var allValidTransitions = []TransitionFixture{
 		EventType:   EventSendFailedTransient,
 		Event:       Event{Type: EventSendFailedTransient},
 		ToState:     StateLocalAppliedPendingSend,
+		ActionCount: 0,
+	},
+	{
+		FromState:   StateSendSubmitted,
+		Role:        RoleSender,
+		EventType:   EventSendFailedTransient,
+		Event:       Event{Type: EventSendFailedTransient},
+		ToState:     StateSendSubmitted,
 		ActionCount: 0,
 	},
 	{
@@ -158,6 +174,15 @@ var allValidTransitions = []TransitionFixture{
 		EventType:   EventParentConfirmed,
 		Event:       Event{Type: EventParentConfirmed},
 		ToState:     StateSentConfirmed,
+		ActionCount: 0,
+		IsReplay:    true,
+	},
+	{
+		FromState:   StateSendSubmitted,
+		Role:        RoleSender,
+		EventType:   EventRPCSubmitted,
+		Event:       Event{Type: EventRPCSubmitted, Role: RoleSender},
+		ToState:     StateSendSubmitted,
 		ActionCount: 0,
 		IsReplay:    true,
 	},
@@ -266,8 +291,24 @@ var allValidTransitions = []TransitionFixture{
 	{
 		FromState:   StateMarkedClaimedPendingCredit,
 		Role:        RoleReceiver,
+		EventType:   EventRPCSubmitted,
+		Event:       Event{Type: EventRPCSubmitted, Role: RoleReceiver},
+		ToState:     StateMarkClaimedSubmitted,
+		ActionCount: 0,
+	},
+	{
+		FromState:   StateMarkedClaimedPendingRefund,
+		Role:        RoleReceiver,
+		EventType:   EventRPCSubmitted,
+		Event:       Event{Type: EventRPCSubmitted, Role: RoleReceiver},
+		ToState:     StateMarkClaimedSubmitted,
+		ActionCount: 0,
+	},
+	{
+		FromState:   StateMarkClaimedSubmitted,
+		Role:        RoleReceiver,
 		EventType:   EventClaimedConfirmed,
-		Event:       Event{Type: EventClaimedConfirmed, Target: testTarget, Value: testValue},
+		Event:       Event{Type: EventClaimedConfirmed, Target: testTarget, Value: testValue, Outcome: OutcomeCredited},
 		ToState:     StateCredited,
 		ActionCount: 1,
 		ActionType:  ActionCreditLocal,
@@ -276,10 +317,10 @@ var allValidTransitions = []TransitionFixture{
 		},
 	},
 	{
-		FromState:   StateMarkedClaimedPendingRefund,
+		FromState:   StateMarkClaimedSubmitted,
 		Role:        RoleReceiver,
 		EventType:   EventClaimedConfirmed,
-		Event:       Event{Type: EventClaimedConfirmed, Sender: testSender, Value: testValue},
+		Event:       Event{Type: EventClaimedConfirmed, Sender: testSender, Value: testValue, Outcome: OutcomeRefund},
 		ToState:     StateRefundSent,
 		ActionCount: 1,
 		ActionType:  ActionSendRefund,
@@ -333,6 +374,15 @@ var allValidTransitions = []TransitionFixture{
 		IsReplay:    true,
 	},
 	{
+		FromState:   StateMarkClaimedSubmitted,
+		Role:        RoleReceiver,
+		EventType:   EventRPCSubmitted,
+		Event:       Event{Type: EventRPCSubmitted, Role: RoleReceiver},
+		ToState:     StateMarkClaimedSubmitted,
+		ActionCount: 0,
+		IsReplay:    true,
+	},
+	{
 		FromState:   StateCredited,
 		Role:        RoleReceiver,
 		EventType:   EventClaimedConfirmed,
@@ -379,7 +429,12 @@ func TestValidTransitionsTable(t *testing.T) {
 			t.Fatalf("TxSubmitted act[2] mismatch: expected SendTransfer target=%s val=%s, got %+v", testTarget, testValue, act1[2])
 		}
 
-		s2, act2, err := Next(s1, RoleSender, Event{Type: EventParentConfirmed})
+		s1b, act1b, err := Next(s1, RoleSender, Event{Type: EventRPCSubmitted, Role: RoleSender})
+		if err != nil || s1b != StateSendSubmitted || len(act1b) != 0 {
+			t.Fatalf("RPCSubmitted failed: s=%s, act=%d, err=%v", s1b, len(act1b), err)
+		}
+
+		s2, act2, err := Next(s1b, RoleSender, Event{Type: EventParentConfirmed})
 		if err != nil || s2 != StateSentConfirmed || len(act2) != 0 {
 			t.Fatalf("ParentConfirmed failed: s=%s, act=%d, err=%v", s2, len(act2), err)
 		}
@@ -441,7 +496,12 @@ func TestValidTransitionsTable(t *testing.T) {
 			t.Fatalf("CreditObserved(Valid) failed: s=%s, act=%d, err=%v", s1, len(act1), err)
 		}
 
-		s2, act2, err := Next(s1, RoleReceiver, Event{Type: EventClaimedConfirmed, Target: testTarget, Value: testValue})
+		s1b, act1b, err := Next(s1, RoleReceiver, Event{Type: EventRPCSubmitted, Role: RoleReceiver})
+		if err != nil || s1b != StateMarkClaimedSubmitted || len(act1b) != 0 {
+			t.Fatalf("RPCSubmitted failed: s=%s, act=%d, err=%v", s1b, len(act1b), err)
+		}
+
+		s2, act2, err := Next(s1b, RoleReceiver, Event{Type: EventClaimedConfirmed, Target: testTarget, Value: testValue, Outcome: OutcomeCredited})
 		if err != nil || s2 != StateCredited || len(act2) != 1 || act2[0].Type != ActionCreditLocal {
 			t.Fatalf("ClaimedConfirmed failed: s=%s, act=%d, err=%v", s2, len(act2), err)
 		}
@@ -458,7 +518,12 @@ func TestValidTransitionsTable(t *testing.T) {
 			t.Fatalf("CreditObserved(Invalid) failed: s=%s, act=%d, err=%v", s1, len(act1), err)
 		}
 
-		s2, act2, err := Next(s1, RoleReceiver, Event{Type: EventClaimedConfirmed, Sender: testSender, Value: testValue})
+		s1b, act1b, err := Next(s1, RoleReceiver, Event{Type: EventRPCSubmitted, Role: RoleReceiver})
+		if err != nil || s1b != StateMarkClaimedSubmitted || len(act1b) != 0 {
+			t.Fatalf("RPCSubmitted failed: s=%s, act=%d, err=%v", s1b, len(act1b), err)
+		}
+
+		s2, act2, err := Next(s1b, RoleReceiver, Event{Type: EventClaimedConfirmed, Sender: testSender, Value: testValue, Outcome: OutcomeRefund})
 		if err != nil || s2 != StateRefundSent || len(act2) != 1 || act2[0].Type != ActionSendRefund {
 			t.Fatalf("ClaimedConfirmed(Refund) failed: s=%s, act=%d, err=%v", s2, len(act2), err)
 		}
@@ -483,6 +548,7 @@ func TestCartesianProductRejection(t *testing.T) {
 	allStates := []State{
 		StateNone,
 		StateLocalAppliedPendingSend,
+		StateSendSubmitted,
 		StateSentConfirmed,
 		StateReclaimSubmitted,
 		StateRefundInTransit,
@@ -490,6 +556,7 @@ func TestCartesianProductRejection(t *testing.T) {
 		StateConfirmedSuccess,
 		StateMarkedClaimedPendingCredit,
 		StateMarkedClaimedPendingRefund,
+		StateMarkClaimedSubmitted,
 		StateRefundSent,
 		StateSkippedDup,
 		StateRefunded,
@@ -503,6 +570,7 @@ func TestCartesianProductRejection(t *testing.T) {
 
 	allEventTypes := []EventType{
 		EventTxSubmitted,
+		EventRPCSubmitted,
 		EventParentConfirmed,
 		EventSendFailedTransient,
 		EventClaimedObserved,
@@ -519,6 +587,7 @@ func TestCartesianProductRejection(t *testing.T) {
 	validMap := make(map[[3]uint32][]TransitionFixture)
 	eventIndex := map[EventType]uint32{
 		EventTxSubmitted:         1,
+		EventRPCSubmitted:        12,
 		EventParentConfirmed:     2,
 		EventSendFailedTransient: 3,
 		EventClaimedObserved:     4,
@@ -762,7 +831,7 @@ func TestValueValidation(t *testing.T) {
 		}
 
 		// ClaimedConfirmed
-		_, _, err4 := Next(StateMarkedClaimedPendingCredit, RoleReceiver, Event{Type: EventClaimedConfirmed, Target: testTarget, Value: v})
+		_, _, err4 := Next(StateMarkClaimedSubmitted, RoleReceiver, Event{Type: EventClaimedConfirmed, Target: testTarget, Value: v, Outcome: OutcomeCredited})
 		if !errors.Is(err4, ErrInvalidAmount) {
 			t.Errorf("ClaimedConfirmed: expected ErrInvalidAmount for value %v, got %v", v, err4)
 		}
@@ -800,6 +869,7 @@ func TestRoleInvariantValidation(t *testing.T) {
 func TestProperty_MutualExclusion(t *testing.T) {
 	allEvents := []Event{
 		{Type: EventTxSubmitted, Sender: testSender, Target: testTarget, Value: testValue},
+		{Type: EventRPCSubmitted, Role: RoleSender},
 		{Type: EventParentConfirmed},
 		{Type: EventSendFailedTransient},
 		{Type: EventClaimedObserved, Outcome: OutcomeCredited},
@@ -850,6 +920,7 @@ func FuzzMutualExclusion(f *testing.F) {
 
 	allSenderEvents := []Event{
 		{Type: EventTxSubmitted, Sender: testSender, Target: testTarget, Value: testValue},
+		{Type: EventRPCSubmitted, Role: RoleSender},
 		{Type: EventParentConfirmed},
 		{Type: EventSendFailedTransient},
 		{Type: EventClaimedObserved, Outcome: OutcomeCredited},

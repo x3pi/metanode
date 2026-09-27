@@ -18,6 +18,7 @@ func TestReceiveWorker(t *testing.T) {
 
 	kp1 := bls.GenerateKeyPair()
 	worker := NewReceiveWorker(store, stateDB, client, kp1)
+	client.claimedOutcome = parentchain.FloatOutcomeCredited
 
 	// Test 1: New inbound transfer
 	msgID := common.HexToHash("0x789")
@@ -42,12 +43,20 @@ func TestReceiveWorker(t *testing.T) {
 		t.Errorf("Expected MARKED_CLAIMED_PENDING_CREDIT, got %v", rec.State)
 	}
 
-	// Test 2: processMarkClaimedPendingCredit
-	worker.pollAndProcess() // This will process the pending record
-	
+	// Test 2: processMarkClaimedPendingCredit (step 1: submit MarkClaimed)
+	worker.pollAndProcess()
+
+	rec, _, _ = store.Get(msgID)
+	if rec.State != StateMarkClaimedSubmitted {
+		t.Errorf("Expected MARK_CLAIMED_SUBMITTED after submit, got %v", rec.State)
+	}
+
+	// Test 2b: next cycle polls GetClaimed and confirms (step 2: credit applied)
+	worker.pollAndProcess()
+
 	rec, _, _ = store.Get(msgID)
 	if rec.State != StateCredited {
-		t.Errorf("Expected CREDITED, got %v", rec.State)
+		t.Errorf("Expected CREDITED after poll-confirm, got %v", rec.State)
 	}
 	
 	// Target should have 500 more balance

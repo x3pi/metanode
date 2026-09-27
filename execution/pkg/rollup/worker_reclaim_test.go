@@ -6,13 +6,14 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 )
 
 func TestReclaimWorker(t *testing.T) {
 	scDB := &mockDB{data: make(map[common.Address]map[common.Hash][]byte)}
 	store := NewDBStore(scDB)
 	stateDB := newMockAccountStateDB()
-	client := &mockParentChainClient{}
+	client := &mockParentChainClient{claimedOutcome: parentchain.FloatOutcomeReclaimed}
 	kp := bls.GenerateKeyPair()
 
 	worker := NewReclaimWorker(store, stateDB, client, kp)

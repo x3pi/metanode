@@ -44,6 +44,7 @@ const (
 
 	// Sender states (Phía gửi: 10..19)
 	StateLocalAppliedPendingSend State = 10
+	StateSendSubmitted           State = 14
 	StateSentConfirmed           State = 11
 	StateReclaimSubmitted        State = 12
 	StateRefundInTransit         State = 13
@@ -53,6 +54,7 @@ const (
 	// Receiver states (Phía nhận: 21..29)
 	StateMarkedClaimedPendingCredit State = 21
 	StateMarkedClaimedPendingRefund State = 22
+	StateMarkClaimedSubmitted       State = 24
 	StateRefundSent                 State = 23
 	StateSkippedDup                 State = 27 // terminal
 	StateRefunded                   State = 28 // terminal
@@ -65,6 +67,8 @@ func (s State) String() string {
 		return "NONE"
 	case StateLocalAppliedPendingSend:
 		return "LOCAL_APPLIED_PENDING_SEND"
+	case StateSendSubmitted:
+		return "SEND_SUBMITTED"
 	case StateSentConfirmed:
 		return "SENT_CONFIRMED"
 	case StateReclaimSubmitted:
@@ -79,6 +83,8 @@ func (s State) String() string {
 		return "MARKED_CLAIMED_PENDING_CREDIT"
 	case StateMarkedClaimedPendingRefund:
 		return "MARKED_CLAIMED_PENDING_REFUND"
+	case StateMarkClaimedSubmitted:
+		return "MARK_CLAIMED_SUBMITTED"
 	case StateRefundSent:
 		return "REFUND_SENT"
 	case StateSkippedDup:
@@ -162,6 +168,7 @@ type EventType string
 
 const (
 	EventTxSubmitted         EventType = "TxSubmitted"
+	EventRPCSubmitted        EventType = "RPCSubmitted"
 	EventParentConfirmed     EventType = "ParentConfirmed"
 	EventSendFailedTransient EventType = "SendFailedTransient"
 	EventClaimedObserved     EventType = "ClaimedObserved"
@@ -176,6 +183,10 @@ const (
 )
 
 // Role returns the role that is allowed to process this event type.
+// EventRPCSubmitted is shared by both roles (fired by SendWorker after submitting a
+// Transfer, and by ReceiveWorker after submitting a MarkClaimed) — its expected role is
+// not fixed by event type alone, so Next() derives it from the caller-supplied Event.Role
+// instead of from this method (see the dedicated check there).
 func (e EventType) Role() Role {
 	switch e {
 	case EventTxSubmitted, EventParentConfirmed, EventSendFailedTransient,

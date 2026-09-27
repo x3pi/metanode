@@ -26,6 +26,7 @@ type Store interface {
 	ScanNonTerminal() ([]*MessageRecord, error)
 	GetNextFloatSeq() (uint64, error)
 	IncrementFloatSeq() error
+	SetFloatSeq(seq uint64) error
 }
 
 type MessageRecord struct {
@@ -178,6 +179,14 @@ func (s *DBStore) IncrementFloatSeq() error {
 		seq = new(big.Int).SetBytes(data).Uint64()
 	}
 	seq++
+	val := new(big.Int).SetUint64(seq).Bytes()
+	s.scDB.SetStorageValue(RollupSystemAddress, RollupFloatSeqKey, val)
+	return nil
+}
+
+func (s *DBStore) SetFloatSeq(seq uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	val := new(big.Int).SetUint64(seq).Bytes()
 	s.scDB.SetStorageValue(RollupSystemAddress, RollupFloatSeqKey, val)
 	return nil

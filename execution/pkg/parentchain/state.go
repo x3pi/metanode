@@ -141,11 +141,21 @@ func DepositToFloat(store Store, destKey cm.PublicKey, destChainIDDesc uint64, a
 	if err := store.SetFloat(floatTotalSupplyKey, newTotal); err != nil {
 		return err
 	}
-	return store.SetTransferRecord(messageID, FloatTransferRecord{
+	err = store.SetTransferRecord(messageID, FloatTransferRecord{
 		SourceKey:            nil,
 		DestKey:              destKey,
 		Value:                new(big.Int).Set(amount),
 		ConfirmedAtBlockTime: blockTime,
+	})
+	if err != nil {
+		return err
+	}
+	
+	return store.AppendInboundTransfer(destHash, &TransferEvent{
+		MsgID:      messageID,
+		DestPubKey: destKey,
+		Amount:     amount,
+		BlockTime:  blockTime,
 	})
 }
 
@@ -258,6 +268,22 @@ func TransferFloat(
 	}); err != nil {
 		return common.Hash{}, err
 	}
+	
+	if err := store.AppendInboundTransfer(toHash, &TransferEvent{
+		MsgID:        messageID,
+		SourcePubKey: fromKey,
+		DestPubKey:   toKey,
+		SourceSeq:    nonce,
+		Sender:       sender,
+		Target:       target,
+		Amount:       value,
+		PayloadHash:  payloadHash,
+		BlockTime:    blockTime,
+		IsRefund:     isRefund,
+	}); err != nil {
+		return common.Hash{}, err
+	}
+	
 	if err := store.SetFloatSeq(fromHash, nonce+1); err != nil {
 		return common.Hash{}, err
 	}

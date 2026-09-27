@@ -13,17 +13,28 @@ func Next(current State, recordRole Role, event Event) (State, []Action, error) 
 		return current, nil, fmt.Errorf("%w: record role must be SENDER or RECEIVER, got %s", ErrInvalidRole, recordRole)
 	}
 
-	expectedRole := event.Type.Role()
-	if expectedRole == RoleUnknown {
-		return current, nil, fmt.Errorf("%w: unknown event type '%s'", ErrInvalidTransition, event.Type)
-	}
+	// EventRPCSubmitted is shared by both roles (see EventType.Role's doc comment) — its
+	// expected role comes from the caller-supplied Event.Role, not from the event type.
+	if event.Type == EventRPCSubmitted {
+		if event.Role != RoleSender && event.Role != RoleReceiver {
+			return current, nil, fmt.Errorf("%w: EventRPCSubmitted requires an explicit Event.Role", ErrInvalidRole)
+		}
+		if event.Role != recordRole {
+			return current, nil, fmt.Errorf("%w: event role %s does not match record role %s", ErrInvalidRole, event.Role, recordRole)
+		}
+	} else {
+		expectedRole := event.Type.Role()
+		if expectedRole == RoleUnknown {
+			return current, nil, fmt.Errorf("%w: unknown event type '%s'", ErrInvalidTransition, event.Type)
+		}
 
-	// 1. Role invariant checks
-	if expectedRole != recordRole {
-		return current, nil, fmt.Errorf("%w: event %s role %s does not match record role %s", ErrInvalidRole, event.Type, expectedRole, recordRole)
-	}
-	if event.Role != RoleUnknown && event.Role != recordRole {
-		return current, nil, fmt.Errorf("%w: event role %s does not match record role %s", ErrInvalidRole, event.Role, recordRole)
+		// 1. Role invariant checks
+		if expectedRole != recordRole {
+			return current, nil, fmt.Errorf("%w: event %s role %s does not match record role %s", ErrInvalidRole, event.Type, expectedRole, recordRole)
+		}
+		if event.Role != RoleUnknown && event.Role != recordRole {
+			return current, nil, fmt.Errorf("%w: event role %s does not match record role %s", ErrInvalidRole, event.Role, recordRole)
+		}
 	}
 	if current != StateNone && current.Role() != recordRole {
 		return current, nil, fmt.Errorf("%w: cannot process %s event in %s state %s", ErrInvalidRole, recordRole, current.Role(), current)
@@ -66,18 +77,30 @@ func Next(current State, recordRole Role, event Event) (State, []Action, error) 
 		}
 		return StateLocalAppliedPendingSend, actions, nil
 
+	case EventRPCSubmitted:
+		if current == StateSendSubmitted || current == StateMarkClaimedSubmitted {
+			return current, nil, nil // Idempotent
+		}
+		if current == StateLocalAppliedPendingSend {
+			return StateSendSubmitted, nil, nil
+		}
+		if current == StateMarkedClaimedPendingCredit || current == StateMarkedClaimedPendingRefund {
+			return StateMarkClaimedSubmitted, nil, nil
+		}
+		return current, nil, fmt.Errorf("%w: cannot submit to RPC from state %s", ErrInvalidTransition, current)
+
 	case EventParentConfirmed:
 		if current == StateSentConfirmed {
 			return StateSentConfirmed, nil, nil // Idempotent
 		}
-		if current != StateLocalAppliedPendingSend {
+		if current != StateSendSubmitted {
 			return current, nil, fmt.Errorf("%w: cannot confirm parent from state %s", ErrInvalidTransition, current)
 		}
 		return StateSentConfirmed, nil, nil
 
 	case EventSendFailedTransient:
-		if current == StateLocalAppliedPendingSend {
-			return StateLocalAppliedPendingSend, nil, nil
+		if current == StateLocalAppliedPendingSend || current == StateSendSubmitted {
+			return current, nil, nil
 		}
 		return current, nil, fmt.Errorf("%w: transient failure not applicable in state %s", ErrInvalidTransition, current)
 
@@ -214,9 +237,12 @@ func Next(current State, recordRole Role, event Event) (State, []Action, error) 
 		if current == StateRefundSent {
 			return StateRefundSent, nil, nil // Idempotent
 		}
+		if current != StateMarkClaimedSubmitted {
+			return current, nil, fmt.Errorf("%w: cannot confirm claimed from state %s", ErrInvalidTransition, current)
+		}
 
-		switch current {
-		case StateMarkedClaimedPendingCredit:
+		switch event.Outcome {
+		case OutcomeCredited:
 			if event.Value == nil || event.Value.Sign() <= 0 {
 				return current, nil, ErrInvalidAmount
 			}
@@ -229,7 +255,7 @@ func Next(current State, recordRole Role, event Event) (State, []Action, error) 
 			}
 			return StateCredited, actions, nil
 
-		case StateMarkedClaimedPendingRefund:
+		case OutcomeRefund:
 			if event.Value == nil || event.Value.Sign() <= 0 {
 				return current, nil, ErrInvalidAmount
 			}

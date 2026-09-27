@@ -59,6 +59,9 @@ type Store interface {
 	SetAccountRegistry(userAddress common.Address, floatIdentityKey cm.PublicKey) error
 
 	GetAllChainRegistryKeys() ([]common.Hash, error)
+
+	AppendInboundTransfer(destKeyHash common.Hash, event *TransferEvent) error
+	GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([]*TransferEvent, uint64, error)
 }
 
 // MemoryStore is an in-memory implementation for testing
@@ -71,6 +74,7 @@ type MemoryStore struct {
 	seqs            map[common.Hash]uint64
 	velocities      map[common.Hash]FloatVelocityState
 	accounts        map[common.Address]cm.PublicKey
+	inbound         map[common.Hash][]*TransferEvent
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -82,6 +86,7 @@ func NewMemoryStore() *MemoryStore {
 		seqs:            make(map[common.Hash]uint64),
 		velocities:      make(map[common.Hash]FloatVelocityState),
 		accounts:        make(map[common.Address]cm.PublicKey),
+		inbound:         make(map[common.Hash][]*TransferEvent),
 	}
 }
 
@@ -123,6 +128,17 @@ func (m *MemoryStore) Clone() *MemoryStore {
 	}
 	for k, v := range m.accounts {
 		clone.accounts[k] = v
+	}
+	for k, v := range m.inbound {
+		events := make([]*TransferEvent, len(v))
+		for i, ev := range v {
+			evCopy := *ev
+			if ev.Amount != nil {
+				evCopy.Amount = new(big.Int).Set(ev.Amount)
+			}
+			events[i] = &evCopy
+		}
+		clone.inbound[k] = events
 	}
 	return clone
 }
@@ -285,4 +301,45 @@ func (m *MemoryStore) GetAllChainRegistryKeys() ([]common.Hash, error) {
 		keys = append(keys, k)
 	}
 	return keys, nil
+}
+
+func (m *MemoryStore) AppendInboundTransfer(destKeyHash common.Hash, event *TransferEvent) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	// Create a safe copy to store
+	evCopy := *event
+	if event.Amount != nil {
+		evCopy.Amount = new(big.Int).Set(event.Amount)
+	}
+	
+	m.inbound[destKeyHash] = append(m.inbound[destKeyHash], &evCopy)
+	return nil
+}
+
+func (m *MemoryStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([]*TransferEvent, uint64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	events := m.inbound[destKeyHash]
+	if cursor >= uint64(len(events)) {
+		return nil, cursor, nil
+	}
+	
+	count := uint64(len(events)) - cursor
+	if count > 50 {
+		count = 50 // paginate 50 at a time
+	}
+	
+	res := make([]*TransferEvent, count)
+	for i := uint64(0); i < count; i++ {
+		ev := events[cursor+i]
+		evCopy := *ev
+		if ev.Amount != nil {
+			evCopy.Amount = new(big.Int).Set(ev.Amount)
+		}
+		res[i] = &evCopy
+	}
+	
+	return res, cursor + count, nil
 }
