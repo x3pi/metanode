@@ -24,8 +24,13 @@ Công cụ: `execution/cmd/tool/rollup_cluster` (`go build -o rollup-cluster ./c
 ## Thay replica chết vĩnh viễn
 `remove-replica --id n1` **trước** (được phép khi voter sống còn ≥ đa số của cụm sau khi bỏ; nếu không ⇒ từ chối "mất quorum"), rồi thêm replica mới như trên. Thứ tự này giữ quorum khi dừng một peer để sao chép. Xoá leader cần `--transfer-first`. Đo thật: giết leader n1 giữa tải (24 000 tx), xoá n1, sao chép từ n3, thêm n4 ⇒ 4 replica cùng 152 000 tx, cùng hash/stateRoot.
 
-## Khoá ký
-Mọi replica dùng **cùng** khoá (`private_key`, địa chỉ = `raft.sequencer_address`, node tự thoát khi lệch). `check` báo `key_consistent=false` nếu các replica báo địa chỉ ký khác nhau. Khoá không đi qua mạng (mỗi node đọc từ cấu hình cục bộ). **Chưa làm:** lưu khoá mã hoá tại chỗ (hiện là trường `private_key` trong `config.json` dạng rõ, như các chế độ khác).
+## Khoá ký (mã hoá tại chỗ)
+Mọi replica dùng **cùng** khoá (`private_key`, địa chỉ = `raft.sequencer_address`, node tự thoát khi lệch). `check` báo `key_consistent=false` nếu các replica báo địa chỉ ký khác nhau. Khoá không đi qua mạng (mỗi node đọc từ cấu hình cục bộ).
+
+**Không để khoá dạng rõ trong `config.json`:** `pkg/keyvault` (scrypt N=2^15 + AES-256-GCM) lưu mỗi bí mật thành chuỗi `enc:v1:…`; node giải mã **một lần lúc khởi động, trong bộ nhớ**. Mật khẩu **không** nằm trong `config.json`: lấy từ biến môi trường `META_KEY_PASSWORD`, hoặc từ file (mode 0600, trường `key_password_file` hoặc `META_KEY_PASSWORD_FILE`; file mở cho group/others bị từ chối). Không có mật khẩu / sai mật khẩu ⇒ node **không khởi động** (không chạy với khoá hỏng).
+- Mã hoá cả file: `encrypt_secret config -in config.json -out config.enc.json -password-file /etc/metanode/keypw [-require]` (cmd/tool/encrypt_secret) — mã hoá mọi bí mật còn dạng rõ (`private_key`, `Databases.BLSPrivateKey`, `gateway_bls_key`, `reward_sender_private_key`, `securepassword`, `master_password`, `app_pepper`, `pk_admin_file_storage`, `bls_admin_storage`, `cross_chain.root_anchor_submitter_private_key_hex`), không ghi đè file có sẵn, bí mật đọc từ stdin (không vào lịch sử shell). `-require` đặt `require_encrypted_keys=true`: node từ chối khởi động nếu còn bí mật dạng rõ.
+- Từng giá trị: `printf '%s' "$KEY" | encrypt_secret encrypt -password-file pw` → dán chuỗi `enc:v1:…` vào trường; kiểm bằng `decrypt`. Biến `META_PRIVATE_KEY`… cũng có thể mang chuỗi `enc:v1:…`.
+- Cùng một khoá trên mọi replica ⇒ có thể dùng cùng mật khẩu hoặc mỗi node một mật khẩu (mỗi bản mã có salt/nonce riêng). **Giới hạn:** bảo vệ khoá khi nghỉ và trong bản sao lưu cấu hình; kẻ đọc được cả nguồn mật khẩu lẫn cấu hình trên máy đang chạy vẫn lấy được khoá. Đặt file mật khẩu ở nơi khác `config.json`/sao lưu (ví dụ `/etc`, quyền 0600, hoặc trình quản lý bí mật đẩy vào biến môi trường).
 
 ## Giới hạn
 - Một máy thử: chưa chạy trên nhiều máy thật. `add-replica` cần sao chép thư mục dữ liệu ngoài băng (ổ btrfs/xfs có reflink cho nhanh).
