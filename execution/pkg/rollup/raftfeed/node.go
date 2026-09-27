@@ -121,6 +121,11 @@ type Node struct {
 
 var cluster atomic.Pointer[Node]
 
+// GetNode returns the global Node instance, if any.
+func GetNode() *Node {
+	return cluster.Load()
+}
+
 // StartCluster starts this replica and registers it as the target of Submit/Ready.
 func StartCluster(cc ClusterConfig) (*Node, error) {
 	if cluster.Load() != nil {

@@ -42,4 +42,5 @@ type Client interface {
 	
 	GetTransferRecord(msgID common.Hash) (FloatTransferRecord, bool, error)
 	GetClaimed(msgID common.Hash) (FloatOutcome, error)
+	GetFloatSeq(pubKey cm.PublicKey) (uint64, error)
 }

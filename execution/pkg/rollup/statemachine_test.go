@@ -85,11 +85,7 @@ var allValidTransitions = []TransitionFixture{
 		EventType:   EventRefundObserved,
 		Event:       Event{Type: EventRefundObserved, Sender: testSender, Value: testValue},
 		ToState:     StateConfirmedRefunded,
-		ActionCount: 1,
-		ActionType:  ActionCreditLocal,
-		ExpectedActions: []Action{
-			{Type: ActionCreditLocal, Target: testSender, Amount: testValue},
-		},
+		ActionCount: 0,
 	},
 	{
 		FromState: StateSentConfirmed,
@@ -127,6 +123,22 @@ var allValidTransitions = []TransitionFixture{
 		EventType:   EventReclaimLost,
 		Event:       Event{Type: EventReclaimLost},
 		ToState:     StateSentConfirmed,
+		ActionCount: 0,
+	},
+	{
+		FromState:   StateReclaimSubmitted,
+		Role:        RoleSender,
+		EventType:   EventClaimedObserved,
+		Event:       Event{Type: EventClaimedObserved, Outcome: OutcomeCredited},
+		ToState:     StateConfirmedSuccess,
+		ActionCount: 0,
+	},
+	{
+		FromState:   StateReclaimSubmitted,
+		Role:        RoleSender,
+		EventType:   EventClaimedObserved,
+		Event:       Event{Type: EventClaimedObserved, Outcome: OutcomeRefund},
+		ToState:     StateRefundInTransit,
 		ActionCount: 0,
 	},
 
@@ -386,7 +398,7 @@ func TestValidTransitionsTable(t *testing.T) {
 		}
 
 		s2, act2, err := Next(s1, RoleSender, Event{Type: EventRefundObserved, Sender: testSender, Value: testValue})
-		if err != nil || s2 != StateConfirmedRefunded || len(act2) != 1 || act2[0].Type != ActionCreditLocal {
+		if err != nil || s2 != StateConfirmedRefunded || len(act2) != 0 {
 			t.Fatalf("RefundObserved failed: s=%s, act=%d, err=%v", s2, len(act2), err)
 		}
 	})

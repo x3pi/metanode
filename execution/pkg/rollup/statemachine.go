@@ -88,7 +88,7 @@ func Next(current State, recordRole Role, event Event) (State, []Action, error) 
 		if current == StateRefundInTransit && event.Outcome == OutcomeRefund {
 			return StateRefundInTransit, nil, nil // Idempotent
 		}
-		if current != StateSentConfirmed {
+		if current != StateSentConfirmed && current != StateReclaimSubmitted {
 			return current, nil, fmt.Errorf("%w: claimed observed not allowed from state %s", ErrInvalidTransition, current)
 		}
 
@@ -108,17 +108,7 @@ func Next(current State, recordRole Role, event Event) (State, []Action, error) 
 		if current != StateRefundInTransit {
 			return current, nil, fmt.Errorf("%w: refund observed not allowed from state %s", ErrInvalidTransition, current)
 		}
-		if event.Value == nil || event.Value.Sign() <= 0 {
-			return current, nil, ErrInvalidAmount
-		}
-		actions := []Action{
-			{
-				Type:   ActionCreditLocal,
-				Target: event.Sender,
-				Amount: CloneBigInt(event.Value),
-			},
-		}
-		return StateConfirmedRefunded, actions, nil
+		return StateConfirmedRefunded, nil, nil
 
 	case EventReclaimEligible:
 		if current == StateReclaimSubmitted {
