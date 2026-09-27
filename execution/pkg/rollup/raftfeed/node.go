@@ -45,6 +45,9 @@ type ClusterConfig struct {
 	// OnFatal is called once, from a goroutine, when this replica must stop (cannot apply an entry exactly).
 	OnFatal func(error)
 
+	// ForwardAddrOf is a test hook resolving members that are in neither peers[] nor derivable by offset.
+	ForwardAddrOf func(raft.ServerID) (string, bool)
+
 	// Test hooks: an injected transport (in-memory, partitionable), an already bound forward listener, a secret.
 	WrapLogStore    func(raft.LogStore) raft.LogStore // test hook: inject log-store faults
 	Tune            func(*raft.Config)                // last word on the library config (e.g. a short snapshot interval)
@@ -83,9 +86,13 @@ type Node struct {
 	proposeQ chan proposal
 	inflight chan inflight
 
-	forwardAddr map[raft.ServerID]string
-	client      *http.Client
-	httpSrv     *http.Server
+	forwardAddr   map[raft.ServerID]string
+	forwardAddrOf func(raft.ServerID) (string, bool) // test hook (members the static list does not know)
+	member        membership
+	logStore      raft.LogStore
+	draining      atomic.Bool // leader is being drained for a leadership transfer: accept no new batches
+	client        *http.Client
+	httpSrv       *http.Server
 
 	stop     chan struct{}
 	ready    chan struct{} // closed once n.raft is assigned
@@ -141,9 +148,10 @@ func startNode(cc ClusterConfig) (*Node, error) {
 	}
 	n := &Node{
 		cfg: rc, secret: secret, now: cc.Now,
-		proposeQ:    make(chan proposal, rc.ProposeQueueSize),
-		inflight:    make(chan inflight, rc.ProposeQueueSize),
-		forwardAddr: map[raft.ServerID]string{},
+		proposeQ:      make(chan proposal, rc.ProposeQueueSize),
+		inflight:      make(chan inflight, rc.ProposeQueueSize),
+		forwardAddr:   map[raft.ServerID]string{},
+		forwardAddrOf: cc.ForwardAddrOf,
 		client: &http.Client{
 			Timeout:       forwardTimeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -152,7 +160,9 @@ func startNode(cc ClusterConfig) (*Node, error) {
 		ready: make(chan struct{}),
 	}
 	for _, p := range rc.Peers {
-		n.forwardAddr[raft.ServerID(p.ID)] = p.ForwardAddress
+		if p.ForwardAddress != "" {
+			n.forwardAddr[raft.ServerID(p.ID)] = p.ForwardAddress
+		}
 	}
 	if err := n.start(cc); err != nil {
 		n.Stop()
@@ -187,9 +197,11 @@ func (n *Node) start(cc ClusterConfig) error {
 	if err != nil {
 		return fmt.Errorf("raft state check: %w", err)
 	}
-	if !hasState && cc.Durable() > 0 {
-		// Log positions and block numbers are only aligned for a chain that started with this cluster.
-		return fmt.Errorf("raft state is empty but the chain already has block %d: cannot align (fresh chain required, plan C4)", cc.Durable())
+	if !hasState && cc.Durable() > 0 && !rc.JoinExistingChain {
+		// Log positions and block numbers are only aligned for a chain that started with this cluster, or for a
+		// replica that joins with a DB copied from a peer (join_existing_chain): then log/snapshot replay skips the
+		// blocks the DB already has and the FSM counters come from the log/snapshot, not from the DB.
+		return fmt.Errorf("raft state is empty but the chain already has block %d: set raft.join_existing_chain only if this data directory was copied from a stopped peer (rollup-cluster prepare-replica)", cc.Durable())
 	}
 
 	trans := cc.Transport
@@ -247,6 +259,7 @@ func (n *Node) start(cc ClusterConfig) error {
 	// A log write that fails may or may not have reached the disk: continuing (as a leader that keeps sending
 	// heartbeats, or a follower that acks) could acknowledge entries that are not durable. Leave the cluster.
 	logStore = &failClosedLogStore{LogStore: logStore, onFatal: func(err error) { go onFatal(err) }}
+	n.logStore = logStore
 	if n.raft, err = raft.NewRaft(rcfg, n.fsm, logStore, stable, snaps, trans); err != nil {
 		return fmt.Errorf("raft start: %w", err)
 	}
@@ -270,6 +283,7 @@ func (n *Node) start(cc ClusterConfig) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(submitPath, n.handleSubmit)
 	mux.HandleFunc(hashPath, n.handleBlockHash)
+	n.registerAdmin(mux)
 	n.httpSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second}
 	n.wg.Add(4)
 	go func() { defer n.wg.Done(); n.attestLoop() }()
@@ -305,7 +319,7 @@ func (n *Node) Stop() {
 // committed within submitCommitTimeout) means "keep the batch and retry": the caller may then send a batch that
 // did commit a second time, which Go's tx dedup absorbs.
 func (n *Node) Submit(batch []byte) bool {
-	if n.failed.Load() {
+	if n.failed.Load() || n.draining.Load() {
 		return false
 	}
 	if n.raft.State() == raft.Leader {
@@ -318,7 +332,7 @@ func (n *Node) Submit(batch []byte) bool {
 // A malformed or empty batch can never become a block and would halt every replica if proposed, so it is
 // dropped here (counted), exactly like the C1 feeder.
 func (n *Node) submitLocal(batch []byte) submitStatus {
-	if n.failed.Load() {
+	if n.failed.Load() || n.draining.Load() {
 		return statusNoLeader
 	}
 	if n.raft.State() != raft.Leader {
@@ -470,7 +484,7 @@ func (n *Node) resultLoop() {
 // Ready reports whether this node may accept transactions: a leader is known, the replica has not failed and,
 // on the leader, the propose queue has room.
 func (n *Node) Ready() bool {
-	if n.failed.Load() {
+	if n.failed.Load() || n.draining.Load() {
 		return false
 	}
 	if n.raft.State() == raft.Leader {

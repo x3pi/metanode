@@ -52,6 +52,10 @@ type fsm struct {
 
 	failed  atomic.Bool
 	skipped atomic.Uint64
+
+	// snapshotBlock is the last block number covered by the newest snapshot this replica took or restored: a
+	// replica joining with a DB older than that cannot be served from the leader's compacted log.
+	snapshotBlock atomic.Uint64
 }
 
 func newFSM(st stamper, sink chan<- *pb.ExecutableBlock, durable func() uint64, stop <-chan struct{}, onFatal func(error)) *fsm {
@@ -145,6 +149,7 @@ func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	f.snapshotBlock.Store(meta.LastBlockNumber)
 	return &metaSnapshot{data: data}, nil
 }
 
@@ -174,6 +179,7 @@ func (f *fsm) Restore(rc io.ReadCloser) error {
 	f.st.lastTs = meta.LastTimestampMs
 	f.appliedIndex = meta.AppliedIndex
 	f.delivered = meta.LastBlockNumber
+	f.snapshotBlock.Store(meta.LastBlockNumber)
 	return nil
 }
 

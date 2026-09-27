@@ -48,7 +48,8 @@
 | C0 (spike) | **Có, nên làm sớm** | Điểm nối đã tìm ra (dưới); cần chứng minh thực thi xác định giữa 2 tiến trình |
 | C1 | **Đã làm (2026-09-26)** | Xem `NEXT_STEPS_PLAN.md` N3 |
 | C2 | **Đã làm tập con khả thi (2026-09-26)** | Xem `NEXT_STEPS_PLAN.md` N3b (còn mất điện giữa fsync thật, đa máy) |
-| C3–C6, D1 | **Chưa** | Chờ C2 |
+| C4 | **Đã làm (2026-09-27)** | Xem `NEXT_STEPS_PLAN.md` N3c và `RAFT_CLUSTER_RUNBOOK.md` |
+| C3, C5–C6, D1 | **Chưa** | C3 chờ B9 |
 
 **Điểm đã xác minh — điểm nối vào xử lý block Go:**
 1. `BlockProcessor.processRustEpochData(dataChan)` (`cmd/simple_chain/processor/block_processor_network.go:129`) đọc **hai** nguồn trong cùng một `select`: `executor.GetAuthoritativeBlockQueue()` (Rust) và `dataChan` (kênh `chan *pb.ExecutableBlock`, "legacy"); cả hai cùng đổ vào `speculativeExecutor.ExecuteSpeculative(epochData, lastHeader, authRespCh)`. **Xử lý block Go nhận `ExecutableBlock` từ bất kỳ nguồn nào.** Nguồn Rust chỉ bị bỏ qua nếu không gọi `executor.InitFFIBridge` (nó ở dòng 104 cùng file): khi đó kênh authoritative là `nil`, nhánh đó của `select` không bao giờ được chọn.
@@ -376,7 +377,7 @@ Chi tiết, schema và test `T-AN-*` ở `SEQUENCER_PARENT_ANCHORING.md`. **Ph�
 | C1 | Chế độ `raft` trên 1 node: điểm móc H1–H6, nguồn cấp Go | L | C0 | ☑ (2026-09-26) |
 | C2 | Raft: nhân bản batch, FSM cấp block | L | C1 | ☑ (2026-09-26, tập con: còn mất điện giữa fsync thật, đa máy, C4) |
 | C3 | Hành động ra ngoài chỉ từ batch đã commit | M | B9, C2 | ☐ |
-| C4 | Đổi leader, thay replica, `rollup-cluster` | L | C3 | ☐ |
+| C4 | Đổi leader, thay replica, `rollup-cluster` | L | C3 | ☑ (2026-09-27; làm trước C3 vì độc lập; còn khoá ký mã hoá tại chỗ, đa máy) |
 | C5 | Chaos test + đa máy | L | C4 | ☐ |
 | C6 | CI, build, tài liệu cấu trúc | S | C5 | ☐ |
 | D1 | Giám sát + runbook | M | C5 | ☐ |

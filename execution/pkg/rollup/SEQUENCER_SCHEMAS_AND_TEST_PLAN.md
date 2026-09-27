@@ -150,6 +150,8 @@ Nguồn trường: `execution/pkg/proto/executor.proto`. `FSM.Apply` (mọi repl
 > - `T-RF-09`: replica so hash header block checkpoint (bội của 10) với peer, lệch đa số ⇒ dừng (`attest.go`); binary thử nghiệm có tag `rollup_faults` mới có hook tiêm lệch.
 > - `FsmSnapshotMeta` có thêm `last_global_exec_index=4` và `last_timestamp_ms=7`; `last_state_root=6` dành sẵn, chưa dùng.
 
+> **Ghi chú triển khai C4 (2026-09-27):** thêm cấu hình `raft.join_existing_chain`, `raft.forward_port_offset`; kênh nội bộ có thêm `GET /raft/v1/admin/status`, `POST /raft/v1/admin/{transfer,add,remove}` (HMAC trên `query‖body`, id gửi `admin` cho công cụ) và `GET /raft/v1/blockhash`; đầu ra `check` (schema 1.10 thu gọn) là `CheckReport` trong `raftfeed/adminclient.go`. Xem `RAFT_CLUSTER_RUNBOOK.md`.
+
 ### 1.4. Metadata snapshot của FSM và bố cục lưu trữ Raft  **[ĐỀ XUẤT]**
 
 State thật nằm trong NOMT/DB, không nằm trong bộ nhớ FSM, nên snapshot Raft chỉ giữ metadata:
