@@ -322,7 +322,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 				return common.Hash{}, false
 			}
 			return tip.Header().Hash(), true
-		}))
+		}, &executionLock{release: se.bp.ExecutionMutex.RUnlock, reacquire: se.bp.ExecutionMutex.RLock}))
 		accumulatedResults, execErr := tx_processor.ProcessTransactions(gatedCtx, csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum, true)
 		execDuration := time.Since(startTime)
 		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(accumulatedResults.Transactions), 0, execDuration.Microseconds())

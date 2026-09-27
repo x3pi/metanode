@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ func tipOf(h common.Hash) func() (common.Hash, bool) {
 // A speculative execution must not reach the state roots (the NOMT handle) before its predecessor is committed.
 func TestIRGate_WaitsForPredecessorCommit(t *testing.T) {
 	se := newGateExecutor()
-	gate := se.newIRGate(gateBase+5, parentA, tipOf(parentA))
+	gate := se.newIRGate(gateBase+5, parentA, tipOf(parentA), nil)
 	done := make(chan error, 1)
 	go func() { done <- gate(context.Background()) }()
 	select {
@@ -56,7 +57,7 @@ func TestIRGate_WaitsForPredecessorCommit(t *testing.T) {
 func TestIRGate_RefusesStaleParent(t *testing.T) {
 	se := newGateExecutor()
 	se.MarkCommitted(gateBase + 9)
-	gate := se.newIRGate(gateBase+10, parentA, tipOf(parentB))
+	gate := se.newIRGate(gateBase+10, parentA, tipOf(parentB), nil)
 	if err := gate(context.Background()); err != errSpeculativeParentStale {
 		t.Fatalf("got %v, want errSpeculativeParentStale", err)
 	}
@@ -65,7 +66,7 @@ func TestIRGate_RefusesStaleParent(t *testing.T) {
 func TestIRGate_ValidParentPasses(t *testing.T) {
 	se := newGateExecutor()
 	se.MarkCommitted(gateBase + 9)
-	if err := se.newIRGate(gateBase+10, parentA, tipOf(parentA))(context.Background()); err != nil {
+	if err := se.newIRGate(gateBase+10, parentA, tipOf(parentA), nil)(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -75,7 +76,7 @@ func TestIRGate_CancelUnblocksWaiter(t *testing.T) {
 	se := newGateExecutor()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- se.newIRGate(gateBase+50, parentA, tipOf(parentA))(ctx) }()
+	go func() { done <- se.newIRGate(gateBase+50, parentA, tipOf(parentA), nil)(ctx) }()
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 	select {
@@ -95,7 +96,7 @@ func TestIRGate_OpensInGEIOrder(t *testing.T) {
 	for _, g := range []uint64{gateBase + 3, gateBase + 2, gateBase + 4} { // arrive out of order
 		g := g
 		go func() {
-			if err := se.newIRGate(g, parentA, tipOf(parentA))(context.Background()); err == nil {
+			if err := se.newIRGate(g, parentA, tipOf(parentA), nil)(context.Background()); err == nil {
 				order <- g
 			}
 		}()
@@ -111,5 +112,42 @@ func TestIRGate_OpensInGEIOrder(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("GEI %d did not pass after its predecessor committed", g)
 		}
+	}
+}
+
+// A speculative worker waiting in the gate must not keep the execution read lock: a writer (PauseExecution for a
+// snapshot, P2P sync) is pending, blocks NEW readers — including the committer that has to commit the predecessor —
+// and waits for this worker: a deadlock unless the gate lets go of the read lock while it waits.
+func TestIRGate_DoesNotHoldExecutionLockWhileWaiting(t *testing.T) {
+	se := newGateExecutor()
+	var mu sync.RWMutex
+	mu.RLock() // what the speculative worker holds while it runs
+	lock := &executionLock{release: mu.RUnlock, reacquire: mu.RLock}
+	gateDone := make(chan error, 1)
+	go func() {
+		err := se.newIRGate(gateBase+20, parentA, tipOf(parentA), lock)(context.Background())
+		mu.RUnlock() // the worker's deferred RUnlock
+		gateDone <- err
+	}()
+	time.Sleep(100 * time.Millisecond) // the gate is waiting for gateBase+19
+
+	writerGot := make(chan struct{})
+	go func() { mu.Lock(); close(writerGot); mu.Unlock() }() // PauseExecution
+	select {
+	case <-writerGot:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the gate kept the execution read lock while waiting: a pending writer (snapshot/sync) deadlocks with the committer")
+	}
+	// the committer (needs the read lock, which the pending writer gave back) commits the predecessor
+	mu.RLock()
+	se.MarkCommitted(gateBase + 19)
+	mu.RUnlock()
+	select {
+	case err := <-gateDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the gate did not finish after the predecessor committed")
 	}
 }
