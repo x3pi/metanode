@@ -121,6 +121,9 @@ func (bp *BlockProcessor) runUnixSocket() {
 				Raft:    *rc,
 				Sink:    blockQueue,
 				Durable: storage.GetLastBlockNumber,
+				// C4: a new replica can fetch a consistent snapshot of this node over the internal channel.
+				StateSource:      bp.NewRaftStateSource(bp.config.Databases.RootPath, rc.StateTransferAllowCopy),
+				StateTransferDir: bp.config.Databases.RootPath + ".state_transfer",
 				BlockHash: func(n uint64) (common.Hash, bool) {
 					return blockchain.GetBlockChainInstance().GetBlockHashByNumber(n)
 				},

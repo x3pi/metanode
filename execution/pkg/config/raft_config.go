@@ -26,6 +26,10 @@ type RaftConfig struct {
 	// prepare-replica`). Log/snapshot replay then skips the blocks the DB already has. Never together with
 	// Bootstrap. Without it such a start is refused (block numbers and log positions would not be aligned).
 	JoinExistingChain bool `json:"join_existing_chain,omitempty"`
+	// StateTransferAllowCopy lets this node serve state to a new replica on a filesystem WITHOUT reflink support
+	// (ext4...). The atomic snapshot is then a full copy and execution stays paused for as long as it takes to
+	// copy the database (seconds to minutes on a big one): off by default, the request is refused instead.
+	StateTransferAllowCopy bool `json:"state_transfer_allow_copy,omitempty"`
 	// ForwardPortOffset, when > 0, defines every member's internal endpoint as (raft host, raft port + offset), so
 	// members added at runtime are reachable without editing the config of the others. Then peers[].forward_address
 	// is optional and this node's forward_bind_address port must equal its advertise port + offset.

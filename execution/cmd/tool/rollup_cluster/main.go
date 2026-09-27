@@ -7,14 +7,20 @@
 //	rollup-cluster -config cluster.json transfer-leader --to n1 [--dry-run]
 //	rollup-cluster -config cluster.json add-replica --id n3 --raft-addr host:7103 --admin-addr host:7203 [--dry-run]
 //	rollup-cluster -config cluster.json remove-replica --id n2 [--transfer-first] [--dry-run]
+//	rollup-cluster -config cluster.json hold-snapshots --on on|off
+//	rollup-cluster -config cluster.json fetch-state --from host:7200 --to-data /path/new/data [--workers 4] [--dry-run]
 //	rollup-cluster prepare-replica --from-data /path/of/stopped/peer/data --to-data /path/new/data --from-admin host:7201 [--dry-run]
 //
 // cluster.json: {"secret_file": "path/to/raft_forward.key", "members": [{"id":"n0","raft_addr":"h:7100","admin_addr":"h:7200"}, ...]}
 //
-// Adding a replica (the state is NOT streamed over the network; Raft snapshots only carry counters):
-//  1. stop one healthy peer, `prepare-replica` copies its data directory (skipping the peer's Raft directory), restart the peer;
-//  2. start the new replica with raft.join_existing_chain=true (empty Raft state, copied DB), same sequencer key and secret;
-//  3. `add-replica` adds it as a NON-voter, waits until it caught up, checks its tip hash equals the leader's, then promotes it.
+// Adding a replica (Raft snapshots only carry counters, so the state has to come from a peer):
+//  0. `hold-snapshots --on on` (log compaction paused on every member; releases itself after 30 minutes);
+//  1. EITHER `fetch-state` pulls a consistent snapshot of a RUNNING peer over the internal channel (the peer pauses
+//     execution for the short time its atomic checkpoints/reflinks take; needs a reflink filesystem on the donor),
+//     OR stop one healthy peer and `prepare-replica` copies its data directory, then restart the peer;
+//  2. start the new replica with raft.join_existing_chain=true (empty Raft state, that DB), same sequencer key and secret;
+//  3. `add-replica` adds it as a NON-voter, waits until it caught up, checks its tip hash equals the leader's, then promotes it;
+//  4. `hold-snapshots --on off`.
 package main
 
 import (
@@ -102,6 +108,54 @@ func run(args []string) int {
 		}
 		cl.CatchUpWait = *wait
 		return report(cl.AddReplica(cf.Members, raftfeed.Member{ID: *id, RaftAddr: *raftAddr, AdminAddr: *adminAddr}, *dry))
+	case "hold-snapshots":
+		on := fs.String("on", "", "on | off")
+		if err := fs.Parse(cargs); err != nil {
+			return 2
+		}
+		if *on != "on" && *on != "off" {
+			return fail(errors.New("--on must be 'on' or 'off'"))
+		}
+		if *dry {
+			fmt.Printf("would %s automatic Raft snapshots on %d member(s)\n", *on, len(cf.Members))
+			return 0
+		}
+		if errs := cl.HoldSnapshots(cf.Members, *on == "on"); len(errs) > 0 {
+			for _, e := range errs {
+				fmt.Fprintln(os.Stderr, "ERROR:", e)
+			}
+			return 1
+		}
+		fmt.Println("ok")
+		return 0
+	case "fetch-state":
+		from := fs.String("from", "", "donor's internal endpoint host:port (a running, healthy replica; the leader or the most caught-up)")
+		toData := fs.String("to-data", "", "databases.root_path of the new replica (must not exist, or hold an unfinished fetch)")
+		workers := fs.Int("workers", 4, "parallel downloads")
+		if err := fs.Parse(cargs); err != nil {
+			return 2
+		}
+		if *from == "" || *toData == "" {
+			return fail(errors.New("--from and --to-data are required"))
+		}
+		st, err := cl.Status(*from)
+		if err != nil {
+			return fail(fmt.Errorf("refused: the donor is not reachable at %s: %w", *from, err))
+		}
+		if st.Failed {
+			return fail(errors.New("refused: the donor has failed"))
+		}
+		fmt.Printf("donor %s: state=%s, last block %d\nsteps:\n  1. the donor pauses execution briefly and takes an atomic snapshot (checkpoints/reflinks), then resumes\n  2. it hashes every file; the manifest is authenticated by the donor's MAC\n  3. download + verify every file into %s (resumable: re-run after an interruption)\n  4. the donor discards its staging copy\n", st.NodeID, st.State, st.LastBlock, *toData)
+		if *dry {
+			return 0
+		}
+		start := time.Now()
+		man, err := cl.FetchState(*from, *toData, raftfeed.FetchStateOptions{Workers: *workers})
+		if err != nil {
+			return fail(err)
+		}
+		fmt.Printf("ok: %d files, snapshot at block %d (hash %s) in %v\nnext: start the new replica with raft.join_existing_chain=true, then `add-replica`\n", len(man.Files), man.Meta.LastBlock, man.Meta.BlockHash, time.Since(start).Round(time.Millisecond))
+		return 0
 	case "remove-replica":
 		id := fs.String("id", "", "member id to remove")
 		tf := fs.Bool("transfer-first", false, "if it is the leader, move leadership away first")

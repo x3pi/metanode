@@ -56,6 +56,16 @@ func NewBlobStore(path string, namespace string) (*BlobStore, error) {
 	return &BlobStore{db: db, namespace: namespace}, nil
 }
 
+// Checkpoint creates an atomic Pebble checkpoint of the blob store at destDir (for state transfer / snapshots).
+func (s *BlobStore) Checkpoint(destDir string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.db == nil {
+		return fmt.Errorf("blob store is closed")
+	}
+	return s.db.Checkpoint(destDir)
+}
+
 // Close gracefully shuts down the database.
 func (s *BlobStore) Close() error {
 	s.mu.Lock()

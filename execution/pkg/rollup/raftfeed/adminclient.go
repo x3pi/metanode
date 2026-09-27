@@ -369,7 +369,7 @@ func (c *AdminClient) AddReplica(members []Member, nm Member, dryRun bool) ([]st
 		return nil, fmt.Errorf("refused: the new replica's state (block %d) is ahead of the leader's (block %d): it is not a copy of this chain", ns.LastBlock, ls.LastBlock)
 	}
 	if ls.FirstLogIndex > 1 && ns.LastBlock < ls.SnapshotBlock {
-		return nil, fmt.Errorf("refused: the leader's log is compacted (first index %d, snapshot covers block %d) and the new replica's state stops at block %d: copy a recent state from a stopped peer first (prepare-replica)", ls.FirstLogIndex, ls.SnapshotBlock, ns.LastBlock)
+		return nil, fmt.Errorf("refused: the leader's log is compacted (first index %d, snapshot covers block %d) and the new replica's state stops at block %d: hold snapshots (rollup-cluster hold-snapshots on), copy a fresh state (fetch-state / prepare-replica), start the replica and retry", ls.FirstLogIndex, ls.SnapshotBlock, ns.LastBlock)
 	}
 	if err := c.sameChainAt(all, lm, nm, ns); err != nil {
 		return nil, err
@@ -519,4 +519,26 @@ func FormatSteps(steps []string) string {
 // ShortHTTPClient is a client for probes that must fail fast (is that peer really stopped?).
 func ShortHTTPClient() *http.Client {
 	return &http.Client{Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+}
+
+// HoldSnapshots asks every reachable member to stop (on) / resume (off) automatic Raft snapshots. Use it around
+// building a new replica from a state copy: hold, fetch-state (or prepare-replica), start it, add-replica, release.
+func (c *AdminClient) HoldSnapshots(members []Member, on bool) []error {
+	v := "0"
+	if on {
+		v = "1"
+	}
+	var errs []error
+	for _, m := range members {
+		code, _, b, err := c.do(http.MethodPost, m.AdminAddr, adminSnapHoldPath, url.Values{"hold": {v}}.Encode(), nil)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("%s: %w", m.ID, err))
+		case code != http.StatusOK:
+			var r adminResult
+			_ = json.Unmarshal(b, &r)
+			errs = append(errs, fmt.Errorf("%s: %s (HTTP %d)", m.ID, r.Error, code))
+		}
+	}
+	return errs
 }

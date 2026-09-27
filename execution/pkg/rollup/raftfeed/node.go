@@ -45,6 +45,10 @@ type ClusterConfig struct {
 	// OnFatal is called once, from a goroutine, when this replica must stop (cannot apply an entry exactly).
 	OnFatal func(error)
 
+	// StateSource + StateTransferDir enable serving a consistent snapshot of this node to a new replica (C4).
+	// StateTransferDir must be on the same filesystem as the database root.
+	StateSource      StateSource
+	StateTransferDir string
 	// ForwardAddrOf is a test hook resolving members that are in neither peers[] nor derivable by offset.
 	ForwardAddrOf func(raft.ServerID) (string, bool)
 
@@ -89,8 +93,13 @@ type Node struct {
 	forwardAddr   map[raft.ServerID]string
 	forwardAddrOf func(raft.ServerID) (string, bool) // test hook (members the static list does not know)
 	member        membership
+	state         stateTransfer
 	logStore      raft.LogStore
-	draining      atomic.Bool // leader is being drained for a leadership transfer: accept no new batches
+	snapMu        sync.Mutex
+	snapHold      atomic.Bool
+	snapTimer     *time.Timer
+	reloadBase    raft.ReloadableConfig // the configured values a released hold goes back to
+	draining      atomic.Bool           // leader is being drained for a leadership transfer: accept no new batches
 	client        *http.Client
 	httpSrv       *http.Server
 
@@ -152,6 +161,7 @@ func startNode(cc ClusterConfig) (*Node, error) {
 		inflight:      make(chan inflight, rc.ProposeQueueSize),
 		forwardAddr:   map[raft.ServerID]string{},
 		forwardAddrOf: cc.ForwardAddrOf,
+		state:         stateTransfer{base: cc.StateTransferDir, source: cc.StateSource},
 		client: &http.Client{
 			Timeout:       forwardTimeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -193,6 +203,7 @@ func (n *Node) start(cc ClusterConfig) error {
 		return fmt.Errorf("raft snapshot store: %w", err)
 	}
 
+	n.cleanStaging()
 	hasState, err := raft.HasExistingState(logs, stable, snaps)
 	if err != nil {
 		return fmt.Errorf("raft state check: %w", err)
@@ -251,6 +262,10 @@ func (n *Node) start(cc ClusterConfig) error {
 	if cc.Tune != nil {
 		cc.Tune(rcfg)
 	}
+	n.reloadBase = raft.ReloadableConfig{
+		TrailingLogs: rcfg.TrailingLogs, SnapshotInterval: rcfg.SnapshotInterval, SnapshotThreshold: rcfg.SnapshotThreshold,
+		HeartbeatTimeout: rcfg.HeartbeatTimeout, ElectionTimeout: rcfg.ElectionTimeout,
+	}
 
 	var logStore raft.LogStore = logs
 	if cc.WrapLogStore != nil {
@@ -284,6 +299,7 @@ func (n *Node) start(cc ClusterConfig) error {
 	mux.HandleFunc(submitPath, n.handleSubmit)
 	mux.HandleFunc(hashPath, n.handleBlockHash)
 	n.registerAdmin(mux)
+	n.registerState(mux)
 	n.httpSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second}
 	n.wg.Add(4)
 	go func() { defer n.wg.Done(); n.attestLoop() }()

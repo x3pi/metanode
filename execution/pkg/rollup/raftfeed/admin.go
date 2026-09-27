@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -21,6 +22,7 @@ const (
 	adminTransferPath = "/raft/v1/admin/transfer"
 	adminAddPath      = "/raft/v1/admin/add"
 	adminRemovePath   = "/raft/v1/admin/remove"
+	adminSnapHoldPath = "/raft/v1/admin/snapshots"
 
 	// promoteMaxLag: a non-voter may become a voter only when its applied index is within this many entries of the
 	// leader's commit index ("counts toward the majority only after it caught up").
@@ -53,6 +55,7 @@ type Status struct {
 	LastBlock         uint64       `json:"last_block"`
 	Servers           []ServerInfo `json:"servers"`
 	Draining          bool         `json:"draining"`
+	SnapshotsHeld     bool         `json:"snapshots_held"`
 	Failed            bool         `json:"failed"`
 	SequencerAddress  string       `json:"sequencer_address"`
 	Attested          uint64       `json:"attested"`
@@ -79,6 +82,7 @@ func (n *Node) Status() Status {
 		LastSnapshotIndex: statUint(st, "last_snapshot_index"),
 		SnapshotBlock:     n.fsm.snapshotBlock.Load(),
 		Draining:          n.draining.Load(),
+		SnapshotsHeld:     n.snapHold.Load(),
 		Failed:            n.failed.Load(),
 		SequencerAddress:  n.cfg.SequencerAddress,
 		Attested:          n.attested.Load(),
@@ -175,6 +179,9 @@ func (n *Node) registerAdmin(mux *http.ServeMux) {
 		}
 		q := r.URL.Query()
 		respond(w, n.AddMember(q.Get("id"), q.Get("addr"), q.Get("voter") == "1"))
+	}))
+	mux.HandleFunc(adminSnapHoldPath, n.adminHandler(func(w http.ResponseWriter, r *http.Request) {
+		respond(w, n.HoldSnapshots(r.URL.Query().Get("hold") == "1"))
 	}))
 	mux.HandleFunc(adminRemovePath, n.adminHandler(func(w http.ResponseWriter, r *http.Request) {
 		if !n.leaderOnly(w) {
@@ -360,6 +367,41 @@ func RemovalSafe(servers []ServerInfo, live map[string]bool, remove string) erro
 	}
 	if liveVoters < voters/2+1 {
 		return fmt.Errorf("removing %s would leave %d live voters of %d, below the majority %d: the cluster would lose its quorum", remove, liveVoters, voters, voters/2+1)
+	}
+	return nil
+}
+
+// snapshotHoldMax bounds a snapshot hold: it only postpones log compaction (disk space), so it releases itself
+// instead of letting the log grow for ever if the operator forgets. (A variable so tests can shorten it.)
+var snapshotHoldMax = 30 * time.Minute
+
+// HoldSnapshots stops (on) or resumes (off) the AUTOMATIC Raft snapshots of this replica, i.e. log compaction.
+// While a new replica is being built from a state copy, the leader's latest snapshot must not move past the copied
+// state: a joiner whose DB is older than the snapshot the leader installs cannot restore it (fail closed), so the
+// operator holds snapshots on every replica, copies the state, adds the replica, then releases.
+func (n *Node) HoldSnapshots(on bool) error {
+	n.snapMu.Lock()
+	defer n.snapMu.Unlock()
+	if n.snapTimer != nil {
+		n.snapTimer.Stop()
+		n.snapTimer = nil
+	}
+	rc := n.reloadBase
+	if on {
+		rc.SnapshotThreshold = math.MaxUint64
+		rc.SnapshotInterval = 24 * time.Hour
+	}
+	if err := n.raft.ReloadConfig(rc); err != nil {
+		return err
+	}
+	n.snapHold.Store(on)
+	if on {
+		n.snapTimer = time.AfterFunc(snapshotHoldMax, func() { _ = n.HoldSnapshots(false) })
+	} else {
+		// Raft's snapshot loop re-arms its timer only after it fires: while held that timer ran with the long
+		// interval. A user-triggered snapshot wakes the loop, which then re-arms with the restored interval (and
+		// takes the compaction that was postponed).
+		go func() { _ = n.raft.Snapshot().Error() }()
 	}
 	return nil
 }

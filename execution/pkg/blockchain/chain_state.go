@@ -1645,6 +1645,25 @@ func (cs *ChainState) CheckpointChangelogs(destBaseDir string) error {
 		}
 		logger.Info("✅ [STATE CHANGELOG] Checkpointed changelog_db_stake to %s", cPath)
 	}
+	// The shared contract-storage changelog and the EIP-4844 blob store live under history/ too. A snapshot
+	// without them restores a node that cannot roll contract storage back (AlignWithExpectedRoot fails closed) and
+	// has lost its blob sidecars.
+	if scDB := cs.GetSmartContractDB(); scDB != nil {
+		if scCl := scDB.GetChangelogDB(); scCl != nil {
+			cPath := filepath.Join(destBaseDir, "history", "changelog_db_sc")
+			if err := scCl.Checkpoint(cPath); err != nil {
+				return fmt.Errorf("failed to checkpoint changelog_db_sc: %w", err)
+			}
+			logger.Info("✅ [STATE CHANGELOG] Checkpointed changelog_db_sc to %s", cPath)
+		}
+	}
+	if cs.blobStore != nil {
+		cPath := filepath.Join(destBaseDir, "history", "blob_store")
+		if err := cs.blobStore.Checkpoint(cPath); err != nil {
+			return fmt.Errorf("failed to checkpoint blob_store: %w", err)
+		}
+		logger.Info("✅ [BLOB-STORE] Checkpointed blob_store to %s", cPath)
+	}
 	return nil
 }
 
