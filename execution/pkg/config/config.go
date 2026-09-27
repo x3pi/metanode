@@ -216,8 +216,13 @@ type SimpleChainConfig struct {
 
 	// BLS Key Store: enables Master to store per-address BLS private keys
 	// (previously only available in the RPC client proxy)
-	MasterPassword string `json:"master_password,omitempty"`
-	AppPepper      string `json:"app_pepper,omitempty"`
+	// KeyPasswordFile names a file (mode 0600) holding the password that decrypts "enc:v1:..." secrets in this
+	// file (see pkg/keyvault). The password may instead come from META_KEY_PASSWORD or META_KEY_PASSWORD_FILE.
+	KeyPasswordFile string `json:"key_password_file,omitempty"`
+	// RequireEncryptedKeys makes the node refuse to start while any secret of this file is still in clear text.
+	RequireEncryptedKeys bool   `json:"require_encrypted_keys,omitempty"`
+	MasterPassword       string `json:"master_password,omitempty"`
+	AppPepper            string `json:"app_pepper,omitempty"`
 
 	// Unified Node RPC (Private Gateway) configuration
 	EnablePrivateGateway bool   `json:"enable_private_gateway"` // Nếu true, Node sẽ tự động chặn ETH tx, chạy Speculative Execution và bọc BLS
@@ -426,6 +431,10 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 			} else if v == "false" || v == "0" {
 				ConfigApp.VerifyDeviceKey = false
 			}
+		}
+
+		if err = resolveSecrets(ConfigApp); err != nil {
+			return
 		}
 
 		if ConfigApp.MVMCacheEnabled == nil {
