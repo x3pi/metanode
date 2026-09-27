@@ -16,6 +16,9 @@ type mockParentChainClient struct {
 	sentTransfers  []common.Hash
 	failNext       bool
 	claimedOutcome parentchain.FloatOutcome
+	// transferNotFound flips GetTransferRecord to report "not found yet" (default false, i.e.
+	// found=true, matching this mock's original behavior before the field existed).
+	transferNotFound bool
 }
 
 func (m *mockParentChainClient) SendTransferFloat(
@@ -49,9 +52,12 @@ func (m *mockParentChainClient) GetInboundTransfers(pubKey cm.PublicKey, cursor 
 }
 
 func (m *mockParentChainClient) GetTransferRecord(msgID common.Hash) (parentchain.FloatTransferRecord, bool, error) {
+	if m.transferNotFound {
+		return parentchain.FloatTransferRecord{}, false, nil
+	}
 	// For testing timeout/reclaim logic, say it's old enough
 	rec := parentchain.FloatTransferRecord{
-		ConfirmedAtBlockTime: 10, 
+		ConfirmedAtBlockTime: 10,
 	}
 	return rec, true, nil
 }

@@ -9,7 +9,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
-	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
@@ -144,6 +143,8 @@ func (w *ReceiveWorker) pollAndProcess() {
 			w.processMarkClaimedPendingRefund(rec)
 		case StateMarkClaimedSubmitted:
 			w.processMarkClaimedSubmitted(rec)
+		case StateRefundSent:
+			w.processRefundSent(rec)
 		}
 	}
 }
@@ -276,10 +277,15 @@ func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) {
 					log.Printf("ReceiveWorker: failed to get next float seq: %v", err)
 					return
 				}
-				
+
+				payloadHash := crypto.Keccak256Hash(nil)
+				digest := parentchain.ComputeTransferFloatMessage(
+					w.blsKeyPair.PublicKey(), rec.SourcePubKey, rec.Target, rec.Sender, rec.Value, payloadHash, seq,
+				)
+				refundCert := bls.Sign(w.blsKeyPair.PrivateKey(), digest)
+				refundMsgID := crypto.Keccak256Hash(digest)
+
 				isRefund := true
-				refundCert := w.signTransfer(rec.SourcePubKey, rec.Target, rec.Sender, rec.Value, seq)
-				
 				_, sendErr := w.client.SendTransferFloat(
 					w.blsKeyPair.PublicKey(),
 					rec.SourcePubKey, // destination is the source of the original transfer
@@ -289,33 +295,56 @@ func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) {
 					action.Amount,
 					nil,
 					seq,
-					refundCert,
+					refundCert[:],
 					isRefund,
 				)
 				if sendErr != nil {
 					log.Printf("ReceiveWorker: failed to send refund transfer: %v", sendErr)
 					return // Will retry
 				}
-				
+
 				_ = w.store.IncrementFloatSeq()
+				rec.RefundMsgID = refundMsgID
 			}
 		}
-		
+
 		rec.State = newState
 		w.store.Put(rec)
 	}
 }
 
-func (w *ReceiveWorker) signMarkClaimed(msgID common.Hash, outcome parentchain.FloatOutcome) []byte {
-	digest := parentchain.ComputeMarkClaimedMessage(msgID, outcome)
-	cert := bls.Sign(w.blsKeyPair.PrivateKey(), digest)
-	return cert[:]
+// processRefundSent polls Parent Chain to confirm the compensating refund Transfer this
+// record already submitted (StateRefundSent, set by processMarkClaimedSubmitted's
+// ActionSendRefund branch) actually landed, before closing this record out. Mirrors
+// SendWorker.processPending's own submit-then-poll-confirm discipline: "accepted into the
+// RPC queue" is not "applied" — see the state machine's EventRefundConfirmed (already
+// existed, unused before this) for the terminal transition.
+func (w *ReceiveWorker) processRefundSent(rec *MessageRecord) {
+	if rec.RefundMsgID == (common.Hash{}) {
+		log.Printf("ReceiveWorker: record %x in StateRefundSent has no RefundMsgID to poll (pre-existing record from before this field existed?)", rec.MessageID)
+		return
+	}
+	_, found, err := w.client.GetTransferRecord(rec.RefundMsgID)
+	if err != nil {
+		log.Printf("ReceiveWorker: failed to poll refund msgID %x: %v", rec.RefundMsgID, err)
+		return
+	}
+	if !found {
+		return // not yet applied, wait for retry
+	}
+
+	event := Event{Type: EventRefundConfirmed, Role: RoleReceiver}
+	newState, _, err := Next(rec.State, RoleReceiver, event)
+	if err != nil {
+		log.Printf("ReceiveWorker: Next(EventRefundConfirmed) error: %v", err)
+		return
+	}
+	rec.State = newState
+	w.store.Put(rec)
 }
 
-func (w *ReceiveWorker) signTransfer(destPubKey cm.PublicKey, sender, target common.Address, value *big.Int, nonce uint64) []byte {
-	digest := parentchain.ComputeTransferFloatMessage(
-		w.blsKeyPair.PublicKey(), destPubKey, sender, target, value, crypto.Keccak256Hash(nil), nonce,
-	)
+func (w *ReceiveWorker) signMarkClaimed(msgID common.Hash, outcome parentchain.FloatOutcome) []byte {
+	digest := parentchain.ComputeMarkClaimedMessage(msgID, outcome)
 	cert := bls.Sign(w.blsKeyPair.PrivateKey(), digest)
 	return cert[:]
 }

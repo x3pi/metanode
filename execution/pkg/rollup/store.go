@@ -40,6 +40,10 @@ type MessageRecord struct {
 	SourcePubKey cm.PublicKey  `json:"sourcePubKey"`
 	DestPubKey   cm.PublicKey  `json:"destPubKey"`
 	PayloadHash common.Hash    `json:"payloadHash"`
+	// RefundMsgID is the MessageID of the compensating TransferFloat a ReceiveWorker sends
+	// back when it refunds this record (StateRefundSent onward) — set once that transfer is
+	// submitted, so a later poll can confirm it actually landed before this record is closed.
+	RefundMsgID common.Hash `json:"refundMsgId,omitempty"`
 }
 
 type SmartContractDB interface {
