@@ -43,7 +43,7 @@
 | Chi phí | ECDSA ~54 µs/lần; Gateway cũ `outbound` 0,7 → 5,4 → 31 ms khi tích luỹ 50 → 500 → 3.000 message (tăng tuyến tính, blob JSON nạp/ghi cả khối mỗi giao dịch barrier) | F0-8, F0-11 |
 | Không dùng Rust consensus | Đúng ở chế độ raft; nhưng binary vẫn link `libmetanode`, NOMT (Rust) vẫn dùng cho state, MVM/Xapian là C++ | xem N8 |
 
-**Đã ☑:** A0, A1, A2, B1, N7, **C0** (theo D1, xem mục 2), **C1 / N3** (2026-09-26), **C2** (2026-09-26, tập con khả thi — xem N3b). **Còn ◐ (chưa ☑):** N1. **Chưa làm:** B2 (đã tách sang branch riêng `feat/rollup-b2-store`), B3–B9, C3–C6, D1, F1–F6.
+**Đã ☑:** A0, A1, A2, B1, N7, **C0** (theo D1, xem mục 2), **C1 / N3** (2026-09-26), **C2** (2026-09-26, tập con khả thi — xem N3b), **C4** (2026-09-27, xem N3c). **Còn ◐ (chưa ☑):** N1. **Chưa làm:** B2 (đã tách sang branch riêng `feat/rollup-b2-store`), B3–B9, C3, C5–C6, D1, F1–F6.
 
 **Bẫy đã gặp khi chạy:**
 - Spike cần genesis có ví gửi `0x294f…f846` và `0x6169…9C49`; dùng `deploy/systemd/genesis.json` (do `ci.sh` sinh). Với `cmd/simple_chain/config.json` mặc định (genesis không có ví) spike thoát lỗi rõ ràng.
@@ -182,6 +182,22 @@ Tham chiếu: kế hoạch chính bước C1, hook H1–H6, `C0_VERIFICATION_REP
 - **Không làm được ở môi trường này (nói thẳng):** (a) *kill -9 đa máy thật*: chỉ có 1 máy cho cụm thử; máy khác là cụm 231/230 thật, cấm động vào; (b) *mất điện giữa fsync thật*: cần quyền root (dm-flakey/ngắt nguồn) hoặc chèn fsync; thay bằng kill -9 ngẫu nhiên nhiều điểm + test ổ log từ chối ghi (bolt là copy-on-write có meta page nên crash giữa ghi để lại DB nhất quán ở lần commit trước; entry chưa fsync xong chưa bao giờ được ack).
 
 **Chưa làm / giới hạn (ghi trung thực):** mất điện giữa fsync thật và kill -9 đa máy thật (không làm được ở đây, xem trên), replica dựng lại rỗng/thêm replica (C4), **`Lost()` khác 0 ⇒ người gửi phải gửi lại tx** (chưa có trong thử nghiệm thật vì kill -9 không làm mất tx nào, nhưng cơ chế cho phép). Hard fork StorageRoot và cụm 231/230 (D3/N2) không đổi.
+
+### N3c — C4: đổi leader, thêm / thay replica (2026-09-27; nhánh `feat/raft-c4`)
+
+**Đã làm:** `admin.go` / `adminclient.go` / `membership.go` trong `raftfeed`, công cụ `execution/cmd/tool/rollup_cluster` (`check`, `transfer-leader`, `add-replica`, `remove-replica`, `prepare-replica`, đều có `--dry-run` và từ chối khi thiếu điều kiện an toàn), runbook `RAFT_CLUSTER_RUNBOOK.md`.
+- Kênh điều khiển = cổng nội bộ có HMAC (dùng chung với kênh submit), id `admin` cho công cụ; **mọi thao tác kiểm lại ở node** (client bỏ qua bước kiểm vẫn bị từ chối).
+- Thành viên động: `raft.forward_port_offset` (cổng nội bộ = cổng Raft + offset) để replica thêm sau không cần sửa cấu hình node cũ; `raft.join_existing_chain` cho replica có DB sao chép từ peer (state Raft rỗng + DB có block; nếu không đặt cờ thì node từ chối khởi động). Phát lại log/snapshot bỏ qua block DB đã có, bộ đếm FSM lấy từ log/snapshot.
+- **Trạng thái không truyền qua mạng** (snapshot Raft chỉ có bộ đếm; chọn: sao chép thư mục dữ liệu của peer đã DỪNG, `cp -a --reflink=auto`, công cụ từ chối nếu peer còn trả lời). Replica rỗng chỉ vào được khi log của leader còn đủ từ entry 1; log đã thu gọn ⇒ công cụ từ chối, ép ở mức node ⇒ replica tự dừng.
+- Nâng voter chỉ khi đã bắt kịp **cả** entry (≤ 64 so với commit index) **lẫn** block đã thực thi (≤ 64 so với leader) và hash block tip trùng leader; thêm thẳng voter bị từ chối. (Phát hiện khi chạy thật: chỉ dựa vào `applied_index` là sai — FSM chỉ đẩy block vào pipeline, replica đang phát lại log dài "applied" từ lâu trước khi thực thi; đã sửa + test có đột biến.)
+- Xoá replica: từ chối nếu số voter sống còn lại < đa số của cụm sau khi bỏ, hoặc xoá leader không có `--transfer-first`.
+- Chuyển leader: drain leader (ngừng nhận batch, đợi áp dụng hết) rồi `LeadershipTransferToServer`; đích phải là voter sống, không `failed`, chênh ≤ 64.
+- Attest (T-RF-09) giờ dùng voter của cấu hình Raft hiện tại; replica non-voter vẫn bị so với đa số voter (mang state sai sẽ tự dừng trước khi được nâng).
+
+**Test (T-LD-*, T-CL-* dạng trong tiến trình, `-race`, có đột biến cho từng luật an toàn: quorum, độ trễ khi chuyển, độ trễ khi nâng, chuỗi khác, log thu gọn, chưa thực thi, drain):** chuyển leader dưới tải không mất tx; từ chối đích tụt hậu; từ chối xoá làm mất quorum (cả ở công cụ lẫn node); dry-run không đổi gì; thêm replica có state sao chép / rỗng (log đủ) / rỗng (log thu gọn: từ chối + tự dừng) / state của chuỗi khác (từ chối); thay replica chết dưới tải; `check` khoẻ + phát hiện khoá ký khác nhau; cờ `join_existing_chain`.
+**Chạy thật (3→6 tiến trình `simple_chain` trên 1 máy, cổng riêng):** chuyển leader n0→n1 giữa tải 36 000 tx (không mất); dừng n2 và `prepare-replica` (8,6 GB, reflink 0,5 s; từ chối khi n2 còn chạy) → thêm n3 giữa tải 24 000 tx (4 voter, cùng chiều cao/số tx/hash); **giết leader n1 vĩnh viễn giữa tải**, `remove-replica n1`, sao chép từ n3, thêm n4 (152 000 tx, 4 replica cùng hash/stateRoot); restart cả cụm 5 replica; thêm **replica rỗng** n6 (phát lại toàn log) giữa tải, chỉ được nâng sau khi thực thi kịp: 6 replica cùng 164 000 tx, block 350, hash/stateRoot trùng, 0 lệch attest.
+
+**Chưa làm / giới hạn:** lưu khoá ký mã hoá tại chỗ (T-CL-02 phần "mã hoá"; hiện chỉ kiểm cùng địa chỉ ký + khoá không đi qua mạng), nhiều máy thật, dựng replica rỗng khi log đã thu gọn mà không có bản sao state (cần truyền state qua mạng — chưa có), so từng state root riêng.
 
 ### N4 — Tài liệu và schema: A1 → A2, rồi chốt B1 (ĐÃ HOÀN TẤT `☑`)
 **A1 (Đã ☑):** Đã viết lại `SEQUENCER_DESIGN.md` và `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` cho khớp Raft (mục 0.1, 0.6 của kế hoạch chính); đã gỡ bỏ hoàn toàn banner "pre-Raft", bổ sung quy trình Raft SMR Pipeline (mục 2.5) và sơ đồ sequence diagram (A.1b).

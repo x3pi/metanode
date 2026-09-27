@@ -3,7 +3,9 @@ package raftfeed
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -49,8 +51,8 @@ func effectiveRaftConfig(rc *config.RaftConfig) (config.RaftConfig, error) {
 	}
 	ids, addrs, self := map[string]bool{}, map[string]bool{}, false
 	for _, p := range c.Peers {
-		if p.ID == "" || p.Address == "" || p.ForwardAddress == "" {
-			return c, fmt.Errorf("raft: peer %+v needs id, address and forward_address", p)
+		if p.ID == "" || p.Address == "" || (p.ForwardAddress == "" && c.ForwardPortOffset <= 0) {
+			return c, fmt.Errorf("raft: peer %+v needs id, address and forward_address (or forward_port_offset)", p)
 		}
 		if ids[p.ID] || addrs[p.Address] {
 			return c, fmt.Errorf("raft: duplicate peer id or address (%s / %s)", p.ID, p.Address)
@@ -60,6 +62,25 @@ func effectiveRaftConfig(rc *config.RaftConfig) (config.RaftConfig, error) {
 	}
 	if !self {
 		return c, fmt.Errorf("raft: node_id %q is not in peers", c.NodeID)
+	}
+	if c.Bootstrap && c.JoinExistingChain {
+		return c, errors.New("raft: bootstrap and join_existing_chain are mutually exclusive")
+	}
+	if c.ForwardPortOffset < 0 {
+		return c, errors.New("raft: forward_port_offset must be >= 0")
+	}
+	if c.ForwardPortOffset > 0 {
+		adv, err := portOf(c.AdvertiseAddress)
+		if err != nil {
+			return c, fmt.Errorf("raft: advertise_address: %w", err)
+		}
+		fwd, err := portOf(c.ForwardBindAddress)
+		if err != nil {
+			return c, fmt.Errorf("raft: forward_bind_address: %w", err)
+		}
+		if fwd != adv+c.ForwardPortOffset {
+			return c, fmt.Errorf("raft: forward_bind_address port %d must equal advertise port %d + forward_port_offset %d", fwd, adv, c.ForwardPortOffset)
+		}
 	}
 	if c.ElectionTimeoutMs < c.HeartbeatTimeoutMs {
 		return c, errors.New("raft: election_timeout_ms must be >= heartbeat_timeout_ms")
@@ -80,6 +101,33 @@ func effectiveRaftConfig(rc *config.RaftConfig) (config.RaftConfig, error) {
 		return c, errors.New("raft: sequencer_address must be a 20-byte hex address")
 	}
 	return c, nil
+}
+
+// portOf returns the numeric port of a host:port string.
+func portOf(hostport string) (int, error) {
+	_, p, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// derivedForwardAddr is the internal endpoint of the member whose raft address is raftAddr when
+// forward_port_offset is used.
+func derivedForwardAddr(raftAddr string, offset int) (string, bool) {
+	host, p, err := net.SplitHostPort(raftAddr)
+	if err != nil {
+		return "", false
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil {
+		return "", false
+	}
+	return net.JoinHostPort(host, strconv.Itoa(n+offset)), true
 }
 
 // readForwardSecret reads the shared HMAC secret once (>= 32 bytes).

@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/hashicorp/raft"
-
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 )
 
@@ -66,7 +64,7 @@ func (n *Node) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	sender := r.Header.Get(hdrNode)
 	ts, err := strconv.ParseInt(r.Header.Get(hdrTs), 10, 64)
 	skew := n.now().Sub(time.UnixMilli(ts))
-	_, known := n.forwardAddr[raft.ServerID(sender)]
+	known := n.knownNode(sender)
 	mac, macErr := hex.DecodeString(r.Header.Get(hdrMac))
 	want, _ := hex.DecodeString(forwardMAC(n.secret, sender, ts, body))
 	if err != nil || macErr != nil || !known || skew > maxForwardSkew || skew < -maxForwardSkew || !hmac.Equal(mac, want) {
@@ -125,8 +123,7 @@ func (n *Node) leaderForwardAddr() (string, bool) {
 	if id == "" {
 		return "", false
 	}
-	a, ok := n.forwardAddr[id]
-	return a, ok
+	return n.forwardAddrFor(id)
 }
 
 func macEqual(a, b []byte) bool { return hmac.Equal(a, b) }

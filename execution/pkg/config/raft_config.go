@@ -21,6 +21,15 @@ type RaftConfig struct {
 	// Bootstrap must be true on exactly one node, once, when the cluster is first created; ignored when the
 	// node already has Raft state.
 	Bootstrap bool `json:"bootstrap,omitempty"`
+	// JoinExistingChain lets a replica start with EMPTY Raft state although its block DB already holds blocks: a
+	// replica added later, whose data directory was copied from a stopped peer (plan C4, `rollup-cluster
+	// prepare-replica`). Log/snapshot replay then skips the blocks the DB already has. Never together with
+	// Bootstrap. Without it such a start is refused (block numbers and log positions would not be aligned).
+	JoinExistingChain bool `json:"join_existing_chain,omitempty"`
+	// ForwardPortOffset, when > 0, defines every member's internal endpoint as (raft host, raft port + offset), so
+	// members added at runtime are reachable without editing the config of the others. Then peers[].forward_address
+	// is optional and this node's forward_bind_address port must equal its advertise port + offset.
+	ForwardPortOffset int `json:"forward_port_offset,omitempty"`
 
 	HeartbeatTimeoutMs   int `json:"heartbeat_timeout_ms,omitempty"`    // default 1000
 	ElectionTimeoutMs    int `json:"election_timeout_ms,omitempty"`     // default 1000

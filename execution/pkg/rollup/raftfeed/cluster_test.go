@@ -16,6 +16,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/hashicorp/raft"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
@@ -74,12 +75,14 @@ type member struct {
 }
 
 type harness struct {
+	mu      sync.Mutex // guards h.m and every member's node pointer against the background load goroutines
 	t       *testing.T
 	m       []*member
 	secret  []byte
 	mutate  func(*config.RaftConfig)
 	tune    func(*raft.Config)
 	wrap    map[string]func(raft.LogStore) raft.LogStore // per node id
+	join    map[string]bool                              // node ids started with join_existing_chain
 	badMu   sync.Mutex
 	badHash map[string]bool // node ids whose BlockHash lies
 	fatalMu sync.Mutex
@@ -119,6 +122,7 @@ func (h *harness) rcfg(m *member) config.RaftConfig {
 		HeartbeatTimeoutMs: 100, ElectionTimeoutMs: 100, LeaderLeaseTimeoutMs: 50, CommitTimeoutMs: 5,
 		ForwardBindAddress: m.fwdAddr, ForwardSecretFile: "unused-in-tests", SequencerAddress: seqAddr.Hex(),
 	}
+	rc.JoinExistingChain = h.join[m.id]
 	if h.mutate != nil {
 		h.mutate(&rc)
 	}
@@ -136,21 +140,27 @@ func (h *harness) start(m *member) {
 	sink := make(chan *pb.ExecutableBlock, 5000)
 	m.stopPipe = make(chan struct{})
 	go m.disk.run(sink, m.stopPipe)
-	m.node, err = startNode(ClusterConfig{
+	nd, err := startNode(ClusterConfig{
 		Raft: h.rcfg(m), Sink: sink, Durable: m.disk.last.Load, Secret: h.secret,
-		Transport: tr, ForwardListener: ln, Tune: h.tune, WrapLogStore: h.wrap[m.id], BlockHash: h.blockHashFor(m),
+		Transport: tr, ForwardListener: ln, Tune: h.tune, WrapLogStore: h.wrap[m.id], BlockHash: h.blockHashFor(m), ForwardAddrOf: h.fwdOf,
 		OnFatal: func(e error) { h.fatalMu.Lock(); h.fatals[m.id] = e; h.fatalMu.Unlock() },
 	})
 	if err != nil {
 		h.t.Fatal(err)
 	}
+	h.mu.Lock()
+	m.node = nd
+	h.mu.Unlock()
 	h.connect()
 }
 
 func (h *harness) stop(m *member) {
 	if m.node != nil {
-		m.node.Stop()
+		nd := m.node
+		h.mu.Lock()
 		m.node = nil
+		h.mu.Unlock()
+		nd.Stop()
 		close(m.stopPipe)
 	}
 }
@@ -159,6 +169,59 @@ func (h *harness) startAll() {
 	for _, m := range h.m {
 		h.start(m)
 	}
+}
+
+// fwdOf resolves the internal endpoint of any member of the harness, including ones added after the others started.
+func (h *harness) fwdOf(id raft.ServerID) (string, bool) {
+	for _, m := range h.m {
+		if m.id == string(id) {
+			return m.fwdAddr, true
+		}
+	}
+	return "", false
+}
+
+// newMember prepares (does not start) an extra replica.
+func (h *harness) newMember(id string) *member {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	fa := ln.Addr().String()
+	ln.Close()
+	m := &member{id: id, addr: raft.ServerAddress(id), dir: filepath.Join(h.t.TempDir(), "raft"), fwdAddr: fa, disk: &disk{}}
+	h.mu.Lock()
+	h.m = append(h.m, m)
+	h.mu.Unlock()
+	return m
+}
+
+// copyState simulates prepare-replica: the DB of a STOPPED peer is copied to a new replica.
+func copyState(from, to *member) {
+	from.disk.mu.Lock()
+	defer from.disk.mu.Unlock()
+	to.disk.mu.Lock()
+	defer to.disk.mu.Unlock()
+	to.disk.received = nil
+	for _, b := range from.disk.received {
+		to.disk.received = append(to.disk.received, proto.Clone(b).(*pb.ExecutableBlock))
+	}
+	to.disk.last.Store(from.disk.last.Load())
+}
+
+// members is the operator's view of the started replicas.
+func (h *harness) members() []Member {
+	var out []Member
+	for _, m := range h.m {
+		if m.node != nil {
+			out = append(out, Member{ID: m.id, RaftAddr: string(m.addr), AdminAddr: m.fwdAddr})
+		}
+	}
+	return out
+}
+
+func (h *harness) admin() *AdminClient {
+	return &AdminClient{Secret: h.secret, CatchUpWait: 20 * time.Second}
 }
 
 // blockHashFor stands in for the execution layer's header hash: the FSM's commit hash of the block, or a wrong
@@ -395,7 +458,8 @@ func TestCluster_OversizeBatchIsSplitNotTruncated(t *testing.T) {
 		nonces = append(nonces, uint64(i))
 	}
 	h.submit(l, testBatch(t, nonces...))
-	h.waitBlocks(4, h.m...) // 10 txs, <=3 per piece => 4 blocks
+	h.waitBlocks(4, h.m...) // 10 txs, <=3 per piece => 4 blocks (more if the caller had to retry: still no loss)
+	time.Sleep(400 * time.Millisecond)
 	h.assertIdentical(h.m...)
 	seen := map[uint64]bool{}
 	for _, b := range l.disk.blocks() {

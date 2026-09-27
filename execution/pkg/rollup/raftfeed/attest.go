@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/hashicorp/raft"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 )
@@ -36,7 +35,7 @@ func (n *Node) handleBlockHash(w http.ResponseWriter, r *http.Request) {
 	sender := r.Header.Get(hdrNode)
 	ts, tsErr := strconv.ParseInt(r.Header.Get(hdrTs), 10, 64)
 	skew := n.now().Sub(time.UnixMilli(ts))
-	_, known := n.forwardAddr[raft.ServerID(sender)]
+	known := n.knownNode(sender)
 	got, macErr := hex.DecodeString(r.Header.Get(hdrMac))
 	want, _ := hex.DecodeString(forwardMAC(n.secret, sender, ts, []byte(q)))
 	if err != nil || tsErr != nil || macErr != nil || !known || skew > maxForwardSkew || skew < -maxForwardSkew || !macEqual(got, want) {
@@ -112,26 +111,34 @@ func (n *Node) attestOnce(num uint64) bool {
 	if !ok {
 		return false
 	}
-	votes := map[string]int{mine.Hex(): 1}
-	for id, addr := range n.forwardAddr {
-		if string(id) == n.cfg.NodeID {
+	votes := map[string]int{}
+	voters := n.voters()
+	for _, s := range voters {
+		if string(s.ID) == n.cfg.NodeID {
+			votes[mine.Hex()]++ // this replica votes only while it is a voter
+			continue
+		}
+		addr, ok := n.forwardAddrFor(s.ID)
+		if !ok {
 			continue
 		}
 		if h, ok := n.fetchPeerHash(addr, num); ok {
 			votes[h]++
 		}
 	}
-	majority := len(n.forwardAddr)/2 + 1
+	// A non-voter (a replica still catching up after being added) does not vote, but it is checked against the
+	// voters' majority all the same: a joiner with a wrong copied state must stop before it is promoted.
+	majority := len(voters)/2 + 1
 	for h, c := range votes {
 		if c < majority {
 			continue
 		}
 		if h != mine.Hex() {
 			n.mismatches.Add(1)
-			n.fatal(fmt.Errorf("block %d hash %s differs from the value %s held by %d of %d replicas: this replica executed a different state", num, mine.Hex(), h, c, len(n.forwardAddr)))
+			n.fatal(fmt.Errorf("block %d hash %s differs from the value %s held by %d of %d replicas: this replica executed a different state", num, mine.Hex(), h, c, len(voters)))
 		}
 		n.attested.Add(1)
-		logger.Info("✅ [RAFT-ATTEST] block %d hash %s matches the majority (%d of %d replicas)", num, h[:12], c, len(n.forwardAddr))
+		logger.Info("✅ [RAFT-ATTEST] block %d hash %s matches the majority (%d of %d replicas)", num, h[:12], c, len(voters))
 		return true
 	}
 	logger.Debug("[RAFT-ATTEST] block %d: no majority value yet (%v)", num, votes)
