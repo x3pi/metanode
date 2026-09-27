@@ -146,7 +146,8 @@ Nguồn trường: `execution/pkg/proto/executor.proto`. `FSM.Apply` (mọi repl
 > - `commit_hash = keccak256(prev ‖ be64(index) ‖ be64(ts) ‖ batch)` (như C1), **không** có tiền tố `ROLLUP_BATCH_V1:`; `prev` khởi đầu rỗng. `epoch = 0`. `timestamp` = `max(BatchRecord.timestamp_ms, ts_trước + 1)` (đóng dấu bởi leader, làm tăng nghiêm ngặt tại `Apply` nên leader đổi/đồng hồ lùi vẫn xác định).
 > - Cấu hình: thêm `peers[].forward_address` và `forward_bind_address` (kênh mục 1.5); **không có** `block_queue_size` (dùng hàng đợi nạp block 5000 sẵn có).
 > - 413: follower **bỏ + đếm** batch quá lớn thay vì trả `false` (forwarder thử lại `false` vô hạn). Batch vượt `max_batch_bytes` được **tách theo ranh giới tx** ở leader.
-> - **Cổng giao block:** `Apply` chỉ giao block n khi block n-1 đã bền trong DB (bộ đếm cục bộ) — xem `NEXT_STEPS_PLAN.md` N3b (lý do: treo NOMT ở đường xung đột của speculative executor).
+> - `Submit` trả `true` **chỉ khi batch đã commit** (chờ tối đa 5s, quá hạn/mất leader ⇒ `false` để forwarder gửi lại); mã 504 ở kênh forward = chưa commit. (Cổng giao block đã gỡ; thứ tự truy cập NOMT do cổng IR của executor bảo đảm — `HANDOVER_SPECULATIVE_CONFLICT_NOMT_SESSION_LEAK.md`.)
+> - `T-RF-09`: replica so hash header block checkpoint (bội của 10) với peer, lệch đa số ⇒ dừng (`attest.go`); binary thử nghiệm có tag `rollup_faults` mới có hook tiêm lệch.
 > - `FsmSnapshotMeta` có thêm `last_global_exec_index=4` và `last_timestamp_ms=7`; `last_state_root=6` dành sẵn, chưa dùng.
 
 ### 1.4. Metadata snapshot của FSM và bố cục lưu trữ Raft  **[ĐỀ XUẤT]**

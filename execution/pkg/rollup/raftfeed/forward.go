@@ -25,8 +25,9 @@ const (
 	hdrMac         = "X-Rollup-Mac"
 	hdrLeader      = "X-Rollup-Leader"
 	maxForwardSkew = 30 * time.Second
-	forwardTimeout = 3 * time.Second // transport hygiene only
-	maxForwardBody = 64 << 20        // hard cap on what the internal port will read
+	// the client must outlast the leader's own wait for the commit
+	forwardTimeout = submitCommitTimeout + 3*time.Second
+	maxForwardBody = 64 << 20 // hard cap on what the internal port will read
 )
 
 func forwardMAC(secret []byte, nodeID string, tsMs int64, body []byte) string {
@@ -47,6 +48,8 @@ const (
 	statusTooLarge submitStatus = http.StatusRequestEntityTooLarge
 	statusFull     submitStatus = http.StatusTooManyRequests
 	statusNoLeader submitStatus = http.StatusServiceUnavailable
+	// statusUncommitted: queued but not committed (leadership lost, or no quorum within submitCommitTimeout).
+	statusUncommitted submitStatus = http.StatusGatewayTimeout
 )
 
 func (n *Node) handleSubmit(w http.ResponseWriter, r *http.Request) {

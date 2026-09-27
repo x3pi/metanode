@@ -152,7 +152,6 @@ func (bp *BlockProcessor) runUnixSocket() {
 			NextBlock:     lastBlock + 1,
 			Epoch:         storage.GetLastHandledCommitEpoch(),
 			LeaderAddress: bp.validatorAddress,
-			Durable:       storage.GetLastBlockNumber,
 		})
 		if err != nil {
 			logger.Error("❌ [RAFT FEED] cannot start the block feed: %v", err)
