@@ -19,9 +19,6 @@ import (
 
 const schemaVersion = 1
 
-// gatePollInterval paces the re-check of the local durable-block counter while Apply waits for the pipeline.
-const gatePollInterval = 200 * time.Microsecond
-
 // durablePollInterval is only how often Snapshot re-checks a LOCAL durability counter; it never decides
 // whether a batch is applied or dispatched.
 const durablePollInterval = 5 * time.Millisecond
@@ -99,9 +96,6 @@ func (f *fsm) Apply(l *raft.Log) interface{} {
 		return f.fatal(fmt.Errorf("index %d: %w", l.Index, err))
 	}
 	res := applyResult{BlockNumber: blk.BlockNumber}
-	if blk.BlockNumber > f.durable() && !f.waitPreviousDurable(blk.BlockNumber) {
-		return errors.New("raftfeed: stopping")
-	}
 	if blk.BlockNumber <= f.durable() {
 		// Raft replays entries after a restart; the block is already in the DB. Counters still advance so the
 		// hash chain and numbering stay identical to the replicas that did not restart.
@@ -118,26 +112,6 @@ func (f *fsm) Apply(l *raft.Log) interface{} {
 	f.st.advance(blk)
 	f.appliedIndex = l.Index
 	return res
-}
-
-// waitPreviousDurable holds block n back until block n-1 is durable in the DB, so the execution pipeline never
-// speculates block n on a parent that is still in flight. Without this the pipeline's speculative executor
-// hits its parent-hash conflict path under a fast stream of small blocks, and that path was observed to leave a
-// NOMT session pending for good (live, single node and 3-node: stuck in IntermediateRoot, goroutine dump shows
-// BeginSession waiting on activeCount with no holder). The Rust consensus path is naturally lock-step (it waits
-// for the execution response of one commit before sending the next), which this reproduces.
-//
-// It waits on a LOCAL counter, never on a clock or a peer, so it cannot make replicas diverge; if the pipeline
-// stops committing, Apply stays blocked (pending, not fork). Returns false if the node is stopping.
-func (f *fsm) waitPreviousDurable(blockNumber uint64) bool {
-	for f.durable()+1 < blockNumber {
-		select {
-		case <-f.stop:
-			return false
-		case <-time.After(gatePollInterval):
-		}
-	}
-	return true
 }
 
 // Snapshot implements raft.FSM.

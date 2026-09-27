@@ -150,6 +150,14 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	var accountIRDuration, stakeIRDuration time.Duration
 	var accountErr, stakeErr error
 
+	// Ordering hook for speculative executions: the first NOMT session of this block is opened below (contract
+	// storage LateBindRoots, then the account/stake IntermediateRoot). See IRGate.
+	if gate := irGateFrom(ctx); gate != nil {
+		if err := gate(ctx); err != nil {
+			return ProcessResult{Error: err}, err
+		}
+	}
+
 	startTrieDBIR := time.Now()
 	trie_database.GetTrieDatabaseManager().IntermediateRoot()
 	trieDBIRDuration := time.Since(startTrieDBIR)

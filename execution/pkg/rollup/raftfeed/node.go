@@ -26,12 +26,10 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 )
 
-// A batch whose proposal failed (leadership change) is re-routed up to maxRerouteAttempts times, rerouteInterval
-// apart, before it is counted as lost.
-const (
-	maxRerouteAttempts = 40
-	rerouteInterval    = 250 * time.Millisecond
-)
+// submitCommitTimeout is how long Submit waits for its batch to be COMMITTED (replicated to a quorum) before it
+// tells the caller to retry. It only decides what the caller is told: the FSM executes committed entries only, so
+// a timeout can at worst make the caller send a batch twice (Go dedups by tx hash), never lose or fork anything.
+const submitCommitTimeout = 5 * time.Second
 
 // ClusterConfig starts a replicated Raft node (plan C2).
 type ClusterConfig struct {
@@ -55,9 +53,17 @@ type ClusterConfig struct {
 	Secret          []byte
 }
 
+// proposal is one batch on its way into the log; done receives the outcome of its commit exactly once.
 type proposal struct {
-	batch    []byte
-	attempts int
+	batch []byte
+	done  chan error
+}
+
+func (p proposal) finish(err error) {
+	select {
+	case p.done <- err:
+	default:
+	}
 }
 
 type inflight struct {
@@ -95,7 +101,6 @@ type Node struct {
 	attested   atomic.Uint64
 
 	dropped atomic.Uint64 // batches that can never become a block (malformed / oversize)
-	lost    atomic.Uint64 // batches whose proposal kept failing (reported, sender must resend)
 }
 
 var cluster atomic.Pointer[Node]
@@ -215,7 +220,7 @@ func (n *Node) start(cc ClusterConfig) error {
 		}
 	}
 	n.fatal = onFatal
-	n.blockHash, n.durable = cc.BlockHash, cc.Durable
+	n.blockHash, n.durable = wrapBlockHash(cc.BlockHash), cc.Durable
 	n.fsm = newFSM(
 		stamper{epoch: 0, leader: common.HexToAddress(rc.SequencerAddress), nextIndex: 1, nextBlock: 1},
 		cc.Sink, cc.Durable, n.stop, onFatal,
@@ -294,8 +299,11 @@ func (n *Node) Stop() {
 	})
 }
 
-// Submit is the C2 backend of raftfeed.Submit: true only when the batch is accepted by the leader's bounded
-// queue (locally or over the forward channel). It never blocks beyond the forward call's own transport timeout.
+// Submit is the C2 backend of raftfeed.Submit: true only when the batch has been COMMITTED by a quorum (locally
+// on the leader, or reported so by the leader over the forward channel), so a batch the forwarder has been told
+// "accepted" for survives the death of any single node. False (not leader / no leader / queue full / not
+// committed within submitCommitTimeout) means "keep the batch and retry": the caller may then send a batch that
+// did commit a second time, which Go's tx dedup absorbs.
 func (n *Node) Submit(batch []byte) bool {
 	if n.failed.Load() {
 		return false
@@ -328,11 +336,28 @@ func (n *Node) submitLocal(batch []byte) submitStatus {
 	if cap(n.proposeQ)-len(n.proposeQ) < len(pieces) {
 		return statusFull
 	}
+	dones := make([]chan error, 0, len(pieces))
 	for _, p := range pieces {
+		pr := proposal{batch: p, done: make(chan error, 1)}
 		select {
-		case n.proposeQ <- proposal{batch: p}:
+		case n.proposeQ <- pr:
+			dones = append(dones, pr.done)
 		default:
-			return statusFull // partial acceptance only ever duplicates on retry; Go dedups by tx hash
+			return statusFull // pieces already queued still commit; a retry only duplicates them
+		}
+	}
+	timer := time.NewTimer(submitCommitTimeout)
+	defer timer.Stop()
+	for _, d := range dones {
+		select {
+		case err := <-d:
+			if err != nil {
+				return statusUncommitted
+			}
+		case <-timer.C:
+			return statusUncommitted
+		case <-n.stop:
+			return statusNoLeader
 		}
 	}
 	return statusAccepted
@@ -393,6 +418,7 @@ func (n *Node) proposeLoop() {
 			txs, err := transaction.UnmarshalTransactions(p.batch)
 			if err != nil || len(txs) == 0 {
 				n.dropped.Add(1)
+				p.finish(nil) // nothing can ever be committed for it; do not leave the caller waiting
 				continue
 			}
 			data, err := proto.MarshalOptions{Deterministic: true}.Marshal(&rpb.BatchRecord{
@@ -404,6 +430,7 @@ func (n *Node) proposeLoop() {
 			})
 			if err != nil {
 				n.dropped.Add(1)
+				p.finish(nil)
 				continue
 			}
 			f := n.raft.Apply(data, 0)
@@ -416,8 +443,7 @@ func (n *Node) proposeLoop() {
 	}
 }
 
-// resultLoop waits for each proposal in order. A failed proposal (leadership lost before commit) is routed
-// again to whoever leads now, a bounded number of times; the batch is never silently forgotten.
+// resultLoop waits for each proposal in order and reports its outcome to the Submit call waiting for it.
 func (n *Node) resultLoop() {
 	for {
 		select {
@@ -425,42 +451,20 @@ func (n *Node) resultLoop() {
 			return
 		case in := <-n.inflight:
 			if err := in.future.Error(); err != nil {
+				in.p.finish(err) // leadership lost / not leader / shutting down: the caller retries
 				if errors.Is(err, raft.ErrRaftShutdown) {
 					return
 				}
-				n.reroute(in.p, err)
 				continue
 			}
 			if e, ok := in.future.Response().(error); ok {
 				logger.Error("❌ [RAFT] entry applied with error: %v", e)
+				in.p.finish(e)
+				continue
 			}
+			in.p.finish(nil)
 		}
 	}
-}
-
-// reroute hands a batch whose proposal failed to whoever leads now. It retries while no leader is reachable
-// (a cut-off old leader only learns of the new one after the partition heals), for a bounded number of tries.
-// The interval only paces re-submission; it never decides whether anything is executed. Re-proposing can
-// duplicate a batch that did commit; Go dedups by tx hash (T-SUB-05).
-func (n *Node) reroute(p proposal, cause error) {
-	for p.attempts = 0; p.attempts < maxRerouteAttempts; p.attempts++ {
-		if n.raft.State() == raft.Leader {
-			select {
-			case n.proposeQ <- p:
-				return
-			default:
-			}
-		} else if n.forwardToLeader(p.batch) {
-			return
-		}
-		select {
-		case <-n.stop:
-			return
-		case <-time.After(rerouteInterval):
-		}
-	}
-	n.lost.Add(1)
-	logger.Error("🚨 [RAFT] batch lost after %d re-route attempts (proposal failed: %v): its transactions must be resent", maxRerouteAttempts, cause)
 }
 
 // Ready reports whether this node may accept transactions: a leader is known, the replica has not failed and,
@@ -482,9 +486,8 @@ func (n *Node) IsLeader() bool { return n.raft.State() == raft.Leader }
 // AppliedIndex is the last Raft index applied to the FSM.
 func (n *Node) AppliedIndex() uint64 { return n.raft.AppliedIndex() }
 
-// Dropped / Lost / Skipped / Failed expose the counters used by tests and diagnostics.
+// Dropped / Skipped / Failed expose the counters used by tests and diagnostics.
 func (n *Node) Dropped() uint64    { return n.dropped.Load() }
-func (n *Node) Lost() uint64       { return n.lost.Load() }
 func (n *Node) Skipped() uint64    { return n.fsm.skipped.Load() }
 func (n *Node) Failed() bool       { return n.failed.Load() }
 func (n *Node) Mismatches() uint64 { return n.mismatches.Load() }

@@ -237,6 +237,19 @@ func (h *harness) submit(from *member, batch []byte) {
 	h.t.Fatal("Submit never accepted the batch")
 }
 
+// submitRetry sends a batch the way tx_batch_forwarder does: keep offering it to `from` until it is accepted
+// (Submit true means committed). Safe to call from a goroutine (no t.Fatal). Returns false only on timeout.
+func submitRetry(from *member, batch []byte, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if from.node.Submit(batch) {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
 func (h *harness) waitBlocks(n int, members ...*member) {
 	h.t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -507,8 +520,17 @@ func TestCluster_LeaderWithoutQuorumExecutesNothing(t *testing.T) {
 			h.isolate(m)
 		}
 	}
+	var wg sync.WaitGroup
+	var failed atomic.Int32
 	for i := 5; i < 10; i++ {
-		l.node.Submit(testBatch(t, uint64(i)))
+		i := i
+		wg.Add(1)
+		go func() { // the forwarder keeps offering the batch until it is committed
+			defer wg.Done()
+			if !submitRetry(l, testBatch(t, uint64(i)), 40*time.Second) {
+				failed.Add(1)
+			}
+		}()
 	}
 	time.Sleep(600 * time.Millisecond)
 	for _, m := range h.m {
@@ -525,10 +547,14 @@ func TestCluster_LeaderWithoutQuorumExecutesNothing(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	time.Sleep(500 * time.Millisecond)
+	wg.Wait()
+	if failed.Load() != 0 {
+		t.Fatalf("%d batches were never accepted after healing", failed.Load())
+	}
 	for _, m := range h.m {
 		d, dup := distinctNonces(t, m)
 		if d != 10 {
-			t.Fatalf("%s executed %d distinct txs after healing, want 10 (lost=%d)", m.id, d, l.node.Lost())
+			t.Fatalf("%s executed %d distinct txs after healing, want 10", m.id, d)
 		}
 		t.Logf("%s: %d blocks, %d re-executed batches (dedup'd by Go)", m.id, len(m.disk.blocks()), dup)
 	}
@@ -549,8 +575,17 @@ func TestCluster_IsolatedLeaderNoForkNoLossNoDuplicate(t *testing.T) {
 	h.waitBlocks(5, h.m...)
 
 	h.isolate(old)
-	for i := 100; i < 105; i++ { // accepted by the cut-off leader, cannot commit
-		old.node.Submit(testBatch(t, uint64(i)))
+	var wg sync.WaitGroup
+	var failed atomic.Int32
+	for i := 100; i < 105; i++ { // offered to the cut-off leader: it cannot commit them, the caller keeps retrying
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !submitRetry(old, testBatch(t, uint64(i)), 40*time.Second) {
+				failed.Add(1)
+			}
+		}()
 	}
 	nl := h.leader(old)
 	for i := 200; i < 205; i++ { // committed by the majority
@@ -568,7 +603,11 @@ func TestCluster_IsolatedLeaderNoForkNoLossNoDuplicate(t *testing.T) {
 	}
 
 	h.connect()
-	h.waitBlocks(15, h.m...) // 5 + 5 (majority) + 5 re-routed
+	wg.Wait() // the retries reach the new leader through the healed old one
+	if failed.Load() != 0 {
+		t.Fatalf("%d batches were never accepted after healing", failed.Load())
+	}
+	h.waitBlocks(15, h.m...) // 5 + 5 (majority) + 5 that were retried
 	time.Sleep(500 * time.Millisecond)
 	h.assertIdentical(h.m...)
 	seen := map[uint64]int{}
@@ -582,7 +621,7 @@ func TestCluster_IsolatedLeaderNoForkNoLossNoDuplicate(t *testing.T) {
 	}
 	for _, want := range []uint64{0, 4, 100, 104, 200, 204} {
 		if seen[want] != 1 {
-			t.Fatalf("nonce %d missing after the leader change (lost=%d)", want, old.node.Lost())
+			t.Fatalf("nonce %d missing after the leader change", want)
 		}
 	}
 	if len(seen) != 15 {
@@ -625,8 +664,7 @@ func TestCluster_FullRestartContinuesWithoutReexecution(t *testing.T) {
 
 // T-AP-07 end to end: while the pipeline has not made the delivered blocks durable, a forced Raft snapshot must
 // not finish, so no log entry can be compacted away; once they are durable it completes, and a crash + restart
-// from that snapshot loses nothing. (The delivery gate keeps at most one block ahead of the DB, so what is held
-// back here is Apply itself — the FSM-level test covers Snapshot's own wait.)
+// from that snapshot loses nothing.
 func TestCluster_SnapshotNeverCompactsAheadOfDurability(t *testing.T) {
 	h := newHarness(t, 3)
 	h.mutate = func(rc *config.RaftConfig) { rc.TrailingLogs = 5; rc.SnapshotThreshold = 1 << 30 }
@@ -638,16 +676,12 @@ func TestCluster_SnapshotNeverCompactsAheadOfDurability(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		h.submit(l, testBatch(t, uint64(i)))
 	}
-	h.waitBlocks(1, l)
-	time.Sleep(300 * time.Millisecond)
-	if got := len(l.disk.blocks()); got != 1 {
-		t.Fatalf("%d blocks delivered although none is durable: the gate lets the pipeline run more than one block ahead", got)
-	}
+	h.waitBlocks(30, h.m...) // all delivered to the pipeline, none durable on the leader
 	done := make(chan error, 1)
 	go func() { done <- l.node.raft.Snapshot().Error() }()
 	select {
 	case err := <-done:
-		t.Fatalf("snapshot finished (%v) while a delivered block was not durable: log could be compacted ahead of the DB", err)
+		t.Fatalf("snapshot finished (%v) while 30 delivered blocks were not durable: log could be compacted ahead of the DB", err)
 	case <-time.After(400 * time.Millisecond):
 	}
 	l.disk.release()
@@ -864,8 +898,8 @@ func TestCluster_LeaderLogStoreFailureLosesNothingAndForksNothing(t *testing.T) 
 		h.submit(l, testBatch(t, uint64(i)))
 	}
 	h.waitBlocks(20, h.m...)
-	fs.okWrites.Store(0)             // the disk dies here
-	l.node.Submit(testBatch(t, 999)) // first write after the failure: the node must take itself out
+	fs.okWrites.Store(0)                // the disk dies here
+	go l.node.Submit(testBatch(t, 999)) // first write after the failure: the node must take itself out; the batch is NOT acknowledged
 	var alive []*member
 	for _, m := range h.m {
 		if m.id != "n0" {
@@ -879,9 +913,9 @@ func TestCluster_LeaderLogStoreFailureLosesNothingAndForksNothing(t *testing.T) 
 	h.waitBlocks(60, alive...)
 	time.Sleep(500 * time.Millisecond)
 	h.assertIdentical(alive...)
-	// Every tx that was replicated (0..59) is executed exactly once. The one batch the failing node had only
-	// accepted (nonce 999, in its propose queue, never replicated) dies with that replica, exactly like a kill -9:
-	// the sender must resend it. So 60 or 61 distinct txs, never fewer, never a duplicate of 0..59.
+	// Every tx that was replicated (0..59) is executed exactly once. The batch offered to the failing node (nonce
+	// 999) was never acknowledged (Submit only says true once committed), so its sender still holds it and would
+	// retry; here nobody retries, so it is absent — or present once if it did commit. Never a duplicate of 0..59.
 	seen := map[uint64]int{}
 	for _, b := range alive[0].disk.blocks() {
 		seen[nonceOf(t, b)]++
@@ -1001,5 +1035,32 @@ func TestCluster_HashEndpointRejectsBadAuth(t *testing.T) {
 	}
 	if c := get("n1", forwardMAC(h.secret, "n1", now, []byte("2"))); c != http.StatusUnauthorized {
 		t.Fatalf("mac for a different query: %d", c)
+	}
+}
+
+// Submit acknowledges only COMMITTED batches: a leader that cannot reach a quorum must not tell the forwarder
+// "accepted" (the forwarder would then delete the txs from its pool and a crash would lose them for good).
+func TestCluster_SubmitIsNotAcknowledgedBeforeCommit(t *testing.T) {
+	h := newHarness(t, 3)
+	h.startAll()
+	l := h.leader()
+	for _, m := range h.m {
+		if m != l {
+			h.isolate(m)
+		}
+	}
+	res := make(chan bool, 1)
+	go func() { res <- l.node.Submit(testBatch(t, 1)) }()
+	select {
+	case ok := <-res:
+		if ok { // false is fine: the isolated leader steps down and the caller is told to retry
+			t.Fatal("Submit acknowledged a batch that could not have been committed (no quorum)")
+		}
+	case <-time.After(1500 * time.Millisecond):
+	}
+	h.connect()
+	select {
+	case <-res: // committed after healing, or reported uncommitted (already consumed above): both are honest
+	case <-time.After(submitCommitTimeout + 3*time.Second):
 	}
 }

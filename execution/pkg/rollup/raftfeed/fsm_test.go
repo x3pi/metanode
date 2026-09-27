@@ -207,42 +207,6 @@ func snapshotBytes(t *testing.T, s raft.FSMSnapshot) []byte {
 	return sink.Bytes()
 }
 
-// The pipeline must never be handed block n while block n-1 is still in flight: the speculative executor's
-// parent-hash conflict path was seen to wedge NOMT (see waitPreviousDurable).
-func TestFSM_HoldsBlockUntilPreviousIsDurable(t *testing.T) {
-	r := newRig(t)
-	r.f.Apply(entry(t, 2, 10, testBatch(t, 1), 1))
-	r.next() // block 1 delivered and durable
-
-	done := make(chan struct{})
-	go func() {
-		r.f.Apply(entry(t, 3, 20, testBatch(t, 2), 1)) // block 2
-		r.f.Apply(entry(t, 4, 30, testBatch(t, 3), 1)) // block 3: previous (2) never becomes durable in this test
-		close(done)
-	}()
-	blk2 := <-r.sink
-	if blk2.BlockNumber != 2 {
-		t.Fatalf("got block %d", blk2.BlockNumber)
-	}
-	select {
-	case b := <-r.sink:
-		t.Fatalf("block %d was delivered while block 2 was not durable", b.BlockNumber)
-	case <-done:
-		t.Fatal("Apply of block 3 returned while block 2 was not durable")
-	case <-time.After(300 * time.Millisecond):
-	}
-	r.dur.Store(2)
-	select {
-	case b := <-r.sink:
-		if b.BlockNumber != 3 {
-			t.Fatalf("got block %d", b.BlockNumber)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("block 3 was not delivered once block 2 became durable")
-	}
-	<-done
-}
-
 // T-AP-07 / T-AP-08: Snapshot must not return (so Raft cannot compact its log) while a delivered block is not
 // yet durable; the meta it then carries describes exactly the durable state.
 func TestFSM_SnapshotWaitsForDurableBlocks(t *testing.T) {

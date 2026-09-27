@@ -74,9 +74,6 @@ type StartConfig struct {
 	// LeaderAddress is the address stamped as the block's leader. Go must never derive a leader itself; in C1
 	// it is this node's own validator address, in C2 it comes from the replicated batch record.
 	LeaderAddress common.Address
-	// Durable returns the last block number durable in the DB. When set, the feeder hands block n to the pipeline
-	// only once block n-1 is durable (see fsm.waitPreviousDurable for why); nil disables the gate (unit tests).
-	Durable func() uint64
 	// Now supplies the timestamp source (defaults to time.Now); injectable so tests can prove determinism.
 	Now func() time.Time
 }
@@ -158,21 +155,6 @@ func (f *Feeder) Dropped() uint64 { return f.dropped.Load() }
 // Failed reports whether the feeder stopped itself because it could not keep numbering safely.
 func (f *Feeder) Failed() bool { return f.failed.Load() }
 
-// waitPreviousDurable is the feeder's copy of the delivery gate (fsm.waitPreviousDurable).
-func (f *Feeder) waitPreviousDurable(blockNumber uint64) bool {
-	if f.cfg.Durable == nil {
-		return true
-	}
-	for f.cfg.Durable()+1 < blockNumber {
-		select {
-		case <-f.stop:
-			return false
-		case <-time.After(gatePollInterval):
-		}
-	}
-	return true
-}
-
 // Submit hands a marshalled transaction batch (transaction.MarshalTransactions) to the feeder.
 //
 // It returns true only once the batch is accepted into the bounded queue. tx_batch_forwarder retries a false
@@ -221,9 +203,6 @@ func (f *Feeder) run() {
 				f.dropped.Add(1)
 				logger.Error("❌ [RAFT-FEED] dropping a batch that cannot become a block: %v", err)
 				continue
-			}
-			if !f.waitPreviousDurable(blk.BlockNumber) {
-				return
 			}
 			select {
 			case f.cfg.Sink <- blk:

@@ -60,6 +60,12 @@ type SpeculativeExecutor struct {
 	concurrencySem chan struct{} // Bounded concurrency (max 2 sessions)
 	inFlight       sync.Map      // GEI (uint64) -> *inFlightSession, executions currently running
 	activeWorkers  atomic.Int32  // Number of EVM speculative worker goroutines currently executing
+
+	// committedThrough is the highest GEI whose commit (or sequential re-execution) the committer has finished;
+	// commitWake is closed and replaced on every advance so waiters can block without polling.
+	commitMu         sync.Mutex
+	committedThrough uint64
+	commitWake       chan struct{}
 }
 
 // inFlightSession tracks the caller currently waiting on a GEI's speculative
@@ -80,6 +86,7 @@ func NewSpeculativeExecutor(bp *BlockProcessor) *SpeculativeExecutor {
 		bp:             bp,
 		resultChan:     make(chan *SpeculativeResult, 1000),
 		concurrencySem: make(chan struct{}, 2), // Max 2 parallel speculative EVMs
+		commitWake:     make(chan struct{}),
 	}
 }
 
@@ -309,7 +316,14 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 
 		logger.Info("🔄 [SPECULATIVE] Executing GEI=%d speculatively with %d txs (block #%d)", gei, len(allTransactions), blockNum)
 		startTime := time.Now()
-		accumulatedResults, execErr := tx_processor.ProcessTransactions(ctx, csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum, true)
+		gatedCtx := tx_processor.WithIRGate(ctx, se.newIRGate(gei, lastBlockHeader.Hash(), func() (common.Hash, bool) {
+			tip := se.bp.GetLastBlock()
+			if tip == nil {
+				return common.Hash{}, false
+			}
+			return tip.Header().Hash(), true
+		}))
+		accumulatedResults, execErr := tx_processor.ProcessTransactions(gatedCtx, csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum, true)
 		execDuration := time.Since(startTime)
 		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(accumulatedResults.Transactions), 0, execDuration.Microseconds())
 		if ffiTraceEnabled {
@@ -579,6 +593,9 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 		}
 	}
 
+	// Everything below nextExpectedGEI is already committed: let speculative executions waiting on it proceed.
+	bp.speculativeExecutor.MarkCommitted(nextExpectedGEI - 1)
+
 	epochFileLogger, _ := loggerfile.NewFileLogger("runSocketExecutor_committer.log")
 
 	for range bp.speculativeExecutor.ResultChan() {
@@ -591,6 +608,7 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 				// Xóa tất cả các session cũ bị bỏ qua trong một lần gọi
 				bp.speculativeExecutor.CleanGEI(lastGEI)
 				nextExpectedGEI = lastGEI + 1
+				bp.speculativeExecutor.MarkCommitted(lastGEI)
 			}
 
 			specRes, exists := bp.speculativeExecutor.GetSpeculativeResult(nextExpectedGEI)
@@ -607,6 +625,7 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 
 			// Dọn dẹp session cũ
 			bp.speculativeExecutor.CleanGEI(nextExpectedGEI)
+			bp.speculativeExecutor.MarkCommitted(nextExpectedGEI)
 			nextExpectedGEI++
 		}
 	}

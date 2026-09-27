@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"math"
 	"math/big"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -313,34 +312,5 @@ func TestValidateConfig(t *testing.T) {
 				t.Fatalf("ValidateConfig() error = %v, wantErr %v", err, tc.wantErr)
 			}
 		})
-	}
-}
-
-// The feeder must not hand block n to the pipeline while block n-1 is still in flight (see waitPreviousDurable).
-func TestFeeder_HoldsBlockUntilPreviousIsDurable(t *testing.T) {
-	var durable atomic.Uint64
-	durable.Store(3) // blocks start at 4, so block 3 is the last durable one
-	_, sink := startFeeder(t, 8, func(c *StartConfig) { c.Durable = durable.Load })
-	for i := uint64(0); i < 3; i++ {
-		if !Submit(testBatch(t, i)) {
-			t.Fatal("submit refused")
-		}
-	}
-	if b := recv(t, sink); b.BlockNumber != 4 {
-		t.Fatalf("first block is %d", b.BlockNumber)
-	}
-	select {
-	case b := <-sink:
-		t.Fatalf("block %d delivered while block 4 was not durable", b.BlockNumber)
-	case <-time.After(300 * time.Millisecond):
-	}
-	durable.Store(4)
-	if b := recv(t, sink); b.BlockNumber != 5 {
-		t.Fatalf("second block is %d", b.BlockNumber)
-	}
-	select {
-	case b := <-sink:
-		t.Fatalf("block %d delivered while block 5 was not durable", b.BlockNumber)
-	case <-time.After(300 * time.Millisecond):
 	}
 }
