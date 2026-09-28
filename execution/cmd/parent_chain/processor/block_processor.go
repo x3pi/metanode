@@ -8,6 +8,7 @@ import (
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/executor"
 	"google.golang.org/protobuf/proto"
 )
@@ -124,4 +125,8 @@ func (bp *BlockProcessor) processBlock(block *pb.ExecutableBlock) {
 			bp.onTxResult(tx.MsgID, err)
 		}
 	}
+
+	// Tell the FFI that the block has been processed
+	storage.UpdateLastBlockNumber(block.BlockNumber)
+	storage.UpdateLastAssignedBlockNumber(block.BlockNumber)
 }

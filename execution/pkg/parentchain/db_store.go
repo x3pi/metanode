@@ -19,6 +19,7 @@ var (
 	PrefixSeq           = []byte("sq:")
 	PrefixVelocity      = []byte("vl:")
 	PrefixAccount       = []byte("ac:")
+	PrefixStateRoot     = []byte("sr:")
 )
 
 type DBStore struct {
@@ -262,4 +263,40 @@ func (s *DBStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([
 	
 	res := allEvents[cursor : cursor+count]
 	return res, cursor + count, nil
+}
+
+func (s *DBStore) GetStateRoot(clusterKeyHash common.Hash, epoch uint64) (common.Hash, bool, error) {
+	key := make([]byte, 0, len(PrefixStateRoot)+32+8)
+	key = append(key, PrefixStateRoot...)
+	key = append(key, clusterKeyHash.Bytes()...)
+	var epochBytes [8]byte
+	for i := 7; i >= 0; i-- {
+		epochBytes[i] = byte(epoch >> (8 * (7 - i)))
+	}
+	key = append(key, epochBytes[:]...)
+
+	data, err := s.db.Get(key, nil)
+	if err != nil {
+		if err == leveldb.ErrNotFound {
+			return common.Hash{}, false, nil
+		}
+		return common.Hash{}, false, err
+	}
+	if len(data) != 32 {
+		return common.Hash{}, false, errors.New("invalid state root length")
+	}
+	return common.BytesToHash(data), true, nil
+}
+
+func (s *DBStore) SetStateRoot(clusterKeyHash common.Hash, epoch uint64, root common.Hash) error {
+	key := make([]byte, 0, len(PrefixStateRoot)+32+8)
+	key = append(key, PrefixStateRoot...)
+	key = append(key, clusterKeyHash.Bytes()...)
+	var epochBytes [8]byte
+	for i := 7; i >= 0; i-- {
+		epochBytes[i] = byte(epoch >> (8 * (7 - i)))
+	}
+	key = append(key, epochBytes[:]...)
+
+	return s.db.Put(key, root.Bytes(), nil)
 }
