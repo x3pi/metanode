@@ -78,7 +78,7 @@ def build_genesis(exec_name, validator_address, committee_path):
     return g
 
 exec1_genesis = build_genesis('exec1', '0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5', '../../../consensus/metanode/config/devnet_exec1_keys/committee.json')
-exec2_genesis = build_genesis('exec2', '0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5', '../../../consensus/metanode/config/devnet_exec2_keys/committee.json')
+exec2_genesis = build_genesis('exec2', '0x0d4CC97b62a149a8fe8DE81262270426A80B0935', '../../../consensus/metanode/config/devnet_exec2_keys/committee.json')
 
 with open('devnet_data/exec1/genesis.json', 'w') as f:
     json.dump(exec1_genesis, f, indent=2)
@@ -125,8 +125,8 @@ cat << 'EOF' > devnet_data/exec2/config.json
   "enable_private_gateway": false,
   "master_password": "devnet-test-password",
   "app_pepper": "devnet-test-pepper",
-  "private_key": "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c",
-  "address": "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5",
+  "private_key": "2a61eac9235fab64ae377b2b7e39f8fa9648c5737094d28c7ee68a14b5086d39",
+  "address": "0x0d4CC97b62a149a8fe8DE81262270426A80B0935",
   "log_path": "./devnet_data/exec2/logs",
   "backup_path": "./devnet_data/exec2/backup",
   "explorer_db_path": "./devnet_data/exec2/explorer",
