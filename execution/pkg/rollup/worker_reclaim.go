@@ -3,6 +3,7 @@ package rollup
 import (
 	"log"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
@@ -120,23 +121,22 @@ func (w *ReclaimWorker) checkAndReclaim(rec *MessageRecord) {
 			ParentConfirmTime: transferRec.ConfirmedAtBlockTime,
 			Timeout:           60,
 		}
+		
+		cert := w.signReclaim(rec.MessageID)
+		_, err = w.client.SendReclaimFloat(rec.MessageID, cert)
+		if err != nil {
+			if !strings.Contains(err.Error(), "already resolved") {
+				log.Printf("Failed to send reclaim: %v", err)
+				return // transient error, retry next time
+			}
+		}
+
 		newState, _, err := Next(rec.State, RoleSender, event)
 		if err == nil {
 			rec.State = newState
 			w.store.Put(rec)
-			w.submitReclaim(rec)
 		}
 	}
-}
-
-func (w *ReclaimWorker) submitReclaim(rec *MessageRecord) {
-	cert := w.signReclaim(rec.MessageID)
-	_, err := w.client.SendReclaimFloat(rec.MessageID, cert)
-	if err != nil {
-		log.Printf("Failed to send reclaim: %v", err)
-		return
-	}
-	// Once submitted successfully, we just wait for outcome (checkReclaimOutcome)
 }
 
 func (w *ReclaimWorker) checkReclaimOutcome(rec *MessageRecord) {

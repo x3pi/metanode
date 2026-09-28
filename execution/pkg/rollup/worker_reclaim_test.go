@@ -1,6 +1,7 @@
 package rollup
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 
@@ -27,6 +28,34 @@ func TestReclaimWorker(t *testing.T) {
 		Value:     big.NewInt(100),
 	}
 	_ = store.Put(record)
+
+	// Test 1: Test Reclaim Eligible (transient error doesn't advance)
+	msgID3 := common.HexToHash("0x333")
+	record3 := &MessageRecord{
+		MessageID: msgID3,
+		Role:      RoleSender,
+		State:     StateSentConfirmed, // Eligible for reclaim
+		Sender:    common.HexToAddress("0xbbb"),
+		Value:     big.NewInt(100),
+	}
+	_ = store.Put(record3)
+	
+	client.failNext = true
+	client.failError = errors.New("network dropped")
+	worker.processReclaims()
+	
+	rec3, _, _ := store.Get(msgID3)
+	if rec3.State != StateSentConfirmed {
+		t.Errorf("Expected StateSentConfirmed on failure, got %v", rec3.State)
+	}
+
+	// Test 2: Success or already resolved advances
+	client.failNext = false // success
+	worker.processReclaims()
+	rec3, _, _ = store.Get(msgID3)
+	if rec3.State != StateReclaimSubmitted {
+		t.Errorf("Expected StateReclaimSubmitted on success, got %v", rec3.State)
+	}
 
 	// Process reclaims
 	worker.processReclaims()

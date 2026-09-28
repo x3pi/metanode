@@ -2,6 +2,7 @@ package rollup
 
 import (
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -147,8 +148,14 @@ func (w *SendWorker) processPending() {
 			)
 
 			if err != nil {
-				log.Printf("SendWorker: failed to send msgID %x: %v", rec.MessageID, err)
-				continue
+				if strings.Contains(err.Error(), "wrong nonce") {
+					// The previous RPC call probably succeeded but the response was dropped.
+					// We must advance to submitted to poll GetTransferRecord.
+					log.Printf("SendWorker: msgID %x returned 'wrong nonce', advancing to check confirmation", rec.MessageID)
+				} else {
+					log.Printf("SendWorker: failed to send msgID %x: %v", rec.MessageID, err)
+					continue
+				}
 			}
 
 			// Advance state to submitted

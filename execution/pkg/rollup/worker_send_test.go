@@ -16,9 +16,9 @@ type mockParentChainClient struct {
 	sentTransfers  []common.Hash
 	failNext       bool
 	claimedOutcome parentchain.FloatOutcome
-	// transferNotFound flips GetTransferRecord to report "not found yet" (default false, i.e.
 	// found=true, matching this mock's original behavior before the field existed).
 	transferNotFound bool
+	failError        error
 }
 
 func (m *mockParentChainClient) SendDepositToFloat(
@@ -41,6 +41,11 @@ func (m *mockParentChainClient) SendTransferFloat(
 ) (common.Hash, error) {
 	if m.failNext {
 		m.failNext = false
+		if m.failError != nil {
+			err := m.failError
+			m.failError = nil
+			return common.Hash{}, err
+		}
 		return common.Hash{}, errors.New("transient network error")
 	}
 	hash := common.HexToHash("0xabc")
@@ -53,6 +58,15 @@ func (m *mockParentChainClient) SendMarkClaimed(msgID common.Hash, outcome paren
 }
 
 func (m *mockParentChainClient) SendReclaimFloat(msgID common.Hash, cert []byte) (common.Hash, error) {
+	if m.failNext {
+		m.failNext = false
+		if m.failError != nil {
+			err := m.failError
+			m.failError = nil
+			return common.Hash{}, err
+		}
+		return common.Hash{}, errors.New("transient network error")
+	}
 	return common.Hash{}, nil
 }
 
@@ -150,6 +164,28 @@ func TestSendWorker(t *testing.T) {
 	worker.processPending()
 	if len(client.sentTransfers) != 1 {
 		t.Errorf("Expected 1 sent, got %d", len(client.sentTransfers))
+	}
+
+	// Test 4: "wrong nonce" error should advance state
+	msgID2 := common.HexToHash("0xdef")
+	record2 := &MessageRecord{
+		MessageID: msgID2,
+		Role:      RoleSender,
+		State:     StateLocalAppliedPendingSend,
+		Sender:    common.HexToAddress("0x111"),
+		Target:    common.HexToAddress("0x222"),
+		Value:     big.NewInt(100),
+		SourceSeq: 2,
+	}
+	_ = store.Put(record2)
+
+	client.failNext = true
+	client.failError = errors.New("float account: wrong nonce: got 2, want 3")
+	worker.processPending()
+
+	rec2, _, _ := store.Get(msgID2)
+	if rec2.State != StateSendSubmitted {
+		t.Errorf("Expected state to advance to SEND_SUBMITTED on wrong nonce error, got %v", rec2.State)
 	}
 
 	// Start and Stop test (non-blocking channel)
