@@ -11,6 +11,7 @@ rm -rf devnet_data
 mkdir -p devnet_data/parent
 mkdir -p devnet_data/exec1
 mkdir -p devnet_data/exec2
+rm -rf ../../../consensus/metanode/config/storage/*
 
 echo "==> CONFIGURE PARENT CHAIN"
 cat << 'EOF' > devnet_data/parent/config.json

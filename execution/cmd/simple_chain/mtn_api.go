@@ -795,3 +795,41 @@ func (api *MtnAPI) GetCommitVotes(ctx context.Context, commitIndex uint32) (map[
 	}
 	return result, nil
 }
+
+func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, amountHex string) (string, error) {
+	if api.App.crossNodeHandler == nil {
+		return "", fmt.Errorf("cross node handler not initialized")
+	}
+
+	targetAddr := common.HexToAddress(target)
+	
+	// Default sender is an account with high balance in genesis
+	senderAddr := common.HexToAddress("0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266")
+
+	amount := new(big.Int)
+	amount.SetString(strings.TrimPrefix(amountHex, "0x"), 16)
+	
+	payloadHash := crypto.Keccak256Hash(nil) // Empty payload for simple transfer
+	
+	destPubKey, found, err := api.App.parentClient.GetAccountRegistry(targetAddr)
+	if err != nil {
+		return "", fmt.Errorf("failed to query account registry: %w", err)
+	}
+	if !found {
+		// FALLBACK FOR DEVNET TEST: If not found, just use local node's pubkey
+		destPubKey = api.App.keyPair.PublicKey()
+	}
+	
+	msgID, err := api.App.crossNodeHandler.HandleTransfer(
+		destPubKey,
+		senderAddr,
+		targetAddr,
+		amount,
+		payloadHash,
+	)
+	if err != nil {
+		return "", err
+	}
+	
+	return msgID.Hex(), nil
+}

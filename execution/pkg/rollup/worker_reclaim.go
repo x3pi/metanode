@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
@@ -17,6 +18,10 @@ type ReclaimWorker struct {
 	stateDB    AccountStateDB
 	client     parentchain.Client
 	blsKeyPair *bls.KeyPair
+
+	// EventProposer is used to submit state machine events to the Raft consensus.
+	// If nil, the worker executes events locally (unsafe for Raft, only for tests).
+	EventProposer func(event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error
 
 	wakeCh chan struct{}
 	quitCh chan struct{}
@@ -172,6 +177,13 @@ func (w *ReclaimWorker) checkReclaimOutcome(rec *MessageRecord) {
 		return
 	}
 
+	if w.EventProposer != nil {
+		if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
+			log.Printf("ReclaimWorker: failed to propose EventClaimedObserved/EventReclaimWon for %x: %v", rec.MessageID, err)
+		}
+		return
+	}
+
 	newState, actions, err := Next(rec.State, RoleSender, event)
 	if err == nil {
 		w.applyActions(actions)
@@ -189,6 +201,14 @@ func (w *ReclaimWorker) processRefund(rec *MessageRecord) {
 		Sender: rec.Sender,
 		Value:  rec.Value,
 	}
+
+	if w.EventProposer != nil {
+		if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
+			log.Printf("ReclaimWorker: failed to propose EventRefundObserved for %x: %v", rec.MessageID, err)
+		}
+		return
+	}
+
 	newState, actions, err := Next(rec.State, RoleSender, event)
 	if err == nil {
 		w.applyActions(actions)

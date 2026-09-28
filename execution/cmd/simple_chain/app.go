@@ -34,6 +34,8 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/tracing"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
+	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	mt_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
@@ -91,6 +93,14 @@ type App struct {
 
 	// Pruning
 	pruningManager *pruning.PruningManager
+
+	// Rollup Components
+	rollupStore      rollup.Store
+	crossNodeHandler *rollup.CrossNodeHandler
+	sendWorker       *rollup.SendWorker
+	recvWorker       *rollup.ReceiveWorker
+	reclaimWorker    *rollup.ReclaimWorker
+	parentClient     parentchain.Client
 }
 
 // NewApp creates and initializes a new blockchain application
@@ -230,6 +240,33 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		// expect the read-only instance don't get a nil receiver.
 		app.storageManager.SetExplorerSearchServiceReadOnly(explorerReadOnlySearch)
 	}
+
+	// Initialize Rollup Components
+	parentChainURL := os.Getenv("PARENT_CHAIN_URL")
+	if parentChainURL == "" {
+		parentChainURL = "http://127.0.0.1:8547"
+	}
+	parentClient := parentchain.NewHTTPClient(parentChainURL)
+	app.parentClient = parentClient
+
+	scAdapter := &smartContractDBAdapter{db: app.chainState.GetSmartContractDB()}
+	rollupStore := rollup.NewDBStore(scAdapter)
+	app.rollupStore = rollupStore
+
+	// Register account on Parent Chain for this Exec Node
+	dummySig := bls.Sign(app.keyPair.PrivateKey(), []byte("register"))
+	_, err = parentClient.SendRegisterAccount(app.keyPair.Address(), app.keyPair.PublicKey(), dummySig.Bytes(), dummySig)
+	if err != nil {
+		logger.Warn("Failed to register account on parent chain: %v", err)
+	}
+
+	stateDBAdapter := &accountStateDBAdapter{db: app.chainState.GetAccountStateDB()}
+	chainID := uint64(1) // Default to 1
+
+	app.crossNodeHandler = rollup.NewCrossNodeHandler(rollupStore, stateDBAdapter, app.keyPair.PublicKey())
+	app.sendWorker = rollup.NewSendWorker(rollupStore, parentClient, app.keyPair, app.keyPair.PublicKey(), chainID)
+	app.recvWorker = rollup.NewReceiveWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
+	app.reclaimWorker = rollup.NewReclaimWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 
 	if app.config.IsMining {
 		// 1. Khởi tạo EthTransactionBroadcaster
@@ -414,6 +451,13 @@ func (app *App) Run() error {
 	// We now always run as the primary unified execution engine (Master)
 	app.blockProcessor.StartBackgroundWorkers()
 	go app.blockProcessor.TxsProcessor2()
+
+	// Start Rollup Workers
+	if app.sendWorker != nil {
+		go app.sendWorker.Start()
+		go app.recvWorker.Start()
+		go app.reclaimWorker.Start()
+	}
 
 	// Bắt đầu tiến trình tải dữ liệu history nếu là rpc node
 	// MÔ HÌNH SYNC MỚI: Toàn bộ quá trình đồng bộ history nay đã được uỷ thác cho Rust, Go không tự sync nữa.

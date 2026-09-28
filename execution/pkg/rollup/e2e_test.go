@@ -21,6 +21,7 @@ type InMemoryParentChain struct {
 	store     parentchain.Store
 	transfers map[uint64][]*parentchain.TransferEvent // destChainID -> transfers
 	nodeKeys  map[uint64]*bls.KeyPair
+	accounts  map[common.Address]cm.PublicKey
 }
 
 func NewInMemoryParentChain() *InMemoryParentChain {
@@ -28,6 +29,7 @@ func NewInMemoryParentChain() *InMemoryParentChain {
 		store:     parentchain.NewMemoryStore(),
 		transfers: make(map[uint64][]*parentchain.TransferEvent),
 		nodeKeys:  make(map[uint64]*bls.KeyPair),
+		accounts:  make(map[common.Address]cm.PublicKey),
 	}
 }
 
@@ -148,6 +150,20 @@ func (a *ParentChainClientAdapter) GetTransferRecord(msgID common.Hash) (parentc
 	return a.chain.store.GetTransferRecord(msgID)
 }
 
+func (a *ParentChainClientAdapter) GetAccountRegistry(userAddress common.Address) (cm.PublicKey, bool, error) {
+	a.chain.mu.Lock()
+	defer a.chain.mu.Unlock()
+	pubKey, ok := a.chain.accounts[userAddress]
+	return pubKey, ok, nil
+}
+
+func (a *ParentChainClientAdapter) SendRegisterAccount(userAddress common.Address, pubKey cm.PublicKey, signBytes []byte, sign cm.Sign) (common.Hash, error) {
+	a.chain.mu.Lock()
+	defer a.chain.mu.Unlock()
+	a.chain.accounts[userAddress] = pubKey
+	return common.Hash{}, nil
+}
+
 func (a *ParentChainClientAdapter) GetClaimed(msgID common.Hash) (parentchain.FloatOutcome, error) {
 	a.chain.mu.Lock()
 	defer a.chain.mu.Unlock()
@@ -215,14 +231,17 @@ func TestE2E_HappyPathTransfer(t *testing.T) {
 	parentChain.nodeKeys[1] = kp1
 	parentChain.nodeKeys[2] = kp2
 	
+	sender := common.HexToAddress("0xaaa")
+	target := common.HexToAddress("0xbbb")
+	
+	parentChain.accounts[sender] = kp1.PublicKey()
+	parentChain.accounts[target] = kp2.PublicKey()
+	
 	setupClusterFloatBalance(t, parentChain, kp1, 1, big.NewInt(10000))
 	setupClusterFloatBalance(t, parentChain, kp2, 2, big.NewInt(10000))
 
 	node1 := NewRollupNode(1, parentChain, kp1, kp2.PublicKey(), 2)
 	node2 := NewRollupNode(2, parentChain, kp2, kp1.PublicKey(), 1)
-	
-	sender := common.HexToAddress("0xaaa")
-	target := common.HexToAddress("0xbbb")
 	
 	// Fund node 1 sender
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
@@ -248,6 +267,10 @@ func TestE2E_HappyPathTransfer(t *testing.T) {
 			bal1 := node1.StateDB.GetBalance(sender)
 			bal2 := node2.StateDB.GetBalance(target)
 			rec2, f2, _ := node2.Store.Get(msgID)
+			
+			// DEBUG LOGGING
+			// t.Logf("bal1: %v, bal2: %v, f2: %v, rec2.State: %v", bal1, bal2, f2, rec2.State)
+			
 			if bal1.Cmp(big.NewInt(500)) == 0 && bal2.Cmp(big.NewInt(500)) == 0 {
 				if f2 && rec2.State == StateCredited {
 					success = true
@@ -270,15 +293,18 @@ func TestE2E_TransferRefund(t *testing.T) {
 	setupClusterFloatBalance(t, parentChain, kp1, 1, big.NewInt(10000))
 	setupClusterFloatBalance(t, parentChain, kp2, 2, big.NewInt(10000))
 	
+	sender := common.HexToAddress("0xaaa")
+	target := common.HexToAddress("0xbbb")
+	
+	parentChain.accounts[sender] = kp1.PublicKey()
+	parentChain.accounts[target] = kp2.PublicKey()
+	
 	node1 := NewRollupNode(1, parentChain, kp1, kp2.PublicKey(), 2)
 	node2 := NewRollupNode(2, parentChain, kp2, kp1.PublicKey(), 1)
 	
 	node2.receiveWorker.Validator = func(addr common.Address) bool {
 		return false
 	}
-	
-	sender := common.HexToAddress("0xaaa")
-	target := common.HexToAddress("0xbbb")
 	
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
 	
@@ -322,12 +348,14 @@ func TestE2E_TransferReclaimWon(t *testing.T) {
 	setupClusterFloatBalance(t, parentChain, kp1, 1, big.NewInt(10000))
 	setupClusterFloatBalance(t, parentChain, kp2, 2, big.NewInt(10000))
 
-	node1 := NewRollupNode(1, parentChain, kp1, kp2.PublicKey(), 2)
-	node2 := NewRollupNode(2, parentChain, kp2, kp1.PublicKey(), 1)
-	
 	sender := common.HexToAddress("0xaaa")
 	target := common.HexToAddress("0xbbb")
 	
+	parentChain.accounts[sender] = kp1.PublicKey()
+	parentChain.accounts[target] = kp2.PublicKey()
+
+	node1 := NewRollupNode(1, parentChain, kp1, kp2.PublicKey(), 2)
+	node2 := NewRollupNode(2, parentChain, kp2, kp1.PublicKey(), 1)
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
 	
 	handler := NewCrossNodeHandler(node1.Store, node1.StateDB, node1.blsKeyPair.PublicKey())
@@ -392,15 +420,17 @@ func TestE2E_TransferReclaimLost_DoubleCreditPrevention(t *testing.T) {
 	
 	setupClusterFloatBalance(t, parentChain, kp1, 1, big.NewInt(10000))
 	setupClusterFloatBalance(t, parentChain, kp2, 2, big.NewInt(10000))
+	sender := common.HexToAddress("0xaaa")
+	target := common.HexToAddress("0xbbb")
+	
+	parentChain.accounts[sender] = kp1.PublicKey()
+	parentChain.accounts[target] = kp2.PublicKey()
 
 	node1 := NewRollupNode(1, parentChain, kp1, kp2.PublicKey(), 2)
 	node2 := NewRollupNode(2, parentChain, kp2, kp1.PublicKey(), 1)
 	
 	// Node 2 rejects destination
 	node2.receiveWorker.Validator = func(addr common.Address) bool { return false }
-	
-	sender := common.HexToAddress("0xaaa")
-	target := common.HexToAddress("0xbbb")
 	
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
 	
@@ -477,14 +507,17 @@ func TestE2E_Refund_DoubleCreditPrevention(t *testing.T) {
 	setupClusterFloatBalance(t, parentChain, kp1, 1, big.NewInt(10000))
 	setupClusterFloatBalance(t, parentChain, kp2, 2, big.NewInt(10000))
 
+	sender := common.HexToAddress("0xaaa")
+	target := common.HexToAddress("0xbbb")
+	
+	parentChain.accounts[sender] = kp1.PublicKey()
+	parentChain.accounts[target] = kp2.PublicKey()
+
 	node1 := NewRollupNode(1, parentChain, kp1, kp2.PublicKey(), 2)
 	node2 := NewRollupNode(2, parentChain, kp2, kp1.PublicKey(), 1)
 	
 	// Node 2 rejects destination
 	node2.receiveWorker.Validator = func(addr common.Address) bool { return false }
-	
-	sender := common.HexToAddress("0xaaa")
-	target := common.HexToAddress("0xbbb")
 	
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
 	

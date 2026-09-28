@@ -66,6 +66,14 @@ func (m *mockParentChainClient) GetClaimed(msgID common.Hash) (parentchain.Float
 	return m.claimedOutcome, nil
 }
 
+func (m *mockParentChainClient) GetAccountRegistry(userAddress common.Address) (cm.PublicKey, bool, error) {
+	return cm.PublicKey{}, true, nil
+}
+
+func (m *mockParentChainClient) SendRegisterAccount(userAddress common.Address, pubKey cm.PublicKey, signBytes []byte, sign cm.Sign) (common.Hash, error) {
+	return common.Hash{}, nil
+}
+
 func (m *mockParentChainClient) GetFloatSeq(pubKey cm.PublicKey) (uint64, error) {
 	return 0, nil
 }

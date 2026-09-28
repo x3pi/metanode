@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
@@ -23,6 +24,12 @@ type ReceiveWorker struct {
 	blsKeyPair  *bls.KeyPair
 
 	Validator func(common.Address) bool
+
+	// EventProposer is used to submit state machine events to the Raft consensus.
+	// In a real execution node, this MUST submit a SystemTransaction to the tx_pool
+	// so the event can be processed atomically by the Block Processor.
+	// If nil, the worker executes events locally (unsafe for Raft, only for tests).
+	EventProposer func(event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error
 
 	wakeCh chan struct{}
 	quitCh chan struct{}
@@ -151,7 +158,7 @@ func (w *ReceiveWorker) pollAndProcess() {
 
 func (w *ReceiveWorker) handleIncomingTransfer(tx *parentchain.TransferEvent) {
 	_, found, _ := w.store.Get(tx.MsgID)
-	
+
 	event := Event{
 		Type:               EventCreditObserved,
 		Role:               RoleReceiver,
@@ -162,6 +169,14 @@ func (w *ReceiveWorker) handleIncomingTransfer(tx *parentchain.TransferEvent) {
 		IsDestinationValid: w.isValidDestination(tx.Target),
 	}
 
+	if w.EventProposer != nil {
+		if err := w.EventProposer(event, tx.MsgID, tx.SourceSeq, tx.SourcePubKey, tx.DestPubKey, tx.PayloadHash); err != nil {
+			log.Printf("ReceiveWorker: failed to propose EventCreditObserved for %x: %v", tx.MsgID, err)
+		}
+		return
+	}
+
+	// Fallback: local direct execution (only for testing without Raft)
 	newState, _, err := Next(StateNone, RoleReceiver, event)
 	if err != nil {
 		log.Printf("ReceiveWorker: next failed for incoming msg %x: %v", tx.MsgID, err)
@@ -260,6 +275,15 @@ func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) {
 			Value:   rec.Value,
 			Outcome: smOutcome,
 		}
+
+		if w.EventProposer != nil {
+			if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
+				log.Printf("ReceiveWorker: failed to propose EventClaimedConfirmed for %x: %v", rec.MessageID, err)
+			}
+			return
+		}
+
+		// Fallback: local direct execution (only for testing without Raft)
 		newState, actions, err := Next(rec.State, RoleReceiver, event)
 		if err != nil {
 			log.Printf("ReceiveWorker: Next(EventClaimedConfirmed) error: %v", err)

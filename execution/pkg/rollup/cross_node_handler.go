@@ -117,3 +117,67 @@ func (h *CrossNodeHandler) HandleTransfer(
 
 	return msgID, nil
 }
+
+// HandleSystemEvent applies a rollup state machine event deterministically.
+// This MUST be called by the transaction executor during Raft block processing
+// to ensure zero state drift across all replicas.
+func (h *CrossNodeHandler) HandleSystemEvent(event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	rec, found, err := h.store.Get(msgID)
+	if err != nil {
+		return fmt.Errorf("failed to get record: %w", err)
+	}
+
+	var currentState State = StateNone
+	if found {
+		currentState = rec.State
+	} else if event.Type == EventCreditObserved {
+		// Initialize new record
+		rec = &MessageRecord{
+			MessageID:   msgID,
+			Role:        event.Role,
+			State:       StateNone,
+			Sender:      event.Sender,
+			Target:      event.Target,
+			Value:       event.Value,
+			SourceSeq:   sourceSeq,
+			SourcePubKey: sourcePubKey,
+			DestPubKey:   destPubKey,
+			PayloadHash: payloadHash,
+		}
+	} else {
+		return fmt.Errorf("record not found for event %v", event.Type)
+	}
+
+	// For EventCreditObserved, check if duplicate
+	if event.Type == EventCreditObserved {
+		event.IsDuplicate = found
+	}
+
+	newState, actions, err := Next(currentState, event.Role, event)
+	if err != nil {
+		return fmt.Errorf("state transition failed: %w", err)
+	}
+
+	// Apply actions atomically
+	for _, action := range actions {
+		if action.Type == ActionDeductBalance {
+			h.stateDB.SubBalance(action.Target, action.Amount)
+		} else if action.Type == ActionCreditLocal {
+			// Credit is negative deduction
+			h.stateDB.SubBalance(action.Target, new(big.Int).Neg(action.Amount))
+		}
+		// Note: ActionSendRefund is not applied here. It requires sending an HTTP request,
+		// which is non-deterministic and must be done by a background worker polling the state,
+		// NOT during Raft block execution!
+	}
+
+	rec.State = newState
+	if err := h.store.Put(rec); err != nil {
+		return fmt.Errorf("failed to save record: %w", err)
+	}
+
+	return nil
+}
