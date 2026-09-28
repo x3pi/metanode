@@ -21,6 +21,15 @@ type mockParentChainClient struct {
 	transferNotFound bool
 }
 
+func (m *mockParentChainClient) SendDepositToFloat(
+	pubKey cm.PublicKey,
+	destChainID uint64,
+	sender, target common.Address,
+	amount *big.Int,
+) (common.Hash, error) {
+	return common.Hash{}, nil
+}
+
 func (m *mockParentChainClient) SendTransferFloat(
 	pubKey, destPubKey cm.PublicKey,
 	destChainID uint64,

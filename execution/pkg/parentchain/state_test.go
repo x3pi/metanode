@@ -77,7 +77,7 @@ func TestParentChainState(t *testing.T) {
 	t.Run("DepositToFloat to new FloatIdentityKey", func(t *testing.T) {
 		depositAmount := big.NewInt(1000)
 		msgID := common.HexToHash("0x123")
-		err := DepositToFloat(store, pub1, 101, depositAmount, msgID, 1)
+		err := DepositToFloat(store, pub1, 101, common.Address{}, common.Address{}, depositAmount, msgID, 1)
 		if err != nil {
 			t.Fatalf("Failed to deposit: %v", err)
 		}
@@ -102,7 +102,7 @@ func TestParentChainState(t *testing.T) {
 	// Test: TransferFloat
 	t.Run("TransferFloat to new FloatIdentityKey", func(t *testing.T) {
 		store := NewMemoryStore()
-		DepositToFloat(store, pub1, 101, big.NewInt(1000), common.HexToHash("0x123"), 1)
+		DepositToFloat(store, pub1, 101, common.Address{}, common.Address{}, big.NewInt(1000), common.HexToHash("0x123"), 1)
 		
 		nonce := uint64(0)
 		amount := big.NewInt(400)
@@ -164,7 +164,7 @@ func TestParentChainState(t *testing.T) {
 	// Test: ReclaimFloat before timeout rejected
 	t.Run("ReclaimFloat before timeout rejected", func(t *testing.T) {
 		store := NewMemoryStore()
-		DepositToFloat(store, pub1, 101, big.NewInt(1000), common.HexToHash("0x123"), 1)
+		DepositToFloat(store, pub1, 101, common.Address{}, common.Address{}, big.NewInt(1000), common.HexToHash("0x123"), 1)
 		
 		nonce := uint64(0)
 		amount := big.NewInt(100)
@@ -210,7 +210,7 @@ func TestParentChainState(t *testing.T) {
 	t.Run("Refund not blocked by velocity", func(t *testing.T) {
 		// bal1 is 1000, 20% is 200. Sending 250 should fail if not refund.
 		store := NewMemoryStore()
-		DepositToFloat(store, pub1, 101, big.NewInt(1000), common.HexToHash("0x123"), 1)
+		DepositToFloat(store, pub1, 101, common.Address{}, common.Address{}, big.NewInt(1000), common.HexToHash("0x123"), 1)
 		
 		nonce := uint64(0)
 		amount := big.NewInt(250)
@@ -238,7 +238,7 @@ func TestParentChainState(t *testing.T) {
 	// Test: Persist qua reload (Clone)
 	t.Run("Persist qua reload", func(t *testing.T) {
 		store := NewMemoryStore()
-		DepositToFloat(store, pub1, 101, big.NewInt(1000), common.HexToHash("0x123"), 1)
+		DepositToFloat(store, pub1, 101, common.Address{}, common.Address{}, big.NewInt(1000), common.HexToHash("0x123"), 1)
 		nonce := uint64(0)
 		digest := ComputeTransferFloatMessage(pub1, pub2, userAddr, userAddr2, big.NewInt(450), nil, crypto.Keccak256Hash(nil), nonce)
 		cert := bls.Sign(priv1, digest)

@@ -40,6 +40,27 @@ type ParentChainClientAdapter struct {
 	delay   time.Duration // simulate latency or failures
 }
 
+func (a *ParentChainClientAdapter) SendDepositToFloat(
+	pubKey cm.PublicKey,
+	destChainID uint64,
+	sender, target common.Address,
+	amount *big.Int,
+) (common.Hash, error) {
+	msgID := common.BytesToHash([]byte(fmt.Sprintf("deposit_adapter_%d", time.Now().UnixNano())))
+	// We call DepositToFloat directly to simulate what the gateway would do
+	err := parentchain.DepositToFloat(
+		a.chain.store,
+		pubKey,
+		destChainID,
+		sender,
+		target,
+		amount,
+		msgID,
+		uint64(time.Now().Unix()),
+	)
+	return msgID, err
+}
+
 func (a *ParentChainClientAdapter) SendTransferFloat(
 	pubKey, destPubKey cm.PublicKey,
 	destChainID uint64,
@@ -218,7 +239,7 @@ func (n *RollupNode) Stop() {}
 
 func setupClusterFloatBalance(t *testing.T, parentChain *InMemoryParentChain, kp *bls.KeyPair, chainID uint64, amount *big.Int) {
 	msgID := common.BytesToHash([]byte(fmt.Sprintf("deposit_init_%d", chainID)))
-	err := parentchain.DepositToFloat(parentChain.store, kp.PublicKey(), chainID, amount, msgID, uint64(time.Now().Unix()))
+	err := parentchain.DepositToFloat(parentChain.store, kp.PublicKey(), chainID, common.Address{}, common.Address{}, amount, msgID, uint64(time.Now().Unix()))
 	if err != nil {
 		t.Fatalf("setupClusterFloatBalance failed: %v", err)
 	}
