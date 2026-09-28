@@ -12,6 +12,7 @@ var (
 	configPath     = flag.String("config", "config.json", "Config path")
 	rustConfigPath = flag.String("rust-config", "config.json", "Rust consensus config path")
 	dataDir        = flag.String("data-dir", "./data", "Data directory")
+	httpAddr       = flag.String("http", ":8545", "HTTP RPC listen address")
 )
 
 func main() {
@@ -19,7 +20,7 @@ func main() {
 
 	log.Println("Starting Parent Chain Node...")
 
-	app, err := NewApp(*configPath, *rustConfigPath, *dataDir)
+	app, err := NewApp(*configPath, *rustConfigPath, *dataDir, *httpAddr)
 	if err != nil {
 		log.Fatalf("Failed to initialize app: %v", err)
 	}

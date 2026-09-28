@@ -149,7 +149,10 @@ func (rh *RequestHandler) HandleGetCurrentEpochRequest(request *pb.GetCurrentEpo
 	logger.Debug("🔍 [GET CURRENT EPOCH] Handling GetCurrentEpochRequest from Rust")
 
 	// Get current epoch from blockchain state
-	currentEpoch := rh.chainState.GetCurrentEpoch()
+	var currentEpoch uint64 = 0
+	if rh.chainState != nil {
+		currentEpoch = rh.chainState.GetCurrentEpoch()
+	}
 	logger.Debug("🔍 [GET CURRENT EPOCH] Current epoch from Go state", "epoch", currentEpoch)
 
 	// NOTE: SaveEpochData() removed here - it was debug code causing unnecessary I/O
@@ -167,11 +170,13 @@ func (rh *RequestHandler) HandleGetCurrentEpochRequest(request *pb.GetCurrentEpo
 func (rh *RequestHandler) HandleGetEpochStartTimestampRequest(request *pb.GetEpochStartTimestampRequest) (*pb.GetEpochStartTimestampResponse, error) {
 	logger.Info("Handling GetEpochStartTimestampRequest (Sui-style epoch transition)", "epoch", request.Epoch)
 
-	// Get epoch start timestamp from blockchain state
-	// This should be stored in the blockchain state similar to how Sui stores epoch_start_timestamp_ms
-	epochTimestamp, err := rh.chainState.GetEpochStartTimestamp(request.Epoch)
-	if err != nil {
-		return nil, fmt.Errorf("could not get epoch start timestamp for epoch %d: %w", request.Epoch, err)
+	var epochTimestamp uint64 = 0
+	var err error
+	if rh.chainState != nil {
+		epochTimestamp, err = rh.chainState.GetEpochStartTimestamp(request.Epoch)
+		if err != nil {
+			return nil, fmt.Errorf("could not get epoch start timestamp for epoch %d: %w", request.Epoch, err)
+		}
 	}
 
 	logger.Info("Epoch start timestamp from Go state", "epoch", request.Epoch, "timestamp_ms", epochTimestamp)
@@ -200,7 +205,10 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 	// ═══════════════════════════════════════════════════════════════════
 	// THE EPOCH GUARD: Prevent duplicate advances & log divergence
 	// ═══════════════════════════════════════════════════════════════════
-	currentEpoch := rh.chainState.GetCurrentEpoch()
+	var currentEpoch uint64 = 0
+	if rh.chainState != nil {
+		currentEpoch = rh.chainState.GetCurrentEpoch()
+	}
 	lastCommittedBlock := storage.GetLastBlockNumber()
 	lastGEI := storage.GetLastGlobalExecIndex()
 
@@ -208,9 +216,13 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 		// Rust consensus catching up sequentially during snapshot recovery.
 		// We silently accept but DO NOT modify Go state, to let Rust proceed.
 		logger.Warn("🛡️ [EPOCH GUARD] Backwards AdvanceEpoch request ignored! Target Epoch %d, but Go is already at Epoch %d. (Likely a recovery catch-up).", request.NewEpoch, currentEpoch)
+		respTs := uint64(0)
+		if rh.chainState != nil {
+			respTs = rh.chainState.GetCurrentEpochStartTimestampMs()
+		}
 		return &pb.AdvanceEpochResponse{
 			NewEpoch:              currentEpoch,
-			EpochStartTimestampMs: rh.chainState.GetCurrentEpochStartTimestampMs(),
+			EpochStartTimestampMs: respTs,
 		}, nil
 	}
 
@@ -218,9 +230,13 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 		// Rust loop/monitor fired a duplicate advance.
 		// We silently accept but DO NOT modify Go state, to let Rust proceed.
 		logger.Warn("🛡️ [EPOCH GUARD] Duplicate AdvanceEpoch rejected! Target Epoch %d, but Go is already at Epoch %d.", request.NewEpoch, currentEpoch)
+		respTs := uint64(0)
+		if rh.chainState != nil {
+			respTs = rh.chainState.GetCurrentEpochStartTimestampMs()
+		}
 		return &pb.AdvanceEpochResponse{
 			NewEpoch:              currentEpoch,
-			EpochStartTimestampMs: rh.chainState.GetCurrentEpochStartTimestampMs(),
+			EpochStartTimestampMs: respTs,
 		}, nil
 	}
 
@@ -276,9 +292,13 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 
 	// Advance epoch in Go state with explicit boundary_block from Rust
 	// This ensures deterministic epoch boundary instead of fallback to storage.GetLastBlockNumber()
-	err := rh.chainState.AdvanceEpochWithBoundary(request.NewEpoch, timestampMs, request.BoundaryBlock, request.BoundaryGei)
-	if err != nil {
-		return nil, fmt.Errorf("could not advance epoch to %d: %w", request.NewEpoch, err)
+	if rh.chainState != nil {
+		err := rh.chainState.AdvanceEpochWithBoundary(request.NewEpoch, timestampMs, request.BoundaryBlock, request.BoundaryGei)
+		if err != nil {
+			return nil, fmt.Errorf("could not advance epoch to %d: %w", request.NewEpoch, err)
+		}
+	} else {
+		logger.Warn("⚠️ [ADVANCE EPOCH] chainState is nil, skipping AdvanceEpochWithBoundary (expected in Parent Chain mode)")
 	}
 
 	// CRITICAL FORK-SAFETY FIX (May 2026): Reset commit index and epoch in GEIAuthority and DB.
@@ -328,12 +348,16 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 	// ═══════════════════════════════════════════════════════════════════
 	if validators, vErr := rh.GetValidatorsAtBlockInternal(request.BoundaryBlock); vErr == nil && len(validators.Validators) > 0 {
 		if serialized, sErr := proto.Marshal(validators); sErr == nil {
-			rh.chainState.SetEpochValidators(request.NewEpoch, serialized)
-			logger.Info("💾 [EPOCH VALIDATORS] Cached %d validators for epoch %d at boundary block %d",
-				len(validators.Validators), request.NewEpoch, request.BoundaryBlock)
-			// Persist the epoch data again to include the validator cache
-			if pErr := rh.chainState.SaveEpochDataSafe(); pErr != nil {
-				logger.Warn("⚠️ [EPOCH VALIDATORS] Failed to persist epoch data with validators: %v", pErr)
+			if rh.chainState != nil {
+				rh.chainState.SetEpochValidators(request.NewEpoch, serialized)
+				logger.Info("💾 [EPOCH VALIDATORS] Cached %d validators for epoch %d at boundary block %d",
+					len(validators.Validators), request.NewEpoch, request.BoundaryBlock)
+				// Persist the epoch data again to include the validator cache
+				if pErr := rh.chainState.SaveEpochDataSafe(); pErr != nil {
+					logger.Warn("⚠️ [EPOCH VALIDATORS] Failed to persist epoch data with validators: %v", pErr)
+				}
+			} else {
+				logger.Warn("⚠️ [EPOCH VALIDATORS] chainState is nil, skipping validator caching (expected in Parent Chain mode)")
 			}
 		} else {
 			logger.Warn("⚠️ [EPOCH VALIDATORS] Failed to serialize validators to protobuf: %v", sErr)
@@ -374,9 +398,15 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 	logger.Info("📊 [EPOCH BOUNDARY] Handling GetEpochBoundaryDataRequest", "epoch", epoch)
 
 	// Get epoch boundary block and GEI
-	currentEpoch := rh.chainState.GetCurrentEpoch()
-	boundaryBlock, fromHistory := rh.chainState.GetEpochBoundaryBlock(epoch)
-	boundaryGei := rh.chainState.GetEpochBoundaryGei(epoch)
+	var currentEpoch uint64 = 0
+	var boundaryBlock uint64 = 0
+	var boundaryGei uint64 = 0
+	var fromHistory bool = false
+	if rh.chainState != nil {
+		currentEpoch = rh.chainState.GetCurrentEpoch()
+		boundaryBlock, fromHistory = rh.chainState.GetEpochBoundaryBlock(epoch)
+		boundaryGei = rh.chainState.GetEpochBoundaryGei(epoch)
+	}
 
 	// SPECIAL CASE: Only epoch 0 uses boundary=0 (genesis)
 	if epoch == 0 && !fromHistory {
@@ -402,7 +432,9 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 
 	if epoch == 0 {
 		// EPOCH 0: Genesis epoch - use genesis config timestamp
-		epochTimestamp = rh.chainState.GetCurrentEpochStartTimestampMs()
+		if rh.chainState != nil {
+			epochTimestamp = rh.chainState.GetCurrentEpochStartTimestampMs()
+		}
 		if epochTimestamp == 0 {
 			if rh.genesisPath != "" {
 				if genesisData, err := config.LoadGenesisData(rh.genesisPath); err == nil {
@@ -426,10 +458,14 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 		// EPOCH N (N >= 1): Retrieve the timestamp provided by Rust during AdvanceEpoch.
 		// FORK-SAFETY: Check specific epoch start timestamp, fallback to current epoch start timestamp.
 		var tsErr error
-		epochTimestamp, tsErr = rh.chainState.GetEpochStartTimestamp(epoch)
+		if rh.chainState != nil {
+			epochTimestamp, tsErr = rh.chainState.GetEpochStartTimestamp(epoch)
+		} else {
+			tsErr = fmt.Errorf("chainState is nil")
+		}
 		if tsErr != nil {
 			// Fallback: Check if it is the current epoch
-			if epoch == currentEpoch {
+			if epoch == currentEpoch && rh.chainState != nil {
 				epochTimestamp = rh.chainState.GetCurrentEpochStartTimestampMs()
 			}
 			if epochTimestamp == 0 {

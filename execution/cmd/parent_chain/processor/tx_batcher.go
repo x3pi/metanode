@@ -27,6 +27,12 @@ func NewTxBatcher(queueSize int) *TxBatcher {
 	}
 }
 
+// Chan returns the channel HTTPServer writes accepted txs into directly, so app.go can wire
+// the two together without exposing the unexported field itself.
+func (tb *TxBatcher) Chan() chan *parentchain.ParentChainTx {
+	return tb.txChan
+}
+
 func (tb *TxBatcher) SubmitTx(tx *parentchain.ParentChainTx) error {
 	select {
 	case tb.txChan <- tx:

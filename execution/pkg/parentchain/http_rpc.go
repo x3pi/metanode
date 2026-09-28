@@ -8,6 +8,8 @@ import (
 	"math/big"
 	"net/http"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -160,14 +162,30 @@ func hexEncode(b []byte) string {
 // ---------------------------------------------------------
 
 type HTTPServer struct {
-	store  Store
-	txChan chan *ParentChainTx
+	store      Store
+	txChan     chan *ParentChainTx
+	pendingTxs sync.Map // map[common.Hash]chan error
 }
 
 func NewHTTPServer(store Store, txChan chan *ParentChainTx) *HTTPServer {
 	return &HTTPServer{
 		store:  store,
 		txChan: txChan,
+	}
+}
+
+func (s *HTTPServer) NotifyTxResult(msgID common.Hash, err error) {
+	if chIntf, ok := s.pendingTxs.Load(msgID); ok {
+		ch := chIntf.(chan error)
+		if err != nil {
+			select {
+			case ch <- err:
+			default:
+			}
+		} else {
+			close(ch)
+		}
+		s.pendingTxs.Delete(msgID)
 	}
 }
 
@@ -192,22 +210,37 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
+	var msgID common.Hash
+	if tx.Type == TxTypeTransferFloat {
+		var fromKey, toKey cm.PublicKey
+		copy(fromKey[:], tx.PubKey)
+		copy(toKey[:], tx.ToPubKey)
+		
+		payloadHash := crypto.Keccak256Hash(tx.Payload)
+		digest := ComputeTransferFloatMessage(fromKey, toKey, tx.Sender, tx.Target, tx.Amount, payloadHash, tx.Nonce)
+		msgID = crypto.Keccak256Hash(digest)
+		tx.MsgID = msgID
+	} else {
+		msgID = tx.MsgID
+	}
+
+	resultCh := make(chan error, 1)
+	s.pendingTxs.Store(msgID, resultCh)
+	defer s.pendingTxs.Delete(msgID)
+
 	select {
 	case s.txChan <- &tx:
-		var msgID common.Hash
-		if tx.Type == TxTypeTransferFloat {
-			var fromKey, toKey cm.PublicKey
-			copy(fromKey[:], tx.PubKey)
-			copy(toKey[:], tx.ToPubKey)
-			
-			payloadHash := crypto.Keccak256Hash(tx.Payload)
-			digest := ComputeTransferFloatMessage(fromKey, toKey, tx.Sender, tx.Target, tx.Amount, payloadHash, tx.Nonce)
-			msgID = crypto.Keccak256Hash(digest)
-			tx.MsgID = msgID
-		} else {
-			msgID = tx.MsgID
+		// Transaction successfully queued. Wait for consensus to process it.
+		select {
+		case err := <-resultCh:
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{"msg_id": msgID})
+		case <-time.After(10 * time.Second):
+			http.Error(w, "timeout waiting for consensus", http.StatusGatewayTimeout)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{"msg_id": msgID})
 	default:
 		http.Error(w, "tx queue full", http.StatusServiceUnavailable)
 	}

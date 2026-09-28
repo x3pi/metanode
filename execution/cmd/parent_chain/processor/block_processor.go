@@ -4,22 +4,25 @@ import (
 	"log"
 	"time"
 	
+	"github.com/ethereum/go-ethereum/common"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
 type BlockProcessor struct {
-	store parentchain.Store
-	queue chan *pb.ExecutableBlock
-	quit  chan struct{}
+	store      parentchain.Store
+	queue      chan *pb.ExecutableBlock
+	quit       chan struct{}
+	onTxResult func(msgID common.Hash, err error)
 }
 
-func NewBlockProcessor(store parentchain.Store) *BlockProcessor {
+func NewBlockProcessor(store parentchain.Store, onTxResult func(msgID common.Hash, err error)) *BlockProcessor {
 	return &BlockProcessor{
-		store: store,
-		queue: make(chan *pb.ExecutableBlock, 100),
-		quit:  make(chan struct{}),
+		store:      store,
+		queue:      make(chan *pb.ExecutableBlock, 100),
+		quit:       make(chan struct{}),
+		onTxResult: onTxResult,
 	}
 }
 
@@ -99,6 +102,9 @@ func (bp *BlockProcessor) processBlock(block *pb.ExecutableBlock) {
 
 		if err != nil {
 			log.Printf("Parent Chain: tx %d failed: %v", i, err)
+		}
+		if bp.onTxResult != nil {
+			bp.onTxResult(tx.MsgID, err)
 		}
 	}
 }

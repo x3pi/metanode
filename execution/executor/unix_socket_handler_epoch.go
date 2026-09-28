@@ -17,7 +17,10 @@ import (
 func (rh *RequestHandler) HandleGetLastHandledCommitIndexRequest(request *pb.GetLastHandledCommitIndexRequest) (*pb.GetLastHandledCommitIndexResponse, error) {
 	lastGEI := storage.GetLastGlobalExecIndex()
 	lastBlockNumber := storage.GetLastBlockNumber()
-	currentEpoch := rh.chainState.GetCurrentEpoch()
+	var currentEpoch uint64 = 0
+	if rh.chainState != nil {
+		currentEpoch = rh.chainState.GetCurrentEpoch()
+	}
 
 	// Go is the authoritative source for lastHandledCommitIndex
 	isAuthoritative := true
