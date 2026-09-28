@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -13,9 +15,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	e_common "github.com/ethereum/go-ethereum/common"
+	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -268,6 +273,68 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	app.recvWorker = rollup.NewReceiveWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 	app.reclaimWorker = rollup.NewReclaimWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 
+	var rollupNonceMutex sync.Mutex
+	var rollupPendingNonce uint64
+
+	type RollupSystemPayload struct {
+		Event        rollup.Event  `json:"event"`
+		MsgID        e_common.Hash `json:"msg_id"`
+		SourceSeq    uint64        `json:"source_seq"`
+		SourcePubKey cm.PublicKey  `json:"source_pub_key"`
+		DestPubKey   cm.PublicKey  `json:"dest_pub_key"`
+		PayloadHash  e_common.Hash `json:"payload_hash"`
+	}
+
+	eventProposer := func(event rollup.Event, msgID e_common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash e_common.Hash) error {
+		rollupNonceMutex.Lock()
+		defer rollupNonceMutex.Unlock()
+
+		state, err := app.chainState.GetAccountStateDB().AccountState(app.keyPair.Address())
+		var dbNonce uint64
+		if err == nil {
+			dbNonce = state.Nonce()
+		}
+		if rollupPendingNonce < dbNonce {
+			rollupPendingNonce = dbNonce
+		}
+
+		payload := RollupSystemPayload{
+			Event:        event,
+			MsgID:        msgID,
+			SourceSeq:    sourceSeq,
+			SourcePubKey: sourcePubKey,
+			DestPubKey:   destPubKey,
+			PayloadHash:  payloadHash,
+		}
+		eventData, _ := json.Marshal(payload)
+
+		tx := transaction.NewTransaction(
+			app.keyPair.Address(),
+			rollup.RollupSystemAddress,
+			big.NewInt(0),
+			21000,
+			0, // maxGasPrice
+			0, // maxTimeUse
+			eventData,
+			nil, // relatedAddresses
+			e_common.Hash{}, // lastDeviceKey
+			e_common.Hash{}, // newDeviceKey
+			rollupPendingNonce,
+			uint64(1), // chainID
+		)
+		tx.SetSign(app.keyPair.PrivateKey())
+
+		err = app.transactionPool.AddTransaction(tx)
+		if err == nil {
+			rollupPendingNonce++
+			logger.Info("📡 [ROLLUP-PROPOSER] Proposed Event %T to Raft Tx Pool (Nonce %d)", event, tx.GetNonce())
+		}
+		return err
+	}
+
+	app.recvWorker.EventProposer = eventProposer
+	app.reclaimWorker.EventProposer = eventProposer
+
 	if app.config.IsMining {
 		// 1. Khởi tạo EthTransactionBroadcaster
 		ethBroadcaster, err := NewEthTransactionBroadcaster(config.ConfigApp.ClientRpcUrl)
@@ -331,6 +398,42 @@ func (app *App) initProcessors() {
 
 	// Set node references
 	app.blockProcessor.SetNode(app.node)
+
+	// Set Rollup System Event Interceptor
+	app.transactionProcessor.SetRollupInterceptor(func(tx types.Transaction) bool {
+		if tx.ToAddress() == rollup.RollupSystemAddress {
+			type RollupSystemPayload struct {
+				Event        rollup.Event  `json:"event"`
+				MsgID        e_common.Hash `json:"msg_id"`
+				SourceSeq    uint64        `json:"source_seq"`
+				SourcePubKey cm.PublicKey  `json:"source_pub_key"`
+				DestPubKey   cm.PublicKey  `json:"dest_pub_key"`
+				PayloadHash  e_common.Hash `json:"payload_hash"`
+			}
+			
+			var payload RollupSystemPayload
+			if err := json.Unmarshal(tx.Data(), &payload); err != nil {
+				logger.Error("❌ [ROLLUP-INTERCEPTOR] Failed to unmarshal RollupSystemPayload: %v", err)
+				return false
+			}
+
+			err := app.crossNodeHandler.HandleSystemEvent(
+				payload.Event, 
+				payload.MsgID, 
+				payload.SourceSeq, 
+				payload.SourcePubKey, 
+				payload.DestPubKey, 
+				payload.PayloadHash,
+			)
+			if err != nil {
+				logger.Error("❌ [ROLLUP-INTERCEPTOR] HandleSystemEvent failed: %v", err)
+			} else {
+				logger.Info("✅ [ROLLUP-INTERCEPTOR] Successfully handled Rollup System Event: Hash %s", tx.Hash().Hex())
+			}
+			return true // Handled
+		}
+		return false
+	})
 }
 
 // initRoutes initializes API routes

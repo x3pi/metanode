@@ -50,6 +50,14 @@ type TxValidatorPool struct {
 	// evictionInProgress guards EvictLowestGasPrice against being triggered
 	// concurrently — see addTransactionToPoolInternal for why this matters.
 	evictionInProgress atomic.Bool
+	
+	// RollupInterceptor allows simple_chain/app.go to intercept System Events (like CreditObserved)
+	// before they are sent to the EVM processor, ensuring Zero State Drift across the cluster.
+	RollupInterceptor func(tx types.Transaction) bool
+}
+
+func (vp *TxValidatorPool) SetRollupInterceptor(interceptor func(tx types.Transaction) bool) {
+	vp.RollupInterceptor = interceptor
 }
 
 func NewTxValidatorPool(
@@ -784,6 +792,10 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	allAddrs := make([]common.Address, 0, len(txs)*3)
 
 	for i, tx := range txs {
+		if vp.RollupInterceptor != nil {
+			vp.RollupInterceptor(tx)
+		}
+
 		startIdx := len(allAddrs)
 		allAddrs = grouptxns.AppendDeterministicGroupAddrs(tx, allAddrs)
 		endIdx := len(allAddrs)
