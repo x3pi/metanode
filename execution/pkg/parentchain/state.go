@@ -1,6 +1,7 @@
 package parentchain
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/big"
@@ -493,4 +494,45 @@ func CheckFloatSupplyInvariant(store Store) error {
 		return fmt.Errorf("CheckFloatSupplyInvariant: sum of every NodeFloatAccount (%s) != total ever deposited (%s)", sum.String(), total.String())
 	}
 	return nil
+}
+
+func ComputeSubmitStateRootMessage(clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash) []byte {
+	var epochBytes [8]byte
+	binary.BigEndian.PutUint64(epochBytes[:], epoch)
+	data := append(clusterPubKey[:], epochBytes[:]...)
+	data = append(data, stateRoot.Bytes()...)
+	return data
+}
+
+func SubmitStateRoot(store Store, clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash, cert cm.Sign) error {
+	clusterHash := crypto.Keccak256Hash(clusterPubKey[:])
+	
+	// Check if cluster exists
+	_, found, err := store.GetChainRegistry(clusterHash)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("SubmitStateRoot: unknown cluster")
+	}
+
+	digest := ComputeSubmitStateRootMessage(clusterPubKey, epoch, stateRoot)
+	if !bls.VerifySign(clusterPubKey, cert, digest) {
+		return fmt.Errorf("SubmitStateRoot: %w", ErrInvalidSignature)
+	}
+
+	// Verify we are not submitting a root for an older epoch than what we have?
+	// The implementation can just accept whatever epoch as long as it's signed.
+	// But it might be good to prevent overwriting with older roots.
+	// We just overwrite the epoch's state root.
+	
+	_, found, err = store.GetStateRoot(clusterHash, epoch)
+	if err != nil {
+		return err
+	}
+	if found {
+		return fmt.Errorf("SubmitStateRoot: state root for epoch %d already submitted", epoch)
+	}
+
+	return store.SetStateRoot(clusterHash, epoch, stateRoot)
 }

@@ -260,4 +260,40 @@ func TestParentChainState(t *testing.T) {
 			t.Errorf("Invariant failed after clone: %v", err)
 		}
 	})
+	
+	// Test: SubmitStateRoot
+	t.Run("SubmitStateRoot valid and duplicate", func(t *testing.T) {
+		epoch := uint64(42)
+		stateRoot := common.HexToHash("0xabc123")
+		digest := ComputeSubmitStateRootMessage(pub1, epoch, stateRoot)
+		cert := bls.Sign(priv1, digest)
+		
+		err := SubmitStateRoot(store, pub1, epoch, stateRoot, cert)
+		if err != nil {
+			t.Fatalf("Failed to submit state root: %v", err)
+		}
+		
+		// check it's saved
+		hash := crypto.Keccak256Hash(pub1[:])
+		savedRoot, found, _ := store.GetStateRoot(hash, epoch)
+		if !found {
+			t.Fatalf("State root not found after submit")
+		}
+		if savedRoot != stateRoot {
+			t.Errorf("Expected root %x, got %x", stateRoot, savedRoot)
+		}
+		
+		// duplicate submission should fail
+		err = SubmitStateRoot(store, pub1, epoch, stateRoot, cert)
+		if err == nil {
+			t.Errorf("Expected error for duplicate state root submission")
+		}
+		
+		// submit with wrong sig
+		wrongCert := bls.Sign(priv2, digest)
+		err = SubmitStateRoot(store, pub1, epoch+1, stateRoot, wrongCert)
+		if err == nil || !errors.Is(err, ErrInvalidSignature) {
+			t.Errorf("Expected ErrInvalidSignature, got %v", err)
+		}
+	})
 }

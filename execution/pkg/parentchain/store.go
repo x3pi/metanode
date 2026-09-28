@@ -58,6 +58,9 @@ type Store interface {
 	GetAccountRegistry(userAddress common.Address) (cm.PublicKey, bool, error)
 	SetAccountRegistry(userAddress common.Address, floatIdentityKey cm.PublicKey) error
 
+	GetStateRoot(clusterKeyHash common.Hash, epoch uint64) (common.Hash, bool, error)
+	SetStateRoot(clusterKeyHash common.Hash, epoch uint64, root common.Hash) error
+
 	GetAllChainRegistryKeys() ([]common.Hash, error)
 
 	AppendInboundTransfer(destKeyHash common.Hash, event *TransferEvent) error
@@ -75,6 +78,7 @@ type MemoryStore struct {
 	velocities      map[common.Hash]FloatVelocityState
 	accounts        map[common.Address]cm.PublicKey
 	inbound         map[common.Hash][]*TransferEvent
+	stateRoots      map[common.Hash]map[uint64]common.Hash
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -87,6 +91,7 @@ func NewMemoryStore() *MemoryStore {
 		velocities:      make(map[common.Hash]FloatVelocityState),
 		accounts:        make(map[common.Address]cm.PublicKey),
 		inbound:         make(map[common.Hash][]*TransferEvent),
+		stateRoots:      make(map[common.Hash]map[uint64]common.Hash),
 	}
 }
 
@@ -342,4 +347,25 @@ func (m *MemoryStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64
 	}
 	
 	return res, cursor + count, nil
+}
+
+func (m *MemoryStore) GetStateRoot(clusterKeyHash common.Hash, epoch uint64) (common.Hash, bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	epochs, ok := m.stateRoots[clusterKeyHash]
+	if !ok {
+		return common.Hash{}, false, nil
+	}
+	root, found := epochs[epoch]
+	return root, found, nil
+}
+
+func (m *MemoryStore) SetStateRoot(clusterKeyHash common.Hash, epoch uint64, root common.Hash) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.stateRoots[clusterKeyHash] == nil {
+		m.stateRoots[clusterKeyHash] = make(map[uint64]common.Hash)
+	}
+	m.stateRoots[clusterKeyHash][epoch] = root
+	return nil
 }

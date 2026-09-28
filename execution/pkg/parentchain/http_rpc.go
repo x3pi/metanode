@@ -204,6 +204,31 @@ func (c *httpClient) GetAccountRegistry(userAddress common.Address) (cm.PublicKe
 	return pubKey, resp.Found, err
 }
 
+func (c *httpClient) SendSubmitStateRoot(clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash, cert cm.Sign) (common.Hash, error) {
+	req := ParentChainTx{
+		Type:      TxTypeSubmitStateRoot,
+		PubKey:    clusterPubKey[:],
+		Epoch:     epoch,
+		StateRoot: stateRoot,
+		Cert:      cert[:],
+	}
+	var resp struct {
+		MsgID common.Hash `json:"msg_id"`
+	}
+	err := c.post("/tx", req, &resp)
+	return resp.MsgID, err
+}
+
+func (c *httpClient) GetStateRoot(clusterPubKey cm.PublicKey, epoch uint64) (common.Hash, bool, error) {
+	pubKeyHex := hexEncode(clusterPubKey[:])
+	var resp struct {
+		Root  common.Hash `json:"root"`
+		Found bool        `json:"found"`
+	}
+	err := c.get(fmt.Sprintf("/state_root?pubkey=%s&epoch=%d", pubKeyHex, epoch), &resp)
+	return resp.Root, resp.Found, err
+}
+
 func hexEncode(b []byte) string {
 	return common.Bytes2Hex(b)
 }
@@ -248,6 +273,7 @@ func (s *HTTPServer) Start(addr string) error {
 	mux.HandleFunc("/claimed", s.handleClaimed)
 	mux.HandleFunc("/seq", s.handleSeq)
 	mux.HandleFunc("/account", s.handleAccount)
+	mux.HandleFunc("/state_root", s.handleStateRoot)
 	return http.ListenAndServe(addr, mux)
 }
 
@@ -287,6 +313,12 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 		// We just create a unique MsgID based on the transaction fields.
 		digest := crypto.Keccak256Hash(append(append(pubKey[:], tx.Sender.Bytes()...), tx.Target.Bytes()...))
 		msgID = crypto.Keccak256Hash(append(digest.Bytes(), tx.Amount.Bytes()...))
+		tx.MsgID = msgID
+	} else if tx.Type == TxTypeSubmitStateRoot {
+		var clusterPubKey cm.PublicKey
+		copy(clusterPubKey[:], tx.PubKey)
+		digest := ComputeSubmitStateRootMessage(clusterPubKey, tx.Epoch, tx.StateRoot)
+		msgID = crypto.Keccak256Hash(append(digest, tx.Cert...))
 		tx.MsgID = msgID
 	} else if tx.Type == TxTypeRegisterAccount {
 		var floatIdentityKey cm.PublicKey
@@ -415,6 +447,20 @@ func (s *HTTPServer) handleAccount(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"float_identity_key": pubKey[:],
 		"found":              found,
+	})
+}
+
+func (s *HTTPServer) handleStateRoot(w http.ResponseWriter, r *http.Request) {
+	pubKeyHex := r.URL.Query().Get("pubkey")
+	pubKeyBytes := common.FromHex(pubKeyHex)
+	
+	epochStr := r.URL.Query().Get("epoch")
+	epoch, _ := strconv.ParseUint(epochStr, 10, 64)
+
+	root, found, _ := s.store.GetStateRoot(crypto.Keccak256Hash(pubKeyBytes), epoch)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"root":  root,
+		"found": found,
 	})
 }
 

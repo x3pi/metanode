@@ -15,6 +15,7 @@ const (
 	TxTypeMarkClaimed     TxType = "MarkClaimed"
 	TxTypeReclaimFloat    TxType = "ReclaimFloat"
 	TxTypeRegisterAccount TxType = "RegisterAccount"
+	TxTypeSubmitStateRoot TxType = "SubmitStateRoot"
 )
 
 // ParentChainTx represents a native transaction on the Parent Chain.
@@ -45,6 +46,10 @@ type ParentChainTx struct {
 	// RegisterAccount fields
 	UserAddress common.Address `json:"userAddress,omitempty"`
 	UserSig     []byte         `json:"userSig,omitempty"`
+
+	// SubmitStateRoot fields
+	Epoch     uint64      `json:"epoch,omitempty"`
+	StateRoot common.Hash `json:"stateRoot,omitempty"`
 }
 
 func (tx *ParentChainTx) Marshal() ([]byte, error) {

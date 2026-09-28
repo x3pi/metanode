@@ -53,4 +53,7 @@ type Client interface {
 	
 	SendRegisterAccount(userAddress common.Address, floatIdentityKey cm.PublicKey, userSig []byte, clusterSig cm.Sign) (common.Hash, error)
 	GetAccountRegistry(userAddress common.Address) (cm.PublicKey, bool, error)
+
+	SendSubmitStateRoot(clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash, cert cm.Sign) (common.Hash, error)
+	GetStateRoot(clusterPubKey cm.PublicKey, epoch uint64) (common.Hash, bool, error)
 }
