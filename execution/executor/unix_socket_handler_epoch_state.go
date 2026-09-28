@@ -397,6 +397,18 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 	epoch := request.GetEpoch()
 	logger.Info("📊 [EPOCH BOUNDARY] Handling GetEpochBoundaryDataRequest", "epoch", epoch)
 
+	if rh.CustomGetEpochBoundaryDataCallback != nil {
+		res, err := rh.CustomGetEpochBoundaryDataCallback(request)
+		if err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if rh.chainState == nil {
+		return nil, fmt.Errorf("cannot process GetEpochBoundaryDataRequest: chainState is nil (parent_chain node does not support this query)")
+	}
+
 	// Get epoch boundary block and GEI
 	var currentEpoch uint64 = 0
 	var boundaryBlock uint64 = 0
@@ -480,7 +492,11 @@ func (rh *RequestHandler) HandleGetEpochBoundaryDataRequest(request *pb.GetEpoch
 
 		// Check if boundary block is fully synced to correctly handle NOMT queries below
 		lastBlock := storage.GetLastBlockNumber()
-		_, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(boundaryBlock)
+		var ok bool
+		bc := blockchain.GetBlockChainInstance()
+		if bc != nil {
+			_, ok = bc.GetBlockHashByNumber(boundaryBlock)
+		}
 		queryBlock = boundaryBlock
 		if !ok {
 			if lastBlock >= boundaryBlock {

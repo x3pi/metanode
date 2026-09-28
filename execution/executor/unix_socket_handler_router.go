@@ -246,7 +246,13 @@ func (se *RequestHandler) ProcessProtobufRequest(wrappedRequest *pb.Request) *pb
 		fromBlock := req.GetBlocksRangeRequest.GetFromBlock()
 		toBlock := req.GetBlocksRangeRequest.GetToBlock()
 		logger.Debug("[Go Server] 📥 Received GetBlocksRangeRequest: from=%d, to=%d", fromBlock, toBlock)
-		res, err := se.HandleGetBlocksRangeRequest(req.GetBlocksRangeRequest)
+		var res *pb.GetBlocksRangeResponse
+		var err error
+		if se.CustomGetBlocksRangeCallback != nil {
+			res, err = se.CustomGetBlocksRangeCallback(req.GetBlocksRangeRequest)
+		} else {
+			res, err = se.HandleGetBlocksRangeRequest(req.GetBlocksRangeRequest)
+		}
 		if err != nil {
 			logger.Error("[Go Server] ❌ Error handling GetBlocksRangeRequest: %v", err)
 			wrappedResponse = &pb.Response{
@@ -265,7 +271,13 @@ func (se *RequestHandler) ProcessProtobufRequest(wrappedRequest *pb.Request) *pb
 	case *pb.Request_SyncBlocksRequest:
 		blockCount := len(req.SyncBlocksRequest.GetBlocks())
 		logger.Info("[Go Server] 📥 Received SyncBlocksRequest: block_count=%d", blockCount)
-		res, err := se.HandleSyncBlocksRequest(req.SyncBlocksRequest)
+		var res *pb.SyncBlocksResponse
+		var err error
+		if se.CustomSyncBlocksCallback != nil {
+			res, err = se.CustomSyncBlocksCallback(req.SyncBlocksRequest)
+		} else {
+			res, err = se.HandleSyncBlocksRequest(req.SyncBlocksRequest)
+		}
 		if err != nil {
 			logger.Error("[Go Server] ❌ Error handling SyncBlocksRequest: %v", err)
 			wrappedResponse = &pb.Response{

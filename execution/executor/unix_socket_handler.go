@@ -34,6 +34,10 @@ type RequestHandler struct {
 	clearNoncesCacheCallback           func()                                                                      // Callback to clear expected nonces cache on block sync
 	cancelSpeculativeCallback          func(geis ...uint64)                                                        // Callback to abort active speculative workers on P2P block sync
 	epochAdvancedCallback              func(newEpoch, boundaryBlock uint64)                                        // Milestone C: notifies CommitteeAttestationWorker of a local epoch transition
+	CustomSyncBlocksCallback           func(request *pb.SyncBlocksRequest) (*pb.SyncBlocksResponse, error)         // Optional override for HandleSyncBlocksRequest (used by parent_chain)
+	CustomGetEpochBoundaryDataCallback func(request *pb.GetEpochBoundaryDataRequest) (*pb.EpochBoundaryData, error)
+	CustomGetValidatorsCallback        func(request *pb.GetValidatorsAtBlockRequest) ([]*pb.ValidatorInfo, error)
+	CustomGetBlocksRangeCallback       func(request *pb.GetBlocksRangeRequest) (*pb.GetBlocksRangeResponse, error)
 }
 
 func NewRequestHandler(storageManager *storage.StorageManager, chainState *blockchain.ChainState, genesisPath string) *RequestHandler {

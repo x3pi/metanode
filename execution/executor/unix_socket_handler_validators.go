@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -112,6 +113,18 @@ func (rh *RequestHandler) HandleGetActiveValidatorsRequest(request *pb.GetActive
 func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValidatorsAtBlockRequest) (*pb.ValidatorInfoList, error) {
 	blockNumber := request.GetBlockNumber()
 	logger.Info("🔍 [SNAPSHOT] Handling GetValidatorsAtBlockRequest for block %d (Rust checking if Go executor has processed this block)", blockNumber)
+
+	if rh.CustomGetValidatorsCallback != nil {
+		res, err := rh.CustomGetValidatorsCallback(request)
+		if err != nil {
+			return nil, err
+		}
+		return &pb.ValidatorInfoList{
+			Validators:           res,
+			EpochTimestampMs:     uint64(time.Now().UnixMilli()),
+			LastGlobalExecIndex:  0,
+		}, nil
+	}
 
 	validatorCacheKey := crypto.Keccak256([]byte(fmt.Sprintf("epoch_validators_at_block_%d", blockNumber)))
 

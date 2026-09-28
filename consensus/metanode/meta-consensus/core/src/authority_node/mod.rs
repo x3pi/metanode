@@ -570,6 +570,11 @@ where
                         }
                     }
 
+                    // Single node network fast path: no peers to wait for
+                    if ctx_ref.committee.size() == 1 {
+                        return PeerAttestResult::Ok;
+                    }
+
                     // No quorum digest yet. Check vote counts for this index.
                     let (total_stake, best_entry) = monitor_ref.vote_count_for_index(index);
 

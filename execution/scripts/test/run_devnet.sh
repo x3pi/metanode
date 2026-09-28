@@ -50,7 +50,7 @@ cat << 'EOF' > devnet_data/exec1/config.json
     "BLSPrivateKey": "5fb8d1ceadf4059adca5c106dbd91452be8c433b2c38c5dd85c50f1c7da4c85c",
     "SnapshotPath": "./devnet_data/exec1/snapshot"
   },
-  "rust_config_path": "../../../consensus/metanode/config/node_1.toml",
+  "rust_config_path": "../../../consensus/metanode/config/node_devnet_exec1.toml",
   "is_rpc_node": true
 }
 EOF
@@ -80,13 +80,13 @@ cat << 'EOF' > devnet_data/exec2/config.json
     "BLSPrivateKey": "5fb8d1ceadf4059adca5c106dbd91452be8c433b2c38c5dd85c50f1c7da4c85c",
     "SnapshotPath": "./devnet_data/exec2/snapshot"
   },
-  "rust_config_path": "../../../consensus/metanode/config/node_2.toml",
+  "rust_config_path": "../../../consensus/metanode/config/node_devnet_exec2.toml",
   "is_rpc_node": true
 }
 EOF
 
 echo "==> STARTING NODES"
-./parent_chain -data-dir ./devnet_data/parent -http :8547 -rust-config ../../../consensus/metanode/config/node_0.toml > ./devnet_data/parent/node.log 2>&1 &
+./parent_chain -data-dir ./devnet_data/parent -http :8547 -rust-config ../../../consensus/metanode/config/node_devnet_parent.toml > ./devnet_data/parent/node.log 2>&1 &
 PARENT_PID=$!
 echo "Parent Chain PID: $PARENT_PID"
 

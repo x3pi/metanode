@@ -458,6 +458,7 @@ impl Core {
         let commit_votes = self
             .dag_state_writer
             .take_commit_votes(MAX_COMMIT_VOTES_PER_BLOCK);
+        tracing::warn!("🚀 [PROPOSER DEBUG] try_new_block (round {}): took {} commit votes from dag_state_writer", clock_round, commit_votes.len());
 
         let transaction_votes = if self.context.protocol_config.mysticeti_fastpath() {
             let new_causal_history = self.dag_state_writer.link_causal_history_batch(
