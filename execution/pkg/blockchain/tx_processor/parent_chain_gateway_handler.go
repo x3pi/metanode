@@ -66,7 +66,14 @@ func (h *ParentChainGatewayHandler) HandleTransaction(
 		return h.errorReceipt(tx, "dispatcher not initialized"), nil, nil
 	}
 
-	data := tx.Data()
+	// tx.Data() returns the raw wrapped bytes (still carrying the CallData envelope's own
+	// prefix) — every other handler in this package correctly unwraps via CallData().Input()
+	// instead. Using tx.Data() here caused a reproducible 2-byte offset: the on-chain tx input
+	// was byte-perfect (verified via eth_getTransactionByHash) but this handler read the target
+	// address 2 bytes early, picking up payloadHash's own trailing 2 bytes as a prefix and
+	// losing the target's last 2 bytes — SendWorker then failed to route to the corrupted
+	// address, forever.
+	data := tx.CallData().Input()
 	if len(data) < 48 {
 		logger.Error("❌ ParentChainGatewayHandler: invalid data length")
 		return h.errorReceipt(tx, "invalid data length for parent chain transfer (expected >= 48 bytes pubkey)"), nil, nil
@@ -77,10 +84,14 @@ func (h *ParentChainGatewayHandler) HandleTransaction(
 	if len(data) >= 80 {
 		payloadHash = common.BytesToHash(data[48:80])
 	}
+	var targetAddr common.Address
+	if len(data) >= 100 {
+		targetAddr = common.BytesToAddress(data[80:100])
+	}
 
 	// Route the transfer to the actual CrossNodeHandler logic.
 	// NOTE: The dispatcher itself deducts the balance using AccountStateDB and records the transfer event.
-	msgID, err := h.dispatcher.HandleTransfer(destPubKey, tx.FromAddress(), common.Address{}, tx.Amount(), payloadHash)
+	msgID, err := h.dispatcher.HandleTransfer(destPubKey, tx.FromAddress(), targetAddr, tx.Amount(), payloadHash)
 	if err != nil {
 		logger.Error("❌ ParentChainGatewayHandler: Dispatcher failed: %v", err)
 		return h.errorReceipt(tx, err.Error()), nil, nil

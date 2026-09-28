@@ -1,7 +1,11 @@
 node_id = 1
 network_address = "127.0.0.1:9001"
-protocol_key_path = "../../../consensus/metanode/config/node_1_protocol_key.json"
-network_key_path = "../../../consensus/metanode/config/node_1_network_key.json"
+# Freshly generated, devnet-exclusive identity (via `metanode generate --nodes 1`), NOT the
+# static node_1_protocol_key.json/node_1_network_key.json shared with other clusters on this
+# machine. Its matching single-authority committee is embedded in genesis.json's `validators`
+# (see run_devnet.sh) so this node's own signature alone reaches quorum (f=0, self-contained).
+protocol_key_path = "../../../consensus/metanode/config/devnet_exec1_keys/node_0_protocol_key.json"
+network_key_path = "../../../consensus/metanode/config/devnet_exec1_keys/node_0_network_key.json"
 storage_path = "./devnet_data/exec1/storage"
 enable_metrics = true
 metrics_port = 9111
@@ -32,7 +36,14 @@ gradual_shutdown_consensus_cert_drain_secs = 1
 gradual_shutdown_final_drain_secs = 1
 epoch_monitor_poll_interval_secs = 5
 peer_rpc_port = 19301
-peer_rpc_addresses = ["127.0.0.1:19200", "127.0.0.1:19202", "127.0.0.1:19203", "127.0.0.1:19204"]
+# Isolated single-node devnet chain (self-quorum), matching node_devnet_parent.toml's pattern.
+# NOTE: this previously pointed at 127.0.0.1:19200/19202/19203/19204, which belong to an
+# unrelated, already-running cluster on this shared machine (confirmed listening) — exec1's Rust
+# consensus was cross-talking with that foreign chain's gossip, which eventually made it observe
+# a "Network Quorum" commit index belonging to that OTHER chain and flip into CatchingUp/SYNC_ONLY
+# against a quorum it can never actually reach, permanently freezing this devnet's own block
+# production (~831 blocks in, then stalled for 13+ minutes, confirmed live).
+peer_rpc_addresses = []
 
 # Number of epochs to keep for cross-epoch sync support (0 = archive mode)
 epochs_to_keep = 5

@@ -22,24 +22,68 @@ cat << 'EOF' > devnet_data/parent/config.json
 EOF
 
 echo "==> CONFIGURE EXECUTION CLUSTERS"
-# Use existing genesis, plus a self-generated devnet test account (own ECDSA+BLS keypair,
-# not a well-known/shared one) funded and BLS-registered so mtn_sendCrossChainTransfer's
-# devnet sender has a real, matching key pair to sign with — see mtn_api.go's
-# devnetSenderPrivateKeyHex/devnetSenderBLSPrivateKeyHex for the matching private keys.
+# exec1 and exec2 are each meant to be an ISOLATED single-node chain (self-quorum), not
+# members of the real 4-validator committee that cmd/simple_chain/genesis.json ships with by
+# default. That default genesis.json's `validators` array embeds the SAME committee identity
+# (authority_key/protocol_key/network_key) used by other, already-running clusters on this
+# shared machine — reusing it unmodified means exec1/exec2 can only ever hold 1000/4000 of the
+# stake needed for quorum (2666), so they'd NEVER produce a block past genesis (confirmed live:
+# 13+ minute permanent freeze). Each exec node gets its OWN genesis with a single validator
+# entry matching its OWN freshly generated Rust identity (consensus/metanode/config/devnet_execN_keys/,
+# generated once via `metanode generate --nodes 1`, wired into node_devnet_execN.toml's
+# protocol_key_path/network_key_path) so its own signature alone reaches quorum (f=0).
 python3 -c "
 import json
 with open('../../cmd/simple_chain/genesis.json') as f:
-    g = json.load(f)
-g['alloc'].append({
+    base = json.load(f)
+
+devnet_sender_alloc = {
     'address': '0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24',
     'balance': '2000000000000000000000000000000',
     'pending_balance': '0',
     'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
     'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
     'publicKeyBls': '0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc',
-})
-with open('devnet_data/genesis.json', 'w') as f:
-    json.dump(g, f, indent=2)
+}
+
+def build_genesis(exec_name, validator_address, committee_path):
+    with open(committee_path) as f:
+        committee = json.load(f)
+    authority = committee['authorities'][0]
+    stake_amount = '1000000000000000000000'  # 1000 whole tokens, matches base genesis's per-validator convention
+    g = dict(base)
+    g['validators'] = [{
+        'address': validator_address,
+        'primary_address': '127.0.0.1:4000',
+        'worker_address': '127.0.0.1:4012',
+        'p2p_address': authority['address'],
+        'description': f'Devnet {exec_name} self-quorum validator',
+        'website': '',
+        'image': '',
+        'commission_rate': 5,
+        'min_self_delegation': '1000000000000000000',
+        'accumulated_rewards_per_share': '0',
+        'delegator_stakes': [{'address': validator_address, 'amount': stake_amount}],
+        'total_staked_amount': stake_amount,
+        'network_key': authority['network_key'],
+        'hostname': authority['hostname'],
+        'authority_key': authority['authority_key'],
+        'protocol_key': authority['protocol_key'],
+    }]
+    # Single validator: quorum/validity thresholds just need to be reachable by itself (f=0).
+    g['total_stake'] = 1000
+    g['quorum_threshold'] = 1000
+    g['validity_threshold'] = 1000
+    g['alloc'] = list(base.get('alloc', [])) + [devnet_sender_alloc]
+    return g
+
+exec1_genesis = build_genesis('exec1', '0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5', '../../../consensus/metanode/config/devnet_exec1_keys/committee.json')
+exec2_genesis = build_genesis('exec2', '0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5', '../../../consensus/metanode/config/devnet_exec2_keys/committee.json')
+
+with open('devnet_data/exec1/genesis.json', 'w') as f:
+    json.dump(exec1_genesis, f, indent=2)
+with open('devnet_data/exec2/genesis.json', 'w') as f:
+    json.dump(exec2_genesis, f, indent=2)
 "
 
 cat << 'EOF' > devnet_data/exec1/config.json
@@ -59,7 +103,7 @@ cat << 'EOF' > devnet_data/exec1/config.json
   "version": "0.0.1.0",
   "rpc_port": ":8646",
   "db_type": 2,
-  "genesis_file_path": "./devnet_data/genesis.json",
+  "genesis_file_path": "./devnet_data/exec1/genesis.json",
   "pk_admin_file_storage": "87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623",
   "bls_admin_storage": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
   "owner_file_storage_address": "0xC6E6474A8DEAD25B0e75b1aeA5d35FA19f69588a",
@@ -92,7 +136,7 @@ cat << 'EOF' > devnet_data/exec2/config.json
   "version": "0.0.1.0",
   "rpc_port": ":8647",
   "db_type": 2,
-  "genesis_file_path": "./devnet_data/genesis.json",
+  "genesis_file_path": "./devnet_data/exec2/genesis.json",
   "pk_admin_file_storage": "87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623",
   "bls_admin_storage": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
   "owner_file_storage_address": "0xC6E6474A8DEAD25B0e75b1aeA5d35FA19f69588a",
@@ -118,6 +162,13 @@ sleep 2
 ./simple_chain -config ./devnet_data/exec1/config.json > ./devnet_data/exec1/node.log 2>&1 &
 EXEC1_PID=$!
 echo "Exec 1 PID: $EXEC1_PID"
+
+# Staggered on purpose: starting exec1 and exec2 back-to-back was observed to race during Rust
+# consensus network-server startup (both processes transiently colliding on the same port
+# regardless of their own configured network_address, one winning and the other panicking with
+# AddrInUse and permanently losing its consensus engine for the rest of the run). Not fully
+# root-caused; this delay is a mitigation, not a fix.
+sleep 3
 
 ./simple_chain -config ./devnet_data/exec2/config.json > ./devnet_data/exec2/node.log 2>&1 &
 EXEC2_PID=$!

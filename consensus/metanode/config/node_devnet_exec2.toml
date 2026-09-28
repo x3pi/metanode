@@ -1,7 +1,11 @@
 node_id = 2
 network_address = "127.0.0.1:9002"
-protocol_key_path = "../../../consensus/metanode/config/node_2_protocol_key.json"
-network_key_path = "../../../consensus/metanode/config/node_2_network_key.json"
+# Freshly generated, devnet-exclusive identity (via `metanode generate --nodes 1`), NOT the
+# static node_2_protocol_key.json/node_2_network_key.json shared with other clusters on this
+# machine. Its matching single-authority committee is embedded in genesis.json's `validators`
+# (see run_devnet.sh) so this node's own signature alone reaches quorum (f=0, self-contained).
+protocol_key_path = "../../../consensus/metanode/config/devnet_exec2_keys/node_0_protocol_key.json"
+network_key_path = "../../../consensus/metanode/config/devnet_exec2_keys/node_0_network_key.json"
 storage_path = "./devnet_data/exec2/storage"
 enable_metrics = true
 metrics_port = 9112
@@ -32,7 +36,10 @@ gradual_shutdown_consensus_cert_drain_secs = 1
 gradual_shutdown_final_drain_secs = 1
 epoch_monitor_poll_interval_secs = 5
 peer_rpc_port = 19302
-peer_rpc_addresses = ["127.0.0.1:19200", "127.0.0.1:19201", "127.0.0.1:19203", "127.0.0.1:19204"]
+# Isolated single-node devnet chain (self-quorum) — see node_devnet_exec1.toml's comment for why
+# this must be empty (was cross-talking with an unrelated cluster's peer_rpc ports on this
+# shared machine, causing a permanent block-production freeze).
+peer_rpc_addresses = []
 
 # Number of epochs to keep for cross-epoch sync support (0 = archive mode)
 epochs_to_keep = 5

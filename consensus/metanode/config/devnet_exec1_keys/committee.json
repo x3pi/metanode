@@ -1,0 +1,18 @@
+{
+  "epoch": 0,
+  "total_stake": 1,
+  "quorum_threshold": 1,
+  "validity_threshold": 1,
+  "authorities": [
+    {
+      "stake": 1,
+      "address": "/ip4/127.0.0.1/tcp/9000",
+      "hostname": "node-0",
+      "authority_key": "klcgTBKc4NQLKSczpnxlZKAGc8fUel6VelLIJvoBIGzsGnuwnO701drKUiyBd5nfA+iZ/HbNnjcM9fsyEOFIeuR2iuQp/WFWcxO/TZN458THpC12+JSsfcje8sWkSwvW",
+      "protocol_key": "jWnkBGoZpIN4tZtQaOQEUVKTNDZNp8LyZFb5m/oqtpI=",
+      "network_key": "BmcwE/cbghIyKnRdCJzSYnERdYA67b+w9cjQ5HKp+Cc="
+    }
+  ],
+  "epoch_timestamp_ms": 1790602627922,
+  "last_global_exec_index": 0
+}

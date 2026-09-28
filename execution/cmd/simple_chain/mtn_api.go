@@ -863,11 +863,16 @@ func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, am
 		nonce = accountState.Nonce()
 	}
 
-	// data = destPubKey (48 bytes) || payloadHash (32 bytes), matching
-	// ParentChainGatewayHandler.HandleTransaction's expected layout.
-	data := make([]byte, 0, 80)
+	// data = destPubKey (48 bytes) || payloadHash (32 bytes) || targetAddr (20 bytes), matching
+	// ParentChainGatewayHandler.HandleTransaction's expected layout. targetAddr must travel in
+	// the tx data itself: the barrier tx's own `to` is the gateway CONTRACT address, not the
+	// actual recipient, so without this the handler has no way to know who to credit (found
+	// live: it silently defaulted to the zero address, and SendWorker then logged "account
+	// 0x0000...0000 not found in registry, cannot route" forever).
+	data := make([]byte, 0, 100)
 	data = append(data, destPubKey[:]...)
 	data = append(data, payloadHash.Bytes()...)
+	data = append(data, targetAddr.Bytes()...)
 
 	const gasLimit = uint64(200000)
 	gasPrice := big.NewInt(1_000_000_000) // 1 gwei, devnet default
