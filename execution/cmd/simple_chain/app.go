@@ -255,7 +255,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	parentClient := parentchain.NewHTTPClient(parentChainURL)
 	app.parentClient = parentClient
 
-	scAdapter := &smartContractDBAdapter{db: app.chainState.GetSmartContractDB()}
+	scAdapter := &smartContractDBAdapter{chainState: app.chainState}
 	rollupStore := rollup.NewDBStore(scAdapter)
 	app.rollupStore = rollupStore
 
@@ -267,11 +267,11 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		logger.Warn("Failed to register account on parent chain: %v", err)
 	}
 
-	stateDBAdapter := &accountStateDBAdapter{db: app.chainState.GetAccountStateDB()}
+	stateDBAdapter := &accountStateDBAdapter{chainState: app.chainState}
 	chainID := uint64(1) // Default to 1
 
-	app.crossNodeHandler = rollup.NewCrossNodeHandler(rollupStore, stateDBAdapter, app.keyPair.PublicKey())
-	tx_processor.InitParentChainGatewayHandler(app.crossNodeHandler)
+	app.crossNodeHandler = rollup.NewCrossNodeHandler(app.keyPair.PublicKey())
+	tx_processor.InitParentChainGatewayHandler(crossChainTransferDispatcherAdapter{h: app.crossNodeHandler})
 	app.sendWorker = rollup.NewSendWorker(rollupStore, parentClient, app.keyPair, app.keyPair.PublicKey(), chainID)
 	app.recvWorker = rollup.NewReceiveWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 	app.reclaimWorker = rollup.NewReclaimWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
@@ -297,9 +297,19 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		if err == nil {
 			dbNonce = state.Nonce()
 		}
-		if rollupPendingNonce < dbNonce {
-			rollupPendingNonce = dbNonce
-		}
+		// Always resync to the real on-chain nonce rather than only ever raising
+		// rollupPendingNonce to catch up with it. ReceiveWorker/ReclaimWorker re-propose a
+		// still-non-terminal record's event on EVERY poll tick (5s) until its state actually
+		// changes, so a record whose barrier tx hasn't landed yet (still sitting in the pool,
+		// "future" relative to the real account nonce runBarrierTx validates against) gets a
+		// FRESH local nonce reservation each tick that's never consumed — with the old
+		// only-ever-raise logic this drifts rollupPendingNonce arbitrarily far ahead of dbNonce
+		// with no way back, so the one nonce value that would actually be accepted next never
+		// gets resubmitted again. Confirmed live: rollupPendingNonce reached 38 while the real
+		// account nonce stayed stuck at 1, forever. Unconditionally resyncing costs at most a
+		// nonce-collision-triggered retry (one more 5s tick) if two records need submission in
+		// the exact same tick — a bounded, self-correcting cost, not a permanent stall.
+		rollupPendingNonce = dbNonce
 
 		payload := RollupSystemPayload{
 			Event:        event,
@@ -411,7 +421,10 @@ func (app *App) initProcessors() {
 	// exactly how PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS is dispatched from true_block_stm.go.
 	app.transactionProcessor.SetRollupInterceptor(func(tx types.Transaction) bool {
 		if tx.ToAddress() == rollup.RollupSystemAddress {
-			if err := handleRollupSystemEvent(app, tx.Data()); err != nil {
+			// Dead path (see note above) with no per-call chainState available from this call
+			// site; app.rollupStore/app.chainState are the best available fallback and are
+			// harmless since this branch never actually runs against the live BlockSTM engine.
+			if err := handleRollupSystemEvent(app, app.rollupStore, &accountStateDBAdapter{chainState: app.chainState}, tx.Data()); err != nil {
 				logger.Error("❌ [ROLLUP-INTERCEPTOR] HandleSystemEvent failed: %v", err)
 			} else {
 				logger.Info("✅ [ROLLUP-INTERCEPTOR] Successfully handled Rollup System Event: Hash %s", tx.Hash().Hex())
@@ -421,8 +434,8 @@ func (app *App) initProcessors() {
 		return false
 	})
 
-	tx_processor.InitRollupSystemHandler(rollupSystemEventDispatcherFunc(func(data []byte) error {
-		return handleRollupSystemEvent(app, data)
+	tx_processor.InitRollupSystemHandler(rollupSystemEventDispatcherFunc(func(store rollup.Store, stateDB tx_processor.AccountStateAccessor, data []byte) error {
+		return handleRollupSystemEvent(app, store, stateDB, data)
 	}))
 }
 
@@ -435,12 +448,14 @@ type rollupSystemPayload struct {
 	PayloadHash  e_common.Hash `json:"payload_hash"`
 }
 
-func handleRollupSystemEvent(app *App, data []byte) error {
+func handleRollupSystemEvent(app *App, store rollup.Store, stateDB rollup.AccountStateDB, data []byte) error {
 	var payload rollupSystemPayload
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return fmt.Errorf("failed to unmarshal RollupSystemPayload: %w", err)
 	}
 	return app.crossNodeHandler.HandleSystemEvent(
+		store,
+		stateDB,
 		payload.Event,
 		payload.MsgID,
 		payload.SourceSeq,
@@ -451,10 +466,32 @@ func handleRollupSystemEvent(app *App, data []byte) error {
 }
 
 // rollupSystemEventDispatcherFunc adapts a plain function to tx_processor.RollupSystemEventDispatcher.
-type rollupSystemEventDispatcherFunc func(data []byte) error
+type rollupSystemEventDispatcherFunc func(store rollup.Store, stateDB tx_processor.AccountStateAccessor, data []byte) error
 
-func (f rollupSystemEventDispatcherFunc) HandleSystemEvent(data []byte) error {
-	return f(data)
+func (f rollupSystemEventDispatcherFunc) HandleSystemEvent(store rollup.Store, stateDB tx_processor.AccountStateAccessor, data []byte) error {
+	return f(store, stateDB, data)
+}
+
+// crossChainTransferDispatcherAdapter adapts *rollup.CrossNodeHandler (whose HandleTransfer
+// takes rollup.AccountStateDB) to tx_processor.CrossChainTransferDispatcher (which takes
+// tx_processor.AccountStateAccessor). Works because AccountStateAccessor's method set is a
+// strict superset of rollup.AccountStateDB's, so any value satisfying the former automatically
+// satisfies the latter — Go just won't infer that across two independently-named interfaces
+// without an explicit adapter at the boundary.
+type crossChainTransferDispatcherAdapter struct {
+	h *rollup.CrossNodeHandler
+}
+
+func (a crossChainTransferDispatcherAdapter) HandleTransfer(
+	store rollup.Store,
+	stateDB tx_processor.AccountStateAccessor,
+	toKey cm.PublicKey,
+	sender e_common.Address,
+	target e_common.Address,
+	value *big.Int,
+	payloadHash e_common.Hash,
+) (e_common.Hash, error) {
+	return a.h.HandleTransfer(store, stateDB, toKey, sender, target, value, payloadHash)
 }
 
 // initRoutes initializes API routes

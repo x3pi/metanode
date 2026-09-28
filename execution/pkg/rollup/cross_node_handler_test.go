@@ -56,7 +56,7 @@ func TestCrossNodeHandler(t *testing.T) {
 	store := NewDBStore(scDB)
 	stateDB := newMockAccountStateDB()
 
-	handler := NewCrossNodeHandler(store, stateDB, cm.PublicKey{})
+	handler := NewCrossNodeHandler(cm.PublicKey{})
 
 	sender := common.HexToAddress("0xaaa")
 	target := common.HexToAddress("0xbbb")
@@ -64,7 +64,7 @@ func TestCrossNodeHandler(t *testing.T) {
 	payloadHash := common.HexToHash("0x111")
 
 	// 1. Insufficient balance
-	_, err := handler.HandleTransfer(cm.PublicKey{}, sender, target, value, payloadHash)
+	_, err := handler.HandleTransfer(store, stateDB, cm.PublicKey{}, sender, target, value, payloadHash)
 	if err == nil {
 		t.Errorf("Expected insufficient balance error")
 	}
@@ -73,7 +73,7 @@ func TestCrossNodeHandler(t *testing.T) {
 	stateDB.balances[sender] = big.NewInt(1000)
 
 	// 2. Successful transfer
-	msgID, err := handler.HandleTransfer(cm.PublicKey{}, sender, target, value, payloadHash)
+	msgID, err := handler.HandleTransfer(store, stateDB, cm.PublicKey{}, sender, target, value, payloadHash)
 	if err != nil {
 		t.Fatalf("Expected success, got: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestCrossNodeHandler(t *testing.T) {
 	}
 
 	// 3. Second transfer to exhaust balance
-	_, err = handler.HandleTransfer(cm.PublicKey{}, sender, target, big.NewInt(600), payloadHash)
+	_, err = handler.HandleTransfer(store, stateDB, cm.PublicKey{}, sender, target, big.NewInt(600), payloadHash)
 	if err == nil {
 		t.Errorf("Expected insufficient balance error for second transfer")
 	}

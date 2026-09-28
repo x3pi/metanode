@@ -6,18 +6,118 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
+	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract_db"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
+
+// AccountStateAccessor mirrors rollup.AccountStateDB's shape structurally (this package
+// deliberately does not import pkg/rollup for this interface, matching the existing
+// decoupling pattern below). liveAccountStateAccessor implements it by wrapping the CURRENT
+// barrier-tx call's own chainState.GetAccountStateDB() result, freshly, per call — never a
+// reference captured once at App-construction time. See rollup.CrossNodeHandler.HandleTransfer's
+// doc comment for why that staleness class of bug is dangerous here specifically: the account
+// nonce/balance this touches is also what TxValidatorPool's own future-tx nonce-gap check reads,
+// so a write landing in the wrong chainState instance diverges permanently and silently.
+type AccountStateAccessor interface {
+	GetBalance(address common.Address) *big.Int
+	AddBalance(address common.Address, amount *big.Int) error
+	SubBalance(address common.Address, amount *big.Int)
+	GetNonce(address common.Address) uint64
+	SetNonce(address common.Address, nonce uint64)
+}
+
+type liveAccountStateAccessor struct {
+	db *account_state_db.AccountStateDB
+}
+
+// newLiveAccountStateAccessor wraps chainState.GetAccountStateDB() as called by the barrier-tx
+// dispatch for THIS specific transaction — callers must not cache or reuse the result across
+// calls.
+func newLiveAccountStateAccessor(chainState *blockchain.ChainState) AccountStateAccessor {
+	return &liveAccountStateAccessor{db: chainState.GetAccountStateDB()}
+}
+
+func (a *liveAccountStateAccessor) GetBalance(address common.Address) *big.Int {
+	state, err := a.db.AccountState(address)
+	if err != nil || state == nil {
+		return big.NewInt(0)
+	}
+	return state.Balance()
+}
+
+func (a *liveAccountStateAccessor) AddBalance(address common.Address, amount *big.Int) error {
+	return a.db.AddBalance(address, amount)
+}
+
+func (a *liveAccountStateAccessor) SubBalance(address common.Address, amount *big.Int) {
+	_ = a.db.SubBalance(address, amount)
+}
+
+func (a *liveAccountStateAccessor) GetNonce(address common.Address) uint64 {
+	state, err := a.db.AccountState(address)
+	if err != nil || state == nil {
+		return 0
+	}
+	return state.Nonce()
+}
+
+func (a *liveAccountStateAccessor) SetNonce(address common.Address, nonce uint64) {
+	_ = a.db.SetNonce(address, nonce)
+}
+
+// liveSmartContractDB adapts *smart_contract_db.SmartContractDB to rollup.SmartContractDB,
+// wrapping the barrier-tx call's own chainState.GetSmartContractDB() result. Has the exact same
+// per-call freshness requirement as liveAccountStateAccessor above, and empirically confirmed to
+// matter here specifically: rollup.CrossNodeHandler.HandleTransfer/HandleSystemEvent's
+// store.Put(record) call went through app.chainState (the global/base instance, captured once)
+// before this fix, and the resulting record was never visible to ScanNonTerminal() afterward —
+// SendWorker found 0 non-terminal records on every tick, forever, confirmed via direct
+// instrumentation, even though HandleTransfer itself reported success every time.
+type liveSmartContractDB struct {
+	db *smart_contract_db.SmartContractDB
+}
+
+// newLiveRollupStore wraps chainState.GetSmartContractDB() as called by the barrier-tx dispatch
+// for THIS specific transaction — callers must not cache or reuse the result across calls.
+func newLiveRollupStore(chainState *blockchain.ChainState) rollup.Store {
+	return rollup.NewDBStore(&liveSmartContractDB{db: chainState.GetSmartContractDB()})
+}
+
+func (s *liveSmartContractDB) StorageValue(address common.Address, key common.Hash) ([]byte, bool) {
+	val, found := s.db.StorageValue(address, key[:])
+	if found && len(val) == 32 {
+		emptyHash := common.Hash{}
+		isEmpty := true
+		for i := 0; i < 32; i++ {
+			if val[i] != emptyHash[i] {
+				isEmpty = false
+				break
+			}
+		}
+		if isEmpty {
+			return nil, false
+		}
+	}
+	return val, found
+}
+
+func (s *liveSmartContractDB) SetStorageValue(address common.Address, key common.Hash, value []byte) {
+	_ = s.db.SetStorageValue(address, key[:], value)
+}
 
 // CrossChainTransferDispatcher defines the interface for triggering cross-node transfers
 // via the Parent Chain clearing house. It is implemented by rollup.CrossNodeHandler.
 type CrossChainTransferDispatcher interface {
 	HandleTransfer(
+		store rollup.Store,
+		stateDB AccountStateAccessor,
 		toKey mt_common.PublicKey,
 		sender common.Address,
 		target common.Address,
@@ -91,7 +191,7 @@ func (h *ParentChainGatewayHandler) HandleTransaction(
 
 	// Route the transfer to the actual CrossNodeHandler logic.
 	// NOTE: The dispatcher itself deducts the balance using AccountStateDB and records the transfer event.
-	msgID, err := h.dispatcher.HandleTransfer(destPubKey, tx.FromAddress(), targetAddr, tx.Amount(), payloadHash)
+	msgID, err := h.dispatcher.HandleTransfer(newLiveRollupStore(chainState), newLiveAccountStateAccessor(chainState), destPubKey, tx.FromAddress(), targetAddr, tx.Amount(), payloadHash)
 	if err != nil {
 		logger.Error("❌ ParentChainGatewayHandler: Dispatcher failed: %v", err)
 		return h.errorReceipt(tx, err.Error()), nil, nil

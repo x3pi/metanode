@@ -19,18 +19,14 @@ type AccountStateDB interface {
 }
 
 type CrossNodeHandler struct {
-	store   Store
-	stateDB AccountStateDB
 	fromKey cm.PublicKey
 
 	// Using a simple lock for serialization. In true BlockSTM it would be handled differently.
 	mu sync.Mutex
 }
 
-func NewCrossNodeHandler(store Store, stateDB AccountStateDB, fromKey cm.PublicKey) *CrossNodeHandler {
+func NewCrossNodeHandler(fromKey cm.PublicKey) *CrossNodeHandler {
 	return &CrossNodeHandler{
-		store:   store,
-		stateDB: stateDB,
 		fromKey: fromKey,
 	}
 }
@@ -42,7 +38,26 @@ func ComputeMessageID(fromKey, toKey cm.PublicKey, sender, target common.Address
 }
 
 // HandleTransfer processes a cross-node transfer request from a user.
+//
+// stateDB MUST be freshly derived from the chainState instance the CALLING barrier-tx execution
+// is actually operating against (see ParentChainGatewayHandler.HandleTransaction), never a
+// reference captured once at App-construction time. The account balance/nonce this method
+// mutates is also what TxValidatorPool's own nonce-gap ("future tx") check reads when deciding
+// whether a later tx from the same sender is ready to execute; if this write lands in a
+// different chainState instance than that check reads (e.g. app.chainState, the global/base
+// instance, while the running block is executing against its own speculative clone), the two
+// views permanently diverge — found live: SetNonce below appeared to succeed every time, but
+// the account nonce the tx-pool observed never advanced, so every later system tx from
+// app.go's eventProposer piled up as a permanent "future" tx and the credited balance never
+// reached a real, committed block no matter how many times ReceiveWorker retried.
+// store has the same per-call freshness requirement as stateDB above, and for the same reason:
+// found live, empirically, that Put(record) below going through app.chainState-scoped storage
+// (rather than the calling barrier-tx's own chainState) meant the record was NEVER visible to
+// ScanNonTerminal() afterward — confirmed via direct instrumentation (0 records found on every
+// tick, forever) even though HandleTransfer itself reported success every time.
 func (h *CrossNodeHandler) HandleTransfer(
+	store Store,
+	stateDB AccountStateDB,
 	toKey cm.PublicKey,
 	sender common.Address,
 	target common.Address,
@@ -57,13 +72,13 @@ func (h *CrossNodeHandler) HandleTransfer(
 	defer h.mu.Unlock()
 
 	// 1. Check balance
-	balance := h.stateDB.GetBalance(sender)
+	balance := stateDB.GetBalance(sender)
 	if balance.Cmp(value) < 0 {
 		return common.Hash{}, fmt.Errorf("insufficient balance: have %v, need %v", balance, value)
 	}
 
 	// 2. Generate source sequence
-	seq, err := h.store.GetNextFloatSeq()
+	seq, err := store.GetNextFloatSeq()
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to get next float seq: %w", err)
 	}
@@ -89,14 +104,14 @@ func (h *CrossNodeHandler) HandleTransfer(
 	// 5. Apply Actions Atomically (In Memory / DB)
 	for _, action := range actions {
 		if action.Type == ActionDeductBalance {
-			h.stateDB.SubBalance(action.Target, action.Amount)
+			stateDB.SubBalance(action.Target, action.Amount)
 		}
 	}
 
-	if err := h.store.IncrementFloatSeq(); err != nil {
+	if err := store.IncrementFloatSeq(); err != nil {
 		return common.Hash{}, fmt.Errorf("failed to increment float seq: %w", err)
 	}
-	h.stateDB.SetNonce(sender, h.stateDB.GetNonce(sender)+1)
+	stateDB.SetNonce(sender, stateDB.GetNonce(sender)+1)
 
 	// 6. Create and Save Record
 	record := &MessageRecord{
@@ -113,7 +128,7 @@ func (h *CrossNodeHandler) HandleTransfer(
 		PayloadHash: payloadHash,
 	}
 
-	if err := h.store.Put(record); err != nil {
+	if err := store.Put(record); err != nil {
 		return common.Hash{}, fmt.Errorf("failed to save rollup record: %w", err)
 	}
 
@@ -123,11 +138,15 @@ func (h *CrossNodeHandler) HandleTransfer(
 // HandleSystemEvent applies a rollup state machine event deterministically.
 // This MUST be called by the transaction executor during Raft block processing
 // to ensure zero state drift across all replicas.
-func (h *CrossNodeHandler) HandleSystemEvent(event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error {
+//
+// stateDB and store have the same per-call freshness requirement documented on HandleTransfer
+// above — both must come from the calling barrier-tx execution's own chainState, not a
+// reference captured once at App-construction time.
+func (h *CrossNodeHandler) HandleSystemEvent(store Store, stateDB AccountStateDB, event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	rec, found, err := h.store.Get(msgID)
+	rec, found, err := store.Get(msgID)
 	if err != nil {
 		return fmt.Errorf("failed to get record: %w", err)
 	}
@@ -166,10 +185,10 @@ func (h *CrossNodeHandler) HandleSystemEvent(event Event, msgID common.Hash, sou
 	// Apply actions atomically
 	for _, action := range actions {
 		if action.Type == ActionDeductBalance {
-			h.stateDB.SubBalance(action.Target, action.Amount)
+			stateDB.SubBalance(action.Target, action.Amount)
 		} else if action.Type == ActionCreditLocal {
 			// Credit is negative deduction
-			h.stateDB.SubBalance(action.Target, new(big.Int).Neg(action.Amount))
+			stateDB.SubBalance(action.Target, new(big.Int).Neg(action.Amount))
 		}
 		// Note: ActionSendRefund is not applied here. It requires sending an HTTP request,
 		// which is non-deterministic and must be done by a background worker polling the state,
@@ -177,7 +196,7 @@ func (h *CrossNodeHandler) HandleSystemEvent(event Event, msgID common.Hash, sou
 	}
 
 	rec.State = newState
-	if err := h.store.Put(rec); err != nil {
+	if err := store.Put(rec); err != nil {
 		return fmt.Errorf("failed to save record: %w", err)
 	}
 

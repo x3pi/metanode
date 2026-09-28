@@ -10,6 +10,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -20,7 +21,7 @@ import (
 // than importing pkg/rollup's Event type) purely to mirror ParentChainGatewayHandler's existing
 // decoupling pattern, not because of any real import-cycle risk.
 type RollupSystemEventDispatcher interface {
-	HandleSystemEvent(data []byte) error
+	HandleSystemEvent(store rollup.Store, stateDB AccountStateAccessor, data []byte) error
 }
 
 // RollupSystemHandler handles transactions sent to rollup.RollupSystemAddress.
@@ -76,10 +77,26 @@ func (h *RollupSystemHandler) HandleTransaction(
 	// checking this) corrupted it into empty/truncated bytes (confirmed live: "unexpected end
 	// of JSON input").
 	data := tx.Data()
-	if err := h.dispatcher.HandleSystemEvent(data); err != nil {
+	stateDB := newLiveAccountStateAccessor(chainState)
+	if err := h.dispatcher.HandleSystemEvent(newLiveRollupStore(chainState), stateDB, data); err != nil {
 		logger.Error("❌ RollupSystemHandler: HandleSystemEvent failed: %v", err)
 		return h.errorReceipt(tx, err.Error()), nil, nil
 	}
+
+	// runBarrierTx only VALIDATES tx.FromAddress()'s nonce against fromAccount.Nonce() before
+	// dispatch — it never advances it afterward (unlike the parallel MVCC path, which calls
+	// PlusOneNonce for every tx). ParentChainGatewayHandler gets this "for free" because its
+	// dispatcher call happens to pass tx.FromAddress() as HandleTransfer's own transfer-sender
+	// too, so HandleTransfer's SetNonce incidentally advances the barrier tx's sender. Here,
+	// HandleSystemEvent's SubBalance/credit actions apply to the EVENT's Target address, never
+	// to this system tx's own sender (app.go's eventProposer, e.g. exec2's own operating
+	// address) — so without this, that address's nonce never moves past 0, and every
+	// subsequent system tx after the very first one fails runBarrierTx's nonce check silently
+	// (RollupSystemHandler.HandleTransaction is never even called again) and piles up as a
+	// permanent "future" tx in TxValidatorPool. Confirmed live: exec2's own account nonce
+	// stayed 0 forever while ReceiveWorker retried the same credit with climbing nonces (11,
+	// 12, 13, ...), none of which ever got past the pool's own admission check.
+	stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
 
 	rcp := receipt.NewReceipt(
 		tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),

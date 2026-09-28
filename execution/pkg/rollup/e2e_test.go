@@ -276,8 +276,8 @@ func TestE2E_HappyPathTransfer(t *testing.T) {
 	// Fund node 1 sender
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
 	
-	handler := NewCrossNodeHandler(node1.Store, node1.StateDB, node1.blsKeyPair.PublicKey())
-	msgID, err := handler.HandleTransfer(node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
+	handler := NewCrossNodeHandler(node1.blsKeyPair.PublicKey())
+	msgID, err := handler.HandleTransfer(node1.Store, node1.StateDB, node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
 	if err != nil {
 		t.Fatalf("Failed to handle transfer: %v", err)
 	}
@@ -338,8 +338,8 @@ func TestE2E_TransferRefund(t *testing.T) {
 	
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
 	
-	handler := NewCrossNodeHandler(node1.Store, node1.StateDB, node1.blsKeyPair.PublicKey())
-	_, err := handler.HandleTransfer(node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
+	handler := NewCrossNodeHandler(node1.blsKeyPair.PublicKey())
+	_, err := handler.HandleTransfer(node1.Store, node1.StateDB, node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
 	if err != nil {
 		t.Fatalf("HandleTransfer failed: %v", err)
 	}
@@ -388,8 +388,8 @@ func TestE2E_TransferReclaimWon(t *testing.T) {
 	node2 := NewRollupNode(2, parentChain, kp2, kp1.PublicKey(), 1)
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
 	
-	handler := NewCrossNodeHandler(node1.Store, node1.StateDB, node1.blsKeyPair.PublicKey())
-	msgID, err := handler.HandleTransfer(node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
+	handler := NewCrossNodeHandler(node1.blsKeyPair.PublicKey())
+	msgID, err := handler.HandleTransfer(node1.Store, node1.StateDB, node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
 	if err != nil {
 		t.Fatalf("Failed to handle transfer: %v", err)
 	}
@@ -464,8 +464,8 @@ func TestE2E_TransferReclaimLost_DoubleCreditPrevention(t *testing.T) {
 	
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
 	
-	handler := NewCrossNodeHandler(node1.Store, node1.StateDB, node1.blsKeyPair.PublicKey())
-	msgID, err := handler.HandleTransfer(node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
+	handler := NewCrossNodeHandler(node1.blsKeyPair.PublicKey())
+	msgID, err := handler.HandleTransfer(node1.Store, node1.StateDB, node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
 	if err != nil {
 		t.Fatalf("Failed to handle transfer: %v", err)
 	}
@@ -551,8 +551,8 @@ func TestE2E_Refund_DoubleCreditPrevention(t *testing.T) {
 	
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
 	
-	handler := NewCrossNodeHandler(node1.Store, node1.StateDB, node1.blsKeyPair.PublicKey())
-	msgID, err := handler.HandleTransfer(node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
+	handler := NewCrossNodeHandler(node1.blsKeyPair.PublicKey())
+	msgID, err := handler.HandleTransfer(node1.Store, node1.StateDB, node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
 	if err != nil {
 		t.Fatalf("Failed to handle transfer: %v", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/stretchr/testify/assert"
 )
@@ -25,6 +26,8 @@ type MockCrossChainDispatcher struct {
 }
 
 func (m *MockCrossChainDispatcher) HandleTransfer(
+	store rollup.Store,
+	stateDB AccountStateAccessor,
 	toKey mt_common.PublicKey,
 	sender common.Address,
 	target common.Address,
@@ -58,10 +61,22 @@ func TestParentChainGatewayHandler_HandleTransaction(t *testing.T) {
 	// 3. Create mock transaction
 	destPubKeyHex := "010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101"
 	destPubKeyBytes := common.FromHex(destPubKeyHex)
-	
-	// Data requires exactly 48 bytes (or more for payloadHash). We use 48 bytes here.
-	data := make([]byte, 48)
-	copy(data, destPubKeyBytes)
+	targetAddr := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	// Layout: destPubKey (48 bytes) || payloadHash (32 bytes) || targetAddr (20 bytes), matching
+	// what mtn_api.go's SendCrossChainTransfer actually builds.
+	rawPayload := make([]byte, 0, 100)
+	rawPayload = append(rawPayload, destPubKeyBytes...)
+	rawPayload = append(rawPayload, make([]byte, 32)...) // zero payloadHash for this test
+	rawPayload = append(rawPayload, targetAddr.Bytes()...)
+
+	// HandleTransaction reads tx.CallData().Input(), not tx.Data() directly — a real tx arriving
+	// via SendRawEthTransaction is always wrapped in this CallData protobuf envelope (see
+	// rpc_transaction.go), so the test must wrap it the same way or CallData().Input() returns
+	// garbage from a failed protobuf-unmarshal of the raw bytes.
+	callData := transaction.NewCallData(rawPayload)
+	data, err := callData.Marshal()
+	assert.NoError(t, err)
 
 	txAmount := big.NewInt(5000)
 	tx := transaction.NewTransaction(
@@ -91,7 +106,7 @@ func TestParentChainGatewayHandler_HandleTransaction(t *testing.T) {
 	assert.True(t, mockDispatcher.HandleTransferCalled)
 	assert.Equal(t, destPubKeyBytes, mockDispatcher.LastToKey[:])
 	assert.Equal(t, senderAddr, mockDispatcher.LastSender)
-	assert.Equal(t, common.Address{}, mockDispatcher.LastTarget) // always empty
+	assert.Equal(t, targetAddr, mockDispatcher.LastTarget)
 	assert.Equal(t, txAmount, mockDispatcher.LastValue)
 
 	// Check if gas fee was deducted (transfer fee is handled by dispatcher, gas is handled by handler)
