@@ -24,6 +24,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/explorer"
@@ -270,6 +271,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	chainID := uint64(1) // Default to 1
 
 	app.crossNodeHandler = rollup.NewCrossNodeHandler(rollupStore, stateDBAdapter, app.keyPair.PublicKey())
+	tx_processor.InitParentChainGatewayHandler(app.crossNodeHandler)
 	app.sendWorker = rollup.NewSendWorker(rollupStore, parentClient, app.keyPair, app.keyPair.PublicKey(), chainID)
 	app.recvWorker = rollup.NewReceiveWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 	app.reclaimWorker = rollup.NewReclaimWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)

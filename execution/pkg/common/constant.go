@@ -62,6 +62,9 @@ var (
 	// Handled as a Go-native barrier transaction (same dispatch pattern as VALIDATOR_CONTRACT_ADDRESS),
 	// not a C++ MVM precompile — see execution/pkg/blockchain/tx_processor/gateway_handler.go.
 	GATEWAY_CONTRACT_ADDRESS = common.HexToAddress("0x0000000000000000000000000000000000001002")
+	// Parent Chain Gateway contract address - 0x1003 (Phase F: EVM Integration).
+	// Handled as a Go-native barrier transaction for high-speed cross-node float transfers.
+	PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS = common.HexToAddress("0x0000000000000000000000000000000000001003")
 	// use global
 	CROSS_CHAIN_CONTRACT_ADDRESS = common.HexToAddress("0x00000000000000000000000000000000B429C0B2")
 )

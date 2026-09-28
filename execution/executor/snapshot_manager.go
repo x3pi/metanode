@@ -166,6 +166,7 @@ func NewSnapshotManager(dataDir, snapshotBaseDir string, maxSnapshots, blocksAft
 			"consensus/xapian",
 			"xapian",
 			"xapian_node",
+			"consensus/raft", // Backup Raft LogStore and StableStore
 			"other",
 		},
 		pebbleDBDirs: []string{

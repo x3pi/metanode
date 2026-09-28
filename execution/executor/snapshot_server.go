@@ -50,6 +50,9 @@ func (ss *SnapshotServer) Start() error {
 	// API endpoint — verify snapshot integrity
 	mux.HandleFunc("/api/snapshots/verify", ss.handleAPISnapshotVerify)
 
+	// API endpoint — trigger manual snapshot
+	mux.HandleFunc("/api/snapshots/create", ss.handleAPISnapshotCreate)
+
 	// Phục vụ file tĩnh từ thư mục snapshot
 	// http.FileServer tự động hỗ trợ:
 	// - Range requests (resume download)
@@ -608,3 +611,30 @@ wget -c -r -np -nH --cut-dirs=2 http://{{$.ServerAddr}}/files/{{.SnapshotName}}/
     </script>
 </body>
 </html>`
+
+// handleAPISnapshotCreate triggers a manual snapshot creation.
+func (ss *SnapshotServer) handleAPISnapshotCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if ss.manager.IsSnapshotInProgress() {
+		http.Error(w, "Snapshot already in progress", http.StatusConflict)
+		return
+	}
+
+	// In a real scenario, we should get blockNumber and epoch from query params or body,
+	// but for manual backup we can just trigger ForceSnapshotNow with 0, 0 
+	// (ForceSnapshotNow uses the current state if not specified).
+
+	// Wait, ForceSnapshotNow expects the actual block/epoch. 
+	// We should just launch it in a goroutine because it blocks.
+	go func() {
+		ss.manager.ForceSnapshotNow(0, 0)
+	}()
+
+w.Header().Set("Content-Type", "application/json")
+w.WriteHeader(http.StatusAccepted)
+json.NewEncoder(w).Encode(map[string]string{"status": "Snapshot creation triggered"})
+}

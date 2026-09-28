@@ -1,0 +1,104 @@
+package tx_processor
+
+import (
+	"context"
+	"math/big"
+	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
+	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/stretchr/testify/assert"
+)
+
+// MockCrossChainDispatcher implements CrossChainTransferDispatcher for testing.
+type MockCrossChainDispatcher struct {
+	HandleTransferCalled bool
+	LastToKey            mt_common.PublicKey
+	LastSender           common.Address
+	LastTarget           common.Address
+	LastValue            *big.Int
+	LastPayloadHash      common.Hash
+	MockError            error
+	MockHash             common.Hash
+}
+
+func (m *MockCrossChainDispatcher) HandleTransfer(
+	toKey mt_common.PublicKey,
+	sender common.Address,
+	target common.Address,
+	value *big.Int,
+	payloadHash common.Hash,
+) (common.Hash, error) {
+	m.HandleTransferCalled = true
+	m.LastToKey = toKey
+	m.LastSender = sender
+	m.LastTarget = target
+	m.LastValue = value
+	m.LastPayloadHash = payloadHash
+	return m.MockHash, m.MockError
+}
+
+func TestParentChainGatewayHandler_HandleTransaction(t *testing.T) {
+	// 1. Setup mock dispatcher
+	mockDispatcher := &MockCrossChainDispatcher{
+		MockHash: common.HexToHash("0x1234"),
+	}
+	InitParentChainGatewayHandler(mockDispatcher)
+	handler := GetParentChainGatewayHandler()
+	assert.NotNil(t, handler)
+
+	// 2. Setup mock state using test helper
+	chainState, _, _, _ := newPersistentTestChainState(t)
+	senderAddr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	stateDB := chainState.GetAccountStateDB()
+	stateDB.AddBalance(senderAddr, big.NewInt(1000000000000000000)) // 1 ETH
+
+	// 3. Create mock transaction
+	destPubKeyHex := "010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101"
+	destPubKeyBytes := common.FromHex(destPubKeyHex)
+	
+	// Data requires exactly 48 bytes (or more for payloadHash). We use 48 bytes here.
+	data := make([]byte, 48)
+	copy(data, destPubKeyBytes)
+
+	txAmount := big.NewInt(5000)
+	tx := transaction.NewTransaction(
+		senderAddr,
+		mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS,
+		txAmount,
+		21000,
+		1,
+		0,
+		data,
+		nil,
+		common.Hash{},
+		common.Hash{},
+		1,
+		1,
+	)
+
+	// 4. Test HandleTransaction
+	receipt, _, err := handler.HandleTransaction(context.Background(), chainState, tx, mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, false, 0)
+	assert.NoError(t, err)
+	assert.NotNil(t, receipt)
+	
+	// Ensure the receipt status is RETURNED (equivalent to success for barrier TX)
+	assert.Equal(t, pb.RECEIPT_STATUS_RETURNED, receipt.Status())
+	
+	// Verify that the dispatcher was called with correct parameters
+	assert.True(t, mockDispatcher.HandleTransferCalled)
+	assert.Equal(t, destPubKeyBytes, mockDispatcher.LastToKey[:])
+	assert.Equal(t, senderAddr, mockDispatcher.LastSender)
+	assert.Equal(t, common.Address{}, mockDispatcher.LastTarget) // always empty
+	assert.Equal(t, txAmount, mockDispatcher.LastValue)
+
+	// Check if gas fee was deducted (transfer fee is handled by dispatcher, gas is handled by handler)
+	accountState, _ := stateDB.AccountState(senderAddr)
+	newBalance := accountState.Balance()
+	gasFee := new(big.Int).Mul(big.NewInt(int64(mt_common.TRANSFER_GAS_COST)), big.NewInt(1))
+	expectedBalance := new(big.Int).Sub(big.NewInt(1000000000000000000), gasFee) // since HandleTransfer doesn't deduct from stateDB in the mock
+	
+	assert.Equal(t, expectedBalance.String(), newBalance.String())
+}
