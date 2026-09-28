@@ -411,19 +411,29 @@ func RegisterAccount(store Store, userAddress common.Address, floatIdentityKey c
 
 	digest := ComputeRegisterAccountMessage(userAddress, floatIdentityKey)
 
-	hash := crypto.Keccak256Hash(digest)
-
-	pubKey, err := crypto.SigToPub(hash.Bytes(), userSig)
-	if err != nil {
-		return fmt.Errorf("RegisterAccount: invalid user signature: %w", err)
-	}
-	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
-	if recoveredAddr != userAddress {
-		return fmt.Errorf("RegisterAccount: user signature address mismatch: got %s, want %s", recoveredAddr.Hex(), userAddress.Hex())
-	}
-
+	// Verify the cluster's BLS signature first
 	if !bls.VerifySign(floatIdentityKey, clusterSig, digest) {
 		return fmt.Errorf("RegisterAccount: cluster %w", ErrInvalidSignature)
+	}
+
+	// Check if this is a self-registration by the Exec Node itself.
+	// The Exec Node's address is derived directly from its BLS public key.
+	hash := crypto.Keccak256(floatIdentityKey.Bytes())
+	blsDerivedAddress := common.BytesToAddress(hash[12:])
+	
+	if userAddress == blsDerivedAddress {
+		// It's a self-registration, the cluster BLS signature is sufficient.
+	} else {
+		// Normal user registration requires a valid ECDSA signature.
+		userHash := crypto.Keccak256Hash(digest)
+		pubKey, err := crypto.SigToPub(userHash.Bytes(), userSig)
+		if err != nil {
+			return fmt.Errorf("RegisterAccount: invalid user signature: %w", err)
+		}
+		recoveredAddr := crypto.PubkeyToAddress(*pubKey)
+		if recoveredAddr != userAddress {
+			return fmt.Errorf("RegisterAccount: user signature address mismatch: got %s, want %s", recoveredAddr.Hex(), userAddress.Hex())
+		}
 	}
 
 	return store.SetAccountRegistry(userAddress, floatIdentityKey)

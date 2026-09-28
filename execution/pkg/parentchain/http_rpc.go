@@ -13,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 )
 
@@ -247,14 +248,50 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 		
 		payloadHash := crypto.Keccak256Hash(tx.Payload)
 		digest := ComputeTransferFloatMessage(fromKey, toKey, tx.Sender, tx.Target, tx.Amount, payloadHash, tx.Nonce)
+		if !bls.VerifySign(fromKey, cm.Sign(tx.Cert), digest) {
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
 		msgID = crypto.Keccak256Hash(digest)
 		tx.MsgID = msgID
 	} else if tx.Type == TxTypeRegisterAccount {
 		var floatIdentityKey cm.PublicKey
 		copy(floatIdentityKey[:], tx.PubKey)
 		digest := ComputeRegisterAccountMessage(tx.UserAddress, floatIdentityKey)
+		if !bls.VerifySign(floatIdentityKey, cm.Sign(tx.Cert), digest) {
+			http.Error(w, "invalid cluster signature", http.StatusUnauthorized)
+			return
+		}
 		msgID = crypto.Keccak256Hash(digest)
 		tx.MsgID = msgID
+	} else if tx.Type == TxTypeMarkClaimed {
+		rec, found, err := s.store.GetTransferRecord(tx.MsgID)
+		if err != nil || !found {
+			http.Error(w, "unknown messageID", http.StatusBadRequest)
+			return
+		}
+		digest := ComputeMarkClaimedMessage(tx.MsgID, tx.Outcome)
+		if !bls.VerifySign(rec.DestKey, cm.Sign(tx.Cert), digest) {
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
+		msgID = tx.MsgID
+	} else if tx.Type == TxTypeReclaimFloat {
+		rec, found, err := s.store.GetTransferRecord(tx.MsgID)
+		if err != nil || !found {
+			http.Error(w, "unknown messageID", http.StatusBadRequest)
+			return
+		}
+		if rec.SourceKey == nil {
+			http.Error(w, "cannot reclaim direct deposit", http.StatusBadRequest)
+			return
+		}
+		digest := ComputeReclaimFloatMessage(tx.MsgID, *rec.SourceKey)
+		if !bls.VerifySign(*rec.SourceKey, cm.Sign(tx.Cert), digest) {
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
+		msgID = tx.MsgID
 	} else {
 		msgID = tx.MsgID
 	}

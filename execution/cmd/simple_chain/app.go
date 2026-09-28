@@ -259,8 +259,9 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	app.rollupStore = rollupStore
 
 	// Register account on Parent Chain for this Exec Node
-	dummySig := bls.Sign(app.keyPair.PrivateKey(), []byte("register"))
-	_, err = parentClient.SendRegisterAccount(app.keyPair.Address(), app.keyPair.PublicKey(), dummySig.Bytes(), dummySig)
+	registerDigest := parentchain.ComputeRegisterAccountMessage(app.keyPair.Address(), app.keyPair.PublicKey())
+	clusterSig := bls.Sign(app.keyPair.PrivateKey(), registerDigest)
+	_, err = parentClient.SendRegisterAccount(app.keyPair.Address(), app.keyPair.PublicKey(), nil, clusterSig)
 	if err != nil {
 		logger.Warn("Failed to register account on parent chain: %v", err)
 	}
