@@ -15,6 +15,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rpc"
 	"google.golang.org/protobuf/proto"
@@ -796,21 +797,38 @@ func (api *MtnAPI) GetCommitVotes(ctx context.Context, commitIndex uint32) (map[
 	return result, nil
 }
 
-func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, amountHex string) (string, error) {
-	if api.App.crossNodeHandler == nil {
-		return "", fmt.Errorf("cross node handler not initialized")
-	}
+// devnetSenderPrivateKeyHex/devnetSenderBLSPrivateKeyHex are a self-generated devnet-only test
+// keypair (address 0xB3b7335d78eEA5DA565dD7C726d063A2A4C520e1) — not a well-known/shared key
+// borrowed from elsewhere, so there is no risk of it silently drifting out of sync with whatever
+// BLS public key some other fixture's genesis.json happens to register for it. Its matching
+// alloc entry (balance + publicKeyBls) is injected by scripts/test/run_devnet.sh; this sender
+// only exists for that devnet script, not production. Every transaction, including a plain
+// ETH-style signed tx, is wrapped in this project's own "MetaTx" format which also checks a BLS
+// signature against whatever public key is registered on-chain for the sender — that's why a
+// matching BLS key is needed here at all, not just a plain ECDSA one.
+const devnetSenderPrivateKeyHex = "12aa5b569dade5bff22a14b3aa9369f487f1cb744c9f4d6c130b304553ba1faf"
+const devnetSenderBLSPrivateKeyHex = "14789828f8ac3eb5f7403d34b26d07dd33d028a1015e9c67ca203c923f070c07"
 
+// SendCrossChainTransfer submits a cross-node transfer as a REAL signed transaction targeting
+// PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, so it goes through the normal tx pool -> consensus ->
+// block execution -> Commit() pipeline like any other transaction. It must NOT call
+// crossNodeHandler.HandleTransfer directly from this RPC handler: that writes straight to
+// SmartContractDB outside any block's execution context, and since NOMT only makes a write
+// durable via the per-block Commit() that real transaction execution triggers, an out-of-band
+// write here is silently discarded the next time a block is processed (found live: the record
+// was gone by SendWorker's very next 5s poll, with the RPC call itself reporting success).
+func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, amountHex string) (string, error) {
 	targetAddr := common.HexToAddress(target)
-	
-	// Default sender is an account with high balance in genesis
-	senderAddr := common.HexToAddress("0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266")
+
+	// Default sender is the devnet-only test account funded in run_devnet.sh's genesis (see
+	// devnetSenderPrivateKeyHex's doc comment).
+	senderAddr := common.HexToAddress("0xB3b7335d78eEA5DA565dD7C726d063A2A4C520e1")
 
 	amount := new(big.Int)
 	amount.SetString(strings.TrimPrefix(amountHex, "0x"), 16)
-	
+
 	payloadHash := crypto.Keccak256Hash(nil) // Empty payload for simple transfer
-	
+
 	destPubKey, found, err := api.App.parentClient.GetAccountRegistry(targetAddr)
 	if err != nil {
 		return "", fmt.Errorf("failed to query account registry: %w", err)
@@ -819,17 +837,56 @@ func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, am
 		// FALLBACK FOR DEVNET TEST: If not found, just use local node's pubkey
 		destPubKey = api.App.keyPair.PublicKey()
 	}
-	
-	msgID, err := api.App.crossNodeHandler.HandleTransfer(
-		destPubKey,
-		senderAddr,
-		targetAddr,
-		amount,
-		payloadHash,
-	)
-	if err != nil {
-		return "", err
+
+	if api.App.blsKeyStore != nil {
+		if has, _ := api.App.blsKeyStore.HasPrivateKey(senderAddr); !has {
+			if err := api.App.blsKeyStore.SetPrivateKey(senderAddr, devnetSenderBLSPrivateKeyHex); err != nil {
+				return "", fmt.Errorf("failed to register devnet sender BLS key: %w", err)
+			}
+		}
 	}
-	
-	return msgID.Hex(), nil
+
+	privKey, err := crypto.HexToECDSA(devnetSenderPrivateKeyHex)
+	if err != nil {
+		return "", fmt.Errorf("failed to load devnet sender key: %w", err)
+	}
+	if crypto.PubkeyToAddress(privKey.PublicKey) != senderAddr {
+		return "", fmt.Errorf("devnet sender key does not match expected address")
+	}
+
+	accountState, err := api.App.chainState.GetAccountStateDB().AccountState(senderAddr)
+	if err != nil {
+		return "", fmt.Errorf("failed to load sender account state: %w", err)
+	}
+	nonce := uint64(0)
+	if accountState != nil {
+		nonce = accountState.Nonce()
+	}
+
+	// data = destPubKey (48 bytes) || payloadHash (32 bytes), matching
+	// ParentChainGatewayHandler.HandleTransaction's expected layout.
+	data := make([]byte, 0, 80)
+	data = append(data, destPubKey[:]...)
+	data = append(data, payloadHash.Bytes()...)
+
+	const gasLimit = uint64(200000)
+	gasPrice := big.NewInt(1_000_000_000) // 1 gwei, devnet default
+
+	ethTx := ethtypes.NewTransaction(nonce, mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, amount, gasLimit, gasPrice, data)
+	signer := ethtypes.NewCancunSigner(api.App.config.ChainId)
+	signedTx, err := ethtypes.SignTx(ethTx, signer, privKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign cross-chain transfer tx: %w", err)
+	}
+	rawTx, err := signedTx.MarshalBinary()
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal cross-chain transfer tx: %w", err)
+	}
+
+	txHash, err := api.ethApi.SendRawEthTransaction(ctx, rawTx)
+	if err != nil {
+		return "", fmt.Errorf("failed to submit cross-chain transfer tx: %w", err)
+	}
+
+	return txHash.Hex(), nil
 }

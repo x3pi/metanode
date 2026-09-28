@@ -22,12 +22,32 @@ cat << 'EOF' > devnet_data/parent/config.json
 EOF
 
 echo "==> CONFIGURE EXECUTION CLUSTERS"
-# Use existing genesis
-cp ../../cmd/simple_chain/genesis.json devnet_data/genesis.json
+# Use existing genesis, plus a self-generated devnet test account (own ECDSA+BLS keypair,
+# not a well-known/shared one) funded and BLS-registered so mtn_sendCrossChainTransfer's
+# devnet sender has a real, matching key pair to sign with — see mtn_api.go's
+# devnetSenderPrivateKeyHex/devnetSenderBLSPrivateKeyHex for the matching private keys.
+python3 -c "
+import json
+with open('../../cmd/simple_chain/genesis.json') as f:
+    g = json.load(f)
+g['alloc'].append({
+    'address': '0xB3b7335d78eEA5DA565dD7C726d063A2A4C520e1',
+    'balance': '2000000000000000000000000000000',
+    'pending_balance': '0',
+    'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
+    'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
+    'publicKeyBls': '0x87a5944933935c634d15186b464d20b3c9ed69d12d74c6aec44e130b6e052124e387b7c472a9b67a557b9fc5fcc980f3',
+})
+with open('devnet_data/genesis.json', 'w') as f:
+    json.dump(g, f, indent=2)
+"
 
 cat << 'EOF' > devnet_data/exec1/config.json
 {
   "debug": true,
+  "enable_private_gateway": false,
+  "master_password": "devnet-test-password",
+  "app_pepper": "devnet-test-pepper",
   "private_key": "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c",
   "address": "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5",
   "log_path": "./devnet_data/exec1/logs",
@@ -58,6 +78,9 @@ EOF
 cat << 'EOF' > devnet_data/exec2/config.json
 {
   "debug": true,
+  "enable_private_gateway": false,
+  "master_password": "devnet-test-password",
+  "app_pepper": "devnet-test-pepper",
   "private_key": "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c",
   "address": "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5",
   "log_path": "./devnet_data/exec2/logs",
@@ -77,7 +100,7 @@ cat << 'EOF' > devnet_data/exec2/config.json
     "RootPath": "./devnet_data/exec2/data",
     "DBEngine": "sharded",
     "Version": "0.0.1.0",
-    "BLSPrivateKey": "5fb8d1ceadf4059adca5c106dbd91452be8c433b2c38c5dd85c50f1c7da4c85c",
+    "BLSPrivateKey": "2d21f977fd594b7587439a91ab1bb5523573f02e5ba7e3e61cd8e895470d400a",
     "SnapshotPath": "./devnet_data/exec2/snapshot"
   },
   "rust_config_path": "../../../consensus/metanode/config/node_devnet_exec2.toml",
