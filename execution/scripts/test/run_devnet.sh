@@ -31,12 +31,12 @@ import json
 with open('../../cmd/simple_chain/genesis.json') as f:
     g = json.load(f)
 g['alloc'].append({
-    'address': '0xB3b7335d78eEA5DA565dD7C726d063A2A4C520e1',
+    'address': '0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24',
     'balance': '2000000000000000000000000000000',
     'pending_balance': '0',
     'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
     'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
-    'publicKeyBls': '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128',
+    'publicKeyBls': '0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc',
 })
 with open('devnet_data/genesis.json', 'w') as f:
     json.dump(g, f, indent=2)

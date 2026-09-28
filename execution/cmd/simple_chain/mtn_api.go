@@ -798,7 +798,7 @@ func (api *MtnAPI) GetCommitVotes(ctx context.Context, commitIndex uint32) (map[
 }
 
 // devnetSenderPrivateKeyHex/devnetSenderBLSPrivateKeyHex are a self-generated devnet-only test
-// keypair (address 0xB3b7335d78eEA5DA565dD7C726d063A2A4C520e1) — not a well-known/shared key
+// keypair (address 0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24) — not a well-known/shared key
 // borrowed from elsewhere, so there is no risk of it silently drifting out of sync with whatever
 // BLS public key some other fixture's genesis.json happens to register for it. Its matching
 // alloc entry (balance + publicKeyBls) is injected by scripts/test/run_devnet.sh; this sender
@@ -806,8 +806,11 @@ func (api *MtnAPI) GetCommitVotes(ctx context.Context, commitIndex uint32) (map[
 // ETH-style signed tx, is wrapped in this project's own "MetaTx" format which also checks a BLS
 // signature against whatever public key is registered on-chain for the sender — that's why a
 // matching BLS key is needed here at all, not just a plain ECDSA one.
-const devnetSenderPrivateKeyHex = "12aa5b569dade5bff22a14b3aa9369f487f1cb744c9f4d6c130b304553ba1faf"
-const devnetSenderBLSPrivateKeyHex = "14789828f8ac3eb5f7403d34b26d07dd33d028a1015e9c67ca203c923f070c07"
+// NOTE: if you regenerate this pair, the BLS PUBLIC key derived from devnetSenderBLSPrivateKeyHex
+// must be re-copied into scripts/test/run_devnet.sh's genesis injection (publicKeyBls field) too —
+// a mismatch here silently breaks every devnet send with "registered BLS public key does not match".
+const devnetSenderPrivateKeyHex = "a3e6d454ea7a3b464af1f8c891259d5ff48f331004d56d1331388ec3c3915fe1"
+const devnetSenderBLSPrivateKeyHex = "0f0f8761e3fe67cdc9e7573adf72c7e929e2a00f981834298867d5628ca2d8f6"
 
 // SendCrossChainTransfer submits a cross-node transfer as a REAL signed transaction targeting
 // PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, so it goes through the normal tx pool -> consensus ->
@@ -819,10 +822,6 @@ const devnetSenderBLSPrivateKeyHex = "14789828f8ac3eb5f7403d34b26d07dd33d028a101
 // was gone by SendWorker's very next 5s poll, with the RPC call itself reporting success).
 func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, amountHex string) (string, error) {
 	targetAddr := common.HexToAddress(target)
-
-	// Default sender is the devnet-only test account funded in run_devnet.sh's genesis (see
-	// devnetSenderPrivateKeyHex's doc comment).
-	senderAddr := common.HexToAddress("0xB3b7335d78eEA5DA565dD7C726d063A2A4C520e1")
 
 	amount := new(big.Int)
 	amount.SetString(strings.TrimPrefix(amountHex, "0x"), 16)
@@ -838,20 +837,21 @@ func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, am
 		destPubKey = api.App.keyPair.PublicKey()
 	}
 
+	// Sender is the devnet-only test account funded in run_devnet.sh's genesis (see
+	// devnetSenderPrivateKeyHex's doc comment). Derived from the key itself rather than a
+	// separately hardcoded address literal, so the two can never drift out of sync.
+	privKey, err := crypto.HexToECDSA(devnetSenderPrivateKeyHex)
+	if err != nil {
+		return "", fmt.Errorf("failed to load devnet sender key: %w", err)
+	}
+	senderAddr := crypto.PubkeyToAddress(privKey.PublicKey)
+
 	if api.App.blsKeyStore != nil {
 		if has, _ := api.App.blsKeyStore.HasPrivateKey(senderAddr); !has {
 			if err := api.App.blsKeyStore.SetPrivateKey(senderAddr, devnetSenderBLSPrivateKeyHex); err != nil {
 				return "", fmt.Errorf("failed to register devnet sender BLS key: %w", err)
 			}
 		}
-	}
-
-	privKey, err := crypto.HexToECDSA(devnetSenderPrivateKeyHex)
-	if err != nil {
-		return "", fmt.Errorf("failed to load devnet sender key: %w", err)
-	}
-	if crypto.PubkeyToAddress(privKey.PublicKey) != senderAddr {
-		return "", fmt.Errorf("devnet sender key does not match expected address")
 	}
 
 	accountState, err := api.App.chainState.GetAccountStateDB().AccountState(senderAddr)
