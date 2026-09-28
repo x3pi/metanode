@@ -36,8 +36,8 @@ func NewCrossNodeHandler(store Store, stateDB AccountStateDB, fromKey cm.PublicK
 }
 
 // ComputeMessageID calculates the deterministic ID of a cross-node message according to Parent Chain rules.
-func ComputeMessageID(fromKey, toKey cm.PublicKey, sender, target common.Address, value *big.Int, payloadHash common.Hash, nonce uint64) common.Hash {
-	digest := parentchain.ComputeTransferFloatMessage(fromKey, toKey, sender, target, value, payloadHash, nonce)
+func ComputeMessageID(fromKey, toKey cm.PublicKey, sender, target common.Address, value, fee *big.Int, payloadHash common.Hash, nonce uint64) common.Hash {
+	digest := parentchain.ComputeTransferFloatMessage(fromKey, toKey, sender, target, value, fee, payloadHash, nonce)
 	return crypto.Keccak256Hash(digest)
 }
 
@@ -69,7 +69,8 @@ func (h *CrossNodeHandler) HandleTransfer(
 	}
 
 	// 3. Compute deterministic MessageID
-	msgID := ComputeMessageID(h.fromKey, toKey, sender, target, value, payloadHash, seq)
+	fee := big.NewInt(100) // Default fee for cross-chain transfer
+	msgID := ComputeMessageID(h.fromKey, toKey, sender, target, value, fee, payloadHash, seq)
 
 	// 4. Run State Machine Transition
 	event := Event{
@@ -105,6 +106,7 @@ func (h *CrossNodeHandler) HandleTransfer(
 		Sender:      sender,
 		Target:      target,
 		Value:       value,
+		GasFee:      fee,
 		SourceSeq:   seq,
 		SourcePubKey: h.fromKey,
 		DestPubKey:   toKey,

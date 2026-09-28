@@ -304,7 +304,7 @@ func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) {
 
 				payloadHash := crypto.Keccak256Hash(nil)
 				digest := parentchain.ComputeTransferFloatMessage(
-					w.blsKeyPair.PublicKey(), rec.SourcePubKey, rec.Target, rec.Sender, rec.Value, payloadHash, seq,
+					w.blsKeyPair.PublicKey(), rec.SourcePubKey, rec.Target, rec.Sender, rec.Value, nil, payloadHash, seq,
 				)
 				refundCert := bls.Sign(w.blsKeyPair.PrivateKey(), digest)
 				refundMsgID := crypto.Keccak256Hash(digest)

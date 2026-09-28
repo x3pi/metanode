@@ -88,7 +88,7 @@ func (bp *BlockProcessor) processBlock(block *pb.ExecutableBlock) {
 			}
 			_, err = parentchain.TransferFloat(
 				bp.store, pubKey, toPubKey, tx.ChainID, tx.Sender, tx.Target,
-				tx.Amount, tx.Payload, tx.Nonce, sig, tx.IsRefund, 0, blockTime,
+				tx.Amount, tx.Fee, tx.Payload, tx.Nonce, sig, tx.IsRefund, 0, blockTime,
 			)
 		case parentchain.TxTypeMarkClaimed:
 			err = parentchain.MarkClaimed(bp.store, tx.MsgID, tx.Outcome, sig)

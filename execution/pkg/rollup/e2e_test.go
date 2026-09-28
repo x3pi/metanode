@@ -66,7 +66,8 @@ func (a *ParentChainClientAdapter) SendTransferFloat(
 		destChainID,
 		sender, target,
 		amount,
-		nil,
+		gasFee,
+		nil, // payload
 		nonce,
 		sig,
 		isRefund,

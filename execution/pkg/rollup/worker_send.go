@@ -124,6 +124,7 @@ func (w *SendWorker) processPending() {
 				rec.Sender,
 				rec.Target,
 				rec.Value,
+				rec.GasFee,
 				rec.PayloadHash,
 				rec.SourceSeq, // nonce
 			)
@@ -139,7 +140,7 @@ func (w *SendWorker) processPending() {
 				rec.Sender,
 				rec.Target,
 				rec.Value,
-				nil, // gasFee
+				rec.GasFee, // gasFee
 				rec.SourceSeq,
 				cert[:],
 				isRefund,

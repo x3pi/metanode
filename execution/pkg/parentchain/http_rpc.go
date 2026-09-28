@@ -83,6 +83,7 @@ func (c *httpClient) SendTransferFloat(
 		Cert:      cert,
 		IsRefund:  isRefund,
 		Payload:   nil,
+		Fee:       gasFee,
 	}
 	var resp struct {
 		MsgID common.Hash `json:"msg_id"`
@@ -247,7 +248,7 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 		copy(toKey[:], tx.ToPubKey)
 		
 		payloadHash := crypto.Keccak256Hash(tx.Payload)
-		digest := ComputeTransferFloatMessage(fromKey, toKey, tx.Sender, tx.Target, tx.Amount, payloadHash, tx.Nonce)
+		digest := ComputeTransferFloatMessage(fromKey, toKey, tx.Sender, tx.Target, tx.Amount, tx.Fee, payloadHash, tx.Nonce)
 		if !bls.VerifySign(fromKey, cm.Sign(tx.Cert), digest) {
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return

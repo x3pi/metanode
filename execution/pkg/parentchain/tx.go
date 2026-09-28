@@ -33,10 +33,11 @@ type ParentChainTx struct {
 	// TransferFloat fields
 	ToPubKey    []byte         `json:"toPubKey,omitempty"` // For cm.PublicKey
 	Sender      common.Address `json:"sender,omitempty"`
-	Target   common.Address `json:"target,omitempty"`
-	Payload  []byte         `json:"payload,omitempty"`
-	IsRefund bool           `json:"isRefund,omitempty"`
-	Nonce    uint64         `json:"nonce,omitempty"`
+	Target      common.Address `json:"target,omitempty"`
+	Payload     []byte         `json:"payload,omitempty"`
+	IsRefund    bool           `json:"isRefund,omitempty"`
+	Nonce       uint64         `json:"nonce,omitempty"`
+	Fee         *big.Int       `json:"fee,omitempty"`
 
 	// MarkClaimed / ReclaimFloat fields
 	Outcome FloatOutcome `json:"outcome,omitempty"`

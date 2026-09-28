@@ -54,7 +54,7 @@ func padTo32(val *big.Int) []byte {
 	return res
 }
 
-func ComputeTransferFloatMessage(fromKey, toKey cm.PublicKey, sender, target common.Address, value *big.Int, payloadHash common.Hash, nonce uint64) []byte {
+func ComputeTransferFloatMessage(fromKey, toKey cm.PublicKey, sender, target common.Address, value, fee *big.Int, payloadHash common.Hash, nonce uint64) []byte {
 	var buf []byte
 	buf = append(buf, TransferFloatDomainTag...)
 	buf = append(buf, fromKey[:]...)
@@ -62,6 +62,13 @@ func ComputeTransferFloatMessage(fromKey, toKey cm.PublicKey, sender, target com
 	buf = append(buf, sender.Bytes()...)
 	buf = append(buf, target.Bytes()...)
 	buf = append(buf, padTo32(value)...)
+	
+	if fee != nil {
+		buf = append(buf, padTo32(fee)...)
+	} else {
+		buf = append(buf, padTo32(big.NewInt(0))...)
+	}
+
 	buf = append(buf, payloadHash.Bytes()...)
 	buf = appendUint64BE(buf, nonce)
 	return buf
@@ -165,7 +172,7 @@ func TransferFloat(
 	fromKey, toKey cm.PublicKey,
 	destChainIDDesc uint64,
 	sender, target common.Address,
-	value *big.Int,
+	value, fee *big.Int,
 	payload []byte,
 	nonce uint64,
 	cert cm.Sign,
@@ -201,7 +208,7 @@ func TransferFloat(
 	}
 
 	payloadHash := crypto.Keccak256Hash(payload)
-	digest := ComputeTransferFloatMessage(fromKey, toKey, sender, target, value, payloadHash, nonce)
+	digest := ComputeTransferFloatMessage(fromKey, toKey, sender, target, value, fee, payloadHash, nonce)
 	
 	if !bls.VerifySign(fromKey, cert, digest) {
 		return common.Hash{}, fmt.Errorf("TransferFloat: %w", ErrInvalidSignature)
@@ -211,8 +218,14 @@ func TransferFloat(
 	if err != nil {
 		return common.Hash{}, err
 	}
-	if fromBal.Cmp(value) < 0 {
-		return common.Hash{}, fmt.Errorf("TransferFloat: %w (has %s, needs %s)", ErrFloatInsufficientBalance, fromBal.String(), value.String())
+	
+	totalDeduction := new(big.Int).Set(value)
+	if fee != nil && fee.Sign() > 0 {
+		totalDeduction.Add(totalDeduction, fee)
+	}
+
+	if fromBal.Cmp(totalDeduction) < 0 {
+		return common.Hash{}, fmt.Errorf("TransferFloat: %w (has %s, needs %s)", ErrFloatInsufficientBalance, fromBal.String(), totalDeduction.String())
 	}
 
 	var newVelocity FloatVelocityState
@@ -245,7 +258,7 @@ func TransferFloat(
 		return common.Hash{}, err
 	}
 
-	newFrom := new(big.Int).Sub(fromBal, value)
+	newFrom := new(big.Int).Sub(fromBal, totalDeduction)
 	newTo := new(big.Int).Add(toBal, value)
 
 	if err := store.SetFloat(fromHash, newFrom); err != nil {
@@ -254,6 +267,18 @@ func TransferFloat(
 	if err := store.SetFloat(toHash, newTo); err != nil {
 		return common.Hash{}, err
 	}
+	
+	if fee != nil && fee.Sign() > 0 {
+		total, err := store.GetFloat(floatTotalSupplyKey)
+		if err != nil {
+			return common.Hash{}, err
+		}
+		newTotal := new(big.Int).Sub(total, fee)
+		if err := store.SetFloat(floatTotalSupplyKey, newTotal); err != nil {
+			return common.Hash{}, err
+		}
+	}
+	
 	if !isRefund {
 		if err := store.SetVelocity(fromHash, newVelocity); err != nil {
 			return common.Hash{}, err

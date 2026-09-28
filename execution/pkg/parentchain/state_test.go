@@ -108,10 +108,10 @@ func TestParentChainState(t *testing.T) {
 		amount := big.NewInt(400)
 		payloadHash := crypto.Keccak256Hash(nil)
 		
-		digest := ComputeTransferFloatMessage(pub1, pub2, userAddr, userAddr2, amount, payloadHash, nonce)
+		digest := ComputeTransferFloatMessage(pub1, pub2, userAddr, userAddr2, amount, nil, payloadHash, nonce)
 		cert := bls.Sign(priv1, digest)
 		
-		msgID, err := TransferFloat(store, pub1, pub2, 102, userAddr, userAddr2, amount, nil, nonce, cert, false, 50, 2)
+		msgID, err := TransferFloat(store, pub1, pub2, 102, userAddr, userAddr2, amount, nil, nil, nonce, cert, false, 50, 2)
 		if err != nil {
 			t.Fatalf("Failed to transfer: %v", err)
 		}
@@ -170,10 +170,10 @@ func TestParentChainState(t *testing.T) {
 		amount := big.NewInt(100)
 		payloadHash := crypto.Keccak256Hash(nil)
 		
-		digest := ComputeTransferFloatMessage(pub1, pub2, userAddr, userAddr2, amount, payloadHash, nonce)
+		digest := ComputeTransferFloatMessage(pub1, pub2, userAddr, userAddr2, amount, nil, payloadHash, nonce)
 		cert := bls.Sign(priv1, digest)
 		
-		msgID, err := TransferFloat(store, pub1, pub2, 102, userAddr, userAddr2, amount, nil, nonce, cert, false, 0, 10)
+		msgID, err := TransferFloat(store, pub1, pub2, 102, userAddr, userAddr2, amount, nil, nil, nonce, cert, false, 0, 10)
 		if err != nil {
 			t.Fatalf("Failed to transfer: %v", err)
 		}
@@ -215,16 +215,16 @@ func TestParentChainState(t *testing.T) {
 		nonce := uint64(0)
 		amount := big.NewInt(250)
 		
-		digest := ComputeTransferFloatMessage(pub1, pub2, userAddr, userAddr2, amount, crypto.Keccak256Hash(nil), nonce)
+		digest := ComputeTransferFloatMessage(pub1, pub2, userAddr, userAddr2, amount, nil, crypto.Keccak256Hash(nil), nonce)
 		cert := bls.Sign(priv1, digest)
 		
-		_, err := TransferFloat(store, pub1, pub2, 102, userAddr, userAddr2, amount, nil, nonce, cert, false, 20, 20)
+		_, err := TransferFloat(store, pub1, pub2, 102, userAddr, userAddr2, amount, nil, nil, nonce, cert, false, 20, 20)
 		if err == nil {
 			t.Error("Expected velocity limit error for normal transfer")
 		}
 		
 		// If it is a refund, it should pass
-		msgID, err := TransferFloat(store, pub1, pub2, 102, userAddr, userAddr2, amount, nil, nonce, cert, true, 20, 20)
+		msgID, err := TransferFloat(store, pub1, pub2, 102, userAddr, userAddr2, amount, nil, nil, nonce, cert, true, 20, 20)
 		if err != nil {
 			t.Errorf("Refund transfer failed: %v", err)
 		}
@@ -240,9 +240,9 @@ func TestParentChainState(t *testing.T) {
 		store := NewMemoryStore()
 		DepositToFloat(store, pub1, 101, big.NewInt(1000), common.HexToHash("0x123"), 1)
 		nonce := uint64(0)
-		digest := ComputeTransferFloatMessage(pub1, pub2, userAddr, userAddr2, big.NewInt(450), crypto.Keccak256Hash(nil), nonce)
+		digest := ComputeTransferFloatMessage(pub1, pub2, userAddr, userAddr2, big.NewInt(450), nil, crypto.Keccak256Hash(nil), nonce)
 		cert := bls.Sign(priv1, digest)
-		TransferFloat(store, pub1, pub2, 102, userAddr, userAddr2, big.NewInt(450), nil, nonce, cert, false, 50, 2)
+		TransferFloat(store, pub1, pub2, 102, userAddr, userAddr2, big.NewInt(450), nil, nil, nonce, cert, false, 50, 2)
 		
 		reloadedStore := store.Clone()
 		

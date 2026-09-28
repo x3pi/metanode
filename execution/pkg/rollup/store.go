@@ -36,6 +36,7 @@ type MessageRecord struct {
 	Sender      common.Address `json:"sender"`
 	Target      common.Address `json:"target"`
 	Value       *big.Int       `json:"value"`
+	GasFee      *big.Int       `json:"gasFee,omitempty"`
 	SourceSeq   uint64         `json:"sourceSeq"`
 	SourcePubKey cm.PublicKey  `json:"sourcePubKey"`
 	DestPubKey   cm.PublicKey  `json:"destPubKey"`
