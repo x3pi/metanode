@@ -669,15 +669,11 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 		blsPrivateKey = api.App.keyPair.PrivateKey()
 	}
 
-	// 4. Get latest state root for account lookup
-	stateRoot := api.App.blockProcessor.GetLastBlock().Header().AccountStatesRoot()
-
 	// 5. Build MetaTx from EthTx
 	metaTxData, metaTx, err := buildMetaTxFromEthTx(
 		ethTx,
 		api.App.config.ChainId,
 		blsPrivateKey,
-		stateRoot,
 		api.App,
 	)
 	if err != nil {
@@ -750,15 +746,11 @@ func (api *MetaAPI) sendRawEthTransactionSync(ctx context.Context, input hexutil
 		blsPrivateKey = api.App.keyPair.PrivateKey()
 	}
 
-	// 4. Get latest state root for account lookup
-	stateRoot := api.App.blockProcessor.GetLastBlock().Header().AccountStatesRoot()
-
 	// 5. Build MetaTx from EthTx (in-process, no HTTP)
 	metaTxData, metaTx, err := buildMetaTxFromEthTx(
 		ethTx,
 		api.App.config.ChainId,
 		blsPrivateKey,
-		stateRoot,
 		api.App,
 	)
 	if err != nil {

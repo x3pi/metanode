@@ -12,11 +12,9 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 
-	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -36,7 +34,6 @@ func buildMetaTxFromEthTx(
 	ethTx *types.Transaction,
 	chainID *big.Int,
 	blsPrivateKey mt_common.PrivateKey,
-	stateRoot common.Hash,
 	app *App,
 ) ([]byte, *mt_transaction.Transaction, error) {
 
@@ -47,31 +44,10 @@ func buildMetaTxFromEthTx(
 		return nil, nil, fmt.Errorf("failed to derive sender: %w", err)
 	}
 
-	// 2. Get account state from local trie (using cache)
-	accountStateTrie, err := app.GetAccountStateTrie(stateRoot)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open account state trie: %w", err)
-	}
-
-	// Reuse one AccountStateDB per stateRoot across concurrent RPC calls instead of
-	// allocating a fresh one (with an empty loadedAccounts cache) per call — otherwise
-	// every single submission forces a fresh NOMT FFI read even when the same sender
-	// is hit repeatedly within the same block. Safe: AccountStateDB's internal caches
-	// are sharded/lock-protected for concurrent access (see getOrCreateAccountState).
-	trieCacheKey := stateRoot.Hex()
-	var accountStateDB *account_state_db.AccountStateDB
-	if app.blockProcessor != nil {
-		if cached, ok := app.blockProcessor.GetAccountStateDBCache(trieCacheKey); ok {
-			accountStateDB = cached
-		}
-	}
-	if accountStateDB == nil {
-		accountStateDB = account_state_db.NewAccountStateDB(accountStateTrie, app.storageManager.GetStorageAccount())
-		if app.blockProcessor != nil {
-			app.blockProcessor.SetAccountStateDBCache(trieCacheKey, accountStateDB)
-		}
-	}
-	as, err := accountStateDB.AccountState(fromAddress)
+	// 2. Get account state from LIVE trie
+	// We use AccountStateReadOnly to query the live state (including mempool changes)
+	// and benefit from the global loadedAccounts cache, ensuring consistency with mtn_getAccountState.
+	as, err := app.chainState.GetAccountStateDB().AccountStateReadOnly(fromAddress)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get account state for %s: %w", fromAddress.Hex(), err)
 	}
