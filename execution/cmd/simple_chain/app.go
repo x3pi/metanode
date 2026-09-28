@@ -402,33 +402,16 @@ func (app *App) initProcessors() {
 	// Set node references
 	app.blockProcessor.SetNode(app.node)
 
-	// Set Rollup System Event Interceptor
+	// Set Rollup System Event Interceptor.
+	// NOTE: this TxValidatorPool-based interceptor is NOT part of the live BlockSTM execution
+	// path (TrueBlockSTM never routes RollupSystemAddress txs through TxValidatorPool at all —
+	// confirmed live: it silently executed them as plain zero-value transfers, so this callback
+	// never fired and EventCreditObserved never credited any balance). Kept here as a harmless
+	// legacy no-op; the real wiring is tx_processor.InitRollupSystemHandler below, which mirrors
+	// exactly how PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS is dispatched from true_block_stm.go.
 	app.transactionProcessor.SetRollupInterceptor(func(tx types.Transaction) bool {
 		if tx.ToAddress() == rollup.RollupSystemAddress {
-			type RollupSystemPayload struct {
-				Event        rollup.Event  `json:"event"`
-				MsgID        e_common.Hash `json:"msg_id"`
-				SourceSeq    uint64        `json:"source_seq"`
-				SourcePubKey cm.PublicKey  `json:"source_pub_key"`
-				DestPubKey   cm.PublicKey  `json:"dest_pub_key"`
-				PayloadHash  e_common.Hash `json:"payload_hash"`
-			}
-			
-			var payload RollupSystemPayload
-			if err := json.Unmarshal(tx.Data(), &payload); err != nil {
-				logger.Error("❌ [ROLLUP-INTERCEPTOR] Failed to unmarshal RollupSystemPayload: %v", err)
-				return false
-			}
-
-			err := app.crossNodeHandler.HandleSystemEvent(
-				payload.Event, 
-				payload.MsgID, 
-				payload.SourceSeq, 
-				payload.SourcePubKey, 
-				payload.DestPubKey, 
-				payload.PayloadHash,
-			)
-			if err != nil {
+			if err := handleRollupSystemEvent(app, tx.Data()); err != nil {
 				logger.Error("❌ [ROLLUP-INTERCEPTOR] HandleSystemEvent failed: %v", err)
 			} else {
 				logger.Info("✅ [ROLLUP-INTERCEPTOR] Successfully handled Rollup System Event: Hash %s", tx.Hash().Hex())
@@ -437,6 +420,41 @@ func (app *App) initProcessors() {
 		}
 		return false
 	})
+
+	tx_processor.InitRollupSystemHandler(rollupSystemEventDispatcherFunc(func(data []byte) error {
+		return handleRollupSystemEvent(app, data)
+	}))
+}
+
+type rollupSystemPayload struct {
+	Event        rollup.Event  `json:"event"`
+	MsgID        e_common.Hash `json:"msg_id"`
+	SourceSeq    uint64        `json:"source_seq"`
+	SourcePubKey cm.PublicKey  `json:"source_pub_key"`
+	DestPubKey   cm.PublicKey  `json:"dest_pub_key"`
+	PayloadHash  e_common.Hash `json:"payload_hash"`
+}
+
+func handleRollupSystemEvent(app *App, data []byte) error {
+	var payload rollupSystemPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return fmt.Errorf("failed to unmarshal RollupSystemPayload: %w", err)
+	}
+	return app.crossNodeHandler.HandleSystemEvent(
+		payload.Event,
+		payload.MsgID,
+		payload.SourceSeq,
+		payload.SourcePubKey,
+		payload.DestPubKey,
+		payload.PayloadHash,
+	)
+}
+
+// rollupSystemEventDispatcherFunc adapts a plain function to tx_processor.RollupSystemEventDispatcher.
+type rollupSystemEventDispatcherFunc func(data []byte) error
+
+func (f rollupSystemEventDispatcherFunc) HandleSystemEvent(data []byte) error {
+	return f(data)
 }
 
 // initRoutes initializes API routes

@@ -24,6 +24,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	mt_state "github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -182,9 +183,10 @@ func (stm *TrueBlockSTM) Process(
 	isBarrierTx := make([]bool, numTxs)
 	for i, tx := range stm.txs {
 		to := tx.ToAddress()
-		if to == mt_common.VALIDATOR_CONTRACT_ADDRESS || 
-		   to == mt_common.GATEWAY_CONTRACT_ADDRESS || 
-		   to == mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS {
+		if to == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
+		   to == mt_common.GATEWAY_CONTRACT_ADDRESS ||
+		   to == mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS ||
+		   to == rollup.RollupSystemAddress {
 			isBarrierTx[i] = true
 		}
 	}
@@ -1309,6 +1311,13 @@ func (stm *TrueBlockSTM) runBarrierTx(
 		handler := GetParentChainGatewayHandler()
 		if handler == nil {
 			logger.Error("Lỗi khi lấy ParentChainGatewayHandler: nil")
+		} else {
+			rcp, exRs, _ = handler.HandleTransaction(ctx, chainState, tx, toAddress, false, blockTime)
+		}
+	} else if toAddress == rollup.RollupSystemAddress {
+		handler := GetRollupSystemHandler()
+		if handler == nil {
+			logger.Error("Lỗi khi lấy RollupSystemHandler: nil")
 		} else {
 			rcp, exRs, _ = handler.HandleTransaction(ctx, chainState, tx, toAddress, false, blockTime)
 		}

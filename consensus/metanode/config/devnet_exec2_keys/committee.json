@@ -6,7 +6,7 @@
   "authorities": [
     {
       "stake": 1,
-      "address": "/ip4/127.0.0.1/tcp/9000",
+      "address": "/ip4/127.0.0.1/tcp/9092",
       "hostname": "node-0",
       "authority_key": "hjANa2BZDelSsqQNYWEk7Xsni0o4Jv3ruhl+zqXolcy3de7G2pMY4JjO7+OXbF11GGkD/LEM+aulgxEI40gq88RTlGkkbCYOjphLXZel7my+QvCdAAVRWS1CfPPCLRWI",
       "protocol_key": "TmF45mAU5A7YWdETBRunRzTyRH/joKhW+UhWtXgbzwU=",
