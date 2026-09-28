@@ -106,10 +106,21 @@ func (w *SendWorker) processPending() {
 		}
 
 		if rec.State == StateLocalAppliedPendingSend {
+			// [ROUTING] Query Account Registry for target address
+			destPubKey, found, err := w.client.GetAccountRegistry(rec.Target)
+			if err != nil {
+				log.Printf("SendWorker: failed to lookup account %s: %v", rec.Target.Hex(), err)
+				continue
+			}
+			if !found {
+				log.Printf("SendWorker: account %s not found in registry, cannot route", rec.Target.Hex())
+				continue
+			}
+
 			// Prepare message digest to sign
 			digest := parentchain.ComputeTransferFloatMessage(
 				w.blsKeyPair.PublicKey(),
-				w.destPubKey,
+				destPubKey,
 				rec.Sender,
 				rec.Target,
 				rec.Value,
@@ -121,10 +132,10 @@ func (w *SendWorker) processPending() {
 
 			// Send via client
 			isRefund := false
-			_, err := w.client.SendTransferFloat(
+			_, err = w.client.SendTransferFloat(
 				w.blsKeyPair.PublicKey(),
-				w.destPubKey,
-				w.destChainID,
+				destPubKey,
+				w.destChainID, // legacy field, not used in digest
 				rec.Sender,
 				rec.Target,
 				rec.Value,

@@ -43,4 +43,7 @@ type Client interface {
 	GetTransferRecord(msgID common.Hash) (FloatTransferRecord, bool, error)
 	GetClaimed(msgID common.Hash) (FloatOutcome, error)
 	GetFloatSeq(pubKey cm.PublicKey) (uint64, error)
+	
+	SendRegisterAccount(userAddress common.Address, floatIdentityKey cm.PublicKey, userSig []byte, clusterSig cm.Sign) (common.Hash, error)
+	GetAccountRegistry(userAddress common.Address) (cm.PublicKey, bool, error)
 }

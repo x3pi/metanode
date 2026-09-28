@@ -153,6 +153,34 @@ func (c *httpClient) GetFloatSeq(pubKey cm.PublicKey) (uint64, error) {
 	return resp.Seq, err
 }
 
+func (c *httpClient) SendRegisterAccount(userAddress common.Address, floatIdentityKey cm.PublicKey, userSig []byte, clusterSig cm.Sign) (common.Hash, error) {
+	req := ParentChainTx{
+		Type:        TxTypeRegisterAccount,
+		UserAddress: userAddress,
+		PubKey:      floatIdentityKey[:],
+		UserSig:     userSig,
+		Cert:        clusterSig[:],
+	}
+	var resp struct {
+		MsgID common.Hash `json:"msg_id"`
+	}
+	err := c.post("/tx", req, &resp)
+	return resp.MsgID, err
+}
+
+func (c *httpClient) GetAccountRegistry(userAddress common.Address) (cm.PublicKey, bool, error) {
+	var resp struct {
+		FloatIdentityKey []byte `json:"float_identity_key"`
+		Found            bool   `json:"found"`
+	}
+	err := c.get(fmt.Sprintf("/account?address=%s", userAddress.Hex()), &resp)
+	var pubKey cm.PublicKey
+	if len(resp.FloatIdentityKey) > 0 {
+		copy(pubKey[:], resp.FloatIdentityKey)
+	}
+	return pubKey, resp.Found, err
+}
+
 func hexEncode(b []byte) string {
 	return common.Bytes2Hex(b)
 }
@@ -196,6 +224,7 @@ func (s *HTTPServer) Start(addr string) error {
 	mux.HandleFunc("/record", s.handleRecord)
 	mux.HandleFunc("/claimed", s.handleClaimed)
 	mux.HandleFunc("/seq", s.handleSeq)
+	mux.HandleFunc("/account", s.handleAccount)
 	return http.ListenAndServe(addr, mux)
 }
 
@@ -218,6 +247,12 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 		
 		payloadHash := crypto.Keccak256Hash(tx.Payload)
 		digest := ComputeTransferFloatMessage(fromKey, toKey, tx.Sender, tx.Target, tx.Amount, payloadHash, tx.Nonce)
+		msgID = crypto.Keccak256Hash(digest)
+		tx.MsgID = msgID
+	} else if tx.Type == TxTypeRegisterAccount {
+		var floatIdentityKey cm.PublicKey
+		copy(floatIdentityKey[:], tx.PubKey)
+		digest := ComputeRegisterAccountMessage(tx.UserAddress, floatIdentityKey)
 		msgID = crypto.Keccak256Hash(digest)
 		tx.MsgID = msgID
 	} else {
@@ -287,3 +322,15 @@ func (s *HTTPServer) handleSeq(w http.ResponseWriter, r *http.Request) {
 	seq, _ := s.store.GetFloatSeq(crypto.Keccak256Hash(pubKeyBytes))
 	json.NewEncoder(w).Encode(map[string]interface{}{"seq": seq})
 }
+
+func (s *HTTPServer) handleAccount(w http.ResponseWriter, r *http.Request) {
+	addrHex := r.URL.Query().Get("address")
+	addr := common.HexToAddress(addrHex)
+	
+	pubKey, found, _ := s.store.GetAccountRegistry(addr)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"float_identity_key": pubKey[:],
+		"found":              found,
+	})
+}
+
