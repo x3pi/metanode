@@ -62,6 +62,27 @@ func (c *httpClient) get(path string, resp interface{}) error {
 	return nil
 }
 
+func (c *httpClient) SendDepositToFloat(
+	pubKey cm.PublicKey,
+	destChainID uint64,
+	sender, target common.Address,
+	amount *big.Int,
+) (common.Hash, error) {
+	req := ParentChainTx{
+		Type:     TxTypeDepositToFloat,
+		PubKey:   pubKey[:],
+		ChainID:  destChainID,
+		Sender:   sender,
+		Target:   target,
+		Amount:   amount,
+	}
+	var resp struct {
+		MsgID common.Hash `json:"msg_id"`
+	}
+	err := c.post("/tx", req, &resp)
+	return resp.MsgID, err
+}
+
 func (c *httpClient) SendTransferFloat(
 	pubKey, destPubKey cm.PublicKey,
 	destChainID uint64,
@@ -249,16 +270,33 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 		
 		payloadHash := crypto.Keccak256Hash(tx.Payload)
 		digest := ComputeTransferFloatMessage(fromKey, toKey, tx.Sender, tx.Target, tx.Amount, tx.Fee, payloadHash, tx.Nonce)
+		if len(tx.Cert) != 96 {
+			http.Error(w, "invalid signature length", http.StatusBadRequest)
+			return
+		}
 		if !bls.VerifySign(fromKey, cm.Sign(tx.Cert), digest) {
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return
 		}
 		msgID = crypto.Keccak256Hash(digest)
 		tx.MsgID = msgID
+	} else if tx.Type == TxTypeDepositToFloat {
+		var pubKey cm.PublicKey
+		copy(pubKey[:], tx.PubKey)
+		// For deposit, we don't have a signature from the user (Gateway handles it).
+		// We just create a unique MsgID based on the transaction fields.
+		digest := crypto.Keccak256Hash(append(append(pubKey[:], tx.Sender.Bytes()...), tx.Target.Bytes()...))
+		msgID = crypto.Keccak256Hash(append(digest.Bytes(), tx.Amount.Bytes()...))
+		tx.MsgID = msgID
 	} else if tx.Type == TxTypeRegisterAccount {
 		var floatIdentityKey cm.PublicKey
 		copy(floatIdentityKey[:], tx.PubKey)
 		digest := ComputeRegisterAccountMessage(tx.UserAddress, floatIdentityKey)
+		
+		if len(tx.Cert) != 96 {
+			http.Error(w, "invalid signature length", http.StatusBadRequest)
+			return
+		}
 		if !bls.VerifySign(floatIdentityKey, cm.Sign(tx.Cert), digest) {
 			http.Error(w, "invalid cluster signature", http.StatusUnauthorized)
 			return
@@ -272,6 +310,10 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		digest := ComputeMarkClaimedMessage(tx.MsgID, tx.Outcome)
+		if len(tx.Cert) != 96 {
+			http.Error(w, "invalid signature length", http.StatusBadRequest)
+			return
+		}
 		if !bls.VerifySign(rec.DestKey, cm.Sign(tx.Cert), digest) {
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return
@@ -288,6 +330,10 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		digest := ComputeReclaimFloatMessage(tx.MsgID, *rec.SourceKey)
+		if len(tx.Cert) != 96 {
+			http.Error(w, "invalid signature length", http.StatusBadRequest)
+			return
+		}
 		if !bls.VerifySign(*rec.SourceKey, cm.Sign(tx.Cert), digest) {
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return

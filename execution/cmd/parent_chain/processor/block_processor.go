@@ -8,6 +8,8 @@ import (
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/executor"
+	"google.golang.org/protobuf/proto"
 )
 
 type BlockProcessor struct {
@@ -44,12 +46,22 @@ func (bp *BlockProcessor) Stop() {
 }
 
 func (bp *BlockProcessor) loop() {
+	authQueue := executor.GetAuthoritativeBlockQueue()
 	for {
 		select {
 		case <-bp.quit:
 			return
 		case block := <-bp.queue:
 			bp.processBlock(block)
+		case req, ok := <-authQueue:
+			if !ok {
+				log.Println("Parent Chain: Authoritative block queue closed")
+				return
+			}
+			bp.processBlock(req.Block)
+			if req.ResponseCh != nil {
+				req.ResponseCh <- &pb.ExecuteBlockResponse{Success: true}
+			}
 		}
 	}
 }
@@ -63,7 +75,12 @@ func (bp *BlockProcessor) processBlock(block *pb.ExecutableBlock) {
 	}
 
 	for i, txExe := range block.Transactions {
-		tx, err := parentchain.UnmarshalParentChainTx(txExe.Digest)
+		var pbTx pb.Transaction
+		if err := proto.Unmarshal(txExe.Digest, &pbTx); err != nil {
+			log.Printf("Parent Chain: failed to unmarshal pb.Transaction %d in block %d: %v", i, block.BlockNumber, err)
+			continue
+		}
+		tx, err := parentchain.UnmarshalParentChainTx(pbTx.Data)
 		if err != nil {
 			log.Printf("Parent Chain: failed to unmarshal tx %d in block %d: %v", i, block.BlockNumber, err)
 			continue
@@ -80,7 +97,7 @@ func (bp *BlockProcessor) processBlock(block *pb.ExecutableBlock) {
 
 		switch tx.Type {
 		case parentchain.TxTypeDepositToFloat:
-			err = parentchain.DepositToFloat(bp.store, pubKey, tx.ChainID, tx.Amount, tx.MsgID, blockTime)
+			err = parentchain.DepositToFloat(bp.store, pubKey, tx.ChainID, tx.Sender, tx.Target, tx.Amount, tx.MsgID, blockTime)
 		case parentchain.TxTypeTransferFloat:
 			var toPubKey cm.PublicKey
 			if len(tx.ToPubKey) > 0 {

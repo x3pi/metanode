@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 )
@@ -32,12 +33,20 @@ func main() {
 	// Wait, RegisterAccount verifies BOTH UserSig and ClusterSig!
 	// We need to properly generate UserSig.
 	
-	digest := parentchain.ComputeRegisterAccountMessage(target, toPubKey)
+	blsPrivHex := "5fb8d1ceadf4059adca5c106dbd91452be8c433b2c38c5dd85c50f1c7da4c85c" // exec1 devnet BLS private key
+	blsPriv, clusterPubKey, _ := bls.GenerateKeyPairFromSecretKey(blsPrivHex)
+	
+	digest := parentchain.ComputeRegisterAccountMessage(target, clusterPubKey)
 	userSig, _ := crypto.Sign(crypto.Keccak256(digest), targetPriv)
 	
-	var clusterSig cm.Sign // 96 bytes zero for now, might fail if devnet requires real BLS
+	clusterSig := bls.Sign(blsPriv, digest)
 	
-	msgID, err := client.SendRegisterAccount(target, toPubKey, userSig, clusterSig)
+	log.Printf("[DEBUG] e2e UserAddress: %s", target.Hex())
+	log.Printf("[DEBUG] e2e floatIdentityKey: %x", clusterPubKey[:4])
+	log.Printf("[DEBUG] e2e digest: %x", digest)
+	log.Printf("[DEBUG] e2e sig: %x", clusterSig[:4])
+	
+	msgID, err := client.SendRegisterAccount(target, clusterPubKey, userSig, clusterSig)
 	if err != nil {
 		log.Printf("RegisterAccount failed: %v", err)
 		// We'll continue anyway to see if lookup fails
@@ -55,17 +64,37 @@ func main() {
 		log.Printf("NOT FOUND in Account Registry (maybe consensus dropped our invalid sig)")
 	}
 
-	log.Printf("Transferring 100 to target on chain 992...")
+	log.Printf("Depositing 500 to target on chain 992...")
 	start := time.Now()
-	_, err = client.SendTransferFloat(
-		pubKey, toPubKey, 992,
-		sender, target, big.NewInt(100), nil, 0,
-		nil, false,
+	_, err = client.SendDepositToFloat(
+		clusterPubKey, 992,
+		sender, target, big.NewInt(500),
 	)
 	if err != nil {
-		log.Printf("Transfer failed (as expected due to no balance): %v", err)
+		log.Printf("Deposit failed: %v", err)
 	} else {
-		log.Printf("Transfer succeeded?!")
+		log.Printf("Deposit succeeded! Sent to Parent Chain.")
+	}
+	log.Printf("Waiting 3s for Deposit to be processed by Rollup...")
+	time.Sleep(3 * time.Second)
+
+	log.Printf("Transferring 100 to sender on chain 992 (Target withdrawing)...")
+	// Target is sending to Sender, so we need Target's BLS signature? 
+	// Wait, we need to sign with the Cluster's BLS key because the Float Account is owned by the Cluster.
+	// But in this test, we are just triggering `TransferFloat`, which requires a signature from `clusterPubKey`.
+	payloadHash := crypto.Keccak256Hash(nil)
+	digest2 := parentchain.ComputeTransferFloatMessage(clusterPubKey, pubKey, target, sender, big.NewInt(100), big.NewInt(0), payloadHash, 0)
+	clusterSig2 := bls.Sign(blsPriv, digest2)
+	
+	_, err = client.SendTransferFloat(
+		clusterPubKey, pubKey, 992,
+		target, sender, big.NewInt(100), big.NewInt(0), 0,
+		clusterSig2[:], false,
+	)
+	if err != nil {
+		log.Printf("Transfer failed: %v", err)
+	} else {
+		log.Printf("Transfer succeeded!")
 	}
 
 	log.Printf("Transfer finished on consensus in %v!", time.Since(start))

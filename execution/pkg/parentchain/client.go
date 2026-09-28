@@ -23,6 +23,13 @@ type TransferEvent struct {
 
 // Client is the minimal RPC client interface to interact with Parent Chain.
 type Client interface {
+	SendDepositToFloat(
+		pubKey cm.PublicKey,
+		destChainID uint64,
+		sender, target common.Address,
+		amount *big.Int,
+	) (common.Hash, error)
+
 	SendTransferFloat(
 		pubKey, destPubKey cm.PublicKey,
 		destChainID uint64,

@@ -114,7 +114,7 @@ func ensureChainRegistry(store Store, keyHash common.Hash, key cm.PublicKey, cha
 }
 
 // DepositToFloat credits destKey's NodeFloatAccount by amount and records messageID.
-func DepositToFloat(store Store, destKey cm.PublicKey, destChainIDDesc uint64, amount *big.Int, messageID common.Hash, blockTime uint64) error {
+func DepositToFloat(store Store, destKey cm.PublicKey, destChainIDDesc uint64, sender, target common.Address, amount *big.Int, messageID common.Hash, blockTime uint64) error {
 	if amount == nil || amount.Sign() <= 0 {
 		return ErrFloatInvalidAmount
 	}
@@ -161,6 +161,8 @@ func DepositToFloat(store Store, destKey cm.PublicKey, destChainIDDesc uint64, a
 	return store.AppendInboundTransfer(destHash, &TransferEvent{
 		MsgID:      messageID,
 		DestPubKey: destKey,
+		Sender:     sender,
+		Target:     target,
 		Amount:     amount,
 		BlockTime:  blockTime,
 	})
