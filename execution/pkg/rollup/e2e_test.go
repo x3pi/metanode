@@ -200,6 +200,14 @@ func (a *ParentChainClientAdapter) GetFloatSeq(pubKey cm.PublicKey) (uint64, err
 	return a.chain.store.GetFloatSeq(hash)
 }
 
+func (a *ParentChainClientAdapter) SendSubmitStateRoot(clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash, cert cm.Sign) (common.Hash, error) {
+	return common.Hash{}, nil
+}
+
+func (a *ParentChainClientAdapter) GetStateRoot(clusterPubKey cm.PublicKey, epoch uint64) (common.Hash, bool, error) {
+	return common.Hash{}, false, nil
+}
+
 // RollupNode represents a single rollup cluster with its workers
 type RollupNode struct {
 	ChainID uint64

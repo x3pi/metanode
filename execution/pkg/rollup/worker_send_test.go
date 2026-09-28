@@ -3,6 +3,7 @@ package rollup
 import (
 	"errors"
 	"math/big"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,10 @@ type mockParentChainClient struct {
 	// found=true, matching this mock's original behavior before the field existed).
 	transferNotFound bool
 	failError        error
+
+	submitStateRootCount int
+	shouldFailSubmit     bool
+	mu                   sync.Mutex
 }
 
 func (m *mockParentChainClient) SendDepositToFloat(
@@ -99,6 +104,20 @@ func (m *mockParentChainClient) SendRegisterAccount(userAddress common.Address, 
 
 func (m *mockParentChainClient) GetFloatSeq(pubKey cm.PublicKey) (uint64, error) {
 	return 0, nil
+}
+
+func (m *mockParentChainClient) SendSubmitStateRoot(clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash, cert cm.Sign) (common.Hash, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.submitStateRootCount++
+	if m.shouldFailSubmit {
+		return common.Hash{}, errors.New("transient network error")
+	}
+	return common.Hash{}, nil
+}
+
+func (m *mockParentChainClient) GetStateRoot(clusterPubKey cm.PublicKey, epoch uint64) (common.Hash, bool, error) {
+	return common.Hash{}, false, nil
 }
 
 
