@@ -1,15 +1,9 @@
 all:
   vars:
     ansible_user: "abc"
-    ansible_become_pass: !vault |
-                $ANSIBLE_VAULT;1.1;AES256
-                36376363666162653830633633643532323631383034373830313633366663303732626339343438
-                3938613039613062306435653433646663613562333861650a303730653533316562376566623935
-                62376463646638653763613338666137653933323638646134653437633934633464326562336230
-                6630343161636439380a616434316135623739383634356333636364383965653764376164313464
-                3034
+    ansible_become_pass: "1234@abcd"
     # Unified EVM Chain ID for transaction signing across all execution clusters
-    evm_chain_id: 991
+    chain_id: 991
     # Installation and base directories
     install_dir: "/opt/metanode"
     # Raft shared configuration for execution clusters

@@ -311,6 +311,12 @@ if [ -f "$CHECK_SEC_SCRIPT" ] && [ -f "$INVENTORY" ]; then
     fi
 fi
 
+# Detect become password from inventory for localhost become tasks (devnet only)
+INVENTORY_BECOME_PASS=$(grep -E '^\s*ansible_become_pass:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+if [ -n "$INVENTORY_BECOME_PASS" ] && [ "$INVENTORY_BECOME_PASS" != "!vault" ] && [[ "$INVENTORY_BECOME_PASS" != \{\{* ]]; then
+    export ANSIBLE_BECOME_PASS="${ANSIBLE_BECOME_PASS:-$INVENTORY_BECOME_PASS}"
+fi
+
 # 2. Execute Ansible Playbook
 echo "⚙️ Bắt đầu thực thi Ansible Playbook (${ACTION}, Môi trường: ${METANODE_ENV})..."
 set +e
