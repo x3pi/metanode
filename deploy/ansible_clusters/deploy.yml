@@ -19,6 +19,7 @@
 - name: "Phase 2: Deploy Parent Chain Node"
   hosts: parent_chain_nodes
   gather_facts: true
+  become: true
   tags: ["parent_chain", "core"]
   roles:
     - role: common
@@ -28,6 +29,7 @@
 - name: "Phase 3: Deploy Sharded Execution Clusters (Chain ID 101/102)"
   hosts: exec_clusters
   gather_facts: true
+  become: true
   tags: ["exec_clusters", "shards"]
   roles:
     - role: common

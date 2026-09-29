@@ -37,6 +37,7 @@
         - "{{ node_data_dir }}/snapshot"
         - "{{ node_data_dir }}/logs"
         - "{{ node_data_dir }}/explorer"
+        - "{{ node_data_dir }}/explorer-ro"
         - "{{ node_data_dir }}/raft"
         - "{{ node_data_dir }}/backup"
         - "{{ node_data_dir }}/genesis.json"
@@ -62,6 +63,9 @@
         - "{{ node_data_dir }}/snapshot"
         - "{{ node_data_dir }}/logs"
         - "{{ node_data_dir }}/raft"
+        - "{{ node_data_dir }}/backup"
+        - "{{ node_data_dir }}/explorer"
+        - "{{ node_data_dir }}/explorer-ro"
         - "{{ base_log_dir }}"
 
     - name: Ensure Raft HMAC secret key exists
@@ -86,7 +90,7 @@
         with open('{{ install_dir }}/genesis_base.json') as f:
             base = json.load(f)
 
-        cluster_bls = '{{ bls_pub | default(bls_priv) }}'
+        cluster_bls = '{{ bls_pubkey | default(bls_pub | default(bls_priv)) }}'
         alloc_map = {}
 
         # 1. Base allocs from template (align publicKeyBls to cluster_bls)
@@ -124,7 +128,7 @@
                             'publicKeyBls': cluster_bls,
                         }
 
-        # 3. Add explicit test devnet sender & cluster self address
+        # 3. Add explicit test devnet sender
         devnet_sender_addr = '0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24'
         alloc_map[devnet_sender_addr.lower()] = {
             'address': devnet_sender_addr,
@@ -135,6 +139,28 @@
             'publicKeyBls': cluster_bls,
         }
 
+        # 4. Cross-cluster validator allocs with explicit BLS public keys for Rollup signature verification
+        exec1_addr = '0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5'
+        alloc_map[exec1_addr.lower()] = {
+            'address': exec1_addr,
+            'balance': '2000000000000000000000000000000',
+            'pending_balance': '0',
+            'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
+            'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
+            'publicKeyBls': '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128',
+        }
+
+        exec2_addr = '0x0d4CC97b62a149a8fe8DE81262270426A80B0935'
+        alloc_map[exec2_addr.lower()] = {
+            'address': exec2_addr,
+            'balance': '2000000000000000000000000000000',
+            'pending_balance': '0',
+            'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
+            'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
+            'publicKeyBls': '0x83221629eeff1a69aa96ac6aadea402a7b62a74647633c0743cd517b71dcd5cd39fec42841b953fc481dac039bceb465',
+        }
+
+        # 5. Cluster self sequencer address
         cluster_addr = '{{ address }}'
         alloc_map[cluster_addr.lower()] = {
             'address': cluster_addr,
@@ -205,7 +231,8 @@
     - name: Start process via background daemon
       when: not is_systemd
       ansible.builtin.shell: |
-        nohup {{ bin_dir }}/simple_chain \
+        nohup env PARENT_CHAIN_URL="http://{{ parent_chain_host | default('127.0.0.1') }}:{{ parent_chain_rpc_port | default(8547) }}" \
+          {{ bin_dir }}/simple_chain \
           -config {{ node_data_dir }}/config.json \
           >> {{ base_log_dir }}/{{ inventory_hostname }}.log 2>&1 &
         echo $! > {{ node_data_dir }}/cluster.pid

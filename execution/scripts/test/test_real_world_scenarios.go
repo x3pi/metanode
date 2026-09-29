@@ -354,6 +354,7 @@ func main() {
 	// =======================================================================================
 	printHeader("KỊCH BẢN 5: PARENT CHAIN NGỪNG HOẠT ĐỘNG -> NODE THỰC THI VẪN TIẾN TRIỂN ĐỘC LẬP")
 	fmt.Println("1. Dừng tiến trình Parent Chain (giả lập sự cố Parent Chain offline)...")
+	_ = exec.Command("sudo", "systemctl", "stop", "metanode-parentchain.service").Run()
 	killCmd := exec.Command("pkill", "-f", "parent_chain.*8547")
 	_ = killCmd.Run()
 	time.Sleep(2 * time.Second)
@@ -411,6 +412,7 @@ func main() {
 
 	// Phục hồi lại Parent Chain để hoàn tất test
 	fmt.Println("\n🔄 Khởi động lại Parent Chain để đưa Devnet về trạng thái đầy đủ...")
+	_ = exec.Command("sudo", "systemctl", "start", "metanode-parentchain.service").Run()
 	repoRoot := findRepoRoot()
 	startParentCmd := exec.Command("bash", "-c", fmt.Sprintf("cd %s/execution/scripts/test && ./parent_chain -data-dir ./devnet_data/parent -http :8547 -rust-config ../../../consensus/metanode/config/node_devnet_parent.toml >> ./devnet_data/parent/node.log 2>&1 &", repoRoot))
 	_ = startParentCmd.Start()

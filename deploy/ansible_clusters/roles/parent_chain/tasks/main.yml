@@ -69,10 +69,10 @@
         - "node_0_protocol_key.json"
         - "node_0_network_key.json"
 
-    - name: Deploy Parent Chain consensus.toml
+    - name: Deploy Parent Chain Rust consensus node_parent.toml
       ansible.builtin.template:
-        src: parent_consensus.toml.j2
-        dest: "{{ node_data_dir }}/consensus.toml"
+        src: node_parent.toml.j2
+        dest: "{{ node_data_dir }}/node_parent.toml"
         mode: '0644'
 
     - name: Deploy systemd service unit
@@ -100,7 +100,7 @@
         nohup {{ bin_dir }}/parent_chain \
           -data-dir {{ node_data_dir }} \
           -http :{{ parent_http_port | default(8547) }} \
-          -rust-config {{ node_data_dir }}/consensus.toml \
+          -rust-config {{ node_data_dir }}/node_parent.toml \
           >> {{ base_log_dir }}/parent_chain.log 2>&1 &
         echo $! > {{ node_data_dir }}/parent_chain.pid
       args:

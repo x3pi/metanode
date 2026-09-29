@@ -13,6 +13,9 @@ def parse_inventory(file_path):
 
     try:
         import yaml
+        def vault_constructor(loader, node):
+            return loader.construct_scalar(node)
+        yaml.SafeLoader.add_constructor('!vault', vault_constructor)
         data = yaml.safe_load(content)
     except Exception as e:
         print(f"Error parsing YAML from {file_path}: {e}", file=sys.stderr)
@@ -47,7 +50,27 @@ def parse_inventory(file_path):
         break
 
     # 2. Exec Clusters
-    exec_clusters = children.get('exec_clusters', {}).get('children', {})
+    exec_cluster_group = children.get('exec_clusters', {}) or {}
+    exec_children = exec_cluster_group.get('children', {}) or {}
+    exec_hosts = exec_cluster_group.get('hosts', {}) or {}
+
+    if exec_hosts and not exec_children:
+        grouped = {}
+        for h_key, h_val in exec_hosts.items():
+            if not isinstance(h_val, dict):
+                continue
+            cid = h_val.get('cluster_id', 1)
+            cname = h_val.get('cluster_name', f"cluster_{cid}")
+            cgroup = f"cluster_{cid}"
+            if cgroup not in grouped:
+                grouped[cgroup] = {
+                    'vars': {'cluster_id': cid, 'cluster_name': cname},
+                    'hosts': {}
+                }
+            grouped[cgroup]['hosts'][h_key] = h_val
+        exec_clusters = grouped
+    else:
+        exec_clusters = exec_children
     clusters_data = {}
     all_nodes_rpc = {}
     all_ws_nodes = {}
