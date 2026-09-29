@@ -133,3 +133,80 @@ func TestCrossNodeHandler(t *testing.T) {
 		t.Errorf("Expected msgID match")
 	}
 }
+
+type mockNilBalanceAccountStateDB struct {
+	mockAccountStateDB
+}
+
+func (m *mockNilBalanceAccountStateDB) GetBalance(addr common.Address) *big.Int {
+	// Explicitly returns nil to simulate accounts with uninitialized/nil balance
+	return nil
+}
+
+func TestCrossNodeHandler_NilBalanceHandling(t *testing.T) {
+	scDB := &mockDB{data: make(map[common.Address]map[common.Hash][]byte)}
+	store := NewDBStore(scDB)
+	stateDB := &mockNilBalanceAccountStateDB{
+		mockAccountStateDB: *newMockAccountStateDB(),
+	}
+
+	handler := NewCrossNodeHandler(cm.PublicKey{})
+	sender := common.HexToAddress("0xaaa")
+	target := common.HexToAddress("0xbbb")
+	value := big.NewInt(500)
+	payloadHash := common.HexToHash("0x111")
+
+	// Must NOT panic with nil pointer dereference, and must return insufficient balance error
+	msgID, err := handler.HandleTransfer(store, stateDB, cm.PublicKey{}, sender, target, value, payloadHash)
+	if err == nil {
+		t.Fatalf("Expected error when balance is nil/zero, got success with msgID: %v", msgID)
+	}
+	if err.Error() != "insufficient balance: have 0, need 500" {
+		t.Errorf("Unexpected error message: %v", err)
+	}
+}
+
+func TestCrossNodeHandler_NilGuards(t *testing.T) {
+	scDB := &mockDB{data: make(map[common.Address]map[common.Hash][]byte)}
+	store := NewDBStore(scDB)
+	stateDB := newMockAccountStateDB()
+	handler := NewCrossNodeHandler(cm.PublicKey{})
+
+	sender := common.HexToAddress("0xaaa")
+	target := common.HexToAddress("0xbbb")
+	value := big.NewInt(100)
+	payloadHash := common.HexToHash("0x111")
+
+	// 1. Nil store
+	if _, err := handler.HandleTransfer(nil, stateDB, cm.PublicKey{}, sender, target, value, payloadHash); err == nil || err.Error() != "store is nil" {
+		t.Errorf("Expected 'store is nil', got: %v", err)
+	}
+
+	// 2. Nil stateDB
+	if _, err := handler.HandleTransfer(store, nil, cm.PublicKey{}, sender, target, value, payloadHash); err == nil || err.Error() != "stateDB is nil" {
+		t.Errorf("Expected 'stateDB is nil', got: %v", err)
+	}
+
+	// 3. Nil value
+	if _, err := handler.HandleTransfer(store, stateDB, cm.PublicKey{}, sender, target, nil, payloadHash); err == nil || err.Error() != "invalid value" {
+		t.Errorf("Expected 'invalid value', got: %v", err)
+	}
+
+	// 4. Zero or negative value
+	if _, err := handler.HandleTransfer(store, stateDB, cm.PublicKey{}, sender, target, big.NewInt(0), payloadHash); err == nil || err.Error() != "invalid value" {
+		t.Errorf("Expected 'invalid value', got: %v", err)
+	}
+
+	// 5. HandleSystemEvent nil guards
+	event := Event{Type: EventCreditObserved}
+	if err := handler.HandleSystemEvent(nil, store, stateDB, event, common.Hash{}, 0, cm.PublicKey{}, cm.PublicKey{}, common.Hash{}); err == nil || err.Error() != "readStore is nil" {
+		t.Errorf("Expected 'readStore is nil', got: %v", err)
+	}
+	if err := handler.HandleSystemEvent(store, nil, stateDB, event, common.Hash{}, 0, cm.PublicKey{}, cm.PublicKey{}, common.Hash{}); err == nil || err.Error() != "writeStore is nil" {
+		t.Errorf("Expected 'writeStore is nil', got: %v", err)
+	}
+	if err := handler.HandleSystemEvent(store, store, nil, event, common.Hash{}, 0, cm.PublicKey{}, cm.PublicKey{}, common.Hash{}); err == nil || err.Error() != "stateDB is nil" {
+		t.Errorf("Expected 'stateDB is nil', got: %v", err)
+	}
+}
+

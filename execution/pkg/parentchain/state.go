@@ -46,6 +46,9 @@ func appendUint64BE(buf []byte, v uint64) []byte {
 }
 
 func padTo32(val *big.Int) []byte {
+	if val == nil {
+		return make([]byte, 32)
+	}
 	b := val.Bytes()
 	if len(b) >= 32 {
 		return b
@@ -117,6 +120,9 @@ func ensureChainRegistry(store Store, keyHash common.Hash, key cm.PublicKey, clu
 
 // DepositToFloat credits destKey's NodeFloatAccount by amount and records messageID.
 func DepositToFloat(store Store, destKey cm.PublicKey, destClusterIDDesc uint64, sender, target common.Address, amount *big.Int, messageID common.Hash, blockTime uint64) error {
+	if destKey == (cm.PublicKey{}) {
+		return errors.New("DepositToFloat: zero destination public key")
+	}
 	if amount == nil || amount.Sign() <= 0 {
 		return ErrFloatInvalidAmount
 	}

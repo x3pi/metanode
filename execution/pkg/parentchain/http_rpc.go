@@ -294,6 +294,14 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 	
 	var msgID common.Hash
 	if tx.Type == TxTypeTransferFloat {
+		if tx.Amount == nil || tx.Amount.Sign() <= 0 {
+			http.Error(w, "invalid amount", http.StatusBadRequest)
+			return
+		}
+		if len(tx.PubKey) != 48 || len(tx.ToPubKey) != 48 {
+			http.Error(w, "invalid public key length", http.StatusBadRequest)
+			return
+		}
 		var fromKey, toKey cm.PublicKey
 		copy(fromKey[:], tx.PubKey)
 		copy(toKey[:], tx.ToPubKey)
@@ -311,15 +319,21 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 		msgID = crypto.Keccak256Hash(digest)
 		tx.MsgID = msgID
 	} else if tx.Type == TxTypeDepositToFloat {
+		if tx.Amount == nil || tx.Amount.Sign() <= 0 {
+			http.Error(w, "invalid amount", http.StatusBadRequest)
+			return
+		}
+		if len(tx.PubKey) != 48 {
+			http.Error(w, "invalid public key length", http.StatusBadRequest)
+			return
+		}
 		if tx.MsgID != (common.Hash{}) {
 			msgID = tx.MsgID
 		} else {
 			var pubKey cm.PublicKey
 			copy(pubKey[:], tx.PubKey)
 			data := append(append(pubKey[:], tx.Sender.Bytes()...), tx.Target.Bytes()...)
-			if tx.Amount != nil {
-				data = append(data, tx.Amount.Bytes()...)
-			}
+			data = append(data, tx.Amount.Bytes()...)
 			nonce := tx.Nonce
 			if nonce == 0 {
 				nonce = uint64(time.Now().UnixNano())
@@ -331,9 +345,21 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 			tx.MsgID = msgID
 		}
 	} else if tx.Type == TxTypeSubmitStateRoot {
+		if len(tx.PubKey) != 48 {
+			http.Error(w, "invalid public key length", http.StatusBadRequest)
+			return
+		}
+		if len(tx.Cert) != 96 {
+			http.Error(w, "invalid signature length", http.StatusBadRequest)
+			return
+		}
 		var clusterPubKey cm.PublicKey
 		copy(clusterPubKey[:], tx.PubKey)
 		digest := ComputeSubmitStateRootMessage(clusterPubKey, tx.Epoch, tx.StateRoot)
+		if !bls.VerifySign(clusterPubKey, cm.Sign(tx.Cert), digest) {
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
 		msgID = crypto.Keccak256Hash(append(digest, tx.Cert...))
 		tx.MsgID = msgID
 	} else if tx.Type == TxTypeRegisterAccount {

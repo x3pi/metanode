@@ -65,6 +65,12 @@ func (h *CrossNodeHandler) HandleTransfer(
 	value *big.Int,
 	payloadHash common.Hash,
 ) (common.Hash, error) {
+	if store == nil {
+		return common.Hash{}, fmt.Errorf("store is nil")
+	}
+	if stateDB == nil {
+		return common.Hash{}, fmt.Errorf("stateDB is nil")
+	}
 	if value == nil || value.Sign() <= 0 {
 		return common.Hash{}, fmt.Errorf("invalid value")
 	}
@@ -74,6 +80,9 @@ func (h *CrossNodeHandler) HandleTransfer(
 
 	// 1. Check balance
 	balance := stateDB.GetBalance(sender)
+	if balance == nil {
+		balance = big.NewInt(0)
+	}
 	if balance.Cmp(value) < 0 {
 		return common.Hash{}, fmt.Errorf("insufficient balance: have %v, need %v", balance, value)
 	}
@@ -158,6 +167,16 @@ func (h *CrossNodeHandler) HandleTransfer(
 // current record was already at StateMarkClaimedSubmitted. Reading through readStore instead
 // fixes this; the final Put still goes through writeStore so THIS call's own result is durable.
 func (h *CrossNodeHandler) HandleSystemEvent(readStore Store, writeStore Store, stateDB AccountStateDB, event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error {
+	if readStore == nil {
+		return fmt.Errorf("readStore is nil")
+	}
+	if writeStore == nil {
+		return fmt.Errorf("writeStore is nil")
+	}
+	if stateDB == nil {
+		return fmt.Errorf("stateDB is nil")
+	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 

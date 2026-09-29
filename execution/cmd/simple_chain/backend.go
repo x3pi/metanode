@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -539,53 +540,7 @@ func NewServer(app *App) *http.ServeMux {
 		w.Write([]byte(`{"status":"reset"}`))
 	})
 
-	mux.HandleFunc("/mtn/sendRawTransactionBin", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		defer r.Body.Close()
-
-		rawPayload, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to read request body: %v", err), http.StatusBadRequest)
-			return
-		}
-
-		metaTx, ethTx, pubKey, err := decodeBinaryRawTxPayload(rawPayload)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("invalid payload: %v", err), http.StatusBadRequest)
-			return
-		}
-
-		txHash, err := customAPI.SendRawTransactionWithDeviceKey(r.Context(), metaTx, ethTx, pubKey)
-		if err != nil {
-			var revErr *revertError
-			if errors.As(err, &revErr) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusConflict)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"code":    revErr.ErrorCode(),
-					"message": revErr.Error(),
-					"data":    revErr.ErrorData(),
-				})
-				return
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"code":    -32000,
-				"message": err.Error(),
-			})
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/octet-stream")
-		if _, writeErr := w.Write(txHash.Bytes()); writeErr != nil {
-			logger.Warn("failed to write binary transaction hash response: %v", writeErr)
-		}
-	})
+	mux.HandleFunc("/mtn/sendRawTransactionBin", sendRawTransactionBinHandler(customAPI))
 
 	// Áp dụng middleware vào handler WebSocket
 	wsHandler := server.WebsocketHandler([]string{"*"})
@@ -660,3 +615,60 @@ func writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
+
+type rawTxBinSender interface {
+	SendRawTransactionWithDeviceKey(ctx context.Context, metaTx, ethTx, pubKey []byte) (common.Hash, error)
+}
+
+func sendRawTransactionBinHandler(sender rawTxBinSender) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		defer r.Body.Close()
+
+		const maxRawTxPayloadSize = 8 << 20 // 8 MB limit to prevent OOM
+		r.Body = http.MaxBytesReader(w, r.Body, maxRawTxPayloadSize)
+		rawPayload, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to read request body: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		metaTx, ethTx, pubKey, err := decodeBinaryRawTxPayload(rawPayload)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid payload: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		txHash, err := sender.SendRawTransactionWithDeviceKey(r.Context(), metaTx, ethTx, pubKey)
+		if err != nil {
+			var revErr *revertError
+			if errors.As(err, &revErr) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"code":    revErr.ErrorCode(),
+					"message": revErr.Error(),
+					"data":    revErr.ErrorData(),
+				})
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"code":    -32000,
+				"message": err.Error(),
+			})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		if _, writeErr := w.Write(txHash.Bytes()); writeErr != nil {
+			logger.Warn("failed to write binary transaction hash response: %v", writeErr)
+		}
+	}
+}
+

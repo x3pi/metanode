@@ -69,3 +69,100 @@ func TestDepositToFloat_ConsecutiveDepositsUniqueMsgID(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, big.NewInt(2000), bal)
 }
+
+func TestPadTo32_NilSafety(t *testing.T) {
+	// Must not panic on nil
+	var res []byte
+	assert.NotPanics(t, func() {
+		res = padTo32(nil)
+	})
+	assert.Equal(t, 32, len(res))
+	assert.Equal(t, make([]byte, 32), res)
+}
+
+func TestHTTPRPC_InputValidation(t *testing.T) {
+	store := NewMemoryStore()
+	txChan := make(chan *ParentChainTx, 10)
+	server := NewHTTPServer(store, txChan)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/tx", server.handleTx)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	client := NewHTTPClient(ts.URL)
+
+	kp := bls.GenerateKeyPair()
+	pubKey := kp.PublicKey()
+
+	// 1. TransferFloat with nil amount -> must be rejected
+	reqBadTransfer := ParentChainTx{
+		Type:     TxTypeTransferFloat,
+		PubKey:   pubKey[:],
+		ToPubKey: pubKey[:],
+		Amount:   nil, // nil amount!
+	}
+	var resp struct{}
+	err := client.(*httpClient).post("/tx", reqBadTransfer, &resp)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid amount")
+
+	// 2. TransferFloat with negative/zero amount -> must be rejected
+	reqZeroTransfer := ParentChainTx{
+		Type:     TxTypeTransferFloat,
+		PubKey:   pubKey[:],
+		ToPubKey: pubKey[:],
+		Amount:   big.NewInt(0),
+	}
+	err = client.(*httpClient).post("/tx", reqZeroTransfer, &resp)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid amount")
+
+	// 3. DepositToFloat with nil amount -> must be rejected
+	reqBadDeposit := ParentChainTx{
+		Type:   TxTypeDepositToFloat,
+		PubKey: pubKey[:],
+		Amount: nil,
+	}
+	err = client.(*httpClient).post("/tx", reqBadDeposit, &resp)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid amount")
+
+	// 4. DepositToFloat with invalid pubkey length -> must be rejected
+	reqShortKeyDeposit := ParentChainTx{
+		Type:   TxTypeDepositToFloat,
+		PubKey: []byte("too short"),
+		Amount: big.NewInt(100),
+	}
+	err = client.(*httpClient).post("/tx", reqShortKeyDeposit, &resp)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid public key length")
+
+	// 5. SubmitStateRoot with invalid signature length -> must be rejected
+	reqBadCertLen := ParentChainTx{
+		Type:      TxTypeSubmitStateRoot,
+		PubKey:    pubKey[:],
+		Epoch:     1,
+		StateRoot: common.HexToHash("0x1111"),
+		Cert:      []byte("short-cert"),
+	}
+	err = client.(*httpClient).post("/tx", reqBadCertLen, &resp)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid signature length")
+
+	// 6. SubmitStateRoot with forged/invalid signature -> must be rejected with 401 Unauthorized
+	otherKp := bls.GenerateKeyPair()
+	badDigest := ComputeSubmitStateRootMessage(pubKey, 1, common.HexToHash("0x1111"))
+	forgedSig := bls.Sign(otherKp.PrivateKey(), badDigest) // Signed with different key!
+	reqBadSig := ParentChainTx{
+		Type:      TxTypeSubmitStateRoot,
+		PubKey:    pubKey[:],
+		Epoch:     1,
+		StateRoot: common.HexToHash("0x1111"),
+		Cert:      forgedSig[:],
+	}
+	err = client.(*httpClient).post("/tx", reqBadSig, &resp)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid signature")
+}
+

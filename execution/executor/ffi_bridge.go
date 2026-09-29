@@ -439,15 +439,25 @@ func cgo_get_state_root() *C.char {
 	return nil
 }
 
-//export cgo_update_tx_trace
-func cgo_update_tx_trace(hashPtr *C.uint8_t, stepPtr *C.char, detailsPtr *C.char) {
+func updateTxTraceFromPointers(hashPtr, stepPtr, detailsPtr unsafe.Pointer) {
 	if hashPtr == nil || traceCallback == nil {
 		return
 	}
-	hash := *(*common.Hash)(unsafe.Pointer(hashPtr))
-	step := C.GoString(stepPtr)
-	details := C.GoString(detailsPtr)
+	hash := *(*common.Hash)(hashPtr)
+	step := ""
+	if stepPtr != nil {
+		step = C.GoString((*C.char)(stepPtr))
+	}
+	details := ""
+	if detailsPtr != nil {
+		details = C.GoString((*C.char)(detailsPtr))
+	}
 	traceCallback(hash, step, details)
+}
+
+//export cgo_update_tx_trace
+func cgo_update_tx_trace(hashPtr *C.uint8_t, stepPtr *C.char, detailsPtr *C.char) {
+	updateTxTraceFromPointers(unsafe.Pointer(hashPtr), unsafe.Pointer(stepPtr), unsafe.Pointer(detailsPtr))
 }
 
 // SubmitTransactionBatch directly submits a transaction batch to the Rust consensus via zero-copy FFI
