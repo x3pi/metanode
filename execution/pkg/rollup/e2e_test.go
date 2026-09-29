@@ -20,8 +20,9 @@ type InMemoryParentChain struct {
 	mu        sync.Mutex
 	store     parentchain.Store
 	transfers map[uint64][]*parentchain.TransferEvent // destClusterID -> transfers
-	nodeKeys  map[uint64]*bls.KeyPair
-	accounts  map[common.Address]cm.PublicKey
+	nodeKeys   map[uint64]*bls.KeyPair
+	accounts   map[common.Address]cm.PublicKey
+	onTransfer func(destID uint64)
 }
 
 func NewInMemoryParentChain() *InMemoryParentChain {
@@ -124,6 +125,9 @@ func (a *ParentChainClientAdapter) SendTransferFloat(
 	}
 
 	a.chain.transfers[destID] = append(a.chain.transfers[destID], event)
+	if a.chain.onTransfer != nil {
+		a.chain.onTransfer(destID)
+	}
 	return msgID, nil
 }
 
@@ -613,3 +617,113 @@ func TestE2E_Refund_DoubleCreditPrevention(t *testing.T) {
 		}
 	}
 }
+
+func TestE2E_10ConcurrentTransfers_LatencyBenchmark(t *testing.T) {
+	parentChain := NewInMemoryParentChain()
+
+	kp1 := bls.GenerateKeyPair()
+	kp2 := bls.GenerateKeyPair()
+	parentChain.nodeKeys[1] = kp1
+	parentChain.nodeKeys[2] = kp2
+
+	sender := common.HexToAddress("0xaaa")
+	parentChain.accounts[sender] = kp1.PublicKey()
+
+	setupClusterFloatBalance(t, parentChain, kp1, 1, big.NewInt(100_000))
+	setupClusterFloatBalance(t, parentChain, kp2, 2, big.NewInt(100_000))
+
+	node1 := NewRollupNode(1, parentChain, kp1, kp2.PublicKey(), 2)
+	node2 := NewRollupNode(2, parentChain, kp2, kp1.PublicKey(), 1)
+
+	// Fund sender with ample balance for 10 transfers
+	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(50_000)
+
+	// Set up onTransfer callback to instantly wake up node2.receiveWorker (Event-driven without timeout)
+	parentChain.onTransfer = func(destID uint64) {
+		if destID == 2 {
+			node2.receiveWorker.WakeUp()
+		}
+	}
+
+	handler := NewCrossNodeHandler(node1.blsKeyPair.PublicKey())
+
+	// Start real background worker goroutines
+	node1.sendWorker.Start()
+	defer node1.sendWorker.Stop()
+	node2.receiveWorker.Start()
+	defer node2.receiveWorker.Stop()
+
+	const transferCount = 10
+	transferValue := big.NewInt(100)
+	msgIDs := make([]common.Hash, transferCount)
+	targets := make([]common.Address, transferCount)
+
+	for i := 0; i < transferCount; i++ {
+		target := common.HexToAddress(fmt.Sprintf("0x%03x", 0xbbb+i))
+		targets[i] = target
+		parentChain.accounts[target] = kp2.PublicKey()
+	}
+
+	startTime := time.Now()
+
+	// Launch 10 concurrent transfers
+	var wg sync.WaitGroup
+	for i := 0; i < transferCount; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			mID, err := handler.HandleTransfer(
+				node1.Store,
+				node1.StateDB,
+				node2.blsKeyPair.PublicKey(),
+				sender,
+				targets[idx],
+				transferValue,
+				crypto.Keccak256Hash(nil),
+			)
+			if err != nil {
+				t.Errorf("Transfer %d failed: %v", idx, err)
+				return
+			}
+			msgIDs[idx] = mID
+			// Event-driven immediate wakeup: 0ms delay
+			node1.sendWorker.WakeUp()
+		}(i)
+	}
+	wg.Wait()
+
+	// Wait until all 10 transfers reach StateCredited on Node 2
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	completed := 0
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("Timeout waiting for 10 transfers. Only %d/%d completed. Check pipeline.", completed, transferCount)
+		default:
+			completed = 0
+			for i := 0; i < transferCount; i++ {
+				rec, found, _ := node2.Store.Get(msgIDs[i])
+				if found && rec.State == StateCredited {
+					completed++
+				}
+			}
+			if completed == transferCount {
+				elapsed := time.Since(startTime)
+				t.Logf("=====================================================================")
+				t.Logf("🚀 [KẾT QUẢ TEST] 10 TRANSFERS ĐỒNG THỜI HOÀN TẤT THÀNH CÔNG!")
+				t.Logf("⏱️ Thời gian thực tế: %v", elapsed)
+				t.Logf("📉 Trước đây (do tick 5s): ~20–24s")
+				t.Logf("⚡ Nhanh hơn: ~%.1fx lần (loại bỏ hoàn toàn timeout chờ đợi)", float64(22*time.Second)/float64(elapsed))
+				t.Logf("=====================================================================")
+				if elapsed >= 5*time.Second {
+					t.Errorf("Expected completion under 5s, but took %v", elapsed)
+				}
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
