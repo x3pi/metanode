@@ -2996,7 +2996,7 @@ impl<C: NetworkClient> Inner<C> {
                 // Comparing the full struct fails because end_commit_ref.epoch is hardcoded to 0
                 // while validators vote with the actual active epoch (e.g., 2, 3, 4), causing
                 // accumulated_stake to incorrectly resolve to 0 and stall synchronization.
-                tracing::warn!(
+                tracing::debug!(
                     "DEBUG-VOTE: author={}, vote.index={}, vote.digest={:?}, end.index={}, end.digest={:?}, match={}",
                     block.author(),
                     vote.index,

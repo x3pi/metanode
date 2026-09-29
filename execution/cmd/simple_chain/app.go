@@ -107,6 +107,7 @@ type App struct {
 	recvWorker       *rollup.ReceiveWorker
 	reclaimWorker    *rollup.ReclaimWorker
 	parentClient     parentchain.Client
+	rollupEnabled    bool // true only when PARENT_CHAIN_URL is set: rollup workers + parent-chain registration
 }
 
 // NewApp creates and initializes a new blockchain application
@@ -263,9 +264,15 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	}
 
 	// Initialize Rollup Components
+	// The rollup workers and the parent-chain registration only make sense on a node that has a parent chain.
+	// A plain simple-chain node (Rust consensus, no parent chain) must not poll a non-existent endpoint, so they
+	// are enabled only when PARENT_CHAIN_URL is set explicitly. The client is still built (default URL) so RPC
+	// handlers that reference it never see a nil pointer.
 	parentChainURL := os.Getenv("PARENT_CHAIN_URL")
-	if parentChainURL == "" {
+	app.rollupEnabled = parentChainURL != ""
+	if !app.rollupEnabled {
 		parentChainURL = "http://127.0.0.1:8547"
+		logger.Info("PARENT_CHAIN_URL is not set: rollup workers and parent-chain registration are disabled")
 	}
 	parentClient := parentchain.NewHTTPClient(parentChainURL)
 	app.parentClient = parentClient
@@ -277,9 +284,10 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	// Register account on Parent Chain for this Exec Node
 	registerDigest := parentchain.ComputeRegisterAccountMessage(app.keyPair.Address(), app.keyPair.PublicKey())
 	clusterSig := bls.Sign(app.keyPair.PrivateKey(), registerDigest)
-	_, err = parentClient.SendRegisterAccount(app.keyPair.Address(), app.keyPair.PublicKey(), nil, clusterSig)
-	if err != nil {
-		logger.Warn("Failed to register account on parent chain: %v", err)
+	if app.rollupEnabled {
+		if _, regErr := parentClient.SendRegisterAccount(app.keyPair.Address(), app.keyPair.PublicKey(), nil, clusterSig); regErr != nil {
+			logger.Warn("Failed to register account on parent chain: %v", regErr)
+		}
 	}
 
 	stateDBAdapter := &accountStateDBAdapter{chainState: app.chainState}
@@ -720,8 +728,8 @@ func (app *App) Run() error {
 	app.blockProcessor.StartBackgroundWorkers()
 	go app.blockProcessor.TxsProcessor2()
 
-	// Start Rollup Workers
-	if app.sendWorker != nil {
+	// Start Rollup Workers (only on nodes that have a parent chain, see NewApp)
+	if app.rollupEnabled && app.sendWorker != nil {
 		go app.sendWorker.Start()
 		go app.recvWorker.Start()
 		go app.reclaimWorker.Start()
