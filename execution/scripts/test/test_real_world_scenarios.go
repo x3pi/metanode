@@ -277,8 +277,16 @@ func main() {
 	nonce, _ := getAccountNonce(exec1URL, localAccAddr)
 	gasLimit := uint64(1000000)
 	gasPrice := big.NewInt(1_000_000_000) // 1 gwei
-	tx := ethtypes.NewTransaction(nonce, accountSettingAddr, big.NewInt(0), gasLimit, gasPrice, inputData)
-	signer := ethtypes.NewCancunSigner(big.NewInt(991))
+	chainIDVal := big.NewInt(101)
+	cIdRes, cErr := rpcCall(exec1URL, "eth_chainId", nil)
+	if cErr == nil && cIdRes["result"] != nil {
+		if cStr, ok := cIdRes["result"].(string); ok {
+			if parsed, pErr := hexutil.DecodeBig(cStr); pErr == nil && parsed.Sign() > 0 {
+				chainIDVal = parsed
+			}
+		}
+	}
+	signer := ethtypes.NewCancunSigner(chainIDVal)
 	signedTx, err := ethtypes.SignTx(tx, signer, localAccPriv)
 	if err != nil {
 		fmt.Printf("❌ Ký transaction gọi contract thất bại: %v\n", err)

@@ -10,7 +10,7 @@
     - "{{ base_data_dir }}"
     - "{{ base_log_dir }}"
 
-- name: Distribute built binaries to node
+- name: Distribute built binaries and base assets to node
   ansible.builtin.copy:
     src: "{{ item.src }}"
     dest: "{{ item.dest }}"
@@ -18,3 +18,5 @@
   loop:
     - { src: "{{ local_bin_dir }}/parent_chain", dest: "{{ bin_dir }}/parent_chain" }
     - { src: "{{ local_bin_dir }}/simple_chain", dest: "{{ bin_dir }}/simple_chain" }
+    - { src: "{{ playbook_dir }}/../../deploy/systemd/genesis.json.example", dest: "{{ install_dir }}/genesis_base.json" }
+    - { src: "{{ playbook_dir }}/private_dev_keys.json", dest: "{{ install_dir }}/private_dev_keys.json" }

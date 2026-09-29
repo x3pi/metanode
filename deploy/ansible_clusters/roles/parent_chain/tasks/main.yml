@@ -35,6 +35,11 @@
       loop:
         - "{{ node_data_dir }}/chain_data"
         - "{{ node_data_dir }}/storage"
+        - "{{ node_data_dir }}/parentchain_db"
+        - "{{ node_data_dir }}/consensus"
+        - "{{ node_data_dir }}/consensus_storage"
+        - "{{ node_data_dir }}/rocksdb_dummy_init"
+        - "{{ node_data_dir }}/backup"
 
 # ── Setup Configuration & Service Unit ───────────────────────────────────────
 - name: Setup Parent Chain configuration
@@ -53,6 +58,21 @@
       ansible.builtin.template:
         src: parentchain_config.json.j2
         dest: "{{ node_data_dir }}/config.json"
+        mode: '0644'
+
+    - name: Copy Parent Chain consensus keys
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../consensus/metanode/config/{{ item }}"
+        dest: "{{ node_data_dir }}/{{ item }}"
+        mode: '0600'
+      loop:
+        - "node_0_protocol_key.json"
+        - "node_0_network_key.json"
+
+    - name: Deploy Parent Chain consensus.toml
+      ansible.builtin.template:
+        src: parent_consensus.toml.j2
+        dest: "{{ node_data_dir }}/consensus.toml"
         mode: '0644'
 
     - name: Deploy systemd service unit
@@ -80,7 +100,7 @@
         nohup {{ bin_dir }}/parent_chain \
           -data-dir {{ node_data_dir }} \
           -http :{{ parent_http_port | default(8547) }} \
-          -rust-config {{ deploy_dir }}/{{ rust_config_path }} \
+          -rust-config {{ node_data_dir }}/consensus.toml \
           >> {{ base_log_dir }}/parent_chain.log 2>&1 &
         echo $! > {{ node_data_dir }}/parent_chain.pid
       args:

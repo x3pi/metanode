@@ -3,5 +3,4 @@
 *.retry
 .env
 !scripts/*.py
-!inventory.yml
-
+inventory.yml

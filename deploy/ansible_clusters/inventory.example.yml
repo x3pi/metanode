@@ -1,11 +1,9 @@
 all:
   vars:
     ansible_user: "metanode"
-    # Unified EVM Chain ID for transaction signing across all execution clusters
-    evm_chain_id: 991
-    # Installation and base directories
+    # Installation and base directories (standardized across all machines)
     install_dir: "/opt/metanode"
-    deploy_dir: "/home/abc/chain-n/metanode"
+    ansible_become_pass: "YOUR_BECOME_PASSWORD"
     # Raft shared configuration for execution clusters
     raft_secret_file: "/opt/metanode/raft_secret.key"
     # Parent Chain configuration
@@ -13,119 +11,128 @@ all:
     parent_chain_host: "127.0.0.1"
 
   children:
-    # ── Parent Chain Node (100% Rust BFT Consensus Engine) ──────────────
+    # ── Parent Chain Node (100% Rust BFT Consensus Engine, Chain ID: 991) ──
     parent_chain_nodes:
+      vars:
+        chain_id: 991
       hosts:
         parent_node:
           ansible_host: 127.0.0.1
           ansible_connection: local
           parent_http_port: 8547
           node_data_dir: "/opt/metanode/parent_chain"
-          rust_config_path: "consensus/metanode/config/node_devnet_parent.toml"
 
     # ── Execution Clusters (Rollup Shards with Raft HA Consensus) ────────
     exec_clusters:
-      hosts:
-        # Cluster 1: 3-Replica High Availability Raft Cluster
-        exec1_replica1:
-          ansible_host: 127.0.0.1
-          ansible_connection: local
-          cluster_id: 1
-          cluster_name: "exec1"
-          consensus_mode: "raft"
-          node_id: "exec1_r1"
-          rpc_port: 8646
-          p2p_port: 4200
-          raft_port: 7110
-          forward_port: 7210
-          raft_bootstrap: true
-          node_data_dir: "/opt/metanode/exec1_r1"
-          private_key: "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c"
-          address: "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5"
-          bls_priv: "5fb8d1ceadf4059adca5c106dbd91452be8c433b2c38c5dd85c50f1c7da4c85c"
-          raft_peers:
-            - id: "exec1_r1"
-              address: "127.0.0.1:7110"
-              forward_address: "127.0.0.1:7210"
-            - id: "exec1_r2"
-              address: "127.0.0.1:7111"
-              forward_address: "127.0.0.1:7211"
-            - id: "exec1_r3"
-              address: "127.0.0.1:7112"
-              forward_address: "127.0.0.1:7212"
+      children:
+        # Cluster 1: 3-Replica High Availability Raft Cluster (Chain ID: 101)
+        cluster_1:
+          vars:
+            cluster_id: 1
+            cluster_name: "exec1"
+            chain_id: 101
+          hosts:
+            exec1_replica1:
+              ansible_host: 127.0.0.1
+              ansible_connection: local
+              consensus_mode: "raft"
+              node_id: "exec1_r1"
+              rpc_port: 8646
+              p2p_port: 4200
+              raft_port: 7110
+              forward_port: 7210
+              raft_bootstrap: true
+              node_data_dir: "/opt/metanode/exec1_r1"
+              private_key: "YOUR_CLUSTER1_PRIVATE_KEY_HEX"
+              address: "0xYourCluster1SequencerAddress"
+              bls_priv: "YOUR_CLUSTER1_BLS_PRIVATE_KEY_HEX"
+              bls_pub: "0xYourCluster1BlsPublicKeyHex"
+              raft_peers:
+                - id: "exec1_r1"
+                  address: "127.0.0.1:7110"
+                  forward_address: "127.0.0.1:7210"
+                - id: "exec1_r2"
+                  address: "127.0.0.1:7111"
+                  forward_address: "127.0.0.1:7211"
+                - id: "exec1_r3"
+                  address: "127.0.0.1:7112"
+                  forward_address: "127.0.0.1:7212"
 
-        exec1_replica2:
-          ansible_host: 127.0.0.1
-          ansible_connection: local
-          cluster_id: 1
-          cluster_name: "exec1"
-          consensus_mode: "raft"
-          node_id: "exec1_r2"
-          rpc_port: 8648
-          p2p_port: 4201
-          raft_port: 7111
-          forward_port: 7211
-          raft_bootstrap: false
-          node_data_dir: "/opt/metanode/exec1_r2"
-          private_key: "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c"
-          address: "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5"
-          bls_priv: "5fb8d1ceadf4059adca5c106dbd91452be8c433b2c38c5dd85c50f1c7da4c85c"
-          raft_peers:
-            - id: "exec1_r1"
-              address: "127.0.0.1:7110"
-              forward_address: "127.0.0.1:7210"
-            - id: "exec1_r2"
-              address: "127.0.0.1:7111"
-              forward_address: "127.0.0.1:7211"
-            - id: "exec1_r3"
-              address: "127.0.0.1:7112"
-              forward_address: "127.0.0.1:7212"
+            exec1_replica2:
+              ansible_host: 127.0.0.1
+              ansible_connection: local
+              consensus_mode: "raft"
+              node_id: "exec1_r2"
+              rpc_port: 8648
+              p2p_port: 4201
+              raft_port: 7111
+              forward_port: 7211
+              raft_bootstrap: false
+              node_data_dir: "/opt/metanode/exec1_r2"
+              private_key: "YOUR_CLUSTER1_PRIVATE_KEY_HEX"
+              address: "0xYourCluster1SequencerAddress"
+              bls_priv: "YOUR_CLUSTER1_BLS_PRIVATE_KEY_HEX"
+              bls_pub: "0xYourCluster1BlsPublicKeyHex"
+              raft_peers:
+                - id: "exec1_r1"
+                  address: "127.0.0.1:7110"
+                  forward_address: "127.0.0.1:7210"
+                - id: "exec1_r2"
+                  address: "127.0.0.1:7111"
+                  forward_address: "127.0.0.1:7211"
+                - id: "exec1_r3"
+                  address: "127.0.0.1:7112"
+                  forward_address: "127.0.0.1:7212"
 
-        exec1_replica3:
-          ansible_host: 127.0.0.1
-          ansible_connection: local
-          cluster_id: 1
-          cluster_name: "exec1"
-          consensus_mode: "raft"
-          node_id: "exec1_r3"
-          rpc_port: 8649
-          p2p_port: 4203
-          raft_port: 7112
-          forward_port: 7212
-          raft_bootstrap: false
-          node_data_dir: "/opt/metanode/exec1_r3"
-          private_key: "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c"
-          address: "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5"
-          bls_priv: "5fb8d1ceadf4059adca5c106dbd91452be8c433b2c38c5dd85c50f1c7da4c85c"
-          raft_peers:
-            - id: "exec1_r1"
-              address: "127.0.0.1:7110"
-              forward_address: "127.0.0.1:7210"
-            - id: "exec1_r2"
-              address: "127.0.0.1:7111"
-              forward_address: "127.0.0.1:7211"
-            - id: "exec1_r3"
-              address: "127.0.0.1:7112"
-              forward_address: "127.0.0.1:7212"
+            exec1_replica3:
+              ansible_host: 127.0.0.1
+              ansible_connection: local
+              consensus_mode: "raft"
+              node_id: "exec1_r3"
+              rpc_port: 8649
+              p2p_port: 4203
+              raft_port: 7112
+              forward_port: 7212
+              raft_bootstrap: false
+              node_data_dir: "/opt/metanode/exec1_r3"
+              private_key: "YOUR_CLUSTER1_PRIVATE_KEY_HEX"
+              address: "0xYourCluster1SequencerAddress"
+              bls_priv: "YOUR_CLUSTER1_BLS_PRIVATE_KEY_HEX"
+              bls_pub: "0xYourCluster1BlsPublicKeyHex"
+              raft_peers:
+                - id: "exec1_r1"
+                  address: "127.0.0.1:7110"
+                  forward_address: "127.0.0.1:7210"
+                - id: "exec1_r2"
+                  address: "127.0.0.1:7111"
+                  forward_address: "127.0.0.1:7211"
+                - id: "exec1_r3"
+                  address: "127.0.0.1:7112"
+                  forward_address: "127.0.0.1:7212"
 
-        # Cluster 2: Single-Replica Raft Node
-        exec2_replica1:
-          ansible_host: 127.0.0.1
-          ansible_connection: local
-          cluster_id: 2
-          cluster_name: "exec2"
-          consensus_mode: "raft"
-          node_id: "exec2_r1"
-          rpc_port: 8647
-          p2p_port: 4202
-          raft_port: 7120
-          forward_port: 7220
-          raft_bootstrap: true
-          node_data_dir: "/opt/metanode/exec2"
-          private_key: "2a61eac9235fab64ae377b2b7e39f8fa9648c5737094d28c7ee68a14b5086d39"
-          address: "0x0d4CC97b62a149a8fe8DE81262270426A80B0935"
-          bls_priv: "2d21f977fd594b7587439a91ab1bb5523573f02e5ba7e3e61cd8e895470d400a"
-          raft_peers:
-            - id: "exec2_r1"
-              address: "127.0.0.1:7120"
-              forward_address: "127.0.0.1:7220"
+        # Cluster 2: Single-Replica Raft Node (Chain ID: 102)
+        cluster_2:
+          vars:
+            cluster_id: 2
+            cluster_name: "exec2"
+            chain_id: 102
+          hosts:
+            exec2_replica1:
+              ansible_host: 127.0.0.1
+              ansible_connection: local
+              consensus_mode: "raft"
+              node_id: "exec2_r1"
+              rpc_port: 8647
+              p2p_port: 4202
+              raft_port: 7120
+              forward_port: 7220
+              raft_bootstrap: true
+              node_data_dir: "/opt/metanode/exec2"
+              private_key: "YOUR_CLUSTER2_PRIVATE_KEY_HEX"
+              address: "0xYourCluster2SequencerAddress"
+              bls_priv: "YOUR_CLUSTER2_BLS_PRIVATE_KEY_HEX"
+              bls_pub: "0xYourCluster2BlsPublicKeyHex"
+              raft_peers:
+                - id: "exec2_r1"
+                  address: "127.0.0.1:7120"
+                  forward_address: "127.0.0.1:7220"

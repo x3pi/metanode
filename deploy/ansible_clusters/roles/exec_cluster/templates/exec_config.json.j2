@@ -31,7 +31,7 @@
 {% if (consensus_mode | default('raft')) == 'raft' %}
   "snapshot_enabled": false,
   "raft": {
-    "node_id": "{{ raft_node_id | default(inventory_hostname) }}",
+    "node_id": "{{ node_id | default(raft_node_id | default(inventory_hostname)) }}",
     "bind_address": "{{ raft_bind_address | default((ansible_host | default('127.0.0.1')) ~ ':' ~ (raft_port | default(7110))) }}",
     "advertise_address": "{{ raft_advertise_address | default((ansible_host | default('127.0.0.1')) ~ ':' ~ (raft_port | default(7110))) }}",
     "data_dir": "{{ node_data_dir }}/raft",
@@ -45,7 +45,7 @@
     "commit_timeout_ms": {{ raft_commit_timeout_ms | default(30) }},
     "propose_queue_size": {{ raft_propose_queue_size | default(1024) }},
     "peers": [
-{% for peer in raft_peers | default([{'id': raft_node_id | default(inventory_hostname), 'address': (ansible_host | default('127.0.0.1')) ~ ':' ~ (raft_port | default(7110)), 'forward_address': (ansible_host | default('127.0.0.1')) ~ ':' ~ (forward_port | default(7210))}]) %}
+{% for peer in raft_peers | default([{'id': node_id | default(raft_node_id | default(inventory_hostname)), 'address': (ansible_host | default('127.0.0.1')) ~ ':' ~ (raft_port | default(7110)), 'forward_address': (ansible_host | default('127.0.0.1')) ~ ':' ~ (forward_port | default(7210))}]) %}
       {
         "id": "{{ peer.id }}",
         "address": "{{ peer.address }}",

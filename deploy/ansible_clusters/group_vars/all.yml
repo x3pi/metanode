@@ -4,12 +4,10 @@
 # Operational action: setup, deploy, restart, stop, clean, reset, status
 deploy_action: "setup"
 
-# EVM Chain ID used network-wide for Ethereum transaction signing
-evm_chain_id: 991
-
 # Binaries location
 bin_dir: "/opt/metanode/bin"
 local_bin_dir: "{{ playbook_dir }}/../../execution/scripts/test"
+deploy_dir: "{{ playbook_dir }}/../.."
 
 # State & Log directories
 base_data_dir: "/opt/metanode/data"

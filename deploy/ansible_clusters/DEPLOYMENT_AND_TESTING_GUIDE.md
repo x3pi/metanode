@@ -47,7 +47,7 @@ Kiến trúc MetaNode tuân thủ mô hình **Đồng Thuận Hai Tầng (Two-Ti
              ┌────────────────────────────┴───┐        ┌───┴────────────────────────────┐
              │       EXEC CLUSTER 1           │        │       EXEC CLUSTER 2           │
              │   - ClusterID: 1               │        │   - ClusterID: 2               │
-             │   - EVM ChainID: 991           │        │   - EVM ChainID: 991           │
+             │   - ChainID: 101               │        │   - ChainID: 102               │
              │   - RPC: http://...:8646       │        │   - RPC: http://...:8647       │
              │   - Consensus: HashiCorp Raft  │        │   - Consensus: HashiCorp Raft  │
              │     (3 Replicas HA Cluster)    │        │     (Single-Node Feed)         │
@@ -69,7 +69,7 @@ Kiến trúc MetaNode tuân thủ mô hình **Đồng Thuận Hai Tầng (Two-Ti
    - **Động cơ đồng thuận:** **HashiCorp Raft v1.7.1** (`consensus_mode = "raft"`) tích hợp trực tiếp trong `simple_chain` thuần Go.
    - **Khả năng chịu lỗi (CFT / High Availability):** Chạy nhiều replica (ví dụ 3 replica `n0`, `n1`, `n2`), tự động phát hiện mất kết nối và **bầu Leader mới trong ~200ms**.
    - **Shared Key Pattern:** Tất cả replica trong cùng 1 cụm thực thi dùng chung cùng 1 cặp khóa Sequencer (`address` & `private_key`), bảo đảm tính xác định 100% của block hash bất kể replica nào đang giữ quyền Leader.
-   - Chạy engine máy ảo MVM (Meta Virtual Machine) tương thích hoàn toàn EVM Cancun (EVM ChainID `991`).
+   - Chạy engine máy ảo MVM (Meta Virtual Machine) tương thích hoàn toàn EVM Cancun (EVM ChainID tương ứng theo cluster: `101` cho Cluster 1, `102` cho Cluster 2; Parent Chain là ChainID `991`).
 3. **Bộ Ba Rollup Workers trên mỗi Cụm:**
    - **`SendWorker`**: Quét các giao dịch xuyên cụm nội bộ (`StateLocalAppliedPendingSend`), ký chứng thực BLS và đẩy lên Parent Chain qua `SendInboundTransfer`.
    - **`ReceiveWorker`**: Thăm dò định kỳ (poll) Parent Chain từ con trỏ `cursor`, tiếp nhận các giao dịch gửi đến cụm mình, đề xuất block nội bộ để ghi có (`credit`) tiền cho người nhận, sau đó gọi `SendMarkClaimed` về Parent Chain.
@@ -121,14 +121,14 @@ Toàn bộ giải pháp triển khai nằm trong thư mục `deploy/ansible_clus
 ```
 deploy/ansible_clusters/
 ├── ansible.cfg                # Cấu hình Ansible: kích hoạt pipelining, callback YAML, timeout
-├── inventory.yml              # Khai báo máy chủ, địa chỉ IP, roles và cluster_id
-├── inventory.example.yml      # Mẫu inventory tham khảo
-├── .env                       # Cấu hình Token Bot và Chat ID Telegram (bảo mật)
+├── inventory.example.yml      # Mẫu inventory tham khảo (che các khóa/mật khẩu bí mật)
+├── inventory.yml              # Khai báo máy chủ, IP, roles & keys thực tế (đã đưa vào .gitignore)
+├── .env                       # Cấu hình Token Bot và Chat ID Telegram bí mật (đã gitignore)
 ├── .env.example               # Mẫu cấu hình biến môi trường Telegram
 ├── deploy.yml                 # Playbook tổng hợp: Build, Setup, Parent Chain, Exec Clusters, Test
 ├── deploy_clusters.sh         # Script bash 1-click điều phối thông minh, tích hợp Telegram alerts
 ├── group_vars/
-│   └── all.yml                # Biến dùng chung (ChainID 991, paths, URLs mặc định)
+│   └── all.yml                # Biến dùng chung (paths, URLs mặc định, thư mục logs)
 ├── roles/
 │   ├── build/                 # Kiểm tra và biên dịch tự động binaries (parent_chain, simple_chain)
 │   ├── common/                # Tạo thư mục /opt/metanode, phân phối nhị phân và chuẩn bị runtime
@@ -163,13 +163,19 @@ deploy/ansible_clusters/
 
 ### 4.2 Cấu hình Inventory
 
+> 🔒 **Lưu ý bảo mật:** File `inventory.yml` đã được cấu hình trong `.gitignore` nhằm ngăn ngừa việc rò rỉ khóa bí mật và mật khẩu lên Git repository. Khi bắt đầu cài đặt trên môi trường mới:
+> ```bash
+> cp inventory.example.yml inventory.yml
+> ```
+> Mở file `inventory.yml` vừa tạo và điền các khóa bí mật (`private_key`, `bls_priv`, `address`, `bls_pub`) cùng mật khẩu `ansible_become_pass`.
+
 #### Chế độ A: Triển khai Local Devnet (Chuẩn Raft 3 Replicas HA + Single Feed)
 File `inventory.yml` mô hình hóa chuẩn: Cluster 1 chạy cụm Raft 3 node chịu lỗi, Cluster 2 chạy Single Feed:
 ```yaml
 all:
   vars:
     ansible_user: "metanode"
-    evm_chain_id: 991
+    chain_id: 101
     install_dir: "/opt/metanode"
     raft_secret_file: "/opt/metanode/raft_secret.key"
 
@@ -294,10 +300,13 @@ exec_clusters:
       # ...
 ```
 
-### 4.3 Cấu hình Biến Toàn Cục
-Trong `group_vars/all.yml`:
-- `metanode_evm_chain_id: 991`: Tất cả các cụm thực thi đều sử dụng EVM ChainID 991 để các ví Web3 (Metamask, Rabby) không cần chuyển mạng khi tương tác.
-- `metanode_base_dir: /opt/metanode`: Thư mục cài đặt và chứa dữ liệu runtime trên từng node.
+### 4.3 Cấu hình Biến Toàn Cục & Khởi Tạo Genesis
+- **Cấu hình Chain ID:** Trong `inventory.yml`, mỗi cụm Shard được định danh bằng một Chain ID riêng biệt: Cluster 1 là `101`, Cluster 2 là `102` (Parent Chain là `991`). Các tài khoản devnet được ánh xạ tự động từ `private_dev_keys.json` theo đúng `chain_id`.
+- **Cơ chế Genesis Base chuẩn hóa:** Phôi mẫu khởi tạo được phân phối từ file chuẩn nhẹ [deploy/systemd/genesis.json.example](../../deploy/systemd/genesis.json.example) (dung lượng chỉ ~66 KB thay vì các file phình to do spam keys). Tác vụ `roles/exec_cluster` tự động:
+  1. Gán lại `chainId` (`101` hoặc `102`) cho từng cụm tương ứng.
+  2. Gán đè `publicKeyBls` của toàn bộ tài khoản khớp với khóa BLS Sequencer của cụm đó (`cluster_bls`).
+  3. Bổ sung các ví devnet theo shard từ `private_dev_keys.json`.
+- **Thư mục cài đặt:** `install_dir: /opt/metanode`, thư mục log: `base_log_dir: /var/log/metanode`.
 
 ---
 
@@ -343,16 +352,18 @@ ansible-playbook -i inventory.yml deploy.yml --tags exec_clusters
   ```bash
   ./deploy_clusters.sh --setup --systemd --test
   ```
-  Hệ thống sẽ tạo 3 service độc lập:
-  - `metanode-parentchain.service`
-  - `metanode-cluster-1.service`
-  - `metanode-cluster-2.service`
+  Hệ thống sẽ tạo các systemd unit độc lập theo từng host:
+  - `metanode-parentchain.service` (Parent Chain)
+  - `metanode-exec1_replica1.service` (Exec Cluster 1 - Replica 1)
+  - `metanode-exec1_replica2.service` (Exec Cluster 1 - Replica 2)
+  - `metanode-exec1_replica3.service` (Exec Cluster 1 - Replica 3)
+  - `metanode-exec2_replica1.service` (Exec Cluster 2 - Replica 1)
 
 ---
 
 ## 6. QUY TRÌNH KIỂM THỬ TÍCH HỢP
 
-Bộ kiểm thử được viết bằng Go tại [`execution/scripts/test/test_real_world_scenarios.go`](file:///home/abc/chain-n/metanode/execution/scripts/test/test_real_world_scenarios.go), mô phỏng 100% các hành vi giao dịch trong thực tế.
+Bộ kiểm thử được viết bằng Go tại [`execution/scripts/test/test_real_world_scenarios.go`](../../execution/scripts/test/test_real_world_scenarios.go), mô phỏng 100% các hành vi giao dịch trong thực tế.
 
 ### 6.1 Giải thích chi tiết 5 Kịch bản kiểm thử Tích hợp Xuyên Cụm
 
@@ -360,13 +371,13 @@ Bộ kiểm thử được viết bằng Go tại [`execution/scripts/test/test_
 | :--- | :--- | :--- | :--- |
 | **Kịch bản 1: Đăng ký tài khoản** | Đăng ký ví mới vào danh bạ cụm (`Account Registry`) | 1. Sinh cặp khóa ECDSA mới.<br>2. Tạo thông điệp đăng ký ánh xạ ví vào Cluster 2.<br>3. Ký kép: Chữ ký ECDSA của người dùng + Chữ ký BLS của Cluster 2.<br>4. Gửi `SendRegisterAccount` lên Parent Chain. | Truy vấn `GetAccountRegistry(addr)` trên Parent Chain trả về đúng BLS Public Key của Cluster 2. |
 | **Kịch bản 2: Nạp tiền Float & Ghi có số dư** | Nạp tiền ký quỹ từ Parent Chain vào cụm thực thi | 1. Gửi `SendDepositToFloat` từ ví nguồn trên Parent Chain tới tài khoản mới tại Cluster 2.<br>2. `ReceiveWorker` của Cluster 2 thăm dò (poll) Parent Chain.<br>3. Cluster 2 tự động sinh block ghi có (credit) số dư. | Số dư của ví trên Cluster 2 (`eth_getBalance`) tăng đúng bằng số tiền nạp. |
-| **Kịch bản 3: Thực thi Contract nội bộ** | Kiểm tra engine MVM / EVM Cancun độc lập | 1. Thực hiện `eth_call` truy vấn smart contract hệ thống Staking (`0x1001`).<br>2. Tạo giao dịch gọi hàm `setBlsPublicKey(bytes)` trên Smart Contract `AccountSetting`.<br>3. Ký transaction EVM chuẩn với ChainID 991 và gửi `eth_sendRawTransaction`. | Giao dịch được đóng gói thành công vào block của Cluster 1, trả về mã băm TxHash hợp lệ. |
+| **Kịch bản 3: Thực thi Contract nội bộ** | Kiểm tra engine MVM / EVM Cancun độc lập | 1. Thực hiện `eth_call` truy vấn smart contract hệ thống Staking (`0x1001`).<br>2. Tạo giao dịch gọi hàm `setBlsPublicKey(bytes)` trên Smart Contract `AccountSetting`.<br>3. Ký transaction EVM chuẩn với ChainID tương ứng (ChainID `101` trên Cluster 1) và gửi `eth_sendRawTransaction`. | Giao dịch được đóng gói thành công vào block của Cluster 1, trả về mã băm TxHash hợp lệ. |
 | **Kịch bản 4: Chuyển tiền xuyên 2 cụm** | Chuyển tiền liên shard (Cluster 1 -> Cluster 2) | 1. Cluster 1 gọi RPC `mtn_sendCrossChainTransfer`.<br>2. Cluster 1 trừ tiền người gửi, `SendWorker` ký BLS gửi lên Parent Chain.<br>3. Parent Chain ghi nhận vào danh sách inbound.<br>4. `ReceiveWorker` của Cluster 2 bắt được và credit tiền cho người nhận. | Số dư tài khoản đích trên Cluster 2 tăng đúng lượng tiền chuyển trong vòng < 40 giây. |
 | **Kịch bản 5: Parent Chain sập, Cụm tự vận hành** | Khả năng độc lập và chịu lỗi (Resilience) | 1. Cưỡng chế dừng hoàn toàn tiến trình Parent Chain (`pkill parent_chain`).<br>2. Gửi một giao dịch chuyển tiền nội bộ trên Cluster 1.<br>3. Cluster 1 tiếp tục tự đào block, khớp lệnh và cập nhật state trie bình thường.<br>4. Khởi động lại Parent Chain để phục hồi mạng. | Block Height Cluster 1 tiếp tục tăng, số dư người nhận cập nhật chính xác dù Parent Chain chết hoàn toàn. |
 
 ### 6.2 Kiểm thử Khả Năng Chịu Lỗi & Auto-Failover Cụm Raft (HA Testing)
 
-Bộ kiểm thử tại [`execution/scripts/test/test_raft_fault_tolerance.go`](file:///home/abc/chain-n/metanode/execution/scripts/test/test_raft_fault_tolerance.go) tự động chứng minh năng lực phục hồi tức thời của cụm thực thi chạy Raft (`hashicorp/raft v1.7.1`):
+Bộ kiểm thử tại [`execution/scripts/test/test_raft_fault_tolerance.go`](../../execution/scripts/test/test_raft_fault_tolerance.go) tự động chứng minh năng lực phục hồi tức thời của cụm thực thi chạy Raft (`hashicorp/raft v1.7.1`):
 
 ```
                                   SỰ CỐ XẢY RA: KILL -9 LEADER n0
@@ -397,7 +408,7 @@ Bộ kiểm thử tại [`execution/scripts/test/test_raft_fault_tolerance.go`](
 
 #### Lệnh chạy kiểm thử Raft & tự động bắn Telegram:
 ```bash
-cd /home/abc/chain-n/metanode
+# Từ thư mục gốc metanode repo
 go run execution/scripts/test/test_raft_fault_tolerance.go
 ```
 *Kết quả failover sub-second và bằng chứng Zero-Fork sẽ được bot Telegram tự động đẩy về máy của bạn.*
@@ -412,7 +423,7 @@ cd deploy/ansible_clusters
 
 #### Chạy test trực tiếp bằng Go (để debug chi tiết):
 ```bash
-cd /home/abc/chain-n/metanode
+# Từ thư mục gốc metanode repo
 go run execution/scripts/test/test_real_world_scenarios.go
 ```
 *Tùy biến URL endpoint qua biến môi trường:*
@@ -481,7 +492,7 @@ curl -s -X POST http://127.0.0.1:8647 -H "Content-Type: application/json" \
 ```bash
 curl -s -X POST http://127.0.0.1:8646 -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"net_version","params":[],"id":1}' | jq
-# Kết quả mong đợi: "result": "991"
+# Kết quả mong đợi trên Cluster 1: "result": "101"
 ```
 
 #### Kiểm tra số dư tài khoản:
@@ -494,15 +505,15 @@ curl -s -X POST http://127.0.0.1:8646 -H "Content-Type: application/json" \
 
 - **Với chế độ Daemon:**
   ```bash
-  tail -f devnet_data/parent/node.log
-  tail -f devnet_data/exec_1/node.log
-  tail -f devnet_data/exec_2/node.log
+  tail -f /var/log/metanode/parent_chain.log
+  tail -f /var/log/metanode/exec1_replica1.log
+  tail -f /var/log/metanode/exec2_replica1.log
   ```
 - **Với chế độ Systemd:**
   ```bash
   journalctl -u metanode-parentchain.service -f
-  journalctl -u metanode-cluster-1.service -f
-  journalctl -u metanode-cluster-2.service -f
+  journalctl -u metanode-exec1_replica1.service -f
+  journalctl -u metanode-exec2_replica1.service -f
   ```
 
 ---
@@ -523,7 +534,7 @@ curl -s -X POST http://127.0.0.1:8646 -H "Content-Type: application/json" \
 - **Nguyên nhân:** File cấu hình Rust `node_devnet_parent.toml` sử dụng đường dẫn tương đối `../../../consensus/...`, đòi hỏi tiến trình `parent_chain` phải có Working Directory (CWD) chuẩn là `execution/scripts/test`.
 - **Cách xử lý:** Script `deploy_clusters.sh` và role `parent_chain` đã được thiết lập CWD tự động chuẩn xác. Nếu khởi chạy thủ công, luôn đảm bảo lệnh chạy có dạng:
   ```bash
-  cd /home/abc/chain-n/metanode/execution/scripts/test && ./parent_chain ...
+  cd <metanode_repo_root>/execution/scripts/test && ./parent_chain ...
   ```
 
 ### 3. Sự cố: Giao dịch xuyên cụm bị pending kéo dài

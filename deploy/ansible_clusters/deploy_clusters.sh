@@ -149,8 +149,14 @@ send_tele() {
 check_status() {
     echo "📊 Đang kiểm tra trạng thái các cụm node..."
     echo ""
+    if [ -f "$INVENTORY" ] && [ -f "${SCRIPT_DIR}/scripts/parse_inventory.py" ]; then
+        python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" summary
+        echo ""
+    fi
+
+    echo "🔍 Trạng thái kết nối dịch vụ:"
     # Parent Chain
-    echo -n "• Parent Chain (:8547): "
+    echo -n "  • Parent Chain (:8547): "
     if curl -s -m 2 http://127.0.0.1:8547/inbound >/dev/null 2>&1; then
         echo "✅ HOẠT ĐỘNG (HTTP RPC OK)"
     else
@@ -158,7 +164,7 @@ check_status() {
     fi
 
     # Exec 1
-    echo -n "• Exec Cluster 1 (:8646): "
+    echo -n "  • Exec Cluster 1 (:8646): "
     local b1
     b1=$(curl -s -m 2 -X POST http://127.0.0.1:8646 -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' | grep -o '"result":"[^"]*"' | cut -d'"' -f4 || echo "")
     if [ -n "$b1" ]; then
@@ -169,7 +175,7 @@ check_status() {
     fi
 
     # Exec 2
-    echo -n "• Exec Cluster 2 (:8647): "
+    echo -n "  • Exec Cluster 2 (:8647): "
     local b2
     b2=$(curl -s -m 2 -X POST http://127.0.0.1:8647 -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' | grep -o '"result":"[^"]*"' | cut -d'"' -f4 || echo "")
     if [ -n "$b2" ]; then
@@ -260,6 +266,11 @@ fi
 # ── Main Deployment Pipeline ─────────────────────────────────────────────────
 DEPLOY_START_TIME=$(date +%s)
 
+# 0. Xuất thông tin các cổng vào /tmp/rpc_nodes.json và /tmp/private_chains.json
+if [ -f "$INVENTORY" ] && [ -f "${SCRIPT_DIR}/scripts/parse_inventory.py" ]; then
+    python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" export >/dev/null 2>&1 || true
+fi
+
 # 1. Send Deploy Start Telegram Notification
 echo "📢 Gửi thông báo bắt đầu triển khai đến Telegram..."
 send_tele "tn.notify_deploy_start('Parent Chain (:8547) + Cluster 1 (:8646) + Cluster 2 (:8647)')"
@@ -291,65 +302,30 @@ fi
 DEPLOY_END_TIME=$(date +%s)
 TOTAL_DEPLOY_DURATION=$((DEPLOY_END_TIME - DEPLOY_START_TIME))
 
-# 3. Query cluster block heights
-B1_DEC=$(curl -s -m 2 -X POST http://127.0.0.1:8646 -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' | grep -o '"result":"[^"]*"' | cut -d'"' -f4 || echo "0x0")
-B2_DEC=$(curl -s -m 2 -X POST http://127.0.0.1:8647 -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' | grep -o '"result":"[^"]*"' | cut -d'"' -f4 || echo "0x0")
-B1_INT=$((16#${B1_DEC#0x}))
-B2_INT=$((16#${B2_DEC#0x}))
-
-# 4. Notify Services Ready
-echo "📢 Gửi thông báo dịch vụ sẵn sàng lên Telegram..."
+# 3. Export /tmp/rpc_nodes.json & Notify Services Ready
+echo "📢 Xuất cấu hình cổng vào /tmp và gửi thông báo dịch vụ sẵn sàng lên Telegram..."
 python3 -c "
 import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
+import parse_inventory as pi
 import telegram_notify as tn
 
-parent = {
-    'rpc': 'http://127.0.0.1:8547',
-    'p2p': '127.0.0.1:9000',
-    'status': 'Active (BFT Core + Native Float)'
-}
-clusters = [
-    {
-        'name': 'Exec Cluster 1 (Raft HA 3-Replica)',
-        'cluster_id': 1,
-        'chain_id': 991,
-        'rpc': 'http://127.0.0.1:8646',
-        'p2p': ':4200',
-        'address': '0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5',
-        'bls_key': '944488b425d29336c7913a3b45946adee6b9bfbd',
-        'block_height': ${B1_INT},
-        'status': 'Active & Producing Blocks',
-        'consensus_mode': 'raft',
-        'raft_role': 'Leader',
-        'raft_term': 1,
-        'raft_port': ':7110',
-        'fwd_port': ':7210',
-        'quorum_info': '3/3 Nodes Active (Quorum OK)'
-    },
-    {
-        'name': 'Exec Cluster 2 (Raft Single)',
-        'cluster_id': 2,
-        'chain_id': 991,
-        'rpc': 'http://127.0.0.1:8647',
-        'p2p': ':4202',
-        'address': '0x0d4CC97b62a149a8fe8DE81262270426A80B0935',
-        'bls_key': '83221629eeff1a69aa96ac6aadea402a7b62a746',
-        'block_height': ${B2_INT},
-        'status': 'Active & Producing Blocks',
-        'consensus_mode': 'raft',
-        'raft_role': 'Leader',
-        'raft_term': 1,
-        'raft_port': ':7120',
-        'fwd_port': ':7220',
-        'quorum_info': '1/1 Node Active (Single Feed)'
-    },
-]
-tn.notify_services_ready(parent, clusters, duration_secs=${TOTAL_DEPLOY_DURATION})
+info = pi.parse_inventory('${INVENTORY}')
+pi.export_tmp_files(info)
+if '${NOTIFY}' == 'true':
+    tn.notify_services_ready(info, duration_secs=${TOTAL_DEPLOY_DURATION})
 " || true
 
 echo ""
 echo "✅ TRIỂN KHAI CỤM METANODE HOÀN TẤT TRONG ${TOTAL_DEPLOY_DURATION}s!"
 check_status
+
+# Tự động đồng bộ cấu hình sang metanode-suite (update-ip.sh) nếu có
+UPDATE_IP_SCRIPT="${METANODE_ROOT}/../metanode-suite/scripts/update-ip/update-ip.sh"
+if [ -f "$UPDATE_IP_SCRIPT" ]; then
+    echo "🔄 Đang đồng bộ cấu hình sang metanode-suite (update-ip.sh)..."
+    bash "$UPDATE_IP_SCRIPT" --chain 101 >/dev/null 2>&1 || true
+    echo "✅ Đã tự động cập nhật cấu hình test-chain & configs trong metanode-suite!"
+fi
 
 # 5. Run Post-Deployment Tests if requested
 if [ "$RUN_TESTS" = "true" ]; then

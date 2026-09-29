@@ -1,0 +1,44 @@
+node_id = {{ parent_node_id | default(0) }}
+network_address = "{{ parent_network_address | default('127.0.0.1:9000') }}"
+protocol_key_path = "{{ node_data_dir }}/node_0_protocol_key.json"
+network_key_path = "{{ node_data_dir }}/node_0_network_key.json"
+storage_path = "{{ node_data_dir }}/consensus_storage"
+enable_metrics = true
+metrics_port = {{ metrics_port | default(9110) }}
+speed_multiplier = 1.0
+time_based_epoch_change = false
+max_clock_drift_seconds = 5
+enable_ntp_sync = false
+ntp_servers = [
+    "pool.ntp.org",
+    "time.google.com",
+]
+ntp_sync_interval_seconds = 300
+executor_read_enabled = true
+executor_commit_enabled = true
+commit_sync_batch_size = 500
+commit_sync_parallel_fetches = 32
+commit_sync_batches_ahead = 128
+adaptive_catchup_enabled = true
+adaptive_delay_enabled = false
+adaptive_delay_ms = 50
+min_round_delay_ms = 25
+compact_blocks_enabled = true
+leader_timeout_ms = 200
+epoch_transition_optimization = "fast"
+enable_gradual_shutdown = true
+gradual_shutdown_user_cert_drain_secs = 2
+gradual_shutdown_consensus_cert_drain_secs = 1
+gradual_shutdown_final_drain_secs = 1
+epoch_monitor_poll_interval_secs = 5
+peer_rpc_port = {{ peer_rpc_port | default(19300) }}
+peer_rpc_addresses = []
+
+# Number of epochs to keep for cross-epoch sync support (0 = archive mode)
+epochs_to_keep = 5
+
+[log]
+level = "info"
+format = "text"
+console_output = true
+file_output = false

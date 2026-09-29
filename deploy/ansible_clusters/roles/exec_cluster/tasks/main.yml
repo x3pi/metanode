@@ -38,6 +38,14 @@
         - "{{ node_data_dir }}/logs"
         - "{{ node_data_dir }}/explorer"
         - "{{ node_data_dir }}/raft"
+        - "{{ node_data_dir }}/backup"
+        - "{{ node_data_dir }}/genesis.json"
+
+    - name: Remove temporary integrity sentinel
+      ansible.builtin.file:
+        path: /tmp/MTN_INTEGRITY_FAILED
+        state: absent
+      ignore_errors: true
 
 # ── Setup Configuration, Genesis & Service Unit ──────────────────────────────
 - name: Setup Execution Node {{ inventory_hostname }}
@@ -74,39 +82,67 @@
     - name: Generate cluster genesis if not present or reset
       ansible.builtin.shell: |
         python3 -c "
-        import json
-        with open('{{ deploy_dir }}/execution/cmd/simple_chain/genesis.json') as f:
+        import json, os
+        with open('{{ install_dir }}/genesis_base.json') as f:
             base = json.load(f)
 
-        devnet_sender_alloc = {
-            'address': '0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24',
+        cluster_bls = '{{ bls_pub | default(bls_priv) }}'
+        alloc_map = {}
+
+        # 1. Base allocs from template (align publicKeyBls to cluster_bls)
+        for a in base.get('alloc', []):
+            addr_key = a.get('address', '').lower()
+            if addr_key:
+                a_copy = dict(a)
+                a_copy['publicKeyBls'] = cluster_bls
+                alloc_map[addr_key] = a_copy
+
+        # 2. Add dev keys from private_dev_keys.json matching target_chain_id and 'common'
+        target_chain_id = str({{ chain_id | default(101) }})
+        dev_keys_path = '{{ install_dir }}/private_dev_keys.json'
+        if os.path.exists(dev_keys_path):
+            with open(dev_keys_path) as df:
+                dev_data = json.load(df)
+            allowed_groups = [target_chain_id, 'common']
+            for group in allowed_groups:
+                for item in dev_data.get(group, []):
+                    addr = item.get('address', '')
+                    if addr:
+                        alloc_map[addr.lower()] = {
+                            'address': addr,
+                            'balance': '2000000000000000000000000000000',
+                            'pending_balance': '0',
+                            'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
+                            'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
+                            'publicKeyBls': cluster_bls,
+                        }
+
+        # 3. Add explicit test devnet sender & cluster self address
+        devnet_sender_addr = '0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24'
+        alloc_map[devnet_sender_addr.lower()] = {
+            'address': devnet_sender_addr,
             'balance': '2000000000000000000000000000000',
             'pending_balance': '0',
             'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
             'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
-            'publicKeyBls': '0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc',
+            'publicKeyBls': cluster_bls,
         }
 
-        cluster_alloc = {
-            'address': '{{ address }}',
+        cluster_addr = '{{ address }}'
+        alloc_map[cluster_addr.lower()] = {
+            'address': cluster_addr,
             'balance': '2000000000000000000000000000000',
             'pending_balance': '0',
             'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
             'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
-            'publicKeyBls': '{{ bls_priv }}',
+            'publicKeyBls': cluster_bls,
         }
 
-        # Load committee if exists (BFT mode fallback)
-        try:
-            with open('{{ deploy_dir }}/consensus/metanode/config/devnet_{{ cluster_name }}_keys/committee.json') as f:
-                committee = json.load(f)
-            auth = committee['authorities'][0]
-        except Exception:
-            auth = base['validators'][0]
+        auth = base['validators'][0]
 
         stake = '1000000000000000000000'
         g = dict(base)
-        g['config']['chainId'] = {{ evm_chain_id | default(991) }}
+        g['config']['chainId'] = {{ chain_id | default(101) }}
         g['validators'] = [{
             'address': '{{ address }}',
             'primary_address': '127.0.0.1:4000',
@@ -128,7 +164,7 @@
         g['total_stake'] = 1000
         g['quorum_threshold'] = 1000
         g['validity_threshold'] = 1000
-        g['alloc'] = list(base.get('alloc', [])) + [devnet_sender_alloc, cluster_alloc]
+        g['alloc'] = list(alloc_map.values())
 
         with open('{{ node_data_dir }}/genesis.json', 'w') as out:
             json.dump(g, out, indent=2)
