@@ -214,3 +214,67 @@ func TestSendWorker(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	worker.Stop()
 }
+
+func TestSendWorker_EventDrivenWakeUp(t *testing.T) {
+	scDB := &mockDB{data: make(map[common.Address]map[common.Hash][]byte)}
+	store := NewDBStore(scDB)
+	client := &mockParentChainClient{}
+
+	kp1 := bls.GenerateKeyPair()
+	kp2 := bls.GenerateKeyPair()
+
+	worker := NewSendWorker(store, client, kp1, kp2.PublicKey(), 102)
+	// Set an abnormally long ticker (1 hour) to prove processing happens via WakeUp, NOT the ticker!
+	worker.SetInterval(1 * time.Hour)
+
+	msgID := common.HexToHash("0xaaaa1111")
+	record := &MessageRecord{
+		MessageID: msgID,
+		Role:      RoleSender,
+		State:     StateLocalAppliedPendingSend,
+		Sender:    common.HexToAddress("0x111"),
+		Target:    common.HexToAddress("0x222"),
+		Value:     big.NewInt(100),
+		SourceSeq: 1,
+	}
+	_ = store.Put(record)
+
+	worker.Start()
+	defer worker.Stop()
+
+	// Trigger immediate event-driven wake up
+	worker.WakeUp()
+
+	// Verify state advances to SEND_SUBMITTED almost instantly (within 100ms) without waiting for ticker
+	deadline := time.Now().Add(500 * time.Millisecond)
+	var rec *MessageRecord
+	for time.Now().Before(deadline) {
+		r, found, _ := store.Get(msgID)
+		if found && r.State == StateSendSubmitted {
+			rec = r
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if rec == nil || rec.State != StateSendSubmitted {
+		t.Fatalf("Expected record to advance via WakeUp without waiting for ticker, got: %v", rec)
+	}
+}
+
+func TestSendWorker_SetInterval(t *testing.T) {
+	worker := NewSendWorker(nil, nil, nil, cm.PublicKey{}, 1)
+	if worker.interval != 1*time.Second {
+		t.Errorf("Expected default interval 1s, got %v", worker.interval)
+	}
+	worker.SetInterval(500 * time.Millisecond)
+	if worker.interval != 500*time.Millisecond {
+		t.Errorf("Expected interval 500ms, got %v", worker.interval)
+	}
+	// Invalid value ignored
+	worker.SetInterval(0)
+	if worker.interval != 500*time.Millisecond {
+		t.Errorf("Expected interval to remain 500ms, got %v", worker.interval)
+	}
+}
+

@@ -278,10 +278,13 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	}
 
 	app.crossNodeHandler = rollup.NewCrossNodeHandler(app.keyPair.PublicKey())
-	tx_processor.InitParentChainGatewayHandler(crossChainTransferDispatcherAdapter{h: app.crossNodeHandler})
 	app.sendWorker = rollup.NewSendWorker(rollupStore, parentClient, app.keyPair, app.keyPair.PublicKey(), clusterID)
 	app.recvWorker = rollup.NewReceiveWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 	app.reclaimWorker = rollup.NewReclaimWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
+	tx_processor.InitParentChainGatewayHandler(crossChainTransferDispatcherAdapter{
+		h:          app.crossNodeHandler,
+		sendWorker: app.sendWorker,
+	})
 
 	var rollupNonceMutex sync.Mutex
 	var rollupPendingNonce uint64
@@ -526,7 +529,7 @@ func handleRollupSystemEvent(app *App, store rollup.Store, stateDB rollup.Accoun
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return fmt.Errorf("failed to unmarshal RollupSystemPayload: %w", err)
 	}
-	return app.crossNodeHandler.HandleSystemEvent(
+	err := app.crossNodeHandler.HandleSystemEvent(
 		app.rollupStore,
 		store,
 		stateDB,
@@ -537,6 +540,16 @@ func handleRollupSystemEvent(app *App, store rollup.Store, stateDB rollup.Accoun
 		payload.DestPubKey,
 		payload.PayloadHash,
 	)
+	if err == nil {
+		// Event-driven wakeup: instantly trigger workers to advance without waiting for poll ticker
+		if app.recvWorker != nil {
+			app.recvWorker.WakeUp()
+		}
+		if app.sendWorker != nil {
+			app.sendWorker.WakeUp()
+		}
+	}
+	return err
 }
 
 // rollupSystemEventDispatcherFunc adapts a plain function to tx_processor.RollupSystemEventDispatcher.
@@ -553,7 +566,8 @@ func (f rollupSystemEventDispatcherFunc) HandleSystemEvent(store rollup.Store, s
 // satisfies the latter — Go just won't infer that across two independently-named interfaces
 // without an explicit adapter at the boundary.
 type crossChainTransferDispatcherAdapter struct {
-	h *rollup.CrossNodeHandler
+	h          *rollup.CrossNodeHandler
+	sendWorker *rollup.SendWorker
 }
 
 func (a crossChainTransferDispatcherAdapter) HandleTransfer(
@@ -565,7 +579,11 @@ func (a crossChainTransferDispatcherAdapter) HandleTransfer(
 	value *big.Int,
 	payloadHash e_common.Hash,
 ) (e_common.Hash, error) {
-	return a.h.HandleTransfer(store, stateDB, toKey, sender, target, value, payloadHash)
+	msgID, err := a.h.HandleTransfer(store, stateDB, toKey, sender, target, value, payloadHash)
+	if err == nil && a.sendWorker != nil {
+		a.sendWorker.WakeUp()
+	}
+	return msgID, err
 }
 
 // initRoutes initializes API routes

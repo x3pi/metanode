@@ -19,6 +19,7 @@ type SendWorker struct {
 	blsKeyPair    *bls.KeyPair
 	destPubKey    cm.PublicKey
 	destClusterID uint64
+	interval      time.Duration
 
 	// EventProposer is used to submit state machine events to the Raft consensus.
 	EventProposer func(event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error
@@ -35,8 +36,15 @@ func NewSendWorker(store Store, client parentchain.Client, blsKeyPair *bls.KeyPa
 		blsKeyPair:    blsKeyPair,
 		destPubKey:    destPubKey,
 		destClusterID: destClusterID,
+		interval:      1 * time.Second,
 		wakeCh:        make(chan struct{}, 1),
 		quitCh:        make(chan struct{}),
+	}
+}
+
+func (w *SendWorker) SetInterval(d time.Duration) {
+	if d > 0 {
+		w.interval = d
 	}
 }
 
@@ -83,7 +91,11 @@ func (w *SendWorker) isReleasable(record *MessageRecord) bool {
 
 func (w *SendWorker) loop() {
 	defer w.wg.Done()
-	ticker := time.NewTicker(5 * time.Second)
+	interval := w.interval
+	if interval <= 0 {
+		interval = 1 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {

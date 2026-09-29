@@ -3,6 +3,7 @@ package rollup
 import (
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
@@ -196,3 +197,65 @@ func TestReceiveWorker_RaftRefundDisconnectionRecovery(t *testing.T) {
 		t.Fatalf("Expected StateRefunded after confirmation, got %v", finalRec.State)
 	}
 }
+
+func TestReceiveWorker_EventDrivenWakeUp(t *testing.T) {
+	scDB := &mockDB{data: make(map[common.Address]map[common.Hash][]byte)}
+	store := NewDBStore(scDB)
+	stateDB := newMockAccountStateDB()
+	client := &mockParentChainClient{}
+
+	kp := bls.GenerateKeyPair()
+	worker := NewReceiveWorker(store, stateDB, client, kp)
+	// Set 1 hour ticker to guarantee execution is purely event-driven
+	worker.SetInterval(1 * time.Hour)
+
+	msgID := common.HexToHash("0xbbbb2222")
+	record := &MessageRecord{
+		MessageID: msgID,
+		Role:      RoleReceiver,
+		State:     StateMarkedClaimedPendingCredit,
+		Sender:    common.HexToAddress("0x111"),
+		Target:    common.HexToAddress("0x222"),
+		Value:     big.NewInt(100),
+		SourceSeq: 1,
+	}
+	_ = store.Put(record)
+
+	worker.Start()
+	defer worker.Stop()
+
+	// Trigger immediate event-driven wake up
+	worker.WakeUp()
+
+	// Verify state advances to MARK_CLAIMED_SUBMITTED without waiting for ticker
+	deadline := time.Now().Add(500 * time.Millisecond)
+	var rec *MessageRecord
+	for time.Now().Before(deadline) {
+		r, found, _ := store.Get(msgID)
+		if found && r.State == StateMarkClaimedSubmitted {
+			rec = r
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if rec == nil || rec.State != StateMarkClaimedSubmitted {
+		t.Fatalf("Expected record to advance via WakeUp without waiting for ticker, got: %v", rec)
+	}
+}
+
+func TestReceiveWorker_SetInterval(t *testing.T) {
+	worker := NewReceiveWorker(nil, nil, nil, nil)
+	if worker.interval != 1*time.Second {
+		t.Errorf("Expected default interval 1s, got %v", worker.interval)
+	}
+	worker.SetInterval(200 * time.Millisecond)
+	if worker.interval != 200*time.Millisecond {
+		t.Errorf("Expected interval 200ms, got %v", worker.interval)
+	}
+	worker.SetInterval(0)
+	if worker.interval != 200*time.Millisecond {
+		t.Errorf("Expected interval to remain 200ms, got %v", worker.interval)
+	}
+}
+

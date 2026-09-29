@@ -51,9 +51,10 @@ type ReceiveWorker struct {
 	// If nil, the worker executes events locally (unsafe for Raft, only for tests).
 	EventProposer func(event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error
 
-	wakeCh chan struct{}
-	quitCh chan struct{}
-	wg     sync.WaitGroup
+	interval time.Duration
+	wakeCh   chan struct{}
+	quitCh   chan struct{}
+	wg       sync.WaitGroup
 }
 
 func NewReceiveWorker(store Store, stateDB AccountStateDB, client parentchain.Client, blsKeyPair *bls.KeyPair) *ReceiveWorker {
@@ -62,8 +63,15 @@ func NewReceiveWorker(store Store, stateDB AccountStateDB, client parentchain.Cl
 		stateDB:    stateDB,
 		client:     client,
 		blsKeyPair: blsKeyPair,
+		interval:   1 * time.Second,
 		wakeCh:     make(chan struct{}, 1),
 		quitCh:     make(chan struct{}),
+	}
+}
+
+func (w *ReceiveWorker) SetInterval(d time.Duration) {
+	if d > 0 {
+		w.interval = d
 	}
 }
 
@@ -104,7 +112,11 @@ func (w *ReceiveWorker) isReleasable(record *MessageRecord) bool {
 
 func (w *ReceiveWorker) loop() {
 	defer w.wg.Done()
-	ticker := time.NewTicker(5 * time.Second)
+	interval := w.interval
+	if interval <= 0 {
+		interval = 1 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
