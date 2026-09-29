@@ -261,7 +261,7 @@
       ansible.builtin.assert:
         that:
           - private_plaintext_creds_check.rc == 0
-        fail_msg: "CRITICAL SECURITY ERROR (Issue #104): Plaintext credentials ({{ private_plaintext_creds_check.stdout }}) found in inventory {{ inventory_file | default(hostvars[groups['all'] | default([]) | first].inventory_file | default(playbook_dir ~ '/inventory.yml')) }}! In production (metanode_env=production), credentials MUST be encrypted with ansible-vault (or referenced via Jinja2 '{{ vault_... }}')."
+        fail_msg: "CRITICAL SECURITY ERROR (Issue #104): Plaintext credentials ({{ private_plaintext_creds_check.stdout }}) found in inventory {{ inventory_file | default(hostvars[groups['all'] | default([]) | first].inventory_file | default(playbook_dir ~ '/inventory.yml')) }}! In production (metanode_env=production), credentials MUST be encrypted with ansible-vault (or referenced via Jinja2 vault variables)."
       when: (metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'
       run_once: true
       delegate_to: localhost

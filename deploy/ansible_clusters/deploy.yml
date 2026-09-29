@@ -18,6 +18,7 @@
 - name: "Phase 2: Deploy Parent Chain Node"
   hosts: parent_chain_nodes
   gather_facts: true
+  become: true
   tags: ["parent_chain", "core"]
   roles:
     - role: common
@@ -27,6 +28,7 @@
 - name: "Phase 3: Deploy Sharded Execution Clusters (EVM ChainID 991)"
   hosts: exec_clusters
   gather_facts: true
+  become: true
   tags: ["exec_clusters", "shards"]
   roles:
     - role: common
@@ -38,6 +40,6 @@
   connection: local
   gather_facts: false
   tags: ["test", "verify"]
-  when: run_integration_tests | default(false) | bool
   roles:
     - role: testing
+      when: run_integration_tests | default(false) | bool

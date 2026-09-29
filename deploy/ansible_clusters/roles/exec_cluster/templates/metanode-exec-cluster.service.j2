@@ -14,6 +14,7 @@ RestartSec=3s
 TimeoutStopSec=30
 LimitNOFILE=65536
 LimitCORE=infinity
+Environment="PARENT_CHAIN_URL=http://{{ parent_chain_host | default('127.0.0.1') }}:{{ parent_chain_rpc_port | default(8547) }}"
 
 StandardOutput=append:{{ base_log_dir }}/{{ inventory_hostname }}.log
 StandardError=append:{{ base_log_dir }}/{{ inventory_hostname }}.log
