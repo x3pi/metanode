@@ -117,3 +117,82 @@ func TestParentChainGatewayHandler_HandleTransaction(t *testing.T) {
 	
 	assert.Equal(t, expectedBalance.String(), newBalance.String())
 }
+
+func TestParentChainGatewayHandler_ErrorCases(t *testing.T) {
+	mockDispatcher := &MockCrossChainDispatcher{
+		MockHash: common.HexToHash("0x1234"),
+	}
+	InitParentChainGatewayHandler(mockDispatcher)
+	handler := GetParentChainGatewayHandler()
+	assert.NotNil(t, handler)
+
+	chainState, _, _, _ := newPersistentTestChainState(t)
+	stateDB := chainState.GetAccountStateDB()
+	senderAddr := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	stateDB.AddBalance(senderAddr, big.NewInt(1000)) // Low balance
+	stateDB.SetNonce(senderAddr, 5)
+
+	// Case 1: Short calldata (< 100 bytes)
+	callDataShort := transaction.NewCallData([]byte("too short"))
+	dataShort, err := callDataShort.Marshal()
+	assert.NoError(t, err)
+
+	txShort := transaction.NewTransaction(
+		senderAddr,
+		mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS,
+		big.NewInt(500),
+		21000,
+		1,
+		0,
+		dataShort,
+		nil,
+		common.Hash{},
+		common.Hash{},
+		5,
+		1,
+	)
+
+	receipt1, _, err := handler.HandleTransaction(context.Background(), chainState, txShort, mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, false, 0)
+	assert.NoError(t, err)
+	assert.NotNil(t, receipt1)
+	assert.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, receipt1.Status())
+	// Nonce must advance to 6
+	as1, err := stateDB.AccountState(senderAddr)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(6), as1.Nonce())
+
+	// Case 2: Insufficient balance for transfer + gas
+	rawPayload := make([]byte, 100)
+	copy(rawPayload[0:48], make([]byte, 48))
+	copy(rawPayload[80:100], common.HexToAddress("0x4444444444444444444444444444444444444444").Bytes())
+	callDataFull := transaction.NewCallData(rawPayload)
+	dataFull, err := callDataFull.Marshal()
+	assert.NoError(t, err)
+
+	// User has balance 1000, tries to send 1000000
+	txExcessive := transaction.NewTransaction(
+		senderAddr,
+		mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS,
+		big.NewInt(1000000),
+		21000,
+		1,
+		0,
+		dataFull,
+		nil,
+		common.Hash{},
+		common.Hash{},
+		6,
+		1,
+	)
+
+	receipt2, _, err := handler.HandleTransaction(context.Background(), chainState, txExcessive, mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, false, 0)
+	assert.NoError(t, err)
+	assert.NotNil(t, receipt2)
+	assert.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, receipt2.Status())
+	// Nonce must advance to 7
+	as2, err := stateDB.AccountState(senderAddr)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(7), as2.Nonce())
+	// Balance should not have changed
+	assert.Equal(t, big.NewInt(1000), as2.Balance())
+}

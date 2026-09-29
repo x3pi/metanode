@@ -119,6 +119,8 @@ func (bp *BlockProcessor) processBlock(block *pb.ExecutableBlock) {
 			err = parentchain.ReclaimFloat(bp.store, tx.MsgID, sig, blockTime, 60) // 60s timeout for reclaim by default
 		case parentchain.TxTypeRegisterAccount:
 			err = parentchain.RegisterAccount(bp.store, tx.UserAddress, pubKey, tx.UserSig, sig)
+		case parentchain.TxTypeSubmitStateRoot:
+			err = parentchain.SubmitStateRoot(bp.store, pubKey, tx.Epoch, tx.StateRoot, sig)
 		default:
 			log.Printf("Parent Chain: unknown tx type %s", tx.Type)
 		}

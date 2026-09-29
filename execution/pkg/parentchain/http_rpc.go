@@ -2,6 +2,7 @@ package parentchain
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -76,6 +77,7 @@ func (c *httpClient) SendDepositToFloat(
 		Sender:    sender,
 		Target:    target,
 		Amount:    amount,
+		Nonce:     uint64(time.Now().UnixNano()),
 	}
 	var resp struct {
 		MsgID common.Hash `json:"msg_id"`
@@ -309,13 +311,25 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 		msgID = crypto.Keccak256Hash(digest)
 		tx.MsgID = msgID
 	} else if tx.Type == TxTypeDepositToFloat {
-		var pubKey cm.PublicKey
-		copy(pubKey[:], tx.PubKey)
-		// For deposit, we don't have a signature from the user (Gateway handles it).
-		// We just create a unique MsgID based on the transaction fields.
-		digest := crypto.Keccak256Hash(append(append(pubKey[:], tx.Sender.Bytes()...), tx.Target.Bytes()...))
-		msgID = crypto.Keccak256Hash(append(digest.Bytes(), tx.Amount.Bytes()...))
-		tx.MsgID = msgID
+		if tx.MsgID != (common.Hash{}) {
+			msgID = tx.MsgID
+		} else {
+			var pubKey cm.PublicKey
+			copy(pubKey[:], tx.PubKey)
+			data := append(append(pubKey[:], tx.Sender.Bytes()...), tx.Target.Bytes()...)
+			if tx.Amount != nil {
+				data = append(data, tx.Amount.Bytes()...)
+			}
+			nonce := tx.Nonce
+			if nonce == 0 {
+				nonce = uint64(time.Now().UnixNano())
+			}
+			var nonceBytes [8]byte
+			binary.BigEndian.PutUint64(nonceBytes[:], nonce)
+			data = append(data, nonceBytes[:]...)
+			msgID = crypto.Keccak256Hash(data)
+			tx.MsgID = msgID
+		}
 	} else if tx.Type == TxTypeSubmitStateRoot {
 		var clusterPubKey cm.PublicKey
 		copy(clusterPubKey[:], tx.PubKey)

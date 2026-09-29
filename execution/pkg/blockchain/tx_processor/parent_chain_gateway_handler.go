@@ -161,8 +161,11 @@ func (h *ParentChainGatewayHandler) HandleTransaction(
 	blockTime uint64,
 ) (types.Receipt, types.ExecuteSCResult, error) {
 
+	stateDB := newLiveAccountStateAccessor(chainState)
+
 	if h.dispatcher == nil {
 		logger.Error("❌ ParentChainGatewayHandler: Dispatcher not initialized")
+		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
 		return h.errorReceipt(tx, "dispatcher not initialized"), nil, nil
 	}
 
@@ -174,41 +177,44 @@ func (h *ParentChainGatewayHandler) HandleTransaction(
 	// losing the target's last 2 bytes — SendWorker then failed to route to the corrupted
 	// address, forever.
 	data := tx.CallData().Input()
-	if len(data) < 48 {
+	if len(data) < 100 {
 		logger.Error("❌ ParentChainGatewayHandler: invalid data length")
-		return h.errorReceipt(tx, "invalid data length for parent chain transfer (expected >= 48 bytes pubkey)"), nil, nil
+		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+		return h.errorReceipt(tx, "invalid data length for parent chain transfer (expected >= 100 bytes for pubkey + payloadHash + targetAddr)"), nil, nil
 	}
 
 	destPubKey := mt_common.PubkeyFromBytes(data[:48])
-	var payloadHash common.Hash
-	if len(data) >= 80 {
-		payloadHash = common.BytesToHash(data[48:80])
+	payloadHash := common.BytesToHash(data[48:80])
+	targetAddr := common.BytesToAddress(data[80:100])
+	if targetAddr == (common.Address{}) {
+		logger.Error("❌ ParentChainGatewayHandler: target address cannot be zero")
+		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+		return h.errorReceipt(tx, "target address cannot be zero"), nil, nil
 	}
-	var targetAddr common.Address
-	if len(data) >= 100 {
-		targetAddr = common.BytesToAddress(data[80:100])
+
+	// Calculate and pre-validate gas fee and total balance before deducting anything
+	gasUsed := uint64(mt_common.TRANSFER_GAS_COST) // Use standard transfer gas cost
+	gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), tx.EffectiveGasPrice())
+	totalRequired := new(big.Int).Add(tx.Amount(), gasFee)
+
+	curBal := stateDB.GetBalance(tx.FromAddress())
+	if curBal == nil || curBal.Cmp(totalRequired) < 0 {
+		logger.Error("❌ ParentChainGatewayHandler: insufficient balance for transfer and gas")
+		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+		return h.errorReceipt(tx, "insufficient balance for transfer and gas"), nil, nil
 	}
 
 	// Route the transfer to the actual CrossNodeHandler logic.
 	// NOTE: The dispatcher itself deducts the balance using AccountStateDB and records the transfer event.
-	msgID, err := h.dispatcher.HandleTransfer(newLiveRollupStore(chainState), newLiveAccountStateAccessor(chainState), destPubKey, tx.FromAddress(), targetAddr, tx.Amount(), payloadHash)
+	msgID, err := h.dispatcher.HandleTransfer(newLiveRollupStore(chainState), stateDB, destPubKey, tx.FromAddress(), targetAddr, tx.Amount(), payloadHash)
 	if err != nil {
 		logger.Error("❌ ParentChainGatewayHandler: Dispatcher failed: %v", err)
+		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
 		return h.errorReceipt(tx, err.Error()), nil, nil
 	}
 
-	// Calculate and charge gas fee (barrier TX must still pay gas for processing).
-	// Because HandleTransfer deducts the transfer amount, we just deduct the gas fee separately.
-	gasUsed := uint64(mt_common.TRANSFER_GAS_COST) // Use standard transfer gas cost
-	gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), tx.EffectiveGasPrice())
-
-	baseAccountDB := chainState.GetAccountStateDB()
 	if gasFee.Sign() > 0 {
-		err = baseAccountDB.SubBalance(tx.FromAddress(), gasFee)
-		if err != nil {
-			logger.Error("❌ ParentChainGatewayHandler: insufficient balance for gas")
-			return h.errorReceipt(tx, "insufficient balance for gas"), nil, nil
-		}
+		stateDB.SubBalance(tx.FromAddress(), gasFee)
 	}
 
 	// Note: HandleTransfer has already bumped the nonce inside the underlying stateDB.

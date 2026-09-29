@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
+	"strings"
 
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
 	"github.com/meta-node-blockchain/meta-node/executor"
@@ -17,10 +18,21 @@ type AdminApi struct {
 	events *mt_filters.EventSystem
 }
 
+// authenticate checks if admin password is configured and matches constant-time.
+func (api *AdminApi) authenticate(password string) error {
+	if api == nil || api.App == nil || strings.TrimSpace(api.App.config.Securepassword) == "" {
+		return errPasswordNotConfigured
+	}
+	if subtle.ConstantTimeCompare([]byte(password), []byte(api.App.config.Securepassword)) != 1 {
+		return errInvalidCredentials
+	}
+	return nil
+}
+
 // LoginAPI is a simple API for user login using only a password.
 func (api *AdminApi) LoginAPI(ctx context.Context, password string) (string, error) {
-	if subtle.ConstantTimeCompare([]byte(password), []byte(api.App.config.Securepassword)) != 1 {
-		return "", errInvalidCredentials
+	if err := api.authenticate(password); err != nil {
+		return "", err
 	}
 	return "Login successful", nil
 }
@@ -38,8 +50,8 @@ func (api *AdminApi) LoginAPI(ctx context.Context, password string) (string, err
 // (no skip needed), 2 = insufficient stake attested so far, -1 = could not run. Full detail is
 // always in the node's own logs (grep for PAYLOAD-LOSS-SKIP), never only in this return value.
 func (api *AdminApi) AttestPayloadLoss(ctx context.Context, password string, commitIndex uint32, txDigestHex string) (int32, error) {
-	if subtle.ConstantTimeCompare([]byte(password), []byte(api.App.config.Securepassword)) != 1 {
-		return -1, errInvalidCredentials
+	if err := api.authenticate(password); err != nil {
+		return -1, err
 	}
 	if raftfeed.Enabled() {
 		return -1, fmt.Errorf("unsupported in raft mode")
@@ -59,8 +71,8 @@ func (api *AdminApi) AttestPayloadLoss(ctx context.Context, password string, com
 // could not run, or at least one claim hit a hard error. Full detail is always in the node's own
 // logs (grep for PAYLOAD-LOSS-SKIP), never only in this return value.
 func (api *AdminApi) AttestPayloadLossForCommit(ctx context.Context, password string, commitIndex uint32) (int32, error) {
-	if subtle.ConstantTimeCompare([]byte(password), []byte(api.App.config.Securepassword)) != 1 {
-		return -1, errInvalidCredentials
+	if err := api.authenticate(password); err != nil {
+		return -1, err
 	}
 	if raftfeed.Enabled() {
 		return -1, fmt.Errorf("unsupported in raft mode")
@@ -69,9 +81,8 @@ func (api *AdminApi) AttestPayloadLossForCommit(ctx context.Context, password st
 }
 
 func (api *AdminApi) SetState(ctx context.Context, password string, state processor.State) (processor.State, error) {
-
-	if subtle.ConstantTimeCompare([]byte(password), []byte(api.App.config.Securepassword)) != 1 {
-		return -1, errInvalidCredentials
+	if err := api.authenticate(password); err != nil {
+		return -1, err
 	}
 	oldState := api.App.blockProcessor.GetState()
 	if (oldState != processor.StatePendingLook && state != processor.StateLook) && (state == processor.StatePendingLook && oldState == processor.StateLook) {
@@ -91,8 +102,8 @@ func (api *AdminApi) GetState(ctx context.Context) (processor.State, error) {
 }
 
 func (api *AdminApi) CreateBackup(ctx context.Context, password string) (string, error) {
-	if subtle.ConstantTimeCompare([]byte(password), []byte(api.App.config.Securepassword)) != 1 {
-		return "", errInvalidCredentials
+	if err := api.authenticate(password); err != nil {
+		return "", err
 	}
 	state := api.App.blockProcessor.GetState()
 

@@ -1,7 +1,9 @@
 package rollup
 
 import (
+	"fmt"
 	"log"
+	"math/big"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -320,39 +322,11 @@ func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) {
 					log.Printf("ReceiveWorker: failed to credit local balance for %x: %v", rec.MessageID, err)
 				}
 			} else if action.Type == ActionSendRefund {
-				// Handle SendRefund (similar to what was in processMarkClaimedPendingRefund)
-				seq, err := w.store.GetNextFloatSeq()
+				refundMsgID, err := w.sendRefundTransfer(rec, action.Amount)
 				if err != nil {
-					log.Printf("ReceiveWorker: failed to get next float seq: %v", err)
-					return
-				}
-
-				payloadHash := crypto.Keccak256Hash(nil)
-				digest := parentchain.ComputeTransferFloatMessage(
-					w.blsKeyPair.PublicKey(), rec.SourcePubKey, rec.Target, rec.Sender, rec.Value, nil, payloadHash, seq,
-				)
-				refundCert := bls.Sign(w.blsKeyPair.PrivateKey(), digest)
-				refundMsgID := crypto.Keccak256Hash(digest)
-
-				isRefund := true
-				_, sendErr := w.client.SendTransferFloat(
-					w.blsKeyPair.PublicKey(),
-					rec.SourcePubKey, // destination is the source of the original transfer
-					0, // destClusterID
-					rec.Target,
-					rec.Sender,
-					action.Amount,
-					nil,
-					seq,
-					refundCert[:],
-					isRefund,
-				)
-				if sendErr != nil {
-					log.Printf("ReceiveWorker: failed to send refund transfer: %v", sendErr)
+					log.Printf("ReceiveWorker: failed to send refund transfer: %v", err)
 					return // Will retry
 				}
-
-				_ = w.store.IncrementFloatSeq()
 				rec.RefundMsgID = refundMsgID
 			}
 		}
@@ -360,6 +334,44 @@ func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) {
 		rec.State = newState
 		w.store.Put(rec)
 	}
+}
+
+// sendRefundTransfer performs the ParentChain HTTP call for compensating refunds.
+func (w *ReceiveWorker) sendRefundTransfer(rec *MessageRecord, amount *big.Int) (common.Hash, error) {
+	if amount == nil || amount.Sign() <= 0 {
+		amount = rec.Value
+	}
+	seq, err := w.store.GetNextFloatSeq()
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to get next float seq: %w", err)
+	}
+
+	payloadHash := crypto.Keccak256Hash(nil)
+	digest := parentchain.ComputeTransferFloatMessage(
+		w.blsKeyPair.PublicKey(), rec.SourcePubKey, rec.Target, rec.Sender, amount, nil, payloadHash, seq,
+	)
+	refundCert := bls.Sign(w.blsKeyPair.PrivateKey(), digest)
+	refundMsgID := crypto.Keccak256Hash(digest)
+
+	isRefund := true
+	_, sendErr := w.client.SendTransferFloat(
+		w.blsKeyPair.PublicKey(),
+		rec.SourcePubKey, // destination is the source of the original transfer
+		0,                 // destClusterID
+		rec.Target,
+		rec.Sender,
+		amount,
+		nil,
+		seq,
+		refundCert[:],
+		isRefund,
+	)
+	if sendErr != nil {
+		return common.Hash{}, fmt.Errorf("failed to send refund transfer: %w", sendErr)
+	}
+
+	_ = w.store.IncrementFloatSeq()
+	return refundMsgID, nil
 }
 
 // processRefundSent polls Parent Chain to confirm the compensating refund Transfer this
@@ -370,7 +382,15 @@ func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) {
 // existed, unused before this) for the terminal transition.
 func (w *ReceiveWorker) processRefundSent(rec *MessageRecord) {
 	if rec.RefundMsgID == (common.Hash{}) {
-		log.Printf("ReceiveWorker: record %x in StateRefundSent has no RefundMsgID to poll (pre-existing record from before this field existed?)", rec.MessageID)
+		// In Raft mode, ActionSendRefund is not executed inside the deterministic Raft FSM.
+		// The background worker must perform the HTTP refund transfer here.
+		refundMsgID, err := w.sendRefundTransfer(rec, rec.Value)
+		if err != nil {
+			log.Printf("ReceiveWorker: failed to send refund transfer for record %x: %v", rec.MessageID, err)
+			return // Will retry on next loop
+		}
+		rec.RefundMsgID = refundMsgID
+		w.store.Put(rec)
 		return
 	}
 	_, found, err := w.client.GetTransferRecord(rec.RefundMsgID)

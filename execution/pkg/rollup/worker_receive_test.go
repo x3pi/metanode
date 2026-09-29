@@ -138,3 +138,61 @@ func TestReceiveWorker_RefundSentConfirmation(t *testing.T) {
 		t.Fatalf("Expected REFUNDED once the compensating transfer is confirmed, got %v", rec.State)
 	}
 }
+
+// TestReceiveWorker_RaftRefundDisconnectionRecovery verifies that when a record enters
+// StateRefundSent without a RefundMsgID (the exact scenario produced by Raft FSM execution
+// because HTTP requests cannot run deterministically inside Raft blocks), the background
+// ReceiveWorker properly sends the HTTP SendTransferFloat refund, records the RefundMsgID,
+// and proceeds to confirmation instead of silently dropping the refund.
+func TestReceiveWorker_RaftRefundDisconnectionRecovery(t *testing.T) {
+	scDB := &mockDB{data: make(map[common.Address]map[common.Hash][]byte)}
+	store := NewDBStore(scDB)
+	stateDB := newMockAccountStateDB()
+	client := &mockParentChainClient{claimedOutcome: parentchain.FloatOutcomeRefund}
+
+	kp1 := bls.GenerateKeyPair()
+	worker := NewReceiveWorker(store, stateDB, client, kp1)
+
+	msgID := common.HexToHash("0xraft_refund_test")
+	rec := &MessageRecord{
+		MessageID:    msgID,
+		Role:         RoleReceiver,
+		State:        StateRefundSent,
+		Sender:       common.HexToAddress("0x1111"),
+		Target:       common.HexToAddress("0x2222"),
+		Value:        big.NewInt(777),
+		SourceSeq:    42,
+		SourcePubKey: cm.PublicKey{},
+		DestPubKey:   kp1.PublicKey(),
+		RefundMsgID:  common.Hash{}, // EMPTY: simulated Raft state transition
+	}
+	if err := store.Put(rec); err != nil {
+		t.Fatalf("Failed to put record: %v", err)
+	}
+
+	// First tick: worker detects missing RefundMsgID, calls SendTransferFloat, and records RefundMsgID.
+	worker.pollAndProcess()
+
+	updatedRec, found, err := store.Get(msgID)
+	if err != nil || !found {
+		t.Fatalf("Record not found: %v", err)
+	}
+	if updatedRec.RefundMsgID == (common.Hash{}) {
+		t.Fatalf("Expected worker to send refund and record RefundMsgID, but got empty hash")
+	}
+	if updatedRec.State != StateRefundSent {
+		t.Fatalf("Expected state to remain StateRefundSent while waiting for confirmation, got %v", updatedRec.State)
+	}
+
+	// Second tick: worker polls ParentChain for the refundMsgID and confirms it landed -> transitions to StateRefunded.
+	client.transferNotFound = false
+	worker.pollAndProcess()
+
+	finalRec, found, err := store.Get(msgID)
+	if err != nil || !found {
+		t.Fatalf("Record not found: %v", err)
+	}
+	if finalRec.State != StateRefunded {
+		t.Fatalf("Expected StateRefunded after confirmation, got %v", finalRec.State)
+	}
+}

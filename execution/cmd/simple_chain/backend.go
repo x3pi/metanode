@@ -33,9 +33,10 @@ var (
 	errInvalidBlockRange  = errors.New("invalid block range params")
 	errExceedMaxTopics    = errors.New("exceed max topics")
 	ErrInvalidSig         = errors.New("invalid transaction v, r, s values")
-	errInvalidCredentials = errors.New("invalid credentials")
-	errInvalidTypeState   = errors.New("invalid type state")
-	errStateNotReady      = errors.New("state not ready")
+	errInvalidCredentials   = errors.New("invalid credentials")
+	errPasswordNotConfigured = errors.New("admin password is not configured")
+	errInvalidTypeState     = errors.New("invalid type state")
+	errStateNotReady        = errors.New("state not ready")
 )
 
 const maxTopics = 4
