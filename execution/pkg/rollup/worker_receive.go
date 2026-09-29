@@ -124,20 +124,33 @@ func (w *ReceiveWorker) loop() {
 		case <-w.quitCh:
 			return
 		case <-ticker.C:
-			w.pollAndProcess()
+			if w.pollAndProcess() {
+				ticker.Reset(100 * time.Millisecond)
+			} else {
+				ticker.Reset(interval)
+			}
 		case <-w.wakeCh:
-			w.pollAndProcess()
+			if w.pollAndProcess() {
+				ticker.Reset(100 * time.Millisecond)
+			} else {
+				ticker.Reset(interval)
+			}
 		}
 	}
 }
 
-func (w *ReceiveWorker) pollAndProcess() {
+func (w *ReceiveWorker) pollAndProcess() bool {
+	hasActivity := false
+
 	// 1. Poll new incoming transfers
 	cursor := w.getCursor()
 	transfers, newCursor, err := w.client.GetInboundTransfers(w.blsKeyPair.PublicKey(), cursor)
 	if err != nil {
 		log.Printf("ReceiveWorker: failed to fetch transfers: %v", err)
 	} else {
+		if len(transfers) > 0 {
+			hasActivity = true
+		}
 		for _, tx := range transfers {
 			w.handleIncomingTransfer(tx)
 		}
@@ -150,13 +163,15 @@ func (w *ReceiveWorker) pollAndProcess() {
 	records, err := w.store.ScanNonTerminal()
 	if err != nil {
 		log.Printf("ReceiveWorker: ScanNonTerminal error: %v", err)
-		return
+		return hasActivity
 	}
 
+	receiverCount := 0
 	for _, rec := range records {
 		if rec.Role != RoleReceiver {
 			continue
 		}
+		receiverCount++
 		if !w.isReleasable(rec) {
 			continue
 		}
@@ -172,6 +187,11 @@ func (w *ReceiveWorker) pollAndProcess() {
 			w.processRefundSent(rec)
 		}
 	}
+
+	if receiverCount > 0 {
+		hasActivity = true
+	}
+	return hasActivity
 }
 
 func (w *ReceiveWorker) handleIncomingTransfer(tx *parentchain.TransferEvent) {

@@ -62,10 +62,17 @@ func (tb *TxBatcher) batchingLoop() {
 			return
 		case tx := <-tb.txChan:
 			pending = append(pending, tx)
-			if len(pending) >= maxTxPerBatch {
-				tb.submitBatch(pending)
-				pending = nil
+		drainLoop:
+			for len(pending) < maxTxPerBatch {
+				select {
+				case extra := <-tb.txChan:
+					pending = append(pending, extra)
+				default:
+					break drainLoop
+				}
 			}
+			tb.submitBatch(pending)
+			pending = nil
 		case <-ticker.C:
 			if len(pending) > 0 {
 				tb.submitBatch(pending)

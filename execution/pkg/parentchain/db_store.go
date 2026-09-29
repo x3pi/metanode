@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/util"
 )
 
 var (
@@ -248,17 +249,29 @@ func (s *DBStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([
 	prefix = append(prefix, PrefixInbound...)
 	prefix = append(prefix, destKeyHash.Bytes()...)
 	
-	iter := s.db.NewIterator(nil, nil)
+	slice := util.BytesPrefix(prefix)
+	if cursor > 0 {
+		startKey := make([]byte, 0, len(prefix)+8)
+		startKey = append(startKey, prefix...)
+		var cursorBytes [8]byte
+		binary.BigEndian.PutUint64(cursorBytes[:], cursor)
+		startKey = append(startKey, cursorBytes[:]...)
+		slice.Start = startKey
+	}
+	
+	iter := s.db.NewIterator(slice, nil)
 	defer iter.Release()
 	
-	var allEvents []*TransferEvent
+	var events []*TransferEvent
+	curPos := cursor
 	for iter.Next() {
-		k := iter.Key()
-		if len(k) >= len(prefix) && string(k[:len(prefix)]) == string(prefix) {
-			var event TransferEvent
-			if err := json.Unmarshal(iter.Value(), &event); err == nil {
-				allEvents = append(allEvents, &event)
-			}
+		var event TransferEvent
+		if err := json.Unmarshal(iter.Value(), &event); err == nil {
+			events = append(events, &event)
+			curPos++
+		}
+		if len(events) >= 50 {
+			break
 		}
 	}
 	
@@ -266,17 +279,7 @@ func (s *DBStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([
 		return nil, cursor, err
 	}
 	
-	if cursor >= uint64(len(allEvents)) {
-		return nil, cursor, nil
-	}
-	
-	count := uint64(len(allEvents)) - cursor
-	if count > 50 {
-		count = 50
-	}
-	
-	res := allEvents[cursor : cursor+count]
-	return res, cursor + count, nil
+	return events, curPos, nil
 }
 
 func (s *DBStore) GetStateRoot(clusterKeyHash common.Hash, epoch uint64) (common.Hash, bool, error) {

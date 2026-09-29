@@ -439,6 +439,18 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 		msgID = tx.MsgID
 	}
 
+	async := r.URL.Query().Get("async") == "true" || r.Header.Get("X-Async") == "true"
+	if async {
+		select {
+		case s.txChan <- &tx:
+			json.NewEncoder(w).Encode(map[string]interface{}{"msg_id": msgID, "status": "queued"})
+			return
+		default:
+			http.Error(w, "tx queue full", http.StatusServiceUnavailable)
+			return
+		}
+	}
+
 	resultCh := make(chan error, 1)
 	s.pendingTxs.Store(msgID, resultCh)
 	defer s.pendingTxs.Delete(msgID)

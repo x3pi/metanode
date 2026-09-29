@@ -161,7 +161,7 @@ func main() {
 						}
 					}
 				}
-				time.Sleep(1 * time.Second)
+				time.Sleep(100 * time.Millisecond)
 			}
 			r.err = "timeout waiting for credit"
 			r.elapsed = time.Since(t0)

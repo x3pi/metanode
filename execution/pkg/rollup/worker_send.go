@@ -25,9 +25,10 @@ type SendWorker struct {
 	// EventProposer is used to submit state machine events to the Raft consensus.
 	EventProposer func(event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error
 
-	wakeCh chan struct{}
-	quitCh chan struct{}
-	wg     sync.WaitGroup
+	wakeCh          chan struct{}
+	quitCh          chan struct{}
+	wg              sync.WaitGroup
+	inFlightSubmits sync.Map
 }
 
 func NewSendWorker(store Store, client parentchain.Client, blsKeyPair *bls.KeyPair, destPubKey cm.PublicKey, destClusterID uint64) *SendWorker {
@@ -104,18 +105,26 @@ func (w *SendWorker) loop() {
 		case <-w.quitCh:
 			return
 		case <-ticker.C:
-			w.processPending()
+			if w.processPending() {
+				ticker.Reset(100 * time.Millisecond)
+			} else {
+				ticker.Reset(interval)
+			}
 		case <-w.wakeCh:
-			w.processPending()
+			if w.processPending() {
+				ticker.Reset(100 * time.Millisecond)
+			} else {
+				ticker.Reset(interval)
+			}
 		}
 	}
 }
 
-func (w *SendWorker) processPending() {
+func (w *SendWorker) processPending() bool {
 	records, err := w.store.ScanNonTerminal()
 	if err != nil {
 		log.Printf("SendWorker: failed to scan records: %v", err)
-		return
+		return false
 	}
 
 	// Sort records strictly by SourceSeq so sequential nonce transfers are dispatched in order
@@ -129,6 +138,11 @@ func (w *SendWorker) processPending() {
 		}
 
 		if rec.State == StateLocalAppliedPendingSend {
+			if _, inFlight := w.inFlightSubmits.Load(rec.MessageID); inFlight {
+				// Already submitted to parent chain, waiting for local commit of EventRPCSubmitted
+				continue
+			}
+
 			// [ROUTING] Query Account Registry for target address
 			destPubKey, found, err := w.client.GetAccountRegistry(rec.Target)
 			if err != nil {
@@ -170,10 +184,10 @@ func (w *SendWorker) processPending() {
 			)
 
 			if err != nil {
-				if strings.Contains(err.Error(), "wrong nonce") {
+				if strings.Contains(err.Error(), "wrong nonce") || strings.Contains(err.Error(), "already resolved") {
 					// Verify whether the record actually landed on the parent chain
 					if _, recFound, checkErr := w.client.GetTransferRecord(rec.MessageID); checkErr == nil && recFound {
-						log.Printf("SendWorker: msgID %x returned 'wrong nonce' but record exists on parent chain, advancing to check confirmation", rec.MessageID)
+						log.Printf("SendWorker: msgID %x returned '%v' but record exists on parent chain, advancing to check confirmation", rec.MessageID, err)
 					} else {
 						log.Printf("SendWorker: msgID %x returned 'wrong nonce' (seq %d) and not found on parent chain, pausing to let nonce settle", rec.MessageID, rec.SourceSeq)
 						break
@@ -183,6 +197,8 @@ func (w *SendWorker) processPending() {
 					break
 				}
 			}
+
+			w.inFlightSubmits.Store(rec.MessageID, true)
 
 			// Advance state to submitted
 			event := Event{
@@ -203,6 +219,7 @@ func (w *SendWorker) processPending() {
 				w.store.Put(rec)
 			}
 		} else if rec.State == StateSendSubmitted {
+			w.inFlightSubmits.Delete(rec.MessageID)
 			// Poll ParentChain to check if it has actually been confirmed
 			_, found, err := w.client.GetTransferRecord(rec.MessageID)
 			if err != nil {
@@ -231,4 +248,5 @@ func (w *SendWorker) processPending() {
 			}
 		}
 	}
+	return len(records) > 0
 }
