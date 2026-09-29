@@ -323,7 +323,7 @@ check_status
 UPDATE_IP_SCRIPT="${METANODE_ROOT}/../metanode-suite/scripts/update-ip/update-ip.sh"
 if [ -f "$UPDATE_IP_SCRIPT" ]; then
     echo "🔄 Đang đồng bộ cấu hình sang metanode-suite (update-ip.sh)..."
-    bash "$UPDATE_IP_SCRIPT" --chain 101 >/dev/null 2>&1 || true
+    bash "$UPDATE_IP_SCRIPT" --chain 991 >/dev/null 2>&1 || true
     echo "✅ Đã tự động cập nhật cấu hình test-chain & configs trong metanode-suite!"
 fi
 

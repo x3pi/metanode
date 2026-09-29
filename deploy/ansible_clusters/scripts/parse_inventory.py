@@ -65,7 +65,7 @@ def parse_inventory(file_path):
         c_vars = c_val.get('vars', {}) or {}
         c_id = c_vars.get('cluster_id', 1)
         c_name = c_vars.get('cluster_name', c_key)
-        c_chain_id = c_vars.get('chain_id', 100 + c_id)
+        c_chain_id = c_vars.get('chain_id', global_vars.get('chain_id', 991))
         c_hosts = c_val.get('hosts', {}) or {}
 
         c_replicas = {}
@@ -157,8 +157,9 @@ def export_tmp_files(info):
         }
         for cid, c in info['clusters'].items():
             chain_id_str = str(c['chain_id'])
-            priv_out['nodes'][chain_id_str] = c['primary_rpc']
-            
+            c_name = c.get('name', f'exec{cid}')
+            cid_str = str(cid)
+
             c_rpc = {}
             c_ws = {}
             c_tcp = {}
@@ -171,8 +172,10 @@ def export_tmp_files(info):
                 if not first_tcp:
                     first_tcp = c_tcp[m_key]
 
-            priv_out['tcp_nodes'][chain_id_str] = first_tcp
-            priv_out['chain_nodes'][chain_id_str] = {
+            c_entry = {
+                'cluster_id': cid,
+                'cluster_name': c_name,
+                'chain_id': c['chain_id'],
                 'validators': len(c['replicas']),
                 'rpc_url': c['primary_rpc'],
                 'ws_url': f"{c['primary_rpc'].replace('http', 'ws')}/ws",
@@ -180,6 +183,15 @@ def export_tmp_files(info):
                 'ws_nodes': c_ws,
                 'tcp_nodes': c_tcp
             }
+
+            keys_to_set = [cid_str, f"cluster_{cid}", c_name]
+            if chain_id_str not in priv_out['nodes']:
+                keys_to_set.append(chain_id_str)
+
+            for k in keys_to_set:
+                priv_out['nodes'][k] = c['primary_rpc']
+                priv_out['tcp_nodes'][k] = first_tcp
+                priv_out['chain_nodes'][k] = c_entry
 
         with open(priv_file, 'w') as f:
             json.dump(priv_out, f, indent=2)

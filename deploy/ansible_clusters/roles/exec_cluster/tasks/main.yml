@@ -97,13 +97,21 @@
                 a_copy['publicKeyBls'] = cluster_bls
                 alloc_map[addr_key] = a_copy
 
-        # 2. Add dev keys from private_dev_keys.json matching target_chain_id and 'common'
-        target_chain_id = str({{ chain_id | default(101) }})
+        # 2. Add dev keys from private_dev_keys.json matching cluster and 'common'
+        cid = str({{ cluster_id | default(1) }})
+        cname = '{{ cluster_name | default("exec1") }}'
         dev_keys_path = '{{ install_dir }}/private_dev_keys.json'
         if os.path.exists(dev_keys_path):
             with open(dev_keys_path) as df:
                 dev_data = json.load(df)
-            allowed_groups = [target_chain_id, 'common']
+            allowed_groups = [
+                'cluster_' + cid,
+                'cum_' + cid,
+                cid,
+                cname,
+                '10' + cid,
+                'common'
+            ]
             for group in allowed_groups:
                 for item in dev_data.get(group, []):
                     addr = item.get('address', '')
@@ -142,7 +150,7 @@
 
         stake = '1000000000000000000000'
         g = dict(base)
-        g['config']['chainId'] = {{ chain_id | default(101) }}
+        g['config']['chainId'] = {{ chain_id | default(991) }}
         g['validators'] = [{
             'address': '{{ address }}',
             'primary_address': '127.0.0.1:4000',

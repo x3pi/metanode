@@ -1,5 +1,5 @@
 # 🚀 HƯỚNG DẪN TRIỂN KHAI & KIỂM THỬ CỤM METANODE (SỔ TAY LỆNH NHANH)
-> **Kiến trúc:** Parent Chain (Coordinator `:8547`, P2P `:4000`) + Exec Shard 1 (Raft HA `:8646`, ChainID `101`) + Exec Shard 2 (Raft Single `:8647`, ChainID `102`).
+> **Kiến trúc:** Parent Chain (Coordinator `:8547`, P2P `:4000`) + Exec Shard 1 (Raft HA `:8646`) + Exec Shard 2 (Raft Single `:8647`) — Thống nhất dùng chung EVM ChainID `991`.
 
 ---
 
@@ -23,7 +23,7 @@
                     │     CHAIN CON 1: EXEC SHARD 1    │            │     CHAIN CON 2: EXEC SHARD 2    │
                     │  (Mô hình 3-Replica Raft HA)     │            │  (Mô hình Single Feed Raft)      │
                     ├──────────────────────────────────┤            ├──────────────────────────────────┤
-                    │ • ClusterID: 1 | EVM ChainID: 101│            │ • ClusterID: 2 | EVM ChainID: 102│
+                    │ • ClusterID: 1 | EVM ChainID: 991│            │ • ClusterID: 2 | EVM ChainID: 991│
                     │ • Động cơ: HashiCorp Raft v1.7.1 │            │ • Động cơ: HashiCorp Raft v1.7.1 │
                     │ • Auto-Failover: ~200ms (CFT)    │            │ • 1 Node: exec2_replica1 (:8647) │
                     │ • 3 Nodes:                       │            │ • Transport :7120 | Fwd :7220    │
@@ -43,8 +43,8 @@
 | Thực Thể | Vai Trò Hệ Thống | EVM ChainID | HTTP RPC | P2P Consensus | Raft Transport | Admin / Forward | Node Hosts |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Parent Chain** | Điều phối thanh khoản, Float & Registry | `991` | `http://127.0.0.1:8547` | `127.0.0.1:4000` | N/A (Rust BFT) | N/A | `parent_node` |
-| **Chain con 1 (Exec 1)** | Cụm thực thi Rollup HA (3 Replicas) | `101` | `:8646`, `:8648`, `:8649` | `:4200`, `:4201`, `:4203` | `:7110`, `:7111`, `:7112` | `:7210`, `:7211`, `:7212` | `exec1_replica1`, `exec1_replica2`, `exec1_replica3` |
-| **Chain con 2 (Exec 2)** | Cụm thực thi Rollup Single Node | `102` | `http://127.0.0.1:8647` | `127.0.0.1:4202` | `127.0.0.1:7120` | `127.0.0.1:7220` | `exec2_replica1` |
+| **Chain con 1 (Exec 1)** | Cụm thực thi Rollup HA (3 Replicas) | `991` | `:8646`, `:8648`, `:8649` | `:4200`, `:4201`, `:4203` | `:7110`, `:7111`, `:7112` | `:7210`, `:7211`, `:7212` | `exec1_replica1`, `exec1_replica2`, `exec1_replica3` |
+| **Chain con 2 (Exec 2)** | Cụm thực thi Rollup Single Node | `991` | `http://127.0.0.1:8647` | `127.0.0.1:4202` | `127.0.0.1:7120` | `127.0.0.1:7220` | `exec2_replica1` |
 
 ---
 
@@ -66,7 +66,7 @@
 | **Kiểm tra biên dịch (Build Check)** | `cd consensus/metanode/scripts && ./build_check.sh` | Kiểm tra build sạch Go, Rust BFT, NOMT FFI và C++/EVM |
 | **Xuất cấu hình cổng vào /tmp** | `python3 scripts/parse_inventory.py inventory.yml export` | Cập nhật `/tmp/rpc_nodes.json` & `/tmp/private_chains.json` |
 | **Bắn danh sách port lên Telegram** | `python3 scripts/telegram_notify.py --ready` | Báo danh sách port hiện tại lên bot Telegram |
-| **Đồng bộ sang metanode-suite** | `bash ../metanode-suite/scripts/update-ip/update-ip.sh --chain 101` | Đồng bộ IP/Port sang bộ test dApp |
+| **Đồng bộ sang metanode-suite** | `bash ../metanode-suite/scripts/update-ip/update-ip.sh --chain 991` | Đồng bộ IP/Port sang bộ test dApp |
 
 ---
 
@@ -142,7 +142,7 @@ go run execution/scripts/test/test_real_world_scenarios.go
 #### Tóm tắt 5 kịch bản kiểm thử:
 1. **Kịch bản 1 (Account Registry):** Đăng ký ví mới vào Parent Chain với chữ ký kép (ECDSA + BLS cụm). Xác minh `GetAccountRegistry(addr)`.
 2. **Kịch bản 2 (Float Deposit):** Nạp tiền từ Parent Chain vào ví trên Cluster 2. `ReceiveWorker` bắt giao dịch và credit số dư `eth_getBalance`.
-3. **Kịch bản 3 (Smart Contract MVM):** Thực thi smart contract nội bộ trên Cluster 1 (ChainID `101`), gọi hàm `setBlsPublicKey`, sinh receipt và block hash.
+3. **Kịch bản 3 (Smart Contract MVM):** Thực thi smart contract nội bộ trên Cluster 1 (ChainID `991`), gọi hàm `setBlsPublicKey`, sinh receipt và block hash.
 4. **Kịch bản 4 (Cross-Cluster Transfer):** Chuyển tiền liên shard (Cluster 1 -> Cluster 2). `SendWorker` trừ ví nguồn -> Parent Chain ghi nhận -> `ReceiveWorker` credit ví đích.
 5. **Kịch bản 5 (Parent Chain Offline Resilience):** Tắt Parent Chain (`pkill parent_chain`), gửi giao dịch nội bộ Cluster 1 -> Cụm vẫn tự đóng block bình thường. Bật lại Parent Chain -> tự động catch-up.
 
@@ -228,7 +228,7 @@ File script: `metanode-suite/scripts/update-ip/update-ip.sh`
 
 ```bash
 # Tự động cập nhật RPC, WebSocket và TCP vào các file config của metanode-suite:
-bash ../metanode-suite/scripts/update-ip/update-ip.sh --chain 101
+bash ../metanode-suite/scripts/update-ip/update-ip.sh --chain 991
 ```
 
 ---
@@ -244,7 +244,7 @@ curl -s -X POST http://127.0.0.1:8547 -H "Content-Type: application/json" -d '{"
 # 2. Kiểm tra Block Height Exec Cluster 1:
 curl -s -X POST http://127.0.0.1:8646 -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' | jq
 
-# 3. Kiểm tra EVM ChainID Cluster 1 (kết quả trả về: 101):
+# 3. Kiểm tra EVM ChainID Cluster 1 (kết quả trả về: 991):
 curl -s -X POST http://127.0.0.1:8646 -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"net_version","params":[],"id":1}' | jq
 
 # 4. Kiểm tra số dư ví Sequencer trên Cluster 1:

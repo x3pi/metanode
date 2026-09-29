@@ -12,8 +12,8 @@ Hệ thống Ansible tự động hóa triển khai, quản lý vòng đời và
 | Thành Phần | Định Danh & Cổng | Vai Trò & Cơ Chế |
 | :--- | :--- | :--- |
 | **Parent Chain** | HTTP RPC: `:8547`<br>P2P: `:4000` | Native State Store (Float Accounts, Account Registry, Cluster Registry, Claimed Messages). Quản lý cọc float và điều phối bảo lãnh chuyển tiền. |
-| **Exec Cluster 1** | ClusterID: `1`<br>EVM ChainID: `101`<br>RPC: `:8646`<br>P2P: `:4200` | Cụm thực thi Shard 1. Chạy Rollup workers (`SendWorker`, `ReceiveWorker`, `ReclaimWorker`). Tiếp nhận giao dịch EVM chuẩn. |
-| **Exec Cluster 2** | ClusterID: `2`<br>EVM ChainID: `102`<br>RPC: `:8647`<br>P2P: `:4202` | Cụm thực thi Shard 2. Tương tác giao dịch xuyên cụm (cross-cluster transfer) với Cluster 1 qua Float Account trên Parent Chain. |
+| **Exec Cluster 1** | ClusterID: `1`<br>EVM ChainID: `991`<br>RPC: `:8646`<br>P2P: `:4200` | Cụm thực thi Shard 1. Chạy Rollup workers (`SendWorker`, `ReceiveWorker`, `ReclaimWorker`). Tiếp nhận giao dịch EVM chuẩn. |
+| **Exec Cluster 2** | ClusterID: `2`<br>EVM ChainID: `991`<br>RPC: `:8647`<br>P2P: `:4202` | Cụm thực thi Shard 2. Tương tác giao dịch xuyên cụm (cross-cluster transfer) với Cluster 1 qua Float Account trên Parent Chain. |
 
 ---
 
@@ -67,7 +67,7 @@ Lệnh trên sẽ:
 1. Gửi thông báo 🚀 **Deploy Bắt đầu** lên Telegram (kèm commit hash, author, nhánh git).
 2. Tự động kiểm tra và build các binary Go (`parent_chain`, `simple_chain`).
 3. Khởi chạy **Parent Chain** trên cổng `:8547` và kiểm tra HTTP RPC sẵn sàng.
-4. Khởi chạy **Exec Cluster 1** (`:8646`, ChainID `101`) và **Exec Cluster 2** (`:8647`, ChainID `102`).
+4. Khởi chạy **Exec Cluster 1** (`:8646`, ChainID `991`) và **Exec Cluster 2** (`:8647`, ChainID `991`).
 5. Gửi thông báo ✅ **Dịch Vụ Sẵn Sàng** lên Telegram (kèm block heights và ports).
 6. Tự động thực thi **Bộ kiểm thử tích hợp 5 kịch bản thực tế**:
    - *Kịch bản 1:* Đăng ký tài khoản mới & ánh xạ vào Account Registry trên Parent Chain.

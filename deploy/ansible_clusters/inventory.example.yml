@@ -9,12 +9,12 @@ all:
     # Parent Chain configuration
     parent_chain_rpc_port: 8547
     parent_chain_host: "127.0.0.1"
+    # Unified EVM Chain ID for Parent Chain and all Execution Clusters
+    chain_id: 991
 
   children:
     # ── Parent Chain Node (100% Rust BFT Consensus Engine, Chain ID: 991) ──
     parent_chain_nodes:
-      vars:
-        chain_id: 991
       hosts:
         parent_node:
           ansible_host: 127.0.0.1
@@ -25,12 +25,11 @@ all:
     # ── Execution Clusters (Rollup Shards with Raft HA Consensus) ────────
     exec_clusters:
       children:
-        # Cluster 1: 3-Replica High Availability Raft Cluster (Chain ID: 101)
+        # Cluster 1: 3-Replica High Availability Raft Cluster
         cluster_1:
           vars:
             cluster_id: 1
             cluster_name: "exec1"
-            chain_id: 101
           hosts:
             exec1_replica1:
               ansible_host: 127.0.0.1
@@ -110,12 +109,11 @@ all:
                   address: "127.0.0.1:7112"
                   forward_address: "127.0.0.1:7212"
 
-        # Cluster 2: Single-Replica Raft Node (Chain ID: 102)
+        # Cluster 2: Single-Replica Raft Node
         cluster_2:
           vars:
             cluster_id: 2
             cluster_name: "exec2"
-            chain_id: 102
           hosts:
             exec2_replica1:
               ansible_host: 127.0.0.1
