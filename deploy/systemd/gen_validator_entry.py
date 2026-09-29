@@ -630,8 +630,55 @@ def parse_args():
     return parser.parse_args()
 
 
+def parse_and_validate_balance(raw_val, param_name="--initial-balance") -> str:
+    """
+    Validates that a balance string is a valid non-negative integer (decimal or 0x-hex).
+    Returns normalized decimal string representation. Exits with clear error if invalid.
+    """
+    if raw_val is None:
+        return "0"
+    if not isinstance(raw_val, str):
+        raw_val = str(raw_val)
+    val_str = raw_val.strip()
+    if not val_str:
+        print(red(f"ERROR: {param_name} cannot be empty. Must be a valid non-negative integer or 0x-hex in wei."))
+        sys.exit(1)
+
+    try:
+        if val_str.startswith("0x") or val_str.startswith("0X"):
+            num = int(val_str, 16)
+        else:
+            num = int(val_str)
+        if num < 0:
+            print(red(f"ERROR: {param_name} cannot be negative: {raw_val!r}"))
+            sys.exit(1)
+        return str(num)
+    except (ValueError, TypeError):
+        print(red(f"ERROR: {param_name} must be a valid non-negative integer or 0x-hex in wei, got: {raw_val!r}"))
+        sys.exit(1)
+
+
+def safe_read_balance(entry_balance, default=0) -> int:
+    """Safely parses existing balance without raising exceptions."""
+    if entry_balance is None:
+        return default
+    s = str(entry_balance).strip()
+    if not s:
+        return default
+    try:
+        if s.startswith("0x") or s.startswith("0X"):
+            return int(s, 16)
+        return int(s)
+    except (ValueError, TypeError):
+        return default
+
+
 def main():
     args = parse_args()
+
+    # Validate initial balance input early
+    if getattr(args, "initial_balance", None) is not None:
+        args.initial_balance = parse_and_validate_balance(args.initial_balance, param_name="--initial-balance")
 
     # Auto-calculate port defaults if not specified, based on node_id
     if args.p2p_port is None:
@@ -743,10 +790,11 @@ def main():
                                     a["publicKeyBls"] = pubkey_hex
                                     print(green(f"  ✅ Registered publicKeyBls for existing alloc entry {target_addr}"))
 
-                                curr_bal = int(a.get("balance", "0"))
-                                if curr_bal == 0 and int(init_bal) > 0:
-                                    a["balance"] = init_bal
-                                    print(green(f"  💰 Set initial balance {init_bal} for {target_addr}"))
+                                curr_bal = safe_read_balance(a.get("balance", "0"))
+                                init_bal_int = safe_read_balance(init_bal)
+                                if curr_bal == 0 and init_bal_int > 0:
+                                    a["balance"] = str(init_bal_int)
+                                    print(green(f"  💰 Set initial balance {init_bal_int} for {target_addr}"))
                                 break
                         if not found_alloc:
                             g_data["alloc"].append({
