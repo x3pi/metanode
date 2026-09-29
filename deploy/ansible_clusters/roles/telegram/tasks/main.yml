@@ -1,0 +1,10 @@
+---
+- name: Send Telegram notification
+  delegate_to: localhost
+  run_once: true
+  when: telegram_enabled | default(true) | bool
+  block:
+    - name: Trigger telegram notification script
+      ansible.builtin.command:
+        cmd: "python3 {{ playbook_dir }}/scripts/telegram_notify.py --action {{ telegram_event | default('status') }}"
+      ignore_errors: true

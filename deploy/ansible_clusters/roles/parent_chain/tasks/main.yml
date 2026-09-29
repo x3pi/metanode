@@ -1,0 +1,104 @@
+---
+- name: Determine process management mode
+  set_fact:
+    is_systemd: "{{ use_systemd | default(false) | bool }}"
+
+# ── Stop Service ─────────────────────────────────────────────────────────────
+- name: Stop Parent Chain service
+  when: "deploy_action in ['stop', 'restart', 'reset', 'clean']"
+  block:
+    - name: Stop via systemd
+      when: is_systemd
+      ansible.builtin.systemd:
+        name: metanode-parentchain
+        state: stopped
+      ignore_errors: true
+
+    - name: Stop via process kill (daemon mode)
+      when: not is_systemd
+      ansible.builtin.shell: |
+        if [ -f "{{ node_data_dir }}/parent_chain.pid" ]; then
+          kill -SIGTERM $(cat "{{ node_data_dir }}/parent_chain.pid") 2>/dev/null || true
+          rm -f "{{ node_data_dir }}/parent_chain.pid"
+        fi
+        pkill -f "{{ bin_dir }}/parent_chain.*:{{ parent_http_port | default(8547) }}" 2>/dev/null || true
+      ignore_errors: true
+
+# ── Clean / Reset Data ───────────────────────────────────────────────────────
+- name: Clean Parent Chain data directories
+  when: "deploy_action in ['clean', 'reset']"
+  block:
+    - name: Remove database files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ node_data_dir }}/chain_data"
+        - "{{ node_data_dir }}/storage"
+
+# ── Setup Configuration & Service Unit ───────────────────────────────────────
+- name: Setup Parent Chain configuration
+  when: "deploy_action in ['setup', 'deploy', 'restart', 'reset']"
+  block:
+    - name: Ensure Parent Chain data and log directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ node_data_dir }}"
+        - "{{ base_log_dir }}"
+
+    - name: Deploy Parent Chain config.json
+      ansible.builtin.template:
+        src: parentchain_config.json.j2
+        dest: "{{ node_data_dir }}/config.json"
+        mode: '0644'
+
+    - name: Deploy systemd service unit
+      when: is_systemd
+      ansible.builtin.template:
+        src: metanode-parentchain.service.j2
+        dest: /etc/systemd/system/metanode-parentchain.service
+        mode: '0644'
+      notify: Reload systemd
+
+# ── Start / Restart Service ──────────────────────────────────────────────────
+- name: Start Parent Chain
+  when: "deploy_action in ['setup', 'deploy', 'start', 'restart', 'reset']"
+  block:
+    - name: Start service via systemd
+      when: is_systemd
+      ansible.builtin.systemd:
+        name: metanode-parentchain
+        state: started
+        enabled: yes
+
+    - name: Start process via background daemon
+      when: not is_systemd
+      ansible.builtin.shell: |
+        nohup {{ bin_dir }}/parent_chain \
+          -data-dir {{ node_data_dir }} \
+          -http :{{ parent_http_port | default(8547) }} \
+          -rust-config {{ deploy_dir }}/{{ rust_config_path }} \
+          >> {{ base_log_dir }}/parent_chain.log 2>&1 &
+        echo $! > {{ node_data_dir }}/parent_chain.pid
+      args:
+        chdir: "{{ node_data_dir }}"
+
+    - name: Wait for Parent Chain HTTP RPC port to respond
+      ansible.builtin.wait_for:
+        port: "{{ parent_http_port | default(8547) }}"
+        host: "{{ ansible_host | default('127.0.0.1') }}"
+        delay: 2
+        timeout: 25
+
+    - name: Verify Parent Chain HTTP RPC endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ parent_http_port | default(8547) }}/inbound?cluster_id=1"
+        method: GET
+        status_code: [200, 404]
+      register: rpc_check
+      retries: 5
+      delay: 2
+      until: rpc_check.status in [200, 404]

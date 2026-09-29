@@ -1,0 +1,51 @@
+all:
+  vars:
+    ansible_user: "metanode"
+    # Unified EVM Chain ID for transaction signing across all execution clusters
+    evm_chain_id: 991
+    # Installation and base directories
+    install_dir: "/opt/metanode"
+    deploy_dir: "/home/abc/chain-n/metanode"
+    # Parent Chain configuration
+    parent_chain_rpc_port: 8547
+    parent_chain_host: "127.0.0.1"
+
+  children:
+    # ── Parent Chain Node ────────────────────────────────────────────────
+    parent_chain_nodes:
+      hosts:
+        parent_node:
+          ansible_host: 127.0.0.1
+          ansible_connection: local
+          parent_http_port: 8547
+          node_data_dir: "/opt/metanode/parent_chain"
+          rust_config_path: "consensus/metanode/config/node_devnet_parent.toml"
+
+    # ── Execution Clusters (Rollup Shards) ───────────────────────────────
+    exec_clusters:
+      hosts:
+        exec_cluster_1:
+          ansible_host: 127.0.0.1
+          ansible_connection: local
+          cluster_id: 1
+          cluster_name: "exec1"
+          rpc_port: 8646
+          p2p_port: 4200
+          node_data_dir: "/opt/metanode/exec1"
+          private_key: "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c"
+          address: "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5"
+          bls_priv: "5fb8d1ceadf4059adca5c106dbd91452be8c433b2c38c5dd85c50f1c7da4c85c"
+          rust_config_path: "consensus/metanode/config/node_devnet_exec1.toml"
+
+        exec_cluster_2:
+          ansible_host: 127.0.0.1
+          ansible_connection: local
+          cluster_id: 2
+          cluster_name: "exec2"
+          rpc_port: 8647
+          p2p_port: 4202
+          node_data_dir: "/opt/metanode/exec2"
+          private_key: "2a61eac9235fab64ae377b2b7e39f8fa9648c5737094d28c7ee68a14b5086d39"
+          address: "0x0d4CC97b62a149a8fe8DE81262270426A80B0935"
+          bls_priv: "2d21f977fd594b7587439a91ab1bb5523573f02e5ba7e3e61cd8e895470d400a"
+          rust_config_path: "consensus/metanode/config/node_devnet_exec2.toml"

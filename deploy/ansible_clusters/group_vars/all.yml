@@ -1,0 +1,26 @@
+---
+# Global configuration for MetaNode Multi-Cluster Deployment
+
+# Operational action: setup, deploy, restart, stop, clean, reset, status
+deploy_action: "setup"
+
+# EVM Chain ID used network-wide for Ethereum transaction signing
+evm_chain_id: 991
+
+# Binaries location
+bin_dir: "/opt/metanode/bin"
+local_bin_dir: "{{ playbook_dir }}/../../execution/scripts/test"
+
+# State & Log directories
+base_data_dir: "/opt/metanode/data"
+base_log_dir: "/var/log/metanode"
+
+# Parent Chain settings
+parent_chain_rpc_url: "http://{{ hostvars[groups['parent_chain_nodes'][0]]['ansible_host'] | default('127.0.0.1') }}:{{ hostvars[groups['parent_chain_nodes'][0]]['parent_http_port'] | default(8547) }}"
+
+# Integration test settings
+run_integration_tests: false
+test_script_path: "{{ playbook_dir }}/../../execution/scripts/test/test_real_world_scenarios.go"
+
+# Telegram settings
+telegram_enabled: true

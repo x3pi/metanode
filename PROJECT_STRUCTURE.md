@@ -26,6 +26,7 @@ metanode/
 │   │   │   └── start_monitors.sh    ← Background daemon manager for all monitors
 │   │   └── stop_all.sh     ← Script to stop all background deployment processes
 │   ├── ansible_private_chains/ ← Decoupled Ansible manager for Multi-Machine Private Chains
+│   ├── ansible_clusters/   ← Ansible automation for Parent Chain & Sharded Execution Clusters with Telegram alerts
 │   └── systemd/            ← Systemd deployment scripts, key generators (gen_validator_entry.py, gen_private_chain.py), and env templates
 ├── execution/          ← Go execution engine (EVM-compatible layer)
 │   └── debug_nil/      ← Go standalone tests for nil/slice panic debugging

@@ -1,0 +1,23 @@
+[Unit]
+Description=MetaNode Parent Chain Consensus and Float State Service
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ ansible_user | default('metanode') }}
+WorkingDirectory={{ node_data_dir }}
+ExecStart={{ bin_dir }}/parent_chain -data-dir {{ node_data_dir }} -http :{{ parent_http_port | default(8547) }} -rust-config {{ deploy_dir }}/{{ rust_config_path }}
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=always
+RestartSec=3s
+TimeoutStopSec=30
+LimitNOFILE=65536
+LimitCORE=infinity
+
+StandardOutput=append:{{ base_log_dir }}/parent_chain.log
+StandardError=append:{{ base_log_dir }}/parent_chain.log
+SyslogIdentifier=metanode-parentchain
+
+[Install]
+WantedBy=multi-user.target

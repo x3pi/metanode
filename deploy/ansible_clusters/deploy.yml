@@ -1,0 +1,43 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+#  METANODE MULTI-CLUSTER DEPLOYMENT PLAYBOOK
+#  Supports Parent Chain, Sharded Execution Clusters, Automated E2E Testing,
+#  and Telegram Status & Alert Notifications.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Play 1: Local Build & Preparation ────────────────────────────────────────
+- name: "Phase 1: Local Binary Verification & Build"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: ["build", "prepare"]
+  roles:
+    - role: build
+
+# ── Play 2: Deploy Parent Chain ──────────────────────────────────────────────
+- name: "Phase 2: Deploy Parent Chain Node"
+  hosts: parent_chain_nodes
+  gather_facts: true
+  tags: ["parent_chain", "core"]
+  roles:
+    - role: common
+    - role: parent_chain
+
+# ── Play 3: Deploy Execution Clusters ────────────────────────────────────────
+- name: "Phase 3: Deploy Sharded Execution Clusters (EVM ChainID 991)"
+  hosts: exec_clusters
+  gather_facts: true
+  tags: ["exec_clusters", "shards"]
+  roles:
+    - role: common
+    - role: exec_cluster
+
+# ── Play 4: Post-Deployment Testing ──────────────────────────────────────────
+- name: "Phase 4: Integration & Scenario Testing"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: ["test", "verify"]
+  when: run_integration_tests | default(false) | bool
+  roles:
+    - role: testing

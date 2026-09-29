@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -23,11 +24,41 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 )
 
-const (
-	parentChainURL = "http://127.0.0.1:8547"
-	exec1URL       = "http://127.0.0.1:8646"
-	exec2URL       = "http://127.0.0.1:8647"
+func findRepoRoot() string {
+	if root := os.Getenv("METANODE_ROOT"); root != "" {
+		return root
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		return "/home/abc/chain-n/metanode"
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return "/home/abc/chain-n/metanode"
+}
 
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+var (
+	parentChainURL = getEnv("PARENT_CHAIN_URL", "http://127.0.0.1:8547")
+	exec1URL       = getEnv("EXEC1_URL", "http://127.0.0.1:8646")
+	exec2URL       = getEnv("EXEC2_URL", "http://127.0.0.1:8647")
+)
+
+const (
 	devnetSenderECDSA = "a3e6d454ea7a3b464af1f8c891259d5ff48f331004d56d1331388ec3c3915fe1"
 	devnetSenderBLS   = "0f0f8761e3fe67cdc9e7573adf72c7e929e2a00f981834298867d5628ca2d8f6"
 
@@ -371,9 +402,10 @@ func main() {
 
 	// Phục hồi lại Parent Chain để hoàn tất test
 	fmt.Println("\n🔄 Khởi động lại Parent Chain để đưa Devnet về trạng thái đầy đủ...")
-	startParentCmd := exec.Command("bash", "-c", "cd ../../../consensus/metanode && ../../execution/scripts/test/parent_chain -data-dir ../../execution/scripts/test/devnet_data/parent -http :8547 -rust-config config/node_devnet_parent.toml > ../../execution/scripts/test/devnet_data/parent/node.log 2>&1 &")
+	repoRoot := findRepoRoot()
+	startParentCmd := exec.Command("bash", "-c", fmt.Sprintf("cd %s/execution/scripts/test && ./parent_chain -data-dir ./devnet_data/parent -http :8547 -rust-config ../../../consensus/metanode/config/node_devnet_parent.toml >> ./devnet_data/parent/node.log 2>&1 &", repoRoot))
 	_ = startParentCmd.Start()
-	time.Sleep(2 * time.Second)
+	time.Sleep(3 * time.Second)
 
 	fmt.Println("\n🎉 TẤT CẢ 5/5 KỊCH BẢN SỬ DỤNG THỰC TẾ ĐỀU ĐÃ ĐƯỢC KIỂM CHỨNG THÀNH CÔNG VÀ CHÍNH XÁC!")
 }

@@ -1,0 +1,176 @@
+---
+- name: Determine process management mode
+  set_fact:
+    is_systemd: "{{ use_systemd | default(false) | bool }}"
+
+# ── Stop Service ─────────────────────────────────────────────────────────────
+- name: Stop Execution Cluster {{ cluster_id }}
+  when: "deploy_action in ['stop', 'restart', 'reset', 'clean']"
+  block:
+    - name: Stop via systemd
+      when: is_systemd
+      ansible.builtin.systemd:
+        name: "metanode-cluster-{{ cluster_id }}"
+        state: stopped
+      ignore_errors: true
+
+    - name: Stop via process kill (daemon mode)
+      when: not is_systemd
+      ansible.builtin.shell: |
+        if [ -f "{{ node_data_dir }}/cluster.pid" ]; then
+          kill -SIGTERM $(cat "{{ node_data_dir }}/cluster.pid") 2>/dev/null || true
+          rm -f "{{ node_data_dir }}/cluster.pid"
+        fi
+        pkill -f "{{ bin_dir }}/simple_chain.*{{ node_data_dir }}/config.json" 2>/dev/null || true
+      ignore_errors: true
+
+# ── Clean / Reset Data ───────────────────────────────────────────────────────
+- name: Clean Execution Cluster data directories
+  when: "deploy_action in ['clean', 'reset']"
+  block:
+    - name: Remove cluster database and snapshot folders
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ node_data_dir }}/data"
+        - "{{ node_data_dir }}/snapshot"
+        - "{{ node_data_dir }}/logs"
+        - "{{ node_data_dir }}/explorer"
+
+# ── Setup Configuration, Genesis & Service Unit ──────────────────────────────
+- name: Setup Execution Cluster {{ cluster_id }}
+  when: "deploy_action in ['setup', 'deploy', 'restart', 'reset']"
+  block:
+    - name: Ensure Execution Cluster directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ node_data_dir }}"
+        - "{{ node_data_dir }}/data"
+        - "{{ node_data_dir }}/snapshot"
+        - "{{ node_data_dir }}/logs"
+        - "{{ base_log_dir }}"
+
+    - name: Generate cluster genesis if not present or reset
+      ansible.builtin.shell: |
+        python3 -c "
+        import json
+        with open('{{ deploy_dir }}/execution/cmd/simple_chain/genesis.json') as f:
+            base = json.load(f)
+
+        devnet_sender_alloc = {
+            'address': '0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24',
+            'balance': '2000000000000000000000000000000',
+            'pending_balance': '0',
+            'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
+            'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
+            'publicKeyBls': '0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc',
+        }
+
+        cluster_alloc = {
+            'address': '{{ address }}',
+            'balance': '2000000000000000000000000000000',
+            'pending_balance': '0',
+            'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
+            'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
+            'publicKeyBls': '{{ bls_priv }}',
+        }
+
+        # Load committee if exists
+        try:
+            with open('{{ deploy_dir }}/consensus/metanode/config/devnet_{{ cluster_name }}_keys/committee.json') as f:
+                committee = json.load(f)
+            auth = committee['authorities'][0]
+        except Exception:
+            auth = base['validators'][0]
+
+        stake = '1000000000000000000000'
+        g = dict(base)
+        g['config']['chainId'] = {{ evm_chain_id | default(991) }}
+        g['validators'] = [{
+            'address': '{{ address }}',
+            'primary_address': '127.0.0.1:4000',
+            'worker_address': '127.0.0.1:4012',
+            'p2p_address': auth.get('address', '127.0.0.1:9000'),
+            'description': 'Devnet {{ cluster_name }} validator',
+            'website': '',
+            'image': '',
+            'commission_rate': 5,
+            'min_self_delegation': '1000000000000000000',
+            'accumulated_rewards_per_share': '0',
+            'delegator_stakes': [{'address': '{{ address }}', 'amount': stake}],
+            'total_staked_amount': stake,
+            'network_key': auth.get('network_key', ''),
+            'hostname': auth.get('hostname', ''),
+            'authority_key': auth.get('authority_key', ''),
+            'protocol_key': auth.get('protocol_key', ''),
+        }]
+        g['total_stake'] = 1000
+        g['quorum_threshold'] = 1000
+        g['validity_threshold'] = 1000
+        g['alloc'] = list(base.get('alloc', [])) + [devnet_sender_alloc, cluster_alloc]
+
+        with open('{{ node_data_dir }}/genesis.json', 'w') as out:
+            json.dump(g, out, indent=2)
+        "
+
+    - name: Deploy Execution Cluster config.json
+      ansible.builtin.template:
+        src: exec_config.json.j2
+        dest: "{{ node_data_dir }}/config.json"
+        mode: '0644'
+
+    - name: Deploy systemd service unit
+      when: is_systemd
+      ansible.builtin.template:
+        src: metanode-exec-cluster.service.j2
+        dest: "/etc/systemd/system/metanode-cluster-{{ cluster_id }}.service"
+        mode: '0644'
+      notify: Reload systemd
+
+# ── Start / Restart Service ──────────────────────────────────────────────────
+- name: Start Execution Cluster {{ cluster_id }}
+  when: "deploy_action in ['setup', 'deploy', 'start', 'restart', 'reset']"
+  block:
+    - name: Start service via systemd
+      when: is_systemd
+      ansible.builtin.systemd:
+        name: "metanode-cluster-{{ cluster_id }}"
+        state: started
+        enabled: yes
+
+    - name: Start process via background daemon
+      when: not is_systemd
+      ansible.builtin.shell: |
+        nohup {{ bin_dir }}/simple_chain \
+          -config {{ node_data_dir }}/config.json \
+          >> {{ base_log_dir }}/cluster_{{ cluster_id }}.log 2>&1 &
+        echo $! > {{ node_data_dir }}/cluster.pid
+      args:
+        chdir: "{{ node_data_dir }}"
+
+    - name: Wait for Cluster RPC port to respond
+      ansible.builtin.wait_for:
+        port: "{{ rpc_port }}"
+        host: "{{ ansible_host | default('127.0.0.1') }}"
+        delay: 2
+        timeout: 30
+
+    - name: Query eth_blockNumber from cluster RPC
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ rpc_port }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method: "eth_blockNumber"
+          params: []
+          id: 1
+        status_code: 200
+      register: block_check
+      retries: 5
+      delay: 2
+      until: block_check.status == 200

@@ -1,0 +1,20 @@
+---
+- name: Ensure target directory tree exists on host
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - "{{ install_dir }}"
+    - "{{ bin_dir }}"
+    - "{{ base_data_dir }}"
+    - "{{ base_log_dir }}"
+
+- name: Distribute built binaries to node
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: '0755'
+  loop:
+    - { src: "{{ local_bin_dir }}/parent_chain", dest: "{{ bin_dir }}/parent_chain" }
+    - { src: "{{ local_bin_dir }}/simple_chain", dest: "{{ bin_dir }}/simple_chain" }

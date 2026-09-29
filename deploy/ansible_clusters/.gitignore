@@ -1,0 +1,7 @@
+*.log
+*.pid
+*.retry
+.env
+!scripts/*.py
+!inventory.yml
+

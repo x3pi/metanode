@@ -1,0 +1,28 @@
+---
+- name: Execute automated integration tests
+  delegate_to: localhost
+  run_once: true
+  block:
+    - name: Run E2E multi-cluster real world scenarios test
+      ansible.builtin.shell: |
+        export PARENT_CHAIN_URL="http://{{ hostvars[groups['parent_chain_nodes'][0]]['ansible_host'] | default('127.0.0.1') }}:{{ hostvars[groups['parent_chain_nodes'][0]]['parent_http_port'] | default(8547) }}"
+        export EXEC1_URL="http://{{ hostvars['exec_cluster_1']['ansible_host'] | default('127.0.0.1') }}:{{ hostvars['exec_cluster_1']['rpc_port'] | default(8646) }}"
+        export EXEC2_URL="http://{{ hostvars['exec_cluster_2']['ansible_host'] | default('127.0.0.1') }}:{{ hostvars['exec_cluster_2']['rpc_port'] | default(8647) }}"
+        go run {{ test_script_path }}
+      register: test_output
+      ignore_errors: true
+
+    - name: Save test log to file
+      ansible.builtin.copy:
+        content: "{{ test_output.stdout }}\n{{ test_output.stderr }}"
+        dest: "{{ playbook_dir }}/test_run.log"
+        mode: '0644'
+
+    - name: Check if all scenarios passed
+      set_fact:
+        tests_passed: "{{ test_output.rc == 0 and 'TẤT CẢ 5/5 KỊCH BẢN' in test_output.stdout }}"
+
+    - name: Display test outcome
+      ansible.builtin.debug:
+        msg: >-
+          {{ '✅ TẤT CẢ 5 KỊCH BẢN TEST THÀNH CÔNG!' if tests_passed else '❌ BÀI TEST TÍCH HỢP THẤT BẠI! Xem test_run.log để biết chi tiết.' }}

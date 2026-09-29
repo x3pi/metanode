@@ -1,0 +1,31 @@
+{
+  "debug": true,
+  "cluster_id": {{ cluster_id }},
+  "enable_private_gateway": false,
+  "master_password": "devnet-test-password",
+  "app_pepper": "devnet-test-pepper",
+  "private_key": "{{ private_key }}",
+  "address": "{{ address }}",
+  "log_path": "{{ node_data_dir }}/logs",
+  "backup_path": "{{ node_data_dir }}/backup",
+  "explorer_db_path": "{{ node_data_dir }}/explorer",
+  "explorer_read_only_db_path": "{{ node_data_dir }}/explorer-ro",
+  "is_explorer": true,
+  "connection_address": "0.0.0.0:{{ p2p_port | default(4200) }}",
+  "version": "0.0.1.0",
+  "rpc_port": ":{{ rpc_port }}",
+  "db_type": 2,
+  "genesis_file_path": "{{ node_data_dir }}/genesis.json",
+  "pk_admin_file_storage": "87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623",
+  "bls_admin_storage": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
+  "owner_file_storage_address": "0xC6E6474A8DEAD25B0e75b1aeA5d35FA19f69588a",
+  "Databases": {
+    "RootPath": "{{ node_data_dir }}/data",
+    "DBEngine": "sharded",
+    "Version": "0.0.1.0",
+    "BLSPrivateKey": "{{ bls_priv }}",
+    "SnapshotPath": "{{ node_data_dir }}/snapshot"
+  },
+  "rust_config_path": "{{ deploy_dir }}/{{ rust_config_path }}",
+  "is_rpc_node": true
+}
