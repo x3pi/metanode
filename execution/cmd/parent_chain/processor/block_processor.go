@@ -96,16 +96,21 @@ func (bp *BlockProcessor) processBlock(block *pb.ExecutableBlock) {
 			copy(pubKey[:], tx.PubKey)
 		}
 
+		clusterID := tx.ClusterID
+		if clusterID == 0 {
+			clusterID = tx.ChainID
+		}
+
 		switch tx.Type {
 		case parentchain.TxTypeDepositToFloat:
-			err = parentchain.DepositToFloat(bp.store, pubKey, tx.ChainID, tx.Sender, tx.Target, tx.Amount, tx.MsgID, blockTime)
+			err = parentchain.DepositToFloat(bp.store, pubKey, clusterID, tx.Sender, tx.Target, tx.Amount, tx.MsgID, blockTime)
 		case parentchain.TxTypeTransferFloat:
 			var toPubKey cm.PublicKey
 			if len(tx.ToPubKey) > 0 {
 				copy(toPubKey[:], tx.ToPubKey)
 			}
 			_, err = parentchain.TransferFloat(
-				bp.store, pubKey, toPubKey, tx.ChainID, tx.Sender, tx.Target,
+				bp.store, pubKey, toPubKey, clusterID, tx.Sender, tx.Target,
 				tx.Amount, tx.Fee, tx.Payload, tx.Nonce, sig, tx.IsRefund, 0, blockTime,
 			)
 		case parentchain.TxTypeMarkClaimed:

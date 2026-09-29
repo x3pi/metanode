@@ -133,6 +133,7 @@ with open('devnet_data/exec2/genesis.json', 'w') as f:
 cat << 'EOF' > devnet_data/exec1/config.json
 {
   "debug": true,
+  "cluster_id": 1,
   "enable_private_gateway": false,
   "master_password": "devnet-test-password",
   "app_pepper": "devnet-test-pepper",
@@ -166,6 +167,7 @@ EOF
 cat << 'EOF' > devnet_data/exec2/config.json
 {
   "debug": true,
+  "cluster_id": 2,
   "enable_private_gateway": false,
   "master_password": "devnet-test-password",
   "app_pepper": "devnet-test-pepper",

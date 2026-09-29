@@ -27,9 +27,10 @@ type ParentChainTx struct {
 	Cert  []byte      `json:"cert,omitempty"` // For cm.Sign
 
 	// DepositToFloat fields
-	PubKey   []byte   `json:"pubKey,omitempty"` // For cm.PublicKey
-	ChainID  uint64   `json:"chainID,omitempty"`
-	Amount   *big.Int `json:"amount,omitempty"`
+	PubKey    []byte   `json:"pubKey,omitempty"` // For cm.PublicKey
+	ClusterID uint64   `json:"clusterID,omitempty"`
+	ChainID   uint64   `json:"chainID,omitempty"` // legacy alias for ClusterID
+	Amount    *big.Int `json:"amount,omitempty"`
 
 	// TransferFloat fields
 	ToPubKey    []byte         `json:"toPubKey,omitempty"` // For cm.PublicKey

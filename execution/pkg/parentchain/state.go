@@ -100,22 +100,23 @@ func ComputeRegisterAccountMessage(userAddress common.Address, floatIdentityKey 
 }
 
 // ensureChainRegistry lazy-creates a chain registry entry if it doesn't exist
-func ensureChainRegistry(store Store, keyHash common.Hash, key cm.PublicKey, chainIDDesc uint64) error {
+func ensureChainRegistry(store Store, keyHash common.Hash, key cm.PublicKey, clusterIDDesc uint64) error {
 	_, found, err := store.GetChainRegistry(keyHash)
 	if err != nil {
 		return err
 	}
 	if !found {
 		return store.SetChainRegistry(keyHash, ChainRegistryEntry{
-			FloatIdentityKey:   key,
-			ChainIDDescriptive: chainIDDesc,
+			FloatIdentityKey:     key,
+			ClusterIDDescriptive: clusterIDDesc,
+			ChainIDDescriptive:   clusterIDDesc,
 		})
 	}
 	return nil
 }
 
 // DepositToFloat credits destKey's NodeFloatAccount by amount and records messageID.
-func DepositToFloat(store Store, destKey cm.PublicKey, destChainIDDesc uint64, sender, target common.Address, amount *big.Int, messageID common.Hash, blockTime uint64) error {
+func DepositToFloat(store Store, destKey cm.PublicKey, destClusterIDDesc uint64, sender, target common.Address, amount *big.Int, messageID common.Hash, blockTime uint64) error {
 	if amount == nil || amount.Sign() <= 0 {
 		return ErrFloatInvalidAmount
 	}
@@ -128,7 +129,7 @@ func DepositToFloat(store Store, destKey cm.PublicKey, destChainIDDesc uint64, s
 	destHash := crypto.Keccak256Hash(destKey[:])
 
 	// Lazy create dest entry
-	if err := ensureChainRegistry(store, destHash, destKey, destChainIDDesc); err != nil {
+	if err := ensureChainRegistry(store, destHash, destKey, destClusterIDDesc); err != nil {
 		return err
 	}
 
@@ -173,7 +174,7 @@ func DepositToFloat(store Store, destKey cm.PublicKey, destChainIDDesc uint64, s
 func TransferFloat(
 	store Store,
 	fromKey, toKey cm.PublicKey,
-	destChainIDDesc uint64,
+	destClusterIDDesc uint64,
 	sender, target common.Address,
 	value, fee *big.Int,
 	payload []byte,
@@ -252,7 +253,7 @@ func TransferFloat(
 	}
 
 	// Lazy create dest entry
-	if err := ensureChainRegistry(store, toHash, toKey, destChainIDDesc); err != nil {
+	if err := ensureChainRegistry(store, toHash, toKey, destClusterIDDesc); err != nil {
 		return common.Hash{}, err
 	}
 

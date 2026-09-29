@@ -19,8 +19,9 @@ const (
 )
 
 type ChainRegistryEntry struct {
-	FloatIdentityKey   cm.PublicKey
-	ChainIDDescriptive uint64
+	FloatIdentityKey     cm.PublicKey `json:"float_identity_key"`
+	ClusterIDDescriptive uint64       `json:"cluster_id_descriptive,omitempty"`
+	ChainIDDescriptive   uint64       `json:"chain_id_descriptive,omitempty"` // legacy alias
 }
 
 type FloatTransferRecord struct {

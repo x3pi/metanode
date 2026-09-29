@@ -338,7 +338,7 @@ func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) {
 				_, sendErr := w.client.SendTransferFloat(
 					w.blsKeyPair.PublicKey(),
 					rec.SourcePubKey, // destination is the source of the original transfer
-					0, // destChainID
+					0, // destClusterID
 					rec.Target,
 					rec.Sender,
 					action.Amount,

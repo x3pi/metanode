@@ -137,7 +137,7 @@ func main() {
 
 	// Bootstrap exec1 in ChainRegistry if not yet
 	bootstrapAddr := common.HexToAddress("0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5")
-	_, _ = parentClient.SendDepositToFloat(exec1PubKey, 991, bootstrapAddr, bootstrapAddr, big.NewInt(1_000_000_000))
+	_, _ = parentClient.SendDepositToFloat(exec1PubKey, 1, bootstrapAddr, bootstrapAddr, big.NewInt(1_000_000_000))
 
 	// =======================================================================================
 	// KỊCH BẢN 1: Đăng ký 1 tài khoản mới trên Parent Chain & ánh xạ vào Cluster Exec 2
@@ -179,7 +179,7 @@ func main() {
 	printHeader("KỊCH BẢN 2: NẠP VÀ NHẬN TIỀN CHO TÀI KHOẢN MỚI")
 	depositAmount := big.NewInt(10_000_000_000_000) // 10k gwei
 	fmt.Printf("1. Gửi lệnh nạp tiền DepositToFloat (%s wei) từ Parent Chain đến tài khoản %s...\n", depositAmount.String(), newAccAddr.Hex())
-	depMsgID, err := parentClient.SendDepositToFloat(exec2PubKey, 991, senderAddr, newAccAddr, depositAmount)
+	depMsgID, err := parentClient.SendDepositToFloat(exec2PubKey, 2, senderAddr, newAccAddr, depositAmount)
 	if err != nil {
 		fmt.Printf("❌ DepositToFloat thất bại: %v\n", err)
 		os.Exit(1)

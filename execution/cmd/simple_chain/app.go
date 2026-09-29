@@ -268,14 +268,18 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	}
 
 	stateDBAdapter := &accountStateDBAdapter{chainState: app.chainState}
-	chainID := uint64(1) // Default to 1
-	if app.config.ChainId != nil {
-		chainID = app.config.ChainId.Uint64()
+	clusterID := uint64(1) // Default to 1
+	if app.config.ClusterId != nil {
+		clusterID = app.config.ClusterId.Uint64()
+	} else if app.config.ClusterIdCamel != nil {
+		clusterID = app.config.ClusterIdCamel.Uint64()
+	} else if app.config.ChainId != nil {
+		clusterID = app.config.ChainId.Uint64()
 	}
 
 	app.crossNodeHandler = rollup.NewCrossNodeHandler(app.keyPair.PublicKey())
 	tx_processor.InitParentChainGatewayHandler(crossChainTransferDispatcherAdapter{h: app.crossNodeHandler})
-	app.sendWorker = rollup.NewSendWorker(rollupStore, parentClient, app.keyPair, app.keyPair.PublicKey(), chainID)
+	app.sendWorker = rollup.NewSendWorker(rollupStore, parentClient, app.keyPair, app.keyPair.PublicKey(), clusterID)
 	app.recvWorker = rollup.NewReceiveWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 	app.reclaimWorker = rollup.NewReclaimWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 

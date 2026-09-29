@@ -64,17 +64,18 @@ func (c *httpClient) get(path string, resp interface{}) error {
 
 func (c *httpClient) SendDepositToFloat(
 	pubKey cm.PublicKey,
-	destChainID uint64,
+	destClusterID uint64,
 	sender, target common.Address,
 	amount *big.Int,
 ) (common.Hash, error) {
 	req := ParentChainTx{
-		Type:     TxTypeDepositToFloat,
-		PubKey:   pubKey[:],
-		ChainID:  destChainID,
-		Sender:   sender,
-		Target:   target,
-		Amount:   amount,
+		Type:      TxTypeDepositToFloat,
+		PubKey:    pubKey[:],
+		ClusterID: destClusterID,
+		ChainID:   destClusterID,
+		Sender:    sender,
+		Target:    target,
+		Amount:    amount,
 	}
 	var resp struct {
 		MsgID common.Hash `json:"msg_id"`
@@ -85,7 +86,7 @@ func (c *httpClient) SendDepositToFloat(
 
 func (c *httpClient) SendTransferFloat(
 	pubKey, destPubKey cm.PublicKey,
-	destChainID uint64,
+	destClusterID uint64,
 	sender, target common.Address,
 	amount, gasFee *big.Int,
 	nonce uint64,
@@ -96,7 +97,8 @@ func (c *httpClient) SendTransferFloat(
 		Type:      TxTypeTransferFloat,
 		PubKey:    pubKey[:],
 		ToPubKey:  destPubKey[:],
-		ChainID:   destChainID,
+		ClusterID: destClusterID,
+		ChainID:   destClusterID,
 		Sender:    sender,
 		Target:    target,
 		Amount:    amount,

@@ -19,7 +19,7 @@ import (
 type InMemoryParentChain struct {
 	mu        sync.Mutex
 	store     parentchain.Store
-	transfers map[uint64][]*parentchain.TransferEvent // destChainID -> transfers
+	transfers map[uint64][]*parentchain.TransferEvent // destClusterID -> transfers
 	nodeKeys  map[uint64]*bls.KeyPair
 	accounts  map[common.Address]cm.PublicKey
 }
@@ -42,7 +42,7 @@ type ParentChainClientAdapter struct {
 
 func (a *ParentChainClientAdapter) SendDepositToFloat(
 	pubKey cm.PublicKey,
-	destChainID uint64,
+	destClusterID uint64,
 	sender, target common.Address,
 	amount *big.Int,
 ) (common.Hash, error) {
@@ -51,7 +51,7 @@ func (a *ParentChainClientAdapter) SendDepositToFloat(
 	err := parentchain.DepositToFloat(
 		a.chain.store,
 		pubKey,
-		destChainID,
+		destClusterID,
 		sender,
 		target,
 		amount,
@@ -63,7 +63,7 @@ func (a *ParentChainClientAdapter) SendDepositToFloat(
 
 func (a *ParentChainClientAdapter) SendTransferFloat(
 	pubKey, destPubKey cm.PublicKey,
-	destChainID uint64,
+	destClusterID uint64,
 	sender, target common.Address,
 	amount, gasFee *big.Int,
 	nonce uint64,
@@ -84,7 +84,7 @@ func (a *ParentChainClientAdapter) SendTransferFloat(
 	msgID, err := parentchain.TransferFloat(
 		a.chain.store,
 		pubKey, destPubKey,
-		destChainID,
+		destClusterID,
 		sender, target,
 		amount,
 		gasFee,
@@ -120,7 +120,7 @@ func (a *ParentChainClientAdapter) SendTransferFloat(
 		}
 	}
 	if destID == 0 {
-		destID = destChainID // Fallback
+		destID = destClusterID // Fallback
 	}
 
 	a.chain.transfers[destID] = append(a.chain.transfers[destID], event)
@@ -220,14 +220,14 @@ type RollupNode struct {
 	blsKeyPair    *bls.KeyPair
 }
 
-func NewRollupNode(chainID uint64, parentChain *InMemoryParentChain, kp *bls.KeyPair, destPubKey cm.PublicKey, destChainID uint64) *RollupNode {
+func NewRollupNode(chainID uint64, parentChain *InMemoryParentChain, kp *bls.KeyPair, destPubKey cm.PublicKey, destClusterID uint64) *RollupNode {
 	stateDB := newMockAccountStateDB()
 	scDB := &mockDB{data: make(map[common.Address]map[common.Hash][]byte)}
 	store := NewDBStore(scDB)
 	
 	client := &ParentChainClientAdapter{chain: parentChain, chainID: chainID}
 	
-	sendW := NewSendWorker(store, client, kp, destPubKey, destChainID)
+	sendW := NewSendWorker(store, client, kp, destPubKey, destClusterID)
 	recW := NewReceiveWorker(store, stateDB, client, kp)
 	reclaimW := NewReclaimWorker(store, stateDB, client, kp)
 	

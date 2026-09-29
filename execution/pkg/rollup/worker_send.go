@@ -14,11 +14,11 @@ import (
 )
 
 type SendWorker struct {
-	store       Store
-	client      parentchain.Client
-	blsKeyPair  *bls.KeyPair
-	destPubKey  cm.PublicKey
-	destChainID uint64
+	store         Store
+	client        parentchain.Client
+	blsKeyPair    *bls.KeyPair
+	destPubKey    cm.PublicKey
+	destClusterID uint64
 
 	// EventProposer is used to submit state machine events to the Raft consensus.
 	EventProposer func(event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error
@@ -28,15 +28,15 @@ type SendWorker struct {
 	wg     sync.WaitGroup
 }
 
-func NewSendWorker(store Store, client parentchain.Client, blsKeyPair *bls.KeyPair, destPubKey cm.PublicKey, destChainID uint64) *SendWorker {
+func NewSendWorker(store Store, client parentchain.Client, blsKeyPair *bls.KeyPair, destPubKey cm.PublicKey, destClusterID uint64) *SendWorker {
 	return &SendWorker{
-		store:       store,
-		client:      client,
-		blsKeyPair:  blsKeyPair,
-		destPubKey:  destPubKey,
-		destChainID: destChainID,
-		wakeCh:      make(chan struct{}, 1),
-		quitCh:      make(chan struct{}),
+		store:         store,
+		client:        client,
+		blsKeyPair:    blsKeyPair,
+		destPubKey:    destPubKey,
+		destClusterID: destClusterID,
+		wakeCh:        make(chan struct{}, 1),
+		quitCh:        make(chan struct{}),
 	}
 }
 
@@ -141,7 +141,7 @@ func (w *SendWorker) processPending() {
 			_, err = w.client.SendTransferFloat(
 				w.blsKeyPair.PublicKey(),
 				destPubKey,
-				w.destChainID, // legacy field, not used in digest
+				w.destClusterID, // cluster routing field, not used in digest
 				rec.Sender,
 				rec.Target,
 				rec.Value,
