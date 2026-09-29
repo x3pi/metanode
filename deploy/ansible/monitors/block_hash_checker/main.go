@@ -217,45 +217,94 @@ func triggerStopFlag(reason string) {
 	sendTelegramAlertDirect(reason, true)
 }
 
+var (
+	cachedPublicIP    string
+	publicIPFetchOnce sync.Once
+	publicIPMutex     sync.RWMutex
+)
+
+// getPrimaryLANIP detects the host's primary outbound LAN IP (instant, zero network packet)
+func getPrimaryLANIP() string {
+	// Query OS routing table via UDP socket (zero packets sent across network)
+	conn, err := net.DialTimeout("udp", "1.1.1.1:80", 200*time.Millisecond)
+	if err == nil {
+		defer conn.Close()
+		if localAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+			ip := localAddr.IP.String()
+			if ip != "" && !localAddr.IP.IsLoopback() && localAddr.IP.To4() != nil {
+				return ip
+			}
+		}
+	}
+
+	// Fallback: scan local interfaces, filter loopback, prioritize RFC 1918 private subnets
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "127.0.0.1"
+	}
+
+	var candidates []string
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ip4 := ipnet.IP.To4(); ip4 != nil {
+				ipStr := ip4.String()
+				// Prioritize standard LAN subnets (192.168.x.x, 10.x.x.x)
+				if strings.HasPrefix(ipStr, "192.168.") || strings.HasPrefix(ipStr, "10.") {
+					return ipStr
+				}
+				candidates = append(candidates, ipStr)
+			}
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return "127.0.0.1"
+}
+
+// fetchPublicIPAsync triggers a single background fetch for public IP without blocking alert dispatch
+func fetchPublicIPAsync() {
+	publicIPFetchOnce.Do(func() {
+		go func() {
+			client := http.Client{
+				Timeout: 2 * time.Second,
+			}
+			resp, err := client.Get("https://api.ipify.org")
+			if err == nil {
+				defer resp.Body.Close()
+				body, err := io.ReadAll(resp.Body)
+				if err == nil {
+					pub := strings.TrimSpace(string(body))
+					if pub != "" && !strings.Contains(pub, " ") {
+						publicIPMutex.Lock()
+						cachedPublicIP = pub
+						publicIPMutex.Unlock()
+					}
+				}
+			}
+		}()
+	})
+}
+
 func getSystemIPInfo() string {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "Unknown"
 	}
 
-	var localIPs []string
-	addrs, err := net.InterfaceAddrs()
-	if err == nil {
-		for _, addr := range addrs {
-			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-				if ipnet.IP.To4() != nil {
-					localIPs = append(localIPs, ipnet.IP.String())
-				}
-			}
-		}
-	}
-	localIPStr := "Unknown"
-	if len(localIPs) > 0 {
-		localIPStr = strings.Join(localIPs, ", ")
-	}
+	lanIP := getPrimaryLANIP()
 
-	publicIP := "Unknown"
-	client := http.Client{
-		Timeout: 2 * time.Second,
-	}
-	resp, err := client.Get("https://api.ipify.org")
-	if err == nil {
-		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		if err == nil {
-			publicIP = strings.TrimSpace(string(body))
-		}
-	}
+	// Trigger async public IP fetch (runs once in background, non-blocking)
+	fetchPublicIPAsync()
 
-	if publicIP != "Unknown" {
-		return fmt.Sprintf("%s (Static/Private IP: %s, Public IP: %s)", hostname, localIPStr, publicIP)
+	publicIPMutex.RLock()
+	pubIP := cachedPublicIP
+	publicIPMutex.RUnlock()
+
+	if pubIP != "" {
+		return fmt.Sprintf("%s (LAN IP: %s, Public IP: %s)", hostname, lanIP, pubIP)
 	}
-	return fmt.Sprintf("%s (Static/Private IP: %s)", hostname, localIPStr)
+	return fmt.Sprintf("%s (LAN IP: %s)", hostname, lanIP)
 }
 
 func sendTelegramAlertDirect(message string, isCritical bool) {
