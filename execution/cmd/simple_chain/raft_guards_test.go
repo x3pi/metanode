@@ -84,19 +84,32 @@ func TestIssue103_SkipMempoolSigVerifyProductionGuard(t *testing.T) {
 	}
 
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "true")
-	t.Setenv("NODE_ENV", "production")
 
+	// Case 1: Fail-closed: No METANODE_DEVNET=true set, even if NODE_ENV is unset/empty
+	t.Setenv("METANODE_DEVNET", "")
+	t.Setenv("NODE_ENV", "")
+	t.Setenv("ENVIRONMENT", "")
+	t.Setenv("METANODE_ENV", "")
 	_, err := NewApp(cfgPath, 0)
+	if err == nil || !strings.Contains(err.Error(), "FATAL SECURITY VIOLATION (Issue #103)") {
+		t.Fatalf("expected fatal security violation error when METANODE_DEVNET is not set, got: %v", err)
+	}
+
+	// Case 2: METANODE_DEVNET=true but in production environment -> Must still fail
+	t.Setenv("METANODE_DEVNET", "true")
+	t.Setenv("NODE_ENV", "production")
+	_, err = NewApp(cfgPath, 0)
 	if err == nil || !strings.Contains(err.Error(), "FATAL SECURITY VIOLATION (Issue #103)") {
 		t.Fatalf("expected fatal security violation error for SKIP_MEMPOOL_SIG_VERIFY in production, got: %v", err)
 	}
 
-	// Without production env, it should not fail on the security violation
+	// Case 3: Explicit devnet (METANODE_DEVNET=true) and non-production -> Should pass startup guard
+	t.Setenv("METANODE_DEVNET", "true")
 	t.Setenv("NODE_ENV", "development")
 	t.Setenv("ENVIRONMENT", "development")
 	t.Setenv("METANODE_ENV", "development")
 	_, err = NewApp(cfgPath, 0)
 	if err != nil && strings.Contains(err.Error(), "FATAL SECURITY VIOLATION (Issue #103)") {
-		t.Fatalf("unexpected Issue #103 security violation in development mode: %v", err)
+		t.Fatalf("unexpected Issue #103 security violation in explicit devnet mode: %v", err)
 	}
 }

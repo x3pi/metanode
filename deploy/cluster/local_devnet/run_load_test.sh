@@ -123,6 +123,9 @@ echo "▶️  Starting fresh 4-node devnet..."
 # case -- exported here (inherited by the node processes start_single_
 # chain.sh launches), never meant to reach a real deployment.
 export SKIP_MEMPOOL_SIG_VERIFY=true
+export METANODE_DEVNET=true
+export METANODE_ENV=devnet
+export NODE_ENV=devnet
 bash "$DIR/start_single_chain.sh"
 
 echo "⏳ Waiting for RPC to come up..."

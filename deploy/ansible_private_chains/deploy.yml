@@ -237,6 +237,13 @@
     node_list: "{{ range(0, (validators | default(1) | int)) | list }}"
     skip_mempool_sig_verify: "{{ skip_mempool_sig_verify | default(false) | bool }}"
   tasks:
+    - name: "SECURITY: Ensure skip_mempool_sig_verify is not enabled in production (Issue #103)"
+      ansible.builtin.assert:
+        that:
+          - not (skip_mempool_sig_verify | default(false) | bool)
+        fail_msg: "CRITICAL SECURITY ERROR (Issue #103): skip_mempool_sig_verify MUST NOT be enabled in production environments!"
+      when: (metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'
+
     - name: Check if host is targeted
       ansible.builtin.set_fact:
         is_targeted: "{{ active_target == 'all' or active_target | string == chain_id | string }}"
