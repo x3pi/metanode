@@ -25,6 +25,12 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
+// evmTimestampSeconds converts the millisecond timestamp stored in a Metanode
+// block header to the Unix-second value required by the EVM TIMESTAMP opcode.
+func evmTimestampSeconds(timestampMs uint64) uint64 {
+	return timestampMs / 1000
+}
+
 func (v *TxVirtualExecutor) ProcessTransactionOffChain(tx types.Transaction) (types.ExecuteSCResult, error) {
 	isSmartContract := false
 	if as, err := v.chainState.GetAccountStateDB().AccountState(tx.ToAddress()); err == nil && as != nil {
@@ -144,7 +150,8 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	}
 	defer chainStateNew.Close()
 
-	vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, header.TimeStamp(), common.Address{})
+	evmTimestamp := evmTimestampSeconds(header.TimeStamp())
+	vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, evmTimestamp, common.Address{})
 	mvmOffChain := mvm.GetOrCreateMVMApi(mvmId, chainStateNew.GetSmartContractDB(), accountStateDB, true)
 	defer func() {
 		mvm.ClearMVMApi(mvmId)
@@ -180,7 +187,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 			executeTransaction.MaxGas(),
 			header.TimeStamp(),
 			mt_common.OFF_CHAIN_GAS_LIMIT,
-			header.TimeStamp(),
+			evmTimestamp,
 			mt_common.MINIMUM_BASE_FEE,
 			header.BlockNumber(),
 			header.LeaderAddress(),
@@ -203,7 +210,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 			executeTransaction.MaxGas(),
 			header.TimeStamp(),
 			mt_common.OFF_CHAIN_GAS_LIMIT,
-			header.TimeStamp(),
+			evmTimestamp,
 			mt_common.MINIMUM_BASE_FEE,
 			header.BlockNumber(),
 			header.LeaderAddress(),
@@ -328,7 +335,8 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 	}
 	defer chainStateNew.Close()
 
-	vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, lastBlockHeader.TimeStamp(), common.Address{})
+	evmTimestamp := evmTimestampSeconds(lastBlockHeader.TimeStamp())
+	vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, evmTimestamp, common.Address{})
 	mvmOffChain := mvm.GetOrCreateMVMApi(mvmId, chainStateNew.GetSmartContractDB(), accountStateDB, true)
 	defer func() {
 		mvm.ClearMVMApi(mvmId)
@@ -364,7 +372,7 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 			executeTransaction.MaxGas(),
 			lastBlockHeader.TimeStamp(),
 			mt_common.OFF_CHAIN_GAS_LIMIT,
-			lastBlockHeader.TimeStamp(),
+			evmTimestamp,
 			mt_common.MINIMUM_BASE_FEE,
 			lastBlockHeader.BlockNumber(),
 			lastBlockHeader.LeaderAddress(),
@@ -387,7 +395,7 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 			executeTransaction.MaxGas(),
 			lastBlockHeader.TimeStamp(),
 			mt_common.OFF_CHAIN_GAS_LIMIT,
-			lastBlockHeader.TimeStamp(),
+			evmTimestamp,
 			mt_common.MINIMUM_BASE_FEE,
 			lastBlockHeader.BlockNumber(),
 			lastBlockHeader.LeaderAddress(),
@@ -461,7 +469,7 @@ func (v *TxVirtualExecutor) ProcessTransactionDebug(tx types.Transaction, blockV
 			return nil, fmt.Errorf("failed to create temporary chain state for debug execution: %w", err)
 		}
 		defer chainStateNew.Close()
-		vmP := vm_processor.NewVmProcessor(chainStateNew, tx.ToAddress(), false, blockVal.Header().TimeStamp(), common.Address{})
+		vmP := vm_processor.NewVmProcessor(chainStateNew, tx.ToAddress(), false, evmTimestampSeconds(blockVal.Header().TimeStamp()), common.Address{})
 		exRs, err := vmP.ExecuteTransactionWithMvmIdDebug(ctx, tx, false)
 		if err != nil {
 			logger.Error("Error executing transaction in debug mode: %v", err)
