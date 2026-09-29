@@ -30,16 +30,31 @@ import (
 
 func main() {
 	secretHex := flag.String("secret", "", "BLS secret scalar hex (with or without 0x prefix)")
+	// Opt-in, defaults false: keeps stdout single-line (just the base64 pubkey) for existing
+	// callers (e.g. gen_root_anchor_chain.py's own copy of derive_min_pk_pubkey) that parse
+	// exactly one line and would otherwise silently break on this tool's stdout format changing
+	// out from under them.
+	withAddress := flag.Bool("with-address", false, "also print this secret's bls.KeyPair.Address() as a second line")
 	flag.Parse()
 	if *secretHex == "" {
 		fmt.Fprintln(os.Stderr, "Error: -secret is required")
 		os.Exit(1)
 	}
-	_, pub, _ := bls.GenerateKeyPairFromSecretKey(strings.TrimPrefix(*secretHex, "0x"))
+	_, pub, addr := bls.GenerateKeyPairFromSecretKey(strings.TrimPrefix(*secretHex, "0x"))
 	pubBytes := pub.Bytes()
 	if len(pubBytes) != 48 {
 		fmt.Fprintf(os.Stderr, "Error: derived public key is %d bytes, expected 48 (invalid secret?)\n", len(pubBytes))
 		os.Exit(1)
 	}
 	fmt.Println(base64.StdEncoding.EncodeToString(pubBytes))
+	if *withAddress {
+		// This secret's own bls.KeyPair.Address() (keccak256(compressed pubkey)[12:]), i.e. what
+		// cmd/simple_chain's app.keyPair.Address() resolves to when this secret is used as
+		// config.json's top-level "private_key". Needed by gen_single_chain.py to register a
+		// genesis alloc entry for THIS address (see its own call site's doc comment for the live
+		// incident this closes: that address never had one, so any cross-chain rollup system tx
+		// it signs fails "invalid sign" -- config.json's separate "address" field is an unrelated
+		// ECDSA identity and registering a pubkey there does not help this address at all).
+		fmt.Println(addr.Hex())
+	}
 }

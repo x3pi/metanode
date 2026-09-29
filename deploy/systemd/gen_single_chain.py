@@ -258,23 +258,35 @@ def generate_validator_keys(metanode_bin: str, keys_dir: str) -> tuple:
 
 _BLS_PUBKEY_BIN_CACHE = None
 
-def derive_min_pk_pubkey(secret_hex: str) -> str:
-    """Derives the real pkg/bls (min-pk, 48-byte G1) public key from a BLS secret scalar, as
-    base64. Real fix for a genesis-generation bug found 2026-08-26 while live-testing P4 relayer
-    automation: this script used to write the min_sig (96-byte G2, Rust consensus authority)
-    public key straight into an account's genesis publicKeyBls field -- but
-    AccountState.SetPublicKeyBls (execution/pkg/state/account_state.go) requires EXACTLY 48
-    bytes, the min-pk convention every cross-chain BLS call in the Go codebase actually uses
-    (CommitteeAttestationWorker/CommitAttestationWorker signing with Databases.BLSPrivateKey,
-    register_chains building founding committees). Writing the wrong 96-byte encoding meant a
-    validator's own on-chain identity never matched the min-pk pubkey it (and register_chains)
-    actually signs with -- committeeContains() never found a match, so validators silently never
-    submitted a single real commit/committee attestation share, and cross-chain automation
+def derive_min_pk_pubkey(secret_hex: str) -> tuple:
+    """Derives the real pkg/bls (min-pk, 48-byte G1) public key AND its bls.KeyPair.Address()
+    from a BLS secret scalar, returned as (pubkey_b64, address_0x_hex). Real fix for a
+    genesis-generation bug found 2026-08-26 while live-testing P4 relayer automation: this
+    script used to write the min_sig (96-byte G2, Rust consensus authority) public key straight
+    into an account's genesis publicKeyBls field -- but AccountState.SetPublicKeyBls
+    (execution/pkg/state/account_state.go) requires EXACTLY 48 bytes, the min-pk convention
+    every cross-chain BLS call in the Go codebase actually uses (CommitteeAttestationWorker/
+    CommitAttestationWorker signing with Databases.BLSPrivateKey, register_chains building
+    founding committees). Writing the wrong 96-byte encoding meant a validator's own on-chain
+    identity never matched the min-pk pubkey it (and register_chains) actually signs with --
+    committeeContains() never found a match, so validators silently never submitted a single
+    real commit/committee attestation share, and cross-chain automation
     (RelayerDaemon.WatchChainPair) hung forever waiting for a quorum that could never form.
     Same secret scalar, but min-pk and min-sig derive genuinely different, incompatible public
     keys from it -- there is no way to convert one to the other, only to derive both separately
     (metanode-keytool already generated the min_sig half; this derives the min-pk half via the
-    same execution/pkg/bls Go library every real cross-chain caller uses)."""
+    same execution/pkg/bls Go library every real cross-chain caller uses).
+
+    The address half closes a SEPARATE, later-found bug (2026-09-29): this SAME secret is what
+    config.json's top-level "private_key" gets set to (see this function's call site below), and
+    cmd/simple_chain's app.keyPair = bls.NewKeyPair(that secret) is the identity that signs
+    cross-chain rollup system txs (app.go's eventProposer). app.keyPair.Address() is
+    keccak256(compressed pubkey)[12:] -- a completely different address from config.json's own
+    "address" field (a separately-generated, unrelated ECDSA identity). Before this fix, NO
+    genesis alloc entry ever existed for app.keyPair.Address(), so it had no registered
+    PublicKeyBls and every rollup system tx it signed failed "invalid sign" -- reproduced and
+    fixed first on the execution/scripts/test devnet (see run_devnet.sh's self_alloc), then
+    traced back to this exact same gap in real deployment genesis generation."""
     global _BLS_PUBKEY_BIN_CACHE
     if _BLS_PUBKEY_BIN_CACHE is None:
         candidates = [
@@ -303,13 +315,18 @@ def derive_min_pk_pubkey(secret_hex: str) -> str:
                     sys.exit(1)
         _BLS_PUBKEY_BIN_CACHE = str(bin_path)
     result = subprocess.run(
-        [_BLS_PUBKEY_BIN_CACHE, "-secret", secret_hex],
+        [_BLS_PUBKEY_BIN_CACHE, "-secret", secret_hex, "-with-address"],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
         print(red(f"ERROR: bls_pubkey helper failed:\n{result.stderr}"))
         sys.exit(1)
-    return result.stdout.strip()
+    lines = result.stdout.strip().splitlines()
+    if len(lines) != 2:
+        print(red(f"ERROR: bls_pubkey helper returned unexpected output (expected 2 lines: pubkey b64, address): {result.stdout!r}"))
+        print(red("If you rebuilt this repo's Go sources, delete execution/bls_pubkey (or any other cached copy this script finds) and re-run so it gets rebuilt."))
+        sys.exit(1)
+    return lines[0], lines[1]  # (pubkey_b64, address_0x_hex)
 
 def generate_eth_dev_account(metanode_bin=None):
     """Generates a random secp256k1 Ethereum private key and derives its 0x address without external dependencies."""
@@ -553,7 +570,9 @@ def main():
         # Real min-pk (48-byte G1) pubkey derived from the SAME secret scalar authority_key
         # uses -- see derive_min_pk_pubkey's doc comment for why this is a separate value from
         # bls["authority_key"] (that one stays min_sig/G2, used only for consensus identity).
-        bls["min_pk_pubkey_b64"] = derive_min_pk_pubkey(bls["authority_key_private"])
+        # app_keypair_address is this SAME secret's bls.KeyPair.Address() -- see
+        # derive_min_pk_pubkey's doc comment for why this needs its own alloc entry below.
+        bls["min_pk_pubkey_b64"], bls["app_keypair_address"] = derive_min_pk_pubkey(bls["authority_key_private"])
         validator_keys_list.append((bls, eth))
 
         eth_addr = eth["address"].lower()
@@ -594,6 +613,27 @@ def main():
             # Real min-pk pubkey (see derive_min_pk_pubkey's doc comment) -- NOT
             # bls["authority_key"] (min_sig/G2, consensus-only). Hex-encoded to match this
             # field's own convention (see the dev-account publicKeyBls entries below).
+            "publicKeyBls": "0x" + base64.b64decode(bls["min_pk_pubkey_b64"]).hex()
+        })
+
+        # Separate alloc entry for app_keypair_address (see derive_min_pk_pubkey's doc comment):
+        # cmd/simple_chain's app.keyPair.Address() -- the identity that signs cross-chain rollup
+        # system txs (app.go's eventProposer) -- is a DIFFERENT address from eth_addr above even
+        # though both derive from the same underlying secret, because app.keyPair.Address() uses
+        # keccak256(BLS pubkey)[12:] while eth_addr is a separately-generated, unrelated ECDSA
+        # identity. Without this entry, app.keyPair.Address() has no registered PublicKeyBls and
+        # every rollup system tx it signs fails "invalid sign" in every real deployment -- found
+        # and fixed 2026-09-29 while closing out the rollup cross-chain-credit flow end to end.
+        # Kept "0x"-prefixed (bls["app_keypair_address"] already is, via Go's Address.Hex()),
+        # matching every other alloc[].address entry in this file (eth_addr's own entry above,
+        # the relayer identity below, etc.) -- confirmed by inspecting a generated genesis.json:
+        # 62/63 existing alloc entries are "0x"-prefixed, only bare where explicitly intended.
+        alloc_list.append({
+            "address": bls["app_keypair_address"].lower(),
+            "balance": alloc_wei,
+            "pending_balance": "0",
+            "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
             "publicKeyBls": "0x" + base64.b64decode(bls["min_pk_pubkey_b64"]).hex()
         })
 
@@ -802,6 +842,12 @@ def main():
             _submitter_addr_bare = node_submitter_addr[2:] if node_submitter_addr.lower().startswith("0x") else node_submitter_addr
             free_fee_list.append(_submitter_addr_bare)
             free_fee_list.append("7d8bfbaba9268b59bab9ef8ff3f314d3f5747366")  # shared relayer devnet identity
+            # app.keyPair.Address() (see derive_min_pk_pubkey's doc comment) signs cross-chain
+            # rollup system txs -- same "infra identity needs to transact but deterministic-genesis
+            # gives it zero funded balance" situation as the submitter/relayer above. [2:], not
+            # .lstrip("0x") -- see the alloc_list.append call site's own comment on this.
+            _app_keypair_addr_bare2 = bls["app_keypair_address"][2:] if bls["app_keypair_address"].lower().startswith("0x") else bls["app_keypair_address"]
+            free_fee_list.append(_app_keypair_addr_bare2.lower())
 
         exec_config = {
             "debug": False,
