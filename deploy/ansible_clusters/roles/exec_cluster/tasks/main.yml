@@ -106,7 +106,6 @@
                 dev_data = json.load(df)
             allowed_groups = [
                 'cluster_' + cid,
-                'cum_' + cid,
                 cid,
                 cname,
                 '10' + cid,
