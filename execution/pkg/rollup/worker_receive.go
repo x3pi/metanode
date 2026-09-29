@@ -2,9 +2,9 @@ package rollup
 
 import (
 	"log"
-	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -15,13 +15,31 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 )
 
-var RollupCursorKey = crypto.Keccak256Hash([]byte("RollupCursorKey"))
-
 type ReceiveWorker struct {
 	store       Store
 	stateDB     AccountStateDB
 	client      parentchain.Client
 	blsKeyPair  *bls.KeyPair
+
+	// cursor is kept IN-MEMORY ONLY, not persisted via store/SmartContractDB. It used to be
+	// written directly with dbStore.scDB.SetStorageValue() from this worker's own goroutine,
+	// outside any barrier-tx execution -- but chainState's SmartContractDB pointer gets
+	// wholesale REPLACED (cmd/simple_chain/processor/speculative_executor.go's committer,
+	// bp.chainState.SetSmartContractDB(...)) every time a block containing ANY real tx commits,
+	// swapping in a speculative clone that was snapshotted BEFORE this worker's direct write
+	// happened -- silently discarding it. Confirmed live: setCursor(1)'s own immediate readback
+	// correctly showed 1, but the very next 5s poll tick read back 0 again, every time, because
+	// at least one such swap happened in between (this devnet's system-tx retries alone produced
+	// dozens of them). The cursor is a pure "don't re-fetch already-seen events" optimization,
+	// not a correctness requirement -- handleIncomingTransfer's real duplicate-safety comes from
+	// IsDuplicate (store.Get(msgID), which DOES persist reliably because it's only ever written
+	// from inside a real barrier-tx execution against that tx's own chainState, per this
+	// session's earlier CrossNodeHandler fix). Keeping the cursor in memory sidesteps the whole
+	// swap-discards-writes class of bug for this piece of state entirely; the worst case on a
+	// process restart is a burst of re-fetched "duplicate" events, which the state machine now
+	// (see statemachine.go's EventCreditObserved idempotent cases) rejects cleanly instead of
+	// erroring.
+	cursor atomic.Uint64
 
 	Validator func(common.Address) bool
 
@@ -65,25 +83,11 @@ func (w *ReceiveWorker) WakeUp() {
 }
 
 func (w *ReceiveWorker) getCursor() uint64 {
-	dbStore, ok := w.store.(*DBStore)
-	if !ok {
-		return 0
-	}
-	data, found := dbStore.scDB.StorageValue(RollupSystemAddress, RollupCursorKey)
-	if !found || len(data) < 8 {
-		return 0
-	}
-	// deserialize uint64 (big endian)
-	return common.BytesToHash(data).Big().Uint64()
+	return w.cursor.Load()
 }
 
 func (w *ReceiveWorker) setCursor(cursor uint64) {
-	dbStore, ok := w.store.(*DBStore)
-	if !ok {
-		return
-	}
-	val := common.BigToHash(new(big.Int).SetUint64(cursor)).Bytes()
-	dbStore.scDB.SetStorageValue(RollupSystemAddress, RollupCursorKey, val)
+	w.cursor.Store(cursor)
 }
 
 func (w *ReceiveWorker) isReleasable(record *MessageRecord) bool {
@@ -293,7 +297,12 @@ func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) {
 		// Apply Actions (CreditLocal or SendRefund)
 		for _, action := range actions {
 			if action.Type == ActionCreditLocal {
-				w.stateDB.SubBalance(action.Target, new(big.Int).Neg(action.Amount))
+				// See cross_node_handler.go's HandleSystemEvent for why this must be
+				// AddBalance, not SubBalance with a negated amount (AccountStateDB.SubBalance
+				// silently no-ops on a non-positive amount).
+				if err := w.stateDB.AddBalance(action.Target, action.Amount); err != nil {
+					log.Printf("ReceiveWorker: failed to credit local balance for %x: %v", rec.MessageID, err)
+				}
 			} else if action.Type == ActionSendRefund {
 				// Handle SendRefund (similar to what was in processMarkClaimedPendingRefund)
 				seq, err := w.store.GetNextFloatSeq()

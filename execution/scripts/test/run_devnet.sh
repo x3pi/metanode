@@ -46,7 +46,7 @@ devnet_sender_alloc = {
     'publicKeyBls': '0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc',
 }
 
-def build_genesis(exec_name, validator_address, committee_path):
+def build_genesis(exec_name, validator_address, committee_path, self_alloc):
     with open(committee_path) as f:
         committee = json.load(f)
     authority = committee['authorities'][0]
@@ -74,11 +74,44 @@ def build_genesis(exec_name, validator_address, committee_path):
     g['total_stake'] = 1000
     g['quorum_threshold'] = 1000
     g['validity_threshold'] = 1000
-    g['alloc'] = list(base.get('alloc', [])) + [devnet_sender_alloc]
+    g['alloc'] = list(base.get('alloc', [])) + [devnet_sender_alloc, self_alloc]
     return g
 
-exec1_genesis = build_genesis('exec1', '0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5', '../../../consensus/metanode/config/devnet_exec1_keys/committee.json')
-exec2_genesis = build_genesis('exec2', '0x0d4CC97b62a149a8fe8DE81262270426A80B0935', '../../../consensus/metanode/config/devnet_exec2_keys/committee.json')
+# Each exec node's own app.keyPair identity (bls.NewKeyPair(config.PrivateKey), address =
+# keccak256(compressed BLS pubkey)[12:]) is what SignS its own ROLLUP-PROPOSER system event
+# txs (rollup.RollupSystemAddress, submitted from app.go's eventProposer). This address happens
+# to equal validator_address above (both derived from the same private_key), but the genesis
+# validators[] entry above only carries Rust-consensus-level authority_key/protocol_key -- it
+# does NOT populate the Go-side AccountState.PublicKeyBls() field that transaction signature
+# verification (pkg/blockchain/tx_processor/validation.go) checks against. Without a matching
+# alloc[] entry (the ONLY genesis section that sets PublicKeyBls, same mechanism as
+# devnet_sender_alloc above), every self-signed system tx from this address permanently fails
+# with 'invalid sign' -- found live: ReceiveWorker successfully proposed EventCreditObserved to
+# TxValidatorPool, but every attempt was rejected at signature verification since
+# AccountStateReadOnly(app.keyPair.Address()).PublicKeyBls() came back empty. These addresses
+# and BLS public keys are precomputed from run_devnet.sh's own hardcoded exec1/exec2
+# private_key values below (bls.KeyPair.Address()/BytesPublicKey()) -- if those private_key
+# values are ever regenerated, these must be recomputed too (see execution/scripts/test's
+# throwaway go-run snippet used to derive them).
+exec1_self_alloc = {
+    'address': '0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5',
+    'balance': '2000000000000000000000000000000',
+    'pending_balance': '0',
+    'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
+    'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
+    'publicKeyBls': '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128',
+}
+exec2_self_alloc = {
+    'address': '0x0d4CC97b62a149a8fe8DE81262270426A80B0935',
+    'balance': '2000000000000000000000000000000',
+    'pending_balance': '0',
+    'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
+    'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
+    'publicKeyBls': '0x83221629eeff1a69aa96ac6aadea402a7b62a74647633c0743cd517b71dcd5cd39fec42841b953fc481dac039bceb465',
+}
+
+exec1_genesis = build_genesis('exec1', '0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5', '../../../consensus/metanode/config/devnet_exec1_keys/committee.json', exec1_self_alloc)
+exec2_genesis = build_genesis('exec2', '0x0d4CC97b62a149a8fe8DE81262270426A80B0935', '../../../consensus/metanode/config/devnet_exec2_keys/committee.json', exec2_self_alloc)
 
 with open('devnet_data/exec1/genesis.json', 'w') as f:
     json.dump(exec1_genesis, f, indent=2)

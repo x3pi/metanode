@@ -16,6 +16,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
@@ -298,7 +299,15 @@ func VerifyTransaction(
 		if !tx.ValidDeployData() {
 			return transaction.InvalidDeployData
 		}
-		if !tx.ValidCallData() {
+		// RollupSystemAddress system-event txs (app.go's eventProposer, dispatched to
+		// RollupSystemHandler) are deliberately NOT ETH CallData-wrapped — RollupSystemHandler
+		// reads tx.Data() directly since the payload is a plain JSON-marshaled rollupSystemPayload,
+		// not an ABI-encoded call. ValidCallData() unconditionally requires a well-formed
+		// CallData envelope for any IsCallContract() tx, so without this exemption every such tx
+		// was rejected with "invalid call data" the moment it started actually reaching this
+		// validator (previously masked because these txs went to a dead pool that TxValidatorPool
+		// never processed at all — see app.go's AddTransactionToPool fix).
+		if !tx.ValidCallData() && tx.ToAddress() != rollup.RollupSystemAddress {
 			return transaction.InvalidCallData
 		}
 
@@ -313,7 +322,10 @@ func VerifyTransaction(
 		// no-code address and no-ops, same as calling any other empty EOA.
 		if tx.IsCallContract() && tx.GetType() != uint64(e_types.SetCodeTxType) {
 			toAddress := tx.ToAddress()
-			if toAddress != common.VALIDATOR_CONTRACT_ADDRESS && toAddress != common.GATEWAY_CONTRACT_ADDRESS && toAddress != common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS {
+			// RollupSystemAddress has no deployed SmartContractState (it's a barrier-tx marker
+			// address dispatched natively by TrueBlockSTM, exactly like VALIDATOR/GATEWAY/
+			// PARENT_CHAIN_GATEWAY below), so it must be exempted the same way.
+			if toAddress != common.VALIDATOR_CONTRACT_ADDRESS && toAddress != common.GATEWAY_CONTRACT_ADDRESS && toAddress != common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS && toAddress != rollup.RollupSystemAddress {
 				toAccount, err := chainState.GetAccountStateDB().AccountStateReadOnly(toAddress)
 				if err != nil || toAccount == nil || toAccount.SmartContractState() == nil {
 					logger.Warn("❌ [VERIFY] Invalid call to non-existent smart contract: %s (txHash=%s)", tx.ToAddress().Hex(), tx.Hash().Hex())

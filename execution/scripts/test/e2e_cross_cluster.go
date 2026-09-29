@@ -112,7 +112,11 @@ func main() {
 			if m, ok := res2["result"].(map[string]interface{}); ok && m != nil {
 				if balStr, ok := m["balance"].(string); ok {
 					bal := new(big.Int)
-					bal.SetString(trimHex(balStr), 16)
+					// mtn_getAccountState's "balance" is big.Int.String() (decimal), NOT a
+					// 0x-prefixed hex string like most other RPC fields in this codebase --
+					// parsing it as base 16 silently mangled the reported amount (777 decimal
+					// read back as "1911" here, since "777" is also a valid hex literal).
+					bal.SetString(balStr, 10)
 					if bal.Sign() > 0 {
 						fmt.Printf("   SUCCESS: exec2 balance for %s = %s\n", targetAddr.Hex(), bal.String())
 						return

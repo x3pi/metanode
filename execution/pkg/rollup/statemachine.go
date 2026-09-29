@@ -197,6 +197,21 @@ func Next(current State, recordRole Role, event Event) (State, []Action, error) 
 		if current == StateMarkedClaimedPendingRefund && !event.IsDuplicate && !event.IsDestinationValid {
 			return StateMarkedClaimedPendingRefund, nil, nil // Idempotent
 		}
+		// General idempotent case: a re-observation (IsDuplicate=true, i.e. store.Get(msgID)
+		// already found a record) of a message that's already progressed past StateNone into
+		// ANY other state is always safe to no-op rather than error. The 3 specific cases above
+		// only cover exact (state, IsDuplicate, IsDestinationValid) combinations; this catches
+		// every other already-progressed state (e.g. StateMarkedClaimedPendingCredit with
+		// IsDuplicate=true, which the second check above does NOT cover since it requires
+		// !IsDuplicate). Found live: ReceiveWorker's inbound-transfer poll can re-discover and
+		// re-fire EventCreditObserved for an already-processed message (its cursor is
+		// intentionally in-memory-only now, see worker_receive.go's cursor field doc comment,
+		// so this WILL happen at least once after every process restart) -- without this, that
+		// re-fire errored instead of no-op'ing, and critically still consumed that poll tick's
+		// one dispatchable nonce slot ahead of the record's real next step, starving it.
+		if event.IsDuplicate && current != StateNone {
+			return current, nil, nil // Idempotent
+		}
 
 		if current != StateNone {
 			return current, nil, fmt.Errorf("%w: credit observed not allowed from state %s", ErrInvalidTransition, current)

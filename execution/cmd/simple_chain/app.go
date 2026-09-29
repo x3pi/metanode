@@ -326,18 +326,39 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			rollup.RollupSystemAddress,
 			big.NewInt(0),
 			21000,
-			0, // maxGasPrice
+			1_000_000_000, // maxGasPrice: only the FIRST system tx from this address (nonce 0)
+			// is fee-exempt (validation.go's "tx.GetNonce() == 0 { isFree = true }" rule) --
+			// every later one (e.g. the EventClaimedConfirmed leg) is a normal fee-paying tx and
+			// must clear common.MINIMUM_BASE_FEE (100000); found live with maxGasPrice=0:
+			// "invalid max gas price, expected at least 100000" on the second system tx. The
+			// self_alloc balance run_devnet.sh's build_genesis gives this address is large
+			// enough to cover this indefinitely.
 			0, // maxTimeUse
 			eventData,
 			nil, // relatedAddresses
 			e_common.Hash{}, // lastDeviceKey
 			e_common.Hash{}, // newDeviceKey
 			rollupPendingNonce,
-			uint64(1), // chainID
+			app.config.ChainId.Uint64(), // chainID: must match the real configured chain, not a
+			// hardcoded literal -- found live: hardcoded 1 was rejected with "invalid chain id"
+			// on this devnet, whose real ChainId is 991 (0x3df).
 		)
 		tx.SetSign(app.keyPair.PrivateKey())
 
-		err = app.transactionPool.AddTransaction(tx)
+		// Must go through TxValidatorPool (app.transactionProcessor's embedded pool), NOT
+		// app.transactionPool.AddTransaction(). app.transactionPool (pkg/transaction_pool) is
+		// only ever read for load-monitoring (CountTransactions() in processors.go's
+		// startSystemLoadMonitor) -- it is never drained by the Rust consensus leader when
+		// packing a block. TxValidatorPool is the pool every real RPC-submitted tx actually
+		// goes through (see rpc_transaction.go's sendRawEthTransactionSync ->
+		// ProcessTransactionFromRpc -> tp.AddTransactionToPool, an embedded-field-promoted
+		// TxValidatorPool method). Found live: a system event tx added via the old
+		// app.transactionPool.AddTransaction() sat forever with the sender's on-chain nonce
+		// never advancing (confirmed via eth_getTransactionCount staying 0 for 10+ minutes
+		// while Rust consensus rounds and DAG commits kept advancing normally) -- it was
+		// accepted into a pool nothing ever reads from, so it was silently never dispatched to
+		// RollupSystemHandler at all.
+		_, err = app.transactionProcessor.AddTransactionToPool(tx)
 		if err == nil {
 			rollupPendingNonce++
 			logger.Info("📡 [ROLLUP-PROPOSER] Proposed Event %T to Raft Tx Pool (Nonce %d)", event, tx.GetNonce())
@@ -448,12 +469,23 @@ type rollupSystemPayload struct {
 	PayloadHash  e_common.Hash `json:"payload_hash"`
 }
 
+// store is the WRITE store: barrier-tx-scoped (a speculative-execution snapshot), supplied by
+// RollupSystemHandler.HandleTransaction via newLiveRollupStore(chainState) where chainState is
+// that call's own per-tx parameter. app.rollupStore is passed separately as the READ store: it
+// is scoped to app.chainState directly (see NewApp's construction of app.rollupStore), which is
+// the live, always-current pointer that worker goroutines (e.g. ReceiveWorker) write through —
+// unlike the barrier-tx snapshot, it never goes stale relative to those writes. See
+// CrossNodeHandler.HandleSystemEvent's doc comment in pkg/rollup/cross_node_handler.go for why
+// this read/write split is required (a barrier-tx snapshot taken before a worker's own direct
+// Put() cannot see that Put(), causing e.g. EventClaimedConfirmed to be rejected against a
+// stale MARKED_CLAIMED_PENDING_CREDIT read even though the record had already advanced).
 func handleRollupSystemEvent(app *App, store rollup.Store, stateDB rollup.AccountStateDB, data []byte) error {
 	var payload rollupSystemPayload
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return fmt.Errorf("failed to unmarshal RollupSystemPayload: %w", err)
 	}
 	return app.crossNodeHandler.HandleSystemEvent(
+		app.rollupStore,
 		store,
 		stateDB,
 		payload.Event,

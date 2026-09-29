@@ -2,7 +2,6 @@ package rollup
 
 import (
 	"log"
-	"math/big"
 	"strings"
 	"sync"
 	"time"
@@ -226,9 +225,13 @@ func (w *ReclaimWorker) signReclaim(msgID common.Hash) []byte {
 func (w *ReclaimWorker) applyActions(actions []Action) {
 	for _, action := range actions {
 		if action.Type == ActionCreditLocal {
-			// SubBalance negative amount = add balance
-			// (Assuming SubBalance handles big ints properly)
-			w.stateDB.SubBalance(action.Target, new(big.Int).Neg(action.Amount))
+			// NOT SubBalance with a negated amount: AccountStateDB.SubBalance explicitly
+			// no-ops on any amount.Sign() <= 0, so a negated (negative) amount silently
+			// credits nothing. See cross_node_handler.go's HandleSystemEvent for the live
+			// incident this was found from.
+			if err := w.stateDB.AddBalance(action.Target, action.Amount); err != nil {
+				log.Printf("ReclaimWorker: failed to credit local balance: %v", err)
+			}
 		}
 	}
 }

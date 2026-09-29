@@ -13,6 +13,7 @@ import (
 
 type AccountStateDB interface {
 	GetBalance(addr common.Address) *big.Int
+	AddBalance(addr common.Address, amount *big.Int) error
 	SubBalance(addr common.Address, amount *big.Int)
 	GetNonce(addr common.Address) uint64
 	SetNonce(addr common.Address, nonce uint64)
@@ -139,14 +140,28 @@ func (h *CrossNodeHandler) HandleTransfer(
 // This MUST be called by the transaction executor during Raft block processing
 // to ensure zero state drift across all replicas.
 //
-// stateDB and store have the same per-call freshness requirement documented on HandleTransfer
-// above — both must come from the calling barrier-tx execution's own chainState, not a
-// reference captured once at App-construction time.
-func (h *CrossNodeHandler) HandleSystemEvent(store Store, stateDB AccountStateDB, event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error {
+// stateDB and writeStore have the same per-call freshness requirement documented on
+// HandleTransfer above — both must come from the calling barrier-tx execution's own chainState
+// (a snapshot), not a reference captured once at App-construction time, so this call's writes
+// get included in whatever eventually gets promoted to the live chainState.
+//
+// readStore is DIFFERENT on purpose: it must be scoped to the live, always-current chainState
+// (e.g. app.chainState in cmd/simple_chain), NOT the same barrier-tx snapshot as writeStore.
+// The barrier-tx snapshot is taken at some earlier point in the speculative-execution pipeline
+// and never refreshes — a worker goroutine's own direct Put() (e.g. ReceiveWorker.
+// processMarkClaimedPendingCredit advancing a record to StateMarkClaimedSubmitted) that lands
+// AFTER that snapshot was taken but BEFORE this barrier tx dispatches is invisible to a read
+// through writeStore/the snapshot. Found live: HandleSystemEvent's own Get(msgID) kept seeing
+// the record stuck at StateMarkedClaimedPendingCredit — one step behind what the worker had
+// already durably advanced it to — so EventClaimedConfirmed was rejected every time with
+// "cannot confirm claimed from state MARKED_CLAIMED_PENDING_CREDIT" even though the real,
+// current record was already at StateMarkClaimedSubmitted. Reading through readStore instead
+// fixes this; the final Put still goes through writeStore so THIS call's own result is durable.
+func (h *CrossNodeHandler) HandleSystemEvent(readStore Store, writeStore Store, stateDB AccountStateDB, event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	rec, found, err := store.Get(msgID)
+	rec, found, err := readStore.Get(msgID)
 	if err != nil {
 		return fmt.Errorf("failed to get record: %w", err)
 	}
@@ -187,8 +202,15 @@ func (h *CrossNodeHandler) HandleSystemEvent(store Store, stateDB AccountStateDB
 		if action.Type == ActionDeductBalance {
 			stateDB.SubBalance(action.Target, action.Amount)
 		} else if action.Type == ActionCreditLocal {
-			// Credit is negative deduction
-			stateDB.SubBalance(action.Target, new(big.Int).Neg(action.Amount))
+			// Must use AddBalance, not SubBalance with a negated amount: AccountStateDB.SubBalance
+			// (pkg/account_state_db/account_state_db_mutations.go) explicitly guards
+			// `amount.Sign() <= 0` as a no-op ("subtracting zero or negative"), so a negated
+			// (negative) amount silently credited nothing at all. Found live: EventClaimedConfirmed
+			// processed with no error every time, MarkClaimed on the Parent Chain genuinely
+			// succeeded, yet the destination's on-chain balance stayed 0 forever.
+			if err := stateDB.AddBalance(action.Target, action.Amount); err != nil {
+				return fmt.Errorf("failed to credit local balance: %w", err)
+			}
 		}
 		// Note: ActionSendRefund is not applied here. It requires sending an HTTP request,
 		// which is non-deterministic and must be done by a background worker polling the state,
@@ -196,7 +218,7 @@ func (h *CrossNodeHandler) HandleSystemEvent(store Store, stateDB AccountStateDB
 	}
 
 	rec.State = newState
-	if err := store.Put(rec); err != nil {
+	if err := writeStore.Put(rec); err != nil {
 		return fmt.Errorf("failed to save record: %w", err)
 	}
 

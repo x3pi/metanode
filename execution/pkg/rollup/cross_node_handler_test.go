@@ -31,9 +31,26 @@ func (m *mockAccountStateDB) GetBalance(addr common.Address) *big.Int {
 	return big.NewInt(0)
 }
 
-func (m *mockAccountStateDB) SubBalance(addr common.Address, amount *big.Int) {
+func (m *mockAccountStateDB) AddBalance(addr common.Address, amount *big.Int) error {
 	bal := m.GetBalance(addr) // locks inside GetBalance
-	
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.balances[addr] = new(big.Int).Add(bal, amount)
+	return nil
+}
+
+func (m *mockAccountStateDB) SubBalance(addr common.Address, amount *big.Int) {
+	// Mirrors the real AccountStateDB.SubBalance's guard (pkg/account_state_db/
+	// account_state_db_mutations.go): a non-positive amount is a no-op. Without this, the mock
+	// silently accepted `SubBalance(addr, negativeAmount)` as a way to credit balance, which is
+	// exactly the real bug ActionCreditLocal handling had (see cross_node_handler.go) -- masking
+	// it here would let that regression slip back in unnoticed.
+	if amount == nil || amount.Sign() <= 0 {
+		return
+	}
+	bal := m.GetBalance(addr) // locks inside GetBalance
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.balances[addr] = new(big.Int).Sub(bal, amount)
