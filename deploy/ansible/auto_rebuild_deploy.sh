@@ -40,6 +40,47 @@ load_telegram_config() {
     export TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-""}"
 }
 
+detect_server_ip() {
+    local py_ip
+    py_ip=$(python3 -c "
+import socket, subprocess
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0.5)
+    s.connect(('8.8.8.8', 80))
+    ip = s.getsockname()[0]
+    s.close()
+    if ip and not ip.startswith('127.') and ip != '0.0.0.0':
+        print(ip)
+        exit(0)
+except Exception:
+    pass
+try:
+    out = subprocess.check_output(['hostname', '-I'], text=True).strip()
+    for ip in out.split():
+        if ip and not ip.startswith('127.') and ':' not in ip and ip != '0.0.0.0':
+            print(ip)
+            exit(0)
+except Exception:
+    pass
+" 2>/dev/null || true)
+    if [ -n "$py_ip" ]; then
+        echo "$py_ip"
+        return
+    fi
+
+    local host_ips
+    host_ips=$(hostname -I 2>/dev/null || true)
+    for ip in $host_ips; do
+        if [[ -n "$ip" && "$ip" != 127.* && "$ip" != *:* && "$ip" != "0.0.0.0" ]]; then
+            echo "$ip"
+            return
+        fi
+    done
+
+    echo "127.0.0.1"
+}
+
 send_telegram_notification() {
     local message="$1"
     if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
@@ -296,8 +337,11 @@ cmd_run_now() {
     commit_author=$(git log -1 --pretty=%an)
     export DEPLOY_SOURCE="Auto-Deploy Manual Run-Now (Branch: ${target_branch}, Git Commit ${current_hash:0:8} by ${commit_author}: \"${commit_msg}\")"
 
+    local server_ip
+    server_ip=$(detect_server_ip)
     echo "🚀 Kích hoạt build & deploy hệ thống ngay lập tức (từ clean HEAD: ${current_hash:0:8})..."
     send_telegram_notification "🚀 <b>[Kích Hoạt Deploy Thủ Công (Run-Now)]</b>
+• <b>Server IP:</b> <code>${server_ip}</code>
 Đang tiến hành biên dịch và restart toàn bộ cụm node lên commit <code>${current_hash:0:8}</code>...
 • <b>Tác giả:</b> ${commit_author}
 • <b>Nội dung:</b> <i>${commit_msg}</i>"
@@ -309,12 +353,14 @@ cmd_run_now() {
         cd "$PROJECT_ROOT" || exit 1
         echo "✅ Deploy hoàn tất thành công!"
         send_telegram_notification "✅ <b>[Deploy Thủ Công Hoàn Tất]</b>
+• <b>Server IP:</b> <code>${server_ip}</code>
 Cụm node đã được cập nhật thành công lên commit <code>${current_hash:0:8}</code>!"
         run_post_deploy_tests "$current_hash"
     else
         cd "$PROJECT_ROOT" || exit 1
         echo "❌ Lỗi xảy ra trong quá trình deploy!"
         send_telegram_notification "❌ <b>[LỖI DEPLOY THỰC TẾ]</b>
+• <b>Server IP:</b> <code>${server_ip}</code>
 Tiến trình cập nhật lên commit <code>${current_hash:0:8}</code> ĐÃ THẤT BẠI ở bước chạy ansible_deploy (biên dịch hoặc triển khai lỗi)!"
         deploy_status=1
     fi
@@ -682,7 +728,10 @@ while true; do
             COMMIT_AUTHOR=$(git log -1 --pretty=%an)
             export DEPLOY_SOURCE="Auto-Deploy (Scheduled ${SCHEDULE_AT}, Branch: ${BRANCH}, Git Commit ${CURRENT_LOCAL:0:8} by ${COMMIT_AUTHOR}: \"${COMMIT_MSG}\")"
 
+            local server_ip
+            server_ip=$(detect_server_ip)
             send_telegram_notification "🚀 <b>[Đến Giờ Hẹn Deploy ${SCHEDULE_AT}]</b>
+• <b>Server IP:</b> <code>${server_ip}</code>
 Đã đến lịch hẹn! Tiến hành triển khai commit <code>${CURRENT_LOCAL:0:8}</code> lên toàn bộ cụm node...
 • <b>Tác giả:</b> ${COMMIT_AUTHOR}
 • <b>Nội dung:</b> <i>${COMMIT_MSG}</i>"
@@ -694,12 +743,14 @@ while true; do
                 cd "$PROJECT_ROOT" || exit 1
                 echo "✅ Hoàn tất deploy theo lịch hẹn ${SCHEDULE_AT}!"
                 send_telegram_notification "✅ <b>[Deploy Lịch Hẹn Hoàn Tất]</b>
+• <b>Server IP:</b> <code>${server_ip}</code>
 Cụm node đã được cập nhật thành công lên commit <code>${CURRENT_LOCAL:0:8}</code>!"
                 run_post_deploy_tests "$CURRENT_LOCAL"
             else
                 cd "$PROJECT_ROOT" || exit 1
                 echo "❌ Lỗi xảy ra trong quá trình deploy theo lịch hẹn!"
                 send_telegram_notification "❌ <b>[LỖI DEPLOY THỰC TẾ]</b>
+• <b>Server IP:</b> <code>${server_ip}</code>
 Tiến trình cập nhật lên commit <code>${CURRENT_LOCAL:0:8}</code> ĐÃ THẤT BẠI ở bước chạy ansible_deploy (biên dịch hoặc triển khai lỗi)!"
             fi
 
@@ -799,9 +850,12 @@ Hệ thống phát hiện commit mới trên nhánh <code>${BRANCH}</code>:
                     NEW_LOCAL_HASH=$(git rev-parse HEAD)
                     echo "✅ Đã kéo mã nguồn về thành công (HEAD: ${NEW_LOCAL_HASH:0:8})."
 
+                    local server_ip
+                    server_ip=$(detect_server_ip)
                     export DEPLOY_SOURCE="Auto-Deploy Immediate (Branch: ${BRANCH}, Git Commit ${NEW_LOCAL_HASH:0:8} by ${COMMIT_AUTHOR}: \"${COMMIT_MSG}\")"
                     echo "🚀 Kích hoạt build & deploy hệ thống ngay lập tức (từ clean HEAD: ${NEW_LOCAL_HASH:0:8})..."
                     send_telegram_notification "🚀 <b>[Kích Hoạt Deploy Ngay Lập Tức]</b>
+• <b>Server IP:</b> <code>${server_ip}</code>
 Đang tiến hành biên dịch và restart toàn bộ cụm node lên commit <code>${NEW_LOCAL_HASH:0:8}</code>...
 • <b>Tác giả:</b> ${COMMIT_AUTHOR}
 • <b>Nội dung:</b> <i>${COMMIT_MSG}</i>"
@@ -810,11 +864,13 @@ Hệ thống phát hiện commit mới trên nhánh <code>${BRANCH}</code>:
                         echo "$NEW_LOCAL_HASH" > "$LAST_DEPLOYED_FILE"
                         cd "$PROJECT_ROOT" || exit 1
                         send_telegram_notification "✅ <b>[Deploy Hoàn Tất]</b>
+• <b>Server IP:</b> <code>${server_ip}</code>
 Cụm node đã được cập nhật thành công lên commit <code>${NEW_LOCAL_HASH:0:8}</code>!"
                         run_post_deploy_tests "$NEW_LOCAL_HASH"
                     else
                         cd "$PROJECT_ROOT" || exit 1
                         send_telegram_notification "❌ <b>[LỖI DEPLOY THỰC TẾ]</b>
+• <b>Server IP:</b> <code>${server_ip}</code>
 Tiến trình cập nhật lên commit <code>${NEW_LOCAL_HASH:0:8}</code> ĐÃ THẤT BẠI ở bước chạy ansible_deploy (biên dịch hoặc triển khai lỗi)!"
                     fi
 

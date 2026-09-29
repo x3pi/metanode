@@ -534,6 +534,47 @@ func getIgnoredNodes() map[string]bool {
 	return ignored
 }
 
+func getSystemIPInfo() string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "Unknown"
+	}
+
+	var localIPs []string
+	addrs, err := net.InterfaceAddrs()
+	if err == nil {
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				if ipnet.IP.To4() != nil {
+					localIPs = append(localIPs, ipnet.IP.String())
+				}
+			}
+		}
+	}
+	localIPStr := "Unknown"
+	if len(localIPs) > 0 {
+		localIPStr = strings.Join(localIPs, ", ")
+	}
+
+	publicIP := "Unknown"
+	client := http.Client{
+		Timeout: 2 * time.Second,
+	}
+	resp, err := client.Get("https://api.ipify.org")
+	if err == nil {
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err == nil {
+			publicIP = strings.TrimSpace(string(body))
+		}
+	}
+
+	if publicIP != "Unknown" {
+		return fmt.Sprintf("%s (IP: %s, Public IP: %s)", hostname, localIPStr, publicIP)
+	}
+	return fmt.Sprintf("%s (IP: %s)", hostname, localIPStr)
+}
+
 func sendTelegramAlert(title string, message string, isRecovery bool) {
 	if noAlert || telegramBotToken == "" || telegramChatID == "" {
 		return
@@ -546,7 +587,8 @@ func sendTelegramAlert(title string, message string, isRecovery bool) {
 		header = fmt.Sprintf("🚨 *[%s]*", title)
 	}
 
-	fullMsg := fmt.Sprintf("%s\n\n%s\n\n🕒 _Time: %s_", header, message, time.Now().Format("2006-01-02 15:04:05"))
+	ipInfo := getSystemIPInfo()
+	fullMsg := fmt.Sprintf("%s\n\n*Server:* `%s`\n\n%s\n\n🕒 _Time: %s_", header, ipInfo, message, time.Now().Format("2006-01-02 15:04:05"))
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", telegramBotToken)
 	payload := map[string]string{
 		"chat_id":    telegramChatID,

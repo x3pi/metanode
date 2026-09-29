@@ -15,6 +15,46 @@ def get_local_ips():
         pass
     return ips
 
+def get_primary_ip():
+    """
+    Detects the outward-facing non-loopback IPv4 address of the local machine.
+    Prefers real LAN/Public IP instead of loopback (127.0.0.1 / localhost).
+    """
+    # 1. Try UDP probe (kernel routing lookup, no packets sent)
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith('127.') and ip != '0.0.0.0':
+            return ip
+    except Exception:
+        pass
+
+    # 2. Try parsing hostname -I
+    try:
+        out = subprocess.check_output(['hostname', '-I'], text=True).strip()
+        for ip in out.split():
+            ip = ip.strip()
+            if ip and not ip.startswith('127.') and ':' not in ip and ip != '0.0.0.0':
+                return ip
+    except Exception:
+        pass
+
+    # 3. Fallback to socket gethostbyname
+    try:
+        import socket
+        hname = socket.gethostname()
+        ip = socket.gethostbyname(hname)
+        if ip and not ip.startswith('127.') and ip != '0.0.0.0':
+            return ip
+    except Exception:
+        pass
+
+    return '127.0.0.1'
+
 def find_vault_password_file(inv_file=None):
     """
     Locates the Ansible Vault password file from:
@@ -117,6 +157,7 @@ def parse_inventory(file_path):
         return err
 
     local_ips = get_local_ips()
+    primary_ip = get_primary_ip()
     default_user = os.environ.get('USER', 'abc')
     
     # Try parsing via PyYAML if available
@@ -147,6 +188,8 @@ def parse_inventory(file_path):
                 if not isinstance(hvars, dict):
                     hvars = {}
                 ip = str(hvars.get('ansible_host', host_key)).strip()
+                if ip in ('127.0.0.1', 'localhost', '::1', '0.0.0.0') or ip.startswith('127.') or not ip:
+                    ip = primary_ip
                 ansible_conn = str(hvars.get('ansible_connection', global_conn)).strip().lower()
                 node_ids = hvars.get('node_ids', [])
                 synconly_nodes = hvars.get('synconly_nodes', [])
@@ -242,6 +285,9 @@ def parse_inventory(file_path):
             if ip_match:
                 ip = ip_match.group(0)
 
+        if ip in ('127.0.0.1', 'localhost', '::1', '0.0.0.0') or ip.startswith('127.') or not ip:
+            ip = primary_ip
+
         # VALIDATION 1
         if ansible_conn == 'local' and ip not in local_ips:
             print(f"\n\033[0;31m❌ [LỖI CẤU HÌNH INVENTORY] Host '{host_key}' cấu hình sai 'ansible_connection: local'!\033[0m", file=sys.stderr)
@@ -281,6 +327,7 @@ def check_reachability(inv_file, target_node='all', timeout=2.0):
         return False
 
     local_ips = get_local_ips()
+    primary_ip = get_primary_ip()
     hosts_to_check = []  # list of (host_key, ip, port)
 
     try:
@@ -303,6 +350,8 @@ def check_reachability(inv_file, target_node='all', timeout=2.0):
                 if not isinstance(hvars, dict):
                     hvars = {}
                 ip = str(hvars.get('ansible_host', host_key)).strip()
+                if ip in ('127.0.0.1', 'localhost', '::1', '0.0.0.0') or ip.startswith('127.') or not ip:
+                    ip = primary_ip
                 ansible_conn = str(hvars.get('ansible_connection', global_conn)).strip().lower()
                 ansible_port = int(hvars.get('ansible_port', global_port))
                 node_ids = hvars.get('node_ids', [])
@@ -357,6 +406,9 @@ def check_reachability(inv_file, target_node='all', timeout=2.0):
                     ip_match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', ip)
                     if ip_match:
                         ip = ip_match.group(0)
+
+                if ip in ('127.0.0.1', 'localhost', '::1', '0.0.0.0') or ip.startswith('127.') or not ip:
+                    ip = primary_ip
 
                 if target_node != 'all':
                     try:

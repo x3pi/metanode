@@ -102,11 +102,47 @@ def get_git_info():
             "message": "N/A",
         }
 
+def get_server_ip():
+    """Detect outward-facing server IP address, avoiding loopback (127.0.0.1/localhost)."""
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith('127.') and ip != '0.0.0.0':
+            return ip
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(["hostname", "-I"], text=True).strip()
+        for ip in out.split():
+            ip = ip.strip()
+            if ip and not ip.startswith('127.') and ':' not in ip and ip != '0.0.0.0':
+                return ip
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+def normalize_endpoint(endpoint, server_ip, default_port=""):
+    if not endpoint or endpoint == '?':
+        return f"http://{server_ip}:{default_port}" if default_port else f"{server_ip}"
+    ep = str(endpoint).strip()
+    if ep.startswith(':'):
+        return f"http://{server_ip}{ep}"
+    for loopback in ('127.0.0.1', 'localhost', '::1', '0.0.0.0'):
+        if loopback in ep:
+            return ep.replace(loopback, server_ip)
+    return ep
+
 def notify_deploy_start(clusters_info="Parent Chain + Exec Clusters", target_env="Local/Devnet"):
     git = get_git_info()
     now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+    server_ip = get_server_ip()
     msg = (
         f"🚀 <b>[METANODE CLUSTER DEPLOY BẮT ĐẦU]</b>\n\n"
+        f"🖥 <b>Server IP:</b> <code>{server_ip}</code>\n"
         f"🌿 <b>Nhánh:</b> <code>{html.escape(git['branch'])}</code>\n"
         f"📌 <b>Commit:</b> <code>{git['hash']}</code> (bởi <b>{html.escape(git['author'])}</b>)\n"
         f"💬 <b>Nội dung:</b> <i>{html.escape(git['message'])}</i>\n"
@@ -120,14 +156,15 @@ def notify_deploy_start(clusters_info="Parent Chain + Exec Clusters", target_env
 def notify_services_ready(parent_info, exec_clusters_info, duration_secs=0):
     git = get_git_info()
     now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+    server_ip = get_server_ip()
     
     exec_blocks = []
     for c in exec_clusters_info:
         name = html.escape(c.get('name', 'Cluster'))
         cid = c.get('cluster_id', '?')
         evm_chain = c.get('chain_id', 991)
-        rpc = c.get('rpc', '?')
-        p2p = c.get('p2p', '?')
+        rpc = normalize_endpoint(c.get('rpc', '?'), server_ip, "8545")
+        p2p = normalize_endpoint(c.get('p2p', '?'), server_ip, "9001")
         addr = c.get('address', '')
         bls_key = c.get('bls_key', '')
         blk = c.get('block_height', '0')
@@ -162,12 +199,13 @@ def notify_services_ready(parent_info, exec_clusters_info, duration_secs=0):
     
     clusters_text = "\n\n".join(exec_blocks) if exec_blocks else "  • Các cluster đã sẵn sàng"
 
-    parent_rpc = parent_info.get('rpc', ':8547')
-    parent_p2p = parent_info.get('p2p', ':9000')
+    parent_rpc = normalize_endpoint(parent_info.get('rpc', ':8547'), server_ip, "8547")
+    parent_p2p = normalize_endpoint(parent_info.get('p2p', ':9000'), server_ip, "9000")
     parent_status = parent_info.get('status', 'Active (BFT Core + Native Float)')
 
     msg = (
         f"✅ <b>[DỊCH VỤ CỤM METANODE ĐÃ KHỞI CHẠY THÀNH CÔNG]</b>\n\n"
+        f"🖥 <b>Server IP:</b> <code>{server_ip}</code>\n"
         f"🌿 <b>Nhánh:</b> <code>{html.escape(git['branch'])}</code>\n"
         f"📌 <b>Commit:</b> <code>{git['hash']}</code> (bởi <b>{html.escape(git['author'])}</b>)\n"
         f"⏱️ <b>Thời gian khởi chạy:</b> <code>{duration_secs:.1f}s</code>\n"
@@ -215,6 +253,7 @@ def notify_test_results(scenarios, total_duration=0, all_passed=True):
 def notify_deploy_failure(stage, error_msg, tail_logs=""):
     git = get_git_info()
     now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+    server_ip = get_server_ip()
     
     clean_tail = ""
     if tail_logs:
@@ -223,6 +262,7 @@ def notify_deploy_failure(stage, error_msg, tail_logs=""):
 
     msg = (
         f"🚨 <b>[METANODE CLUSTER DEPLOY THẤT BẠI]</b>\n\n"
+        f"🖥 <b>Server IP:</b> <code>{server_ip}</code>\n"
         f"🌿 <b>Nhánh:</b> <code>{html.escape(git['branch'])}</code>\n"
         f"📌 <b>Commit:</b> <code>{git['hash']}</code> (bởi <b>{html.escape(git['author'])}</b>)\n"
         f"📍 <b>Giai đoạn lỗi:</b> <code>{html.escape(stage)}</code>\n"

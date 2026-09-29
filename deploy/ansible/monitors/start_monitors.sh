@@ -116,6 +116,48 @@ if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --is-inside-
     fi
 fi
 
+# Detect outward-facing server IP (avoid localhost/127.0.0.1 in telegram alerts)
+detect_server_ip() {
+    local py_ip
+    py_ip=$(python3 -c "
+import socket, subprocess
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0.5)
+    s.connect(('8.8.8.8', 80))
+    ip = s.getsockname()[0]
+    s.close()
+    if ip and not ip.startswith('127.') and ip != '0.0.0.0':
+        print(ip)
+        exit(0)
+except Exception:
+    pass
+try:
+    out = subprocess.check_output(['hostname', '-I'], text=True).strip()
+    for ip in out.split():
+        if ip and not ip.startswith('127.') and ':' not in ip and ip != '0.0.0.0':
+            print(ip)
+            exit(0)
+except Exception:
+    pass
+" 2>/dev/null || true)
+    if [ -n "$py_ip" ]; then
+        echo "$py_ip"
+        return
+    fi
+
+    local host_ips
+    host_ips=$(hostname -I 2>/dev/null || true)
+    for ip in $host_ips; do
+        if [[ -n "$ip" && "$ip" != 127.* && "$ip" != *:* && "$ip" != "0.0.0.0" ]]; then
+            echo "$ip"
+            return
+        fi
+    done
+
+    echo "127.0.0.1"
+}
+
 send_tele() {
     if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
         return
@@ -417,9 +459,8 @@ if [ "${1:-}" == "health" ]; then
     # right before alerting below; this threshold mainly controls how often that probe fires.
     STALL_THRESHOLD_SEC="${CHAIN_STALL_THRESHOLD_SEC:-300}"
 
-    # Lấy IP local của máy monitor hiện tại
-    MONITOR_IP=$(hostname -I | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.)' | head -n 1)
-    if [ -z "$MONITOR_IP" ]; then MONITOR_IP=$(hostname -I | awk '{print $1}'); fi
+    # Lấy IP của máy monitor hiện tại (ưu tiên IP mạng ngoài thay vì localhost)
+    MONITOR_IP=$(detect_server_ip)
 
     while true; do
         INV_PATH=$(get_inv_path)
@@ -447,6 +488,9 @@ if [ "${1:-}" == "health" ]; then
                     if [ "${dead_nodes[$node_key]:-0}" == "0" ]; then
                         dead_nodes[$node_key]=1
                         ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
+                        if [ "$ip" == "127.0.0.1" ] || [ "$ip" == "localhost" ] || [ -z "$ip" ]; then
+                            ip="$MONITOR_IP"
+                        fi
                         resolve_ssh_auth "$node_key" "$node_id" "$RPC_CONFIG_DATA"
                         ssh_user="$SSH_USER"
                         
@@ -985,8 +1029,7 @@ if [ "${1:-}" == "resources" ]; then
     echo "Starting resource monitor loop..."
     declare -A alert_history
     
-    MONITOR_IP=$(hostname -I | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.)' | head -n 1)
-    if [ -z "$MONITOR_IP" ]; then MONITOR_IP=$(hostname -I | awk '{print $1}'); fi
+    MONITOR_IP=$(detect_server_ip)
 
     while true; do
         INV_PATH=$(get_inv_path)
@@ -1005,6 +1048,9 @@ if [ "${1:-}" == "resources" ]; then
                     continue
                 fi
                 ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
+                if [ "$ip" == "127.0.0.1" ] || [ "$ip" == "localhost" ] || [ -z "$ip" ]; then
+                    ip="$MONITOR_IP"
+                fi
                 resolve_ssh_auth "$node_key" "$node_id" "$RPC_CONFIG_DATA"
                 ssh_user="$SSH_USER"
                 
