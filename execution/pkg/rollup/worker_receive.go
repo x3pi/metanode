@@ -140,7 +140,7 @@ func (w *ReceiveWorker) loop() {
 }
 
 func (w *ReceiveWorker) pollAndProcess() bool {
-	hasActivity := false
+	hasProgress := false
 
 	// 1. Poll new incoming transfers
 	cursor := w.getCursor()
@@ -149,7 +149,7 @@ func (w *ReceiveWorker) pollAndProcess() bool {
 		log.Printf("ReceiveWorker: failed to fetch transfers: %v", err)
 	} else {
 		if len(transfers) > 0 {
-			hasActivity = true
+			hasProgress = true
 		}
 		for _, tx := range transfers {
 			w.handleIncomingTransfer(tx)
@@ -163,35 +163,38 @@ func (w *ReceiveWorker) pollAndProcess() bool {
 	records, err := w.store.ScanNonTerminal()
 	if err != nil {
 		log.Printf("ReceiveWorker: ScanNonTerminal error: %v", err)
-		return hasActivity
+		return hasProgress
 	}
 
-	receiverCount := 0
 	for _, rec := range records {
 		if rec.Role != RoleReceiver {
 			continue
 		}
-		receiverCount++
 		if !w.isReleasable(rec) {
 			continue
 		}
 
 		switch rec.State {
 		case StateMarkedClaimedPendingCredit:
-			w.processMarkClaimedPendingCredit(rec)
+			if w.processMarkClaimedPendingCredit(rec) {
+				hasProgress = true
+			}
 		case StateMarkedClaimedPendingRefund:
-			w.processMarkClaimedPendingRefund(rec)
+			if w.processMarkClaimedPendingRefund(rec) {
+				hasProgress = true
+			}
 		case StateMarkClaimedSubmitted:
-			w.processMarkClaimedSubmitted(rec)
+			if w.processMarkClaimedSubmitted(rec) {
+				hasProgress = true
+			}
 		case StateRefundSent:
-			w.processRefundSent(rec)
+			if w.processRefundSent(rec) {
+				hasProgress = true
+			}
 		}
 	}
 
-	if receiverCount > 0 {
-		hasActivity = true
-	}
-	return hasActivity
+	return hasProgress
 }
 
 func (w *ReceiveWorker) handleIncomingTransfer(tx *parentchain.TransferEvent) {
@@ -246,12 +249,12 @@ func (w *ReceiveWorker) isValidDestination(addr common.Address) bool {
 	return true
 }
 
-func (w *ReceiveWorker) processMarkClaimedPendingCredit(rec *MessageRecord) {
+func (w *ReceiveWorker) processMarkClaimedPendingCredit(rec *MessageRecord) bool {
 	cert := w.signMarkClaimed(rec.MessageID, parentchain.FloatOutcomeCredited)
 	_, err := w.client.SendMarkClaimed(rec.MessageID, parentchain.FloatOutcomeCredited, cert)
 	if err != nil {
 		if !strings.Contains(err.Error(), "already resolved") {
-			return // wait for retry
+			return false // wait for retry
 		}
 	}
 
@@ -264,23 +267,26 @@ func (w *ReceiveWorker) processMarkClaimedPendingCredit(rec *MessageRecord) {
 	if w.EventProposer != nil {
 		if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
 			log.Printf("ReceiveWorker: failed to propose EventRPCSubmitted for %x: %v", rec.MessageID, err)
+			return false
 		}
-		return
+		return true
 	}
 
 	newState, _, err := Next(rec.State, RoleReceiver, event)
 	if err == nil {
 		rec.State = newState
 		w.store.Put(rec)
+		return true
 	}
+	return false
 }
 
-func (w *ReceiveWorker) processMarkClaimedPendingRefund(rec *MessageRecord) {
+func (w *ReceiveWorker) processMarkClaimedPendingRefund(rec *MessageRecord) bool {
 	cert := w.signMarkClaimed(rec.MessageID, parentchain.FloatOutcomeRefund)
 	_, err := w.client.SendMarkClaimed(rec.MessageID, parentchain.FloatOutcomeRefund, cert)
 	if err != nil {
 		if !strings.Contains(err.Error(), "already resolved") {
-			return 
+			return false
 		}
 	}
 
@@ -293,23 +299,26 @@ func (w *ReceiveWorker) processMarkClaimedPendingRefund(rec *MessageRecord) {
 	if w.EventProposer != nil {
 		if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
 			log.Printf("ReceiveWorker: failed to propose EventRPCSubmitted for %x: %v", rec.MessageID, err)
+			return false
 		}
-		return
+		return true
 	}
 
 	newState, _, err := Next(rec.State, RoleReceiver, event)
 	if err == nil {
 		rec.State = newState
 		w.store.Put(rec)
+		return true
 	}
+	return false
 }
 
-func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) {
+func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) bool {
 	// Poll ParentChain to check if it has actually been confirmed
 	outcome, err := w.client.GetClaimed(rec.MessageID)
 	if err != nil {
 		log.Printf("ReceiveWorker: failed to poll GetClaimed for msgID %x: %v", rec.MessageID, err)
-		return
+		return false
 	}
 	
 	if outcome == parentchain.FloatOutcomeCredited || outcome == parentchain.FloatOutcomeRefund {
@@ -333,15 +342,16 @@ func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) {
 		if w.EventProposer != nil {
 			if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
 				log.Printf("ReceiveWorker: failed to propose EventClaimedConfirmed for %x: %v", rec.MessageID, err)
+				return false
 			}
-			return
+			return true
 		}
 
 		// Fallback: local direct execution (only for testing without Raft)
 		newState, actions, err := Next(rec.State, RoleReceiver, event)
 		if err != nil {
 			log.Printf("ReceiveWorker: Next(EventClaimedConfirmed) error: %v", err)
-			return
+			return false
 		}
 		
 		// Apply Actions (CreditLocal or SendRefund)
@@ -357,7 +367,7 @@ func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) {
 				refundMsgID, err := w.sendRefundTransfer(rec, action.Amount)
 				if err != nil {
 					log.Printf("ReceiveWorker: failed to send refund transfer: %v", err)
-					return // Will retry
+					return false // Will retry
 				}
 				rec.RefundMsgID = refundMsgID
 			}
@@ -365,7 +375,9 @@ func (w *ReceiveWorker) processMarkClaimedSubmitted(rec *MessageRecord) {
 
 		rec.State = newState
 		w.store.Put(rec)
+		return true
 	}
+	return false
 }
 
 // sendRefundTransfer performs the ParentChain HTTP call for compensating refunds.
@@ -412,26 +424,26 @@ func (w *ReceiveWorker) sendRefundTransfer(rec *MessageRecord, amount *big.Int) 
 // SendWorker.processPending's own submit-then-poll-confirm discipline: "accepted into the
 // RPC queue" is not "applied" — see the state machine's EventRefundConfirmed (already
 // existed, unused before this) for the terminal transition.
-func (w *ReceiveWorker) processRefundSent(rec *MessageRecord) {
+func (w *ReceiveWorker) processRefundSent(rec *MessageRecord) bool {
 	if rec.RefundMsgID == (common.Hash{}) {
 		// In Raft mode, ActionSendRefund is not executed inside the deterministic Raft FSM.
 		// The background worker must perform the HTTP refund transfer here.
 		refundMsgID, err := w.sendRefundTransfer(rec, rec.Value)
 		if err != nil {
 			log.Printf("ReceiveWorker: failed to send refund transfer for record %x: %v", rec.MessageID, err)
-			return // Will retry on next loop
+			return false // Will retry on next loop
 		}
 		rec.RefundMsgID = refundMsgID
 		w.store.Put(rec)
-		return
+		return true
 	}
 	_, found, err := w.client.GetTransferRecord(rec.RefundMsgID)
 	if err != nil {
 		log.Printf("ReceiveWorker: failed to poll refund msgID %x: %v", rec.RefundMsgID, err)
-		return
+		return false
 	}
 	if !found {
-		return // not yet applied, wait for retry
+		return false // not yet applied, wait for retry
 	}
 
 	event := Event{Type: EventRefundConfirmed, Role: RoleReceiver}
@@ -439,17 +451,19 @@ func (w *ReceiveWorker) processRefundSent(rec *MessageRecord) {
 	if w.EventProposer != nil {
 		if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
 			log.Printf("ReceiveWorker: failed to propose EventRefundConfirmed for %x: %v", rec.MessageID, err)
+			return false
 		}
-		return
+		return true
 	}
 
 	newState, _, err := Next(rec.State, RoleReceiver, event)
 	if err != nil {
 		log.Printf("ReceiveWorker: Next(EventRefundConfirmed) error: %v", err)
-		return
+		return false
 	}
 	rec.State = newState
 	w.store.Put(rec)
+	return true
 }
 
 func (w *ReceiveWorker) signMarkClaimed(msgID common.Hash, outcome parentchain.FloatOutcome) []byte {

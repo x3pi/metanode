@@ -121,6 +121,7 @@ func (w *SendWorker) loop() {
 }
 
 func (w *SendWorker) processPending() bool {
+	hasProgress := false
 	records, err := w.store.ScanNonTerminal()
 	if err != nil {
 		log.Printf("SendWorker: failed to scan records: %v", err)
@@ -199,6 +200,7 @@ func (w *SendWorker) processPending() bool {
 			}
 
 			w.inFlightSubmits.Store(rec.MessageID, true)
+			hasProgress = true
 
 			// Advance state to submitted
 			event := Event{
@@ -232,6 +234,7 @@ func (w *SendWorker) processPending() bool {
 					Type: EventParentConfirmed,
 					Role: RoleSender,
 				}
+				hasProgress = true
 				
 				if w.EventProposer != nil {
 					if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
@@ -248,5 +251,5 @@ func (w *SendWorker) processPending() bool {
 			}
 		}
 	}
-	return len(records) > 0
+	return hasProgress
 }
