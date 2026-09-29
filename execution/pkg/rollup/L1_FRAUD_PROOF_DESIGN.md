@@ -1,60 +1,64 @@
-# Thiết Kế L1 Smart Contract: Giải Quyết Tranh Chấp & Fraud Proof
-**Trạng thái:** CHỐT PHƯƠNG ÁN (FINAL) | **Ngày:** 2026-09-28
+# Thiết Kế L1 Smart Contract / L1 Logic: Giải Quyết Tranh Chấp & Fraud Proof
+**Trạng thái:** BẢN THẢO (DRAFT) - Cập nhật phản hồi | **Ngày:** 2026-09-29
 
-Tài liệu này xác định kiến trúc **Bằng chứng Gian lận (Fraud Proof)** của Rollup trên L1 (Parent Chain). 
-**Mục tiêu cốt lõi:** 
-- **Bảo mật 100%:** An toàn tuyệt đối trước Node thực thi độc hại.
-- **Zero-DA:** Chi phí L1 gần như bằng không (Không lưu Data Availability).
-- **Trải nghiệm 100% Web3 (Gửi & Quên):** Không bắt người dùng tương tác phức tạp (Không cần ký 2 lần, không bắt buộc P2P).
-- **Phạm vi hỗ trợ:** Tập trung giải quyết triệt để **Giao dịch chuẩn (Chuyển tiền ERC20 / Native Coin)** nhờ sức mạnh kiểm tra phép cộng/trừ của L1.
-
----
+Tài liệu này xác định kiến trúc **Bằng chứng Gian lận (Fraud Proof)** của Rollup (L2) trên L1 (Parent Chain). 
+**Phạm vi áp dụng:** Áp dụng cho các L2 Rollup neo vào Parent Chain. (Lưu ý: Luồng Float/TransferFloat cross-node nội mạng vừa hoàn thiện hoạt động dựa trên đồng thuận Quorum nội bộ, không dùng Fraud Proof này - hai hệ thống hoạt động độc lập và bổ sung cho nhau tùy mô hình mạng).
 
 ## 1. Nguyên lý Hoạt động & Cấu trúc Dữ liệu (Core Mechanisms)
 
-Hệ thống hoàn toàn **không lưu dữ liệu giao dịch** trên L1. 
-Thay vào đó, Node duy trì một **Cây Merkle Trạng Thái (Event-List Merkle Tree)** đặc thù cho từng Tài khoản:
-- Mỗi chiếc lá (Leaf) đại diện cho một Tài khoản.
-- Lá lưu trữ: `[Số dư (Balance)]` + `[EventRoot]`.
-- `EventRoot` là mã băm của danh sách toàn bộ các giao dịch gửi/nhận ảnh hưởng đến tài khoản đó trong Block hiện tại.
+Hệ thống **không lưu toàn bộ dữ liệu giao dịch** (Zero-DA) trên L1. 
+Thay vào đó, Node duy trì một **Cây Merkle Trạng Thái (State Merkle Tree)**. Cấu trúc lá (Leaf) của tài khoản:
+- `[Account, TokenID]` (Để tách biệt rõ Native Balance và các tài sản khác).
+- `[Số dư (Balance)]`
+- `[Nonce]` (Chống Replay Attack).
+- `[EventRoot]` (Mã băm đại diện danh sách giao dịch có thứ tự trong Block).
 
-**Định lý Toán học khóa cứng trên L1:** 
-`Số dư cuối Block = Số dư đầu Block + Tổng (Các giao dịch trong EventRoot)`
+**Định lý Toán học & Tính Tuần Tự trên L1:** 
+L1 xác minh sự thay đổi trạng thái theo thứ tự cố định của các event trong `EventRoot`. 
+- `Số dư cuối = Số dư đầu + Σ (Events theo đúng thứ tự)`
+- **Prefix-sum Rule:** Tại bất kỳ bước trung gian nào trong chuỗi event, `Số dư trung gian ≥ 0`.
+- **Nonce Rule:** Mỗi event phải có `Nonce` tăng dần duy nhất và khớp với trạng thái tài khoản.
 
----
+*Lưu ý Ranh giới Smart Contract (MVM/ERC20):* Thiết kế này chỉ áp dụng cho Native Balance (hoặc Token được ánh xạ ở cấp độ giao thức lá). Số dư ERC20 nằm trong storage của smart contract MVM sẽ cần cơ chế Fraud Proof tương tác (Interactive Fraud Proof) tiêu chuẩn của MVM, nằm ngoài phạm vi của kiến trúc kiểm chứng Native Math này.
 
 ## 2. Kiến trúc Giải Quyết Tranh Chấp (Tòa Án L1)
 
-### 2.1. Lớp bảo vệ 1: Ngăn chặn Trộm cắp (Forgery)
-Nếu Node lén trừ tiền của Alice (không có giao dịch ủy quyền), Alice nộp Merkle Path để kiện.
-- `challengeForgery`: L1 kiểm tra `EventRoot` của Alice. Node phải nộp Chữ ký của Alice cho cái giao dịch làm suy giảm số dư đó. Node không có chữ ký 👉 Bị Slash.
+### 2.1. Lớp bảo vệ 1: Ngăn chặn Trộm cắp & Replay (Challenge Forgery)
+Nếu Node lén trừ tiền của Alice (không có giao dịch ủy quyền) hoặc replay giao dịch cũ:
+- `challengeForgery`: Alice (hoặc Challenger) nộp Merkle Path để kiện.
+- L1 kiểm tra `EventRoot`. Node phải nộp Chữ ký của Alice và giao dịch đó phải có `Nonce` hợp lệ.
+- Nếu giao dịch là Gas Fee, System Reward hoặc Deposit/Stake (không có chữ ký trực tiếp của user), L1 sẽ kiểm chứng dựa trên các **luật giao thức định sẵn (Protocol Verifiable Rules)**. 
+- Node sai phạm 👉 Bị Slash.
 
-### 2.2. Lớp bảo vệ 2: Chống Bỏ Lọt & Gian Lận Số Dư Đầu Cuối (Challenge Omission & Math)
-**Kịch bản:** Alice chuyển 100 Coin cho Bob (Ký qua MetaMask). Node trừ 100 của Alice nhưng không cộng cho Bob (tuồn cho Hacker).
-Alice nộp Chữ ký giao dịch `Chuyển 100 cho Bob` lên L1 để kiện tội "Bỏ lọt giao dịch":
-- L1 ép Node phải nộp Merkle Path của Bob (Receiver) bao gồm Số dư và `EventRoot`.
-- **Ngõ cụt 1 (Bỏ lọt):** L1 kiểm tra `EventRoot` của Bob, nếu không thấy giao dịch 100 Coin của Alice 👉 Node bị Slash vì bỏ lọt giao dịch.
-- **Ngõ cụt 2 (Sai phép toán):** Node đưa giao dịch của Alice vào `EventRoot` của Bob để trốn tội bỏ lọt. Nhưng theo định lý toán học, L1 cộng 100 Coin vào số dư cũ của Bob. Nếu số dư cuối của Bob trên cây Merkle không tăng lên tương ứng 👉 L1 lập tức phát hiện sai lệch phép cộng 👉 Node bị Slash.
+### 2.2. Lớp bảo vệ 2: Chống Bỏ Lọt & Gian Lận Thứ Tự (Challenge Omission & Math)
+**Kịch bản:** Alice chuyển 100 Coin cho Bob. Node trừ tiền Alice nhưng không cộng cho Bob.
+Alice kiện "Bỏ lọt giao dịch":
+- L1 ép Node nộp Merkle Path của Bob (Receiver) kèm `EventRoot`.
+- **Ngõ cụt 1 (Bỏ lọt):** Không tìm thấy giao dịch của Alice trong `EventRoot` của Bob 👉 Slash.
+- **Ngõ cụt 2 (Sai phép toán & Thứ tự):** Node đưa giao dịch vào nhưng cộng sai số dư, hoặc xếp sai thứ tự khiến số dư Bob bị âm trung gian (vi phạm Prefix-sum) 👉 Slash.
 
-Nhờ L1 hiểu được phép cộng trừ, Node không có bất kỳ khe hở nào để giấu tiền hoặc tính sai!
+### 2.3. Lớp bảo vệ 3: Giải quyết Giấu Dữ Liệu & Thoát Cưỡng Chế (Forced Exit)
+Nếu Node giả chết, từ chối cấp Merkle Path hoặc giấu dữ liệu (Data Withholding):
+- Người dùng gọi `demandToOpen(accountId)` trên L1, hoặc kích hoạt `forceExit`.
+- L1 phát tối hậu thư yêu cầu Node nộp Merkle Path hiện tại để chứng minh trạng thái.
+- **Node im lặng:** Hết thời gian ân hạn, Node bị Slash. L1 không chỉ phạt Node mà còn cung cấp đường thoát cưỡng chế.
+- **Cơ chế Mass Exit:** Khi Node bị Slash do giấu dữ liệu, hệ thống L2 sẽ bị đóng băng. Người dùng được phép thực hiện rút tiền (withdraw) hàng loạt dựa trên State Root hợp lệ gần nhất (đã được chốt trước đó trên L1).
 
-### 2.3. Lớp bảo vệ 3: Giải quyết Giấu Dữ Liệu (Cưỡng chế Mở sổ)
-Để có dữ liệu đi kiện, người dùng gọi RPC xin Node cấp Merkle Path. Nếu Node giả chết, từ chối cấp:
-- Người dùng gọi hàm `demandToOpen(accountId)` trên L1.
-- L1 phát tối hậu thư yêu cầu Node phải nộp Merkle Path của người dùng lên L1 trong 24 giờ.
-- **Node im lặng:** Hết 24h, Node bị Slash vì tội giấu dữ liệu.
-- **Node nộp Merkle Path:** Người dùng tải về từ L1 và dùng nó để tiếp tục kiện tội Bịa đặt (Forgery) hoặc Bỏ lọt (Omission). Node không có đường thoát.
+## 3. Mô hình An Ninh Thực Tế (1-of-N Watchtowers)
 
----
+Hệ thống **không yêu cầu 100% người dùng phải tự online bảo vệ mình**.
+- Bảo mật dựa trên mô hình **1-of-N Honest Challenger** (Cần ít nhất 1 Watchtower trung thực online trong thời gian cửa sổ tranh chấp).
+- Bất kỳ ai cũng có thể làm Challenger (Watchtower) để giám sát các State Root.
+- Ngay cả khi tài khoản nạn nhân đang ngủ đông, Challenger vẫn có động cơ (phần thưởng từ tiền Slash) để gọi `demandToOpen` hoặc kiện lên L1 nếu phát hiện Node tự in tiền cho chính nó.
 
-## 3. Lợi ích Đột phá của Giải pháp này
+## 4. Tham Số Vận Hành (Operational Parameters)
+- **Tần suất nộp Root:** Proposer (Validator được ủy quyền) nộp State Root lên L1 định kỳ (VD: mỗi epoch).
+- **Cửa sổ Tranh chấp (Dispute Window):** Thời gian chờ để State Root được chốt cứng vĩnh viễn (VD: 7 ngày).
+- **Mức Bond / Slash:** L2 Node phải cọc một lượng lớn Native Coin (Bond) trên L1. Khi gian lận, tiền cọc bị tịch thu (Slash): một phần bù đắp cho nạn nhân và trả thưởng cho Challenger, phần còn lại bị đốt.
+- **Chi phí Gas kiện tụng (Merkle Depth):** Người kiện phải cọc một khoản phí nhỏ để chống Spam. Độ sâu của Cây Merkle được thiết kế tối ưu để phí Gas verify trên L1 là khả thi. Nếu kiện thành công, phí này được hoàn trả hoàn toàn.
 
-- **Giữ nguyên Trải nghiệm (UX):** Giải quyết hoàn toàn bài toán Inbound Transfer (Tiền người khác chuyển tới) mà không cần thay đổi thói quen người dùng. Alice chuyển tiền cho Bob xong là xong, Bob không cần làm gì cũng chắc chắn nhận được tiền.
-- **Không cần Watchtower / Data Availability:** L1 đóng vai trò "Máy tính Casio". Chỉ khi có kiện tụng, L1 mới yêu cầu Node nộp đúng nhánh Merkle của 2 tài khoản (Gửi và Nhận) để làm toán cộng trừ. Không một Bytes dữ liệu thừa nào bị lưu lên L1.
-
----
-
-## 4. Kế hoạch Triển khai Smart Contract (Next Steps)
-1. **Thiết kế Data Structure trên Solidity:** Viết cấu trúc struct cho `AccountLeaf` (gồm Balance và EventRoot).
-2. **Viết logic Math Verifier:** Cài đặt hàm xác minh đường dẫn Merkle kết hợp kiểm tra vòng lặp cộng/trừ các giao dịch trong `EventRoot`.
-3. **Cài đặt Tòa án L1 (`DisputeResolution.sol`):** Xây dựng các hàm `challengeForgery`, `challengeOmission`, và cơ chế Cưỡng chế Mở sổ (`demandToOpen`).
+## 5. Kế Hoạch Triển Khai Kiến Trúc (Công nghệ)
+Mạng Parent Chain sử dụng kiến trúc State Native Go (không dùng EVM base cho lõi hệ thống). Do đó:
+1. **Thiết kế Data Structure:** Tòa án không viết bằng Solidity. L1 sẽ thiết lập cấu trúc lá Merkle `AccountLeaf` chứa `Balance`, `Nonce`, và `EventRoot` ngay trong lõi Go.
+2. **Xây dựng Math & Sequence Verifier:** Lập trình Logic Tòa án L1 bằng Go (triển khai trong `pkg/parentchain` hoặc module tương tự `ParentChainGatewayHandler`).
+3. **Cài đặt Handler (DisputeResolution):** Thiết lập các API nội bộ / Barrier Transaction cho `challengeForgery`, `challengeOmission`, `demandToOpen` và `forceExit`. L1 trực tiếp kiểm tra Prefix-sum và Nonce rules trên Go.
