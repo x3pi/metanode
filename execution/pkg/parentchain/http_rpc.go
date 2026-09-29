@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -18,13 +19,34 @@ import (
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 )
 
+var defaultHTTPTransport = &http.Transport{
+	Proxy: http.ProxyFromEnvironment,
+	DialContext: (&net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	MaxIdleConns:        100,
+	MaxIdleConnsPerHost: 30,
+	IdleConnTimeout:     90 * time.Second,
+	TLSHandshakeTimeout: 10 * time.Second,
+}
+
+var defaultHTTPClient = &http.Client{
+	Transport: defaultHTTPTransport,
+	Timeout:   15 * time.Second,
+}
+
 // httpClient implements Client
 type httpClient struct {
 	endpoint string
+	client   *http.Client
 }
 
 func NewHTTPClient(endpoint string) Client {
-	return &httpClient{endpoint: endpoint}
+	return &httpClient{
+		endpoint: endpoint,
+		client:   defaultHTTPClient,
+	}
 }
 
 func (c *httpClient) post(path string, req interface{}, resp interface{}) error {
@@ -32,7 +54,7 @@ func (c *httpClient) post(path string, req interface{}, resp interface{}) error 
 	if err != nil {
 		return err
 	}
-	r, err := http.Post(c.endpoint+path, "application/json", bytes.NewReader(body))
+	r, err := c.client.Post(c.endpoint+path, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -48,7 +70,7 @@ func (c *httpClient) post(path string, req interface{}, resp interface{}) error 
 }
 
 func (c *httpClient) get(path string, resp interface{}) error {
-	r, err := http.Get(c.endpoint + path)
+	r, err := c.client.Get(c.endpoint + path)
 	if err != nil {
 		return err
 	}
@@ -421,6 +443,9 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 	s.pendingTxs.Store(msgID, resultCh)
 	defer s.pendingTxs.Delete(msgID)
 
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+
 	select {
 	case s.txChan <- &tx:
 		// Transaction successfully queued. Wait for consensus to process it.
@@ -431,7 +456,7 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			json.NewEncoder(w).Encode(map[string]interface{}{"msg_id": msgID})
-		case <-time.After(10 * time.Second):
+		case <-timer.C:
 			http.Error(w, "timeout waiting for consensus", http.StatusGatewayTimeout)
 		}
 	default:

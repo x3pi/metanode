@@ -297,3 +297,30 @@ func TestParentChainState(t *testing.T) {
 		}
 	})
 }
+
+func BenchmarkComputeTransferFloatMessage(b *testing.B) {
+	var pub1, pub2 cm.PublicKey
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	val := big.NewInt(1000)
+	fee := big.NewInt(10)
+	payloadHash := common.HexToHash("0x3333333333333333333333333333333333333333333333333333333333333333")
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = ComputeTransferFloatMessage(pub1, pub2, sender, target, val, fee, payloadHash, uint64(i))
+	}
+}
+
+func BenchmarkComputeSubmitStateRootMessage(b *testing.B) {
+	var pub cm.PublicKey
+	root := common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = ComputeSubmitStateRootMessage(pub, uint64(i), root)
+	}
+}
+

@@ -38,10 +38,7 @@ var floatTotalSupplyKey = common.Hash{}
 
 func appendUint64BE(buf []byte, v uint64) []byte {
 	var b [8]byte
-	for i := 7; i >= 0; i-- {
-		b[i] = byte(v)
-		v >>= 8
-	}
+	binary.BigEndian.PutUint64(b[:], v)
 	return append(buf, b[:]...)
 }
 
@@ -59,27 +56,22 @@ func padTo32(val *big.Int) []byte {
 }
 
 func ComputeTransferFloatMessage(fromKey, toKey cm.PublicKey, sender, target common.Address, value, fee *big.Int, payloadHash common.Hash, nonce uint64) []byte {
-	var buf []byte
+	totalLen := len(TransferFloatDomainTag) + 48 + 48 + 20 + 20 + 32 + 32 + 32 + 8
+	buf := make([]byte, 0, totalLen)
 	buf = append(buf, TransferFloatDomainTag...)
 	buf = append(buf, fromKey[:]...)
 	buf = append(buf, toKey[:]...)
 	buf = append(buf, sender.Bytes()...)
 	buf = append(buf, target.Bytes()...)
 	buf = append(buf, padTo32(value)...)
-	
-	if fee != nil {
-		buf = append(buf, padTo32(fee)...)
-	} else {
-		buf = append(buf, padTo32(big.NewInt(0))...)
-	}
-
+	buf = append(buf, padTo32(fee)...)
 	buf = append(buf, payloadHash.Bytes()...)
 	buf = appendUint64BE(buf, nonce)
 	return buf
 }
 
 func ComputeReclaimFloatMessage(messageID common.Hash, sourceKey cm.PublicKey) []byte {
-	var buf []byte
+	buf := make([]byte, 0, len(ReclaimFloatDomainTag)+32+48)
 	buf = append(buf, ReclaimFloatDomainTag...)
 	buf = append(buf, messageID.Bytes()...)
 	buf = append(buf, sourceKey[:]...)
@@ -87,7 +79,7 @@ func ComputeReclaimFloatMessage(messageID common.Hash, sourceKey cm.PublicKey) [
 }
 
 func ComputeMarkClaimedMessage(messageID common.Hash, outcome FloatOutcome) []byte {
-	var buf []byte
+	buf := make([]byte, 0, len(MarkClaimedDomainTag)+32+1)
 	buf = append(buf, MarkClaimedDomainTag...)
 	buf = append(buf, messageID.Bytes()...)
 	buf = append(buf, byte(outcome))
@@ -95,7 +87,7 @@ func ComputeMarkClaimedMessage(messageID common.Hash, outcome FloatOutcome) []by
 }
 
 func ComputeRegisterAccountMessage(userAddress common.Address, floatIdentityKey cm.PublicKey) []byte {
-	var buf []byte
+	buf := make([]byte, 0, len(RegisterAccountDomainTag)+20+48)
 	buf = append(buf, RegisterAccountDomainTag...)
 	buf = append(buf, userAddress.Bytes()...)
 	buf = append(buf, floatIdentityKey[:]...)
@@ -504,11 +496,11 @@ func CheckFloatSupplyInvariant(store Store) error {
 }
 
 func ComputeSubmitStateRootMessage(clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash) []byte {
-	var epochBytes [8]byte
-	binary.BigEndian.PutUint64(epochBytes[:], epoch)
-	data := append(clusterPubKey[:], epochBytes[:]...)
-	data = append(data, stateRoot.Bytes()...)
-	return data
+	buf := make([]byte, 88)
+	copy(buf[:48], clusterPubKey[:])
+	binary.BigEndian.PutUint64(buf[48:56], epoch)
+	copy(buf[56:88], stateRoot.Bytes())
+	return buf
 }
 
 func SubmitStateRoot(store Store, clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash, cert cm.Sign) error {

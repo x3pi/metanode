@@ -135,3 +135,20 @@ func TestDecodeBinaryRawTxPayload_EdgeCases(t *testing.T) {
 	assert.Nil(t, e)
 	assert.Nil(t, p)
 }
+
+func BenchmarkDecodeBinaryRawTxPayload(b *testing.B) {
+	metaTx := bytes.Repeat([]byte{0x01}, 256)
+	ethTx := bytes.Repeat([]byte{0x02}, 512)
+	pubKey := bytes.Repeat([]byte{0x03}, 48)
+	payload := encodeTestPayload(metaTx, ethTx, pubKey)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _, _, err := decodeBinaryRawTxPayload(payload)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+

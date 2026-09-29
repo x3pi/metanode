@@ -572,8 +572,7 @@ func decodeBinaryRawTxPayload(payload []byte) ([]byte, []byte, []byte, error) {
 		if uint32(len(buf)) < segmentLen {
 			return nil, nil, fmt.Errorf("segment length %d exceeds remaining payload %d", segmentLen, len(buf))
 		}
-		segment := make([]byte, segmentLen)
-		copy(segment, buf[:segmentLen])
+		segment := buf[:segmentLen]
 		return segment, buf[segmentLen:], nil
 	}
 
