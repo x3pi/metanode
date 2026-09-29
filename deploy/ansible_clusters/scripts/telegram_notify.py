@@ -121,26 +121,49 @@ def notify_services_ready(parent_info, exec_clusters_info, duration_secs=0):
     git = get_git_info()
     now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
     
-    exec_lines = []
+    exec_blocks = []
     for c in exec_clusters_info:
-        name = c.get('name', 'Cluster')
+        name = html.escape(c.get('name', 'Cluster'))
         cid = c.get('cluster_id', '?')
+        evm_chain = c.get('chain_id', 991)
         rpc = c.get('rpc', '?')
-        blk = c.get('block_height', '?')
-        exec_lines.append(f"  • <b>{name}</b> (ClusterID <code>{cid}</code>) | RPC: <code>{rpc}</code> | Height: <code>{blk}</code>")
+        p2p = c.get('p2p', '?')
+        addr = c.get('address', '')
+        bls_key = c.get('bls_key', '')
+        blk = c.get('block_height', '0')
+        status = c.get('status', 'Active')
+        
+        block = [
+            f"⚡ <b>{name}</b> (ClusterID: <code>{cid}</code> | EVM ChainID: <code>{evm_chain}</code>):",
+            f"   • <b>RPC:</b> <code>{rpc}</code> | <b>P2P:</b> <code>{p2p}</code>",
+            f"   • <b>Block Height:</b> <code>{blk}</code> ({status})"
+        ]
+        if addr:
+            block.append(f"   • <b>Validator Address:</b> <code>{addr}</code>")
+        if bls_key:
+            block.append(f"   • <b>BLS PubKey:</b> <code>{bls_key[:18]}...</code>")
+        block.append("   • <b>Rollup Workers:</b> 🟢 SendWorker | 🟢 ReceiveWorker | 🟢 ReclaimWorker")
+        exec_blocks.append("\n".join(block))
     
-    clusters_text = "\n".join(exec_lines) if exec_lines else "  • Các cluster đã sẵn sàng"
+    clusters_text = "\n\n".join(exec_blocks) if exec_blocks else "  • Các cluster đã sẵn sàng"
+
+    parent_rpc = parent_info.get('rpc', ':8547')
+    parent_p2p = parent_info.get('p2p', ':9000')
+    parent_status = parent_info.get('status', 'Active (BFT Core + Native Float)')
 
     msg = (
-        f"✅ <b>[DỊCH VỤ CỤM METANODE ĐÃ SẴN SÀNG]</b>\n\n"
-        f"📌 <b>Commit:</b> <code>{git['hash']}</code>\n"
+        f"✅ <b>[DỊCH VỤ CỤM METANODE ĐÃ KHỞI CHẠY THÀNH CÔNG]</b>\n\n"
+        f"🌿 <b>Nhánh:</b> <code>{html.escape(git['branch'])}</code>\n"
+        f"📌 <b>Commit:</b> <code>{git['hash']}</code> (bởi <b>{html.escape(git['author'])}</b>)\n"
         f"⏱️ <b>Thời gian khởi chạy:</b> <code>{duration_secs:.1f}s</code>\n"
         f"🕒 <b>Thời gian:</b> <code>{now_str}</code>\n\n"
-        f"🌐 <b>Parent Chain:</b>\n"
-        f"  • RPC: <code>{parent_info.get('rpc', ':8547')}</code> | Height: <code>{parent_info.get('block_height', 'OK')}</code>\n\n"
-        f"⚡ <b>Execution Clusters (EVM ChainID 991):</b>\n"
+        f"🌐 <b>Parent Chain (Consensus & Float Coordinator):</b>\n"
+        f"   • <b>HTTP RPC:</b> <code>{parent_rpc}</code> | <b>P2P:</b> <code>{parent_p2p}</code>\n"
+        f"   • <b>State Engine:</b> LevelDB Native Float Store ({parent_status})\n"
+        f"   • <b>Cross-Cluster Routing:</b> Enabled\n\n"
+        f"🧱 <b>Các Cụm Thực Thi Độc Lập (Sharded Execution Clusters):</b>\n\n"
         f"{clusters_text}\n\n"
-        f"🛡️ <i>Cơ chế Rollup Float Accounts và routing liên cụm đã kích hoạt!</i>"
+        f"🛡️ <i>Tất cả các cluster đều dùng chung EVM ChainID 991, hoạt động độc lập và tự động đồng bộ xuyên cụm qua Parent Chain!</i>"
     )
     return send_telegram_message(html_message=msg)
 

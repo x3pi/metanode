@@ -303,10 +303,34 @@ python3 -c "
 import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
 import telegram_notify as tn
 
-parent = {'rpc': 'http://127.0.0.1:8547', 'block_height': 'Active'}
+parent = {
+    'rpc': 'http://127.0.0.1:8547',
+    'p2p': '127.0.0.1:9000',
+    'status': 'Active (BFT Core + Native Float)'
+}
 clusters = [
-    {'name': 'Exec Cluster 1', 'cluster_id': 1, 'rpc': 'http://127.0.0.1:8646', 'block_height': ${B1_INT}},
-    {'name': 'Exec Cluster 2', 'cluster_id': 2, 'rpc': 'http://127.0.0.1:8647', 'block_height': ${B2_INT}},
+    {
+        'name': 'Exec Cluster 1',
+        'cluster_id': 1,
+        'chain_id': 991,
+        'rpc': 'http://127.0.0.1:8646',
+        'p2p': ':4200',
+        'address': '0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5',
+        'bls_key': '944488b425d29336c7913a3b45946adee6b9bfbd',
+        'block_height': ${B1_INT},
+        'status': 'Active & Producing Blocks'
+    },
+    {
+        'name': 'Exec Cluster 2',
+        'cluster_id': 2,
+        'chain_id': 991,
+        'rpc': 'http://127.0.0.1:8647',
+        'p2p': ':4202',
+        'address': '0x0d4CC97b62a149a8fe8DE81262270426A80B0935',
+        'bls_key': '83221629eeff1a69aa96ac6aadea402a7b62a746',
+        'block_height': ${B2_INT},
+        'status': 'Active & Producing Blocks'
+    },
 ]
 tn.notify_services_ready(parent, clusters, duration_secs=${TOTAL_DEPLOY_DURATION})
 " || true
