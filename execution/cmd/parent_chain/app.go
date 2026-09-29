@@ -81,7 +81,7 @@ func (a *App) Start() error {
 			BoundaryBlock:         0,
 			BoundaryGei:           0,
 			Validators:            validators,
-			EpochDurationSeconds:  900,
+			EpochDurationSeconds:  86400, // 24 hours for devnet
 		}, nil
 	}
 	
