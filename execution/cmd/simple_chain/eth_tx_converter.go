@@ -55,8 +55,11 @@ func buildMetaTxFromEthTx(
 	// 3. Verify BLS public key is registered on-chain (skip for account setting TX)
 	if ethTx.To() == nil || *ethTx.To() != utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		if len(as.PublicKeyBls()) == 0 {
-			if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") == "true" {
-				// DO NOTHING, bypass
+			isProd := os.Getenv("NODE_ENV") == "production" ||
+				os.Getenv("ENVIRONMENT") == "production" ||
+				os.Getenv("METANODE_ENV") == "production"
+			if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") == "true" && !isProd {
+				// DO NOTHING, bypass in dev/test only
 			} else {
 				return nil, nil, fmt.Errorf("account %s has no BLS public key registered on-chain", fromAddress.Hex())
 			}

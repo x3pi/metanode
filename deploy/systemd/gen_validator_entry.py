@@ -257,6 +257,56 @@ def run_founding_entry_tool(args, keys_dir: str) -> None:
     print(green("     Contains NO private key material — safe to publish/share with the ceremony coordinator."))
 
 
+_BLS_PUBKEY_BIN_CACHE = None
+
+def derive_min_pk_pubkey(secret_hex: str) -> tuple:
+    """
+    Derives the real pkg/bls (min-pk, 48-byte G1) public key AND its bls.KeyPair.Address()
+    from a BLS secret scalar, returned as (pubkey_b64, address_0x_hex).
+    Ensures execution node has registered PublicKeyBls in genesis alloc.
+    """
+    global _BLS_PUBKEY_BIN_CACHE
+    if _BLS_PUBKEY_BIN_CACHE is None:
+        candidates = [
+            SCRIPT_DIR / "bin" / "bls_pubkey",
+            SCRIPT_DIR / "bls_pubkey",
+            REPO_ROOT / "execution" / "bls_pubkey",
+            REPO_ROOT / "execution" / "cmd" / "tool" / "bls_pubkey" / "bls_pubkey",
+            Path(shutil.which("bls_pubkey") or ""),
+        ]
+        bin_path = None
+        for c in candidates:
+            if c and c.is_file():
+                bin_path = c
+                break
+
+        if bin_path is None:
+            bin_path = REPO_ROOT / "execution" / "bls_pubkey"
+            if not bin_path.exists():
+                print(cyan("🔨 Building bls_pubkey helper (execution/cmd/tool/bls_pubkey)..."))
+                result = subprocess.run(
+                    ["go", "build", "-o", str(bin_path), "./cmd/tool/bls_pubkey"],
+                    cwd=str(REPO_ROOT / "execution"), capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    print(red(f"ERROR: failed to build bls_pubkey helper:\n{result.stderr}"))
+                    sys.exit(1)
+        _BLS_PUBKEY_BIN_CACHE = str(bin_path)
+
+    result = subprocess.run(
+        [_BLS_PUBKEY_BIN_CACHE, "-secret", secret_hex, "-with-address"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(red(f"ERROR: bls_pubkey helper failed:\n{result.stderr}"))
+        sys.exit(1)
+    lines = result.stdout.strip().splitlines()
+    if len(lines) != 2:
+        print(red(f"ERROR: bls_pubkey helper returned unexpected output: {result.stdout!r}"))
+        sys.exit(1)
+    return lines[0], lines[1]  # (pubkey_b64, address_0x_hex)
+
+
 def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
     """
     Write execution.json and consensus.toml directly instead of .env.
@@ -627,6 +677,38 @@ def main():
                     
                     if not updated:
                         g_data["validators"].append(entry)
+
+                    # Auto-register validator and exec node in genesis alloc with min-pk BLS key
+                    if "alloc" not in g_data or g_data["alloc"] is None:
+                        g_data["alloc"] = []
+
+                    import base64
+                    min_pk_b64, app_keypair_addr = derive_min_pk_pubkey(bls["authority_key_private"])
+                    pubkey_hex = "0x" + base64.b64decode(min_pk_b64).hex()
+
+                    addrs_to_fund = [
+                        (eth["address"].lower(), "1000000000000000000000000"),
+                        (app_keypair_addr.lower(), "1000000000000000000000000")
+                    ]
+                    for target_addr, initial_bal in addrs_to_fund:
+                        found_alloc = False
+                        for a in g_data["alloc"]:
+                            if a.get("address", "").lower() == target_addr:
+                                found_alloc = True
+                                a["publicKeyBls"] = pubkey_hex
+                                if int(a.get("balance", "0")) == 0:
+                                    a["balance"] = initial_bal
+                                break
+                        if not found_alloc:
+                            g_data["alloc"].append({
+                                "address": target_addr,
+                                "balance": initial_bal,
+                                "pending_balance": "0",
+                                "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                "publicKeyBls": pubkey_hex,
+                            })
+                    print(green(f"  ✅ Auto-registered BLS public key & alloc for validator {eth['address']} and exec node {app_keypair_addr}"))
 
                     if getattr(args, "epoch_duration_seconds", None):
                         g_data["epoch_duration_seconds"] = args.epoch_duration_seconds

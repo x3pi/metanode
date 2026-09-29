@@ -638,7 +638,8 @@ fi
 # same effect (ansible-playbook reads it automatically) without that exposure. Exported here
 # so it's in scope for every ansible-playbook invocation below (gen_keys included).
 INVENTORY_BECOME_PASS=$(grep -E '^\s*ansible_become_pass:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
-if [ -n "$INVENTORY_BECOME_PASS" ]; then
+if [ -n "$INVENTORY_BECOME_PASS" ] && [ "$INVENTORY_BECOME_PASS" != "!vault" ]; then
+    echo -e "\033[0;33m⚠️ [SECURITY NOTICE] Plaintext ansible_become_pass detected in inventory. For production, please encrypt using ansible-vault (Issue #104)!\033[0m"
     export ANSIBLE_BECOME_PASS="$INVENTORY_BECOME_PASS"
 fi
 

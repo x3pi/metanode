@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -70,5 +72,31 @@ func TestRaftMode_ConsensusReadyIsFalseUntilFeedIsReady(t *testing.T) {
 	}
 	if res["note"] == nil || res["note"] == "" {
 		t.Fatal("a not-ready response must explain why")
+	}
+}
+
+func TestIssue103_SkipMempoolSigVerifyProductionGuard(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.json")
+	cfgContent := `{"chainId": 991, "consensus_mode": "raft", "Databases": {"RootPath": "` + tmpDir + `"}}`
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "true")
+	t.Setenv("NODE_ENV", "production")
+
+	_, err := NewApp(cfgPath, 0)
+	if err == nil || !strings.Contains(err.Error(), "FATAL SECURITY VIOLATION (Issue #103)") {
+		t.Fatalf("expected fatal security violation error for SKIP_MEMPOOL_SIG_VERIFY in production, got: %v", err)
+	}
+
+	// Without production env, it should not fail on the security violation
+	t.Setenv("NODE_ENV", "development")
+	t.Setenv("ENVIRONMENT", "development")
+	t.Setenv("METANODE_ENV", "development")
+	_, err = NewApp(cfgPath, 0)
+	if err != nil && strings.Contains(err.Error(), "FATAL SECURITY VIOLATION (Issue #103)") {
+		t.Fatalf("unexpected Issue #103 security violation in development mode: %v", err)
 	}
 }

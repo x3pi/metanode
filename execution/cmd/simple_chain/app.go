@@ -132,6 +132,19 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
+	// Issue #103: Enforce that SKIP_MEMPOOL_SIG_VERIFY cannot be enabled in production environments
+	if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") == "true" {
+		isProduction := os.Getenv("NODE_ENV") == "production" ||
+			os.Getenv("ENVIRONMENT") == "production" ||
+			os.Getenv("METANODE_ENV") == "production" ||
+			(os.Getenv("NODE_TYPE") == "validator" && os.Getenv("METANODE_DEVNET") != "true" && app.config != nil && app.config.ConsensusMode == "raft")
+
+		if isProduction {
+			return nil, fmt.Errorf("FATAL SECURITY VIOLATION (Issue #103): SKIP_MEMPOOL_SIG_VERIFY=true is strictly forbidden in production / validator mode")
+		}
+		logger.Warn("⚠️ [SECURITY WARNING] SKIP_MEMPOOL_SIG_VERIFY=true: Transaction signature verification is BYPASSED (dev/benchmark only)!")
+	}
+
 	cacheEnabled := false
 	if app.config.MVMCacheEnabled != nil {
 		cacheEnabled = *app.config.MVMCacheEnabled

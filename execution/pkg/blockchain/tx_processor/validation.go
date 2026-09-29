@@ -152,7 +152,14 @@ func VerifyTransaction(
 	preloadedState types.AccountState, // nil = auto-fetch via AccountStateReadOnly
 ) *transaction.TransactionError {
 	if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") == "true" {
-		return nil
+		isProd := os.Getenv("NODE_ENV") == "production" ||
+			os.Getenv("ENVIRONMENT") == "production" ||
+			os.Getenv("METANODE_ENV") == "production"
+		if isProd {
+			logger.Error("🚨 [SECURITY VIOLATION] SKIP_MEMPOOL_SIG_VERIFY=true invoked in production environment! Bypassing is blocked.")
+		} else {
+			return nil
+		}
 	}
 
 	var as types.AccountState
