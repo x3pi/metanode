@@ -2,6 +2,9 @@
 
 Hệ thống Ansible tự động hóa triển khai, quản lý vòng đời và kiểm thử tích hợp cho kiến trúc **Parent Chain + Sharded Execution Clusters (Rollup Architecture)** của MetaNode, đi kèm tích hợp thông báo trạng thái & cảnh báo thời gian thực qua **Telegram Bot**.
 
+> 📚 **Tài liệu hướng dẫn toàn diện:** Chi tiết kiến trúc, cấu hình đa máy chủ, giải thích 5 kịch bản kiểm thử, cơ chế phục hồi offline và xử lý lỗi được trình bày đầy đủ tại:  
+> 👉 [**DEPLOYMENT_AND_TESTING_GUIDE.md**](file:///home/abc/chain-n/metanode/deploy/ansible_clusters/DEPLOYMENT_AND_TESTING_GUIDE.md)
+
 ---
 
 ## 📐 Kiến Trúc Triển Khai
@@ -36,7 +39,8 @@ deploy/ansible_clusters/
 │   └── telegram/              # Gửi thông báo Telegram theo sự kiện playbook
 ├── scripts/
 │   └── telegram_notify.py     # Module Python gửi tin nhắn HTML đẹp qua Telegram API (zero-dep)
-└── README.md                  # Hướng dẫn chi tiết này
+├── DEPLOYMENT_AND_TESTING_GUIDE.md  # 📘 Hướng dẫn chuyên sâu từ A-Z (Kiến trúc, Deploy, 5 Scenarios Test, Khắc phục lỗi)
+└── README.md                  # Hướng dẫn nhanh này
 ```
 
 ---
