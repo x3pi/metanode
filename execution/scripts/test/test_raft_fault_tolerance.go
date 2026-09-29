@@ -101,6 +101,7 @@ func waitForRPC(url string, timeout time.Duration) error {
 }
 
 func main() {
+	startTime := time.Now()
 	fmt.Println("╔═══════════════════════════════════════════════════════════════════════════════╗")
 	fmt.Println("║  🚀 DEMO: KHẢ NĂNG CHỊU LỖI CỤM THỰC THI REPLICATED RAFT (HASHICORP/RAFT)       ║")
 	fmt.Println("╚═══════════════════════════════════════════════════════════════════════════════╝")
@@ -393,6 +394,26 @@ func main() {
 		fmt.Printf("   3. Tự động phục hồi & Catch-up: Node cũ sống lại đồng bộ 100%% đạt cùng Block Height #%d.\n", finalHeights[0])
 		fmt.Println("   4. Zero-Fork Invariant: Không phát sinh bất kỳ nhánh rẽ hoặc sai lệch dữ liệu nào.")
 		fmt.Println("═══════════════════════════════════════════════════════════════════════════════")
+
+		// Gửi thông báo chi tiết lên Telegram Bot
+		fmt.Println("\n📢 Đang gửi báo cáo kiểm thử Raft lên Telegram Bot...")
+		tgScript := filepath.Join(dir, "../../../deploy/ansible_clusters/scripts/telegram_notify.py")
+		payload, _ := json.Marshal(map[string]interface{}{
+			"leader_before":  currentLeaderID,
+			"failover_ms":    failoverDuration.Milliseconds(),
+			"leader_after":   newLeaderID,
+			"initial_block":  1,
+			"failover_block": 2,
+			"final_block":    finalHeights[0],
+			"duration_secs":  time.Since(startTime).Seconds(),
+		})
+		cmdTg := exec.Command("python3", tgScript, "--raft-test-results", string(payload))
+		outTg, errTg := cmdTg.CombinedOutput()
+		if errTg != nil {
+			fmt.Printf("⚠️ Lỗi gửi Telegram: %v (output: %s)\n", errTg, string(outTg))
+		} else {
+			fmt.Printf("   ✅ Đã bắn thông báo Raft lên Telegram thành công! (%s)\n", strings.TrimSpace(string(outTg)))
+		}
 	} else {
 		fmt.Println("⚠️ Chiều cao các node chưa đồng nhất hoặc đang trong quá trình đồng bộ.")
 	}

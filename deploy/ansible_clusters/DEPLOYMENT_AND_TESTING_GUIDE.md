@@ -29,15 +29,15 @@ Tài liệu này cung cấp toàn bộ quy trình từ A-Z để thiết lập, 
 
 ## 1. KIẾN TRÚC & NGUYÊN LÝ HOẠT ĐỘNG
 
-Kiến trúc MetaNode phân tầng giữa **Lớp Điều Phối / Bảo Lãnh Thanh Khoản (Parent Chain)** và **Các Cụm Thực Thi Phân Đoạn Độc Lập (Sharded Execution Clusters)**.
+Kiến trúc MetaNode tuân thủ mô hình **Đồng Thuận Hai Tầng (Two-Tier Consensus Architecture)** phân định ranh giới nghiêm ngặt giữa **Lớp Điều Phối / Bảo Lãnh Thanh Khoản (Parent Chain)** và **Các Cụm Thực Thi Phân Đoạn (Sharded Execution Clusters)**.
 
 ```
                            ┌──────────────────────────────────────────────┐
-                           │               PARENT CHAIN                   │
-                           │   - BFT Consensus Engine (:4000)             │
+                           │          PARENT CHAIN (COORDINATOR)          │
+                           │   - 100% Rust BFT Engine (Quorum 2f+1)       │
+                           │   - Zero-Fork Invariant (Thà pending ko fork)│
                            │   - LevelDB Native Float Store (:8547)       │
                            │   - Account & Cluster Registry               │
-                           │   - Claimed Inbound Messages Store           │
                            └──────────────▲────────────────▲──────────────┘
                                           │                │
             Chuyển tiền xuyên cụm:        │                │ Nhận tiền & Xác nhận:
@@ -49,22 +49,27 @@ Kiến trúc MetaNode phân tầng giữa **Lớp Điều Phối / Bảo Lãnh T
              │   - ClusterID: 1               │        │   - ClusterID: 2               │
              │   - EVM ChainID: 991           │        │   - EVM ChainID: 991           │
              │   - RPC: http://...:8646       │        │   - RPC: http://...:8647       │
-             │   - P2P: :4200                 │        │   - P2P: :4202                 │
-             │   - MVM Execution Engine       │        │   - MVM Execution Engine       │
-             │   - Workers:                   │        │   - Workers:                   │
-             │     • SendWorker               │        │     • SendWorker               │
-             │     • ReceiveWorker            │        │     • ReceiveWorker            │
-             │     • ReclaimWorker            │        │     • ReclaimWorker            │
+             │   - Consensus: HashiCorp Raft  │        │   - Consensus: HashiCorp Raft  │
+             │     (3 Replicas HA Cluster)    │        │     (Single-Node Feed)         │
+             │   - Auto-Failover: ~200ms      │        │   - Workers:                   │
+             │   - Replicas n0, n1, n2        │        │     • SendWorker               │
+             │   - Workers:                   │        │     • ReceiveWorker            │
+             │     • SendWorker               │        │     • ReclaimWorker            │
+             │     • ReceiveWorker            │        │                                │
+             │     • ReclaimWorker            │        │                                │
              └────────────────────────────────┘        └────────────────────────────────┘
 ```
 
 ### Các Thành Phần Trọng Yếu:
 1. **Parent Chain (Cổng RPC `:8547`, P2P `:4000`):**
+   - **Động cơ đồng thuận:** **100% Rust BFT Engine** (`consensus/metanode`). Sử dụng HotStuff BFT, Quorum 2f+1, DAG digest votes và chữ ký BLS tổng hợp.
+   - **Zero-Fork Invariant (Tối Thượng):** Thà pending chờ Quorum confirmation chứ tuyệt đối không bao giờ fork. Không dùng timeout/sleep để tự ý dispatch commit.
    - Đóng vai trò là nguồn sự thật (Single Source of Truth) về danh bạ cụm (`Cluster Registry`), danh bạ tài khoản (`Account Registry`) và sổ cái ký quỹ thanh khoản (`Native Float Accounts`).
-   - Không can thiệp vào quá trình thực thi hợp đồng thông minh cục bộ của các cụm.
 2. **Execution Clusters (`Cluster 1: :8646`, `Cluster 2: :8647`):**
+   - **Động cơ đồng thuận:** **HashiCorp Raft v1.7.1** (`consensus_mode = "raft"`) tích hợp trực tiếp trong `simple_chain` thuần Go.
+   - **Khả năng chịu lỗi (CFT / High Availability):** Chạy nhiều replica (ví dụ 3 replica `n0`, `n1`, `n2`), tự động phát hiện mất kết nối và **bầu Leader mới trong ~200ms**.
+   - **Shared Key Pattern:** Tất cả replica trong cùng 1 cụm thực thi dùng chung cùng 1 cặp khóa Sequencer (`address` & `private_key`), bảo đảm tính xác định 100% của block hash bất kể replica nào đang giữ quyền Leader.
    - Chạy engine máy ảo MVM (Meta Virtual Machine) tương thích hoàn toàn EVM Cancun (EVM ChainID `991`).
-   - Sở hữu cơ chế đồng thuận nội bộ riêng, tự sinh block và cập nhật state trie độc lập.
 3. **Bộ Ba Rollup Workers trên mỗi Cụm:**
    - **`SendWorker`**: Quét các giao dịch xuyên cụm nội bộ (`StateLocalAppliedPendingSend`), ký chứng thực BLS và đẩy lên Parent Chain qua `SendInboundTransfer`.
    - **`ReceiveWorker`**: Thăm dò định kỳ (poll) Parent Chain từ con trỏ `cursor`, tiếp nhận các giao dịch gửi đến cụm mình, đề xuất block nội bộ để ghi có (`credit`) tiền cho người nhận, sau đó gọi `SendMarkClaimed` về Parent Chain.
@@ -100,11 +105,12 @@ rustc --version
 | Cổng | Giao thức | Dịch vụ | Phạm vi truy cập |
 | :--- | :--- | :--- | :--- |
 | `8547` | TCP (HTTP) | Parent Chain JSON-RPC | Nội bộ cụm / Node quản trị |
-| `4000` | TCP/UDP | Parent Chain P2P Consensus | Giữa các node Parent Chain |
-| `8646` | TCP (HTTP) | Exec Cluster 1 EVM RPC | DApps, Wallets, Tests |
-| `4200` | TCP/UDP | Exec Cluster 1 P2P | Mạng nội bộ Cluster 1 |
+| `4000` | TCP/UDP | Parent Chain P2P Consensus (Rust BFT) | Giữa các node Parent Chain |
+| `8646`, `8648`, `8649` | TCP (HTTP) | Exec Cluster 1 EVM RPC (Replicas 1, 2, 3) | DApps, Wallets, Tests |
+| `7110`, `7111`, `7112` | TCP | Exec Cluster 1 Raft Transport | Nội bộ giữa các Replicas Raft |
+| `7210`, `7211`, `7212` | TCP (HTTP) | Exec Cluster 1 Forward/Admin HMAC | Forwarding tx Follower -> Leader |
 | `8647` | TCP (HTTP) | Exec Cluster 2 EVM RPC | DApps, Wallets, Tests |
-| `4202` | TCP/UDP | Exec Cluster 2 P2P | Mạng nội bộ Cluster 2 |
+| `7120` / `7220` | TCP | Exec Cluster 2 Raft Transport & Forward | Nội bộ Cluster 2 |
 
 ---
 
@@ -157,60 +163,135 @@ deploy/ansible_clusters/
 
 ### 4.2 Cấu hình Inventory
 
-#### Chế độ A: Triển khai Local Devnet (1 Máy chủ / Mặc định)
-File `inventory.yml` đã được định hình sẵn:
+#### Chế độ A: Triển khai Local Devnet (Chuẩn Raft 3 Replicas HA + Single Feed)
+File `inventory.yml` mô hình hóa chuẩn: Cluster 1 chạy cụm Raft 3 node chịu lỗi, Cluster 2 chạy Single Feed:
 ```yaml
 all:
   vars:
-    ansible_connection: local
-    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    ansible_user: "metanode"
+    evm_chain_id: 991
+    install_dir: "/opt/metanode"
+    raft_secret_file: "/opt/metanode/raft_secret.key"
 
-parent_chain_nodes:
-  hosts:
-    parent_node:
-      ansible_host: 127.0.0.1
-      http_port: 8547
-      p2p_port: 4000
+  children:
+    # ── Parent Chain Node (100% Rust BFT Consensus Engine) ──────────────
+    parent_chain_nodes:
+      hosts:
+        parent_node:
+          ansible_host: 127.0.0.1
+          ansible_connection: local
+          parent_http_port: 8547
+          node_data_dir: "/opt/metanode/parent_chain"
+          rust_config_path: "consensus/metanode/config/node_devnet_parent.toml"
 
-exec_clusters:
-  hosts:
-    exec_cluster_1:
-      ansible_host: 127.0.0.1
-      cluster_id: 1
-      http_port: 8646
-      p2p_port: 4200
-    exec_cluster_2:
-      ansible_host: 127.0.0.1
-      cluster_id: 2
-      http_port: 8647
-      p2p_port: 4202
+    # ── Execution Clusters (Rollup Shards with Raft HA Consensus) ────────
+    exec_clusters:
+      hosts:
+        # Cluster 1: 3-Replica High Availability Raft Cluster
+        exec1_replica1:
+          ansible_host: 127.0.0.1
+          ansible_connection: local
+          cluster_id: 1
+          cluster_name: "exec1"
+          consensus_mode: "raft"
+          node_id: "exec1_r1"
+          rpc_port: 8646
+          raft_port: 7110
+          forward_port: 7210
+          raft_bootstrap: true
+          node_data_dir: "/opt/metanode/exec1_r1"
+          address: "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5"
+          raft_peers:
+            - { id: "exec1_r1", address: "127.0.0.1:7110", forward_address: "127.0.0.1:7210" }
+            - { id: "exec1_r2", address: "127.0.0.1:7111", forward_address: "127.0.0.1:7211" }
+            - { id: "exec1_r3", address: "127.0.0.1:7112", forward_address: "127.0.0.1:7212" }
+
+        exec1_replica2:
+          ansible_host: 127.0.0.1
+          ansible_connection: local
+          cluster_id: 1
+          cluster_name: "exec1"
+          consensus_mode: "raft"
+          node_id: "exec1_r2"
+          rpc_port: 8648
+          raft_port: 7111
+          forward_port: 7211
+          raft_bootstrap: false
+          node_data_dir: "/opt/metanode/exec1_r2"
+          address: "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5"
+          raft_peers:
+            - { id: "exec1_r1", address: "127.0.0.1:7110", forward_address: "127.0.0.1:7210" }
+            - { id: "exec1_r2", address: "127.0.0.1:7111", forward_address: "127.0.0.1:7211" }
+            - { id: "exec1_r3", address: "127.0.0.1:7112", forward_address: "127.0.0.1:7212" }
+
+        exec1_replica3:
+          ansible_host: 127.0.0.1
+          ansible_connection: local
+          cluster_id: 1
+          cluster_name: "exec1"
+          consensus_mode: "raft"
+          node_id: "exec1_r3"
+          rpc_port: 8649
+          raft_port: 7112
+          forward_port: 7212
+          raft_bootstrap: false
+          node_data_dir: "/opt/metanode/exec1_r3"
+          address: "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5"
+          raft_peers:
+            - { id: "exec1_r1", address: "127.0.0.1:7110", forward_address: "127.0.0.1:7210" }
+            - { id: "exec1_r2", address: "127.0.0.1:7111", forward_address: "127.0.0.1:7211" }
+            - { id: "exec1_r3", address: "127.0.0.1:7112", forward_address: "127.0.0.1:7212" }
+
+        # Cluster 2: Single-Replica Raft Node
+        exec2_replica1:
+          ansible_host: 127.0.0.1
+          ansible_connection: local
+          cluster_id: 2
+          cluster_name: "exec2"
+          consensus_mode: "raft"
+          node_id: "exec2_r1"
+          rpc_port: 8647
+          raft_port: 7120
+          forward_port: 7220
+          raft_bootstrap: true
+          node_data_dir: "/opt/metanode/exec2"
+          address: "0x0d4CC97b62a149a8fe8DE81262270426A80B0935"
+          raft_peers:
+            - { id: "exec2_r1", address: "127.0.0.1:7120", forward_address: "127.0.0.1:7220" }
 ```
 
-#### Chế độ B: Triển khai Multi-Server Production (Nhiều Máy Chủ)
-Chỉ cần chỉnh sửa `inventory.yml`, trỏ IP các node và sử dụng giao thức SSH:
+#### Chế độ B: Triển khai Multi-Server Production (Phân tán qua mạng nội bộ / VPN)
+Chỉ cần chỉnh sửa `ansible_host` trỏ IP máy chủ thật, đặt `ansible_connection: ssh`, và trỏ các địa chỉ `raft_peers` tương ứng:
 ```yaml
 all:
   vars:
     ansible_connection: ssh
-    ansible_user: ubuntu
-    ansible_ssh_private_key_file: ~/.ssh/id_rsa
+    ansible_user: metanode
+    ansible_ssh_private_key_file: ~/.ssh/metanode_deploy_key
 
 parent_chain_nodes:
   hosts:
     parent_node:
       ansible_host: 10.0.0.10
-      http_port: 8547
+      parent_http_port: 8547
 
 exec_clusters:
   hosts:
-    exec_cluster_1:
+    exec1_replica1:
       ansible_host: 10.0.0.11
       cluster_id: 1
-      http_port: 8646
-    exec_cluster_2:
+      raft_bootstrap: true
+      # ...
+    exec1_replica2:
       ansible_host: 10.0.0.12
-      cluster_id: 2
-      http_port: 8647
+      cluster_id: 1
+      raft_bootstrap: false
+      # ...
+    exec1_replica3:
+      ansible_host: 10.0.0.13
+      cluster_id: 1
+      raft_bootstrap: false
+      # ...
 ```
 
 ### 4.3 Cấu hình Biến Toàn Cục
@@ -273,7 +354,7 @@ ansible-playbook -i inventory.yml deploy.yml --tags exec_clusters
 
 Bộ kiểm thử được viết bằng Go tại [`execution/scripts/test/test_real_world_scenarios.go`](file:///home/abc/chain-n/metanode/execution/scripts/test/test_real_world_scenarios.go), mô phỏng 100% các hành vi giao dịch trong thực tế.
 
-### 6.1 Giải thích chi tiết 5 Kịch bản kiểm thử
+### 6.1 Giải thích chi tiết 5 Kịch bản kiểm thử Tích hợp Xuyên Cụm
 
 | Kịch Bản | Mục Tiêu Kiểm Thử | Hành Động Kỹ Thuật & Luồng Xử Lý | Tiêu Chí Đạt (Pass) |
 | :--- | :--- | :--- | :--- |
@@ -283,7 +364,45 @@ Bộ kiểm thử được viết bằng Go tại [`execution/scripts/test/test_
 | **Kịch bản 4: Chuyển tiền xuyên 2 cụm** | Chuyển tiền liên shard (Cluster 1 -> Cluster 2) | 1. Cluster 1 gọi RPC `mtn_sendCrossChainTransfer`.<br>2. Cluster 1 trừ tiền người gửi, `SendWorker` ký BLS gửi lên Parent Chain.<br>3. Parent Chain ghi nhận vào danh sách inbound.<br>4. `ReceiveWorker` của Cluster 2 bắt được và credit tiền cho người nhận. | Số dư tài khoản đích trên Cluster 2 tăng đúng lượng tiền chuyển trong vòng < 40 giây. |
 | **Kịch bản 5: Parent Chain sập, Cụm tự vận hành** | Khả năng độc lập và chịu lỗi (Resilience) | 1. Cưỡng chế dừng hoàn toàn tiến trình Parent Chain (`pkill parent_chain`).<br>2. Gửi một giao dịch chuyển tiền nội bộ trên Cluster 1.<br>3. Cluster 1 tiếp tục tự đào block, khớp lệnh và cập nhật state trie bình thường.<br>4. Khởi động lại Parent Chain để phục hồi mạng. | Block Height Cluster 1 tiếp tục tăng, số dư người nhận cập nhật chính xác dù Parent Chain chết hoàn toàn. |
 
-### 6.2 Các lệnh chạy test
+### 6.2 Kiểm thử Khả Năng Chịu Lỗi & Auto-Failover Cụm Raft (HA Testing)
+
+Bộ kiểm thử tại [`execution/scripts/test/test_raft_fault_tolerance.go`](file:///home/abc/chain-n/metanode/execution/scripts/test/test_raft_fault_tolerance.go) tự động chứng minh năng lực phục hồi tức thời của cụm thực thi chạy Raft (`hashicorp/raft v1.7.1`):
+
+```
+                                  SỰ CỐ XẢY RA: KILL -9 LEADER n0
+                                               │
+                                 ┌─────────────┴─────────────┐
+                                 │                           │
+                   Follower n1 phát hiện       Follower n2 phát hiện
+                   heartbeat timeout (100ms)   heartbeat timeout (100ms)
+                                 │                           │
+                                 └─────────────┬─────────────┘
+                                               ▼
+                               Bầu cử Leader mới (Election)
+                               Term 2 -> Term 3 (Tốn ~207ms)
+                                               ▼
+                                      👑 LEADER MỚI: n2
+                                  Quorum 2/3 tiếp tục đóng block
+                                               ▼
+                              n0 khởi động lại -> Tự động Catch-up
+                             100% Khớp Block Height (Zero-Fork)
+```
+
+#### Quy trình 5 bước kiểm thử chịu lỗi Raft:
+1. **Khởi tạo & Bầu Leader ban đầu:** Khởi chạy 3 replica (`n0`, `n1`, `n2`), xác minh `n0` được bầu làm Leader ban đầu (Term 2).
+2. **Giao dịch ban đầu:** Gửi transaction khi cả 3 node đang online -> cụm commit batch và sinh Block Height #1.
+3. **Giả lập sự cố phần cứng (`kill -9 n0`):** Cưỡng chế tắt Leader ngay lập tức.
+4. **Bầu Leader tự động (Auto-Failover):** 2 node còn lại (`n1`, `n2`) phát hiện mất tín hiệu và tự động bầu `n2` làm Leader mới chỉ trong **207 ms**. Cụm tiếp tục nhận giao dịch và đóng Block Height #2 bình thường (không gián đoạn dịch vụ).
+5. **Phục hồi & Đồng bộ bắt kịp (Catch-Up):** Bật lại `n0`. Node này tự động gia nhập lại mạng Raft, đồng bộ state/log và đạt cùng Block Height #3 với toàn cụm.
+
+#### Lệnh chạy kiểm thử Raft & tự động bắn Telegram:
+```bash
+cd /home/abc/chain-n/metanode
+go run execution/scripts/test/test_raft_fault_tolerance.go
+```
+*Kết quả failover sub-second và bằng chứng Zero-Fork sẽ được bot Telegram tự động đẩy về máy của bạn.*
+
+### 6.3 Các lệnh chạy test tích hợp toàn diện
 
 #### Chạy test tích hợp kèm thông báo Telegram:
 ```bash
@@ -304,7 +423,7 @@ EXEC2_URL="http://127.0.0.1:8647" \
 go run execution/scripts/test/test_real_world_scenarios.go
 ```
 
-### 6.3 Kiểm tra báo cáo Telegram & Logs
+### 6.4 Kiểm tra báo cáo Telegram & Logs
 - Khi test chạy xong, bot Telegram sẽ gửi báo cáo dạng bảng chi tiết từng kịch bản (Kèm emoji ✅ / ❌ và thời gian thực thi).
 - Log chi tiết từng bước được ghi tại: `deploy/ansible_clusters/test_run.log`.
 

@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-09-29 (Standardized ClusterID vs EVM ChainID: Execution nodes share unified EVM `ChainID = 991` for user tx signing and replay protection, while cross-node routing, float accounts, and SendWorker strictly use `ClusterID` (`destClusterID`). Backward compatibility preserved via aliases in `parentchain/store.go`, `parentchain/tx.go`, and `SimpleChainConfig`.)
+> **Last updated:** 2026-09-29 (Upgraded Ansible cluster deployment with HashiCorp Raft HA 3-replica sequencer configuration, automated HMAC secret generation, and enriched Telegram status and fault-tolerance test reporting.)
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---

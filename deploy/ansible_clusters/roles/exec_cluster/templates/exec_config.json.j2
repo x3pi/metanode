@@ -26,6 +26,35 @@
     "BLSPrivateKey": "{{ bls_priv }}",
     "SnapshotPath": "{{ node_data_dir }}/snapshot"
   },
-  "rust_config_path": "{{ deploy_dir }}/{{ rust_config_path }}",
-  "is_rpc_node": true
+  "is_rpc_node": true,
+  "consensus_mode": "{{ consensus_mode | default('raft') }}",
+{% if (consensus_mode | default('raft')) == 'raft' %}
+  "snapshot_enabled": false,
+  "raft": {
+    "node_id": "{{ raft_node_id | default(inventory_hostname) }}",
+    "bind_address": "{{ raft_bind_address | default((ansible_host | default('127.0.0.1')) ~ ':' ~ (raft_port | default(7110))) }}",
+    "advertise_address": "{{ raft_advertise_address | default((ansible_host | default('127.0.0.1')) ~ ':' ~ (raft_port | default(7110))) }}",
+    "data_dir": "{{ node_data_dir }}/raft",
+    "bootstrap": {{ raft_bootstrap | default(false) | lower }},
+    "forward_bind_address": "{{ forward_bind_address | default((ansible_host | default('127.0.0.1')) ~ ':' ~ (forward_port | default(7210))) }}",
+    "forward_secret_file": "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}",
+    "sequencer_address": "{{ address }}",
+    "heartbeat_timeout_ms": {{ raft_heartbeat_timeout_ms | default(100) }},
+    "election_timeout_ms": {{ raft_election_timeout_ms | default(200) }},
+    "leader_lease_timeout_ms": {{ raft_leader_lease_timeout_ms | default(80) }},
+    "commit_timeout_ms": {{ raft_commit_timeout_ms | default(30) }},
+    "propose_queue_size": {{ raft_propose_queue_size | default(1024) }},
+    "peers": [
+{% for peer in raft_peers | default([{'id': raft_node_id | default(inventory_hostname), 'address': (ansible_host | default('127.0.0.1')) ~ ':' ~ (raft_port | default(7110)), 'forward_address': (ansible_host | default('127.0.0.1')) ~ ':' ~ (forward_port | default(7210))}]) %}
+      {
+        "id": "{{ peer.id }}",
+        "address": "{{ peer.address }}",
+        "forward_address": "{{ peer.forward_address }}"
+      }{% if not loop.last %},{% endif %}
+{% endfor %}
+    ]
+  }
+{% else %}
+  "rust_config_path": "{{ deploy_dir }}/{{ rust_config_path }}"
+{% endif %}
 }

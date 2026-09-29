@@ -6,8 +6,8 @@
     - name: Run E2E multi-cluster real world scenarios test
       ansible.builtin.shell: |
         export PARENT_CHAIN_URL="http://{{ hostvars[groups['parent_chain_nodes'][0]]['ansible_host'] | default('127.0.0.1') }}:{{ hostvars[groups['parent_chain_nodes'][0]]['parent_http_port'] | default(8547) }}"
-        export EXEC1_URL="http://{{ hostvars['exec_cluster_1']['ansible_host'] | default('127.0.0.1') }}:{{ hostvars['exec_cluster_1']['rpc_port'] | default(8646) }}"
-        export EXEC2_URL="http://{{ hostvars['exec_cluster_2']['ansible_host'] | default('127.0.0.1') }}:{{ hostvars['exec_cluster_2']['rpc_port'] | default(8647) }}"
+        export EXEC1_URL="http://{{ (groups['exec_clusters'] | map('extract', hostvars) | selectattr('cluster_id', 'equalto', 1) | list | first)['ansible_host'] | default('127.0.0.1') }}:{{ (groups['exec_clusters'] | map('extract', hostvars) | selectattr('cluster_id', 'equalto', 1) | list | first)['rpc_port'] | default(8646) }}"
+        export EXEC2_URL="http://{{ (groups['exec_clusters'] | map('extract', hostvars) | selectattr('cluster_id', 'equalto', 2) | list | first)['ansible_host'] | default('127.0.0.1') }}:{{ (groups['exec_clusters'] | map('extract', hostvars) | selectattr('cluster_id', 'equalto', 2) | list | first)['rpc_port'] | default(8647) }}"
         go run {{ test_script_path }}
       register: test_output
       ignore_errors: true

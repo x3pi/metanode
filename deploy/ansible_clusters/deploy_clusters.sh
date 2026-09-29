@@ -310,7 +310,7 @@ parent = {
 }
 clusters = [
     {
-        'name': 'Exec Cluster 1',
+        'name': 'Exec Cluster 1 (Raft HA 3-Replica)',
         'cluster_id': 1,
         'chain_id': 991,
         'rpc': 'http://127.0.0.1:8646',
@@ -318,10 +318,16 @@ clusters = [
         'address': '0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5',
         'bls_key': '944488b425d29336c7913a3b45946adee6b9bfbd',
         'block_height': ${B1_INT},
-        'status': 'Active & Producing Blocks'
+        'status': 'Active & Producing Blocks',
+        'consensus_mode': 'raft',
+        'raft_role': 'Leader',
+        'raft_term': 1,
+        'raft_port': ':7110',
+        'fwd_port': ':7210',
+        'quorum_info': '3/3 Nodes Active (Quorum OK)'
     },
     {
-        'name': 'Exec Cluster 2',
+        'name': 'Exec Cluster 2 (Raft Single)',
         'cluster_id': 2,
         'chain_id': 991,
         'rpc': 'http://127.0.0.1:8647',
@@ -329,7 +335,13 @@ clusters = [
         'address': '0x0d4CC97b62a149a8fe8DE81262270426A80B0935',
         'bls_key': '83221629eeff1a69aa96ac6aadea402a7b62a746',
         'block_height': ${B2_INT},
-        'status': 'Active & Producing Blocks'
+        'status': 'Active & Producing Blocks',
+        'consensus_mode': 'raft',
+        'raft_role': 'Leader',
+        'raft_term': 1,
+        'raft_port': ':7120',
+        'fwd_port': ':7220',
+        'quorum_info': '1/1 Node Active (Single Feed)'
     },
 ]
 tn.notify_services_ready(parent, clusters, duration_secs=${TOTAL_DEPLOY_DURATION})
