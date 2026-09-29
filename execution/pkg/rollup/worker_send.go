@@ -2,6 +2,7 @@ package rollup
 
 import (
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -117,6 +118,11 @@ func (w *SendWorker) processPending() {
 		return
 	}
 
+	// Sort records strictly by SourceSeq so sequential nonce transfers are dispatched in order
+	sort.SliceStable(records, func(i, j int) bool {
+		return records[i].SourceSeq < records[j].SourceSeq
+	})
+
 	for _, rec := range records {
 		if !w.isReleasable(rec) {
 			continue
@@ -165,12 +171,16 @@ func (w *SendWorker) processPending() {
 
 			if err != nil {
 				if strings.Contains(err.Error(), "wrong nonce") {
-					// The previous RPC call probably succeeded but the response was dropped.
-					// We must advance to submitted to poll GetTransferRecord.
-					log.Printf("SendWorker: msgID %x returned 'wrong nonce', advancing to check confirmation", rec.MessageID)
+					// Verify whether the record actually landed on the parent chain
+					if _, recFound, checkErr := w.client.GetTransferRecord(rec.MessageID); checkErr == nil && recFound {
+						log.Printf("SendWorker: msgID %x returned 'wrong nonce' but record exists on parent chain, advancing to check confirmation", rec.MessageID)
+					} else {
+						log.Printf("SendWorker: msgID %x returned 'wrong nonce' (seq %d) and not found on parent chain, pausing to let nonce settle", rec.MessageID, rec.SourceSeq)
+						break
+					}
 				} else {
 					log.Printf("SendWorker: failed to send msgID %x: %v", rec.MessageID, err)
-					continue
+					break
 				}
 			}
 
