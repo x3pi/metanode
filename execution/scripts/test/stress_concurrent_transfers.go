@@ -1,3 +1,5 @@
+//go:build ignore
+
 package main
 
 // stress_concurrent_transfers.go fires N cross-chain transfers CONCURRENTLY from exec1 to N
