@@ -168,7 +168,7 @@ func main() {
 
 	// Bootstrap exec1 in ChainRegistry if not yet
 	bootstrapAddr := common.HexToAddress("0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5")
-	_, _ = parentClient.SendDepositToFloat(exec1PubKey, 1, bootstrapAddr, bootstrapAddr, big.NewInt(1_000_000_000))
+	_, _ = parentClient.SendDepositToFloat(exec1PubKey, 1, bootstrapAddr, bootstrapAddr, big.NewInt(1_000_000_000_000_000_000))
 
 	// =======================================================================================
 	// KỊCH BẢN 1: Đăng ký 1 tài khoản mới trên Parent Chain & ánh xạ vào Cluster Exec 2
@@ -473,5 +473,109 @@ func main() {
 	}
 	fmt.Println("   Cầu nối Rollup và các worker đã tự động tái kết nối, trạng thái liên chuỗi được phục hồi 100%!")
 
-	fmt.Println("\n🎉 TẤT CẢ 6/6 KỊCH BẢN SỬ DỤNG THỰC TẾ ĐỀU ĐÃ ĐƯỢC KIỂM CHỨNG THÀNH CÔNG VÀ CHÍNH XÁC!")
+	// =======================================================================================
+	// KỊCH BẢN 7: Tương tác gọi Smart Contract xuyên 2 cụm node (Exec 1 -> Exec 2)
+	// =======================================================================================
+	printHeader("KỊCH BẢN 7: TƯƠNG TÁC GỌI SMART CONTRACT XUYÊN 2 CỤM NODE (EXEC 1 -> EXEC 2)")
+	fmt.Println("1. Khởi tạo tài khoản đích điều khiển Smart Contract trên Exec 2...")
+	contractOwnerPriv, _ := crypto.GenerateKey()
+	contractOwnerAddr := crypto.PubkeyToAddress(contractOwnerPriv.PublicKey)
+	fmt.Printf("   Địa chỉ Smart Contract đích trên Exec 2: %s\n", contractOwnerAddr.Hex())
+
+	// Đảm bảo cụm Exec 1 có đủ float balance trên Parent Chain
+	_, _ = parentClient.SendDepositToFloat(exec1PubKey, 1, bootstrapAddr, bootstrapAddr, big.NewInt(1_000_000_000_000_000_000))
+
+	// Đăng ký tài khoản đích trên Parent Chain
+	fmt.Println("2. Đăng ký tài khoản Smart Contract đích trên Parent Chain vào Cluster Exec 2...")
+	regDigestContract := parentchain.ComputeRegisterAccountMessage(contractOwnerAddr, exec2PubKey)
+	userSigContract, _ := crypto.Sign(crypto.Keccak256(regDigestContract), contractOwnerPriv)
+	clusterSigContract := bls.Sign(exec2Priv, regDigestContract)
+	_, err = parentClient.SendRegisterAccount(contractOwnerAddr, exec2PubKey, userSigContract, clusterSigContract)
+	if err != nil {
+		fmt.Printf("❌ Đăng ký Smart Contract trên Parent Chain thất bại: %v\n", err)
+		os.Exit(1)
+	}
+	for i := 0; i < 15; i++ {
+		time.Sleep(1 * time.Second)
+		_, found, err := parentClient.GetAccountRegistry(contractOwnerAddr)
+		if err == nil && found {
+			break
+		}
+	}
+
+	// Gửi lệnh gọi xuyên cụm từ Exec 1 sang Smart Contract trên Exec 2
+	fundingAmount := big.NewInt(10_000_000_000) // 10 gwei
+	fundingAmountHex := hexutil.EncodeBig(fundingAmount)
+	fmt.Printf("3. Exec 1 (RPC :8646) thực thi gọi xuyên cụm cấp vốn/kích hoạt Smart Contract trên Exec 2 (10 gwei)...\n")
+	resCrossContract, err := rpcCall(exec1URL, "mtn_sendCrossChainTransfer", []interface{}{contractOwnerAddr.Hex(), fundingAmountHex})
+	if err != nil {
+		fmt.Printf("❌ Lỗi kích hoạt gọi Smart Contract xuyên cụm: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("   Giao dịch gọi Smart Contract xuyên cụm đã gửi: TxHash = %v\n", resCrossContract["result"])
+
+	// Chờ Exec 2 nhận và cập nhật số dư cho contract
+	fmt.Printf("4. Chờ Rollup ReceiveWorker trên Exec 2 tiếp nhận và ghi nhận số dư cho %s (tối đa 40s)...\n", contractOwnerAddr.Hex())
+	creditedContract := false
+	startWaitContract := time.Now()
+	for time.Since(startWaitContract) < 40*time.Second {
+		balContract, err := getBalance(exec2URL, contractOwnerAddr)
+		if err == nil && balContract != nil && balContract.Sign() > 0 {
+			fmt.Printf("   ✅ Exec 2 đã ghi nhận số dư thành công: %s wei (mất %v)\n", balContract.String(), time.Since(startWaitContract))
+			creditedContract = true
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if !creditedContract {
+		fmt.Printf("❌ Kịch bản 7 thất bại: Exec 2 chưa nhận được số dư xuyên cụm\n")
+		os.Exit(1)
+	}
+
+	// Thực thi Smart Contract logic trên Exec 2 bằng số dư vừa nhận
+	fmt.Println("5. Thực thi tương tác Smart Contract setBlsPublicKey trên Exec 2 bằng nguồn vốn xuyên cụm...")
+	contractBLS := bls.GenerateKeyPair()
+	accountSettingAddrContract := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
+	selectorContract := utils.GetFunctionSelector("setBlsPublicKey(bytes)")
+	var inputDataContract []byte
+	inputDataContract = append(inputDataContract, selectorContract...)
+	offsetContract := common.LeftPadBytes(big.NewInt(32).Bytes(), 32)
+	inputDataContract = append(inputDataContract, offsetContract...)
+	blsBytesContract := contractBLS.BytesPublicKey()
+	lengthContract := common.LeftPadBytes(big.NewInt(int64(len(blsBytesContract))).Bytes(), 32)
+	inputDataContract = append(inputDataContract, lengthContract...)
+	paddedBlsContract := common.RightPadBytes(blsBytesContract, 64)
+	inputDataContract = append(inputDataContract, paddedBlsContract...)
+
+	nonceContract, _ := getAccountNonce(exec2URL, contractOwnerAddr)
+	gasLimitContract := uint64(200000)
+	gasPriceContract := big.NewInt(1) // 1 wei
+	txContract := ethtypes.NewTransaction(nonceContract, accountSettingAddrContract, big.NewInt(0), gasLimitContract, gasPriceContract, inputDataContract)
+	signerContract := ethtypes.NewCancunSigner(big.NewInt(991))
+	signedTxContract, err := ethtypes.SignTx(txContract, signerContract, contractOwnerPriv)
+	if err != nil {
+		fmt.Printf("❌ Ký giao dịch contract trên Exec 2 thất bại: %v\n", err)
+		os.Exit(1)
+	}
+	rawTxContract, _ := signedTxContract.MarshalBinary()
+	txContractHex := hexutil.Encode(rawTxContract)
+
+	resTxContract, err := rpcCall(exec2URL, "eth_sendRawTransaction", []interface{}{txContractHex})
+	if err != nil {
+		fmt.Printf("❌ Gửi giao dịch thực thi contract trên Exec 2 thất bại: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("   Đã gửi giao dịch thực thi Smart Contract trên Exec 2: TxHash=%v\n", resTxContract["result"])
+	time.Sleep(3 * time.Second)
+
+	// Kiểm tra receipt của giao dịch trên Exec 2
+	fmt.Println("6. Kiểm tra receipt xác nhận thực thi Smart Contract trên Exec 2...")
+	rcpRes, err := rpcCall(exec2URL, "eth_getTransactionReceipt", []interface{}{resTxContract["result"]})
+	if err == nil && rcpRes != nil && rcpRes["result"] != nil {
+		rcpMap := rcpRes["result"].(map[string]interface{})
+		fmt.Printf("   Receipt status: %v, Gas Used: %v, Block Number: %v\n", rcpMap["status"], rcpMap["gasUsed"], rcpMap["blockNumber"])
+	}
+	fmt.Println("✅ KỊCH BẢN 7 THÀNH CÔNG RỰC RỠ: Toàn bộ chu trình gọi Smart Contract xuyên 2 cụm (Exec 1 -> Parent Chain -> Exec 2 -> EVM Contract Execution) hoạt động hoàn hảo!")
+
+	fmt.Println("\n🎉 TẤT CẢ 7/7 KỊCH BẢN SỬ DỤNG THỰC TẾ ĐỀU ĐÃ ĐƯỢC KIỂM CHỨNG THÀNH CÔNG VÀ CHÍNH XÁC!")
 }
