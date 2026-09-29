@@ -820,7 +820,11 @@ const devnetSenderBLSPrivateKeyHex = "0f0f8761e3fe67cdc9e7573adf72c7e929e2a00f98
 // durable via the per-block Commit() that real transaction execution triggers, an out-of-band
 // write here is silently discarded the next time a block is processed (found live: the record
 // was gone by SendWorker's very next 5s poll, with the RPC call itself reporting success).
-func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, amountHex string) (string, error) {
+//
+// Optional trailing params (devnet-only, same trust level as the hardcoded devnet sender above):
+// senderKeyHex / blsKeyHex override the sender's ECDSA and BLS private keys, so stress tests can
+// use many independent senders instead of racing on one shared account's nonce.
+func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, amountHex string, senderKeyHex *string, blsKeyHex *string) (string, error) {
 	// Verify that the execution nodes are not a separate chain but share the chainid with the parent chain
 	// A separate chain (L2) would have a GatewayContract configured for cross-chain value transfer.
 	if api.App.config.CrossChain.GatewayContract != "" {
@@ -846,7 +850,11 @@ func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, am
 	// Sender is the devnet-only test account funded in run_devnet.sh's genesis (see
 	// devnetSenderPrivateKeyHex's doc comment). Derived from the key itself rather than a
 	// separately hardcoded address literal, so the two can never drift out of sync.
-	privKey, err := crypto.HexToECDSA(devnetSenderPrivateKeyHex)
+	ecdsaHex, blsHex := devnetSenderPrivateKeyHex, devnetSenderBLSPrivateKeyHex
+	if senderKeyHex != nil && blsKeyHex != nil {
+		ecdsaHex, blsHex = strings.TrimPrefix(*senderKeyHex, "0x"), strings.TrimPrefix(*blsKeyHex, "0x")
+	}
+	privKey, err := crypto.HexToECDSA(ecdsaHex)
 	if err != nil {
 		return "", fmt.Errorf("failed to load devnet sender key: %w", err)
 	}
@@ -854,7 +862,7 @@ func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, am
 
 	if api.App.blsKeyStore != nil {
 		if has, _ := api.App.blsKeyStore.HasPrivateKey(senderAddr); !has {
-			if err := api.App.blsKeyStore.SetPrivateKey(senderAddr, devnetSenderBLSPrivateKeyHex); err != nil {
+			if err := api.App.blsKeyStore.SetPrivateKey(senderAddr, blsHex); err != nil {
 				return "", fmt.Errorf("failed to register devnet sender BLS key: %w", err)
 			}
 		}

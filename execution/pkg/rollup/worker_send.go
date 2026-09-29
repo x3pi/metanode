@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
@@ -18,6 +19,9 @@ type SendWorker struct {
 	blsKeyPair  *bls.KeyPair
 	destPubKey  cm.PublicKey
 	destChainID uint64
+
+	// EventProposer is used to submit state machine events to the Raft consensus.
+	EventProposer func(event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error
 
 	wakeCh chan struct{}
 	quitCh chan struct{}
@@ -163,6 +167,14 @@ func (w *SendWorker) processPending() {
 				Type: EventRPCSubmitted,
 				Role: RoleSender,
 			}
+			
+			if w.EventProposer != nil {
+				if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
+					log.Printf("SendWorker: failed to propose EventRPCSubmitted for %x: %v", rec.MessageID, err)
+				}
+				continue
+			}
+
 			newState, _, err := Next(rec.State, RoleSender, event)
 			if err == nil {
 				rec.State = newState
@@ -181,6 +193,14 @@ func (w *SendWorker) processPending() {
 					Type: EventParentConfirmed,
 					Role: RoleSender,
 				}
+				
+				if w.EventProposer != nil {
+					if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
+						log.Printf("SendWorker: failed to propose EventParentConfirmed for %x: %v", rec.MessageID, err)
+					}
+					continue
+				}
+
 				newState, _, err := Next(rec.State, RoleSender, event)
 				if err == nil {
 					rec.State = newState

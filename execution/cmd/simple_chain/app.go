@@ -281,6 +281,15 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 
 	var rollupNonceMutex sync.Mutex
 	var rollupPendingNonce uint64
+	// In-flight system txs, keyed by (msgID, event type) -> nonce assigned. Guarded by
+	// rollupNonceMutex. See the eventProposer comment for why this exists.
+	type rollupInflightKey struct {
+		msgID e_common.Hash
+		typ   rollup.EventType
+	}
+	rollupInflight := map[rollupInflightKey]uint64{}
+	var rollupLastDBNonce uint64
+	rollupLastProgress := time.Now()
 
 	type RollupSystemPayload struct {
 		Event        rollup.Event  `json:"event"`
@@ -300,19 +309,43 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		if err == nil {
 			dbNonce = state.Nonce()
 		}
-		// Always resync to the real on-chain nonce rather than only ever raising
-		// rollupPendingNonce to catch up with it. ReceiveWorker/ReclaimWorker re-propose a
-		// still-non-terminal record's event on EVERY poll tick (5s) until its state actually
-		// changes, so a record whose barrier tx hasn't landed yet (still sitting in the pool,
-		// "future" relative to the real account nonce runBarrierTx validates against) gets a
-		// FRESH local nonce reservation each tick that's never consumed — with the old
-		// only-ever-raise logic this drifts rollupPendingNonce arbitrarily far ahead of dbNonce
-		// with no way back, so the one nonce value that would actually be accepted next never
-		// gets resubmitted again. Confirmed live: rollupPendingNonce reached 38 while the real
-		// account nonce stayed stuck at 1, forever. Unconditionally resyncing costs at most a
-		// nonce-collision-triggered retry (one more 5s tick) if two records need submission in
-		// the exact same tick — a bounded, self-correcting cost, not a permanent stall.
-		rollupPendingNonce = dbNonce
+		// Nonce allocation for system txs. TransactionPool keys on (sender, nonce), so two
+		// events proposed with the same nonce collide ("already exists in pool") no matter what
+		// their payloads are. Two failure modes to avoid at once:
+		//  (a) ReceiveWorker/ReclaimWorker re-propose a still-non-terminal record's event every
+		//      5s tick until its state changes, so blindly taking a fresh nonce per call drifts
+		//      far ahead of the on-chain nonce (seen live: 38 vs 1) and strands the tx that
+		//      would actually be accepted next;
+		//  (b) unconditionally resetting to the on-chain nonce (the earlier fix for (a)) makes
+		//      every event in the SAME tick read the same not-yet-committed nonce, so only the
+		//      first lands per tick (seen live with 10 concurrent transfers: 2/10 credited).
+		// Fix: remember which (msgID, event type) already holds a nonce that hasn't been
+		// consumed on-chain yet and don't resubmit it; hand new events consecutive nonces after
+		// the highest one outstanding. Entries whose nonce the chain has passed are dropped, so
+		// an event that executed but left its record unchanged is simply re-proposed later.
+		// The stall reset below is proposer-local retry hygiene only (no consensus decision
+		// depends on it): if the on-chain nonce makes no progress while events are in flight
+		// (e.g. a tx was dropped from the pool), forget them and start again from dbNonce.
+		if dbNonce != rollupLastDBNonce {
+			rollupLastDBNonce = dbNonce
+			rollupLastProgress = time.Now()
+		}
+		for k, n := range rollupInflight {
+			if n < dbNonce {
+				delete(rollupInflight, k)
+			}
+		}
+		if len(rollupInflight) > 0 && time.Since(rollupLastProgress) > 60*time.Second {
+			rollupInflight = map[rollupInflightKey]uint64{}
+			rollupLastProgress = time.Now()
+		}
+		inflightKey := rollupInflightKey{msgID: msgID, typ: event.Type}
+		if _, pending := rollupInflight[inflightKey]; pending {
+			return nil
+		}
+		if len(rollupInflight) == 0 || rollupPendingNonce < dbNonce {
+			rollupPendingNonce = dbNonce
+		}
 
 		payload := RollupSystemPayload{
 			Event:        event,
@@ -363,12 +396,14 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		// RollupSystemHandler at all.
 		_, err = app.transactionProcessor.AddTransactionToPool(tx)
 		if err == nil {
+			rollupInflight[inflightKey] = rollupPendingNonce
 			rollupPendingNonce++
 			logger.Info("📡 [ROLLUP-PROPOSER] Proposed Event %T to Raft Tx Pool (Nonce %d)", event, tx.GetNonce())
 		}
 		return err
 	}
 
+	app.sendWorker.EventProposer = eventProposer
 	app.recvWorker.EventProposer = eventProposer
 	app.reclaimWorker.EventProposer = eventProposer
 

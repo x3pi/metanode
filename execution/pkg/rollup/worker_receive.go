@@ -226,6 +226,14 @@ func (w *ReceiveWorker) processMarkClaimedPendingCredit(rec *MessageRecord) {
 		Type: EventRPCSubmitted,
 		Role: RoleReceiver,
 	}
+
+	if w.EventProposer != nil {
+		if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
+			log.Printf("ReceiveWorker: failed to propose EventRPCSubmitted for %x: %v", rec.MessageID, err)
+		}
+		return
+	}
+
 	newState, _, err := Next(rec.State, RoleReceiver, event)
 	if err == nil {
 		rec.State = newState
@@ -247,6 +255,14 @@ func (w *ReceiveWorker) processMarkClaimedPendingRefund(rec *MessageRecord) {
 		Type: EventRPCSubmitted,
 		Role: RoleReceiver,
 	}
+
+	if w.EventProposer != nil {
+		if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
+			log.Printf("ReceiveWorker: failed to propose EventRPCSubmitted for %x: %v", rec.MessageID, err)
+		}
+		return
+	}
+
 	newState, _, err := Next(rec.State, RoleReceiver, event)
 	if err == nil {
 		rec.State = newState
@@ -367,6 +383,14 @@ func (w *ReceiveWorker) processRefundSent(rec *MessageRecord) {
 	}
 
 	event := Event{Type: EventRefundConfirmed, Role: RoleReceiver}
+
+	if w.EventProposer != nil {
+		if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
+			log.Printf("ReceiveWorker: failed to propose EventRefundConfirmed for %x: %v", rec.MessageID, err)
+		}
+		return
+	}
+
 	newState, _, err := Next(rec.State, RoleReceiver, event)
 	if err != nil {
 		log.Printf("ReceiveWorker: Next(EventRefundConfirmed) error: %v", err)

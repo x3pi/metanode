@@ -80,6 +80,14 @@ func (h *RollupSystemHandler) HandleTransaction(
 	stateDB := newLiveAccountStateAccessor(chainState)
 	if err := h.dispatcher.HandleSystemEvent(newLiveRollupStore(chainState), stateDB, data); err != nil {
 		logger.Error("❌ RollupSystemHandler: HandleSystemEvent failed: %v", err)
+		// The tx was executed (and failed), so it must still consume its nonce, as on any
+		// Ethereum-style chain. Without this, a rejected event (e.g. a stale-state race) left
+		// the sender's on-chain nonce unchanged: the next system tx then needed the same
+		// nonce, and eventProposer's in-flight bookkeeping for the failed nonce never cleared,
+		// wedging all later system txs (seen live under 10 concurrent transfers: 8/10 never
+		// credited). HandleSystemEvent's state-machine check runs before any write, so a
+		// failed call leaves no partial state to roll back here.
+		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
 		return h.errorReceipt(tx, err.Error()), nil, nil
 	}
 

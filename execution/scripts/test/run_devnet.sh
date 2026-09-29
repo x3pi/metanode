@@ -74,7 +74,18 @@ def build_genesis(exec_name, validator_address, committee_path, self_alloc):
     g['total_stake'] = 1000
     g['quorum_threshold'] = 1000
     g['validity_threshold'] = 1000
-    g['alloc'] = list(base.get('alloc', [])) + [devnet_sender_alloc, self_alloc]
+    # Extra independent devnet senders (devnet_senders.json, used by stress_concurrent_transfers.go)
+    # so concurrent transfers each get their own nonce sequence instead of racing on one account.
+    with open('devnet_senders.json') as sf:
+        extra = [{
+            'address': s['address'],
+            'balance': '2000000000000000000000000000000',
+            'pending_balance': '0',
+            'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
+            'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
+            'publicKeyBls': s['public_key_bls'],
+        } for s in json.load(sf)]
+    g['alloc'] = list(base.get('alloc', [])) + [devnet_sender_alloc, self_alloc] + extra
     return g
 
 # Each exec node's own app.keyPair identity (bls.NewKeyPair(config.PrivateKey), address =

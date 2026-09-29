@@ -130,6 +130,13 @@ func (w *ReclaimWorker) checkAndReclaim(rec *MessageRecord) {
 			}
 		}
 
+		if w.EventProposer != nil {
+			if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
+				log.Printf("ReclaimWorker: failed to propose EventReclaimEligible for %x: %v", rec.MessageID, err)
+			}
+			return
+		}
+
 		newState, _, err := Next(rec.State, RoleSender, event)
 		if err == nil {
 			rec.State = newState
