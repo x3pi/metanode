@@ -821,6 +821,12 @@ const devnetSenderBLSPrivateKeyHex = "0f0f8761e3fe67cdc9e7573adf72c7e929e2a00f98
 // write here is silently discarded the next time a block is processed (found live: the record
 // was gone by SendWorker's very next 5s poll, with the RPC call itself reporting success).
 func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, amountHex string) (string, error) {
+	// Verify that the execution nodes are not a separate chain but share the chainid with the parent chain
+	// A separate chain (L2) would have a GatewayContract configured for cross-chain value transfer.
+	if api.App.config.CrossChain.GatewayContract != "" {
+		return "", fmt.Errorf("cross-node transfer is only supported for execution nodes sharing the parent chain ID, not separate chains")
+	}
+
 	targetAddr := common.HexToAddress(target)
 
 	amount := new(big.Int)

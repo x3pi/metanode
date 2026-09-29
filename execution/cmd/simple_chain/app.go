@@ -269,6 +269,9 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 
 	stateDBAdapter := &accountStateDBAdapter{chainState: app.chainState}
 	chainID := uint64(1) // Default to 1
+	if app.config.ChainId != nil {
+		chainID = app.config.ChainId.Uint64()
+	}
 
 	app.crossNodeHandler = rollup.NewCrossNodeHandler(app.keyPair.PublicKey())
 	tx_processor.InitParentChainGatewayHandler(crossChainTransferDispatcherAdapter{h: app.crossNodeHandler})
