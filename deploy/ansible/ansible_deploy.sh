@@ -642,9 +642,24 @@ fi
 # same effect (ansible-playbook reads it automatically) without that exposure. Exported here
 # so it's in scope for every ansible-playbook invocation below (gen_keys included).
 INVENTORY_BECOME_PASS=$(grep -E '^\s*ansible_become_pass:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+INVENTORY_SSH_PASS=$(grep -E '^\s*ansible_ssh_pass:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+HAS_PLAINTEXT_CREDS=false
 if [ -n "$INVENTORY_BECOME_PASS" ] && [ "$INVENTORY_BECOME_PASS" != "!vault" ]; then
-    echo -e "\033[0;33m⚠️ [SECURITY NOTICE] Plaintext ansible_become_pass detected in inventory. For production, please encrypt using ansible-vault (Issue #104)!\033[0m"
+    HAS_PLAINTEXT_CREDS=true
     export ANSIBLE_BECOME_PASS="$INVENTORY_BECOME_PASS"
+fi
+if [ -n "$INVENTORY_SSH_PASS" ] && [ "$INVENTORY_SSH_PASS" != "!vault" ]; then
+    HAS_PLAINTEXT_CREDS=true
+fi
+if [ "$HAS_PLAINTEXT_CREDS" = "true" ]; then
+    if [ "${METANODE_ENV:-production}" = "production" ] && [ "${NODE_ENV:-production}" = "production" ]; then
+        echo -e "\033[0;31m❌ [SECURITY ERROR] Plaintext credentials detected in inventory for production environment (Issue #104)!\033[0m"
+        echo -e "\033[0;33m   In production, ansible_become_pass and ansible_ssh_pass MUST be encrypted using ansible-vault.\033[0m"
+        echo -e "\033[0;33m   Example: ansible-vault encrypt_string 'my_password' --name ansible_become_pass\033[0m"
+        exit 1
+    else
+        echo -e "\033[0;33m⚠️ [SECURITY NOTICE] Plaintext credentials detected in inventory (allowed in devnet/benchmark only).\033[0m"
+    fi
 fi
 
 # Fast Pre-flight Check: Kiểm tra khả năng kết nối mạng tới các server đích trước khi build/deploy

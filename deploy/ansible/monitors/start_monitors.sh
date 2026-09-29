@@ -86,14 +86,14 @@ if [ -z "$PROBE_TX_KEY" ] && [ -n "$INV_PATH" ]; then
 fi
 PROBE_SUITE_CONFIG="${SCRIPT_DIR}/../../../../metanode-suite/test-simple/test-rpc/test-chain/config.json"
 if [ -z "$PROBE_TX_KEY" ] && [ -f "$PROBE_SUITE_CONFIG" ]; then
-    PROBE_TX_KEY=$(python3 -c "
-import json
+    PROBE_TX_KEY=$(PROBE_SUITE_CONFIG="$PROBE_SUITE_CONFIG" python3 -c '
+import json, os
 try:
-    c = json.load(open('$PROBE_SUITE_CONFIG'))
-    print(c.get('private_key', ''))
+    c = json.load(open(os.environ.get("PROBE_SUITE_CONFIG", "")))
+    print(c.get("private_key", ""))
 except Exception:
-    print('')
-" 2>/dev/null)
+    print("")
+' 2>/dev/null)
 fi
 if [ -z "$PROBE_TX_KEY" ]; then
     PROBE_TX_KEY="0x9f61a687fbeac9e11d5cfce0fe2dcec035cb2b21eb9c584d8cf90696ce2fc370"
@@ -202,30 +202,34 @@ resolve_ssh_auth() {
     SSH_PASS=""
     if [ -n "$key" ] && [ -f "$key" ]; then
         SSH_OPTS="-i $key $SSH_OPTS"
-    elif [ -n "$INV_PATH" ] && command -v sshpass >/dev/null 2>&1; then
-        SSH_PASS=$(python3 -c "
+        SSH_PASS=$(SCRIPT_DIR="$SCRIPT_DIR" INV_PATH="$INV_PATH" TARGET_NODE_ID="$node_id" python3 -c '
 import sys, os
-sys.path.insert(0, '${SCRIPT_DIR}')
-sys.path.insert(0, os.path.dirname('${SCRIPT_DIR}'))
+script_dir = os.environ.get("SCRIPT_DIR", "")
+inv_path = os.environ.get("INV_PATH", "")
+node_id_str = os.environ.get("TARGET_NODE_ID", "")
+if script_dir:
+    sys.path.insert(0, script_dir)
+    sys.path.insert(0, os.path.dirname(script_dir))
 try:
+    node_id = int(node_id_str)
     from parse_inventory import load_inventory_content, setup_yaml_vault_constructor
-    content, err, vault = load_inventory_content('$INV_PATH')
+    content, err, vault = load_inventory_content(inv_path)
     if content:
         import yaml
         setup_yaml_vault_constructor(vault)
         d = yaml.safe_load(content) or {}
-        mc = d.get('all', {}).get('children', {}).get('metanode_cluster', {})
-        hosts = mc.get('hosts', {}) or d.get('all', {}).get('hosts', {}) or {}
-        gv = mc.get('vars', {}) or d.get('all', {}).get('vars', {}) or {}
+        mc = d.get("all", {}).get("children", {}).get("metanode_cluster", {})
+        hosts = mc.get("hosts", {}) or d.get("all", {}).get("hosts", {}) or {}
+        gv = mc.get("vars", {}) or d.get("all", {}).get("vars", {}) or {}
         for h in hosts.values():
-            if isinstance(h, dict) and $node_id in (h.get('node_ids') or []):
-                p = h.get('ansible_ssh_pass', gv.get('ansible_ssh_pass', ''))
-                if p and p != '[VAULT_ENCRYPTED]':
+            if isinstance(h, dict) and node_id in (h.get("node_ids") or []):
+                p = h.get("ansible_ssh_pass", gv.get("ansible_ssh_pass", ""))
+                if p and p != "[VAULT_ENCRYPTED]":
                     print(p)
                 break
 except Exception:
     pass
-" 2>/dev/null)
+' 2>/dev/null)
     fi
 }
 

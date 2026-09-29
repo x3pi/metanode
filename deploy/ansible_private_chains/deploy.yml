@@ -244,6 +244,50 @@
         fail_msg: "CRITICAL SECURITY ERROR (Issue #103): skip_mempool_sig_verify MUST NOT be enabled in production environments!"
       when: (metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'
 
+    - name: "SECURITY: Check for plaintext credentials in inventory (Issue #104)"
+      ansible.builtin.shell: |
+        python3 -c '
+        import sys, re, os
+        inv = os.environ.get("INV_FILE", "")
+        if not inv or not os.path.isfile(inv):
+            sys.exit(0)
+        with open(inv, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+        if content.startswith("$ANSIBLE_VAULT;"):
+            sys.exit(0)
+        violations = []
+        for idx, line in enumerate(content.splitlines(), 1):
+            s = line.strip()
+            if s.startswith("#"):
+                continue
+            m = re.match(r"^\s*(ansible_become_pass|ansible_ssh_pass):\s*(\S+.*)$", line)
+            if m:
+                k, v = m.group(1), m.group(2).strip()
+                if not v.startswith("!vault"):
+                    violations.append(f"line {idx}: {k}")
+        if violations:
+            print(", ".join(violations))
+            sys.exit(1)
+        '
+      environment:
+        INV_FILE: "{{ inventory_file | default(hostvars[groups['all'] | default([]) | first].inventory_file | default(playbook_dir ~ '/inventory.yml')) }}"
+      register: private_plaintext_creds_check
+      failed_when: false
+      changed_when: false
+      run_once: true
+      delegate_to: localhost
+      tags: ["always"]
+
+    - name: "SECURITY: Reject plaintext credentials in production (Issue #104)"
+      ansible.builtin.assert:
+        that:
+          - private_plaintext_creds_check.rc == 0
+        fail_msg: "CRITICAL SECURITY ERROR (Issue #104): Plaintext credentials ({{ private_plaintext_creds_check.stdout }}) found in inventory {{ inventory_file | default(hostvars[groups['all'] | default([]) | first].inventory_file | default(playbook_dir ~ '/inventory.yml')) }}! In production (metanode_env=production), ansible_become_pass and ansible_ssh_pass MUST be encrypted with ansible-vault."
+      when: (metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'
+      run_once: true
+      delegate_to: localhost
+      tags: ["always"]
+
     - name: Check if host is targeted
       ansible.builtin.set_fact:
         is_targeted: "{{ active_target == 'all' or active_target | string == chain_id | string }}"

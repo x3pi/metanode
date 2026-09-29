@@ -4,6 +4,66 @@
   connection: local
   gather_facts: false
   pre_tasks:
+    - name: Resolve inventory file path
+      ansible.builtin.set_fact:
+        resolved_inventory_file: >-
+          {%- set ns = namespace(inv='') -%}
+          {%- for h in groups['all'] | default([]) -%}
+            {%- if hostvars[h].inventory_file is defined and not ns.inv -%}
+              {%- set ns.inv = hostvars[h].inventory_file -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ ns.inv | default(inventory_file | default(playbook_dir ~ '/inventory.yml'), true) }}
+      tags: ["always"]
+
+    - name: "SECURITY: Check for plaintext credentials in inventory (Issue #104)"
+      ansible.builtin.shell: |
+        python3 -c '
+        import sys, re, os
+        inv = os.environ.get("INV_FILE", "")
+        if not inv or not os.path.isfile(inv):
+            sys.exit(0)
+        with open(inv, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+        if content.startswith("$ANSIBLE_VAULT;"):
+            sys.exit(0)
+        violations = []
+        for idx, line in enumerate(content.splitlines(), 1):
+            s = line.strip()
+            if s.startswith("#"):
+                continue
+            m = re.match(r"^\s*(ansible_become_pass|ansible_ssh_pass):\s*(\S+.*)$", line)
+            if m:
+                k, v = m.group(1), m.group(2).strip()
+                if not v.startswith("!vault"):
+                    violations.append(f"line {idx}: {k}")
+        if violations:
+            print(", ".join(violations))
+            sys.exit(1)
+        '
+      environment:
+        INV_FILE: "{{ resolved_inventory_file }}"
+      register: plaintext_creds_check
+      failed_when: false
+      changed_when: false
+      tags: ["always"]
+
+    - name: "SECURITY: Reject plaintext credentials in production (Issue #104)"
+      ansible.builtin.assert:
+        that:
+          - plaintext_creds_check.rc == 0
+        fail_msg: "CRITICAL SECURITY ERROR (Issue #104): Plaintext credentials ({{ plaintext_creds_check.stdout }}) found in inventory {{ resolved_inventory_file }}! In production (metanode_env=production), ansible_become_pass and ansible_ssh_pass MUST be encrypted with ansible-vault."
+      when: (metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'
+      tags: ["always"]
+
+    - name: "SECURITY: Ensure skip_mempool_sig_verify is not enabled in production (Issue #103)"
+      ansible.builtin.assert:
+        that:
+          - not (skip_mempool_sig_verify | default(false) | bool)
+        fail_msg: "CRITICAL SECURITY ERROR (Issue #103): skip_mempool_sig_verify MUST NOT be enabled in production environments!"
+      when: (metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'
+      tags: ["always"]
+
     - name: Build cluster_nodes list from inventory
       set_fact:
         cluster_nodes: >-

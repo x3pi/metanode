@@ -658,8 +658,12 @@ def parse_and_validate_balance(raw_val, param_name="--initial-balance") -> str:
         sys.exit(1)
 
 
-def safe_read_balance(entry_balance, default=0) -> int:
-    """Safely parses existing balance without raising exceptions."""
+def safe_read_balance(entry_balance, default=0, context="") -> int:
+    """
+    Safely parses existing balance without raising unhandled exceptions.
+    Emits a visible warning if parsing fails or balance is corrupted so operators
+    are alerted to invalid existing data instead of silently falling back to default.
+    """
     if entry_balance is None:
         return default
     s = str(entry_balance).strip()
@@ -667,9 +671,17 @@ def safe_read_balance(entry_balance, default=0) -> int:
         return default
     try:
         if s.startswith("0x") or s.startswith("0X"):
-            return int(s, 16)
-        return int(s)
-    except (ValueError, TypeError):
+            val = int(s, 16)
+        else:
+            val = int(s)
+        if val < 0:
+            ctx_str = f" for {context}" if context else ""
+            print(yellow(f"  ⚠️ Warning: negative balance {entry_balance!r}{ctx_str} is invalid in genesis alloc; treated as {default}."))
+            return default
+        return val
+    except (ValueError, TypeError) as e:
+        ctx_str = f" for {context}" if context else ""
+        print(yellow(f"  ⚠️ Warning: failed to parse existing balance {entry_balance!r}{ctx_str} (corrupted or malformed); treated as {default}. Details: {e}"))
         return default
 
 
@@ -790,8 +802,8 @@ def main():
                                     a["publicKeyBls"] = pubkey_hex
                                     print(green(f"  ✅ Registered publicKeyBls for existing alloc entry {target_addr}"))
 
-                                curr_bal = safe_read_balance(a.get("balance", "0"))
-                                init_bal_int = safe_read_balance(init_bal)
+                                curr_bal = safe_read_balance(a.get("balance", "0"), context=target_addr)
+                                init_bal_int = safe_read_balance(init_bal, context=f"initial_balance for {target_addr}")
                                 if curr_bal == 0 and init_bal_int > 0:
                                     a["balance"] = str(init_bal_int)
                                     print(green(f"  💰 Set initial balance {init_bal_int} for {target_addr}"))

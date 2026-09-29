@@ -141,7 +141,7 @@ print_banner
 send_tele() {
     local fn_call="$1"
     if [ "$NOTIFY" = "true" ] && [ -f "$TELE_SCRIPT" ]; then
-        python3 -c "import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts'); import telegram_notify as tn; ${fn_call}" || true
+        SCRIPT_DIR="$SCRIPT_DIR" python3 -c 'import sys, os; sys.path.insert(0, os.path.join(os.environ.get("SCRIPT_DIR", ""), "scripts")); import telegram_notify as tn; '"${fn_call}" || true
     fi
 }
 
