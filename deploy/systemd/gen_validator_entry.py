@@ -257,6 +257,74 @@ def run_founding_entry_tool(args, keys_dir: str) -> None:
     print(green("     Contains NO private key material — safe to publish/share with the ceremony coordinator."))
 
 
+_BLS_PUBKEY_BIN_CACHE = None
+
+def derive_min_pk_pubkey(secret_hex: str, bls_pubkey_bin_override: str = None, no_build: bool = False) -> tuple:
+    """
+    Derives the real pkg/bls (min-pk, 48-byte G1) public key AND its bls.KeyPair.Address()
+    from a BLS secret scalar, returned as (pubkey_b64, address_0x_hex).
+    Ensures execution node has registered PublicKeyBls in genesis alloc.
+    Secret is piped via stdin to avoid exposing private keys in process command-line (argv).
+    """
+    global _BLS_PUBKEY_BIN_CACHE
+    if _BLS_PUBKEY_BIN_CACHE is None:
+        candidates = [
+            Path(bls_pubkey_bin_override) if bls_pubkey_bin_override else None,
+            Path(os.environ.get("BLS_PUBKEY_BIN", "")),
+            Path("/opt/metanode/bin/bls_pubkey"),
+            SCRIPT_DIR / "bin" / "bls_pubkey",
+            SCRIPT_DIR / "bls_pubkey",
+            REPO_ROOT / "bin" / "bls_pubkey",
+            REPO_ROOT / "execution" / "bin" / "bls_pubkey",
+            REPO_ROOT / "execution" / "bls_pubkey",
+            REPO_ROOT / "execution" / "cmd" / "tool" / "bls_pubkey" / "bls_pubkey",
+            Path(shutil.which("bls_pubkey") or ""),
+        ]
+        bin_path = None
+        for c in candidates:
+            if c and c.is_file():
+                bin_path = c
+                break
+
+        if bin_path is None:
+            # Check if go compiler is available
+            go_bin = shutil.which("go")
+            if no_build or not go_bin:
+                print(red(
+                    "ERROR: bls_pubkey binary not found and cannot auto-compile ('go' compiler not found or --no-build-tool set).\n"
+                    "Please pre-compile execution/cmd/tool/bls_pubkey on your build machine and place it at\n"
+                    "/opt/metanode/bin/bls_pubkey or specify path via --bls-pubkey-bin."
+                ))
+                sys.exit(1)
+
+            bin_path = REPO_ROOT / "execution" / "bls_pubkey"
+            if not bin_path.exists():
+                print(yellow("⚠️ bls_pubkey helper binary not found. Compiling via go compiler (dev/build environment only)..."))
+                result = subprocess.run(
+                    [go_bin, "build", "-o", str(bin_path), "./cmd/tool/bls_pubkey"],
+                    cwd=str(REPO_ROOT / "execution"), capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    print(red(f"ERROR: failed to build bls_pubkey helper:\n{result.stderr}"))
+                    sys.exit(1)
+        _BLS_PUBKEY_BIN_CACHE = str(bin_path)
+
+    # Pass secret via stdin to prevent exposing secret scalar in ps / process argv
+    result = subprocess.run(
+        [_BLS_PUBKEY_BIN_CACHE, "-stdin", "-with-address"],
+        input=secret_hex.strip() + "\n",
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(red(f"ERROR: bls_pubkey helper failed:\n{result.stderr}"))
+        sys.exit(1)
+    lines = result.stdout.strip().splitlines()
+    if len(lines) != 2:
+        print(red(f"ERROR: bls_pubkey helper returned unexpected output: {result.stdout!r}"))
+        sys.exit(1)
+    return lines[0], lines[1]  # (pubkey_b64, address_0x_hex)
+
+
 def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
     """
     Write execution.json and consensus.toml directly instead of .env.
@@ -549,11 +617,80 @@ def parse_args():
     parser.add_argument("--random-gateway-bls-key", action="store_true", help="Generate a fresh, independent gateway_bls_key instead of the shared devnet default. Recommended for any real deployment; does nothing to existing devnet/smoke-test flows unless passed explicitly.")
     parser.add_argument("--epoch-duration-seconds", type=int, default=600,
                         help="Epoch duration in seconds (default: 600 = 10 min)")
+    parser.add_argument("--initial-balance", default=None,
+                        help="Initial token balance in wei for validator and exec node in genesis alloc. "
+                             "Default: '0' for production safety. Pass explicit value (e.g. 1000000000000000000000000) "
+                             "or --devnet-alloc to fund.")
+    parser.add_argument("--devnet-alloc", action="store_true",
+                        help="Fund validator and exec node with 1,000,000 MTN in genesis alloc (devnet/benchmarks only)")
+    parser.add_argument("--bls-pubkey-bin", default=None,
+                        help="Path to pre-compiled bls_pubkey binary helper")
+    parser.add_argument("--no-build-tool", action="store_true",
+                        help="Do not attempt to compile bls_pubkey if not found (fail immediately instead of calling go compiler)")
     return parser.parse_args()
+
+
+def parse_and_validate_balance(raw_val, param_name="--initial-balance") -> str:
+    """
+    Validates that a balance string is a valid non-negative integer (decimal or 0x-hex).
+    Returns normalized decimal string representation. Exits with clear error if invalid.
+    """
+    if raw_val is None:
+        return "0"
+    if not isinstance(raw_val, str):
+        raw_val = str(raw_val)
+    val_str = raw_val.strip()
+    if not val_str:
+        print(red(f"ERROR: {param_name} cannot be empty. Must be a valid non-negative integer or 0x-hex in wei."))
+        sys.exit(1)
+
+    try:
+        if val_str.startswith("0x") or val_str.startswith("0X"):
+            num = int(val_str, 16)
+        else:
+            num = int(val_str)
+        if num < 0:
+            print(red(f"ERROR: {param_name} cannot be negative: {raw_val!r}"))
+            sys.exit(1)
+        return str(num)
+    except (ValueError, TypeError):
+        print(red(f"ERROR: {param_name} must be a valid non-negative integer or 0x-hex in wei, got: {raw_val!r}"))
+        sys.exit(1)
+
+
+def safe_read_balance(entry_balance, default=0, context="") -> int:
+    """
+    Safely parses existing balance without raising unhandled exceptions.
+    Emits a visible warning if parsing fails or balance is corrupted so operators
+    are alerted to invalid existing data instead of silently falling back to default.
+    """
+    if entry_balance is None:
+        return default
+    s = str(entry_balance).strip()
+    if not s:
+        return default
+    try:
+        if s.startswith("0x") or s.startswith("0X"):
+            val = int(s, 16)
+        else:
+            val = int(s)
+        if val < 0:
+            ctx_str = f" for {context}" if context else ""
+            print(yellow(f"  ⚠️ Warning: negative balance {entry_balance!r}{ctx_str} is invalid in genesis alloc; treated as {default}."))
+            return default
+        return val
+    except (ValueError, TypeError) as e:
+        ctx_str = f" for {context}" if context else ""
+        print(yellow(f"  ⚠️ Warning: failed to parse existing balance {entry_balance!r}{ctx_str} (corrupted or malformed); treated as {default}. Details: {e}"))
+        return default
 
 
 def main():
     args = parse_args()
+
+    # Validate initial balance input early
+    if getattr(args, "initial_balance", None) is not None:
+        args.initial_balance = parse_and_validate_balance(args.initial_balance, param_name="--initial-balance")
 
     # Auto-calculate port defaults if not specified, based on node_id
     if args.p2p_port is None:
@@ -627,6 +764,61 @@ def main():
                     
                     if not updated:
                         g_data["validators"].append(entry)
+
+                    # Auto-register validator and exec node in genesis alloc with min-pk BLS key
+                    if "alloc" not in g_data or g_data["alloc"] is None:
+                        g_data["alloc"] = []
+
+                    import base64
+                    min_pk_b64, app_keypair_addr = derive_min_pk_pubkey(
+                        bls["authority_key_private"],
+                        bls_pubkey_bin_override=getattr(args, "bls_pubkey_bin", None),
+                        no_build=getattr(args, "no_build_tool", False),
+                    )
+                    pubkey_hex = "0x" + base64.b64decode(min_pk_b64).hex()
+
+                    # Production safety: default initial balance is "0" (no accidental token minting in genesis).
+                    # Only fund if --initial-balance is explicitly passed or --devnet-alloc is set.
+                    if getattr(args, "initial_balance", None) is not None:
+                        initial_bal = str(args.initial_balance)
+                    elif getattr(args, "devnet_alloc", False):
+                        initial_bal = "1000000000000000000000000"  # 1,000,000 MTN (devnet only)
+                    else:
+                        initial_bal = "0"  # Production safe default
+
+                    addrs_to_fund = [
+                        (eth["address"].lower(), initial_bal),
+                        (app_keypair_addr.lower(), initial_bal)
+                    ]
+                    for target_addr, init_bal in addrs_to_fund:
+                        found_alloc = False
+                        for a in g_data["alloc"]:
+                            if a.get("address", "").lower() == target_addr:
+                                found_alloc = True
+                                existing_bls = a.get("publicKeyBls")
+                                if existing_bls and existing_bls.lower() != pubkey_hex.lower():
+                                    print(yellow(f"  ⚠️ Warning: alloc entry for {target_addr} already has a different publicKeyBls ({existing_bls}). Preserving existing key."))
+                                elif not existing_bls:
+                                    a["publicKeyBls"] = pubkey_hex
+                                    print(green(f"  ✅ Registered publicKeyBls for existing alloc entry {target_addr}"))
+
+                                curr_bal = safe_read_balance(a.get("balance", "0"), context=target_addr)
+                                init_bal_int = safe_read_balance(init_bal, context=f"initial_balance for {target_addr}")
+                                if curr_bal == 0 and init_bal_int > 0:
+                                    a["balance"] = str(init_bal_int)
+                                    print(green(f"  💰 Set initial balance {init_bal_int} for {target_addr}"))
+                                break
+                        if not found_alloc:
+                            g_data["alloc"].append({
+                                "address": target_addr,
+                                "balance": init_bal,
+                                "pending_balance": "0",
+                                "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                "publicKeyBls": pubkey_hex,
+                            })
+                            print(green(f"  ✅ Added new alloc entry {target_addr} (balance={init_bal})"))
+                    print(green(f"  ✅ Auto-registered BLS public key & alloc for validator {eth['address']} and exec node {app_keypair_addr}"))
 
                     if getattr(args, "epoch_duration_seconds", None):
                         g_data["epoch_duration_seconds"] = args.epoch_duration_seconds

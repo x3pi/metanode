@@ -1,6 +1,7 @@
 package rollup
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -256,6 +257,119 @@ func TestReceiveWorker_SetInterval(t *testing.T) {
 	worker.SetInterval(0)
 	if worker.interval != 200*time.Millisecond {
 		t.Errorf("Expected interval to remain 200ms, got %v", worker.interval)
+	}
+}
+
+func TestReceiveWorker_ProgressDrivenPolling(t *testing.T) {
+	scDB := &mockDB{data: make(map[common.Address]map[common.Hash][]byte)}
+	store := NewDBStore(scDB)
+	stateDB := newMockAccountStateDB()
+	client := &mockParentChainClient{}
+
+	kp := bls.GenerateKeyPair()
+	worker := NewReceiveWorker(store, stateDB, client, kp)
+
+	// Case 1: Idle state (no inbound transfers, no non-terminal records)
+	// hasProgress must be false to avoid spinning 100ms ticker
+	if worker.pollAndProcess() {
+		t.Errorf("Expected false when idle, got true")
+	}
+
+	// Case 2: Inbound transfer arrives from parent chain, but SendMarkClaimed fails on initial try
+	msgID := common.HexToHash("0x1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff")
+	tx := &parentchain.TransferEvent{
+		MsgID:        msgID,
+		SourcePubKey: cm.PublicKey{},
+		DestPubKey:   kp.PublicKey(),
+		SourceSeq:    1,
+		Sender:       common.HexToAddress("0xaaa"),
+		Target:       common.HexToAddress("0xbbb"),
+		Amount:       big.NewInt(300),
+	}
+	client.inboundTransfers = []*parentchain.TransferEvent{tx}
+	client.failNext = true
+	client.failError = errors.New("initial mark claimed failure")
+
+	// Must return true because inbound transfer was fetched (len(transfers) > 0)
+	if !worker.pollAndProcess() {
+		t.Errorf("Expected true when inbound transfer arrives, got false")
+	}
+
+	// Record was created and remains in StateMarkedClaimedPendingCredit because SendMarkClaimed failed
+	rec, found, _ := store.Get(msgID)
+	if !found || rec.State != StateMarkedClaimedPendingCredit {
+		t.Fatalf("Expected StateMarkedClaimedPendingCredit, got %v", rec)
+	}
+
+	// Case 3: Retrying while RPC is still failing (no new transfers, SendMarkClaimed fails)
+	// Must return false to prevent spinning at 100ms
+	client.failNext = true
+	client.failError = errors.New("network timeout")
+	if worker.pollAndProcess() {
+		t.Errorf("Expected false when SendMarkClaimed fails, got true")
+	}
+
+	// Case 4: SendMarkClaimed succeeds -> advances to StateMarkClaimedSubmitted -> must return true
+	client.failNext = false
+	if !worker.pollAndProcess() {
+		t.Errorf("Expected true when SendMarkClaimed succeeds, got false")
+	}
+
+	rec, _, _ = store.Get(msgID)
+	if rec.State != StateMarkClaimedSubmitted {
+		t.Fatalf("Expected StateMarkClaimedSubmitted, got %v", rec.State)
+	}
+
+	// Case 5: Waiting for Parent Chain confirmation (GetClaimed returns FloatOutcomeNone)
+	// Must return false to prevent spamming GetClaimed every 100ms
+	client.claimedOutcome = parentchain.FloatOutcomeNone
+	if worker.pollAndProcess() {
+		t.Errorf("Expected false when waiting for GetClaimed confirmation, got true")
+	}
+
+	// Case 6: Parent Chain confirms (GetClaimed returns FloatOutcomeCredited)
+	// Must return true (progress: credit applied, transitions to StateCredited)
+	client.claimedOutcome = parentchain.FloatOutcomeCredited
+	if !worker.pollAndProcess() {
+		t.Errorf("Expected true when GetClaimed confirms, got false")
+	}
+
+	rec, _, _ = store.Get(msgID)
+	if rec.State != StateCredited {
+		t.Fatalf("Expected StateCredited, got %v", rec.State)
+	}
+
+	// Case 7: Refund flow progress testing
+	msgIDRefund := common.HexToHash("0xffffeeeeeeddddccccbbbbaaaa0000999988887777666655554444333322221111")
+	refundRec := &MessageRecord{
+		MessageID:    msgIDRefund,
+		Role:         RoleReceiver,
+		State:        StateRefundSent,
+		Sender:       common.HexToAddress("0x1111"),
+		Target:       common.HexToAddress("0x2222"),
+		Value:        big.NewInt(100),
+		SourceSeq:    5,
+		SourcePubKey: cm.PublicKey{},
+		DestPubKey:   kp.PublicKey(),
+		RefundMsgID:  common.HexToHash("0x9999888877776666555544443333222211110000aaaabbbbccccddddeeeeffff"),
+	}
+	_ = store.Put(refundRec)
+
+	// Sub-case 7a: Refund tx not yet found on Parent Chain -> must return false (waiting for block)
+	client.transferNotFound = true
+	if worker.pollAndProcess() {
+		t.Errorf("Expected false when waiting for refund tx confirmation, got true")
+	}
+
+	// Sub-case 7b: Refund tx confirmed on Parent Chain -> must return true (transitions to StateRefunded)
+	client.transferNotFound = false
+	if !worker.pollAndProcess() {
+		t.Errorf("Expected true when refund tx is confirmed, got false")
+	}
+
+	recRefund, _, _ := store.Get(msgIDRefund)
+	if recRefund.State != StateRefunded {
+		t.Fatalf("Expected StateRefunded, got %v", recRefund.State)
 	}
 }
 

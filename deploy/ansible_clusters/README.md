@@ -91,21 +91,24 @@ Lệnh trên sẽ:
 | `./deploy_clusters.sh --clean` | Xóa database và logs, giữ lại cấu hình và keys |
 | `./deploy_clusters.sh --reset` | Reset toàn bộ hệ sinh thái về Block 0 và khởi chạy lại |
 | `./deploy_clusters.sh --systemd` | Sử dụng `systemd` service thay vì background daemon |
+| `./deploy_clusters.sh --env=production` | Đặt môi trường deploy (`devnet` hoặc `production`). Mặc định là `devnet` cho test cluster. |
+| `./deploy_clusters.sh --vault-password-file FILE` | Chỉ định file mật khẩu Ansible Vault để giải mã credentials |
 
 ---
 
 ## 🌐 Triển Khai Multi-Server (Production)
 
-Mặc định `inventory.yml` chạy trên localhost (`127.0.0.1`). Để deploy lên nhiều server vật lý hoặc VPS:
+Mặc định `inventory.yml` chạy trên localhost (`127.0.0.1`) cho môi trường devnet. Để deploy lên nhiều server vật lý hoặc VPS môi trường production:
 1. Mở `inventory.yml` và thay đổi `ansible_host` thành IP của server tương ứng.
 2. Đổi `ansible_connection: ssh`.
-3. Bổ sung SSH key hoặc password:
+3. Bổ sung SSH key hoặc mã hóa mật khẩu bằng Ansible Vault (`!vault | ...`):
 ```yaml
 parent_chain_nodes:
   hosts:
     parent_node:
       ansible_host: 192.168.1.100
       ansible_user: metanode
+      ansible_ssh_private_key_file: ~/.ssh/id_ed25519
 
 exec_clusters:
   hosts:
@@ -118,8 +121,14 @@ exec_clusters:
       ansible_user: metanode
       cluster_id: 2
 ```
-4. Chạy với cờ `--systemd`:
+
+> 🔒 **Quy tắc Bảo mật Credentials:**
+> - Ở môi trường `--env=production`, hệ thống sẽ **chặn hoàn toàn** nếu inventory chứa mật khẩu plaintext (`ansible_become_pass`, `ansible_ssh_pass`, `ansible_password`, `ansible_sudo_pass`).
+> - Nếu dùng mật khẩu, bắt buộc mã hóa qua Ansible Vault (`ansible-vault encrypt_string`) và truyền cờ `--vault-password-file`.
+> - Nếu deploy với inventory plaintext, bạn PHẢI đặt `--env=devnet` (hoặc `export METANODE_ENV=devnet`).
+
+4. Chạy với cờ `--systemd` và `--env=production`:
 ```bash
-./deploy_clusters.sh --setup --systemd --test
+./deploy_clusters.sh --setup --systemd --env=production --vault-password-file .vault_pass
 ```
 Mỗi server sẽ tự động tạo systemd service riêng (`metanode-parentchain.service`, `metanode-cluster-1.service`, `metanode-cluster-2.service`) với cấu hình tự khởi động lại (`Restart=always`) và giới hạn file descriptors cao (`LimitNOFILE=65536`).

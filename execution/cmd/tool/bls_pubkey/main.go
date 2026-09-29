@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -30,17 +31,33 @@ import (
 
 func main() {
 	secretHex := flag.String("secret", "", "BLS secret scalar hex (with or without 0x prefix)")
+	fromStdin := flag.Bool("stdin", false, "read BLS secret scalar hex from stdin (avoids exposing secret in process argv/ps)")
 	// Opt-in, defaults false: keeps stdout single-line (just the base64 pubkey) for existing
 	// callers (e.g. gen_root_anchor_chain.py's own copy of derive_min_pk_pubkey) that parse
 	// exactly one line and would otherwise silently break on this tool's stdout format changing
 	// out from under them.
 	withAddress := flag.Bool("with-address", false, "also print this secret's bls.KeyPair.Address() as a second line")
 	flag.Parse()
-	if *secretHex == "" {
-		fmt.Fprintln(os.Stderr, "Error: -secret is required")
+
+	var rawSecret string
+	if *fromStdin || *secretHex == "-" {
+		stdinBytes, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to read secret from stdin: %v\n", err)
+			os.Exit(1)
+		}
+		rawSecret = strings.TrimSpace(string(stdinBytes))
+	} else if *secretHex != "" {
+		rawSecret = strings.TrimSpace(*secretHex)
+	} else if envSecret := os.Getenv("BLS_SECRET_HEX"); envSecret != "" {
+		rawSecret = strings.TrimSpace(envSecret)
+	}
+
+	if rawSecret == "" {
+		fmt.Fprintln(os.Stderr, "Error: BLS secret scalar is required (via -stdin, BLS_SECRET_HEX environment variable, or -secret flag)")
 		os.Exit(1)
 	}
-	_, pub, addr := bls.GenerateKeyPairFromSecretKey(strings.TrimPrefix(*secretHex, "0x"))
+	_, pub, addr := bls.GenerateKeyPairFromSecretKey(strings.TrimPrefix(rawSecret, "0x"))
 	pubBytes := pub.Bytes()
 	if len(pubBytes) != 48 {
 		fmt.Fprintf(os.Stderr, "Error: derived public key is %d bytes, expected 48 (invalid secret?)\n", len(pubBytes))

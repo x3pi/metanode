@@ -116,6 +116,51 @@ File thực thi: [`deploy/ansible_clusters/deploy_clusters.sh`](file:///home/abc
 ./deploy_clusters.sh --status
 ```
 
+**Các bước diễn ra tự động:**
+1. 📢 Bắn thông báo **Deploy Bắt Đầu** lên Telegram kèm thông tin commit hash và author.
+2. 🔨 Tự động kiểm tra và build nhị phân Go (`parent_chain`, `simple_chain`).
+3. 🚀 Khởi chạy **Parent Chain** tại cổng `:8547` và kiểm tra RPC sẵn sàng.
+4. ⚡ Khởi chạy đồng thời **Exec Cluster 1** (`:8646`) và **Exec Cluster 2** (`:8647`).
+5. 📊 Ping lấy Block Height, Validator Address, BLS Key và bắn thông báo **Dịch Vụ Sẵn Sàng** lên Telegram.
+6. 🧪 Tự động kích hoạt **Bộ kiểm thử 5 kịch bản thực tế**.
+7. 🏆 Báo cáo kết quả kiểm thử (Thành công / Thất bại) lên Telegram.
+
+### 3.2 Cách 2: Triển khai qua Ansible Playbook trực tiếp
+Nếu muốn can thiệp chi tiết bằng lệnh Ansible gốc:
+```bash
+# Triển khai toàn bộ không chạy test
+ansible-playbook -i inventory.yml deploy.yml
+
+# Triển khai và bao gồm chạy test
+ansible-playbook -i inventory.yml deploy.yml -e "run_tests=true"
+
+# Chỉ triển khai riêng Parent Chain
+ansible-playbook -i inventory.yml deploy.yml --tags parent_chain
+
+# Chỉ triển khai riêng các Execution Clusters
+ansible-playbook -i inventory.yml deploy.yml --tags exec_clusters
+```
+
+### 3.3 Chế độ Systemd Service vs Daemon
+- **Mặc định (Daemon Mode):** Phù hợp môi trường local devnet; tiến trình chạy ngầm qua background job, log ghi vào thư mục `/opt/metanode/logs/` (hoặc `devnet_data/`).
+- **Chế độ Systemd (Production Mode):** Để chạy dưới dạng dịch vụ Linux có quản lý vòng đời và tự khởi động lại:
+  ```bash
+  ./deploy_clusters.sh --setup --systemd --test
+  ```
+  Hệ thống sẽ tạo 3 service độc lập:
+  - `metanode-parentchain.service`
+  - `metanode-cluster-1.service`
+  - `metanode-cluster-2.service`
+
+### 3.4 Quản Lý Môi Trường & Bảo Mật Credentials (Ansible Vault)
+Hệ thống triển khai phân tách rõ giữa môi trường Production và Devnet:
+- **Môi trường Production (`--env=production` hoặc `METANODE_ENV=production`):**
+  - Script pre-flight `check_inventory_security.py` và playbook Ansible sẽ **chặn đứng** quá trình triển khai nếu phát hiện bất kỳ mật khẩu plaintext nào (`ansible_become_pass`, `ansible_ssh_pass`, `ansible_password`, `ansible_sudo_pass`).
+  - Bắt buộc phải sử dụng SSH Key không mật khẩu hoặc mã hóa mật khẩu bằng Ansible Vault (`!vault | ...`) và cung cấp cờ `--vault-password-file <path>`.
+  - Binary `simple_chain` / `metanode` trên server sẽ chạy với cờ bảo vệ production, nghiêm cấm bypass chữ ký mempool.
+- **Môi trường Devnet (`--env=devnet` hoặc `METANODE_ENV=devnet`):**
+  - Cho phép sử dụng inventory chứa mật khẩu plaintext phục vụ mục đích kiểm thử và phát triển nhanh trong mạng nội bộ cô lập.
+  - Mặc định script `deploy_clusters.sh` thiết lập `--env=devnet` để thuận tiện cho việc chạy bộ test 5 kịch bản.
 ---
 
 ## 🧪 4. BỘ SCRIPT KIỂM THỬ CHUYÊN SÂU (TESTING SCRIPTS)

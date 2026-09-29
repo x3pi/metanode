@@ -132,6 +132,21 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
+	// Issue #103: Enforce that SKIP_MEMPOOL_SIG_VERIFY is fail-closed.
+	// Bypassing mempool signature verification is ONLY allowed if explicitly enabled
+	// for development/benchmarks (METANODE_DEVNET=true) and strictly forbidden otherwise (e.g. production).
+	if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") == "true" {
+		isExplicitDev := os.Getenv("METANODE_DEVNET") == "true"
+		isProduction := os.Getenv("NODE_ENV") == "production" ||
+			os.Getenv("ENVIRONMENT") == "production" ||
+			os.Getenv("METANODE_ENV") == "production"
+
+		if !isExplicitDev || isProduction {
+			return nil, fmt.Errorf("FATAL SECURITY VIOLATION (Issue #103): SKIP_MEMPOOL_SIG_VERIFY=true is only allowed when METANODE_DEVNET=true is explicitly set, and strictly forbidden in production (NODE_ENV/METANODE_ENV=production)")
+		}
+		logger.Warn("⚠️ [SECURITY WARNING] SKIP_MEMPOOL_SIG_VERIFY=true: Transaction signature verification is BYPASSED (explicit devnet benchmark mode)!")
+	}
+
 	cacheEnabled := false
 	if app.config.MVMCacheEnabled != nil {
 		cacheEnabled = *app.config.MVMCacheEnabled

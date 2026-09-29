@@ -63,13 +63,55 @@ send_telegram_notification() {
     fi
 }
 
+detect_server_ip() {
+    local py_ip
+    py_ip=$(python3 -c "
+import socket, subprocess
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0.5)
+    s.connect(('8.8.8.8', 80))
+    ip = s.getsockname()[0]
+    s.close()
+    if ip and not ip.startswith('127.') and ip != '0.0.0.0':
+        print(ip)
+        exit(0)
+except Exception:
+    pass
+try:
+    out = subprocess.check_output(['hostname', '-I'], text=True).strip()
+    for ip in out.split():
+        if ip and not ip.startswith('127.') and ':' not in ip and ip != '0.0.0.0':
+            print(ip)
+            exit(0)
+except Exception:
+    pass
+" 2>/dev/null || true)
+    if [ -n "$py_ip" ]; then
+        echo "$py_ip"
+        return
+    fi
+
+    local host_ips
+    host_ips=$(hostname -I 2>/dev/null || true)
+    for ip in $host_ips; do
+        if [[ -n "$ip" && "$ip" != 127.* && "$ip" != *:* && "$ip" != "0.0.0.0" ]]; then
+            echo "$ip"
+            return
+        fi
+    done
+
+    echo "127.0.0.1"
+}
+
 CURRENT_STEP="Khởi tạo Pipeline"
 PIPELINE_START_TIME=$(date +%s)
 
 on_pipeline_error() {
     local exit_code=$1
     local line_no=$2
-    local server_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+    local server_ip
+    server_ip=$(detect_server_ip)
     local timestamp=$(date '+%H:%M:%S %d/%m/%Y')
 
     echo -e "\n${RED}🚨 [LỖI PIPELINE KHẨN CẤP] Bước '${CURRENT_STEP}' thất bại tại dòng ${line_no} với mã lỗi ${exit_code}!${NC}"
@@ -281,7 +323,7 @@ echo -e "${CYAN}═════════════════════�
 PIPELINE_END_TIME=$(date +%s)
 PIPELINE_ELAPSED=$((PIPELINE_END_TIME - PIPELINE_START_TIME))
 PIPELINE_ELAPSED_FMT="$((PIPELINE_ELAPSED / 60))m $((PIPELINE_ELAPSED % 60))s"
-SUCCESS_SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+SUCCESS_SERVER_IP=$(detect_server_ip)
 SUCCESS_TIMESTAMP=$(date '+%H:%M:%S %d/%m/%Y')
 SUCCESS_MSG="✅ <b>[METANODE FULL PIPELINE THÀNH CÔNG]</b>
 

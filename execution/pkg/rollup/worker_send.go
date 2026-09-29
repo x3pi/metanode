@@ -2,6 +2,7 @@ package rollup
 
 import (
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,9 +25,10 @@ type SendWorker struct {
 	// EventProposer is used to submit state machine events to the Raft consensus.
 	EventProposer func(event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error
 
-	wakeCh chan struct{}
-	quitCh chan struct{}
-	wg     sync.WaitGroup
+	wakeCh          chan struct{}
+	quitCh          chan struct{}
+	wg              sync.WaitGroup
+	inFlightSubmits sync.Map
 }
 
 func NewSendWorker(store Store, client parentchain.Client, blsKeyPair *bls.KeyPair, destPubKey cm.PublicKey, destClusterID uint64) *SendWorker {
@@ -103,19 +105,33 @@ func (w *SendWorker) loop() {
 		case <-w.quitCh:
 			return
 		case <-ticker.C:
-			w.processPending()
+			if w.processPending() {
+				ticker.Reset(100 * time.Millisecond)
+			} else {
+				ticker.Reset(interval)
+			}
 		case <-w.wakeCh:
-			w.processPending()
+			if w.processPending() {
+				ticker.Reset(100 * time.Millisecond)
+			} else {
+				ticker.Reset(interval)
+			}
 		}
 	}
 }
 
-func (w *SendWorker) processPending() {
+func (w *SendWorker) processPending() bool {
+	hasProgress := false
 	records, err := w.store.ScanNonTerminal()
 	if err != nil {
 		log.Printf("SendWorker: failed to scan records: %v", err)
-		return
+		return false
 	}
+
+	// Sort records strictly by SourceSeq so sequential nonce transfers are dispatched in order
+	sort.SliceStable(records, func(i, j int) bool {
+		return records[i].SourceSeq < records[j].SourceSeq
+	})
 
 	for _, rec := range records {
 		if !w.isReleasable(rec) {
@@ -123,6 +139,11 @@ func (w *SendWorker) processPending() {
 		}
 
 		if rec.State == StateLocalAppliedPendingSend {
+			if _, inFlight := w.inFlightSubmits.Load(rec.MessageID); inFlight {
+				// Already submitted to parent chain, waiting for local commit of EventRPCSubmitted
+				continue
+			}
+
 			// [ROUTING] Query Account Registry for target address
 			destPubKey, found, err := w.client.GetAccountRegistry(rec.Target)
 			if err != nil {
@@ -164,15 +185,22 @@ func (w *SendWorker) processPending() {
 			)
 
 			if err != nil {
-				if strings.Contains(err.Error(), "wrong nonce") {
-					// The previous RPC call probably succeeded but the response was dropped.
-					// We must advance to submitted to poll GetTransferRecord.
-					log.Printf("SendWorker: msgID %x returned 'wrong nonce', advancing to check confirmation", rec.MessageID)
+				if strings.Contains(err.Error(), "wrong nonce") || strings.Contains(err.Error(), "already resolved") {
+					// Verify whether the record actually landed on the parent chain
+					if _, recFound, checkErr := w.client.GetTransferRecord(rec.MessageID); checkErr == nil && recFound {
+						log.Printf("SendWorker: msgID %x returned '%v' but record exists on parent chain, advancing to check confirmation", rec.MessageID, err)
+					} else {
+						log.Printf("SendWorker: msgID %x returned 'wrong nonce' (seq %d) and not found on parent chain, pausing to let nonce settle", rec.MessageID, rec.SourceSeq)
+						break
+					}
 				} else {
 					log.Printf("SendWorker: failed to send msgID %x: %v", rec.MessageID, err)
-					continue
+					break
 				}
 			}
+
+			w.inFlightSubmits.Store(rec.MessageID, true)
+			hasProgress = true
 
 			// Advance state to submitted
 			event := Event{
@@ -193,6 +221,7 @@ func (w *SendWorker) processPending() {
 				w.store.Put(rec)
 			}
 		} else if rec.State == StateSendSubmitted {
+			w.inFlightSubmits.Delete(rec.MessageID)
 			// Poll ParentChain to check if it has actually been confirmed
 			_, found, err := w.client.GetTransferRecord(rec.MessageID)
 			if err != nil {
@@ -205,6 +234,7 @@ func (w *SendWorker) processPending() {
 					Type: EventParentConfirmed,
 					Role: RoleSender,
 				}
+				hasProgress = true
 				
 				if w.EventProposer != nil {
 					if err := w.EventProposer(event, rec.MessageID, rec.SourceSeq, rec.SourcePubKey, rec.DestPubKey, rec.PayloadHash); err != nil {
@@ -221,4 +251,5 @@ func (w *SendWorker) processPending() {
 			}
 		}
 	}
+	return hasProgress
 }

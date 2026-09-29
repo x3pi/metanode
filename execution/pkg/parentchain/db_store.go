@@ -1,6 +1,7 @@
 package parentchain
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"math/big"
@@ -9,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/util"
 )
 
 var (
@@ -205,7 +207,10 @@ func (s *DBStore) GetAllChainRegistryKeys() ([]common.Hash, error) {
 	return keys, iter.Error()
 }
 
-var PrefixInbound = []byte("in:")
+var (
+	PrefixInbound    = []byte("in:")
+	PrefixInboundSeq = []byte("in_sq:")
+)
 
 func (s *DBStore) AppendInboundTransfer(destKeyHash common.Hash, event *TransferEvent) error {
 	data, err := json.Marshal(event)
@@ -213,20 +218,30 @@ func (s *DBStore) AppendInboundTransfer(destKeyHash common.Hash, event *Transfer
 		return err
 	}
 	
-	// Create a unique key using destination key hash + msg ID (or timestamp) to keep them ordered
-	// For simplicity, we can use PrefixInbound + destKeyHash + event.BlockTime + MsgID
-	key := make([]byte, 0, len(PrefixInbound)+32+8+32)
+	seqKey := append(PrefixInboundSeq, destKeyHash.Bytes()...)
+	var curSeq uint64
+	seqData, err := s.db.Get(seqKey, nil)
+	if err == nil && len(seqData) == 8 {
+		curSeq = binary.BigEndian.Uint64(seqData)
+	}
+
+	// Create a unique monotonically increasing key using destination key hash + sequence
+	// This guarantees new events are ALWAYS appended strictly after previous events in LevelDB.
+	key := make([]byte, 0, len(PrefixInbound)+32+8)
 	key = append(key, PrefixInbound...)
 	key = append(key, destKeyHash.Bytes()...)
 	
-	var timeBytes [8]byte
-	for i := 7; i >= 0; i-- {
-		timeBytes[i] = byte(event.BlockTime >> (8 * (7 - i)))
-	}
-	key = append(key, timeBytes[:]...)
-	key = append(key, event.MsgID.Bytes()...)
+	var seqBytes [8]byte
+	binary.BigEndian.PutUint64(seqBytes[:], curSeq)
+	key = append(key, seqBytes[:]...)
 	
-	return s.db.Put(key, data, nil)
+	if err := s.db.Put(key, data, nil); err != nil {
+		return err
+	}
+
+	var nextSeqBytes [8]byte
+	binary.BigEndian.PutUint64(nextSeqBytes[:], curSeq+1)
+	return s.db.Put(seqKey, nextSeqBytes[:], nil)
 }
 
 func (s *DBStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([]*TransferEvent, uint64, error) {
@@ -234,17 +249,29 @@ func (s *DBStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([
 	prefix = append(prefix, PrefixInbound...)
 	prefix = append(prefix, destKeyHash.Bytes()...)
 	
-	iter := s.db.NewIterator(nil, nil)
+	slice := util.BytesPrefix(prefix)
+	if cursor > 0 {
+		startKey := make([]byte, 0, len(prefix)+8)
+		startKey = append(startKey, prefix...)
+		var cursorBytes [8]byte
+		binary.BigEndian.PutUint64(cursorBytes[:], cursor)
+		startKey = append(startKey, cursorBytes[:]...)
+		slice.Start = startKey
+	}
+	
+	iter := s.db.NewIterator(slice, nil)
 	defer iter.Release()
 	
-	var allEvents []*TransferEvent
+	var events []*TransferEvent
+	curPos := cursor
 	for iter.Next() {
-		k := iter.Key()
-		if len(k) >= len(prefix) && string(k[:len(prefix)]) == string(prefix) {
-			var event TransferEvent
-			if err := json.Unmarshal(iter.Value(), &event); err == nil {
-				allEvents = append(allEvents, &event)
-			}
+		var event TransferEvent
+		if err := json.Unmarshal(iter.Value(), &event); err == nil {
+			events = append(events, &event)
+			curPos++
+		}
+		if len(events) >= 50 {
+			break
 		}
 	}
 	
@@ -252,17 +279,7 @@ func (s *DBStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([
 		return nil, cursor, err
 	}
 	
-	if cursor >= uint64(len(allEvents)) {
-		return nil, cursor, nil
-	}
-	
-	count := uint64(len(allEvents)) - cursor
-	if count > 50 {
-		count = 50
-	}
-	
-	res := allEvents[cursor : cursor+count]
-	return res, cursor + count, nil
+	return events, curPos, nil
 }
 
 func (s *DBStore) GetStateRoot(clusterKeyHash common.Hash, epoch uint64) (common.Hash, bool, error) {

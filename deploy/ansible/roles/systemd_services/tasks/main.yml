@@ -1,4 +1,32 @@
 ---
+- name: "SECURITY: Ensure skip_mempool_sig_verify is not enabled in production (Issue #103)"
+  ansible.builtin.assert:
+    that:
+      - not (skip_mempool_sig_verify | default(false) | bool)
+    fail_msg: "CRITICAL SECURITY ERROR (Issue #103): skip_mempool_sig_verify MUST NOT be enabled in production environments!"
+  when: (metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'
+
+- name: "SECURITY: Check for plaintext credentials in inventory (Issue #104)"
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ role_path }}/../../check_inventory_security.py"
+      - "{{ inventory_file | default(hostvars[groups['all'][0]].inventory_file | default('')) }}"
+  register: systemd_plaintext_creds_check
+  failed_when: false
+  changed_when: false
+  run_once: true
+  delegate_to: localhost
+
+- name: "SECURITY: Reject plaintext credentials in production (Issue #104)"
+  ansible.builtin.assert:
+    that:
+      - systemd_plaintext_creds_check.rc == 0
+    fail_msg: "CRITICAL SECURITY ERROR (Issue #104): Plaintext credentials ({{ systemd_plaintext_creds_check.stdout }}) found in inventory {{ inventory_file | default(hostvars[groups['all'][0]].inventory_file | default('')) }}! In production (metanode_env=production), credentials MUST be encrypted with ansible-vault (or referenced via Jinja2 '{{ vault_... }}')."
+  when: (metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'
+  run_once: true
+  delegate_to: localhost
+
 - name: Create metanode system group
   ansible.builtin.group:
     name: metanode

@@ -21,7 +21,7 @@ sys.path.insert(0, BASE_DIR)
 import telegram_notify
 
 def get_server_ip():
-    """Detect server IP address."""
+    """Detect server IP address, avoiding loopback (127.0.0.1/localhost)."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0.5)
@@ -29,13 +29,19 @@ def get_server_ip():
         s.connect(('8.8.8.8', 80))
         ip = s.getsockname()[0]
         s.close()
-        return ip
+        if ip and not ip.startswith('127.') and ip != '0.0.0.0':
+            return ip
     except Exception:
-        try:
-            out = subprocess.check_output(["hostname", "-I"], text=True).strip()
-            return out.split()[0] if out else "127.0.0.1"
-        except Exception:
-            return "127.0.0.1"
+        pass
+    try:
+        out = subprocess.check_output(["hostname", "-I"], text=True).strip()
+        for ip in out.split():
+            ip = ip.strip()
+            if ip and not ip.startswith('127.') and ':' not in ip and ip != '0.0.0.0':
+                return ip
+    except Exception:
+        pass
+    return "127.0.0.1"
 
 def get_git_info(repo_path):
     """Extract current git commit info."""

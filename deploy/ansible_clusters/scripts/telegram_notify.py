@@ -102,11 +102,47 @@ def get_git_info():
             "message": "N/A",
         }
 
+def get_server_ip():
+    """Detect outward-facing server IP address, avoiding loopback (127.0.0.1/localhost)."""
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith('127.') and ip != '0.0.0.0':
+            return ip
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(["hostname", "-I"], text=True).strip()
+        for ip in out.split():
+            ip = ip.strip()
+            if ip and not ip.startswith('127.') and ':' not in ip and ip != '0.0.0.0':
+                return ip
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+def normalize_endpoint(endpoint, server_ip, default_port=""):
+    if not endpoint or endpoint == '?':
+        return f"http://{server_ip}:{default_port}" if default_port else f"{server_ip}"
+    ep = str(endpoint).strip()
+    if ep.startswith(':'):
+        return f"http://{server_ip}{ep}"
+    for loopback in ('127.0.0.1', 'localhost', '::1', '0.0.0.0'):
+        if loopback in ep:
+            return ep.replace(loopback, server_ip)
+    return ep
+
 def notify_deploy_start(clusters_info="Parent Chain + Exec Clusters", target_env="Local/Devnet"):
     git = get_git_info()
     now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+    server_ip = get_server_ip()
     msg = (
         f"🚀 <b>[METANODE CLUSTER DEPLOY BẮT ĐẦU]</b>\n\n"
+        f"🖥 <b>Server IP:</b> <code>{server_ip}</code>\n"
         f"🌿 <b>Nhánh:</b> <code>{html.escape(git['branch'])}</code>\n"
         f"📌 <b>Commit:</b> <code>{git['hash']}</code> (bởi <b>{html.escape(git['author'])}</b>)\n"
         f"💬 <b>Nội dung:</b> <i>{html.escape(git['message'])}</i>\n"
@@ -125,6 +161,7 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
     """
     git = get_git_info()
     now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+    server_ip = get_server_ip()
 
     rpc_lines = []
     ws_lines = []
@@ -155,15 +192,20 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
         fwd_nodes = info.get('forward_nodes', {})
 
         for k, v in rpc_nodes.items():
-            rpc_lines.append(f"  • {k}: {v}")
+            ep = normalize_endpoint(v, server_ip)
+            rpc_lines.append(f"  • {k}: {ep}")
         for k, v in ws_nodes.items():
-            ws_lines.append(f"  • {k}: {v}")
+            ep = normalize_endpoint(v, server_ip)
+            ws_lines.append(f"  • {k}: {ep}")
         for k, v in tcp_nodes.items():
-            tcp_lines.append(f"  • {k}: {v}")
+            ep = normalize_endpoint(v, server_ip)
+            tcp_lines.append(f"  • {k}: {ep}")
         for k, v in raft_nodes.items():
+            ep = normalize_endpoint(v, server_ip)
             fwd = fwd_nodes.get(k, '')
-            fwd_str = f" (Forward: {fwd})" if fwd else ""
-            raft_lines.append(f"  • {k}: {v}{fwd_str}")
+            fwd_ep = normalize_endpoint(fwd, server_ip) if fwd else ''
+            fwd_str = f" (Forward: {fwd_ep})" if fwd_ep else ""
+            raft_lines.append(f"  • {k}: {ep}{fwd_str}")
     elif isinstance(info_or_parent, str) and os.path.isfile(info_or_parent):
         try:
             import parse_inventory as pi
@@ -172,17 +214,17 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
         except Exception:
             pass
     elif isinstance(info_or_parent, dict) and isinstance(exec_clusters_info, list):
-        parent_rpc = info_or_parent.get('rpc', 'http://127.0.0.1:8547')
-        parent_p2p = info_or_parent.get('p2p', '127.0.0.1:4000')
+        parent_rpc = normalize_endpoint(info_or_parent.get('rpc', ':8547'), server_ip, "8547")
+        parent_p2p = normalize_endpoint(info_or_parent.get('p2p', ':4000'), server_ip, "4000")
         rpc_lines.append(f"  • parent_node: {parent_rpc}")
         tcp_lines.append(f"  • parent_node: {parent_p2p}")
 
         for c in exec_clusters_info:
             c_name = c.get('name', 'cluster')
-            c_rpc = c.get('rpc', '')
-            c_p2p = c.get('p2p', '')
-            c_raft = c.get('raft_port', '')
-            c_fwd = c.get('fwd_port', '')
+            c_rpc = normalize_endpoint(c.get('rpc', ''), server_ip)
+            c_p2p = normalize_endpoint(c.get('p2p', ''), server_ip)
+            c_raft = normalize_endpoint(c.get('raft_port', ''), server_ip)
+            c_fwd = normalize_endpoint(c.get('fwd_port', ''), server_ip)
             if c_rpc:
                 rpc_lines.append(f"  • {c_name}: {c_rpc}")
                 ws_lines.append(f"  • {c_name}: {c_rpc.replace('http', 'ws')}/ws")
@@ -194,6 +236,7 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
 
     msg_parts = [
         "✅ <b>[DỊCH VỤ CỤM METANODE ĐÃ KHỞI CHẠY THÀNH CÔNG]</b>\n",
+        f"🖥 <b>Server IP:</b> <code>{server_ip}</code>",
         f"🌿 <b>Nhánh:</b> <code>{html.escape(git['branch'])}</code>",
         f"📌 <b>Commit:</b> <code>{git['hash']}</code> (bởi <b>{html.escape(git['author'])}</b>)",
         f"⏱️ <b>Thời gian khởi chạy:</b> <code>{dur:.1f}s</code>",
@@ -214,7 +257,9 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
 
     if raft_lines:
         msg_parts.append("⛵ <b>Danh sách Node Raft Consensus & Forward:</b>")
-        msg_parts.append("<pre>\n" + "\n".join(raft_lines) + "\n</pre>")
+        msg_parts.append("<pre>\n" + "\n".join(raft_lines) + "\n</pre>\n")
+
+    msg_parts.append("🛡️ <i>Tất cả các cluster đều dùng chung EVM ChainID 991, hoạt động độc lập và tự động đồng bộ xuyên cụm qua Parent Chain!</i>")
 
     msg = "\n".join(msg_parts)
     return send_telegram_message(html_message=msg)
@@ -252,6 +297,7 @@ def notify_test_results(scenarios, total_duration=0, all_passed=True):
 def notify_deploy_failure(stage, error_msg, tail_logs=""):
     git = get_git_info()
     now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+    server_ip = get_server_ip()
     
     clean_tail = ""
     if tail_logs:
@@ -260,6 +306,7 @@ def notify_deploy_failure(stage, error_msg, tail_logs=""):
 
     msg = (
         f"🚨 <b>[METANODE CLUSTER DEPLOY THẤT BẠI]</b>\n\n"
+        f"🖥 <b>Server IP:</b> <code>{server_ip}</code>\n"
         f"🌿 <b>Nhánh:</b> <code>{html.escape(git['branch'])}</code>\n"
         f"📌 <b>Commit:</b> <code>{git['hash']}</code> (bởi <b>{html.escape(git['author'])}</b>)\n"
         f"📍 <b>Giai đoạn lỗi:</b> <code>{html.escape(stage)}</code>\n"

@@ -14,9 +14,10 @@ import (
 )
 
 type mockParentChainClient struct {
-	sentTransfers  []common.Hash
-	failNext       bool
-	claimedOutcome parentchain.FloatOutcome
+	sentTransfers    []common.Hash
+	inboundTransfers []*parentchain.TransferEvent
+	failNext         bool
+	claimedOutcome   parentchain.FloatOutcome
 	// found=true, matching this mock's original behavior before the field existed).
 	transferNotFound bool
 	failError        error
@@ -59,6 +60,15 @@ func (m *mockParentChainClient) SendTransferFloat(
 }
 
 func (m *mockParentChainClient) SendMarkClaimed(msgID common.Hash, outcome parentchain.FloatOutcome, cert []byte) (common.Hash, error) {
+	if m.failNext {
+		m.failNext = false
+		if m.failError != nil {
+			err := m.failError
+			m.failError = nil
+			return common.Hash{}, err
+		}
+		return common.Hash{}, errors.New("transient network error")
+	}
 	return common.Hash{}, nil
 }
 
@@ -76,6 +86,11 @@ func (m *mockParentChainClient) SendReclaimFloat(msgID common.Hash, cert []byte)
 }
 
 func (m *mockParentChainClient) GetInboundTransfers(pubKey cm.PublicKey, cursor uint64) ([]*parentchain.TransferEvent, uint64, error) {
+	if len(m.inboundTransfers) > 0 {
+		txs := m.inboundTransfers
+		m.inboundTransfers = nil
+		return txs, cursor + uint64(len(txs)), nil
+	}
 	return nil, cursor, nil
 }
 
@@ -275,6 +290,101 @@ func TestSendWorker_SetInterval(t *testing.T) {
 	worker.SetInterval(0)
 	if worker.interval != 500*time.Millisecond {
 		t.Errorf("Expected interval to remain 500ms, got %v", worker.interval)
+	}
+}
+
+func TestSendWorker_ProgressDrivenPolling(t *testing.T) {
+	scDB := &mockDB{data: make(map[common.Address]map[common.Hash][]byte)}
+	store := NewDBStore(scDB)
+	client := &mockParentChainClient{}
+
+	kp1 := bls.GenerateKeyPair()
+	kp2 := bls.GenerateKeyPair()
+	worker := NewSendWorker(store, client, kp1, kp2.PublicKey(), 102)
+
+	var proposedEvents []Event
+	worker.EventProposer = func(event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey, destPubKey cm.PublicKey, payloadHash common.Hash) error {
+		proposedEvents = append(proposedEvents, event)
+		return nil
+	}
+
+	// Case 1: Empty store: no records -> hasProgress must be false (idle)
+	if worker.processPending() {
+		t.Errorf("Expected false for empty store, got true")
+	}
+
+	// Case 2: Add a pending send record
+	msgID := common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	record := &MessageRecord{
+		MessageID: msgID,
+		Role:      RoleSender,
+		State:     StateLocalAppliedPendingSend,
+		Sender:    common.HexToAddress("0xaaa"),
+		Target:    common.HexToAddress("0xbbb"),
+		Value:     big.NewInt(100),
+		SourceSeq: 1,
+	}
+	_ = store.Put(record)
+
+	// Sub-case 2a: SendTransferFloat fails with transient error -> stuck, must return false (no 100ms RPC spam)
+	client.failNext = true
+	client.failError = errors.New("network timeout")
+	if worker.processPending() {
+		t.Errorf("Expected false on send failure, got true")
+	}
+
+	// Sub-case 2b: Successful SendTransferFloat -> makes progress, must return true
+	if !worker.processPending() {
+		t.Errorf("Expected true on successful SendTransferFloat, got false")
+	}
+	if len(proposedEvents) != 1 || proposedEvents[0].Type != EventRPCSubmitted {
+		t.Fatalf("Expected EventRPCSubmitted proposed, got %v", proposedEvents)
+	}
+
+	// Sub-case 2c: In-flight check: while record is waiting for local consensus commit,
+	// store still has StateLocalAppliedPendingSend, but inFlightSubmits prevents re-submission
+	// and returns false (no new progress, no duplicate RPC call).
+	if worker.processPending() {
+		t.Errorf("Expected false while record is inFlight waiting for local commit, got true")
+	}
+
+	// Sub-case 2d: Consensus commits -> record transitions to StateSendSubmitted.
+	// But ParentChain has NOT yet mined/confirmed the transfer (transferNotFound = true).
+	// Must return false (waiting for parent chain, no RPC spam).
+	record.State = StateSendSubmitted
+	_ = store.Put(record)
+	client.transferNotFound = true
+	if worker.processPending() {
+		t.Errorf("Expected false when waiting for parent chain confirmation, got true")
+	}
+
+	// Sub-case 2e: ParentChain mines the transfer (transferNotFound = false).
+	// Must return true (progress: EventParentConfirmed proposed).
+	client.transferNotFound = false
+	if !worker.processPending() {
+		t.Errorf("Expected true when parent chain confirms transfer, got false")
+	}
+	if len(proposedEvents) != 2 || proposedEvents[1].Type != EventParentConfirmed {
+		t.Fatalf("Expected EventParentConfirmed proposed, got %v", proposedEvents)
+	}
+
+	// Case 3: "wrong nonce" where record is NOT found on parent chain -> pauses to let nonce settle, must return false
+	msgID2 := common.HexToHash("0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
+	record2 := &MessageRecord{
+		MessageID: msgID2,
+		Role:      RoleSender,
+		State:     StateLocalAppliedPendingSend,
+		Sender:    common.HexToAddress("0xaaa"),
+		Target:    common.HexToAddress("0xbbb"),
+		Value:     big.NewInt(50),
+		SourceSeq: 2,
+	}
+	_ = store.Put(record2)
+	client.failNext = true
+	client.failError = errors.New("float account: wrong nonce: got 2, want 3")
+	client.transferNotFound = true
+	if worker.processPending() {
+		t.Errorf("Expected false on wrong nonce settling pause, got true")
 	}
 }
 

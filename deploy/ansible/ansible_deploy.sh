@@ -105,6 +105,10 @@ if [ -n "${ANSIBLE_VAULT_PASSWORD_FILE:-}" ] && [ -f "${ANSIBLE_VAULT_PASSWORD_F
     VAULT_ARGS=(--vault-password-file "${ANSIBLE_VAULT_PASSWORD_FILE}")
 elif [ -f "${SCRIPT_DIR}/.vault_pass" ]; then
     VAULT_ARGS=(--vault-password-file "${SCRIPT_DIR}/.vault_pass")
+elif [ -f "$(dirname "$INVENTORY")/.vault_pass" ]; then
+    VAULT_ARGS=(--vault-password-file "$(dirname "$INVENTORY")/.vault_pass")
+elif [ -f "$HOME/.vault_pass" ]; then
+    VAULT_ARGS=(--vault-password-file "$HOME/.vault_pass")
 fi
 
 # ==============================================================================
@@ -524,11 +528,49 @@ if [[ "$ACTION" == "setup" || "$ACTION" == "deploy" || "$ACTION" == "gen_keys" ]
     fi
 fi
 
-# Detect Deployer Server IP dynamically
-DEPLOY_IP=$(hostname -I | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.)' | head -n 1)
-if [ -z "$DEPLOY_IP" ]; then
-    DEPLOY_IP=$(hostname -I | awk '{print $1}')
-fi
+# Detect Deployer Server IP dynamically (prefer outward-facing LAN/Public IP over localhost)
+detect_server_ip() {
+    local py_ip
+    py_ip=$(python3 -c "
+import socket, subprocess
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0.5)
+    s.connect(('8.8.8.8', 80))
+    ip = s.getsockname()[0]
+    s.close()
+    if ip and not ip.startswith('127.') and ip != '0.0.0.0':
+        print(ip)
+        exit(0)
+except Exception:
+    pass
+try:
+    out = subprocess.check_output(['hostname', '-I'], text=True).strip()
+    for ip in out.split():
+        if ip and not ip.startswith('127.') and ':' not in ip and ip != '0.0.0.0':
+            print(ip)
+            exit(0)
+except Exception:
+    pass
+" 2>/dev/null || true)
+    if [ -n "$py_ip" ]; then
+        echo "$py_ip"
+        return
+    fi
+
+    local host_ips
+    host_ips=$(hostname -I 2>/dev/null || true)
+    for ip in $host_ips; do
+        if [[ -n "$ip" && "$ip" != 127.* && "$ip" != *:* && "$ip" != "0.0.0.0" ]]; then
+            echo "$ip"
+            return
+        fi
+    done
+
+    echo "127.0.0.1"
+}
+
+DEPLOY_IP=$(detect_server_ip)
 
 # Check if Git Auto-Deploy Watcher daemon is running
 if pgrep -f "auto_rebuild_deploy.sh" >/dev/null 2>&1; then
@@ -631,15 +673,30 @@ if [ -n "$BTRFS_SIZE_VAL" ]; then
     EXTRA_VARS="${EXTRA_VARS} btrfs_size='${BTRFS_SIZE_VAL}'"
 fi
 
-# Detect become password from inventory for localhost become tasks.
+# Detect become password from inventory for localhost become tasks (devnet only).
 # SECURITY: pass it via the ANSIBLE_BECOME_PASS env var, NOT `-e ansible_become_pass=...`
 # on the ansible-playbook command line -- `-e` extra-vars are visible in plaintext to any
 # local user via `ps aux`/`/proc/<pid>/cmdline` for the whole run. The env var achieves the
-# same effect (ansible-playbook reads it automatically) without that exposure. Exported here
-# so it's in scope for every ansible-playbook invocation below (gen_keys included).
+# same effect (ansible-playbook reads it automatically) without that exposure.
 INVENTORY_BECOME_PASS=$(grep -E '^\s*ansible_become_pass:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
-if [ -n "$INVENTORY_BECOME_PASS" ]; then
+if [ -n "$INVENTORY_BECOME_PASS" ] && [ "$INVENTORY_BECOME_PASS" != "!vault" ] && [[ "$INVENTORY_BECOME_PASS" != \{\{* ]]; then
     export ANSIBLE_BECOME_PASS="$INVENTORY_BECOME_PASS"
+fi
+
+# Check for plaintext credentials using centralized validator (Issue #104)
+if [ -f "${SCRIPT_DIR}/check_inventory_security.py" ] && [ -f "$INVENTORY" ]; then
+    PLAINTEXT_CREDS_VIOLATIONS=$(python3 "${SCRIPT_DIR}/check_inventory_security.py" "$INVENTORY" 2>/dev/null || true)
+    if [ -n "$PLAINTEXT_CREDS_VIOLATIONS" ]; then
+        if [ "${METANODE_ENV:-production}" = "production" ] && [ "${NODE_ENV:-production}" = "production" ]; then
+            echo -e "\033[0;31m❌ [SECURITY ERROR] Plaintext credentials (${PLAINTEXT_CREDS_VIOLATIONS}) detected in inventory for production environment (Issue #104)!\033[0m"
+            echo -e "\033[0;33m   In production, credentials MUST be encrypted using ansible-vault (or referenced via Jinja2 '{{ vault_... }}').\033[0m"
+            echo -e "\033[0;33m   Example: ansible-vault encrypt_string 'my_password' --name ansible_become_pass\033[0m"
+            echo -e "\033[0;36m   👉 For devnet/benchmark, explicitly set: export METANODE_ENV=devnet\033[0m"
+            exit 1
+        else
+            echo -e "\033[0;33m⚠️ [SECURITY NOTICE] Plaintext credentials (${PLAINTEXT_CREDS_VIOLATIONS}) detected in inventory (allowed in devnet/benchmark only).\033[0m"
+        fi
+    fi
 fi
 
 # Fast Pre-flight Check: Kiểm tra khả năng kết nối mạng tới các server đích trước khi build/deploy
@@ -649,6 +706,7 @@ if [ "$ACTION" != "gen_keys" ] && [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; the
         echo -e "\n\033[0;31m❌ [LỖI KẾT NỐI SERVER] Máy chủ đích bị timeout hoặc không thể kết nối qua SSH!\033[0m"
         echo -e "\033[0;33m   🛑 Dừng thực thi ngay lập tức để không tốn thời gian biên dịch hay triển khai dở dang.\033[0m\n"
         send_telegram_notification "❌ <b>[${ACTION_LABEL}]</b> Thất bại ngay bước kiểm tra kết nối: Máy chủ đích không phản hồi (Connection timed out / SSH unreachable)!
+- Deployer Server IP: <code>${DEPLOY_IP}</code>
 - Target Node IPs: <code>${TARGET_NODES_IPS}</code>"
         exit 4
     fi
@@ -756,6 +814,7 @@ if [ $ansible_exit -eq 0 ]; then
     echo -e  "\n📋 *Node Roles:*"
     echo "${ROLES_OUTPUT}"
     send_telegram_notification "✅ <b>[${ACTION_LABEL}]</b> Quá trình Ansible ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> hoàn tất thành công!
+- Deployer Server IP: <code>${DEPLOY_IP}</code>
 - Target Node IPs: <code>${TARGET_NODES_IPS}</code>
 - Watcher Daemon: <code>${WATCHER_STATUS}</code>
 
@@ -794,6 +853,7 @@ else
     esac
 
     send_telegram_notification "❌ <b>[${ACTION_LABEL}]</b> Quá trình Ansible ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> thất bại với mã lỗi <code>${ansible_exit}</code>: <b>${ERROR_DESC}</b>!
+- Deployer Server IP: <code>${DEPLOY_IP}</code>
 - Target Node IPs: <code>${TARGET_NODES_IPS}</code>
 - Watcher Daemon: <code>${WATCHER_STATUS}</code>
 

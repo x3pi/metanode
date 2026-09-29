@@ -90,8 +90,8 @@ Dùng SSH Key an toàn hơn rất nhiều, tốc độ kết nối nhanh hơn v�
      ansible_become_pass: "mat_khau_sudo"   # Mật khẩu sudo để phân quyền root
    ```
 
-#### Cách 2: Sử dụng Mật khẩu trực tiếp (Dùng cho Lab / Devnet nội bộ)
-Nếu không muốn thiết lập SSH Key, bạn điền trực tiếp mật khẩu:
+#### Cách 2: Sử dụng Mật khẩu trực tiếp (Chỉ cho phép trên Lab / Devnet nội bộ)
+Nếu không muốn thiết lập SSH Key trong môi trường thử nghiệm:
 ```yaml
 server_1:
   ansible_host: 192.168.1.223
@@ -99,6 +99,38 @@ server_1:
   ansible_ssh_pass: "mat_khau_ssh"
   ansible_become_pass: "mat_khau_sudo"
 ```
+> ⚠️ **BẮT BUỘC KHI DÙNG MẬT KHẨU PLAINTEXT (Issue #104):** Môi trường mặc định của hệ thống là `production` (tự động chặn toàn bộ mật khẩu plaintext). Khi triển khai cụm devnet/lab có mật khẩu plaintext, bạn **bắt buộc phải khai báo rõ ràng biến môi trường Devnet**:
+> ```bash
+> export METANODE_ENV=devnet
+> # Hoặc
+> export NODE_ENV=devnet
+> ```
+
+#### Cách 3: Sử dụng Ansible Vault (Bắt buộc cho Production nếu dùng Mật khẩu - Issue #104)
+Trong môi trường `production`, toàn bộ mật khẩu trong `inventory.yml` bắt buộc phải được mã hóa bằng Ansible Vault (dùng khối `!vault |` hoặc tham chiếu Jinja `{{ vault_... }}`).
+
+1. **Tạo file mật khẩu vault (đã được cấu hình tự động gitignore):**
+   ```bash
+   echo "mat_khau_vault_cua_ban" > .vault_pass
+   chmod 0600 .vault_pass
+   ```
+2. **Mã hóa chuỗi mật khẩu bằng `ansible-vault`:**
+   ```bash
+   ansible-vault encrypt_string --vault-password-file .vault_pass 'mat_khau_sudo' --name ansible_become_pass
+   ansible-vault encrypt_string --vault-password-file .vault_pass 'mat_khau_ssh' --name ansible_ssh_pass
+   ```
+3. **Dán khối kết quả `!vault |` vào `inventory.yml`:**
+   ```yaml
+   all:
+     children:
+       metanode_cluster:
+         vars:
+           ansible_user: "abc"
+           ansible_become_pass: !vault |
+                     $ANSIBLE_VAULT;1.1;AES256
+                     36376363...
+   ```
+   *Script `./ansible_deploy.sh` sẽ tự động phát hiện file `.vault_pass` và giải mã an toàn khi triển khai.*
 
 > 💡 **Lưu ý:** Toàn bộ ý nghĩa của từng trường cấu hình (`node_ids`, `rpc_nodes`, `snapshot_frequency_blocks`, `btrfs_size`, `prune_nodes`, `epochs_to_keep`...) đã được **chú thích chi tiết trong file [`inventory.example.yml`](./inventory.example.yml)**. Bạn chỉ cần mở file `inventory.yml` lên và chỉnh sửa lại IP, tài khoản, dung lượng `btrfs_size` (mặc định `400G`) theo đúng cụm server của mình.
 

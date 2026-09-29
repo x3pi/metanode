@@ -16,6 +16,10 @@ if [ -n "${ANSIBLE_VAULT_PASSWORD_FILE:-}" ] && [ -f "${ANSIBLE_VAULT_PASSWORD_F
     VAULT_ARGS=(--vault-password-file "${ANSIBLE_VAULT_PASSWORD_FILE}")
 elif [ -f "${SCRIPT_DIR}/.vault_pass" ]; then
     VAULT_ARGS=(--vault-password-file "${SCRIPT_DIR}/.vault_pass")
+elif [ -f "$(dirname "$INVENTORY")/.vault_pass" ]; then
+    VAULT_ARGS=(--vault-password-file "$(dirname "$INVENTORY")/.vault_pass")
+elif [ -f "$HOME/.vault_pass" ]; then
+    VAULT_ARGS=(--vault-password-file "$HOME/.vault_pass")
 fi
 
 echo "═══════════════════════════════════════════════════════════════"
@@ -278,10 +282,10 @@ print(data.get('all', {}).get('vars', {}).get('root_anchor_per_chain_allocation'
     echo ""
 
     # Xuất file json cấu hình tường minh đăng ký Gateway & cấu hình mạng Relayer
-    python3 -c "
+    INVENTORY="$INVENTORY" SCRIPT_DIR="$SCRIPT_DIR" GENESIS_SUPPLY="$GENESIS_SUPPLY" PER_CHAIN_ALLOCATION="$PER_CHAIN_ALLOCATION" python3 -c "
 import os, yaml, json, glob
 
-with open('$INVENTORY') as f:
+with open(os.environ['INVENTORY']) as f:
     data = yaml.safe_load(f)
 
 global_vars = data.get('all', {}).get('vars', {}) or {}
@@ -458,18 +462,19 @@ gateway_register_data = {
     'chains': chains_config
 }
 
-with open('$SCRIPT_DIR/gateway_register.json', 'w') as f:
+gw_reg_path = os.path.join(os.environ['SCRIPT_DIR'], 'gateway_register.json')
+with open(gw_reg_path, 'w') as f:
     json.dump(gateway_register_data, f, indent=2)
-print('📄 Đã xuất cấu hình Gateway & Relayer ra: $SCRIPT_DIR/gateway_register.json')
+print(f'📄 Đã xuất cấu hình Gateway & Relayer ra: {gw_reg_path}')
 
 with open('/tmp/private_chains.json', 'w') as f:
     json.dump(out_simple, f, indent=2)
 print('📄 Đã xuất cấu hình mạng ra: /tmp/private_chains.json')
 "
 
-    SUBMITTER_KEY=$(python3 -c "
-import yaml
-with open('$INVENTORY') as f:
+    SUBMITTER_KEY=$(INVENTORY="$INVENTORY" python3 -c "
+import os, yaml
+with open(os.environ['INVENTORY']) as f:
     data = yaml.safe_load(f)
 print(data.get('all', {}).get('vars', {}).get('root_anchor_submitter_key', ''))
 ")

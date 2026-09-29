@@ -86,14 +86,14 @@ if [ -z "$PROBE_TX_KEY" ] && [ -n "$INV_PATH" ]; then
 fi
 PROBE_SUITE_CONFIG="${SCRIPT_DIR}/../../../../metanode-suite/test-simple/test-rpc/test-chain/config.json"
 if [ -z "$PROBE_TX_KEY" ] && [ -f "$PROBE_SUITE_CONFIG" ]; then
-    PROBE_TX_KEY=$(python3 -c "
-import json
+    PROBE_TX_KEY=$(PROBE_SUITE_CONFIG="$PROBE_SUITE_CONFIG" python3 -c '
+import json, os
 try:
-    c = json.load(open('$PROBE_SUITE_CONFIG'))
-    print(c.get('private_key', ''))
+    c = json.load(open(os.environ.get("PROBE_SUITE_CONFIG", "")))
+    print(c.get("private_key", ""))
 except Exception:
-    print('')
-" 2>/dev/null)
+    print("")
+' 2>/dev/null)
 fi
 if [ -z "$PROBE_TX_KEY" ]; then
     PROBE_TX_KEY="0x9f61a687fbeac9e11d5cfce0fe2dcec035cb2b21eb9c584d8cf90696ce2fc370"
@@ -115,6 +115,48 @@ if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --is-inside-
         CODE_VERSION="${CODE_VERSION}-dirty"
     fi
 fi
+
+# Detect outward-facing server IP (avoid localhost/127.0.0.1 in telegram alerts)
+detect_server_ip() {
+    local py_ip
+    py_ip=$(python3 -c "
+import socket, subprocess
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0.5)
+    s.connect(('8.8.8.8', 80))
+    ip = s.getsockname()[0]
+    s.close()
+    if ip and not ip.startswith('127.') and ip != '0.0.0.0':
+        print(ip)
+        exit(0)
+except Exception:
+    pass
+try:
+    out = subprocess.check_output(['hostname', '-I'], text=True).strip()
+    for ip in out.split():
+        if ip and not ip.startswith('127.') and ':' not in ip and ip != '0.0.0.0':
+            print(ip)
+            exit(0)
+except Exception:
+    pass
+" 2>/dev/null || true)
+    if [ -n "$py_ip" ]; then
+        echo "$py_ip"
+        return
+    fi
+
+    local host_ips
+    host_ips=$(hostname -I 2>/dev/null || true)
+    for ip in $host_ips; do
+        if [[ -n "$ip" && "$ip" != 127.* && "$ip" != *:* && "$ip" != "0.0.0.0" ]]; then
+            echo "$ip"
+            return
+        fi
+    done
+
+    echo "127.0.0.1"
+}
 
 send_tele() {
     if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
@@ -202,22 +244,34 @@ resolve_ssh_auth() {
     SSH_PASS=""
     if [ -n "$key" ] && [ -f "$key" ]; then
         SSH_OPTS="-i $key $SSH_OPTS"
-    elif [ -n "$INV_PATH" ] && command -v sshpass >/dev/null 2>&1; then
-        SSH_PASS=$(python3 -c "
-import yaml
+        SSH_PASS=$(SCRIPT_DIR="$SCRIPT_DIR" INV_PATH="$INV_PATH" TARGET_NODE_ID="$node_id" python3 -c '
+import sys, os
+script_dir = os.environ.get("SCRIPT_DIR", "")
+inv_path = os.environ.get("INV_PATH", "")
+node_id_str = os.environ.get("TARGET_NODE_ID", "")
+if script_dir:
+    sys.path.insert(0, script_dir)
+    sys.path.insert(0, os.path.dirname(script_dir))
 try:
-    with open('$INV_PATH') as f:
-        d = yaml.safe_load(f) or {}
-    mc = d.get('all', {}).get('children', {}).get('metanode_cluster', {})
-    hosts = mc.get('hosts', {}) or d.get('all', {}).get('hosts', {}) or {}
-    gv = mc.get('vars', {}) or d.get('all', {}).get('vars', {}) or {}
-    for h in hosts.values():
-        if isinstance(h, dict) and $node_id in (h.get('node_ids') or []):
-            print(h.get('ansible_ssh_pass', gv.get('ansible_ssh_pass', '')))
-            break
+    node_id = int(node_id_str)
+    from parse_inventory import load_inventory_content, setup_yaml_vault_constructor
+    content, err, vault = load_inventory_content(inv_path)
+    if content:
+        import yaml
+        setup_yaml_vault_constructor(vault)
+        d = yaml.safe_load(content) or {}
+        mc = d.get("all", {}).get("children", {}).get("metanode_cluster", {})
+        hosts = mc.get("hosts", {}) or d.get("all", {}).get("hosts", {}) or {}
+        gv = mc.get("vars", {}) or d.get("all", {}).get("vars", {}) or {}
+        for h in hosts.values():
+            if isinstance(h, dict) and node_id in (h.get("node_ids") or []):
+                p = h.get("ansible_ssh_pass", gv.get("ansible_ssh_pass", ""))
+                if p and p != "[VAULT_ENCRYPTED]":
+                    print(p)
+                break
 except Exception:
     pass
-" 2>/dev/null)
+' 2>/dev/null)
     fi
 }
 
@@ -405,9 +459,8 @@ if [ "${1:-}" == "health" ]; then
     # right before alerting below; this threshold mainly controls how often that probe fires.
     STALL_THRESHOLD_SEC="${CHAIN_STALL_THRESHOLD_SEC:-300}"
 
-    # Lấy IP local của máy monitor hiện tại
-    MONITOR_IP=$(hostname -I | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.)' | head -n 1)
-    if [ -z "$MONITOR_IP" ]; then MONITOR_IP=$(hostname -I | awk '{print $1}'); fi
+    # Lấy IP của máy monitor hiện tại (ưu tiên IP mạng ngoài thay vì localhost)
+    MONITOR_IP=$(detect_server_ip)
 
     while true; do
         INV_PATH=$(get_inv_path)
@@ -435,6 +488,9 @@ if [ "${1:-}" == "health" ]; then
                     if [ "${dead_nodes[$node_key]:-0}" == "0" ]; then
                         dead_nodes[$node_key]=1
                         ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
+                        if [ "$ip" == "127.0.0.1" ] || [ "$ip" == "localhost" ] || [ -z "$ip" ]; then
+                            ip="$MONITOR_IP"
+                        fi
                         resolve_ssh_auth "$node_key" "$node_id" "$RPC_CONFIG_DATA"
                         ssh_user="$SSH_USER"
                         
@@ -973,8 +1029,7 @@ if [ "${1:-}" == "resources" ]; then
     echo "Starting resource monitor loop..."
     declare -A alert_history
     
-    MONITOR_IP=$(hostname -I | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.)' | head -n 1)
-    if [ -z "$MONITOR_IP" ]; then MONITOR_IP=$(hostname -I | awk '{print $1}'); fi
+    MONITOR_IP=$(detect_server_ip)
 
     while true; do
         INV_PATH=$(get_inv_path)
@@ -993,6 +1048,9 @@ if [ "${1:-}" == "resources" ]; then
                     continue
                 fi
                 ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
+                if [ "$ip" == "127.0.0.1" ] || [ "$ip" == "localhost" ] || [ -z "$ip" ]; then
+                    ip="$MONITOR_IP"
+                fi
                 resolve_ssh_auth "$node_key" "$node_id" "$RPC_CONFIG_DATA"
                 ssh_user="$SSH_USER"
                 

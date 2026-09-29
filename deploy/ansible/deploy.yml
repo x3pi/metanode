@@ -4,6 +4,45 @@
   connection: local
   gather_facts: false
   pre_tasks:
+    - name: Resolve inventory file path
+      ansible.builtin.set_fact:
+        resolved_inventory_file: >-
+          {%- set ns = namespace(inv='') -%}
+          {%- for h in groups['all'] | default([]) -%}
+            {%- if hostvars[h].inventory_file is defined and not ns.inv -%}
+              {%- set ns.inv = hostvars[h].inventory_file -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ ns.inv | default(inventory_file | default(playbook_dir ~ '/inventory.yml'), true) }}
+      tags: ["always"]
+
+    - name: "SECURITY: Check for plaintext credentials in inventory (Issue #104)"
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/check_inventory_security.py"
+          - "{{ resolved_inventory_file }}"
+      register: plaintext_creds_check
+      failed_when: false
+      changed_when: false
+      tags: ["always"]
+
+    - name: "SECURITY: Reject plaintext credentials in production (Issue #104)"
+      ansible.builtin.assert:
+        that:
+          - plaintext_creds_check.rc == 0
+        fail_msg: "CRITICAL SECURITY ERROR (Issue #104): Plaintext credentials ({{ plaintext_creds_check.stdout }}) found in inventory {{ resolved_inventory_file }}! In production (metanode_env=production), credentials MUST be encrypted with ansible-vault (or referenced via Jinja2 '{{ vault_... }}')."
+      when: (metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'
+      tags: ["always"]
+
+    - name: "SECURITY: Ensure skip_mempool_sig_verify is not enabled in production (Issue #103)"
+      ansible.builtin.assert:
+        that:
+          - not (skip_mempool_sig_verify | default(false) | bool)
+        fail_msg: "CRITICAL SECURITY ERROR (Issue #103): skip_mempool_sig_verify MUST NOT be enabled in production environments!"
+      when: (metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'
+      tags: ["always"]
+
     - name: Build cluster_nodes list from inventory
       set_fact:
         cluster_nodes: >-

@@ -290,6 +290,9 @@ start_go_master() {
     # environment calling this script if a specific local debug session needs it.
     if [ "${MTN_SKIP_MEMPOOL_SIG_VERIFY:-false}" = "true" ]; then
         echo "export SKIP_MEMPOOL_SIG_VERIFY=true" >> "$script_file"
+        echo "export METANODE_DEVNET=true" >> "$script_file"
+        echo "export METANODE_ENV=devnet" >> "$script_file"
+        echo "export NODE_ENV=devnet" >> "$script_file"
     fi
     echo "$cmd" >> "$script_file"
     chmod +x "$script_file"

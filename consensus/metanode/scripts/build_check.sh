@@ -149,9 +149,9 @@ if [ "$BUILD_GO" = true ]; then
         fi
         echo -e "${CYAN}─── Go Builds (Dùng ${GO_JOBS}/${NUM_CORES} cores) ────────────────────${NC}"
 
-        # Go simple_chain binary
+        # Go simple_chain binary & helper tools
         run_step "Go simple_chain (go build)" \
-            bash -c "cd '$GO_ROOT/cmd/simple_chain' && export CGO_ENABLED=1 && rm -f simple_chain && touch '$GO_ROOT/executor/ffi_bridge.go' '$GO_ROOT/pkg/nomt_ffi/bridge.go' && go build -p $GO_JOBS -o simple_chain ."
+            bash -c "cd '$GO_ROOT/cmd/simple_chain' && export CGO_ENABLED=1 && rm -f simple_chain && touch '$GO_ROOT/executor/ffi_bridge.go' '$GO_ROOT/pkg/nomt_ffi/bridge.go' && go build -p $GO_JOBS -o simple_chain . && mkdir -p '$GO_ROOT/bin' '$REPO_ROOT/bin' && go build -p $GO_JOBS -o '$GO_ROOT/bin/bls_pubkey' '$GO_ROOT/cmd/tool/bls_pubkey' && cp '$GO_ROOT/bin/bls_pubkey' '$REPO_ROOT/bin/bls_pubkey'"
     fi
 fi
 
