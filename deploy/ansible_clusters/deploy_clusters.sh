@@ -58,9 +58,14 @@ usage() {
     echo "  --no-notify         Tắt thông báo Telegram"
     echo ""
     echo "⚙️ Tùy Chọn Khác:"
+    echo "  --env=ENV           Môi trường triển khai: devnet (mặc định cho test cluster) hoặc production"
     echo "  --systemd           Sử dụng systemd service thay vì background daemon"
     echo "  --inventory=FILE    Đường dẫn inventory tùy chỉnh (mặc định: inventory.yml)"
     echo "  --help, -h          Hiển thị trợ giúp này"
+    echo ""
+    echo "🔒 Lưu ý bảo mật (Issue #104):"
+    echo "  - Khi --env=production: Mật khẩu trong inventory bắt buộc phải được mã hóa bằng Ansible Vault."
+    echo "  - Khi --env=devnet (mặc định): Cho phép inventory chứa thông tin thử nghiệm cục bộ."
     echo ""
     exit 0
 }
@@ -125,6 +130,10 @@ while [[ $# -gt 0 ]]; do
             INVENTORY="$2"
             shift 2
             ;;
+        --env=*)
+            METANODE_ENV="${1#*=}"
+            shift
+            ;;
         --help|-h)
             usage
             ;;
@@ -134,6 +143,9 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+export METANODE_ENV="${METANODE_ENV:-devnet}"
+export NODE_ENV="${NODE_ENV:-$METANODE_ENV}"
 
 print_banner
 
@@ -264,13 +276,38 @@ DEPLOY_START_TIME=$(date +%s)
 echo "📢 Gửi thông báo bắt đầu triển khai đến Telegram..."
 send_tele "tn.notify_deploy_start('Parent Chain (:8547) + Cluster 1 (:8646) + Cluster 2 (:8647)')"
 
+# Check vault password file if available
+VAULT_CLUSTER_ARGS=()
+CHECK_SEC_SCRIPT="${METANODE_ROOT}/deploy/ansible/check_inventory_security.py"
+if [ -f "${SCRIPT_DIR}/.vault_pass" ]; then
+    VAULT_CLUSTER_ARGS=(--vault-password-file "${SCRIPT_DIR}/.vault_pass")
+elif [ -f "${METANODE_ROOT}/deploy/ansible/.vault_pass" ]; then
+    VAULT_CLUSTER_ARGS=(--vault-password-file "${METANODE_ROOT}/deploy/ansible/.vault_pass")
+fi
+
+# Pre-flight Security check for plaintext credentials (Issue #104)
+if [ -f "$CHECK_SEC_SCRIPT" ] && [ -f "$INVENTORY" ]; then
+    PLAINTEXT_VIOLATIONS=$(python3 "$CHECK_SEC_SCRIPT" "$INVENTORY" 2>/dev/null || true)
+    if [ -n "$PLAINTEXT_VIOLATIONS" ]; then
+        if [ "$METANODE_ENV" = "production" ] && [ "$NODE_ENV" = "production" ]; then
+            echo -e "\033[0;31m❌ [SECURITY ERROR] Plaintext credentials (${PLAINTEXT_VIOLATIONS}) detected in inventory for production environment (Issue #104)!\033[0m"
+            echo -e "\033[0;33m   In production, credentials MUST be encrypted using ansible-vault (or referenced via Jinja2 '{{ vault_... }}').\033[0m"
+            echo -e "\033[0;36m   👉 For devnet/benchmark, run with: ./deploy_clusters.sh --env=devnet\033[0m"
+            exit 1
+        else
+            echo -e "\033[0;33m⚠️ [SECURITY NOTICE] Plaintext credentials (${PLAINTEXT_VIOLATIONS}) detected in inventory (allowed in devnet/benchmark only).\033[0m"
+        fi
+    fi
+fi
+
 # 2. Execute Ansible Playbook
-echo "⚙️ Bắt đầu thực thi Ansible Playbook (${ACTION})..."
+echo "⚙️ Bắt đầu thực thi Ansible Playbook (${ACTION}, Môi trường: ${METANODE_ENV})..."
 set +e
 ansible-playbook \
     -i "$INVENTORY" \
     "$PLAYBOOK" \
-    --extra-vars "deploy_action=${ACTION} use_systemd=${USE_SYSTEMD} run_integration_tests=false" \
+    --extra-vars "deploy_action=${ACTION} use_systemd=${USE_SYSTEMD} run_integration_tests=false metanode_env=${METANODE_ENV} node_env=${NODE_ENV}" \
+    "${VAULT_CLUSTER_ARGS[@]}" \
     "${EXTRA_ANSIBLE_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
 ANSIBLE_RC=${PIPESTATUS[0]}
 set -e

@@ -18,9 +18,11 @@ Bạn **KHÔNG CẦN** phải gõ lệnh `ansible-playbook` dài dòng nữa. H�
 > 
 > 🔒 **Chuẩn Bảo Mật (Credentials Hardening):**
 > - **Khuyên dùng cho Production:** Thiết lập xác thực SSH Key (`ssh-copy-id abc@<node-ip>`) và khai báo `ansible_ssh_private_key_file: "~/.ssh/id_ed25519"` trong `inventory.yml`. Cấp quyền `NOPASSWD: ALL` cho deployment user để loại bỏ hoàn toàn việc lưu mật khẩu.
-> - **Mã hóa mật khẩu sudo:** Nếu server yêu cầu mật khẩu sudo, mã hóa bằng Ansible Vault:
+> - **Mã hóa mật khẩu sudo / ssh:** Nếu server yêu cầu mật khẩu sudo hoặc SSH, mã hóa bằng Ansible Vault:
 >   `ansible-vault encrypt_string 'mat_khau' --name 'ansible_become_pass'`
 >   thay vì lưu mật khẩu thô (plaintext) trong file cấu hình.
+> - **Chặn Plaintext ở Production:** Mặc định hệ thống chạy với `metanode_env=production` và sẽ **từ chối triển khai** nếu phát hiện mật khẩu plaintext (`ansible_become_pass`, `ansible_ssh_pass`, `ansible_password`, `ansible_sudo_pass`).
+> - **Môi trường Devnet / Local:** Nếu bắt buộc dùng inventory chứa mật khẩu plaintext trong môi trường test/dev, bạn phải đặt biến môi trường `export METANODE_ENV=devnet` hoặc truyền `-e metanode_env=devnet`.
 
 ### 📌 Tổng hợp các Cờ (Flags) và Giá trị Mặc định
 

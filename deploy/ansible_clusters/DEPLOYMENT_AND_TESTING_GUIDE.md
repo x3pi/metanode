@@ -348,6 +348,16 @@ ansible-playbook -i inventory.yml deploy.yml --tags exec_clusters
   - `metanode-cluster-1.service`
   - `metanode-cluster-2.service`
 
+### 5.4 Quản Lý Môi Trường & Bảo Mật Credentials (Ansible Vault)
+Hệ thống triển khai phân tách rõ giữa môi trường Production và Devnet:
+- **Môi trường Production (`--env=production` hoặc `METANODE_ENV=production`):**
+  - Script pre-flight `check_inventory_security.py` và playbook Ansible sẽ **chặn đứng** quá trình triển khai nếu phát hiện bất kỳ mật khẩu plaintext nào (`ansible_become_pass`, `ansible_ssh_pass`, `ansible_password`, `ansible_sudo_pass`).
+  - Bắt buộc phải sử dụng SSH Key không mật khẩu hoặc mã hóa mật khẩu bằng Ansible Vault (`!vault | ...`) và cung cấp cờ `--vault-password-file <path>`.
+  - Binary `simple_chain` / `metanode` trên server sẽ chạy với cờ bảo vệ production, nghiêm cấm bypass chữ ký mempool.
+- **Môi trường Devnet (`--env=devnet` hoặc `METANODE_ENV=devnet`):**
+  - Cho phép sử dụng inventory chứa mật khẩu plaintext phục vụ mục đích kiểm thử và phát triển nhanh trong mạng nội bộ cô lập.
+  - Mặc định script `deploy_clusters.sh` thiết lập `--env=devnet` để thuận tiện cho việc chạy bộ test 5 kịch bản.
+
 ---
 
 ## 6. QUY TRÌNH KIỂM THỬ TÍCH HỢP
