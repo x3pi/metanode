@@ -16,6 +16,10 @@ if [ -n "${ANSIBLE_VAULT_PASSWORD_FILE:-}" ] && [ -f "${ANSIBLE_VAULT_PASSWORD_F
     VAULT_ARGS=(--vault-password-file "${ANSIBLE_VAULT_PASSWORD_FILE}")
 elif [ -f "${SCRIPT_DIR}/.vault_pass" ]; then
     VAULT_ARGS=(--vault-password-file "${SCRIPT_DIR}/.vault_pass")
+elif [ -f "$(dirname "$INVENTORY")/.vault_pass" ]; then
+    VAULT_ARGS=(--vault-password-file "$(dirname "$INVENTORY")/.vault_pass")
+elif [ -f "$HOME/.vault_pass" ]; then
+    VAULT_ARGS=(--vault-password-file "$HOME/.vault_pass")
 fi
 
 echo "═══════════════════════════════════════════════════════════════"

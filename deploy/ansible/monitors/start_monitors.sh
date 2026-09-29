@@ -204,17 +204,25 @@ resolve_ssh_auth() {
         SSH_OPTS="-i $key $SSH_OPTS"
     elif [ -n "$INV_PATH" ] && command -v sshpass >/dev/null 2>&1; then
         SSH_PASS=$(python3 -c "
-import yaml
+import sys, os
+sys.path.insert(0, '${SCRIPT_DIR}')
+sys.path.insert(0, os.path.dirname('${SCRIPT_DIR}'))
 try:
-    with open('$INV_PATH') as f:
-        d = yaml.safe_load(f) or {}
-    mc = d.get('all', {}).get('children', {}).get('metanode_cluster', {})
-    hosts = mc.get('hosts', {}) or d.get('all', {}).get('hosts', {}) or {}
-    gv = mc.get('vars', {}) or d.get('all', {}).get('vars', {}) or {}
-    for h in hosts.values():
-        if isinstance(h, dict) and $node_id in (h.get('node_ids') or []):
-            print(h.get('ansible_ssh_pass', gv.get('ansible_ssh_pass', '')))
-            break
+    from parse_inventory import load_inventory_content, setup_yaml_vault_constructor
+    content, err, vault = load_inventory_content('$INV_PATH')
+    if content:
+        import yaml
+        setup_yaml_vault_constructor(vault)
+        d = yaml.safe_load(content) or {}
+        mc = d.get('all', {}).get('children', {}).get('metanode_cluster', {})
+        hosts = mc.get('hosts', {}) or d.get('all', {}).get('hosts', {}) or {}
+        gv = mc.get('vars', {}) or d.get('all', {}).get('vars', {}) or {}
+        for h in hosts.values():
+            if isinstance(h, dict) and $node_id in (h.get('node_ids') or []):
+                p = h.get('ansible_ssh_pass', gv.get('ansible_ssh_pass', ''))
+                if p and p != '[VAULT_ENCRYPTED]':
+                    print(p)
+                break
 except Exception:
     pass
 " 2>/dev/null)

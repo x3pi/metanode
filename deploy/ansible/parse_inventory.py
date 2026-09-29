@@ -15,12 +15,106 @@ def get_local_ips():
         pass
     return ips
 
-def parse_inventory(file_path):
+def find_vault_password_file(inv_file=None):
+    """
+    Locates the Ansible Vault password file from:
+      1. ANSIBLE_VAULT_PASSWORD_FILE environment variable
+      2. .vault_pass in the inventory file's directory
+      3. .vault_pass in the current script directory
+      4. ~/.vault_pass
+    """
+    env_file = os.environ.get('ANSIBLE_VAULT_PASSWORD_FILE')
+    if env_file and os.path.isfile(env_file):
+        return env_file
+
+    search_dirs = []
+    if inv_file:
+        search_dirs.append(os.path.dirname(os.path.abspath(inv_file)))
+    search_dirs.append(os.path.dirname(os.path.abspath(__file__)))
+    search_dirs.append(os.path.expanduser('~'))
+
+    for d in search_dirs:
+        candidate = os.path.join(d, '.vault_pass')
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def get_vault_lib(inv_file=None):
+    """
+    Initializes Ansible VaultLib instance if a vault password file is available.
+    """
+    pass_file = find_vault_password_file(inv_file)
+    if not pass_file:
+        return None
     try:
-        with open(file_path, 'r') as f:
+        with open(pass_file, 'rb') as f:
+            secret_bytes = f.read().strip()
+        from ansible.parsing.vault import VaultLib, VaultSecret
+        return VaultLib([('default', VaultSecret(secret_bytes))])
+    except Exception:
+        return None
+
+
+def load_inventory_content(file_path):
+    """
+    Reads the inventory file. If encrypted with Ansible Vault ($ANSIBLE_VAULT),
+    decrypts it transparently using the discovered vault password.
+    Returns (content_str, error_str, vault_instance).
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()
     except Exception as e:
-        return f"Error reading inventory: {e}"
+        return None, f"Error reading inventory: {e}", None
+
+    vault = get_vault_lib(file_path)
+
+    # Check if the entire file is vault-encrypted
+    if content.strip().startswith('$ANSIBLE_VAULT'):
+        if not vault:
+            err_msg = (
+                f"❌ [LỖI ANSIBLE VAULT] File inventory '{file_path}' được mã hóa bằng Ansible Vault ($ANSIBLE_VAULT),\n"
+                f"nhưng không tìm thấy mật khẩu giải mã (.vault_pass hoặc biến môi trường ANSIBLE_VAULT_PASSWORD_FILE)!"
+            )
+            return None, err_msg, None
+        try:
+            content = vault.decrypt(content.strip().encode('utf-8')).decode('utf-8')
+        except Exception as e:
+            return None, f"❌ [LỖI GIẢI MÃ ANSIBLE VAULT] Không thể giải mã file '{file_path}': {e}", None
+
+    return content, None, vault
+
+
+def setup_yaml_vault_constructor(vault):
+    """
+    Registers a custom constructor for '!vault' tags in PyYAML's SafeLoader.
+    If vault is available, transparently decrypts the inline vault ciphertext.
+    If vault is unavailable, returns a safe mask '[VAULT_ENCRYPTED]' instead of raising ConstructorError.
+    """
+    try:
+        import yaml
+        def vault_constructor(loader, node):
+            val = loader.construct_scalar(node)
+            if vault:
+                idx = val.find('$ANSIBLE_VAULT')
+                if idx != -1:
+                    vault_payload = val[idx:].strip()
+                    try:
+                        return vault.decrypt(vault_payload.encode('utf-8')).decode('utf-8').strip()
+                    except Exception:
+                        return '[VAULT_ENCRYPTED]'
+            return '[VAULT_ENCRYPTED]'
+
+        yaml.SafeLoader.add_constructor('!vault', vault_constructor)
+    except Exception:
+        pass
+
+
+def parse_inventory(file_path):
+    content, err, vault = load_inventory_content(file_path)
+    if err:
+        return err
 
     local_ips = get_local_ips()
     default_user = os.environ.get('USER', 'abc')
@@ -28,6 +122,7 @@ def parse_inventory(file_path):
     # Try parsing via PyYAML if available
     try:
         import yaml
+        setup_yaml_vault_constructor(vault)
         data = yaml.safe_load(content)
         hosts = {}
         if isinstance(data, dict):
@@ -180,11 +275,9 @@ def check_reachability(inv_file, target_node='all', timeout=2.0):
     Checks TCP socket connectivity to target remote hosts on their SSH port.
     Returns True if all reachable (or no remote hosts), False if any host fails.
     """
-    try:
-        with open(inv_file, 'r') as f:
-            content = f.read()
-    except Exception as e:
-        print(f"❌ [LỖI ĐỌC INVENTORY] Không thể đọc {inv_file}: {e}", file=sys.stderr)
+    content, err, vault = load_inventory_content(inv_file)
+    if err:
+        print(err, file=sys.stderr)
         return False
 
     local_ips = get_local_ips()
@@ -192,6 +285,7 @@ def check_reachability(inv_file, target_node='all', timeout=2.0):
 
     try:
         import yaml
+        setup_yaml_vault_constructor(vault)
         data = yaml.safe_load(content)
         hosts = {}
         if isinstance(data, dict):
