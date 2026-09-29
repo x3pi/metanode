@@ -346,8 +346,7 @@ func main() {
 	printHeader("KỊCH BẢN 5: PARENT CHAIN NGỪNG HOẠT ĐỘNG -> NODE THỰC THI VẪN TIẾN TRIỂN ĐỘC LẬP")
 	fmt.Println("1. Dừng tiến trình Parent Chain (giả lập sự cố Parent Chain offline)...")
 	_ = exec.Command("sudo", "systemctl", "stop", "metanode-parentchain.service").Run()
-	killCmd := exec.Command("pkill", "-f", "parent_chain.*8547")
-	_ = killCmd.Run()
+	_ = exec.Command("sudo", "pkill", "-9", "-f", "parent_chain").Run()
 	time.Sleep(2 * time.Second)
 
 	// Kiểm tra Parent Chain thật sự đã sập
@@ -401,13 +400,78 @@ func main() {
 	fmt.Println("   Dù Parent Chain sập hoàn toàn, Node Thực thi (Exec 1) vẫn hoạt động độc lập 100%,")
 	fmt.Println("   tự sản sinh block, tự khớp lệnh, tự commit state trie và bảo toàn toàn bộ tính toàn vẹn!")
 
-	// Phục hồi lại Parent Chain để hoàn tất test
-	fmt.Println("\n🔄 Khởi động lại Parent Chain để đưa Devnet về trạng thái đầy đủ...")
+	// =======================================================================================
+	// KỊCH BẢN 6: Khôi phục Parent Chain -> Tự động tái đồng bộ & khôi phục giao dịch liên cụm
+	// =======================================================================================
+	printHeader("KỊCH BẢN 6: KHÔI PHỤC PARENT CHAIN -> TỰ ĐỘNG TÁI KẾT NỐI & KHÔI PHỤC GIAO DỊCH LIÊN CỤM")
+	fmt.Println("1. Khởi động lại tiến trình Parent Chain...")
+	startParentCmd := exec.Command("sudo", "bash", "-c", "cd /opt/metanode/parent_chain && nohup /opt/metanode/bin/parent_chain -data-dir /opt/metanode/parent_chain -http :8547 -rust-config /opt/metanode/parent_chain/node_parent.toml >> /var/log/metanode/parent_chain.log 2>&1 & echo $! > /opt/metanode/parent_chain/parent_chain.pid")
+	_ = startParentCmd.Run()
 	_ = exec.Command("sudo", "systemctl", "start", "metanode-parentchain.service").Run()
-	repoRoot := findRepoRoot()
-	startParentCmd := exec.Command("bash", "-c", fmt.Sprintf("cd %s/execution/scripts/test && ./parent_chain -data-dir ./devnet_data/parent -http :8547 -rust-config ../../../consensus/metanode/config/node_devnet_parent.toml >> ./devnet_data/parent/node.log 2>&1 &", repoRoot))
-	_ = startParentCmd.Start()
-	time.Sleep(3 * time.Second)
 
-	fmt.Println("\n🎉 TẤT CẢ 5/5 KỊCH BẢN SỬ DỤNG THỰC TẾ ĐỀU ĐÃ ĐƯỢC KIỂM CHỨNG THÀNH CÔNG VÀ CHÍNH XÁC!")
+	// 2. Chờ Parent Chain online trở lại
+	fmt.Println("2. Kiểm tra Parent Chain phản hồi kết nối (health check)...")
+	parentOnline := false
+	startWaitParent := time.Now()
+	for time.Since(startWaitParent) < 20*time.Second {
+		resp, err := http.Get(parentChainURL + "/inbound")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 || resp.StatusCode == 400 {
+				parentOnline = true
+				break
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !parentOnline {
+		fmt.Printf("❌ Parent Chain không khởi động lại được sau 20s!\n")
+		os.Exit(1)
+	}
+	fmt.Println("   ✅ Parent Chain đã ONLINE trở lại và phản hồi HTTP RPC bình thường!")
+
+	// 3. Đăng ký tài khoản đích mới sau phục hồi
+	fmt.Println("3. Đăng ký tài khoản đích mới trên Parent Chain sau khi phục hồi...")
+	recoveredAccPriv, _ := crypto.GenerateKey()
+	recoveredAccAddr := crypto.PubkeyToAddress(recoveredAccPriv.PublicKey)
+	regDigestRec := parentchain.ComputeRegisterAccountMessage(recoveredAccAddr, exec2PubKey)
+	userSigRec, _ := crypto.Sign(crypto.Keccak256(regDigestRec), recoveredAccPriv)
+	clusterSigRec := bls.Sign(exec2Priv, regDigestRec)
+	_, err = parentClient.SendRegisterAccount(recoveredAccAddr, exec2PubKey, userSigRec, clusterSigRec)
+	if err != nil {
+		fmt.Printf("❌ Gửi RegisterAccount sau phục hồi thất bại: %v\n", err)
+		os.Exit(1)
+	}
+	time.Sleep(2 * time.Second)
+
+	// 4. Exec 1 thực hiện chuyển tiền xuyên cụm sang Exec 2 qua Parent Chain
+	recAmountHex := "0x22b8" // 8888 decimal
+	fmt.Printf("4. Exec 1 (RPC :8646) gọi mtn_sendCrossChainTransfer (8888 wei) sang Exec 2 cho %s...\n", recoveredAccAddr.Hex())
+	resCrossRec, err := rpcCall(exec1URL, "mtn_sendCrossChainTransfer", []interface{}{recoveredAccAddr.Hex(), recAmountHex})
+	if err != nil {
+		fmt.Printf("❌ Lỗi gửi cross-chain transfer sau phục hồi: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("   Giao dịch xuyên cụm đã gửi: TxHash = %v\n", resCrossRec["result"])
+
+	// 5. Chờ Exec 2 nhận và cập nhật số dư
+	fmt.Println("5. Chờ Rollup ReceiveWorker trên Exec 2 tiếp nhận và ghi nhận số dư (tối đa 40s)...")
+	creditedRec := false
+	startWaitRec := time.Now()
+	for time.Since(startWaitRec) < 40*time.Second {
+		balRec, err := getBalance(exec2URL, recoveredAccAddr)
+		if err == nil && balRec != nil && balRec.Sign() > 0 {
+			fmt.Printf("✅ KỊCH BẢN 6 THÀNH CÔNG RỰC RỠ: Exec 2 đã nhận và cập nhật số dư: %s wei (mất %v)\n", balRec.String(), time.Since(startWaitRec))
+			creditedRec = true
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if !creditedRec {
+		fmt.Printf("❌ Kịch bản 6 thất bại: Exec 2 chưa nhận được số dư sau khi phục hồi Parent Chain\n")
+		os.Exit(1)
+	}
+	fmt.Println("   Cầu nối Rollup và các worker đã tự động tái kết nối, trạng thái liên chuỗi được phục hồi 100%!")
+
+	fmt.Println("\n🎉 TẤT CẢ 6/6 KỊCH BẢN SỬ DỤNG THỰC TẾ ĐỀU ĐÃ ĐƯỢC KIỂM CHỨNG THÀNH CÔNG VÀ CHÍNH XÁC!")
 }

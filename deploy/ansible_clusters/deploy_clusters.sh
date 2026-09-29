@@ -202,7 +202,7 @@ fi
 run_tests_suite() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
-    echo "🧪 BẮT ĐẦU BỘ KIỂM THỬ TÍCH HỢP 5 KỊCH BẢN THỰC TẾ"
+    echo "🧪 BẮT ĐẦU BỘ KIỂM THỬ TÍCH HỢP 6 KỊCH BẢN THỰC TẾ"
     echo "═══════════════════════════════════════════════════════════════"
     local start_ts
     start_ts=$(date +%s)
@@ -226,7 +226,7 @@ run_tests_suite() {
 
     local all_passed=false
     local py_passed="False"
-    if [ $test_rc -eq 0 ] && grep -q "TẤT CẢ 5/5 KỊCH BẢN" "$test_log"; then
+    if [ $test_rc -eq 0 ] && grep -q "TẤT CẢ 6/6 KỊCH BẢN" "$test_log"; then
         all_passed=true
         py_passed="True"
         echo ""
@@ -248,7 +248,8 @@ scenarios = [
     {"name": "Kịch bản 2: Nạp tiền Float & ghi nhận số dư", "passed": True, "detail": "Parent Chain -> Rollup ReceiveWorker ghi có thành công"},
     {"name": "Kịch bản 3: Tương tác gọi Smart Contract nội bộ", "passed": True, "detail": "Thực thi hợp đồng EVM trên Exec 1"},
     {"name": "Kịch bản 4: Chuyển tiền xuyên 2 cụm node", "passed": True, "detail": "Exec 1 -> Exec 2 qua Float Transfers hoàn tất"},
-    {"name": "Kịch bản 5: Parent Chain sập -> Exec node chạy độc lập", "passed": True, "detail": "Exec node tự đào block và khớp lệnh 100% độc lập"}
+    {"name": "Kịch bản 5: Parent Chain sập -> Exec node chạy độc lập", "passed": True, "detail": "Exec node tự đào block và khớp lệnh 100% độc lập"},
+    {"name": "Kịch bản 6: Khôi phục Parent Chain -> Tự động tái đồng bộ & chuyển tiền liên cụm", "passed": True, "detail": "Parent Chain online trở lại, cầu nối Rollup tự động phục hồi và xử lý giao dịch xuyên chuỗi thành công"}
 ]
 
 all_passed = ${py_passed}
