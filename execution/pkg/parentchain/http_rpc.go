@@ -2,6 +2,7 @@ package parentchain
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -9,7 +10,9 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,7 +57,15 @@ func (c *httpClient) post(path string, req interface{}, resp interface{}) error 
 	if err != nil {
 		return err
 	}
-	r, err := c.client.Post(c.endpoint+path, "application/json", bytes.NewReader(body))
+	hreq, err := http.NewRequest(http.MethodPost, c.endpoint+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	hreq.Header.Set("Content-Type", "application/json")
+	if tok := os.Getenv("PARENT_CHAIN_RPC_TOKEN"); tok != "" {
+		hreq.Header.Set("Authorization", "Bearer "+tok)
+	}
+	r, err := c.client.Do(hreq)
 	if err != nil {
 		return err
 	}
@@ -313,7 +324,7 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	
+
 	var msgID common.Hash
 	if tx.Type == TxTypeTransferFloat {
 		if tx.Amount == nil || tx.Amount.Sign() <= 0 {
@@ -327,7 +338,7 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 		var fromKey, toKey cm.PublicKey
 		copy(fromKey[:], tx.PubKey)
 		copy(toKey[:], tx.ToPubKey)
-		
+
 		payloadHash := crypto.Keccak256Hash(tx.Payload)
 		digest := ComputeTransferFloatMessage(fromKey, toKey, tx.Sender, tx.Target, tx.Amount, tx.Fee, payloadHash, tx.Nonce)
 		if len(tx.Cert) != 96 {
@@ -341,6 +352,14 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 		msgID = crypto.Keccak256Hash(digest)
 		tx.MsgID = msgID
 	} else if tx.Type == TxTypeDepositToFloat {
+		// A deposit carries no user signature (it is relayed by the bridge), so the caller itself must be
+		// authenticated: fail-closed unless PARENT_CHAIN_RPC_TOKEN is configured and presented.
+		tok := os.Getenv("PARENT_CHAIN_RPC_TOKEN")
+		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if tok == "" || subtle.ConstantTimeCompare([]byte(got), []byte(tok)) != 1 {
+			http.Error(w, "unauthorized: DepositToFloat requires PARENT_CHAIN_RPC_TOKEN", http.StatusUnauthorized)
+			return
+		}
 		if tx.Amount == nil || tx.Amount.Sign() <= 0 {
 			http.Error(w, "invalid amount", http.StatusBadRequest)
 			return
@@ -388,7 +407,7 @@ func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
 		var floatIdentityKey cm.PublicKey
 		copy(floatIdentityKey[:], tx.PubKey)
 		digest := ComputeRegisterAccountMessage(tx.UserAddress, floatIdentityKey)
-		
+
 		if len(tx.Cert) != 96 {
 			http.Error(w, "invalid signature length", http.StatusBadRequest)
 			return
@@ -480,11 +499,11 @@ func (s *HTTPServer) handleInbound(w http.ResponseWriter, r *http.Request) {
 	pubKeyHex := r.URL.Query().Get("pubkey")
 	cursorStr := r.URL.Query().Get("cursor")
 	cursor, _ := strconv.ParseUint(cursorStr, 10, 64)
-	
+
 	pubKeyBytes := common.FromHex(pubKeyHex)
 	var pubKey cm.PublicKey
 	copy(pubKey[:], pubKeyBytes)
-	
+
 	destHash := crypto.Keccak256Hash(pubKey[:])
 	events, nextCursor, err := s.store.GetInboundTransfers(destHash, cursor)
 	if err != nil {
@@ -494,7 +513,7 @@ func (s *HTTPServer) handleInbound(w http.ResponseWriter, r *http.Request) {
 	if events == nil {
 		events = []*TransferEvent{}
 	}
-	
+
 	json.NewEncoder(w).Encode(map[string]interface{}{"events": events, "cursor": nextCursor})
 }
 
@@ -513,7 +532,7 @@ func (s *HTTPServer) handleClaimed(w http.ResponseWriter, r *http.Request) {
 func (s *HTTPServer) handleSeq(w http.ResponseWriter, r *http.Request) {
 	pubKeyHex := r.URL.Query().Get("pubkey")
 	pubKeyBytes := common.FromHex(pubKeyHex)
-	
+
 	seq, _ := s.store.GetFloatSeq(crypto.Keccak256Hash(pubKeyBytes))
 	json.NewEncoder(w).Encode(map[string]interface{}{"seq": seq})
 }
@@ -521,7 +540,7 @@ func (s *HTTPServer) handleSeq(w http.ResponseWriter, r *http.Request) {
 func (s *HTTPServer) handleAccount(w http.ResponseWriter, r *http.Request) {
 	addrHex := r.URL.Query().Get("address")
 	addr := common.HexToAddress(addrHex)
-	
+
 	pubKey, found, _ := s.store.GetAccountRegistry(addr)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"float_identity_key": pubKey[:],
@@ -532,7 +551,7 @@ func (s *HTTPServer) handleAccount(w http.ResponseWriter, r *http.Request) {
 func (s *HTTPServer) handleStateRoot(w http.ResponseWriter, r *http.Request) {
 	pubKeyHex := r.URL.Query().Get("pubkey")
 	pubKeyBytes := common.FromHex(pubKeyHex)
-	
+
 	epochStr := r.URL.Query().Get("epoch")
 	epoch, _ := strconv.ParseUint(epochStr, 10, 64)
 
@@ -542,4 +561,3 @@ func (s *HTTPServer) handleStateRoot(w http.ResponseWriter, r *http.Request) {
 		"found": found,
 	})
 }
-
