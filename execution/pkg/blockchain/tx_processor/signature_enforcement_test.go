@@ -74,3 +74,39 @@ func TestFilterInvalidSignatures_DevnetBypassIsExplicit(t *testing.T) {
 		t.Fatal("explicit devnet bypass should keep the tx")
 	}
 }
+
+// Batch path: many BLS txs, with two signatures swapped (each individually invalid, aggregate unchanged).
+// Exactly those two must be dropped and everything else kept, i.e. batching never changes a tx's verdict.
+func TestFilterInvalidSignatures_BatchPathExactVerdicts(t *testing.T) {
+	cs := setupTestChainState(t)
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+	const n = 300
+	txs := make([]types.Transaction, n)
+	for i := 0; i < n; i++ {
+		from := common.BigToAddress(big.NewInt(int64(5000 + i)))
+		tx, pub := createTestTx(from, common.HexToAddress("0x456"), big.NewInt(1), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, 1)
+		as := state.NewAccountState(from)
+		as.AddBalance(big.NewInt(1_000_000_000_000_000))
+		as.SetPublicKeyBls(pub)
+		as.SetNonce(1)
+		cs.GetAccountStateDB().SetState(as)
+		txs[i] = tx
+	}
+	s1, s2 := txs[10].Sign().Bytes(), txs[200].Sign().Bytes()
+	txs[10].(*transaction.Transaction).SetSignBytes(s2)
+	txs[200].(*transaction.Transaction).SetSignBytes(s1)
+
+	rotateVerifiedSignatures()
+	rotateVerifiedSignatures()
+	out := FilterInvalidSignatures(cs, groupsOf(txs...))
+	if len(out) != n-2 {
+		t.Fatalf("expected %d survivors, got %d", n-2, len(out))
+	}
+	for _, g := range out {
+		for _, it := range g.Items {
+			if it.Tx.Hash() == txs[10].Hash() || it.Tx.Hash() == txs[200].Hash() {
+				t.Fatal("a swapped-signature tx survived")
+			}
+		}
+	}
+}

@@ -4,10 +4,12 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 
 	eth_common "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -89,41 +91,110 @@ func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptx
 	valid := make([]bool, total)
 	accountDB := chainState.GetAccountStateDB()
 
-	verify := func(k int) {
+	workers := runtime.GOMAXPROCS(0)
+	if workers > 128 {
+		workers = 128
+	}
+	// parallel runs fn(k) for k in [0,n) with dynamic scheduling (atomic work counter) on up to `workers`
+	// goroutines (inline for small n), so uneven items (batch chunks) still balance across cores.
+	parallel := func(n int, minParallel int, fn func(k int)) {
+		if n < minParallel || workers < 2 {
+			for k := 0; k < n; k++ {
+				fn(k)
+			}
+			return
+		}
+		var next int64 = -1
+		var wg sync.WaitGroup
+		w := workers
+		if w > n {
+			w = n
+		}
+		for i := 0; i < w; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					k := int(atomic.AddInt64(&next, 1))
+					if k >= n {
+						return
+					}
+					fn(k)
+				}
+			}()
+		}
+		wg.Wait()
+	}
+
+	// Phase 1: cache hits are accepted; plain BLS txs (registered key, AccountType 0, not yet cached) are
+	// queued for batch verification; everything else (ETH-signed, no key yet, AccountType 1, ...) takes
+	// the exact per-tx path.
+	type pending struct {
+		k   int
+		key eth_common.Hash
+		pub []byte
+	}
+	queued := make([]*pending, total)
+	parallel(total, 64, func(k int) {
 		tx := groups[refs[k].g].Items[refs[k].i].Tx
 		as, err := accountDB.AccountStateReadOnly(tx.FromAddress())
 		if err != nil {
 			as = nil
 		}
-		valid[k] = checkTxSignature(tx, as)
-	}
-
-	workers := runtime.GOMAXPROCS(0)
-	if workers > 128 {
-		workers = 128
-	}
-	if total < 200 || workers < 2 {
-		for k := range refs {
-			verify(k)
-		}
-	} else {
-		var wg sync.WaitGroup
-		chunk := (total + workers - 1) / workers
-		for start := 0; start < total; start += chunk {
-			end := start + chunk
-			if end > total {
-				end = total
+		if as != nil && len(as.PublicKeyBls()) > 0 && as.AccountType() == 0 {
+			key := sigCacheKey(tx, as.PublicKeyBls())
+			if LoadVerifiedSignature(key) {
+				valid[k] = true
+			} else {
+				queued[k] = &pending{k: k, key: key, pub: as.PublicKeyBls()}
 			}
-			wg.Add(1)
-			go func(s, e int) {
-				defer wg.Done()
-				for k := s; k < e; k++ {
-					verify(k)
-				}
-			}(start, end)
+			return
 		}
-		wg.Wait()
+		valid[k] = checkTxSignature(tx, as)
+	})
+
+	// Phase 2: batch-verify the queued BLS txs in chunks (one shared final exponentiation, random linear
+	// combination => a bad/cancelling signature cannot hide). A chunk that fails falls back to the exact
+	// per-tx check, so every tx's verdict is identical to non-batched verification (deterministic).
+	toBatch := make([]*pending, 0, total)
+	for _, p := range queued {
+		if p != nil {
+			toBatch = append(toBatch, p)
+		}
 	}
+	const batchChunk = 128
+	nChunks := (len(toBatch) + batchChunk - 1) / batchChunk
+	parallel(nChunks, 2, func(c int) {
+		lo := c * batchChunk
+		hi := lo + batchChunk
+		if hi > len(toBatch) {
+			hi = len(toBatch)
+		}
+		part := toBatch[lo:hi]
+		pubs := make([][]byte, len(part))
+		sigs := make([][]byte, len(part))
+		msgs := make([][]byte, len(part))
+		for i, p := range part {
+			tx := groups[refs[p.k].g].Items[refs[p.k].i].Tx
+			h := tx.Hash()
+			pubs[i], sigs[i], msgs[i] = p.pub, tx.Sign().Bytes(), h.Bytes()
+		}
+		if bls.VerifyBatch(pubs, sigs, msgs) {
+			for _, p := range part {
+				valid[p.k] = true
+				StoreVerifiedSignature(p.key)
+			}
+			return
+		}
+		for _, p := range part {
+			tx := groups[refs[p.k].g].Items[refs[p.k].i].Tx
+			as, err := accountDB.AccountStateReadOnly(tx.FromAddress())
+			if err != nil {
+				as = nil
+			}
+			valid[p.k] = checkTxSignature(tx, as)
+		}
+	})
 
 	dropped := 0
 	out := make([]grouptxns.RelativeGroup, 0, len(groups))
