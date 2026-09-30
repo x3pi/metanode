@@ -665,7 +665,7 @@ ${ROLES_OUTPUT}
 </pre>"
 
 # Prepare extra vars
-EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST} ansible_debug_cpp=${DEBUG_CPP} ansible_use_prebuilt=${USE_PREBUILT} ansible_prebuilt_bin_dir='${PREBUILT_BIN_DIR}' ansible_overwrite=${OVERWRITE}"
+EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST} ansible_debug_cpp=${DEBUG_CPP} ansible_use_prebuilt=${USE_PREBUILT} ansible_prebuilt_bin_dir='${PREBUILT_BIN_DIR}' ansible_overwrite=${OVERWRITE} metanode_env=${METANODE_ENV:-production} node_env=${NODE_ENV:-production}"
 if [ -n "$SNAPSHOT_URL" ]; then
     EXTRA_VARS="${EXTRA_VARS} snapshot_url='${SNAPSHOT_URL}'"
 fi

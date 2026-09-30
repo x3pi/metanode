@@ -259,8 +259,6 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
         msg_parts.append("⛵ <b>Danh sách Node Raft Consensus & Forward:</b>")
         msg_parts.append("<pre>\n" + "\n".join(raft_lines) + "\n</pre>\n")
 
-    msg_parts.append("🛡️ <i>Tất cả các cluster đều dùng chung EVM ChainID 991, hoạt động độc lập và tự động đồng bộ xuyên cụm qua Parent Chain!</i>")
-
     msg = "\n".join(msg_parts)
     return send_telegram_message(html_message=msg)
 

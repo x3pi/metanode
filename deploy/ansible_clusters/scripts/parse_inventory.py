@@ -152,18 +152,47 @@ def parse_inventory(file_path):
     }
 
 def export_tmp_files(info):
-    # 1. Export /tmp/rpc_nodes.json (standard format compatible with metanode-suite)
+    # 1. Export /tmp/rpc_nodes.json (Smart-Merge with existing Public Chain nodes)
     rpc_nodes_file = "/tmp/rpc_nodes.json"
     try:
-        with open(rpc_nodes_file, 'w') as f:
-            json.dump({
-                'nodes': info['nodes'],
-                'rpc_nodes': info['rpc_nodes'],
-                'ws_nodes': info['ws_nodes'],
-                'tcp_nodes': info['tcp_nodes'],
-                'raft_nodes': info['raft_nodes'],
-                'forward_nodes': info['forward_nodes']
-            }, f, indent=2)
+        existing = {}
+        if os.path.isfile(rpc_nodes_file):
+            try:
+                with open(rpc_nodes_file, 'r', encoding='utf-8') as f:
+                    existing = json.load(f)
+            except Exception:
+                existing = {}
+
+        merged_nodes = dict(existing.get('nodes', {}))
+        merged_nodes.update(info['nodes'])
+
+        merged_rpc = dict(existing.get('rpc_nodes', {}))
+        merged_rpc.update(info['rpc_nodes'])
+
+        merged_ws = dict(existing.get('ws_nodes', {}))
+        merged_ws.update(info['ws_nodes'])
+
+        merged_tcp = dict(existing.get('tcp_nodes', {}))
+        merged_tcp.update(info['tcp_nodes'])
+
+        merged_raft = dict(existing.get('raft_nodes', {}))
+        merged_raft.update(info['raft_nodes'])
+
+        merged_fwd = dict(existing.get('forward_nodes', {}))
+        merged_fwd.update(info['forward_nodes'])
+
+        out = dict(existing)
+        out.update({
+            'nodes': merged_nodes,
+            'rpc_nodes': merged_rpc,
+            'ws_nodes': merged_ws,
+            'tcp_nodes': merged_tcp,
+            'raft_nodes': merged_raft,
+            'forward_nodes': merged_fwd
+        })
+
+        with open(rpc_nodes_file, 'w', encoding='utf-8') as f:
+            json.dump(out, f, indent=2)
         os.chmod(rpc_nodes_file, 0o600)
     except Exception as e:
         print(f"Warning: could not write {rpc_nodes_file}: {e}", file=sys.stderr)
@@ -180,7 +209,7 @@ def export_tmp_files(info):
         }
         for cid, c in info['clusters'].items():
             chain_id_str = str(c['chain_id'])
-            c_name = c.get('name', f'exec{cid}')
+            c_name = c.get('cluster_name', c.get('name', f'exec{cid}'))
             cid_str = str(cid)
 
             c_rpc = {}
