@@ -153,71 +153,113 @@ def notify_deploy_start(clusters_info="Parent Chain + Exec Clusters", target_env
     )
     return send_telegram_message(html_message=msg)
 
-def notify_services_ready(parent_info, exec_clusters_info, duration_secs=0):
+def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration_secs=0):
+    """
+    Thông báo danh sách các port dịch vụ gọn gàng, rõ ràng qua Telegram.
+    Chỉ hiển thị các port endpoint và tên node (RPC, WS, TCP, Raft).
+    Không gửi các thông tin rườm rà hay dư thừa (BLS key, validator address, status text thừa).
+    """
     git = get_git_info()
     now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
     server_ip = get_server_ip()
-    
-    exec_blocks = []
-    for c in exec_clusters_info:
-        name = html.escape(c.get('name', 'Cluster'))
-        cid = c.get('cluster_id', '?')
-        evm_chain = c.get('chain_id', 991)
-        rpc = normalize_endpoint(c.get('rpc', '?'), server_ip, "8545")
-        p2p = normalize_endpoint(c.get('p2p', '?'), server_ip, "9001")
-        addr = c.get('address', '')
-        bls_key = c.get('bls_key', '')
-        blk = c.get('block_height', '0')
-        status = c.get('status', 'Active')
-        
-        block = [
-            f"⚡ <b>{name}</b> (ClusterID: <code>{cid}</code> | EVM ChainID: <code>{evm_chain}</code>):",
-            f"   • <b>RPC:</b> <code>{rpc}</code> | <b>P2P:</b> <code>{p2p}</code>",
-            f"   • <b>Block Height:</b> <code>{blk}</code> ({status})"
-        ]
-        
-        consensus_mode = str(c.get('consensus_mode', 'bft')).lower()
-        if consensus_mode == 'raft':
-            raft_role = c.get('raft_role', 'Leader')
-            raft_term = c.get('raft_term', 1)
-            raft_port = c.get('raft_port', ':7100')
-            fwd_port = c.get('fwd_port', ':7200')
-            quorum_info = c.get('quorum_info', '3/3 Nodes Active (Quorum OK)')
-            role_icon = "👑" if raft_role.lower() == "leader" else "🛡️"
-            block.append(f"   • <b>Consensus:</b> 🚀 HashiCorp Raft v1.7.1 ({role_icon} <b>{raft_role}</b> | Term <code>{raft_term}</code>)")
-            block.append(f"   • <b>Raft Network:</b> Transport <code>{raft_port}</code> | Admin/Fwd <code>{fwd_port}</code>")
-            block.append(f"   • <b>Raft Quorum:</b> 🟢 {quorum_info}")
-        else:
-            block.append("   • <b>Consensus:</b> 🦀 Rust BFT Core (DAG 2f+1 Quorum Engine)")
 
-        if addr:
-            block.append(f"   • <b>Validator Address:</b> <code>{addr}</code>")
-        if bls_key:
-            block.append(f"   • <b>BLS PubKey:</b> <code>{bls_key[:18]}...</code>")
-        block.append("   • <b>Rollup Workers:</b> 🟢 SendWorker | 🟢 ReceiveWorker | 🟢 ReclaimWorker")
-        exec_blocks.append("\n".join(block))
-    
-    clusters_text = "\n\n".join(exec_blocks) if exec_blocks else "  • Các cluster đã sẵn sàng"
+    rpc_lines = []
+    ws_lines = []
+    tcp_lines = []
+    raft_lines = []
 
-    parent_rpc = normalize_endpoint(parent_info.get('rpc', ':8547'), server_ip, "8547")
-    parent_p2p = normalize_endpoint(parent_info.get('p2p', ':9000'), server_ip, "9000")
-    parent_status = parent_info.get('status', 'Active (BFT Core + Native Float)')
+    # 1. Tự động đọc từ /tmp/rpc_nodes.json nếu tham số rỗng
+    if info_or_parent is None and os.path.isfile("/tmp/rpc_nodes.json"):
+        try:
+            with open("/tmp/rpc_nodes.json", "r") as f:
+                info_or_parent = json.load(f)
+        except Exception:
+            pass
 
-    msg = (
-        f"✅ <b>[DỊCH VỤ CỤM METANODE ĐÃ KHỞI CHẠY THÀNH CÔNG]</b>\n\n"
-        f"🖥 <b>Server IP:</b> <code>{server_ip}</code>\n"
-        f"🌿 <b>Nhánh:</b> <code>{html.escape(git['branch'])}</code>\n"
-        f"📌 <b>Commit:</b> <code>{git['hash']}</code> (bởi <b>{html.escape(git['author'])}</b>)\n"
-        f"⏱️ <b>Thời gian khởi chạy:</b> <code>{duration_secs:.1f}s</code>\n"
-        f"🕒 <b>Thời gian:</b> <code>{now_str}</code>\n\n"
-        f"🌐 <b>Parent Chain (Consensus & Float Coordinator):</b>\n"
-        f"   • <b>HTTP RPC:</b> <code>{parent_rpc}</code> | <b>P2P:</b> <code>{parent_p2p}</code>\n"
-        f"   • <b>State Engine:</b> LevelDB Native Float Store ({parent_status})\n"
-        f"   • <b>Cross-Cluster Routing:</b> Enabled\n\n"
-        f"🧱 <b>Các Cụm Thực Thi Độc Lập (Sharded Execution Clusters):</b>\n\n"
-        f"{clusters_text}\n\n"
-        f"🛡️ <i>Tất cả các cluster đều dùng chung EVM ChainID 991, hoạt động độc lập và tự động đồng bộ xuyên cụm qua Parent Chain!</i>"
-    )
+    dur = 0
+    if isinstance(duration_secs, (int, float)) and duration_secs > 0:
+        dur = duration_secs
+    elif isinstance(exec_clusters_info, (int, float)):
+        dur = exec_clusters_info
+
+    # 2. Xử lý dữ liệu từ parse_inventory hoặc /tmp/rpc_nodes.json
+    if isinstance(info_or_parent, dict) and ('rpc_nodes' in info_or_parent or 'nodes' in info_or_parent):
+        info = info_or_parent
+        rpc_nodes = info.get('rpc_nodes') or info.get('nodes', {})
+        ws_nodes = info.get('ws_nodes', {})
+        tcp_nodes = info.get('tcp_nodes', {})
+        raft_nodes = info.get('raft_nodes', {})
+        fwd_nodes = info.get('forward_nodes', {})
+
+        for k, v in rpc_nodes.items():
+            ep = normalize_endpoint(v, server_ip)
+            rpc_lines.append(f"  • {k}: {ep}")
+        for k, v in ws_nodes.items():
+            ep = normalize_endpoint(v, server_ip)
+            ws_lines.append(f"  • {k}: {ep}")
+        for k, v in tcp_nodes.items():
+            ep = normalize_endpoint(v, server_ip)
+            tcp_lines.append(f"  • {k}: {ep}")
+        for k, v in raft_nodes.items():
+            ep = normalize_endpoint(v, server_ip)
+            fwd = fwd_nodes.get(k, '')
+            fwd_ep = normalize_endpoint(fwd, server_ip) if fwd else ''
+            fwd_str = f" (Forward: {fwd_ep})" if fwd_ep else ""
+            raft_lines.append(f"  • {k}: {ep}{fwd_str}")
+    elif isinstance(info_or_parent, str) and os.path.isfile(info_or_parent):
+        try:
+            import parse_inventory as pi
+            info = pi.parse_inventory(info_or_parent)
+            return notify_services_ready(info, duration_secs=dur)
+        except Exception:
+            pass
+    elif isinstance(info_or_parent, dict) and isinstance(exec_clusters_info, list):
+        parent_rpc = normalize_endpoint(info_or_parent.get('rpc', ':8547'), server_ip, "8547")
+        parent_p2p = normalize_endpoint(info_or_parent.get('p2p', ':4000'), server_ip, "4000")
+        rpc_lines.append(f"  • parent_node: {parent_rpc}")
+        tcp_lines.append(f"  • parent_node: {parent_p2p}")
+
+        for c in exec_clusters_info:
+            c_name = c.get('name', 'cluster')
+            c_rpc = normalize_endpoint(c.get('rpc', ''), server_ip)
+            c_p2p = normalize_endpoint(c.get('p2p', ''), server_ip)
+            c_raft = normalize_endpoint(c.get('raft_port', ''), server_ip)
+            c_fwd = normalize_endpoint(c.get('fwd_port', ''), server_ip)
+            if c_rpc:
+                rpc_lines.append(f"  • {c_name}: {c_rpc}")
+                ws_lines.append(f"  • {c_name}: {c_rpc.replace('http', 'ws')}/ws")
+            if c_p2p:
+                tcp_lines.append(f"  • {c_name}: {c_p2p}")
+            if c_raft:
+                fwd_str = f" (Forward: {c_fwd})" if c_fwd else ""
+                raft_lines.append(f"  • {c_name}: {c_raft}{fwd_str}")
+
+    msg_parts = [
+        "✅ <b>[DỊCH VỤ CỤM METANODE ĐÃ KHỞI CHẠY THÀNH CÔNG]</b>\n",
+        f"🖥 <b>Server IP:</b> <code>{server_ip}</code>",
+        f"🌿 <b>Nhánh:</b> <code>{html.escape(git['branch'])}</code>",
+        f"📌 <b>Commit:</b> <code>{git['hash']}</code> (bởi <b>{html.escape(git['author'])}</b>)",
+        f"⏱️ <b>Thời gian khởi chạy:</b> <code>{dur:.1f}s</code>",
+        f"🕒 <b>Thời gian:</b> <code>{now_str}</code>\n"
+    ]
+
+    if rpc_lines:
+        msg_parts.append("⚙️ <b>Danh sách Node RPC (IP & Port):</b>")
+        msg_parts.append("<pre>\n" + "\n".join(rpc_lines) + "\n</pre>\n")
+
+    if ws_lines:
+        msg_parts.append("🔌 <b>Danh sách Node WebSocket (WS URL):</b>")
+        msg_parts.append("<pre>\n" + "\n".join(ws_lines) + "\n</pre>\n")
+
+    if tcp_lines:
+        msg_parts.append("🌐 <b>Danh sách Node TCP (P2P / Consensus):</b>")
+        msg_parts.append("<pre>\n" + "\n".join(tcp_lines) + "\n</pre>\n")
+
+    if raft_lines:
+        msg_parts.append("⛵ <b>Danh sách Node Raft Consensus & Forward:</b>")
+        msg_parts.append("<pre>\n" + "\n".join(raft_lines) + "\n</pre>\n")
+
+    msg = "\n".join(msg_parts)
     return send_telegram_message(html_message=msg)
 
 def notify_test_results(scenarios, total_duration=0, all_passed=True):
@@ -325,6 +367,12 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--start":
         notify_deploy_start()
         sys.exit(0)
+
+    if len(sys.argv) > 1 and sys.argv[1] in ["--ready", "--status"]:
+        inv = sys.argv[2] if len(sys.argv) > 2 else None
+        ok = notify_services_ready(inv)
+        print("Telegram services ready notification sent:", ok)
+        sys.exit(0 if ok else 1)
 
     if len(sys.argv) > 1 and sys.argv[1] == "--raft-test-results":
         data = {}

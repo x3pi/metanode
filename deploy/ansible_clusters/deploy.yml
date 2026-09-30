@@ -10,6 +10,7 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  become: false
   tags: ["build", "prepare"]
   roles:
     - role: build
@@ -25,7 +26,7 @@
     - role: parent_chain
 
 # ── Play 3: Deploy Execution Clusters ────────────────────────────────────────
-- name: "Phase 3: Deploy Sharded Execution Clusters (EVM ChainID 991)"
+- name: "Phase 3: Deploy Sharded Execution Clusters (EVM Chain ID 991)"
   hosts: exec_clusters
   gather_facts: true
   become: true
@@ -39,6 +40,7 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  become: false
   tags: ["test", "verify"]
   roles:
     - role: testing

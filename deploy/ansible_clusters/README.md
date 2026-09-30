@@ -3,7 +3,7 @@
 Hệ thống Ansible tự động hóa triển khai, quản lý vòng đời và kiểm thử tích hợp cho kiến trúc **Parent Chain + Sharded Execution Clusters (Rollup Architecture)** của MetaNode, đi kèm tích hợp thông báo trạng thái & cảnh báo thời gian thực qua **Telegram Bot**.
 
 > 📚 **Tài liệu hướng dẫn toàn diện:** Chi tiết kiến trúc, cấu hình đa máy chủ, giải thích 5 kịch bản kiểm thử, cơ chế phục hồi offline và xử lý lỗi được trình bày đầy đủ tại:  
-> 👉 [**DEPLOYMENT_AND_TESTING_GUIDE.md**](file:///home/abc/chain-n/metanode/deploy/ansible_clusters/DEPLOYMENT_AND_TESTING_GUIDE.md)
+> 👉 [**DEPLOYMENT_AND_TESTING_GUIDE.md**](DEPLOYMENT_AND_TESTING_GUIDE.md)
 
 ---
 
@@ -22,14 +22,14 @@ Hệ thống Ansible tự động hóa triển khai, quản lý vòng đời và
 ```
 deploy/ansible_clusters/
 ├── ansible.cfg                # Cấu hình Ansible tối ưu (pipelining, timeouts, callbacks)
-├── inventory.example.yml      # Mẫu file inventory khai báo hosts và cluster
-├── inventory.yml              # File inventory hiện hành
+├── inventory.example.yml      # Mẫu file inventory tham khảo (che các khóa/mật khẩu bí mật)
+├── inventory.yml              # File inventory thực tế (đã đưa vào .gitignore chống lộ key)
 ├── .env.example               # Mẫu cấu hình Telegram Bot Token & Chat ID
-├── .env                       # File cấu hình Telegram bí mật
+├── .env                       # File cấu hình Telegram bí mật (gitignore)
 ├── deploy.yml                 # Ansible Playbook chính (Build, Parent Chain, Exec Clusters, Test)
 ├── deploy_clusters.sh         # Script điều phối 1-click tích hợp thông báo Telegram
 ├── group_vars/
-│   └── all.yml                # Biến toàn cục (ChainID 991, paths, RPC URLs)
+│   └── all.yml                # Biến toàn cục (paths, RPC URLs, log dirs)
 ├── roles/
 │   ├── build/                 # Biên dịch binaries (parent_chain, simple_chain)
 │   ├── common/                # Tạo thư mục /opt/metanode, phân phối binaries
@@ -67,7 +67,7 @@ Lệnh trên sẽ:
 1. Gửi thông báo 🚀 **Deploy Bắt đầu** lên Telegram (kèm commit hash, author, nhánh git).
 2. Tự động kiểm tra và build các binary Go (`parent_chain`, `simple_chain`).
 3. Khởi chạy **Parent Chain** trên cổng `:8547` và kiểm tra HTTP RPC sẵn sàng.
-4. Khởi chạy **Exec Cluster 1** (`:8646`) và **Exec Cluster 2** (`:8647`) với `cluster_id: 1, 2` và `chainId: 991`.
+4. Khởi chạy **Exec Cluster 1** (`:8646`, ChainID `991`) và **Exec Cluster 2** (`:8647`, ChainID `991`).
 5. Gửi thông báo ✅ **Dịch Vụ Sẵn Sàng** lên Telegram (kèm block heights và ports).
 6. Tự động thực thi **Bộ kiểm thử tích hợp 5 kịch bản thực tế**:
    - *Kịch bản 1:* Đăng ký tài khoản mới & ánh xạ vào Account Registry trên Parent Chain.

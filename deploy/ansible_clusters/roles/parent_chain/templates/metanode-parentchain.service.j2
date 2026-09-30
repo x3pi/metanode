@@ -1,5 +1,5 @@
 [Unit]
-Description=MetaNode Parent Chain Consensus and Float State Service
+Description=MetaNode Parent Chain Consensus and Float State Service (ChainID {{ chain_id | default(991) }})
 After=network.target network-online.target
 Wants=network-online.target
 

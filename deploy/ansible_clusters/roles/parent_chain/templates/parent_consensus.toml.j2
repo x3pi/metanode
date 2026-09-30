@@ -1,8 +1,8 @@
-node_id = 0
+node_id = {{ parent_node_id | default(0) }}
 network_address = "{{ parent_network_address | default('127.0.0.1:9000') }}"
 protocol_key_path = "{{ node_data_dir }}/node_0_protocol_key.json"
 network_key_path = "{{ node_data_dir }}/node_0_network_key.json"
-storage_path = "{{ node_data_dir }}/storage"
+storage_path = "{{ node_data_dir }}/consensus_storage"
 enable_metrics = true
 metrics_port = {{ metrics_port | default(9110) }}
 speed_multiplier = 1.0

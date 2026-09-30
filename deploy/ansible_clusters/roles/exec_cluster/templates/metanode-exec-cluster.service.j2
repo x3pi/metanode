@@ -1,5 +1,5 @@
 [Unit]
-Description=MetaNode Execution Service - {{ inventory_hostname }} (Cluster {{ cluster_id }}, EVM ChainID {{ evm_chain_id | default(991) }})
+Description=MetaNode Execution Service - {{ inventory_hostname }} (Cluster {{ cluster_id }}, ChainID {{ chain_id | default(991) }})
 After=network.target network-online.target
 Wants=network-online.target
 

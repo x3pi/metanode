@@ -1072,7 +1072,7 @@ if [ "${1:-}" == "resources" ]; then
 
                 RAM_LIMIT=95
                 CPU_LIMIT=97
-                DISK_LIMIT=85
+                DISK_LIMIT=95
 
                 if [[ -n "$ram_usage" ]] && [[ -n "$cpu_usage" ]] && [[ -n "$disk_usage" ]]; then
                     if [[ "$ram_usage" -ge "$RAM_LIMIT" ]] || [[ "$cpu_usage" -ge "$CPU_LIMIT" ]] || [[ "$disk_usage" -ge "$DISK_LIMIT" ]]; then

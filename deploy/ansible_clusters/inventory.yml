@@ -9,10 +9,9 @@ all:
                 6630343161636439380a616434316135623739383634356333636364383965653764376164313464
                 3034
     # Unified EVM Chain ID for transaction signing across all execution clusters
-    evm_chain_id: 991
+    chain_id: 991
     # Installation and base directories
     install_dir: "/opt/metanode"
-    deploy_dir: "/home/abc/chain-n/metanode"
     # Raft shared configuration for execution clusters
     raft_secret_file: "/opt/metanode/raft_secret.key"
     # Parent Chain configuration

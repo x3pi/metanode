@@ -1,24 +1,25 @@
 all:
   vars:
     ansible_user: "metanode"
-    # Unified EVM Chain ID for transaction signing across all execution clusters
-    evm_chain_id: 991
-    # Installation and base directories
+    # Installation and base directories (standardized across all machines)
     install_dir: "/opt/metanode"
-    deploy_dir: "/home/abc/chain-n/metanode"
+    ansible_become_pass: "YOUR_BECOME_PASSWORD"
     # Raft shared configuration for execution clusters
     raft_secret_file: "/opt/metanode/raft_secret.key"
     # Parent Chain configuration
     parent_chain_rpc_port: 8547
     parent_chain_host: "127.0.0.1"
+    # Unified EVM Chain ID for Parent Chain and all Execution Clusters
+    chain_id: 991
     # ── Security tokens (2026-09-30 audit fixes) — put REAL values in ansible-vault, never in plaintext ──
     # snapshot_server_token: "{{ vault_snapshot_server_token }}"   # protects snapshot downloads; POST /create needs it
     # snapshot_server_bind: "127.0.0.1"                            # restrict the snapshot port if peers need no access
     # parent_chain_rpc_token: "{{ vault_parent_chain_rpc_token }}" # SAME value on parent chain + every exec node
     # quic_pinned_cert_sha256: "<leaf-cert-sha256>,<...>"         # pin QUIC peer certs (otherwise unauthenticated)
 
+
   children:
-    # ── Parent Chain Node (100% Rust BFT Consensus Engine) ──────────────
+    # ── Parent Chain Node (100% Rust BFT Consensus Engine, Chain ID: 991) ──
     parent_chain_nodes:
       hosts:
         parent_node:
@@ -26,7 +27,6 @@ all:
           ansible_connection: local
           parent_http_port: 8547
           node_data_dir: "/opt/metanode/parent_chain"
-          rust_config_path: "consensus/metanode/config/node_devnet_parent.toml"
 
     # ── Execution Clusters (Rollup Shards with Raft HA Consensus) ────────
     exec_clusters:
@@ -45,10 +45,10 @@ all:
           forward_port: 7210
           raft_bootstrap: true
           node_data_dir: "/opt/metanode/exec1_r1"
-          private_key: "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c"
-          address: "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5"
-          bls_priv: "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c"
-          bls_pubkey: "0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128"
+          private_key: "YOUR_CLUSTER1_PRIVATE_KEY_HEX"
+          address: "0xYourCluster1SequencerAddress"
+          bls_priv: "YOUR_CLUSTER1_BLS_PRIVATE_KEY_HEX"
+          bls_pubkey: "0xYourCluster1BlsPublicKeyHex"
           raft_peers:
             - id: "exec1_r1"
               address: "127.0.0.1:7110"
@@ -73,10 +73,10 @@ all:
           forward_port: 7211
           raft_bootstrap: false
           node_data_dir: "/opt/metanode/exec1_r2"
-          private_key: "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c"
-          address: "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5"
-          bls_priv: "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c"
-          bls_pubkey: "0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128"
+          private_key: "YOUR_CLUSTER1_PRIVATE_KEY_HEX"
+          address: "0xYourCluster1SequencerAddress"
+          bls_priv: "YOUR_CLUSTER1_BLS_PRIVATE_KEY_HEX"
+          bls_pubkey: "0xYourCluster1BlsPublicKeyHex"
           raft_peers:
             - id: "exec1_r1"
               address: "127.0.0.1:7110"
@@ -101,10 +101,10 @@ all:
           forward_port: 7212
           raft_bootstrap: false
           node_data_dir: "/opt/metanode/exec1_r3"
-          private_key: "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c"
-          address: "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5"
-          bls_priv: "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c"
-          bls_pubkey: "0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128"
+          private_key: "YOUR_CLUSTER1_PRIVATE_KEY_HEX"
+          address: "0xYourCluster1SequencerAddress"
+          bls_priv: "YOUR_CLUSTER1_BLS_PRIVATE_KEY_HEX"
+          bls_pubkey: "0xYourCluster1BlsPublicKeyHex"
           raft_peers:
             - id: "exec1_r1"
               address: "127.0.0.1:7110"
@@ -130,10 +130,10 @@ all:
           forward_port: 7220
           raft_bootstrap: true
           node_data_dir: "/opt/metanode/exec2"
-          private_key: "2a61eac9235fab64ae377b2b7e39f8fa9648c5737094d28c7ee68a14b5086d39"
-          address: "0x0d4CC97b62a149a8fe8DE81262270426A80B0935"
-          bls_priv: "2a61eac9235fab64ae377b2b7e39f8fa9648c5737094d28c7ee68a14b5086d39"
-          bls_pubkey: "0x83221629eeff1a69aa96ac6aadea402a7b62a74647633c0743cd517b71dcd5cd39fec42841b953fc481dac039bceb465"
+          private_key: "YOUR_CLUSTER2_PRIVATE_KEY_HEX"
+          address: "0xYourCluster2SequencerAddress"
+          bls_priv: "YOUR_CLUSTER2_BLS_PRIVATE_KEY_HEX"
+          bls_pubkey: "0xYourCluster2BlsPublicKeyHex"
           raft_peers:
             - id: "exec2_r1"
               address: "127.0.0.1:7120"
