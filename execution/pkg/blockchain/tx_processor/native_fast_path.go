@@ -148,7 +148,7 @@ func processNativeTransfersFastPath(
 
 					// Verify transaction (BLS signature, amount, etc.)
 					var errVerify *transaction.TransactionError
-					if skipSignatureVerify || LoadVerifiedSignature(tx.Hash()) {
+					if skipSignatureVerify || LoadVerifiedSignature(sigCacheKey(tx, as.PublicKeyBls())) {
 						errVerify = nil
 					} else {
 						errVerify = VerifyTransaction(tx, chainState, as)

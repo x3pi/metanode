@@ -170,6 +170,9 @@ func TestTrueBlockSTM_BarrierTxObservesRealCommitNotSharedMVCCMap(t *testing.T) 
 // other's leader-balance write. Running them sequentially (this test's
 // subject) must always yield the exact sum of both fees.
 func TestProcessTransactionsOptimistic_MixedBlock_LeaderRewardNotLost(t *testing.T) {
+	// This test exercises execution semantics with unsigned txs; signature enforcement has its own tests.
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "true")
+	t.Setenv("METANODE_DEVNET", "true")
 	cs := newTestChainState(t)
 
 	nativeSender := common.HexToAddress("0x1111111111111111111111111111111111111a")
@@ -251,6 +254,9 @@ func TestProcessTransactionsOptimistic_MixedBlock_LeaderRewardNotLost(t *testing
 // ─── A3: Smart Contract Gas Deduction & Insufficient Balance Revert ───
 
 func TestTrueBlockSTM_SmartContractGasDeduction(t *testing.T) {
+	// This test exercises execution semantics with unsigned txs; signature enforcement has its own tests.
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "true")
+	t.Setenv("METANODE_DEVNET", "true")
 	cs := newTestChainState(t)
 
 	senderGood := common.HexToAddress("0x5555555555555555555555555555555555555555")
