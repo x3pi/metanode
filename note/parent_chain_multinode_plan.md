@@ -82,7 +82,7 @@ Client/exec ──HTTP JSON (không ký)──> pkg/parentchain/http_rpc.go (han
 - `consensus/metanode/src/node/peer_go_client.rs` + `PeerRpcServer` (`peer_rpc_port`): Rust lấy block từ Go của peer.
 - `.../setup_consensus/fork_guard.rs`: so `(block_hash, state_root)` của block cục bộ (lấy từ Go qua `GetBlocksRange`) với đa số peer. `startup_sync.rs`, `health_check.rs` cũng dùng `GetBlocksRange` và `get_go_state_root()`.
 - Mẫu nhiều node của chain chính: `consensus/metanode/config/node_{0..4}.toml`, `committee.json`, `DISTRIBUTED_DEPLOYMENT.md`.
-- Công cụ cây: `execution/pkg/trie/state_trie.go` (`StateTrie`: `Get/Update/BatchUpdate/Hash/Commit`, NOMT có `GenerateProof`); **chưa có bộ kiểm proof** phía Go (chỉ sinh).
+- Công cụ cây: `execution/pkg/trie/state_trie.go` (`StateTrie`: `Get/Update/BatchUpdate/Hash/Commit`, NOMT có `GenerateProof`); **đã có `nomt_ffi.VerifyProof` (kiểm) lẫn `GenerateProof` (sinh).
 - Công cụ giao dịch: `execution/pkg/proto/transaction.proto` (`pb.Transaction`), `pkg/transaction`, `pkg/bls`, và mẫu kiểm chữ ký ở thực thi `pkg/blockchain/tx_processor/signature_enforcement.go` (`checkTxSignature`, `FilterInvalidSignatures`).
 
 ---
@@ -127,7 +127,7 @@ Trả lời bằng văn bản vào `note/`, mỗi câu dẫn `file:dòng`. Nếu
 | D6 | Đánh số block: bắt đầu từ 1? Có block `block_number = 0`? Với `is_authoritative_gei=false`, `GlobalExecIndex` có luôn bằng `block_number` (log: `block 58774 (GEI 58774)`)? | proto `ExecutableBlock`, log parent chain |
 | D7 | Chuyển epoch của parent chain (`EpochDurationSeconds=86400` đang hard-code); có hỗ trợ đổi committee giữa chừng không? (theo Đ14: không, chỉ cần biết hành vi khi epoch kết thúc) | `app.go`, Rust epoch monitor |
 | D8 | Rust dựng `PeerRpcServer` từ `peer_rpc_addresses` thế nào và gọi Go local ra sao? | `consensus/metanode/src/node/` (grep `PeerRpcServer`) |
-| D9 | Dùng `pkg/trie` (NOMT) từ Go cho một **namespace không phải account**: `trie_factory.go` chọn namespace thế nào; cách sinh proof (`GenerateProof`); cách **kiểm proof** (cần thêm hàm verify qua FFI từ crate `nomt`?); chi phí commit; giới hạn key. | `pkg/trie/trie_factory.go`, `pkg/trie/nomt_state_trie.go`, `pkg/nomt_ffi/bridge.go`, `crates/nomt_db` |
+| D9 | Dùng `pkg/trie` (NOMT) từ Go cho một **namespace không phải account**: `trie_factory.go` chọn namespace thế nào; cách sinh proof (`GenerateProof`); cách **kiểm proof** (`nomt_ffi.VerifyProof` đã có, xác nhận dùng đúng KeyPath băm); chi phí commit; giới hạn key. | `pkg/trie/trie_factory.go`, `pkg/trie/nomt_state_trie.go`, `pkg/nomt_ffi/bridge.go`, `crates/nomt_db` |
 | D10 | Rào chắn độ bền: mẫu `CommitBlockState` (block DB bền trước NOMT), cách khôi phục khi NOMT lệch tip. Parent Chain dùng lại đúng mẫu đó. | `pkg/blockchain/block_state_commit.go`, `execution/pkg/rollup/N1_DURABILITY_REPORT.md` |
 | D11 | Danh tính người gửi: địa chỉ ↔ khóa BLS/ECDSA (`bls.GetAddressFromPublicKey`), đăng ký khóa (cluster do `ChainRegistry`/chứng nhận, validator/người dùng thế nào), và cách bootstrap tài khoản đầu tiên từ genesis. | `pkg/parentchain/state.go` (`RegisterAccount`, `ensureChainRegistry`), `pkg/bls` |
 | D12 | Miền chữ ký: `TransactionHashData` có gồm `ChainID` không? xác nhận `ChainID=990` (hoặc giá trị chốt) không trùng chain nào; tx của parent chain không thể replay ở chain khác và ngược lại. | `pkg/transaction/transaction.go`, `pkg/common/constant.go`, ansible/config |
@@ -156,6 +156,16 @@ Không dùng đồng hồ máy: nếu `commit_timestamp_ms == 0` thì dùng `tim
 - **Giá trị nhị phân chuẩn tắc** (Đ9), không JSON. `big.Int` = byte big-endian tối thiểu.
 - **Không được duyệt cây trong logic đồng thuận** (khóa đã băm nên không quét theo tiền tố). Cần liệt kê (ví dụ mọi chain đã đăng ký) thì duy trì **danh sách tường minh trong cây** (ví dụ khóa đếm + khóa theo chỉ số), hoặc chỉ mục phụ ngoài cây phục vụ RPC (cập nhật tất định khi commit, không dùng trong thực thi).
 - Ghi vào cây theo lô **sắp theo khóa** (thứ tự tất định) rồi lấy `state_root`.
+
+#### 5.2b. Cách lưu trữ: theo đúng simple_chain (NOMT), không tự chế
+Parent Chain **tái dùng nguyên lớp NOMT của simple_chain** (đã chạy production, đã sửa nhiều lỗi độ bền), không viết lớp lưu trữ riêng:
+- **Khởi tạo:** `trie.InitNomtDB(basePath, commitConcurrency, pageCacheMB, leafCacheMB)` một lần lúc khởi động (mẫu `cmd/simple_chain/app.go:181`), rồi `trie.GetOrInitNomtHandle(namespace)` (`pkg/trie/trie_factory.go`). Mỗi namespace = **một thư mục NOMT riêng** dưới `basePath`. Parent Chain dùng **một namespace `parent_state`** (cache nhỏ; hashtable 64000 bucket, `preallocate` theo mặc định của namespace không nặng), không dùng `account_state`/`smart_contract_storage` (đã gán cấu hình nặng).
+- **Truy cập:** qua `trie.StateTrie`/`NomtStateTrie` (`pkg/trie/nomt_state_trie.go`): `Get`, `BatchUpdate(keys, values)`, `Hash()`, `Commit()`; khóa nghiệp vụ được băm `keccak256(namespace ‖ key)` thành KeyPath 32 byte bởi `addressToKeyPathWithNamespace` (khớp thiết kế mục 5.2, nên **để `NomtStateTrie` tự băm**, không tự băm lần hai).
+- **Chu trình block (mẫu `pkg/blockchain/block_state_commit.go`):** `BatchUpdate` toàn bộ ghi của block → `Commit` (hoặc `ExtractPendingPayload` + `CommitPayload` khi cần tách bước để giữ rào chắn độ bền: **ghi block DB bền trước, commit NOMT sau**) → `state_root = Hash()`. Khôi phục lệch tip: `AlignWithExpectedRoot` + changelog (`state_changelog`), như simple_chain.
+- **Proof:** `NomtStateTrie.GenerateProof(key)` sinh; **`nomt_ffi.VerifyProof(root, keyPath, val, proof)` đã có sẵn ở Go** (`pkg/nomt_ffi/bridge.go`, hỗ trợ cả chứng minh không tồn tại khi `val` rỗng), nên client kiểm proof được ngay; không cần viết bộ kiểm mới. Ví dụ dùng: `cmd/simple_chain/rpc_state.go` (`eth_getProof`-kiểu, ~dòng 440-650).
+- **Liệt kê khóa:** `NomtStateTrie` có registry khóa (`RegisterKnownKey`, `GetAll`) do simple_chain dựng để duyệt; **không dùng `GetAll` trong logic đồng thuận** (giữ quy tắc ở trên: danh sách tường minh trong cây). Registry chỉ phục vụ RPC/debug.
+- **Cấm:** `Checkpoint()` trên đường nóng (gây đứng, xem bộ nhớ `feedback_checkpoint_causes_stall`); ghi song song vào cùng handle từ nhiều goroutine ngoài cơ chế của `NomtStateTrie`.
+- **Không dùng** `FlatStateTrie` (root là bộ cộng dồn, không có proof thành viên) hay MPT/Verkle cho parent state.
 
 ### 5.3. Cây giao dịch và biên lai
 - `txs_root`: cây Merkle nhị phân thật trên `keccak256(tx_bytes)` theo thứ tự thực thi. `receipts_root`: cây Merkle nhị phân trên `keccak256(receipt_bytes)` cùng thứ tự. Quy ước lá lẻ và băm nút nội bộ có test vector; **không** dùng bộ cộng dồn modulo như `FlatStateTrie` của chain chính.
@@ -206,10 +216,10 @@ WP0 ─┬─> WP1 ──> WP2 ──> WP3 ──> WP4 ──> WP5 ──┐
 - **Nghiệm thu:** `./run.sh up` chạy 4 node; `./run.sh status` in `last_block`, `block_hash`, `state_root` từng node; không đụng tiến trình `:8547`.
 
 ### WP1 — Mô hình dữ liệu cây và thực thi block nguyên tử
-- Cài đặt mục 5: overlay hai lớp trên cây NOMT, mã hóa chuẩn tắc, `Header`/`block_hash`, cây Merkle nhị phân cho `txs_root`/`receipts_root`, `ApplyBlock` idempotent + `ErrBlockGap/ErrBlockConflict`, rào chắn độ bền (D10).
+- Cài đặt mục 5 (lưu trữ theo mục 5.2b, tái dùng `pkg/trie` của simple_chain): overlay hai lớp trên cây NOMT, mã hóa chuẩn tắc, `Header`/`block_hash`, cây Merkle nhị phân cho `txs_root`/`receipts_root`, `ApplyBlock` idempotent + `ErrBlockGap/ErrBlockConflict`, rào chắn độ bền (D10).
 - **Tái dùng từ prototype `a6564afd`:** ý tưởng `overlayKV` (lớp block + lớp tx, `push/drop/merge`, `scan` gộp) và `ApplyBlock` (exactly-once, gap, conflict). **Thay** `levelKV` bằng lớp truy cập cây NOMT và **thay** công thức hash-chain write-set bằng `state_root` của cây. Prototype dùng khóa/giá trị JSON và duyệt tiền tố: cả hai **không** được mang sang đường đồng thuận (Đ9, mục 5.2).
 - Giữ `Store` typed hiện có (`pkg/parentchain/store.go`) làm giao diện cho `state.go` (logic nghiệp vụ không đổi): cài lại nó trên `treeKV` (đọc qua overlay xuống cây, ghi vào overlay).
-- **Nghiệm thu:** T-U1..T-U12 (mục 9) pass; `state_root` do hai node độc lập ra giống hệt; proof của một khóa kiểm được so với `state_root` (cần bộ kiểm proof, D9).
+- **Nghiệm thu:** T-U1..T-U12 (mục 9) pass; `state_root` do hai node độc lập ra giống hệt; proof của một khóa kiểm được so với `state_root` bằng `nomt_ffi.VerifyProof`.
 
 ### WP2 — Phong bì giao dịch và xác thực ở thực thi
 - Địa chỉ hệ thống, `ChainID` (Đ7), mã hóa `CallData` cho từng phương thức (mục 6), `nonce` người gửi lưu trong cây (namespace `0x0B`), quy tắc nonce khi tx lỗi (tất định, chốt và ghi lại), receipt, xác thực chữ ký (dùng lại `checkTxSignature` làm mẫu), bootstrap tài khoản/cluster từ genesis (D11).
@@ -315,7 +325,7 @@ Tích hợp (cụm WP0, cổng riêng):
 | Đổi committee tự động, chuyển epoch có thay validator (Đ14) | Sau; hiện là quy trình thủ công có wipe |
 | Cắt tỉa block cũ, snapshot đồng thuận | Sau; v1 giữ toàn bộ |
 | Hiệu năng: parent chain ~1 block/giây (đa số block rỗng); cây NOMT + ghi bền `Sync` mỗi block | Đo ở WP1, ghi số liệu vào `note/`; nếu cần, chỉ commit NOMT khi block có tx (giữ nguyên đúng root cho block rỗng) |
-| NOMT chưa có bộ kiểm proof phía Go | Việc bắt buộc trong WP1 (D9): thêm hàm verify qua FFI từ crate `nomt` |
+| Proof NOMT | Đã có `GenerateProof`/`VerifyProof` ở Go; WP1 chỉ cần test vector và xác nhận KeyPath |
 | Nếu một bên điều khiển ≥ 2/3 stake (Đ13) | Ghi rõ trong tài liệu vận hành; không có biện pháp kỹ thuật |
 
 ---
