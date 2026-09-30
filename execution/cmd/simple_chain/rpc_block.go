@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/common/math"
 	eth_types "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/executor"
@@ -722,6 +723,10 @@ func (api *MetaAPI) EstimateGas(ctx context.Context, rawInput json.RawMessage, b
 		).(*transaction.Transaction)
 
 		txM.SetReadOnly(false)
+		if len(args.AuthList) > 0 {
+			txM.SetAuthorizationList(transaction.FromEthAuthorizationList(args.AuthList))
+			txM.SetType(uint64(eth_types.SetCodeTxType))
+		}
 	}
 
 	rs, err := api.App.transactionProcessor.ProcessTransactionOffChain(txM)
@@ -730,6 +735,11 @@ func (api *MetaAPI) EstimateGas(ctx context.Context, rawInput json.RawMessage, b
 		return 0, err
 	}
 	if rs == nil {
+		// Plain native transfer (no VM run). A SetCode tx still owes intrinsic gas for every
+		// authorization tuple, so a bare MINIMUM_BASE_FEE would be rejected as "intrinsic gas too low".
+		if n := len(txM.AuthorizationList()); n > 0 {
+			return hexutil.Uint64(params.TxGas + uint64(n)*params.CallNewAccountGas + mt_common.MINIMUM_BASE_FEE), nil
+		}
 		return hexutil.Uint64(mt_common.MINIMUM_BASE_FEE), nil
 	}
 	logger.Info("[EstimateGas] Status: %v, Exception: %v", rs.ReceiptStatus(), rs.Exception())
@@ -737,6 +747,7 @@ func (api *MetaAPI) EstimateGas(ctx context.Context, rawInput json.RawMessage, b
 		logger.Info("[EstimateGas] execution reverted or threw")
 		return 0, newRevertError(rs.Return())
 	}
+	// VM path: rs.GasUsed() already includes core.IntrinsicGas, i.e. 25000 per authorization tuple.
 	return hexutil.Uint64(rs.GasUsed() + mt_common.MINIMUM_BASE_FEE), nil
 }
 

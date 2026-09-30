@@ -64,6 +64,9 @@ type TransactionArgs struct {
 	Commitments []kzg4844.Commitment `json:"commitments"`
 	Proofs      []kzg4844.Proof      `json:"proofs"`
 
+	// Introduced by EIP-7702 SetCodeTxType transaction.
+	AuthList []types.SetCodeAuthorization `json:"authorizationList,omitempty"`
+
 	// This configures whether blobs are allowed to be passed.
 }
 
@@ -220,6 +223,8 @@ func (args *TransactionArgs) ToMessage(baseFee *big.Int, skipNonceCheck, skipEoA
 func (args *TransactionArgs) ToTransaction(defaultType int) *types.Transaction {
 	usedType := types.LegacyTxType
 	switch {
+	case args.AuthList != nil || defaultType == types.SetCodeTxType:
+		usedType = types.SetCodeTxType
 	case args.BlobHashes != nil || defaultType == types.BlobTxType:
 		usedType = types.BlobTxType
 	case args.MaxFeePerGas != nil || defaultType == types.DynamicFeeTxType:
@@ -228,11 +233,55 @@ func (args *TransactionArgs) ToTransaction(defaultType int) *types.Transaction {
 		usedType = types.AccessListTxType
 	}
 	// Make it possible to default to newer tx, but use legacy if gasprice is provided
-	if args.GasPrice != nil {
+	if args.GasPrice != nil && args.AuthList == nil {
 		usedType = types.LegacyTxType
 	}
 	var data types.TxData
 	switch usedType {
+	case types.SetCodeTxType:
+		al := types.AccessList{}
+		if args.AccessList != nil {
+			al = *args.AccessList
+		}
+		var toAddress common.Address
+		if args.To != nil {
+			toAddress = *args.To
+		}
+		var chainID *uint256.Int
+		if args.ChainID != nil {
+			chainID = uint256.MustFromBig((*big.Int)(args.ChainID))
+		}
+		var nonce uint64
+		if args.Nonce != nil {
+			nonce = uint64(*args.Nonce)
+		}
+		var gas uint64
+		if args.Gas != nil {
+			gas = uint64(*args.Gas)
+		}
+		var gasFeeCap, gasTipCap, value *uint256.Int
+		if args.MaxFeePerGas != nil {
+			gasFeeCap = uint256.MustFromBig((*big.Int)(args.MaxFeePerGas))
+		}
+		if args.MaxPriorityFeePerGas != nil {
+			gasTipCap = uint256.MustFromBig((*big.Int)(args.MaxPriorityFeePerGas))
+		}
+		if args.Value != nil {
+			value = uint256.MustFromBig((*big.Int)(args.Value))
+		}
+		data = &types.SetCodeTx{
+			To:         toAddress,
+			ChainID:    chainID,
+			Nonce:      nonce,
+			Gas:        gas,
+			GasFeeCap:  gasFeeCap,
+			GasTipCap:  gasTipCap,
+			Value:      value,
+			Data:       args.data(),
+			AccessList: al,
+			AuthList:   args.AuthList,
+		}
+
 	case types.BlobTxType:
 		al := types.AccessList{}
 		if args.AccessList != nil {

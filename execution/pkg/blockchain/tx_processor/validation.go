@@ -11,8 +11,9 @@ import (
 	"os"
 
 	eth_common "github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	e_types "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -400,6 +401,17 @@ func VerifyTransaction(
 
 	if !tx.ValidMaxGas() {
 		return transaction.InvalidMaxGas
+	}
+
+	// EIP-7702 (F2/F3): MaxGas must at least cover intrinsic gas (base 21000 + 25000 per auth tuple).
+	// params.TxGas (21000), not this chain's native TRANSFER_GAS_COST (20000): a SetCode tx that calls a
+	// contract is priced by core.IntrinsicGas (21000 base) in the VM, so admitting less would let it in
+	// only to fail at execution with "intrinsic gas too low".
+	if len(tx.AuthorizationList()) > 0 {
+		requiredGas := params.TxGas + uint64(len(tx.AuthorizationList()))*params.CallNewAccountGas
+		if tx.MaxGas() < requiredGas {
+			return transaction.InvalidMaxGas
+		}
 	}
 
 	// verify last hash
