@@ -112,7 +112,9 @@ func ProcessTransactionsOptimistic(
 	logger.Debug("⚡ [PERF] Pre-fetched %d unique addresses in %v", len(addrSlice), time.Since(startPreload))
 
 	// ─── Pre-verify BLS signatures once (covers both pipelines) ───────────────
-	if !skipSignatureVerify {
+	// FilterInvalidSignatures above already verified every tx and warmed the cache, so PreVerifySignatures
+	// is redundant unless the filter was bypassed (devnet switches).
+	if !skipSignatureVerify && (sigVerifyBypassedForDevnet() || execFilterDisabledForDevnetBenchmark()) {
 		startPreVerify := time.Now()
 		flatAll := make([]types.Transaction, 0, totalTxs)
 		for _, group := range groupedGroups {

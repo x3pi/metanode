@@ -32,7 +32,7 @@
         that:
           - plaintext_creds_check.rc == 0
         fail_msg: "CRITICAL SECURITY ERROR (Issue #104): Plaintext credentials ({{ plaintext_creds_check.stdout }}) found in inventory {{ resolved_inventory_file }}! In production (metanode_env=production), credentials MUST be encrypted with ansible-vault (or referenced via Jinja2 vault variables)."
-      when: (metanode_env | default('production')) == 'production' and (node_env | default('production')) == 'production'
+      when: (metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'
       tags: ["always"]
 
     - name: "SECURITY: Ensure skip_mempool_sig_verify is not enabled in production (Issue #103)"
@@ -40,7 +40,7 @@
         that:
           - not (skip_mempool_sig_verify | default(false) | bool)
         fail_msg: "CRITICAL SECURITY ERROR (Issue #103): skip_mempool_sig_verify MUST NOT be enabled in production environments!"
-      when: (metanode_env | default('production')) == 'production' and (node_env | default('production')) == 'production'
+      when: (metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'
       tags: ["always"]
 
     - name: Build cluster_nodes list from inventory

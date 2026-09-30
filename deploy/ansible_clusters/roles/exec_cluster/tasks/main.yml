@@ -90,6 +90,8 @@
         with open('{{ install_dir }}/genesis_base.json') as f:
             base = json.load(f)
 
+        # By design ONE cluster BLS key (the execution node's key) manages many accounts, so every
+        # genesis alloc below is registered with the same publicKeyBls.
         cluster_bls = '{{ bls_pubkey | default(bls_pub | default(bls_priv)) }}'
         alloc_map = {}
 

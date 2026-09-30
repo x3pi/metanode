@@ -39,6 +39,37 @@ func VerifySign(bPub cm.PublicKey, bSig cm.Sign, bMsg []byte) bool {
 	return new(blstSignature).VerifyCompressed(bSig.Bytes(), true, bPub.Bytes(), false, bMsg, dstMinPk)
 }
 
+// VerifyBatch reports whether EVERY (pub, sig, msg) triple is a valid signature. It uses blst's
+// random-linear-combination batch verification (64-bit random scalars from crypto/rand), which is sound
+// against forged signatures that only cancel out in an aggregate, and is markedly cheaper per signature
+// than n independent verifications (one shared final exponentiation, no per-item final check).
+// false means "at least one is invalid (or malformed)": callers must fall back to per-item VerifySign to
+// find which. The verdict per item is therefore identical to calling VerifySign on each.
+func VerifyBatch(bPubs, bSigs, bMsgs [][]byte) bool {
+	n := len(bPubs)
+	if n == 0 || len(bSigs) != n || len(bMsgs) != n {
+		return false
+	}
+	pks := make([]*blstPublicKey, n)
+	sigs := make([]*blstSignature, n)
+	msgs := make([]blst.Message, n)
+	for i := 0; i < n; i++ {
+		pks[i] = new(blstPublicKey).Uncompress(bPubs[i])
+		sigs[i] = new(blstSignature).Uncompress(bSigs[i])
+		if pks[i] == nil || sigs[i] == nil {
+			return false
+		}
+		msgs[i] = bMsgs[i]
+	}
+	randFn := func(s *blst.Scalar) {
+		var buf [32]byte // Scalar is 256-bit; only the low randBits (64) are used by blst
+		_, _ = rand.Read(buf[:8])
+		buf[0] |= 1 // never a zero coefficient (would skip that item)
+		s.FromLEndian(buf[:])
+	}
+	return new(blstSignature).MultipleAggregateVerify(sigs, true, pks, false, msgs, dstMinPk, randFn, 64)
+}
+
 func VerifyAggregateSign(bPubs [][]byte, bSig []byte, bMsgs [][]byte) bool {
 	return new(blstSignature).AggregateVerifyCompressed(bSig, true, bPubs, false, bMsgs, dstMinPk)
 }

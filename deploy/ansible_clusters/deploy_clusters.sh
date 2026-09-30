@@ -147,6 +147,13 @@ done
 export METANODE_ENV="${METANODE_ENV:-devnet}"
 export NODE_ENV="${NODE_ENV:-$METANODE_ENV}"
 
+# inventory.yml is untracked (it holds real hosts / vault-encrypted credentials): on a fresh clone seed it
+# from the example so the default invocation works, then remind the operator to edit it.
+if [ ! -f "$INVENTORY" ] && [ "$INVENTORY" = "${SCRIPT_DIR}/inventory.yml" ] && [ -f "${SCRIPT_DIR}/inventory.example.yml" ]; then
+    cp "${SCRIPT_DIR}/inventory.example.yml" "$INVENTORY"
+    echo "⚠️  inventory.yml chưa tồn tại: đã tạo từ inventory.example.yml. Hãy chỉnh host/khóa/mật khẩu (dùng ansible-vault) trước khi deploy thật." >&2
+fi
+
 print_banner
 
 # Helper to send telegram notification safely

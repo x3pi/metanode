@@ -74,3 +74,117 @@ func TestFilterInvalidSignatures_DevnetBypassIsExplicit(t *testing.T) {
 		t.Fatal("explicit devnet bypass should keep the tx")
 	}
 }
+
+// Batch path: many BLS txs, with two signatures swapped (each individually invalid, aggregate unchanged).
+// Exactly those two must be dropped and everything else kept, i.e. batching never changes a tx's verdict.
+func TestFilterInvalidSignatures_BatchPathExactVerdicts(t *testing.T) {
+	cs := setupTestChainState(t)
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+	const n = 300
+	txs := make([]types.Transaction, n)
+	for i := 0; i < n; i++ {
+		from := common.BigToAddress(big.NewInt(int64(5000 + i)))
+		tx, pub := createTestTx(from, common.HexToAddress("0x456"), big.NewInt(1), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, 1)
+		as := state.NewAccountState(from)
+		as.AddBalance(big.NewInt(1_000_000_000_000_000))
+		as.SetPublicKeyBls(pub)
+		as.SetNonce(1)
+		cs.GetAccountStateDB().SetState(as)
+		txs[i] = tx
+	}
+	s1, s2 := txs[10].Sign().Bytes(), txs[200].Sign().Bytes()
+	txs[10].(*transaction.Transaction).SetSignBytes(s2)
+	txs[200].(*transaction.Transaction).SetSignBytes(s1)
+
+	rotateVerifiedSignatures()
+	rotateVerifiedSignatures()
+	out := FilterInvalidSignatures(cs, groupsOf(txs...))
+	if len(out) != n-2 {
+		t.Fatalf("expected %d survivors, got %d", n-2, len(out))
+	}
+	for _, g := range out {
+		for _, it := range g.Items {
+			if it.Tx.Hash() == txs[10].Hash() || it.Tx.Hash() == txs[200].Hash() {
+				t.Fatal("a swapped-signature tx survived")
+			}
+		}
+	}
+}
+
+func TestFilterInvalidSignatures_BenchmarkSwitchIsDevnetOnly(t *testing.T) {
+	cs := setupTestChainState(t)
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+	victim := common.HexToAddress("0x1234")
+	unsigned := transaction.NewTransaction(victim, common.HexToAddress("0x5678"), big.NewInt(2), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, p_common.TRANSFER_GAS_COST,
+		[]byte{}, nil, common.Hash{}, common.Hash{}, 2, 1)
+
+	t.Setenv("METANODE_DEVNET_SKIP_EXEC_SIG_FILTER", "true")
+	t.Setenv("METANODE_DEVNET", "")
+	if out := FilterInvalidSignatures(cs, groupsOf(unsigned)); len(out) != 0 {
+		t.Fatal("benchmark switch without METANODE_DEVNET must not disable the filter")
+	}
+	t.Setenv("METANODE_DEVNET", "true")
+	t.Setenv("NODE_ENV", "production")
+	if out := FilterInvalidSignatures(cs, groupsOf(unsigned)); len(out) != 0 {
+		t.Fatal("benchmark switch in production must not disable the filter")
+	}
+	t.Setenv("NODE_ENV", "")
+	if out := FilterInvalidSignatures(cs, groupsOf(unsigned)); len(out) != 1 {
+		t.Fatal("devnet benchmark switch should disable the filter")
+	}
+}
+
+// One bad signature in a big chunk must be found by bisection (not by re-verifying the whole chunk one by
+// one), while every other tx keeps its exact verdict.
+func TestVerifySignatures_BisectsFailingChunk(t *testing.T) {
+	cs := setupTestChainState(t)
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+	const n = 256
+	txs := make([]types.Transaction, n)
+	for i := 0; i < n; i++ {
+		from := common.BigToAddress(big.NewInt(int64(20000 + i)))
+		tx, pub := createTestTx(from, common.HexToAddress("0x456"), big.NewInt(1), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, 1)
+		as := state.NewAccountState(from)
+		as.AddBalance(big.NewInt(1_000_000_000_000_000))
+		as.SetPublicKeyBls(pub)
+		as.SetNonce(1)
+		cs.GetAccountStateDB().SetState(as)
+		txs[i] = tx
+	}
+	bad := 77
+	other, _ := createTestTx(common.HexToAddress("0xdead"), common.HexToAddress("0x456"), big.NewInt(1), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, 1)
+	txs[bad].(*transaction.Transaction).SetSignBytes(other.Sign().Bytes())
+
+	rotateVerifiedSignatures()
+	rotateVerifiedSignatures()
+	valid, st := verifySignatures(cs.GetAccountStateDB(), txs, nil)
+	for i, v := range valid {
+		if v == (i == bad) {
+			t.Fatalf("tx %d verdict wrong (valid=%v)", i, v)
+		}
+	}
+	if st.individual > 2*bisectMinSize {
+		t.Fatalf("bisection should isolate one bad sig with <= %d individual checks, did %d", 2*bisectMinSize, st.individual)
+	}
+}
+
+func TestPrewarmSignatureCache_FillsCache(t *testing.T) {
+	cs := setupTestChainState(t)
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+	from := common.HexToAddress("0xabcd")
+	tx, pub := createTestTx(from, common.HexToAddress("0x456"), big.NewInt(1), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, 1)
+	as := state.NewAccountState(from)
+	as.SetPublicKeyBls(pub)
+	as.SetNonce(1)
+	cs.GetAccountStateDB().SetState(as)
+
+	rotateVerifiedSignatures()
+	rotateVerifiedSignatures()
+	if LoadVerifiedSignature(sigCacheKey(tx, pub)) {
+		t.Fatal("cache should start cold")
+	}
+	PrewarmSignatureCache(cs, []types.Transaction{tx, nil}, nil)
+	if !LoadVerifiedSignature(sigCacheKey(tx, pub)) {
+		t.Fatal("prewarm should have cached the verified signature")
+	}
+}

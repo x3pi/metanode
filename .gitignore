@@ -23,6 +23,8 @@ benchmark_results/
 **/_book/
 **/book/
 **/build/
+# ...but the ansible_clusters "build" ROLE is source code, not a build artifact
+!deploy/ansible_clusters/roles/build/
 /build
 /build_app
 # Build artifacts
