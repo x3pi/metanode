@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestDepositToFloat_ConsecutiveDepositsUniqueMsgID(t *testing.T) {
@@ -189,3 +191,117 @@ func TestDepositToFloat_RequiresToken(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, name)
 	}
 }
+
+// T-P7..T-P10: RPC endpoints for blocks, txs, receipts, proofs, status, and raw transactions.
+func TestHTTPRPC_FullChainEndpoints(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewDBStore(dir)
+	assert.NoError(t, err)
+	defer store.Close()
+
+	// Setup cluster & create a valid deposit transaction
+	kp := bls.GenerateKeyPair()
+	pub := kp.PublicKey()
+	priv := kp.PrivateKey()
+	msgID := common.HexToHash("0x1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff")
+	callData := EncodeDepositToFloatCallData(pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID)
+	tx, err := BuildAndSignBLSTx(priv, pub, ParentChainGatewayAddress, 0, callData)
+	assert.NoError(t, err)
+	txBytes, _ := proto.Marshal(tx)
+
+	// Apply block 1
+	in := BlockInput{
+		Number:        1,
+		GEI:           100,
+		CommitIndex:   1,
+		Epoch:         1,
+		TimestampMs:   1000,
+		LeaderAddress: common.HexToAddress("0x7e615e4a500ab42b7bb3fdbb62fbb8bd10385fc5"),
+		CommitDigest:  common.HexToHash("0xabcd"),
+		Txs:           [][]byte{txBytes},
+	}
+	res, err := store.ApplyBlock(in, func(st Store, idx int, rawTx []byte) (*Receipt, error) {
+		var pTx pb.Transaction
+		_ = proto.Unmarshal(rawTx, &pTx)
+		return ExecuteTx(st, &pTx, 1)
+	})
+	assert.NoError(t, err)
+
+	protoTxChan := make(chan *pb.Transaction, 10)
+	server := NewHTTPServer(store, make(chan *ParentChainTx, 10))
+	server.SetProtoTxChan(protoTxChan)
+	server.SetValidators([]*pb.ValidatorInfo{
+		{Name: "validator-0", Address: "0x7e615e4a500ab42b7bb3fdbb62fbb8bd10385fc5"},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/block", server.handleBlock)
+	mux.HandleFunc("/tx", server.handleTxGetOrPost)
+	mux.HandleFunc("/receipt", server.handleReceipt)
+	mux.HandleFunc("/proof", server.handleProof)
+	mux.HandleFunc("/status", server.handleStatus)
+	mux.HandleFunc("/validators", server.handleValidators)
+	mux.HandleFunc("/send_raw_transaction", server.handleSendRawTransaction)
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	client := NewHTTPClient(ts.URL)
+
+	// 1. GetBlockByNumber
+	rec, found, err := client.GetBlockByNumber(1)
+	assert.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, uint64(1), rec.Header.Number)
+	assert.Equal(t, res.Record.BlockHash, rec.BlockHash)
+
+	// 2. GetBlockByHash
+	recHash, found, err := client.GetBlockByHash(res.Record.BlockHash)
+	assert.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, rec.Header.Number, recHash.Header.Number)
+
+	// 3. GetTransaction
+	txHash := ComputeTxHash(tx)
+	bNum, idx, found, err := client.GetTransaction(txHash)
+	assert.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, uint64(1), bNum)
+	assert.Equal(t, uint32(0), idx)
+
+	// 4. GetReceipt
+	rcpt, found, err := client.GetReceipt(txHash)
+	assert.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, uint8(1), rcpt.Status)
+	assert.Equal(t, txHash, rcpt.TxHash)
+
+	// 5. GetStatus
+	status, err := client.GetStatus()
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(1), status.LastBlock)
+	assert.Equal(t, res.Record.BlockHash, status.LastHash)
+	assert.False(t, status.Syncing)
+	assert.False(t, status.ForkDetected)
+
+	// 6. GetProof
+	key := TreeKey(NamespaceFloat, crypto.Keccak256Hash(pub[:]).Bytes())
+	proofRes, err := client.GetProof(key)
+	assert.NoError(t, err)
+	assert.True(t, proofRes.Verified)
+
+	// 7. SendRawTransaction when syncing => 503 rejected
+	server.SetSyncing(true)
+	tx2, _ := BuildAndSignBLSTx(priv, pub, ParentChainGatewayAddress, 1, callData)
+	tx2Bytes, _ := proto.Marshal(tx2)
+	_, errSync := client.SendRawTransaction(tx2Bytes)
+	assert.Error(t, errSync)
+	assert.Contains(t, errSync.Error(), "503")
+
+	// 8. SendRawTransaction when not syncing => accepted
+	server.SetSyncing(false)
+	sentHash, errSent := client.SendRawTransaction(tx2Bytes)
+	assert.NoError(t, errSent)
+	assert.Equal(t, ComputeTxHash(tx2), sentHash)
+}
+

@@ -14,12 +14,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 var defaultHTTPTransport = &http.Transport{
@@ -266,6 +269,66 @@ func (c *httpClient) GetStateRoot(clusterPubKey cm.PublicKey, epoch uint64) (com
 	return resp.Root, resp.Found, err
 }
 
+func (c *httpClient) GetBlockByNumber(number uint64) (BlockRecord, bool, error) {
+	var resp struct {
+		Record BlockRecord `json:"record"`
+		Found  bool        `json:"found"`
+	}
+	err := c.get(fmt.Sprintf("/block?number=%d", number), &resp)
+	return resp.Record, resp.Found, err
+}
+
+func (c *httpClient) GetBlockByHash(hash common.Hash) (BlockRecord, bool, error) {
+	var resp struct {
+		Record BlockRecord `json:"record"`
+		Found  bool        `json:"found"`
+	}
+	err := c.get(fmt.Sprintf("/block?hash=%s", hash.Hex()), &resp)
+	return resp.Record, resp.Found, err
+}
+
+func (c *httpClient) GetTransaction(txHash common.Hash) (uint64, uint32, bool, error) {
+	var resp struct {
+		BlockNumber uint64 `json:"block_number"`
+		Index       uint32 `json:"index"`
+		Found       bool   `json:"found"`
+	}
+	err := c.get(fmt.Sprintf("/tx?hash=%s", txHash.Hex()), &resp)
+	return resp.BlockNumber, resp.Index, resp.Found, err
+}
+
+func (c *httpClient) GetReceipt(txHash common.Hash) (*Receipt, bool, error) {
+	var resp struct {
+		Receipt *Receipt `json:"receipt"`
+		Found   bool     `json:"found"`
+	}
+	err := c.get(fmt.Sprintf("/receipt?hash=%s", txHash.Hex()), &resp)
+	return resp.Receipt, resp.Found, err
+}
+
+func (c *httpClient) GetStatus() (ChainStatus, error) {
+	var resp ChainStatus
+	err := c.get("/status", &resp)
+	return resp, err
+}
+
+func (c *httpClient) GetProof(key [32]byte) (ProofResult, error) {
+	var resp ProofResult
+	err := c.get(fmt.Sprintf("/proof?key=0x%x", key), &resp)
+	return resp, err
+}
+
+func (c *httpClient) SendRawTransaction(rawTx []byte) (common.Hash, error) {
+	req := map[string]string{
+		"raw_tx": "0x" + common.Bytes2Hex(rawTx),
+	}
+	var resp struct {
+		TxHash common.Hash `json:"tx_hash"`
+	}
+	err := c.post("/send_raw_transaction", req, &resp)
+	return resp.TxHash, err
+}
+
 func hexEncode(b []byte) string {
 	return common.Bytes2Hex(b)
 }
@@ -275,16 +338,48 @@ func hexEncode(b []byte) string {
 // ---------------------------------------------------------
 
 type HTTPServer struct {
-	store      Store
-	txChan     chan *ParentChainTx
-	pendingTxs sync.Map // map[common.Hash]chan error
+	store        Store
+	committer    BlockCommitter
+	txChan       chan *ParentChainTx
+	protoTxChan  chan *pb.Transaction
+	pendingTxs   sync.Map // map[common.Hash]chan error
+	syncing      atomic.Bool
+	forkDetected atomic.Bool
+	validatorsMu sync.RWMutex
+	validators   []*pb.ValidatorInfo
 }
 
 func NewHTTPServer(store Store, txChan chan *ParentChainTx) *HTTPServer {
-	return &HTTPServer{
+	s := &HTTPServer{
 		store:  store,
 		txChan: txChan,
 	}
+	if c, ok := store.(BlockCommitter); ok {
+		s.committer = c
+	}
+	return s
+}
+
+func (s *HTTPServer) SetCommitter(c BlockCommitter) {
+	s.committer = c
+}
+
+func (s *HTTPServer) SetProtoTxChan(ch chan *pb.Transaction) {
+	s.protoTxChan = ch
+}
+
+func (s *HTTPServer) SetSyncing(syncing bool) {
+	s.syncing.Store(syncing)
+}
+
+func (s *HTTPServer) SetForkDetected(fork bool) {
+	s.forkDetected.Store(fork)
+}
+
+func (s *HTTPServer) SetValidators(vals []*pb.ValidatorInfo) {
+	s.validatorsMu.Lock()
+	defer s.validatorsMu.Unlock()
+	s.validators = vals
 }
 
 func (s *HTTPServer) NotifyTxResult(msgID common.Hash, err error) {
@@ -304,7 +399,14 @@ func (s *HTTPServer) NotifyTxResult(msgID common.Hash, err error) {
 
 func (s *HTTPServer) Start(addr string) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/tx", s.handleTx)
+	mux.HandleFunc("/tx", s.handleTxGetOrPost)
+	mux.HandleFunc("/block", s.handleBlock)
+	mux.HandleFunc("/receipt", s.handleReceipt)
+	mux.HandleFunc("/proof", s.handleProof)
+	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/validators", s.handleValidators)
+	mux.HandleFunc("/send_raw_transaction", s.handleSendRawTransaction)
+
 	mux.HandleFunc("/inbound", s.handleInbound)
 	mux.HandleFunc("/record", s.handleRecord)
 	mux.HandleFunc("/claimed", s.handleClaimed)
@@ -561,3 +663,229 @@ func (s *HTTPServer) handleStateRoot(w http.ResponseWriter, r *http.Request) {
 		"found": found,
 	})
 }
+
+func (s *HTTPServer) handleBlock(w http.ResponseWriter, r *http.Request) {
+	if s.committer == nil {
+		http.Error(w, "block storage not available", http.StatusServiceUnavailable)
+		return
+	}
+	numStr := r.URL.Query().Get("number")
+	hashStr := r.URL.Query().Get("hash")
+
+	var rec BlockRecord
+	var found bool
+	var err error
+
+	if hashStr != "" {
+		h := common.HexToHash(hashStr)
+		rec, found, err = s.committer.GetBlockRecordByHash(h)
+	} else if numStr != "" {
+		num, pErr := strconv.ParseUint(numStr, 10, 64)
+		if pErr != nil {
+			http.Error(w, "invalid block number", http.StatusBadRequest)
+			return
+		}
+		rec, found, err = s.committer.GetBlockRecord(num)
+	} else {
+		prog, pErr := s.committer.LastApplied()
+		if pErr != nil || prog.LastBlock == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"found": false})
+			return
+		}
+		rec, found, err = s.committer.GetBlockRecord(prog.LastBlock)
+	}
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"record": rec,
+		"found":  found,
+	})
+}
+
+func (s *HTTPServer) handleTxGetOrPost(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		hashStr := r.URL.Query().Get("hash")
+		if hashStr == "" {
+			http.Error(w, "missing hash query parameter", http.StatusBadRequest)
+			return
+		}
+		txHash := common.HexToHash(hashStr)
+		if s.committer == nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"found": false})
+			return
+		}
+		bNum, idx, found, err := s.committer.GetTxLocation(txHash)
+		if err != nil || !found {
+			json.NewEncoder(w).Encode(map[string]interface{}{"found": false})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"block_number": bNum,
+			"index":        idx,
+			"found":        true,
+		})
+		return
+	}
+	s.handleTx(w, r)
+}
+
+func (s *HTTPServer) handleReceipt(w http.ResponseWriter, r *http.Request) {
+	hashStr := r.URL.Query().Get("hash")
+	if hashStr == "" {
+		http.Error(w, "missing hash query parameter", http.StatusBadRequest)
+		return
+	}
+	txHash := common.HexToHash(hashStr)
+	if s.committer == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"found": false})
+		return
+	}
+	rcpt, found, err := s.committer.GetReceipt(txHash)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"receipt": rcpt,
+		"found":   found,
+	})
+}
+
+func (s *HTTPServer) handleProof(w http.ResponseWriter, r *http.Request) {
+	if s.committer == nil {
+		http.Error(w, "committer not available", http.StatusServiceUnavailable)
+		return
+	}
+	keyStr := r.URL.Query().Get("key")
+	if keyStr == "" {
+		http.Error(w, "missing key query parameter", http.StatusBadRequest)
+		return
+	}
+	keyBytes := common.FromHex(keyStr)
+	var key [32]byte
+	copy(key[:], keyBytes)
+
+	proof, err := s.committer.GenerateProof(key)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to generate proof: %v", err), http.StatusInternalServerError)
+		return
+	}
+	prog, _ := s.committer.LastApplied()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"key":        common.BytesToHash(key[:]),
+		"proof":      proof,
+		"state_root": prog.LastStateRoot,
+		"verified":   len(proof) > 0,
+	})
+}
+
+func (s *HTTPServer) handleStatus(w http.ResponseWriter, r *http.Request) {
+	var lastBlock uint64
+	var lastHash common.Hash
+	var stateRoot common.Hash
+	if s.committer != nil {
+		prog, _ := s.committer.LastApplied()
+		lastBlock = prog.LastBlock
+		lastHash = prog.LastHash
+		stateRoot = prog.LastStateRoot
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"last_block":    lastBlock,
+		"last_hash":     lastHash,
+		"state_root":    stateRoot,
+		"syncing":       s.syncing.Load(),
+		"fork_detected": s.forkDetected.Load(),
+	})
+}
+
+func (s *HTTPServer) handleValidators(w http.ResponseWriter, r *http.Request) {
+	s.validatorsMu.RLock()
+	vals := s.validators
+	s.validatorsMu.RUnlock()
+	if vals == nil {
+		vals = []*pb.ValidatorInfo{}
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"validators": vals,
+	})
+}
+
+func (s *HTTPServer) handleSendRawTransaction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.syncing.Load() {
+		http.Error(w, "node is syncing, transactions rejected", http.StatusServiceUnavailable)
+		return
+	}
+
+	var rawBytes []byte
+	contentType := r.Header.Get("Content-Type")
+	if strings.Contains(contentType, "application/json") {
+		var req struct {
+			RawTx string `json:"raw_tx"`
+			Data  string `json:"data"`
+			Tx    string `json:"tx"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, fmt.Sprintf("invalid json body: %v", err), http.StatusBadRequest)
+			return
+		}
+		rawHex := req.RawTx
+		if rawHex == "" {
+			rawHex = req.Data
+		}
+		if rawHex == "" {
+			rawHex = req.Tx
+		}
+		rawBytes = common.FromHex(rawHex)
+	} else {
+		var err error
+		rawBytes, err = io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
+			return
+		}
+	}
+
+	var tx pb.Transaction
+	if err := proto.Unmarshal(rawBytes, &tx); err != nil {
+		http.Error(w, fmt.Sprintf("failed to unmarshal transaction: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if tx.ChainID != ParentChainID {
+		http.Error(w, fmt.Sprintf("invalid chain ID: %d", tx.ChainID), http.StatusBadRequest)
+		return
+	}
+	if len(tx.FromAddress) != 20 {
+		http.Error(w, "invalid from address", http.StatusBadRequest)
+		return
+	}
+
+	txHash := ComputeTxHash(&tx)
+
+	if s.protoTxChan != nil {
+		select {
+		case s.protoTxChan <- &tx:
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"tx_hash": txHash,
+				"status":  "queued",
+			})
+		default:
+			http.Error(w, "transaction queue is full", http.StatusServiceUnavailable)
+		}
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"tx_hash": txHash,
+		"status":  "accepted",
+	})
+}
+

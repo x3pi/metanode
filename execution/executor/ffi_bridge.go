@@ -59,6 +59,7 @@ import "C"
 import (
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -427,8 +428,31 @@ func cgo_free_go_buffer(ptr *C.uint8_t) {
 	}
 }
 
+var (
+	stateRootProviderMu     sync.RWMutex
+	globalStateRootProvider func() string
+)
+
+// SetStateRootProvider allows applications (e.g. parent_chain) without SnapshotManager
+// to provide the authoritative state root for Rust consensus via cgo_get_state_root.
+func SetStateRootProvider(fn func() string) {
+	stateRootProviderMu.Lock()
+	defer stateRootProviderMu.Unlock()
+	globalStateRootProvider = fn
+}
+
 //export cgo_get_state_root
 func cgo_get_state_root() *C.char {
+	stateRootProviderMu.RLock()
+	provider := globalStateRootProvider
+	stateRootProviderMu.RUnlock()
+	if provider != nil {
+		root := provider()
+		if root != "" {
+			return C.CString(root)
+		}
+	}
+
 	sm := GetGlobalSnapshotManager()
 	if sm != nil && sm.stateRootCallback != nil {
 		root := sm.stateRootCallback()

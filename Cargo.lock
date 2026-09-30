@@ -3460,6 +3460,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
+ "bitvec",
  "blake3",
  "libc",
  "nomt",
