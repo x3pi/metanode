@@ -429,16 +429,16 @@ func TestCluster_ForwardChannelRejectsBadAuth(t *testing.T) {
 		return resp.StatusCode
 	}
 	for name, code := range map[string]int{
-		"wrong mac":     send("n1", now, forwardMAC([]byte("another-secret-another-secret-xxxx"), "n1", now, body)),
-		"unknown node":  send("evil", now, forwardMAC(h.secret, "evil", now, body)),
-		"stale ts":      send("n1", now-int64(2*maxForwardSkew/time.Millisecond), forwardMAC(h.secret, "n1", now-int64(2*maxForwardSkew/time.Millisecond), body)),
-		"mac for other": send("n1", now, forwardMAC(h.secret, "n1", now, []byte("other body"))),
+		"wrong mac":     send("n1", now, forwardMAC([]byte("another-secret-another-secret-xxxx"), "n1", now, submitPath, body)),
+		"unknown node":  send("evil", now, forwardMAC(h.secret, "evil", now, submitPath, body)),
+		"stale ts":      send("n1", now-int64(2*maxForwardSkew/time.Millisecond), forwardMAC(h.secret, "n1", now-int64(2*maxForwardSkew/time.Millisecond), submitPath, body)),
+		"mac for other": send("n1", now, forwardMAC(h.secret, "n1", now, submitPath, []byte("other body"))),
 	} {
 		if code != http.StatusUnauthorized {
 			t.Errorf("%s: status %d, want 401", name, code)
 		}
 	}
-	if code := send("n1", now, forwardMAC(h.secret, "n1", now, body)); code != http.StatusOK {
+	if code := send("n1", now, forwardMAC(h.secret, "n1", now, submitPath, body)); code != http.StatusOK {
 		t.Fatalf("a correctly signed submit got %d", code)
 	}
 	h.waitBlocks(1, h.m...)
@@ -1093,13 +1093,13 @@ func TestCluster_HashEndpointRejectsBadAuth(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode
 	}
-	if c := get("n1", forwardMAC([]byte("wrong-secret-wrong-secret-wrong-xx"), "n1", now, []byte("1"))); c != http.StatusUnauthorized {
+	if c := get("n1", forwardMAC([]byte("wrong-secret-wrong-secret-wrong-xx"), "n1", now, hashPath, []byte("1"))); c != http.StatusUnauthorized {
 		t.Fatalf("wrong mac: %d", c)
 	}
-	if c := get("evil", forwardMAC(h.secret, "evil", now, []byte("1"))); c != http.StatusUnauthorized {
+	if c := get("evil", forwardMAC(h.secret, "evil", now, hashPath, []byte("1"))); c != http.StatusUnauthorized {
 		t.Fatalf("unknown node: %d", c)
 	}
-	if c := get("n1", forwardMAC(h.secret, "n1", now, []byte("2"))); c != http.StatusUnauthorized {
+	if c := get("n1", forwardMAC(h.secret, "n1", now, hashPath, []byte("2"))); c != http.StatusUnauthorized {
 		t.Fatalf("mac for a different query: %d", c)
 	}
 }

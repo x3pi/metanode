@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -44,7 +46,16 @@ type DebugApi struct {
 
 var (
 	logStreamUpgrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true },
+		// Same-origin (or non-browser, no Origin header) only: the log stream must not be readable from
+		// an arbitrary web page through the operator's browser.
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true
+			}
+			u, err := url.Parse(origin)
+			return err == nil && u.Host == r.Host
+		},
 	}
 	maxLogChunkBytes int64 = 128 * 1024 // 128KB mỗi lần gửi
 )
@@ -284,6 +295,22 @@ func (api *DebugApi) TraceBlock(ctx context.Context, blockNumber uint64) ([]*tra
 	return allSpans, nil
 }
 
+// authorizeHTTP protects the raw HTTP debug endpoints (logs may contain keys/addresses/internal state) with the
+// same admin password as the admin_* RPC, sent as "Authorization: Bearer <password>". Fail-closed when no
+// password is configured.
+func (api *DebugApi) authorizeHTTP(w http.ResponseWriter, r *http.Request) bool {
+	pw := ""
+	if api != nil && api.App != nil && api.App.config != nil {
+		pw = strings.TrimSpace(api.App.config.Securepassword)
+	}
+	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if pw == "" || subtle.ConstantTimeCompare([]byte(got), []byte(pw)) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
 // ListLogFiles trả về danh sách file log theo epoch.
 func (api *DebugApi) ListLogFiles(ctx context.Context, params LogListParams) ([]string, error) {
 	files, err := loggerfile.ListLogFiles(params.Root, params.Epoch)
@@ -312,6 +339,9 @@ func (api *DebugApi) GetLogFileContent(ctx context.Context, params LogFileParams
 // ServeLogPreview cung cấp endpoint HTTP GET sẵn có để xem log qua browser.
 // Query params: root, epoch, file, maxBytes, format (html/plain).
 func (api *DebugApi) ServeLogPreview(w http.ResponseWriter, r *http.Request) {
+	if !api.authorizeHTTP(w, r) {
+		return
+	}
 	query := r.URL.Query()
 	params := LogFileParams{
 		Root:     strings.TrimSpace(query.Get("root")),
@@ -406,6 +436,9 @@ func classifyLogLine(line string) string {
 //   - root:     thư mục gốc logs (mặc định app.config.LogPath hoặc loggerfile global dir)
 //   - follow:   true/false, nếu true và epoch rỗng thì tự động chuyển sang epoch mới (mặc định true khi epoch rỗng)
 func (api *DebugApi) HandleLogStreamWS(w http.ResponseWriter, r *http.Request) {
+	if !api.authorizeHTTP(w, r) {
+		return
+	}
 	conn, err := logStreamUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return

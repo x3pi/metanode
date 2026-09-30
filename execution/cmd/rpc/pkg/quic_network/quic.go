@@ -2,14 +2,19 @@ package quic_network
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/models/file_model"
@@ -64,8 +69,26 @@ func readFrameWithLength(stream quic.Stream) ([]byte, error) {
 
 func CreateQuicConnection(serverAddr string) (quic.Connection, error) {
 	tlsConf := &tls.Config{
+		// Peers use self-signed certificates, so chain verification is off; authenticity is instead
+		// enforced by pinning the peer's leaf certificate SHA-256 when QUIC_PINNED_CERT_SHA256
+		// (comma-separated hex list) is set. Without pins this is unauthenticated TLS (MITM-able):
+		// a warning is logged. See security_audit.md item H1.
 		InsecureSkipVerify: true,
-		NextProtos:         []string{"file-storage-v1"}, // ✅ THÊM ALPN
+		MinVersion:         tls.VersionTLS12,
+	}
+	if pins := parsePinnedCertHashes(os.Getenv("QUIC_PINNED_CERT_SHA256")); len(pins) > 0 {
+		tlsConf.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return errors.New("quic: peer presented no certificate")
+			}
+			sum := sha256.Sum256(rawCerts[0])
+			if _, ok := pins[hex.EncodeToString(sum[:])]; !ok {
+				return errors.New("quic: peer certificate does not match any pinned SHA-256")
+			}
+			return nil
+		}
+	} else {
+		log.Printf("⚠️ [QUIC] QUIC_PINNED_CERT_SHA256 not set: peer certificates are NOT verified")
 	}
 
 	var conn quic.Connection
@@ -162,4 +185,14 @@ func SendChunkToRustServerQuic(conn quic.Connection, fileKey string, chunkIndex 
 		return fmt.Errorf("server báo lỗi: %s", response.Message)
 	}
 	return nil
+}
+
+func parsePinnedCertHashes(v string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, h := range strings.Split(v, ",") {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			out[h] = struct{}{}
+		}
+	}
+	return out
 }

@@ -224,7 +224,8 @@ func VerifyTransaction(
 			// )
 			// Let it pass local verification; assume Master will reject if invalid.
 		} else {
-			if !LoadVerifiedSignature(txHash) {
+			blsCacheKey := sigCacheKey(tx, as.PublicKeyBls())
+			if !LoadVerifiedSignature(blsCacheKey) {
 				request := transaction.NewVerifyTransactionRequest(
 					tx.Hash(),
 					common.PubkeyFromBytes(as.PublicKeyBls()),
@@ -244,7 +245,7 @@ func VerifyTransaction(
 					}
 				}
 				// Only cache on successful validation
-				StoreVerifiedSignature(txHash)
+				StoreVerifiedSignature(blsCacheKey)
 				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
 				if count == maxVerifiedSignaturesCacheSize {
 					rotateVerifiedSignatures()
@@ -273,12 +274,12 @@ func VerifyTransaction(
 
 		switch {
 		case as.Nonce() == 0 && isSetBls:
-			txHash := tx.Hash()
-			if !LoadVerifiedSignature(txHash) {
+			setBlsCacheKey := sigCacheKey(tx, nil)
+			if !LoadVerifiedSignature(setBlsCacheKey) {
 				if !tx.ValidEthSign() {
 					return transaction.InvalidSignSecp
 				}
-				StoreVerifiedSignature(txHash)
+				StoreVerifiedSignature(setBlsCacheKey)
 				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
 				if count == maxVerifiedSignaturesCacheSize {
 					rotateVerifiedSignatures()
@@ -436,31 +437,12 @@ func PreVerifySignatures(txs []types.Transaction, chainState *blockchain.ChainSt
 	accountDB := chainState.GetAccountStateDB()
 
 	verifyFn := func(tx types.Transaction) {
-		txHash := tx.Hash()
-		if LoadVerifiedSignature(txHash) {
-			return
-		}
-
 		as, err := accountDB.AccountStateReadOnly(tx.FromAddress())
-		if err != nil || as == nil || len(as.PublicKeyBls()) == 0 {
-			// fallback to ECDSA pre-verification if BLS key is missing
-			if tx.ValidEthSign() {
-				StoreVerifiedSignature(txHash)
-			}
-			return
+		if err != nil {
+			as = nil
 		}
-
-		request := transaction.NewVerifyTransactionRequest(
-			txHash,
-			common.PubkeyFromBytes(as.PublicKeyBls()),
-			tx.Sign(),
-		)
-		if request.Valid() {
-			StoreVerifiedSignature(txHash)
-		} else if tx.ValidEthSign() {
-			// Fallback just in case a registered BLS account sent an EVM tx
-			StoreVerifiedSignature(txHash)
-		}
+		// Same pure check the consensus-level filter uses; populates the cache on success.
+		checkTxSignature(tx, as)
 	}
 
 	if numWorkers <= 1 {
