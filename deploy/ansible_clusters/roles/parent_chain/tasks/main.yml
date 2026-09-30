@@ -62,6 +62,13 @@
         dest: "{{ node_data_dir }}/node_parent.toml"
         mode: '0644'
 
+    - name: Write security environment file (tokens / pins from vault vars, 0600)
+      ansible.builtin.template:
+        src: security.env.j2
+        dest: "{{ node_data_dir }}/security.env"
+        mode: '0600'
+      no_log: true
+
     - name: Deploy systemd service unit
       when: is_systemd
       ansible.builtin.template:
@@ -84,6 +91,7 @@
     - name: Start process via background daemon
       when: not is_systemd
       ansible.builtin.shell: |
+        set -a; [ -f {{ node_data_dir }}/security.env ] && . {{ node_data_dir }}/security.env; set +a
         nohup {{ bin_dir }}/parent_chain \
           -data-dir {{ node_data_dir }} \
           -http :{{ parent_http_port | default(8547) }} \

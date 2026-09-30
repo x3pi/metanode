@@ -117,6 +117,17 @@
   loop: "{{ active_nodes }}"
   when: ansible_action in ['deploy', 'setup']
 
+- name: Write security environment file (tokens / pins from vault vars, 0600)
+  ansible.builtin.template:
+    src: security.env.j2
+    dest: "{{ metanode_install_dir }}/node-{{ item }}/config/security.env"
+    owner: metanode
+    group: metanode
+    mode: '0600'
+  loop: "{{ active_nodes }}"
+  no_log: true
+  notify: reload systemd
+
 - name: Generate systemd service for Execution
   ansible.builtin.template:
     src: metanode-execution.service.j2

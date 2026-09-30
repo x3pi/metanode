@@ -4,6 +4,7 @@ After=network.target network-online.target
 Wants=network-online.target
 
 [Service]
+EnvironmentFile=-{{ node_data_dir }}/security.env
 Type=simple
 User={{ ansible_user | default('metanode') }}
 WorkingDirectory={{ node_data_dir }}

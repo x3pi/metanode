@@ -403,6 +403,16 @@
             - "{{ node_list }}"
             - [ "protocol_key.json", "network_key.json", "authority_key.json", "eth_key.json" ]
 
+        - name: Write security environment file (tokens / pins from vault vars, 0600)
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/roles/private_node/templates/security.env.j2"
+            dest: "{{ target_install_dir }}/node-{{ item }}/config/security.env"
+            owner: metanode
+            group: metanode
+            mode: '0600'
+          loop: "{{ node_list }}"
+          no_log: true
+
         - name: Create systemd service files for each validator node
           ansible.builtin.template:
             src: "{{ playbook_dir }}/roles/private_node/templates/metanode-private.service.j2"

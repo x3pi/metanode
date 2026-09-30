@@ -11,6 +11,11 @@ all:
     # Parent Chain configuration
     parent_chain_rpc_port: 8547
     parent_chain_host: "127.0.0.1"
+    # ── Security tokens (2026-09-30 audit fixes) — put REAL values in ansible-vault, never in plaintext ──
+    # snapshot_server_token: "{{ vault_snapshot_server_token }}"   # protects snapshot downloads; POST /create needs it
+    # snapshot_server_bind: "127.0.0.1"                            # restrict the snapshot port if peers need no access
+    # parent_chain_rpc_token: "{{ vault_parent_chain_rpc_token }}" # SAME value on parent chain + every exec node
+    # quic_pinned_cert_sha256: "<leaf-cert-sha256>,<...>"         # pin QUIC peer certs (otherwise unauthenticated)
 
   children:
     # ── Parent Chain Node (100% Rust BFT Consensus Engine) ──────────────
