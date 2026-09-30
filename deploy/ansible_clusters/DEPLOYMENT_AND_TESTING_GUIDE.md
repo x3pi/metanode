@@ -166,14 +166,16 @@ Hệ thống triển khai phân tách rõ giữa môi trường Production và D
 1. **Tạo file chìa khóa Vault (`.vault_pass`):**
    ```bash
    cd deploy/ansible_clusters   # hoặc cd deploy/ansible
-   echo "ten_mat_khau_vault_cua_ban" > .vault_pass
-   chmod 600 .vault_pass
+   umask 077
+   read -rs -p "Vault password: " p; printf '\n'
+   printf '%s' "$p" > .vault_pass
+   unset p
    ```
    *(💡 File `.vault_pass` đã nằm trong `.gitignore`, tuyệt đối an toàn không bị commit lên Git).*
 
 2. **Mã hóa chuỗi mật khẩu server:**
    ```bash
-   ansible-vault encrypt_string --vault-password-file ~/.vault_pass 'password' --name ansible_become_pass
+   ansible-vault encrypt_string --vault-password-file .vault_pass 'password' --name ansible_become_pass
    ```
 
 3. **Dán khối kết quả vào `inventory.yml`:**
@@ -187,7 +189,7 @@ Hệ thống triển khai phân tách rõ giữa môi trường Production và D
    ```
 
 4. **Thực thi:**
-   Cả script `deploy_clusters.sh` lẫn `ansible_deploy.sh` đều đã được tích hợp cơ chế tự động tìm file `.vault_pass` trong thư mục hiện tại hoặc tại `~/.vault_pass`. Khi bạn chạy các lệnh `--start, --stop, --deploy, reset-all`, script sẽ **tự động nạp chìa khóa giải mã ngầm** mà không cần gõ thêm cờ phụ.
+   `deploy_clusters.sh` lần lượt tìm `${SCRIPT_DIR}/.vault_pass`, `deploy/ansible/.vault_pass`, rồi `~/.vault_pass`. `ansible_deploy.sh` ưu tiên `ANSIBLE_VAULT_PASSWORD_FILE`, sau đó tìm `${SCRIPT_DIR}/.vault_pass`, thư mục chứa inventory, rồi `~/.vault_pass`. Khi file nằm ở một trong các vị trí này, script tự nạp khóa giải mã; không cần thêm cờ phụ.
 ---
 
 ## 🧪 4. BỘ SCRIPT KIỂM THỬ CHUYÊN SÂU (TESTING SCRIPTS)

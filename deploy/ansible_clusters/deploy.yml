@@ -14,7 +14,7 @@
   tags: ["build", "prepare"]
   roles:
     - role: build
-      when: deploy_action in ['setup', 'deploy', 'restart']
+      when: deploy_action in ['setup', 'deploy', 'restart', 'reset']
 
 # ── Play 2: Deploy Parent Chain ──────────────────────────────────────────────
 - name: "Phase 2: Deploy Parent Chain Node"
