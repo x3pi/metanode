@@ -10,6 +10,13 @@
     - "{{ base_data_dir }}"
     - "{{ base_log_dir }}"
 
+- name: Ensure existing cluster daemons are stopped before binary update
+  when: deploy_action is defined and deploy_action in ['reset', 'stop', 'deploy']
+  ansible.builtin.shell: |
+    pkill -9 -f "{{ bin_dir }}/simple_chain" || true
+    pkill -9 -f "{{ bin_dir }}/parent_chain" || true
+  failed_when: false
+
 - name: Distribute built binaries and base assets to node
   ansible.builtin.copy:
     src: "{{ item.src }}"

@@ -208,7 +208,7 @@ fi
 run_tests_suite() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
-    echo "🧪 BẮT ĐẦU BỘ KIỂM THỬ TÍCH HỢP 6 KỊCH BẢN THỰC TẾ"
+    echo "🧪 BẮT ĐẦU BỘ KIỂM THỬ TÍCH HỢP 7 KỊCH BẢN THỰC TẾ"
     echo "═══════════════════════════════════════════════════════════════"
     local start_ts
     start_ts=$(date +%s)
@@ -232,7 +232,7 @@ run_tests_suite() {
 
     local all_passed=false
     local py_passed="False"
-    if [ $test_rc -eq 0 ] && grep -q "TẤT CẢ 6/6 KỊCH BẢN" "$test_log"; then
+    if [ $test_rc -eq 0 ] && grep -q "TẤT CẢ 7/7 KỊCH BẢN" "$test_log"; then
         all_passed=true
         py_passed="True"
         echo ""
@@ -249,21 +249,52 @@ import sys, json, re
 sys.path.insert(0, '${SCRIPT_DIR}/scripts')
 import telegram_notify as tn
 
+log_content = ""
+try:
+    with open("${test_log}", "r", encoding="utf-8", errors="ignore") as f:
+        log_content = f.read()
+except Exception:
+    pass
+
 scenarios = [
-    {"name": "Kịch bản 1: Đăng ký tài khoản mới & ánh xạ Cluster", "passed": True, "detail": "Đăng ký thành công vào Account Registry"},
-    {"name": "Kịch bản 2: Nạp tiền Float & ghi nhận số dư", "passed": True, "detail": "Parent Chain -> Rollup ReceiveWorker ghi có thành công"},
-    {"name": "Kịch bản 3: Tương tác gọi Smart Contract nội bộ", "passed": True, "detail": "Thực thi hợp đồng EVM trên Exec 1"},
-    {"name": "Kịch bản 4: Chuyển tiền xuyên 2 cụm node", "passed": True, "detail": "Exec 1 -> Exec 2 qua Float Transfers hoàn tất"},
-    {"name": "Kịch bản 5: Parent Chain sập -> Exec node chạy độc lập", "passed": True, "detail": "Exec node tự đào block và khớp lệnh 100% độc lập"},
-    {"name": "Kịch bản 6: Khôi phục Parent Chain -> Tự động tái đồng bộ & chuyển tiền liên cụm", "passed": True, "detail": "Parent Chain online trở lại, cầu nối Rollup tự động phục hồi và xử lý giao dịch xuyên chuỗi thành công"}
+    {
+        "name": "Kịch bản 1: Đăng ký tài khoản mới & ánh xạ Cluster",
+        "passed": "KỊCH BẢN 1 THÀNH CÔNG" in log_content,
+        "detail": "Đăng ký thành công vào Account Registry" if "KỊCH BẢN 1 THÀNH CÔNG" in log_content else "Không hoàn tất hoặc bị gián đoạn"
+    },
+    {
+        "name": "Kịch bản 2: Nạp tiền Float & ghi nhận số dư",
+        "passed": "KỊCH BẢN 2 THÀNH CÔNG" in log_content,
+        "detail": "Parent Chain -> Rollup ReceiveWorker ghi có thành công" if "KỊCH BẢN 2 THÀNH CÔNG" in log_content else "Không hoàn tất hoặc bị gián đoạn"
+    },
+    {
+        "name": "Kịch bản 3: Tương tác gọi Smart Contract nội bộ",
+        "passed": "KỊCH BẢN 3 THÀNH CÔNG" in log_content,
+        "detail": "Thực thi hợp đồng EVM trên Exec 1" if "KỊCH BẢN 3 THÀNH CÔNG" in log_content else "Không hoàn tất hoặc bị gián đoạn"
+    },
+    {
+        "name": "Kịch bản 4: Chuyển tiền xuyên 2 cụm node",
+        "passed": "KỊCH BẢN 4 THÀNH CÔNG" in log_content,
+        "detail": "Exec 1 -> Exec 2 qua Float Transfers hoàn tất" if "KỊCH BẢN 4 THÀNH CÔNG" in log_content else "Không hoàn tất hoặc bị gián đoạn"
+    },
+    {
+        "name": "Kịch bản 5: Parent Chain sập -> Exec node chạy độc lập",
+        "passed": "KỊCH BẢN 5 THÀNH CÔNG" in log_content,
+        "detail": "Exec node tự đào block và khớp lệnh 100% độc lập" if "KỊCH BẢN 5 THÀNH CÔNG" in log_content else "Không hoàn tất hoặc bị gián đoạn"
+    },
+    {
+        "name": "Kịch bản 6: Khôi phục Parent Chain -> Tự động tái đồng bộ & chuyển tiền liên cụm",
+        "passed": "KỊCH BẢN 6 THÀNH CÔNG" in log_content,
+        "detail": "Cầu nối Rollup tự động phục hồi và xử lý giao dịch thành công" if "KỊCH BẢN 6 THÀNH CÔNG" in log_content else "Không hoàn tất hoặc bị gián đoạn"
+    },
+    {
+        "name": "Kịch bản 7: Gọi Smart Contract xuyên 2 cụm node",
+        "passed": "KỊCH BẢN 7 THÀNH CÔNG" in log_content,
+        "detail": "Exec 1 kích hoạt luồng gọi Smart Contract sang Exec 2, Exec 2 xử lý và cập nhật hợp đồng EVM thành công" if "KỊCH BẢN 7 THÀNH CÔNG" in log_content else "Không hoàn tất hoặc bị gián đoạn"
+    }
 ]
 
-all_passed = ${py_passed}
-if not all_passed:
-    for s in scenarios:
-        s["passed"] = False
-        s["detail"] = "Lỗi trong quá trình chạy kịch bản"
-
+all_passed = all(s["passed"] for s in scenarios) and ${py_passed}
 tn.notify_test_results(scenarios, total_duration=${duration}, all_passed=all_passed)
 EOF
     fi

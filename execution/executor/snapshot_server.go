@@ -1,12 +1,14 @@
 package executor
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +21,28 @@ type SnapshotServer struct {
 	port        int
 	bindAddr    string
 	manager     *SnapshotManager
+	// authToken (env SNAPSHOT_SERVER_TOKEN): when set, every request needs "Authorization: Bearer <token>".
+	// The mutating create endpoint additionally REQUIRES a configured token (it pauses Go+Rust and rotates
+	// away real snapshots, so it must never be reachable anonymously).
+	authToken string
+}
+
+func bearerMatches(r *http.Request, token string) bool {
+	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return token != "" && subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+}
+
+func (ss *SnapshotServer) requireToken(next http.Handler) http.Handler {
+	if ss.authToken == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !bearerMatches(r, ss.authToken) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // NewSnapshotServer tạo instance mới
@@ -29,7 +53,11 @@ func NewSnapshotServer(snapshotDir string, port int, bindAddr string, manager *S
 	if bindAddr == "" {
 		bindAddr = "0.0.0.0"
 	}
+	if v := strings.TrimSpace(os.Getenv("SNAPSHOT_SERVER_BIND")); v != "" {
+		bindAddr = v
+	}
 	return &SnapshotServer{
+		authToken:   strings.TrimSpace(os.Getenv("SNAPSHOT_SERVER_TOKEN")),
 		snapshotDir: snapshotDir,
 		port:        port,
 		bindAddr:    bindAddr,
@@ -40,6 +68,9 @@ func NewSnapshotServer(snapshotDir string, port int, bindAddr string, manager *S
 // Start khởi động HTTP server
 func (ss *SnapshotServer) Start() error {
 	mux := http.NewServeMux()
+	if ss.authToken == "" {
+		logger.Warn("📥 [SNAPSHOT SERVER] SNAPSHOT_SERVER_TOKEN is not set: snapshot downloads are UNAUTHENTICATED and POST /api/snapshots/create is DISABLED. Set the token (and/or SNAPSHOT_SERVER_BIND) to protect this port.")
+	}
 
 	// Index page — liệt kê snapshots
 	mux.HandleFunc("/", ss.handleIndex)
@@ -85,7 +116,7 @@ func (ss *SnapshotServer) Start() error {
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           ss.requireToken(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		// Không set ReadTimeout/WriteTimeout vì cần hỗ trợ tải file lớn
@@ -619,22 +650,27 @@ func (ss *SnapshotServer) handleAPISnapshotCreate(w http.ResponseWriter, r *http
 		return
 	}
 
+	if !bearerMatches(r, ss.authToken) {
+		http.Error(w, "forbidden: snapshot creation requires SNAPSHOT_SERVER_TOKEN", http.StatusForbidden)
+		return
+	}
+
 	if ss.manager.IsSnapshotInProgress() {
 		http.Error(w, "Snapshot already in progress", http.StatusConflict)
 		return
 	}
 
 	// In a real scenario, we should get blockNumber and epoch from query params or body,
-	// but for manual backup we can just trigger ForceSnapshotNow with 0, 0 
+	// but for manual backup we can just trigger ForceSnapshotNow with 0, 0
 	// (ForceSnapshotNow uses the current state if not specified).
 
-	// Wait, ForceSnapshotNow expects the actual block/epoch. 
+	// Wait, ForceSnapshotNow expects the actual block/epoch.
 	// We should just launch it in a goroutine because it blocks.
 	go func() {
 		ss.manager.ForceSnapshotNow(0, 0)
 	}()
 
-w.Header().Set("Content-Type", "application/json")
-w.WriteHeader(http.StatusAccepted)
-json.NewEncoder(w).Encode(map[string]string{"status": "Snapshot creation triggered"})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"status": "Snapshot creation triggered"})
 }

@@ -131,7 +131,7 @@ func (n *Node) handleStatePrepare(w http.ResponseWriter, r *http.Request) {
 	ts := n.now().UnixMilli()
 	w.Header().Set(hdrNode, n.cfg.NodeID)
 	w.Header().Set(hdrTs, strconv.FormatInt(ts, 10))
-	w.Header().Set(hdrMac, forwardMAC(n.secret, n.cfg.NodeID, ts, body))
+	w.Header().Set(hdrMac, forwardMAC(n.secret, n.cfg.NodeID, ts, statePreparePath, body))
 	w.Header().Set("Content-Type", "application/json")
 	n.state.active = id
 	logger.Info("📦 [RAFT-STATE] snapshot %s ready: block %d, %d files", id, meta.LastBlock, len(files))
@@ -353,7 +353,7 @@ func (c *AdminClient) FetchState(donorAddr, destRoot string, opts FetchStateOpti
 	ts, _ := strconv.ParseInt(hdr.Get(hdrTs), 10, 64)
 	skew := c.now().Sub(time.UnixMilli(ts))
 	mac, _ := hex.DecodeString(hdr.Get(hdrMac))
-	want, _ := hex.DecodeString(forwardMAC(c.Secret, hdr.Get(hdrNode), ts, body))
+	want, _ := hex.DecodeString(forwardMAC(c.Secret, hdr.Get(hdrNode), ts, statePreparePath, body))
 	if skew > maxForwardSkew || skew < -maxForwardSkew || !macEqual(mac, want) || hdr.Get(hdrNode) != man.DonorID {
 		return StateManifest{}, errors.New("the manifest is not authentic (bad MAC, donor id or clock skew): aborting")
 	}
@@ -502,7 +502,7 @@ func (c *AdminClient) fetchRange(addr, id, path string, off, n int64, out *os.Fi
 	}
 	req.Header.Set(hdrNode, c.sender())
 	req.Header.Set(hdrTs, strconv.FormatInt(ts, 10))
-	req.Header.Set(hdrMac, forwardMAC(c.Secret, c.sender(), ts, []byte(q)))
+	req.Header.Set(hdrMac, forwardMAC(c.Secret, c.sender(), ts, stateFilePath, []byte(q)))
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, off+n-1))
 	resp, err := c.client().Do(req)
 	if err != nil {

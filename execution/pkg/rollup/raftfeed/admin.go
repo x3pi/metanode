@@ -116,7 +116,7 @@ func (n *Node) authorizeAdmin(r *http.Request, body []byte) bool {
 	if err != nil {
 		return false
 	}
-	want, _ := hex.DecodeString(forwardMAC(n.secret, sender, ts, append([]byte(r.URL.RawQuery), body...)))
+	want, _ := hex.DecodeString(forwardMAC(n.secret, sender, ts, r.URL.Path, append([]byte(r.URL.RawQuery), body...)))
 	return macEqual(got, want)
 }
 

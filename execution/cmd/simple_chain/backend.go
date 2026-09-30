@@ -23,21 +23,22 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
 var (
-	errInvalidBlockRange  = errors.New("invalid block range params")
-	errExceedMaxTopics    = errors.New("exceed max topics")
-	ErrInvalidSig         = errors.New("invalid transaction v, r, s values")
-	errInvalidCredentials   = errors.New("invalid credentials")
-	errPasswordNotConfigured = errors.New("admin password is not configured")
-	errInvalidTypeState     = errors.New("invalid type state")
-	errStateNotReady        = errors.New("state not ready")
+	errInvalidBlockRange      = errors.New("invalid block range params")
+	errExceedMaxTopics        = errors.New("exceed max topics")
+	ErrInvalidSig             = errors.New("invalid transaction v, r, s values")
+	errInvalidCredentials     = errors.New("invalid credentials")
+	errPasswordNotConfigured  = errors.New("admin password is not configured")
+	errAdminFromBrowserOrigin = errors.New("admin API refuses requests carrying a browser Origin header")
+	errInvalidTypeState       = errors.New("invalid type state")
+	errStateNotReady          = errors.New("state not ready")
 )
 
 const maxTopics = 4
@@ -56,29 +57,29 @@ const (
 
 // RPCTransaction represents a transaction that will serialize to the RPC representation of a transaction
 type RPCTransaction struct {
-	BlockHash           *common.Hash      `json:"blockHash"`
-	BlockNumber         *hexutil.Big      `json:"blockNumber"`
-	From                common.Address    `json:"from"`
-	Gas                 hexutil.Uint64    `json:"gas"`
-	GasPrice            *hexutil.Big      `json:"gasPrice"`
-	GasFeeCap           *hexutil.Big      `json:"maxFeePerGas,omitempty"`
-	GasTipCap           *hexutil.Big      `json:"maxPriorityFeePerGas,omitempty"`
-	MaxFeePerBlobGas    *hexutil.Big      `json:"maxFeePerBlobGas,omitempty"`
-	Hash                common.Hash       `json:"hash"`
-	Input               hexutil.Bytes     `json:"input"`
-	Nonce               hexutil.Uint64    `json:"nonce"`
-	To                  *common.Address   `json:"to"`
-	TransactionIndex    *hexutil.Uint64   `json:"transactionIndex"`
-	Value               *hexutil.Big      `json:"value"`
-	Type                hexutil.Uint64    `json:"type"`
-	Accesses            *types.AccessList `json:"accessList,omitempty"`
-	ChainID             *hexutil.Big      `json:"chainId,omitempty"`
-	BlobVersionedHashes []common.Hash     `json:"blobVersionedHashes,omitempty"`
+	BlockHash           *common.Hash                 `json:"blockHash"`
+	BlockNumber         *hexutil.Big                 `json:"blockNumber"`
+	From                common.Address               `json:"from"`
+	Gas                 hexutil.Uint64               `json:"gas"`
+	GasPrice            *hexutil.Big                 `json:"gasPrice"`
+	GasFeeCap           *hexutil.Big                 `json:"maxFeePerGas,omitempty"`
+	GasTipCap           *hexutil.Big                 `json:"maxPriorityFeePerGas,omitempty"`
+	MaxFeePerBlobGas    *hexutil.Big                 `json:"maxFeePerBlobGas,omitempty"`
+	Hash                common.Hash                  `json:"hash"`
+	Input               hexutil.Bytes                `json:"input"`
+	Nonce               hexutil.Uint64               `json:"nonce"`
+	To                  *common.Address              `json:"to"`
+	TransactionIndex    *hexutil.Uint64              `json:"transactionIndex"`
+	Value               *hexutil.Big                 `json:"value"`
+	Type                hexutil.Uint64               `json:"type"`
+	Accesses            *types.AccessList            `json:"accessList,omitempty"`
+	ChainID             *hexutil.Big                 `json:"chainId,omitempty"`
+	BlobVersionedHashes []common.Hash                `json:"blobVersionedHashes,omitempty"`
 	AuthorizationList   []types.SetCodeAuthorization `json:"authorizationList,omitempty"`
-	V                   *hexutil.Big      `json:"v"`
-	R                   *hexutil.Big      `json:"r"`
-	S                   *hexutil.Big      `json:"s"`
-	YParity             *hexutil.Uint64   `json:"yParity,omitempty"`
+	V                   *hexutil.Big                 `json:"v"`
+	R                   *hexutil.Big                 `json:"r"`
+	S                   *hexutil.Big                 `json:"s"`
+	YParity             *hexutil.Uint64              `json:"yParity,omitempty"`
 }
 
 // OverrideAccount indicates the overriding fields of account during the execution
@@ -670,4 +671,3 @@ func sendRawTransactionBinHandler(sender rawTxBinSender) http.HandlerFunc {
 		}
 	}
 }
-

@@ -67,7 +67,7 @@ func (c *AdminClient) do(method, addr, path, rawQuery string, body []byte) (int,
 	}
 	req.Header.Set(hdrNode, c.sender())
 	req.Header.Set(hdrTs, strconv.FormatInt(ts, 10))
-	req.Header.Set(hdrMac, forwardMAC(c.Secret, c.sender(), ts, append([]byte(rawQuery), body...)))
+	req.Header.Set(hdrMac, forwardMAC(c.Secret, c.sender(), ts, path, append([]byte(rawQuery), body...)))
 	resp, err := c.client().Do(req)
 	if err != nil {
 		return 0, nil, nil, err
@@ -103,7 +103,7 @@ func (c *AdminClient) BlockHash(addr string, n uint64) (string, bool) {
 	}
 	req.Header.Set(hdrNode, c.sender())
 	req.Header.Set(hdrTs, strconv.FormatInt(ts, 10))
-	req.Header.Set(hdrMac, forwardMAC(c.Secret, c.sender(), ts, []byte(q)))
+	req.Header.Set(hdrMac, forwardMAC(c.Secret, c.sender(), ts, hashPath, []byte(q)))
 	resp, err := c.client().Do(req)
 	if err != nil {
 		return "", false

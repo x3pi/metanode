@@ -4,6 +4,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 )
 
 func TestDepositToFloat_ConsecutiveDepositsUniqueMsgID(t *testing.T) {
+	t.Setenv("PARENT_CHAIN_RPC_TOKEN", "test-token")
 	store := NewMemoryStore()
 	txChan := make(chan *ParentChainTx, 10)
 	server := NewHTTPServer(store, txChan)
@@ -81,6 +83,7 @@ func TestPadTo32_NilSafety(t *testing.T) {
 }
 
 func TestHTTPRPC_InputValidation(t *testing.T) {
+	t.Setenv("PARENT_CHAIN_RPC_TOKEN", "test-token")
 	store := NewMemoryStore()
 	txChan := make(chan *ParentChainTx, 10)
 	server := NewHTTPServer(store, txChan)
@@ -166,3 +169,23 @@ func TestHTTPRPC_InputValidation(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid signature")
 }
 
+func TestDepositToFloat_RequiresToken(t *testing.T) {
+	t.Setenv("PARENT_CHAIN_RPC_TOKEN", "secret")
+	server := NewHTTPServer(NewMemoryStore(), make(chan *ParentChainTx, 1))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/tx", server.handleTx)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"type":"DepositToFloat","amount":1}`
+	for name, auth := range map[string]string{"missing": "", "wrong": "Bearer nope"} {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/tx", strings.NewReader(body))
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		assert.NoError(t, err)
+		resp.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, name)
+	}
+}

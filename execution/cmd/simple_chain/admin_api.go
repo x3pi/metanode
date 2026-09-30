@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/rpc"
+
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
 	"github.com/meta-node-blockchain/meta-node/executor"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
@@ -19,7 +21,15 @@ type AdminApi struct {
 }
 
 // authenticate checks if admin password is configured and matches constant-time.
-func (api *AdminApi) authenticate(password string) error {
+func (api *AdminApi) authenticate(ctx context.Context, password string) error {
+	// Admin operations are for operators (curl/CLI). A browser always sends an Origin header, so any
+	// admin call carrying one is a cross-site request (CSWSH/CSRF through the public "*"-origin /ws
+	// and CORS RPC endpoint) and is refused even if the password is known to the page.
+	if ctx != nil {
+		if pi := rpc.PeerInfoFromContext(ctx); pi.HTTP.Origin != "" {
+			return errAdminFromBrowserOrigin
+		}
+	}
 	if api == nil || api.App == nil || strings.TrimSpace(api.App.config.Securepassword) == "" {
 		return errPasswordNotConfigured
 	}
@@ -31,7 +41,7 @@ func (api *AdminApi) authenticate(password string) error {
 
 // LoginAPI is a simple API for user login using only a password.
 func (api *AdminApi) LoginAPI(ctx context.Context, password string) (string, error) {
-	if err := api.authenticate(password); err != nil {
+	if err := api.authenticate(ctx, password); err != nil {
 		return "", err
 	}
 	return "Login successful", nil
@@ -50,7 +60,7 @@ func (api *AdminApi) LoginAPI(ctx context.Context, password string) (string, err
 // (no skip needed), 2 = insufficient stake attested so far, -1 = could not run. Full detail is
 // always in the node's own logs (grep for PAYLOAD-LOSS-SKIP), never only in this return value.
 func (api *AdminApi) AttestPayloadLoss(ctx context.Context, password string, commitIndex uint32, txDigestHex string) (int32, error) {
-	if err := api.authenticate(password); err != nil {
+	if err := api.authenticate(ctx, password); err != nil {
 		return -1, err
 	}
 	if raftfeed.Enabled() {
@@ -71,7 +81,7 @@ func (api *AdminApi) AttestPayloadLoss(ctx context.Context, password string, com
 // could not run, or at least one claim hit a hard error. Full detail is always in the node's own
 // logs (grep for PAYLOAD-LOSS-SKIP), never only in this return value.
 func (api *AdminApi) AttestPayloadLossForCommit(ctx context.Context, password string, commitIndex uint32) (int32, error) {
-	if err := api.authenticate(password); err != nil {
+	if err := api.authenticate(ctx, password); err != nil {
 		return -1, err
 	}
 	if raftfeed.Enabled() {
@@ -81,7 +91,7 @@ func (api *AdminApi) AttestPayloadLossForCommit(ctx context.Context, password st
 }
 
 func (api *AdminApi) SetState(ctx context.Context, password string, state processor.State) (processor.State, error) {
-	if err := api.authenticate(password); err != nil {
+	if err := api.authenticate(ctx, password); err != nil {
 		return -1, err
 	}
 	oldState := api.App.blockProcessor.GetState()
@@ -102,7 +112,7 @@ func (api *AdminApi) GetState(ctx context.Context) (processor.State, error) {
 }
 
 func (api *AdminApi) CreateBackup(ctx context.Context, password string) (string, error) {
-	if err := api.authenticate(password); err != nil {
+	if err := api.authenticate(ctx, password); err != nil {
 		return "", err
 	}
 	state := api.App.blockProcessor.GetState()

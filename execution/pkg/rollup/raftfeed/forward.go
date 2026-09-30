@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"io"
 	"net/http"
@@ -28,12 +29,18 @@ const (
 	maxForwardBody = 64 << 20 // hard cap on what the internal port will read
 )
 
-func forwardMAC(secret []byte, nodeID string, tsMs int64, body []byte) string {
+// forwardMAC authenticates (node id, timestamp, endpoint path, body hash). Every field is length-prefixed so the
+// concatenation is unambiguous, and the path is bound so a MAC captured for one endpoint cannot be replayed
+// against another (e.g. a submit MAC against an admin operation).
+func forwardMAC(secret []byte, nodeID string, tsMs int64, path string, body []byte) string {
 	sum := sha256.Sum256(body)
 	m := hmac.New(sha256.New, secret)
-	m.Write([]byte(nodeID))
-	m.Write([]byte(strconv.FormatInt(tsMs, 10)))
-	m.Write(sum[:])
+	for _, f := range [][]byte{[]byte(nodeID), []byte(strconv.FormatInt(tsMs, 10)), []byte(path), sum[:]} {
+		var l [4]byte
+		binary.BigEndian.PutUint32(l[:], uint32(len(f)))
+		m.Write(l[:])
+		m.Write(f)
+	}
 	return hex.EncodeToString(m.Sum(nil))
 }
 
@@ -66,7 +73,7 @@ func (n *Node) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	skew := n.now().Sub(time.UnixMilli(ts))
 	known := n.knownNode(sender)
 	mac, macErr := hex.DecodeString(r.Header.Get(hdrMac))
-	want, _ := hex.DecodeString(forwardMAC(n.secret, sender, ts, body))
+	want, _ := hex.DecodeString(forwardMAC(n.secret, sender, ts, submitPath, body))
 	if err != nil || macErr != nil || !known || skew > maxForwardSkew || skew < -maxForwardSkew || !hmac.Equal(mac, want) {
 		logger.Error("❌ [RAFT-FWD] rejected submit from %q (bad mac / unknown node / clock skew %v)", sender, skew)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -97,7 +104,7 @@ func (n *Node) forwardToLeader(batch []byte) bool {
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set(hdrNode, n.cfg.NodeID)
 	req.Header.Set(hdrTs, strconv.FormatInt(ts, 10))
-	req.Header.Set(hdrMac, forwardMAC(n.secret, n.cfg.NodeID, ts, batch))
+	req.Header.Set(hdrMac, forwardMAC(n.secret, n.cfg.NodeID, ts, submitPath, batch))
 	resp, err := n.client.Do(req)
 	if err != nil {
 		return false // leader unreachable: the caller keeps the batch and retries
