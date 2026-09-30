@@ -17,6 +17,7 @@
   changed_when: false
   run_once: true
   delegate_to: localhost
+  become: no
 
 - name: "SECURITY: Reject plaintext credentials in production (Issue #104)"
   ansible.builtin.assert:
@@ -26,6 +27,7 @@
   when: (metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'
   run_once: true
   delegate_to: localhost
+  become: no
 
 - name: Create metanode system group
   ansible.builtin.group:
