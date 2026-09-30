@@ -735,27 +735,12 @@ func (stm *TrueBlockSTM) execOne(
 
 			// EIP-7702 / Fraud Proof I1 (F2): never exceed MaxGas, and reject/fail if MaxGas < intrinsicGas.
 			var errSub error
-			var totalGasUsed uint64
-
-			if tx.MaxGas() < intrinsicGas {
-				totalGasUsed = tx.MaxGas()
-				errSub = errors.New("intrinsic gas too low")
-			} else {
-				totalGasUsed = intrinsicGas + newAccountGas
-				// EIP-7702 (F5): 12,500 gas refund per applied tuple whose authority already existed.
-				// Like every EVM refund (EIP-3529, go-ethereum calcRefund) it is capped at gasUsed/5.
-				if authGasRefund > 0 {
-					if maxRefund := totalGasUsed / 5; authGasRefund > maxRefund {
-						authGasRefund = maxRefund
-					}
-					totalGasUsed -= authGasRefund
-				}
-				// Policy: the new-account surcharge (newAccountGas) is a chain-specific extra, not part of
-				// intrinsic gas. A tx whose MaxGas covers intrinsic gas but not the surcharge still succeeds
-				// and is billed at most its signed MaxGas (never more than the user authorised).
-				if totalGasUsed > tx.MaxGas() {
-					totalGasUsed = tx.MaxGas()
-				}
+			// Plain transfers keep the legacy rule shared with the native fast path (EXE-03 surcharge always billed);
+			// SetCode txs are strict (never billed above the signed MaxGas, fail when it cannot pay). See
+			// nativeTransferGas.
+			totalGasUsed, gasCovered := nativeTransferGas(tx.MaxGas(), intrinsicGas, newAccountGas, authGasRefund, len(tx.AuthorizationList()) > 0)
+			if !gasCovered {
+				errSub = errors.New("gas limit too low: intrinsic gas plus the new-account surcharge exceed MaxGas")
 			}
 
 			gasFee := new(big.Int).Mul(new(big.Int).SetUint64(totalGasUsed), tx.EffectiveGasPrice())
