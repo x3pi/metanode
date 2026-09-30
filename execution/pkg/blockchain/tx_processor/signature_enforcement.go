@@ -9,6 +9,7 @@ import (
 
 	eth_common "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -64,35 +65,28 @@ func checkTxSignature(tx types.Transaction, as types.AccountState) bool {
 	return ok
 }
 
-// FilterInvalidSignatures drops every tx whose signature does not verify against the sender's
-// pre-block account state. Committed blocks used to be executed WITHOUT re-checking signatures (the
-// mempool of the proposing node was the only gate), so a single Byzantine proposer could include
-// forged txs that every honest node then executed. Dropping (not failing) mirrors what the native
-// fast path already does for a rejected tx: no receipt, no state change, no nonce bump — identical on
-// every node. Group order and per-group item order are preserved; emptied groups are removed.
-func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptxns.RelativeGroup) []grouptxns.RelativeGroup {
-	if sigVerifyBypassedForDevnet() || execFilterDisabledForDevnetBenchmark() {
-		return groups
-	}
-	total := 0
-	for _, g := range groups {
-		total += len(g.Items)
-	}
-	if total == 0 {
-		return groups
-	}
+// sigStats reports how a verification pass was served (for throughput investigations).
+type sigStats struct{ cacheHits, batched, individual int64 }
 
-	type ref struct{ g, i int }
-	refs := make([]ref, 0, total)
-	for gi, g := range groups {
-		for ii := range g.Items {
-			refs = append(refs, ref{gi, ii})
-		}
-	}
-	startFilter := time.Now()
-	var cacheHits, batched, fellBack int64
+// batchChunk is the size of one random-linear-combination batch. On a failing chunk we BISECT instead of
+// re-verifying every member one by one, so a single bad signature costs ~O(log n) batch calls rather than n
+// individual verifications (bounds the amplification an attacker gets from sending bad signatures).
+const (
+	batchChunk    = 128
+	bisectMinSize = 8 // at or below this, verify individually (exact ETH-fallback semantics included)
+)
+
+// verifySignatures computes, for every tx, the exact verdict checkTxSignature would give, but verifies plain
+// BLS txs (registered key, AccountType 0) with blst batch verification, in parallel. stateOf(i) returns the
+// sender's account state for txs[i] (nil = load from accountDB). Successful checks populate the
+// verified-signature cache. The result depends only on (tx, sender state): batching never changes a verdict.
+func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Transaction, stateOf func(i int) types.AccountState) ([]bool, sigStats) {
+	total := len(txs)
 	valid := make([]bool, total)
-	accountDB := chainState.GetAccountStateDB()
+	var st sigStats
+	if total == 0 {
+		return valid, st
+	}
 
 	workers := runtime.GOMAXPROCS(0)
 	if workers > 128 {
@@ -129,44 +123,82 @@ func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptx
 		wg.Wait()
 	}
 
-	// Phase 1: cache hits are accepted; plain BLS txs (registered key, AccountType 0, not yet cached) are
-	// queued for batch verification; everything else (ETH-signed, no key yet, AccountType 1, ...) takes
-	// the exact per-tx path.
+	loadState := func(i int) types.AccountState {
+		if stateOf != nil {
+			if as := stateOf(i); as != nil {
+				return as
+			}
+		}
+		as, err := accountDB.AccountStateReadOnly(txs[i].FromAddress())
+		if err != nil {
+			return nil
+		}
+		return as
+	}
+
+	// Phase 1: cache hits are accepted; plain BLS txs not yet cached are queued for batch verification;
+	// everything else (ETH-signed, no key yet, AccountType 1, ...) takes the exact per-tx path.
 	type pending struct {
-		k   int
+		i   int
 		key eth_common.Hash
 		pub []byte
 	}
 	queued := make([]*pending, total)
-	parallel(total, 64, func(k int) {
-		tx := groups[refs[k].g].Items[refs[k].i].Tx
-		as, err := accountDB.AccountStateReadOnly(tx.FromAddress())
-		if err != nil {
-			as = nil
-		}
+	parallel(total, 64, func(i int) {
+		as := loadState(i)
 		if as != nil && len(as.PublicKeyBls()) > 0 && as.AccountType() == 0 {
-			key := sigCacheKey(tx, as.PublicKeyBls())
+			key := sigCacheKey(txs[i], as.PublicKeyBls())
 			if LoadVerifiedSignature(key) {
-				valid[k] = true
-				atomic.AddInt64(&cacheHits, 1)
+				valid[i] = true
+				atomic.AddInt64(&st.cacheHits, 1)
 			} else {
-				queued[k] = &pending{k: k, key: key, pub: as.PublicKeyBls()}
+				queued[i] = &pending{i: i, key: key, pub: as.PublicKeyBls()}
 			}
 			return
 		}
-		valid[k] = checkTxSignature(tx, as)
+		valid[i] = checkTxSignature(txs[i], as)
+		atomic.AddInt64(&st.individual, 1)
 	})
 
-	// Phase 2: batch-verify the queued BLS txs in chunks (one shared final exponentiation, random linear
-	// combination => a bad/cancelling signature cannot hide). A chunk that fails falls back to the exact
-	// per-tx check, so every tx's verdict is identical to non-batched verification (deterministic).
 	toBatch := make([]*pending, 0, total)
 	for _, p := range queued {
 		if p != nil {
 			toBatch = append(toBatch, p)
 		}
 	}
-	const batchChunk = 128
+
+	// Phase 2: batch-verify in chunks; bisect failing chunks.
+	var verifyPart func(part []*pending)
+	verifyPart = func(part []*pending) {
+		if len(part) == 0 {
+			return
+		}
+		if len(part) > bisectMinSize {
+			pubs := make([][]byte, len(part))
+			sigs := make([][]byte, len(part))
+			msgs := make([][]byte, len(part))
+			for j, p := range part {
+				h := txs[p.i].Hash()
+				pubs[j], sigs[j], msgs[j] = p.pub, txs[p.i].Sign().Bytes(), h.Bytes()
+			}
+			if bls.VerifyBatch(pubs, sigs, msgs) {
+				atomic.AddInt64(&st.batched, int64(len(part)))
+				for _, p := range part {
+					valid[p.i] = true
+					StoreVerifiedSignature(p.key)
+				}
+				return
+			}
+			mid := len(part) / 2
+			verifyPart(part[:mid])
+			verifyPart(part[mid:])
+			return
+		}
+		for _, p := range part {
+			valid[p.i] = checkTxSignature(txs[p.i], loadState(p.i))
+			atomic.AddInt64(&st.individual, 1)
+		}
+	}
 	nChunks := (len(toBatch) + batchChunk - 1) / batchChunk
 	parallel(nChunks, 2, func(c int) {
 		lo := c * batchChunk
@@ -174,33 +206,58 @@ func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptx
 		if hi > len(toBatch) {
 			hi = len(toBatch)
 		}
-		part := toBatch[lo:hi]
-		pubs := make([][]byte, len(part))
-		sigs := make([][]byte, len(part))
-		msgs := make([][]byte, len(part))
-		for i, p := range part {
-			tx := groups[refs[p.k].g].Items[refs[p.k].i].Tx
-			h := tx.Hash()
-			pubs[i], sigs[i], msgs[i] = p.pub, tx.Sign().Bytes(), h.Bytes()
-		}
-		if bls.VerifyBatch(pubs, sigs, msgs) {
-			atomic.AddInt64(&batched, int64(len(part)))
-			for _, p := range part {
-				valid[p.k] = true
-				StoreVerifiedSignature(p.key)
-			}
-			return
-		}
-		atomic.AddInt64(&fellBack, int64(len(part)))
-		for _, p := range part {
-			tx := groups[refs[p.k].g].Items[refs[p.k].i].Tx
-			as, err := accountDB.AccountStateReadOnly(tx.FromAddress())
-			if err != nil {
-				as = nil
-			}
-			valid[p.k] = checkTxSignature(tx, as)
-		}
+		verifyPart(toBatch[lo:hi])
 	})
+	return valid, st
+}
+
+// PrewarmSignatureCache batch-verifies txs' signatures and fills the verified-signature cache so the
+// per-tx VerifyTransaction calls that follow hit the cache. It never rejects anything itself (a tx that
+// fails here simply misses the cache and is rejected by VerifyTransaction as before). senderStates may be
+// nil / incomplete.
+func PrewarmSignatureCache(chainState *blockchain.ChainState, txs []types.Transaction, senderStates map[eth_common.Address]types.AccountState) {
+	if len(txs) == 0 || sigVerifyBypassedForDevnet() {
+		return
+	}
+	flat := make([]types.Transaction, 0, len(txs))
+	for _, tx := range txs {
+		if tx != nil {
+			flat = append(flat, tx)
+		}
+	}
+	verifySignatures(chainState.GetAccountStateDB(), flat, func(i int) types.AccountState {
+		if senderStates == nil {
+			return nil
+		}
+		return senderStates[flat[i].FromAddress()]
+	})
+}
+
+// FilterInvalidSignatures drops every tx whose signature does not verify against the sender's
+// pre-block account state. Committed blocks used to be executed WITHOUT re-checking signatures (the
+// mempool of the proposing node was the only gate), so a single Byzantine proposer could include
+// forged txs that every honest node then executed. Dropping (not failing) mirrors what the native
+// fast path already does for a rejected tx: no receipt, no state change, no nonce bump — identical on
+// every node. Group order and per-group item order are preserved; emptied groups are removed.
+func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptxns.RelativeGroup) []grouptxns.RelativeGroup {
+	if sigVerifyBypassedForDevnet() || execFilterDisabledForDevnetBenchmark() {
+		return groups
+	}
+	total := 0
+	for _, g := range groups {
+		total += len(g.Items)
+	}
+	if total == 0 {
+		return groups
+	}
+	startFilter := time.Now()
+	flat := make([]types.Transaction, 0, total)
+	for _, g := range groups {
+		for _, item := range g.Items {
+			flat = append(flat, item.Tx)
+		}
+	}
+	valid, st := verifySignatures(chainState.GetAccountStateDB(), flat, nil)
 
 	dropped := 0
 	out := make([]grouptxns.RelativeGroup, 0, len(groups))
@@ -225,8 +282,8 @@ func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptx
 	}
 	// Cost visibility for throughput investigations: this runs on the block critical path of EVERY validator.
 	if elapsed := time.Since(startFilter); elapsed > 20*time.Millisecond || dropped > 0 {
-		logger.Info("🔏 [SIG-ENFORCE] %d txs in %v (cache_hit=%d batch_verified=%d batch_fallback=%d other=%d dropped=%d)",
-			total, elapsed, cacheHits, batched, fellBack, int64(total)-cacheHits-batched-fellBack, dropped)
+		logger.Info("🔏 [SIG-ENFORCE] %d txs in %v (cache_hit=%d batch_verified=%d individual=%d dropped=%d)",
+			total, elapsed, st.cacheHits, st.batched, st.individual, dropped)
 	}
 	if dropped > 0 {
 		logger.Warn("❌ [SIG-ENFORCE] dropped %d/%d txs with invalid signatures", dropped, total)

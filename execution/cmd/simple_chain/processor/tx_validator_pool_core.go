@@ -496,6 +496,10 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	// PERF: Cap workers at numCPU/2 (max 48) to reduce sync.Map contention on
 	// verifiedSignaturesCache. 104 goroutines cause excessive cache-line bouncing.
 	if !skipVerification {
+		// Batch-verify all BLS signatures first (blst random-linear-combination, ~2-3x cheaper CPU per
+		// signature than one-by-one) so the per-tx VerifyTransaction calls below hit the warm cache.
+		tx_processor.PrewarmSignatureCache(vp.chainState, txs, senderStates)
+
 		// GOMAXPROCS(0), not NumCPU(): see native_fast_path.go for why.
 		numWorkers := runtime.GOMAXPROCS(0) / 2
 		if numWorkers < 4 {

@@ -133,3 +133,58 @@ func TestFilterInvalidSignatures_BenchmarkSwitchIsDevnetOnly(t *testing.T) {
 		t.Fatal("devnet benchmark switch should disable the filter")
 	}
 }
+
+// One bad signature in a big chunk must be found by bisection (not by re-verifying the whole chunk one by
+// one), while every other tx keeps its exact verdict.
+func TestVerifySignatures_BisectsFailingChunk(t *testing.T) {
+	cs := setupTestChainState(t)
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+	const n = 256
+	txs := make([]types.Transaction, n)
+	for i := 0; i < n; i++ {
+		from := common.BigToAddress(big.NewInt(int64(20000 + i)))
+		tx, pub := createTestTx(from, common.HexToAddress("0x456"), big.NewInt(1), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, 1)
+		as := state.NewAccountState(from)
+		as.AddBalance(big.NewInt(1_000_000_000_000_000))
+		as.SetPublicKeyBls(pub)
+		as.SetNonce(1)
+		cs.GetAccountStateDB().SetState(as)
+		txs[i] = tx
+	}
+	bad := 77
+	other, _ := createTestTx(common.HexToAddress("0xdead"), common.HexToAddress("0x456"), big.NewInt(1), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, 1)
+	txs[bad].(*transaction.Transaction).SetSignBytes(other.Sign().Bytes())
+
+	rotateVerifiedSignatures()
+	rotateVerifiedSignatures()
+	valid, st := verifySignatures(cs.GetAccountStateDB(), txs, nil)
+	for i, v := range valid {
+		if v == (i == bad) {
+			t.Fatalf("tx %d verdict wrong (valid=%v)", i, v)
+		}
+	}
+	if st.individual > 2*bisectMinSize {
+		t.Fatalf("bisection should isolate one bad sig with <= %d individual checks, did %d", 2*bisectMinSize, st.individual)
+	}
+}
+
+func TestPrewarmSignatureCache_FillsCache(t *testing.T) {
+	cs := setupTestChainState(t)
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+	from := common.HexToAddress("0xabcd")
+	tx, pub := createTestTx(from, common.HexToAddress("0x456"), big.NewInt(1), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, 1)
+	as := state.NewAccountState(from)
+	as.SetPublicKeyBls(pub)
+	as.SetNonce(1)
+	cs.GetAccountStateDB().SetState(as)
+
+	rotateVerifiedSignatures()
+	rotateVerifiedSignatures()
+	if LoadVerifiedSignature(sigCacheKey(tx, pub)) {
+		t.Fatal("cache should start cold")
+	}
+	PrewarmSignatureCache(cs, []types.Transaction{tx, nil}, nil)
+	if !LoadVerifiedSignature(sigCacheKey(tx, pub)) {
+		t.Fatal("prewarm should have cached the verified signature")
+	}
+}
