@@ -326,6 +326,8 @@ if [ -f "${SCRIPT_DIR}/.vault_pass" ]; then
     VAULT_CLUSTER_ARGS=(--vault-password-file "${SCRIPT_DIR}/.vault_pass")
 elif [ -f "${METANODE_ROOT}/deploy/ansible/.vault_pass" ]; then
     VAULT_CLUSTER_ARGS=(--vault-password-file "${METANODE_ROOT}/deploy/ansible/.vault_pass")
+elif [ -f "$HOME/.vault_pass" ]; then
+    VAULT_CLUSTER_ARGS=(--vault-password-file "$HOME/.vault_pass")
 fi
 
 # Pre-flight Security check for plaintext credentials (Issue #104)

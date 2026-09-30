@@ -156,11 +156,38 @@ ansible-playbook -i inventory.yml deploy.yml --tags exec_clusters
 Hệ thống triển khai phân tách rõ giữa môi trường Production và Devnet:
 - **Môi trường Production (`--env=production` hoặc `METANODE_ENV=production`):**
   - Script pre-flight `check_inventory_security.py` và playbook Ansible sẽ **chặn đứng** quá trình triển khai nếu phát hiện bất kỳ mật khẩu plaintext nào (`ansible_become_pass`, `ansible_ssh_pass`, `ansible_password`, `ansible_sudo_pass`).
-  - Bắt buộc phải sử dụng SSH Key không mật khẩu hoặc mã hóa mật khẩu bằng Ansible Vault (`!vault | ...`) và cung cấp cờ `--vault-password-file <path>`.
+  - Bắt buộc phải sử dụng SSH Key không mật khẩu hoặc mã hóa mật khẩu bằng Ansible Vault (`!vault | ...`).
   - Binary `simple_chain` / `metanode` trên server sẽ chạy với cờ bảo vệ production, nghiêm cấm bypass chữ ký mempool.
 - **Môi trường Devnet (`--env=devnet` hoặc `METANODE_ENV=devnet`):**
   - Cho phép sử dụng inventory chứa mật khẩu plaintext phục vụ mục đích kiểm thử và phát triển nhanh trong mạng nội bộ cô lập.
   - Mặc định script `deploy_clusters.sh` thiết lập `--env=devnet` để thuận tiện cho việc chạy bộ test 5 kịch bản.
+
+#### 🔐 Hướng dẫn mã hóa mật khẩu bằng Ansible Vault (Từng bước):
+1. **Tạo file chìa khóa Vault (`.vault_pass`):**
+   ```bash
+   cd deploy/ansible_clusters   # hoặc cd deploy/ansible
+   echo "ten_mat_khau_vault_cua_ban" > .vault_pass
+   chmod 600 .vault_pass
+   ```
+   *(💡 File `.vault_pass` đã nằm trong `.gitignore`, tuyệt đối an toàn không bị commit lên Git).*
+
+2. **Mã hóa chuỗi mật khẩu server:**
+   ```bash
+   ansible-vault encrypt_string --vault-password-file ~/.vault_pass 'password' --name ansible_become_pass
+   ```
+
+3. **Dán khối kết quả vào `inventory.yml`:**
+   ```yaml
+   all:
+     vars:
+       ansible_user: "abc"
+       ansible_become_pass: !vault |
+                 $ANSIBLE_VAULT;1.1;AES256
+                 32333835353265326636306432...
+   ```
+
+4. **Thực thi:**
+   Cả script `deploy_clusters.sh` lẫn `ansible_deploy.sh` đều đã được tích hợp cơ chế tự động tìm file `.vault_pass` trong thư mục hiện tại hoặc tại `~/.vault_pass`. Khi bạn chạy các lệnh `--start, --stop, --deploy, reset-all`, script sẽ **tự động nạp chìa khóa giải mã ngầm** mà không cần gõ thêm cờ phụ.
 ---
 
 ## 🧪 4. BỘ SCRIPT KIỂM THỬ CHUYÊN SÂU (TESTING SCRIPTS)
