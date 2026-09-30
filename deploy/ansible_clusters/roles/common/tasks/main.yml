@@ -26,4 +26,21 @@
     - { src: "{{ local_bin_dir }}/parent_chain", dest: "{{ bin_dir }}/parent_chain" }
     - { src: "{{ local_bin_dir }}/simple_chain", dest: "{{ bin_dir }}/simple_chain" }
     - { src: "{{ playbook_dir }}/../../deploy/systemd/genesis.json.example", dest: "{{ install_dir }}/genesis_base.json" }
-    - { src: "{{ playbook_dir }}/private_dev_keys.json", dest: "{{ install_dir }}/private_dev_keys.json" }
+
+# private_dev_keys.json holds devnet-only keys: never ship it outside devnet, and
+# only when the operator actually provides it (it is not tracked in the repo).
+- name: Check for optional devnet keys file
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/private_dev_keys.json"
+  delegate_to: localhost
+  become: false
+  register: private_dev_keys_stat
+
+- name: Distribute devnet keys (devnet only)
+  when:
+    - (metanode_env | default('production')) == 'devnet' or (node_env | default('production')) == 'devnet'
+    - private_dev_keys_stat.stat.exists
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/private_dev_keys.json"
+    dest: "{{ install_dir }}/private_dev_keys.json"
+    mode: '0600'
