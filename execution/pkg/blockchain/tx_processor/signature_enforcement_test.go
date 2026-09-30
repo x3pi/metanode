@@ -110,3 +110,26 @@ func TestFilterInvalidSignatures_BatchPathExactVerdicts(t *testing.T) {
 		}
 	}
 }
+
+func TestFilterInvalidSignatures_BenchmarkSwitchIsDevnetOnly(t *testing.T) {
+	cs := setupTestChainState(t)
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+	victim := common.HexToAddress("0x1234")
+	unsigned := transaction.NewTransaction(victim, common.HexToAddress("0x5678"), big.NewInt(2), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, p_common.TRANSFER_GAS_COST,
+		[]byte{}, nil, common.Hash{}, common.Hash{}, 2, 1)
+
+	t.Setenv("METANODE_DEVNET_SKIP_EXEC_SIG_FILTER", "true")
+	t.Setenv("METANODE_DEVNET", "")
+	if out := FilterInvalidSignatures(cs, groupsOf(unsigned)); len(out) != 0 {
+		t.Fatal("benchmark switch without METANODE_DEVNET must not disable the filter")
+	}
+	t.Setenv("METANODE_DEVNET", "true")
+	t.Setenv("NODE_ENV", "production")
+	if out := FilterInvalidSignatures(cs, groupsOf(unsigned)); len(out) != 0 {
+		t.Fatal("benchmark switch in production must not disable the filter")
+	}
+	t.Setenv("NODE_ENV", "")
+	if out := FilterInvalidSignatures(cs, groupsOf(unsigned)); len(out) != 1 {
+		t.Fatal("devnet benchmark switch should disable the filter")
+	}
+}

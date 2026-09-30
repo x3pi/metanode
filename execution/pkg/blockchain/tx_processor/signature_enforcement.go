@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	eth_common "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -70,7 +71,7 @@ func checkTxSignature(tx types.Transaction, as types.AccountState) bool {
 // fast path already does for a rejected tx: no receipt, no state change, no nonce bump — identical on
 // every node. Group order and per-group item order are preserved; emptied groups are removed.
 func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptxns.RelativeGroup) []grouptxns.RelativeGroup {
-	if sigVerifyBypassedForDevnet() {
+	if sigVerifyBypassedForDevnet() || execFilterDisabledForDevnetBenchmark() {
 		return groups
 	}
 	total := 0
@@ -88,6 +89,8 @@ func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptx
 			refs = append(refs, ref{gi, ii})
 		}
 	}
+	startFilter := time.Now()
+	var cacheHits, batched, fellBack int64
 	valid := make([]bool, total)
 	accountDB := chainState.GetAccountStateDB()
 
@@ -145,6 +148,7 @@ func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptx
 			key := sigCacheKey(tx, as.PublicKeyBls())
 			if LoadVerifiedSignature(key) {
 				valid[k] = true
+				atomic.AddInt64(&cacheHits, 1)
 			} else {
 				queued[k] = &pending{k: k, key: key, pub: as.PublicKeyBls()}
 			}
@@ -180,12 +184,14 @@ func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptx
 			pubs[i], sigs[i], msgs[i] = p.pub, tx.Sign().Bytes(), h.Bytes()
 		}
 		if bls.VerifyBatch(pubs, sigs, msgs) {
+			atomic.AddInt64(&batched, int64(len(part)))
 			for _, p := range part {
 				valid[p.k] = true
 				StoreVerifiedSignature(p.key)
 			}
 			return
 		}
+		atomic.AddInt64(&fellBack, int64(len(part)))
 		for _, p := range part {
 			tx := groups[refs[p.k].g].Items[refs[p.k].i].Tx
 			as, err := accountDB.AccountStateReadOnly(tx.FromAddress())
@@ -217,6 +223,11 @@ func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptx
 		ng.Items = kept
 		out = append(out, ng)
 	}
+	// Cost visibility for throughput investigations: this runs on the block critical path of EVERY validator.
+	if elapsed := time.Since(startFilter); elapsed > 20*time.Millisecond || dropped > 0 {
+		logger.Info("🔏 [SIG-ENFORCE] %d txs in %v (cache_hit=%d batch_verified=%d batch_fallback=%d other=%d dropped=%d)",
+			total, elapsed, cacheHits, batched, fellBack, int64(total)-cacheHits-batched-fellBack, dropped)
+	}
 	if dropped > 0 {
 		logger.Warn("❌ [SIG-ENFORCE] dropped %d/%d txs with invalid signatures", dropped, total)
 	}
@@ -227,6 +238,20 @@ func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptx
 // SKIP_MEMPOOL_SIG_VERIFY=true only honoured with METANODE_DEVNET=true and never in production).
 func sigVerifyBypassedForDevnet() bool {
 	if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") != "true" {
+		return false
+	}
+	isProd := os.Getenv("NODE_ENV") == "production" ||
+		os.Getenv("ENVIRONMENT") == "production" ||
+		os.Getenv("METANODE_ENV") == "production"
+	return os.Getenv("METANODE_DEVNET") == "true" && !isProd
+}
+
+// execFilterDisabledForDevnetBenchmark lets a devnet operator A/B the throughput cost of THIS filter alone
+// (mempool verification stays on): METANODE_DEVNET_SKIP_EXEC_SIG_FILTER=true, honoured only with
+// METANODE_DEVNET=true and never in production. Not for real networks: it re-opens the Byzantine-proposer
+// forged-tx hole the filter closes.
+func execFilterDisabledForDevnetBenchmark() bool {
+	if os.Getenv("METANODE_DEVNET_SKIP_EXEC_SIG_FILTER") != "true" {
 		return false
 	}
 	isProd := os.Getenv("NODE_ENV") == "production" ||
