@@ -40,7 +40,7 @@ Các quyết định kèm theo (agent triển khai theo đây; nếu Discovery �
 3. Không sửa kiểu/interface dùng chung nếu chưa phân tích blast radius (`grep`/codegraph).
 4. Sau mỗi thay đổi code: chạy `consensus/metanode/scripts/build_check.sh` (Go + Rust + FFI) sạch, không warning.
 5. Cập nhật `PROJECT_STRUCTURE.md` khi thêm module/file quan trọng. Tóm tắt cuối mỗi phản hồi bằng tiếng Việt theo mẫu `AGENTS.md`.
-6. **Máy này có parent chain đang chạy thật** (`/opt/metanode/parent_chain`, HTTP `:8547`; mạng `:9000`, peer RPC `:19300`, metrics `:9110` theo mặc định của template; log `/var/log/metanode/parent_chain.log`, ~59.000 block, cụm exec đang phụ thuộc vào nó). **Không dừng, không ghi đè, không dùng lại các cổng đó.** Mọi thử nghiệm dùng thư mục dữ liệu và dải cổng riêng (gợi ý: HTTP `18601–18604`, mạng `19001–19004`, peer RPC `19501–19504`, metrics `19601–19604`).
+6. **Môi trường local dev, dữ liệu bỏ được** (chủ dự án chốt 2026-10-01): được tự do dừng/wipe/chạy lại từ đầu mọi cụm (kể cả parent chain `:8547` và các cụm exec) khi test. Cụm thử nghiệm đề xuất dùng dải cổng riêng (HTTP `18601–18604`, mạng `19001–19004`, peer RPC `19501–19504`, metrics `19601–19604`) để tách khỏi các cụm khác, nhưng không bắt buộc.
 7. Commit bằng tên file (`git add <file>`), không `git add <thư mục>` (worktree dùng chung). Không push `dev` nếu chưa được chủ dự án đồng ý.
 8. Bài học đã trả giá (đọc trước khi đụng NOMT/commit): `execution/pkg/blockchain/block_state_commit.go` mục 8a/8b (**ghi block DB bền TRƯỚC khi commit NOMT**, để NOMT không bao giờ vượt tip bền); `execution/pkg/rollup/N1_DURABILITY_REPORT.md`; đừng gọi `Checkpoint()` NOMT trên đường nóng (gây đứng hệ thống); đừng dùng khóa `parking_lot` lồng nhau trong consensus-core.
 
@@ -213,7 +213,7 @@ WP0 ─┬─> WP1 ──> WP2 ──> WP3 ──> WP4 ──> WP5 ──┐
 
 ### WP0 — Hạ tầng thử nghiệm cô lập
 - Script dựng cụm N=4 cục bộ **trên cổng riêng** (mục 1.6): 4 thư mục dữ liệu, sinh khóa, sinh committee, sinh 4 `node_parent_i.toml`, chạy 4 tiến trình, dừng/khởi động lại từng node. Đặt ở `deploy/cluster/local_parent_chain/` (mô phỏng `deploy/cluster/local_devnet/`).
-- **Nghiệm thu:** `./run.sh up` chạy 4 node; `./run.sh status` in `last_block`, `block_hash`, `state_root` từng node; không đụng tiến trình `:8547`.
+- **Nghiệm thu:** `./run.sh up` chạy 4 node; `./run.sh status` in `last_block`, `block_hash`, `state_root` từng node.
 
 ### WP1 — Mô hình dữ liệu cây và thực thi block nguyên tử
 - Cài đặt mục 5 (lưu trữ theo mục 5.2b, tái dùng `pkg/trie` của simple_chain): overlay hai lớp trên cây NOMT, mã hóa chuẩn tắc, `Header`/`block_hash`, cây Merkle nhị phân cho `txs_root`/`receipts_root`, `ApplyBlock` idempotent + `ErrBlockGap/ErrBlockConflict`, rào chắn độ bền (D10).
@@ -311,7 +311,7 @@ Tích hợp (cụm WP0, cổng riêng):
 - [ ] Mất quorum ⇒ dừng an toàn, không fork; đủ quorum ⇒ tự tiến (T-I3).
 - [ ] Client đọc qua `QuorumClient` + proof chịu được 1 node nói dối (T-C2, T-I7).
 - [ ] `build_check.sh` sạch; `go test ./...` pass; `PROJECT_STRUCTURE.md`, runbook, tài liệu triển khai đã cập nhật.
-- [ ] Không có thay đổi nào lên tiến trình parent chain đang chạy ở `:8547` ngoài việc chủ dự án chủ động chuyển đổi.
+- [ ] Redeploy sạch từ genesis (wipe parent + exec) chạy cross-chain e2e pass.
 
 ---
 

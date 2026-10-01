@@ -11,7 +11,7 @@
 2. Mọi queue/worker mới có giới hạn bộ đệm; không I/O chặn trong vòng lặp async.
 3. Sau mỗi thay đổi: `consensus/metanode/scripts/build_check.sh` sạch, **và** `cd execution && go build ./cmd/parent_chain/... && go vet` (build_check **không** build `parent_chain`).
 4. Cập nhật `PROJECT_STRUCTURE.md` khi đổi cấu trúc. Commit bằng tên file (`git add <file>`), không `git add <thư mục>`. Không push `dev` khi chưa được chủ dự án đồng ý.
-5. **Không tự ý đụng** parent chain đang chạy ở `:8547` (`/opt/metanode/parent_chain`, binary cũ, ~59.000 block, các cụm exec đang phụ thuộc vào nó; dữ liệu là dữ liệu dev nên wipe được, nhưng chỉ khi chủ dự án yêu cầu — xem P7) và các node thực thi đang chạy (`/opt/metanode/exec1_r1..3`, `exec2`, `node-0..3`). Thử nghiệm dùng cụm cô lập `deploy/cluster/local_parent_chain/` (cổng HTTP 18601–18604, mạng 19001–19004). Thư mục này bị `.gitignore` chặn (chứa khóa), **đừng ép commit**; nếu cần script/test dùng chung thì đặt bản không chứa khóa ở `deploy/parent_chain_cluster/` hoặc `execution/scripts/`.
+5. **Môi trường là local dev, dữ liệu bỏ được:** agent được **tự do dừng, wipe dữ liệu và chạy lại từ đầu** (parent chain `:8547`, cụm exec, cụm 4 node cục bộ) khi cần để test; không cần xin phép, không cần backup, không cần giữ tương thích. Khuyến nghị vẫn dùng cụm cô lập `deploy/cluster/local_parent_chain/` (cổng 18601–18604, mạng 19001–19004) cho test chịu lỗi để không làm gián đoạn các cụm khác khi không cần thiết. Thư mục này bị `.gitignore` chặn (chứa khóa), **đừng ép commit**; nếu cần script/test dùng chung thì đặt bản không chứa khóa ở `deploy/parent_chain_cluster/` hoặc `execution/scripts/`.
 6. Báo cáo trung thực: cái gì đã chạy thật trên cụm, cái gì mới có unit test.
 
 ---
@@ -96,13 +96,13 @@ Chạy trên cụm `deploy/cluster/local_parent_chain/` (4 node, cổng riêng).
 - Ansible: `parent_chain_nodes` nhiều host (`parent_node_id`, cổng), phân phối cùng một `parent_genesis.json`, tham số `-genesis`, mở cổng P2P/peer RPC giữa các node; unit systemd đọc `security.env`.
 - Công cụ sinh khóa + genesis cho N node (mẫu: `crates/metanode-keytool`, `deploy/systemd/gen_validator_entry.py`); **khóa không commit**.
 - Inventory mẫu (`inventory.example.yml`) có ví dụ 4 parent node; README cập nhật.
-- **Nghiệm thu:** `./deploy_clusters.sh` với inventory 4 parent node dựng được cụm **cục bộ cổng riêng** (không đụng `:8547`); mọi node lên cùng block/`state_root`.
+- **Nghiệm thu:** `./deploy_clusters.sh` với inventory 4 parent node dựng được cụm **cục bộ cổng riêng** ; mọi node lên cùng block/`state_root`.
 
 ### P6 — (đã bỏ)
 Không có bước di chuyển dữ liệu cũ (chủ dự án chốt 2026-10-01). Không viết công cụ export/migrate; không cần giữ tương thích DB cũ.
 
-### P7 — Triển khai lại sạch (thay cho cutover)  **[chỉ khi chủ dự án yêu cầu]**
-Môi trường dev, không cần bảo toàn dữ liệu: **wipe dữ liệu parent chain cũ rồi dựng cụm mới từ genesis** (genesis mới chứa committee + cluster/tài khoản khởi tạo từ công cụ sinh genesis của P2/P5), cấu hình các cụm exec trỏ `parent_chain_urls` vào cụm mới, đăng ký lại cluster/tài khoản, chạy cross-chain e2e (deposit/transfer/claim/reclaim). Wipe và redeploy phải làm **đồng loạt** (parent + exec) vì định dạng dữ liệu và giao dịch thay đổi. Vẫn nên có thư mục `backup_*` của binary/dữ liệu cũ cho đến khi e2e pass (rẻ, nhưng không cần công cụ migrate). Cập nhật runbook.
+### P7 — Triển khai lại sạch (thay cho cutover)  
+Môi trường dev, không cần bảo toàn dữ liệu: **wipe dữ liệu parent chain cũ rồi dựng cụm mới từ genesis** (genesis mới chứa committee + cluster/tài khoản khởi tạo từ công cụ sinh genesis của P2/P5), cấu hình các cụm exec trỏ `parent_chain_urls` vào cụm mới, đăng ký lại cluster/tài khoản, chạy cross-chain e2e (deposit/transfer/claim/reclaim). Wipe và redeploy phải làm **đồng loạt** (parent + exec) vì định dạng dữ liệu và giao dịch thay đổi. Không cần backup. Cập nhật runbook.
 
 ### P8 — Các việc đảm bảo chất lượng (song song, xong trước P7)
 - **H7:** viết T-U6 cho đường thật: handler ghi dở rồi lỗi ⇒ không còn ghi dở, nonce xử lý đúng quy tắc đã chốt (ghi quyết định vào `note/`: nonce tăng khi tx hợp lệ chữ ký nhưng handler lỗi, để chống replay); T-U7 giả lập crash từng bước rào chắn độ bền (block DB bền trước NOMT).
@@ -121,7 +121,7 @@ Môi trường dev, không cần bảo toàn dữ liệu: **wipe dữ liệu par
 - [ ] Triển khai N node bằng ansible dựng được cụm cục bộ cổng riêng (P5).
 - [ ] Runbook, metrics, tool giám sát, benchmark có số liệu thật (P8).
 - [ ] `build_check.sh` sạch, `go build ./cmd/parent_chain/...`, `go test` các gói liên quan (kể cả `-race`) pass; `PROJECT_STRUCTURE.md` cập nhật đúng mức đã kiểm chứng.
-- [ ] Không có thay đổi nào lên tiến trình `:8547` hay các node thực thi đang chạy ngoài việc chủ dự án chủ động yêu cầu redeploy sạch (P7).
+- [ ] Sau khi xong, một lần redeploy sạch từ genesis (wipe parent + exec) chạy cross-chain e2e pass (P7).
 
 ## 5. Việc để sau (ngoài phạm vi)
 
