@@ -580,3 +580,7 @@ deploy/.bin.lock
 deploy/.build.lock
 deploy/.bin_staging.*
 execution/gen_recovery_committee
+
+# Generated exports of the fraud-proof doc (source of truth is the .md)
+execution/pkg/rollup/FRAUD_PROOF_FEASIBILITY_AND_SOLUTIONS.html
+execution/pkg/rollup/FRAUD_PROOF_FEASIBILITY_AND_SOLUTIONS.pdf

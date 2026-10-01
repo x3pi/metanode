@@ -954,6 +954,11 @@ func (t *Transaction) AuthorizationList() []*pb.SetCodeAuthorization {
 	return t.proto.AuthorizationList
 }
 
+// SetAuthorizationList sets the EIP-7702 authorization tuples.
+func (t *Transaction) SetAuthorizationList(list []*pb.SetCodeAuthorization) {
+	t.proto.AuthorizationList = list
+}
+
 // EthAccessList returns the tx's EIP-2930 access list converted to
 // go-ethereum's representation. Empty for tx types that don't carry one.
 // Used for intrinsic-gas accounting (see vm_processor.computeIntrinsicGas).

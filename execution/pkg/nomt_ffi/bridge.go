@@ -1009,6 +1009,34 @@ func (h *Handle) GenerateProof(key [32]byte) ([]byte, error) {
 	return C.GoBytes(unsafe.Pointer(proofPtr), C.int(proofLen)), nil
 }
 
+// VerifyProof verifies a Merkle proof for a given 32-byte key path against a known state root.
+// If val is nil or empty, it verifies non-existence of the key.
+// Otherwise, it verifies that the key exists and contains val.
+func VerifyProof(root [32]byte, key [32]byte, val []byte, proof []byte) (bool, error) {
+	if len(proof) == 0 {
+		return false, fmt.Errorf("empty proof")
+	}
+	rootPtr := (*C.uint8_t)(unsafe.Pointer(&root[0]))
+	keyPtr := (*C.uint8_t)(unsafe.Pointer(&key[0]))
+	proofPtr := (*C.uint8_t)(unsafe.Pointer(&proof[0]))
+	proofLen := C.size_t(len(proof))
+
+	var valPtr *C.uint8_t
+	var valLen C.size_t
+	if len(val) > 0 {
+		valPtr = (*C.uint8_t)(unsafe.Pointer(&val[0]))
+		valLen = C.size_t(len(val))
+	}
+
+	res := C.nomt_verify_proof(rootPtr, keyPtr, valPtr, valLen, proofPtr, proofLen)
+	if res == 1 {
+		return true, nil
+	} else if res == 0 {
+		return false, nil
+	}
+	return false, fmt.Errorf("nomt_verify_proof execution failed")
+}
+
 // ─── UNIFIED STATE DB METHODS (SIMPLIFIED BRIDGE) ────────────────────────────
 
 // StateDbRoot returns the current Merkle root of the state database.

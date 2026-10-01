@@ -802,6 +802,11 @@ func (t *Transaction) AuthorizationList() []*pb.SetCodeAuthorization {
 	return t.proto.AuthorizationList
 }
 
+// SetAuthorizationList sets the EIP-7702 authorization tuples.
+func (t *Transaction) SetAuthorizationList(list []*pb.SetCodeAuthorization) {
+	t.proto.AuthorizationList = list
+}
+
 func (tx *Transaction) MaxFee() *big.Int {
 	maxGas := big.NewInt(0).SetUint64(tx.MaxGas())
 

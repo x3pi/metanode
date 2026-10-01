@@ -56,4 +56,28 @@ type Client interface {
 
 	SendSubmitStateRoot(clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash, cert cm.Sign) (common.Hash, error)
 	GetStateRoot(clusterPubKey cm.PublicKey, epoch uint64) (common.Hash, bool, error)
+
+	GetBlockByNumber(number uint64) (BlockRecord, bool, error)
+	GetBlockByHash(hash common.Hash) (BlockRecord, bool, error)
+	GetTransaction(txHash common.Hash) (uint64, uint32, bool, error)
+	GetReceipt(txHash common.Hash) (*Receipt, bool, error)
+	GetStatus() (ChainStatus, error)
+	GetProof(key [32]byte) (ProofResult, error)
+	SendRawTransaction(rawTx []byte) (common.Hash, error)
 }
+
+type ChainStatus struct {
+	LastBlock    uint64      `json:"last_block"`
+	LastHash     common.Hash `json:"last_hash"`
+	StateRoot    common.Hash `json:"state_root"`
+	Syncing      bool        `json:"syncing"`
+	ForkDetected bool        `json:"fork_detected"`
+}
+
+type ProofResult struct {
+	Key       common.Hash `json:"key"`
+	Proof     []byte      `json:"proof"`
+	StateRoot common.Hash `json:"state_root"`
+	Verified  bool        `json:"verified"`
+}
+

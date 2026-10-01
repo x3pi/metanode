@@ -13,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -136,6 +137,10 @@ func (api *MetaAPI) processCallRequest(ctx context.Context, rawInput json.RawMes
 		).(*transaction.Transaction)
 
 		txM.SetReadOnly(true)
+		if len(args.AuthList) > 0 {
+			txM.SetAuthorizationList(transaction.FromEthAuthorizationList(args.AuthList))
+			txM.SetType(uint64(eth_types.SetCodeTxType))
+		}
 	}
 
 	if txM.GetNonce() == 0 {

@@ -66,6 +66,9 @@ type Store interface {
 
 	AppendInboundTransfer(destKeyHash common.Hash, event *TransferEvent) error
 	GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([]*TransferEvent, uint64, error)
+
+	GetNonce(sender common.Address) (uint64, error)
+	SetNonce(sender common.Address, nonce uint64) error
 }
 
 // MemoryStore is an in-memory implementation for testing
@@ -80,6 +83,7 @@ type MemoryStore struct {
 	accounts        map[common.Address]cm.PublicKey
 	inbound         map[common.Hash][]*TransferEvent
 	stateRoots      map[common.Hash]map[uint64]common.Hash
+	nonces          map[common.Address]uint64
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -93,6 +97,7 @@ func NewMemoryStore() *MemoryStore {
 		accounts:        make(map[common.Address]cm.PublicKey),
 		inbound:         make(map[common.Hash][]*TransferEvent),
 		stateRoots:      make(map[common.Hash]map[uint64]common.Hash),
+		nonces:          make(map[common.Address]uint64),
 	}
 }
 
@@ -145,6 +150,9 @@ func (m *MemoryStore) Clone() *MemoryStore {
 			events[i] = &evCopy
 		}
 		clone.inbound[k] = events
+	}
+	for k, v := range m.nonces {
+		clone.nonces[k] = v
 	}
 	return clone
 }
@@ -370,3 +378,17 @@ func (m *MemoryStore) SetStateRoot(clusterKeyHash common.Hash, epoch uint64, roo
 	m.stateRoots[clusterKeyHash][epoch] = root
 	return nil
 }
+
+func (m *MemoryStore) GetNonce(sender common.Address) (uint64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.nonces[sender], nil
+}
+
+func (m *MemoryStore) SetNonce(sender common.Address, nonce uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nonces[sender] = nonce
+	return nil
+}
+

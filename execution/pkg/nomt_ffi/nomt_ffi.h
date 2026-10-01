@@ -47,9 +47,10 @@ int nomt_checkpoint(const NomtHandle* handle, const char* src_path, const char* 
 }
 #endif
 
-/* Proof Generation */
+/* Proof Generation and Verification */
 int nomt_generate_proof(const NomtHandle* handle, const uint8_t* key, uint8_t** proof_out, size_t* proof_len);
 void nomt_free_proof(uint8_t* proof_ptr, size_t proof_len);
+int nomt_verify_proof(const uint8_t* root, const uint8_t* key, const uint8_t* value, size_t value_len, const uint8_t* proof_ptr, size_t proof_len);
 
 /* Unified State DB FFI APIs (Simplified Bridge) */
 typedef struct RustStateDBHandle RustStateDBHandle;
