@@ -104,12 +104,7 @@ func sendRawTx(nodeURL string, tx *pb.Transaction) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	hexStr := hex.EncodeToString(rawBytes)
-	reqBody, _ := json.Marshal(map[string]string{
-		"raw_tx": "0x" + hexStr,
-		"data":   "0x" + hexStr,
-	})
-	resp, err := http.Post(nodeURL+"/send_raw_transaction", "application/json", bytes.NewReader(reqBody))
+	resp, err := http.Post(nodeURL+"/send_raw_transaction", "application/octet-stream", bytes.NewReader(rawBytes))
 	if err != nil {
 		return "", err
 	}

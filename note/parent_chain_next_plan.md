@@ -123,3 +123,17 @@ Làm tuần tự, mỗi gói một hoặc vài commit; chạy lại `build_check
 ## 6. Việc để sau (ngoài phạm vi)
 
 Chữ ký tổng hợp BLS trên header (client tin một nguồn); phí/gas; đổi committee tự động và epoch có đổi validator; cắt tỉa block cũ/snapshot đồng thuận (xem `parent_chain_multinode_plan.md` mục 10).
+
+## 7. Cập nhật 2026-10-01 (sau khi xóa hẳn luồng JSON) — việc mới, ưu tiên cao
+
+**Đã làm và đã chạy thật** (xem commit "remove legacy JSON ..."): xóa `ParentChainTx`/`POST /tx`/`httpClient.Send*`/chế độ giao dịch không ký và chữ ký ECDSA (không chạy được vì hash chứa R,S,V); mọi giao dịch ký BLS trên hash + nonce tuần tự, gửi raw proto; script e2e dùng `QuorumClient` (relayer riêng). Kiểm chứng thật: ansible `--reset --test` 9/9 (3 lần); công cụ `cmd/tool/parent_chain_security_check` (tấn công thật: POST /tx, JSON body, deposit không nguồn, nguồn chưa đăng ký, chứng nhận giả, không chữ ký, registerCluster lạ) pass ở chế độ mở (devnet) và chế độ đóng (`-expect-closed`, cụm local genesis đóng, mã 221).
+
+**Lỗ hổng thật phát hiện khi gỡ JSON (đã sửa):** (1) `DepositToFloat` BỎ QUA kiểm chứng nhận khi `sourceKey` rỗng ⇒ ai cũng đúc float; (2) `registerCluster` không giới hạn ⇒ ai cũng tự thành cluster rồi đúc. Sửa: nguồn bắt buộc phải là cluster đã đăng ký + chứng nhận hợp lệ; chính sách đăng ký cluster lấy từ genesis (`open_cluster_registration` chỉ cho devnet, `clusters` = allow-list cho production, mặc định đóng). **Production phải có `open_cluster_registration:false` và liệt kê khóa cluster trong genesis.** Chế độ mở = ai cũng đúc được (chỉ devnet).
+
+**Việc mở mới:**
+
+| Mã | Vấn đề | Bằng chứng / hướng xử lý |
+|---|---|---|
+| **G11** | **Node restart khi chain đang rảnh có thể kẹt vĩnh viễn (liveness).** Node-3 sau `stop-node/start-node` kẹt ở block cũ; log Rust: `BLOCKED synced_commit_index advance ... (execution parity gap=463, handled=175, local_commit=639)` lặp mãi. `highest_handled` bị đặt từ commit index của block Go cuối (175) còn DAG đã có 600+ commit rỗng không được giao cho Go ⇒ gap > 50 ⇒ cổng fork-safety trong `consensus/metanode/meta-consensus/core/src/commit_syncer/mod.rs` (~dòng 2580-2610) chặn thoát CatchingUp, trong khi CommitProcessor chờ CommitSyncer ⇒ vòng chờ. **Có từ trước thay đổi này:** bản binary CŨ (`a22d9638`) cũng fail T-I8 y hệt 1/2 lần; bản mới fail 3/4 lần chạy bộ `test_cluster_fault_tolerance` (T-I8 ×3, T-I3 ×1), `-test T-I3` riêng lẻ pass 2/2 ⇒ phụ thuộc trạng thái trước đó (node vừa restart khi chain đã rảnh >50 commit). Vi phạm nguyên tắc "không deadlock vĩnh viễn" của AGENTS.md (an toàn: pending, không fork). Cần phân tích gốc ở Rust (cách `commit_consumer_monitor.highest_handled_commit` tính cho commit rỗng bị bỏ qua / khởi tạo từ `go_handled` ở `authority_node/mod.rs:349`), sửa bằng dữ liệu (không timeout), thêm test hồi quy (rảnh >50 commit rồi restart ⇒ phải tự bắt kịp). **Đây là việc quan trọng nhất trước khi coi parent chain là chạy ổn định thực tế.** |
+| **G12** | Node nói dối với `QuorumClient`, T-I4 tamper và e2e exec-node với node parent nói dối vẫn chưa kiểm live đầy đủ (T-I4 live đã có ở commit `61174d2f` và pass trong các lần chạy mới). | N3 ở trên |
+| **G13** | `registerAccount` tự đăng ký không cần cluster (bootstrap khóa người gửi) và exec node đăng ký tài khoản chính mình ⇒ cần rà lại mô hình ủy quyền người dùng (user ECDSA sig tùy chọn, `userSig=nil` được chấp nhận?) | `pkg/parentchain/state.go` RegisterAccount, `cmd/simple_chain/app.go` |

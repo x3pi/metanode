@@ -139,3 +139,28 @@ Khi cấu hình lại danh sách validator hoặc thay đổi stake/khóa trong 
 5. Thực hiện wipe dữ liệu toàn cụm: `./run.sh clean`.
 6. Khởi động lại cụm mới: `./run.sh up`.
 7. Kiểm tra `/validators` trên tất cả các node để xác nhận committee mới đã có hiệu lực.
+
+## 4. Genesis: ai được đăng ký làm cluster (BẮT BUỘC đọc trước khi chạy production)
+
+Chứng nhận của một cluster đã đăng ký là thứ cho phép `depositToFloat` (đúc float). Vì vậy việc đăng ký cluster do **genesis** quyết định, giống hệt trên mọi validator:
+
+| Trường genesis | Ý nghĩa |
+|---|---|
+| `open_cluster_registration: true` | Bất kỳ khóa nào cũng tự đăng ký được cluster rồi đúc float. **CHỈ cho devnet/test.** Node parent in cảnh báo khi khởi động. |
+| `open_cluster_registration: false` + `clusters: ["<48-byte BLS pubkey hex>", ...]` | Chỉ các khóa trong danh sách được `registerCluster` (receipt lỗi mã 221 với khóa khác). **Cấu hình production.** |
+| (thiếu cả hai) | Mặc định đóng, danh sách rỗng: không ai đăng ký được. |
+
+Ansible: biến `parent_open_cluster_registration` (mặc định `true` cho devnet) và `parent_allowed_clusters` trong inventory. Kiểm tra bằng:
+
+```bash
+cd execution && go run ./cmd/tool/parent_chain_security_check -url http://<node>:<port> [-expect-closed]
+```
+Công cụ tấn công thật (POST /tx, deposit không nguồn/nguồn lạ/chứng nhận giả/không chữ ký, registerCluster lạ) và thoát mã 1 nếu có kẻ tấn công nào lọt.
+
+## 5. Giao dịch: chỉ có một đường
+
+Mọi thay đổi trạng thái là `pb.Transaction` ký BLS trên hash (kèm `ChainID=990` và nonce tuần tự), gửi **raw proto bytes** tới `POST /send_raw_transaction`. Không còn `POST /tx` JSON, không còn giao dịch không ký. `GET /nonce?address=0x...` trả nonce đã commit của người gửi (client tự tính nonce tiếp theo, `QuorumClient` làm sẵn).
+
+## 6. Sự cố đã biết: node restart khi chain rảnh có thể không bắt kịp
+
+Xem `note/parent_chain_next_plan.md` mục 7 (G11). Triệu chứng: `/status` của node dừng ở block cũ, log Rust lặp `BLOCKED synced_commit_index advance ... execution parity gap`. Cách xử lý tạm thời: wipe dữ liệu node đó (`run.sh wipe-node <id>` / xóa thư mục dữ liệu) rồi để nó đồng bộ lại từ các node khác.

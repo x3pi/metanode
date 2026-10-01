@@ -116,7 +116,6 @@ thật của `deploy/`), nhưng nếu muốn dọn: gộp về 1 file `config.de
 | :--- | :--- | :--- |
 | `SNAPSHOT_SERVER_TOKEN` | `executor/snapshot_server.go` | Nếu đặt: mọi request tới snapshot server (port `snapshot_server_port`) cần `Authorization: Bearer <token>`. `POST /api/snapshots/create` **luôn** cần token (không đặt = endpoint bị vô hiệu vì nó pause Go+Rust và rotate mất snapshot thật). |
 | `SNAPSHOT_SERVER_BIND` | `executor/snapshot_server.go` | Ghi đè địa chỉ bind (mặc định `0.0.0.0`; nên đặt `127.0.0.1` nếu không cần peer tải). |
-| `PARENT_CHAIN_RPC_TOKEN` | `pkg/parentchain/http_rpc.go` | Bắt buộc cho `DepositToFloat` (tx không có chữ ký user). Server fail-closed nếu không đặt; client gửi `Authorization: Bearer`. |
 | `QUIC_PINNED_CERT_SHA256` | `pkg/quic_network/quic.go` | Danh sách SHA-256 (hex, phân cách dấu phẩy) của leaf cert peer hợp lệ. Không đặt = QUIC không xác thực peer (chỉ cảnh báo log). |
 
 Thay đổi hành vi (KHÔNG cần biến): (1) mọi đường thực thi block giờ lọc tx sai chữ ký
