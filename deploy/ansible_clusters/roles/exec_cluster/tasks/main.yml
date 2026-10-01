@@ -85,6 +85,7 @@
             mkdir -p "{{ install_dir }}"
             python3 -c "import secrets; print(secrets.token_hex(32), end='')" > "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
             chmod 600 "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
+            chown {{ ansible_user | default('abc') }}:{{ ansible_user | default('abc') }} "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
 
     - name: Generate cluster genesis if not present or reset
       ansible.builtin.shell: |
