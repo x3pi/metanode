@@ -39,6 +39,7 @@ func TestDepositToFloat_ConsecutiveDepositsUniqueMsgID(t *testing.T) {
 
 	kp := bls.GenerateKeyPair()
 	pubKey := kp.PublicKey()
+	privKey := kp.PrivateKey()
 	clusterID := uint64(101)
 	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
@@ -61,10 +62,15 @@ func TestDepositToFloat_ConsecutiveDepositsUniqueMsgID(t *testing.T) {
 	assert.NotEqual(t, msgID1, msgID2, "consecutive identical deposits must have distinct MsgIDs")
 
 	// Verify both deposits can be successfully recorded in parent chain state
-	err1 := DepositToFloat(store, pubKey, clusterID, sender, target, amount, msgID1, 100)
+	_ = store.SetChainRegistry(crypto.Keccak256Hash(pubKey[:]), ChainRegistryEntry{FloatIdentityKey: pubKey, ClusterIDDescriptive: clusterID})
+	dig1 := ComputeDepositFloatMessage(pubKey, clusterID, sender, target, amount, msgID1)
+	cert1 := bls.Sign(privKey, dig1)
+	err1 := DepositToFloat(store, pubKey, pubKey, clusterID, sender, target, amount, msgID1, cert1, 100)
 	assert.NoError(t, err1)
 
-	err2 := DepositToFloat(store, pubKey, clusterID, sender, target, amount, msgID2, 101)
+	dig2 := ComputeDepositFloatMessage(pubKey, clusterID, sender, target, amount, msgID2)
+	cert2 := bls.Sign(privKey, dig2)
+	err2 := DepositToFloat(store, pubKey, pubKey, clusterID, sender, target, amount, msgID2, cert2, 101)
 	assert.NoError(t, err2, "second identical deposit must not fail with ErrFloatAlreadyResolved")
 
 	// Total balance in float account must be 2000
@@ -203,9 +209,17 @@ func TestHTTPRPC_FullChainEndpoints(t *testing.T) {
 	kp := bls.GenerateKeyPair()
 	pub := kp.PublicKey()
 	priv := kp.PrivateKey()
+
+	regData := EncodeRegisterClusterCallData(pub, 101)
+	regTx, err := BuildAndSignBLSTx(priv, pub, ParentChainGatewayAddress, 0, regData)
+	assert.NoError(t, err)
+	regBytes, _ := proto.Marshal(regTx)
+
 	msgID := common.HexToHash("0x1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff")
-	callData := EncodeDepositToFloatCallData(pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID)
-	tx, err := BuildAndSignBLSTx(priv, pub, ParentChainGatewayAddress, 0, callData)
+	dig := ComputeDepositFloatMessage(pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID)
+	cert := bls.Sign(priv, dig)
+	callData := EncodeDepositToFloatCallData(pub, pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID, cert)
+	tx, err := BuildAndSignBLSTx(priv, pub, ParentChainGatewayAddress, 1, callData)
 	assert.NoError(t, err)
 	txBytes, _ := proto.Marshal(tx)
 
@@ -218,7 +232,7 @@ func TestHTTPRPC_FullChainEndpoints(t *testing.T) {
 		TimestampMs:   1000,
 		LeaderAddress: common.HexToAddress("0x7e615e4a500ab42b7bb3fdbb62fbb8bd10385fc5"),
 		CommitDigest:  common.HexToHash("0xabcd"),
-		Txs:           [][]byte{txBytes},
+		Txs:           [][]byte{regBytes, txBytes},
 	}
 	res, err := store.ApplyBlock(in, func(st Store, idx int, rawTx []byte) (*Receipt, error) {
 		var pTx pb.Transaction
@@ -267,7 +281,7 @@ func TestHTTPRPC_FullChainEndpoints(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, found)
 	assert.Equal(t, uint64(1), bNum)
-	assert.Equal(t, uint32(0), idx)
+	assert.Equal(t, uint32(1), idx)
 
 	// 4. GetReceipt
 	rcpt, found, err := client.GetReceipt(txHash)

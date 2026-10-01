@@ -138,7 +138,9 @@ func TestTx_DepositToFloat(t *testing.T) {
 	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
 	amount := big.NewInt(1000000)
 
-	callData := EncodeDepositToFloatCallData(pub, 101, sender, target, amount, msgID)
+	dig := ComputeDepositFloatMessage(pub, 101, sender, target, amount, msgID)
+	cert := bls.Sign(priv, dig)
+	callData := EncodeDepositToFloatCallData(pub, pub, 101, sender, target, amount, msgID, cert)
 	tx, err := BuildAndSignBLSTx(priv, pub, ParentChainGatewayAddress, 0, callData)
 	require.NoError(t, err)
 
@@ -166,7 +168,9 @@ func TestTx_DuplicateMsgID(t *testing.T) {
 	priv, pub, _ := setupCluster(t, store, 101)
 
 	msgID := common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	callData := EncodeDepositToFloatCallData(pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID)
+	dig := ComputeDepositFloatMessage(pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID)
+	cert := bls.Sign(priv, dig)
+	callData := EncodeDepositToFloatCallData(pub, pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID, cert)
 
 	// Tx 1: nonce 0
 	tx1, err := BuildAndSignBLSTx(priv, pub, ParentChainGatewayAddress, 0, callData)
@@ -192,7 +196,9 @@ func TestTx_HandlerAuthorizationChecks(t *testing.T) {
 
 	// Deposit initial funds to cluster 1
 	msgID := common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-	require.NoError(t, DepositToFloat(store, pub1, 101, common.Address{}, common.Address{}, big.NewInt(1000), msgID, 1000))
+	dig := ComputeDepositFloatMessage(pub1, 101, common.Address{}, common.Address{}, big.NewInt(1000), msgID)
+	cert := bls.Sign(priv1, dig)
+	require.NoError(t, DepositToFloat(store, pub1, pub1, 101, common.Address{}, common.Address{}, big.NewInt(1000), msgID, cert, 1000))
 
 	// TransferFloat initiated by cluster 1
 	val := big.NewInt(100)

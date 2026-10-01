@@ -269,12 +269,30 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	// are enabled only when PARENT_CHAIN_URL is set explicitly. The client is still built (default URL) so RPC
 	// handlers that reference it never see a nil pointer.
 	parentChainURL := os.Getenv("PARENT_CHAIN_URL")
-	app.rollupEnabled = parentChainURL != ""
-	if !app.rollupEnabled {
-		parentChainURL = "http://127.0.0.1:8547"
-		logger.Info("PARENT_CHAIN_URL is not set: rollup workers and parent-chain registration are disabled")
+	parentChainURLs := os.Getenv("PARENT_CHAIN_URLS")
+	var urls []string
+	if parentChainURLs != "" {
+		for _, u := range strings.Split(parentChainURLs, ",") {
+			u = strings.TrimSpace(u)
+			if u != "" {
+				urls = append(urls, u)
+			}
+		}
+	} else if parentChainURL != "" {
+		for _, u := range strings.Split(parentChainURL, ",") {
+			u = strings.TrimSpace(u)
+			if u != "" {
+				urls = append(urls, u)
+			}
+		}
 	}
-	parentClient := parentchain.NewHTTPClient(parentChainURL)
+
+	app.rollupEnabled = len(urls) > 0
+	if !app.rollupEnabled {
+		urls = []string{"http://127.0.0.1:8547"}
+		logger.Info("PARENT_CHAIN_URL / PARENT_CHAIN_URLS is not set: rollup workers and parent-chain registration are disabled")
+	}
+	parentClient := parentchain.NewQuorumClient(urls, app.keyPair.PrivateKey(), app.keyPair.PublicKey())
 	app.parentClient = parentClient
 
 	scAdapter := &smartContractDBAdapter{chainState: app.chainState}

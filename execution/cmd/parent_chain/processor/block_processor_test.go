@@ -133,11 +133,18 @@ func TestBlockProcessor_StateRootProvider(t *testing.T) {
 	pub := kp.PublicKey()
 	priv := kp.PrivateKey()
 	msgID := common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111")
-	callData := parentchain.EncodeDepositToFloatCallData(pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID)
-	tx, err := parentchain.BuildAndSignBLSTx(priv, pub, parentchain.ParentChainGatewayAddress, 0, callData)
+
+	regData := parentchain.EncodeRegisterClusterCallData(pub, 101)
+	regTx, err := parentchain.BuildAndSignBLSTx(priv, pub, parentchain.ParentChainGatewayAddress, 0, regData)
 	require.NoError(t, err)
 
-	blk1 := makeTestBlock(1, 100, 1000, []*pb.Transaction{tx})
+	dig := parentchain.ComputeDepositFloatMessage(pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID)
+	cert := bls.Sign(priv, dig)
+	callData := parentchain.EncodeDepositToFloatCallData(pub, pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID, cert)
+	tx, err := parentchain.BuildAndSignBLSTx(priv, pub, parentchain.ParentChainGatewayAddress, 1, callData)
+	require.NoError(t, err)
+
+	blk1 := makeTestBlock(1, 100, 1000, []*pb.Transaction{regTx, tx})
 	resp1 := bp.ProcessBlock(blk1)
 	require.True(t, resp1.Success)
 

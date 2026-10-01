@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 )
 
@@ -13,7 +14,7 @@ var (
 	rustConfigPath = flag.String("rust-config", "config.json", "Rust consensus config path")
 	dataDir        = flag.String("data-dir", "./data", "Data directory")
 	httpAddr       = flag.String("http", ":8545", "HTTP RPC listen address")
-	genesisPath    = flag.String("genesis", "parent_genesis.json", "Parent chain genesis file path")
+	genesisPath    = flag.String("genesis", "", "Parent chain genesis file path (REQUIRED)")
 )
 
 func main() {
@@ -21,6 +22,17 @@ func main() {
 	signal.Ignore(syscall.SIGHUP, syscall.SIGPIPE)
 
 	flag.Parse()
+
+	if *genesisPath == "" {
+		candidate1 := filepath.Join(*dataDir, "parent_genesis.json")
+		if _, err := os.Stat(candidate1); err == nil {
+			*genesisPath = candidate1
+		} else if _, err := os.Stat("parent_genesis.json"); err == nil {
+			*genesisPath = "parent_genesis.json"
+		} else {
+			log.Fatalf("Fatal: -genesis flag is required. You must specify the path to genesis JSON (e.g. -genesis parent_genesis.json)")
+		}
+	}
 
 	log.Println("Starting Parent Chain Node...")
 

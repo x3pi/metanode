@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"strings"
 
@@ -56,8 +57,11 @@ func LoadGenesis(path string) (*Genesis, error) {
 		return nil, fmt.Errorf("%w: invalid chain_id %d (expected 990)", ErrGenesisInvalid, g.ChainID)
 	}
 
+	if len(g.Validators) == 0 {
+		return nil, fmt.Errorf("%w: validators list cannot be empty", ErrGenesisInvalid)
+	}
 	if len(g.Validators) < 4 {
-		return nil, fmt.Errorf("%w: minimum 4 validators required for BFT quorum, got %d", ErrGenesisInvalid, len(g.Validators))
+		fmt.Printf("⚠️ Warning: Genesis has %d validators (< 4). Minimum 4 required for BFT quorum in production.\n", len(g.Validators))
 	}
 
 	seenAddresses := make(map[string]bool)
@@ -73,6 +77,11 @@ func LoadGenesis(path string) (*Genesis, error) {
 			return nil, fmt.Errorf("%w: validator %d duplicate or empty address %s", ErrGenesisInvalid, i, v.Address)
 		}
 		seenAddresses[addr] = true
+
+		stakeVal, ok := new(big.Int).SetString(strings.TrimSpace(v.Stake), 10)
+		if !ok || stakeVal.Sign() <= 0 {
+			return nil, fmt.Errorf("%w: validator %d invalid or non-positive stake: %s", ErrGenesisInvalid, i, v.Stake)
+		}
 
 		if strings.TrimSpace(v.P2PAddress) == "" {
 			return nil, fmt.Errorf("%w: validator %d missing p2p_address", ErrGenesisInvalid, i)

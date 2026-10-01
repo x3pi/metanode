@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -860,17 +861,21 @@ func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, am
 	}
 	senderAddr := crypto.PubkeyToAddress(privKey.PublicKey)
 
-	if api.App.blsKeyStore != nil {
-		if has, _ := api.App.blsKeyStore.HasPrivateKey(senderAddr); !has {
-			if err := api.App.blsKeyStore.SetPrivateKey(senderAddr, blsHex); err != nil {
-				return "", fmt.Errorf("failed to register devnet sender BLS key: %w", err)
-			}
-		}
-	}
-
 	accountState, err := api.App.chainState.GetAccountStateDB().AccountState(senderAddr)
 	if err != nil {
 		return "", fmt.Errorf("failed to load sender account state: %w", err)
+	}
+
+	if senderKeyHex == nil && blsKeyHex == nil && accountState != nil {
+		if len(accountState.PublicKeyBls()) == 48 && bytes.Equal(accountState.PublicKeyBls(), api.App.keyPair.PublicKey().Bytes()) {
+			blsHex = hex.EncodeToString(api.App.keyPair.PrivateKey().Bytes())
+		}
+	}
+
+	if api.App.blsKeyStore != nil {
+		if err := api.App.blsKeyStore.SetPrivateKey(senderAddr, blsHex); err != nil {
+			return "", fmt.Errorf("failed to register devnet sender BLS key: %w", err)
+		}
 	}
 	nonce := uint64(0)
 	if accountState != nil {

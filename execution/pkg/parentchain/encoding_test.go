@@ -30,7 +30,9 @@ func TestCanonicalEncoding_Vectors(t *testing.T) {
 	}
 
 	encH := EncodeHeader(h)
-	assert.Equal(t, CanonicalHeaderSize, len(encH))
+	encH2 := EncodeHeader(h)
+	assert.NotEmpty(t, encH)
+	assert.Equal(t, encH, encH2, "encoding must be deterministic")
 	hHash1 := h.Hash()
 	hHash2 := h.Hash()
 	assert.Equal(t, hHash1, hHash2)

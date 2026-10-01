@@ -26,6 +26,7 @@ var (
 )
 
 var (
+	DepositFloatDomainTag    = []byte("DEPOSIT_FLOAT_V1:")
 	TransferFloatDomainTag   = []byte("TRANSFER_FLOAT_V1:")
 	ReclaimFloatDomainTag    = []byte("RECLAIM_FLOAT_V1:")
 	MarkClaimedDomainTag     = []byte("MARK_CLAIMED_FLOAT_V1:")
@@ -53,6 +54,18 @@ func padTo32(val *big.Int) []byte {
 	res := make([]byte, 32)
 	copy(res[32-len(b):], b)
 	return res
+}
+
+func ComputeDepositFloatMessage(destKey cm.PublicKey, destClusterID uint64, sender, target common.Address, amount *big.Int, msgID common.Hash) []byte {
+	buf := make([]byte, 0, len(DepositFloatDomainTag)+48+8+20+20+32+32)
+	buf = append(buf, DepositFloatDomainTag...)
+	buf = append(buf, destKey[:]...)
+	buf = appendUint64BE(buf, destClusterID)
+	buf = append(buf, sender.Bytes()...)
+	buf = append(buf, target.Bytes()...)
+	buf = append(buf, padTo32(amount)...)
+	buf = append(buf, msgID.Bytes()...)
+	return buf
 }
 
 func ComputeTransferFloatMessage(fromKey, toKey cm.PublicKey, sender, target common.Address, value, fee *big.Int, payloadHash common.Hash, nonce uint64) []byte {
@@ -110,8 +123,8 @@ func ensureChainRegistry(store Store, keyHash common.Hash, key cm.PublicKey, clu
 	return nil
 }
 
-// DepositToFloat credits destKey's NodeFloatAccount by amount and records messageID.
-func DepositToFloat(store Store, destKey cm.PublicKey, destClusterIDDesc uint64, sender, target common.Address, amount *big.Int, messageID common.Hash, blockTime uint64) error {
+// DepositToFloat credits destKey's NodeFloatAccount by amount with certified proof from sourceKey, and records messageID.
+func DepositToFloat(store Store, sourceKey, destKey cm.PublicKey, destClusterIDDesc uint64, sender, target common.Address, amount *big.Int, messageID common.Hash, cert cm.Sign, blockTime uint64) error {
 	if destKey == (cm.PublicKey{}) {
 		return errors.New("DepositToFloat: zero destination public key")
 	}
@@ -122,6 +135,24 @@ func DepositToFloat(store Store, destKey cm.PublicKey, destClusterIDDesc uint64,
 		return err
 	} else if found {
 		return fmt.Errorf("DepositToFloat: %w: %s", ErrFloatAlreadyResolved, messageID.Hex())
+	}
+
+	// 1. Verify source cluster exists in ChainRegistry (if this is a cross-cluster transfer)
+	if sourceKey != (cm.PublicKey{}) {
+		sourceHash := crypto.Keccak256Hash(sourceKey[:])
+		_, found, err := store.GetChainRegistry(sourceHash)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errors.New("DepositToFloat: unknown source cluster")
+		}
+
+		// 2. Verify source cluster's BLS signature on the deposit message
+		digest := ComputeDepositFloatMessage(destKey, destClusterIDDesc, sender, target, amount, messageID)
+		if !bls.VerifySign(sourceKey, cert, digest) {
+			return fmt.Errorf("DepositToFloat: %w", ErrInvalidSignature)
+		}
 	}
 
 	destHash := crypto.Keccak256Hash(destKey[:])
@@ -148,8 +179,9 @@ func DepositToFloat(store Store, destKey cm.PublicKey, destClusterIDDesc uint64,
 	if err := store.SetFloat(floatTotalSupplyKey, newTotal); err != nil {
 		return err
 	}
+	srcKeyCopy := sourceKey
 	err = store.SetTransferRecord(messageID, FloatTransferRecord{
-		SourceKey:            nil,
+		SourceKey:            &srcKeyCopy,
 		DestKey:              destKey,
 		Value:                new(big.Int).Set(amount),
 		ConfirmedAtBlockTime: blockTime,

@@ -356,8 +356,9 @@ func main() {
 	// =======================================================================================
 	printHeader("KỊCH BẢN 5: PARENT CHAIN NGỪNG HOẠT ĐỘNG -> NODE THỰC THI VẪN TIẾN TRIỂN ĐỘC LẬP")
 	fmt.Println("1. Dừng tiến trình Parent Chain (giả lập sự cố Parent Chain offline)...")
-	_ = exec.Command("sudo", "systemctl", "stop", "metanode-parentchain.service").Run()
-	_ = exec.Command("sudo", "pkill", "-9", "-f", "parent_chain").Run()
+	_ = exec.Command("sudo", "-n", "systemctl", "stop", "metanode-parentchain.service").Run()
+	_ = exec.Command("pkill", "-9", "-f", "parent_chain").Run()
+	_ = exec.Command("sudo", "-n", "pkill", "-9", "-f", "parent_chain").Run()
 	time.Sleep(2 * time.Second)
 
 	// Kiểm tra Parent Chain thật sự đã sập
@@ -415,10 +416,26 @@ func main() {
 	// KỊCH BẢN 6: Khôi phục Parent Chain -> Tự động tái đồng bộ & khôi phục giao dịch liên cụm
 	// =======================================================================================
 	printHeader("KỊCH BẢN 6: KHÔI PHỤC PARENT CHAIN -> TỰ ĐỘNG TÁI KẾT NỐI & KHÔI PHỤC GIAO DỊCH LIÊN CỤM")
-	fmt.Println("1. Khởi động lại tiến trình Parent Chain...")
-	startParentCmd := exec.Command("sudo", "bash", "-c", "cd /opt/metanode/parent_chain && nohup /opt/metanode/bin/parent_chain -data-dir /opt/metanode/parent_chain -http :8547 -rust-config /opt/metanode/parent_chain/node_parent.toml >> /var/log/metanode/parent_chain.log 2>&1 & echo $! > /opt/metanode/parent_chain/parent_chain.pid")
-	_ = startParentCmd.Run()
-	_ = exec.Command("sudo", "systemctl", "start", "metanode-parentchain.service").Run()
+	fmt.Println("1. Khởi động lại các tiến trình Parent Chain...")
+	pDirs := []string{"/opt/metanode/parent_chain", "/opt/metanode/parent_chain_0", "/opt/metanode/parent_chain_1", "/opt/metanode/parent_chain_2", "/opt/metanode/parent_chain_3"}
+	for _, pDir := range pDirs {
+		cfgPath := filepath.Join(pDir, "node_parent.toml")
+		genPath := filepath.Join(pDir, "parent_genesis.json")
+		if _, err := os.Stat(cfgPath); err == nil {
+			port := "8547"
+			if strings.HasSuffix(pDir, "_1") {
+				port = "18602"
+			} else if strings.HasSuffix(pDir, "_2") {
+				port = "18603"
+			} else if strings.HasSuffix(pDir, "_3") {
+				port = "18604"
+			}
+			cmdStr := fmt.Sprintf("cd %s && nohup /opt/metanode/bin/parent_chain -data-dir %s -http :%s -rust-config %s -genesis %s >> /var/log/metanode/parent_chain.log 2>&1 & echo $! > %s/parent_chain.pid", pDir, pDir, port, cfgPath, genPath, pDir)
+			_ = exec.Command("bash", "-c", cmdStr).Run()
+			_ = exec.Command("sudo", "-n", "bash", "-c", cmdStr).Run()
+		}
+	}
+	_ = exec.Command("sudo", "-n", "systemctl", "start", "metanode-parentchain.service").Run()
 
 	// 2. Chờ Parent Chain online trở lại
 	fmt.Println("2. Kiểm tra Parent Chain phản hồi kết nối (health check)...")
