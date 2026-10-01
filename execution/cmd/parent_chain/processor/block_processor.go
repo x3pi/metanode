@@ -27,6 +27,7 @@ type BlockProcessor struct {
 	quit         chan struct{}
 	onTxResult   func(msgID common.Hash, err error)
 	syncCallback func(fromBlock uint64)
+	forkCallback func(fork bool)
 
 	mu              sync.RWMutex
 	lastBlockNumber uint64
@@ -44,7 +45,7 @@ func NewBlockProcessor(committer parentchain.BlockCommitter, onTxResult func(msg
 		onTxResult: onTxResult,
 	}
 
-	// Startup recovery: reload last applied progress from durable DB
+	// Startup recovery and state integrity verification
 	if committer != nil {
 		prog, err := committer.LastApplied()
 		if err == nil && prog.LastBlock > 0 {
@@ -53,17 +54,56 @@ func NewBlockProcessor(committer parentchain.BlockCommitter, onTxResult func(msg
 			bp.lastStateRoot = prog.LastStateRoot
 			bp.lastBlockHash = prog.LastHash
 
-			storage.UpdateLastBlockNumber(prog.LastBlock)
-			storage.UpdateLastAssignedBlockNumber(prog.LastBlock)
-			storage.UpdateLastGlobalExecIndex(prog.LastGEI)
-			if rec, found, err := committer.GetBlockRecord(prog.LastBlock); err == nil && found {
+			// 1. Verify LevelDB block record integrity for LastBlock
+			rec, found, recErr := committer.GetBlockRecord(prog.LastBlock)
+			if recErr != nil || !found {
+				log.Printf("🚨 [PARENT-CHAIN-STARTUP] Block record #%d missing or unreadable: %v", prog.LastBlock, recErr)
+				bp.forkDetected = true
+				parentchain.ParentChainForkDetected.Set(1)
+			} else {
+				if rec.Header.StateRoot != prog.LastStateRoot {
+					log.Printf("🚨 [PARENT-CHAIN-STARTUP] Block record #%d state root mismatch: rec=%s vs prog=%s",
+						prog.LastBlock, rec.Header.StateRoot.Hex(), prog.LastStateRoot.Hex())
+					bp.forkDetected = true
+					parentchain.ParentChainForkDetected.Set(1)
+				}
+				if rec.BlockHash != prog.LastHash {
+					log.Printf("🚨 [PARENT-CHAIN-STARTUP] Block record #%d block hash mismatch: rec=%s vs prog=%s",
+						prog.LastBlock, rec.BlockHash.Hex(), prog.LastHash.Hex())
+					bp.forkDetected = true
+					parentchain.ParentChainForkDetected.Set(1)
+				}
+				computedHash := rec.Header.Hash()
+				if rec.BlockHash != computedHash {
+					log.Printf("🚨 [PARENT-CHAIN-STARTUP] Block record #%d corrupted hash! stored=%s vs computed=%s",
+						prog.LastBlock, rec.BlockHash.Hex(), computedHash.Hex())
+					bp.forkDetected = true
+					parentchain.ParentChainForkDetected.Set(1)
+				}
 				if rec.Header.CommitIndex > 0 {
 					storage.UpdateLastHandledCommitIndex(rec.Header.CommitIndex)
 				}
 			}
 
-			log.Printf("Parent Chain: Recovered at block #%d (GEI %d), stateRoot=%s",
-				prog.LastBlock, prog.LastGEI, prog.LastStateRoot.Hex())
+			// 2. Verify NOMT Merkle tree root matches durable prog.LastStateRoot
+			if actualRoot, rErr := committer.NomtRoot(); rErr == nil {
+				if actualRoot != prog.LastStateRoot {
+					log.Printf("🚨 [PARENT-CHAIN-STARTUP] CRITICAL STATE ROOT MISMATCH! LevelDB LastStateRoot=%s != NOMT Root=%s at block #%d",
+						prog.LastStateRoot.Hex(), actualRoot.Hex(), prog.LastBlock)
+					bp.forkDetected = true
+					parentchain.ParentChainForkDetected.Set(1)
+				}
+			}
+
+			if !bp.forkDetected {
+				storage.UpdateLastBlockNumber(prog.LastBlock)
+				storage.UpdateLastAssignedBlockNumber(prog.LastBlock)
+				storage.UpdateLastGlobalExecIndex(prog.LastGEI)
+				log.Printf("Parent Chain: Recovered at block #%d (GEI %d), stateRoot=%s",
+					prog.LastBlock, prog.LastGEI, prog.LastStateRoot.Hex())
+			} else {
+				log.Printf("🚨 Parent Chain: QUARANTINED ON STARTUP due to state corruption / fork detection at block #%d", prog.LastBlock)
+			}
 		}
 	}
 
@@ -77,6 +117,16 @@ func (bp *BlockProcessor) SetSyncCallback(cb func(fromBlock uint64)) {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 	bp.syncCallback = cb
+}
+
+func (bp *BlockProcessor) SetForkCallback(cb func(fork bool)) {
+	bp.mu.Lock()
+	bp.forkCallback = cb
+	isFork := bp.forkDetected
+	bp.mu.Unlock()
+	if isFork && cb != nil {
+		cb(true)
+	}
 }
 
 func (bp *BlockProcessor) GetQueue() chan *pb.ExecutableBlock {
@@ -260,6 +310,9 @@ func (bp *BlockProcessor) ProcessBlock(block *pb.ExecutableBlock) *pb.ExecuteBlo
 			log.Printf("🚨 Parent Chain: CRITICAL FORK DETECTED at block #%d! State conflict: %v", block.BlockNumber, err)
 			bp.forkDetected = true
 			parentchain.ParentChainForkDetected.Set(1)
+			if bp.forkCallback != nil {
+				bp.forkCallback(true)
+			}
 			return &pb.ExecuteBlockResponse{
 				BlockNumber: block.BlockNumber,
 				Success:     false,

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/syndtr/goleveldb/leveldb"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -463,20 +465,181 @@ func testTI3() error {
 // ─────────────────────────────────────────────────────────────────────────────
 func testTI4() error {
 	fmt.Println("\n================================================================================")
-	fmt.Println("▶ RUNNING T-I4: State Conflict & Fork Guard Detection")
+	fmt.Println("▶ RUNNING T-I4: State Conflict & Fork Guard Detection (Live Tamper Test)")
 	fmt.Println("================================================================================")
 
-	// NOT a live test: nothing here tampers with a node's data. The conflict detector is covered only by the
-	// unit test TestBlockProcessor_ForkConflictDetection. A real live check (stop a node, corrupt its stored
-	// block/state, restart, expect fork_detected) is still TODO, so report this as SKIPPED rather than PASSED.
-	st, err := queryStatus(nodes[0])
+	// Step 1: Verify all nodes are online and in parity
+	initSt, err := waitForClusterParity(15*time.Second, 1)
+	if err != nil {
+		return fmt.Errorf("cluster not in initial parity: %v", err)
+	}
+	fmt.Printf("  [T-I4.1] Baseline: Cluster in parity at Block #%d, StateRoot: %s\n",
+		initSt.LastBlock, initSt.StateRoot[:18]+"...")
+
+	// Step 2: Stop Node-3
+	fmt.Println("  [T-I4.2] Stopping Node-3 for storage tampering...")
+	if err := runClusterScript("stop-node", "3"); err != nil {
+		return fmt.Errorf("failed to stop node-3: %v", err)
+	}
+	time.Sleep(1 * time.Second)
+
+	// Verify Node-3 is offline
+	if _, err := queryStatus(nodes[3]); err == nil {
+		return fmt.Errorf("node-3 still responding after stop")
+	}
+
+	// Step 3: Tamper Node-3 durable DB state
+	// Corrupt sys:progress in LevelDB: alter LastStateRoot so it diverges from NOMT Merkle root
+	node3DBPath := filepath.Join(repoRoot, "deploy/cluster/local_parent_chain/node-3/data/parentchain_db")
+	fmt.Printf("  [T-I4.3] Opening Node-3 DB at %s to tamper sys:progress...\n", node3DBPath)
+
+	rawDB, err := leveldb.OpenFile(node3DBPath, nil)
+	if err != nil {
+		return fmt.Errorf("failed to open node-3 leveldb: %v", err)
+	}
+
+	progBytes, err := rawDB.Get([]byte("sys:progress"), nil)
+	if err != nil {
+		rawDB.Close()
+		return fmt.Errorf("failed to read sys:progress: %v", err)
+	}
+
+	prog, err := parentchain.DecodeBlockProgress(progBytes)
+	if err != nil {
+		rawDB.Close()
+		return fmt.Errorf("failed to decode progress: %v", err)
+	}
+
+	tamperedRoot := common.HexToHash("0xbad0bad0bad0bad0bad0bad0bad0bad0bad0bad0bad0bad0bad0bad0bad0bad0")
+	prog.LastStateRoot = tamperedRoot
+	tamperedProgBytes := parentchain.EncodeBlockProgress(prog)
+
+	if err := rawDB.Put([]byte("sys:progress"), tamperedProgBytes, nil); err != nil {
+		rawDB.Close()
+		return fmt.Errorf("failed to write tampered progress: %v", err)
+	}
+	if err := rawDB.Close(); err != nil {
+		return fmt.Errorf("failed to close tampered db: %v", err)
+	}
+	fmt.Printf("  [T-I4.4] Corrupted Node-3 sys:progress LastStateRoot -> %s\n", tamperedRoot.Hex())
+
+	// Step 4: Restart Node-3 with tampered data
+	fmt.Println("  [T-I4.5] Starting Node-3 with tampered storage state...")
+	if err := runClusterScript("start-node", "3"); err != nil {
+		return fmt.Errorf("failed to restart node-3: %v", err)
+	}
+
+	// Poll Node-3 until status is reachable (timeout 10s)
+	var node3St *StatusResponse
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		st, err := queryStatus(nodes[3])
+		if err == nil {
+			node3St = st
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if node3St == nil {
+		return fmt.Errorf("node-3 did not come up after restart")
+	}
+
+	// Step 5: Verify Node-3 detected fork and quarantined itself
+	fmt.Printf("  [T-I4.6] Querying Node-3 status: fork_detected=%v, last_block=%d\n",
+		node3St.ForkDetected, node3St.LastBlock)
+	if !node3St.ForkDetected {
+		return fmt.Errorf("FAIL: Node-3 did NOT detect fork/tamper! ForkDetected was false")
+	}
+	fmt.Println("  ✅ Node-3 correctly set fork_detected = true in /status!")
+
+	// Also check Prometheus metric on Node-3
+	metricResp, err := http.Get(nodes[3] + "/metrics")
+	if err != nil {
+		return fmt.Errorf("failed to query node-3 metrics: %v", err)
+	}
+	defer metricResp.Body.Close()
+	metricBody, _ := io.ReadAll(metricResp.Body)
+	if !strings.Contains(string(metricBody), "parent_chain_fork_detected 1") {
+		return fmt.Errorf("FAIL: Node-3 /metrics did not report parent_chain_fork_detected 1")
+	}
+	fmt.Println("  ✅ Node-3 correctly exposed parent_chain_fork_detected 1 in Prometheus metrics!")
+
+	// Step 6: Verify honest quorum (Nodes 0, 1, 2) can continue advancing while Node-3 remains quarantined
+	fmt.Println("  [T-I4.7] Submitting transactions to honest quorum (Nodes 0-2) while Node-3 is quarantined...")
+	kp := bls.GenerateKeyPair()
+	cid := uint64(7770)
+	regData := parentchain.EncodeRegisterClusterCallData(kp.PublicKey(), cid)
+	tx, err := parentchain.BuildAndSignBLSTx(kp.PrivateKey(), kp.PublicKey(), parentchain.ParentChainGatewayAddress, 0, regData)
 	if err != nil {
 		return err
 	}
-	if st.ForkDetected {
-		return fmt.Errorf("Node-0 unexpectedly in fork detected state")
+	if _, err := sendRawTx(nodes[0], tx); err != nil {
+		return fmt.Errorf("failed to send tx to node-0: %v", err)
 	}
-	fmt.Println("  ⚠️  T-I4 SKIPPED (live): no tampering performed; only unit-test coverage exists (TestBlockProcessor_ForkConflictDetection)")
+
+	// Wait for honest nodes (0, 1, 2) to advance
+	var honestAdvanced bool
+	waitDeadline := time.Now().Add(15 * time.Second)
+	expectedNewBlock := initSt.LastBlock + 1
+	for time.Now().Before(waitDeadline) {
+		st0, err0 := queryStatus(nodes[0])
+		st1, err1 := queryStatus(nodes[1])
+		st2, err2 := queryStatus(nodes[2])
+		if err0 == nil && err1 == nil && err2 == nil {
+			if st0.LastBlock >= expectedNewBlock &&
+				st1.LastBlock == st0.LastBlock &&
+				st2.LastBlock == st0.LastBlock {
+				honestAdvanced = true
+				fmt.Printf("  ✅ Honest quorum advanced to Block #%d with parity!\n", st0.LastBlock)
+				break
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !honestAdvanced {
+		return fmt.Errorf("honest nodes (0, 1, 2) failed to advance with quorum")
+	}
+
+	// Verify Node-3 did NOT advance and remains quarantined
+	st3After, err := queryStatus(nodes[3])
+	if err != nil {
+		return fmt.Errorf("node-3 unreachable: %v", err)
+	}
+	if st3After.LastBlock >= expectedNewBlock {
+		return fmt.Errorf("FAIL: Quarantined Node-3 advanced to block %d! It should have refused new blocks", st3After.LastBlock)
+	}
+	fmt.Printf("  ✅ Node-3 stayed quarantined at Block #%d (fork_detected=%v)\n",
+		st3After.LastBlock, st3After.ForkDetected)
+
+	// Step 7: Clean Recovery / Resync
+	// Wipe Node-3 (cold wipe) and restart it so it resyncs from honest quorum
+	fmt.Println("  [T-I4.8] Restoring Node-3 via cold wipe & peer resync...")
+	if err := runClusterScript("wipe-node", "3"); err != nil {
+		return fmt.Errorf("failed to wipe node-3: %v", err)
+	}
+	if err := runClusterScript("start-node", "3"); err != nil {
+		return fmt.Errorf("failed to restart wiped node-3: %v", err)
+	}
+
+	// Wait for full cluster parity across all 4 nodes
+	fmt.Println("  [T-I4.9] Waiting for Node-3 to catch up and achieve full 4-node parity...")
+	restoredSt, err := waitForClusterParity(20*time.Second, expectedNewBlock)
+	if err != nil {
+		return fmt.Errorf("cluster parity failed after node-3 recovery: %v", err)
+	}
+
+	// Verify Node-3 fork_detected is now false
+	st3Final, err := queryStatus(nodes[3])
+	if err != nil {
+		return err
+	}
+	if st3Final.ForkDetected {
+		return fmt.Errorf("node-3 still in fork_detected state after wipe & resync")
+	}
+
+	fmt.Printf("  ✅ All 4 nodes in full parity at Block #%d, StateRoot: %s, fork_detected=false\n",
+		restoredSt.LastBlock, restoredSt.StateRoot[:18]+"...")
+	fmt.Println("✅ T-I4 PASSED: State conflict detected on startup, quarantined safely, and recovered to parity!")
 	return nil
 }
 
@@ -727,7 +890,7 @@ func main() {
 	fmt.Printf("Target: %s\n", *testFlag)
 	fmt.Println("================================================================================")
 
-	runAll := *testFlag == "all"
+	runAll := strings.EqualFold(*testFlag, "all")
 
 	tests := []struct {
 		name string
@@ -747,7 +910,7 @@ func main() {
 	failed := 0
 
 	for _, t := range tests {
-		if runAll || *testFlag == t.name {
+		if runAll || strings.EqualFold(*testFlag, t.name) {
 			err := t.fn()
 			if err != nil {
 				fmt.Printf("\n❌ [%s] FAILED: %v\n", t.name, err)

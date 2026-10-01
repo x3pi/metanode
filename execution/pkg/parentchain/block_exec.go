@@ -66,6 +66,7 @@ type BlockCommitter interface {
 	ApplyBlock(in BlockInput, exec TxExecutor) (BlockResult, error)
 	GenerateProof(key [32]byte) ([]byte, error)
 	Store() Store
+	NomtRoot() (common.Hash, error)
 }
 
 // ─── KEYS FOR PERSISTENT STORE ───────────────────────────────────────────────

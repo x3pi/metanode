@@ -59,6 +59,12 @@ func NewApp(configPath, rustConfigPath, dataDir, httpAddr, genesisPath string) (
 	httpServer.SetValidators(protoValidators)
 	httpServer.SetProtoTxChan(tb.ProtoChan())
 	bp := processor.NewBlockProcessor(dbStore, httpServer.NotifyTxResult)
+	bp.SetForkCallback(func(fork bool) {
+		httpServer.SetForkDetected(fork)
+	})
+	if bp.IsForkDetected() {
+		httpServer.SetForkDetected(true)
+	}
 
 	return &App{
 		configPath:      configPath,
@@ -197,15 +203,19 @@ func (a *App) Start() error {
 	}
 
 	if prog, err := a.committer.LastApplied(); err == nil && prog.LastBlock > 0 {
-		storage.UpdateLastBlockNumber(prog.LastBlock)
-		storage.UpdateLastGlobalExecIndex(prog.LastBlock)
-		if rec, found, err := a.committer.GetBlockRecord(prog.LastBlock); err == nil && found {
-			if rec.Header.CommitIndex > 0 {
-				storage.UpdateLastHandledCommitIndex(rec.Header.CommitIndex)
+		if !a.blockProcessor.IsForkDetected() {
+			storage.UpdateLastBlockNumber(prog.LastBlock)
+			storage.UpdateLastGlobalExecIndex(prog.LastBlock)
+			if rec, found, err := a.committer.GetBlockRecord(prog.LastBlock); err == nil && found {
+				if rec.Header.CommitIndex > 0 {
+					storage.UpdateLastHandledCommitIndex(rec.Header.CommitIndex)
+				}
 			}
+			log.Printf("Loaded last block #%d from DBStore (state_root=%s, commit_index=%d)",
+				prog.LastBlock, prog.LastStateRoot.Hex(), storage.GetLastHandledCommitIndex())
+		} else {
+			log.Printf("🚨 Node in QUARANTINED fork_detected state at startup: skipping storage block advance")
 		}
-		log.Printf("Loaded last block #%d from DBStore (state_root=%s, commit_index=%d)",
-			prog.LastBlock, prog.LastStateRoot.Hex(), storage.GetLastHandledCommitIndex())
 	}
 
 	reqHandler.CustomGetLastBlockNumberCallback = func(request *pb.GetLastBlockNumberRequest) (*pb.LastBlockNumberResponse, error) {
