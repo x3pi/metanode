@@ -39,20 +39,21 @@
 
 ```
 ================================================================================
-📊 BENCHMARK RESULTS (H10) - 1,000 TRANSACTIONS (REPRODUCED LIVE)
+📊 KẾT QUẢ THỬ NGHIỆM SƠ BỘ T-I1 - 1,000 TRANSACTIONS
 ================================================================================
   • Tổng số giao dịch:        1,000 txs (50 clusters, 20 txs/cluster)
   • Loại giao dịch:           RegisterCluster (nonce 0), DepositToFloat & SubmitStateRoot
   • Khối cam kết:             3 blocks (#1 -> #4)
   • Thời gian gửi (Dispatch): 1.301 s  (768.5 tx/s dispatch rate)
-  • Thời gian cam kết khối:   0.001 s
   • Thời gian End-to-End:     1.302 s
-  • Throughput thực tế:       768.08 tx/giây
+  • Throughput ước tính:      768.08 tx/giây (tốc độ dispatch vào hàng đợi cụm)
   • StateRoot đồng thuận:     0x123e48443d601edc9dba76ca605077522945db3f690dea8ded5c28c581fbf897
   • BlockHash đồng thuận:     0xa4d60ccc7b8b954fcf56cce05bf919110cc0c9fe995055870a707a74a2878aa4
   • Parity giữa 4 node:       100% BIT-PERFECT (Sai lệch = 0)
 ================================================================================
 ```
+> ⚠️ **Lưu ý về phương pháp đo sơ bộ:** Con số "0.001s cam kết" trong công cụ test cũ là do các khối đã được consensus gom batch và cam kết song song ngay trong lúc vòng lặp dispatch gửi tx qua HTTP. Phép đo `waitForClusterParity` sau `wg.Wait()` chỉ bắt được thời điểm khối đã xong. Đây chưa phải là bộ benchmark khoa học nhiều mức tải; hiệu năng chuẩn xác (p50/p95 latency, đa mức tải 1..10k txs) sẽ được đo độc lập theo kế hoạch N5.
+
 
 ---
 
