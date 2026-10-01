@@ -27,7 +27,7 @@ Các quyết định kèm theo (agent triển khai theo đây; nếu Discovery �
 | Đ9 | **Không dùng JSON cho giá trị trong cây state.** Dùng mã hóa nhị phân chuẩn tắc (protobuf `Deterministic: true` hoặc RLP) với test vector. | JSON không phải chuẩn tắc, dễ lệch giữa phiên bản |
 | Đ10 | **Đồng thuận cuối cùng (finality) = commit của Rust BFT**, không có reorg. Client v1 xác minh bằng **đọc quorum f+1 header khớp + Merkle proof**; v2 (backlog) thêm **chữ ký tổng hợp BLS của validator trên header** để tin được một nguồn duy nhất. | v1 đủ an toàn và đơn giản; v2 làm sau |
 | Đ11 | **Chống spam v1:** không có token gas. Người gửi phải là tài khoản/cluster đã đăng ký (cluster do chứng nhận, người dùng do `RegisterAccount`), có `nonce` và giới hạn tốc độ ở ingress. Phí = việc sau. | Đủ cho control plane có người vận hành |
-| Đ12 | **Chain mới dựng từ genesis**, không nâng cấp tại chỗ thành multi-node. Cụm đơn node hiện tại (`:8547`) chạy tiếp cho tới khi cụm mới thay thế; dữ liệu cũ nếu cần giữ được xuất thành genesis bằng công cụ di chuyển (WP11). Môi trường dev cho phép reset. | Tránh trộn hai mô hình dữ liệu |
+| Đ12 | **Chain mới dựng từ genesis, không di chuyển dữ liệu cũ** (chủ dự án chốt 2026-10-01: đang dev). Wipe và redeploy đồng loạt parent + exec. | Tránh trộn hai mô hình dữ liệu, không tốn công migrate |
 | Đ13 | **Mô hình tin cậy:** các validator do **các operator độc lập** vận hành; nếu một bên điều khiển ≥ 2/3 stake thì BFT không thêm bảo đảm tin cậy (chỉ thêm khả dụng). Ghi rõ trong tài liệu vận hành. | Trung thực về giới hạn |
 | Đ14 | **Committee cố định trong giai đoạn đầu** (file genesis chung). Đổi committee = quy trình vận hành có chủ đích, chưa hỗ trợ tự động. | Giảm rủi ro chuyển epoch |
 
@@ -294,10 +294,9 @@ Tích hợp (cụm WP0, cổng riêng):
 - **T-I7** exec cluster dùng `QuorumClient` chạy e2e trong khi 1 parent node bị chặn hoặc nói dối.
 - **T-I8** một validator cố đưa deposit không hợp lệ vào block ⇒ mọi node loại đồng nhất.
 
-### WP11 — Di chuyển, triển khai, tài liệu
-- Cụm đơn node cũ (`:8547`) chạy tiếp tới khi cụm mới sẵn sàng (Đ12). Nếu cần giữ dữ liệu: công cụ `parentchain-export-genesis` đọc DB cũ (số dư float, registry, transfer record, account registry, state root cụm) và ghi `parent_genesis.json`/state khởi tạo; kiểm bất biến tổng cung (`CheckFloatSupplyInvariant`). Mặc định môi trường dev: reset và đăng ký lại.
-- Thứ tự chuyển đổi: dựng cụm mới, cho exec cluster dùng `QuorumClient` trỏ cụm mới, chạy song song có so sánh, rồi tắt cụm cũ. Quay lui: giữ nguyên binary và DB cũ ở thư mục `backup_*`.
-- Tài liệu: `PROJECT_STRUCTURE.md`, `OPERATIONS_GUIDE.md`, `note/parent_chain_multinode_design.md` (bản thiết kế kết quả), runbook (WP9), cập nhật `deploy/ansible_clusters/README.md`; sửa các chỗ ghi "Parent Chain ChainID 991".
+### WP11 — Triển khai lại sạch, tài liệu
+- **Không có bước di chuyển dữ liệu cũ** (chủ dự án chốt 2026-10-01: đang dev, chưa có bản nào cần bảo toàn). Wipe parent chain cũ, dựng cụm mới từ genesis, cấu hình lại exec cluster, đăng ký lại cluster/tài khoản.
+- Tài liệu: `PROJECT_STRUCTURE.md`, `OPERATIONS_GUIDE.md`, `note/parent_chain_multinode_design.md`, runbook (WP9), `deploy/ansible_clusters/README.md`; sửa các chỗ ghi "Parent Chain ChainID 991".
 
 ---
 

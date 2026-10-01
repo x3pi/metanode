@@ -11,7 +11,7 @@
 2. Mọi queue/worker mới có giới hạn bộ đệm; không I/O chặn trong vòng lặp async.
 3. Sau mỗi thay đổi: `consensus/metanode/scripts/build_check.sh` sạch, **và** `cd execution && go build ./cmd/parent_chain/... && go vet` (build_check **không** build `parent_chain`).
 4. Cập nhật `PROJECT_STRUCTURE.md` khi đổi cấu trúc. Commit bằng tên file (`git add <file>`), không `git add <thư mục>`. Không push `dev` khi chưa được chủ dự án đồng ý.
-5. **Không đụng** parent chain đang chạy thật ở `:8547` (`/opt/metanode/parent_chain`, binary cũ, ~59.000 block, các cụm exec phụ thuộc vào nó) và các node thực thi đang chạy (`/opt/metanode/exec1_r1..3`, `exec2`, `node-0..3`). Thử nghiệm dùng cụm cô lập `deploy/cluster/local_parent_chain/` (cổng HTTP 18601–18604, mạng 19001–19004). Thư mục này bị `.gitignore` chặn (chứa khóa), **đừng ép commit**; nếu cần script/test dùng chung thì đặt bản không chứa khóa ở `deploy/parent_chain_cluster/` hoặc `execution/scripts/`.
+5. **Không tự ý đụng** parent chain đang chạy ở `:8547` (`/opt/metanode/parent_chain`, binary cũ, ~59.000 block, các cụm exec đang phụ thuộc vào nó; dữ liệu là dữ liệu dev nên wipe được, nhưng chỉ khi chủ dự án yêu cầu — xem P7) và các node thực thi đang chạy (`/opt/metanode/exec1_r1..3`, `exec2`, `node-0..3`). Thử nghiệm dùng cụm cô lập `deploy/cluster/local_parent_chain/` (cổng HTTP 18601–18604, mạng 19001–19004). Thư mục này bị `.gitignore` chặn (chứa khóa), **đừng ép commit**; nếu cần script/test dùng chung thì đặt bản không chứa khóa ở `deploy/parent_chain_cluster/` hoặc `execution/scripts/`.
 6. Báo cáo trung thực: cái gì đã chạy thật trên cụm, cái gì mới có unit test.
 
 ---
@@ -34,7 +34,7 @@
 | **H5** | **Template triển khai vẫn đơn node:** `node_id = 0`, `peer_rpc_addresses = []`, không có `-genesis`, inventory 1 host. | `deploy/ansible_clusters/roles/parent_chain/templates/node_parent.toml.j2:1,35`, `parent_consensus.toml.j2:35` |
 | **H6** | **Chưa test chịu lỗi** (T-I2..T-I6): dừng 1 node, dừng 2 node (mất quorum), wipe+resync, sửa DB một node. `fork_guard`/`health_check` của Rust chưa được chứng minh bắt được lệch dữ liệu Go mới. | — |
 | **H7** | **Nonce tăng trước khi chạy handler** (`SetNonce` ngay sau xác thực chữ ký, rồi mới dispatch). Cần xác nhận hành vi tất định khi handler lỗi: nonce đã tăng nhưng ghi dở của handler phải bị bỏ (overlay lớp tx). Phải có test chứng minh (T-U6) chứ không giả định. | `pkg/parentchain/tx.go:386-405` |
-| **H8** | **Chưa có công cụ di chuyển dữ liệu** từ parent chain cũ (DB LevelDB JSON) sang chain mới; định dạng DB lưu trữ **không tương thích**. Không được chạy binary mới trên thư mục dữ liệu `:8547`. | `pkg/parentchain/db_store.go` (đã viết lại) |
+| **H8** | ~~Di chuyển dữ liệu cũ~~ **Không cần** (chủ dự án 2026-10-01: đang dev, chưa có bản nào chạy cần bảo toàn dữ liệu). Chain mới dựng từ genesis; môi trường dev wipe và triển khai lại. Lưu ý kỹ thuật: định dạng DB mới **không tương thích** DB cũ, nên khi nâng cấp binary phải wipe thư mục dữ liệu parent chain (không chạy binary mới trên dữ liệu cũ). | `pkg/parentchain/db_store.go` |
 | **H9** | **Chưa có runbook, metrics fork, tool giám sát**; PROJECT_STRUCTURE đã ghi mức xác minh vừa phải. | — |
 | **H10** | **Chưa đo hiệu năng** dưới tải (cụm mới chỉ chạy ~4 block). Ghi bền `Sync` mỗi block + NOMT trên đường nóng chưa được đo. | — |
 | **H11** | `ChainID 990` chưa được quét toàn repo (ansible/doc còn ghi "Parent Chain ChainID 991"). | `grep -rn "991" deploy note` |
@@ -45,7 +45,7 @@
 
 ```
 P1 (H1 deposit authz) ──┐
-P2 (H4 genesis bắt buộc)─┼─> P3 (H2,H3 client + QuorumClient) ──> P4 (H6 test chịu lỗi cụm) ──> P6 (H8 migrate) ──> P7 (cutover)
+P2 (H4 genesis bắt buộc)─┼─> P3 (H2,H3 client + QuorumClient) ──> P4 (H6 test chịu lỗi cụm) ──> P7 (redeploy sạch)
                          └─> P5 (H5 template/ansible) ─────────────┘                                    │
 P8 (H7,H9,H10,H11: test nonce, runbook, metrics, perf, ChainID) chạy song song, xong trước P7 ─────────┘
 ```
@@ -98,14 +98,11 @@ Chạy trên cụm `deploy/cluster/local_parent_chain/` (4 node, cổng riêng).
 - Inventory mẫu (`inventory.example.yml`) có ví dụ 4 parent node; README cập nhật.
 - **Nghiệm thu:** `./deploy_clusters.sh` với inventory 4 parent node dựng được cụm **cục bộ cổng riêng** (không đụng `:8547`); mọi node lên cùng block/`state_root`.
 
-### P6 — Di chuyển dữ liệu từ parent chain cũ (H8)
-- Công cụ `execution/cmd/tool/parentchain-export-genesis` (read-only): đọc DB LevelDB cũ (số dư float, chain registry, account registry, transfer record/claimed, seq, state root cụm) → ghi `parent_genesis.json` + state khởi tạo. **Mở DB ở chế độ chỉ đọc trên bản sao**, không bao giờ mở thư mục đang chạy.
-- Kiểm bất biến: tổng cung float cũ = mới (`CheckFloatSupplyInvariant`), số bản ghi khớp, mẫu ngẫu nhiên khóa/giá trị khớp.
-- Ghi rõ: các giao dịch/block lịch sử cũ **không** mang sang (chain mới bắt đầu từ genesis chứa trạng thái đã chốt); nếu cần lưu lịch sử thì giữ DB cũ làm lưu trữ.
-- **Nghiệm thu:** chạy trên bản sao DB thật của `:8547`, báo cáo số liệu so khớp; test đơn vị cho từng loại bản ghi.
+### P6 — (đã bỏ)
+Không có bước di chuyển dữ liệu cũ (chủ dự án chốt 2026-10-01). Không viết công cụ export/migrate; không cần giữ tương thích DB cũ.
 
-### P7 — Chuyển đổi (cutover)  **[chỉ thực hiện khi chủ dự án chủ động yêu cầu]**
-Thứ tự: dựng cụm mới từ genesis đã migrate → cho **một** cụm exec dùng `QuorumClient` trỏ cụm mới, chạy cross-chain e2e (deposit/transfer/claim/reclaim) → chạy song song có so sánh số dư float → chuyển các cụm còn lại → tắt cụm cũ. Quay lui: giữ binary + DB cũ ở thư mục `backup_*` (mẫu `~/backup_pre_upgrade/…`). Runbook phải nêu rõ thao tác và điểm quay lui.
+### P7 — Triển khai lại sạch (thay cho cutover)  **[chỉ khi chủ dự án yêu cầu]**
+Môi trường dev, không cần bảo toàn dữ liệu: **wipe dữ liệu parent chain cũ rồi dựng cụm mới từ genesis** (genesis mới chứa committee + cluster/tài khoản khởi tạo từ công cụ sinh genesis của P2/P5), cấu hình các cụm exec trỏ `parent_chain_urls` vào cụm mới, đăng ký lại cluster/tài khoản, chạy cross-chain e2e (deposit/transfer/claim/reclaim). Wipe và redeploy phải làm **đồng loạt** (parent + exec) vì định dạng dữ liệu và giao dịch thay đổi. Vẫn nên có thư mục `backup_*` của binary/dữ liệu cũ cho đến khi e2e pass (rẻ, nhưng không cần công cụ migrate). Cập nhật runbook.
 
 ### P8 — Các việc đảm bảo chất lượng (song song, xong trước P7)
 - **H7:** viết T-U6 cho đường thật: handler ghi dở rồi lỗi ⇒ không còn ghi dở, nonce xử lý đúng quy tắc đã chốt (ghi quyết định vào `note/`: nonce tăng khi tx hợp lệ chữ ký nhưng handler lỗi, để chống replay); T-U7 giả lập crash từng bước rào chắn độ bền (block DB bền trước NOMT).
@@ -122,10 +119,9 @@ Thứ tự: dựng cụm mới từ genesis đã migrate → cho **một** cụm
 - [ ] Exec cluster gửi giao dịch ký và đọc qua `QuorumClient` + proof; chịu được 1 parent node nói dối/chết (P3, T-I7).
 - [ ] T-I1..T-I8 chạy thật trên cụm 4 node, báo cáo có đầu ra (P4).
 - [ ] Triển khai N node bằng ansible dựng được cụm cục bộ cổng riêng (P5).
-- [ ] Công cụ migrate đã chạy trên **bản sao** DB cũ, bất biến khớp (P6).
 - [ ] Runbook, metrics, tool giám sát, benchmark có số liệu thật (P8).
 - [ ] `build_check.sh` sạch, `go build ./cmd/parent_chain/...`, `go test` các gói liên quan (kể cả `-race`) pass; `PROJECT_STRUCTURE.md` cập nhật đúng mức đã kiểm chứng.
-- [ ] Không có thay đổi nào lên tiến trình `:8547` hay các node thực thi đang chạy ngoài việc chủ dự án chủ động cutover (P7).
+- [ ] Không có thay đổi nào lên tiến trình `:8547` hay các node thực thi đang chạy ngoài việc chủ dự án chủ động yêu cầu redeploy sạch (P7).
 
 ## 5. Việc để sau (ngoài phạm vi)
 
