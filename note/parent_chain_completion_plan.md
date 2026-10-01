@@ -40,6 +40,8 @@
 | **H11** | `ChainID 990` chưa được quét toàn repo (ansible/doc còn ghi "Parent Chain ChainID 991"). | `grep -rn "991" deploy note` |
 | **H12** | **Tái dùng sai mục đích `LastDeviceKey`.** Parent chain nhét khóa công khai BLS 48 byte vào `LastDeviceKey`, trong khi ở chain chính trường này là **device key 32 byte** (`validation.go:425`: `keccak256(LastDeviceKey) == account.DeviceKey`; getter `LastDeviceKey()` ép về `Hash` 32 byte, cắt mất 16 byte). Cùng một tên trường mang hai nghĩa ⇒ dễ nhầm/lỗi nếu code dùng chung đọc nhầm. Sửa: **không dùng `LastDeviceKey` để mang public key**; lấy khóa người gửi từ registry (`GetAccountRegistry`/`ChainRegistry`, nhánh đã có sẵn trong `VerifyTxSignature`), còn tx khởi tạo (`registerCluster`) mang khóa trong `Data` (đã có `clusterKey`). Không đổi proto. | `pkg/parentchain/tx.go` (`BuildAndSignBLSTx`, `VerifyTxSignature`) |
 
+| **H13** | **Dữ liệu đồng thuận còn dùng JSON/đóng gói tay, phải chuyển sang proto như simple_chain.** (a) `ParentChainTx` JSON (`tx.go` ~dòng 540-585) và nhánh `json.Marshal(tx)` rơi vào `Data` của `pb.Transaction` không chữ ký (`tx_batcher.go` ~dòng 188); (b) `CallData` đóng gói tay theo offset cố định; (c) client `Send*` gửi JSON tới `/tx`; (d) Receipt/Header/BlockRecord/giá trị state mã hóa tay hoặc JSON ở RPC. Chủ dự án chốt 2026-10-01: **dùng proto giống simple_chain cũ**. | `pkg/parentchain/{tx,encoding,block_exec,http_rpc}.go`, `cmd/parent_chain/processor/tx_batcher.go` |
+
 ---
 
 ## 2. Thứ tự và phụ thuộc
@@ -48,6 +50,7 @@
 P1 (H1 deposit authz) ──┐
 P2 (H4 genesis bắt buộc)─┼─> P3 (H2,H3 client + QuorumClient) ──> P4 (H6 test chịu lỗi cụm) ──> P7 (redeploy sạch)
                          └─> P5 (H5 template/ansible) ─────────────┘                                    │
+P9 (H13 proto) làm cùng P1/P3 (chung file; xem P9)
 P8 (H7,H9,H10,H11: test nonce, runbook, metrics, perf, ChainID) chạy song song, xong trước P7 ─────────┘
 ```
 
@@ -99,6 +102,15 @@ Chạy trên cụm `deploy/cluster/local_parent_chain/` (4 node, cổng riêng).
 - Công cụ sinh khóa + genesis cho N node (mẫu: `crates/metanode-keytool`, `deploy/systemd/gen_validator_entry.py`); **khóa không commit**.
 - Inventory mẫu (`inventory.example.yml`) có ví dụ 4 parent node; README cập nhật.
 - **Nghiệm thu:** `./deploy_clusters.sh` với inventory 4 parent node dựng được cụm **cục bộ cổng riêng** ; mọi node lên cùng block/`state_root`.
+
+### P9 — Chuẩn hóa toàn bộ dữ liệu đồng thuận sang proto (H13)  **[chủ dự án đã chốt]**
+Nguyên tắc: giống simple_chain, **giao dịch, block, receipt, header và giá trị state đều là protobuf**; JSON chỉ còn là lớp hiển thị cho RPC đọc của con người (nếu giữ), **không** nằm trong đường đồng thuận hay trong dữ liệu được băm/ký.
+- Tạo `execution/pkg/proto/parent_chain.proto` (sinh `.pb.go` + `vtproto` như các file proto hiện có, cùng cách build/ghi trong repo; **không** dùng tag 8 của `Transaction`, xem ghi chú trong `transaction.proto`). Messages tối thiểu: một message tham số cho mỗi phương thức (`DepositToFloatArgs`, `TransferFloatArgs`, `MarkClaimedArgs`, `ReclaimFloatArgs`, `RegisterAccountArgs`, `SubmitStateRootArgs`, `RegisterClusterArgs`), `CallData{method, args}` hoặc `oneof`, `Receipt`, `BlockHeader`, `BlockRecord`, và các message giá trị state (float, record, registry...).
+- **Giao dịch:** vẫn là `pb.Transaction`; `Data` = proto `CallData` (thay offset cố định). Bỏ hẳn `ParentChainTx` JSON (`Marshal`/`UnmarshalParentChainTx`), bỏ nhánh JSON-trong-`Data` ở `tx_batcher.go`, bỏ `/tx` JSON (xem H3). Client `Send*` dựng và ký `pb.Transaction` rồi gửi proto raw (`/send_raw_transaction` nhận bytes; RPC node-tới-node và `QuorumClient` dùng proto, không JSON).
+- **Mã hóa tất định:** mọi thứ được băm hoặc đưa vào cây (header → `block_hash`, receipt → `receipts_root`, giá trị state → `state_root`) dùng `proto.MarshalOptions{Deterministic: true}` (hoặc vtproto marshal đã kiểm chứng tất định), **kèm test vector cố định** (T-U9) và test: marshal hai lần/hai tiến trình ra byte giống nhau; không dùng `map` trong message; không có trường bị bỏ nhận biết khác nhau giữa `nil` và rỗng (chuẩn hóa trước khi marshal).
+- Quy tắc tiến hóa: chỉ **thêm** trường mới với số tag mới, không đổi nghĩa/xóa; thay đổi bất kỳ trường nào tham gia hash là thay đổi đồng thuận (redeploy đồng loạt, đã chấp nhận ở môi trường dev).
+- Xóa các hàm `Encode*/Decode*CallData` đóng gói tay và `encoding.go` thủ công **sau khi** proto thay thế đủ (không để hai đường song song).
+- **Nghiệm thu:** `grep -rn "encoding/json" pkg/parentchain cmd/parent_chain` chỉ còn lớp hiển thị RPC đọc (nếu có); T-U9 vector pass; 4 node cùng root/hash với dữ liệu proto; test_cluster đổi sang dựng proto; `build_check.sh` sạch.
 
 ### P6 — (đã bỏ)
 Không có bước di chuyển dữ liệu cũ (chủ dự án chốt 2026-10-01). Không viết công cụ export/migrate; không cần giữ tương thích DB cũ.
