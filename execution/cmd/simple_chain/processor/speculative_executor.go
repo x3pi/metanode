@@ -209,6 +209,25 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			defer se.bp.ExecutionMutex.RUnlock()
 		}
 
+		// ZERO-FORK SERIALIZATION GATE:
+		// Blockchain state transition S_N = f(S_{N-1}, Block_N) strictly requires S_{N-1}
+		// to be fully committed before Block N clones state and executes EVM transactions.
+		if gei > 1 && !se.isCommitted(gei-1) {
+			if se.bp != nil {
+				se.bp.ExecutionMutex.RUnlock()
+			}
+			err := se.waitCommitted(ctx, gei-1)
+			if se.bp != nil {
+				se.bp.ExecutionMutex.RLock()
+			}
+			if err != nil {
+				logger.Warn("⚠️ [SPECULATIVE] GEI=%d waitCommitted(gei-1=%d) aborted: %v", gei, gei-1, err)
+				se.activeSessions.Delete(gei)
+				se.inFlight.Delete(gei)
+				return
+			}
+		}
+
 		// If block was committed to DB while waiting for the lock (e.g. by P2P Sync),
 		// bypass speculative execution immediately and unblock Rust.
 		lastCommittedGEI := storage.GetLastGlobalExecIndex()
@@ -239,6 +258,13 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			se.activeSessions.Delete(gei)
 			se.inFlight.Delete(gei)
 			return
+		}
+
+		// Refresh lastBlockHeader after predecessor commit completes
+		if se.bp != nil {
+			if latestBlock := se.bp.GetLastBlock(); latestBlock != nil {
+				lastBlockHeader = latestBlock.Header()
+			}
 		}
 
 		// NOTE: inFlight[gei] is intentionally NOT deleted here. Deleting it as
@@ -698,14 +724,22 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		hasConflict = false // Empty block, no speculative state, no conflict
 	} else {
 		parentHash := lastBlock.Header().Hash()
+		actualParentRoot := lastBlock.Header().AccountStatesRoot()
 		var specParentHash common.Hash
+		var specParentRoot common.Hash
 		specHeaderPtr := res.ClonedState.GetcurrentBlockHeader()
 		if specHeaderPtr != nil && *specHeaderPtr != nil {
 			specParentHash = (*specHeaderPtr).Hash()
+			specParentRoot = (*specHeaderPtr).AccountStatesRoot()
 		}
 		if specParentHash != parentHash {
 			logger.Warn("🔄 [COMMITTER-CONFLICT] Conflict detected: specParentHash=%s ≠ actualParentHash=%s for GEI=%d. Re-executing sequentially.",
 				specParentHash.Hex()[:16], parentHash.Hex()[:16], res.GEI)
+			hasConflict = true
+		}
+		if specParentRoot != actualParentRoot {
+			logger.Warn("🔄 [COMMITTER-CONFLICT] Root conflict detected: specParentRoot=%s ≠ actualParentRoot=%s for GEI=%d. Re-executing sequentially.",
+				specParentRoot.Hex()[:16], actualParentRoot.Hex()[:16], res.GEI)
 			hasConflict = true
 		}
 	}

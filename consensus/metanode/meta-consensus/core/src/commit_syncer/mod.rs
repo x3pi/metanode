@@ -3037,6 +3037,30 @@ impl<C: NetworkClient> Inner<C> {
             .vote_count_for_index(end_commit_ref.index);
         let is_true_cold_start = !has_any_digest_data && total_votes == 0;
 
+        // ═══════════════════════════════════════════════════════════════════
+        // ZERO-FORK INVARIANT (PART 2.5): CONFLICT DETECTION
+        // If CommitVoteMonitor already observed 2f+1 quorum on a digest for
+        // this index, and the peer's commit digest conflicts with it, REJECT
+        // IMMEDIATELY. Never allow single-peer bypass or catching-up bypass
+        // to adopt a conflicting digest and split the network.
+        // ═══════════════════════════════════════════════════════════════════
+        if let Some(quorum_digest) = self.commit_vote_monitor.quorum_commit_digest(end_commit_ref.index) {
+            if quorum_digest != end_commit_ref.digest {
+                tracing::error!(
+                    "🚨 [COMMIT-SYNCER] Conflict detected: commit {} from peer {} has digest {:?} != quorum digest {:?}. Rejecting commits to prevent fork!",
+                    end_commit_ref,
+                    peer,
+                    end_commit_ref.digest,
+                    quorum_digest
+                );
+                return Err(ConsensusError::NotEnoughCommitVotes {
+                    commit: Box::new(end_commit.clone()),
+                    stake: 0,
+                    peer,
+                });
+            }
+        }
+
         if is_true_cold_start {
             tracing::info!(
                 "🔓 [COMMIT-SYNCER] Bypassing quorum verification for TRUE cold-start (no peer data). \

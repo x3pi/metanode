@@ -757,12 +757,18 @@ func (cs *ChainState) CloneSpeculative(header types.BlockHeader) (*ChainState, e
 	}
 
 	// 3. Copy SmartContractDB
-	clonedScDB := smart_contract_db.NewSmartContractDB(
-		cs.storageManager.GetStorageCode(),
-		cs.storageManager.GetStorageSmartContract(),
-		clonedAccDB,
-		cs.GetSmartContractDB().GetChangelogDB(),
-	)
+	scDB := cs.GetSmartContractDB()
+	var clonedScDB *smart_contract_db.SmartContractDB
+	if scDB != nil {
+		clonedScDB = scDB.Copy(clonedAccDB)
+	} else {
+		clonedScDB = smart_contract_db.NewSmartContractDB(
+			cs.storageManager.GetStorageCode(),
+			cs.storageManager.GetStorageSmartContract(),
+			clonedAccDB,
+			nil,
+		)
+	}
 
 	// 4. Construct cloned ChainState
 	clonedCS := &ChainState{
