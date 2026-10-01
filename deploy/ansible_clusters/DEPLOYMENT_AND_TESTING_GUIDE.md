@@ -53,8 +53,11 @@
 | Thao Tác | Lệnh Chạy Trực Tiếp | Ghi Chú |
 | :--- | :--- | :--- |
 | **Triển khai 1-Click (Devnet Daemon)** | `./deploy_clusters.sh --setup --test` | Build, cấu hình genesis, chạy daemon, test 5 kịch bản & báo Telegram |
+| **Chỉ chạy/deploy các Chain con** | `./deploy_clusters.sh --setup --exec-only` | Triển khai chỉ các cụm execution cluster (bỏ qua Parent Chain) |
+| **Dừng/Bật 1 node cụ thể** | `./deploy_clusters.sh --stop --node=exec1_r3` | Dừng/bật an toàn riêng 1 replica để test chịu lỗi (vd: `exec1_r3`) |
 | **Triển khai Production (Systemd)** | `./deploy_clusters.sh --setup --systemd --test` | Quản lý vòng đời qua systemd unit, tự restart khi sự cố |
 | **Kiểm tra trạng thái & Ports** | `./deploy_clusters.sh --status` | In bảng port RPC/WS/TCP/Raft & ping block height |
+| **Xuất cấu hình cổng vào /tmp** | `./deploy_clusters.sh --export-config` | Xuất file thống nhất `/tmp/rpc_nodes.json` & `/tmp/private_chains.json` |
 | **Chỉ chạy bộ test tích hợp** | `./deploy_clusters.sh --test-only` | Chạy 5 kịch bản E2E thực tế, bắn kết quả lên Telegram |
 | **Test chịu lỗi Raft (Auto-Failover)** | `go run execution/scripts/test/test_raft_fault_tolerance.go` | Giả lập kill leader, đo thời gian bầu cử (~200ms) & zero-fork |
 | **Chạy test E2E trực tiếp bằng Go** | `go run execution/scripts/test/test_real_world_scenarios.go` | Debug luồng giao dịch thực tế chi tiết từng bước |
@@ -85,13 +88,17 @@ File thực thi: [`deploy/ansible_clusters/deploy_clusters.sh`](file:///home/abc
 | :--- | :--- | :--- |
 | **Hành động (Action)** | `--setup` | Triển khai hoàn chỉnh từ đầu: build binary, sinh genesis, gán port, khởi động cụm |
 | | `--deploy` | Biên dịch lại và cập nhật mã nguồn mới vào các node đang chạy |
-| | `--start` | Bật lại các node đã cấu hình sẵn (không build lại) |
-| | `--stop` | Dừng an toàn toàn bộ node Parent Chain và Exec Clusters |
-| | `--restart` | Khởi động lại toàn bộ các node |
+| | `--start` | Bật lại các node đã cấu hình sẵn (toàn bộ hoặc lọc theo `--exec-only` / `--node`) |
+| | `--stop` | Dừng an toàn các tiến trình (toàn bộ hoặc lọc theo `--exec-only` / `--node`) |
+| | `--restart` | Khởi động lại các node (toàn bộ hoặc lọc theo `--exec-only` / `--node`) |
 | | `--status` | Kiểm tra tình trạng kết nối RPC, lấy block number, in bảng toàn bộ port mạng |
-| | `--test-only` | Chỉ chạy bộ kiểm thử tích hợp 5 kịch bản (không tác động trạng thái node) |
+| | `--export-config` | Xuất file cấu hình thống nhất `/tmp/rpc_nodes.json` & `/tmp/private_chains.json` |
+| | `--test-only` | Chỉ chạy bộ kiểm thử tích hợp (không tác động trạng thái node) |
 | | `--clean` | Dọn dẹp các file log cũ để giải phóng dung lượng đĩa |
 | | `--reset` | Xóa trắng dữ liệu state database, đưa tất cả node về Genesis (Block #0) |
+| **Phạm vi (Target & Scope)** | `--exec-only` | **Chỉ thao tác trên các Chain con (Execution Clusters)** (bỏ qua Parent Chain) |
+| | `--parent-only` | Chỉ thao tác riêng trên Parent Chain (bỏ qua Chain con) |
+| | `--node=NAME`, `-n` | **Chỉ thao tác trên 1 node cụ thể** (vd: `exec1_r1`, `exec1_r2`, `exec1_r3`, `parent`) |
 | **Bổ trợ (Modifier)** | `--test` | Tự động kích hoạt test tích hợp ngay sau khi setup/deploy hoàn tất |
 | | `--systemd` | Chạy dưới dạng Systemd service thay vì Background daemon |
 | | `--notify` | Bật thông báo Telegram (mặc định bật nếu có file `.env`) |
@@ -100,19 +107,24 @@ File thực thi: [`deploy/ansible_clusters/deploy_clusters.sh`](file:///home/abc
 
 ### Ví dụ phối hợp cờ lệnh thực tế:
 ```bash
-# 1. Triển khai nhanh devnet và chạy test có báo Telegram:
+# 1. CHỈ CHẠY CÁC CHAIN CON (Execution Clusters - không đụng tới Parent Chain):
+./deploy_clusters.sh --setup --exec-only
+
+# 2. Khởi động lại hoặc dừng riêng các Chain con:
+./deploy_clusters.sh --restart --exec-only
+./deploy_clusters.sh --stop --exec-only
+
+# 3. Dừng và bật lại 1 node cụ thể của Chain con (vd: replica 3 của cluster 1):
+./deploy_clusters.sh --stop --node=exec1_r3
+./deploy_clusters.sh --start --node=exec1_r3
+
+# 4. Xuất file cấu hình endpoint vào /tmp/rpc_nodes.json để test chain con:
+./deploy_clusters.sh --export-config
+
+# 5. Triển khai toàn bộ (cả Parent Chain + Chain con) và chạy test:
 ./deploy_clusters.sh --setup --test
 
-# 2. Triển khai môi trường Production dùng systemd, tắt test để chạy ngay:
-./deploy_clusters.sh --setup --systemd --no-notify
-
-# 3. Khi sửa code Go/Rust, cập nhật và chạy lại test kiểm tra:
-./deploy_clusters.sh --deploy --test
-
-# 4. Khi cần xóa trắng dữ liệu để test lại từ đầu:
-./deploy_clusters.sh --reset && ./deploy_clusters.sh --setup --test
-
-# 5. Kiểm tra nhanh trạng thái các node và danh sách port:
+# 6. Kiểm tra nhanh trạng thái các node và danh sách port:
 ./deploy_clusters.sh --status
 ```
 
@@ -156,11 +168,46 @@ ansible-playbook -i inventory.yml deploy.yml --tags exec_clusters
 Hệ thống triển khai phân tách rõ giữa môi trường Production và Devnet:
 - **Môi trường Production (`--env=production` hoặc `METANODE_ENV=production`):**
   - Script pre-flight `check_inventory_security.py` và playbook Ansible sẽ **chặn đứng** quá trình triển khai nếu phát hiện bất kỳ mật khẩu plaintext nào (`ansible_become_pass`, `ansible_ssh_pass`, `ansible_password`, `ansible_sudo_pass`).
-  - Bắt buộc phải sử dụng SSH Key không mật khẩu hoặc mã hóa mật khẩu bằng Ansible Vault (`!vault | ...`) và cung cấp cờ `--vault-password-file <path>`.
+  - Bắt buộc phải sử dụng SSH Key không mật khẩu hoặc mã hóa mật khẩu bằng Ansible Vault (`!vault | ...`).
   - Binary `simple_chain` / `metanode` trên server sẽ chạy với cờ bảo vệ production, nghiêm cấm bypass chữ ký mempool.
 - **Môi trường Devnet (`--env=devnet` hoặc `METANODE_ENV=devnet`):**
   - Cho phép sử dụng inventory chứa mật khẩu plaintext phục vụ mục đích kiểm thử và phát triển nhanh trong mạng nội bộ cô lập.
   - Mặc định script `deploy_clusters.sh` thiết lập `--env=devnet` để thuận tiện cho việc chạy bộ test 5 kịch bản.
+
+#### 🔐 Hướng dẫn mã hóa mật khẩu bằng Ansible Vault (Từng bước):
+1. **Tạo file chìa khóa Vault (`.vault_pass`):**
+   ```bash
+   cd deploy/ansible_clusters   # hoặc cd deploy/ansible
+   umask 077
+   read -rs -p "Vault password: " p; printf '\n'
+   printf '%s' "$p" > .vault_pass
+   unset p
+   ```
+   *(💡 File `.vault_pass` đã nằm trong `.gitignore`, tuyệt đối an toàn không bị commit lên Git).*
+
+2. **Mã hóa chuỗi mật khẩu server:**
+   ```bash
+   ansible-vault encrypt_string --vault-password-file .vault_pass 'password' --name ansible_become_pass
+   ```
+
+3. **Dán khối kết quả vào `inventory.yml`:**
+   ```yaml
+   all:
+     vars:
+       ansible_user: "abc"
+       ansible_become_pass: !vault |
+                 $ANSIBLE_VAULT;1.1;AES256
+                 32333835353265326636306432...
+   ```
+
+   Tạo thêm token RPC một lần và dán khối kết quả cùng cấp với `ansible_become_pass` trong `all.vars`:
+   ```bash
+   ansible-vault encrypt_string --vault-password-file ~/.vault_pass "$(openssl rand -hex 32)" --name parent_chain_rpc_token
+   ```
+   Ansible phân phối token này cho Parent Chain và tự truyền nó vào E2E test; không cần `export PARENT_CHAIN_RPC_TOKEN` khi chạy test.
+
+4. **Thực thi:**
+   `deploy_clusters.sh` lần lượt tìm `${SCRIPT_DIR}/.vault_pass`, `deploy/ansible/.vault_pass`, rồi `~/.vault_pass`. `ansible_deploy.sh` ưu tiên `ANSIBLE_VAULT_PASSWORD_FILE`, sau đó tìm `${SCRIPT_DIR}/.vault_pass`, thư mục chứa inventory, rồi `~/.vault_pass`. Khi file nằm ở một trong các vị trí này, script tự nạp khóa giải mã; không cần thêm cờ phụ.
 ---
 
 ## 🧪 4. BỘ SCRIPT KIỂM THỬ CHUYÊN SÂU (TESTING SCRIPTS)

@@ -18,6 +18,10 @@ ACTION="setup"
 RUN_TESTS="false"
 NOTIFY="true"
 USE_SYSTEMD="false"
+EXEC_ONLY="false"
+PARENT_ONLY="false"
+TARGET_NODE=""
+EXPORT_CONFIG_ONLY="false"
 EXTRA_ANSIBLE_ARGS=()
 
 # ── Load environment (.env) ──────────────────────────────────────────────────
@@ -43,15 +47,22 @@ usage() {
     echo "⚡ Hành Động (Actions):"
     echo "  --setup             (Mặc định) Cài đặt cấu hình, build và khởi chạy tất cả"
     echo "  --deploy            Cập nhật binary mới và khởi động lại toàn bộ dịch vụ"
+    echo "  --start             Bật lại các node (toàn bộ hoặc lọc theo --node/--exec-only)"
     echo "  --restart           Khởi động lại toàn bộ cụm node (Parent Chain + Exec Clusters)"
-    echo "  --stop              Dừng toàn bộ dịch vụ của hệ thống"
+    echo "  --stop              Dừng dịch vụ (toàn bộ hoặc lọc theo --node/--exec-only)"
     echo "  --clean             Dọn dẹp database & log (giữ nguyên config và key)"
     echo "  --reset             Reset toàn bộ, xóa database và khởi chạy lại từ block 0"
     echo "  --status            Kiểm tra trạng thái RPC và block height các cụm node"
+    echo "  --export-config     Xuất cấu hình mạng ra /tmp/rpc_nodes.json"
+    echo ""
+    echo "🎯 Phạm vi áp dụng (Target & Scope):"
+    echo "  --exec-only         Chỉ thao tác trên Execution Clusters (các chain con - Chain ID 991)"
+    echo "  --parent-only       Chỉ thao tác trên Parent Chain"
+    echo "  --node=NAME, -n     Chỉ thao tác trên 1 node cụ thể (vd: exec1_r1, exec1_r3, parent)"
     echo ""
     echo "🧪 Kiểm Thử (Testing):"
-    echo "  --test              Chạy bộ kiểm thử tích hợp 5 kịch bản thực tế sau khi deploy"
-    echo "  --test-only         Chỉ chạy bộ kiểm thử (không deploy lại node)"
+    echo "  --test              Chạy bộ kiểm thử tích hợp thực tế sau khi deploy"
+    echo "  --test-only         Chỉ chạy bộ kiểm thử; tự đồng bộ token Parent Chain nếu token đã đổi"
     echo ""
     echo "📲 Thông Báo (Notifications):"
     echo "  --notify            Bật thông báo Telegram (mặc định nếu có token)"
@@ -81,6 +92,10 @@ while [[ $# -gt 0 ]]; do
             ACTION="deploy"
             shift
             ;;
+        --start)
+            ACTION="start"
+            shift
+            ;;
         --restart)
             ACTION="restart"
             shift
@@ -100,6 +115,26 @@ while [[ $# -gt 0 ]]; do
         --status)
             ACTION="status"
             shift
+            ;;
+        --export-config|--export-config-only)
+            EXPORT_CONFIG_ONLY="true"
+            shift
+            ;;
+        --exec-only|--execution-only|--shards-only|--child-only|--child-chain-only)
+            EXEC_ONLY="true"
+            shift
+            ;;
+        --parent-only)
+            PARENT_ONLY="true"
+            shift
+            ;;
+        --node=*|--target=*)
+            TARGET_NODE="${1#*=}"
+            shift
+            ;;
+        -n|--node)
+            TARGET_NODE="$2"
+            shift 2
             ;;
         --test)
             RUN_TESTS="true"
@@ -151,7 +186,17 @@ export NODE_ENV="${NODE_ENV:-$METANODE_ENV}"
 # from the example so the default invocation works, then remind the operator to edit it.
 if [ ! -f "$INVENTORY" ] && [ "$INVENTORY" = "${SCRIPT_DIR}/inventory.yml" ] && [ -f "${SCRIPT_DIR}/inventory.example.yml" ]; then
     cp "${SCRIPT_DIR}/inventory.example.yml" "$INVENTORY"
-    echo "⚠️  inventory.yml chưa tồn tại: đã tạo từ inventory.example.yml. Hãy chỉnh host/khóa/mật khẩu (dùng ansible-vault) trước khi deploy thật." >&2
+    echo "⚠️  inventory.yml does not exist: created from inventory.example.yml. Please configure hosts/keys/passwords (use ansible-vault) before deploying." >&2
+fi
+
+# Make test-only use the same Vault password discovery as deployment.
+VAULT_CLUSTER_ARGS=()
+if [ -f "${SCRIPT_DIR}/.vault_pass" ]; then
+    VAULT_CLUSTER_ARGS=(--vault-password-file "${SCRIPT_DIR}/.vault_pass")
+elif [ -f "${METANODE_ROOT}/deploy/ansible/.vault_pass" ]; then
+    VAULT_CLUSTER_ARGS=(--vault-password-file "${METANODE_ROOT}/deploy/ansible/.vault_pass")
+elif [ -f "$HOME/.vault_pass" ]; then
+    VAULT_CLUSTER_ARGS=(--vault-password-file "$HOME/.vault_pass")
 fi
 
 print_banner
@@ -164,44 +209,57 @@ send_tele() {
     fi
 }
 
+resolve_target_host() {
+    local target="$1"
+    case "$target" in
+        exec1_r1|r1|1)
+            echo "exec1_replica1"
+            ;;
+        exec1_r2|r2|2)
+            echo "exec1_replica2"
+            ;;
+        exec1_r3|r3|3)
+            echo "exec1_replica3"
+            ;;
+        exec1|cluster_1|cluster1)
+            echo "exec1_replica1,exec1_replica2,exec1_replica3"
+            ;;
+        exec2_r1|r4)
+            echo "exec2_replica1"
+            ;;
+        exec2|cluster_2|cluster2)
+            echo "exec2_replica1"
+            ;;
+        parent|parent_chain|parent_node)
+            echo "parent_node"
+            ;;
+        *)
+            echo "$target"
+            ;;
+    esac
+}
+
+# ── Early Exit for Export Config ─────────────────────────────────────────────
+if [ "$EXPORT_CONFIG_ONLY" = "true" ]; then
+    echo "📢 Exporting configuration to /tmp..."
+    if [ -f "$INVENTORY" ] && [ -f "${SCRIPT_DIR}/scripts/parse_inventory.py" ]; then
+        python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" export
+        echo "✅ Successfully exported configuration to:"
+        echo "   • /tmp/private_chains.json"
+        echo "   • /tmp/rpc_nodes.json"
+        exit 0
+    else
+        echo "❌ Inventory ($INVENTORY) or parse_inventory.py not found"
+        exit 1
+    fi
+fi
+
 # ── Check Status Action ──────────────────────────────────────────────────────
 check_status() {
-    echo "📊 Đang kiểm tra trạng thái các cụm node..."
+    echo "📊 Checking node cluster status..."
     echo ""
     if [ -f "$INVENTORY" ] && [ -f "${SCRIPT_DIR}/scripts/parse_inventory.py" ]; then
-        python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" summary
-        echo ""
-    fi
-
-    echo "🔍 Trạng thái kết nối dịch vụ:"
-    # Parent Chain
-    echo -n "  • Parent Chain (:8547): "
-    if curl -s -m 2 http://127.0.0.1:8547/inbound >/dev/null 2>&1; then
-        echo "✅ HOẠT ĐỘNG (HTTP RPC OK)"
-    else
-        echo "❌ KHÔNG PHẢN HỒI (Offline)"
-    fi
-
-    # Exec 1
-    echo -n "  • Exec Cluster 1 (:8646): "
-    local b1
-    b1=$(curl -s -m 2 -X POST http://127.0.0.1:8646 -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' | grep -o '"result":"[^"]*"' | cut -d'"' -f4 || echo "")
-    if [ -n "$b1" ]; then
-        local dec1=$((16#${b1#0x}))
-        echo "✅ HOẠT ĐỘNG (Block: ${dec1} / ${b1})"
-    else
-        echo "❌ KHÔNG PHẢN HỒI (Offline)"
-    fi
-
-    # Exec 2
-    echo -n "  • Exec Cluster 2 (:8647): "
-    local b2
-    b2=$(curl -s -m 2 -X POST http://127.0.0.1:8647 -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' | grep -o '"result":"[^"]*"' | cut -d'"' -f4 || echo "")
-    if [ -n "$b2" ]; then
-        local dec2=$((16#${b2#0x}))
-        echo "✅ HOẠT ĐỘNG (Block: ${dec2} / ${b2})"
-    else
-        echo "❌ KHÔNG PHẢN HỒI (Offline)"
+        python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" status
     fi
     echo ""
 }
@@ -220,18 +278,23 @@ run_tests_suite() {
     local start_ts
     start_ts=$(date +%s)
     local test_log="${SCRIPT_DIR}/test_run.log"
-    
+
+    : > "$test_log"
     echo "⏳ Đang chạy kịch bản thử nghiệm..."
     set +e
-    (
-        cd "${METANODE_ROOT}/execution/scripts/test"
-        export PARENT_CHAIN_URL="http://127.0.0.1:8547"
-        export EXEC1_URL="http://127.0.0.1:8646"
-        export EXEC2_URL="http://127.0.0.1:8647"
-        go run test_real_world_scenarios.go
-    ) 2>&1 | tee "$test_log"
+    ansible-playbook \
+        -i "$INVENTORY" \
+        "$PLAYBOOK" \
+        --tags test \
+        --extra-vars "run_integration_tests=true deploy_action=test use_systemd=${USE_SYSTEMD} metanode_env=${METANODE_ENV} node_env=${NODE_ENV}" \
+        "${VAULT_CLUSTER_ARGS[@]}" \
+        "${EXTRA_ANSIBLE_ARGS[@]}" 2>&1 | tee "${test_log}.ansible"
     local test_rc=${PIPESTATUS[0]}
     set -e
+
+    if [ -s "$test_log" ]; then
+        cat "$test_log"
+    fi
 
     local end_ts
     end_ts=$(date +%s)
@@ -336,14 +399,7 @@ fi
 echo "📢 Gửi thông báo bắt đầu triển khai đến Telegram..."
 send_tele "tn.notify_deploy_start('Parent Chain BFT Committee (4 Validators) + Exec Cluster 1 (3 Replicas) + Exec Cluster 2')"
 
-# Check vault password file if available
-VAULT_CLUSTER_ARGS=()
 CHECK_SEC_SCRIPT="${METANODE_ROOT}/deploy/ansible/check_inventory_security.py"
-if [ -f "${SCRIPT_DIR}/.vault_pass" ]; then
-    VAULT_CLUSTER_ARGS=(--vault-password-file "${SCRIPT_DIR}/.vault_pass")
-elif [ -f "${METANODE_ROOT}/deploy/ansible/.vault_pass" ]; then
-    VAULT_CLUSTER_ARGS=(--vault-password-file "${METANODE_ROOT}/deploy/ansible/.vault_pass")
-fi
 
 # Pre-flight Security check for plaintext credentials (Issue #104)
 if [ -f "$CHECK_SEC_SCRIPT" ] && [ -f "$INVENTORY" ]; then
@@ -366,8 +422,33 @@ if [ -n "$INVENTORY_BECOME_PASS" ] && [ "$INVENTORY_BECOME_PASS" != "!vault" ] &
     export ANSIBLE_BECOME_PASS="${ANSIBLE_BECOME_PASS:-$INVENTORY_BECOME_PASS}"
 fi
 
-# 2. Execute Ansible Playbook
-echo "⚙️ Bắt đầu thực thi Ansible Playbook (${ACTION}, Môi trường: ${METANODE_ENV})..."
+# 2. Scope & Target Node Resolution
+if [ -n "$TARGET_NODE" ]; then
+    RESOLVED_HOST=$(resolve_target_host "$TARGET_NODE")
+    echo "🎯 Targeting specific node: ${RESOLVED_HOST} (from parameter: ${TARGET_NODE})"
+    if [[ "$ACTION" =~ ^(setup|deploy|restart|reset)$ ]]; then
+        EXTRA_ANSIBLE_ARGS+=(--limit "localhost,${RESOLVED_HOST}")
+    else
+        EXTRA_ANSIBLE_ARGS+=(--limit "${RESOLVED_HOST}")
+    fi
+elif [ "$EXEC_ONLY" = "true" ]; then
+    echo "⛓️  Targeting Execution Clusters only (Child Chains - EVM Chain ID 991)"
+    if [[ "$ACTION" =~ ^(setup|deploy|restart|reset)$ ]]; then
+        EXTRA_ANSIBLE_ARGS+=(--tags "build,exec_clusters")
+    else
+        EXTRA_ANSIBLE_ARGS+=(--tags "exec_clusters")
+    fi
+elif [ "$PARENT_ONLY" = "true" ]; then
+    echo "🏛️  Targeting Parent Chain only"
+    if [[ "$ACTION" =~ ^(setup|deploy|restart|reset)$ ]]; then
+        EXTRA_ANSIBLE_ARGS+=(--tags "build,parent_chain")
+    else
+        EXTRA_ANSIBLE_ARGS+=(--tags "parent_chain")
+    fi
+fi
+
+# 3. Execute Ansible Playbook
+echo "⚙️ Executing Ansible Playbook (${ACTION}, Environment: ${METANODE_ENV})..."
 set +e
 ansible-playbook \
     -i "$INVENTORY" \
@@ -385,7 +466,7 @@ if [ $ANSIBLE_RC -ne 0 ]; then
         python3 -c "
 import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
 import telegram_notify as tn
-tn.notify_deploy_failure('Ansible Playbook (${ACTION})', 'Mã lỗi: ${ANSIBLE_RC}', tail_logs=\"\"\"${TAIL_LOGS}\"\"\")
+tn.notify_deploy_failure('Ansible Playbook (${ACTION})', 'Exit code: ${ANSIBLE_RC}', tail_logs=\"\"\"${TAIL_LOGS}\"\"\")
 "
     fi
     exit $ANSIBLE_RC

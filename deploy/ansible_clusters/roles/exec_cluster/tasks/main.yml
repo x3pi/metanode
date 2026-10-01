@@ -91,6 +91,7 @@
             mkdir -p "{{ install_dir }}"
             python3 -c "import secrets; print(secrets.token_hex(32), end='')" > "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
             chmod 600 "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
+            chown {{ ansible_user | default('abc') }}:{{ ansible_user | default('abc') }} "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
 
     - name: Generate cluster genesis if not present or reset
       ansible.builtin.shell: |
@@ -139,15 +140,17 @@
                             'publicKeyBls': cluster_bls,
                         }
 
-        # 3. Add explicit test devnet sender
+        # 3. Add explicit test devnet sender. It is signed by mtn_api.go's
+        # devnetSenderBLSPrivateKeyHex, so it must not use the cluster BLS key.
         devnet_sender_addr = '0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24'
+        devnet_sender_bls = '{{ devnet_sender_bls_pubkey | default('0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc') }}'
         alloc_map[devnet_sender_addr.lower()] = {
             'address': devnet_sender_addr,
             'balance': '2000000000000000000000000000000',
             'pending_balance': '0',
             'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
             'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
-            'publicKeyBls': '0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc',
+            'publicKeyBls': devnet_sender_bls,
         }
 
         # 4. Cross-cluster validator allocs with explicit BLS public keys for Rollup signature verification
