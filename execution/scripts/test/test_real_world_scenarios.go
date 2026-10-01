@@ -356,9 +356,7 @@ func main() {
 	// =======================================================================================
 	printHeader("KỊCH BẢN 5: PARENT CHAIN NGỪNG HOẠT ĐỘNG -> NODE THỰC THI VẪN TIẾN TRIỂN ĐỘC LẬP")
 	fmt.Println("1. Dừng tiến trình Parent Chain (giả lập sự cố Parent Chain offline)...")
-	_ = exec.Command("sudo", "-n", "systemctl", "stop", "metanode-parentchain.service").Run()
-	_ = exec.Command("pkill", "-9", "-f", "parent_chain").Run()
-	_ = exec.Command("sudo", "-n", "pkill", "-9", "-f", "parent_chain").Run()
+	stopAllParentNodes()
 	time.Sleep(2 * time.Second)
 
 	// Kiểm tra Parent Chain thật sự đã sập
@@ -417,46 +415,15 @@ func main() {
 	// =======================================================================================
 	printHeader("KỊCH BẢN 6: KHÔI PHỤC PARENT CHAIN -> TỰ ĐỘNG TÁI KẾT NỐI & KHÔI PHỤC GIAO DỊCH LIÊN CỤM")
 	fmt.Println("1. Khởi động lại các tiến trình Parent Chain...")
-	pDirs := []string{"/opt/metanode/parent_chain", "/opt/metanode/parent_chain_0", "/opt/metanode/parent_chain_1", "/opt/metanode/parent_chain_2", "/opt/metanode/parent_chain_3"}
-	for _, pDir := range pDirs {
-		cfgPath := filepath.Join(pDir, "node_parent.toml")
-		genPath := filepath.Join(pDir, "parent_genesis.json")
-		if _, err := os.Stat(cfgPath); err == nil {
-			port := "8547"
-			if strings.HasSuffix(pDir, "_1") {
-				port = "18602"
-			} else if strings.HasSuffix(pDir, "_2") {
-				port = "18603"
-			} else if strings.HasSuffix(pDir, "_3") {
-				port = "18604"
-			}
-			cmdStr := fmt.Sprintf("cd %s && nohup /opt/metanode/bin/parent_chain -data-dir %s -http :%s -rust-config %s -genesis %s >> /var/log/metanode/parent_chain.log 2>&1 & echo $! > %s/parent_chain.pid", pDir, pDir, port, cfgPath, genPath, pDir)
-			_ = exec.Command("bash", "-c", cmdStr).Run()
-			_ = exec.Command("sudo", "-n", "bash", "-c", cmdStr).Run()
-		}
-	}
-	_ = exec.Command("sudo", "-n", "systemctl", "start", "metanode-parentchain.service").Run()
+	startAllParentNodes()
 
-	// 2. Chờ Parent Chain online trở lại
-	fmt.Println("2. Kiểm tra Parent Chain phản hồi kết nối (health check)...")
-	parentOnline := false
-	startWaitParent := time.Now()
-	for time.Since(startWaitParent) < 20*time.Second {
-		resp, err := http.Get(parentChainURL + "/inbound")
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == 200 || resp.StatusCode == 400 {
-				parentOnline = true
-				break
-			}
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	if !parentOnline {
-		fmt.Printf("❌ Parent Chain không khởi động lại được sau 20s!\n")
+	// 2. Wait until the whole parent cluster is back: every node answers and all agree on height/hash/root.
+	fmt.Println("2. Chờ cả 4 node Parent Chain online và đồng thuận cùng block/hash/state_root...")
+	if err := waitParentCluster(180 * time.Second); err != nil {
+		fmt.Printf("❌ Parent Chain không phục hồi đầy đủ: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("   ✅ Parent Chain đã ONLINE trở lại và phản hồi HTTP RPC bình thường!")
+	fmt.Println("   ✅ Parent Chain đã ONLINE trở lại, 4 node cùng block/hash/state_root!")
 
 	// 3. Đăng ký tài khoản đích mới sau phục hồi
 	fmt.Println("3. Đăng ký tài khoản đích mới trên Parent Chain sau khi phục hồi...")
@@ -609,9 +576,6 @@ func main() {
 	// KỊCH BẢN 8: mất 1/4 node Parent Chain (node 0 = URL cũ :8547) -> chuyển xuyên cụm vẫn hoàn tất
 	// =======================================================================================
 	printHeader("KỊCH BẢN 8: MẤT 1/4 NODE PARENT CHAIN -> CHUYỂN XUYÊN CỤM VẪN HOÀN TẤT (QUORUM)")
-	parentURLs := []string{"http://127.0.0.1:8547", "http://127.0.0.1:18602", "http://127.0.0.1:18603", "http://127.0.0.1:18604"}
-	parentDirs := []string{"/opt/metanode/parent_chain", "/opt/metanode/parent_chain_1", "/opt/metanode/parent_chain_2", "/opt/metanode/parent_chain_3"}
-	parentPorts := []string{"8547", "18602", "18603", "18604"}
 	// Registrations use the legacy HTTP client against a live node so this script never shares a nonce stream
 	// with the real Exec 2 process (same cluster key); the cross-chain transfers themselves go through the real
 	// Exec 1/Exec 2 rollup workers, which use the quorum client.
@@ -674,6 +638,10 @@ func main() {
 	fmt.Println("3. Bật lại node 0 và node 1...")
 	startParentNode(parentDirs[0], parentPorts[0])
 	startParentNode(parentDirs[1], parentPorts[1])
+	if err := waitParentCluster(180 * time.Second); err != nil {
+		fmt.Printf("❌ Parent Chain không phục hồi đầy đủ sau khi bật lại: %v\n", err)
+		os.Exit(1)
+	}
 	if !waitBalance(exec2URL, accB, big.NewInt(555), 120*time.Second) {
 		bal, _ := getBalance(exec2URL, accB)
 		fmt.Printf("❌ Kịch bản 9 thất bại: sau khi bật lại, số dư B = %v (mong đợi đúng 555)\n", bal)
@@ -709,12 +677,92 @@ func waitBalance(url string, a common.Address, want *big.Int, d time.Duration) b
 	return false
 }
 
+// The four parent chain validators of the deployed cluster (ports match the ansible inventory).
+var (
+	parentURLs  = []string{"http://127.0.0.1:8547", "http://127.0.0.1:18602", "http://127.0.0.1:18603", "http://127.0.0.1:18604"}
+	parentDirs  = []string{"/opt/metanode/parent_chain", "/opt/metanode/parent_chain_1", "/opt/metanode/parent_chain_2", "/opt/metanode/parent_chain_3"}
+	parentPorts = []string{"8547", "18602", "18603", "18604"}
+)
+
 // killParentPort kills only the process listening on the given TCP port (never a pattern match).
 func killParentPort(port string) {
 	_ = exec.Command("bash", "-c", "kill -9 $(lsof -ti tcp:"+port+" -sTCP:LISTEN) 2>/dev/null").Run()
 }
 
+func portListening(port string) bool {
+	return exec.Command("bash", "-c", "lsof -ti tcp:"+port+" -sTCP:LISTEN >/dev/null 2>&1").Run() == nil
+}
+
+func stopAllParentNodes() {
+	for _, p := range parentPorts {
+		killParentPort(p)
+	}
+}
+
+// startParentNode starts one validator exactly once: it is skipped if the port is already served (a second
+// process on the same ports would crash with AddrInUse and could take the first one down with it).
 func startParentNode(dir, port string) {
-	cmdStr := fmt.Sprintf("cd %s && nohup /opt/metanode/bin/parent_chain -data-dir %s -http :%s -rust-config %s/node_parent.toml -genesis %s/parent_genesis.json >> /var/log/metanode/parent_chain_restart.log 2>&1 & echo $! > %s/parent_chain.pid", dir, dir, port, dir, dir, dir)
+	if portListening(port) {
+		return
+	}
+	cmdStr := fmt.Sprintf("cd %s && nohup /opt/metanode/bin/parent_chain -data-dir %s -http :%s -rust-config %s/node_parent.toml -genesis %s/parent_genesis.json >> /var/log/metanode/%s_restart.log 2>&1 & echo $! > %s/parent_chain.pid", dir, dir, port, dir, dir, filepath.Base(dir), dir)
 	_ = exec.Command("bash", "-c", cmdStr).Run()
+}
+
+func startAllParentNodes() {
+	for i := range parentDirs {
+		startParentNode(parentDirs[i], parentPorts[i])
+	}
+}
+
+// waitParentCluster waits until all four validators answer /status, are not syncing, and report the same
+// last block, block hash and state root (a restarted node first has to catch up via the other validators).
+func waitParentCluster(d time.Duration) error {
+	type st struct {
+		LastBlock uint64 `json:"last_block"`
+		LastHash  string `json:"last_hash"`
+		StateRoot string `json:"state_root"`
+		Syncing   bool   `json:"syncing"`
+		Fork      bool   `json:"fork_detected"`
+	}
+	start := time.Now()
+	last := "no answer yet"
+	for time.Since(start) < d {
+		var all []st
+		ok := true
+		for _, u := range parentURLs {
+			resp, err := http.Get(u + "/status")
+			if err != nil {
+				ok = false
+				last = fmt.Sprintf("%s: %v", u, err)
+				break
+			}
+			var x st
+			err = json.NewDecoder(resp.Body).Decode(&x)
+			resp.Body.Close()
+			if err != nil || x.Syncing {
+				ok = false
+				last = fmt.Sprintf("%s: syncing or bad status", u)
+				break
+			}
+			if x.Fork {
+				return fmt.Errorf("%s reports fork_detected", u)
+			}
+			all = append(all, x)
+		}
+		if ok {
+			same := true
+			for _, x := range all[1:] {
+				if x != all[0] {
+					same = false
+					last = fmt.Sprintf("nodes disagree: %+v vs %+v", all[0], x)
+				}
+			}
+			if same {
+				return nil
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return fmt.Errorf("timeout after %v (%s)", d, last)
 }
