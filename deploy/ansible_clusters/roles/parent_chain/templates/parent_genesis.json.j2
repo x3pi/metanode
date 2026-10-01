@@ -45,6 +45,8 @@
       "address": "0x7e615e4a500ab42b7bb3fdbb62fbb8bd10385fc5",
       "balance": "1000000000000000000000"
     }
-  ]
+  ],
+  "open_cluster_registration": {{ (parent_open_cluster_registration | default(true)) | bool | to_json }},
+  "clusters": {{ (parent_allowed_clusters | default([])) | to_json }}
 }
 

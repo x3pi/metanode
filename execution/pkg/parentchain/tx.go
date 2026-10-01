@@ -2,7 +2,6 @@ package parentchain
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -354,123 +353,52 @@ func BuildAndSignBLSTx(privKey cm.PrivateKey, pubKey cm.PublicKey, to common.Add
 	return tx, nil
 }
 
-// VerifyTxSignature verifies the signature (BLS or ECDSA) of a transaction.
-// Returns senderKey, isTxHashSigned (true if signature covers txHash directly), and error.
-// Sender public key is resolved via AccountRegistry/ChainRegistry or registration call data (fix H12).
-func VerifyTxSignature(tx *pb.Transaction, store Store) (cm.PublicKey, bool, error) {
+// VerifyTxSignature verifies that tx is signed over its transaction hash (ComputeTxHash, which covers the
+// nonce and chain id) by the sender named in FromAddress, using BLS (96-byte Sign); every sender on this chain
+// is a BLS identity. It returns the sender's BLS public key, which is resolved from the
+// AccountRegistry/ChainRegistry, or, for a registerCluster/registerAccount bootstrap transaction, from the key
+// carried in its own CallData (H12). There is no unsigned or alternate-digest mode: every transaction is
+// signed over its hash and carries a sequential nonce.
+func VerifyTxSignature(tx *pb.Transaction, store Store) (cm.PublicKey, error) {
 	if tx == nil || len(tx.FromAddress) != 20 {
-		return cm.PublicKey{}, false, ErrInvalidTxSignature
+		return cm.PublicKey{}, ErrInvalidTxSignature
 	}
 	sender := common.BytesToAddress(tx.FromAddress)
 	txHash := ComputeTxHash(tx)
 
-	// Case 1: BLS signature (96 bytes)
 	if len(tx.Sign) == 96 {
 		var senderKey cm.PublicKey
-		// Look up in AccountRegistry or ChainRegistry
 		regKey, found, err := store.GetAccountRegistry(sender)
 		if err == nil && found {
 			senderKey = regKey
 		} else {
-			// Check if this tx is a registration transaction providing the key in Data
-			var cd pb.ParentChainCallData
-			if protoErr := proto.Unmarshal(tx.Data, &cd); protoErr == nil {
-				if cd.Method == pb.ParentChainMethod_METHOD_REGISTER_CLUSTER {
-					args := cd.GetRegisterCluster()
-					if args != nil && len(args.ClusterKey) == 48 {
-						derived := common.BytesToAddress(crypto.Keccak256(args.ClusterKey)[12:])
-						if derived == sender {
-							copy(senderKey[:], args.ClusterKey)
-						}
-					}
-				} else if cd.Method == pb.ParentChainMethod_METHOD_REGISTER_ACCOUNT {
-					args := cd.GetRegisterAccount()
-					if args != nil && len(args.FloatIdentityKey) == 48 {
-						derived := common.BytesToAddress(crypto.Keccak256(args.FloatIdentityKey)[12:])
-						if derived == sender {
-							copy(senderKey[:], args.FloatIdentityKey)
-						}
-					}
-				}
-			}
-		}
-
-		if senderKey == (cm.PublicKey{}) {
-			return cm.PublicKey{}, false, fmt.Errorf("%w: unknown BLS sender", ErrInvalidTxSignature)
-		}
-
-		if !bls.VerifySign(senderKey, cm.SignFromBytes(tx.Sign), txHash[:]) {
-			// Check if signature was made against method-specific digest instead of txHash
+			// A registration transaction provides the sender key in its own CallData.
 			var cd pb.ParentChainCallData
 			if protoErr := proto.Unmarshal(tx.Data, &cd); protoErr == nil {
 				switch cd.Method {
+				case pb.ParentChainMethod_METHOD_REGISTER_CLUSTER:
+					if args := cd.GetRegisterCluster(); args != nil && len(args.ClusterKey) == 48 &&
+						common.BytesToAddress(crypto.Keccak256(args.ClusterKey)[12:]) == sender {
+						copy(senderKey[:], args.ClusterKey)
+					}
 				case pb.ParentChainMethod_METHOD_REGISTER_ACCOUNT:
-					args := cd.GetRegisterAccount()
-					if args != nil && len(args.FloatIdentityKey) == 48 {
-						var fKey cm.PublicKey
-						copy(fKey[:], args.FloatIdentityKey)
-						regDigest := ComputeRegisterAccountMessage(common.BytesToAddress(args.UserAddress), fKey)
-						if bls.VerifySign(senderKey, cm.SignFromBytes(tx.Sign), regDigest) {
-							return senderKey, false, nil
-						}
-					}
-				case pb.ParentChainMethod_METHOD_TRANSFER_FLOAT:
-					toKey, _, argSender, target, val, fee, seq, _, _, payload, err := DecodeTransferFloatCallData(tx.Data)
-					if err == nil {
-						payloadHash := crypto.Keccak256Hash(payload)
-						digest := ComputeTransferFloatMessage(senderKey, toKey, argSender, target, val, fee, payloadHash, seq)
-						if bls.VerifySign(senderKey, cm.SignFromBytes(tx.Sign), digest) {
-							return senderKey, false, nil
-						}
-					}
-				case pb.ParentChainMethod_METHOD_SUBMIT_STATE_ROOT:
-					clusterKey, epoch, root, _, err := DecodeSubmitStateRootCallData(tx.Data)
-					if err == nil {
-						digest := ComputeSubmitStateRootMessage(clusterKey, epoch, root)
-						if bls.VerifySign(senderKey, cm.SignFromBytes(tx.Sign), digest) {
-							return senderKey, false, nil
-						}
+					if args := cd.GetRegisterAccount(); args != nil && len(args.FloatIdentityKey) == 48 &&
+						common.BytesToAddress(crypto.Keccak256(args.FloatIdentityKey)[12:]) == sender {
+						copy(senderKey[:], args.FloatIdentityKey)
 					}
 				}
 			}
-			return cm.PublicKey{}, false, fmt.Errorf("%w: BLS verification failed", ErrInvalidTxSignature)
 		}
-		return senderKey, true, nil
+		if senderKey == (cm.PublicKey{}) {
+			return cm.PublicKey{}, fmt.Errorf("%w: unknown BLS sender", ErrInvalidTxSignature)
+		}
+		if !bls.VerifySign(senderKey, cm.SignFromBytes(tx.Sign), txHash[:]) {
+			return cm.PublicKey{}, fmt.Errorf("%w: BLS verification failed", ErrInvalidTxSignature)
+		}
+		return senderKey, nil
 	}
 
-	// Case 2: ECDSA Ethereum signature (R, S, V)
-	if len(tx.R) > 0 && len(tx.S) > 0 {
-		var sig [65]byte
-		copy(sig[0:32], padTo32(new(big.Int).SetBytes(tx.R)))
-		copy(sig[32:64], padTo32(new(big.Int).SetBytes(tx.S)))
-		if len(tx.V) > 0 {
-			v := tx.V[0]
-			if v >= 27 {
-				v -= 27
-			}
-			sig[64] = v
-		}
-
-		pubKey, err := crypto.SigToPub(txHash[:], sig[:])
-		if err != nil {
-			return cm.PublicKey{}, false, fmt.Errorf("%w: ECDSA recover failed: %v", ErrInvalidTxSignature, err)
-		}
-		recoveredAddr := crypto.PubkeyToAddress(*pubKey)
-		if recoveredAddr != sender {
-			return cm.PublicKey{}, false, fmt.Errorf("%w: ECDSA address mismatch", ErrInvalidTxSignature)
-		}
-		return cm.PublicKey{}, true, nil
-	}
-
-	// Case 3: Gateway Direct Deposit (authenticated at API boundary)
-	var cd pb.ParentChainCallData
-	if protoErr := proto.Unmarshal(tx.Data, &cd); protoErr == nil {
-		if cd.Method == pb.ParentChainMethod_METHOD_DEPOSIT_TO_FLOAT {
-			return cm.PublicKey{}, false, nil
-		}
-	}
-
-	return cm.PublicKey{}, false, fmt.Errorf("%w: no signature present", ErrInvalidTxSignature)
+	return cm.PublicKey{}, fmt.Errorf("%w: no signature present", ErrInvalidTxSignature)
 }
 
 // ─── EXECUTE TRANSACTION ──────────────────────────────────────────────────
@@ -502,8 +430,8 @@ func ExecuteTx(store Store, tx *pb.Transaction, blockTime uint64) (*Receipt, err
 		}, ErrInvalidToAddress
 	}
 
-	// 3. Validate Signature
-	senderKey, isTxHashSigned, err := VerifyTxSignature(tx, store)
+	// 3. Validate Signature (over the transaction hash)
+	senderKey, err := VerifyTxSignature(tx, store)
 	if err != nil {
 		return &Receipt{
 			TxHash:    txHash,
@@ -512,31 +440,27 @@ func ExecuteTx(store Store, tx *pb.Transaction, blockTime uint64) (*Receipt, err
 		}, err
 	}
 
-	// 4. Validate and Advance Nonce (only for transactions directly signing txHash, T-U14 & H7)
+	// 4. Validate and advance the sequential nonce (T-U14 & H7)
 	sender := common.BytesToAddress(tx.FromAddress)
-	if isTxHashSigned {
-		expectedNonce, err := store.GetNonce(sender)
-		if err != nil {
-			return nil, err
-		}
-		var txNonce uint64
-		if len(tx.Nonce) >= 8 {
-			txNonce = binary.BigEndian.Uint64(tx.Nonce[:8])
-		} else if len(tx.Nonce) > 0 {
-			txNonce = new(big.Int).SetBytes(tx.Nonce).Uint64()
-		}
-		if txNonce != expectedNonce {
-			return &Receipt{
-				TxHash:    txHash,
-				Status:    0,
-				ErrorCode: 103, // ErrWrongNonce
-			}, fmt.Errorf("%w: expected %d, got %d", ErrWrongNonce, expectedNonce, txNonce)
-		}
-
-		// Advance sender nonce immediately after valid signature check
-		if err := store.SetNonce(sender, expectedNonce+1); err != nil {
-			return nil, err
-		}
+	expectedNonce, err := store.GetNonce(sender)
+	if err != nil {
+		return nil, err
+	}
+	var txNonce uint64
+	if len(tx.Nonce) >= 8 {
+		txNonce = binary.BigEndian.Uint64(tx.Nonce[:8])
+	} else if len(tx.Nonce) > 0 {
+		txNonce = new(big.Int).SetBytes(tx.Nonce).Uint64()
+	}
+	if txNonce != expectedNonce {
+		return &Receipt{
+			TxHash:    txHash,
+			Status:    0,
+			ErrorCode: 103, // ErrWrongNonce
+		}, fmt.Errorf("%w: expected %d, got %d", ErrWrongNonce, expectedNonce, txNonce)
+	}
+	if err := store.SetNonce(sender, expectedNonce+1); err != nil {
+		return nil, err
 	}
 
 	// 5. Dispatch Method with state isolation for handler execution (H7)
@@ -641,9 +565,6 @@ func dispatchTxMethod(store Store, tx *pb.Transaction, senderKey cm.PublicKey, t
 		if err != nil {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 214}, err
 		}
-		if clusterSig == (cm.Sign{}) && len(tx.Sign) == 96 {
-			clusterSig = cm.SignFromBytes(tx.Sign)
-		}
 		regDigest := ComputeRegisterAccountMessage(userAddress, floatIdentityKey)
 		events = append(events, crypto.Keccak256(regDigest))
 		events = append(events, userAddress.Bytes())
@@ -671,6 +592,9 @@ func dispatchTxMethod(store Store, tx *pb.Transaction, senderKey cm.PublicKey, t
 		if err != nil {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 219}, err
 		}
+		if !clusterRegistrationAllowed(clusterPubKey) {
+			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 221}, ErrClusterNotAuthorized
+		}
 		clusterHash := crypto.Keccak256Hash(clusterPubKey[:])
 		if err := store.SetChainRegistry(clusterHash, ChainRegistryEntry{
 			FloatIdentityKey:     clusterPubKey,
@@ -697,45 +621,4 @@ func dispatchTxMethod(store Store, tx *pb.Transaction, senderKey cm.PublicKey, t
 		ErrorCode: 0,
 		Events:    events,
 	}, nil
-}
-
-// ─── LEGACY SUPPORT ────────────────────────────────────────────────────────
-
-type TxType string
-
-const (
-	TxTypeDepositToFloat  TxType = "DepositToFloat"
-	TxTypeTransferFloat   TxType = "TransferFloat"
-	TxTypeMarkClaimed     TxType = "MarkClaimed"
-	TxTypeReclaimFloat    TxType = "ReclaimFloat"
-	TxTypeRegisterAccount TxType = "RegisterAccount"
-	TxTypeSubmitStateRoot TxType = "SubmitStateRoot"
-	TxTypeRegisterCluster TxType = "RegisterCluster"
-)
-
-type ParentChainTx struct {
-	Type         TxType         `json:"type"`
-	MsgID        common.Hash    `json:"msgID,omitempty"`
-	Cert         []byte         `json:"cert,omitempty"`
-	PubKey       []byte         `json:"pubKey,omitempty"`
-	SourcePubKey []byte         `json:"sourcePubKey,omitempty"`
-	ClusterID    uint64         `json:"clusterID,omitempty"`
-	ChainID      uint64         `json:"chainID,omitempty"`
-	Amount       *big.Int       `json:"amount,omitempty"`
-	ToPubKey     []byte         `json:"toPubKey,omitempty"`
-	Sender       common.Address `json:"sender,omitempty"`
-	Target       common.Address `json:"target,omitempty"`
-	Payload      []byte         `json:"payload,omitempty"`
-	IsRefund     bool           `json:"isRefund,omitempty"`
-	Nonce        uint64         `json:"nonce,omitempty"`
-	Fee          *big.Int       `json:"fee,omitempty"`
-	Outcome      FloatOutcome   `json:"outcome,omitempty"`
-	UserAddress  common.Address `json:"userAddress,omitempty"`
-	UserSig      []byte         `json:"userSig,omitempty"`
-	Epoch        uint64         `json:"epoch,omitempty"`
-	StateRoot    common.Hash    `json:"stateRoot,omitempty"`
-}
-
-func (tx *ParentChainTx) Marshal() ([]byte, error) {
-	return json.Marshal(tx)
 }

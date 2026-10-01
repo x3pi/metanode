@@ -54,11 +54,22 @@ func NewApp(configPath, rustConfigPath, dataDir, httpAddr, genesisPath string) (
 	}
 	log.Printf("Loaded genesis from %s: chain_id=%d, validators=%d", genesisPath, gen.ChainID, len(gen.Validators))
 
+	policy, err := gen.ClusterPolicy()
+	if err != nil {
+		return nil, err
+	}
+	parentchain.SetClusterPolicy(policy)
+	if policy.Open {
+		log.Printf("⚠️ open_cluster_registration=true: ANY key may register as a cluster and certify deposits (devnet only)")
+	} else {
+		log.Printf("Cluster registration restricted to %d genesis clusters", len(policy.Allowed))
+	}
+
 	tb := processor.NewTxBatcher(1000)
-	httpServer := parentchain.NewHTTPServer(dbStore, tb.Chan())
+	httpServer := parentchain.NewHTTPServer(dbStore)
 	httpServer.SetValidators(protoValidators)
-	httpServer.SetProtoTxChan(tb.ProtoChan())
-	bp := processor.NewBlockProcessor(dbStore, httpServer.NotifyTxResult)
+	httpServer.SetTxChan(tb.Chan())
+	bp := processor.NewBlockProcessor(dbStore)
 	bp.SetForkCallback(func(fork bool) {
 		httpServer.SetForkDetected(fork)
 	})

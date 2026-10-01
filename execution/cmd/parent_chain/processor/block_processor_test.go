@@ -49,7 +49,7 @@ func TestBlockProcessor_GapDetection(t *testing.T) {
 	var syncTriggered bool
 	var syncFrom uint64
 
-	bp := NewBlockProcessor(store, nil)
+	bp := NewBlockProcessor(store)
 	bp.SetSyncCallback(func(fromBlock uint64) {
 		syncTriggered = true
 		syncFrom = fromBlock
@@ -73,7 +73,7 @@ func TestBlockProcessor_Block0Ignored(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
-	bp := NewBlockProcessor(store, nil)
+	bp := NewBlockProcessor(store)
 
 	blk0 := makeTestBlock(0, 0, 1000, nil)
 	resp := bp.ProcessBlock(blk0)
@@ -92,7 +92,7 @@ func TestBlockProcessor_RestartBetweenBlocks(t *testing.T) {
 	store1, err := parentchain.NewDBStore(dbPath)
 	require.NoError(t, err)
 
-	bp1 := NewBlockProcessor(store1, nil)
+	bp1 := NewBlockProcessor(store1)
 	blk1 := makeTestBlock(1, 100, 1000, nil)
 	resp1 := bp1.ProcessBlock(blk1)
 	require.True(t, resp1.Success)
@@ -108,7 +108,7 @@ func TestBlockProcessor_RestartBetweenBlocks(t *testing.T) {
 	require.NoError(t, err)
 	defer store2.Close()
 
-	bp2 := NewBlockProcessor(store2, nil)
+	bp2 := NewBlockProcessor(store2)
 	assert.Equal(t, uint64(1), bp2.LastBlockNumber())
 	assert.Equal(t, root1, bp2.GetStateRoot())
 	assert.Equal(t, hash1, bp2.LastBlockHash())
@@ -127,7 +127,7 @@ func TestBlockProcessor_StateRootProvider(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
-	bp := NewBlockProcessor(store, nil)
+	bp := NewBlockProcessor(store)
 	assert.Equal(t, "0x0000000000000000000000000000000000000000000000000000000000000000", bp.GetStateRoot())
 
 	kp := bls.GenerateKeyPair()
@@ -161,7 +161,7 @@ func TestBlockProcessor_ForkConflictDetection(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
-	bp := NewBlockProcessor(store, nil)
+	bp := NewBlockProcessor(store)
 
 	// Apply block 1
 	blk1 := makeTestBlock(1, 100, 1000, nil)
@@ -191,7 +191,7 @@ func TestBlockProcessor_GetBlocksRange(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
-	bp := NewBlockProcessor(store, nil)
+	bp := NewBlockProcessor(store)
 	for i := uint64(1); i <= 5; i++ {
 		resp := bp.ProcessBlock(makeTestBlock(i, i*100, i*1000, nil))
 		require.True(t, resp.Success)
@@ -219,13 +219,13 @@ func TestBlockProcessor_SyncBlocks(t *testing.T) {
 	storeA, err := parentchain.NewDBStore(filepath.Join(dirA, "dbA"))
 	require.NoError(t, err)
 	defer storeA.Close()
-	bpA := NewBlockProcessor(storeA, nil)
+	bpA := NewBlockProcessor(storeA)
 
 	dirB := t.TempDir()
 	storeB, err := parentchain.NewDBStore(filepath.Join(dirB, "dbB"))
 	require.NoError(t, err)
 	defer storeB.Close()
-	bpB := NewBlockProcessor(storeB, nil)
+	bpB := NewBlockProcessor(storeB)
 
 	// Both execute block 1 identically
 	blk1 := makeTestBlock(1, 100, 1000, nil)
@@ -283,7 +283,7 @@ func TestBlockProcessor_StartupIntegrityVerification(t *testing.T) {
 	// Phase 1: Apply block 1 cleanly
 	store1, err := parentchain.NewDBStore(dbPath)
 	require.NoError(t, err)
-	bp1 := NewBlockProcessor(store1, nil)
+	bp1 := NewBlockProcessor(store1)
 	blk1 := makeTestBlock(1, 100, 1000, nil)
 	resp1 := bp1.ProcessBlock(blk1)
 	require.True(t, resp1.Success)
@@ -310,7 +310,7 @@ func TestBlockProcessor_StartupIntegrityVerification(t *testing.T) {
 	require.NoError(t, err)
 
 	var forkNotified bool
-	bpTampered := NewBlockProcessor(storeTampered, nil)
+	bpTampered := NewBlockProcessor(storeTampered)
 	bpTampered.SetForkCallback(func(fork bool) {
 		forkNotified = fork
 	})
@@ -337,7 +337,7 @@ func TestBlockProcessor_StartupIntegrityVerification(t *testing.T) {
 	require.NoError(t, err)
 	defer storeClean.Close()
 
-	bpClean := NewBlockProcessor(storeClean, nil)
+	bpClean := NewBlockProcessor(storeClean)
 	assert.False(t, bpClean.IsForkDetected())
 	respClean := bpClean.ProcessBlock(blk2)
 	assert.True(t, respClean.Success)

@@ -15,10 +15,14 @@ all:
     parent_chain_id: 990
     # BLS public key for mtn_api.go's devnet sender 0xb4eb...; must match its signing key.
     devnet_sender_bls_pubkey: "0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc"
+    # Who may register as a cluster (a cluster's certificate authorizes deposits, i.e. mints float).
+    #   devnet:     true  -> any key may register.
+    #   production: false + list the BLS public keys (hex, 48 bytes) of the allowed clusters.
+    parent_open_cluster_registration: true
+    parent_allowed_clusters: []
     # ── Security tokens (2026-09-30 audit fixes) — put REAL values in ansible-vault, never in plaintext ──
     # snapshot_server_token: "{{ vault_snapshot_server_token }}"   # protects snapshot downloads; POST /create needs it
     # snapshot_server_bind: "127.0.0.1"                            # restrict the snapshot port if peers need no access
-    # parent_chain_rpc_token: "{{ vault_parent_chain_rpc_token }}" # SAME value on parent chain + every exec node
     # quic_pinned_cert_sha256: "<leaf-cert-sha256>,<...>"         # pin QUIC peer certs (otherwise unauthenticated)
 
 

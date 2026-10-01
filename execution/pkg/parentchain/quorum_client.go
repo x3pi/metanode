@@ -52,7 +52,7 @@ func NewQuorumClient(urls []string, privKey cm.PrivateKey, pubKey cm.PublicKey) 
 	for _, u := range urls {
 		if u != "" {
 			cleanURLs = append(cleanURLs, u)
-			clients = append(clients, NewHTTPClient(u).(*httpClient))
+			clients = append(clients, NewHTTPClient(u))
 		}
 	}
 	var sender common.Address
@@ -282,6 +282,24 @@ func (q *QuorumClient) SendReclaimFloat(msgID common.Hash, cert []byte) (common.
 
 	callData := EncodeReclaimFloatCallData(msgID, cm.SignFromBytes(cert))
 	tx, err := BuildAndSignBLSTx(q.privKey, q.pubKey, ParentChainGatewayAddress, nonce, callData)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return q.sendRawTxFailover(tx)
+}
+
+// SendRegisterCluster registers this client's own BLS key as a cluster on the parent chain. It only takes effect
+// if the genesis authorizes the key (allow-list) or allows open registration (devnet); otherwise the transaction
+// is rejected deterministically at execution.
+func (q *QuorumClient) SendRegisterCluster(clusterID uint64) (common.Hash, error) {
+	if q.privKey == (cm.PrivateKey{}) {
+		return common.Hash{}, errors.New("cannot SendRegisterCluster: private key not configured")
+	}
+	nonce, err := q.getNextNonce()
+	if err != nil {
+		return common.Hash{}, err
+	}
+	tx, err := BuildAndSignBLSTx(q.privKey, q.pubKey, ParentChainGatewayAddress, nonce, EncodeRegisterClusterCallData(q.pubKey, clusterID))
 	if err != nil {
 		return common.Hash{}, err
 	}

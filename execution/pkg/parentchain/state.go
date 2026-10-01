@@ -17,6 +17,7 @@ var (
 	ErrFloatInsufficientBalance = errors.New("float account: insufficient balance")
 	ErrFloatAlreadyResolved     = errors.New("float account: messageID already resolved (claimed or reclaimed)")
 	ErrFloatUnknownMessage      = errors.New("float account: unknown messageID")
+	ErrFloatUnknownSource       = errors.New("float account: deposit source is not a registered cluster")
 	ErrFloatReclaimTooEarly     = errors.New("float account: reclaim timeout not reached yet")
 	ErrFloatNotReclaimable      = errors.New("float account: this messageID cannot be reclaimed")
 	ErrFloatVelocityExceeded    = errors.New("float account: transfer outflow velocity limit exceeded")
@@ -137,22 +138,22 @@ func DepositToFloat(store Store, sourceKey, destKey cm.PublicKey, destClusterIDD
 		return fmt.Errorf("DepositToFloat: %w: %s", ErrFloatAlreadyResolved, messageID.Hex())
 	}
 
-	// 1. Verify source cluster exists in ChainRegistry (if this is a cross-cluster transfer)
-	if sourceKey != (cm.PublicKey{}) {
-		sourceHash := crypto.Keccak256Hash(sourceKey[:])
-		_, found, err := store.GetChainRegistry(sourceHash)
-		if err != nil {
-			return err
-		}
-		if !found {
-			return errors.New("DepositToFloat: unknown source cluster")
-		}
+	// 1. The source cluster must be a registered cluster and must certify the deposit. A deposit mints float,
+	// so there is no unauthenticated mode: a missing (zero) source key is rejected, never skipped.
+	if sourceKey == (cm.PublicKey{}) {
+		return fmt.Errorf("DepositToFloat: %w", ErrFloatUnknownSource)
+	}
+	sourceHash := crypto.Keccak256Hash(sourceKey[:])
+	if _, found, err := store.GetChainRegistry(sourceHash); err != nil {
+		return err
+	} else if !found {
+		return fmt.Errorf("DepositToFloat: %w", ErrFloatUnknownSource)
+	}
 
-		// 2. Verify source cluster's BLS signature on the deposit message
-		digest := ComputeDepositFloatMessage(destKey, destClusterIDDesc, sender, target, amount, messageID)
-		if !bls.VerifySign(sourceKey, cert, digest) {
-			return fmt.Errorf("DepositToFloat: %w", ErrInvalidSignature)
-		}
+	// 2. Verify the source cluster's BLS signature on the deposit message
+	digest := ComputeDepositFloatMessage(destKey, destClusterIDDesc, sender, target, amount, messageID)
+	if !bls.VerifySign(sourceKey, cert, digest) {
+		return fmt.Errorf("DepositToFloat: %w", ErrInvalidSignature)
 	}
 
 	destHash := crypto.Keccak256Hash(destKey[:])

@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -17,69 +16,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func TestDepositToFloat_ConsecutiveDepositsUniqueMsgID(t *testing.T) {
-	t.Setenv("PARENT_CHAIN_RPC_TOKEN", "test-token")
-	store := NewMemoryStore()
-	txChan := make(chan *ParentChainTx, 10)
-	server := NewHTTPServer(store, txChan)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/tx", server.handleTx)
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
-
-	client := NewHTTPClient(ts.URL)
-
-	// Background worker responding to txChan
-	go func() {
-		for tx := range txChan {
-			server.NotifyTxResult(tx.MsgID, nil)
-		}
-	}()
-
-	kp := bls.GenerateKeyPair()
-	pubKey := kp.PublicKey()
-	privKey := kp.PrivateKey()
-	clusterID := uint64(101)
-	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
-	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
-	amount := big.NewInt(1000)
-
-	// Deposit 1
-	msgID1, err := client.SendDepositToFloat(pubKey, clusterID, sender, target, amount)
-	assert.NoError(t, err)
-	assert.NotEqual(t, common.Hash{}, msgID1)
-
-	// Small pause so UnixNano ticks
-	time.Sleep(1 * time.Millisecond)
-
-	// Deposit 2: Same parameters exactly
-	msgID2, err := client.SendDepositToFloat(pubKey, clusterID, sender, target, amount)
-	assert.NoError(t, err)
-	assert.NotEqual(t, common.Hash{}, msgID2)
-
-	// Verify msgIDs are distinct!
-	assert.NotEqual(t, msgID1, msgID2, "consecutive identical deposits must have distinct MsgIDs")
-
-	// Verify both deposits can be successfully recorded in parent chain state
-	_ = store.SetChainRegistry(crypto.Keccak256Hash(pubKey[:]), ChainRegistryEntry{FloatIdentityKey: pubKey, ClusterIDDescriptive: clusterID})
-	dig1 := ComputeDepositFloatMessage(pubKey, clusterID, sender, target, amount, msgID1)
-	cert1 := bls.Sign(privKey, dig1)
-	err1 := DepositToFloat(store, pubKey, pubKey, clusterID, sender, target, amount, msgID1, cert1, 100)
-	assert.NoError(t, err1)
-
-	dig2 := ComputeDepositFloatMessage(pubKey, clusterID, sender, target, amount, msgID2)
-	cert2 := bls.Sign(privKey, dig2)
-	err2 := DepositToFloat(store, pubKey, pubKey, clusterID, sender, target, amount, msgID2, cert2, 101)
-	assert.NoError(t, err2, "second identical deposit must not fail with ErrFloatAlreadyResolved")
-
-	// Total balance in float account must be 2000
-	hash := crypto.Keccak256Hash(pubKey[:])
-	bal, err := store.GetFloat(hash)
-	assert.NoError(t, err)
-	assert.Equal(t, big.NewInt(2000), bal)
-}
-
 func TestPadTo32_NilSafety(t *testing.T) {
 	// Must not panic on nil
 	var res []byte
@@ -88,114 +24,6 @@ func TestPadTo32_NilSafety(t *testing.T) {
 	})
 	assert.Equal(t, 32, len(res))
 	assert.Equal(t, make([]byte, 32), res)
-}
-
-func TestHTTPRPC_InputValidation(t *testing.T) {
-	t.Setenv("PARENT_CHAIN_RPC_TOKEN", "test-token")
-	store := NewMemoryStore()
-	txChan := make(chan *ParentChainTx, 10)
-	server := NewHTTPServer(store, txChan)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/tx", server.handleTx)
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
-
-	client := NewHTTPClient(ts.URL)
-
-	kp := bls.GenerateKeyPair()
-	pubKey := kp.PublicKey()
-
-	// 1. TransferFloat with nil amount -> must be rejected
-	reqBadTransfer := ParentChainTx{
-		Type:     TxTypeTransferFloat,
-		PubKey:   pubKey[:],
-		ToPubKey: pubKey[:],
-		Amount:   nil, // nil amount!
-	}
-	var resp struct{}
-	err := client.(*httpClient).post("/tx", reqBadTransfer, &resp)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid amount")
-
-	// 2. TransferFloat with negative/zero amount -> must be rejected
-	reqZeroTransfer := ParentChainTx{
-		Type:     TxTypeTransferFloat,
-		PubKey:   pubKey[:],
-		ToPubKey: pubKey[:],
-		Amount:   big.NewInt(0),
-	}
-	err = client.(*httpClient).post("/tx", reqZeroTransfer, &resp)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid amount")
-
-	// 3. DepositToFloat with nil amount -> must be rejected
-	reqBadDeposit := ParentChainTx{
-		Type:   TxTypeDepositToFloat,
-		PubKey: pubKey[:],
-		Amount: nil,
-	}
-	err = client.(*httpClient).post("/tx", reqBadDeposit, &resp)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid amount")
-
-	// 4. DepositToFloat with invalid pubkey length -> must be rejected
-	reqShortKeyDeposit := ParentChainTx{
-		Type:   TxTypeDepositToFloat,
-		PubKey: []byte("too short"),
-		Amount: big.NewInt(100),
-	}
-	err = client.(*httpClient).post("/tx", reqShortKeyDeposit, &resp)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid public key length")
-
-	// 5. SubmitStateRoot with invalid signature length -> must be rejected
-	reqBadCertLen := ParentChainTx{
-		Type:      TxTypeSubmitStateRoot,
-		PubKey:    pubKey[:],
-		Epoch:     1,
-		StateRoot: common.HexToHash("0x1111"),
-		Cert:      []byte("short-cert"),
-	}
-	err = client.(*httpClient).post("/tx", reqBadCertLen, &resp)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid signature length")
-
-	// 6. SubmitStateRoot with forged/invalid signature -> must be rejected with 401 Unauthorized
-	otherKp := bls.GenerateKeyPair()
-	badDigest := ComputeSubmitStateRootMessage(pubKey, 1, common.HexToHash("0x1111"))
-	forgedSig := bls.Sign(otherKp.PrivateKey(), badDigest) // Signed with different key!
-	reqBadSig := ParentChainTx{
-		Type:      TxTypeSubmitStateRoot,
-		PubKey:    pubKey[:],
-		Epoch:     1,
-		StateRoot: common.HexToHash("0x1111"),
-		Cert:      forgedSig[:],
-	}
-	err = client.(*httpClient).post("/tx", reqBadSig, &resp)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid signature")
-}
-
-func TestDepositToFloat_RequiresToken(t *testing.T) {
-	t.Setenv("PARENT_CHAIN_RPC_TOKEN", "secret")
-	server := NewHTTPServer(NewMemoryStore(), make(chan *ParentChainTx, 1))
-	mux := http.NewServeMux()
-	mux.HandleFunc("/tx", server.handleTx)
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
-
-	body := `{"type":"DepositToFloat","amount":1}`
-	for name, auth := range map[string]string{"missing": "", "wrong": "Bearer nope"} {
-		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/tx", strings.NewReader(body))
-		if auth != "" {
-			req.Header.Set("Authorization", auth)
-		}
-		resp, err := http.DefaultClient.Do(req)
-		assert.NoError(t, err)
-		resp.Body.Close()
-		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, name)
-	}
 }
 
 // T-P7..T-P10: RPC endpoints for blocks, txs, receipts, proofs, status, and raw transactions.
@@ -241,16 +69,16 @@ func TestHTTPRPC_FullChainEndpoints(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	protoTxChan := make(chan *pb.Transaction, 10)
-	server := NewHTTPServer(store, make(chan *ParentChainTx, 10))
-	server.SetProtoTxChan(protoTxChan)
+	txChan := make(chan *pb.Transaction, 10)
+	server := NewHTTPServer(store)
+	server.SetTxChan(txChan)
 	server.SetValidators([]*pb.ValidatorInfo{
 		{Name: "validator-0", Address: "0x7e615e4a500ab42b7bb3fdbb62fbb8bd10385fc5"},
 	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/block", server.handleBlock)
-	mux.HandleFunc("/tx", server.handleTxGetOrPost)
+	mux.HandleFunc("/tx", server.handleTxLookup)
 	mux.HandleFunc("/receipt", server.handleReceipt)
 	mux.HandleFunc("/proof", server.handleProof)
 	mux.HandleFunc("/status", server.handleStatus)
@@ -319,3 +147,57 @@ func TestHTTPRPC_FullChainEndpoints(t *testing.T) {
 	assert.Equal(t, ComputeTxHash(tx2), sentHash)
 }
 
+
+// The JSON transaction path no longer exists: POST /tx is rejected and /send_raw_transaction accepts only raw
+// proto bytes (a JSON body is not a valid pb.Transaction).
+func TestHTTPRPC_LegacyJSONPathRemoved(t *testing.T) {
+	txChan := make(chan *pb.Transaction, 1)
+	server := NewHTTPServer(NewMemoryStore())
+	server.SetTxChan(txChan)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/tx", server.handleTxLookup)
+	mux.HandleFunc("/send_raw_transaction", server.handleSendRawTransaction)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/tx", "application/json", strings.NewReader(`{"type":"DepositToFloat","amount":1}`))
+	assert.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode, "POST /tx must not exist")
+
+	resp, err = http.Post(ts.URL+"/send_raw_transaction", "application/json", strings.NewReader(`{"raw_tx":"0x0a0b"}`))
+	assert.NoError(t, err)
+	resp.Body.Close()
+	assert.NotEqual(t, http.StatusOK, resp.StatusCode, "a JSON-wrapped body must not be accepted as a transaction")
+	assert.Equal(t, 0, len(txChan), "nothing may be queued from the JSON path")
+}
+
+// Oversized and wrong-chain transactions are rejected at ingress and never queued.
+func TestHTTPRPC_SendRawTransactionValidation(t *testing.T) {
+	txChan := make(chan *pb.Transaction, 4)
+	server := NewHTTPServer(NewMemoryStore())
+	server.SetTxChan(txChan)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/send_raw_transaction", server.handleSendRawTransaction)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	client := NewHTTPClient(ts.URL)
+
+	kp := bls.GenerateKeyPair()
+	tx, _ := BuildAndSignBLSTx(kp.PrivateKey(), kp.PublicKey(), ParentChainGatewayAddress, 0, EncodeRegisterClusterCallData(kp.PublicKey(), 1))
+	tx.ChainID = 1
+	raw, _ := proto.Marshal(tx)
+	_, err := client.SendRawTransaction(raw)
+	assert.Error(t, err, "wrong chain id must be rejected")
+
+	_, err = client.SendRawTransaction(make([]byte, maxRawTxBytes+1))
+	assert.Error(t, err, "oversized body must be rejected")
+	assert.Equal(t, 0, len(txChan))
+
+	good, _ := BuildAndSignBLSTx(kp.PrivateKey(), kp.PublicKey(), ParentChainGatewayAddress, 0, EncodeRegisterClusterCallData(kp.PublicKey(), 1))
+	goodRaw, _ := proto.Marshal(good)
+	h, err := client.SendRawTransaction(goodRaw)
+	assert.NoError(t, err)
+	assert.Equal(t, ComputeTxHash(good), h)
+	assert.Equal(t, 1, len(txChan))
+}

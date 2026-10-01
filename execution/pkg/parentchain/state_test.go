@@ -90,7 +90,7 @@ func TestParentChainState(t *testing.T) {
 		dig := ComputeDepositFloatMessage(pub1, 101, common.Address{}, common.Address{}, depositAmount, msgID)
 		cert := bls.Sign(priv1, dig)
 		err := DepositToFloat(s, pub1, pub1, 101, common.Address{}, common.Address{}, depositAmount, msgID, cert, 1)
-		if err == nil || err.Error() != "DepositToFloat: unknown source cluster" {
+		if !errors.Is(err, ErrFloatUnknownSource) {
 			t.Fatalf("Expected unknown source cluster error, got %v", err)
 		}
 

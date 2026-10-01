@@ -318,6 +318,14 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		clusterID = app.config.ChainId.Uint64()
 	}
 
+	// Register this cluster's key as a cluster on the Parent Chain. Whether it takes effect is decided by the
+	// parent genesis (allow-list, or open registration on devnet); a rejection is only logged here.
+	if app.rollupEnabled {
+		if _, regErr := parentClient.SendRegisterCluster(clusterID); regErr != nil {
+			logger.Warn("Failed to submit cluster registration to parent chain: %v", regErr)
+		}
+	}
+
 	app.crossNodeHandler = rollup.NewCrossNodeHandler(app.keyPair.PublicKey())
 	app.sendWorker = rollup.NewSendWorker(rollupStore, parentClient, app.keyPair, app.keyPair.PublicKey(), clusterID)
 	app.recvWorker = rollup.NewReceiveWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)

@@ -203,8 +203,27 @@ func main() {
 	if parentToken != "" {
 		_ = os.Setenv("PARENT_CHAIN_RPC_TOKEN", parentToken)
 	}
-	parentClient := parentchain.NewHTTPClient(parentChainURL)
 
+	// This script talks to the parent chain only through signed transactions. It acts as a dedicated relayer
+	// cluster with its own throw-away BLS key (never the exec clusters' keys, so it cannot race the running exec
+	// nodes on their nonce stream). The relayer registers itself as a cluster (devnet genesis allows open
+	// registration) and then certifies deposits / relays account registrations; every send goes to all four
+	// parent validators with failover.
+	clientURLs := parentURLs
+	if !isMultiNodeCluster() {
+		clientURLs = []string{parentChainURL}
+	}
+	relayerKP := bls.GenerateKeyPair()
+	parentClient := parentchain.NewQuorumClient(clientURLs, relayerKP.PrivateKey(), relayerKP.PublicKey())
+	if _, err := parentClient.SendRegisterCluster(9001); err != nil {
+		fmt.Printf("❌ Relayer không đăng ký được cluster trên Parent Chain: %v\n", err)
+		os.Exit(1)
+	}
+	waitRegistered(parentClient, relayerKP.Address())
+	if _, found, err := parentClient.GetAccountRegistry(relayerKP.Address()); err != nil || !found {
+		fmt.Printf("❌ Relayer chưa có trong registry sau khi đăng ký (genesis không cho đăng ký cluster mở?): found=%v err=%v\n", found, err)
+		os.Exit(1)
+	}
 	_, exec1PubKey, _ := bls.GenerateKeyPairFromSecretKey(exec1PrivHex)
 	exec2Priv, exec2PubKey, _ := bls.GenerateKeyPairFromSecretKey(exec2PrivHex)
 
@@ -562,7 +581,7 @@ func main() {
 	fmt.Printf("   Địa chỉ Smart Contract đích trên Exec 2: %s\n", contractOwnerAddr.Hex())
 
 	// Đảm bảo cụm Exec 1 có đủ float balance trên Parent Chain
-	_, _ = parentClient.SendDepositToFloat(exec1PubKey, 1, bootstrapAddr, bootstrapAddr, big.NewInt(1_000_000_000_000_000_000))
+	mustDeposit(parentClient, exec1PubKey, 1, bootstrapAddr, bootstrapAddr, big.NewInt(1_000_000_000_000_000_000))
 
 	// Đăng ký tài khoản đích trên Parent Chain
 	fmt.Println("2. Đăng ký tài khoản Smart Contract đích trên Parent Chain vào Cluster Exec 2...")
@@ -666,20 +685,15 @@ func main() {
 		fmt.Println("   (Môi trường hiện tại là cụm 1 node Parent Chain — tự động hoàn tất mô phỏng quorum resilience)")
 		fmt.Println("✅ KỊCH BẢN 8 THÀNH CÔNG: mất 1/4 node parent, chuyển xuyên cụm vẫn hoàn tất đúng 777 wei")
 	} else {
-		// Registrations use the legacy HTTP client against a live node so this script never shares a nonce stream
-		// with the real Exec 2 process (same cluster key); the cross-chain transfers themselves go through the real
-		// Exec 1/Exec 2 rollup workers, which use the quorum client.
-		regClient := func(i int) parentchain.Client { return parentchain.NewHTTPClient(parentURLs[i]) }
-
 		accAPriv, _ := crypto.GenerateKey()
 		accA := crypto.PubkeyToAddress(accAPriv.PublicKey)
 		regA := parentchain.ComputeRegisterAccountMessage(accA, exec2PubKey)
 		sigA, _ := crypto.Sign(crypto.Keccak256(regA), accAPriv)
-		if _, err := regClient(0).SendRegisterAccount(accA, exec2PubKey, sigA, bls.Sign(exec2Priv, regA)); err != nil {
+		if _, err := parentClient.SendRegisterAccount(accA, exec2PubKey, sigA, bls.Sign(exec2Priv, regA)); err != nil {
 			fmt.Printf("❌ Đăng ký tài khoản A thất bại: %v\n", err)
 			os.Exit(1)
 		}
-		waitRegistered(regClient(0), accA)
+		waitRegistered(parentClient, accA)
 		fmt.Println("1. Dừng node parent 0 (:8547). Còn 3/4 node (đủ quorum 2f+1)...")
 		killParentPort(parentPorts[0])
 		time.Sleep(2 * time.Second)
@@ -707,16 +721,15 @@ func main() {
 		fmt.Println("   (Môi trường hiện tại là cụm 1 node Parent Chain — tự động hoàn tất mô phỏng pending & recovery)")
 		fmt.Println("✅ KỊCH BẢN 9 THÀNH CÔNG: mất quorum thì pending, bật lại thì ghi có đúng 555 wei một lần")
 	} else {
-		regClient := func(i int) parentchain.Client { return parentchain.NewHTTPClient(parentURLs[i]) }
 		accBPriv, _ := crypto.GenerateKey()
 		accB := crypto.PubkeyToAddress(accBPriv.PublicKey)
 		regB := parentchain.ComputeRegisterAccountMessage(accB, exec2PubKey)
 		sigB, _ := crypto.Sign(crypto.Keccak256(regB), accBPriv)
-		if _, err := regClient(2).SendRegisterAccount(accB, exec2PubKey, sigB, bls.Sign(exec2Priv, regB)); err != nil {
+		if _, err := parentClient.SendRegisterAccount(accB, exec2PubKey, sigB, bls.Sign(exec2Priv, regB)); err != nil {
 			fmt.Printf("❌ Đăng ký tài khoản B thất bại (3/4 node): %v\n", err)
 			os.Exit(1)
 		}
-		waitRegistered(regClient(2), accB)
+		waitRegistered(parentClient, accB)
 		fmt.Println("1. Dừng thêm node parent 1 (:18602). Còn 2/4 node (< 2f+1)...")
 		killParentPort(parentPorts[1])
 		time.Sleep(2 * time.Second)
@@ -752,6 +765,14 @@ func main() {
 		fmt.Println("✅ KỊCH BẢN 9 THÀNH CÔNG: mất quorum thì pending, bật lại thì ghi có đúng 555 wei một lần")
 	}
 	fmt.Println("\n🎉 TẤT CẢ 9/9 KỊCH BẢN ĐÃ CHẠY THÀNH CÔNG!")
+}
+
+// mustDeposit sends a certified deposit and aborts the run if it cannot be submitted.
+func mustDeposit(c parentchain.Client, destKey mt_common.PublicKey, clusterID uint64, sender, target common.Address, amount *big.Int) {
+	if _, err := c.SendDepositToFloat(destKey, clusterID, sender, target, amount); err != nil {
+		fmt.Printf("❌ DepositToFloat thất bại: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func waitRegistered(c parentchain.Client, a common.Address) {

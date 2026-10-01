@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
@@ -39,6 +40,27 @@ type Genesis struct {
 	EpochTimestampMs     uint64             `json:"epoch_timestamp_ms,omitempty"`
 	Validators           []GenesisValidator `json:"validators"`
 	Accounts             []GenesisAccount   `json:"accounts,omitempty"`
+
+	// OpenClusterRegistration lets any key register as a cluster (devnet only). When false, only the keys listed
+	// in Clusters may register. See ClusterPolicy.
+	OpenClusterRegistration bool `json:"open_cluster_registration"`
+	// Clusters lists the BLS public keys (hex or base64, 48 bytes) of the clusters allowed to register.
+	Clusters []string `json:"clusters,omitempty"`
+}
+
+// ClusterPolicy converts the genesis cluster settings into the policy enforced during execution.
+func (g *Genesis) ClusterPolicy() (ClusterPolicy, error) {
+	p := ClusterPolicy{Open: g.OpenClusterRegistration, Allowed: map[cm.PublicKey]struct{}{}}
+	for i, c := range g.Clusters {
+		raw, err := decodeKey(c)
+		if err != nil || len(raw) != 48 {
+			return ClusterPolicy{}, fmt.Errorf("%w: clusters[%d] is not a 48-byte BLS public key", ErrGenesisInvalid, i)
+		}
+		var k cm.PublicKey
+		copy(k[:], raw)
+		p.Allowed[k] = struct{}{}
+	}
+	return p, nil
 }
 
 // LoadGenesis reads and validates a parent chain genesis file.
@@ -113,6 +135,10 @@ func LoadGenesis(path string) (*Genesis, error) {
 
 	if g.EpochDurationSeconds == 0 {
 		g.EpochDurationSeconds = 86400
+	}
+
+	if _, err := g.ClusterPolicy(); err != nil {
+		return nil, err
 	}
 
 	return &g, nil

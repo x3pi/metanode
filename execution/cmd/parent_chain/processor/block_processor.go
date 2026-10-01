@@ -14,7 +14,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/executor"
-	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -25,7 +24,6 @@ type BlockProcessor struct {
 	committer    parentchain.BlockCommitter
 	queue        chan *pb.ExecutableBlock
 	quit         chan struct{}
-	onTxResult   func(msgID common.Hash, err error)
 	syncCallback func(fromBlock uint64)
 	forkCallback func(fork bool)
 
@@ -37,12 +35,11 @@ type BlockProcessor struct {
 	forkDetected    bool
 }
 
-func NewBlockProcessor(committer parentchain.BlockCommitter, onTxResult func(msgID common.Hash, err error)) *BlockProcessor {
+func NewBlockProcessor(committer parentchain.BlockCommitter) *BlockProcessor {
 	bp := &BlockProcessor{
-		committer:  committer,
-		queue:      make(chan *pb.ExecutableBlock, 100),
-		quit:       make(chan struct{}),
-		onTxResult: onTxResult,
+		committer: committer,
+		queue:     make(chan *pb.ExecutableBlock, 100),
+		quit:      make(chan struct{}),
 	}
 
 	// Startup recovery and state integrity verification
@@ -348,64 +345,15 @@ func (bp *BlockProcessor) ProcessBlock(block *pb.ExecutableBlock) *pb.ExecuteBlo
 	parentchain.ParentChainStateRoot.Reset()
 	parentchain.ParentChainStateRoot.WithLabelValues(res.Record.Header.StateRoot.Hex()).Set(1)
 
-	// Notify individual transaction execution outcomes
-	if bp.onTxResult != nil {
-		for i, rcpt := range res.Record.Receipts {
+	// Log failed transactions (their receipts, with status 0, are part of the block and its receipts_root).
+	for i, rcpt := range res.Record.Receipts {
+		if rcpt.Status == 0 {
 			var txErr error
-			if rcpt.Status == 0 {
-				if i < len(res.TxErrors) && res.TxErrors[i] != nil {
-					txErr = res.TxErrors[i]
-				} else {
-					txErr = fmt.Errorf("receipt error code: %d", rcpt.ErrorCode)
-				}
+			if i < len(res.TxErrors) {
+				txErr = res.TxErrors[i]
 			}
-			log.Printf("block_processor: receipt #%d txHash=%s status=%d errCode=%d events=%d err=%v",
-				i, rcpt.TxHash.Hex()[:10], rcpt.Status, rcpt.ErrorCode, len(rcpt.Events), txErr)
-
-			bp.onTxResult(rcpt.TxHash, txErr)
-			for _, evt := range rcpt.Events {
-				if len(evt) == 32 {
-					bp.onTxResult(common.BytesToHash(evt), txErr)
-				}
-			}
-
-			// If rcpt failed before events were populated, fallback to extracting msgID from rawTxs
-			if len(rcpt.Events) == 0 && i < len(rawTxs) {
-				var pbTx pb.Transaction
-				if err := proto.Unmarshal(rawTxs[i], &pbTx); err == nil {
-					var cd pb.ParentChainCallData
-					if err := proto.Unmarshal(pbTx.Data, &cd); err == nil {
-						switch cd.Method {
-						case pb.ParentChainMethod_METHOD_DEPOSIT_TO_FLOAT:
-							if args := cd.GetDepositToFloat(); args != nil && len(args.MsgId) == 32 {
-								bp.onTxResult(common.BytesToHash(args.MsgId), txErr)
-							}
-						case pb.ParentChainMethod_METHOD_REGISTER_ACCOUNT:
-							if args := cd.GetRegisterAccount(); args != nil && len(args.FloatIdentityKey) == 48 {
-								var fKey cm.PublicKey
-								copy(fKey[:], args.FloatIdentityKey)
-								regDigest := parentchain.ComputeRegisterAccountMessage(common.BytesToAddress(args.UserAddress), fKey)
-								bp.onTxResult(crypto.Keccak256Hash(regDigest), txErr)
-							}
-						case pb.ParentChainMethod_METHOD_SUBMIT_STATE_ROOT:
-							if args := cd.GetSubmitStateRoot(); args != nil && len(args.ClusterKey) == 48 {
-								var cKey cm.PublicKey
-								copy(cKey[:], args.ClusterKey)
-								digest := parentchain.ComputeSubmitStateRootMessage(cKey, args.Epoch, common.BytesToHash(args.StateRoot))
-								bp.onTxResult(crypto.Keccak256Hash(append(digest, args.Cert...)), txErr)
-							}
-						case pb.ParentChainMethod_METHOD_MARK_CLAIMED:
-							if args := cd.GetMarkClaimed(); args != nil && len(args.MsgId) == 32 {
-								bp.onTxResult(common.BytesToHash(args.MsgId), txErr)
-							}
-						case pb.ParentChainMethod_METHOD_RECLAIM_FLOAT:
-							if args := cd.GetReclaimFloat(); args != nil && len(args.MsgId) == 32 {
-								bp.onTxResult(common.BytesToHash(args.MsgId), txErr)
-							}
-						}
-					}
-				}
-			}
+			log.Printf("block_processor: tx %s rejected in block #%d: errCode=%d err=%v",
+				rcpt.TxHash.Hex()[:10], res.Record.Header.Number, rcpt.ErrorCode, txErr)
 		}
 	}
 
