@@ -36,8 +36,23 @@
     - role: common
     - role: exec_cluster
 
+# ── Test authentication preflight ────────────────────────────────────────────
+# Test-only runs must use the same deposit credential as the already-running
+# Parent Chain. This role restarts only the Parent Chain when that credential is
+# stale; it does not redeploy the execution clusters.
+- name: "Phase 4: Synchronize Parent Chain RPC authentication for tests"
+  hosts: parent_chain_nodes
+  gather_facts: false
+  become: true
+  tags: ["test", "verify"]
+  tasks:
+    - name: Synchronize Parent Chain token before integration tests
+      ansible.builtin.include_role:
+        name: parent_chain
+        tasks_from: test_token_sync
+
 # ── Play 4: Post-Deployment Testing ──────────────────────────────────────────
-- name: "Phase 4: Integration & Scenario Testing"
+- name: "Phase 5: Integration & Scenario Testing"
   hosts: localhost
   connection: local
   gather_facts: false

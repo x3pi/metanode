@@ -152,125 +152,109 @@ def parse_inventory(file_path):
     }
 
 def export_tmp_files(info):
-    # 1. Export /tmp/rpc_nodes.json (Smart-Merge with existing Public Chain nodes)
     rpc_nodes_file = "/tmp/rpc_nodes.json"
+    priv_file = "/tmp/private_chains.json"
+    p_rpc = info.get('parent', {}).get('rpc_url', 'http://127.0.0.1:8547')
+    clusters_info = info.get('clusters', {})
+
+    private_chains_map = {}
+    for cid, c in clusters_info.items():
+        cid_str = str(cid)
+        c_name = c.get('cluster_name', f'exec{cid}')
+        alias_name = 'chain_a' if cid_str == '1' else ('chain_b' if cid_str == '2' else f'chain_{cid}')
+
+        c_rpc = {}
+        c_ws = {}
+        c_tcp = {}
+        for idx, (r_name, r) in enumerate(c.get('replicas', {}).items()):
+            m_key = f"m{idx}"
+            c_rpc[m_key] = r['rpc_url']
+            c_ws[m_key] = r['ws_url']
+            c_tcp[m_key] = f"{r['ip']}:{r['p2p_port']}"
+
+        c_entry = {
+            'cluster_id': int(cid),
+            'cluster_name': c_name,
+            'chain_id': c.get('chain_id', 991),
+            'validators': len(c.get('replicas', {})),
+            'rpc_url': c.get('primary_rpc', ''),
+            'ws_url': f"{c.get('primary_rpc', '').replace('http', 'ws')}/ws",
+            'rpc_nodes': c_rpc,
+            'ws_nodes': c_ws,
+            'tcp_nodes': c_tcp
+        }
+
+        private_chains_map[alias_name] = c_entry
+
+    unified_out = {
+        'root_anchor': p_rpc,
+        'chain_id': 991,
+        'parent': info.get('parent', {}),
+        'private_chains': private_chains_map
+    }
+
+    # 1. Write unified /tmp/rpc_nodes.json
     try:
-        existing = {}
-        if os.path.isfile(rpc_nodes_file):
-            try:
-                with open(rpc_nodes_file, 'r', encoding='utf-8') as f:
-                    existing = json.load(f)
-            except Exception:
-                existing = {}
-
-        merged_nodes = dict(existing.get('nodes', {}))
-        merged_nodes.update(info['nodes'])
-
-        merged_rpc = dict(existing.get('rpc_nodes', {}))
-        merged_rpc.update(info['rpc_nodes'])
-
-        merged_ws = dict(existing.get('ws_nodes', {}))
-        merged_ws.update(info['ws_nodes'])
-
-        merged_tcp = dict(existing.get('tcp_nodes', {}))
-        merged_tcp.update(info['tcp_nodes'])
-
-        merged_raft = dict(existing.get('raft_nodes', {}))
-        merged_raft.update(info['raft_nodes'])
-
-        merged_fwd = dict(existing.get('forward_nodes', {}))
-        merged_fwd.update(info['forward_nodes'])
-
-        out = dict(existing)
-        out.update({
-            'nodes': merged_nodes,
-            'rpc_nodes': merged_rpc,
-            'ws_nodes': merged_ws,
-            'tcp_nodes': merged_tcp,
-            'raft_nodes': merged_raft,
-            'forward_nodes': merged_fwd
-        })
-
         with open(rpc_nodes_file, 'w', encoding='utf-8') as f:
-            json.dump(out, f, indent=2)
+            json.dump(unified_out, f, indent=2)
         os.chmod(rpc_nodes_file, 0o600)
     except Exception as e:
         print(f"Warning: could not write {rpc_nodes_file}: {e}", file=sys.stderr)
 
-    # 2. Export /tmp/private_chains.json (for metanode-suite update-ip.sh mapping)
-    priv_file = "/tmp/private_chains.json"
+    # 2. Synchronize /tmp/private_chains.json with identical data & symlink fallback
     try:
-        p_rpc = info['parent'].get('rpc_url', 'http://127.0.0.1:8547')
-        priv_out = {
-            'root_anchor': p_rpc,
-            'nodes': {},
-            'tcp_nodes': {},
-            'chain_nodes': {}
-        }
-        for cid, c in info['clusters'].items():
-            chain_id_str = str(c['chain_id'])
-            c_name = c.get('cluster_name', c.get('name', f'exec{cid}'))
-            cid_str = str(cid)
-
-            c_rpc = {}
-            c_ws = {}
-            c_tcp = {}
-            first_tcp = ''
-            for idx, (r_name, r) in enumerate(c['replicas'].items()):
-                m_key = f"m{idx}"
-                c_rpc[m_key] = r['rpc_url']
-                c_ws[m_key] = r['ws_url']
-                c_tcp[m_key] = f"{r['ip']}:{r['p2p_port']}"
-                if not first_tcp:
-                    first_tcp = c_tcp[m_key]
-
-            c_entry = {
-                'cluster_id': cid,
-                'cluster_name': c_name,
-                'chain_id': c['chain_id'],
-                'validators': len(c['replicas']),
-                'rpc_url': c['primary_rpc'],
-                'ws_url': f"{c['primary_rpc'].replace('http', 'ws')}/ws",
-                'rpc_nodes': c_rpc,
-                'ws_nodes': c_ws,
-                'tcp_nodes': c_tcp
-            }
-
-            keys_to_set = [cid_str, f"cluster_{cid}", c_name]
-            if chain_id_str not in priv_out['nodes']:
-                keys_to_set.append(chain_id_str)
-
-            for k in keys_to_set:
-                priv_out['nodes'][k] = c['primary_rpc']
-                priv_out['tcp_nodes'][k] = first_tcp
-                priv_out['chain_nodes'][k] = c_entry
-
-        with open(priv_file, 'w') as f:
-            json.dump(priv_out, f, indent=2)
+        with open(priv_file, 'w', encoding='utf-8') as f:
+            json.dump(unified_out, f, indent=2)
         os.chmod(priv_file, 0o600)
     except Exception as e:
         print(f"Warning: could not write {priv_file}: {e}", file=sys.stderr)
 
 def print_summary(info):
-    print("⚙️ Danh sách Node RPC (IP & Port):")
+    print("⚙️ RPC Endpoints (IP & Port):")
     for k, v in info['rpc_nodes'].items():
         print(f"  • {k}: {v}")
 
     if info['ws_nodes']:
-        print("\n🔌 Danh sách Node WebSocket (WS URL):")
+        print("\n🔌 WebSocket Endpoints (WS URL):")
         for k, v in info['ws_nodes'].items():
             print(f"  • {k}: {v}")
 
-    print("\n🌐 Danh sách Node TCP (P2P / Consensus):")
+    print("\n🌐 TCP Endpoints (P2P / Consensus):")
     for k, v in info['tcp_nodes'].items():
         print(f"  • {k}: {v}")
 
     if info['raft_nodes']:
-        print("\n⛵ Danh sách Node Raft Consensus & Forward:")
+        print("\n⛵ Raft Consensus & Forwarding Endpoints:")
         for k, v in info['raft_nodes'].items():
             fwd = info['forward_nodes'].get(k, '')
             fwd_str = f" (Forward: {fwd})" if fwd else ""
             print(f"  • {k}: {v}{fwd_str}")
+
+def check_live_status(info):
+    import urllib.request
+    print("🔍 Live Service Health Status (Live RPC Check):")
+    for name, rpc_url in info['rpc_nodes'].items():
+        if 'parent' in name:
+            try:
+                req = urllib.request.Request(f"{rpc_url}/inbound", headers={'User-Agent': 'curl/7.68.0'})
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    print(f"  • {name} ({rpc_url}): ✅ ONLINE (HTTP RPC OK)")
+            except Exception:
+                print(f"  • {name} ({rpc_url}): ❌ OFFLINE (Unreachable)")
+        else:
+            try:
+                data = json.dumps({"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}).encode('utf-8')
+                req = urllib.request.Request(rpc_url, data=data, headers={'Content-Type': 'application/json'})
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    res = json.loads(resp.read().decode('utf-8'))
+                    b_hex = res.get('result', '')
+                    if b_hex:
+                        b_num = int(b_hex, 16)
+                        print(f"  • {name} ({rpc_url}): ✅ ONLINE (Block: {b_num} / {b_hex})")
+                    else:
+                        print(f"  • {name} ({rpc_url}): ⚠️ WARNING (Invalid payload)")
+            except Exception:
+                print(f"  • {name} ({rpc_url}): ❌ OFFLINE (Unreachable)")
 
 if __name__ == '__main__':
     inv_file = sys.argv[1] if len(sys.argv) > 1 else 'inventory.yml'
@@ -281,6 +265,10 @@ if __name__ == '__main__':
 
     if mode == 'json':
         print(json.dumps(parsed, indent=2))
+    elif mode in ['check', '--check', 'status', '--status']:
+        print_summary(parsed)
+        print("")
+        check_live_status(parsed)
     elif mode in ['summary', 'display', '--summary', '-s']:
         print_summary(parsed)
     elif mode in ['export', '--export']:

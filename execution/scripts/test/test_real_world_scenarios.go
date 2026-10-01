@@ -115,6 +115,46 @@ func getBalance(url string, addr common.Address) (*big.Int, error) {
 	return b, nil
 }
 
+func waitForExactBalance(url string, addr common.Address, expected *big.Int, timeout time.Duration) (*big.Int, bool) {
+	deadline := time.Now().Add(timeout)
+	last := big.NewInt(0)
+	for time.Now().Before(deadline) {
+		balance, err := getBalance(url, addr)
+		if err == nil && balance != nil {
+			last = balance
+			if balance.Cmp(expected) == 0 {
+				return balance, true
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return last, false
+}
+
+func waitForSuccessfulReceipt(url, txHash string, timeout time.Duration) (map[string]interface{}, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		result, err := rpcCall(url, "eth_getTransactionReceipt", []interface{}{txHash})
+		if err == nil && result != nil && result["result"] != nil {
+			receipt, ok := result["result"].(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("invalid transaction receipt: %v", result["result"])
+			}
+			status, ok := receipt["status"].(string)
+			if !ok {
+				return nil, fmt.Errorf("transaction receipt has no status: %v", receipt)
+			}
+			statusValue, parseErr := strconv.ParseUint(strings.TrimPrefix(status, "0x"), 16, 64)
+			if parseErr != nil || statusValue != 1 {
+				return nil, fmt.Errorf("transaction reverted with receipt status %s", status)
+			}
+			return receipt, nil
+		}
+		time.Sleep(time.Second)
+	}
+	return nil, fmt.Errorf("transaction receipt was not available within %s", timeout)
+}
+
 func getAccountNonce(url string, addr common.Address) (uint64, error) {
 	res, err := rpcCall(url, "mtn_getAccountState", []interface{}{addr.Hex(), "latest"})
 	if err == nil {
@@ -211,6 +251,12 @@ func main() {
 	// =======================================================================================
 	printHeader("KỊCH BẢN 2: NẠP VÀ NHẬN TIỀN CHO TÀI KHOẢN MỚI")
 	depositAmount := big.NewInt(10_000_000_000_000) // 10k gwei
+	initialDepositBalance, err := getBalance(exec2URL, newAccAddr)
+	if err != nil {
+		fmt.Printf("❌ Không đọc được số dư ban đầu trên Exec 2: %v\n", err)
+		os.Exit(1)
+	}
+	expectedDepositBalance := new(big.Int).Add(initialDepositBalance, depositAmount)
 	fmt.Printf("1. Gửi lệnh nạp tiền DepositToFloat (%s wei) từ Parent Chain đến tài khoản %s...\n", depositAmount.String(), newAccAddr.Hex())
 	depMsgID, err := parentClient.SendDepositToFloat(exec2PubKey, 2, senderAddr, newAccAddr, depositAmount)
 	if err != nil {
@@ -220,20 +266,13 @@ func main() {
 	fmt.Printf("   Deposit submitted! MsgID: %s\n", depMsgID.Hex())
 
 	fmt.Println("2. Chờ Rollup ReceiveWorker trên Exec 2 tiếp nhận và ghi nhận số dư...")
-	credited := false
 	startWait := time.Now()
-	for time.Since(startWait) < 30*time.Second {
-		bal, err := getBalance(exec2URL, newAccAddr)
-		if err == nil && bal != nil && bal.Sign() > 0 {
-			fmt.Printf("✅ KỊCH BẢN 2 THÀNH CÔNG: Số dư tài khoản mới trên Exec 2 = %s wei (mất %v)\n", bal.String(), time.Since(startWait))
-			credited = true
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
+	balanceAfterDeposit, credited := waitForExactBalance(exec2URL, newAccAddr, expectedDepositBalance, 30*time.Second)
 	if !credited {
-		fmt.Printf("⚠️ DepositToFloat chưa kịp cập nhật số dư sau 30s. Thử tiếp qua luồng chuyển tiền cross-chain...\n")
+		fmt.Printf("❌ Kịch bản 2 thất bại: số dư Exec 2 mong đợi %s wei, nhận %s wei sau 30s\n", expectedDepositBalance.String(), balanceAfterDeposit.String())
+		os.Exit(1)
 	}
+	fmt.Printf("✅ KỊCH BẢN 2 THÀNH CÔNG: Số dư tài khoản mới trên Exec 2 = %s wei (mất %v)\n", balanceAfterDeposit.String(), time.Since(startWait))
 
 	// =======================================================================================
 	// KỊCH BẢN 3: Tương tác / Gọi Smart Contract chỉ trên 1 node thực thi (Exec 1)
@@ -303,7 +342,17 @@ func main() {
 		fmt.Printf("❌ Gửi eth_sendRawTransaction gọi contract lỗi: %v\n", err)
 	} else {
 		fmt.Printf("   Đã gửi giao dịch gọi Smart Contract thành công: TxHash=%v\n", resTx["result"])
-		time.Sleep(3 * time.Second)
+		txHash, ok := resTx["result"].(string)
+		if !ok {
+			fmt.Printf("❌ Kịch bản 3 thất bại: RPC không trả transaction hash hợp lệ: %v\n", resTx["result"])
+			os.Exit(1)
+		}
+		receipt, receiptErr := waitForSuccessfulReceipt(exec1URL, txHash, 20*time.Second)
+		if receiptErr != nil {
+			fmt.Printf("❌ Kịch bản 3 thất bại: giao dịch contract không được thực thi thành công: %v\n", receiptErr)
+			os.Exit(1)
+		}
+		fmt.Printf("   Receipt status: %v, Gas Used: %v, Block Number: %v\n", receipt["status"], receipt["gasUsed"], receipt["blockNumber"])
 		fmt.Println("✅ KỊCH BẢN 3 THÀNH CÔNG: Tương tác và gọi contract trên 1 node thực thi độc lập diễn ra trơn tru!")
 	}
 
@@ -326,6 +375,13 @@ func main() {
 	time.Sleep(2 * time.Second)
 
 	crossAmountHex := "0x1234" // 4660 decimal
+	crossAmount := big.NewInt(0x1234)
+	initialCrossBalance, err := getBalance(exec2URL, crossTargetAddr)
+	if err != nil {
+		fmt.Printf("❌ Không đọc được số dư ban đầu trên Exec 2: %v\n", err)
+		os.Exit(1)
+	}
+	expectedCrossBalance := new(big.Int).Add(initialCrossBalance, crossAmount)
 	fmt.Printf("2. Exec 1 (RPC :8646) gọi mtn_sendCrossChainTransfer (chuyển 4660 wei) sang Exec 2 cho %s...\n", crossTargetAddr.Hex())
 	resCross, err := rpcCall(exec1URL, "mtn_sendCrossChainTransfer", []interface{}{crossTargetAddr.Hex(), crossAmountHex})
 	if err != nil {
@@ -335,21 +391,13 @@ func main() {
 	fmt.Printf("   Giao dịch xuyên node đã gửi: TxHash = %v\n", resCross["result"])
 
 	fmt.Println("3. Kiểm tra số dư của tài khoản trên Exec 2 (chờ tối đa 40s)...")
-	creditedCross := false
 	startWaitCross := time.Now()
-	for time.Since(startWaitCross) < 40*time.Second {
-		bal2, err := getBalance(exec2URL, crossTargetAddr)
-		if err == nil && bal2 != nil && bal2.Sign() > 0 {
-			fmt.Printf("✅ KỊCH BẢN 4 THÀNH CÔNG: Exec 2 đã nhận và ghi có số dư: %s wei cho %s (mất %v)\n", bal2.String(), crossTargetAddr.Hex(), time.Since(startWaitCross))
-			creditedCross = true
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
+	balanceAfterCross, creditedCross := waitForExactBalance(exec2URL, crossTargetAddr, expectedCrossBalance, 40*time.Second)
 	if !creditedCross {
-		fmt.Printf("❌ Kịch bản 4 thất bại: Exec 2 chưa nhận được số dư sau 40s\n")
+		fmt.Printf("❌ Kịch bản 4 thất bại: số dư Exec 2 mong đợi %s wei, nhận %s wei sau 40s\n", expectedCrossBalance.String(), balanceAfterCross.String())
 		os.Exit(1)
 	}
+	fmt.Printf("✅ KỊCH BẢN 4 THÀNH CÔNG: Exec 2 đã nhận và ghi có số dư: %s wei cho %s (mất %v)\n", balanceAfterCross.String(), crossTargetAddr.Hex(), time.Since(startWaitCross))
 
 	// =======================================================================================
 	// KỊCH BẢN 5: Parent Chain không hoạt động -> Node thực thi vẫn hoạt động độc lập
@@ -416,7 +464,7 @@ func main() {
 	// =======================================================================================
 	printHeader("KỊCH BẢN 6: KHÔI PHỤC PARENT CHAIN -> TỰ ĐỘNG TÁI KẾT NỐI & KHÔI PHỤC GIAO DỊCH LIÊN CỤM")
 	fmt.Println("1. Khởi động lại tiến trình Parent Chain...")
-	startParentCmd := exec.Command("sudo", "bash", "-c", "cd /opt/metanode/parent_chain && nohup /opt/metanode/bin/parent_chain -data-dir /opt/metanode/parent_chain -http :8547 -rust-config /opt/metanode/parent_chain/node_parent.toml >> /var/log/metanode/parent_chain.log 2>&1 & echo $! > /opt/metanode/parent_chain/parent_chain.pid")
+	startParentCmd := exec.Command("sudo", "bash", "-c", "set -e; cd /opt/metanode/parent_chain; set -a; . ./security.env; set +a; nohup /opt/metanode/bin/parent_chain -data-dir /opt/metanode/parent_chain -http :8547 -rust-config /opt/metanode/parent_chain/node_parent.toml >> /var/log/metanode/parent_chain.log 2>&1 & echo $! > /opt/metanode/parent_chain/parent_chain.pid")
 	_ = startParentCmd.Run()
 	_ = exec.Command("sudo", "systemctl", "start", "metanode-parentchain.service").Run()
 
@@ -457,6 +505,13 @@ func main() {
 
 	// 4. Exec 1 thực hiện chuyển tiền xuyên cụm sang Exec 2 qua Parent Chain
 	recAmountHex := "0x22b8" // 8888 decimal
+	recAmount := big.NewInt(0x22b8)
+	initialRecoveredBalance, err := getBalance(exec2URL, recoveredAccAddr)
+	if err != nil {
+		fmt.Printf("❌ Không đọc được số dư ban đầu trên Exec 2 sau phục hồi: %v\n", err)
+		os.Exit(1)
+	}
+	expectedRecoveredBalance := new(big.Int).Add(initialRecoveredBalance, recAmount)
 	fmt.Printf("4. Exec 1 (RPC :8646) gọi mtn_sendCrossChainTransfer (8888 wei) sang Exec 2 cho %s...\n", recoveredAccAddr.Hex())
 	resCrossRec, err := rpcCall(exec1URL, "mtn_sendCrossChainTransfer", []interface{}{recoveredAccAddr.Hex(), recAmountHex})
 	if err != nil {
@@ -467,21 +522,13 @@ func main() {
 
 	// 5. Chờ Exec 2 nhận và cập nhật số dư
 	fmt.Println("5. Chờ Rollup ReceiveWorker trên Exec 2 tiếp nhận và ghi nhận số dư (tối đa 40s)...")
-	creditedRec := false
 	startWaitRec := time.Now()
-	for time.Since(startWaitRec) < 40*time.Second {
-		balRec, err := getBalance(exec2URL, recoveredAccAddr)
-		if err == nil && balRec != nil && balRec.Sign() > 0 {
-			fmt.Printf("✅ KỊCH BẢN 6 THÀNH CÔNG RỰC RỠ: Exec 2 đã nhận và cập nhật số dư: %s wei (mất %v)\n", balRec.String(), time.Since(startWaitRec))
-			creditedRec = true
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
+	balanceAfterRecovery, creditedRec := waitForExactBalance(exec2URL, recoveredAccAddr, expectedRecoveredBalance, 40*time.Second)
 	if !creditedRec {
-		fmt.Printf("❌ Kịch bản 6 thất bại: Exec 2 chưa nhận được số dư sau khi phục hồi Parent Chain\n")
+		fmt.Printf("❌ Kịch bản 6 thất bại: số dư Exec 2 mong đợi %s wei, nhận %s wei sau 40s\n", expectedRecoveredBalance.String(), balanceAfterRecovery.String())
 		os.Exit(1)
 	}
+	fmt.Printf("✅ KỊCH BẢN 6 THÀNH CÔNG RỰC RỠ: Exec 2 đã nhận và cập nhật số dư: %s wei (mất %v)\n", balanceAfterRecovery.String(), time.Since(startWaitRec))
 	fmt.Println("   Cầu nối Rollup và các worker đã tự động tái kết nối, trạng thái liên chuỗi được phục hồi 100%!")
 
 	// =======================================================================================
@@ -517,6 +564,12 @@ func main() {
 	// Gửi lệnh gọi xuyên cụm từ Exec 1 sang Smart Contract trên Exec 2
 	fundingAmount := big.NewInt(10_000_000_000) // 10 gwei
 	fundingAmountHex := hexutil.EncodeBig(fundingAmount)
+	initialContractBalance, err := getBalance(exec2URL, contractOwnerAddr)
+	if err != nil {
+		fmt.Printf("❌ Không đọc được số dư ban đầu của contract owner trên Exec 2: %v\n", err)
+		os.Exit(1)
+	}
+	expectedContractBalance := new(big.Int).Add(initialContractBalance, fundingAmount)
 	fmt.Printf("3. Exec 1 (RPC :8646) thực thi gọi xuyên cụm cấp vốn/kích hoạt Smart Contract trên Exec 2 (10 gwei)...\n")
 	resCrossContract, err := rpcCall(exec1URL, "mtn_sendCrossChainTransfer", []interface{}{contractOwnerAddr.Hex(), fundingAmountHex})
 	if err != nil {
@@ -527,21 +580,13 @@ func main() {
 
 	// Chờ Exec 2 nhận và cập nhật số dư cho contract
 	fmt.Printf("4. Chờ Rollup ReceiveWorker trên Exec 2 tiếp nhận và ghi nhận số dư cho %s (tối đa 40s)...\n", contractOwnerAddr.Hex())
-	creditedContract := false
 	startWaitContract := time.Now()
-	for time.Since(startWaitContract) < 40*time.Second {
-		balContract, err := getBalance(exec2URL, contractOwnerAddr)
-		if err == nil && balContract != nil && balContract.Sign() > 0 {
-			fmt.Printf("   ✅ Exec 2 đã ghi nhận số dư thành công: %s wei (mất %v)\n", balContract.String(), time.Since(startWaitContract))
-			creditedContract = true
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
+	balanceAfterFunding, creditedContract := waitForExactBalance(exec2URL, contractOwnerAddr, expectedContractBalance, 40*time.Second)
 	if !creditedContract {
-		fmt.Printf("❌ Kịch bản 7 thất bại: Exec 2 chưa nhận được số dư xuyên cụm\n")
+		fmt.Printf("❌ Kịch bản 7 thất bại: số dư Exec 2 mong đợi %s wei, nhận %s wei sau 40s\n", expectedContractBalance.String(), balanceAfterFunding.String())
 		os.Exit(1)
 	}
+	fmt.Printf("   ✅ Exec 2 đã ghi nhận số dư thành công: %s wei (mất %v)\n", balanceAfterFunding.String(), time.Since(startWaitContract))
 
 	// Thực thi Smart Contract logic trên Exec 2 bằng số dư vừa nhận
 	fmt.Println("5. Thực thi tương tác Smart Contract setBlsPublicKey trên Exec 2 bằng nguồn vốn xuyên cụm...")
@@ -576,16 +621,21 @@ func main() {
 		fmt.Printf("❌ Gửi giao dịch thực thi contract trên Exec 2 thất bại: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("   Đã gửi giao dịch thực thi Smart Contract trên Exec 2: TxHash=%v\n", resTxContract["result"])
-	time.Sleep(3 * time.Second)
+	txHashContract, ok := resTxContract["result"].(string)
+	if !ok {
+		fmt.Printf("❌ Kịch bản 7 thất bại: RPC không trả transaction hash hợp lệ: %v\n", resTxContract["result"])
+		os.Exit(1)
+	}
+	fmt.Printf("   Đã gửi giao dịch thực thi Smart Contract trên Exec 2: TxHash=%s\n", txHashContract)
 
 	// Kiểm tra receipt của giao dịch trên Exec 2
 	fmt.Println("6. Kiểm tra receipt xác nhận thực thi Smart Contract trên Exec 2...")
-	rcpRes, err := rpcCall(exec2URL, "eth_getTransactionReceipt", []interface{}{resTxContract["result"]})
-	if err == nil && rcpRes != nil && rcpRes["result"] != nil {
-		rcpMap := rcpRes["result"].(map[string]interface{})
-		fmt.Printf("   Receipt status: %v, Gas Used: %v, Block Number: %v\n", rcpMap["status"], rcpMap["gasUsed"], rcpMap["blockNumber"])
+	receiptContract, receiptErr := waitForSuccessfulReceipt(exec2URL, txHashContract, 20*time.Second)
+	if receiptErr != nil {
+		fmt.Printf("❌ Kịch bản 7 thất bại: giao dịch contract không được thực thi thành công: %v\n", receiptErr)
+		os.Exit(1)
 	}
+	fmt.Printf("   Receipt status: %v, Gas Used: %v, Block Number: %v\n", receiptContract["status"], receiptContract["gasUsed"], receiptContract["blockNumber"])
 	fmt.Println("✅ KỊCH BẢN 7 THÀNH CÔNG RỰC RỠ: Toàn bộ chu trình gọi Smart Contract xuyên 2 cụm (Exec 1 -> Parent Chain -> Exec 2 -> EVM Contract Execution) hoạt động hoàn hảo!")
 
 	fmt.Println("\n🎉 TẤT CẢ 7/7 KỊCH BẢN SỬ DỤNG THỰC TẾ ĐỀU ĐÃ ĐƯỢC KIỂM CHỨNG THÀNH CÔNG VÀ CHÍNH XÁC!")

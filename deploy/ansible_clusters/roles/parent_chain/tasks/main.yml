@@ -5,7 +5,7 @@
 
 # ── Stop Service ─────────────────────────────────────────────────────────────
 - name: Stop Parent Chain service
-  when: "deploy_action in ['stop', 'restart', 'reset', 'clean']"
+  when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy']"
   block:
     - name: Stop via systemd
       when: is_systemd
@@ -17,11 +17,15 @@
     - name: Stop via process kill (daemon mode)
       when: not is_systemd
       ansible.builtin.shell: |
-        if [ -f "{{ node_data_dir }}/parent_chain.pid" ]; then
-          kill -SIGTERM $(cat "{{ node_data_dir }}/parent_chain.pid") 2>/dev/null || true
-          rm -f "{{ node_data_dir }}/parent_chain.pid"
-        fi
-        pkill -f "{{ bin_dir }}/parent_chain.*:{{ parent_http_port | default(8547) }}" 2>/dev/null || true
+        set -euo pipefail
+        for pid in $(ss -ltnpH "sport = :{{ parent_http_port | default(8547) }}" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p'); do
+          if [ -r "/proc/$pid/cmdline" ] && tr '\0' '\n' < "/proc/$pid/cmdline" | grep -Fxq "{{ bin_dir }}/parent_chain"; then
+            kill -SIGTERM "$pid" 2>/dev/null || true
+          fi
+        done
+        rm -f "{{ node_data_dir }}/parent_chain.pid"
+      args:
+        executable: /bin/bash
       ignore_errors: true
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────

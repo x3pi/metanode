@@ -3,14 +3,27 @@
   delegate_to: localhost
   run_once: true
   block:
+    - name: Require the Parent Chain RPC token
+      ansible.builtin.assert:
+        that:
+          - parent_chain_rpc_token | default('') | length > 0
+        fail_msg: "Configure parent_chain_rpc_token as an Ansible Vault value before running integration tests."
+
     - name: Run E2E multi-cluster real world scenarios test
       ansible.builtin.shell: |
         export PARENT_CHAIN_URL="http://{{ hostvars[groups['parent_chain_nodes'][0]]['ansible_host'] | default('127.0.0.1') }}:{{ hostvars[groups['parent_chain_nodes'][0]]['parent_http_port'] | default(8547) }}"
         export EXEC1_URL="http://{{ (groups['exec_clusters'] | map('extract', hostvars) | selectattr('cluster_id', 'equalto', 1) | list | first)['ansible_host'] | default('127.0.0.1') }}:{{ (groups['exec_clusters'] | map('extract', hostvars) | selectattr('cluster_id', 'equalto', 1) | list | first)['rpc_port'] | default(8646) }}"
         export EXEC2_URL="http://{{ (groups['exec_clusters'] | map('extract', hostvars) | selectattr('cluster_id', 'equalto', 2) | list | first)['ansible_host'] | default('127.0.0.1') }}:{{ (groups['exec_clusters'] | map('extract', hostvars) | selectattr('cluster_id', 'equalto', 2) | list | first)['rpc_port'] | default(8647) }}"
-        go run {{ test_script_path }}
+        go run scripts/test/test_real_world_scenarios.go
+      args:
+        chdir: "{{ playbook_dir }}/../../execution"
+      become: true
+      environment:
+        PARENT_CHAIN_RPC_TOKEN: "{{ parent_chain_rpc_token }}"
+        PATH: "{{ lookup('ansible.builtin.env', 'PATH') }}"
       register: test_output
       ignore_errors: true
+      no_log: true
 
     - name: Save test log to file
       ansible.builtin.copy:
@@ -26,3 +39,8 @@
       ansible.builtin.debug:
         msg: >-
           {{ '✅ TẤT CẢ 7 KỊCH BẢN TEST THÀNH CÔNG!' if tests_passed else '❌ BÀI TEST TÍCH HỢP THẤT BẠI! Xem test_run.log để biết chi tiết.' }}
+
+    - name: Fail when an integration scenario fails
+      ansible.builtin.fail:
+        msg: "Integration scenarios failed; see test_run.log for details."
+      when: not (tests_passed | bool)
