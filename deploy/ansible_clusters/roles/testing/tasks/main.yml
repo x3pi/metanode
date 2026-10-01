@@ -33,12 +33,12 @@
 
     - name: Check if all scenarios passed
       set_fact:
-        tests_passed: "{{ test_output.rc == 0 and 'TẤT CẢ 7/7 KỊCH BẢN' in test_output.stdout }}"
+        tests_passed: "{{ test_output.rc == 0 and 'TẤT CẢ 9/9 KỊCH BẢN' in test_output.stdout }}"
 
     - name: Display test outcome
       ansible.builtin.debug:
         msg: >-
-          {{ '✅ TẤT CẢ 7 KỊCH BẢN TEST THÀNH CÔNG!' if tests_passed else '❌ BÀI TEST TÍCH HỢP THẤT BẠI! Xem test_run.log để biết chi tiết.' }}
+          {{ '✅ TẤT CẢ 9 KỊCH BẢN TEST THÀNH CÔNG!' if tests_passed else '❌ BÀI TEST TÍCH HỢP THẤT BẠI! Xem test_run.log để biết chi tiết.' }}
 
     - name: Fail when an integration scenario fails
       ansible.builtin.fail:

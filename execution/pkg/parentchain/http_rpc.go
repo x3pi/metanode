@@ -208,6 +208,15 @@ func (c *httpClient) GetClaimed(msgID common.Hash) (FloatOutcome, error) {
 	return resp.Outcome, err
 }
 
+// GetNonce returns the committed sender nonce of addr (the nonce its next transaction must carry).
+func (c *httpClient) GetNonce(addr common.Address) (uint64, error) {
+	var resp struct {
+		Nonce uint64 `json:"nonce"`
+	}
+	err := c.get(fmt.Sprintf("/nonce?address=%s", addr.Hex()), &resp)
+	return resp.Nonce, err
+}
+
 func (c *httpClient) GetFloatSeq(pubKey cm.PublicKey) (uint64, error) {
 	pubKeyHex := hexEncode(pubKey[:])
 	var resp struct {
@@ -361,10 +370,6 @@ func NewHTTPServer(store Store, txChan chan *ParentChainTx) *HTTPServer {
 	return s
 }
 
-func (s *HTTPServer) SetCommitter(c BlockCommitter) {
-	s.committer = c
-}
-
 func (s *HTTPServer) SetProtoTxChan(ch chan *pb.Transaction) {
 	s.protoTxChan = ch
 }
@@ -412,6 +417,7 @@ func (s *HTTPServer) Start(addr string) error {
 	mux.HandleFunc("/record", s.handleRecord)
 	mux.HandleFunc("/claimed", s.handleClaimed)
 	mux.HandleFunc("/seq", s.handleSeq)
+	mux.HandleFunc("/nonce", s.handleNonce)
 	mux.HandleFunc("/account", s.handleAccount)
 	mux.HandleFunc("/state_root", s.handleStateRoot)
 	mux.Handle("/metrics", promhttp.Handler())
@@ -645,6 +651,17 @@ func (s *HTTPServer) handleSeq(w http.ResponseWriter, r *http.Request) {
 
 	seq, _ := s.store.GetFloatSeq(crypto.Keccak256Hash(pubKeyBytes))
 	json.NewEncoder(w).Encode(map[string]interface{}{"seq": seq})
+}
+
+// handleNonce returns the committed sender nonce (the number of the next tx this address must use).
+func (s *HTTPServer) handleNonce(w http.ResponseWriter, r *http.Request) {
+	addr := common.HexToAddress(r.URL.Query().Get("address"))
+	nonce, err := s.store.GetNonce(addr)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"nonce": nonce})
 }
 
 func (s *HTTPServer) handleAccount(w http.ResponseWriter, r *http.Request) {

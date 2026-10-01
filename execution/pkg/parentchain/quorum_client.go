@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -32,10 +33,17 @@ type QuorumClient struct {
 	pubKey  cm.PublicKey
 	sender  common.Address
 
-	nonceMu      sync.Mutex
-	nonceInit    bool
-	currentNonce uint64
+	// Nonce tracking. The next nonce is derived from the COMMITTED sender nonce on the parent chain (never from
+	// FloatSeq, which is an unrelated counter). Transactions still in flight are accounted for via lastSent.
+	nonceMu    sync.Mutex
+	haveSent   bool
+	lastSent   uint64
+	lastTxHash common.Hash
 }
+
+// maxNonceWindow bounds how many nonces we may run ahead of the committed nonce. If the chain has not caught up
+// within this many sends, earlier transactions were dropped and we fall back to the committed nonce.
+const maxNonceWindow = 256
 
 // NewQuorumClient creates a new QuorumClient connected to multiple Parent Chain node URLs.
 func NewQuorumClient(urls []string, privKey cm.PrivateKey, pubKey cm.PublicKey) *QuorumClient {
@@ -71,41 +79,67 @@ func (q *QuorumClient) quorumThreshold() int {
 	return f + 1
 }
 
+// committedNonce returns the sender nonce attested by the parent chain: the (f+1)-th largest value among the
+// responding nodes, so up to f lying nodes can neither inflate it nor (with f+1 honest answers) deflate it.
+func (q *QuorumClient) committedNonce() (uint64, error) {
+	var vals []uint64
+	var lastErr error
+	for _, c := range q.clients {
+		n, err := c.GetNonce(q.sender)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		vals = append(vals, n)
+	}
+	need := q.quorumThreshold()
+	if len(vals) < need {
+		return 0, fmt.Errorf("committed nonce: only %d of %d nodes answered (need %d): %w", len(vals), len(q.clients), need, lastErr)
+	}
+	sort.Slice(vals, func(i, j int) bool { return vals[i] > vals[j] })
+	return vals[need-1], nil
+}
+
 func (q *QuorumClient) getNextNonce() (uint64, error) {
 	q.nonceMu.Lock()
 	defer q.nonceMu.Unlock()
 
-	if !q.nonceInit {
-		if q.sender == (common.Address{}) {
-			return 0, errors.New("cannot fetch nonce: client has no BLS public key configured")
-		}
-		var lastErr error
-		foundNonce := false
-		for _, c := range q.clients {
-			seq, err := c.GetFloatSeq(q.pubKey)
-			if err == nil {
-				q.currentNonce = seq
-				q.nonceInit = true
-				foundNonce = true
-				break
+	if q.sender == (common.Address{}) {
+		return 0, errors.New("cannot fetch nonce: client has no BLS public key configured")
+	}
+	chain, err := q.committedNonce()
+	if err != nil {
+		q.haveSent = false
+		return 0, err
+	}
+	next := chain
+	if q.haveSent && q.lastSent+1 > chain {
+		// Our previous transaction(s) are not committed yet. Keep pipelining unless the last one is known to
+		// have failed (its receipt exists with a non-success status) or we ran too far ahead of the chain.
+		failed := false
+		if q.lastTxHash != (common.Hash{}) {
+			for _, c := range q.clients {
+				if r, found, rerr := c.GetReceipt(q.lastTxHash); rerr == nil && found {
+					failed = r.Status != 1
+					break
+				}
 			}
-			lastErr = err
 		}
-		if !foundNonce {
-			return 0, fmt.Errorf("failed to fetch initial nonce from parent chain nodes: %w", lastErr)
+		if !failed && q.lastSent+1-chain <= maxNonceWindow {
+			next = q.lastSent + 1
 		}
 	}
-
-	n := q.currentNonce
-	q.currentNonce++
-	return n, nil
+	q.lastSent = next
+	q.haveSent = true
+	q.lastTxHash = common.Hash{}
+	return next, nil
 }
 
-// ResetNonce forces re-fetching nonce from chain on next transaction send.
+// ResetNonce forces the next send to re-read the committed nonce from the chain.
 func (q *QuorumClient) ResetNonce() {
 	q.nonceMu.Lock()
 	defer q.nonceMu.Unlock()
-	q.nonceInit = false
+	q.haveSent = false
 }
 
 // ─── TRANSACTION SUBMISSION (FAILOVER ACROSS NODES) ─────────────────────────
@@ -123,10 +157,14 @@ func (q *QuorumClient) sendRawTxFailover(tx *pb.Transaction) (common.Hash, error
 	for _, c := range q.clients {
 		txHash, err := c.SendRawTransaction(rawBytes)
 		if err == nil {
+			q.nonceMu.Lock()
+			q.lastTxHash = txHash
+			q.nonceMu.Unlock()
 			return txHash, nil
 		}
 		lastErr = err
 	}
+	q.ResetNonce()
 	return common.Hash{}, fmt.Errorf("all parent chain nodes rejected transaction or were unreachable: %w", lastErr)
 }
 

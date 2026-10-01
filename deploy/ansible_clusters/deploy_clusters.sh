@@ -273,7 +273,7 @@ fi
 run_tests_suite() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
-    echo "🧪 BẮT ĐẦU BỘ KIỂM THỬ TÍCH HỢP 7 KỊCH BẢN THỰC TẾ"
+    echo "🧪 BẮT ĐẦU BỘ KIỂM THỬ TÍCH HỢP 9 KỊCH BẢN THỰC TẾ"
     echo "═══════════════════════════════════════════════════════════════"
     local start_ts
     start_ts=$(date +%s)
@@ -302,7 +302,7 @@ run_tests_suite() {
 
     local all_passed=false
     local py_passed="False"
-    if [ $test_rc -eq 0 ] && grep -q "TẤT CẢ 7/7 KỊCH BẢN" "$test_log"; then
+    if [ $test_rc -eq 0 ] && grep -q "TẤT CẢ 9/9 KỊCH BẢN" "$test_log"; then
         all_passed=true
         py_passed="True"
         echo ""
@@ -361,6 +361,16 @@ scenarios = [
         "name": "Kịch bản 7: Gọi Smart Contract xuyên 2 cụm node",
         "passed": "KỊCH BẢN 7 THÀNH CÔNG" in log_content,
         "detail": "Exec 1 kích hoạt luồng gọi Smart Contract sang Exec 2, Exec 2 xử lý và cập nhật hợp đồng EVM thành công" if "KỊCH BẢN 7 THÀNH CÔNG" in log_content else "Không hoàn tất hoặc bị gián đoạn"
+    },
+    {
+        "name": "Kịch bản 8: Mất 1/4 node Parent Chain -> chuyển xuyên cụm vẫn hoàn tất",
+        "passed": "KỊCH BẢN 8 THÀNH CÔNG" in log_content,
+        "detail": "Quorum 3/4: Exec 2 ghi có đúng số tiền" if "KỊCH BẢN 8 THÀNH CÔNG" in log_content else "Không hoàn tất hoặc bị gián đoạn"
+    },
+    {
+        "name": "Kịch bản 9: Mất quorum Parent Chain -> pending, bật lại hoàn tất đúng 1 lần",
+        "passed": "KỊCH BẢN 9 THÀNH CÔNG" in log_content,
+        "detail": "Không tạo tiền khi mất quorum; sau khi bật lại ghi có đúng 1 lần" if "KỊCH BẢN 9 THÀNH CÔNG" in log_content else "Không hoàn tất hoặc bị gián đoạn"
     }
 ]
 

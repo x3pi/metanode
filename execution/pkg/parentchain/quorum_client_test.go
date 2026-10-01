@@ -130,6 +130,9 @@ func TestQuorumClient_ConcurrentNonceOrdering(t *testing.T) {
 	mux.HandleFunc("/seq", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"seq": 0})
 	})
+	mux.HandleFunc("/nonce", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"nonce": 0})
+	})
 	mux.HandleFunc("/send_raw_transaction", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			RawTx string `json:"raw_tx"`
@@ -140,9 +143,7 @@ func TestQuorumClient_ConcurrentNonceOrdering(t *testing.T) {
 		if rawHex == "" {
 			rawHex = req.Data
 		}
-		rawBytes, _ := hex.DecodeString(rawHex[2:])
-		tx, _ := UnmarshalParentChainTx(rawBytes)
-		_ = tx
+		_, _ = hex.DecodeString(rawHex[2:])
 
 		mu.Lock()
 		// Mock accept
@@ -183,4 +184,65 @@ func TestQuorumClient_ConcurrentNonceOrdering(t *testing.T) {
 		assert.True(t, ok, fmt.Sprintf("Nonce %d must exist without missing gaps", i))
 	}
 	_ = receivedNonces
+}
+
+// nonceServer serves /nonce (fixed value) and /receipt (found=true with the given status when failedReceipt).
+func nonceServer(nonce uint64, failedReceipt bool) *httptest.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/nonce", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"nonce": nonce})
+	})
+	mux.HandleFunc("/receipt", func(w http.ResponseWriter, r *http.Request) {
+		if !failedReceipt {
+			json.NewEncoder(w).Encode(map[string]interface{}{"found": false})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"found": true, "receipt": map[string]interface{}{"Status": 0, "ErrorCode": 103}})
+	})
+	return httptest.NewServer(mux)
+}
+
+// The next nonce must come from the committed sender nonce (not FloatSeq), and pipelined sends continue from it.
+func TestQuorumClient_NonceFromChainAndPipelining(t *testing.T) {
+	kp := bls.GenerateKeyPair()
+	ts := nonceServer(5, false)
+	defer ts.Close()
+	qc := NewQuorumClient([]string{ts.URL}, kp.PrivateKey(), kp.PublicKey())
+
+	for want := uint64(5); want < 8; want++ {
+		got, err := qc.getNextNonce()
+		assert.NoError(t, err)
+		assert.Equal(t, want, got, "chain nonce is 5 and nothing committed yet: nonces must pipeline 5,6,7")
+	}
+}
+
+// A failed last transaction (status 0 receipt) must make the client fall back to the committed nonce.
+func TestQuorumClient_NonceResetsAfterFailedTx(t *testing.T) {
+	kp := bls.GenerateKeyPair()
+	ts := nonceServer(5, true)
+	defer ts.Close()
+	qc := NewQuorumClient([]string{ts.URL}, kp.PrivateKey(), kp.PublicKey())
+
+	n, _ := qc.getNextNonce()
+	assert.Equal(t, uint64(5), n)
+	qc.nonceMu.Lock()
+	qc.lastTxHash = common.HexToHash("0x01")
+	qc.nonceMu.Unlock()
+	n, _ = qc.getNextNonce()
+	assert.Equal(t, uint64(5), n, "last tx failed on chain: must restart from the committed nonce, not 6")
+}
+
+// One lying node reporting a huge nonce must not inflate the result (f=1 of 4: use the (f+1)-th largest).
+func TestQuorumClient_NonceIgnoresLyingNode(t *testing.T) {
+	kp := bls.GenerateKeyPair()
+	var urls []string
+	for _, v := range []uint64{7, 7, 7, 999999} {
+		ts := nonceServer(v, false)
+		defer ts.Close()
+		urls = append(urls, ts.URL)
+	}
+	qc := NewQuorumClient(urls, kp.PrivateKey(), kp.PublicKey())
+	n, err := qc.getNextNonce()
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(7), n)
 }

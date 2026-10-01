@@ -739,12 +739,3 @@ type ParentChainTx struct {
 func (tx *ParentChainTx) Marshal() ([]byte, error) {
 	return json.Marshal(tx)
 }
-
-func UnmarshalParentChainTx(data []byte) (*ParentChainTx, error) {
-	var tx ParentChainTx
-	err := json.Unmarshal(data, &tx)
-	if err != nil {
-		return nil, err
-	}
-	return &tx, nil
-}
