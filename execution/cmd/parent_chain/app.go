@@ -199,7 +199,13 @@ func (a *App) Start() error {
 	if prog, err := a.committer.LastApplied(); err == nil && prog.LastBlock > 0 {
 		storage.UpdateLastBlockNumber(prog.LastBlock)
 		storage.UpdateLastGlobalExecIndex(prog.LastBlock)
-		log.Printf("Loaded last block #%d from DBStore (state_root=%s)", prog.LastBlock, prog.LastStateRoot.Hex())
+		if rec, found, err := a.committer.GetBlockRecord(prog.LastBlock); err == nil && found {
+			if rec.Header.CommitIndex > 0 {
+				storage.UpdateLastHandledCommitIndex(rec.Header.CommitIndex)
+			}
+		}
+		log.Printf("Loaded last block #%d from DBStore (state_root=%s, commit_index=%d)",
+			prog.LastBlock, prog.LastStateRoot.Hex(), storage.GetLastHandledCommitIndex())
 	}
 
 	reqHandler.CustomGetLastBlockNumberCallback = func(request *pb.GetLastBlockNumberRequest) (*pb.LastBlockNumberResponse, error) {
@@ -219,7 +225,7 @@ func (a *App) Start() error {
 	}
 
 	storage.SetBlockchainInitDone()
-	
+
 	if err := executor.InitFFIBridge(a.rustConfigPath, a.dataDir, reqHandler, blockQueue); err != nil {
 		return fmt.Errorf("failed to init FFI bridge: %w", err)
 	}

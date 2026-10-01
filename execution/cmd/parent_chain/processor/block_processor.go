@@ -56,6 +56,11 @@ func NewBlockProcessor(committer parentchain.BlockCommitter, onTxResult func(msg
 			storage.UpdateLastBlockNumber(prog.LastBlock)
 			storage.UpdateLastAssignedBlockNumber(prog.LastBlock)
 			storage.UpdateLastGlobalExecIndex(prog.LastGEI)
+			if rec, found, err := committer.GetBlockRecord(prog.LastBlock); err == nil && found {
+				if rec.Header.CommitIndex > 0 {
+					storage.UpdateLastHandledCommitIndex(rec.Header.CommitIndex)
+				}
+			}
 
 			log.Printf("Parent Chain: Recovered at block #%d (GEI %d), stateRoot=%s",
 				prog.LastBlock, prog.LastGEI, prog.LastStateRoot.Hex())
@@ -275,6 +280,13 @@ func (bp *BlockProcessor) ProcessBlock(block *pb.ExecutableBlock) *pb.ExecuteBlo
 	bp.lastGEI = res.Record.Header.GEI
 	bp.lastStateRoot = res.Record.Header.StateRoot
 	bp.lastBlockHash = res.Record.BlockHash
+
+	storage.UpdateLastBlockNumber(res.Record.Header.Number)
+	storage.UpdateLastAssignedBlockNumber(res.Record.Header.Number)
+	storage.UpdateLastGlobalExecIndex(res.Record.Header.GEI)
+	if res.Record.Header.CommitIndex > 0 {
+		storage.UpdateLastHandledCommitIndex(res.Record.Header.CommitIndex)
+	}
 
 	// Update Prometheus metrics (H9)
 	parentchain.ParentChainLastBlock.Set(float64(res.Record.Header.Number))
