@@ -2,7 +2,6 @@ package processor
 
 import (
 	"encoding/binary"
-	"fmt"
 	"log"
 	"time"
 
@@ -39,24 +38,6 @@ func (tb *TxBatcher) Chan() chan *parentchain.ParentChainTx {
 // ProtoChan returns the channel for protobuf raw transactions.
 func (tb *TxBatcher) ProtoChan() chan *pb.Transaction {
 	return tb.protoTxChan
-}
-
-func (tb *TxBatcher) SubmitTx(tx *parentchain.ParentChainTx) error {
-	select {
-	case tb.txChan <- tx:
-		return nil
-	default:
-		return fmt.Errorf("parent chain tx queue is full")
-	}
-}
-
-func (tb *TxBatcher) SubmitProtoTx(tx *pb.Transaction) error {
-	select {
-	case tb.protoTxChan <- tx:
-		return nil
-	default:
-		return fmt.Errorf("parent chain proto tx queue is full")
-	}
 }
 
 func (tb *TxBatcher) Start() {

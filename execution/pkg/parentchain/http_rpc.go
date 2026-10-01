@@ -370,10 +370,6 @@ func NewHTTPServer(store Store, txChan chan *ParentChainTx) *HTTPServer {
 	return s
 }
 
-func (s *HTTPServer) SetCommitter(c BlockCommitter) {
-	s.committer = c
-}
-
 func (s *HTTPServer) SetProtoTxChan(ch chan *pb.Transaction) {
 	s.protoTxChan = ch
 }

@@ -143,9 +143,7 @@ func TestQuorumClient_ConcurrentNonceOrdering(t *testing.T) {
 		if rawHex == "" {
 			rawHex = req.Data
 		}
-		rawBytes, _ := hex.DecodeString(rawHex[2:])
-		tx, _ := UnmarshalParentChainTx(rawBytes)
-		_ = tx
+		_, _ = hex.DecodeString(rawHex[2:])
 
 		mu.Lock()
 		// Mock accept
