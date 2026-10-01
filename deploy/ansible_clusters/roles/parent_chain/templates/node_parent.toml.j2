@@ -1,8 +1,8 @@
-node_id = 0
+node_id = {{ parent_node_id | default(0) }}
 network_address = "{{ parent_network_address | default('127.0.0.1:9000') }}"
-protocol_key_path = "{{ node_data_dir }}/node_0_protocol_key.json"
-network_key_path = "{{ node_data_dir }}/node_0_network_key.json"
-storage_path = "{{ node_data_dir }}/storage"
+protocol_key_path = "{{ node_data_dir }}/node_{{ parent_node_id | default(0) }}_protocol_key.json"
+network_key_path = "{{ node_data_dir }}/node_{{ parent_node_id | default(0) }}_network_key.json"
+storage_path = "{{ node_data_dir }}/consensus_storage"
 enable_metrics = true
 metrics_port = {{ metrics_port | default(9110) }}
 speed_multiplier = 1.0
@@ -32,7 +32,7 @@ gradual_shutdown_consensus_cert_drain_secs = 1
 gradual_shutdown_final_drain_secs = 1
 epoch_monitor_poll_interval_secs = 5
 peer_rpc_port = {{ peer_rpc_port | default(19300) }}
-peer_rpc_addresses = []
+peer_rpc_addresses = {{ peer_rpc_addresses | default([]) | to_json }}
 
 # Number of epochs to keep for cross-epoch sync support (0 = archive mode)
 epochs_to_keep = 5

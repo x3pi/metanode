@@ -32,22 +32,36 @@ def parse_inventory(file_path):
     children = data.get('all', {}).get('children', {})
     p_nodes = children.get('parent_chain_nodes', {}).get('hosts', {})
 
-    # 1. Parent Node
-    p_info = {}
-    for h_key, h_val in p_nodes.items():
+    # 1. Parent Chain Nodes (supports multi-validator committee)
+    parent_nodes_map = {}
+    p_primary = {}
+    for h_key, h_val in sorted(p_nodes.items()):
         if not isinstance(h_val, dict):
             h_val = {}
         h_ip = h_val.get('ansible_host', p_host)
         h_port = h_val.get('parent_http_port', p_rpc_port)
-        h_p2p = h_val.get('p2p_port', h_val.get('parent_p2p_port', global_vars.get('parent_chain_p2p_port', 4000)))
-        p_info = {
+        h_net_addr = h_val.get('parent_network_address', '')
+        net_port = 4000
+        if ':' in h_net_addr:
+            try:
+                net_port = int(h_net_addr.split(':')[-1])
+            except Exception:
+                pass
+        h_p2p = h_val.get('p2p_port', h_val.get('parent_p2p_port', net_port if net_port != 4000 else global_vars.get('parent_chain_p2p_port', 4000)))
+        p_node_info = {
             'name': h_key,
             'ip': h_ip,
             'rpc_port': h_port,
             'rpc_url': f"http://{h_ip}:{h_port}",
-            'p2p_port': h_p2p
+            'p2p_port': h_p2p,
+            'node_id': h_val.get('parent_node_id', 0),
+            'validator_address': h_val.get('parent_validator_address', '')
         }
-        break
+        parent_nodes_map[h_key] = p_node_info
+        if not p_primary:
+            p_primary = p_node_info
+
+    p_info = p_primary
 
     # 2. Exec Clusters
     exec_cluster_group = children.get('exec_clusters', {}) or {}
@@ -78,9 +92,9 @@ def parse_inventory(file_path):
     all_raft_nodes = {}
     all_fwd_nodes = {}
 
-    if p_info:
-        all_nodes_rpc[p_info['name']] = p_info['rpc_url']
-        all_tcp_nodes[p_info['name']] = f"{p_info['ip']}:{p_info['p2p_port']}"
+    for p_name, p_node in parent_nodes_map.items():
+        all_nodes_rpc[p_name] = p_node['rpc_url']
+        all_tcp_nodes[p_name] = f"{p_node['ip']}:{p_node['p2p_port']}"
 
     for c_key, c_val in sorted(exec_clusters.items()):
         if not isinstance(c_val, dict):
@@ -142,6 +156,7 @@ def parse_inventory(file_path):
 
     return {
         'parent': p_info,
+        'parent_nodes': parent_nodes_map,
         'nodes': all_nodes_rpc,
         'rpc_nodes': all_nodes_rpc,
         'ws_nodes': all_ws_nodes,
@@ -190,13 +205,51 @@ def export_tmp_files(info):
         'root_anchor': p_rpc,
         'chain_id': 991,
         'parent': info.get('parent', {}),
+        'parent_nodes': info.get('parent_nodes', {}),
         'private_chains': private_chains_map
     }
 
-    # 1. Write unified /tmp/rpc_nodes.json
+    # 1. Write merged /tmp/rpc_nodes.json
     try:
+        existing = {}
+        if os.path.isfile(rpc_nodes_file):
+            try:
+                with open(rpc_nodes_file, 'r', encoding='utf-8') as f:
+                    existing = json.load(f)
+            except Exception:
+                existing = {}
+
+        merged_nodes = dict(existing.get('nodes', {}))
+        merged_nodes.update(info['nodes'])
+
+        merged_rpc = dict(existing.get('rpc_nodes', {}))
+        merged_rpc.update(info['rpc_nodes'])
+
+        merged_ws = dict(existing.get('ws_nodes', {}))
+        merged_ws.update(info['ws_nodes'])
+
+        merged_tcp = dict(existing.get('tcp_nodes', {}))
+        merged_tcp.update(info['tcp_nodes'])
+
+        merged_raft = dict(existing.get('raft_nodes', {}))
+        merged_raft.update(info['raft_nodes'])
+
+        merged_fwd = dict(existing.get('forward_nodes', {}))
+        merged_fwd.update(info['forward_nodes'])
+
+        out = dict(existing)
+        out.update({
+            'parent_nodes': info.get('parent_nodes', {}),
+            'nodes': merged_nodes,
+            'rpc_nodes': merged_rpc,
+            'ws_nodes': merged_ws,
+            'tcp_nodes': merged_tcp,
+            'raft_nodes': merged_raft,
+            'forward_nodes': merged_fwd
+        })
+
         with open(rpc_nodes_file, 'w', encoding='utf-8') as f:
-            json.dump(unified_out, f, indent=2)
+            json.dump(out, f, indent=2)
         os.chmod(rpc_nodes_file, 0o600)
     except Exception as e:
         print(f"Warning: could not write {rpc_nodes_file}: {e}", file=sys.stderr)

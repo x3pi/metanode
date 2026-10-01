@@ -387,7 +387,7 @@ fi
 
 # 1. Send Deploy Start Telegram Notification
 echo "📢 Gửi thông báo bắt đầu triển khai đến Telegram..."
-send_tele "tn.notify_deploy_start('Parent Chain (:8547) + Cluster 1 (:8646) + Cluster 2 (:8647)')"
+send_tele "tn.notify_deploy_start('Parent Chain BFT Committee (4 Validators) + Exec Cluster 1 (3 Replicas) + Exec Cluster 2')"
 
 CHECK_SEC_SCRIPT="${METANODE_ROOT}/deploy/ansible/check_inventory_security.py"
 

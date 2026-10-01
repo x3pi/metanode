@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/executor"
+	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -26,6 +27,7 @@ type BlockProcessor struct {
 	quit         chan struct{}
 	onTxResult   func(msgID common.Hash, err error)
 	syncCallback func(fromBlock uint64)
+	forkCallback func(fork bool)
 
 	mu              sync.RWMutex
 	lastBlockNumber uint64
@@ -43,7 +45,7 @@ func NewBlockProcessor(committer parentchain.BlockCommitter, onTxResult func(msg
 		onTxResult: onTxResult,
 	}
 
-	// Startup recovery: reload last applied progress from durable DB
+	// Startup recovery and state integrity verification
 	if committer != nil {
 		prog, err := committer.LastApplied()
 		if err == nil && prog.LastBlock > 0 {
@@ -52,12 +54,56 @@ func NewBlockProcessor(committer parentchain.BlockCommitter, onTxResult func(msg
 			bp.lastStateRoot = prog.LastStateRoot
 			bp.lastBlockHash = prog.LastHash
 
-			storage.UpdateLastBlockNumber(prog.LastBlock)
-			storage.UpdateLastAssignedBlockNumber(prog.LastBlock)
-			storage.UpdateLastGlobalExecIndex(prog.LastGEI)
+			// 1. Verify LevelDB block record integrity for LastBlock
+			rec, found, recErr := committer.GetBlockRecord(prog.LastBlock)
+			if recErr != nil || !found {
+				log.Printf("🚨 [PARENT-CHAIN-STARTUP] Block record #%d missing or unreadable: %v", prog.LastBlock, recErr)
+				bp.forkDetected = true
+				parentchain.ParentChainForkDetected.Set(1)
+			} else {
+				if rec.Header.StateRoot != prog.LastStateRoot {
+					log.Printf("🚨 [PARENT-CHAIN-STARTUP] Block record #%d state root mismatch: rec=%s vs prog=%s",
+						prog.LastBlock, rec.Header.StateRoot.Hex(), prog.LastStateRoot.Hex())
+					bp.forkDetected = true
+					parentchain.ParentChainForkDetected.Set(1)
+				}
+				if rec.BlockHash != prog.LastHash {
+					log.Printf("🚨 [PARENT-CHAIN-STARTUP] Block record #%d block hash mismatch: rec=%s vs prog=%s",
+						prog.LastBlock, rec.BlockHash.Hex(), prog.LastHash.Hex())
+					bp.forkDetected = true
+					parentchain.ParentChainForkDetected.Set(1)
+				}
+				computedHash := rec.Header.Hash()
+				if rec.BlockHash != computedHash {
+					log.Printf("🚨 [PARENT-CHAIN-STARTUP] Block record #%d corrupted hash! stored=%s vs computed=%s",
+						prog.LastBlock, rec.BlockHash.Hex(), computedHash.Hex())
+					bp.forkDetected = true
+					parentchain.ParentChainForkDetected.Set(1)
+				}
+				if rec.Header.CommitIndex > 0 {
+					storage.UpdateLastHandledCommitIndex(rec.Header.CommitIndex)
+				}
+			}
 
-			log.Printf("Parent Chain: Recovered at block #%d (GEI %d), stateRoot=%s",
-				prog.LastBlock, prog.LastGEI, prog.LastStateRoot.Hex())
+			// 2. Verify NOMT Merkle tree root matches durable prog.LastStateRoot
+			if actualRoot, rErr := committer.NomtRoot(); rErr == nil {
+				if actualRoot != prog.LastStateRoot {
+					log.Printf("🚨 [PARENT-CHAIN-STARTUP] CRITICAL STATE ROOT MISMATCH! LevelDB LastStateRoot=%s != NOMT Root=%s at block #%d",
+						prog.LastStateRoot.Hex(), actualRoot.Hex(), prog.LastBlock)
+					bp.forkDetected = true
+					parentchain.ParentChainForkDetected.Set(1)
+				}
+			}
+
+			if !bp.forkDetected {
+				storage.UpdateLastBlockNumber(prog.LastBlock)
+				storage.UpdateLastAssignedBlockNumber(prog.LastBlock)
+				storage.UpdateLastGlobalExecIndex(prog.LastGEI)
+				log.Printf("Parent Chain: Recovered at block #%d (GEI %d), stateRoot=%s",
+					prog.LastBlock, prog.LastGEI, prog.LastStateRoot.Hex())
+			} else {
+				log.Printf("🚨 Parent Chain: QUARANTINED ON STARTUP due to state corruption / fork detection at block #%d", prog.LastBlock)
+			}
 		}
 	}
 
@@ -71,6 +117,16 @@ func (bp *BlockProcessor) SetSyncCallback(cb func(fromBlock uint64)) {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 	bp.syncCallback = cb
+}
+
+func (bp *BlockProcessor) SetForkCallback(cb func(fork bool)) {
+	bp.mu.Lock()
+	bp.forkCallback = cb
+	isFork := bp.forkDetected
+	bp.mu.Unlock()
+	if isFork && cb != nil {
+		cb(true)
+	}
 }
 
 func (bp *BlockProcessor) GetQueue() chan *pb.ExecutableBlock {
@@ -253,6 +309,10 @@ func (bp *BlockProcessor) ProcessBlock(block *pb.ExecutableBlock) *pb.ExecuteBlo
 		if errors.Is(err, parentchain.ErrBlockConflict) {
 			log.Printf("🚨 Parent Chain: CRITICAL FORK DETECTED at block #%d! State conflict: %v", block.BlockNumber, err)
 			bp.forkDetected = true
+			parentchain.ParentChainForkDetected.Set(1)
+			if bp.forkCallback != nil {
+				bp.forkCallback(true)
+			}
 			return &pb.ExecuteBlockResponse{
 				BlockNumber: block.BlockNumber,
 				Success:     false,
@@ -274,6 +334,20 @@ func (bp *BlockProcessor) ProcessBlock(block *pb.ExecutableBlock) *pb.ExecuteBlo
 	bp.lastStateRoot = res.Record.Header.StateRoot
 	bp.lastBlockHash = res.Record.BlockHash
 
+	storage.UpdateLastBlockNumber(res.Record.Header.Number)
+	storage.UpdateLastAssignedBlockNumber(res.Record.Header.Number)
+	storage.UpdateLastGlobalExecIndex(res.Record.Header.GEI)
+	if res.Record.Header.CommitIndex > 0 {
+		storage.UpdateLastHandledCommitIndex(res.Record.Header.CommitIndex)
+	}
+
+	// Update Prometheus metrics (H9)
+	parentchain.ParentChainLastBlock.Set(float64(res.Record.Header.Number))
+	parentchain.ParentChainBlocksTotal.Inc()
+	parentchain.ParentChainTxsTotal.Add(float64(len(res.Record.Receipts)))
+	parentchain.ParentChainStateRoot.Reset()
+	parentchain.ParentChainStateRoot.WithLabelValues(res.Record.Header.StateRoot.Hex()).Set(1)
+
 	// Notify individual transaction execution outcomes
 	if bp.onTxResult != nil {
 		for i, rcpt := range res.Record.Receipts {
@@ -285,12 +359,58 @@ func (bp *BlockProcessor) ProcessBlock(block *pb.ExecutableBlock) *pb.ExecuteBlo
 					txErr = fmt.Errorf("receipt error code: %d", rcpt.ErrorCode)
 				}
 			}
+			log.Printf("block_processor: receipt #%d txHash=%s status=%d errCode=%d events=%d err=%v",
+				i, rcpt.TxHash.Hex()[:10], rcpt.Status, rcpt.ErrorCode, len(rcpt.Events), txErr)
+
 			bp.onTxResult(rcpt.TxHash, txErr)
+			for _, evt := range rcpt.Events {
+				if len(evt) == 32 {
+					bp.onTxResult(common.BytesToHash(evt), txErr)
+				}
+			}
+
+			// If rcpt failed before events were populated, fallback to extracting msgID from rawTxs
+			if len(rcpt.Events) == 0 && i < len(rawTxs) {
+				var pbTx pb.Transaction
+				if err := proto.Unmarshal(rawTxs[i], &pbTx); err == nil {
+					var cd pb.ParentChainCallData
+					if err := proto.Unmarshal(pbTx.Data, &cd); err == nil {
+						switch cd.Method {
+						case pb.ParentChainMethod_METHOD_DEPOSIT_TO_FLOAT:
+							if args := cd.GetDepositToFloat(); args != nil && len(args.MsgId) == 32 {
+								bp.onTxResult(common.BytesToHash(args.MsgId), txErr)
+							}
+						case pb.ParentChainMethod_METHOD_REGISTER_ACCOUNT:
+							if args := cd.GetRegisterAccount(); args != nil && len(args.FloatIdentityKey) == 48 {
+								var fKey cm.PublicKey
+								copy(fKey[:], args.FloatIdentityKey)
+								regDigest := parentchain.ComputeRegisterAccountMessage(common.BytesToAddress(args.UserAddress), fKey)
+								bp.onTxResult(crypto.Keccak256Hash(regDigest), txErr)
+							}
+						case pb.ParentChainMethod_METHOD_SUBMIT_STATE_ROOT:
+							if args := cd.GetSubmitStateRoot(); args != nil && len(args.ClusterKey) == 48 {
+								var cKey cm.PublicKey
+								copy(cKey[:], args.ClusterKey)
+								digest := parentchain.ComputeSubmitStateRootMessage(cKey, args.Epoch, common.BytesToHash(args.StateRoot))
+								bp.onTxResult(crypto.Keccak256Hash(append(digest, args.Cert...)), txErr)
+							}
+						case pb.ParentChainMethod_METHOD_MARK_CLAIMED:
+							if args := cd.GetMarkClaimed(); args != nil && len(args.MsgId) == 32 {
+								bp.onTxResult(common.BytesToHash(args.MsgId), txErr)
+							}
+						case pb.ParentChainMethod_METHOD_RECLAIM_FLOAT:
+							if args := cd.GetReclaimFloat(); args != nil && len(args.MsgId) == 32 {
+								bp.onTxResult(common.BytesToHash(args.MsgId), txErr)
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 
-	log.Printf("Parent Chain: Block #%d applied successfully: hash=%s stateRoot=%s",
-		res.Record.Header.Number, res.Record.BlockHash.Hex()[:18], res.Record.Header.StateRoot.Hex()[:18])
+	log.Printf("Parent Chain: Block #%d applied successfully: txs=%d receipts=%d hash=%s stateRoot=%s",
+		res.Record.Header.Number, len(block.Transactions), len(res.Record.Receipts), res.Record.BlockHash.Hex()[:18], res.Record.Header.StateRoot.Hex()[:18])
 
 	return &pb.ExecuteBlockResponse{
 		BlockNumber:  res.Record.Header.Number,

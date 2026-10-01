@@ -84,6 +84,7 @@ type MemoryStore struct {
 	inbound         map[common.Hash][]*TransferEvent
 	stateRoots      map[common.Hash]map[uint64]common.Hash
 	nonces          map[common.Address]uint64
+	snapshots       []*MemoryStore
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -101,10 +102,8 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
-// Clone creates a deep copy of the MemoryStore, useful for testing persistence via reload
-func (m *MemoryStore) Clone() *MemoryStore {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+// cloneInternal creates a deep copy of the MemoryStore without acquiring locks
+func (m *MemoryStore) cloneInternal() *MemoryStore {
 	clone := NewMemoryStore()
 	for k, v := range m.chains {
 		clone.chains[k] = v
@@ -155,6 +154,48 @@ func (m *MemoryStore) Clone() *MemoryStore {
 		clone.nonces[k] = v
 	}
 	return clone
+}
+
+// Clone creates a deep copy of the MemoryStore, useful for testing persistence via reload
+func (m *MemoryStore) Clone() *MemoryStore {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cloneInternal()
+}
+
+func (m *MemoryStore) Push() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.snapshots = append(m.snapshots, m.cloneInternal())
+}
+
+func (m *MemoryStore) Drop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.snapshots) == 0 {
+		return
+	}
+	prev := m.snapshots[len(m.snapshots)-1]
+	m.snapshots = m.snapshots[:len(m.snapshots)-1]
+
+	m.chains = prev.chains
+	m.floats = prev.floats
+	m.claimed = prev.claimed
+	m.transferRecords = prev.transferRecords
+	m.seqs = prev.seqs
+	m.velocities = prev.velocities
+	m.accounts = prev.accounts
+	m.inbound = prev.inbound
+	m.stateRoots = prev.stateRoots
+	m.nonces = prev.nonces
+}
+
+func (m *MemoryStore) Merge() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.snapshots) > 0 {
+		m.snapshots = m.snapshots[:len(m.snapshots)-1]
+	}
 }
 
 func (m *MemoryStore) GetChainRegistry(key common.Hash) (ChainRegistryEntry, bool, error) {

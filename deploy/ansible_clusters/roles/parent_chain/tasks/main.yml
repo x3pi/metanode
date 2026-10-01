@@ -17,16 +17,12 @@
     - name: Stop via process kill (daemon mode)
       when: not is_systemd
       ansible.builtin.shell: |
-        set -euo pipefail
-        for pid in $(ss -ltnpH "sport = :{{ parent_http_port | default(8547) }}" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p'); do
-          if [ -r "/proc/$pid/cmdline" ] && tr '\0' '\n' < "/proc/$pid/cmdline" | grep -Fxq "{{ bin_dir }}/parent_chain"; then
-            kill -SIGTERM "$pid" 2>/dev/null || true
-          fi
-        done
-        rm -f "{{ node_data_dir }}/parent_chain.pid"
-      args:
-        executable: /bin/bash
-      ignore_errors: true
+        if [ -f "{{ node_data_dir }}/parent_chain.pid" ]; then
+          kill -9 $(cat "{{ node_data_dir }}/parent_chain.pid") 2>/dev/null || true
+          rm -f "{{ node_data_dir }}/parent_chain.pid"
+        fi
+        pkill -9 -f "{{ bin_dir }}/parent_chain.*{{ node_data_dir }}" 2>/dev/null || true
+      failed_when: false
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────
 - name: Clean Parent Chain data directories
@@ -54,6 +50,9 @@
         path: "{{ item }}"
         state: directory
         mode: '0755'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+        recurse: yes
       loop:
         - "{{ node_data_dir }}"
         - "{{ base_log_dir }}"
@@ -63,27 +62,43 @@
         src: parentchain_config.json.j2
         dest: "{{ node_data_dir }}/config.json"
         mode: '0644'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+
+    - name: Deploy Parent Chain genesis file
+      ansible.builtin.template:
+        src: parent_genesis.json.j2
+        dest: "{{ node_data_dir }}/parent_genesis.json"
+        mode: '0644'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
 
     - name: Copy Parent Chain consensus keys
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../../consensus/metanode/config/{{ item }}"
         dest: "{{ node_data_dir }}/{{ item }}"
         mode: '0600'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
       loop:
-        - "node_0_protocol_key.json"
-        - "node_0_network_key.json"
+        - "node_{{ parent_node_id | default(0) }}_protocol_key.json"
+        - "node_{{ parent_node_id | default(0) }}_network_key.json"
 
     - name: Deploy Parent Chain Rust consensus node_parent.toml
       ansible.builtin.template:
         src: node_parent.toml.j2
         dest: "{{ node_data_dir }}/node_parent.toml"
         mode: '0644'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
 
     - name: Write security environment file (tokens / pins from vault vars, 0600)
       ansible.builtin.template:
         src: security.env.j2
         dest: "{{ node_data_dir }}/security.env"
         mode: '0600'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
       no_log: true
 
     - name: Deploy systemd service unit
@@ -107,13 +122,15 @@
 
     - name: Start process via background daemon
       when: not is_systemd
+      become_user: "{{ ansible_user | default('abc') }}"
       ansible.builtin.shell: |
         set -a; [ -f {{ node_data_dir }}/security.env ] && . {{ node_data_dir }}/security.env; set +a
         nohup {{ bin_dir }}/parent_chain \
           -data-dir {{ node_data_dir }} \
           -http :{{ parent_http_port | default(8547) }} \
           -rust-config {{ node_data_dir }}/node_parent.toml \
-          >> {{ base_log_dir }}/parent_chain.log 2>&1 &
+          -genesis {{ node_data_dir }}/parent_genesis.json \
+          >> {{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log 2>&1 &
         echo $! > {{ node_data_dir }}/parent_chain.pid
       args:
         chdir: "{{ node_data_dir }}"

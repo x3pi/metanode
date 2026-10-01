@@ -73,44 +73,93 @@ func TestParentChainState(t *testing.T) {
 		}
 	})
 	
-	// Test: DepositToFloat auto-creates ChainRegistry+NodeFloatAccount entry
-	t.Run("DepositToFloat to new FloatIdentityKey", func(t *testing.T) {
+	doDeposit := func(s Store, srcPub, dstPub cm.PublicKey, srcPriv cm.PrivateKey, cid uint64, amt *big.Int, mID common.Hash) error {
+		_ = ensureChainRegistry(s, crypto.Keccak256Hash(srcPub[:]), srcPub, cid)
+		dig := ComputeDepositFloatMessage(dstPub, cid, common.Address{}, common.Address{}, amt, mID)
+		cert := bls.Sign(srcPriv, dig)
+		return DepositToFloat(s, srcPub, dstPub, cid, common.Address{}, common.Address{}, amt, mID, cert, 1)
+	}
+
+	// Test: DepositToFloat authorization and security tests (T-U13..T-U18)
+	t.Run("DepositToFloat security and authorization", func(t *testing.T) {
+		s := NewMemoryStore()
 		depositAmount := big.NewInt(1000)
 		msgID := common.HexToHash("0x123")
-		err := DepositToFloat(store, pub1, 101, common.Address{}, common.Address{}, depositAmount, msgID, 1)
-		if err != nil {
-			t.Fatalf("Failed to deposit: %v", err)
+
+		// 1. Unknown source cluster rejected
+		dig := ComputeDepositFloatMessage(pub1, 101, common.Address{}, common.Address{}, depositAmount, msgID)
+		cert := bls.Sign(priv1, dig)
+		err := DepositToFloat(s, pub1, pub1, 101, common.Address{}, common.Address{}, depositAmount, msgID, cert, 1)
+		if err == nil || err.Error() != "DepositToFloat: unknown source cluster" {
+			t.Fatalf("Expected unknown source cluster error, got %v", err)
 		}
-		
-		// verify auto-create
-		_, found, err := store.GetChainRegistry(hash1)
+
+		// Register source cluster
+		_ = ensureChainRegistry(s, hash1, pub1, 101)
+
+		// 2. Forged signature (signed with priv2 instead of priv1) rejected
+		badCert := bls.Sign(priv2, dig)
+		err = DepositToFloat(s, pub1, pub1, 101, common.Address{}, common.Address{}, depositAmount, msgID, badCert, 1)
+		if !errors.Is(err, ErrInvalidSignature) {
+			t.Fatalf("Expected ErrInvalidSignature for forged cert, got %v", err)
+		}
+
+		// 3. Tampered amount rejected
+		tamperedAmount := big.NewInt(2000)
+		err = DepositToFloat(s, pub1, pub1, 101, common.Address{}, common.Address{}, tamperedAmount, msgID, cert, 1)
+		if !errors.Is(err, ErrInvalidSignature) {
+			t.Fatalf("Expected ErrInvalidSignature for tampered amount, got %v", err)
+		}
+
+		// 4. Valid deposit succeeds
+		err = DepositToFloat(s, pub1, pub1, 101, common.Address{}, common.Address{}, depositAmount, msgID, cert, 1)
+		if err != nil {
+			t.Fatalf("Failed valid deposit: %v", err)
+		}
+
+		// verify auto-create dest entry
+		_, found, err := s.GetChainRegistry(hash1)
 		if err != nil || !found {
 			t.Errorf("Chain registry entry not created")
 		}
-		
-		bal, _ := store.GetFloat(hash1)
+
+		bal, _ := s.GetFloat(hash1)
 		if bal.Cmp(depositAmount) != 0 {
 			t.Errorf("Expected balance %s, got %s", depositAmount.String(), bal.String())
 		}
-		
+
+		// verify SourceKey recorded
+		rec, found, err := s.GetTransferRecord(msgID)
+		if err != nil || !found || rec.SourceKey == nil || *rec.SourceKey != pub1 {
+			t.Errorf("Transfer record SourceKey not recorded correctly: %+v", rec)
+		}
+
+		// 5. Replay same msgID rejected
+		err = DepositToFloat(s, pub1, pub1, 101, common.Address{}, common.Address{}, depositAmount, msgID, cert, 1)
+		if !errors.Is(err, ErrFloatAlreadyResolved) {
+			t.Fatalf("Expected ErrFloatAlreadyResolved for replay, got %v", err)
+		}
+
 		// Invariant check
-		if err := CheckFloatSupplyInvariant(store); err != nil {
+		if err := CheckFloatSupplyInvariant(s); err != nil {
 			t.Errorf("Invariant failed: %v", err)
 		}
 	})
-	
+
 	// Test: TransferFloat
 	t.Run("TransferFloat to new FloatIdentityKey", func(t *testing.T) {
 		store := NewMemoryStore()
-		DepositToFloat(store, pub1, 101, common.Address{}, common.Address{}, big.NewInt(1000), common.HexToHash("0x123"), 1)
-		
+		if err := doDeposit(store, pub1, pub1, priv1, 101, big.NewInt(1000), common.HexToHash("0x123")); err != nil {
+			t.Fatalf("Deposit failed: %v", err)
+		}
+
 		nonce := uint64(0)
 		amount := big.NewInt(400)
 		payloadHash := crypto.Keccak256Hash(nil)
-		
+
 		digest := ComputeTransferFloatMessage(pub1, pub2, userAddr, userAddr2, amount, nil, payloadHash, nonce)
 		cert := bls.Sign(priv1, digest)
-		
+
 		msgID, err := TransferFloat(store, pub1, pub2, 102, userAddr, userAddr2, amount, nil, nil, nonce, cert, false, 50, 2)
 		if err != nil {
 			t.Fatalf("Failed to transfer: %v", err)
@@ -164,7 +213,9 @@ func TestParentChainState(t *testing.T) {
 	// Test: ReclaimFloat before timeout rejected
 	t.Run("ReclaimFloat before timeout rejected", func(t *testing.T) {
 		store := NewMemoryStore()
-		DepositToFloat(store, pub1, 101, common.Address{}, common.Address{}, big.NewInt(1000), common.HexToHash("0x123"), 1)
+		if err := doDeposit(store, pub1, pub1, priv1, 101, big.NewInt(1000), common.HexToHash("0x123")); err != nil {
+			t.Fatalf("Deposit failed: %v", err)
+		}
 		
 		nonce := uint64(0)
 		amount := big.NewInt(100)
@@ -210,7 +261,9 @@ func TestParentChainState(t *testing.T) {
 	t.Run("Refund not blocked by velocity", func(t *testing.T) {
 		// bal1 is 1000, 20% is 200. Sending 250 should fail if not refund.
 		store := NewMemoryStore()
-		DepositToFloat(store, pub1, 101, common.Address{}, common.Address{}, big.NewInt(1000), common.HexToHash("0x123"), 1)
+		if err := doDeposit(store, pub1, pub1, priv1, 101, big.NewInt(1000), common.HexToHash("0x123")); err != nil {
+			t.Fatalf("Deposit failed: %v", err)
+		}
 		
 		nonce := uint64(0)
 		amount := big.NewInt(250)
@@ -238,7 +291,9 @@ func TestParentChainState(t *testing.T) {
 	// Test: Persist qua reload (Clone)
 	t.Run("Persist qua reload", func(t *testing.T) {
 		store := NewMemoryStore()
-		DepositToFloat(store, pub1, 101, common.Address{}, common.Address{}, big.NewInt(1000), common.HexToHash("0x123"), 1)
+		if err := doDeposit(store, pub1, pub1, priv1, 101, big.NewInt(1000), common.HexToHash("0x123")); err != nil {
+			t.Fatalf("Deposit failed: %v", err)
+		}
 		nonce := uint64(0)
 		digest := ComputeTransferFloatMessage(pub1, pub2, userAddr, userAddr2, big.NewInt(450), nil, crypto.Keccak256Hash(nil), nonce)
 		cert := bls.Sign(priv1, digest)
@@ -267,7 +322,8 @@ func TestParentChainState(t *testing.T) {
 		stateRoot := common.HexToHash("0xabc123")
 		digest := ComputeSubmitStateRootMessage(pub1, epoch, stateRoot)
 		cert := bls.Sign(priv1, digest)
-		
+		_ = ensureChainRegistry(store, hash1, pub1, 101)
+
 		err := SubmitStateRoot(store, pub1, epoch, stateRoot, cert)
 		if err != nil {
 			t.Fatalf("Failed to submit state root: %v", err)

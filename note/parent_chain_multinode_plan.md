@@ -27,7 +27,7 @@ Các quyết định kèm theo (agent triển khai theo đây; nếu Discovery �
 | Đ9 | **Không dùng JSON cho giá trị trong cây state.** Dùng mã hóa nhị phân chuẩn tắc (protobuf `Deterministic: true` hoặc RLP) với test vector. | JSON không phải chuẩn tắc, dễ lệch giữa phiên bản |
 | Đ10 | **Đồng thuận cuối cùng (finality) = commit của Rust BFT**, không có reorg. Client v1 xác minh bằng **đọc quorum f+1 header khớp + Merkle proof**; v2 (backlog) thêm **chữ ký tổng hợp BLS của validator trên header** để tin được một nguồn duy nhất. | v1 đủ an toàn và đơn giản; v2 làm sau |
 | Đ11 | **Chống spam v1:** không có token gas. Người gửi phải là tài khoản/cluster đã đăng ký (cluster do chứng nhận, người dùng do `RegisterAccount`), có `nonce` và giới hạn tốc độ ở ingress. Phí = việc sau. | Đủ cho control plane có người vận hành |
-| Đ12 | **Chain mới dựng từ genesis**, không nâng cấp tại chỗ thành multi-node. Cụm đơn node hiện tại (`:8547`) chạy tiếp cho tới khi cụm mới thay thế; dữ liệu cũ nếu cần giữ được xuất thành genesis bằng công cụ di chuyển (WP11). Môi trường dev cho phép reset. | Tránh trộn hai mô hình dữ liệu |
+| Đ12 | **Chain mới dựng từ genesis, không di chuyển dữ liệu cũ** (chủ dự án chốt 2026-10-01: đang dev). Wipe và redeploy đồng loạt parent + exec. | Tránh trộn hai mô hình dữ liệu, không tốn công migrate |
 | Đ13 | **Mô hình tin cậy:** các validator do **các operator độc lập** vận hành; nếu một bên điều khiển ≥ 2/3 stake thì BFT không thêm bảo đảm tin cậy (chỉ thêm khả dụng). Ghi rõ trong tài liệu vận hành. | Trung thực về giới hạn |
 | Đ14 | **Committee cố định trong giai đoạn đầu** (file genesis chung). Đổi committee = quy trình vận hành có chủ đích, chưa hỗ trợ tự động. | Giảm rủi ro chuyển epoch |
 
@@ -40,7 +40,7 @@ Các quyết định kèm theo (agent triển khai theo đây; nếu Discovery �
 3. Không sửa kiểu/interface dùng chung nếu chưa phân tích blast radius (`grep`/codegraph).
 4. Sau mỗi thay đổi code: chạy `consensus/metanode/scripts/build_check.sh` (Go + Rust + FFI) sạch, không warning.
 5. Cập nhật `PROJECT_STRUCTURE.md` khi thêm module/file quan trọng. Tóm tắt cuối mỗi phản hồi bằng tiếng Việt theo mẫu `AGENTS.md`.
-6. **Máy này có parent chain đang chạy thật** (`/opt/metanode/parent_chain`, HTTP `:8547`; mạng `:9000`, peer RPC `:19300`, metrics `:9110` theo mặc định của template; log `/var/log/metanode/parent_chain.log`, ~59.000 block, cụm exec đang phụ thuộc vào nó). **Không dừng, không ghi đè, không dùng lại các cổng đó.** Mọi thử nghiệm dùng thư mục dữ liệu và dải cổng riêng (gợi ý: HTTP `18601–18604`, mạng `19001–19004`, peer RPC `19501–19504`, metrics `19601–19604`).
+6. **Môi trường local dev, dữ liệu bỏ được** (chủ dự án chốt 2026-10-01): được tự do dừng/wipe/chạy lại từ đầu mọi cụm (kể cả parent chain `:8547` và các cụm exec) khi test. Cụm thử nghiệm đề xuất dùng dải cổng riêng (HTTP `18601–18604`, mạng `19001–19004`, peer RPC `19501–19504`, metrics `19601–19604`) để tách khỏi các cụm khác, nhưng không bắt buộc.
 7. Commit bằng tên file (`git add <file>`), không `git add <thư mục>` (worktree dùng chung). Không push `dev` nếu chưa được chủ dự án đồng ý.
 8. Bài học đã trả giá (đọc trước khi đụng NOMT/commit): `execution/pkg/blockchain/block_state_commit.go` mục 8a/8b (**ghi block DB bền TRƯỚC khi commit NOMT**, để NOMT không bao giờ vượt tip bền); `execution/pkg/rollup/N1_DURABILITY_REPORT.md`; đừng gọi `Checkpoint()` NOMT trên đường nóng (gây đứng hệ thống); đừng dùng khóa `parking_lot` lồng nhau trong consensus-core.
 
@@ -213,7 +213,7 @@ WP0 ─┬─> WP1 ──> WP2 ──> WP3 ──> WP4 ──> WP5 ──┐
 
 ### WP0 — Hạ tầng thử nghiệm cô lập
 - Script dựng cụm N=4 cục bộ **trên cổng riêng** (mục 1.6): 4 thư mục dữ liệu, sinh khóa, sinh committee, sinh 4 `node_parent_i.toml`, chạy 4 tiến trình, dừng/khởi động lại từng node. Đặt ở `deploy/cluster/local_parent_chain/` (mô phỏng `deploy/cluster/local_devnet/`).
-- **Nghiệm thu:** `./run.sh up` chạy 4 node; `./run.sh status` in `last_block`, `block_hash`, `state_root` từng node; không đụng tiến trình `:8547`.
+- **Nghiệm thu:** `./run.sh up` chạy 4 node; `./run.sh status` in `last_block`, `block_hash`, `state_root` từng node.
 
 ### WP1 — Mô hình dữ liệu cây và thực thi block nguyên tử
 - Cài đặt mục 5 (lưu trữ theo mục 5.2b, tái dùng `pkg/trie` của simple_chain): overlay hai lớp trên cây NOMT, mã hóa chuẩn tắc, `Header`/`block_hash`, cây Merkle nhị phân cho `txs_root`/`receipts_root`, `ApplyBlock` idempotent + `ErrBlockGap/ErrBlockConflict`, rào chắn độ bền (D10).
@@ -294,10 +294,9 @@ Tích hợp (cụm WP0, cổng riêng):
 - **T-I7** exec cluster dùng `QuorumClient` chạy e2e trong khi 1 parent node bị chặn hoặc nói dối.
 - **T-I8** một validator cố đưa deposit không hợp lệ vào block ⇒ mọi node loại đồng nhất.
 
-### WP11 — Di chuyển, triển khai, tài liệu
-- Cụm đơn node cũ (`:8547`) chạy tiếp tới khi cụm mới sẵn sàng (Đ12). Nếu cần giữ dữ liệu: công cụ `parentchain-export-genesis` đọc DB cũ (số dư float, registry, transfer record, account registry, state root cụm) và ghi `parent_genesis.json`/state khởi tạo; kiểm bất biến tổng cung (`CheckFloatSupplyInvariant`). Mặc định môi trường dev: reset và đăng ký lại.
-- Thứ tự chuyển đổi: dựng cụm mới, cho exec cluster dùng `QuorumClient` trỏ cụm mới, chạy song song có so sánh, rồi tắt cụm cũ. Quay lui: giữ nguyên binary và DB cũ ở thư mục `backup_*`.
-- Tài liệu: `PROJECT_STRUCTURE.md`, `OPERATIONS_GUIDE.md`, `note/parent_chain_multinode_design.md` (bản thiết kế kết quả), runbook (WP9), cập nhật `deploy/ansible_clusters/README.md`; sửa các chỗ ghi "Parent Chain ChainID 991".
+### WP11 — Triển khai lại sạch, tài liệu
+- **Không có bước di chuyển dữ liệu cũ** (chủ dự án chốt 2026-10-01: đang dev, chưa có bản nào cần bảo toàn). Wipe parent chain cũ, dựng cụm mới từ genesis, cấu hình lại exec cluster, đăng ký lại cluster/tài khoản.
+- Tài liệu: `PROJECT_STRUCTURE.md`, `OPERATIONS_GUIDE.md`, `note/parent_chain_multinode_design.md`, runbook (WP9), `deploy/ansible_clusters/README.md`; sửa các chỗ ghi "Parent Chain ChainID 991".
 
 ---
 
@@ -312,7 +311,7 @@ Tích hợp (cụm WP0, cổng riêng):
 - [ ] Mất quorum ⇒ dừng an toàn, không fork; đủ quorum ⇒ tự tiến (T-I3).
 - [ ] Client đọc qua `QuorumClient` + proof chịu được 1 node nói dối (T-C2, T-I7).
 - [ ] `build_check.sh` sạch; `go test ./...` pass; `PROJECT_STRUCTURE.md`, runbook, tài liệu triển khai đã cập nhật.
-- [ ] Không có thay đổi nào lên tiến trình parent chain đang chạy ở `:8547` ngoài việc chủ dự án chủ động chuyển đổi.
+- [ ] Redeploy sạch từ genesis (wipe parent + exec) chạy cross-chain e2e pass.
 
 ---
 

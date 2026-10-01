@@ -121,12 +121,37 @@ func (o *OverlayTree) BlockWrites() ([][32]byte, map[[32]byte][]byte) {
 
 // ─── TREE STORE (TYPED STORE OVER TREEKV) ───────────────────────────────────
 
+// Snapshotter allows isolating transaction or handler write layers.
+type Snapshotter interface {
+	Push()
+	Drop()
+	Merge()
+}
+
 type TreeStore struct {
 	kv TreeKV
 }
 
 func NewTreeStore(kv TreeKV) *TreeStore {
 	return &TreeStore{kv: kv}
+}
+
+func (s *TreeStore) Push() {
+	if snap, ok := s.kv.(Snapshotter); ok {
+		snap.Push()
+	}
+}
+
+func (s *TreeStore) Drop() {
+	if snap, ok := s.kv.(Snapshotter); ok {
+		snap.Drop()
+	}
+}
+
+func (s *TreeStore) Merge() {
+	if snap, ok := s.kv.(Snapshotter); ok {
+		snap.Merge()
+	}
 }
 
 func (s *TreeStore) GetChainRegistry(key common.Hash) (ChainRegistryEntry, bool, error) {

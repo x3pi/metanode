@@ -39,44 +39,32 @@ func NewApp(configPath, rustConfigPath, dataDir, httpAddr, genesisPath string) (
 		return nil, fmt.Errorf("failed to open DBStore: %w", err)
 	}
 
-	var gen *parentchain.Genesis
-	var protoValidators []*pb.ValidatorInfo
-
-	if genesisPath != "" {
-		if g, err := parentchain.LoadGenesis(genesisPath); err == nil {
-			gen = g
-			if pv, err := g.ToProtoValidators(); err == nil {
-				protoValidators = pv
-				log.Printf("Loaded genesis from %s: chain_id=%d, validators=%d", genesisPath, g.ChainID, len(g.Validators))
-			}
-		} else {
-			log.Printf("⚠️ Failed to load genesis from %s: %v. Using default committee.", genesisPath, err)
-		}
+	if genesisPath == "" {
+		return nil, fmt.Errorf("genesis configuration path is required (use -genesis flag)")
 	}
 
-	if len(protoValidators) == 0 {
-		// Fallback for single node devnet / backward compatibility
-		protocolKeyBytes := common.Hex2Bytes("7cdfc1340f0f1728c4de1725ca3c6791882316547a336ee3a5ba1cabb5fce3b6")
-		networkKeyBytes := common.Hex2Bytes("8d9fe40cd34f06c657503dbc15cc4c2cb67ebc26426c426852f741f33811bee8")
-		blsPubKeyBytes := common.Hex2Bytes("805562d9bf84b6ebec07e59676eeb883b160ff287c71f98bc19c0b115682855cf83d2cbe24cff49a2a50a3cc16053331006509172909f2913e1de18f7724128f6edbbde91244e6b7f3b89510b65f7c00e1293fb548c7e2b7e9f3bba800f7cd0a")
-		protoValidators = []*pb.ValidatorInfo{
-			{
-				Address:      "0x7e615e4a500ab42b7bb3fdbb62fbb8bd10385fc5",
-				Stake:        "1000000000000000000",
-				AuthorityKey: blsPubKeyBytes,
-				ProtocolKey:  protocolKeyBytes,
-				NetworkKey:   networkKeyBytes,
-				Name:         "node-0",
-				P2PAddress:   "/ip4/127.0.0.1/tcp/19300",
-			},
-		}
+	gen, err := parentchain.LoadGenesis(genesisPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load genesis from %s: %w", genesisPath, err)
 	}
+
+	protoValidators, err := gen.ToProtoValidators()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse genesis validators: %w", err)
+	}
+	log.Printf("Loaded genesis from %s: chain_id=%d, validators=%d", genesisPath, gen.ChainID, len(gen.Validators))
 
 	tb := processor.NewTxBatcher(1000)
 	httpServer := parentchain.NewHTTPServer(dbStore, tb.Chan())
 	httpServer.SetValidators(protoValidators)
 	httpServer.SetProtoTxChan(tb.ProtoChan())
 	bp := processor.NewBlockProcessor(dbStore, httpServer.NotifyTxResult)
+	bp.SetForkCallback(func(fork bool) {
+		httpServer.SetForkDetected(fork)
+	})
+	if bp.IsForkDetected() {
+		httpServer.SetForkDetected(true)
+	}
 
 	return &App{
 		configPath:      configPath,
@@ -215,9 +203,19 @@ func (a *App) Start() error {
 	}
 
 	if prog, err := a.committer.LastApplied(); err == nil && prog.LastBlock > 0 {
-		storage.UpdateLastBlockNumber(prog.LastBlock)
-		storage.UpdateLastGlobalExecIndex(prog.LastBlock)
-		log.Printf("Loaded last block #%d from DBStore (state_root=%s)", prog.LastBlock, prog.LastStateRoot.Hex())
+		if !a.blockProcessor.IsForkDetected() {
+			storage.UpdateLastBlockNumber(prog.LastBlock)
+			storage.UpdateLastGlobalExecIndex(prog.LastBlock)
+			if rec, found, err := a.committer.GetBlockRecord(prog.LastBlock); err == nil && found {
+				if rec.Header.CommitIndex > 0 {
+					storage.UpdateLastHandledCommitIndex(rec.Header.CommitIndex)
+				}
+			}
+			log.Printf("Loaded last block #%d from DBStore (state_root=%s, commit_index=%d)",
+				prog.LastBlock, prog.LastStateRoot.Hex(), storage.GetLastHandledCommitIndex())
+		} else {
+			log.Printf("🚨 Node in QUARANTINED fork_detected state at startup: skipping storage block advance")
+		}
 	}
 
 	reqHandler.CustomGetLastBlockNumberCallback = func(request *pb.GetLastBlockNumberRequest) (*pb.LastBlockNumberResponse, error) {
@@ -237,7 +235,7 @@ func (a *App) Start() error {
 	}
 
 	storage.SetBlockchainInitDone()
-	
+
 	if err := executor.InitFFIBridge(a.rustConfigPath, a.dataDir, reqHandler, blockQueue); err != nil {
 		return fmt.Errorf("failed to init FFI bridge: %w", err)
 	}

@@ -135,6 +135,34 @@ func (m *mockParentChainClient) GetStateRoot(clusterPubKey cm.PublicKey, epoch u
 	return common.Hash{}, false, nil
 }
 
+func (m *mockParentChainClient) GetBlockByNumber(number uint64) (parentchain.BlockRecord, bool, error) {
+	return parentchain.BlockRecord{}, false, nil
+}
+
+func (m *mockParentChainClient) GetBlockByHash(hash common.Hash) (parentchain.BlockRecord, bool, error) {
+	return parentchain.BlockRecord{}, false, nil
+}
+
+func (m *mockParentChainClient) GetTransaction(txHash common.Hash) (uint64, uint32, bool, error) {
+	return 0, 0, false, nil
+}
+
+func (m *mockParentChainClient) GetReceipt(txHash common.Hash) (*parentchain.Receipt, bool, error) {
+	return nil, false, nil
+}
+
+func (m *mockParentChainClient) GetStatus() (parentchain.ChainStatus, error) {
+	return parentchain.ChainStatus{}, nil
+}
+
+func (m *mockParentChainClient) GetProof(key [32]byte) (parentchain.ProofResult, error) {
+	return parentchain.ProofResult{}, nil
+}
+
+func (m *mockParentChainClient) SendRawTransaction(rawTx []byte) (common.Hash, error) {
+	return common.Hash{}, nil
+}
+
 
 
 func TestSendWorker(t *testing.T) {

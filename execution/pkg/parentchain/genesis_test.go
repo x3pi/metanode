@@ -87,18 +87,27 @@ func TestGenesis_ValidAndInvalid(t *testing.T) {
 			json: `{"chain_id": 1337, "validators": []}`,
 		},
 		{
-			name: "less_than_4_validators",
-			json: `{"chain_id": 990, "validators": [{"name": "n0", "address": "0x1", "p2p_address": "p2p"}]}`,
+			name: "empty_validators",
+			json: `{"chain_id": 990, "validators": []}`,
+		},
+		{
+			name: "invalid_stake",
+			json: `{
+				"chain_id": 990,
+				"validators": [
+					{"name":"n0","address":"0x1111111111111111111111111111111111111111","stake":"0","protocol_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 32)) + `","network_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 32)) + `","authority_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 48)) + `","p2p_address":"addr"}
+				]
+			}`,
 		},
 		{
 			name: "duplicate_address",
 			json: `{
 				"chain_id": 990,
 				"validators": [
-					{"name":"n0","address":"0x1111111111111111111111111111111111111111","protocol_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 32)) + `","network_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 32)) + `","authority_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 48)) + `","p2p_address":"addr"},
-					{"name":"n1","address":"0x1111111111111111111111111111111111111111","protocol_key":"` + base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")) + `","network_key":"` + base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")) + `","authority_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 48)) + `","p2p_address":"addr"},
-					{"name":"n2","address":"0x2222222222222222222222222222222222222222","protocol_key":"` + base64.StdEncoding.EncodeToString([]byte("abcdefghijabcdefghijabcdefghijab")) + `","network_key":"` + base64.StdEncoding.EncodeToString([]byte("abcdefghijabcdefghijabcdefghijab")) + `","authority_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 48)) + `","p2p_address":"addr"},
-					{"name":"n3","address":"0x3333333333333333333333333333333333333333","protocol_key":"` + base64.StdEncoding.EncodeToString([]byte("klmnopqrstklmnopqrstklmnopqrstkl")) + `","network_key":"` + base64.StdEncoding.EncodeToString([]byte("klmnopqrstklmnopqrstklmnopqrstkl")) + `","authority_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 48)) + `","p2p_address":"addr"}
+					{"name":"n0","address":"0x1111111111111111111111111111111111111111","stake":"1000","protocol_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 32)) + `","network_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 32)) + `","authority_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 48)) + `","p2p_address":"addr"},
+					{"name":"n1","address":"0x1111111111111111111111111111111111111111","stake":"1000","protocol_key":"` + base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")) + `","network_key":"` + base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")) + `","authority_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 48)) + `","p2p_address":"addr"},
+					{"name":"n2","address":"0x2222222222222222222222222222222222222222","stake":"1000","protocol_key":"` + base64.StdEncoding.EncodeToString([]byte("abcdefghijabcdefghijabcdefghijab")) + `","network_key":"` + base64.StdEncoding.EncodeToString([]byte("abcdefghijabcdefghijabcdefghijab")) + `","authority_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 48)) + `","p2p_address":"addr"},
+					{"name":"n3","address":"0x3333333333333333333333333333333333333333","stake":"1000","protocol_key":"` + base64.StdEncoding.EncodeToString([]byte("klmnopqrstklmnopqrstklmnopqrstkl")) + `","network_key":"` + base64.StdEncoding.EncodeToString([]byte("klmnopqrstklmnopqrstklmnopqrstkl")) + `","authority_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 48)) + `","p2p_address":"addr"}
 				]
 			}`,
 		},

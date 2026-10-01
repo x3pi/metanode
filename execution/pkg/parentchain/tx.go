@@ -43,171 +43,249 @@ const (
 	MethodRegisterCluster byte = 0x07
 )
 
-// ─── CALLDATA ENCODING & DECODING ──────────────────────────────────────────
+// ─── CALLDATA ENCODING & DECODING (PROTOBUF) ──────────────────────────────
 
-func EncodeDepositToFloatCallData(destKey cm.PublicKey, destClusterID uint64, sender, target common.Address, amount *big.Int, msgID common.Hash) []byte {
-	buf := make([]byte, 1+48+8+20+20+32+32)
-	buf[0] = MethodDepositToFloat
-	copy(buf[1:49], destKey[:])
-	binary.BigEndian.PutUint64(buf[49:57], destClusterID)
-	copy(buf[57:77], sender.Bytes())
-	copy(buf[77:97], target.Bytes())
-	copy(buf[97:129], padTo32(amount))
-	copy(buf[129:161], msgID.Bytes())
-	return buf
+func EncodeDepositToFloatCallData(sourceKey, destKey cm.PublicKey, destClusterID uint64, sender, target common.Address, amount *big.Int, msgID common.Hash, cert cm.Sign) []byte {
+	var amtBytes []byte
+	if amount != nil {
+		amtBytes = amount.Bytes()
+	}
+	cd := &pb.ParentChainCallData{
+		Method: pb.ParentChainMethod_METHOD_DEPOSIT_TO_FLOAT,
+		Args: &pb.ParentChainCallData_DepositToFloat{
+			DepositToFloat: &pb.DepositToFloatArgs{
+				SourceKey:     sourceKey[:],
+				DestKey:       destKey[:],
+				DestClusterId: destClusterID,
+				Sender:        sender.Bytes(),
+				Target:        target.Bytes(),
+				Amount:        amtBytes,
+				MsgId:         msgID.Bytes(),
+				Cert:          cert.Bytes(),
+			},
+		},
+	}
+	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(cd)
+	return b
 }
 
-func DecodeDepositToFloatCallData(data []byte) (destKey cm.PublicKey, destClusterID uint64, sender, target common.Address, amount *big.Int, msgID common.Hash, err error) {
-	if len(data) < 1+48+8+20+20+32+32 {
-		return destKey, 0, sender, target, nil, msgID, ErrMalformedCallData
+func DecodeDepositToFloatCallData(data []byte) (sourceKey, destKey cm.PublicKey, destClusterID uint64, sender, target common.Address, amount *big.Int, msgID common.Hash, cert cm.Sign, err error) {
+	var cd pb.ParentChainCallData
+	if err := proto.Unmarshal(data, &cd); err != nil {
+		return sourceKey, destKey, 0, sender, target, nil, msgID, cert, ErrMalformedCallData
 	}
-	copy(destKey[:], data[1:49])
-	destClusterID = binary.BigEndian.Uint64(data[49:57])
-	sender = common.BytesToAddress(data[57:77])
-	target = common.BytesToAddress(data[77:97])
-	amount = new(big.Int).SetBytes(data[97:129])
-	msgID = common.BytesToHash(data[129:161])
-	return destKey, destClusterID, sender, target, amount, msgID, nil
+	args := cd.GetDepositToFloat()
+	if args == nil || len(args.DestKey) != 48 || len(args.Sender) != 20 || len(args.Target) != 20 || len(args.MsgId) != 32 {
+		return sourceKey, destKey, 0, sender, target, nil, msgID, cert, ErrMalformedCallData
+	}
+	if len(args.SourceKey) == 48 {
+		copy(sourceKey[:], args.SourceKey)
+	}
+	copy(destKey[:], args.DestKey)
+	if len(args.Cert) == 96 {
+		copy(cert[:], args.Cert)
+	}
+	var amt *big.Int
+	if len(args.Amount) > 0 {
+		amt = new(big.Int).SetBytes(args.Amount)
+	} else {
+		amt = big.NewInt(0)
+	}
+	return sourceKey, destKey, args.DestClusterId, common.BytesToAddress(args.Sender), common.BytesToAddress(args.Target), amt, common.BytesToHash(args.MsgId), cert, nil
 }
 
 func EncodeTransferFloatCallData(toKey cm.PublicKey, destClusterID uint64, sender, target common.Address, value, fee *big.Int, nonce uint64, cert cm.Sign, isRefund bool, payload []byte) []byte {
-	buf := make([]byte, 1+48+8+20+20+32+32+8+96+1+4+len(payload))
-	buf[0] = MethodTransferFloat
-	copy(buf[1:49], toKey[:])
-	binary.BigEndian.PutUint64(buf[49:57], destClusterID)
-	copy(buf[57:77], sender.Bytes())
-	copy(buf[77:97], target.Bytes())
-	copy(buf[97:129], padTo32(value))
-	copy(buf[129:161], padTo32(fee))
-	binary.BigEndian.PutUint64(buf[161:169], nonce)
-	copy(buf[169:265], cert.Bytes())
-	if isRefund {
-		buf[265] = 1
+	var valBytes, feeBytes []byte
+	if value != nil {
+		valBytes = value.Bytes()
 	}
-	binary.BigEndian.PutUint32(buf[266:270], uint32(len(payload)))
-	copy(buf[270:], payload)
-	return buf
+	if fee != nil {
+		feeBytes = fee.Bytes()
+	}
+	cd := &pb.ParentChainCallData{
+		Method: pb.ParentChainMethod_METHOD_TRANSFER_FLOAT,
+		Args: &pb.ParentChainCallData_TransferFloat{
+			TransferFloat: &pb.TransferFloatArgs{
+				DestKey:       toKey[:],
+				DestClusterId: destClusterID,
+				Sender:        sender.Bytes(),
+				Target:        target.Bytes(),
+				Amount:        valBytes,
+				GasFee:        feeBytes,
+				Payload:       payload,
+				Seq:           nonce,
+				Cert:          cert.Bytes(),
+				IsRefund:      isRefund,
+			},
+		},
+	}
+	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(cd)
+	return b
 }
 
 func DecodeTransferFloatCallData(data []byte) (toKey cm.PublicKey, destClusterID uint64, sender, target common.Address, value, fee *big.Int, nonce uint64, cert cm.Sign, isRefund bool, payload []byte, err error) {
-	if len(data) < 270 {
+	var cd pb.ParentChainCallData
+	if err := proto.Unmarshal(data, &cd); err != nil {
 		return toKey, 0, sender, target, nil, nil, 0, cert, false, nil, ErrMalformedCallData
 	}
-	copy(toKey[:], data[1:49])
-	destClusterID = binary.BigEndian.Uint64(data[49:57])
-	sender = common.BytesToAddress(data[57:77])
-	target = common.BytesToAddress(data[77:97])
-	value = new(big.Int).SetBytes(data[97:129])
-	fee = new(big.Int).SetBytes(data[129:161])
-	nonce = binary.BigEndian.Uint64(data[161:169])
-	cert = cm.SignFromBytes(data[169:265])
-	isRefund = data[265] == 1
-	pLen := binary.BigEndian.Uint32(data[266:270])
-	if uint32(len(data)-270) < pLen {
+	args := cd.GetTransferFloat()
+	if args == nil || len(args.DestKey) != 48 || len(args.Sender) != 20 || len(args.Target) != 20 || len(args.Cert) != 96 {
 		return toKey, 0, sender, target, nil, nil, 0, cert, false, nil, ErrMalformedCallData
 	}
-	payload = make([]byte, pLen)
-	copy(payload, data[270:270+pLen])
-	return toKey, destClusterID, sender, target, value, fee, nonce, cert, isRefund, payload, nil
+	copy(toKey[:], args.DestKey)
+	var val, feeVal *big.Int
+	if len(args.Amount) > 0 {
+		val = new(big.Int).SetBytes(args.Amount)
+	} else {
+		val = big.NewInt(0)
+	}
+	if len(args.GasFee) > 0 {
+		feeVal = new(big.Int).SetBytes(args.GasFee)
+	} else {
+		feeVal = big.NewInt(0)
+	}
+	return toKey, args.DestClusterId, common.BytesToAddress(args.Sender), common.BytesToAddress(args.Target), val, feeVal, args.Seq, cm.SignFromBytes(args.Cert), args.IsRefund, args.Payload, nil
 }
 
 func EncodeMarkClaimedCallData(messageID common.Hash, outcome FloatOutcome, cert cm.Sign) []byte {
-	buf := make([]byte, 1+32+1+96)
-	buf[0] = MethodMarkClaimed
-	copy(buf[1:33], messageID.Bytes())
-	buf[33] = byte(outcome)
-	copy(buf[34:130], cert.Bytes())
-	return buf
+	cd := &pb.ParentChainCallData{
+		Method: pb.ParentChainMethod_METHOD_MARK_CLAIMED,
+		Args: &pb.ParentChainCallData_MarkClaimed{
+			MarkClaimed: &pb.MarkClaimedArgs{
+				MsgId:   messageID.Bytes(),
+				Outcome: uint32(outcome),
+				Cert:    cert.Bytes(),
+			},
+		},
+	}
+	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(cd)
+	return b
 }
 
 func DecodeMarkClaimedCallData(data []byte) (messageID common.Hash, outcome FloatOutcome, cert cm.Sign, err error) {
-	if len(data) < 130 {
+	var cd pb.ParentChainCallData
+	if err := proto.Unmarshal(data, &cd); err != nil {
 		return messageID, 0, cert, ErrMalformedCallData
 	}
-	messageID = common.BytesToHash(data[1:33])
-	outcome = FloatOutcome(data[33])
-	cert = cm.SignFromBytes(data[34:130])
-	return messageID, outcome, cert, nil
+	args := cd.GetMarkClaimed()
+	if args == nil || len(args.MsgId) != 32 || len(args.Cert) != 96 {
+		return messageID, 0, cert, ErrMalformedCallData
+	}
+	return common.BytesToHash(args.MsgId), FloatOutcome(args.Outcome), cm.SignFromBytes(args.Cert), nil
 }
 
 func EncodeReclaimFloatCallData(messageID common.Hash, cert cm.Sign) []byte {
-	buf := make([]byte, 1+32+96)
-	buf[0] = MethodReclaimFloat
-	copy(buf[1:33], messageID.Bytes())
-	copy(buf[33:129], cert.Bytes())
-	return buf
+	cd := &pb.ParentChainCallData{
+		Method: pb.ParentChainMethod_METHOD_RECLAIM_FLOAT,
+		Args: &pb.ParentChainCallData_ReclaimFloat{
+			ReclaimFloat: &pb.ReclaimFloatArgs{
+				MsgId: messageID.Bytes(),
+				Cert:  cert.Bytes(),
+			},
+		},
+	}
+	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(cd)
+	return b
 }
 
 func DecodeReclaimFloatCallData(data []byte) (messageID common.Hash, cert cm.Sign, err error) {
-	if len(data) < 129 {
+	var cd pb.ParentChainCallData
+	if err := proto.Unmarshal(data, &cd); err != nil {
 		return messageID, cert, ErrMalformedCallData
 	}
-	messageID = common.BytesToHash(data[1:33])
-	cert = cm.SignFromBytes(data[33:129])
-	return messageID, cert, nil
+	args := cd.GetReclaimFloat()
+	if args == nil || len(args.MsgId) != 32 || len(args.Cert) != 96 {
+		return messageID, cert, ErrMalformedCallData
+	}
+	return common.BytesToHash(args.MsgId), cm.SignFromBytes(args.Cert), nil
 }
 
-func EncodeRegisterAccountCallData(userAddress common.Address, floatIdentityKey cm.PublicKey, userSig []byte) []byte {
-	buf := make([]byte, 1+20+48+4+len(userSig))
-	buf[0] = MethodRegisterAccount
-	copy(buf[1:21], userAddress.Bytes())
-	copy(buf[21:69], floatIdentityKey[:])
-	binary.BigEndian.PutUint32(buf[69:73], uint32(len(userSig)))
-	copy(buf[73:], userSig)
-	return buf
+func EncodeRegisterAccountCallData(userAddress common.Address, floatIdentityKey cm.PublicKey, userSig []byte, clusterSig cm.Sign) []byte {
+	cd := &pb.ParentChainCallData{
+		Method: pb.ParentChainMethod_METHOD_REGISTER_ACCOUNT,
+		Args: &pb.ParentChainCallData_RegisterAccount{
+			RegisterAccount: &pb.RegisterAccountArgs{
+				UserAddress:      userAddress.Bytes(),
+				FloatIdentityKey: floatIdentityKey[:],
+				UserSig:          userSig,
+				ClusterSig:       clusterSig.Bytes(),
+			},
+		},
+	}
+	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(cd)
+	return b
 }
 
-func DecodeRegisterAccountCallData(data []byte) (userAddress common.Address, floatIdentityKey cm.PublicKey, userSig []byte, err error) {
-	if len(data) < 73 {
-		return userAddress, floatIdentityKey, nil, ErrMalformedCallData
+func DecodeRegisterAccountCallData(data []byte) (userAddress common.Address, floatIdentityKey cm.PublicKey, userSig []byte, clusterSig cm.Sign, err error) {
+	var cd pb.ParentChainCallData
+	if err := proto.Unmarshal(data, &cd); err != nil {
+		return userAddress, floatIdentityKey, nil, clusterSig, ErrMalformedCallData
 	}
-	userAddress = common.BytesToAddress(data[1:21])
-	copy(floatIdentityKey[:], data[21:69])
-	sigLen := binary.BigEndian.Uint32(data[69:73])
-	if uint32(len(data)-73) < sigLen {
-		return userAddress, floatIdentityKey, nil, ErrMalformedCallData
+	args := cd.GetRegisterAccount()
+	if args == nil || len(args.UserAddress) != 20 || len(args.FloatIdentityKey) != 48 {
+		return userAddress, floatIdentityKey, nil, clusterSig, ErrMalformedCallData
 	}
-	userSig = make([]byte, sigLen)
-	copy(userSig, data[73:73+sigLen])
-	return userAddress, floatIdentityKey, userSig, nil
+	copy(floatIdentityKey[:], args.FloatIdentityKey)
+	if len(args.ClusterSig) == 96 {
+		clusterSig = cm.SignFromBytes(args.ClusterSig)
+	}
+	return common.BytesToAddress(args.UserAddress), floatIdentityKey, args.UserSig, clusterSig, nil
 }
 
 func EncodeSubmitStateRootCallData(clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash, cert cm.Sign) []byte {
-	buf := make([]byte, 1+48+8+32+96)
-	buf[0] = MethodSubmitStateRoot
-	copy(buf[1:49], clusterPubKey[:])
-	binary.BigEndian.PutUint64(buf[49:57], epoch)
-	copy(buf[57:89], stateRoot.Bytes())
-	copy(buf[89:185], cert.Bytes())
-	return buf
+	cd := &pb.ParentChainCallData{
+		Method: pb.ParentChainMethod_METHOD_SUBMIT_STATE_ROOT,
+		Args: &pb.ParentChainCallData_SubmitStateRoot{
+			SubmitStateRoot: &pb.SubmitStateRootArgs{
+				ClusterKey: clusterPubKey[:],
+				Epoch:      epoch,
+				StateRoot:  stateRoot.Bytes(),
+				Cert:       cert.Bytes(),
+			},
+		},
+	}
+	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(cd)
+	return b
 }
 
 func DecodeSubmitStateRootCallData(data []byte) (clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash, cert cm.Sign, err error) {
-	if len(data) < 185 {
+	var cd pb.ParentChainCallData
+	if err := proto.Unmarshal(data, &cd); err != nil {
 		return clusterPubKey, 0, stateRoot, cert, ErrMalformedCallData
 	}
-	copy(clusterPubKey[:], data[1:49])
-	epoch = binary.BigEndian.Uint64(data[49:57])
-	stateRoot = common.BytesToHash(data[57:89])
-	cert = cm.SignFromBytes(data[89:185])
-	return clusterPubKey, epoch, stateRoot, cert, nil
+	args := cd.GetSubmitStateRoot()
+	if args == nil || len(args.ClusterKey) != 48 || len(args.StateRoot) != 32 || len(args.Cert) != 96 {
+		return clusterPubKey, 0, stateRoot, cert, ErrMalformedCallData
+	}
+	copy(clusterPubKey[:], args.ClusterKey)
+	return clusterPubKey, args.Epoch, common.BytesToHash(args.StateRoot), cm.SignFromBytes(args.Cert), nil
 }
 
 func EncodeRegisterClusterCallData(clusterPubKey cm.PublicKey, clusterID uint64) []byte {
-	buf := make([]byte, 1+48+8)
-	buf[0] = MethodRegisterCluster
-	copy(buf[1:49], clusterPubKey[:])
-	binary.BigEndian.PutUint64(buf[49:57], clusterID)
-	return buf
+	cd := &pb.ParentChainCallData{
+		Method: pb.ParentChainMethod_METHOD_REGISTER_CLUSTER,
+		Args: &pb.ParentChainCallData_RegisterCluster{
+			RegisterCluster: &pb.RegisterClusterArgs{
+				ClusterKey: clusterPubKey[:],
+				ClusterId:  clusterID,
+			},
+		},
+	}
+	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(cd)
+	return b
 }
 
 func DecodeRegisterClusterCallData(data []byte) (clusterPubKey cm.PublicKey, clusterID uint64, err error) {
-	if len(data) < 57 {
+	var cd pb.ParentChainCallData
+	if err := proto.Unmarshal(data, &cd); err != nil {
 		return clusterPubKey, 0, ErrMalformedCallData
 	}
-	copy(clusterPubKey[:], data[1:49])
-	clusterID = binary.BigEndian.Uint64(data[49:57])
-	return clusterPubKey, clusterID, nil
+	args := cd.GetRegisterCluster()
+	if args == nil || len(args.ClusterKey) != 48 {
+		return clusterPubKey, 0, ErrMalformedCallData
+	}
+	copy(clusterPubKey[:], args.ClusterKey)
+	return clusterPubKey, args.ClusterId, nil
 }
 
 // ─── TRANSACTION HASH & SIGNING ──────────────────────────────────────────
@@ -256,18 +334,18 @@ func ComputeTxHash(tx *pb.Transaction) common.Hash {
 }
 
 // BuildAndSignBLSTx creates a pb.Transaction signed with the cluster's BLS key.
+// Note: LastDeviceKey is intentionally NOT used for carrying the public key (fix H12).
 func BuildAndSignBLSTx(privKey cm.PrivateKey, pubKey cm.PublicKey, to common.Address, nonce uint64, callData []byte) (*pb.Transaction, error) {
 	addr := common.BytesToAddress(crypto.Keccak256(pubKey[:])[12:])
 	var nonceBytes [8]byte
 	binary.BigEndian.PutUint64(nonceBytes[:], nonce)
 
 	tx := &pb.Transaction{
-		FromAddress:   addr.Bytes(),
-		ToAddress:     to.Bytes(),
-		Nonce:         nonceBytes[:],
-		Data:          callData,
-		ChainID:       ParentChainID,
-		LastDeviceKey: pubKey[:], // 48-byte BLS public key
+		FromAddress: addr.Bytes(),
+		ToAddress:   to.Bytes(),
+		Nonce:       nonceBytes[:],
+		Data:        callData,
+		ChainID:     ParentChainID,
 	}
 
 	txHash := ComputeTxHash(tx)
@@ -277,9 +355,11 @@ func BuildAndSignBLSTx(privKey cm.PrivateKey, pubKey cm.PublicKey, to common.Add
 }
 
 // VerifyTxSignature verifies the signature (BLS or ECDSA) of a transaction.
-func VerifyTxSignature(tx *pb.Transaction, store Store) (cm.PublicKey, error) {
+// Returns senderKey, isTxHashSigned (true if signature covers txHash directly), and error.
+// Sender public key is resolved via AccountRegistry/ChainRegistry or registration call data (fix H12).
+func VerifyTxSignature(tx *pb.Transaction, store Store) (cm.PublicKey, bool, error) {
 	if tx == nil || len(tx.FromAddress) != 20 {
-		return cm.PublicKey{}, ErrInvalidTxSignature
+		return cm.PublicKey{}, false, ErrInvalidTxSignature
 	}
 	sender := common.BytesToAddress(tx.FromAddress)
 	txHash := ComputeTxHash(tx)
@@ -287,25 +367,75 @@ func VerifyTxSignature(tx *pb.Transaction, store Store) (cm.PublicKey, error) {
 	// Case 1: BLS signature (96 bytes)
 	if len(tx.Sign) == 96 {
 		var senderKey cm.PublicKey
-		if len(tx.LastDeviceKey) == 48 {
-			copy(senderKey[:], tx.LastDeviceKey)
-			derived := common.BytesToAddress(crypto.Keccak256(senderKey[:])[12:])
-			if derived != sender {
-				return cm.PublicKey{}, fmt.Errorf("%w: LastDeviceKey address mismatch", ErrInvalidTxSignature)
-			}
-		} else {
-			// Look up in AccountRegistry or ChainRegistry
-			regKey, found, err := store.GetAccountRegistry(sender)
-			if err != nil || !found {
-				return cm.PublicKey{}, fmt.Errorf("%w: unknown BLS sender", ErrInvalidTxSignature)
-			}
+		// Look up in AccountRegistry or ChainRegistry
+		regKey, found, err := store.GetAccountRegistry(sender)
+		if err == nil && found {
 			senderKey = regKey
+		} else {
+			// Check if this tx is a registration transaction providing the key in Data
+			var cd pb.ParentChainCallData
+			if protoErr := proto.Unmarshal(tx.Data, &cd); protoErr == nil {
+				if cd.Method == pb.ParentChainMethod_METHOD_REGISTER_CLUSTER {
+					args := cd.GetRegisterCluster()
+					if args != nil && len(args.ClusterKey) == 48 {
+						derived := common.BytesToAddress(crypto.Keccak256(args.ClusterKey)[12:])
+						if derived == sender {
+							copy(senderKey[:], args.ClusterKey)
+						}
+					}
+				} else if cd.Method == pb.ParentChainMethod_METHOD_REGISTER_ACCOUNT {
+					args := cd.GetRegisterAccount()
+					if args != nil && len(args.FloatIdentityKey) == 48 {
+						derived := common.BytesToAddress(crypto.Keccak256(args.FloatIdentityKey)[12:])
+						if derived == sender {
+							copy(senderKey[:], args.FloatIdentityKey)
+						}
+					}
+				}
+			}
+		}
+
+		if senderKey == (cm.PublicKey{}) {
+			return cm.PublicKey{}, false, fmt.Errorf("%w: unknown BLS sender", ErrInvalidTxSignature)
 		}
 
 		if !bls.VerifySign(senderKey, cm.SignFromBytes(tx.Sign), txHash[:]) {
-			return cm.PublicKey{}, fmt.Errorf("%w: BLS verification failed", ErrInvalidTxSignature)
+			// Check if signature was made against method-specific digest instead of txHash
+			var cd pb.ParentChainCallData
+			if protoErr := proto.Unmarshal(tx.Data, &cd); protoErr == nil {
+				switch cd.Method {
+				case pb.ParentChainMethod_METHOD_REGISTER_ACCOUNT:
+					args := cd.GetRegisterAccount()
+					if args != nil && len(args.FloatIdentityKey) == 48 {
+						var fKey cm.PublicKey
+						copy(fKey[:], args.FloatIdentityKey)
+						regDigest := ComputeRegisterAccountMessage(common.BytesToAddress(args.UserAddress), fKey)
+						if bls.VerifySign(senderKey, cm.SignFromBytes(tx.Sign), regDigest) {
+							return senderKey, false, nil
+						}
+					}
+				case pb.ParentChainMethod_METHOD_TRANSFER_FLOAT:
+					toKey, _, argSender, target, val, fee, seq, _, _, payload, err := DecodeTransferFloatCallData(tx.Data)
+					if err == nil {
+						payloadHash := crypto.Keccak256Hash(payload)
+						digest := ComputeTransferFloatMessage(senderKey, toKey, argSender, target, val, fee, payloadHash, seq)
+						if bls.VerifySign(senderKey, cm.SignFromBytes(tx.Sign), digest) {
+							return senderKey, false, nil
+						}
+					}
+				case pb.ParentChainMethod_METHOD_SUBMIT_STATE_ROOT:
+					clusterKey, epoch, root, _, err := DecodeSubmitStateRootCallData(tx.Data)
+					if err == nil {
+						digest := ComputeSubmitStateRootMessage(clusterKey, epoch, root)
+						if bls.VerifySign(senderKey, cm.SignFromBytes(tx.Sign), digest) {
+							return senderKey, false, nil
+						}
+					}
+				}
+			}
+			return cm.PublicKey{}, false, fmt.Errorf("%w: BLS verification failed", ErrInvalidTxSignature)
 		}
-		return senderKey, nil
+		return senderKey, true, nil
 	}
 
 	// Case 2: ECDSA Ethereum signature (R, S, V)
@@ -323,16 +453,24 @@ func VerifyTxSignature(tx *pb.Transaction, store Store) (cm.PublicKey, error) {
 
 		pubKey, err := crypto.SigToPub(txHash[:], sig[:])
 		if err != nil {
-			return cm.PublicKey{}, fmt.Errorf("%w: ECDSA recover failed: %v", ErrInvalidTxSignature, err)
+			return cm.PublicKey{}, false, fmt.Errorf("%w: ECDSA recover failed: %v", ErrInvalidTxSignature, err)
 		}
 		recoveredAddr := crypto.PubkeyToAddress(*pubKey)
 		if recoveredAddr != sender {
-			return cm.PublicKey{}, fmt.Errorf("%w: ECDSA address mismatch", ErrInvalidTxSignature)
+			return cm.PublicKey{}, false, fmt.Errorf("%w: ECDSA address mismatch", ErrInvalidTxSignature)
 		}
-		return cm.PublicKey{}, nil
+		return cm.PublicKey{}, true, nil
 	}
 
-	return cm.PublicKey{}, fmt.Errorf("%w: no signature present", ErrInvalidTxSignature)
+	// Case 3: Gateway Direct Deposit (authenticated at API boundary)
+	var cd pb.ParentChainCallData
+	if protoErr := proto.Unmarshal(tx.Data, &cd); protoErr == nil {
+		if cd.Method == pb.ParentChainMethod_METHOD_DEPOSIT_TO_FLOAT {
+			return cm.PublicKey{}, false, nil
+		}
+	}
+
+	return cm.PublicKey{}, false, fmt.Errorf("%w: no signature present", ErrInvalidTxSignature)
 }
 
 // ─── EXECUTE TRANSACTION ──────────────────────────────────────────────────
@@ -364,28 +502,8 @@ func ExecuteTx(store Store, tx *pb.Transaction, blockTime uint64) (*Receipt, err
 		}, ErrInvalidToAddress
 	}
 
-	// 3. Validate Nonce
-	sender := common.BytesToAddress(tx.FromAddress)
-	expectedNonce, err := store.GetNonce(sender)
-	if err != nil {
-		return nil, err
-	}
-	var txNonce uint64
-	if len(tx.Nonce) >= 8 {
-		txNonce = binary.BigEndian.Uint64(tx.Nonce[:8])
-	} else if len(tx.Nonce) > 0 {
-		txNonce = new(big.Int).SetBytes(tx.Nonce).Uint64()
-	}
-	if txNonce != expectedNonce {
-		return &Receipt{
-			TxHash:    txHash,
-			Status:    0,
-			ErrorCode: 103, // ErrWrongNonce
-		}, fmt.Errorf("%w: expected %d, got %d", ErrWrongNonce, expectedNonce, txNonce)
-	}
-
-	// 4. Validate Signature
-	senderKey, err := VerifyTxSignature(tx, store)
+	// 3. Validate Signature
+	senderKey, isTxHashSigned, err := VerifyTxSignature(tx, store)
 	if err != nil {
 		return &Receipt{
 			TxHash:    txHash,
@@ -394,12 +512,34 @@ func ExecuteTx(store Store, tx *pb.Transaction, blockTime uint64) (*Receipt, err
 		}, err
 	}
 
-	// Advance sender nonce immediately after valid signature check
-	if err := store.SetNonce(sender, expectedNonce+1); err != nil {
-		return nil, err
+	// 4. Validate and Advance Nonce (only for transactions directly signing txHash, T-U14 & H7)
+	sender := common.BytesToAddress(tx.FromAddress)
+	if isTxHashSigned {
+		expectedNonce, err := store.GetNonce(sender)
+		if err != nil {
+			return nil, err
+		}
+		var txNonce uint64
+		if len(tx.Nonce) >= 8 {
+			txNonce = binary.BigEndian.Uint64(tx.Nonce[:8])
+		} else if len(tx.Nonce) > 0 {
+			txNonce = new(big.Int).SetBytes(tx.Nonce).Uint64()
+		}
+		if txNonce != expectedNonce {
+			return &Receipt{
+				TxHash:    txHash,
+				Status:    0,
+				ErrorCode: 103, // ErrWrongNonce
+			}, fmt.Errorf("%w: expected %d, got %d", ErrWrongNonce, expectedNonce, txNonce)
+		}
+
+		// Advance sender nonce immediately after valid signature check
+		if err := store.SetNonce(sender, expectedNonce+1); err != nil {
+			return nil, err
+		}
 	}
 
-	// 5. Dispatch Method
+	// 5. Dispatch Method with state isolation for handler execution (H7)
 	if len(tx.Data) == 0 {
 		return &Receipt{
 			TxHash:    txHash,
@@ -408,21 +548,44 @@ func ExecuteTx(store Store, tx *pb.Transaction, blockTime uint64) (*Receipt, err
 		}, nil
 	}
 
-	method := tx.Data[0]
+	snap, isSnapshotter := store.(Snapshotter)
+	if isSnapshotter {
+		snap.Push()
+	}
+
+	rcpt, err := dispatchTxMethod(store, tx, senderKey, txHash, blockTime)
+	if err != nil {
+		if isSnapshotter {
+			snap.Drop() // Revert any partial writes made by the handler (H7)
+		}
+		return rcpt, err
+	}
+	if isSnapshotter {
+		snap.Merge()
+	}
+	return rcpt, nil
+}
+
+func dispatchTxMethod(store Store, tx *pb.Transaction, senderKey cm.PublicKey, txHash common.Hash, blockTime uint64) (*Receipt, error) {
+	var cd pb.ParentChainCallData
+	if err := proto.Unmarshal(tx.Data, &cd); err != nil {
+		return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 200}, ErrMalformedCallData
+	}
+
 	var events [][]byte
 
-	switch method {
-	case MethodDepositToFloat:
-		destKey, destClusterID, argSender, target, amount, msgID, err := DecodeDepositToFloatCallData(tx.Data)
+	switch cd.Method {
+	case pb.ParentChainMethod_METHOD_DEPOSIT_TO_FLOAT:
+		sourceKey, destKey, destClusterID, argSender, target, amount, msgID, cert, err := DecodeDepositToFloatCallData(tx.Data)
 		if err != nil {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 201}, err
 		}
-		if err := DepositToFloat(store, destKey, destClusterID, argSender, target, amount, msgID, blockTime); err != nil {
-			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 202}, err
-		}
 		events = append(events, msgID.Bytes())
+		if err := DepositToFloat(store, sourceKey, destKey, destClusterID, argSender, target, amount, msgID, cert, blockTime); err != nil {
+			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 202, Events: events}, err
+		}
 
-	case MethodTransferFloat:
+	case pb.ParentChainMethod_METHOD_TRANSFER_FLOAT:
 		toKey, destClusterID, argSender, target, value, fee, seq, cert, isRefund, payload, err := DecodeTransferFloatCallData(tx.Data)
 		if err != nil {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 203}, err
@@ -438,7 +601,7 @@ func ExecuteTx(store Store, tx *pb.Transaction, blockTime uint64) (*Receipt, err
 		}
 		events = append(events, msgID.Bytes())
 
-	case MethodMarkClaimed:
+	case pb.ParentChainMethod_METHOD_MARK_CLAIMED:
 		msgID, outcome, cert, err := DecodeMarkClaimedCallData(tx.Data)
 		if err != nil {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 206}, err
@@ -456,7 +619,7 @@ func ExecuteTx(store Store, tx *pb.Transaction, blockTime uint64) (*Receipt, err
 		}
 		events = append(events, msgID.Bytes())
 
-	case MethodReclaimFloat:
+	case pb.ParentChainMethod_METHOD_RECLAIM_FLOAT:
 		msgID, cert, err := DecodeReclaimFloatCallData(tx.Data)
 		if err != nil {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 210}, err
@@ -473,18 +636,22 @@ func ExecuteTx(store Store, tx *pb.Transaction, blockTime uint64) (*Receipt, err
 		}
 		events = append(events, msgID.Bytes())
 
-	case MethodRegisterAccount:
-		userAddress, floatIdentityKey, userSig, err := DecodeRegisterAccountCallData(tx.Data)
+	case pb.ParentChainMethod_METHOD_REGISTER_ACCOUNT:
+		userAddress, floatIdentityKey, userSig, clusterSig, err := DecodeRegisterAccountCallData(tx.Data)
 		if err != nil {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 214}, err
 		}
-		clusterSig := cm.SignFromBytes(tx.Sign)
-		if err := RegisterAccount(store, userAddress, floatIdentityKey, userSig, clusterSig); err != nil {
-			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 215}, err
+		if clusterSig == (cm.Sign{}) && len(tx.Sign) == 96 {
+			clusterSig = cm.SignFromBytes(tx.Sign)
 		}
+		regDigest := ComputeRegisterAccountMessage(userAddress, floatIdentityKey)
+		events = append(events, crypto.Keccak256(regDigest))
 		events = append(events, userAddress.Bytes())
+		if err := RegisterAccount(store, userAddress, floatIdentityKey, userSig, clusterSig); err != nil {
+			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 215, Events: events}, err
+		}
 
-	case MethodSubmitStateRoot:
+	case pb.ParentChainMethod_METHOD_SUBMIT_STATE_ROOT:
 		clusterPubKey, epoch, stateRoot, cert, err := DecodeSubmitStateRootCallData(tx.Data)
 		if err != nil {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 216}, err
@@ -495,9 +662,11 @@ func ExecuteTx(store Store, tx *pb.Transaction, blockTime uint64) (*Receipt, err
 		if err := SubmitStateRoot(store, clusterPubKey, epoch, stateRoot, cert); err != nil {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 218}, err
 		}
+		subDigest := ComputeSubmitStateRootMessage(clusterPubKey, epoch, stateRoot)
+		events = append(events, crypto.Keccak256(append(subDigest, cert.Bytes()...)))
 		events = append(events, stateRoot.Bytes())
 
-	case MethodRegisterCluster:
+	case pb.ParentChainMethod_METHOD_REGISTER_CLUSTER:
 		clusterPubKey, clusterID, err := DecodeRegisterClusterCallData(tx.Data)
 		if err != nil {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 219}, err
@@ -545,25 +714,26 @@ const (
 )
 
 type ParentChainTx struct {
-	Type        TxType         `json:"type"`
-	MsgID       common.Hash    `json:"msgID,omitempty"`
-	Cert        []byte         `json:"cert,omitempty"`
-	PubKey      []byte         `json:"pubKey,omitempty"`
-	ClusterID   uint64         `json:"clusterID,omitempty"`
-	ChainID     uint64         `json:"chainID,omitempty"`
-	Amount      *big.Int       `json:"amount,omitempty"`
-	ToPubKey    []byte         `json:"toPubKey,omitempty"`
-	Sender      common.Address `json:"sender,omitempty"`
-	Target      common.Address `json:"target,omitempty"`
-	Payload     []byte         `json:"payload,omitempty"`
-	IsRefund    bool           `json:"isRefund,omitempty"`
-	Nonce       uint64         `json:"nonce,omitempty"`
-	Fee         *big.Int       `json:"fee,omitempty"`
-	Outcome     FloatOutcome   `json:"outcome,omitempty"`
-	UserAddress common.Address `json:"userAddress,omitempty"`
-	UserSig     []byte         `json:"userSig,omitempty"`
-	Epoch       uint64         `json:"epoch,omitempty"`
-	StateRoot   common.Hash    `json:"stateRoot,omitempty"`
+	Type         TxType         `json:"type"`
+	MsgID        common.Hash    `json:"msgID,omitempty"`
+	Cert         []byte         `json:"cert,omitempty"`
+	PubKey       []byte         `json:"pubKey,omitempty"`
+	SourcePubKey []byte         `json:"sourcePubKey,omitempty"`
+	ClusterID    uint64         `json:"clusterID,omitempty"`
+	ChainID      uint64         `json:"chainID,omitempty"`
+	Amount       *big.Int       `json:"amount,omitempty"`
+	ToPubKey     []byte         `json:"toPubKey,omitempty"`
+	Sender       common.Address `json:"sender,omitempty"`
+	Target       common.Address `json:"target,omitempty"`
+	Payload      []byte         `json:"payload,omitempty"`
+	IsRefund     bool           `json:"isRefund,omitempty"`
+	Nonce        uint64         `json:"nonce,omitempty"`
+	Fee          *big.Int       `json:"fee,omitempty"`
+	Outcome      FloatOutcome   `json:"outcome,omitempty"`
+	UserAddress  common.Address `json:"userAddress,omitempty"`
+	UserSig      []byte         `json:"userSig,omitempty"`
+	Epoch        uint64         `json:"epoch,omitempty"`
+	StateRoot    common.Hash    `json:"stateRoot,omitempty"`
 }
 
 func (tx *ParentChainTx) Marshal() ([]byte, error) {

@@ -1,0 +1,50 @@
+{
+  "chain_id": {{ parent_chain_id | default(990) }},
+  "epoch_duration_seconds": {{ epoch_duration_seconds | default(86400) }},
+  "epoch_timestamp_ms": {{ epoch_timestamp_ms | default(1700000000000) }},
+{% set default_authorities = [
+  'kUYrYvf/fDUygF8+nIdNATAAlnQU3BZSD3aGuHNoAZQv3OJOIZKW+Uw+UbH/1LWCAlbyWnQra9vUSDJfFVIxlV4XlraaNkLsZSb3HMJJQK3qEc1L20Yqb5YM8uGRXvnB',
+  'iRQSDQ6sV7V5jQVsevn8QpS11kG/0tCrN8lSuPqEcb1fDjbtRyzPFgRzY3SM8KAYEycufZ61UBQXMFKEPqAQ41hl4IOed47OQK/NZsQyuccw53CV0F89gaTELIFO/jx9',
+  'hK+5uAd/qeLvGo98NE7OCFwYioigpG0uYXn5ocETYSrUMLbCkC+PPH6E4AtRgo5jF7aDhhUmZPX1jAppMs2g9aJzAXQVMNo7Hj5sJq5/r5ogz9HyHsMPvDKvi3HBIuq5',
+  'lexRcMNpxBeR/rHNqC3d2+8FOPbDzhXj1mYAdkimbQuCr1WZtSD4Z1sOS0jumEFiFovhoOugnMDIxmOPEZLg7QbzDYGjmpd2+j4ARJTsm70Ophw/q5XmPlzaJL8R0lJO'
+] %}
+{% set default_protocols = [
+  'fN/BNA8PFyjE3hclyjxnkYgjFlR6M27jpbocq7X847Y=',
+  'ngmCtN3emEfN6PD/oOtB4YoBaHRFn1M3GzhdtdnZzLw=',
+  'SJMLmNrKGJHkextl8SN2px1Nq1LBsj6BX6nsnb8gU8Y=',
+  '2EhvdGj7yPTg2fPLQOy6ytlApvgpUhgc1nxzsPEkGCA='
+] %}
+{% set default_networks = [
+  'jZ/kDNNPBsZXUD28FcxMLLZ+vCZCbEJoUvdB8zgRvug=',
+  'LFHUv5KJyfpRHkJrLGTItE8+LQI1y8su7PVrId8Dqzs=',
+  'ursUG3M+DRgSL1q6oKQY0FM1EEOla67/EzAw+u75iHM=',
+  'tmkvDNdrvCX0F6Da6n6zr36cQDej3PUirrbUYOceq4w='
+] %}
+{% set default_addrs = [
+  '0x7e615e4a500ab42b7bb3fdbb62fbb8bd10385fc5',
+  '0x2b5ad5c4795c026514f8317c7a215e218dccd6cf',
+  '0x6813eb9362372eef6200f3b1dbc3f819671cba69',
+  '0x1ef3613697cf40e54f45d602ee3458c425f38144'
+] %}
+  "validators": [
+{% for host in groups['parent_chain_nodes'] %}
+{% set v_idx = hostvars[host]['parent_node_id'] | default(loop.index0) | int %}
+    {
+      "name": "node-{{ v_idx }}",
+      "address": "{{ hostvars[host]['parent_validator_address'] | default(default_addrs[v_idx % default_addrs|length]) }}",
+      "stake": "{{ hostvars[host]['stake'] | default('1000000000000000000') }}",
+      "authority_key": "{{ hostvars[host]['authority_key'] | default(default_authorities[v_idx % default_authorities|length]) }}",
+      "protocol_key": "{{ hostvars[host]['protocol_key'] | default(default_protocols[v_idx % default_protocols|length]) }}",
+      "network_key": "{{ hostvars[host]['network_key'] | default(default_networks[v_idx % default_networks|length]) }}",
+      "p2p_address": "/ip4/{{ hostvars[host]['ansible_host'] | default('127.0.0.1') }}/tcp/{{ hostvars[host]['parent_p2p_port'] | default(19001 + v_idx) }}"
+    }{% if not loop.last %},{% endif %}
+{% endfor %}
+  ],
+  "accounts": [
+    {
+      "address": "0x7e615e4a500ab42b7bb3fdbb62fbb8bd10385fc5",
+      "balance": "1000000000000000000000"
+    }
+  ]
+}
+

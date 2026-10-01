@@ -2,7 +2,6 @@ package processor
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -79,15 +78,20 @@ func (tb *TxBatcher) batchingLoop() {
 		case <-tb.stop:
 			return
 		case tx := <-tb.txChan:
-			pbTx := convertParentChainTxToProto(tx)
-			pending = append(pending, pbTx)
+			if pbTx := convertParentChainTxToProto(tx); pbTx != nil {
+				pending = append(pending, pbTx)
+			}
 		drainLoop:
 			for len(pending) < maxTxPerBatch {
 				select {
 				case extra := <-tb.txChan:
-					pending = append(pending, convertParentChainTxToProto(extra))
+					if extraProto := convertParentChainTxToProto(extra); extraProto != nil {
+						pending = append(pending, extraProto)
+					}
 				case extraProto := <-tb.protoTxChan:
-					pending = append(pending, extraProto)
+					if extraProto != nil {
+						pending = append(pending, extraProto)
+					}
 				default:
 					break drainLoop
 				}
@@ -95,14 +99,20 @@ func (tb *TxBatcher) batchingLoop() {
 			tb.submitBatch(pending)
 			pending = nil
 		case ptx := <-tb.protoTxChan:
-			pending = append(pending, ptx)
+			if ptx != nil {
+				pending = append(pending, ptx)
+			}
 		drainProtoLoop:
 			for len(pending) < maxTxPerBatch {
 				select {
 				case extraProto := <-tb.protoTxChan:
-					pending = append(pending, extraProto)
+					if extraProto != nil {
+						pending = append(pending, extraProto)
+					}
 				case extra := <-tb.txChan:
-					pending = append(pending, convertParentChainTxToProto(extra))
+					if extraProto := convertParentChainTxToProto(extra); extraProto != nil {
+						pending = append(pending, extraProto)
+					}
 				default:
 					break drainProtoLoop
 				}
@@ -121,7 +131,6 @@ func (tb *TxBatcher) batchingLoop() {
 func convertParentChainTxToProto(tx *parentchain.ParentChainTx) *pb.Transaction {
 	var callData []byte
 	var senderAddr []byte
-	var senderKey []byte
 	var nonceBytes [8]byte
 	binary.BigEndian.PutUint64(nonceBytes[:], tx.Nonce)
 
@@ -130,34 +139,34 @@ func convertParentChainTxToProto(tx *parentchain.ParentChainTx) *pb.Transaction 
 		var pubKey cm.PublicKey
 		copy(pubKey[:], tx.PubKey)
 		callData = parentchain.EncodeSubmitStateRootCallData(pubKey, tx.Epoch, tx.StateRoot, cm.SignFromBytes(tx.Cert))
-		senderKey = tx.PubKey
 		senderAddr = crypto.Keccak256(tx.PubKey)[12:]
 
 	case parentchain.TxTypeRegisterCluster:
 		var pubKey cm.PublicKey
 		copy(pubKey[:], tx.PubKey)
 		callData = parentchain.EncodeRegisterClusterCallData(pubKey, tx.ClusterID)
-		senderKey = tx.PubKey
 		senderAddr = crypto.Keccak256(tx.PubKey)[12:]
 
 	case parentchain.TxTypeRegisterAccount:
 		var floatKey cm.PublicKey
 		copy(floatKey[:], tx.PubKey)
-		callData = parentchain.EncodeRegisterAccountCallData(tx.UserAddress, floatKey, tx.UserSig)
-		senderKey = tx.PubKey
+		callData = parentchain.EncodeRegisterAccountCallData(tx.UserAddress, floatKey, tx.UserSig, cm.SignFromBytes(tx.Cert))
 		senderAddr = crypto.Keccak256(tx.PubKey)[12:]
 
 	case parentchain.TxTypeDepositToFloat:
 		var destKey cm.PublicKey
 		copy(destKey[:], tx.PubKey)
-		callData = parentchain.EncodeDepositToFloatCallData(destKey, tx.ClusterID, tx.Sender, tx.Target, tx.Amount, tx.MsgID)
+		var sourceKey cm.PublicKey
+		if len(tx.SourcePubKey) == 48 {
+			copy(sourceKey[:], tx.SourcePubKey)
+		}
+		callData = parentchain.EncodeDepositToFloatCallData(sourceKey, destKey, tx.ClusterID, tx.Sender, tx.Target, tx.Amount, tx.MsgID, cm.SignFromBytes(tx.Cert))
 		senderAddr = tx.Sender.Bytes()
 
 	case parentchain.TxTypeTransferFloat:
 		var toKey cm.PublicKey
 		copy(toKey[:], tx.ToPubKey)
 		callData = parentchain.EncodeTransferFloatCallData(toKey, tx.ClusterID, tx.Sender, tx.Target, tx.Amount, tx.Fee, tx.Nonce, cm.SignFromBytes(tx.Cert), tx.IsRefund, tx.Payload)
-		senderKey = tx.PubKey
 		senderAddr = tx.Sender.Bytes()
 
 	case parentchain.TxTypeMarkClaimed:
@@ -171,22 +180,17 @@ func convertParentChainTxToProto(tx *parentchain.ParentChainTx) *pb.Transaction 
 
 	if len(callData) > 0 {
 		return &pb.Transaction{
-			FromAddress:   senderAddr,
-			ToAddress:     parentchain.ParentChainGatewayAddress.Bytes(),
-			Nonce:         nonceBytes[:],
-			Data:          callData,
-			ChainID:       parentchain.ParentChainID,
-			LastDeviceKey: senderKey,
-			Sign:          tx.Cert,
+			FromAddress: senderAddr,
+			ToAddress:   parentchain.ParentChainGatewayAddress.Bytes(),
+			Nonce:       nonceBytes[:],
+			Data:        callData,
+			ChainID:     parentchain.ParentChainID,
+			Sign:        tx.Cert,
 		}
 	}
 
-	raw, _ := json.Marshal(tx)
-	return &pb.Transaction{
-		Data:      raw,
-		ChainID:   parentchain.ParentChainID,
-		ToAddress: parentchain.ParentChainGatewayAddress.Bytes(),
-	}
+	log.Printf("tx_batcher: unsupported or invalid transaction type %s, dropping", tx.Type)
+	return nil
 }
 
 func (tb *TxBatcher) submitBatch(txs []*pb.Transaction) {
@@ -207,5 +211,7 @@ func (tb *TxBatcher) submitBatch(txs []*pb.Transaction) {
 	success := executor.SubmitTransactionBatch(batchBytes)
 	if !success {
 		log.Printf("Warning: SubmitTransactionBatch returned false for %d txs", len(batch.Transactions))
+	} else {
+		log.Printf("tx_batcher: Successfully submitted batch of %d txs to Rust consensus", len(batch.Transactions))
 	}
 }

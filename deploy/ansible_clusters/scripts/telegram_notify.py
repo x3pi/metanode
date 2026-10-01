@@ -153,11 +153,143 @@ def notify_deploy_start(clusters_info="Parent Chain + Exec Clusters", target_env
     )
     return send_telegram_message(html_message=msg)
 
+def get_parent_chain_committee(info=None, server_ip=None):
+    """
+    Gather and return all Parent Chain committee validators with RPC, P2P, and validator address.
+    Sources checked in order of fidelity:
+    1. info['parent_nodes'] from parse_inventory
+    2. Live query to /validators on known parent RPCs (8547, 18601, 18602, etc.)
+    3. Genesis files: /opt/metanode/parent_chain/parent_genesis.json or deploy/cluster/local_parent_chain/parent_genesis.json
+    """
+    server_ip = server_ip or get_server_ip()
+    committee = []
+    
+    parent_nodes = {}
+    if isinstance(info, dict):
+        parent_nodes = info.get('parent_nodes', {})
+        if not parent_nodes and 'parent' in info and isinstance(info['parent'], dict):
+            p = info['parent']
+            parent_nodes = {p.get('name', 'parent_node'): p}
+            
+    if not parent_nodes and os.path.isfile("/tmp/rpc_nodes.json"):
+        try:
+            with open("/tmp/rpc_nodes.json", "r", encoding="utf-8") as f:
+                tmp_data = json.load(f)
+                parent_nodes = tmp_data.get('parent_nodes', {})
+        except Exception:
+            pass
+
+    # Try live query to /validators from candidate URLs
+    live_validators = []
+    candidate_urls = []
+    for p_val in parent_nodes.values():
+        if isinstance(p_val, dict) and 'rpc_url' in p_val:
+            candidate_urls.append(p_val['rpc_url'])
+        elif isinstance(p_val, str):
+            candidate_urls.append(p_val)
+    candidate_urls.extend(["http://127.0.0.1:8547", "http://127.0.0.1:18601", "http://127.0.0.1:18602", "http://127.0.0.1:18603", "http://127.0.0.1:18604"])
+    
+    seen_urls = set()
+    dedup_urls = []
+    for u in candidate_urls:
+        if u not in seen_urls:
+            seen_urls.add(u)
+            dedup_urls.append(u)
+
+    for u in dedup_urls:
+        try:
+            req = urllib.request.Request(f"{u}/validators")
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                if resp.status == 200:
+                    val_data = json.load(resp)
+                    if isinstance(val_data, dict) and "validators" in val_data:
+                        live_validators = val_data["validators"]
+                        if len(live_validators) > 0:
+                            break
+        except Exception:
+            pass
+
+    # Fallback to local genesis file if live_validators is empty
+    genesis_validators = []
+    for gen_path in [
+        "/opt/metanode/parent_chain/parent_genesis.json",
+        os.path.join(METANODE_ROOT, "deploy/cluster/local_parent_chain/parent_genesis.json"),
+    ]:
+        if os.path.isfile(gen_path):
+            try:
+                with open(gen_path, "r", encoding="utf-8") as gf:
+                    g_data = json.load(gf)
+                    if "validators" in g_data and len(g_data["validators"]) > 0:
+                        genesis_validators = g_data["validators"]
+                        break
+            except Exception:
+                pass
+
+    vals_source = live_validators if len(live_validators) >= len(genesis_validators) else genesis_validators
+
+    # Default fallback committee if still empty
+    if not vals_source and not parent_nodes:
+        vals_source = [
+            {"name": "node-0", "address": "0x7e615e4a500ab42b7bb3fdbb62fbb8bd10385fc5", "p2p_address": "/ip4/127.0.0.1/tcp/19001"},
+            {"name": "node-1", "address": "0x2b5ad5c4795c026514f8317c7a215e218dccd6cf", "p2p_address": "/ip4/127.0.0.1/tcp/19002"},
+            {"name": "node-2", "address": "0x6813eb9362372eef6200f3b1dbc3f819671cba69", "p2p_address": "/ip4/127.0.0.1/tcp/19003"},
+            {"name": "node-3", "address": "0x1ef3613697cf40e54f45d602ee3458c425f38144", "p2p_address": "/ip4/127.0.0.1/tcp/19004"}
+        ]
+
+    # If inventory defines multi-node parent_nodes:
+    if len(parent_nodes) > 1:
+        sorted_keys = sorted(parent_nodes.keys())
+        for idx, k in enumerate(sorted_keys):
+            p = parent_nodes[k]
+            v_addr = p.get('validator_address', '')
+            if not v_addr and idx < len(vals_source):
+                v_addr = vals_source[idx].get('address', '')
+            
+            p2p_p = p.get('p2p_port', 19001 + idx)
+            rpc_ep = normalize_endpoint(p.get('rpc_url', f"http://{server_ip}:{p.get('rpc_port', 8547)}"), server_ip)
+            
+            committee.append({
+                'name': k,
+                'node_id': p.get('node_id', idx),
+                'rpc_url': rpc_ep,
+                'p2p_endpoint': f"{server_ip}:{p2p_p}",
+                'validator_address': v_addr
+            })
+    else:
+        # If inventory only has 1 node OR vals_source has multiple validators:
+        for idx, v in enumerate(vals_source):
+            node_name = f"parent_node_{idx}"
+            v_addr = v.get('address', '')
+            p2p_raw = v.get('p2p_address', f'/tcp/{19001 + idx}')
+            p2p_port = 19001 + idx
+            if 'tcp/' in p2p_raw:
+                try:
+                    p2p_port = int(p2p_raw.split('tcp/')[-1].split('/')[0])
+                except Exception:
+                    pass
+            
+            rpc_port = 8547 if idx == 0 else (18601 + idx)
+            if parent_nodes:
+                p_first = list(parent_nodes.values())[0]
+                if idx == 0 and isinstance(p_first, dict) and 'rpc_port' in p_first:
+                    rpc_port = p_first['rpc_port']
+            
+            rpc_ep = f"http://{server_ip}:{rpc_port}"
+            committee.append({
+                'name': node_name,
+                'node_id': idx,
+                'rpc_url': rpc_ep,
+                'p2p_endpoint': f"{server_ip}:{p2p_port}",
+                'validator_address': v_addr
+            })
+
+    return committee
+
 def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration_secs=0):
     """
     Thông báo danh sách các port dịch vụ gọn gàng, rõ ràng qua Telegram.
-    Chỉ hiển thị các port endpoint và tên node (RPC, WS, TCP, Raft).
-    Không gửi các thông tin rườm rà hay dư thừa (BLS key, validator address, status text thừa).
+    Hiển thị đầy đủ Ủy ban BFT Parent Chain (mọi validator node) và các Execution Clusters.
+    Nhấn mạnh giao dịch có thể gửi tới bất kỳ Parent Chain validator nào.
     """
     git = get_git_info()
     now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
@@ -234,6 +366,28 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
                 fwd_str = f" (Forward: {c_fwd})" if c_fwd else ""
                 raft_lines.append(f"  • {c_name}: {c_raft}{fwd_str}")
 
+    # 3. Tổng hợp thông tin Ủy ban BFT Parent Chain (Multi-Validator)
+    parent_committee = get_parent_chain_committee(info_or_parent, server_ip)
+    parent_committee_lines = []
+    if parent_committee:
+        for p in parent_committee:
+            p_name = p.get('name', 'node')
+            p_rpc = p.get('rpc_url', '')
+            p_p2p = p.get('p2p_endpoint', '')
+            p_addr = p.get('validator_address', '')
+            p_id = p.get('node_id', '')
+
+            p2p_str = f" | P2P: {p_p2p}" if p_p2p else ""
+            addr_str = f" | Addr: {p_addr}" if p_addr else ""
+            id_str = f" (ID: {p_id})" if p_id != '' else ""
+            parent_committee_lines.append(f"  • {p_name}{id_str}: {p_rpc}{p2p_str}{addr_str}")
+
+            # Đảm bảo các node validator của Parent Chain có mặt trong danh sách RPC
+            if not any(p_name in line for line in rpc_lines):
+                rpc_lines.insert(0, f"  • {p_name}: {p_rpc}")
+            if p_p2p and not any(p_name in line for line in tcp_lines):
+                tcp_lines.insert(0, f"  • {p_name}: {p_p2p}")
+
     msg_parts = [
         "✅ <b>[DỊCH VỤ CỤM METANODE ĐÃ KHỞI CHẠY THÀNH CÔNG]</b>\n",
         f"🖥 <b>Server IP:</b> <code>{server_ip}</code>",
@@ -242,6 +396,11 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
         f"⏱️ <b>Thời gian khởi chạy:</b> <code>{dur:.1f}s</code>",
         f"🕒 <b>Thời gian:</b> <code>{now_str}</code>\n"
     ]
+
+    if parent_committee_lines:
+        msg_parts.append("🏛️ <b>Ủy ban BFT Parent Chain (Giao dịch có thể gửi tới BẤT KỲ validator nào):</b>")
+        msg_parts.append("<pre>\n" + "\n".join(parent_committee_lines) + "\n</pre>")
+        msg_parts.append("💡 <i>Lưu ý: Mọi giao dịch người dùng/Rollup (nạp float, đăng ký tài khoản, chuyển tiền) có thể gửi tới <b>BẤT KỲ</b> validator nào trong danh sách trên (qua endpoint <code>/tx</code> hoặc <code>/send_raw_transaction</code>), ủy ban BFT đảm bảo đồng thuận và thực thi 100% tất định!</i>\n")
 
     if rpc_lines:
         msg_parts.append("⚙️ <b>Danh sách Node RPC (IP & Port):</b>")

@@ -8,9 +8,11 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -64,6 +66,7 @@ type BlockCommitter interface {
 	ApplyBlock(in BlockInput, exec TxExecutor) (BlockResult, error)
 	GenerateProof(key [32]byte) ([]byte, error)
 	Store() Store
+	NomtRoot() (common.Hash, error)
 }
 
 // ─── KEYS FOR PERSISTENT STORE ───────────────────────────────────────────────
@@ -90,136 +93,122 @@ func txLocKey(h common.Hash) []byte {
 // ─── CANONICAL SERIALIZATION FOR BLOCK RECORD & PROGRESS ─────────────────────
 
 func EncodeBlockProgress(p *BlockProgress) []byte {
-	buf := make([]byte, 8+8+8+32+32)
-	binary.BigEndian.PutUint64(buf[0:8], p.LastBlock)
-	binary.BigEndian.PutUint64(buf[8:16], p.LastGEI)
-	binary.BigEndian.PutUint64(buf[16:24], p.LastTimestampMs)
-	copy(buf[24:56], p.LastHash.Bytes())
-	copy(buf[56:88], p.LastStateRoot.Bytes())
-	return buf
+	if p == nil {
+		return nil
+	}
+	prog := &pb.ParentChainBlockProgress{
+		LastBlock:       p.LastBlock,
+		LastGei:         p.LastGEI,
+		LastTimestampMs: p.LastTimestampMs,
+		LastHash:        p.LastHash.Bytes(),
+		LastStateRoot:   p.LastStateRoot.Bytes(),
+	}
+	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(prog)
+	return b
 }
 
 func DecodeBlockProgress(data []byte) (*BlockProgress, error) {
-	if len(data) < 88 {
-		return nil, fmt.Errorf("%w: BlockProgress expected 88 bytes, got %d", ErrEncodingCorrupt, len(data))
+	if len(data) == 0 {
+		return nil, fmt.Errorf("%w: empty BlockProgress data", ErrEncodingCorrupt)
+	}
+	var prog pb.ParentChainBlockProgress
+	if err := proto.Unmarshal(data, &prog); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrEncodingCorrupt, err)
 	}
 	return &BlockProgress{
-		LastBlock:       binary.BigEndian.Uint64(data[0:8]),
-		LastGEI:         binary.BigEndian.Uint64(data[8:16]),
-		LastTimestampMs: binary.BigEndian.Uint64(data[16:24]),
-		LastHash:        common.BytesToHash(data[24:56]),
-		LastStateRoot:   common.BytesToHash(data[56:88]),
+		LastBlock:       prog.LastBlock,
+		LastGEI:         prog.LastGei,
+		LastTimestampMs: prog.LastTimestampMs,
+		LastHash:        common.BytesToHash(prog.LastHash),
+		LastStateRoot:   common.BytesToHash(prog.LastStateRoot),
 	}, nil
 }
 
 func EncodeBlockRecord(r *BlockRecord) []byte {
-	hdrBytes := EncodeHeader(&r.Header)
-	// hdr (len) + blockHash (32) + txHashesCount (4) + txHashes (N*32) + receiptsCount (4) + each receipt + rawBlock (4 len + bytes)
-	totalLen := len(hdrBytes) + 32 + 4 + len(r.TxHashes)*32 + 4
-	encodedReceipts := make([][]byte, len(r.Receipts))
+	if r == nil {
+		return nil
+	}
+	hdr := &pb.ParentChainBlockHeader{
+		Number:        r.Header.Number,
+		ParentHash:    r.Header.ParentHash.Bytes(),
+		StateRoot:     r.Header.StateRoot.Bytes(),
+		TxsRoot:       r.Header.TxsRoot.Bytes(),
+		ReceiptsRoot:  r.Header.ReceiptsRoot.Bytes(),
+		TimestampMs:   r.Header.TimestampMs,
+		Epoch:         r.Header.Epoch,
+		CommitIndex:   uint64(r.Header.CommitIndex),
+		Gei:           r.Header.GEI,
+		LeaderAddress: r.Header.LeaderAddress.Bytes(),
+		CommitDigest:  r.Header.CommitDigest.Bytes(),
+		TxCount:       r.Header.TxCount,
+	}
+	txHashes := make([][]byte, len(r.TxHashes))
+	for i, th := range r.TxHashes {
+		txHashes[i] = th.Bytes()
+	}
+	receipts := make([]*pb.ParentChainReceipt, len(r.Receipts))
 	for i, rc := range r.Receipts {
-		encodedReceipts[i] = EncodeReceipt(rc)
-		totalLen += 4 + len(encodedReceipts[i])
+		receipts[i] = &pb.ParentChainReceipt{
+			TxHash:    rc.TxHash.Bytes(),
+			Status:    uint32(rc.Status),
+			ErrorCode: rc.ErrorCode,
+			Events:    rc.Events,
+		}
 	}
-	totalLen += 4 + len(r.RawBlock)
-
-	buf := make([]byte, totalLen)
-	offset := 0
-
-	copy(buf[offset:offset+len(hdrBytes)], hdrBytes)
-	offset += len(hdrBytes)
-
-	copy(buf[offset:offset+32], r.BlockHash.Bytes())
-	offset += 32
-
-	binary.BigEndian.PutUint32(buf[offset:offset+4], uint32(len(r.TxHashes)))
-	offset += 4
-	for _, th := range r.TxHashes {
-		copy(buf[offset:offset+32], th.Bytes())
-		offset += 32
+	rec := &pb.ParentChainBlockRecord{
+		Header:    hdr,
+		BlockHash: r.BlockHash.Bytes(),
+		TxHashes:  txHashes,
+		Receipts:  receipts,
+		RawBlock:  r.RawBlock,
 	}
-
-	binary.BigEndian.PutUint32(buf[offset:offset+4], uint32(len(r.Receipts)))
-	offset += 4
-	for _, rb := range encodedReceipts {
-		binary.BigEndian.PutUint32(buf[offset:offset+4], uint32(len(rb)))
-		offset += 4
-		copy(buf[offset:offset+len(rb)], rb)
-		offset += len(rb)
-	}
-
-	binary.BigEndian.PutUint32(buf[offset:offset+4], uint32(len(r.RawBlock)))
-	offset += 4
-	copy(buf[offset:offset+len(r.RawBlock)], r.RawBlock)
-
-	return buf
+	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(rec)
+	return b
 }
 
 func DecodeBlockRecord(data []byte) (*BlockRecord, error) {
-	if len(data) < CanonicalHeaderSize+32+8 {
-		return nil, fmt.Errorf("%w: BlockRecord too short", ErrEncodingCorrupt)
+	if len(data) == 0 {
+		return nil, fmt.Errorf("%w: empty BlockRecord data", ErrEncodingCorrupt)
 	}
-	offset := 0
-
-	hdr, err := DecodeHeader(data[offset : offset+CanonicalHeaderSize])
-	if err != nil {
-		return nil, err
+	var rec pb.ParentChainBlockRecord
+	if err := proto.Unmarshal(data, &rec); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrEncodingCorrupt, err)
 	}
-	offset += CanonicalHeaderSize
-
-	blockHash := common.BytesToHash(data[offset : offset+32])
-	offset += 32
-
-	txCount := int(binary.BigEndian.Uint32(data[offset : offset+4]))
-	offset += 4
-	if offset+txCount*32 > len(data) {
-		return nil, fmt.Errorf("%w: BlockRecord txHashes truncated", ErrEncodingCorrupt)
+	if rec.Header == nil {
+		return nil, fmt.Errorf("%w: missing header", ErrEncodingCorrupt)
 	}
-	txHashes := make([]common.Hash, txCount)
-	for i := 0; i < txCount; i++ {
-		txHashes[i] = common.BytesToHash(data[offset : offset+32])
-		offset += 32
+	txHashes := make([]common.Hash, len(rec.TxHashes))
+	for i, h := range rec.TxHashes {
+		txHashes[i] = common.BytesToHash(h)
 	}
-
-	if offset+4 > len(data) {
-		return nil, fmt.Errorf("%w: BlockRecord receipts header truncated", ErrEncodingCorrupt)
-	}
-	rcCount := int(binary.BigEndian.Uint32(data[offset : offset+4]))
-	offset += 4
-	receipts := make([]*Receipt, rcCount)
-	for i := 0; i < rcCount; i++ {
-		if offset+4 > len(data) {
-			return nil, fmt.Errorf("%w: BlockRecord receipt len truncated", ErrEncodingCorrupt)
-		}
-		rcLen := int(binary.BigEndian.Uint32(data[offset : offset+4]))
-		offset += 4
-		if offset+rcLen > len(data) {
-			return nil, fmt.Errorf("%w: BlockRecord receipt body truncated", ErrEncodingCorrupt)
-		}
-		rc, err := DecodeReceipt(data[offset : offset+rcLen])
-		if err != nil {
-			return nil, err
-		}
-		receipts[i] = rc
-		offset += rcLen
-	}
-
-	var rawBlock []byte
-	if offset+4 <= len(data) {
-		rawLen := int(binary.BigEndian.Uint32(data[offset : offset+4]))
-		offset += 4
-		if offset+rawLen <= len(data) {
-			rawBlock = make([]byte, rawLen)
-			copy(rawBlock, data[offset:offset+rawLen])
+	receipts := make([]*Receipt, len(rec.Receipts))
+	for i, pr := range rec.Receipts {
+		receipts[i] = &Receipt{
+			TxHash:    common.BytesToHash(pr.TxHash),
+			Status:    uint8(pr.Status),
+			ErrorCode: pr.ErrorCode,
+			Events:    pr.Events,
 		}
 	}
-
 	return &BlockRecord{
-		Header:    *hdr,
-		BlockHash: blockHash,
+		Header: Header{
+			Number:        rec.Header.Number,
+			ParentHash:    common.BytesToHash(rec.Header.ParentHash),
+			StateRoot:     common.BytesToHash(rec.Header.StateRoot),
+			TxsRoot:       common.BytesToHash(rec.Header.TxsRoot),
+			ReceiptsRoot:  common.BytesToHash(rec.Header.ReceiptsRoot),
+			TimestampMs:   rec.Header.TimestampMs,
+			Epoch:         rec.Header.Epoch,
+			CommitIndex:   uint32(rec.Header.CommitIndex),
+			GEI:           rec.Header.Gei,
+			LeaderAddress: common.BytesToAddress(rec.Header.LeaderAddress),
+			CommitDigest:  common.BytesToHash(rec.Header.CommitDigest),
+			TxCount:       rec.Header.TxCount,
+		},
+		BlockHash: common.BytesToHash(rec.BlockHash),
 		TxHashes:  txHashes,
 		Receipts:  receipts,
-		RawBlock:  rawBlock,
+		RawBlock:  rec.RawBlock,
 	}, nil
 }
 
@@ -424,7 +413,18 @@ func (c *TreeBlockCommitter) ApplyBlock(in BlockInput, exec TxExecutor) (BlockRe
 		ov.Push()
 		rc, err := exec(view, i, rawTx)
 		if err != nil {
-			ov.Drop() // Drop writes from failed tx (fix G6)
+			if rc != nil && rc.ErrorCode >= 200 {
+				// Method execution failure (H7):
+				// Valid signature and valid nonce => sender consumed their nonce.
+				// The handler's partial writes were already reverted by the execution layer,
+				// so only the nonce increment remains in this layer.
+				// We merge this layer into the block so nonce is advanced, preventing replay.
+				ov.Merge()
+			} else {
+				// Validation / consensus failure (invalid sig, bad nonce, unmarshal err):
+				// Discard all writes.
+				ov.Drop()
+			}
 			txErrors[i] = err
 			if rc == nil {
 				rc = &Receipt{

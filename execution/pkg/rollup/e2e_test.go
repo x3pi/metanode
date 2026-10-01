@@ -48,15 +48,62 @@ func (a *ParentChainClientAdapter) SendDepositToFloat(
 	amount *big.Int,
 ) (common.Hash, error) {
 	msgID := common.BytesToHash([]byte(fmt.Sprintf("deposit_adapter_%d", time.Now().UnixNano())))
-	// We call DepositToFloat directly to simulate what the gateway would do
+	a.chain.mu.Lock()
+	defer a.chain.mu.Unlock()
+
+	var sourcePriv cm.PrivateKey
+	for _, kp := range a.chain.nodeKeys {
+		if kp.PublicKey() == pubKey {
+			sourcePriv = kp.PrivateKey()
+			break
+		}
+	}
+	if sourcePriv == (cm.PrivateKey{}) {
+		tmpKp := bls.GenerateKeyPair()
+		sourcePriv = tmpKp.PrivateKey()
+		tmpPub := tmpKp.PublicKey()
+		tmpHash := crypto.Keccak256Hash(tmpPub[:])
+		_ = a.chain.store.SetChainRegistry(tmpHash, parentchain.ChainRegistryEntry{
+			FloatIdentityKey:     tmpPub,
+			ClusterIDDescriptive: destClusterID,
+			ChainIDDescriptive:   destClusterID,
+		})
+		dig := parentchain.ComputeDepositFloatMessage(pubKey, destClusterID, sender, target, amount, msgID)
+		cert := bls.Sign(sourcePriv, dig)
+		err := parentchain.DepositToFloat(
+			a.chain.store,
+			tmpPub,
+			pubKey,
+			destClusterID,
+			sender,
+			target,
+			amount,
+			msgID,
+			cert,
+			uint64(time.Now().Unix()),
+		)
+		return msgID, err
+	}
+
+	pubKeyCopy := pubKey
+	sourceHash := crypto.Keccak256Hash(pubKeyCopy[:])
+	_ = a.chain.store.SetChainRegistry(sourceHash, parentchain.ChainRegistryEntry{
+		FloatIdentityKey:     pubKey,
+		ClusterIDDescriptive: destClusterID,
+		ChainIDDescriptive:   destClusterID,
+	})
+	dig := parentchain.ComputeDepositFloatMessage(pubKey, destClusterID, sender, target, amount, msgID)
+	cert := bls.Sign(sourcePriv, dig)
 	err := parentchain.DepositToFloat(
 		a.chain.store,
+		pubKey,
 		pubKey,
 		destClusterID,
 		sender,
 		target,
 		amount,
 		msgID,
+		cert,
 		uint64(time.Now().Unix()),
 	)
 	return msgID, err
@@ -212,6 +259,34 @@ func (a *ParentChainClientAdapter) GetStateRoot(clusterPubKey cm.PublicKey, epoc
 	return common.Hash{}, false, nil
 }
 
+func (a *ParentChainClientAdapter) GetBlockByNumber(number uint64) (parentchain.BlockRecord, bool, error) {
+	return parentchain.BlockRecord{}, false, nil
+}
+
+func (a *ParentChainClientAdapter) GetBlockByHash(hash common.Hash) (parentchain.BlockRecord, bool, error) {
+	return parentchain.BlockRecord{}, false, nil
+}
+
+func (a *ParentChainClientAdapter) GetTransaction(txHash common.Hash) (uint64, uint32, bool, error) {
+	return 0, 0, false, nil
+}
+
+func (a *ParentChainClientAdapter) GetReceipt(txHash common.Hash) (*parentchain.Receipt, bool, error) {
+	return nil, false, nil
+}
+
+func (a *ParentChainClientAdapter) GetStatus() (parentchain.ChainStatus, error) {
+	return parentchain.ChainStatus{}, nil
+}
+
+func (a *ParentChainClientAdapter) GetProof(key [32]byte) (parentchain.ProofResult, error) {
+	return parentchain.ProofResult{}, nil
+}
+
+func (a *ParentChainClientAdapter) SendRawTransaction(rawTx []byte) (common.Hash, error) {
+	return common.Hash{}, nil
+}
+
 // RollupNode represents a single rollup cluster with its workers
 type RollupNode struct {
 	ChainID uint64
@@ -251,7 +326,16 @@ func (n *RollupNode) Stop() {}
 
 func setupClusterFloatBalance(t *testing.T, parentChain *InMemoryParentChain, kp *bls.KeyPair, chainID uint64, amount *big.Int) {
 	msgID := common.BytesToHash([]byte(fmt.Sprintf("deposit_init_%d", chainID)))
-	err := parentchain.DepositToFloat(parentChain.store, kp.PublicKey(), chainID, common.Address{}, common.Address{}, amount, msgID, uint64(time.Now().Unix()))
+	pub := kp.PublicKey()
+	sourceHash := crypto.Keccak256Hash(pub[:])
+	_ = parentChain.store.SetChainRegistry(sourceHash, parentchain.ChainRegistryEntry{
+		FloatIdentityKey:     pub,
+		ClusterIDDescriptive: chainID,
+		ChainIDDescriptive:   chainID,
+	})
+	dig := parentchain.ComputeDepositFloatMessage(pub, chainID, common.Address{}, common.Address{}, amount, msgID)
+	cert := bls.Sign(kp.PrivateKey(), dig)
+	err := parentchain.DepositToFloat(parentChain.store, pub, pub, chainID, common.Address{}, common.Address{}, amount, msgID, cert, uint64(time.Now().Unix()))
 	if err != nil {
 		t.Fatalf("setupClusterFloatBalance failed: %v", err)
 	}

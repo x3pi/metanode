@@ -9,6 +9,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 // Namespace byte constants (Section 5.2 of plan)
@@ -30,6 +32,8 @@ const (
 var (
 	ErrEncodingCorrupt = errors.New("parentchain: binary encoding corrupt or incomplete")
 )
+
+var deterministicMarshal = proto.MarshalOptions{Deterministic: true}
 
 // TreeKey computes the 32-byte key for the NOMT state tree:
 // keccak256(namespace_byte || business_key)
@@ -57,44 +61,50 @@ type Header struct {
 	TxCount       uint32
 }
 
-const CanonicalHeaderSize = 8 + 32 + 32 + 32 + 32 + 8 + 8 + 4 + 8 + 20 + 32 + 4 // 230 bytes
-
 func EncodeHeader(h *Header) []byte {
-	buf := make([]byte, CanonicalHeaderSize)
-	binary.BigEndian.PutUint64(buf[0:8], h.Number)
-	copy(buf[8:40], h.ParentHash.Bytes())
-	copy(buf[40:72], h.StateRoot.Bytes())
-	copy(buf[72:104], h.TxsRoot.Bytes())
-	copy(buf[104:136], h.ReceiptsRoot.Bytes())
-	binary.BigEndian.PutUint64(buf[136:144], h.TimestampMs)
-	binary.BigEndian.PutUint64(buf[144:152], h.Epoch)
-	binary.BigEndian.PutUint32(buf[152:156], h.CommitIndex)
-	binary.BigEndian.PutUint64(buf[156:164], h.GEI)
-	copy(buf[164:184], h.LeaderAddress.Bytes())
-	copy(buf[184:216], h.CommitDigest.Bytes())
-	binary.BigEndian.PutUint32(buf[216:220], h.TxCount)
-	return buf
+	if h == nil {
+		return nil
+	}
+	protoHdr := &pb.ParentChainBlockHeader{
+		Number:        h.Number,
+		ParentHash:    h.ParentHash.Bytes(),
+		StateRoot:     h.StateRoot.Bytes(),
+		TxsRoot:       h.TxsRoot.Bytes(),
+		ReceiptsRoot:  h.ReceiptsRoot.Bytes(),
+		TimestampMs:   h.TimestampMs,
+		Epoch:         h.Epoch,
+		CommitIndex:   uint64(h.CommitIndex),
+		Gei:           h.GEI,
+		LeaderAddress: h.LeaderAddress.Bytes(),
+		CommitDigest:  h.CommitDigest.Bytes(),
+		TxCount:       h.TxCount,
+	}
+	b, _ := deterministicMarshal.Marshal(protoHdr)
+	return b
 }
 
 func DecodeHeader(data []byte) (*Header, error) {
-	if len(data) < CanonicalHeaderSize {
-		return nil, fmt.Errorf("%w: header expected %d bytes, got %d", ErrEncodingCorrupt, CanonicalHeaderSize, len(data))
+	if len(data) == 0 {
+		return nil, fmt.Errorf("%w: empty header data", ErrEncodingCorrupt)
 	}
-	h := &Header{
-		Number:        binary.BigEndian.Uint64(data[0:8]),
-		ParentHash:    common.BytesToHash(data[8:40]),
-		StateRoot:     common.BytesToHash(data[40:72]),
-		TxsRoot:       common.BytesToHash(data[72:104]),
-		ReceiptsRoot:  common.BytesToHash(data[104:136]),
-		TimestampMs:   binary.BigEndian.Uint64(data[136:144]),
-		Epoch:         binary.BigEndian.Uint64(data[144:152]),
-		CommitIndex:   binary.BigEndian.Uint32(data[152:156]),
-		GEI:           binary.BigEndian.Uint64(data[156:164]),
-		LeaderAddress: common.BytesToAddress(data[164:184]),
-		CommitDigest:  common.BytesToHash(data[184:216]),
-		TxCount:       binary.BigEndian.Uint32(data[216:220]),
+	var protoHdr pb.ParentChainBlockHeader
+	if err := proto.Unmarshal(data, &protoHdr); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrEncodingCorrupt, err)
 	}
-	return h, nil
+	return &Header{
+		Number:        protoHdr.Number,
+		ParentHash:    common.BytesToHash(protoHdr.ParentHash),
+		StateRoot:     common.BytesToHash(protoHdr.StateRoot),
+		TxsRoot:       common.BytesToHash(protoHdr.TxsRoot),
+		ReceiptsRoot:  common.BytesToHash(protoHdr.ReceiptsRoot),
+		TimestampMs:   protoHdr.TimestampMs,
+		Epoch:         protoHdr.Epoch,
+		CommitIndex:   uint32(protoHdr.CommitIndex),
+		GEI:           protoHdr.Gei,
+		LeaderAddress: common.BytesToAddress(protoHdr.LeaderAddress),
+		CommitDigest:  common.BytesToHash(protoHdr.CommitDigest),
+		TxCount:       protoHdr.TxCount,
+	}, nil
 }
 
 func (h *Header) Hash() common.Hash {
@@ -111,53 +121,33 @@ type Receipt struct {
 }
 
 func EncodeReceipt(r *Receipt) []byte {
-	// 32 (TxHash) + 1 (Status) + 4 (ErrorCode) + 4 (events count) + each event (4 len + bytes)
-	totalLen := 32 + 1 + 4 + 4
-	for _, ev := range r.Events {
-		totalLen += 4 + len(ev)
+	if r == nil {
+		return nil
 	}
-	buf := make([]byte, totalLen)
-	copy(buf[0:32], r.TxHash.Bytes())
-	buf[32] = r.Status
-	binary.BigEndian.PutUint32(buf[33:37], r.ErrorCode)
-	binary.BigEndian.PutUint32(buf[37:41], uint32(len(r.Events)))
-	offset := 41
-	for _, ev := range r.Events {
-		binary.BigEndian.PutUint32(buf[offset:offset+4], uint32(len(ev)))
-		offset += 4
-		copy(buf[offset:offset+len(ev)], ev)
-		offset += len(ev)
+	pr := &pb.ParentChainReceipt{
+		TxHash:    r.TxHash.Bytes(),
+		Status:    uint32(r.Status),
+		ErrorCode: r.ErrorCode,
+		Events:    r.Events,
 	}
-	return buf
+	b, _ := deterministicMarshal.Marshal(pr)
+	return b
 }
 
 func DecodeReceipt(data []byte) (*Receipt, error) {
-	if len(data) < 41 {
-		return nil, fmt.Errorf("%w: receipt too short", ErrEncodingCorrupt)
+	if len(data) == 0 {
+		return nil, fmt.Errorf("%w: empty receipt data", ErrEncodingCorrupt)
 	}
-	r := &Receipt{
-		TxHash:    common.BytesToHash(data[0:32]),
-		Status:    data[32],
-		ErrorCode: binary.BigEndian.Uint32(data[33:37]),
+	var pr pb.ParentChainReceipt
+	if err := proto.Unmarshal(data, &pr); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrEncodingCorrupt, err)
 	}
-	evCount := int(binary.BigEndian.Uint32(data[37:41]))
-	r.Events = make([][]byte, 0, evCount)
-	offset := 41
-	for i := 0; i < evCount; i++ {
-		if offset+4 > len(data) {
-			return nil, fmt.Errorf("%w: receipt truncated reading event len", ErrEncodingCorrupt)
-		}
-		l := int(binary.BigEndian.Uint32(data[offset : offset+4]))
-		offset += 4
-		if offset+l > len(data) {
-			return nil, fmt.Errorf("%w: receipt truncated reading event payload", ErrEncodingCorrupt)
-		}
-		ev := make([]byte, l)
-		copy(ev, data[offset:offset+l])
-		r.Events = append(r.Events, ev)
-		offset += l
-	}
-	return r, nil
+	return &Receipt{
+		TxHash:    common.BytesToHash(pr.TxHash),
+		Status:    uint8(pr.Status),
+		ErrorCode: pr.ErrorCode,
+		Events:    pr.Events,
+	}, nil
 }
 
 // ─── STATE VALUES CANONICAL ENCODINGS ───────────────────────────────────────
@@ -187,111 +177,177 @@ func DecodeUint64(data []byte) (uint64, error) {
 }
 
 func EncodeChainRegistryEntry(e *ChainRegistryEntry) []byte {
-	buf := make([]byte, 48+8)
-	copy(buf[0:48], e.FloatIdentityKey[:])
-	binary.BigEndian.PutUint64(buf[48:56], e.ClusterIDDescriptive)
-	return buf
+	if e == nil {
+		return nil
+	}
+	entry := &pb.ChainRegistryEntryProto{
+		PubKey:    e.FloatIdentityKey[:],
+		ClusterId: e.ClusterIDDescriptive,
+	}
+	b, _ := deterministicMarshal.Marshal(entry)
+	return b
 }
 
 func DecodeChainRegistryEntry(data []byte) (*ChainRegistryEntry, error) {
-	if len(data) < 56 {
-		return nil, fmt.Errorf("%w: expected at least 56 bytes for ChainRegistryEntry, got %d", ErrEncodingCorrupt, len(data))
+	if len(data) == 0 {
+		return nil, fmt.Errorf("%w: empty ChainRegistryEntry data", ErrEncodingCorrupt)
+	}
+	var entry pb.ChainRegistryEntryProto
+	if err := proto.Unmarshal(data, &entry); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrEncodingCorrupt, err)
 	}
 	var pubKey cm.PublicKey
-	copy(pubKey[:], data[0:48])
-	cid := binary.BigEndian.Uint64(data[48:56])
+	copy(pubKey[:], entry.PubKey)
 	return &ChainRegistryEntry{
 		FloatIdentityKey:     pubKey,
-		ClusterIDDescriptive: cid,
-		ChainIDDescriptive:   cid,
+		ClusterIDDescriptive: entry.ClusterId,
+		ChainIDDescriptive:   entry.ClusterId,
 	}, nil
 }
 
 func EncodeFloatTransferRecord(r *FloatTransferRecord) []byte {
-	// 1 (hasSource) + 48 (SourceKey if present) + 48 (DestKey) + 32 (Value) + 8 (ConfirmedAtBlockTime)
-	var hasSource byte
+	if r == nil {
+		return nil
+	}
+	rec := &pb.FloatTransferRecordProto{
+		CommitTime: r.ConfirmedAtBlockTime,
+	}
 	if r.SourceKey != nil {
-		hasSource = 1
+		rec.SourceKey = r.SourceKey[:]
 	}
-	buf := make([]byte, 1+48+48+32+8)
-	buf[0] = hasSource
-	if hasSource == 1 {
-		copy(buf[1:49], r.SourceKey[:])
+	rec.ToKey = r.DestKey[:]
+	if r.Value != nil {
+		rec.Value = r.Value.Bytes()
 	}
-	copy(buf[49:97], r.DestKey[:])
-	copy(buf[97:129], padTo32(r.Value))
-	binary.BigEndian.PutUint64(buf[129:137], r.ConfirmedAtBlockTime)
-	return buf
+	b, _ := deterministicMarshal.Marshal(rec)
+	return b
 }
 
 func DecodeFloatTransferRecord(data []byte) (*FloatTransferRecord, error) {
-	if len(data) < 137 {
-		return nil, fmt.Errorf("%w: expected 137 bytes for FloatTransferRecord, got %d", ErrEncodingCorrupt, len(data))
+	if len(data) == 0 {
+		return nil, fmt.Errorf("%w: empty FloatTransferRecord data", ErrEncodingCorrupt)
+	}
+	var rec pb.FloatTransferRecordProto
+	if err := proto.Unmarshal(data, &rec); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrEncodingCorrupt, err)
 	}
 	var srcKey *cm.PublicKey
-	if data[0] == 1 {
+	if len(rec.SourceKey) == 48 {
 		var k cm.PublicKey
-		copy(k[:], data[1:49])
+		copy(k[:], rec.SourceKey)
 		srcKey = &k
 	}
-	var destKey cm.PublicKey
-	copy(destKey[:], data[49:97])
-	val := new(big.Int).SetBytes(data[97:129])
-	timeMs := binary.BigEndian.Uint64(data[129:137])
+	var toKey cm.PublicKey
+	copy(toKey[:], rec.ToKey)
+
+	var val *big.Int
+	if len(rec.Value) > 0 {
+		val = new(big.Int).SetBytes(rec.Value)
+	} else {
+		val = big.NewInt(0)
+	}
+
 	return &FloatTransferRecord{
 		SourceKey:            srcKey,
-		DestKey:              destKey,
+		DestKey:              toKey,
 		Value:                val,
-		ConfirmedAtBlockTime: timeMs,
+		ConfirmedAtBlockTime: rec.CommitTime,
 	}, nil
 }
 
 func EncodeFloatVelocityState(s *FloatVelocityState) []byte {
-	buf := make([]byte, 8+32+32)
-	binary.BigEndian.PutUint64(buf[0:8], s.WindowStart)
-	copy(buf[8:40], padTo32(s.WindowBaseAlloc))
-	copy(buf[40:72], padTo32(s.Spent))
-	return buf
+	if s == nil {
+		return nil
+	}
+	st := &pb.FloatVelocityStateProto{
+		WindowStart: s.WindowStart,
+	}
+	if s.WindowBaseAlloc != nil {
+		st.WindowBaseAlloc = s.WindowBaseAlloc.Bytes()
+	}
+	if s.Spent != nil {
+		st.Spent = s.Spent.Bytes()
+	}
+	b, _ := deterministicMarshal.Marshal(st)
+	return b
 }
 
 func DecodeFloatVelocityState(data []byte) (*FloatVelocityState, error) {
-	if len(data) < 72 {
-		return nil, fmt.Errorf("%w: expected 72 bytes for FloatVelocityState, got %d", ErrEncodingCorrupt, len(data))
+	if len(data) == 0 {
+		return nil, fmt.Errorf("%w: empty FloatVelocityState data", ErrEncodingCorrupt)
 	}
-	wStart := binary.BigEndian.Uint64(data[0:8])
-	baseAlloc := new(big.Int).SetBytes(data[8:40])
-	spent := new(big.Int).SetBytes(data[40:72])
+	var st pb.FloatVelocityStateProto
+	if err := proto.Unmarshal(data, &st); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrEncodingCorrupt, err)
+	}
+	var baseAlloc, spent *big.Int
+	if len(st.WindowBaseAlloc) > 0 {
+		baseAlloc = new(big.Int).SetBytes(st.WindowBaseAlloc)
+	} else {
+		baseAlloc = big.NewInt(0)
+	}
+	if len(st.Spent) > 0 {
+		spent = new(big.Int).SetBytes(st.Spent)
+	} else {
+		spent = big.NewInt(0)
+	}
+
 	return &FloatVelocityState{
-		WindowStart:     wStart,
+		WindowStart:     st.WindowStart,
 		WindowBaseAlloc: baseAlloc,
 		Spent:           spent,
 	}, nil
 }
 
 func EncodeTransferEvent(ev *TransferEvent) []byte {
-	// 32 (MsgID) + 48 (DestPubKey) + 20 (Sender) + 20 (Target) + 32 (Amount) + 8 (BlockTime) = 160 bytes
-	buf := make([]byte, 32+48+20+20+32+8)
-	copy(buf[0:32], ev.MsgID.Bytes())
-	copy(buf[32:80], ev.DestPubKey[:])
-	copy(buf[80:100], ev.Sender.Bytes())
-	copy(buf[100:120], ev.Target.Bytes())
-	copy(buf[120:152], padTo32(ev.Amount))
-	binary.BigEndian.PutUint64(buf[152:160], ev.BlockTime)
-	return buf
+	if ev == nil {
+		return nil
+	}
+	tev := &pb.TransferEventProto{
+		MsgId:        ev.MsgID.Bytes(),
+		SourcePubKey: ev.SourcePubKey[:],
+		DestPubKey:   ev.DestPubKey[:],
+		SourceSeq:    ev.SourceSeq,
+		Sender:       ev.Sender.Bytes(),
+		Target:       ev.Target.Bytes(),
+		PayloadHash:  ev.PayloadHash.Bytes(),
+		BlockTime:    ev.BlockTime,
+		IsRefund:     ev.IsRefund,
+	}
+	if ev.Amount != nil {
+		tev.Amount = ev.Amount.Bytes()
+	}
+	b, _ := deterministicMarshal.Marshal(tev)
+	return b
 }
 
 func DecodeTransferEvent(data []byte) (*TransferEvent, error) {
-	if len(data) < 160 {
-		return nil, fmt.Errorf("%w: expected 160 bytes for TransferEvent, got %d", ErrEncodingCorrupt, len(data))
+	if len(data) == 0 {
+		return nil, fmt.Errorf("%w: empty TransferEvent data", ErrEncodingCorrupt)
 	}
-	var destKey cm.PublicKey
-	copy(destKey[:], data[32:80])
+	var tev pb.TransferEventProto
+	if err := proto.Unmarshal(data, &tev); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrEncodingCorrupt, err)
+	}
+	var srcKey, destKey cm.PublicKey
+	copy(srcKey[:], tev.SourcePubKey)
+	copy(destKey[:], tev.DestPubKey)
+	var amount *big.Int
+	if len(tev.Amount) > 0 {
+		amount = new(big.Int).SetBytes(tev.Amount)
+	} else {
+		amount = big.NewInt(0)
+	}
 	return &TransferEvent{
-		MsgID:      common.BytesToHash(data[0:32]),
-		DestPubKey: destKey,
-		Sender:     common.BytesToAddress(data[80:100]),
-		Target:     common.BytesToAddress(data[100:120]),
-		Amount:     new(big.Int).SetBytes(data[120:152]),
-		BlockTime:  binary.BigEndian.Uint64(data[152:160]),
+		MsgID:        common.BytesToHash(tev.MsgId),
+		SourcePubKey: srcKey,
+		DestPubKey:   destKey,
+		SourceSeq:    tev.SourceSeq,
+		Sender:       common.BytesToAddress(tev.Sender),
+		Target:       common.BytesToAddress(tev.Target),
+		Amount:       amount,
+		PayloadHash:  common.BytesToHash(tev.PayloadHash),
+		BlockTime:    tev.BlockTime,
+		IsRefund:     tev.IsRefund,
 	}, nil
 }

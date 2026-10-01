@@ -12,6 +12,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/syndtr/goleveldb/leveldb"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -133,11 +134,18 @@ func TestBlockProcessor_StateRootProvider(t *testing.T) {
 	pub := kp.PublicKey()
 	priv := kp.PrivateKey()
 	msgID := common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111")
-	callData := parentchain.EncodeDepositToFloatCallData(pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID)
-	tx, err := parentchain.BuildAndSignBLSTx(priv, pub, parentchain.ParentChainGatewayAddress, 0, callData)
+
+	regData := parentchain.EncodeRegisterClusterCallData(pub, 101)
+	regTx, err := parentchain.BuildAndSignBLSTx(priv, pub, parentchain.ParentChainGatewayAddress, 0, regData)
 	require.NoError(t, err)
 
-	blk1 := makeTestBlock(1, 100, 1000, []*pb.Transaction{tx})
+	dig := parentchain.ComputeDepositFloatMessage(pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID)
+	cert := bls.Sign(priv, dig)
+	callData := parentchain.EncodeDepositToFloatCallData(pub, pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID, cert)
+	tx, err := parentchain.BuildAndSignBLSTx(priv, pub, parentchain.ParentChainGatewayAddress, 1, callData)
+	require.NoError(t, err)
+
+	blk1 := makeTestBlock(1, 100, 1000, []*pb.Transaction{regTx, tx})
 	resp1 := bp.ProcessBlock(blk1)
 	require.True(t, resp1.Success)
 
@@ -265,5 +273,74 @@ func TestBlockProcessor_SyncBlocks(t *testing.T) {
 	// But if peer claimed root was different, sync logic detects it
 	fakePeerRoot := crypto.Keccak256([]byte("fake-peer-root"))
 	assert.NotEqual(t, fakePeerRoot, respCorrupt.StateRoot)
+}
+
+// T-P7: Startup integrity verification detects corrupted state or NOMT mismatch
+func TestBlockProcessor_StartupIntegrityVerification(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "db")
+
+	// Phase 1: Apply block 1 cleanly
+	store1, err := parentchain.NewDBStore(dbPath)
+	require.NoError(t, err)
+	bp1 := NewBlockProcessor(store1, nil)
+	blk1 := makeTestBlock(1, 100, 1000, nil)
+	resp1 := bp1.ProcessBlock(blk1)
+	require.True(t, resp1.Success)
+	require.NoError(t, store1.Close())
+
+	// Phase 2: Tamper LevelDB sys:progress to have a bogus state root
+	rawDB, err := leveldb.OpenFile(dbPath, nil)
+	require.NoError(t, err)
+	progBytes, err := rawDB.Get([]byte("sys:progress"), nil)
+	require.NoError(t, err)
+
+	prog, err := parentchain.DecodeBlockProgress(progBytes)
+	require.NoError(t, err)
+	origStateRoot := prog.LastStateRoot
+
+	// Corrupt state root in progress
+	prog.LastStateRoot = common.HexToHash("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+	tamperedBytes := parentchain.EncodeBlockProgress(prog)
+	require.NoError(t, rawDB.Put([]byte("sys:progress"), tamperedBytes, nil))
+	require.NoError(t, rawDB.Close())
+
+	// Phase 3: Open with NewBlockProcessor -> Must detect fork/corruption!
+	storeTampered, err := parentchain.NewDBStore(dbPath)
+	require.NoError(t, err)
+
+	var forkNotified bool
+	bpTampered := NewBlockProcessor(storeTampered, nil)
+	bpTampered.SetForkCallback(func(fork bool) {
+		forkNotified = fork
+	})
+
+	assert.True(t, bpTampered.IsForkDetected(), "Processor should detect state root mismatch on startup")
+	assert.True(t, forkNotified, "Fork callback should be triggered on startup")
+
+	// Any subsequent ProcessBlock must be refused
+	blk2 := makeTestBlock(2, 200, 2000, nil)
+	resp2 := bpTampered.ProcessBlock(blk2)
+	assert.False(t, resp2.Success)
+	assert.Contains(t, resp2.Error, "fork detected")
+	storeTampered.Close()
+
+	// Restore original state root
+	rawDB, err = leveldb.OpenFile(dbPath, nil)
+	require.NoError(t, err)
+	prog.LastStateRoot = origStateRoot
+	require.NoError(t, rawDB.Put([]byte("sys:progress"), parentchain.EncodeBlockProgress(prog), nil))
+	require.NoError(t, rawDB.Close())
+
+	// Reopen cleanly: should not detect fork
+	storeClean, err := parentchain.NewDBStore(dbPath)
+	require.NoError(t, err)
+	defer storeClean.Close()
+
+	bpClean := NewBlockProcessor(storeClean, nil)
+	assert.False(t, bpClean.IsForkDetected())
+	respClean := bpClean.ProcessBlock(blk2)
+	assert.True(t, respClean.Success)
+	assert.Equal(t, uint64(2), bpClean.LastBlockNumber())
 }
 
