@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,7 +56,7 @@ func getEnv(key, fallback string) string {
 }
 
 var (
-	parentChainURL = getEnv("PARENT_CHAIN_URL", "http://127.0.0.1:8547")
+	parentChainURL = getEnv("PARENT_CHAIN_URL", "http://127.0.0.1:18601")
 	exec1URL       = getEnv("EXEC1_URL", "http://127.0.0.1:8646")
 	exec2URL       = getEnv("EXEC2_URL", "http://127.0.0.1:8647")
 )
@@ -163,9 +164,24 @@ func main() {
 	fmt.Println("║  🧪 METANODE END-TO-END SCENARIO & RESILIENCE TEST SUITE                      ║")
 	fmt.Println("╚═══════════════════════════════════════════════════════════════════════════════╝")
 
+	if os.Getenv("PARENT_CHAIN_URL") == "" {
+		if !portListening("18601") && portListening("8547") {
+			parentChainURL = "http://127.0.0.1:8547"
+		}
+	}
+	if u, err := url.Parse(parentChainURL); err == nil && u.Port() != "" {
+		parentPorts[0] = u.Port()
+		parentURLs[0] = parentChainURL
+		if u.Port() == "18601" {
+			parentDirs[0] = "/opt/metanode/parent_chain_0"
+		} else if u.Port() == "8547" {
+			parentDirs[0] = "/opt/metanode/parent_chain"
+		}
+	}
+
 	parentToken := getEnv("PARENT_CHAIN_RPC_TOKEN", "")
 	if parentToken == "" {
-		for _, f := range []string{"/opt/metanode/parent_chain/security.env", "/opt/metanode/exec1_r1/security.env"} {
+		for _, f := range []string{"/opt/metanode/parent_chain_0/security.env", "/opt/metanode/parent_chain/security.env", "/opt/metanode/exec1_r1/security.env"} {
 			if data, err := os.ReadFile(f); err == nil {
 				for _, line := range strings.Split(string(data), "\n") {
 					line = strings.TrimSpace(line)
@@ -760,9 +776,9 @@ func waitBalance(url string, a common.Address, want *big.Int, d time.Duration) b
 
 // The four parent chain validators of the deployed cluster (ports match the ansible inventory).
 var (
-	parentURLs  = []string{"http://127.0.0.1:8547", "http://127.0.0.1:18602", "http://127.0.0.1:18603", "http://127.0.0.1:18604"}
-	parentDirs  = []string{"/opt/metanode/parent_chain", "/opt/metanode/parent_chain_1", "/opt/metanode/parent_chain_2", "/opt/metanode/parent_chain_3"}
-	parentPorts = []string{"8547", "18602", "18603", "18604"}
+	parentURLs  = []string{"http://127.0.0.1:18601", "http://127.0.0.1:18602", "http://127.0.0.1:18603", "http://127.0.0.1:18604"}
+	parentDirs  = []string{"/opt/metanode/parent_chain_0", "/opt/metanode/parent_chain_1", "/opt/metanode/parent_chain_2", "/opt/metanode/parent_chain_3"}
+	parentPorts = []string{"18601", "18602", "18603", "18604"}
 )
 
 // killParentPort kills only the process listening on the given TCP port (never a pattern match).
