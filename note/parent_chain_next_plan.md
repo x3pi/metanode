@@ -12,7 +12,7 @@
 5. Code comment tiếng Anh. Commit bằng **tên file** (`git add <file>`), không `git add <thư mục>` hay `git add -A` (worktree dùng chung, từng quét nhầm file rác). Mỗi commit một việc, thông điệp nêu rõ cái gì đã chạy thật. **Không push `dev`** khi chưa được chủ dự án đồng ý.
 6. Chỉ `gofmt` file mới hoặc file đã sạch ở HEAD (nhiều file cũ chưa gofmt; format hàng loạt tạo diff nhiễu).
 7. Kết thúc **mỗi phản hồi** bằng khối tóm tắt tiếng Việt theo mẫu "📋 Tóm tắt thay đổi" ở `AGENTS.md` mục 5. Cập nhật `PROJECT_STRUCTURE.md` khi thêm module/tool.
-8. **Môi trường local dev, dữ liệu bỏ được** (chủ dự án chốt): được dừng/wipe/chạy lại từ đầu mọi cụm. Nhưng **không dừng tiến trình mà bạn không tự khởi động khi chưa hỏi** (người dùng đã từ chối một lệnh `kill` hàng loạt): trước khi dừng cụm khác, liệt kê tiến trình và hỏi.
+8. **Môi trường local dev, dữ liệu bỏ được; được tự do kill/wipe/cấu hình lại để test** (chủ dự án chốt 2026-10-01, áp dụng cho mọi cụm trên máy này: parent cục bộ, `/opt/metanode/parent_chain*`, các cụm exec `/opt/metanode/exec*`, `node-0..3`). Không cần xin phép, không cần backup. Vẫn nên: (a) `ps`/`ss` trước khi dừng để biết mình dừng gì và ghi lại vào báo cáo; (b) chỉ kill đúng PID/pattern cần thiết (từng có lần `pkill -f` giết nhầm chính shell của agent); (c) **không** áp dụng sự tự do này cho máy ngoài (cụm 231/230 hay bất kỳ máy khác) — chỉ máy local.
 9. **Cổng:** cụm cục bộ `deploy/cluster/local_parent_chain/` dùng HTTP 18601–18604, mạng 19001–19004, peer RPC 19501–19504, metrics 19601–19604. Cụm triển khai ở `/opt/metanode/parent_chain{,_1,_2,_3}` **trùng** cổng 1860x/1950x ⇒ không chạy song song (gây `AddrInUse`, node lệch). Luôn `ss -ltnp | grep -E ':1860|:1900|:1950'` trước khi dựng cụm.
 10. Thư mục `deploy/cluster/*` bị `.gitignore` chặn (chứa khóa). Đừng ép commit; tool/script dùng chung đặt trong `execution/cmd/tool/` hoặc `execution/scripts/`. Công cụ test đang gọi `deploy/cluster/local_parent_chain/run.sh` (không có trong git): nếu cần tái lập được thì chuyển bản không chứa khóa vào repo (xem N9).
 11. Cấm commit file nhị phân build (đã từng lọt một binary 34MB `test_live_e2e`); kiểm `git status` trước khi commit. Không in/ghi khóa riêng, token vào file hoặc log.
@@ -68,7 +68,7 @@ Làm tuần tự, mỗi gói một hoặc vài commit; chạy lại `build_check
 - **Nghiệm thu:** bảng kết quả live (số node nói dối × kết quả mong đợi/thực tế) trong báo cáo; mở rộng `testTI7` hoặc thêm `T-I9` trong tool.
 
 ### N4 — E2E cross-chain thật giữa node thực thi và parent chain mới (G3)  [lớn nhất]
-- Dựng một cụm exec nhỏ (tối thiểu 2 cụm exec để có chuyển chéo; dùng cụm cục bộ có sẵn trong repo hoặc đã chạy ở `/opt/metanode/exec1_r*`, `exec2` nếu cho phép dùng; **hỏi trước khi dừng/cấu hình lại cụm đang chạy**), cấu hình `PARENT_CHAIN_URLS=http://127.0.0.1:18601,...,18604`.
+- Dựng một cụm exec nhỏ (tối thiểu 2 cụm exec để có chuyển chéo; dùng cụm cục bộ có sẵn trong repo hoặc đã chạy ở `/opt/metanode/exec1_r*`, `exec2` nếu cho phép dùng; được tự do dừng/cấu hình lại (xem luật 8)), cấu hình `PARENT_CHAIN_URLS=http://127.0.0.1:18601,...,18604`.
 - Đăng ký đầy đủ: cluster (khóa BLS) trên parent chain bằng giao dịch ký, tài khoản người dùng (`registerAccount`), nạp genesis phù hợp. Kiểm tra lỗ hổng đã flag trong bộ nhớ: **khóa BLS riêng của exec node có được đăng ký ở genesis hay không**; nếu thiếu, sửa genesis/công cụ sinh genesis, ghi rõ.
 - Chạy luồng thật: **deposit → transfer chéo cluster → claim → reclaim/refund** (xem các script mẫu `execution/scripts/test/e2e_cross_cluster.go`, `e2e_real.go`, `stress_concurrent_transfers.go`; cập nhật chúng khỏi mã legacy). Sau mỗi bước đọc **số dư float qua `QuorumClient` có proof**.
 - Bất biến phải kiểm: tổng cung float không đổi ngoài deposit/withdraw hợp lệ (`CheckFloatSupplyInvariant`); `msgID` chỉ áp một lần; deposit không `Cert` hợp lệ không tạo tiền.
@@ -115,10 +115,10 @@ Làm tuần tự, mỗi gói một hoặc vài commit; chạy lại `build_check
 
 ## 5. Điều cần hỏi chủ dự án (đừng tự quyết)
 
-1. Có được dùng/cấu hình lại các cụm exec đang chạy ở `/opt/metanode` cho N4 không, hay dựng cụm exec riêng?
-2. Có được dừng cụm parent ở `/opt/metanode/parent_chain*` cho N6/N8 không (trùng cổng với cụm cục bộ)?
+1. ~~Dùng/cấu hình lại cụm exec ở `/opt/metanode` cho N4?~~ **Đã trả lời: được, tự do.**
+2. ~~Dừng cụm parent `/opt/metanode/parent_chain*` cho N6/N8?~~ **Đã trả lời: được, tự do.**
 3. Nếu N2 cho thấy phải thêm tự kiểm lúc khởi động (đổi hành vi khởi động node): xác nhận hành vi mong muốn khi phát hiện lệch (dừng hẳn, hay chờ wipe+resync thủ công).
-4. Khi nào push `dev`.
+4. Khi nào push `dev` (vẫn chờ chủ dự án).
 
 ## 6. Việc để sau (ngoài phạm vi)
 
