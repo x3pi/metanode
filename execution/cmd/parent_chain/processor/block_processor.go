@@ -214,6 +214,15 @@ func (bp *BlockProcessor) ProcessBlock(block *pb.ExecutableBlock) *pb.ExecuteBlo
 		}
 	}
 
+	// 2b. Idempotent-execution guard (same role as the main chain's LAYER-4 guard): a commit index is executed at
+	// most once. Rust can re-deliver commits Go has already executed (a restart whose recovery position was read
+	// before Go finished syncing blocks). Without this, the replay would be applied again as brand new blocks
+	// (found live: the same 230-transaction commit became block 8 and then block 16 on one node, whose chain
+	// then differed from the other validators').
+	if resp := bp.staleCommitGuard(block); resp != nil {
+		return resp
+	}
+
 	log.Printf("Parent Chain: Processing block %d (GEI %d) with %d txs",
 		block.BlockNumber, block.GlobalExecIndex, len(block.Transactions))
 
@@ -366,5 +375,38 @@ func (bp *BlockProcessor) ProcessBlock(block *pb.ExecutableBlock) *pb.ExecuteBlo
 		GeisConsumed: 1,
 		Success:      true,
 		StateRoot:    res.Record.Header.StateRoot.Bytes(),
+	}
+}
+
+// staleCommitGuard refuses a block that would be appended as a NEW block although its commit was already executed
+// (its commit index is not above the last applied block's, in the same epoch). It returns nil when the block must
+// be handled normally.
+//
+// Blocks numbered at or below the tip are NOT judged here: ApplyBlock already treats those as an idempotent
+// replay (same content) or a conflict (different content, which is a fork). Only a block numbered above the tip
+// with an old commit index is the dangerous case: appending it would create a duplicate block and a divergent
+// chain. It is refused WITHOUT creating a block; Rust keeps retrying a refused commit, so the node pauses
+// (nothing is guessed, nothing forks) until its recovery position is corrected.
+func (bp *BlockProcessor) staleCommitGuard(block *pb.ExecutableBlock) *pb.ExecuteBlockResponse {
+	if block.CommitIndex == 0 || bp.committer == nil {
+		return nil
+	}
+	prog, err := bp.committer.LastApplied()
+	if err != nil || prog.LastBlock == 0 || block.BlockNumber <= prog.LastBlock {
+		return nil
+	}
+	rec, found, err := bp.committer.GetBlockRecord(prog.LastBlock)
+	if err != nil || !found || rec.Header.Epoch != block.Epoch || block.CommitIndex > rec.Header.CommitIndex {
+		return nil
+	}
+
+	log.Printf("🛑 Parent Chain: REFUSING stale commit %d (epoch %d, incoming block #%d, %d txs): last applied block #%d is at commit %d. "+
+		"Not creating a duplicate block.",
+		block.CommitIndex, block.Epoch, block.BlockNumber, len(block.Transactions), rec.Header.Number, rec.Header.CommitIndex)
+	return &pb.ExecuteBlockResponse{
+		BlockNumber: block.BlockNumber,
+		Success:     false,
+		Error: fmt.Sprintf("stale commit %d: already executed (last applied block #%d is at commit %d)",
+			block.CommitIndex, rec.Header.Number, rec.Header.CommitIndex),
 	}
 }

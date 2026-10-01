@@ -344,3 +344,63 @@ func TestBlockProcessor_StartupIntegrityVerification(t *testing.T) {
 	assert.Equal(t, uint64(2), bpClean.LastBlockNumber())
 }
 
+
+// A commit index is executed at most once: a block that would be appended as a NEW block although its commit was
+// already executed must be refused (never create a duplicate block), while a genuinely new commit and an exact
+// replay of an existing block keep working.
+func TestBlockProcessor_StaleCommitGuard(t *testing.T) {
+	dir := t.TempDir()
+	store, err := parentchain.NewDBStore(filepath.Join(dir, "db"))
+	require.NoError(t, err)
+	defer store.Close()
+	bp := NewBlockProcessor(store)
+
+	kp := bls.GenerateKeyPair()
+	mkTx := func(nonce uint64) *pb.Transaction {
+		tx, err := parentchain.BuildAndSignBLSTx(kp.PrivateKey(), kp.PublicKey(), parentchain.ParentChainGatewayAddress, nonce,
+			parentchain.EncodeRegisterClusterCallData(kp.PublicKey(), 1))
+		require.NoError(t, err)
+		return tx
+	}
+
+	// Blocks 1..3 at commits 1..3 (commit index == block number in the test helper).
+	txA := mkTx(0)
+	for n := uint64(1); n <= 3; n++ {
+		var txs []*pb.Transaction
+		if n == 3 {
+			txs = []*pb.Transaction{txA}
+		}
+		resp := bp.ProcessBlock(makeTestBlock(n, 100+n, 1000*n, txs))
+		require.True(t, resp.Success, "block %d: %s", n, resp.Error)
+	}
+	require.Equal(t, uint64(3), bp.LastBlockNumber())
+	tipHash := bp.LastBlockHash()
+
+	// (1) Stale replay: commit 2 again, numbered as the next block. Refused, nothing applied.
+	stale := makeTestBlock(4, 104, 4000, nil)
+	stale.CommitIndex = 2
+	resp := bp.ProcessBlock(stale)
+	assert.False(t, resp.Success)
+	assert.Contains(t, resp.Error, "stale commit")
+	assert.Equal(t, uint64(3), bp.LastBlockNumber(), "no duplicate block may be created")
+	assert.Equal(t, tipHash, bp.LastBlockHash())
+	assert.False(t, bp.IsForkDetected(), "a stale replay is not a fork: the node just refuses it")
+
+	// (2) The same, carrying transactions and the tip's own commit index: still refused.
+	staleWithTx := makeTestBlock(4, 104, 4000, []*pb.Transaction{mkTx(1)})
+	staleWithTx.CommitIndex = 3
+	resp = bp.ProcessBlock(staleWithTx)
+	assert.False(t, resp.Success)
+	assert.Equal(t, uint64(3), bp.LastBlockNumber())
+
+	// (3) An exact replay of an existing block (same number, same content) is still an idempotent success.
+	replay := makeTestBlock(3, 103, 3000, []*pb.Transaction{txA})
+	resp = bp.ProcessBlock(replay)
+	assert.True(t, resp.Success, resp.Error)
+	assert.Equal(t, uint64(3), bp.LastBlockNumber())
+
+	// (4) A genuinely new commit still executes.
+	resp = bp.ProcessBlock(makeTestBlock(4, 104, 4000, nil))
+	assert.True(t, resp.Success, resp.Error)
+	assert.Equal(t, uint64(4), bp.LastBlockNumber())
+}

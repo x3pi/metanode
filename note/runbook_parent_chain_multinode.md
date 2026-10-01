@@ -161,6 +161,6 @@ Công cụ tấn công thật (POST /tx, deposit không nguồn/nguồn lạ/ch�
 
 Mọi thay đổi trạng thái là `pb.Transaction` ký BLS trên hash (kèm `ChainID=990` và nonce tuần tự), gửi **raw proto bytes** tới `POST /send_raw_transaction`. Không còn `POST /tx` JSON, không còn giao dịch không ký. `GET /nonce?address=0x...` trả nonce đã commit của người gửi (client tự tính nonce tiếp theo, `QuorumClient` làm sẵn).
 
-## 6. Sự cố đã biết: node restart khi chain rảnh có thể không bắt kịp
+## 6. Sự cố đã biết: node có thể rẽ nhánh sau khi restart ở thời điểm mạng vừa mất quorum
 
-Xem `note/parent_chain_next_plan.md` mục 7 (G11). Triệu chứng: `/status` của node dừng ở block cũ, log Rust lặp `BLOCKED synced_commit_index advance ... execution parity gap`. Cách xử lý tạm thời: wipe dữ liệu node đó (`run.sh wipe-node <id>` / xóa thư mục dữ liệu) rồi để nó đồng bộ lại từ các node khác.
+Xem `note/parent_chain_next_plan.md` mục 7 (G11), có thể tái hiện bằng `execution/scripts/test/parent_chain_fork_hunt.sh`. Triệu chứng: ở cùng chiều cao một node có `last_hash`/`state_root` khác 3 node còn lại (`/status` vẫn báo `fork_detected:false`), hoặc node đó đứng yên với log Rust lặp `BLOCKED synced_commit_index advance ... execution parity gap`. Cách xử lý hiện tại: so `last_hash` của các node (`run.sh status` / `parent_chain_monitor`); node lệch phải **wipe dữ liệu rồi đồng bộ lại** từ các node đúng (test T-I6 xác nhận wipe + resync ra đúng root). Không restart nhiều node cùng lúc khi mạng đang không đủ quorum.
