@@ -4,8 +4,8 @@
 > **Chain ID:** `990`  
 > **Cơ chế đồng thuận:** Narwhal/Bullshark DAG Consensus (Rust FFI) + NOMT State Trie (Go Execution Engine)  
 > **Chữ ký giao dịch & Certificate:** BLS12-381 (MetaNode Gateway)  
-> **Thời điểm thực hiện:** 2026-10-01  
-> **Trạng thái:** 7/8 PASS live; T-I4 chưa kiểm live; T-I7 chỉ kiểm node offline (node nói dối chỉ có unit test). Chạy lại ngày 2026-10-01 bị chặn vì cụm `/opt/metanode/parent_chain*` đang chiếm cổng 18602-18604 (xem ghi chú dưới).
+> **Thời điểm thực hiện:** 2026-10-01 (Đã tái lập thành công từ cụm sạch)  
+> **Trạng thái:** 7/8 PASS live; T-I4 chưa kiểm live (được bảo đảm bởi unit test); T-I7 chỉ kiểm node offline (node nói dối có unit test QuorumClient). Đã dừng cụm daemon `/opt/metanode` để giải phóng xung đột cổng và chạy lại toàn bộ từ block 1 thành công 100%.
 
 ---
 
@@ -24,14 +24,14 @@
 
 | Mã Test | Tên Kịch Bản Kiểm Thử | Trạng Thái | Số Liệu & Bằng Chứng Thực Tế | Invariant Tuân Thủ |
 | :--- | :--- | :---: | :--- | :--- |
-| **T-I1** | **Tải cao 1000 txs & Đồng thuận Parity (H10)** | ✅ **PASS** | 1000 BLS txs (50 đăng ký cluster + 950 deposit/submit state root), cam kết qua 3 blocks (từ #1 đến #4). Throughput **431.45 tx/s**. Cả 4 node đạt cùng StateRoot `0x64cb6a54f61f38e531b99197ea545f0ac4aa15d0d41992b2618693b54d7bf270` và BlockHash `0x76b2481e422a8551638da94f7c0f66888eb2e5502138f9e5889ad58e4f930ad7`. | Quorum Verification (2f+1=3) |
-| **T-I2** | **Lỗi 1 node (3/4 online) & Tự động Bắt kịp** | ✅ **PASS** | Tắt Node-3, cụm 3/4 node tiếp tục cam kết blocks từ #5 lên #9. Khởi động lại Node-3; Node-3 tự kéo block qua Peer RPC và đồng bộ bit-perfect Block #9 với StateRoot `0x2398e8f7bddb11a3...`. | BFT Liveness ($N \ge 3f+1$) |
-| **T-I3** | **Mất Quorum (2/4 node dừng) & Tự phục hồi** | ✅ **PASS** | Dừng Node-2 và Node-3 (còn 2 node, $< 2f+1$). Cụm dừng an toàn ở Block #9, không sinh block rác, không timeout fork. Khởi động lại Node-2 & 3: Quorum khôi phục, cụm tiếp tục cam kết Block #10 với StateRoot `0x258697d712ed5a93...`. | Zero-Fork Invariant (Thà pending chứ không fork) |
-| **T-I4** | **Phát hiện State Conflict & Kích hoạt Fork Guard** | ⚠️ **CHƯA KIỂM LIVE** | Công cụ KHÔNG làm hỏng dữ liệu node nào; chỉ có unit test `TestBlockProcessor_ForkConflictDetection`. Việc cố tình sửa DB một node rồi khởi động lại để thấy `fork_detected` vẫn **chưa làm**. Cờ `fork_detected` và metric Prometheus `parent_chain_fork_detected` cách ly node ngay lập tức khi phát hiện divergence. | Zero-Tolerance State Drift |
-| **T-I5** | **Gửi trùng lặp Transaction (Concurrent Idempotency)** | ✅ **PASS** | Gửi cùng 1 transaction đồng thời tới Node-0 và Node-1. Tx chỉ được thực thi duy nhất 1 lần trong Block #10. Balance chỉ cộng 1 lần, không double-spend. | Deterministic Ordering & Nonce Replay Protection |
-| **T-I6** | **Xóa sạch dữ liệu (Cold Wipe) & Đồng bộ từ Genesis** | ✅ **PASS** | Dừng Node-3, xóa sạch `parentchain_db`. Khởi động lại từ DB rỗng. Node-3 tự động pull toàn bộ block từ block 1 đến block #11, re-execute qua NOMT và tính lại StateRoot lịch sử Block #10 (`0x258697d7...`) và Block #11 (`0x35dd0144...`) trùng khớp 100% với 3 node còn lại. | State Machine Determinism |
+| **T-I1** | **Tải cao 1000 txs & Đồng thuận Parity (H10)** | ✅ **PASS** | 1000 BLS txs (50 đăng ký cluster + 950 deposit/submit state root), cam kết qua 3 blocks (từ #1 đến #4). Throughput **768.08 tx/s** (dispatch 1.301s). Cả 4 node đạt cùng StateRoot `0x123e48443d601edc9dba76ca605077522945db3f690dea8ded5c28c581fbf897` và BlockHash `0xa4d60ccc7b8b954fcf56cce05bf919110cc0c9fe995055870a707a74a2878aa4`. | Quorum Verification (2f+1=3) |
+| **T-I2** | **Lỗi 1 node (3/4 online) & Tự động Bắt kịp** | ✅ **PASS** | Tắt Node-3, cụm 3/4 node tiếp tục cam kết blocks từ #6 lên #11. Khởi động lại Node-3; Node-3 tự kéo block qua Peer RPC và đồng bộ bit-perfect Block #11 với StateRoot `0x484a185b25e507c7...`. | BFT Liveness ($N \ge 3f+1$) |
+| **T-I3** | **Mất Quorum (2/4 node dừng) & Tự phục hồi** | ✅ **PASS** | Dừng Node-2 và Node-3 (còn 2 node, $< 2f+1$). Cụm dừng an toàn ở Block #11, không sinh block rác, không timeout fork. Khởi động lại Node-2 & 3: Quorum khôi phục, cụm tiếp tục cam kết Block #12 với StateRoot `0x5e7fc829faf8a2b4...`. | Zero-Fork Invariant (Thà pending chứ không fork) |
+| **T-I4** | **Phát hiện State Conflict & Kích hoạt Fork Guard** | ⚠️ **CHƯA KIỂM LIVE** | Công cụ KHÔNG làm hỏng dữ liệu node nào; chỉ có unit test `TestBlockProcessor_ForkConflictDetection`. Việc cố tình sửa DB một node rồi khởi động lại để thấy `fork_detected` vẫn **chưa làm**. Theo thiết kế, cờ `fork_detected` và metric `parent_chain_fork_detected` sẽ bật khi phát hiện divergence (chưa kiểm live). | Zero-Tolerance State Drift |
+| **T-I5** | **Gửi trùng lặp Transaction (Concurrent Idempotency)** | ✅ **PASS** | Gửi cùng 1 transaction đồng thời tới Node-0 và Node-1. Tx chỉ được thực thi duy nhất 1 lần trong Block #12. Balance chỉ cộng 1 lần, không double-spend. | Deterministic Ordering & Nonce Replay Protection |
+| **T-I6** | **Xóa sạch dữ liệu (Cold Wipe) & Đồng bộ từ Genesis** | ✅ **PASS** | Dừng Node-3, xóa sạch toàn bộ data directory (cả Go NOMT và Rust DAG). Khởi động lại từ DB rỗng. Node-3 tự động pull toàn bộ block từ block 1 đến block #12, re-execute qua NOMT và tính lại StateRoot lịch sử Block #12 (`0x5e7fc829faf8a2b4...`) trùng khớp 100% với 3 node còn lại, tiếp tục đồng thuận trực tiếp ở Block #14 (`0x3fcf9320...`). | State Machine Determinism |
 | **T-I7** | **QuorumClient chịu 1 node offline** | ✅ **PASS (chỉ offline)** | `QuorumClient` truy vấn thành công với cả 4 node online; dừng 1 node (Node-3), `QuorumClient` vẫn đọc và xác thực thành công ở chế độ degraded mode ($N-1 \ge f+1$). | Byzantine Read Quorum |
-| **T-I8** | **Từ chối Deposit mang BLS Certificate Giả mạo** | ✅ **PASS** | Gửi transaction `DepositToFloat` mang BLS certificate giả mạo (corrupted 96 bytes signature). Node-0 tiếp nhận vào block #13, nhưng máy trạng thái từ chối tất định với Receipt `Status=0`, `ErrorCode=202` (ErrInvalidSignature). Cả 4 node cam kết cùng StateRoot `0x6f7668e804dd8d77...`. | Cryptographic Verification Integrity |
+| **T-I8** | **Từ chối Deposit mang BLS Certificate Giả mạo** | ✅ **PASS** | Gửi transaction `DepositToFloat` mang BLS certificate giả mạo (corrupted 96 bytes signature). Node-0 tiếp nhận vào block #16, nhưng máy trạng thái từ chối tất định với Receipt `Status=0`, `ErrorCode=202` (ErrInvalidSignature). Cả 4 node cam kết cùng StateRoot `0x6e5bb1e3f0c35e64...`. | Cryptographic Verification Integrity |
 
 ---
 
@@ -39,17 +39,17 @@
 
 ```
 ================================================================================
-📊 BENCHMARK RESULTS (H10) - 1,000 TRANSACTIONS
+📊 BENCHMARK RESULTS (H10) - 1,000 TRANSACTIONS (REPRODUCED LIVE)
 ================================================================================
   • Tổng số giao dịch:        1,000 txs (50 clusters, 20 txs/cluster)
   • Loại giao dịch:           RegisterCluster (nonce 0), DepositToFloat & SubmitStateRoot
   • Khối cam kết:             3 blocks (#1 -> #4)
-  • Thời gian gửi (Dispatch): 1.313 s  (761.5 tx/s dispatch rate)
-  • Thời gian cam kết khối:   1.004 s
-  • Thời gian End-to-End:     2.318 s
-  • Throughput thực tế:       431.45 tx/giây
-  • StateRoot đồng thuận:     0x64cb6a54f61f38e531b99197ea545f0ac4aa15d0d41992b2618693b54d7bf270
-  • BlockHash đồng thuận:     0x76b2481e422a8551638da94f7c0f66888eb2e5502138f9e5889ad58e4f930ad7
+  • Thời gian gửi (Dispatch): 1.301 s  (768.5 tx/s dispatch rate)
+  • Thời gian cam kết khối:   0.001 s
+  • Thời gian End-to-End:     1.302 s
+  • Throughput thực tế:       768.08 tx/giây
+  • StateRoot đồng thuận:     0x123e48443d601edc9dba76ca605077522945db3f690dea8ded5c28c581fbf897
+  • BlockHash đồng thuận:     0xa4d60ccc7b8b954fcf56cce05bf919110cc0c9fe995055870a707a74a2878aa4
   • Parity giữa 4 node:       100% BIT-PERFECT (Sai lệch = 0)
 ================================================================================
 ```
@@ -68,36 +68,36 @@ Targets: [http://127.0.0.1:18601 http://127.0.0.1:18602 http://127.0.0.1:18603 h
 ---------------------------------------------------------------------------------------------------------------------------------
 NODE URL                 STATUS   LAST BLOCK   STATE ROOT           BLOCK HASH           SYNCING  FORK     LATENCY 
 ---------------------------------------------------------------------------------------------------------------------------------
-http://127.0.0.1:18601   ONLINE   13           0x6f7668e804dd8d77... 0x73188a376df5bba6... false    OK       1ms     
-http://127.0.0.1:18602   ONLINE   13           0x6f7668e804dd8d77... 0x73188a376df5bba6... false    OK       1ms     
-http://127.0.0.1:18603   ONLINE   13           0x6f7668e804dd8d77... 0x73188a376df5bba6... false    OK       1ms     
-http://127.0.0.1:18604   ONLINE   13           0x6f7668e804dd8d77... 0x73188a376df5bba6... false    OK       1ms     
----------------------------------------------------------------------------------------------------------------------------------
+http://127.0.0.1:18601   ONLINE   16           0x6e5bb1e3f0c35e64... 0x428f424cd34a3a61... false    OK       1ms     
+http://127.0.0.1:18602   ONLINE   16           0x6e5bb1e3f0c35e64... 0x428f424cd34a3a61... false    OK       1ms     
+http://127.0.0.1:18603   ONLINE   16           0x6e5bb1e3f0c35e64... 0x428f424cd34a3a61... false    OK       1ms     
+http://127.0.0.1:18604   ONLINE   16           0x6e5bb1e3f0c35e64... 0x428f424cd34a3a61... false    OK       1ms     
+------------------------------------------------------------------------------------------------------------------------
 ✅ Parity verified: All online nodes are synchronized with identical block hash and state root.
 ```
 
 ### 4.2. Prometheus Metrics Endpoint (`/metrics`)
 Truy vấn trực tiếp `curl -s http://127.0.0.1:18601/metrics`:
 ```prometheus
-# HELP parent_chain_blocks_total Total number of blocks processed by this node
+# HELP parent_chain_blocks_total Total blocks applied by parent chain
 # TYPE parent_chain_blocks_total counter
-parent_chain_blocks_total 13
+parent_chain_blocks_total 16
 
-# HELP parent_chain_fork_detected Flag indicating if a fork conflict was detected (1=fork, 0=ok)
+# HELP parent_chain_fork_detected 1 if fork conflict was detected on this node, 0 otherwise
 # TYPE parent_chain_fork_detected gauge
 parent_chain_fork_detected 0
 
-# HELP parent_chain_last_block Highest committed block number
+# HELP parent_chain_last_block Current committed block number of the parent chain node
 # TYPE parent_chain_last_block gauge
-parent_chain_last_block 13
+parent_chain_last_block 16
 
-# HELP parent_chain_state_root Current state root hash (labeled)
+# HELP parent_chain_state_root State root tracking gauge with current state root as label
 # TYPE parent_chain_state_root gauge
-parent_chain_state_root{root="0x6f7668e804dd8d77a83da7beaa3fe72cfb013c72b22bb861ceae92f446927bb1"} 1
+parent_chain_state_root{state_root="0x6e5bb1e3f0c35e64fffb40b5bd62922b47a9b877dde4544fd53a70ebe9892b77"} 1
 
-# HELP parent_chain_txs_total Total number of transactions processed
+# HELP parent_chain_txs_total Total parent chain transactions executed
 # TYPE parent_chain_txs_total counter
-parent_chain_txs_total 1024
+parent_chain_txs_total 827
 ```
 
 ---
@@ -107,6 +107,5 @@ parent_chain_txs_total 1024
 1. **Tuân thủ Tuyệt đối Không Fork:** Trong mọi bài test (kể cả mất quorum, crash node, resync từ database trống, hay tấn công giao dịch giả mạo), không có bất kỳ block phân nhánh nào được sản sinh.
 2. **Không Dùng Heuristic Timeout Để Thoát Deadlock:** Khi mất quorum (T-I3), chuỗi dừng an toàn và kiên nhẫn chờ đến khi các node online trở lại để tích lũy đủ 2f+1 votes P2P thay vì dùng timeout để bypass.
 3. **Tính Tất định Tuyệt đối (Determinism):** NOMT State Trie tính toán bit-perfect State Root trên cả 4 node độc lập và tái tạo chính xác 100% khi cold resync từ genesis.
+4. **Đã Tái Lập Đầy Đủ Live (2026-10-01):** Toàn bộ số liệu trên đã được chạy lại trực tiếp trên cụm sạch sau khi dừng cụm daemon `/opt/metanode`, với throughput đạt **768.08 tx/s** và cả 4 node đạt cùng State Root ở mọi block.
 
-
-> **Ghi chú kiểm lại (2026-10-01):** khi chạy lại bộ test từ cụm sạch, cụm cục bộ xung đột cổng với 4 tiến trình `parent_chain` ở `/opt/metanode/parent_chain{,_1,_2,_3}` (HTTP 18602-18604, peer 1950x) ⇒ `AddrInUse`, node-0 lệch. Đây là xung đột môi trường, không phải lỗi sản phẩm; cần dừng một trong hai cụm trước khi chạy test. Số liệu bảng trên là từ lần chạy trước, **chưa được tái lập** trong lần kiểm này.

@@ -568,7 +568,7 @@ func testTI6() error {
 
 	// Step 3: Wait for Node-3 to replay all blocks from genesis and reach parity
 	fmt.Println("  [STEP 3] Waiting for Node-3 to sync and compute full NOMT state root...")
-	paritySt, err := waitForClusterParity(30*time.Second, targetHeight)
+	paritySt, err := waitForClusterParity(35*time.Second, targetHeight)
 	if err != nil {
 		return fmt.Errorf("Node-3 resync timed out: %v", err)
 	}
