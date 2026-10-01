@@ -1,7 +1,12 @@
 package parentchain
 
 import (
+	"encoding/json"
+	"io"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -11,10 +16,13 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 func init() {
 	bls.Init()
+	// Most tests register clusters freely; policy-specific tests install their own policy and restore this one.
+	SetClusterPolicy(ClusterPolicy{Open: true})
 }
 
 // helper to register a cluster in store and return keys
@@ -252,4 +260,174 @@ func TestTx_HandlerAuthorizationChecks(t *testing.T) {
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, ErrUnauthorizedSender)
 	assert.Equal(t, uint8(0), rcptRootUnauth.Status)
+}
+
+// There is exactly one way to authenticate a transaction: a signature over its hash plus a sequential nonce.
+// The old alternate modes (no signature at all for deposits, a signature over a method-specific digest, the
+// cluster certificate reused as the transaction signature) must all be rejected without touching state.
+func TestTx_NoAlternateAuthenticationModes(t *testing.T) {
+	store := NewMemoryStore()
+	priv, pub, addr := setupCluster(t, store, 101)
+
+	amount := big.NewInt(500)
+	msgID := common.HexToHash("0x01")
+	dig := ComputeDepositFloatMessage(pub, 101, common.Address{}, common.Address{}, amount, msgID)
+	cert := bls.Sign(priv, dig)
+	callData := EncodeDepositToFloatCallData(pub, pub, 101, common.Address{}, common.Address{}, amount, msgID, cert)
+
+	// (1) A deposit with a valid certificate but NO transaction signature (the old "API boundary" mode).
+	unsigned := &pb.Transaction{
+		FromAddress: addr.Bytes(),
+		ToAddress:   ParentChainGatewayAddress.Bytes(),
+		Nonce:       make([]byte, 8),
+		Data:        callData,
+		ChainID:     ParentChainID,
+	}
+	rcpt, err := ExecuteTx(store, unsigned, 1)
+	assert.Error(t, err)
+	assert.Equal(t, uint8(0), rcpt.Status)
+	assert.Equal(t, uint32(104), uint32(rcpt.ErrorCode))
+
+	// (2) The certificate reused as the transaction signature (signature over the method digest, not the tx hash).
+	certAsSig := proto.Clone(unsigned).(*pb.Transaction)
+	certAsSig.Sign = cert.Bytes()
+	rcpt, err = ExecuteTx(store, certAsSig, 1)
+	assert.Error(t, err)
+	assert.Equal(t, uint8(0), rcpt.Status)
+
+	// (3) Neither attempt may have changed state or advanced the nonce.
+	nonce, _ := store.GetNonce(addr)
+	assert.Equal(t, uint64(0), nonce)
+	bal, _ := store.GetFloat(crypto.Keccak256Hash(pub[:]))
+	assert.True(t, bal == nil || bal.Sign() == 0, "no float may be credited")
+
+	// (4) The properly signed transaction is accepted.
+	good, err := BuildAndSignBLSTx(priv, pub, ParentChainGatewayAddress, 0, callData)
+	require.NoError(t, err)
+	rcpt, err = ExecuteTx(store, good, 1)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(1), rcpt.Status)
+
+	// (5) Replaying the very same signed transaction fails on the nonce.
+	rcpt, err = ExecuteTx(store, good, 2)
+	assert.Error(t, err)
+	assert.Equal(t, uint32(103), uint32(rcpt.ErrorCode))
+}
+
+// Two identical deposits from the same client must get distinct message ids (they are derived from the nonce).
+func TestQuorumClient_ConsecutiveDepositsUniqueMsgID(t *testing.T) {
+	kp := bls.GenerateKeyPair()
+	var mu sync.Mutex
+	var msgIDs []common.Hash
+	next := uint64(0)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/nonce", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]interface{}{"nonce": next})
+	})
+	mux.HandleFunc("/receipt", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"found": false})
+	})
+	mux.HandleFunc("/send_raw_transaction", func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var tx pb.Transaction
+		if err := proto.Unmarshal(raw, &tx); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_, _, _, _, _, _, msgID, _, err := DecodeDepositToFloatCallData(tx.Data)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		msgIDs = append(msgIDs, msgID)
+		mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]interface{}{"tx_hash": ComputeTxHash(&tx), "status": "queued"})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	qc := NewQuorumClient([]string{ts.URL}, kp.PrivateKey(), kp.PublicKey())
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	for i := 0; i < 3; i++ {
+		_, err := qc.SendDepositToFloat(kp.PublicKey(), 101, sender, sender, big.NewInt(1000))
+		require.NoError(t, err)
+	}
+	require.Len(t, msgIDs, 3)
+	assert.NotEqual(t, msgIDs[0], msgIDs[1])
+	assert.NotEqual(t, msgIDs[1], msgIDs[2])
+}
+
+// Cluster registration is a trust anchor: with the default (closed) policy nobody may register, with a
+// genesis allow-list only the listed keys may, and only an explicit open policy lets anyone in.
+func TestTx_ClusterRegistrationPolicy(t *testing.T) {
+	defer SetClusterPolicy(ClusterPolicy{Open: true})
+
+	register := func(kp *bls.KeyPair, nonce uint64, store Store) (*Receipt, error) {
+		tx, err := BuildAndSignBLSTx(kp.PrivateKey(), kp.PublicKey(), ParentChainGatewayAddress, nonce, EncodeRegisterClusterCallData(kp.PublicKey(), 7))
+		require.NoError(t, err)
+		return ExecuteTx(store, tx, 1)
+	}
+	allowed := bls.GenerateKeyPair()
+	stranger := bls.GenerateKeyPair()
+
+	// Closed (secure default): nothing registers.
+	SetClusterPolicy(ClusterPolicy{})
+	store := NewMemoryStore()
+	rcpt, err := register(allowed, 0, store)
+	assert.ErrorIs(t, err, ErrClusterNotAuthorized)
+	assert.Equal(t, uint32(221), uint32(rcpt.ErrorCode))
+
+	// Allow-list: only the listed key.
+	SetClusterPolicy(ClusterPolicy{Allowed: map[cm.PublicKey]struct{}{allowed.PublicKey(): {}}})
+	store = NewMemoryStore()
+	_, err = register(stranger, 0, store)
+	assert.ErrorIs(t, err, ErrClusterNotAuthorized, "a key outside the genesis list must not register")
+	rcpt, err = register(allowed, 0, store)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(1), rcpt.Status)
+	_, found, _ := store.GetChainRegistry(crypto.Keccak256Hash(allowed.PublicKey().Bytes()))
+	assert.True(t, found)
+
+	// Open (devnet): anyone.
+	SetClusterPolicy(ClusterPolicy{Open: true})
+	store = NewMemoryStore()
+	rcpt, err = register(stranger, 0, store)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(1), rcpt.Status)
+}
+
+// A deposit mints float, so it must always be certified by a registered cluster: a zero source key, an
+// unregistered source, or a certificate from a different key must all be rejected and change nothing.
+func TestDeposit_AlwaysRequiresRegisteredCertifyingSource(t *testing.T) {
+	store := NewMemoryStore()
+	priv, pub, _ := setupCluster(t, store, 101)
+	stranger := bls.GenerateKeyPair()
+	amount := big.NewInt(1000)
+	msgID := common.HexToHash("0xaa")
+	var zero cm.PublicKey
+
+	digest := ComputeDepositFloatMessage(pub, 101, common.Address{}, common.Address{}, amount, msgID)
+
+	// (1) zero source key: the old "unauthenticated mint" bypass.
+	err := DepositToFloat(store, zero, pub, 101, common.Address{}, common.Address{}, amount, msgID, bls.Sign(priv, digest), 1)
+	assert.ErrorIs(t, err, ErrFloatUnknownSource)
+
+	// (2) source key that is not a registered cluster, with its own valid certificate.
+	err = DepositToFloat(store, stranger.PublicKey(), pub, 101, common.Address{}, common.Address{}, amount, msgID, bls.Sign(stranger.PrivateKey(), digest), 1)
+	assert.ErrorIs(t, err, ErrFloatUnknownSource)
+
+	// (3) registered source, certificate signed by someone else.
+	err = DepositToFloat(store, pub, pub, 101, common.Address{}, common.Address{}, amount, msgID, bls.Sign(stranger.PrivateKey(), digest), 1)
+	assert.ErrorIs(t, err, ErrInvalidSignature)
+
+	bal, _ := store.GetFloat(crypto.Keccak256Hash(pub[:]))
+	assert.True(t, bal == nil || bal.Sign() == 0, "nothing may be minted by any rejected deposit")
+
+	// (4) the legitimate deposit works.
+	err = DepositToFloat(store, pub, pub, 101, common.Address{}, common.Address{}, amount, msgID, bls.Sign(priv, digest), 1)
+	assert.NoError(t, err)
 }
