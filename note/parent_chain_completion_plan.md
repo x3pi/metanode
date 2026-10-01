@@ -38,6 +38,7 @@
 | **H9** | **Chưa có runbook, metrics fork, tool giám sát**; PROJECT_STRUCTURE đã ghi mức xác minh vừa phải. | — |
 | **H10** | **Chưa đo hiệu năng** dưới tải (cụm mới chỉ chạy ~4 block). Ghi bền `Sync` mỗi block + NOMT trên đường nóng chưa được đo. | — |
 | **H11** | `ChainID 990` chưa được quét toàn repo (ansible/doc còn ghi "Parent Chain ChainID 991"). | `grep -rn "991" deploy note` |
+| **H12** | **Tái dùng sai mục đích `LastDeviceKey`.** Parent chain nhét khóa công khai BLS 48 byte vào `LastDeviceKey`, trong khi ở chain chính trường này là **device key 32 byte** (`validation.go:425`: `keccak256(LastDeviceKey) == account.DeviceKey`; getter `LastDeviceKey()` ép về `Hash` 32 byte, cắt mất 16 byte). Cùng một tên trường mang hai nghĩa ⇒ dễ nhầm/lỗi nếu code dùng chung đọc nhầm. Sửa: **không dùng `LastDeviceKey` để mang public key**; lấy khóa người gửi từ registry (`GetAccountRegistry`/`ChainRegistry`, nhánh đã có sẵn trong `VerifyTxSignature`), còn tx khởi tạo (`registerCluster`) mang khóa trong `Data` (đã có `clusterKey`). Không đổi proto. | `pkg/parentchain/tx.go` (`BuildAndSignBLSTx`, `VerifyTxSignature`) |
 
 ---
 
@@ -71,6 +72,7 @@ Mỗi gói = 1+ commit có test; chạy lại `build_check.sh` và test của g�
 - **Nghiệm thu:** test: thiếu cờ ⇒ thoát; file hỏng ⇒ thoát; 4 node cùng genesis ⇒ `/validators` giống nhau từng byte.
 
 ### P3 — Client node thực thi + QuorumClient (H2, H3)
+- (H12) Bỏ việc nhét public key vào `LastDeviceKey`: sửa `BuildAndSignBLSTx`/`VerifyTxSignature` để lấy khóa từ registry, tx khởi tạo mang khóa trong `Data`; thêm test chống tái dùng.
 - `pkg/parentchain.Client.Send*`: dựng `pb.Transaction` (`BuildAndSignBLSTx` đã có) ký bằng **khóa cluster**, `ToAddress` hệ thống, `ChainID 990`, `Nonce` tuần tự **lấy từ chain** (`GetNonce`/status), **không** `time.Now()`. Gửi qua `/send_raw_transaction` tới một node; lỗi thì thử node kế (theo danh sách, không theo timeout để "quyết định").
 - `QuorumClient` mới (`pkg/parentchain/quorum_client.go`): đọc từ mọi endpoint; chấp nhận khi **≥ f+1** node trả header khớp **và** proof hợp lệ (`nomt_ffi.VerifyProof` so với `state_root` trong header); không đủ ⇒ lỗi (thà chờ còn hơn tin sai). Cấu hình `parent_chain_urls: [...]`, vẫn nhận `parent_chain_url` cũ.
 - Cập nhật nơi tạo client: `cmd/simple_chain/app.go:277`, `pkg/config` (nếu có), các script `execution/scripts/test/*.go` đang trỏ `:8547`.
