@@ -215,7 +215,7 @@ fi
 run_tests_suite() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
-    echo "🧪 BẮT ĐẦU BỘ KIỂM THỬ TÍCH HỢP 7 KỊCH BẢN THỰC TẾ"
+    echo "🧪 BẮT ĐẦU BỘ KIỂM THỬ TÍCH HỢP 9 KỊCH BẢN THỰC TẾ"
     echo "═══════════════════════════════════════════════════════════════"
     local start_ts
     start_ts=$(date +%s)
@@ -239,7 +239,7 @@ run_tests_suite() {
 
     local all_passed=false
     local py_passed="False"
-    if [ $test_rc -eq 0 ] && grep -q "TẤT CẢ 7/7 KỊCH BẢN" "$test_log"; then
+    if [ $test_rc -eq 0 ] && grep -q "TẤT CẢ 9/9 KỊCH BẢN" "$test_log"; then
         all_passed=true
         py_passed="True"
         echo ""

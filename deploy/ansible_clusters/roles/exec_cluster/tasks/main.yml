@@ -1,4 +1,10 @@
 ---
+- name: Build the parent chain endpoint list (all validators, for quorum reads and failover)
+  ansible.builtin.set_fact:
+    parent_chain_urls_csv: "{% for h in groups['parent_chain_nodes'] %}http://{{ hostvars[h].ansible_host | default('127.0.0.1') }}:{{ hostvars[h].parent_http_port | default(8547) }}{% if not loop.last %},{% endif %}{% endfor %}"
+  when: groups['parent_chain_nodes'] is defined and (groups['parent_chain_nodes'] | length) > 0
+
+
 - name: Determine process management mode
   set_fact:
     is_systemd: "{{ use_systemd | default(false) | bool }}"
@@ -245,7 +251,7 @@
       become_user: "{{ ansible_user | default('abc') }}"
       ansible.builtin.shell: |
         set -a; [ -f {{ node_data_dir }}/security.env ] && . {{ node_data_dir }}/security.env; set +a
-        nohup env PARENT_CHAIN_URL="http://{{ parent_chain_host | default('127.0.0.1') }}:{{ parent_chain_rpc_port | default(8547) }}" \
+        nohup env PARENT_CHAIN_URL="http://{{ parent_chain_host | default('127.0.0.1') }}:{{ parent_chain_rpc_port | default(8547) }}" PARENT_CHAIN_URLS="{{ parent_chain_urls_csv | default('') }}" \
           {{ bin_dir }}/simple_chain \
           -config {{ node_data_dir }}/config.json \
           >> {{ base_log_dir }}/{{ inventory_hostname }}.log 2>&1 &

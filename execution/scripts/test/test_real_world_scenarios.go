@@ -605,5 +605,116 @@ func main() {
 	}
 	fmt.Println("✅ KỊCH BẢN 7 THÀNH CÔNG RỰC RỠ: Toàn bộ chu trình gọi Smart Contract xuyên 2 cụm (Exec 1 -> Parent Chain -> Exec 2 -> EVM Contract Execution) hoạt động hoàn hảo!")
 
-	fmt.Println("\n🎉 TẤT CẢ 7/7 KỊCH BẢN SỬ DỤNG THỰC TẾ ĐỀU ĐÃ ĐƯỢC KIỂM CHỨNG THÀNH CÔNG VÀ CHÍNH XÁC!")
+	// =======================================================================================
+	// KỊCH BẢN 8: mất 1/4 node Parent Chain (node 0 = URL cũ :8547) -> chuyển xuyên cụm vẫn hoàn tất
+	// =======================================================================================
+	printHeader("KỊCH BẢN 8: MẤT 1/4 NODE PARENT CHAIN -> CHUYỂN XUYÊN CỤM VẪN HOÀN TẤT (QUORUM)")
+	parentURLs := []string{"http://127.0.0.1:8547", "http://127.0.0.1:18602", "http://127.0.0.1:18603", "http://127.0.0.1:18604"}
+	parentDirs := []string{"/opt/metanode/parent_chain", "/opt/metanode/parent_chain_1", "/opt/metanode/parent_chain_2", "/opt/metanode/parent_chain_3"}
+	parentPorts := []string{"8547", "18602", "18603", "18604"}
+	// Registrations use the legacy HTTP client against a live node so this script never shares a nonce stream
+	// with the real Exec 2 process (same cluster key); the cross-chain transfers themselves go through the real
+	// Exec 1/Exec 2 rollup workers, which use the quorum client.
+	regClient := func(i int) parentchain.Client { return parentchain.NewHTTPClient(parentURLs[i]) }
+
+	accAPriv, _ := crypto.GenerateKey()
+	accA := crypto.PubkeyToAddress(accAPriv.PublicKey)
+	regA := parentchain.ComputeRegisterAccountMessage(accA, exec2PubKey)
+	sigA, _ := crypto.Sign(crypto.Keccak256(regA), accAPriv)
+	if _, err := regClient(0).SendRegisterAccount(accA, exec2PubKey, sigA, bls.Sign(exec2Priv, regA)); err != nil {
+		fmt.Printf("❌ Đăng ký tài khoản A thất bại: %v\n", err)
+		os.Exit(1)
+	}
+	waitRegistered(regClient(0), accA)
+	fmt.Println("1. Dừng node parent 0 (:8547). Còn 3/4 node (đủ quorum 2f+1)...")
+	killParentPort(parentPorts[0])
+	time.Sleep(2 * time.Second)
+	if _, err := http.Get(parentURLs[0]); err == nil {
+		fmt.Println("❌ node 0 vẫn còn phản hồi")
+		os.Exit(1)
+	}
+	fmt.Println("2. Exec 1 gửi chuyển xuyên cụm 777 wei sang Exec 2 trong khi node 0 đã chết...")
+	if _, err := rpcCall(exec1URL, "mtn_sendCrossChainTransfer", []interface{}{accA.Hex(), "0x309"}); err != nil {
+		fmt.Printf("❌ Gửi cross-chain transfer thất bại: %v\n", err)
+		os.Exit(1)
+	}
+	if !waitBalance(exec2URL, accA, big.NewInt(777), 60*time.Second) {
+		fmt.Println("❌ Kịch bản 8 thất bại: Exec 2 không nhận được 777 wei khi mất 1/4 node parent")
+		os.Exit(1)
+	}
+	fmt.Println("✅ KỊCH BẢN 8 THÀNH CÔNG: mất 1/4 node parent, chuyển xuyên cụm vẫn hoàn tất đúng 777 wei")
+
+	// =======================================================================================
+	// KỊCH BẢN 9: mất 2/4 node (không đủ quorum) -> giao dịch PENDING, không mất/tạo tiền; bật lại thì hoàn tất
+	// =======================================================================================
+	printHeader("KỊCH BẢN 9: MẤT 2/4 NODE PARENT -> DỪNG AN TOÀN (PENDING), BẬT LẠI THÌ HOÀN TẤT ĐÚNG 1 LẦN")
+	accBPriv, _ := crypto.GenerateKey()
+	accB := crypto.PubkeyToAddress(accBPriv.PublicKey)
+	regB := parentchain.ComputeRegisterAccountMessage(accB, exec2PubKey)
+	sigB, _ := crypto.Sign(crypto.Keccak256(regB), accBPriv)
+	if _, err := regClient(2).SendRegisterAccount(accB, exec2PubKey, sigB, bls.Sign(exec2Priv, regB)); err != nil {
+		fmt.Printf("❌ Đăng ký tài khoản B thất bại (3/4 node): %v\n", err)
+		os.Exit(1)
+	}
+	waitRegistered(regClient(2), accB)
+	fmt.Println("1. Dừng thêm node parent 1 (:18602). Còn 2/4 node (< 2f+1)...")
+	killParentPort(parentPorts[1])
+	time.Sleep(2 * time.Second)
+	fmt.Println("2. Exec 1 gửi chuyển xuyên cụm 555 wei khi parent KHÔNG đủ quorum...")
+	if _, err := rpcCall(exec1URL, "mtn_sendCrossChainTransfer", []interface{}{accB.Hex(), "0x22b"}); err != nil {
+		fmt.Printf("   (gửi bị từ chối ngay: %v — chấp nhận được, không mất tiền)\n", err)
+	}
+	time.Sleep(25 * time.Second)
+	balB, _ := getBalance(exec2URL, accB)
+	if balB != nil && balB.Sign() > 0 {
+		fmt.Printf("❌ Kịch bản 9 thất bại: Exec 2 đã ghi có %s wei dù parent mất quorum (nguy cơ fork/tạo tiền)\n", balB.String())
+		os.Exit(1)
+	}
+	fmt.Println("   ✅ Sau 25s Exec 2 chưa ghi có (PENDING đúng thiết kế, không tạo tiền)")
+	fmt.Println("3. Bật lại node 0 và node 1...")
+	startParentNode(parentDirs[0], parentPorts[0])
+	startParentNode(parentDirs[1], parentPorts[1])
+	if !waitBalance(exec2URL, accB, big.NewInt(555), 120*time.Second) {
+		bal, _ := getBalance(exec2URL, accB)
+		fmt.Printf("❌ Kịch bản 9 thất bại: sau khi bật lại, số dư B = %v (mong đợi đúng 555)\n", bal)
+		os.Exit(1)
+	}
+	time.Sleep(10 * time.Second)
+	balB2, _ := getBalance(exec2URL, accB)
+	if balB2 == nil || balB2.Cmp(big.NewInt(555)) != 0 {
+		fmt.Printf("❌ Số dư B không còn đúng 555 sau khi ổn định: %v (nghi ngờ ghi có nhiều lần)\n", balB2)
+		os.Exit(1)
+	}
+	fmt.Println("✅ KỊCH BẢN 9 THÀNH CÔNG: mất quorum thì pending, bật lại thì ghi có đúng 555 wei một lần")
+	fmt.Println("\n🎉 TẤT CẢ 9/9 KỊCH BẢN ĐÃ CHẠY THÀNH CÔNG!")
+}
+
+func waitRegistered(c parentchain.Client, a common.Address) {
+	for i := 0; i < 30; i++ {
+		time.Sleep(1 * time.Second)
+		if _, found, err := c.GetAccountRegistry(a); err == nil && found {
+			return
+		}
+	}
+}
+
+func waitBalance(url string, a common.Address, want *big.Int, d time.Duration) bool {
+	start := time.Now()
+	for time.Since(start) < d {
+		if b, err := getBalance(url, a); err == nil && b != nil && b.Cmp(want) == 0 {
+			return true
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return false
+}
+
+// killParentPort kills only the process listening on the given TCP port (never a pattern match).
+func killParentPort(port string) {
+	_ = exec.Command("bash", "-c", "kill -9 $(lsof -ti tcp:"+port+" -sTCP:LISTEN) 2>/dev/null").Run()
+}
+
+func startParentNode(dir, port string) {
+	cmdStr := fmt.Sprintf("cd %s && nohup /opt/metanode/bin/parent_chain -data-dir %s -http :%s -rust-config %s/node_parent.toml -genesis %s/parent_genesis.json >> /var/log/metanode/parent_chain_restart.log 2>&1 & echo $! > %s/parent_chain.pid", dir, dir, port, dir, dir, dir)
+	_ = exec.Command("bash", "-c", cmdStr).Run()
 }
