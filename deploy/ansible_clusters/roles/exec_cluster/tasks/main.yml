@@ -5,7 +5,7 @@
 
 # ── Stop Service ─────────────────────────────────────────────────────────────
 - name: Stop Execution Node {{ inventory_hostname }}
-  when: "deploy_action in ['stop', 'restart', 'reset', 'clean']"
+  when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy']"
   block:
     - name: Stop via systemd
       when: is_systemd
@@ -18,11 +18,11 @@
       when: not is_systemd
       ansible.builtin.shell: |
         if [ -f "{{ node_data_dir }}/cluster.pid" ]; then
-          kill -SIGTERM $(cat "{{ node_data_dir }}/cluster.pid") 2>/dev/null || true
+          kill -9 $(cat "{{ node_data_dir }}/cluster.pid") 2>/dev/null || true
           rm -f "{{ node_data_dir }}/cluster.pid"
         fi
-        pkill -f "{{ bin_dir }}/simple_chain.*{{ node_data_dir }}/config.json" 2>/dev/null || true
-      ignore_errors: true
+        pkill -9 -f "{{ bin_dir }}/simple_chain.*{{ node_data_dir }}" 2>/dev/null || true
+      failed_when: false
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────
 - name: Clean Execution Node {{ inventory_hostname }} data directories
@@ -57,6 +57,9 @@
         path: "{{ item }}"
         state: directory
         mode: '0755'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+        recurse: yes
       loop:
         - "{{ node_data_dir }}"
         - "{{ node_data_dir }}/data"
@@ -138,7 +141,7 @@
             'pending_balance': '0',
             'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
             'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
-            'publicKeyBls': cluster_bls,
+            'publicKeyBls': '0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc',
         }
 
         # 4. Cross-cluster validator allocs with explicit BLS public keys for Rollup signature verification
@@ -239,6 +242,7 @@
 
     - name: Start process via background daemon
       when: not is_systemd
+      become_user: "{{ ansible_user | default('abc') }}"
       ansible.builtin.shell: |
         set -a; [ -f {{ node_data_dir }}/security.env ] && . {{ node_data_dir }}/security.env; set +a
         nohup env PARENT_CHAIN_URL="http://{{ parent_chain_host | default('127.0.0.1') }}:{{ parent_chain_rpc_port | default(8547) }}" \

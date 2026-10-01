@@ -32,22 +32,36 @@ def parse_inventory(file_path):
     children = data.get('all', {}).get('children', {})
     p_nodes = children.get('parent_chain_nodes', {}).get('hosts', {})
 
-    # 1. Parent Node
-    p_info = {}
-    for h_key, h_val in p_nodes.items():
+    # 1. Parent Chain Nodes (supports multi-validator committee)
+    parent_nodes_map = {}
+    p_primary = {}
+    for h_key, h_val in sorted(p_nodes.items()):
         if not isinstance(h_val, dict):
             h_val = {}
         h_ip = h_val.get('ansible_host', p_host)
         h_port = h_val.get('parent_http_port', p_rpc_port)
-        h_p2p = h_val.get('p2p_port', h_val.get('parent_p2p_port', global_vars.get('parent_chain_p2p_port', 4000)))
-        p_info = {
+        h_net_addr = h_val.get('parent_network_address', '')
+        net_port = 4000
+        if ':' in h_net_addr:
+            try:
+                net_port = int(h_net_addr.split(':')[-1])
+            except Exception:
+                pass
+        h_p2p = h_val.get('p2p_port', h_val.get('parent_p2p_port', net_port if net_port != 4000 else global_vars.get('parent_chain_p2p_port', 4000)))
+        p_node_info = {
             'name': h_key,
             'ip': h_ip,
             'rpc_port': h_port,
             'rpc_url': f"http://{h_ip}:{h_port}",
-            'p2p_port': h_p2p
+            'p2p_port': h_p2p,
+            'node_id': h_val.get('parent_node_id', 0),
+            'validator_address': h_val.get('parent_validator_address', '')
         }
-        break
+        parent_nodes_map[h_key] = p_node_info
+        if not p_primary:
+            p_primary = p_node_info
+
+    p_info = p_primary
 
     # 2. Exec Clusters
     exec_cluster_group = children.get('exec_clusters', {}) or {}
@@ -78,9 +92,9 @@ def parse_inventory(file_path):
     all_raft_nodes = {}
     all_fwd_nodes = {}
 
-    if p_info:
-        all_nodes_rpc[p_info['name']] = p_info['rpc_url']
-        all_tcp_nodes[p_info['name']] = f"{p_info['ip']}:{p_info['p2p_port']}"
+    for p_name, p_node in parent_nodes_map.items():
+        all_nodes_rpc[p_name] = p_node['rpc_url']
+        all_tcp_nodes[p_name] = f"{p_node['ip']}:{p_node['p2p_port']}"
 
     for c_key, c_val in sorted(exec_clusters.items()):
         if not isinstance(c_val, dict):
@@ -142,6 +156,7 @@ def parse_inventory(file_path):
 
     return {
         'parent': p_info,
+        'parent_nodes': parent_nodes_map,
         'nodes': all_nodes_rpc,
         'rpc_nodes': all_nodes_rpc,
         'ws_nodes': all_ws_nodes,
@@ -183,6 +198,7 @@ def export_tmp_files(info):
 
         out = dict(existing)
         out.update({
+            'parent_nodes': info.get('parent_nodes', {}),
             'nodes': merged_nodes,
             'rpc_nodes': merged_rpc,
             'ws_nodes': merged_ws,

@@ -9,8 +9,10 @@ all:
     # Parent Chain configuration
     parent_chain_rpc_port: 8547
     parent_chain_host: "127.0.0.1"
-    # Unified EVM Chain ID for Parent Chain and all Execution Clusters
+    # EVM Chain ID for Execution Clusters
     chain_id: 991
+    # Dedicated Chain ID for Parent Chain (Đ7: 990)
+    parent_chain_id: 990
     # ── Security tokens (2026-09-30 audit fixes) — put REAL values in ansible-vault, never in plaintext ──
     # snapshot_server_token: "{{ vault_snapshot_server_token }}"   # protects snapshot downloads; POST /create needs it
     # snapshot_server_bind: "127.0.0.1"                            # restrict the snapshot port if peers need no access
@@ -19,14 +21,50 @@ all:
 
 
   children:
-    # ── Parent Chain Node (100% Rust BFT Consensus Engine, Chain ID: 991) ──
+    # ── Parent Chain Committee (100% Rust BFT Consensus Engine, Chain ID: 990) ──
     parent_chain_nodes:
       hosts:
-        parent_node:
+        # Example 4-Node BFT Parent Chain Committee (single-node or multi-node supported)
+        parent_node_0:
           ansible_host: 127.0.0.1
           ansible_connection: local
-          parent_http_port: 8547
-          node_data_dir: "/opt/metanode/parent_chain"
+          parent_node_id: 0
+          parent_http_port: 18601
+          parent_network_address: "127.0.0.1:19001"
+          peer_rpc_port: 19501
+          peer_rpc_addresses: ["127.0.0.1:19502", "127.0.0.1:19503", "127.0.0.1:19504"]
+          metrics_port: 19601
+          node_data_dir: "/opt/metanode/parent_chain_0"
+        parent_node_1:
+          ansible_host: 127.0.0.1
+          ansible_connection: local
+          parent_node_id: 1
+          parent_http_port: 18602
+          parent_network_address: "127.0.0.1:19002"
+          peer_rpc_port: 19502
+          peer_rpc_addresses: ["127.0.0.1:19501", "127.0.0.1:19503", "127.0.0.1:19504"]
+          metrics_port: 19602
+          node_data_dir: "/opt/metanode/parent_chain_1"
+        parent_node_2:
+          ansible_host: 127.0.0.1
+          ansible_connection: local
+          parent_node_id: 2
+          parent_http_port: 18603
+          parent_network_address: "127.0.0.1:19003"
+          peer_rpc_port: 19503
+          peer_rpc_addresses: ["127.0.0.1:19501", "127.0.0.1:19502", "127.0.0.1:19504"]
+          metrics_port: 19603
+          node_data_dir: "/opt/metanode/parent_chain_2"
+        parent_node_3:
+          ansible_host: 127.0.0.1
+          ansible_connection: local
+          parent_node_id: 3
+          parent_http_port: 18604
+          parent_network_address: "127.0.0.1:19004"
+          peer_rpc_port: 19504
+          peer_rpc_addresses: ["127.0.0.1:19501", "127.0.0.1:19502", "127.0.0.1:19503"]
+          metrics_port: 19604
+          node_data_dir: "/opt/metanode/parent_chain_3"
 
     # ── Execution Clusters (Rollup Shards with Raft HA Consensus) ────────
     exec_clusters:

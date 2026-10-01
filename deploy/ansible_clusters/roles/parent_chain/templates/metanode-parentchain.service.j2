@@ -1,5 +1,5 @@
 [Unit]
-Description=MetaNode Parent Chain Consensus and Float State Service (ChainID {{ chain_id | default(991) }})
+Description=MetaNode Parent Chain Consensus and Float State Service (ChainID {{ parent_chain_id | default(990) }})
 After=network.target network-online.target
 Wants=network-online.target
 
@@ -8,7 +8,7 @@ EnvironmentFile=-{{ node_data_dir }}/security.env
 Type=simple
 User={{ ansible_user | default('metanode') }}
 WorkingDirectory={{ node_data_dir }}
-ExecStart={{ bin_dir }}/parent_chain -data-dir {{ node_data_dir }} -http :{{ parent_http_port | default(8547) }} -rust-config {{ node_data_dir }}/node_parent.toml
+ExecStart={{ bin_dir }}/parent_chain -data-dir {{ node_data_dir }} -http :{{ parent_http_port | default(8547) }} -rust-config {{ node_data_dir }}/node_parent.toml -genesis {{ node_data_dir }}/parent_genesis.json
 ExecStop=/bin/kill -SIGTERM $MAINPID
 Restart=always
 RestartSec=3s
