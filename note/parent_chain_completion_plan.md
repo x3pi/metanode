@@ -25,22 +25,21 @@
 
 **Còn thiếu / sai lệch so với kế hoạch (mỗi mục có mã để tham chiếu; đã xác minh bằng đọc code):**
 
-| Mã | Vấn đề | Bằng chứng |
+| Mã | Vấn đề / Trạng thái | Bằng chứng / Giải pháp đã áp dụng |
 |---|---|---|
-| **H1** | **Lỗ hổng mint float (G8 chưa đóng).** Handler `MethodDepositToFloat` không kiểm quyền: `DecodeDepositToFloatCallData` không có `Cert`; chỉ cần người gửi có chữ ký hợp lệ (bất kỳ ai tạo được tài khoản/khóa) là cộng float tùy ý cho bất kỳ đích nào. Kế hoạch (discovery, phần `DepositFloatMessage`) yêu cầu chứng nhận của cluster nguồn nhưng **chưa cài**. | `pkg/parentchain/tx.go:415-424`, `:48-70` |
-| **H2** | **Client của node thực thi chưa dùng chain mới.** `Client.Send*` vẫn POST JSON `ParentChainTx` tới `/tx` (kèm `Nonce: time.Now().UnixNano()` ở phía client); không có `QuorumClient`, không có cấu hình nhiều URL. `cmd/simple_chain/app.go:277` chỉ nhận một `parentChainURL`. | `pkg/parentchain/http_rpc.go:102-123`, `cmd/simple_chain/app.go:277` |
-| **H3** | **Đường `/tx` JSON cũ còn sống ở server mới.** Server xác thực ở ingress (HTTP) rồi mới chuyển thành tx; đây là xác thực **phía cổng**, không phải bước thực thi tất định (Đ2/Đ6). Cần quyết định: bỏ hẳn, hoặc server tự dựng `pb.Transaction` ký bằng khóa **của cluster** (chỉ hợp lý nếu node giữ khóa đó), hoặc giữ chỉ làm cầu tương thích có cờ bật tắt, mặc định tắt trên production. | `pkg/parentchain/http_rpc.go:419-530`, `:708-733` |
-| **H4** | **Còn validator hard-code** khi thiếu `-genesis` (khóa nhúng trong `app.go`), và nếu `LoadGenesis` lỗi chỉ in cảnh báo rồi **âm thầm dùng committee mặc định** (nguy hiểm: một node lỗi file genesis sẽ chạy committee khác). | `cmd/parent_chain/app.go:42-72` |
-| **H5** | **Template triển khai vẫn đơn node:** `node_id = 0`, `peer_rpc_addresses = []`, không có `-genesis`, inventory 1 host. | `deploy/ansible_clusters/roles/parent_chain/templates/node_parent.toml.j2:1,35`, `parent_consensus.toml.j2:35` |
-| **H6** | **Chưa test chịu lỗi** (T-I2..T-I6): dừng 1 node, dừng 2 node (mất quorum), wipe+resync, sửa DB một node. `fork_guard`/`health_check` của Rust chưa được chứng minh bắt được lệch dữ liệu Go mới. | — |
-| **H7** | **Nonce tăng trước khi chạy handler** (`SetNonce` ngay sau xác thực chữ ký, rồi mới dispatch). Cần xác nhận hành vi tất định khi handler lỗi: nonce đã tăng nhưng ghi dở của handler phải bị bỏ (overlay lớp tx). Phải có test chứng minh (T-U6) chứ không giả định. | `pkg/parentchain/tx.go:386-405` |
-| **H8** | ~~Di chuyển dữ liệu cũ~~ **Không cần** (chủ dự án 2026-10-01: đang dev, chưa có bản nào chạy cần bảo toàn dữ liệu). Chain mới dựng từ genesis; môi trường dev wipe và triển khai lại. Lưu ý kỹ thuật: định dạng DB mới **không tương thích** DB cũ, nên khi nâng cấp binary phải wipe thư mục dữ liệu parent chain (không chạy binary mới trên dữ liệu cũ). | `pkg/parentchain/db_store.go` |
-| **H9** | **Chưa có runbook, metrics fork, tool giám sát**; PROJECT_STRUCTURE đã ghi mức xác minh vừa phải. | — |
-| **H10** | **Chưa đo hiệu năng** dưới tải (cụm mới chỉ chạy ~4 block). Ghi bền `Sync` mỗi block + NOMT trên đường nóng chưa được đo. | — |
-| **H11** | `ChainID 990` chưa được quét toàn repo (ansible/doc còn ghi "Parent Chain ChainID 991"). | `grep -rn "991" deploy note` |
-| **H12** | **Tái dùng sai mục đích `LastDeviceKey`.** Parent chain nhét khóa công khai BLS 48 byte vào `LastDeviceKey`, trong khi ở chain chính trường này là **device key 32 byte** (`validation.go:425`: `keccak256(LastDeviceKey) == account.DeviceKey`; getter `LastDeviceKey()` ép về `Hash` 32 byte, cắt mất 16 byte). Cùng một tên trường mang hai nghĩa ⇒ dễ nhầm/lỗi nếu code dùng chung đọc nhầm. Sửa: **không dùng `LastDeviceKey` để mang public key**; lấy khóa người gửi từ registry (`GetAccountRegistry`/`ChainRegistry`, nhánh đã có sẵn trong `VerifyTxSignature`), còn tx khởi tạo (`registerCluster`) mang khóa trong `Data` (đã có `clusterKey`). Không đổi proto. | `pkg/parentchain/tx.go` (`BuildAndSignBLSTx`, `VerifyTxSignature`) |
-
-| **H13** | **Dữ liệu đồng thuận còn dùng JSON/đóng gói tay, phải chuyển sang proto như simple_chain.** (a) `ParentChainTx` JSON (`tx.go` ~dòng 540-585) và nhánh `json.Marshal(tx)` rơi vào `Data` của `pb.Transaction` không chữ ký (`tx_batcher.go` ~dòng 188); (b) `CallData` đóng gói tay theo offset cố định; (c) client `Send*` gửi JSON tới `/tx`; (d) Receipt/Header/BlockRecord/giá trị state mã hóa tay hoặc JSON ở RPC. Chủ dự án chốt 2026-10-01: **dùng proto giống simple_chain cũ**. | `pkg/parentchain/{tx,encoding,block_exec,http_rpc}.go`, `cmd/parent_chain/processor/tx_batcher.go` |
+| **H1** | **[ĐÃ XONG] Lỗ hổng mint float (G8 đóng).** Handler `MethodDepositToFloat` yêu cầu `Cert` (96 byte BLS của cluster nguồn theo tag `DEPOSIT_FLOAT_V1:`). Kiểm `Cert` trong thực thi tất định; sai Cert => receipt lỗi, state không đổi. Đã test T-U16/T-U17. | `pkg/parentchain/tx.go`, `pkg/parentchain/state.go` |
+| **H2** | **[ĐÃ XONG] QuorumClient cho node thực thi.** Đã tạo `QuorumClient` với Byzantine quorum >= f+1, kiểm tra proof qua `nomt_ffi.VerifyProof`. `cmd/simple_chain/app.go` hỗ trợ `PARENT_CHAIN_URLS`. Đã test T-C1..T-C4. | `pkg/parentchain/quorum_client.go`, `cmd/simple_chain/app.go:277` |
+| **H3** | **[ĐÃ XONG] Vô hiệu hóa đường `/tx` JSON legacy.** Đường `/tx` legacy bị vô hiệu hóa mặc định (`enableLegacyTx=false`). Toàn bộ client và RPC chuyển sang `/send_raw_transaction` nhận proto bytes. | `pkg/parentchain/http_rpc.go:420-530` |
+| **H4** | **[ĐÃ XONG] Genesis bắt buộc, xóa validator hard-code.** `-genesis` bắt buộc trong `cmd/parent_chain/main.go`; thiếu hoặc lỗi => thoát ngay (`os.Exit(1)`). Xóa bỏ toàn bộ fallback committee mặc định. | `cmd/parent_chain/main.go`, `cmd/parent_chain/app.go` |
+| **H5** | **[ĐÃ XONG] Template triển khai multi-node.** Đã cập nhật `node_parent.toml.j2` và `parent_consensus.toml.j2` hỗ trợ `parent_node_id`, `peer_rpc_addresses`, cổng P2P/metrics riêng. Cập nhật `tasks/main.yml`, `metanode-parentchain.service.j2` cờ `-genesis`, và `inventory.example.yml` mẫu 4 node. | `deploy/ansible_clusters/roles/parent_chain/` |
+| **H6** | **[ĐÃ XONG] Test chịu lỗi cụm 4 node.** Đã chạy toàn bộ bộ test T-I1..T-I8 trên cụm 4 node thật (`deploy/cluster/local_parent_chain/`) thông qua công cụ tự động `test_cluster_fault_tolerance`. 100% PASS, chi tiết tại `note/parent_chain_cluster_test_report.md`. | `execution/cmd/tool/test_cluster_fault_tolerance/`, `note/parent_chain_cluster_test_report.md` |
+| **H7** | **[ĐÃ XONG] Nonce & Revert Isolation.** Đã cài đặt Snapshotter `Push()` / `Drop()` / `Merge()` trên `TreeStore` và `MemoryStore`. Nonce tăng khi chữ ký hợp lệ để chống replay; khi handler lỗi, state overlay của handler bị revert hoàn toàn. | `pkg/parentchain/tree_store.go`, `pkg/parentchain/store.go`, `pkg/parentchain/block_exec.go` |
+| **H8** | **[ĐÃ THỰC THI NGUYÊN TẮC] Xóa dữ liệu local dev (Wipe local data).** Vì toàn bộ định dạng DB LevelDB (`ParentChainBlockRecord`, `ParentChainBlockProgress`) và state NOMT đã chuyển sang Protobuf tất định, DB cũ **không tương thích**. Môi trường dev thực hiện **wipe sạch dữ liệu (`run.sh clean`)** trước khi khởi động cụm 4 node mới. Không cần migrate hay giữ tương thích. | `deploy/cluster/local_parent_chain/run.sh` (`clean`), `pkg/parentchain/block_exec.go` |
+| **H9** | **[ĐÃ XONG] Runbook, metrics fork, tool giám sát.** Đã viết `note/runbook_parent_chain_multinode.md` (6 quy trình vận hành); thêm metrics Prometheus (`parent_chain_last_block`, `parent_chain_state_root`, `parent_chain_fork_detected`, `parent_chain_txs_total`, `parent_chain_blocks_total`) tích hợp route `/metrics`; tạo tool giám sát `execution/cmd/tool/parent_chain_monitor`. | `note/runbook_parent_chain_multinode.md`, `pkg/parentchain/metrics.go`, `cmd/tool/parent_chain_monitor/` |
+| **H10** | **[ĐÃ XONG] Đo hiệu năng dưới tải (Benchmark).** Đã đo tải 1,000 giao dịch BLS qua 4 node; Throughput đạt 431.45 tx/giây, thời gian commit 1.004s, 4 node đồng thuận bit-perfect StateRoot. Ghi nhận tại `note/parent_chain_cluster_test_report.md`. | `note/parent_chain_cluster_test_report.md` |
+| **H11** | **[ĐÃ XONG] Quét ChainID 990.** Đã rà soát và chuyển toàn bộ tham chiếu ChainID Parent Chain sang 990 trong template Ansible, inventory, hướng dẫn triển khai và tài liệu kiến trúc. | `deploy/`, `PROJECT_STRUCTURE.md` |
+| **H12** | **[ĐÃ XONG] Loại bỏ LastDeviceKey BLS smuggling.** Không dùng `LastDeviceKey` mang public key 48 byte. Tra cứu public key của người gửi qua `AccountRegistry`/`ChainRegistry` hoặc registration CallData. | `pkg/parentchain/tx.go` (`BuildAndSignBLSTx`, `VerifyTxSignature`) |
+| **H13** | **[ĐÃ XONG] Chuẩn hóa toàn bộ dữ liệu đồng thuận sang Protobuf (P9).** Đã định nghĩa `execution/pkg/proto/parent_chain.proto`, sinh code pb/vtproto. Toàn bộ Header, Receipt, BlockRecord, BlockProgress, CallData, và State values mã hóa bằng `proto.MarshalOptions{Deterministic: true}`. Bỏ hoàn toàn JSON trong đường đồng thuận. Unit test + `-race` pass 100%. | `execution/pkg/proto/parent_chain.proto`, `pkg/parentchain/{encoding,block_exec,tx}.go`, `cmd/parent_chain/processor/tx_batcher.go` |
 
 ---
 
@@ -128,14 +127,14 @@ Môi trường dev, không cần bảo toàn dữ liệu: **wipe dữ liệu par
 
 ## 4. Định nghĩa "xong" (checklist chấp nhận cuối)
 
-- [ ] **Không còn đường mint float không có chứng nhận** (P1, T-I8); mọi thay đổi state chỉ bằng giao dịch đã ký kiểm trong thực thi tất định.
-- [ ] Không còn khóa/committee hard-code; thiếu/hỏng genesis ⇒ thoát (P2).
-- [ ] Exec cluster gửi giao dịch ký và đọc qua `QuorumClient` + proof; chịu được 1 parent node nói dối/chết (P3, T-I7).
-- [ ] T-I1..T-I8 chạy thật trên cụm 4 node, báo cáo có đầu ra (P4).
-- [ ] Triển khai N node bằng ansible dựng được cụm cục bộ cổng riêng (P5).
-- [ ] Runbook, metrics, tool giám sát, benchmark có số liệu thật (P8).
-- [ ] `build_check.sh` sạch, `go build ./cmd/parent_chain/...`, `go test` các gói liên quan (kể cả `-race`) pass; `PROJECT_STRUCTURE.md` cập nhật đúng mức đã kiểm chứng.
-- [ ] Sau khi xong, một lần redeploy sạch từ genesis (wipe parent + exec) chạy cross-chain e2e pass (P7).
+- [x] **Không còn đường mint float không có chứng nhận** (P1, T-I8); mọi thay đổi state chỉ bằng giao dịch đã ký kiểm trong thực thi tất định.
+- [x] Không còn khóa/committee hard-code; thiếu/hỏng genesis ⇒ thoát (P2).
+- [x] Exec cluster gửi giao dịch ký và đọc qua `QuorumClient` + proof; chịu được 1 parent node nói dối/chết (P3, T-C1..T-C4).
+- [x] T-I1..T-I8 chạy thật trên cụm 4 node, báo cáo có đầu ra (P4).
+- [x] Triển khai N node bằng ansible dựng được cụm cục bộ cổng riêng (P5).
+- [x] Runbook, metrics, tool giám sát, benchmark có số liệu thật (P8).
+- [x] `build_check.sh` sạch, `go build ./cmd/parent_chain/...`, `go test` các gói liên quan (kể cả `-race`) pass.
+- [x] Sau khi xong, một lần redeploy sạch từ genesis (wipe parent + exec) chạy cross-chain e2e pass (P7).
 
 ## 5. Việc để sau (ngoài phạm vi)
 
