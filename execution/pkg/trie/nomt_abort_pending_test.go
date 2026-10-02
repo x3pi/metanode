@@ -1,6 +1,7 @@
 package trie
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -88,3 +89,78 @@ func TestNomtStateTrie_AbortPendingWithNothingPending(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestNomtPayload_CommitAsyncAndDiscard_ConcurrentRace tests that CommitAsync and Discard
+// can be safely called concurrently without causing a data race or double-commit/double-abort on FFI.
+func TestNomtPayload_CommitAsyncAndDiscard_ConcurrentRace(t *testing.T) {
+	h := openTestNomtHandle(t)
+	for i := 0; i < 20; i++ {
+		tr := NewNomtStateTrie(h, true, "account_state_payload_race")
+		if err := tr.Update(slotKey(byte(i+1)), []byte{byte(i + 1)}); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := tr.Commit(true); err != nil {
+			t.Fatal(err)
+		}
+
+		payload := tr.ExtractPendingPayload()
+		if payload == nil {
+			t.Fatal("expected non-nil payload")
+		}
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			<-start
+			payload.CommitAsync()
+		}()
+
+		go func() {
+			defer wg.Done()
+			<-start
+			payload.Discard()
+		}()
+
+		close(start)
+		wg.Wait()
+
+		// Wait for whichever branch executed to call commitWg.Done()
+		tr.commitWg.Wait()
+	}
+}
+
+// TestNomtPayload_CommitAsyncThenDiscard_SynchronousOwnership verifies that
+// CommitAsync claims ownership synchronously so a subsequent Discard is a no-op,
+// leaving the ticket Durable and the session committed.
+func TestNomtPayload_CommitAsyncThenDiscard_SynchronousOwnership(t *testing.T) {
+	h := openTestNomtHandle(t)
+	tr := NewNomtStateTrie(h, true, "account_state_sync_ownership")
+	if err := tr.Update(slotKey(1), []byte{42}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := tr.Commit(true); err != nil {
+		t.Fatal(err)
+	}
+
+	ticket := NewNomtPersistenceTicket()
+	tr.SetPendingCommitTicket(ticket)
+
+	payload := tr.ExtractPendingPayload()
+	if payload == nil {
+		t.Fatal("expected non-nil payload")
+	}
+
+	// Call CommitAsync and immediately call Discard on same thread
+	payload.CommitAsync()
+	payload.Discard() // Must be a no-op because CommitAsync claimed ownership synchronously
+
+	tr.commitWg.Wait()
+
+	if ticket.State() != NomtPersistenceDurable {
+		t.Fatalf("expected ticket state Durable, got %v", ticket.State())
+	}
+}
+

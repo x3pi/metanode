@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -22,13 +23,18 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
+const maxCachedStorageTries = 512
+
 type SmartContractDB struct {
 	codeStorage     storage.Storage
 	dbSmartContract storage.Storage
 
 	accountStateDB types.AccountStateDB
 
-	smartContractStorageTries sync.Map // Replaces map[common.Address]trie.StateTrie
+	smartContractStorageTries sync.Map // map[common.Address]trie.StateTrie
+	dirtyStorageContracts     sync.Map // map[common.Address]struct{} - tracks contracts modified in this DB
+	accessSequence            atomic.Uint64
+	lastAccessSeq             sync.Map // map[common.Address]uint64
 
 	pendingCode      sync.Map // Replaces map[common.Hash][]byte
 	pendingEventLogs sync.Map // Replaces map[common.Address][]types.EventLog
@@ -134,6 +140,17 @@ func (db *SmartContractDB) Copy(accountStateDB types.AccountStateDB) *SmartContr
 		}
 		return true
 	})
+
+	db.dirtyStorageContracts.Range(func(key, value interface{}) bool {
+		newDB.dirtyStorageContracts.Store(key, value)
+		return true
+	})
+
+	db.lastAccessSeq.Range(func(key, value interface{}) bool {
+		newDB.lastAccessSeq.Store(key, value)
+		return true
+	})
+	newDB.accessSequence.Store(db.accessSequence.Load())
 
 	db.pendingCode.Range(func(key, value interface{}) bool {
 		newDB.pendingCode.Store(key, value)
@@ -250,7 +267,11 @@ func (db *SmartContractDB) SetStorageValue(address common.Address, key []byte, v
 	if t == nil {
 		return fmt.Errorf("failed to get StorageValue: db is nil")
 	}
-	return t.Update(key, value)
+	if err := t.Update(key, value); err != nil {
+		return err
+	}
+	db.dirtyStorageContracts.Store(address, struct{}{})
+	return nil
 }
 
 // BatchSetStorageValues performs optimized batch updates for multiple storage slots
@@ -273,7 +294,11 @@ func (db *SmartContractDB) BatchSetStorageValues(address common.Address, keys, v
 	if t == nil {
 		return fmt.Errorf("failed to batch set storage: trie is nil for address %s", address.Hex())
 	}
-	return t.BatchUpdate(keys, values)
+	if err := t.BatchUpdate(keys, values); err != nil {
+		return err
+	}
+	db.dirtyStorageContracts.Store(address, struct{}{})
+	return nil
 }
 
 func (db *SmartContractDB) EventLogs() map[common.Address][]types.EventLog {
@@ -327,15 +352,21 @@ func GroupEventLogsByAddress(eventLogs []types.EventLog) map[common.Address][]ty
 	return groupedLogs
 }
 
-func (db *SmartContractDB) CommitAllStorage() (interface{}, error) {
+func (db *SmartContractDB) CommitAllStorage() (pendingSession interface{}, finalErr error) {
+	defer func() {
+		if finalErr != nil && pendingSession != nil {
+			if disc, ok := pendingSession.(interface{ Discard() }); ok {
+				disc.Discard()
+			}
+			pendingSession = nil
+		}
+	}()
+
 	var allBatches [][2][]byte
-	var finalErr error
 	backend := trie.GetStateBackend()
 
-	var pendingSession interface{}
-
 	var addresses []common.Address
-	db.smartContractStorageTries.Range(func(key, _ interface{}) bool {
+	db.dirtyStorageContracts.Range(func(key, _ interface{}) bool {
 		address := key.(common.Address)
 		addresses = append(addresses, address)
 		return true
@@ -352,7 +383,7 @@ func (db *SmartContractDB) CommitAllStorage() (interface{}, error) {
 		t_val, ok := db.smartContractStorageTries.Load(address)
 		if !ok || t_val == nil {
 			logger.Error("Failed to load storage trie for address:", address)
-			continue
+			return nil, fmt.Errorf("dirty storage trie missing for %s", address.Hex())
 		}
 		t := t_val.(trie.StateTrie)
 
@@ -410,10 +441,13 @@ func (db *SmartContractDB) CommitAllStorage() (interface{}, error) {
 
 		// Update account state with new storage root
 		as, asErr := db.accountStateDB.AccountState(address)
-		if asErr != nil || as.SmartContractState() == nil {
-			logger.Error("Invalid account state for address:", address)
-			finalErr = asErr
-			continue
+		if asErr != nil {
+			logger.Error("Failed to load account state for address: %s: %v", address.Hex(), asErr)
+			return nil, fmt.Errorf("load account %s: %w", address.Hex(), asErr)
+		}
+		if as == nil || as.SmartContractState() == nil {
+			logger.Error("Smart contract state missing for address:", address)
+			return nil, fmt.Errorf("smart contract state missing for %s", address.Hex())
 		}
 
 		if as.SmartContractState().StorageRoot() != root {
@@ -482,6 +516,14 @@ func (db *SmartContractDB) CommitAllStorage() (interface{}, error) {
 		db.SetSmartContractStorageBatch(data)
 	}
 
+	if finalErr == nil {
+		db.dirtyStorageContracts.Range(func(key, _ interface{}) bool {
+			db.dirtyStorageContracts.Delete(key)
+			return true
+		})
+		db.evictCleanTriesIfNeeded()
+	}
+
 	return pendingSession, finalErr
 }
 
@@ -493,7 +535,7 @@ func (db *SmartContractDB) LateBindRoots() error {
 	var addresses []common.Address
 	var nomtTries []*trie.NomtStateTrie
 	var nomtAddresses []common.Address
-	db.smartContractStorageTries.Range(func(key, _ interface{}) bool {
+	db.dirtyStorageContracts.Range(func(key, _ interface{}) bool {
 		addresses = append(addresses, key.(common.Address))
 		return true
 	})
@@ -508,7 +550,7 @@ func (db *SmartContractDB) LateBindRoots() error {
 		t_val, ok := db.smartContractStorageTries.Load(address)
 		if !ok || t_val == nil {
 			logger.Error("LateBindRoots: Failed to load storage trie for address:", address)
-			continue
+			return fmt.Errorf("dirty storage trie missing in LateBindRoots for %s", address.Hex())
 		}
 		t := t_val.(trie.StateTrie)
 
@@ -586,8 +628,11 @@ func (db *SmartContractDB) LateBindRoots() error {
 		}
 
 		as, asErr := db.accountStateDB.AccountState(address)
-		if asErr != nil || as.SmartContractState() == nil {
-			continue
+		if asErr != nil {
+			return fmt.Errorf("LateBindRoots load account %s: %w", address.Hex(), asErr)
+		}
+		if as == nil || as.SmartContractState() == nil {
+			return fmt.Errorf("LateBindRoots smart contract state missing for %s", address.Hex())
 		}
 
 		if as.SmartContractState().StorageRoot() != root {
@@ -627,20 +672,27 @@ func (db *SmartContractDB) LateBindRoots() error {
 			return err
 		}
 
+		// Create a single shared persistence ticket for the entire batch
+		batchTicket := trie.NewNomtPersistenceTicket()
+
 		// Clear dirty states and set pendingFinishedSession on the FIRST trie
 		for i, nt := range nomtTries {
-			nt.ClearDirty(globalRoot)
+			nt.ClearDirty(globalRoot, batchTicket)
 			if i == 0 {
 				nt.SetPendingSession(fs)
 				nt.SetPendingChangelog(changes, nt.GetCurrentCommitBlock())
+				nt.SetPendingCommitTicket(batchTicket)
 			}
 		}
 
 		// Assign globalRoot to all those contracts' AccountStates
 		for _, address := range nomtAddresses {
 			as, asErr := db.accountStateDB.AccountState(address)
-			if asErr != nil || as.SmartContractState() == nil {
-				continue
+			if asErr != nil {
+				return fmt.Errorf("LateBindRoots NOMT load account %s: %w", address.Hex(), asErr)
+			}
+			if as == nil || as.SmartContractState() == nil {
+				return fmt.Errorf("LateBindRoots NOMT smart contract state missing for %s", address.Hex())
 			}
 			if as.SmartContractState().StorageRoot() != globalRoot {
 				as.SetStorageRoot(globalRoot)
@@ -814,7 +866,7 @@ func (db *SmartContractDB) StorageRoot(address common.Address, customRoot ...*co
 
 func (db *SmartContractDB) loadStorageTrie(address common.Address, customRoot ...*common.Hash) (trie.StateTrie, error) {
 
-	db.lastAccessTime.LoadOrStore(address, time.Now())
+	db.lastAccessTime.Store(address, time.Now())
 
 	// CRITICAL CONCURRENCY & FORK-SAFETY FIX (May 2026):
 	// If a customRoot is explicitly requested, bypass the cached trie lookup.
@@ -824,6 +876,7 @@ func (db *SmartContractDB) loadStorageTrie(address common.Address, customRoot ..
 	hasCustomRoot := len(customRoot) > 0 && customRoot[0] != nil
 
 	if !hasCustomRoot {
+		db.lastAccessSeq.Store(address, db.accessSequence.Add(1))
 		if t, ok := db.smartContractStorageTries.Load(address); ok {
 			if t == nil {
 				return nil, fmt.Errorf("trie is nil for address: %s", address.Hex())
@@ -868,16 +921,94 @@ func (db *SmartContractDB) loadStorageTrie(address common.Address, customRoot ..
 	}
 
 	if !hasCustomRoot {
-		db.smartContractStorageTries.Store(address, t) // Sử dụng Store thay vì LoadOrStore vì chúng ta đã load ở trên rồi
+		actual, loaded := db.smartContractStorageTries.LoadOrStore(address, t)
+		if loaded {
+			if closer, ok := t.(interface{ Close() }); ok {
+				closer.Close()
+			}
+			return actual.(trie.StateTrie), nil
+		}
 	}
 
 	// Kết thúc đo thời gian và ghi log
 	return t, nil
 }
 
+type candidateAddress struct {
+	addr common.Address
+	seq  uint64
+}
+
+func (db *SmartContractDB) evictCleanTriesIfNeeded() {
+	var count int
+	var candidates []candidateAddress
+
+	db.smartContractStorageTries.Range(func(key, value interface{}) bool {
+		count++
+		addr := key.(common.Address)
+		// Never evict dirty contracts
+		if _, isDirty := db.dirtyStorageContracts.Load(addr); isDirty {
+			return true
+		}
+		// Only consider evictable tries that prove durability
+		if evictable, ok := value.(trie.EvictableStateTrie); ok && evictable.CanEvict() {
+			seqVal, _ := db.lastAccessSeq.Load(addr)
+			var seq uint64
+			if seqVal != nil {
+				seq = seqVal.(uint64)
+			}
+			candidates = append(candidates, candidateAddress{addr: addr, seq: seq})
+		}
+		return true
+	})
+
+	if count <= maxCachedStorageTries || len(candidates) == 0 {
+		return
+	}
+
+	// Sort candidates by access sequence ascending (oldest accessed first)
+	slices.SortFunc(candidates, func(a, b candidateAddress) int {
+		if a.seq < b.seq {
+			return -1
+		} else if a.seq > b.seq {
+			return 1
+		}
+		return 0
+	})
+
+	toEvict := count - maxCachedStorageTries
+	evicted := 0
+	for _, c := range candidates {
+		if evicted >= toEvict {
+			break
+		}
+		if val, ok := db.smartContractStorageTries.Load(c.addr); ok {
+			// Re-verify it is still evictable and not dirty
+			if _, isDirty := db.dirtyStorageContracts.Load(c.addr); isDirty {
+				continue
+			}
+			if evictable, ok := val.(trie.EvictableStateTrie); ok && evictable.CanEvict() {
+				if db.smartContractStorageTries.CompareAndDelete(c.addr, val) {
+					db.lastAccessSeq.Delete(c.addr)
+					db.lastAccessTime.Delete(c.addr)
+					evicted++
+				}
+			}
+		}
+	}
+}
+
 func (db *SmartContractDB) Discard() {
 	db.pendingCode.Range(func(key, _ interface{}) bool {
 		db.pendingCode.Delete(key)
+		return true
+	})
+	db.dirtyStorageContracts.Range(func(key, _ interface{}) bool {
+		db.dirtyStorageContracts.Delete(key)
+		return true
+	})
+	db.lastAccessSeq.Range(func(key, _ interface{}) bool {
+		db.lastAccessSeq.Delete(key)
 		return true
 	})
 	db.smartContractStorageTries.Range(func(key, value interface{}) bool {
@@ -899,6 +1030,10 @@ func (db *SmartContractDB) Discard() {
 // (finished, unpersisted) NOMT session first, then the in-memory state is cleared like Discard. Discard alone
 // closes the tries, and closing a trie persists its pending session — wrong for state that must never land.
 func (db *SmartContractDB) AbortPending() {
+	db.dirtyStorageContracts.Range(func(key, _ interface{}) bool {
+		db.dirtyStorageContracts.Delete(key)
+		return true
+	})
 	db.smartContractStorageTries.Range(func(_, value interface{}) bool {
 		if a, ok := value.(interface{ AbortPending() }); ok {
 			a.AbortPending()
@@ -922,6 +1057,10 @@ func (db *SmartContractDB) InvalidateAllCaches() {
 		db.lastAccessTime.Delete(key)
 		return true
 	})
+	db.lastAccessSeq.Range(func(key, _ interface{}) bool {
+		db.lastAccessSeq.Delete(key)
+		return true
+	})
 }
 
 func (db *SmartContractDB) GetSmartContractUpdateDatas() map[common.Address]types.SmartContractUpdateData {
@@ -932,9 +1071,11 @@ func (db *SmartContractDB) ClearSmartContractUpdateDatas() {
 }
 
 func (db *SmartContractDB) DeleteAddress(address common.Address) {
+	db.dirtyStorageContracts.Delete(address)
 	db.smartContractStorageTries.Delete(address)
 	db.pendingEventLogs.Delete(address)
 	db.lastAccessTime.Delete(address)
+	db.lastAccessSeq.Delete(address)
 }
 
 func (db *SmartContractDB) NewTrieStorage(address common.Address) common.Hash {

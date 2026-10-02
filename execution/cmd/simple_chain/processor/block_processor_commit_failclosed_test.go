@@ -3,6 +3,7 @@ package processor
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -256,4 +257,43 @@ func TestCommitWorker_ChangelogFailureIsFatal(t *testing.T) {
 			require.Error(t, bp.GetLastCommitErr(), "root error must be recorded so later work is refused")
 		})
 	}
+}
+
+type trackingDiscardPayload struct {
+	err       error
+	discarded *atomic.Bool
+}
+
+func (p trackingDiscardPayload) WriteChangelog() error { return p.err }
+func (p trackingDiscardPayload) Discard()              { p.discarded.Store(true) }
+
+func TestCommitWorker_FailurePathsDiscardPayloads(t *testing.T) {
+	bp := &BlockProcessor{commitChannel: make(chan CommitJob, 4)}
+	go bp.commitWorker()
+	defer close(bp.commitChannel)
+
+	var accDiscarded atomic.Bool
+	var stakeDiscarded atomic.Bool
+	var scDiscarded atomic.Bool
+
+	errCh := make(chan error, 1)
+	bp.commitChannel <- CommitJob{
+		Block:                    newFailClosedTestBlock(),
+		AccountNomtPayload:       trackingDiscardPayload{err: errors.New("write changelog failed"), discarded: &accDiscarded},
+		StakeNomtPayload:         trackingDiscardPayload{discarded: &stakeDiscarded},
+		SmartContractNomtPayload: trackingDiscardPayload{discarded: &scDiscarded},
+		ErrChan:                  errCh,
+	}
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "account changelog durability failed")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for changelog error")
+	}
+
+	assert.True(t, accDiscarded.Load(), "Account payload must be discarded on failure")
+	assert.True(t, stakeDiscarded.Load(), "Stake payload must be discarded on failure")
+	assert.True(t, scDiscarded.Load(), "SmartContract payload must be discarded on failure")
 }

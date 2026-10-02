@@ -281,7 +281,7 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 			} else {
 				serializeAndSetResponse(response, outPayload, outLen)
 			}
-			return C.bool(true)
+			return C.bool(response != nil && response.GetSuccess())
 		case <-time.After(executeBlockResponseTimeout):
 			logger.Error("🚨 [FFI BRIDGE] Timeout waiting for speculative execution response (GEI=%d) — treating as failure so Rust can retry instead of hanging forever", subDag.GetGlobalExecIndex())
 			serializeAndSetResponse(&pb.ExecuteBlockResponse{

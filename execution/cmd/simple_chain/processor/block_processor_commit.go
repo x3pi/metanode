@@ -24,6 +24,24 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
+// discardJobPayloads safely aborts and releases all NOMT payloads in a job
+// if commit failed or was skipped, preventing activeCount leaks and commitWg deadlocks.
+func discardJobPayloads(job *CommitJob) {
+	if job == nil {
+		return
+	}
+	for _, p := range []interface{}{job.AccountNomtPayload, job.StakeNomtPayload, job.SmartContractNomtPayload} {
+		if p != nil {
+			if disc, ok := p.(interface{ Discard() }); ok && disc != nil {
+				disc.Discard()
+			}
+		}
+	}
+	job.AccountNomtPayload = nil
+	job.StakeNomtPayload = nil
+	job.SmartContractNomtPayload = nil
+}
+
 // commitWorker handles committing and broadcasting blocks after creation
 func (bp *BlockProcessor) commitWorker() {
 	logger.Info("🚀 [COMMIT] commitWorker loop started")
@@ -58,6 +76,7 @@ func (bp *BlockProcessor) commitWorker() {
 
 		if priorErr := bp.GetLastCommitErr(); priorErr != nil {
 			logger.Error("🚨 [COMMIT-WORKER] Skipping commit for block #%d due to prior commit error: %v", job.Block.Header().BlockNumber(), priorErr)
+			discardJobPayloads(&job)
 			if job.ErrChan != nil {
 				job.ErrChan <- fmt.Errorf("skipped block #%d: prior commit error: %w", job.Block.Header().BlockNumber(), priorErr)
 			}
@@ -109,6 +128,7 @@ func (bp *BlockProcessor) commitWorker() {
 				if err := payload.WriteChangelog(); err != nil {
 					commitErr := fmt.Errorf("block #%d account changelog durability failed: %w", blockNum, err)
 					bp.SetLastCommitErr(commitErr)
+					discardJobPayloads(&job)
 					if job.ErrChan != nil {
 						job.ErrChan <- commitErr
 					}
@@ -121,6 +141,7 @@ func (bp *BlockProcessor) commitWorker() {
 				if err := payload.WriteChangelog(); err != nil {
 					commitErr := fmt.Errorf("block #%d stake changelog durability failed: %w", blockNum, err)
 					bp.SetLastCommitErr(commitErr)
+					discardJobPayloads(&job)
 					if job.ErrChan != nil {
 						job.ErrChan <- commitErr
 					}
@@ -133,6 +154,7 @@ func (bp *BlockProcessor) commitWorker() {
 				if err := payload.WriteChangelog(); err != nil {
 					commitErr := fmt.Errorf("block #%d smart contract changelog durability failed: %w", blockNum, err)
 					bp.SetLastCommitErr(commitErr)
+					discardJobPayloads(&job)
 					if job.ErrChan != nil {
 						job.ErrChan <- commitErr
 					}
@@ -147,6 +169,7 @@ func (bp *BlockProcessor) commitWorker() {
 		if _, err := bp.chainState.CommitBlockState(job.Block, blockchain.WithPersistToDB(), blockchain.WithSaveTxMapping(), blockchain.WithCommitMappings()); err != nil {
 			logger.Error("🚨 [COMMIT-WORKER] CommitBlockState failed for block #%d: %v — aborting post-commit processing", blockNum, err)
 			bp.SetLastCommitErr(fmt.Errorf("block #%d CommitBlockState failed: %w", blockNum, err))
+			discardJobPayloads(&job)
 			if job.ErrChan != nil {
 				job.ErrChan <- err
 			}
