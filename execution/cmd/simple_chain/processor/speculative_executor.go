@@ -1043,7 +1043,7 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		bp.chainState.SetSmartContractDB(clonedState.GetSmartContractDB())
 		bp.chainState.SetStakeStateDB(clonedState.GetStakeStateDB())
 		// CRITICAL ZERO-FORK FIX: Clear clonedState reference once adopted by chainState.
-		// Otherwise, when CleanGEI runs after commit, it would invoke CloseSpeculative()
+		// Otherwise, when CleanGEI runs after commit, it would discard the live tries (the removed CloseSpeculative path)
 		// (and scDB.Discard()) on this state, wiping the live in-memory tries from
 		// bp.chainState and causing subsequent blocks to read stale storage from disk.
 		clonedState = nil

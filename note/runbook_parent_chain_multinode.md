@@ -211,17 +211,17 @@ go run ./cmd/tool/test_account_model                  # genesis→chuyển→ng�
   ```bash
   cd execution
   # Xem định dạng YAML cho inventory Ansible:
-  go run ./cmd/tool/gen_float_accounts -exec-genesis /path/to/exec/genesis.json -format yaml
+  go run ./cmd/tool/gen_float_accounts -genesis /path/to/exec/genesis.json -bls-pubkey <48-byte-hex> -format yaml
 
   # Patch trực tiếp vào parent_genesis.json:
-  go run ./cmd/tool/gen_float_accounts -exec-genesis /path/to/exec/genesis.json -patch-parent /path/to/parent_genesis.json
+  go run ./cmd/tool/gen_float_accounts -genesis /path/to/exec/genesis.json -bls-pubkey <48-byte-hex> -patch-parent-genesis /path/to/parent_genesis.json  # NOTE: replaces the WHOLE float_accounts list; pass every cluster via -cluster PUBKEY=GENESIS
   ```
 - **Kiểm tra trạng thái qua RPC:**
   ```bash
   curl -s -X POST http://127.0.0.1:8646 -H "Content-Type: application/json" \
     -d '{"jsonrpc":"2.0","method":"mtn_getConservation","params":[],"id":1}' | jq
   ```
-  Nếu `result.blocked == true`: Hệ thống đang bật chế độ bảo vệ do phát hiện sai lệch. Kiểm tra trường `result.diff`, `result.float_balance`, và `result.account_sum` để đối soát.
+  Nếu `result.blocked == true`: Hệ thống đang bật chế độ bảo vệ do phát hiện sai lệch. Kiểm tra trường `result.diff`, `result.float`, `result.supply`, `result.pending` và `result.reason` để đối soát.
 
 ## 5. Giao dịch: chỉ có một đường
 

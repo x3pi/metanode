@@ -128,11 +128,11 @@ Chưa làm trong đợt này. **Việc chỉ-đọc được phép làm ngay (kh
 
 - [x] `dev` trên GitHub chứa toàn bộ bản sửa (`de6ac207`).
 - [ ] (P7, dời lại) Cụm production/231/230 chạy đúng commit đó (cả Rust và Go).
-- [x] P1: Kịch bản chaos burn-in tự động `execution/scripts/chaos_burnin.sh` đã hoàn thành (ngẫu nhiên kill -9 1-2 hoặc 4 nodes, downtime 5-120s phủ `gc_depth`, tx liên tục, verify hash từng block).
+- [ ] P1: script `execution/scripts/chaos_burnin.sh` đã viết (kiểm cú pháp) nhưng **CHƯA chạy lượt nào**; cần chạy ≥ 200 chu kỳ và ghi kết quả thật. Mô tả script (ngẫu nhiên kill -9 1-2 hoặc 4 nodes, downtime 5-120s phủ `gc_depth`, tx liên tục, verify hash từng block).
 - [ ] P2: toàn bộ test pass trên cụm ≥ 2 máy với genesis production (cluster policy đóng).
-- [x] Cảnh báo lệch height hoạt động và đã cập nhật vào runbook (`block_hash_checker --watch --lag-threshold 2` + Telegram alert).
-- [x] Runbook cập nhật đầy đủ: mục 3.4/3.5 fork response, 4.1 float model, 4.2 BLS conservation guard & `gen_float_accounts`.
-- [x] P8.1/P8.2: key chỉ nhận float không thể chứng nhận/mint (test hồi quy); đăng ký theo số dư ≥ 1000 đơn vị; đã rà kỹ `MarkClaimed`/`ReclaimFloat`/`RegisterAccount` (xác nhận an toàn, không có lỗ hổng ủy quyền certifier).
+- [ ] Cảnh báo lệch height: đã ghi lệnh vào runbook, **chưa bắn thử cảnh báo** (`block_hash_checker --watch --lag-threshold 2` + Telegram alert).
+- [ ] Runbook đã cập nhật (chưa diễn tập): mục 3.4/3.5 fork response, 4.1 float model, 4.2 BLS conservation guard & `gen_float_accounts`.
+- [x] P8.1/P8.2: key chỉ nhận float không thể chứng nhận/mint (test hồi quy); đăng ký theo số dư ≥ 1000 đơn vị; `MarkClaimed`/`ReclaimFloat`/`RegisterAccount`: chưa có bằng chứng rà soát trong commit, cần xác minh lại.
 - [ ] P8: genesis production thật (tài khoản, số dư, khóa BLS do chủ dự án cung cấp, không commit khóa riêng); quyết định bond.
 - [x] P9.1: Công cụ sinh `float_accounts` tự động `execution/cmd/tool/gen_float_accounts` đã hoàn thành và test PASS (json/yaml/patch).
 - [ ] P9.2: Kiểm chứng sống trên cụm thật/ansible (gửi cross-chain transfer ở chế độ `enforce` và `warn`).

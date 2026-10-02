@@ -29,12 +29,12 @@ type ClusterFloatResult struct {
 
 func main() {
 	var (
-		genesisPath       string
-		blsPubKey         string
-		clusterSpecs      multiClusterFlag
-		format            string
-		outFile           string
-		patchParentGen    string
+		genesisPath    string
+		blsPubKey      string
+		clusterSpecs   multiClusterFlag
+		format         string
+		outFile        string
+		patchParentGen string
 	)
 
 	flag.StringVar(&genesisPath, "genesis", "", "Path to execution cluster genesis.json")
@@ -284,7 +284,7 @@ func PatchParentGenesis(parentGenPath string, results []ClusterFloatResult) erro
 	for i, r := range results {
 		floatAccounts[i] = map[string]string{
 			"bls_public_key": r.BLSPublicKey,
-			"balance":      r.Balance,
+			"balance":        r.Balance,
 		}
 	}
 	root["float_accounts"] = floatAccounts
