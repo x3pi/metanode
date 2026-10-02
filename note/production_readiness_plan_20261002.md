@@ -1,0 +1,104 @@
+# Kế hoạch đưa Parent Chain + Node thực thi lên production (agent tiếp quản)
+
+> Lập 2026-10-02. Đọc kèm: `AGENTS.md` (luật bắt buộc), `PROJECT_STRUCTURE.md`, `note/runbook_parent_chain_multinode.md` (đặc biệt mục 3.4b),
+> `note/parent_chain_cluster_test_report.md` (đầu file có phần tái kiểm chứng trung thực), `note/parent_chain_completion_plan.md`.
+> Mốc code: nhánh `dev`, commit `87879fd0` (local có thể đi trước GitHub — kiểm tra `git status -sb`).
+
+---
+
+## 0. Luật không đổi (đọc trước khi làm bất cứ gì)
+
+1. **Zero-fork:** thà pending còn hơn fork. Không dùng timeout/sleep để quyết định dispatch. Mọi lối thoát kẹt phải dựa trên dữ liệu từ peer.
+2. Mọi hàng đợi/worker mới phải có giới hạn bộ đệm; không I/O chặn trong vòng lặp async.
+3. Sau mỗi thay đổi code: `consensus/metanode/scripts/build_check.sh` phải sạch (4/4, không warning). Nó **không** build `parent_chain`: chạy thêm `cd execution && go build ./cmd/parent_chain/... && go vet ./cmd/parent_chain/...`.
+4. **Chỉ `git add <tên file>`**, không `git add <thư mục>` (worktree dùng chung, từng bị quét nhầm file của agent khác). Trước khi commit chạy `git status` và `git diff` để chắc chỉ có thay đổi của chính mình.
+5. **Không push, không đóng/merge PR** khi chưa được chủ dự án đồng ý. Commit local thì được.
+6. **Báo cáo trung thực:** cái gì đã chạy thật trên cụm, cái gì mới có unit test, cái gì không tái hiện được. Một lần "PASS" phải kiểm tra bài test thực sự assert gì (đã từng có test xanh giả).
+7. Cập nhật `PROJECT_STRUCTURE.md` khi đổi cấu trúc/RPC; mỗi response kết thúc bằng khối tóm tắt tiếng Việt theo `AGENTS.md` Phần 5.
+
+## 1. Hiện trạng đã xác minh (2026-10-02)
+
+**Đã sửa và đã commit trên `dev`:**
+- Parent chain: admission filter ở `/send_raw_transaction` (chữ ký BLS, địa chỉ gateway, nonce), RPC `GET /float`, batcher retry khi kênh Rust đầy (trước đây mất tx im lặng), I/O timeout cho HTTP, ansible `parent_open_cluster_registration` mặc định `false`.
+- Consensus (Rust): commit thay thế commit local phải có 2f+1 votes ở mọi phase; detector `4a` chạy riêng mỗi tick; **không chèn baseline khi restart thường, luôn `set_committed`** (sửa lỗi parent chia 2/2).
+- Exec: hủy state đầu cơ dùng `AbortSpeculative` (không persist state bị hủy); sở hữu `ClonedState` nguyên tử; kênh phản hồi khi Rust retry; sửa nhiều data race (`PAUSE_GUARD`, `originRootHash`, header GEI, logger).
+- PR #153 (zero-fork speculative executor + độ bền NOMT) đã hợp nhất kèm bản sửa hồi quy `SmartContractState` (node thực thi từng dừng ở block 0).
+- PR #152 (block hash checker) đã hợp nhất vào `dev` local.
+- Bài test: e2e từng "xanh giả" (in số dư rỗng) đã sửa để assert thật; T-I1/T-I3/T-I4 đã chỉnh các race trong test.
+
+**Kết quả kiểm chứng gần nhất (bản `dev` hiện tại):** 6/6 lượt triển khai mới ansible với 9 kịch bản pass; 12 chu kỳ crash-restart với so hash từng block 0 lệch; T-I1..T-I8 8/8; consensus-core 216/216; `go test -race` sạch trên 52 package.
+
+**Còn mở / chưa chứng minh:**
+- Lỗi parent chia 2/2 sau nhiều lần `kill -9`: trước sửa ~1/3 lượt e2e mới triển khai, sau sửa 0/30 lượt — **chưa tái hiện được theo ý muốn nên chưa có test fail→pass**.
+- Kịch bản 6 (exec 2 không nhận số dư sau khi parent bật lại) fail 1 lần, chưa điều tra.
+- Mọi kết quả chỉ từ **một máy**. Cụm 231/230 vẫn chạy code cũ.
+
+## 2. Công cụ và bẫy đã biết (tiết kiệm nhiều giờ)
+
+| Việc | Cách làm | Bẫy |
+|---|---|---|
+| Cụm parent 4 node cục bộ, nhanh | `deploy/cluster/local_parent_chain/run.sh {clean,build,up,down,start-node N,stop-node N}`; cổng 18601–18604 | `run.sh build` **không relink** khi `libmetanode.a` đổi → dùng `go build -a` sau mỗi lần build lại Rust. Cụm này và cụm ansible **dùng chung cổng 18602–18604**: dừng cái này trước khi chạy cái kia. |
+| Bộ test chịu lỗi parent | `go run ./cmd/tool/test_cluster_fault_tolerance` (cần cụm local đang chạy) | Mỗi lượt ~1–2 phút. |
+| Cụm đầy đủ parent 4 + exec 3+1 | `cd deploy/ansible_clusters && GOFLAGS=-a ./deploy_clusters.sh --setup --reset --test --no-notify` | Cần `parent_chain_rpc_token` (ansible-vault) trong `inventory.yml` cục bộ (đã có, file bị gitignore). 9 kịch bản, ~4–6 phút. Log: `/var/log/metanode/*_restart.log` (nhiều GB, dùng `grep -a`), exec: `/opt/metanode/exec*/logs/<ngày>/`. |
+| Race detector | `go test -race` theo package; chạy node bản `-race` bằng `go build -race` | `parent_chain` bản `-race` mất ~36s để thoát (TSAN finalize) → ansible (cửa sổ SIGTERM 20s) báo lỗi. Muốn chạy race trên cụm thật thì dựng cụm bình thường rồi chỉ thay binary `simple_chain`, hoặc dùng `run.sh`. |
+| Kill node như kịch bản thật | `kill -9` (kịch bản e2e dùng `kill -9 $(lsof -ti tcp:PORT -sTCP:LISTEN)`) | Tắt êm bằng SIGTERM **không** kích hoạt các lỗi khôi phục sau crash. |
+| `pkill -f` / `pgrep -f` | Tránh dùng với mẫu xuất hiện trong chính lệnh bash của bạn | Nó giết luôn shell của bạn (exit 144). Dùng `pgrep` rồi loại `$$`. |
+
+## 3. Các gói công việc
+
+Thứ tự đề xuất: **P0 → P1 → P2** là điều kiện chạy thật; P3–P5 song song hoặc sau.
+
+### P0 — Push, redeploy, giám sát (cần chủ dự án duyệt push)
+- Kiểm tra `git log origin/dev..dev`; xin chủ dự án push `dev`. Sau khi push, **spot-check** trên GitHub rằng các file chính có mặt (từng có trường hợp squash-merge làm mất commit): `execution/pkg/trie/evictable.go`, `execution/cmd/simple_chain/processor/speculative_executor.go` (có `TakeClonedState`), `consensus/.../commit_syncer/mod.rs` (có `gc_depth`), `execution/pkg/smart_contract_db/smart_contract_db.go` (có cảnh báo `no SmartContractState`).
+- Chuẩn bị checklist redeploy đồng loạt cho cụm 231/230: **cả Rust lẫn Go cùng lúc** (thay đổi consensus và FFI), sao lưu dữ liệu trước (xem `note/` các runbook và memory 231/230 về cách backup, stop-all/start-all), build bằng `go build -a`, kiểm parity 4 node + 2 cụm exec sau khi lên.
+- Dựng cảnh báo: height các node parent lệch > 1 trong > 60 giây (dùng `deploy/ansible/monitors/block_hash_checker --watch` hoặc `execution/cmd/tool/parent_chain_monitor`), gửi Telegram. Ghi cách bật vào runbook.
+- **Nghiệm thu:** redeploy xong, `parent_chain_monitor --once` báo parity; cảnh báo bắn thử thành công (tắt 1 node cho lệch rồi bật lại).
+
+### P1 — Burn-in và chaos tự động (bằng chứng cho lỗi chia 2/2)
+Mục tiêu: biến "0 lỗi trong 30 lượt" thành bằng chứng đủ mạnh, hoặc bắt lại lỗi nếu còn.
+- Viết một script chaos lặp lâu (đặt ở `deploy/ci/` hoặc `execution/scripts/`; không chứa khóa): chu kỳ ngẫu nhiên gồm `kill -9` 1–2 node, đôi khi cả 4; tx liên tục; node tắt từ 5s đến 120s (phủ cả trường hợp gap > `gc_depth` — đường chèn baseline vẫn còn dùng); bật lại; chờ parity; so hash **từng block** trên 4 node; ghi log và **dừng giữ nguyên trạng thái khi có lệch hoặc kẹt** để phân tích.
+- Chạy ≥ 200 chu kỳ, cả với exec cluster đang chạy nền (có tải relayer). Lưu kết quả vào `note/` (số lượt, số lỗi, lệnh, đầu ra thật).
+- Nếu bắt được lỗi: dùng đúng phương pháp đã dùng — tìm lần phân kỳ đầu tiên (`DIGEST-GATE ... DIVERGENT`), xem trình tự khởi động ngay trước đó (`Baseline injected`, `Recovering committed state`, `RECOVERY-GUARD`), so với node không restart. Lưu log **trước** khi chạy lượt kế (log bị dọn khi `--reset`).
+- **Nghiệm thu:** báo cáo trung thực; nếu 0 lỗi/200 chu kỳ thì ghi rõ giới hạn (một máy, loại tải đã thử).
+
+### P2 — Cụm nhiều máy (production thật)
+- Dựng parent 4 node trên ≥ 2 máy khác nhau (ansible đã có inventory mẫu 4 node: `deploy/ansible_clusters/inventory.example.yml`), exec cluster trỏ `PARENT_CHAIN_URLS` vào cả 4. Genesis production: `parent_open_cluster_registration: false` + `parent_allowed_clusters` (playbook sẽ dừng nếu bỏ trống cả hai).
+- Chạy lại 9 kịch bản e2e, T-I1..T-I8, và chu kỳ chaos của P1 trên môi trường này (độ trễ mạng thật, `kill -9` thật, chặn mạng bằng `iptables`/`tc`).
+- Việc cần chủ dự án quyết: danh sách cluster được phép đăng ký, khóa BLS thật (không commit khóa), quản lý token RPC (`parent_chain_rpc_token`) và mật khẩu SSH/become bằng ansible-vault (xem GitHub issues #103–#105 về credential).
+- **Nghiệm thu:** toàn bộ test trên pass trên ≥ 2 máy; ghi lại số liệu độ trễ commit và TPS đo đúng (xem P5).
+
+### P3 — Điều tra kịch bản 6 flaky
+- Triệu chứng: sau khi parent bật lại (kịch bản 6), Exec 2 không ghi có số dư trong 40s; parent đã đều height; log exec2 đầy `ReceiveWorker: failed to fetch transfers ... dial tcp ...`.
+- Nghi ngờ: relayer/`ReceiveWorker` retry không kịp / cache URL lỗi thời sau khi parent khởi động lại; chưa xác nhận. Tái hiện bằng vòng lặp `--test-only` (≥ 10 lượt không reset) và bắt log exec2 ngay khi fail.
+- **Nghiệm thu:** nguyên nhân gốc có bằng chứng, sửa kèm test; hoặc kết luận "chỉ do cửa sổ chờ 40s quá ngắn" kèm số đo.
+
+### P4 — Chất lượng code và an toàn đồng thời
+- Rust chưa có công cụ race tương đương: rà `unsafe`, lock giữ xuyên `.await` (đã chạy clippy `await_holding_lock` sạch), các `static`/global trong `consensus/metanode/src`. Cân nhắc `cargo miri`/`loom` cho các module nhỏ có `unsafe` (ví dụ `ffi.rs`).
+- Chạy lại `go test -race` toàn bộ định kỳ trong CI.
+- PR #153: xác nhận với tác giả (PearTNhat) ý định bind storage root cho địa chỉ hệ thống như `0x…72` (hiện được bỏ qua kèm cảnh báo như trước PR). Xác minh nhánh fail-closed `getStateRootForBlock == nil` không làm Rust retry vô hạn sau restart/snapshot (test: restart exec node ngay sau khi có block, quan sát).
+- Dọn nợ nhỏ: các file Go lệch `gofmt` sẵn từ trước (`gofmt -l`), hàm `CloseSpeculative` hiện không còn nơi gọi.
+- **Nghiệm thu:** danh sách việc có bằng chứng; không sửa lan man ngoài phạm vi.
+
+### P5 — Hiệu năng đo đúng
+- Con số 768 tx/s trong báo cáo cũ chỉ là tốc độ dispatch vào hàng đợi; đo end-to-end thực tế ~400–630 tx/s (dao động). Làm bộ benchmark đa block, đa mức tải (1/100/1000 tx/block), đo độ trễ commit thật và dung lượng DB (xem `note/parent_chain_next_plan.md` mục N5). Không dùng `Checkpoint()` trên đường nóng.
+- Chi phí xác minh BLS ở admission chưa đo dưới tải hợp lệ cao: đo và quyết định có cần rate limit theo `FromAddress`/IP.
+- **Nghiệm thu:** số liệu có phương pháp rõ ràng, tái lập được.
+
+### P6 — CI
+- PR #153 và #152 không có CI check. Dựng workflow chạy `build_check.sh`, `go vet`, `go test` (có `-race` cho các package đồng thời) và bộ T-I rút gọn trên cụm cục bộ. Chủ dự án quyết định runner/chi phí.
+
+## 4. Định nghĩa "sẵn sàng production" (checklist cuối)
+
+- [ ] `dev` trên GitHub chứa toàn bộ bản sửa; cụm production chạy đúng commit đó (cả Rust và Go).
+- [ ] P1: ≥ 200 chu kỳ chaos, 0 block lệch, 0 kẹt (hoặc mọi lỗi bắt được đã có nguyên nhân gốc và bản sửa).
+- [ ] P2: toàn bộ test pass trên cụm ≥ 2 máy với genesis production (cluster policy đóng).
+- [ ] Cảnh báo lệch height hoạt động và đã bắn thử.
+- [ ] Runbook cập nhật và đã diễn tập: restart từng node, mất quorum, chia nhóm, `fork_detected`.
+- [ ] Không còn credential plaintext trong inventory production.
+- [ ] Báo cáo cuối ghi trung thực những gì chưa chứng minh.
+
+## 5. Việc **không** làm
+- Không wipe/reset cụm 231/230 hay dữ liệu thật khi chưa có backup và chủ dự án đồng ý.
+- Không nới lỏng assertion của test để "cho xanh"; lỗi phải sửa gốc.
+- Không dùng timeout để quyết định dispatch commit; không bật lại toàn bộ stall detector (đã từng làm wedge cả cụm — chỉ detector `4a` được chạy riêng).
+- Không thêm lại `network_baseline_round` ("coi block round ≤ baseline là đã commit"): tái tạo lỗi block mồ côi đã được ghi trong comment `DagState::is_committed`.
