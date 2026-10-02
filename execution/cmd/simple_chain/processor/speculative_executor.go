@@ -763,6 +763,7 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		// IntermediateRoot -> BeginSession would wait for it forever (observed live). Abort it, do NOT persist it.
 		if res.ClonedState != nil {
 			res.ClonedState.AbortSpeculative()
+			res.ClonedState = nil
 		}
 
 		// Clone state mới từ tip thực tế hiện tại
@@ -810,6 +811,11 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		bp.chainState.SetAccountStateDB(res.ClonedState.GetAccountStateDB())
 		bp.chainState.SetSmartContractDB(res.ClonedState.GetSmartContractDB())
 		bp.chainState.SetStakeStateDB(res.ClonedState.GetStakeStateDB())
+		// CRITICAL ZERO-FORK FIX: Clear ClonedState reference once adopted by chainState.
+		// Otherwise, when CleanGEI runs after commit, it would invoke CloseSpeculative()
+		// (and scDB.Discard()) on this state, wiping the live in-memory tries from
+		// bp.chainState and causing subsequent blocks to read stale storage from disk.
+		res.ClonedState = nil
 	}
 
 	// 3. Tiến hành tạo block và commit
@@ -818,6 +824,10 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 	// We no longer skip block creation for empty blocks to guarantee zero gaps and 100% no-fork.
 
 	if len(res.Txs) == 0 {
+		if res.ClonedState != nil {
+			res.ClonedState.AbortSpeculative()
+			res.ClonedState = nil
+		}
 		// Ghost-block-guard: 0 transactions, tạo block trống để tránh gap
 		emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
 		lastB := bp.GetLastBlock()

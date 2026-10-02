@@ -461,10 +461,15 @@ func (db *SmartContractDB) CommitAllStorage() (interface{}, error) {
 			}
 		}
 
-		if closer, ok := t.(interface{ Close() }); ok {
-			closer.Close()
-		}
-		db.smartContractStorageTries.Delete(address)
+		// CRITICAL PIPELINE & ZERO-FORK FIX:
+		// Keep commitSource in smartContractStorageTries!
+		// Do NOT delete it or call closer.Close().
+		// In pipeline and speculative execution, Block N+1 begins executing immediately
+		// via CloneSpeculative -> Copy() before asynchronous disk persistence (CommitAsync)
+		// completes. If the trie is deleted or closed, Block N+1's storage reads cannot
+		// find the in-memory trie (with its loadReadView().committing snapshot) and fall
+		// back to stale disk state (e.g. cross-contract calls seeing 0 instead of accumulated value).
+		db.smartContractStorageTries.Store(address, commitSource)
 	}
 
 	// Network replication: serialize batches for Sub nodes (master only)
