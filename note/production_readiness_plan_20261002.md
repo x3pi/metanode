@@ -47,7 +47,7 @@
 
 ## 3. Các gói công việc
 
-Thứ tự đề xuất: **P0 → P1 → P2** là điều kiện chạy thật; P3–P6 song song hoặc sau; **P7 (nâng cấp 231/230) dời lại, chờ chủ dự án**.
+Thứ tự đề xuất: **P8.1 (đóng lỗ hổng chính sách đăng ký) → P0 → P1 → P2** là điều kiện chạy thật; P3–P6 song song hoặc sau; **P7 (nâng cấp 231/230) dời lại, chờ chủ dự án**.
 
 ### P0 — Giám sát và đối chiếu mã (push đã xong)
 - **Đã xong (chủ dự án push, đã spot-check trên GitHub):** `dev` = `de6ac207`; các file chính có mặt: `commit_syncer/mod.rs` (có `gc_depth`), `speculative_executor.go` (có `TakeClonedState`), `smart_contract_db.go` (cảnh báo `no SmartContractState`), `block_hash_checker/main.go`; `network_baseline_round` **không** có (đúng chủ ý). Việc của agent: đầu mỗi phiên chạy `git fetch origin && git status -sb` để chắc đang làm trên mã mới nhất, không push thêm khi chưa được duyệt.
@@ -87,6 +87,24 @@ Mục tiêu: biến "0 lỗi trong 30 lượt" thành bằng chứng đủ mạn
 ### P6 — CI
 - PR #153 và #152 không có CI check. Dựng workflow chạy `build_check.sh`, `go vet`, `go test` (có `-race` cho các package đồng thời) và bộ T-I rút gọn trên cụm cục bộ. Chủ dự án quyết định runner/chi phí.
 
+### P8 — Chính sách đăng ký cluster (BẢO MẬT, chặn production) — cần chủ dự án duyệt thiết kế
+
+**8.1 Lỗ hổng đã chứng minh bằng test (2026-10-02, chưa sửa):** chính sách đăng ký (`cluster_policy.go`, kiểm tại `tx.go` `METHOD_REGISTER_CLUSTER`) chỉ chặn đường `registerCluster`. Nhưng "cluster tin cậy" lại được xác định bằng *có mục trong ChainRegistry* (`state.go`: `DepositToFloat` kiểm nguồn ở dòng ~147, `TransferFloat` ~229, `SubmitStateRoot` ~543), và `ensureChainRegistry` **tự tạo mục đó cho key đích** của mọi `DepositToFloat`/`TransferFloat` (~162, ~287). Hệ quả: một key chưa hề được cho phép, chỉ cần *nhận* một khoản float nhỏ, là trở thành nguồn chứng nhận và có thể tự mint số lượng tùy ý. Test tái hiện (đặt trong `execution/pkg/parentchain`, dùng `MemoryStore`): đăng ký thẳng cluster A bằng `SetChainRegistry`; A `DepositToFloat` 5 đơn vị cho key X chưa đăng ký; rồi X (ký bằng khóa của X) `DepositToFloat` 1.000.000.000 cho Y → **thành công** (kỳ vọng đúng: bị từ chối `ErrFloatUnknownSource`). Mọi danh sách cho phép hay ngưỡng số dư đều vô nghĩa chừng nào lỗ này còn.
+- **Sửa đề xuất:** tách "đã được chính sách cho phép làm cluster" khỏi "có mục trong registry". Thêm trường `authorized` (add-only, proto tag mới, không đổi nghĩa tag cũ) vào `ChainRegistryEntry`/`ChainRegistryEntryProto`; chỉ `registerCluster` (đã qua chính sách) và genesis đặt `true`; `ensureChainRegistry` tạo mục với `false`; mọi chỗ coi một key là nguồn chứng nhận (deposit, transferFloat nguồn, submitStateRoot, markClaimed/reclaim nếu liên quan) phải đòi `authorized == true`. Rà luôn `MarkClaimed`/`ReclaimFloat`/`RegisterAccount` xem chúng có kiểm cluster nguồn không.
+- **Đây là thay đổi đồng thuận:** đổi định dạng state ⇒ phải wipe + redeploy đồng loạt (như các lần đổi proto trước). Làm cùng lúc với P7 hoặc trước đó trên cụm thử.
+- **Nghiệm thu:** test trên fail trước sửa, pass sau sửa; test thêm: key được nhận tiền vẫn nhận/chuyển float bình thường nhưng không chứng nhận được; T-I8 và e2e 9 kịch bản vẫn pass; 4 node cùng root.
+
+**8.2 Yêu cầu của chủ dự án (đề xuất ban đầu):** thay vì (hoặc ngoài) danh sách cluster cố định trong genesis, chỉ cho đăng ký khi *tài khoản BLS có số dư > ngưỡng* (ví dụ 1000).
+Phân tích kỹ thuật trước khi làm:
+- "Số dư" duy nhất trên parent chain là **float** (`GetFloat(keccak(pubkey))`), mà float chỉ vào chain qua `DepositToFloat` do một cluster **đã được phép** chứng nhận. Nên ngưỡng số dư là **vòng tròn** nếu không có tập sáng lập; và nếu cho ứng viên tự nạp thì vô nghĩa (cluster có quyền mint cho chính mình). Số dư chỉ có ý nghĩa khi do **cluster đã được phép bảo lãnh** (nạp vào key của ứng viên) hoặc là tài sản khan hiếm nằm ngoài chuỗi.
+- Giá trị tuyệt đối "1000" phải gắn với đơn vị (float tính theo wei hay đơn vị nguyên?) và với giá trị thực mà exec chain khóa để đảm bảo; ngưỡng thấp không ngăn được Sybil nếu mint không bị trần.
+- Cluster đã đăng ký có thể mint float không giới hạn bằng chứng chỉ của chính nó: cần trần/phân bổ theo cluster (xem `PerChainAllocation` ở phía Root Anchor/`gateway.go`) trước khi mở đăng ký rộng.
+- **Thiết kế đề xuất:** genesis thêm `min_float_to_register` (số nguyên thập phân, `0` = tắt) bên cạnh `clusters` (tập sáng lập, luôn được phép). Trong `registerCluster`: cho phép nếu `key ∈ Allowed` **hoặc** (`min_float_to_register > 0` và `GetFloat(keccak(key)) ≥ min_float_to_register`). Kiểm trong thực thi tất định (đọc state), không đổi nghĩa khi tx lỗi (receipt `221`, state không đổi). **Chỉ làm sau 8.1.**
+- **Cần chủ dự án chốt:** (a) giữ tập sáng lập trong genesis hay không (khuyến nghị: có), (b) đơn vị và giá trị ngưỡng, (c) có đặt trần mint theo cluster không, (d) khóa BLS sáng lập.
+- **Nghiệm thu:** unit + e2e: A (sáng lập) nạp ≥ ngưỡng cho B ⇒ B đăng ký được; B dưới ngưỡng bị loại `221`; C tự nạp (không có nguồn) bị loại; 4 node cùng root; chạy trên genesis production (`open_cluster_registration: false`).
+
+**8.3 Quyền push (hỏi chủ dự án):** quyền push lên `x3pi/metanode` do chủ repo quyết (cài đặt GitHub); agent không có token và không được push. Ghi tên người/nhóm có quyền vào runbook sau khi chủ dự án trả lời.
+
 ### P7 — Nâng cấp cụm 231/230 (DỜI LẠI — chủ dự án sẽ báo thời điểm)
 Chưa làm trong đợt này. Khi chủ dự án cho phép, mới thực hiện:
 - Redeploy đồng loạt **cả Rust lẫn Go** (thay đổi consensus và FFI), sao lưu dữ liệu trước (xem memory/runbook 231/230: stop-all/start-all, thư mục backup, quirk node-4), build bằng `go build -a`, kiểm parity 4 node parent + 2 cụm exec sau khi lên.
@@ -101,6 +119,7 @@ Chưa làm trong đợt này. Khi chủ dự án cho phép, mới thực hiện:
 - [ ] P2: toàn bộ test pass trên cụm ≥ 2 máy với genesis production (cluster policy đóng).
 - [ ] Cảnh báo lệch height hoạt động và đã bắn thử.
 - [ ] Runbook cập nhật và đã diễn tập: restart từng node, mất quorum, chia nhóm, `fork_detected`.
+- [ ] P8.1: key chỉ nhận float không thể chứng nhận/mint (test hồi quy); P8.2 nếu bật chính sách theo số dư.
 - [ ] Không còn credential plaintext trong inventory production.
 - [ ] Báo cáo cuối ghi trung thực những gì chưa chứng minh.
 
