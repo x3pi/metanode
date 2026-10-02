@@ -497,3 +497,27 @@ func TestCommitAllStorage_MissingDirtyTrieDoesNotClearMarkers(t *testing.T) {
 	require.True(t, dirtyMissing, "Dirty marker for missing contract must be retained on failure")
 	require.True(t, dirtyOther, "Dirty marker for other contract must be retained on failure")
 }
+
+// Regression: a storage write at an address whose account has no SmartContractState (a system address that only
+// has storage, as at genesis for 0x...72) has no storage root to bind. Treating that as a commit error halted the
+// execution chain at its very first block; it must be skipped, exactly as before.
+func TestCommitAllStorage_AccountWithoutSmartContractStateIsSkipped(t *testing.T) {
+	origBackend := trie.GetStateBackend()
+	trie.SetStateBackend(trie.BackendMPT)
+	defer trie.SetStateBackend(origBackend)
+
+	accStorage := newTestDB()
+	accTrie, err := trie.New(common.Hash{}, accStorage, false)
+	require.NoError(t, err)
+	asDB := account_state_db.NewAccountStateDB(accTrie, accStorage)
+
+	sysAddr := common.HexToAddress("0x0000000000000000000000000000000000000072")
+	asDB.SetState(state.NewAccountState(sysAddr)) // account exists, no SmartContractState
+
+	db := NewSmartContractDB(newTestDB(), newTestDB(), asDB, nil)
+	require.NoError(t, db.SetStorageValue(sysAddr, []byte("slot"), []byte("val")))
+
+	require.NoError(t, db.LateBindRoots(), "LateBindRoots must skip an address without SmartContractState")
+	_, err = db.CommitAllStorage()
+	require.NoError(t, err, "CommitAllStorage must skip an address without SmartContractState")
+}

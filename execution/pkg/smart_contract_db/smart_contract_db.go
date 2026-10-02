@@ -445,9 +445,15 @@ func (db *SmartContractDB) CommitAllStorage() (pendingSession interface{}, final
 			logger.Error("Failed to load account state for address: %s: %v", address.Hex(), asErr)
 			return nil, fmt.Errorf("load account %s: %w", address.Hex(), asErr)
 		}
-		if as == nil || as.SmartContractState() == nil {
-			logger.Error("Smart contract state missing for address:", address)
-			return nil, fmt.Errorf("smart contract state missing for %s", address.Hex())
+		if as == nil {
+			logger.Error("Account state missing for address:", address)
+			return nil, fmt.Errorf("account state missing for %s", address.Hex())
+		}
+		if as.SmartContractState() == nil {
+			// Not a contract account (e.g. a system address that only has storage written at genesis): there is no
+			// storage root to bind. This was always skipped; failing here halted the chain at its first block.
+			logger.Warn("[SmartContractDB] no SmartContractState for %s: storage root not bound, skipping", address.Hex())
+			continue
 		}
 
 		if as.SmartContractState().StorageRoot() != root {
@@ -631,8 +637,12 @@ func (db *SmartContractDB) LateBindRoots() error {
 		if asErr != nil {
 			return fmt.Errorf("LateBindRoots load account %s: %w", address.Hex(), asErr)
 		}
-		if as == nil || as.SmartContractState() == nil {
-			return fmt.Errorf("LateBindRoots smart contract state missing for %s", address.Hex())
+		if as == nil {
+			return fmt.Errorf("LateBindRoots account state missing for %s", address.Hex())
+		}
+		if as.SmartContractState() == nil {
+			logger.Warn("[SmartContractDB] LateBindRoots: no SmartContractState for %s, skipping", address.Hex())
+			continue
 		}
 
 		if as.SmartContractState().StorageRoot() != root {
@@ -691,8 +701,12 @@ func (db *SmartContractDB) LateBindRoots() error {
 			if asErr != nil {
 				return fmt.Errorf("LateBindRoots NOMT load account %s: %w", address.Hex(), asErr)
 			}
-			if as == nil || as.SmartContractState() == nil {
-				return fmt.Errorf("LateBindRoots NOMT smart contract state missing for %s", address.Hex())
+			if as == nil {
+				return fmt.Errorf("LateBindRoots NOMT account state missing for %s", address.Hex())
+			}
+			if as.SmartContractState() == nil {
+				logger.Warn("[SmartContractDB] LateBindRoots NOMT: no SmartContractState for %s, skipping", address.Hex())
+				continue
 			}
 			if as.SmartContractState().StorageRoot() != globalRoot {
 				as.SetStorageRoot(globalRoot)
