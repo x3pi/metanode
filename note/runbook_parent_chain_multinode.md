@@ -150,7 +150,7 @@ Chứng nhận của một cluster đã đăng ký là thứ cho phép `depositT
 | `open_cluster_registration: false` + `clusters: ["<48-byte BLS pubkey hex>", ...]` | Chỉ các khóa trong danh sách được `registerCluster` (receipt lỗi mã 221 với khóa khác). **Cấu hình production.** |
 | (thiếu cả hai) | Mặc định đóng, danh sách rỗng: không ai đăng ký được. |
 
-Ansible: biến `parent_open_cluster_registration` (mặc định `true` cho devnet) và `parent_allowed_clusters` trong inventory. Kiểm tra bằng:
+Ansible: biến `parent_open_cluster_registration` (mặc định `false` = an toàn; devnet phải đặt `true` tường minh, production phải khai `parent_allowed_clusters` — playbook dừng nếu cả hai bỏ trống) và `parent_allowed_clusters` trong inventory. Kiểm tra bằng:
 
 ```bash
 cd execution && go run ./cmd/tool/parent_chain_security_check -url http://<node>:<port> [-expect-closed]

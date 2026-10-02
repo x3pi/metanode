@@ -47,7 +47,7 @@ func getStatus(url string) (*statusResp, error) {
 	return &st, nil
 }
 
-func sendTx(nodeURL string, tx *pb.Transaction) (string, error) {
+func sendTxErr(nodeURL string, tx *pb.Transaction) (string, error) {
 	rawBytes, err := proto.Marshal(tx)
 	if err != nil {
 		return "", err
@@ -62,6 +62,14 @@ func sendTx(nodeURL string, tx *pb.Transaction) (string, error) {
 		return "", fmt.Errorf("HTTP %d: %s", postResp.StatusCode, string(body))
 	}
 	return string(body), nil
+}
+
+// sendTx submits tx and aborts the whole run if the node does not accept it.
+func sendTx(nodeURL string, tx *pb.Transaction) {
+	if _, err := sendTxErr(nodeURL, tx); err != nil {
+		fmt.Printf("❌ submit to %s failed: %v\n", nodeURL, err)
+		os.Exit(1)
+	}
 }
 
 func waitForClusterCommit(minBlock uint64, timeout time.Duration) (*statusResp, error) {
@@ -173,18 +181,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Verify balance credited on Node-0
-	destHashHex := hex.EncodeToString(pub1[:])
-	accResp, err := http.Get(fmt.Sprintf("%s/account?address=%s", nodes[0], destHashHex))
-	if err == nil {
-		defer accResp.Body.Close()
-		var aData struct {
-			Balance string `json:"balance"`
-			Found   bool   `json:"found"`
+	// Verify balance credited on every node
+	for _, n := range nodes {
+		if bal := floatBalance(n, pub1); bal.Cmp(depAmount) != 0 {
+			fmt.Printf("❌ Cluster 1 balance on %s = %s, want exactly %s\n", n, bal, depAmount)
+			os.Exit(1)
 		}
-		json.NewDecoder(accResp.Body).Decode(&aData)
-		fmt.Printf("  ✅ Cluster 1 Balance verified on Node-0: %s (Expected: >=100000)\n", aData.Balance)
 	}
+	fmt.Printf("  ✅ Cluster 1 balance == %s on all %d nodes\n", depAmount, len(nodes))
 
 	// Step 4: Security Invariant: Replay of same Deposit Message ID MUST be rejected
 	fmt.Println("\n[STEP 4] Verifying Security Invariant: Replay Deposit rejected deterministically...")
@@ -198,26 +202,31 @@ func main() {
 	}
 	repHash := parentchain.ComputeTxHash(txDepReplay)
 	rcptResp, err := http.Get(fmt.Sprintf("%s/receipt?hash=%s", nodes[1], repHash.Hex()))
-	if err == nil {
+	if err != nil {
+		fmt.Printf("❌ replay receipt request failed: %v\n", err)
+		os.Exit(1)
+	}
+	{
 		defer rcptResp.Body.Close()
 		var rData struct {
 			Receipt *parentchain.Receipt `json:"receipt"`
 			Found   bool                 `json:"found"`
 		}
 		json.NewDecoder(rcptResp.Body).Decode(&rData)
-		if rData.Found && rData.Receipt != nil {
-			if rData.Receipt.Status == 0 {
-				fmt.Printf("  ✅ Security verified: Replay deposit rejected with Status=0, ErrorCode=%d\n", rData.Receipt.ErrorCode)
-			} else {
-				fmt.Printf("❌ SECURITY BREACH: Replay deposit succeeded!\n")
-				os.Exit(1)
-			}
+		if !rData.Found || rData.Receipt == nil {
+			fmt.Printf("❌ replay tx has no receipt: cannot prove it was rejected\n")
+			os.Exit(1)
 		}
+		if rData.Receipt.Status != 0 {
+			fmt.Printf("❌ SECURITY BREACH: Replay deposit succeeded!\n")
+			os.Exit(1)
+		}
+		fmt.Printf("  ✅ Security verified: Replay deposit rejected with Status=0, ErrorCode=%d\n", rData.Receipt.ErrorCode)
 	}
 
-	// Step 5: Cross-Cluster Transfer (Cluster 1 -> Cluster 2: 25,000 units)
-	fmt.Println("\n[STEP 5] Performing Cross-Cluster TransferFloat (Cluster 1 -> Cluster 2: 25,000 units)...")
-	xferAmount := big.NewInt(25000)
+	// Step 5: Cross-Cluster Transfer (Cluster 1 -> Cluster 2: 15,000 units)
+	fmt.Println("\n[STEP 5] Performing Cross-Cluster TransferFloat (Cluster 1 -> Cluster 2: 15,000 units)...")
+	xferAmount := big.NewInt(15000) // must stay under the 20% per-window velocity limit
 	gasFee := big.NewInt(100)
 	xferSeq := uint64(0)
 	xferTarget := crypto.PubkeyToAddress(userKey.PublicKey)
@@ -234,20 +243,22 @@ func main() {
 		fmt.Printf("❌ TransferFloat commit timeout: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("  ✅ TransferFloat committed in Block #%d across all 4 nodes\n", st.LastBlock)
+	requireReceiptOK(nodes, txXfer, "TransferFloat")
+	fmt.Printf("  ✅ TransferFloat committed and succeeded in Block #%d across all 4 nodes\n", st.LastBlock)
 
-	// Verify Cluster 2 balance increased
-	destHash2Hex := hex.EncodeToString(pub2[:])
-	acc2Resp, err := http.Get(fmt.Sprintf("%s/account?address=%s", nodes[2], destHash2Hex))
-	if err == nil {
-		defer acc2Resp.Body.Close()
-		var aData struct {
-			Balance string `json:"balance"`
-			Found   bool   `json:"found"`
+	// Verify balances on every node: cluster 2 received the transfer, nothing was minted or lost beyond the fee
+	for _, n := range nodes {
+		c1, c2 := floatBalance(n, pub1), floatBalance(n, pub2)
+		if c2.Cmp(xferAmount) < 0 {
+			fmt.Printf("❌ Cluster 2 balance on %s = %s, want >= %s\n", n, c2, xferAmount)
+			os.Exit(1)
 		}
-		json.NewDecoder(acc2Resp.Body).Decode(&aData)
-		fmt.Printf("  ✅ Cluster 2 Balance verified on Node-2: %s (Expected: >=25000)\n", aData.Balance)
+		if sum := new(big.Int).Add(c1, c2); sum.Cmp(depAmount) > 0 {
+			fmt.Printf("❌ Float inflation on %s: c1+c2 = %s > deposited %s\n", n, sum, depAmount)
+			os.Exit(1)
+		}
 	}
+	fmt.Printf("  ✅ Cluster 1 = %s, Cluster 2 = %s on all nodes (no inflation)\n", floatBalance(nodes[0], pub1), floatBalance(nodes[0], pub2))
 
 	// Step 6: Mark Claimed on Cluster 2
 	fmt.Println("\n[STEP 6] Submitting MarkClaimed on Parent Chain...")
@@ -340,4 +351,54 @@ func main() {
 	fmt.Println("   • QuorumClient Byzantine read verified.")
 	fmt.Println("   • All 4 nodes in 100% bit-perfect consensus parity with zero-fork.")
 	fmt.Println("================================================================================")
+}
+
+// floatBalance reads the committed float balance of a BLS identity from a node's /float endpoint.
+func floatBalance(node string, pub [48]byte) *big.Int {
+	resp, err := http.Get(fmt.Sprintf("%s/float?pubkey=%s", node, hex.EncodeToString(pub[:])))
+	if err != nil {
+		fmt.Printf("❌ /float request failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	var d struct {
+		Balance string `json:"balance"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		fmt.Printf("❌ /float decode failed: %v\n", err)
+		os.Exit(1)
+	}
+	b, ok := new(big.Int).SetString(d.Balance, 10)
+	if !ok {
+		fmt.Printf("❌ /float returned unparsable balance %q\n", d.Balance)
+		os.Exit(1)
+	}
+	return b
+}
+
+// requireReceiptOK aborts unless every node holds a successful (Status=1) receipt for tx: "a block committed"
+// says nothing about whether the transaction itself succeeded.
+func requireReceiptOK(nodes []string, tx *pb.Transaction, what string) {
+	h := parentchain.ComputeTxHash(tx)
+	for _, n := range nodes {
+		resp, err := http.Get(fmt.Sprintf("%s/receipt?hash=%s", n, h.Hex()))
+		if err != nil {
+			fmt.Printf("❌ %s: receipt request to %s failed: %v\n", what, n, err)
+			os.Exit(1)
+		}
+		var d struct {
+			Receipt *parentchain.Receipt `json:"receipt"`
+			Found   bool                 `json:"found"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&d)
+		resp.Body.Close()
+		if err != nil || !d.Found || d.Receipt == nil {
+			fmt.Printf("❌ %s: no receipt for %s on %s\n", what, h.Hex(), n)
+			os.Exit(1)
+		}
+		if d.Receipt.Status != 1 {
+			fmt.Printf("❌ %s FAILED on %s: Status=%d ErrorCode=%d\n", what, n, d.Receipt.Status, d.Receipt.ErrorCode)
+			os.Exit(1)
+		}
+	}
 }

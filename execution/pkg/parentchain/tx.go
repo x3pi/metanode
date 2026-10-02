@@ -403,6 +403,17 @@ func VerifyTxSignature(tx *pb.Transaction, store Store) (cm.PublicKey, error) {
 
 // ─── EXECUTE TRANSACTION ──────────────────────────────────────────────────
 
+// TxNonceValue decodes tx.Nonce (big-endian, first 8 bytes) into a uint64.
+func TxNonceValue(tx *pb.Transaction) uint64 {
+	if len(tx.Nonce) >= 8 {
+		return binary.BigEndian.Uint64(tx.Nonce[:8])
+	}
+	if len(tx.Nonce) > 0 {
+		return new(big.Int).SetBytes(tx.Nonce).Uint64()
+	}
+	return 0
+}
+
 // ExecuteTx validates signature, nonce, and chain ID, advances nonce, and executes the call.
 func ExecuteTx(store Store, tx *pb.Transaction, blockTime uint64) (*Receipt, error) {
 	if tx == nil {
@@ -446,12 +457,7 @@ func ExecuteTx(store Store, tx *pb.Transaction, blockTime uint64) (*Receipt, err
 	if err != nil {
 		return nil, err
 	}
-	var txNonce uint64
-	if len(tx.Nonce) >= 8 {
-		txNonce = binary.BigEndian.Uint64(tx.Nonce[:8])
-	} else if len(tx.Nonce) > 0 {
-		txNonce = new(big.Int).SetBytes(tx.Nonce).Uint64()
-	}
+	txNonce := TxNonceValue(tx)
 	if txNonce != expectedNonce {
 		return &Receipt{
 			TxHash:    txHash,

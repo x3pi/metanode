@@ -1,6 +1,7 @@
 package parentchain
 
 import (
+	"encoding/json"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -134,7 +135,7 @@ func TestHTTPRPC_FullChainEndpoints(t *testing.T) {
 
 	// 7. SendRawTransaction when syncing => 503 rejected
 	server.SetSyncing(true)
-	tx2, _ := BuildAndSignBLSTx(priv, pub, ParentChainGatewayAddress, 1, callData)
+	tx2, _ := BuildAndSignBLSTx(priv, pub, ParentChainGatewayAddress, 2, callData) // nonce 1 is already committed
 	tx2Bytes, _ := proto.Marshal(tx2)
 	_, errSync := client.SendRawTransaction(tx2Bytes)
 	assert.Error(t, errSync)
@@ -146,7 +147,6 @@ func TestHTTPRPC_FullChainEndpoints(t *testing.T) {
 	assert.NoError(t, errSent)
 	assert.Equal(t, ComputeTxHash(tx2), sentHash)
 }
-
 
 // The JSON transaction path no longer exists: POST /tx is rejected and /send_raw_transaction accepts only raw
 // proto bytes (a JSON body is not a valid pb.Transaction).
@@ -200,4 +200,78 @@ func TestHTTPRPC_SendRawTransactionValidation(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, ComputeTxHash(good), h)
 	assert.Equal(t, 1, len(txChan))
+}
+
+// Admission filter: forged, unknown-sender and stale-nonce transactions never reach the consensus queue.
+func TestHTTPRPC_AdmissionFilter(t *testing.T) {
+	txChan := make(chan *pb.Transaction, 8)
+	store := NewMemoryStore()
+	server := NewHTTPServer(store)
+	server.SetTxChan(txChan)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/send_raw_transaction", server.handleSendRawTransaction)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	client := NewHTTPClient(ts.URL)
+	send := func(tx *pb.Transaction) error {
+		raw, _ := proto.Marshal(tx)
+		_, err := client.SendRawTransaction(raw)
+		return err
+	}
+
+	kp := bls.GenerateKeyPair()
+	other := bls.GenerateKeyPair()
+	register := EncodeRegisterClusterCallData(kp.PublicKey(), 1)
+
+	// Forged signature (signed by a different key) on a registration tx.
+	forged, _ := BuildAndSignBLSTx(other.PrivateKey(), other.PublicKey(), ParentChainGatewayAddress, 0, register)
+	forged.FromAddress = common.BytesToAddress(crypto.Keccak256(kp.PublicKey().Bytes())[12:]).Bytes()
+	assert.Error(t, send(forged), "forged signature must be rejected")
+
+	// Unsigned tx from a random unregistered sender (the spam shape).
+	spam := &pb.Transaction{FromAddress: make([]byte, 20), ToAddress: ParentChainGatewayAddress.Bytes(),
+		Nonce: make([]byte, 8), ChainID: ParentChainID, Sign: make([]byte, 96)}
+	assert.Error(t, send(spam), "unknown sender must be rejected")
+
+	// Wrong destination address.
+	wrongTo, _ := BuildAndSignBLSTx(kp.PrivateKey(), kp.PublicKey(), common.Address{1}, 0, register)
+	assert.Error(t, send(wrongTo), "non-gateway destination must be rejected")
+	assert.Equal(t, 0, len(txChan))
+
+	// Valid registration passes; once the nonce is committed, replaying nonce 0 is stale.
+	good, _ := BuildAndSignBLSTx(kp.PrivateKey(), kp.PublicKey(), ParentChainGatewayAddress, 0, register)
+	assert.NoError(t, send(good))
+	assert.Equal(t, 1, len(txChan))
+	sender := common.BytesToAddress(good.FromAddress)
+	assert.NoError(t, store.SetNonce(sender, 1))
+	assert.Error(t, send(good), "stale nonce must be rejected")
+	assert.Equal(t, 1, len(txChan))
+}
+
+func TestHTTPRPC_FloatEndpoint(t *testing.T) {
+	store := NewMemoryStore()
+	server := NewHTTPServer(store)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/float", server.handleFloat)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	kp := bls.GenerateKeyPair()
+	pk := kp.PublicKey()
+	assert.NoError(t, store.SetFloat(crypto.Keccak256Hash(pk[:]), big.NewInt(777)))
+
+	resp, err := http.Get(ts.URL + "/float?pubkey=" + common.Bytes2Hex(pk[:]))
+	assert.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var d struct {
+		Balance string `json:"balance"`
+	}
+	assert.NoError(t, json.NewDecoder(resp.Body).Decode(&d))
+	assert.Equal(t, "777", d.Balance)
+
+	bad, err := http.Get(ts.URL + "/float?pubkey=0x1234")
+	assert.NoError(t, err)
+	defer bad.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, bad.StatusCode)
 }
