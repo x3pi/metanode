@@ -41,3 +41,19 @@
     src: "{{ playbook_dir }}/private_dev_keys.json"
     dest: "{{ install_dir }}/private_dev_keys.json"
     mode: '0600'
+
+- name: Check for optional generated spam keys file
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/../../../metanode-suite/test_tps/gen_spam_keys/generated_keys.json"
+  delegate_to: localhost
+  become: false
+  register: generated_spam_keys_stat
+
+- name: Distribute generated spam keys to node
+  when:
+    - generated_spam_keys_stat.stat.exists
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../../metanode-suite/test_tps/gen_spam_keys/generated_keys.json"
+    dest: "{{ install_dir }}/generated_keys.json"
+    mode: '0644'
+

@@ -52,8 +52,20 @@ chain_actions:
   # Lệnh cập nhật IP / RPC endpoints cho toàn bộ các file test config
   update_ip_cmd: "cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
 
+  # Lệnh reset Execution Clusters (Chain Con - Chain ID 991: Cluster 1 / chain_a, Cluster 2 / chain_b)
+  reset_exec_cmd: "cd {METANODE_DIR}/deploy/ansible_clusters && ./deploy_clusters.sh --reset --exec-only && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
+  reset_exec: "cd {METANODE_DIR}/deploy/ansible_clusters && ./deploy_clusters.sh --reset --exec-only && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
+
+  # Lệnh restart Execution Clusters (Chain Con)
+  restart_exec_cmd: "cd {METANODE_DIR}/deploy/ansible_clusters && ./deploy_clusters.sh --restart --exec-only && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
+  restart_exec: "cd {METANODE_DIR}/deploy/ansible_clusters && ./deploy_clusters.sh --restart --exec-only && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
+
   # Lệnh nạp 50,000 ví TPS (chống trùng lặp), xóa genesis.json cũ và reset Public Chain
   prepare_tps_cmd: "cd {METANODE_DIR} && ./deploy/ci/prepare_tps_chain.sh"
+
+  # Lệnh nạp 50,000 ví TPS, cập nhật genesis và reset Execution Clusters (Chain Con - Chain ID 991)
+  prepare_tps_exec_cmd: "cd {METANODE_DIR} && ./deploy/ci/prepare_tps_exec.sh"
+  prepare_tps_exec: "cd {METANODE_DIR} && ./deploy/ci/prepare_tps_exec.sh"
 
   # Thời gian chờ (giây) để RPC sẵn sàng sau khi reset hoặc restart
   wait_rpc_ready_seconds: 5
@@ -64,7 +76,35 @@ chain_actions:
 # ==============================================================================
 tests:
   # ----------------------------------------------------------------------------
-  # 1. BÀI TEST LOGIC CHAIN THƯỜNG (BLOCK-STM 32+ KỊCH BẢN)
+  # 1. BÀI TEST CHAIN CON (EXECUTION CLUSTERS - CHAIN_A: 34 KỊCH BẢN BLOCK-STM)
+  # ----------------------------------------------------------------------------
+  - id: "child_chain_a"
+    name: "Child Chain (chain_a) Block-STM Tests (34 kịch bản)"
+    target: "child_chain"
+    enabled: true
+    # Tự động reset Execution Clusters và cập nhật IP trước khi test
+    pre_action: "reset_exec"
+    cwd: "test-simple/test-rpc/test-chain"
+    command: "./run_all_tests.sh --chain=chain_a"
+    timeout_seconds: 1800
+    continue_on_failure: false
+
+  # ----------------------------------------------------------------------------
+  # 1b. BÀI TEST TPS CAO ĐIỂM CHAIN CON (EXECUTION CLUSTERS - CHAIN_A)
+  # ----------------------------------------------------------------------------
+  - id: "tps_blast_child_a"
+    name: "Child Chain (chain_a) TPS Blast Benchmark"
+    target: "child_chain"
+    enabled: true
+    # Tự động nạp 50,000 ví vào genesis, reset cụm chain con sạch để đo Max TPS
+    pre_action: "prepare_tps_exec"
+    cwd: "test_tps/tps_blast_cc"
+    command: "./run_tps_test.sh --chain chain_a --no-reset --count 25000 --rounds 1 --load_balance=true --batch=2000 --amount 1"
+    timeout_seconds: 900
+    continue_on_failure: false
+
+  # ----------------------------------------------------------------------------
+  # 2. BÀI TEST LOGIC CHAIN THƯỜNG (BLOCK-STM 32+ KỊCH BẢN)
   # ----------------------------------------------------------------------------
   - id: "blockstm_logic"
     name: "Block-STM Logic Tests (32+ kịch bản)"
@@ -104,15 +144,15 @@ tests:
     continue_on_failure: false
 
   # ----------------------------------------------------------------------------
-  # 4. BÀI TEST TPS CAO ĐIỂM (BENCHMARK THROUGHPUT)
+  # 4. BÀI TEST TPS CAO ĐIỂM (BENCHMARK THROUGHPUT - PUBLIC CHAIN)
   # ----------------------------------------------------------------------------
   - id: "tps_blast"
-    name: "TPS Blast Benchmark"
+    name: "TPS Blast Benchmark (Public Chain)"
     enabled: true
     # Tự động nạp keys vào genesis, reset cụm Public Chain sạch để đo Max TPS tuyệt đối
     pre_action: "prepare_tps"
     cwd: "test_tps/tps_blast_cc"
-    command: "./run_tps_test.sh --no-reset --count 25000 --rounds 1 --load_balance=true --batch=2000 --amount 1"
+    command: "./run_tps_test.sh --chain public --no-reset --count 25000 --rounds 1 --load_balance=true --batch=2000 --amount 1"
     timeout_seconds: 900
     continue_on_failure: false
 

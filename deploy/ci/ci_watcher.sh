@@ -214,9 +214,14 @@ case "${1:-status}" in
         echo "  run-now   Kích hoạt chạy test ngay lập tức (không cần đợi commit)"
         echo ""
         echo "Ví dụ chạy test cụ thể:"
-        echo "  $0 run-now --only node_chaos_restart --restart-chain  # Khởi động lại chain trước khi test"
-        echo "  $0 run-now --only tps_blast                          # Chỉ test bài TPS"
-        echo "  $0 run-now --restart-chain                           # Restart chain và chạy toàn bộ tests"
+        echo "  $0 run-now --child-chain                             # Chạy toàn bộ các bài test cho Child Chain (chain con)"
+        echo "  $0 run-now --only child_chain_a                      # Test 34 kịch bản Block-STM trên Child Chain (chain_a)"
+        echo "  $0 run-now --only tps_blast_child_a                  # Benchmark Max TPS trên Child Chain (chain_a)"
+        echo "  $0 run-now --only node_chaos_restart --restart-chain  # Khởi động lại Public Chain trước khi test"
+        echo "  $0 run-now --only tps_blast                          # Chỉ test bài TPS Public Chain"
+        echo "  $0 run-now --restart-chain                           # Restart Public Chain và chạy toàn bộ tests"
+        echo "  $0 run-now --restart-exec                            # Restart Execution Clusters (Child Chain)"
+        echo "  $0 run-now --reset-exec                              # Reset Execution Clusters (Child Chain)"
         echo "  $0 run-now --dry-run                                 # Xem trước kế hoạch chạy"
         ;;
     *)
