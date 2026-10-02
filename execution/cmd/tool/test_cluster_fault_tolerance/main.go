@@ -604,7 +604,15 @@ func testTI4() error {
 	// Wait for honest nodes (0, 1, 2) to advance
 	var honestAdvanced bool
 	waitDeadline := time.Now().Add(15 * time.Second)
-	expectedNewBlock := initSt.LastBlock + 1
+	// The reference height is where Node-3 actually stopped when it quarantined itself, not the T-I4.1 snapshot:
+	// transactions the tx recycler re-sent after an earlier test (T-I3) can still commit between the snapshot and
+	// the tamper, on every node including Node-3, which is legitimate and must not count as "advanced while
+	// quarantined".
+	quarantineHeight := node3St.LastBlock
+	if initSt.LastBlock > quarantineHeight {
+		quarantineHeight = initSt.LastBlock
+	}
+	expectedNewBlock := quarantineHeight + 1
 	for time.Now().Before(waitDeadline) {
 		st0, err0 := queryStatus(nodes[0])
 		st1, err1 := queryStatus(nodes[1])
@@ -629,8 +637,8 @@ func testTI4() error {
 	if err != nil {
 		return fmt.Errorf("node-3 unreachable: %v", err)
 	}
-	if st3After.LastBlock >= expectedNewBlock {
-		return fmt.Errorf("FAIL: Quarantined Node-3 advanced to block %d! It should have refused new blocks", st3After.LastBlock)
+	if st3After.LastBlock > node3St.LastBlock {
+		return fmt.Errorf("FAIL: Quarantined Node-3 advanced from block %d to %d! It should have refused new blocks", node3St.LastBlock, st3After.LastBlock)
 	}
 	fmt.Printf("  ✅ Node-3 stayed quarantined at Block #%d (fork_detected=%v)\n",
 		st3After.LastBlock, st3After.ForkDetected)

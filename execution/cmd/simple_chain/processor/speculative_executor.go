@@ -46,6 +46,10 @@ type SpeculativeResult struct {
 	ExecuteErr      error
 	IsEpochBoundary bool
 	AuthRespCh      chan<- *pb.ExecuteBlockResponse
+	// session is the in-flight record whose respCh a Rust retry may REPLACE while this result is still waiting for
+	// the committer; respCh() always reads the latest one (a snapshot taken when execution finished would answer a
+	// channel Rust already abandoned, costing it another full executeBlockResponseTimeout).
+	session *inFlightSession
 	// IsFinished distinguishes a real, completed result from the placeholder
 	// registered in activeSessions at dispatch time (see ExecuteSpeculative).
 	// Without this, GetSpeculativeResult could return the empty placeholder
@@ -80,10 +84,20 @@ func (res *SpeculativeResult) AbortClonedState() {
 	}
 }
 
+// respCh returns the response channel of the most recent caller waiting on this result.
+func (res *SpeculativeResult) respCh() chan<- *pb.ExecuteBlockResponse {
+	return res.AuthResponseChannel()
+}
+
 // SetAuthRespCh atomically sets the AuthRespCh channel.
 func (res *SpeculativeResult) SetAuthRespCh(ch chan<- *pb.ExecuteBlockResponse) {
 	if res == nil {
 		return
+	}
+	if res.session != nil {
+		res.session.mu.Lock()
+		res.session.respCh = ch
+		res.session.mu.Unlock()
 	}
 	res.mu.Lock()
 	defer res.mu.Unlock()
@@ -94,6 +108,14 @@ func (res *SpeculativeResult) SetAuthRespCh(ch chan<- *pb.ExecuteBlockResponse) 
 func (res *SpeculativeResult) AuthResponseChannel() chan<- *pb.ExecuteBlockResponse {
 	if res == nil {
 		return nil
+	}
+	if res.session != nil {
+		res.session.mu.Lock()
+		ch := res.session.respCh
+		res.session.mu.Unlock()
+		if ch != nil {
+			return ch
+		}
 	}
 	res.mu.Lock()
 	defer res.mu.Unlock()
@@ -152,6 +174,7 @@ type inFlightSession struct {
 	respCh chan<- *pb.ExecuteBlockResponse
 	cancel context.CancelFunc
 }
+
 
 // NewSpeculativeExecutor creates a new SpeculativeExecutor
 func NewSpeculativeExecutor(bp *BlockProcessor) *SpeculativeExecutor {
@@ -269,6 +292,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		GEI:        gei,
 		BlockNum:   blockNum,
 		AuthRespCh: authRespCh,
+		session:    session,
 	})
 
 	se.concurrencySem <- struct{}{} // Acquire concurrency slot
@@ -482,6 +506,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			ExecuteErr:      execErr,
 			IsEpochBoundary: isEpochBoundary,
 			AuthRespCh:      latestRespCh,
+			session:         session,
 			IsFinished:      true,
 		}
 

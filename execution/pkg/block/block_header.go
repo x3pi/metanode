@@ -3,6 +3,7 @@ package block
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -114,19 +115,21 @@ func (b *BlockHeader) Epoch() uint64 {
 }
 
 func (b *BlockHeader) GlobalExecIndex() uint64 {
-	return b.globalExecIndex
+	return atomic.LoadUint64(&b.globalExecIndex)
 }
 
 func (b *BlockHeader) SetGlobalExecIndex(gei uint64) {
-	b.globalExecIndex = gei
+	// Atomic: commitWorker sets this on a header that a speculative worker may be hashing at the same time
+	// (the block hash includes the GEI).
+	atomic.StoreUint64(&b.globalExecIndex, gei)
 }
 
 func (b *BlockHeader) CommitIndex() uint64 {
-	return b.commitIndex
+	return atomic.LoadUint64(&b.commitIndex)
 }
 
 func (b *BlockHeader) SetCommitIndex(index uint64) {
-	b.commitIndex = index
+	atomic.StoreUint64(&b.commitIndex, index)
 }
 
 func (b *BlockHeader) LogsBloom() []byte {
@@ -189,7 +192,7 @@ func (b *BlockHeader) Hash() common.Hash {
 	pbHeader.TimeStamp = b.timeStamp
 	pbHeader.TransactionsRoot = b.transactionsRoot.Bytes()
 	pbHeader.Epoch = b.epoch
-	pbHeader.GlobalExecIndex = b.globalExecIndex
+	pbHeader.GlobalExecIndex = atomic.LoadUint64(&b.globalExecIndex)
 	pbHeader.LogsBloom = b.logsBloom
 	pbHeader.ExcessBlobGas = b.excessBlobGas
 	pbHeader.BlobGasUsed = b.blobGasUsed
@@ -215,8 +218,8 @@ func (b *BlockHeader) Proto() *pb.BlockHeader {
 		TimeStamp:         b.timeStamp,
 		TransactionsRoot:  b.transactionsRoot.Bytes(),
 		Epoch:             b.epoch,
-		GlobalExecIndex:   b.globalExecIndex,
-		CommitIndex:       b.commitIndex,
+		GlobalExecIndex:   atomic.LoadUint64(&b.globalExecIndex),
+		CommitIndex:       atomic.LoadUint64(&b.commitIndex),
 		LogsBloom:         b.logsBloom,
 		ExcessBlobGas:     b.excessBlobGas,
 		BlobGasUsed:       b.blobGasUsed,
@@ -234,8 +237,8 @@ func (b *BlockHeader) FromProto(pbBlockHeader *pb.BlockHeader) {
 	b.aggregateSignature = pbBlockHeader.AggregateSignature
 	b.transactionsRoot = common.BytesToHash(pbBlockHeader.TransactionsRoot)
 	b.epoch = pbBlockHeader.Epoch
-	b.globalExecIndex = pbBlockHeader.GlobalExecIndex
-	b.commitIndex = pbBlockHeader.CommitIndex
+	atomic.StoreUint64(&b.globalExecIndex, pbBlockHeader.GlobalExecIndex)
+	atomic.StoreUint64(&b.commitIndex, pbBlockHeader.CommitIndex)
 	b.logsBloom = pbBlockHeader.LogsBloom
 	b.excessBlobGas = pbBlockHeader.ExcessBlobGas
 	b.blobGasUsed = pbBlockHeader.BlobGasUsed
@@ -270,6 +273,6 @@ BlockHeader{
   Epoch: %d,
   GlobalExecIndex: %d
 }
-`, b.lastBlockHash, b.blockNumber, b.accountStatesRoot, b.stakeStatesRoot, b.receiptRoot, b.TransactionsRoot(), b.leaderAddress, b.timeStamp, b.aggregateSignature, b.epoch, b.globalExecIndex)
+`, b.lastBlockHash, b.blockNumber, b.accountStatesRoot, b.stakeStatesRoot, b.receiptRoot, b.TransactionsRoot(), b.leaderAddress, b.timeStamp, b.aggregateSignature, b.epoch, b.GlobalExecIndex())
 	return str
 }
