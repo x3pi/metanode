@@ -2,7 +2,8 @@
 
 > Lập 2026-10-02. Đọc kèm: `AGENTS.md` (luật bắt buộc), `PROJECT_STRUCTURE.md`, `note/runbook_parent_chain_multinode.md` (đặc biệt mục 3.4b),
 > `note/parent_chain_cluster_test_report.md` (đầu file có phần tái kiểm chứng trung thực), `note/parent_chain_completion_plan.md`.
-> Mốc code: nhánh `dev`, commit `87879fd0` (local có thể đi trước GitHub — kiểm tra `git status -sb`).
+> Mốc code: nhánh `dev` trên GitHub đã đồng bộ tới `de6ac207` (chủ dự án đã push 2026-10-02; đã xác minh nội dung trên remote).
+> **Cụm 231/230 chưa nâng cấp — chủ dự án dời lại sau (xem P7). Agent KHÔNG được tự deploy/restart/wipe cụm 231/230.**
 
 ---
 
@@ -46,13 +47,12 @@
 
 ## 3. Các gói công việc
 
-Thứ tự đề xuất: **P0 → P1 → P2** là điều kiện chạy thật; P3–P5 song song hoặc sau.
+Thứ tự đề xuất: **P0 → P1 → P2** là điều kiện chạy thật; P3–P6 song song hoặc sau; **P7 (nâng cấp 231/230) dời lại, chờ chủ dự án**.
 
-### P0 — Push, redeploy, giám sát (cần chủ dự án duyệt push)
-- Kiểm tra `git log origin/dev..dev`; xin chủ dự án push `dev`. Sau khi push, **spot-check** trên GitHub rằng các file chính có mặt (từng có trường hợp squash-merge làm mất commit): `execution/pkg/trie/evictable.go`, `execution/cmd/simple_chain/processor/speculative_executor.go` (có `TakeClonedState`), `consensus/.../commit_syncer/mod.rs` (có `gc_depth`), `execution/pkg/smart_contract_db/smart_contract_db.go` (có cảnh báo `no SmartContractState`).
-- Chuẩn bị checklist redeploy đồng loạt cho cụm 231/230: **cả Rust lẫn Go cùng lúc** (thay đổi consensus và FFI), sao lưu dữ liệu trước (xem `note/` các runbook và memory 231/230 về cách backup, stop-all/start-all), build bằng `go build -a`, kiểm parity 4 node + 2 cụm exec sau khi lên.
-- Dựng cảnh báo: height các node parent lệch > 1 trong > 60 giây (dùng `deploy/ansible/monitors/block_hash_checker --watch` hoặc `execution/cmd/tool/parent_chain_monitor`), gửi Telegram. Ghi cách bật vào runbook.
-- **Nghiệm thu:** redeploy xong, `parent_chain_monitor --once` báo parity; cảnh báo bắn thử thành công (tắt 1 node cho lệch rồi bật lại).
+### P0 — Giám sát và đối chiếu mã (push đã xong)
+- **Đã xong (chủ dự án push, đã spot-check trên GitHub):** `dev` = `de6ac207`; các file chính có mặt: `commit_syncer/mod.rs` (có `gc_depth`), `speculative_executor.go` (có `TakeClonedState`), `smart_contract_db.go` (cảnh báo `no SmartContractState`), `block_hash_checker/main.go`; `network_baseline_round` **không** có (đúng chủ ý). Việc của agent: đầu mỗi phiên chạy `git fetch origin && git status -sb` để chắc đang làm trên mã mới nhất, không push thêm khi chưa được duyệt.
+- Dựng cảnh báo: height các node parent lệch > 1 trong > 60 giây (dùng `deploy/ansible/monitors/block_hash_checker --watch` hoặc `execution/cmd/tool/parent_chain_monitor`), gửi Telegram. Ghi cách bật vào runbook (mục 3.4b đã nhắc tới cảnh báo này).
+- **Nghiệm thu:** cảnh báo bắn thử thành công trên **cụm cục bộ/ansible** (tắt 1 node cho lệch rồi bật lại); không đụng cụm 231/230.
 
 ### P1 — Burn-in và chaos tự động (bằng chứng cho lỗi chia 2/2)
 Mục tiêu: biến "0 lỗi trong 30 lượt" thành bằng chứng đủ mạnh, hoặc bắt lại lỗi nếu còn.
@@ -87,9 +87,16 @@ Mục tiêu: biến "0 lỗi trong 30 lượt" thành bằng chứng đủ mạn
 ### P6 — CI
 - PR #153 và #152 không có CI check. Dựng workflow chạy `build_check.sh`, `go vet`, `go test` (có `-race` cho các package đồng thời) và bộ T-I rút gọn trên cụm cục bộ. Chủ dự án quyết định runner/chi phí.
 
+### P7 — Nâng cấp cụm 231/230 (DỜI LẠI — chủ dự án sẽ báo thời điểm)
+Chưa làm trong đợt này. Khi chủ dự án cho phép, mới thực hiện:
+- Redeploy đồng loạt **cả Rust lẫn Go** (thay đổi consensus và FFI), sao lưu dữ liệu trước (xem memory/runbook 231/230: stop-all/start-all, thư mục backup, quirk node-4), build bằng `go build -a`, kiểm parity 4 node parent + 2 cụm exec sau khi lên.
+- Cần chủ dự án chốt: cửa sổ bảo trì, ai có quyền SSH/become, kế hoạch rollback.
+- **Nghiệm thu:** parity + 9 kịch bản (hoặc bộ rút gọn) pass trên cụm thật; cảnh báo P0 đang chạy.
+
 ## 4. Định nghĩa "sẵn sàng production" (checklist cuối)
 
-- [ ] `dev` trên GitHub chứa toàn bộ bản sửa; cụm production chạy đúng commit đó (cả Rust và Go).
+- [x] `dev` trên GitHub chứa toàn bộ bản sửa (`de6ac207`).
+- [ ] (P7, dời lại) Cụm production/231/230 chạy đúng commit đó (cả Rust và Go).
 - [ ] P1: ≥ 200 chu kỳ chaos, 0 block lệch, 0 kẹt (hoặc mọi lỗi bắt được đã có nguyên nhân gốc và bản sửa).
 - [ ] P2: toàn bộ test pass trên cụm ≥ 2 máy với genesis production (cluster policy đóng).
 - [ ] Cảnh báo lệch height hoạt động và đã bắn thử.
@@ -98,7 +105,7 @@ Mục tiêu: biến "0 lỗi trong 30 lượt" thành bằng chứng đủ mạn
 - [ ] Báo cáo cuối ghi trung thực những gì chưa chứng minh.
 
 ## 5. Việc **không** làm
-- Không wipe/reset cụm 231/230 hay dữ liệu thật khi chưa có backup và chủ dự án đồng ý.
+- Không deploy, restart, wipe hay reset cụm 231/230 (hoặc dữ liệu thật) khi chưa có backup và chủ dự án đồng ý rõ ràng.
 - Không nới lỏng assertion của test để "cho xanh"; lỗi phải sửa gốc.
 - Không dùng timeout để quyết định dispatch commit; không bật lại toàn bộ stall detector (đã từng làm wedge cả cụm — chỉ detector `4a` được chạy riêng).
 - Không thêm lại `network_baseline_round` ("coi block round ≤ baseline là đã commit"): tái tạo lỗi block mồ côi đã được ghi trong comment `DagState::is_committed`.
