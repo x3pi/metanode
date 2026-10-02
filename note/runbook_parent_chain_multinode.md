@@ -109,6 +109,21 @@ Khi database của một node bị hỏng vật lý hoặc muốn thử nghiệm
 
 ---
 
+### 3.4b. Cả 4 node online nhưng không tiến / chia 2 nhóm (sau khi nhiều node bị `kill -9` rồi bật lại)
+
+**Dấu hiệu:** `last_block` của các node lệch nhau và không tự đều lại sau ~60 giây dù cả 4 node online; `fork_detected=false`; log Rust có hàng nghìn dòng `Rejecting commits ... insufficient quorum votes (accumulated_stake=... needed=2f+1)` và `DIGEST-GATE ... DIVERGENT`; một nhóm ở `CatchingUp`, nhóm kia ở `Healthy`.
+
+**Tính chất:** mất liveness, KHÔNG fork (mỗi nhóm chỉ vote digest riêng nên không ai đủ 2f+1 — đúng nguyên tắc thà pending chứ không fork).
+
+**Nguyên nhân đã biết (2026-10-02):** sau restart, node chèn "baseline" từ mạng (`DAG-RESET Baseline injected`) cả khi lệch nhỏ, và bỏ qua `set_committed` cho block của commit lịch sử, nên sub-dag/commit local lệch với mạng. Đã sửa (commit consensus `commit_syncer` + `linearizer`: chỉ chèn baseline khi DAG rỗng hoặc lệch > `gc_depth`; luôn đánh dấu committed). Trước sửa lỗi gặp ~1/3 lượt e2e mới triển khai; sau sửa 0 lần trong 8 lượt e2e mới + 15 chu kỳ crash-restart + 12 chu kỳ có kiểm tra hash từng block + 8 lượt T-I1..T-I8. Vẫn chưa chứng minh tuyệt đối.
+
+**Khắc phục (không wipe dữ liệu):**
+1. Xác nhận bằng `parent_chain_monitor` hoặc `GET /status` từng node (height/hash khác nhau, không có `fork_detected`).
+2. Restart **lần lượt từng node đang tụt lại** (SIGTERM, chờ lên hẳn rồi mới sang node kế). Đã quan sát một node tụt lại hồi phục đúng bit sau lần restart thứ hai.
+3. Nếu vẫn kẹt: dừng cả 4 node rồi bật lại cả 4 (dữ liệu giữ nguyên), kiểm tra parity.
+4. Nếu node báo `fork_detected=true`: chuyển sang 3.5.
+5. Đặt cảnh báo: height các node lệch > 1 trong > 60 giây (`block_hash_checker --watch` hoặc `parent_chain_monitor`).
+
 ### 3.5. Ứng phó Sự cố Fork (`parent_chain_fork_detected = 1`)
 
 - **Triệu chứng:**

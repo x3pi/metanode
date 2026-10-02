@@ -1845,8 +1845,15 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let dag_commit = self.inner.dag_state.read().last_commit_index();
         let is_recovery = self.coordination_hub.recovery_barrier().is_active();
 
+        // Baseline injection is ONLY appropriate when DAG is empty (snapshot recovery, dag_commit == 0)
+        // OR when the gap between DAG commit and Go execution exceeds the peer GC depth (past commits
+        // have been pruned by peers and cannot be fetched). On routine node restarts with a small gap,
+        // DAG history is preserved and CommitSyncer MUST fetch missing commits sequentially from peers
+        // so that DagState and recent_blocks are properly populated.
+        let gap = (highest_handled as u32).saturating_sub(dag_commit);
+        let gc_depth = self.inner.context.protocol_config.gc_depth();
         let needs_baseline_injection =
-            is_recovery && highest_handled > 0 && dag_commit < highest_handled as u32;
+            is_recovery && highest_handled > 0 && (dag_commit == 0 || gap > gc_depth);
 
         if needs_baseline_injection {
             self.synced_commit_index = highest_handled as u32;
