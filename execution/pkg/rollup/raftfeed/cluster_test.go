@@ -336,6 +336,28 @@ func (h *harness) waitBlocks(n int, members ...*member) {
 	h.t.Fatalf("replicas did not reach %d blocks", n)
 }
 
+// waitSameLength waits until every member has received the same number of blocks.
+func (h *harness) waitSameLength(members ...*member) {
+	h.t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		same := true
+		for _, m := range members[1:] {
+			if len(m.disk.blocks()) != len(members[0].disk.blocks()) {
+				same = false
+			}
+		}
+		if same {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, m := range members {
+		h.t.Logf("%s has %d blocks", m.id, len(m.disk.blocks()))
+	}
+	h.t.Fatal("replicas never converged to the same number of blocks")
+}
+
 func nonceOf(t *testing.T, blk *pb.ExecutableBlock) uint64 {
 	t.Helper()
 	tx, err := transaction.UnmarshalTransaction(blk.Transactions[0].Digest)
@@ -378,11 +400,25 @@ func TestCluster_ThousandBatchesIdenticalOnAllReplicas(t *testing.T) {
 		h.submit(l, testBatch(t, uint64(i)))
 	}
 	h.waitBlocks(N, h.m...)
+	// Submit is at-least-once (see Node.Submit): when a commit takes longer than submitCommitTimeout (slow machine,
+	// -race) it reports false although the batch committed, and the retry adds a duplicate block. So wait until the
+	// replicas hold the same number of blocks, then require every replica identical and the nonces to be a
+	// non-decreasing sequence that covers 0..N-1 (duplicates allowed, loss and reordering not).
+	h.waitSameLength(h.m...)
 	h.assertIdentical(h.m...)
+	next := uint64(0)
 	for i, b := range h.m[0].disk.blocks() {
-		if nonceOf(t, b) != uint64(i) {
-			t.Fatalf("block %d holds nonce %d: order not preserved", i+1, nonceOf(t, b))
+		nc := nonceOf(t, b)
+		switch {
+		case nc == next:
+			next++
+		case nc+1 == next: // duplicate of the previous batch from an at-least-once retry
+		default:
+			t.Fatalf("block %d holds nonce %d, expected %d (or a duplicate of %d): order not preserved", i+1, nc, next, next-1)
 		}
+	}
+	if next != N {
+		t.Fatalf("only nonces 0..%d reached the log, want 0..%d", next-1, N-1)
 	}
 }
 
