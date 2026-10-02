@@ -63,7 +63,24 @@ cd /home/abc/nhat/con-chain-v2/metanode
 ./ci.sh run-now
 ```
 
-### 🔹 Chạy MỘT bài test cụ thể (`--only <test_id>`)
+### ⚡ Chạy Test Cho Chain Con (Execution Clusters - `chain_a`)
+```bash
+# Cách 1: Dùng lệnh tắt tiện lợi (Tự động reset Execution Clusters và chạy 34 bài test Block-STM):
+./ci.sh test-child
+
+# Cách 2: Chạy trực tiếp qua Test ID:
+./ci.sh run-now --only child_chain_a
+
+# Cách 3: Chạy test ngay mà KHÔNG reset lại cụm node (tiết kiệm thời gian khi node đã chạy):
+./ci.sh test-child --no-reset
+# hoặc:
+./ci.sh run-now --only child_chain_a --no-reset
+
+# Cách 4: Ép reset Execution Clusters trước khi test:
+./ci.sh run-now --only child_chain_a --reset-exec
+```
+
+### 🔹 Chạy MỘT bài test cụ thể khác (`--only <test_id>`)
 ```bash
 # 1. Test tắt/bật node luân phiên & kiểm chứng Zero-Fork:
 ./ci.sh run-now --only node_chaos_restart
@@ -71,13 +88,10 @@ cd /home/abc/nhat/con-chain-v2/metanode
 # 2. Test đo hiệu năng đỉnh Max TPS (TPS Blast):
 ./ci.sh run-now --only tps_blast
 
-# 3. Test spam 10,000 giao dịch song song (Xapian):
-./ci.sh run-now --only spam_xapian_10k
+# 3. Test spam contract song song:
+./ci.sh run-now --only spam_contract
 
-# 4. Test Cross-Chain & Relayer Gateway:
-./ci.sh run-now --only cross_chain_gateway
-
-# 5. Chạy bộ Unit Test & E2E cơ bản:
+# 4. Test Snapshot & khôi phục trạng thái node:
 ./ci.sh run-now --only snapshot_recovery
 ```
 
@@ -134,11 +148,12 @@ Daemon chạy ngầm liên tục theo dõi Git remote nhánh `main`. Khi có com
 
 | Test ID | Tên bài test | Mô tả ngắn gọn |
 | :--- | :--- | :--- |
-| `unit_and_e2e_tests` | Unit & E2E Tests | Chạy 30+ bài test logic RPC, BlockSTM, Double Spending... |
-| `cross_chain_gateway` | Cross-Chain & Gateway | Test luân chuyển tài sản giữa các chain con và Public Chain |
-| `spam_xapian_10k` | Spam 10k Transactions | Gửi 10,000 txs song song kiểm tra độ ổn định mempool |
+| `child_chain_a` | Child Chain (chain_a) Tests | Chạy 34 bài test Block-STM trên Execution Clusters (chain con) |
+| `blockstm_logic` | Block-STM Logic Tests | Chạy 32+ bài test logic RPC, BlockSTM, Double Spending... |
+| `spam_contract` | Spam Contract Multi-RPC | Gửi txs song song kiểm tra độ ổn định và xử lý xung đột |
 | `tps_blast` | TPS Blast Benchmark | Bơm 25,000 txs đo thông lượng đỉnh (Max TPS) |
 | `node_chaos_restart` | Chaos Restart & Zero-Fork | Tắt/bật luân phiên từng node, restart cả cụm & verify Zero-Fork |
+| `snapshot_recovery` | Snapshot & Recovery | Tạo snapshot và khôi phục node qua Ansible |
 
 ---
 

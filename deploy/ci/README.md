@@ -20,8 +20,9 @@ Bạn có thể chạy trực tiếp lệnh `./ci.sh` từ thư mục gốc củ
 | **Xem log realtime của Watcher** | `./ci.sh logs` | `./ci_watcher.sh logs` |
 | **Dừng Watcher Daemon** | `./ci.sh stop` | `./ci_watcher.sh stop` |
 | **Chạy test thủ công ngay lập tức** | `./ci.sh run-now` | `./ci_watcher.sh run-now` |
+| **Chạy test chain con (Execution Clusters)** | `./ci.sh test-child` | `./ci_watcher.sh test-child` |
 | **Chạy thử nghiệm (Dry-Run)** | `./ci.sh run-now --dry-run` | `./ci_watcher.sh run-now --dry-run` |
-| **Chạy duy nhất 1 bài test** | `./ci.sh run-now --only tps_blast` | `./ci_watcher.sh run-now --only tps_blast` |
+| **Chạy duy nhất 1 bài test** | `./ci.sh run-now --only child_chain_a` | `./ci_watcher.sh run-now --only child_chain_a` |
 
 ---
 
@@ -32,20 +33,22 @@ Mở file [`ci_config.yaml`](file:///home/abc/nhat/con-chain-v2/metanode/deploy/
 ### Ví dụ thêm 1 bài test mới:
 ```yaml
   # ----------------------------------------------------------------------------
-  # 5. BÀI TEST GIAO DỊCH PARALLEL CONFLICT (VÍ DỤ BỔ SUNG)
+  # BÀI TEST CHAIN CON (EXECUTION CLUSTERS - CHAIN_A: 34 KỊCH BẢN BLOCK-STM)
   # ----------------------------------------------------------------------------
-  - id: "parallel_conflict_test"
-    name: "Block-STM Parallel Conflict Test"
-    enabled: true                  # true: bật chạy, false: bỏ qua
-    pre_action: "none"             # "reset_chain" (reset data), "restart_chain" (restart service), "none"
-    # Đường dẫn tương đối từ metanode-suite (hoàn toàn portable giữa các máy)
-    cwd: "test-simple/test-rpc/test-chain/30-eip7702-parallel-contention"
-    command: "go run main.go"
-    timeout_seconds: 300           # Giới hạn thời gian chạy tối đa tránh treo CI
-    continue_on_failure: false     # Dừng pipeline ngay nếu bài test này thất bại
+  - id: "child_chain_a"
+    name: "Child Chain (chain_a) Block-STM Tests (34 kịch bản)"
+    enabled: true
+    # Tự động reset Execution Clusters và cập nhật IP trước khi test
+    pre_action: "reset_exec"
+    cwd: "test-simple/test-rpc/test-chain"
+    command: "./run_all_tests.sh --chain=chain_a"
+    timeout_seconds: 1800
+    continue_on_failure: false
 ```
 
 ### 💡 Các cơ chế `pre_action` hỗ trợ:
+- **`reset_exec` / `reset_child`**: Tự động reset các cụm Execution Clusters (Chain con) qua `./deploy_clusters.sh --reset --exec-only` và cập nhật lại IP/RPC endpoints vào `metanode-suite`.
+- **`restart_exec` / `restart_child`**: Khởi động lại service các cụm Execution Clusters mà không xóa database.
 - **`prepare_tps`** (Dành riêng cho test TPS):
   1. Kiểm tra file `generated_keys.json`. Nếu chưa tồn tại hoặc số lượng < 50,000 ví, tự động kích hoạt `main.go` trong `gen_spam_keys` để sinh mới đúng số lượng.
   2. Nạp toàn bộ danh sách ví TPS và BLS keys vào `genesis.json.example` qua `manage_genesis.py` (tự động lọc chống trùng lặp địa chỉ 100%).

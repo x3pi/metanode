@@ -7,6 +7,7 @@ import (
 	"time"
 
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -173,7 +174,8 @@ func TestSpeculativeExecutor_AbortAllSpeculative(t *testing.T) {
 	// 5. Assert rescue responses were sent to unblock waiting Rust channels
 	select {
 	case resp := <-respCh1:
-		assert.True(t, resp.Success)
+		assert.False(t, resp.Success)
+		assert.Contains(t, resp.Error, "speculative execution aborted")
 		assert.Equal(t, uint64(100), resp.ActualGei)
 		assert.Equal(t, uint64(0), resp.GeisConsumed)
 	default:
@@ -182,7 +184,8 @@ func TestSpeculativeExecutor_AbortAllSpeculative(t *testing.T) {
 
 	select {
 	case resp := <-respCh2:
-		assert.True(t, resp.Success)
+		assert.False(t, resp.Success)
+		assert.Contains(t, resp.Error, "speculative execution aborted")
 		assert.Equal(t, uint64(101), resp.ActualGei)
 		assert.Equal(t, uint64(0), resp.GeisConsumed)
 	default:
@@ -222,7 +225,8 @@ func TestBlockProcessor_CancelSpeculativeExecution_EmptyArgs(t *testing.T) {
 
 	select {
 	case resp := <-respCh:
-		assert.True(t, resp.Success)
+		assert.False(t, resp.Success)
+		assert.Contains(t, resp.Error, "speculative execution aborted")
 		assert.Equal(t, uint64(200), resp.ActualGei)
 	default:
 		t.Fatal("Expected rescue response on respCh")
@@ -234,4 +238,156 @@ func TestBlockProcessor_CancelSpeculativeExecution_EmptyArgs(t *testing.T) {
 		return true
 	})
 	assert.Equal(t, 0, activeCount)
+}
+
+func TestSpeculativeExecutor_RetryWakesCommitterForFinishedSession(t *testing.T) {
+	bp := &BlockProcessor{}
+	se := NewSpeculativeExecutor(bp)
+	bp.speculativeExecutor = se
+
+	gei := uint64(500)
+	respCh1 := make(chan *pb.ExecuteBlockResponse, 1)
+
+	// Session is finished and waiting in activeSessions
+	res := &SpeculativeResult{
+		GEI:        gei,
+		BlockNum:   1234,
+		AuthRespCh: respCh1,
+		IsFinished: true,
+	}
+	se.activeSessions.Store(gei, res)
+
+	// An inFlightSession exists (e.g. committer had failed or is retrying)
+	se.inFlight.Store(gei, &inFlightSession{respCh: respCh1})
+
+	// Now Rust retries with a new response channel
+	respCh2 := make(chan *pb.ExecuteBlockResponse, 1)
+	epochData := &pb.ExecutableBlock{
+		GlobalExecIndex: gei,
+		BlockNumber:     1234,
+	}
+	se.ExecuteSpeculative(epochData, nil, respCh2)
+
+	// Verify that:
+	// 1. AuthRespCh was updated to respCh2
+	updatedCh := res.AuthResponseChannel()
+	assert.Equal(t, (chan<- *pb.ExecuteBlockResponse)(respCh2), updatedCh, "Retry must update AuthRespCh")
+
+	// 2. Committer was notified via resultChan
+	select {
+	case wokeRes := <-se.ResultChan():
+		assert.Equal(t, gei, wokeRes.GEI, "Retry must wake committer on resultChan")
+	default:
+		t.Fatal("Expected committer to be woken up via resultChan")
+	}
+}
+
+func TestSpeculativeResult_AuthResponseChannel_Concurrent(t *testing.T) {
+	res := &SpeculativeResult{}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Writer goroutines
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					ch := make(chan *pb.ExecuteBlockResponse, 1)
+					res.SetAuthRespCh(ch)
+				}
+			}
+		}()
+	}
+
+	// Reader goroutines
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = res.AuthResponseChannel()
+				}
+			}
+		}()
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
+func TestBlockProcessor_CommitSpeculativeResult_ExecutionMutexProtectsCommit(t *testing.T) {
+	bp := &BlockProcessor{}
+	bp.ExecutionMutex.Lock()
+
+	commitStarted := make(chan struct{})
+	commitDone := make(chan struct{})
+
+	res := &SpeculativeResult{
+		GEI:      10,
+		BlockNum: 1,
+	}
+
+	go func() {
+		close(commitStarted)
+		_ = bp.commitSpeculativeResult(res, nil)
+		close(commitDone)
+	}()
+
+	<-commitStarted
+	// Ensure commitSpeculativeResult is blocked on ExecutionMutex.RLock
+	select {
+	case <-commitDone:
+		t.Fatal("commitSpeculativeResult should be blocked while ExecutionMutex.Lock is held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Simulate P2P sync advancing GEI to 10 while holding ExecutionMutex.Lock
+	defer storage.ForceSetLastGlobalExecIndex(0)
+	storage.ForceSetLastGlobalExecIndex(10)
+
+	bp.ExecutionMutex.Unlock()
+
+	select {
+	case <-commitDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("commitSpeculativeResult should complete after ExecutionMutex is unlocked")
+	}
+}
+
+func TestCommitSpeculativeResult_ZeroForkStateRootCheck(t *testing.T) {
+	bp := &BlockProcessor{}
+	respCh := make(chan *pb.ExecuteBlockResponse, 1)
+
+	res := &SpeculativeResult{
+		GEI:        10,
+		BlockNum:   1,
+		AuthRespCh: respCh,
+	}
+
+	defer storage.ForceSetLastGlobalExecIndex(0)
+	storage.ForceSetLastGlobalExecIndex(10)
+
+	err := bp.commitSpeculativeResult(res, nil)
+	assert.NoError(t, err)
+
+	select {
+	case resp := <-respCh:
+		// Since blockchain DB has no block 1 in this unit test, stateRoot is missing.
+		// ZERO-FORK INVARIANT: Never confirm success blindly with nil StateRoot!
+		assert.False(t, resp.Success, "Must fail-closed when stateRoot cannot be verified")
+		assert.Nil(t, resp.StateRoot, "StateRoot must be nil when unverified")
+		assert.Contains(t, resp.Error, "stateRoot not found")
+	default:
+		t.Fatal("Expected response on AuthRespCh")
+	}
 }
