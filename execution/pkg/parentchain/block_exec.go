@@ -220,6 +220,16 @@ type TreeBlockCommitter struct {
 	nomtHandle *nomt_ffi.Handle
 	treeStore  *TreeStore
 	applyMu    sync.Mutex
+	// genesisInit, when set, runs inside block 1 before its transactions (see SetGenesisInit).
+	genesisInit func(Store) error
+}
+
+// SetGenesisInit installs the function that creates the genesis state (float balances). It runs inside the
+// execution of block 1, so every validator applies it identically and it is part of block 1's state root.
+func (c *TreeBlockCommitter) SetGenesisInit(f func(Store) error) {
+	c.applyMu.Lock()
+	defer c.applyMu.Unlock()
+	c.genesisInit = f
 }
 
 func NewTreeBlockCommitter(db *leveldb.DB, nomtHandle *nomt_ffi.Handle) *TreeBlockCommitter {
@@ -403,6 +413,15 @@ func (c *TreeBlockCommitter) ApplyBlock(in BlockInput, exec TxExecutor) (BlockRe
 	// 3. Two-layer overlay execution
 	ov := NewOverlayTree(&nomtTreeKV{handle: c.nomtHandle})
 	view := NewTreeStore(ov)
+
+	if prog.LastBlock == 0 && c.genesisInit != nil {
+		ov.Push()
+		if err := c.genesisInit(view); err != nil {
+			ov.Drop()
+			return BlockResult{}, fmt.Errorf("parentchain: genesis state init failed: %w", err)
+		}
+		ov.Merge()
+	}
 
 	txErrors := make([]error, len(in.Txs))
 	receipts := make([]*Receipt, len(in.Txs))

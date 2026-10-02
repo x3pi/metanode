@@ -132,6 +132,11 @@ func (s *DBStore) GetReceipt(txHash common.Hash) (*Receipt, bool, error) {
 	return s.committer.GetReceipt(txHash)
 }
 
+// SetGenesisInit installs the genesis state initializer run inside block 1.
+func (s *DBStore) SetGenesisInit(f func(Store) error) {
+	s.committer.SetGenesisInit(f)
+}
+
 func (s *DBStore) ApplyBlock(in BlockInput, exec TxExecutor) (BlockResult, error) {
 	return s.committer.ApplyBlock(in, exec)
 }

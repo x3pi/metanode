@@ -181,8 +181,9 @@ func EncodeChainRegistryEntry(e *ChainRegistryEntry) []byte {
 		return nil
 	}
 	entry := &pb.ChainRegistryEntryProto{
-		PubKey:    e.FloatIdentityKey[:],
-		ClusterId: e.ClusterIDDescriptive,
+		PubKey:     e.FloatIdentityKey[:],
+		ClusterId:  e.ClusterIDDescriptive,
+		Authorized: e.Authorized,
 	}
 	b, _ := deterministicMarshal.Marshal(entry)
 	return b
@@ -202,6 +203,7 @@ func DecodeChainRegistryEntry(data []byte) (*ChainRegistryEntry, error) {
 		FloatIdentityKey:     pubKey,
 		ClusterIDDescriptive: entry.ClusterId,
 		ChainIDDescriptive:   entry.ClusterId,
+		Authorized:           entry.Authorized,
 	}, nil
 }
 

@@ -9,10 +9,10 @@
   when: "deploy_action in ['deploy', 'reset']"
   ansible.builtin.assert:
     that:
-      - (parent_open_cluster_registration | default(false) | bool) or ((parent_allowed_clusters | default([])) | length > 0)
+      - (parent_open_cluster_registration | default(false) | bool) or ((parent_allowed_clusters | default([])) | length > 0) or ((parent_float_accounts | default([])) | length > 0)
     fail_msg: >-
       parent_open_cluster_registration is false (the default) but parent_allowed_clusters is empty. Set
-      parent_allowed_clusters to the BLS public keys of the permitted clusters (production) or
+      parent_allowed_clusters (founding clusters) or parent_float_accounts (genesis balances; any key reaching parent_min_float_to_register may register) for production, or
       parent_open_cluster_registration: true (devnet only).
 
 # ── Stop Service ─────────────────────────────────────────────────────────────

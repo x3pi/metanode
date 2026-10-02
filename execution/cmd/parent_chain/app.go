@@ -65,6 +65,20 @@ func NewApp(configPath, rustConfigPath, dataDir, httpAddr, genesisPath string) (
 		log.Printf("Cluster registration restricted to %d genesis clusters", len(policy.Allowed))
 	}
 
+	allocs, err := gen.FloatAllocations()
+	if err != nil {
+		return nil, err
+	}
+	if len(allocs) > 0 {
+		dbStore.SetGenesisInit(func(st parentchain.Store) error { return parentchain.ApplyGenesisFloat(st, allocs) })
+		log.Printf("Genesis float: %d account(s) will be created in block 1", len(allocs))
+	}
+	if policy.AllowDeposit {
+		log.Printf("⚠️ allow_deposit_to_float=true: clusters can MINT float (devnet only)")
+	} else {
+		log.Printf("Float supply is fixed (depositToFloat disabled by genesis)")
+	}
+
 	tb := processor.NewTxBatcher(1000)
 	httpServer := parentchain.NewHTTPServer(dbStore)
 	httpServer.SetValidators(protoValidators)

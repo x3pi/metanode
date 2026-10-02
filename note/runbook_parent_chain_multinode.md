@@ -172,6 +172,22 @@ cd execution && go run ./cmd/tool/parent_chain_security_check -url http://<node>
 ```
 Công cụ tấn công thật (POST /tx, deposit không nguồn/nguồn lạ/chứng nhận giả/không chữ ký, registerCluster lạ) và thoát mã 1 nếu có kẻ tấn công nào lọt.
 
+### 4.1. Mô hình float của production (2026-10-02): tổng cung cố định, BLS là tài khoản
+
+- **Tổng cung = tổng số dư genesis, không bao giờ tăng.** `depositToFloat` (đường mint duy nhất) bị **tắt** trừ khi genesis đặt `allow_deposit_to_float: true` (chỉ devnet/test); khi tắt, mọi deposit nhận receipt lỗi **222**, state không đổi.
+- **Số dư khởi tạo trong genesis:** `float_accounts: [{"bls_public_key": "<48-byte hex>", "balance": "<số thập phân, đơn vị nhỏ nhất>"}]` (1 đơn vị = 10^18). Áp dụng tất định trong **block 1** (nằm trong state root block 1), nên **mọi validator phải dùng cùng một file genesis**. Khóa trùng, số dư không dương hay khóa sai độ dài làm node không khởi động.
+- **Chuyển tiền thường giữa các BLS:** method `TRANSFER_BALANCE` (người gửi ký tx như mọi tx, nonce tuần tự). Trừ người gửi, cộng người nhận, không đổi tổng cung, không sự kiện inbound. Lỗi: **223** (CallData hỏng), **224** (thiếu số dư/số tiền không hợp lệ/tự chuyển cho mình). Người nhận tự được ghi vào AccountRegistry nên ký được tx tiếp theo. Không có phí và không có trần velocity (đã chọn đơn giản; trần velocity chỉ áp cho `TransferFloat` xuyên cụm).
+- **Đăng ký cluster:** khóa thuộc `clusters` (tập sáng lập) **hoặc** có số dư ≥ `min_float_to_register` (production: `"1000000000000000000000"` = 1000 đơn vị nguyên) đều đăng ký được; còn lại **221**. Không có khóa bond: số dư chỉ được kiểm lúc đăng ký (có thể chuyển đi sau đó; cân nhắc bond nếu cần).
+- **Chỉ cluster đã đăng ký (`authorized`) mới được làm nguồn chứng nhận** (`depositToFloat`, nguồn của `transferFloat`, `submitStateRoot`). Một khóa chỉ *nhận* tiền không còn trở thành cluster tin cậy (đã sửa lỗ hổng bỏ qua chính sách).
+- **Đổi định dạng state ⇒ phải wipe + redeploy đồng loạt** (trường `authorized` trong ChainRegistry, method mới, hook genesis). Không có migrate.
+- Ansible: `parent_float_accounts`, `parent_min_float_to_register` (mặc định 1000 đơn vị), `parent_allow_deposit_to_float` (mặc định `false`; devnet đặt `true`). Playbook dừng nếu cả `parent_open_cluster_registration`, `parent_allowed_clusters` và `parent_float_accounts` đều trống.
+- Kiểm chứng trực tiếp trên cụm khởi động bằng genesis tương ứng:
+```bash
+cd execution
+go run ./cmd/tool/test_account_model -print-genesis   # trường genesis cho 3 khóa test (CHỈ test, khóa công khai)
+go run ./cmd/tool/test_account_model                  # genesis→chuyển→ngưỡng 1000→không mint→parity 4 node
+```
+
 ## 5. Giao dịch: chỉ có một đường
 
 Mọi thay đổi trạng thái là `pb.Transaction` ký BLS trên hash (kèm `ChainID=990` và nonce tuần tự), gửi **raw proto bytes** tới `POST /send_raw_transaction`. Không còn `POST /tx` JSON, không còn giao dịch không ký. `GET /nonce?address=0x...` trả nonce đã commit của người gửi (client tự tính nonce tiếp theo, `QuorumClient` làm sẵn).

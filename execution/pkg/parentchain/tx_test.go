@@ -22,7 +22,7 @@ import (
 func init() {
 	bls.Init()
 	// Most tests register clusters freely; policy-specific tests install their own policy and restore this one.
-	SetClusterPolicy(ClusterPolicy{Open: true})
+	SetClusterPolicy(ClusterPolicy{Open: true, AllowDeposit: true})
 }
 
 // helper to register a cluster in store and return keys
@@ -36,6 +36,7 @@ func setupCluster(t *testing.T, store Store, clusterID uint64) (cm.PrivateKey, c
 		FloatIdentityKey:     pub,
 		ClusterIDDescriptive: clusterID,
 		ChainIDDescriptive:   clusterID,
+		Authorized:           true,
 	})
 	require.NoError(t, err)
 	err = store.SetAccountRegistry(addr, pub)
@@ -364,7 +365,7 @@ func TestQuorumClient_ConsecutiveDepositsUniqueMsgID(t *testing.T) {
 // Cluster registration is a trust anchor: with the default (closed) policy nobody may register, with a
 // genesis allow-list only the listed keys may, and only an explicit open policy lets anyone in.
 func TestTx_ClusterRegistrationPolicy(t *testing.T) {
-	defer SetClusterPolicy(ClusterPolicy{Open: true})
+	defer SetClusterPolicy(ClusterPolicy{Open: true, AllowDeposit: true})
 
 	register := func(kp *bls.KeyPair, nonce uint64, store Store) (*Receipt, error) {
 		tx, err := BuildAndSignBLSTx(kp.PrivateKey(), kp.PublicKey(), ParentChainGatewayAddress, nonce, EncodeRegisterClusterCallData(kp.PublicKey(), 7))
@@ -393,7 +394,7 @@ func TestTx_ClusterRegistrationPolicy(t *testing.T) {
 	assert.True(t, found)
 
 	// Open (devnet): anyone.
-	SetClusterPolicy(ClusterPolicy{Open: true})
+	SetClusterPolicy(ClusterPolicy{Open: true, AllowDeposit: true})
 	store = NewMemoryStore()
 	rcpt, err = register(stranger, 0, store)
 	require.NoError(t, err)

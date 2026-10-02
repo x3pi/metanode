@@ -13,6 +13,7 @@ enum ParentChainMethod {
   METHOD_REGISTER_ACCOUNT = 5;
   METHOD_SUBMIT_STATE_ROOT = 6;
   METHOD_REGISTER_CLUSTER = 7;
+  METHOD_TRANSFER_BALANCE = 8;
 }
 
 message DepositToFloatArgs {
@@ -37,6 +38,12 @@ message TransferFloatArgs {
   uint64 seq = 8;             // sequence number for cluster outflow
   bytes cert = 9;             // 96 bytes BLS signature cert
   bool is_refund = 10;        // refund flag
+}
+
+// Plain account-to-account transfer of float between BLS identities (no cluster semantics, no inbound event).
+message TransferBalanceArgs {
+  bytes to_key = 1;           // 48 bytes BLS public key of the recipient
+  bytes amount = 2;           // big-endian big.Int bytes
 }
 
 message MarkClaimedArgs {
@@ -81,6 +88,7 @@ message ParentChainCallData {
     RegisterAccountArgs register_account = 6;
     SubmitStateRootArgs submit_state_root = 7;
     RegisterClusterArgs register_cluster = 8;
+    TransferBalanceArgs transfer_balance = 9;
   }
 }
 
@@ -147,6 +155,9 @@ message ChainRegistryEntryProto {
   bytes pub_key = 1;
   uint64 cluster_id = 2;
   string name = 3;
+  // True only for a key admitted through the cluster policy (registerCluster). A registry entry that was merely
+  // created because the key RECEIVED float is not a trusted certifier.
+  bool authorized = 4;
 }
 
 message FloatVelocityStateProto {
