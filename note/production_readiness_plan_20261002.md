@@ -2,7 +2,7 @@
 
 > Lập 2026-10-02. Đọc kèm: `AGENTS.md` (luật bắt buộc), `PROJECT_STRUCTURE.md`, `note/runbook_parent_chain_multinode.md` (đặc biệt mục 3.4b),
 > `note/parent_chain_cluster_test_report.md` (đầu file có phần tái kiểm chứng trung thực), `note/parent_chain_completion_plan.md`.
-> Mốc code: nhánh `dev` trên GitHub đã đồng bộ tới `de6ac207` (chủ dự án đã push 2026-10-02; đã xác minh nội dung trên remote).
+> Mốc code: `dev` trên GitHub tới `de6ac207`; **local `dev` còn các commit chưa push** (P8 `d165a781`, P9 `9d38d4e4`) — chủ dự án sẽ tự push. Cụm 231/230 hiện chạy `56df6d18` (cách dev 82 commit).
 > **Cụm 231/230 chưa nâng cấp — chủ dự án dời lại sau (xem P7). Agent KHÔNG được tự deploy/restart/wipe cụm 231/230.**
 
 ---
@@ -28,6 +28,8 @@
 - Bài test: e2e từng "xanh giả" (in số dư rỗng) đã sửa để assert thật; T-I1/T-I3/T-I4 đã chỉnh các race trong test.
 
 **Kết quả kiểm chứng gần nhất (bản `dev` hiện tại):** 6/6 lượt triển khai mới ansible với 9 kịch bản pass; 12 chu kỳ crash-restart với so hash từng block 0 lệch; T-I1..T-I8 8/8; consensus-core 216/216; `go test -race` sạch trên 52 package.
+
+**Đã làm sau mốc trên (local, chưa push):** P8 mô hình float cố định (genesis `float_accounts`, chuyển BLS→BLS, đăng ký theo số dư, cờ `authorized`) — commit `d165a781`; P9 bảo toàn tổng coin cụm thực thi (guard + trừ `value+fee`) — commit `9d38d4e4`. Cả hai mới có unit/e2e test, **chưa chạy trên cụm thật**.
 
 **Còn mở / chưa chứng minh:**
 - Lỗi parent chia 2/2 sau nhiều lần `kill -9`: trước sửa ~1/3 lượt e2e mới triển khai, sau sửa 0/30 lượt — **chưa tái hiện được theo ý muốn nên chưa có test fail→pass**.
@@ -117,7 +119,7 @@ Hiện trạng code (đã kiểm bằng `grep`, 2026-10-02) khác mô hình đó
 **8.3 Quyền push (hỏi chủ dự án):** quyền push lên `x3pi/metanode` do chủ repo quyết (cài đặt GitHub); agent không có token và không được push. Ghi tên người/nhóm có quyền vào runbook sau khi chủ dự án trả lời.
 
 ### P7 — Nâng cấp cụm 231/230 (DỜI LẠI — chủ dự án sẽ báo thời điểm)
-Chưa làm trong đợt này. Khi chủ dự án cho phép, mới thực hiện:
+Chưa làm trong đợt này. **Việc chỉ-đọc được phép làm ngay (không đụng cụm):** (a) rà 82 commit `56df6d18..HEAD`, đặc biệt `execution/pkg/trie/nomt_state_trie.go`, `processor/`, `c_mvm/processor.cpp`, kiểm xem commit nào đổi stateRoot/kết quả thực thi trên dữ liệu cũ (nếu có thì replay lịch sử cũ sẽ fork → cần wipe thay vì giữ dữ liệu); (b) quét lịch sử 231/230 tìm giao dịch cross-chain (trừ phí `value+fee` đổi trạng thái người gửi); (c) mọi node thực thi 231/230 nâng cấp **cùng lúc**, không rolling. Cụm cũ không có parent chain: **không đặt `PARENT_CHAIN_URL`** hoặc đặt `BLS_CONSERVATION_MODE=off|warn`. Khi chủ dự án cho phép, mới thực hiện:
 - Redeploy đồng loạt **cả Rust lẫn Go** (thay đổi consensus và FFI), sao lưu dữ liệu trước (xem memory/runbook 231/230: stop-all/start-all, thư mục backup, quirk node-4), build bằng `go build -a`, kiểm parity 4 node parent + 2 cụm exec sau khi lên.
 - Cần chủ dự án chốt: cửa sổ bảo trì, ai có quyền SSH/become, kế hoạch rollback.
 - **Nghiệm thu:** parity + 9 kịch bản (hoặc bộ rút gọn) pass trên cụm thật; cảnh báo P0 đang chạy.
@@ -130,16 +132,24 @@ Chưa làm trong đợt này. Khi chủ dự án cho phép, mới thực hiện:
 - [ ] P2: toàn bộ test pass trên cụm ≥ 2 máy với genesis production (cluster policy đóng).
 - [ ] Cảnh báo lệch height hoạt động và đã bắn thử.
 - [ ] Runbook cập nhật và đã diễn tập: restart từng node, mất quorum, chia nhóm, `fork_detected`.
-- [ ] P8.1: key chỉ nhận float không thể chứng nhận/mint (test hồi quy); P8.2 nếu bật chính sách theo số dư.
+- [x] P8.1/P8.2: key chỉ nhận float không thể chứng nhận/mint (test hồi quy); đăng ký theo số dư ≥ 1000 đơn vị (đã commit; còn rà `MarkClaimed`/`ReclaimFloat`/`RegisterAccount`).
+- [ ] P8: genesis production thật (tài khoản, số dư, khóa BLS do chủ dự án cung cấp, không commit khóa riêng); quyết định bond.
+- [ ] P9: công cụ `float_accounts`, kiểm chứng sống `enforce`, cấu hình ansible (P9.1–P9.3); `mtn_getConservation` `ok=true` trên mọi cụm production.
+- [ ] Mọi thay đổi consensus/phí (P8, P9) deploy **đồng loạt + wipe** cùng P7; không trộn phiên bản.
 - [ ] Không còn credential plaintext trong inventory production.
 - [ ] Báo cáo cuối ghi trung thực những gì chưa chứng minh.
 
-### P9. Bảo toàn tổng coin của cụm thực thi (BLS đại diện toàn bộ tài khoản)
+### P9. Bảo toàn tổng coin của cụm thực thi (BLS đại diện toàn bộ tài khoản) — ĐÃ CODE, CÒN 4 VIỆC
 
 - **Bất biến:** `float(BLS cụm) trên Parent == Σ số dư mọi tài khoản trong cụm` khi nghỉ; khi đang chuyển: `0 ≤ float − Σ ≤ pending` (người gửi bị trừ trước khi Parent trừ float; người nhận được cộng sau khi Parent cộng float). Vi phạm phía dưới = coin không có đảm bảo; phía trên = coin có đảm bảo biến mất.
 - **Sửa lỗi gốc:** người gửi trước đây chỉ bị trừ `value` trong khi Parent trừ `value+fee` ⇒ float lệch dần so với tài khoản. Nay người gửi bị trừ `value+fee` (`statemachine.go`, `cross_node_handler.go`), hoàn tiền trả lại `value` (phí bị đốt cả hai phía).
 - **Triển khai:** `pkg/rollup/conservation.go` (`CheckConservation`, đo ổn định trước/sau, không ổn định = không kết luận; `ConservationGuard`). Đọc float qua `QuorumClient.GetFloat` (≥ f+1 node đồng ý cùng block+số dư). Chế độ `BLS_CONSERVATION_MODE=enforce|warn|off` (mặc định `enforce`, chu kỳ `BLS_CONSERVATION_INTERVAL_SECONDS`, mặc định 300): `enforce` chặn `SendWorker` và `mtn_sendCrossChainTransfer` cho tới khi có phép đo OK đầu tiên và sau 3 lần vi phạm liên tiếp (thà pending chứ không fork). RPC giám sát: `mtn_getConservation`.
-- **Điều kiện vận hành:** `float_accounts` trong genesis Parent của cụm phải bằng đúng Σ alloc của genesis cụm thực thi (devnet mint bằng deposit nên không khớp ⇒ dùng `warn`). Còn lại: công cụ tính mục `float_accounts` từ genesis cụm + khóa BLS; kiểm chứng sống.
+- **Điều kiện vận hành:** `float_accounts` trong genesis Parent của cụm phải bằng đúng Σ alloc của genesis cụm thực thi (devnet mint bằng deposit nên không khớp ⇒ dùng `warn`). 
+- **Việc còn lại (theo thứ tự):**
+  1. **P9.1 Công cụ sinh `float_accounts`:** đọc genesis cụm thực thi (Σ `alloc`) + khóa BLS công khai của cụm, in mục `float_accounts` cho genesis Parent (đặt trong `cmd/tool/`). Nghiệm thu: với cụm test, `mtn_getConservation` báo `ok=true` ngay khi khởi động.
+  2. **P9.2 Kiểm chứng sống** trên cụm local (parent 4 + exec) ở chế độ `warn` rồi `enforce`: gửi chuyển cross-chain + refund, `diff` luôn trong `[0, pending]`, về 0 khi nghỉ. Cố ý làm lệch (sửa genesis) để thấy `enforce` chặn (`halted`) và `warn` chỉ log. Ghi kết quả thật vào báo cáo.
+  3. **P9.3 Cấu hình ansible:** biến `bls_conservation_mode` (devnet `warn`, production `enforce`) + `BLS_CONSERVATION_INTERVAL_SECONDS` trong unit/env của node thực thi; thêm vào runbook và cảnh báo giám sát khi `blocked=true`.
+  4. **P9.4 Chi phí đo:** `TotalSupply` dùng `GetAll()` quét toàn bộ tài khoản; đo trên cụm lớn (≥ 1M tài khoản), nếu đắt thì thay bằng tổng cung đã lưu trong state (chỉ làm khi đo cho thấy cần).
 
 ## 5. Việc **không** làm
 - Không deploy, restart, wipe hay reset cụm 231/230 (hoặc dữ liệu thật) khi chưa có backup và chủ dự án đồng ý rõ ràng.
