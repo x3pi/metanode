@@ -360,7 +360,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		if ctx.Err() != nil {
 			logger.Warn("⚠️ [SPECULATIVE] GEI=%d (block #%d) execution was cancelled (aborted by Sync/Consensus). Discarding state.", gei, blockNum)
 			if csCopy != nil {
-				csCopy.CloseSpeculative()
+				csCopy.AbortSpeculative()
 			}
 			se.activeSessions.Delete(gei)
 			se.inFlight.Delete(gei)
@@ -394,7 +394,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		if gei <= lastCommittedGEI {
 			logger.Warn("⚠️ [SPECULATIVE] Execution finished for GEI=%d (block #%d) but block is already committed to DB (lastGEI=%d). Discarding obsolete speculative state immediately.", gei, blockNum, lastCommittedGEI)
 			if res.ClonedState != nil {
-				res.ClonedState.CloseSpeculative()
+				res.ClonedState.AbortSpeculative()
 			}
 			if res.AuthRespCh != nil {
 				select {
@@ -418,7 +418,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		if _, exists := se.activeSessions.Load(gei); !exists {
 			logger.Warn("⚠️ [SPECULATIVE] Execution finished for GEI=%d but session was aborted by CleanGEI", gei)
 			if res.ClonedState != nil {
-				res.ClonedState.CloseSpeculative()
+				res.ClonedState.AbortSpeculative()
 			}
 			if res.AuthRespCh != nil {
 				select {
@@ -501,7 +501,7 @@ func (se *SpeculativeExecutor) AbortAllSpeculative() {
 		gei := key.(uint64)
 		if res, ok := value.(*SpeculativeResult); ok && res != nil {
 			if res.ClonedState != nil {
-				res.ClonedState.CloseSpeculative()
+				res.ClonedState.AbortSpeculative()
 			}
 			if res.AuthRespCh != nil {
 				select {
@@ -545,7 +545,7 @@ func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 		if k <= gei {
 			if res, ok := value.(*SpeculativeResult); ok && res != nil {
 				if res.ClonedState != nil {
-					res.ClonedState.CloseSpeculative()
+					res.ClonedState.AbortSpeculative()
 				}
 				if res.AuthRespCh != nil {
 					select {
@@ -668,7 +668,7 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		logger.Warn("⚠️ [COMMITTER] Committer received GEI=%d (block #%d) but block is already committed to DB (lastGEI=%d). Discarding obsolete speculative state immediately.",
 			res.GEI, res.BlockNum, lastGEI)
 		if res.ClonedState != nil {
-			res.ClonedState.CloseSpeculative()
+			res.ClonedState.AbortSpeculative()
 		}
 		return nil
 	}
@@ -763,6 +763,7 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		// IntermediateRoot -> BeginSession would wait for it forever (observed live). Abort it, do NOT persist it.
 		if res.ClonedState != nil {
 			res.ClonedState.AbortSpeculative()
+			res.ClonedState = nil // aborted: nobody may close or abort it a second time (CleanGEI)
 		}
 
 		// Clone state mới từ tip thực tế hiện tại
@@ -792,7 +793,7 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		accumulatedResults, commitErr = tx_processor.ProcessTransactions(context.Background(), csCopy, groupedGroups, false, true, blockTimeSec, res.LeaderAddr, res.BlockNum, true)
 		if commitErr != nil {
 			if csCopy != nil {
-				csCopy.CloseSpeculative()
+				csCopy.AbortSpeculative()
 			}
 			commitErr = fmt.Errorf("sequential re-execution failed: %w", commitErr)
 			return commitErr
@@ -810,6 +811,10 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		bp.chainState.SetAccountStateDB(res.ClonedState.GetAccountStateDB())
 		bp.chainState.SetSmartContractDB(res.ClonedState.GetSmartContractDB())
 		bp.chainState.SetStakeStateDB(res.ClonedState.GetStakeStateDB())
+		// The tries now belong to bp.chainState. Drop the speculative result's reference: CleanGEI runs right after
+		// this commit and used to AbortSpeculative() the very same objects (draining/aborting the live state's
+		// sessions and discarding its smart-contract DB caches).
+		res.ClonedState = nil
 	}
 
 	// 3. Tiến hành tạo block và commit
