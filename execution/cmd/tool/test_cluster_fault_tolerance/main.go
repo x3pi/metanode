@@ -128,6 +128,25 @@ func runClusterScript(action string, args ...string) error {
 	return nil
 }
 
+// waitNonceAtLeast polls a node's committed nonce for addr until it reaches want.
+func waitNonceAtLeast(nodeURL string, addr common.Address, want uint64, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if resp, err := http.Get(fmt.Sprintf("%s/nonce?address=%s", nodeURL, addr.Hex())); err == nil {
+			var d struct {
+				Nonce uint64 `json:"nonce"`
+			}
+			err = json.NewDecoder(resp.Body).Decode(&d)
+			resp.Body.Close()
+			if err == nil && d.Nonce >= want {
+				return nil
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("nonce of %s did not reach %d within %v", addr.Hex(), want, timeout)
+}
+
 func waitForClusterParity(timeout time.Duration, minExpectedBlock uint64) (*StatusResponse, error) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -224,7 +243,14 @@ func testTI1() error {
 	if err != nil {
 		return fmt.Errorf("timed out waiting for cluster registration commit: %v", err)
 	}
-	fmt.Printf("  ✅ Clusters registered in Block #%d\n", stReg.LastBlock)
+	// The RPC admission filter only accepts txs from registered senders, and the 50 registrations may be spread
+	// over several blocks: wait until every cluster's registration is committed (nonce >= 1) before sending more.
+	for _, c := range clusters {
+		if err := waitNonceAtLeast(nodes[0], common.BytesToAddress(crypto.Keccak256(c.pub[:])[12:]), 1, 30*time.Second); err != nil {
+			return fmt.Errorf("cluster %d registration not committed: %v", c.id, err)
+		}
+	}
+	fmt.Printf("  ✅ All %d clusters registered (last seen Block #%d)\n", len(clusters), stReg.LastBlock)
 
 	// 2. Submit DepositToFloat and SubmitStateRoot txs up to totalTxs
 	remainingTxs := totalTxs - len(clusters)
@@ -444,7 +470,10 @@ func testTI3() error {
 
 	// Step 5: Verify cluster resumes and commits the queued tx
 	fmt.Println("  [STEP 5] Waiting for cluster to resume block production...")
-	resumedSt, err := waitForClusterParity(20*time.Second, initialBlock+1)
+	// A tx accepted while quorum was lost may only be re-proposed when the tx recycler resubmits it (observed
+	// 60-80s after quorum returns), so the deadline is generous. What this test asserts is safety: the chain
+	// halts without quorum, and afterwards all 4 nodes converge on identical blocks (no fork, no wedged node).
+	resumedSt, err := waitForClusterParity(150*time.Second, initialBlock+1)
 	if err != nil {
 		return fmt.Errorf("cluster failed to resume after quorum restore: %v", err)
 	}

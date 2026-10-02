@@ -116,6 +116,33 @@ func NewSmartContractDB(
 	return db
 }
 
+// Copy creates an isolated copy of SmartContractDB for speculative execution.
+// It deep-copies all in-memory smart contract storage tries so speculative execution
+// inherits all intermediate dirty state without falling back to stale disk reads.
+func (db *SmartContractDB) Copy(accountStateDB types.AccountStateDB) *SmartContractDB {
+	newDB := &SmartContractDB{
+		codeStorage:        db.codeStorage,
+		accountStateDB:     accountStateDB,
+		dbSmartContract:    db.dbSmartContract,
+		changelogDB:        db.changelogDB,
+		currentCommitBlock: db.currentCommitBlock,
+	}
+
+	db.smartContractStorageTries.Range(func(key, value interface{}) bool {
+		if trieVal, ok := value.(trie.StateTrie); ok && trieVal != nil {
+			newDB.smartContractStorageTries.Store(key, trieVal.Copy())
+		}
+		return true
+	})
+
+	db.pendingCode.Range(func(key, value interface{}) bool {
+		newDB.pendingCode.Store(key, value)
+		return true
+	})
+
+	return newDB
+}
+
 func (db *SmartContractDB) Code(address common.Address) []byte {
 	account, err := db.accountStateDB.AccountState(address)
 	if err != nil {

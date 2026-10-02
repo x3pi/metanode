@@ -10,6 +10,7 @@ use tracing::{error, info, warn};
 pub async fn perform_block_recovery_check(
     executor_client: &Arc<ExecutorClient>,
     go_last_block: u64,
+    go_last_commit_index: u32,
     epoch_base_exec_index: u64,
     current_epoch: u64,
     recovery_store: &Arc<dyn consensus_core::storage::Store>,
@@ -35,9 +36,18 @@ pub async fn perform_block_recovery_check(
         );
         return Ok(());
     }
-    // We MUST scan from the beginning of the epoch to reconstruct the fragment offset.
-    // Assuming commit_index starts at 1 for the first commit after genesis/epoch base.
-    let range = consensus_core::CommitRange::new(1..=u32::MAX);
+    // ROOT-CAUSE FIX (G11, found live on a 4-node cluster): the GEI of a commit used to be derived by ARITHMETIC over the
+    // local commit store: `epoch_base + commit_index + cumulative_fragment_offset`, starting from commit 1. That is only
+    // right if the store holds EVERY commit index from 1 up (each empty commit decrements the offset). A store that is
+    // sparse (commits learned from peers during catch-up, an earlier wipe, ...) inflates every later GEI, so commits Go
+    // had ALREADY executed were replayed as brand-new blocks (the same transactions became a second block and the
+    // node's chain diverged from its peers).
+    //
+    // Go is the authority on what it executed. So: replay only commits ABOVE the last commit Go reports, number their
+    // GEIs by counting forward from Go's own last GEI (exactly what the live path does: one GEI per non-empty commit,
+    // N for a fragmented one), and refuse to guess when the local store has a hole right after Go's position.
+    let first_commit = go_last_commit_index.saturating_add(1);
+    let range = consensus_core::CommitRange::new(first_commit..=u32::MAX);
     let commits = recovery_store.scan_commits(range)?;
 
     if commits.is_empty() {
@@ -46,23 +56,15 @@ pub async fn perform_block_recovery_check(
     }
 
     let mut next_required_global = go_last_block + 1;
-    let mut cumulative_fragment_offset: i64 = 0;
+    let mut expected_commit_index = first_commit;
     let mut missing_commits_found = false;
 
     info!(
-        "🔍 [RECOVERY] Scanning {} commits to reconstruct GEI fragmentation offset...",
-        commits.len()
+        "🔍 [RECOVERY] Scanning {} commit(s) above Go's last commit {} (next GEI {})...",
+        commits.len(),
+        go_last_commit_index,
+        next_required_global
     );
-
-    // ═══════════════════════════════════════════════════════════════════
-    // FORK-SAFETY FIX (C2): Track cumulative fragment offset during recovery.
-    //
-    // When a commit has >MAX_TXS_PER_GO_BLOCK TXs, send_committed_subdag
-    // fragments it into N blocks, each consuming 1 GEI. So a fragmented
-    // commit consumes N GEIs instead of 1.
-    // We must accumulate `cumulative_fragment_offset` from commit 1 to ensure
-    // that `commit_start_gei` is correctly aligned with the original GEI stream.
-    // ═══════════════════════════════════════════════════════════════════
 
     for commit in commits {
         let commit_index = commit.index();
@@ -70,7 +72,22 @@ pub async fn perform_block_recovery_check(
             continue; // Genesis/Epoch start is handled locally
         }
 
-        let commit_start_gei = (epoch_base_exec_index as i64 + commit_index as i64 + cumulative_fragment_offset) as u64;
+        // Halt rather than guess: a hole in the local commit sequence could hide a commit with transactions, and
+        // numbering GEIs across it would silently shift every later one.
+        if commit_index != expected_commit_index {
+            warn!(
+                "⚠️ [RECOVERY] Local commit store has a hole: expected commit {}, found {}. Not replaying from local \
+                 data; deferring to network catch-up (certified commits).",
+                expected_commit_index, commit_index
+            );
+            return Err(anyhow::anyhow!(
+                "Local commit store not contiguous after Go's position (expected {}, found {}). Deferring to network sync.",
+                expected_commit_index, commit_index
+            ));
+        }
+        expected_commit_index += 1;
+
+        let commit_start_gei = next_required_global;
 
         // Reconstruct CommittedSubDag
         // Note: reputation_scores are not critical for execution replay, passing empty
@@ -144,36 +161,13 @@ pub async fn perform_block_recovery_check(
             }
         };
 
-        let commit_end_gei = commit_start_gei + geis_consumed;
-
-        // If this commit is completely older than what we need, skip it. It won't be
-        // (re)sent below, so there's no authoritative actual GEI count for it -- advance the
-        // offset with this speculative (now pre-warmed, so should already be accurate) count.
-        if commit_end_gei <= next_required_global {
-            cumulative_fragment_offset += geis_consumed as i64 - 1;
-            continue;
-        }
-
-        // GAP DETECTED!
-        // This is critical: if we skip a block, Go Master will buffer forever waiting for it.
-        if commit_start_gei > next_required_global {
-            let error_msg = format!(
-                "🚨 [RECOVERY CRITICAL] Gap detected in block sequence! Expected global_exec_index={}, but commit {} starts at {}. Missing {} blocks. Recovery cannot proceed sequentially.",
-                next_required_global, commit_index, commit_start_gei, commit_start_gei - next_required_global
-             );
-            error!("{}", error_msg);
-            return Err(anyhow::anyhow!(error_msg));
-        }
-
-        // Skip empty commits completely during recovery check
+        // Empty commits never reach Go and consume no GEI (same rule as the live path).
         if geis_consumed == 0 {
-            cumulative_fragment_offset -= 1;
-            tracing::trace!(
-                "⏭️ [RECOVERY-SKIP] Skipping empty commit #{} (GEI={})",
-                commit_index, commit_start_gei
-            );
+            tracing::trace!("⏭️ [RECOVERY-SKIP] Skipping empty commit #{}", commit_index);
             continue;
         }
+
+        let commit_end_gei = commit_start_gei + geis_consumed;
 
         missing_commits_found = true;
 
@@ -195,15 +189,10 @@ pub async fn perform_block_recovery_check(
             .send_committed_subdag(&subdag, current_epoch, commit_start_gei, subdag.leader_address.clone())
             .await?;
 
-        // FORK FIX (2026-09-17): update the offset for the NEXT commit using the REAL,
-        // authoritative `actual_geis` this send just returned, not the earlier speculative
-        // `geis_consumed` -- these can legitimately still disagree (e.g. peer recovery above
-        // raced with a payload arriving via normal gossip in between), and `actual_geis` is
-        // always the ground truth for what was actually delivered to Go.
-        cumulative_fragment_offset += actual_geis as i64 - 1;
-
-        // Advance expected index to the end of this commit
-        next_required_global = std::cmp::max(next_required_global, commit_start_gei + actual_geis);
+        // The next commit starts where this one actually ended: `actual_geis` is the authoritative count of GEIs this
+        // send delivered (it can legitimately differ from the speculative `geis_consumed` above if a payload arrived
+        // via gossip in between).
+        next_required_global = commit_start_gei + actual_geis;
 
         // Small delay to prevent overwhelming the socket/executor
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

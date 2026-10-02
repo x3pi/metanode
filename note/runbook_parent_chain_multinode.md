@@ -150,7 +150,7 @@ Chứng nhận của một cluster đã đăng ký là thứ cho phép `depositT
 | `open_cluster_registration: false` + `clusters: ["<48-byte BLS pubkey hex>", ...]` | Chỉ các khóa trong danh sách được `registerCluster` (receipt lỗi mã 221 với khóa khác). **Cấu hình production.** |
 | (thiếu cả hai) | Mặc định đóng, danh sách rỗng: không ai đăng ký được. |
 
-Ansible: biến `parent_open_cluster_registration` (mặc định `true` cho devnet) và `parent_allowed_clusters` trong inventory. Kiểm tra bằng:
+Ansible: biến `parent_open_cluster_registration` (mặc định `false` = an toàn; devnet phải đặt `true` tường minh, production phải khai `parent_allowed_clusters` — playbook dừng nếu cả hai bỏ trống) và `parent_allowed_clusters` trong inventory. Kiểm tra bằng:
 
 ```bash
 cd execution && go run ./cmd/tool/parent_chain_security_check -url http://<node>:<port> [-expect-closed]
@@ -161,6 +161,6 @@ Công cụ tấn công thật (POST /tx, deposit không nguồn/nguồn lạ/ch�
 
 Mọi thay đổi trạng thái là `pb.Transaction` ký BLS trên hash (kèm `ChainID=990` và nonce tuần tự), gửi **raw proto bytes** tới `POST /send_raw_transaction`. Không còn `POST /tx` JSON, không còn giao dịch không ký. `GET /nonce?address=0x...` trả nonce đã commit của người gửi (client tự tính nonce tiếp theo, `QuorumClient` làm sẵn).
 
-## 6. Sự cố đã biết: node restart khi chain rảnh có thể không bắt kịp
+## 6. Kiểm tra không rẽ nhánh sau restart (G11 đã sửa)
 
-Xem `note/parent_chain_next_plan.md` mục 7 (G11). Triệu chứng: `/status` của node dừng ở block cũ, log Rust lặp `BLOCKED synced_commit_index advance ... execution parity gap`. Cách xử lý tạm thời: wipe dữ liệu node đó (`run.sh wipe-node <id>` / xóa thư mục dữ liệu) rồi để nó đồng bộ lại từ các node khác.
+`execution/scripts/test/parent_chain_fork_hunt.sh` lặp T-I2 (một node dừng/bật) và T-I3 (mất quorum rồi khôi phục) trên cụm local 4 node, sau mỗi bước chờ hội tụ (có giới hạn) rồi so hash block của mọi node ở mọi chiều cao. Phải báo `no fork and always converged`. Nếu một node vẫn lệch hash ở cùng chiều cao: wipe dữ liệu node đó rồi đồng bộ lại (T-I6 xác nhận ra đúng root) và báo lại kèm log. Chi tiết nguyên nhân/bằng chứng: `note/parent_chain_next_plan.md` mục 7 (G11). Lưu ý: node restart khi chain có hàng nghìn commit rỗng có thể mất vài chục giây đến vài phút để bắt kịp (chậm, không phải fork).

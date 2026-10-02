@@ -7,6 +7,20 @@
 > **Thời điểm thực hiện:** 2026-10-01 (Đã tái lập thành công từ cụm sạch)  
 > **Trạng thái:** 8/8 PASS live. T-I4 đã kiểm live thật (gói N2): làm hỏng dữ liệu LevelDB khi node dừng, kiểm chứng node tự phát hiện lúc khởi động, bật cờ `fork_detected: true`, cách ly không nhận block mới, để 3 node còn lại tiến độc lập, sau đó cold-wipe và resync về parity thành công. T-I7 kiểm live 1 node offline (node nói dối kiểm qua unit test QuorumClient, xem N3). Toàn bộ 8 bài test chạy live 100% trên cụm 4 node.
 
+
+> ## ⚠️ Tái kiểm chứng 2026-10-01 (đánh giá sẵn sàng production) — ĐỌC TRƯỚC
+>
+> Chạy lại thật trên cụm 4 node sạch, kết quả **KHÔNG còn là "8/8 PASS ổn định"**:
+> - **E2E `test_live_e2e` cũ là xanh giả**: in "✅ Balance verified" với số dư RỖNG (RPC `/account` không trả số dư), không assert receipt; bước TransferFloat 25% vượt velocity limit 20% (receipt `ErrorCode=205`) mà vẫn báo thành công. Đã sửa: thêm RPC `GET /float?pubkey=`, assert số dư/receipt/không lạm phát, replay bắt buộc có receipt.
+> - **Tx rác vào thẳng consensus**: `/send_raw_transaction` không kiểm chữ ký/nonce → 48.000 tx giả được nhận (HTTP 200) và lấp block/receipt. Đã thêm admission filter (xem `PROJECT_STRUCTURE.md`); sau sửa 48.000/48.000 bị chặn, không sinh block.
+> - **Mất tx im lặng khi tải**: `TxBatcher` bỏ qua `false` của `SubmitTransactionBatch` (Rust đầy kênh) → 18.763 lô bị bỏ dù RPC đã trả "queued". Đã sửa: giữ lô và retry, backpressure qua hàng đợi RPC (503).
+> - **ĐÃ SỬA 2026-10-02 (lỗi chặn production, tồn tại từ trước — binary gốc `66b8d174` fail T-I8 3/3):** sau restart, một node thực thi **block khác** hẳn các node còn lại hoặc kẹt lại 1 block (ví dụ commit 96 chứa 195/228 tx trùng: node A có block 9 = commit 96, node B bỏ qua và đánh số lệch; `fork_detected` vẫn false vì state root trùng). Nguyên nhân gốc, trong `consensus/metanode/meta-consensus/core/src/commit_syncer/mod.rs`:
+>   1. `verify_commits` **bỏ qua kiểm 2f+1 votes** khi node đang catching-up/phase≠Healthy ("chaining mật mã đảm bảo an toàn"), nhưng chaining chỉ chứng minh commit nối với chuỗi của *chính peer phục vụ*. Peer vừa restart với DAG thưa phục vụ biến thể sai của slot, node catching-up nhận ngay và **thay cả commit local đúng** (khớp quorum) → sub-dag/tx khác mọi node. Bản vá G11 trước chỉ gỡ bypass `is_historical`. Sửa: commit nào **thay thế** một commit local khác digest (tính cả commit chưa flush `commits_to_write`) luôn bắt buộc 2f+1 votes, mọi phase; chưa đủ votes thì PENDING và retry khi có vote blocks. Commit không thay thế gì vẫn được bypass (liveness catch-up giữ nguyên).
+>   2. Toàn bộ stall detector (4a… trong nhánh `interval.tick()`) bị **đói**: nhánh `quorum_advanced_notify` dùng chung `last_state_check` và ghi đè nó mỗi ≥100ms, nên điều kiện `now - last_state_check >= check_interval` (2s) không bao giờ thỏa trên cụm sống → detector 4a (hồi phục lỗ hổng commit) không bao giờ chạy. Sửa: nhánh notify dùng đồng hồ riêng `last_notify_state_check`.
+>   - Kiểm chứng: 10 lượt chạy đầy đủ T-I1..T-I8 trên cụm sạch, mỗi lượt so hash của MỌI block giữa 4 node: 0 block lệch ở cả 10 lượt; 9/10 lượt 8/8 pass, 1 lượt T-I3 chậm (tx nhận lúc mất quorum chỉ được commit lại sau 60–80s nhờ tx recycler; sau đó 4 node đúng parity). Deadline T-I3 nâng 20s→150s kèm giải thích; test khẳng định an toàn (dừng không quorum, hội tụ đồng nhất), không khẳng định độ trễ. 216/216 unit test consensus-core pass (test `healthy_node_requires_quorum_for_a_commit_it_already_holds` được mở rộng: catching-up cũng bị chặn khi thay commit đang giữ).
+> - Benchmark: T-I1 đo ~400-630 tx/s end-to-end (dao động), không phải 768; số 768 chỉ là tốc độ dispatch vào hàng đợi.
+
+
 ---
 
 ## 1. Cấu hình Cụm Thử nghiệm

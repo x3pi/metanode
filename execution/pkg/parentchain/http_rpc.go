@@ -269,8 +269,18 @@ func (s *HTTPServer) Start(addr string) error {
 	mux.HandleFunc("/nonce", s.handleNonce)
 	mux.HandleFunc("/account", s.handleAccount)
 	mux.HandleFunc("/state_root", s.handleStateRoot)
+	mux.HandleFunc("/float", s.handleFloat)
 	mux.Handle("/metrics", promhttp.Handler())
-	return http.ListenAndServe(addr, mux)
+	// I/O timeouts only bound slow or stalled clients (slowloris); they never influence consensus or dispatch.
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	return srv.ListenAndServe()
 }
 
 func (s *HTTPServer) handleInbound(w http.ResponseWriter, r *http.Request) {
@@ -334,6 +344,30 @@ func (s *HTTPServer) handleAccount(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"float_identity_key": pubKey[:],
 		"found":              found,
+	})
+}
+
+// handleFloat returns the committed float balance of a BLS identity (GET /float?pubkey=<48-byte hex>) together
+// with the chain-wide float total supply.
+func (s *HTTPServer) handleFloat(w http.ResponseWriter, r *http.Request) {
+	pubKeyBytes := common.FromHex(r.URL.Query().Get("pubkey"))
+	if len(pubKeyBytes) != 48 {
+		http.Error(w, "pubkey must be a 48-byte BLS public key (hex)", http.StatusBadRequest)
+		return
+	}
+	bal, err := s.store.GetFloat(crypto.Keccak256Hash(pubKeyBytes))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	total, err := s.store.GetFloat(floatTotalSupplyKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"balance":      bal.String(),
+		"total_supply": total.String(),
 	})
 }
 
@@ -539,6 +573,22 @@ func (s *HTTPServer) handleSendRawTransaction(w http.ResponseWriter, r *http.Req
 	}
 	if len(tx.FromAddress) != 20 {
 		http.Error(w, "invalid from address", http.StatusBadRequest)
+		return
+	}
+
+	if common.BytesToAddress(tx.ToAddress) != ParentChainGatewayAddress {
+		http.Error(w, "invalid to address", http.StatusBadRequest)
+		return
+	}
+	// Admission filter: unsigned or forged transactions never reach consensus (they would only burn block space
+	// and receipt storage). Execution re-verifies deterministically, so this is purely a pre-filter on committed
+	// state: a sender must already be registered (or carry its own registration) and the nonce must not be stale.
+	if _, err := VerifyTxSignature(&tx, s.store); err != nil {
+		http.Error(w, fmt.Sprintf("rejected: %v", err), http.StatusBadRequest)
+		return
+	}
+	if committed, err := s.store.GetNonce(common.BytesToAddress(tx.FromAddress)); err == nil && TxNonceValue(&tx) < committed {
+		http.Error(w, fmt.Sprintf("rejected: stale nonce %d < committed %d", TxNonceValue(&tx), committed), http.StatusBadRequest)
 		return
 	}
 

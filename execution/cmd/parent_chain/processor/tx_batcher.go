@@ -87,8 +87,13 @@ func (tb *TxBatcher) submitBatch(txs []*pb.Transaction) {
 		return
 	}
 
-	// Submit to Rust consensus core
-	if !executor.SubmitTransactionBatch(batchBytes) {
-		log.Printf("Warning: SubmitTransactionBatch returned false for %d txs", len(batch.Transactions))
+	// Rust returns false when its bounded FFI channel is full: keep the batch and retry (never drop an accepted
+	// tx). While we retry the bounded ingress queue fills and the RPC answers 503, which is the backpressure.
+	for !executor.SubmitTransactionBatch(batchBytes) {
+		select {
+		case <-tb.stop:
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }

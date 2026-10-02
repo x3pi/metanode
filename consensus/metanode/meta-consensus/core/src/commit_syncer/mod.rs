@@ -737,6 +737,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let mut interval = tokio::time::interval(initial_interval);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut last_state_check = tokio::time::Instant::now();
+        // The quorum-advanced wakeup below keeps its own throttle clock. It must NOT share `last_state_check`
+        // with the periodic tick: quorum advances every few hundred ms on a live cluster, so a shared clock
+        // was refreshed before the tick's check_interval ever elapsed and every stall detector in the tick
+        // branch (notably 4a, the only recovery for a hole left by a discarded divergent local commit)
+        // never ran -- a restarted node stayed wedged one block behind forever.
+        let mut last_notify_state_check = tokio::time::Instant::now();
 
         info!(
             "🚀 [COMMIT-SYNCER] Starting with phase={:?}, interval={}ms",
@@ -750,9 +756,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 _ = self.inner.commit_vote_monitor.quorum_advanced_notify.notified() => {
                     let now = tokio::time::Instant::now();
                     // Throttle state checks slightly to avoid rapid toggling
-                    if now.duration_since(last_state_check) >= Duration::from_millis(100) {
+                    if now.duration_since(last_notify_state_check) >= Duration::from_millis(100) {
                         self.update_state();
-                        last_state_check = now;
+                        last_notify_state_check = now;
                     }
                     self.try_schedule_once();
                 }
@@ -3031,13 +3037,66 @@ impl<C: NetworkClient> Inner<C> {
         let is_mismatched_epoch = vote_blocks
             .iter()
             .any(|b| b.epoch() != self.context.committee.epoch());
-        let local_dag_commit = self.dag_state.read().last_commit_index();
-        let is_historical_for_us = commit_range.end() <= local_dag_commit;
         let has_any_digest_data = self.commit_vote_monitor.has_any_digest_data();
         let (total_votes, _) = self
             .commit_vote_monitor
             .vote_count_for_index(end_commit_ref.index);
         let is_true_cold_start = !has_any_digest_data && total_votes == 0;
+
+        // ZERO-FORK (root cause of the "restarted node executes a different block 9 / wedges one block behind"
+        // failure of T-I3/T-I8): a fetched commit that REPLACES a local commit with a different digest must
+        // always carry 2f+1 votes, in EVERY phase. The catch-up bypass below only vouches for a commit with
+        // "cryptographic chaining", which proves nothing more than that the commit links to the SERVING PEER'S
+        // own chain. A peer that has just restarted with a sparse DAG serves its own wrong variant of the
+        // slot, and a catching-up node used to adopt it -- even over a local commit that matched the network
+        // quorum -- so its sub-dag (and the transactions it executes) differed from every other node's. With
+        // no votes yet the commit stays pending (the fetch is retried as vote blocks arrive), never adopted.
+        let replaces_local_commit = {
+            let first = commits.first().map(|(_, c)| c.index()).unwrap_or(0);
+            let last = end_commit.index();
+            // Persisted commits plus the ones still waiting to be flushed (the freshest local decisions, which
+            // are exactly the ones a peer's variant can collide with).
+            let local = {
+                let dag = self.dag_state.read();
+                let mut local = dag.store().scan_commits((first..=last).into()).unwrap_or_default();
+                local.extend(
+                    dag.commits_to_write
+                        .iter()
+                        .filter(|c| c.index() >= first && c.index() <= last)
+                        .cloned(),
+                );
+                local
+            };
+            local.iter().any(|lc| {
+                commits
+                    .iter()
+                    .any(|(d, c)| c.index() == lc.index() && *d != lc.digest())
+            })
+        };
+
+        // ═══════════════════════════════════════════════════════════════════
+        // ZERO-FORK INVARIANT (PART 2.5): CONFLICT DETECTION
+        // If CommitVoteMonitor already observed 2f+1 quorum on a digest for
+        // this index, and the peer's commit digest conflicts with it, REJECT
+        // IMMEDIATELY. Never allow single-peer bypass or catching-up bypass
+        // to adopt a conflicting digest and split the network.
+        // ═══════════════════════════════════════════════════════════════════
+        if let Some(quorum_digest) = self.commit_vote_monitor.quorum_commit_digest(end_commit_ref.index) {
+            if quorum_digest != end_commit_ref.digest {
+                tracing::error!(
+                    "🚨 [COMMIT-SYNCER] Conflict detected: commit {} from peer {} has digest {:?} != quorum digest {:?}. Rejecting commits to prevent fork!",
+                    end_commit_ref,
+                    peer,
+                    end_commit_ref.digest,
+                    quorum_digest
+                );
+                return Err(ConsensusError::NotEnoughCommitVotes {
+                    commit: Box::new(end_commit.clone()),
+                    stake: 0,
+                    peer,
+                });
+            }
+        }
 
         if is_true_cold_start {
             tracing::info!(
@@ -3052,14 +3111,22 @@ impl<C: NetworkClient> Inner<C> {
                 stake: 0,
                 peer,
             });
-        } else if is_epoch_boundary
-            || is_catching_up
-            || is_historical
-            || is_historical_for_us
-            || is_mismatched_epoch
-            || self._coordination_hub.get_phase()
-                != crate::coordination_hub::NodeConsensusPhase::Healthy
+        } else if !replaces_local_commit
+            && (is_epoch_boundary
+                || is_catching_up
+                || is_historical
+                || is_mismatched_epoch
+                || self._coordination_hub.get_phase()
+                    != crate::coordination_hub::NodeConsensusPhase::Healthy)
         {
+            // NOTE (G11 root cause): `is_historical_for_us` (the fetched commit is at an index this node already holds
+            // locally) is deliberately NOT a reason to skip quorum verification any more. A fetched commit at an index
+            // we already have is used to CHECK our local commit, and when the two differ the certified one replaces the
+            // local one (commit_manager: "DIVERGENCE-DETECTED ... Allowing certified commit to replace local"). Trusting
+            // a SINGLE peer there let a healthy node adopt the (wrong) commit of a peer that had just restarted with a
+            // sparse DAG; its committed-block bookkeeping then no longer matched the network's, and a later leader
+            // re-collected blocks whose transactions were already executed (a duplicate block, i.e. a fork). A healthy
+            // node now needs 2f+1 votes for the commit before it may replace its own.
             tracing::info!(
                 "🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit {} from peer {} \
                  (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.",
@@ -3625,6 +3692,111 @@ mod tests {
         assert!(
             matches!(dec2, PhaseTransitionDecision::Hold { reason } if reason.contains("parity not reached"))
         );
+    }
+
+    /// G11 regression: a HEALTHY node must NOT accept a commit from a single peer at an index it already holds
+    /// locally. That path used to skip quorum verification ("historical for us"), so a peer that had just restarted
+    /// with a sparse DAG could make a healthy node replace its own (correct) commit with a divergent one, which
+    /// later produced a duplicate block (a fork). The same commit is still accepted while the node is catching up.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn healthy_node_requires_quorum_for_a_commit_it_already_holds() {
+        use crate::commit::Commit;
+
+        let (context, _) = Context::new_for_test(4);
+        let context = Arc::new(context);
+        let block_verifier = Arc::new(NoopBlockVerifier {});
+        let core_thread_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
+        let network_client = Arc::new(FakeNetworkClient::default());
+        let store = Arc::new(MemStore::new());
+        let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
+        let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let transaction_certifier = TransactionCertifier::new(
+            context.clone(),
+            block_verifier.clone(),
+            dag_state.clone(),
+            blocks_sender,
+        );
+        let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
+        let commit_consumer_monitor = Arc::new(CommitConsumerMonitor::new(0, 0));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        let hub = crate::coordination_hub::ConsensusCoordinationHub::new_for_testing(); // starts Healthy
+
+        // The node already holds commit 1 locally.
+        let leader = BlockRef::new(3, AuthorityIndex::new_for_test(0), Default::default());
+        let local = TrustedCommit::new_for_test(1, CommitDigest::MIN, 1000, leader, vec![leader], 1);
+        dag_state.write().add_commit(local);
+
+        // Peers have gossiped commit votes, so this is not a cold start (otherwise the first bypass would apply).
+        for i in 0..3 {
+            let b = TestBlock::new(10, i)
+                .set_commit_votes(vec![CommitRef::new(5, CommitDigest::MIN)])
+                .build();
+            commit_vote_monitor.observe_block(&VerifiedBlock::new_for_test(b));
+        }
+
+        let inner = super::Inner {
+            context: context.clone(),
+            core_thread_dispatcher,
+            commit_vote_monitor,
+            commit_consumer_monitor,
+            block_verifier,
+            transaction_certifier,
+            network_client,
+            dag_state: dag_state.clone(),
+            dag_state_writer,
+            _coordination_hub: hub.clone(),
+        };
+
+        // A different version of commit 1, as served by ONE peer, with no vote blocks at all.
+        let other_leader = BlockRef::new(3, AuthorityIndex::new_for_test(1), Default::default());
+        let divergent = Commit::new(1, CommitDigest::MIN, 1000, other_leader, vec![other_leader], 1);
+        let serialized = divergent.serialize().unwrap();
+
+        // Healthy + commit already held locally + no quorum votes => must be rejected.
+        let res = inner.verify_commits(
+            AuthorityIndex::new_for_test(2),
+            CommitRange::new(1..=1),
+            vec![serialized.clone()],
+            vec![],
+            false, // is_epoch_boundary
+            false, // is_catching_up
+            false, // is_historical
+        );
+        assert!(
+            matches!(res, Err(crate::error::ConsensusError::NotEnoughCommitVotes { .. })),
+            "a healthy node must not trust a single peer for a commit it already holds, got {:?}",
+            res.map(|_| ())
+        );
+
+        // Catching up does NOT change that: a single peer's divergent variant of a commit we already hold must
+        // not replace it without 2f+1 votes (it may be the peer that is wrong, e.g. one that just restarted).
+        let res = inner.verify_commits(
+            AuthorityIndex::new_for_test(2),
+            CommitRange::new(1..=1),
+            vec![serialized],
+            vec![],
+            false,
+            true, // is_catching_up
+            false,
+        );
+        assert!(
+            matches!(res, Err(crate::error::ConsensusError::NotEnoughCommitVotes { .. })),
+            "a catching-up node must not replace a held commit on a single peer's word, got {:?}",
+            res.map(|_| ())
+        );
+
+        // Catch-up liveness is unchanged for commits that replace nothing (no local commit at that index).
+        let next = Commit::new(2, CommitDigest::MIN, 1001, other_leader, vec![other_leader], 2);
+        let res = inner.verify_commits(
+            AuthorityIndex::new_for_test(2),
+            CommitRange::new(2..=2),
+            vec![next.serialize().unwrap()],
+            vec![],
+            false,
+            true, // is_catching_up
+            false,
+        );
+        assert!(res.is_ok(), "catch-up must still accept a commit that replaces nothing: {:?}", res.map(|_| ()));
     }
 }
 pub mod cold_start;
