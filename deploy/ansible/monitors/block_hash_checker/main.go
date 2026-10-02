@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -30,6 +31,40 @@ var noStopFlag bool
 var daemonMode bool
 var globalMismatchRetries int = 8
 var globalMismatchDelay time.Duration = 2 * time.Second
+
+// ===== Checkpoint state persistence =====
+const checkpointFile = "checkpoint.json"
+
+type checkpointData struct {
+	LastVerifiedBlock uint64 `json:"last_verified_block"`
+	UpdatedAt         string `json:"updated_at"`
+}
+
+func saveCheckpoint(blockNum uint64) {
+	if blockNum == 0 {
+		return
+	}
+	data := checkpointData{
+		LastVerifiedBlock: blockNum,
+		UpdatedAt:         time.Now().Format("2006-01-02 15:04:05"),
+	}
+	b, err := json.MarshalIndent(data, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(checkpointFile, b, 0644)
+	}
+}
+
+func loadCheckpoint() uint64 {
+	b, err := os.ReadFile(checkpointFile)
+	if err != nil {
+		return 0
+	}
+	var data checkpointData
+	if err := json.Unmarshal(b, &data); err != nil {
+		return 0
+	}
+	return data.LastVerifiedBlock
+}
 
 func clearLoggedBlocks() {
 	ghostMutex.Lock()
@@ -426,6 +461,7 @@ type blockResult struct {
 // ===== Block info (parsed from blockResult) =====
 
 type blockInfo struct {
+	Number             string
 	Hash               string
 	ParentHash         string
 	StateRoot          string
@@ -465,7 +501,7 @@ type mismatch struct {
 func main() {
 	nodesFlag := flag.String("nodes", "", `Danh sách node, format: "name=url,name2=url2"`)
 	configFlag := flag.String("config", "config.json", "Đường dẫn file cấu hình JSON")
-	fromBlock := flag.Uint64("from", 1, "Block bắt đầu kiểm tra")
+	fromBlock := flag.Uint64("from", 0, "Block bắt đầu kiểm tra (0 = tự động từ checkpoint hoặc block 1)")
 	toBlock := flag.Uint64("to", 0, "Block kết thúc (0 = lấy block mới nhất)")
 	batchSize := flag.Int("batch", 10, "Số block kiểm tra song song mỗi lần")
 	timeout := flag.Duration("timeout", 5*time.Second, "Timeout cho mỗi RPC call")
@@ -483,6 +519,19 @@ func main() {
 	daemonMode = *daemon
 	globalMismatchRetries = *mismatchRetries
 	globalMismatchDelay = *mismatchDelay
+
+	// Environment variable fallback for FROM_BLOCK
+	if *fromBlock == 0 {
+		if envFrom := os.Getenv("FROM_BLOCK"); envFrom != "" {
+			if v, err := strconv.ParseUint(strings.TrimSpace(envFrom), 10, 64); err == nil && v > 0 {
+				*fromBlock = v
+			}
+		} else if envFrom := os.Getenv("MONITOR_FROM_BLOCK"); envFrom != "" {
+			if v, err := strconv.ParseUint(strings.TrimSpace(envFrom), 10, 64); err == nil && v > 0 {
+				*fromBlock = v
+			}
+		}
+	}
 
 	if *nodesFlag == "" {
 		candidateConfigs := []string{
@@ -560,8 +609,12 @@ func main() {
 
 	// ===== Watch mode =====
 	if *watchMode {
-		runWatch(client, nodes, *watchInterval, *lagThreshold)
+		runWatch(client, nodes, *watchInterval, *lagThreshold, *fromBlock)
 		return
+	}
+
+	if *fromBlock == 0 {
+		*fromBlock = 1
 	}
 
 	// Nếu --to=0, query block mới nhất từ node đầu tiên
@@ -666,7 +719,7 @@ func main() {
 		fmt.Printf("\n🔍 Phát hiện lệch hash tại block %d. Đang truy vấn lùi bằng Binary Search để tìm block lệch đầu tiên...\n", firstMismatchInBatch)
 
 		realFirstMismatch := firstMismatchInBatch
-		low := uint64(1)
+		low := *fromBlock
 		high := firstMismatchInBatch - 1
 
 		for low <= high {
@@ -832,6 +885,14 @@ func checkBatch(client *http.Client, nodes []nodeInfo, from, to uint64) (mismatc
 	// Build a map of block hash by node name for chain integrity check (parentHash verification)
 	// prevBlockHashes[nodeName] = hash of previous block on that node
 	prevBlockHashes := make(map[string]string)
+	if from > 1 {
+		for _, node := range nodes {
+			pbi, err := getBlockInfo(client, node.URL, from-1)
+			if err == nil && !pbi.IsError() && pbi.Hash != "" {
+				prevBlockHashes[node.Name] = pbi.Hash
+			}
+		}
+	}
 
 	// Track sequential state per node for anomaly detection
 	prevState := make(map[string]*prevBlockState)
@@ -970,10 +1031,17 @@ func checkBatch(client *http.Client, nodes []nodeInfo, from, to uint64) (mismatc
 			if hasPrev && bi.ParentHash != prevHash {
 				// Chain is broken on this node!
 				mismatchedFields["chain_broken"] = true
+
+				pointedMsg := ""
+				pointedBi, pErr := getBlockByHash(client, node.URL, bi.ParentHash)
+				if pErr == nil && !pointedBi.IsError() && pointedBi.Number != "" {
+					pointedMsg = fmt.Sprintf(" (đang trỏ về Block #%d)", parseHexStr(pointedBi.Number))
+				}
+
 				// Mark the error in the block info for display
 				brokenBi := r.blocks[node.Name]
-				brokenBi.Error = fmt.Sprintf("CHAIN BROKEN: parentHash=%s but prev block hash=%s",
-					bi.ParentHash[:18]+"...", prevHash[:18]+"...")
+				brokenBi.Error = fmt.Sprintf("SAI PARENT HASH: Block #%d có parentHash=%s%s nhưng hash của Block #%d là %s",
+					r.blockNum, bi.ParentHash, pointedMsg, r.blockNum-1, prevHash)
 				r.blocks[node.Name] = brokenBi
 			}
 		}
@@ -1372,6 +1440,7 @@ func getBlockInfo(client *http.Client, url string, blockNum uint64) (blockInfo, 
 	}
 
 	return blockInfo{
+		Number:             block.Number,
 		Hash:               block.Hash,
 		ParentHash:         block.ParentHash,
 		StateRoot:          block.StateRoot,
@@ -1387,6 +1456,79 @@ func getBlockInfo(client *http.Client, url string, blockNum uint64) (blockInfo, 
 		TxCount:            txCount,
 		SysTxCount:         sysTxCount,
 		TxOrder:            block.Transactions,
+	}, nil
+}
+
+func getBlockByHash(client *http.Client, url string, hash string) (blockInfo, error) {
+	req := rpcRequest{
+		JSONRPC: "2.0",
+		Method:  "eth_getBlockByHash",
+		Params:  []interface{}{hash, false},
+		ID:      1,
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return blockInfo{}, err
+	}
+
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return blockInfo{}, err
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return blockInfo{}, err
+	}
+
+	var rpcResp rpcResponse
+	if err := json.Unmarshal(data, &rpcResp); err != nil {
+		return blockInfo{}, fmt.Errorf("invalid JSON response: %v", err)
+	}
+
+	if rpcResp.Error != nil {
+		return blockInfo{}, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+
+	if string(rpcResp.Result) == "null" || len(rpcResp.Result) == 0 {
+		return blockInfo{Error: "(block không tồn tại)"}, nil
+	}
+
+	var block struct {
+		Number             string `json:"number"`
+		Hash               string `json:"hash"`
+		ParentHash         string `json:"parentHash"`
+		StateRoot          string `json:"stateRoot"`
+		StakeStatesRoot    string `json:"stakeStatesRoot"`
+		TransactionsRoot   string `json:"transactionsRoot"`
+		ReceiptsRoot       string `json:"receiptsRoot"`
+		Timestamp          string `json:"timestamp"`
+		Miner              string `json:"miner"`
+		GlobalExecIndex    string `json:"globalExecIndex"`
+		Epoch              string `json:"epoch"`
+		AggregateSignature string `json:"aggregateSignature"`
+		CommitIndex        string `json:"commitIndex"`
+	}
+	if err := json.Unmarshal(rpcResp.Result, &block); err != nil {
+		return blockInfo{}, fmt.Errorf("cannot parse block result: %v", err)
+	}
+
+	return blockInfo{
+		Number:             block.Number,
+		Hash:               block.Hash,
+		ParentHash:         block.ParentHash,
+		StateRoot:          block.StateRoot,
+		StakeStatesRoot:    block.StakeStatesRoot,
+		TransactionsRoot:   block.TransactionsRoot,
+		ReceiptsRoot:       block.ReceiptsRoot,
+		Timestamp:          block.Timestamp,
+		Miner:              block.Miner,
+		GlobalExecIndex:    block.GlobalExecIndex,
+		Epoch:              block.Epoch,
+		AggregateSignature: block.AggregateSignature,
+		CommitIndex:        block.CommitIndex,
 	}, nil
 }
 
@@ -1914,7 +2056,7 @@ func writeMismatchCSV(filename string, nodes []nodeInfo, mismatches []mismatch) 
 
 const mismatchAlertFile = "hash_mismatch_alert.log"
 
-func runWatch(client *http.Client, nodes []nodeInfo, interval time.Duration, lagThreshold int) {
+func runWatch(client *http.Client, nodes []nodeInfo, interval time.Duration, lagThreshold int, initialFromBlock uint64) {
 	fmt.Printf("👁️  WATCH MODE — khoảng thời gian %v\n", interval)
 	fmt.Println("   Nhấn Ctrl+C để dừng")
 	if noStopFlag {
@@ -1922,7 +2064,6 @@ func runWatch(client *http.Client, nodes []nodeInfo, interval time.Duration, lag
 	} else {
 		fmt.Println("   🛑 Tự động DỪNG khi phát hiện lệch hash (ghi vào " + mismatchAlertFile + ")")
 	}
-	fmt.Println()
 
 	// Handle Ctrl+C
 	sigCh := make(chan os.Signal, 1)
@@ -1936,6 +2077,22 @@ func runWatch(client *http.Client, nodes []nodeInfo, interval time.Duration, lag
 	trackedGhosts := make(map[uint64]bool)
 	lastVerifiedBlock := uint64(0)
 	nodeWasDead := make(map[string]bool)
+
+	if initialFromBlock > 0 {
+		if initialFromBlock > 1 {
+			lastVerifiedBlock = initialFromBlock - 1
+		} else {
+			lastVerifiedBlock = 0
+		}
+		saveCheckpoint(lastVerifiedBlock)
+		fmt.Printf("🎯 Khởi đầu giám sát từ Block #%d trở đi (lastVerifiedBlock=%d)\n", initialFromBlock, lastVerifiedBlock)
+	} else if cp := loadCheckpoint(); cp > 0 {
+		lastVerifiedBlock = cp
+		fmt.Printf("📂 Tìm thấy checkpoint: tiếp tục giám sát từ Block #%d (lastVerifiedBlock=%d)\n", cp+1, lastVerifiedBlock)
+	} else {
+		fmt.Println("ℹ️ Không có checkpoint hoặc --from: quét từ Block #1")
+	}
+	fmt.Println()
 
 	// Run immediately on start
 	if watchOnce(client, nodes, &totalChecks, &totalMismatches, trackedGhosts, &lastVerifiedBlock, nodeWasDead, lagThreshold) {
@@ -2226,6 +2383,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, totalChecks, totalMismatch
 		}
 
 		*lastVerifiedBlock = minBlock
+		saveCheckpoint(minBlock)
 		return false
 	}
 
@@ -2238,7 +2396,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, totalChecks, totalMismatch
 	fmt.Printf("\n🔍 Phát hiện lệch hash tại block %d. Đang truy vấn lùi bằng Binary Search để tìm block lệch đầu tiên...\n", firstMismatchInBatch)
 
 	realFirstMismatch := firstMismatchInBatch
-	low := uint64(1)
+	low := from
 	high := firstMismatchInBatch - 1
 
 	for low <= high {
@@ -2418,6 +2576,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, totalChecks, totalMismatch
 
 	if noStopFlag {
 		*lastVerifiedBlock = minBlock
+		saveCheckpoint(minBlock)
 		return false
 	}
 
@@ -2519,6 +2678,28 @@ func triggerStopFlagForFirstMismatch(client *http.Client, nodes []nodeInfo, bloc
 		}
 	}
 
+	// CHECK CHAIN CONTINUITY against blockNum-1
+	var brokenDetails []string
+	if blockNum > 1 {
+		for _, node := range nodes {
+			bi, ok := blocks[node.Name]
+			if !ok || bi.IsError() {
+				continue
+			}
+			pbi, err := getBlockInfo(client, node.URL, blockNum-1)
+			if err == nil && !pbi.IsError() && pbi.Hash != "" && bi.ParentHash != pbi.Hash {
+				mismatchedFields["chain_broken"] = true
+				pointedMsg := ""
+				pointedBi, pErr := getBlockByHash(client, node.URL, bi.ParentHash)
+				if pErr == nil && !pointedBi.IsError() && pointedBi.Number != "" {
+					pointedMsg = fmt.Sprintf(" (đang trỏ về Block #%d)", parseHexStr(pointedBi.Number))
+				}
+				brokenDetails = append(brokenDetails, fmt.Sprintf("  - *%s*: Block #%d có parentHash=`%s`%s ≠ hash Block #%d (`%s`)",
+					node.Name, blockNum, bi.ParentHash, pointedMsg, blockNum-1, pbi.Hash))
+			}
+		}
+	}
+
 	var fields []string
 	for f := range mismatchedFields {
 		fields = append(fields, f)
@@ -2532,6 +2713,15 @@ func triggerStopFlagForFirstMismatch(client *http.Client, nodes []nodeInfo, bloc
 	} else {
 		sb.WriteString("• ⚠️ *Trường bị lệch:* `[không xác định - độ trễ/lỗi node]`\n")
 	}
+
+	if len(brokenDetails) > 0 {
+		sb.WriteString("• 🔗 *LỖI SAI PARENT HASH (ĐỨT MẮC XÍCH CHUỖI):*\n")
+		sb.WriteString(fmt.Sprintf("  Block #%d có parentHash KHÔNG khớp với hash của block liền trước (#%d):\n", blockNum, blockNum-1))
+		for _, d := range brokenDetails {
+			sb.WriteString(d + "\n")
+		}
+	}
+
 	sb.WriteString("• *Chi tiết các node:*\n")
 
 	for _, node := range nodes {

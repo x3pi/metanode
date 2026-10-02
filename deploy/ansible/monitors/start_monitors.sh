@@ -340,6 +340,20 @@ if [ "${1:-}" == "stop-all" ] || [ "${1:-}" == "--stop-all" ]; then
     exit 0
 fi
 
+# ─── PARSE OPTIONAL FROM BLOCK ARGUMENT ──────────────────────────────────────
+FROM_BLOCK="${FROM_BLOCK:-}"
+for ((i=1; i<=$#; i++)); do
+    arg="${!i}"
+    if [[ "$arg" == "--from" ]] || [[ "$arg" == "from" ]]; then
+        next_idx=$((i+1))
+        FROM_BLOCK="${!next_idx}"
+    elif [[ "$arg" =~ ^--from=([0-9]+)$ ]] || [[ "$arg" =~ ^from=([0-9]+)$ ]]; then
+        FROM_BLOCK="${BASH_REMATCH[1]}"
+    elif [[ "$arg" =~ ^[0-9]+$ ]] && [ -z "$FROM_BLOCK" ]; then
+        FROM_BLOCK="$arg"
+    fi
+done
+
 # ─── ACTION: DISTRIBUTED MULTI-HOST MONITOR LAUNCH ───────────────────────────
 if [ "${1:-}" == "--all-hosts" ] || [ "${1:-}" == "--all" ] || [ "${1:-}" == "--multi" ]; then
     echo "🌐 Đang khởi động chế độ Giám Sát Chéo Đa Máy (Mutual Cross-Monitoring)..."
@@ -1149,7 +1163,12 @@ if [ -d "$BLOCK_CHECKER_DIR" ]; then
     
     if [ -f "block_hash_checker" ]; then
         chmod +x "block_hash_checker"
-        nohup ./block_hash_checker --watch --interval 5s --config config-m-nodes.json --daemon > block_checker_daemon.log 2>&1 &
+        EXTRA_FROM=""
+        if [ -n "$FROM_BLOCK" ]; then
+            EXTRA_FROM="--from $FROM_BLOCK"
+            echo "🎯 Cấu hình Block Hash Monitor bắt đầu từ Block #$FROM_BLOCK"
+        fi
+        nohup ./block_hash_checker --watch --interval 5s --config config-m-nodes.json --daemon $EXTRA_FROM > block_checker_daemon.log 2>&1 &
         PID=$!
         sleep 2
         
