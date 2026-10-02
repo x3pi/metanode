@@ -14,6 +14,7 @@ package mvm
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -22,7 +23,7 @@ import (
 // state for the duration of one test, restoring the real ones after --
 // same t.Cleanup pattern ta_boundary_harness_test.go's own
 // runXViaMode helpers use for SetExecutionMode.
-func withWatchdogOverrides(t *testing.T, enabled bool, rebootErr error) (calls *int) {
+func withWatchdogOverrides(t *testing.T, enabled bool, rebootErr error) (calls *atomic.Int32) {
 	t.Helper()
 	prevFunc := tzHardwareRebootFunc
 	prevEnabled := tzHardwareWatchdogEnabled
@@ -33,10 +34,9 @@ func withWatchdogOverrides(t *testing.T, enabled bool, rebootErr error) (calls *
 		tzHardwareRebootOnce = prevOnce
 	})
 
-	n := 0
-	calls = &n
+	calls = &atomic.Int32{}
 	tzHardwareRebootFunc = func() error {
-		*calls++
+		calls.Add(1)
 		return rebootErr
 	}
 	tzHardwareWatchdogEnabled = enabled
@@ -57,15 +57,15 @@ func TestTzHardwareWatchdog_TriggersRebootOnTimeout(t *testing.T) {
 	}()
 
 	deadline := time.After(2 * time.Second)
-	for *calls == 0 {
+	for calls.Load() == 0 {
 		select {
 		case <-deadline:
 			t.Fatal("tzHardwareOnRoundTripTimeout did not call tzHardwareRebootFunc within 2s")
 		case <-time.After(time.Millisecond):
 		}
 	}
-	if *calls != 1 {
-		t.Errorf("tzHardwareRebootFunc called %d times, want exactly 1", *calls)
+	if calls.Load() != 1 {
+		t.Errorf("tzHardwareRebootFunc called %d times, want exactly 1", calls.Load())
 	}
 	// Don't wait for `done` -- that's the 30s post-reboot sleep, not
 	// interesting to this test.
@@ -74,16 +74,16 @@ func TestTzHardwareWatchdog_TriggersRebootOnTimeout(t *testing.T) {
 func TestTzHardwareWatchdog_DisabledDoesNotReboot(t *testing.T) {
 	calls := withWatchdogOverrides(t, false, nil)
 	tzHardwareOnRoundTripTimeout(0, 60*time.Second)
-	if *calls != 0 {
-		t.Errorf("tzHardwareRebootFunc called %d times with watchdog disabled, want 0", *calls)
+	if calls.Load() != 0 {
+		t.Errorf("tzHardwareRebootFunc called %d times with watchdog disabled, want 0", calls.Load())
 	}
 }
 
 func TestTzHardwareWatchdog_FailedRebootDoesNotPanic(t *testing.T) {
 	calls := withWatchdogOverrides(t, true, errors.New("simulated: not CAP_SYS_BOOT"))
 	tzHardwareOnRoundTripTimeout(0, 60*time.Second) // must return, not panic
-	if *calls != 1 {
-		t.Errorf("tzHardwareRebootFunc called %d times, want exactly 1", *calls)
+	if calls.Load() != 1 {
+		t.Errorf("tzHardwareRebootFunc called %d times, want exactly 1", calls.Load())
 	}
 }
 
@@ -94,11 +94,11 @@ func TestTzHardwareWatchdog_OnlyRebootsOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			tzHardwareRebootOnce.Do(func() { *calls++ })
+			tzHardwareRebootOnce.Do(func() { calls.Add(1) })
 		}()
 	}
 	wg.Wait()
-	if *calls != 1 {
-		t.Errorf("concurrent triggers resulted in %d reboot calls, want exactly 1 (sync.Once)", *calls)
+	if calls.Load() != 1 {
+		t.Errorf("concurrent triggers resulted in %d reboot calls, want exactly 1 (sync.Once)", calls.Load())
 	}
 }

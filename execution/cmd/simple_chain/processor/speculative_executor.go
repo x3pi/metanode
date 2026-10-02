@@ -45,6 +45,10 @@ type SpeculativeResult struct {
 	ExecuteErr      error
 	IsEpochBoundary bool
 	AuthRespCh      chan<- *pb.ExecuteBlockResponse
+	// session is the in-flight record whose respCh a Rust retry may REPLACE while this result is still waiting for
+	// the committer; respCh() always reads the latest one (a snapshot taken when execution finished would answer a
+	// channel Rust already abandoned, costing it another full executeBlockResponseTimeout).
+	session *inFlightSession
 	// IsFinished distinguishes a real, completed result from the placeholder
 	// registered in activeSessions at dispatch time (see ExecuteSpeculative).
 	// Without this, GetSpeculativeResult could return the empty placeholder
@@ -78,6 +82,19 @@ type inFlightSession struct {
 	mu     sync.Mutex
 	respCh chan<- *pb.ExecuteBlockResponse
 	cancel context.CancelFunc
+}
+
+// respCh returns the response channel of the most recent caller waiting on this result.
+func (r *SpeculativeResult) respCh() chan<- *pb.ExecuteBlockResponse {
+	if r.session != nil {
+		r.session.mu.Lock()
+		ch := r.session.respCh
+		r.session.mu.Unlock()
+		if ch != nil {
+			return ch
+		}
+	}
+	return r.AuthRespCh
 }
 
 // NewSpeculativeExecutor creates a new SpeculativeExecutor
@@ -190,6 +207,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		GEI:        gei,
 		BlockNum:   blockNum,
 		AuthRespCh: authRespCh,
+		session:    session,
 	})
 
 	se.concurrencySem <- struct{}{} // Acquire concurrency slot
@@ -385,6 +403,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			ExecuteErr:      execErr,
 			IsEpochBoundary: isEpochBoundary,
 			AuthRespCh:      latestRespCh,
+			session:         session,
 			IsFinished:      true,
 		}
 
@@ -396,9 +415,9 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			if res.ClonedState != nil {
 				res.ClonedState.AbortSpeculative()
 			}
-			if res.AuthRespCh != nil {
+			if res.respCh() != nil {
 				select {
-				case res.AuthRespCh <- &pb.ExecuteBlockResponse{
+				case res.respCh() <- &pb.ExecuteBlockResponse{
 					Success:      true, // Block already committed in DB, safe to unblock Rust
 					ActualGei:    res.GEI,
 					BlockNumber:  res.BlockNum,
@@ -420,9 +439,9 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			if res.ClonedState != nil {
 				res.ClonedState.AbortSpeculative()
 			}
-			if res.AuthRespCh != nil {
+			if res.respCh() != nil {
 				select {
-				case res.AuthRespCh <- &pb.ExecuteBlockResponse{
+				case res.respCh() <- &pb.ExecuteBlockResponse{
 					Success:      true, // Session swept by CleanGEI, unblock Rust
 					ActualGei:    res.GEI,
 					BlockNumber:  res.BlockNum,
@@ -503,9 +522,9 @@ func (se *SpeculativeExecutor) AbortAllSpeculative() {
 			if res.ClonedState != nil {
 				res.ClonedState.AbortSpeculative()
 			}
-			if res.AuthRespCh != nil {
+			if res.respCh() != nil {
 				select {
-				case res.AuthRespCh <- &pb.ExecuteBlockResponse{
+				case res.respCh() <- &pb.ExecuteBlockResponse{
 					Success:      true, // Treat as success so Rust proceeds
 					ActualGei:    res.GEI,
 					BlockNumber:  res.BlockNum,
@@ -547,9 +566,9 @@ func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 				if res.ClonedState != nil {
 					res.ClonedState.AbortSpeculative()
 				}
-				if res.AuthRespCh != nil {
+				if res.respCh() != nil {
 					select {
-					case res.AuthRespCh <- &pb.ExecuteBlockResponse{
+					case res.respCh() <- &pb.ExecuteBlockResponse{
 						Success:      true, // Treat as success so Rust proceeds instead of retrying/hanging.
 						ActualGei:    res.GEI,
 						BlockNumber:  res.BlockNum,
@@ -688,9 +707,9 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		if ffiTraceEnabled {
 			logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_COMMIT_DONE t_ns=%d", res.GEI, time.Now().UnixNano())
 		}
-		if res.AuthRespCh != nil {
+		if res.respCh() != nil {
 			if commitErr != nil {
-				res.AuthRespCh <- &pb.ExecuteBlockResponse{
+				res.respCh() <- &pb.ExecuteBlockResponse{
 					Success:      false,
 					Error:        commitErr.Error(),
 					ActualGei:    res.GEI,
@@ -702,7 +721,7 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 				if bp.chainState != nil && bp.chainState.GetAccountStateDB() != nil {
 					stateRoot = bp.chainState.GetAccountStateDB().Trie().Hash().Bytes()
 				}
-				res.AuthRespCh <- &pb.ExecuteBlockResponse{
+				res.respCh() <- &pb.ExecuteBlockResponse{
 					Success:      true,
 					ActualGei:    res.GEI,
 					BlockNumber:  currentBlockNumber,

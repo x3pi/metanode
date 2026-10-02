@@ -247,7 +247,7 @@ func (db *AccountStateDB) Commit() (common.Hash, error) {
 		}
 	}
 	db.trie = newTrie
-	db.originRootHash = finalHash
+	db.storeOriginRoot(finalHash)
 
 	db.muTrie.Unlock()
 	// --- Release structural lock ---
@@ -533,7 +533,7 @@ func (db *AccountStateDB) PersistAsync(result *PipelineCommitResult) error {
 	}
 
 	db.trie = newTrieToSet
-	db.originRootHash = result.FinalHash
+	db.storeOriginRoot(result.FinalHash)
 	db.muTrie.Unlock()
 
 	logger.Debug("PersistAsync: Trie swapped to new root and persistReady signaled", "hash", result.FinalHash)
@@ -624,7 +624,7 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 		return common.Hash{}, errors.New("cannot calculate intermediate root, trie is nil")
 	}
 
-	logger.Debug("Initial state", "originRootHash", db.originRootHash)
+	logger.Debug("Initial state", "originRootHash", db.loadOriginRoot())
 
 	var (
 		updateErr     error
@@ -1004,13 +1004,13 @@ func (db *AccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, 
 			} else {
 				newHash = committedHash
 				logger.Debug("[NOMT-INLINE-COMMIT] IntermediateRoot got real root: %s (was: %s)",
-					newHash.Hex()[:18]+"...", db.originRootHash.Hex()[:18]+"...")
+					newHash.Hex()[:18]+"...", db.loadOriginRoot().Hex()[:18]+"...")
 			}
 		} else {
 			newHash = db.trie.Hash()
 		}
 	} else {
-		newHash = db.originRootHash
+		newHash = db.loadOriginRoot()
 		logger.Debug("No changes detected in dirtyAccounts, intermediate hash remains origin hash", "hash", newHash)
 	}
 	hashDuration = time.Since(startHash)

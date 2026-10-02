@@ -52,6 +52,35 @@ type Logger struct {
 	Config *LoggerConfig
 }
 
+// cfgMu guards the scalar fields of `config` (Flag, Identifier, Telegram*, Format). The setters below run at
+// startup but AFTER other goroutines (cache monitors, processors) may already be logging, so plain field access raced
+// (found by running the cluster with -race). Outputs keep their own writeMu.
+var cfgMu sync.RWMutex
+
+func getFlag() int {
+	cfgMu.RLock()
+	defer cfgMu.RUnlock()
+	return config.Flag
+}
+
+func getFormat() string {
+	cfgMu.RLock()
+	defer cfgMu.RUnlock()
+	return config.Format
+}
+
+func getIdentifier() string {
+	cfgMu.RLock()
+	defer cfgMu.RUnlock()
+	return config.Identifier
+}
+
+func getTelegram() (token string, chatID int, threadID uint) {
+	cfgMu.RLock()
+	defer cfgMu.RUnlock()
+	return config.TelegramToken, config.TelegramChatId, config.TelegramThreadId
+}
+
 var config = &LoggerConfig{
 	Flag:             FLAG_INFO,
 	Outputs:          []*os.File{os.Stdout},
@@ -82,14 +111,17 @@ func SetConfig(newConfig *LoggerConfig) {
 		return
 	}
 
+	cfgMu.Lock()
 	config = newConfig
-	setOutputsUnsafe(config.Outputs)
 	logger.Config.Flag = config.Flag
 	logger.Config.Identifier = config.Identifier
 	logger.Config.TelegramChatId = config.TelegramChatId
 	logger.Config.TelegramToken = config.TelegramToken
 	logger.Config.TelegramThreadId = config.TelegramThreadId
 	logger.Config.Format = config.Format
+	outs := config.Outputs
+	cfgMu.Unlock()
+	setOutputsUnsafe(outs)
 
 	fileLoggerMu.Lock()
 	defer fileLoggerMu.Unlock()
@@ -111,23 +143,31 @@ func SetOutputs(outputs []*os.File) {
 }
 
 func SetFlag(flag int) {
+	cfgMu.Lock()
 	config.Flag = flag
+	cfgMu.Unlock()
 }
 
 func SetTelegramInfo(token string, chatId int) {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
 	config.TelegramToken = token
 	config.TelegramChatId = chatId
 	config.TelegramThreadId = 0
 }
 
 func SetTelegramGroupInfo(token string, chatId int, threadId uint) {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
 	config.TelegramToken = token
 	config.TelegramChatId = chatId
 	config.TelegramThreadId = threadId
 }
 
 func SetIdentifier(identifier string) {
+	cfgMu.Lock()
 	config.Identifier = identifier
+	cfgMu.Unlock()
 }
 
 // SetConsoleOutputEnabled bật/tắt việc log ra stdout.
@@ -151,12 +191,14 @@ func SetConsoleOutputEnabled(enabled bool) {
 
 // SetFormat thiết lập định dạng log ("text" hoặc "json").
 func SetFormat(format string) {
+	cfgMu.Lock()
 	config.Format = format
 	logger.Config.Format = format
+	cfgMu.Unlock()
 }
 
 func DebugP(message interface{}, a ...interface{}) {
-	if config.Flag < FLAG_DEBUGP {
+	if getFlag() < FLAG_DEBUGP {
 		return
 	}
 	colored, plain := getLogBuffers(Purple, "DEBUG_P", message, a)
@@ -164,7 +206,7 @@ func DebugP(message interface{}, a ...interface{}) {
 }
 
 func Trace(message interface{}, a ...interface{}) {
-	if config.Flag < FLAG_TRACE {
+	if getFlag() < FLAG_TRACE {
 		return
 	}
 	colored, plain := getLogBuffers(Blue, "TRACE", message, a)
@@ -172,7 +214,7 @@ func Trace(message interface{}, a ...interface{}) {
 }
 
 func Debug(message interface{}, a ...interface{}) {
-	if config.Flag < FLAG_DEBUG {
+	if getFlag() < FLAG_DEBUG {
 		return
 	}
 	colored, plain := getLogBuffers(Cyan, "DEBUG", message, a)
@@ -180,7 +222,7 @@ func Debug(message interface{}, a ...interface{}) {
 }
 
 func Info(message interface{}, a ...interface{}) {
-	if config.Flag < FLAG_INFO {
+	if getFlag() < FLAG_INFO {
 		return
 	}
 	colored, plain := getLogBuffers(Green, "INFO", message, a)
@@ -188,7 +230,7 @@ func Info(message interface{}, a ...interface{}) {
 }
 
 func Warn(message interface{}, a ...interface{}) {
-	if config.Flag < FLAG_WARN {
+	if getFlag() < FLAG_WARN {
 		return
 	}
 	colored, plain := getLogBuffers(Yellow, "WARN", message, a)
@@ -196,11 +238,11 @@ func Warn(message interface{}, a ...interface{}) {
 }
 
 func Error(message interface{}, a ...interface{}) {
-	if config.Flag < FLAG_ERROR {
+	if getFlag() < FLAG_ERROR {
 		return
 	}
 	_, plain := getLogBuffers("", "ERROR", message, a)
-	if config.TelegramToken != "" && config.TelegramChatId != 0 {
+	if tok, chat, _ := getTelegram(); tok != "" && chat != 0 {
 		sendToTelegram(plain)
 	}
 	colored, _ := getLogBuffers(Red, "ERROR", message, a)
@@ -233,7 +275,7 @@ func Error(message interface{}, a ...interface{}) {
 // Logs are synced to disk before exit to prevent log loss.
 func Fatal(message interface{}, a ...interface{}) {
 	_, plain := getLogBuffers("", "FATAL", message, a)
-	if config.TelegramToken != "" && config.TelegramChatId != 0 {
+	if tok, chat, _ := getTelegram(); tok != "" && chat != 0 {
 		sendToTelegram(plain)
 	}
 	colored, _ := getLogBuffers(Red, "FATAL", message, a)
@@ -244,7 +286,7 @@ func Fatal(message interface{}, a ...interface{}) {
 }
 
 func Telegram(message interface{}, a ...interface{}) {
-	if config.Flag < FLAG_TELEGRAM {
+	if getFlag() < FLAG_TELEGRAM {
 		return
 	}
 	_, plain := getLogBuffers("", "TELE", message, a)
@@ -252,14 +294,15 @@ func Telegram(message interface{}, a ...interface{}) {
 }
 
 func sendToTelegram(messageContent []byte) {
+	telegramToken, telegramChatID, telegramThreadID := getTelegram()
 	var jsonPayload bytes.Buffer
 	jsonPayload.WriteString(`{"chat_id": "`)
-	jsonPayload.WriteString(strconv.Itoa(config.TelegramChatId))
+	jsonPayload.WriteString(strconv.Itoa(telegramChatID))
 	jsonPayload.WriteString(`", `)
 
-	if config.TelegramThreadId > 0 {
+	if telegramThreadID > 0 {
 		jsonPayload.WriteString(`"message_thread_id": "`)
-		jsonPayload.WriteString(strconv.FormatUint(uint64(config.TelegramThreadId), 10))
+		jsonPayload.WriteString(strconv.FormatUint(uint64(telegramThreadID), 10))
 		jsonPayload.WriteString(`", `)
 	}
 
@@ -281,7 +324,7 @@ func sendToTelegram(messageContent []byte) {
 
 	jsonPayload.WriteString(`}`)
 
-	apiUrl := "https://api.telegram.org/bot" + config.TelegramToken + "/sendMessage"
+	apiUrl := "https://api.telegram.org/bot" + telegramToken + "/sendMessage"
 	resp, err := http.Post(
 		apiUrl,
 		"application/json",
@@ -325,7 +368,7 @@ func getLogBuffers(color string, prefix string, message interface{}, a []interfa
 
 // buildLogLine tạo một dòng log hoàn chỉnh
 func buildLogLine(color string, prefix string, message interface{}, a []interface{}) []byte {
-	if config.Format == "json" {
+	if getFormat() == "json" {
 		var msg string
 		if formatStr, ok := message.(string); ok && len(a) > 0 {
 			msg = fmt.Sprintf(formatStr, a...)
@@ -344,7 +387,7 @@ func buildLogLine(color string, prefix string, message interface{}, a []interfac
 		}{
 			Time:       time.Now().Format(time.RFC3339Nano),
 			Level:      prefix,
-			Identifier: config.Identifier,
+			Identifier: getIdentifier(),
 			Msg:        msg,
 		}
 
@@ -364,9 +407,9 @@ func buildLogLine(color string, prefix string, message interface{}, a []interfac
 	}
 
 	// Add Identifier if specified
-	if config.Identifier != "" {
+	if id := getIdentifier(); id != "" {
 		buffer.WriteString("[")
-		buffer.WriteString(config.Identifier)
+		buffer.WriteString(id)
 		buffer.WriteString("]")
 	}
 
