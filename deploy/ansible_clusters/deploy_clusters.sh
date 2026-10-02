@@ -422,6 +422,100 @@ if [ -n "$INVENTORY_BECOME_PASS" ] && [ "$INVENTORY_BECOME_PASS" != "!vault" ] &
     export ANSIBLE_BECOME_PASS="${ANSIBLE_BECOME_PASS:-$INVENTORY_BECOME_PASS}"
 fi
 
+# Pre-flight Sudo Validation to prevent indefinite hang on wrong become password
+SUDO_CHECK_OUTPUT=$(python3 - "$INVENTORY" "${SCRIPT_DIR}/.vault_pass" << 'EOF' 2>/dev/null || echo "CHECK_FAILED"
+import sys, os, re, subprocess
+from ansible.parsing.vault import VaultLib, VaultSecret
+from ansible.constants import DEFAULT_VAULT_ID_MATCH
+
+inv_path = sys.argv[1]
+vault_file = sys.argv[2]
+
+if subprocess.run(['sudo', '-n', 'true'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+    print('OK')
+    sys.exit(0)
+
+pwd = os.environ.get('ANSIBLE_BECOME_PASS', '')
+if not pwd and os.path.exists(vault_file) and os.path.exists(inv_path):
+    try:
+        with open(vault_file, 'rb') as f:
+            vpass = f.read().strip()
+        vault = VaultLib([(DEFAULT_VAULT_ID_MATCH, VaultSecret(vpass))])
+        with open(inv_path) as f:
+            text = f.read()
+        m = re.search(r'ansible_become_pass:\s*!vault\s*\|\s*\n([\s\S]+?)(?=\n\s*[a-zA-Z_#]|\Z)', text)
+        if m:
+            lines = [line.strip() for line in m.group(1).splitlines() if line.strip()]
+            pwd = vault.decrypt('\n'.join(lines)).decode('utf-8')
+    except Exception as e:
+        print(f'VAULT_ERROR:{e}')
+        sys.exit(0)
+
+if not pwd and os.path.exists(inv_path):
+    with open(inv_path) as f:
+        for line in f:
+            if 'ansible_become_pass:' in line and '!vault' not in line:
+                val = line.split('ansible_become_pass:', 1)[1].strip().strip('"\'')
+                if val:
+                    pwd = val
+                    break
+
+if not pwd:
+    print('NO_PASS')
+    sys.exit(0)
+
+try:
+    p = subprocess.run(['sudo', '-S', '-v'], input=(pwd + '\n').encode('utf-8'), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+    if p.returncode == 0:
+        print('OK')
+    else:
+        print(f'INVALID_PASS:{pwd}')
+except Exception:
+    print('TIMEOUT')
+EOF
+)
+
+if [[ "$SUDO_CHECK_OUTPUT" == INVALID_PASS:* ]]; then
+    WRONG_VAL="${SUDO_CHECK_OUTPUT#INVALID_PASS:}"
+    ERR_MSG="Mật khẩu 'ansible_become_pass' không chính xác (đang cấu hình là: \"${WRONG_VAL}\")."
+    echo ""
+    echo -e "\033[0;31m❌ [LỖI SUDO] ${ERR_MSG}\033[0m"
+    echo -e "\033[0;33m   Lệnh sudo trên máy từ chối mật khẩu hiện tại.\033[0m"
+    echo -e "\033[0;36m   👉 Vui lòng chạy lệnh sau với MẬT KHẨU ĐĂNG NHẬP MÁY TÍNH THẬT của bạn để mã hóa lại:\033[0m"
+    echo -e "      cd ${SCRIPT_DIR}"
+    echo -e "      ansible-vault encrypt_string --vault-password-file .vault_pass '<MẬT_KHẨU_SUDO_THẬT>' --name ansible_become_pass"
+    echo ""
+    if [ "$NOTIFY" = "true" ]; then
+        TAIL_ERR="❌ [LỖI SUDO] ${ERR_MSG}
+Lệnh sudo trên máy từ chối mật khẩu hiện tại.
+Cách khắc phục:
+cd ${SCRIPT_DIR}
+ansible-vault encrypt_string --vault-password-file .vault_pass '<MẬT_KHẨU_SUDO_THẬT>' --name ansible_become_pass"
+        python3 - "${SCRIPT_DIR}" "${ERR_MSG}" "${TAIL_ERR}" << 'EOF' 2>/dev/null || true
+import sys, os
+sys.path.insert(0, os.path.join(sys.argv[1], 'scripts'))
+import telegram_notify as tn
+err = sys.argv[2]
+tail = sys.argv[3]
+tn.notify_deploy_failure('Pre-flight Sudo Validation', err, tail_logs=tail)
+EOF
+    fi
+    exit 1
+elif [ "$SUDO_CHECK_OUTPUT" = "TIMEOUT" ]; then
+    ERR_MSG="Xác thực quyền sudo bị quá thời gian chờ (timeout)!"
+    echo -e "\033[0;31m❌ [LỖI SUDO] ${ERR_MSG}\033[0m"
+    if [ "$NOTIFY" = "true" ]; then
+        python3 - "${SCRIPT_DIR}" "${ERR_MSG}" << 'EOF' 2>/dev/null || true
+import sys, os
+sys.path.insert(0, os.path.join(sys.argv[1], 'scripts'))
+import telegram_notify as tn
+err = sys.argv[2]
+tn.notify_deploy_failure('Pre-flight Sudo Validation', err, tail_logs="Xác thực quyền sudo bị quá thời gian chờ (timeout > 4s).")
+EOF
+    fi
+    exit 1
+fi
+
 # 2. Scope & Target Node Resolution
 if [ -n "$TARGET_NODE" ]; then
     RESOLVED_HOST=$(resolve_target_host "$TARGET_NODE")
@@ -462,12 +556,16 @@ set -e
 if [ $ANSIBLE_RC -ne 0 ]; then
     echo "❌ Ansible playbook thất bại với mã lỗi ${ANSIBLE_RC}!"
     if [ "$NOTIFY" = "true" ]; then
-        TAIL_LOGS=$(tail -n 25 "$LOG_FILE" 2>/dev/null || echo "")
-        python3 -c "
-import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
+        TAIL_LOGS=$(tail -n 20 "$LOG_FILE" 2>/dev/null || echo "")
+        python3 - "${SCRIPT_DIR}" "${ACTION}" "${ANSIBLE_RC}" "${TAIL_LOGS}" << 'EOF' 2>/dev/null || true
+import sys, os
+sys.path.insert(0, os.path.join(sys.argv[1], 'scripts'))
 import telegram_notify as tn
-tn.notify_deploy_failure('Ansible Playbook (${ACTION})', 'Exit code: ${ANSIBLE_RC}', tail_logs=\"\"\"${TAIL_LOGS}\"\"\")
-"
+stage = f"Ansible Playbook ({sys.argv[2]})"
+err = f"Exit code: {sys.argv[3]}"
+tail = sys.argv[4]
+tn.notify_deploy_failure(stage, err, tail_logs=tail)
+EOF
     fi
     exit $ANSIBLE_RC
 fi

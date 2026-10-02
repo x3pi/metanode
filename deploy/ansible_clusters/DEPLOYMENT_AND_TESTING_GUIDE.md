@@ -174,40 +174,78 @@ Hệ thống triển khai phân tách rõ giữa môi trường Production và D
   - Cho phép sử dụng inventory chứa mật khẩu plaintext phục vụ mục đích kiểm thử và phát triển nhanh trong mạng nội bộ cô lập.
   - Mặc định script `deploy_clusters.sh` thiết lập `--env=devnet` để thuận tiện cho việc chạy bộ test 5 kịch bản.
 
-#### 🔐 Hướng dẫn mã hóa mật khẩu bằng Ansible Vault (Từng bước):
-1. **Tạo file chìa khóa Vault (`.vault_pass`):**
-   ```bash
-   cd deploy/ansible_clusters   # hoặc cd deploy/ansible
-   umask 077
-   read -rs -p "Vault password: " p; printf '\n'
-   printf '%s' "$p" > .vault_pass
-   unset p
-   ```
-   *(💡 File `.vault_pass` đã nằm trong `.gitignore`, tuyệt đối an toàn không bị commit lên Git).*
+#### 🔐 Hướng dẫn mã hóa thông tin bảo mật bằng Ansible Vault (Từng bước):
 
-2. **Mã hóa chuỗi mật khẩu server:**
-   ```bash
-   ansible-vault encrypt_string --vault-password-file .vault_pass 'password' --name ansible_become_pass
-   ```
+Hệ thống yêu cầu 2 biến bí mật mã hóa trong `all.vars` của `inventory.yml`:
+- **`ansible_become_pass`:** Mật khẩu `sudo` thực tế của tài khoản (ví dụ tài khoản `abc`) để phân quyền chạy service và tạo thư mục `/opt/metanode`.
+- **`parent_chain_rpc_token`:** Token bảo mật 32-byte dùng để xác thực các lệnh gọi RPC lên Parent Chain (bắt buộc khi chạy kiểm thử E2E).
 
-3. **Dán khối kết quả vào `inventory.yml`:**
-   ```yaml
-   all:
-     vars:
-       ansible_user: "abc"
-       ansible_become_pass: !vault |
-                 $ANSIBLE_VAULT;1.1;AES256
-                 32333835353265326636306432...
-   ```
+---
 
-   Tạo thêm token RPC một lần và dán khối kết quả cùng cấp với `ansible_become_pass` trong `all.vars`:
-   ```bash
-   ansible-vault encrypt_string --vault-password-file ~/.vault_pass "$(openssl rand -hex 32)" --name parent_chain_rpc_token
-   ```
-   Ansible phân phối token này cho Parent Chain và tự truyền nó vào E2E test; không cần `export PARENT_CHAIN_RPC_TOKEN` khi chạy test.
+##### 1. Tạo file chìa khóa bí mật của Vault (`.vault_pass`):
+```bash
+cd deploy/ansible_clusters
+umask 077
+read -rs -p "Nhập mật khẩu cho file Vault: " p; printf '\n'
+printf '%s' "$p" > .vault_pass
+unset p
+```
+*(💡 File `.vault_pass` đã nằm trong `.gitignore`, tuyệt đối an toàn không bị commit lên Git).*
 
-4. **Thực thi:**
-   `deploy_clusters.sh` lần lượt tìm `${SCRIPT_DIR}/.vault_pass`, `deploy/ansible/.vault_pass`, rồi `~/.vault_pass`. `ansible_deploy.sh` ưu tiên `ANSIBLE_VAULT_PASSWORD_FILE`, sau đó tìm `${SCRIPT_DIR}/.vault_pass`, thư mục chứa inventory, rồi `~/.vault_pass`. Khi file nằm ở một trong các vị trí này, script tự nạp khóa giải mã; không cần thêm cờ phụ.
+---
+
+##### 2. Mã hóa mật khẩu `sudo` máy thật (`ansible_become_pass`):
+Thay `'mat_khau_sudo_that'` bằng chính xác mật khẩu đăng nhập máy tính (`sudo`) của bạn:
+```bash
+ansible-vault encrypt_string --vault-password-file .vault_pass 'mat_khau_sudo_that' --name ansible_become_pass
+```
+
+---
+
+##### 3. Tạo ngẫu nhiên và mã hóa Token bảo mật Parent Chain (`parent_chain_rpc_token`):
+Chạy lệnh sau để tự sinh chuỗi hex 32-byte ngẫu nhiên và mã hóa trực tiếp vào Vault:
+```bash
+ansible-vault encrypt_string --vault-password-file .vault_pass "$(openssl rand -hex 32)" --name parent_chain_rpc_token
+```
+
+---
+
+##### 4. Dán 2 khối mã hóa vào file `inventory.yml`:
+Mở file `inventory.yml` và dán 2 khối vừa sinh vào phần `all.vars`:
+```yaml
+all:
+  vars:
+    ansible_user: "abc"
+    install_dir: "/opt/metanode"
+
+    # 1. Khối mật khẩu sudo:
+    ansible_become_pass: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          6561366230616162326232326166663438346364...
+
+    # 2. Khối token RPC Parent Chain (bắt buộc khi chạy test):
+    parent_chain_rpc_token: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          6134316363353539336466383639663630343462...
+
+    raft_secret_file: "/opt/metanode/raft_secret.key"
+    parent_chain_rpc_port: 18601
+    parent_chain_host: "127.0.0.1"
+    chain_id: 991
+    parent_chain_id: 990
+    devnet_sender_bls_pubkey: "0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc"
+    parent_open_cluster_registration: true
+```
+
+---
+
+##### 5. Thực thi triển khai & kiểm thử:
+Script `deploy_clusters.sh` sẽ tự động tìm file `.vault_pass` trong thư mục hiện tại để giải mã:
+```bash
+# Triển khai reset từ đầu và tự động chạy toàn bộ 9 kịch bản test:
+./deploy_clusters.sh --reset --test
+```
+Ansible sẽ tự phân phối token này cho Parent Chain và truyền tự động vào script test `test_real_world_scenarios.go`. Không cần phải gõ lệnh export thủ công.
 ---
 
 ## 🧪 4. BỘ SCRIPT KIỂM THỬ CHUYÊN SÂU (TESTING SCRIPTS)
@@ -231,12 +269,16 @@ EXEC2_URL="http://127.0.0.1:8647" \
 go run execution/scripts/test/test_real_world_scenarios.go
 ```
 
-#### Tóm tắt 5 kịch bản kiểm thử:
+#### Tóm tắt 9 kịch bản kiểm thử thực tế (E2E Test Suite):
 1. **Kịch bản 1 (Account Registry):** Đăng ký ví mới vào Parent Chain với chữ ký kép (ECDSA + BLS cụm). Xác minh `GetAccountRegistry(addr)`.
 2. **Kịch bản 2 (Float Deposit):** Nạp tiền từ Parent Chain vào ví trên Cluster 2. `ReceiveWorker` bắt giao dịch và credit số dư `eth_getBalance`.
 3. **Kịch bản 3 (Smart Contract MVM):** Thực thi smart contract nội bộ trên Cluster 1 (ChainID `991`), gọi hàm `setBlsPublicKey`, sinh receipt và block hash.
 4. **Kịch bản 4 (Cross-Cluster Transfer):** Chuyển tiền liên shard (Cluster 1 -> Cluster 2). `SendWorker` trừ ví nguồn -> Parent Chain ghi nhận -> `ReceiveWorker` credit ví đích.
 5. **Kịch bản 5 (Parent Chain Offline Resilience):** Tắt Parent Chain (`pkill parent_chain`), gửi giao dịch nội bộ Cluster 1 -> Cụm vẫn tự đóng block bình thường. Bật lại Parent Chain -> tự động catch-up.
+6. **Kịch bản 6 (Parent Chain Reconnect & Recovery):** Khôi phục Parent Chain sau sự cố -> Cầu nối Rollup và các worker tự động tái kết nối, xử lý tiếp giao dịch liên cụm.
+7. **Kịch bản 7 (Cross-Cluster Smart Contract Call):** Exec 1 kích hoạt luồng gọi Smart Contract sang Exec 2 thông qua Parent Chain, Exec 2 xử lý và cập nhật hợp đồng EVM thành công.
+8. **Kịch bản 8 (Chịu lỗi mất 1/4 node Parent Chain):** Dừng 1 node BFT HotStuff, còn 3/4 node (đủ Quorum 2f+1) -> Giao dịch chuyển xuyên cụm vẫn hoàn tất bình thường.
+9. **Kịch bản 9 (Chịu lỗi mất Quorum Parent Chain - Zero-Fork):** Dừng tiếp node thứ 2, còn 2/4 node (< 2f+1) -> Toàn bộ giao dịch dừng an toàn ở trạng thái PENDING (tuyệt đối không tạo tiền/fork). Khi bật lại các node, giao dịch hoàn tất đúng 1 lần duy nhất (Exactly-once).
 
 ---
 

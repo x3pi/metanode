@@ -135,8 +135,13 @@ def main():
     parser.add_argument("--pull", action="store_true", help="Pull git remote before running")
     parser.add_argument("--skip-build-check", action="store_true", help="Skip build verification")
     parser.add_argument("--skip-pre-action", action="store_true", help="Skip pre-actions (reset/restart chain)")
+    parser.add_argument("--no-reset", dest="skip_pre_action", action="store_true", help="Skip pre-actions (do not reset or restart chain)")
     parser.add_argument("--restart-chain", "--restart", action="store_true", help="Restart chain cluster before running tests")
     parser.add_argument("--reset-chain", "--reset", action="store_true", help="Reset chain cluster before running tests")
+    parser.add_argument("--exec-only", "--child-chain", "--child", action="store_true", help="Target Execution Clusters (chain con)")
+    parser.add_argument("--reset-exec", action="store_true", help="Reset Execution Clusters (chain con) before running tests")
+    parser.add_argument("--restart-exec", action="store_true", help="Restart Execution Clusters (chain con) before running tests")
+    parser.add_argument("--chain", default="", help="Target specific chain name (e.g. chain_a, chain_b)")
     parser.add_argument("--dry-run", action="store_true", help="Print actions without executing")
     args = parser.parse_args()
 
@@ -189,6 +194,9 @@ def main():
     tests = config.get("tests", [])
 
     server_ip = get_server_ip()
+
+    if args.chain:
+        os.environ["TARGET_CHAIN"] = args.chain
 
     # 2. Git Pull if requested
     if args.pull:
@@ -315,7 +323,51 @@ def main():
     os.makedirs(run_log_dir, exist_ok=True)
 
     # 4.5. Pre-test Chain Restart or Reset if requested via CLI flags
-    if args.reset_chain:
+    is_exec_target = args.exec_only or (args.only and ("child" in args.only or "exec" in args.only))
+
+    if args.reset_exec or (args.reset_chain and is_exec_target):
+        print(f"\n🔄 [CI FLAG --reset-exec] Đang reset cụm Execution Clusters (Chain con) theo cờ CLI...")
+        if args.dry_run:
+            print(f"  [DRY-RUN] Sẽ chạy reset_exec_cmd: {chain_actions.get('reset_exec_cmd') or chain_actions.get('reset_exec')}")
+        else:
+            reset_exec_cmd = interpolate_paths(chain_actions.get("reset_exec_cmd") or chain_actions.get("reset_exec"))
+            if reset_exec_cmd:
+                r_c, r_out = run_shell_cmd(reset_exec_cmd, cwd=repo_path)
+                if r_c != 0:
+                    print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh reset Execution Clusters thất bại với mã lỗi {r_c}!")
+                    print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi reset gặp lỗi.")
+                    if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                        fail_msg = telegram_notify.build_failure_message(
+                            commit_info, branch, "CI Flag: --reset-exec", r_c,
+                            tail_text(r_out, 20), server_ip
+                        )
+                        telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                    sys.exit(r_c)
+            wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
+            print(f"⏳ Đợi {wait_sec}s để RPC các node sẵn sàng...")
+            time.sleep(wait_sec)
+    elif args.restart_exec or (args.restart_chain and is_exec_target):
+        print(f"\n🔄 [CI FLAG --restart-exec] Đang khởi động lại cụm Execution Clusters (Chain con) theo cờ CLI...")
+        if args.dry_run:
+            print(f"  [DRY-RUN] Sẽ chạy restart_exec_cmd: {chain_actions.get('restart_exec_cmd') or chain_actions.get('restart_exec')}")
+        else:
+            restart_exec_cmd = interpolate_paths(chain_actions.get("restart_exec_cmd") or chain_actions.get("restart_exec"))
+            if restart_exec_cmd:
+                r_c, r_out = run_shell_cmd(restart_exec_cmd, cwd=repo_path)
+                if r_c != 0:
+                    print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh restart Execution Clusters thất bại với mã lỗi {r_c}!")
+                    print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi restart gặp lỗi.")
+                    if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                        fail_msg = telegram_notify.build_failure_message(
+                            commit_info, branch, "CI Flag: --restart-exec", r_c,
+                            tail_text(r_out, 20), server_ip
+                        )
+                        telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                    sys.exit(r_c)
+            wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
+            print(f"⏳ Đợi {wait_sec}s để RPC các node sẵn sàng...")
+            time.sleep(wait_sec)
+    elif args.reset_chain:
         print(f"\n🔄 [CI FLAG --reset-chain] Đang reset toàn bộ cụm Public Chain theo cờ CLI...")
         if args.dry_run:
             print(f"  [DRY-RUN] Sẽ chạy reset_cmd: {chain_actions.get('reset_cmd')}")
@@ -388,7 +440,10 @@ def main():
     test_results = []
     has_failure = False
 
-    active_tests = [t for t in tests if (t.get("id") == args.only if args.only else t.get("enabled", True))]
+    if args.exec_only and not args.only:
+        active_tests = [t for t in tests if ("child" in t.get("id", "") or "exec" in t.get("id", "")) and t.get("enabled", True)]
+    else:
+        active_tests = [t for t in tests if (t.get("id") == args.only if args.only else t.get("enabled", True))]
     total_active = len(active_tests)
     current_step = 0
 
@@ -412,6 +467,9 @@ def main():
         if args.only and test_id != args.only:
             continue
 
+        if args.exec_only and not args.only and not ("child" in test_id or "exec" in test_id):
+            continue
+
         if not enabled and not (args.only and test_id == args.only):
             print(f"\n⏭️  [SKIPPED] Bỏ qua bài test: {test_name} (disabled)")
             continue
@@ -428,7 +486,41 @@ def main():
 
         # Pre-action handling
         if not args.skip_pre_action and not args.dry_run:
-            if pre_action in ["reset_chain", "reset_public"]:
+            if pre_action in ["reset_exec", "reset_child", "reset_exec_cluster"]:
+                reset_exec_cmd = interpolate_paths(chain_actions.get("reset_exec_cmd") or chain_actions.get("reset_exec"))
+                print(f"👉 [PRE-ACTION] Reset cụm Execution Clusters (Chain con) và đồng bộ IP...")
+                if reset_exec_cmd:
+                    r_code, r_out = run_shell_cmd(reset_exec_cmd, cwd=repo_path)
+                    if r_code != 0:
+                        print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh reset Execution Clusters thất bại với mã lỗi {r_code}!")
+                        print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi reset gặp lỗi.")
+                        if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                            fail_msg = telegram_notify.build_failure_message(
+                                commit_info, branch, f"Pre-action: {pre_action}", r_code,
+                                tail_text(r_out, 20), server_ip
+                            )
+                            telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                        sys.exit(r_code)
+                wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
+                time.sleep(wait_sec)
+            elif pre_action in ["restart_exec", "restart_child", "restart_exec_cluster"]:
+                restart_exec_cmd = interpolate_paths(chain_actions.get("restart_exec_cmd") or chain_actions.get("restart_exec"))
+                print(f"👉 [PRE-ACTION] Restart cụm Execution Clusters (Chain con) và đồng bộ IP...")
+                if restart_exec_cmd:
+                    r_code, r_out = run_shell_cmd(restart_exec_cmd, cwd=repo_path)
+                    if r_code != 0:
+                        print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh restart Execution Clusters thất bại với mã lỗi {r_code}!")
+                        print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi restart gặp lỗi.")
+                        if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                            fail_msg = telegram_notify.build_failure_message(
+                                commit_info, branch, f"Pre-action: {pre_action}", r_code,
+                                tail_text(r_out, 20), server_ip
+                            )
+                            telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                        sys.exit(r_code)
+                wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
+                time.sleep(wait_sec)
+            elif pre_action in ["reset_chain", "reset_public"]:
                 reset_cmd = interpolate_paths(chain_actions.get("reset_cmd") or chain_actions.get("reset_public_cmd"))
                 update_ip_cmd = interpolate_paths(chain_actions.get("update_ip_cmd"))
                 print(f"👉 [PRE-ACTION] Reset cụm Public Chain để đạt môi trường sạch & TPS tối đa...")

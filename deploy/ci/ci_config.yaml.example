@@ -52,6 +52,14 @@ chain_actions:
   # Lệnh cập nhật IP / RPC endpoints cho toàn bộ các file test config
   update_ip_cmd: "cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
 
+  # Lệnh reset Execution Clusters (Chain Con - Chain ID 991: Cluster 1 / chain_a, Cluster 2 / chain_b)
+  reset_exec_cmd: "cd {METANODE_DIR}/deploy/ansible_clusters && ./deploy_clusters.sh --reset --exec-only && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
+  reset_exec: "cd {METANODE_DIR}/deploy/ansible_clusters && ./deploy_clusters.sh --reset --exec-only && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
+
+  # Lệnh restart Execution Clusters (Chain Con)
+  restart_exec_cmd: "cd {METANODE_DIR}/deploy/ansible_clusters && ./deploy_clusters.sh --restart --exec-only && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
+  restart_exec: "cd {METANODE_DIR}/deploy/ansible_clusters && ./deploy_clusters.sh --restart --exec-only && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
+
   # Lệnh nạp 50,000 ví TPS (chống trùng lặp), xóa genesis.json cũ và reset Public Chain
   prepare_tps_cmd: "cd {METANODE_DIR} && ./deploy/ci/prepare_tps_chain.sh"
 
@@ -64,7 +72,20 @@ chain_actions:
 # ==============================================================================
 tests:
   # ----------------------------------------------------------------------------
-  # 1. BÀI TEST LOGIC CHAIN THƯỜNG (BLOCK-STM 32+ KỊCH BẢN)
+  # 1. BÀI TEST CHAIN CON (EXECUTION CLUSTERS - CHAIN_A: 34 KỊCH BẢN BLOCK-STM)
+  # ----------------------------------------------------------------------------
+  - id: "child_chain_a"
+    name: "Child Chain (chain_a) Block-STM Tests (34 kịch bản)"
+    enabled: true
+    # Tự động reset Execution Clusters và cập nhật IP trước khi test
+    pre_action: "reset_exec"
+    cwd: "test-simple/test-rpc/test-chain"
+    command: "./run_all_tests.sh --chain=chain_a"
+    timeout_seconds: 1800
+    continue_on_failure: false
+
+  # ----------------------------------------------------------------------------
+  # 2. BÀI TEST LOGIC CHAIN THƯỜNG (BLOCK-STM 32+ KỊCH BẢN)
   # ----------------------------------------------------------------------------
   - id: "blockstm_logic"
     name: "Block-STM Logic Tests (32+ kịch bản)"
