@@ -92,6 +92,9 @@ func (w *ReceiveWorker) WakeUp() {
 	}
 }
 
+// Cursor returns how many inbound events this worker has already processed (for monitoring).
+func (w *ReceiveWorker) Cursor() uint64 { return w.getCursor() }
+
 func (w *ReceiveWorker) getCursor() uint64 {
 	return w.cursor.Load()
 }

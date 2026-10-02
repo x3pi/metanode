@@ -108,6 +108,12 @@ type App struct {
 	reclaimWorker    *rollup.ReclaimWorker
 	parentClient     parentchain.Client
 	rollupEnabled    bool // true only when PARENT_CHAIN_URL is set: rollup workers + parent-chain registration
+
+	// conservation checks that the cluster's BLS float on the Parent Chain equals the sum of the cluster's accounts and
+	// gates new outbound cross-chain transfers (BLS_CONSERVATION_MODE=enforce|warn|off, default enforce).
+	conservation     *rollup.ConservationGuard
+	conservationRun  func() // starts the periodic measurement
+	conservationStop chan struct{}
 }
 
 // NewApp creates and initializes a new blockchain application
@@ -330,6 +336,35 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	app.sendWorker = rollup.NewSendWorker(rollupStore, parentClient, app.keyPair, app.keyPair.PublicKey(), clusterID)
 	app.recvWorker = rollup.NewReceiveWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 	app.reclaimWorker = rollup.NewReclaimWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
+
+	// Conservation: the cluster's BLS identity represents all of its accounts, so its float on the Parent Chain must
+	// always equal the sum of the accounts (plus what is demonstrably in flight). Until that is verified, and while a
+	// violation is confirmed, no new value may leave the cluster.
+	consMode := rollup.ConservationOff
+	if app.rollupEnabled {
+		m, modeErr := rollup.ParseConservationMode(os.Getenv("BLS_CONSERVATION_MODE"))
+		if modeErr != nil {
+			return nil, modeErr
+		}
+		consMode = m
+	}
+	app.conservation = rollup.NewConservationGuard(consMode)
+	app.conservationStop = make(chan struct{})
+	app.sendWorker.Gate = app.conservation.Allow
+	consInterval := 300 * time.Second
+	if v, convErr := strconv.Atoi(os.Getenv("BLS_CONSERVATION_INTERVAL_SECONDS")); convErr == nil && v > 0 {
+		consInterval = time.Duration(v) * time.Second
+	}
+	consInputs := rollup.ConservationInputs{
+		Store:       rollupStore,
+		Client:      parentClient,
+		Float:       parentClient,
+		BLS:         app.keyPair.PublicKey(),
+		TotalSupply: stateDBAdapter.TotalSupply,
+		RecvCursor:  app.recvWorker.Cursor,
+	}
+	app.conservationRun = func() { app.conservation.Run(consInputs, consInterval, app.conservationStop) }
+	logger.Info("BLS conservation mode: %s (interval %s)", consMode, consInterval)
 	tx_processor.InitParentChainGatewayHandler(crossChainTransferDispatcherAdapter{
 		h:          app.crossNodeHandler,
 		sendWorker: app.sendWorker,
@@ -759,6 +794,9 @@ func (app *App) Run() error {
 		go app.sendWorker.Start()
 		go app.recvWorker.Start()
 		go app.reclaimWorker.Start()
+		if app.conservationRun != nil {
+			go app.conservationRun()
+		}
 	}
 
 	// Bắt đầu tiến trình tải dữ liệu history nếu là rpc node
@@ -847,6 +885,13 @@ func (app *App) GetAccountStateTrie(stateRoot e_common.Hash) (mt_trie.StateTrie,
 // Stop gracefully stops the application and releases resources
 func (app *App) Stop() {
 	logger.Info("Stopping app...")
+	if app.conservationStop != nil {
+		select {
+		case <-app.conservationStop:
+		default:
+			close(app.conservationStop)
+		}
+	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// SHUTDOWN ORDERING FIX (May 2026):

@@ -58,11 +58,17 @@ func Next(current State, recordRole Role, event Event) (State, []Action, error) 
 			return current, nil, ErrInvalidAmount
 		}
 
+		// The Parent Chain charges the cluster's float Value + GasFee for the transfer (the fee is burned there), so the
+		// sender must be debited the same total here: the cluster's BLS float always equals the sum of its accounts.
+		debit := CloneBigInt(event.Value)
+		if event.GasFee != nil && event.GasFee.Sign() > 0 {
+			debit.Add(debit, event.GasFee)
+		}
 		actions := []Action{
 			{
 				Type:   ActionDeductBalance,
 				Target: event.Sender,
-				Amount: CloneBigInt(event.Value),
+				Amount: debit,
 			},
 			{
 				Type:   ActionCreateRecord,

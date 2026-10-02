@@ -134,6 +134,13 @@ Chưa làm trong đợt này. Khi chủ dự án cho phép, mới thực hiện:
 - [ ] Không còn credential plaintext trong inventory production.
 - [ ] Báo cáo cuối ghi trung thực những gì chưa chứng minh.
 
+### P9. Bảo toàn tổng coin của cụm thực thi (BLS đại diện toàn bộ tài khoản)
+
+- **Bất biến:** `float(BLS cụm) trên Parent == Σ số dư mọi tài khoản trong cụm` khi nghỉ; khi đang chuyển: `0 ≤ float − Σ ≤ pending` (người gửi bị trừ trước khi Parent trừ float; người nhận được cộng sau khi Parent cộng float). Vi phạm phía dưới = coin không có đảm bảo; phía trên = coin có đảm bảo biến mất.
+- **Sửa lỗi gốc:** người gửi trước đây chỉ bị trừ `value` trong khi Parent trừ `value+fee` ⇒ float lệch dần so với tài khoản. Nay người gửi bị trừ `value+fee` (`statemachine.go`, `cross_node_handler.go`), hoàn tiền trả lại `value` (phí bị đốt cả hai phía).
+- **Triển khai:** `pkg/rollup/conservation.go` (`CheckConservation`, đo ổn định trước/sau, không ổn định = không kết luận; `ConservationGuard`). Đọc float qua `QuorumClient.GetFloat` (≥ f+1 node đồng ý cùng block+số dư). Chế độ `BLS_CONSERVATION_MODE=enforce|warn|off` (mặc định `enforce`, chu kỳ `BLS_CONSERVATION_INTERVAL_SECONDS`, mặc định 300): `enforce` chặn `SendWorker` và `mtn_sendCrossChainTransfer` cho tới khi có phép đo OK đầu tiên và sau 3 lần vi phạm liên tiếp (thà pending chứ không fork). RPC giám sát: `mtn_getConservation`.
+- **Điều kiện vận hành:** `float_accounts` trong genesis Parent của cụm phải bằng đúng Σ alloc của genesis cụm thực thi (devnet mint bằng deposit nên không khớp ⇒ dùng `warn`). Còn lại: công cụ tính mục `float_accounts` từ genesis cụm + khóa BLS; kiểm chứng sống.
+
 ## 5. Việc **không** làm
 - Không deploy, restart, wipe hay reset cụm 231/230 (hoặc dữ liệu thật) khi chưa có backup và chủ dự án đồng ý rõ ràng.
 - Không nới lỏng assertion của test để "cho xanh"; lỗi phải sửa gốc.
