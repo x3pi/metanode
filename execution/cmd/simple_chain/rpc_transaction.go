@@ -773,6 +773,9 @@ func (api *MetaAPI) sendRawEthTransactionSync(ctx context.Context, input hexutil
 		logger.Warn("[SendRawEthTransaction] SetEthHashMapblsHash failed: %v", err)
 	}
 
+	blockchain.GetBlockChainInstance().MarkSubmittedPending(metaTx.Hash())
+	blockchain.GetBlockChainInstance().MarkSubmittedPending(ethTx.Hash())
+
 	logger.Info("[SendRawEthTransaction] TX submitted (sync): ethHash=%s metaHash=%s from=%s",
 		ethTx.Hash().Hex(), metaTx.Hash().Hex(), fromAddress.Hex())
 
