@@ -128,7 +128,7 @@ Chưa làm trong đợt này. **Việc chỉ-đọc được phép làm ngay (kh
 
 - [x] `dev` trên GitHub chứa toàn bộ bản sửa (`de6ac207`).
 - [ ] (P7, dời lại) Cụm production/231/230 chạy đúng commit đó (cả Rust và Go).
-- [ ] P1: script `execution/scripts/chaos_burnin.sh` đã viết (kiểm cú pháp) nhưng **CHƯA chạy lượt nào**; cần chạy ≥ 200 chu kỳ và ghi kết quả thật. Mô tả script (ngẫu nhiên kill -9 1-2 hoặc 4 nodes, downtime 5-120s phủ `gc_depth`, tx liên tục, verify hash từng block).
+- [ ] P1: `execution/scripts/chaos_burnin.sh` đã chạy thật: bản trước sửa lỗi gặp split 2/2 ở chu kỳ 12 (bằng chứng ngoài repo `/home/abc/chain-n/chaos_evidence/`); bản sau sửa (`46f1dc7a`) chạy 40/40 chu kỳ pass (7× kill 2 node, 2× kill 4 node, tắt ≥ 22s, 0 dòng `ESCALATION`/`Baseline injected`). **Còn thiếu: ≥ 200 chu kỳ (đang chạy) và kịch bản mất quorum kéo dài hàng phút.** Mô tả script (ngẫu nhiên kill -9 1-2 hoặc 4 nodes, downtime 5-120s phủ `gc_depth`, tx liên tục, verify hash từng block).
 - [ ] P2: toàn bộ test pass trên cụm ≥ 2 máy với genesis production (cluster policy đóng).
 - [ ] Cảnh báo lệch height: đã ghi lệnh vào runbook, **chưa bắn thử cảnh báo** (`block_hash_checker --watch --lag-threshold 2` + Telegram alert).
 - [ ] Runbook đã cập nhật (chưa diễn tập): mục 3.4/3.5 fork response, 4.1 float model, 4.2 BLS conservation guard & `gen_float_accounts`.
@@ -153,6 +153,14 @@ Chưa làm trong đợt này. **Việc chỉ-đọc được phép làm ngay (kh
   2. **[ ] P9.2 Kiểm chứng sống** trên cụm local (parent 4 + exec) ở chế độ `warn` rồi `enforce`: gửi chuyển cross-chain + refund, `diff` luôn trong `[0, pending]`, về 0 khi nghỉ. Cố ý làm lệch (sửa genesis) để thấy `enforce` chặn (`halted`) và `warn` chỉ log. Ghi kết quả thật vào báo cáo.
   3. **[x] P9.3 Cấu hình ansible:** biến `bls_conservation_mode` + `BLS_CONSERVATION_INTERVAL_SECONDS` trong `inventory.example.yml`, `roles/exec_cluster/templates/metanode-exec-cluster.service.j2`, và `roles/exec_cluster/tasks/main.yml`; mục 4.2 trong runbook `note/runbook_parent_chain_multinode.md`.
   4. **[ ] P9.4 Chi phí đo:** `TotalSupply` dùng `GetAll()` quét toàn bộ tài khoản; đo trên cụm lớn (≥ 1M tài khoản), nếu đắt thì thay bằng tổng cung đã lưu trong state (chỉ làm khi đo cho thấy cần).
+
+### P10. Nguyên nhân gốc lỗi chia 2/2 (đã sửa, commit `46f1dc7a`)
+- `DagState::reset_to_network_baseline` đặt digest thật vào `previous_digest` của commit giả ⇒ `last_commit_digest()` là hash của commit rỗng; `POST-RESTORE-GUARD` đếm 10 tick (~20s, quyết định theo thời gian — trái Zero-Fork) rồi reset node khỏe về digest đó khi peer offline ⇒ hai nhóm node đề xuất commit kế tiếp với `previous_digest` khác nhau ⇒ split 2/2.
+- Đã bỏ escalation theo tick và mọi reset baseline về `CommitDigest::MIN`; baseline giả mang digest thật; `DagState` từ chối ghi đè commit hợp lệ bằng MIN. **Đừng đề xuất lại** tie-break theo hash/ngưỡng f+1 (đã bị từ chối: vi phạm Zero-Fork, làm fail test G11).
+- Nếu vẫn gặp split 2/2: giữ nguyên trạng thái pending, giữ log, dừng nhóm node lệch, wipe dữ liệu consensus của nhóm đó và sync lại từ nhóm có 2f+1 digest chung.
+
+### P11. Giao dịch hệ thống rollup phải trả gas (commit `0d4daf54`)
+- `RollupSystemHandler` trước đây không trừ gas người gửi nhưng leader vẫn nhận thưởng khối ⇒ tổng cung cụm tăng, phá bảo toàn P9. Nay người gửi (địa chỉ khóa node) bị trừ gas. **Genesis production phải cấp số dư cho địa chỉ khóa của node**, nếu không giao dịch hệ thống bị từ chối. Thay đổi trạng thái ⇒ deploy đồng loạt + wipe cùng P7.
 
 ## 5. Việc **không** làm
 - Không deploy, restart, wipe hay reset cụm 231/230 (hoặc dữ liệu thật) khi chưa có backup và chủ dự án đồng ý rõ ràng.
