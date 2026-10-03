@@ -72,7 +72,7 @@ func (bp *BlockProcessor) getTransactionReceipt(hashEth common.Hash) (*mt_proto.
 	}
 
 	// Bước 3: Lấy block hash từ block number
-	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
+	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumberFast(blockNumber)
 	if !ok {
 		return nil, fmt.Errorf("block not found for number: %d", blockNumber)
 	}
@@ -242,7 +242,7 @@ func (bp *BlockProcessor) getTransactionByHash(hashEth common.Hash) (*mt_proto.T
 	}
 
 	// Bước 3: Lấy block hash từ block number
-	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
+	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumberFast(blockNumber)
 	if !ok {
 		return nil, fmt.Errorf("block not found for number: %d", blockNumber)
 	}

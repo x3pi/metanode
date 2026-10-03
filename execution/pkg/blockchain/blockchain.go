@@ -488,7 +488,11 @@ func (bc *BlockChain) SetBlockNumberToHash(blockNumber uint64, blockHash common.
 	return nil
 }
 
-func (bc *BlockChain) GetBlockHashByNumber(blockNumber uint64) (common.Hash, bool) {
+// GetBlockHashByNumberFast looks up a block's hash by its number using ONLY the
+// in-memory cache and LevelDB mapping. It is strictly O(1) and NEVER triggers
+// disk walkback scans. Used for query endpoints (RPC, receipt lookup, transaction lookup)
+// where predictable low latency is required.
+func (bc *BlockChain) GetBlockHashByNumberFast(blockNumber uint64) (common.Hash, bool) {
 	if lastPruned := bc.GetLastPrunedBlockNumber(); lastPruned > 0 && blockNumber <= lastPruned {
 		return common.Hash{}, false
 	}
@@ -502,6 +506,10 @@ func (bc *BlockChain) GetBlockHashByNumber(blockNumber uint64) (common.Hash, boo
 		}
 	}
 
+	if bc.storageManager == nil || bc.storageManager.GetStorageMapping() == nil {
+		return common.Hash{}, false
+	}
+
 	key := []byte(blockNumberPrefix + strconv.FormatUint(blockNumber, 10))
 	data, err := bc.storageManager.GetStorageMapping().Get(key)
 	if err == nil && data != nil && len(data) == common.HashLength {
@@ -511,6 +519,15 @@ func (bc *BlockChain) GetBlockHashByNumber(blockNumber uint64) (common.Hash, boo
 			addedAt: time.Now(),
 		})
 		return blockHash, true
+	}
+
+	return common.Hash{}, false
+}
+
+func (bc *BlockChain) GetBlockHashByNumber(blockNumber uint64) (common.Hash, bool) {
+	// Fast-path: Check in-memory cache and DB mapping first (O(1))
+	if hash, ok := bc.GetBlockHashByNumberFast(blockNumber); ok {
+		return hash, true
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -738,51 +755,7 @@ func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bo
 }
 
 func (bc *BlockChain) GetBlockNumberByTxHash(txHash common.Hash) (uint64, bool) {
-	if blockNumber, ok := bc.GetBlockNumberByTxHashFast(txHash); ok {
-		return blockNumber, true
-	}
-
-	// ═══════════════════════════════════════════════════════════════════════════
-	// LAZY FALLBACK (June 2026): Rebuild transaction mapping from block DB.
-	//
-	// Negative-cache guard (Aug 2026): a still-pending tx is a guaranteed
-	// walkback miss on every poll a client makes while waiting for its
-	// receipt (eth_getTransactionReceipt is typically polled every tens of
-	// ms until confirmed). Without this, that's a full up-to-2000-block scan
-	// per poll per pending tx. Cache "not found" for a short TTL so repeated
-	// polls for the same still-pending hash don't re-walk the chain; a real
-	// crash-recovery lookup (rare, and not latency-sensitive) still gets a
-	// fresh walkback once the short TTL expires.
-	// ═══════════════════════════════════════════════════════════════════════════
-	if v, ok := bc.walkbackNotFound.Load(txHash); ok {
-		if until, ok := v.(time.Time); ok && time.Now().Before(until) {
-			return 0, false
-		}
-		bc.walkbackNotFound.Delete(txHash)
-	}
-
-	if bc.blockDatabase != nil {
-		// Elastic load-shedding: bound how many walkback scans run at once
-		// (walkbackSem, sized off GOMAXPROCS) and how long a caller waits for
-		// a free slot (walkbackAcquireTimeout). Under normal load a slot is
-		// free instantly; under a flood, callers give up quickly and are
-		// treated as a miss (negative-cached, same as a real miss) instead of
-		// piling up thousands of concurrent expensive scans.
-		select {
-		case walkbackSem <- struct{}{}:
-			blockNumber, ok := bc.rebuildTxMappingByWalkback(txHash)
-			<-walkbackSem
-			if ok {
-				logger.Info("✅ [LAZY-FALLBACK] Walkback search found transaction %s in block #%d", txHash.Hex(), blockNumber)
-				return blockNumber, true
-			}
-		case <-time.After(walkbackAcquireTimeout):
-			logger.Warn("⚠️ [LAZY-FALLBACK] Walkback slot busy, shedding load for %s", txHash.Hex())
-		}
-		bc.walkbackNotFound.Store(txHash, time.Now().Add(walkbackNegativeCacheTTL))
-	}
-
-	return 0, false
+	return bc.GetBlockNumberByTxHashFast(txHash)
 }
 
 func (bc *BlockChain) rebuildTxMappingByWalkback(targetTxHash common.Hash) (uint64, bool) {
@@ -796,7 +769,7 @@ func (bc *BlockChain) rebuildTxMappingByWalkback(targetTxHash common.Hash) (uint
 
 	// Walk backwards from lastBlock
 	blk := lastBlock
-	const maxDepth = 2000 // Safely scan up to 2000 blocks to prevent RPC hang
+	const maxDepth = 64 // Crash-recovery window (covers uncommitted mapping before flush, prevents wasteful deep scans)
 	var depth int
 
 	for blk != nil && depth < maxDepth {

@@ -661,12 +661,36 @@ func (app *App) initBlockchain() error {
 		// Depth is conditional on previous shutdown type:
 		//   - Clean shutdown: verify last 50 blocks (fast sanity check, ~1ms)
 		//   - Crash/SIGKILL:  full walk to genesis (recover all lost mappings)
+		// Depth is conditional on previous shutdown type and migration status:
+		//   - If full historical rebuild was never completed on this DB: full walk to genesis
+		//   - Clean shutdown + full rebuild completed: verify last 50 blocks (fast sanity check)
+		//   - Crash/SIGKILL: full walk to genesis (recover all lost mappings)
 		// ═══════════════════════════════════════════════════════════════════
-		rebuildMaxBlocks := 0 // unlimited — full recovery walk
-		if wasCleanShutdown {
+		const fullRebuildMarkerKey = "full_mapping_rebuild_v1_complete"
+		rebuildMaxBlocks := 0 // unlimited — full recovery walk by default
+		fullRebuildDone := false
+		if markerData, mErr := app.storageManager.GetStorageMapping().Get([]byte(fullRebuildMarkerKey)); mErr == nil && len(markerData) > 0 {
+			fullRebuildDone = true
+		}
+
+		if wasCleanShutdown && fullRebuildDone {
 			rebuildMaxBlocks = 50 // fast sanity check only
 		}
-		blockchain.GetBlockChainInstance().RebuildMappingsFromBlock(app.startLastBlock, rebuildMaxBlocks)
+
+		rebuilt, err := blockchain.GetBlockChainInstance().RebuildMappingsFromBlock(app.startLastBlock, rebuildMaxBlocks)
+		if err != nil {
+			logger.Fatal("❌ [STARTUP-REBUILD] Failed to rebuild blockchain mappings: %v", err)
+		}
+
+		// Mark full rebuild complete in DB once an unlimited walk has successfully finished
+		if rebuildMaxBlocks == 0 && !fullRebuildDone {
+			if mErr := app.storageManager.GetStorageMapping().Put([]byte(fullRebuildMarkerKey), []byte{1}); mErr != nil {
+				logger.Error("⚠️ [STARTUP-REBUILD] Failed to write full rebuild marker: %v", mErr)
+			} else {
+				_ = app.storageManager.GetStorageMapping().Flush()
+				logger.Info("✅ [STARTUP-REBUILD] Marked full mapping rebuild complete in DB (%d mappings recovered)", rebuilt)
+			}
+		}
 	}
 
 SKIP_GENESIS:

@@ -24,7 +24,7 @@ func GetTransactionReceipt(txHash common.Hash, bd *block.BlockDatabase, storageR
 		return nil, fmt.Errorf("transaction not found in any block")
 	}
 
-	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
+	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumberFast(blockNumber)
 	if !ok {
 		return nil, fmt.Errorf("block hash not found for block number %d", blockNumber)
 	}
