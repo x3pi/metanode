@@ -18,7 +18,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/file_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
@@ -131,7 +130,7 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 		hashTx = blsHash
 	}
 
-	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(hashTx)
+	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(hashTx)
 
 	if !ok || blockNumber > storage.GetLastBlockNumber() {
 		// Fallback to cache as a pending transaction
@@ -442,11 +441,7 @@ func (api *MetaAPI) SendRawTransactionWithDeviceKey(ctx context.Context, input [
 		}
 		logger.Info("ETH SendRawTransactionWithDeviceKey", txEth.Hash())
 
-		fileHandler, _ := file_handler.GetFileAbi()
-		name, _ := fileHandler.ParseMethodName(txM)
-		if !(txM.ToAddress() == file_handler.PredictContractAddress(common.HexToAddress(api.App.chainState.GetConfig().OwnerFileStorageAddress)) && name == "uploadChunk") {
-			blockchain.GetBlockChainInstance().AddTxToCache(txEth.Hash(), append([]byte(nil), inputEth...))
-		}
+		blockchain.GetBlockChainInstance().AddTxToCache(txEth.Hash(), append([]byte(nil), inputEth...))
 		signer := types.NewCancunSigner(api.App.config.ChainId)
 
 		from, err := types.Sender(signer, txEth)
@@ -798,7 +793,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		searchHash = blsHash
 	}
 
-	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(searchHash)
+	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(searchHash)
 	if !ok || blockNumber > storage.GetLastBlockNumber() {
 		return nil, nil // Trả về nil nếu không tìm thấy giao dịch hoặc chưa committed
 	}

@@ -66,7 +66,7 @@ func (bp *BlockProcessor) getTransactionReceipt(hashEth common.Hash) (*mt_proto.
 		searchHash = blsHash
 	}
 
-	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(searchHash)
+	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(searchHash)
 	if !ok {
 		return nil, nil // Trả về nil nếu không tìm thấy giao dịch (not an error, just not found)
 	}
@@ -236,7 +236,7 @@ func (bp *BlockProcessor) getTransactionByHash(hashEth common.Hash) (*mt_proto.T
 		searchHash = blsHash
 	}
 
-	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(searchHash)
+	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(searchHash)
 	if !ok {
 		return nil, nil // Trả về nil nếu không tìm thấy giao dịch (not an error, just not found)
 	}
