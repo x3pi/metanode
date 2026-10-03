@@ -2,6 +2,7 @@ package tx_processor
 
 import (
 	"context"
+	"math/big"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -68,6 +69,9 @@ func (h *RollupSystemHandler) HandleTransaction(
 		return h.errorReceipt(tx, "dispatcher not initialized"), nil, nil
 	}
 
+	gasUsed := uint64(mt_common.TRANSFER_GAS_COST)
+	gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), tx.EffectiveGasPrice())
+
 	// Unlike ParentChainGatewayHandler's tx (which arrives via the ETH-wrapped
 	// SendRawEthTransaction -> buildMetaTxFromEthTx path and so genuinely needs
 	// CallData().Input() to unwrap the CallData envelope), this tx is built natively by
@@ -78,6 +82,16 @@ func (h *RollupSystemHandler) HandleTransaction(
 	// of JSON input").
 	data := tx.Data()
 	stateDB := newLiveAccountStateAccessor(chainState)
+
+	if gasFee.Sign() > 0 {
+		curBal := stateDB.GetBalance(tx.FromAddress())
+		if curBal == nil || curBal.Cmp(gasFee) < 0 {
+			logger.Error("❌ RollupSystemHandler: insufficient balance for gas")
+			stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+			return h.errorReceipt(tx, "insufficient balance for gas"), nil, nil
+		}
+	}
+
 	if err := h.dispatcher.HandleSystemEvent(newLiveRollupStore(chainState), stateDB, data); err != nil {
 		logger.Error("❌ RollupSystemHandler: HandleSystemEvent failed: %v", err)
 		// The tx was executed (and failed), so it must still consume its nonce, as on any
@@ -89,6 +103,10 @@ func (h *RollupSystemHandler) HandleTransaction(
 		// failed call leaves no partial state to roll back here.
 		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
 		return h.errorReceipt(tx, err.Error()), nil, nil
+	}
+
+	if gasFee.Sign() > 0 {
+		stateDB.SubBalance(tx.FromAddress(), gasFee)
 	}
 
 	// runBarrierTx only VALIDATES tx.FromAddress()'s nonce against fromAccount.Nonce() before
@@ -109,7 +127,7 @@ func (h *RollupSystemHandler) HandleTransaction(
 	rcp := receipt.NewReceipt(
 		tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
 		pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-		tx.EffectiveGasPrice().Uint64(), uint64(mt_common.TRANSFER_GAS_COST), nil, 0, common.Hash{}, 0,
+		tx.EffectiveGasPrice().Uint64(), gasUsed, nil, 0, common.Hash{}, 0,
 	)
 
 	return rcp, nil, nil

@@ -585,3 +585,6 @@ execution/gen_recovery_committee
 execution/pkg/rollup/FRAUD_PROOF_FEASIBILITY_AND_SOLUTIONS.html
 execution/pkg/rollup/FRAUD_PROOF_FEASIBILITY_AND_SOLUTIONS.pdf
 deploy/ansible/monitors/block_hash_checker/checkpoint.json
+
+# chaos burn-in crash reports (multi-GB logs)
+execution/scripts/chaos_crash_reports/
