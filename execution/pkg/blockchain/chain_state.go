@@ -1697,24 +1697,8 @@ func (cs *ChainState) Close() {
 	}
 }
 
-// CloseSpeculative releases in-memory trie sessions of a cloned ChainState
-// WITHOUT closing the shared changelog databases.
-func (cs *ChainState) CloseSpeculative() {
-	if asDB := cs.GetAccountStateDB(); asDB != nil {
-		asDB.Close()
-	}
-	if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
-		if closer, ok := stakeDB.Trie().(interface{ Close() }); ok {
-			closer.Close()
-		}
-	}
-	if scDB := cs.GetSmartContractDB(); scDB != nil {
-		scDB.Discard()
-	}
-}
-
-// AbortSpeculative discards a speculative ChainState that lost a conflict and will never be adopted: unlike
-// CloseSpeculative it does not persist the tries' pending NOMT sessions, it aborts them, releasing the shared
+// AbortSpeculative discards a speculative ChainState that lost a conflict and will never be adopted:
+// it does not persist the tries' pending NOMT sessions, it aborts them, releasing the shared
 // handle for the sequential re-execution of the same block.
 func (cs *ChainState) AbortSpeculative() {
 	abort := func(t interface{}) {

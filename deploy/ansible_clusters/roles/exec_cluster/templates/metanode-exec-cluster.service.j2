@@ -17,6 +17,8 @@ LimitNOFILE=65536
 LimitCORE=infinity
 Environment="PARENT_CHAIN_URL=http://{{ parent_chain_host | default('127.0.0.1') }}:{{ parent_chain_rpc_port | default(8547) }}"
 Environment="PARENT_CHAIN_URLS={{ parent_chain_urls_csv | default('') }}"
+Environment="BLS_CONSERVATION_MODE={{ bls_conservation_mode | default('enforce') }}"
+Environment="BLS_CONSERVATION_INTERVAL_SECONDS={{ bls_conservation_interval_seconds | default('300') }}"
 
 StandardOutput=append:{{ base_log_dir }}/{{ inventory_hostname }}.log
 StandardError=append:{{ base_log_dir }}/{{ inventory_hostname }}.log

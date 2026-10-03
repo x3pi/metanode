@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -25,10 +26,22 @@ type SendWorker struct {
 	// EventProposer is used to submit state machine events to the Raft consensus.
 	EventProposer func(event Event, msgID common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash common.Hash) error
 
+	// Gate, when set, is consulted before any new transfer leaves the cluster (see ConservationGuard.Allow).
+	Gate func() error
+
+	lastGateLog atomic.Int64 // unix seconds of the last "blocked" log line, to keep the log readable
+
 	wakeCh          chan struct{}
 	quitCh          chan struct{}
 	wg              sync.WaitGroup
 	inFlightSubmits sync.Map
+}
+
+func (w *SendWorker) logGate(err error) {
+	now := time.Now().Unix()
+	if last := w.lastGateLog.Load(); now-last >= 30 && w.lastGateLog.CompareAndSwap(last, now) {
+		log.Printf("🛑 SendWorker: not sending new transfers: %v", err)
+	}
 }
 
 func NewSendWorker(store Store, client parentchain.Client, blsKeyPair *bls.KeyPair, destPubKey cm.PublicKey, destClusterID uint64) *SendWorker {
@@ -122,6 +135,14 @@ func (w *SendWorker) loop() {
 
 func (w *SendWorker) processPending() bool {
 	hasProgress := false
+	// Gate: while the cluster's BLS float is not verified against its accounts (or a violation is confirmed), nothing
+	// new may leave the cluster. Settling inbound transfers (ReceiveWorker/ReclaimWorker) is deliberately not gated.
+	if w.Gate != nil {
+		if err := w.Gate(); err != nil {
+			w.logGate(err)
+			return false
+		}
+	}
 	records, err := w.store.ScanNonTerminal()
 	if err != nil {
 		log.Printf("SendWorker: failed to scan records: %v", err)

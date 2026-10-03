@@ -217,7 +217,14 @@ static FFI_TX_SUBMIT_BYTES: AtomicU64 = AtomicU64::new(0);
 static FFI_TX_FULL_COUNT: AtomicU64 = AtomicU64::new(0);
 static FFI_TX_LAST_LOG_SECS: AtomicU64 = AtomicU64::new(0);
 
-pub static mut PAUSE_GUARD: Option<std::sync::RwLockWriteGuard<'static, ()>> = None;
+/// The write guard of RUST_EXECUTION_LOCK held for the duration of a pause. `pause` and `resume` are separate FFI
+/// calls that Go may issue from different OS threads, so the guard is handed over through a Mutex instead of the
+/// previous `static mut` (unsynchronized writes are UB) and a `transmute`.
+struct PauseGuard(#[allow(dead_code)] std::sync::RwLockWriteGuard<'static, ()>);
+// SAFETY: std's RwLock on Linux is futex-based with no thread ownership, so releasing the write guard from another
+// thread than the one that acquired it is sound; the guard is only ever moved between the pause and resume calls.
+unsafe impl Send for PauseGuard {}
+static PAUSE_GUARD: std::sync::Mutex<Option<PauseGuard>> = std::sync::Mutex::new(None);
 
 /// Tracks whether pause is active
 static PAUSE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -320,9 +327,8 @@ pub extern "C" fn metanode_pause_consensus() {
                 poisoned.into_inner()
             }
         };
-        unsafe {
-            PAUSE_GUARD = Some(std::mem::transmute(guard));
-        }
+        // The (possibly long) wait for the write lock happened above WITHOUT holding PAUSE_GUARD's mutex.
+        *PAUSE_GUARD.lock().unwrap_or_else(|p| p.into_inner()) = Some(PauseGuard(guard));
         PAUSE_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
 
         info!(
@@ -341,9 +347,9 @@ pub extern "C" fn metanode_resume_consensus() {
     let result = std::panic::catch_unwind(|| {
         info!("▶️ [FFI] metanode_resume_consensus called - dropping write lock...");
         PAUSE_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
-        unsafe {
-            PAUSE_GUARD = None;
-        }
+        // Take the guard out and drop it after releasing PAUSE_GUARD's mutex.
+        let released = PAUSE_GUARD.lock().unwrap_or_else(|p| p.into_inner()).take();
+        drop(released);
         info!("▶️ [FFI] metanode_resume_consensus: RocksDB writes RESUMED.");
     });
 

@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -559,6 +560,42 @@ func (q *QuorumClient) GetFloatSeq(pubKey cm.PublicKey) (uint64, error) {
 		}
 	}
 	return 0, nil
+}
+
+// ErrNoFloatQuorum is returned by GetFloat when no (block, balance) pair is attested by f+1 nodes.
+var ErrNoFloatQuorum = errors.New("parentchain: no float balance attested by f+1 parent nodes at the same block")
+
+// GetFloat returns the float balance of pubKey attested by at least f+1 parent nodes AT THE SAME BLOCK (so up to f
+// lying or lagging nodes cannot move it), together with that block. Nodes that are at different blocks simply do not
+// vote together; with traffic the call may need a retry, which it does a few times before giving up.
+func (q *QuorumClient) GetFloat(pubKey cm.PublicKey) (*big.Int, uint64, error) {
+	if len(q.clients) == 0 {
+		return nil, 0, ErrNoNodesConfigured
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		type vote struct {
+			block uint64
+			bal   string
+		}
+		votes := map[vote]int{}
+		vals := map[vote]*big.Int{}
+		for _, c := range q.clients {
+			bal, block, err := c.GetFloat(pubKey)
+			if err != nil {
+				continue
+			}
+			v := vote{block, bal.String()}
+			votes[v]++
+			vals[v] = bal
+		}
+		for v, n := range votes {
+			if n >= q.quorumThreshold() {
+				return new(big.Int).Set(vals[v]), v.block, nil
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return nil, 0, ErrNoFloatQuorum
 }
 
 func (q *QuorumClient) GetAccountRegistry(userAddress common.Address) (cm.PublicKey, bool, error) {

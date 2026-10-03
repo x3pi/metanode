@@ -26,6 +26,7 @@ import (
 type StakeStateDB struct {
 	trie p_trie.StateTrie
 
+	rootMu         sync.RWMutex // guards originRootHash only (a leaf lock): written by PersistAsync on the committer goroutine, read by commitWorker
 	originRootHash common.Hash
 	db             storage.Storage
 	//cache tránh trie truy vấn nhiều lần
@@ -76,12 +77,24 @@ func (db *StakeStateDB) SetHistoricalContext(changelogDB *state_changelog.StateC
 // SetOriginRootHash explicitly updates the origin root hash.
 // This is critical for Sub nodes when applying block states from the network.
 func (db *StakeStateDB) SetOriginRootHash(hash common.Hash) {
-	db.originRootHash = hash
+	db.storeOriginRoot(hash)
 }
 
 // GetOriginRootHash returns the current origin root hash.
 func (db *StakeStateDB) GetOriginRootHash() common.Hash {
+	return db.loadOriginRoot()
+}
+
+func (db *StakeStateDB) loadOriginRoot() common.Hash {
+	db.rootMu.RLock()
+	defer db.rootMu.RUnlock()
 	return db.originRootHash
+}
+
+func (db *StakeStateDB) storeOriginRoot(h common.Hash) {
+	db.rootMu.Lock()
+	db.originRootHash = h
+	db.rootMu.Unlock()
 }
 
 // Trie returns the underlying StateTrie instance.
@@ -876,7 +889,7 @@ func (db *StakeStateDB) Commit() (common.Hash, error) {
 	}
 
 	db.trie = newTrie
-	db.originRootHash = committedHash
+	db.storeOriginRoot(committedHash)
 
 	return committedHash, nil
 }
@@ -1082,7 +1095,7 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 	}
 
 	db.trie = newTrieToSet
-	db.originRootHash = result.FinalHash
+	db.storeOriginRoot(result.FinalHash)
 	db.muCommit.Unlock()
 
 	logger.Debug("PersistAsync (StakeStateDB): trie swapped to new root %s, persistReady signaled", result.FinalHash)
@@ -1093,9 +1106,9 @@ func (db *StakeStateDB) PersistAsync(result *StakePipelineCommitResult) error {
 func (db *StakeStateDB) Discard() error {
 	db.lockedFlag.Store(false)
 	db.dirtyValidators.Clear()
-	newTrie, err := p_trie.NewStateTrie(db.originRootHash, db.db, true)
+	newTrie, err := p_trie.NewStateTrie(db.loadOriginRoot(), db.db, true)
 	if err != nil {
-		return fmt.Errorf("failed to reload trie to %s: %w", db.originRootHash, err)
+		return fmt.Errorf("failed to reload trie to %s: %w", db.loadOriginRoot(), err)
 	}
 
 	// Preserve ChangelogDB

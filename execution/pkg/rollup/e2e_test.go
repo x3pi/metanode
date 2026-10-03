@@ -67,6 +67,7 @@ func (a *ParentChainClientAdapter) SendDepositToFloat(
 			FloatIdentityKey:     tmpPub,
 			ClusterIDDescriptive: destClusterID,
 			ChainIDDescriptive:   destClusterID,
+			Authorized:           true,
 		})
 		dig := parentchain.ComputeDepositFloatMessage(pubKey, destClusterID, sender, target, amount, msgID)
 		cert := bls.Sign(sourcePriv, dig)
@@ -91,6 +92,7 @@ func (a *ParentChainClientAdapter) SendDepositToFloat(
 		FloatIdentityKey:     pubKey,
 		ClusterIDDescriptive: destClusterID,
 		ChainIDDescriptive:   destClusterID,
+		Authorized:           true,
 	})
 	dig := parentchain.ComputeDepositFloatMessage(pubKey, destClusterID, sender, target, amount, msgID)
 	cert := bls.Sign(sourcePriv, dig)
@@ -332,6 +334,7 @@ func setupClusterFloatBalance(t *testing.T, parentChain *InMemoryParentChain, kp
 		FloatIdentityKey:     pub,
 		ClusterIDDescriptive: chainID,
 		ChainIDDescriptive:   chainID,
+		Authorized:           true,
 	})
 	dig := parentchain.ComputeDepositFloatMessage(pub, chainID, common.Address{}, common.Address{}, amount, msgID)
 	cert := bls.Sign(kp.PrivateKey(), dig)
@@ -389,7 +392,8 @@ func TestE2E_HappyPathTransfer(t *testing.T) {
 			// DEBUG LOGGING
 			// t.Logf("bal1: %v, bal2: %v, f2: %v, rec2.State: %v", bal1, bal2, f2, rec2.State)
 			
-			if bal1.Cmp(big.NewInt(500)) == 0 && bal2.Cmp(big.NewInt(500)) == 0 {
+			// 1000 - 500 value - 100 fee = 400; refunds return the value only (the fee is burned): 1000 - 600 + 500 = 900.
+			if bal1.Cmp(big.NewInt(400)) == 0 && bal2.Cmp(big.NewInt(500)) == 0 {
 				if f2 && rec2.State == StateCredited {
 					success = true
 				}
@@ -446,7 +450,7 @@ func TestE2E_TransferRefund(t *testing.T) {
 			node1.receiveWorker.pollAndProcess()
 			
 			bal1 := node1.StateDB.GetBalance(sender)
-			if bal1.Cmp(big.NewInt(1000)) == 0 {
+			if bal1.Cmp(big.NewInt(900)) == 0 {
 				success = true
 			}
 		}
@@ -517,7 +521,7 @@ func TestE2E_TransferReclaimWon(t *testing.T) {
 			node1.reclaimWorker.processReclaims()
 			bal1 := node1.StateDB.GetBalance(sender)
 			rec1, _, _ := node1.Store.Get(msgID)
-			if bal1.Cmp(big.NewInt(1000)) == 0 {
+			if bal1.Cmp(big.NewInt(900)) == 0 {
 				if rec1 != nil && rec1.State == StateConfirmedRefunded {
 					success = true
 				}
@@ -602,10 +606,10 @@ func TestE2E_TransferReclaimLost_DoubleCreditPrevention(t *testing.T) {
 			rec1, _, _ := node1.Store.Get(msgID)
 			
 			// Balance must NOT exceed 1000 (No double credit)
-			if bal1.Cmp(big.NewInt(1000)) > 0 {
+			if bal1.Cmp(big.NewInt(900)) > 0 {
 				t.Fatalf("Double credit detected! Balance is %v", bal1)
 			}
-			if bal1.Cmp(big.NewInt(1000)) == 0 && rec1 != nil && rec1.State == StateConfirmedRefunded {
+			if bal1.Cmp(big.NewInt(900)) == 0 && rec1 != nil && rec1.State == StateConfirmedRefunded {
 				success = true
 			}
 		}
@@ -689,10 +693,10 @@ func TestE2E_Refund_DoubleCreditPrevention(t *testing.T) {
 			rec1, _, _ := node1.Store.Get(msgID)
 			
 			// Balance must NOT exceed 1000 (No double credit)
-			if bal1.Cmp(big.NewInt(1000)) > 0 {
+			if bal1.Cmp(big.NewInt(900)) > 0 {
 				t.Fatalf("Double credit detected! Balance is %v", bal1)
 			}
-			if bal1.Cmp(big.NewInt(1000)) == 0 && rec1 != nil && rec1.State == StateConfirmedRefunded {
+			if bal1.Cmp(big.NewInt(900)) == 0 && rec1 != nil && rec1.State == StateConfirmedRefunded {
 				success = true
 			}
 		}

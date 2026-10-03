@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"strconv"
@@ -176,6 +177,22 @@ func (c *httpClient) GetStatus() (ChainStatus, error) {
 	var resp ChainStatus
 	err := c.get("/status", &resp)
 	return resp, err
+}
+
+// GetFloat returns the float balance of a BLS identity and the block it was read at.
+func (c *httpClient) GetFloat(pubKey cm.PublicKey) (*big.Int, uint64, error) {
+	var resp struct {
+		Balance   string `json:"balance"`
+		LastBlock uint64 `json:"last_block"`
+	}
+	if err := c.get(fmt.Sprintf("/float?pubkey=0x%x", pubKey[:]), &resp); err != nil {
+		return nil, 0, err
+	}
+	v, ok := new(big.Int).SetString(resp.Balance, 10)
+	if !ok {
+		return nil, 0, fmt.Errorf("parentchain: node returned an unparsable float balance %q", resp.Balance)
+	}
+	return v, resp.LastBlock, nil
 }
 
 func (c *httpClient) GetProof(key [32]byte) (ProofResult, error) {
@@ -355,20 +372,42 @@ func (s *HTTPServer) handleFloat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pubkey must be a 48-byte BLS public key (hex)", http.StatusBadRequest)
 		return
 	}
-	bal, err := s.store.GetFloat(crypto.Keccak256Hash(pubKeyBytes))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	total, err := s.store.GetFloat(floatTotalSupplyKey)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	// last_block is the block the values belong to: read it before and after and retry until the same block was
+	// applied throughout, so a client comparing nodes can require "same block, same balance".
+	var bal, total *big.Int
+	var block uint64
+	for attempt := 0; attempt < 5; attempt++ {
+		before := s.lastAppliedBlock()
+		var err error
+		if bal, err = s.store.GetFloat(crypto.Keccak256Hash(pubKeyBytes)); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if total, err = s.store.GetFloat(floatTotalSupplyKey); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		block = before
+		if s.lastAppliedBlock() == before {
+			break
+		}
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"balance":      bal.String(),
 		"total_supply": total.String(),
+		"last_block":   block,
 	})
+}
+
+func (s *HTTPServer) lastAppliedBlock() uint64 {
+	if s.committer == nil {
+		return 0
+	}
+	prog, err := s.committer.LastApplied()
+	if err != nil {
+		return 0
+	}
+	return prog.LastBlock
 }
 
 func (s *HTTPServer) handleStateRoot(w http.ResponseWriter, r *http.Request) {

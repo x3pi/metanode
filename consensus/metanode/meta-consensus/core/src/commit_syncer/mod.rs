@@ -737,12 +737,6 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let mut interval = tokio::time::interval(initial_interval);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut last_state_check = tokio::time::Instant::now();
-        // The quorum-advanced wakeup below keeps its own throttle clock. It must NOT share `last_state_check`
-        // with the periodic tick: quorum advances every few hundred ms on a live cluster, so a shared clock
-        // was refreshed before the tick's check_interval ever elapsed and every stall detector in the tick
-        // branch (notably 4a, the only recovery for a hole left by a discarded divergent local commit)
-        // never ran -- a restarted node stayed wedged one block behind forever.
-        let mut last_notify_state_check = tokio::time::Instant::now();
 
         info!(
             "🚀 [COMMIT-SYNCER] Starting with phase={:?}, interval={}ms",
@@ -756,9 +750,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 _ = self.inner.commit_vote_monitor.quorum_advanced_notify.notified() => {
                     let now = tokio::time::Instant::now();
                     // Throttle state checks slightly to avoid rapid toggling
-                    if now.duration_since(last_notify_state_check) >= Duration::from_millis(100) {
+                    if now.duration_since(last_state_check) >= Duration::from_millis(100) {
                         self.update_state();
-                        last_notify_state_check = now;
+                        last_state_check = now;
                     }
                     self.try_schedule_once();
                 }
@@ -766,6 +760,60 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 _ = interval.tick() => {
                     // STATE MACHINE: Check for state transitions dynamically
                     let now = tokio::time::Instant::now();
+                    // STALL DETECTOR 4a runs on EVERY tick, outside the `check_interval` gate below. The quorum-advanced
+                    // wakeup refreshes `last_state_check` every few hundred ms on a live cluster, so inside the gate this
+                    // detector (the only recovery for a hole left behind a discarded divergent local commit) never ran:
+                    // the hole at handled+1 was never re-fetched as a CertifiedCommit and the node stayed wedged. The
+                    // other detectors keep their previous cadence on purpose (enabling all of them at once wedged a
+                    // whole cluster in the e2e "lose 2/4 parent nodes" scenario).
+                    {
+                        let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
+                        let quorum_commit = self.get_effective_quorum_commit();
+                        // ════════════════════════════════════════════════════════
+                        // STALL DETECTOR 4a: DAG/dispatch gap detector.
+                        //
+                        // Detects when highest_handled_commit (the DAG-side "enqueued
+                        // for Go" watermark) has stopped advancing, while we are aware
+                        // of a higher quorum commit index. This indicates that the node
+                        // is stuck expecting a specific commit index (e.g. 263) due to a
+                        // divergence or missing commit, while the network has already
+                        // processed past it (e.g. 264).
+                        //
+                        // Recovery: Reset synced_commit_index to highest_handled, clear
+                        // pending fetches and fetched ranges, forcing CommitSyncer to
+                        // refetch the missing range starting from highest_handled + 1.
+                        //
+                        // NOTE (2026-09-12, project memory mục 17 UPDATE #4): this detector
+                        // does NOT catch a genuine Go-execution-side stall (Go enqueued but
+                        // never confirming) -- highest_handled advances on enqueue, not on
+                        // Go's actual completion, so it tracks synced_commit_index almost
+                        // in lockstep even while Go itself is wedged. See DETECTOR 4b below.
+                        // ════════════════════════════════════════════════════════
+                        if highest_handled != self.last_known_highest_handled {
+                            self.last_highest_handled_change_at = now;
+                            self.last_known_highest_handled = highest_handled;
+                        }
+                        let execution_stall_duration = now.duration_since(self.last_highest_handled_change_at);
+                        if execution_stall_duration >= Duration::from_secs(20)
+                            && highest_handled < self.synced_commit_index
+                        {
+                            tracing::warn!(
+                                "🚨 [EXECUTION-STALL] Go execution stuck at {} for {:.0}s (quorum={}). \
+                                 Resetting synced_commit_index to {} to fetch missing range.",
+                                highest_handled,
+                                execution_stall_duration.as_secs_f64(),
+                                quorum_commit,
+                                highest_handled
+                            );
+                            self.synced_commit_index = highest_handled;
+                            self.highest_scheduled_index = Some(highest_handled);
+                            self.pending_fetches.clear();
+                            self.fetched_ranges.clear();
+                            self.last_highest_handled_change_at = now; // Prevent rapid re-triggers
+                        }
+
+                    }
+
                     let check_interval = if self.coordination_hub.is_healthy() {
                         let quorum_commit = self.get_effective_quorum_commit();
                         let lag = quorum_commit.saturating_sub(self.synced_commit_index);
@@ -886,49 +934,6 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 }
                             });
                             self.last_local_commit_change_at = now; // prevent rapid re-triggers
-                        }
-
-                        // ════════════════════════════════════════════════════════
-                        // STALL DETECTOR 4a: DAG/dispatch gap detector.
-                        //
-                        // Detects when highest_handled_commit (the DAG-side "enqueued
-                        // for Go" watermark) has stopped advancing, while we are aware
-                        // of a higher quorum commit index. This indicates that the node
-                        // is stuck expecting a specific commit index (e.g. 263) due to a
-                        // divergence or missing commit, while the network has already
-                        // processed past it (e.g. 264).
-                        //
-                        // Recovery: Reset synced_commit_index to highest_handled, clear
-                        // pending fetches and fetched ranges, forcing CommitSyncer to
-                        // refetch the missing range starting from highest_handled + 1.
-                        //
-                        // NOTE (2026-09-12, project memory mục 17 UPDATE #4): this detector
-                        // does NOT catch a genuine Go-execution-side stall (Go enqueued but
-                        // never confirming) -- highest_handled advances on enqueue, not on
-                        // Go's actual completion, so it tracks synced_commit_index almost
-                        // in lockstep even while Go itself is wedged. See DETECTOR 4b below.
-                        // ════════════════════════════════════════════════════════
-                        if highest_handled != self.last_known_highest_handled {
-                            self.last_highest_handled_change_at = now;
-                            self.last_known_highest_handled = highest_handled;
-                        }
-                        let execution_stall_duration = now.duration_since(self.last_highest_handled_change_at);
-                        if execution_stall_duration >= Duration::from_secs(20)
-                            && highest_handled < self.synced_commit_index
-                        {
-                            tracing::warn!(
-                                "🚨 [EXECUTION-STALL] Go execution stuck at {} for {:.0}s (quorum={}). \
-                                 Resetting synced_commit_index to {} to fetch missing range.",
-                                highest_handled,
-                                execution_stall_duration.as_secs_f64(),
-                                quorum_commit,
-                                highest_handled
-                            );
-                            self.synced_commit_index = highest_handled;
-                            self.highest_scheduled_index = Some(highest_handled);
-                            self.pending_fetches.clear();
-                            self.fetched_ranges.clear();
-                            self.last_highest_handled_change_at = now; // Prevent rapid re-triggers
                         }
 
                         // ════════════════════════════════════════════════════════
@@ -1840,8 +1845,15 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let dag_commit = self.inner.dag_state.read().last_commit_index();
         let is_recovery = self.coordination_hub.recovery_barrier().is_active();
 
+        // Baseline injection is ONLY appropriate when DAG is empty (snapshot recovery, dag_commit == 0)
+        // OR when the gap between DAG commit and Go execution exceeds the peer GC depth (past commits
+        // have been pruned by peers and cannot be fetched). On routine node restarts with a small gap,
+        // DAG history is preserved and CommitSyncer MUST fetch missing commits sequentially from peers
+        // so that DagState and recent_blocks are properly populated.
+        let gap = (highest_handled as u32).saturating_sub(dag_commit);
+        let gc_depth = self.inner.context.protocol_config.gc_depth();
         let needs_baseline_injection =
-            is_recovery && highest_handled > 0 && dag_commit < highest_handled as u32;
+            is_recovery && highest_handled > 0 && (dag_commit == 0 || gap > gc_depth);
 
         if needs_baseline_injection {
             self.synced_commit_index = highest_handled as u32;

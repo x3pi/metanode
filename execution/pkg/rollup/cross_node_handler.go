@@ -78,13 +78,16 @@ func (h *CrossNodeHandler) HandleTransfer(
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// 1. Check balance
+	// 1. Check balance: the sender pays the value AND the transfer fee (both leave the cluster's float on the Parent
+	// Chain, so both must leave the cluster's accounts here).
+	fee := big.NewInt(100) // Default fee for cross-chain transfer
+	need := new(big.Int).Add(value, fee)
 	balance := stateDB.GetBalance(sender)
 	if balance == nil {
 		balance = big.NewInt(0)
 	}
-	if balance.Cmp(value) < 0 {
-		return common.Hash{}, fmt.Errorf("insufficient balance: have %v, need %v", balance, value)
+	if balance.Cmp(need) < 0 {
+		return common.Hash{}, fmt.Errorf("insufficient balance: have %v, need %v (value %v + fee %v)", balance, need, value, fee)
 	}
 
 	// 2. Generate source sequence
@@ -94,7 +97,6 @@ func (h *CrossNodeHandler) HandleTransfer(
 	}
 
 	// 3. Compute deterministic MessageID
-	fee := big.NewInt(100) // Default fee for cross-chain transfer
 	msgID := ComputeMessageID(h.fromKey, toKey, sender, target, value, fee, payloadHash, seq)
 
 	// 4. Run State Machine Transition
@@ -104,6 +106,7 @@ func (h *CrossNodeHandler) HandleTransfer(
 		Sender: sender,
 		Target: target,
 		Value:  value,
+		GasFee: fee,
 	}
 
 	newState, actions, err := Next(StateNone, RoleSender, event)

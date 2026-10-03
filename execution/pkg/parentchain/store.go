@@ -22,6 +22,9 @@ type ChainRegistryEntry struct {
 	FloatIdentityKey     cm.PublicKey `json:"float_identity_key"`
 	ClusterIDDescriptive uint64       `json:"cluster_id_descriptive,omitempty"`
 	ChainIDDescriptive   uint64       `json:"chain_id_descriptive,omitempty"` // legacy alias
+	// Authorized is true only for a key admitted through the cluster policy (registerCluster). A registry entry that
+	// was merely created because the key RECEIVED float is not a trusted certifier of deposits/state roots.
+	Authorized bool `json:"authorized,omitempty"`
 }
 
 type FloatTransferRecord struct {

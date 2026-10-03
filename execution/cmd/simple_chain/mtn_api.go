@@ -813,6 +813,32 @@ func (api *MtnAPI) GetCommitVotes(ctx context.Context, commitIndex uint32) (map[
 const devnetSenderPrivateKeyHex = "a3e6d454ea7a3b464af1f8c891259d5ff48f331004d56d1331388ec3c3915fe1"
 const devnetSenderBLSPrivateKeyHex = "0f0f8761e3fe67cdc9e7573adf72c7e929e2a00f981834298867d5628ca2d8f6"
 
+// GetConservation reports the cluster conservation invariant: the BLS float on the Parent Chain versus the sum of the
+// cluster's accounts, the amount legitimately in flight, and whether cross-chain is currently allowed.
+func (api *MtnAPI) GetConservation(ctx context.Context) (map[string]interface{}, error) {
+	last, lastErr, verified, blocked, mode := api.App.conservation.Status()
+	out := map[string]interface{}{"mode": string(mode), "verified": verified, "blocked": blocked}
+	if last.Supply != nil {
+		out["supply"] = last.Supply.String()
+		out["float"] = last.Float.String()
+		out["diff"] = last.Diff.String()
+		out["pending"] = last.Pending.String()
+		out["stable"] = last.Stable
+		out["ok"] = last.OK
+		out["reason"] = last.Reason
+	}
+	if lastErr != nil {
+		out["error"] = lastErr.Error()
+	}
+	if err := api.App.conservation.Allow(); err != nil {
+		out["allow"] = false
+		out["halt_reason"] = err.Error()
+	} else {
+		out["allow"] = true
+	}
+	return out, nil
+}
+
 // SendCrossChainTransfer submits a cross-node transfer as a REAL signed transaction targeting
 // PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, so it goes through the normal tx pool -> consensus ->
 // block execution -> Commit() pipeline like any other transaction. It must NOT call
@@ -826,6 +852,11 @@ const devnetSenderBLSPrivateKeyHex = "0f0f8761e3fe67cdc9e7573adf72c7e929e2a00f98
 // senderKeyHex / blsKeyHex override the sender's ECDSA and BLS private keys, so stress tests can
 // use many independent senders instead of racing on one shared account's nonce.
 func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, amountHex string, senderKeyHex *string, blsKeyHex *string) (string, error) {
+	// Halt-not-guess: no new value leaves the cluster while its BLS float is unverified or the conservation invariant is
+	// violated. This is a node-local admission check only; block execution of already admitted transfers is unaffected.
+	if err := api.App.conservation.Allow(); err != nil {
+		return "", err
+	}
 	// Verify that the execution nodes are not a separate chain but share the chainid with the parent chain
 	// A separate chain (L2) would have a GatewayContract configured for cross-chain value transfer.
 	if api.App.config.CrossChain.GatewayContract != "" {

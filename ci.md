@@ -63,15 +63,29 @@ cd /home/abc/nhat/con-chain-v2/metanode
 ./ci.sh run-now
 ```
 
-### 🔹 Chạy riêng toàn bộ bài test cho Child Chain (Chain con - `--child-chain` hoặc `--child`)
-Tự động lọc và chỉ chạy các bài test dành cho Execution Clusters (`chain_a`):
+### ⚡ Chạy Test Cho Chain Con (Execution Clusters - `chain_a`)
 ```bash
+# Cách 1: Dùng lệnh tắt tiện lợi (Tự động reset Execution Clusters và chạy 34 bài test Block-STM):
+./ci.sh test-child
+
+# Cách 2: Chạy trực tiếp qua Test ID:
+./ci.sh run-now --only child_chain_a
+
+# Cách 3: Chạy test ngay mà KHÔNG reset lại cụm node (tiết kiệm thời gian khi node đã chạy):
+./ci.sh test-child --no-reset
+# hoặc:
+./ci.sh run-now --only child_chain_a --no-reset
+
+# Cách 4: Ép reset Execution Clusters trước khi test:
+./ci.sh run-now --only child_chain_a --reset-exec
+
+# Cách 5: Chạy toàn bộ các bài test cho Child Chain (chain con):
 ./ci.sh run-now --child-chain
 # hoặc cờ ngắn:
 ./ci.sh run-now --child
 ```
 
-### 🔹 Chạy MỘT bài test cụ thể (`--only <test_id>`)
+### 🔹 Chạy MỘT bài test cụ thể khác (`--only <test_id>`)
 ```bash
 # 1. Test 34 kịch bản Block-STM trên Child Chain (chain_a):
 ./ci.sh run-now --only child_chain_a

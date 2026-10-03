@@ -46,11 +46,63 @@ type Genesis struct {
 	OpenClusterRegistration bool `json:"open_cluster_registration"`
 	// Clusters lists the BLS public keys (hex or base64, 48 bytes) of the clusters allowed to register.
 	Clusters []string `json:"clusters,omitempty"`
+
+	// FloatAccounts are the float balances that exist at genesis, keyed by BLS public key. They are applied
+	// deterministically in block 1 and are the whole float supply when AllowDepositToFloat is false.
+	FloatAccounts []GenesisFloatAccount `json:"float_accounts,omitempty"`
+	// MinFloatToRegister (decimal base units; 1 unit = 10^18) lets any key whose float balance reaches it register
+	// as a cluster, in addition to Clusters. Empty or "0" disables the balance rule.
+	MinFloatToRegister string `json:"min_float_to_register,omitempty"`
+	// AllowDepositToFloat enables depositToFloat (the only mint path). Devnet / tests only.
+	AllowDepositToFloat bool `json:"allow_deposit_to_float"`
+}
+
+// GenesisFloatAccount is one genesis float allocation.
+type GenesisFloatAccount struct {
+	BLSPublicKey string `json:"bls_public_key"` // 48 bytes, hex or base64
+	Balance      string `json:"balance"`        // decimal base units
+}
+
+// FloatAllocation is a validated genesis float allocation.
+type FloatAllocation struct {
+	Key     cm.PublicKey
+	Balance *big.Int
+}
+
+// FloatAllocations validates and returns the genesis float allocations in file order.
+func (g *Genesis) FloatAllocations() ([]FloatAllocation, error) {
+	seen := map[cm.PublicKey]bool{}
+	out := make([]FloatAllocation, 0, len(g.FloatAccounts))
+	for i, a := range g.FloatAccounts {
+		raw, err := decodeKey(a.BLSPublicKey)
+		if err != nil || len(raw) != 48 {
+			return nil, fmt.Errorf("%w: float_accounts[%d] is not a 48-byte BLS public key", ErrGenesisInvalid, i)
+		}
+		var k cm.PublicKey
+		copy(k[:], raw)
+		if seen[k] {
+			return nil, fmt.Errorf("%w: float_accounts[%d] duplicate key", ErrGenesisInvalid, i)
+		}
+		seen[k] = true
+		bal, ok := new(big.Int).SetString(strings.TrimSpace(a.Balance), 10)
+		if !ok || bal.Sign() <= 0 {
+			return nil, fmt.Errorf("%w: float_accounts[%d] balance must be a positive decimal integer", ErrGenesisInvalid, i)
+		}
+		out = append(out, FloatAllocation{Key: k, Balance: bal})
+	}
+	return out, nil
 }
 
 // ClusterPolicy converts the genesis cluster settings into the policy enforced during execution.
 func (g *Genesis) ClusterPolicy() (ClusterPolicy, error) {
-	p := ClusterPolicy{Open: g.OpenClusterRegistration, Allowed: map[cm.PublicKey]struct{}{}}
+	p := ClusterPolicy{Open: g.OpenClusterRegistration, Allowed: map[cm.PublicKey]struct{}{}, AllowDeposit: g.AllowDepositToFloat}
+	if m := strings.TrimSpace(g.MinFloatToRegister); m != "" {
+		v, ok := new(big.Int).SetString(m, 10)
+		if !ok || v.Sign() < 0 {
+			return ClusterPolicy{}, fmt.Errorf("%w: min_float_to_register must be a non-negative decimal integer", ErrGenesisInvalid)
+		}
+		p.MinFloat = v
+	}
 	for i, c := range g.Clusters {
 		raw, err := decodeKey(c)
 		if err != nil || len(raw) != 48 {
@@ -138,6 +190,9 @@ func LoadGenesis(path string) (*Genesis, error) {
 	}
 
 	if _, err := g.ClusterPolicy(); err != nil {
+		return nil, err
+	}
+	if _, err := g.FloatAllocations(); err != nil {
 		return nil, err
 	}
 

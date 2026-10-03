@@ -274,6 +274,35 @@ func EncodeRegisterClusterCallData(clusterPubKey cm.PublicKey, clusterID uint64)
 	return b
 }
 
+// EncodeTransferBalanceCallData builds the CallData of a plain account-to-account transfer.
+func EncodeTransferBalanceCallData(toKey cm.PublicKey, amount *big.Int) []byte {
+	var amt []byte
+	if amount != nil {
+		amt = amount.Bytes()
+	}
+	cd := &pb.ParentChainCallData{
+		Method: pb.ParentChainMethod_METHOD_TRANSFER_BALANCE,
+		Args: &pb.ParentChainCallData_TransferBalance{
+			TransferBalance: &pb.TransferBalanceArgs{ToKey: toKey[:], Amount: amt},
+		},
+	}
+	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(cd)
+	return b
+}
+
+func DecodeTransferBalanceCallData(data []byte) (toKey cm.PublicKey, amount *big.Int, err error) {
+	var cd pb.ParentChainCallData
+	if err := proto.Unmarshal(data, &cd); err != nil {
+		return toKey, nil, ErrMalformedCallData
+	}
+	args := cd.GetTransferBalance()
+	if args == nil || len(args.ToKey) != 48 {
+		return toKey, nil, ErrMalformedCallData
+	}
+	copy(toKey[:], args.ToKey)
+	return toKey, new(big.Int).SetBytes(args.Amount), nil
+}
+
 func DecodeRegisterClusterCallData(data []byte) (clusterPubKey cm.PublicKey, clusterID uint64, err error) {
 	var cd pb.ParentChainCallData
 	if err := proto.Unmarshal(data, &cd); err != nil {
@@ -506,6 +535,9 @@ func dispatchTxMethod(store Store, tx *pb.Transaction, senderKey cm.PublicKey, t
 
 	switch cd.Method {
 	case pb.ParentChainMethod_METHOD_DEPOSIT_TO_FLOAT:
+		if !depositToFloatAllowed() {
+			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 222}, ErrDepositDisabled
+		}
 		sourceKey, destKey, destClusterID, argSender, target, amount, msgID, cert, err := DecodeDepositToFloatCallData(tx.Data)
 		if err != nil {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 201}, err
@@ -598,7 +630,11 @@ func dispatchTxMethod(store Store, tx *pb.Transaction, senderKey cm.PublicKey, t
 		if err != nil {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 219}, err
 		}
-		if !clusterRegistrationAllowed(clusterPubKey) {
+		allowed, allowErr := clusterRegistrationAllowed(store, clusterPubKey)
+		if allowErr != nil {
+			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 220}, allowErr
+		}
+		if !allowed {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 221}, ErrClusterNotAuthorized
 		}
 		clusterHash := crypto.Keccak256Hash(clusterPubKey[:])
@@ -606,12 +642,25 @@ func dispatchTxMethod(store Store, tx *pb.Transaction, senderKey cm.PublicKey, t
 			FloatIdentityKey:     clusterPubKey,
 			ClusterIDDescriptive: clusterID,
 			ChainIDDescriptive:   clusterID,
+			Authorized:           true,
 		}); err != nil {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 220}, err
 		}
 		// Also register the derived address in AccountRegistry
 		derivedAddr := common.BytesToAddress(crypto.Keccak256(clusterPubKey[:])[12:])
 		_ = store.SetAccountRegistry(derivedAddr, clusterPubKey)
+
+	case pb.ParentChainMethod_METHOD_TRANSFER_BALANCE:
+		toKey, amount, err := DecodeTransferBalanceCallData(tx.Data)
+		if err != nil {
+			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 223}, err
+		}
+		if senderKey == (cm.PublicKey{}) {
+			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 204}, ErrUnauthorizedSender
+		}
+		if err := TransferBalance(store, senderKey, toKey, amount); err != nil {
+			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 224}, err
+		}
 
 	default:
 		return &Receipt{
