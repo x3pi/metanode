@@ -128,7 +128,7 @@ Chưa làm trong đợt này. **Việc chỉ-đọc được phép làm ngay (kh
 
 - [x] `dev` trên GitHub chứa toàn bộ bản sửa (`de6ac207`).
 - [ ] (P7, dời lại) Cụm production/231/230 chạy đúng commit đó (cả Rust và Go).
-- [ ] P1: `execution/scripts/chaos_burnin.sh` đã chạy thật: bản trước sửa lỗi gặp split 2/2 ở chu kỳ 12 (bằng chứng ngoài repo `/home/abc/chain-n/chaos_evidence/`); bản sau sửa (`46f1dc7a`) chạy 40/40 chu kỳ pass (7× kill 2 node, 2× kill 4 node, tắt ≥ 22s, 0 dòng `ESCALATION`/`Baseline injected`). **Còn thiếu: ≥ 200 chu kỳ (đang chạy) và kịch bản mất quorum kéo dài hàng phút.** Mô tả script (ngẫu nhiên kill -9 1-2 hoặc 4 nodes, downtime 5-120s phủ `gc_depth`, tx liên tục, verify hash từng block).
+- [x] P1 (một máy): `execution/scripts/chaos_burnin.sh` — bản trước sửa gặp split 2/2 ở chu kỳ 12 (bằng chứng ngoài repo `/home/abc/chain-n/chaos_evidence/`); bản sau sửa (`46f1dc7a`): 40/40 + **200/200** chu kỳ pass (144× kill 1, 38× kill 2, 18× kill cả 4 node, tắt 22–60s) và **12/12 chu kỳ mất quorum dài** (`QUORUM_LOSS=1`, kill 2 hoặc 4 node, tắt 188–284s, hội tụ lại sau 14–21s, block không tiến trong lúc mất quorum đúng như thiết kế). 0 dòng `ESCALATION`/`REJECTED`/`DIVERGENCE-DETECTED`, 0 `fork_detected`. **Chưa làm: chạy trên ≥ 2 máy (P2), chaos kèm tải giao dịch liên tục khi mất quorum.**
 - [ ] P2: toàn bộ test pass trên cụm ≥ 2 máy với genesis production (cluster policy đóng).
 - [ ] Cảnh báo lệch height: đã ghi lệnh vào runbook, **chưa bắn thử cảnh báo** (`block_hash_checker --watch --lag-threshold 2` + Telegram alert).
 - [ ] Runbook đã cập nhật (chưa diễn tập): mục 3.4/3.5 fork response, 4.1 float model, 4.2 BLS conservation guard & `gen_float_accounts`.

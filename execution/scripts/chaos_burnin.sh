@@ -200,6 +200,16 @@ for cycle in $(seq 1 "$CYCLES"); do
         VICTIMS=(0 1 2 3)
     fi
 
+    # QUORUM_LOSS=1: always kill 2 or 4 nodes (quorum lost) and keep them down for
+    # LONG_DOWN_MIN..LONG_DOWN_MAX seconds (minutes), to test long pending + recovery.
+    if [ "${QUORUM_LOSS:-0}" = "1" ]; then
+        if [ $((RANDOM % 2)) -eq 0 ]; then
+            N1=$((RANDOM % 4)); N2=$(((N1 + 1 + (RANDOM % 3)) % 4)); VICTIMS=("$N1" "$N2")
+        else
+            VICTIMS=(0 1 2 3)
+        fi
+    fi
+
     # Random downtime: weighted between MIN_DOWNTIME and MAX_DOWNTIME
     # 25% chance of long downtime (50s - 120s) to cross gc_depth (50 blocks)
     LONG_ROLL=$((RANDOM % 100))
@@ -207,6 +217,10 @@ for cycle in $(seq 1 "$CYCLES"); do
         DOWNTIME=$((50 + (RANDOM % (MAX_DOWNTIME - 50 + 1))))
     else
         DOWNTIME=$((MIN_DOWNTIME + (RANDOM % (30 - MIN_DOWNTIME + 1))))
+    fi
+
+    if [ "${QUORUM_LOSS:-0}" = "1" ]; then
+        DOWNTIME=$((${LONG_DOWN_MIN:-180} + (RANDOM % (${LONG_DOWN_MAX:-300} - ${LONG_DOWN_MIN:-180} + 1))))
     fi
 
     echo "💥 Action: Killing node(s) [${VICTIMS[*]}] for ${DOWNTIME}s (Roll: $ROLL, LongRoll: $LONG_ROLL)..."
