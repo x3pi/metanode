@@ -85,10 +85,10 @@ func snapshot(in ConservationInputs) (inflightSnapshot, error) {
 	for _, r := range recs {
 		keys = append(keys, fmt.Sprintf("%s:%d", r.MessageID.Hex(), r.State))
 		amt := new(big.Int)
-		if r.Value != nil {
+		if r.Value != nil && r.Value.Sign() > 0 {
 			amt.Add(amt, r.Value)
 		}
-		if r.Role == RoleSender && r.GasFee != nil {
+		if r.Role == RoleSender && r.GasFee != nil && r.GasFee.Sign() > 0 {
 			amt.Add(amt, r.GasFee)
 		}
 		pending.Add(pending, amt)
@@ -105,7 +105,7 @@ func snapshot(in ConservationInputs) (inflightSnapshot, error) {
 	}
 	keys = append(keys, fmt.Sprintf("inbound:%d@%d", len(events), cursor))
 	for _, e := range events {
-		if e != nil && e.Amount != nil {
+		if e != nil && e.Amount != nil && e.Amount.Sign() > 0 {
 			pending.Add(pending, e.Amount)
 		}
 	}
@@ -131,9 +131,15 @@ func CheckConservation(in ConservationInputs) (ConservationResult, error) {
 		if err != nil {
 			return ConservationResult{}, err
 		}
+		if f == nil {
+			return ConservationResult{}, fmt.Errorf("conservation: float balance is nil")
+		}
 		s, err := in.TotalSupply()
 		if err != nil {
 			return ConservationResult{}, err
+		}
+		if s == nil {
+			return ConservationResult{}, fmt.Errorf("conservation: total supply is nil")
 		}
 		after, err := snapshot(in)
 		if err != nil {

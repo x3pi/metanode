@@ -33,6 +33,11 @@ func NewCrossNodeHandler(fromKey cm.PublicKey) *CrossNodeHandler {
 }
 
 // ComputeMessageID calculates the deterministic ID of a cross-node message according to Parent Chain rules.
+// CrossNodeTransferFee is the flat fee a sender pays on top of the transfer value for a cross-node transfer. It is
+// consensus state (part of the message ID and of the float accounting); callers that pre-validate a balance
+// (ParentChainGatewayHandler) must use this same constant.
+const CrossNodeTransferFee int64 = 100
+
 func ComputeMessageID(fromKey, toKey cm.PublicKey, sender, target common.Address, value, fee *big.Int, payloadHash common.Hash, nonce uint64) common.Hash {
 	digest := parentchain.ComputeTransferFloatMessage(fromKey, toKey, sender, target, value, fee, payloadHash, nonce)
 	return crypto.Keccak256Hash(digest)
@@ -80,7 +85,7 @@ func (h *CrossNodeHandler) HandleTransfer(
 
 	// 1. Check balance: the sender pays the value AND the transfer fee (both leave the cluster's float on the Parent
 	// Chain, so both must leave the cluster's accounts here).
-	fee := big.NewInt(100) // Default fee for cross-chain transfer
+	fee := big.NewInt(CrossNodeTransferFee)
 	need := new(big.Int).Add(value, fee)
 	balance := stateDB.GetBalance(sender)
 	if balance == nil {
