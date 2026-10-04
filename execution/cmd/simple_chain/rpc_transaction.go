@@ -463,8 +463,6 @@ func (api *MetaAPI) SendRawTransactionWithDeviceKey(ctx context.Context, input [
 		if err != nil {
 			return common.Hash{}, newError(err, output)
 		}
-		blockchain.GetBlockChainInstance().MarkSubmittedPending(txEth.Hash())
-		blockchain.GetBlockChainInstance().MarkSubmittedPending(txM.Hash())
 		return txEth.Hash(), nil
 	} else {
 		output, err := api.App.transactionProcessor.ProcessTransactionFromRpcWithDeviceKey(txD)
@@ -472,7 +470,6 @@ func (api *MetaAPI) SendRawTransactionWithDeviceKey(ctx context.Context, input [
 			return common.Hash{}, newError(err, output)
 
 		}
-		blockchain.GetBlockChainInstance().MarkSubmittedPending(txM.Hash())
 		return txM.Hash(), nil
 	}
 }
@@ -696,15 +693,6 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 		logger.Warn("[SpeculativeGateway] SetEthHashMapblsHash failed: %v", err)
 	}
 
-	// Pre-seed the walkback negative-cache: this tx was JUST accepted into the
-	// mempool, so it's guaranteed not to be in any committed block yet. Without
-	// this, the client's first eth_getTransactionReceipt poll (which can arrive
-	// immediately after this call returns) pays a full block-history walkback
-	// scan for a guaranteed miss — under sustained load this showed up as
-	// hundreds of goroutines piled up in rebuildTxMappingByWalkback at once.
-	blockchain.GetBlockChainInstance().MarkSubmittedPending(metaTx.Hash())
-	blockchain.GetBlockChainInstance().MarkSubmittedPending(ethTx.Hash())
-
 	logger.Info("[SpeculativeGateway] TX executed speculatively without mock receipt: ethHash=%s", ethTx.Hash().Hex())
 
 	return ethTx.Hash(), nil
@@ -771,8 +759,6 @@ func (api *MetaAPI) sendRawEthTransactionSync(ctx context.Context, input hexutil
 		logger.Warn("[SendRawEthTransaction] SetEthHashMapblsHash failed: %v", err)
 	}
 
-	blockchain.GetBlockChainInstance().MarkSubmittedPending(metaTx.Hash())
-	blockchain.GetBlockChainInstance().MarkSubmittedPending(ethTx.Hash())
 
 	logger.Info("[SendRawEthTransaction] TX submitted (sync): ethHash=%s metaHash=%s from=%s",
 		ethTx.Hash().Hex(), metaTx.Hash().Hex(), fromAddress.Hex())
