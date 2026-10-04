@@ -61,6 +61,11 @@ type Transaction interface {
 	EthHash() e_common.Hash
 
 	ValidEthSign() bool
+	ValidSecpProtoSign() bool
+	ValidSecpSign() bool
+	SigningHash() e_common.Hash
+	Type() uint64
+	SignBytes() []byte
 	GetIsDebug() bool
 	// setter
 	SetSign(privateKey common.PrivateKey)

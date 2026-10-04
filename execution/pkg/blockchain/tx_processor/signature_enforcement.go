@@ -50,13 +50,13 @@ func checkTxSignature(tx types.Transaction, as types.AccountState) bool {
 	}
 
 	ok := false
-	if len(blsKey) > 0 {
+	if tx.Type() != 0xFF && len(blsKey) > 0 {
 		ok = transaction.NewVerifyTransactionRequest(tx.Hash(), common.PubkeyFromBytes(blsKey), tx.Sign()).Valid()
 	}
 	if !ok {
-		ok = tx.ValidEthSign()
+		ok = tx.ValidSecpSign()
 	}
-	if ok && accountType == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) && !tx.ValidEthSign() {
+	if ok && accountType == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) && !tx.ValidSecpSign() {
 		ok = false
 	}
 	if ok {
@@ -146,7 +146,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 	queued := make([]*pending, total)
 	parallel(total, 64, func(i int) {
 		as := loadState(i)
-		if as != nil && len(as.PublicKeyBls()) > 0 && as.AccountType() == 0 {
+		if as != nil && len(as.PublicKeyBls()) > 0 && as.AccountType() == 0 && txs[i].Type() != 0xFF {
 			key := sigCacheKey(txs[i], as.PublicKeyBls())
 			if LoadVerifiedSignature(key) {
 				valid[i] = true

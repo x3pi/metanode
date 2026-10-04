@@ -214,15 +214,21 @@ func VerifyTransaction(
 	if as.Nonce() != 0 || tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		txHash := tx.Hash()
 
-		if isSubNodeLagging {
-			// logger.Warn("⚠️ [BLS-LAG-DEBUG] account=%s | as.Nonce=%d | tx.Nonce=%d | blsKeyLen=%d | stateIsPreloaded=%v | tx=%s",
-			// 	tx.FromAddress().String(),
-			// 	as.Nonce(),
-			// 	tx.GetNonce(),
-			// 	len(as.PublicKeyBls()),
-			// 	preloadedState != nil,
-			// 	tx.Hash().Hex()[:16]+"...",
-			// )
+		if tx.Type() == 0xFF {
+			secpCacheKey := sigCacheKey(tx, nil)
+			if !LoadVerifiedSignature(secpCacheKey) {
+				if !tx.ValidSecpProtoSign() {
+					logger.Error("❌ [VERIFY] Secp256k1 Proto Verification failed: txHash=%s, from=%s", txHash.Hex(), tx.FromAddress().Hex())
+					return transaction.InvalidSign
+				}
+				StoreVerifiedSignature(secpCacheKey)
+				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
+				if count == maxVerifiedSignaturesCacheSize {
+					rotateVerifiedSignatures()
+					atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
+				}
+			}
+		} else if isSubNodeLagging {
 			// Let it pass local verification; assume Master will reject if invalid.
 		} else {
 			blsCacheKey := sigCacheKey(tx, as.PublicKeyBls())
@@ -257,7 +263,7 @@ func VerifyTransaction(
 	}
 
 	if as.AccountType() == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
-		if !tx.ValidEthSign() {
+		if !tx.ValidSecpSign() {
 			return transaction.RequiresTwoSignatures
 		}
 	}
@@ -277,7 +283,7 @@ func VerifyTransaction(
 		case as.Nonce() == 0 && isSetBls:
 			setBlsCacheKey := sigCacheKey(tx, nil)
 			if !LoadVerifiedSignature(setBlsCacheKey) {
-				if !tx.ValidEthSign() {
+				if !tx.ValidSecpSign() {
 					return transaction.InvalidSignSecp
 				}
 				StoreVerifiedSignature(setBlsCacheKey)

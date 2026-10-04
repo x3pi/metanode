@@ -1,6 +1,7 @@
 package client
 
 import (
+	"crypto/ecdsa"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -467,6 +468,78 @@ asDrained:
 		logger.Info("⏱  TX %v error in %v", tx.Hash().Hex()[:10], elapsed)
 		return nil, txErr
 	}
+}
+
+// SendSecpProtoTransaction signs and sends a Type 0xFF transaction using an ECDSA secp256k1 key.
+func (client *Client) SendSecpProtoTransaction(
+	privKey *ecdsa.PrivateKey,
+	toAddress common.Address,
+	amount *big.Int,
+	maxGas uint64,
+	maxGasPrice uint64,
+	data []byte,
+) (types.Receipt, types.Transaction, error) {
+	fromAddress := crypto.PubkeyToAddress(privKey.PublicKey)
+
+	// Fetch current on-chain account state to get nonce
+	as, err := client.AccountState(fromAddress)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get account state for %s: %w", fromAddress.Hex(), err)
+	}
+
+	tx := mt_transaction.NewTransaction(
+		fromAddress,
+		toAddress,
+		amount,
+		maxGas,
+		maxGasPrice,
+		0, // maxTimeUse
+		data,
+		nil, // relatedAddress
+		common.Hash{},
+		common.Hash{},
+		as.Nonce(),
+		client.clientContext.Config.ChainId,
+	)
+	concreteTx, ok := tx.(*mt_transaction.Transaction)
+	if !ok {
+		return nil, nil, fmt.Errorf("transaction is not *mt_transaction.Transaction")
+	}
+	concreteTx.SetType(0xFF)
+	if err := concreteTx.SignSecpProto(privKey); err != nil {
+		return nil, nil, fmt.Errorf("failed to sign secp proto tx: %w", err)
+	}
+
+	bTransaction, err := tx.Marshal()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal tx: %w", err)
+	}
+
+	parentConn := client.clientContext.ConnectionsManager.ParentConnection()
+	if parentConn == nil {
+		return nil, nil, fmt.Errorf("parent connection is nil")
+	}
+
+	err = client.clientContext.MessageSender.SendBytes(
+		parentConn,
+		command.SendTransaction,
+		bTransaction,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to send bytes via TCP: %w", err)
+	}
+
+	logger.Info("══════ SECP PROTO TX 0xFF SENT ══════")
+	logger.Info("  Hash:      %v", tx.Hash().Hex())
+	logger.Info("  From:      %v", fromAddress.Hex())
+	logger.Info("  To:        %v", toAddress.Hex())
+	logger.Info("  Nonce:     %d", tx.GetNonce())
+	logger.Info("  Amount:    %v", amount.String())
+	logger.Info("  ChainID:   %d", tx.GetChainID())
+	logger.Info("═════════════════════════════════════")
+
+	receipt, err := client.waitReceipt(tx.Hash(), 60*time.Second)
+	return receipt, tx, err
 }
 
 func (client *Client) ReadTransaction(

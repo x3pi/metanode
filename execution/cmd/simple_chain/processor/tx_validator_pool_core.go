@@ -278,6 +278,16 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 		return transaction.InvalidTransaction.Code, fmt.Errorf("transaction gas price (%d) is below node minimum (%d)", tx.MaxGasPrice(), minGasPrice)
 	}
 
+	if tx.Type() == 0xFF {
+		nodeChainID := vp.chainState.GetConfig().ChainId
+		if nodeChainID != nil && nodeChainID.Sign() > 0 && tx.GetChainID() != nodeChainID.Uint64() {
+			return transaction.InvalidChainId.Code, fmt.Errorf("transaction chain ID (%d) does not match node chain ID (%d)", tx.GetChainID(), nodeChainID.Uint64())
+		}
+		if len(tx.SignBytes()) != 0 {
+			return transaction.InvalidSign.Code, fmt.Errorf("transaction type 0xFF must not contain Sign bytes")
+		}
+	}
+
 	// Limit pool size to prevent GC stall / OOM.
 	//
 	// CRITICAL: EvictLowestGasPrice does a full scan of every shard plus an

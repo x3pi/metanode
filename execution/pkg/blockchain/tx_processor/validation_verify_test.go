@@ -6,11 +6,13 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
@@ -193,3 +195,71 @@ func TestVerifyTransaction_LaggingSubnode(t *testing.T) {
 		t.Errorf("Expected nil (Lagging subnode bypasses signature), got %v", err2)
 	}
 }
+
+func TestVerifyTransaction_SecpProtoType0xFF(t *testing.T) {
+	cs := setupTestChainState(t)
+
+	privKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("crypto.GenerateKey: %v", err)
+	}
+	from := crypto.PubkeyToAddress(privKey.PublicKey)
+	to := common.HexToAddress("0x456")
+
+	// Account without BLS key (secp only)
+	as := state.NewAccountState(from)
+	as.AddBalance(big.NewInt(1_000_000_000_000_000))
+	as.SetNonce(1)
+
+	// Valid Type 0xFF tx
+	good := &transaction.Transaction{}
+	good.FromProto(&pb.Transaction{
+		FromAddress: from.Bytes(),
+		ToAddress:   to.Bytes(),
+		Amount:      big.NewInt(100).Bytes(),
+		Nonce:       []byte{0, 0, 0, 0, 0, 0, 0, 1},
+		MaxGas:      p_common.TRANSFER_GAS_COST,
+		MaxGasPrice: p_common.MINIMUM_BASE_FEE,
+		ChainID:     1,
+		Type:        0xFF,
+	})
+	if err := good.SignSecpProto(privKey); err != nil {
+		t.Fatalf("SignSecpProto failed: %v", err)
+	}
+
+	rotateVerifiedSignatures()
+	rotateVerifiedSignatures()
+
+	// VerifyTransaction should pass for valid Type 0xFF
+	if txErr := VerifyTransaction(good, cs, as); txErr != nil {
+		t.Fatalf("expected nil error for valid Type 0xFF tx, got %v", txErr)
+	}
+
+	// Forged Type 0xFF tx (tampered amount)
+	forged := &transaction.Transaction{}
+	forged.FromProto(&pb.Transaction{
+		FromAddress: from.Bytes(),
+		ToAddress:   to.Bytes(),
+		Amount:      big.NewInt(9999).Bytes(), // Tampered amount
+		Nonce:       []byte{0, 0, 0, 0, 0, 0, 0, 1},
+		MaxGas:      p_common.TRANSFER_GAS_COST,
+		MaxGasPrice: p_common.MINIMUM_BASE_FEE,
+		ChainID:     1,
+		Type:        0xFF,
+		R:           good.Proto().(*pb.Transaction).R,
+		S:           good.Proto().(*pb.Transaction).S,
+		V:           good.Proto().(*pb.Transaction).V,
+	})
+
+	rotateVerifiedSignatures()
+	rotateVerifiedSignatures()
+
+	txErr := VerifyTransaction(forged, cs, as)
+	if txErr == nil {
+		t.Fatalf("expected error for forged Type 0xFF tx, got nil")
+	}
+	if txErr.Code != transaction.InvalidSign.Code {
+		t.Fatalf("expected InvalidSign code (%d), got %d (%s)", transaction.InvalidSign.Code, txErr.Code, txErr.Description)
+	}
+}
+

@@ -7,9 +7,13 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/config"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -211,3 +215,48 @@ func TestAdvanceNoncesCacheForForwarded_SurvivesClearNoncesCache(t *testing.T) {
 	_, ok = cache.Load(addr)
 	assert.False(t, ok, "ClearNoncesCache must wipe an optimistic advance just like any other cache entry")
 }
+
+func TestTxValidatorPool_Type0xFF_IngressValidation(t *testing.T) {
+	cs := &blockchain.ChainState{}
+	cs.SetConfig(&config.SimpleChainConfig{
+		ChainId: big.NewInt(1337),
+	})
+	vp := &TxValidatorPool{
+		chainState: cs,
+	}
+
+	privKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	from := crypto.PubkeyToAddress(privKey.PublicKey)
+	to := common.HexToAddress("0x1234")
+
+	// Case 1: Wrong ChainID (e.g. 999 vs 1337)
+	badChainTx := &transaction.Transaction{}
+	badChainTx.FromProto(&pb.Transaction{
+		FromAddress: from.Bytes(),
+		ToAddress:   to.Bytes(),
+		ChainID:     999,
+		Type:        0xFF,
+	})
+	badChainTx.SetNonce(0)
+	require.NoError(t, badChainTx.SignSecpProto(privKey))
+
+	code, err := vp.AddTransactionToPool(badChainTx)
+	assert.Equal(t, transaction.InvalidChainId.Code, code)
+	assert.ErrorContains(t, err, "does not match node chain ID")
+
+	// Case 2: Sign field is not empty (e.g. raw proto bytes injected into Sign field)
+	badSignTx := &transaction.Transaction{}
+	badSignTx.FromProto(&pb.Transaction{
+		FromAddress: from.Bytes(),
+		ToAddress:   to.Bytes(),
+		ChainID:     1337,
+		Type:        0xFF,
+		Sign:        []byte{0x01, 0x02, 0x03},
+	})
+	badSignTx.SetNonce(0)
+	code, err = vp.AddTransactionToPool(badSignTx)
+	assert.Equal(t, transaction.InvalidSign.Code, code)
+	assert.ErrorContains(t, err, "must not contain Sign bytes")
+}
+
