@@ -73,16 +73,17 @@ graph TD
 Dành cho các Client/Script đã quen dùng Protobuf từ trước, muốn gửi qua TCP socket mà không cần RLP phức tạp.
 
 #### Quy cách đóng gói ở Client:
-Client giữ nguyên 100% schema `pb.Transaction` cũ, **chỉ thay đổi hàm ký**:
+Client giữ nguyên 100% schema `pb.Transaction` cũ, **thêm định danh loại giao dịch và thay đổi hàm ký**:
 1. Chuẩn bị `pb.Transaction` (From, To, Amount, Nonce, Data, ChainID).
-2. Lấy hash dữ liệu: `hash = tx.Hash().Bytes()` (chính là `keccak256(TransactionHashData)`).
-3. Ký bằng private key `secp256k1` (thay vì BLS):
+2. **Quy định loại giao dịch:** Gán `pTx.Type = 0xFF` (255) để phân định đây là giao dịch Proto nội bộ, tránh xung đột với các loại giao dịch RLP của Ethereum (0, 1, 2, 3, 4...).
+3. Lấy hash dữ liệu: `hash = tx.Hash().Bytes()` (chính là `keccak256(TransactionHashData)`).
+4. Ký bằng private key `secp256k1` (thay vì BLS):
    $$\text{Signature} = \text{secp256k1.Sign}(hash, \text{privateKey}) \quad \text{(đúng 65 bytes: } [R (32B) \mid S (32B) \mid V (1B)]\text{)}$$
-4. Gán trực tiếp 65 bytes vào trường `Sign`:
+5. Gán trực tiếp 65 bytes vào trường `Sign`:
    ```go
    pTx.Sign = sig // 65 bytes
    ```
-5. Serialize Protobuf và gửi qua socket TCP với command:
+6. Serialize Protobuf và gửi qua socket TCP với command:
    ```go
    messageSender.SendBytes(conn, "SendTransaction", protoBytes)
    ```
@@ -107,7 +108,7 @@ if tx.ValidEthSign() {
 
 // Nhánh 2: Giao dịch từ Luồng TCP Proto (Ký secp256k1 trực tiếp trên tx.Hash)
 txSign := tx.Sign().Bytes()
-if len(txSign) == 65 {
+if len(txSign) == 65 && tx.Type() == 0xFF {
     recoveredPubKey, err := crypto.SigToPub(tx.Hash().Bytes(), txSign)
     if err == nil && crypto.PubkeyToAddress(*recoveredPubKey) == tx.FromAddress() {
         // Chữ ký secp256k1 trên Protobuf hợp lệ
@@ -139,6 +140,7 @@ return transaction.InvalidSign
 | Tiêu chí | Luồng 1: RPC Chuẩn EVM | Luồng 2: TCP Proto Trực Tiếp |
 | :--- | :--- | :--- |
 | **Đối tượng sử dụng** | Người dùng Web3, dApp, MetaMask, ví di động | Backend nội bộ, bot arbitrage, app có sẵn Proto SDK |
+| **Trường Type (`tx.Type()`)** | Động theo chuẩn EVM (0, 1, 2, 3, 4...) | Cố định `0xFF` (255) |
 | **Chuẩn ký** | Ethereum RLP Sighash (EIP-155, 1559, 4844...) | Keccak256 trên `pb.TransactionHashData` |
 | **Thuật toán khóa** | secp256k1 (ECDSA) | secp256k1 (ECDSA) |
 | **Giao thức mạng** | HTTP JSON-RPC (`eth_sendRawTransaction`) | TCP Socket Native (`command.SendTransaction`) |
