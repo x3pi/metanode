@@ -681,7 +681,6 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 		return common.Hash{}, fmt.Errorf("failed to unmarshal TransactionWithDeviceKey: %w", err)
 	}
 
-
 	// 10. Execute real transaction synchronously to return errors to client
 	output, errRun := api.App.transactionProcessor.ProcessTransactionFromRpcWithDeviceKey(txD)
 	if errRun != nil {
@@ -758,7 +757,6 @@ func (api *MetaAPI) sendRawEthTransactionSync(ctx context.Context, input hexutil
 	if err := blockchain.GetBlockChainInstance().SetEthHashMapblsHash(ethTx.Hash(), metaTx.Hash()); err != nil {
 		logger.Warn("[SendRawEthTransaction] SetEthHashMapblsHash failed: %v", err)
 	}
-
 
 	logger.Info("[SendRawEthTransaction] TX submitted (sync): ethHash=%s metaHash=%s from=%s",
 		ethTx.Hash().Hex(), metaTx.Hash().Hex(), fromAddress.Hex())
@@ -1050,7 +1048,7 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 					TxIndex:     uint(txIndex),
 					Index:       logIndex,
 				}
-				
+
 				// 🚀 OPTIMIZATION: Lọc (Early Filtering) ngay tại đây thay vì dồn hết vào mảng rồi mới lọc
 				if len(filters.FilterLogs([]*types.Log{evL}, beginBlock, endBlock, crit.Addresses, crit.Topics)) > 0 {
 					eventLogs = append(eventLogs, evL)
