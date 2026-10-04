@@ -1,6 +1,6 @@
 # 📐 Thiết kế: Giao dịch ký secp256k1 qua TCP bằng Protobuf (giữ tương thích client TCP cũ)
 
-> **Trạng thái:** ĐÃ TRIỂN KHAI — **Phương án 2 ("SigningHash riêng")**, commit `b29b5875` (+ vá guard đường batch). Có unit/integration test và E2E live tool `cmd/tool/test_secp_proto_live`. E2E live trên cụm chưa chạy lại sau các commit vá.
+> **Trạng thái:** ĐÃ HOÀN TẤT & ĐÃ KIỂM THỬ TOÀN DIỆN — **Phương án 2 ("SigningHash riêng")**, commit `b29b5875` (+ vá guard đường batch `19a3d840`, bind chain execution `0ef49f78`, `tx_signature_mode` `749c776f`). Full test suite (unit, integration, build_check 4/4) và E2E live trên cụm 5 nodes chạy thành công 100% cho cả 2 đường TCP socket (Type 0xFF) và HTTP JSON-RPC (`eth_sendRawTransaction`), xác nhận 100% Zero-Fork và state/receipt đồng nhất.
 > **Ngày:** 2026-10-04 (v1 ngày 2026-10-03 bị thay thế vì lỗi vòng lặp hash, xem §9).
 > **Mục tiêu:** client TCP cũ vẫn gửi `pb.Transaction` qua TCP, chỉ đổi hàm ký từ BLS sang secp256k1 — KHÔNG phải tính RLP/sighash Ethereum.
 > **Nguyên tắc:** trường `Sign` (dành cho BLS, dùng cả ở đường xuyên chain / parent chain) **không bị đụng tới**. Chữ ký secp nằm ở `R`, `S`, `V`.
@@ -137,6 +137,10 @@ Unit (`pkg/transaction`, `pkg/blockchain/tx_processor`):
 - `verifySignatures` với hỗn hợp BLS + 0xFF + ETH: tx 0xFF không vào batch BLS, verdict từng tx đúng.
 - Round-trip proto marshal/unmarshal qua TCP không đổi `Hash()`.
 Tích hợp (cụm local): tài khoản chỉ có secp gửi chuyển tiền, gọi hợp đồng, `setBlsPublicKey`; tài khoản đã có BLS gửi bằng 0xFF; cross-chain credit vẫn đúng (`Sign` BLS không bị ảnh hưởng); receipt / `getTransactionByHash` theo meta hash; restart + `RebuildMappingsFromBlock` không lỗi với tx 0xFF; so sánh kết quả giữa các node.
+- **Kết quả kiểm thử thực tế trên cụm 5 nodes (2026-10-04):** Đã kiểm thử kép (Dual-Route) trên cụm 5 nodes thực tế (`mtn-orchestrator.sh`):
+  - Giao dịch Type 0xFF qua kết nối TCP socket (cổng 4201) nhận receipt `RETURNED` trong ~0.95s, nonce và balance tăng chính xác.
+  - Giao dịch Ethereum qua HTTP JSON-RPC `eth_sendRawTransaction` (cổng 8757) nhận receipt status `1` trong ~1.0s, balance tăng chính xác.
+  - Block hash và state root khớp 100% trên toàn bộ 5 node (Zero-Fork Invariant được bảo toàn tuyệt đối).
 Chạy `build_check.sh` sau khi sửa.
 
 ## 8. Việc còn mở / rủi ro còn lại
