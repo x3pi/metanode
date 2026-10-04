@@ -19,12 +19,12 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
-// newSecpTestChainState returns a test chain state configured with chain ID 1: Type 0xFF txs are only valid on
+// newSecpTestChainState returns a test chain state configured with chain ID 1 and tx_signature_mode="secp": Type 0xFF txs are only valid on
 // the chain they were signed for, and an unconfigured chain ID fails closed.
 func newSecpTestChainState(t *testing.T) *blockchain.ChainState {
 	t.Helper()
 	cs := newTestChainState(t)
-	cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(1)})
+	cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(1), TxSignatureMode: config.TxSignatureModeSecp})
 	return cs
 }
 
@@ -214,11 +214,11 @@ func TestSecpProto_ChainBinding(t *testing.T) {
 	good := newSecpProtoTx(t, key, to, 0, big.NewInt(1), 1)
 	otherChain := newSecpProtoTx(t, key, to, 0, big.NewInt(1), 2)
 
-	valid, _ := verifySignatures(cs.GetAccountStateDB(), []types.Transaction{good, otherChain}, nil, chainIDOf(cs))
+	valid, _ := verifySignatures(cs.GetAccountStateDB(), []types.Transaction{good, otherChain}, nil, sigPolicyOf(cs))
 	assert.Equal(t, []bool{true, false}, valid, "only the tx signed for this chain may pass the execution filter")
 
 	// Fail closed when the node chain ID is not configured.
-	valid, _ = verifySignatures(cs.GetAccountStateDB(), []types.Transaction{good}, nil, 0)
+	valid, _ = verifySignatures(cs.GetAccountStateDB(), []types.Transaction{good}, nil, sigPolicy{secp: true})
 	assert.Equal(t, []bool{false}, valid)
 
 }

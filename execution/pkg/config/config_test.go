@@ -219,3 +219,29 @@ func TestDatabasesConfig_Defaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "./data", db.RootPath)
 }
+
+func TestTxSignatureMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode    string
+		secp    bool
+		wantErr bool
+	}{
+		{"", false, false},
+		{TxSignatureModeBLSLegacy, false, false},
+		{TxSignatureModeSecp, true, false},
+		{"SECP", false, true}, // typos must fail startup, never silently pick another rule set
+		{"bls", false, true},
+	} {
+		c := &SimpleChainConfig{TxSignatureMode: tc.mode}
+		if got := c.SecpOnlyTxSignatures(); got != tc.secp {
+			t.Errorf("mode %q: SecpOnlyTxSignatures()=%v, want %v", tc.mode, got, tc.secp)
+		}
+		if err := c.validateTxSignatureMode(); (err != nil) != tc.wantErr {
+			t.Errorf("mode %q: validate err=%v, wantErr=%v", tc.mode, err, tc.wantErr)
+		}
+	}
+	var nilCfg *SimpleChainConfig
+	if nilCfg.SecpOnlyTxSignatures() {
+		t.Error("nil config must be legacy")
+	}
+}

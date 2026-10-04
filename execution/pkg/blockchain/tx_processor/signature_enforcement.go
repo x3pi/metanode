@@ -32,19 +32,56 @@ func sigCacheKey(tx types.Transaction, blsKey []byte) eth_common.Hash {
 	return crypto.Keccak256Hash(buf)
 }
 
-// chainIDOf returns the node's configured chain ID (0 when unset).
-func chainIDOf(cs *blockchain.ChainState) uint64 {
-	if cs == nil || cs.GetConfig() == nil || cs.GetConfig().ChainId == nil {
-		return 0
-	}
-	return cs.GetConfig().ChainId.Uint64()
+// sigPolicy is the per-chain signature rule set, derived from the node config (identical on every validator of a
+// chain). It keeps every signature verdict a pure function of (tx, sender state, policy).
+type sigPolicy struct {
+	chainID uint64 // configured chain ID (0 = unset)
+	secp    bool   // tx_signature_mode == "secp": users sign only with secp256k1
 }
 
-// secpProtoChainOK enforces anti cross-chain replay for Type 0xFF (secp256k1 proto) txs: they are valid only on
-// the chain they were signed for. An unconfigured chain ID (0) fails closed. Every other tx type is unaffected.
-// Pure function of (tx, chainID), so every validator with the same chain config gets the same verdict.
-func secpProtoChainOK(tx types.Transaction, chainID uint64) bool {
-	return tx.Type() != 0xFF || (chainID != 0 && tx.GetChainID() == chainID)
+func sigPolicyOf(cs *blockchain.ChainState) sigPolicy {
+	if cs == nil || cs.GetConfig() == nil {
+		return sigPolicy{}
+	}
+	cfg := cs.GetConfig()
+	p := sigPolicy{secp: cfg.SecpOnlyTxSignatures()}
+	if cfg.ChainId != nil {
+		p.chainID = cfg.ChainId.Uint64()
+	}
+	return p
+}
+
+// isNodeBLSIdentity reports whether the sender is a BLS-native identity: an account whose address IS the address
+// derived from its own registered BLS public key (what a node/cluster key pair produces). Such accounts have no
+// secp key, so in secp mode they are the only senders still allowed to carry a BLS tx signature.
+func isNodeBLSIdentity(tx types.Transaction, as types.AccountState) bool {
+	if as == nil {
+		return false
+	}
+	pub := as.PublicKeyBls()
+	return len(pub) > 0 && tx.FromAddress() == bls.GetAddressFromPublicKey(pub)
+}
+
+// blsAllowed: whether a BLS signature may authenticate this tx. Always in legacy mode; only for node identities in
+// secp mode (user txs there must be secp-signed).
+func (p sigPolicy) blsAllowed(tx types.Transaction, as types.AccountState) bool {
+	return !p.secp || isNodeBLSIdentity(tx, as)
+}
+
+// secpProtoError returns nil when a Type 0xFF tx is admissible under the policy, else the rejection reason.
+// Type 0xFF exists only in secp mode and only for the configured chain (anti cross-chain replay; an unset chain ID
+// fails closed). Every other tx type returns nil.
+func (p sigPolicy) secpProtoError(tx types.Transaction) *transaction.TransactionError {
+	if tx.Type() != 0xFF {
+		return nil
+	}
+	if !p.secp {
+		return transaction.InvalidSign
+	}
+	if p.chainID == 0 || tx.GetChainID() != p.chainID {
+		return transaction.InvalidChainId
+	}
+	return nil
 }
 
 // checkTxSignature is a pure function of (tx, sender account state): every node evaluating the same
@@ -52,8 +89,8 @@ func secpProtoChainOK(tx types.Transaction, chainID uint64) bool {
 // execution filter (no clocks, no peer-local data other than the cache, which only memoizes this result).
 // It mirrors the signature rules of VerifyTransaction (BLS key if registered, ETH secp256k1 otherwise or
 // as fallback; AccountType 1 additionally requires the ETH signature).
-func checkTxSignature(tx types.Transaction, as types.AccountState, chainID uint64) bool {
-	if !secpProtoChainOK(tx, chainID) {
+func checkTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy) bool {
+	if pol.secpProtoError(tx) != nil {
 		return false
 	}
 	var blsKey []byte
@@ -68,7 +105,7 @@ func checkTxSignature(tx types.Transaction, as types.AccountState, chainID uint6
 	}
 
 	ok := false
-	if tx.Type() != 0xFF && len(blsKey) > 0 {
+	if tx.Type() != 0xFF && len(blsKey) > 0 && pol.blsAllowed(tx, as) {
 		ok = transaction.NewVerifyTransactionRequest(tx.Hash(), common.PubkeyFromBytes(blsKey), tx.Sign()).Valid()
 	}
 	if !ok {
@@ -98,7 +135,7 @@ const (
 // BLS txs (registered key, AccountType 0) with blst batch verification, in parallel. stateOf(i) returns the
 // sender's account state for txs[i] (nil = load from accountDB). Successful checks populate the
 // verified-signature cache. The result depends only on (tx, sender state): batching never changes a verdict.
-func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Transaction, stateOf func(i int) types.AccountState, chainID uint64) ([]bool, sigStats) {
+func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Transaction, stateOf func(i int) types.AccountState, pol sigPolicy) ([]bool, sigStats) {
 	total := len(txs)
 	valid := make([]bool, total)
 	var st sigStats
@@ -164,7 +201,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 	queued := make([]*pending, total)
 	parallel(total, 64, func(i int) {
 		as := loadState(i)
-		if as != nil && len(as.PublicKeyBls()) > 0 && as.AccountType() == 0 && txs[i].Type() != 0xFF {
+		if as != nil && len(as.PublicKeyBls()) > 0 && as.AccountType() == 0 && txs[i].Type() != 0xFF && pol.blsAllowed(txs[i], as) {
 			key := sigCacheKey(txs[i], as.PublicKeyBls())
 			if LoadVerifiedSignature(key) {
 				valid[i] = true
@@ -174,7 +211,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 			}
 			return
 		}
-		valid[i] = checkTxSignature(txs[i], as, chainID)
+		valid[i] = checkTxSignature(txs[i], as, pol)
 		atomic.AddInt64(&st.individual, 1)
 	})
 
@@ -213,7 +250,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 			return
 		}
 		for _, p := range part {
-			valid[p.i] = checkTxSignature(txs[p.i], loadState(p.i), chainID)
+			valid[p.i] = checkTxSignature(txs[p.i], loadState(p.i), pol)
 			atomic.AddInt64(&st.individual, 1)
 		}
 	}
@@ -248,7 +285,7 @@ func PrewarmSignatureCache(chainState *blockchain.ChainState, txs []types.Transa
 			return nil
 		}
 		return senderStates[flat[i].FromAddress()]
-	}, chainIDOf(chainState))
+	}, sigPolicyOf(chainState))
 }
 
 // FilterInvalidSignatures drops every tx whose signature does not verify against the sender's
@@ -275,7 +312,7 @@ func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptx
 			flat = append(flat, item.Tx)
 		}
 	}
-	valid, st := verifySignatures(chainState.GetAccountStateDB(), flat, nil, chainIDOf(chainState))
+	valid, st := verifySignatures(chainState.GetAccountStateDB(), flat, nil, sigPolicyOf(chainState))
 
 	dropped := 0
 	out := make([]grouptxns.RelativeGroup, 0, len(groups))

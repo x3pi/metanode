@@ -198,6 +198,7 @@ func TestVerifyTransaction_LaggingSubnode(t *testing.T) {
 
 func TestVerifyTransaction_SecpProtoType0xFF(t *testing.T) {
 	cs := setupTestChainState(t)
+	cs.GetConfig().TxSignatureMode = config.TxSignatureModeSecp
 
 	privKey, err := crypto.GenerateKey()
 	if err != nil {
@@ -265,7 +266,8 @@ func TestVerifyTransaction_SecpProtoType0xFF(t *testing.T) {
 
 
 func TestVerifyTransaction_SecpProto_WrongChain(t *testing.T) {
-	cs := setupTestChainState(t) // chain ID 1
+	cs := setupTestChainState(t)
+	cs.GetConfig().TxSignatureMode = config.TxSignatureModeSecp // chain ID 1
 
 	privKey, err := crypto.GenerateKey()
 	if err != nil {

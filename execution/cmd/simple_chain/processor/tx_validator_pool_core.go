@@ -19,6 +19,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/trace"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
+	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -253,7 +254,11 @@ func (vp *TxValidatorPool) checkSecpProtoIngress(tx types.Transaction) (int64, e
 	if tx.Type() != 0xFF {
 		return 0, nil
 	}
-	nodeChainID := vp.chainState.GetConfig().ChainId
+	cfg := vp.chainState.GetConfig()
+	if !cfg.SecpOnlyTxSignatures() {
+		return transaction.InvalidSign.Code, fmt.Errorf("transaction type 0xFF is disabled on this chain (tx_signature_mode is not %q)", config.TxSignatureModeSecp)
+	}
+	nodeChainID := cfg.ChainId
 	if nodeChainID == nil || nodeChainID.Sign() <= 0 {
 		return transaction.InvalidChainId.Code, fmt.Errorf("node chain ID is not configured: cannot accept type 0xFF transactions")
 	}

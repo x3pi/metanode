@@ -52,8 +52,12 @@ func buildMetaTxFromEthTx(
 		return nil, nil, fmt.Errorf("failed to get account state for %s: %w", fromAddress.Hex(), err)
 	}
 
-	// 3. Verify BLS public key is registered on-chain (skip for account setting TX)
-	if ethTx.To() == nil || *ethTx.To() != utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
+	// secp mode (tx_signature_mode="secp"): users sign only with secp256k1, so the tx keeps its own ETH signature and
+	// is NOT re-signed by a BLS key; no BLS registration or device key is involved.
+	secpOnly := app.chainState.GetConfig().SecpOnlyTxSignatures()
+
+	// 3. Verify BLS public key is registered on-chain (skip for account setting TX and in secp mode)
+	if !secpOnly && (ethTx.To() == nil || *ethTx.To() != utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)) {
 		if len(as.PublicKeyBls()) == 0 {
 			isExplicitDev := os.Getenv("METANODE_DEVNET") == "true"
 			isProd := os.Getenv("NODE_ENV") == "production" ||
@@ -113,14 +117,14 @@ func buildMetaTxFromEthTx(
 		metaTxProto.Sidecar = nil
 	}
 
-	metaTx.UpdateDeriver(deviceKey, newDeviceKey)
-	metaTx.SetSign(blsPrivateKey)
+	txWithDK := &mt_proto.TransactionWithDeviceKey{Transaction: metaTx.Proto().(*mt_proto.Transaction)}
+	if !secpOnly {
+		metaTx.UpdateDeriver(deviceKey, newDeviceKey)
+		metaTx.SetSign(blsPrivateKey)
+		txWithDK.DeviceKey = rawNewDeviceKey
+	}
 
 	// 6. Marshal as TransactionWithDeviceKey proto
-	txWithDK := &mt_proto.TransactionWithDeviceKey{
-		Transaction: metaTx.Proto().(*mt_proto.Transaction),
-		DeviceKey:   rawNewDeviceKey,
-	}
 
 	data, err := proto.Marshal(txWithDK)
 	if err != nil {

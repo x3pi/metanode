@@ -219,7 +219,8 @@ func TestAdvanceNoncesCacheForForwarded_SurvivesClearNoncesCache(t *testing.T) {
 func TestTxValidatorPool_Type0xFF_IngressValidation(t *testing.T) {
 	cs := &blockchain.ChainState{}
 	cs.SetConfig(&config.SimpleChainConfig{
-		ChainId: big.NewInt(1337),
+		ChainId:         big.NewInt(1337),
+		TxSignatureMode: config.TxSignatureModeSecp,
 	})
 	vp := &TxValidatorPool{
 		chainState: cs,
@@ -264,7 +265,7 @@ func TestTxValidatorPool_Type0xFF_IngressValidation(t *testing.T) {
 // The single and batch ingress paths share checkSecpProtoIngress; non-0xFF txs must be untouched.
 func TestTxValidatorPool_checkSecpProtoIngress(t *testing.T) {
 	cs := &blockchain.ChainState{}
-	cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(1337)})
+	cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(1337), TxSignatureMode: config.TxSignatureModeSecp})
 	vp := &TxValidatorPool{chainState: cs}
 
 	mk := func(typ, chainID uint64, sign []byte) *transaction.Transaction {
@@ -290,9 +291,19 @@ func TestTxValidatorPool_checkSecpProtoIngress(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, int64(0), code)
 
+	// Legacy chain (default mode): 0xFF is disabled, every other type is untouched.
+	legacy := &blockchain.ChainState{}
+	legacy.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(1337)})
+	vpLegacy := &TxValidatorPool{chainState: legacy}
+	code, err = vpLegacy.checkSecpProtoIngress(mk(0xFF, 1337, nil))
+	assert.ErrorContains(t, err, "disabled on this chain")
+	assert.Equal(t, transaction.InvalidSign.Code, code)
+	_, err = vpLegacy.checkSecpProtoIngress(mk(2, 1337, []byte{1}))
+	assert.NoError(t, err)
+
 	// Unconfigured node chain ID: 0xFF txs fail closed, everything else is untouched.
 	noChain := &blockchain.ChainState{}
-	noChain.SetConfig(&config.SimpleChainConfig{})
+	noChain.SetConfig(&config.SimpleChainConfig{TxSignatureMode: config.TxSignatureModeSecp})
 	vp2 := &TxValidatorPool{chainState: noChain}
 	code, err = vp2.checkSecpProtoIngress(mk(0xFF, 1337, nil))
 	assert.ErrorContains(t, err, "node chain ID is not configured")

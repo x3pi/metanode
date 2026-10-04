@@ -214,15 +214,32 @@ func VerifyTransaction(
 	if as.Nonce() != 0 || tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		txHash := tx.Hash()
 
+		pol := sigPolicyOf(chainState)
 		if tx.Type() == 0xFF {
-			if !secpProtoChainOK(tx, chainIDOf(chainState)) {
-				logger.Error("❌ [VERIFY] Type 0xFF tx chain ID %d does not match node chain: txHash=%s", tx.GetChainID(), txHash.Hex())
-				return transaction.InvalidChainId
+			if perr := pol.secpProtoError(tx); perr != nil {
+				logger.Error("❌ [VERIFY] Type 0xFF tx rejected (%s): txHash=%s chainID=%d", perr.Description, txHash.Hex(), tx.GetChainID())
+				return perr
 			}
 			secpCacheKey := sigCacheKey(tx, nil)
 			if !LoadVerifiedSignature(secpCacheKey) {
 				if !tx.ValidSecpProtoSign() {
 					logger.Error("❌ [VERIFY] Secp256k1 Proto Verification failed: txHash=%s, from=%s", txHash.Hex(), tx.FromAddress().Hex())
+					return transaction.InvalidSign
+				}
+				StoreVerifiedSignature(secpCacheKey)
+				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
+				if count == maxVerifiedSignaturesCacheSize {
+					rotateVerifiedSignatures()
+					atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
+				}
+			}
+		} else if pol.secp && !isNodeBLSIdentity(tx, as) {
+			// secp mode: a user tx must carry a valid ETH/secp256k1 signature. No BLS attempt and NO sub-node-lagging
+			// bypass: secp-only accounts have no BLS key, so that bypass would skip verification for all of them.
+			secpCacheKey := sigCacheKey(tx, nil)
+			if !LoadVerifiedSignature(secpCacheKey) {
+				if !tx.ValidEthSign() {
+					logger.Error("❌ [VERIFY] secp-mode signature verification failed: txHash=%s, from=%s", txHash.Hex(), tx.FromAddress().Hex())
 					return transaction.InvalidSign
 				}
 				StoreVerifiedSignature(secpCacheKey)
@@ -457,7 +474,7 @@ func PreVerifySignatures(txs []types.Transaction, chainState *blockchain.ChainSt
 	}
 
 	accountDB := chainState.GetAccountStateDB()
-	chainID := chainIDOf(chainState)
+	pol := sigPolicyOf(chainState)
 
 	verifyFn := func(tx types.Transaction) {
 		as, err := accountDB.AccountStateReadOnly(tx.FromAddress())
@@ -465,7 +482,7 @@ func PreVerifySignatures(txs []types.Transaction, chainState *blockchain.ChainSt
 			as = nil
 		}
 		// Same pure check the consensus-level filter uses; populates the cache on success.
-		checkTxSignature(tx, as, chainID)
+		checkTxSignature(tx, as, pol)
 	}
 
 	if numWorkers <= 1 {

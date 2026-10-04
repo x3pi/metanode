@@ -7,6 +7,24 @@
 
 ---
 
+## 0. Hai chế độ theo chain: `tx_signature_mode`
+
+Một binary `simple_chain`, hai bộ luật xác thực chữ ký, chọn bằng cấu hình **theo chain** (`config.json`). Mọi validator của một chain PHẢI cùng giá trị — lệch là fork; đổi trên chain đã có lịch sử cần wipe + redeploy đồng loạt. Giá trị lạ làm node không khởi động (không bao giờ âm thầm rơi về luật khác).
+
+| | `""` / `"bls_legacy"` (mặc định) — simple chain cũ | `"secp"` — node thực thi mới |
+| :--- | :--- | :--- |
+| Tx dapp ký BLS (`Sign` 96B + khoá BLS đăng ký) | **Giữ nguyên** | Chỉ hợp lệ với **danh tính node** (địa chỉ = `keccak(blsPubKey)[12:]`, ví dụ tx hệ thống rollup do `app.keyPair` ký). Tài khoản người dùng bị từ chối |
+| Tx ETH (Type 0-4, `ValidEthSign`) | Giữ nguyên | Hợp lệ |
+| Tx proto secp (Type `0xFF`) | **Từ chối** (`InvalidSign`; ingress báo "disabled on this chain") | Hợp lệ, phải đúng `ChainID` (chưa cấu hình → từ chối) |
+| Bypass "sub-node lagging" (không có khoá BLS + nonce>0 ⇒ bỏ qua verify) | Giữ nguyên | **Tắt** cho tài khoản người dùng (mọi tài khoản secp đều không có khoá BLS, bypass sẽ bỏ qua verify toàn bộ) |
+| RPC Private Gateway (`eth_tx_converter.go`) | Đòi khoá BLS của tài khoản, ký BLS bảo lãnh + device key | Không đòi khoá BLS, không ký lại, không device key — tx giữ chữ ký ETH |
+
+Vì sao BLS không bị xoá hẳn ở chế độ `secp`: node thực thi tự có danh tính BLS (không có khoá secp) và tự ký tx hệ thống rollup bằng khoá BLS (`app.go`). `AccountState.PublicKeyBls` vẫn nằm trong state (attestation, kiểm tra danh tính, MVM). Các worker attestation gửi tx ký kiểu ETH, chữ ký BLS chỉ nằm trong payload nên không bị ảnh hưởng.
+
+Chế độ `bls_legacy` giống hệt hành vi trước khi có tx `0xFF` đối với mọi tx không phải `0xFF`, nên bản binary mới chạy chung được với bản cũ trên chain legacy (node cũ cũng loại tx `0xFF` vì chữ ký không hợp lệ).
+
+---
+
 ## 1. Bối cảnh
 
 - Mô hình mới: khóa BLS chỉ thuộc Node/Sequencer/Cluster. Người dùng là tài khoản EVM thường, ký `secp256k1`.
@@ -124,7 +142,7 @@ Chạy `build_check.sh` sau khi sửa.
 ## 8. Việc còn mở / rủi ro còn lại
 
 - **Guard ingress dùng chung:** `checkSecpProtoIngress` (`tx_validator_pool_core.go`) chạy ở CẢ đường đơn (`AddTransactionToPool`) và đường batch (`AddTransactionsToPool`, lệnh `SendTransactions`): ChainID phải bằng chain của node, `Sign` phải rỗng, và node chưa cấu hình `ChainId` thì từ chối 0xFF (fail-closed).
-- **ChainID cũng được ép lúc thực thi block:** `secpProtoChainOK(tx, chainID)` trong `checkTxSignature` / `verifySignatures` / `FilterInvalidSignatures` / `PreVerifySignatures`, và trong `VerifyTransaction` (trả `InvalidChainId`). Hàm thuần theo `(tx, chainID)` nên mọi validator cùng config cho cùng kết quả — **mọi validator của một chain phải có cùng `ChainId`** (đã là điều kiện bắt buộc cho opcode CHAINID). Chưa có tx 0xFF nào trong lịch sử chain, nên thay đổi này không làm đổi verdict của dữ liệu cũ.
+- **ChainID và chế độ được ép lúc thực thi block:** `sigPolicy.secpProtoError(tx)` (`signature_enforcement.go`) trong `checkTxSignature` / `verifySignatures` / `FilterInvalidSignatures` / `PreVerifySignatures`, và trong `VerifyTransaction` (trả `InvalidChainId`). Hàm thuần theo `(tx, trạng thái người gửi, sigPolicy)` nên mọi validator cùng config cho cùng kết quả — **mọi validator của một chain phải có cùng `ChainId`** (đã là điều kiện bắt buộc cho opcode CHAINID). Chưa có tx 0xFF nào trong lịch sử chain, nên thay đổi này không làm đổi verdict của dữ liệu cũ.
 - RPC: `ToEthTransaction()` trả `nil` cho Type 0xFF nên `EthHash` rỗng; các đường RPC hiện tại đều xử lý `nil` và dùng meta hash. Receipt trả `type = 0xff`.
 - Client không phải Go cần cài cùng protobuf deterministic marshal để ra đúng `SigningHash`. Test vector cố định (khoá, tx, `SigningHash`, R/S/V, `Hash()`): `TestSecpProto_GoldenVector` trong `pkg/transaction/secp_proto_test.go` — SDK ngôn ngữ khác phải khớp từng byte.
 

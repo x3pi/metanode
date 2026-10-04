@@ -7,6 +7,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
@@ -159,7 +160,7 @@ func TestVerifySignatures_BisectsFailingChunk(t *testing.T) {
 
 	rotateVerifiedSignatures()
 	rotateVerifiedSignatures()
-	valid, st := verifySignatures(cs.GetAccountStateDB(), txs, nil, chainIDOf(cs))
+	valid, st := verifySignatures(cs.GetAccountStateDB(), txs, nil, sigPolicyOf(cs))
 	for i, v := range valid {
 		if v == (i == bad) {
 			t.Fatalf("tx %d verdict wrong (valid=%v)", i, v)
@@ -193,6 +194,7 @@ func TestPrewarmSignatureCache_FillsCache(t *testing.T) {
 
 func TestFilterInvalidSignatures_SecpProtoType0xFF(t *testing.T) {
 	cs := setupTestChainState(t)
+	cs.GetConfig().TxSignatureMode = config.TxSignatureModeSecp
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
 
 	privKey, err := crypto.GenerateKey()
@@ -252,6 +254,7 @@ func TestFilterInvalidSignatures_SecpProtoType0xFF(t *testing.T) {
 
 func TestFilterInvalidSignatures_SecpProtoType0xFF_WithAccountHavingBLSKey(t *testing.T) {
 	cs := setupTestChainState(t)
+	cs.GetConfig().TxSignatureMode = config.TxSignatureModeSecp
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
 
 	privKey, err := crypto.GenerateKey()
@@ -295,6 +298,7 @@ func TestFilterInvalidSignatures_SecpProtoType0xFF_WithAccountHavingBLSKey(t *te
 
 func TestVerifySignatures_MixedBatchWithProto0xFF(t *testing.T) {
 	cs := setupTestChainState(t)
+	cs.GetConfig().TxSignatureMode = config.TxSignatureModeSecp
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
 
 	const blsCount = 20
@@ -305,8 +309,9 @@ func TestVerifySignatures_MixedBatchWithProto0xFF(t *testing.T) {
 
 	// Create BLS txs
 	for i := 0; i < blsCount; i++ {
-		from := common.BigToAddress(big.NewInt(int64(70000 + i)))
-		tx, pub := createTestTx(from, common.HexToAddress("0x456"), big.NewInt(1), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, 1)
+		// secp mode: BLS txs are only valid for node identities (address derived from the BLS key).
+		tx, pub := createNodeIdentityTx(common.HexToAddress("0x456"), big.NewInt(1), 1)
+		from := tx.FromAddress()
 		as := state.NewAccountState(from)
 		as.AddBalance(big.NewInt(1_000_000_000_000_000))
 		as.SetPublicKeyBls(pub)
@@ -352,7 +357,7 @@ func TestVerifySignatures_MixedBatchWithProto0xFF(t *testing.T) {
 	rotateVerifiedSignatures()
 	rotateVerifiedSignatures()
 
-	valid, _ := verifySignatures(cs.GetAccountStateDB(), txs, nil, chainIDOf(cs))
+	valid, _ := verifySignatures(cs.GetAccountStateDB(), txs, nil, sigPolicyOf(cs))
 	for i, v := range valid {
 		expectedValid := (i != badBLS && i != badSecp)
 		if v != expectedValid {
