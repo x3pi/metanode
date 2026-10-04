@@ -11,7 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	com "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/file_handler/abi_file"
+	"github.com/meta-node-blockchain/meta-node/pkg/abi_file"
 	file_model "github.com/meta-node-blockchain/meta-node/pkg/models/file_model"
 
 	"github.com/ethereum/go-ethereum/crypto"

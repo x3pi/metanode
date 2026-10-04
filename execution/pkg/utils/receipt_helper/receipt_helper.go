@@ -19,12 +19,12 @@ import (
 // GetTransactionReceipt lấy receipt của transaction từ blockchain
 func GetTransactionReceipt(txHash common.Hash, bd *block.BlockDatabase, storageReceipt storage.Storage) (*receipt.Receipt, error) {
 	// Kiểm tra xem transaction đã có receipt chưa
-	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(txHash)
+	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(txHash)
 	if !ok {
 		return nil, fmt.Errorf("transaction not found in any block")
 	}
 
-	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
+	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumberFast(blockNumber)
 	if !ok {
 		return nil, fmt.Errorf("block hash not found for block number %d", blockNumber)
 	}

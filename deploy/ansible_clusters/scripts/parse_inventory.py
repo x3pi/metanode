@@ -107,6 +107,10 @@ def parse_inventory(file_path):
 
         c_replicas = {}
         lead_rpc = ''
+        lead_pk = ''
+        lead_bls_priv = ''
+        lead_addr = ''
+        lead_bls_pub = ''
         idx = 0
         for r_key, r_val in sorted(c_hosts.items()):
             if not isinstance(r_val, dict):
@@ -117,6 +121,10 @@ def parse_inventory(file_path):
             r_raft = r_val.get('raft_port', 7110)
             r_fwd = r_val.get('forward_port', 7210)
             r_boot = r_val.get('raft_bootstrap', False)
+            r_pk = r_val.get('private_key', '')
+            r_bls_priv = r_val.get('bls_priv', '') or r_pk
+            r_addr = r_val.get('address', '')
+            r_bls_pub = r_val.get('bls_pubkey', '')
 
             rpc_url = f"http://{r_ip}:{r_rpc}"
             ws_url = f"ws://{r_ip}:{r_rpc}/ws"
@@ -126,6 +134,10 @@ def parse_inventory(file_path):
 
             if not lead_rpc or r_boot:
                 lead_rpc = rpc_url
+                lead_pk = r_pk
+                lead_bls_priv = r_bls_priv
+                lead_addr = r_addr
+                lead_bls_pub = r_bls_pub
 
             all_nodes_rpc[r_key] = rpc_url
             all_ws_nodes[r_key] = ws_url
@@ -142,6 +154,10 @@ def parse_inventory(file_path):
                 'p2p_port': r_p2p,
                 'raft_port': r_raft,
                 'forward_port': r_fwd,
+                'private_key': r_pk,
+                'bls_priv': r_bls_priv,
+                'address': r_addr,
+                'bls_pubkey': r_bls_pub,
                 'is_bootstrap_leader': r_boot
             }
             idx += 1
@@ -151,6 +167,10 @@ def parse_inventory(file_path):
             'cluster_name': c_name,
             'chain_id': c_chain_id,
             'primary_rpc': lead_rpc,
+            'primary_private_key': lead_pk,
+            'primary_bls_priv': lead_bls_priv,
+            'primary_address': lead_addr,
+            'primary_bls_pubkey': lead_bls_pub,
             'replicas': c_replicas
         }
 
@@ -194,6 +214,9 @@ def export_tmp_files(info):
             'validators': len(c.get('replicas', {})),
             'rpc_url': c.get('primary_rpc', ''),
             'ws_url': f"{c.get('primary_rpc', '').replace('http', 'ws')}/ws",
+            'bls_private_key': c.get('primary_bls_priv', c.get('primary_private_key', '')),
+            'address': c.get('primary_address', ''),
+            'bls_pubkey': c.get('primary_bls_pubkey', ''),
             'rpc_nodes': c_rpc,
             'ws_nodes': c_ws,
             'tcp_nodes': c_tcp
@@ -219,17 +242,28 @@ def export_tmp_files(info):
             except Exception:
                 existing = {}
 
-        merged_nodes = dict(existing.get('nodes', {}))
-        merged_nodes.update(info['nodes'])
+        def is_clean_key(k):
+            return not k.startswith('parent_node_') and not k.startswith('exec')
 
-        merged_rpc = dict(existing.get('rpc_nodes', {}))
-        merged_rpc.update(info['rpc_nodes'])
+        merged_nodes = {k: v for k, v in existing.get('nodes', {}).items() if is_clean_key(k)}
+        for k, v in info.get('nodes', {}).items():
+            if is_clean_key(k):
+                merged_nodes[k] = v
 
-        merged_ws = dict(existing.get('ws_nodes', {}))
-        merged_ws.update(info['ws_nodes'])
+        merged_rpc = {k: v for k, v in existing.get('rpc_nodes', {}).items() if is_clean_key(k)}
+        for k, v in info.get('rpc_nodes', {}).items():
+            if is_clean_key(k):
+                merged_rpc[k] = v
 
-        merged_tcp = dict(existing.get('tcp_nodes', {}))
-        merged_tcp.update(info['tcp_nodes'])
+        merged_ws = {k: v for k, v in existing.get('ws_nodes', {}).items() if is_clean_key(k)}
+        for k, v in info.get('ws_nodes', {}).items():
+            if is_clean_key(k):
+                merged_ws[k] = v
+
+        merged_tcp = {k: v for k, v in existing.get('tcp_nodes', {}).items() if is_clean_key(k)}
+        for k, v in info.get('tcp_nodes', {}).items():
+            if is_clean_key(k):
+                merged_tcp[k] = v
 
         merged_raft = dict(existing.get('raft_nodes', {}))
         merged_raft.update(info['raft_nodes'])

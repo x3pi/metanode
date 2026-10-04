@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -92,6 +93,9 @@ type harness struct {
 
 func newHarness(t *testing.T, n int) *harness {
 	t.Helper()
+	if runtime.NumCPU() < 2 {
+		t.Fatalf("❌ LỖI: Cần tối thiểu 2 nhân CPU để chạy kiểm thử cluster/raftfeed (hiện tại: %d nhân). Máy 1 CPU không đủ tài nguyên để giả lập cụm phân tán!", runtime.NumCPU())
+	}
 	h := &harness{t: t, secret: bytes.Repeat([]byte("k"), 32), fatals: map[string]error{}}
 	for i := 0; i < n; i++ {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -118,9 +122,15 @@ func (h *harness) rcfg(m *member) config.RaftConfig {
 	for _, p := range h.m {
 		peers = append(peers, config.RaftPeer{ID: p.id, Address: string(p.addr), ForwardAddress: p.fwdAddr})
 	}
+	hb := 100
+	el := 100
+	if runtime.NumCPU() <= 2 || os.Getenv("CI") != "" {
+		hb = 200
+		el = 200
+	}
 	rc := config.RaftConfig{
 		NodeID: m.id, BindAddress: string(m.addr), DataDir: m.dir, Peers: peers, Bootstrap: m.id == "n0",
-		HeartbeatTimeoutMs: 100, ElectionTimeoutMs: 100, LeaderLeaseTimeoutMs: 50, CommitTimeoutMs: 5,
+		HeartbeatTimeoutMs: hb, ElectionTimeoutMs: el, LeaderLeaseTimeoutMs: 50, CommitTimeoutMs: 5,
 		ForwardBindAddress: m.fwdAddr, ForwardSecretFile: "unused-in-tests", SequencerAddress: seqAddr.Hex(),
 	}
 	rc.JoinExistingChain = h.join[m.id]
@@ -223,7 +233,11 @@ func (h *harness) members() []Member {
 }
 
 func (h *harness) admin() *AdminClient {
-	return &AdminClient{Secret: h.secret, CatchUpWait: 20 * time.Second}
+	wait := 20 * time.Second
+	if runtime.NumCPU() <= 2 || os.Getenv("CI") != "" {
+		wait = 60 * time.Second
+	}
+	return &AdminClient{Secret: h.secret, CatchUpWait: wait}
 }
 
 // blockHashFor stands in for the execution layer's header hash: the FSM's commit hash of the block, or a wrong
@@ -317,7 +331,11 @@ func submitRetry(from *member, batch []byte, within time.Duration) bool {
 
 func (h *harness) waitBlocks(n int, members ...*member) {
 	h.t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	wait := 20 * time.Second
+	if runtime.NumCPU() <= 2 || os.Getenv("CI") != "" {
+		wait = 60 * time.Second
+	}
+	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
 		ok := true
 		for _, m := range members {

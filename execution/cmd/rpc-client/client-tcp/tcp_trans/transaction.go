@@ -14,7 +14,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp"
 	"github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp/command"
 	tcp_config "github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp/config"
-	"github.com/meta-node-blockchain/meta-node/pkg/file_handler/abi_file"
+	"github.com/meta-node-blockchain/meta-node/pkg/abi_file"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/models/file_model"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"

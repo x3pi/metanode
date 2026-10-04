@@ -72,5 +72,15 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: Check CPU cores
+        run: |
+          CORES=$(nproc)
+          echo "Detected CPU cores: $CORES"
+          if [ "$CORES" -lt 2 ]; then
+            echo "❌ [ERROR] CI yêu cầu tối thiểu 2 nhân CPU (hiện tại phát hiện: $CORES nhân)."
+            echo "Không thể chạy kiểm thử cụm phân tán / consensus trên máy 1 nhân CPU do gây nghẽn luồng và timeout giả!"
+            exit 1
+          fi
+
       - name: go test
-        run: go test -count=1 ./...
+        run: go test -p 2 -count=1 ./...

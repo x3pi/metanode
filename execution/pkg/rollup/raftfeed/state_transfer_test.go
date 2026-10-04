@@ -313,7 +313,7 @@ func TestStateTransfer_EmptyReplicaJoinsCompactedCluster(t *testing.T) {
 	loadDiskState(t, stage, n3)
 	// keep the cluster moving while the new replica boots
 	for i := 40; i < 55; i++ {
-		h.submit(l, testBatch(t, uint64(i)))
+		h.submit(h.leader(), testBatch(t, uint64(i)))
 	}
 	h.start(n3)
 	if _, err := h.admin().AddReplica(h.members()[:3], Member{ID: "n3", RaftAddr: "n3", AdminAddr: n3.fwdAddr}, false); err != nil {

@@ -14,7 +14,7 @@ import (
 	client "github.com/meta-node-blockchain/meta-node/cmd/tool/tool-test-chain/test-tcp/client-tcp"
 	"github.com/meta-node-blockchain/meta-node/cmd/tool/tool-test-chain/test-tcp/client-tcp/command"
 	tcp_config "github.com/meta-node-blockchain/meta-node/cmd/tool/tool-test-chain/test-tcp/client-tcp/config"
-	"github.com/meta-node-blockchain/meta-node/pkg/file_handler/abi_file"
+	"github.com/meta-node-blockchain/meta-node/pkg/abi_file"
 	"github.com/meta-node-blockchain/meta-node/pkg/models/file_model"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils/file_handler_helper"

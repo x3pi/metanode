@@ -140,6 +140,23 @@
                             'publicKeyBls': cluster_bls,
                         }
 
+        # 2.5. Add spam keys from generated_keys.json (if present) for TPS benchmarking
+        spam_keys_path = '{{ install_dir }}/generated_keys.json'
+        if os.path.exists(spam_keys_path):
+            with open(spam_keys_path) as skf:
+                spam_keys = json.load(skf)
+            for item in spam_keys:
+                s_addr = item.get('address', '')
+                if s_addr and s_addr.lower() not in alloc_map:
+                    alloc_map[s_addr.lower()] = {
+                        'address': s_addr,
+                        'balance': '2000000000000000000000000000000',
+                        'pending_balance': '0',
+                        'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
+                        'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
+                        'publicKeyBls': cluster_bls,
+                    }
+
         # 3. Add explicit test devnet sender. It is signed by mtn_api.go's
         # devnetSenderBLSPrivateKeyHex, so it must not use the cluster BLS key.
         devnet_sender_addr = '0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24'

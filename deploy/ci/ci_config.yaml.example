@@ -63,6 +63,10 @@ chain_actions:
   # Lệnh nạp 50,000 ví TPS (chống trùng lặp), xóa genesis.json cũ và reset Public Chain
   prepare_tps_cmd: "cd {METANODE_DIR} && ./deploy/ci/prepare_tps_chain.sh"
 
+  # Lệnh nạp 50,000 ví TPS, cập nhật genesis và reset Execution Clusters (Chain Con - Chain ID 991)
+  prepare_tps_exec_cmd: "cd {METANODE_DIR} && ./deploy/ci/prepare_tps_exec.sh"
+  prepare_tps_exec: "cd {METANODE_DIR} && ./deploy/ci/prepare_tps_exec.sh"
+
   # Thời gian chờ (giây) để RPC sẵn sàng sau khi reset hoặc restart
   wait_rpc_ready_seconds: 5
 
@@ -76,12 +80,27 @@ tests:
   # ----------------------------------------------------------------------------
   - id: "child_chain_a"
     name: "Child Chain (chain_a) Block-STM Tests (34 kịch bản)"
+    target: "child_chain"
     enabled: true
     # Tự động reset Execution Clusters và cập nhật IP trước khi test
     pre_action: "reset_exec"
     cwd: "test-simple/test-rpc/test-chain"
     command: "./run_all_tests.sh --chain=chain_a"
     timeout_seconds: 1800
+    continue_on_failure: false
+
+  # ----------------------------------------------------------------------------
+  # 1b. BÀI TEST TPS CAO ĐIỂM CHAIN CON (EXECUTION CLUSTERS - CHAIN_A)
+  # ----------------------------------------------------------------------------
+  - id: "tps_blast_child_a"
+    name: "Child Chain (chain_a) TPS Blast Benchmark"
+    target: "child_chain"
+    enabled: true
+    # Tự động nạp 50,000 ví vào genesis, reset cụm chain con sạch để đo Max TPS
+    pre_action: "prepare_tps_exec"
+    cwd: "test_tps/tps_blast_cc"
+    command: "./run_tps_test.sh --chain chain_a --no-reset --count 25000 --rounds 1 --load_balance=true --batch=2000 --amount 1"
+    timeout_seconds: 900
     continue_on_failure: false
 
   # ----------------------------------------------------------------------------
@@ -125,15 +144,15 @@ tests:
     continue_on_failure: false
 
   # ----------------------------------------------------------------------------
-  # 4. BÀI TEST TPS CAO ĐIỂM (BENCHMARK THROUGHPUT)
+  # 4. BÀI TEST TPS CAO ĐIỂM (BENCHMARK THROUGHPUT - PUBLIC CHAIN)
   # ----------------------------------------------------------------------------
   - id: "tps_blast"
-    name: "TPS Blast Benchmark"
+    name: "TPS Blast Benchmark (Public Chain)"
     enabled: true
     # Tự động nạp keys vào genesis, reset cụm Public Chain sạch để đo Max TPS tuyệt đối
     pre_action: "prepare_tps"
     cwd: "test_tps/tps_blast_cc"
-    command: "./run_tps_test.sh --no-reset --count 25000 --rounds 1 --load_balance=true --batch=2000 --amount 1"
+    command: "./run_tps_test.sh --chain public --no-reset --count 25000 --rounds 1 --load_balance=true --batch=2000 --amount 1"
     timeout_seconds: 900
     continue_on_failure: false
 
