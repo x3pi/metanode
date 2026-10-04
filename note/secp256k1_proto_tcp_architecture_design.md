@@ -1,6 +1,6 @@
 # 📐 Thiết kế: Giao dịch ký secp256k1 qua TCP bằng Protobuf (giữ tương thích client TCP cũ)
 
-> **Trạng thái:** DRAFT v2 — chọn **Phương án 2 ("SigningHash riêng")**. Chưa triển khai, chưa có test.
+> **Trạng thái:** ĐÃ TRIỂN KHAI — **Phương án 2 ("SigningHash riêng")**, commit `b29b5875` (+ vá guard đường batch). Có unit/integration test và E2E live tool `cmd/tool/test_secp_proto_live`. Cụm local chưa chạy lại E2E sau commit vá.
 > **Ngày:** 2026-10-04 (v1 ngày 2026-10-03 bị thay thế vì lỗi vòng lặp hash, xem §9).
 > **Mục tiêu:** client TCP cũ vẫn gửi `pb.Transaction` qua TCP, chỉ đổi hàm ký từ BLS sang secp256k1 — KHÔNG phải tính RLP/sighash Ethereum.
 > **Nguyên tắc:** trường `Sign` (dành cho BLS, dùng cả ở đường xuyên chain / parent chain) **không bị đụng tới**. Chữ ký secp nằm ở `R`, `S`, `V`.
@@ -121,12 +121,13 @@ Unit (`pkg/transaction`, `pkg/blockchain/tx_processor`):
 Tích hợp (cụm local): tài khoản chỉ có secp gửi chuyển tiền, gọi hợp đồng, `setBlsPublicKey`; tài khoản đã có BLS gửi bằng 0xFF; cross-chain credit vẫn đúng (`Sign` BLS không bị ảnh hưởng); receipt / `getTransactionByHash` theo meta hash; restart + `RebuildMappingsFromBlock` không lỗi với tx 0xFF; so sánh kết quả giữa các node.
 Chạy `build_check.sh` sau khi sửa.
 
-## 8. Việc còn mở (chưa kiểm chứng)
+## 8. Việc còn mở / rủi ro còn lại
 
-- Đọc handler TCP `SendTransaction` để biết chính xác đường vào mempool và chỗ nào đòi BLS key.
-- Xác nhận các chỗ khác đọc `Type()` (gas, RPC marshal, explorer, `GetRelatedAddresses`) không panic/sai với `0xFF`.
-- Quyết định giá trị `eth_getTransactionByHash` trả về (field `type`, `v/r/s`) cho tx 0xFF.
-- Cross-language: client không phải Go cần cài cùng protobuf deterministic marshal để ra đúng `SigningHash` (rủi ro đã tồn tại với BLS hiện nay). Nên cung cấp test vector cố định.
+- **Guard ingress dùng chung:** `checkSecpProtoIngress` (`tx_validator_pool_core.go`) được gọi ở CẢ đường đơn (`AddTransactionToPool`) và đường batch (`AddTransactionsToPool`, lệnh `SendTransactions`). Trước commit vá, đường batch thiếu kiểm tra ChainID/`Sign` rỗng.
+- **ChainID chỉ được ép ở ingress**, không ở bước thực thi block (`checkTxSignature` không có ngữ cảnh chain). Một proposer Byzantine có thể đưa tx 0xFF ký cho chain khác vào block. Giới hạn này đã tồn tại với tx ETH; nếu muốn đóng, phải truyền ChainID của chain vào bộ lọc chữ ký (thay đổi mức consensus, cần wipe+redeploy đồng bộ).
+- Ingress bỏ qua kiểm tra ChainID khi node chưa cấu hình `ChainId` (nil/0).
+- RPC: `ToEthTransaction()` trả `nil` cho Type 0xFF nên `EthHash` rỗng; các đường RPC hiện tại đều xử lý `nil` và dùng meta hash. Receipt trả `type = 0xff`.
+- Client không phải Go cần cài cùng protobuf deterministic marshal để ra đúng `SigningHash`; nên bổ sung test vector cố định.
 
 ## 9. Phương án đã loại
 

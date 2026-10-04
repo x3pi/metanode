@@ -260,3 +260,33 @@ func TestTxValidatorPool_Type0xFF_IngressValidation(t *testing.T) {
 	assert.ErrorContains(t, err, "must not contain Sign bytes")
 }
 
+
+// The single and batch ingress paths share checkSecpProtoIngress; non-0xFF txs must be untouched.
+func TestTxValidatorPool_checkSecpProtoIngress(t *testing.T) {
+	cs := &blockchain.ChainState{}
+	cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(1337)})
+	vp := &TxValidatorPool{chainState: cs}
+
+	mk := func(typ, chainID uint64, sign []byte) *transaction.Transaction {
+		tx := &transaction.Transaction{}
+		tx.FromProto(&pb.Transaction{Type: typ, ChainID: chainID, Sign: sign})
+		return tx
+	}
+
+	code, err := vp.checkSecpProtoIngress(mk(0xFF, 1337, nil))
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), code)
+
+	code, err = vp.checkSecpProtoIngress(mk(0xFF, 999, nil))
+	assert.ErrorContains(t, err, "does not match node chain ID")
+	assert.Equal(t, transaction.InvalidChainId.Code, code)
+
+	code, err = vp.checkSecpProtoIngress(mk(0xFF, 1337, []byte{1}))
+	assert.ErrorContains(t, err, "must not contain Sign bytes")
+	assert.Equal(t, transaction.InvalidSign.Code, code)
+
+	// Non-0xFF transactions are never touched by this check (BLS Sign / other chain IDs stay valid here).
+	code, err = vp.checkSecpProtoIngress(mk(2, 999, []byte{1}))
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), code)
+}

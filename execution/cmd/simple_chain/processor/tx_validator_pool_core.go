@@ -245,6 +245,24 @@ func (vp *TxValidatorPool) GetExcludedItemsCount() int {
 	return len(vp.excludedItems)
 }
 
+// checkSecpProtoIngress applies the node-local admission rules of Type 0xFF (secp256k1 proto) transactions:
+// the signed ChainID must be this node's chain (anti cross-chain replay) and the BLS Sign field must be empty.
+// Shared by the single and batch ingress paths so both enforce the same rules. Signature validity itself is
+// checked by tx_processor.VerifyTransaction.
+func (vp *TxValidatorPool) checkSecpProtoIngress(tx types.Transaction) (int64, error) {
+	if tx.Type() != 0xFF {
+		return 0, nil
+	}
+	nodeChainID := vp.chainState.GetConfig().ChainId
+	if nodeChainID != nil && nodeChainID.Sign() > 0 && tx.GetChainID() != nodeChainID.Uint64() {
+		return transaction.InvalidChainId.Code, fmt.Errorf("transaction chain ID (%d) does not match node chain ID (%d)", tx.GetChainID(), nodeChainID.Uint64())
+	}
+	if len(tx.SignBytes()) != 0 {
+		return transaction.InvalidSign.Code, fmt.Errorf("transaction type 0xFF must not contain Sign bytes")
+	}
+	return 0, nil
+}
+
 // AddTransactionToPool validates and adds a transaction to the pool
 func (vp *TxValidatorPool) AddTransactionToPool(tx types.Transaction) (int64, error) {
 	return vp.addTransactionToPoolInternal(tx, false)
@@ -278,14 +296,8 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 		return transaction.InvalidTransaction.Code, fmt.Errorf("transaction gas price (%d) is below node minimum (%d)", tx.MaxGasPrice(), minGasPrice)
 	}
 
-	if tx.Type() == 0xFF {
-		nodeChainID := vp.chainState.GetConfig().ChainId
-		if nodeChainID != nil && nodeChainID.Sign() > 0 && tx.GetChainID() != nodeChainID.Uint64() {
-			return transaction.InvalidChainId.Code, fmt.Errorf("transaction chain ID (%d) does not match node chain ID (%d)", tx.GetChainID(), nodeChainID.Uint64())
-		}
-		if len(tx.SignBytes()) != 0 {
-			return transaction.InvalidSign.Code, fmt.Errorf("transaction type 0xFF must not contain Sign bytes")
-		}
+	if code, err := vp.checkSecpProtoIngress(tx); err != nil {
+		return code, err
 	}
 
 	// Limit pool size to prevent GC stall / OOM.
@@ -431,6 +443,14 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	t0 := time.Now()
 	var validTxs []types.Transaction
 	var errorsList = make([]error, len(txs))
+	for i, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		if code, err := vp.checkSecpProtoIngress(tx); err != nil {
+			errorsList[i] = fmt.Errorf("[code:%d] %s", code, err.Error())
+		}
+	}
 
 	// Phase 1.5 (TPS Optimization): Batch Cache Warming
 	// Collect unique addresses to fetch in parallel without blocking muTrie.Lock
@@ -535,7 +555,7 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 			go func(s, e int) {
 				defer wg.Done()
 				for i := s; i < e; i++ {
-					if txs[i] == nil {
+					if txs[i] == nil || errorsList[i] != nil {
 						continue
 					}
 					if minGasPrice > 0 && txs[i].MaxGasPrice() < minGasPrice {
