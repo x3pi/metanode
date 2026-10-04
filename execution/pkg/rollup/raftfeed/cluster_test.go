@@ -94,7 +94,7 @@ type harness struct {
 func newHarness(t *testing.T, n int) *harness {
 	t.Helper()
 	if runtime.NumCPU() < 2 {
-		t.Fatalf("❌ LỖI: Cần tối thiểu 2 nhân CPU để chạy kiểm thử cluster/raftfeed (hiện tại: %d nhân). Máy 1 CPU không đủ tài nguyên để giả lập cụm phân tán!", runtime.NumCPU())
+		t.Skipf("raftfeed cluster tests need at least 2 CPUs (have %d)", runtime.NumCPU())
 	}
 	h := &harness{t: t, secret: bytes.Repeat([]byte("k"), 32), fatals: map[string]error{}}
 	for i := 0; i < n; i++ {

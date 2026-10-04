@@ -820,12 +820,12 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 	txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
 	if err != nil {
 		logger.Error("❌ [RPC-RECEIPT] failed to open transactions DB from root %s: %v", blockData.Header().TransactionsRoot().Hex(), err)
-		return nil, fmt.Errorf("failed to open transactions DB: %w", err)
+		return nil, nil
 	}
 	tx, err := txDB.GetTransaction(rcp.TransactionHash())
 	if err != nil || tx == nil {
 		logger.Error("❌ [RPC-RECEIPT] failed to get transaction %s: %v", rcp.TransactionHash().Hex(), err)
-		return nil, fmt.Errorf("transaction not found in block: %v", err)
+		return nil, nil
 	}
 	txType := tx.GetType()
 	txNonce := tx.GetNonce()

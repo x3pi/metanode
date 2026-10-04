@@ -679,11 +679,11 @@ func (app *App) initBlockchain() error {
 
 		rebuilt, err := blockchain.GetBlockChainInstance().RebuildMappingsFromBlock(app.startLastBlock, rebuildMaxBlocks)
 		if err != nil {
-			logger.Fatal("❌ [STARTUP-REBUILD] Failed to rebuild blockchain mappings: %v", err)
-		}
-
-		// Mark full rebuild complete in DB once an unlimited walk has successfully finished
-		if rebuildMaxBlocks == 0 && !fullRebuildDone {
+			// Mappings only serve RPC lookups (not consensus state), so a failed rebuild
+			// must not stop the node from starting. Skip the marker so the next start retries the full walk.
+			logger.Error("❌ [STARTUP-REBUILD] Mapping rebuild incomplete (RPC tx/receipt lookups may miss old txs): %v", err)
+		} else if rebuildMaxBlocks == 0 && !fullRebuildDone {
+			// Mark full rebuild complete in DB once an unlimited walk has successfully finished
 			if mErr := app.storageManager.GetStorageMapping().Put([]byte(fullRebuildMarkerKey), []byte{1}); mErr != nil {
 				logger.Error("⚠️ [STARTUP-REBUILD] Failed to write full rebuild marker: %v", mErr)
 			} else {
