@@ -215,6 +215,10 @@ func VerifyTransaction(
 		txHash := tx.Hash()
 
 		if tx.Type() == 0xFF {
+			if !secpProtoChainOK(tx, chainIDOf(chainState)) {
+				logger.Error("❌ [VERIFY] Type 0xFF tx chain ID %d does not match node chain: txHash=%s", tx.GetChainID(), txHash.Hex())
+				return transaction.InvalidChainId
+			}
 			secpCacheKey := sigCacheKey(tx, nil)
 			if !LoadVerifiedSignature(secpCacheKey) {
 				if !tx.ValidSecpProtoSign() {
@@ -453,6 +457,7 @@ func PreVerifySignatures(txs []types.Transaction, chainState *blockchain.ChainSt
 	}
 
 	accountDB := chainState.GetAccountStateDB()
+	chainID := chainIDOf(chainState)
 
 	verifyFn := func(tx types.Transaction) {
 		as, err := accountDB.AccountStateReadOnly(tx.FromAddress())
@@ -460,7 +465,7 @@ func PreVerifySignatures(txs []types.Transaction, chainState *blockchain.ChainSt
 			as = nil
 		}
 		// Same pure check the consensus-level filter uses; populates the cache on success.
-		checkTxSignature(tx, as)
+		checkTxSignature(tx, as, chainID)
 	}
 
 	if numWorkers <= 1 {

@@ -32,12 +32,30 @@ func sigCacheKey(tx types.Transaction, blsKey []byte) eth_common.Hash {
 	return crypto.Keccak256Hash(buf)
 }
 
+// chainIDOf returns the node's configured chain ID (0 when unset).
+func chainIDOf(cs *blockchain.ChainState) uint64 {
+	if cs == nil || cs.GetConfig() == nil || cs.GetConfig().ChainId == nil {
+		return 0
+	}
+	return cs.GetConfig().ChainId.Uint64()
+}
+
+// secpProtoChainOK enforces anti cross-chain replay for Type 0xFF (secp256k1 proto) txs: they are valid only on
+// the chain they were signed for. An unconfigured chain ID (0) fails closed. Every other tx type is unaffected.
+// Pure function of (tx, chainID), so every validator with the same chain config gets the same verdict.
+func secpProtoChainOK(tx types.Transaction, chainID uint64) bool {
+	return tx.Type() != 0xFF || (chainID != 0 && tx.GetChainID() == chainID)
+}
+
 // checkTxSignature is a pure function of (tx, sender account state): every node evaluating the same
 // tx against the same pre-block state gets the same verdict, so it is safe to use as a consensus-level
 // execution filter (no clocks, no peer-local data other than the cache, which only memoizes this result).
 // It mirrors the signature rules of VerifyTransaction (BLS key if registered, ETH secp256k1 otherwise or
 // as fallback; AccountType 1 additionally requires the ETH signature).
-func checkTxSignature(tx types.Transaction, as types.AccountState) bool {
+func checkTxSignature(tx types.Transaction, as types.AccountState, chainID uint64) bool {
+	if !secpProtoChainOK(tx, chainID) {
+		return false
+	}
 	var blsKey []byte
 	accountType := int32(0)
 	if as != nil {
@@ -80,7 +98,7 @@ const (
 // BLS txs (registered key, AccountType 0) with blst batch verification, in parallel. stateOf(i) returns the
 // sender's account state for txs[i] (nil = load from accountDB). Successful checks populate the
 // verified-signature cache. The result depends only on (tx, sender state): batching never changes a verdict.
-func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Transaction, stateOf func(i int) types.AccountState) ([]bool, sigStats) {
+func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Transaction, stateOf func(i int) types.AccountState, chainID uint64) ([]bool, sigStats) {
 	total := len(txs)
 	valid := make([]bool, total)
 	var st sigStats
@@ -156,7 +174,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 			}
 			return
 		}
-		valid[i] = checkTxSignature(txs[i], as)
+		valid[i] = checkTxSignature(txs[i], as, chainID)
 		atomic.AddInt64(&st.individual, 1)
 	})
 
@@ -195,7 +213,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 			return
 		}
 		for _, p := range part {
-			valid[p.i] = checkTxSignature(txs[p.i], loadState(p.i))
+			valid[p.i] = checkTxSignature(txs[p.i], loadState(p.i), chainID)
 			atomic.AddInt64(&st.individual, 1)
 		}
 	}
@@ -230,7 +248,7 @@ func PrewarmSignatureCache(chainState *blockchain.ChainState, txs []types.Transa
 			return nil
 		}
 		return senderStates[flat[i].FromAddress()]
-	})
+	}, chainIDOf(chainState))
 }
 
 // FilterInvalidSignatures drops every tx whose signature does not verify against the sender's
@@ -257,7 +275,7 @@ func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptx
 			flat = append(flat, item.Tx)
 		}
 	}
-	valid, st := verifySignatures(chainState.GetAccountStateDB(), flat, nil)
+	valid, st := verifySignatures(chainState.GetAccountStateDB(), flat, nil, chainIDOf(chainState))
 
 	dropped := 0
 	out := make([]grouptxns.RelativeGroup, 0, len(groups))

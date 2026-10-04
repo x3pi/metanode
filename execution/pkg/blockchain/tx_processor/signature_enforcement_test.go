@@ -159,7 +159,7 @@ func TestVerifySignatures_BisectsFailingChunk(t *testing.T) {
 
 	rotateVerifiedSignatures()
 	rotateVerifiedSignatures()
-	valid, st := verifySignatures(cs.GetAccountStateDB(), txs, nil)
+	valid, st := verifySignatures(cs.GetAccountStateDB(), txs, nil, chainIDOf(cs))
 	for i, v := range valid {
 		if v == (i == bad) {
 			t.Fatalf("tx %d verdict wrong (valid=%v)", i, v)
@@ -217,7 +217,7 @@ func TestFilterInvalidSignatures_SecpProtoType0xFF(t *testing.T) {
 		Nonce:       []byte{0, 0, 0, 0, 0, 0, 0, 1},
 		MaxGas:      p_common.TRANSFER_GAS_COST,
 		MaxGasPrice: p_common.MINIMUM_BASE_FEE,
-		ChainID:     1337,
+		ChainID:     1,
 		Type:        0xFF,
 	})
 	if err := good.SignSecpProto(privKey); err != nil {
@@ -234,7 +234,7 @@ func TestFilterInvalidSignatures_SecpProtoType0xFF(t *testing.T) {
 		Nonce:       []byte{0, 0, 0, 0, 0, 0, 0, 1},
 		MaxGas:      p_common.TRANSFER_GAS_COST,
 		MaxGasPrice: p_common.MINIMUM_BASE_FEE,
-		ChainID:     1337,
+		ChainID:     1,
 		Type:        0xFF,
 	})
 	if err := forged.SignSecpProto(otherKey); err != nil {
@@ -277,7 +277,7 @@ func TestFilterInvalidSignatures_SecpProtoType0xFF_WithAccountHavingBLSKey(t *te
 		Nonce:       []byte{0, 0, 0, 0, 0, 0, 0, 1},
 		MaxGas:      p_common.TRANSFER_GAS_COST,
 		MaxGasPrice: p_common.MINIMUM_BASE_FEE,
-		ChainID:     1337,
+		ChainID:     1,
 		Type:        0xFF,
 	})
 	if err := good.SignSecpProto(privKey); err != nil {
@@ -332,7 +332,7 @@ func TestVerifySignatures_MixedBatchWithProto0xFF(t *testing.T) {
 			Nonce:       []byte{0, 0, 0, 0, 0, 0, 0, 1},
 			MaxGas:      p_common.TRANSFER_GAS_COST,
 			MaxGasPrice: p_common.MINIMUM_BASE_FEE,
-			ChainID:     1337,
+			ChainID:     1,
 			Type:        0xFF,
 		})
 		_ = tx.SignSecpProto(privKey)
@@ -352,7 +352,7 @@ func TestVerifySignatures_MixedBatchWithProto0xFF(t *testing.T) {
 	rotateVerifiedSignatures()
 	rotateVerifiedSignatures()
 
-	valid, _ := verifySignatures(cs.GetAccountStateDB(), txs, nil)
+	valid, _ := verifySignatures(cs.GetAccountStateDB(), txs, nil, chainIDOf(cs))
 	for i, v := range valid {
 		expectedValid := (i != badBLS && i != badSecp)
 		if v != expectedValid {

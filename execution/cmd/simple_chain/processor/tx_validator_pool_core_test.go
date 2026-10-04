@@ -289,4 +289,14 @@ func TestTxValidatorPool_checkSecpProtoIngress(t *testing.T) {
 	code, err = vp.checkSecpProtoIngress(mk(2, 999, []byte{1}))
 	assert.NoError(t, err)
 	assert.Equal(t, int64(0), code)
+
+	// Unconfigured node chain ID: 0xFF txs fail closed, everything else is untouched.
+	noChain := &blockchain.ChainState{}
+	noChain.SetConfig(&config.SimpleChainConfig{})
+	vp2 := &TxValidatorPool{chainState: noChain}
+	code, err = vp2.checkSecpProtoIngress(mk(0xFF, 1337, nil))
+	assert.ErrorContains(t, err, "node chain ID is not configured")
+	assert.Equal(t, transaction.InvalidChainId.Code, code)
+	_, err = vp2.checkSecpProtoIngress(mk(2, 1337, nil))
+	assert.NoError(t, err)
 }

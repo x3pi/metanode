@@ -11,11 +11,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
+
+// newSecpTestChainState returns a test chain state configured with chain ID 1: Type 0xFF txs are only valid on
+// the chain they were signed for, and an unconfigured chain ID fails closed.
+func newSecpTestChainState(t *testing.T) *blockchain.ChainState {
+	t.Helper()
+	cs := newTestChainState(t)
+	cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(1)})
+	return cs
+}
 
 func newSecpProtoTx(
 	t *testing.T,
@@ -45,7 +56,7 @@ func newSecpProtoTx(
 }
 
 func TestSecpProto_FullExecution_BalanceTransferAndNonce(t *testing.T) {
-	cs := newTestChainState(t)
+	cs := newSecpTestChainState(t)
 
 	senderKey, err := crypto.GenerateKey()
 	require.NoError(t, err)
@@ -99,7 +110,7 @@ func TestSecpProto_FullExecution_BalanceTransferAndNonce(t *testing.T) {
 }
 
 func TestSecpProto_SequentialTransactions_NonceChaining(t *testing.T) {
-	cs := newTestChainState(t)
+	cs := newSecpTestChainState(t)
 
 	senderKey, err := crypto.GenerateKey()
 	require.NoError(t, err)
@@ -148,7 +159,7 @@ func TestSecpProto_SequentialTransactions_NonceChaining(t *testing.T) {
 }
 
 func TestSecpProto_FilterDropsForgedBeforeExecution(t *testing.T) {
-	cs := newTestChainState(t)
+	cs := newSecpTestChainState(t)
 
 	realKey, err := crypto.GenerateKey()
 	require.NoError(t, err)
@@ -187,4 +198,27 @@ func TestSecpProto_FilterDropsForgedBeforeExecution(t *testing.T) {
 	filtered := FilterInvalidSignatures(cs, groupsOf(goodTx, forgedTx))
 	require.Len(t, filtered, 1, "forged transaction must be dropped by FilterInvalidSignatures")
 	assert.Equal(t, goodTx.Hash(), filtered[0].Items[0].Tx.Hash())
+}
+
+// Type 0xFF txs are chain-bound at execution: a tx correctly signed for another chain must be dropped by the
+// consensus-level filter; an unconfigured chain ID fails closed. (Admission: TestVerifyTransaction_SecpProto_WrongChain.)
+func TestSecpProto_ChainBinding(t *testing.T) {
+	cs := newSecpTestChainState(t)
+
+	key, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	addr := crypto.PubkeyToAddress(key.PublicKey)
+	to := common.HexToAddress("0x1234000000000000000000000000000000001234")
+	seedAccount(t, cs, addr, big.NewInt(10_000_000_000_000), 0)
+
+	good := newSecpProtoTx(t, key, to, 0, big.NewInt(1), 1)
+	otherChain := newSecpProtoTx(t, key, to, 0, big.NewInt(1), 2)
+
+	valid, _ := verifySignatures(cs.GetAccountStateDB(), []types.Transaction{good, otherChain}, nil, chainIDOf(cs))
+	assert.Equal(t, []bool{true, false}, valid, "only the tx signed for this chain may pass the execution filter")
+
+	// Fail closed when the node chain ID is not configured.
+	valid, _ = verifySignatures(cs.GetAccountStateDB(), []types.Transaction{good}, nil, 0)
+	assert.Equal(t, []bool{false}, valid)
+
 }

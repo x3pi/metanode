@@ -254,7 +254,10 @@ func (vp *TxValidatorPool) checkSecpProtoIngress(tx types.Transaction) (int64, e
 		return 0, nil
 	}
 	nodeChainID := vp.chainState.GetConfig().ChainId
-	if nodeChainID != nil && nodeChainID.Sign() > 0 && tx.GetChainID() != nodeChainID.Uint64() {
+	if nodeChainID == nil || nodeChainID.Sign() <= 0 {
+		return transaction.InvalidChainId.Code, fmt.Errorf("node chain ID is not configured: cannot accept type 0xFF transactions")
+	}
+	if tx.GetChainID() != nodeChainID.Uint64() {
 		return transaction.InvalidChainId.Code, fmt.Errorf("transaction chain ID (%d) does not match node chain ID (%d)", tx.GetChainID(), nodeChainID.Uint64())
 	}
 	if len(tx.SignBytes()) != 0 {
