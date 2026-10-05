@@ -237,11 +237,13 @@ Tối thiểu: (a) bỏ kiểm tra gate ở admission; (b) bỏ kiểm tra gate 
 
 **Test bổ sung cho giai đoạn 2 (ngoài §4):** hết hạn theo block (biên N-1/N/N+1, giống nhau trên mọi replica); cấp trùng idempotent; sai `UserSig` / chữ ký cho cụm khác bị từ chối đúng lỗi; revoke sau khi parent từ chối; tài khoản tạm không gửi được tx xuyên chain; ngừng parent thật rồi dựng lại ⇒ tài khoản tạm được xác nhận không cần can thiệp; **mô phỏng cùng một người dùng được cấp tạm ở hai cụm cùng chain ID ⇒ chứng minh khoảng hở và chứng minh chain ID khác nhau thì đóng được**; kiểm tra đột biến (bỏ kiểm `UserSig`, bỏ hết hạn, bỏ cấm xuyên chain).
 
-### 8.1 Quyết định của người dùng (2026-10-05): đăng ký tạm ở hai cụm — parent chọn bên thắng, bên thua bị khoá và chỉ được rút sạch
+### 8.1 Quyết định của người dùng (2026-10-05, bản cập nhật): đăng ký tạm ở hai cụm — parent chọn bên thắng, bên thua bị KHOÁ HẲN
 
-**Luật trọng tài:** Parent Chain là trọng tài. Cụm nào đăng ký **được parent ghi nhận trước** (`RegisterAccount` thành công, `ErrAccountAlreadyRegistered` với bên đến sau) thì tài khoản ở cụm đó thành tài khoản thật. Cụm còn lại phải khoá tài khoản; chủ tài khoản chỉ được **rút toàn bộ số dư sang một tài khoản khác**.
+**Luật trọng tài:** Parent Chain là trọng tài. Cụm nào đăng ký **được parent ghi nhận trước** (`RegisterAccount` thành công; bên đến sau nhận `ErrAccountAlreadyRegistered`) thì tài khoản ở cụm đó thành tài khoản thật. Tài khoản ở cụm còn lại bị **khoá hoàn toàn**.
 
-**Máy trạng thái tài khoản (trên mỗi cụm):** `NONE → PROVISIONAL → CONFIRMED` hoặc `PROVISIONAL → LOCKED`. (Có thể hợp nhất `ParentRegistered`/`ProvisionalUntilBlock` thành một enum `RegistrationState` + `HomeClusterKey` trong `AccountState`.)
+**Phạm vi:** tính năng rút tiền khỏi tài khoản bị khoá **chưa làm** (bản trước của kế hoạch có "rút sạch", đã bỏ theo yêu cầu). Giai đoạn này, tài khoản bị khoá không gửi được bất kỳ tx nào.
+
+**Máy trạng thái tài khoản (trên mỗi cụm):** `NONE → PROVISIONAL → CONFIRMED` hoặc `PROVISIONAL/NONE → LOCKED`. Gợi ý biểu diễn: enum `RegistrationState` + `HomeClusterKey` trong `AccountState` (hợp nhất `ParentRegistered`/`ProvisionalUntilBlock`).
 
 | Sự kiện on-chain (do danh tính node đề xuất, kèm bằng chứng parent — xem P0) | Chuyển trạng thái |
 | :--- | :--- |
@@ -250,10 +252,13 @@ Tối thiểu: (a) bỏ kiểm tra gate ở admission; (b) bỏ kiểm tra gate 
 | `ParentLocked(user, winnerClusterKey)` (parent ghi nhận cụm KHÁC trước) | `PROVISIONAL/NONE → LOCKED` (lưu `HomeClusterKey`) |
 | hết hạn mà parent chưa trả lời | `PROVISIONAL → NONE` (chỉ thôi quyền gửi; vẫn nhận tiền) |
 
-**Quy tắc gate cho trạng thái LOCKED (hàm thuần, ở admission và bộ lọc thực thi):** chỉ chấp nhận **một** loại tx — **rút sạch**: chuyển tiền thuần (không gọi hợp đồng, không `Data`), `Value = số dư − phí gas`, tới một địa chỉ khác do chủ tài khoản chọn. Mọi tx khác bị từ chối đúng mã (`AccountLocked`). Sau khi rút số dư về 0 thì không còn gì để gửi. Tiền nhận thêm sau khi khoá chỉ rút được theo cùng quy tắc "rút sạch". Tuỳ chọn (2b): cho phép rút sạch qua `PARENT_CHAIN_GATEWAY` để chuyển thẳng sang cụm thắng (cần parent, đúng chủ tài khoản chọn đích; không tự động gửi).
+**Quy tắc gate cho LOCKED (hàm thuần, ở admission và bộ lọc thực thi):** **từ chối mọi tx có người gửi là tài khoản LOCKED**, với mã lỗi riêng (`AccountLocked`). Không có ngoại lệ (kể cả chuyển tiền, gọi hợp đồng, gateway). Tài khoản vẫn **nhận** tiền được (không chặn người nhận, xem §2.1). `LOCKED` là trạng thái cuối: không tự thoát, không hết hạn.
 
-**Vì sao không tự động đẩy tiền sang cụm thắng:** cụm thắng có thể là cụm độc hại mà người dùng bị lừa ký đăng ký; người dùng phải tự chọn đích rút (ký tx rút của chính mình).
+**Hệ quả phải ghi rõ cho người dùng và vận hành:**
+- Số dư đang có ở cụm bên thua **bị kẹt** cho tới khi có tính năng rút (sẽ thiết kế sau: cần quy tắc rút sạch / chuyển về cụm thắng do chủ tài khoản chọn đích, không tự động đẩy tiền sang cụm thắng vì cụm thắng có thể là cụm độc hại mà người dùng bị lừa ký).
+- Tiền nhận thêm sau khi khoá cũng bị kẹt. Nên cảnh báo trên giao diện/RPC: trạng thái tài khoản (`LOCKED`) phải đọc được qua RPC để ví/dapp không gửi tiền vào địa chỉ đã khoá ở cụm đó.
+- Vì chưa có đường thoát, việc cấp đăng ký tạm (giai đoạn 2) nên giới hạn giá trị tài khoản tạm và thời hạn ngắn để giảm số tiền có thể bị kẹt.
 
-**Tính xác định / không fork:** `ParentConfirmed/ParentLocked` là system event có thứ tự mang bằng chứng parent; verdict gate là hàm thuần của `AccountState` trước block. Không dùng quan sát mất kết nối, không timeout. Hai cụm không cần liên lạc với nhau: chỉ cần mỗi cụm nhận được phán quyết của parent.
+**Tính xác định / không fork:** `ParentConfirmed/ParentLocked` là system event có thứ tự mang bằng chứng parent; verdict gate là hàm thuần của `AccountState` trước block. Không dùng quan sát mất kết nối, không timeout. Hai cụm không cần liên lạc: mỗi cụm chỉ cần phán quyết của parent.
 
-**Test bắt buộc thêm (ngoài §4):** (L1) cùng một người dùng đăng ký tạm ở cụm A và B, A đăng ký lên parent trước ⇒ A: `CONFIRMED`, B: `LOCKED`, kết quả đúng bất kể thứ tự xử lý ở hai cụm; (L2) ở B chỉ tx rút sạch được chấp nhận, mọi tx khác bị từ chối đúng mã (kể cả chuyển một phần, gọi hợp đồng, gateway); rút sạch rồi số dư = 0 và đúng phí; (L3) tiền nhận thêm sau khi khoá vẫn rút sạch được; (L4) giả mạo `ParentLocked` từ tài khoản thường bị từ chối (P0) và từ node không có bằng chứng bị từ chối; (L5) hết hạn theo block đúng biên N-1/N/N+1 trên mọi replica; (L6) bảo toàn tiền: tổng cung cụm B không đổi sau khi rút sạch; (L7) đột biến: bỏ kiểm tra "rút sạch", bỏ kiểm tra bằng chứng, đảo thứ tự thắng/thua ⇒ test tương ứng phải FAIL.
+**Test bắt buộc thêm (ngoài §4):** (L1) cùng một người dùng đăng ký tạm ở cụm A và B, A đăng ký lên parent trước ⇒ A: `CONFIRMED`, B: `LOCKED`, kết quả đúng bất kể thứ tự xử lý ở hai cụm; (L2) ở B mọi tx của người dùng đều bị từ chối **đúng mã `AccountLocked`** (chuyển toàn bộ, chuyển một phần, gọi hợp đồng, gateway, tx `0xFF` và tx ETH), có ca đối chứng cùng tx được chấp nhận ở A; (L3) tiền nhận thêm sau khi khoá vẫn vào được và vẫn bị kẹt (số dư tăng, gửi vẫn bị từ chối); (L4) giả mạo `ParentLocked`/`ParentConfirmed` từ tài khoản thường bị từ chối (P0) và từ node không có bằng chứng bị từ chối (khoá bừa người khác = tấn công từ chối dịch vụ nên phải kiểm kỹ); (L5) hết hạn theo block đúng biên N-1/N/N+1 trên mọi replica; (L6) trạng thái `LOCKED` không bao giờ quay lại `CONFIRMED`/`PROVISIONAL` bằng sự kiện nào (kể cả `ProvisionalRegister` mới); (L7) RPC trả đúng trạng thái; (L8) đột biến: bỏ kiểm tra `AccountLocked`, bỏ kiểm tra bằng chứng, đảo thứ tự thắng/thua, cho phép thoát `LOCKED` ⇒ test tương ứng phải FAIL.
