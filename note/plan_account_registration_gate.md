@@ -320,3 +320,17 @@ Tối thiểu: (a) bỏ kiểm tra gate ở admission; (b) bỏ kiểm tra gate 
 4. **Giai đoạn 2 chưa làm:** đăng ký tạm, `ParentLocked`/`LOCKED` (§8). Hiện bên thua chỉ nhận trạng thái `REJECTED` ở relay; tài khoản đơn giản không được đăng ký ở cụm đó (không bị khoá).
 5. **Khoá node = khoá cụm** (V2) mới được xác nhận ở mức "code hiện tại giả định `app.keyPair` là danh tính cụm" (`app.go` đã tự đăng ký như vậy); chưa kiểm cụm nhiều validator với khoá khác nhau.
 6. Mã HTTP `/inbound_registrations` nuốt lỗi store giống `/inbound` hiện có (trả danh sách rỗng); nên trả 5xx để quorum không coi node lỗi là "đồng ý rỗng".
+
+## 10. Item 2 — parent-verifiable authentication of system events (DESIGN, not implemented)
+
+Residual hole (still open, shown by E8 only for NON-node identities): the rollup system handler accepts events from the node BLS identity of ANY validator, so one Byzantine validator can forge `account_registered` / credit / lock events.
+
+Findings that constrain the design (checked 2026-10-05):
+- Parent block headers (`parentchain.Header`) carry NO validator signatures/certificate. A NOMT proof (`nomt_ffi.VerifyProof`) only proves "key is under root R"; nothing deterministic proves R is the parent's real root. So "attach a parent proof to the system tx" is NOT sufficient by itself, and checking R against the parent at execution time would be time-dependent (non-deterministic => fork risk, forbidden by Part 2.5).
+- `QuorumClient` (f+1 parent RPC nodes) is a trust decision made per-validator at observation time, fine for deciding to *vote*, not for deterministic execution.
+
+Recommended design (no parent change, deterministic): **intra-cluster f+1 co-attestation.**
+1. Each exec validator runs its own RegistrationWorker, observes the event through `QuorumClient` + registry proof, and BLS-signs digest = keccak("ACCT_REG_ATTEST_V1" || chainID || user || clusterKey || parentSeq).
+2. The system tx carries the payload plus >= f+1 distinct committee-member signatures over that digest. Handler verifies them deterministically against the committee set in state (same set used by `CommitteeAttestationWorker`), then applies. Single node => f+1 = 1 (current behaviour).
+3. The sender check stays (node identity) but is no longer sufficient alone. Same envelope for credit/lock events.
+Cost/risk: needs signature exchange between validators (bounded queue; no timeouts for dispatch decisions — events just stay PENDING until f+1 sigs exist) and a committee-key lookup inside tx_processor. Not started: needs the user's go-ahead on (a) accepting f+1 intra-cluster trust vs (b) adding parent-side block certificates (bigger, touches parent consensus).
