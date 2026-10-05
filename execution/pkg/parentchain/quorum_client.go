@@ -361,6 +361,7 @@ func (q *QuorumClient) GetStatus() (ChainStatus, error) {
 	}
 
 	type statusKey struct {
+		chainID   uint64
 		lastBlock uint64
 		lastHash  common.Hash
 		stateRoot common.Hash
@@ -373,6 +374,7 @@ func (q *QuorumClient) GetStatus() (ChainStatus, error) {
 		res := <-ch
 		if res.err == nil {
 			k := statusKey{
+				chainID:   res.status.ChainID,
 				lastBlock: res.status.LastBlock,
 				lastHash:  res.status.LastHash,
 				stateRoot: res.status.StateRoot,
@@ -573,7 +575,6 @@ func (q *QuorumClient) GetInboundAccountRegistrations(pubKey cm.PublicKey, curso
 	}
 	return nil, cursor, ErrQuorumNotReached
 }
-
 
 func (q *QuorumClient) GetTransferRecord(msgID common.Hash) (FloatTransferRecord, bool, error) {
 	if len(q.clients) == 0 {

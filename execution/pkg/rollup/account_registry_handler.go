@@ -1,6 +1,7 @@
 package rollup
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -8,28 +9,116 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 )
 
 const (
 	SystemPayloadKindAccountRegistered = "account_registered"
+	AttestationDomainAccountRegistered = "ACCT_REG_ATTEST_V1"
 )
+
+// RegistrationAttestation carries a single validator's BLS signature over the event digest.
+type RegistrationAttestation struct {
+	ValidatorPubkey cm.PublicKey `json:"validator_pubkey"`
+	Signature       cm.Sign      `json:"signature"`
+}
+
+func (a *RegistrationAttestation) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ValidatorPubkeyRaw json.RawMessage `json:"validator_pubkey"`
+		SignatureRaw       json.RawMessage `json:"signature"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	pub, err := parseClusterKey(raw.ValidatorPubkeyRaw)
+	if err != nil {
+		return fmt.Errorf("invalid validator_pubkey: %w", err)
+	}
+	sig, err := parseSignature(raw.SignatureRaw)
+	if err != nil {
+		return fmt.Errorf("invalid signature: %w", err)
+	}
+	a.ValidatorPubkey = pub
+	a.Signature = sig
+	return nil
+}
+
+func (a RegistrationAttestation) MarshalJSON() ([]byte, error) {
+	return json.Marshal(&struct {
+		ValidatorPubkey string `json:"validator_pubkey"`
+		Signature       string `json:"signature"`
+	}{
+		ValidatorPubkey: hex.EncodeToString(a.ValidatorPubkey[:]),
+		Signature:       hex.EncodeToString(a.Signature[:]),
+	})
+}
+
+func parseSignature(raw json.RawMessage) (cm.Sign, error) {
+	var sig cm.Sign
+	var str string
+	if err := json.Unmarshal(raw, &str); err == nil {
+		b, err := hex.DecodeString(strings.TrimPrefix(str, "0x"))
+		if err != nil {
+			return sig, fmt.Errorf("invalid signature hex: %w", err)
+		}
+		if len(b) != len(sig) {
+			return sig, fmt.Errorf("invalid signature length %d, want %d", len(b), len(sig))
+		}
+		copy(sig[:], b)
+		return sig, nil
+	}
+	var arr []int
+	if err := json.Unmarshal(raw, &arr); err == nil {
+		if len(arr) != len(sig) {
+			return sig, fmt.Errorf("invalid signature length %d, want %d", len(arr), len(sig))
+		}
+		for i, v := range arr {
+			if v < 0 || v > 255 {
+				return sig, fmt.Errorf("invalid signature byte %d at index %d", v, i)
+			}
+			sig[i] = byte(v)
+		}
+		return sig, nil
+	}
+	return sig, fmt.Errorf("invalid signature format")
+}
+
+// ComputeAccountRegistrationAttestDigest computes the deterministic keccak256 digest for committee co-attestation:
+// keccak256("ACCT_REG_ATTEST_V1" || chainID || user || clusterKey || parentSeq)
+func ComputeAccountRegistrationAttestDigest(chainID uint64, user common.Address, clusterKey cm.PublicKey, parentSeq uint64) []byte {
+	var data []byte
+	data = append(data, []byte(AttestationDomainAccountRegistered)...)
+	var chainIDBytes [8]byte
+	binary.BigEndian.PutUint64(chainIDBytes[:], chainID)
+	data = append(data, chainIDBytes[:]...)
+	data = append(data, user.Bytes()...)
+	data = append(data, clusterKey[:]...)
+	var seqBytes [8]byte
+	binary.BigEndian.PutUint64(seqBytes[:], parentSeq)
+	data = append(data, seqBytes[:]...)
+	return crypto.Keccak256(data)
+}
 
 // AccountRegistrationPayload is the JSON payload sent in a system transaction to RollupSystemAddress
 // when an account registration event from Parent Chain is relayed to the execution cluster.
 type AccountRegistrationPayload struct {
-	Kind       string         `json:"kind"`
-	User       common.Address `json:"user"`
-	ClusterKey cm.PublicKey   `json:"cluster_key"`
-	ParentSeq  uint64         `json:"parent_seq"`
+	Kind         string                    `json:"kind"`
+	User         common.Address            `json:"user"`
+	ClusterKey   cm.PublicKey              `json:"cluster_key"`
+	ParentSeq    uint64                    `json:"parent_seq"`
+	Attestations []RegistrationAttestation `json:"attestations,omitempty"`
 }
 
 func (p *AccountRegistrationPayload) UnmarshalJSON(data []byte) error {
 	type rawPayload struct {
-		Kind          string          `json:"kind"`
-		User          common.Address  `json:"user"`
-		ClusterKeyRaw json.RawMessage `json:"cluster_key"`
-		ParentSeq     uint64          `json:"parent_seq"`
+		Kind          string                    `json:"kind"`
+		User          common.Address            `json:"user"`
+		ClusterKeyRaw json.RawMessage           `json:"cluster_key"`
+		ParentSeq     uint64                    `json:"parent_seq"`
+		Attestations  []RegistrationAttestation `json:"attestations,omitempty"`
 	}
 	var raw rawPayload
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -38,6 +127,7 @@ func (p *AccountRegistrationPayload) UnmarshalJSON(data []byte) error {
 	p.Kind = raw.Kind
 	p.User = raw.User
 	p.ParentSeq = raw.ParentSeq
+	p.Attestations = raw.Attestations
 
 	if len(raw.ClusterKeyRaw) > 0 {
 		key, err := parseClusterKey(raw.ClusterKeyRaw)
@@ -83,15 +173,17 @@ func parseClusterKey(raw json.RawMessage) (cm.PublicKey, error) {
 
 func (p AccountRegistrationPayload) MarshalJSON() ([]byte, error) {
 	return json.Marshal(&struct {
-		Kind       string         `json:"kind"`
-		User       common.Address `json:"user"`
-		ClusterKey string         `json:"cluster_key"`
-		ParentSeq  uint64         `json:"parent_seq"`
+		Kind         string                    `json:"kind"`
+		User         common.Address            `json:"user"`
+		ClusterKey   string                    `json:"cluster_key"`
+		ParentSeq    uint64                    `json:"parent_seq"`
+		Attestations []RegistrationAttestation `json:"attestations,omitempty"`
 	}{
-		Kind:       p.Kind,
-		User:       p.User,
-		ClusterKey: hex.EncodeToString(p.ClusterKey[:]),
-		ParentSeq:  p.ParentSeq,
+		Kind:         p.Kind,
+		User:         p.User,
+		ClusterKey:   hex.EncodeToString(p.ClusterKey[:]),
+		ParentSeq:    p.ParentSeq,
+		Attestations: p.Attestations,
 	})
 }
 
@@ -101,16 +193,34 @@ type AccountStateRegistryDB interface {
 	SetParentRegistered(addr common.Address, registered bool)
 }
 
+// CommitteeProvider returns the active committee validator BLS public keys.
+type CommitteeProvider interface {
+	GetActiveCommitteeBLSKeys() ([]cm.PublicKey, error)
+}
+
 // AccountRegistryHandler applies parent-chain account registration events on the execution cluster.
 type AccountRegistryHandler struct {
-	clusterPubKey cm.PublicKey
+	clusterPubKey     cm.PublicKey
+	chainID           uint64
+	committeeProvider CommitteeProvider
 }
 
 // NewAccountRegistryHandler creates a new handler bound to the cluster's public key.
 func NewAccountRegistryHandler(clusterPubKey cm.PublicKey) *AccountRegistryHandler {
 	return &AccountRegistryHandler{
 		clusterPubKey: clusterPubKey,
+		chainID:       991, // default matching shared exec chain ID
 	}
+}
+
+// SetCommitteeProvider sets the committee provider for quorum verification (>= f+1).
+func (h *AccountRegistryHandler) SetCommitteeProvider(cp CommitteeProvider) {
+	h.committeeProvider = cp
+}
+
+// SetChainID sets the expected chain ID used for attestation digest calculation.
+func (h *AccountRegistryHandler) SetChainID(id uint64) {
+	h.chainID = id
 }
 
 // ClusterPublicKey returns the cluster key configured for this handler.
@@ -134,7 +244,8 @@ func IsAccountRegistrationPayload(data []byte) bool {
 
 // Apply executes an account registration payload against the state database.
 // It is idempotent (already registered accounts are no-op successes).
-// It rejects payloads with mismatched cluster keys, invalid JSON, or missing user addresses.
+// If a CommitteeProvider is configured, it enforces that >= f+1 distinct active committee
+// members have signed the deterministic attestation digest.
 func (h *AccountRegistryHandler) Apply(stateDB AccountStateRegistryDB, data []byte) error {
 	if stateDB == nil {
 		return errors.New("account registry: stateDB is nil")
@@ -155,6 +266,67 @@ func (h *AccountRegistryHandler) Apply(stateDB AccountStateRegistryDB, data []by
 
 	if payload.ClusterKey != h.clusterPubKey {
 		return fmt.Errorf("account registry: cluster key mismatch: got %x, want %x", payload.ClusterKey[:6], h.clusterPubKey[:6])
+	}
+
+	// Committee attestation verification
+	if h.committeeProvider != nil {
+		committee, err := h.committeeProvider.GetActiveCommitteeBLSKeys()
+		if err != nil {
+			return fmt.Errorf("account registry: failed to get active committee: %w", err)
+		}
+		if len(committee) == 0 {
+			return errors.New("account registry: committee is empty")
+		}
+
+		// Quorum threshold: f = (N - 1) / 3, required = f + 1
+		n := len(committee)
+		f := (n - 1) / 3
+		required := f + 1
+
+		if len(payload.Attestations) < required {
+			return fmt.Errorf("account registry: insufficient attestations: got %d, required %d (committee size %d)",
+				len(payload.Attestations), required, n)
+		}
+
+		digest := ComputeAccountRegistrationAttestDigest(h.chainID, payload.User, payload.ClusterKey, payload.ParentSeq)
+		seen := make(map[cm.PublicKey]bool)
+		committeeSet := make(map[cm.PublicKey]bool, len(committee))
+		for _, key := range committee {
+			committeeSet[key] = true
+		}
+
+		validCount := 0
+		for _, att := range payload.Attestations {
+			if !committeeSet[att.ValidatorPubkey] {
+				return fmt.Errorf("account registry: attestation from non-committee validator %x", att.ValidatorPubkey[:6])
+			}
+			if seen[att.ValidatorPubkey] {
+				return fmt.Errorf("account registry: duplicate attestation from validator %x", att.ValidatorPubkey[:6])
+			}
+			seen[att.ValidatorPubkey] = true
+
+			if !bls.VerifySign(att.ValidatorPubkey, att.Signature, digest) {
+				return fmt.Errorf("account registry: invalid BLS signature from validator %x", att.ValidatorPubkey[:6])
+			}
+			validCount++
+		}
+
+		if validCount < required {
+			return fmt.Errorf("account registry: insufficient valid attestations: got %d, required %d", validCount, required)
+		}
+	} else if len(payload.Attestations) > 0 {
+		// When no committee provider is configured, verify any attached signatures against the payload digest
+		digest := ComputeAccountRegistrationAttestDigest(h.chainID, payload.User, payload.ClusterKey, payload.ParentSeq)
+		seen := make(map[cm.PublicKey]bool)
+		for _, att := range payload.Attestations {
+			if seen[att.ValidatorPubkey] {
+				return fmt.Errorf("account registry: duplicate attestation from validator %x", att.ValidatorPubkey[:6])
+			}
+			seen[att.ValidatorPubkey] = true
+			if !bls.VerifySign(att.ValidatorPubkey, att.Signature, digest) {
+				return fmt.Errorf("account registry: invalid BLS signature from validator %x", att.ValidatorPubkey[:6])
+			}
+		}
 	}
 
 	// Idempotent: already registered is a no-op success

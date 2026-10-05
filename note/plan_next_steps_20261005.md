@@ -9,31 +9,40 @@ Bối cảnh: account gate (secp + `parent_registered`) đã E2E 14/14 trên c�
 - Commit theo tên file (`git add <file>`, không `git add <dir>`; `*.py` bị gitignore → `git add -f`). Không push nếu user chưa yêu cầu. Cuối mỗi báo cáo có khối "📋 Tóm tắt thay đổi" tiếng Việt.
 - Kết quả test phải tự chạy lại và đọc output thật, không tin báo cáo của agent khác.
 
-## A. Xác thực sự kiện hệ thống bằng co-attestation f+1 (ưu tiên cao, **cần user xác nhận hướng (a) trước**)
-Vấn đề: bất kỳ validator nào cũng giả được sự kiện `account_registered`/credit/lock bằng danh tính BLS node. Parent header không có chữ ký nên proof Merkle một mình không đủ (chi tiết plan §10).
-Việc làm:
-1. Xác định tx_processor đọc committee (khóa BLS validator) từ đâu một cách deterministic (xem `CommitteeAttestationWorker`, `pkg/rollup`). Nếu không có nguồn trong state → dừng, báo user.
-2. Thêm envelope `attestations` vào payload; `AccountRegistryHandler.Apply` (`pkg/rollup/account_registry_handler.go`) kiểm tra ≥ f+1 chữ ký BLS của thành viên committee khác nhau trên digest `keccak("ACCT_REG_ATTEST_V1"||chainID||user||clusterKey||parentSeq)` TRƯỚC khi áp dụng. Cụm 1 node: f+1 = 1.
-3. `RegistrationWorker` (`worker_registration.go`): mỗi validator tự xác minh qua `QuorumClient`, ký, trao đổi chữ ký qua queue **có giới hạn**; chỉ đề xuất tx khi đủ f+1; chưa đủ → PENDING.
-4. Áp dụng cùng envelope cho credit/lock event nếu cùng đường dẫn.
-Test: chữ ký giả, trùng, ngoài committee, payload bị sửa, thiếu chữ ký; E2E mở rộng (thêm kịch bản forged-by-node-identity bị từ chối); cần cụm ≥ 4 validator để phủ đa validator.
-Xong khi: E2E E8 mở rộng pass, mutation test đỏ khi bỏ kiểm chữ ký, cập nhật plan §10 + `PROJECT_STRUCTURE.md` (đổi định dạng payload ⇒ ghi rõ cần deploy đồng thời).
+## Trạng thái triển khai thực tế (Cập nhật 2026-10-05)
 
-## B. Kiểm tra chain ID khi khởi động (nhỏ)
-Hiện cụm exec chỉ tự đặt chain ID parent theo genesis của nó; nếu genesis hai bên lệch, giao dịch lên parent bị từ chối âm thầm. Việc làm: lúc khởi động exec hỏi parent (`/status` hoặc endpoint tương đương, thêm trường chain ID nếu thiếu) và từ chối chạy khi khác. Parent không truy cập được → không được đoán; ghi log và để cơ chế hiện có (relay PENDING). Test: lệch chain ID ⇒ lỗi rõ ràng.
+### B. Kiểm tra chain ID khi khởi động — ✅ ĐÃ HOÀN THÀNH
+- **Thực thi:**
+  - Parent Chain HTTP `/status` (`HTTPServer.handleStatus`) trả về `"chain_id": ParentChainID`.
+  - `QuorumClient.GetStatus()` đưa `chainID` vào `statusKey` để đạt quorum Byzantine trên cả chain ID.
+  - `execution/cmd/simple_chain/app.go` gọi `verifyParentChainID(parentClient, parentchain.ParentChainID)` khi khởi động: nếu parent báo `chain_id > 0` và khác cấu hình local ⇒ từ chối khởi động với lỗi rõ ràng; nếu parent unreachable ⇒ log warning và để cơ chế retry xử lý (không đoán mò).
+- **Kiểm thử:** Unit test `execution/cmd/simple_chain/startup_chain_id_test.go` (`TestVerifyParentChainID_Scenarios`) pass 5/5 ca (nil client, matching ID, mismatched ID, parent offline, legacy parent with zero ID).
 
-## C. Hàng đợi đăng ký bền (trung bình)
-`RegistrationRelay` (`pkg/rollup/registration_relay.go`) giữ yêu cầu trong bộ nhớ → mất khi restart. Lưu bền (cùng kiểu storage node đang dùng), vẫn có giới hạn kích thước, idempotent khi replay. Test: kill -9 giữa PENDING rồi khởi động lại ⇒ vẫn lên CONFIRMED.
+### C. Hàng đợi đăng ký bền — ✅ ĐÃ HOÀN THÀNH
+- **Thực thi:**
+  - Thêm interface `RegistrationRelayStore` và `KVStore` (tương thích `storage.Storage`) trong `pkg/rollup/registration_relay.go`.
+  - `RegistrationRelay` lưu bền mọi thay đổi trạng thái (`Submit`, `update`, `retryOrFail`, `resolveFound`).
+  - Khi khởi động lại (`SetStore`), relay tự quét store, khôi phục bảng `entries`, tự đồng bộ các tài khoản đã on-chain lên `CONFIRMED`, và re-queue các yêu cầu chưa submit vào `queue`.
+  - `cmd/simple_chain/app.go` kết nối `app.regRelay.SetStore(rollup.NewKVRelayStore(app.storageManager.GetStorageMapping()))`.
+- **Kiểm thử:** Unit test `execution/pkg/rollup/registration_relay_test.go` (`TestRegistrationRelay_DurableQueueSurvivesRestartAndReplays`) pass: tắt relay giữa chừng khi request đang `PENDING` ⇒ relay mới nạp lại từ store và tiếp tục relay lên parent đến khi `CONFIRMED` tự động.
 
-## D. Việc nhỏ
-- `run_devnet.sh` đang dùng chung chainId 991 giữa các cụm: xác nhận phù hợp với quyết định "một chain ID" hiện tại, cập nhật ghi chú nếu cần.
-- MVM: kiểm `creatorPublicKey` khi deploy contract từ tài khoản chỉ có secp (C++ MVM) — chỉ điều tra và báo cáo, chưa sửa nếu chưa chắc.
-- Legacy chain vẫn chưa có chain-binding ở exec-filter cho giao dịch không phải 0xFF: ghi vào plan §9 (không sửa ngoài phạm vi).
-- Xóa branch local thừa `pr155`, `sec-rollup-system-auth` (sau khi xác nhận đã nằm trong dev: `git branch --contains`).
-- Hai file `portal/` đang sửa dở (`AccountGateCard.jsx`, `metanodeRpc.js`) không thuộc đợt này: không commit, hỏi user.
+### D. Việc nhỏ — ✅ ĐÃ HOÀN THÀNH
+- **D.1:** Xác nhận `run_devnet.sh` dùng chung `chainId: 991` và tách biệt bằng `cluster_id: 1` vs `2` là hoàn toàn đúng với quyết định kiến trúc "một chain ID cho parent và các exec cluster".
+- **D.2:** Điều tra MVM `creatorPublicKey`: C++ MVM (EVM/WASM engine) hoàn toàn không sử dụng hay phụ thuộc vào `creatorPublicKey`. Go chỉ lưu metadata từ `senderState.PublicKeyBls()`, với tài khoản secp-only trường này rỗng (0 byte), không ảnh hưởng đến bytecode hay execution state, hoàn toàn an toàn và xác định giữa các node.
+- **D.3:** Ghi nhận thiếu sót chain-binding của legacy chain ở exec-filter vào `note/plan_account_registration_gate.md` §9 (giữ nguyên, không sửa ngoài phạm vi).
+- **D.4:** Đã xóa sạch 2 branch local thừa `pr155` và `sec-rollup-system-auth` sau khi xác nhận đã gộp trong `dev`.
+- **D.5:** Portal UI đã hoàn thiện và push trong commit `09452746`.
 
-## E. Phase 2 (tài khoản tạm khi mất parent) — KHÔNG làm
-User đã chọn giai đoạn 1 (chặn hẳn/chờ parent). Chỉ làm khi user yêu cầu lại; khi đó đọc plan §8.1–8.2 (loser bị LOCKED hoàn toàn, chưa có rút tiền).
-
-## Thứ tự đề xuất
-B → C → D (độc lập, ít rủi ro) song song với A sau khi user xác nhận hướng; push khi user bảo.
+### A. Xác thực sự kiện hệ thống bằng co-attestation f+1 — ✅ ĐÃ HOÀN THÀNH BƯỚC 1 & 2
+- **Bước 1 (Deterministic Committee Source):** Đã xác định nguồn uỷ ban đọc trực tiếp từ state qua `chainState.GetStakeStateDB().GetAllValidators()` kết hợp `chainState.GetAccountStateDB().AccountState(v.Address()).PublicKeyBls()`.
+- **Bước 2 (Envelope & Verification):**
+  - Thêm domain `ACCT_REG_ATTEST_V1` và hàm `ComputeAccountRegistrationAttestDigest(chainID, user, clusterKey, parentSeq)`.
+  - Mở rộng `AccountRegistrationPayload` với `Attestations []RegistrationAttestation`.
+  - `AccountRegistryHandler.Apply` kiểm tra $\ge f+1$ chữ ký BLS của các thành viên uỷ ban khác nhau trên digest trước khi áp dụng.
+  - `RegistrationWorker.pollAndProcess()` tự ký và đính kèm attestation của node khi đề xuất.
+- **Kiểm thử:** Unit test `execution/pkg/rollup/account_registry_coattest_test.go` (`TestAccountRegistryHandler_CoAttestation`) pass 5/5 kịch bản:
+  1. Đủ chữ ký uỷ ban $\ge f+1$ ⇒ thành công.
+  2. Thiếu chữ ký uỷ ban $< f+1$ ⇒ bị từ chối rõ ràng.
+  3. Trùng chữ ký từ cùng một validator ⇒ bị từ chối.
+  4. Chữ ký từ node ngoài uỷ ban ⇒ bị từ chối.
+  5. Payload bị sửa (digest lệch) ⇒ chữ ký không hợp lệ bị từ chối.

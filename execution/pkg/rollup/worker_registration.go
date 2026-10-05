@@ -167,6 +167,14 @@ func (w *RegistrationWorker) pollAndProcess() bool {
 				ClusterKey: w.clusterPubKey,
 				ParentSeq:  ev.Seq,
 			}
+			if w.blsKeyPair != nil {
+				digest := ComputeAccountRegistrationAttestDigest(parentchain.ParentChainID, ev.UserAddress, w.clusterPubKey, ev.Seq)
+				sig := bls.Sign(w.blsKeyPair.PrivateKey(), digest)
+				payload.Attestations = []RegistrationAttestation{{
+					ValidatorPubkey: w.blsKeyPair.PublicKey(),
+					Signature:       sig,
+				}}
+			}
 			data, err := json.Marshal(payload)
 			if err != nil {
 				log.Printf("RegistrationWorker: failed to marshal payload for user %s: %v", ev.UserAddress.Hex(), err)

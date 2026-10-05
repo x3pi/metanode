@@ -1,9 +1,11 @@
 package rollup
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -70,6 +72,153 @@ type relayEntry struct {
 	reason    string
 }
 
+// KVStore is a minimal key-value storage interface compatible with storage.Storage and leveldb/pebbledb/memory stores.
+type KVStore interface {
+	Get(key []byte) ([]byte, error)
+	Put(key []byte, value []byte) error
+	Delete(key []byte) error
+	PrefixScan(prefix []byte) ([][2][]byte, error)
+}
+
+// RelayRecord is the persisted state of an account registration request.
+type RelayRecord struct {
+	User      common.Address     `json:"user"`
+	UserSig   []byte             `json:"userSig"`
+	Status    RegistrationStatus `json:"status"`
+	Submitted bool               `json:"submitted"`
+	Attempts  int                `json:"attempts"`
+	Verifies  int                `json:"verifies"`
+	Home      *cm.PublicKey      `json:"home,omitempty"`
+	Reason    string             `json:"reason,omitempty"`
+}
+
+// RegistrationRelayStore defines persistent operations for registration entries.
+type RegistrationRelayStore interface {
+	Get(user common.Address) (*RelayRecord, bool, error)
+	Put(record *RelayRecord) error
+	Delete(user common.Address) error
+	ScanAll() ([]*RelayRecord, error)
+}
+
+const relayStoreKeyPrefix = "reg_relay:"
+
+type kvRelayStore struct {
+	kv KVStore
+}
+
+// NewKVRelayStore wraps a KVStore (such as storage.Storage) to persist registration relay records.
+func NewKVRelayStore(kv KVStore) RegistrationRelayStore {
+	return &kvRelayStore{kv: kv}
+}
+
+func (s *kvRelayStore) makeKey(user common.Address) []byte {
+	return append([]byte(relayStoreKeyPrefix), user.Bytes()...)
+}
+
+func (s *kvRelayStore) Get(user common.Address) (*RelayRecord, bool, error) {
+	if s.kv == nil {
+		return nil, false, nil
+	}
+	data, err := s.kv.Get(s.makeKey(user))
+	if err != nil || len(data) == 0 {
+		return nil, false, err
+	}
+	var rec RelayRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return nil, false, err
+	}
+	return &rec, true, nil
+}
+
+func (s *kvRelayStore) Put(record *RelayRecord) error {
+	if s.kv == nil || record == nil {
+		return nil
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	return s.kv.Put(s.makeKey(record.User), data)
+}
+
+func (s *kvRelayStore) Delete(user common.Address) error {
+	if s.kv == nil {
+		return nil
+	}
+	return s.kv.Delete(s.makeKey(user))
+}
+
+func (s *kvRelayStore) ScanAll() ([]*RelayRecord, error) {
+	if s.kv == nil {
+		return nil, nil
+	}
+	pairs, err := s.kv.PrefixScan([]byte(relayStoreKeyPrefix))
+	if err != nil {
+		return nil, err
+	}
+	var records []*RelayRecord
+	for _, pair := range pairs {
+		var rec RelayRecord
+		if err := json.Unmarshal(pair[1], &rec); err == nil {
+			records = append(records, &rec)
+		}
+	}
+	return records, nil
+}
+
+// MemoryKVStore is an in-memory implementation of KVStore for testing and isolated usage.
+type MemoryKVStore struct {
+	mu   sync.RWMutex
+	data map[string][]byte
+}
+
+func NewMemoryKVStore() *MemoryKVStore {
+	return &MemoryKVStore{data: make(map[string][]byte)}
+}
+
+func (m *MemoryKVStore) Get(key []byte) ([]byte, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	v, ok := m.data[string(key)]
+	if !ok {
+		return nil, nil
+	}
+	out := make([]byte, len(v))
+	copy(out, v)
+	return out, nil
+}
+
+func (m *MemoryKVStore) Put(key, value []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v := make([]byte, len(value))
+	copy(v, value)
+	m.data[string(key)] = v
+	return nil
+}
+
+func (m *MemoryKVStore) Delete(key []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.data, string(key))
+	return nil
+}
+
+func (m *MemoryKVStore) PrefixScan(prefix []byte) ([][2][]byte, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	prefStr := string(prefix)
+	var out [][2][]byte
+	for k, v := range m.data {
+		if strings.HasPrefix(k, prefStr) {
+			valCopy := make([]byte, len(v))
+			copy(valCopy, v)
+			out = append(out, [2][]byte{[]byte(k), valCopy})
+		}
+	}
+	return out, nil
+}
+
 // RegistrationRelay accepts account registration requests from users, relays them to the Parent Chain automatically and
 // tracks the outcome. It is deliberately NOT part of consensus: it only produces the cluster-signed Parent Chain
 // transaction and a user-facing status. Whether an account may send transactions is decided solely by the on-chain
@@ -85,6 +234,8 @@ type RegistrationRelay struct {
 	maxAttempts int
 	maxVerifies int
 	interval    time.Duration
+
+	store RegistrationRelayStore
 
 	mu      sync.Mutex
 	entries map[common.Address]*relayEntry
@@ -113,6 +264,55 @@ func NewRegistrationRelay(parent RegistrationParent, clusterKey cm.PublicKey, si
 		wakeCh:      make(chan struct{}, 1),
 		quitCh:      make(chan struct{}),
 	}
+}
+
+// SetStore attaches a durable store to the relay and reloads any unconfirmed requests.
+func (r *RegistrationRelay) SetStore(store RegistrationRelayStore) error {
+	if store == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.store = store
+
+	records, err := store.ScanAll()
+	if err != nil {
+		return fmt.Errorf("failed to scan registration store: %w", err)
+	}
+
+	for _, rec := range records {
+		if rec == nil || rec.User == (common.Address{}) {
+			continue
+		}
+		// If already registered on-chain, ensure state is CONFIRMED
+		if r.registered != nil && r.registered(rec.User) {
+			rec.Status = RegStatusConfirmed
+			rec.Reason = ""
+			_ = store.Put(rec)
+		}
+		entry := &relayEntry{
+			user:      rec.User,
+			userSig:   append([]byte(nil), rec.UserSig...),
+			status:    rec.Status,
+			submitted: rec.Submitted,
+			attempts:  rec.Attempts,
+			verifies:  rec.Verifies,
+			home:      rec.Home,
+			reason:    rec.Reason,
+		}
+		r.entries[rec.User] = entry
+
+		// Re-enqueue pending unsubmitted requests so they resume processing
+		if entry.status == RegStatusPending && !entry.submitted {
+			select {
+			case r.queue <- entry.user:
+			default:
+				// queue is full, will be picked up on later replay or submit
+			}
+		}
+	}
+	r.wake()
+	return nil
 }
 
 // ClusterKey returns the cluster identity key users must sign their registration for.
@@ -182,6 +382,7 @@ func (r *RegistrationRelay) Submit(user common.Address, userSig []byte) (Registr
 		return RegistrationResult{}, ErrRegistrationBusy
 	}
 	r.entries[user] = e
+	r.saveLocked(e)
 	r.wake()
 	return r.resultLocked(e), nil
 }
@@ -195,6 +396,22 @@ func (r *RegistrationRelay) Status(user common.Address) RegistrationResult {
 	defer r.mu.Unlock()
 	if e, ok := r.entries[user]; ok {
 		return r.resultLocked(e)
+	}
+	if r.store != nil {
+		if rec, found, err := r.store.Get(user); err == nil && found && rec != nil {
+			entry := &relayEntry{
+				user:      rec.User,
+				userSig:   rec.UserSig,
+				status:    rec.Status,
+				submitted: rec.Submitted,
+				attempts:  rec.Attempts,
+				verifies:  rec.Verifies,
+				home:      rec.Home,
+				reason:    rec.Reason,
+			}
+			r.entries[user] = entry
+			return r.resultLocked(entry)
+		}
 	}
 	return RegistrationResult{Status: RegStatusNone}
 }
@@ -298,6 +515,26 @@ func (r *RegistrationRelay) update(user common.Address, fn func(e *relayEntry)) 
 	defer r.mu.Unlock()
 	if e, ok := r.entries[user]; ok {
 		fn(e)
+		r.saveLocked(e)
+	}
+}
+
+func (r *RegistrationRelay) saveLocked(e *relayEntry) {
+	if r.store == nil || e == nil {
+		return
+	}
+	rec := &RelayRecord{
+		User:      e.user,
+		UserSig:   append([]byte(nil), e.userSig...),
+		Status:    e.status,
+		Submitted: e.submitted,
+		Attempts:  e.attempts,
+		Verifies:  e.verifies,
+		Home:      e.home,
+		Reason:    e.reason,
+	}
+	if err := r.store.Put(rec); err != nil {
+		log.Printf("RegistrationRelay: failed to persist entry %s: %v", e.user.Hex(), err)
 	}
 }
 

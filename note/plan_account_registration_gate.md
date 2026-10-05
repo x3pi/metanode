@@ -315,11 +315,12 @@ Tối thiểu: (a) bỏ kiểm tra gate ở admission; (b) bỏ kiểm tra gate 
 
 **Chưa làm / rủi ro mở (đọc trước khi bật gate trên chain thật):**
 1. **E2E trên cụm thật chưa chạy** (chỉ test tích hợp trong tiến trình). Cần cụm cô lập có `tx_signature_mode="secp"` + `account_gate="parent_registered"` + parent chain, chạy kịch bản §5.
-2. **Hàng đợi yêu cầu đăng ký không bền:** mất khi node khởi động lại (cờ on-chain vẫn đúng; người dùng gửi lại — idempotent). Làm bền nếu cần.
-3. **Bằng chứng parent cho system event (P0 còn hở):** mọi danh tính node của cụm đều gửi được event; một validator Byzantine vẫn giả mạo được (mint/đăng ký/khoá bừa). Cần event mang chứng chỉ quorum/proof parent do handler xác minh.
+2. **Hàng đợi yêu cầu đăng ký bền:** ĐÃ HOÀN THÀNH (lưu bền qua `KVStore` / `storage.Storage`, tự khôi phục và replay PENDING -> CONFIRMED sau khi khởi động lại).
+3. **Bằng chứng parent cho system event (P0 còn hở):** mọi danh tính node của cụm đều gửi được event; một validator Byzantine vẫn giả mạo được (mint/đăng ký/khoá bừa). Cần event mang chứng chỉ quorum/proof parent do handler xác minh (mục 10).
 4. **Giai đoạn 2 chưa làm:** đăng ký tạm, `ParentLocked`/`LOCKED` (§8). Hiện bên thua chỉ nhận trạng thái `REJECTED` ở relay; tài khoản đơn giản không được đăng ký ở cụm đó (không bị khoá).
 5. **Khoá node = khoá cụm** (V2) mới được xác nhận ở mức "code hiện tại giả định `app.keyPair` là danh tính cụm" (`app.go` đã tự đăng ký như vậy); chưa kiểm cụm nhiều validator với khoá khác nhau.
 6. Mã HTTP `/inbound_registrations` nuốt lỗi store giống `/inbound` hiện có (trả danh sách rỗng); nên trả 5xx để quorum không coi node lỗi là "đồng ý rỗng".
+7. **Legacy chain chưa có chain-binding ở exec-filter cho giao dịch không phải 0xFF:** tx legacy BLS không có chain ID gắn trong envelope chữ ký (chỉ có secp EIP-155 và tx 0xFF); giữ nguyên không sửa ngoài phạm vi.
 
 ## 10. Item 2 — parent-verifiable authentication of system events (DESIGN, not implemented)
 

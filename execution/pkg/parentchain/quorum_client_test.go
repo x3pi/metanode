@@ -21,11 +21,13 @@ func TestQuorumClient_T_C1_OneNodeLies(t *testing.T) {
 	bls.Init()
 
 	honestStatus := ChainStatus{
+		ChainID:   991,
 		LastBlock: 10,
 		LastHash:  common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
 		StateRoot: common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222"),
 	}
 	dishonestStatus := ChainStatus{
+		ChainID:   999,
 		LastBlock: 9,
 		LastHash:  common.HexToHash("0x9999999999999999999999999999999999999999999999999999999999999999"),
 		StateRoot: common.HexToHash("0x8888888888888888888888888888888888888888888888888888888888888888"),
@@ -51,6 +53,7 @@ func TestQuorumClient_T_C1_OneNodeLies(t *testing.T) {
 	qc := NewQuorumClient([]string{s0.URL, s1.URL, s2.URL, s3.URL}, cm.PrivateKey{}, cm.PublicKey{})
 	st, err := qc.GetStatus()
 	require.NoError(t, err)
+	assert.Equal(t, uint64(991), st.ChainID)
 	assert.Equal(t, honestStatus.LastBlock, st.LastBlock)
 	assert.Equal(t, honestStatus.LastHash, st.LastHash)
 	assert.Equal(t, honestStatus.StateRoot, st.StateRoot)

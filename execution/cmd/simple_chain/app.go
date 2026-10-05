@@ -20,13 +20,12 @@ import (
 
 	e_common "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/explorer"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
@@ -36,13 +35,14 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/pkg/network"
 	"github.com/meta-node-blockchain/meta-node/pkg/node"
+	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/pruning"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/tracing"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
-	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
-	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	mt_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
@@ -111,7 +111,7 @@ type App struct {
 	regWorker              *rollup.RegistrationWorker
 	regRelay               *rollup.RegistrationRelay
 	parentClient           parentchain.Client
-	rollupEnabled    bool // true only when PARENT_CHAIN_URL is set: rollup workers + parent-chain registration
+	rollupEnabled          bool // true only when PARENT_CHAIN_URL is set: rollup workers + parent-chain registration
 
 	// conservation checks that the cluster's BLS float on the Parent Chain equals the sum of the cluster's accounts and
 	// gates new outbound cross-chain transfers (BLS_CONSERVATION_MODE=enforce|warn|off, default enforce).
@@ -305,6 +305,12 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	parentClient := parentchain.NewQuorumClient(urls, app.keyPair.PrivateKey(), app.keyPair.PublicKey())
 	app.parentClient = parentClient
 
+	if app.rollupEnabled {
+		if err := verifyParentChainID(parentClient, parentchain.ParentChainID); err != nil {
+			return nil, err
+		}
+	}
+
 	scAdapter := &smartContractDBAdapter{chainState: app.chainState}
 	rollupStore := rollup.NewDBStore(scAdapter)
 	app.rollupStore = rollupStore
@@ -347,6 +353,12 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	app.regRelay = rollup.NewRegistrationRelay(parentClient, app.keyPair.PublicKey(),
 		func(digest []byte) cm.Sign { return bls.Sign(app.keyPair.PrivateKey(), digest) },
 		stateDBAdapter.GetParentRegistered)
+	if app.storageManager != nil && app.storageManager.GetStorageMapping() != nil {
+		store := rollup.NewKVRelayStore(app.storageManager.GetStorageMapping())
+		if err := app.regRelay.SetStore(store); err != nil {
+			logger.Warn("Failed to initialize durable storage for registration relay: %v", err)
+		}
+	}
 
 	// Conservation: the cluster's BLS identity represents all of its accounts, so its float on the Parent Chain must
 	// always equal the sum of the accounts (plus what is demonstrably in flight). Until that is verified, and while a
@@ -473,7 +485,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			// enough to cover this indefinitely.
 			0, // maxTimeUse
 			eventData,
-			nil, // relatedAddresses
+			nil,             // relatedAddresses
 			e_common.Hash{}, // lastDeviceKey
 			e_common.Hash{}, // newDeviceKey
 			rollupPendingNonce,
@@ -1247,4 +1259,22 @@ func readProcessRSSKB() (uint64, error) {
 		return 0, err
 	}
 	return 0, fmt.Errorf("readProcessRSSKB: VmRSS not found in /proc/self/status")
+}
+
+// verifyParentChainID queries the Parent Chain status and ensures that its chain ID
+// matches the local execution node configuration. If the parent chain is unreachable,
+// it logs a warning and allows startup to proceed (relay will stay in PENDING status).
+func verifyParentChainID(client parentchain.Client, localChainID uint64) error {
+	if client == nil {
+		return nil
+	}
+	status, err := client.GetStatus()
+	if err != nil {
+		logger.Warn("Failed to query parent chain status at startup: %v (continuing with configured chain ID %d)", err, localChainID)
+		return nil
+	}
+	if status.ChainID > 0 && status.ChainID != localChainID {
+		return fmt.Errorf("parent chain ID mismatch: parent reports %d, local config has %d", status.ChainID, localChainID)
+	}
+	return nil
 }
