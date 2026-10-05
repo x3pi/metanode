@@ -326,7 +326,13 @@ func (c *SimpleChainConfig) SecpOnlyTxSignatures() bool {
 // validateTxSignatureMode rejects unknown modes so a typo can never silently fall back to a different rule set.
 func (c *SimpleChainConfig) validateTxSignatureMode() error {
 	switch c.TxSignatureMode {
-	case "", TxSignatureModeBLSLegacy, TxSignatureModeSecp:
+	case "", TxSignatureModeBLSLegacy:
+		return nil
+	case TxSignatureModeSecp:
+		// Replay protection of secp-signed txs rests on the chain ID: it must be configured (and unique per chain).
+		if c.ChainId == nil || c.ChainId.Sign() <= 0 {
+			return fmt.Errorf("tx_signature_mode %q requires a positive chainId", TxSignatureModeSecp)
+		}
 		return nil
 	}
 	return fmt.Errorf("invalid tx_signature_mode %q (want %q or %q)", c.TxSignatureMode, TxSignatureModeBLSLegacy, TxSignatureModeSecp)

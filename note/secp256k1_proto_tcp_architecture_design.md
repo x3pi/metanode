@@ -155,3 +155,18 @@ Chạy `build_check.sh` sau khi sửa.
 
 - **v1 (ký `tx.Hash()` rồi nhét 65 byte vào `Sign`):** vòng lặp hash khi điền R,S,V và làm quá tải `Sign` đang dành cho BLS / xuyên chain.
 - **Phương án 1 (ký sighash Ethereum chuẩn, điền R,S,V, `Sign` trống):** an toàn hơn cho node (`ValidEthSign()` có sẵn, không đổi consensus) nhưng bắt client phải tự tính sighash Ethereum (RLP, theo từng Type) từ proto, và sighash Ethereum không phủ `LastDeviceKey`/`NewDeviceKey`/`MaxTimeUse`/`ReadOnly` nên cần canonical hoá ở ingress. Có thể quay lại phương án này nếu ưu tiên tương thích công cụ Ethereum hơn là giữ client cũ.
+
+## 10. Chain ID phải duy nhất theo cụm thực thi (replay xuyên cụm)
+
+**Bất biến vận hành:** mỗi cụm thực thi phải có `chainId` riêng. Chữ ký tx ETH (EIP-155) và tx `0xFF` chỉ gắn với `ChainID`, không gắn với cụm/genesis. Hai cụm cùng `chainId` mà một địa chỉ có số dư và cùng nonce trên cả hai thì một tx đã ký cho cụm này nộp lại vào cụm kia vẫn hợp lệ và bị thực thi (test `TestChainBinding_SameChainIDAcrossClusters_IsReplayable` ghi lại hành vi này).
+
+Những gì **không** chặn được replay xuyên cụm (đã đối chiếu code):
+- `AccountRegistry` / `ErrAccountAlreadyRegistered` (`parentchain/state.go`) chỉ dùng để định tuyến chuyển tiền xuyên chain (`worker_send.go`, `mtn_api.go`); mempool và thực thi của cụm KHÔNG tra nó, nên địa chỉ vẫn có thể có số dư cục bộ (genesis alloc, nhận chuyển khoản) trên nhiều cụm.
+- Quy tắc nonce-0 (`InvalidAddressMatchForTx0`) chỉ buộc tx đầu tiên là `setBlsPublicKey`; khoá BLS nằm trong calldata, không gắn cụm, và chính tx đó ký secp theo ChainID nên cũng replay được.
+- Bảo toàn tiền (BLS Conservation Guard) đảm bảo tổng cung của cụm khớp với float, không ngăn một tx hợp lệ-theo-chữ-ký bị thực thi trên cụm khác (nạn nhân mất tiền, tổng cung không đổi).
+
+Cơ chế duy nhất hiện có: `Root Anchor ChainRegistry` từ chối đăng ký trùng `chainId` (`ErrChainAlreadyRegistered`), nhưng chỉ cho cụm tham gia cross-chain. Cụm devnet `run_devnet.sh` (exec1/exec2, `cluster_id` 1/2) sinh từ cùng `genesis.json` nên cùng `chainId` 991.
+
+Đã làm trong chế độ `secp` (chain mới, không có lịch sử): bắt buộc cấu hình `chainId` dương; bộ lọc thực thi ép `ChainID == chainId` cho MỌI loại tx (trước đây chỉ `0xFF`, trong khi mempool đã ép cho mọi loại), nên proposer Byzantine không đưa được tx ETH ký cho chain khác vào block. Chain `bls_legacy` giữ nguyên verdict (cần kiểm chứng trên cụm thật trước khi áp dụng).
+
+Khuyến nghị: (1) cấp `chainId` duy nhất khi sinh cấu hình/genesis cho từng cụm và có kiểm tra khi triển khai; (2) kiểm tra lúc khởi động không trùng với `ChainRegistry` của Root Anchor; (3) nếu không đảm bảo được duy nhất, thêm miền chữ ký theo cụm (genesis hash / `cluster_id`) vào `SigningHash` của tx `0xFF` (đổi định dạng, cần SDK client).

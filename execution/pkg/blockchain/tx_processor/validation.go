@@ -210,11 +210,11 @@ func VerifyTransaction(
 	// so this bypass never fires on Master (which is correct).
 	// ════════════════════════════════════════════════════════════════
 	isSubNodeLagging := len(as.PublicKeyBls()) == 0 && (tx.GetNonce() > 0 || as.Nonce() > 0)
+	pol := sigPolicyOf(chainState)
 
 	if as.Nonce() != 0 || tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		txHash := tx.Hash()
 
-		pol := sigPolicyOf(chainState)
 		if tx.Type() == 0xFF {
 			if perr := pol.secpProtoError(tx); perr != nil {
 				logger.Error("❌ [VERIFY] Type 0xFF tx rejected (%s): txHash=%s chainID=%d", perr.Description, txHash.Hex(), tx.GetChainID())
@@ -330,7 +330,11 @@ func VerifyTransaction(
 			return transaction.InvalidData
 		}
 	} else {
-		if as.Nonce() == 0 && !isSubNodeLagging {
+		// Legacy rule: an account's first tx must bind its BLS key (setBlsPublicKey) before any ordinary tx. In secp
+		// mode users never have a BLS key, so the rule would lock every fresh secp-only account out; node (BLS-native)
+		// identities keep it.
+		secpUser := pol.secp && !isNodeBLSIdentity(tx, as)
+		if as.Nonce() == 0 && !isSubNodeLagging && !secpUser {
 			return transaction.InvalidAddressMatchForTx0
 		}
 		if !tx.ValidDeployData() {

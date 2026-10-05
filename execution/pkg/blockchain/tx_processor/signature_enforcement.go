@@ -73,12 +73,24 @@ func (p sigPolicy) blsAllowed(tx types.Transaction, as types.AccountState) bool 
 // fails closed). Every other tx type returns nil.
 func (p sigPolicy) secpProtoError(tx types.Transaction) *transaction.TransactionError {
 	if tx.Type() != 0xFF {
-		return nil
+		return p.chainBindingError(tx)
 	}
 	if !p.secp {
 		return transaction.InvalidSign
 	}
 	if p.chainID == 0 || tx.GetChainID() != p.chainID {
+		return transaction.InvalidChainId
+	}
+	return nil
+}
+
+// chainBindingError makes the consensus-level filter enforce what mempool admission (VerifyTransaction's
+// ValidChainID) already enforces for every tx type: in secp mode a tx must carry THIS chain's ID. Without it a tx
+// signed for another chain (valid under ValidEthSign, which recovers the sender with the tx's own chain ID) could be
+// included by a Byzantine proposer, or admitted through a verification-skipping path, and be executed by every
+// honest node. Legacy chains keep their existing verdicts (no change to history); secp chains are new.
+func (p sigPolicy) chainBindingError(tx types.Transaction) *transaction.TransactionError {
+	if p.secp && (p.chainID == 0 || tx.GetChainID() != p.chainID) {
 		return transaction.InvalidChainId
 	}
 	return nil
