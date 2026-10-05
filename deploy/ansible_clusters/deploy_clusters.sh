@@ -641,15 +641,14 @@ try:
     if p.returncode == 0:
         print('OK')
     else:
-        print(f'INVALID_PASS:{pwd}')
+        print('INVALID_PASS')  # never echo the password itself (it would reach the terminal, logs and Telegram)
 except Exception:
     print('TIMEOUT')
 EOF
 )
 
-if [[ "$SUDO_CHECK_OUTPUT" == INVALID_PASS:* ]]; then
-    WRONG_VAL="${SUDO_CHECK_OUTPUT#INVALID_PASS:}"
-    ERR_MSG="Mật khẩu 'ansible_become_pass' không chính xác (đang cấu hình là: \"${WRONG_VAL}\")."
+if [[ "$SUDO_CHECK_OUTPUT" == INVALID_PASS* ]]; then
+    ERR_MSG="Mật khẩu 'ansible_become_pass' không chính xác (sudo từ chối mật khẩu đã cấu hình)."
     echo ""
     echo -e "\033[0;31m❌ [LỖI SUDO] ${ERR_MSG}\033[0m"
     echo -e "\033[0;33m   Lệnh sudo trên máy từ chối mật khẩu hiện tại.\033[0m"

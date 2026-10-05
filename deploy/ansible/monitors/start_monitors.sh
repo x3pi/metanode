@@ -1201,11 +1201,11 @@ echo "🔄 Đang khởi động các tiến trình giám sát trên máy này ($
 stop_monitor_instance
 if [ "$MONITOR_NAMESPACE" = "root" ]; then
     # Clean up legacy root processes which predate PID-file ownership.
-    pkill -f "go run main.go.*--no-stop-flag" || true
-    pkill -f "block_hash_checker.*--config config-m-nodes.json.*--daemon" || true
-    pkill -f "vote_monitor --daemon --interval 2s$" || true
-    pkill -f "start_monitors.sh health$" || true
-    pkill -f "start_monitors.sh resources$" || true
+    pkill -f "go run [m]ain.go.*--no-stop-flag" || true
+    pkill -f "[b]lock_hash_checker.*--config config-m-nodes.json.*--daemon" || true
+    pkill -f "[v]ote_monitor --daemon --interval 2s$" || true
+    pkill -f "[s]tart_monitors.sh health$" || true
+    pkill -f "[s]tart_monitors.sh resources$" || true
 fi
 
 # 2. Start Health Monitor in background

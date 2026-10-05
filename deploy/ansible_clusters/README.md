@@ -155,3 +155,15 @@ exec_clusters:
 ./deploy_clusters.sh --setup --systemd --env=production --vault-password-file .vault_pass
 ```
 Mỗi server sẽ tự động tạo systemd service riêng (`metanode-parentchain.service`, `metanode-cluster-1.service`, `metanode-cluster-2.service`) với cấu hình tự khởi động lại (`Restart=always`) và giới hạn file descriptors cao (`LimitNOFILE=65536`).
+
+## Firewall (UFW) — opt-in và giới hạn nguồn
+
+Triển khai bình thường (`setup`, `deploy`, `restart`, `reset`) **không** thay đổi tường lửa. Chỉ khi chạy với `--open-ports`
+(`deploy_action=open_ports`) và UFW đang bật thì role mới thêm rule:
+
+- Cổng **client** (RPC của exec, HTTP RPC của parent chain): mở cho mọi nguồn.
+- Cổng **nội bộ** (P2P, Raft, Forward của exec; peer RPC và metrics của parent chain): chỉ mở cho IP của các node khác trong
+  inventory (`exec_clusters` + `parent_chain_nodes`, bỏ `127.0.0.1`), cộng thêm danh sách `ufw_extra_sources` nếu khai báo
+  (ví dụ máy giám sát lấy metrics). Raft và Forward là kênh nội bộ giữa các node, không nên mở ra toàn mạng.
+
+Ví dụ thêm máy giám sát: `-e '{"ufw_extra_sources":["10.0.0.5"]}'`.
