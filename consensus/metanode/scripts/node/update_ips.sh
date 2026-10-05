@@ -223,6 +223,30 @@ for N in $(seq 0 $((NODE_COUNT - 1))); do
         "meta_node_rpc_address IP → ${NODE_IP}"
 done
 
+# ─── Update Rust Committee JSON ──────────────────────────────────────────────
+echo -e "\n${BOLD}═══ Rust Committee JSON (committee.json) ═══${NC}"
+COMMITTEE_JSON="$RUST_CONFIG_DIR/committee.json"
+if [ -f "$COMMITTEE_JSON" ]; then
+    if $DRY_RUN; then
+        echo -e "  ${CYAN}[DRY] Cập nhật địa chỉ trong committee.json${NC}"
+    else
+        python3 -c "
+import json
+with open('$COMMITTEE_JSON', 'r') as f:
+    comm = json.load(f)
+ips = [$(printf "'%s', " "${IPS[@]}")]
+ports = [$(printf "%s, " "${CONSENSUS_PORTS[@]}")]
+for i, auth in enumerate(comm.get('authorities', [])):
+    if i < len(ips):
+        auth['address'] = f'/ip4/{ips[i]}/tcp/{ports[i]}'
+with open('$COMMITTEE_JSON', 'w') as f:
+    json.dump(comm, f, indent=2)
+"
+        echo -e "  ${GREEN}✅ Đã cập nhật địa chỉ IP và port trong committee.json${NC}"
+        CHANGED_COUNT=$((CHANGED_COUNT + 1))
+    fi
+fi
+
 
 
 # ─── Update TPS Blast Scripts ────────────────────────────────────────────────
@@ -367,7 +391,7 @@ if [ -f "$GENESIS" ]; then
     # Validator port mapping: primary, worker, p2p(tcp)
     GENESIS_PRIMARY_PORTS=(4000 4100 4200 4300)
     GENESIS_WORKER_PORTS=(4012 4112 4212 4312)
-    GENESIS_P2P_PORTS=(9000 9011 9002 9003)
+    GENESIS_P2P_PORTS=(9000 9001 9002 9003)
 
     for V in 0 1 2 3; do
         V_IP="${IPS[$V]}"
