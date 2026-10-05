@@ -203,3 +203,23 @@ Tối thiểu: (a) bỏ kiểm tra gate ở admission; (b) bỏ kiểm tra gate 
 4. E2E trên devnet cô lập có receipt thật hoặc báo cáo trung thực lý do chưa chạy được.
 5. `PROJECT_STRUCTURE.md` và tài liệu thiết kế đã cập nhật; commit theo từng nhóm tệp, KHÔNG push khi chưa được phép.
 6. Khối tóm tắt tiếng Việt theo `AGENTS.md` Part 5 ở cuối báo cáo.
+
+## 8. Phụ lục (giai đoạn 2): tài khoản chạy tạm khi mất kết nối Parent Chain
+
+**Vấn đề:** gate §2 làm onboarding người dùng mới phụ thuộc parent. Khi cụm thực thi mất kết nối parent, người dùng chưa đăng ký không gửi được tx (tài khoản đã đăng ký vẫn chạy bình thường). Có muốn cho phép "tài khoản chạy tạm" không?
+
+**Nguyên tắc bất di bất dịch:** việc "parent đang mất kết nối" là quan sát cục bộ, mỗi node thấy khác nhau ⇒ **không được dùng làm đầu vào của verdict thực thi** (sẽ fork; AGENTS.md: không timeout/không heuristic để quyết định). Trạng thái "tạm" chỉ được tạo ra bởi **sự kiện on-chain có thứ tự** và hết hạn theo **số block** của chain thực thi, không theo đồng hồ.
+
+**Mặc định giai đoạn 1 (đã chọn): không có tài khoản tạm.** Người dùng mới chờ (pending) đến khi parent về; tài khoản đã đăng ký, tài khoản genesis và danh tính node (đã miễn gate, có số dư/nonce ngay trong chain, ví dụ self_alloc dùng trả gas cho tx hệ thống) **không bị ảnh hưởng** khi mất parent. Chỉ cần onboarding mới chấp nhận độ trễ.
+
+**Nếu cần giai đoạn 2 — "đăng ký tạm" (provisional registration):**
+1. State: thêm `uint64 ProvisionalUntilBlock = 11` vào `AccountState` (0 = không có). Gate cho phép nếu `ParentRegistered || ProvisionalUntilBlock > số block đang xử lý` (số block của block trước, hàm thuần).
+2. Cấp: system tx `ProvisionalRegister{User, UserSig, ClusterKey}` do **danh tính node** ký (cụm đồng ý). `UserSig` là chữ ký ECDSA của người dùng trên đúng thông điệp `REGISTER_ACCOUNT_V1:` gắn với khoá cụm này (cùng thông điệp `RegisterAccount` trên parent dùng); handler tự kiểm bằng ecrecover (xác định), đặt `ProvisionalUntilBlock = block hiện tại + W` (W cấu hình theo block), idempotent. Giới hạn số lần cấp mỗi block/epoch (bounded) để không thể bị làm ngập.
+3. Chữ ký người dùng nằm **trên chain** ⇒ khi parent về, bất kỳ node nào cũng lấy lại được để gửi `SendRegisterAccount` lên parent (không phải lưu cục bộ, sống qua restart).
+4. Xác nhận: sự kiện đăng ký từ parent (§2.3) đặt `ParentRegistered=true` và xoá trạng thái tạm. Hết hạn mà chưa xác nhận ⇒ mất quyền gửi (vẫn nhận được tiền); cấp lại cần sự kiện mới.
+5. Đối soát: nếu parent từ chối vì địa chỉ đã đăng ký ở cụm khác (`ErrAccountAlreadyRegistered`), worker đề xuất `ProvisionalRevoke(User)` ⇒ `ProvisionalUntilBlock=0`. Số dư còn lại bị kẹt ở cụm này (không gửi được): phải ghi rõ cho người dùng.
+6. Hạn chế tạm: tối thiểu cấm tx xuyên chain/`PARENT_CHAIN_GATEWAY` cho tài khoản chỉ ở trạng thái tạm (cần parent để bảo chứng), và giới hạn giá trị mỗi tx; hạn mức tích luỹ cần bộ đếm trong state (giai đoạn 2b, phức tạp hơn, chỉ làm nếu cần).
+
+**Đánh đổi phải nói rõ với người dùng:** trong cửa sổ tạm, đảm bảo "một địa chỉ một cụm" **không còn đầy đủ** — người dùng có thể ký `REGISTER_ACCOUNT` cho hai cụm và có tài khoản tạm ở cả hai (parent chỉ phân xử sau khi về). Đây đúng là khoảng hở replay xuyên cụm quay lại trong thời gian ngắn. Cách giảm: chain ID duy nhất theo cụm (gắn với khoá BLS, xem `secp256k1_proto_tcp_architecture_design.md` §10) giữ replay bị chặn kể cả trong cửa sổ tạm; W nhỏ; giới hạn giá trị; cấm xuyên chain. Nếu không chấp nhận khoảng hở này thì giữ giai đoạn 1 (chờ).
+
+**Test bổ sung cho giai đoạn 2 (ngoài §4):** hết hạn theo block (biên N-1/N/N+1, giống nhau trên mọi replica); cấp trùng idempotent; sai `UserSig` / chữ ký cho cụm khác bị từ chối đúng lỗi; revoke sau khi parent từ chối; tài khoản tạm không gửi được tx xuyên chain; ngừng parent thật rồi dựng lại ⇒ tài khoản tạm được xác nhận không cần can thiệp; **mô phỏng cùng một người dùng được cấp tạm ở hai cụm cùng chain ID ⇒ chứng minh khoảng hở và chứng minh chain ID khác nhau thì đóng được**; kiểm tra đột biến (bỏ kiểm `UserSig`, bỏ hết hạn, bỏ cấm xuyên chain).
