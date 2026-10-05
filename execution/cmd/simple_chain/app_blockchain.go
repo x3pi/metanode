@@ -550,6 +550,12 @@ func (app *App) initBlockchain() error {
 			return fmt.Errorf("failed NewChainState: %v", err)
 		}
 
+		// Initialize blockchain singleton early so recovery operations like CommitBlockState have access to it
+		blockchain.InitBlockChain(100, blockDatabase, app.storageManager)
+		if app.chainState != nil && blockchain.GetBlockChainInstance() != nil {
+			blockchain.GetBlockChainInstance().SetChangelogDB(app.chainState.GetChangelogDB())
+		}
+
 		// A crash can leave the canonical block durable while its asynchronous
 		// NOMT payload is not. The changelog is synced before block publication,
 		// so rebuild both NOMT domains to the canonical header before integrity
