@@ -306,6 +306,11 @@ func (w *CommitAttestationWorker) signAndSubmit(ctx context.Context, calldata []
 			return hash, nil
 		}
 		lastErr = err
+		// Every failure here is an eth_sendRawTransaction ADMISSION error (mempool nonce race, transport, breaker),
+		// so all of them are retried with a fresh pending nonce. Contract-level rejections such as "already
+		// submitted a share" or "epoch mismatch" are execution results visible only in the receipt and never reach
+		// this point, and committee membership is checked by handleCommit before submitting; so no error text is
+		// treated as permanent here (matching on message strings would be dead code and brittle).
 		logger.Warn("⚠️ [COMMIT ATTESTATION] submit share attempt %d failed: %v (will retry with fresh nonce)", attempt+1, err)
 	}
 	return common.Hash{}, lastErr
