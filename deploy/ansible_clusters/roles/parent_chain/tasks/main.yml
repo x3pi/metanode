@@ -34,6 +34,12 @@
           rm -f "{{ node_data_dir }}/parent_chain.pid"
         fi
         pkill -9 -f "{{ bin_dir }}/parent_chain.*{{ node_data_dir }}" 2>/dev/null || true
+        for pid in $(pgrep -f "{{ bin_dir }}/parent_chain" 2>/dev/null || true); do
+          cwd_path=$(readlink -f /proc/$pid/cwd 2>/dev/null || true)
+          if [ "$cwd_path" = "{{ node_data_dir }}" ]; then
+            kill -9 $pid 2>/dev/null || true
+          fi
+        done
       failed_when: false
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────
