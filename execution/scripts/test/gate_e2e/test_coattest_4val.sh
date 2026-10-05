@@ -15,13 +15,11 @@ echo "   Base Dir: $BASE"
 echo "   Bin Dir:  $BIN_DIR"
 echo "================================================================="
 
-# Ensure binaries exist
+# Always rebuild (incremental): reusing binaries left in $BIN_DIR would silently test OLD code.
 mkdir -p "$BIN_DIR"
-if [ ! -f "$BIN_DIR/parent_chain" ] || [ ! -f "$BIN_DIR/simple_chain" ]; then
-    echo "📦 Building parent_chain and simple_chain binaries..."
-    ( cd "$EXECUTION_ROOT" && go build -o "$BIN_DIR/parent_chain" ./cmd/parent_chain )
-    ( cd "$EXECUTION_ROOT" && go build -o "$BIN_DIR/simple_chain" ./cmd/simple_chain )
-fi
+echo "📦 Building parent_chain and simple_chain binaries..."
+( cd "$EXECUTION_ROOT" && go build -o "$BIN_DIR/parent_chain" ./cmd/parent_chain )
+( cd "$EXECUTION_ROOT" && go build -o "$BIN_DIR/simple_chain" ./cmd/simple_chain )
 
 # Build e2e_coattest_4val tool
 echo "📦 Building e2e_coattest_4val tool..."

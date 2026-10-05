@@ -3,6 +3,7 @@ package tx_processor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"testing"
 
@@ -10,7 +11,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
@@ -107,4 +110,33 @@ func TestRollupSystemHandler_CoAttestationEnforcedIn4ValidatorCommittee(t *testi
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, forgedMint.String(), got.Balance().String(), "target balance must be credited exactly once after co-attestation")
+}
+
+type failingCommittee struct{}
+
+func (failingCommittee) GetActiveCommitteeBLSKeys() ([]cm.PublicKey, error) {
+	return nil, errors.New("committee unreadable")
+}
+
+// If the committee cannot be read (stake DB error) an unattested system event must be rejected, never applied:
+// failing open would let a single Byzantine validator bypass co-attestation whenever the read fails, and replicas
+// whose read failed would disagree with those whose read succeeded.
+func TestRollupSystemHandler_UnattestedEventRejectedWhenCommitteeUnreadable(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	called := false
+	h := &RollupSystemHandler{
+		dispatcher:   systemDispatcher(func(rollup.Store, AccountStateAccessor, []byte) error { called = true; return nil }),
+		committeeFor: func(*blockchain.ChainState) rollup.CommitteeProvider { return failingCommittee{} },
+	}
+	nodeKP := bls.GenerateKeyPair()
+	ns := state.NewAccountState(nodeKP.Address())
+	ns.AddBalance(big.NewInt(1_000_000_000_000_000))
+	ns.SetPublicKeyBls(nodeKP.PublicKey().Bytes())
+	cs.GetAccountStateDB().SetState(ns)
+	tx := transaction.NewTransaction(nodeKP.Address(), rollup.RollupSystemAddress, big.NewInt(0), 21000, 1_000_000_000, 0,
+		[]byte(`{"event":"x"}`), nil, common.Hash{}, common.Hash{}, 0, 1)
+	rcp, _, err := h.HandleTransaction(context.Background(), cs, tx, rollup.RollupSystemAddress, false, 0)
+	require.NoError(t, err)
+	require.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, rcp.Status())
+	require.False(t, called, "the inner event must not be dispatched")
 }

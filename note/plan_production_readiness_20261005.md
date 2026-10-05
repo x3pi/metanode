@@ -46,8 +46,8 @@ Issue #103 (CRITICAL: `SKIP_MEMPOOL_SIG_VERIFY` bật cứng trong template depl
 
 ## Tiêu chí "sẵn sàng production" (checklist)
 - [x] P0-1 cụm ≥4 validator: 5 kịch bản PASS 3 lần liên tiếp, state root các node khớp.
-- [x] P0-2 không validator đơn lẻ nào mint/credit được; cross-chain credit thật vẫn PASS.
+- [~] P0-2 envelope + tombstone đã có và có unit/integration test; **CHƯA kiểm** (a) luồng credit cross-chain thật qua envelope trên cụm nhiều validator, (b) mọi validator sinh `inner` JSON giống hệt từng byte cho cùng một sự kiện (nếu lệch thì không bao giờ đủ f+1 ⇒ credit treo). Review 2026-10-05 đã sửa 2 lỗi: tombstone ghi trước dispatch (sự kiện bị từ chối sẽ mất vĩnh viễn) và fail-open khi đọc committee lỗi.
 - [x] P0-3 cảnh báo khi khoá attestation không thuộc committee.
-- [x] P0-4 #103/#104/#105 đóng, chữ ký tx được kiểm ở exec filter trên deploy thật.
+- [~] P0-4 #104 (vault trong inventory mẫu — chuỗi vault là placeholder, cần người dùng tự mã hoá) và #105 (bỏ khoá riêng khỏi parse_inventory) đã sửa; #103: template ansible vốn chỉ bật khi `skip_mempool_sig_verify=true`, nay thêm `METANODE_ENV=production`; CHƯA kiểm trên deploy thật.
 - [ ] P1-1/P1-2 runbook cutover và genesis production đã chạy thử trên cụm cô lập.
 - [ ] `go test -race`, `build_check.sh` sạch; mọi báo cáo có output thật kèm commit hash.

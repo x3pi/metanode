@@ -43,6 +43,15 @@ type AttestedRegistryApplier interface {
 type RollupSystemHandler struct {
 	dispatcher      RollupSystemEventDispatcher
 	registryHandler AccountRegistryApplier
+	// committeeFor (optional, tests) overrides how the validator committee is read for a chain state.
+	committeeFor func(*blockchain.ChainState) rollup.CommitteeProvider
+}
+
+func (h *RollupSystemHandler) committee(cs *blockchain.ChainState) rollup.CommitteeProvider {
+	if h.committeeFor != nil {
+		return h.committeeFor(cs)
+	}
+	return newLiveCommitteeProvider(cs)
 }
 
 var (
@@ -194,8 +203,10 @@ func (h *RollupSystemHandler) HandleTransaction(
 			return h.errorReceipt(tx, "dispatcher not initialized"), nil, nil
 		}
 
-		comm := newLiveCommitteeProvider(chainState)
-		if keys, _ := comm.GetActiveCommitteeBLSKeys(); len(keys) > 1 {
+		// Fail closed: if the committee cannot be read, an unattested event must NOT be applied (and every replica
+		// must reach the same verdict). Only a committee of at most one validator needs no co-attestation.
+		keys, committeeErr := h.committee(chainState).GetActiveCommitteeBLSKeys()
+		if committeeErr != nil || len(keys) > 1 {
 			logger.Error("❌ RollupSystemHandler: unattested system event rejected in multi-validator committee")
 			stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
 			return h.errorReceipt(tx, "unattested system event rejected: co-attestation required"), nil, nil

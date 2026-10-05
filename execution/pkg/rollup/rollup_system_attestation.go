@@ -127,10 +127,13 @@ func ApplyAttestedSystemEvent(
 				return fmt.Errorf("rollup system attestation: invalid BLS signature from validator %x", att.ValidatorPubkey[:6])
 			}
 		}
+		if err := dispatcher(store, stateDB, payload.Inner); err != nil {
+			return err
+		}
 		if contractDB != nil {
 			contractDB.SetStorageValue(RollupSystemAddress, tombstoneKey, []byte{1})
 		}
-		return dispatcher(store, stateDB, payload.Inner)
+		return nil
 	}
 
 	keys, err := committee.GetActiveCommitteeBLSKeys()
@@ -186,14 +189,19 @@ func ApplyAttestedSystemEvent(
 	}
 
 	if len(merged) >= required {
+		// Dispatch FIRST. If the inner event is rejected (e.g. a stale-state race that the worker retries later) nothing
+		// is tombstoned or cleared, so the event is not lost: the next attestation (or the retry by the validator whose
+		// share was not recorded) reaches the same quorum and dispatches again. Only a successful dispatch tombstones.
+		if err := dispatcher(store, stateDB, payload.Inner); err != nil {
+			return err
+		}
 		if contractDB != nil {
-			// Write tombstone first
 			contractDB.SetStorageValue(RollupSystemAddress, tombstoneKey, []byte{1})
 			if attStore != nil {
 				attStore.Clear(pendingKey)
 			}
 		}
-		return dispatcher(store, stateDB, payload.Inner)
+		return nil
 	}
 
 	if contractDB == nil {

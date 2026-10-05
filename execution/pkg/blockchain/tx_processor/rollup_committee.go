@@ -28,7 +28,8 @@ func newLiveCommitteeProvider(chainState *blockchain.ChainState) *LiveCommitteeP
 func (p *LiveCommitteeProvider) GetActiveCommitteeBLSKeys() ([]cm.PublicKey, error) {
 	stakeDB := p.chainState.GetStakeStateDB()
 	if stakeDB == nil {
-		return nil, fmt.Errorf("stake state DB unavailable")
+		// A chain without a stake DB has no committee (callers that require one treat an empty committee as an error).
+		return nil, nil
 	}
 	validators, err := stakeDB.GetAllValidators()
 	if err != nil {

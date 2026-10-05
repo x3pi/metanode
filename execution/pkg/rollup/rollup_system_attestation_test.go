@@ -214,3 +214,36 @@ func TestRollupSystemAttestation_DispatcherErrorPropagates(t *testing.T) {
 	err := ApplyAttestedSystemEvent(nil, e.stateDB, e.sc, comm, e.chainID, p, dispatcher)
 	require.ErrorIs(t, err, expectedErr)
 }
+
+// A rejected inner event must not be lost: the event is only tombstoned after a SUCCESSFUL dispatch, so a retry
+// (the worker re-proposes after a stale-state rejection) still applies it exactly once.
+func TestRollupSystemAttestation_RejectedDispatchIsRetriedNotLost(t *testing.T) {
+	for _, n := range []int{1, 4} {
+		e := newAttestedSysEnv(n)
+		comm := e.committee(n)
+		fail := true
+		applied := 0
+		dispatcher := func(Store, AccountStateDB, []byte) error {
+			if fail {
+				return errors.New("stale state, retry later")
+			}
+			applied++
+			return nil
+		}
+		need := (n-1)/3 + 1
+		var last error
+		for i := 0; i < need; i++ {
+			last = ApplyAttestedSystemEvent(nil, e.stateDB, e.sc, comm, e.chainID, e.buildPayload(e.vals[i], e.innerRaw), dispatcher)
+		}
+		require.Error(t, last, "n=%d: quorum reached but the dispatch was rejected", n)
+		require.Equal(t, 0, applied)
+
+		fail = false
+		// retry by the validator whose share was not recorded
+		require.NoError(t, ApplyAttestedSystemEvent(nil, e.stateDB, e.sc, comm, e.chainID, e.buildPayload(e.vals[need-1], e.innerRaw), dispatcher))
+		require.Equal(t, 1, applied, "n=%d: the event must be applied after the retry", n)
+		// and exactly once
+		require.NoError(t, ApplyAttestedSystemEvent(nil, e.stateDB, e.sc, comm, e.chainID, e.buildPayload(e.vals[0], e.innerRaw), dispatcher))
+		require.Equal(t, 1, applied, "n=%d: tombstone prevents a second application", n)
+	}
+}
