@@ -11,7 +11,7 @@ export function NetworkMonitorTab() {
     setIsRefreshing(true);
     const results = {};
     for (const cluster of PRESET_CLUSTERS) {
-      results[cluster.id] = await checkNodeStatus(cluster.rpcUrl);
+      results[cluster.id] = await checkNodeStatus(cluster);
     }
     setNodesStatus(results);
     setLastRefreshed(new Date().toLocaleTimeString());

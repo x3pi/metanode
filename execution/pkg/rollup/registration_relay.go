@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
@@ -135,12 +136,17 @@ func (r *RegistrationRelay) verifyUserSig(user common.Address, sig []byte) bool 
 	if s[registrationSigVIndex] >= ethRecoveryIDOffset {
 		s[registrationSigVIndex] -= ethRecoveryIDOffset // accept the Ethereum 27/28 form too
 	}
-	hash := crypto.Keccak256Hash(r.RegistrationDigest(user))
-	pub, err := crypto.SigToPub(hash.Bytes(), s)
-	if err != nil {
-		return false
+	digest := r.RegistrationDigest(user)
+	hash := crypto.Keccak256Hash(digest)
+	if pub, err := crypto.SigToPub(hash.Bytes(), s); err == nil && crypto.PubkeyToAddress(*pub) == user {
+		return true
 	}
-	return crypto.PubkeyToAddress(*pub) == user
+	// Also accept Ethereum personal_sign text prefix
+	ethHash := accounts.TextHash(digest)
+	if pub2, err2 := crypto.SigToPub(ethHash, s); err2 == nil && crypto.PubkeyToAddress(*pub2) == user {
+		return true
+	}
+	return false
 }
 
 // Submit accepts a registration request. It is idempotent: an address that is already confirmed, pending or rejected

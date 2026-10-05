@@ -34,8 +34,11 @@ export function AccountGateCard({
   const [currentStep, setCurrentStep] = useState(0); // 0: Idle, 1: Signing, 2: Parent Chain Relay, 3: Syncing, 4: Done
   const [regError, setRegError] = useState(null);
 
+  const gateEnforced = accountInfo?.gateEnforced;
   const isRegisteredOnExec = accountInfo?.parentRegistered;
   const isRegisteredOnParent = parentRegInfo?.registered;
+
+  const isGatePass = gateEnforced === false || isRegisteredOnExec;
 
   const handleStartOnboarding = async () => {
     if (!account) {
@@ -155,116 +158,137 @@ export function AccountGateCard({
   return (
     <div>
       {/* Hero Gate Status Card */}
-      <div
-        className={`gate-hero-card ${
-          isRegisteredOnExec
+      {(() => {
+        const isGateActive = gateEnforced !== false;
+        const gateHeroStatus =
+          !isGateActive
+            ? 'open'
+            : isRegisteredOnExec
             ? 'registered'
             : isRegisteredOnParent
             ? 'pending'
-            : 'unregistered'
-        }`}
-      >
-        <div className="gate-hero-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <div
-              style={{
-                width: '48px',
-                height: '48px',
-                borderRadius: '12px',
-                background: isRegisteredOnExec
-                  ? 'rgba(16, 185, 129, 0.2)'
-                  : isRegisteredOnParent
-                  ? 'rgba(245, 158, 11, 0.2)'
-                  : 'rgba(239, 68, 68, 0.2)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              {isRegisteredOnExec ? (
-                <ShieldCheck className="w-6 h-6" style={{ color: 'var(--green)' }} />
-              ) : isRegisteredOnParent ? (
-                <Clock className="w-6 h-6" style={{ color: 'var(--amber)' }} />
-              ) : (
-                <ShieldX className="w-6 h-6" style={{ color: 'var(--red)' }} />
-              )}
-            </div>
-            <div>
-              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>
-                Parent Chain Account Gate Status
+            : 'unregistered';
+
+        return (
+          <div className={`gate-hero-card ${gateHeroStatus === 'open' ? 'registered' : gateHeroStatus}`}>
+            <div className="gate-hero-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                <div
+                  style={{
+                    width: '48px',
+                    height: '48px',
+                    borderRadius: '12px',
+                    background:
+                      gateHeroStatus === 'registered' || gateHeroStatus === 'open'
+                        ? 'rgba(16, 185, 129, 0.2)'
+                        : gateHeroStatus === 'pending'
+                        ? 'rgba(245, 158, 11, 0.2)'
+                        : 'rgba(239, 68, 68, 0.2)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  {gateHeroStatus === 'registered' || gateHeroStatus === 'open' ? (
+                    <ShieldCheck className="w-6 h-6" style={{ color: 'var(--green)' }} />
+                  ) : gateHeroStatus === 'pending' ? (
+                    <Clock className="w-6 h-6" style={{ color: 'var(--amber)' }} />
+                  ) : (
+                    <ShieldX className="w-6 h-6" style={{ color: 'var(--red)' }} />
+                  )}
+                </div>
+                <div>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>
+                    Parent Chain Account Gate Status
+                  </div>
+                  <h2 style={{ fontSize: '1.35rem', fontWeight: 800, color: '#fff' }}>
+                    {gateHeroStatus === 'open'
+                      ? 'Active & Ready — No Account Gate Required'
+                      : gateHeroStatus === 'registered'
+                      ? 'Active & Registered — Ready to Transact'
+                      : gateHeroStatus === 'pending'
+                      ? 'Registered on Parent Chain (Syncing to Exec Cluster)'
+                      : 'Unregistered — Outgoing Transactions Gated'}
+                  </h2>
+                </div>
               </div>
-              <h2 style={{ fontSize: '1.35rem', fontWeight: 800, color: '#fff' }}>
-                {isRegisteredOnExec
-                  ? 'Active & Registered — Ready to Transact'
-                  : isRegisteredOnParent
-                  ? 'Registered on Parent Chain (Syncing to Exec Cluster)'
-                  : 'Unregistered — Outgoing Transactions Gated'}
-              </h2>
-            </div>
-          </div>
 
-          <div
-            className="gate-status-pill"
-            style={{
-              background: isRegisteredOnExec
-                ? 'rgba(16, 185, 129, 0.15)'
-                : isRegisteredOnParent
-                ? 'rgba(245, 158, 11, 0.15)'
-                : 'rgba(239, 68, 68, 0.15)',
-              color: isRegisteredOnExec
-                ? '#34d399'
-                : isRegisteredOnParent
-                ? '#fbbf24'
-                : '#f87171',
-              border: `1px solid ${
-                isRegisteredOnExec
-                  ? 'rgba(16, 185, 129, 0.3)'
-                  : isRegisteredOnParent
-                  ? 'rgba(245, 158, 11, 0.3)'
-                  : 'rgba(239, 68, 68, 0.3)'
-              }`,
-            }}
-          >
-            <span
-              className={`status-dot ${
-                isRegisteredOnExec ? 'online' : isRegisteredOnParent ? 'pending' : 'offline'
-              }`}
-            />
-            {isRegisteredOnExec
-              ? 'PASS (Gate Open)'
-              : isRegisteredOnParent
-              ? 'PENDING SYNC'
-              : 'BLOCKED (Code 69)'}
-          </div>
-        </div>
+              <div
+                className="gate-status-pill"
+                style={{
+                  background:
+                    gateHeroStatus === 'registered' || gateHeroStatus === 'open'
+                      ? 'rgba(16, 185, 129, 0.15)'
+                      : gateHeroStatus === 'pending'
+                      ? 'rgba(245, 158, 11, 0.15)'
+                      : 'rgba(239, 68, 68, 0.15)',
+                  color:
+                    gateHeroStatus === 'registered' || gateHeroStatus === 'open'
+                      ? '#34d399'
+                      : gateHeroStatus === 'pending'
+                      ? '#fbbf24'
+                      : '#f87171',
+                  border: `1px solid ${
+                    gateHeroStatus === 'registered' || gateHeroStatus === 'open'
+                      ? 'rgba(16, 185, 129, 0.3)'
+                      : gateHeroStatus === 'pending'
+                      ? 'rgba(245, 158, 11, 0.3)'
+                      : 'rgba(239, 68, 68, 0.3)'
+                  }`,
+                }}
+              >
+                <span
+                  className={`status-dot ${
+                    gateHeroStatus === 'registered' || gateHeroStatus === 'open'
+                      ? 'online'
+                      : gateHeroStatus === 'pending'
+                      ? 'pending'
+                      : 'offline'
+                  }`}
+                />
+                {gateHeroStatus === 'open'
+                  ? 'OPEN CLUSTER (No Gate)'
+                  : gateHeroStatus === 'registered'
+                  ? 'PASS (Gate Open)'
+                  : gateHeroStatus === 'pending'
+                  ? 'PENDING SYNC'
+                  : 'BLOCKED (Code 69)'}
+              </div>
+            </div>
 
-        {/* Detailed Metrics */}
-        <div className="details-grid">
-          <div className="detail-box">
-            <div className="detail-label">Connected Wallet Address</div>
-            <div className="detail-value mono">{account}</div>
-          </div>
-          <div className="detail-box">
-            <div className="detail-label">Current Cluster Balance</div>
-            <div className="detail-value">
-              {accountInfo?.balanceMtn || '0.0000'} <span style={{ color: 'var(--cyan)' }}>MTN</span>
+            {/* Detailed Metrics */}
+            <div className="details-grid">
+              <div className="detail-box">
+                <div className="detail-label">Connected Wallet Address</div>
+                <div className="detail-value mono">{account}</div>
+              </div>
+              <div className="detail-box">
+                <div className="detail-label">Current Cluster Balance</div>
+                <div className="detail-value">
+                  {accountInfo?.balanceMtn || '0.0000'} <span style={{ color: 'var(--cyan)' }}>MTN</span>
+                </div>
+              </div>
+              <div className="detail-box">
+                <div className="detail-label">Account Nonce</div>
+                <div className="detail-value mono">{accountInfo?.nonce ?? 0}</div>
+              </div>
+              <div className="detail-box">
+                <div className="detail-label">Parent Registry Seq</div>
+                <div className="detail-value mono">
+                  {gateHeroStatus === 'open'
+                    ? 'Not Required'
+                    : parentRegInfo?.registered
+                    ? `#${parentRegInfo.seq}`
+                    : 'Not registered yet'}
+                </div>
+              </div>
             </div>
           </div>
-          <div className="detail-box">
-            <div className="detail-label">Account Nonce</div>
-            <div className="detail-value mono">{accountInfo?.nonce ?? 0}</div>
-          </div>
-          <div className="detail-box">
-            <div className="detail-label">Parent Registry Seq</div>
-            <div className="detail-value mono">
-              {parentRegInfo?.registered ? `#${parentRegInfo.seq}` : 'Not registered yet'}
-            </div>
-          </div>
-        </div>
-      </div>
+        );
+      })()}
 
       {/* Onboarding Interactive Flow */}
-      {!isRegisteredOnExec && (
+      {gateEnforced !== false && !isRegisteredOnExec && (
         <div className="card" style={{ marginTop: '20px' }}>
           <div className="card-header">
             <div>
