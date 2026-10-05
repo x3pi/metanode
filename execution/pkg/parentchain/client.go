@@ -46,6 +46,9 @@ type Client interface {
 	
 	// GetInboundTransfers returns incoming transfers and the new cursor
 	GetInboundTransfers(pubKey cm.PublicKey, cursor uint64) ([]*TransferEvent, uint64, error)
+
+	// GetInboundAccountRegistrations returns incoming account registrations and the new cursor
+	GetInboundAccountRegistrations(pubKey cm.PublicKey, cursor uint64) ([]*AccountRegisteredEvent, uint64, error)
 	
 	GetTransferRecord(msgID common.Hash) (FloatTransferRecord, bool, error)
 	GetClaimed(msgID common.Hash) (FloatOutcome, error)

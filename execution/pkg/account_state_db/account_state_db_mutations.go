@@ -570,3 +570,24 @@ func (db *AccountStateDB) ExecuteNativeTransferLockFree(
 
 	return nil
 }
+
+func (db *AccountStateDB) SetParentRegistered(address common.Address, registered bool) error {
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
+
+	if db.lockedFlag.Load() {
+		return errors.New("SetParentRegistered db.lockedFlag is already locked")
+	}
+
+	as, err := db.getOrCreateAccountState(address)
+	if err != nil {
+		return fmt.Errorf("SetParentRegistered: %w", err)
+	}
+	if as == nil {
+		return errors.New("SetParentRegistered: account state is nil")
+	}
+	as.SetParentRegistered(registered)
+	db.setDirtyAccountState(as)
+	return nil
+}
+

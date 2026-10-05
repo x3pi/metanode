@@ -94,6 +94,10 @@ func (m *mockParentChainClient) GetInboundTransfers(pubKey cm.PublicKey, cursor 
 	return nil, cursor, nil
 }
 
+func (m *mockParentChainClient) GetInboundAccountRegistrations(pubKey cm.PublicKey, cursor uint64) ([]*parentchain.AccountRegisteredEvent, uint64, error) {
+	return nil, cursor, nil
+}
+
 func (m *mockParentChainClient) GetTransferRecord(msgID common.Hash) (parentchain.FloatTransferRecord, bool, error) {
 	if m.transferNotFound {
 		return parentchain.FloatTransferRecord{}, false, nil

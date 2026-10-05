@@ -397,6 +397,70 @@ func (s *TreeStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64) 
 	return events, total, nil
 }
 
+func (s *TreeStore) AppendAccountRegistration(clusterKeyHash common.Hash, event *AccountRegisteredEvent) error {
+	seqKey := TreeKey(NamespaceAccountRegistrationSeq, clusterKeyHash.Bytes())
+	seqBytes, found, err := s.kv.Get(seqKey)
+	if err != nil {
+		return err
+	}
+	var seq uint64
+	if found {
+		seq, _ = DecodeUint64(seqBytes)
+	}
+
+	evCopy := *event
+	evCopy.Seq = seq
+
+	bKey := append(clusterKeyHash.Bytes(), EncodeUint64(seq)...)
+	evKey := TreeKey(NamespaceAccountRegistrationLog, bKey)
+	if err := s.kv.Put(evKey, EncodeAccountRegisteredEvent(&evCopy)); err != nil {
+		return err
+	}
+	return s.kv.Put(seqKey, EncodeUint64(seq+1))
+}
+
+func (s *TreeStore) GetAccountRegistrations(clusterKeyHash common.Hash, cursor uint64) ([]*AccountRegisteredEvent, uint64, error) {
+	seqKey := TreeKey(NamespaceAccountRegistrationSeq, clusterKeyHash.Bytes())
+	seqBytes, found, err := s.kv.Get(seqKey)
+	if err != nil {
+		return nil, cursor, err
+	}
+	if !found {
+		return nil, 0, nil
+	}
+	total, err := DecodeUint64(seqBytes)
+	if err != nil {
+		return nil, cursor, err
+	}
+
+	if cursor >= total {
+		return nil, cursor, nil
+	}
+
+	limit := total
+	if limit-cursor > 50 {
+		limit = cursor + 50
+	}
+
+	var events []*AccountRegisteredEvent
+	for i := cursor; i < limit; i++ {
+		bKey := append(clusterKeyHash.Bytes(), EncodeUint64(i)...)
+		evKey := TreeKey(NamespaceAccountRegistrationLog, bKey)
+		evData, evFound, err := s.kv.Get(evKey)
+		if err != nil {
+			return nil, i, err
+		}
+		if evFound {
+			ev, err := DecodeAccountRegisteredEvent(evData)
+			if err != nil {
+				return nil, i, err
+			}
+			events = append(events, ev)
+		}
+	}
+	return events, limit, nil
+}
+
 // GetNonce returns the current sequential nonce for an account (namespace 0x0B).
 func (s *TreeStore) GetNonce(sender common.Address) (uint64, error) {
 	k := TreeKey(NamespaceSenderNonce, sender.Bytes())

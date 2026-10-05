@@ -1,6 +1,7 @@
 package parentchain
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/big"
@@ -522,6 +523,57 @@ func (q *QuorumClient) GetInboundTransfers(pubKey cm.PublicKey, cursor uint64) (
 	}
 	return nil, 0, lastErr
 }
+
+func (q *QuorumClient) GetInboundAccountRegistrations(pubKey cm.PublicKey, cursor uint64) ([]*AccountRegisteredEvent, uint64, error) {
+	if len(q.clients) == 0 {
+		return nil, cursor, ErrNoNodesConfigured
+	}
+	type respItem struct {
+		events []*AccountRegisteredEvent
+		cursor uint64
+		err    error
+	}
+	ch := make(chan respItem, len(q.clients))
+	for _, c := range q.clients {
+		go func(cl *httpClient) {
+			evs, nextCur, err := cl.GetInboundAccountRegistrations(pubKey, cursor)
+			ch <- respItem{events: evs, cursor: nextCur, err: err}
+		}(c)
+	}
+
+	// Group responses by deterministic fingerprint: cursor + serialized events
+	type groupKey string
+	counts := make(map[groupKey]int)
+	groupResp := make(map[groupKey]respItem)
+
+	threshold := q.quorumThreshold()
+	var lastErr error
+	for i := 0; i < len(q.clients); i++ {
+		res := <-ch
+		if res.err != nil {
+			lastErr = res.err
+			continue
+		}
+		// Hash events and next cursor to identify identical responses
+		b := make([]byte, 8)
+		binary.BigEndian.PutUint64(b, res.cursor)
+		for _, ev := range res.events {
+			b = append(b, EncodeAccountRegisteredEvent(ev)...)
+		}
+		k := groupKey(crypto.Keccak256Hash(b).Hex())
+		counts[k]++
+		groupResp[k] = res
+		if counts[k] >= threshold {
+			return res.events, res.cursor, nil
+		}
+	}
+
+	if lastErr != nil {
+		return nil, cursor, fmt.Errorf("%w: %v", ErrQuorumNotReached, lastErr)
+	}
+	return nil, cursor, ErrQuorumNotReached
+}
+
 
 func (q *QuorumClient) GetTransferRecord(msgID common.Hash) (FloatTransferRecord, bool, error) {
 	if len(q.clients) == 0 {

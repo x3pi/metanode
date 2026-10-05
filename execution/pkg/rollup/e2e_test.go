@@ -219,6 +219,12 @@ func (a *ParentChainClientAdapter) GetInboundTransfers(pubKey cm.PublicKey, curs
 	return res, uint64(len(events)), nil
 }
 
+func (a *ParentChainClientAdapter) GetInboundAccountRegistrations(pubKey cm.PublicKey, cursor uint64) ([]*parentchain.AccountRegisteredEvent, uint64, error) {
+	a.chain.mu.Lock()
+	defer a.chain.mu.Unlock()
+	return a.chain.store.GetAccountRegistrations(crypto.Keccak256Hash(pubKey[:]), cursor)
+}
+
 func (a *ParentChainClientAdapter) GetTransferRecord(msgID common.Hash) (parentchain.FloatTransferRecord, bool, error) {
 	a.chain.mu.Lock()
 	defer a.chain.mu.Unlock()

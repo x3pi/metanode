@@ -210,11 +210,18 @@ func VerifyTransaction(
 	// so this bypass never fires on Master (which is correct).
 	// ════════════════════════════════════════════════════════════════
 	isSubNodeLagging := len(as.PublicKeyBls()) == 0 && (tx.GetNonce() > 0 || as.Nonce() > 0)
+	pol := sigPolicyOf(chainState)
+
+	// Rollup system events are applied from their payload alone, so only BLS-native node identities may submit them.
+	// No sub-node-lagging exemption: an attacker (no BLS key, nonce > 0) looks exactly like a lagging account. System
+	// txs are produced by the master node's own workers, which always hold the node identity's state.
+	if tx.ToAddress() == rollup.RollupSystemAddress && !isNodeBLSIdentity(tx, as) {
+		return transaction.UnauthorizedSystemSender
+	}
 
 	if as.Nonce() != 0 || tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		txHash := tx.Hash()
 
-		pol := sigPolicyOf(chainState)
 		if tx.Type() == 0xFF {
 			if perr := pol.secpProtoError(tx); perr != nil {
 				logger.Error("❌ [VERIFY] Type 0xFF tx rejected (%s): txHash=%s chainID=%d", perr.Description, txHash.Hex(), tx.GetChainID())
@@ -283,6 +290,11 @@ func VerifyTransaction(
 		}
 	}
 
+	if regErr := pol.senderRegisteredError(tx, as); regErr != nil {
+		logger.Warn("❌ [VERIFY] Sender not registered on parent chain: from=%s, txHash=%s", tx.FromAddress().Hex(), tx.Hash().Hex())
+		return regErr
+	}
+
 	if as.AccountType() == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		if !tx.ValidSecpSign() {
 			return transaction.RequiresTwoSignatures
@@ -330,7 +342,11 @@ func VerifyTransaction(
 			return transaction.InvalidData
 		}
 	} else {
-		if as.Nonce() == 0 && !isSubNodeLagging {
+		// Legacy rule: an account's first tx must bind its BLS key (setBlsPublicKey) before any ordinary tx. In secp
+		// mode users never have a BLS key, so the rule would lock every fresh secp-only account out; node (BLS-native)
+		// identities keep it.
+		secpUser := pol.secp && !isNodeBLSIdentity(tx, as)
+		if as.Nonce() == 0 && !isSubNodeLagging && !secpUser {
 			return transaction.InvalidAddressMatchForTx0
 		}
 		if !tx.ValidDeployData() {

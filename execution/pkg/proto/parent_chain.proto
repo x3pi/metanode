@@ -194,3 +194,14 @@ message StateRootEntryProto {
 message NonceEntryProto {
   uint64 nonce = 1;
 }
+
+message AccountRegisteredEventProto {
+  uint64 seq = 1;
+  bytes user_address = 2;
+  bytes cluster_key = 3;
+  uint64 parent_block = 4;
+}
+
+message InboundAccountRegistrationsProto {
+  repeated AccountRegisteredEventProto events = 1;
+}

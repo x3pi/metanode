@@ -100,6 +100,8 @@ var (
 	VerifyTransactionError      = &TransactionError{66, "verify transaction failed"}
 	AddToPoolError              = &TransactionError{67, "failed to add transaction to pool"}
 	UploadChunkError            = &TransactionError{68, "failed to upload chunk"}
+	AccountNotRegistered        = &TransactionError{69, "account not registered on parent chain"}
+	UnauthorizedSystemSender    = &TransactionError{70, "unauthorized sender for a rollup system event"}
 )
 
 var CodeToError = map[int64]*TransactionError{
@@ -175,6 +177,10 @@ var CodeToError = map[int64]*TransactionError{
 
 	// upload chunk
 	68: UploadChunkError,
+
+	// account registration gate
+	69: AccountNotRegistered,
+	70: UnauthorizedSystemSender,
 }
 
 // DescriptionToError provides reverse lookup from error description to TransactionError.

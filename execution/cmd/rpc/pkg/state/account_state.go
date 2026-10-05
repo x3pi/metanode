@@ -36,6 +36,7 @@ type AccountState struct {
 	nonce              uint64
 	publicKeyBls       []byte
 	accountType        pb.ACCOUNT_TYPE
+	parentRegistered   bool
 }
 
 func NewAccountState(address common.Address) types.AccountState {
@@ -57,9 +58,10 @@ func (as *AccountState) Proto() *pb.AccountState {
 		Balance:        as.balance.Bytes(),
 		PendingBalance: as.pendingBalance.Bytes(),
 		DeviceKey:      as.deviceKey.Bytes(),
-		Nonce:          nonceBytes,
-		PublicKeyBls:   as.publicKeyBls,
-		AccountType:    as.accountType,
+		Nonce:            nonceBytes,
+		PublicKeyBls:     as.publicKeyBls,
+		AccountType:      as.accountType,
+		ParentRegistered: as.parentRegistered,
 	}
 	if as.smartContractState != nil {
 		pbAs.SmartContractState = as.smartContractState.Proto()
@@ -84,6 +86,7 @@ func (as *AccountState) FromProto(pbData *pb.AccountState) {
 	}
 	as.publicKeyBls = pbData.PublicKeyBls
 	as.accountType = pbData.AccountType
+	as.parentRegistered = pbData.ParentRegistered
 }
 
 func (as *AccountState) Marshal() ([]byte, error) {
@@ -113,6 +116,7 @@ func (as *AccountState) Copy() types.AccountState {
 	copyAs.nonce = as.nonce
 	copy(copyAs.publicKeyBls[:], as.publicKeyBls[:])
 	copyAs.accountType = as.accountType
+	copyAs.parentRegistered = as.parentRegistered
 	return copyAs
 }
 
@@ -134,6 +138,14 @@ func (as *AccountState) PublicKeyBls() []byte {
 
 func (as *AccountState) AccountType() pb.ACCOUNT_TYPE {
 	return as.accountType
+}
+
+func (as *AccountState) ParentRegistered() bool {
+	return as.parentRegistered
+}
+
+func (as *AccountState) SetParentRegistered(registered bool) {
+	as.parentRegistered = registered
 }
 
 func (as *AccountState) Balance() *big.Int {
@@ -264,6 +276,7 @@ type JsonAccountState struct {
 	Nonce              uint64                  `json:"nonce"`
 	PublicKeyBls       string                  `json:"publicKeyBls"`
 	AccountType        int32                   `json:"accountType"`
+	ParentRegistered   bool                    `json:"parent_registered,omitempty"`
 }
 
 func (j *JsonAccountState) ToAccountState() *AccountState {
@@ -281,6 +294,7 @@ func (j *JsonAccountState) ToAccountState() *AccountState {
 	as.nonce = j.Nonce
 	as.publicKeyBls = common.FromHex(j.PublicKeyBls)
 	as.accountType = pb.ACCOUNT_TYPE(j.AccountType)
+	as.parentRegistered = j.ParentRegistered
 	return as
 }
 
@@ -297,6 +311,7 @@ func (j *JsonAccountState) FromAccountState(as *AccountState) {
 	j.Nonce = as.Nonce()
 	j.PublicKeyBls = hex.EncodeToString(as.publicKeyBls)
 	j.AccountType = int32(as.accountType)
+	j.ParentRegistered = as.parentRegistered
 }
 
 func MarshalSCStatesWithBlockNumber(

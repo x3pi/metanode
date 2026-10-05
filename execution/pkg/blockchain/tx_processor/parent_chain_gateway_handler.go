@@ -31,6 +31,8 @@ type AccountStateAccessor interface {
 	SubBalance(address common.Address, amount *big.Int)
 	GetNonce(address common.Address) uint64
 	SetNonce(address common.Address, nonce uint64)
+	GetParentRegistered(address common.Address) bool
+	SetParentRegistered(address common.Address, registered bool)
 }
 
 type liveAccountStateAccessor struct {
@@ -71,6 +73,19 @@ func (a *liveAccountStateAccessor) GetNonce(address common.Address) uint64 {
 func (a *liveAccountStateAccessor) SetNonce(address common.Address, nonce uint64) {
 	_ = a.db.SetNonce(address, nonce)
 }
+
+func (a *liveAccountStateAccessor) GetParentRegistered(address common.Address) bool {
+	state, err := a.db.AccountState(address)
+	if err != nil || state == nil {
+		return false
+	}
+	return state.ParentRegistered()
+}
+
+func (a *liveAccountStateAccessor) SetParentRegistered(address common.Address, registered bool) {
+	_ = a.db.SetParentRegistered(address, registered)
+}
+
 
 // liveSmartContractDB adapts *smart_contract_db.SmartContractDB to rollup.SmartContractDB,
 // wrapping the barrier-tx call's own chainState.GetSmartContractDB() result. Has the exact same
