@@ -11,7 +11,14 @@ import {
   Layers,
   Sparkles,
 } from 'lucide-react';
-import { PRESET_CLUSTERS, submitRegistrationToParent } from '../services/metanodeRpc';
+import {
+  PRESET_CLUSTERS,
+  LAN_IP,
+  submitRegistrationToParent,
+  getClusterRegistrationMessage,
+  registerAccountOnNode,
+  getRegistrationStatusFromNode,
+} from '../services/metanodeRpc';
 
 export function AccountGateCard({
   account,
@@ -24,7 +31,7 @@ export function AccountGateCard({
     selectedCluster.isExec ? selectedCluster : PRESET_CLUSTERS[0]
   );
   const [isRegistering, setIsRegistering] = useState(false);
-  const [currentStep, setCurrentStep] = useState(0); // 0: Idle, 1: Signing, 2: Parent Chain, 3: Syncing, 4: Done
+  const [currentStep, setCurrentStep] = useState(0); // 0: Idle, 1: Signing, 2: Parent Chain Relay, 3: Syncing, 4: Done
   const [regError, setRegError] = useState(null);
 
   const isRegisteredOnExec = accountInfo?.parentRegistered;
@@ -42,7 +49,17 @@ export function AccountGateCard({
     try {
       // Step 1: User Signs Registration Intent with ECDSA
       const clusterKey = targetCluster.clusterKey || PRESET_CLUSTERS[0].clusterKey;
-      const message = `REGISTER_ACCOUNT_V1:${account.toLowerCase()}:${clusterKey.toLowerCase()}`;
+      let hashToSign;
+      try {
+        const msgRes = await getClusterRegistrationMessage(targetCluster.rpcUrl, account);
+        if (msgRes && msgRes.hashToSign) {
+          hashToSign = msgRes.hashToSign;
+        }
+      } catch (msgErr) {
+        console.warn('Could not fetch custom registration hash, falling back to message format:', msgErr);
+      }
+
+      const message = hashToSign || `REGISTER_ACCOUNT_V1:${account.toLowerCase()}:${clusterKey.toLowerCase()}`;
 
       let signature;
       try {
@@ -56,13 +73,17 @@ export function AccountGateCard({
 
       setCurrentStep(2);
 
-      // Step 2: Submit to Parent Chain
-      const parentRpc = 'http://127.0.0.1:8547';
+      // Step 2: Submit to Execution Node Relay (Gasless for user)
       try {
-        await submitRegistrationToParent(parentRpc, account, clusterKey, signature);
-      } catch (submitErr) {
-        console.warn('Parent RPC call notification:', submitErr.message);
-        // Note: Even if mock/devnet endpoints have specific routes, proceed to sync check
+        const relayRes = await registerAccountOnNode(targetCluster.rpcUrl, account, signature);
+        console.log('Node relay registration submitted:', relayRes);
+      } catch (nodeErr) {
+        console.warn('Node relay registration notice, trying direct parent route:', nodeErr.message);
+        const parentCluster = PRESET_CLUSTERS.find((c) => c.isParent);
+        const parentRpc = parentCluster ? parentCluster.rpcUrl : `http://${LAN_IP}:18601`;
+        try {
+          await submitRegistrationToParent(parentRpc, account, clusterKey, signature);
+        } catch (_) {}
       }
 
       setCurrentStep(3);
@@ -71,9 +92,26 @@ export function AccountGateCard({
       let attempts = 0;
       const interval = setInterval(async () => {
         attempts++;
+        try {
+          const statusRes = await getRegistrationStatusFromNode(targetCluster.rpcUrl, account);
+          if (statusRes && statusRes.status === 'CONFIRMED') {
+            clearInterval(interval);
+            if (onRefresh) await onRefresh();
+            setCurrentStep(4);
+            setIsRegistering(false);
+            return;
+          }
+          if (statusRes && statusRes.status === 'REJECTED') {
+            clearInterval(interval);
+            setRegError(`Registration rejected by Parent Chain: Already registered on cluster ${statusRes.homeCluster || 'another cluster'}`);
+            setIsRegistering(false);
+            return;
+          }
+        } catch (_) {}
+
         if (onRefresh) await onRefresh();
 
-        if (accountInfo?.parentRegistered || attempts >= 8) {
+        if (accountInfo?.parentRegistered || attempts >= 10) {
           clearInterval(interval);
           setCurrentStep(4);
           setIsRegistering(false);

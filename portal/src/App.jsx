@@ -15,6 +15,7 @@ import { RollupTransferTab } from './components/RollupTransferTab';
 import { NetworkMonitorTab } from './components/NetworkMonitorTab';
 import {
   PRESET_CLUSTERS,
+  LAN_IP,
   connectWallet,
   fetchAccountInfo,
   checkParentRegistration,
@@ -61,7 +62,8 @@ export default function App() {
       setAccountInfo(info);
 
       // 3. Account on Parent Chain
-      const parentRpc = 'http://127.0.0.1:8547';
+      const parentCluster = PRESET_CLUSTERS.find((c) => c.isParent);
+      const parentRpc = parentCluster ? parentCluster.rpcUrl : `http://${LAN_IP}:18601`;
       const clusterKey = selectedCluster.clusterKey || PRESET_CLUSTERS[0].clusterKey;
       const parentInfo = await checkParentRegistration(parentRpc, clusterKey, account);
       setParentRegInfo(parentInfo);
