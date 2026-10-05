@@ -12,6 +12,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
+	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -157,10 +158,47 @@ func (h *RollupSystemHandler) HandleTransaction(
 			stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
 			return h.errorReceipt(tx, err.Error()), nil, nil
 		}
+	} else if rollup.IsRollupSystemAttestedPayload(data) {
+		if h.dispatcher == nil {
+			logger.Error("❌ RollupSystemHandler: Dispatcher not initialized")
+			stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+			return h.errorReceipt(tx, "dispatcher not initialized"), nil, nil
+		}
+		var chainID uint64
+		if chainState.GetConfig() != nil && chainState.GetConfig().ChainId != nil {
+			chainID = chainState.GetConfig().ChainId.Uint64()
+		}
+		if chainID == 0 {
+			chainID = parentchain.ParentChainID
+		}
+		err := rollup.ApplyAttestedSystemEvent(
+			newLiveRollupStore(chainState),
+			stateDB,
+			&liveSmartContractDB{db: chainState.GetSmartContractDB()},
+			newLiveCommitteeProvider(chainState),
+			chainID,
+			data,
+			func(st rollup.Store, sdb rollup.AccountStateDB, inner []byte) error {
+				return h.dispatcher.HandleSystemEvent(st, stateDB, inner)
+			},
+		)
+		if err != nil {
+			logger.Error("❌ RollupSystemHandler: ApplyAttestedSystemEvent failed: %v", err)
+			stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+			return h.errorReceipt(tx, err.Error()), nil, nil
+		}
 	} else {
 		if h.dispatcher == nil {
 			logger.Error("❌ RollupSystemHandler: Dispatcher not initialized")
+			stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
 			return h.errorReceipt(tx, "dispatcher not initialized"), nil, nil
+		}
+
+		comm := newLiveCommitteeProvider(chainState)
+		if keys, _ := comm.GetActiveCommitteeBLSKeys(); len(keys) > 1 {
+			logger.Error("❌ RollupSystemHandler: unattested system event rejected in multi-validator committee")
+			stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+			return h.errorReceipt(tx, "unattested system event rejected: co-attestation required"), nil, nil
 		}
 
 		if err := h.dispatcher.HandleSystemEvent(newLiveRollupStore(chainState), stateDB, data); err != nil {

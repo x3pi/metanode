@@ -109,8 +109,6 @@ def parse_inventory(file_path):
 
         c_replicas = {}
         lead_rpc = ''
-        lead_pk = ''
-        lead_bls_priv = ''
         lead_addr = ''
         lead_bls_pub = ''
         idx = 0
@@ -125,8 +123,6 @@ def parse_inventory(file_path):
             r_raft = r_val.get('raft_port', 7110)
             r_fwd = r_val.get('forward_port', 7210)
             r_boot = r_val.get('raft_bootstrap', False)
-            r_pk = r_val.get('private_key', '')
-            r_bls_priv = r_val.get('bls_priv', '') or r_pk
             r_addr = r_val.get('address', '')
             r_bls_pub = r_val.get('bls_pubkey', '')
 
@@ -138,8 +134,6 @@ def parse_inventory(file_path):
 
             if not lead_rpc or r_boot:
                 lead_rpc = rpc_url
-                lead_pk = r_pk
-                lead_bls_priv = r_bls_priv
                 lead_addr = r_addr
                 lead_bls_pub = r_bls_pub
 
@@ -158,8 +152,6 @@ def parse_inventory(file_path):
                 'p2p_port': r_p2p,
                 'raft_port': r_raft,
                 'forward_port': r_fwd,
-                'private_key': r_pk,
-                'bls_priv': r_bls_priv,
                 'address': r_addr,
                 'bls_pubkey': r_bls_pub,
                 'is_bootstrap_leader': r_boot
@@ -171,8 +163,6 @@ def parse_inventory(file_path):
             'cluster_name': c_name,
             'chain_id': c_chain_id,
             'primary_rpc': lead_rpc,
-            'primary_private_key': lead_pk,
-            'primary_bls_priv': lead_bls_priv,
             'primary_address': lead_addr,
             'primary_bls_pubkey': lead_bls_pub,
             'replicas': c_replicas
@@ -220,7 +210,6 @@ def export_tmp_files(info, rpc_nodes_file=None):
             'validators': len(c.get('replicas', {})),
             'rpc_url': c.get('primary_rpc', ''),
             'ws_url': f"{c.get('primary_rpc', '').replace('http', 'ws')}/ws",
-            'bls_private_key': c.get('primary_bls_priv', c.get('primary_private_key', '')),
             'address': c.get('primary_address', ''),
             'bls_pubkey': c.get('primary_bls_pubkey', ''),
             'rpc_nodes': c_rpc,

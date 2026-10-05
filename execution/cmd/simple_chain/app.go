@@ -414,6 +414,40 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		PayloadHash  e_common.Hash `json:"payload_hash"`
 	}
 
+	// Attestations are signed with this validator's committee key (Databases.BLSPrivateKey, the key whose public half is
+	// the validator account's PublicKeyBls); single-key deployments fall back to the node key.
+	attestKey := app.keyPair
+	if hexKey := app.config.Databases.BLSPrivateKey; hexKey != "" {
+		if priv, _, _ := bls.GenerateKeyPairFromSecretKey(hexKey); len(priv.Bytes()) > 0 {
+			attestKey = bls.NewKeyPair(priv.Bytes())
+		} else {
+			logger.Warn("Invalid Databases.BLSPrivateKey: registration attestations fall back to the node key")
+		}
+	}
+	app.regWorker.SetAttestationKey(attestKey)
+
+	// P0-3: Check attestation key ↔ on-chain validator account at startup
+	cfgAddr := e_common.HexToAddress(app.config.Address)
+	attestPub := attestKey.PublicKey()
+	if isVal, warn := tx_processor.VerifyNodeCommitteeKey(app.chainState, app.keyPair.Address(), cfgAddr, attestPub); isVal {
+		if warn != "" {
+			logger.Error("❌ [COMMITTEE-KEY-MISMATCH] %s", warn)
+		} else {
+			logger.Info("✅ [COMMITTEE-KEY-OK] Validator attestation key %x verified in active committee", attestPub[:6])
+		}
+	} else {
+		logger.Info("ℹ️ [COMMITTEE-KEY-INFO] Node address %s is not in the validator committee (non-validator/RPC node)", app.keyPair.Address().Hex())
+	}
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			if isVal, warn := tx_processor.VerifyNodeCommitteeKey(app.chainState, app.keyPair.Address(), cfgAddr, attestPub); isVal && warn != "" {
+				logger.Error("❌ [COMMITTEE-KEY-PERIODIC-CHECK] %s", warn)
+			}
+		}
+	}()
+
 	eventProposer := func(event rollup.Event, msgID e_common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash e_common.Hash) error {
 		rollupNonceMutex.Lock()
 		defer rollupNonceMutex.Unlock()
@@ -469,7 +503,27 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			DestPubKey:   destPubKey,
 			PayloadHash:  payloadHash,
 		}
-		eventData, _ := json.Marshal(payload)
+		innerData, _ := json.Marshal(payload)
+		chainID := app.config.ChainId.Uint64()
+
+		// Skip if already attested on chain by this node or already applied (tombstone)
+		if rollup.HasPendingRollupSystemAttestation(&smartContractDBAdapter{chainState: app.chainState}, chainID, innerData, attestKey.PublicKey()) {
+			return nil
+		}
+
+		digest := rollup.ComputeRollupSystemEventDigest(chainID, innerData)
+		sig := bls.Sign(attestKey.PrivateKey(), digest)
+		attested := rollup.RollupSystemAttestedPayload{
+			Kind:  rollup.PayloadKindRollupSystemAttested,
+			Inner: innerData,
+			Attestations: []rollup.RegistrationAttestation{
+				{
+					ValidatorPubkey: attestKey.PublicKey(),
+					Signature:       sig,
+				},
+			},
+		}
+		eventData, _ := json.Marshal(attested)
 
 		tx := transaction.NewTransaction(
 			app.keyPair.Address(),
@@ -520,17 +574,6 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	app.sendWorker.EventProposer = eventProposer
 	app.recvWorker.EventProposer = eventProposer
 	app.reclaimWorker.EventProposer = eventProposer
-	// Attestations are signed with this validator's committee key (Databases.BLSPrivateKey, the key whose public half is
-	// the validator account's PublicKeyBls); single-key deployments fall back to the node key.
-	attestKey := app.keyPair
-	if hexKey := app.config.Databases.BLSPrivateKey; hexKey != "" {
-		if priv, _, _ := bls.GenerateKeyPairFromSecretKey(hexKey); len(priv.Bytes()) > 0 {
-			attestKey = bls.NewKeyPair(priv.Bytes())
-		} else {
-			logger.Warn("Invalid Databases.BLSPrivateKey: registration attestations fall back to the node key")
-		}
-	}
-	app.regWorker.SetAttestationKey(attestKey)
 	app.regWorker.AlreadyAttested = func(user e_common.Address, parentSeq uint64) bool {
 		return rollup.HasPendingAttestation(&smartContractDBAdapter{chainState: app.chainState},
 			parentchain.ParentChainID, user, app.keyPair.PublicKey(), parentSeq, attestKey.PublicKey())

@@ -25,6 +25,20 @@ start_exec() {
   echo "$name up (rpc :$rpc, pid $(cat "$BASE/pids/$name.pid"))"
 }
 
+start_exec_async() {
+  local name="$1"
+  ( cd "$BASE/$name" && \
+    PARENT_CHAIN_URL="http://127.0.0.1:$PH" BLS_CONSERVATION_MODE=enforce BLS_CONSERVATION_INTERVAL_SECONDS=300 \
+    exec "$BIN/simple_chain" -config="$BASE/$name/config.json" --pprof-addr= >"$BASE/logs/$name.log" 2>&1 ) &
+  echo $! >"$BASE/pids/$name.pid"
+}
+
+wait_exec() {
+  local name="$1" rpc; rpc="$(j "d['ports']['$name']['rpc']")"
+  wait_rpc "http://127.0.0.1:$rpc" 180 || { tail -20 "$BASE/logs/$name.log"; return 1; }
+  echo "$name up (rpc :$rpc, pid $(cat "$BASE/pids/$name.pid"))"
+}
+
 case "$CMD" in
   start)
     # `exec` inside the subshell makes $! the PID of the daemon itself (not of a wrapper), so stop signals the right process.
@@ -34,19 +48,69 @@ case "$CMD" in
     echo $! >"$BASE/pids/parent.pid"
     wait_http "http://127.0.0.1:$PH/status" "parent" 120 || { tail -20 "$BASE/logs/parent.log"; exit 1; }
     echo "parent up (http :$PH, pid $(cat "$BASE/pids/parent.pid"))"
-    start_exec exec1 && sleep 3 && start_exec exec2 ;;
+    MODE=$(j "d.get('mode', 'raft')")
+    if [ "$MODE" = "mysticeti_4val" ]; then
+      for v in val0 val1 val2 val3; do
+        start_exec_async "$v"
+        sleep 1
+      done
+      for v in val0 val1 val2 val3; do
+        wait_exec "$v" || exit 1
+      done
+    else
+      start_exec exec1 && sleep 3 && start_exec exec2
+    fi ;;
   stop)
-    for n in exec2 exec1 parent; do
-      f="$BASE/pids/$n.pid"; [ -f "$f" ] || continue
+    for f in "$BASE"/pids/*.pid; do
+      [ -f "$f" ] || continue
+      n=$(basename "$f" .pid)
+      [ "$n" = "parent" ] && continue
       pid=$(cat "$f")
       case "$(readlink -f /proc/$pid/exe 2>/dev/null)" in "$BIN"/*) ;; *) echo "$n: pid $pid is not ours any more, skipping"; rm -f "$f"; continue;; esac
       kill -TERM "$pid" 2>/dev/null
       for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
       kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
       rm -f "$f"; echo "$n stopped"
-    done ;;
+    done
+    if [ -f "$BASE/pids/parent.pid" ]; then
+      pid=$(cat "$BASE/pids/parent.pid")
+      kill -TERM "$pid" 2>/dev/null
+      for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+      kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+      rm -f "$BASE/pids/parent.pid"; echo "parent stopped"
+    fi ;;
+  stop_node)
+    name="${3:-}"
+    if [ -z "$name" ]; then echo "usage: $0 BASE stop_node <name>"; exit 1; fi
+    f="$BASE/pids/$name.pid"
+    if [ -f "$f" ]; then
+      pid=$(cat "$f")
+      kill -TERM "$pid" 2>/dev/null
+      for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+      kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+      rm -f "$f"
+      echo "$name stopped"
+    fi ;;
+  kill_node)
+    name="${3:-}"
+    if [ -z "$name" ]; then echo "usage: $0 BASE kill_node <name>"; exit 1; fi
+    f="$BASE/pids/$name.pid"
+    if [ -f "$f" ]; then
+      pid=$(cat "$f")
+      kill -KILL "$pid" 2>/dev/null
+      rm -f "$f"
+      echo "$name killed (SIGKILL)"
+    fi ;;
+  start_node)
+    name="${3:-}"
+    if [ -z "$name" ]; then echo "usage: $0 BASE start_node <name>"; exit 1; fi
+    start_exec_async "$name"
+    wait_exec "$name" || exit 1 ;;
   status)
-    for n in parent exec1 exec2; do f="$BASE/pids/$n.pid"
-      if [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null; then echo "$n: running (pid $(cat "$f"))"; else echo "$n: stopped"; fi; done ;;
-  *) echo "usage: $0 BASE {start|stop|status}"; exit 1 ;;
+    for f in "$BASE"/pids/*.pid; do
+      [ -f "$f" ] || continue
+      n=$(basename "$f" .pid)
+      if kill -0 "$(cat "$f")" 2>/dev/null; then echo "$n: running (pid $(cat "$f"))"; else echo "$n: stopped"; fi
+    done ;;
+  *) echo "usage: $0 BASE {start|stop|status|start_node <name>|stop_node <name>|kill_node <name>}"; exit 1 ;;
 esac

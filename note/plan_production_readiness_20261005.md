@@ -45,9 +45,9 @@ Issue #103 (CRITICAL: `SKIP_MEMPOOL_SIG_VERIFY` bật cứng trong template depl
 - Push + PR: chỉ khi user yêu cầu; sau khi merge phải `git show origin/dev:<path>` kiểm tra không bị mất commit (đã xảy ra 3 lần với squash-merge).
 
 ## Tiêu chí "sẵn sàng production" (checklist)
-- [ ] P0-1 cụm ≥4 validator: 5 kịch bản PASS 3 lần liên tiếp, state root các node khớp.
-- [ ] P0-2 không validator đơn lẻ nào mint/credit được; cross-chain credit thật vẫn PASS.
-- [ ] P0-3 cảnh báo khi khoá attestation không thuộc committee.
-- [ ] P0-4 #103/#104/#105 đóng, chữ ký tx được kiểm ở exec filter trên deploy thật.
+- [x] P0-1 cụm ≥4 validator: 5 kịch bản PASS 3 lần liên tiếp, state root các node khớp.
+- [x] P0-2 không validator đơn lẻ nào mint/credit được; cross-chain credit thật vẫn PASS.
+- [x] P0-3 cảnh báo khi khoá attestation không thuộc committee.
+- [x] P0-4 #103/#104/#105 đóng, chữ ký tx được kiểm ở exec filter trên deploy thật.
 - [ ] P1-1/P1-2 runbook cutover và genesis production đã chạy thử trên cụm cô lập.
 - [ ] `go test -race`, `build_check.sh` sạch; mọi báo cáo có output thật kèm commit hash.

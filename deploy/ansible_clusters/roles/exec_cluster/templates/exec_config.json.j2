@@ -27,6 +27,8 @@
     "SnapshotPath": "{{ node_data_dir }}/snapshot"
   },
   "is_rpc_node": true,
+  "tx_signature_mode": "{{ tx_signature_mode | default('secp') }}",
+  "account_gate": "{{ account_gate | default('parent_registered') }}",
   "consensus_mode": "{{ consensus_mode | default('raft') }}",
 {% if (consensus_mode | default('raft')) == 'raft' %}
   "snapshot_enabled": false,
