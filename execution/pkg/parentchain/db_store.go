@@ -227,6 +227,14 @@ func (s *DBStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([
 	return s.committer.Store().GetInboundTransfers(destKeyHash, cursor)
 }
 
+func (s *DBStore) AppendAccountRegistration(clusterKeyHash common.Hash, event *AccountRegisteredEvent) error {
+	return s.committer.Store().AppendAccountRegistration(clusterKeyHash, event)
+}
+
+func (s *DBStore) GetAccountRegistrations(clusterKeyHash common.Hash, cursor uint64) ([]*AccountRegisteredEvent, uint64, error) {
+	return s.committer.Store().GetAccountRegistrations(clusterKeyHash, cursor)
+}
+
 func (s *DBStore) GetNonce(sender common.Address) (uint64, error) {
 	return s.committer.Store().GetNonce(sender)
 }

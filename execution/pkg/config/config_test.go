@@ -249,3 +249,34 @@ func TestTxSignatureMode(t *testing.T) {
 		t.Error("nil config must be legacy")
 	}
 }
+
+func TestAccountGate(t *testing.T) {
+	for _, tc := range []struct {
+		gate        string
+		sigMode     string
+		registered  bool
+		wantErr     bool
+		description string
+	}{
+		{"", "", false, false, "empty gate is valid (disabled)"},
+		{AccountGateOff, "", false, false, "off gate is valid (disabled)"},
+		{AccountGateParentRegistered, TxSignatureModeSecp, true, false, "parent_registered in secp mode is valid"},
+		{AccountGateParentRegistered, "", true, true, "parent_registered in empty (legacy) mode must error"},
+		{AccountGateParentRegistered, TxSignatureModeBLSLegacy, true, true, "parent_registered in bls_legacy mode must error"},
+		{"parent", TxSignatureModeSecp, false, true, "typo/unknown gate must error"},
+		{"REGISTERED", TxSignatureModeSecp, false, true, "uppercase/unknown gate must error"},
+	} {
+		c := &SimpleChainConfig{AccountGate: tc.gate, TxSignatureMode: tc.sigMode}
+		if got := c.AccountGateParentRegistered(); got != tc.registered {
+			t.Errorf("[%s] AccountGateParentRegistered()=%v, want %v", tc.description, got, tc.registered)
+		}
+		if err := c.validateAccountGate(); (err != nil) != tc.wantErr {
+			t.Errorf("[%s] validateAccountGate() err=%v, wantErr=%v", tc.description, err, tc.wantErr)
+		}
+	}
+	var nilCfg *SimpleChainConfig
+	if nilCfg.AccountGateParentRegistered() {
+		t.Error("nil config must report false for AccountGateParentRegistered")
+	}
+}
+

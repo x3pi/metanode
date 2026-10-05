@@ -67,6 +67,18 @@ func (a *accountStateDBAdapter) SetNonce(address common.Address, nonce uint64) {
 	_ = a.chainState.GetAccountStateDB().SetNonce(address, nonce)
 }
 
+func (a *accountStateDBAdapter) GetParentRegistered(address common.Address) bool {
+	state, err := a.chainState.GetAccountStateDB().AccountState(address)
+	if err != nil || state == nil {
+		return false
+	}
+	return state.ParentRegistered()
+}
+
+func (a *accountStateDBAdapter) SetParentRegistered(address common.Address, registered bool) {
+	_ = a.chainState.GetAccountStateDB().SetParentRegistered(address, registered)
+}
+
 // smartContractDBAdapter adapts smart_contract_db to rollup.SmartContractDB.
 // Same staleness hazard as accountStateDBAdapter above -- see its doc comment.
 type smartContractDBAdapter struct {

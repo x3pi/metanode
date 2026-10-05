@@ -70,6 +70,9 @@ type Store interface {
 	AppendInboundTransfer(destKeyHash common.Hash, event *TransferEvent) error
 	GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([]*TransferEvent, uint64, error)
 
+	AppendAccountRegistration(clusterKeyHash common.Hash, event *AccountRegisteredEvent) error
+	GetAccountRegistrations(clusterKeyHash common.Hash, cursor uint64) ([]*AccountRegisteredEvent, uint64, error)
+
 	GetNonce(sender common.Address) (uint64, error)
 	SetNonce(sender common.Address, nonce uint64) error
 }
@@ -84,24 +87,26 @@ type MemoryStore struct {
 	seqs            map[common.Hash]uint64
 	velocities      map[common.Hash]FloatVelocityState
 	accounts        map[common.Address]cm.PublicKey
-	inbound         map[common.Hash][]*TransferEvent
-	stateRoots      map[common.Hash]map[uint64]common.Hash
-	nonces          map[common.Address]uint64
-	snapshots       []*MemoryStore
+	inbound              map[common.Hash][]*TransferEvent
+	accountRegistrations map[common.Hash][]*AccountRegisteredEvent
+	stateRoots           map[common.Hash]map[uint64]common.Hash
+	nonces               map[common.Address]uint64
+	snapshots            []*MemoryStore
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		chains:          make(map[common.Hash]ChainRegistryEntry),
-		floats:          make(map[common.Hash]*big.Int),
-		claimed:         make(map[common.Hash]FloatOutcome),
-		transferRecords: make(map[common.Hash]FloatTransferRecord),
-		seqs:            make(map[common.Hash]uint64),
-		velocities:      make(map[common.Hash]FloatVelocityState),
-		accounts:        make(map[common.Address]cm.PublicKey),
-		inbound:         make(map[common.Hash][]*TransferEvent),
-		stateRoots:      make(map[common.Hash]map[uint64]common.Hash),
-		nonces:          make(map[common.Address]uint64),
+		chains:               make(map[common.Hash]ChainRegistryEntry),
+		floats:               make(map[common.Hash]*big.Int),
+		claimed:              make(map[common.Hash]FloatOutcome),
+		transferRecords:      make(map[common.Hash]FloatTransferRecord),
+		seqs:                 make(map[common.Hash]uint64),
+		velocities:           make(map[common.Hash]FloatVelocityState),
+		accounts:             make(map[common.Address]cm.PublicKey),
+		inbound:              make(map[common.Hash][]*TransferEvent),
+		accountRegistrations: make(map[common.Hash][]*AccountRegisteredEvent),
+		stateRoots:           make(map[common.Hash]map[uint64]common.Hash),
+		nonces:               make(map[common.Address]uint64),
 	}
 }
 
@@ -152,6 +157,14 @@ func (m *MemoryStore) cloneInternal() *MemoryStore {
 			events[i] = &evCopy
 		}
 		clone.inbound[k] = events
+	}
+	for k, v := range m.accountRegistrations {
+		events := make([]*AccountRegisteredEvent, len(v))
+		for i, ev := range v {
+			evCopy := *ev
+			events[i] = &evCopy
+		}
+		clone.accountRegistrations[k] = events
 	}
 	for k, v := range m.nonces {
 		clone.nonces[k] = v
@@ -421,6 +434,40 @@ func (m *MemoryStore) SetStateRoot(clusterKeyHash common.Hash, epoch uint64, roo
 	}
 	m.stateRoots[clusterKeyHash][epoch] = root
 	return nil
+}
+
+func (m *MemoryStore) AppendAccountRegistration(clusterKeyHash common.Hash, event *AccountRegisteredEvent) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	evCopy := *event
+	evCopy.Seq = uint64(len(m.accountRegistrations[clusterKeyHash]))
+	m.accountRegistrations[clusterKeyHash] = append(m.accountRegistrations[clusterKeyHash], &evCopy)
+	return nil
+}
+
+func (m *MemoryStore) GetAccountRegistrations(clusterKeyHash common.Hash, cursor uint64) ([]*AccountRegisteredEvent, uint64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	events := m.accountRegistrations[clusterKeyHash]
+	if cursor >= uint64(len(events)) {
+		return nil, cursor, nil
+	}
+
+	count := uint64(len(events)) - cursor
+	if count > 50 {
+		count = 50 // paginate 50 at a time
+	}
+
+	res := make([]*AccountRegisteredEvent, count)
+	for i := uint64(0); i < count; i++ {
+		ev := events[cursor+i]
+		evCopy := *ev
+		res[i] = &evCopy
+	}
+
+	return res, cursor + count, nil
 }
 
 func (m *MemoryStore) GetNonce(sender common.Address) (uint64, error) {

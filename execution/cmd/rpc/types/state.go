@@ -32,6 +32,8 @@ type AccountState interface {
 	DeviceKey() e_common.Hash
 	AccountType() pb.ACCOUNT_TYPE
 	SetAccountType(pb.ACCOUNT_TYPE) error
+	ParentRegistered() bool
+	SetParentRegistered(bool)
 	//
 	SubPendingBalance(*big.Int) error
 	AddPendingBalance(*big.Int)

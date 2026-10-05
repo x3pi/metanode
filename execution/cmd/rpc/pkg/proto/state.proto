@@ -30,6 +30,7 @@ message AccountState {
     bytes Nonce = 7;
     bytes PublicKeyBls = 8;
     ACCOUNT_TYPE AccountType = 9;
+    bool ParentRegistered = 10;
     // StateChannelState StateChannelState = 7; // DEPRECATED
 }
 

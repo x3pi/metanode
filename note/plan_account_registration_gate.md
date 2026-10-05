@@ -10,7 +10,7 @@
 
 **Phát hiện (2026-10-05, đã chứng minh bằng test chạy thật):** `RollupSystemHandler` áp dụng system event chỉ từ payload JSON và **không kiểm tra ai gửi tx**. Đường nhận tiền `CreditObserved → RPCSubmitted → ClaimedConfirmed` cộng `Target/Value` thẳng từ event, không tra dữ liệu parent. Một tài khoản thường có tiền gas đã mint được 10²⁴ wei vào địa chỉ bất kỳ bằng ba tx đều `RETURNED`. Toàn bộ kế hoạch này (event đăng ký / khoá / thu hồi) đi qua đúng cửa này, nên nếu chưa đóng thì **mọi người dùng có thể tự đặt cờ đăng ký cho chính mình hoặc mint tiền**.
 
-**Bản sửa đã viết và kiểm thử (đột biến xác nhận), CHƯA nằm trong `dev`:** nhánh `sec-rollup-system-auth` (commit `9b413aee`). Chỉ danh tính node BLS-native (`isNodeBLSIdentity`: địa chỉ = `keccak(blsPub)[12:]`, khoá BLS đã đăng ký trong state) mới được gửi tx tới `RollupSystemAddress`:
+**Bản sửa đã viết và kiểm thử (đột biến xác nhận):** ĐÃ được tích hợp cùng nhánh gate (xem §9); nhánh tham chiếu `sec-rollup-system-auth` (commit `9b413aee`) dùng mã lỗi 69, bản tích hợp dùng mã `70` vì `69` đã là `AccountNotRegistered`. Chỉ danh tính node BLS-native (`isNodeBLSIdentity`: địa chỉ = `keccak(blsPub)[12:]`, khoá BLS đã đăng ký trong state) mới được gửi tx tới `RollupSystemAddress`:
 - thực thi (có thẩm quyền): `isAuthorizedRollupSystemSender` ở ĐẦU `HandleTransaction`, sai ⇒ biên lai lỗi `UnauthorizedSystemSender` + tiêu nonce;
 - admission: `VerifyTransaction` trả mã lỗi mới `69` (không có miễn trừ "sub node lagging" vì kẻ tấn công trông y hệt tài khoản lagging);
 - test: `rollup_system_handler_auth_test.go` (giả mạo bị từ chối, ca đối chứng danh tính node vẫn credit, admission), test cũ `TestRollupSystemHandler_HandleTransaction` đổi sang gửi từ danh tính node (nó từng dựa vào việc thiếu kiểm tra).
@@ -300,3 +300,23 @@ Tối thiểu: (a) bỏ kiểm tra gate ở admission; (b) bỏ kiểm tra gate 
 **Test thêm:** (R1) RPC từ chối chữ ký sai/địa chỉ không khớp/đã `CONFIRMED|LOCKED`/vượt giới hạn tốc độ, đúng mã lỗi; (R2) yêu cầu hợp lệ ⇒ chuỗi tự động đến `CONFIRMED` mà người dùng không gọi thêm gì; (R3) restart node giữa chừng ⇒ không mất yêu cầu, không gửi parent hai lần gây lỗi; (R4) parent tạm dừng rồi chạy lại ⇒ tự tiếp tục; (R5) hai cụm cùng nhận yêu cầu của một địa chỉ ⇒ cụm đến parent trước `CONFIRMED`, cụm kia `LOCKED`, mọi thứ tự xử lý cho cùng kết quả; (R6) hàng đợi đầy ⇒ từ chối rõ ràng, không rò rỉ bộ nhớ; (R7) `mtn_getRegistrationStatus` đúng ở mọi trạng thái; (R8) đột biến: bỏ kiểm `userSig`, bỏ rate-limit, bỏ idempotent.
 
 **E2E thêm (cụm cô lập):** người dùng mới gọi `mtn_registerAccount` (chỉ node thực thi) ⇒ theo dõi `PENDING → (PROVISIONAL) → CONFIRMED` ⇒ gửi tx thành công; kịch bản đăng ký song song ở hai cụm ⇒ một `CONFIRMED`, một `LOCKED`; tắt parent giữa chừng ⇒ tự hồi phục khi parent chạy lại.
+
+## 9. Trạng thái triển khai (2026-10-05) — giai đoạn 1 (không có tài khoản tạm)
+
+**Đã làm và đã kiểm thử (đột biến + `-race` + `build_check.sh`):**
+- Parent chain: chỉ mục sự kiện đăng ký theo cụm (`MemoryStore`, `TreeStore`/`DBStore`), HTTP `/inbound_registrations`, `QuorumClient.GetInboundAccountRegistrations` (f+1).
+- `AccountState.ParentRegistered` (proto, `Copy`, JSON, mutation, `cmd/rpc` bản sao); root tài khoản cũ không đổi khi trường = false.
+- Handler `account_registered` (idempotent, khoá cụm đúng 48 byte) + `RegistrationWorker` (poll, đề xuất system tx, dedupe theo hash payload).
+- **P0:** chỉ danh tính node BLS-native được gửi tx tới `RollupSystemAddress` (thực thi + admission, mã 70), áp dụng trước cả nhánh đăng ký.
+- Gate người gửi (`sigPolicy.senderRegisteredError`) ở admission và bộ lọc thực thi, ngoài cache chữ ký; config `account_gate` (chỉ với `secp`).
+- Genesis: cờ chỉ đặt khi gate bật (chain không dùng gate giữ nguyên root genesis); `registered_accounts` tuỳ chọn.
+- **Phía node (mục 8.2, giai đoạn 1):** `rollup.RegistrationRelay` (hàng đợi có giới hạn, mỗi tick một lần thử, kiểm registry trước khi gửi, hỏi lại registry sau khi gửi vì parent chỉ báo trùng qua registry) + RPC `mtn_getClusterIdentity`, `mtn_getRegistrationMessage`, `mtn_registerAccount`, `mtn_getRegistrationStatus`.
+- Test tích hợp trong tiến trình nối toàn bộ thành phần thật (parent `RegisterAccount` thật kiểm chữ ký BLS cụm + ECDSA người dùng): người dùng chỉ gọi node ⇒ `CONFIRMED` tự động; cùng địa chỉ ở hai cụm ⇒ parent chọn cụm đến trước, cụm kia `REJECTED`, tx replay bị từ chối ở cụm không phải nhà; sự kiện giả từ tài khoản thường không mở được gate.
+
+**Chưa làm / rủi ro mở (đọc trước khi bật gate trên chain thật):**
+1. **E2E trên cụm thật chưa chạy** (chỉ test tích hợp trong tiến trình). Cần cụm cô lập có `tx_signature_mode="secp"` + `account_gate="parent_registered"` + parent chain, chạy kịch bản §5.
+2. **Hàng đợi yêu cầu đăng ký không bền:** mất khi node khởi động lại (cờ on-chain vẫn đúng; người dùng gửi lại — idempotent). Làm bền nếu cần.
+3. **Bằng chứng parent cho system event (P0 còn hở):** mọi danh tính node của cụm đều gửi được event; một validator Byzantine vẫn giả mạo được (mint/đăng ký/khoá bừa). Cần event mang chứng chỉ quorum/proof parent do handler xác minh.
+4. **Giai đoạn 2 chưa làm:** đăng ký tạm, `ParentLocked`/`LOCKED` (§8). Hiện bên thua chỉ nhận trạng thái `REJECTED` ở relay; tài khoản đơn giản không được đăng ký ở cụm đó (không bị khoá).
+5. **Khoá node = khoá cụm** (V2) mới được xác nhận ở mức "code hiện tại giả định `app.keyPair` là danh tính cụm" (`app.go` đã tự đăng ký như vậy); chưa kiểm cụm nhiều validator với khoá khác nhau.
+6. Mã HTTP `/inbound_registrations` nuốt lỗi store giống `/inbound` hiện có (trả danh sách rỗng); nên trả 5xx để quorum không coi node lỗi là "đồng ý rỗng".

@@ -9,6 +9,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -317,3 +318,78 @@ func TestMarshalUnmarshal_SCStatesWithBlockNumber(t *testing.T) {
 	assert.Equal(t, uint64(99), bn)
 	assert.Equal(t, 1, len(decoded))
 }
+
+// ---------- ParentRegistered (Gate) ----------
+
+func TestAccountState_ParentRegistered_GetSetCopy(t *testing.T) {
+	as := NewAccountState(testAddr)
+	assert.False(t, as.ParentRegistered(), "default ParentRegistered must be false")
+
+	as.SetParentRegistered(true)
+	assert.True(t, as.ParentRegistered())
+	assert.True(t, as.IsDirty())
+
+	cp := as.Copy()
+	assert.True(t, cp.ParentRegistered())
+
+	as.SetParentRegistered(false)
+	assert.False(t, as.ParentRegistered())
+	cp2 := as.Copy()
+	assert.False(t, cp2.ParentRegistered())
+}
+
+func TestAccountState_ParentRegistered_MarshalRoundTrip(t *testing.T) {
+	as := NewAccountState(testAddr)
+	as.SetParentRegistered(true)
+	as.AddBalance(big.NewInt(1000))
+	as.SetNonce(42)
+
+	data, err := as.Marshal()
+	require.NoError(t, err)
+
+	as2 := &AccountState{}
+	require.NoError(t, as2.Unmarshal(data))
+	assert.True(t, as2.ParentRegistered())
+	assert.Equal(t, as.Balance(), as2.Balance())
+	assert.Equal(t, as.Nonce(), as2.Nonce())
+}
+
+func TestAccountState_ParentRegistered_JsonRoundTrip(t *testing.T) {
+	as := NewAccountState(testAddr)
+	as.SetParentRegistered(true)
+
+	j := &JsonAccountState{}
+	j.FromAccountState(as.(*AccountState))
+	assert.True(t, j.ParentRegistered)
+
+	as2 := j.ToAccountState()
+	assert.True(t, as2.ParentRegistered())
+}
+
+func TestAccountState_ParentRegistered_RootBackwardCompatibility(t *testing.T) {
+	// Account with ParentRegistered = false
+	asFalse := NewAccountState(testAddr)
+	asFalse.AddBalance(big.NewInt(12345))
+	asFalse.SetNonce(7)
+
+	bytesFalse, err := asFalse.Marshal()
+	require.NoError(t, err)
+
+	// An AccountState proto marshaled with field 10 absent (legacy raw proto)
+	rawProto := asFalse.Proto()
+	rawProto.ParentRegistered = false
+	bytesRaw, err := proto.Marshal(rawProto)
+	require.NoError(t, err)
+
+	// Proto3 skips default false boolean field, so bytes must match exactly
+	assert.Equal(t, bytesRaw, bytesFalse, "Account with ParentRegistered=false must have identical proto bytes to legacy proto")
+
+	// Account with ParentRegistered = true
+	asTrue := asFalse.Copy()
+	asTrue.SetParentRegistered(true)
+	bytesTrue, err := asTrue.Marshal()
+	require.NoError(t, err)
+
+	assert.NotEqual(t, bytesFalse, bytesTrue, "Setting ParentRegistered=true must change the marshaled bytes/hash")
+}
+

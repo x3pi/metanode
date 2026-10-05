@@ -78,6 +78,16 @@ func (c *httpClient) GetInboundTransfers(pubKey cm.PublicKey, cursor uint64) ([]
 	return resp.Events, resp.Cursor, err
 }
 
+func (c *httpClient) GetInboundAccountRegistrations(pubKey cm.PublicKey, cursor uint64) ([]*AccountRegisteredEvent, uint64, error) {
+	pubKeyHex := hexEncode(pubKey[:])
+	var resp struct {
+		Events []*AccountRegisteredEvent `json:"events"`
+		Cursor uint64                   `json:"cursor"`
+	}
+	err := c.get(fmt.Sprintf("/inbound_registrations?pubkey=%s&cursor=%d", pubKeyHex, cursor), &resp)
+	return resp.Events, resp.Cursor, err
+}
+
 func (c *httpClient) GetTransferRecord(msgID common.Hash) (FloatTransferRecord, bool, error) {
 	var resp struct {
 		Record FloatTransferRecord `json:"record"`
@@ -280,6 +290,7 @@ func (s *HTTPServer) Start(addr string) error {
 	mux.HandleFunc("/send_raw_transaction", s.handleSendRawTransaction)
 
 	mux.HandleFunc("/inbound", s.handleInbound)
+	mux.HandleFunc("/inbound_registrations", s.handleInboundRegistrations)
 	mux.HandleFunc("/record", s.handleRecord)
 	mux.HandleFunc("/claimed", s.handleClaimed)
 	mux.HandleFunc("/seq", s.handleSeq)
@@ -317,6 +328,28 @@ func (s *HTTPServer) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	if events == nil {
 		events = []*TransferEvent{}
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{"events": events, "cursor": nextCursor})
+}
+
+func (s *HTTPServer) handleInboundRegistrations(w http.ResponseWriter, r *http.Request) {
+	pubKeyHex := r.URL.Query().Get("pubkey")
+	cursorStr := r.URL.Query().Get("cursor")
+	cursor, _ := strconv.ParseUint(cursorStr, 10, 64)
+
+	pubKeyBytes := common.FromHex(pubKeyHex)
+	var pubKey cm.PublicKey
+	copy(pubKey[:], pubKeyBytes)
+
+	destHash := crypto.Keccak256Hash(pubKey[:])
+	events, nextCursor, err := s.store.GetAccountRegistrations(destHash, cursor)
+	if err != nil {
+		events = []*AccountRegisteredEvent{}
+		nextCursor = cursor
+	}
+	if events == nil {
+		events = []*AccountRegisteredEvent{}
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{"events": events, "cursor": nextCursor})

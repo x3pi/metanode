@@ -22,6 +22,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
+	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
@@ -992,6 +993,15 @@ func (app *App) alignStartupTipToBlock(blk types.Block) {
 }
 
 // initGenesisBlock creates the genesis block if it doesn't exist
+// genesisAccountsRegistered reports whether genesis accounts must be flagged ParentRegistered. It is true ONLY when the
+// account gate is enabled: with the gate off the flag must not be written, so the genesis state of a chain that does
+// not use the gate stays byte-identical to what it was before the flag existed (same account encoding, same genesis
+// root). Writing it unconditionally would change every legacy chain's genesis root and break startup integrity
+// checks and compatibility with nodes running older binaries.
+func (app *App) genesisAccountsRegistered() bool {
+	return app.config != nil && app.config.AccountGateParentRegistered()
+}
+
 func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 	logger.Info("Starting genesis block initialization...")
 
@@ -1042,7 +1052,26 @@ func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 		}
 		addressMap[a.Address()] = true
 		a.PlusOneNonce()
+		if app.genesisAccountsRegistered() {
+			a.SetParentRegistered(true)
+		}
 		app.chainState.GetAccountStateDB().SetState(a)
+	}
+
+	for _, rawAddr := range app.genesis.RegisteredAccounts {
+		if !app.genesisAccountsRegistered() {
+			break
+		}
+		addr := e_common.HexToAddress(rawAddr)
+		if addr == (e_common.Address{}) {
+			continue
+		}
+		as, _ := app.chainState.GetAccountStateDB().AccountState(addr)
+		if as == nil {
+			as = state.NewAccountState(addr)
+		}
+		as.SetParentRegistered(true)
+		app.chainState.GetAccountStateDB().SetState(as)
 	}
 
 	// Commit state changes
@@ -1308,7 +1337,26 @@ func (app *App) repopulateGenesisState() error {
 		}
 		addressMap[a.Address()] = true
 		a.PlusOneNonce()
+		if app.genesisAccountsRegistered() {
+			a.SetParentRegistered(true)
+		}
 		app.chainState.GetAccountStateDB().SetState(a)
+	}
+
+	for _, rawAddr := range app.genesis.RegisteredAccounts {
+		if !app.genesisAccountsRegistered() {
+			break
+		}
+		addr := e_common.HexToAddress(rawAddr)
+		if addr == (e_common.Address{}) {
+			continue
+		}
+		as, _ := app.chainState.GetAccountStateDB().AccountState(addr)
+		if as == nil {
+			as = state.NewAccountState(addr)
+		}
+		as.SetParentRegistered(true)
+		app.chainState.GetAccountStateDB().SetState(as)
 	}
 
 	// Commit account state changes

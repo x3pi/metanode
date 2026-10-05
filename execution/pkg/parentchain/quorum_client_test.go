@@ -246,3 +246,112 @@ func TestQuorumClient_NonceIgnoresLyingNode(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(7), n)
 }
+
+// Q1: Quorum verification tests for GetInboundAccountRegistrations
+
+func TestQuorumClient_AccountRegistrations_OneNodeLies(t *testing.T) {
+	clusterKp := bls.GenerateKeyPair()
+	_, userAddr1 := generateECDSAKey()
+	_, userAddr2 := generateECDSAKey()
+
+	honestEvents := []*AccountRegisteredEvent{
+		{Seq: 0, UserAddress: userAddr1, ClusterKey: clusterKp.PublicKey()},
+	}
+	dishonestEvents := []*AccountRegisteredEvent{
+		{Seq: 0, UserAddress: userAddr2, ClusterKey: clusterKp.PublicKey()},
+	}
+
+	createMockRegServer := func(events []*AccountRegisteredEvent, cursor uint64) *httptest.Server {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/inbound_registrations", func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"events": events,
+				"cursor": cursor,
+			})
+		})
+		return httptest.NewServer(mux)
+	}
+
+	s0 := createMockRegServer(honestEvents, 1)
+	defer s0.Close()
+	s1 := createMockRegServer(honestEvents, 1)
+	defer s1.Close()
+	s2 := createMockRegServer(honestEvents, 1)
+	defer s2.Close()
+	s3 := createMockRegServer(dishonestEvents, 5) // 1 lying node
+	defer s3.Close()
+
+	qc := NewQuorumClient([]string{s0.URL, s1.URL, s2.URL, s3.URL}, clusterKp.PrivateKey(), clusterKp.PublicKey())
+	events, nextCur, err := qc.GetInboundAccountRegistrations(clusterKp.PublicKey(), 0)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), nextCur)
+	require.Len(t, events, 1)
+	assert.Equal(t, userAddr1, events[0].UserAddress)
+}
+
+func TestQuorumClient_AccountRegistrations_DisagreementNoQuorum(t *testing.T) {
+	clusterKp := bls.GenerateKeyPair()
+	_, userAddr1 := generateECDSAKey()
+	_, userAddr2 := generateECDSAKey()
+
+	eventsA := []*AccountRegisteredEvent{
+		{Seq: 0, UserAddress: userAddr1, ClusterKey: clusterKp.PublicKey()},
+	}
+	eventsB := []*AccountRegisteredEvent{
+		{Seq: 0, UserAddress: userAddr2, ClusterKey: clusterKp.PublicKey()},
+	}
+
+	createMockRegServer := func(events []*AccountRegisteredEvent, cursor uint64) *httptest.Server {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/inbound_registrations", func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"events": events,
+				"cursor": cursor,
+			})
+		})
+		return httptest.NewServer(mux)
+	}
+
+	// 4 nodes: 1 says A, 1 says B, 1 says C, 1 says D -> 0 reaches threshold of 2 (f+1)
+	s0 := createMockRegServer(eventsA, 1)
+	defer s0.Close()
+	s1 := createMockRegServer(eventsB, 1)
+	defer s1.Close()
+	s2 := createMockRegServer(nil, 0)
+	defer s2.Close()
+	s3 := createMockRegServer(nil, 2)
+	defer s3.Close()
+
+	qc := NewQuorumClient([]string{s0.URL, s1.URL, s2.URL, s3.URL}, clusterKp.PrivateKey(), clusterKp.PublicKey())
+	events, nextCur, err := qc.GetInboundAccountRegistrations(clusterKp.PublicKey(), 0)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrQuorumNotReached)
+	assert.Nil(t, events)
+	assert.Equal(t, uint64(0), nextCur, "cursor must NOT advance when quorum is not reached")
+}
+
+func TestQuorumClient_AccountRegistrations_MissingNodesNoQuorum(t *testing.T) {
+	clusterKp := bls.GenerateKeyPair()
+	_, userAddr1 := generateECDSAKey()
+
+	honestEvents := []*AccountRegisteredEvent{
+		{Seq: 0, UserAddress: userAddr1, ClusterKey: clusterKp.PublicKey()},
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/inbound_registrations", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"events": honestEvents,
+			"cursor": 1,
+		})
+	})
+	s0 := httptest.NewServer(mux)
+	defer s0.Close()
+
+	// 4 nodes, but 3 are invalid/offline URLs
+	qc := NewQuorumClient([]string{s0.URL, "http://127.0.0.1:1", "http://127.0.0.1:2", "http://127.0.0.1:3"}, clusterKp.PrivateKey(), clusterKp.PublicKey())
+	events, nextCur, err := qc.GetInboundAccountRegistrations(clusterKp.PublicKey(), 0)
+	require.Error(t, err)
+	assert.Nil(t, events)
+	assert.Equal(t, uint64(0), nextCur, "cursor must NOT advance when responses < threshold")
+}

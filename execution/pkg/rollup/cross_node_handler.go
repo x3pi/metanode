@@ -17,6 +17,8 @@ type AccountStateDB interface {
 	SubBalance(addr common.Address, amount *big.Int)
 	GetNonce(addr common.Address) uint64
 	SetNonce(addr common.Address, nonce uint64)
+	GetParentRegistered(addr common.Address) bool
+	SetParentRegistered(addr common.Address, registered bool)
 }
 
 type CrossNodeHandler struct {

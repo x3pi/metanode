@@ -212,6 +212,13 @@ func VerifyTransaction(
 	isSubNodeLagging := len(as.PublicKeyBls()) == 0 && (tx.GetNonce() > 0 || as.Nonce() > 0)
 	pol := sigPolicyOf(chainState)
 
+	// Rollup system events are applied from their payload alone, so only BLS-native node identities may submit them.
+	// No sub-node-lagging exemption: an attacker (no BLS key, nonce > 0) looks exactly like a lagging account. System
+	// txs are produced by the master node's own workers, which always hold the node identity's state.
+	if tx.ToAddress() == rollup.RollupSystemAddress && !isNodeBLSIdentity(tx, as) {
+		return transaction.UnauthorizedSystemSender
+	}
+
 	if as.Nonce() != 0 || tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		txHash := tx.Hash()
 
@@ -281,6 +288,11 @@ func VerifyTransaction(
 				}
 			}
 		}
+	}
+
+	if regErr := pol.senderRegisteredError(tx, as); regErr != nil {
+		logger.Warn("❌ [VERIFY] Sender not registered on parent chain: from=%s, txHash=%s", tx.FromAddress().Hex(), tx.Hash().Hex())
+		return regErr
 	}
 
 	if as.AccountType() == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {

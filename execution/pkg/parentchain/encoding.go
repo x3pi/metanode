@@ -27,6 +27,8 @@ const (
 	NamespaceInboundSeq       byte = 0x0A
 	NamespaceSenderNonce      byte = 0x0B
 	NamespaceConfigSystem     byte = 0x0C
+	NamespaceAccountRegistrationLog byte = 0x0D
+	NamespaceAccountRegistrationSeq byte = 0x0E
 )
 
 var (
@@ -353,3 +355,44 @@ func DecodeTransferEvent(data []byte) (*TransferEvent, error) {
 		IsRefund:     tev.IsRefund,
 	}, nil
 }
+
+// AccountRegisteredEvent represents an account registration record for an execution cluster.
+type AccountRegisteredEvent struct {
+	Seq         uint64         `json:"seq"`
+	UserAddress common.Address `json:"user_address"`
+	ClusterKey  cm.PublicKey   `json:"cluster_key"`
+	ParentBlock uint64         `json:"parent_block,omitempty"`
+}
+
+func EncodeAccountRegisteredEvent(ev *AccountRegisteredEvent) []byte {
+	if ev == nil {
+		return nil
+	}
+	protoEv := &pb.AccountRegisteredEventProto{
+		Seq:         ev.Seq,
+		UserAddress: ev.UserAddress.Bytes(),
+		ClusterKey:  ev.ClusterKey[:],
+		ParentBlock: ev.ParentBlock,
+	}
+	b, _ := deterministicMarshal.Marshal(protoEv)
+	return b
+}
+
+func DecodeAccountRegisteredEvent(data []byte) (*AccountRegisteredEvent, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("%w: empty AccountRegisteredEvent data", ErrEncodingCorrupt)
+	}
+	var protoEv pb.AccountRegisteredEventProto
+	if err := proto.Unmarshal(data, &protoEv); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrEncodingCorrupt, err)
+	}
+	var clusterKey cm.PublicKey
+	copy(clusterKey[:], protoEv.ClusterKey)
+	return &AccountRegisteredEvent{
+		Seq:         protoEv.Seq,
+		UserAddress: common.BytesToAddress(protoEv.UserAddress),
+		ClusterKey:  clusterKey,
+		ParentBlock: protoEv.ParentBlock,
+	}, nil
+}
+

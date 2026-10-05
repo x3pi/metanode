@@ -10,15 +10,17 @@ import (
 )
 
 type mockAccountStateDB struct {
-	mu       sync.Mutex
-	balances map[common.Address]*big.Int
-	nonces   map[common.Address]uint64
+	mu        sync.Mutex
+	balances  map[common.Address]*big.Int
+	nonces    map[common.Address]uint64
+	parentReg map[common.Address]bool
 }
 
 func newMockAccountStateDB() *mockAccountStateDB {
 	return &mockAccountStateDB{
-		balances: make(map[common.Address]*big.Int),
-		nonces:   make(map[common.Address]uint64),
+		balances:  make(map[common.Address]*big.Int),
+		nonces:    make(map[common.Address]uint64),
+		parentReg: make(map[common.Address]bool),
 	}
 }
 
@@ -66,6 +68,24 @@ func (m *mockAccountStateDB) SetNonce(addr common.Address, nonce uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.nonces[addr] = nonce
+}
+
+func (m *mockAccountStateDB) GetParentRegistered(addr common.Address) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.parentReg == nil {
+		return false
+	}
+	return m.parentReg[addr]
+}
+
+func (m *mockAccountStateDB) SetParentRegistered(addr common.Address, registered bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.parentReg == nil {
+		m.parentReg = make(map[common.Address]bool)
+	}
+	m.parentReg[addr] = registered
 }
 
 func TestCrossNodeHandler(t *testing.T) {

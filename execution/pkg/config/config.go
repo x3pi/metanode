@@ -223,6 +223,11 @@ type SimpleChainConfig struct {
 	// on a chain with history requires a wipe + simultaneous redeploy.
 	TxSignatureMode string `json:"tx_signature_mode,omitempty"`
 
+	// AccountGate controls whether user transactions are gated on Parent Chain account registration.
+	// Values: "" or "off" (default, disabled), "parent_registered" (enforced).
+	// Can only be "parent_registered" when tx_signature_mode == "secp".
+	AccountGate string `json:"account_gate,omitempty"`
+
 	// Cross-chain configuration
 	CrossChain CrossChainConfig `json:"cross_chain"`
 
@@ -316,6 +321,9 @@ func JoinPathIfNotURL(basePath, path string) string {
 const (
 	TxSignatureModeBLSLegacy = "bls_legacy"
 	TxSignatureModeSecp      = "secp"
+
+	AccountGateOff              = "off"
+	AccountGateParentRegistered = "parent_registered"
 )
 
 // SecpOnlyTxSignatures reports whether user transactions must be secp256k1-signed (see TxSignatureMode).
@@ -338,6 +346,25 @@ func (c *SimpleChainConfig) validateTxSignatureMode() error {
 	return fmt.Errorf("invalid tx_signature_mode %q (want %q or %q)", c.TxSignatureMode, TxSignatureModeBLSLegacy, TxSignatureModeSecp)
 }
 
+// AccountGateParentRegistered reports whether the parent-registered account gate is enabled.
+func (c *SimpleChainConfig) AccountGateParentRegistered() bool {
+	return c != nil && c.AccountGate == AccountGateParentRegistered
+}
+
+// validateAccountGate rejects unknown values and enforces that parent_registered requires secp mode.
+func (c *SimpleChainConfig) validateAccountGate() error {
+	switch c.AccountGate {
+	case "", AccountGateOff:
+		return nil
+	case AccountGateParentRegistered:
+		if !c.SecpOnlyTxSignatures() {
+			return fmt.Errorf("account_gate %q requires tx_signature_mode %q", AccountGateParentRegistered, TxSignatureModeSecp)
+		}
+		return nil
+	}
+	return fmt.Errorf("invalid account_gate %q (want %q, %q or empty)", c.AccountGate, AccountGateOff, AccountGateParentRegistered)
+}
+
 // LoadConfig đọc và xử lý file cấu hình.
 func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 	var err error
@@ -358,6 +385,9 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		}
 
 		if err = ConfigApp.validateTxSignatureMode(); err != nil {
+			return
+		}
+		if err = ConfigApp.validateAccountGate(); err != nil {
 			return
 		}
 

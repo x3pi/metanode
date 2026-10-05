@@ -497,7 +497,15 @@ func RegisterAccount(store Store, userAddress common.Address, floatIdentityKey c
 		}
 	}
 
-	return store.SetAccountRegistry(userAddress, floatIdentityKey)
+	if err := store.SetAccountRegistry(userAddress, floatIdentityKey); err != nil {
+		return err
+	}
+
+	clusterHash := crypto.Keccak256Hash(floatIdentityKey.Bytes())
+	return store.AppendAccountRegistration(clusterHash, &AccountRegisteredEvent{
+		UserAddress: userAddress,
+		ClusterKey:  floatIdentityKey,
+	})
 }
 
 // ErrBalanceInsufficient is returned by TransferBalance when the sender cannot cover the amount.

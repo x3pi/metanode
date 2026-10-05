@@ -19,6 +19,7 @@ import (
 	"time"
 
 	e_common "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
@@ -101,12 +102,15 @@ type App struct {
 	pruningManager *pruning.PruningManager
 
 	// Rollup Components
-	rollupStore      rollup.Store
-	crossNodeHandler *rollup.CrossNodeHandler
-	sendWorker       *rollup.SendWorker
-	recvWorker       *rollup.ReceiveWorker
-	reclaimWorker    *rollup.ReclaimWorker
-	parentClient     parentchain.Client
+	rollupStore            rollup.Store
+	crossNodeHandler       *rollup.CrossNodeHandler
+	accountRegistryHandler *rollup.AccountRegistryHandler
+	sendWorker             *rollup.SendWorker
+	recvWorker             *rollup.ReceiveWorker
+	reclaimWorker          *rollup.ReclaimWorker
+	regWorker              *rollup.RegistrationWorker
+	regRelay               *rollup.RegistrationRelay
+	parentClient           parentchain.Client
 	rollupEnabled    bool // true only when PARENT_CHAIN_URL is set: rollup workers + parent-chain registration
 
 	// conservation checks that the cluster's BLS float on the Parent Chain equals the sum of the cluster's accounts and
@@ -333,9 +337,16 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	}
 
 	app.crossNodeHandler = rollup.NewCrossNodeHandler(app.keyPair.PublicKey())
+	app.accountRegistryHandler = rollup.NewAccountRegistryHandler(app.keyPair.PublicKey())
 	app.sendWorker = rollup.NewSendWorker(rollupStore, parentClient, app.keyPair, app.keyPair.PublicKey(), clusterID)
 	app.recvWorker = rollup.NewReceiveWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 	app.reclaimWorker = rollup.NewReclaimWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
+	app.regWorker = rollup.NewRegistrationWorker(stateDBAdapter, parentClient, app.keyPair, app.keyPair.PublicKey())
+	// Users register ONLY with this node (mtn_registerAccount); the relay forwards the cluster-signed registration to the
+	// Parent Chain automatically and tracks the outcome. Same key the node already uses to self-register on the parent.
+	app.regRelay = rollup.NewRegistrationRelay(parentClient, app.keyPair.PublicKey(),
+		func(digest []byte) cm.Sign { return bls.Sign(app.keyPair.PrivateKey(), digest) },
+		stateDBAdapter.GetParentRegistered)
 
 	// Conservation: the cluster's BLS identity represents all of its accounts, so its float on the Parent Chain must
 	// always equal the sum of the accounts (plus what is demonstrably in flight). Until that is verified, and while a
@@ -497,6 +508,61 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	app.sendWorker.EventProposer = eventProposer
 	app.recvWorker.EventProposer = eventProposer
 	app.reclaimWorker.EventProposer = eventProposer
+	app.regWorker.EventProposer = func(payload []byte) error {
+		rollupNonceMutex.Lock()
+		defer rollupNonceMutex.Unlock()
+
+		state, err := app.chainState.GetAccountStateDB().AccountState(app.keyPair.Address())
+		var dbNonce uint64
+		if err == nil {
+			dbNonce = state.Nonce()
+		}
+		if dbNonce != rollupLastDBNonce {
+			rollupLastDBNonce = dbNonce
+			rollupLastProgress = time.Now()
+		}
+		for k, n := range rollupInflight {
+			if n < dbNonce {
+				delete(rollupInflight, k)
+			}
+		}
+		if len(rollupInflight) > 0 && time.Since(rollupLastProgress) > 60*time.Second {
+			rollupInflight = map[rollupInflightKey]uint64{}
+			rollupLastProgress = time.Now()
+		}
+		payloadHash := e_common.BytesToHash(crypto.Keccak256(payload))
+		inflightKey := rollupInflightKey{msgID: payloadHash, typ: rollup.EventType(rollup.SystemPayloadKindAccountRegistered)}
+		if _, pending := rollupInflight[inflightKey]; pending {
+			return nil
+		}
+		if len(rollupInflight) == 0 || rollupPendingNonce < dbNonce {
+			rollupPendingNonce = dbNonce
+		}
+
+		tx := transaction.NewTransaction(
+			app.keyPair.Address(),
+			rollup.RollupSystemAddress,
+			big.NewInt(0),
+			21000,
+			1_000_000_000,
+			0,
+			payload,
+			nil,
+			e_common.Hash{},
+			e_common.Hash{},
+			rollupPendingNonce,
+			app.config.ChainId.Uint64(),
+		)
+		tx.SetSign(app.keyPair.PrivateKey())
+
+		_, err = app.transactionProcessor.AddTransactionToPool(tx)
+		if err == nil {
+			rollupInflight[inflightKey] = rollupPendingNonce
+			rollupPendingNonce++
+			logger.Info("📡 [REGISTRATION-PROPOSER] Proposed account_registered event to Tx Pool (Nonce %d)", tx.GetNonce())
+		}
+		return err
+	}
 
 	if app.config.IsMining {
 		// 1. Khởi tạo EthTransactionBroadcaster
@@ -586,7 +652,7 @@ func (app *App) initProcessors() {
 
 	tx_processor.InitRollupSystemHandler(rollupSystemEventDispatcherFunc(func(store rollup.Store, stateDB tx_processor.AccountStateAccessor, data []byte) error {
 		return handleRollupSystemEvent(app, store, stateDB, data)
-	}))
+	}), app.accountRegistryHandler)
 }
 
 type rollupSystemPayload struct {
@@ -609,6 +675,16 @@ type rollupSystemPayload struct {
 // Put() cannot see that Put(), causing e.g. EventClaimedConfirmed to be rejected against a
 // stale MARKED_CLAIMED_PENDING_CREDIT read even though the record had already advanced).
 func handleRollupSystemEvent(app *App, store rollup.Store, stateDB rollup.AccountStateDB, data []byte) error {
+	if rollup.IsAccountRegistrationPayload(data) {
+		if app.accountRegistryHandler == nil {
+			return errors.New("account registry handler not initialized")
+		}
+		err := app.accountRegistryHandler.Apply(stateDB, data)
+		if err == nil && app.regWorker != nil {
+			app.regWorker.WakeUp()
+		}
+		return err
+	}
 	var payload rollupSystemPayload
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return fmt.Errorf("failed to unmarshal RollupSystemPayload: %w", err)
@@ -794,6 +870,12 @@ func (app *App) Run() error {
 		go app.sendWorker.Start()
 		go app.recvWorker.Start()
 		go app.reclaimWorker.Start()
+		if app.regWorker != nil {
+			go app.regWorker.Start()
+		}
+		if app.regRelay != nil && app.config.AccountGateParentRegistered() {
+			app.regRelay.Start()
+		}
 		if app.conservationRun != nil {
 			go app.conservationRun()
 		}
@@ -911,6 +993,22 @@ func (app *App) Stop() {
 
 	if app.pruningManager != nil {
 		app.pruningManager.Stop()
+	}
+
+	if app.sendWorker != nil {
+		app.sendWorker.Stop()
+	}
+	if app.recvWorker != nil {
+		app.recvWorker.Stop()
+	}
+	if app.reclaimWorker != nil {
+		app.reclaimWorker.Stop()
+	}
+	if app.regWorker != nil {
+		app.regWorker.Stop()
+	}
+	if app.regRelay != nil {
+		app.regRelay.Stop()
 	}
 
 	// Stop server non-blocking so it doesn't block the critical DB flush if clients hang

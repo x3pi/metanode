@@ -35,8 +35,9 @@ func sigCacheKey(tx types.Transaction, blsKey []byte) eth_common.Hash {
 // sigPolicy is the per-chain signature rule set, derived from the node config (identical on every validator of a
 // chain). It keeps every signature verdict a pure function of (tx, sender state, policy).
 type sigPolicy struct {
-	chainID uint64 // configured chain ID (0 = unset)
-	secp    bool   // tx_signature_mode == "secp": users sign only with secp256k1
+	chainID     uint64 // configured chain ID (0 = unset)
+	secp        bool   // tx_signature_mode == "secp": users sign only with secp256k1
+	accountGate bool   // account_gate == "parent_registered"
 }
 
 func sigPolicyOf(cs *blockchain.ChainState) sigPolicy {
@@ -44,7 +45,10 @@ func sigPolicyOf(cs *blockchain.ChainState) sigPolicy {
 		return sigPolicy{}
 	}
 	cfg := cs.GetConfig()
-	p := sigPolicy{secp: cfg.SecpOnlyTxSignatures()}
+	p := sigPolicy{
+		secp:        cfg.SecpOnlyTxSignatures(),
+		accountGate: cfg.AccountGateParentRegistered(),
+	}
 	if cfg.ChainId != nil {
 		p.chainID = cfg.ChainId.Uint64()
 	}
@@ -60,6 +64,22 @@ func isNodeBLSIdentity(tx types.Transaction, as types.AccountState) bool {
 	}
 	pub := as.PublicKeyBls()
 	return len(pub) > 0 && tx.FromAddress() == bls.GetAddressFromPublicKey(pub)
+}
+
+// senderRegisteredError returns nil if the sender is authorized under the account gate,
+// or transaction.AccountNotRegistered if the account is not registered on the parent chain.
+// Node BLS identities and non-secp or gate-disabled chains are exempt.
+func (p sigPolicy) senderRegisteredError(tx types.Transaction, as types.AccountState) *transaction.TransactionError {
+	if !p.secp || !p.accountGate {
+		return nil
+	}
+	if isNodeBLSIdentity(tx, as) {
+		return nil
+	}
+	if as == nil || !as.ParentRegistered() {
+		return transaction.AccountNotRegistered
+	}
+	return nil
 }
 
 // blsAllowed: whether a BLS signature may authenticate this tx. Always in legacy mode; only for node identities in
@@ -103,6 +123,9 @@ func (p sigPolicy) chainBindingError(tx types.Transaction) *transaction.Transact
 // as fallback; AccountType 1 additionally requires the ETH signature).
 func checkTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy) bool {
 	if pol.secpProtoError(tx) != nil {
+		return false
+	}
+	if pol.senderRegisteredError(tx, as) != nil {
 		return false
 	}
 	var blsKey []byte
@@ -213,6 +236,10 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 	queued := make([]*pending, total)
 	parallel(total, 64, func(i int) {
 		as := loadState(i)
+		if pol.senderRegisteredError(txs[i], as) != nil {
+			valid[i] = false
+			return
+		}
 		if as != nil && len(as.PublicKeyBls()) > 0 && as.AccountType() == 0 && txs[i].Type() != 0xFF && pol.blsAllowed(txs[i], as) {
 			key := sigCacheKey(txs[i], as.PublicKeyBls())
 			if LoadVerifiedSignature(key) {
