@@ -76,6 +76,8 @@
 
 **Truy cập (hàm thuần):** `as.ParentRegistered()` trên `AccountState` trước block.
 
+**Luồng đăng ký phía người dùng (đã chốt, xem §8.2):** người dùng CHỈ nói chuyện với node thực thi; node và parent chain tự xử lý toàn bộ phần còn lại.
+
 **Luồng sự kiện:**
 1. `RegistrationWorker` (file mới `pkg/rollup/worker_registration.go`, theo khuôn `ReceiveWorker`): poll `GetInboundAccountRegistrations(blsKeyPair.PublicKey(), cursor)` bằng `QuorumClient`; mỗi sự kiện → system tx qua cùng `eventProposer`/nonce allocator (`app.go`). Hàng đợi/batch có giới hạn, một goroutine, không blocking I/O trong vòng xử lý chung; cursor lưu bền, chỉ tiến sau khi event đã được áp dụng on-chain (đọc cờ để xác nhận), poll lại an toàn vì áp dụng idempotent.
 2. System tx tới `RollupSystemAddress` với payload có `Kind`/loại mới `account_registered {User, ClusterKey, ParentSeq}`; `RollupSystemHandler` rẽ nhánh sang `AccountRegistryHandler.Apply` (file mới, ví dụ `pkg/rollup/account_registry_handler.go`):
@@ -262,3 +264,39 @@ Tối thiểu: (a) bỏ kiểm tra gate ở admission; (b) bỏ kiểm tra gate 
 **Tính xác định / không fork:** `ParentConfirmed/ParentLocked` là system event có thứ tự mang bằng chứng parent; verdict gate là hàm thuần của `AccountState` trước block. Không dùng quan sát mất kết nối, không timeout. Hai cụm không cần liên lạc: mỗi cụm chỉ cần phán quyết của parent.
 
 **Test bắt buộc thêm (ngoài §4):** (L1) cùng một người dùng đăng ký tạm ở cụm A và B, A đăng ký lên parent trước ⇒ A: `CONFIRMED`, B: `LOCKED`, kết quả đúng bất kể thứ tự xử lý ở hai cụm; (L2) ở B mọi tx của người dùng đều bị từ chối **đúng mã `AccountLocked`** (chuyển toàn bộ, chuyển một phần, gọi hợp đồng, gateway, tx `0xFF` và tx ETH), có ca đối chứng cùng tx được chấp nhận ở A; (L3) tiền nhận thêm sau khi khoá vẫn vào được và vẫn bị kẹt (số dư tăng, gửi vẫn bị từ chối); (L4) giả mạo `ParentLocked`/`ParentConfirmed` từ tài khoản thường bị từ chối (P0) và từ node không có bằng chứng bị từ chối (khoá bừa người khác = tấn công từ chối dịch vụ nên phải kiểm kỹ); (L5) hết hạn theo block đúng biên N-1/N/N+1 trên mọi replica; (L6) trạng thái `LOCKED` không bao giờ quay lại `CONFIRMED`/`PROVISIONAL` bằng sự kiện nào (kể cả `ProvisionalRegister` mới); (L7) RPC trả đúng trạng thái; (L8) đột biến: bỏ kiểm tra `AccountLocked`, bỏ kiểm tra bằng chứng, đảo thứ tự thắng/thua, cho phép thoát `LOCKED` ⇒ test tương ứng phải FAIL.
+
+### 8.2 Luồng đăng ký tự động — người dùng chỉ gửi yêu cầu tới node thực thi (quyết định của người dùng, 2026-10-05)
+
+**Nguyên tắc:** người dùng không bao giờ gọi parent chain. Người dùng gửi yêu cầu đăng ký cho **node thực thi**; việc chuyển từ tạm sang thật (hoặc bị khoá) do node thực thi và parent chain tự động xử lý. Người dùng chỉ cần hỏi trạng thái.
+
+**Điểm vào (khuyến nghị: RPC của node thực thi):** `mtn_registerAccount({address, userSig})`.
+- `userSig` = chữ ký ECDSA của người dùng trên đúng thông điệp parent yêu cầu (`ComputeRegisterAccountMessage(userAddress, floatIdentityKey)`, domain tag `REGISTER_ACCOUNT_V1:`, gắn khoá cụm này). Client lấy `floatIdentityKey` từ node (`mtn_getClusterIdentity`, thêm mới) để ký đúng thông điệp.
+- Vì sao RPC thay vì tx: người dùng chưa đăng ký không qua được gate nên không gửi tx thường được; RPC không cần tạo ngoại lệ gate cho người gửi chưa đăng ký. Bản ghi bền vẫn nằm on-chain (system event bên dưới).
+- Node kiểm ngay: chữ ký hợp lệ (ecrecover = `address`), địa chỉ chưa ở trạng thái `CONFIRMED`/`LOCKED`, chính sách onboarding của cụm cho phép (`registration_policy` trong cấu hình: mở có giới hạn tốc độ / danh sách cho phép), rate-limit theo IP và theo địa chỉ, hàng đợi **có giới hạn**; vượt ⇒ từ chối rõ ràng (không treo).
+- Trả về ngay `{status: "PENDING"}`; không chờ parent.
+
+**Trạng thái hiển thị cho người dùng:** `mtn_getRegistrationStatus(address)` ⇒ `NONE | PENDING (đã nhận, chờ cấp tạm) | PROVISIONAL (dùng được, hết hạn ở block N) | CONFIRMED | LOCKED (kèm HomeClusterKey) | EXPIRED`. Đọc từ `AccountState` + hàng đợi cục bộ. Ví/dapp dựa vào đây (đặc biệt `LOCKED`).
+
+**Chuỗi tự động (không cần người dùng làm gì thêm):**
+1. Node nhận `mtn_registerAccount` ⇒ đưa vào hàng đợi cục bộ (bền, giới hạn).
+2. `RegistrationRelayWorker` (một goroutine, theo khuôn `ReceiveWorker`) lấy yêu cầu:
+   - phase 1 (không có tạm): ký `clusterSig` bằng khoá BLS của cụm rồi gọi parent `SendRegisterAccount(user, floatIdentityKey, userSig, clusterSig)`;
+   - phase 2 (có tạm): trước đó đề xuất system event `ProvisionalRegister` (kèm `userSig` ⇒ nằm on-chain, mọi node lấy lại được) rồi mới gọi parent.
+3. Parent xử lý `RegisterAccount` theo luật "ai đến trước": thành công ⇒ sinh `AccountRegisteredEvent` theo cụm; bị trùng ⇒ `ErrAccountAlreadyRegistered`.
+4. `RegistrationSyncWorker` (poll `GetInboundAccountRegistrations`, qua `QuorumClient` f+1) và đối soát `GetAccountRegistry(user)` cho các tài khoản đang `PENDING/PROVISIONAL` (theo lô, giới hạn):
+   - parent ghi cụm NÀY ⇒ system event `ParentConfirmed` ⇒ `CONFIRMED`;
+   - parent ghi cụm KHÁC ⇒ system event `ParentLocked(user, winnerClusterKey)` ⇒ `LOCKED`;
+   - chưa có kết quả ⇒ giữ nguyên, thử lại; phase 2: hết hạn theo block ⇒ `EXPIRED`.
+5. Mọi chuyển trạng thái là **system event có thứ tự, mang bằng chứng parent, do danh tính node đề xuất** (xem P0). Các thử lại/ poll chỉ là hành vi cục bộ của worker, không là đầu vào của verdict.
+
+**Tự động và an toàn thử lại:** mọi bước idempotent (cùng yêu cầu gửi lại không tạo trạng thái mới; parent từ chối trùng không làm hỏng); worker khởi động lại tiếp tục từ hàng đợi bền; backoff có trần nhưng KHÔNG dùng timeout để quyết định chuyển trạng thái. Parent không truy cập được ⇒ yêu cầu nằm trong hàng đợi (phase 1: người dùng chờ; phase 2: đang `PROVISIONAL` thì vẫn dùng được tới khi hết hạn).
+
+**Khoá cụm ký `clusterSig`:** cần khoá BLS của cụm trong node (câu hỏi V2 còn mở: khoá node `app.keyPair` có chính là `floatIdentityKey` không). Nếu mỗi node có khoá riêng thì chỉ node nắm khoá cụm (hoặc cơ chế ký ngưỡng) mới relay được — ghi quyết định vào báo cáo bước 0.
+
+**Chống lạm dụng onboarding:** rate-limit, hàng đợi giới hạn, `registration_policy`; mỗi yêu cầu tốn một giao dịch trên parent nên cụm có thể gom lô (tối đa N/lần) để không làm nghẽn parent.
+
+**Việc cần thêm vào bảng bước (§3):** (a) RPC `mtn_registerAccount`, `mtn_getRegistrationStatus`, `mtn_getClusterIdentity` + giới hạn tốc độ; (b) hàng đợi bền cho yêu cầu đăng ký; (c) `RegistrationRelayWorker` và `RegistrationSyncWorker`; (d) cấu hình `registration_policy`; (e) tài liệu hướng dẫn client cách ký thông điệp đăng ký.
+
+**Test thêm:** (R1) RPC từ chối chữ ký sai/địa chỉ không khớp/đã `CONFIRMED|LOCKED`/vượt giới hạn tốc độ, đúng mã lỗi; (R2) yêu cầu hợp lệ ⇒ chuỗi tự động đến `CONFIRMED` mà người dùng không gọi thêm gì; (R3) restart node giữa chừng ⇒ không mất yêu cầu, không gửi parent hai lần gây lỗi; (R4) parent tạm dừng rồi chạy lại ⇒ tự tiếp tục; (R5) hai cụm cùng nhận yêu cầu của một địa chỉ ⇒ cụm đến parent trước `CONFIRMED`, cụm kia `LOCKED`, mọi thứ tự xử lý cho cùng kết quả; (R6) hàng đợi đầy ⇒ từ chối rõ ràng, không rò rỉ bộ nhớ; (R7) `mtn_getRegistrationStatus` đúng ở mọi trạng thái; (R8) đột biến: bỏ kiểm `userSig`, bỏ rate-limit, bỏ idempotent.
+
+**E2E thêm (cụm cô lập):** người dùng mới gọi `mtn_registerAccount` (chỉ node thực thi) ⇒ theo dõi `PENDING → (PROVISIONAL) → CONFIRMED` ⇒ gửi tx thành công; kịch bản đăng ký song song ở hai cụm ⇒ một `CONFIRMED`, một `LOCKED`; tắt parent giữa chừng ⇒ tự hồi phục khi parent chạy lại.
