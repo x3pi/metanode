@@ -42,6 +42,8 @@ metanode/
 │           ├── config/ ← Consensus configuration types
 │           └── types/  ← Shared consensus types
 ├── crates/             ← Shared Rust crates (crypto, metrics, storage, macros)
+├── dashboard/          ← Real-time telemetry & explorer web app
+├── portal/             ← Web3 Portal: Parent Chain Account Gate Onboarding, Rollup transfers, and zero-fork telemetry
 ├── docs/               ← Docusaurus-based web documentation site
 ├── note/               ← Architecture documentation & known bugs (relocated from /docs)
 ├── scripts/            ← Operational scripts
