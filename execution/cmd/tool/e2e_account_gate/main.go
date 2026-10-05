@@ -33,6 +33,7 @@ import (
 	client "github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp"
 	c_config "github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+	"github.com/meta-node-blockchain/meta-node/types"
 )
 
 const (
@@ -354,12 +355,57 @@ func (c *cluster) sendProto(u user, to common.Address, amount *big.Int) (*client
 	if err != nil {
 		return nil, common.Hash{}, err
 	}
-	time.Sleep(time.Second) // let the handshake settle
-	tx, err := cl.SendSecpProtoTransactionNoWait(u.key, to, amount, 21000, gasPrice, nil)
+	// The TCP handshake completes asynchronously; retry only the "connection not ready yet" failure (a client-side
+	// condition, the tx has not been sent) so a slow handshake is not reported as a node failure.
+	var tx types.Transaction
+	for i := 0; i < 20; i++ {
+		time.Sleep(500 * time.Millisecond)
+		tx, err = cl.SendSecpProtoTransactionNoWait(u.key, to, amount, 21000, gasPrice, nil)
+		if err == nil || !strings.Contains(err.Error(), "realConnAddr") {
+			break
+		}
+	}
 	if err != nil {
 		return nil, common.Hash{}, err
 	}
 	return cl, tx.Hash(), nil
+}
+
+// runRestartStep supports the kill -9 durability test driven by a shell script: the registration request must survive an
+// execution-node crash and still reach CONFIRMED once the Parent Chain is reachable again.
+func runRestartStep(c *cluster, step, keyHex string) int {
+	k, err := crypto.HexToECDSA(keyHex)
+	if err != nil {
+		fmt.Println("bad -user-key:", err)
+		return 2
+	}
+	u := user{k, crypto.PubkeyToAddress(k.PublicKey)}
+	switch step {
+	case "register":
+		f := funder()
+		if _, err := c.transferEth(f.key, u.addr, oneEther); err != nil {
+			fmt.Println("funding:", err)
+			return 1
+		}
+		info, err := c.register(u)
+		if err != nil {
+			fmt.Println("register:", err)
+			return 1
+		}
+		fmt.Println("registered, status:", info.Status)
+		return 0
+	case "verify":
+		path, info, err := c.waitStatus(u.addr, "CONFIRMED", 120*time.Second)
+		fmt.Println("status path:", path)
+		if err != nil || info == nil {
+			fmt.Println("NOT CONFIRMED:", err)
+			return 1
+		}
+		fmt.Println("CONFIRMED after restart")
+		return 0
+	}
+	fmt.Println("unknown -restart-step", step)
+	return 2
 }
 
 func errContains(err error, sub string) error {
@@ -377,6 +423,8 @@ func errContains(err error, sub string) error {
 func main() {
 	envPath := flag.String("env", "", "path to env.json written by gen_env.py")
 	report := flag.String("report", "", "write a markdown report to this file")
+	restartStep := flag.String("restart-step", "", "durability test helper: 'register' (fund + register -user-key on exec1, print status) or 'verify' (wait for CONFIRMED)")
+	userKeyHex := flag.String("user-key", "", "hex secp256k1 key of the user for -restart-step")
 	flag.Parse()
 	if *envPath == "" {
 		fmt.Println("usage: e2e_account_gate -env <BASE>/env.json [-report file]")
@@ -400,6 +448,9 @@ func main() {
 	}
 	r.exec1 = mk("exec1", r.env.Ports.Exec1.RPC, r.env.Ports.Exec1.Conn)
 	r.exec2 = mk("exec2", r.env.Ports.Exec2.RPC, r.env.Ports.Exec2.Conn)
+	if *restartStep != "" {
+		os.Exit(runRestartStep(r.exec1, *restartStep, *userKeyHex))
+	}
 	for _, c := range []*cluster{r.exec1, r.exec2} {
 		var id struct {
 			AccountGate bool `json:"accountGate"`

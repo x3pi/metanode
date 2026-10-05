@@ -188,7 +188,11 @@ func TestRollupSystemHandler_ForgedRegistrationCannotSetFlag(t *testing.T) {
 	ns.SetPublicKeyBls(nodeKP.PublicKey().Bytes())
 	db.SetState(ns)
 	victim := common.HexToAddress("0x00000000000000000000000000000000000a11ce")
+	addTestCommitteeValidator(t, cs, nodeKP)
+	flushTestStake(t, cs)
 	tx, _ = forge(node, victim, 0)
+	tx = transaction.NewTransaction(node, rollup.RollupSystemAddress, big.NewInt(0), 21000, 1_000_000_000, 0,
+		attestedRegistrationPayload(t, nodeKP, victim, clusterKey, 1), nil, common.Hash{}, common.Hash{}, 0, 1).(*transaction.Transaction)
 	rcp, _, err = h.HandleTransaction(context.Background(), cs, tx, rollup.RollupSystemAddress, false, 0)
 	require.NoError(t, err)
 	assert.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcp.Status(), string(rcp.Return()))

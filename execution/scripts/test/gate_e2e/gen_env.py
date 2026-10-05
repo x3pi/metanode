@@ -140,7 +140,7 @@ def main():
             "bls_admin_storage": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
             "owner_file_storage_address": "0xC6E6474A8DEAD25B0e75b1aeA5d35FA19f69588a",
             "Databases": {"RootPath": d + "/data", "DBEngine": "sharded", "Version": "0.0.1.0",
-                          "BLSPrivateKey": c["bls_priv"], "SnapshotPath": d + "/snapshot"},
+                          "BLSPrivateKey": c["private_key"], "SnapshotPath": d + "/snapshot"},
             "is_rpc_node": True, "consensus_mode": "raft", "snapshot_enabled": False,
             "tx_signature_mode": "secp",
             "raft": {

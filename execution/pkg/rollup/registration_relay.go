@@ -284,11 +284,14 @@ func (r *RegistrationRelay) SetStore(store RegistrationRelayStore) error {
 		if rec == nil || rec.User == (common.Address{}) {
 			continue
 		}
-		// If already registered on-chain, ensure state is CONFIRMED
+		// Registered on-chain: Status() answers CONFIRMED from chain state, so the persisted record is dead weight.
 		if r.registered != nil && r.registered(rec.User) {
-			rec.Status = RegStatusConfirmed
-			rec.Reason = ""
-			_ = store.Put(rec)
+			_ = store.Delete(rec.User)
+			continue
+		}
+		// Bounded memory: records beyond maxTracked stay in the store and are loaded lazily by Status().
+		if len(r.entries) >= r.maxTracked {
+			continue
 		}
 		entry := &relayEntry{
 			user:      rec.User,
@@ -311,6 +314,7 @@ func (r *RegistrationRelay) SetStore(store RegistrationRelayStore) error {
 			}
 		}
 	}
+	log.Printf("RegistrationRelay: restored %d persisted registration request(s) (%d tracked in memory)", len(records), len(r.entries))
 	r.wake()
 	return nil
 }

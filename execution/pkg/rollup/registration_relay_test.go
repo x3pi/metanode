@@ -2,6 +2,7 @@ package rollup
 
 import (
 	"errors"
+	"math/big"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -422,4 +423,30 @@ func TestRegistrationRelay_DurableQueueSurvivesRestartAndReplays(t *testing.T) {
 	res3, err := relay2.Submit(addr, sig)
 	require.NoError(t, err)
 	assert.Equal(t, RegStatusConfirmed, res3.Status)
+}
+
+func TestRegistrationRelay_ReloadDropsRegisteredAndBoundsMemory(t *testing.T) {
+	kv := NewMemoryKVStore()
+	store := NewKVRelayStore(kv)
+	registered := map[common.Address]bool{}
+	for i := 0; i < 6; i++ {
+		u := common.BigToAddress(big.NewInt(int64(i + 1)))
+		require.NoError(t, store.Put(&RelayRecord{User: u, UserSig: []byte{1}, Status: RegStatusPending}))
+		if i < 2 {
+			registered[u] = true
+		}
+	}
+	r := NewRegistrationRelay(nil, cm.PublicKey{}, func([]byte) cm.Sign { return cm.Sign{} }, func(a common.Address) bool { return registered[a] })
+	r.maxTracked = 3
+	require.NoError(t, r.SetStore(store))
+	require.Len(t, r.entries, 3, "memory stays bounded")
+	left, _ := store.ScanAll()
+	require.Len(t, left, 4, "records of already-registered users are deleted from the store")
+	for _, rec := range left {
+		require.False(t, registered[rec.User])
+	}
+	// a record that did not fit in memory is still answered (lazy load)
+	for _, rec := range left {
+		require.Equal(t, RegStatusPending, r.Status(rec.User).Status)
+	}
 }

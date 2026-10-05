@@ -33,17 +33,13 @@ Bối cảnh: account gate (secp + `parent_registered`) đã E2E 14/14 trên c�
 - **D.4:** Đã xóa sạch 2 branch local thừa `pr155` và `sec-rollup-system-auth` sau khi xác nhận đã gộp trong `dev`.
 - **D.5:** Portal UI đã hoàn thiện và push trong commit `09452746`.
 
-### A. Xác thực sự kiện hệ thống bằng co-attestation f+1 — ⚠️ MỚI XONG PHẦN XÁC MINH Ở HANDLER, CHƯA BẬT TRÊN NODE THẬT
-> Review 2026-10-05: **chưa có hiệu lực bảo mật.** (1) `CommitteeProvider` chỉ là interface, chưa có cài đặt (`GetActiveCommitteeBLSKeys`) và chưa gắn vào `simple_chain` ⇒ handler không ép f+1. (2) Worker chỉ đính kèm chữ ký CỦA CHÍNH NÓ, chưa có trao đổi chữ ký giữa validator (bước 3 còn thiếu) ⇒ bật provider với committee f+1>1 sẽ làm mọi đăng ký PENDING mãi. (3) Chưa có E2E nhiều validator. Việc còn lại: cài `CommitteeProvider` từ state (nguồn ở bước 1), cơ chế thu chữ ký có giới hạn, E2E ≥4 validator. Đã sửa lỗi: handler từng mặc định chain ID 991 cứng nên lệch với worker khi chain ID cấu hình khác ⇒ mọi đăng ký bị từ chối; nay dùng `parentchain.ParentChainID`.
-- **Bước 1 (Deterministic Committee Source):** Đã xác định nguồn uỷ ban đọc trực tiếp từ state qua `chainState.GetStakeStateDB().GetAllValidators()` kết hợp `chainState.GetAccountStateDB().AccountState(v.Address()).PublicKeyBls()`.
-- **Bước 2 (Envelope & Verification):**
-  - Thêm domain `ACCT_REG_ATTEST_V1` và hàm `ComputeAccountRegistrationAttestDigest(chainID, user, clusterKey, parentSeq)`.
-  - Mở rộng `AccountRegistrationPayload` với `Attestations []RegistrationAttestation`.
-  - `AccountRegistryHandler.Apply` kiểm tra $\ge f+1$ chữ ký BLS của các thành viên uỷ ban khác nhau trên digest trước khi áp dụng.
-  - `RegistrationWorker.pollAndProcess()` tự ký và đính kèm attestation của node khi đề xuất.
-- **Kiểm thử:** Unit test `execution/pkg/rollup/account_registry_coattest_test.go` (`TestAccountRegistryHandler_CoAttestation`) pass 5/5 kịch bản:
-  1. Đủ chữ ký uỷ ban $\ge f+1$ ⇒ thành công.
-  2. Thiếu chữ ký uỷ ban $< f+1$ ⇒ bị từ chối rõ ràng.
-  3. Trùng chữ ký từ cùng một validator ⇒ bị từ chối.
-  4. Chữ ký từ node ngoài uỷ ban ⇒ bị từ chối.
-  5. Payload bị sửa (digest lệch) ⇒ chữ ký không hợp lệ bị từ chối.
+### A. Xác thực sự kiện hệ thống bằng co-attestation f+1 — ✅ ĐÃ BẬT TRÊN NODE (hướng (a), 2026-10-05)
+- **Cơ chế:** mỗi validator tự xác minh sự kiện qua `QuorumClient` rồi gửi **tx hệ thống riêng** chứa chữ ký BLS của chính nó (khoá committee `Databases.BLSPrivateKey`, nếu trống thì dùng khoá node). `AccountRegistryHandler.ApplyAttested` kiểm chữ ký (thuộc committee, không trùng, đúng digest `ACCT_REG_ATTEST_V1||chainID||user||clusterKey||parentSeq`), **cộng dồn** chữ ký vào contract storage của `RollupSystemAddress` (`NewDBAttestationStore`), đủ ≥ f+1 chữ ký phân biệt (f=(N-1)/3) mới đặt `ParentRegistered`, rồi xoá bộ nhớ tạm. Chưa đủ ⇒ receipt thành công nhưng giữ PENDING (không timeout, không đoán). Không cần kênh P2P mới: chính consensus là nơi trao đổi chữ ký.
+- **Committee** (`tx_processor/rollup_committee.go`): validator không bị jail, stake > 0, tài khoản có `PublicKeyBls` 48 byte, đọc từ chính chain state mà tx đang chạy ⇒ mọi replica cùng kết quả. Chữ ký của validator đã rời committee không được tính.
+- **Worker:** bỏ qua gửi lại nếu chữ ký của mình đã nằm trên chain (`HasPendingAttestation`) ⇒ không spam khi chờ validator khác.
+- **Yêu cầu triển khai:** với mỗi validator, `AccountState.PublicKeyBls` của địa chỉ validator PHẢI bằng public key của `Databases.BLSPrivateKey` (hoặc khoá node nếu không đặt BLSPrivateKey); lệch ⇒ đăng ký PENDING mãi (an toàn nhưng treo). Đổi định dạng payload ⇒ deploy đồng thời mọi node. `GetAllValidators` giới hạn top 21.
+- **Đã kiểm:** unit (cộng dồn, trùng, ngoài committee, sai digest, thứ tự, committee đổi giữa chừng; 5 mutation đều bị bắt), integration thật qua `HandleTransaction` với committee 4 validator (1 validator lặp lại nhiều lần không đăng ký được; validator thứ 2 hoàn tất; node ngoài committee bị từ chối), `-race`, E2E cụm cô lập 14/14 với enforcement bật.
+- **Chưa kiểm:** E2E nhiều validator thật (≥4) — môi trường cô lập chỉ có cụm 1 validator (f+1=1). Nên chạy trước khi lên production thật.
+
+### C+. Độ bền hàng đợi đăng ký — ✅ kiểm bằng kill -9 thật
+`scripts/test/gate_e2e/restart_durability.sh <BASE>`: (A) đã CONFIRMED rồi kill -9 ⇒ vẫn CONFIRMED; (B) đăng ký khi parent tắt, kill -9 node, bật lại ⇒ lên CONFIRMED. 3/3 lần PASS. Ghi mỗi request có `SyncDurable` (Pebble NoSync không đủ khi mất điện). Nạp lại bị chặn bộ nhớ (maxTracked), bản ghi của user đã đăng ký tự xoá.

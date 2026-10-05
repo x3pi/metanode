@@ -105,14 +105,17 @@ func TestRollupSystemHandler_AccountRegistration_Success(t *testing.T) {
 
 	stateDB := chainState.GetAccountStateDB()
 	initialBalance := big.NewInt(1000000000000000000)
-	senderAddr := newNodeIdentityAccount(stateDB, initialBalance)
+	nodeKP := bls.GenerateKeyPair()
+	ns := state.NewAccountState(nodeKP.Address())
+	ns.AddBalance(initialBalance)
+	ns.SetPublicKeyBls(nodeKP.PublicKey().Bytes())
+	stateDB.SetState(ns)
+	senderAddr := nodeKP.Address()
+	// the node is the (only) validator of the committee, so its own attestation reaches f+1
+	addTestCommitteeValidator(t, chainState, nodeKP)
+	flushTestStake(t, chainState)
 
-	payload, _ := json.Marshal(rollup.AccountRegistrationPayload{
-		Kind:       rollup.SystemPayloadKindAccountRegistered,
-		User:       userAddr,
-		ClusterKey: clusterKey,
-		ParentSeq:  1,
-	})
+	payload := attestedRegistrationPayload(t, nodeKP, userAddr, clusterKey, 1)
 	tx := transaction.NewTransaction(
 		senderAddr,
 		rollup.RollupSystemAddress,

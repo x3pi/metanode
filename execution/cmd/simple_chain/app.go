@@ -354,7 +354,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		func(digest []byte) cm.Sign { return bls.Sign(app.keyPair.PrivateKey(), digest) },
 		stateDBAdapter.GetParentRegistered)
 	if app.storageManager != nil && app.storageManager.GetStorageMapping() != nil {
-		store := rollup.NewKVRelayStore(app.storageManager.GetStorageMapping())
+		store := rollup.NewKVRelayStore(durableKV{app.storageManager.GetStorageMapping()})
 		if err := app.regRelay.SetStore(store); err != nil {
 			logger.Warn("Failed to initialize durable storage for registration relay: %v", err)
 		}
@@ -520,6 +520,21 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	app.sendWorker.EventProposer = eventProposer
 	app.recvWorker.EventProposer = eventProposer
 	app.reclaimWorker.EventProposer = eventProposer
+	// Attestations are signed with this validator's committee key (Databases.BLSPrivateKey, the key whose public half is
+	// the validator account's PublicKeyBls); single-key deployments fall back to the node key.
+	attestKey := app.keyPair
+	if hexKey := app.config.Databases.BLSPrivateKey; hexKey != "" {
+		if priv, _, _ := bls.GenerateKeyPairFromSecretKey(hexKey); len(priv.Bytes()) > 0 {
+			attestKey = bls.NewKeyPair(priv.Bytes())
+		} else {
+			logger.Warn("Invalid Databases.BLSPrivateKey: registration attestations fall back to the node key")
+		}
+	}
+	app.regWorker.SetAttestationKey(attestKey)
+	app.regWorker.AlreadyAttested = func(user e_common.Address, parentSeq uint64) bool {
+		return rollup.HasPendingAttestation(&smartContractDBAdapter{chainState: app.chainState},
+			parentchain.ParentChainID, user, app.keyPair.PublicKey(), parentSeq, attestKey.PublicKey())
+	}
 	app.regWorker.EventProposer = func(payload []byte) error {
 		rollupNonceMutex.Lock()
 		defer rollupNonceMutex.Unlock()
@@ -1277,4 +1292,22 @@ func verifyParentChainID(client parentchain.Client, localChainID uint64) error {
 		return fmt.Errorf("parent chain ID mismatch: parent reports %d, local config has %d", status.ChainID, localChainID)
 	}
 	return nil
+}
+
+// durableKV makes every relay write durable (fsync) before it returns. Registration requests are rare, so the cost is
+// negligible, and a request the user was told is PENDING must survive a crash or power loss.
+type durableKV struct{ storage.Storage }
+
+func (d durableKV) Put(key, value []byte) error {
+	if err := d.Storage.Put(key, value); err != nil {
+		return err
+	}
+	return storage.SyncDurable(d.Storage)
+}
+
+func (d durableKV) Delete(key []byte) error {
+	if err := d.Storage.Delete(key); err != nil {
+		return err
+	}
+	return storage.SyncDurable(d.Storage)
 }
