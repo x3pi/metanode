@@ -11,6 +11,7 @@ import (
 
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 )
 
 type mockCommitteeProvider struct {
@@ -172,4 +173,23 @@ func TestAccountRegistryHandler_CoAttestation(t *testing.T) {
 		assert.Contains(t, err.Error(), "invalid BLS signature")
 		assert.False(t, db.GetParentRegistered(tamperedUser))
 	})
+}
+
+// A non-default chain ID must not break registration: the handler must derive the same digest the worker signs.
+func TestAccountRegistryAttestationFollowsConfiguredChainID(t *testing.T) {
+	old := parentchain.ParentChainID
+	defer parentchain.SetParentChainID(old)
+	parentchain.SetParentChainID(4242)
+
+	kp := bls.GenerateKeyPair()
+	user := common.HexToAddress("0x00000000000000000000000000000000000000aa")
+	cluster := kp.PublicKey()
+	digest := ComputeAccountRegistrationAttestDigest(parentchain.ParentChainID, user, cluster, 7)
+	payload := AccountRegistrationPayload{Kind: SystemPayloadKindAccountRegistered, User: user, ClusterKey: cluster, ParentSeq: 7,
+		Attestations: []RegistrationAttestation{{ValidatorPubkey: kp.PublicKey(), Signature: bls.Sign(kp.PrivateKey(), digest)}}}
+	data, _ := json.Marshal(payload)
+	db := newCoattestMockStateDB()
+	if err := NewAccountRegistryHandler(cluster).Apply(db, data); err != nil {
+		t.Fatalf("registration must apply under chain ID 4242: %v", err)
+	}
 }

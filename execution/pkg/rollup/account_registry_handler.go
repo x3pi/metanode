@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 )
 
 const (
@@ -193,6 +194,9 @@ type AccountStateRegistryDB interface {
 	SetParentRegistered(addr common.Address, registered bool)
 }
 
+// NOTE: committee enforcement is NOT active in production yet: no CommitteeProvider is wired in simple_chain, and the
+// RegistrationWorker attaches only its OWN attestation (no signature exchange between validators). Wiring a provider
+// for a committee with f+1 > 1 before that exchange exists would leave every registration PENDING forever.
 // CommitteeProvider returns the active committee validator BLS public keys.
 type CommitteeProvider interface {
 	GetActiveCommitteeBLSKeys() ([]cm.PublicKey, error)
@@ -207,15 +211,21 @@ type AccountRegistryHandler struct {
 
 // NewAccountRegistryHandler creates a new handler bound to the cluster's public key.
 func NewAccountRegistryHandler(clusterPubKey cm.PublicKey) *AccountRegistryHandler {
-	return &AccountRegistryHandler{
-		clusterPubKey: clusterPubKey,
-		chainID:       991, // default matching shared exec chain ID
-	}
+	return &AccountRegistryHandler{clusterPubKey: clusterPubKey}
 }
 
 // SetCommitteeProvider sets the committee provider for quorum verification (>= f+1).
 func (h *AccountRegistryHandler) SetCommitteeProvider(cp CommitteeProvider) {
 	h.committeeProvider = cp
+}
+
+// attestChainID is the chain ID bound into the attestation digest: an explicit SetChainID value, otherwise the
+// configured shared chain ID (parentchain.ParentChainID), i.e. the same value the RegistrationWorker signs with.
+func (h *AccountRegistryHandler) attestChainID() uint64 {
+	if h.chainID != 0 {
+		return h.chainID
+	}
+	return parentchain.ParentChainID
 }
 
 // SetChainID sets the expected chain ID used for attestation digest calculation.
@@ -288,7 +298,7 @@ func (h *AccountRegistryHandler) Apply(stateDB AccountStateRegistryDB, data []by
 				len(payload.Attestations), required, n)
 		}
 
-		digest := ComputeAccountRegistrationAttestDigest(h.chainID, payload.User, payload.ClusterKey, payload.ParentSeq)
+		digest := ComputeAccountRegistrationAttestDigest(h.attestChainID(), payload.User, payload.ClusterKey, payload.ParentSeq)
 		seen := make(map[cm.PublicKey]bool)
 		committeeSet := make(map[cm.PublicKey]bool, len(committee))
 		for _, key := range committee {
@@ -316,7 +326,7 @@ func (h *AccountRegistryHandler) Apply(stateDB AccountStateRegistryDB, data []by
 		}
 	} else if len(payload.Attestations) > 0 {
 		// When no committee provider is configured, verify any attached signatures against the payload digest
-		digest := ComputeAccountRegistrationAttestDigest(h.chainID, payload.User, payload.ClusterKey, payload.ParentSeq)
+		digest := ComputeAccountRegistrationAttestDigest(h.attestChainID(), payload.User, payload.ClusterKey, payload.ParentSeq)
 		seen := make(map[cm.PublicKey]bool)
 		for _, att := range payload.Attestations {
 			if seen[att.ValidatorPubkey] {

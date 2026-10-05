@@ -33,7 +33,8 @@ Bối cảnh: account gate (secp + `parent_registered`) đã E2E 14/14 trên c�
 - **D.4:** Đã xóa sạch 2 branch local thừa `pr155` và `sec-rollup-system-auth` sau khi xác nhận đã gộp trong `dev`.
 - **D.5:** Portal UI đã hoàn thiện và push trong commit `09452746`.
 
-### A. Xác thực sự kiện hệ thống bằng co-attestation f+1 — ✅ ĐÃ HOÀN THÀNH BƯỚC 1 & 2
+### A. Xác thực sự kiện hệ thống bằng co-attestation f+1 — ⚠️ MỚI XONG PHẦN XÁC MINH Ở HANDLER, CHƯA BẬT TRÊN NODE THẬT
+> Review 2026-10-05: **chưa có hiệu lực bảo mật.** (1) `CommitteeProvider` chỉ là interface, chưa có cài đặt (`GetActiveCommitteeBLSKeys`) và chưa gắn vào `simple_chain` ⇒ handler không ép f+1. (2) Worker chỉ đính kèm chữ ký CỦA CHÍNH NÓ, chưa có trao đổi chữ ký giữa validator (bước 3 còn thiếu) ⇒ bật provider với committee f+1>1 sẽ làm mọi đăng ký PENDING mãi. (3) Chưa có E2E nhiều validator. Việc còn lại: cài `CommitteeProvider` từ state (nguồn ở bước 1), cơ chế thu chữ ký có giới hạn, E2E ≥4 validator. Đã sửa lỗi: handler từng mặc định chain ID 991 cứng nên lệch với worker khi chain ID cấu hình khác ⇒ mọi đăng ký bị từ chối; nay dùng `parentchain.ParentChainID`.
 - **Bước 1 (Deterministic Committee Source):** Đã xác định nguồn uỷ ban đọc trực tiếp từ state qua `chainState.GetStakeStateDB().GetAllValidators()` kết hợp `chainState.GetAccountStateDB().AccountState(v.Address()).PublicKeyBls()`.
 - **Bước 2 (Envelope & Verification):**
   - Thêm domain `ACCT_REG_ATTEST_V1` và hàm `ComputeAccountRegistrationAttestDigest(chainID, user, clusterKey, parentSeq)`.
