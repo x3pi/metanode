@@ -1,45 +1,35 @@
 all:
   vars:
-    ansible_user: "metanode"
+    ansible_user: "abc"
     # Installation and base directories (standardized across all machines)
     install_dir: "/opt/metanode"
+    # Mật khẩu sudo/become: khuyến nghị dùng Ansible Vault trong production
     ansible_become_pass: "YOUR_BECOME_PASSWORD"
+    ansible_ssh_pass: "{{ ansible_become_pass }}"
     # Raft shared configuration for execution clusters
     raft_secret_file: "/opt/metanode/raft_secret.key"
-    # Parent Chain configuration
-    parent_chain_rpc_port: 8547
-    parent_chain_host: "127.0.0.1"
-    # EVM Chain ID for Execution Clusters
+
+    # ── Parent Chain Configuration (Điểm neo bảo chứng cho Child Chain) ──
+    parent_chain_rpc_port: 10751
+    parent_chain_host: "192.168.1.234"
+    # EVM Chain ID cho Child Chain (Execution Clusters)
     chain_id: 991
-    # Dedicated Chain ID for Parent Chain (Đ7: 990)
-    parent_chain_id: 990
-    # BLS public key for mtn_api.go's devnet sender 0xb4eb...; must match its signing key.
+    # Dedicated Chain ID cho Parent Chain (Mặc định: 990 hoặc 991)
+    parent_chain_id: 991
+    # BLS public key cho devnet sender (mtn_api.go)
     devnet_sender_bls_pubkey: "0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc"
-    # Who may register as a cluster (a cluster's certificate authorizes deposits, i.e. mints float).
-    #   devnet:     true  -> any key may register.
-    #   production: false + list the BLS public keys (hex, 48 bytes) of the allowed clusters.
+    # Đăng ký cluster tự do (devnet: true, production: false)
     parent_open_cluster_registration: true
     parent_allowed_clusters: []
-    # Float model (production): the supply is exactly what the genesis allocates; depositToFloat (the only mint path)
-    # is disabled. BLS keys are accounts that transfer float to each other. 1 unit = 10^18 base units.
-    #   parent_allow_deposit_to_float: false          # devnet/tests only: true
-    #   parent_min_float_to_register: "1000000000000000000000"   # 1000 units: any key holding this may register as a cluster
-    #   parent_float_accounts:
-    #     - { bls_public_key: "<48-byte hex>", balance: "1500000000000000000000" }
-    parent_allow_deposit_to_float: true   # devnet only
-    # Conservation guard (production: 'enforce', devnet: 'warn' or 'off'):
-    # Asserts that Parent Chain float(cluster BLS) == sum(alloc) on the execution cluster.
-    # When 'enforce', blocks outbound cross-chain transfers if float != sum(alloc).
-    bls_conservation_mode: "warn"             # devnet: warn, production: enforce
+    # Float model & Conservation guard
+    parent_allow_deposit_to_float: true   # devnet: true, production: false
+    bls_conservation_mode: "warn"         # devnet: warn, production: enforce
     bls_conservation_interval_seconds: 300
-    # ── Security tokens (2026-09-30 audit fixes) — put REAL values in ansible-vault, never in plaintext ──
-    # snapshot_server_token: "{{ vault_snapshot_server_token }}"   # protects snapshot downloads; POST /create needs it
-    # snapshot_server_bind: "127.0.0.1"                            # restrict the snapshot port if peers need no access
-    # quic_pinned_cert_sha256: "<leaf-cert-sha256>,<...>"         # pin QUIC peer certs (otherwise unauthenticated)
-
 
   children:
     # ── Parent Chain Committee (100% Rust BFT Consensus Engine, Chain ID: 990) ──
+    # ⚠️ LƯU Ý: Nếu CHỈ TRIỂN KHAI CHILD CHAIN (Execution Cluster), hãy ĐỂ COMMENT nhóm này.
+    # Khi nhóm này rỗng hoặc bị comment, hệ thống sẽ tự động bỏ qua Parent Chain và bỏ qua Validator Vote Monitor.
     parent_chain_nodes:
       hosts:
         # Example 4-Node BFT Parent Chain Committee (single-node or multi-node supported)
@@ -84,81 +74,74 @@ all:
           metrics_port: 19604
           node_data_dir: "/opt/metanode/parent_chain_3"
 
-    # ── Execution Clusters (Rollup Shards with Raft HA Consensus) ────────
+    # ── Execution Clusters (Child Chains / Rollup Shards with Raft HA Consensus) ────────
     exec_clusters:
       children:
-        # Cluster 1: 3-Replica High Availability Raft Cluster
+        # Cluster 1: 3-Replica High Availability Raft Cluster (Child Chain ID 991)
         cluster_1:
           vars:
             cluster_id: 1
             cluster_name: "exec1"
             consensus_mode: "raft"
-            # Standard ports across all machines in multi-server setup
-            rpc_port: 8646
+            # Cổng và thư mục mặc định (chuẩn hóa trên tất cả các máy khi chạy multi-server)
+            rpc_port: 8747
             p2p_port: 4200
             raft_port: 7110
             forward_port: 7210
             node_data_dir: "/opt/metanode/data"
-            private_key: "YOUR_CLUSTER1_PRIVATE_KEY_HEX"
-            address: "0xYourCluster1SequencerAddress"
-            bls_priv: "YOUR_CLUSTER1_BLS_PRIVATE_KEY_HEX"
-            bls_pubkey: "0xYourCluster1BlsPublicKeyHex"
-            # NOTE: raft_peers is automatically generated by Jinja2 template from the hosts below.
-            # No manual raft_peers array needed!
+            private_key: "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c"
+            address: "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5"
+            bls_priv: "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c"
+            bls_pubkey: "0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128"
+            # NOTE: raft_peers được tự động sinh bởi Jinja2 template từ danh sách hosts dưới đây.
           hosts:
+            # Replica 1: Leader khởi tạo ban đầu (chạy trên máy localhost hoặc Server 1)
             exec1_replica1:
-              ansible_host: 127.0.0.1
-              ansible_connection: local
+              ansible_host: 192.168.1.234
+              ansible_connection: local     # Dùng 'local' nếu script Ansible chạy trực tiếp trên máy này
               node_id: "exec1_r1"
-              raft_bootstrap: true
-              # For local single-machine testing, override ports:
-              # For multi-server deployment (each node on distinct IP), delete these port override lines!
-              rpc_port: 8646
-              p2p_port: 4200
-              raft_port: 7110
-              forward_port: 7210
+              raft_bootstrap: true          # Node duy nhất nhận cờ khởi tạo cụm Raft
+              rpc_port: 8747
               node_data_dir: "/opt/metanode/exec1_r1"
 
+            # Replica 2: Follower node (chạy trên Server 2 qua kết nối SSH)
             exec1_replica2:
-              ansible_host: 127.0.0.1
-              ansible_connection: local
+              ansible_host: 192.168.1.223   # IP máy chủ từ xa
               node_id: "exec1_r2"
               raft_bootstrap: false
-              rpc_port: 8648
+              rpc_port: 8748
+              node_data_dir: "/opt/metanode/exec1_r2"
+
+            # Replica 3: Follower node thứ 2 (cùng nằm trên Server 2)
+            # Vì chung IP với Replica 2 nên các cổng phải được cấu hình tăng dần tránh xung đột:
+            exec1_replica3:
+              ansible_host: 192.168.1.223
+              node_id: "exec1_r3"
+              raft_bootstrap: false
+              rpc_port: 8749
               p2p_port: 4201
               raft_port: 7111
               forward_port: 7211
-              node_data_dir: "/opt/metanode/exec1_r2"
-
-            exec1_replica3:
-              ansible_host: 127.0.0.1
-              ansible_connection: local
-              node_id: "exec1_r3"
-              raft_bootstrap: false
-              rpc_port: 8649
-              p2p_port: 4203
-              raft_port: 7112
-              forward_port: 7212
               node_data_dir: "/opt/metanode/exec1_r3"
 
-        # Cluster 2: Single-Replica Raft Node
-        cluster_2:
-          vars:
-            cluster_id: 2
-            cluster_name: "exec2"
-            consensus_mode: "raft"
-            rpc_port: 8647
-            p2p_port: 4202
-            raft_port: 7120
-            forward_port: 7220
-            node_data_dir: "/opt/metanode/exec2"
-            private_key: "YOUR_CLUSTER2_PRIVATE_KEY_HEX"
-            address: "0xYourCluster2SequencerAddress"
-            bls_priv: "YOUR_CLUSTER2_BLS_PRIVATE_KEY_HEX"
-            bls_pubkey: "0xYourCluster2BlsPublicKeyHex"
-          hosts:
-            exec2_replica1:
-              ansible_host: 127.0.0.1
-              ansible_connection: local
-              node_id: "exec2_r1"
-              raft_bootstrap: true
+        # Cluster 2 (Tùy chọn): Cụm Shard con thứ 2 (Exec Cluster 2) nếu cần chạy đa cụm
+        # cluster_2:
+        #   vars:
+        #     cluster_id: 2
+        #     cluster_name: "exec2"
+        #     consensus_mode: "raft"
+        #     rpc_port: 8750
+        #     p2p_port: 4202
+        #     raft_port: 7120
+        #     forward_port: 7220
+        #     node_data_dir: "/opt/metanode/exec2"
+        #     private_key: "YOUR_CLUSTER2_PRIVATE_KEY_HEX"
+        #     address: "0xYourCluster2SequencerAddress"
+        #     bls_priv: "YOUR_CLUSTER2_BLS_PRIVATE_KEY_HEX"
+        #     bls_pubkey: "0xYourCluster2BlsPublicKeyHex"
+        #   hosts:
+        #     exec2_replica1:
+        #       ansible_host: 192.168.1.234
+        #       ansible_connection: local
+        #       node_id: "exec2_r1"
+        #       raft_bootstrap: true
