@@ -6,6 +6,19 @@
 
 ---
 
+## P0. ĐIỀU KIỆN TIÊN QUYẾT BẢO MẬT — phải xong trước khi làm bất cứ bước nào dưới đây
+
+**Phát hiện (2026-10-05, đã chứng minh bằng test chạy thật):** `RollupSystemHandler` áp dụng system event chỉ từ payload JSON và **không kiểm tra ai gửi tx**. Đường nhận tiền `CreditObserved → RPCSubmitted → ClaimedConfirmed` cộng `Target/Value` thẳng từ event, không tra dữ liệu parent. Một tài khoản thường có tiền gas đã mint được 10²⁴ wei vào địa chỉ bất kỳ bằng ba tx đều `RETURNED`. Toàn bộ kế hoạch này (event đăng ký / khoá / thu hồi) đi qua đúng cửa này, nên nếu chưa đóng thì **mọi người dùng có thể tự đặt cờ đăng ký cho chính mình hoặc mint tiền**.
+
+**Bản sửa đã viết và kiểm thử (đột biến xác nhận), CHƯA nằm trong `dev`:** nhánh `sec-rollup-system-auth` (commit `9b413aee`). Chỉ danh tính node BLS-native (`isNodeBLSIdentity`: địa chỉ = `keccak(blsPub)[12:]`, khoá BLS đã đăng ký trong state) mới được gửi tx tới `RollupSystemAddress`:
+- thực thi (có thẩm quyền): `isAuthorizedRollupSystemSender` ở ĐẦU `HandleTransaction`, sai ⇒ biên lai lỗi `UnauthorizedSystemSender` + tiêu nonce;
+- admission: `VerifyTransaction` trả mã lỗi mới `69` (không có miễn trừ "sub node lagging" vì kẻ tấn công trông y hệt tài khoản lagging);
+- test: `rollup_system_handler_auth_test.go` (giả mạo bị từ chối, ca đối chứng danh tính node vẫn credit, admission), test cũ `TestRollupSystemHandler_HandleTransaction` đổi sang gửi từ danh tính node (nó từng dựa vào việc thiếu kiểm tra).
+
+**Tích hợp:** agent đang làm kế hoạch này cũng sửa `rollup_system_handler.go` (nhánh `registryHandler`, `rollup.IsAccountRegistrationPayload`). Khối kiểm tra quyền phải nằm **trước cả hai nhánh** (đăng ký và dispatcher) để nhánh đăng ký không bị giả mạo. Hãy lấy nhánh trên (`git cherry-pick 9b413aee` sau khi commit phần của bạn, giải xung đột thủ công) và thêm test: giả mạo event ĐĂNG KÝ từ tài khoản thường phải bị từ chối.
+
+**Còn hở sau bản sửa (cần thiết kế riêng):** mọi danh tính node của cụm đều qua được kiểm tra; một validator Byzantine vẫn có thể gửi event giả (mint, đăng ký/khoá bừa). Event lấy từ parent phải mang **bằng chứng parent xác minh được** (chứng chỉ quorum / proof NOMT so với root parent đã neo trên chain thực thi) và handler kiểm bằng dữ liệu on-chain, không tin người đề xuất. Đây là việc của giai đoạn 2 nhưng phải được ghi nhận là rủi ro mở.
+
 ## 0. Đọc trước khi làm (bắt buộc)
 
 1. `AGENTS.md` (Zero-Fork Invariant: thà pending chứ không fork; KHÔNG dùng timeout/sleep để quyết định commit/dispatch; mọi queue/worker phải có giới hạn; không blocking I/O trong vòng async). `PROJECT_STRUCTURE.md` (cập nhật khi thêm module/đổi proto/đổi kênh).
@@ -223,3 +236,24 @@ Tối thiểu: (a) bỏ kiểm tra gate ở admission; (b) bỏ kiểm tra gate 
 **Đánh đổi phải nói rõ với người dùng:** trong cửa sổ tạm, đảm bảo "một địa chỉ một cụm" **không còn đầy đủ** — người dùng có thể ký `REGISTER_ACCOUNT` cho hai cụm và có tài khoản tạm ở cả hai (parent chỉ phân xử sau khi về). Đây đúng là khoảng hở replay xuyên cụm quay lại trong thời gian ngắn. Cách giảm: chain ID duy nhất theo cụm (gắn với khoá BLS, xem `secp256k1_proto_tcp_architecture_design.md` §10) giữ replay bị chặn kể cả trong cửa sổ tạm; W nhỏ; giới hạn giá trị; cấm xuyên chain. Nếu không chấp nhận khoảng hở này thì giữ giai đoạn 1 (chờ).
 
 **Test bổ sung cho giai đoạn 2 (ngoài §4):** hết hạn theo block (biên N-1/N/N+1, giống nhau trên mọi replica); cấp trùng idempotent; sai `UserSig` / chữ ký cho cụm khác bị từ chối đúng lỗi; revoke sau khi parent từ chối; tài khoản tạm không gửi được tx xuyên chain; ngừng parent thật rồi dựng lại ⇒ tài khoản tạm được xác nhận không cần can thiệp; **mô phỏng cùng một người dùng được cấp tạm ở hai cụm cùng chain ID ⇒ chứng minh khoảng hở và chứng minh chain ID khác nhau thì đóng được**; kiểm tra đột biến (bỏ kiểm `UserSig`, bỏ hết hạn, bỏ cấm xuyên chain).
+
+### 8.1 Quyết định của người dùng (2026-10-05): đăng ký tạm ở hai cụm — parent chọn bên thắng, bên thua bị khoá và chỉ được rút sạch
+
+**Luật trọng tài:** Parent Chain là trọng tài. Cụm nào đăng ký **được parent ghi nhận trước** (`RegisterAccount` thành công, `ErrAccountAlreadyRegistered` với bên đến sau) thì tài khoản ở cụm đó thành tài khoản thật. Cụm còn lại phải khoá tài khoản; chủ tài khoản chỉ được **rút toàn bộ số dư sang một tài khoản khác**.
+
+**Máy trạng thái tài khoản (trên mỗi cụm):** `NONE → PROVISIONAL → CONFIRMED` hoặc `PROVISIONAL → LOCKED`. (Có thể hợp nhất `ParentRegistered`/`ProvisionalUntilBlock` thành một enum `RegistrationState` + `HomeClusterKey` trong `AccountState`.)
+
+| Sự kiện on-chain (do danh tính node đề xuất, kèm bằng chứng parent — xem P0) | Chuyển trạng thái |
+| :--- | :--- |
+| `ProvisionalRegister` (chữ ký user + cụm đồng ý) | `NONE → PROVISIONAL` (hết hạn theo số block) |
+| `ParentConfirmed(user, thisCluster)` (parent ghi nhận cụm NÀY trước) | `PROVISIONAL → CONFIRMED` |
+| `ParentLocked(user, winnerClusterKey)` (parent ghi nhận cụm KHÁC trước) | `PROVISIONAL/NONE → LOCKED` (lưu `HomeClusterKey`) |
+| hết hạn mà parent chưa trả lời | `PROVISIONAL → NONE` (chỉ thôi quyền gửi; vẫn nhận tiền) |
+
+**Quy tắc gate cho trạng thái LOCKED (hàm thuần, ở admission và bộ lọc thực thi):** chỉ chấp nhận **một** loại tx — **rút sạch**: chuyển tiền thuần (không gọi hợp đồng, không `Data`), `Value = số dư − phí gas`, tới một địa chỉ khác do chủ tài khoản chọn. Mọi tx khác bị từ chối đúng mã (`AccountLocked`). Sau khi rút số dư về 0 thì không còn gì để gửi. Tiền nhận thêm sau khi khoá chỉ rút được theo cùng quy tắc "rút sạch". Tuỳ chọn (2b): cho phép rút sạch qua `PARENT_CHAIN_GATEWAY` để chuyển thẳng sang cụm thắng (cần parent, đúng chủ tài khoản chọn đích; không tự động gửi).
+
+**Vì sao không tự động đẩy tiền sang cụm thắng:** cụm thắng có thể là cụm độc hại mà người dùng bị lừa ký đăng ký; người dùng phải tự chọn đích rút (ký tx rút của chính mình).
+
+**Tính xác định / không fork:** `ParentConfirmed/ParentLocked` là system event có thứ tự mang bằng chứng parent; verdict gate là hàm thuần của `AccountState` trước block. Không dùng quan sát mất kết nối, không timeout. Hai cụm không cần liên lạc với nhau: chỉ cần mỗi cụm nhận được phán quyết của parent.
+
+**Test bắt buộc thêm (ngoài §4):** (L1) cùng một người dùng đăng ký tạm ở cụm A và B, A đăng ký lên parent trước ⇒ A: `CONFIRMED`, B: `LOCKED`, kết quả đúng bất kể thứ tự xử lý ở hai cụm; (L2) ở B chỉ tx rút sạch được chấp nhận, mọi tx khác bị từ chối đúng mã (kể cả chuyển một phần, gọi hợp đồng, gateway); rút sạch rồi số dư = 0 và đúng phí; (L3) tiền nhận thêm sau khi khoá vẫn rút sạch được; (L4) giả mạo `ParentLocked` từ tài khoản thường bị từ chối (P0) và từ node không có bằng chứng bị từ chối; (L5) hết hạn theo block đúng biên N-1/N/N+1 trên mọi replica; (L6) bảo toàn tiền: tổng cung cụm B không đổi sau khi rút sạch; (L7) đột biến: bỏ kiểm tra "rút sạch", bỏ kiểm tra bằng chứng, đảo thứ tự thắng/thua ⇒ test tương ứng phải FAIL.
