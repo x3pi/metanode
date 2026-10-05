@@ -2,6 +2,8 @@
 import sys
 import os
 import json
+import fcntl
+import tempfile
 
 def parse_inventory(file_path):
     try:
@@ -30,7 +32,7 @@ def parse_inventory(file_path):
     p_host = global_vars.get('parent_chain_host', '127.0.0.1')
 
     children = data.get('all', {}).get('children', {})
-    p_nodes = children.get('parent_chain_nodes', {}).get('hosts', {})
+    p_nodes = (children.get('parent_chain_nodes') or {}).get('hosts') or {}
 
     # 1. Parent Chain Nodes (supports multi-validator committee)
     parent_nodes_map = {}
@@ -99,7 +101,7 @@ def parse_inventory(file_path):
     for c_key, c_val in sorted(exec_clusters.items()):
         if not isinstance(c_val, dict):
             continue
-        c_vars = c_val.get('vars', {}) or {}
+        c_vars = {**global_vars, **(exec_cluster_group.get('vars') or {}), **(c_val.get('vars') or {})}
         c_id = c_vars.get('cluster_id', 1)
         c_name = c_vars.get('cluster_name', c_key)
         c_chain_id = c_vars.get('chain_id', global_vars.get('chain_id', 991))
@@ -115,6 +117,8 @@ def parse_inventory(file_path):
         for r_key, r_val in sorted(c_hosts.items()):
             if not isinstance(r_val, dict):
                 r_val = {}
+            # Match inventory inheritance: host values override group defaults.
+            r_val = {**c_vars, **r_val}
             r_ip = r_val.get('ansible_host', '127.0.0.1')
             r_rpc = r_val.get('rpc_port', 8545)
             r_p2p = r_val.get('p2p_port', 4200)
@@ -175,6 +179,7 @@ def parse_inventory(file_path):
         }
 
     return {
+        'root_anchor': p_info.get('rpc_url', f"http://{p_host}:{p_rpc_port}"),
         'parent': p_info,
         'parent_nodes': parent_nodes_map,
         'nodes': all_nodes_rpc,
@@ -186,10 +191,11 @@ def parse_inventory(file_path):
         'clusters': clusters_data
     }
 
-def export_tmp_files(info):
-    rpc_nodes_file = "/tmp/rpc_nodes.json"
-    priv_file = "/tmp/private_chains.json"
-    p_rpc = info.get('parent', {}).get('rpc_url', 'http://127.0.0.1:8547')
+def export_tmp_files(info, rpc_nodes_file=None):
+    if not rpc_nodes_file:
+        rpc_nodes_file = os.environ.get("RPC_NODES_JSON_PATH", "/tmp/rpc_nodes.json")
+    legacy_private_chains_file = "/tmp/private_chains.json"
+    p_rpc = info.get('parent', {}).get('rpc_url') or info.get('root_anchor', 'http://127.0.0.1:8547')
     clusters_info = info.get('clusters', {})
 
     private_chains_map = {}
@@ -224,77 +230,110 @@ def export_tmp_files(info):
 
         private_chains_map[alias_name] = c_entry
 
-    unified_out = {
-        'root_anchor': p_rpc,
-        'chain_id': 991,
-        'parent': info.get('parent', {}),
-        'parent_nodes': info.get('parent_nodes', {}),
-        'private_chains': private_chains_map
-    }
-
-    # 1. Write merged /tmp/rpc_nodes.json
+    # 1. Write merged rpc_nodes_file
     try:
-        existing = {}
-        if os.path.isfile(rpc_nodes_file):
-            try:
-                with open(rpc_nodes_file, 'r', encoding='utf-8') as f:
-                    existing = json.load(f)
-            except Exception:
-                existing = {}
-
         def is_clean_key(k):
             return not k.startswith('parent_node_') and not k.startswith('exec')
 
-        merged_nodes = {k: v for k, v in existing.get('nodes', {}).items() if is_clean_key(k)}
-        for k, v in info.get('nodes', {}).items():
-            if is_clean_key(k):
-                merged_nodes[k] = v
+        os.makedirs(os.path.dirname(os.path.abspath(rpc_nodes_file)), exist_ok=True)
+        lock_file = f"{rpc_nodes_file}.lock"
+        with open(lock_file, 'a', encoding='utf-8') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            # Re-read only while holding the shared lock so no public-chain
+            # exporter can be overwritten with stale data.
+            existing = {}
+            if os.path.isfile(rpc_nodes_file):
+                try:
+                    with open(rpc_nodes_file, 'r', encoding='utf-8') as f:
+                        content = f.read().strip()
+                        if content:
+                            existing = json.loads(content)
+                except Exception:
+                    existing = {}
+            out = dict(existing)
+            for map_name in ('nodes', 'rpc_nodes', 'ws_nodes', 'tcp_nodes', 'raft_nodes', 'forward_nodes'):
+                merged = {k: v for k, v in existing.get(map_name, {}).items() if is_clean_key(k)}
+                merged.update(info.get(map_name, {}))
+                out[map_name] = merged
+            out.update({
+                'root_anchor': p_rpc,
+                'parent': info.get('parent', {}),
+                'parent_nodes': info.get('parent_nodes', {}),
+                # This is the single shared endpoint/configuration file (mode 0600).
+                'private_chains': private_chains_map
+            })
+            tmp_file = None
+            try:
+                with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir='/tmp', delete=False) as f:
+                    tmp_file = f.name
+                    json.dump(out, f, indent=2)
+                os.chmod(tmp_file, 0o600)
+                os.replace(tmp_file, rpc_nodes_file)
+            finally:
+                if tmp_file and os.path.exists(tmp_file):
+                    os.unlink(tmp_file)
+        # The unified file replaces this retired compatibility artifact.
+        if os.path.exists(legacy_private_chains_file):
+            os.unlink(legacy_private_chains_file)
 
-        merged_rpc = {k: v for k, v in existing.get('rpc_nodes', {}).items() if is_clean_key(k)}
-        for k, v in info.get('rpc_nodes', {}).items():
-            if is_clean_key(k):
-                merged_rpc[k] = v
+        # Export namespace-specific files for start_monitors.sh and block_hash_checker
+        active_clusters = set()
+        for cid, c_data in info.get('clusters', {}).items():
+            c_name = c_data.get('cluster_name', f"exec{cid}")
+            c_replicas = c_data.get('replicas', {})
+            if c_replicas:
+                active_clusters.add(c_name)
+                c_file = f"/tmp/rpc_nodes.{c_name}.json"
+                c_nodes = {r_k: r_v['rpc_url'] for r_k, r_v in c_replicas.items()}
+                c_content = {
+                    'nodes': c_nodes,
+                    'rpc_nodes': c_nodes,
+                    'ws_nodes': {r_k: r_v['ws_url'] for r_k, r_v in c_replicas.items()},
+                    'tcp_nodes': {r_k: f"{r_v['ip']}:{r_v['p2p_port']}" for r_k, r_v in c_replicas.items()},
+                    'raft_nodes': {r_k: f"{r_v['ip']}:{r_v['raft_port']}" for r_k, r_v in c_replicas.items()},
+                    'chain_id': c_data.get('chain_id', 991),
+                    'cluster_name': c_name
+                }
+                try:
+                    with open(c_file, 'w', encoding='utf-8') as cf:
+                        json.dump(c_content, cf, indent=2)
+                    os.chmod(c_file, 0o600)
+                except Exception:
+                    pass
 
-        merged_ws = {k: v for k, v in existing.get('ws_nodes', {}).items() if is_clean_key(k)}
-        for k, v in info.get('ws_nodes', {}).items():
-            if is_clean_key(k):
-                merged_ws[k] = v
+        # Tự động dọn dẹp các file rác exec*.json cũ không có trong inventory hiện tại
+        import glob
+        for old_cf in glob.glob('/tmp/rpc_nodes.exec*.json'):
+            cf_name = os.path.basename(old_cf).replace('rpc_nodes.', '').replace('.json', '')
+            if cf_name not in active_clusters:
+                try:
+                    os.unlink(old_cf)
+                except Exception:
+                    pass
 
-        merged_tcp = {k: v for k, v in existing.get('tcp_nodes', {}).items() if is_clean_key(k)}
-        for k, v in info.get('tcp_nodes', {}).items():
-            if is_clean_key(k):
-                merged_tcp[k] = v
-
-        merged_raft = dict(existing.get('raft_nodes', {}))
-        merged_raft.update(info['raft_nodes'])
-
-        merged_fwd = dict(existing.get('forward_nodes', {}))
-        merged_fwd.update(info['forward_nodes'])
-
-        out = dict(existing)
-        out.update({
-            'parent_nodes': info.get('parent_nodes', {}),
-            'nodes': merged_nodes,
-            'rpc_nodes': merged_rpc,
-            'ws_nodes': merged_ws,
-            'tcp_nodes': merged_tcp,
-            'raft_nodes': merged_raft,
-            'forward_nodes': merged_fwd
-        })
-
-        with open(rpc_nodes_file, 'w', encoding='utf-8') as f:
-            json.dump(out, f, indent=2)
-        os.chmod(rpc_nodes_file, 0o600)
+        if info.get('parent_nodes'):
+            p_file = "/tmp/rpc_nodes.parent.json"
+            p_nodes = {p_k: p_v['rpc_url'] for p_k, p_v in info['parent_nodes'].items()}
+            p_content = {
+                'nodes': p_nodes,
+                'rpc_nodes': p_nodes,
+                'parent_nodes': info['parent_nodes']
+            }
+            try:
+                with open(p_file, 'w', encoding='utf-8') as pf:
+                    json.dump(p_content, pf, indent=2)
+                os.chmod(p_file, 0o600)
+            except Exception:
+                pass
+        else:
+            p_file = "/tmp/rpc_nodes.parent.json"
+            if os.path.exists(p_file):
+                try:
+                    os.unlink(p_file)
+                except Exception:
+                    pass
     except Exception as e:
-        print(f"Warning: could not write {rpc_nodes_file}: {e}", file=sys.stderr)
-
-    # 2. Synchronize /tmp/private_chains.json with identical data & symlink fallback
-    try:
-        with open(priv_file, 'w', encoding='utf-8') as f:
-            json.dump(unified_out, f, indent=2)
-        os.chmod(priv_file, 0o600)
-    except Exception as e:
-        print(f"Warning: could not write {priv_file}: {e}", file=sys.stderr)
+        raise RuntimeError(f"Could not write {rpc_nodes_file}: {e}") from e
 
 def print_summary(info):
     print("⚙️ RPC Endpoints (IP & Port):")
@@ -348,7 +387,8 @@ if __name__ == '__main__':
     mode = sys.argv[2] if len(sys.argv) > 2 else 'summary'
 
     parsed = parse_inventory(inv_file)
-    export_tmp_files(parsed)
+    custom_target = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith('-') else None
+    export_tmp_files(parsed, rpc_nodes_file=custom_target)
 
     if mode == 'json':
         print(json.dumps(parsed, indent=2))

@@ -17,7 +17,7 @@
 
 # ── Stop Service ─────────────────────────────────────────────────────────────
 - name: Stop Parent Chain service
-  when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy']"
+  when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy', 'setup']"
   block:
     - name: Stop via systemd
       when: is_systemd
@@ -52,6 +52,36 @@
         - "{{ node_data_dir }}/consensus_storage"
         - "{{ node_data_dir }}/rocksdb_dummy_init"
         - "{{ node_data_dir }}/backup"
+
+# ── Firewall (UFW) Configuration ───────────────────────────────────────────
+- name: Firewall (UFW) Configuration for Parent Chain
+  when: "deploy_action in ['setup', 'deploy', 'restart', 'reset', 'open_ports']"
+  block:
+    - name: Check if UFW is active on Parent Chain host
+      ansible.builtin.command: ufw status
+      register: ufw_status_parent
+      changed_when: false
+      failed_when: false
+      become: true
+
+    - name: Automatically configure firewall (UFW) rules for Parent Chain
+      when:
+        - ufw_status_parent.rc == 0
+        - "'Status: active' in ufw_status_parent.stdout"
+      become: true
+      block:
+        - name: Allow Parent Chain network ports in UFW
+          ansible.builtin.command: "ufw allow {{ item.port }}/tcp comment '{{ item.comment }}'"
+          loop:
+            - { port: "{{ parent_http_port | default(parent_chain_rpc_port | default(8547)) }}", comment: "Metanode Parent Chain HTTP RPC" }
+            - { port: "{{ peer_rpc_port | default(19501) }}", comment: "Metanode Parent Chain Peer RPC" }
+            - { port: "{{ metrics_port | default(19601) }}", comment: "Metanode Parent Chain Metrics" }
+          register: ufw_parent_rules
+          changed_when: "'Rule added' in ufw_parent_rules.stdout or 'Rule updated' in ufw_parent_rules.stdout"
+
+        - name: Reload UFW to apply port rules
+          ansible.builtin.command: ufw reload
+          when: ufw_parent_rules is defined and ufw_parent_rules.changed
 
 # ── Setup Configuration & Service Unit ───────────────────────────────────────
 - name: Setup Parent Chain configuration

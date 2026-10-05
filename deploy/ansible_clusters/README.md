@@ -47,6 +47,29 @@ deploy/ansible_clusters/
 
 ## ⚡ Hướng Dẫn Sử Dụng Nhanh (1-Click)
 
+### File endpoint dùng chung
+
+`--reset`, `--export-config`, `--test` và `--test-only` xuất cấu hình cluster vào
+`/tmp/rpc_nodes.json`, giữ nguyên node public chain `m0–m4` cùng metadata hiện có.
+Các map `nodes`, `rpc_nodes`, `ws_nodes`, `tcp_nodes`, `raft_nodes`, `forward_nodes`
+được bổ sung node cluster theo tên inventory (`exec1_replica1`, `exec2_replica1`, ...).
+Node cluster cũ có tiền tố `exec`/`parent_node_` được thay bằng dữ liệu inventory hiện tại.
+
+Bộ test tích hợp đọc `root_anchor`, `private_chains.chain_a.rpc_url` và
+`private_chains.chain_b.rpc_url` từ file này để truyền vào `PARENT_CHAIN_URL`,
+`EXEC1_URL`, `EXEC2_URL`. `chain_a`/`chain_b` tương ứng cluster ID 1/2;
+`root_anchor` là endpoint dịch vụ `parent_chain` từ inventory, không phải alias cho `m0`.
+Khi nhóm parent rỗng, endpoint này lấy từ `parent_chain_host`/`parent_chain_rpc_port`.
+Do file này chứa private-chain credentials, nó luôn được ghi với quyền `0600`.
+
+Public chain (`ansible_deploy.sh`) cũng tự gộp endpoint khi chạy, giữ nguyên cluster đã xuất;
+khởi động lần lượt public trước hay cluster trước đều không làm mất cấu hình bên còn lại.
+Không cần chạy export thủ công sau khi khởi động.
+
+Có thể cập nhật riêng file mà không reset node bằng `./deploy_clusters.sh --export-config`.
+Việc dùng chung endpoint không thay thế yêu cầu API `parent_chain` của bộ test;
+kịch bản lỗi node 8–9 vẫn phụ thuộc cổng/đường dẫn local được định nghĩa trong test Go.
+
 ### 1. Cấu hình Telegram (Tùy chọn)
 Chỉnh sửa file `.env`:
 ```bash

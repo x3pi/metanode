@@ -153,7 +153,7 @@ def notify_deploy_start(clusters_info="Parent Chain + Exec Clusters", target_env
     )
     return send_telegram_message(html_message=msg)
 
-def get_parent_chain_committee(info=None, server_ip=None):
+def get_parent_chain_committee(info=None, server_ip=None, rpc_nodes_path=None):
     """
     Gather and return all Parent Chain committee validators with RPC, P2P, and validator address.
     Sources checked in order of fidelity:
@@ -161,6 +161,10 @@ def get_parent_chain_committee(info=None, server_ip=None):
     2. Live query to /validators on known parent RPCs (8547, 18601, 18602, etc.)
     3. Genesis files: /opt/metanode/parent_chain/parent_genesis.json or deploy/cluster/local_parent_chain/parent_genesis.json
     """
+    # An explicitly empty inventory group must not discover unrelated services.
+    if isinstance(info, dict) and 'parent_nodes' in info and not info['parent_nodes']:
+        return []
+
     server_ip = server_ip or get_server_ip()
     committee = []
     
@@ -171,9 +175,10 @@ def get_parent_chain_committee(info=None, server_ip=None):
             p = info['parent']
             parent_nodes = {p.get('name', 'parent_node'): p}
             
-    if not parent_nodes and os.path.isfile("/tmp/rpc_nodes.json"):
+    target_json = rpc_nodes_path or os.environ.get("RPC_NODES_JSON_PATH", "/tmp/rpc_nodes.json")
+    if not parent_nodes and os.path.isfile(target_json):
         try:
-            with open("/tmp/rpc_nodes.json", "r", encoding="utf-8") as f:
+            with open(target_json, "r", encoding="utf-8") as f:
                 tmp_data = json.load(f)
                 parent_nodes = tmp_data.get('parent_nodes', {})
         except Exception:
@@ -285,7 +290,7 @@ def get_parent_chain_committee(info=None, server_ip=None):
 
     return committee
 
-def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration_secs=0):
+def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration_secs=0, rpc_nodes_path=None):
     """
     Thông báo danh sách các port dịch vụ gọn gàng, rõ ràng qua Telegram.
     Hiển thị đầy đủ Ủy ban BFT Parent Chain (mọi validator node) và các Execution Clusters.
@@ -300,10 +305,12 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
     tcp_lines = []
     raft_lines = []
 
-    # 1. Tự động đọc từ /tmp/rpc_nodes.json nếu tham số rỗng
-    if info_or_parent is None and os.path.isfile("/tmp/rpc_nodes.json"):
+    target_json = rpc_nodes_path or os.environ.get("RPC_NODES_JSON_PATH", "/tmp/rpc_nodes.json")
+
+    # 1. Tự động đọc từ target_json nếu tham số rỗng
+    if info_or_parent is None and os.path.isfile(target_json):
         try:
-            with open("/tmp/rpc_nodes.json", "r") as f:
+            with open(target_json, "r") as f:
                 info_or_parent = json.load(f)
         except Exception:
             pass
@@ -367,7 +374,7 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
                 raft_lines.append(f"  • {c_name}: {c_raft}{fwd_str}")
 
     # 3. Tổng hợp thông tin Ủy ban BFT Parent Chain (Multi-Validator)
-    parent_committee = get_parent_chain_committee(info_or_parent, server_ip)
+    parent_committee = get_parent_chain_committee(info_or_parent, server_ip, rpc_nodes_path=target_json)
     parent_committee_lines = []
     if parent_committee:
         for p in parent_committee:
@@ -516,6 +523,67 @@ def notify_raft_fault_tolerance_result(results):
     )
     return send_telegram_message(html_message=msg)
 
+def notify_cluster_node_offline(node_name, rpc_url, cluster_name, err_msg, server_ip=None):
+    server_ip = server_ip or get_server_ip()
+    now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+    msg = (
+        f"🚨 <b>[SỰ CỐ: REPLICA SẬP / NODE OFFLINE]</b>\n\n"
+        f"🖥 <b>Server IP:</b> <code>{server_ip}</code>\n"
+        f"⛓️ <b>Cụm:</b> <code>{html.escape(cluster_name)}</code>\n"
+        f"🔴 <b>Node lỗi:</b> <code>{html.escape(node_name)}</code>\n"
+        f"🔌 <b>RPC Endpoint:</b> <code>{html.escape(rpc_url)}</code>\n"
+        f"⚠️ <b>Nguyên nhân:</b> <i>{html.escape(str(err_msg))}</i>\n"
+        f"🕒 <b>Thời gian phát hiện:</b> <code>{now_str}</code>\n\n"
+        f"<i>Khuyến nghị: Kiểm tra log tiến trình trên server (systemctl / log file).</i>"
+    )
+    return send_telegram_message(html_message=msg)
+
+def notify_cluster_node_recovered(node_name, rpc_url, cluster_name, block_num=0, server_ip=None):
+    server_ip = server_ip or get_server_ip()
+    now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+    block_info = f"#<code>{block_num}</code>" if block_num > 0 else "đang đồng bộ"
+    msg = (
+        f"✅ <b>[PHỤC HỒI: NODE ĐÃ HOẠT ĐỘNG TRỞ LẠI]</b>\n\n"
+        f"🖥 <b>Server IP:</b> <code>{server_ip}</code>\n"
+        f"⛓️ <b>Cụm:</b> <code>{html.escape(cluster_name)}</code>\n"
+        f"🟢 <b>Node phục hồi:</b> <code>{html.escape(node_name)}</code>\n"
+        f"🔌 <b>RPC Endpoint:</b> <code>{html.escape(rpc_url)}</code>\n"
+        f"📦 <b>Block hiện tại:</b> {block_info}\n"
+        f"🕒 <b>Thời gian phục hồi:</b> <code>{now_str}</code>"
+    )
+    return send_telegram_message(html_message=msg)
+
+def notify_cluster_hash_mismatch(cluster_name, block_num, hashes_by_node, server_ip=None):
+    server_ip = server_ip or get_server_ip()
+    now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+    lines = [
+        f"🚨 <b>[NGHIÊM TRỌNG: LỆCH BLOCK HASH / FORK TRÊN CHAIN CON]</b>\n",
+        f"🖥 <b>Server IP:</b> <code>{server_ip}</code>",
+        f"⛓️ <b>Cụm:</b> <code>{html.escape(cluster_name)}</code>",
+        f"📦 <b>Block Height:</b> #<code>{block_num}</code>",
+        f"🕒 <b>Thời gian:</b> <code>{now_str}</code>\n",
+        f"📋 <b>Chi tiết Block Hash giữa các Replica:</b>"
+    ]
+    for node, h in hashes_by_node.items():
+        lines.append(f"  • <b>{html.escape(node)}:</b> <code>{html.escape(str(h))}</code>")
+    lines.append("\n⚠️ <b>CẢNH BÁO ZERO-FORK INVARIANT VIOLATION:</b>")
+    lines.append("<i>Các replica trong cùng cụm Raft có state divergence! Cần kiểm tra ngay Raft log & state database!</i>")
+    return send_telegram_message(html_message="\n".join(lines))
+
+def notify_cluster_replica_lag(cluster_name, lagging_node, lag_blocks, leader_node, leader_block, server_ip=None):
+    server_ip = server_ip or get_server_ip()
+    now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+    msg = (
+        f"⚠️ <b>[CẢNH BÁO: REPLICA BỊ LAG BLOCK]</b>\n\n"
+        f"🖥 <b>Server IP:</b> <code>{server_ip}</code>\n"
+        f"⛓️ <b>Cụm:</b> <code>{html.escape(cluster_name)}</code>\n"
+        f"🐢 <b>Node bị tụt:</b> <code>{html.escape(lagging_node)}</code> (chậm hơn <b>{lag_blocks}</b> blocks)\n"
+        f"👑 <b>Leader / Tham chiếu:</b> <code>{html.escape(leader_node)}</code> (Block #{leader_block})\n"
+        f"🕒 <b>Thời gian:</b> <code>{now_str}</code>\n\n"
+        f"<i>Raft log replication đang bị trễ trên node này.</i>"
+    )
+    return send_telegram_message(html_message=msg)
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--test":
         print("Sending test Telegram message...")
@@ -543,4 +611,3 @@ if __name__ == "__main__":
         ok = notify_raft_fault_tolerance_result(data)
         print("Telegram Raft test result sent:", ok)
         sys.exit(0 if ok else 1)
-

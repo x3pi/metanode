@@ -3,6 +3,10 @@ project_root: "{{ playbook_dir }}/../.."
 deploy_dir: "{{ project_root }}/deploy/systemd"
 remote_deploy_dir: "/opt/metanode-deploy"
 metanode_install_dir: "/opt/metanode"
+cluster_config_dir: "{{ deploy_dir }}"
+chain_id: 991
+rpc_export_namespace: "root"
+manage_global_monitors: true
 
 # Operational configuration defaults
 # Supported actions: 'deploy', 'setup', 'start', 'stop', 'restart', 'gen_keys', 'open_ports'
@@ -43,4 +47,3 @@ alertmanager_version: "0.27.0"
 # Prebuilt binary deployment options (true = skip compilation, use existing binaries)
 ansible_use_prebuilt: false
 ansible_prebuilt_bin_dir: ""
-

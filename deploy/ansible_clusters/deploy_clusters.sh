@@ -14,7 +14,8 @@ PLAYBOOK="${SCRIPT_DIR}/deploy.yml"
 TELE_SCRIPT="${SCRIPT_DIR}/scripts/telegram_notify.py"
 LOG_FILE="${SCRIPT_DIR}/deploy.log"
 
-ACTION="setup"
+ACTION=""
+OPEN_PORTS_FLAG="false"
 RUN_TESTS="false"
 NOTIFY="true"
 USE_SYSTEMD="false"
@@ -22,6 +23,7 @@ EXEC_ONLY="false"
 PARENT_ONLY="false"
 TARGET_NODE=""
 EXPORT_CONFIG_ONLY="false"
+ENABLE_MONITOR="true"
 EXTRA_ANSIBLE_ARGS=()
 
 # ── Load environment (.env) ──────────────────────────────────────────────────
@@ -53,6 +55,7 @@ usage() {
     echo "  --clean             Dọn dẹp database & log (giữ nguyên config và key)"
     echo "  --reset             Reset toàn bộ, xóa database và khởi chạy lại từ block 0"
     echo "  --status            Kiểm tra trạng thái RPC và block height các cụm node"
+    echo "  --open-ports        Tự động cấu hình mở cổng tường lửa (UFW) trên các server"
     echo "  --export-config     Xuất cấu hình mạng ra /tmp/rpc_nodes.json"
     echo ""
     echo "🎯 Phạm vi áp dụng (Target & Scope):"
@@ -64,14 +67,20 @@ usage() {
     echo "  --test              Chạy bộ kiểm thử tích hợp thực tế sau khi deploy"
     echo "  --test-only         Chỉ chạy bộ kiểm thử; tự đồng bộ token Parent Chain nếu token đã đổi"
     echo ""
-    echo "📲 Thông Báo (Notifications):"
+    echo "📲 Thông Báo & Giám Sát (Notifications & Monitoring):"
     echo "  --notify            Bật thông báo Telegram (mặc định nếu có token)"
     echo "  --no-notify         Tắt thông báo Telegram"
+    echo "  --monitor           (Mặc định) Bật monitor ngầm (Health check & Hash verification)"
+    echo "  --no-monitor        Không bật monitor ngầm sau khi deploy"
+    echo "  --monitor-status    Kiểm tra trạng thái tiến trình monitor ngầm"
+    echo "  --stop-monitor      Dừng tiến trình monitor ngầm"
+    echo "  --monitor-only      Chỉ khởi động monitor ngầm mà không deploy"
     echo ""
     echo "⚙️ Tùy Chọn Khác:"
     echo "  --env=ENV           Môi trường triển khai: devnet (mặc định cho test cluster) hoặc production"
     echo "  --systemd           Sử dụng systemd service thay vì background daemon"
     echo "  --inventory=FILE    Đường dẫn inventory tùy chỉnh (mặc định: inventory.yml)"
+    echo "  --rpc-nodes-file=FILE Đường dẫn file cấu hình RPC JSON (mặc định: /tmp/rpc_nodes.json)"
     echo "  --help, -h          Hiển thị trợ giúp này"
     echo ""
     echo "🔒 Lưu ý bảo mật (Issue #104):"
@@ -80,6 +89,8 @@ usage() {
     echo ""
     exit 0
 }
+
+RPC_NODES_FILE="${RPC_NODES_FILE:-${RPC_NODES_JSON_PATH:-/tmp/rpc_nodes.json}}"
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -114,6 +125,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --status|status)
             ACTION="status"
+            shift
+            ;;
+        --open-ports|open-ports|open_ports)
+            OPEN_PORTS_FLAG="true"
             shift
             ;;
         --export-config|--export-config-only)
@@ -153,6 +168,26 @@ while [[ $# -gt 0 ]]; do
             NOTIFY="false"
             shift
             ;;
+        --monitor)
+            ENABLE_MONITOR="true"
+            shift
+            ;;
+        --no-monitor)
+            ENABLE_MONITOR="false"
+            shift
+            ;;
+        --monitor-status)
+            ACTION="monitor_status"
+            shift
+            ;;
+        --stop-monitor)
+            ACTION="stop_monitor"
+            shift
+            ;;
+        --monitor-only)
+            ACTION="monitor_only"
+            shift
+            ;;
         --systemd)
             USE_SYSTEMD="true"
             shift
@@ -163,6 +198,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         -i)
             INVENTORY="$2"
+            shift 2
+            ;;
+        --rpc-nodes-file=*|--rpc-json=*)
+            RPC_NODES_FILE="${1#*=}"
+            shift
+            ;;
+        --rpc-nodes-file|--rpc-json)
+            RPC_NODES_FILE="$2"
             shift 2
             ;;
         --env=*)
@@ -178,6 +221,14 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [ -z "$ACTION" ]; then
+    if [ "$OPEN_PORTS_FLAG" = "true" ]; then
+        ACTION="open_ports"
+    else
+        ACTION="setup"
+    fi
+fi
 
 export METANODE_ENV="${METANODE_ENV:-devnet}"
 export NODE_ENV="${NODE_ENV:-$METANODE_ENV}"
@@ -245,7 +296,6 @@ if [ "$EXPORT_CONFIG_ONLY" = "true" ]; then
     if [ -f "$INVENTORY" ] && [ -f "${SCRIPT_DIR}/scripts/parse_inventory.py" ]; then
         python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" export
         echo "✅ Successfully exported configuration to:"
-        echo "   • /tmp/private_chains.json"
         echo "   • /tmp/rpc_nodes.json"
         exit 0
     else
@@ -254,12 +304,132 @@ if [ "$EXPORT_CONFIG_ONLY" = "true" ]; then
     fi
 fi
 
+# ── Monitor Helpers (Tái sử dụng start_monitors.sh & block_hash_checker) ─────
+MONITOR_SCRIPT="${METANODE_ROOT}/deploy/ansible/monitors/start_monitors.sh"
+
+stop_cluster_monitors() {
+    if [ -f "$MONITOR_SCRIPT" ]; then
+        for pid_dir in /tmp/metanode-monitors-*; do
+            if [ -d "$pid_dir" ]; then
+                ns="${pid_dir##*-}"
+                bash "$MONITOR_SCRIPT" --stop --namespace "$ns" >/dev/null 2>&1 || true
+            fi
+        done
+        bash "$MONITOR_SCRIPT" --stop --namespace exec1 >/dev/null 2>&1 || true
+        bash "$MONITOR_SCRIPT" --stop --namespace parent >/dev/null 2>&1 || true
+    fi
+}
+
+start_cluster_monitors() {
+    if [ "$ENABLE_MONITOR" != "true" ] || [ ! -f "$MONITOR_SCRIPT" ]; then
+        return 0
+    fi
+    echo "▶️  Kích hoạt hệ thống Monitor ngầm (start_monitors.sh & block_hash_checker)..."
+    
+    # 1. Kích hoạt monitor cho các Exec Clusters trong Inventory (Child Chains chạy Raft Consensus, bỏ qua Validator Vote Monitor)
+    if [ "$PARENT_ONLY" != "true" ]; then
+        CLUSTER_NAMES=$(python3 -c "
+import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
+import parse_inventory as pi
+info = pi.parse_inventory('${INVENTORY}')
+print(' '.join(c.get('cluster_name', f'exec{cid}') for cid, c in info.get('clusters', {}).items()))
+" 2>/dev/null || echo "exec1")
+
+        for ns in $CLUSTER_NAMES; do
+            c_file="/tmp/rpc_nodes.${ns}.json"
+            if [ -s "$c_file" ]; then
+                echo "   • Kích hoạt Health Monitor & Block Hash Checker cho $ns (Namespace: $ns, Raft - no vote)..."
+                bash "$MONITOR_SCRIPT" --stop --namespace "$ns" >/dev/null 2>&1 || true
+                MONITOR_NAMESPACE="$ns" MONITOR_INVENTORY="$INVENTORY" \
+                    bash "$MONITOR_SCRIPT" --namespace "$ns" --config "$c_file" --no-vote
+            elif [ -s "$RPC_NODES_FILE" ]; then
+                echo "   • Kích hoạt Health Monitor & Block Hash Checker cho child chain (Config: $RPC_NODES_FILE, Raft - no vote)..."
+                bash "$MONITOR_SCRIPT" --stop --namespace "$ns" >/dev/null 2>&1 || true
+                MONITOR_NAMESPACE="$ns" MONITOR_INVENTORY="$INVENTORY" \
+                    bash "$MONITOR_SCRIPT" --namespace "$ns" --config "$RPC_NODES_FILE" --no-vote
+            fi
+        done
+    fi
+
+    # 2. Chỉ kích hoạt Monitor cho Parent Chain nếu Parent Chain nodes thực sự được cấu hình trong Inventory
+    if [ "$EXEC_ONLY" != "true" ] && [ -s "/tmp/rpc_nodes.parent.json" ]; then
+        HAS_PARENT=$(python3 -c "
+import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
+import parse_inventory as pi
+info = pi.parse_inventory('${INVENTORY}')
+print('true' if info.get('parent_nodes') else 'false')
+" 2>/dev/null || echo "false")
+
+        if [ "$HAS_PARENT" = "true" ]; then
+            echo "   • Kích hoạt Monitor cho Parent Chain Committee (Namespace: parent)..."
+            bash "$MONITOR_SCRIPT" --stop --namespace parent >/dev/null 2>&1 || true
+            MONITOR_NAMESPACE="parent" MONITOR_INVENTORY="$INVENTORY" \
+                bash "$MONITOR_SCRIPT" --namespace parent --config "/tmp/rpc_nodes.parent.json"
+        fi
+    fi
+}
+
+if [ "$ACTION" = "stop_monitor" ]; then
+    stop_cluster_monitors
+    echo "✅ Đã dừng các tiến trình monitor ngầm (exec1, parent)."
+    exit 0
+fi
+
+if [ "$ACTION" = "monitor_only" ]; then
+    python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" export "$RPC_NODES_FILE" >/dev/null 2>&1 || true
+    start_cluster_monitors
+    exit 0
+fi
+
+if [ "$ACTION" = "monitor_status" ]; then
+    echo "🔍 Trạng thái tiến trình Monitor ngầm (start_monitors.sh):"
+    found=0
+    for ns in exec1 parent; do
+        if [ -d "/tmp/metanode-monitors-${ns}" ]; then
+            for pid_f in "/tmp/metanode-monitors-${ns}"/*.pid; do
+                if [ -f "$pid_f" ]; then
+                    p_name=$(basename "$pid_f" .pid)
+                    pid=$(cat "$pid_f" 2>/dev/null || echo "")
+                    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                        echo "  • [${ns}] ${p_name}: ▶️ RUNNING (PID ${pid})"
+                        found=1
+                    fi
+                fi
+            done
+        fi
+    done
+    if [ $found -eq 0 ]; then
+        echo "  • Chưa có monitor nào đang chạy."
+    fi
+    exit 0
+fi
+
 # ── Check Status Action ──────────────────────────────────────────────────────
 check_status() {
     echo "📊 Checking node cluster status..."
     echo ""
     if [ -f "$INVENTORY" ] && [ -f "${SCRIPT_DIR}/scripts/parse_inventory.py" ]; then
         python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" status
+    fi
+    echo ""
+    echo "🔍 Trạng thái tiến trình Monitor ngầm (start_monitors.sh):"
+    found=0
+    for ns in exec1 parent; do
+        if [ -d "/tmp/metanode-monitors-${ns}" ]; then
+            for pid_f in "/tmp/metanode-monitors-${ns}"/*.pid; do
+                if [ -f "$pid_f" ]; then
+                    p_name=$(basename "$pid_f" .pid)
+                    pid=$(cat "$pid_f" 2>/dev/null || echo "")
+                    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                        echo "  • [${ns}] ${p_name}: ▶️ RUNNING (PID ${pid})"
+                        found=1
+                    fi
+                fi
+            done
+        fi
+    done
+    if [ $found -eq 0 ]; then
+        echo "  • Chưa có monitor nào đang chạy."
     fi
     echo ""
 }
@@ -271,6 +441,8 @@ fi
 
 # ── Test Only Action ─────────────────────────────────────────────────────────
 run_tests_suite() {
+    # Refresh endpoints for both --test and --test-only before Ansible reads them.
+    python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" export || return $?
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
     echo "🧪 BẮT ĐẦU BỘ KIỂM THỬ TÍCH HỢP 9 KỊCH BẢN THỰC TẾ"
@@ -390,9 +562,9 @@ fi
 # ── Main Deployment Pipeline ─────────────────────────────────────────────────
 DEPLOY_START_TIME=$(date +%s)
 
-# 0. Xuất thông tin các cổng vào /tmp/rpc_nodes.json và /tmp/private_chains.json
+# 0. Xuất thông tin các cổng vào file RPC JSON
 if [ -f "$INVENTORY" ] && [ -f "${SCRIPT_DIR}/scripts/parse_inventory.py" ]; then
-    python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" export >/dev/null 2>&1 || true
+    python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" export "$RPC_NODES_FILE"
 fi
 
 # 1. Send Deploy Start Telegram Notification
@@ -417,7 +589,7 @@ if [ -f "$CHECK_SEC_SCRIPT" ] && [ -f "$INVENTORY" ]; then
 fi
 
 # Detect become password from inventory for localhost become tasks (devnet only)
-INVENTORY_BECOME_PASS=$(grep -E '^\s*ansible_become_pass:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+INVENTORY_BECOME_PASS=$(grep -E '^\s*ansible_become_pass:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
 if [ -n "$INVENTORY_BECOME_PASS" ] && [ "$INVENTORY_BECOME_PASS" != "!vault" ] && [[ "$INVENTORY_BECOME_PASS" != \{\{* ]]; then
     export ANSIBLE_BECOME_PASS="${ANSIBLE_BECOME_PASS:-$INVENTORY_BECOME_PASS}"
 fi
@@ -525,6 +697,18 @@ if [ -n "$TARGET_NODE" ]; then
     else
         EXTRA_ANSIBLE_ARGS+=(--limit "${RESOLVED_HOST}")
     fi
+    if [ "$ACTION" = "open_ports" ]; then
+        EXTRA_ANSIBLE_ARGS+=(--tags "open_ports")
+    fi
+elif [ "$ACTION" = "open_ports" ]; then
+    echo "🛡️  Targeting Firewall (UFW) port opening..."
+    if [ "$EXEC_ONLY" = "true" ]; then
+        EXTRA_ANSIBLE_ARGS+=(--tags "exec_clusters,open_ports")
+    elif [ "$PARENT_ONLY" = "true" ]; then
+        EXTRA_ANSIBLE_ARGS+=(--tags "parent_chain,open_ports")
+    else
+        EXTRA_ANSIBLE_ARGS+=(--tags "open_ports")
+    fi
 elif [ "$EXEC_ONLY" = "true" ]; then
     echo "⛓️  Targeting Execution Clusters only (Child Chains - EVM Chain ID 991)"
     if [[ "$ACTION" =~ ^(setup|deploy|restart|reset)$ ]]; then
@@ -575,6 +759,7 @@ TOTAL_DEPLOY_DURATION=$((DEPLOY_END_TIME - DEPLOY_START_TIME))
 
 # Nếu là action stop hoặc clean: kết thúc ngay mà không cần check RPC status
 if [ "$ACTION" = "stop" ]; then
+    stop_cluster_monitors
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
     echo "🛑 ĐÃ DỪNG TOÀN BỘ TIẾN TRÌNH CỤM METANODE THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
@@ -583,6 +768,7 @@ if [ "$ACTION" = "stop" ]; then
 fi
 
 if [ "$ACTION" = "clean" ]; then
+    stop_cluster_monitors
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
     echo "🧹 ĐÃ DỌN DẸP DỮ LIỆU CỤM METANODE THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
@@ -590,22 +776,36 @@ if [ "$ACTION" = "clean" ]; then
     exit 0
 fi
 
-# 3. Export /tmp/rpc_nodes.json & Notify Services Ready
-echo "📢 Xuất cấu hình cổng vào /tmp và gửi thông báo dịch vụ sẵn sàng lên Telegram..."
+if [ "$ACTION" = "open_ports" ]; then
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "🛡️  ĐÃ MỞ THÔNG TẤT CẢ CÁC CỔNG TƯỜNG LỬA (UFW) TRÊN CỤM SERVER THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
+    echo "═══════════════════════════════════════════════════════════════"
+    if [ "$NOTIFY" = "true" ]; then
+        send_tele "tn.send_telegram_message(html_message='🛡️ <b>[METANODE CLUSTER FIREWALL]</b>\nĐã mở thông tất cả các cổng tường lửa (UFW) trên cụm server thành công (<b>${TOTAL_DEPLOY_DURATION}s</b>)!')"
+    fi
+    exit 0
+fi
+
+# 3. Export RPC JSON & Notify Services Ready
+echo "📢 Xuất cấu hình cổng vào ${RPC_NODES_FILE} và gửi thông báo dịch vụ sẵn sàng lên Telegram..."
+python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" export "$RPC_NODES_FILE"
 python3 -c "
 import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
 import parse_inventory as pi
 import telegram_notify as tn
 
 info = pi.parse_inventory('${INVENTORY}')
-pi.export_tmp_files(info)
 if '${NOTIFY}' == 'true':
-    tn.notify_services_ready(info, duration_secs=${TOTAL_DEPLOY_DURATION})
+    tn.notify_services_ready(info, duration_secs=${TOTAL_DEPLOY_DURATION}, rpc_nodes_path='${RPC_NODES_FILE}')
 " || true
 
 echo ""
 echo "✅ TRIỂN KHAI CỤM METANODE HOÀN TẤT TRONG ${TOTAL_DEPLOY_DURATION}s!"
 check_status
+
+# 4. Kích hoạt Monitor ngầm (start_monitors.sh & block_hash_checker)
+start_cluster_monitors
 
 # Tự động đồng bộ cấu hình sang metanode-suite (update-ip.sh) nếu có
 UPDATE_IP_SCRIPT="${METANODE_ROOT}/../metanode-suite/scripts/update-ip/update-ip.sh"

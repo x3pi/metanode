@@ -57,7 +57,7 @@
 | **Dừng/Bật 1 node cụ thể** | `./deploy_clusters.sh --stop --node=exec1_r3` | Dừng/bật an toàn riêng 1 replica để test chịu lỗi (vd: `exec1_r3`) |
 | **Triển khai Production (Systemd)** | `./deploy_clusters.sh --setup --systemd --test` | Quản lý vòng đời qua systemd unit, tự restart khi sự cố |
 | **Kiểm tra trạng thái & Ports** | `./deploy_clusters.sh --status` | In bảng port RPC/WS/TCP/Raft & ping block height |
-| **Xuất cấu hình cổng vào /tmp** | `./deploy_clusters.sh --export-config` | Xuất file thống nhất `/tmp/rpc_nodes.json` & `/tmp/private_chains.json` |
+| **Xuất cấu hình cổng vào /tmp** | `./deploy_clusters.sh --export-config` | Xuất file thống nhất `/tmp/rpc_nodes.json` |
 | **Chỉ chạy bộ test tích hợp** | `./deploy_clusters.sh --test-only` | Chạy 5 kịch bản E2E thực tế, bắn kết quả lên Telegram |
 | **Test chịu lỗi Raft (Auto-Failover)** | `go run execution/scripts/test/test_raft_fault_tolerance.go` | Giả lập kill leader, đo thời gian bầu cử (~200ms) & zero-fork |
 | **Chạy test E2E trực tiếp bằng Go** | `go run execution/scripts/test/test_real_world_scenarios.go` | Debug luồng giao dịch thực tế chi tiết từng bước |
@@ -67,7 +67,7 @@
 | **Reset toàn bộ về Genesis (Block 0)** | `./deploy_clusters.sh --reset` | Xóa sạch DB cũ, sinh lại genesis từ đầu |
 | **Dọn dẹp logs tạm thời** | `./deploy_clusters.sh --clean` | Dọn dẹp logs cũ trong `/var/log/metanode/` |
 | **Kiểm tra biên dịch (Build Check)** | `cd consensus/metanode/scripts && ./build_check.sh` | Kiểm tra build sạch Go, Rust BFT, NOMT FFI và C++/EVM |
-| **Xuất cấu hình cổng vào /tmp** | `python3 scripts/parse_inventory.py inventory.yml export` | Cập nhật `/tmp/rpc_nodes.json` & `/tmp/private_chains.json` |
+| **Xuất cấu hình cổng vào /tmp** | `python3 scripts/parse_inventory.py inventory.yml export` | Cập nhật `/tmp/rpc_nodes.json` |
 | **Bắn danh sách port lên Telegram** | `python3 scripts/telegram_notify.py --ready` | Báo danh sách port hiện tại lên bot Telegram |
 | **Đồng bộ sang metanode-suite** | `bash ../metanode-suite/scripts/update-ip/update-ip.sh --chain 991` | Đồng bộ IP/Port sang bộ test dApp |
 
@@ -92,7 +92,7 @@ File thực thi: [`deploy/ansible_clusters/deploy_clusters.sh`](file:///home/abc
 | | `--stop` | Dừng an toàn các tiến trình (toàn bộ hoặc lọc theo `--exec-only` / `--node`) |
 | | `--restart` | Khởi động lại các node (toàn bộ hoặc lọc theo `--exec-only` / `--node`) |
 | | `--status` | Kiểm tra tình trạng kết nối RPC, lấy block number, in bảng toàn bộ port mạng |
-| | `--export-config` | Xuất file cấu hình thống nhất `/tmp/rpc_nodes.json` & `/tmp/private_chains.json` |
+| | `--export-config` | Xuất file cấu hình thống nhất `/tmp/rpc_nodes.json` |
 | | `--test-only` | Chỉ chạy bộ kiểm thử tích hợp (không tác động trạng thái node) |
 | | `--clean` | Dọn dẹp các file log cũ để giải phóng dung lượng đĩa |
 | | `--reset` | Xóa trắng dữ liệu state database, đưa tất cả node về Genesis (Block #0) |
@@ -103,7 +103,13 @@ File thực thi: [`deploy/ansible_clusters/deploy_clusters.sh`](file:///home/abc
 | | `--systemd` | Chạy dưới dạng Systemd service thay vì Background daemon |
 | | `--notify` | Bật thông báo Telegram (mặc định bật nếu có file `.env`) |
 | | `--no-notify` | Tắt hoàn toàn thông báo Telegram |
+| | `--monitor` | (Mặc định) Kích hoạt monitor ngầm (Health check, Block Hash Checker qua `start_monitors.sh`) |
+| | `--no-monitor` | Tắt không kích hoạt monitor ngầm sau khi deploy |
+| | `--monitor-status` | Kiểm tra trạng thái các tiến trình monitor ngầm đang chạy |
+| | `--stop-monitor` | Dừng các tiến trình monitor ngầm của cluster |
+| | `--monitor-only` | Chỉ khởi động hệ thống monitor ngầm mà không deploy |
 | | `-i <file>` / `--inventory=<file>` | Chỉ định file inventory tùy chọn (mặc định: `inventory.yml`) |
+| | `--rpc-nodes-file=<file>` | Chỉ định đường dẫn file cấu hình RPC JSON tùy chọn (mặc định: `/tmp/rpc_nodes.json`) |
 
 ### Ví dụ phối hợp cờ lệnh thực tế:
 ```bash
@@ -121,11 +127,25 @@ File thực thi: [`deploy/ansible_clusters/deploy_clusters.sh`](file:///home/abc
 # 4. Xuất file cấu hình endpoint vào /tmp/rpc_nodes.json để test chain con:
 ./deploy_clusters.sh --export-config
 
-# 5. Triển khai toàn bộ (cả Parent Chain + Chain con) và chạy test:
+# 5. Xuất cấu hình RPC vào file tùy ý hoặc DÙNG CHUNG FILE VỚI CHAIN 2:
+./deploy_clusters.sh --export-config --rpc-nodes-file /tmp/rpc_nodes.custom.json
+
+# 6. Triển khai cụm Cluster và phối hợp chung file RPC với Chain 2:
+./deploy_clusters.sh --setup --rpc-nodes-file /tmp/rpc_nodes.shared.json
+# Sau đó bên cụm Chain 2 (deploy/ansible):
+# ./ansible_deploy.sh deploy --all --inventory ./inventory.chain2.yml --rpc-nodes-file /tmp/rpc_nodes.shared.json
+# File rpc_nodes.shared.json sẽ tự động tích hợp cả parent_nodes, exec1/2 và chain_2 an toàn!
+
+# 7. Triển khai toàn bộ (cả Parent Chain + Chain con) và chạy test:
 ./deploy_clusters.sh --setup --test
 
-# 6. Kiểm tra nhanh trạng thái các node và danh sách port:
+# 8. Kiểm tra nhanh trạng thái các node, danh sách port và monitor ngầm:
 ./deploy_clusters.sh --status
+
+# 9. Quản lý hệ thống Monitor ngầm (Tái sử dụng start_monitors.sh & block_hash_checker):
+./deploy_clusters.sh --monitor-status            # Kiểm tra trạng thái các tiến trình monitor
+./deploy_clusters.sh --stop-monitor              # Dừng các tiến trình monitor ngầm
+./deploy_clusters.sh --monitor-only --exec-only  # Kích hoạt riêng monitor cho chain con
 ```
 
 **Các bước diễn ra tự động:**
@@ -311,16 +331,19 @@ cd deploy/ansible_clusters
 # 1. In bảng danh sách toàn bộ port (RPC, WS, TCP, Raft) ra terminal:
 python3 scripts/parse_inventory.py inventory.yml summary
 
-# 2. Xuất dữ liệu cấu hình vào /tmp (tự động gộp với Public Chain và cập nhật private_chains.json):
+# 2. Xuất dữ liệu cấu hình vào /tmp (tự động gộp với Public Chain và Chain 2):
 python3 scripts/parse_inventory.py inventory.yml export
 
-# 3. Xuất JSON thô để script khác sử dụng:
+# 3. Xuất ra file cấu hình tùy ý (hoặc file dùng chung với Chain 2):
+python3 scripts/parse_inventory.py inventory.yml export /tmp/rpc_nodes.custom.json
+
+# 4. Xuất JSON thô để script khác sử dụng:
 python3 scripts/parse_inventory.py inventory.yml json
 ```
 
 *Quy cách file tạm sinh ra:*
-- [`/tmp/rpc_nodes.json`](file:///tmp/rpc_nodes.json): Gộp chung thông minh các node Public Chain (`m0`..`m4`) và Cluster nodes (`parent_node`, `exec1_replica*`, `exec2_replica*`).
-- [`/tmp/private_chains.json`](file:///tmp/private_chains.json): Cung cấp chuẩn topology (`root_anchor`, `nodes`, `tcp_nodes`, `chain_nodes`) cho `metanode-suite`.
+- [`/tmp/rpc_nodes.json`](file:///tmp/rpc_nodes.json) hoặc custom file: Gộp chung thông minh các node Public Chain (`m0`..`m4`), Chain 2 (`m5`..`m8` trong `public_chains.chain_2`) và Cluster nodes (`parent_nodes`, `exec1_replica*`, `exec2_replica*`).
+- Cung cấp đầy đủ topology cho `metanode-suite` và các test scripts mà không bị ghi đè lẫn nhau.
 
 ---
 

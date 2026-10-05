@@ -1,6 +1,7 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-10-04 (per-chain `tx_signature_mode` (`bls_legacy` default = old simple chain keeps BLS dapp txs and rejects 0xFF; `secp` = new execution node: users sign only secp256k1, BLS tx signatures only for BLS-native node identities; `config.SecpOnlyTxSignatures`, `tx_processor.sigPolicy`); prior: secp256k1 proto transactions over TCP: tx `Type 0xFF`, signed by secp over `Transaction.SigningHash()` (Hash() with R,S,V cleared), signature in R(32)/S(32)/V(1), `Sign` stays BLS-only/empty; unified verifier seam `Transaction.ValidSecpSign()` used by `tx_processor/validation.go` + `signature_enforcement.go`; shared ingress guard `checkSecpProtoIngress` (single + batch pool paths); client `SendSecpProtoTransaction`, live tool `cmd/tool/test_secp_proto_live`, design `note/secp256k1_proto_tcp_architecture_design.md`; prior: Exec cluster conservation guard `execution/pkg/rollup/conservation.go` (BLS float on Parent == sum of cluster accounts; sender debited value+fee; `BLS_CONSERVATION_MODE`, RPC `mtn_getConservation`, `/float` now returns last_block, `QuorumClient.GetFloat`); prior: Parent Chain float model: fixed supply from genesis `float_accounts`, plain BLS-to-BLS `TRANSFER_BALANCE`, cluster registration by founding list or balance >= `min_float_to_register` (1000 units), `depositToFloat` disabled unless `allow_deposit_to_float`, `ChainRegistryEntry.authorized` so a key that only received float is not a certifier; live tool `cmd/tool/test_account_model`; prior: Parent Chain production-readiness pass: RPC admission filter in `/send_raw_transaction` (BLS signature + gateway address + non-stale nonce checked before consensus), new read RPC `GET /float?pubkey=` (float balance + total supply), `TxBatcher` retries when Rust's bounded FFI channel is full instead of dropping accepted txs, HTTP server I/O timeouts, ansible `parent_open_cluster_registration` now defaults to false with an assert; prior: Completed Parent Chain Multi-node Phase 2 & Full End-to-End Integration Testing: automated 4-node fault tolerance test suite T-I1..T-I8 with 100% PASS, live 4-node cluster E2E verification tool `cmd/tool/test_live_e2e` with 100% PASS, 778+ tx/s benchmark, Rollup E2E tests 100% PASS, Prometheus `/metrics` + real-time monitor `cmd/tool/parent_chain_monitor`, multi-node Ansible templates, operational runbook, and standardized ChainID 990).
+> **Last updated:** 2026-10-05 (direct reuse of `start_monitors.sh` and `block_hash_checker` in `deploy_clusters.sh` with `--no-vote` for Raft clusters; customizable RPC nodes JSON export/parsing via `--rpc-nodes-file`, `RPC_NODES_JSON_PATH`, and namespace-isolated `/tmp/rpc_nodes.<namespace>.json` alongside global `/tmp/rpc_nodes.json` in ansible_deploy.sh, deploy_clusters.sh, and parse_inventory.py; fixed Telegram bot token/chat_id regex in bash scripts).
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
+> **2026-10-05 addition:** Isolated `inventory.chain2.yml` profile for a second Chain ID 991 network uses validator IDs 5-8, separate genesis/install/staging paths, no snapshot/global monitor ownership, `public_chains.chain_2` endpoint export, and namespaced health/block-hash/vote monitor processes with separate config, logs, and PID files. Customizable RPC JSON paths (`--rpc-nodes-file`) prevent hardcoding to `/tmp/rpc_nodes.json`.
 
 ---
 
@@ -19,6 +20,8 @@ metanode/
 │   │   ├── telegram_notify.py ← Telegram notification module
 │   │   └── README.md       ← Comprehensive operations & test guide
 │   ├── ansible/            ← Ansible deployment scripts for Public Chain (Root Anchor)
+│   │   ├── inventory.chain2.yml ← Local ignored profile for isolated second Chain ID 991 network (nodes 5-8, snapshot disabled)
+│   │   ├── parse_inventory.py ← Public endpoint export preserves cluster entries; public-only JSON feeds block hash monitor
 │   │   ├── roles/          ← Modular Ansible roles (node_setup, local_build, systemd_services, start_services, stop_services, restart_services, snapshot_restore, firewall)
 │   │   ├── scripts/manage_snapshot_storage.py ← Managed BTRFS grow/recreate, shared-node checks and size verification
 │   │   ├── scripts/test_manage_snapshot_storage.py ← Non-destructive storage command tests
@@ -29,6 +32,7 @@ metanode/
 │   │   └── stop_all.sh     ← Script to stop all background deployment processes
 │   ├── ansible_private_chains/ ← Decoupled Ansible manager for Multi-Machine Private Chains
 │   ├── ansible_clusters/   ← Ansible automation for Parent Chain & Sharded Execution Clusters with Telegram alerts
+│   │   └── scripts/parse_inventory.py ← Merges public + cluster endpoints into /tmp/rpc_nodes.json; roles/testing reads root_anchor + private_chains URLs
 │   └── systemd/            ← Systemd deployment scripts, key generators (gen_validator_entry.py, gen_private_chain.py), and env templates
 ├── execution/          ← Go execution engine (EVM-compatible layer)
 │   └── debug_nil/      ← Go standalone tests for nil/slice panic debugging
