@@ -804,11 +804,11 @@ var (
 
 // killParentPort kills only the process listening on the given TCP port (never a pattern match).
 func killParentPort(port string) {
-	_ = exec.Command("bash", "-c", "kill -9 $(lsof -ti tcp:"+port+" -sTCP:LISTEN) 2>/dev/null").Run()
+	_ = exec.Command("bash", "-c", "fuser -k -9 "+port+"/tcp 2>/dev/null || kill -9 $(lsof -ti tcp:"+port+" -sTCP:LISTEN) 2>/dev/null").Run()
 }
 
 func portListening(port string) bool {
-	return exec.Command("bash", "-c", "lsof -ti tcp:"+port+" -sTCP:LISTEN >/dev/null 2>&1").Run() == nil
+	return exec.Command("bash", "-c", "fuser "+port+"/tcp >/dev/null 2>&1 || lsof -ti tcp:"+port+" -sTCP:LISTEN >/dev/null 2>&1").Run() == nil
 }
 
 func isMultiNodeCluster() bool {
@@ -838,6 +838,10 @@ func startParentNode(dir, port string) {
 		if targetDir == "/opt/metanode/parent_chain" {
 			if _, err0 := os.Stat("/opt/metanode/parent_chain_0"); err0 == nil {
 				targetDir = "/opt/metanode/parent_chain_0"
+			}
+		} else if targetDir == "/opt/metanode/parent_chain_0" {
+			if _, err0 := os.Stat("/opt/metanode/parent_chain"); err0 == nil {
+				targetDir = "/opt/metanode/parent_chain"
 			}
 		}
 	}

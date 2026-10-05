@@ -781,11 +781,11 @@ if [ "$ACTION" != "open_ports" ] && [ "$MANAGE_GLOBAL_MONITORS" = "true" ]; then
     if [ -f "${SCRIPT_DIR}/monitors/start_monitors.sh" ]; then
         bash "${SCRIPT_DIR}/monitors/start_monitors.sh" --stop-all >/dev/null 2>&1 || true
     fi
-    pkill -9 -f "start_monitors.sh health$" || true
-    pkill -9 -f "start_monitors.sh resources$" || true
-    pkill -9 -f "block_hash_checker.*--config config-m-nodes.json" || true
-    pkill -9 -f "vote_monitor --daemon --interval 2s$" || true
-    pkill -9 -f "go run main.go.*--no-stop-flag" || true
+    pkill -9 -f "[s]tart_monitors.sh health$" || true
+    pkill -9 -f "[s]tart_monitors.sh resources$" || true
+    pkill -9 -f "[b]lock_hash_checker.*--config config-m-nodes.json" || true
+    pkill -9 -f "[v]ote_monitor --daemon --interval 2s$" || true
+    pkill -9 -f "go run [m]ain.go.*--no-stop-flag" || true
 
     if [ "$KEEP_DATA" == "false" ]; then
         echo -e "🧹 Dọn dẹp cache và log cũ của Monitors do dữ liệu Node bị xoá..."
@@ -943,9 +943,9 @@ if [ "$ACTION" != "open_ports" ] && [ "$MANAGE_GLOBAL_MONITORS" = "true" ]; then
         fi
     elif [ "$ACTION" == "stop" ]; then
         echo -e "\n⏸ Không bật lại Health Monitor vì hệ thống đang ở trạng thái STOP..."
-        pkill -f "vote_monitor" || true
+        pkill -f "[v]ote_monitor" || true
         if [ "$ALL_MONITORS" == "true" ]; then
-            ansible metanode_cluster -i "$INVENTORY" -m shell -a "pkill -f 'start_monitors.sh' || true; pkill -f 'block_hash_checker' || true; pkill -f 'vote_monitor' || true" >/dev/null 2>&1 || true
+            ansible metanode_cluster -i "$INVENTORY" -m shell -a "pkill -f '[s]tart_monitors.sh' || true; pkill -f '[b]lock_hash_checker' || true; pkill -f '[v]ote_monitor' || true" >/dev/null 2>&1 || true
         fi
     fi
 fi

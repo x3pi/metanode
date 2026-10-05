@@ -28,6 +28,12 @@
           rm -f "{{ node_data_dir }}/cluster.pid"
         fi
         pkill -9 -f "{{ bin_dir }}/simple_chain.*{{ node_data_dir }}" 2>/dev/null || true
+        for pid in $(pgrep -f "{{ bin_dir }}/simple_chain" 2>/dev/null || true); do
+          cwd_path=$(readlink -f /proc/$pid/cwd 2>/dev/null || true)
+          if [ "$cwd_path" = "{{ node_data_dir }}" ]; then
+            kill -9 $pid 2>/dev/null || true
+          fi
+        done
       failed_when: false
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────
@@ -55,8 +61,11 @@
       ignore_errors: true
 
 # ── Firewall (UFW) Configuration ───────────────────────────────────────────
+# OPT-IN only (`--open-ports` => deploy_action=open_ports): a normal setup/deploy/restart/reset must never change the
+# firewall. Client-facing ports (RPC) are opened to everyone; INTERNAL ports (P2P, Raft, Forward) are opened only to
+# the other cluster members (plus `ufw_extra_sources`, e.g. a monitoring host), never to the whole network.
 - name: Firewall (UFW) Configuration for Execution Node {{ inventory_hostname }}
-  when: "deploy_action in ['setup', 'deploy', 'restart', 'reset', 'open_ports']"
+  when: "deploy_action == 'open_ports'"
   block:
     - name: Check if UFW is active on {{ inventory_hostname }}
       ansible.builtin.command: ufw status
@@ -65,19 +74,32 @@
       failed_when: false
       become: true
 
+    - name: Compute the cluster member IPs allowed on internal ports
+      ansible.builtin.set_fact:
+        ufw_peer_ips: >-
+          {{ (((groups['exec_clusters'] | default([])) + (groups['parent_chain_nodes'] | default([])))
+              | unique
+              | map('extract', hostvars, 'ansible_host')
+              | select('defined')
+              | map('string')
+              | reject('equalto', '127.0.0.1')
+              | unique
+              | list) + (ufw_extra_sources | default([])) }}
+
     - name: Automatically configure firewall (UFW) rules for execution node
       when:
         - ufw_status_exec.rc == 0
         - "'Status: active' in ufw_status_exec.stdout"
       become: true
       block:
-        - name: Allow cluster network ports in UFW
-          ansible.builtin.command: "ufw allow {{ item.port }}/tcp comment '{{ item.comment }}'"
-          loop:
-            - { port: "{{ rpc_port }}", comment: "Metanode RPC {{ inventory_hostname }}" }
-            - { port: "{{ p2p_port }}", comment: "Metanode P2P {{ inventory_hostname }}" }
-            - { port: "{{ raft_port }}", comment: "Metanode Raft {{ inventory_hostname }}" }
-            - { port: "{{ forward_port }}", comment: "Metanode Forward {{ inventory_hostname }}" }
+        - name: Allow the client-facing RPC port in UFW
+          ansible.builtin.command: "ufw allow {{ rpc_port }}/tcp comment 'Metanode RPC {{ inventory_hostname }}'"
+          register: ufw_exec_rpc
+          changed_when: "'Rule added' in ufw_exec_rpc.stdout or 'Rule updated' in ufw_exec_rpc.stdout"
+
+        - name: Allow internal cluster ports (P2P, Raft, Forward) only from cluster members
+          ansible.builtin.command: "ufw allow from {{ item.1 }} to any port {{ item.0 }} proto tcp comment 'Metanode internal {{ inventory_hostname }}'"
+          loop: "{{ [p2p_port, raft_port, forward_port] | product(ufw_peer_ips) | list }}"
           register: ufw_exec_rules
           changed_when: "'Rule added' in ufw_exec_rules.stdout or 'Rule updated' in ufw_exec_rules.stdout"
 
@@ -89,7 +111,10 @@
 
         - name: Reload UFW to apply port rules
           ansible.builtin.command: ufw reload
-          when: (ufw_exec_rules is defined and ufw_exec_rules.changed) or (ufw_parent_rule is defined and ufw_parent_rule.changed)
+          when: >-
+            (ufw_exec_rpc is defined and ufw_exec_rpc.changed) or
+            (ufw_exec_rules is defined and ufw_exec_rules.changed) or
+            (ufw_parent_rule is defined and ufw_parent_rule.changed)
 
 # ── Setup Configuration, Genesis & Service Unit ──────────────────────────────
 - name: Setup Execution Node {{ inventory_hostname }}
