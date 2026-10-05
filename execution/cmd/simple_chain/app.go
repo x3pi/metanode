@@ -405,14 +405,6 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	var rollupLastDBNonce uint64
 	rollupLastProgress := time.Now()
 
-	type RollupSystemPayload struct {
-		Event        rollup.Event  `json:"event"`
-		MsgID        e_common.Hash `json:"msg_id"`
-		SourceSeq    uint64        `json:"source_seq"`
-		SourcePubKey cm.PublicKey  `json:"source_pub_key"`
-		DestPubKey   cm.PublicKey  `json:"dest_pub_key"`
-		PayloadHash  e_common.Hash `json:"payload_hash"`
-	}
 
 	// Attestations are signed with this validator's committee key (Databases.BLSPrivateKey, the key whose public half is
 	// the validator account's PublicKeyBls); single-key deployments fall back to the node key.
@@ -452,7 +444,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		rollupNonceMutex.Lock()
 		defer rollupNonceMutex.Unlock()
 
-		state, err := app.chainState.GetAccountStateDB().AccountState(app.keyPair.Address())
+		state, err := app.chainState.GetAccountStateDB().AccountState(attestKey.Address())
 		var dbNonce uint64
 		if err == nil {
 			dbNonce = state.Nonce()
@@ -495,7 +487,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			rollupPendingNonce = dbNonce
 		}
 
-		payload := RollupSystemPayload{
+		payload := rollup.RollupSystemPayload{
 			Event:        event,
 			MsgID:        msgID,
 			SourceSeq:    sourceSeq,
@@ -526,7 +518,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		eventData, _ := json.Marshal(attested)
 
 		tx := transaction.NewTransaction(
-			app.keyPair.Address(),
+			attestKey.Address(),
 			rollup.RollupSystemAddress,
 			big.NewInt(0),
 			21000,
@@ -547,7 +539,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			// hardcoded literal -- found live: hardcoded 1 was rejected with "invalid chain id"
 			// on this devnet, whose real ChainId is 991 (0x3df).
 		)
-		tx.SetSign(app.keyPair.PrivateKey())
+		tx.SetSign(attestKey.PrivateKey())
 
 		// Must go through TxValidatorPool (app.transactionProcessor's embedded pool), NOT
 		// app.transactionPool.AddTransaction(). app.transactionPool (pkg/transaction_pool) is
@@ -582,7 +574,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		rollupNonceMutex.Lock()
 		defer rollupNonceMutex.Unlock()
 
-		state, err := app.chainState.GetAccountStateDB().AccountState(app.keyPair.Address())
+		state, err := app.chainState.GetAccountStateDB().AccountState(attestKey.Address())
 		var dbNonce uint64
 		if err == nil {
 			dbNonce = state.Nonce()
@@ -610,7 +602,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		}
 
 		tx := transaction.NewTransaction(
-			app.keyPair.Address(),
+			attestKey.Address(),
 			rollup.RollupSystemAddress,
 			big.NewInt(0),
 			21000,
@@ -623,7 +615,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			rollupPendingNonce,
 			app.config.ChainId.Uint64(),
 		)
-		tx.SetSign(app.keyPair.PrivateKey())
+		tx.SetSign(attestKey.PrivateKey())
 
 		_, err = app.transactionProcessor.AddTransactionToPool(tx)
 		if err == nil {
@@ -725,25 +717,11 @@ func (app *App) initProcessors() {
 	}), app.accountRegistryHandler)
 }
 
-type rollupSystemPayload struct {
-	Event        rollup.Event  `json:"event"`
-	MsgID        e_common.Hash `json:"msg_id"`
-	SourceSeq    uint64        `json:"source_seq"`
-	SourcePubKey cm.PublicKey  `json:"source_pub_key"`
-	DestPubKey   cm.PublicKey  `json:"dest_pub_key"`
-	PayloadHash  e_common.Hash `json:"payload_hash"`
-}
 
-// store is the WRITE store: barrier-tx-scoped (a speculative-execution snapshot), supplied by
-// RollupSystemHandler.HandleTransaction via newLiveRollupStore(chainState) where chainState is
-// that call's own per-tx parameter. app.rollupStore is passed separately as the READ store: it
-// is scoped to app.chainState directly (see NewApp's construction of app.rollupStore), which is
-// the live, always-current pointer that worker goroutines (e.g. ReceiveWorker) write through —
-// unlike the barrier-tx snapshot, it never goes stale relative to those writes. See
-// CrossNodeHandler.HandleSystemEvent's doc comment in pkg/rollup/cross_node_handler.go for why
-// this read/write split is required (a barrier-tx snapshot taken before a worker's own direct
-// Put() cannot see that Put(), causing e.g. EventClaimedConfirmed to be rejected against a
-// stale MARKED_CLAIMED_PENDING_CREDIT read even though the record had already advanced).
+// handleRollupSystemEvent applies a system event deterministically.
+// store is passed as BOTH readStore and writeStore: it is the live block-execution store
+// (newLiveRollupStore(chainState)), ensuring 100% deterministic state transitions and state root
+// parity across all replicas, during normal execution, catchup sync, and post-restart block replay.
 func handleRollupSystemEvent(app *App, store rollup.Store, stateDB rollup.AccountStateDB, data []byte) error {
 	if rollup.IsAccountRegistrationPayload(data) {
 		if app.accountRegistryHandler == nil {
@@ -755,12 +733,12 @@ func handleRollupSystemEvent(app *App, store rollup.Store, stateDB rollup.Accoun
 		}
 		return err
 	}
-	var payload rollupSystemPayload
+	var payload rollup.RollupSystemPayload
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return fmt.Errorf("failed to unmarshal RollupSystemPayload: %w", err)
 	}
 	err := app.crossNodeHandler.HandleSystemEvent(
-		app.rollupStore,
+		store,
 		store,
 		stateDB,
 		payload.Event,

@@ -853,11 +853,16 @@ func (s *Session) Finish(h *Handle) ([32]byte, *FinishedSession, error) {
 
 	var newRoot [32]byte
 
-	ptr := C.nomt_session_finish(
-		h.ptr,
-		s.ptr,
-		(*C.uint8_t)(&newRoot[0]),
-	)
+	var ptr *C.FinishedSessionHandle
+	func() {
+		h.LockCommitPayload()
+		defer h.UnlockCommitPayload()
+		ptr = C.nomt_session_finish(
+			h.ptr,
+			s.ptr,
+			(*C.uint8_t)(&newRoot[0]),
+		)
+	}()
 	// NOTE: We DO NOT decrement activeCount here, because the returned
 	// FinishedSession still holds an Arc<Core> reference and represents an active session.
 	s.ptr = nil // session consumed

@@ -20,7 +20,7 @@ CLUSTERS = [
          bls_pub="0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128"),
     dict(name="exec2", cluster_id=2, address="0x0d4CC97b62a149a8fe8DE81262270426A80B0935",
          private_key="2a61eac9235fab64ae377b2b7e39f8fa9648c5737094d28c7ee68a14b5086d39",
-         bls_priv="2d21f977fd594b7587439a91ab1bb5523573f02e5ba7e3e61cd8e895470d400a",
+         bls_priv="2a61eac9235fab64ae377b2b7e39f8fa9648c5737094d28c7ee68a14b5086d39",
          bls_pub="0x83221629eeff1a69aa96ac6aadea402a7b62a74647633c0743cd517b71dcd5cd39fec42841b953fc481dac039bceb465"),
 ]
 # Funded secp account used by the test driver (mtn_api.go devnetSenderPrivateKeyHex); present in every genesis alloc.
@@ -145,6 +145,7 @@ def main():
     if a.validators == 4:
         ports = dict(
             parent_http=pb + 601, parent_p2p=pb + 1, parent_metrics=pb + 901, parent_peer_rpc=pb + 501,
+            exec2=dict(rpc=pb + 650, conn=pb + 210, raft=pb + 110, forward=pb + 211),
         )
         for i in range(4):
             ports[f"val{i}"] = dict(
@@ -155,6 +156,44 @@ def main():
                 metrics=pb + 400 + i,
             )
         os.makedirs(base, exist_ok=True)
+
+        # ---------------- exec2 destination cluster ----------------
+        d2 = os.path.join(base, "exec2")
+        os.makedirs(d2, exist_ok=True)
+        p2 = ports["exec2"]
+        secret = os.path.join(base, "raft_secret.key")
+        if not os.path.exists(secret):
+            with open(secret, "w") as f:
+                f.write(os.urandom(32).hex())
+            os.chmod(secret, 0o600)
+        c2 = CLUSTERS[1]
+
+        def acc(addr, bls):
+            return {"address": addr, "balance": BIG, "pending_balance": "0", "last_hash": ZERO32,
+                    "device_key": ZERO32, "publicKeyBls": bls}
+
+        with open(os.path.join(a.repo, "execution/cmd/simple_chain/genesis.json")) as f:
+            gbase = json.load(f)
+
+        alloc_c1 = {}
+        for x in gbase["alloc"][:20]:
+            alloc_c1[x["address"].lower()] = dict(x, publicKeyBls=CLUSTERS[0]["bls_pub"])
+        alloc_c1[FUNDER["address"].lower()] = acc(FUNDER["address"], FUNDER["bls_pub"])
+        alloc_c1[CLUSTERS[0]["address"].lower()] = acc(CLUSTERS[0]["address"], CLUSTERS[0]["bls_pub"])
+        alloc_c1[CLUSTERS[1]["address"].lower()] = acc(CLUSTERS[1]["address"], CLUSTERS[1]["bls_pub"])
+        for v in VALS_4:
+            alloc_c1[v["address"].lower()] = acc(v["address"], v["bls_pub"])
+        supply_c1 = sum(int(x["balance"]) for x in alloc_c1.values())
+
+        alloc_c2 = {}
+        for x in gbase["alloc"][:20]:
+            alloc_c2[x["address"].lower()] = dict(x, publicKeyBls=c2["bls_pub"])
+        alloc_c2[FUNDER["address"].lower()] = acc(FUNDER["address"], FUNDER["bls_pub"])
+        alloc_c2[CLUSTERS[0]["address"].lower()] = acc(CLUSTERS[0]["address"], CLUSTERS[0]["bls_pub"])
+        alloc_c2[CLUSTERS[1]["address"].lower()] = acc(CLUSTERS[1]["address"], CLUSTERS[1]["bls_pub"])
+        for v in VALS_4:
+            alloc_c2[v["address"].lower()] = acc(v["address"], v["bls_pub"])
+        supply_c2 = sum(int(x["balance"]) for x in alloc_c2.values())
 
         # ---------------- parent ----------------
         pdir = os.path.join(base, "parent")
@@ -176,28 +215,18 @@ def main():
                 "p2p_address": "/ip4/127.0.0.1/tcp/%d" % ports["parent_p2p"],
             }],
             "accounts": [{"address": "0x7e615e4a500ab42b7bb3fdbb62fbb8bd10385fc5", "balance": "1000000000000000000000"}],
-            "open_cluster_registration": True, "clusters": [],
-            "float_accounts": [{"bls_public_key": CLUSTERS[0]["bls_pub"], "balance": FLOAT}],
+            "open_cluster_registration": True,
+            "clusters": [CLUSTERS[0]["bls_pub"], CLUSTERS[1]["bls_pub"]],
+            "float_accounts": [
+                {"bls_public_key": CLUSTERS[0]["bls_pub"], "balance": str(supply_c1)},
+                {"bls_public_key": CLUSTERS[1]["bls_pub"], "balance": str(supply_c2)},
+            ],
             "min_float_to_register": "1000000000000000000000", "allow_deposit_to_float": True,
         }
         with open(os.path.join(pdir, "parent_genesis.json"), "w") as f:
             json.dump(parent_genesis, f, indent=2)
 
         # ---------------- 4 validators ----------------
-        with open(os.path.join(a.repo, "execution/cmd/simple_chain/genesis.json")) as f:
-            gbase = json.load(f)
-
-        def acc(addr, bls):
-            return {"address": addr, "balance": BIG, "pending_balance": "0", "last_hash": ZERO32,
-                    "device_key": ZERO32, "publicKeyBls": bls}
-        alloc = {}
-        for x in gbase["alloc"][:20]:
-            alloc[x["address"].lower()] = dict(x, publicKeyBls=CLUSTERS[0]["bls_pub"])
-        alloc[FUNDER["address"].lower()] = acc(FUNDER["address"], FUNDER["bls_pub"])
-        alloc[CLUSTERS[0]["address"].lower()] = acc(CLUSTERS[0]["address"], CLUSTERS[0]["bls_pub"])
-        for v in VALS_4:
-            alloc[v["address"].lower()] = acc(v["address"], v["bls_pub"])
-
         stake = "1000000000000000000000"
         validators = [
             {
@@ -217,7 +246,7 @@ def main():
         g["config"] = dict(gbase["config"], chainId=991, epoch_timestamp_ms=int(time.time() * 1000))
         g["validators"] = validators
         g["total_stake"], g["quorum_threshold"], g["validity_threshold"] = 4000, 2667, 1334
-        g["alloc"] = list(alloc.values())
+        g["alloc"] = list(alloc_c1.values())
         g["registered_accounts"] = []
 
         gpath = os.path.join(base, "genesis.json")
@@ -264,10 +293,55 @@ def main():
             with open(os.path.join(d, "config.json"), "w") as f:
                 json.dump(config, f, indent=2)
 
+        # ---------------- exec2 cluster config & genesis ----------------
+        config_c2 = {
+            "debug": True, "cluster_id": 2, "enable_private_gateway": False,
+            "master_password": "devnet-test-password", "app_pepper": "devnet-test-pepper",
+            "private_key": c2["private_key"], "address": c2["address"],
+            "log_path": d2 + "/logs", "backup_path": d2 + "/backup",
+            "explorer_db_path": d2 + "/explorer", "explorer_read_only_db_path": d2 + "/explorer-ro",
+            "is_explorer": True, "connection_address": "0.0.0.0:%d" % p2["conn"], "version": "0.0.1.0",
+            "rpc_port": ":%d" % p2["rpc"], "db_type": 2, "genesis_file_path": d2 + "/genesis.json",
+            "Databases": {"RootPath": d2 + "/data", "DBEngine": "sharded", "Version": "0.0.1.0",
+                          "BLSPrivateKey": c2.get("bls_priv", c2["private_key"]), "SnapshotPath": d2 + "/snapshot"},
+            "is_rpc_node": True, "consensus_mode": "raft", "snapshot_enabled": False,
+            "tx_signature_mode": "secp", "account_gate": "parent_registered",
+            "raft": {
+                "node_id": "exec2_r1", "bind_address": "127.0.0.1:%d" % p2["raft"],
+                "advertise_address": "127.0.0.1:%d" % p2["raft"], "data_dir": d2 + "/raft", "bootstrap": True,
+                "forward_bind_address": "127.0.0.1:%d" % p2["forward"], "forward_secret_file": secret,
+                "sequencer_address": c2["address"], "heartbeat_timeout_ms": 100, "election_timeout_ms": 200,
+                "leader_lease_timeout_ms": 80, "commit_timeout_ms": 30, "propose_queue_size": 1024,
+                "peers": [{"id": "exec2_r1", "address": "127.0.0.1:%d" % p2["raft"],
+                           "forward_address": "127.0.0.1:%d" % p2["forward"]}],
+            },
+        }
+        with open(os.path.join(d2, "config.json"), "w") as f:
+            json.dump(config_c2, f, indent=2)
+
+        g2 = dict(gbase)
+        g2["config"] = dict(gbase["config"], chainId=991, epoch_timestamp_ms=int(time.time() * 1000))
+        auth = gbase["validators"][0]
+        g2["validators"] = [{
+            "address": c2["address"], "primary_address": "127.0.0.1:4000", "worker_address": "127.0.0.1:4012",
+            "p2p_address": auth.get("p2p_address", auth.get("address", "127.0.0.1:9000")),
+            "description": "E2E exec2 validator", "website": "", "image": "", "commission_rate": 5,
+            "min_self_delegation": "1000000000000000000", "accumulated_rewards_per_share": "0",
+            "delegator_stakes": [{"address": c2["address"], "amount": stake}], "total_staked_amount": stake,
+            "network_key": auth.get("network_key", ""), "hostname": auth.get("hostname", ""),
+            "authority_key": auth.get("authority_key", ""), "protocol_key": auth.get("protocol_key", ""),
+        }]
+        g2["total_stake"], g2["quorum_threshold"], g2["validity_threshold"] = 1000, 1000, 1000
+        g2["alloc"] = list(alloc_c2.values())
+        g2["registered_accounts"] = []
+        with open(os.path.join(d2, "genesis.json"), "w") as f:
+            json.dump(g2, f, indent=2)
+
         env = dict(
             base=base, bin=os.path.abspath(a.bin), ports=ports, funder=FUNDER["address"],
             mode="mysticeti_4val",
             cluster=dict(address=CLUSTERS[0]["address"], bls_pub=CLUSTERS[0]["bls_pub"], private_key=CLUSTERS[0]["private_key"]),
+            clusters={c["name"]: dict(address=c["address"], bls_pub=c["bls_pub"], private_key=c["private_key"]) for c in CLUSTERS},
             validators={v["name"]: dict(id=v["id"], address=v["address"], bls_pub=v["bls_pub"], bls_priv=v["bls_priv"]) for v in VALS_4}
         )
         with open(os.path.join(base, "env.json"), "w") as f:

@@ -17,6 +17,16 @@ const (
 	PayloadKindRollupSystemAttested    = "rollup_system_attested"
 )
 
+// RollupSystemPayload is the canonical inner payload for rollup system events across all validators.
+type RollupSystemPayload struct {
+	Event        Event         `json:"event"`
+	MsgID        common.Hash   `json:"msg_id"`
+	SourceSeq    uint64        `json:"source_seq"`
+	SourcePubKey cm.PublicKey  `json:"source_pub_key"`
+	DestPubKey   cm.PublicKey  `json:"dest_pub_key"`
+	PayloadHash  common.Hash   `json:"payload_hash"`
+}
+
 // RollupSystemAttestedPayload wraps any rollup system event payload (such as RollupSystemPayload)
 // with committee co-attestations.
 type RollupSystemAttestedPayload struct {

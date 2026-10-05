@@ -1165,26 +1165,30 @@ func (bp *BlockProcessor) WaitForPersistence() error {
 					// header (already written via a separate path) still claimed the
 					// root as committed. CommitPayload() drains (persists) whatever is
 					// still pending before we wait for anything already in flight.
-					if err := trie.CommitPayload(); err != nil {
-						logger.Error("🚨 [PERSIST] AccountStateDB CommitPayload (drain) failed: %v", err)
-						panic(fmt.Sprintf("FATAL: AccountStateDB pending commit drain failed: %v", err))
-					}
+					// 1. First wait for any in-flight background CommitAsync goroutines to finish.
+					// Calling CommitPayload before WaitCommitPayload would race with in-flight
+					// async commits on NOMT session FFI, causing beatree staging panics.
 					if err := trie.WaitCommitPayload(); err != nil {
 						logger.Error("🚨 [PERSIST] AccountStateDB WaitCommitPayload failed: %v", err)
 						panic(fmt.Sprintf("FATAL: AccountStateDB async commit failed: %v", err))
+					}
+					// 2. Drains (persists) whatever finished session is still pending synchronously.
+					if err := trie.CommitPayload(); err != nil {
+						logger.Error("🚨 [PERSIST] AccountStateDB CommitPayload (drain) failed: %v", err)
+						panic(fmt.Sprintf("FATAL: AccountStateDB pending commit drain failed: %v", err))
 					}
 				}
 			}
 			if stakeDB := bp.chainState.GetStakeStateDB(); stakeDB != nil {
 				if trie, ok := stakeDB.Trie().(*mt_trie.NomtStateTrie); ok {
 					// Same fix as AccountStateDB above -- see the comment there.
-					if err := trie.CommitPayload(); err != nil {
-						logger.Error("🚨 [PERSIST] StakeStateDB CommitPayload (drain) failed: %v", err)
-						panic(fmt.Sprintf("FATAL: StakeStateDB pending commit drain failed: %v", err))
-					}
 					if err := trie.WaitCommitPayload(); err != nil {
 						logger.Error("🚨 [PERSIST] StakeStateDB WaitCommitPayload failed: %v", err)
 						panic(fmt.Sprintf("FATAL: StakeStateDB async commit failed: %v", err))
+					}
+					if err := trie.CommitPayload(); err != nil {
+						logger.Error("🚨 [PERSIST] StakeStateDB CommitPayload (drain) failed: %v", err)
+						panic(fmt.Sprintf("FATAL: StakeStateDB pending commit drain failed: %v", err))
 					}
 				}
 			}
