@@ -48,6 +48,7 @@ func NewApp(configPath, rustConfigPath, dataDir, httpAddr, genesisPath string) (
 		return nil, fmt.Errorf("failed to load genesis from %s: %w", genesisPath, err)
 	}
 
+	parentchain.SetParentChainID(gen.ChainID)
 	protoValidators, err := gen.ToProtoValidators()
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse genesis validators: %w", err)

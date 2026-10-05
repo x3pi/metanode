@@ -126,7 +126,7 @@ func TestTx_ChainIDVerification(t *testing.T) {
 	require.NoError(t, err)
 
 	// Set wrong chain ID
-	tx.ChainID = 991 // Root Anchor instead of Parent Chain (990)
+	tx.ChainID = ParentChainID + 1 // any other chain ID (e.g. Root Anchor)
 	// re-sign for new hash
 	txHash := ComputeTxHash(tx)
 	tx.Sign = bls.Sign(priv, txHash[:]).Bytes()

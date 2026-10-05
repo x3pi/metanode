@@ -1,5 +1,5 @@
 # 🚀 HƯỚNG DẪN TRIỂN KHAI & KIỂM THỬ CỤM METANODE (SỔ TAY LỆNH NHANH)
-> **Kiến trúc:** Parent Chain (Coordinator `:8547`, P2P `:4000`, ChainID `990`) + Exec Shard 1 (Raft HA `:8646`) + Exec Shard 2 (Raft Single `:8647`) — Exec shards dùng EVM ChainID `991`.
+> **Kiến trúc:** Parent Chain (Coordinator `:8547`, P2P `:4000`, ChainID `991`) + Exec Shard 1 (Raft HA `:8646`) + Exec Shard 2 (Raft Single `:8647`) — Exec shards dùng chung ChainID `991`.
 
 ---
 
@@ -11,7 +11,7 @@
                                 │  • Consensus Engine: 100% Rust BFT (HotStuff 2f+1)       │
                                 │  • Invariant: ZERO-FORK (Thà pending chứ tuyệt đối ko fork)│
                                 │  • HTTP RPC: http://127.0.0.1:8547 | P2P: 127.0.0.1:4000 │
-                                │  • State Engine: LevelDB/NOMT Native Store (ChainID 990) │
+                                │  • State Engine: LevelDB/NOMT Native Store (ChainID 991) │
                                 │  • Vai trò: Cluster Registry, Account Registry, Inbound  │
                                 └─────────────▲──────────────────────────────▲─────────────┘
                                               │                              │
@@ -42,7 +42,7 @@
 ### Bảng phân bổ mạng & Cổng (Network Topology):
 | Thực Thể | Vai Trò Hệ Thống | ChainID | HTTP RPC | P2P Consensus | Raft Transport | Admin / Forward | Node Hosts |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Parent Chain** | Điều phối thanh khoản, Float & Registry | `990` | `http://127.0.0.1:8547` | `127.0.0.1:4000` | N/A (Rust BFT) | N/A | `parent_node` |
+| **Parent Chain** | Điều phối thanh khoản, Float & Registry | `991` | `http://127.0.0.1:8547` | `127.0.0.1:4000` | N/A (Rust BFT) | N/A | `parent_node` |
 | **Chain con 1 (Exec 1)** | Cụm thực thi Rollup HA (3 Replicas) | `991` | `:8646`, `:8648`, `:8649` | `:4200`, `:4201`, `:4203` | `:7110`, `:7111`, `:7112` | `:7210`, `:7211`, `:7212` | `exec1_replica1`, `exec1_replica2`, `exec1_replica3` |
 | **Chain con 2 (Exec 2)** | Cụm thực thi Rollup Single Node | `991` | `http://127.0.0.1:8647` | `127.0.0.1:4202` | `127.0.0.1:7120` | `127.0.0.1:7220` | `exec2_replica1` |
 
@@ -252,7 +252,7 @@ all:
     parent_chain_rpc_port: 18601
     parent_chain_host: "127.0.0.1"
     chain_id: 991
-    parent_chain_id: 990
+    parent_chain_id: 991
     devnet_sender_bls_pubkey: "0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc"
     parent_open_cluster_registration: true
 ```

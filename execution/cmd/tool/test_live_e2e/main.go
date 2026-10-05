@@ -108,7 +108,7 @@ func main() {
 
 	fmt.Println("================================================================================")
 	fmt.Println("🚀 COMPREHENSIVE LIVE END-TO-END (E2E) TEST FOR PARENT CHAIN")
-	fmt.Println("Target Cluster: 4 Validator Nodes (ChainID: 990)")
+	fmt.Println("Target Cluster: 4 Validator Nodes (ChainID: 991)")
 	fmt.Printf("Endpoints: %v\n", nodes)
 	fmt.Println("================================================================================")
 

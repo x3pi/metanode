@@ -11,7 +11,7 @@ func TestGenesis_ValidAndInvalid(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	validJSON := `{
-		"chain_id": 990,
+		"chain_id": 991,
 		"epoch_duration_seconds": 86400,
 		"validators": [
 			{
@@ -62,8 +62,8 @@ func TestGenesis_ValidAndInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadGenesis failed on valid json: %v", err)
 	}
-	if g.ChainID != 990 {
-		t.Fatalf("expected chainID 990, got %d", g.ChainID)
+	if g.ChainID != 991 {
+		t.Fatalf("expected chainID 991, got %d", g.ChainID)
 	}
 	if len(g.Validators) != 4 {
 		t.Fatalf("expected 4 validators, got %d", len(g.Validators))
@@ -88,12 +88,12 @@ func TestGenesis_ValidAndInvalid(t *testing.T) {
 		},
 		{
 			name: "empty_validators",
-			json: `{"chain_id": 990, "validators": []}`,
+			json: `{"chain_id": 991, "validators": []}`,
 		},
 		{
 			name: "invalid_stake",
 			json: `{
-				"chain_id": 990,
+				"chain_id": 991,
 				"validators": [
 					{"name":"n0","address":"0x1111111111111111111111111111111111111111","stake":"0","protocol_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 32)) + `","network_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 32)) + `","authority_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 48)) + `","p2p_address":"addr"}
 				]
@@ -102,7 +102,7 @@ func TestGenesis_ValidAndInvalid(t *testing.T) {
 		{
 			name: "duplicate_address",
 			json: `{
-				"chain_id": 990,
+				"chain_id": 991,
 				"validators": [
 					{"name":"n0","address":"0x1111111111111111111111111111111111111111","stake":"1000","protocol_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 32)) + `","network_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 32)) + `","authority_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 48)) + `","p2p_address":"addr"},
 					{"name":"n1","address":"0x1111111111111111111111111111111111111111","stake":"1000","protocol_key":"` + base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")) + `","network_key":"` + base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")) + `","authority_key":"` + base64.StdEncoding.EncodeToString(make([]byte, 48)) + `","p2p_address":"addr"},
@@ -122,5 +122,17 @@ func TestGenesis_ValidAndInvalid(t *testing.T) {
 				t.Fatalf("expected error for case %s, got nil", tc.name)
 			}
 		})
+	}
+}
+
+func TestParentChainIDConfigurable(t *testing.T) {
+	old := ParentChainID
+	defer SetParentChainID(old)
+	if DefaultParentChainID != 991 {
+		t.Fatalf("default parent chain ID must equal the shared exec chain ID 991, got %d", DefaultParentChainID)
+	}
+	SetParentChainID(4242)
+	if ParentChainID != 4242 {
+		t.Fatal("SetParentChainID did not take effect")
 	}
 }

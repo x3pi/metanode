@@ -43,3 +43,6 @@ E5-control shows the same signed tx IS replayed on exec2 when the gate is off, i
 
 ## Not covered
 - Forged system events by a *validator node identity* (needs parent-verifiable proof, item 2). - Single-node clusters (no multi-validator consensus). - Durable registration queue.
+
+## Run C — after unifying chain ID 991 (parent + exec): 14 passed / 0 failed
+Parent genesis chain_id=991 (was 990), ParentChainID now a startup-configurable var. Report: same scenarios as Run A.

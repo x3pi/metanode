@@ -14,7 +14,7 @@ all:
     parent_chain_host: "192.168.1.234"
     # EVM Chain ID cho Child Chain (Execution Clusters)
     chain_id: 991
-    # Dedicated Chain ID cho Parent Chain (Mặc định: 990 hoặc 991)
+    # Dedicated Chain ID cho Parent Chain (Mặc định: 991, dùng chung với các cụm thực thi)
     parent_chain_id: 991
     # BLS public key cho devnet sender (mtn_api.go)
     devnet_sender_bls_pubkey: "0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc"
@@ -27,7 +27,7 @@ all:
     bls_conservation_interval_seconds: 300
 
   children:
-    # ── Parent Chain Committee (100% Rust BFT Consensus Engine, Chain ID: 990) ──
+    # ── Parent Chain Committee (100% Rust BFT Consensus Engine, Chain ID: 991) ──
     # ⚠️ LƯU Ý: Nếu CHỈ TRIỂN KHAI CHILD CHAIN (Execution Cluster), hãy ĐỂ COMMENT nhóm này.
     # Khi nhóm này rỗng hoặc bị comment, hệ thống sẽ tự động bỏ qua Parent Chain và bỏ qua Validator Vote Monitor.
     parent_chain_nodes:

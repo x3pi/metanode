@@ -99,7 +99,7 @@ def main():
     with open(os.path.join(pdir, "config.json"), "w") as f:
         json.dump({"http_port": ":%d" % ports["parent_http"], "log_level": 3}, f, indent=2)
     parent_genesis = {
-        "chain_id": 990, "epoch_duration_seconds": 86400, "epoch_timestamp_ms": 1700000000000,
+        "chain_id": 991, "epoch_duration_seconds": 86400, "epoch_timestamp_ms": 1700000000000,
         "validators": [{
             "name": "node-0", "address": "0x7e615e4a500ab42b7bb3fdbb62fbb8bd10385fc5", "stake": "1000000000000000000",
             "authority_key": "kUYrYvf/fDUygF8+nIdNATAAlnQU3BZSD3aGuHNoAZQv3OJOIZKW+Uw+UbH/1LWCAlbyWnQra9vUSDJfFVIxlV4XlraaNkLsZSb3HMJJQK3qEc1L20Yqb5YM8uGRXvnB",
