@@ -43,3 +43,6 @@ Bối cảnh: account gate (secp + `parent_registered`) đã E2E 14/14 trên c�
 
 ### C+. Độ bền hàng đợi đăng ký — ✅ kiểm bằng kill -9 thật
 `scripts/test/gate_e2e/restart_durability.sh <BASE>`: (A) đã CONFIRMED rồi kill -9 ⇒ vẫn CONFIRMED; (B) đăng ký khi parent tắt, kill -9 node, bật lại ⇒ lên CONFIRMED. 3/3 lần PASS. Ghi mỗi request có `SyncDurable` (Pebble NoSync không đủ khi mất điện). Nạp lại bị chặn bộ nhớ (maxTracked), bản ghi của user đã đăng ký tự xoá.
+
+### A2. CÒN MỞ — sự kiện credit/lock/refund của rollup chưa có co-attestation
+Chỉ `account_registered` đòi f+1 chữ ký. Các sự kiện còn lại đi qua `rollupSystemEventDispatcherFunc` → `CrossNodeHandler.HandleSystemEvent` (CreditObserved/RPCSubmitted/ClaimedConfirmed/refund…) vẫn chỉ cần danh tính node BLS của MỘT validator ⇒ một validator Byzantine vẫn có thể giả sự kiện credit (mint) trong cụm nhiều validator. Hướng làm: envelope chung `{inner, attestations}` với digest `keccak(domain||chainID||keccak(inner))`, cộng dồn như registration nhưng thêm dấu "đã áp dụng" (tombstone) để validator đến muộn không kích hoạt lại; bọc ở `eventProposer` của send/recv/reclaim worker. Phải test lại luồng cross-chain thật (đã live-verified, dễ vỡ) và cần cụm ≥4 validator. Không làm khi chưa có môi trường nhiều validator để kiểm.
