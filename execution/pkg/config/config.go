@@ -337,13 +337,20 @@ func (c *SimpleChainConfig) validateTxSignatureMode() error {
 	case "", TxSignatureModeBLSLegacy:
 		return nil
 	case TxSignatureModeSecp:
-		// Replay protection of secp-signed txs rests on the chain ID: it must be configured (and unique per chain).
-		if c.ChainId == nil || c.ChainId.Sign() <= 0 {
-			return fmt.Errorf("tx_signature_mode %q requires a positive chainId", TxSignatureModeSecp)
-		}
+		// The chain ID is NOT required here: deployed configs do not carry it, the genesis does and initNetwork copies
+		// it into the config. The requirement is enforced right after that, by ValidateChainBinding.
 		return nil
 	}
 	return fmt.Errorf("invalid tx_signature_mode %q (want %q or %q)", c.TxSignatureMode, TxSignatureModeBLSLegacy, TxSignatureModeSecp)
+}
+
+// ValidateChainBinding must be called once the chain ID is known (after it is read from the genesis). Replay protection
+// of secp-signed transactions rests on the chain ID, so a secp chain without a positive chain ID must not start.
+func (c *SimpleChainConfig) ValidateChainBinding() error {
+	if c.SecpOnlyTxSignatures() && (c.ChainId == nil || c.ChainId.Sign() <= 0) {
+		return fmt.Errorf("tx_signature_mode %q requires a positive chain ID (genesis config.chainId)", TxSignatureModeSecp)
+	}
+	return nil
 }
 
 // AccountGateParentRegistered reports whether the parent-registered account gate is enabled.

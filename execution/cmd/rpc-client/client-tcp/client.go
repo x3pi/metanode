@@ -470,7 +470,8 @@ asDrained:
 	}
 }
 
-// SendSecpProtoTransaction signs and sends a Type 0xFF transaction using an ECDSA secp256k1 key.
+// SendSecpProtoTransaction signs and sends a Type 0xFF transaction using an ECDSA secp256k1 key and waits (up to 60s)
+// for its receipt.
 func (client *Client) SendSecpProtoTransaction(
 	privKey *ecdsa.PrivateKey,
 	toAddress common.Address,
@@ -479,12 +480,35 @@ func (client *Client) SendSecpProtoTransaction(
 	maxGasPrice uint64,
 	data []byte,
 ) (types.Receipt, types.Transaction, error) {
+	tx, err := client.SendSecpProtoTransactionNoWait(privKey, toAddress, amount, maxGas, maxGasPrice, data)
+	if err != nil {
+		return nil, nil, err
+	}
+	receipt, err := client.waitReceipt(tx.Hash(), 60*time.Second)
+	return receipt, tx, err
+}
+
+// WaitForReceipt waits up to timeout for the receipt of a transaction already sent on this connection.
+func (client *Client) WaitForReceipt(txHash common.Hash, timeout time.Duration) (types.Receipt, error) {
+	return client.waitReceipt(txHash, timeout)
+}
+
+// SendSecpProtoTransactionNoWait signs a Type 0xFF transaction with an ECDSA secp256k1 key and sends it over TCP
+// without waiting for a receipt (a rejected transaction never produces one). Use WaitForReceipt to wait.
+func (client *Client) SendSecpProtoTransactionNoWait(
+	privKey *ecdsa.PrivateKey,
+	toAddress common.Address,
+	amount *big.Int,
+	maxGas uint64,
+	maxGasPrice uint64,
+	data []byte,
+) (types.Transaction, error) {
 	fromAddress := crypto.PubkeyToAddress(privKey.PublicKey)
 
 	// Fetch current on-chain account state to get nonce
 	as, err := client.AccountState(fromAddress)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get account state for %s: %w", fromAddress.Hex(), err)
+		return nil, fmt.Errorf("failed to get account state for %s: %w", fromAddress.Hex(), err)
 	}
 
 	tx := mt_transaction.NewTransaction(
@@ -503,21 +527,21 @@ func (client *Client) SendSecpProtoTransaction(
 	)
 	concreteTx, ok := tx.(*mt_transaction.Transaction)
 	if !ok {
-		return nil, nil, fmt.Errorf("transaction is not *mt_transaction.Transaction")
+		return nil, fmt.Errorf("transaction is not *mt_transaction.Transaction")
 	}
 	concreteTx.SetType(0xFF)
 	if err := concreteTx.SignSecpProto(privKey); err != nil {
-		return nil, nil, fmt.Errorf("failed to sign secp proto tx: %w", err)
+		return nil, fmt.Errorf("failed to sign secp proto tx: %w", err)
 	}
 
 	bTransaction, err := tx.Marshal()
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal tx: %w", err)
+		return nil, fmt.Errorf("failed to marshal tx: %w", err)
 	}
 
 	parentConn := client.clientContext.ConnectionsManager.ParentConnection()
 	if parentConn == nil {
-		return nil, nil, fmt.Errorf("parent connection is nil")
+		return nil, fmt.Errorf("parent connection is nil")
 	}
 
 	err = client.clientContext.MessageSender.SendBytes(
@@ -526,7 +550,7 @@ func (client *Client) SendSecpProtoTransaction(
 		bTransaction,
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to send bytes via TCP: %w", err)
+		return nil, fmt.Errorf("failed to send bytes via TCP: %w", err)
 	}
 
 	logger.Info("══════ SECP PROTO TX 0xFF SENT ══════")
@@ -538,8 +562,7 @@ func (client *Client) SendSecpProtoTransaction(
 	logger.Info("  ChainID:   %d", tx.GetChainID())
 	logger.Info("═════════════════════════════════════")
 
-	receipt, err := client.waitReceipt(tx.Hash(), 60*time.Second)
-	return receipt, tx, err
+	return tx, nil
 }
 
 func (client *Client) ReadTransaction(

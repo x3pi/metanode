@@ -31,6 +31,9 @@ func (app *App) initNetwork() error {
 		return fmt.Errorf("failed to load genesis data: %v", err)
 	}
 	app.config.ChainId = app.genesis.Config.ChainId
+	if err := app.config.ValidateChainBinding(); err != nil {
+		return err
+	}
 
 	// Initialize key pair
 	app.keyPair = bls.NewKeyPair(e_common.FromHex(app.config.PrivateKey))
