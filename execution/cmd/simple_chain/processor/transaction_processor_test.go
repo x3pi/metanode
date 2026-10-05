@@ -220,3 +220,53 @@ func TestTCPSetCodeSuiteFixture(t *testing.T) {
 		require.False(t, altered.ValidSign(cm.PubkeyFromBytes(publicKey)))
 	}
 }
+
+// TestProcessTransactionFromClient_SecpProtoType0xFF tests client TCP ingestion
+// of a Type 0xFF (Secp256k1 Proto TCP) transaction via SendTransaction.
+func TestProcessTransactionFromClient_SecpProtoType0xFF(t *testing.T) {
+	privKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	from := crypto.PubkeyToAddress(privKey.PublicKey)
+	to := e_common.HexToAddress("0xCAFE00000000000000000000000000000000CAFE")
+
+	tx := &transaction.Transaction{}
+	tx.FromProto(&pb.Transaction{
+		FromAddress: from.Bytes(),
+		ToAddress:   to.Bytes(),
+		Amount:      []byte{0x01},
+		MaxGas:      21000,
+		MaxGasPrice: 1000,
+		MaxTimeUse:  1000,
+		ChainID:     991,
+		Type:        0xFF,
+	})
+	tx.SetNonce(0)
+	require.NoError(t, tx.SignSecpProto(privKey))
+
+	wireBytes, err := tx.Marshal()
+	require.NoError(t, err)
+
+	tp := &TransactionProcessor{
+		injectionQueue: make(chan injectionRequest, 10),
+	}
+	conn := NewMockConnection(from)
+
+	req := NewMockRequest(conn, NewMockMessage("SendTransaction", wireBytes))
+	err = tp.ProcessTransactionFromClient(req)
+	require.NoError(t, err)
+
+	require.Len(t, tp.injectionQueue, 1)
+	injected := <-tp.injectionQueue
+	assert.Equal(t, wireBytes, injected.rawBody)
+
+	// Execute deferred unmarshal and check transaction structure
+	unmarshaledTx := &transaction.Transaction{}
+	require.NoError(t, unmarshaledTx.Unmarshal(injected.rawBody))
+	assert.Equal(t, uint64(0xFF), unmarshaledTx.Type())
+	assert.Equal(t, tx.Hash(), unmarshaledTx.Hash())
+	assert.Equal(t, tx.SigningHash(), unmarshaledTx.SigningHash())
+	assert.True(t, unmarshaledTx.ValidSecpProtoSign())
+	assert.True(t, unmarshaledTx.ValidSecpSign())
+	assert.Equal(t, from, unmarshaledTx.FromAddress())
+}
+

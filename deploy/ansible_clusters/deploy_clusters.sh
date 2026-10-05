@@ -84,35 +84,35 @@ usage() {
 # ── Parse arguments ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --setup)
+        --setup|setup)
             ACTION="setup"
             shift
             ;;
-        --deploy)
+        --deploy|deploy)
             ACTION="deploy"
             shift
             ;;
-        --start)
+        --start|start)
             ACTION="start"
             shift
             ;;
-        --restart)
+        --restart|restart)
             ACTION="restart"
             shift
             ;;
-        --stop)
+        --stop|stop)
             ACTION="stop"
             shift
             ;;
-        --clean|--clean-data)
+        --clean|--clean-data|clean)
             ACTION="clean"
             shift
             ;;
-        --reset|--reset-all)
+        --reset|--reset-all|reset)
             ACTION="reset"
             shift
             ;;
-        --status)
+        --status|status)
             ACTION="status"
             shift
             ;;
@@ -572,6 +572,23 @@ fi
 
 DEPLOY_END_TIME=$(date +%s)
 TOTAL_DEPLOY_DURATION=$((DEPLOY_END_TIME - DEPLOY_START_TIME))
+
+# Nếu là action stop hoặc clean: kết thúc ngay mà không cần check RPC status
+if [ "$ACTION" = "stop" ]; then
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "🛑 ĐÃ DỪNG TOÀN BỘ TIẾN TRÌNH CỤM METANODE THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
+    echo "═══════════════════════════════════════════════════════════════"
+    exit 0
+fi
+
+if [ "$ACTION" = "clean" ]; then
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "🧹 ĐÃ DỌN DẸP DỮ LIỆU CỤM METANODE THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
+    echo "═══════════════════════════════════════════════════════════════"
+    exit 0
+fi
 
 # 3. Export /tmp/rpc_nodes.json & Notify Services Ready
 echo "📢 Xuất cấu hình cổng vào /tmp và gửi thông báo dịch vụ sẵn sàng lên Telegram..."

@@ -282,6 +282,11 @@ func (mt *MockTransaction) CopyTransaction() types.Transaction                  
 func (mt *MockTransaction) SetIsDebug(_ bool)                                    {}
 func (mt *MockTransaction) GetIsDebug() bool                                     { return false }
 func (mt *MockTransaction) ValidEthSign() bool                                   { return true }
+func (mt *MockTransaction) ValidSecpProtoSign() bool                             { return true }
+func (mt *MockTransaction) ValidSecpSign() bool                                  { return true }
+func (mt *MockTransaction) SigningHash() e_common.Hash                           { return mt.hash }
+func (mt *MockTransaction) Type() uint64                                         { return mt.txType }
+func (mt *MockTransaction) SignBytes() []byte                                    { return nil }
 func (mt *MockTransaction) UpdateRelatedAddresses(_ [][]byte)                    {}
 func (mt *MockTransaction) AddRelatedAddress(_ e_common.Address)                 {}
 func (mt *MockTransaction) UpdateDeriver(_, _ e_common.Hash)                     {}

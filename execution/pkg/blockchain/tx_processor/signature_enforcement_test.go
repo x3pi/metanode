@@ -5,8 +5,11 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -157,7 +160,7 @@ func TestVerifySignatures_BisectsFailingChunk(t *testing.T) {
 
 	rotateVerifiedSignatures()
 	rotateVerifiedSignatures()
-	valid, st := verifySignatures(cs.GetAccountStateDB(), txs, nil)
+	valid, st := verifySignatures(cs.GetAccountStateDB(), txs, nil, sigPolicyOf(cs))
 	for i, v := range valid {
 		if v == (i == bad) {
 			t.Fatalf("tx %d verdict wrong (valid=%v)", i, v)
@@ -188,3 +191,178 @@ func TestPrewarmSignatureCache_FillsCache(t *testing.T) {
 		t.Fatal("prewarm should have cached the verified signature")
 	}
 }
+
+func TestFilterInvalidSignatures_SecpProtoType0xFF(t *testing.T) {
+	cs := setupTestChainState(t)
+	cs.GetConfig().TxSignatureMode = config.TxSignatureModeSecp
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+
+	privKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("crypto.GenerateKey: %v", err)
+	}
+	from := crypto.PubkeyToAddress(privKey.PublicKey)
+	to := common.HexToAddress("0x7890")
+
+	// Account without BLS key (secp only)
+	as := state.NewAccountState(from)
+	as.AddBalance(big.NewInt(1_000_000_000_000_000))
+	as.SetNonce(1)
+	cs.GetAccountStateDB().SetState(as)
+
+	// Valid Type 0xFF tx
+	good := &transaction.Transaction{}
+	good.FromProto(&pb.Transaction{
+		FromAddress: from.Bytes(),
+		ToAddress:   to.Bytes(),
+		Amount:      big.NewInt(100).Bytes(),
+		Nonce:       []byte{0, 0, 0, 0, 0, 0, 0, 1},
+		MaxGas:      p_common.TRANSFER_GAS_COST,
+		MaxGasPrice: p_common.MINIMUM_BASE_FEE,
+		ChainID:     1,
+		Type:        0xFF,
+	})
+	if err := good.SignSecpProto(privKey); err != nil {
+		t.Fatalf("SignSecpProto failed: %v", err)
+	}
+
+	// Forged Type 0xFF tx signed with a DIFFERENT private key
+	otherKey, _ := crypto.GenerateKey()
+	forged := &transaction.Transaction{}
+	forged.FromProto(&pb.Transaction{
+		FromAddress: from.Bytes(),
+		ToAddress:   to.Bytes(),
+		Amount:      big.NewInt(100).Bytes(),
+		Nonce:       []byte{0, 0, 0, 0, 0, 0, 0, 1},
+		MaxGas:      p_common.TRANSFER_GAS_COST,
+		MaxGasPrice: p_common.MINIMUM_BASE_FEE,
+		ChainID:     1,
+		Type:        0xFF,
+	})
+	if err := forged.SignSecpProto(otherKey); err != nil {
+		t.Fatalf("SignSecpProto failed: %v", err)
+	}
+
+	rotateVerifiedSignatures()
+	rotateVerifiedSignatures()
+
+	out := FilterInvalidSignatures(cs, groupsOf(good, forged))
+	if len(out) != 1 || len(out[0].Items) != 1 || out[0].Items[0].Tx.Hash() != good.Hash() {
+		t.Fatalf("expected only the genuine secp proto tx to survive, got %d groups", len(out))
+	}
+}
+
+func TestFilterInvalidSignatures_SecpProtoType0xFF_WithAccountHavingBLSKey(t *testing.T) {
+	cs := setupTestChainState(t)
+	cs.GetConfig().TxSignatureMode = config.TxSignatureModeSecp
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+
+	privKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("crypto.GenerateKey: %v", err)
+	}
+	from := crypto.PubkeyToAddress(privKey.PublicKey)
+	to := common.HexToAddress("0x7890")
+
+	// Account WITH registered BLS key sending a Type 0xFF transaction
+	_, blsPub := createTestTx(from, to, big.NewInt(1), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, 1)
+	as := state.NewAccountState(from)
+	as.AddBalance(big.NewInt(1_000_000_000_000_000))
+	as.SetPublicKeyBls(blsPub)
+	as.SetNonce(1)
+	cs.GetAccountStateDB().SetState(as)
+
+	good := &transaction.Transaction{}
+	good.FromProto(&pb.Transaction{
+		FromAddress: from.Bytes(),
+		ToAddress:   to.Bytes(),
+		Amount:      big.NewInt(500).Bytes(),
+		Nonce:       []byte{0, 0, 0, 0, 0, 0, 0, 1},
+		MaxGas:      p_common.TRANSFER_GAS_COST,
+		MaxGasPrice: p_common.MINIMUM_BASE_FEE,
+		ChainID:     1,
+		Type:        0xFF,
+	})
+	if err := good.SignSecpProto(privKey); err != nil {
+		t.Fatalf("SignSecpProto failed: %v", err)
+	}
+
+	rotateVerifiedSignatures()
+	rotateVerifiedSignatures()
+
+	out := FilterInvalidSignatures(cs, groupsOf(good))
+	if len(out) != 1 || len(out[0].Items) != 1 || out[0].Items[0].Tx.Hash() != good.Hash() {
+		t.Fatalf("account with BLS key sending Type 0xFF secp tx must be accepted, got %d groups", len(out))
+	}
+}
+
+func TestVerifySignatures_MixedBatchWithProto0xFF(t *testing.T) {
+	cs := setupTestChainState(t)
+	cs.GetConfig().TxSignatureMode = config.TxSignatureModeSecp
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+
+	const blsCount = 20
+	const secpCount = 10
+	total := blsCount + secpCount
+
+	txs := make([]types.Transaction, total)
+
+	// Create BLS txs
+	for i := 0; i < blsCount; i++ {
+		// secp mode: BLS txs are only valid for node identities (address derived from the BLS key).
+		tx, pub := createNodeIdentityTx(common.HexToAddress("0x456"), big.NewInt(1), 1)
+		from := tx.FromAddress()
+		as := state.NewAccountState(from)
+		as.AddBalance(big.NewInt(1_000_000_000_000_000))
+		as.SetPublicKeyBls(pub)
+		as.SetNonce(1)
+		cs.GetAccountStateDB().SetState(as)
+		txs[i] = tx
+	}
+
+	// Create Secp Proto Type 0xFF txs
+	for i := 0; i < secpCount; i++ {
+		privKey, _ := crypto.GenerateKey()
+		from := crypto.PubkeyToAddress(privKey.PublicKey)
+		as := state.NewAccountState(from)
+		as.AddBalance(big.NewInt(1_000_000_000_000_000))
+		as.SetNonce(1)
+		cs.GetAccountStateDB().SetState(as)
+
+		tx := &transaction.Transaction{}
+		tx.FromProto(&pb.Transaction{
+			FromAddress: from.Bytes(),
+			ToAddress:   common.HexToAddress("0x456").Bytes(),
+			Amount:      big.NewInt(int64(10 + i)).Bytes(),
+			Nonce:       []byte{0, 0, 0, 0, 0, 0, 0, 1},
+			MaxGas:      p_common.TRANSFER_GAS_COST,
+			MaxGasPrice: p_common.MINIMUM_BASE_FEE,
+			ChainID:     1,
+			Type:        0xFF,
+		})
+		_ = tx.SignSecpProto(privKey)
+		txs[blsCount+i] = tx
+	}
+
+	// Make 1 BLS tx bad and 1 Secp tx bad
+	badBLS := 5
+	otherTx, _ := createTestTx(common.HexToAddress("0xdead"), common.HexToAddress("0x456"), big.NewInt(1), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, 1)
+	txs[badBLS].(*transaction.Transaction).SetSignBytes(otherTx.Sign().Bytes())
+
+	badSecp := blsCount + 3
+	tamperedProto := txs[badSecp].(*transaction.Transaction).Proto().(*pb.Transaction)
+	tamperedProto.Amount = big.NewInt(999999).Bytes()
+	txs[badSecp].ClearCacheHash()
+
+	rotateVerifiedSignatures()
+	rotateVerifiedSignatures()
+
+	valid, _ := verifySignatures(cs.GetAccountStateDB(), txs, nil, sigPolicyOf(cs))
+	for i, v := range valid {
+		expectedValid := (i != badBLS && i != badSecp)
+		if v != expectedValid {
+			t.Fatalf("tx %d expected valid=%v, got %v", i, expectedValid, v)
+		}
+	}
+}
+

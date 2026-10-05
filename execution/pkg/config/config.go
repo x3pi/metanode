@@ -213,6 +213,16 @@ type SimpleChainConfig struct {
 
 	MinGasPrice uint64 `json:"min_gas_price,omitempty"`
 
+	// TxSignatureMode selects how user transactions are authenticated by this chain:
+	//   "" / "bls_legacy": the legacy simple chain (default). BLS-signed dapp transactions and ETH-signed
+	//                      transactions are accepted exactly as before; secp256k1 proto txs (type 0xFF) are rejected.
+	//   "secp":            the new execution node. Users sign only with secp256k1 (ETH txs or proto type 0xFF).
+	//                      BLS-signed transactions are accepted ONLY from node identities (an account whose address is
+	//                      derived from its own registered BLS public key, e.g. the node's rollup system txs).
+	// CAUTION: consensus-critical. Every validator of a chain MUST use the same value (a mismatch forks); changing it
+	// on a chain with history requires a wipe + simultaneous redeploy.
+	TxSignatureMode string `json:"tx_signature_mode,omitempty"`
+
 	// Cross-chain configuration
 	CrossChain CrossChainConfig `json:"cross_chain"`
 
@@ -303,6 +313,25 @@ func JoinPathIfNotURL(basePath, path string) string {
 	return filepath.Join(basePath, path)
 }
 
+const (
+	TxSignatureModeBLSLegacy = "bls_legacy"
+	TxSignatureModeSecp      = "secp"
+)
+
+// SecpOnlyTxSignatures reports whether user transactions must be secp256k1-signed (see TxSignatureMode).
+func (c *SimpleChainConfig) SecpOnlyTxSignatures() bool {
+	return c != nil && c.TxSignatureMode == TxSignatureModeSecp
+}
+
+// validateTxSignatureMode rejects unknown modes so a typo can never silently fall back to a different rule set.
+func (c *SimpleChainConfig) validateTxSignatureMode() error {
+	switch c.TxSignatureMode {
+	case "", TxSignatureModeBLSLegacy, TxSignatureModeSecp:
+		return nil
+	}
+	return fmt.Errorf("invalid tx_signature_mode %q (want %q or %q)", c.TxSignatureMode, TxSignatureModeBLSLegacy, TxSignatureModeSecp)
+}
+
 // LoadConfig đọc và xử lý file cấu hình.
 func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 	var err error
@@ -319,6 +348,10 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		err = json.Unmarshal(raw, ConfigApp)
 		if err != nil {
 			err = fmt.Errorf("failed to parse config file %s: %w", configPath, err)
+			return
+		}
+
+		if err = ConfigApp.validateTxSignatureMode(); err != nil {
 			return
 		}
 

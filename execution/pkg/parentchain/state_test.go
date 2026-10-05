@@ -74,7 +74,7 @@ func TestParentChainState(t *testing.T) {
 	})
 	
 	doDeposit := func(s Store, srcPub, dstPub cm.PublicKey, srcPriv cm.PrivateKey, cid uint64, amt *big.Int, mID common.Hash) error {
-		_ = ensureChainRegistry(s, crypto.Keccak256Hash(srcPub[:]), srcPub, cid)
+		_ = registerAuthorizedCluster(s, crypto.Keccak256Hash(srcPub[:]), srcPub, cid)
 		dig := ComputeDepositFloatMessage(dstPub, cid, common.Address{}, common.Address{}, amt, mID)
 		cert := bls.Sign(srcPriv, dig)
 		return DepositToFloat(s, srcPub, dstPub, cid, common.Address{}, common.Address{}, amt, mID, cert, 1)
@@ -95,7 +95,7 @@ func TestParentChainState(t *testing.T) {
 		}
 
 		// Register source cluster
-		_ = ensureChainRegistry(s, hash1, pub1, 101)
+		_ = registerAuthorizedCluster(s, hash1, pub1, 101)
 
 		// 2. Forged signature (signed with priv2 instead of priv1) rejected
 		badCert := bls.Sign(priv2, dig)
@@ -322,7 +322,7 @@ func TestParentChainState(t *testing.T) {
 		stateRoot := common.HexToHash("0xabc123")
 		digest := ComputeSubmitStateRootMessage(pub1, epoch, stateRoot)
 		cert := bls.Sign(priv1, digest)
-		_ = ensureChainRegistry(store, hash1, pub1, 101)
+		_ = registerAuthorizedCluster(store, hash1, pub1, 101)
 
 		err := SubmitStateRoot(store, pub1, epoch, stateRoot, cert)
 		if err != nil {
@@ -380,3 +380,13 @@ func BenchmarkComputeSubmitStateRootMessage(b *testing.B) {
 	}
 }
 
+
+// registerAuthorizedCluster registers key as a trusted (policy-admitted) cluster, as registerCluster does.
+func registerAuthorizedCluster(store Store, keyHash common.Hash, key cm.PublicKey, clusterID uint64) error {
+	return store.SetChainRegistry(keyHash, ChainRegistryEntry{
+		FloatIdentityKey:     key,
+		ClusterIDDescriptive: clusterID,
+		ChainIDDescriptive:   clusterID,
+		Authorized:           true,
+	})
+}

@@ -32,7 +32,6 @@ import (
 	client_tcp "github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/file_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/rpc_client"
@@ -931,36 +930,10 @@ func processSendRawTransaction(p *RpcReverseProxy, rawTransactionHex string, id 
 	}
 
 	if tx != nil {
-		fileAbi, _ := file_handler.GetFileAbi()
-		name, _ := fileAbi.ParseMethodName(tx)
-		if !(tx.ToAddress() == file_handler.PredictContractAddress(ethCommon.HexToAddress(p.CLientTcp.GetClientContext().Config.OwnerFileStorageAddress)) && name == "uploadChunk") {
-			rs := p.ClientRpc.SendRawTransactionBinary(bTx, releaseTx, decodedTxBytes, releaseDecodedOnce, nil)
-			releaseDecodedOnce()
-			rs.Id = id
-			return rs
-		} else {
-			fileHandler, err := file_handler.GetFileHandlerTCP(p.CLientTcp, p.TcpCfg)
-			if err != nil {
-				return makeInternalError(id, "Failed to build transaction: "+err.Error())
-			}
-			isPrevent, err := fileHandler.HandleFileTransactionNoReceipt(context.Background(), tx)
-			if err != nil {
-				return makeInternalError(id, "Failed to build transaction: "+err.Error())
-			}
-			if isPrevent {
-				releaseDecodedOnce()
-				releaseTx()
-				// fileTimeLogger, _ := loggerfile.NewFileLogger("fileTimeLogger_TX.log")
-				// fileTimeLogger.Info("Prevent uploadChunk transaction: %s", tx.Hash().Hex())
-				return rpc_client.JSONRPCResponse{
-					Jsonrpc: "2.0",
-					Result:  tx.Hash().Hex(),
-					Id:      id,
-				}
-			}
-			return makeInternalError(id, "Failed to build transaction: "+err.Error())
-		}
-
+		rs := p.ClientRpc.SendRawTransactionBinary(bTx, releaseTx, decodedTxBytes, releaseDecodedOnce, nil)
+		releaseDecodedOnce()
+		rs.Id = id
+		return rs
 	} else {
 		return makeInternalError(id, "null transaction: "+err.Error())
 	}

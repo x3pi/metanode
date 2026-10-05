@@ -23,6 +23,22 @@ type accountStateDBAdapter struct {
 	chainState *blockchain.ChainState
 }
 
+// TotalSupply returns the sum of every account balance (including pending balances) of the cluster, read from the
+// committed account state. A cluster's BLS float on the Parent Chain must equal it (see rollup.CheckConservation).
+func (a *accountStateDBAdapter) TotalSupply() (*big.Int, error) {
+	all, err := a.chainState.GetAccountStateDB().GetAll()
+	if err != nil {
+		return nil, err
+	}
+	sum := new(big.Int)
+	for _, st := range all {
+		if st != nil {
+			sum.Add(sum, st.TotalBalance())
+		}
+	}
+	return sum, nil
+}
+
 func (a *accountStateDBAdapter) GetBalance(address common.Address) *big.Int {
 	state, err := a.chainState.GetAccountStateDB().AccountState(address)
 	if err != nil || state == nil {

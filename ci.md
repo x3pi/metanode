@@ -78,20 +78,31 @@ cd /home/abc/nhat/con-chain-v2/metanode
 
 # Cách 4: Ép reset Execution Clusters trước khi test:
 ./ci.sh run-now --only child_chain_a --reset-exec
+
+# Cách 5: Chạy toàn bộ các bài test cho Child Chain (chain con):
+./ci.sh run-now --child-chain
+# hoặc cờ ngắn:
+./ci.sh run-now --child
 ```
 
 ### 🔹 Chạy MỘT bài test cụ thể khác (`--only <test_id>`)
 ```bash
-# 1. Test tắt/bật node luân phiên & kiểm chứng Zero-Fork:
-./ci.sh run-now --only node_chaos_restart
+# 1. Test 34 kịch bản Block-STM trên Child Chain (chain_a):
+./ci.sh run-now --only child_chain_a
 
-# 2. Test đo hiệu năng đỉnh Max TPS (TPS Blast):
+# 2. Test đo hiệu năng đỉnh Max TPS trên Child Chain (chain_a - 25,000 txs từ 50k ví spam):
+./ci.sh run-now --only tps_blast_child_a
+
+# 3. Test đo hiệu năng đỉnh Max TPS trên Public Chain (Root Chain - 25,000 txs):
 ./ci.sh run-now --only tps_blast
 
-# 3. Test spam contract song song:
+# 4. Test spam hợp đồng thông minh đa node RPC (Spam Contract):
 ./ci.sh run-now --only spam_contract
 
-# 4. Test Snapshot & khôi phục trạng thái node:
+# 5. Test tắt/bật node luân phiên & kiểm chứng Zero-Fork:
+./ci.sh run-now --only node_chaos_restart
+
+# 6. Test tạo snapshot & khôi phục node qua Ansible (Zero-Fork):
 ./ci.sh run-now --only snapshot_recovery
 ```
 
@@ -102,9 +113,9 @@ cd /home/abc/nhat/con-chain-v2/metanode
 Hệ thống CI cho phép can thiệp trực tiếp trạng thái cụm node trước khi chạy test thông qua các cờ (flag):
 
 ### 🔄 Khởi động lại cụm node trước khi test (`--restart-chain` hoặc `--restart`)
-Tự động gọi `ansible_deploy.sh --restart` để khởi động lại toàn bộ service của các node, chờ RPC sẵn sàng rồi mới test.
+Tự động gọi `ansible_deploy.sh --restart` để khởi động lại toàn bộ service của các node Public Chain, chờ RPC sẵn sàng rồi mới test.
 ```bash
-# Khởi động lại chain và chỉ chạy bài test restart recovery:
+# Khởi động lại Public Chain và chạy bài test recovery:
 ./ci.sh run-now --only node_chaos_restart --restart-chain
 
 # Hoặc dùng cờ ngắn gọn tương đương:
@@ -114,8 +125,8 @@ Tự động gọi `ansible_deploy.sh --restart` để khởi động lại toà
 ./ci.sh run-now --restart-chain
 ```
 
-### 🧼 Reset toàn bộ chain về Genesis sạch (`--reset-chain` hoặc `--reset`)
-Xóa toàn bộ database cũ, nạp genesis mới và đồng bộ lại IP endpoints:
+### 🧼 Reset toàn bộ Public Chain về Genesis sạch (`--reset-chain` hoặc `--reset`)
+Xóa toàn bộ database cũ của Public Chain, nạp genesis mới và đồng bộ lại IP endpoints:
 ```bash
 ./ci.sh run-now --only node_chaos_restart --reset-chain
 
@@ -123,9 +134,23 @@ Xóa toàn bộ database cũ, nạp genesis mới và đồng bộ lại IP endp
 ./ci.sh run-now --reset
 ```
 
+### ⛓️ Quản lý riêng Execution Clusters / Child Chain (`--restart-exec` và `--reset-exec`)
+Thao tác chuyên biệt trên các cụm node chain con (Chain ID 991: `chain_a`, `chain_b`):
+```bash
+# Restart nhanh các tiến trình của Execution Clusters:
+./ci.sh run-now --child-chain --restart-exec
+
+# Reset sạch sẽ cụm Execution Clusters về Genesis (nạp sẵn 50,000 ví TPS):
+./ci.sh run-now --child-chain --reset-exec
+
+# Reset chain con và chỉ chạy bài test TPS:
+./ci.sh run-now --only tps_blast_child_a --reset-exec
+```
+
 ### 🔍 Xem trước luồng thực thi mà không chạy thật (`--dry-run`)
 ```bash
-./ci.sh run-now --dry-run --only node_chaos_restart --restart
+./ci.sh run-now --dry-run --child-chain
+./ci.sh run-now --dry-run --only tps_blast_child_a
 ```
 
 ---
@@ -146,14 +171,15 @@ Daemon chạy ngầm liên tục theo dõi Git remote nhánh `main`. Khi có com
 
 ## 📋 4. DANH SÁCH TEST ID TRONG HỆ THỐNG
 
-| Test ID | Tên bài test | Mô tả ngắn gọn |
-| :--- | :--- | :--- |
-| `child_chain_a` | Child Chain (chain_a) Tests | Chạy 34 bài test Block-STM trên Execution Clusters (chain con) |
-| `blockstm_logic` | Block-STM Logic Tests | Chạy 32+ bài test logic RPC, BlockSTM, Double Spending... |
-| `spam_contract` | Spam Contract Multi-RPC | Gửi txs song song kiểm tra độ ổn định và xử lý xung đột |
-| `tps_blast` | TPS Blast Benchmark | Bơm 25,000 txs đo thông lượng đỉnh (Max TPS) |
-| `node_chaos_restart` | Chaos Restart & Zero-Fork | Tắt/bật luân phiên từng node, restart cả cụm & verify Zero-Fork |
-| `snapshot_recovery` | Snapshot & Recovery | Tạo snapshot và khôi phục node qua Ansible |
+| Test ID | Tên bài test | Phân loại | Mô tả ngắn gọn |
+| :--- | :--- | :--- | :--- |
+| `child_chain_a` | Child Chain Block-STM Tests | **Child Chain** | Chạy 34 kịch bản kiểm tra logic Block-STM trên `chain_a` |
+| `tps_blast_child_a` | Child Chain TPS Blast Benchmark | **Child Chain** | Bơm 25,000 txs từ 50,000 ví độc lập đo Max TPS trên `chain_a` |
+| `spam_contract` | Spam Contract Multi-RPC Test | **Chung** | Gửi giao dịch spam smart contract dàn trải trên các node RPC |
+| `tps_blast` | TPS Blast Benchmark (Public Chain) | **Public Chain** | Bơm 25,000 txs đo Max TPS trên Public Chain |
+| `blockstm_logic` | Block-STM Logic Tests | **Public Chain** | Chạy bộ test logic 32+ kịch bản trên chain chính |
+| `node_chaos_restart` | Chaos Rolling Restart & Zero-Fork | **Hạ tầng** | Tắt/bật luân phiên từng node, restart cả cụm & verify Zero-Fork |
+| `snapshot_recovery` | Snapshot Generation & State Recovery | **Hạ tầng** | Tạo snapshot và khôi phục trạng thái node luân phiên qua Ansible |
 
 ---
 

@@ -32,6 +32,7 @@ var ffiTraceEnabled = os.Getenv("METANODE_FFI_TRACE") == "true"
 
 // SpeculativeResult holds the result of a speculative EVM execution
 type SpeculativeResult struct {
+	mu              sync.Mutex
 	BlockNum        uint64
 	GEI             uint64
 	CommitIndex     uint32
@@ -54,6 +55,96 @@ type SpeculativeResult struct {
 	// Without this, GetSpeculativeResult could return the empty placeholder
 	// to the committer before execution has actually produced anything.
 	IsFinished bool
+}
+
+// TakeClonedState atomically claims ownership of ClonedState.
+// Returns nil if already claimed or discarded.
+func (res *SpeculativeResult) TakeClonedState() *blockchain.ChainState {
+	if res == nil {
+		return nil
+	}
+	res.mu.Lock()
+	defer res.mu.Unlock()
+	cs := res.ClonedState
+	res.ClonedState = nil
+	return cs
+}
+
+// AbortClonedState atomically claims and aborts the speculative state.
+func (res *SpeculativeResult) AbortClonedState() {
+	if res == nil {
+		return
+	}
+	res.mu.Lock()
+	cs := res.ClonedState
+	res.ClonedState = nil
+	res.mu.Unlock()
+	if cs != nil {
+		cs.AbortSpeculative()
+	}
+}
+
+// respCh returns the response channel of the most recent caller waiting on this result.
+func (res *SpeculativeResult) respCh() chan<- *pb.ExecuteBlockResponse {
+	return res.AuthResponseChannel()
+}
+
+// SetAuthRespCh atomically sets the AuthRespCh channel.
+func (res *SpeculativeResult) SetAuthRespCh(ch chan<- *pb.ExecuteBlockResponse) {
+	if res == nil {
+		return
+	}
+	if res.session != nil {
+		res.session.mu.Lock()
+		res.session.respCh = ch
+		res.session.mu.Unlock()
+	}
+	res.mu.Lock()
+	defer res.mu.Unlock()
+	res.AuthRespCh = ch
+}
+
+// AuthResponseChannel atomically returns the AuthRespCh channel.
+func (res *SpeculativeResult) AuthResponseChannel() chan<- *pb.ExecuteBlockResponse {
+	if res == nil {
+		return nil
+	}
+	if res.session != nil {
+		res.session.mu.Lock()
+		ch := res.session.respCh
+		res.session.mu.Unlock()
+		if ch != nil {
+			return ch
+		}
+	}
+	res.mu.Lock()
+	defer res.mu.Unlock()
+	return res.AuthRespCh
+}
+
+// getStateRootForBlock retrieves the AccountStatesRoot for a committed block by block number.
+// Returns nil if the block or state root cannot be found in BlockDatabase.
+func getStateRootForBlock(bp *BlockProcessor, blockNum uint64) []byte {
+	if bp == nil || bp.chainState == nil {
+		return nil
+	}
+	bc := blockchain.GetBlockChainInstance()
+	if bc == nil {
+		return nil
+	}
+	blockHash, ok := bc.GetBlockHashByNumber(blockNum)
+	if !ok {
+		return nil
+	}
+	blockDb := bp.chainState.GetBlockDatabase()
+	if blockDb == nil {
+		return nil
+	}
+	block, err := blockDb.GetBlockByHash(blockHash)
+	if err != nil || block == nil {
+		return nil
+	}
+	return block.Header().AccountStatesRoot().Bytes()
 }
 
 // SpeculativeExecutor handles background execution of incoming consensus commits
@@ -84,18 +175,6 @@ type inFlightSession struct {
 	cancel context.CancelFunc
 }
 
-// respCh returns the response channel of the most recent caller waiting on this result.
-func (r *SpeculativeResult) respCh() chan<- *pb.ExecuteBlockResponse {
-	if r.session != nil {
-		r.session.mu.Lock()
-		ch := r.session.respCh
-		r.session.mu.Unlock()
-		if ch != nil {
-			return ch
-		}
-	}
-	return r.AuthRespCh
-}
 
 // NewSpeculativeExecutor creates a new SpeculativeExecutor
 func NewSpeculativeExecutor(bp *BlockProcessor) *SpeculativeExecutor {
@@ -128,6 +207,21 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		existingSession.respCh = authRespCh
 		existingSession.mu.Unlock()
 		cancel() // Cancel unused newly created context
+
+		// If this GEI already produced a finished speculative result waiting in activeSessions
+		// (e.g. committer had a transient failure or was waiting), update its AuthRespCh and wake up committer!
+		if val, ok := se.activeSessions.Load(gei); ok {
+			if res, ok := val.(*SpeculativeResult); ok && res != nil && res.IsFinished {
+				res.SetAuthRespCh(authRespCh)
+				logger.Warn("🔄 [SPECULATIVE] GEI=%d already finished but uncommitted — notifying committer to retry", gei)
+				select {
+				case se.resultChan <- res:
+				default:
+				}
+				return
+			}
+		}
+
 		logger.Warn("⏳ [SPECULATIVE] GEI=%d already executing — attaching retry's response channel instead of starting a duplicate execution", gei)
 		return
 	}
@@ -154,23 +248,14 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		se.inFlight.Delete(gei) // Clean up placeholder
 
 		if authRespCh != nil {
-			var stateRoot []byte
-			bc := blockchain.GetBlockChainInstance()
-			if bc != nil && se.bp.chainState != nil {
-				if blockHash, ok := bc.GetBlockHashByNumber(blockNum); ok {
-					if blockDb := se.bp.chainState.GetBlockDatabase(); blockDb != nil {
-						if block, err := blockDb.GetBlockByHash(blockHash); err == nil && block != nil {
-							stateRoot = block.Header().AccountStatesRoot().Bytes()
-						}
-					}
-				}
-			}
+			stateRoot := getStateRootForBlock(se.bp, blockNum)
 
 			// ZERO-FORK INVARIANT: Never return Success: true with a nil StateRoot!
 			if stateRoot == nil {
 				logger.Warn("⚠️ [SPECULATIVE] Cannot find valid stateRoot for block #%d (gei=%d). Rejecting bypass to prevent Zero-Fork violation.", blockNum, gei)
 				resp := &pb.ExecuteBlockResponse{
 					Success:      false,
+					Error:        fmt.Sprintf("stateRoot not found for committed block #%d", blockNum),
 					ActualGei:    gei,
 					BlockNumber:  blockNum,
 					GeisConsumed: 0,
@@ -258,12 +343,30 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			latestRespCh := session.respCh
 			session.mu.Unlock()
 			if latestRespCh != nil {
+				stateRoot := getStateRootForBlock(se.bp, blockNum)
+				if stateRoot == nil {
+					logger.Warn("⚠️ [SPECULATIVE] Cannot find valid stateRoot for block #%d (gei=%d) on lock-wait bypass. Rejecting bypass to prevent Zero-Fork violation.", blockNum, gei)
+					resp := &pb.ExecuteBlockResponse{
+						Success:      false,
+						Error:        fmt.Sprintf("stateRoot not found for committed block #%d", blockNum),
+						ActualGei:    gei,
+						BlockNumber:  blockNum,
+						GeisConsumed: 0,
+						StateRoot:    nil,
+					}
+					select {
+					case latestRespCh <- resp:
+					default:
+					}
+					return
+				}
 				select {
 				case latestRespCh <- &pb.ExecuteBlockResponse{
 					Success:      true,
 					ActualGei:    gei,
 					BlockNumber:  blockNum,
 					GeisConsumed: 0,
+					StateRoot:    stateRoot,
 				}:
 				default:
 				}
@@ -412,18 +515,33 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		lastCommittedGEI = storage.GetLastGlobalExecIndex()
 		if gei <= lastCommittedGEI {
 			logger.Warn("⚠️ [SPECULATIVE] Execution finished for GEI=%d (block #%d) but block is already committed to DB (lastGEI=%d). Discarding obsolete speculative state immediately.", gei, blockNum, lastCommittedGEI)
-			if res.ClonedState != nil {
-				res.ClonedState.AbortSpeculative()
-			}
-			if res.respCh() != nil {
-				select {
-				case res.respCh() <- &pb.ExecuteBlockResponse{
-					Success:      true, // Block already committed in DB, safe to unblock Rust
-					ActualGei:    res.GEI,
-					BlockNumber:  res.BlockNum,
-					GeisConsumed: 0,
-				}:
-				default:
+			res.AbortClonedState()
+			authCh := res.AuthResponseChannel()
+			if authCh != nil {
+				stateRoot := getStateRootForBlock(se.bp, blockNum)
+				if stateRoot == nil {
+					logger.Warn("⚠️ [SPECULATIVE] Cannot find valid stateRoot for committed block #%d (gei=%d). Rejecting response to prevent Zero-Fork violation.", blockNum, gei)
+					select {
+					case authCh <- &pb.ExecuteBlockResponse{
+						Success:      false,
+						Error:        fmt.Sprintf("stateRoot not found for committed block #%d", blockNum),
+						ActualGei:    res.GEI,
+						BlockNumber:  res.BlockNum,
+						GeisConsumed: 0,
+					}:
+					default:
+					}
+				} else {
+					select {
+					case authCh <- &pb.ExecuteBlockResponse{
+						Success:      true, // Block already committed in DB, safe to unblock Rust
+						ActualGei:    res.GEI,
+						BlockNumber:  res.BlockNum,
+						GeisConsumed: 0,
+						StateRoot:    stateRoot,
+					}:
+					default:
+					}
 				}
 			}
 			se.activeSessions.Delete(gei)
@@ -436,18 +554,34 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		// it — discard the speculative clone and never push to resultChan.
 		if _, exists := se.activeSessions.Load(gei); !exists {
 			logger.Warn("⚠️ [SPECULATIVE] Execution finished for GEI=%d but session was aborted by CleanGEI", gei)
-			if res.ClonedState != nil {
-				res.ClonedState.AbortSpeculative()
-			}
-			if res.respCh() != nil {
-				select {
-				case res.respCh() <- &pb.ExecuteBlockResponse{
-					Success:      true, // Session swept by CleanGEI, unblock Rust
-					ActualGei:    res.GEI,
-					BlockNumber:  res.BlockNum,
-					GeisConsumed: 0,
-				}:
-				default:
+			res.AbortClonedState()
+			authCh := res.AuthResponseChannel()
+			if authCh != nil {
+				stateRoot := getStateRootForBlock(se.bp, blockNum)
+				if stateRoot == nil {
+					logger.Warn("⚠️ [SPECULATIVE] Cannot find valid stateRoot for block #%d (gei=%d) swept by CleanGEI. Rejecting with Success: false to prevent Zero-Fork violation.", blockNum, gei)
+					select {
+					case authCh <- &pb.ExecuteBlockResponse{
+						Success:      false,
+						Error:        fmt.Sprintf("session swept by CleanGEI and stateRoot not found for block #%d", blockNum),
+						ActualGei:    res.GEI,
+						BlockNumber:  res.BlockNum,
+						GeisConsumed: 0,
+						StateRoot:    nil,
+					}:
+					default:
+					}
+				} else {
+					select {
+					case authCh <- &pb.ExecuteBlockResponse{
+						Success:      true, // Session swept by CleanGEI, unblock Rust with valid state root
+						ActualGei:    res.GEI,
+						BlockNumber:  res.BlockNum,
+						GeisConsumed: 0,
+						StateRoot:    stateRoot,
+					}:
+					default:
+					}
 				}
 			}
 			se.inFlight.Delete(gei)
@@ -516,21 +650,39 @@ func (se *SpeculativeExecutor) AbortAllSpeculative() {
 	se.WaitForInFlight(200 * time.Millisecond)
 
 	// 2. Discard and abort all FinishedSessions in activeSessions
+	lastCommittedGEI := storage.GetLastGlobalExecIndex()
 	se.activeSessions.Range(func(key, value interface{}) bool {
 		gei := key.(uint64)
 		if res, ok := value.(*SpeculativeResult); ok && res != nil {
-			if res.ClonedState != nil {
-				res.ClonedState.AbortSpeculative()
-			}
-			if res.respCh() != nil {
+			res.AbortClonedState()
+			authCh := res.AuthResponseChannel()
+			if authCh != nil {
+				var resp *pb.ExecuteBlockResponse
+				// ZERO-FORK INVARIANT: If the block was already committed in DB, return Success with verified stateRoot.
+				// Otherwise, return Success: false so Rust triggers deliver_with_halt_retry instead of committing uncommitted block!
+				if res.GEI <= lastCommittedGEI {
+					if root := getStateRootForBlock(se.bp, res.BlockNum); root != nil {
+						resp = &pb.ExecuteBlockResponse{
+							Success:      true,
+							ActualGei:    res.GEI,
+							BlockNumber:  res.BlockNum,
+							GeisConsumed: 0,
+							StateRoot:    root,
+						}
+					}
+				}
+				if resp == nil {
+					resp = &pb.ExecuteBlockResponse{
+						Success:      false,
+						Error:        fmt.Sprintf("speculative execution aborted for GEI=%d (block #%d uncommitted)", res.GEI, res.BlockNum),
+						ActualGei:    res.GEI,
+						BlockNumber:  res.BlockNum,
+						GeisConsumed: 0,
+					}
+				}
 				select {
-				case res.respCh() <- &pb.ExecuteBlockResponse{
-					Success:      true, // Treat as success so Rust proceeds
-					ActualGei:    res.GEI,
-					BlockNumber:  res.BlockNum,
-					GeisConsumed: 0,
-				}:
-					logger.Info("✅ [AbortAllSpeculative] Sent rescue response for GEI=%d", res.GEI)
+				case authCh <- resp:
+					logger.Info("✅ [AbortAllSpeculative] Sent rescue response for GEI=%d (success=%v)", res.GEI, resp.Success)
 				default:
 				}
 			}
@@ -544,37 +696,50 @@ func (se *SpeculativeExecutor) AbortAllSpeculative() {
 // CleanGEI cleans speculative results older than or equal to a target GEI.
 //
 // ARCHITECTURAL NOTE: Why `if !res.IsFinished` was intentionally removed:
-// 1. CleanGEI(gei) is only invoked when `storage.GetLastGlobalExecIndex() >= gei` (either
-//    by the committer loop after a successful commit, or when fast-forwarding because
-//    P2P BlockSyncer already caught up and persisted blocks directly to DB).
-// 2. Therefore, for all k <= gei, the ground-truth state for block k is ALREADY finalized
-//    in the DB. Any in-flight background goroutine executing EVM for k is computing on an
-//    obsolete snapshot; its result will be discarded anyway.
-// 3. If we skipped in-flight sessions (`if !res.IsFinished { return true }`), when those
-//    goroutines finish later, the committer has already advanced past k. The session remains
-//    orphaned in activeSessions forever, its cloned NOMT state is never closed, leaving
-//    `h.activeCount > 0` and causing all future sessions to deadlock indefinitely in `sync.Cond.Wait`.
-// 4. By proactively deleting the session and unblocking Rust with `Success: true, GeisConsumed: 0`,
-//    Rust knows the block is safely handled (since DB already has it), and the goroutine, upon
-//    completing, will detect that `gei <= lastCommittedGEI` (or that it was swept) and immediately
-//    close its speculative NOMT state without deadlock.
+//  1. CleanGEI(gei) is only invoked when `storage.GetLastGlobalExecIndex() >= gei` (either
+//     by the committer loop after a successful commit, or when fast-forwarding because
+//     P2P BlockSyncer already caught up and persisted blocks directly to DB).
+//  2. Therefore, for all k <= gei, the ground-truth state for block k is ALREADY finalized
+//     in the DB. Any in-flight background goroutine executing EVM for k is computing on an
+//     obsolete snapshot; its result will be discarded anyway.
+//  3. If we skipped in-flight sessions (`if !res.IsFinished { return true }`), when those
+//     goroutines finish later, the committer has already advanced past k. The session remains
+//     orphaned in activeSessions forever, its cloned NOMT state is never closed, leaving
+//     `h.activeCount > 0` and causing all future sessions to deadlock indefinitely in `sync.Cond.Wait`.
+//  4. By proactively deleting the session and unblocking Rust with `Success: true, GeisConsumed: 0`,
+//     Rust knows the block is safely handled (since DB already has it), and the goroutine, upon
+//     completing, will detect that `gei <= lastCommittedGEI` (or that it was swept) and immediately
+//     close its speculative NOMT state without deadlock.
 func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 	se.activeSessions.Range(func(key, value interface{}) bool {
 		k := key.(uint64)
 		if k <= gei {
 			if res, ok := value.(*SpeculativeResult); ok && res != nil {
-				if res.ClonedState != nil {
-					res.ClonedState.AbortSpeculative()
-				}
-				if res.respCh() != nil {
+				res.AbortClonedState()
+				authCh := res.AuthResponseChannel()
+				if authCh != nil {
+					stateRoot := getStateRootForBlock(se.bp, res.BlockNum)
+					var resp *pb.ExecuteBlockResponse
+					if stateRoot != nil {
+						resp = &pb.ExecuteBlockResponse{
+							Success:      true,
+							ActualGei:    res.GEI,
+							BlockNumber:  res.BlockNum,
+							GeisConsumed: 0,
+							StateRoot:    stateRoot,
+						}
+					} else {
+						resp = &pb.ExecuteBlockResponse{
+							Success:      false,
+							Error:        fmt.Sprintf("stateRoot not found for block #%d on CleanGEI", res.BlockNum),
+							ActualGei:    res.GEI,
+							BlockNumber:  res.BlockNum,
+							GeisConsumed: 0,
+						}
+					}
 					select {
-					case res.respCh() <- &pb.ExecuteBlockResponse{
-						Success:      true, // Treat as success so Rust proceeds instead of retrying/hanging.
-						ActualGei:    res.GEI,
-						BlockNumber:  res.BlockNum,
-						GeisConsumed: 0,
-					}:
-						logger.Info("✅ [CleanGEI] Sent rescue response for GEI=%d", res.GEI)
+					case authCh <- resp:
+						logger.Info("✅ [CleanGEI] Sent rescue response for GEI=%d (success=%v)", res.GEI, resp.Success)
 					default:
 						// Buffered(1) channel already has a response, or nobody's
 						// listening anymore — safe to drop, matches ffi_bridge.go's
@@ -666,6 +831,7 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 			err := bp.commitSpeculativeResult(specRes, epochFileLogger)
 			if err != nil {
 				logger.Error("❌ [COMMITTER] Failed to commit speculative result for GEI=%d: %v", nextExpectedGEI, err)
+				break
 			}
 
 			// Dọn dẹp session cũ
@@ -678,16 +844,58 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 
 // commitSpeculativeResult commits a single speculative execution result
 func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLogger *loggerfile.FileLogger) (commitErr error) {
+	bp.ExecutionMutex.RLock()
+	defer bp.ExecutionMutex.RUnlock()
+
 	if ffiTraceEnabled {
 		logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_COMMIT_DEQUEUED t_ns=%d", res.GEI, time.Now().UnixNano())
 	}
+
+	// Claim ownership of speculative state upfront so CleanGEI or worker cleanup cannot race with committer
+	clonedState := res.TakeClonedState()
+	defer func() {
+		if clonedState != nil {
+			clonedState.AbortSpeculative()
+			clonedState = nil
+		}
+	}()
+
 	// Check if already committed by P2P Sync
 	lastGEI := storage.GetLastGlobalExecIndex()
 	if res.GEI <= lastGEI {
 		logger.Warn("⚠️ [COMMITTER] Committer received GEI=%d (block #%d) but block is already committed to DB (lastGEI=%d). Discarding obsolete speculative state immediately.",
 			res.GEI, res.BlockNum, lastGEI)
-		if res.ClonedState != nil {
-			res.ClonedState.AbortSpeculative()
+		if clonedState != nil {
+			clonedState.AbortSpeculative()
+			clonedState = nil
+		}
+		authCh := res.AuthResponseChannel()
+		if authCh != nil {
+			stateRoot := getStateRootForBlock(bp, res.BlockNum)
+			if stateRoot == nil {
+				logger.Warn("⚠️ [COMMITTER] Cannot find valid stateRoot for committed block #%d (gei=%d). Rejecting bypass to prevent Zero-Fork violation.", res.BlockNum, res.GEI)
+				select {
+				case authCh <- &pb.ExecuteBlockResponse{
+					Success:      false,
+					Error:        fmt.Sprintf("stateRoot not found for committed block #%d", res.BlockNum),
+					ActualGei:    res.GEI,
+					BlockNumber:  res.BlockNum,
+					GeisConsumed: 0,
+				}:
+				default:
+				}
+			} else {
+				select {
+				case authCh <- &pb.ExecuteBlockResponse{
+					Success:      true, // Block already committed in DB, safe to unblock Rust
+					ActualGei:    res.GEI,
+					BlockNumber:  res.BlockNum,
+					GeisConsumed: 0,
+					StateRoot:    stateRoot,
+				}:
+				default:
+				}
+			}
 		}
 		return nil
 	}
@@ -707,26 +915,33 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		if ffiTraceEnabled {
 			logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_COMMIT_DONE t_ns=%d", res.GEI, time.Now().UnixNano())
 		}
-		if res.respCh() != nil {
+		authCh := res.AuthResponseChannel()
+		if authCh != nil {
 			if commitErr != nil {
-				res.respCh() <- &pb.ExecuteBlockResponse{
+				select {
+				case authCh <- &pb.ExecuteBlockResponse{
 					Success:      false,
 					Error:        commitErr.Error(),
 					ActualGei:    res.GEI,
 					BlockNumber:  currentBlockNumber,
 					GeisConsumed: 0,
+				}:
+				default:
 				}
 			} else {
 				var stateRoot []byte
 				if bp.chainState != nil && bp.chainState.GetAccountStateDB() != nil {
 					stateRoot = bp.chainState.GetAccountStateDB().Trie().Hash().Bytes()
 				}
-				res.respCh() <- &pb.ExecuteBlockResponse{
+				select {
+				case authCh <- &pb.ExecuteBlockResponse{
 					Success:      true,
 					ActualGei:    res.GEI,
 					BlockNumber:  currentBlockNumber,
 					GeisConsumed: 1,
 					StateRoot:    stateRoot,
+				}:
+				default:
 				}
 			}
 		}
@@ -736,17 +951,17 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 	var hasConflict bool
 	if lastBlock == nil {
 		hasConflict = false // Genesis
-	} else if res.ClonedState == nil && len(res.Txs) > 0 {
+	} else if clonedState == nil && len(res.Txs) > 0 {
 		logger.Warn("⚠️ [COMMITTER] Speculative ClonedState is nil for GEI=%d (aborted/closed by Sync). Re-executing sequentially.", res.GEI)
 		hasConflict = true
-	} else if res.ClonedState == nil {
+	} else if clonedState == nil {
 		hasConflict = false // Empty block, no speculative state, no conflict
 	} else {
 		parentHash := lastBlock.Header().Hash()
 		actualParentRoot := lastBlock.Header().AccountStatesRoot()
 		var specParentHash common.Hash
 		var specParentRoot common.Hash
-		specHeaderPtr := res.ClonedState.GetcurrentBlockHeader()
+		specHeaderPtr := clonedState.GetcurrentBlockHeader()
 		if specHeaderPtr != nil && *specHeaderPtr != nil {
 			specParentHash = (*specHeaderPtr).Hash()
 			specParentRoot = (*specHeaderPtr).AccountStatesRoot()
@@ -770,9 +985,6 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 
 	var accumulatedResults tx_processor.ProcessResult
 
-	bp.ExecutionMutex.RLock()
-	defer bp.ExecutionMutex.RUnlock()
-
 	// 2. Xử lý trường hợp Conflict -> Re-execute tuần tự
 	if hasConflict && len(res.Txs) > 0 {
 		logger.Info("🔄 [COMMITTER] Re-executing GEI=%d sequentially...", res.GEI)
@@ -780,9 +992,9 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		// The speculative state is discarded. Its trie may hold a NOMT session that IntermediateRoot already
 		// finished but nobody will ever persist; it keeps the handle's activeCount > 0, so the re-execution's own
 		// IntermediateRoot -> BeginSession would wait for it forever (observed live). Abort it, do NOT persist it.
-		if res.ClonedState != nil {
-			res.ClonedState.AbortSpeculative()
-			res.ClonedState = nil // aborted: nobody may close or abort it a second time (CleanGEI)
+		if clonedState != nil {
+			clonedState.AbortSpeculative()
+			clonedState = nil
 		}
 
 		// Clone state mới từ tip thực tế hiện tại
@@ -822,18 +1034,19 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		bp.chainState.SetAccountStateDB(csCopy.GetAccountStateDB())
 		bp.chainState.SetSmartContractDB(csCopy.GetSmartContractDB())
 		bp.chainState.SetStakeStateDB(csCopy.GetStakeStateDB())
-	} else if len(res.Txs) > 0 && res.ClonedState != nil {
+	} else if len(res.Txs) > 0 && clonedState != nil {
 		// Không conflict -> Sử dụng speculative results và database đã thực thi sẵn
 		accumulatedResults = res.ProcessResult
 
-		// Gán database của ChainState sang res.ClonedState database
-		bp.chainState.SetAccountStateDB(res.ClonedState.GetAccountStateDB())
-		bp.chainState.SetSmartContractDB(res.ClonedState.GetSmartContractDB())
-		bp.chainState.SetStakeStateDB(res.ClonedState.GetStakeStateDB())
-		// The tries now belong to bp.chainState. Drop the speculative result's reference: CleanGEI runs right after
-		// this commit and used to AbortSpeculative() the very same objects (draining/aborting the live state's
-		// sessions and discarding its smart-contract DB caches).
-		res.ClonedState = nil
+		// Gán database của ChainState sang clonedState database
+		bp.chainState.SetAccountStateDB(clonedState.GetAccountStateDB())
+		bp.chainState.SetSmartContractDB(clonedState.GetSmartContractDB())
+		bp.chainState.SetStakeStateDB(clonedState.GetStakeStateDB())
+		// CRITICAL ZERO-FORK FIX: Clear clonedState reference once adopted by chainState.
+		// Otherwise, when CleanGEI runs after commit, it would discard the live tries (the removed CloseSpeculative path)
+		// (and scDB.Discard()) on this state, wiping the live in-memory tries from
+		// bp.chainState and causing subsequent blocks to read stale storage from disk.
+		clonedState = nil
 	}
 
 	// 3. Tiến hành tạo block và commit
@@ -842,6 +1055,10 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 	// We no longer skip block creation for empty blocks to guarantee zero gaps and 100% no-fork.
 
 	if len(res.Txs) == 0 {
+		if clonedState != nil {
+			clonedState.AbortSpeculative()
+			clonedState = nil
+		}
 		// Ghost-block-guard: 0 transactions, tạo block trống để tránh gap
 		emptyResult := tx_processor.ProcessResult{Transactions: nil, Receipts: nil}
 		lastB := bp.GetLastBlock()
@@ -1068,10 +1285,19 @@ func (se *SpeculativeExecutor) verifyBypassBlock(blockNum uint64, gei uint64, ep
 	}
 
 	authTxs := PrepareTransactions(epochData)
-	if len(committedBlock.Transactions()) != len(authTxs) {
+	committedTxs := committedBlock.Transactions()
+	if len(committedTxs) != len(authTxs) {
 		logger.Error("🚨 [FORK-SAFETY] FATAL MISMATCH! Committed DB block #%d (GEI=%d) has %d txs, but authoritative consensus block requires %d txs! Force crashing to prevent silent fork!",
-			blockNum, gei, len(committedBlock.Transactions()), len(authTxs))
+			blockNum, gei, len(committedTxs), len(authTxs))
 		panic(fmt.Sprintf("ZERO-FORK INVARIANT VIOLATION: DB block #%d (GEI=%d) has %d txs, Consensus requires %d txs",
-			blockNum, gei, len(committedBlock.Transactions()), len(authTxs)))
+			blockNum, gei, len(committedTxs), len(authTxs)))
+	}
+	for i := range authTxs {
+		if committedTxs[i] != authTxs[i].Hash() {
+			logger.Error("🚨 [FORK-SAFETY] FATAL MISMATCH! Committed DB block #%d tx[%d] hash=%s, but consensus block tx[%d] hash=%s! Force crashing to prevent silent fork!",
+				blockNum, i, committedTxs[i].Hex(), i, authTxs[i].Hash().Hex())
+			panic(fmt.Sprintf("ZERO-FORK INVARIANT VIOLATION: DB block #%d tx[%d] hash %s != Consensus tx hash %s",
+				blockNum, i, committedTxs[i].Hex(), authTxs[i].Hash().Hex()))
+		}
 	}
 }

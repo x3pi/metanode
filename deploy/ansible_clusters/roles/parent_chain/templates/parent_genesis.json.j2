@@ -47,6 +47,9 @@
     }
   ],
   "open_cluster_registration": {{ (parent_open_cluster_registration | default(false)) | bool | to_json }},
-  "clusters": {{ (parent_allowed_clusters | default([])) | to_json }}
+  "clusters": {{ (parent_allowed_clusters | default([])) | to_json }},
+  "float_accounts": {{ (parent_float_accounts | default([])) | to_json }},
+  "min_float_to_register": {{ (parent_min_float_to_register | default('1000000000000000000000')) | string | to_json }},
+  "allow_deposit_to_float": {{ (parent_allow_deposit_to_float | default(false)) | bool | to_json }}
 }
 

@@ -18,7 +18,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/file_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
@@ -131,7 +130,7 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 		hashTx = blsHash
 	}
 
-	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(hashTx)
+	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(hashTx)
 
 	if !ok || blockNumber > storage.GetLastBlockNumber() {
 		// Fallback to cache as a pending transaction
@@ -206,7 +205,7 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 		return nil, nil
 	}
 
-	hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
+	hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumberFast(blockNumber)
 
 	if !ok {
 		return nil, fmt.Errorf("could not find block hash for block number %d", blockNumber)
@@ -442,11 +441,7 @@ func (api *MetaAPI) SendRawTransactionWithDeviceKey(ctx context.Context, input [
 		}
 		logger.Info("ETH SendRawTransactionWithDeviceKey", txEth.Hash())
 
-		fileHandler, _ := file_handler.GetFileAbi()
-		name, _ := fileHandler.ParseMethodName(txM)
-		if !(txM.ToAddress() == file_handler.PredictContractAddress(common.HexToAddress(api.App.chainState.GetConfig().OwnerFileStorageAddress)) && name == "uploadChunk") {
-			blockchain.GetBlockChainInstance().AddTxToCache(txEth.Hash(), append([]byte(nil), inputEth...))
-		}
+		blockchain.GetBlockChainInstance().AddTxToCache(txEth.Hash(), append([]byte(nil), inputEth...))
 		signer := types.NewCancunSigner(api.App.config.ChainId)
 
 		from, err := types.Sender(signer, txEth)
@@ -686,7 +681,6 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 		return common.Hash{}, fmt.Errorf("failed to unmarshal TransactionWithDeviceKey: %w", err)
 	}
 
-
 	// 10. Execute real transaction synchronously to return errors to client
 	output, errRun := api.App.transactionProcessor.ProcessTransactionFromRpcWithDeviceKey(txD)
 	if errRun != nil {
@@ -697,15 +691,6 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 	if err := blockchain.GetBlockChainInstance().SetEthHashMapblsHash(ethTx.Hash(), metaTx.Hash()); err != nil {
 		logger.Warn("[SpeculativeGateway] SetEthHashMapblsHash failed: %v", err)
 	}
-
-	// Pre-seed the walkback negative-cache: this tx was JUST accepted into the
-	// mempool, so it's guaranteed not to be in any committed block yet. Without
-	// this, the client's first eth_getTransactionReceipt poll (which can arrive
-	// immediately after this call returns) pays a full block-history walkback
-	// scan for a guaranteed miss — under sustained load this showed up as
-	// hundreds of goroutines piled up in rebuildTxMappingByWalkback at once.
-	blockchain.GetBlockChainInstance().MarkSubmittedPending(metaTx.Hash())
-	blockchain.GetBlockChainInstance().MarkSubmittedPending(ethTx.Hash())
 
 	logger.Info("[SpeculativeGateway] TX executed speculatively without mock receipt: ethHash=%s", ethTx.Hash().Hex())
 
@@ -795,13 +780,13 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		searchHash = blsHash
 	}
 
-	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(searchHash)
+	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(searchHash)
 	if !ok || blockNumber > storage.GetLastBlockNumber() {
 		return nil, nil // Trả về nil nếu không tìm thấy giao dịch hoặc chưa committed
 	}
 
 	// Bước 3: Lấy block hash từ block number
-	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
+	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumberFast(blockNumber)
 	if !ok {
 		return nil, nil
 	}
@@ -830,17 +815,26 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		logger.Error("❌ [RPC-RECEIPT] failed to get receipt: %v", err)
 		return nil, nil
 	}
-	tx, err := api.GetTransactionByHash(ctx, rcp.TransactionHash())
+	txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
 	if err != nil {
-		logger.Error("❌ [RPC-RECEIPT] failed to get transaction for receipt: %v", err)
+		logger.Error("❌ [RPC-RECEIPT] failed to open transactions DB from root %s: %v", blockData.Header().TransactionsRoot().Hex(), err)
 		return nil, nil
 	}
-	if tx == nil {
-		logger.Error("❌ [RPC-RECEIPT] transaction not found for receipt: %s", rcp.TransactionHash().Hex())
+	tx, err := txDB.GetTransaction(rcp.TransactionHash())
+	if err != nil || tx == nil {
+		logger.Error("❌ [RPC-RECEIPT] failed to get transaction %s: %v", rcp.TransactionHash().Hex(), err)
 		return nil, nil
 	}
-	blockNumberBigInt := tx.BlockNumber.ToInt()
-	blockNumberInt64 := blockNumberBigInt.Int64()
+	txType := tx.GetType()
+	txNonce := tx.GetNonce()
+	var blobVersionedHashes []common.Hash
+	if rawHashes := tx.BlobVersionedHashes(); len(rawHashes) > 0 {
+		blobVersionedHashes = make([]common.Hash, len(rawHashes))
+		for i, h := range rawHashes {
+			blobVersionedHashes[i] = common.BytesToHash(h)
+		}
+	}
+	blockNumberInt64 := int64(blockNumber)
 
 	events := rcp.EventLogs()
 	logs := make([]interface{}, len(events))
@@ -864,7 +858,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 
 	receiptMap := map[string]interface{}{
 		// "typeHash":          typeHash,
-		"type":              hexutil.EncodeUint64(uint64(tx.Type)),
+		"type":              hexutil.EncodeUint64(txType),
 		"status":            swapStatusNumber(int32(rcp.Status().Number())),
 		"transactionHash":   hashEth,
 		"gasUsed":           hexutil.EncodeUint64(rcp.GasUsed()),
@@ -880,8 +874,8 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 	}
 	// EIP-4844 receipt fields, present only for blob transactions (matches
 	// go-ethereum's own RPCReceipt: omitted entirely for non-blob types).
-	if len(tx.BlobVersionedHashes) > 0 {
-		blobGasUsed := uint64(len(tx.BlobVersionedHashes)) * eth_params.BlobTxBlobGasPerBlob
+	if len(blobVersionedHashes) > 0 {
+		blobGasUsed := uint64(len(blobVersionedHashes)) * eth_params.BlobTxBlobGasPerBlob
 		receiptMap["blobGasUsed"] = hexutil.EncodeUint64(blobGasUsed)
 		receiptMap["blobGasPrice"] = hexutil.EncodeBig(block.BlobBaseFeeForHeader(blockData.Header()))
 	}
@@ -897,7 +891,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		receiptMap["return"] = fmt.Sprintf("0x%s", common.Bytes2Hex(rcp.Return()))
 	}
 	if (rcp.ToAddress() == common.Address{}) {
-		toAddressDeploy := crypto.CreateAddress(rcp.FromAddress(), uint64(tx.Nonce))
+		toAddressDeploy := crypto.CreateAddress(rcp.FromAddress(), txNonce)
 		receiptMap["contractAddress"] = toAddressDeploy
 	} else {
 		receiptMap["to"] = rcp.ToAddress()
@@ -996,7 +990,7 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 	currentBlockNum := new(big.Int).Set(beginBlock)
 	for currentBlockNum.Cmp(endBlock) <= 0 {
 
-		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(currentBlockNum.Uint64())
+		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumberFast(currentBlockNum.Uint64())
 		if !ok {
 			currentBlockNum.Add(currentBlockNum, big.NewInt(1))
 			continue
@@ -1054,7 +1048,7 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 					TxIndex:     uint(txIndex),
 					Index:       logIndex,
 				}
-				
+
 				// 🚀 OPTIMIZATION: Lọc (Early Filtering) ngay tại đây thay vì dồn hết vào mảng rồi mới lọc
 				if len(filters.FilterLogs([]*types.Log{evL}, beginBlock, endBlock, crit.Addresses, crit.Topics)) > 0 {
 					eventLogs = append(eventLogs, evL)

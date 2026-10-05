@@ -138,12 +138,13 @@ def main():
     parser.add_argument("--no-reset", dest="skip_pre_action", action="store_true", help="Skip pre-actions (do not reset or restart chain)")
     parser.add_argument("--restart-chain", "--restart", action="store_true", help="Restart chain cluster before running tests")
     parser.add_argument("--reset-chain", "--reset", action="store_true", help="Reset chain cluster before running tests")
-    parser.add_argument("--exec-only", "--child-chain", "--child", action="store_true", help="Target Execution Clusters (chain con)")
-    parser.add_argument("--reset-exec", action="store_true", help="Reset Execution Clusters (chain con) before running tests")
-    parser.add_argument("--restart-exec", action="store_true", help="Restart Execution Clusters (chain con) before running tests")
+    parser.add_argument("--child-chain", "--child", "--exec-only", dest="child_chain", action="store_true", help="Run only Child Chain (Execution Clusters) tests")
+    parser.add_argument("--reset-exec", action="store_true", help="Reset Execution Clusters (child chain) before running tests")
+    parser.add_argument("--restart-exec", action="store_true", help="Restart Execution Clusters (child chain) before running tests")
     parser.add_argument("--chain", default="", help="Target specific chain name (e.g. chain_a, chain_b)")
     parser.add_argument("--dry-run", action="store_true", help="Print actions without executing")
     args = parser.parse_args()
+    args.exec_only = args.child_chain
 
     # 1. Load config
     if not os.path.isfile(args.config):
@@ -435,13 +436,58 @@ def main():
             wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
             print(f"⏳ Đợi {wait_sec}s để RPC các node sẵn sàng...")
             time.sleep(wait_sec)
+    elif args.reset_exec:
+        print(f"\n🚀 [CI FLAG --reset-exec] Đang reset toàn bộ Execution Clusters (chain con) theo cờ CLI...")
+        if args.dry_run:
+            print(f"  [DRY-RUN] Sẽ chạy reset_exec: {chain_actions.get('prepare_tps_exec_cmd') or chain_actions.get('reset_exec_cmd')}")
+        else:
+            reset_exec_cmd = interpolate_paths(chain_actions.get("prepare_tps_exec_cmd") or chain_actions.get("reset_exec_cmd") or chain_actions.get("reset_exec"))
+            if reset_exec_cmd:
+                r_c, r_out = run_shell_cmd(reset_exec_cmd, cwd=repo_path)
+                if r_c != 0:
+                    print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh reset_exec thất bại với mã lỗi {r_c}!")
+                    sys.exit(r_c)
+            wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
+            print(f"⏳ Đợi {wait_sec}s để RPC Execution Clusters sẵn sàng...")
+            time.sleep(wait_sec)
+    elif args.restart_exec:
+        print(f"\n🔄 [CI FLAG --restart-exec] Đang restart Execution Clusters (chain con) theo cờ CLI...")
+        if args.dry_run:
+            print(f"  [DRY-RUN] Sẽ chạy restart_exec: {chain_actions.get('restart_exec_cmd')}")
+        else:
+            restart_exec_cmd = interpolate_paths(chain_actions.get("restart_exec_cmd") or chain_actions.get("restart_exec"))
+            if restart_exec_cmd:
+                r_c, r_out = run_shell_cmd(restart_exec_cmd, cwd=repo_path)
+                if r_c != 0:
+                    print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh restart_exec thất bại với mã lỗi {r_c}!")
+                    sys.exit(r_c)
+            wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
+            print(f"⏳ Đợi {wait_sec}s để RPC Execution Clusters sẵn sàng...")
+            time.sleep(wait_sec)
 
     # 5. Run Test Matrix
     test_results = []
     has_failure = False
 
-    if args.exec_only and not args.only:
-        active_tests = [t for t in tests if ("child" in t.get("id", "") or "exec" in t.get("id", "")) and t.get("enabled", True)]
+    def is_child_test(test_item):
+        t_id = str(test_item.get("id", "")).lower()
+        target = str(test_item.get("target", "")).lower()
+        category = str(test_item.get("category", "")).lower()
+        pre_action = str(test_item.get("pre_action", "")).lower()
+        cmd = str(test_item.get("command", "")).lower()
+
+        if target in ["child", "child_chain", "exec", "exec_cluster"]:
+            return True
+        if category in ["child", "child_chain", "exec"]:
+            return True
+        if "exec" in pre_action: # e.g. reset_exec, prepare_tps_exec
+            return True
+        if "chain=chain_" in cmd or "chain chain_" in cmd or "chain=exec" in cmd or "chain exec" in cmd:
+            return True
+        return t_id.startswith("child_") or "child" in t_id or "exec" in t_id
+
+    if (args.child_chain or args.exec_only):
+        active_tests = [t for t in tests if is_child_test(t) and (t.get("id") == args.only if args.only else t.get("enabled", True))]
     else:
         active_tests = [t for t in tests if (t.get("id") == args.only if args.only else t.get("enabled", True))]
     total_active = len(active_tests)
@@ -463,11 +509,12 @@ def main():
         timeout_sec = test.get("timeout_seconds", 600)
         continue_on_fail = test.get("continue_on_failure", False)
 
-        # Filter if --only flag was given
-        if args.only and test_id != args.only:
+        # Filter if --child-chain / --exec-only flag was given
+        if (args.child_chain or args.exec_only) and not is_child_test(test):
             continue
 
-        if args.exec_only and not args.only and not ("child" in test_id or "exec" in test_id):
+        # Filter if --only flag was given
+        if args.only and test_id != args.only:
             continue
 
         if not enabled and not (args.only and test_id == args.only):
@@ -575,6 +622,23 @@ def main():
                     if r_code != 0:
                         print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh prepare_tps thất bại với mã lỗi {r_code}!")
                         print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi prepare_tps gặp lỗi.")
+                        if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                            fail_msg = telegram_notify.build_failure_message(
+                                commit_info, branch, f"Pre-action: {pre_action}", r_code,
+                                tail_text(r_out, 20), server_ip
+                            )
+                            telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                        sys.exit(r_code)
+                wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
+                time.sleep(wait_sec)
+            elif pre_action in ["prepare_tps_exec", "reset_tps_exec"]:
+                tps_prep_cmd = interpolate_paths(chain_actions.get("prepare_tps_exec_cmd") or chain_actions.get("reset_tps_exec_cmd") or chain_actions.get("prepare_tps_exec"))
+                print(f"👉 [PRE-ACTION] Nạp 50k ví TPS, xóa genesis.json cũ và reset Execution Clusters (chain con)...")
+                if tps_prep_cmd:
+                    r_code, r_out = run_shell_cmd(tps_prep_cmd, cwd=repo_path)
+                    if r_code != 0:
+                        print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh {pre_action} thất bại với mã lỗi {r_code}!")
+                        print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi {pre_action} gặp lỗi.")
                         if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
                             fail_msg = telegram_notify.build_failure_message(
                                 commit_info, branch, f"Pre-action: {pre_action}", r_code,

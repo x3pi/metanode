@@ -20,6 +20,18 @@ all:
     #   production: false + list the BLS public keys (hex, 48 bytes) of the allowed clusters.
     parent_open_cluster_registration: true
     parent_allowed_clusters: []
+    # Float model (production): the supply is exactly what the genesis allocates; depositToFloat (the only mint path)
+    # is disabled. BLS keys are accounts that transfer float to each other. 1 unit = 10^18 base units.
+    #   parent_allow_deposit_to_float: false          # devnet/tests only: true
+    #   parent_min_float_to_register: "1000000000000000000000"   # 1000 units: any key holding this may register as a cluster
+    #   parent_float_accounts:
+    #     - { bls_public_key: "<48-byte hex>", balance: "1500000000000000000000" }
+    parent_allow_deposit_to_float: true   # devnet only
+    # Conservation guard (production: 'enforce', devnet: 'warn' or 'off'):
+    # Asserts that Parent Chain float(cluster BLS) == sum(alloc) on the execution cluster.
+    # When 'enforce', blocks outbound cross-chain transfers if float != sum(alloc).
+    bls_conservation_mode: "warn"             # devnet: warn, production: enforce
+    bls_conservation_interval_seconds: 300
     # ── Security tokens (2026-09-30 audit fixes) — put REAL values in ansible-vault, never in plaintext ──
     # snapshot_server_token: "{{ vault_snapshot_server_token }}"   # protects snapshot downloads; POST /create needs it
     # snapshot_server_bind: "127.0.0.1"                            # restrict the snapshot port if peers need no access

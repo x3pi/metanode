@@ -7,9 +7,13 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/config"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -210,4 +214,100 @@ func TestAdvanceNoncesCacheForForwarded_SurvivesClearNoncesCache(t *testing.T) {
 	cache = cacheVal.(*sync.Map)
 	_, ok = cache.Load(addr)
 	assert.False(t, ok, "ClearNoncesCache must wipe an optimistic advance just like any other cache entry")
+}
+
+func TestTxValidatorPool_Type0xFF_IngressValidation(t *testing.T) {
+	cs := &blockchain.ChainState{}
+	cs.SetConfig(&config.SimpleChainConfig{
+		ChainId:         big.NewInt(1337),
+		TxSignatureMode: config.TxSignatureModeSecp,
+	})
+	vp := &TxValidatorPool{
+		chainState: cs,
+	}
+
+	privKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	from := crypto.PubkeyToAddress(privKey.PublicKey)
+	to := common.HexToAddress("0x1234")
+
+	// Case 1: Wrong ChainID (e.g. 999 vs 1337)
+	badChainTx := &transaction.Transaction{}
+	badChainTx.FromProto(&pb.Transaction{
+		FromAddress: from.Bytes(),
+		ToAddress:   to.Bytes(),
+		ChainID:     999,
+		Type:        0xFF,
+	})
+	badChainTx.SetNonce(0)
+	require.NoError(t, badChainTx.SignSecpProto(privKey))
+
+	code, err := vp.AddTransactionToPool(badChainTx)
+	assert.Equal(t, transaction.InvalidChainId.Code, code)
+	assert.ErrorContains(t, err, "does not match node chain ID")
+
+	// Case 2: Sign field is not empty (e.g. raw proto bytes injected into Sign field)
+	badSignTx := &transaction.Transaction{}
+	badSignTx.FromProto(&pb.Transaction{
+		FromAddress: from.Bytes(),
+		ToAddress:   to.Bytes(),
+		ChainID:     1337,
+		Type:        0xFF,
+		Sign:        []byte{0x01, 0x02, 0x03},
+	})
+	badSignTx.SetNonce(0)
+	code, err = vp.AddTransactionToPool(badSignTx)
+	assert.Equal(t, transaction.InvalidSign.Code, code)
+	assert.ErrorContains(t, err, "must not contain Sign bytes")
+}
+
+
+// The single and batch ingress paths share checkSecpProtoIngress; non-0xFF txs must be untouched.
+func TestTxValidatorPool_checkSecpProtoIngress(t *testing.T) {
+	cs := &blockchain.ChainState{}
+	cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(1337), TxSignatureMode: config.TxSignatureModeSecp})
+	vp := &TxValidatorPool{chainState: cs}
+
+	mk := func(typ, chainID uint64, sign []byte) *transaction.Transaction {
+		tx := &transaction.Transaction{}
+		tx.FromProto(&pb.Transaction{Type: typ, ChainID: chainID, Sign: sign})
+		return tx
+	}
+
+	code, err := vp.checkSecpProtoIngress(mk(0xFF, 1337, nil))
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), code)
+
+	code, err = vp.checkSecpProtoIngress(mk(0xFF, 999, nil))
+	assert.ErrorContains(t, err, "does not match node chain ID")
+	assert.Equal(t, transaction.InvalidChainId.Code, code)
+
+	code, err = vp.checkSecpProtoIngress(mk(0xFF, 1337, []byte{1}))
+	assert.ErrorContains(t, err, "must not contain Sign bytes")
+	assert.Equal(t, transaction.InvalidSign.Code, code)
+
+	// Non-0xFF transactions are never touched by this check (BLS Sign / other chain IDs stay valid here).
+	code, err = vp.checkSecpProtoIngress(mk(2, 999, []byte{1}))
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), code)
+
+	// Legacy chain (default mode): 0xFF is disabled, every other type is untouched.
+	legacy := &blockchain.ChainState{}
+	legacy.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(1337)})
+	vpLegacy := &TxValidatorPool{chainState: legacy}
+	code, err = vpLegacy.checkSecpProtoIngress(mk(0xFF, 1337, nil))
+	assert.ErrorContains(t, err, "disabled on this chain")
+	assert.Equal(t, transaction.InvalidSign.Code, code)
+	_, err = vpLegacy.checkSecpProtoIngress(mk(2, 1337, []byte{1}))
+	assert.NoError(t, err)
+
+	// Unconfigured node chain ID: 0xFF txs fail closed, everything else is untouched.
+	noChain := &blockchain.ChainState{}
+	noChain.SetConfig(&config.SimpleChainConfig{TxSignatureMode: config.TxSignatureModeSecp})
+	vp2 := &TxValidatorPool{chainState: noChain}
+	code, err = vp2.checkSecpProtoIngress(mk(0xFF, 1337, nil))
+	assert.ErrorContains(t, err, "node chain ID is not configured")
+	assert.Equal(t, transaction.InvalidChainId.Code, code)
+	_, err = vp2.checkSecpProtoIngress(mk(2, 1337, nil))
+	assert.NoError(t, err)
 }

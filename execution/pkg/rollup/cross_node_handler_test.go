@@ -95,9 +95,10 @@ func TestCrossNodeHandler(t *testing.T) {
 		t.Fatalf("Expected success, got: %v", err)
 	}
 
-	// Verify balance deducted
-	if stateDB.GetBalance(sender).Cmp(big.NewInt(500)) != 0 {
-		t.Errorf("Expected balance 500, got %v", stateDB.GetBalance(sender))
+	// Verify balance deducted: value (500) AND the transfer fee (100), the same total the Parent Chain removes from the
+	// cluster's float.
+	if stateDB.GetBalance(sender).Cmp(big.NewInt(400)) != 0 {
+		t.Errorf("Expected balance 400 (1000 - 500 value - 100 fee), got %v", stateDB.GetBalance(sender))
 	}
 
 	// Verify nonce incremented
@@ -161,7 +162,7 @@ func TestCrossNodeHandler_NilBalanceHandling(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Expected error when balance is nil/zero, got success with msgID: %v", msgID)
 	}
-	if err.Error() != "insufficient balance: have 0, need 500" {
+	if err.Error() != "insufficient balance: have 0, need 600 (value 500 + fee 100)" {
 		t.Errorf("Unexpected error message: %v", err)
 	}
 }

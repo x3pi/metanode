@@ -109,6 +109,31 @@ Khi database của một node bị hỏng vật lý hoặc muốn thử nghiệm
 
 ---
 
+### 3.4b. Cả 4 node online nhưng không tiến / chia 2 nhóm (sau khi nhiều node bị `kill -9` rồi bật lại)
+
+**Dấu hiệu:** `last_block` của các node lệch nhau và không tự đều lại sau ~60 giây dù cả 4 node online; `fork_detected=false`; log Rust có hàng nghìn dòng `Rejecting commits ... insufficient quorum votes (accumulated_stake=... needed=2f+1)` và `DIGEST-GATE ... DIVERGENT`; một nhóm ở `CatchingUp`, nhóm kia ở `Healthy`.
+
+**Tính chất:** mất liveness, KHÔNG fork (mỗi nhóm chỉ vote digest riêng nên không ai đủ 2f+1 — đúng nguyên tắc thà pending chứ không fork).
+
+**Nguyên nhân đã biết (2026-10-02):** sau restart, node chèn "baseline" từ mạng (`DAG-RESET Baseline injected`) cả khi lệch nhỏ, và bỏ qua `set_committed` cho block của commit lịch sử, nên sub-dag/commit local lệch với mạng. Đã sửa (commit consensus `commit_syncer` + `linearizer`: chỉ chèn baseline khi DAG rỗng hoặc lệch > `gc_depth`; luôn đánh dấu committed). Trước sửa lỗi gặp ~1/3 lượt e2e mới triển khai; sau sửa 0 lần trong 8 lượt e2e mới + 15 chu kỳ crash-restart + 12 chu kỳ có kiểm tra hash từng block + 8 lượt T-I1..T-I8. Vẫn chưa chứng minh tuyệt đối.
+
+**Khắc phục (không wipe dữ liệu):**
+1. Xác nhận bằng `parent_chain_monitor` hoặc `GET /status` từng node (height/hash khác nhau, không có `fork_detected`).
+2. Restart **lần lượt từng node đang tụt lại** (SIGTERM, chờ lên hẳn rồi mới sang node kế). Đã quan sát một node tụt lại hồi phục đúng bit sau lần restart thứ hai.
+3. Nếu vẫn kẹt: dừng cả 4 node rồi bật lại cả 4 (dữ liệu giữ nguyên), kiểm tra parity.
+4. Nếu node báo `fork_detected=true`: chuyển sang 3.5.
+5. Đặt cảnh báo: height các node lệch > 1 trong > 60 giây. Chạy công cụ giám sát liên tục kèm cảnh báo Telegram:
+```bash
+# Giám sát block hash và cảnh báo chênh lệch height (bắn Telegram qua TELEGRAM_BOT_TOKEN):
+cd deploy/ansible/monitors/block_hash_checker
+./block_hash_checker --watch --interval 5s --lag-threshold 2 \
+  --nodes "node0=http://127.0.0.1:18601,node1=http://127.0.0.1:18602,node2=http://127.0.0.1:18603,node3=http://127.0.0.1:18604"
+```
+Hoặc dùng `parent_chain_monitor` kiểm tra định kỳ:
+```bash
+cd execution && go run ./cmd/tool/parent_chain_monitor -interval 3s
+```
+
 ### 3.5. Ứng phó Sự cố Fork (`parent_chain_fork_detected = 1`)
 
 - **Triệu chứng:**
@@ -157,10 +182,55 @@ cd execution && go run ./cmd/tool/parent_chain_security_check -url http://<node>
 ```
 Công cụ tấn công thật (POST /tx, deposit không nguồn/nguồn lạ/chứng nhận giả/không chữ ký, registerCluster lạ) và thoát mã 1 nếu có kẻ tấn công nào lọt.
 
+### 4.1. Mô hình float của production (2026-10-02): tổng cung cố định, BLS là tài khoản
+
+- **Tổng cung = tổng số dư genesis, không bao giờ tăng.** `depositToFloat` (đường mint duy nhất) bị **tắt** trừ khi genesis đặt `allow_deposit_to_float: true` (chỉ devnet/test); khi tắt, mọi deposit nhận receipt lỗi **222**, state không đổi.
+- **Số dư khởi tạo trong genesis:** `float_accounts: [{"bls_public_key": "<48-byte hex>", "balance": "<số thập phân, đơn vị nhỏ nhất>"}]` (1 đơn vị = 10^18). Áp dụng tất định trong **block 1** (nằm trong state root block 1), nên **mọi validator phải dùng cùng một file genesis**. Khóa trùng, số dư không dương hay khóa sai độ dài làm node không khởi động.
+- **Chuyển tiền thường giữa các BLS:** method `TRANSFER_BALANCE` (người gửi ký tx như mọi tx, nonce tuần tự). Trừ người gửi, cộng người nhận, không đổi tổng cung, không sự kiện inbound. Lỗi: **223** (CallData hỏng), **224** (thiếu số dư/số tiền không hợp lệ/tự chuyển cho mình). Người nhận tự được ghi vào AccountRegistry nên ký được tx tiếp theo. Không có phí và không có trần velocity (đã chọn đơn giản; trần velocity chỉ áp cho `TransferFloat` xuyên cụm).
+- **Đăng ký cluster:** khóa thuộc `clusters` (tập sáng lập) **hoặc** có số dư ≥ `min_float_to_register` (production: `"1000000000000000000000"` = 1000 đơn vị nguyên) đều đăng ký được; còn lại **221**. Không có khóa bond: số dư chỉ được kiểm lúc đăng ký (có thể chuyển đi sau đó; cân nhắc bond nếu cần).
+- **Chỉ cluster đã đăng ký (`authorized`) mới được làm nguồn chứng nhận** (`depositToFloat`, nguồn của `transferFloat`, `submitStateRoot`). Một khóa chỉ *nhận* tiền không còn trở thành cluster tin cậy (đã sửa lỗ hổng bỏ qua chính sách).
+- **Đổi định dạng state ⇒ phải wipe + redeploy đồng loạt** (trường `authorized` trong ChainRegistry, method mới, hook genesis). Không có migrate.
+- Ansible: `parent_float_accounts`, `parent_min_float_to_register` (mặc định 1000 đơn vị), `parent_allow_deposit_to_float` (mặc định `false`; devnet đặt `true`). Playbook dừng nếu cả `parent_open_cluster_registration`, `parent_allowed_clusters` và `parent_float_accounts` đều trống.
+- Kiểm chứng trực tiếp trên cụm khởi động bằng genesis tương ứng:
+```bash
+cd execution
+go run ./cmd/tool/test_account_model -print-genesis   # trường genesis cho 3 khóa test (CHỈ test, khóa công khai)
+go run ./cmd/tool/test_account_model                  # genesis→chuyển→ngưỡng 1000→không mint→parity 4 node
+```
+
+### 4.2. Bảo toàn tổng coin của cụm thực thi (BLS Conservation Guard & Công cụ `gen_float_accounts`)
+
+- **Bất biến bảo toàn:** Trên Parent Chain, `float(BLS cụm) == Σ (balance + pending_balance)` của mọi tài khoản trong cụm thực thi khi hệ thống ở trạng thái tĩnh. Khi đang có giao dịch cross-chain đang bay, `0 ≤ float − Σ ≤ pending`.
+- **Chế độ bảo vệ:** Node thực thi hỗ trợ biến môi trường `BLS_CONSERVATION_MODE`:
+  - `enforce` (Production): Chặn gửi giao dịch ra ngoài (`SendWorker` và `mtn_sendCrossChainTransfer`) nếu không đạt bảo toàn sau 3 lần đo liên tiếp hoặc chưa có phép đo OK đầu tiên.
+  - `warn` (Devnet/Staging): Ghi log cảnh báo nhưng không chặn.
+  - `off`: Tắt hoàn toàn kiểm tra.
+  - Chu kỳ kiểm tra cấu hình qua `BLS_CONSERVATION_INTERVAL_SECONDS` (mặc định 300 giây).
+- **Công cụ sinh `float_accounts` tự động:**
+  Để đảm bảo genesis của Parent Chain khớp 100% với genesis của cụm thực thi, dùng công cụ `gen_float_accounts`:
+  ```bash
+  cd execution
+  # Xem định dạng YAML cho inventory Ansible:
+  go run ./cmd/tool/gen_float_accounts -genesis /path/to/exec/genesis.json -bls-pubkey <48-byte-hex> -format yaml
+
+  # Patch trực tiếp vào parent_genesis.json:
+  go run ./cmd/tool/gen_float_accounts -genesis /path/to/exec/genesis.json -bls-pubkey <48-byte-hex> -patch-parent-genesis /path/to/parent_genesis.json  # NOTE: replaces the WHOLE float_accounts list; pass every cluster via -cluster PUBKEY=GENESIS
+  ```
+- **Kiểm tra trạng thái qua RPC:**
+  ```bash
+  curl -s -X POST http://127.0.0.1:8646 -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"mtn_getConservation","params":[],"id":1}' | jq
+  ```
+  Nếu `result.blocked == true`: Hệ thống đang bật chế độ bảo vệ do phát hiện sai lệch. Kiểm tra trường `result.diff`, `result.float`, `result.supply`, `result.pending` và `result.reason` để đối soát.
+
 ## 5. Giao dịch: chỉ có một đường
 
 Mọi thay đổi trạng thái là `pb.Transaction` ký BLS trên hash (kèm `ChainID=990` và nonce tuần tự), gửi **raw proto bytes** tới `POST /send_raw_transaction`. Không còn `POST /tx` JSON, không còn giao dịch không ký. `GET /nonce?address=0x...` trả nonce đã commit của người gửi (client tự tính nonce tiếp theo, `QuorumClient` làm sẵn).
 
-## 6. Kiểm tra không rẽ nhánh sau restart (G11 đã sửa)
+## 6. Kiểm tra không rẽ nhánh sau restart & Chaos Burn-in
 
-`execution/scripts/test/parent_chain_fork_hunt.sh` lặp T-I2 (một node dừng/bật) và T-I3 (mất quorum rồi khôi phục) trên cụm local 4 node, sau mỗi bước chờ hội tụ (có giới hạn) rồi so hash block của mọi node ở mọi chiều cao. Phải báo `no fork and always converged`. Nếu một node vẫn lệch hash ở cùng chiều cao: wipe dữ liệu node đó rồi đồng bộ lại (T-I6 xác nhận ra đúng root) và báo lại kèm log. Chi tiết nguyên nhân/bằng chứng: `note/parent_chain_next_plan.md` mục 7 (G11). Lưu ý: node restart khi chain có hàng nghìn commit rỗng có thể mất vài chục giây đến vài phút để bắt kịp (chậm, không phải fork).
+- `execution/scripts/test/parent_chain_fork_hunt.sh` lặp T-I2 (một node dừng/bật) và T-I3 (mất quorum rồi khôi phục) trên cụm local 4 node, sau mỗi bước chờ hội tụ (có giới hạn) rồi so hash block của mọi node ở mọi chiều cao. Phải báo `no fork and always converged`.
+- `execution/scripts/chaos_burnin.sh` chạy kiểm tra độ bền lâu dài (≥ 200 chu kỳ chaos) với lỗi ngẫu nhiên (kill -9 1, 2, hoặc 4 nodes), thời gian chết ngẫu nhiên 5s–120s (vượt `gc_depth`), gửi giao dịch liên tục, so khớp từng block hash và dừng bảo toàn log ngay lập tức nếu có bất kỳ sai lệch nào.
+```bash
+CYCLES=200 ./execution/scripts/chaos_burnin.sh
+```

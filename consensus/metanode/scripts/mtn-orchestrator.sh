@@ -592,6 +592,8 @@ cmd_start() {
             if [ "$i" = "$exclude_node" ]; then continue; fi
             rm -rf "$LOG_BASE/node_${i}" 2>/dev/null || true
         done
+        log_step "Đồng bộ committee.json sang genesis.json và làm mới epoch_timestamp_ms..."
+        python3 "$SCRIPT_DIR/sync_committee_to_genesis.py" "$RUST_DIR/config/committee.json" "$GO_DIR/genesis.json"
         log_info "✅ Dọn sạch hoàn tất"
     fi
 
