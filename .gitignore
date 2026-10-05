@@ -478,6 +478,9 @@ execution/cmd/rpc-client/rpc-client-bin
 
 # Ignore local inventory configurations & secrets
 deploy/ansible/inventory.yml
+deploy/ansible/inventory.*.yml
+!deploy/ansible/inventory.example.yml
+!deploy/ansible/inventory.sample.yml
 deploy/ansible/monitors/inventory.yml
 **/inventory.yml
 !**/inventory.example.yml

@@ -336,7 +336,7 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
 
     is_validator = (args.node_type == "validator")
     node_id          = getattr(args, "node_id",           0)
-    install_dir      = f"/opt/metanode/node-{node_id}"
+    install_dir      = getattr(args, "install_dir", None) or f"/opt/metanode/node-{node_id}"
     rpc_port         = getattr(args, "rpc_port",          f":{10746 + node_id}")
     p2p_port         = getattr(args, "primary_port",      6200 + node_id)
     dns_port         = getattr(args, "dns_port",          9080 + node_id)
@@ -370,7 +370,8 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
 
     # Dynamically build PEER_RPC_ADDRESSES
     peers = []
-    for i in range(args.total_nodes):
+    peer_node_ids = sorted(peers_map) if peers_map else list(range(args.total_nodes))
+    for i in peer_node_ids:
         if i != node_id:
             peer_ip = peers_map.get(i, args.ip)
             peers.append(f'"{peer_ip}:{19200 + i}"')
@@ -378,7 +379,7 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
 
     # Dynamically build Go list_sub_address
     go_peers = []
-    for i in range(args.total_nodes):
+    for i in peer_node_ids:
         if i != node_id:
             peer_ip = peers_map.get(i, args.ip)
             go_peers.append(f"{peer_ip}:{6200 + i}")
@@ -394,6 +395,7 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
             else generate_fresh_bls_secret(find_metanode_bin(args.metanode_bin)) if getattr(args, "random_gateway_bls_key", False)
             else DEVNET_GATEWAY_BLS_KEY
         ),
+        "tx_signature_mode": getattr(args, "tx_signature_mode", "secp"),
         "chainId": args.chain_id,
         "private_key": bls_private_hex,
         "address": eth_addr_stripped,
@@ -564,12 +566,14 @@ def parse_args():
     )
     parser.add_argument("--hostname",     required=True, help="Validator hostname, e.g. node-0")
     parser.add_argument("--chain-id",     type=int, default=991, help="Chain ID written into execution.json (default: 991, the existing shared-genesis default)")
+    parser.add_argument("--tx-signature-mode", default="secp", choices=["secp", "bls_legacy"], help="Transaction signature mode (default: secp)")
     parser.add_argument("--node-type",    default="validator", choices=["validator", "synconly"],
                         help="Node type: validator (default) or synconly")
     parser.add_argument("--is-rpc",       action="store_true", help="Enable RPC for this node")
     parser.add_argument("--epochs-to-keep", type=int, default=None, help="Number of epochs to keep (default: 0 for RPC/Explorer, 5 for Validator)")
     parser.add_argument("--is-explorer",  action="store_true", help="Enable Explorer for this node")
     parser.add_argument("--node-id",      type=int, default=0, help="Node index in genesis (default: 0)")
+    parser.add_argument("--install-dir",  default=None, help="Absolute per-node install directory")
     parser.add_argument("--total-nodes",  type=int, default=5, help="Total number of nodes for auto-generating peers")
     parser.add_argument("--ip",           default="127.0.0.1")
     parser.add_argument("--p2p-port",     type=int, default=None, help="Rust consensus P2P port (default: 9100 + node_id)")

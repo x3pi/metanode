@@ -326,6 +326,96 @@ cd deploy/ansible
 
 ---
 
+## 4.1. Chạy cụm Chain 2 (Chain ID 991) độc lập với Chain gốc
+
+Profile `inventory.chain2.yml` triển khai một blockchain hoàn toàn độc lập (gọi là **Chain 2**), sử dụng 4 validator nodes (`m5`, `m6`, `m7`, `m8`) với bộ cổng và tài nguyên tách biệt 100% so với Chain gốc (`m0–m4`):
+
+- **Thông số mạng Chain 2:**
+  - Chain ID: `991` (Chain gốc là `990` hoặc tùy chọn)
+  - RPC HTTP: `10751 - 10754` (vd: `http://<IP>:10751`)
+  - WebSocket: `ws://<IP>:10751/ws` - `10754/ws`
+  - Go TCP Consensus P2P: `6205 - 6208`
+  - Rust BFT consensus: `9105 - 9108`
+  - Thư mục dữ liệu runtime: `/opt/metanode-chain-2/node-5..8`
+  - Thư mục staging: `/opt/metanode-deploy-chain-2`
+  - Keys & Genesis riêng biệt: `deploy/systemd/chains/chain_2/`
+  - Namespace export: `chain_2`
+
+- **Thông báo Telegram:**
+  - Cấu hình trực tiếp trong `inventory.chain2.yml` qua `telegram_bot_token` và `telegram_chat_id` (tự động fallback sang `inventory.yml` và `.env` nếu không khai báo).
+  - Tự động gửi thông báo chi tiết khi deploy/reset xong kèm danh sách node `m5-m8` và namespace `chain_2`.
+
+- **Cơ chế xuất file cấu hình RPC JSON:**
+  - **Mặc định:** Hệ thống tự động xuất file riêng `/tmp/rpc_nodes.chain_2.json` (chứa các node `m5-m8` ở cấp cao nhất `nodes`, `ws_nodes`, `tcp_nodes`) và đồng thời cập nhật vào mục `public_chains.chain_2` trong `/tmp/rpc_nodes.json` toàn cục.
+  - **Tùy biến với `--rpc-nodes-file PATH`:** Có thể chỉ định file JSON bất kỳ khi chạy lệnh.
+
+---
+
+### Các câu lệnh vận hành Chain 2:
+
+#### 1. Khởi tạo sạch và chạy từ Block 0 (Khởi tạo cụm Chain 2 lần đầu):
+```bash
+cd /home/abc/nhat/con-chain-v2/metanode/deploy/ansible
+./ansible_deploy.sh reset-all \
+  --inventory ./inventory.chain2.yml \
+  --yes-reset-all
+```
+
+#### 2. Cập nhật mã nguồn mới / binary mới (Giữ nguyên dữ liệu):
+```bash
+./ansible_deploy.sh deploy --all --inventory ./inventory.chain2.yml
+```
+
+#### 3. Chỉ định file cấu hình RPC JSON tùy ý khi deploy:
+```bash
+# Xuất trực tiếp cấu hình endpoint vào file bạn muốn (vd: /tmp/rpc_nodes.chain_2.json):
+./ansible_deploy.sh deploy --all \
+  --inventory ./inventory.chain2.yml \
+  --rpc-nodes-file /tmp/rpc_nodes.chain_2.json
+
+# Hoặc qua biến môi trường:
+export RPC_NODES_JSON_PATH="/tmp/rpc_nodes.chain_2.json"
+./ansible_deploy.sh deploy --all --inventory ./inventory.chain2.yml
+```
+
+#### 4. Sử dụng CHUNG 1 FILE JSON giữa Chain 2 và Cụm Cluster:
+Nếu bạn muốn cả **Cụm Cluster** (`Parent Chain + Execution Clusters`) và **Chain 2** hòa nhập thông tin vào chung 1 file endpoint (ví dụ: `/tmp/rpc_nodes.custom.json`):
+```bash
+# Bước 1: Deploy cụm Cluster
+cd /home/abc/nhat/con-chain-v2/metanode/deploy/ansible_clusters
+./deploy_clusters.sh --setup --rpc-nodes-file /tmp/rpc_nodes.custom.json
+
+# Bước 2: Deploy cụm Chain 2
+cd /home/abc/nhat/con-chain-v2/metanode/deploy/ansible
+./ansible_deploy.sh deploy --all --inventory ./inventory.chain2.yml --rpc-nodes-file /tmp/rpc_nodes.custom.json
+```
+> **💡 Cơ chế Smart Merge:** Cả hai script sẽ tự động bảo toàn dữ liệu của nhau trong file `/tmp/rpc_nodes.custom.json`. File này sẽ chứa cả `parent_nodes`, `exec1_replica*`, `private_chains` và `public_chains.chain_2`, không bị ghi đè hay mất dữ liệu dù bạn chạy script nào trước!
+
+#### 5. Dừng hoặc Khởi động lại riêng cụm Chain 2:
+```bash
+# Dừng tất cả các node của Chain 2:
+./ansible_deploy.sh stop --all --inventory ./inventory.chain2.yml
+
+# Khởi động lại tất cả các node của Chain 2:
+./ansible_deploy.sh restart --all --inventory ./inventory.chain2.yml
+```
+
+#### 6. Xuất cấu hình endpoint thủ công bằng script Python:
+```bash
+python3 parse_inventory.py ./inventory.chain2.yml export /tmp/rpc_nodes.chain_2.json
+```
+
+#### 7. Giám sát Chain 2 độc lập:
+Profile cấu hình `manage_snapshot_storage: false` và `manage_chain_monitors: true`.
+Các tiến trình Health Monitor, Block-Hash Checker và Consensus Vote Monitor sẽ chạy hoàn toàn trong namespace `chain_2`, sử dụng file cấu hình `/tmp/rpc_nodes.chain_2.json` và log file `vote_monitor.chain_2.log`, `block_checker.chain_2.log`. Do đó, block height hay anomaly của Chain 2 sẽ không bị lẫn với Chain gốc.
+```bash
+# Kiểm tra log monitor của Chain 2:
+tail -f monitors/block_hash_checker/block_checker.chain_2.log
+tail -f monitors/vote_monitor/vote_monitor.chain_2.log
+```
+
+---
+
 ## 5. Kiểm Tra Trạng Thái & Giám Sát Mạng
 
 Sau khi thực hiện bất kỳ kịch bản nào, người mới có thể kiểm tra xem mạng đã hoạt động ổn định và các node đã bắt kịp nhau hay chưa:

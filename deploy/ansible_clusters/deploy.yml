@@ -11,6 +11,7 @@
   connection: local
   gather_facts: false
   become: false
+  any_errors_fatal: true
   tags: ["build", "prepare"]
   roles:
     - role: build
@@ -21,9 +22,11 @@
   hosts: parent_chain_nodes
   gather_facts: true
   become: true
-  tags: ["parent_chain", "core"]
+  any_errors_fatal: true
+  tags: ["parent_chain", "core", "open_ports"]
   roles:
     - role: common
+      when: deploy_action != 'open_ports'
     - role: parent_chain
 
 # ── Play 3: Deploy Execution Clusters ────────────────────────────────────────
@@ -31,9 +34,11 @@
   hosts: exec_clusters
   gather_facts: true
   become: true
-  tags: ["exec_clusters", "shards"]
+  any_errors_fatal: true
+  tags: ["exec_clusters", "shards", "open_ports"]
   roles:
     - role: common
+      when: deploy_action != 'open_ports'
     - role: exec_cluster
 
 # ── Test authentication preflight ────────────────────────────────────────────
@@ -44,6 +49,7 @@
   hosts: parent_chain_nodes
   gather_facts: false
   become: true
+  any_errors_fatal: true
   tags: ["test", "verify"]
   tasks:
     - name: Synchronize Parent Chain token before integration tests
@@ -61,6 +67,7 @@
   connection: local
   gather_facts: false
   become: false
+  any_errors_fatal: true
   tags: ["test", "verify"]
   roles:
     - role: testing

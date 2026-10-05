@@ -17,7 +17,7 @@
 
 # ── Stop Service ─────────────────────────────────────────────────────────────
 - name: Stop Parent Chain service
-  when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy']"
+  when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy', 'setup']"
   block:
     - name: Stop via systemd
       when: is_systemd
@@ -58,6 +58,55 @@
         - "{{ node_data_dir }}/consensus_storage"
         - "{{ node_data_dir }}/rocksdb_dummy_init"
         - "{{ node_data_dir }}/backup"
+
+# ── Firewall (UFW) Configuration ───────────────────────────────────────────
+# OPT-IN only (`--open-ports` => deploy_action=open_ports). The HTTP RPC is client-facing; the peer RPC and the metrics
+# endpoint are internal and are opened only to the other cluster members (plus `ufw_extra_sources`, e.g. a monitoring
+# host that scrapes metrics).
+- name: Firewall (UFW) Configuration for Parent Chain
+  when: "deploy_action == 'open_ports'"
+  block:
+    - name: Check if UFW is active on Parent Chain host
+      ansible.builtin.command: ufw status
+      register: ufw_status_parent
+      changed_when: false
+      failed_when: false
+      become: true
+
+    - name: Compute the cluster member IPs allowed on internal ports
+      ansible.builtin.set_fact:
+        ufw_peer_ips: >-
+          {{ (((groups['exec_clusters'] | default([])) + (groups['parent_chain_nodes'] | default([])))
+              | unique
+              | map('extract', hostvars, 'ansible_host')
+              | select('defined')
+              | map('string')
+              | reject('equalto', '127.0.0.1')
+              | unique
+              | list) + (ufw_extra_sources | default([])) }}
+
+    - name: Automatically configure firewall (UFW) rules for Parent Chain
+      when:
+        - ufw_status_parent.rc == 0
+        - "'Status: active' in ufw_status_parent.stdout"
+      become: true
+      block:
+        - name: Allow the client-facing Parent Chain HTTP RPC port in UFW
+          ansible.builtin.command: "ufw allow {{ parent_http_port | default(parent_chain_rpc_port | default(8547)) }}/tcp comment 'Metanode Parent Chain HTTP RPC'"
+          register: ufw_parent_http
+          changed_when: "'Rule added' in ufw_parent_http.stdout or 'Rule updated' in ufw_parent_http.stdout"
+
+        - name: Allow internal Parent Chain ports (peer RPC, metrics) only from cluster members
+          ansible.builtin.command: "ufw allow from {{ item.1 }} to any port {{ item.0 }} proto tcp comment 'Metanode Parent Chain internal'"
+          loop: "{{ [peer_rpc_port | default(19501), metrics_port | default(19601)] | product(ufw_peer_ips) | list }}"
+          register: ufw_parent_rules
+          changed_when: "'Rule added' in ufw_parent_rules.stdout or 'Rule updated' in ufw_parent_rules.stdout"
+
+        - name: Reload UFW to apply port rules
+          ansible.builtin.command: ufw reload
+          when: >-
+            (ufw_parent_http is defined and ufw_parent_http.changed) or
+            (ufw_parent_rules is defined and ufw_parent_rules.changed)
 
 # ── Setup Configuration & Service Unit ───────────────────────────────────────
 - name: Setup Parent Chain configuration

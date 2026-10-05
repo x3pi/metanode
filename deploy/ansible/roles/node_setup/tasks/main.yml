@@ -18,7 +18,9 @@
     executable: python3
   register: snapshot_storage_result
   changed_when: (snapshot_storage_result.stdout | trim | from_json).changed
-  when: keep_data | bool
+  when:
+    - manage_snapshot_storage | default(true) | bool
+    - keep_data | bool
 
 - name: Ensure base deployment directory exists
   ansible.builtin.file:
@@ -41,7 +43,7 @@
 - name: Check if local node key directory exists
   delegate_to: localhost
   ansible.builtin.stat:
-    path: "{{ deploy_dir }}/node-{{ item }}_keys"
+    path: "{{ cluster_config_dir }}/node-{{ item }}_keys"
   loop: "{{ active_nodes }}"
   register: local_keys_to_copy
   become: no
@@ -56,7 +58,7 @@
   # root via `become: yes`, which ignores these permission bits entirely, so 0600/0700
   # changes nothing about whether the deploy itself still works.
   ansible.builtin.copy:
-    src: "{{ deploy_dir }}/node-{{ item.item }}_keys/"
+    src: "{{ cluster_config_dir }}/node-{{ item.item }}_keys/"
     dest: "{{ remote_deploy_dir }}/node-{{ item.item }}_keys/"
     owner: "{{ ansible_user }}"
     group: "{{ ansible_user }}"
@@ -289,7 +291,7 @@
       fi
     done
   changed_when: false
-  when: active_nodes | length > 0
+  when: manage_snapshot_storage | default(true) | bool and active_nodes | length > 0
 
 - name: Unmount /opt/metanode if it is mounted to BTRFS disk
   ansible.builtin.shell: |
@@ -297,7 +299,7 @@
       umount /opt/metanode || umount -l /opt/metanode || true
     fi
     sed -i '\#{{ btrfs_device_path | default('/dev/mapper/ubuntu--vg-metanode_data') }} /opt/metanode#d' /etc/fstab
-  when: btrfs_disk.stat.exists
+  when: manage_snapshot_storage | default(true) | bool and btrfs_disk.stat.exists
   changed_when: false
 
 - name: Ensure base snapshot mount directory exists
@@ -305,14 +307,14 @@
     path: /mnt/metanode_snapshots
     state: directory
     mode: '0755'
-  when: btrfs_disk.stat.exists
+  when: manage_snapshot_storage | default(true) | bool and btrfs_disk.stat.exists
 
 - name: Mount BTRFS partition to /mnt/metanode_snapshots (shell)
   ansible.builtin.shell: |
     if ! mountpoint -q /mnt/metanode_snapshots; then
       mount -t btrfs -o "{{ 'loop,defaults' if '.img' in (btrfs_device_path | default('')) else 'defaults' }}" "{{ btrfs_device_path | default('/dev/mapper/ubuntu--vg-metanode_data') }}" /mnt/metanode_snapshots
     fi
-  when: btrfs_disk.stat.exists
+  when: manage_snapshot_storage | default(true) | bool and btrfs_disk.stat.exists
 
 - name: Persist BTRFS partition in /etc/fstab
   ansible.builtin.lineinfile:
@@ -320,14 +322,14 @@
     line: "{{ btrfs_device_path | default('/dev/mapper/ubuntu--vg-metanode_data') }} /mnt/metanode_snapshots btrfs {{ 'loop,defaults' if '.img' in (btrfs_device_path | default('')) else 'defaults' }} 0 0"
     regexp: "^.* /mnt/metanode_snapshots "
     state: present
-  when: btrfs_disk.stat.exists
+  when: manage_snapshot_storage | default(true) | bool and btrfs_disk.stat.exists
 
 - name: Verify mounted managed snapshot storage has the requested size
   ansible.builtin.script:
     cmd: "{{ playbook_dir }}/scripts/manage_snapshot_storage.py {{ snapshot_storage_args }} --verify"
     executable: python3
   changed_when: false
-  when: btrfs_disk.stat.exists and host_requires_btrfs | bool
+  when: manage_snapshot_storage | default(true) | bool and btrfs_disk.stat.exists and host_requires_btrfs | bool
 
 
 - name: Validate BTRFS availability for snapshot-enabled nodes
@@ -340,6 +342,8 @@
       Hướng dẫn khắc phục: Vui lòng kiểm tra lại việc tạo file loop BTRFS (/opt/metanode_cluster_btrfs.img) hoặc tắt snapshot cho Node {{ item }}.
   loop: "{{ active_nodes }}"
   when: >
+    manage_snapshot_storage | default(true) | bool
+    and
     node_configs[item | string].snapshot_enabled
     and not btrfs_disk.stat.exists
     and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
@@ -351,7 +355,7 @@
     group: metanode
     mode: '0755'
   loop: "{{ active_nodes }}"
-  when: btrfs_disk.stat.exists and node_configs[item | string].snapshot_enabled
+  when: manage_snapshot_storage | default(true) | bool and btrfs_disk.stat.exists and node_configs[item | string].snapshot_enabled
 
 - name: Ensure the entire snapshot source subtree is owned by metanode, not just its top dir
   # The task above only chowns /mnt/metanode_snapshots/node-N itself (also ignore_errors, so a
@@ -373,7 +377,7 @@
     owner: metanode
     group: metanode
   loop: "{{ active_nodes }}"
-  when: btrfs_disk.stat.exists and node_configs[item | string].snapshot_enabled
+  when: manage_snapshot_storage | default(true) | bool and btrfs_disk.stat.exists and node_configs[item | string].snapshot_enabled
 
 - name: Create execution snapshot target directories
   ansible.builtin.file:
@@ -383,7 +387,7 @@
     group: metanode
     mode: '0755'
   loop: "{{ active_nodes }}"
-  when: btrfs_disk.stat.exists
+  when: manage_snapshot_storage | default(true) | bool and btrfs_disk.stat.exists
 
 - name: Setup Bind Mounts for snapshot-enabled nodes
   ansible.builtin.mount:
@@ -393,7 +397,7 @@
     fstype: none
     state: mounted
   loop: "{{ active_nodes }}"
-  when: btrfs_disk.stat.exists and node_configs[item | string].snapshot_enabled
+  when: manage_snapshot_storage | default(true) | bool and btrfs_disk.stat.exists and node_configs[item | string].snapshot_enabled
 
 - name: Remove Bind Mounts for non-snapshot nodes
   ansible.builtin.shell: |
@@ -402,7 +406,7 @@
     fi
     sed -i '\#{{ metanode_install_dir }}/node-{{ item }}/data#d' /etc/fstab
   loop: "{{ active_nodes }}"
-  when: btrfs_disk.stat.exists and not node_configs[item | string].snapshot_enabled
+  when: manage_snapshot_storage | default(true) | bool and btrfs_disk.stat.exists and not node_configs[item | string].snapshot_enabled
   changed_when: false
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -47,6 +47,29 @@ deploy/ansible_clusters/
 
 ## ⚡ Hướng Dẫn Sử Dụng Nhanh (1-Click)
 
+### File endpoint dùng chung
+
+`--reset`, `--export-config`, `--test` và `--test-only` xuất cấu hình cluster vào
+`/tmp/rpc_nodes.json`, giữ nguyên node public chain `m0–m4` cùng metadata hiện có.
+Các map `nodes`, `rpc_nodes`, `ws_nodes`, `tcp_nodes`, `raft_nodes`, `forward_nodes`
+được bổ sung node cluster theo tên inventory (`exec1_replica1`, `exec2_replica1`, ...).
+Node cluster cũ có tiền tố `exec`/`parent_node_` được thay bằng dữ liệu inventory hiện tại.
+
+Bộ test tích hợp đọc `root_anchor`, `private_chains.chain_a.rpc_url` và
+`private_chains.chain_b.rpc_url` từ file này để truyền vào `PARENT_CHAIN_URL`,
+`EXEC1_URL`, `EXEC2_URL`. `chain_a`/`chain_b` tương ứng cluster ID 1/2;
+`root_anchor` là endpoint dịch vụ `parent_chain` từ inventory, không phải alias cho `m0`.
+Khi nhóm parent rỗng, endpoint này lấy từ `parent_chain_host`/`parent_chain_rpc_port`.
+Do file này chứa private-chain credentials, nó luôn được ghi với quyền `0600`.
+
+Public chain (`ansible_deploy.sh`) cũng tự gộp endpoint khi chạy, giữ nguyên cluster đã xuất;
+khởi động lần lượt public trước hay cluster trước đều không làm mất cấu hình bên còn lại.
+Không cần chạy export thủ công sau khi khởi động.
+
+Có thể cập nhật riêng file mà không reset node bằng `./deploy_clusters.sh --export-config`.
+Việc dùng chung endpoint không thay thế yêu cầu API `parent_chain` của bộ test;
+kịch bản lỗi node 8–9 vẫn phụ thuộc cổng/đường dẫn local được định nghĩa trong test Go.
+
 ### 1. Cấu hình Telegram (Tùy chọn)
 Chỉnh sửa file `.env`:
 ```bash
@@ -132,3 +155,15 @@ exec_clusters:
 ./deploy_clusters.sh --setup --systemd --env=production --vault-password-file .vault_pass
 ```
 Mỗi server sẽ tự động tạo systemd service riêng (`metanode-parentchain.service`, `metanode-cluster-1.service`, `metanode-cluster-2.service`) với cấu hình tự khởi động lại (`Restart=always`) và giới hạn file descriptors cao (`LimitNOFILE=65536`).
+
+## Firewall (UFW) — opt-in và giới hạn nguồn
+
+Triển khai bình thường (`setup`, `deploy`, `restart`, `reset`) **không** thay đổi tường lửa. Chỉ khi chạy với `--open-ports`
+(`deploy_action=open_ports`) và UFW đang bật thì role mới thêm rule:
+
+- Cổng **client** (RPC của exec, HTTP RPC của parent chain): mở cho mọi nguồn.
+- Cổng **nội bộ** (P2P, Raft, Forward của exec; peer RPC và metrics của parent chain): chỉ mở cho IP của các node khác trong
+  inventory (`exec_clusters` + `parent_chain_nodes`, bỏ `127.0.0.1`), cộng thêm danh sách `ufw_extra_sources` nếu khai báo
+  (ví dụ máy giám sát lấy metrics). Raft và Forward là kênh nội bộ giữa các node, không nên mở ra toàn mạng.
+
+Ví dụ thêm máy giám sát: `-e '{"ufw_extra_sources":["10.0.0.5"]}'`.

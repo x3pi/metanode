@@ -11,7 +11,7 @@
 
 # ── Stop Service ─────────────────────────────────────────────────────────────
 - name: Stop Execution Node {{ inventory_hostname }}
-  when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy']"
+  when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy', 'setup']"
   block:
     - name: Stop via systemd
       when: is_systemd
@@ -59,6 +59,62 @@
         path: /tmp/MTN_INTEGRITY_FAILED
         state: absent
       ignore_errors: true
+
+# ── Firewall (UFW) Configuration ───────────────────────────────────────────
+# OPT-IN only (`--open-ports` => deploy_action=open_ports): a normal setup/deploy/restart/reset must never change the
+# firewall. Client-facing ports (RPC) are opened to everyone; INTERNAL ports (P2P, Raft, Forward) are opened only to
+# the other cluster members (plus `ufw_extra_sources`, e.g. a monitoring host), never to the whole network.
+- name: Firewall (UFW) Configuration for Execution Node {{ inventory_hostname }}
+  when: "deploy_action == 'open_ports'"
+  block:
+    - name: Check if UFW is active on {{ inventory_hostname }}
+      ansible.builtin.command: ufw status
+      register: ufw_status_exec
+      changed_when: false
+      failed_when: false
+      become: true
+
+    - name: Compute the cluster member IPs allowed on internal ports
+      ansible.builtin.set_fact:
+        ufw_peer_ips: >-
+          {{ (((groups['exec_clusters'] | default([])) + (groups['parent_chain_nodes'] | default([])))
+              | unique
+              | map('extract', hostvars, 'ansible_host')
+              | select('defined')
+              | map('string')
+              | reject('equalto', '127.0.0.1')
+              | unique
+              | list) + (ufw_extra_sources | default([])) }}
+
+    - name: Automatically configure firewall (UFW) rules for execution node
+      when:
+        - ufw_status_exec.rc == 0
+        - "'Status: active' in ufw_status_exec.stdout"
+      become: true
+      block:
+        - name: Allow the client-facing RPC port in UFW
+          ansible.builtin.command: "ufw allow {{ rpc_port }}/tcp comment 'Metanode RPC {{ inventory_hostname }}'"
+          register: ufw_exec_rpc
+          changed_when: "'Rule added' in ufw_exec_rpc.stdout or 'Rule updated' in ufw_exec_rpc.stdout"
+
+        - name: Allow internal cluster ports (P2P, Raft, Forward) only from cluster members
+          ansible.builtin.command: "ufw allow from {{ item.1 }} to any port {{ item.0 }} proto tcp comment 'Metanode internal {{ inventory_hostname }}'"
+          loop: "{{ [p2p_port, raft_port, forward_port] | product(ufw_peer_ips) | list }}"
+          register: ufw_exec_rules
+          changed_when: "'Rule added' in ufw_exec_rules.stdout or 'Rule updated' in ufw_exec_rules.stdout"
+
+        - name: Allow Parent Chain RPC port in UFW if host matches parent_chain_host
+          ansible.builtin.command: "ufw allow {{ parent_chain_rpc_port | default(10751) }}/tcp comment 'Metanode Parent Chain RPC'"
+          when: "(ansible_host | default('127.0.0.1')) == (parent_chain_host | default('127.0.0.1')) or (ansible_connection | default('')) == 'local'"
+          register: ufw_parent_rule
+          changed_when: "'Rule added' in ufw_parent_rule.stdout or 'Rule updated' in ufw_parent_rule.stdout"
+
+        - name: Reload UFW to apply port rules
+          ansible.builtin.command: ufw reload
+          when: >-
+            (ufw_exec_rpc is defined and ufw_exec_rpc.changed) or
+            (ufw_exec_rules is defined and ufw_exec_rules.changed) or
+            (ufw_parent_rule is defined and ufw_parent_rule.changed)
 
 # ── Setup Configuration, Genesis & Service Unit ──────────────────────────────
 - name: Setup Execution Node {{ inventory_hostname }}
@@ -244,14 +300,33 @@
       ansible.builtin.template:
         src: exec_config.json.j2
         dest: "{{ node_data_dir }}/config.json"
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
         mode: '0644'
 
     - name: Write security environment file (tokens / pins from vault vars, 0600)
       ansible.builtin.template:
         src: security.env.j2
         dest: "{{ node_data_dir }}/security.env"
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
         mode: '0600'
       no_log: true
+
+    - name: Ensure correct ownership of node data directory and files
+      ansible.builtin.file:
+        path: "{{ node_data_dir }}"
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+        recurse: yes
+
+    - name: Ensure base log directory ownership
+      ansible.builtin.file:
+        path: "{{ base_log_dir }}"
+        state: directory
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+        mode: '0755'
 
     - name: Deploy systemd service unit
       when: is_systemd
@@ -291,7 +366,7 @@
     - name: Wait for Cluster RPC port to respond
       ansible.builtin.wait_for:
         port: "{{ rpc_port }}"
-        host: "{{ ansible_host | default('127.0.0.1') }}"
+        host: "127.0.0.1"
         delay: 2
         timeout: 30
 
