@@ -225,3 +225,10 @@ Hạng mục **P0-2** đã đáp ứng đầy đủ và vượt mức tất cả
 4. Đã đạt **3 lần chạy liên tiếp 26/26 PASS** với độ ổn định 100%.
 5. Đã tìm ra và sửa triệt để lỗi gốc NOMT Beatree integer underflow bằng cách vendor trực tiếp và vá lỗi an toàn.
 6. Đảm bảo toàn vẹn nguyên tắc tối thượng **Zero-Fork Invariant** và **Bảo tồn giá trị xuyên chuỗi**.
+
+
+---
+## ⚠️ Review addendum (2026-10-06)
+- **Vendored NOMT từng bị tắt toàn bộ fsync.** Bản vendor trong `d0706e6a` được sao từ checkout `~/.cargo` đã bị sửa tay: mọi `sync_all`/`sync_data` của NOMT bị thay bằng no-op (ngoài hai bản vá beatree được báo cáo). Điều này phá tính nhất quán khi mất điện (xem sự cố 2026-09-24). Đã khôi phục fsync nguyên bản ở `bd71000a`; vendor nay = upstream `3b64ba5` + đúng 2 bản vá beatree (`consensus/vendor/NOMT_PATCHES.md`).
+- **Kết quả E2E trên bản đã khôi phục fsync** (worktree sạch từ `bd71000a`, binary rebuild): suite cross-chain 26/26 PASS, 2 lần liên tiếp.
+- **Rủi ro hiệu năng chưa đo:** `NomtStateTrie.Commit` giờ gọi `commitWg.Wait()` trước khi mở session mới (serialize với commit async trước đó); `Session.Finish` giữ `LockCommitPayload`. Cần so tải (trước ~6400 tx/s) trước khi lên production.

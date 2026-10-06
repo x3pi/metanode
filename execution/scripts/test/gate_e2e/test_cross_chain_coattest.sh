@@ -7,7 +7,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 EXECUTION_ROOT="$(cd "$HERE/../../.." && pwd)"
 
-DEFAULT_SCRATCH="/home/abc/.gemini/antigravity-ide/brain/b3d16829-6df5-40a9-8b48-891491c8a256/scratch"
+DEFAULT_SCRATCH="${E2E_SCRATCH:-${TMPDIR:-/tmp}/metanode_e2e}"
 BASE="${1:-$DEFAULT_SCRATCH/cross_chain_4val_e2e}"
 BIN_DIR="$DEFAULT_SCRATCH/e2e_bins"
 
@@ -17,11 +17,10 @@ echo "   Base Dir: $BASE"
 echo "   Bin Dir:  $BIN_DIR"
 echo "================================================================="
 
-# Pre-cleanup: kill any leftover processes pointing to this BIN_DIR or BASE
-echo "🧹 Checking for any leftover processes..."
-pkill -9 -f "$BIN_DIR" 2>/dev/null || true
-pkill -9 -f "$BASE" 2>/dev/null || true
-sleep 1
+# Pre-cleanup: stop a previous run of THIS base through its recorded PIDs only (never pkill by pattern or port).
+if [ -d "$BASE" ]; then
+    "$HERE/run_env.sh" "$BASE" stop 2>/dev/null || true
+fi
 
 # Always rebuild: ensure binaries match the exact latest source code
 mkdir -p "$BIN_DIR"
