@@ -155,6 +155,11 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 
 	// Ensure the connection is cleaned up when this handler exits for any reason
 	defer func() {
+		if r := recover(); r != nil {
+			if s.ctx.Err() == nil {
+				panic(r)
+			}
+		}
 		s.OnDisconnect(conn)  // This calls RemoveConnection
 		_ = conn.Disconnect() // This closes the TCP conn and channels
 	}()
@@ -238,6 +243,8 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 
 			// Normal dispatch: non-blocking send to worker pool
 			select {
+			case <-s.ctx.Done():
+				return s.ctx.Err()
 			case s.requestChan <- request:
 				// logger.Info("⚠️  [SERVER DEBUG] Command queued to requestChan: %s", cmd)
 				// Success
