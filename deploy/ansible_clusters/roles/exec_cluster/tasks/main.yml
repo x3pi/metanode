@@ -327,6 +327,15 @@
             json.dump(g, out, indent=2)
         "
 
+    - name: Assert production secrets are not default devnet values (Issue #104 & #5.4)
+      ansible.builtin.assert:
+        that:
+          - (master_password | default('devnet-test-password')) != 'devnet-test-password'
+          - (app_pepper | default('devnet-test-pepper')) != 'devnet-test-pepper'
+          - (pk_admin_file_storage | default('87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623')) != '87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623'
+        fail_msg: "FATAL: In production environment (metanode_env=production), master_password, app_pepper, and pk_admin_file_storage must be explicitly configured via Ansible Vault and cannot use devnet defaults!"
+      when: "(metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'"
+
     - name: Deploy Execution Node config.json
       ansible.builtin.template:
         src: exec_config.json.j2

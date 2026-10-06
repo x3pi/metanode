@@ -4,14 +4,14 @@ all:
     # Installation and base directories (standardized across all machines)
     install_dir: "/opt/metanode"
     # Mật khẩu sudo/become: BẮT BUỘC dùng Ansible Vault trong production (Issue #104).
-    # Mã hóa: ansible-vault encrypt_string --vault-password-file .vault_pass '<MẬT_KHẨU_SUDO>' --name ansible_become_pass
-    ansible_become_pass: !vault |
-          $ANSIBLE_VAULT;1.1;AES256
-          61343734616631623861346337313063303831613264626130383232333037303131653835613464
-          3430633031383733353564613436343534346462376263300a353633633665383536323630653535
-          35643431353163353866386438313861323330626362326532383562623164393661663261313763
-          3839356534333634620a323363653131343738363765363437396637373539326233376337326463
-          3034
+    # Hướng dẫn tạo vault string:
+    #   1) Tạo mật khẩu vault: openssl rand -base64 24 > .vault_pass (đã được .gitignore)
+    #   2) Mã hóa biến: ansible-vault encrypt_string --vault-password-file .vault_pass '<MẬT_KHẨU_SUDO>' --name ansible_become_pass
+    #   3) Dán khối '!vault |' kết quả vào dưới đây HOẶC tham chiếu biến vault_ansible_become_pass.
+    # ansible_become_pass: !vault |
+    #       $ANSIBLE_VAULT;1.1;AES256
+    #       <DÁN_NỘI_DUNG_VAULT_ENCRYPTED_TẠI_ĐÂY>
+    ansible_become_pass: "{{ vault_ansible_become_pass | default('') }}"
     ansible_ssh_pass: "{{ ansible_become_pass }}"
     # Raft shared configuration for execution clusters
     raft_secret_file: "/opt/metanode/raft_secret.key"
