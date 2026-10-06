@@ -7,9 +7,9 @@ Trạng thái: **SẴN SÀNG GIAO AGENT** (viết 2026-10-06 sau khi đọc code
 **Không còn hỗ trợ tương thích simple-chain cũ (`bls_legacy`, dapp ký BLS/proto).** Hệ quả:
 - Không còn "chế độ": node **luôn** là eth-only. Các guard `SecpOnlyTxSignatures()` ở `a25cb135` (kể cả `requireSecpModeForRawEth`, nhánh `bls_legacy` trong `eth_tx_converter.go`) trở thành **mã chết cần xóa**, không phải giữ.
 - Bản cũ được bảo tồn tại: tag `legacy-simple-chain-bls-v1`, nhánh `legacy/simple-chain-bls` (cùng commit `a25cb135`). Cần hỗ trợ dapp BLS ⇒ dùng nhánh đó, không backport vào đây.
-- Công việc mới làm trên nhánh **`feat/eth-only-node`**, worktree riêng **`/home/abc/chain-n/metanode-eth-only`** (không dùng chung working tree `/home/abc/chain-n/metanode` của các agent khác).
-- Worktree mới KHÔNG có artifact build (thư mục `target/`, thư viện `execution/pkg/mvm/**/build`): chạy `consensus/metanode/scripts/build_check.sh` lần đầu để build (lâu hơn bình thường). Cụm local đang chạy ở cổng 4200/4201/8646 thuộc worktree cũ — test ở đây dùng cổng cô lập 31xxx, KHÔNG đụng cụm đó và KHÔNG đụng cụm 231/230.
-- **Không `git push`** nhánh/tag nếu user chưa yêu cầu. `git add` theo tên file, không `git add <thư mục>`. Commit nhỏ, mỗi commit build_check sạch.
+- Công việc mới tiếp tục trên nhánh **`dev`** trong working tree chính `/home/abc/chain-n/metanode` (không dùng nhánh/worktree phụ). Vì working tree này dùng chung với agent khác: `git add` theo tên file, `git status`/`git diff` trước khi commit, không đụng file thay đổi chưa commit của agent khác.
+- Cụm local đang chạy ở cổng 4200/4201/8646: test thay đổi lớn dùng cổng cô lập 31xxx, KHÔNG đụng cụm 231/230. Restart node trên cụm local cần báo user.
+- **Không `git push`** nhánh/tag nếu user chưa yêu cầu. `git add` theo tên file, không `git add <thư mục>`. Commit nhỏ trên `dev`, mỗi commit build_check sạch.
 
 ## 1. Mục tiêu / định nghĩa "xong"
 1. Đường vào giao dịch của người dùng (TCP + RPC) **chỉ** nhận envelope EIP-2718 ký secp256k1. Không còn proto tx, device key, type 0xFF, chữ ký BLS của người dùng.
@@ -120,4 +120,4 @@ W2: batch hỗn hợp tốt/xấu, vượt kích thước, nonce lặp, receipt 
 - Chưa chạy thật ethers/viem/web3j/foundry/hive trên chain này (W6).
 - Số tx/s sau khi bỏ BLS user-verify và thêm `ecrecover` chưa đo.
 - Tham chiếu deploy/ansible tới gateway `rpc-client` chưa kiểm.
-- Worktree mới cần build từ đầu (lâu); tránh xung đột cổng với cụm local đang chạy ở worktree cũ.
+- Cụm local đang chạy (4200/4201/8646) dùng binary build cũ: sau khi sửa code cần restart mới kiểm được thay đổi live (báo user trước).
