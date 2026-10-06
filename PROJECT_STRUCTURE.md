@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-10-06 (TCP Ethereum EIP-2718 Native Ingress live cluster E2E verified: created `cmd/tool/test_raw_eth_tcp_live` running against live multi-replica cluster with 100% success on single/batch EIP-1559 txs, HTTP RPC receipt query by `ethTx.Hash()`, and negative security guards).
+> **Last updated:** 2026-10-06 (Complete Ethereum-Only Execution Node: Unconditional EIP-2718 / EIP-1559 support on TCP & RPC. Standard Geth error mapping code -32000, cumulativeGasUsed and logsBloom calculation in receipts, detailed batch ingress with individual transaction hashes, unconditional rejection of legacy proto/device-key commands, and live E2E `cmd/tool/test_raw_eth_tcp_live` passed on the local cluster (single RPC endpoint; cross-validator state-root agreement not asserted by this tool)).
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 ---
 

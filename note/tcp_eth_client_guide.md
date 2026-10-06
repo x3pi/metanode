@@ -97,6 +97,19 @@ if err != nil {
 }
 ```
 
+### 2.3 Gửi Batch Chi Tiết Nhận Danh Sách Hashes (`SendRawEthTransactionsDetailed`)
+
+```go
+// Gửi danh sách envelopes thô và nhận mảng []common.Hash tương ứng từng transaction
+hashes, err := client.SendRawEthTransactionsDetailed(envelopes)
+if err != nil {
+    log.Fatalf("Gửi batch chi tiết thất bại: %v", err)
+}
+for i, h := range hashes {
+    fmt.Printf("Tx %d Hash: %s\n", i, h.Hex())
+}
+```
+
 ---
 
 ## 3. Hướng dẫn Dapp & Mobile (Android / iOS / Web)
