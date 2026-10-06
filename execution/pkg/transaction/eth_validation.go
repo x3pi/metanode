@@ -4,10 +4,20 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+)
+
+const (
+	// MaxStandardTxEnvelopeSize is the maximum allowed size for standard (non-blob) EIP-2718 envelopes (128 KB).
+	MaxStandardTxEnvelopeSize = 128 * 1024
+	// MaxRawEthTxEnvelopeSize is the maximum envelope size for EIP-4844 blob transactions with KZG sidecars (1 MB).
+	MaxRawEthTxEnvelopeSize = 1024 * 1024
+	// MaxBatchTxCount is the maximum number of transactions allowed in a single TCP batch.
+	MaxBatchTxCount = 1000
 )
 
 var (
@@ -73,4 +83,38 @@ func ValidateEthTxEnvelope(ethTx *e_types.Transaction, expectedChainId *big.Int)
 	}
 
 	return nil
+}
+
+// ClassifyEthTxError maps an envelope validation or mempool error into an explicit typed TransactionError.
+func ClassifyEthTxError(err error) *TransactionError {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "pre-EIP-155"):
+		return ErrPreEIP155
+	case strings.Contains(msg, "chain ID"):
+		return InvalidChainId
+	case strings.Contains(msg, "malleable signature") || strings.Contains(msg, "curve order / 2"):
+		return ErrMalleableSignature
+	case strings.Contains(msg, "recover sender") || strings.Contains(msg, "recovered sender"):
+		return ErrSenderRecovery
+	case strings.Contains(msg, "exceeds max") || strings.Contains(msg, "envelope size"):
+		return ErrExceedsMaxEnvelopeSize
+	case strings.Contains(msg, "too many transactions") || strings.Contains(msg, "max batch"):
+		return ErrExceedsMaxBatchSize
+	case strings.Contains(msg, "decode") || strings.Contains(msg, "RLP format"):
+		return ErrDecodeRawEth
+	case strings.Contains(msg, "already known") || strings.Contains(msg, "already exists"):
+		return ErrAlreadyKnown
+	case strings.Contains(msg, "nonce"):
+		return InvalidNonce
+	case strings.Contains(msg, "balance") || strings.Contains(msg, "funds"):
+		return ErrInsufficientBalance
+	case strings.Contains(msg, "gas price") || strings.Contains(msg, "base fee"):
+		return InvalidMaxGasPrice
+	default:
+		return InvalidTransaction
+	}
 }

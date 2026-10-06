@@ -22,10 +22,8 @@ func InitRoutes(
 	messageSender network.MessageSender,
 ) {
 	// --- KHỞI TẠO RATE LIMITERS ---
-	// Giới hạn 1,000,000 req/s, burst 100,000 (cho 100ms)
+	// Giới hạn 500,000 req/s, burst 50,000 (cho 100ms)
 	readTxLimiter := rate.NewLimiter(rate.Limit(500000), 50000)
-	// Giới hạn 200,000 req/s, burst 20,000 (cho 100ms)
-	deviceKeyTxLimiter := rate.NewLimiter(rate.Limit(200000), 20000)
 
 	// --- HÀM BỌC (WRAPPER) VỚI LOGIC BACKPRESSURE ---
 	withRateLimit := func(limiter *rate.Limiter, next func(network.Request) error) func(network.Request) error {
@@ -83,21 +81,19 @@ func InitRoutes(
 	// State attestation: all nodes receive attestations from peers for fork detection
 	routes[common.StateAttestationTopic] = blockProcessor.ProcessStateAttestation
 
-	// transaction routes
-	// Đã bỏ: API giao tiếp nội bộ DB key từ thời master/sub
-	// routes[command.RemoteDeviceKeyDB] = transactionProcessor.HandleDeviceKeyRequest
+	// Legacy proto/BLS commands: unconditionally rejected
 	routes[command.SendTransaction] = transactionProcessor.ProcessTransactionFromClient
 	routes[command.SendTransactions] = transactionProcessor.ProcessTransactionsFromClient
+	routes[command.SendTransactionWithDeviceKey] = transactionProcessor.ProcessTransactionFromClientWithDeviceKey
+
+	// Eth-only TCP ingress
 	routes[command.SendRawTransaction] = transactionProcessor.ProcessRawTransactionFromClient
 	routes[command.SendRawTransactions] = transactionProcessor.ProcessRawTransactionsFromClient
-	// Đã bỏ: Topic cũ cho sub node
-	// routes[common.TransactionsFromSubTopic] = transactionProcessor.ProcessTransactionsFromClient
 
 	// subscribe routes
 	routes[command.SubscribeToAddress] = subscribeProcessor.ProcessSubscribeToAddress
 
-	// --- CÁC ROUTE ĐƯỢC ÁP DỤNG RATE LIMITING ---
-	routes[command.SendTransactionWithDeviceKey] = withRateLimit(deviceKeyTxLimiter, transactionProcessor.ProcessTransactionFromClientWithDeviceKey)
+	// Master Node now handles API read requests directly
 
 	// Master Node now handles API read requests directly
 	routes[command.ReadTransaction] = withRateLimit(readTxLimiter, transactionProcessor.ProcessReadTransaction)

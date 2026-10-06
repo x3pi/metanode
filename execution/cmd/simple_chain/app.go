@@ -18,9 +18,7 @@ import (
 	"time"
 
 	e_common "github.com/ethereum/go-ethereum/common"
-	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -750,42 +748,8 @@ func (app *App) initProcessors() {
 	// Set node references
 	app.blockProcessor.SetNode(app.node)
 
-	// Set Raw Ethereum Converter for SendRawTransaction / SendRawTransactions
-	app.transactionProcessor.SetRawEthConverter(func(rawEth []byte) (types.Transaction, *e_types.Transaction, error) {
-		ethTx := new(e_types.Transaction)
-		if err := ethTx.UnmarshalBinary(rawEth); err != nil {
-			return nil, nil, fmt.Errorf("failed to decode Ethereum transaction: %w", err)
-		}
-		if err := transaction.ValidateEthTxEnvelope(ethTx, app.config.ChainId); err != nil {
-			return nil, nil, err
-		}
-		metaTxIface, err := transaction.NewTransactionFromEth(ethTx)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to build MetaTx from EthTx: %w", err)
-		}
-		metaTx, ok := metaTxIface.(*transaction.Transaction)
-		if !ok {
-			return nil, nil, fmt.Errorf("unexpected transaction type from NewTransactionFromEth")
-		}
-
-		// EIP-4844: persist sidecar to blob_store if present, then strip sidecar
-		if metaTxProto, ok := metaTx.Proto().(*mt_proto.Transaction); ok && metaTxProto.Type == uint64(e_types.BlobTxType) && metaTxProto.Sidecar != nil {
-			sidecar := metaTxProto.Sidecar
-			if bs := app.chainState.GetBlobStore(); bs != nil {
-				var blockNumber uint64
-				if app.blockProcessor != nil && app.blockProcessor.GetLastBlock() != nil && app.blockProcessor.GetLastBlock().Header() != nil {
-					blockNumber = app.blockProcessor.GetLastBlock().Header().BlockNumber() + 1
-				}
-				for i, vh := range metaTxProto.BlobVersionedHashes {
-					if err := bs.Put(blockNumber, vh, sidecar.Commitments[i], sidecar.Proofs[i], sidecar.Blobs[i]); err != nil {
-						return nil, nil, fmt.Errorf("failed to persist blob sidecar: %w", err)
-					}
-				}
-			}
-			metaTxProto.Sidecar = nil
-		}
-		return metaTx, ethTx, nil
-	})
+	// Set Raw Ethereum Converter for SendRawTransaction / SendRawTransactions (shared with RPC)
+	app.transactionProcessor.SetRawEthConverter(app.ConvertRawEthTxToMetaTx)
 
 	// Set Rollup System Event Interceptor.
 	// NOTE: this TxValidatorPool-based interceptor is NOT part of the live BlockSTM execution

@@ -211,6 +211,22 @@ func (v *TxVirtualExecutor) sendTransactionResult(conn network.Connection, txHas
 	conn.SendMessage(respMsg)
 }
 
+// sendTransactionSuccessBytes sends a successful response with an arbitrary byte payload (e.g. RLP encoded list of hashes).
+func (v *TxVirtualExecutor) sendTransactionSuccessBytes(conn network.Connection, body []byte, msgID string) {
+	if v == nil || v.messageSender == nil {
+		return
+	}
+
+	respMsg := p_network.NewMessage(&pb.Message{
+		Header: &pb.Header{
+			Command: command.TransactionSuccess,
+			ID:      msgID,
+		},
+		Body: body,
+	})
+	conn.SendMessage(respMsg)
+}
+
 // sendDeviceKeyWithPool gửi device key không đồng bộ sử dụng worker pool và timeout
 func (tp *TransactionProcessor) sendDeviceKeyWithPool(
 	connectionTypeName string,

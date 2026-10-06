@@ -102,6 +102,15 @@ var (
 	UploadChunkError            = &TransactionError{68, "failed to upload chunk"}
 	AccountNotRegistered        = &TransactionError{69, "account not registered on parent chain"}
 	UnauthorizedSystemSender    = &TransactionError{70, "unauthorized sender for a rollup system event"}
+
+	// Ethereum native ingress & envelope admission errors
+	ErrDecodeRawEth           = &TransactionError{71, "failed to decode raw Ethereum transaction envelope"}
+	ErrPreEIP155              = &TransactionError{72, "pre-EIP-155 unprotected transactions are not allowed"}
+	ErrMalleableSignature     = &TransactionError{73, "malleable signature: s exceeds curve order / 2 (EIP-2)"}
+	ErrSenderRecovery         = &TransactionError{74, "failed to recover sender address from signature"}
+	ErrExceedsMaxEnvelopeSize = &TransactionError{75, "transaction envelope exceeds maximum allowed size"}
+	ErrExceedsMaxBatchSize    = &TransactionError{76, "batch contains too many transactions"}
+	ErrAlreadyKnown           = &TransactionError{77, "transaction already known in mempool or blockchain"}
 )
 
 var CodeToError = map[int64]*TransactionError{
@@ -181,6 +190,15 @@ var CodeToError = map[int64]*TransactionError{
 	// account registration gate
 	69: AccountNotRegistered,
 	70: UnauthorizedSystemSender,
+
+	// Ethereum native ingress & envelope admission errors
+	71: ErrDecodeRawEth,
+	72: ErrPreEIP155,
+	73: ErrMalleableSignature,
+	74: ErrSenderRecovery,
+	75: ErrExceedsMaxEnvelopeSize,
+	76: ErrExceedsMaxBatchSize,
+	77: ErrAlreadyKnown,
 }
 
 // DescriptionToError provides reverse lookup from error description to TransactionError.

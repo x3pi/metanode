@@ -44,14 +44,26 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	blockMap["transactionsRoot"] = block.Header().TransactionsRoot()           // Root của Merkle Patricia Trie chứa các giao dịch
 	blockMap["logsBloom"] = eth_types.BytesToBloom(block.Header().LogsBloom()) // Bloom filter chứa thông tin về logs
 	blockMap["difficulty"] = hexutil.EncodeUint64(0)
-	blockMap["gasLimit"] = hexutil.EncodeUint64(0)                           // Giới hạn gas của khối
-	blockMap["gasUsed"] = hexutil.EncodeUint64(0)                            // Gas đã sử dụng trong khối
+	blockMap["gasLimit"] = hexutil.EncodeUint64(mt_common.BLOCK_GAS_LIMIT) // Giới hạn gas của khối (chain limit, mt_common.BLOCK_GAS_LIMIT)
+
+	var totalBlockGasUsed uint64
+	if len(block.Transactions()) > 0 && storageReceipt != nil {
+		if rcpDb, err := receipt.NewReceiptsFromRoot(block.Header().ReceiptRoot(), storageReceipt); err == nil {
+			for _, txH := range block.Transactions() {
+				if rcp, err := rcpDb.GetReceipt(txH); err == nil && rcp != nil {
+					totalBlockGasUsed += rcp.GasUsed()
+				}
+			}
+		}
+	}
+	blockMap["gasUsed"] = hexutil.EncodeUint64(totalBlockGasUsed) // Gas đã sử dụng trong khối
+
 	blockMap["timestamp"] = hexutil.EncodeUint64(block.Header().TimeStamp() / 1000) // Thời gian tạo khối (giây)
-	blockMap["extraData"] = "0x"                                             // Dữ liệu bổ sung
-	blockMap["mixHash"] = common.Hash{}                                      // Hash của proof-of-work
-	blockMap["nonce"] = "0x0000000000000000"                                 // Nonce của khối
-	blockMap["baseFeePerGas"] = hexutil.EncodeUint64(0)                      // Phí cơ bản trên mỗi gas (EIP-1559)
-	blockMap["withdrawalsRoot"] = trie.EmptyRootHash                         // Root của Merkle Patricia Trie chứa các giao dịch rút tiền (EIP-3675)
+	blockMap["extraData"] = "0x"                                                     // Dữ liệu bổ sung
+	blockMap["mixHash"] = common.Hash{}                                              // Hash của proof-of-work
+	blockMap["nonce"] = "0x0000000000000000"                                         // Nonce của khối
+	blockMap["baseFeePerGas"] = hexutil.EncodeUint64(mt_common.MINIMUM_BASE_FEE)     // Phí cơ bản phẳng (EIP-1559: 100,000 wei)
+	blockMap["withdrawalsRoot"] = trie.EmptyRootHash                                 // Root của Merkle Patricia Trie chứa các giao dịch rút tiền (EIP-3675)
 	blockMap["blobGasUsed"] = hexutil.EncodeUint64(block.Header().BlobGasUsed())     // Gas đã sử dụng cho blobs (EIP-4844)
 	blockMap["excessBlobGas"] = hexutil.EncodeUint64(block.Header().ExcessBlobGas()) // Gas dư thừa cho blobs (EIP-4844)
 	blockMap["parentBeaconBlockRoot"] = common.Hash{}                        // Root của khối beacon cha (trong trường hợp sharding)
@@ -647,86 +659,69 @@ func (api *MetaAPI) GetRawTransactionByBlockHashAndIndex(ctx context.Context, bl
 // clients (which pass 2 arguments: txObject and "latest"). The value is currently ignored,
 // and gas estimation always runs against the latest state off-chain.
 func (api *MetaAPI) EstimateGas(ctx context.Context, rawInput json.RawMessage, blockNr *rpc.BlockNumber) (hexutil.Uint64, error) {
-	var inputStr string
-	var txM *transaction.Transaction
-
-	// 1. Cố gắng parse theo chuẩn cũ (truyền raw hexutil.Bytes của MetaNode transaction)
-	if err := json.Unmarshal(rawInput, &inputStr); err == nil {
-		inputBytes, errHex := hexutil.Decode(inputStr)
-		if errHex == nil {
-			txM = &transaction.Transaction{}
-			if errUnmarshal := txM.Unmarshal(inputBytes); errUnmarshal != nil {
-				txM = nil // Fallback
-			}
-		}
+	var args TransactionArgs
+	if err := json.Unmarshal(rawInput, &args); err != nil {
+		logger.Warn("Error Unmarshal EstimateGas input: %v", err)
+		return 0, fmt.Errorf("invalid EstimateGas input: %v", err)
 	}
 
-	// 2. Nếu parse chuẩn cũ thất bại, cố gắng parse theo chuẩn Ethereum (TransactionArgs JSON object)
-	if txM == nil {
-		var args TransactionArgs
-		if err := json.Unmarshal(rawInput, &args); err != nil {
-			logger.Warn("Error Unmarshal EstimateGas input: %v", err)
-			return 0, fmt.Errorf("invalid EstimateGas input: %v", err)
-		}
+	var toAddress common.Address
+	if args.To != nil {
+		toAddress = *args.To
+	}
 
-		var toAddress common.Address
-		if args.To != nil {
-			toAddress = *args.To
-		}
+	amount := big.NewInt(0)
+	if args.Value != nil {
+		amount = (*big.Int)(args.Value)
+	}
 
-		amount := big.NewInt(0)
-		if args.Value != nil {
-			amount = (*big.Int)(args.Value)
-		}
+	var inputData []byte
+	if args.Data != nil {
+		inputData = *args.Data
+	} else if args.Input != nil {
+		inputData = *args.Input
+	}
 
-		var inputData []byte
-		if args.Data != nil {
-			inputData = *args.Data
-		} else if args.Input != nil {
-			inputData = *args.Input
-		}
+	gasLimit := uint64(50000000)
+	if args.Gas != nil {
+		gasLimit = uint64(*args.Gas)
+	}
 
-		gasLimit := uint64(50000000)
-		if args.Gas != nil {
-			gasLimit = uint64(*args.Gas)
-		}
+	gasPrice := uint64(0)
+	if args.GasPrice != nil {
+		gasPrice = (*big.Int)(args.GasPrice).Uint64()
+	}
 
-		gasPrice := uint64(0)
-		if args.GasPrice != nil {
-			gasPrice = (*big.Int)(args.GasPrice).Uint64()
-		}
+	var fromAddress common.Address
+	if args.From != nil {
+		fromAddress = *args.From
+	}
 
-		var fromAddress common.Address
-		if args.From != nil {
-			fromAddress = *args.From
-		}
+	var bData []byte
+	if inputData != nil {
+		callData := transaction.NewCallData(inputData)
+		bData, _ = callData.Marshal()
+	}
 
-		var bData []byte
-		if inputData != nil {
-			callData := transaction.NewCallData(inputData)
-			bData, _ = callData.Marshal()
-		}
+	txM := transaction.NewTransaction(
+		fromAddress,
+		toAddress,
+		amount,
+		gasLimit,
+		gasPrice,
+		0, // maxTimeUse
+		bData,
+		nil,           // relatedAddresses
+		common.Hash{}, // lastDeviceKey
+		common.Hash{}, // newDeviceKey
+		1,             // nonce
+		api.App.config.ChainId.Uint64(),
+	).(*transaction.Transaction)
 
-		txM = transaction.NewTransaction(
-			fromAddress,
-			toAddress,
-			amount,
-			gasLimit,
-			gasPrice,
-			0, // maxTimeUse
-			bData,
-			nil,           // relatedAddresses
-			common.Hash{}, // lastDeviceKey
-			common.Hash{}, // newDeviceKey
-			1,             // nonce
-			api.App.config.ChainId.Uint64(),
-		).(*transaction.Transaction)
-
-		txM.SetReadOnly(false)
-		if len(args.AuthList) > 0 {
-			txM.SetAuthorizationList(transaction.FromEthAuthorizationList(args.AuthList))
-			txM.SetType(uint64(eth_types.SetCodeTxType))
-		}
+	txM.SetReadOnly(false)
+	if len(args.AuthList) > 0 {
+		txM.SetAuthorizationList(transaction.FromEthAuthorizationList(args.AuthList))
+		txM.SetType(uint64(eth_types.SetCodeTxType))
 	}
 
 	rs, err := api.App.transactionProcessor.ProcessTransactionOffChain(txM)

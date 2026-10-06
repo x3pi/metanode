@@ -1,14 +1,6 @@
 package processor
 
 import (
-	"bytes"
-	"encoding/hex"
-	"encoding/json"
-	"github.com/ethereum/go-ethereum/crypto"
-	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
-	"google.golang.org/protobuf/proto"
-	"os"
 	"sync"
 	"testing"
 
@@ -172,101 +164,23 @@ func TestDeviceKeyHandlerMissingTransaction(t *testing.T) {
 	}
 }
 
-// TestTCPSetCodeSuiteFixture checks the actual suite encoder against node types.
-func TestTCPSetCodeSuiteFixture(t *testing.T) {
-	path := os.Getenv("TCP_SETCODE_FIXTURE")
-	if path == "" {
-		t.Skip("set TCP_SETCODE_FIXTURE to the suite's offline fixture")
-	}
-	data, err := os.ReadFile(path)
-	require.NoError(t, err)
-	var f map[string]string
-	require.NoError(t, json.Unmarshal(data, &f))
-	wire, err := hex.DecodeString(f["wire"])
-	require.NoError(t, err)
-	publicKey, err := hex.DecodeString(f["bls_public_key"])
-	require.NoError(t, err)
-	var wrapper pb.TransactionWithDeviceKey
-	require.NoError(t, proto.Unmarshal(wire, &wrapper))
-	require.NotNil(t, wrapper.Transaction)
-	tp := &TransactionProcessor{injectionQueue: make(chan injectionRequest, 1)}
+// TestLegacyCommandsRejected verifies that old SendTransaction, SendTransactions,
+// and SendTransactionWithDeviceKey are unconditionally rejected on this eth-only node.
+func TestLegacyCommandsRejected(t *testing.T) {
+	tp := &TransactionProcessor{injectionQueue: make(chan injectionRequest, 10)}
 	conn := NewMockConnection(e_common.Address{})
-	require.NoError(t, tp.ProcessTransactionFromClientWithDeviceKey(NewMockRequest(conn, NewMockMessage("SendTransactionWithDeviceKey", wire))))
-	require.Len(t, tp.injectionQueue, 1)
-	tx := (<-tp.injectionQueue).tx
-	require.NotNil(t, tx)
-	require.Equal(t, uint64(4), tx.GetType())
-	require.Equal(t, e_common.HexToHash(f["hash"]), tx.Hash())
-	require.True(t, tx.ValidSign(cm.PubkeyFromBytes(publicKey)))
-	require.True(t, tx.ValidEthSign())
-	require.Equal(t, e_common.HexToHash(f["eth_hash"]), tx.ToEthTransaction().Hash())
-	require.Equal(t, crypto.Keccak256Hash(wrapper.DeviceKey), tx.NewDeviceKey())
-	require.Len(t, tx.AuthorizationList(), 1)
-	authority, err := transaction.ToEthAuthorizationList(tx.AuthorizationList())[0].Authority()
-	require.NoError(t, err)
-	require.Equal(t, e_common.HexToAddress(f["authority"]), authority)
-	// Native signature must bind both the device chain and authorization tuple.
-	for _, mutate := range []func(*pb.Transaction){
-		func(p *pb.Transaction) { p.LastDeviceKey = bytes.Repeat([]byte{9}, 32) },
-		func(p *pb.Transaction) { p.NewDeviceKey = bytes.Repeat([]byte{9}, 32) },
-		func(p *pb.Transaction) { p.AuthorizationList[0].Nonce++ },
-		func(p *pb.Transaction) { p.AuthorizationList[0].Address = bytes.Repeat([]byte{9}, 20) },
-		func(p *pb.Transaction) { p.Sign[0] ^= 1 },
-	} {
-		changed := proto.Clone(wrapper.Transaction).(*pb.Transaction)
-		mutate(changed)
-		altered := &transaction.Transaction{}
-		altered.FromProto(changed)
-		require.False(t, altered.ValidSign(cm.PubkeyFromBytes(publicKey)))
-	}
+
+	err := tp.ProcessTransactionFromClient(NewMockRequest(conn, NewMockMessage("SendTransaction", []byte{0x01})))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SendTransaction (proto) is disabled")
+
+	err = tp.ProcessTransactionFromClientWithDeviceKey(NewMockRequest(conn, NewMockMessage("SendTransactionWithDeviceKey", []byte{0x01})))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SendTransactionWithDeviceKey is disabled")
+
+	err = tp.ProcessTransactionsFromClient(NewMockRequest(conn, NewMockMessage("SendTransactions", []byte{0x01})))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SendTransactions (proto batch) is disabled")
 }
 
-// TestProcessTransactionFromClient_SecpProtoType0xFF tests client TCP ingestion
-// of a Type 0xFF (Secp256k1 Proto TCP) transaction via SendTransaction.
-func TestProcessTransactionFromClient_SecpProtoType0xFF(t *testing.T) {
-	privKey, err := crypto.GenerateKey()
-	require.NoError(t, err)
-	from := crypto.PubkeyToAddress(privKey.PublicKey)
-	to := e_common.HexToAddress("0xCAFE00000000000000000000000000000000CAFE")
-
-	tx := &transaction.Transaction{}
-	tx.FromProto(&pb.Transaction{
-		FromAddress: from.Bytes(),
-		ToAddress:   to.Bytes(),
-		Amount:      []byte{0x01},
-		MaxGas:      21000,
-		MaxGasPrice: 1000,
-		MaxTimeUse:  1000,
-		ChainID:     991,
-		Type:        0xFF,
-	})
-	tx.SetNonce(0)
-	require.NoError(t, tx.SignSecpProto(privKey))
-
-	wireBytes, err := tx.Marshal()
-	require.NoError(t, err)
-
-	tp := &TransactionProcessor{
-		injectionQueue: make(chan injectionRequest, 10),
-	}
-	conn := NewMockConnection(from)
-
-	req := NewMockRequest(conn, NewMockMessage("SendTransaction", wireBytes))
-	err = tp.ProcessTransactionFromClient(req)
-	require.NoError(t, err)
-
-	require.Len(t, tp.injectionQueue, 1)
-	injected := <-tp.injectionQueue
-	assert.Equal(t, wireBytes, injected.rawBody)
-
-	// Execute deferred unmarshal and check transaction structure
-	unmarshaledTx := &transaction.Transaction{}
-	require.NoError(t, unmarshaledTx.Unmarshal(injected.rawBody))
-	assert.Equal(t, uint64(0xFF), unmarshaledTx.Type())
-	assert.Equal(t, tx.Hash(), unmarshaledTx.Hash())
-	assert.Equal(t, tx.SigningHash(), unmarshaledTx.SigningHash())
-	assert.True(t, unmarshaledTx.ValidSecpProtoSign())
-	assert.True(t, unmarshaledTx.ValidSecpSign())
-	assert.Equal(t, from, unmarshaledTx.FromAddress())
-}
 

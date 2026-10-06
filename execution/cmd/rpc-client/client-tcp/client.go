@@ -44,9 +44,10 @@ type Client struct {
 	transactionController client_types.TransactionController
 	subscribeSCAddresses  []common.Address
 
-	keepAliveStop chan struct{}
-	txErrorChan   chan error
-	txSuccessChan chan common.Hash
+	keepAliveStop          chan struct{}
+	txErrorChan            chan error
+	txSuccessChan          chan common.Hash
+	batchSuccessHashesChan chan []common.Hash
 }
 
 type receiptRequestType int
@@ -115,6 +116,7 @@ func NewClient(
 	clientContext.Handler = clientHandler
 	client.txErrorChan = clientHandler.TxErrorChan()
 	client.txSuccessChan = clientHandler.TxSuccessChan()
+	client.batchSuccessHashesChan = clientHandler.BatchSuccessHashesChan()
 	clientContext.SocketServer, _ = p_network.NewSocketServer(
 		nil,
 		clientContext.KeyPair,
@@ -617,17 +619,30 @@ drained:
 }
 
 // SendRawEthTransactions gửi batch EIP-2718 raw Ethereum transactions qua TCP.
-// Đợi TransactionSuccess response chứa batchHash hoặc TransactionError, hoặc timeout sau 5 giây.
+// Trả về hash của transaction đầu tiên trong batch được chấp nhận thành công.
 func (client *Client) SendRawEthTransactions(rawBatch [][]byte) (common.Hash, error) {
+	hashes, err := client.SendRawEthTransactionsDetailed(rawBatch)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if len(hashes) == 0 {
+		return common.Hash{}, fmt.Errorf("no transactions accepted from batch")
+	}
+	return hashes[0], nil
+}
+
+// SendRawEthTransactionsDetailed gửi batch EIP-2718 raw Ethereum transactions qua TCP
+// và trả về toàn bộ danh sách các transaction hash được chấp nhận thành công.
+func (client *Client) SendRawEthTransactionsDetailed(rawBatch [][]byte) ([]common.Hash, error) {
 	parentConn := client.clientContext.ConnectionsManager.ParentConnection()
 	if parentConn == nil || !parentConn.IsConnect() {
 		logger.Info("🔌 [RAW ETH TXs] Parent connection lost, reconnecting...")
 		if err := client.ReconnectToParent(); err != nil {
-			return common.Hash{}, fmt.Errorf("cannot send raw eth TXs: reconnect failed: %w", err)
+			return nil, fmt.Errorf("cannot send raw eth TXs: reconnect failed: %w", err)
 		}
 		parentConn = client.clientContext.ConnectionsManager.ParentConnection()
 		if parentConn == nil || !parentConn.IsConnect() {
-			return common.Hash{}, fmt.Errorf("cannot send raw eth TXs: still disconnected after reconnect")
+			return nil, fmt.Errorf("cannot send raw eth TXs: still disconnected after reconnect")
 		}
 	}
 
@@ -636,6 +651,7 @@ func (client *Client) SendRawEthTransactions(rawBatch [][]byte) (common.Hash, er
 		select {
 		case <-client.txErrorChan:
 		case <-client.txSuccessChan:
+		case <-client.batchSuccessHashesChan:
 		default:
 			goto drainedBatch
 		}
@@ -645,7 +661,7 @@ drainedBatch:
 	// Encode batch into RLP [][]byte
 	batchRLP, err := rlp.EncodeToBytes(rawBatch)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to RLP encode batch: %w", err)
+		return nil, fmt.Errorf("failed to RLP encode batch: %w", err)
 	}
 
 	err = client.clientContext.MessageSender.SendBytes(
@@ -654,16 +670,16 @@ drainedBatch:
 		batchRLP,
 	)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to send SendRawTransactions via TCP: %w", err)
+		return nil, fmt.Errorf("failed to send SendRawTransactions via TCP: %w", err)
 	}
 
 	select {
-	case batchHash := <-client.txSuccessChan:
-		return batchHash, nil
+	case hashes := <-client.batchSuccessHashesChan:
+		return hashes, nil
 	case err := <-client.txErrorChan:
-		return common.Hash{}, err
+		return nil, err
 	case <-time.After(5 * time.Second):
-		return common.Hash{}, fmt.Errorf("timeout waiting for SendRawTransactions response")
+		return nil, fmt.Errorf("timeout waiting for SendRawTransactions response")
 	}
 }
 
