@@ -275,9 +275,12 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 	tx := req.tx
 	var ethTxHash common.Hash
 	if req.rawEth {
+		startConv := time.Now()
 		metaTx, ethTx, err := tp.convertRawEth(req.rawBody)
+		metrics.RawEthConversionDuration.Observe(time.Since(startConv).Seconds())
 		if err != nil {
 			txErr := transaction.ClassifyEthTxError(err)
+			metrics.RawEthTxsRejectedTotal.WithLabelValues(fmt.Sprintf("%d", txErr.Code)).Inc()
 			logger.Warn("executeAndAddTx: rawEth conversion failed (code %d): %v", txErr.Code, err)
 			tp.sendTransactionError(req.conn, common.Hash{}, int64(txErr.Code), err.Error(), nil, req.msgID)
 			return
@@ -484,6 +487,8 @@ func (tp *TransactionProcessor) ProcessRawTransactionFromClient(
 	}
 
 	metrics.TxsReceivedTotal.Inc()
+	metrics.RawEthTxsReceivedTotal.Inc()
+	metrics.InjectionQueueDepth.Set(float64(len(tp.injectionQueue)))
 	return nil
 }
 
@@ -538,6 +543,10 @@ func (tp *TransactionProcessor) ProcessRawTransactionsFromClient(request network
 		tp.sendTransactionError(request.Connection(), common.Hash{}, int64(transaction.ErrExceedsMaxBatchSize.Code), err.Error(), nil, request.Message().ID())
 		return err
 	}
+
+	metrics.RawEthBatchSize.Observe(float64(len(rawEnvelopes)))
+	metrics.RawEthTxsReceivedTotal.Add(float64(len(rawEnvelopes)))
+	metrics.InjectionQueueDepth.Set(float64(len(tp.injectionQueue)))
 
 	logger.Info("🔥 ProcessRawTransactionsFromClient: Received batch of %d raw Ethereum transactions", len(rawEnvelopes))
 
@@ -595,7 +604,9 @@ func (tp *TransactionProcessor) ProcessRawTransactionsFromClient(request network
 					}
 					continue
 				}
+				startConv := time.Now()
 				metaTx, ethTx, err := tp.convertRawEth(rawEnv)
+				metrics.RawEthConversionDuration.Observe(time.Since(startConv).Seconds())
 				converted[idx] = convertedItem{
 					idx:    idx,
 					rawEnv: rawEnv,
@@ -616,6 +627,7 @@ func (tp *TransactionProcessor) ProcessRawTransactionsFromClient(request network
 	for idx, item := range converted {
 		if item.err != nil {
 			txErr := transaction.ClassifyEthTxError(item.err)
+			metrics.RawEthTxsRejectedTotal.WithLabelValues(fmt.Sprintf("%d", txErr.Code)).Inc()
 			var failedHash common.Hash
 			if item.ethTx != nil {
 				failedHash = item.ethTx.Hash()

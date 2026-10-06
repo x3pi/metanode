@@ -70,11 +70,29 @@ var (
 		Name: "master_rollup_committee_read_errors_total",
 		Help: "Total errors when reading active committee validator keys for rollup system attestations",
 	})
+
+	// RawEthTxsReceivedTotal counts raw EIP-2718 transactions received (TCP & RPC).
+	RawEthTxsReceivedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "master_raw_eth_txs_received_total",
+		Help: "Total raw Ethereum EIP-2718 transactions received",
+	})
+
+	// RawEthTxsRejectedTotal counts rejected raw transactions, labeled by error code.
+	RawEthTxsRejectedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "master_raw_eth_txs_rejected_total",
+		Help: "Total rejected raw Ethereum transactions, labeled by error code",
+	}, []string{"code"})
 )
 
 // ─── Gauges ──────────────────────────────────────────────────────────────────
 
 var (
+	// InjectionQueueDepth tracks the current depth of the async transaction injection queue.
+	InjectionQueueDepth = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "master_injection_queue_depth",
+		Help: "Current depth of the transaction injection queue",
+	})
+
 	// CurrentBlock tracks the latest block number.
 	CurrentBlock = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "master_current_block",
@@ -256,6 +274,20 @@ var (
 		Name:    "master_block_time_seconds",
 		Help:    "Time between consecutive blocks in seconds",
 		Buckets: []float64{0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0},
+	})
+
+	// RawEthBatchSize observes incoming TCP batch sizes for raw transactions.
+	RawEthBatchSize = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "master_raw_eth_batch_size",
+		Help:    "Size of incoming raw transaction batches",
+		Buckets: []float64{1, 5, 10, 50, 100, 250, 500, 1000},
+	})
+
+	// RawEthConversionDuration observes latency of decoding and validating raw Ethereum envelopes.
+	RawEthConversionDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "master_raw_eth_conversion_seconds",
+		Help:    "Latency of decoding and validating raw Ethereum envelopes in seconds",
+		Buckets: []float64{0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.005, 0.01},
 	})
 )
 
