@@ -155,36 +155,48 @@
             chmod 600 "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
             chown {{ ansible_user | default('abc') }}:{{ ansible_user | default('abc') }} "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
 
-    # ── Phase 2 (B4): Pre-flight Validator BLS Key Mismatch Check ───────────────
-    - name: Pre-flight validator BLS key verification (Phase 2 / B4)
+    # ── Pre-flight: the validator's BLS secret must produce the public key that genesis registers ──────────────
+    # Runs on the controller with the freshly built tool (it is never shipped to nodes). The secret goes through
+    # stdin and no_log keeps it out of argv, process lists and Ansible output. A mismatch (or a missing tool /
+    # missing bls_pubkey in production) FAILS the deploy: attestations from such a node would stay PENDING forever.
+    - name: Pre-flight validator BLS key verification
       when:
         - "deploy_action in ['setup', 'deploy', 'restart']"
         - bls_priv is defined and (bls_priv | length) > 0
+      delegate_to: localhost
+      become: false
       block:
-        - name: Check if bls_pubkey tool exists
+        - name: Check that the bls_pubkey tool was built
           ansible.builtin.stat:
-            path: "{{ bin_dir }}/bls_pubkey"
+            path: "{{ local_bin_dir }}/bls_pubkey"
           register: bls_pubkey_tool_stat
 
-        - name: Derive min-pk BLS public key from bls_priv using bls_pubkey tool
-          when: bls_pubkey_tool_stat.stat.exists
-          ansible.builtin.command: "{{ bin_dir }}/bls_pubkey -secret {{ bls_priv }} -hex"
+        - name: Require the tool and an explicit bls_pubkey (genesis must never fall back to the private key)
+          ansible.builtin.assert:
+            that:
+              - bls_pubkey_tool_stat.stat.exists
+              - bls_pubkey is defined and (bls_pubkey | length) > 0
+            fail_msg: >-
+              {{ inventory_hostname }}: bls_priv is set but {{ local_bin_dir }}/bls_pubkey is missing or bls_pubkey is not
+              configured; refusing to deploy without verifying the validator BLS key.
+
+        - name: Derive the min-pk BLS public key from bls_priv (secret via stdin, no_log)
+          ansible.builtin.command:
+            cmd: "{{ local_bin_dir }}/bls_pubkey -stdin -hex"
+            stdin: "{{ bls_priv }}"
           register: derived_bls_pubkey_res
           changed_when: false
+          no_log: true
 
         - name: Assert derived BLS pubkey matches configured bls_pubkey
-          when:
-            - bls_pubkey_tool_stat.stat.exists
-            - bls_pubkey is defined and (bls_pubkey | length) > 0
           ansible.builtin.assert:
             that:
               - (derived_bls_pubkey_res.stdout | trim | lower) == (bls_pubkey | trim | lower)
             fail_msg: >-
-              VALIDATOR BLS KEY MISMATCH on {{ inventory_hostname }}:
-              Derived BLS public key from bls_priv ({{ derived_bls_pubkey_res.stdout | trim | lower }})
-              does not match configured bls_pubkey ({{ bls_pubkey | trim | lower }}).
-              On-chain validator attestations would stay PENDING indefinitely!
-            success_msg: "Validator BLS key verified on {{ inventory_hostname }}: {{ derived_bls_pubkey_res.stdout | trim }}"
+              VALIDATOR BLS KEY MISMATCH on {{ inventory_hostname }}: bls_priv derives
+              {{ derived_bls_pubkey_res.stdout | trim | lower }} but bls_pubkey is {{ bls_pubkey | trim | lower }}.
+              Attestations from this validator would stay PENDING indefinitely.
+            success_msg: "Validator BLS key verified on {{ inventory_hostname }}"
 
     - name: Generate cluster genesis if not present or reset
       ansible.builtin.shell: |
@@ -334,7 +346,7 @@
           - (app_pepper | default('devnet-test-pepper')) != 'devnet-test-pepper'
           - (pk_admin_file_storage | default('87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623')) != '87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623'
         fail_msg: "FATAL: In production environment (metanode_env=production), master_password, app_pepper, and pk_admin_file_storage must be explicitly configured via Ansible Vault and cannot use devnet defaults!"
-      when: "(metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'"
+      when: "(metanode_env | default('production')) != 'devnet' and (node_env | default('production')) != 'devnet' and not (metanode_devnet | default(false) | bool)"
 
     - name: Deploy Execution Node config.json
       ansible.builtin.template:

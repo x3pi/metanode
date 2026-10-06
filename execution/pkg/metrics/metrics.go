@@ -155,10 +155,17 @@ var (
 		Help: "Age in seconds of the oldest pending registration request in relay queue",
 	})
 
-	// RollupAttestationPendingTotal tracks the number of pending rollup system attestations waiting for committee quorum in contract storage.
-	RollupAttestationPendingTotal = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "master_rollup_attestation_pending_total",
-		Help: "Current number of pending rollup system attestations waiting for committee quorum in contract storage",
+	// RollupAttestationStoredTotal / RollupAttestationCompletedTotal count attestation sets entering and leaving the
+	// pending store (contract storage). They are monotonic counters on purpose: they are bumped from the deterministic
+	// execution path, which may run the same tx more than once (speculative execution) and starts from zero after a
+	// restart, so an up/down gauge would drift. Use rate() / increase(); "pending" is approximately stored - completed.
+	RollupAttestationStoredTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "master_rollup_attestation_sets_stored_total",
+		Help: "Attestation sets written to the pending store (waiting for committee quorum); approximate under speculative re-execution",
+	})
+	RollupAttestationCompletedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "master_rollup_attestation_sets_completed_total",
+		Help: "Attestation sets removed from the pending store after quorum; approximate under speculative re-execution",
 	})
 
 	// ParentChainIDMismatch indicates whether the Parent Chain's reported chain ID differs from the local execution configuration.

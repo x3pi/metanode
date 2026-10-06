@@ -300,14 +300,15 @@ func TestRollupSystemAttestation_Metrics(t *testing.T) {
 	_ = ApplyAttestedSystemEvent(nil, e.stateDB, e.sc, comm, e.chainID, bBadSig, func(Store, AccountStateDB, []byte) error { return nil })
 	require.Equal(t, initBadSig+1, testutil.ToFloat64(metrics.RollupSignaturesRejectedTotal.WithLabelValues("invalid_signature")))
 
-	// 5. Pending gauge tracking in dbAttestationStore
-	initPending := testutil.ToFloat64(metrics.RollupAttestationPendingTotal)
+	// 5. Pending-store counters in dbAttestationStore
+	initStored := testutil.ToFloat64(metrics.RollupAttestationStoredTotal)
+	initDone := testutil.ToFloat64(metrics.RollupAttestationCompletedTotal)
 	key := RollupSystemPendingKey([]byte("metric_test_key"))
 	attStore := NewDBAttestationStore(e.sc)
 	attStore.Save(key, []RegistrationAttestation{{ValidatorPubkey: e.vals[0].PublicKey(), Signature: cm.Sign{}}})
-	require.Equal(t, initPending+1, testutil.ToFloat64(metrics.RollupAttestationPendingTotal))
+	require.Equal(t, initStored+1, testutil.ToFloat64(metrics.RollupAttestationStoredTotal))
 	attStore.Clear(key)
-	require.Equal(t, initPending, testutil.ToFloat64(metrics.RollupAttestationPendingTotal))
+	require.Equal(t, initDone+1, testutil.ToFloat64(metrics.RollupAttestationCompletedTotal))
 }
 
 type failingCommitteeMock struct {

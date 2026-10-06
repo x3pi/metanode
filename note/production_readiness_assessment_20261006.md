@@ -37,3 +37,15 @@
 
 ## Thứ tự đề xuất
 B1 (benchmark) → B4 (kiểm tra khoá ở deploy + metric) → B3 (runbook + thử cutover từ template ansible) → B2 (cụm nhiều máy riêng) → B5 → P1-3/4/5/6.
+
+
+## Review đợt 2026-10-06 (commit 4f1b2feb, fc4c2b3c, 456538a0 của agent khác) — đã sửa
+1. **Pre-flight khóa BLS là mã chết:** tool `bls_pubkey` không được build/phân phối ở bất kỳ role nào nên bước kiểm tra luôn bị bỏ qua; ngoài ra khóa riêng nằm trên dòng lệnh và log ansible. Đã chuyển sang chạy trên controller với tool do role `build` dựng, khóa qua stdin + `no_log`, FAIL khi thiếu tool/`bls_pubkey`. Kiểm bằng ansible thật: khớp ⇒ pass; lệch ⇒ fail; `-vvv` không lộ khóa (0 lần xuất hiện); thiếu `bls_pubkey` ⇒ fail. (Genesis từng rơi về dùng chính khóa riêng làm public key khi thiếu `bls_pubkey`.)
+2. **Kiểm tra định kỳ gọi `GetAllValidators` mỗi 30 giây** từ goroutine timer — đúng kiểu duyệt NOMT mà `chain_state.go` cảnh báo sẽ race với commit nền. Thêm `VerifyNodeCommitteeKeyLight` (chỉ tra cứu điểm), lỗi đọc thì giữ trạng thái cũ; kiểm đúng chuẩn đầy đủ chỉ chạy lúc khởi động.
+3. **Gauge pending attestation trôi** (cập nhật trong đường thực thi, có thể chạy lặp khi speculative, về 0 khi restart) ⇒ thay bằng 2 counter `..._sets_stored_total` / `..._sets_completed_total`.
+4. **Committee đếm trùng khóa:** các validator chung một khóa BLS (kiểu ansible hiện tại) làm phình N và ngưỡng f+1 tới mức không bao giờ đạt. Provider nay đếm khóa phân biệt (test + mutation).
+5. **Điều kiện chặn bí mật devnet** dùng `or` nên chặn cả triển khai devnet khi chỉ một trong hai biến là devnet; đổi thành "production trừ khi khai báo devnet" (kiểm 5 trường hợp bằng ansible thật).
+6. **Runbook cutover** dùng tên unit/đường dẫn/cổng/playbook/message proto không tồn tại (`metanode-exec-cluster`, `/opt/metanode/exec/data`, `site.yml`, cổng 8545, `bls_pubkey -priv`, `CreditAttestationRequest`…) — nguy hiểm vì chứa lệnh `rm -rf`. Đã viết lại theo `deploy_clusters.sh`/inventory/`backend.go` thật; vẫn CHƯA diễn tập.
+7. `deploy_clusters.sh`: nhánh dự phòng đọc mật khẩu bỏ qua giá trị Jinja `{{ ... }}`. `reset_clusters.sh`: bỏ mật khẩu sudo ghi cứng, yêu cầu biến môi trường `SUDO_PASS`.
+- Kiểm trực tiếp trên node thật (cụm cô lập): `/health` `committee_key=ok`, `/readiness` 200, `master_validator_committee_key_valid 1`; cố ý đặt sai `Databases.BLSPrivateKey` ⇒ `committee_key=mismatch`, `/readiness` 503, metric 0.
+- **Còn mở (cần user):** mật khẩu sudo dev `1234@abcd` vẫn xuất hiện ở nhiều file được theo dõi (`OPERATIONS_GUIDE.md`, `consensus/metanode/scripts/node/*`, `execution/cmd/tool/tps_blast/*`, `migrate-to-btrfs-lvm.sh`) và trong lịch sử git — cần đổi mật khẩu ở máy thật và quyết định có làm sạch lịch sử không.

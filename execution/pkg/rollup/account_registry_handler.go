@@ -376,7 +376,7 @@ func (s *dbAttestationStore) Save(key common.Hash, atts []RegistrationAttestatio
 	}
 	raw, ok := s.db.StorageValue(RollupSystemAddress, key)
 	if !ok || len(raw) == 0 {
-		metrics.RollupAttestationPendingTotal.Inc()
+		metrics.RollupAttestationStoredTotal.Inc()
 	}
 	buf := make([]byte, 0, len(atts)*attestEntrySize)
 	for _, a := range atts {
@@ -389,7 +389,7 @@ func (s *dbAttestationStore) Save(key common.Hash, atts []RegistrationAttestatio
 func (s *dbAttestationStore) Clear(key common.Hash) {
 	raw, ok := s.db.StorageValue(RollupSystemAddress, key)
 	if ok && len(raw) > 0 {
-		metrics.RollupAttestationPendingTotal.Dec()
+		metrics.RollupAttestationCompletedTotal.Inc()
 	}
 	s.db.SetStorageValue(RollupSystemAddress, key, nil)
 }

@@ -628,7 +628,7 @@ if not pwd and os.path.exists(inv_path):
         for line in f:
             if 'ansible_become_pass:' in line and '!vault' not in line:
                 val = line.split('ansible_become_pass:', 1)[1].strip().strip('"\'')
-                if val:
+                if val and not val.startswith('{{'):
                     pwd = val
                     break
 

@@ -432,7 +432,6 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	var rollupLastDBNonce uint64
 	rollupLastProgress := time.Now()
 
-
 	// Attestations are signed with this validator's committee key (Databases.BLSPrivateKey, the key whose public half is
 	// the validator account's PublicKeyBls); single-key deployments fall back to the node key.
 	attestKey := app.keyPair
@@ -467,16 +466,19 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			if isVal, warn := tx_processor.VerifyNodeCommitteeKey(app.chainState, app.keyPair.Address(), cfgAddr, attestPub); isVal {
-				if warn != "" {
-					metrics.ValidatorCommitteeKeyValid.Set(0)
-					app.setCommitteeKeyStatus("mismatch", warn)
-					logger.Error("❌ [COMMITTEE-KEY-PERIODIC-CHECK] %s", warn)
-				} else {
-					metrics.ValidatorCommitteeKeyValid.Set(1)
-					app.setCommitteeKeyStatus("ok", "")
-				}
-			} else {
+			// Point lookups only (never GetAllValidators from a timer goroutine: it races the block commit).
+			isVal, warn, err := tx_processor.VerifyNodeCommitteeKeyLight(app.chainState, app.keyPair.Address(), cfgAddr, attestPub)
+			switch {
+			case err != nil:
+				logger.Warn("[COMMITTEE-KEY-PERIODIC-CHECK] state read failed, keeping previous status: %v", err)
+			case isVal && warn != "":
+				metrics.ValidatorCommitteeKeyValid.Set(0)
+				app.setCommitteeKeyStatus("mismatch", warn)
+				logger.Error("❌ [COMMITTEE-KEY-PERIODIC-CHECK] %s", warn)
+			case isVal:
+				metrics.ValidatorCommitteeKeyValid.Set(1)
+				app.setCommitteeKeyStatus("ok", "")
+			default:
 				metrics.ValidatorCommitteeKeyValid.Set(-1)
 				app.setCommitteeKeyStatus("not_validator", "")
 			}
@@ -772,7 +774,6 @@ func (app *App) initProcessors() {
 		return handleRollupSystemEvent(app, store, stateDB, data)
 	}), app.accountRegistryHandler)
 }
-
 
 // handleRollupSystemEvent applies a system event deterministically.
 // store is passed as BOTH readStore and writeStore: it is the live block-execution store

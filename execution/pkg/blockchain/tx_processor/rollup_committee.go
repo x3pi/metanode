@@ -36,6 +36,7 @@ func (p *LiveCommitteeProvider) GetActiveCommitteeBLSKeys() ([]cm.PublicKey, err
 		return nil, fmt.Errorf("GetAllValidators: %w", err)
 	}
 	var keys []cm.PublicKey
+	seen := make(map[cm.PublicKey]bool)
 	for _, v := range validators {
 		if v.IsJailed() {
 			continue
@@ -51,7 +52,14 @@ func (p *LiveCommitteeProvider) GetActiveCommitteeBLSKeys() ([]cm.PublicKey, err
 		if len(pub) != len(cm.PublicKey{}) {
 			continue
 		}
-		keys = append(keys, cm.PubkeyFromBytes(pub))
+		// Distinct keys only: validators sharing one BLS key (the single-cluster-key deployment) are one signer, so
+		// counting them separately would inflate N and the f+1 threshold beyond what can ever be signed.
+		k := cm.PubkeyFromBytes(pub)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		keys = append(keys, k)
 	}
 	return keys, nil
 }
@@ -127,4 +135,51 @@ func VerifyNodeCommitteeKey(chainState *blockchain.ChainState, nodeAddr, cfgAddr
 	}
 
 	return true, ""
+}
+
+// VerifyNodeCommitteeKeyLight is the periodic-health variant of VerifyNodeCommitteeKey. It uses point lookups only
+// (GetValidator + account state) and NEVER enumerates the validator trie: GetAllValidators walks NOMT and must not run
+// concurrently with the background commit of a block (see the note in ChainState on the boundary-block race), which a
+// timer goroutine cannot guarantee. It does not check the top-N committee cap; the exact check runs once at startup.
+// err != nil means the state could not be read this time: callers keep the previous status instead of flipping it.
+func VerifyNodeCommitteeKeyLight(chainState *blockchain.ChainState, nodeAddr, cfgAddr common.Address, attestPubKey cm.PublicKey) (isValidator bool, warning string, err error) {
+	if chainState == nil || chainState.GetStakeStateDB() == nil || chainState.GetAccountStateDB() == nil {
+		return false, "", nil
+	}
+	stakeDB := chainState.GetStakeStateDB()
+	candidates := []common.Address{nodeAddr}
+	if cfgAddr != (common.Address{}) && cfgAddr != nodeAddr {
+		candidates = append(candidates, cfgAddr)
+	}
+	for _, addr := range candidates {
+		v, verr := stakeDB.GetValidator(addr)
+		if verr != nil {
+			return false, "", fmt.Errorf("GetValidator(%s): %w", addr.Hex(), verr)
+		}
+		if v == nil {
+			continue
+		}
+		if v.IsJailed() {
+			return true, fmt.Sprintf("validator %s is JAILED in stake state: attestations will not be accepted by peers", addr.Hex()), nil
+		}
+		if total := v.TotalStakedAmount(); total == nil || total.Sign() <= 0 {
+			return true, fmt.Sprintf("validator %s has zero or non-positive stake (%v): attestations will not be accepted by peers", addr.Hex(), total), nil
+		}
+		as, aerr := chainState.GetAccountStateDB().AccountState(addr)
+		if aerr != nil {
+			return false, "", fmt.Errorf("AccountState(%s): %w", addr.Hex(), aerr)
+		}
+		if as == nil {
+			return true, fmt.Sprintf("validator %s has no account state in database", addr.Hex()), nil
+		}
+		pub := as.PublicKeyBls()
+		if len(pub) != len(cm.PublicKey{}) {
+			return true, fmt.Sprintf("validator %s on-chain account has missing or invalid PublicKeyBls (len %d, expected 48)", addr.Hex(), len(pub)), nil
+		}
+		if !bytes.Equal(pub, attestPubKey.Bytes()) {
+			return true, fmt.Sprintf("validator %s on-chain PublicKeyBls (%x) does not match node attestation key (%x): attestations will stay PENDING forever", addr.Hex(), pub, attestPubKey.Bytes()), nil
+		}
+		return true, "", nil
+	}
+	return false, "", nil
 }

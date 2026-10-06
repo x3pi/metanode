@@ -39,7 +39,7 @@ Commit mốc hiện tại: `4d8438b8` (dev, **chưa push**). Mọi con số "đ�
 - Đã thêm 7 metrics chuẩn Prometheus trong `execution/pkg/metrics/metrics.go`:
   - `master_validator_committee_key_valid` (gauge: 1=OK, 0=mismatch, -1=not validator).
   - `master_account_registration_pending_total` & `master_account_registration_pending_max_age_seconds` (từ `RegistrationRelay.PendingStats()`).
-  - `master_rollup_attestation_pending_total` (đếm pending attestation trong smart contract storage).
+  - `master_rollup_attestation_sets_stored_total` và `master_rollup_attestation_sets_completed_total` (counter; pending ≈ stored − completed, xấp xỉ do thực thi speculative).
   - `master_rollup_signatures_rejected_total` (counter labeled by `reason`: `non_committee`, `invalid_signature`, `invalid_length`, `duplicate`).
   - `master_rollup_committee_read_errors_total` (counter đếm lỗi khi đọc committee từ trie).
   - `master_parent_chain_id_mismatch` (gauge: 1=mismatch, 0=OK).
