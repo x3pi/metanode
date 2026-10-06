@@ -166,6 +166,14 @@ func VerifyTransaction(
 		}
 	}
 
+	// P0-9: Enforce strict envelope binding at mempool admission
+	if tx != nil && len(tx.RawEnvelope()) > 0 {
+		if err := transaction.ValidateEnvelopeBinding(tx); err != nil {
+			logger.Error("❌ [VERIFY] envelope binding failed: txHash=%s, err=%v", tx.Hash().Hex(), err)
+			return transaction.ErrEnvelopeBindingMismatch
+		}
+	}
+
 	var as types.AccountState
 	if preloadedState != nil {
 		// PERFORMANCE: Use pre-loaded state from batch caller (avoids sync.Map lookup)

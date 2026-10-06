@@ -20,13 +20,15 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
-// sigCacheKey binds a verified-signature cache entry to (tx hash, signature bytes, BLS key it was
-// verified against). Keying by tx hash alone would let a tx copy carrying a forged signature ride on
-// the cache entry of the genuine one.
+// sigCacheKey binds a verified-signature cache entry to (tx hash, canonical proto fields hash,
+// signature bytes, BLS key it was verified against). Keying by tx hash alone would let a tx copy
+// carrying a forged signature or mutated proto fields ride on the cache entry of the genuine one.
 func sigCacheKey(tx types.Transaction, blsKey []byte) eth_common.Hash {
-	buf := make([]byte, 0, 32+len(tx.Sign().Bytes())+len(blsKey))
+	buf := make([]byte, 0, 64+len(tx.Sign().Bytes())+len(blsKey))
 	h := tx.Hash()
 	buf = append(buf, h[:]...)
+	protoHash := tx.ProtoHash()
+	buf = append(buf, protoHash[:]...)
 	buf = append(buf, tx.Sign().Bytes()...)
 	buf = append(buf, blsKey...)
 	return crypto.Keccak256Hash(buf)
@@ -122,6 +124,14 @@ func (p sigPolicy) chainBindingError(tx types.Transaction) *transaction.Transact
 // It mirrors the signature rules of VerifyTransaction (BLS key if registered, ETH secp256k1 otherwise or
 // as fallback; AccountType 1 additionally requires the ETH signature).
 func checkTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy) bool {
+	if tx == nil {
+		return false
+	}
+	if len(tx.RawEnvelope()) > 0 {
+		if err := transaction.ValidateEnvelopeBinding(tx); err != nil {
+			return false
+		}
+	}
 	if pol.secpProtoError(tx) != nil {
 		return false
 	}
@@ -235,6 +245,16 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 	}
 	queued := make([]*pending, total)
 	parallel(total, 64, func(i int) {
+		if txs[i] == nil {
+			valid[i] = false
+			return
+		}
+		if len(txs[i].RawEnvelope()) > 0 {
+			if err := transaction.ValidateEnvelopeBinding(txs[i]); err != nil {
+				valid[i] = false
+				return
+			}
+		}
 		as := loadState(i)
 		if pol.senderRegisteredError(txs[i], as) != nil {
 			valid[i] = false

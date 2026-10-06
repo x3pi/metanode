@@ -1,6 +1,7 @@
 package transaction
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math/big"
@@ -9,6 +10,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/types"
 )
 
 const (
@@ -85,6 +88,177 @@ func ValidateEthTxEnvelope(ethTx *e_types.Transaction, expectedChainId *big.Int)
 	return nil
 }
 
+// ValidateProtoEnvelopeBinding verifies that when RawEnvelope is present, every single
+// execution-relevant field in pTx matches the canonical representation derived directly
+// from RawEnvelope. This closes P0-9 where an attacker keeps a valid RawEnvelope
+// but mutates proto fields (To, Amount, Nonce, MaxGas, MaxGasPrice, GasFeeCap, GasTipCap,
+// Data/CallData/DeployData, Type, ChainID, R/S/V, AccessList, BlobVersionedHashes,
+// MaxFeePerBlobGas, AuthorizationList).
+func ValidateProtoEnvelopeBinding(pTx *pb.Transaction) error {
+	if pTx == nil {
+		return errors.New("transaction proto is nil")
+	}
+	if len(pTx.RawEnvelope) == 0 {
+		return nil // Non-envelope transaction (e.g. system BLS transaction)
+	}
+
+	ethTx := new(e_types.Transaction)
+	if err := ethTx.UnmarshalBinary(pTx.RawEnvelope); err != nil {
+		return fmt.Errorf("%w: failed to unmarshal RawEnvelope: %v", ErrInvalidEnvelope, err)
+	}
+
+	canonicalPb := &pb.Transaction{}
+	var convErr error
+	switch ethTx.Type() {
+	case e_types.LegacyTxType:
+		convErr = FromEthLegacyTx(ethTx, canonicalPb)
+	case e_types.AccessListTxType:
+		convErr = FromEthEIP2930Tx(ethTx, canonicalPb)
+	case e_types.DynamicFeeTxType:
+		convErr = FromEthEIP1559Tx(ethTx, canonicalPb)
+	case e_types.BlobTxType:
+		convErr = FromEthBlobTx(ethTx, canonicalPb)
+	case e_types.SetCodeTxType:
+		convErr = FromEthSetCodeTx(ethTx, canonicalPb)
+	default:
+		convErr = errors.New("unsupported Ethereum transaction type")
+	}
+	if convErr != nil {
+		return fmt.Errorf("%w: failed to convert EthTx to canonical proto: %v", ErrInvalidEnvelope, convErr)
+	}
+
+	// 1. FromAddress
+	if !bytes.Equal(pTx.FromAddress, canonicalPb.FromAddress) {
+		return fmt.Errorf("%w: FromAddress mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	// 2. ToAddress
+	if !bytes.Equal(pTx.ToAddress, canonicalPb.ToAddress) {
+		return fmt.Errorf("%w: ToAddress mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	// 3. Amount
+	if !bytes.Equal(pTx.Amount, canonicalPb.Amount) {
+		return fmt.Errorf("%w: Amount mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	// 4. Nonce
+	if !bytes.Equal(pTx.Nonce, canonicalPb.Nonce) {
+		return fmt.Errorf("%w: Nonce mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	// 5. MaxGas
+	if pTx.MaxGas != canonicalPb.MaxGas {
+		return fmt.Errorf("%w: MaxGas mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, pTx.MaxGas, canonicalPb.MaxGas)
+	}
+
+	// 6. MaxGasPrice
+	if pTx.MaxGasPrice != canonicalPb.MaxGasPrice {
+		return fmt.Errorf("%w: MaxGasPrice mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, pTx.MaxGasPrice, canonicalPb.MaxGasPrice)
+	}
+
+	// 7. GasFeeCap
+	if !bytes.Equal(pTx.GasFeeCap, canonicalPb.GasFeeCap) {
+		return fmt.Errorf("%w: GasFeeCap mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	// 8. GasTipCap
+	if !bytes.Equal(pTx.GasTipCap, canonicalPb.GasTipCap) {
+		return fmt.Errorf("%w: GasTipCap mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	// 9. Data (covers CallData / DeployData)
+	if !bytes.Equal(pTx.Data, canonicalPb.Data) {
+		return fmt.Errorf("%w: Data mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	// 10. Type
+	if pTx.Type != canonicalPb.Type {
+		return fmt.Errorf("%w: Type mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, pTx.Type, canonicalPb.Type)
+	}
+
+	// 11. ChainID
+	if pTx.ChainID != canonicalPb.ChainID {
+		return fmt.Errorf("%w: ChainID mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, pTx.ChainID, canonicalPb.ChainID)
+	}
+
+	// 12. R, S, V
+	if !bytes.Equal(pTx.R, canonicalPb.R) {
+		return fmt.Errorf("%w: R mismatch", ErrEnvelopeBindingMismatch)
+	}
+	if !bytes.Equal(pTx.S, canonicalPb.S) {
+		return fmt.Errorf("%w: S mismatch", ErrEnvelopeBindingMismatch)
+	}
+	if !bytes.Equal(pTx.V, canonicalPb.V) {
+		return fmt.Errorf("%w: V mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	// 13. AccessList
+	if len(pTx.AccessList) != len(canonicalPb.AccessList) {
+		return fmt.Errorf("%w: AccessList length mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, len(pTx.AccessList), len(canonicalPb.AccessList))
+	}
+	for i := range pTx.AccessList {
+		if !bytes.Equal(pTx.AccessList[i].Address, canonicalPb.AccessList[i].Address) {
+			return fmt.Errorf("%w: AccessList[%d].Address mismatch", ErrEnvelopeBindingMismatch, i)
+		}
+		if len(pTx.AccessList[i].StorageKeys) != len(canonicalPb.AccessList[i].StorageKeys) {
+			return fmt.Errorf("%w: AccessList[%d].StorageKeys length mismatch", ErrEnvelopeBindingMismatch, i)
+		}
+		for j := range pTx.AccessList[i].StorageKeys {
+			if !bytes.Equal(pTx.AccessList[i].StorageKeys[j], canonicalPb.AccessList[i].StorageKeys[j]) {
+				return fmt.Errorf("%w: AccessList[%d].StorageKeys[%d] mismatch", ErrEnvelopeBindingMismatch, i, j)
+			}
+		}
+	}
+
+	// 14. BlobVersionedHashes
+	if len(pTx.BlobVersionedHashes) != len(canonicalPb.BlobVersionedHashes) {
+		return fmt.Errorf("%w: BlobVersionedHashes length mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, len(pTx.BlobVersionedHashes), len(canonicalPb.BlobVersionedHashes))
+	}
+	for i := range pTx.BlobVersionedHashes {
+		if !bytes.Equal(pTx.BlobVersionedHashes[i], canonicalPb.BlobVersionedHashes[i]) {
+			return fmt.Errorf("%w: BlobVersionedHashes[%d] mismatch", ErrEnvelopeBindingMismatch, i)
+		}
+	}
+
+	// 15. MaxFeePerBlobGas
+	if !bytes.Equal(pTx.MaxFeePerBlobGas, canonicalPb.MaxFeePerBlobGas) {
+		return fmt.Errorf("%w: MaxFeePerBlobGas mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	// 16. AuthorizationList
+	if len(pTx.AuthorizationList) != len(canonicalPb.AuthorizationList) {
+		return fmt.Errorf("%w: AuthorizationList length mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, len(pTx.AuthorizationList), len(canonicalPb.AuthorizationList))
+	}
+	for i := range pTx.AuthorizationList {
+		a := pTx.AuthorizationList[i]
+		e := canonicalPb.AuthorizationList[i]
+		if a.ChainID != e.ChainID || !bytes.Equal(a.Address, e.Address) || a.Nonce != e.Nonce ||
+			!bytes.Equal(a.YParity, e.YParity) || !bytes.Equal(a.R, e.R) || !bytes.Equal(a.S, e.S) {
+			return fmt.Errorf("%w: AuthorizationList[%d] mismatch", ErrEnvelopeBindingMismatch, i)
+		}
+	}
+
+	// 17. Sign (R || S || V)
+	if len(canonicalPb.Sign) > 0 && !bytes.Equal(pTx.Sign, canonicalPb.Sign) {
+		return fmt.Errorf("%w: Sign mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	return nil
+}
+
+// ValidateEnvelopeBinding validates that tx's proto fields match its RawEnvelope.
+func ValidateEnvelopeBinding(tx types.Transaction) error {
+	if tx == nil {
+		return errors.New("transaction is nil")
+	}
+	pTx, ok := tx.Proto().(*pb.Transaction)
+	if !ok || pTx == nil {
+		return nil
+	}
+	return ValidateProtoEnvelopeBinding(pTx)
+}
+
 // ClassifyEthTxError maps an envelope validation, mempool, or execution error into an explicit typed TransactionError.
 // It checks errors.As first for typed TransactionError instances, and falls back to string pattern matching.
 func ClassifyEthTxError(err error) *TransactionError {
@@ -97,6 +271,10 @@ func ClassifyEthTxError(err error) *TransactionError {
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(msg, "envelope binding") || strings.Contains(msg, "binding mismatch"):
+		return ErrEnvelopeBindingMismatch
+	case strings.Contains(msg, "raw envelope") || strings.Contains(msg, "invalid raw envelope"):
+		return ErrInvalidEnvelope
 	case strings.Contains(msg, "pre-eip-155"):
 		return ErrPreEIP155
 	case strings.Contains(msg, "chain id"):
@@ -187,6 +365,10 @@ func GethStandardRPCError(err error) (int, string) {
 		return -32000, "transaction envelope exceeds maximum allowed size"
 	case ErrDecodeRawEth.Code:
 		return -32000, "failed to decode raw Ethereum transaction envelope"
+	case ErrEnvelopeBindingMismatch.Code:
+		return -32000, "transaction fields do not match raw envelope"
+	case ErrInvalidEnvelope.Code:
+		return -32000, "invalid raw envelope bytes"
 	default:
 		return -32000, te.Description
 	}

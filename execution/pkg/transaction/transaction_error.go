@@ -121,6 +121,8 @@ var (
 	ErrTxTypeNotSupported     = &TransactionError{85, "transaction type not supported"}
 	ErrMaxInitCodeSizeExceeded = &TransactionError{86, "max initcode size exceeded"}
 	ErrGasLimitReached        = &TransactionError{87, "gas limit reached"}
+	ErrEnvelopeBindingMismatch = &TransactionError{88, "transaction fields do not match raw envelope"}
+	ErrInvalidEnvelope         = &TransactionError{89, "invalid raw envelope bytes"}
 )
 
 var CodeToError = map[int64]*TransactionError{
@@ -219,6 +221,8 @@ var CodeToError = map[int64]*TransactionError{
 	85: ErrTxTypeNotSupported,
 	86: ErrMaxInitCodeSizeExceeded,
 	87: ErrGasLimitReached,
+	88: ErrEnvelopeBindingMismatch,
+	89: ErrInvalidEnvelope,
 }
 
 // DescriptionToError provides reverse lookup from error description to TransactionError.

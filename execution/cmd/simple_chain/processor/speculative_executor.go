@@ -1131,6 +1131,17 @@ func PrepareTransactions(epochData *pb.ExecutableBlock) []types.Transaction {
 	seenTxs := make(map[common.Hash]bool, len(rawTxs))
 	dedupedTxs := make([]types.Transaction, 0, len(rawTxs))
 	for _, tx := range rawTxs {
+		if tx == nil {
+			continue
+		}
+		// P0-9: Drop transactions whose proto fields do not match their RawEnvelope
+		// before deduplication, so an invalid variant cannot occupy the hash slot.
+		if len(tx.RawEnvelope()) > 0 {
+			if err := transaction.ValidateEnvelopeBinding(tx); err != nil {
+				fmt.Printf("❌ [PrepareTransactions] dropping tx with invalid envelope binding: hash=%s err=%v\n", tx.Hash().Hex(), err)
+				continue
+			}
+		}
 		hash := tx.Hash()
 		if seenTxs[hash] {
 			continue // Skip duplicates

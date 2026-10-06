@@ -725,6 +725,20 @@ func (t *Transaction) Hash() (hash common.Hash) {
 		return hash
 	}
 
+	hash = t.ProtoHash()
+	t.cachedHash.Store(&hash)
+	return hash
+}
+
+// ProtoHash computes the canonical keccak256 hash of the transaction's protobuf fields
+// (TransactionHashData). Unlike Hash(), which returns keccak256(RawEnvelope) for Ethereum
+// transactions, ProtoHash always covers all protobuf execution fields.
+// This is used to ensure signature cache keys bind to the exact proto payload.
+func (t *Transaction) ProtoHash() (hash common.Hash) {
+	if t == nil || t.proto == nil {
+		return common.Hash{}
+	}
+
 	hashPb := txHashDataPool.Get().(*pb.TransactionHashData)
 	defer func() {
 		// Clear to avoid memory leaks of referenced slices safely
@@ -766,17 +780,11 @@ func (t *Transaction) Hash() (hash common.Hash) {
 
 	bHashPb, err := proto.MarshalOptions{Deterministic: true}.MarshalAppend(buf, hashPb)
 	if err != nil {
-		logger.Error("Transaction.Hash: proto.Marshal failed: %v", err)
+		logger.Error("Transaction.ProtoHash: proto.Marshal failed: %v", err)
 		return common.Hash{}
 	}
 
-	// Tính giá trị băm
-	hash = crypto.Keccak256Hash(bHashPb)
-
-	// Lưu vào cache (atomic)
-	t.cachedHash.Store(&hash)
-
-	return hash
+	return crypto.Keccak256Hash(bHashPb)
 }
 
 // SigningHash computes the deterministic Keccak256 hash of TransactionHashData
@@ -1214,6 +1222,17 @@ func (t *Transaction) SetToAddress(address common.Address) {
 
 // validate
 func (t *Transaction) ValidEthSign() bool {
+	if t == nil || t.proto == nil {
+		return false
+	}
+	// P0-9: If RawEnvelope is present, strictly verify that all proto fields match
+	// the canonical representation decoded from RawEnvelope.
+	if len(t.proto.RawEnvelope) > 0 {
+		if err := ValidateProtoEnvelopeBinding(t.proto); err != nil {
+			logger.Warn("ValidEthSign envelope binding failed: %v", err)
+			return false
+		}
+	}
 	ethTx := t.ToEthTransaction()
 	if ethTx == nil {
 		return false

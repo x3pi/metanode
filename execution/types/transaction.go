@@ -66,6 +66,7 @@ type Transaction interface {
 	EthHash() e_common.Hash
 	RawEnvelope() []byte
 	SetRawEnvelope([]byte)
+	ProtoHash() e_common.Hash
 
 	ValidEthSign() bool
 	ValidSecpProtoSign() bool
