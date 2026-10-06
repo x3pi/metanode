@@ -258,6 +258,22 @@ func ValidateProtoEnvelopeBinding(pTx *pb.Transaction) error {
 		return fmt.Errorf("%w: Sign mismatch", ErrEnvelopeBindingMismatch)
 	}
 
+	// 18. Fields no EIP-2718 envelope can carry must keep their canonical (zero) values. They are still read by
+	// execution (ReadOnly switches the VM to read-only mode, NewDeviceKey is written into the sender's account
+	// state), so an attacker must not be able to set them on a copy of a genuinely signed envelope.
+	if pTx.MaxTimeUse != canonicalPb.MaxTimeUse {
+		return fmt.Errorf("%w: MaxTimeUse mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, pTx.MaxTimeUse, canonicalPb.MaxTimeUse)
+	}
+	if !bytes.Equal(pTx.LastDeviceKey, canonicalPb.LastDeviceKey) {
+		return fmt.Errorf("%w: LastDeviceKey mismatch", ErrEnvelopeBindingMismatch)
+	}
+	if !bytes.Equal(pTx.NewDeviceKey, canonicalPb.NewDeviceKey) {
+		return fmt.Errorf("%w: NewDeviceKey mismatch", ErrEnvelopeBindingMismatch)
+	}
+	if pTx.ReadOnly != canonicalPb.ReadOnly {
+		return fmt.Errorf("%w: ReadOnly mismatch", ErrEnvelopeBindingMismatch)
+	}
+
 	return nil
 }
 
