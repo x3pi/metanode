@@ -11,8 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// secp256k1 curve order N
-var secp256k1N = crypto.S256().Params().N
+// secp256k1 curve order N is declared in eth_validation.go
 
 func TestSigningHash_InvariantWithSignature(t *testing.T) {
 	tx := &Transaction{

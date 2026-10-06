@@ -15,6 +15,8 @@ const (
 	SendTransaction              = "SendTransaction"
 	SendTransactionWithDeviceKey = "SendTransactionWithDeviceKey"
 	SendTransactions             = "SendTransactions"
+	SendRawTransaction           = "SendRawTransaction"
+	SendRawTransactions          = "SendRawTransactions"
 	GetAccountState              = "GetAccountState"
 	SubscribeToAddress           = "SubscribeToAddress"
 	GetStakeState                = "GetStakeState"

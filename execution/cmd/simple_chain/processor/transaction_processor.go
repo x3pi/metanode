@@ -3,6 +3,7 @@ package processor
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"os"
 	"runtime"
 	"strconv"
@@ -12,10 +13,13 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	e_types "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rlp"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
+	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
@@ -81,8 +85,13 @@ type injectionRequest struct {
 	conn    network.Connection
 	tx      types.Transaction
 	rawBody []byte // Raw bytes for deferred unmarshal (zero-copy readLoop)
+	rawEth  bool   // If true, rawBody is an EIP-2718 raw Ethereum envelope
 	msgID   string // Header ID từ request gốc, dùng để gửi response thành công
 }
+
+// RawEthTxConverter converts an Ethereum raw binary envelope into an internal MetaTx
+// and returns the decoded go-ethereum transaction.
+type RawEthTxConverter func(rawEth []byte) (types.Transaction, *e_types.Transaction, error)
 
 type TransactionProcessor struct {
 	env           ITransactionProcessorEnvironment
@@ -103,6 +112,8 @@ type TransactionProcessor struct {
 	storageManager             *storage.StorageManager
 	executedMvmIds             sync.Map
 	chainState                 *blockchain.ChainState
+
+	rawEthConverter RawEthTxConverter
 
 	// Embedded struct for handling off-chain and read-only execution
 	*TxVirtualExecutor
@@ -228,12 +239,57 @@ func (tp *TransactionProcessor) startInjectionWorkers(n int) {
 	}
 }
 
+// SetRawEthConverter sets the custom raw Ethereum envelope converter.
+func (tp *TransactionProcessor) SetRawEthConverter(converter RawEthTxConverter) {
+	tp.rawEthConverter = converter
+}
+
+// defaultRawEthConverter is used as fallback when no custom converter is injected.
+func (tp *TransactionProcessor) defaultRawEthConverter(rawEth []byte) (types.Transaction, *e_types.Transaction, error) {
+	ethTx := new(e_types.Transaction)
+	if err := ethTx.UnmarshalBinary(rawEth); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode Ethereum transaction: %w", err)
+	}
+	var expectedChainId *big.Int
+	if tp.chainState != nil && tp.chainState.GetConfig() != nil {
+		expectedChainId = tp.chainState.GetConfig().ChainId
+	}
+	if err := transaction.ValidateEthTxEnvelope(ethTx, expectedChainId); err != nil {
+		return nil, nil, err
+	}
+	metaTx, err := transaction.NewTransactionFromEth(ethTx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to build MetaTx from EthTx: %w", err)
+	}
+	return metaTx, ethTx, nil
+}
+
+func (tp *TransactionProcessor) convertRawEth(rawEth []byte) (types.Transaction, *e_types.Transaction, error) {
+	if tp.rawEthConverter != nil {
+		return tp.rawEthConverter(rawEth)
+	}
+	return tp.defaultRawEthConverter(rawEth)
+}
+
 // executeAndAddTx handles the full lifecycle of a transaction injection:
 // virtual execution and pool addition.
 // If rawBody is set, unmarshal here (deferred from readLoop for throughput).
 func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 	tx := req.tx
-	if tx == nil && len(req.rawBody) > 0 {
+	var ethTxHash common.Hash
+	if req.rawEth {
+		metaTx, ethTx, err := tp.convertRawEth(req.rawBody)
+		if err != nil {
+			logger.Error("executeAndAddTx: rawEth conversion failed: %v", err)
+			tp.sendTransactionError(req.conn, common.Hash{}, int64(transaction.InvalidSign.Code), err.Error(), nil, req.msgID)
+			return
+		}
+		ethTxHash = ethTx.Hash()
+		if bc := blockchain.GetBlockChainInstance(); bc != nil {
+			_ = bc.SetEthHashMapblsHash(ethTxHash, metaTx.Hash())
+		}
+		tx = metaTx
+	} else if tx == nil && len(req.rawBody) > 0 {
 		// Deferred unmarshal: readLoop skipped this for throughput
 		parsedTx := &transaction.Transaction{}
 		if err := parsedTx.Unmarshal(req.rawBody); err != nil {
@@ -249,7 +305,7 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_UNMARSHALED", "Transaction successfully unmarshaled from client request")
 
-	err := tp.processTransactionFromClient(req.conn, tx, req.msgID)
+	err := tp.processTransactionFromClient(req.conn, tx, req.msgID, ethTxHash)
 	if err != nil {
 		logger.Debug("Async injection failed for tx %s: %v", tx.Hash().Hex(), err)
 	}
@@ -304,8 +360,13 @@ func (tp *TransactionProcessor) SendRawTransaction(ctx context.Context, rawTx []
 func (tp *TransactionProcessor) ProcessTransactionFromClient(
 	request network.Request,
 ) error {
-	// NOTE: Removed checkConnectionInitialized — gây race condition với ProcessInitConnection
-	// trong worker pool. TX được validate bằng signature/nonce.
+	// In secp mode, old proto-based SendTransaction is disabled; clients must use SendRawTransaction.
+	if tp.chainState != nil && tp.chainState.GetConfig() != nil && tp.chainState.GetConfig().SecpOnlyTxSignatures() {
+		err := fmt.Errorf("SendTransaction (proto) is disabled on this chain (tx_signature_mode is secp); use SendRawTransaction with EIP-2718 envelope")
+		logger.Error("❌ [TX REJECTED] %v", err)
+		tp.sendTransactionError(request.Connection(), common.Hash{}, int64(transaction.InvalidSign.Code), err.Error(), nil, request.Message().ID())
+		return err
+	}
 
 	var isExistOverloaded bool
 	value, exists := sharedmemory.GlobalSharedMemory.Read("pendingOverloaded")
@@ -354,10 +415,14 @@ func (tp *TransactionProcessor) ProcessTransactionFromClient(
 func (tp *TransactionProcessor) ProcessTransactionFromClientWithDeviceKey(
 	request network.Request,
 ) error {
-	// NOTE: Removed checkConnectionInitialized — nó gây race condition.
-	// ProcessInitConnection chưa kịp xử lý (worker pool) khi TX handler chạy,
-	// dẫn đến connection address = zero → TX bị reject sai.
-	// TX đã được validate bằng signature/nonce, không cần check connection init.
+	// In secp mode, BLS/DeviceKey-based SendTransactionWithDeviceKey is disabled; clients must use SendRawTransaction.
+	if tp.chainState != nil && tp.chainState.GetConfig() != nil && tp.chainState.GetConfig().SecpOnlyTxSignatures() {
+		err := fmt.Errorf("SendTransactionWithDeviceKey is disabled on this chain (tx_signature_mode is secp); use SendRawTransaction with EIP-2718 envelope")
+		logger.Error("❌ [TX REJECTED] %v", err)
+		tp.sendTransactionError(request.Connection(), common.Hash{}, int64(transaction.InvalidSign.Code), err.Error(), nil, request.Message().ID())
+		return err
+	}
+
 	connAddr := request.Connection().Address()
 
 	transactionWithDeviceKey := &pb.TransactionWithDeviceKey{}
@@ -445,6 +510,14 @@ func (tp *TransactionProcessor) ProcessTransactionFromRpcWithDeviceKey(
 }
 
 func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Request) error {
+	// In secp mode, old proto-based SendTransactions is disabled; clients must use SendRawTransactions.
+	if tp.chainState != nil && tp.chainState.GetConfig() != nil && tp.chainState.GetConfig().SecpOnlyTxSignatures() {
+		err := fmt.Errorf("SendTransactions (proto batch) is disabled on this chain (tx_signature_mode is secp); use SendRawTransactions with EIP-2718 envelopes")
+		logger.Error("❌ [TX REJECTED] %v", err)
+		tp.sendTransactionError(request.Connection(), common.Hash{}, int64(transaction.InvalidSign.Code), err.Error(), nil, request.Message().ID())
+		return err
+	}
+
 	startTime := time.Now()
 	logger.Info("🔥 ProcessTransactionsFromClient CALLED, cmd_length=%d, body_length=%d", len(request.Message().Command()), len(request.Message().Body()))
 
@@ -548,6 +621,7 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 	conn network.Connection,
 	tx types.Transaction,
 	msgID string,
+	respHash common.Hash,
 ) error {
 	// Always save txHash → connection mapping for txHash-based receipt delivery
 	// This ensures `BroadCastReceipts` sends the receipt back to the sender
@@ -557,6 +631,13 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 			MsgID:     msgID,
 			CreatedAt: time.Now(),
 		})
+		if respHash != (common.Hash{}) && respHash != tx.Hash() {
+			tp.env.StoreTxHashConnEntry(respHash, TxHashConnEntry{
+				Conn:      conn,
+				MsgID:     msgID,
+				CreatedAt: time.Now(),
+			})
+		}
 	}
 
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_RECEIVED", fmt.Sprintf("Received from connection: %s", conn.RemoteAddrSafe()))
@@ -566,13 +647,242 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 	if err != nil {
 		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_FAILED", err.Error())
 		logger.Error("❌ [TX REJECTED] AddTransactionToPool failed: txHash=%s, msg=%s", tx.Hash().Hex(), err.Error())
-		tp.sendTransactionError(conn, tx.Hash(), code, err.Error(), nil, msgID)
+		errHash := tx.Hash()
+		if respHash != (common.Hash{}) {
+			errHash = respHash
+		}
+		tp.sendTransactionError(conn, errHash, code, err.Error(), nil, msgID)
 		return err
 	}
 
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_SUCCESS", "Transaction is pending in mempool")
-	// Gửi phản hồi thành công với txHash, code 0 và msgID
-	tp.sendTransactionResult(conn, tx.Hash(), msgID)
+	// Gửi phản hồi thành công với respHash (nếu có, ví dụ ethTxHash), code 0 và msgID
+	finalRespHash := tx.Hash()
+	if respHash != (common.Hash{}) {
+		finalRespHash = respHash
+	}
+	tp.sendTransactionResult(conn, finalRespHash, msgID)
+	return nil
+}
+
+// requireSecpModeForRawEth rejects SendRawTransaction(s) unless the chain runs in secp mode. A raw envelope carries no
+// BLS signature, so on a bls_legacy chain it would only pollute the pool and fail later at block execution.
+func (tp *TransactionProcessor) requireSecpModeForRawEth(request network.Request) error {
+	if tp.chainState != nil && tp.chainState.GetConfig() != nil && tp.chainState.GetConfig().SecpOnlyTxSignatures() {
+		return nil
+	}
+	err := fmt.Errorf("SendRawTransaction(s) is only available when tx_signature_mode is %q", config.TxSignatureModeSecp)
+	logger.Error("❌ [TX REJECTED] %v", err)
+	tp.sendTransactionError(request.Connection(), common.Hash{}, int64(transaction.InvalidSign.Code), err.Error(), nil, request.Message().ID())
+	return err
+}
+
+// ProcessRawTransactionFromClient receives a single raw Ethereum EIP-2718 envelope via TCP.
+func (tp *TransactionProcessor) ProcessRawTransactionFromClient(
+	request network.Request,
+) error {
+	if err := tp.requireSecpModeForRawEth(request); err != nil {
+		return err
+	}
+
+	var isExistOverloaded bool
+	value, exists := sharedmemory.GlobalSharedMemory.Read("pendingOverloaded")
+
+	if !exists {
+		isExistOverloaded = false
+	} else {
+		var ok bool
+		isExistOverloaded, ok = value.(bool)
+		if !ok {
+			err := fmt.Errorf("error: cannot convert 'pendingOverloaded' to bool")
+			request.Connection().Disconnect()
+			return err
+		}
+	}
+	if isExistOverloaded {
+		err := fmt.Errorf("system overloaded. waiting")
+		request.Connection().Disconnect()
+		return err
+	}
+
+	body := request.Message().Body()
+	if len(body) == 0 {
+		err := fmt.Errorf("empty raw transaction body")
+		tp.sendTransactionError(request.Connection(), common.Hash{}, int64(transaction.InvalidSign.Code), err.Error(), nil, request.Message().ID())
+		return err
+	}
+
+	rawBody := make([]byte, len(body))
+	copy(rawBody, body)
+
+	// ZERO-COPY READLOOP: Enqueue raw bytes to async worker pool — non-blocking
+	select {
+	case tp.injectionQueue <- injectionRequest{
+		conn:    request.Connection(),
+		rawBody: rawBody,
+		rawEth:  true,
+		msgID:   request.Message().ID(),
+	}:
+		// Successfully enqueued
+	default:
+		logger.Warn("injectionQueue is full, dropping raw transaction (queue_size=%d)", InjectionQueueSize)
+		err := fmt.Errorf("injection queue full, system overloaded")
+		tp.sendTransactionError(request.Connection(), common.Hash{}, -1, err.Error(), nil, request.Message().ID())
+		return err
+	}
+
+	metrics.TxsReceivedTotal.Inc()
+	return nil
+}
+
+// ProcessRawTransactionsFromClient receives a batch of raw Ethereum EIP-2718 envelopes via TCP,
+// encoded as RLP [][]byte.
+func (tp *TransactionProcessor) ProcessRawTransactionsFromClient(request network.Request) error {
+	if err := tp.requireSecpModeForRawEth(request); err != nil {
+		return err
+	}
+
+	var isExistOverloaded bool
+	value, exists := sharedmemory.GlobalSharedMemory.Read("pendingOverloaded")
+
+	if !exists {
+		isExistOverloaded = false
+	} else {
+		var ok bool
+		isExistOverloaded, ok = value.(bool)
+		if !ok {
+			err := fmt.Errorf("error: cannot convert 'pendingOverloaded' to bool")
+			request.Connection().Disconnect()
+			return err
+		}
+	}
+	if isExistOverloaded {
+		err := fmt.Errorf("system overloaded. waiting")
+		request.Connection().Disconnect()
+		return err
+	}
+
+	startTime := time.Now()
+	body := request.Message().Body()
+	if len(body) == 0 {
+		err := fmt.Errorf("empty raw transaction batch")
+		tp.sendTransactionError(request.Connection(), common.Hash{}, int64(transaction.InvalidSign.Code), err.Error(), nil, request.Message().ID())
+		return err
+	}
+
+	var rawEnvelopes [][]byte
+	if err := rlp.DecodeBytes(body, &rawEnvelopes); err != nil {
+		logger.Error("❌ ProcessRawTransactionsFromClient: rlp decode failed: %v", err)
+		tp.sendTransactionError(request.Connection(), common.Hash{}, int64(transaction.InvalidSign.Code), fmt.Sprintf("invalid batch RLP format: %v", err), nil, request.Message().ID())
+		return fmt.Errorf("invalid batch RLP format: %w", err)
+	}
+
+	if len(rawEnvelopes) == 0 {
+		err := fmt.Errorf("empty raw transaction batch")
+		tp.sendTransactionError(request.Connection(), common.Hash{}, int64(transaction.InvalidSign.Code), err.Error(), nil, request.Message().ID())
+		return err
+	}
+
+	logger.Info("🔥 ProcessRawTransactionsFromClient: Received batch of %d raw Ethereum transactions", len(rawEnvelopes))
+
+	bc := blockchain.GetBlockChainInstance()
+	processedTxs := make([]types.Transaction, 0, len(rawEnvelopes))
+	var firstEthTxHash common.Hash
+	for _, rawEnv := range rawEnvelopes {
+		metaTx, ethTx, err := tp.convertRawEth(rawEnv)
+		if err != nil {
+			logger.Error("ProcessRawTransactionsFromClient: convert failed: %v", err)
+			continue
+		}
+		if firstEthTxHash == (common.Hash{}) {
+			firstEthTxHash = ethTx.Hash()
+		}
+		if bc != nil {
+			_ = bc.SetEthHashMapblsHash(ethTx.Hash(), metaTx.Hash())
+		}
+		processedTxs = append(processedTxs, metaTx)
+
+		tx_processor.GlobalTxTraceStore.UpdateTrace(metaTx.Hash(), "BATCH_UNMARSHALED", "Raw Ethereum transaction received in batch from client")
+
+		if tp.env != nil {
+			tp.env.StoreTxHashConnEntry(metaTx.Hash(), TxHashConnEntry{
+				Conn:      request.Connection(),
+				MsgID:     request.Message().ID(),
+				CreatedAt: time.Now(),
+			})
+			tp.env.StoreTxHashConnEntry(ethTx.Hash(), TxHashConnEntry{
+				Conn:      request.Connection(),
+				MsgID:     request.Message().ID(),
+				CreatedAt: time.Now(),
+			})
+		}
+	}
+
+	if len(processedTxs) == 0 {
+		err := fmt.Errorf("all transactions in batch failed decoding/validation")
+		tp.sendTransactionError(request.Connection(), common.Hash{}, int64(transaction.InvalidSign.Code), err.Error(), nil, request.Message().ID())
+		return err
+	}
+
+	maxChunkSize := 0
+	if tp.chainState != nil && tp.chainState.GetConfig() != nil {
+		maxChunkSize = tp.chainState.GetConfig().TxVerificationChunkSize
+	}
+	if maxChunkSize <= 0 {
+		maxChunkSize = runtime.GOMAXPROCS(0) * 50
+		if maxChunkSize < 1000 {
+			maxChunkSize = 1000
+		} else if maxChunkSize > 5000 {
+			maxChunkSize = 5000
+		}
+	}
+
+	var allErrors = make([]error, 0, len(processedTxs))
+	for i := 0; i < len(processedTxs); i += maxChunkSize {
+		end := i + maxChunkSize
+		if end > len(processedTxs) {
+			end = len(processedTxs)
+		}
+		chunkTxs := processedTxs[i:end]
+		chunkErrs := tp.AddTransactionsToPool(chunkTxs)
+		allErrors = append(allErrors, chunkErrs...)
+	}
+
+	queueFullErrs := 0
+	for i, err := range allErrors {
+		if err != nil {
+			tx_processor.GlobalTxTraceStore.UpdateTrace(processedTxs[i].Hash(), "MEMPOOL_ADD_FAILED", err.Error())
+			queueFullErrs++
+			errCode := int64(-1)
+			errMsg := err.Error()
+			if strings.HasPrefix(errMsg, "[code:") {
+				if idx := strings.Index(errMsg, "] "); idx > 0 {
+					if code, parseErr := strconv.ParseInt(errMsg[6:idx], 10, 64); parseErr == nil {
+						errCode = code
+						errMsg = errMsg[idx+2:]
+					}
+				}
+			}
+			logger.Error("❌ [TX REJECTED] Batch AddTransactionToPool failed: txHash=%s, code=%d, msg=%s",
+				processedTxs[i].Hash().Hex(), errCode, errMsg)
+			tp.sendTransactionError(request.Connection(), processedTxs[i].Hash(), errCode, errMsg, nil, "")
+		} else {
+			tx_processor.GlobalTxTraceStore.UpdateTrace(processedTxs[i].Hash(), "MEMPOOL_ADD_SUCCESS", "Transaction is pending in mempool")
+		}
+	}
+
+	logger.Info("🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: %d", queueFullErrs)
+	if len(processedTxs) > queueFullErrs {
+		firstHash := processedTxs[0].Hash()
+		if firstEthTxHash != (common.Hash{}) {
+			firstHash = firstEthTxHash
+		}
+		tp.sendTransactionResult(request.Connection(), firstHash, request.Message().ID())
+	}
+	elapsed := time.Since(startTime)
+	if elapsed > 10*time.Millisecond {
+		logger.Warn("⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took %v", elapsed)
+	}
 	return nil
 }
 

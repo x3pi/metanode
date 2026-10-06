@@ -37,6 +37,14 @@ func buildMetaTxFromEthTx(
 	app *App,
 ) ([]byte, *mt_transaction.Transaction, error) {
 
+	// 0. secp mode only: strict envelope validation (pre-EIP-155, chainId, malleable s, recover sender).
+	// bls_legacy chains keep their previous admission behaviour (e.g. keyless pre-EIP-155 deployments).
+	if app.chainState.GetConfig().SecpOnlyTxSignatures() {
+		if err := mt_transaction.ValidateEthTxEnvelope(ethTx, chainID); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	// 1. Derive sender from the Ethereum TX signature
 	signer := types.LatestSignerForChainID(chainID)
 	fromAddress, err := types.Sender(signer, ethTx)
