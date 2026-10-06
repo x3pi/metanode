@@ -421,10 +421,14 @@ case "$COMMAND" in
         fi
         ;;
     monitors)
-        echo -e "\033[0;31m❌ [LỖI] Lệnh monitors chưa được hỗ trợ trong wrapper.\033[0m"
-        exit 1
+        bash "${SCRIPT_DIR}/monitors/start_monitors.sh" status
+        exit 0
         ;;
 esac
+
+if [[ "$WITH_FIREWALL" == "true" ]]; then
+    OPEN_PORTS="true"
+fi
 
 if [[ -z "$TARGET_NODE" && "$ALL_NODES" == "true" ]]; then
     TARGET_NODE="all"
@@ -946,11 +950,12 @@ if [ $ansible_exit -eq 0 ]; then
     if [ -d "/opt/metanode/parent_chain_0" ]; then
         p_port=$(grep -E '^\s*parent_chain_http_port:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
         p_port="${p_port:-18601}"
+        p_ip="${DEPLOY_IP:-127.0.0.1}"
         echo -e "\n🏛️ Danh sách Parent Chain RPC (IP & Port):"
-        echo -e "  • parent_chain_0: http://127.0.0.1:${p_port} (Chain ID: 991, BFT Leader)"
-        echo -e "  • parent_chain_1: http://127.0.0.1:$((p_port + 1)) (Chain ID: 991, Replica)"
-        echo -e "  • parent_chain_2: http://127.0.0.1:$((p_port + 2)) (Chain ID: 991, Replica)"
-        echo -e "  • parent_chain_3: http://127.0.0.1:$((p_port + 3)) (Chain ID: 991, Replica)"
+        echo -e "  • parent_chain_0: http://${p_ip}:${p_port} (Chain ID: 991, BFT Leader)"
+        echo -e "  • parent_chain_1: http://${p_ip}:$((p_port + 1)) (Chain ID: 991, Replica)"
+        echo -e "  • parent_chain_2: http://${p_ip}:$((p_port + 2)) (Chain ID: 991, Replica)"
+        echo -e "  • parent_chain_3: http://${p_ip}:$((p_port + 3)) (Chain ID: 991, Replica)"
     fi
 
     # Tự động đồng bộ cấu hình sang metanode-suite (update-ip.sh)

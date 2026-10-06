@@ -381,6 +381,31 @@ if [ "${1:-}" == "unignore" ] || [ "${1:-}" == "--unignore" ]; then
     exit 0
 fi
 
+# ─── ACTION: CHECK STATUS OF MONITORS ─────────────────────────────────────────
+if [ "${1:-}" == "status" ] || [ "${1:-}" == "--status" ]; then
+    echo "🔍 Trạng thái các tiến trình Monitor ngầm:"
+    found=0
+    for d in /tmp/metanode-monitors-*; do
+        [ -d "$d" ] || continue
+        ns="${d#/tmp/metanode-monitors-}"
+        for pid_f in "$d"/*.pid; do
+            [ -f "$pid_f" ] || continue
+            p_name=$(basename "$pid_f" .pid)
+            pid=$(cat "$pid_f" 2>/dev/null || echo "")
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                echo "  • [${ns}] ${p_name}: ▶️ RUNNING (PID ${pid})"
+                found=1
+            else
+                echo "  • [${ns}] ${p_name}: ⏹️ STOPPED (stale PID ${pid})"
+            fi
+        done
+    done
+    if [ $found -eq 0 ]; then
+        echo "  • Chưa có monitor nào đang chạy."
+    fi
+    exit 0
+fi
+
 # ─── ACTION: STOP LOCAL MONITORS ─────────────────────────────────────────────
 if [ "${1:-}" == "stop" ] || [ "${1:-}" == "--stop" ]; then
     echo "🛑 Đang dừng monitor namespace ${MONITOR_NAMESPACE}..."

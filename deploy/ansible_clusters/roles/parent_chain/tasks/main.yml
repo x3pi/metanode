@@ -64,7 +64,7 @@
 # endpoint are internal and are opened only to the other cluster members (plus `ufw_extra_sources`, e.g. a monitoring
 # host that scrapes metrics).
 - name: Firewall (UFW) Configuration for Parent Chain
-  when: "deploy_action == 'open_ports'"
+  when: "deploy_action == 'open_ports' or (open_ports | default(false) | bool)"
   block:
     - name: Check if UFW is active on Parent Chain host
       ansible.builtin.command: ufw status
