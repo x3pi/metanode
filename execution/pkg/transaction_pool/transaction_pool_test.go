@@ -1,6 +1,7 @@
 package transaction_pool
 
 import (
+	"errors"
 	"math/big"
 	"sort"
 	"sync"
@@ -457,3 +458,145 @@ func TestConcurrent_AddAndCount(t *testing.T) {
 	wg.Wait()
 	assert.Equal(t, writers, pool.CountTransactions())
 }
+
+func makeTestTxWithGas(fromByte byte, nonce uint64, gasPrice uint64, data []byte) types.Transaction {
+	from := common.Address{}
+	from[0] = fromByte
+	to := common.Address{}
+	to[0] = 0xFF
+
+	return transaction.NewTransaction(
+		from,
+		to,
+		big.NewInt(100),
+		21000,         // maxGas
+		gasPrice,      // maxGasPrice
+		0,             // maxTimeUse
+		data,          // data (differentiates hash)
+		nil,           // relatedAddresses
+		common.Hash{}, // lastDeviceKey
+		common.Hash{}, // newDeviceKey
+		nonce,
+		1, // chainId
+	)
+}
+
+func TestTransactionPool_ReplacementTx_IdenticalHash(t *testing.T) {
+	pool := NewTransactionPool()
+	tx := makeTestTxWithGas(0x01, 0, 100, []byte{0x01})
+
+	require.NoError(t, pool.AddTransaction(tx))
+	err := pool.AddTransaction(tx)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, transaction.ErrAlreadyKnown), "identical tx must return ErrAlreadyKnown")
+}
+
+func TestTransactionPool_ReplacementTx_Underpriced(t *testing.T) {
+	pool := NewTransactionPool()
+	tx1 := makeTestTxWithGas(0x01, 0, 100, []byte{0x01})
+	require.NoError(t, pool.AddTransaction(tx1))
+
+	// 5% bump: 105 < 110 threshold
+	tx2 := makeTestTxWithGas(0x01, 0, 105, []byte{0x02})
+	err := pool.AddTransaction(tx2)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, transaction.ErrReplacementUnderpriced), "underpriced bump must return ErrReplacementUnderpriced")
+
+	// Lower price: 90 < 110
+	tx3 := makeTestTxWithGas(0x01, 0, 90, []byte{0x03})
+	err = pool.AddTransaction(tx3)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, transaction.ErrReplacementUnderpriced), "lower price must return ErrReplacementUnderpriced")
+
+	// Pool count still 1
+	assert.Equal(t, 1, pool.CountTransactions())
+}
+
+func TestTransactionPool_ReplacementTx_Success(t *testing.T) {
+	pool := NewTransactionPool()
+	tx1 := makeTestTxWithGas(0x01, 0, 100, []byte{0x01})
+	require.NoError(t, pool.AddTransaction(tx1))
+
+	// 15% bump: 115 >= 110 threshold
+	tx2 := makeTestTxWithGas(0x01, 0, 115, []byte{0x02})
+	require.NoError(t, pool.AddTransaction(tx2))
+
+	// Count remains 1
+	assert.Equal(t, 1, pool.CountTransactions())
+
+	// tx1 removed from hash map, tx2 present
+	_, foundOld := pool.GetTransactionByHash(tx1.Hash())
+	assert.False(t, foundOld, "old tx hash should be removed from txHashMap")
+
+	foundNewTx, foundNew := pool.GetTransactionByHash(tx2.Hash())
+	assert.True(t, foundNew, "new tx hash should be present in txHashMap")
+	assert.Equal(t, uint64(115), foundNewTx.MaxGasPrice())
+}
+
+func TestTransactionPool_BatchReplacement(t *testing.T) {
+	pool := NewTransactionPool()
+	tx1 := makeTestTxWithGas(0x01, 0, 100, []byte{0x01})
+	require.NoError(t, pool.AddTransaction(tx1))
+
+	// Batch replace with 20% bump
+	tx2 := makeTestTxWithGas(0x01, 0, 120, []byte{0x02})
+	pool.AddTransactions([]types.Transaction{tx2})
+
+	assert.Equal(t, 1, pool.CountTransactions())
+	foundNewTx, foundNew := pool.GetTransactionByHash(tx2.Hash())
+	assert.True(t, foundNew)
+	assert.Equal(t, uint64(120), foundNewTx.MaxGasPrice())
+}
+
+func TestTransactionPool_GetPendingNonce_Consecutive(t *testing.T) {
+	pool := NewTransactionPool()
+	fromByte := byte(0x42)
+	addr := common.Address{0: fromByte}
+
+	// Pool empty
+	assert.Equal(t, uint64(5), pool.GetPendingNonce(addr, 5))
+
+	// Add 5 consecutive txs: nonces 5, 6, 7, 8, 9
+	for n := uint64(5); n < 10; n++ {
+		require.NoError(t, pool.AddTransaction(makeTestTxWithGas(fromByte, n, 10, []byte{byte(n)})))
+	}
+
+	assert.Equal(t, 5, pool.GetPendingCount(addr))
+	assert.Equal(t, uint64(10), pool.GetPendingNonce(addr, 5))
+}
+
+func TestTransactionPool_GetPendingNonce_NonceGap(t *testing.T) {
+	pool := NewTransactionPool()
+	fromByte := byte(0x43)
+	addr := common.Address{0: fromByte}
+
+	// Add nonces 0, 1, 3 (gap at nonce 2)
+	require.NoError(t, pool.AddTransaction(makeTestTxWithGas(fromByte, 0, 10, []byte{0})))
+	require.NoError(t, pool.AddTransaction(makeTestTxWithGas(fromByte, 1, 10, []byte{1})))
+	require.NoError(t, pool.AddTransaction(makeTestTxWithGas(fromByte, 3, 10, []byte{3})))
+
+	// Starts from 0: sees 0, 1, then stops at gap 2
+	assert.Equal(t, uint64(2), pool.GetPendingNonce(addr, 0))
+
+	// Fill the gap by adding nonce 2
+	require.NoError(t, pool.AddTransaction(makeTestTxWithGas(fromByte, 2, 10, []byte{2})))
+
+	// Now sees 0, 1, 2, 3 -> returns 4
+	assert.Equal(t, uint64(4), pool.GetPendingNonce(addr, 0))
+}
+
+func TestTransactionPool_GetPendingNonce_StaleMempoolTx(t *testing.T) {
+	pool := NewTransactionPool()
+	fromByte := byte(0x44)
+	addr := common.Address{0: fromByte}
+
+	// Pool has nonces 3, 4, 5, 6
+	for n := uint64(3); n <= 6; n++ {
+		require.NoError(t, pool.AddTransaction(makeTestTxWithGas(fromByte, n, 10, []byte{byte(n)})))
+	}
+
+	// On-chain state nonce is already 5 (nonces 3 and 4 were already mined on chain)
+	// Progression starts at 5: sees 5, 6 -> returns 7
+	assert.Equal(t, uint64(7), pool.GetPendingNonce(addr, 5))
+}
+

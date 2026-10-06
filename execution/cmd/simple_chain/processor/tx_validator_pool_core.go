@@ -5,6 +5,7 @@ package processor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -271,6 +272,14 @@ func (vp *TxValidatorPool) checkSecpProtoIngress(tx types.Transaction) (int64, e
 	return 0, nil
 }
 
+// GetTransactionPool returns the underlying mempool transaction pool.
+func (vp *TxValidatorPool) GetTransactionPool() *transaction_pool.TransactionPool {
+	if vp == nil {
+		return nil
+	}
+	return vp.transactionPool
+}
+
 // AddTransactionToPool validates and adds a transaction to the pool
 func (vp *TxValidatorPool) AddTransactionToPool(tx types.Transaction) (int64, error) {
 	return vp.addTransactionToPoolInternal(tx, false)
@@ -377,6 +386,10 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 	err := vp.transactionPool.AddTransaction(tx)
 	if err != nil {
 		logger.Error("❌ [TX FLOW] Failed to add transaction to pool: %v", err)
+		var te *transaction.TransactionError
+		if errors.As(err, &te) {
+			return te.Code, err
+		}
 		return transaction.AddToPoolError.Code, fmt.Errorf("failed to add transaction %s to pool: %w", tx.Hash().Hex(), err)
 	}
 
