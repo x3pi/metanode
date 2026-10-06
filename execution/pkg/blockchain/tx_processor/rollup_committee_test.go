@@ -102,3 +102,67 @@ func TestLiveCommitteeProviderCountsDistinctKeys(t *testing.T) {
 	require.Len(t, keys, 1, "4 validators with one shared key are 1 signer")
 	require.Equal(t, shared.PublicKey(), keys[0])
 }
+
+// P0-1b: Verify that arbitrary accounts that register as a validator with zero stake
+// (e.g. calling registerValidator without stake delegation) CANNOT enter the active validator committee.
+func TestP0_1b_ZeroStakeOrUnstakedValidatorCannotEnterCommittee(t *testing.T) {
+	bls.Init()
+	cs := setupTestChainState(t)
+
+	// 1. Setup a genuine validator with positive stake (1000 MTN) and BLS key
+	valKP := bls.GenerateKeyPair()
+	valAcc := state.NewAccountState(valKP.Address())
+	valAcc.AddBalance(big.NewInt(1_000_000_000_000_000_000))
+	valAcc.SetPublicKeyBls(valKP.PublicKey().Bytes())
+	cs.GetAccountStateDB().SetState(valAcc)
+	addTestCommitteeValidator(t, cs, valKP)
+
+	// 2. Setup an attacker account that registers as a validator with ZERO stake (like registerValidator)
+	attackerKP := bls.GenerateKeyPair()
+	attackerAcc := state.NewAccountState(attackerKP.Address())
+	attackerAcc.AddBalance(big.NewInt(1_000_000_000_000_000_000))
+	attackerAcc.SetPublicKeyBls(attackerKP.PublicKey().Bytes())
+	cs.GetAccountStateDB().SetState(attackerAcc)
+
+	// Attacker registers in stakeStateDB but has 0 stake
+	attackerAddr := attackerKP.Address()
+	require.NoError(t, cs.GetStakeStateDB().CreateRegisterWithKeys(
+		attackerAddr, "attacker-val", "Malicious Validator", "http://bad.org", "", 0,
+		big.NewInt(0), "127.0.0.1:6201", "127.0.0.1:4013", "/ip4/127.0.0.1/tcp/9101",
+		"", []byte{0x04}, []byte{0x05}, "attacker-node", attackerKP.PublicKey().Bytes(),
+	))
+
+	// 3. Setup another attacker account that registers with zero stake and no BLS key
+	attacker2KP := bls.GenerateKeyPair()
+	attacker2Addr := attacker2KP.Address()
+	require.NoError(t, cs.GetStakeStateDB().CreateRegisterWithKeys(
+		attacker2Addr, "attacker-2", "", "", "", 0,
+		big.NewInt(0), "127.0.0.1:6202", "127.0.0.1:4014", "/ip4/127.0.0.1/tcp/9102",
+		"", []byte{0x06}, []byte{0x07}, "attacker-2-node", []byte{0x08},
+	))
+
+	flushTestStake(t, cs)
+
+	// Check 1: GetAllValidators() returns all entries, sorted by stake descending (valKP first)
+	allVals, err := cs.GetStakeStateDB().GetAllValidators()
+	require.NoError(t, err)
+	require.Len(t, allVals, 3)
+	require.Equal(t, valKP.Address(), allVals[0].Address(), "staked validator must be sorted first")
+
+	// Check 2: LiveCommitteeProvider MUST filter out zero-stake validators
+	activeKeys, err := NewLiveCommitteeProvider(cs).GetActiveCommitteeBLSKeys()
+	require.NoError(t, err)
+	require.Len(t, activeKeys, 1, "only genuine staked validator must enter active committee")
+	require.Equal(t, valKP.PublicKey(), activeKeys[0])
+
+	// Check 3: VerifyNodeCommitteeKey flags the zero-stake registered account
+	isVal, warn := VerifyNodeCommitteeKey(cs, attackerAddr, common.Address{}, attackerKP.PublicKey())
+	require.True(t, isVal, "attacker is registered in stake state")
+	require.Contains(t, warn, "zero or non-positive stake (0): attestations will not be accepted by peers")
+
+	// Check 4: Light point-lookup also detects zero-stake validator
+	isValLight, warnLight, err := VerifyNodeCommitteeKeyLight(cs, attackerAddr, common.Address{}, attackerKP.PublicKey())
+	require.NoError(t, err)
+	require.True(t, isValLight)
+	require.Contains(t, warnLight, "zero or non-positive stake (0): attestations will not be accepted by peers")
+}
