@@ -438,7 +438,7 @@ func (t *Transaction) Unmarshal(b []byte) error {
 
 // Kiểm tra giao dịch có phải là Deploy Contract không
 func (t *Transaction) IsDeployContract() bool {
-	return t.GetNonce() != 0 && t.FromAddress() != t.ToAddress() && t.ToAddress() == (common.Address{}) && len(t.Data()) > 0
+	return t.FromAddress() != t.ToAddress() && t.ToAddress() == (common.Address{}) && len(t.Data()) > 0
 }
 
 // Kiểm tra giao dịch có phải là Call Contract không

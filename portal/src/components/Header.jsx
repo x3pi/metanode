@@ -10,6 +10,7 @@ export function Header({
   onSelectCluster,
   clusterStatus,
   isConnecting,
+  isPrivateKeyMode,
 }) {
   const formatAddress = (addr) => {
     if (!addr) return '';
@@ -32,8 +33,20 @@ export function Header({
       <div className="header-content">
         {/* Brand */}
         <div className="brand-section">
-          <div className="brand-logo-icon">
-            <Shield className="w-5 h-5 text-white" />
+          <div className="brand-logo-container">
+            <img
+              src="https://metanode.co/image/logo.png"
+              alt="MetaNode Logo"
+              className="brand-logo-img"
+              onError={(e) => {
+                // Fallback to shield icon if network blocks external image
+                e.target.style.display = 'none';
+                if (e.target.nextSibling) e.target.nextSibling.style.display = 'flex';
+              }}
+            />
+            <div className="brand-logo-fallback" style={{ display: 'none' }}>
+              <Shield className="w-5 h-5 text-cyan" />
+            </div>
           </div>
           <div>
             <div className="brand-title">METANODE PORTAL</div>
@@ -68,6 +81,22 @@ export function Header({
           {/* Connect / Account Button */}
           {account ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              {isPrivateKeyMode && (
+                <span
+                  style={{
+                    fontSize: '0.7rem',
+                    background: 'rgba(6, 182, 212, 0.15)',
+                    color: 'var(--cyan-bright)',
+                    border: '1px solid rgba(6, 182, 212, 0.3)',
+                    padding: '3px 8px',
+                    borderRadius: '6px',
+                    fontWeight: 600,
+                  }}
+                  title="Connected via direct Private Key"
+                >
+                  PK Mode
+                </span>
+              )}
               <button
                 className="btn btn-secondary"
                 style={{ fontFamily: 'var(--font-mono)', fontSize: '0.82rem' }}

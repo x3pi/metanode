@@ -506,6 +506,9 @@ if [ "$USE_PREBUILT" == "true" ]; then
     fi
 
     chmod +x "${PREBUILT_BIN_DIR}/metanode" "${PREBUILT_BIN_DIR}/simple_chain" 2>/dev/null || true
+    if [ -f "${PREBUILT_BIN_DIR}/parent_chain" ]; then
+        chmod +x "${PREBUILT_BIN_DIR}/parent_chain" 2>/dev/null || true
+    fi
     for tool in cross_chain_relayer register_chains bls_pubkey; do
         if [ -f "${PREBUILT_BIN_DIR}/${tool}" ]; then
             chmod +x "${PREBUILT_BIN_DIR}/${tool}" 2>/dev/null || true
@@ -776,6 +779,79 @@ if [ "$ACTION" == "gen_keys" ]; then
     exit $exit_code
 fi
 
+# ─── PARENT CHAIN ORCHESTRATION ───────────────────────────────────────────
+stop_parent_chain() {
+    if pgrep -f "/opt/metanode/bin/parent_chain" >/dev/null 2>&1; then
+        echo -e "\n🏛️ [PARENT CHAIN] Đang dừng cụm Parent Chain..."
+        pkill -9 -f "/opt/metanode/bin/parent_chain" 2>/dev/null || true
+        for i in 0 1 2 3; do
+            rm -f "/opt/metanode/parent_chain_${i}/parent_chain.pid" 2>/dev/null || true
+        done
+        echo "✅ [PARENT CHAIN] Đã dừng toàn bộ Parent Chain."
+    fi
+}
+
+clean_parent_chain_data() {
+    stop_parent_chain
+    if [ -d "/opt/metanode/parent_chain_0" ]; then
+        echo -e "🧹 [PARENT CHAIN] Dọn dẹp dữ liệu cũ của Parent Chain (reset-all)..."
+        rm -rf /opt/metanode/parent_chain_*/parentchain_db /opt/metanode/parent_chain_*/consensus /opt/metanode/parent_chain_*/rocksdb_dummy_init 2>/dev/null || true
+    fi
+}
+
+start_parent_chain() {
+    if [ ! -d "/opt/metanode/parent_chain_0" ] || [ ! -f "/opt/metanode/bin/parent_chain" ]; then
+        return 0
+    fi
+    local base_http_port
+    base_http_port=$(grep -E '^\s*parent_chain_http_port:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
+    base_http_port="${base_http_port:-18601}"
+
+    echo -e "\n🏛️ [PARENT CHAIN] Khởi động cụm Parent Chain (BFT Consensus, Chain ID 991, HTTP ${base_http_port}..$((base_http_port + 3)))..."
+    stop_parent_chain
+    sleep 1
+    for i in 0 1 2 3; do
+        if [ -d "/opt/metanode/parent_chain_${i}" ]; then
+            # Đảm bảo chain_id trong parent_genesis.json luôn là 991 (đồng bộ với Child Chain)
+            if [ -f "/opt/metanode/parent_chain_${i}/parent_genesis.json" ]; then
+                sed -i 's/"chain_id": 990/"chain_id": 991/g' "/opt/metanode/parent_chain_${i}/parent_genesis.json" 2>/dev/null || true
+            fi
+            cd "/opt/metanode/parent_chain_${i}"
+            nohup /opt/metanode/bin/parent_chain \
+                -data-dir "/opt/metanode/parent_chain_${i}" \
+                -http ":$((base_http_port + i))" \
+                -rust-config "/opt/metanode/parent_chain_${i}/node_parent.toml" \
+                -genesis "/opt/metanode/parent_chain_${i}/parent_genesis.json" \
+                >> "/var/log/metanode/parent_chain_${i}.log" 2>&1 &
+            echo $! > "/opt/metanode/parent_chain_${i}/parent_chain.pid"
+        fi
+    done
+    # Chờ port base_http_port sẵn sàng
+    local retries=15
+    local ready=false
+    while [ $retries -gt 0 ]; do
+        if curl -s "http://127.0.0.1:${base_http_port}/status" 2>/dev/null | grep -q "chain_id"; then
+            ready=true
+            break
+        fi
+        sleep 1
+        retries=$((retries - 1))
+    done
+    if [ "$ready" == "true" ]; then
+        echo -e "✅ [PARENT CHAIN] Parent Chain đã sẵn sàng tại http://127.0.0.1:${base_http_port} (Chain ID: 991)"
+    else
+        echo -e "⚠️ [PARENT CHAIN] Chưa nhận được phản hồi từ http://127.0.0.1:${base_http_port}/status sau 15s"
+    fi
+}
+
+if [ "$ACTION" != "open_ports" ] && [[ "$TARGET_NODE" == "all" || -z "$TARGET_NODE" ]]; then
+    if [ "$KEEP_DATA" == "false" ]; then
+        clean_parent_chain_data
+    elif [ "$ACTION" == "stop" ]; then
+        stop_parent_chain
+    fi
+fi
+
 if [ "$ACTION" != "open_ports" ] && [ "$MANAGE_GLOBAL_MONITORS" = "true" ]; then
     echo -e "\n⏸ Tạm dừng Health Monitor trên toàn bộ cụm trong quá trình Deploy để tránh cảnh báo sai..."
     if [ -f "${SCRIPT_DIR}/monitors/start_monitors.sh" ]; then
@@ -862,6 +938,21 @@ if [ $ansible_exit -eq 0 ]; then
     echo -e "\n🌐 Danh sách Node TCP (Consensus P2P):"
     echo "$TCP_NODES_LIST"
 
+    # Khởi động cụm Parent Chain nếu triển khai toàn cụm
+    if [[ "$ACTION" =~ ^(setup|deploy|start|restart)$ ]] && [[ "$TARGET_NODE" == "all" || -z "$TARGET_NODE" ]]; then
+        start_parent_chain
+    fi
+
+    if [ -d "/opt/metanode/parent_chain_0" ]; then
+        p_port=$(grep -E '^\s*parent_chain_http_port:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
+        p_port="${p_port:-18601}"
+        echo -e "\n🏛️ Danh sách Parent Chain RPC (IP & Port):"
+        echo -e "  • parent_chain_0: http://127.0.0.1:${p_port} (Chain ID: 991, BFT Leader)"
+        echo -e "  • parent_chain_1: http://127.0.0.1:$((p_port + 1)) (Chain ID: 991, Replica)"
+        echo -e "  • parent_chain_2: http://127.0.0.1:$((p_port + 2)) (Chain ID: 991, Replica)"
+        echo -e "  • parent_chain_3: http://127.0.0.1:$((p_port + 3)) (Chain ID: 991, Replica)"
+    fi
+
     # Tự động đồng bộ cấu hình sang metanode-suite (update-ip.sh)
     UPDATE_IP_SCRIPT="${SCRIPT_DIR}/../../../metanode-suite/scripts/update-ip/update-ip.sh"
     if [ -f "$UPDATE_IP_SCRIPT" ]; then
@@ -943,6 +1034,7 @@ if [ "$ACTION" != "open_ports" ] && [ "$MANAGE_GLOBAL_MONITORS" = "true" ]; then
         fi
     elif [ "$ACTION" == "stop" ]; then
         echo -e "\n⏸ Không bật lại Health Monitor vì hệ thống đang ở trạng thái STOP..."
+        stop_parent_chain
         pkill -f "[v]ote_monitor" || true
         if [ "$ALL_MONITORS" == "true" ]; then
             ansible metanode_cluster -i "$INVENTORY" -m shell -a "pkill -f '[s]tart_monitors.sh' || true; pkill -f '[b]lock_hash_checker' || true; pkill -f '[v]ote_monitor' || true" >/dev/null 2>&1 || true

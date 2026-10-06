@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
 import { Send, AlertTriangle, CheckCircle, Clock, ExternalLink } from 'lucide-react';
-import { callJsonRpc } from '../services/metanodeRpc';
+import { callJsonRpc, sendTransactionWithPrivateKey } from '../services/metanodeRpc';
 
 export function TransferTab({
   account,
   accountInfo,
   selectedCluster,
   onRefresh,
+  walletPrivateKey,
 }) {
   const [recipient, setRecipient] = useState('');
   const [amount, setAmount] = useState('0.1');
@@ -32,21 +33,31 @@ export function TransferTab({
     setTxReceipt(null);
 
     try {
-      // Convert amount in MTN to Wei Hex
-      const amountWei = BigInt(Math.floor(parseFloat(amount) * 1e18));
-      const valueHex = `0x${amountWei.toString(16)}`;
+      let txHash;
+      if (walletPrivateKey) {
+        txHash = await sendTransactionWithPrivateKey(
+          selectedCluster.rpcUrl,
+          walletPrivateKey,
+          recipient,
+          amount
+        );
+      } else {
+        // Convert amount in MTN to Wei Hex for MetaMask
+        const amountWei = BigInt(Math.floor(parseFloat(amount) * 1e18));
+        const valueHex = `0x${amountWei.toString(16)}`;
 
-      const txParams = {
-        from: account,
-        to: recipient,
-        value: valueHex,
-      };
+        const txParams = {
+          from: account,
+          to: recipient,
+          value: valueHex,
+        };
 
-      // Request MetaMask to send transaction
-      const txHash = await window.ethereum.request({
-        method: 'eth_sendTransaction',
-        params: [txParams],
-      });
+        // Request MetaMask to send transaction
+        txHash = await window.ethereum.request({
+          method: 'eth_sendTransaction',
+          params: [txParams],
+        });
+      }
 
       setTxReceipt({
         hash: txHash,
