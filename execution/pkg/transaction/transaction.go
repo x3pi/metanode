@@ -103,7 +103,7 @@ func NewTransactionFromEth(ethTx *e_types.Transaction) (types.Transaction, error
 	case e_types.SetCodeTxType:
 		err = FromEthSetCodeTx(ethTx, pTx)
 	default:
-		return nil, errors.New("NewTransactionFromEth: unsupported Ethereum transaction type")
+		return nil, fmt.Errorf("%w: unsupported Ethereum transaction type", ErrTxTypeNotSupported)
 	}
 
 	if err != nil {

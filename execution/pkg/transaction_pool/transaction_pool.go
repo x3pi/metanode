@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -279,7 +280,7 @@ func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 	if shard.transactionKeys[key] {
 		logger.Info("Transaction already exists in pool, skipping key addr=%s nonce=%d", key.addr.Hex(), key.nonce)
 		traceTx("REJECT-DUP", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", shardIdx))
-		return fmt.Errorf("transaction already exists in pool, skipping")
+		return fmt.Errorf("%w: transaction already exists in pool, skipping", transaction.ErrAlreadyKnown)
 	}
 
 	// CROSS-CHAIN DEBUG logic (unchanged)

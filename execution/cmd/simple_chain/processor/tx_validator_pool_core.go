@@ -370,7 +370,7 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 	if !skipVerification {
 		if err := tx_processor.VerifyTransaction(tx, vp.chainState, as); err != nil {
 			logger.Error("Transaction verification failed: %v", err)
-			return transaction.VerifyTransactionError.Code, fmt.Errorf(err.Description)
+			return err.Code, err
 		}
 	}
 
@@ -584,7 +584,7 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 						senderState = senderStates[txs[i].FromAddress()]
 					}
 					if err := tx_processor.VerifyTransaction(txs[i], vp.chainState, senderState); err != nil {
-						errorsList[i] = fmt.Errorf("[code:%d] %s", err.Code, err.Description)
+						errorsList[i] = fmt.Errorf("[code:%d] %w", err.Code, err)
 					}
 				}
 			}(start, end)

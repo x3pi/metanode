@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -23,6 +22,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	sharedmemory "github.com/meta-node-blockchain/meta-node/pkg/shared_memory"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	mt_types "github.com/meta-node-blockchain/meta-node/types"
 )
@@ -348,29 +348,10 @@ func formatGethError(err error) error {
 	if rpcErr, ok := err.(rpc.Error); ok {
 		return rpcErr
 	}
-	msg := strings.ToLower(err.Error())
-	var gethMsg string
-	switch {
-	case strings.Contains(msg, "nonce too low") || strings.Contains(msg, "invalid nonce"):
-		gethMsg = "nonce too low"
-	case strings.Contains(msg, "insufficient funds") || strings.Contains(msg, "invalid max fee") || strings.Contains(msg, "insufficient balance"):
-		gethMsg = "insufficient funds for gas * price + value"
-	case strings.Contains(msg, "already known") || strings.Contains(msg, "already exists"):
-		gethMsg = "already known"
-	case strings.Contains(msg, "replacement transaction underpriced") || strings.Contains(msg, "underpriced"):
-		gethMsg = "replacement transaction underpriced"
-	case strings.Contains(msg, "intrinsic gas too low") || strings.Contains(msg, "invalid max gas"):
-		gethMsg = "intrinsic gas too low"
-	case strings.Contains(msg, "exceeds block gas limit") || strings.Contains(msg, "exceeds max allowed"):
-		gethMsg = "exceeds block gas limit"
-	case strings.Contains(msg, "invalid sender") || strings.Contains(msg, "invalid sign") || strings.Contains(msg, "failed to recover sender"):
-		gethMsg = "invalid sender"
-	default:
-		gethMsg = err.Error()
-	}
+	code, msg := transaction.GethStandardRPCError(err)
 	return &jsonrpcError{
-		code:    -32000,
-		message: gethMsg,
+		code:    code,
+		message: msg,
 	}
 }
 

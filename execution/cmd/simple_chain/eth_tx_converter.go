@@ -5,7 +5,6 @@ package main
 // and RPC ingress (eth_sendRawTransaction).
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/core/types"
@@ -28,19 +27,19 @@ import (
 // 5. EIP-4844: Persist blob sidecar into blob_store (if present) and strip sidecar before mempool.
 func (app *App) ConvertRawEthTxToMetaTx(rawEth []byte) (mt_types.Transaction, *e_types.Transaction, error) {
 	if len(rawEth) == 0 {
-		return nil, nil, errors.New("empty raw transaction body")
+		return nil, nil, fmt.Errorf("%w: empty raw transaction body", mt_transaction.ErrDecodeRawEth)
 	}
 	if len(rawEth) > mt_transaction.MaxRawEthTxEnvelopeSize {
-		return nil, nil, fmt.Errorf("transaction envelope size %d exceeds max allowed %d", len(rawEth), mt_transaction.MaxRawEthTxEnvelopeSize)
+		return nil, nil, fmt.Errorf("%w: transaction envelope size %d exceeds max allowed %d", mt_transaction.ErrExceedsMaxEnvelopeSize, len(rawEth), mt_transaction.MaxRawEthTxEnvelopeSize)
 	}
 
 	ethTx := new(types.Transaction)
 	if err := ethTx.UnmarshalBinary(rawEth); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode Ethereum transaction: %w", err)
+		return nil, nil, fmt.Errorf("%w: failed to decode Ethereum transaction: %v", mt_transaction.ErrDecodeRawEth, err)
 	}
 
 	if ethTx.Type() != types.BlobTxType && len(rawEth) > mt_transaction.MaxStandardTxEnvelopeSize {
-		return nil, nil, fmt.Errorf("standard transaction envelope size %d exceeds max allowed %d", len(rawEth), mt_transaction.MaxStandardTxEnvelopeSize)
+		return nil, nil, fmt.Errorf("%w: standard transaction envelope size %d exceeds max allowed %d", mt_transaction.ErrExceedsMaxEnvelopeSize, len(rawEth), mt_transaction.MaxStandardTxEnvelopeSize)
 	}
 
 	if err := mt_transaction.ValidateEthTxEnvelope(ethTx, app.config.ChainId); err != nil {
