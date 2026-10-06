@@ -64,6 +64,8 @@ type Transaction interface {
 	ClearCacheHash()
 	ToEthTransaction() *e_types.Transaction
 	EthHash() e_common.Hash
+	RawEnvelope() []byte
+	SetRawEnvelope([]byte)
 
 	ValidEthSign() bool
 	ValidSecpProtoSign() bool

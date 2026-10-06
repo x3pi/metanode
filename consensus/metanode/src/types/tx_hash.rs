@@ -29,6 +29,15 @@ pub fn calculate_transaction_hash_single(tx_data: &[u8]) -> Vec<u8> {
 /// Calculate hash for a single Transaction using TransactionHashData
 /// This is the official hash calculation that matches Go implementation
 fn calculate_single_transaction_hash(tx: Transaction) -> Vec<u8> {
+    // Cutover bundle v1 / ADR D3 / W4:
+    // If raw_envelope is present (standard Ethereum transaction),
+    // canonical hash is keccak256(raw_envelope) matching go-ethereum and Go Transaction.Hash()
+    if !tx.raw_envelope.is_empty() {
+        return Keccak256::digest(&tx.raw_envelope).to_vec();
+    }
+
+    // System transactions (without raw_envelope, e.g. BLS node-identity transactions):
+    // Maintain deterministic TransactionHashData protobuf hash.
     // Create TransactionHashData from Transaction
     let hash_data = proto::TransactionHashData {
         from_address: tx.from_address,
@@ -96,4 +105,51 @@ pub fn verify_transaction_protobuf(tx_data: &[u8]) -> bool {
     // and will correctly discard any truly invalid data.
     // Filtering here risks data loss during WAL replay.
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hash_with_raw_envelope() {
+        let envelope = b"sample_raw_eip2718_envelope_bytes";
+        let expected_hash = Keccak256::digest(envelope).to_vec();
+
+        let tx = Transaction {
+            from_address: vec![1; 20],
+            to_address: vec![2; 20],
+            raw_envelope: envelope.to_vec(),
+            ..Default::default()
+        };
+
+        let mut tx_bytes = Vec::new();
+        tx.encode(&mut tx_bytes).unwrap();
+
+        let hash = calculate_transaction_hash_single(&tx_bytes);
+        assert_eq!(hash, expected_hash, "Hash must match keccak256(raw_envelope)");
+    }
+
+    #[test]
+    fn test_hash_system_tx_without_envelope() {
+        let tx = Transaction {
+            from_address: vec![0xaa; 20],
+            to_address: vec![0xbb; 20],
+            amount: vec![0x01],
+            max_gas: 21000,
+            max_gas_price: 100000,
+            raw_envelope: Vec::new(), // empty raw_envelope = system tx
+            ..Default::default()
+        };
+
+        let mut tx_bytes = Vec::new();
+        tx.encode(&mut tx_bytes).unwrap();
+
+        let hash = calculate_transaction_hash_single(&tx_bytes);
+        assert_eq!(
+            hex::encode(&hash),
+            "1925db928262bc9d4db0f4dba30bdd01a29ffa7d5d4ae5f418b0a63ba373c9eb",
+            "System tx hash must match Go golden hash"
+        );
+    }
 }

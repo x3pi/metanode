@@ -268,6 +268,8 @@ func (mt *MockTransaction) EthAuthorizationList() []e_types.SetCodeAuthorization
 func (mt *MockTransaction) GetNonce() uint64                                     { return mt.nonce }
 func (mt *MockTransaction) GetChainID() uint64                                   { return 1 }
 func (mt *MockTransaction) ClearCacheHash()                                      {}
+func (mt *MockTransaction) RawEnvelope() []byte                                   { return nil }
+func (mt *MockTransaction) SetRawEnvelope(_ []byte)                               {}
 func (mt *MockTransaction) GetNonce32Bytes() []byte                              { return make([]byte, 32) }
 func (mt *MockTransaction) Marshal() ([]byte, error)                             { return mt.data, nil }
 func (mt *MockTransaction) Unmarshal(b []byte) error                             { mt.data = b; return nil }

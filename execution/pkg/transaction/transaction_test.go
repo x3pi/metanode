@@ -1,10 +1,13 @@
 package transaction
 
 import (
+	"bytes"
 	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	e_types "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -528,4 +531,95 @@ func TestTransaction_Fee_Overflow(t *testing.T) {
 	// Fee must be positive (not negative due to overflow)
 	assert.Positive(t, fee.Sign(),
 		"Fee() must not be negative — uint64 overflow must not occur with large MaxGas")
+}
+
+// P0-8: Cross-language Go <-> Rust hash equivalence test (Zero-Fork invariant).
+func TestCrossLanguage_HashEquivalence_RawEnvelope(t *testing.T) {
+	envelope := []byte("sample_raw_eip2718_envelope_bytes")
+	expectedHash := crypto.Keccak256Hash(envelope)
+
+	pTx := &pb.Transaction{
+		FromAddress: bytes.Repeat([]byte{0x01}, 20),
+		ToAddress:   bytes.Repeat([]byte{0x02}, 20),
+		RawEnvelope: envelope,
+	}
+	tx := TransactionFromProto(pTx)
+
+	assert.Equal(t, expectedHash, tx.Hash(), "Go Hash() must match Keccak256(RawEnvelope)")
+	assert.Equal(t, expectedHash, tx.EthHash(), "Go EthHash() must match Keccak256(RawEnvelope)")
+}
+
+func TestCrossLanguage_HashEquivalence_SystemTxWithoutEnvelope(t *testing.T) {
+	// Rust calculate_single_transaction_hash for this exact proto calculates:
+	// SYSTEM_TX_HASH: 1925db928262bc9d4db0f4dba30bdd01a29ffa7d5d4ae5f418b0a63ba373c9eb
+	expectedRustHash := common.HexToHash("0x1925db928262bc9d4db0f4dba30bdd01a29ffa7d5d4ae5f418b0a63ba373c9eb")
+
+	pTx := &pb.Transaction{
+		FromAddress: bytes.Repeat([]byte{0xaa}, 20),
+		ToAddress:   bytes.Repeat([]byte{0xbb}, 20),
+		Amount:      []byte{0x01},
+		MaxGas:      21000,
+		MaxGasPrice: 100000,
+		RawEnvelope: nil, // empty envelope = system transaction
+	}
+	tx := TransactionFromProto(pTx)
+
+	assert.Equal(t, expectedRustHash, tx.Hash(), "Go system tx Hash() must exactly match Rust consensus calculate_single_transaction_hash")
+}
+
+func TestSingleCanonicalHash_AllEthTxTypes(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	to := common.HexToAddress("0x0000000000000000000000000000000000abcdef")
+
+	// 1. Legacy
+	legacyInner := &e_types.LegacyTx{
+		Nonce:    1,
+		GasPrice: big.NewInt(100000),
+		Gas:      21000,
+		To:       &to,
+		Value:    big.NewInt(100),
+	}
+	ethLegacy, err := e_types.SignNewTx(key, e_types.NewEIP155Signer(big.NewInt(1337)), legacyInner)
+	require.NoError(t, err)
+
+	metaLegacy, err := NewTransactionFromEth(ethLegacy)
+	require.NoError(t, err)
+	assert.Equal(t, ethLegacy.Hash(), metaLegacy.Hash(), "Legacy: meta.Hash() must equal eth.Hash()")
+	assert.Equal(t, ethLegacy.Hash(), metaLegacy.EthHash(), "Legacy: meta.EthHash() must equal eth.Hash()")
+
+	// 2. EIP-2930
+	eip2930Inner := &e_types.AccessListTx{
+		ChainID:  big.NewInt(1337),
+		Nonce:    2,
+		GasPrice: big.NewInt(100000),
+		Gas:      21000,
+		To:       &to,
+		Value:    big.NewInt(200),
+	}
+	eth2930, err := e_types.SignNewTx(key, e_types.NewLondonSigner(big.NewInt(1337)), eip2930Inner)
+	require.NoError(t, err)
+
+	meta2930, err := NewTransactionFromEth(eth2930)
+	require.NoError(t, err)
+	assert.Equal(t, eth2930.Hash(), meta2930.Hash(), "EIP-2930: meta.Hash() must equal eth.Hash()")
+	assert.Equal(t, eth2930.Hash(), meta2930.EthHash(), "EIP-2930: meta.EthHash() must equal eth.Hash()")
+
+	// 3. EIP-1559
+	eip1559Inner := &e_types.DynamicFeeTx{
+		ChainID:   big.NewInt(1337),
+		Nonce:     3,
+		GasTipCap: big.NewInt(1000),
+		GasFeeCap: big.NewInt(100000),
+		Gas:       21000,
+		To:        &to,
+		Value:     big.NewInt(300),
+	}
+	eth1559, err := e_types.SignNewTx(key, e_types.NewLondonSigner(big.NewInt(1337)), eip1559Inner)
+	require.NoError(t, err)
+
+	meta1559, err := NewTransactionFromEth(eth1559)
+	require.NoError(t, err)
+	assert.Equal(t, eth1559.Hash(), meta1559.Hash(), "EIP-1559: meta.Hash() must equal eth.Hash()")
+	assert.Equal(t, eth1559.Hash(), meta1559.EthHash(), "EIP-1559: meta.EthHash() must equal eth.Hash()")
 }

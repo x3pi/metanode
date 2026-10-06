@@ -58,6 +58,9 @@ message Transaction {
   // bản canonical execution/pkg/proto/transaction.proto.
   BlobSidecar Sidecar = 25;
   repeated SetCodeAuthorization AuthorizationList = 26;
+  // RawEnvelope chứa toàn bộ bytes envelope EIP-2718 thô của giao dịch Ethereum chuẩn.
+  // Khi trường này có dữ liệu, tx hash = keccak256(RawEnvelope) trên cả Go và Rust (ADR D3 / W4).
+  bytes RawEnvelope = 27;
 }
 
 message AccessTuple {

@@ -691,6 +691,12 @@ func (bc *BlockChain) GetBlockNumberByTxHash(txHash common.Hash) (uint64, bool) 
 }
 
 func (bc *BlockChain) SetEthHashMapblsHash(ethHash common.Hash, blsHash common.Hash) error {
+	// Cutover bundle v1 / ADR D3:
+	// Single canonical hash keccak256(raw_envelope) makes ethHash == blsHash.
+	// Returning nil avoids unnecessary disk write and memory overhead.
+	if ethHash == blsHash {
+		return nil
+	}
 	key := ethHashMapBlsHashPrefix + ethHash.Hex()
 	bc.storeToDirty(key, blsHash.Bytes())
 

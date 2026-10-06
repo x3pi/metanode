@@ -56,20 +56,26 @@ func (app *App) ConvertRawEthTxToMetaTx(rawEth []byte) (mt_types.Transaction, *e
 	}
 
 	// EIP-4844: persist sidecar to blob_store if present, then strip sidecar
-	if metaTxProto, ok := metaTx.Proto().(*mt_proto.Transaction); ok && metaTxProto.Type == uint64(types.BlobTxType) && metaTxProto.Sidecar != nil {
-		sidecar := metaTxProto.Sidecar
-		if bs := app.chainState.GetBlobStore(); bs != nil {
-			var blockNumber uint64
-			if app.blockProcessor != nil && app.blockProcessor.GetLastBlock() != nil && app.blockProcessor.GetLastBlock().Header() != nil {
-				blockNumber = app.blockProcessor.GetLastBlock().Header().BlockNumber() + 1
-			}
-			for i, vh := range metaTxProto.BlobVersionedHashes {
-				if err := bs.Put(blockNumber, vh, sidecar.Commitments[i], sidecar.Proofs[i], sidecar.Blobs[i]); err != nil {
-					return nil, nil, fmt.Errorf("failed to persist blob sidecar: %w", err)
+	if metaTxProto, ok := metaTx.Proto().(*mt_proto.Transaction); ok {
+		if metaTxProto.Type == uint64(types.BlobTxType) && metaTxProto.Sidecar != nil {
+			sidecar := metaTxProto.Sidecar
+			if bs := app.chainState.GetBlobStore(); bs != nil {
+				var blockNumber uint64
+				if app.blockProcessor != nil && app.blockProcessor.GetLastBlock() != nil && app.blockProcessor.GetLastBlock().Header() != nil {
+					blockNumber = app.blockProcessor.GetLastBlock().Header().BlockNumber() + 1
+				}
+				for i, vh := range metaTxProto.BlobVersionedHashes {
+					if err := bs.Put(blockNumber, vh, sidecar.Commitments[i], sidecar.Proofs[i], sidecar.Blobs[i]); err != nil {
+						return nil, nil, fmt.Errorf("failed to persist blob sidecar: %w", err)
+					}
 				}
 			}
+			metaTxProto.Sidecar = nil
 		}
-		metaTxProto.Sidecar = nil
+		if metaTxProto.Type != uint64(types.BlobTxType) && len(metaTxProto.RawEnvelope) == 0 {
+			metaTxProto.RawEnvelope = append([]byte(nil), rawEth...)
+			metaTx.ClearCacheHash()
+		}
 	}
 
 	logger.Debug("[ETH_TX_CONVERTER] Converted EthTx %s -> MetaTx %s", ethTx.Hash().Hex(), metaTx.Hash().Hex())

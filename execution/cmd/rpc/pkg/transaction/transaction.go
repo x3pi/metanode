@@ -41,24 +41,33 @@ func FromEthTransaction(ethTx *e_types.Transaction, pTx *pb.Transaction) error {
 		return errors.New("FromEthTransaction: ethTx hoặc pTx không được rỗng")
 	}
 
+	var err error
 	switch ethTx.Type() {
 	case e_types.LegacyTxType:
-		// Giả định FromEthLegacyTx đã được định nghĩa và có thể truy cập
-		// (ví dụ: trong cùng package hoặc import từ package chứa nó)
-		return FromEthLegacyTx(ethTx, pTx) //
+		err = FromEthLegacyTx(ethTx, pTx)
 	case e_types.AccessListTxType:
-		// Giả định FromEthEIP2930Tx đã được định nghĩa
-		return FromEthEIP2930Tx(ethTx, pTx) //
+		err = FromEthEIP2930Tx(ethTx, pTx)
 	case e_types.DynamicFeeTxType:
-		// Giả định FromEthEIP1559Tx đã được định nghĩa
-		return FromEthEIP1559Tx(ethTx, pTx) //
+		err = FromEthEIP1559Tx(ethTx, pTx)
 	case e_types.BlobTxType:
-		return FromEthBlobTx(ethTx, pTx)
+		err = FromEthBlobTx(ethTx, pTx)
 	case e_types.SetCodeTxType:
-		return FromEthSetCodeTx(ethTx, pTx)
+		err = FromEthSetCodeTx(ethTx, pTx)
 	default:
 		return errors.New("FromEthTransaction: loại giao dịch Ethereum không được hỗ trợ")
 	}
+	if err != nil {
+		return err
+	}
+
+	txForEnvelope := ethTx
+	if ethTx.BlobTxSidecar() != nil {
+		txForEnvelope = ethTx.WithoutBlobTxSidecar()
+	}
+	if raw, marshalErr := txForEnvelope.MarshalBinary(); marshalErr == nil {
+		pTx.RawEnvelope = raw
+	}
+	return nil
 }
 
 // NewTransactionFromEth creates a new types.Transaction from an Ethereum e_types.Transaction.
@@ -88,6 +97,15 @@ func NewTransactionFromEth(ethTx *e_types.Transaction) (types.Transaction, error
 	if err != nil {
 		return nil, err
 	}
+
+	txForEnvelope := ethTx
+	if ethTx.BlobTxSidecar() != nil {
+		txForEnvelope = ethTx.WithoutBlobTxSidecar()
+	}
+	if raw, marshalErr := txForEnvelope.MarshalBinary(); marshalErr == nil {
+		pTx.RawEnvelope = raw
+	}
+
 	return TransactionFromProto(pTx), nil
 }
 
@@ -578,6 +596,12 @@ func (t *Transaction) Hash() common.Hash {
 	// Kiểm tra cache có giá trị hay chưa
 	if cached := t.cachedHash.Load(); cached != nil {
 		return *cached // Trả về giá trị đã cache nếu có
+	}
+
+	if t.proto != nil && len(t.proto.RawEnvelope) > 0 {
+		hash := crypto.Keccak256Hash(t.proto.RawEnvelope)
+		t.cachedHash.Store(&hash)
+		return hash
 	}
 
 	hashPb := &pb.TransactionHashData{

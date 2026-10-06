@@ -22,7 +22,8 @@ func (cd *CallData) Unmarshal(b []byte) error {
 	cdPb := &pb.CallData{}
 	err := proto.Unmarshal(b, cdPb)
 	if err != nil {
-		return err
+		cd.proto = &pb.CallData{Input: b}
+		return nil
 	}
 	cd.proto = cdPb
 	return nil
