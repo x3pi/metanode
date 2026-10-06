@@ -4,6 +4,7 @@ Trạng thái: **SẴN SÀNG GIAO AGENT** (viết 2026-10-06 sau khi đọc code
 Đọc trước: `AGENTS.md` (Zero-Fork, KISS, `build_check.sh`, tóm tắt tiếng Việt cuối response), `PROJECT_STRUCTURE.md`, `note/plan_eth_native_eip2718.md` (kế hoạch tổng, G0–G6), `note/plan_tcp_eth_only_ingress.md` (pha A — ĐÃ XONG ở `a25cb135`), `note/tcp_eth_client_guide.md`.
 
 ## 0. Quyết định mới của user (2026-10-06) — thay đổi phạm vi
+**Mốc tương thích cuối cùng (đã đánh dấu): tag `legacy-simple-chain-bls-v1` = nhánh `legacy/simple-chain-bls` = commit `a25cb135`.** Từ commit đó trở đi trên `dev` chỉ có tài liệu; mọi thay đổi code sau mốc này **không cần và không được** giữ tương thích với simple-chain cũ (BLS/proto/device key). Không thêm cờ/chế độ/shim tương thích, không viết lại code để dapp cũ chạy được; cần bản cũ thì checkout tag trên. Tag/nhánh mới ở local — push khi user yêu cầu.
 **Không còn hỗ trợ tương thích simple-chain cũ (`bls_legacy`, dapp ký BLS/proto).** Hệ quả:
 - Không còn "chế độ": node **luôn** là eth-only. Các guard `SecpOnlyTxSignatures()` ở `a25cb135` (kể cả `requireSecpModeForRawEth`, nhánh `bls_legacy` trong `eth_tx_converter.go`) trở thành **mã chết cần xóa**, không phải giữ.
 - Bản cũ được bảo tồn tại: tag `legacy-simple-chain-bls-v1`, nhánh `legacy/simple-chain-bls` (cùng commit `a25cb135`). Cần hỗ trợ dapp BLS ⇒ dùng nhánh đó, không backport vào đây.
