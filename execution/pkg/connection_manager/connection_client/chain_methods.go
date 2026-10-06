@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/network"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
@@ -14,8 +13,6 @@ import (
 // Command constants (inline để tránh import cmd/simple_chain/command — cross-workspace)
 const (
 	cmdReadTransaction              = "ReadTransaction"
-	cmdSendTransactionWithDeviceKey = "SendTransactionWithDeviceKey"
-	cmdSendTransaction              = "SendTransaction"
 	cmdSendRawTransaction           = "SendRawTransaction"
 	cmdSendRawTransactions          = "SendRawTransactions"
 	cmdReceipt                      = "Receipt"
@@ -73,33 +70,6 @@ func (c *ConnectionClient) ReadTransaction(txBytes []byte, timeout time.Duration
 			return nil, fmt.Errorf("context cancelled")
 		}
 	}
-}
-
-// SendTransactionWithDeviceKey gửi SendTransactionWithDeviceKey command lên chain.
-// Fire-and-forget: không đợi receipt (receipt sẽ được nhận qua event subscription hoặc polling).
-// Body chứa TransactionWithDeviceKey proto bytes đã marshal.
-func (c *ConnectionClient) SendTransactionWithDeviceKey(txWithDKBytes []byte) error {
-	if atomic.LoadInt32(&c.connected) != 1 || c.connection == nil {
-		return fmt.Errorf("not connected to cluster %s", c.key)
-	}
-
-	if err := c.messageSender.SendBytes(c.connection, cmdSendTransactionWithDeviceKey, txWithDKBytes); err != nil {
-		return fmt.Errorf("failed to send SendTransactionWithDeviceKey: %w", err)
-	}
-	logger.Debug("SendTransactionWithDeviceKey sent via ConnectionClient (cluster=%s)", c.key)
-	return nil
-}
-
-// SendTransaction gửi SendTransaction command lên chain (fire-and-forget).
-func (c *ConnectionClient) SendTransaction(txBytes []byte) error {
-	if atomic.LoadInt32(&c.connected) != 1 || c.connection == nil {
-		return fmt.Errorf("not connected to cluster %s", c.key)
-	}
-
-	if err := c.messageSender.SendBytes(c.connection, cmdSendTransaction, txBytes); err != nil {
-		return fmt.Errorf("failed to send SendTransaction: %w", err)
-	}
-	return nil
 }
 
 // SendRawTransaction gửi SendRawTransaction command lên chain (EIP-2718 raw Ethereum envelope, fire-and-forget).

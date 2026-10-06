@@ -318,29 +318,6 @@ func (api *MetaAPI) startProcessingLogger() {
 		lastCount = currentCount
 	}
 }
-func (api *MetaAPI) SendRawTransactionWithDeviceKey(ctx context.Context, input []byte, inputEth []byte, pubKeyBlsL []byte) (common.Hash, error) {
-	if len(inputEth) == 0 {
-		return common.Hash{}, fmt.Errorf("legacy proto SendRawTransactionWithDeviceKey is disabled; provide raw Ethereum envelope")
-	}
-	metaTx, ethTx, err := api.App.ConvertRawEthTxToMetaTx(inputEth)
-	if err != nil {
-		return common.Hash{}, formatGethError(err)
-	}
-	ethTxHash := ethTx.Hash()
-	metaTxHash := metaTx.Hash()
-
-	_, err = api.App.transactionProcessor.AddTransactionToPool(metaTx)
-	if err != nil {
-		return common.Hash{}, formatGethError(err)
-	}
-
-	if bc := blockchain.GetBlockChainInstance(); bc != nil {
-		bc.AddTxToCache(ethTxHash, append([]byte(nil), inputEth...))
-		_ = bc.SetEthHashMapblsHash(ethTxHash, metaTxHash)
-	}
-
-	return ethTxHash, nil
-}
 
 // rpcTxConcurrencyLimiter bounds how many eth_sendRawTransaction requests can
 // be actively executing pool addition at the same time.

@@ -79,11 +79,6 @@ func InitRoutes(
 	// State attestation: all nodes receive attestations from peers for fork detection
 	routes[common.StateAttestationTopic] = blockProcessor.ProcessStateAttestation
 
-	// Legacy proto/BLS commands: unconditionally rejected
-	routes[command.SendTransaction] = transactionProcessor.ProcessTransactionFromClient
-	routes[command.SendTransactions] = transactionProcessor.ProcessTransactionsFromClient
-	routes[command.SendTransactionWithDeviceKey] = transactionProcessor.ProcessTransactionFromClientWithDeviceKey
-
 	// Eth-only TCP ingress (rate limited to prevent TCP raw DoS)
 	routes[command.SendRawTransaction] = withRateLimit(rawTxLimiter, transactionProcessor.ProcessRawTransactionFromClient)
 	routes[command.SendRawTransactions] = withRateLimit(rawTxLimiter, transactionProcessor.ProcessRawTransactionsFromClient)

@@ -16,7 +16,6 @@ func secretFields(c *SimpleChainConfig) map[string]*string {
 		"securepassword":            &c.Securepassword,
 		"pk_admin_file_storage":     &c.PkAdminFileStorage,
 		"bls_admin_storage":         &c.BlsAdminStorage,
-		"gateway_bls_key":           &c.GatewayBLSKey,
 		"master_password":           &c.MasterPassword,
 		"app_pepper":                &c.AppPepper,
 		"Databases.BLSPrivateKey":   &c.Databases.BLSPrivateKey,

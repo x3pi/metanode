@@ -152,35 +152,3 @@ func TestSendTransactionError_MultipleCalls(t *testing.T) {
 
 	assert.Equal(t, 5, conn.SentCount(), "should have sent 5 error messages")
 }
-
-// TestDeviceKeyHandlerMissingTransaction rejects malformed wrappers before hashing.
-func TestDeviceKeyHandlerMissingTransaction(t *testing.T) {
-	tp := &TransactionProcessor{injectionQueue: make(chan injectionRequest, 1)}
-	conn := NewMockConnection(e_common.Address{})
-	for _, body := range [][]byte{nil, {0xff}, {0x12, 0x01, 0x01}} {
-		err := tp.ProcessTransactionFromClientWithDeviceKey(NewMockRequest(conn, NewMockMessage("SendTransactionWithDeviceKey", body)))
-		require.Error(t, err)
-		require.Empty(t, tp.injectionQueue)
-	}
-}
-
-// TestLegacyCommandsRejected verifies that old SendTransaction, SendTransactions,
-// and SendTransactionWithDeviceKey are unconditionally rejected on this eth-only node.
-func TestLegacyCommandsRejected(t *testing.T) {
-	tp := &TransactionProcessor{injectionQueue: make(chan injectionRequest, 10)}
-	conn := NewMockConnection(e_common.Address{})
-
-	err := tp.ProcessTransactionFromClient(NewMockRequest(conn, NewMockMessage("SendTransaction", []byte{0x01})))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "SendTransaction (proto) is disabled")
-
-	err = tp.ProcessTransactionFromClientWithDeviceKey(NewMockRequest(conn, NewMockMessage("SendTransactionWithDeviceKey", []byte{0x01})))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "SendTransactionWithDeviceKey is disabled")
-
-	err = tp.ProcessTransactionsFromClient(NewMockRequest(conn, NewMockMessage("SendTransactions", []byte{0x01})))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "SendTransactions (proto batch) is disabled")
-}
-
-

@@ -242,9 +242,6 @@ type SimpleChainConfig struct {
 	MasterPassword       string `json:"master_password,omitempty"`
 	AppPepper            string `json:"app_pepper,omitempty"`
 
-	// Unified Node RPC (Private Gateway) configuration
-	EnablePrivateGateway bool   `json:"enable_private_gateway"` // Nếu true, Node sẽ tự động chặn ETH tx, chạy Speculative Execution và bọc BLS
-	GatewayBLSKey        string `json:"gateway_bls_key"`        // Private Key BLS dùng để ký bảo lãnh cho các giao dịch bị chặn
 	VerifyDeviceKey      bool   `json:"verify_device_key"`      // Bật/tắt kiểm tra DeviceKey khi xác thực giao dịch (mặc định: false)
 
 	// Snapshot configuration
@@ -332,17 +329,16 @@ func (c *SimpleChainConfig) SecpOnlyTxSignatures() bool {
 	return c != nil && c.TxSignatureMode == TxSignatureModeSecp
 }
 
-// validateTxSignatureMode rejects unknown modes so a typo can never silently fall back to a different rule set.
+// validateTxSignatureMode rejects bls_legacy and unknown modes, allowing "secp" or empty.
 func (c *SimpleChainConfig) validateTxSignatureMode() error {
 	switch c.TxSignatureMode {
-	case "", TxSignatureModeBLSLegacy:
+	case "", TxSignatureModeSecp:
+		c.TxSignatureMode = TxSignatureModeSecp
 		return nil
-	case TxSignatureModeSecp:
-		// The chain ID is NOT required here: deployed configs do not carry it, the genesis does and initNetwork copies
-		// it into the config. The requirement is enforced right after that, by ValidateChainBinding.
-		return nil
+	case TxSignatureModeBLSLegacy:
+		return fmt.Errorf("bls_legacy signature mode is no longer supported; this node is eth-only")
 	}
-	return fmt.Errorf("invalid tx_signature_mode %q (want %q or %q)", c.TxSignatureMode, TxSignatureModeBLSLegacy, TxSignatureModeSecp)
+	return fmt.Errorf("invalid tx_signature_mode %q (only %q is supported, or omit)", c.TxSignatureMode, TxSignatureModeSecp)
 }
 
 // ValidateChainBinding must be called once the chain ID is known (after it is read from the genesis). Replay protection
@@ -482,9 +478,6 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		}
 		if v := os.Getenv("META_ROOT_ANCHOR_SUBMITTER_PRIVATE_KEY_HEX"); v != "" {
 			ConfigApp.CrossChain.RootAnchorSubmitterPrivateKeyHex = v
-		}
-		if v := os.Getenv("META_GATEWAY_BLS_KEY"); v != "" {
-			ConfigApp.GatewayBLSKey = v
 		}
 		if v := os.Getenv("META_MASTER_PASSWORD"); v != "" {
 			ConfigApp.MasterPassword = v

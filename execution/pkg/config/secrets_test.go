@@ -24,13 +24,13 @@ func TestResolveSecrets_DecryptsEnvelopesInPlace(t *testing.T) {
 	t.Setenv(keyvault.PasswordEnv, "")
 	t.Setenv(keyvault.PasswordFileEnv, "")
 	e, _ := keyvault.Encrypt(testKey, "unit-test-password")
-	e2, _ := keyvault.Encrypt("gw-key", "unit-test-password")
-	c := &SimpleChainConfig{PrivateKey: e, GatewayBLSKey: e2, KeyPasswordFile: pwFile(t, "unit-test-password\n"), Address: "0x1"}
+	e2, _ := keyvault.Encrypt("sender-key", "unit-test-password")
+	c := &SimpleChainConfig{PrivateKey: e, RewardSenderPrivateKey: e2, KeyPasswordFile: pwFile(t, "unit-test-password\n"), Address: "0x1"}
 	c.Databases.BLSPrivateKey = "plain-bls" // mixing is allowed unless require_encrypted_keys
 	if err := resolveSecrets(c); err != nil {
 		t.Fatal(err)
 	}
-	if c.PrivateKey != testKey || c.GatewayBLSKey != "gw-key" || c.Databases.BLSPrivateKey != "plain-bls" || c.Address != "0x1" {
+	if c.PrivateKey != testKey || c.RewardSenderPrivateKey != "sender-key" || c.Databases.BLSPrivateKey != "plain-bls" || c.Address != "0x1" {
 		t.Fatalf("unexpected result: %+v", c)
 	}
 }

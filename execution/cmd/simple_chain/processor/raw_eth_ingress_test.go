@@ -11,12 +11,9 @@ import (
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/command"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
-	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/proto"
 )
 
 func createTestChainState(secpMode bool, chainID int64) *blockchain.ChainState {
@@ -246,53 +243,6 @@ func TestSendRawTransactions_Batch(t *testing.T) {
 }
 
 // ============================================================================
-// TestSecpMode_RejectsLegacyCommands
-// Tests that ProcessTransactionFromClient, ProcessTransactionsFromClient,
-// and ProcessTransactionFromClientWithDeviceKey are all rejected in secp mode
-// ============================================================================
-func TestSecpMode_RejectsLegacyCommands(t *testing.T) {
-	cs := createTestChainState(true, 991) // Secp mode
-
-	sender := NewMockMessageSender()
-	tp := newTestTransactionProcessor(cs, sender)
-	mockConn := NewMockConnection(common.HexToAddress("0x1234"))
-
-	// 1. SendTransaction (proto) rejected
-	pTx := &pb.Transaction{
-		FromAddress: common.HexToAddress("0x1111").Bytes(),
-		ToAddress:   common.HexToAddress("0x2222").Bytes(),
-		Amount:      big.NewInt(100).Bytes(),
-		ChainID:     991,
-	}
-	pTxBytes, err := proto.Marshal(pTx)
-	require.NoError(t, err)
-
-	req1 := NewMockRequest(mockConn, NewMockMessage(command.SendTransaction, pTxBytes))
-	err = tp.ProcessTransactionFromClient(req1)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "SendTransaction (proto) is disabled on this chain")
-
-	// 2. SendTransactions (proto batch) rejected
-	pTxs := &pb.Transactions{Transactions: []*pb.Transaction{pTx}}
-	pTxsBytes, err := proto.Marshal(pTxs)
-	require.NoError(t, err)
-
-	req2 := NewMockRequest(mockConn, NewMockMessage(command.SendTransactions, pTxsBytes))
-	err = tp.ProcessTransactionsFromClient(req2)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "SendTransactions (proto batch) is disabled on this chain")
-
-	// 3. SendTransactionWithDeviceKey rejected
-	txWithDK := &pb.TransactionWithDeviceKey{Transaction: pTx, DeviceKey: []byte{0x01}}
-	txWithDKBytes, err := proto.Marshal(txWithDK)
-	require.NoError(t, err)
-
-	req3 := NewMockRequest(mockConn, NewMockMessage(command.SendTransactionWithDeviceKey, txWithDKBytes))
-	err = tp.ProcessTransactionFromClientWithDeviceKey(req3)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "SendTransactionWithDeviceKey is disabled on this chain")
-	assert.Equal(t, int64(18), transaction.InvalidSign.Code)
-}
 
 // ============================================================================
 // TestP0_3_RejectedTx_NoStorageOrCachePollution

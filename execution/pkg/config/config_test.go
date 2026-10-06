@@ -229,7 +229,7 @@ func TestTxSignatureMode(t *testing.T) {
 		wantErr bool
 	}{
 		{"", nil, false, false},
-		{TxSignatureModeBLSLegacy, nil, false, false},
+		{TxSignatureModeBLSLegacy, nil, false, true}, // bls_legacy must fail fast with clear error
 		{TxSignatureModeSecp, chain, true, false},
 		// Deployed configs do not carry chainId (the genesis does), so loading must NOT depend on it.
 		{TxSignatureModeSecp, nil, true, false},
@@ -243,10 +243,13 @@ func TestTxSignatureMode(t *testing.T) {
 		if err := c.validateTxSignatureMode(); (err != nil) != tc.wantErr {
 			t.Errorf("mode %q chain %v: validate err=%v, wantErr=%v", tc.mode, tc.chainID, err, tc.wantErr)
 		}
+		if !tc.wantErr && c.TxSignatureMode != TxSignatureModeSecp {
+			t.Errorf("mode %q after validation must normalize to secp, got %q", tc.mode, c.TxSignatureMode)
+		}
 	}
 	var nilCfg *SimpleChainConfig
 	if nilCfg.SecpOnlyTxSignatures() {
-		t.Error("nil config must be legacy")
+		t.Error("nil config must be false")
 	}
 }
 

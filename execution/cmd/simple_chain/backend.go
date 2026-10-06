@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -557,8 +555,6 @@ func NewServer(app *App) *http.ServeMux {
 		w.Write([]byte(`{"status":"reset"}`))
 	})
 
-	mux.HandleFunc("/mtn/sendRawTransactionBin", sendRawTransactionBinHandler(customAPI))
-
 	// Áp dụng middleware vào handler WebSocket
 	wsHandler := server.WebsocketHandler([]string{"*"})
 	mux.Handle("/ws", wsHandler)
@@ -569,52 +565,6 @@ func NewServer(app *App) *http.ServeMux {
 	}
 
 	return mux
-}
-
-func decodeBinaryRawTxPayload(payload []byte) ([]byte, []byte, []byte, error) {
-	const headerSize = 4
-	if len(payload) < headerSize*3 {
-		return nil, nil, nil, fmt.Errorf("payload too short")
-	}
-
-	readSegment := func(buf []byte) ([]byte, []byte, error) {
-		if len(buf) < headerSize {
-			return nil, nil, fmt.Errorf("not enough data for length header")
-		}
-		segmentLen := binary.BigEndian.Uint32(buf[:headerSize])
-		buf = buf[headerSize:]
-		if segmentLen == 0 {
-			return nil, buf, nil
-		}
-		if uint32(len(buf)) < segmentLen {
-			return nil, nil, fmt.Errorf("segment length %d exceeds remaining payload %d", segmentLen, len(buf))
-		}
-		segment := buf[:segmentLen]
-		return segment, buf[segmentLen:], nil
-	}
-
-	var (
-		metaTx []byte
-		ethTx  []byte
-		pubKey []byte
-		rest   = payload
-		err    error
-	)
-
-	if metaTx, rest, err = readSegment(rest); err != nil {
-		return nil, nil, nil, err
-	}
-	if ethTx, rest, err = readSegment(rest); err != nil {
-		return nil, nil, nil, err
-	}
-	if pubKey, rest, err = readSegment(rest); err != nil {
-		return nil, nil, nil, err
-	}
-	if len(rest) != 0 {
-		return nil, nil, nil, fmt.Errorf("unexpected trailing bytes (%d)", len(rest))
-	}
-
-	return metaTx, ethTx, pubKey, nil
 }
 
 // writeJSONRPCError writes a standard JSON-RPC error response.
@@ -630,60 +580,4 @@ func writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
-}
-
-type rawTxBinSender interface {
-	SendRawTransactionWithDeviceKey(ctx context.Context, metaTx, ethTx, pubKey []byte) (common.Hash, error)
-}
-
-func sendRawTransactionBinHandler(sender rawTxBinSender) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		defer r.Body.Close()
-
-		const maxRawTxPayloadSize = 8 << 20 // 8 MB limit to prevent OOM
-		r.Body = http.MaxBytesReader(w, r.Body, maxRawTxPayloadSize)
-		rawPayload, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to read request body: %v", err), http.StatusBadRequest)
-			return
-		}
-
-		metaTx, ethTx, pubKey, err := decodeBinaryRawTxPayload(rawPayload)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("invalid payload: %v", err), http.StatusBadRequest)
-			return
-		}
-
-		txHash, err := sender.SendRawTransactionWithDeviceKey(r.Context(), metaTx, ethTx, pubKey)
-		if err != nil {
-			var revErr *revertError
-			if errors.As(err, &revErr) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusConflict)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"code":    revErr.ErrorCode(),
-					"message": revErr.Error(),
-					"data":    revErr.ErrorData(),
-				})
-				return
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"code":    -32000,
-				"message": err.Error(),
-			})
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/octet-stream")
-		if _, writeErr := w.Write(txHash.Bytes()); writeErr != nil {
-			logger.Warn("failed to write binary transaction hash response: %v", writeErr)
-		}
-	}
 }

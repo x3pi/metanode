@@ -91,9 +91,6 @@ type App struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// BLS Key Store (merged from RPC client)
-	blsKeyStore *PrivateKeyStore
-
 	// Performance monitoring
 	handler          *network.Handler
 	metricsCollector *MetricsCollector
@@ -707,22 +704,6 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	// Initialize processors and routes
 	app.initProcessors()
 	app.initRoutes()
-
-	// Initialize BLS key store (merged from RPC client) — only if configured
-	if app.config.MasterPassword != "" && app.config.AppPepper != "" {
-		pks, err := NewPrivateKeyStore(
-			app.config.Databases.RootPath,
-			app.config.MasterPassword,
-			app.config.AppPepper,
-		)
-		if err != nil {
-			logger.Warn("BLS key store initialization failed (non-fatal): %v", err)
-		} else {
-			app.blsKeyStore = pks
-			logger.Info("BLS key store initialized successfully")
-		}
-	}
-
 	return app, nil
 }
 
@@ -1198,10 +1179,6 @@ func (app *App) Stop() {
 
 	if app.explorerSearch != nil {
 		app.explorerSearch.Close()
-	}
-
-	if app.blsKeyStore != nil {
-		app.blsKeyStore.Close()
 	}
 
 	logger.Info("App stopped.")

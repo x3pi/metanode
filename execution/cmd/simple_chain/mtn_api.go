@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -771,9 +770,9 @@ func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, am
 	// Sender is the devnet-only test account funded in run_devnet.sh's genesis (see
 	// devnetSenderPrivateKeyHex's doc comment). Derived from the key itself rather than a
 	// separately hardcoded address literal, so the two can never drift out of sync.
-	ecdsaHex, blsHex := devnetSenderPrivateKeyHex, devnetSenderBLSPrivateKeyHex
-	if senderKeyHex != nil && blsKeyHex != nil {
-		ecdsaHex, blsHex = strings.TrimPrefix(*senderKeyHex, "0x"), strings.TrimPrefix(*blsKeyHex, "0x")
+	ecdsaHex := devnetSenderPrivateKeyHex
+	if senderKeyHex != nil {
+		ecdsaHex = strings.TrimPrefix(*senderKeyHex, "0x")
 	}
 	privKey, err := crypto.HexToECDSA(ecdsaHex)
 	if err != nil {
@@ -786,17 +785,6 @@ func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, am
 		return "", fmt.Errorf("failed to load sender account state: %w", err)
 	}
 
-	if senderKeyHex == nil && blsKeyHex == nil && accountState != nil {
-		if len(accountState.PublicKeyBls()) == 48 && bytes.Equal(accountState.PublicKeyBls(), api.App.keyPair.PublicKey().Bytes()) {
-			blsHex = hex.EncodeToString(api.App.keyPair.PrivateKey().Bytes())
-		}
-	}
-
-	if api.App.blsKeyStore != nil {
-		if err := api.App.blsKeyStore.SetPrivateKey(senderAddr, blsHex); err != nil {
-			return "", fmt.Errorf("failed to register devnet sender BLS key: %w", err)
-		}
-	}
 	nonce := uint64(0)
 	if accountState != nil {
 		nonce = accountState.Nonce()

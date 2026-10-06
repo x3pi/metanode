@@ -356,24 +356,6 @@ func (tp *TransactionProcessor) SendRawTransaction(ctx context.Context, rawTx []
 // The spin-wait retry loop (50×100ms=5s) was blocking TX processing goroutines.
 // Connections are now validated by signature/nonce, not connection manager state.
 
-func (tp *TransactionProcessor) ProcessTransactionFromClient(
-	request network.Request,
-) error {
-	err := fmt.Errorf("SendTransaction (proto) is disabled on this chain (tx_signature_mode is secp); use SendRawTransaction with EIP-2718 envelope")
-	logger.Error("❌ [TX REJECTED] %v", err)
-	tp.sendTransactionError(request.Connection(), common.Hash{}, int64(transaction.InvalidSign.Code), err.Error(), nil, request.Message().ID())
-	return err
-}
-
-func (tp *TransactionProcessor) ProcessTransactionFromClientWithDeviceKey(
-	request network.Request,
-) error {
-	err := fmt.Errorf("SendTransactionWithDeviceKey is disabled on this chain (tx_signature_mode is secp); use SendRawTransaction with EIP-2718 envelope")
-	logger.Error("❌ [TX REJECTED] %v", err)
-	tp.sendTransactionError(request.Connection(), common.Hash{}, int64(transaction.InvalidSign.Code), err.Error(), nil, request.Message().ID())
-	return err
-}
-
 // ProcessTransactionOnChainWithDeviceKeyAndHash is the original method with lastHash parameter
 func (tp *TransactionProcessor) ProcessTransactionOnChainWithDeviceKey(
 	tx types.Transaction,
@@ -390,13 +372,6 @@ func (tp *TransactionProcessor) ProcessTransactionOnChainWithDeviceKey(
 	}
 
 	return nil
-}
-
-func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Request) error {
-	err := fmt.Errorf("SendTransactions (proto batch) is disabled on this chain (tx_signature_mode is secp); use SendRawTransactions with EIP-2718 envelopes")
-	logger.Error("❌ [TX REJECTED] %v", err)
-	tp.sendTransactionError(request.Connection(), common.Hash{}, int64(transaction.InvalidSign.Code), err.Error(), nil, request.Message().ID())
-	return err
 }
 
 func (tp *TransactionProcessor) processTransactionFromClient(

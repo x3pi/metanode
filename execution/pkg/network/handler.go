@@ -120,11 +120,8 @@ func (h *Handler) HandleRequest(r network.Request) (err error) {
 	isCritical := cmd == p_common.BlockDataTopic ||
 		cmd == p_common.TransactionsFromSubTopic ||
 		cmd == "InitConnection" ||
-		cmd == "SendTransaction" ||
-		cmd == "SendTransactions" ||
 		cmd == "SendRawTransaction" ||
 		cmd == "SendRawTransactions" ||
-		cmd == "SendTransactionWithDeviceKey" ||
 		cmd == "GetAccountState" ||
 		cmd == "GetNonce" ||
 		cmd == "ReadTransaction" ||
