@@ -93,7 +93,7 @@ impl Drop for Fsyncer {
     }
 }
 
-fn worker(_fd: Arc<File>, shared: Arc<Shared>) {
+fn worker(fd: Arc<File>, shared: Arc<Shared>) {
     let bomb = Bomb;
     'outer: loop {
         let mut s_guard = shared.s.lock();
@@ -106,7 +106,7 @@ fn worker(_fd: Arc<File>, shared: Arc<Shared>) {
         assert!(matches!(&*s_guard, State::Started | State::Done(_)));
         drop(s_guard);
 
-        let sync_result = Ok(());
+        let sync_result = fd.sync_all();
 
         let mut s_guard = shared.s.lock();
         if matches!(&*s_guard, State::HandleDead) {

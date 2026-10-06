@@ -59,7 +59,7 @@ impl SegmentFileWriter {
     }
 
     pub fn fsync(&mut self) -> std::io::Result<()> {
-        let _ = &self.file;
+        self.file.sync_data()?;
         Ok(())
     }
 

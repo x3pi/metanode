@@ -224,7 +224,7 @@ impl SegmentedLog {
         if root_dir_fsync {
             // To uphold the guarantees provided by this function we should fsync the directory
             // after a new segment file is created.
-            let _ = &self.root_dir_fd;
+            self.root_dir_fd.sync_all()?;
         }
 
         Ok(record_id)
@@ -363,7 +363,7 @@ impl SegmentedLog {
             fs::remove_file(self.root_dir_path.join(filename))?;
             self.segments.pop();
         }
-        let _ = &self.root_dir_fd;
+        self.root_dir_fd.sync_data()?;
 
         if let Some(head_segment_writer) = self.head_segment_writer.take().take() {
             let file = head_segment_writer.into_inner();
@@ -634,7 +634,7 @@ fn truncate_head_segment(
 
     let mut file = OpenOptions::new().append(true).write(true).open(path)?;
     file.set_len(end)?;
-    let _ = &file;
+    file.sync_data()?;
     file.seek(SeekFrom::Start(end))?;
 
     Ok(SegmentFileWriter::new(file, end))
