@@ -1,44 +1,22 @@
 // ============================================================================
 // METANODE RPC & WEB3 CLIENT
 // Communicates with Parent Chain (HTTP RPC) & Execution Clusters (JSON-RPC)
+// Compatible with Protocol Cutover Chain ID 991, Protobuf Wire, & Co-Attestation
 // ============================================================================
 
-export const LAN_IP = '192.168.1.232';
+export const LAN_IP = '127.0.0.1';
 export const DEFAULT_HOST =
   typeof window !== 'undefined' &&
   window.location.hostname &&
   window.location.hostname !== 'localhost' &&
   window.location.hostname !== '127.0.0.1'
     ? window.location.hostname
-    : LAN_IP;
+    : '127.0.0.1';
 
 export const PRESET_CLUSTERS = [
   {
-    id: 'devnet_31646',
-    name: 'Devnet Exec 1 (Gate Active, Port 31646)',
-    chainId: 991,
-    rpcUrl: `http://${DEFAULT_HOST}:31646`,
-    clusterKey: '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128',
-    isExec: true,
-  },
-  {
-    id: 'devnet_31647',
-    name: 'Devnet Exec 2 (Gate Active, Port 31647)',
-    chainId: 991,
-    rpcUrl: `http://${DEFAULT_HOST}:31647`,
-    clusterKey: '0x83221629eeff1a69aa96ac6aadea402a7b62a74647633c0743cd517b71dcd5cd39fec42841b953fc481dac039bceb465',
-    isExec: true,
-  },
-  {
-    id: 'parent_devnet',
-    name: 'Parent Chain (Port 31601)',
-    chainId: 990,
-    rpcUrl: `http://${DEFAULT_HOST}:31601`,
-    isParent: true,
-  },
-  {
     id: 'exec1',
-    name: 'Execution Cluster 1 (No Gate, Port 8646)',
+    name: 'Execution Cluster 1 (Port 8646)',
     chainId: 991,
     rpcUrl: `http://${DEFAULT_HOST}:8646`,
     clusterKey: '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128',
@@ -46,7 +24,7 @@ export const PRESET_CLUSTERS = [
   },
   {
     id: 'exec2',
-    name: 'Execution Cluster 2 (No Gate, Port 8647)',
+    name: 'Execution Cluster 2 (Port 8647)',
     chainId: 991,
     rpcUrl: `http://${DEFAULT_HOST}:8647`,
     clusterKey: '0x83221629eeff1a69aa96ac6aadea402a7b62a74647633c0743cd517b71dcd5cd39fec42841b953fc481dac039bceb465',
@@ -54,27 +32,102 @@ export const PRESET_CLUSTERS = [
   },
   {
     id: 'parent_18601',
-    name: 'Parent Chain (Port 18601)',
-    chainId: 990,
+    name: 'Parent Chain L1 (Port 18601)',
+    chainId: 991,
     rpcUrl: `http://${DEFAULT_HOST}:18601`,
     isParent: true,
   },
   {
     id: 'exec_node0',
     name: 'Node-0 RPC (Port 8545)',
-    chainId: 1000,
+    chainId: 991,
     rpcUrl: `http://${DEFAULT_HOST}:8545`,
     isExec: true,
+  },
+  {
+    id: 'ansible_exec1',
+    name: 'Ansible Exec 1 (Port 8747)',
+    chainId: 991,
+    rpcUrl: `http://${DEFAULT_HOST}:8747`,
+    isExec: true,
+  },
+  {
+    id: 'ansible_parent',
+    name: 'Ansible Parent (Port 8547)',
+    chainId: 991,
+    rpcUrl: `http://${DEFAULT_HOST}:8547`,
+    isParent: true,
+  },
+  {
+    id: 'devnet_31646',
+    name: 'Devnet Exec 1 (Port 31646)',
+    chainId: 991,
+    rpcUrl: `http://${DEFAULT_HOST}:31646`,
+    clusterKey: '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128',
+    isExec: true,
+  },
+  {
+    id: 'devnet_31647',
+    name: 'Devnet Exec 2 (Port 31647)',
+    chainId: 991,
+    rpcUrl: `http://${DEFAULT_HOST}:31647`,
+    clusterKey: '0x83221629eeff1a69aa96ac6aadea402a7b62a74647633c0743cd517b71dcd5cd39fec42841b953fc481dac039bceb465',
+    isExec: true,
+  },
+  {
+    id: 'parent_31601',
+    name: 'Parent Chain (Port 31601)',
+    chainId: 991,
+    rpcUrl: `http://${DEFAULT_HOST}:31601`,
+    isParent: true,
   },
 ];
 
 /**
+ * LocalStorage Custom Cluster Management
+ */
+const CUSTOM_CLUSTERS_KEY = 'metanode_portal_custom_clusters_v1';
+
+export function getCustomClusters() {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(CUSTOM_CLUSTERS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+export function saveCustomCluster(cluster) {
+  if (typeof window === 'undefined') return;
+  try {
+    const current = getCustomClusters();
+    const filtered = current.filter((c) => c.id !== cluster.id && c.rpcUrl !== cluster.rpcUrl);
+    filtered.push(cluster);
+    localStorage.setItem(CUSTOM_CLUSTERS_KEY, JSON.stringify(filtered));
+  } catch (_) {}
+}
+
+export function removeCustomCluster(clusterId) {
+  if (typeof window === 'undefined') return;
+  try {
+    const current = getCustomClusters();
+    const filtered = current.filter((c) => c.id !== clusterId);
+    localStorage.setItem(CUSTOM_CLUSTERS_KEY, JSON.stringify(filtered));
+  } catch (_) {}
+}
+
+export function getAllClusters() {
+  return [...PRESET_CLUSTERS, ...getCustomClusters()];
+}
+
+/**
  * Standard JSON-RPC Call Helper
  */
-export async function callJsonRpc(rpcUrl, method, params = []) {
+export async function callJsonRpc(rpcUrl, method, params = [], timeoutMs = 4000) {
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     const res = await fetch(rpcUrl, {
       method: 'POST',
@@ -103,7 +156,64 @@ export async function callJsonRpc(rpcUrl, method, params = []) {
 }
 
 /**
- * Check node health & block height
+ * Probe a cluster endpoint to auto-detect its type and configuration
+ */
+export async function probeClusterEndpoint(url) {
+  const cleanUrl = url.replace(/\/+$/, '');
+  const result = {
+    rpcUrl: cleanUrl,
+    isParent: false,
+    isExec: false,
+    chainId: 991,
+    online: false,
+    name: cleanUrl,
+  };
+
+  try {
+    // 1. Check if it is a Parent Chain (/status)
+    const ctrl1 = new AbortController();
+    const t1 = setTimeout(() => ctrl1.abort(), 2000);
+    const parentRes = await fetch(`${cleanUrl}/status`, { signal: ctrl1.signal }).catch(() => null);
+    clearTimeout(t1);
+
+    if (parentRes && parentRes.ok) {
+      const pData = await parentRes.json().catch(() => null);
+      if (pData) {
+        result.isParent = true;
+        result.online = true;
+        result.chainId = pData.chain_id || 991;
+        result.name = `Parent Chain (${new URL(cleanUrl).port || '80'})`;
+        return result;
+      }
+    }
+
+    // 2. Check if it is an Execution Cluster (JSON-RPC)
+    const chainIdHex = await callJsonRpc(cleanUrl, 'eth_chainId', [], 2500).catch(() => null);
+    if (chainIdHex) {
+      result.isExec = true;
+      result.online = true;
+      result.chainId = parseInt(chainIdHex, 16);
+      result.name = `Exec Cluster ${result.chainId} (${new URL(cleanUrl).port || '80'})`;
+
+      try {
+        const identity = await callJsonRpc(cleanUrl, 'mtn_getClusterIdentity', [], 2000);
+        if (identity) {
+          result.clusterKey = identity.clusterKey;
+          result.accountGate = identity.accountGate;
+        }
+      } catch (_) {}
+
+      return result;
+    }
+  } catch (err) {
+    result.error = err.message;
+  }
+
+  return result;
+}
+
+/**
+ * Check node health, readiness, committee key status, & block height
  */
 export async function checkNodeStatus(target) {
   const rpcUrl = typeof target === 'string' ? target : target?.rpcUrl;
@@ -113,7 +223,7 @@ export async function checkNodeStatus(target) {
     const start = performance.now();
 
     // Parent Chain uses HTTP REST endpoint /status
-    if (isParent || rpcUrl.includes('18601') || rpcUrl.includes('31601')) {
+    if (isParent || rpcUrl.includes('18601') || rpcUrl.includes('31601') || rpcUrl.includes('8547')) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 3500);
       const res = await fetch(`${rpcUrl}/status`, { signal: controller.signal });
@@ -126,13 +236,22 @@ export async function checkNodeStatus(target) {
         blockNumber: data.last_block || 0,
         stateRoot: data.state_root || '0x00000000...',
         latency,
+        isParent: true,
+        chainId: data.chain_id || 991,
+        forkDetected: !!data.fork_detected,
+        syncing: !!data.syncing,
       };
     }
 
-    // Execution Cluster uses JSON-RPC eth_blockNumber
-    const blockHex = await callJsonRpc(rpcUrl, 'eth_blockNumber', []);
+    // Execution Cluster:
+    // 1. JSON-RPC eth_blockNumber & eth_chainId
+    const [blockHex, chainIdHex] = await Promise.all([
+      callJsonRpc(rpcUrl, 'eth_blockNumber', []),
+      callJsonRpc(rpcUrl, 'eth_chainId', []).catch(() => '0x3df'),
+    ]);
     const latency = Math.round(performance.now() - start);
     const blockNumber = parseInt(blockHex, 16);
+    const chainId = parseInt(chainIdHex, 16);
 
     let stateRoot = '0x00000000...';
     try {
@@ -142,11 +261,55 @@ export async function checkNodeStatus(target) {
       }
     } catch (_) {}
 
+    // 2. Health endpoint (/health)
+    let healthData = null;
+    try {
+      const hCtrl = new AbortController();
+      const hTimeout = setTimeout(() => hCtrl.abort(), 2000);
+      const hRes = await fetch(`${rpcUrl}/health`, { signal: hCtrl.signal });
+      clearTimeout(hTimeout);
+      if (hRes.ok) {
+        healthData = await hRes.json();
+      }
+    } catch (_) {}
+
+    // 3. Readiness endpoint (/readiness)
+    let readinessData = null;
+    try {
+      const rCtrl = new AbortController();
+      const rTimeout = setTimeout(() => rCtrl.abort(), 2000);
+      const rRes = await fetch(`${rpcUrl}/readiness`, { signal: rCtrl.signal });
+      clearTimeout(rTimeout);
+      readinessData = {
+        ready: rRes.ok,
+        status: rRes.status,
+        data: await rRes.json().catch(() => null),
+      };
+    } catch (_) {}
+
+    // 4. Cluster identity (Account Gate & BLS Cluster Key)
+    let clusterIdentity = null;
+    try {
+      clusterIdentity = await callJsonRpc(rpcUrl, 'mtn_getClusterIdentity', [], 2000);
+    } catch (_) {}
+
     return {
       online: true,
       blockNumber,
       stateRoot,
       latency,
+      chainId,
+      isExec: true,
+      health: healthData?.status || 'ok',
+      committeeKey: healthData?.committee_key || 'not_validator',
+      committeeKeyWarning: healthData?.committee_key_warning || null,
+      epoch: healthData?.epoch !== undefined ? healthData.epoch : 0,
+      lastBlockAgeMs: healthData?.last_block_age_ms !== undefined ? healthData.last_block_age_ms : 0,
+      readiness: readinessData ? readinessData.ready : true,
+      readinessDetails: readinessData?.data || null,
+      clusterIdentity,
+      accountGate: clusterIdentity?.accountGate || false,
+      clusterKey: clusterIdentity?.clusterKey || null,
     };
   } catch (err) {
     return {
@@ -155,6 +318,43 @@ export async function checkNodeStatus(target) {
       stateRoot: 'N/A',
       error: err.message,
     };
+  }
+}
+
+/**
+ * Fetch Key Prometheus Metrics for Node Telemetry
+ */
+export async function fetchNodeMetrics(rpcUrl) {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2500);
+    const res = await fetch(`${rpcUrl}/metrics`, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (!res.ok) return null;
+
+    const text = await res.text();
+    const metrics = {};
+
+    const targetKeys = [
+      'master_validator_committee_key_valid',
+      'master_parent_chain_id_mismatch',
+      'master_account_registration_pending_total',
+      'master_account_registration_pending_max_age_seconds',
+      'master_rollup_signatures_rejected_total',
+      'master_rollup_committee_read_errors_total',
+    ];
+
+    targetKeys.forEach((key) => {
+      const regex = new RegExp(`^${key}\\s+([\\d.-]+)`, 'm');
+      const match = text.match(regex);
+      if (match) {
+        metrics[key] = parseFloat(match[1]);
+      }
+    });
+
+    return metrics;
+  } catch (_) {
+    return null;
   }
 }
 
@@ -181,14 +381,16 @@ export async function fetchAccountInfo(rpcUrl, address) {
     let gateEnforced = false;
     let parentRegistered = false;
     let registrationStatus = 'NONE';
+    let dynamicClusterKey = null;
 
     try {
       const clusterIdentity = await callJsonRpc(rpcUrl, 'mtn_getClusterIdentity', []);
       if (clusterIdentity && clusterIdentity.accountGate) {
         gateEnforced = true;
+        dynamicClusterKey = clusterIdentity.clusterKey;
       }
     } catch (_) {
-      // Cluster does not enforce Account Gate
+      // Cluster does not enforce Account Gate (e.g. open evm cluster)
     }
 
     if (gateEnforced) {
@@ -223,6 +425,7 @@ export async function fetchAccountInfo(rpcUrl, address) {
       gateEnforced,
       parentRegistered,
       registrationStatus,
+      dynamicClusterKey,
     };
   } catch (err) {
     console.warn('fetchAccountInfo failed:', err);
@@ -246,7 +449,7 @@ export async function checkParentRegistration(parentRpcUrl, clusterKey, userAddr
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 3500);
 
-    const cleanClusterKey = clusterKey.replace('0x', '');
+    const cleanClusterKey = (clusterKey || '').replace('0x', '');
     const url = `${parentRpcUrl}/account_registration_events?cluster_key=${cleanClusterKey}&from_seq=0&limit=256`;
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timeoutId);
@@ -270,7 +473,6 @@ export async function checkParentRegistration(parentRpcUrl, clusterKey, userAddr
     }
     return { registered: false, seq: 0, total: events.length };
   } catch (err) {
-    // If parent HTTP endpoint isn't up, return tentative false
     return { registered: false, error: err.message };
   }
 }
@@ -326,6 +528,13 @@ export async function submitRegistrationToParent(parentRpcUrl, userAddress, clus
 }
 
 /**
+ * Dispatch Real Cross-Cluster Rollup Transfer via mtn_sendCrossChainTransfer
+ */
+export async function sendCrossChainTransfer(rpcUrl, recipientAddress, amountWeiHex) {
+  return await callJsonRpc(rpcUrl, 'mtn_sendCrossChainTransfer', [recipientAddress, amountWeiHex]);
+}
+
+/**
  * Connect to Web3 Provider (MetaMask / EIP-1193)
  */
 export async function connectWallet() {
@@ -352,7 +561,8 @@ export async function connectWallet() {
  */
 export async function switchOrAddNetwork(cluster) {
   if (!window.ethereum) return;
-  const hexChainId = `0x${cluster.chainId.toString(16)}`;
+  const targetChainId = cluster.chainId || 991;
+  const hexChainId = `0x${targetChainId.toString(16)}`;
 
   try {
     await window.ethereum.request({

@@ -10,14 +10,16 @@ import {
   ExternalLink,
   Layers,
   Sparkles,
+  Search,
+  Check,
 } from 'lucide-react';
 import {
-  PRESET_CLUSTERS,
-  LAN_IP,
+  getAllClusters,
   submitRegistrationToParent,
   getClusterRegistrationMessage,
   registerAccountOnNode,
   getRegistrationStatusFromNode,
+  checkParentRegistration,
 } from '../services/metanodeRpc';
 
 export function AccountGateCard({
@@ -26,13 +28,22 @@ export function AccountGateCard({
   parentRegInfo,
   selectedCluster,
   onRefresh,
+  allClusters,
 }) {
+  const clusters = allClusters || getAllClusters();
+  const execClusters = clusters.filter((c) => c.isExec);
+
   const [targetCluster, setTargetCluster] = useState(
-    selectedCluster.isExec ? selectedCluster : PRESET_CLUSTERS[0]
+    selectedCluster.isExec ? selectedCluster : execClusters[0] || selectedCluster
   );
   const [isRegistering, setIsRegistering] = useState(false);
   const [currentStep, setCurrentStep] = useState(0); // 0: Idle, 1: Signing, 2: Parent Chain Relay, 3: Syncing, 4: Done
   const [regError, setRegError] = useState(null);
+
+  // Address Lookup tool
+  const [lookupAddress, setLookupAddress] = useState('');
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupResult, setLookupResult] = useState(null);
 
   const gateEnforced = accountInfo?.gateEnforced;
   const isRegisteredOnExec = accountInfo?.parentRegistered;
@@ -51,24 +62,36 @@ export function AccountGateCard({
 
     try {
       // Step 1: User Signs Registration Intent with ECDSA
-      const clusterKey = targetCluster.clusterKey || PRESET_CLUSTERS[0].clusterKey;
+      const clusterKey =
+        accountInfo?.dynamicClusterKey ||
+        targetCluster.clusterKey ||
+        '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128';
+
+      let digest;
       let hashToSign;
       try {
         const msgRes = await getClusterRegistrationMessage(targetCluster.rpcUrl, account);
-        if (msgRes && msgRes.hashToSign) {
+        if (msgRes) {
+          digest = msgRes.digest;
           hashToSign = msgRes.hashToSign;
         }
       } catch (msgErr) {
-        console.warn('Could not fetch custom registration hash, falling back to message format:', msgErr);
+        console.warn('Could not fetch cluster registration message:', msgErr);
       }
 
-      const message = hashToSign || `REGISTER_ACCOUNT_V1:${account.toLowerCase()}:${clusterKey.toLowerCase()}`;
+      // MetaMask personal_sign takes (data, address). When data is the raw digest (hex string),
+      // MetaMask applies "\x19Ethereum Signed Message:\n" + len + digest
+      // which exactly matches the Go backend accounts.TextHash(digest) verification!
+      const messageToSign =
+        digest ||
+        hashToSign ||
+        `REGISTER_ACCOUNT_V1:${account.toLowerCase()}:${clusterKey.toLowerCase()}`;
 
       let signature;
       try {
         signature = await window.ethereum.request({
           method: 'personal_sign',
-          params: [message, account],
+          params: [messageToSign, account],
         });
       } catch (signErr) {
         throw new Error(`Signature rejected: ${signErr.message}`);
@@ -81,12 +104,13 @@ export function AccountGateCard({
         const relayRes = await registerAccountOnNode(targetCluster.rpcUrl, account, signature);
         console.log('Node relay registration submitted:', relayRes);
       } catch (nodeErr) {
-        console.warn('Node relay registration notice, trying direct parent route:', nodeErr.message);
-        const parentCluster = PRESET_CLUSTERS.find((c) => c.isParent);
-        const parentRpc = parentCluster ? parentCluster.rpcUrl : `http://${LAN_IP}:18601`;
-        try {
-          await submitRegistrationToParent(parentRpc, account, clusterKey, signature);
-        } catch (_) {}
+        console.warn('Node relay registration notice, attempting direct parent route:', nodeErr.message);
+        const parentCluster = clusters.find((c) => c.isParent);
+        if (parentCluster) {
+          try {
+            await submitRegistrationToParent(parentCluster.rpcUrl, account, clusterKey, signature);
+          } catch (_) {}
+        }
       }
 
       setCurrentStep(3);
@@ -106,7 +130,11 @@ export function AccountGateCard({
           }
           if (statusRes && statusRes.status === 'REJECTED') {
             clearInterval(interval);
-            setRegError(`Registration rejected by Parent Chain: Already registered on cluster ${statusRes.homeCluster || 'another cluster'}`);
+            setRegError(
+              `Registration rejected: Account is already registered on cluster ${
+                statusRes.homeCluster || 'another cluster'
+              }`
+            );
             setIsRegistering(false);
             return;
           }
@@ -125,6 +153,22 @@ export function AccountGateCard({
       setIsRegistering(false);
       setCurrentStep(0);
     }
+  };
+
+  const handleLookupAddress = async (e) => {
+    e.preventDefault();
+    if (!lookupAddress || !lookupAddress.startsWith('0x') || lookupAddress.length !== 42) {
+      alert('Please enter a valid 20-byte 0x address');
+      return;
+    }
+    setLookupLoading(true);
+    setLookupResult(null);
+
+    const parentCluster = clusters.find((c) => c.isParent) || clusters[2];
+    const clusterKey = targetCluster.clusterKey || '';
+    const res = await checkParentRegistration(parentCluster.rpcUrl, clusterKey, lookupAddress);
+    setLookupResult(res);
+    setLookupLoading(false);
   };
 
   if (!account) {
@@ -203,7 +247,7 @@ export function AccountGateCard({
                   </div>
                   <h2 style={{ fontSize: '1.35rem', fontWeight: 800, color: '#fff' }}>
                     {gateHeroStatus === 'open'
-                      ? 'Active & Ready — No Account Gate Required'
+                      ? 'Active & Ready — Open Cluster (No Gate Enforced)'
                       : gateHeroStatus === 'registered'
                       ? 'Active & Registered — Ready to Transact'
                       : gateHeroStatus === 'pending'
@@ -251,7 +295,7 @@ export function AccountGateCard({
                   : gateHeroStatus === 'registered'
                   ? 'PASS (Gate Open)'
                   : gateHeroStatus === 'pending'
-                  ? 'PENDING SYNC'
+                  ? 'PENDING CO-ATTESTATION'
                   : 'BLOCKED (Code 69)'}
               </div>
             </div>
@@ -260,7 +304,7 @@ export function AccountGateCard({
             <div className="details-grid">
               <div className="detail-box">
                 <div className="detail-label">Connected Wallet Address</div>
-                <div className="detail-value mono">{account}</div>
+                <div className="detail-value mono" style={{ fontSize: '0.82rem' }}>{account}</div>
               </div>
               <div className="detail-box">
                 <div className="detail-label">Current Cluster Balance</div>
@@ -273,13 +317,13 @@ export function AccountGateCard({
                 <div className="detail-value mono">{accountInfo?.nonce ?? 0}</div>
               </div>
               <div className="detail-box">
-                <div className="detail-label">Parent Registry Seq</div>
+                <div className="detail-label">Parent Registry Status</div>
                 <div className="detail-value mono">
                   {gateHeroStatus === 'open'
                     ? 'Not Required'
                     : parentRegInfo?.registered
-                    ? `#${parentRegInfo.seq}`
-                    : 'Not registered yet'}
+                    ? `Registered (Block #${parentRegInfo.parentBlock || 'L1'})`
+                    : 'Unregistered'}
                 </div>
               </div>
             </div>
@@ -305,7 +349,7 @@ export function AccountGateCard({
           <div className="alert alert-info">
             <div>
               <strong>Why is registration required?</strong> Under Metanode's Zero-Fork architecture,
-              each secp account is bound 1-to-1 with an execution cluster via Parent Chain's AccountRegistry.
+              each secp256k1 account is bound 1-to-1 with an execution cluster via Parent Chain's AccountRegistry.
               This prevents malicious actors from replaying your signed transactions on another cluster!
             </div>
           </div>
@@ -325,7 +369,7 @@ export function AccountGateCard({
               </div>
               <div className={`step-item ${currentStep >= 3 ? 'active' : ''} ${currentStep > 3 ? 'completed' : ''}`}>
                 <div className="step-circle">{currentStep > 3 ? '✓' : '3'}</div>
-                <div className="step-label">Cluster Sync</div>
+                <div className="step-label">Co-Attestation</div>
               </div>
               <div className={`step-item ${currentStep >= 4 ? 'completed' : ''}`}>
                 <div className="step-circle">{currentStep >= 4 ? '✓' : '4'}</div>
@@ -342,14 +386,14 @@ export function AccountGateCard({
                 className="form-select"
                 value={targetCluster.id}
                 onChange={(e) => {
-                  const c = PRESET_CLUSTERS.find((x) => x.id === e.target.value);
+                  const c = clusters.find((x) => x.id === e.target.value);
                   if (c) setTargetCluster(c);
                 }}
                 disabled={isRegistering}
               >
-                {PRESET_CLUSTERS.filter((c) => c.isExec).map((c) => (
+                {execClusters.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.name} (ChainID: {c.chainId})
+                    {c.name} (ChainID: {c.chainId || 991})
                   </option>
                 ))}
               </select>
@@ -376,6 +420,63 @@ export function AccountGateCard({
           </div>
         </div>
       )}
+
+      {/* Address Registry Lookup Tool */}
+      <div className="card" style={{ marginTop: '20px' }}>
+        <div className="card-header">
+          <div className="card-title">
+            <Search className="w-4 h-4 text-cyan" />
+            Parent Chain Account Registry Lookup
+          </div>
+          <div className="card-subtitle">
+            Verify whether any secp256k1 address is registered in the Parent Chain Account Registry.
+          </div>
+        </div>
+
+        <form onSubmit={handleLookupAddress} style={{ display: 'flex', gap: '10px', alignItems: 'flex-end' }}>
+          <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+            <label className="form-label">Query Address (0x...)</label>
+            <input
+              type="text"
+              className="form-input mono"
+              placeholder="0x..."
+              value={lookupAddress}
+              onChange={(e) => setLookupAddress(e.target.value)}
+              required
+            />
+          </div>
+          <button
+            type="submit"
+            className="btn btn-secondary"
+            style={{ height: '42px', minWidth: '120px' }}
+            disabled={lookupLoading || !lookupAddress}
+          >
+            {lookupLoading ? 'Checking...' : 'Check Registry'}
+          </button>
+        </form>
+
+        {lookupResult && (
+          <div
+            style={{
+              marginTop: '14px',
+              padding: '12px',
+              borderRadius: '8px',
+              background: lookupResult.registered ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+              border: `1px solid ${lookupResult.registered ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+            }}
+          >
+            {lookupResult.registered ? (
+              <div style={{ color: 'var(--green)', fontSize: '0.85rem' }}>
+                <strong>✓ Registered:</strong> Address is registered on Parent Chain (Seq #{lookupResult.seq}, Block #{lookupResult.parentBlock}).
+              </div>
+            ) : (
+              <div style={{ color: 'var(--red)', fontSize: '0.85rem' }}>
+                <strong>✗ Not Registered:</strong> Address has not yet been registered to any execution cluster in Parent Chain events.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

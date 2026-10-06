@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
-import { Send, AlertTriangle, CheckCircle, Clock, ExternalLink } from 'lucide-react';
-import { callJsonRpc } from '../services/metanodeRpc';
+import { Send, AlertTriangle, CheckCircle, Clock, ExternalLink, ArrowRight, ShieldCheck } from 'lucide-react';
+import { callJsonRpc, switchOrAddNetwork } from '../services/metanodeRpc';
 
 export function TransferTab({
   account,
   accountInfo,
   selectedCluster,
   onRefresh,
+  onNavigateToGate,
 }) {
   const [recipient, setRecipient] = useState('');
   const [amount, setAmount] = useState('0.1');
@@ -14,7 +15,8 @@ export function TransferTab({
   const [txReceipt, setTxReceipt] = useState(null);
   const [txError, setTxError] = useState(null);
 
-  const isGateBlocked = !accountInfo?.parentRegistered;
+  const gateEnforced = accountInfo?.gateEnforced;
+  const isGateBlocked = gateEnforced && !accountInfo?.parentRegistered;
 
   const handleSendTransaction = async (e) => {
     e.preventDefault();
@@ -32,7 +34,20 @@ export function TransferTab({
     setTxReceipt(null);
 
     try {
-      // Convert amount in MTN to Wei Hex
+      // 1. Ensure wallet is on correct Chain ID
+      const targetChainId = selectedCluster.chainId || 991;
+      const currentChainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
+      const currentChainId = parseInt(currentChainIdHex, 16);
+
+      if (currentChainId !== targetChainId) {
+        try {
+          await switchOrAddNetwork(selectedCluster);
+        } catch (switchErr) {
+          throw new Error(`Please switch your wallet network to Chain ID ${targetChainId}`);
+        }
+      }
+
+      // 2. Convert amount in MTN to Wei Hex
       const amountWei = BigInt(Math.floor(parseFloat(amount) * 1e18));
       const valueHex = `0x${amountWei.toString(16)}`;
 
@@ -42,7 +57,7 @@ export function TransferTab({
         value: valueHex,
       };
 
-      // Request MetaMask to send transaction
+      // 3. Request MetaMask to send transaction
       const txHash = await window.ethereum.request({
         method: 'eth_sendTransaction',
         params: [txParams],
@@ -56,7 +71,7 @@ export function TransferTab({
         timestamp: new Date().toLocaleTimeString(),
       });
 
-      // Poll for receipt
+      // 4. Poll for receipt
       setTimeout(async () => {
         try {
           const receipt = await callJsonRpc(selectedCluster.rpcUrl, 'eth_getTransactionReceipt', [txHash]);
@@ -93,7 +108,7 @@ export function TransferTab({
             Send MTN Transaction
           </div>
           <div className="card-subtitle">
-            Transfer funds on {selectedCluster.name}
+            Transfer funds on {selectedCluster.name} (Chain ID: {selectedCluster.chainId || 991})
           </div>
         </div>
 
@@ -101,9 +116,19 @@ export function TransferTab({
           <div className="alert alert-warning">
             <AlertTriangle className="w-5 h-5 text-amber" style={{ flexShrink: 0 }} />
             <div>
-              <strong>Gate Enforcement Notice:</strong> Your account is currently <strong>unregistered</strong> on the Parent Chain.
-              Any transaction sent from this wallet will be rejected by the node with error <code>AccountNotRegistered (Code 69)</code>.
-              Please go to the <strong>Account Gate</strong> tab to onboard first.
+              <strong>Account Gate Enforcement:</strong> Your account is currently <strong>unregistered</strong> on the Parent Chain.
+              Transactions sent from this wallet will be rejected by the node with error <code>AccountNotRegistered (Code 69)</code>.
+              <div style={{ marginTop: '8px' }}>
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={onNavigateToGate}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  Go to Account Gate Onboarding
+                  <ArrowRight className="w-3 h-3" />
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -178,7 +203,7 @@ export function TransferTab({
             {isSending ? (
               <>
                 <Clock className="w-4 h-4 animate-spin" />
-                Signing & Sending...
+                Signing &amp; Sending...
               </>
             ) : (
               <>
@@ -193,14 +218,20 @@ export function TransferTab({
       {/* Account Info & Security Details */}
       <div className="card">
         <div className="card-header">
-          <div className="card-title">Account Quick Stats</div>
+          <div className="card-title">Account &amp; Network Quick Stats</div>
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
           <div className="detail-box">
             <div className="detail-label">Current Cluster RPC</div>
             <div className="detail-value mono" style={{ fontSize: '0.8rem' }}>
-              {selectedCluster.rpcUrl} (ChainID: {selectedCluster.chainId})
+              {selectedCluster.rpcUrl}
+            </div>
+          </div>
+          <div className="detail-box">
+            <div className="detail-label">EIP-155 Chain ID</div>
+            <div className="detail-value mono" style={{ color: 'var(--cyan-bright)', fontWeight: 700 }}>
+              {selectedCluster.chainId || 991}
             </div>
           </div>
           <div className="detail-box">
@@ -210,13 +241,15 @@ export function TransferTab({
           <div className="detail-box">
             <div className="detail-label">Signature Mode</div>
             <div className="detail-value">
-              <span className="badge badge-info">secp256k1 (ETH Compatible)</span>
+              <span className="badge badge-info">secp256k1 (ETH Replay Protected)</span>
             </div>
           </div>
           <div className="detail-box">
             <div className="detail-label">Gate Verification Seam</div>
             <div className="detail-value">
-              {accountInfo?.parentRegistered ? (
+              {!gateEnforced ? (
+                <span className="badge badge-info">Open Cluster (Gate Not Required)</span>
+              ) : accountInfo?.parentRegistered ? (
                 <span className="badge badge-success">✓ Authorized by Parent Chain</span>
               ) : (
                 <span className="badge badge-danger">✗ Restricted by Account Gate</span>
