@@ -283,9 +283,6 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 			return
 		}
 		ethTxHash = ethTx.Hash()
-		if bc := blockchain.GetBlockChainInstance(); bc != nil {
-			_ = bc.SetEthHashMapblsHash(ethTxHash, metaTx.Hash())
-		}
 		tx = metaTx
 	} else if tx == nil && len(req.rawBody) > 0 {
 		// Deferred unmarshal: readLoop skipped this for throughput
@@ -306,6 +303,10 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 	err := tp.processTransactionFromClient(req.conn, tx, req.msgID, ethTxHash)
 	if err != nil {
 		logger.Debug("Async injection failed for tx %s: %v", tx.Hash().Hex(), err)
+	} else if req.rawEth && len(req.rawBody) > 0 {
+		if bc := blockchain.GetBlockChainInstance(); bc != nil {
+			bc.AddTxToCache(ethTxHash, append([]byte(nil), req.rawBody...))
+		}
 	}
 }
 
@@ -404,8 +405,22 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 	msgID string,
 	respHash common.Hash,
 ) error {
-	// Always save txHash → connection mapping for txHash-based receipt delivery
-	// This ensures `BroadCastReceipts` sends the receipt back to the sender
+	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_RECEIVED", fmt.Sprintf("Received from connection: %s", conn.RemoteAddrSafe()))
+
+	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_START", "Adding transaction to mempool")
+	code, err := tp.AddTransactionToPool(tx)
+	if err != nil {
+		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_FAILED", err.Error())
+		logger.Error("❌ [TX REJECTED] AddTransactionToPool failed: txHash=%s, msg=%s", tx.Hash().Hex(), err.Error())
+		errHash := tx.Hash()
+		if respHash != (common.Hash{}) {
+			errHash = respHash
+		}
+		tp.sendTransactionError(conn, errHash, code, err.Error(), nil, msgID)
+		return err
+	}
+
+	// Always save txHash → connection mapping for txHash-based receipt delivery AFTER pool admission
 	if tp.env != nil {
 		tp.env.StoreTxHashConnEntry(tx.Hash(), TxHashConnEntry{
 			Conn:      conn,
@@ -421,19 +436,10 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 		}
 	}
 
-	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_RECEIVED", fmt.Sprintf("Received from connection: %s", conn.RemoteAddrSafe()))
-
-	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_START", "Adding transaction to mempool")
-	code, err := tp.AddTransactionToPool(tx)
-	if err != nil {
-		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_FAILED", err.Error())
-		logger.Error("❌ [TX REJECTED] AddTransactionToPool failed: txHash=%s, msg=%s", tx.Hash().Hex(), err.Error())
-		errHash := tx.Hash()
-		if respHash != (common.Hash{}) {
-			errHash = respHash
+	if respHash != (common.Hash{}) && respHash != tx.Hash() {
+		if bc := blockchain.GetBlockChainInstance(); bc != nil {
+			_ = bc.SetEthHashMapblsHash(respHash, tx.Hash())
 		}
-		tp.sendTransactionError(conn, errHash, code, err.Error(), nil, msgID)
-		return err
 	}
 
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_SUCCESS", "Transaction is pending in mempool")
@@ -563,6 +569,7 @@ func (tp *TransactionProcessor) ProcessRawTransactionsFromClient(request network
 	bc := blockchain.GetBlockChainInstance()
 	processedTxs := make([]types.Transaction, 0, len(rawEnvelopes))
 	processedEthHashes := make([]common.Hash, 0, len(rawEnvelopes))
+	processedRawEnvs := make([][]byte, 0, len(rawEnvelopes))
 
 	for idx, rawEnv := range rawEnvelopes {
 		if len(rawEnv) > transaction.MaxRawEthTxEnvelopeSize {
@@ -584,26 +591,11 @@ func (tp *TransactionProcessor) ProcessRawTransactionsFromClient(request network
 			continue
 		}
 
-		if bc != nil {
-			_ = bc.SetEthHashMapblsHash(ethTx.Hash(), metaTx.Hash())
-		}
 		processedTxs = append(processedTxs, metaTx)
 		processedEthHashes = append(processedEthHashes, ethTx.Hash())
+		processedRawEnvs = append(processedRawEnvs, rawEnv)
 
 		tx_processor.GlobalTxTraceStore.UpdateTrace(metaTx.Hash(), "BATCH_UNMARSHALED", "Raw Ethereum transaction received in batch from client")
-
-		if tp.env != nil {
-			tp.env.StoreTxHashConnEntry(metaTx.Hash(), TxHashConnEntry{
-				Conn:      request.Connection(),
-				MsgID:     request.Message().ID(),
-				CreatedAt: time.Now(),
-			})
-			tp.env.StoreTxHashConnEntry(ethTx.Hash(), TxHashConnEntry{
-				Conn:      request.Connection(),
-				MsgID:     request.Message().ID(),
-				CreatedAt: time.Now(),
-			})
-		}
 	}
 
 	if len(processedTxs) == 0 {
@@ -659,6 +651,24 @@ func (tp *TransactionProcessor) ProcessRawTransactionsFromClient(request network
 		} else {
 			successfulEthHashes = append(successfulEthHashes, processedEthHashes[i])
 			tx_processor.GlobalTxTraceStore.UpdateTrace(processedTxs[i].Hash(), "MEMPOOL_ADD_SUCCESS", "Transaction is pending in mempool")
+
+			if bc != nil {
+				_ = bc.SetEthHashMapblsHash(processedEthHashes[i], processedTxs[i].Hash())
+				bc.AddTxToCache(processedEthHashes[i], append([]byte(nil), processedRawEnvs[i]...))
+			}
+
+			if tp.env != nil {
+				tp.env.StoreTxHashConnEntry(processedTxs[i].Hash(), TxHashConnEntry{
+					Conn:      request.Connection(),
+					MsgID:     request.Message().ID(),
+					CreatedAt: time.Now(),
+				})
+				tp.env.StoreTxHashConnEntry(processedEthHashes[i], TxHashConnEntry{
+					Conn:      request.Connection(),
+					MsgID:     request.Message().ID(),
+					CreatedAt: time.Now(),
+				})
+			}
 		}
 	}
 

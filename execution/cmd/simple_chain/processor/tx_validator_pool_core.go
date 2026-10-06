@@ -294,7 +294,9 @@ func (vp *TxValidatorPool) AddVerifiedTransactionsToPool(txs []types.Transaction
 
 // addTransactionToPoolInternal handles the core logic with an option to skip expensive verification
 func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, skipVerification bool) (int64, error) {
-
+	if vp == nil {
+		return transaction.InvalidTransaction.Code, fmt.Errorf("TxValidatorPool is nil")
+	}
 	if tx == nil {
 		return transaction.InvalidTransaction.Code, fmt.Errorf("tx nil")
 	}
@@ -401,6 +403,13 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 // It verifies them individually but adds them to the pool and pending manager in bulk
 // to minimize lock contention.
 func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction, skipVerification bool) []error {
+	if vp == nil {
+		errs := make([]error, len(txs))
+		for i := range errs {
+			errs[i] = fmt.Errorf("TxValidatorPool is nil")
+		}
+		return errs
+	}
 	// Disabled vp_debug.log writing in hot-path for performance
 
 	if len(txs) == 0 {

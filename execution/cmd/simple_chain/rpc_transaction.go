@@ -329,14 +329,14 @@ func (api *MetaAPI) SendRawTransactionWithDeviceKey(ctx context.Context, input [
 	ethTxHash := ethTx.Hash()
 	metaTxHash := metaTx.Hash()
 
-	if bc := blockchain.GetBlockChainInstance(); bc != nil {
-		bc.AddTxToCache(ethTxHash, append([]byte(nil), inputEth...))
-		_ = bc.SetEthHashMapblsHash(ethTxHash, metaTxHash)
-	}
-
 	_, err = api.App.transactionProcessor.AddTransactionToPool(metaTx)
 	if err != nil {
 		return common.Hash{}, formatGethError(err)
+	}
+
+	if bc := blockchain.GetBlockChainInstance(); bc != nil {
+		bc.AddTxToCache(ethTxHash, append([]byte(nil), inputEth...))
+		_ = bc.SetEthHashMapblsHash(ethTxHash, metaTxHash)
 	}
 
 	return ethTxHash, nil
@@ -426,16 +426,16 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 	ethTxHash := ethTx.Hash()
 	metaTxHash := metaTx.Hash()
 
+	_, err = api.App.transactionProcessor.AddTransactionToPool(metaTx)
+	if err != nil {
+		return common.Hash{}, formatGethError(err)
+	}
+
 	if bc := blockchain.GetBlockChainInstance(); bc != nil {
 		bc.AddTxToCache(ethTxHash, append([]byte(nil), input...))
 		if errMap := bc.SetEthHashMapblsHash(ethTxHash, metaTxHash); errMap != nil {
 			logger.Warn("[SendRawEthTransaction] SetEthHashMapblsHash failed: %v", errMap)
 		}
-	}
-
-	_, err = api.App.transactionProcessor.AddTransactionToPool(metaTx)
-	if err != nil {
-		return common.Hash{}, formatGethError(err)
 	}
 
 	logger.Info("[SendRawEthTransaction] TX submitted: ethHash=%s metaHash=%s from=%s nonce=%d",

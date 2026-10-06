@@ -294,4 +294,62 @@ func TestSecpMode_RejectsLegacyCommands(t *testing.T) {
 	assert.Equal(t, int64(18), transaction.InvalidSign.Code)
 }
 
+// ============================================================================
+// TestP0_3_RejectedTx_NoStorageOrCachePollution
+// Verifies that a transaction rejected by mempool does NOT leave any entries
+// in ethHashMapBlsHash or txsCache.
+// ============================================================================
+func TestP0_3_RejectedTx_NoStorageOrCachePollution(t *testing.T) {
+	blockchain.InitBlockChain(10, nil, nil)
+	bc := blockchain.GetBlockChainInstance()
+	require.NotNil(t, bc)
+
+	chainID := big.NewInt(991)
+	cs := createTestChainState(true, 991)
+	sender := NewMockMessageSender()
+	tp := newTestTransactionProcessor(cs, sender)
+	// tp.TxValidatorPool is nil, so AddTransactionToPool will reject all transactions
+	mockConn := NewMockConnection(common.HexToAddress("0x1234"))
+
+	legacyTx := e_types.NewTx(&e_types.LegacyTx{
+		Nonce:    10,
+		GasPrice: big.NewInt(100000),
+		Gas:      21000,
+		To:       &common.Address{0x01},
+		Value:    big.NewInt(100),
+	})
+	legacyRaw := signTestTx(t, legacyTx, chainID)
+	parsedEthTx := new(e_types.Transaction)
+	require.NoError(t, parsedEthTx.UnmarshalBinary(legacyRaw))
+	ethHash := parsedEthTx.Hash()
+
+	// 1. Single injection via executeAndAddTx (which handles async rawEth)
+	tp.executeAndAddTx(injectionRequest{
+		conn:    mockConn,
+		rawBody: legacyRaw,
+		rawEth:  true,
+		msgID:   "msg-test-1",
+	})
+
+	// Verify no pollution in ethHashMapBlsHash
+	_, ok := bc.GetEthHashMapblsHash(ethHash)
+	assert.False(t, ok, "Rejected transaction must NOT have entry in ethHashMapBlsHash")
+
+	// Verify no pollution in txsCache
+	_, ok = bc.GetTxFromCache(ethHash)
+	assert.False(t, ok, "Rejected transaction must NOT have entry in txsCache")
+
+	// 2. Batch injection via ProcessRawTransactionsFromClient
+	batchRLP, err := rlp.EncodeToBytes([][]byte{legacyRaw})
+	require.NoError(t, err)
+	reqBatch := NewMockRequest(mockConn, NewMockMessage(command.SendRawTransactions, batchRLP))
+	_ = tp.ProcessRawTransactionsFromClient(reqBatch)
+
+	_, ok = bc.GetEthHashMapblsHash(ethHash)
+	assert.False(t, ok, "Rejected batch transaction must NOT have entry in ethHashMapBlsHash")
+
+	_, ok = bc.GetTxFromCache(ethHash)
+	assert.False(t, ok, "Rejected batch transaction must NOT have entry in txsCache")
+}
+
 

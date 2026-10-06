@@ -711,6 +711,10 @@ func (bc *BlockChain) GetEthHashMapblsHash(ethHash common.Hash) (common.Hash, bo
 		}
 	}
 
+	if bc.storageManager == nil || bc.storageManager.GetStorageMapping() == nil {
+		return common.Hash{}, false
+	}
+
 	key := []byte(ethHashMapBlsHashPrefix + ethHash.Hex())
 	data, err := bc.storageManager.GetStorageMapping().Get(key)
 	if err != nil || data == nil || len(data) != common.HashLength {
