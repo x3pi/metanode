@@ -5,11 +5,13 @@
 - **Bất biến (AGENTS.md 2.5):** không dùng timeout/sleep để quyết định dispatch; thà PENDING chứ không fork. Không `pkill` theo mẫu/cổng: dừng bằng `deploy_clusters.sh --stop` hoặc `systemctl stop metanode-<host>`.
 - **Lịch sử sửa:** bản đầu của runbook này dùng tên unit, đường dẫn, cổng, tên playbook và tên message proto KHÔNG tồn tại trong repo. Đã viết lại theo mã thật; nếu cấu hình triển khai của bạn khác (inventory riêng), thay các biến theo inventory của bạn.
 
-## 1. Vì sao phải cutover đồng thời
+## 1. Vì sao phải cutover đồng thời (Gói Cutover Bundle v1)
 1. **Chain ID parent 990 → 991** (genesis parent `chain_id`, `parent_chain_id` trong ansible; mọi cụm exec dùng cùng 991). Giao dịch ký với chain ID cũ bị từ chối.
-2. **Payload tx hệ thống JSON → protobuf** (`execution/pkg/proto/rollup.proto`: `RollupSystemPayloadProto`, `RollupSystemAttestedPayloadProto`, `AccountRegistrationPayloadProto`; digest attestation `ACCT_REG_ATTEST_V1` / `ROLLUP_SYS_EVENT_ATTEST_V1`). Node cũ không parse được payload mới và ngược lại.
-3. **Co-attestation f+1** bật mặc định: validator cần khóa committee hợp lệ (mục 3).
-4. Không có đường nâng cấp tương thích ngược ⇒ wipe + redeploy đồng thời parent và mọi cụm exec.
+2. **Một Hash duy nhất = keccak256(raw_envelope) (W4 / ADR D3)**: Bỏ cơ chế ánh xạ hash kép (`ethHash → metaHash`), chuyển sang dùng hash envelope chuẩn Ethereum cho cả Go và Rust.
+3. **Mô hình phí v1 chuẩn Ethereum (ADR D2)**: Giá hiệu dụng `EffectiveGasPrice = min(maxFeePerGas, F + maxPriorityFeePerGas)` trên nền phí phẳng `F = MINIMUM_BASE_FEE = 100,000 wei`, `maxPriorityFeePerGas = 0`.
+4. **Payload tx hệ thống JSON → protobuf** (`execution/pkg/proto/rollup.proto`: `RollupSystemPayloadProto`, `RollupSystemAttestedPayloadProto`, `AccountRegistrationPayloadProto`; digest attestation `ACCT_REG_ATTEST_V1` / `ROLLUP_SYS_EVENT_ATTEST_V1`). Node cũ không parse được payload mới và ngược lại.
+5. **Co-attestation f+1** bật mặc định: validator cần khóa committee hợp lệ (mục 3).
+6. Không có đường nâng cấp tương thích ngược ⇒ **Một lần wipe duy nhất + redeploy đồng thời** parent và mọi cụm exec.
 
 ## 2. Biến theo inventory (điền trước khi chạy)
 | Biến | Lấy ở đâu | Ví dụ trong `inventory.example.yml` |

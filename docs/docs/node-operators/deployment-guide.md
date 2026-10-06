@@ -15,7 +15,7 @@ Tất cả các công cụ quản trị nằm tại thư mục `deploy/` của r
 
 1. **`setup-cluster-btrfs.sh`**: Khởi tạo phân vùng hệ thống file **BTRFS** tại `/opt/metanode` để hỗ trợ sao lưu (snapshot) copy-on-write tốc độ cao.
 2. **`systemd-cluster.sh`**: Công cụ điều phối tổng (**Orchestrator**) quản lý cài đặt, khởi động, dừng và kiểm tra trạng thái của cả 5 node.
-3. **`install-rpc-systemd.sh`**: Công cụ cài đặt và chạy dịch vụ **RPC Proxy** (`metanode-rpc-N.service`) riêng biệt cho mỗi node.
+3. **JSON-RPC trực tiếp**: Trong kiến trúc Ethereum-only, `simple_chain` xử lý trực tiếp JSON-RPC chuẩn Ethereum (CORS, WebSocket, Rate Limiting), không cần chạy proxy trung gian (`metanode-rpc`).
 4. **`restore_node_systemd.sh`**: Công cụ khôi phục an toàn (Sequential & Fork-Safe) một node từ snapshot của node khác.
 
 ---

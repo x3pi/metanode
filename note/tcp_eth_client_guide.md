@@ -187,7 +187,67 @@ console.log("Receipt status:", receipt.status);
 
 ---
 
-## 4. Các Điểm Cần Lưu Ý
+## 4. Giới Hạn Ingress & Bảng Kích Thước (Production Limits)
+
+| Tham số / Giới hạn | Ngưỡng tối đa | Cơ chế cưỡng chế | Hành vi khi vượt quá |
+| :--- | :--- | :--- | :--- |
+| **Standard Tx Envelope** | `128 KB` (131,072 bytes) | `MaxStandardTxEnvelopeSize` | Trả mã lỗi 76 (`ErrExceedsMaxEnvelopeSize`), drop ngay tại TCP readloop |
+| **Blob Tx Envelope (4844)** | `1 MB` (1,048,576 bytes) | `MaxRawEthTxEnvelopeSize` | Trả mã lỗi 76 (`ErrExceedsMaxEnvelopeSize`) |
+| **TCP Batch Size** | `1,000` giao dịch / request | `MaxBatchTxCount` | Trả mã lỗi 75 (`ErrExceedsMaxBatchSize`), từ chối cả batch |
+| **Contract InitCode Size** | `48 KB` (49,152 bytes) | EIP-3860 `MaxInitCodeSize` | Trả mã lỗi 86 (`ErrMaxInitCodeSizeExceeded`) |
+| **Access List Size** | `1,024` tuples | `MaxAccessListTuples` | Trả mã lỗi `InvalidTransaction` |
+| **TCP Ingress Rate Limit** | `50,000` req/s (burst 5,000) | Token Bucket Rate Limiter | Trả message `ServerBusy` (non-blocking) |
+| **TCP Read Rate Limit** | `500,000` req/s (burst 50,000) | Token Bucket Rate Limiter | Trả message `ServerBusy` (non-blocking) |
+
+---
+
+## 5. Bảng Mã Lỗi Ingress (Error Codes Reference)
+
+Khi một giao dịch gửi qua TCP hoặc RPC bị từ chối, node sẽ trả về mã lỗi có kiểu theo bảng chuẩn sau:
+
+| Mã lỗi | Tên lỗi (Go Sentinel) | Mô tả & Nguyên nhân | HTTP/JSON-RPC Code |
+| :--- | :--- | :--- | :--- |
+| **18** | `InvalidSign` / `InvalidSignSecp` | Chữ ký không hợp lệ, hoặc gọi nhầm lệnh BLS legacy / type 0xFF | `-32000` (invalid sender / signature) |
+| **34** | `InvalidChainId` | Chain ID trong tx không khớp với Chain ID của node (`991`) | `-32000` (invalid chain ID) |
+| **71** | `ErrDecodeRawEth` | Lỗi giải mã RLP envelope hoặc cấu trúc bytes sai chuẩn EIP-2718 | `-32000` (decode raw eth error) |
+| **72** | `ErrPreEIP155` | Giao dịch pre-EIP-155 (không có chain ID, không được bảo vệ chống replay) | `-32000` (only replay-protected txs supported) |
+| **73** | `ErrMalleableSignature` | Chữ ký dẻo: giá trị $s > N/2$ (vi phạm EIP-2) | `-32000` (malleable signature) |
+| **74** | `ErrSenderRecovery` | Không thể phục hồi địa chỉ người gửi từ chữ ký secp256k1 | `-32000` (invalid sender) |
+| **75** | `ErrExceedsMaxBatchSize` | Batch TCP vượt quá giới hạn 1,000 giao dịch | `-32000` (batch exceeds max size) |
+| **76** | `ErrExceedsMaxEnvelopeSize`| Kích thước envelope vượt quá 128 KB (hoặc 1 MB cho blob) | `-32000` (envelope exceeds max size) |
+| **77** | `ErrInvalidEnvelope` | RawEnvelope rỗng hoặc không phân tích được khi kiểm tra ràng buộc P0-9 | `-32000` (invalid envelope) |
+| **86** | `ErrMaxInitCodeSizeExceeded`| Kích thước initcode khi deploy contract vượt quá 49,152 bytes (EIP-3860) | `-32000` (max initcode size exceeded) |
+| **81** | `ErrNonceTooLow` | Nonce của giao dịch nhỏ hơn nonce hiện tại on-chain | `-32000` (nonce too low) |
+| **82** | `ErrNonceTooHigh` | Nonce của giao dịch tạo khoảng trống (nonce gap) | `-32000` (nonce too high) |
+| **83** | `ErrInsufficientFunds` | Số dư tài khoản không đủ trả `gasLimit * gasPrice + value` | `-32000` (insufficient funds) |
+| **84** | `ErrAlreadyKnown` | Giao dịch cùng hash đã có sẵn trong mempool | `-32000` (already known) |
+| **85** | `ErrReplacementUnderpriced`| Thay thế giao dịch cùng nonce nhưng gas price không tăng đủ tối thiểu 10% | `-32000` (replacement transaction underpriced) |
+
+---
+
+## 6. Ma Trận Hỗ Trợ JSON-RPC API
+
+Node `simple_chain` cung cấp trực tiếp JSON-RPC chuẩn Ethereum tương thích 100% với MetaMask, Ethers.js, Viem, Foundry (`cast`/`forge`), Web3j:
+
+### 6.1 RPC Methods Được Hỗ Trợ (Supported)
+- **Giao dịch**: `eth_sendRawTransaction`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getTransactionCount`, `eth_estimateGas`, `eth_call`.
+- **Khối & Chuỗi**: `eth_blockNumber`, `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_chainId`, `net_version`.
+- **Trạng thái & Tài khoản**: `eth_getBalance`, `eth_getCode`, `eth_getStorageAt`.
+- **Phí**: `eth_gasPrice` (trả về F = 100,000 wei), `eth_feeHistory`, `eth_maxPriorityFeePerGas` (gợi ý 0 hoặc 1 wei).
+- **Log & Filter**: `eth_getLogs`, `eth_newFilter`, `eth_getFilterChanges`, `eth_uninstallFilter`.
+- **Subscriptions (WebSocket)**: `eth_subscribe` (`newHeads`, `logs`), `eth_unsubscribe`.
+
+### 6.2 RPC Methods Đã Bị Loại Bỏ / Không Hỗ Trợ (Deprecated / Removed)
+- `eth_sendRawTransactionWithDeviceKey` — **ĐÃ XÓA** (chuyển sang `eth_sendRawTransaction`).
+- `mtn_getDeviceKey` — **ĐÃ XÓA** (không còn mô hình device key).
+- Các endpoint quản lý khóa cá nhân trên node (`eth_accounts`, `eth_sign`, `personal_sign` không giữ private key — client tự ký offline và gửi envelope qua `eth_sendRawTransaction`).
+
+---
+
+## 7. Các Điểm Cần Lưu Ý
 1. **Chain ID**: Phải luôn khớp với chain ID của genesis (ví dụ: `991`). Giao dịch pre-EIP-155 hoặc sai chain ID sẽ bị từ chối ngay lập tức.
-2. **Phí gas**: Hiện tại chain sử dụng mô hình phí phẳng với `MINIMUM_BASE_FEE = 100000`. Khi gửi tx, `maxFeePerGas` (hoặc `gasPrice` cho legacy) phải $\ge 100,000$.
-3. **Tra cứu Receipt**: Dùng `eth_getTransactionReceipt(ethHash)` bình thường trên RPC. Node tự động tra cứu qua bảng ánh xạ `ethHash → metaHash`.
+2. **Mô hình phí v1 (ADR D2)**:
+   - Phí phẳng: `F = MINIMUM_BASE_FEE = 100,000 wei`.
+   - Đối với EIP-1559: Giá hiệu dụng là `min(maxFeePerGas, F + maxPriorityFeePerGas)`.
+   - Ví ngoài (Ethers/Viem) nên đặt `maxPriorityFeePerGas: 0` hoặc để mặc định, `maxFeePerGas: >= 100,000`. Phần chênh lệch giữa `maxFeePerGas` và giá hiệu dụng **không bị trừ**, người dùng chỉ trả đúng lượng gas tiêu thụ nhân với giá hiệu dụng thực tế.
+3. **Tra cứu Receipt**: Dùng `eth_getTransactionReceipt(ethHash)` bình thường trên RPC. Node trả về đúng trạng thái `status: "0x1"` khi thành công và `effectiveGasPrice`.
