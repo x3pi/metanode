@@ -21,6 +21,10 @@ const (
 	MaxRawEthTxEnvelopeSize = 1024 * 1024
 	// MaxBatchTxCount is the maximum number of transactions allowed in a single TCP batch.
 	MaxBatchTxCount = 1000
+	// MaxInitCodeSize is the maximum allowed size for contract creation bytecode (48 KB per EIP-3860).
+	MaxInitCodeSize = 49152
+	// MaxAccessListTuples is the maximum allowed number of access list tuples to prevent DoS.
+	MaxAccessListTuples = 1024
 )
 
 var (
@@ -83,6 +87,16 @@ func ValidateEthTxEnvelope(ethTx *e_types.Transaction, expectedChainId *big.Int)
 	}
 	if from == (common.Address{}) {
 		return fmt.Errorf("%w: recovered sender address cannot be zero", ErrInvalidSender)
+	}
+
+	// 5. EIP-3860: Reject initcode exceeding MaxInitCodeSize (49152 bytes)
+	if ethTx.To() == nil && len(ethTx.Data()) > MaxInitCodeSize {
+		return fmt.Errorf("%w: initcode size %d exceeds max allowed %d", ErrMaxInitCodeSizeExceeded, len(ethTx.Data()), MaxInitCodeSize)
+	}
+
+	// 6. Reject oversized access lists to prevent CPU/memory exhaustion DoS
+	if len(ethTx.AccessList()) > MaxAccessListTuples {
+		return fmt.Errorf("%w: access list tuples %d exceeds max allowed %d", InvalidTransaction, len(ethTx.AccessList()), MaxAccessListTuples)
 	}
 
 	return nil
