@@ -155,6 +155,37 @@
             chmod 600 "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
             chown {{ ansible_user | default('abc') }}:{{ ansible_user | default('abc') }} "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
 
+    # ── Phase 2 (B4): Pre-flight Validator BLS Key Mismatch Check ───────────────
+    - name: Pre-flight validator BLS key verification (Phase 2 / B4)
+      when:
+        - "deploy_action in ['setup', 'deploy', 'restart']"
+        - bls_priv is defined and (bls_priv | length) > 0
+      block:
+        - name: Check if bls_pubkey tool exists
+          ansible.builtin.stat:
+            path: "{{ bin_dir }}/bls_pubkey"
+          register: bls_pubkey_tool_stat
+
+        - name: Derive min-pk BLS public key from bls_priv using bls_pubkey tool
+          when: bls_pubkey_tool_stat.stat.exists
+          ansible.builtin.command: "{{ bin_dir }}/bls_pubkey -secret {{ bls_priv }} -hex"
+          register: derived_bls_pubkey_res
+          changed_when: false
+
+        - name: Assert derived BLS pubkey matches configured bls_pubkey
+          when:
+            - bls_pubkey_tool_stat.stat.exists
+            - bls_pubkey is defined and (bls_pubkey | length) > 0
+          ansible.builtin.assert:
+            that:
+              - (derived_bls_pubkey_res.stdout | trim | lower) == (bls_pubkey | trim | lower)
+            fail_msg: >-
+              VALIDATOR BLS KEY MISMATCH on {{ inventory_hostname }}:
+              Derived BLS public key from bls_priv ({{ derived_bls_pubkey_res.stdout | trim | lower }})
+              does not match configured bls_pubkey ({{ bls_pubkey | trim | lower }}).
+              On-chain validator attestations would stay PENDING indefinitely!
+            success_msg: "Validator BLS key verified on {{ inventory_hostname }}: {{ derived_bls_pubkey_res.stdout | trim }}"
+
     - name: Generate cluster genesis if not present or reset
       ansible.builtin.shell: |
         python3 -c "

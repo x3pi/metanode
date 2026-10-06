@@ -6,9 +6,12 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 )
 
@@ -250,4 +253,67 @@ func TestRollupSystemAttestation_RejectedDispatchIsRetriedNotLost(t *testing.T) 
 		require.NoError(t, ApplyAttestedSystemEvent(nil, e.stateDB, e.sc, comm, e.chainID, e.buildPayload(e.vals[0], e.innerRaw), dispatcher))
 		require.Equal(t, 1, applied, "n=%d: tombstone prevents a second application", n)
 	}
+}
+
+func TestRollupSystemAttestation_Metrics(t *testing.T) {
+	e := newAttestedSysEnv(4)
+	comm := e.committee(4)
+
+	// 1. Committee read error metric
+	errComm := &failingCommitteeMock{err: errors.New("committee lookup failed")}
+	initErrCount := testutil.ToFloat64(metrics.RollupCommitteeReadErrorsTotal)
+	_ = ApplyAttestedSystemEvent(nil, e.stateDB, e.sc, errComm, e.chainID, e.buildPayload(e.vals[0], e.innerRaw), func(Store, AccountStateDB, []byte) error { return nil })
+	require.Equal(t, initErrCount+1, testutil.ToFloat64(metrics.RollupCommitteeReadErrorsTotal))
+
+	// 2. Non-committee rejection metric
+	nonVal := bls.GenerateKeyPair()
+	initNonComm := testutil.ToFloat64(metrics.RollupSignaturesRejectedTotal.WithLabelValues("non_committee"))
+	_ = ApplyAttestedSystemEvent(nil, e.stateDB, e.sc, comm, e.chainID, e.buildPayload(nonVal, e.innerRaw), func(Store, AccountStateDB, []byte) error { return nil })
+	require.Equal(t, initNonComm+1, testutil.ToFloat64(metrics.RollupSignaturesRejectedTotal.WithLabelValues("non_committee")))
+
+	// 3. Duplicate rejection metric
+	pDup := RollupSystemAttestedPayload{
+		Kind:  PayloadKindRollupSystemAttested,
+		Inner: e.innerRaw,
+		Attestations: []RegistrationAttestation{
+			{ValidatorPubkey: e.vals[0].PublicKey(), Signature: bls.Sign(e.vals[0].PrivateKey(), ComputeRollupSystemEventDigest(e.chainID, e.innerRaw))},
+			{ValidatorPubkey: e.vals[0].PublicKey(), Signature: bls.Sign(e.vals[0].PrivateKey(), ComputeRollupSystemEventDigest(e.chainID, e.innerRaw))},
+		},
+	}
+	bDup, _ := MarshalRollupSystemAttestedPayload(&pDup)
+	initDup := testutil.ToFloat64(metrics.RollupSignaturesRejectedTotal.WithLabelValues("duplicate"))
+	_ = ApplyAttestedSystemEvent(nil, e.stateDB, e.sc, comm, e.chainID, bDup, func(Store, AccountStateDB, []byte) error { return nil })
+	require.Equal(t, initDup+1, testutil.ToFloat64(metrics.RollupSignaturesRejectedTotal.WithLabelValues("duplicate")))
+
+	// 4. Invalid signature metric
+	wrongDigest := ComputeRollupSystemEventDigest(e.chainID, []byte("wrong"))
+	badSig := bls.Sign(e.vals[0].PrivateKey(), wrongDigest)
+	pBadSig := RollupSystemAttestedPayload{
+		Kind:  PayloadKindRollupSystemAttested,
+		Inner: e.innerRaw,
+		Attestations: []RegistrationAttestation{
+			{ValidatorPubkey: e.vals[0].PublicKey(), Signature: badSig},
+		},
+	}
+	bBadSig, _ := MarshalRollupSystemAttestedPayload(&pBadSig)
+	initBadSig := testutil.ToFloat64(metrics.RollupSignaturesRejectedTotal.WithLabelValues("invalid_signature"))
+	_ = ApplyAttestedSystemEvent(nil, e.stateDB, e.sc, comm, e.chainID, bBadSig, func(Store, AccountStateDB, []byte) error { return nil })
+	require.Equal(t, initBadSig+1, testutil.ToFloat64(metrics.RollupSignaturesRejectedTotal.WithLabelValues("invalid_signature")))
+
+	// 5. Pending gauge tracking in dbAttestationStore
+	initPending := testutil.ToFloat64(metrics.RollupAttestationPendingTotal)
+	key := RollupSystemPendingKey([]byte("metric_test_key"))
+	attStore := NewDBAttestationStore(e.sc)
+	attStore.Save(key, []RegistrationAttestation{{ValidatorPubkey: e.vals[0].PublicKey(), Signature: cm.Sign{}}})
+	require.Equal(t, initPending+1, testutil.ToFloat64(metrics.RollupAttestationPendingTotal))
+	attStore.Clear(key)
+	require.Equal(t, initPending, testutil.ToFloat64(metrics.RollupAttestationPendingTotal))
+}
+
+type failingCommitteeMock struct {
+	err error
+}
+
+func (m *failingCommitteeMock) GetActiveCommitteeBLSKeys() ([]cm.PublicKey, error) {
+	return nil, m.err
 }

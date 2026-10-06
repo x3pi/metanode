@@ -101,6 +101,20 @@ func (mc *MetricsCollector) Snapshot() map[string]interface{} {
 		snapshot["rate_limiter"] = mc.getRateLimiterStats()
 	}
 
+	// Rollup & validator health info
+	if mc.app != nil {
+		keyStatus, _ := mc.app.CommitteeKeyStatus()
+		rollupInfo := map[string]interface{}{
+			"committee_key_status": keyStatus,
+		}
+		if mc.app.regRelay != nil {
+			pendingCount, maxAge := mc.app.regRelay.PendingStats()
+			rollupInfo["account_registration_pending_total"] = pendingCount
+			rollupInfo["account_registration_pending_max_age_s"] = maxAge
+		}
+		snapshot["rollup"] = rollupInfo
+	}
+
 	return snapshot
 }
 

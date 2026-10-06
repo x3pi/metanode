@@ -184,6 +184,7 @@ type SimpleChainConfig struct {
 	ClusterId                          *big.Int       `json:"cluster_id,omitempty"`
 	ClusterIdCamel                     *big.Int       `json:"clusterId,omitempty"`
 	ConsensusMode                      string         `json:"consensus_mode,omitempty"`
+	PrivacyMode                        bool           `json:"privacy_mode,omitempty"`
 	Raft                               *RaftConfig    `json:"raft,omitempty"` // only read when consensus_mode="raft"; nil = single-node feed (C1)
 	PrivateKey                         string         `json:"private_key"`
 	Address                            string         `json:"address"`
@@ -521,4 +522,10 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		}
 	})
 	return ConfigApp, err
+}
+
+// ResetConfigForTesting resets the once guard and ConfigApp so tests can load different configs.
+func ResetConfigForTesting() {
+	loadConfig = sync.Once{}
+	ConfigApp = nil
 }

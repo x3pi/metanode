@@ -9,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"google.golang.org/protobuf/proto"
@@ -261,6 +262,7 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 
 	keys, err := committee.GetActiveCommitteeBLSKeys()
 	if err != nil {
+		metrics.RollupCommitteeReadErrorsTotal.Inc()
 		return fmt.Errorf("account registry: failed to get active committee: %w", err)
 	}
 	if len(keys) == 0 {
@@ -291,13 +293,16 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 	changed := false
 	for _, att := range payload.Attestations {
 		if !committeeSet[att.ValidatorPubkey] {
+			metrics.RollupSignaturesRejectedTotal.WithLabelValues("non_committee").Inc()
 			return fmt.Errorf("account registry: attestation from non-committee validator %x", att.ValidatorPubkey[:6])
 		}
 		if newInPayload[att.ValidatorPubkey] {
+			metrics.RollupSignaturesRejectedTotal.WithLabelValues("duplicate").Inc()
 			return fmt.Errorf("account registry: duplicate attestation from validator %x", att.ValidatorPubkey[:6])
 		}
 		newInPayload[att.ValidatorPubkey] = true
 		if !bls.VerifySign(att.ValidatorPubkey, att.Signature, digest) {
+			metrics.RollupSignaturesRejectedTotal.WithLabelValues("invalid_signature").Inc()
 			return fmt.Errorf("account registry: invalid BLS signature from validator %x", att.ValidatorPubkey[:6])
 		}
 		if !have[att.ValidatorPubkey] {
@@ -365,6 +370,14 @@ func (s *dbAttestationStore) Load(key common.Hash) []RegistrationAttestation {
 }
 
 func (s *dbAttestationStore) Save(key common.Hash, atts []RegistrationAttestation) {
+	if len(atts) == 0 {
+		s.Clear(key)
+		return
+	}
+	raw, ok := s.db.StorageValue(RollupSystemAddress, key)
+	if !ok || len(raw) == 0 {
+		metrics.RollupAttestationPendingTotal.Inc()
+	}
 	buf := make([]byte, 0, len(atts)*attestEntrySize)
 	for _, a := range atts {
 		buf = append(buf, a.ValidatorPubkey[:]...)
@@ -374,5 +387,9 @@ func (s *dbAttestationStore) Save(key common.Hash, atts []RegistrationAttestatio
 }
 
 func (s *dbAttestationStore) Clear(key common.Hash) {
+	raw, ok := s.db.StorageValue(RollupSystemAddress, key)
+	if ok && len(raw) > 0 {
+		metrics.RollupAttestationPendingTotal.Dec()
+	}
 	s.db.SetStorageValue(RollupSystemAddress, key, nil)
 }
