@@ -352,6 +352,7 @@ func (c *ClientRPC) GetAccountState(address common.Address, blockNrOrHash rpc.Bl
 	return nil, fmt.Errorf("kết quả không hợp lệ: %v", response.Result)
 }
 
+// Deprecated: GetDeviceKey is part of the legacy device key architecture and is no longer supported on ETH-only nodes.
 func (c *ClientRPC) GetDeviceKey(hash common.Hash) (common.Hash, error) {
 	request := &JSONRPCRequest{
 		Jsonrpc: "2.0",
@@ -370,6 +371,7 @@ func (c *ClientRPC) GetDeviceKey(hash common.Hash) (common.Hash, error) {
 	return common.Hash{}, fmt.Errorf("kết quả không hợp lệ: %v", response.Result)
 }
 
+// Deprecated: SendRawTransaction with eth_sendRawTransactionWithDeviceKey is deprecated in ETH-only mode. Use standard eth_sendRawTransaction.
 func (c *ClientRPC) SendRawTransaction(input []byte, ethInput []byte, pubKeyBls []byte) JSONRPCResponse {
 	request := &JSONRPCRequest{
 		Jsonrpc: "2.0",
@@ -604,6 +606,7 @@ func (c *ClientRPC) BuildDeployTransaction(callDataT []byte, from common.Address
 	return bTransaction, err
 }
 
+// Deprecated: BuildTransactionWithDeviceKeyFromEthTx is deprecated in ETH-only mode.
 func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTx(
 	ethTx *types.Transaction,
 ) ([]byte, mt_types.Transaction, func(), error) {
@@ -657,6 +660,7 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTx(
 	return data, transaction, release, err
 }
 
+// Deprecated: BuildTransactionWithDeviceKeyFromEthTxAndBlsPrivateKey is deprecated in ETH-only mode.
 func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTxAndBlsPrivateKey(
 	ethTx *types.Transaction,
 	private mt_common.PrivateKey,

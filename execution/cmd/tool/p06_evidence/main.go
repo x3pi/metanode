@@ -1058,7 +1058,7 @@ func main() {
 		}
 	}
 	fmt.Printf("   PASS: %d | FAIL: %d\n", passCount, failCount)
-	fmt.Println("════════════════════════════════════════════════════════════════\n")
+	fmt.Println("════════════════════════════════════════════════════════════════")
 
 	writeReport(r.report, r)
 

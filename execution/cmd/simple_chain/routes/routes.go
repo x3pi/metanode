@@ -60,7 +60,6 @@ func InitRoutes(
 	routes[command.SetCompleteJob] = stateProcessor.ProcessCompleteJob
 	routes[command.GetTxRewardHistoryByAddress] = stateProcessor.ProcessGetTxHistoryByAddress
 	routes[command.GetTxRewardHistoryByJobID] = stateProcessor.ProcessGetTxHistoryByJobID
-	routes[command.GetDeviceKey] = stateProcessor.ProcessGetDeviceKey
 
 	// block routes
 	routes[command.GetBlockNumber] = blockProcessor.GetBlockNumber
