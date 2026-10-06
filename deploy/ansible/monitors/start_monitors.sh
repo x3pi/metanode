@@ -297,6 +297,7 @@ resolve_ssh_auth() {
     SSH_PASS=""
     if [ -n "$key" ] && [ -f "$key" ]; then
         SSH_OPTS="-i $key $SSH_OPTS"
+    else
         SSH_PASS=$(SCRIPT_DIR="$SCRIPT_DIR" INV_PATH="$INV_PATH" TARGET_NODE_ID="$node_id" python3 -c '
 import sys, os
 script_dir = os.environ.get("SCRIPT_DIR", "")
@@ -319,6 +320,8 @@ try:
         for h in hosts.values():
             if isinstance(h, dict) and node_id in (h.get("node_ids") or []):
                 p = h.get("ansible_ssh_pass", gv.get("ansible_ssh_pass", ""))
+                if "{{ ansible_become_pass }}" in str(p) or not p:
+                    p = h.get("ansible_become_pass", gv.get("ansible_become_pass", ""))
                 if p and p != "[VAULT_ENCRYPTED]":
                     print(p)
                 break

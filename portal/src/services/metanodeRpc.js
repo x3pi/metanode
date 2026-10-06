@@ -17,8 +17,8 @@ export const DEFAULT_HOST =
     : LAN_IP;
 
 // Automatically map clusters from clusters.json, substituting host if loaded via localhost or LAN
-export const PRESET_CLUSTERS = [
-  ...((clustersConfig?.clusters || []).map((c) => {
+export const PRESET_CLUSTERS = (clustersConfig?.clusters || [])
+  .map((c) => {
     let url = c.rpcUrl;
     if (
       typeof window !== 'undefined' &&
@@ -31,75 +31,8 @@ export const PRESET_CLUSTERS = [
       ...c,
       rpcUrl: url,
     };
-  })),
-  {
-    id: 'exec1_default',
-    name: 'Execution Cluster 1 (Port 8646)',
-    chainId: 991,
-    rpcUrl: `http://${DEFAULT_HOST}:8646`,
-    clusterKey: '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128',
-    isExec: true,
-  },
-  {
-    id: 'exec2_default',
-    name: 'Execution Cluster 2 (Port 8647)',
-    chainId: 991,
-    rpcUrl: `http://${DEFAULT_HOST}:8647`,
-    clusterKey: '0x83221629eeff1a69aa96ac6aadea402a7b62a74647633c0743cd517b71dcd5cd39fec42841b953fc481dac039bceb465',
-    isExec: true,
-  },
-  {
-    id: 'parent_18601',
-    name: 'Parent Chain L1 (Port 18601)',
-    chainId: 991,
-    rpcUrl: `http://${DEFAULT_HOST}:18601`,
-    isParent: true,
-  },
-  {
-    id: 'exec_node0',
-    name: 'Node-0 RPC (Port 8545)',
-    chainId: 991,
-    rpcUrl: `http://${DEFAULT_HOST}:8545`,
-    isExec: true,
-  },
-  {
-    id: 'ansible_exec1',
-    name: 'Ansible Exec 1 (Port 8747)',
-    chainId: 991,
-    rpcUrl: `http://${DEFAULT_HOST}:8747`,
-    isExec: true,
-  },
-  {
-    id: 'ansible_parent',
-    name: 'Ansible Parent (Port 8547)',
-    chainId: 991,
-    rpcUrl: `http://${DEFAULT_HOST}:8547`,
-    isParent: true,
-  },
-  {
-    id: 'devnet_31646',
-    name: 'Devnet Exec 1 (Port 31646)',
-    chainId: 991,
-    rpcUrl: `http://${DEFAULT_HOST}:31646`,
-    clusterKey: '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128',
-    isExec: true,
-  },
-  {
-    id: 'devnet_31647',
-    name: 'Devnet Exec 2 (Port 31647)',
-    chainId: 991,
-    rpcUrl: `http://${DEFAULT_HOST}:31647`,
-    clusterKey: '0x83221629eeff1a69aa96ac6aadea402a7b62a74647633c0743cd517b71dcd5cd39fec42841b953fc481dac039bceb465',
-    isExec: true,
-  },
-  {
-    id: 'parent_31601',
-    name: 'Parent Chain (Port 31601)',
-    chainId: 991,
-    rpcUrl: `http://${DEFAULT_HOST}:31601`,
-    isParent: true,
-  },
-].filter((cluster, index, self) => index === self.findIndex((c) => c.id === cluster.id || c.rpcUrl === cluster.rpcUrl));
+  })
+  .filter((cluster, index, self) => index === self.findIndex((c) => c.id === cluster.id || c.rpcUrl === cluster.rpcUrl));
 
 export const DEFAULT_CLUSTER_ID = clustersConfig?.defaultClusterId || 'exec1';
 

@@ -324,12 +324,24 @@ if [[ "$COMMAND" =~ ^(deploy|start|stop|restart|open-ports|reset-data)$ ]]; then
 fi
 
 # Secondary independent clusters must not stop/restart the root cluster's monitors.
-MANAGE_GLOBAL_MONITORS=$(awk '/^[[:space:]]*manage_global_monitors:/ {print tolower($2); exit}' "$INVENTORY" 2>/dev/null || true)
-MANAGE_GLOBAL_MONITORS="${MANAGE_GLOBAL_MONITORS:-true}"
-MANAGE_CHAIN_MONITORS=$(awk '/^[[:space:]]*manage_chain_monitors:/ {print tolower($2); exit}' "$INVENTORY" 2>/dev/null || true)
-MANAGE_CHAIN_MONITORS="${MANAGE_CHAIN_MONITORS:-false}"
 RPC_EXPORT_NAMESPACE=$(awk '/^[[:space:]]*rpc_export_namespace:/ {gsub(/["\047]/, "", $2); print $2; exit}' "$INVENTORY" 2>/dev/null || true)
 RPC_EXPORT_NAMESPACE="${RPC_EXPORT_NAMESPACE:-root}"
+MANAGE_GLOBAL_MONITORS=$(awk '/^[[:space:]]*manage_global_monitors:/ {print tolower($2); exit}' "$INVENTORY" 2>/dev/null || true)
+if [ -z "$MANAGE_GLOBAL_MONITORS" ]; then
+    if [ "$RPC_EXPORT_NAMESPACE" != "root" ]; then
+        MANAGE_GLOBAL_MONITORS="false"
+    else
+        MANAGE_GLOBAL_MONITORS="true"
+    fi
+fi
+MANAGE_CHAIN_MONITORS=$(awk '/^[[:space:]]*manage_chain_monitors:/ {print tolower($2); exit}' "$INVENTORY" 2>/dev/null || true)
+if [ -z "$MANAGE_CHAIN_MONITORS" ]; then
+    if [ "$RPC_EXPORT_NAMESPACE" != "root" ]; then
+        MANAGE_CHAIN_MONITORS="true"
+    else
+        MANAGE_CHAIN_MONITORS="false"
+    fi
+fi
 
 # Map to legacy Ansible Extra Vars behavior
 ACTION=""
@@ -880,7 +892,7 @@ fi
 
 if [ "$ACTION" != "open_ports" ] && [ "$MANAGE_CHAIN_MONITORS" = "true" ]; then
     echo -e "\n⏸ Tạm dừng monitor riêng của ${RPC_EXPORT_NAMESPACE} trong quá trình deploy..."
-    MONITOR_NAMESPACE="$RPC_EXPORT_NAMESPACE" MONITOR_INVENTORY="$INVENTORY" \
+    MONITOR_NAMESPACE="$RPC_EXPORT_NAMESPACE" MONITOR_INVENTORY="$INVENTORY" CUSTOM_RPC_JSON_PATH="$RESOLVED_RPC_NODES_FILE" \
         bash "${SCRIPT_DIR}/monitors/start_monitors.sh" --stop >/dev/null 2>&1 || true
 fi
 
@@ -1050,7 +1062,7 @@ fi
 if [ "$ACTION" != "open_ports" ] && [ "$MANAGE_CHAIN_MONITORS" = "true" ]; then
     if [ $ansible_exit -eq 0 ] && [ "$ACTION" != "stop" ]; then
         echo -e "\n▶️ Bật monitor riêng cho ${RPC_EXPORT_NAMESPACE}..."
-        MONITOR_NAMESPACE="$RPC_EXPORT_NAMESPACE" MONITOR_INVENTORY="$INVENTORY" \
+        MONITOR_NAMESPACE="$RPC_EXPORT_NAMESPACE" MONITOR_INVENTORY="$INVENTORY" CUSTOM_RPC_JSON_PATH="$RESOLVED_RPC_NODES_FILE" \
             bash "$MONITOR_SCRIPT"
     elif [ "$ACTION" == "stop" ]; then
         echo -e "\n⏸ Monitor ${RPC_EXPORT_NAMESPACE} giữ trạng thái dừng cùng các node."
