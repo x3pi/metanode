@@ -20,7 +20,6 @@ import (
 	client "github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp"
 	c_config "github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp/config"
 	c_network "github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp/network"
-	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/command"
 )
 
 const (
@@ -648,7 +647,7 @@ func main() {
 	parentConn := c.GetClientContext().ConnectionsManager.ParentConnection()
 	if parentConn != nil && parentConn.IsConnect() {
 		// Send legacy SendTransaction command
-		_ = c.GetClientContext().MessageSender.SendBytes(parentConn, command.SendTransaction, []byte("legacy_payload"))
+		_ = c.GetClientContext().MessageSender.SendBytes(parentConn, "SendTransaction", []byte("legacy_payload"))
 		// Wait briefly for error response
 		select {
 		case errLegacy := <-c.GetClientContext().Handler.(*c_network.Handler).TxErrorChan():

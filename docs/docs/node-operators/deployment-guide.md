@@ -78,19 +78,8 @@ sudo bash systemd-cluster.sh start
 ```
 Thứ tự khởi động tự động: Khởi động execution layer (Go) -> chờ 3 giây -> khởi động consensus layer (Rust).
 
-### 3. Cài đặt và khởi chạy RPC Proxy Services
-Dịch vụ RPC Proxy cần được khởi chạy riêng biệt để cung cấp endpoint JSON-RPC chuẩn cho MetaMask và dApps kết nối:
-
-```bash
-# Biên dịch rpc-client và cài đặt systemd service cho tất cả 5 node
-sudo bash install-rpc-systemd.sh
-
-# Cài đặt lại và bỏ qua bước build lại code (dùng binary hiện có)
-sudo bash install-rpc-systemd.sh --no-build
-
-# Cài đặt riêng cho chỉ Node 4
-sudo bash install-rpc-systemd.sh --node 4
-```
+### 3. Kết nối JSON-RPC (MetaMask & dApps)
+Trong kiến trúc eth-only, node `simple_chain` cung cấp sẵn endpoint JSON-RPC Ethereum chuẩn (mặc định tại cổng `8545` hoặc cổng `rpc_port` được cấu hình) hỗ trợ đầy đủ CORS và WebSocket. MetaMask và dApps kết nối trực tiếp đến endpoint này mà không cần dịch vụ proxy trung gian.
 
 ---
 

@@ -389,12 +389,6 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "tx_trace_enabled": False,
         "go_mem_limit_gb": 32,
         "mvm_cache_enabled": False,
-        "enable_private_gateway": True,
-        "gateway_bls_key": (
-            args.gateway_bls_key if getattr(args, "gateway_bls_key", None)
-            else generate_fresh_bls_secret(find_metanode_bin(args.metanode_bin)) if getattr(args, "random_gateway_bls_key", False)
-            else DEVNET_GATEWAY_BLS_KEY
-        ),
         "tx_signature_mode": getattr(args, "tx_signature_mode", "secp"),
         "chainId": args.chain_id,
         "private_key": bls_private_hex,
