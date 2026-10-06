@@ -5,7 +5,7 @@
 # Usage: restart_durability.sh <BASE>   (env must be freshly started with run_env.sh start)
 set -u
 E="$(cd "$1" && pwd)"; HERE="$(cd "$(dirname "$0")" && pwd)"
-BIN=$E/bin; PH=$(python3 -c "import json;print(json.load(open('$E/env.json'))['ports']['parent_http'])")
+BIN=$(python3 -c "import json;print(json.load(open('$E/env.json'))['bin'])"); PH=$(python3 -c "import json;print(json.load(open('$E/env.json'))['ports']['parent_http'])")
 RPC=$(python3 -c "import json;print(json.load(open('$E/env.json'))['ports']['exec1']['rpc'])")
 D="$BIN/e2e_account_gate -env $E/env.json"
 KA=$(python3 -c "import os;print(os.urandom(32).hex())"); KB=$(python3 -c "import os;print(os.urandom(32).hex())")
