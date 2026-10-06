@@ -1,0 +1,49 @@
+syntax = "proto3";
+package rollup;
+
+option go_package = "github.com/meta-node-blockchain/meta-node/execution/pkg/proto";
+option java_package = "com.meta_node.protos.compiled.rollup";
+
+message RollupEventProto {
+  string type = 1;
+  uint32 role = 2;
+  bytes sender = 3;             // 20 bytes address
+  bytes target = 4;             // 20 bytes address
+  bytes value = 5;              // big.Int bytes
+  bytes gas_fee = 6;            // big.Int bytes
+  uint64 parent_block_time = 7;
+  uint64 parent_confirm_time = 8;
+  uint64 timeout = 9;
+  bytes parent_tx_hash = 10;    // 32 bytes hash
+  uint32 outcome = 11;
+  bool is_duplicate = 12;
+  bool is_destination_valid = 13;
+}
+
+message RollupSystemPayloadProto {
+  RollupEventProto event = 1;
+  bytes msg_id = 2;             // 32 bytes hash
+  uint64 source_seq = 3;
+  bytes source_pub_key = 4;     // 48 bytes BLS public key
+  bytes dest_pub_key = 5;       // 48 bytes BLS public key
+  bytes payload_hash = 6;       // 32 bytes hash
+}
+
+message RollupAttestationProto {
+  bytes validator_pubkey = 1;   // 48 bytes BLS public key
+  bytes signature = 2;          // 96 bytes BLS signature
+}
+
+message RollupSystemAttestedPayloadProto {
+  string kind = 1;
+  bytes inner = 2;
+  repeated RollupAttestationProto attestations = 3;
+}
+
+message AccountRegistrationPayloadProto {
+  string kind = 1;
+  bytes user = 2;               // 20 bytes address
+  bytes cluster_key = 3;        // 48 bytes BLS public key
+  uint64 parent_seq = 4;
+  repeated RollupAttestationProto attestations = 5;
+}

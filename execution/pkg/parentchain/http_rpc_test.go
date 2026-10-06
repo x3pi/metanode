@@ -122,6 +122,7 @@ func TestHTTPRPC_FullChainEndpoints(t *testing.T) {
 	// 5. GetStatus
 	status, err := client.GetStatus()
 	assert.NoError(t, err)
+	assert.Equal(t, ParentChainID, status.ChainID)
 	assert.Equal(t, uint64(1), status.LastBlock)
 	assert.Equal(t, res.Record.BlockHash, status.LastHash)
 	assert.False(t, status.Syncing)

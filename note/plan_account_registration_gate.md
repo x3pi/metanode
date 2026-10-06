@@ -315,8 +315,25 @@ Tối thiểu: (a) bỏ kiểm tra gate ở admission; (b) bỏ kiểm tra gate 
 
 **Chưa làm / rủi ro mở (đọc trước khi bật gate trên chain thật):**
 1. **E2E trên cụm thật chưa chạy** (chỉ test tích hợp trong tiến trình). Cần cụm cô lập có `tx_signature_mode="secp"` + `account_gate="parent_registered"` + parent chain, chạy kịch bản §5.
-2. **Hàng đợi yêu cầu đăng ký không bền:** mất khi node khởi động lại (cờ on-chain vẫn đúng; người dùng gửi lại — idempotent). Làm bền nếu cần.
-3. **Bằng chứng parent cho system event (P0 còn hở):** mọi danh tính node của cụm đều gửi được event; một validator Byzantine vẫn giả mạo được (mint/đăng ký/khoá bừa). Cần event mang chứng chỉ quorum/proof parent do handler xác minh.
+2. **Hàng đợi yêu cầu đăng ký bền:** ĐÃ HOÀN THÀNH (lưu bền qua `KVStore` / `storage.Storage`, tự khôi phục và replay PENDING -> CONFIRMED sau khi khởi động lại).
+3. **Bằng chứng parent cho system event (P0 còn hở):** mọi danh tính node của cụm đều gửi được event; một validator Byzantine vẫn giả mạo được (mint/đăng ký/khoá bừa). Cần event mang chứng chỉ quorum/proof parent do handler xác minh (mục 10).
 4. **Giai đoạn 2 chưa làm:** đăng ký tạm, `ParentLocked`/`LOCKED` (§8). Hiện bên thua chỉ nhận trạng thái `REJECTED` ở relay; tài khoản đơn giản không được đăng ký ở cụm đó (không bị khoá).
 5. **Khoá node = khoá cụm** (V2) mới được xác nhận ở mức "code hiện tại giả định `app.keyPair` là danh tính cụm" (`app.go` đã tự đăng ký như vậy); chưa kiểm cụm nhiều validator với khoá khác nhau.
 6. Mã HTTP `/inbound_registrations` nuốt lỗi store giống `/inbound` hiện có (trả danh sách rỗng); nên trả 5xx để quorum không coi node lỗi là "đồng ý rỗng".
+7. **Legacy chain chưa có chain-binding ở exec-filter cho giao dịch không phải 0xFF:** tx legacy BLS không có chain ID gắn trong envelope chữ ký (chỉ có secp EIP-155 và tx 0xFF); giữ nguyên không sửa ngoài phạm vi.
+
+## 10. Item 2 — parent-verifiable authentication of system events (DESIGN, not implemented)
+
+Residual hole (still open, shown by E8 only for NON-node identities): the rollup system handler accepts events from the node BLS identity of ANY validator, so one Byzantine validator can forge `account_registered` / credit / lock events.
+
+Findings that constrain the design (checked 2026-10-05):
+- Parent block headers (`parentchain.Header`) carry NO validator signatures/certificate. A NOMT proof (`nomt_ffi.VerifyProof`) only proves "key is under root R"; nothing deterministic proves R is the parent's real root. So "attach a parent proof to the system tx" is NOT sufficient by itself, and checking R against the parent at execution time would be time-dependent (non-deterministic => fork risk, forbidden by Part 2.5).
+- `QuorumClient` (f+1 parent RPC nodes) is a trust decision made per-validator at observation time, fine for deciding to *vote*, not for deterministic execution.
+
+Recommended design (no parent change, deterministic): **intra-cluster f+1 co-attestation.**
+1. Each exec validator runs its own RegistrationWorker, observes the event through `QuorumClient` + registry proof, and BLS-signs digest = keccak("ACCT_REG_ATTEST_V1" || chainID || user || clusterKey || parentSeq).
+2. The system tx carries the payload plus >= f+1 distinct committee-member signatures over that digest. Handler verifies them deterministically against the committee set in state (same set used by `CommitteeAttestationWorker`), then applies. Single node => f+1 = 1 (current behaviour).
+3. The sender check stays (node identity) but is no longer sufficient alone. Same envelope for credit/lock events.
+Cost/risk: needs signature exchange between validators (bounded queue; no timeouts for dispatch decisions — events just stay PENDING until f+1 sigs exist) and a committee-key lookup inside tx_processor. Not started: needs the user's go-ahead on (a) accepting f+1 intra-cluster trust vs (b) adding parent-side block certificates (bigger, touches parent consensus).
+
+**Cập nhật 2026-10-05:** §10 đã được triển khai theo hướng (a) và bật trên node — xem `note/plan_next_steps_20261005.md` mục A. Khác thiết kế ban đầu: không có kênh trao đổi chữ ký riêng; mỗi validator gửi tx hệ thống chứa chữ ký của mình và handler cộng dồn chữ ký trong contract storage của `RollupSystemAddress` cho đến khi đủ f+1.

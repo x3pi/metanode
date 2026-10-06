@@ -122,7 +122,7 @@ func TestProcessClustersAndFormats(t *testing.T) {
 	// Test PatchParentGenesis
 	parentGenPath := filepath.Join(tempDir, "parent_genesis.json")
 	initialParent := `{
-		"chain_id": 990,
+		"chain_id": 991,
 		"validators": [],
 		"float_accounts": []
 	}`

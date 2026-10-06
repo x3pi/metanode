@@ -9,6 +9,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
@@ -31,10 +32,26 @@ type AccountRegistryApplier interface {
 	Apply(stateDB rollup.AccountStateRegistryDB, data []byte) error
 }
 
+// AttestedRegistryApplier is implemented by registry handlers that enforce the f+1 validator co-attestation rule.
+// When the configured handler implements it, HandleTransaction uses it with the committee and the pending-attestation
+// store derived from the chain state the tx executes against (so all replicas decide identically).
+type AttestedRegistryApplier interface {
+	ApplyAttested(stateDB rollup.AccountStateRegistryDB, store rollup.AttestationStore, committee rollup.CommitteeProvider, data []byte) error
+}
+
 // RollupSystemHandler handles transactions sent to rollup.RollupSystemAddress.
 type RollupSystemHandler struct {
 	dispatcher      RollupSystemEventDispatcher
 	registryHandler AccountRegistryApplier
+	// committeeFor (optional, tests) overrides how the validator committee is read for a chain state.
+	committeeFor func(*blockchain.ChainState) rollup.CommitteeProvider
+}
+
+func (h *RollupSystemHandler) committee(cs *blockchain.ChainState) rollup.CommitteeProvider {
+	if h.committeeFor != nil {
+		return h.committeeFor(cs)
+	}
+	return newLiveCommitteeProvider(cs)
 }
 
 var (
@@ -138,15 +155,61 @@ func (h *RollupSystemHandler) HandleTransaction(
 			stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
 			return h.errorReceipt(tx, "registryHandler not initialized"), nil, nil
 		}
-		if err := h.registryHandler.Apply(stateDB, data); err != nil {
+		var applyErr error
+		if att, ok := h.registryHandler.(AttestedRegistryApplier); ok {
+			applyErr = att.ApplyAttested(stateDB, rollup.NewDBAttestationStore(&liveSmartContractDB{db: chainState.GetSmartContractDB()}),
+				newLiveCommitteeProvider(chainState), data)
+		} else {
+			applyErr = h.registryHandler.Apply(stateDB, data)
+		}
+		if err := applyErr; err != nil {
 			logger.Error("❌ RollupSystemHandler: RegistryHandler.Apply failed: %v", err)
+			stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+			return h.errorReceipt(tx, err.Error()), nil, nil
+		}
+	} else if rollup.IsRollupSystemAttestedPayload(data) {
+		if h.dispatcher == nil {
+			logger.Error("❌ RollupSystemHandler: Dispatcher not initialized")
+			stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+			return h.errorReceipt(tx, "dispatcher not initialized"), nil, nil
+		}
+		var chainID uint64
+		if chainState.GetConfig() != nil && chainState.GetConfig().ChainId != nil {
+			chainID = chainState.GetConfig().ChainId.Uint64()
+		}
+		if chainID == 0 {
+			chainID = parentchain.ParentChainID
+		}
+		err := rollup.ApplyAttestedSystemEvent(
+			newLiveRollupStore(chainState),
+			stateDB,
+			&liveSmartContractDB{db: chainState.GetSmartContractDB()},
+			newLiveCommitteeProvider(chainState),
+			chainID,
+			data,
+			func(st rollup.Store, sdb rollup.AccountStateDB, inner []byte) error {
+				return h.dispatcher.HandleSystemEvent(st, stateDB, inner)
+			},
+		)
+		if err != nil {
+			logger.Error("❌ RollupSystemHandler: ApplyAttestedSystemEvent failed: %v", err)
 			stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
 			return h.errorReceipt(tx, err.Error()), nil, nil
 		}
 	} else {
 		if h.dispatcher == nil {
 			logger.Error("❌ RollupSystemHandler: Dispatcher not initialized")
+			stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
 			return h.errorReceipt(tx, "dispatcher not initialized"), nil, nil
+		}
+
+		// Fail closed: if the committee cannot be read, an unattested event must NOT be applied (and every replica
+		// must reach the same verdict). Only a committee of at most one validator needs no co-attestation.
+		keys, committeeErr := h.committee(chainState).GetActiveCommitteeBLSKeys()
+		if committeeErr != nil || len(keys) > 1 {
+			logger.Error("❌ RollupSystemHandler: unattested system event rejected in multi-validator committee")
+			stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+			return h.errorReceipt(tx, "unattested system event rejected: co-attestation required"), nil, nil
 		}
 
 		if err := h.dispatcher.HandleSystemEvent(newLiveRollupStore(chainState), stateDB, data); err != nil {

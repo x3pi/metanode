@@ -3,35 +3,67 @@
 // Communicates with Parent Chain (HTTP RPC) & Execution Clusters (JSON-RPC)
 // ============================================================================
 
+export const LAN_IP = '192.168.1.232';
+export const DEFAULT_HOST =
+  typeof window !== 'undefined' &&
+  window.location.hostname &&
+  window.location.hostname !== 'localhost' &&
+  window.location.hostname !== '127.0.0.1'
+    ? window.location.hostname
+    : LAN_IP;
+
 export const PRESET_CLUSTERS = [
   {
-    id: 'exec1',
-    name: 'Execution Cluster 1',
+    id: 'devnet_31646',
+    name: 'Devnet Exec 1 (Gate Active, Port 31646)',
     chainId: 991,
-    rpcUrl: 'http://127.0.0.1:8646',
+    rpcUrl: `http://${DEFAULT_HOST}:31646`,
+    clusterKey: '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128',
+    isExec: true,
+  },
+  {
+    id: 'devnet_31647',
+    name: 'Devnet Exec 2 (Gate Active, Port 31647)',
+    chainId: 991,
+    rpcUrl: `http://${DEFAULT_HOST}:31647`,
+    clusterKey: '0x83221629eeff1a69aa96ac6aadea402a7b62a74647633c0743cd517b71dcd5cd39fec42841b953fc481dac039bceb465',
+    isExec: true,
+  },
+  {
+    id: 'parent_devnet',
+    name: 'Parent Chain (Port 31601)',
+    chainId: 990,
+    rpcUrl: `http://${DEFAULT_HOST}:31601`,
+    isParent: true,
+  },
+  {
+    id: 'exec1',
+    name: 'Execution Cluster 1 (No Gate, Port 8646)',
+    chainId: 991,
+    rpcUrl: `http://${DEFAULT_HOST}:8646`,
     clusterKey: '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128',
     isExec: true,
   },
   {
     id: 'exec2',
-    name: 'Execution Cluster 2',
+    name: 'Execution Cluster 2 (No Gate, Port 8647)',
     chainId: 991,
-    rpcUrl: 'http://127.0.0.1:8647',
+    rpcUrl: `http://${DEFAULT_HOST}:8647`,
     clusterKey: '0x83221629eeff1a69aa96ac6aadea402a7b62a74647633c0743cd517b71dcd5cd39fec42841b953fc481dac039bceb465',
     isExec: true,
   },
   {
-    id: 'parent',
-    name: 'Parent Chain (Governance & Registry)',
+    id: 'parent_18601',
+    name: 'Parent Chain (Port 18601)',
     chainId: 990,
-    rpcUrl: 'http://127.0.0.1:8547',
+    rpcUrl: `http://${DEFAULT_HOST}:18601`,
     isParent: true,
   },
   {
-    id: 'standalone',
-    name: 'Master Node / Standalone',
+    id: 'exec_node0',
+    name: 'Node-0 RPC (Port 8545)',
     chainId: 1000,
-    rpcUrl: 'http://127.0.0.1:8747',
+    rpcUrl: `http://${DEFAULT_HOST}:8545`,
     isExec: true,
   },
 ];
@@ -73,9 +105,31 @@ export async function callJsonRpc(rpcUrl, method, params = []) {
 /**
  * Check node health & block height
  */
-export async function checkNodeStatus(rpcUrl) {
+export async function checkNodeStatus(target) {
+  const rpcUrl = typeof target === 'string' ? target : target?.rpcUrl;
+  const isParent = typeof target === 'object' ? target?.isParent : false;
+
   try {
     const start = performance.now();
+
+    // Parent Chain uses HTTP REST endpoint /status
+    if (isParent || rpcUrl.includes('18601') || rpcUrl.includes('31601')) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+      const res = await fetch(`${rpcUrl}/status`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      const latency = Math.round(performance.now() - start);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      return {
+        online: true,
+        blockNumber: data.last_block || 0,
+        stateRoot: data.state_root || '0x00000000...',
+        latency,
+      };
+    }
+
+    // Execution Cluster uses JSON-RPC eth_blockNumber
     const blockHex = await callJsonRpc(rpcUrl, 'eth_blockNumber', []);
     const latency = Math.round(performance.now() - start);
     const blockNumber = parseInt(blockHex, 16);
@@ -124,15 +178,41 @@ export async function fetchAccountInfo(rpcUrl, address) {
     const balanceMtn = `${whole}.${decimals}`;
     const nonce = parseInt(nonceHex || '0x0', 16);
 
-    // Check ParentRegistered flag via mtn_getAccountState or simulated admission probe
+    let gateEnforced = false;
     let parentRegistered = false;
+    let registrationStatus = 'NONE';
+
     try {
-      const stateResult = await callJsonRpc(rpcUrl, 'mtn_getAccountState', [address]);
-      if (stateResult && (stateResult.parent_registered || stateResult.ParentRegistered)) {
-        parentRegistered = true;
+      const clusterIdentity = await callJsonRpc(rpcUrl, 'mtn_getClusterIdentity', []);
+      if (clusterIdentity && clusterIdentity.accountGate) {
+        gateEnforced = true;
       }
     } catch (_) {
-      // Fallback: If mtn_getAccountState isn't exposed, check via custom probe or default false
+      // Cluster does not enforce Account Gate
+    }
+
+    if (gateEnforced) {
+      try {
+        const regInfo = await callJsonRpc(rpcUrl, 'mtn_getRegistrationStatus', [address]);
+        if (regInfo) {
+          registrationStatus = regInfo.status || 'NONE';
+          if (regInfo.status === 'CONFIRMED') {
+            parentRegistered = true;
+          }
+        }
+      } catch (_) {
+        try {
+          const stateResult = await callJsonRpc(rpcUrl, 'mtn_getAccountState', [address, 'latest']);
+          if (stateResult && (stateResult.parent_registered || stateResult.ParentRegistered)) {
+            parentRegistered = true;
+            registrationStatus = 'CONFIRMED';
+          }
+        } catch (_) {}
+      }
+    } else {
+      // Gate not enforced on this cluster: user can transact freely!
+      parentRegistered = true;
+      registrationStatus = 'NOT_REQUIRED';
     }
 
     return {
@@ -140,7 +220,9 @@ export async function fetchAccountInfo(rpcUrl, address) {
       balanceWei: balanceWei.toString(),
       balanceMtn,
       nonce,
+      gateEnforced,
       parentRegistered,
+      registrationStatus,
     };
   } catch (err) {
     console.warn('fetchAccountInfo failed:', err);
@@ -149,7 +231,9 @@ export async function fetchAccountInfo(rpcUrl, address) {
       balanceWei: '0',
       balanceMtn: '0.0000',
       nonce: 0,
-      parentRegistered: false,
+      gateEnforced: false,
+      parentRegistered: true,
+      registrationStatus: 'NONE',
     };
   }
 }
@@ -192,7 +276,28 @@ export async function checkParentRegistration(parentRpcUrl, clusterKey, userAddr
 }
 
 /**
- * Submit Registration Transaction to Parent Chain
+ * Get registration message & hash from execution node
+ */
+export async function getClusterRegistrationMessage(rpcUrl, userAddress) {
+  return await callJsonRpc(rpcUrl, 'mtn_getRegistrationMessage', [userAddress]);
+}
+
+/**
+ * Register account via Execution Node Relay (Gasless for user)
+ */
+export async function registerAccountOnNode(rpcUrl, userAddress, userSignature) {
+  return await callJsonRpc(rpcUrl, 'mtn_registerAccount', [userAddress, userSignature]);
+}
+
+/**
+ * Query registration status from Execution Node Relay
+ */
+export async function getRegistrationStatusFromNode(rpcUrl, userAddress) {
+  return await callJsonRpc(rpcUrl, 'mtn_getRegistrationStatus', [userAddress]);
+}
+
+/**
+ * Submit Registration Transaction directly to Parent Chain (Legacy/Direct HTTP fallback)
  */
 export async function submitRegistrationToParent(parentRpcUrl, userAddress, clusterKey, userSignature) {
   try {

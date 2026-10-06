@@ -29,6 +29,7 @@ members = [
     "crates/metanode-keytool",
 ]
 resolver = "2"
+exclude = ["consensus/vendor/nomt"]
 
 [workspace.dependencies]
 fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "4db0e90c732bbf7420ca20de808b698883148d9c" }
@@ -68,3 +69,7 @@ codegen-units = 16
 # unpatched crates.io release on the next `cargo build`).
 [patch.crates-io]
 parking_lot_core = { path = "consensus/vendor/parking_lot_core-0.9.12" }
+
+[patch."https://github.com/thrumdev/nomt.git"]
+nomt = { path = "consensus/vendor/nomt/nomt" }
+nomt-core = { path = "consensus/vendor/nomt/core" }

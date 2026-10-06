@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
@@ -486,12 +487,24 @@ func RegisterAccount(store Store, userAddress common.Address, floatIdentityKey c
 		// It's a self-registration, the cluster BLS signature is sufficient.
 	} else {
 		// Normal user registration requires a valid ECDSA signature.
-		userHash := crypto.Keccak256Hash(digest)
-		pubKey, err := crypto.SigToPub(userHash.Bytes(), userSig)
-		if err != nil {
-			return fmt.Errorf("RegisterAccount: invalid user signature: %w", err)
+		s := make([]byte, len(userSig))
+		copy(s, userSig)
+		if len(s) == 65 && s[64] >= 27 {
+			s[64] -= 27
 		}
-		recoveredAddr := crypto.PubkeyToAddress(*pubKey)
+		userHash := crypto.Keccak256Hash(digest)
+		pubKey, err := crypto.SigToPub(userHash.Bytes(), s)
+		var recoveredAddr common.Address
+		if err == nil {
+			recoveredAddr = crypto.PubkeyToAddress(*pubKey)
+		}
+		if recoveredAddr != userAddress {
+			// Also accept standard Ethereum personal_sign prefix
+			ethHash := accounts.TextHash(digest)
+			if pubKey2, err2 := crypto.SigToPub(ethHash, s); err2 == nil {
+				recoveredAddr = crypto.PubkeyToAddress(*pubKey2)
+			}
+		}
 		if recoveredAddr != userAddress {
 			return fmt.Errorf("RegisterAccount: user signature address mismatch: got %s, want %s", recoveredAddr.Hex(), userAddress.Hex())
 		}

@@ -3,7 +3,6 @@ package tx_processor
 import (
 	"context"
 	"crypto/ecdsa"
-	"encoding/json"
 	"math/big"
 	"testing"
 
@@ -21,7 +20,10 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
+	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -72,6 +74,9 @@ func newGateCluster(t *testing.T, parent parentchain.Client) *gateCluster {
 	node.SetPublicKeyBls(kp.PublicKey().Bytes())
 	cs.GetAccountStateDB().SetState(node)
 
+	addTestCommitteeValidator(t, cs, kp)
+	flushTestStake(t, cs)
+
 	g := &gateCluster{t: t, cs: cs, kp: kp}
 	g.h = &RollupSystemHandler{
 		dispatcher:      systemDispatcher(func(rollup.Store, AccountStateAccessor, []byte) error { return nil }),
@@ -95,6 +100,45 @@ func newGateCluster(t *testing.T, parent parentchain.Client) *gateCluster {
 		return nil
 	}
 	return g
+}
+
+// addTestCommitteeValidator registers kp's address as an active staked validator whose committee key (the account's
+// PublicKeyBls) is kp's public key, creating the stake DB on first use.
+func addTestCommitteeValidator(t *testing.T, cs *blockchain.ChainState, kp *bls.KeyPair) {
+	t.Helper()
+	if cs.GetStakeStateDB() == nil {
+		stakeStorage := storage.NewMemoryDb()
+		stakeTrie, err := trie.NewStateTrie(common.Hash{}, stakeStorage, true)
+		require.NoError(t, err)
+		cs.SetStakeStateDB(stake_state_db.NewStakeStateDB(stakeTrie, stakeStorage))
+	}
+	addr := kp.Address()
+	require.NoError(t, cs.GetStakeStateDB().CreateRegisterWithKeys(addr, "v-"+addr.Hex()[:6], "", "", "", 5,
+		big.NewInt(0), "127.0.0.1:6200", "127.0.0.1:4012", "/ip4/127.0.0.1/tcp/9100", "", []byte{0x01}, []byte{0x02}, "v", []byte{0x03}))
+	stake, _ := new(big.Int).SetString("1000000000000000000000", 10)
+	require.NoError(t, cs.GetStakeStateDB().Delegate(addr, addr, stake))
+	require.NoError(t, cs.GetAccountStateDB().SetPublicKeyBls(addr, kp.PublicKey().Bytes()))
+}
+
+// flushTestStake makes the validators registered so far visible to GetAllValidators (it reads the trie, not the dirty
+// cache). Call once after all addTestCommitteeValidator calls: the stake DB locks after a flush.
+func flushTestStake(t *testing.T, cs *blockchain.ChainState) {
+	t.Helper()
+	_, err := cs.GetStakeStateDB().IntermediateRoot()
+	require.NoError(t, err)
+}
+
+// attestedRegistrationPayload builds an account_registered payload carrying kp's attestation.
+func attestedRegistrationPayload(t *testing.T, kp *bls.KeyPair, user common.Address, cluster cm.PublicKey, seq uint64) []byte {
+	t.Helper()
+	d := rollup.ComputeAccountRegistrationAttestDigest(parentchain.ParentChainID, user, cluster, seq)
+	p := &rollup.AccountRegistrationPayload{
+		Kind: rollup.SystemPayloadKindAccountRegistered, User: user, ClusterKey: cluster,
+		ParentSeq: seq, Attestations: []rollup.RegistrationAttestation{{ValidatorPubkey: kp.PublicKey(), Signature: bls.Sign(kp.PrivateKey(), d)}},
+	}
+	b, err := p.MarshalProto()
+	require.NoError(t, err)
+	return b
 }
 
 type testUser struct {
@@ -262,7 +306,9 @@ func TestAccountGate_ForgedRegistrationEventDoesNotOpenTheGate(t *testing.T) {
 	g.fund(attacker)
 	require.NoError(t, g.cs.GetAccountStateDB().AddBalance(attacker.addr, big.NewInt(1_000_000_000_000_000)))
 
-	raw, _ := json.Marshal(rollup.AccountRegistrationPayload{Kind: rollup.SystemPayloadKindAccountRegistered, User: attacker.addr, ClusterKey: g.kp.PublicKey()})
+	p := &rollup.AccountRegistrationPayload{Kind: rollup.SystemPayloadKindAccountRegistered, User: attacker.addr, ClusterKey: g.kp.PublicKey()}
+	raw, err := p.MarshalProto()
+	require.NoError(t, err)
 	tx := transaction.NewTransaction(attacker.addr, rollup.RollupSystemAddress, big.NewInt(0), 21000, 1_000_000_000, 0, raw, nil,
 		common.Hash{}, common.Hash{}, 0, 1)
 	rcp, _, err := g.h.HandleTransaction(context.Background(), g.cs, tx, rollup.RollupSystemAddress, false, 0)
@@ -270,4 +316,64 @@ func TestAccountGate_ForgedRegistrationEventDoesNotOpenTheGate(t *testing.T) {
 	assert.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, rcp.Status())
 
 	require.NotNil(t, g.admit(userTx(t, attacker, 1), attacker))
+}
+
+// Real system-tx path with a 4-validator committee (f=1 => 2 attestations): one validator alone — a Byzantine one —
+// cannot mark an account parent-registered, however many times it submits; the second distinct validator completes it.
+func TestAccountGate_SystemEventNeedsFPlusOneValidatorAttestations(t *testing.T) {
+	cs := setupTestChainState(t)
+	cluster := bls.GenerateKeyPair() // shared cluster identity, distinct from the validators' committee keys
+	h := &RollupSystemHandler{
+		dispatcher:      systemDispatcher(func(rollup.Store, AccountStateAccessor, []byte) error { return nil }),
+		registryHandler: rollup.NewAccountRegistryHandler(cluster.PublicKey()),
+	}
+	var vals []*bls.KeyPair
+	for i := 0; i < 4; i++ {
+		kp := bls.GenerateKeyPair()
+		vals = append(vals, kp)
+		acc := state.NewAccountState(kp.Address())
+		acc.AddBalance(big.NewInt(1_000_000_000_000_000_000))
+		acc.SetPublicKeyBls(kp.PublicKey().Bytes())
+		cs.GetAccountStateDB().SetState(acc)
+		addTestCommitteeValidator(t, cs, kp)
+	}
+	flushTestStake(t, cs)
+	user := common.HexToAddress("0x00000000000000000000000000000000000000cc")
+	nonces := map[common.Address]uint64{}
+	submit := func(v *bls.KeyPair, seq uint64) types.Receipt {
+		d := rollup.ComputeAccountRegistrationAttestDigest(parentchain.ParentChainID, user, cluster.PublicKey(), seq)
+		p := &rollup.AccountRegistrationPayload{Kind: rollup.SystemPayloadKindAccountRegistered, User: user,
+			ClusterKey: cluster.PublicKey(), ParentSeq: seq,
+			Attestations: []rollup.RegistrationAttestation{{ValidatorPubkey: v.PublicKey(), Signature: bls.Sign(v.PrivateKey(), d)}}}
+		data, err := p.MarshalProto()
+		require.NoError(t, err)
+		tx := transaction.NewTransaction(v.Address(), rollup.RollupSystemAddress, big.NewInt(0), 21000, 1_000_000_000, 0, data, nil,
+			common.Hash{}, common.Hash{}, nonces[v.Address()], 1)
+		nonces[v.Address()]++
+		rcp, _, err := h.HandleTransaction(context.Background(), cs, tx, rollup.RollupSystemAddress, false, 0)
+		require.NoError(t, err)
+		return rcp
+	}
+	registered := func() bool {
+		as, err := cs.GetAccountStateDB().AccountState(user)
+		return err == nil && as != nil && as.ParentRegistered()
+	}
+
+	for i := 0; i < 3; i++ {
+		require.Equal(t, pb.RECEIPT_STATUS_RETURNED, submit(vals[0], 1).Status(), "a pending attestation is a successful tx")
+		require.False(t, registered(), "one validator alone must never register the account (repeat %d)", i)
+	}
+	require.Equal(t, pb.RECEIPT_STATUS_RETURNED, submit(vals[1], 1).Status())
+	require.True(t, registered(), "second distinct committee validator reaches f+1")
+
+	// a non-committee node identity (valid BLS-native sender, but not a validator) cannot contribute
+	outsider := bls.GenerateKeyPair()
+	acc := state.NewAccountState(outsider.Address())
+	acc.AddBalance(big.NewInt(1_000_000_000_000_000_000))
+	acc.SetPublicKeyBls(outsider.PublicKey().Bytes())
+	cs.GetAccountStateDB().SetState(acc)
+	user = common.HexToAddress("0x00000000000000000000000000000000000000dd")
+	require.NotEqual(t, pb.RECEIPT_STATUS_RETURNED, submit(outsider, 1).Status(), "attestation from a non-validator must be rejected")
+	require.NotEqual(t, pb.RECEIPT_STATUS_RETURNED, submit(outsider, 2).Status())
+	require.False(t, registered())
 }

@@ -11,7 +11,7 @@ Hệ thống Ansible tự động hóa triển khai, quản lý vòng đời và
 
 | Thành Phần | Định Danh & Cổng | Vai Trò & Cơ Chế |
 | :--- | :--- | :--- |
-| **Parent Chain** | ChainID: `990`<br>HTTP RPC: `:8547`<br>P2P: `:4000` | Native State Store (Float Accounts, Account Registry, Cluster Registry, Claimed Messages). Quản lý cọc float và điều phối bảo lãnh chuyển tiền. |
+| **Parent Chain** | ChainID: `991`<br>HTTP RPC: `:8547`<br>P2P: `:4000` | Native State Store (Float Accounts, Account Registry, Cluster Registry, Claimed Messages). Quản lý cọc float và điều phối bảo lãnh chuyển tiền. |
 | **Exec Cluster 1** | ClusterID: `1`<br>EVM ChainID: `991`<br>RPC: `:8646`<br>P2P: `:4200` | Cụm thực thi Shard 1. Chạy Rollup workers (`SendWorker`, `ReceiveWorker`, `ReclaimWorker`). Tiếp nhận giao dịch EVM chuẩn. |
 | **Exec Cluster 2** | ClusterID: `2`<br>EVM ChainID: `991`<br>RPC: `:8647`<br>P2P: `:4202` | Cụm thực thi Shard 2. Tương tác giao dịch xuyên cụm (cross-cluster transfer) với Cluster 1 qua Float Account trên Parent Chain. |
 

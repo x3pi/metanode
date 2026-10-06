@@ -15,14 +15,20 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const (
-	ParentChainID uint64 = 990
-)
+// DefaultParentChainID is the chain ID shared by the Parent Chain and every execution cluster.
+const DefaultParentChainID uint64 = 991
+
+// ParentChainID is the chain ID stamped on / required of Parent Chain transactions. It is configurable: set it ONCE at
+// process startup (SetParentChainID, from genesis) before any tx is built or validated; it is not safe to change later.
+var ParentChainID = DefaultParentChainID
+
+// SetParentChainID overrides ParentChainID. Call only during startup.
+func SetParentChainID(id uint64) { ParentChainID = id }
 
 var (
 	ParentChainGatewayAddress = common.HexToAddress("0x0000000000000000000000000000000000001003")
 
-	ErrInvalidChainID     = errors.New("parentchain: invalid chain ID, expected 990")
+	ErrInvalidChainID     = errors.New("parentchain: invalid chain ID, does not match the configured parent chain ID")
 	ErrInvalidToAddress   = errors.New("parentchain: invalid ToAddress, must be gateway contract")
 	ErrWrongNonce         = errors.New("parentchain: sender nonce mismatch")
 	ErrInvalidTxSignature = errors.New("parentchain: invalid transaction signature")

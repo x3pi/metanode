@@ -1567,6 +1567,11 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		}
 	}
 
+	// Wait for any in-flight background commit (CommitAsync) to finish persisting
+	// before opening a new NOMT write session. NOMT panics (self.secondary_staging.is_none())
+	// if a new session finishes while secondary_staging is still being committed by beatree.
+	n.commitWg.Wait()
+
 	t0 := time.Now()
 	session := nomt_ffi.BeginSession(n.handle)
 	if session == nil {

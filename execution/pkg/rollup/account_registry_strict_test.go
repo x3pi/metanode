@@ -1,9 +1,6 @@
 package rollup
 
 import (
-	"encoding/hex"
-	"fmt"
-	"strings"
 	"sync"
 	"testing"
 
@@ -12,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
 type flagDB struct {
@@ -39,8 +37,15 @@ func clusterKeyOf(b byte) cm.PublicKey {
 	return k
 }
 
-func payloadWithKey(user common.Address, keyJSON string) []byte {
-	return []byte(fmt.Sprintf(`{"kind":"account_registered","user":"%s","cluster_key":%s,"parent_seq":1}`, user.Hex(), keyJSON))
+func payloadWithKey(user common.Address, keyBytes []byte) []byte {
+	p := &pb.AccountRegistrationPayloadProto{
+		Kind:       SystemPayloadKindAccountRegistered,
+		User:       user.Bytes(),
+		ClusterKey: keyBytes,
+		ParentSeq:  1,
+	}
+	b, _ := deterministicMarshal.Marshal(p)
+	return b
 }
 
 // A cluster key of the wrong length must never be zero-padded or truncated into a different key.
@@ -49,36 +54,31 @@ func TestAccountRegistry_ClusterKeyMustBeExactly48Bytes(t *testing.T) {
 	h := NewAccountRegistryHandler(key)
 	user := common.HexToAddress("0x00000000000000000000000000000000000000b0")
 
-	full := hex.EncodeToString(key[:])
-	bad := map[string]string{
-		"47 bytes hex":       `"` + full[:94] + `"`,
-		"49 bytes hex":       `"` + full + `11"`,
-		"empty string":       `""`,
-		"odd length hex":     `"` + full[:95] + `"`,
-		"not hex":            `"zz` + full[2:] + `"`,
-		"short int array":    `[1,2,3]`,
-		"long int array":     "[" + strings.Repeat("17,", 48) + "17]",
-		"out of range array": "[" + strings.Repeat("17,", 47) + "300]",
-		"object":             `{"a":1}`,
+	bad := map[string][]byte{
+		"47 bytes":      key[:47],
+		"49 bytes":      append(key[:], 0x11),
+		"empty bytes":   nil,
+		"zero bytes":    []byte{},
+		"short 3 bytes": []byte{1, 2, 3},
+		"32 bytes":      make([]byte, 32),
+		"64 bytes":      make([]byte, 64),
 	}
-	for name, js := range bad {
+	for name, k := range bad {
 		t.Run(name, func(t *testing.T) {
 			db := newFlagDB()
-			err := h.Apply(db, payloadWithKey(user, js))
+			err := h.Apply(db, payloadWithKey(user, k))
 			assert.Error(t, err)
 			assert.False(t, db.GetParentRegistered(user), "a malformed cluster key must never register anyone")
 		})
 	}
 
-	good := map[string]string{
-		"hex":       `"` + full + `"`,
-		"0x hex":    `"0x` + full + `"`,
-		"int array": "[" + strings.Repeat("17,", 47) + "17]",
+	good := map[string][]byte{
+		"exact 48 bytes": key[:],
 	}
-	for name, js := range good {
+	for name, k := range good {
 		t.Run("ok "+name, func(t *testing.T) {
 			db := newFlagDB()
-			require.NoError(t, h.Apply(db, payloadWithKey(user, js)))
+			require.NoError(t, h.Apply(db, payloadWithKey(user, k)))
 			assert.True(t, db.GetParentRegistered(user))
 		})
 	}
@@ -89,10 +89,12 @@ func TestAccountRegistry_WrongOrZeroClusterKeyRejected(t *testing.T) {
 	h := NewAccountRegistryHandler(clusterKeyOf(0x11))
 	user := common.HexToAddress("0x00000000000000000000000000000000000000b1")
 	for name, k := range map[string]cm.PublicKey{"other cluster": clusterKeyOf(0x22), "zero key": {}} {
-		db := newFlagDB()
-		err := h.Apply(db, payloadWithKey(user, `"`+hex.EncodeToString(k[:])+`"`))
-		assert.Error(t, err, name)
-		assert.False(t, db.GetParentRegistered(user), name)
+		t.Run(name, func(t *testing.T) {
+			db := newFlagDB()
+			err := h.Apply(db, payloadWithKey(user, k[:]))
+			assert.Error(t, err, name)
+			assert.False(t, db.GetParentRegistered(user), name)
+		})
 	}
 }
 

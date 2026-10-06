@@ -127,8 +127,8 @@ func LoadGenesis(path string) (*Genesis, error) {
 		return nil, fmt.Errorf("%w: failed to parse JSON: %v", ErrGenesisInvalid, err)
 	}
 
-	if g.ChainID != 990 {
-		return nil, fmt.Errorf("%w: invalid chain_id %d (expected 990)", ErrGenesisInvalid, g.ChainID)
+	if g.ChainID == 0 {
+		return nil, fmt.Errorf("%w: chain_id must be positive", ErrGenesisInvalid)
 	}
 
 	if len(g.Validators) == 0 {

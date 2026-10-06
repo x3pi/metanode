@@ -1,11 +1,12 @@
 package rollup
 
 import (
-	"encoding/json"
 	"log"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -30,6 +31,13 @@ type RegistrationWorker struct {
 
 	cursor        atomic.Uint64
 	EventProposer RegistrationEventProposer
+	// attestKey signs attestations. It must be the validator's COMMITTEE key (the account PublicKeyBls registered for
+	// the validator address, i.e. Databases.BLSPrivateKey), which differs per validator; the cluster identity key
+	// (blsKeyPair) is shared by the whole cluster and cannot tell validators apart. Defaults to blsKeyPair.
+	attestKey *bls.KeyPair
+	// AlreadyAttested (optional) reports whether this validator's attestation for the event is already recorded on
+	// chain; the worker then waits for the other validators instead of re-submitting.
+	AlreadyAttested func(user common.Address, parentSeq uint64) bool
 
 	interval time.Duration
 	wakeCh   chan struct{}
@@ -54,6 +62,16 @@ func NewRegistrationWorker(
 		wakeCh:        make(chan struct{}, 1),
 		quitCh:        make(chan struct{}),
 	}
+}
+
+// SetAttestationKey sets the validator committee key used to sign registration attestations.
+func (w *RegistrationWorker) SetAttestationKey(kp *bls.KeyPair) { w.attestKey = kp }
+
+func (w *RegistrationWorker) attestationKey() *bls.KeyPair {
+	if w.attestKey != nil {
+		return w.attestKey
+	}
+	return w.blsKeyPair
 }
 
 // SetInterval updates the polling interval.
@@ -161,13 +179,23 @@ func (w *RegistrationWorker) pollAndProcess() bool {
 		}
 
 		if w.EventProposer != nil {
+			if w.AlreadyAttested != nil && w.AlreadyAttested(ev.UserAddress, ev.Seq) {
+				continue
+			}
 			payload := AccountRegistrationPayload{
 				Kind:       SystemPayloadKindAccountRegistered,
 				User:       ev.UserAddress,
 				ClusterKey: w.clusterPubKey,
 				ParentSeq:  ev.Seq,
 			}
-			data, err := json.Marshal(payload)
+			if ak := w.attestationKey(); ak != nil {
+				digest := ComputeAccountRegistrationAttestDigest(parentchain.ParentChainID, ev.UserAddress, w.clusterPubKey, ev.Seq)
+				payload.Attestations = []RegistrationAttestation{{
+					ValidatorPubkey: ak.PublicKey(),
+					Signature:       bls.Sign(ak.PrivateKey(), digest),
+				}}
+			}
+			data, err := payload.MarshalProto()
 			if err != nil {
 				log.Printf("RegistrationWorker: failed to marshal payload for user %s: %v", ev.UserAddress.Hex(), err)
 				continue

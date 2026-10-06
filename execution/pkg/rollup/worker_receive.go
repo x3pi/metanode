@@ -209,7 +209,7 @@ func (w *ReceiveWorker) handleIncomingTransfer(tx *parentchain.TransferEvent) {
 		Sender:             tx.Sender,
 		Target:             tx.Target,
 		Value:              tx.Amount,
-		IsDuplicate:        found,
+		IsDuplicate:        false, // Deterministic across all validators at proposal time; CrossNodeHandler sets duplicate status from consensus readStore
 		IsDestinationValid: w.isValidDestination(tx.Target),
 	}
 
@@ -220,7 +220,8 @@ func (w *ReceiveWorker) handleIncomingTransfer(tx *parentchain.TransferEvent) {
 		return
 	}
 
-	// Fallback: local direct execution (only for testing without Raft)
+	// Fallback: local direct execution (only for testing without consensus)
+	event.IsDuplicate = found
 	newState, _, err := Next(StateNone, RoleReceiver, event)
 	if err != nil {
 		log.Printf("ReceiveWorker: next failed for incoming msg %x: %v", tx.MsgID, err)

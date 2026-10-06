@@ -82,7 +82,7 @@ func (c *httpClient) GetInboundAccountRegistrations(pubKey cm.PublicKey, cursor 
 	pubKeyHex := hexEncode(pubKey[:])
 	var resp struct {
 		Events []*AccountRegisteredEvent `json:"events"`
-		Cursor uint64                   `json:"cursor"`
+		Cursor uint64                    `json:"cursor"`
 	}
 	err := c.get(fmt.Sprintf("/inbound_registrations?pubkey=%s&cursor=%d", pubKeyHex, cursor), &resp)
 	return resp.Events, resp.Cursor, err
@@ -594,6 +594,7 @@ func (s *HTTPServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	forkDetected := s.forkDetected.Load()
 	UpdateMetrics(lastBlock, stateRoot.Hex(), forkDetected)
 	json.NewEncoder(w).Encode(map[string]interface{}{
+		"chain_id":      ParentChainID,
 		"last_block":    lastBlock,
 		"last_hash":     lastHash,
 		"state_root":    stateRoot,
@@ -684,4 +685,3 @@ func (s *HTTPServer) handleSendRawTransaction(w http.ResponseWriter, r *http.Req
 		"status":  "accepted",
 	})
 }
-

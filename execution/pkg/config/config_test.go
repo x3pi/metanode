@@ -231,9 +231,9 @@ func TestTxSignatureMode(t *testing.T) {
 		{"", nil, false, false},
 		{TxSignatureModeBLSLegacy, nil, false, false},
 		{TxSignatureModeSecp, chain, true, false},
-		{TxSignatureModeSecp, nil, true, true},           // secp replay protection needs a configured chain ID
-		{TxSignatureModeSecp, big.NewInt(0), true, true}, // ...and a positive one
-		{"SECP", chain, false, true},                     // typos must fail startup, never silently pick another rule set
+		// Deployed configs do not carry chainId (the genesis does), so loading must NOT depend on it.
+		{TxSignatureModeSecp, nil, true, false},
+		{"SECP", chain, false, true}, // typos must fail startup, never silently pick another rule set
 		{"bls", chain, false, true},
 	} {
 		c := &SimpleChainConfig{TxSignatureMode: tc.mode, ChainId: tc.chainID}
@@ -247,6 +247,51 @@ func TestTxSignatureMode(t *testing.T) {
 	var nilCfg *SimpleChainConfig
 	if nilCfg.SecpOnlyTxSignatures() {
 		t.Error("nil config must be legacy")
+	}
+}
+
+// Replay protection of secp txs rests on the chain ID, so once the genesis has supplied it a secp chain without a
+// positive chain ID must not start; other modes are unaffected.
+func TestValidateChainBinding(t *testing.T) {
+	for _, tc := range []struct {
+		mode    string
+		chainID *big.Int
+		wantErr bool
+	}{
+		{TxSignatureModeSecp, big.NewInt(991), false},
+		{TxSignatureModeSecp, nil, true},
+		{TxSignatureModeSecp, big.NewInt(0), true},
+		{TxSignatureModeSecp, big.NewInt(-1), true},
+		{"", nil, false},
+		{TxSignatureModeBLSLegacy, big.NewInt(0), false},
+	} {
+		c := &SimpleChainConfig{TxSignatureMode: tc.mode, ChainId: tc.chainID}
+		if err := c.ValidateChainBinding(); (err != nil) != tc.wantErr {
+			t.Errorf("mode %q chain %v: err=%v, wantErr=%v", tc.mode, tc.chainID, err, tc.wantErr)
+		}
+	}
+}
+
+// A deployed (ansible-shaped) secp config has no chainId at all; it must load and validate, and only fail the chain
+// binding check if the genesis then fails to provide a chain ID.
+func TestDeployedSecpConfigWithoutChainIDLoads(t *testing.T) {
+	raw := `{"consensus_mode":"raft","tx_signature_mode":"secp","account_gate":"parent_registered","rpc_port":":8646"}`
+	var c SimpleChainConfig
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.validateTxSignatureMode(); err != nil {
+		t.Fatalf("a secp config without chainId must load: %v", err)
+	}
+	if err := c.validateAccountGate(); err != nil {
+		t.Fatalf("gate config must validate: %v", err)
+	}
+	if err := c.ValidateChainBinding(); err == nil {
+		t.Fatal("before the genesis supplies the chain ID the binding check must fail")
+	}
+	c.ChainId = big.NewInt(991) // what initNetwork does with genesis.Config.ChainId
+	if err := c.ValidateChainBinding(); err != nil {
+		t.Fatalf("with a genesis chain ID the binding check must pass: %v", err)
 	}
 }
 
@@ -279,4 +324,3 @@ func TestAccountGate(t *testing.T) {
 		t.Error("nil config must report false for AccountGateParentRegistered")
 	}
 }
-

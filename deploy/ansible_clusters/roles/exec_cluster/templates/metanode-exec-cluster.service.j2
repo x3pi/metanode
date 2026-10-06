@@ -19,6 +19,8 @@ Environment="PARENT_CHAIN_URL=http://{{ parent_chain_host | default('127.0.0.1')
 Environment="PARENT_CHAIN_URLS={{ parent_chain_urls_csv | default('') }}"
 Environment="BLS_CONSERVATION_MODE={{ bls_conservation_mode | default('enforce') }}"
 Environment="BLS_CONSERVATION_INTERVAL_SECONDS={{ bls_conservation_interval_seconds | default('300') }}"
+Environment="METANODE_ENV={{ metanode_env | default('production') }}"
+Environment="NODE_ENV={{ node_env | default('production') }}"
 
 StandardOutput=append:{{ base_log_dir }}/{{ inventory_hostname }}.log
 StandardError=append:{{ base_log_dir }}/{{ inventory_hostname }}.log

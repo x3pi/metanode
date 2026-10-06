@@ -109,14 +109,14 @@ func (w *ReclaimWorker) checkAndReclaim(rec *MessageRecord) {
 	}
 	
 	currentTime := uint64(time.Now().Unix())
-	isEligible := currentTime > transferRec.ConfirmedAtBlockTime + 60
-	
+	isEligible := currentTime > transferRec.ConfirmedAtBlockTime+60
+
 	if isEligible {
 		event := Event{
 			Type:              EventReclaimEligible,
 			Role:              RoleSender,
 			Value:             rec.Value,
-			ParentBlockTime:   currentTime,
+			ParentBlockTime:   transferRec.ConfirmedAtBlockTime + 60, // Deterministic pure function of Parent Chain data (not node wall-clock)
 			ParentConfirmTime: transferRec.ConfirmedAtBlockTime,
 			Timeout:           60,
 		}

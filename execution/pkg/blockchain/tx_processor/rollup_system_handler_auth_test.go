@@ -2,7 +2,6 @@ package tx_processor
 
 import (
 	"context"
-	"encoding/json"
 	"math/big"
 	"testing"
 
@@ -19,15 +18,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 )
 
-// systemPayload mirrors cmd/simple_chain's rollupSystemPayload (the wire format of a rollup system tx).
-type systemPayload struct {
-	Event        rollup.Event        `json:"event"`
-	MsgID        common.Hash         `json:"msg_id"`
-	SourceSeq    uint64              `json:"source_seq"`
-	SourcePubKey mt_common.PublicKey `json:"source_pub_key"`
-	DestPubKey   mt_common.PublicKey `json:"dest_pub_key"`
-	PayloadHash  common.Hash         `json:"payload_hash"`
-}
+
 
 type systemDispatcher func(store rollup.Store, stateDB AccountStateAccessor, data []byte) error
 
@@ -36,14 +27,14 @@ func (f systemDispatcher) HandleSystemEvent(store rollup.Store, stateDB AccountS
 }
 
 // newSystemHandler wires RollupSystemHandler to the REAL CrossNodeHandler with the same call shape as
-// cmd/simple_chain handleRollupSystemEvent (payload JSON -> HandleSystemEvent).
+// cmd/simple_chain handleRollupSystemEvent (protobuf payload -> HandleSystemEvent).
 func newSystemHandler() *RollupSystemHandler {
 	var key mt_common.PublicKey
 	key[0] = 9
 	cn := rollup.NewCrossNodeHandler(key)
 	return &RollupSystemHandler{dispatcher: systemDispatcher(func(store rollup.Store, stateDB AccountStateAccessor, data []byte) error {
-		var p systemPayload
-		if err := json.Unmarshal(data, &p); err != nil {
+		var p rollup.RollupSystemPayload
+		if err := rollup.UnmarshalRollupSystemPayload(data, &p); err != nil {
 			return err
 		}
 		return cn.HandleSystemEvent(store, store, stateDB, p.Event, p.MsgID, p.SourceSeq, p.SourcePubKey, p.DestPubKey, p.PayloadHash)
@@ -62,7 +53,8 @@ func forgedCreditEvents(target common.Address) []rollup.Event {
 }
 
 func systemTx(from common.Address, nonce uint64, ev rollup.Event) *transaction.Transaction {
-	raw, _ := json.Marshal(systemPayload{Event: ev, MsgID: common.HexToHash("0xabc123"), SourceSeq: 1})
+	p := rollup.RollupSystemPayload{Event: ev, MsgID: common.HexToHash("0xabc123"), SourceSeq: 1}
+	raw, _ := rollup.MarshalRollupSystemPayload(&p)
 	return transaction.NewTransaction(from, rollup.RollupSystemAddress, big.NewInt(0), 21000, 1_000_000_000, 0, raw, nil,
 		common.Hash{}, common.Hash{}, nonce, 1).(*transaction.Transaction)
 }
@@ -165,7 +157,8 @@ func TestRollupSystemHandler_ForgedRegistrationCannotSetFlag(t *testing.T) {
 	db.AddBalance(attacker, big.NewInt(1_000_000_000_000_000))
 
 	forge := func(from common.Address, user common.Address, nonce uint64) (*transaction.Transaction, []byte) {
-		raw, _ := json.Marshal(rollup.AccountRegistrationPayload{Kind: rollup.SystemPayloadKindAccountRegistered, User: user, ClusterKey: clusterKey, ParentSeq: 1})
+		reg := rollup.AccountRegistrationPayload{Kind: rollup.SystemPayloadKindAccountRegistered, User: user, ClusterKey: clusterKey, ParentSeq: 1}
+		raw, _ := reg.MarshalProto()
 		return transaction.NewTransaction(from, rollup.RollupSystemAddress, big.NewInt(0), 21000, 1_000_000_000, 0, raw, nil,
 			common.Hash{}, common.Hash{}, nonce, 1).(*transaction.Transaction), raw
 	}
@@ -188,7 +181,11 @@ func TestRollupSystemHandler_ForgedRegistrationCannotSetFlag(t *testing.T) {
 	ns.SetPublicKeyBls(nodeKP.PublicKey().Bytes())
 	db.SetState(ns)
 	victim := common.HexToAddress("0x00000000000000000000000000000000000a11ce")
+	addTestCommitteeValidator(t, cs, nodeKP)
+	flushTestStake(t, cs)
 	tx, _ = forge(node, victim, 0)
+	tx = transaction.NewTransaction(node, rollup.RollupSystemAddress, big.NewInt(0), 21000, 1_000_000_000, 0,
+		attestedRegistrationPayload(t, nodeKP, victim, clusterKey, 1), nil, common.Hash{}, common.Hash{}, 0, 1).(*transaction.Transaction)
 	rcp, _, err = h.HandleTransaction(context.Background(), cs, tx, rollup.RollupSystemAddress, false, 0)
 	require.NoError(t, err)
 	assert.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcp.Status(), string(rcp.Return()))
