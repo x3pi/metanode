@@ -1,6 +1,6 @@
 # Kế hoạch (giao agent thực hiện): TCP chỉ nhận giao dịch chuẩn Ethereum (EIP-2718)
 
-Trạng thái: **SẴN SÀNG THỰC HIỆN**. Viết 2026-10-06. Là bước thực thi đầu tiên của `note/plan_eth_native_eip2718.md` (G4 làm trước, không đổi hash/định dạng lưu ⇒ KHÔNG cần wipe).
+Trạng thái: **ĐÃ HOÀN THÀNH (T0-T7)**. Viết 2026-10-06. Đã triển khai SendRawTransaction, SendRawTransactions, chặn lệnh cũ trong secp mode, kiểm tra EIP-155 / chain ID / malleable s, build_check 4/4 PASS, go test -race PASS.
 Đọc trước: `AGENTS.md` (Zero-Fork, KISS, build_check.sh, tóm tắt tiếng Việt cuối response), `PROJECT_STRUCTURE.md`, `note/plan_eth_native_eip2718.md`.
 
 ## 1. Hiện trạng đã xác minh (đường TCP)
@@ -22,6 +22,7 @@ Phía Rust (`consensus/metanode/src/network/tx_socket_server.rs`) chỉ nhận b
 4. **Trong secp mode:** `SendTransaction`, `SendTransactions` (proto), `SendTransactionWithDeviceKey` bị từ chối (trả lỗi code `InvalidSign`/mã tương ứng, ghi log, không panic). Type `0xFF` bị từ chối ở mọi nơi trong mode này.
 5. **Cấm tx pre-EIP-155** (không có chainId) và chữ ký malleable (s > n/2, EIP-2). chainId phải bằng chainId genesis.
 6. Mô hình phí, blob 0x03, EIP-7702 0x04: **giữ nguyên hành vi hiện tại**, không đụng trong pha này.
+8. **Đã được user xác nhận (2026-10-06):** tương thích Ethereum hoàn toàn; dapp tự chọn thư viện Eth của họ (web3j, ethers, viem…). KHÔNG hỗ trợ proto thay thế, KHÔNG giữ type `0xFF` làm đường chính thức, KHÔNG ký hộ bằng khóa gateway. Dapp ký BLS/proto ở lại chain `bls_legacy`.
 7. Không dùng `time.Now()`/map iteration trong đường giải mã→admission. Tx lỗi ⇒ từ chối tại chỗ, không dispatch.
 
 ## 3. Việc cần làm (theo thứ tự)
@@ -63,6 +64,12 @@ Pha B sẽ xóa ánh xạ này; đừng cố giải ở đây.
 - Chain `bls_legacy`: không đổi hành vi (test regression xanh).
 - `build_check.sh` sạch, `go test -race` các package sửa xanh, live 4 validator state root khớp.
 - Báo cáo kết thúc có khối tóm tắt tiếng Việt theo `AGENTS.md` Part 5.
+
+## 5a. Đã xác minh thêm (vòng 2, 2026-10-06) — sửa/ghi chú
+- **Rust KHÔNG hoàn toàn là byte mờ** (`consensus/metanode/src/types/tx_hash.rs` giải mã proto và băm `TransactionHashData`). Với **pha A vẫn đúng là không cần sửa Rust** vì proto nội bộ và hash không đổi; nhưng Pha B (hash = keccak(envelope)) phải đổi cả Go lẫn Rust — xem G1 của `plan_eth_native_eip2718.md`.
+- `ValidEthSign` (`transaction.go:1131`) ĐÃ khôi phục sender từ chữ ký và so với `FromAddress` ⇒ không tin trường proto (điểm bảo mật ở 5b đã được trả lời), nhưng xác thực trên tx **dựng lại** từ proto; test round-trip cho mọi type ở T5.
+- `DeriveSenderFromEthTransaction` (`transaction.go:1336`) vẫn chấp nhận legacy không chainId (HomesteadSigner) — hiện chỉ bị `ValidChainID` chặn gián tiếp. **T2 phải từ chối tường minh** (`!ethTx.Protected()` hoặc `ChainId()==0`) trước khi dựng tx, kèm test.
+- Phí phẳng `MINIMUM_BASE_FEE=100000` (`validation.go:435`) nhưng RPC báo `baseFeePerGas=0` (`rpc_block.go:53`): ví Android/web3j ước tính theo RPC có thể gửi gas price quá thấp và bị từ chối. Khi làm T8, **dùng gas price tường minh ≥ `MINIMUM_BASE_FEE`** và ghi lại lệch này; sửa RPC thuộc G3, không làm ở pha A.
 
 ## 5b. Điểm chưa xác minh (agent phải kiểm tra, không giả định)
 - Framing TCP (`pkg/network`, `Message`/`SendBytes`) để client không phải Go tự cài — chỉ cần nếu muốn hỗ trợ TCP ngoài Go; mobile dùng RPC nên không chặn việc này.
