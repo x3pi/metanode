@@ -97,7 +97,7 @@ func newCommittedRPCTransaction(
 		BlockNumber:         (*hexutil.Big)(new(big.Int).SetUint64(blockNumber)),
 		From:                tx.FromAddress(),
 		Gas:                 hexutil.Uint64(tx.MaxGas()),
-		GasPrice:            (*hexutil.Big)(new(big.Int).SetUint64(tx.MaxGasPrice())),
+		GasPrice:            (*hexutil.Big)(tx.EffectiveGasPrice()),
 		GasFeeCap:           gasFeeCap,
 		GasTipCap:           gasTipCap,
 		MaxFeePerBlobGas:    maxFeePerBlobGas,
@@ -527,7 +527,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 
 	effectiveGasPrice := rcp.GasFee()
 	if effectiveGasPrice == 0 && tx != nil {
-		effectiveGasPrice = tx.MaxGasPrice()
+		effectiveGasPrice = tx.EffectiveGasPrice().Uint64()
 	}
 
 	receiptMap := map[string]interface{}{

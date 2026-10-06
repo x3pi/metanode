@@ -258,6 +258,7 @@ func (mt *MockTransaction) MaxTimeUse() uint64                                  
 func (mt *MockTransaction) MaxFee() *big.Int                                     { return big.NewInt(0) }
 func (mt *MockTransaction) GasTipCap() *big.Int                                  { return big.NewInt(0) }
 func (mt *MockTransaction) GasFeeCap() *big.Int                                  { return big.NewInt(0) }
+func (mt *MockTransaction) GasPriceCap() *big.Int                                 { return big.NewInt(1) }
 func (mt *MockTransaction) EffectiveGasPrice() *big.Int                          { return big.NewInt(1) }
 func (mt *MockTransaction) BlobVersionedHashes() [][]byte                        { return nil }
 func (mt *MockTransaction) MaxFeePerBlobGas() *big.Int                           { return big.NewInt(0) }

@@ -1056,15 +1056,10 @@ func (t *Transaction) MaxGasPrice() uint64 {
 	return t.proto.MaxGasPrice
 }
 
-// EffectiveGasPrice returns the price-per-gas-unit this tx actually pays for
-// EXECUTION gas (never blob gas, which is priced/charged separately — see
-// MaxFeePerBlobGas). Legacy/EIP-2930 carry a real flat MaxGasPrice; EIP-1559
-// and EIP-4844 (and any later fee-cap-based type) leave MaxGasPrice at 0 by
-// design and price via GasFeeCap instead (see FromEthEIP1559Tx/FromEthBlobTx).
-// This is the single place that dispatch lives — MaxFee(), ValidMaxGasPrice(),
-// and every fee-charging call site all go through this so a new tx type only
-// needs to be taught the rule once.
-func (t *Transaction) EffectiveGasPrice() *big.Int {
+// GasPriceCap returns the maximum gas price the user is willing to pay for execution gas:
+// flat MaxGasPrice for Legacy/EIP-2930, GasFeeCap for EIP-1559/EIP-4844/EIP-7702.
+// Used for admission gate (>= MINIMUM_BASE_FEE) and balance checks (gasLimit * cap + value) (ADR D2).
+func (t *Transaction) GasPriceCap() *big.Int {
 	switch t.proto.Type {
 	case 0, 1: // Legacy, EIP-2930
 		return big.NewInt(0).SetUint64(t.proto.MaxGasPrice)
@@ -1073,9 +1068,33 @@ func (t *Transaction) EffectiveGasPrice() *big.Int {
 	}
 }
 
+// EffectiveGasPrice returns the price-per-gas-unit this tx actually pays for
+// EXECUTION gas (never blob gas, which is priced/charged separately — see
+// MaxFeePerBlobGas).
+// Under ADR D2 (flat fee model v1):
+// - Legacy/EIP-2930: flat MaxGasPrice
+// - EIP-1559, EIP-4844, EIP-7702: min(maxFeePerGas, F + maxPriorityFeePerGas)
+//   where F = MINIMUM_BASE_FEE (100,000 wei).
+// Used for fee charging, receipt effectiveGasPrice, and eth_getTransactionByHash.gasPrice.
+func (t *Transaction) EffectiveGasPrice() *big.Int {
+	switch t.proto.Type {
+	case 0, 1: // Legacy, EIP-2930
+		return big.NewInt(0).SetUint64(t.proto.MaxGasPrice)
+	default: // EIP-1559, EIP-4844, and later fee-cap-based types
+		gasFeeCap := t.GasFeeCap()
+		gasTipCap := t.GasTipCap()
+		baseFee := new(big.Int).SetUint64(p_common.MINIMUM_BASE_FEE)
+		effective := new(big.Int).Add(baseFee, gasTipCap)
+		if effective.Cmp(gasFeeCap) > 0 {
+			return new(big.Int).Set(gasFeeCap)
+		}
+		return effective
+	}
+}
+
 func (tx *Transaction) MaxFee() *big.Int {
 	maxGas := big.NewInt(0).SetUint64(tx.MaxGas())
-	return new(big.Int).Mul(maxGas, tx.EffectiveGasPrice())
+	return new(big.Int).Mul(maxGas, tx.GasPriceCap())
 }
 
 func (t *Transaction) MaxTimeUse() uint64 {
@@ -1438,7 +1457,7 @@ func (t *Transaction) ValidMaxGasPrice(currentGasPrice uint64) bool {
 		return true
 	}
 
-	return t.EffectiveGasPrice().Cmp(new(big.Int).SetUint64(currentGasPrice)) >= 0
+	return t.GasPriceCap().Cmp(new(big.Int).SetUint64(currentGasPrice)) >= 0
 }
 
 func (t *Transaction) ValidAmountSpend(

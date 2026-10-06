@@ -377,13 +377,37 @@ func TestTransaction_MaxFee(t *testing.T) {
 	assert.Equal(t, big.NewInt(210000), maxFee)
 }
 
-// TestTransaction_EffectiveGasPrice_PerType guards the fix for a real bug: fee
-// charging (native_fast_path.go, true_block_stm.go) and MaxFee()/
-// ValidMaxGasPrice() must all price EIP-1559/EIP-4844 txs via GasFeeCap, not
-// the flat MaxGasPrice field — which FromEthEIP1559Tx/FromEthBlobTx deliberately
-// leave at 0. Before EffectiveGasPrice() existed, three separate call sites in
-// tx_processor charged literally zero execution gas fee for these tx types.
+// TestTransaction_EffectiveGasPrice_PerType verifies ADR D2 fee semantics:
+// - Legacy/EIP-2930: flat MaxGasPrice
+// - EIP-1559/EIP-4844/EIP-7702: min(GasFeeCap, F + GasTipCap) where F = MINIMUM_BASE_FEE (100,000)
 func TestTransaction_EffectiveGasPrice_PerType(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		txType      uint64
+		maxGasPrice uint64
+		gasFeeCap   []byte
+		gasTipCap   []byte
+		want        *big.Int
+	}{
+		{"legacy uses flat MaxGasPrice", 0, 42, nil, nil, big.NewInt(42)},
+		{"eip2930 uses flat MaxGasPrice", 1, 42, nil, nil, big.NewInt(42)},
+		{"eip1559 pays F + tip when below cap", 2, 0, big.NewInt(150000).Bytes(), big.NewInt(10000).Bytes(), big.NewInt(110000)},
+		{"eip1559 capped at GasFeeCap when tip is high", 2, 0, big.NewInt(105000).Bytes(), big.NewInt(10000).Bytes(), big.NewInt(105000)},
+		{"eip4844 with zero tip pays flat F", 3, 0, big.NewInt(200000).Bytes(), nil, big.NewInt(100000)},
+		{"eip7702 pays F + tip", 4, 0, big.NewInt(120000).Bytes(), big.NewInt(5000).Bytes(), big.NewInt(105000)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tx := &Transaction{proto: &pb.Transaction{
+				Type: c.txType, MaxGasPrice: c.maxGasPrice, GasFeeCap: c.gasFeeCap, GasTipCap: c.gasTipCap,
+			}}
+			assert.Equal(t, c.want, tx.EffectiveGasPrice())
+		})
+	}
+}
+
+// TestTransaction_GasPriceCap_PerType verifies GasPriceCap returns the ceiling:
+// MaxGasPrice for legacy/2930, GasFeeCap for 1559/4844/7702.
+func TestTransaction_GasPriceCap_PerType(t *testing.T) {
 	for _, c := range []struct {
 		name        string
 		txType      uint64
@@ -391,16 +415,17 @@ func TestTransaction_EffectiveGasPrice_PerType(t *testing.T) {
 		gasFeeCap   []byte
 		want        *big.Int
 	}{
-		{"legacy uses flat MaxGasPrice", 0, 42, nil, big.NewInt(42)},
-		{"eip2930 uses flat MaxGasPrice", 1, 42, nil, big.NewInt(42)},
-		{"eip1559 uses GasFeeCap, not MaxGasPrice", 2, 0, big.NewInt(999).Bytes(), big.NewInt(999)},
-		{"eip4844 uses GasFeeCap, not MaxGasPrice", 3, 0, big.NewInt(777).Bytes(), big.NewInt(777)},
+		{"legacy cap is MaxGasPrice", 0, 42, nil, big.NewInt(42)},
+		{"eip2930 cap is MaxGasPrice", 1, 42, nil, big.NewInt(42)},
+		{"eip1559 cap is GasFeeCap", 2, 0, big.NewInt(150000).Bytes(), big.NewInt(150000)},
+		{"eip4844 cap is GasFeeCap", 3, 0, big.NewInt(200000).Bytes(), big.NewInt(200000)},
+		{"eip7702 cap is GasFeeCap", 4, 0, big.NewInt(120000).Bytes(), big.NewInt(120000)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tx := &Transaction{proto: &pb.Transaction{
 				Type: c.txType, MaxGasPrice: c.maxGasPrice, GasFeeCap: c.gasFeeCap,
 			}}
-			assert.Equal(t, c.want, tx.EffectiveGasPrice())
+			assert.Equal(t, c.want, tx.GasPriceCap())
 		})
 	}
 }

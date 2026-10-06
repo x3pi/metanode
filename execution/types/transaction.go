@@ -41,8 +41,13 @@ type Transaction interface {
 	MaxFee() *big.Int
 	GasTipCap() *big.Int
 	GasFeeCap() *big.Int
+	// GasPriceCap returns the maximum gas price the user is willing to pay:
+	// flat MaxGasPrice for Legacy/EIP-2930, GasFeeCap for EIP-1559/EIP-4844/EIP-7702.
+	// Used for admission gate (>= MINIMUM_BASE_FEE) and balance checks (gasLimit * cap + value).
+	GasPriceCap() *big.Int
 	// EffectiveGasPrice is the per-type-dispatched execution gas price: flat
-	// MaxGasPrice for Legacy/EIP-2930, GasFeeCap for EIP-1559/EIP-4844/later.
+	// MaxGasPrice for Legacy/EIP-2930; min(maxFeePerGas, F + maxPriorityFeePerGas) for
+	// EIP-1559/EIP-4844/EIP-7702 where F = MINIMUM_BASE_FEE (ADR D2).
 	EffectiveGasPrice() *big.Int
 	// EIP-4844 blob-gas market fields.
 	BlobVersionedHashes() [][]byte

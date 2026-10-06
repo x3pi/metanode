@@ -128,8 +128,8 @@ func (api *MetaAPI) initCaches() {
 	hexGasPrice := hexutil.Big(*gasPrice)
 	api.cachedGasPrice = &hexGasPrice
 
-	// MaxPriorityFeePerGas is currently hardcoded at 0x5f5e100
-	priority := big.NewInt(0x5f5e100)
+	// MaxPriorityFeePerGas: 0 for flat fee model (ADR D2)
+	priority := big.NewInt(0)
 	hexPriority := hexutil.Big(*priority)
 	api.cachedMaxPriorityFee = &hexPriority
 
