@@ -522,13 +522,22 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 	}
 
 	var cumulativeGasUsed uint64
-	for idx, txH := range blockData.Transactions() {
-		itemRcp, errRcp := rcpDb.GetReceipt(txH)
-		if errRcp == nil && itemRcp != nil {
-			cumulativeGasUsed += itemRcp.GasUsed()
-		}
-		if txH == searchHash || (rcp.TransactionIndex() > 0 && uint64(idx) == rcp.TransactionIndex()) {
-			break
+	if gasInfo := api.getBlockGasInfo(blockData); gasInfo != nil {
+		txIdx := rcp.TransactionIndex()
+		txs := blockData.Transactions()
+		if txIdx < uint64(len(txs)) && txs[txIdx] == searchHash {
+			if txIdx < uint64(len(gasInfo.CumulativeGas)) {
+				cumulativeGasUsed = gasInfo.CumulativeGas[txIdx]
+			}
+		} else {
+			for idx, txH := range txs {
+				if txH == searchHash {
+					if idx < len(gasInfo.CumulativeGas) {
+						cumulativeGasUsed = gasInfo.CumulativeGas[idx]
+					}
+					break
+				}
+			}
 		}
 	}
 	if cumulativeGasUsed == 0 {

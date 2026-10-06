@@ -29,8 +29,66 @@ import (
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
-// MarshalBlockToMap converts a mt_types.Block to a map[string]interface{}.
-func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Hash) (mt_types.Transaction, error), storageReceipt storage.Storage) (map[string]interface{}, error) {
+// getBlockGasInfo returns the cached BlockGasInfo or computes and caches it.
+func (api *MetaAPI) getBlockGasInfo(block mt_types.Block) *BlockGasInfo {
+	if block == nil {
+		return nil
+	}
+	blockHash := block.Header().Hash()
+	if api != nil && api.blockGasCache != nil {
+		if info, ok := api.blockGasCache.Get(blockHash); ok && info != nil {
+			return info
+		}
+	}
+
+	txs := block.Transactions()
+	if len(txs) == 0 {
+		info := &BlockGasInfo{
+			TotalGasUsed:  0,
+			CumulativeGas: []uint64{},
+		}
+		if api != nil && api.blockGasCache != nil {
+			api.blockGasCache.Add(blockHash, info)
+		}
+		return info
+	}
+
+	if api == nil || api.App == nil || api.App.storageManager == nil {
+		return nil
+	}
+	storageReceipt := api.App.storageManager.GetStorageReceipt()
+	if storageReceipt == nil {
+		return nil
+	}
+
+	rcpDb, err := receipt.NewReceiptsFromRoot(block.Header().ReceiptRoot(), storageReceipt)
+	if err != nil {
+		logger.Error("❌ [RPC-GAS] failed to open receipts DB from root: %v", err)
+		return nil
+	}
+
+	cumGas := make([]uint64, len(txs))
+	var runningGas uint64
+	for i, txH := range txs {
+		rcp, err := rcpDb.GetReceipt(txH)
+		if err == nil && rcp != nil {
+			runningGas += rcp.GasUsed()
+		}
+		cumGas[i] = runningGas
+	}
+
+	info := &BlockGasInfo{
+		TotalGasUsed:  runningGas,
+		CumulativeGas: cumGas,
+	}
+	if api.blockGasCache != nil {
+		api.blockGasCache.Add(blockHash, info)
+	}
+	return info
+}
+
+// MarshalBlockToMapWithGas converts a mt_types.Block to a map[string]interface{}, using precomputed gas if available.
+func MarshalBlockToMapWithGas(block mt_types.Block, fullTx bool, fetchTx func(common.Hash) (mt_types.Transaction, error), storageReceipt storage.Storage, blockGas *BlockGasInfo) (map[string]interface{}, error) {
 	// Create a map to hold the block data.
 	blockMap := make(map[string]interface{})
 	// note có thể metamask dùng hai trường blockHash blockNumber để ánh xạ vơi recipte
@@ -47,7 +105,9 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	blockMap["gasLimit"] = hexutil.EncodeUint64(mt_common.BLOCK_GAS_LIMIT) // Giới hạn gas của khối (chain limit, mt_common.BLOCK_GAS_LIMIT)
 
 	var totalBlockGasUsed uint64
-	if len(block.Transactions()) > 0 && storageReceipt != nil {
+	if blockGas != nil {
+		totalBlockGasUsed = blockGas.TotalGasUsed
+	} else if len(block.Transactions()) > 0 && storageReceipt != nil {
 		if rcpDb, err := receipt.NewReceiptsFromRoot(block.Header().ReceiptRoot(), storageReceipt); err == nil {
 			for _, txH := range block.Transactions() {
 				if rcp, err := rcpDb.GetReceipt(txH); err == nil && rcp != nil {
@@ -172,6 +232,11 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	return blockMap, nil
 }
 
+// MarshalBlockToMap converts a mt_types.Block to a map[string]interface{}.
+func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Hash) (mt_types.Transaction, error), storageReceipt storage.Storage) (map[string]interface{}, error) {
+	return MarshalBlockToMapWithGas(block, fullTx, fetchTx, storageReceipt, nil)
+}
+
 // GetBlockByNumber returns the requested canonical block.
 //   - When blockNr is -1 the chain pending block is returned.
 //   - When blockNr is -2 the chain latest block is returned.
@@ -228,7 +293,8 @@ func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber
 		}
 	}
 
-	blockMap, err := MarshalBlockToMap(blockData, fullTx, fetchTx, api.App.storageManager.GetStorageReceipt())
+	blockGas := api.getBlockGasInfo(blockData)
+	blockMap, err := MarshalBlockToMapWithGas(blockData, fullTx, fetchTx, api.App.storageManager.GetStorageReceipt(), blockGas)
 	if err != nil {
 		logger.Error("❌ [RPC-BLOCK] Error generating block map for block %d: %v", blockData.Header().BlockNumber(), err)
 		return nil, nil
@@ -366,7 +432,8 @@ func (api *MetaAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx
 		}
 	}
 
-	blockMap, err := MarshalBlockToMap(blockData, fullTx, fetchTx, api.App.storageManager.GetStorageReceipt())
+	blockGas := api.getBlockGasInfo(blockData)
+	blockMap, err := MarshalBlockToMapWithGas(blockData, fullTx, fetchTx, api.App.storageManager.GetStorageReceipt(), blockGas)
 	if err != nil {
 		logger.Error("❌ [RPC-BLOCK] Error generating block map for hash %s: %v", hash.Hex(), err)
 		return nil, nil
@@ -824,16 +891,18 @@ func (api *MetaAPI) FeeHistory(ctx context.Context, blockCount math.HexOrDecimal
 		var totalGasUsed uint64
 		var effectivePrices []*big.Int
 		if len(txHashes) > 0 {
-			if rcpDb, err := receipt.NewReceiptsFromRoot(header.ReceiptRoot(), api.App.storageManager.GetStorageReceipt()); err == nil {
+			if !wantRewards {
+				if gasInfo := api.getBlockGasInfo(blk); gasInfo != nil {
+					totalGasUsed = gasInfo.TotalGasUsed
+				}
+			} else if rcpDb, err := receipt.NewReceiptsFromRoot(header.ReceiptRoot(), api.App.storageManager.GetStorageReceipt()); err == nil {
 				for _, h := range txHashes {
 					rcp, err := rcpDb.GetReceipt(h)
 					if err != nil {
 						continue
 					}
 					totalGasUsed += rcp.GasUsed()
-					if wantRewards {
-						effectivePrices = append(effectivePrices, new(big.Int).SetUint64(rcp.GasFee()))
-					}
+					effectivePrices = append(effectivePrices, new(big.Int).SetUint64(rcp.GasFee()))
 				}
 			}
 		}

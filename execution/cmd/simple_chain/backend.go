@@ -26,6 +26,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 
 	"github.com/ethereum/go-ethereum/rpc"
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 var (
@@ -98,6 +99,12 @@ type OverrideAccount struct {
 // StateOverride is the collection of overridden accounts.
 type StateOverride map[common.Address]OverrideAccount
 
+// BlockGasInfo holds precomputed block gas values for O(1) receipt and block queries.
+type BlockGasInfo struct {
+	TotalGasUsed  uint64
+	CumulativeGas []uint64 // Cumulative gas up to transaction index i
+}
+
 // MetaAPI xử lý các RPC calls của Ethereum
 type MetaAPI struct {
 	App                  *App // Export field Client
@@ -108,7 +115,7 @@ type MetaAPI struct {
 	cachedChainId        hexutil.Big  // Never changes — set once at init
 	cachedGasPrice       *hexutil.Big // Hardcoded value — set once at init
 	cachedMaxPriorityFee *hexutil.Big // Hardcoded value — set once at init
-
+	blockGasCache        *lru.Cache[common.Hash, *BlockGasInfo]
 }
 
 // initCaches pre-computes values that never change or change rarely.
@@ -126,6 +133,9 @@ func (api *MetaAPI) initCaches() {
 	hexPriority := hexutil.Big(*priority)
 	api.cachedMaxPriorityFee = &hexPriority
 
+	if gasCache, err := lru.New[common.Hash, *BlockGasInfo](2048); err == nil {
+		api.blockGasCache = gasCache
+	}
 }
 
 // decodeHash parses a hex-encoded 32-byte hash. The input may optionally
