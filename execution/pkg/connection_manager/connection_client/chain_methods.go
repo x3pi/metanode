@@ -16,6 +16,8 @@ const (
 	cmdReadTransaction              = "ReadTransaction"
 	cmdSendTransactionWithDeviceKey = "SendTransactionWithDeviceKey"
 	cmdSendTransaction              = "SendTransaction"
+	cmdSendRawTransaction           = "SendRawTransaction"
+	cmdSendRawTransactions          = "SendRawTransactions"
 	cmdReceipt                      = "Receipt"
 	cmdTransactionReceipt           = "TransactionReceipt"
 	cmdLogs                         = "Logs"
@@ -96,6 +98,30 @@ func (c *ConnectionClient) SendTransaction(txBytes []byte) error {
 
 	if err := c.messageSender.SendBytes(c.connection, cmdSendTransaction, txBytes); err != nil {
 		return fmt.Errorf("failed to send SendTransaction: %w", err)
+	}
+	return nil
+}
+
+// SendRawTransaction gửi SendRawTransaction command lên chain (EIP-2718 raw Ethereum envelope, fire-and-forget).
+func (c *ConnectionClient) SendRawTransaction(rawEth []byte) error {
+	if atomic.LoadInt32(&c.connected) != 1 || c.connection == nil {
+		return fmt.Errorf("not connected to cluster %s", c.key)
+	}
+
+	if err := c.messageSender.SendBytes(c.connection, cmdSendRawTransaction, rawEth); err != nil {
+		return fmt.Errorf("failed to send SendRawTransaction: %w", err)
+	}
+	return nil
+}
+
+// SendRawTransactions gửi SendRawTransactions command lên chain (RLP-encoded raw Ethereum envelopes, fire-and-forget).
+func (c *ConnectionClient) SendRawTransactions(batchRLP []byte) error {
+	if atomic.LoadInt32(&c.connected) != 1 || c.connection == nil {
+		return fmt.Errorf("not connected to cluster %s", c.key)
+	}
+
+	if err := c.messageSender.SendBytes(c.connection, cmdSendRawTransactions, batchRLP); err != nil {
+		return fmt.Errorf("failed to send SendRawTransactions: %w", err)
 	}
 	return nil
 }

@@ -35,6 +35,13 @@
       environment:
         PATH: "/usr/local/go/bin:{{ ansible_env.PATH | default('/usr/local/bin:/usr/bin:/bin') }}"
 
+    - name: Build bls_pubkey tool (controller-side validator key pre-flight; not distributed to nodes)
+      ansible.builtin.command:
+        cmd: "go build -o {{ local_bin_dir }}/bls_pubkey ."
+        chdir: "{{ playbook_dir }}/../../execution/cmd/tool/bls_pubkey"
+      environment:
+        PATH: "/usr/local/go/bin:{{ ansible_env.PATH | default('/usr/local/bin:/usr/bin:/bin') }}"
+
     - name: Set executable permissions on built binaries
       ansible.builtin.file:
         path: "{{ item }}"
@@ -42,3 +49,4 @@
       loop:
         - "{{ local_bin_dir }}/parent_chain"
         - "{{ local_bin_dir }}/simple_chain"
+        - "{{ local_bin_dir }}/bls_pubkey"

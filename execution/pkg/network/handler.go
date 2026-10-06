@@ -122,6 +122,8 @@ func (h *Handler) HandleRequest(r network.Request) (err error) {
 		cmd == "InitConnection" ||
 		cmd == "SendTransaction" ||
 		cmd == "SendTransactions" ||
+		cmd == "SendRawTransaction" ||
+		cmd == "SendRawTransactions" ||
 		cmd == "SendTransactionWithDeviceKey" ||
 		cmd == "GetAccountState" ||
 		cmd == "GetNonce" ||

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -449,4 +450,23 @@ func TestRegistrationRelay_ReloadDropsRegisteredAndBoundsMemory(t *testing.T) {
 	for _, rec := range left {
 		require.Equal(t, RegStatusPending, r.Status(rec.User).Status)
 	}
+}
+
+func TestRegistrationRelay_PendingStats(t *testing.T) {
+	h := newRelayHarness()
+
+	// Initial empty stats
+	cnt, maxAge := h.relay.PendingStats()
+	require.Equal(t, 0, cnt)
+	require.Equal(t, float64(0), maxAge)
+
+	addr, sig := h.userSig(t)
+	res, err := h.relay.Submit(addr, sig)
+	require.NoError(t, err)
+	require.Equal(t, RegStatusPending, res.Status)
+
+	time.Sleep(10 * time.Millisecond)
+	cnt, maxAge = h.relay.PendingStats()
+	require.Equal(t, 1, cnt)
+	require.Greater(t, maxAge, float64(0.005))
 }

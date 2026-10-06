@@ -57,6 +57,19 @@ var (
 		Name: "master_block_stm_conflicts_total",
 		Help: "Total number of conflicts resolved by Block-STM Union-Find",
 	})
+
+	// RollupSignaturesRejectedTotal counts rejected rollup system attestations, labeled by reason.
+	// Valid reasons: "non_committee", "invalid_signature", "invalid_length", "duplicate".
+	RollupSignaturesRejectedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "master_rollup_signatures_rejected_total",
+		Help: "Total number of rollup system attestations rejected, labeled by reason",
+	}, []string{"reason"})
+
+	// RollupCommitteeReadErrorsTotal counts errors encountered when reading active committee validator keys.
+	RollupCommitteeReadErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "master_rollup_committee_read_errors_total",
+		Help: "Total errors when reading active committee validator keys for rollup system attestations",
+	})
 )
 
 // ─── Gauges ──────────────────────────────────────────────────────────────────
@@ -121,6 +134,45 @@ var (
 	RegisteredChainCount = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "master_gateway_registered_chain_count",
 		Help: "Current number of chains recognized in this GatewayEngine's own ChainRegistry",
+	})
+
+	// ValidatorCommitteeKeyValid indicates whether this node's attestation key matches its on-chain validator identity.
+	// 1 = valid/active committee, 0 = mismatch with on-chain PublicKeyBls, -1 = not in validator committee.
+	ValidatorCommitteeKeyValid = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "master_validator_committee_key_valid",
+		Help: "Validator committee attestation key status: 1=valid, 0=mismatch, -1=not validator",
+	})
+
+	// AccountRegistrationPendingTotal tracks the number of account registrations currently pending in the relay queue.
+	AccountRegistrationPendingTotal = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "master_account_registration_pending_total",
+		Help: "Current number of pending account registration requests in relay queue",
+	})
+
+	// AccountRegistrationPendingMaxAgeSeconds tracks the age in seconds of the oldest pending registration in relay.
+	AccountRegistrationPendingMaxAgeSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "master_account_registration_pending_max_age_seconds",
+		Help: "Age in seconds of the oldest pending registration request in relay queue",
+	})
+
+	// RollupAttestationStoredTotal / RollupAttestationCompletedTotal count attestation sets entering and leaving the
+	// pending store (contract storage). They are monotonic counters on purpose: they are bumped from the deterministic
+	// execution path, which may run the same tx more than once (speculative execution) and starts from zero after a
+	// restart, so an up/down gauge would drift. Use rate() / increase(); "pending" is approximately stored - completed.
+	RollupAttestationStoredTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "master_rollup_attestation_sets_stored_total",
+		Help: "Attestation sets written to the pending store (waiting for committee quorum); approximate under speculative re-execution",
+	})
+	RollupAttestationCompletedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "master_rollup_attestation_sets_completed_total",
+		Help: "Attestation sets removed from the pending store after quorum; approximate under speculative re-execution",
+	})
+
+	// ParentChainIDMismatch indicates whether the Parent Chain's reported chain ID differs from the local execution configuration.
+	// 0 = matches or not yet checked / parent disabled, 1 = mismatch detected.
+	ParentChainIDMismatch = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "master_parent_chain_id_mismatch",
+		Help: "Status of Parent Chain ID match: 1=mismatch with local config, 0=matches",
 	})
 )
 

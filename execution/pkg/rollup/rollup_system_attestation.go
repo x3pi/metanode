@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"google.golang.org/protobuf/proto"
 )
@@ -34,12 +35,15 @@ func requireLen(name string, b []byte, n int) error {
 func validateAttestationsProto(atts []*pb.RollupAttestationProto) error {
 	for i, a := range atts {
 		if a == nil {
+			metrics.RollupSignaturesRejectedTotal.WithLabelValues("invalid_length").Inc()
 			return fmt.Errorf("attestation %d is nil", i)
 		}
 		if err := requireLen("attestation validator_pubkey", a.ValidatorPubkey, len(cm.PublicKey{})); err != nil {
+			metrics.RollupSignaturesRejectedTotal.WithLabelValues("invalid_length").Inc()
 			return err
 		}
 		if err := requireLen("attestation signature", a.Signature, len(cm.Sign{})); err != nil {
+			metrics.RollupSignaturesRejectedTotal.WithLabelValues("invalid_length").Inc()
 			return err
 		}
 	}
@@ -386,6 +390,7 @@ func ApplyAttestedSystemEvent(
 
 	keys, err := committee.GetActiveCommitteeBLSKeys()
 	if err != nil {
+		metrics.RollupCommitteeReadErrorsTotal.Inc()
 		return fmt.Errorf("rollup system attestation: failed to get active committee: %w", err)
 	}
 	if len(keys) == 0 {
@@ -420,13 +425,16 @@ func ApplyAttestedSystemEvent(
 	changed := false
 	for _, att := range payload.Attestations {
 		if !committeeSet[att.ValidatorPubkey] {
+			metrics.RollupSignaturesRejectedTotal.WithLabelValues("non_committee").Inc()
 			return fmt.Errorf("rollup system attestation: attestation from non-committee validator %x", att.ValidatorPubkey[:6])
 		}
 		if newInPayload[att.ValidatorPubkey] {
+			metrics.RollupSignaturesRejectedTotal.WithLabelValues("duplicate").Inc()
 			return fmt.Errorf("rollup system attestation: duplicate attestation from validator %x", att.ValidatorPubkey[:6])
 		}
 		newInPayload[att.ValidatorPubkey] = true
 		if !bls.VerifySign(att.ValidatorPubkey, att.Signature, digest) {
+			metrics.RollupSignaturesRejectedTotal.WithLabelValues("invalid_signature").Inc()
 			return fmt.Errorf("rollup system attestation: invalid BLS signature from validator %x", att.ValidatorPubkey[:6])
 		}
 		if !have[att.ValidatorPubkey] {

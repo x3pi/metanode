@@ -31,6 +31,7 @@ type Handler struct {
 	deviceKeyChan        chan types.LastDeviceKey
 	nonceChan            chan uint64
 	txErrorChan          chan error
+	txSuccessChan        chan common.Hash
 }
 
 func NewHandler(
@@ -47,11 +48,16 @@ func NewHandler(
 		transactionErrorChan: transactionErrorChan,
 		nonceChan:            nonceChan,
 		txErrorChan:          make(chan error, 1),
+		txSuccessChan:        make(chan common.Hash, 100),
 	}
 }
 
 func (h *Handler) TxErrorChan() chan error {
 	return h.txErrorChan
+}
+
+func (h *Handler) TxSuccessChan() chan common.Hash {
+	return h.txSuccessChan
 }
 
 func (h *Handler) HandleRequest(request network.Request) (err error) {
@@ -84,8 +90,15 @@ func (h *Handler) HandleRequest(request network.Request) (err error) {
 	case command.Receipt:
 		return h.handleReceipt(request)
 	case command.TransactionSuccess:
-		// Giao dịch đã vào mempool thành công, server trả về txHash (bỏ qua hoặc log debug)
-		// Không có action đặc biệt nào cần làm vì tx_sender sẽ poll receipt
+		// Giao dịch đã vào mempool thành công, server trả về txHash
+		body := request.Message().Body()
+		if len(body) >= 32 && h.txSuccessChan != nil {
+			txHash := common.BytesToHash(body[:32])
+			select {
+			case h.txSuccessChan <- txHash:
+			default:
+			}
+		}
 		return nil
 	case command.DeviceKey:
 		return h.handleDeviceKey(request)

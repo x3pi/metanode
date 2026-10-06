@@ -476,17 +476,24 @@ func NewServer(app *App) *http.ServeMux {
 			"status": "ok",
 		}
 
-		if app != nil && app.blockProcessor != nil {
-			lastBlock := app.blockProcessor.GetLastBlock()
-			if lastBlock != nil && lastBlock.Header() != nil {
-				status["block"] = lastBlock.Header().BlockNumber()
-				status["epoch"] = lastBlock.Header().Epoch()
+		if app != nil {
+			keyStatus, warn := app.CommitteeKeyStatus()
+			status["committee_key"] = keyStatus
+			if warn != "" {
+				status["committee_key_warning"] = warn
+			}
+			if app.blockProcessor != nil {
+				lastBlock := app.blockProcessor.GetLastBlock()
+				if lastBlock != nil && lastBlock.Header() != nil {
+					status["block"] = lastBlock.Header().BlockNumber()
+					status["epoch"] = lastBlock.Header().Epoch()
 
-				// Calculate block age
-				blockTimeMs := lastBlock.Header().TimeStamp()
-				if blockTimeMs > 0 {
-					blockAgeMs := time.Now().UnixNano()/1e6 - int64(blockTimeMs)
-					status["last_block_age_ms"] = blockAgeMs
+					// Calculate block age
+					blockTimeMs := lastBlock.Header().TimeStamp()
+					if blockTimeMs > 0 {
+						blockAgeMs := time.Now().UnixNano()/1e6 - int64(blockTimeMs)
+						status["last_block_age_ms"] = blockAgeMs
+					}
 				}
 			}
 		}
@@ -506,6 +513,15 @@ func NewServer(app *App) *http.ServeMux {
 		if app == nil || app.blockProcessor == nil || app.blockProcessor.GetLastBlock() == nil {
 			ready = false
 			checks["db"] = "not_initialized"
+		}
+
+		if app != nil {
+			keyStatus, warn := app.CommitteeKeyStatus()
+			checks["committee_key"] = keyStatus
+			if keyStatus == "mismatch" {
+				ready = false
+				checks["committee_key_warning"] = warn
+			}
 		}
 
 		status := map[string]interface{}{

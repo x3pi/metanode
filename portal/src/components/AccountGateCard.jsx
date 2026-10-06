@@ -17,9 +17,11 @@ import {
   Shuffle,
   Wallet,
   Check,
+  Search,
 } from 'lucide-react';
 import {
   PRESET_CLUSTERS,
+  getAllClusters,
   getClusterRegistrationMessage,
   registerAccountOnNode,
   getRegistrationStatusFromNode,
@@ -27,6 +29,8 @@ import {
   deriveAddressFromPrivateKey,
   generateRandomWallet,
   registerAccountWithPrivateKey,
+  checkParentRegistration,
+  submitRegistrationToParent,
 } from '../services/metanodeRpc';
 
 export function AccountGateCard({
@@ -39,7 +43,11 @@ export function AccountGateCard({
   onConnectMetaMask,
   isPrivateKeyMode,
   walletPrivateKey,
+  allClusters,
 }) {
+  const clusters = allClusters || getAllClusters();
+  const execClusters = clusters.filter((c) => c.isExec);
+
   const [onboardingMode, setOnboardingMode] = useState(
     isPrivateKeyMode || walletPrivateKey ? 'private_key' : 'metamask'
   );
@@ -47,7 +55,7 @@ export function AccountGateCard({
   const [targetCluster, setTargetCluster] = useState(
     selectedCluster?.isExec
       ? selectedCluster
-      : PRESET_CLUSTERS.find((c) => c.isExec) || PRESET_CLUSTERS[0]
+      : execClusters[0] || selectedCluster || PRESET_CLUSTERS[0]
   );
 
   useEffect(() => {
@@ -96,7 +104,23 @@ export function AccountGateCard({
       }
 
       setCurrentMmStep(2);
-      await registerAccountOnNode(targetCluster.rpcUrl, account, signature);
+
+      try {
+        await registerAccountOnNode(targetCluster.rpcUrl, account, signature);
+      } catch (nodeErr) {
+        console.warn('Node relay registration notice, attempting direct parent route:', nodeErr.message);
+        const parentCluster = clusters.find((c) => c.isParent);
+        if (parentCluster) {
+          const clusterKey =
+            accountInfo?.dynamicClusterKey ||
+            targetCluster.clusterKey ||
+            '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128';
+          try {
+            await submitRegistrationToParent(parentCluster.rpcUrl, account, clusterKey, signature);
+          } catch (_) {}
+        }
+      }
+
       setCurrentMmStep(3);
 
       let attempts = 0;
@@ -236,7 +260,7 @@ export function AccountGateCard({
     try {
       // Step 1 & 2: Sign digest with private key & submit to node relay
       setPkStep(2);
-      const regRes = await registerAccountWithPrivateKey(targetCluster.rpcUrl, inputPrivateKey);
+      await registerAccountWithPrivateKey(targetCluster.rpcUrl, inputPrivateKey);
 
       // Step 3: Wait for Parent Chain BFT consensus
       setPkStep(3);
@@ -297,6 +321,29 @@ export function AccountGateCard({
 
   const isCurrentActiveWallet =
     account && derivedAddress && account.toLowerCase() === derivedAddress.toLowerCase();
+
+  // =========================================================================
+  // ADDRESS REGISTRY LOOKUP TOOL (From dev branch)
+  // =========================================================================
+  const [lookupAddress, setLookupAddress] = useState('');
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupResult, setLookupResult] = useState(null);
+
+  const handleLookupAddress = async (e) => {
+    e.preventDefault();
+    if (!lookupAddress || !lookupAddress.startsWith('0x') || lookupAddress.length !== 42) {
+      alert('Please enter a valid 20-byte 0x address');
+      return;
+    }
+    setLookupLoading(true);
+    setLookupResult(null);
+
+    const parentCluster = clusters.find((c) => c.isParent) || clusters[2];
+    const clusterKey = targetCluster?.clusterKey || '';
+    const res = await checkParentRegistration(parentCluster.rpcUrl, clusterKey, lookupAddress);
+    setLookupResult(res);
+    setLookupLoading(false);
+  };
 
   return (
     <div>
@@ -458,7 +505,7 @@ export function AccountGateCard({
                     <div className="details-grid">
                       <div className="detail-box">
                         <div className="detail-label">Connected Wallet Address</div>
-                        <div className="detail-value mono">{account}</div>
+                        <div className="detail-value mono" style={{ fontSize: '0.82rem' }}>{account}</div>
                       </div>
                       <div className="detail-box">
                         <div className="detail-label">Current Cluster Balance</div>
@@ -558,14 +605,14 @@ export function AccountGateCard({
                         className="form-select"
                         value={targetCluster?.id}
                         onChange={(e) => {
-                          const c = PRESET_CLUSTERS.find((x) => x.id === e.target.value);
+                          const c = clusters.find((x) => x.id === e.target.value);
                           if (c) setTargetCluster(c);
                         }}
                         disabled={isRegisteringMetaMask}
                       >
-                        {PRESET_CLUSTERS.filter((c) => c.isExec).map((c) => (
+                        {execClusters.map((c) => (
                           <option key={c.id} value={c.id}>
-                            {c.name} (ChainID: {c.chainId})
+                            {c.name} (ChainID: {c.chainId || 991})
                           </option>
                         ))}
                       </select>
@@ -800,7 +847,26 @@ export function AccountGateCard({
                 </div>
               )}
 
-              {/* Action Buttons */}
+              {/* Target Cluster Selector & Action Buttons */}
+              <div className="form-group" style={{ marginTop: '16px' }}>
+                <label className="form-label">Target Execution Cluster:</label>
+                <select
+                  className="form-select"
+                  value={targetCluster?.id}
+                  onChange={(e) => {
+                    const c = clusters.find((x) => x.id === e.target.value);
+                    if (c) setTargetCluster(c);
+                  }}
+                  disabled={isRegisteringPk}
+                >
+                  {execClusters.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} (ChainID: {c.chainId || 991})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div className="grid-2" style={{ marginTop: '16px', gap: '12px' }}>
                 <button
                   type="button"
@@ -857,6 +923,63 @@ export function AccountGateCard({
           ) : null}
         </div>
       )}
+
+      {/* Address Registry Lookup Tool */}
+      <div className="card" style={{ marginTop: '20px' }}>
+        <div className="card-header">
+          <div className="card-title">
+            <Search className="w-4 h-4 text-cyan" />
+            Parent Chain Account Registry Lookup
+          </div>
+          <div className="card-subtitle">
+            Verify whether any secp256k1 address is registered in the Parent Chain Account Registry.
+          </div>
+        </div>
+
+        <form onSubmit={handleLookupAddress} style={{ display: 'flex', gap: '10px', alignItems: 'flex-end' }}>
+          <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+            <label className="form-label">Query Address (0x...)</label>
+            <input
+              type="text"
+              className="form-input mono"
+              placeholder="0x..."
+              value={lookupAddress}
+              onChange={(e) => setLookupAddress(e.target.value)}
+              required
+            />
+          </div>
+          <button
+            type="submit"
+            className="btn btn-secondary"
+            style={{ height: '42px', minWidth: '120px' }}
+            disabled={lookupLoading || !lookupAddress}
+          >
+            {lookupLoading ? 'Checking...' : 'Check Registry'}
+          </button>
+        </form>
+
+        {lookupResult && (
+          <div
+            style={{
+              marginTop: '14px',
+              padding: '12px',
+              borderRadius: '8px',
+              background: lookupResult.registered ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+              border: `1px solid ${lookupResult.registered ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+            }}
+          >
+            {lookupResult.registered ? (
+              <div style={{ color: 'var(--green)', fontSize: '0.85rem' }}>
+                <strong>✓ Registered:</strong> Address is registered on Parent Chain {lookupResult.parentBlock ? `(Block #${lookupResult.parentBlock})` : ''}.
+              </div>
+            ) : (
+              <div style={{ color: 'var(--red)', fontSize: '0.85rem' }}>
+                <strong>✗ Not Registered:</strong> Address has not yet been registered to any execution cluster in Parent Chain events.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

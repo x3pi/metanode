@@ -17,6 +17,8 @@ import {
   PRESET_CLUSTERS,
   DEFAULT_CLUSTER_ID,
   LAN_IP,
+  getAllClusters,
+  saveCustomCluster,
   connectWallet,
   fetchAccountInfo,
   checkParentRegistration,
@@ -24,16 +26,24 @@ import {
 } from './services/metanodeRpc';
 
 export default function App() {
+  const [allClusters, setAllClusters] = useState(getAllClusters());
   const [account, setAccount] = useState(null);
   const [walletPrivateKey, setWalletPrivateKey] = useState(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [activeTab, setActiveTab] = useState('gate');
   const defaultCluster =
-    PRESET_CLUSTERS.find((c) => c.id === DEFAULT_CLUSTER_ID) || PRESET_CLUSTERS[0];
+    allClusters.find((c) => c.id === DEFAULT_CLUSTER_ID) || allClusters[0];
   const [selectedCluster, setSelectedCluster] = useState(defaultCluster);
   const [clusterStatus, setClusterStatus] = useState(null);
   const [accountInfo, setAccountInfo] = useState(null);
   const [parentRegInfo, setParentRegInfo] = useState(null);
+
+  // Add custom cluster handler
+  const handleAddCustomCluster = (newCluster) => {
+    saveCustomCluster(newCluster);
+    const updated = getAllClusters();
+    setAllClusters(updated);
+  };
 
   // Connect MetaMask Wallet
   const handleConnect = async () => {
@@ -65,7 +75,7 @@ export default function App() {
   // Refresh Account & Cluster State
   const refreshState = useCallback(async () => {
     // 1. Cluster Status
-    const status = await checkNodeStatus(selectedCluster.rpcUrl);
+    const status = await checkNodeStatus(selectedCluster);
     setClusterStatus(status);
 
     // 2. Account on Execution Cluster
@@ -74,13 +84,15 @@ export default function App() {
       setAccountInfo(info);
 
       // 3. Account on Parent Chain
-      const parentCluster = PRESET_CLUSTERS.find((c) => c.isParent);
-      const parentRpc = parentCluster ? parentCluster.rpcUrl : `http://${LAN_IP}:18601`;
-      const clusterKey = selectedCluster.clusterKey || PRESET_CLUSTERS[0].clusterKey;
-      const parentInfo = await checkParentRegistration(parentRpc, clusterKey, account);
+      const parentCluster = allClusters.find((c) => c.isParent) || allClusters[2];
+      const clusterKey =
+        info?.dynamicClusterKey ||
+        selectedCluster.clusterKey ||
+        '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128';
+      const parentInfo = await checkParentRegistration(parentCluster.rpcUrl, clusterKey, account);
       setParentRegInfo(parentInfo);
     }
-  }, [account, selectedCluster]);
+  }, [account, selectedCluster, allClusters]);
 
   useEffect(() => {
     refreshState();
@@ -117,6 +129,8 @@ export default function App() {
         clusterStatus={clusterStatus}
         isConnecting={isConnecting}
         isPrivateKeyMode={!!walletPrivateKey}
+        allClusters={allClusters}
+        onAddCustomCluster={handleAddCustomCluster}
       />
 
       {/* Main Container */}
@@ -128,8 +142,8 @@ export default function App() {
             onClick={() => setActiveTab('gate')}
           >
             <ShieldCheck className="w-4 h-4" />
-            Account Gate & Onboarding
-            {accountInfo?.parentRegistered ? (
+            Account Gate &amp; Onboarding
+            {accountInfo?.gateEnforced === false || accountInfo?.parentRegistered ? (
               <span className="badge-pill" style={{ background: 'rgba(16, 185, 129, 0.2)', color: '#34d399' }}>
                 Open
               </span>
@@ -161,7 +175,7 @@ export default function App() {
             onClick={() => setActiveTab('monitor')}
           >
             <Activity className="w-4 h-4" />
-            Network Parity & Zero-Fork
+            Network Parity &amp; Zero-Fork
           </button>
         </nav>
 
@@ -177,6 +191,7 @@ export default function App() {
             onConnectMetaMask={handleConnect}
             isPrivateKeyMode={!!walletPrivateKey}
             walletPrivateKey={walletPrivateKey}
+            allClusters={allClusters}
           />
         )}
 
@@ -187,14 +202,19 @@ export default function App() {
             selectedCluster={selectedCluster}
             onRefresh={refreshState}
             walletPrivateKey={walletPrivateKey}
+            onNavigateToGate={() => setActiveTab('gate')}
           />
         )}
 
         {activeTab === 'rollup' && (
-          <RollupTransferTab account={account} accountInfo={accountInfo} />
+          <RollupTransferTab
+            account={account}
+            accountInfo={accountInfo}
+            allClusters={allClusters}
+          />
         )}
 
-        {activeTab === 'monitor' && <NetworkMonitorTab />}
+        {activeTab === 'monitor' && <NetworkMonitorTab allClusters={allClusters} />}
       </main>
 
       {/* Footer */}
@@ -208,9 +228,19 @@ export default function App() {
           background: 'rgba(7, 10, 18, 0.6)',
         }}
       >
-        <div style={{ maxWidth: '1320px', margin: '0 auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+        <div
+          style={{
+            maxWidth: '1320px',
+            margin: '0 auto',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '10px',
+          }}
+        >
           <div>
-            <strong>Metanode Portal</strong> — Powered by TrueBlockSTM & Parent Chain Account Gate
+            <strong>Metanode Portal</strong> &mdash; Chain ID 991 Cutover &amp; Zero-Fork Co-Attestation
           </div>
           <div style={{ display: 'flex', gap: '16px' }}>
             <span>Protocol: secp256k1 + BLS12-381</span>

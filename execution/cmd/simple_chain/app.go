@@ -18,7 +18,9 @@ import (
 	"time"
 
 	e_common "github.com/ethereum/go-ethereum/common"
+	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -30,6 +32,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
+	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	"github.com/meta-node-blockchain/meta-node/pkg/mining"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/pkg/network"
@@ -117,6 +120,29 @@ type App struct {
 	conservation     *rollup.ConservationGuard
 	conservationRun  func() // starts the periodic measurement
 	conservationStop chan struct{}
+
+	// Committee key health status
+	committeeKeyStatusMu sync.RWMutex
+	committeeKeyStatus   string // "ok", "mismatch", "not_validator", "unknown"
+	committeeKeyWarn     string
+}
+
+// CommitteeKeyStatus returns the current validator committee key status ("ok", "mismatch", "not_validator", "unknown") and any warning message.
+func (app *App) CommitteeKeyStatus() (string, string) {
+	app.committeeKeyStatusMu.RLock()
+	defer app.committeeKeyStatusMu.RUnlock()
+	status := app.committeeKeyStatus
+	if status == "" {
+		status = "unknown"
+	}
+	return status, app.committeeKeyWarn
+}
+
+func (app *App) setCommitteeKeyStatus(status, warn string) {
+	app.committeeKeyStatusMu.Lock()
+	defer app.committeeKeyStatusMu.Unlock()
+	app.committeeKeyStatus = status
+	app.committeeKeyWarn = warn
 }
 
 // NewApp creates and initializes a new blockchain application
@@ -153,6 +179,10 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 
 		if !isExplicitDev || isProduction {
 			return nil, fmt.Errorf("FATAL SECURITY VIOLATION (Issue #103): SKIP_MEMPOOL_SIG_VERIFY=true is only allowed when METANODE_DEVNET=true is explicitly set, and strictly forbidden in production (NODE_ENV/METANODE_ENV=production)")
+		}
+		isPrivacy := app.config.PrivacyMode || os.Getenv("PRIVACY_MODE") == "true"
+		if strings.ToLower(app.config.ConsensusMode) == "raft" || isPrivacy {
+			return nil, fmt.Errorf("FATAL SECURITY VIOLATION (Issue #103): SKIP_MEMPOOL_SIG_VERIFY=true is strictly forbidden when consensus_mode is 'raft' or privacy_mode is true")
 		}
 		logger.Warn("⚠️ [SECURITY WARNING] SKIP_MEMPOOL_SIG_VERIFY=true: Transaction signature verification is BYPASSED (explicit devnet benchmark mode)!")
 	}
@@ -404,7 +434,6 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	var rollupLastDBNonce uint64
 	rollupLastProgress := time.Now()
 
-
 	// Attestations are signed with this validator's committee key (Databases.BLSPrivateKey, the key whose public half is
 	// the validator account's PublicKeyBls); single-key deployments fall back to the node key.
 	attestKey := app.keyPair
@@ -417,24 +446,48 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	}
 	app.regWorker.SetAttestationKey(attestKey)
 
-	// P0-3: Check attestation key ↔ on-chain validator account at startup
+	// P0-3 & Phase 2 (B4): Check attestation key ↔ on-chain validator account at startup
 	cfgAddr := e_common.HexToAddress(app.config.Address)
 	attestPub := attestKey.PublicKey()
 	if isVal, warn := tx_processor.VerifyNodeCommitteeKey(app.chainState, app.keyPair.Address(), cfgAddr, attestPub); isVal {
 		if warn != "" {
+			metrics.ValidatorCommitteeKeyValid.Set(0)
+			app.setCommitteeKeyStatus("mismatch", warn)
 			logger.Error("❌ [COMMITTEE-KEY-MISMATCH] %s", warn)
 		} else {
+			metrics.ValidatorCommitteeKeyValid.Set(1)
+			app.setCommitteeKeyStatus("ok", "")
 			logger.Info("✅ [COMMITTEE-KEY-OK] Validator attestation key %x verified in active committee", attestPub[:6])
 		}
 	} else {
+		metrics.ValidatorCommitteeKeyValid.Set(-1)
+		app.setCommitteeKeyStatus("not_validator", "")
 		logger.Info("ℹ️ [COMMITTEE-KEY-INFO] Node address %s is not in the validator committee (non-validator/RPC node)", app.keyPair.Address().Hex())
 	}
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			if isVal, warn := tx_processor.VerifyNodeCommitteeKey(app.chainState, app.keyPair.Address(), cfgAddr, attestPub); isVal && warn != "" {
+			// Point lookups only (never GetAllValidators from a timer goroutine: it races the block commit).
+			isVal, warn, err := tx_processor.VerifyNodeCommitteeKeyLight(app.chainState, app.keyPair.Address(), cfgAddr, attestPub)
+			switch {
+			case err != nil:
+				logger.Warn("[COMMITTEE-KEY-PERIODIC-CHECK] state read failed, keeping previous status: %v", err)
+			case isVal && warn != "":
+				metrics.ValidatorCommitteeKeyValid.Set(0)
+				app.setCommitteeKeyStatus("mismatch", warn)
 				logger.Error("❌ [COMMITTEE-KEY-PERIODIC-CHECK] %s", warn)
+			case isVal:
+				metrics.ValidatorCommitteeKeyValid.Set(1)
+				app.setCommitteeKeyStatus("ok", "")
+			default:
+				metrics.ValidatorCommitteeKeyValid.Set(-1)
+				app.setCommitteeKeyStatus("not_validator", "")
+			}
+			if app.regRelay != nil {
+				cnt, maxAge := app.regRelay.PendingStats()
+				metrics.AccountRegistrationPendingTotal.Set(float64(cnt))
+				metrics.AccountRegistrationPendingMaxAgeSeconds.Set(maxAge)
 			}
 		}
 	}()
@@ -697,6 +750,43 @@ func (app *App) initProcessors() {
 	// Set node references
 	app.blockProcessor.SetNode(app.node)
 
+	// Set Raw Ethereum Converter for SendRawTransaction / SendRawTransactions
+	app.transactionProcessor.SetRawEthConverter(func(rawEth []byte) (types.Transaction, *e_types.Transaction, error) {
+		ethTx := new(e_types.Transaction)
+		if err := ethTx.UnmarshalBinary(rawEth); err != nil {
+			return nil, nil, fmt.Errorf("failed to decode Ethereum transaction: %w", err)
+		}
+		if err := transaction.ValidateEthTxEnvelope(ethTx, app.config.ChainId); err != nil {
+			return nil, nil, err
+		}
+		metaTxIface, err := transaction.NewTransactionFromEth(ethTx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to build MetaTx from EthTx: %w", err)
+		}
+		metaTx, ok := metaTxIface.(*transaction.Transaction)
+		if !ok {
+			return nil, nil, fmt.Errorf("unexpected transaction type from NewTransactionFromEth")
+		}
+
+		// EIP-4844: persist sidecar to blob_store if present, then strip sidecar
+		if metaTxProto, ok := metaTx.Proto().(*mt_proto.Transaction); ok && metaTxProto.Type == uint64(e_types.BlobTxType) && metaTxProto.Sidecar != nil {
+			sidecar := metaTxProto.Sidecar
+			if bs := app.chainState.GetBlobStore(); bs != nil {
+				var blockNumber uint64
+				if app.blockProcessor != nil && app.blockProcessor.GetLastBlock() != nil && app.blockProcessor.GetLastBlock().Header() != nil {
+					blockNumber = app.blockProcessor.GetLastBlock().Header().BlockNumber() + 1
+				}
+				for i, vh := range metaTxProto.BlobVersionedHashes {
+					if err := bs.Put(blockNumber, vh, sidecar.Commitments[i], sidecar.Proofs[i], sidecar.Blobs[i]); err != nil {
+						return nil, nil, fmt.Errorf("failed to persist blob sidecar: %w", err)
+					}
+				}
+			}
+			metaTxProto.Sidecar = nil
+		}
+		return metaTx, ethTx, nil
+	})
+
 	// Set Rollup System Event Interceptor.
 	// NOTE: this TxValidatorPool-based interceptor is NOT part of the live BlockSTM execution
 	// path (TrueBlockSTM never routes RollupSystemAddress txs through TxValidatorPool at all —
@@ -723,7 +813,6 @@ func (app *App) initProcessors() {
 		return handleRollupSystemEvent(app, store, stateDB, data)
 	}), app.accountRegistryHandler)
 }
-
 
 // handleRollupSystemEvent applies a system event deterministically.
 // store is passed as BOTH readStore and writeStore: it is the live block-execution store
@@ -1309,16 +1398,20 @@ func readProcessRSSKB() (uint64, error) {
 // it logs a warning and allows startup to proceed (relay will stay in PENDING status).
 func verifyParentChainID(client parentchain.Client, localChainID uint64) error {
 	if client == nil {
+		metrics.ParentChainIDMismatch.Set(0)
 		return nil
 	}
 	status, err := client.GetStatus()
 	if err != nil {
 		logger.Warn("Failed to query parent chain status at startup: %v (continuing with configured chain ID %d)", err, localChainID)
+		metrics.ParentChainIDMismatch.Set(0)
 		return nil
 	}
 	if status.ChainID > 0 && status.ChainID != localChainID {
+		metrics.ParentChainIDMismatch.Set(1)
 		return fmt.Errorf("parent chain ID mismatch: parent reports %d, local config has %d", status.ChainID, localChainID)
 	}
+	metrics.ParentChainIDMismatch.Set(0)
 	return nil
 }
 

@@ -88,6 +88,8 @@ func InitRoutes(
 	// routes[command.RemoteDeviceKeyDB] = transactionProcessor.HandleDeviceKeyRequest
 	routes[command.SendTransaction] = transactionProcessor.ProcessTransactionFromClient
 	routes[command.SendTransactions] = transactionProcessor.ProcessTransactionsFromClient
+	routes[command.SendRawTransaction] = transactionProcessor.ProcessRawTransactionFromClient
+	routes[command.SendRawTransactions] = transactionProcessor.ProcessRawTransactionsFromClient
 	// Đã bỏ: Topic cũ cho sub node
 	// routes[common.TransactionsFromSubTopic] = transactionProcessor.ProcessTransactionsFromClient
 

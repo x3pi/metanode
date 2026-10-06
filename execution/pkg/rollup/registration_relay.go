@@ -70,6 +70,7 @@ type relayEntry struct {
 	verifies  int  // registry lookups since submitted without an answer
 	home      *cm.PublicKey
 	reason    string
+	createdAt time.Time
 }
 
 // KVStore is a minimal key-value storage interface compatible with storage.Storage and leveldb/pebbledb/memory stores.
@@ -90,6 +91,7 @@ type RelayRecord struct {
 	Verifies  int                `json:"verifies"`
 	Home      *cm.PublicKey      `json:"home,omitempty"`
 	Reason    string             `json:"reason,omitempty"`
+	CreatedAt int64              `json:"createdAt,omitempty"`
 }
 
 // RegistrationRelayStore defines persistent operations for registration entries.
@@ -293,6 +295,10 @@ func (r *RegistrationRelay) SetStore(store RegistrationRelayStore) error {
 		if len(r.entries) >= r.maxTracked {
 			continue
 		}
+		created := time.Now()
+		if rec.CreatedAt > 0 {
+			created = time.Unix(rec.CreatedAt, 0)
+		}
 		entry := &relayEntry{
 			user:      rec.User,
 			userSig:   append([]byte(nil), rec.UserSig...),
@@ -302,6 +308,7 @@ func (r *RegistrationRelay) SetStore(store RegistrationRelayStore) error {
 			verifies:  rec.Verifies,
 			home:      rec.Home,
 			reason:    rec.Reason,
+			createdAt: created,
 		}
 		r.entries[rec.User] = entry
 
@@ -379,7 +386,7 @@ func (r *RegistrationRelay) Submit(user common.Address, userSig []byte) (Registr
 		return RegistrationResult{}, ErrRegistrationBusy
 	}
 
-	e := &relayEntry{user: user, userSig: append([]byte(nil), userSig...), status: RegStatusPending}
+	e := &relayEntry{user: user, userSig: append([]byte(nil), userSig...), status: RegStatusPending, createdAt: time.Now()}
 	select {
 	case r.queue <- user:
 	default:
@@ -403,6 +410,10 @@ func (r *RegistrationRelay) Status(user common.Address) RegistrationResult {
 	}
 	if r.store != nil {
 		if rec, found, err := r.store.Get(user); err == nil && found && rec != nil {
+			created := time.Now()
+			if rec.CreatedAt > 0 {
+				created = time.Unix(rec.CreatedAt, 0)
+			}
 			entry := &relayEntry{
 				user:      rec.User,
 				userSig:   rec.UserSig,
@@ -412,12 +423,35 @@ func (r *RegistrationRelay) Status(user common.Address) RegistrationResult {
 				verifies:  rec.Verifies,
 				home:      rec.Home,
 				reason:    rec.Reason,
+				createdAt: created,
 			}
 			r.entries[user] = entry
 			return r.resultLocked(entry)
 		}
 	}
 	return RegistrationResult{Status: RegStatusNone}
+}
+
+// PendingStats returns the current number of PENDING registration requests and the age
+// in seconds of the oldest PENDING request.
+func (r *RegistrationRelay) PendingStats() (int, float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var count int
+	var maxAge float64
+	now := time.Now()
+	for _, e := range r.entries {
+		if e.status == RegStatusPending {
+			count++
+			if !e.createdAt.IsZero() {
+				age := now.Sub(e.createdAt).Seconds()
+				if age > maxAge {
+					maxAge = age
+				}
+			}
+		}
+	}
+	return count, maxAge
 }
 
 func (r *RegistrationRelay) resultLocked(e *relayEntry) RegistrationResult {
@@ -527,6 +561,10 @@ func (r *RegistrationRelay) saveLocked(e *relayEntry) {
 	if r.store == nil || e == nil {
 		return
 	}
+	var created int64
+	if !e.createdAt.IsZero() {
+		created = e.createdAt.Unix()
+	}
 	rec := &RelayRecord{
 		User:      e.user,
 		UserSig:   append([]byte(nil), e.userSig...),
@@ -536,6 +574,7 @@ func (r *RegistrationRelay) saveLocked(e *relayEntry) {
 		Verifies:  e.verifies,
 		Home:      e.home,
 		Reason:    e.reason,
+		CreatedAt: created,
 	}
 	if err := r.store.Put(rec); err != nil {
 		log.Printf("RegistrationRelay: failed to persist entry %s: %v", e.user.Hex(), err)

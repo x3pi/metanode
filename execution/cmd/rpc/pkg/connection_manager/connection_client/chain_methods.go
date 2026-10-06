@@ -16,6 +16,8 @@ const (
 	cmdReadTransaction              = "ReadTransaction"
 	cmdSendTransactionWithDeviceKey = "SendTransactionWithDeviceKey"
 	cmdSendTransaction              = "SendTransaction"
+	cmdSendRawTransaction           = "SendRawTransaction"
+	cmdSendRawTransactions          = "SendRawTransactions"
 	cmdReceipt                      = "Receipt"
 	cmdTransactionError             = "TransactionError"
 	cmdTransactionSuccess           = "TransactionSuccess"
@@ -89,6 +91,72 @@ func (c *ConnectionClient) SendTransaction(txBytes []byte) error {
 
 	if err := c.messageSender.SendBytes(c.connection, cmdSendTransaction, txBytes); err != nil {
 		return fmt.Errorf("failed to send SendTransaction: %w", err)
+	}
+	return nil
+}
+
+// SendRawTransaction gửi SendRawTransaction command lên chain (EIP-2718 envelope)
+// và đợi TransactionSuccess hoặc TransactionError response.
+// Trả về txHash bytes (32 bytes) ngay khi chain xác nhận nhận TX thành công.
+func (c *ConnectionClient) SendRawTransaction(rawEth []byte, timeout time.Duration) ([]byte, error) {
+	if atomic.LoadInt32(&c.connected) != 1 || c.connection == nil {
+		return nil, fmt.Errorf("not connected to cluster %s", c.key)
+	}
+
+	id := uuid.New().String()
+
+	responseChan := make(chan interface{}, 2)
+	c.pendingRequests.Store(id, responseChan)
+	defer c.pendingRequests.Delete(id)
+
+	msg := network.NewMessage(&pb.Message{
+		Header: &pb.Header{
+			Command: cmdSendRawTransaction,
+			ID:      id,
+		},
+		Body: rawEth,
+	})
+
+	if err := c.connection.SendMessage(msg); err != nil {
+		return nil, fmt.Errorf("failed to send SendRawTransaction: %w", err)
+	}
+
+	deadline := time.After(timeout)
+	for {
+		select {
+		case res := <-responseChan:
+			switch v := res.(type) {
+			case *TransactionSuccessResponse:
+				return v.Body, nil
+			case *TransactionErrorResponse:
+				txErr := &pb.TransactionHashWithError{}
+				if unmarshalErr := proto.Unmarshal(v.Body, txErr); unmarshalErr == nil {
+					return nil, fmt.Errorf("transaction error from chain (code=%d): %s", txErr.Code, txErr.Description)
+				}
+				return nil, fmt.Errorf("transaction error from chain: 0x%x", v.Body)
+			case []byte:
+				return v, nil
+			default:
+				return nil, fmt.Errorf("invalid response type for SendRawTransaction: %T", res)
+			}
+		case err := <-c.errorNotifyChan:
+			return nil, fmt.Errorf("connection error: %w", err)
+		case <-deadline:
+			return nil, fmt.Errorf("timeout waiting for SendRawTransaction response (id=%s)", id)
+		case <-c.ctx.Done():
+			return nil, fmt.Errorf("context cancelled")
+		}
+	}
+}
+
+// SendRawTransactions gửi SendRawTransactions command lên chain (RLP-encoded envelopes, fire-and-forget).
+func (c *ConnectionClient) SendRawTransactions(batchRLP []byte) error {
+	if atomic.LoadInt32(&c.connected) != 1 || c.connection == nil {
+		return fmt.Errorf("not connected to cluster %s", c.key)
+	}
+
+	if err := c.messageSender.SendBytes(c.connection, cmdSendRawTransactions, batchRLP); err != nil {
+		return fmt.Errorf("failed to send SendRawTransactions: %w", err)
 	}
 	return nil
 }

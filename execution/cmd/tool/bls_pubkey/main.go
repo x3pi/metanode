@@ -36,6 +36,7 @@ func main() {
 	// callers (e.g. gen_root_anchor_chain.py's own copy of derive_min_pk_pubkey) that parse
 	// exactly one line and would otherwise silently break on this tool's stdout format changing
 	// out from under them.
+	hexOutput := flag.Bool("hex", false, "print public key as 0x-prefixed hex string (96 hex chars) instead of base64")
 	withAddress := flag.Bool("with-address", false, "also print this secret's bls.KeyPair.Address() as a second line")
 	flag.Parse()
 
@@ -63,7 +64,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: derived public key is %d bytes, expected 48 (invalid secret?)\n", len(pubBytes))
 		os.Exit(1)
 	}
-	fmt.Println(base64.StdEncoding.EncodeToString(pubBytes))
+	if *hexOutput {
+		fmt.Printf("0x%x\n", pubBytes)
+	} else {
+		fmt.Println(base64.StdEncoding.EncodeToString(pubBytes))
+	}
 	if *withAddress {
 		// This secret's own bls.KeyPair.Address() (keccak256(compressed pubkey)[12:]), i.e. what
 		// cmd/simple_chain's app.keyPair.Address() resolves to when this secret is used as

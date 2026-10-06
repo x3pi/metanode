@@ -13,6 +13,8 @@ const (
 
 	SendTransaction                 = "SendTransaction"
 	SendTransactions                = "SendTransactions"
+	SendRawTransaction              = "SendRawTransaction"
+	SendRawTransactions             = "SendRawTransactions"
 	SendProcessedVirtualTransaction = "SendProcessedVirtualTransaction"
 
 	SendTransactionWithDeviceKey  = "SendTransactionWithDeviceKey"
