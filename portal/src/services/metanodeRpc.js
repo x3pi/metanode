@@ -8,30 +8,10 @@ import clustersConfig from '../config/clusters.json';
 import { ethers, Wallet } from 'ethers';
 
 export const LAN_IP = clustersConfig?.defaultHost || '192.168.1.234';
-export const DEFAULT_HOST =
-  typeof window !== 'undefined' &&
-  window.location.hostname &&
-  window.location.hostname !== 'localhost' &&
-  window.location.hostname !== '127.0.0.1'
-    ? window.location.hostname
-    : LAN_IP;
 
-// Automatically map clusters from clusters.json, substituting host if loaded via localhost or LAN
+// Map clusters directly from clusters.json as single source of truth
 export const PRESET_CLUSTERS = (clustersConfig?.clusters || [])
-  .map((c) => {
-    let url = c.rpcUrl;
-    if (
-      typeof window !== 'undefined' &&
-      window.location.hostname &&
-      clustersConfig?.defaultHost
-    ) {
-      url = url.replace(clustersConfig.defaultHost, window.location.hostname);
-    }
-    return {
-      ...c,
-      rpcUrl: url,
-    };
-  })
+  .map((c) => ({ ...c }))
   .filter((cluster, index, self) => index === self.findIndex((c) => c.id === cluster.id || c.rpcUrl === cluster.rpcUrl));
 
 export const DEFAULT_CLUSTER_ID = clustersConfig?.defaultClusterId || 'exec1';

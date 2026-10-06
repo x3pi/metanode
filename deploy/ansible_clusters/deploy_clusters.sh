@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+/#!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════════
 #  🚀 METANODE MULTI-CLUSTER DEPLOYMENT & TESTING ORCHESTRATOR
 #  Automates deployment of Parent Chain & Sharded Execution Clusters,
@@ -308,6 +308,7 @@ fi
 MONITOR_SCRIPT="${METANODE_ROOT}/deploy/ansible/monitors/start_monitors.sh"
 
 stop_cluster_monitors() {
+    echo "⏸️  Tạm dừng tất cả Monitor ngầm (exec1, parent) để tránh báo động giả..."
     if [ -f "$MONITOR_SCRIPT" ]; then
         for pid_dir in /tmp/metanode-monitors-*; do
             if [ -d "$pid_dir" ]; then
@@ -318,16 +319,29 @@ stop_cluster_monitors() {
         bash "$MONITOR_SCRIPT" --stop --namespace exec1 >/dev/null 2>&1 || true
         bash "$MONITOR_SCRIPT" --stop --namespace parent >/dev/null 2>&1 || true
     fi
+    if [ -f "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" ]; then
+        python3 "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" --stop >/dev/null 2>&1 || true
+    fi
+    pkill -f "parent_chain_monitor.py" >/dev/null 2>&1 || true
+    pkill -f "block_hash_checker.*exec1" >/dev/null 2>&1 || true
+}
+
+clean_monitor_state() {
+    echo "🧹 Dọn sạch cache và log trạng thái cũ của Monitor..."
+    rm -f "${METANODE_ROOT}/deploy/ansible/monitors/block_hash_checker/chain_anomalies.log" 2>/dev/null || true
+    rm -f "${METANODE_ROOT}/deploy/ansible/monitors/block_hash_checker/ghost_blocks.log" 2>/dev/null || true
+    rm -f "${METANODE_ROOT}/deploy/ansible/monitors/block_hash_checker/block_checker_daemon.log" 2>/dev/null || true
+    rm -f "${METANODE_ROOT}/deploy/ansible/monitors/block_hash_checker/"*.csv 2>/dev/null || true
 }
 
 start_cluster_monitors() {
-    if [ "$ENABLE_MONITOR" != "true" ] || [ ! -f "$MONITOR_SCRIPT" ]; then
+    if [ "$ENABLE_MONITOR" != "true" ]; then
         return 0
     fi
-    echo "▶️  Kích hoạt hệ thống Monitor ngầm (start_monitors.sh & block_hash_checker)..."
+    echo "▶️  Kích hoạt hệ thống Monitor ngầm..."
     
     # 1. Kích hoạt monitor cho các Exec Clusters trong Inventory (Child Chains chạy Raft Consensus, bỏ qua Validator Vote Monitor)
-    if [ "$PARENT_ONLY" != "true" ]; then
+    if [ "$PARENT_ONLY" != "true" ] && [ -f "$MONITOR_SCRIPT" ]; then
         CLUSTER_NAMES=$(python3 -c "
 import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
 import parse_inventory as pi
@@ -351,8 +365,8 @@ print(' '.join(c.get('cluster_name', f'exec{cid}') for cid, c in info.get('clust
         done
     fi
 
-    # 2. Chỉ kích hoạt Monitor cho Parent Chain nếu Parent Chain nodes thực sự được cấu hình trong Inventory
-    if [ "$EXEC_ONLY" != "true" ] && [ -s "/tmp/rpc_nodes.parent.json" ]; then
+    # 2. Kích hoạt Monitor cho Parent Chain (Liveness + Hash Consistency, inventory-driven, không dùng Vote Monitor cũ)
+    if [ "$EXEC_ONLY" != "true" ] && [ -f "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" ]; then
         HAS_PARENT=$(python3 -c "
 import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
 import parse_inventory as pi
@@ -361,10 +375,9 @@ print('true' if info.get('parent_nodes') else 'false')
 " 2>/dev/null || echo "false")
 
         if [ "$HAS_PARENT" = "true" ]; then
-            echo "   • Kích hoạt Monitor cho Parent Chain Committee (Namespace: parent)..."
-            bash "$MONITOR_SCRIPT" --stop --namespace parent >/dev/null 2>&1 || true
-            MONITOR_NAMESPACE="parent" MONITOR_INVENTORY="$INVENTORY" \
-                bash "$MONITOR_SCRIPT" --namespace parent --config "/tmp/rpc_nodes.parent.json"
+            echo "   • Kích hoạt Monitor cho Parent Chain (Liveness + Hash Consistency, config: ${INVENTORY})..."
+            python3 "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" --stop >/dev/null 2>&1 || true
+            python3 "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" --daemon --inventory="${INVENTORY}" --interval=5
         fi
     fi
 }
@@ -721,6 +734,14 @@ elif [ "$PARENT_ONLY" = "true" ]; then
         EXTRA_ANSIBLE_ARGS+=(--tags "build,parent_chain")
     else
         EXTRA_ANSIBLE_ARGS+=(--tags "parent_chain")
+    fi
+fi
+
+# 2.5. Tạm dừng monitors và dọn dẹp state nếu đang thực hiện thao tác làm gián đoạn node
+if [[ "$ACTION" =~ ^(setup|deploy|restart|reset|clean|stop)$ ]]; then
+    stop_cluster_monitors
+    if [[ "$ACTION" =~ ^(reset|clean)$ ]]; then
+        clean_monitor_state
     fi
 fi
 

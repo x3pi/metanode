@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, iter, time::Duration, vec};
 
 use itertools::Itertools as _;
 use tokio::time::Instant;
-use tracing::{info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use consensus_config::AuthorityIndex;
 use consensus_types::block::{BlockRef, BlockTimestampMs, Round};
@@ -61,7 +61,7 @@ impl Core {
             let last_proposed_round = dag_state.get_last_proposed_block().round();
 
             if clock_round <= last_proposed_round {
-                warn!(
+                debug!(
                     "Skipping block proposal for round {} as it is not higher than the last proposed block {}",
                     clock_round,
                     last_proposed_round
@@ -75,7 +75,7 @@ impl Core {
             // is invalid and will be rejected by the BlockManager, causing a crash.
             let gc_round = dag_state.gc_round();
             if clock_round <= gc_round {
-                warn!(
+                debug!(
                     "Skipping block proposal for round {} as it is <= gc_round {} (node is catching up)",
                     clock_round,
                     gc_round
@@ -280,7 +280,7 @@ impl Core {
                     .saturating_sub(self.last_proposed_timestamp_ms()),
             ) < effective_delay
             {
-                warn!(
+                debug!(
                     "Skipping block proposal for round {} as it is too soon after the last proposed block timestamp {}; effective delay is {}ms (base: {}ms, go_lag: {})",
                     clock_round,
                     self.last_proposed_timestamp_ms(),
@@ -300,7 +300,7 @@ impl Core {
 
         // If we did not find enough good ancestors to propose, continue to wait before proposing.
         if ancestors.is_empty() {
-            tracing::warn!(
+            tracing::debug!(
                 "Skipping block proposal for round {} because no good ancestor is found (even with force={force})",
                 clock_round,
             );
@@ -604,7 +604,7 @@ impl Core {
             .update_from_verified_block(&extended_block);
 
         let prop_total = prop_start.elapsed() + ancestors_elapsed;
-        tracing::warn!(
+        tracing::debug!(
             "⏱️ [PERF-RUST] try_new_block proposal for round {} (txs: {}): total={:?}, ancestors={:?}, tx_pack={:?}, sign={:?}, accept={:?}",
             clock_round,
             verified_block.transactions().len(),

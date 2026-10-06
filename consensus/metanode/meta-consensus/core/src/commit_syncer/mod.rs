@@ -3068,7 +3068,7 @@ impl<C: NetworkClient> Inner<C> {
             // sparse DAG; its committed-block bookkeeping then no longer matched the network's, and a later leader
             // re-collected blocks whose transactions were already executed (a duplicate block, i.e. a fork). A healthy
             // node now needs 2f+1 votes for the commit before it may replace its own.
-            tracing::info!(
+            tracing::debug!(
                 "🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit {} from peer {} \
                  (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.",
                 end_commit_ref,

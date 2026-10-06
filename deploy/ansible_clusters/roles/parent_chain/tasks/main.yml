@@ -92,13 +92,13 @@
       become: true
       block:
         - name: Allow the client-facing Parent Chain HTTP RPC port in UFW
-          ansible.builtin.command: "ufw allow {{ parent_http_port | default(parent_chain_rpc_port | default(8547)) }}/tcp comment 'Metanode Parent Chain HTTP RPC'"
+          ansible.builtin.command: "ufw allow {{ parent_http_port | default(parent_chain_rpc_port | default(8547)) }}/tcp comment 'Metanode Parent Chain HTTP RPC {{ inventory_hostname }}'"
           register: ufw_parent_http
           changed_when: "'Rule added' in ufw_parent_http.stdout or 'Rule updated' in ufw_parent_http.stdout"
 
-        - name: Allow internal Parent Chain ports (peer RPC, metrics) only from cluster members
-          ansible.builtin.command: "ufw allow from {{ item.1 }} to any port {{ item.0 }} proto tcp comment 'Metanode Parent Chain internal'"
-          loop: "{{ [peer_rpc_port | default(19501), metrics_port | default(19601)] | product(ufw_peer_ips) | list }}"
+        - name: Allow internal Parent Chain ports (peer RPC, metrics, P2P) only from cluster members
+          ansible.builtin.command: "ufw allow from {{ item.1 }} to any port {{ item.0 }} proto tcp comment 'Metanode Parent Chain internal {{ inventory_hostname }}'"
+          loop: "{{ [peer_rpc_port | default(19501), metrics_port | default(19601), parent_p2p_port | default(19001)] | product(ufw_peer_ips) | list }}"
           register: ufw_parent_rules
           changed_when: "'Rule added' in ufw_parent_rules.stdout or 'Rule updated' in ufw_parent_rules.stdout"
 

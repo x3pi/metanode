@@ -10,7 +10,7 @@ use futures::{stream::FuturesOrdered, StreamExt as _};
 use itertools::Itertools as _;
 use rand::{prelude::SliceRandom as _, rngs::ThreadRng};
 use tokio::{runtime::Handle, time::sleep};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::{CommitSyncer, Inner};
 use crate::{
@@ -103,7 +103,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             .node_metrics
             .commit_sync_fetch_loop_latency
             .start_timer();
-        info!("Starting to fetch commits in {commit_range:?} ...",);
+        debug!("Starting to fetch commits in {commit_range:?} ...",);
         loop {
             // Attempt to fetch commits and blocks through min(committee size, MAX_NUM_TARGETS) peers.
             let mut target_authorities = inner
