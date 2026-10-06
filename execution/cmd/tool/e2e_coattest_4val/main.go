@@ -928,7 +928,7 @@ func main() {
 			ParentSeq:    fakeSeq,
 			Attestations: []rollup.RegistrationAttestation{att},
 		}
-		payloadBytes, err := json.Marshal(payload)
+		payloadBytes, err := payload.MarshalProto()
 		if err != nil {
 			return "", err
 		}
@@ -995,7 +995,7 @@ func main() {
 			ParentSeq:    999992,
 			Attestations: []rollup.RegistrationAttestation{att},
 		}
-		payloadBytes, _ := json.Marshal(payload)
+		payloadBytes, _ := payload.MarshalProto()
 
 		clusterAddr := common.HexToAddress(env.Cluster.Address)
 		tx, err := r.sendSystemTx("val0", env.Cluster.PrivateKey, clusterAddr, payloadBytes)
@@ -1135,7 +1135,8 @@ func main() {
 		}
 	}
 	fmt.Printf("   PASS: %d | FAIL: %d\n", passCount, failCount)
-	fmt.Println("════════════════════════════════════════════════════════════════\n")
+	fmt.Println("════════════════════════════════════════════════════════════════")
+	fmt.Println()
 
 	if *reportPath != "" {
 		writeReport(*reportPath, r)

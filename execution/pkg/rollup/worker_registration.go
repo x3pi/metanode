@@ -1,12 +1,12 @@
 package rollup
 
 import (
-	"encoding/json"
-	"github.com/ethereum/go-ethereum/common"
 	"log"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -195,7 +195,7 @@ func (w *RegistrationWorker) pollAndProcess() bool {
 					Signature:       bls.Sign(ak.PrivateKey(), digest),
 				}}
 			}
-			data, err := json.Marshal(payload)
+			data, err := payload.MarshalProto()
 			if err != nil {
 				log.Printf("RegistrationWorker: failed to marshal payload for user %s: %v", ev.UserAddress.Hex(), err)
 				continue

@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -495,7 +494,11 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			DestPubKey:   destPubKey,
 			PayloadHash:  payloadHash,
 		}
-		innerData, _ := json.Marshal(payload)
+		innerData, err := rollup.MarshalRollupSystemPayload(&payload)
+		if err != nil {
+			logger.Error("failed to marshal RollupSystemPayload: %v", err)
+			return err
+		}
 		chainID := app.config.ChainId.Uint64()
 
 		// Skip if already attested on chain by this node or already applied (tombstone)
@@ -515,7 +518,11 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 				},
 			},
 		}
-		eventData, _ := json.Marshal(attested)
+		eventData, err := rollup.MarshalRollupSystemAttestedPayload(&attested)
+		if err != nil {
+			logger.Error("failed to marshal RollupSystemAttestedPayload: %v", err)
+			return err
+		}
 
 		tx := transaction.NewTransaction(
 			attestKey.Address(),
@@ -734,7 +741,7 @@ func handleRollupSystemEvent(app *App, store rollup.Store, stateDB rollup.Accoun
 		return err
 	}
 	var payload rollup.RollupSystemPayload
-	if err := json.Unmarshal(data, &payload); err != nil {
+	if err := rollup.UnmarshalRollupSystemPayload(data, &payload); err != nil {
 		return fmt.Errorf("failed to unmarshal RollupSystemPayload: %w", err)
 	}
 	err := app.crossNodeHandler.HandleSystemEvent(

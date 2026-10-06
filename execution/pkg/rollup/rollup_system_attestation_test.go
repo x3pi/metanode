@@ -1,7 +1,6 @@
 package rollup
 
 import (
-	"encoding/json"
 	"errors"
 	"math/big"
 	"testing"
@@ -69,11 +68,16 @@ type attestedSysEnv struct {
 
 func newAttestedSysEnv(n int) *attestedSysEnv {
 	bls.Init()
+	samplePayload := &RollupSystemPayload{
+		Event: Event{Type: EventCreditObserved},
+		MsgID: common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
+	}
+	inner, _ := MarshalRollupSystemPayload(samplePayload)
 	e := &attestedSysEnv{
 		sc:       newMemSCDB(),
 		stateDB:  newMockSysAccountDB(),
 		chainID:  parentchain.ParentChainID,
-		innerRaw: []byte(`{"event":{"type":"credit_observed"},"msg_id":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}`),
+		innerRaw: inner,
 	}
 	for i := 0; i < n; i++ {
 		e.vals = append(e.vals, bls.GenerateKeyPair())
@@ -102,7 +106,7 @@ func (e *attestedSysEnv) buildPayload(signer *bls.KeyPair, inner []byte) []byte 
 			},
 		},
 	}
-	b, _ := json.Marshal(p)
+	b, _ := MarshalRollupSystemAttestedPayload(&p)
 	return b
 }
 
@@ -194,7 +198,7 @@ func TestRollupSystemAttestation_NonCommitteeAndForgedSignaturesRejected(t *test
 			},
 		},
 	}
-	bForged, _ := json.Marshal(pForged)
+	bForged, _ := MarshalRollupSystemAttestedPayload(&pForged)
 	err = ApplyAttestedSystemEvent(nil, e.stateDB, e.sc, comm, e.chainID, bForged, dispatcher)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid BLS signature")

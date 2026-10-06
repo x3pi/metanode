@@ -2,14 +2,16 @@ package rollup
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -17,22 +19,257 @@ const (
 	PayloadKindRollupSystemAttested    = "rollup_system_attested"
 )
 
+var deterministicMarshal = proto.MarshalOptions{Deterministic: true}
+
+// requireLen enforces the exact fixed size of a wire field. The encoders always emit full-size fields, so a decoder
+// must never zero-pad, truncate or re-interpret a different length: that would let two different byte strings decode to
+// the same value (malleability) or to a different key than the one that was signed.
+func requireLen(name string, b []byte, n int) error {
+	if len(b) != n {
+		return fmt.Errorf("invalid %s length %d, want %d", name, len(b), n)
+	}
+	return nil
+}
+
+func validateAttestationsProto(atts []*pb.RollupAttestationProto) error {
+	for i, a := range atts {
+		if a == nil {
+			return fmt.Errorf("attestation %d is nil", i)
+		}
+		if err := requireLen("attestation validator_pubkey", a.ValidatorPubkey, len(cm.PublicKey{})); err != nil {
+			return err
+		}
+		if err := requireLen("attestation signature", a.Signature, len(cm.Sign{})); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // RollupSystemPayload is the canonical inner payload for rollup system events across all validators.
 type RollupSystemPayload struct {
-	Event        Event         `json:"event"`
-	MsgID        common.Hash   `json:"msg_id"`
-	SourceSeq    uint64        `json:"source_seq"`
-	SourcePubKey cm.PublicKey  `json:"source_pub_key"`
-	DestPubKey   cm.PublicKey  `json:"dest_pub_key"`
-	PayloadHash  common.Hash   `json:"payload_hash"`
+	Event        Event        `json:"event"`
+	MsgID        common.Hash  `json:"msg_id"`
+	SourceSeq    uint64       `json:"source_seq"`
+	SourcePubKey cm.PublicKey `json:"source_pub_key"`
+	DestPubKey   cm.PublicKey `json:"dest_pub_key"`
+	PayloadHash  common.Hash  `json:"payload_hash"`
+}
+
+// EventToProto converts a rollup Event to its protobuf representation.
+func EventToProto(ev *Event) *pb.RollupEventProto {
+	if ev == nil {
+		return nil
+	}
+	p := &pb.RollupEventProto{
+		Type:               string(ev.Type),
+		Role:               uint32(ev.Role),
+		Sender:             ev.Sender.Bytes(),
+		Target:             ev.Target.Bytes(),
+		ParentBlockTime:    ev.ParentBlockTime,
+		ParentConfirmTime:  ev.ParentConfirmTime,
+		Timeout:            ev.Timeout,
+		ParentTxHash:       ev.ParentTxHash.Bytes(),
+		Outcome:            uint32(ev.Outcome),
+		IsDuplicate:        ev.IsDuplicate,
+		IsDestinationValid: ev.IsDestinationValid,
+	}
+	if ev.Value != nil {
+		p.Value = ev.Value.Bytes()
+	}
+	if ev.GasFee != nil {
+		p.GasFee = ev.GasFee.Bytes()
+	}
+	return p
+}
+
+// EventFromProto populates a rollup Event from its protobuf representation.
+func EventFromProto(p *pb.RollupEventProto) Event {
+	if p == nil {
+		return Event{}
+	}
+	var ev Event
+	ev.Type = EventType(p.Type)
+	ev.Role = Role(p.Role)
+	if len(p.Sender) > 0 {
+		ev.Sender = common.BytesToAddress(p.Sender)
+	}
+	if len(p.Target) > 0 {
+		ev.Target = common.BytesToAddress(p.Target)
+	}
+	if len(p.Value) > 0 {
+		ev.Value = new(big.Int).SetBytes(p.Value)
+	}
+	if len(p.GasFee) > 0 {
+		ev.GasFee = new(big.Int).SetBytes(p.GasFee)
+	}
+	ev.ParentBlockTime = p.ParentBlockTime
+	ev.ParentConfirmTime = p.ParentConfirmTime
+	ev.Timeout = p.Timeout
+	if len(p.ParentTxHash) > 0 {
+		ev.ParentTxHash = common.BytesToHash(p.ParentTxHash)
+	}
+	ev.Outcome = Outcome(p.Outcome)
+	ev.IsDuplicate = p.IsDuplicate
+	ev.IsDestinationValid = p.IsDestinationValid
+	return ev
+}
+
+// ToProto converts RollupSystemPayload to its protobuf message.
+func (p *RollupSystemPayload) ToProto() *pb.RollupSystemPayloadProto {
+	if p == nil {
+		return nil
+	}
+	return &pb.RollupSystemPayloadProto{
+		Event:        EventToProto(&p.Event),
+		MsgId:        p.MsgID.Bytes(),
+		SourceSeq:    p.SourceSeq,
+		SourcePubKey: p.SourcePubKey[:],
+		DestPubKey:   p.DestPubKey[:],
+		PayloadHash:  p.PayloadHash.Bytes(),
+	}
+}
+
+// FromProto converts a protobuf message into RollupSystemPayload.
+func (p *RollupSystemPayload) FromProto(pbPayload *pb.RollupSystemPayloadProto) {
+	if pbPayload == nil {
+		return
+	}
+	p.Event = EventFromProto(pbPayload.Event)
+	if len(pbPayload.MsgId) > 0 {
+		p.MsgID = common.BytesToHash(pbPayload.MsgId)
+	}
+	p.SourceSeq = pbPayload.SourceSeq
+	if len(pbPayload.SourcePubKey) == len(p.SourcePubKey) {
+		copy(p.SourcePubKey[:], pbPayload.SourcePubKey)
+	}
+	if len(pbPayload.DestPubKey) == len(p.DestPubKey) {
+		copy(p.DestPubKey[:], pbPayload.DestPubKey)
+	}
+	if len(pbPayload.PayloadHash) > 0 {
+		p.PayloadHash = common.BytesToHash(pbPayload.PayloadHash)
+	}
+}
+
+// MarshalRollupSystemPayload encodes payload deterministically as Protobuf.
+func MarshalRollupSystemPayload(p *RollupSystemPayload) ([]byte, error) {
+	if p == nil {
+		return nil, errors.New("cannot marshal nil RollupSystemPayload")
+	}
+	return deterministicMarshal.Marshal(p.ToProto())
+}
+
+// UnmarshalRollupSystemPayload decodes data into RollupSystemPayload from deterministic Protobuf format.
+func UnmarshalRollupSystemPayload(data []byte, p *RollupSystemPayload) error {
+	if len(data) == 0 {
+		return errors.New("empty data for RollupSystemPayload")
+	}
+	if p == nil {
+		return errors.New("nil target RollupSystemPayload")
+	}
+	var pbPayload pb.RollupSystemPayloadProto
+	if err := proto.Unmarshal(data, &pbPayload); err != nil {
+		return fmt.Errorf("failed to unmarshal RollupSystemPayload protobuf: %w", err)
+	}
+	if pbPayload.Event == nil {
+		return errors.New("missing Event in RollupSystemPayload protobuf")
+	}
+	for _, f := range []struct {
+		name string
+		b    []byte
+		n    int
+	}{
+		{"msg_id", pbPayload.MsgId, common.HashLength},
+		{"payload_hash", pbPayload.PayloadHash, common.HashLength},
+		{"source_pub_key", pbPayload.SourcePubKey, len(cm.PublicKey{})},
+		{"dest_pub_key", pbPayload.DestPubKey, len(cm.PublicKey{})},
+		{"event.sender", pbPayload.Event.Sender, common.AddressLength},
+		{"event.target", pbPayload.Event.Target, common.AddressLength},
+		{"event.parent_tx_hash", pbPayload.Event.ParentTxHash, common.HashLength},
+	} {
+		if err := requireLen(f.name, f.b, f.n); err != nil {
+			return fmt.Errorf("rollup system payload: %w", err)
+		}
+	}
+	p.FromProto(&pbPayload)
+	return nil
 }
 
 // RollupSystemAttestedPayload wraps any rollup system event payload (such as RollupSystemPayload)
 // with committee co-attestations.
 type RollupSystemAttestedPayload struct {
 	Kind         string                    `json:"kind"`
-	Inner        json.RawMessage           `json:"inner"`
+	Inner        []byte                    `json:"inner"`
 	Attestations []RegistrationAttestation `json:"attestations,omitempty"`
+}
+
+// ToProto converts RollupSystemAttestedPayload to its protobuf message.
+func (p *RollupSystemAttestedPayload) ToProto() *pb.RollupSystemAttestedPayloadProto {
+	if p == nil {
+		return nil
+	}
+	var attestations []*pb.RollupAttestationProto
+	for _, a := range p.Attestations {
+		attestations = append(attestations, &pb.RollupAttestationProto{
+			ValidatorPubkey: a.ValidatorPubkey[:],
+			Signature:       a.Signature[:],
+		})
+	}
+	return &pb.RollupSystemAttestedPayloadProto{
+		Kind:         p.Kind,
+		Inner:        p.Inner,
+		Attestations: attestations,
+	}
+}
+
+// FromProto converts a protobuf message into RollupSystemAttestedPayload.
+func (p *RollupSystemAttestedPayload) FromProto(pbPayload *pb.RollupSystemAttestedPayloadProto) {
+	if pbPayload == nil {
+		return
+	}
+	p.Kind = pbPayload.Kind
+	p.Inner = pbPayload.Inner
+	p.Attestations = nil
+	for _, a := range pbPayload.Attestations {
+		var pub cm.PublicKey
+		var sig cm.Sign
+		copy(pub[:], a.ValidatorPubkey)
+		copy(sig[:], a.Signature)
+		p.Attestations = append(p.Attestations, RegistrationAttestation{
+			ValidatorPubkey: pub,
+			Signature:       sig,
+		})
+	}
+}
+
+// MarshalRollupSystemAttestedPayload encodes attested payload deterministically as Protobuf.
+func MarshalRollupSystemAttestedPayload(p *RollupSystemAttestedPayload) ([]byte, error) {
+	if p == nil {
+		return nil, errors.New("cannot marshal nil RollupSystemAttestedPayload")
+	}
+	return deterministicMarshal.Marshal(p.ToProto())
+}
+
+// UnmarshalRollupSystemAttestedPayload decodes data into RollupSystemAttestedPayload from deterministic Protobuf format.
+func UnmarshalRollupSystemAttestedPayload(data []byte, p *RollupSystemAttestedPayload) error {
+	if len(data) == 0 {
+		return errors.New("empty data for RollupSystemAttestedPayload")
+	}
+	if p == nil {
+		return errors.New("nil target RollupSystemAttestedPayload")
+	}
+	var pbPayload pb.RollupSystemAttestedPayloadProto
+	if err := proto.Unmarshal(data, &pbPayload); err != nil {
+		return fmt.Errorf("failed to unmarshal RollupSystemAttestedPayload protobuf: %w", err)
+	}
+	if pbPayload.Kind != PayloadKindRollupSystemAttested {
+		return fmt.Errorf("unexpected payload kind %q, expected %q", pbPayload.Kind, PayloadKindRollupSystemAttested)
+	}
+	if err := validateAttestationsProto(pbPayload.Attestations); err != nil {
+		return fmt.Errorf("rollup system attested payload: %w", err)
+	}
+	p.FromProto(&pbPayload)
+	return nil
 }
 
 // ComputeRollupSystemEventDigest computes the deterministic keccak256 digest:
@@ -77,12 +314,13 @@ func HasPendingRollupSystemAttestation(db SmartContractDB, chainID uint64, inner
 	return false
 }
 
-// IsRollupSystemAttestedPayload reports whether data is a JSON payload with kind "rollup_system_attested".
+// IsRollupSystemAttestedPayload reports whether data is a protobuf payload with kind "rollup_system_attested".
 func IsRollupSystemAttestedPayload(data []byte) bool {
-	var p struct {
-		Kind string `json:"kind"`
+	if len(data) == 0 {
+		return false
 	}
-	if err := json.Unmarshal(data, &p); err == nil && p.Kind == PayloadKindRollupSystemAttested {
+	var pbPayload pb.RollupSystemAttestedPayloadProto
+	if err := proto.Unmarshal(data, &pbPayload); err == nil && pbPayload.Kind == PayloadKindRollupSystemAttested {
 		return true
 	}
 	return false
@@ -105,8 +343,8 @@ func ApplyAttestedSystemEvent(
 	}
 
 	var payload RollupSystemAttestedPayload
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return fmt.Errorf("rollup system attestation: invalid json payload: %w", err)
+	if err := UnmarshalRollupSystemAttestedPayload(data, &payload); err != nil {
+		return fmt.Errorf("rollup system attestation: invalid payload: %w", err)
 	}
 	if payload.Kind != PayloadKindRollupSystemAttested {
 		return fmt.Errorf("rollup system attestation: unexpected payload kind %q", payload.Kind)

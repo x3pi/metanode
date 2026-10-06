@@ -3,7 +3,6 @@ package tx_processor
 import (
 	"context"
 	"crypto/ecdsa"
-	"encoding/json"
 	"math/big"
 	"testing"
 
@@ -133,8 +132,11 @@ func flushTestStake(t *testing.T, cs *blockchain.ChainState) {
 func attestedRegistrationPayload(t *testing.T, kp *bls.KeyPair, user common.Address, cluster cm.PublicKey, seq uint64) []byte {
 	t.Helper()
 	d := rollup.ComputeAccountRegistrationAttestDigest(parentchain.ParentChainID, user, cluster, seq)
-	b, err := json.Marshal(rollup.AccountRegistrationPayload{Kind: rollup.SystemPayloadKindAccountRegistered, User: user, ClusterKey: cluster,
-		ParentSeq: seq, Attestations: []rollup.RegistrationAttestation{{ValidatorPubkey: kp.PublicKey(), Signature: bls.Sign(kp.PrivateKey(), d)}}})
+	p := &rollup.AccountRegistrationPayload{
+		Kind: rollup.SystemPayloadKindAccountRegistered, User: user, ClusterKey: cluster,
+		ParentSeq: seq, Attestations: []rollup.RegistrationAttestation{{ValidatorPubkey: kp.PublicKey(), Signature: bls.Sign(kp.PrivateKey(), d)}},
+	}
+	b, err := p.MarshalProto()
 	require.NoError(t, err)
 	return b
 }
@@ -304,7 +306,9 @@ func TestAccountGate_ForgedRegistrationEventDoesNotOpenTheGate(t *testing.T) {
 	g.fund(attacker)
 	require.NoError(t, g.cs.GetAccountStateDB().AddBalance(attacker.addr, big.NewInt(1_000_000_000_000_000)))
 
-	raw, _ := json.Marshal(rollup.AccountRegistrationPayload{Kind: rollup.SystemPayloadKindAccountRegistered, User: attacker.addr, ClusterKey: g.kp.PublicKey()})
+	p := &rollup.AccountRegistrationPayload{Kind: rollup.SystemPayloadKindAccountRegistered, User: attacker.addr, ClusterKey: g.kp.PublicKey()}
+	raw, err := p.MarshalProto()
+	require.NoError(t, err)
 	tx := transaction.NewTransaction(attacker.addr, rollup.RollupSystemAddress, big.NewInt(0), 21000, 1_000_000_000, 0, raw, nil,
 		common.Hash{}, common.Hash{}, 0, 1)
 	rcp, _, err := g.h.HandleTransaction(context.Background(), g.cs, tx, rollup.RollupSystemAddress, false, 0)
@@ -338,9 +342,10 @@ func TestAccountGate_SystemEventNeedsFPlusOneValidatorAttestations(t *testing.T)
 	nonces := map[common.Address]uint64{}
 	submit := func(v *bls.KeyPair, seq uint64) types.Receipt {
 		d := rollup.ComputeAccountRegistrationAttestDigest(parentchain.ParentChainID, user, cluster.PublicKey(), seq)
-		data, err := json.Marshal(rollup.AccountRegistrationPayload{Kind: rollup.SystemPayloadKindAccountRegistered, User: user,
+		p := &rollup.AccountRegistrationPayload{Kind: rollup.SystemPayloadKindAccountRegistered, User: user,
 			ClusterKey: cluster.PublicKey(), ParentSeq: seq,
-			Attestations: []rollup.RegistrationAttestation{{ValidatorPubkey: v.PublicKey(), Signature: bls.Sign(v.PrivateKey(), d)}}})
+			Attestations: []rollup.RegistrationAttestation{{ValidatorPubkey: v.PublicKey(), Signature: bls.Sign(v.PrivateKey(), d)}}}
+		data, err := p.MarshalProto()
 		require.NoError(t, err)
 		tx := transaction.NewTransaction(v.Address(), rollup.RollupSystemAddress, big.NewInt(0), 21000, 1_000_000_000, 0, data, nil,
 			common.Hash{}, common.Hash{}, nonces[v.Address()], 1)

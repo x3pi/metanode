@@ -1,7 +1,6 @@
 package rollup
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -36,7 +35,7 @@ func makeRegistrationPayload(user common.Address, clusterKey cm.PublicKey, seq u
 		ClusterKey: clusterKey,
 		ParentSeq:  seq,
 	}
-	b, _ := json.Marshal(p)
+	b, _ := p.MarshalProto()
 	return b
 }
 
@@ -103,27 +102,29 @@ func TestAccountRegistryHandler_H1_Unit(t *testing.T) {
 		err = handler.Apply(db, []byte{})
 		require.Error(t, err)
 
-		// Corrupt JSON
-		assert.False(t, IsAccountRegistrationPayload([]byte("not json")))
-		err = handler.Apply(db, []byte("not json"))
+		// Corrupt protobuf
+		assert.False(t, IsAccountRegistrationPayload([]byte("not protobuf")))
+		err = handler.Apply(db, []byte("not protobuf"))
 		require.Error(t, err)
 
 		// Empty user address
-		emptyUserPayload, _ := json.Marshal(AccountRegistrationPayload{
+		pEmpty := &AccountRegistrationPayload{
 			Kind:       SystemPayloadKindAccountRegistered,
 			User:       common.Address{},
 			ClusterKey: clusterKey1,
 			ParentSeq:  1,
-		})
+		}
+		emptyUserPayload, _ := pEmpty.MarshalProto()
 		err = handler.Apply(db, emptyUserPayload)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "empty user address")
 
 		// Wrong kind
-		wrongKindPayload, _ := json.Marshal(map[string]interface{}{
-			"kind": "wrong_kind",
-			"user": user2.Hex(),
-		})
+		pWrong := &AccountRegistrationPayload{
+			Kind: "wrong_kind",
+			User: user2,
+		}
+		wrongKindPayload, _ := pWrong.MarshalProto()
 		assert.False(t, IsAccountRegistrationPayload(wrongKindPayload))
 		err = handler.Apply(db, wrongKindPayload)
 		require.Error(t, err)

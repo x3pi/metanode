@@ -2,7 +2,6 @@ package tx_processor
 
 import (
 	"context"
-	"encoding/json"
 	"math/big"
 	"math/rand"
 	"testing"
@@ -168,12 +167,13 @@ func TestRollupSystemHandler_AccountRegistration_ErrorConsumesNonce(t *testing.T
 	// Payload with mismatch cluster key
 	var wrongClusterKey mt_common.PublicKey
 	copy(wrongClusterKey[:], []byte("wrong_cluster_key_32_bytes_long"))
-	payload, _ := json.Marshal(rollup.AccountRegistrationPayload{
+	regPayload := rollup.AccountRegistrationPayload{
 		Kind:       rollup.SystemPayloadKindAccountRegistered,
 		User:       userAddr,
 		ClusterKey: wrongClusterKey,
 		ParentSeq:  1,
-	})
+	}
+	payload, _ := regPayload.MarshalProto()
 	tx := transaction.NewTransaction(
 		senderAddr,
 		rollup.RollupSystemAddress,

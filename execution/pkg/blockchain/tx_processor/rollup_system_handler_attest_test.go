@@ -2,7 +2,6 @@ package tx_processor
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"math/big"
 	"testing"
@@ -44,7 +43,7 @@ func TestRollupSystemHandler_CoAttestationEnforcedIn4ValidatorCommittee(t *testi
 	creditEvents := forgedCreditEvents(target)
 
 	// 1. A single validator attempts to send an UN-ATTESTED system event in a 4-validator committee => REJECTED!
-	rawUnattested, _ := json.Marshal(systemPayload{Event: creditEvents[0], MsgID: common.HexToHash("0x1111"), SourceSeq: 1})
+	rawUnattested, _ := rollup.MarshalRollupSystemPayload(&rollup.RollupSystemPayload{Event: creditEvents[0], MsgID: common.HexToHash("0x1111"), SourceSeq: 1})
 	unattestedTx := transaction.NewTransaction(vals[0].Address(), rollup.RollupSystemAddress, big.NewInt(0), 21000, 1_000_000_000, 0, rawUnattested, nil,
 		common.Hash{}, common.Hash{}, 0, 1).(*transaction.Transaction)
 	rcp, _, err := h.HandleTransaction(context.Background(), cs, unattestedTx, rollup.RollupSystemAddress, false, 0)
@@ -54,7 +53,7 @@ func TestRollupSystemHandler_CoAttestationEnforcedIn4ValidatorCommittee(t *testi
 
 	// 2. Co-attestation flow across the 3 legs of credit (CreditObserved, RPCSubmitted, ClaimedConfirmed)
 	for legIdx, ev := range creditEvents {
-		inner, _ := json.Marshal(systemPayload{Event: ev, MsgID: common.HexToHash("0x2222"), SourceSeq: 1})
+		inner, _ := rollup.MarshalRollupSystemPayload(&rollup.RollupSystemPayload{Event: ev, MsgID: common.HexToHash("0x2222"), SourceSeq: 1})
 		chainID := cs.GetConfig().ChainId.Uint64()
 		digest := rollup.ComputeRollupSystemEventDigest(chainID, inner)
 
@@ -71,7 +70,7 @@ func TestRollupSystemHandler_CoAttestationEnforcedIn4ValidatorCommittee(t *testi
 					},
 				},
 			}
-			raw, _ := json.Marshal(attPayload)
+			raw, _ := rollup.MarshalRollupSystemAttestedPayload(&attPayload)
 			return transaction.NewTransaction(val.Address(), rollup.RollupSystemAddress, big.NewInt(0), 21000, 1_000_000_000, 0, raw, nil,
 				common.Hash{}, common.Hash{}, nonce, 1).(*transaction.Transaction)
 		}
@@ -133,8 +132,9 @@ func TestRollupSystemHandler_UnattestedEventRejectedWhenCommitteeUnreadable(t *t
 	ns.AddBalance(big.NewInt(1_000_000_000_000_000))
 	ns.SetPublicKeyBls(nodeKP.PublicKey().Bytes())
 	cs.GetAccountStateDB().SetState(ns)
+	rawEvent, _ := rollup.MarshalRollupSystemPayload(&rollup.RollupSystemPayload{Event: rollup.Event{Type: rollup.EventCreditObserved}})
 	tx := transaction.NewTransaction(nodeKP.Address(), rollup.RollupSystemAddress, big.NewInt(0), 21000, 1_000_000_000, 0,
-		[]byte(`{"event":"x"}`), nil, common.Hash{}, common.Hash{}, 0, 1)
+		rawEvent, nil, common.Hash{}, common.Hash{}, 0, 1)
 	rcp, _, err := h.HandleTransaction(context.Background(), cs, tx, rollup.RollupSystemAddress, false, 0)
 	require.NoError(t, err)
 	require.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, rcp.Status())

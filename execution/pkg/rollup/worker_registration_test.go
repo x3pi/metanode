@@ -1,7 +1,6 @@
 package rollup
 
 import (
-	"encoding/json"
 	"fmt"
 	"runtime"
 	"sync"
@@ -54,7 +53,7 @@ func TestRegistrationWorker_W1_Unit(t *testing.T) {
 		var proposedUsers []common.Address
 		worker.EventProposer = func(payload []byte) error {
 			var p AccountRegistrationPayload
-			if err := json.Unmarshal(payload, &p); err == nil {
+			if err := p.Unmarshal(payload); err == nil {
 				proposedUsers = append(proposedUsers, p.User)
 			}
 			return nil

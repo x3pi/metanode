@@ -1,7 +1,6 @@
 package rollup
 
 import (
-	"encoding/json"
 	"sync"
 	"testing"
 
@@ -78,7 +77,7 @@ func TestAccountRegistryHandler_CoAttestation(t *testing.T) {
 				{ValidatorPubkey: v2.PublicKey(), Signature: sig2},
 			},
 		}
-		data, err := json.Marshal(payload)
+		data, err := payload.MarshalProto()
 		require.NoError(t, err)
 
 		err = handler.Apply(db, data)
@@ -97,7 +96,7 @@ func TestAccountRegistryHandler_CoAttestation(t *testing.T) {
 				{ValidatorPubkey: v1.PublicKey(), Signature: sig1}, // only 1, required 2
 			},
 		}
-		data, err := json.Marshal(payload)
+		data, err := payload.MarshalProto()
 		require.NoError(t, err)
 
 		err = handler.Apply(db, data)
@@ -118,7 +117,7 @@ func TestAccountRegistryHandler_CoAttestation(t *testing.T) {
 				{ValidatorPubkey: v1.PublicKey(), Signature: sig1}, // duplicate v1
 			},
 		}
-		data, err := json.Marshal(payload)
+		data, err := payload.MarshalProto()
 		require.NoError(t, err)
 
 		err = handler.Apply(db, data)
@@ -142,7 +141,7 @@ func TestAccountRegistryHandler_CoAttestation(t *testing.T) {
 				{ValidatorPubkey: outsider.PublicKey(), Signature: sigOutsider},
 			},
 		}
-		data, err := json.Marshal(payload)
+		data, err := payload.MarshalProto()
 		require.NoError(t, err)
 
 		err = handler.Apply(db, data)
@@ -165,7 +164,7 @@ func TestAccountRegistryHandler_CoAttestation(t *testing.T) {
 				{ValidatorPubkey: v2.PublicKey(), Signature: sig2},
 			},
 		}
-		data, err := json.Marshal(payload)
+		data, err := payload.MarshalProto()
 		require.NoError(t, err)
 
 		err = handler.Apply(db, data)
@@ -187,7 +186,7 @@ func TestAccountRegistryAttestationFollowsConfiguredChainID(t *testing.T) {
 	digest := ComputeAccountRegistrationAttestDigest(parentchain.ParentChainID, user, cluster, 7)
 	payload := AccountRegistrationPayload{Kind: SystemPayloadKindAccountRegistered, User: user, ClusterKey: cluster, ParentSeq: 7,
 		Attestations: []RegistrationAttestation{{ValidatorPubkey: kp.PublicKey(), Signature: bls.Sign(kp.PrivateKey(), digest)}}}
-	data, _ := json.Marshal(payload)
+	data, _ := payload.MarshalProto()
 	db := newCoattestMockStateDB()
 	if err := NewAccountRegistryHandler(cluster).Apply(db, data); err != nil {
 		t.Fatalf("registration must apply under chain ID 4242: %v", err)

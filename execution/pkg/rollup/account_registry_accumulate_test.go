@@ -1,7 +1,6 @@
 package rollup
 
 import (
-	"encoding/json"
 	"sync"
 	"testing"
 
@@ -65,7 +64,7 @@ func (e *accEnv) payload(signer *bls.KeyPair, seq uint64) []byte {
 	d := ComputeAccountRegistrationAttestDigest(parentchain.ParentChainID, e.user, e.cluster, seq)
 	p := AccountRegistrationPayload{Kind: SystemPayloadKindAccountRegistered, User: e.user, ClusterKey: e.cluster, ParentSeq: seq,
 		Attestations: []RegistrationAttestation{{ValidatorPubkey: signer.PublicKey(), Signature: bls.Sign(signer.PrivateKey(), d)}}}
-	b, _ := json.Marshal(p)
+	b, _ := p.MarshalProto()
 	return b
 }
 
@@ -102,12 +101,13 @@ func TestAttestationRejections(t *testing.T) {
 
 	bad := e.payload(e.vals[0], 1)
 	var p AccountRegistrationPayload
-	require.NoError(t, json.Unmarshal(bad, &p))
+	require.NoError(t, p.Unmarshal(bad))
 	p.ParentSeq = 99 // signature was for seq 1
-	bad, _ = json.Marshal(p)
+	bad, _ = p.MarshalProto()
 	require.Error(t, e.h.ApplyAttested(e.db, e.store, c, bad), "signature over another digest")
 
-	noAtt, _ := json.Marshal(AccountRegistrationPayload{Kind: SystemPayloadKindAccountRegistered, User: e.user, ClusterKey: e.cluster, ParentSeq: 1})
+	noAttP := AccountRegistrationPayload{Kind: SystemPayloadKindAccountRegistered, User: e.user, ClusterKey: e.cluster, ParentSeq: 1}
+	noAtt, _ := noAttP.MarshalProto()
 	require.Error(t, e.h.ApplyAttested(e.db, e.store, c, noAtt), "payload without attestation must not register under a committee")
 
 	require.False(t, e.db.GetParentRegistered(e.user))

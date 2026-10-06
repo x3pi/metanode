@@ -1003,7 +1003,10 @@ func main() {
 			DestPubKey:   cm.PublicKey{2},
 			PayloadHash:  common.HexToHash("0x1234"),
 		}
-		innerBytes, _ := json.Marshal(inner)
+		innerBytes, err := rollup.MarshalRollupSystemPayload(&inner)
+		if err != nil {
+			return "", err
+		}
 		digest := rollup.ComputeRollupSystemEventDigest(chainID, innerBytes)
 
 		// Sign with only val0 key
@@ -1023,11 +1026,14 @@ func main() {
 				},
 			},
 		}
-		payloadBytes, _ := json.Marshal(attestedPayload)
+		payloadBytes, err := rollup.MarshalRollupSystemAttestedPayload(&attestedPayload)
+		if err != nil {
+			return "", err
+		}
 
 		// Submit from cluster key (authorized sender)
 		clusterAddr := common.HexToAddress(r.env.Cluster.Address)
-		_, err := r.sendRawSystemTx("val0", r.env.Cluster.PrivateKey, clusterAddr, payloadBytes)
+		_, err = r.sendRawSystemTx("val0", r.env.Cluster.PrivateKey, clusterAddr, payloadBytes)
 		if err != nil {
 			return "", fmt.Errorf("submit forged envelope: %w", err)
 		}
@@ -1053,9 +1059,12 @@ func main() {
 			},
 			MsgID: common.HexToHash("0xfeedface"),
 		}
-		rawBytes, _ := json.Marshal(rawPayload)
+		rawBytes, err := rollup.MarshalRollupSystemPayload(&rawPayload)
+		if err != nil {
+			return "", err
+		}
 		clusterAddr := common.HexToAddress(r.env.Cluster.Address)
-		_, err := r.sendRawSystemTx("val0", r.env.Cluster.PrivateKey, clusterAddr, rawBytes)
+		_, err = r.sendRawSystemTx("val0", r.env.Cluster.PrivateKey, clusterAddr, rawBytes)
 		if err != nil && !strings.Contains(err.Error(), "rejected") && !strings.Contains(err.Error(), "co-attestation required") {
 			return "", fmt.Errorf("unexpected error: %w", err)
 		}
@@ -1174,7 +1183,10 @@ func main() {
 			},
 			MsgID: prematureMsgID,
 		}
-		pBytes, _ := json.Marshal(prematureInner)
+		pBytes, err := rollup.MarshalRollupSystemPayload(&prematureInner)
+		if err != nil {
+			return "", err
+		}
 		digest := rollup.ComputeRollupSystemEventDigest(chainID, pBytes)
 
 		// Create 2 attestations from val0 and val1
@@ -1194,7 +1206,10 @@ func main() {
 				{ValidatorPubkey: val1Pub, Signature: bls.Sign(cm.PrivateKeyFromBytes(val1Priv), digest)},
 			},
 		}
-		envelopeBytes, _ := json.Marshal(attPayload)
+		envelopeBytes, err := rollup.MarshalRollupSystemAttestedPayload(&attPayload)
+		if err != nil {
+			return "", err
+		}
 		clusterAddr := common.HexToAddress(r.env.Cluster.Address)
 
 		// Submit: dispatch will fail with "record not found"

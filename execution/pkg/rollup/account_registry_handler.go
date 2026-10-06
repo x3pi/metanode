@@ -2,17 +2,16 @@ package rollup
 
 import (
 	"encoding/binary"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -22,69 +21,8 @@ const (
 
 // RegistrationAttestation carries a single validator's BLS signature over the event digest.
 type RegistrationAttestation struct {
-	ValidatorPubkey cm.PublicKey `json:"validator_pubkey"`
-	Signature       cm.Sign      `json:"signature"`
-}
-
-func (a *RegistrationAttestation) UnmarshalJSON(data []byte) error {
-	var raw struct {
-		ValidatorPubkeyRaw json.RawMessage `json:"validator_pubkey"`
-		SignatureRaw       json.RawMessage `json:"signature"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	pub, err := parseClusterKey(raw.ValidatorPubkeyRaw)
-	if err != nil {
-		return fmt.Errorf("invalid validator_pubkey: %w", err)
-	}
-	sig, err := parseSignature(raw.SignatureRaw)
-	if err != nil {
-		return fmt.Errorf("invalid signature: %w", err)
-	}
-	a.ValidatorPubkey = pub
-	a.Signature = sig
-	return nil
-}
-
-func (a RegistrationAttestation) MarshalJSON() ([]byte, error) {
-	return json.Marshal(&struct {
-		ValidatorPubkey string `json:"validator_pubkey"`
-		Signature       string `json:"signature"`
-	}{
-		ValidatorPubkey: hex.EncodeToString(a.ValidatorPubkey[:]),
-		Signature:       hex.EncodeToString(a.Signature[:]),
-	})
-}
-
-func parseSignature(raw json.RawMessage) (cm.Sign, error) {
-	var sig cm.Sign
-	var str string
-	if err := json.Unmarshal(raw, &str); err == nil {
-		b, err := hex.DecodeString(strings.TrimPrefix(str, "0x"))
-		if err != nil {
-			return sig, fmt.Errorf("invalid signature hex: %w", err)
-		}
-		if len(b) != len(sig) {
-			return sig, fmt.Errorf("invalid signature length %d, want %d", len(b), len(sig))
-		}
-		copy(sig[:], b)
-		return sig, nil
-	}
-	var arr []int
-	if err := json.Unmarshal(raw, &arr); err == nil {
-		if len(arr) != len(sig) {
-			return sig, fmt.Errorf("invalid signature length %d, want %d", len(arr), len(sig))
-		}
-		for i, v := range arr {
-			if v < 0 || v > 255 {
-				return sig, fmt.Errorf("invalid signature byte %d at index %d", v, i)
-			}
-			sig[i] = byte(v)
-		}
-		return sig, nil
-	}
-	return sig, fmt.Errorf("invalid signature format")
+	ValidatorPubkey cm.PublicKey
+	Signature       cm.Sign
 }
 
 // ComputeAccountRegistrationAttestDigest computes the deterministic keccak256 digest for committee co-attestation:
@@ -103,89 +41,97 @@ func ComputeAccountRegistrationAttestDigest(chainID uint64, user common.Address,
 	return crypto.Keccak256(data)
 }
 
-// AccountRegistrationPayload is the JSON payload sent in a system transaction to RollupSystemAddress
+// AccountRegistrationPayload is the canonical payload sent in a system transaction to RollupSystemAddress
 // when an account registration event from Parent Chain is relayed to the execution cluster.
 type AccountRegistrationPayload struct {
-	Kind         string                    `json:"kind"`
-	User         common.Address            `json:"user"`
-	ClusterKey   cm.PublicKey              `json:"cluster_key"`
-	ParentSeq    uint64                    `json:"parent_seq"`
-	Attestations []RegistrationAttestation `json:"attestations,omitempty"`
+	Kind         string
+	User         common.Address
+	ClusterKey   cm.PublicKey
+	ParentSeq    uint64
+	Attestations []RegistrationAttestation
 }
 
-func (p *AccountRegistrationPayload) UnmarshalJSON(data []byte) error {
-	type rawPayload struct {
-		Kind          string                    `json:"kind"`
-		User          common.Address            `json:"user"`
-		ClusterKeyRaw json.RawMessage           `json:"cluster_key"`
-		ParentSeq     uint64                    `json:"parent_seq"`
-		Attestations  []RegistrationAttestation `json:"attestations,omitempty"`
+// ToProto converts AccountRegistrationPayload to protobuf representation.
+func (p *AccountRegistrationPayload) ToProto() *pb.AccountRegistrationPayloadProto {
+	if p == nil {
+		return nil
 	}
-	var raw rawPayload
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
+	var attestations []*pb.RollupAttestationProto
+	for _, a := range p.Attestations {
+		attestations = append(attestations, &pb.RollupAttestationProto{
+			ValidatorPubkey: a.ValidatorPubkey[:],
+			Signature:       a.Signature[:],
+		})
 	}
-	p.Kind = raw.Kind
-	p.User = raw.User
-	p.ParentSeq = raw.ParentSeq
-	p.Attestations = raw.Attestations
-
-	if len(raw.ClusterKeyRaw) > 0 {
-		key, err := parseClusterKey(raw.ClusterKeyRaw)
-		if err != nil {
-			return err
-		}
-		p.ClusterKey = key
-	}
-	return nil
-}
-
-// parseClusterKey accepts a hex string (with or without 0x) or an array of 48 byte values, and requires EXACTLY 48
-// bytes: a shorter or longer value must never be silently zero-padded or truncated into a different key.
-func parseClusterKey(raw json.RawMessage) (cm.PublicKey, error) {
-	var key cm.PublicKey
-	var str string
-	if err := json.Unmarshal(raw, &str); err == nil {
-		b, err := hex.DecodeString(strings.TrimPrefix(str, "0x"))
-		if err != nil {
-			return key, fmt.Errorf("invalid cluster_key hex: %w", err)
-		}
-		if len(b) != len(key) {
-			return key, fmt.Errorf("invalid cluster_key length %d, want %d", len(b), len(key))
-		}
-		copy(key[:], b)
-		return key, nil
-	}
-	var arr []int
-	if err := json.Unmarshal(raw, &arr); err == nil {
-		if len(arr) != len(key) {
-			return key, fmt.Errorf("invalid cluster_key length %d, want %d", len(arr), len(key))
-		}
-		for i, v := range arr {
-			if v < 0 || v > 255 {
-				return key, fmt.Errorf("invalid cluster_key byte %d at index %d", v, i)
-			}
-			key[i] = byte(v)
-		}
-		return key, nil
-	}
-	return key, fmt.Errorf("invalid cluster_key format")
-}
-
-func (p AccountRegistrationPayload) MarshalJSON() ([]byte, error) {
-	return json.Marshal(&struct {
-		Kind         string                    `json:"kind"`
-		User         common.Address            `json:"user"`
-		ClusterKey   string                    `json:"cluster_key"`
-		ParentSeq    uint64                    `json:"parent_seq"`
-		Attestations []RegistrationAttestation `json:"attestations,omitempty"`
-	}{
+	return &pb.AccountRegistrationPayloadProto{
 		Kind:         p.Kind,
-		User:         p.User,
-		ClusterKey:   hex.EncodeToString(p.ClusterKey[:]),
+		User:         p.User.Bytes(),
+		ClusterKey:   p.ClusterKey[:],
 		ParentSeq:    p.ParentSeq,
-		Attestations: p.Attestations,
-	})
+		Attestations: attestations,
+	}
+}
+
+// FromProto populates AccountRegistrationPayload from protobuf message.
+func (p *AccountRegistrationPayload) FromProto(pbPayload *pb.AccountRegistrationPayloadProto) {
+	if pbPayload == nil {
+		return
+	}
+	p.Kind = pbPayload.Kind
+	if len(pbPayload.User) > 0 {
+		p.User = common.BytesToAddress(pbPayload.User)
+	}
+	if len(pbPayload.ClusterKey) == len(p.ClusterKey) {
+		copy(p.ClusterKey[:], pbPayload.ClusterKey)
+	}
+	p.ParentSeq = pbPayload.ParentSeq
+	p.Attestations = nil
+	for _, a := range pbPayload.Attestations {
+		var pub cm.PublicKey
+		var sig cm.Sign
+		copy(pub[:], a.ValidatorPubkey)
+		copy(sig[:], a.Signature)
+		p.Attestations = append(p.Attestations, RegistrationAttestation{
+			ValidatorPubkey: pub,
+			Signature:       sig,
+		})
+	}
+}
+
+// MarshalProto encodes AccountRegistrationPayload as deterministic Protobuf.
+func (p *AccountRegistrationPayload) MarshalProto() ([]byte, error) {
+	if p == nil {
+		return nil, errors.New("cannot marshal nil AccountRegistrationPayload")
+	}
+	return deterministicMarshal.Marshal(p.ToProto())
+}
+
+// Unmarshal decodes data into AccountRegistrationPayload from deterministic Protobuf format.
+func (p *AccountRegistrationPayload) Unmarshal(data []byte) error {
+	if len(data) == 0 {
+		return errors.New("empty data for AccountRegistrationPayload")
+	}
+	if p == nil {
+		return errors.New("nil target AccountRegistrationPayload")
+	}
+	var pbPayload pb.AccountRegistrationPayloadProto
+	if err := proto.Unmarshal(data, &pbPayload); err != nil {
+		return fmt.Errorf("failed to unmarshal AccountRegistrationPayload protobuf: %w", err)
+	}
+	if pbPayload.Kind != SystemPayloadKindAccountRegistered {
+		return fmt.Errorf("unexpected payload kind %q, expected %q", pbPayload.Kind, SystemPayloadKindAccountRegistered)
+	}
+	if len(pbPayload.ClusterKey) != len(p.ClusterKey) {
+		return fmt.Errorf("account registry: cluster_key must be exactly %d bytes, got %d", len(p.ClusterKey), len(pbPayload.ClusterKey))
+	}
+	if err := requireLen("user", pbPayload.User, common.AddressLength); err != nil {
+		return fmt.Errorf("account registry: %w", err)
+	}
+	if err := validateAttestationsProto(pbPayload.Attestations); err != nil {
+		return fmt.Errorf("account registry: %w", err)
+	}
+	p.FromProto(&pbPayload)
+	return nil
 }
 
 // AccountStateRegistryDB is the state interface needed to query and set the ParentRegistered flag.
@@ -238,15 +184,13 @@ func (h *AccountRegistryHandler) ClusterPublicKey() cm.PublicKey {
 	return h.clusterPubKey
 }
 
-// IsAccountRegistrationPayload checks whether the given byte slice is a JSON payload with kind="account_registered".
+// IsAccountRegistrationPayload checks whether the given byte slice is a Protobuf payload with kind="account_registered".
 func IsAccountRegistrationPayload(data []byte) bool {
 	if len(data) == 0 {
 		return false
 	}
-	var probe struct {
-		Kind string `json:"kind"`
-	}
-	if err := json.Unmarshal(data, &probe); err == nil && probe.Kind == SystemPayloadKindAccountRegistered {
+	var pbPayload pb.AccountRegistrationPayloadProto
+	if err := proto.Unmarshal(data, &pbPayload); err == nil && pbPayload.Kind == SystemPayloadKindAccountRegistered {
 		return true
 	}
 	return false
@@ -280,8 +224,8 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 	}
 
 	var payload AccountRegistrationPayload
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return fmt.Errorf("account registry: invalid json payload: %w", err)
+	if err := payload.Unmarshal(data); err != nil {
+		return fmt.Errorf("account registry: invalid payload: %w", err)
 	}
 	if payload.Kind != SystemPayloadKindAccountRegistered {
 		return fmt.Errorf("account registry: unexpected payload kind %q", payload.Kind)
