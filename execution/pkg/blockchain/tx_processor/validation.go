@@ -303,6 +303,13 @@ func VerifyTransaction(
 		}
 	}
 
+	// Payload data size limit check (DoS prevention)
+	const maxDataSize = 6 * 1024 * 1024
+	if len(tx.Data()) > maxDataSize {
+		logger.Error("Transaction data size exceeds limit", "hash", tx.Hash().Hex(), "size", len(tx.Data()), "limit", maxDataSize)
+		return transaction.InvalidData
+	}
+
 	if tx.ToAddress() == utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		dataInput := tx.CallData().Input()
 
@@ -388,13 +395,6 @@ func VerifyTransaction(
 				}
 			}
 		}
-	}
-
-	// Thêm kiểm tra kích thước Call Data
-	const maxDataSize = 6 * 1024 * 1024
-	if len(tx.Data()) > maxDataSize {
-		logger.Error("Transaction data size exceeds limit", "hash", tx.Hash().Hex(), "size", len(tx.Data()), "limit", maxDataSize)
-		return transaction.InvalidData // Sử dụng lỗi InvalidData hoặc tạo lỗi mới nếu cần
 	}
 
 	if !tx.ValidChainID(chainState.GetConfig().ChainId.Uint64()) {
