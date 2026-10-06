@@ -3,6 +3,7 @@ package tx_processor
 import (
 	"bytes"
 	"fmt"
+	"math/big"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -156,9 +157,10 @@ func VerifyTransaction(
 		isExplicitDev := os.Getenv("METANODE_DEVNET") == "true"
 		isProd := os.Getenv("NODE_ENV") == "production" ||
 			os.Getenv("ENVIRONMENT") == "production" ||
-			os.Getenv("METANODE_ENV") == "production"
+			os.Getenv("METANODE_ENV") == "production" ||
+			(chainState != nil && chainState.GetConfig() != nil && chainState.GetConfig().ChainId != nil && chainState.GetConfig().ChainId.Cmp(big.NewInt(991)) == 0)
 		if !isExplicitDev || isProd {
-			logger.Error("🚨 [SECURITY VIOLATION] SKIP_MEMPOOL_SIG_VERIFY=true invoked without explicit METANODE_DEVNET=true or in production environment! Bypassing is blocked.")
+			logger.Error("🚨 [SECURITY VIOLATION] SKIP_MEMPOOL_SIG_VERIFY=true invoked without explicit METANODE_DEVNET=true or on production chain (991)! Bypassing is blocked.")
 		} else {
 			return nil
 		}

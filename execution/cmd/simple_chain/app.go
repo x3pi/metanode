@@ -166,17 +166,19 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	// Issue #103: Enforce that SKIP_MEMPOOL_SIG_VERIFY is fail-closed.
+	// Issue #103 / P0-2: Enforce that SKIP_MEMPOOL_SIG_VERIFY is fail-closed.
 	// Bypassing mempool signature verification is ONLY allowed if explicitly enabled
-	// for development/benchmarks (METANODE_DEVNET=true) and strictly forbidden otherwise (e.g. production).
+	// for development/benchmarks (METANODE_DEVNET=true) on non-production chains.
+	// It is strictly forbidden on production chain (ChainId == 991) or production environments.
 	if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") == "true" {
 		isExplicitDev := os.Getenv("METANODE_DEVNET") == "true"
 		isProduction := os.Getenv("NODE_ENV") == "production" ||
 			os.Getenv("ENVIRONMENT") == "production" ||
-			os.Getenv("METANODE_ENV") == "production"
+			os.Getenv("METANODE_ENV") == "production" ||
+			(app.config.ChainId != nil && app.config.ChainId.Cmp(big.NewInt(991)) == 0)
 
 		if !isExplicitDev || isProduction {
-			return nil, fmt.Errorf("FATAL SECURITY VIOLATION (Issue #103): SKIP_MEMPOOL_SIG_VERIFY=true is only allowed when METANODE_DEVNET=true is explicitly set, and strictly forbidden in production (NODE_ENV/METANODE_ENV=production)")
+			return nil, fmt.Errorf("FATAL SECURITY VIOLATION (Issue #103): SKIP_MEMPOOL_SIG_VERIFY=true is strictly forbidden on production chain (Chain ID 991) or without explicit METANODE_DEVNET=true")
 		}
 		isPrivacy := app.config.PrivacyMode || os.Getenv("PRIVACY_MODE") == "true"
 		if strings.ToLower(app.config.ConsensusMode) == "raft" || isPrivacy {

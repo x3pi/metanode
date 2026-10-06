@@ -110,15 +110,20 @@ func TestIssue103_SkipMempoolSigVerifyProductionGuard(t *testing.T) {
 	t.Setenv("NODE_ENV", "development")
 	t.Setenv("ENVIRONMENT", "development")
 	t.Setenv("METANODE_ENV", "development")
+	cfgRaftDevPath := filepath.Join(tmpDir, "config_raft_dev.json")
+	cfgRaftDevContent := `{"chainId": 1337, "consensus_mode": "raft", "Databases": {"RootPath": "` + tmpDir + `"}}`
+	if err := os.WriteFile(cfgRaftDevPath, []byte(cfgRaftDevContent), 0644); err != nil {
+		t.Fatalf("failed to write raft dev config: %v", err)
+	}
 	config.ResetConfigForTesting()
-	_, err = NewApp(cfgPath, 0)
+	_, err = NewApp(cfgRaftDevPath, 0)
 	if err == nil || !strings.Contains(err.Error(), "strictly forbidden when consensus_mode is 'raft'") {
 		t.Fatalf("expected fatal security violation error for raft mode with SKIP_MEMPOOL_SIG_VERIFY, got: %v", err)
 	}
 
 	// Case 3b: Explicit devnet, consensus_mode="rust", but privacy_mode=true -> Must fail
 	cfgPrivacyPath := filepath.Join(tmpDir, "config_privacy.json")
-	cfgPrivacyContent := `{"chainId": 991, "consensus_mode": "rust", "privacy_mode": true, "Databases": {"RootPath": "` + tmpDir + `"}}`
+	cfgPrivacyContent := `{"chainId": 1337, "consensus_mode": "rust", "privacy_mode": true, "Databases": {"RootPath": "` + tmpDir + `"}}`
 	if err := os.WriteFile(cfgPrivacyPath, []byte(cfgPrivacyContent), 0644); err != nil {
 		t.Fatalf("failed to write privacy config: %v", err)
 	}
@@ -128,9 +133,9 @@ func TestIssue103_SkipMempoolSigVerifyProductionGuard(t *testing.T) {
 		t.Fatalf("expected fatal security violation error for privacy mode with SKIP_MEMPOOL_SIG_VERIFY, got: %v", err)
 	}
 
-	// Case 3c: Explicit devnet (METANODE_DEVNET=true), non-production, consensus_mode="rust", privacy_mode=false -> Should pass startup guard
+	// Case 3c: Explicit devnet (METANODE_DEVNET=true), non-production, non-991 chainId (e.g. 1337), consensus_mode="rust", privacy_mode=false -> Should pass startup guard
 	cfgDevPath := filepath.Join(tmpDir, "config_dev.json")
-	cfgDevContent := `{"chainId": 991, "consensus_mode": "rust", "privacy_mode": false, "Databases": {"RootPath": "` + tmpDir + `"}}`
+	cfgDevContent := `{"chainId": 1337, "consensus_mode": "rust", "privacy_mode": false, "Databases": {"RootPath": "` + tmpDir + `"}}`
 	if err := os.WriteFile(cfgDevPath, []byte(cfgDevContent), 0644); err != nil {
 		t.Fatalf("failed to write dev config: %v", err)
 	}
@@ -138,5 +143,17 @@ func TestIssue103_SkipMempoolSigVerifyProductionGuard(t *testing.T) {
 	_, err = NewApp(cfgDevPath, 0)
 	if err != nil && strings.Contains(err.Error(), "FATAL SECURITY VIOLATION (Issue #103)") {
 		t.Fatalf("unexpected Issue #103 security violation in explicit devnet mode: %v", err)
+	}
+
+	// Case 3d: Explicit devnet (METANODE_DEVNET=true) on production chain (chainId: 991) -> MUST FAIL (P0-2)
+	cfgProdChainPath := filepath.Join(tmpDir, "config_prod_chain.json")
+	cfgProdChainContent := `{"chainId": 991, "consensus_mode": "rust", "privacy_mode": false, "Databases": {"RootPath": "` + tmpDir + `"}}`
+	if err := os.WriteFile(cfgProdChainPath, []byte(cfgProdChainContent), 0644); err != nil {
+		t.Fatalf("failed to write prod chain config: %v", err)
+	}
+	config.ResetConfigForTesting()
+	_, err = NewApp(cfgProdChainPath, 0)
+	if err == nil || !strings.Contains(err.Error(), "strictly forbidden on production chain (Chain ID 991)") {
+		t.Fatalf("expected fatal security violation on chain 991 even with METANODE_DEVNET=true, got: %v", err)
 	}
 }

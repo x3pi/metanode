@@ -386,20 +386,21 @@ func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptx
 }
 
 // sigVerifyBypassedForDevnet reports the explicit devnet-benchmark bypass (same guard as VerifyTransaction:
-// SKIP_MEMPOOL_SIG_VERIFY=true only honoured with METANODE_DEVNET=true and never in production).
+// SKIP_MEMPOOL_SIG_VERIFY=true only honoured with METANODE_DEVNET=true and never on production chain 991 or in production).
 func sigVerifyBypassedForDevnet() bool {
 	if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") != "true" {
 		return false
 	}
 	isProd := os.Getenv("NODE_ENV") == "production" ||
 		os.Getenv("ENVIRONMENT") == "production" ||
-		os.Getenv("METANODE_ENV") == "production"
+		os.Getenv("METANODE_ENV") == "production" ||
+		os.Getenv("CHAIN_ID") == "991"
 	return os.Getenv("METANODE_DEVNET") == "true" && !isProd
 }
 
 // execFilterDisabledForDevnetBenchmark lets a devnet operator A/B the throughput cost of THIS filter alone
 // (mempool verification stays on): METANODE_DEVNET_SKIP_EXEC_SIG_FILTER=true, honoured only with
-// METANODE_DEVNET=true and never in production. Not for real networks: it re-opens the Byzantine-proposer
+// METANODE_DEVNET=true and never in production or on chain 991. Not for real networks: it re-opens the Byzantine-proposer
 // forged-tx hole the filter closes.
 func execFilterDisabledForDevnetBenchmark() bool {
 	if os.Getenv("METANODE_DEVNET_SKIP_EXEC_SIG_FILTER") != "true" {
@@ -407,6 +408,7 @@ func execFilterDisabledForDevnetBenchmark() bool {
 	}
 	isProd := os.Getenv("NODE_ENV") == "production" ||
 		os.Getenv("ENVIRONMENT") == "production" ||
-		os.Getenv("METANODE_ENV") == "production"
+		os.Getenv("METANODE_ENV") == "production" ||
+		os.Getenv("CHAIN_ID") == "991"
 	return os.Getenv("METANODE_DEVNET") == "true" && !isProd
 }
