@@ -109,7 +109,11 @@ func NewTransactionFromEth(ethTx *e_types.Transaction) (types.Transaction, error
 	if err != nil {
 		return nil, err
 	}
-	return TransactionFromProto(pTx), nil
+	res := TransactionFromProto(pTx)
+	if concrete, ok := res.(*Transaction); ok && ethTx.BlobTxSidecar() == nil {
+		concrete.cachedEthTx.Store(ethTx)
+	}
+	return res, nil
 }
 
 // Hàm tổng quát để chuyển đổi pb.Transaction sang types.Transaction của go-ethereum

@@ -2,7 +2,6 @@ package routes
 
 import (
 	"fmt"
-	"time" // Thêm import này
 
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/command"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
@@ -24,6 +23,8 @@ func InitRoutes(
 	// --- KHỞI TẠO RATE LIMITERS ---
 	// Giới hạn 500,000 req/s, burst 50,000 (cho 100ms)
 	readTxLimiter := rate.NewLimiter(rate.Limit(500000), 50000)
+	// Giới hạn 50,000 tx/s, burst 5,000 cho SendRawTransaction(s)
+	rawTxLimiter := rate.NewLimiter(rate.Limit(50000), 5000)
 
 	// --- HÀM BỌC (WRAPPER) VỚI LOGIC BACKPRESSURE ---
 	withRateLimit := func(limiter *rate.Limiter, next func(network.Request) error) func(network.Request) error {
@@ -35,11 +36,8 @@ func InitRoutes(
 					_ = messageSender.SendMessage(conn, common.ServerBusy, nil)
 				}
 
-				// 2. TẠO ÁP LỰC NGƯỢC: Buộc worker xử lý request này phải dừng lại một chút.
-				//    Điều này ngăn client gửi yêu cầu liên tục mà không bị ảnh hưởng.
-				time.Sleep(100 * time.Millisecond)
-
-				// 3. Trả về lỗi để network handler biết và ghi log
+				// 2. Trả về lỗi non-blocking để network handler biết và ghi log
+				// (TUYỆT ĐỐI không time.Sleep gây cạn kiệt worker pool / DoS)
 				return fmt.Errorf("rate limit exceeded for command: %s", r.Message().Command())
 			}
 			// Gọi handler gốc nếu không vượt giới hạn
@@ -86,9 +84,9 @@ func InitRoutes(
 	routes[command.SendTransactions] = transactionProcessor.ProcessTransactionsFromClient
 	routes[command.SendTransactionWithDeviceKey] = transactionProcessor.ProcessTransactionFromClientWithDeviceKey
 
-	// Eth-only TCP ingress
-	routes[command.SendRawTransaction] = transactionProcessor.ProcessRawTransactionFromClient
-	routes[command.SendRawTransactions] = transactionProcessor.ProcessRawTransactionsFromClient
+	// Eth-only TCP ingress (rate limited to prevent TCP raw DoS)
+	routes[command.SendRawTransaction] = withRateLimit(rawTxLimiter, transactionProcessor.ProcessRawTransactionFromClient)
+	routes[command.SendRawTransactions] = withRateLimit(rawTxLimiter, transactionProcessor.ProcessRawTransactionsFromClient)
 
 	// subscribe routes
 	routes[command.SubscribeToAddress] = subscribeProcessor.ProcessSubscribeToAddress

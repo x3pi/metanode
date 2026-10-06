@@ -278,7 +278,7 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 		metaTx, ethTx, err := tp.convertRawEth(req.rawBody)
 		if err != nil {
 			txErr := transaction.ClassifyEthTxError(err)
-			logger.Error("executeAndAddTx: rawEth conversion failed (code %d): %v", txErr.Code, err)
+			logger.Warn("executeAndAddTx: rawEth conversion failed (code %d): %v", txErr.Code, err)
 			tp.sendTransactionError(req.conn, common.Hash{}, int64(txErr.Code), err.Error(), nil, req.msgID)
 			return
 		}
@@ -411,7 +411,7 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 	code, err := tp.AddTransactionToPool(tx)
 	if err != nil {
 		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_FAILED", err.Error())
-		logger.Error("❌ [TX REJECTED] AddTransactionToPool failed: txHash=%s, msg=%s", tx.Hash().Hex(), err.Error())
+		logger.Warn("⚠️ [TX REJECTED] AddTransactionToPool failed: txHash=%s, msg=%s", tx.Hash().Hex(), err.Error())
 		errHash := tx.Hash()
 		if respHash != (common.Hash{}) {
 			errHash = respHash
@@ -566,41 +566,107 @@ func (tp *TransactionProcessor) ProcessRawTransactionsFromClient(request network
 
 	logger.Info("🔥 ProcessRawTransactionsFromClient: Received batch of %d raw Ethereum transactions", len(rawEnvelopes))
 
+	type batchItemError struct {
+		Index int
+		Hash  common.Hash
+		Code  int64
+		Msg   string
+	}
+	var batchErrors []batchItemError
+
+	type convertedItem struct {
+		idx    int
+		rawEnv []byte
+		metaTx types.Transaction
+		ethTx  *e_types.Transaction
+		err    error
+	}
+
+	// Bounded worker pool to parallelize batch decoding and ecrecover across CPU cores
+	numWorkers := runtime.GOMAXPROCS(0)
+	if numWorkers > 16 {
+		numWorkers = 16
+	}
+	if numWorkers > len(rawEnvelopes) {
+		numWorkers = len(rawEnvelopes)
+	}
+	if numWorkers <= 0 {
+		numWorkers = 1
+	}
+
+	converted := make([]convertedItem, len(rawEnvelopes))
+	var wg sync.WaitGroup
+	chunkSize := (len(rawEnvelopes) + numWorkers - 1) / numWorkers
+
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunkSize
+		end := start + chunkSize
+		if end > len(rawEnvelopes) {
+			end = len(rawEnvelopes)
+		}
+		if start >= len(rawEnvelopes) {
+			break
+		}
+		wg.Add(1)
+		go func(s, e int) {
+			defer wg.Done()
+			for idx := s; idx < e; idx++ {
+				rawEnv := rawEnvelopes[idx]
+				if len(rawEnv) > transaction.MaxRawEthTxEnvelopeSize {
+					converted[idx] = convertedItem{
+						idx:    idx,
+						rawEnv: rawEnv,
+						err:    fmt.Errorf("batch item [%d] envelope size %d exceeds maximum limit (%d)", idx, len(rawEnv), transaction.MaxRawEthTxEnvelopeSize),
+					}
+					continue
+				}
+				metaTx, ethTx, err := tp.convertRawEth(rawEnv)
+				converted[idx] = convertedItem{
+					idx:    idx,
+					rawEnv: rawEnv,
+					metaTx: metaTx,
+					ethTx:  ethTx,
+					err:    err,
+				}
+			}
+		}(start, end)
+	}
+	wg.Wait()
+
 	bc := blockchain.GetBlockChainInstance()
 	processedTxs := make([]types.Transaction, 0, len(rawEnvelopes))
 	processedEthHashes := make([]common.Hash, 0, len(rawEnvelopes))
 	processedRawEnvs := make([][]byte, 0, len(rawEnvelopes))
 
-	for idx, rawEnv := range rawEnvelopes {
-		if len(rawEnv) > transaction.MaxRawEthTxEnvelopeSize {
-			err := fmt.Errorf("batch item [%d] envelope size %d exceeds maximum limit (%d)", idx, len(rawEnv), transaction.MaxRawEthTxEnvelopeSize)
-			logger.Error("ProcessRawTransactionsFromClient: %v", err)
-			tp.sendTransactionError(request.Connection(), common.Hash{}, int64(transaction.ErrExceedsMaxEnvelopeSize.Code), err.Error(), nil, request.Message().ID())
-			continue
-		}
-
-		metaTx, ethTx, err := tp.convertRawEth(rawEnv)
-		if err != nil {
-			txErr := transaction.ClassifyEthTxError(err)
+	for idx, item := range converted {
+		if item.err != nil {
+			txErr := transaction.ClassifyEthTxError(item.err)
 			var failedHash common.Hash
-			if ethTx != nil {
-				failedHash = ethTx.Hash()
+			if item.ethTx != nil {
+				failedHash = item.ethTx.Hash()
 			}
-			logger.Error("ProcessRawTransactionsFromClient: item [%d] convert failed (code %d): %v", idx, txErr.Code, err)
-			tp.sendTransactionError(request.Connection(), failedHash, int64(txErr.Code), fmt.Sprintf("batch item [%d]: %v", idx, err), nil, request.Message().ID())
+			logger.Warn("ProcessRawTransactionsFromClient: item [%d] convert failed (code %d): %v", idx, txErr.Code, item.err)
+			batchErrors = append(batchErrors, batchItemError{
+				Index: idx,
+				Hash:  failedHash,
+				Code:  int64(txErr.Code),
+				Msg:   fmt.Sprintf("batch item [%d]: %v", idx, item.err),
+			})
 			continue
 		}
 
-		processedTxs = append(processedTxs, metaTx)
-		processedEthHashes = append(processedEthHashes, ethTx.Hash())
-		processedRawEnvs = append(processedRawEnvs, rawEnv)
+		processedTxs = append(processedTxs, item.metaTx)
+		processedEthHashes = append(processedEthHashes, item.ethTx.Hash())
+		processedRawEnvs = append(processedRawEnvs, item.rawEnv)
 
-		tx_processor.GlobalTxTraceStore.UpdateTrace(metaTx.Hash(), "BATCH_UNMARSHALED", "Raw Ethereum transaction received in batch from client")
+		tx_processor.GlobalTxTraceStore.UpdateTrace(item.metaTx.Hash(), "BATCH_UNMARSHALED", "Raw Ethereum transaction received in batch from client")
 	}
 
 	if len(processedTxs) == 0 {
-		err := fmt.Errorf("all transactions in batch failed decoding/validation")
-		logger.Error("ProcessRawTransactionsFromClient: %v", err)
+		firstErr := batchErrors[0]
+		err := fmt.Errorf("all %d transactions in batch failed decoding/validation: %s", len(rawEnvelopes), firstErr.Msg)
+		logger.Warn("ProcessRawTransactionsFromClient: %v", err)
+		tp.sendTransactionError(request.Connection(), firstErr.Hash, firstErr.Code, err.Error(), nil, request.Message().ID())
 		return err
 	}
 
@@ -645,9 +711,14 @@ func (tp *TransactionProcessor) ProcessRawTransactionsFromClient(request network
 					}
 				}
 			}
-			logger.Error("❌ [TX REJECTED] Batch AddTransactionToPool failed: ethHash=%s, metaHash=%s, code=%d, msg=%s",
+			logger.Warn("⚠️ [TX REJECTED] Batch AddTransactionToPool failed: ethHash=%s, metaHash=%s, code=%d, msg=%s",
 				processedEthHashes[i].Hex(), processedTxs[i].Hash().Hex(), errCode, errMsg)
-			tp.sendTransactionError(request.Connection(), processedEthHashes[i], errCode, errMsg, nil, "")
+			batchErrors = append(batchErrors, batchItemError{
+				Index: i,
+				Hash:  processedEthHashes[i],
+				Code:  errCode,
+				Msg:   errMsg,
+			})
 		} else {
 			successfulEthHashes = append(successfulEthHashes, processedEthHashes[i])
 			tx_processor.GlobalTxTraceStore.UpdateTrace(processedTxs[i].Hash(), "MEMPOOL_ADD_SUCCESS", "Transaction is pending in mempool")
@@ -684,6 +755,9 @@ func (tp *TransactionProcessor) ProcessRawTransactionsFromClient(request network
 		} else {
 			tp.sendTransactionSuccessBytes(request.Connection(), respBody, request.Message().ID())
 		}
+	} else if len(batchErrors) > 0 {
+		firstErr := batchErrors[0]
+		tp.sendTransactionError(request.Connection(), firstErr.Hash, firstErr.Code, firstErr.Msg, nil, request.Message().ID())
 	}
 	elapsed := time.Since(startTime)
 	if elapsed > 10*time.Millisecond {
