@@ -364,7 +364,7 @@ def start_daemon(inventory_path=None, interval=5):
     if inventory_path:
         cmd.append(f"--inventory={os.path.abspath(inventory_path)}")
     with open(LOG_FILE, "a") as out:
-        proc = subprocess.Popen(cmd, stdout=out, stderr=out, close_fds=True)
+        proc = subprocess.Popen(cmd, stdout=out, stderr=out, close_fds=True, start_new_session=True)
     with open(PID_FILE, "w") as f:
         f.write(str(proc.pid))
     print(f"✅ Parent Chain Monitor started in background (PID: {proc.pid}, Log: {LOG_FILE})")

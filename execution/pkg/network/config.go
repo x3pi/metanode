@@ -9,17 +9,18 @@ import (
 
 // Config chứa tất cả các tham số cấu hình cho module network.
 type Config struct {
-	MaxMessageLength       uint64
-	RequestChanSize        int
-	ErrorChanSize          int
-	WriteTimeout           time.Duration
-	RequestChanWaitTimeout time.Duration
-	DialTimeout            time.Duration
-	RetryParentInterval    time.Duration
-	HandlerWorkerPoolSize  int
-	SendChanSize           int // <-- THÊM DÒNG NÀY
-	MaxConnections         int // GO-M2: max concurrent TCP connections (0 = default 1000)
-	MaxConnectionsPerIP    int // NET-02: max concurrent TCP connections per remote IP (0 = default 100)
+	MaxMessageLength              uint64
+	RequestChanSize               int
+	ErrorChanSize                 int
+	WriteTimeout                  time.Duration
+	AcceptedConnectionIdleTimeout time.Duration // Maximum interval without a complete valid inbound message from an accepted peer.
+	RequestChanWaitTimeout        time.Duration
+	DialTimeout                   time.Duration
+	RetryParentInterval           time.Duration
+	HandlerWorkerPoolSize         int
+	SendChanSize                  int // <-- THÊM DÒNG NÀY
+	MaxConnections                int // GO-M2: max concurrent TCP connections (0 = default 1000)
+	MaxConnectionsPerIP           int // NET-02: max concurrent TCP connections per remote IP (0 = default 100)
 }
 
 // DefaultConfig tự động tạo ra một cấu hình mặc định hợp lý
@@ -50,16 +51,17 @@ func DefaultConfig() *Config {
 	requestQueueSize := 500000
 
 	return &Config{
-		MaxMessageLength:       256 * 1024 * 1024, // 256MB (genesis state sync can be 170MB+ with many accounts and full trie data)
-		HandlerWorkerPoolSize:  numWorkers,
-		RequestChanSize:        requestQueueSize,
-		SendChanSize:           500000, // Kích thước buffer cho kênh gửi (500K — hỗ trợ burst 200K+ TX)
-		ErrorChanSize:          2000,
-		WriteTimeout:           10 * time.Second,
-		RequestChanWaitTimeout: 30 * time.Second,
-		DialTimeout:            10 * time.Second,
-		RetryParentInterval:    5 * time.Second,
-		MaxConnections:         1000, // GO-M2: default cap; override in Config if needed
-		MaxConnectionsPerIP:    100,  // NET-02: default per-IP cap; safe for multi-node local testnets
+		MaxMessageLength:              256 * 1024 * 1024, // 256MB (genesis state sync can be 170MB+ with many accounts and full trie data)
+		HandlerWorkerPoolSize:         numWorkers,
+		RequestChanSize:               requestQueueSize,
+		SendChanSize:                  500000, // Kích thước buffer cho kênh gửi (500K — hỗ trợ burst 200K+ TX)
+		ErrorChanSize:                 2000,
+		WriteTimeout:                  10 * time.Second,
+		AcceptedConnectionIdleTimeout: 90 * time.Second,
+		RequestChanWaitTimeout:        30 * time.Second,
+		DialTimeout:                   10 * time.Second,
+		RetryParentInterval:           5 * time.Second,
+		MaxConnections:                1000, // GO-M2: default cap; override in Config if needed
+		MaxConnectionsPerIP:           100,  // NET-02: default per-IP cap; safe for multi-node local testnets
 	}
 }

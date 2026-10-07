@@ -333,13 +333,13 @@ func NewServer(app *App) *http.ServeMux {
 		logger.SyncFileLog()
 		os.Exit(1)
 	}
-	// CORS middleware — only allows wildcard origin on the public RPC root path.
-	// Admin, debug, and pipeline endpoints do NOT get CORS headers to prevent
+	// CORS middleware — allows wildcard origin on browser-facing public RPC and
+	// health endpoints. Admin, debug, and pipeline endpoints do NOT get CORS headers to prevent
 	// cross-site attacks (e.g. browser-based admin API abuse via CSRF).
 	corsMiddleware := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Only allow CORS on public RPC paths (MetaMask / browser wallets)
-			if r.URL.Path == "/" || r.URL.Path == "/ws" {
+			// Only allow CORS on browser-facing public endpoints.
+			if r.URL.Path == "/" || r.URL.Path == "/ws" || r.URL.Path == "/health" || r.URL.Path == "/readiness" {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 				w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -477,7 +477,7 @@ func NewServer(app *App) *http.ServeMux {
 	// Backward-compatible JSON metrics endpoint
 	mux.Handle("/metrics/json", metricsCollector)
 	// Enhanced /health endpoint (Liveness)
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/health", corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		status := map[string]interface{}{
@@ -507,10 +507,10 @@ func NewServer(app *App) *http.ServeMux {
 		}
 
 		json.NewEncoder(w).Encode(status)
-	})
+	})))
 
 	// /readiness endpoint (Readiness Probe)
-	mux.HandleFunc("/readiness", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/readiness", corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		ready := true
@@ -543,7 +543,7 @@ func NewServer(app *App) *http.ServeMux {
 			w.WriteHeader(http.StatusOK)
 		}
 		json.NewEncoder(w).Encode(status)
-	})
+	})))
 
 	// Pipeline monitoring endpoints
 	mux.HandleFunc("/pipeline/stats", func(w http.ResponseWriter, r *http.Request) {

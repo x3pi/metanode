@@ -139,21 +139,62 @@
         - "{{ node_data_dir }}/explorer-ro"
         - "{{ base_log_dir }}"
 
-    - name: Ensure Raft HMAC secret key exists
+    - name: Ensure the Raft HMAC secret exists on this cluster's bootstrap source
       when: "(consensus_mode | default('raft')) == 'raft'"
       block:
-        - name: Check if Raft secret file exists
+        - name: Require an explicit bootstrap source for the shared Raft HMAC secret
+          ansible.builtin.assert:
+            that:
+              - >-
+                raft_secret_source is defined and
+                raft_secret_source in groups['exec_clusters'] and
+                (hostvars[raft_secret_source].raft_bootstrap | default(false) | bool) and
+                ((hostvars[raft_secret_source].cluster_id | string) == (cluster_id | string))
+            fail_msg: >-
+              {{ inventory_hostname }}: raft_secret_source must name the bootstrap replica in this cluster.
+              Refusing to generate a per-replica secret because that would break Raft HMAC authentication.
+
+        - name: Ensure the Raft HMAC secret directory exists on every replica
+          ansible.builtin.file:
+            path: "{{ (raft_secret_file | default(install_dir ~ '/raft_secret.key')) | dirname }}"
+            state: directory
+            mode: '0755'
+            owner: "{{ ansible_user | default('abc') }}"
+            group: "{{ ansible_user | default('abc') }}"
+
+        - name: Check the bootstrap source Raft secret
           ansible.builtin.stat:
             path: "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
-          register: raft_secret_stat
+          register: raft_secret_source_stat
+          when: inventory_hostname == raft_secret_source
 
-        - name: Generate random 32-byte HMAC secret if missing
-          when: not raft_secret_stat.stat.exists
+        - name: Generate a Raft HMAC secret on the bootstrap source if it is missing
+          when:
+            - inventory_hostname == raft_secret_source
+            - not raft_secret_source_stat.stat.exists
           ansible.builtin.shell: |
             mkdir -p "{{ install_dir }}"
             python3 -c "import secrets; print(secrets.token_hex(32), end='')" > "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
             chmod 600 "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
             chown {{ ansible_user | default('abc') }}:{{ ansible_user | default('abc') }} "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
+          no_log: true
+
+        - name: Read the cluster Raft HMAC secret from its bootstrap source
+          ansible.builtin.slurp:
+            src: "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
+          delegate_to: "{{ raft_secret_source }}"
+          register: raft_secret_source_content
+          changed_when: false
+          no_log: true
+
+        - name: Synchronize the cluster Raft HMAC secret to this replica
+          ansible.builtin.copy:
+            content: "{{ raft_secret_source_content.content | b64decode }}"
+            dest: "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
+            owner: "{{ ansible_user | default('abc') }}"
+            group: "{{ ansible_user | default('abc') }}"
+            mode: '0600'
+          no_log: true
 
     # ── Pre-flight: the validator's BLS secret must produce the public key that genesis registers ──────────────
     # Runs on the controller with the freshly built tool (it is never shipped to nodes). The secret goes through
