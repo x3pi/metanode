@@ -1,15 +1,14 @@
-# Báo Cáo Hiệu Năng & Độ Bền NOMT Fsync (Giai Đoạn C — B1) — 2026-10-07
+# Báo Cáo Đo Đạc Microbenchmark NOMT Commit & Phục Hồi Crash Tiến Trình — 2026-10-07
 
 ## 1. Mục Tiêu & Phương Pháp Đo Đạc
 
-Theo yêu cầu Giai đoạn C (mục B1 trong kế hoạch `plan_verify_memory_nomt_20261007.md`):
-1. **Kiểm tra tính nhất quán cấu hình fsync:** Xác minh `nomt_commit_bench_test.go` và `test_crash_recovery_nomt.sh` chạy trên cấu hình bật fsync đầy đủ (`nomt_ffi.Open(..., false)`), tuyệt đối không tắt fsync trong đường production.
-2. **Microbenchmark:** Chạy `go test -bench=NomtCommit -benchmem -count=5 ./pkg/trie/...` để định lượng chi phí commit trie qua 5 lần lặp độc lập.
-3. **Độ bền khi gặp sự cố (Crash Recovery under Load):** Chạy `test_crash_recovery_nomt.sh` đủ 10 vòng `kill -9` ngẫu nhiên trên các validator của cụm cô lập trong lúc đang blast giao dịch SECP256k1 EIP-1559, kiểm chứng:
+1. **Microbenchmark:** Chạy `go test -bench=NomtCommit -benchmem -count=5 ./pkg/trie/...` để định lượng thời gian commit trie ở cấp độ đơn vị qua 5 lần lặp độc lập, so sánh mô hình BlockPipeline (`commitWg` + `CommitAsync`) và Synchronous Commit.
+   *(Lưu ý đính chính: tham số cuối của `nomt_ffi.Open(..., false)` trong code benchmark là `preallocate bool`, KHÔNG phải tham số bật/tắt fsync. Fsync được quản lý độc lập bên trong NOMT engine).*
+2. **Khôi phục sự cố sập tiến trình (Crash-Process Recovery under Load):** Chạy `test_crash_recovery_nomt.sh` đủ 10 vòng `kill -9` ngẫu nhiên trên các validator của cụm cô lập trong lúc đang blast giao dịch SECP256k1 EIP-1559, kiểm chứng:
    - Không node nào thoát với mã lỗi 78 (Startup Data Integrity Check).
    - Không xuất hiện tệp cờ lỗi `/tmp/MTN_INTEGRITY_FAILED`.
    - Các node khởi động lại tự động bắt kịp chiều cao block của cụm.
-   - Parity 100% Zero-Fork (Block Hash + State Root) giữa toàn bộ 4 validator.
+   - Parity 100% Zero-Fork (Block Hash + State Root) giữa toàn bộ 4 validator sau khi node tái gia nhập.
 
 ---
 
@@ -55,7 +54,7 @@ cd execution && go test -bench=NomtCommit -benchmem -count=5 ./pkg/trie/...
 ### 2.2 Đánh giá hiệu năng Pipeline vs Sync
 - Với 100 keys/block: Mô hình Pipeline (`3.44 ms`) nhanh hơn mô hình Sync (`4.46 ms`) **23.0%**.
 - Với 1,000 keys/block: Mô hình Pipeline (`11.28 ms`) nhanh hơn mô hình Sync (`18.13 ms`) **37.8%**.
-- **Kết luận:** Mô hình pipeline `commitWg` chuyển việc chờ flush đĩa và fsync sang goroutine nền (`CommitAsync`), cho phép block kế tiếp bắt đầu ngay mà không bị block I/O. Khi block kế tiếp đến điểm commit, nó chỉ cần đợi `commitWg.Wait()` nếu đợt flush trước chưa xong. Nhờ đó, tính bền vững 100% fsync vẫn được bảo lưu trọn vẹn mà tốc độ tăng thêm ~38%.
+- **Cơ chế:** Mô hình pipeline `commitWg` chuyển việc chờ flush đĩa sang goroutine nền (`CommitAsync`), cho phép luồng thực thi block kế tiếp tiếp tục xử lý logic mà không bị block hoàn toàn trong thời gian I/O. Khi block kế tiếp đến điểm commit, nó chỉ cần đợi `commitWg.Wait()` nếu đợt flush trước chưa xong.
 
 ---
 
@@ -67,7 +66,7 @@ Lệnh thực thi:
 ```
 
 Cụm kiểm thử: 4 validator Mysticeti độc lập (`val0`: 31646, `val1`: 31647, `val2`: 31648, `val3`: 31649).
-Tải nền: 1,000 transactions Secp256k1 EIP-1559 mỗi vòng được inject đồng thời qua kết nối TCP.
+Tải nền: 1,000 transactions Secp256k1 EIP-1559 mỗi vòng được inject qua kết nối TCP.
 
 | Round | Node bị Kill -9 | PID bị Kill | Trạng thái sau Restart | Exit Code | Sentinel File | Block kiểm tra | Parity Check (Hash & StateRoot) | Kết quả |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -90,7 +89,7 @@ Mỗi node sau khi bị `kill -9` trong lúc đang ghi NOMT, khi khởi động 
 4. `CHECK 4/5`: Gốc cây trạng thái tài khoản NOMT (`NOMT account_state root`) khớp 100% với `AccountStatesRoot` ghi trong block header.
 5. `CHECK 5/5`: Bộ đếm trạng thái toàn cục (`GEI`, `CommitIndex`, `lastBlockNumber`) đồng bộ.
 
-Kết quả thực tế:
+Kết quả:
 - **10/10 vòng** đều vượt qua toàn bộ 5/5 bước kiểm tra mà không có bất kỳ lỗi nào.
 - Tệp cờ `/tmp/MTN_INTEGRITY_FAILED` không hề được tạo ra.
 - Không có tiến trình nào thoát với mã lỗi 78.
@@ -98,7 +97,24 @@ Kết quả thực tế:
 
 ---
 
-## 4. Kết Luận Giai Đoạn C
-1. **Độ bền dữ liệu tuyệt đối:** NOMT với cơ chế fsync và cơ chế đồng bộ đệm `commitWg` bảo vệ hoàn hảo trạng thái trie trước các sự cố sập nguồn đột ngột (`kill -9`) ngay cả khi đang có luồng giao dịch liên tục.
-2. **Hiệu năng:** Mô hình Block Pipeline đạt tốc độ commit **3.44 ms/block (100 txs)** và **11.28 ms/block (1000 txs)**, hoàn toàn đáp ứng mục tiêu throughput >7,000 TPS mà không cần đánh đổi độ bền hay tắt fsync.
+## 4. Kết Luận & Phạm Vi Đã Kiểm Chứng
+1. **Khôi phục crash tiến trình (Process Crash):** Cơ chế `commitWg` và pipeline commit đảm bảo node có thể chịu được `kill -9` đột ngột trong khi đang nhận tải, khởi động lại sạch sẽ và tiếp tục đồng bộ trạng thái chính xác.
+2. **Hiệu năng microbenchmark:** Ở mức độ trie đơn thuần, pipeline giảm thời gian commit từ 4.46ms xuống 3.44ms (100 keys) và từ 18.13ms xuống 11.28ms (1,000 keys).
 3. **Bất biến Zero-Fork:** 10/10 lần phục hồi sự cố đều duy trì sự đồng thuận tuyệt đối về block hash và state root trên cả 4 validator.
+
+---
+
+## 5. Giới Hạn Của Các Thí Nghiệm & Việc Chưa Làm
+
+### 5.1 Giới hạn kỹ thuật
+1. **`kill -9` không chứng minh được độ bền fsync phần cứng / mất điện:**
+   - Lệnh `kill -9` chỉ kết thúc tiến trình người dùng (user space process). Hệ điều hành Linux kernel vẫn duy trì page cache trong RAM và tiếp tục ghi đĩa bình thường sau khi tiến trình chết.
+   - Do đó, bài test `kill -9` chỉ kiểm chứng được khả năng phục hồi logic khi crash tiến trình, KHÔNG thay thế được bài kiểm thử mất điện đột ngột (power-loss / sudden reboot).
+2. **Microbenchmark không tương đương với TPS toàn hệ thống:**
+   - Số liệu 3.44 ms / 11.28 ms là thời gian commit của riêng trie bộ nhớ.
+   - TPS toàn hệ thống phụ thuộc vào pipeline mạng, thẩm định chữ ký Secp256k1, thực thi MVM/EVM, đồng thuận Mysticeti và ghi BlockDB/LevelDB. Microbenchmark trie không đủ để tuyên bố năng lực TPS tổng thể nếu không có benchmark end-to-end.
+
+### 5.2 Các hạng mục chưa làm trong báo cáo này (chuyển sang các giai đoạn tiếp theo)
+1. **Chưa có bằng chứng syscall fsync:** Chưa có trace `strace` / `bpftrace` chứng minh các syscall `fsync` / `fdatasync` (hoặc io_uring) thực sự được gọi trên đường production (thực hiện ở Giai đoạn 2).
+2. **Chưa thực hiện đo B1 end-to-end so sánh 3 cấu hình:** Chưa so sánh đầy đủ 3 build (A: commit `ec6560ce`, B: HEAD, C: HEAD bỏ `commitWg.Wait()`) dưới tải `secp_tps_blast` trên cùng máy (thực hiện ở Giai đoạn 3).
+3. **Chưa kiểm thử mất điện thực tế (Power-loss simulation):** Chưa chạy trên môi trường có cắt điện/đĩa ảo no-cache (thực hiện ở Giai đoạn 4).

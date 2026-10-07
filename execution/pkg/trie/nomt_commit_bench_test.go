@@ -50,7 +50,7 @@ func BenchmarkNomtCommit_BlockPipeline(b *testing.B) {
 				}
 				_ = time.Since(t0)
 
-				// Background async flush (re-enabled fsync NOMT)
+				// Background async flush via CommitAsync
 				payload := trie.ExtractPendingPayload()
 				if payload != nil {
 					payload.CommitAsync()
