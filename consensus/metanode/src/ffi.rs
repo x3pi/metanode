@@ -275,105 +275,6 @@ pub struct GoCallbacks {
     /// Log message to Go logger
     pub log_message:
         Option<extern "C" fn(level: std::os::raw::c_int, msg_ptr: *const c_char, msg_len: usize)>,
-    /// Async block delivery: queues a block in Go and returns immediately.
-    /// Status: 0 = Enqueued, 1 = Queue full, 2 = Invalid payload, 3 = Not initialized.
-    pub enqueue_block_async:
-        Option<extern "C" fn(payload: *const u8, len: usize, delivery_id: u64) -> i32>,
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-// PIPELINED BLOCK DELIVERY ASYNC COMPLETION REGISTRY
-// ══════════════════════════════════════════════════════════════════════════════
-
-static PENDING_DELIVERIES: OnceLock<
-    std::sync::RwLock<
-        std::collections::HashMap<
-            u64,
-            tokio::sync::oneshot::Sender<crate::node::executor_client::proto::ExecuteBlockResponse>,
-        >,
-    >,
-> = OnceLock::new();
-
-static NEXT_DELIVERY_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-pub fn next_delivery_id() -> u64 {
-    NEXT_DELIVERY_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-fn get_pending_deliveries() -> &'static std::sync::RwLock<
-    std::collections::HashMap<
-        u64,
-        tokio::sync::oneshot::Sender<crate::node::executor_client::proto::ExecuteBlockResponse>,
-    >,
-> {
-    PENDING_DELIVERIES.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
-}
-
-pub fn register_pending_delivery(
-    delivery_id: u64,
-    tx: tokio::sync::oneshot::Sender<crate::node::executor_client::proto::ExecuteBlockResponse>,
-) {
-    if let Ok(mut map) = get_pending_deliveries().write() {
-        map.insert(delivery_id, tx);
-    }
-}
-
-pub fn cancel_pending_delivery(delivery_id: u64) {
-    if let Ok(mut map) = get_pending_deliveries().write() {
-        map.remove(&delivery_id);
-    }
-}
-
-/// Completion notification callback invoked by Go when an asynchronously queued block finishes execution.
-#[no_mangle]
-pub extern "C" fn metanode_notify_block_executed(
-    delivery_id: u64,
-    success: bool,
-    actual_gei: u64,
-    block_number: u64,
-    geis_consumed: u64,
-    state_root_ptr: *const u8,
-    state_root_len: usize,
-    error_msg_ptr: *const c_char,
-) {
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let state_root = if !state_root_ptr.is_null() && state_root_len > 0 {
-            unsafe { std::slice::from_raw_parts(state_root_ptr, state_root_len) }.to_vec()
-        } else {
-            Vec::new()
-        };
-
-        let error_msg = if !error_msg_ptr.is_null() {
-            unsafe { CStr::from_ptr(error_msg_ptr) }
-                .to_string_lossy()
-                .into_owned()
-        } else {
-            String::new()
-        };
-
-        let resp = crate::node::executor_client::proto::ExecuteBlockResponse {
-            actual_gei,
-            geis_consumed,
-            block_number,
-            success,
-            error: error_msg,
-            state_root,
-        };
-
-        let sender = match get_pending_deliveries().write() {
-            Ok(mut map) => map.remove(&delivery_id),
-            Err(poisoned) => poisoned.into_inner().remove(&delivery_id),
-        };
-
-        if let Some(tx) = sender {
-            let _ = tx.send(resp);
-        } else {
-            debug!(
-                "⚠️ [FFI] Received notification for unknown or timed out delivery_id={}",
-                delivery_id
-            );
-        }
-    }));
 }
 
 /// Call into Go to update transaction trace
@@ -1465,7 +1366,6 @@ mod tests {
             get_state_root: None,
             update_tx_trace: None,
             log_message: None,
-            enqueue_block_async: None,
         };
 
         FORCE_REGISTER_CALLBACKS_PANIC_FOR_TEST.store(true, Ordering::SeqCst);
