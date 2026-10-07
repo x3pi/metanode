@@ -363,6 +363,7 @@ stop_cluster_monitors() {
         for pid_dir in /tmp/metanode-monitors-*; do
             if [ -d "$pid_dir" ]; then
                 ns="${pid_dir##*-}"
+                [ "$ns" = "root" ] && continue
                 bash "$MONITOR_SCRIPT" --stop --namespace "$ns" >/dev/null 2>&1 || true
             fi
         done
