@@ -1,0 +1,10 @@
+=== RUN   TestPebbleDBFallbackWhenEvictedFromRAM
+[32m[INFO][Oct  7 16:03:31]  ✅ [PEBBLE] Created 512MB shared block cache[0m
+[32m[INFO][Oct  7 16:03:31]  ✅ [PEBBLE] Created shared table cache (shards=16, size=10000)[0m
+[32m[INFO][Oct  7 16:03:31]  ✅ [PEBBLE] Opened database: /tmp/TestPebbleDBFallbackWhenEvictedFromRAM3037381520/001/pebble_mapping_test/db_shard_0 (parallelism=1)[0m
+[32m[INFO][Oct  7 16:03:31]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/TestPebbleDBFallbackWhenEvictedFromRAM3037381520/001/pebble_mapping_test/db_shard_0[0m
+[32m[INFO][Oct  7 16:03:31]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/TestPebbleDBFallbackWhenEvictedFromRAM3037381520/001/pebble_mapping_test/db_shard_0[0m
+[32m[INFO][Oct  7 16:03:31]  🛑 [PEBBLE] Closed database: /tmp/TestPebbleDBFallbackWhenEvictedFromRAM3037381520/001/pebble_mapping_test/db_shard_0[0m
+--- PASS: TestPebbleDBFallbackWhenEvictedFromRAM (0.01s)
+PASS
+ok  	github.com/meta-node-blockchain/meta-node/pkg/blockchain	(cached)

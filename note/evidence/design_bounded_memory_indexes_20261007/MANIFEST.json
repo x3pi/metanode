@@ -1,0 +1,58 @@
+{
+  "report": "note/design_bounded_memory_indexes_20261007.md",
+  "entries": [
+    {
+      "id": "caller_sites_audit",
+      "command": "grep -rn \"GetBlockNumberByTxHashFast\" ./execution ./consensus",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "b553e34a537bf05684ff258769c715de5cdf84f9",
+      "git_status": "",
+      "started_at": "2026-10-07T16:07:20Z",
+      "finished_at": "2026-10-07T16:07:25Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "caller_sites_audit.txt",
+          "sha256": "c8da1dea5da3fc7143be77ffa282ddd430d9e9e97f10c2cf74684fdf6e6f2c41",
+          "bytes": 7652
+        }
+      ]
+    },
+    {
+      "id": "pebble_fallback_go_test",
+      "command": "go test -v ./pkg/blockchain -run TestPebbleDBFallbackWhenEvictedFromRAM",
+      "cwd": "/home/abc/chain-n/metanode/execution",
+      "git_commit": "b553e34a537bf05684ff258769c715de5cdf84f9",
+      "git_status": "",
+      "started_at": "2026-10-07T16:07:31Z",
+      "finished_at": "2026-10-07T16:07:34Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "pebble_fallback_go_test.log",
+          "sha256": "6beb3e7ce62450345139dee57b4375d957ea90f7c938ee41d37ca8d8d15d3cb1",
+          "bytes": 1042
+        }
+      ]
+    },
+    {
+      "id": "pebble_fallback_rpc_verification",
+      "command": "python3 -u execution/scripts/test/evidence/verify_pebble_fallback_rpc.py",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "b553e34a537bf05684ff258769c715de5cdf84f9",
+      "git_status": "",
+      "started_at": "2026-10-07T16:05:45Z",
+      "finished_at": "2026-10-07T16:07:09Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "pebble_fallback_rpc_verification.log",
+          "sha256": "0797c5127d07639d11453f78e86c49f37da28c9507bd78db9cf18bc3e297f77a",
+          "bytes": 2076
+        }
+      ]
+    }
+  ],
+  "claims": [],
+  "tables": []
+}

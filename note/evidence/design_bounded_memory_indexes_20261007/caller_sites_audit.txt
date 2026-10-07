@@ -1,0 +1,69 @@
+==================================================================
+CALLER SITES AUDIT FOR IN-MEMORY MAPPING INDEXES
+Timestamp: 2026-10-07T16:07:21Z
+Git Commit: b553e34a537bf05684ff258769c715de5cdf84f9
+==================================================================
+
+--- 1. GetBlockNumberByTxHashFast ---
+./execution/pkg/blockchain/blockchain.go:656:// GetBlockNumberByTxHashFast checks only the in-memory cache and the direct
+./execution/pkg/blockchain/blockchain.go:665:func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bool) {
+./execution/pkg/blockchain/blockchain.go:690:	return bc.GetBlockNumberByTxHashFast(txHash)
+./execution/pkg/blockchain/mapping_pebble_fallback_test.go:16:// GetBlockNumberByTxHashFast and GetEthHashMapblsHash transparently fall back to
+./execution/pkg/blockchain/mapping_pebble_fallback_test.go:65:	bnRead, okBn := bc.GetBlockNumberByTxHashFast(txHash)
+./execution/pkg/blockchain/mapping_pebble_fallback_test.go:66:	require.True(t, okBn, "GetBlockNumberByTxHashFast must succeed via Pebble DB fallback")
+./execution/pkg/blockchain/mapping_pebble_fallback_test.go:96:	bnRestart, okBnRestart := bcRestart.GetBlockNumberByTxHashFast(txHash)
+./execution/pkg/utils/receipt_helper/receipt_helper.go:22:	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(txHash)
+./execution/cmd/simple_chain/processor/block_processor_receipt.go:69:	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(searchHash)
+./execution/cmd/simple_chain/processor/block_processor_receipt.go:239:	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(searchHash)
+./execution/cmd/simple_chain/rpc_transaction.go:129:	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(hashTx)
+./execution/cmd/simple_chain/rpc_transaction.go:421:	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(searchHash)
+
+--- 2. GetBlockNumberByTxHash ---
+./execution/pkg/blockchain/blockchain.go:656:// GetBlockNumberByTxHashFast checks only the in-memory cache and the direct
+./execution/pkg/blockchain/blockchain.go:664:// use GetBlockNumberByTxHash instead.
+./execution/pkg/blockchain/blockchain.go:665:func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bool) {
+./execution/pkg/blockchain/blockchain.go:689:func (bc *BlockChain) GetBlockNumberByTxHash(txHash common.Hash) (uint64, bool) {
+./execution/pkg/blockchain/blockchain.go:690:	return bc.GetBlockNumberByTxHashFast(txHash)
+./execution/pkg/blockchain/mapping_rebuild_test.go:286:// GetBlockNumberByTxHash no longer lazily walks back: lost mapping -> (0, false).
+./execution/pkg/blockchain/mapping_rebuild_test.go:287:func TestGetBlockNumberByTxHash_NoLazyWalkbackAfterMappingLoss(t *testing.T) {
+./execution/pkg/blockchain/mapping_rebuild_test.go:293:	bn, ok := f.bc.GetBlockNumberByTxHash(target)
+./execution/pkg/blockchain/mapping_rebuild_test.go:301:	bn, ok = f.bc.GetBlockNumberByTxHash(target)
+./execution/pkg/blockchain/mapping_pebble_fallback_test.go:16:// GetBlockNumberByTxHashFast and GetEthHashMapblsHash transparently fall back to
+./execution/pkg/blockchain/mapping_pebble_fallback_test.go:65:	bnRead, okBn := bc.GetBlockNumberByTxHashFast(txHash)
+./execution/pkg/blockchain/mapping_pebble_fallback_test.go:66:	require.True(t, okBn, "GetBlockNumberByTxHashFast must succeed via Pebble DB fallback")
+./execution/pkg/blockchain/mapping_pebble_fallback_test.go:96:	bnRestart, okBnRestart := bcRestart.GetBlockNumberByTxHashFast(txHash)
+./execution/pkg/utils/receipt_helper/receipt_helper.go:22:	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(txHash)
+./execution/cmd/simple_chain/processor/block_processor_receipt.go:69:	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(searchHash)
+./execution/cmd/simple_chain/processor/block_processor_receipt.go:239:	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(searchHash)
+./execution/cmd/simple_chain/rpc_transaction.go:129:	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(hashTx)
+./execution/cmd/simple_chain/rpc_transaction.go:421:	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(searchHash)
+./execution/cmd/simple_chain/debug_api.go:131:	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(hashEth)
+./execution/cmd/simple_chain/debug_api.go:140:		blockNumber, ok = blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(hash)
+
+--- 3. GetEthHashMapblsHash ---
+./execution/pkg/blockchain/blockchain.go:710:func (bc *BlockChain) GetEthHashMapblsHash(ethHash common.Hash) (common.Hash, bool) {
+./execution/pkg/blockchain/mapping_pebble_fallback_test.go:16:// GetBlockNumberByTxHashFast and GetEthHashMapblsHash transparently fall back to
+./execution/pkg/blockchain/mapping_pebble_fallback_test.go:69:	blsRead, okBls := bc.GetEthHashMapblsHash(ethHash)
+./execution/pkg/blockchain/mapping_pebble_fallback_test.go:70:	require.True(t, okBls, "GetEthHashMapblsHash must succeed via Pebble DB fallback")
+./execution/pkg/blockchain/mapping_pebble_fallback_test.go:100:	blsRestart, okBlsRestart := bcRestart.GetEthHashMapblsHash(ethHash)
+./execution/cmd/simple_chain/processor/raw_eth_ingress_test.go:285:	_, ok := bc.GetEthHashMapblsHash(ethHash)
+./execution/cmd/simple_chain/processor/raw_eth_ingress_test.go:298:	_, ok = bc.GetEthHashMapblsHash(ethHash)
+./execution/cmd/simple_chain/processor/block_processor_receipt.go:63:	blsHash, isEthHash := blockchain.GetBlockChainInstance().GetEthHashMapblsHash(hashEth)
+./execution/cmd/simple_chain/processor/block_processor_receipt.go:233:	blsHash, isEthHash := blockchain.GetBlockChainInstance().GetEthHashMapblsHash(hashEth)
+./execution/cmd/simple_chain/rpc_transaction.go:125:	if blsHash, okBls := blockchain.GetBlockChainInstance().GetEthHashMapblsHash(hashEth); okBls {
+./execution/cmd/simple_chain/rpc_transaction.go:415:	blsHash, isEthHash := blockchain.GetBlockChainInstance().GetEthHashMapblsHash(hashEth)
+./execution/cmd/simple_chain/debug_api.go:120:		if blsHash, ok := blockchain.GetBlockChainInstance().GetEthHashMapblsHash(hash); ok {
+./execution/cmd/simple_chain/debug_api.go:135:		hash, ok := blockchain.GetBlockChainInstance().GetEthHashMapblsHash(hashEth)
+
+--- 4. SetTxHashMapBlockNumberBatch ---
+./execution/pkg/blockchain/blockchain.go:634:func (bc *BlockChain) SetTxHashMapBlockNumberBatch(txHashes []common.Hash, blockNumber uint64) error {
+./execution/pkg/blockchain/block_state_commit.go:205:			bc.SetTxHashMapBlockNumberBatch(txs, blockNum)
+./execution/pkg/blockchain/mapping_pebble_fallback_test.go:41:	require.NoError(t, bc.SetTxHashMapBlockNumberBatch([]common.Hash{txHash}, targetBlockNum))
+
+--- 5. SetEthHashMapblsHash ---
+./execution/pkg/blockchain/blockchain.go:693:func (bc *BlockChain) SetEthHashMapblsHash(ethHash common.Hash, blsHash common.Hash) error {
+./execution/pkg/blockchain/mapping_pebble_fallback_test.go:42:	require.NoError(t, bc.SetEthHashMapblsHash(ethHash, blsHash))
+./execution/cmd/simple_chain/processor/transaction_processor.go:419:			_ = bc.SetEthHashMapblsHash(respHash, tx.Hash())
+./execution/cmd/simple_chain/processor/transaction_processor.go:714:				_ = bc.SetEthHashMapblsHash(processedEthHashes[i], processedTxs[i].Hash())
+./execution/cmd/simple_chain/rpc_transaction.go:394:		if errMap := bc.SetEthHashMapblsHash(ethTxHash, metaTxHash); errMap != nil {
+./execution/cmd/simple_chain/rpc_transaction.go:395:			logger.Warn("[SendRawEthTransaction] SetEthHashMapblsHash failed: %v", errMap)

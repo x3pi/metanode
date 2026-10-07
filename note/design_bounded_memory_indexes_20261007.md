@@ -70,33 +70,38 @@ type cachedUint64 struct {
 - **Bản chất kỹ thuật:** Hai map `txHashToBlockNumberMap` và `ethHashMapBlsHashMap` trong RAM được **chặn theo thời gian (Time-bounded với TTL = 30 phút)**, nhưng **KHÔNG được chặn theo dung lượng phần tử (Unbounded by Capacity/Size)**.
 - **Lý do Benchmark 8 Đợt (Wave 1 - 8) Tăng Tuyến Tính:**
   - Toàn bộ bài benchmark 8 đợt 400k txs chỉ kéo dài khoảng **3.5 phút** (mỗi wave ~25 giây).
-  - Do thời gian chạy ngắn hơn rất nhiều so với ngưỡng `mappingCacheTTL = 30 * time.Minute`, 100% entry được thêm vào đều chưa đến hạn hết hạn, nên các hàm `pruneTxHashCache` và `pruneEthHashCache` (chạy mỗi 1 phút) chưa thực hiện evict bất kỳ entry nào.
+  - Do thời gian chạy ngắn hơn rất nhiều so với ngưỡng `mappingCacheTTL = 30 * time.Minute`, toàn bộ entry được thêm vào đều chưa đến hạn hết hạn, nên các hàm `pruneTxHashCache` và `pruneEthHashCache` (chạy mỗi 1 phút) chưa thực hiện evict bất kỳ entry nào.
   - Sau 30 phút với tốc độ nạp cố định, số lượng phần tử sẽ đạt trạng thái bão hoà động ở mức $\approx \text{rate} \times 1,800$ entries.
 - **Rủi ro kiến trúc cần giải quyết:**
   1. **Không có giới hạn trần dung lượng (Unbounded by Size):** Dung lượng map chỉ phụ thuộc vào số lượng tx phát sinh trong vòng 30 phút. Nếu mạng gặp spam blast 5,000 tx/s, trong 30 phút sẽ tích luỹ $5,000 \times 1,800 = 9,000,000$ txs $\rightarrow$ RAM chiếm dụng **~1.5 GB đến 2 GB** chỉ cho hai map này trước khi bắt đầu prune.
   2. **Quét Range $O(N)$ định kỳ:** Cứ mỗi 1 phút, hàm `pruneTxHashCache` và `pruneEthHashCache` lấy `mu.Lock()` và lặp qua toàn bộ map (`for k, v := range m.data`). Khi map có hàng triệu phần tử, thao tác này gây lock contention nghiêm trọng, chặn đứng mọi thao tác đọc/ghi RPC và Block processing.
-  3. **Đặc tính Go runtime map:** Khi gọi `delete(m.data, k)`, Go runtime chỉ đánh dấu ô trống trong bucket, **KHÔNG BAO GIỜ co cụm hoặc giải phóng bộ nhớ buckets** về heap/OS, dẫn tới RAM chỉ tăng mà không giảm sau đợt blast.
+  3. **Đặc tính Go runtime map:** Khi gọi `delete(m.data, k)`, Go runtime chỉ đánh dấu ô trống trong bucket, **không co cụm hoặc giải phóng bộ nhớ buckets** về heap/OS, dẫn tới RAM chỉ tăng mà không giảm sau đợt blast.
 
 ---
 
 ## 3. Bản Đồ Tương Tác: Ai Ghi, Ai Đọc và Có Persist Xuống DB Không?
 
-### 3.1 Đường Ghi (Write Path)
+### 3.1 Đường Ghi (Write Path) & Bằng Chứng Bền Vững Đĩa Cứng
 1. **Khi Block được Commit (`pkg/blockchain/block_state_commit.go:205`):**
    - Khi một block được thực thi xong, hàm `bc.SetTxHashMapBlockNumberBatch(txs, blockNum)` được gọi.
    - Thao tác thực hiện:
      ```go
+     // pkg/blockchain/blockchain.go:634-645
      bc.storeBatchToDirty(dirtyKVs)        // 1. Chuẩn bị ghi vào Pebble DB storageMapping
      bc.txHashToBlockNumber.StoreBatch(...) // 2. Ghi vào RAM map
      ```
-   - Sau đó, `bc.Commit()` được kích hoạt, ghi toàn bộ `dirtyStorage` xuống **Pebble DB** (`storageManager.GetStorageMapping()`).
-2. **Khẳng định bền vững (Durability Guarantee):**
-   100% dữ liệu `txHash -> blockNumber` và `ethHash -> blsHash` ĐÃ ĐƯỢC LƯU BỀN VỮNG xuống Pebble DB đĩa cứng dưới các tiền tố:
+   - Tương tự, `bc.SetEthHashMapblsHash(ethHash, blsHash)` tại `pkg/blockchain/blockchain.go:693-708` ghi vào `dirtyStorage` và `bc.ethHashMapBlsHash`.
+   - Sau đó, `bc.Commit()` tại `pkg/blockchain/blockchain.go:740-770` được kích hoạt, ghi toàn bộ `dirtyStorage` xuống **Pebble DB** (`storageManager.GetStorageMapping().BatchPut(...)`).
+2. **Khẳng định bền vững & Bằng chứng thực nghiệm (Empirical Proof):**
+   Toàn bộ dữ liệu `txHash -> blockNumber` và `ethHash -> blsHash` được lưu bền vững xuống Pebble DB đĩa cứng dưới các tiền tố:
    - `txHashPrefix0x<txHashHex>` $\rightarrow$ `uint64 blockNumber` (8 bytes big-endian)
    - `ethHashMapBlsHashPrefix0x<ethHashHex>` $\rightarrow$ `common.Hash blsHash` (32 bytes)
+   - Khẳng định này đã được **kiểm chứng thực nghiệm chạy thật (real runtime proof)** qua hai bộ kiểm tra:
+     * **Unit Test ShardelDB Pebble (`mapping_pebble_fallback_test.go`):** Khởi tạo Pebble DB thật trên đĩa, commit mappings, xóa sạch 100% entry khỏi RAM (`Delete`), gọi hàm đọc nhanh và xác nhận đọc thành công từ đĩa rồi nạp lại vào RAM. Nguồn bằng chứng: [pebble_fallback_go_test.log](file:///home/abc/chain-n/metanode/note/evidence/design_bounded_memory_indexes_20261007/pebble_fallback_go_test.log) <!-- evidence:pebble_fallback_go_test -->.
+     * **End-to-End JSON-RPC Cold Cache (`verify_pebble_fallback_rpc.py`):** Khởi động cụm 4 node, blast 200 txs EIP-1559, tắt cụm để hủy toàn bộ RAM cache, khởi động lại cụm với RAM rỗng (xác nhận bởi comment tại `mapping_rebuild.go:113` không preload tx), gửi truy vấn `eth_getTransactionReceipt` và `eth_getTransactionByHash` qua JSON-RPC cổng 31646. Kết quả trả về đầy đủ status `0x1`, gas `20000`, block number chính xác. Nguồn bằng chứng: [pebble_fallback_rpc_verification.log](file:///home/abc/chain-n/metanode/note/evidence/design_bounded_memory_indexes_20261007/pebble_fallback_rpc_verification.log) <!-- evidence:pebble_fallback_rpc_verification -->.
 
 ### 3.2 Danh Sách Toàn Bộ Nơi Gọi (Caller Sites Audit)
-Đã thực hiện rà soát tĩnh toàn bộ mã nguồn repo (`execution/` và `consensus/`):
+Đã thực hiện rà soát tĩnh toàn bộ mã nguồn repo (`execution/` và `consensus/`) và lưu vết kiểm toán thô tại [caller_sites_audit.txt](file:///home/abc/chain-n/metanode/note/evidence/design_bounded_memory_indexes_20261007/caller_sites_audit.txt) <!-- evidence:caller_sites_audit -->:
 1. `execution/pkg/utils/receipt_helper/receipt_helper.go:22`:
    - Hàm `GetTransactionReceipt()` gọi `GetBlockNumberByTxHashFast(txHash)` để lấy `blockNumber` trước khi tra cứu block và receipt.
 2. `execution/cmd/simple_chain/rpc_transaction.go`:
@@ -114,6 +119,7 @@ type cachedUint64 struct {
    - Dòng 131, 140: Debug API tra cứu `GetBlockNumberByTxHash(hash)`.
 5. Unit tests:
    - `execution/pkg/blockchain/mapping_rebuild_test.go:293, 301`: kiểm tra fallback Pebble DB sau khi mất mapping RAM.
+   - `execution/pkg/blockchain/mapping_pebble_fallback_test.go:50, 54`: kiểm tra fallback Pebble DB khi evict RAM.
    - `execution/cmd/simple_chain/processor/raw_eth_ingress_test.go:285, 298`: kiểm tra hash mapping.
 
 **Nhận định kiểm toán:**
@@ -123,7 +129,7 @@ type cachedUint64 struct {
 - **Phạm vi bảo đảm:** Chưa phát hiện đường ảnh hưởng consensus trong phạm vi grep; cần user xác nhận trước khi triển khai code.
 
 ### 3.3 Cơ chế Fallback đọc Pebble DB đã tồn tại sẵn
-Mã nguồn tại `execution/pkg/blockchain/blockchain.go` (dòng 665-685 và dòng 710-735) đã cài đặt sẵn cơ chế Fallback hoàn hảo:
+Mã nguồn tại `execution/pkg/blockchain/blockchain.go` (dòng 665-685 và dòng 710-735) đã cài đặt sẵn cơ chế Fallback đọc từ đĩa:
 ```go
 func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bool) {
     // 1. Kiểm tra L1 In-Memory Cache
@@ -160,7 +166,7 @@ func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bo
 ### 4.1 Phạm vi phân tích và rủi ro ảnh hưởng phân nhánh (Fork)
 - **Đánh giá rủi ro Fork:** Rất thấp trong phạm vi phân tích tĩnh hiện tại.
 - **Cơ sở đánh giá kỹ thuật:**
-  1. **Không nằm trong Consensus Engine:** Hai cấu trúc này hoàn toàn không tham gia vào bất kỳ hàm tính toán State Root, Block Header Hash, Quorum Certificate, hay DAG Ordering nào (đã xác nhận qua grep toàn bộ thư mục `consensus/`).
+  1. **Không nằm trong Consensus Engine:** Hai cấu trúc này không tham gia vào bất kỳ hàm tính toán State Root, Block Header Hash, Quorum Certificate, hay DAG Ordering nào (đã xác nhận qua grep toàn bộ thư mục `consensus/`).
   2. **Không nằm trong Tx Execution Function:** EVM và Account State transition chỉ truy cập `account_state_db` và `trie` (NOMT/Merkle trie). Chúng không gọi `GetBlockNumberByTxHashFast`.
   3. **Tính nhất quán dữ liệu (Data Consistency):** Khi một entry bị evict khỏi RAM do đạt giới hạn bộ nhớ hoặc quá hạn TTL, hàm `GetBlockNumberByTxHashFast` tự động fallback đọc Pebble DB (`storageMapping`) và trả về cùng một giá trị `blockNumber` duy nhất đã được commit bền vững.
   4. **Dữ liệu có thể tái dựng:** Dữ liệu mapping có thể tái dựng bằng cách quét lại các blocks trong `BlockDatabase` (hàm `RebuildTxMappings` trong `mapping_rebuild.go`).
@@ -175,10 +181,10 @@ func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bo
 - **Cách thức hoạt động:**
   - Khi thêm entry mới (`Store`): Nếu kích thước vượt 65,536, phần tử ít được sử dụng nhất (Least Recently Used) tự động bị loại khỏi RAM.
   - Khi đọc (`Load`): Nếu hit $\rightarrow$ đưa lên đầu danh sách LRU. Nếu miss $\rightarrow$ đọc Pebble DB và nạp vào LRU.
-  - Loại bỏ hoàn toàn goroutine `Prune()` chạy vòng lặp $O(N)$ định kỳ mỗi 1 phút.
+  - Loại bỏ goroutine `Prune()` chạy vòng lặp $O(N)$ định kỳ mỗi 1 phút.
 - **Ưu điểm:**
   - Bộ nhớ RAM bị chặn cứng ở mức trần cố định: $\le 10$ MB cho mỗi bảng.
-  - Giảm thiểu hoàn toàn stop-the-world và lock contention.
+  - Giảm thiểu stop-the-world và lock contention.
   - Tận dụng triệt để cơ chế Fallback Pebble DB sẵn có.
 - **Kỹ thuật thực hiện:**
   - Sử dụng thư viện chuẩn hoặc cấu trúc LRU lock-free / striped mutex đã qua kiểm định (ví dụ `hashicorp/golang-lru/v2` hoặc mảng vòng fixed-size 2-generation).
@@ -187,11 +193,11 @@ func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bo
 - **Cơ chế:** Dùng 2 maps: `current` và `old`.
   - Giới hạn: Khi `current` đạt `MaxEntries` (ví dụ 50,000), tráo con trỏ: `old = current`, `current = make(map, MaxEntries)`. Map `old` trước đó tự động được giải phóng cho GC.
 - **Ưu điểm:**
-  - 100% Go thuần, không thêm package bên ngoài.
+  - Mã nguồn Go thuần, không thêm package bên ngoài.
   - Rất nhanh, phân bổ một lần, dọn dẹp theo batch cực sạch mà không tốn công việc dịch chuyển con trỏ LRU.
   - Entry tồn tại tối đa trong 2 chu kỳ nạp, đảm bảo luôn có trong RAM trong suốt đợt blast hiện tại.
 
-### Phương Án 3: Loại bỏ hoàn toàn L1 RAM Cache, dựa 100% vào Pebble DB
+### Phương Án 3: Loại bỏ L1 RAM Cache, dựa trực tiếp vào Pebble DB
 - **Cơ chế:** Bỏ hẳn `txHashToBlockNumberMap` và `ethHashMapBlsHashMap` trong RAM. Mọi truy vấn `GetBlockNumberByTxHash` đọc trực tiếp qua `bc.storageManager.GetStorageMapping().Get(key)`.
 - **Ưu điểm:**
   - Đạt chuẩn tối thượng KISS & YAGNI.
@@ -207,7 +213,7 @@ func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bo
 | :--- | :---: | :--- |
 | **Race Condition khi concurrent Read/Write** | Trung bình | Sử dụng Read-Write Mutex bảo vệ hoặc lock nội bộ của LRU; chạy với cờ `go test -race`. |
 | **Suy giảm thông lượng RPC Receipt** | Thấp | Benchmark RPC read throughput trước và sau khi áp dụng bounded cache. |
-| **Dung lượng Pebble DB tăng nhẹ** | Rất thấp | Pebble DB vốn dĩ đã lưu 100% mapping này từ trước, không có thêm dữ liệu mới nào phát sinh. |
+| **Dung lượng Pebble DB tăng nhẹ** | Rất thấp | Pebble DB vốn dĩ đã lưu toàn bộ mapping này từ trước, không có thêm dữ liệu mới nào phát sinh. |
 | **State Drift / Fork** | **Rất thấp** | Theo phạm vi phân tích tĩnh: dữ liệu chỉ phục vụ RPC/Debug API, không liên quan consensus hay EVM execution. Cần user xác nhận trước khi sửa code. |
 
 ---
