@@ -19,6 +19,9 @@ import (
 // Used to initialize next_expected_index in Rust executor_client.
 // CRITICAL FIX: Validate that block hash exists before returning, not just the counter!
 func (rh *RequestHandler) HandleGetLastBlockNumberRequest(request *pb.GetLastBlockNumberRequest) (*pb.LastBlockNumberResponse, error) {
+	if rh.CustomGetLastBlockNumberCallback != nil {
+		return rh.CustomGetLastBlockNumberCallback(request)
+	}
 	logger.Debug("🔍 [INIT] Handling GetLastBlockNumberRequest (Rust executor_client initializing next_expected_index)")
 
 	// Get last block number from counter

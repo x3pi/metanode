@@ -28,27 +28,22 @@ import (
 // this also makes it visible to MVCCSmartContractDB.Code's same-tx delegated
 // self-call path (see its comment).
 //
-// Returns the total intrinsic gas the caller must charge (at the tx's own
-// EffectiveGasPrice, alongside its regular execution gas fee) for the
-// authorizations actually applied. Deliberately charges the flat
-// params.CallNewAccountGas per applied tuple rather than replicating
-// go-ethereum's refund-if-authority-already-exists optimization
-// (params.TxAuthTupleGas) — this chain has no unified gas-refund counter, and
-// a flat charge only ever over-collects, never under-collects, so it cannot
-// under-price network resource usage.
+// Returns the total intrinsic gas for applied authorizations and whether the
+// tx sender (tx.FromAddress()) successfully self-authorized.
 func processAuthorizationList(
 	tx types.Transaction,
 	currentChainID uint64,
 	accountStateDB types.AccountStateDB,
 	smartContractDB types.SmartContractDB,
-) uint64 {
+) (uint64, bool) {
 	authList := tx.AuthorizationList()
 	if len(authList) == 0 {
-		return 0
+		return 0, false
 	}
 	ethAuthList := transaction.ToEthAuthorizationList(authList)
 
-	var gasUsed uint64
+	var gasRefund uint64
+	var selfAuthorized bool
 	for i := range ethAuthList {
 		auth := &ethAuthList[i]
 
@@ -82,10 +77,18 @@ func processAuthorizationList(
 			continue
 		}
 
-		gasUsed += params.CallNewAccountGas
+		// Authority already existed if it has balance, non-zero nonce, code, or is sender.
+		// EIP-7702 (F5): Refund params.CallNewAccountGas/2 (12,500 gas) for existing authority accounts.
+		if authorityState.Nonce() > 0 || (authorityState.Balance() != nil && authorityState.Balance().Sign() > 0) || authorityState.SmartContractState() != nil || authority == tx.FromAddress() {
+			gasRefund += params.CallNewAccountGas / 2
+		}
 
 		if err := accountStateDB.SetNonce(authority, auth.Nonce+1); err != nil {
 			continue
+		}
+
+		if authority == tx.FromAddress() {
+			selfAuthorized = true
 		}
 
 		if auth.Address == (common.Address{}) {
@@ -99,5 +102,5 @@ func processAuthorizationList(
 		accountStateDB.SetCodeHash(authority, codeHash)
 		smartContractDB.SetCode(authority, codeHash, designator)
 	}
-	return gasUsed
+	return gasRefund, selfAuthorized
 }

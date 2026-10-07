@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/network"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
@@ -14,8 +13,8 @@ import (
 // Command constants (inline để tránh import cmd/simple_chain/command — cross-workspace)
 const (
 	cmdReadTransaction              = "ReadTransaction"
-	cmdSendTransactionWithDeviceKey = "SendTransactionWithDeviceKey"
-	cmdSendTransaction              = "SendTransaction"
+	cmdSendRawTransaction           = "SendRawTransaction"
+	cmdSendRawTransactions          = "SendRawTransactions"
 	cmdReceipt                      = "Receipt"
 	cmdTransactionReceipt           = "TransactionReceipt"
 	cmdLogs                         = "Logs"
@@ -73,29 +72,26 @@ func (c *ConnectionClient) ReadTransaction(txBytes []byte, timeout time.Duration
 	}
 }
 
-// SendTransactionWithDeviceKey gửi SendTransactionWithDeviceKey command lên chain.
-// Fire-and-forget: không đợi receipt (receipt sẽ được nhận qua event subscription hoặc polling).
-// Body chứa TransactionWithDeviceKey proto bytes đã marshal.
-func (c *ConnectionClient) SendTransactionWithDeviceKey(txWithDKBytes []byte) error {
+// SendRawTransaction gửi SendRawTransaction command lên chain (EIP-2718 raw Ethereum envelope, fire-and-forget).
+func (c *ConnectionClient) SendRawTransaction(rawEth []byte) error {
 	if atomic.LoadInt32(&c.connected) != 1 || c.connection == nil {
 		return fmt.Errorf("not connected to cluster %s", c.key)
 	}
 
-	if err := c.messageSender.SendBytes(c.connection, cmdSendTransactionWithDeviceKey, txWithDKBytes); err != nil {
-		return fmt.Errorf("failed to send SendTransactionWithDeviceKey: %w", err)
+	if err := c.messageSender.SendBytes(c.connection, cmdSendRawTransaction, rawEth); err != nil {
+		return fmt.Errorf("failed to send SendRawTransaction: %w", err)
 	}
-	logger.Debug("SendTransactionWithDeviceKey sent via ConnectionClient (cluster=%s)", c.key)
 	return nil
 }
 
-// SendTransaction gửi SendTransaction command lên chain (fire-and-forget).
-func (c *ConnectionClient) SendTransaction(txBytes []byte) error {
+// SendRawTransactions gửi SendRawTransactions command lên chain (RLP-encoded raw Ethereum envelopes, fire-and-forget).
+func (c *ConnectionClient) SendRawTransactions(batchRLP []byte) error {
 	if atomic.LoadInt32(&c.connected) != 1 || c.connection == nil {
 		return fmt.Errorf("not connected to cluster %s", c.key)
 	}
 
-	if err := c.messageSender.SendBytes(c.connection, cmdSendTransaction, txBytes); err != nil {
-		return fmt.Errorf("failed to send SendTransaction: %w", err)
+	if err := c.messageSender.SendBytes(c.connection, cmdSendRawTransactions, batchRLP); err != nil {
+		return fmt.Errorf("failed to send SendRawTransactions: %w", err)
 	}
 	return nil
 }

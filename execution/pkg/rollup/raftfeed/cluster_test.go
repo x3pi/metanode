@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -92,6 +93,9 @@ type harness struct {
 
 func newHarness(t *testing.T, n int) *harness {
 	t.Helper()
+	if runtime.NumCPU() < 2 {
+		t.Skipf("raftfeed cluster tests need at least 2 CPUs (have %d)", runtime.NumCPU())
+	}
 	h := &harness{t: t, secret: bytes.Repeat([]byte("k"), 32), fatals: map[string]error{}}
 	for i := 0; i < n; i++ {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -118,9 +122,15 @@ func (h *harness) rcfg(m *member) config.RaftConfig {
 	for _, p := range h.m {
 		peers = append(peers, config.RaftPeer{ID: p.id, Address: string(p.addr), ForwardAddress: p.fwdAddr})
 	}
+	hb := 100
+	el := 100
+	if runtime.NumCPU() <= 2 || os.Getenv("CI") != "" {
+		hb = 200
+		el = 200
+	}
 	rc := config.RaftConfig{
 		NodeID: m.id, BindAddress: string(m.addr), DataDir: m.dir, Peers: peers, Bootstrap: m.id == "n0",
-		HeartbeatTimeoutMs: 100, ElectionTimeoutMs: 100, LeaderLeaseTimeoutMs: 50, CommitTimeoutMs: 5,
+		HeartbeatTimeoutMs: hb, ElectionTimeoutMs: el, LeaderLeaseTimeoutMs: 50, CommitTimeoutMs: 5,
 		ForwardBindAddress: m.fwdAddr, ForwardSecretFile: "unused-in-tests", SequencerAddress: seqAddr.Hex(),
 	}
 	rc.JoinExistingChain = h.join[m.id]
@@ -223,7 +233,11 @@ func (h *harness) members() []Member {
 }
 
 func (h *harness) admin() *AdminClient {
-	return &AdminClient{Secret: h.secret, CatchUpWait: 20 * time.Second}
+	wait := 20 * time.Second
+	if runtime.NumCPU() <= 2 || os.Getenv("CI") != "" {
+		wait = 60 * time.Second
+	}
+	return &AdminClient{Secret: h.secret, CatchUpWait: wait}
 }
 
 // blockHashFor stands in for the execution layer's header hash: the FSM's commit hash of the block, or a wrong
@@ -317,7 +331,11 @@ func submitRetry(from *member, batch []byte, within time.Duration) bool {
 
 func (h *harness) waitBlocks(n int, members ...*member) {
 	h.t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	wait := 20 * time.Second
+	if runtime.NumCPU() <= 2 || os.Getenv("CI") != "" {
+		wait = 60 * time.Second
+	}
+	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
 		ok := true
 		for _, m := range members {
@@ -334,6 +352,28 @@ func (h *harness) waitBlocks(n int, members ...*member) {
 		h.t.Logf("%s has %d blocks", m.id, len(m.disk.blocks()))
 	}
 	h.t.Fatalf("replicas did not reach %d blocks", n)
+}
+
+// waitSameLength waits until every member has received the same number of blocks.
+func (h *harness) waitSameLength(members ...*member) {
+	h.t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		same := true
+		for _, m := range members[1:] {
+			if len(m.disk.blocks()) != len(members[0].disk.blocks()) {
+				same = false
+			}
+		}
+		if same {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, m := range members {
+		h.t.Logf("%s has %d blocks", m.id, len(m.disk.blocks()))
+	}
+	h.t.Fatal("replicas never converged to the same number of blocks")
 }
 
 func nonceOf(t *testing.T, blk *pb.ExecutableBlock) uint64 {
@@ -378,11 +418,25 @@ func TestCluster_ThousandBatchesIdenticalOnAllReplicas(t *testing.T) {
 		h.submit(l, testBatch(t, uint64(i)))
 	}
 	h.waitBlocks(N, h.m...)
+	// Submit is at-least-once (see Node.Submit): when a commit takes longer than submitCommitTimeout (slow machine,
+	// -race) it reports false although the batch committed, and the retry adds a duplicate block. So wait until the
+	// replicas hold the same number of blocks, then require every replica identical and the nonces to be a
+	// non-decreasing sequence that covers 0..N-1 (duplicates allowed, loss and reordering not).
+	h.waitSameLength(h.m...)
 	h.assertIdentical(h.m...)
+	next := uint64(0)
 	for i, b := range h.m[0].disk.blocks() {
-		if nonceOf(t, b) != uint64(i) {
-			t.Fatalf("block %d holds nonce %d: order not preserved", i+1, nonceOf(t, b))
+		nc := nonceOf(t, b)
+		switch {
+		case nc == next:
+			next++
+		case nc+1 == next: // duplicate of the previous batch from an at-least-once retry
+		default:
+			t.Fatalf("block %d holds nonce %d, expected %d (or a duplicate of %d): order not preserved", i+1, nc, next, next-1)
 		}
+	}
+	if next != N {
+		t.Fatalf("only nonces 0..%d reached the log, want 0..%d", next-1, N-1)
 	}
 }
 
@@ -429,16 +483,16 @@ func TestCluster_ForwardChannelRejectsBadAuth(t *testing.T) {
 		return resp.StatusCode
 	}
 	for name, code := range map[string]int{
-		"wrong mac":     send("n1", now, forwardMAC([]byte("another-secret-another-secret-xxxx"), "n1", now, body)),
-		"unknown node":  send("evil", now, forwardMAC(h.secret, "evil", now, body)),
-		"stale ts":      send("n1", now-int64(2*maxForwardSkew/time.Millisecond), forwardMAC(h.secret, "n1", now-int64(2*maxForwardSkew/time.Millisecond), body)),
-		"mac for other": send("n1", now, forwardMAC(h.secret, "n1", now, []byte("other body"))),
+		"wrong mac":     send("n1", now, forwardMAC([]byte("another-secret-another-secret-xxxx"), "n1", now, submitPath, body)),
+		"unknown node":  send("evil", now, forwardMAC(h.secret, "evil", now, submitPath, body)),
+		"stale ts":      send("n1", now-int64(2*maxForwardSkew/time.Millisecond), forwardMAC(h.secret, "n1", now-int64(2*maxForwardSkew/time.Millisecond), submitPath, body)),
+		"mac for other": send("n1", now, forwardMAC(h.secret, "n1", now, submitPath, []byte("other body"))),
 	} {
 		if code != http.StatusUnauthorized {
 			t.Errorf("%s: status %d, want 401", name, code)
 		}
 	}
-	if code := send("n1", now, forwardMAC(h.secret, "n1", now, body)); code != http.StatusOK {
+	if code := send("n1", now, forwardMAC(h.secret, "n1", now, submitPath, body)); code != http.StatusOK {
 		t.Fatalf("a correctly signed submit got %d", code)
 	}
 	h.waitBlocks(1, h.m...)
@@ -1093,13 +1147,13 @@ func TestCluster_HashEndpointRejectsBadAuth(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode
 	}
-	if c := get("n1", forwardMAC([]byte("wrong-secret-wrong-secret-wrong-xx"), "n1", now, []byte("1"))); c != http.StatusUnauthorized {
+	if c := get("n1", forwardMAC([]byte("wrong-secret-wrong-secret-wrong-xx"), "n1", now, hashPath, []byte("1"))); c != http.StatusUnauthorized {
 		t.Fatalf("wrong mac: %d", c)
 	}
-	if c := get("evil", forwardMAC(h.secret, "evil", now, []byte("1"))); c != http.StatusUnauthorized {
+	if c := get("evil", forwardMAC(h.secret, "evil", now, hashPath, []byte("1"))); c != http.StatusUnauthorized {
 		t.Fatalf("unknown node: %d", c)
 	}
-	if c := get("n1", forwardMAC(h.secret, "n1", now, []byte("2"))); c != http.StatusUnauthorized {
+	if c := get("n1", forwardMAC(h.secret, "n1", now, hashPath, []byte("2"))); c != http.StatusUnauthorized {
 		t.Fatalf("mac for a different query: %d", c)
 	}
 }

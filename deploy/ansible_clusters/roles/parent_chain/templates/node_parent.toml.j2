@@ -1,10 +1,10 @@
-node_id = 0
-network_address = "127.0.0.1:9000"
-protocol_key_path = "{{ deploy_dir }}/consensus/metanode/config/node_0_protocol_key.json"
-network_key_path = "{{ deploy_dir }}/consensus/metanode/config/node_0_network_key.json"
-storage_path = "{{ node_data_dir }}/storage"
+node_id = {{ parent_node_id | default(0) }}
+network_address = "{{ parent_network_address | default((ansible_host | default('127.0.0.1')) ~ ':' ~ (parent_p2p_port | default(19001 + (parent_node_id | default(0) | int)))) }}"
+protocol_key_path = "{{ node_data_dir }}/node_{{ parent_node_id | default(0) }}_protocol_key.json"
+network_key_path = "{{ node_data_dir }}/node_{{ parent_node_id | default(0) }}_network_key.json"
+storage_path = "{{ node_data_dir }}/consensus_storage"
 enable_metrics = true
-metrics_port = 9110
+metrics_port = {{ metrics_port | default(9110) }}
 speed_multiplier = 1.0
 time_based_epoch_change = false
 max_clock_drift_seconds = 5
@@ -31,8 +31,17 @@ gradual_shutdown_user_cert_drain_secs = 2
 gradual_shutdown_consensus_cert_drain_secs = 1
 gradual_shutdown_final_drain_secs = 1
 epoch_monitor_poll_interval_secs = 5
-peer_rpc_port = 19300
-peer_rpc_addresses = []
+peer_rpc_port = {{ peer_rpc_port | default(19501 + (parent_node_id | default(0) | int)) }}
+{% set _peers = [] %}
+{% for h in groups['parent_chain_nodes'] %}
+{% if h != inventory_hostname %}
+{% set h_ip = hostvars[h]['ansible_host'] | default('127.0.0.1') %}
+{% set h_nid = hostvars[h]['parent_node_id'] | default(loop.index0) | int %}
+{% set h_port = hostvars[h]['peer_rpc_port'] | default(19501 + h_nid) %}
+{% set _ = _peers.append(h_ip ~ ':' ~ h_port) %}
+{% endif %}
+{% endfor %}
+peer_rpc_addresses = {{ peer_rpc_addresses | default(_peers) | to_json }}
 
 # Number of epochs to keep for cross-epoch sync support (0 = archive mode)
 epochs_to_keep = 5

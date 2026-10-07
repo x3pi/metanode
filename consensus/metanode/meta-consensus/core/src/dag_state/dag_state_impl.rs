@@ -480,20 +480,28 @@ impl DagState {
         timestamp_ms: consensus_types::block::BlockTimestampMs,
         reputation_scores: Option<Vec<(consensus_config::AuthorityIndex, u64)>>,
     ) {
+        // INVARIANT DEFENSE (Zero-Fork): Never overwrite an existing valid commit with CommitDigest::MIN!
+        // Overwriting a valid commit with MIN causes divergent commit digests across nodes,
+        // resulting in 2/2 quorum splits when restarted nodes reconnect.
+        if self.last_commit.is_some() && real_digest == crate::commit::CommitDigest::MIN && synced_commit_index > 0 {
+            tracing::error!(
+                "🚨 [DAG-RESET] REJECTED: Attempted to overwrite valid last_commit (index={}, digest={:?}) \
+                 with synthetic MIN digest at index={}. Invariant violation prevented!",
+                self.last_commit_index(),
+                self.last_commit_digest(),
+                synced_commit_index
+            );
+            return;
+        }
+
         let gc_depth = self.context.protocol_config.gc_depth();
         let target_index = synced_commit_index.max(1);
 
-        let synthetic_commit = TrustedCommit::new_for_test(
+        let synthetic_commit = TrustedCommit::new_synthetic_baseline(
             target_index,
             real_digest,
-            timestamp_ms, // CRITICAL FORK-SAFETY: Must match the network's timestamp for monotonic guarantees
-            BlockRef::new(
-                target_round,
-                consensus_config::AuthorityIndex::ZERO,
-                consensus_types::block::BlockDigest::MIN,
-            ),
-            vec![],
-            0,
+            target_round,
+            timestamp_ms,
         );
 
         tracing::warn!(

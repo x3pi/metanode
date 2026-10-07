@@ -962,3 +962,20 @@ func FuzzMutualExclusion(f *testing.F) {
 		}
 	})
 }
+
+// The sender is debited Value + GasFee, because the Parent Chain removes both from the cluster's float: otherwise the
+// cluster's accounts would keep `fee` per transfer that its BLS float no longer backs.
+func TestTxSubmitted_DebitsValuePlusFee(t *testing.T) {
+	fee := big.NewInt(100)
+	_, acts, err := Next(StateNone, RoleSender, Event{Type: EventTxSubmitted, Sender: testSender, Target: testTarget, Value: testValue, GasFee: fee})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := new(big.Int).Add(testValue, fee)
+	if acts[0].Type != ActionDeductBalance || acts[0].Amount.Cmp(want) != 0 {
+		t.Fatalf("debit = %v, want value+fee = %v", acts[0].Amount, want)
+	}
+	if acts[1].Amount.Cmp(testValue) != 0 || acts[2].Amount.Cmp(testValue) != 0 {
+		t.Fatalf("record/transfer amounts must stay the value alone")
+	}
+}

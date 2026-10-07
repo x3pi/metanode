@@ -6,7 +6,6 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -142,63 +141,6 @@ func (tc *TransactionController) SendTransactions(
 		bTransaction,
 	)
 	return err
-}
-
-func (tc *TransactionController) SendTransactionWithDeviceKey(
-	fromAddress common.Address,
-	toAddress common.Address,
-	pendingUse *big.Int,
-	amount *big.Int,
-	maxGas uint64,
-	maxGasFee uint64,
-	maxTimeUse uint64,
-	data []byte,
-	relatedAddress [][]byte,
-	lastDeviceKey common.Hash,
-	newDeviceKey common.Hash,
-	nonce uint64,
-	deviceKey []byte,
-	chainId uint64,
-) (types.Transaction, error) {
-	transaction := transaction.NewTransaction(
-		fromAddress,
-		toAddress,
-		amount,
-		maxGas,
-		maxGasFee,
-		maxTimeUse,
-		data,
-		relatedAddress,
-		lastDeviceKey,
-		newDeviceKey,
-		nonce,
-		chainId,
-	)
-	transaction.SetSign(tc.clientContext.KeyPair.PrivateKey())
-	logger.Info(transaction)
-
-	// Create TransactionWithDeviceKey
-	transactionWithDeviceKey := &pb.TransactionWithDeviceKey{
-		Transaction: transaction.Proto().(*pb.Transaction),
-		DeviceKey:   deviceKey,
-	}
-
-	// Serialize to bytes
-	bTransactionWithDeviceKey, err := proto.Marshal(transactionWithDeviceKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal TransactionWithDeviceKey: %w", err)
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal TransactionWithDeviceKey: %w", err)
-	}
-	parentConnection := tc.clientContext.ConnectionsManager.ParentConnection()
-	err = tc.clientContext.MessageSender.SendBytes(
-		parentConnection,
-		command.SendTransactionWithDeviceKey,
-		bTransactionWithDeviceKey,
-	)
-	return transaction, err
 }
 
 func (tc *TransactionController) SaveTransactionWithDeviceKeyToFile(
@@ -354,7 +296,7 @@ func (tc *TransactionController) SendAllTransactionsWidthDeviceKeyInDirectory(
 
 		err = tc.clientContext.MessageSender.SendBytes(
 			parentConnection,
-			command.SendTransactionWithDeviceKey,
+			command.SendTransaction,
 			byteT,
 		)
 		if err != nil {
@@ -439,41 +381,11 @@ func (tc *TransactionController) SendAllTransactionsInDirectory(
 	return combinedError
 }
 
-// RunResult lưu trữ kết quả của một lần chạy benchmark
-type RunResult struct {
-	RunNumber         int
-	Duration          time.Duration
-	MessagesPerSecond float64
-	SentCount         int64
-	ReceivedCount     int64
-	LostCount         int64
-}
-
-//-----------------------//
-
+// SendNewTransactionWithDeviceKey is no longer supported: the server dropped the SendTransactionWithDeviceKey
+// command with the legacy rpc/tcp purge (P1-1). Kept only so the TransactionController interface stays stable.
 func (tc *TransactionController) SendNewTransactionWithDeviceKey(
 	transaction types.Transaction,
 	deviceKey []byte,
 ) (types.Transaction, error) {
-
-	transaction.SetSign(tc.clientContext.KeyPair.PrivateKey())
-
-	// Create TransactionWithDeviceKey
-	transactionWithDeviceKey := &pb.TransactionWithDeviceKey{
-		Transaction: transaction.Proto().(*pb.Transaction),
-		DeviceKey:   deviceKey,
-	}
-
-	// Serialize to bytes
-	bTransactionWithDeviceKey, err := proto.Marshal(transactionWithDeviceKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal TransactionWithDeviceKey: %w", err)
-	}
-	parentConnection := tc.clientContext.ConnectionsManager.ParentConnection()
-	err = tc.clientContext.MessageSender.SendBytes(
-		parentConnection,
-		command.SendTransactionWithDeviceKey,
-		bTransactionWithDeviceKey,
-	)
-	return transaction, err
+	return nil, fmt.Errorf("SendTransactionWithDeviceKey was removed with the legacy rpc/tcp path; use eth_sendRawTransaction")
 }

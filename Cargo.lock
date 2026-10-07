@@ -3460,6 +3460,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
+ "bitvec",
  "blake3",
  "libc",
  "nomt",
@@ -3631,7 +3632,6 @@ dependencies = [
 [[package]]
 name = "nomt"
 version = "1.0.4"
-source = "git+https://github.com/thrumdev/nomt.git#3b64ba527fca26ddbc69d16eea7f6c2d0b4c65cd"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -3658,7 +3658,6 @@ dependencies = [
 [[package]]
 name = "nomt-core"
 version = "1.0.4"
-source = "git+https://github.com/thrumdev/nomt.git#3b64ba527fca26ddbc69d16eea7f6c2d0b4c65cd"
 dependencies = [
  "arrayvec",
  "bitvec",

@@ -94,6 +94,10 @@ func (m *mockParentChainClient) GetInboundTransfers(pubKey cm.PublicKey, cursor 
 	return nil, cursor, nil
 }
 
+func (m *mockParentChainClient) GetInboundAccountRegistrations(pubKey cm.PublicKey, cursor uint64) ([]*parentchain.AccountRegisteredEvent, uint64, error) {
+	return nil, cursor, nil
+}
+
 func (m *mockParentChainClient) GetTransferRecord(msgID common.Hash) (parentchain.FloatTransferRecord, bool, error) {
 	if m.transferNotFound {
 		return parentchain.FloatTransferRecord{}, false, nil
@@ -133,6 +137,34 @@ func (m *mockParentChainClient) SendSubmitStateRoot(clusterPubKey cm.PublicKey, 
 
 func (m *mockParentChainClient) GetStateRoot(clusterPubKey cm.PublicKey, epoch uint64) (common.Hash, bool, error) {
 	return common.Hash{}, false, nil
+}
+
+func (m *mockParentChainClient) GetBlockByNumber(number uint64) (parentchain.BlockRecord, bool, error) {
+	return parentchain.BlockRecord{}, false, nil
+}
+
+func (m *mockParentChainClient) GetBlockByHash(hash common.Hash) (parentchain.BlockRecord, bool, error) {
+	return parentchain.BlockRecord{}, false, nil
+}
+
+func (m *mockParentChainClient) GetTransaction(txHash common.Hash) (uint64, uint32, bool, error) {
+	return 0, 0, false, nil
+}
+
+func (m *mockParentChainClient) GetReceipt(txHash common.Hash) (*parentchain.Receipt, bool, error) {
+	return nil, false, nil
+}
+
+func (m *mockParentChainClient) GetStatus() (parentchain.ChainStatus, error) {
+	return parentchain.ChainStatus{}, nil
+}
+
+func (m *mockParentChainClient) GetProof(key [32]byte) (parentchain.ProofResult, error) {
+	return parentchain.ProofResult{}, nil
+}
+
+func (m *mockParentChainClient) SendRawTransaction(rawTx []byte) (common.Hash, error) {
+	return common.Hash{}, nil
 }
 
 

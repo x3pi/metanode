@@ -1,0 +1,34 @@
+diff --git a/consensus/metanode/src/node/setup_consensus/mod.rs b/consensus/metanode/src/node/setup_consensus/mod.rs
+index 10b6390c..92ef98df 100644
+--- a/consensus/metanode/src/node/setup_consensus/mod.rs
++++ b/consensus/metanode/src/node/setup_consensus/mod.rs
+@@ -671,6 +671,29 @@ impl ConsensusNode {
+                         commit_processor.next_expected_index = go_commit_idx + 1;
+                     }
+ 
++                    // The mirror case of the check above: Go is AHEAD of the position Rust recovered from. Rust read
++                    // its recovery position (go_replay_after) early in startup, but Go kept executing while the
++                    // startup sync pulled the blocks it was missing, so Go now reports a later commit. If the
++                    // CommitProcessor were left at the old position it would re-deliver commits Go has ALREADY
++                    // executed, and they would be applied a second time as new blocks (observed live: one node's
++                    // chain gained duplicate blocks and diverged from its peers). Go is the authority on what it has
++                    // executed, so move the CommitProcessor up to it. This only skips commits Go itself reports as
++                    // executed; it never skips anything Go has not done.
++                    if go_commit_idx > commit_processor.go_last_commit_index
++                        && go_epoch == storage.current_epoch
++                    {
++                        tracing::warn!(
++                            "🛡️ [SYNC-PARITY] CommitProcessor BEHIND Go! cp.go_last_commit_index={} < go.commit_index={} \
++                             (Go executed more after Rust read its recovery position). Fast-forwarding the \
++                             CommitProcessor so commits Go already executed are not replayed.",
++                            commit_processor.go_last_commit_index, go_commit_idx
++                        );
++                        commit_processor.go_last_commit_index = go_commit_idx;
++                        if commit_processor.next_expected_index <= go_commit_idx {
++                            commit_processor.next_expected_index = go_commit_idx + 1;
++                        }
++                    }
++
+                     if go_commit_idx == 0 && cp_go_last > 0 {
+                         tracing::warn!(
+                             "⚠️ [SYNC-PARITY] Go at commit_index=0 (fresh epoch) but \

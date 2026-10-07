@@ -11,6 +11,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/network"
 	"github.com/meta-node-blockchain/meta-node/pkg/node"
+	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 )
 
@@ -31,6 +32,13 @@ func (app *App) initNetwork() error {
 		return fmt.Errorf("failed to load genesis data: %v", err)
 	}
 	app.config.ChainId = app.genesis.Config.ChainId
+	if err := app.config.ValidateChainBinding(); err != nil {
+		return err
+	}
+	// One chain ID for the Parent Chain and every execution cluster: parent txs signed here must carry it.
+	if app.config.ChainId != nil && app.config.ChainId.IsUint64() && app.config.ChainId.Sign() > 0 {
+		parentchain.SetParentChainID(app.config.ChainId.Uint64())
+	}
 
 	// Initialize key pair
 	app.keyPair = bls.NewKeyPair(e_common.FromHex(app.config.PrivateKey))

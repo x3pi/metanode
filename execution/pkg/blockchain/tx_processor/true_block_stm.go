@@ -680,9 +680,15 @@ func (stm *TrueBlockSTM) execOne(
 		// calling processAuthorizationList, which no-ops on an empty list
 		// anyway) so the overwhelming majority of non-SetCode txs skip
 		// touching chainState.GetConfig() entirely on this hot path.
-		var authGasUsed uint64
+		var selfAuthorized bool
+		var authGasRefund uint64
+		var senderFinalNonce uint64 = tx.GetNonce() + 1
 		if len(tx.AuthorizationList()) > 0 {
-			authGasUsed = processAuthorizationList(tx, chainState.GetConfig().ChainId.Uint64(), mvccDB, chainState.GetSmartContractDB())
+			// EIP-7702 (F1): increment sender nonce before processing authorizations so
+			// self-authorization validates against tx.Nonce + 1 per spec.
+			_ = mvccDB.PlusOneNonce(tx.FromAddress())
+
+			authGasRefund, selfAuthorized = processAuthorizationList(tx, chainState.GetConfig().ChainId.Uint64(), mvccDB, chainState.GetSmartContractDB())
 			// processAuthorizationList reads each authority through mvccDB; an ESTIMATE hit there makes it skip that
 			// authority silently (the tx would still succeed with the authorization dropped), so wait for the
 			// blocking tx and re-execute instead. Pass mvccDB/scDB: their Set* calls already wrote earlier
@@ -693,6 +699,11 @@ func (stm *TrueBlockSTM) execOne(
 				markSuspended()
 				stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
 				return
+			}
+			if selfAuthorized {
+				senderFinalNonce = tx.GetNonce() + 2
+			} else {
+				senderFinalNonce = tx.GetNonce() + 1
 			}
 		}
 
@@ -716,7 +727,22 @@ func (stm *TrueBlockSTM) execOne(
 					newAccountGas = params.CallNewAccountGas
 				}
 			}
-			totalGasUsed := mt_common.TRANSFER_GAS_COST + newAccountGas + authGasUsed
+
+			// EIP-7702 (F3): every authorization tuple costs params.CallNewAccountGas (25000)
+			// in intrinsic gas, regardless of validity (anti-DDoS).
+			authGasCost := uint64(len(tx.AuthorizationList())) * params.CallNewAccountGas
+			intrinsicGas := mt_common.TRANSFER_GAS_COST + authGasCost
+
+			// EIP-7702 / Fraud Proof I1 (F2): never exceed MaxGas, and reject/fail if MaxGas < intrinsicGas.
+			var errSub error
+			// Plain transfers keep the legacy rule shared with the native fast path (EXE-03 surcharge always billed);
+			// SetCode txs are strict (never billed above the signed MaxGas, fail when it cannot pay). See
+			// nativeTransferGas.
+			totalGasUsed, gasCovered := nativeTransferGas(tx.MaxGas(), intrinsicGas, newAccountGas, authGasRefund, len(tx.AuthorizationList()) > 0)
+			if !gasCovered {
+				errSub = errors.New("gas limit too low: intrinsic gas plus the new-account surcharge exceed MaxGas")
+			}
+
 			gasFee := new(big.Int).Mul(new(big.Int).SetUint64(totalGasUsed), tx.EffectiveGasPrice())
 
 			// EIP-4844: blob fee is burned (never added to totalGasFee / leader
@@ -731,15 +757,23 @@ func (stm *TrueBlockSTM) execOne(
 				totalCost.Add(totalCost, blobFee)
 			}
 
-			var errSub error
-			if blobErr != nil {
-				errSub = blobErr
+			if errSub == nil {
+				if blobErr != nil {
+					errSub = blobErr
+				} else {
+					errSub = mvccDB.SubTotalBalance(tx.FromAddress(), totalCost)
+				}
 			} else {
-				errSub = mvccDB.SubTotalBalance(tx.FromAddress(), totalCost)
+				// Failed early due to intrinsic gas or out of gas: charge gas fee capped at balance
+				_ = mvccDB.SubTotalBalance(tx.FromAddress(), gasFee)
 			}
 
 			// Always update nonce and state hashes even if balance deduction fails (prevents infinite replay)
-			mvccDB.PlusOneNonce(tx.FromAddress())
+			if len(tx.AuthorizationList()) == 0 {
+				mvccDB.PlusOneNonce(tx.FromAddress())
+			} else {
+				mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
+			}
 			mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
 			mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 			commitDeviceKeyIfPending(chainState, tx.Hash())
@@ -749,7 +783,7 @@ func (stm *TrueBlockSTM) execOne(
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
 					pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(errSub.Error()), pb.EXCEPTION_NONE,
-					tx.EffectiveGasPrice().Uint64(), 0,
+					tx.EffectiveGasPrice().Uint64(), totalGasUsed,
 					[]types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			} else {
@@ -799,7 +833,9 @@ func (stm *TrueBlockSTM) execOne(
 			}
 
 			if err != nil {
-
+				if len(tx.AuthorizationList()) > 0 {
+					mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
+				}
 				logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
@@ -820,10 +856,14 @@ func (stm *TrueBlockSTM) execOne(
 					receiptStatus := exRs.ReceiptStatus()
 					ret := exRs.Return()
 					exception := exRs.Exception()
-					// authGasUsed (EIP-7702 authorization-list intrinsic cost, see
-					// above) is folded in here so it's charged and credited to the
-					// leader identically to the VM's own gas usage.
-					gasUsed := exRs.GasUsed() + authGasUsed
+					// F4 fix: exRs.GasUsed() already folds in intrinsic gas (including
+					// len(authList)*params.CallNewAccountGas via vm_processor's computeIntrinsicGas/applyIntrinsicGas).
+					// Do NOT add authGasUsed again (prevents double charging).
+					// F2 fix: guarantee gasUsed never exceeds tx.MaxGas().
+					gasUsed := exRs.GasUsed()
+					if gasUsed > tx.MaxGas() {
+						gasUsed = tx.MaxGas()
+					}
 					eventLogs := exRs.EventLogs()
 
 					// [FIX] Deduct Gas Fee from sender's balance
@@ -864,9 +904,18 @@ func (stm *TrueBlockSTM) execOne(
 					if exRs.MapNonce() != nil {
 						for addrHex, newNonceBytes := range exRs.MapNonce() {
 							addr := common.HexToAddress(addrHex)
+							if len(tx.AuthorizationList()) > 0 && addr == tx.FromAddress() {
+								// EIP-7702 (F1): sender nonce is strictly senderFinalNonce
+								// (tx.Nonce + 2 if self-authorized, tx.Nonce + 1 otherwise).
+								// Prevent MVM from double-incrementing.
+								mvccDB.SetNonce(addr, senderFinalNonce)
+								continue
+							}
 							newNonce := big.NewInt(0).SetBytes(newNonceBytes).Uint64()
 							mvccDB.SetNonce(addr, newNonce)
 						}
+					} else if len(tx.AuthorizationList()) > 0 {
+						mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
 					}
 
 					if canPayGas {

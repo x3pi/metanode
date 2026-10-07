@@ -239,6 +239,7 @@ func NewMockTransaction(from e_common.Address, to e_common.Address, nonce uint64
 
 func (mt *MockTransaction) Hash() e_common.Hash           { return mt.hash }
 func (mt *MockTransaction) EthHash() e_common.Hash        { return mt.hash }
+func (mt *MockTransaction) ProtoHash() e_common.Hash      { return mt.hash }
 func (mt *MockTransaction) RHash() e_common.Hash          { return mt.rHash }
 func (mt *MockTransaction) NewDeviceKey() e_common.Hash   { return e_common.Hash{} }
 func (mt *MockTransaction) LastDeviceKey() e_common.Hash  { return e_common.Hash{} }
@@ -258,6 +259,7 @@ func (mt *MockTransaction) MaxTimeUse() uint64                                  
 func (mt *MockTransaction) MaxFee() *big.Int                                     { return big.NewInt(0) }
 func (mt *MockTransaction) GasTipCap() *big.Int                                  { return big.NewInt(0) }
 func (mt *MockTransaction) GasFeeCap() *big.Int                                  { return big.NewInt(0) }
+func (mt *MockTransaction) GasPriceCap() *big.Int                                 { return big.NewInt(1) }
 func (mt *MockTransaction) EffectiveGasPrice() *big.Int                          { return big.NewInt(1) }
 func (mt *MockTransaction) BlobVersionedHashes() [][]byte                        { return nil }
 func (mt *MockTransaction) MaxFeePerBlobGas() *big.Int                           { return big.NewInt(0) }
@@ -267,6 +269,8 @@ func (mt *MockTransaction) EthAuthorizationList() []e_types.SetCodeAuthorization
 func (mt *MockTransaction) GetNonce() uint64                                     { return mt.nonce }
 func (mt *MockTransaction) GetChainID() uint64                                   { return 1 }
 func (mt *MockTransaction) ClearCacheHash()                                      {}
+func (mt *MockTransaction) RawEnvelope() []byte                                   { return nil }
+func (mt *MockTransaction) SetRawEnvelope(_ []byte)                               {}
 func (mt *MockTransaction) GetNonce32Bytes() []byte                              { return make([]byte, 32) }
 func (mt *MockTransaction) Marshal() ([]byte, error)                             { return mt.data, nil }
 func (mt *MockTransaction) Unmarshal(b []byte) error                             { mt.data = b; return nil }
@@ -282,6 +286,11 @@ func (mt *MockTransaction) CopyTransaction() types.Transaction                  
 func (mt *MockTransaction) SetIsDebug(_ bool)                                    {}
 func (mt *MockTransaction) GetIsDebug() bool                                     { return false }
 func (mt *MockTransaction) ValidEthSign() bool                                   { return true }
+func (mt *MockTransaction) ValidSecpProtoSign() bool                             { return true }
+func (mt *MockTransaction) ValidSecpSign() bool                                  { return true }
+func (mt *MockTransaction) SigningHash() e_common.Hash                           { return mt.hash }
+func (mt *MockTransaction) Type() uint64                                         { return mt.txType }
+func (mt *MockTransaction) SignBytes() []byte                                    { return nil }
 func (mt *MockTransaction) UpdateRelatedAddresses(_ [][]byte)                    {}
 func (mt *MockTransaction) AddRelatedAddress(_ e_common.Address)                 {}
 func (mt *MockTransaction) UpdateDeriver(_, _ e_common.Hash)                     {}

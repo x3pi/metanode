@@ -16,20 +16,15 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
-	"github.com/meta-node-blockchain/meta-node/pkg/bls"
-	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/file_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
-	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	sharedmemory "github.com/meta-node-blockchain/meta-node/pkg/shared_memory"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	mt_types "github.com/meta-node-blockchain/meta-node/types"
-	"google.golang.org/protobuf/proto"
 )
 
 // newCommittedRPCTransaction builds the standard RPCTransaction JSON representation for a
@@ -102,7 +97,7 @@ func newCommittedRPCTransaction(
 		BlockNumber:         (*hexutil.Big)(new(big.Int).SetUint64(blockNumber)),
 		From:                tx.FromAddress(),
 		Gas:                 hexutil.Uint64(tx.MaxGas()),
-		GasPrice:            (*hexutil.Big)(new(big.Int).SetUint64(tx.MaxGasPrice())),
+		GasPrice:            (*hexutil.Big)(tx.EffectiveGasPrice()),
 		GasFeeCap:           gasFeeCap,
 		GasTipCap:           gasTipCap,
 		MaxFeePerBlobGas:    maxFeePerBlobGas,
@@ -131,7 +126,7 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 		hashTx = blsHash
 	}
 
-	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(hashTx)
+	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(hashTx)
 
 	if !ok || blockNumber > storage.GetLastBlockNumber() {
 		// Fallback to cache as a pending transaction
@@ -206,7 +201,7 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 		return nil, nil
 	}
 
-	hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
+	hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumberFast(blockNumber)
 
 	if !ok {
 		return nil, fmt.Errorf("could not find block hash for block number %d", blockNumber)
@@ -264,102 +259,10 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 	return newCommittedRPCTransaction(tx, blockData.Header().Hash(), blockData.Header().BlockNumber(), txIndexVal, ethHash), nil
 }
 
-func (api *MetaAPI) SendTransaction(ctx context.Context, args TransactionArgs) (common.Hash, error) {
-	txM := &transaction.Transaction{}
-
-	err := txM.Unmarshal(*args.Data)
-	if err != nil {
-		return common.Hash{}, err
-	}
-	// api.App.transactionPool.AddTransaction(txM)
-
-	return txM.Hash(), nil
-}
-
-// SubmitTransaction is a helper function that submits tx to txPool and logs a message.
-func SubmitTransaction(ctx context.Context, tx *types.Transaction) (common.Hash, error) {
-	sg := types.NewCancunSigner(tx.ChainId())
-	from, _ := sg.Sender(tx)
-	if tx.To() == nil {
-		addr := crypto.CreateAddress(from, tx.Nonce())
-		logger.Info("submitted contract creation", "hash", tx.Hash().Hex(), "from", from, "nonce", tx.Nonce(), "contract", addr.Hex(), "value", tx.Value())
-	} else {
-		logger.Info("submitted transaction", "hash", tx.Hash().Hex(), "from", from, "nonce", tx.Nonce(), "recipient", tx.To(), "value", tx.Value())
-	}
-	return tx.Hash(), nil
-}
-
-func (api *MetaAPI) SendRawTransaction(ctx context.Context, input hexutil.Bytes, inputEth *hexutil.Bytes, pubKeyBlsL *hexutil.Bytes) (common.Hash, error) {
-	// Standard Ethereum format (1 argument: raw transaction hex)
-	// Supports MetaMask, ethclient, ethers.js, and web3 over both HTTP and WebSocket
-	if inputEth == nil && pubKeyBlsL == nil {
-		return api.SendRawEthTransaction(ctx, input)
-	}
-
-	var ethBytes []byte
-	if inputEth != nil {
-		ethBytes = *inputEth
-	}
-
-	txM := &transaction.Transaction{}
-	err := txM.Unmarshal(input)
-	if err != nil {
-		// BỔ SUNG LOG
-		logger.Error("Lỗi Unmarshal txM: %v", err)
-		return common.Hash{}, err
-	}
-	if len(ethBytes) > 0 {
-
-		txEth := new(types.Transaction)
-
-		if err := txEth.UnmarshalBinary(ethBytes); err != nil {
-			// BỔ SUNG LOG
-			logger.Error("Lỗi UnmarshalBinary txEth: %v", err)
-			return common.Hash{}, err
-		}
-
-		signer := types.NewCancunSigner(api.App.config.ChainId)
-
-		from, err := types.Sender(signer, txEth)
-		if err != nil {
-			// BỔ SUNG LOG
-			logger.Error("Lỗi types.Sender: %v", err)
-			return common.Hash{}, err
-		}
-		if from != txM.FromAddress() {
-			// SỬA LỖI LOGIC: Tạo lỗi mới thay vì trả về 'err' (đang là nil)
-			err = fmt.Errorf("địa chỉ 'from' không khớp: txEth from %s, txM from %s", from.Hex(), txM.FromAddress().Hex())
-			// BỔ SUNG LOG
-			logger.Error("Lỗi không khớp địa chỉ: %v", err)
-			return common.Hash{}, err
-		}
-
-		output, err := api.App.transactionProcessor.ProcessTransactionFromRpc(txM)
-		if err != nil {
-			// BỔ SUNG LOG
-			logger.Error("Lỗi ProcessTransactionFromRpc (nhánh eth): %v", err)
-			return common.Hash{}, newError(err, output)
-
-		}
-		err = blockchain.GetBlockChainInstance().SetEthHashMapblsHash(txEth.Hash(), txM.Hash())
-
-		if err != nil {
-			// BỔ SUNG LOG
-			logger.Error("Lỗi SetEthHashMapblsHash: %v", err)
-			return common.Hash{}, newError(err, output)
-
-		}
-		return txEth.Hash(), nil
-	} else {
-		output, err := api.App.transactionProcessor.ProcessTransactionFromRpc(txM)
-		if err != nil {
-			// BỔ SUNG LOG
-			logger.Error("Lỗi ProcessTransactionFromRpc (nhánh không-eth): %v", err)
-			return common.Hash{}, newError(err, output)
-
-		}
-		return txM.Hash(), nil
-	}
+// SendRawTransaction implements standard Ethereum JSON-RPC eth_sendRawTransaction.
+// Accepts exactly 1 argument: the hex-encoded EIP-2718 raw signed transaction envelope.
+func (api *MetaAPI) SendRawTransaction(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
+	return api.SendRawEthTransaction(ctx, input)
 }
 
 func TransactionToMap(tx *types.Transaction) (map[string]interface{}, error) {
@@ -415,210 +318,46 @@ func (api *MetaAPI) startProcessingLogger() {
 		lastCount = currentCount
 	}
 }
-func (api *MetaAPI) SendRawTransactionWithDeviceKey(ctx context.Context, input []byte, inputEth []byte, pubKeyBlsL []byte) (common.Hash, error) {
-	var isExistOverloaded bool
-	value, exists := sharedmemory.GlobalSharedMemory.Read("pendingOverloaded")
-	if exists {
-		var ok bool
-		isExistOverloaded, ok = value.(bool)
-		if ok && isExistOverloaded {
-			return common.Hash{}, fmt.Errorf("system overloaded. waiting")
-		}
-	}
-
-	txD := &mt_proto.TransactionWithDeviceKey{}
-	err := proto.Unmarshal(input, txD)
-	if err != nil {
-		return common.Hash{}, err
-	}
-	// api.processingChunkCount.Add(1)
-	// defer api.processingChunkCount.Add(-1)
-	txM := &transaction.Transaction{}
-	txM.FromProto(txD.Transaction)
-	if len(inputEth) > 0 {
-		txEth := new(types.Transaction)
-		if err := txEth.UnmarshalBinary(inputEth); err != nil {
-			return common.Hash{}, err
-		}
-		logger.Info("ETH SendRawTransactionWithDeviceKey", txEth.Hash())
-
-		fileHandler, _ := file_handler.GetFileAbi()
-		name, _ := fileHandler.ParseMethodName(txM)
-		if !(txM.ToAddress() == file_handler.PredictContractAddress(common.HexToAddress(api.App.chainState.GetConfig().OwnerFileStorageAddress)) && name == "uploadChunk") {
-			blockchain.GetBlockChainInstance().AddTxToCache(txEth.Hash(), append([]byte(nil), inputEth...))
-		}
-		signer := types.NewCancunSigner(api.App.config.ChainId)
-
-		from, err := types.Sender(signer, txEth)
-		if err != nil {
-			return common.Hash{}, err
-		}
-		logger.Info("2. ETH")
-		if from != txM.FromAddress() {
-
-			return common.Hash{}, fmt.Errorf("address does not match signature")
-		}
-		logger.Info("3. ProcessTransactionFromRpcWithDeviceKey")
-		output, err := api.App.transactionProcessor.ProcessTransactionFromRpcWithDeviceKey(txD)
-		if err != nil {
-			return common.Hash{}, newError(err, output)
-
-		}
-		err = blockchain.GetBlockChainInstance().SetEthHashMapblsHash(txEth.Hash(), txM.Hash())
-		if err != nil {
-			return common.Hash{}, newError(err, output)
-		}
-		return txEth.Hash(), nil
-	} else {
-		output, err := api.App.transactionProcessor.ProcessTransactionFromRpcWithDeviceKey(txD)
-		if err != nil {
-			return common.Hash{}, newError(err, output)
-
-		}
-		return txM.Hash(), nil
-	}
-}
-
-func (api *MetaAPI) GetSendRawTransaction(ctx context.Context, input hexutil.Bytes) (map[string]interface{}, error) {
-	ethTx := new(types.Transaction)
-	if err := ethTx.UnmarshalBinary(input); err != nil {
-		return nil, err
-	}
-
-	sg := types.NewCancunSigner(ethTx.ChainId())
-	fromAddress, err := sg.Sender(ethTx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get fromAddress: %w", err) // Cập nhật thông báo lỗi
-	}
-	lastDeviceKey := common.HexToHash(
-		"0000000000000000000000000000000000000000000000000000000000000000",
-	)
-	newDeviceKey := common.HexToHash(
-		"0000000000000000000000000000000000000000000000000000000000000000",
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get account: %w", err) // Cập nhật thông báo lỗi
-	}
-	bRelatedAddresses := make([][]byte, 0)
-
-	var toAddress common.Address
-	var bData []byte
-	if len(ethTx.Data()) > 0 && ethTx.To() == nil {
-		// toAddress = common.BytesToAddress(
-		// 	crypto.Keccak256(
-		// 		append(
-		// 			as.Address().Bytes(),
-		// 			as.LastHash().Bytes()...),
-		// 	)[12:],
-		// )
-		toAddress = common.Address{}
-
-		deployData := transaction.NewDeployData(
-			ethTx.Data(),
-			common.HexToAddress("0xda7284fac5e804f8b9d71aa39310f0f86776b51d"),
-		)
-		bData, err = deployData.Marshal()
-		if err != nil {
-			return nil, fmt.Errorf("failed to create deployData : %w", err) // Cập nhật thông báo lỗi
-		}
-	}
-
-	if len(ethTx.Data()) > 0 && ethTx.To() != nil {
-		toAddress = common.BytesToAddress(ethTx.To().Bytes())
-		callData := transaction.NewCallData(ethTx.Data())
-
-		bData, err = callData.Marshal()
-		if err != nil {
-			logger.Error("GetSendRawTransaction: ", err)
-		}
-	}
-
-	if len(ethTx.Data()) == 0 && ethTx.To() != nil {
-		toAddress = common.BytesToAddress(ethTx.To().Bytes())
-	}
-	transaction := transaction.NewTransaction(
-		fromAddress,
-		toAddress,
-		ethTx.Value(),
-		ethTx.Gas(),
-		ethTx.GasPrice().Uint64(),
-		0,
-		bData,
-		bRelatedAddresses,
-		lastDeviceKey,
-		newDeviceKey,
-		ethTx.Nonce(),
-		api.App.config.ChainId.Uint64(),
-	)
-	account := map[string]interface{}{
-		"txHash":    transaction.Hash(),
-		"toAddress": transaction.ToAddress(),
-	}
-
-	return account, nil
-}
-
-// SendRawEthTransaction accepts a raw Ethereum-format transaction (the same
-// payload as eth_sendRawTransaction in MetaMask), converts it locally to a
-// MetaNode transaction with BLS signing, and submits it.
-//
-// With the async queue enabled, this method enqueues the transaction for
-// background processing and returns the ETH tx hash immediately (separated
-// send stream). Clients poll eth_getTransactionReceipt for the result
-// (receive stream).
-//
-// Falls back to synchronous processing if the async queue is not available.
 
 // rpcTxConcurrencyLimiter bounds how many eth_sendRawTransaction requests can
-// be ACTIVELY executing the heavy synchronous path (sendRawEthTransactionSpeculative
-// / sendRawEthTransactionSync — state reads, transaction-pool shard locks, and
-// in the speculative-gateway case a real EVM execution) at the same time.
-//
-// Found live (2026-09-02) root-causing a multi-minute consensus stall under an
-// extreme burst (1,000,000 real transfers, 3,000 concurrent RPC connections):
-// this path has NO concurrency bound at all — every concurrent HTTP connection
-// runs the full pipeline synchronously on its own goroutine, unlike every other
-// tx-intake path in this codebase (the injectionQueue and ReadTxQueue worker
-// pools both cap concurrency deliberately). At 3,000 simultaneous real
-// (non-reverting, genuinely state-mutating) transactions, that's 3,000
-// goroutines simultaneously doing real state I/O and occasionally locking to
-// an OS thread for a CGo call into Rust (e.g. execute_rpc_request's go_lag
-// verification) — a live gdb thread dump + /proc/<pid>/task inspection during
-// the stall showed hundreds of OS threads parked "locked to thread" and
-// Rust's own tokio-runtime-worker threads and dag-state-actor all sleeping,
-// consistent with genuine OS-level scheduling starvation rather than a
-// logical deadlock in either language's code (no lock holder was ever found
-// stuck inside a blocking call). This never manifested with the zero-value/
-// reverting transactions used earlier in this session's benchmarking, since
-// those return almost immediately (no real state work, no CGo pressure).
-//
-// By Little's Law, the concurrency actually NEEDED to sustain this system's
-// measured real throughput ceiling (~5,800-8,700 tx/s, see the 2026-09-02
-// benchmarking session) is throughput x per-request latency — at even a
-// generous 100ms per synchronous request under real (lock + state-I/O)
-// contention, that's under 1,000. 3,000 concurrent connections was never
-// required to reach that ceiling; it was simply how many the load-testing
-// client happened to open to maximize its OWN injection rate. Set to 1000:
-// meaningfully below the 3,000-concurrency level that reproduced the stall
-// (so this cap provides real protection, not just a number equal to what
-// already failed), while comfortably above the Little's-Law estimate so
-// throughput is not the limiting factor. Requests beyond the cap wait on a
-// cheap channel (no OS thread consumed while waiting) instead of each
-// independently piling onto the OS scheduler; a request whose own context
-// is cancelled while waiting (e.g. client-side timeout) gives up its place
-// immediately rather than holding a slot until GC'd.
+// be actively executing pool addition at the same time.
 const rpcTxConcurrencyLimit = 1000
 
 var rpcTxConcurrencyLimiter = make(chan struct{}, rpcTxConcurrencyLimit)
 
+// jsonrpcError implements the standard rpc.Error interface so that go-ethereum
+// JSON-RPC returns error objects with code -32000.
+type jsonrpcError struct {
+	code    int
+	message string
+}
+
+func (e *jsonrpcError) Error() string {
+	return e.message
+}
+
+func (e *jsonrpcError) ErrorCode() int {
+	return e.code
+}
+
+// formatGethError maps internal admission errors to standard go-ethereum RPC error messages.
+func formatGethError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if rpcErr, ok := err.(rpc.Error); ok {
+		return rpcErr
+	}
+	code, msg := transaction.GethStandardRPCError(err)
+	return &jsonrpcError{
+		code:    code,
+		message: msg,
+	}
+}
+
 // SendRawEthTransaction accepts a raw Ethereum-format transaction (the same
 // payload as eth_sendRawTransaction in MetaMask), converts it locally to a
-// Metanode transaction (MetaTx) by signing it with a BLS key, and submits it.
-//
-// If EnablePrivateGateway is true (Private Chain), it executes the transaction
-// speculatively and caches a mock receipt for instant finality.
-//
-// Falls back to synchronous processing if the async queue is not available.
+// MetaNode transaction via the canonical converter, and submits it to the mempool.
 func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
 	var isExistOverloaded bool
 	value, exists := sharedmemory.GlobalSharedMemory.Read("pendingOverloaded")
@@ -626,7 +365,7 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 		var ok bool
 		isExistOverloaded, ok = value.(bool)
 		if ok && isExistOverloaded {
-			return common.Hash{}, fmt.Errorf("system overloaded. waiting")
+			return common.Hash{}, formatGethError(fmt.Errorf("system overloaded, waiting"))
 		}
 	}
 
@@ -634,149 +373,33 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 	case rpcTxConcurrencyLimiter <- struct{}{}:
 		defer func() { <-rpcTxConcurrencyLimiter }()
 	case <-ctx.Done():
-		return common.Hash{}, fmt.Errorf("request cancelled while waiting for processing capacity")
+		return common.Hash{}, formatGethError(fmt.Errorf("request cancelled while waiting for processing capacity"))
 	}
 
-	if api.App.config.EnablePrivateGateway {
-		return api.sendRawEthTransactionSpeculative(ctx, input)
-	}
-
-	// Use synchronous processing to return errors directly to client
-	return api.sendRawEthTransactionSync(ctx, input)
-}
-
-// sendRawEthTransactionSpeculative performs speculative execution for the Private Gateway
-func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
-	// 1. Decode the Ethereum TX
-	ethTx := new(types.Transaction)
-	if err := ethTx.UnmarshalBinary(input); err != nil {
-		return common.Hash{}, fmt.Errorf("failed to decode Ethereum transaction: %w", err)
-	}
-
-	// 2. Derive sender
-	signer := types.LatestSignerForChainID(api.App.config.ChainId)
-	_, err := types.Sender(signer, ethTx)
+	metaTx, ethTx, err := api.App.ConvertRawEthTxToMetaTx(input)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to derive sender: %w", err)
+		return common.Hash{}, formatGethError(err)
 	}
 
-	// 3. Determine BLS private key: Use GatewayBLSKey from config
-	var blsPrivateKey mt_common.PrivateKey
-	if api.App.config.GatewayBLSKey != "" {
-		kp := bls.NewKeyPair(common.FromHex(api.App.config.GatewayBLSKey))
-		blsPrivateKey = kp.PrivateKey()
-	} else {
-		blsPrivateKey = api.App.keyPair.PrivateKey()
-	}
+	ethTxHash := ethTx.Hash()
+	metaTxHash := metaTx.Hash()
 
-	// 5. Build MetaTx from EthTx
-	metaTxData, metaTx, err := buildMetaTxFromEthTx(
-		ethTx,
-		api.App.config.ChainId,
-		blsPrivateKey,
-		api.App,
-	)
+	_, err = api.App.transactionProcessor.AddTransactionToPool(metaTx)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to build MetaTx: %w", err)
+		return common.Hash{}, formatGethError(err)
 	}
 
-	// 6. Process the transaction
-	txD := &mt_proto.TransactionWithDeviceKey{}
-	if err := proto.Unmarshal(metaTxData, txD); err != nil {
-		return common.Hash{}, fmt.Errorf("failed to unmarshal TransactionWithDeviceKey: %w", err)
-	}
-
-
-	// 10. Execute real transaction synchronously to return errors to client
-	output, errRun := api.App.transactionProcessor.ProcessTransactionFromRpcWithDeviceKey(txD)
-	if errRun != nil {
-		return common.Hash{}, newError(errRun, output)
-	}
-
-	// Map ETH hash → BLS hash for receipt lookup
-	if err := blockchain.GetBlockChainInstance().SetEthHashMapblsHash(ethTx.Hash(), metaTx.Hash()); err != nil {
-		logger.Warn("[SpeculativeGateway] SetEthHashMapblsHash failed: %v", err)
-	}
-
-	// Pre-seed the walkback negative-cache: this tx was JUST accepted into the
-	// mempool, so it's guaranteed not to be in any committed block yet. Without
-	// this, the client's first eth_getTransactionReceipt poll (which can arrive
-	// immediately after this call returns) pays a full block-history walkback
-	// scan for a guaranteed miss — under sustained load this showed up as
-	// hundreds of goroutines piled up in rebuildTxMappingByWalkback at once.
-	blockchain.GetBlockChainInstance().MarkSubmittedPending(metaTx.Hash())
-	blockchain.GetBlockChainInstance().MarkSubmittedPending(ethTx.Hash())
-
-	logger.Info("[SpeculativeGateway] TX executed speculatively without mock receipt: ethHash=%s", ethTx.Hash().Hex())
-
-	return ethTx.Hash(), nil
-}
-
-// sendRawEthTransactionSync is the original synchronous implementation, kept
-// as a fallback when the async queue is not available.
-func (api *MetaAPI) sendRawEthTransactionSync(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
-	// 1. Decode the Ethereum TX
-	ethTx := new(types.Transaction)
-	if err := ethTx.UnmarshalBinary(input); err != nil {
-		return common.Hash{}, fmt.Errorf("failed to decode Ethereum transaction: %w", err)
-	}
-
-	// 2. Derive sender
-	signer := types.LatestSignerForChainID(api.App.config.ChainId)
-	fromAddress, err := types.Sender(signer, ethTx)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to derive sender: %w", err)
-	}
-
-	// 3. Determine BLS private key: per-address from key store, or node default
-	var blsPrivateKey mt_common.PrivateKey
-	if api.App.blsKeyStore != nil {
-		exists, _ := api.App.blsKeyStore.HasPrivateKey(fromAddress)
-		if exists {
-			pkStr, err := api.App.blsKeyStore.GetPrivateKey(fromAddress)
-			if err != nil {
-				return common.Hash{}, fmt.Errorf("failed to retrieve BLS key for %s: %w", fromAddress.Hex(), err)
-			}
-			kp := bls.NewKeyPair(common.FromHex(pkStr))
-			blsPrivateKey = kp.PrivateKey()
-		} else {
-			blsPrivateKey = api.App.keyPair.PrivateKey()
+	if bc := blockchain.GetBlockChainInstance(); bc != nil {
+		bc.AddTxToCache(ethTxHash, append([]byte(nil), input...))
+		if errMap := bc.SetEthHashMapblsHash(ethTxHash, metaTxHash); errMap != nil {
+			logger.Warn("[SendRawEthTransaction] SetEthHashMapblsHash failed: %v", errMap)
 		}
-	} else {
-		blsPrivateKey = api.App.keyPair.PrivateKey()
 	}
 
-	// 5. Build MetaTx from EthTx (in-process, no HTTP)
-	metaTxData, metaTx, err := buildMetaTxFromEthTx(
-		ethTx,
-		api.App.config.ChainId,
-		blsPrivateKey,
-		api.App,
-	)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to build MetaTx: %w", err)
-	}
+	logger.Info("[SendRawEthTransaction] TX submitted: ethHash=%s metaHash=%s from=%s nonce=%d",
+		ethTxHash.Hex(), metaTxHash.Hex(), metaTx.FromAddress().Hex(), metaTx.GetNonce())
 
-	// 6. Process the transaction
-	txD := &mt_proto.TransactionWithDeviceKey{}
-	if err := proto.Unmarshal(metaTxData, txD); err != nil {
-		return common.Hash{}, fmt.Errorf("failed to unmarshal TransactionWithDeviceKey: %w", err)
-	}
-
-	output, err := api.App.transactionProcessor.ProcessTransactionFromRpcWithDeviceKey(txD)
-	if err != nil {
-		return common.Hash{}, newError(err, output)
-	}
-
-	// 7. Map ETH hash → BLS hash for receipt lookup
-	if err := blockchain.GetBlockChainInstance().SetEthHashMapblsHash(ethTx.Hash(), metaTx.Hash()); err != nil {
-		logger.Warn("[SendRawEthTransaction] SetEthHashMapblsHash failed: %v", err)
-	}
-
-	logger.Info("[SendRawEthTransaction] TX submitted (sync): ethHash=%s metaHash=%s from=%s",
-		ethTx.Hash().Hex(), metaTx.Hash().Hex(), fromAddress.Hex())
-
-	return ethTx.Hash(), nil
+	return ethTxHash, nil
 }
 
 func swapStatusNumber(bit int32) string {
@@ -795,13 +418,13 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		searchHash = blsHash
 	}
 
-	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(searchHash)
+	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(searchHash)
 	if !ok || blockNumber > storage.GetLastBlockNumber() {
 		return nil, nil // Trả về nil nếu không tìm thấy giao dịch hoặc chưa committed
 	}
 
 	// Bước 3: Lấy block hash từ block number
-	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
+	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumberFast(blockNumber)
 	if !ok {
 		return nil, nil
 	}
@@ -830,17 +453,26 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		logger.Error("❌ [RPC-RECEIPT] failed to get receipt: %v", err)
 		return nil, nil
 	}
-	tx, err := api.GetTransactionByHash(ctx, rcp.TransactionHash())
+	txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blockData.Header().TransactionsRoot(), api.App.storageManager.GetStorageTransaction())
 	if err != nil {
-		logger.Error("❌ [RPC-RECEIPT] failed to get transaction for receipt: %v", err)
+		logger.Error("❌ [RPC-RECEIPT] failed to open transactions DB from root %s: %v", blockData.Header().TransactionsRoot().Hex(), err)
 		return nil, nil
 	}
-	if tx == nil {
-		logger.Error("❌ [RPC-RECEIPT] transaction not found for receipt: %s", rcp.TransactionHash().Hex())
+	tx, err := txDB.GetTransaction(rcp.TransactionHash())
+	if err != nil || tx == nil {
+		logger.Error("❌ [RPC-RECEIPT] failed to get transaction %s: %v", rcp.TransactionHash().Hex(), err)
 		return nil, nil
 	}
-	blockNumberBigInt := tx.BlockNumber.ToInt()
-	blockNumberInt64 := blockNumberBigInt.Int64()
+	txType := tx.GetType()
+	txNonce := tx.GetNonce()
+	var blobVersionedHashes []common.Hash
+	if rawHashes := tx.BlobVersionedHashes(); len(rawHashes) > 0 {
+		blobVersionedHashes = make([]common.Hash, len(rawHashes))
+		for i, h := range rawHashes {
+			blobVersionedHashes[i] = common.BytesToHash(h)
+		}
+	}
+	blockNumberInt64 := int64(blockNumber)
 
 	events := rcp.EventLogs()
 	logs := make([]interface{}, len(events))
@@ -862,26 +494,62 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		}
 	}
 
+	var rcpBloom eth_types.Bloom
+	for _, logData := range events {
+		rcpBloom.Add(logData.Address)
+		for _, topicBytes := range logData.Topics {
+			rcpBloom.Add(topicBytes)
+		}
+	}
+
+	var cumulativeGasUsed uint64
+	if gasInfo := api.getBlockGasInfo(blockData); gasInfo != nil {
+		txIdx := rcp.TransactionIndex()
+		txs := blockData.Transactions()
+		if txIdx < uint64(len(txs)) && txs[txIdx] == searchHash {
+			if txIdx < uint64(len(gasInfo.CumulativeGas)) {
+				cumulativeGasUsed = gasInfo.CumulativeGas[txIdx]
+			}
+		} else {
+			for idx, txH := range txs {
+				if txH == searchHash {
+					if idx < len(gasInfo.CumulativeGas) {
+						cumulativeGasUsed = gasInfo.CumulativeGas[idx]
+					}
+					break
+				}
+			}
+		}
+	}
+	if cumulativeGasUsed == 0 {
+		cumulativeGasUsed = rcp.GasUsed()
+	}
+
+	effectiveGasPrice := rcp.GasFee()
+	if effectiveGasPrice == 0 && tx != nil {
+		effectiveGasPrice = tx.EffectiveGasPrice().Uint64()
+	}
+
 	receiptMap := map[string]interface{}{
 		// "typeHash":          typeHash,
-		"type":              hexutil.EncodeUint64(uint64(tx.Type)),
+		"type":              hexutil.EncodeUint64(txType),
 		"status":            swapStatusNumber(int32(rcp.Status().Number())),
 		"transactionHash":   hashEth,
 		"gasUsed":           hexutil.EncodeUint64(rcp.GasUsed()),
 		"logs":              logs,
-		"logsBloom":         types.Bloom{},
+		"logsBloom":         rcpBloom,
 		"transactionIndex":  hexutil.EncodeUint64(rcp.TransactionIndex()),
 		"groupIndex":        hexutil.EncodeUint64(rcp.GroupIndex()), // Debug: deterministic group order
 		"blockHash":         blockHash,
 		"blockNumber":       hexutil.EncodeUint64(uint64(blockNumberInt64)),
-		"effectiveGasPrice": hexutil.EncodeUint64(rcp.GasFee()),
+		"effectiveGasPrice": hexutil.EncodeUint64(effectiveGasPrice),
 		"from":              rcp.FromAddress(),
-		"cumulativeGasUsed": hexutil.EncodeUint64(mt_common.BLOCK_GAS_LIMIT),
+		"cumulativeGasUsed": hexutil.EncodeUint64(cumulativeGasUsed),
 	}
 	// EIP-4844 receipt fields, present only for blob transactions (matches
 	// go-ethereum's own RPCReceipt: omitted entirely for non-blob types).
-	if len(tx.BlobVersionedHashes) > 0 {
-		blobGasUsed := uint64(len(tx.BlobVersionedHashes)) * eth_params.BlobTxBlobGasPerBlob
+	if len(blobVersionedHashes) > 0 {
+		blobGasUsed := uint64(len(blobVersionedHashes)) * eth_params.BlobTxBlobGasPerBlob
 		receiptMap["blobGasUsed"] = hexutil.EncodeUint64(blobGasUsed)
 		receiptMap["blobGasPrice"] = hexutil.EncodeBig(block.BlobBaseFeeForHeader(blockData.Header()))
 	}
@@ -897,7 +565,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		receiptMap["return"] = fmt.Sprintf("0x%s", common.Bytes2Hex(rcp.Return()))
 	}
 	if (rcp.ToAddress() == common.Address{}) {
-		toAddressDeploy := crypto.CreateAddress(rcp.FromAddress(), uint64(tx.Nonce))
+		toAddressDeploy := crypto.CreateAddress(rcp.FromAddress(), txNonce)
 		receiptMap["contractAddress"] = toAddressDeploy
 	} else {
 		receiptMap["to"] = rcp.ToAddress()
@@ -996,7 +664,7 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 	currentBlockNum := new(big.Int).Set(beginBlock)
 	for currentBlockNum.Cmp(endBlock) <= 0 {
 
-		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(currentBlockNum.Uint64())
+		hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumberFast(currentBlockNum.Uint64())
 		if !ok {
 			currentBlockNum.Add(currentBlockNum, big.NewInt(1))
 			continue
@@ -1054,7 +722,7 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 					TxIndex:     uint(txIndex),
 					Index:       logIndex,
 				}
-				
+
 				// 🚀 OPTIMIZATION: Lọc (Early Filtering) ngay tại đây thay vì dồn hết vào mảng rồi mới lọc
 				if len(filters.FilterLogs([]*types.Log{evL}, beginBlock, endBlock, crit.Addresses, crit.Topics)) > 0 {
 					eventLogs = append(eventLogs, evL)

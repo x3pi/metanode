@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
+use sha3::Digest;
 
 const MAX_TX_CACHE_SIZE: usize = 200_000;
 
@@ -914,16 +915,18 @@ impl PeerRpcServer {
             for tx_hex in &submit_req.transactions_hex {
                 match hex::decode(tx_hex) {
                     Ok(tx_bytes) => {
-                        let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(&tx_bytes);
-                        
-                        let mut hash_array = [0u8; 32];
-                        hash_array.copy_from_slice(&tx_hash);
-                        
-                        if is_duplicate(&hash_array) {
+                        // P0-9: Deduplicate by hash of full tx_bytes so a mutated proto variant
+                        // with identical RawEnvelope cannot occupy the slot of the genuine transaction.
+                        let mut dedup_key = [0u8; 32];
+                        let payload_hash = sha3::Keccak256::digest(&tx_bytes);
+                        dedup_key.copy_from_slice(&payload_hash);
+
+                        if is_duplicate(&dedup_key) {
                             // Skip duplicate TX
                             continue;
                         }
 
+                        let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(&tx_bytes);
                         crate::ffi::update_go_tx_trace(&tx_hash, "RUST_PEER_RPC_RECEIVED", "Transaction forwarded from peer, received by Rust peer RPC server");
                         all_tx_bytes.push(tx_bytes);
                     }

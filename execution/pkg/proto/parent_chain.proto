@@ -1,0 +1,207 @@
+syntax = "proto3";
+package parentchain;
+
+option go_package = "github.com/meta-node-blockchain/meta-node/execution/pkg/proto";
+option java_package = "com.meta_node.protos.compiled.parentchain";
+
+enum ParentChainMethod {
+  METHOD_UNSPECIFIED = 0;
+  METHOD_DEPOSIT_TO_FLOAT = 1;
+  METHOD_TRANSFER_FLOAT = 2;
+  METHOD_MARK_CLAIMED = 3;
+  METHOD_RECLAIM_FLOAT = 4;
+  METHOD_REGISTER_ACCOUNT = 5;
+  METHOD_SUBMIT_STATE_ROOT = 6;
+  METHOD_REGISTER_CLUSTER = 7;
+  METHOD_TRANSFER_BALANCE = 8;
+}
+
+message DepositToFloatArgs {
+  bytes source_key = 1;       // 48 bytes BLS public key of source cluster
+  bytes dest_key = 2;         // 48 bytes BLS public key of destination cluster
+  uint64 dest_cluster_id = 3; // destination cluster ID
+  bytes sender = 4;           // 20 bytes sender address
+  bytes target = 5;           // 20 bytes target address
+  bytes amount = 6;           // big-endian big.Int bytes
+  bytes msg_id = 7;           // 32 bytes message ID
+  bytes cert = 8;             // 96 bytes BLS signature cert from source cluster
+}
+
+message TransferFloatArgs {
+  bytes dest_key = 1;         // 48 bytes BLS public key of destination cluster
+  uint64 dest_cluster_id = 2; // destination cluster ID
+  bytes sender = 3;           // 20 bytes sender address
+  bytes target = 4;           // 20 bytes target address
+  bytes amount = 5;           // big-endian big.Int bytes
+  bytes gas_fee = 6;          // big-endian big.Int bytes
+  bytes payload = 7;          // arbitrary payload bytes
+  uint64 seq = 8;             // sequence number for cluster outflow
+  bytes cert = 9;             // 96 bytes BLS signature cert
+  bool is_refund = 10;        // refund flag
+}
+
+// Plain account-to-account transfer of float between BLS identities (no cluster semantics, no inbound event).
+message TransferBalanceArgs {
+  bytes to_key = 1;           // 48 bytes BLS public key of the recipient
+  bytes amount = 2;           // big-endian big.Int bytes
+}
+
+message MarkClaimedArgs {
+  bytes msg_id = 1;           // 32 bytes message ID
+  uint32 outcome = 2;         // 1 = Credited, 2 = Refunded
+  bytes cert = 3;             // 96 bytes BLS signature cert
+}
+
+message ReclaimFloatArgs {
+  bytes msg_id = 1;           // 32 bytes message ID
+  bytes cert = 2;             // 96 bytes BLS signature cert
+}
+
+message RegisterAccountArgs {
+  bytes user_address = 1;        // 20 bytes user address
+  bytes float_identity_key = 2;  // 48 bytes BLS public key
+  bytes user_sig = 3;            // user signature bytes
+  bytes cluster_sig = 4;         // cluster signature bytes (96B BLS)
+}
+
+message SubmitStateRootArgs {
+  bytes cluster_key = 1;      // 48 bytes BLS public key of cluster
+  uint64 epoch = 2;           // epoch number
+  bytes state_root = 3;       // 32 bytes state root
+  bytes cert = 4;             // 96 bytes BLS signature cert
+}
+
+message RegisterClusterArgs {
+  bytes cluster_key = 1;      // 48 bytes BLS public key of cluster
+  uint64 cluster_id = 2;      // cluster ID
+  string name = 3;            // human readable name
+  bytes cert = 4;             // 96 bytes BLS signature cert
+}
+
+message ParentChainCallData {
+  ParentChainMethod method = 1;
+  oneof args {
+    DepositToFloatArgs deposit_to_float = 2;
+    TransferFloatArgs transfer_float = 3;
+    MarkClaimedArgs mark_claimed = 4;
+    ReclaimFloatArgs reclaim_float = 5;
+    RegisterAccountArgs register_account = 6;
+    SubmitStateRootArgs submit_state_root = 7;
+    RegisterClusterArgs register_cluster = 8;
+    TransferBalanceArgs transfer_balance = 9;
+  }
+}
+
+message ParentChainReceipt {
+  bytes tx_hash = 1;
+  uint32 status = 2;
+  uint32 error_code = 3;
+  repeated bytes events = 4;
+}
+
+message ParentChainBlockHeader {
+  uint64 number = 1;
+  bytes parent_hash = 2;
+  bytes state_root = 3;
+  bytes txs_root = 4;
+  bytes receipts_root = 5;
+  uint64 timestamp_ms = 6;
+  uint64 epoch = 7;
+  uint64 commit_index = 8;
+  uint64 gei = 9;
+  bytes leader_address = 10;
+  bytes commit_digest = 11;
+  uint32 tx_count = 12;
+}
+
+message ParentChainBlockRecord {
+  ParentChainBlockHeader header = 1;
+  bytes block_hash = 2;
+  repeated bytes tx_hashes = 3;
+  repeated ParentChainReceipt receipts = 4;
+  bytes raw_block = 5;
+}
+
+message ParentChainBlockProgress {
+  uint64 last_block = 1;
+  uint64 last_gei = 2;
+  uint64 last_timestamp_ms = 3;
+  bytes last_hash = 4;
+  bytes last_state_root = 5;
+}
+
+message FloatStateRecord {
+  bytes balance = 1;
+}
+
+message FloatTransferRecordProto {
+  bytes source_key = 1;
+  bytes from_key = 2;
+  bytes to_key = 3;
+  uint64 dest_cluster_id = 4;
+  bytes sender = 5;
+  bytes target = 6;
+  bytes value = 7;
+  bytes fee = 8;
+  bytes payload_hash = 9;
+  uint64 seq = 10;
+  uint32 outcome = 11;
+  uint64 commit_time = 12;
+  uint64 timeout = 13;
+  bool is_refund = 14;
+}
+
+message ChainRegistryEntryProto {
+  bytes pub_key = 1;
+  uint64 cluster_id = 2;
+  string name = 3;
+  // True only for a key admitted through the cluster policy (registerCluster). A registry entry that was merely
+  // created because the key RECEIVED float is not a trusted certifier.
+  bool authorized = 4;
+}
+
+message FloatVelocityStateProto {
+  uint64 window_start = 1;
+  bytes window_base_alloc = 2;
+  bytes spent = 3;
+}
+
+message TransferEventProto {
+  bytes msg_id = 1;
+  bytes source_pub_key = 2;
+  bytes dest_pub_key = 3;
+  uint64 source_seq = 4;
+  bytes sender = 5;
+  bytes target = 6;
+  bytes amount = 7;
+  bytes payload_hash = 8;
+  uint64 block_time = 9;
+  bool is_refund = 10;
+}
+
+message InboundTransfersProto {
+  repeated TransferEventProto events = 1;
+}
+
+message AccountRegistryProto {
+  bytes float_identity_key = 1;
+}
+
+message StateRootEntryProto {
+  bytes state_root = 1;
+}
+
+message NonceEntryProto {
+  uint64 nonce = 1;
+}
+
+message AccountRegisteredEventProto {
+  uint64 seq = 1;
+  bytes user_address = 2;
+  bytes cluster_key = 3;
+  uint64 parent_block = 4;
+}
+
+message InboundAccountRegistrationsProto {
+  repeated AccountRegisteredEventProto events = 1;
+}

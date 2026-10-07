@@ -48,15 +48,64 @@ func (a *ParentChainClientAdapter) SendDepositToFloat(
 	amount *big.Int,
 ) (common.Hash, error) {
 	msgID := common.BytesToHash([]byte(fmt.Sprintf("deposit_adapter_%d", time.Now().UnixNano())))
-	// We call DepositToFloat directly to simulate what the gateway would do
+	a.chain.mu.Lock()
+	defer a.chain.mu.Unlock()
+
+	var sourcePriv cm.PrivateKey
+	for _, kp := range a.chain.nodeKeys {
+		if kp.PublicKey() == pubKey {
+			sourcePriv = kp.PrivateKey()
+			break
+		}
+	}
+	if sourcePriv == (cm.PrivateKey{}) {
+		tmpKp := bls.GenerateKeyPair()
+		sourcePriv = tmpKp.PrivateKey()
+		tmpPub := tmpKp.PublicKey()
+		tmpHash := crypto.Keccak256Hash(tmpPub[:])
+		_ = a.chain.store.SetChainRegistry(tmpHash, parentchain.ChainRegistryEntry{
+			FloatIdentityKey:     tmpPub,
+			ClusterIDDescriptive: destClusterID,
+			ChainIDDescriptive:   destClusterID,
+			Authorized:           true,
+		})
+		dig := parentchain.ComputeDepositFloatMessage(pubKey, destClusterID, sender, target, amount, msgID)
+		cert := bls.Sign(sourcePriv, dig)
+		err := parentchain.DepositToFloat(
+			a.chain.store,
+			tmpPub,
+			pubKey,
+			destClusterID,
+			sender,
+			target,
+			amount,
+			msgID,
+			cert,
+			uint64(time.Now().Unix()),
+		)
+		return msgID, err
+	}
+
+	pubKeyCopy := pubKey
+	sourceHash := crypto.Keccak256Hash(pubKeyCopy[:])
+	_ = a.chain.store.SetChainRegistry(sourceHash, parentchain.ChainRegistryEntry{
+		FloatIdentityKey:     pubKey,
+		ClusterIDDescriptive: destClusterID,
+		ChainIDDescriptive:   destClusterID,
+		Authorized:           true,
+	})
+	dig := parentchain.ComputeDepositFloatMessage(pubKey, destClusterID, sender, target, amount, msgID)
+	cert := bls.Sign(sourcePriv, dig)
 	err := parentchain.DepositToFloat(
 		a.chain.store,
+		pubKey,
 		pubKey,
 		destClusterID,
 		sender,
 		target,
 		amount,
 		msgID,
+		cert,
 		uint64(time.Now().Unix()),
 	)
 	return msgID, err
@@ -170,6 +219,12 @@ func (a *ParentChainClientAdapter) GetInboundTransfers(pubKey cm.PublicKey, curs
 	return res, uint64(len(events)), nil
 }
 
+func (a *ParentChainClientAdapter) GetInboundAccountRegistrations(pubKey cm.PublicKey, cursor uint64) ([]*parentchain.AccountRegisteredEvent, uint64, error) {
+	a.chain.mu.Lock()
+	defer a.chain.mu.Unlock()
+	return a.chain.store.GetAccountRegistrations(crypto.Keccak256Hash(pubKey[:]), cursor)
+}
+
 func (a *ParentChainClientAdapter) GetTransferRecord(msgID common.Hash) (parentchain.FloatTransferRecord, bool, error) {
 	a.chain.mu.Lock()
 	defer a.chain.mu.Unlock()
@@ -212,6 +267,34 @@ func (a *ParentChainClientAdapter) GetStateRoot(clusterPubKey cm.PublicKey, epoc
 	return common.Hash{}, false, nil
 }
 
+func (a *ParentChainClientAdapter) GetBlockByNumber(number uint64) (parentchain.BlockRecord, bool, error) {
+	return parentchain.BlockRecord{}, false, nil
+}
+
+func (a *ParentChainClientAdapter) GetBlockByHash(hash common.Hash) (parentchain.BlockRecord, bool, error) {
+	return parentchain.BlockRecord{}, false, nil
+}
+
+func (a *ParentChainClientAdapter) GetTransaction(txHash common.Hash) (uint64, uint32, bool, error) {
+	return 0, 0, false, nil
+}
+
+func (a *ParentChainClientAdapter) GetReceipt(txHash common.Hash) (*parentchain.Receipt, bool, error) {
+	return nil, false, nil
+}
+
+func (a *ParentChainClientAdapter) GetStatus() (parentchain.ChainStatus, error) {
+	return parentchain.ChainStatus{}, nil
+}
+
+func (a *ParentChainClientAdapter) GetProof(key [32]byte) (parentchain.ProofResult, error) {
+	return parentchain.ProofResult{}, nil
+}
+
+func (a *ParentChainClientAdapter) SendRawTransaction(rawTx []byte) (common.Hash, error) {
+	return common.Hash{}, nil
+}
+
 // RollupNode represents a single rollup cluster with its workers
 type RollupNode struct {
 	ChainID uint64
@@ -251,7 +334,17 @@ func (n *RollupNode) Stop() {}
 
 func setupClusterFloatBalance(t *testing.T, parentChain *InMemoryParentChain, kp *bls.KeyPair, chainID uint64, amount *big.Int) {
 	msgID := common.BytesToHash([]byte(fmt.Sprintf("deposit_init_%d", chainID)))
-	err := parentchain.DepositToFloat(parentChain.store, kp.PublicKey(), chainID, common.Address{}, common.Address{}, amount, msgID, uint64(time.Now().Unix()))
+	pub := kp.PublicKey()
+	sourceHash := crypto.Keccak256Hash(pub[:])
+	_ = parentChain.store.SetChainRegistry(sourceHash, parentchain.ChainRegistryEntry{
+		FloatIdentityKey:     pub,
+		ClusterIDDescriptive: chainID,
+		ChainIDDescriptive:   chainID,
+		Authorized:           true,
+	})
+	dig := parentchain.ComputeDepositFloatMessage(pub, chainID, common.Address{}, common.Address{}, amount, msgID)
+	cert := bls.Sign(kp.PrivateKey(), dig)
+	err := parentchain.DepositToFloat(parentChain.store, pub, pub, chainID, common.Address{}, common.Address{}, amount, msgID, cert, uint64(time.Now().Unix()))
 	if err != nil {
 		t.Fatalf("setupClusterFloatBalance failed: %v", err)
 	}
@@ -305,7 +398,8 @@ func TestE2E_HappyPathTransfer(t *testing.T) {
 			// DEBUG LOGGING
 			// t.Logf("bal1: %v, bal2: %v, f2: %v, rec2.State: %v", bal1, bal2, f2, rec2.State)
 			
-			if bal1.Cmp(big.NewInt(500)) == 0 && bal2.Cmp(big.NewInt(500)) == 0 {
+			// 1000 - 500 value - 100 fee = 400; refunds return the value only (the fee is burned): 1000 - 600 + 500 = 900.
+			if bal1.Cmp(big.NewInt(400)) == 0 && bal2.Cmp(big.NewInt(500)) == 0 {
 				if f2 && rec2.State == StateCredited {
 					success = true
 				}
@@ -362,7 +456,7 @@ func TestE2E_TransferRefund(t *testing.T) {
 			node1.receiveWorker.pollAndProcess()
 			
 			bal1 := node1.StateDB.GetBalance(sender)
-			if bal1.Cmp(big.NewInt(1000)) == 0 {
+			if bal1.Cmp(big.NewInt(900)) == 0 {
 				success = true
 			}
 		}
@@ -433,7 +527,7 @@ func TestE2E_TransferReclaimWon(t *testing.T) {
 			node1.reclaimWorker.processReclaims()
 			bal1 := node1.StateDB.GetBalance(sender)
 			rec1, _, _ := node1.Store.Get(msgID)
-			if bal1.Cmp(big.NewInt(1000)) == 0 {
+			if bal1.Cmp(big.NewInt(900)) == 0 {
 				if rec1 != nil && rec1.State == StateConfirmedRefunded {
 					success = true
 				}
@@ -518,10 +612,10 @@ func TestE2E_TransferReclaimLost_DoubleCreditPrevention(t *testing.T) {
 			rec1, _, _ := node1.Store.Get(msgID)
 			
 			// Balance must NOT exceed 1000 (No double credit)
-			if bal1.Cmp(big.NewInt(1000)) > 0 {
+			if bal1.Cmp(big.NewInt(900)) > 0 {
 				t.Fatalf("Double credit detected! Balance is %v", bal1)
 			}
-			if bal1.Cmp(big.NewInt(1000)) == 0 && rec1 != nil && rec1.State == StateConfirmedRefunded {
+			if bal1.Cmp(big.NewInt(900)) == 0 && rec1 != nil && rec1.State == StateConfirmedRefunded {
 				success = true
 			}
 		}
@@ -605,10 +699,10 @@ func TestE2E_Refund_DoubleCreditPrevention(t *testing.T) {
 			rec1, _, _ := node1.Store.Get(msgID)
 			
 			// Balance must NOT exceed 1000 (No double credit)
-			if bal1.Cmp(big.NewInt(1000)) > 0 {
+			if bal1.Cmp(big.NewInt(900)) > 0 {
 				t.Fatalf("Double credit detected! Balance is %v", bal1)
 			}
-			if bal1.Cmp(big.NewInt(1000)) == 0 && rec1 != nil && rec1.State == StateConfirmedRefunded {
+			if bal1.Cmp(big.NewInt(900)) == 0 && rec1 != nil && rec1.State == StateConfirmedRefunded {
 				success = true
 			}
 		}

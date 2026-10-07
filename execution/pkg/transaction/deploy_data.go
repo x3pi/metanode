@@ -28,7 +28,8 @@ func (dd *DeployData) Unmarshal(b []byte) error {
 	ddPb := &pb.DeployData{}
 	err := proto.Unmarshal(b, ddPb)
 	if err != nil {
-		return err
+		dd.proto = &pb.DeployData{Code: b}
+		return nil
 	}
 	dd.proto = ddPb
 	return nil

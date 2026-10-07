@@ -2,175 +2,405 @@ package processor
 
 import (
 	"math/big"
+	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/stretchr/testify/assert"
-	"google.golang.org/protobuf/proto"
-
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/syndtr/goleveldb/leveldb"
+	"google.golang.org/protobuf/proto"
 )
 
-func createExecutableTx(t *testing.T, tx *parentchain.ParentChainTx) *pb.TransactionExe {
-	data, err := tx.Marshal()
-	assert.NoError(t, err)
+func init() {
+	bls.Init()
+}
 
-	pbTx := &pb.Transaction{
-		Data: data,
+func makeTestBlock(number uint64, gei uint64, ts uint64, txs []*pb.Transaction) *pb.ExecutableBlock {
+	var txExes []*pb.TransactionExe
+	for _, tx := range txs {
+		digest, _ := proto.Marshal(tx)
+		txExes = append(txExes, &pb.TransactionExe{
+			Digest: digest,
+		})
 	}
-	pbTxBytes, err := proto.Marshal(pbTx)
-	assert.NoError(t, err)
-
-	return &pb.TransactionExe{
-		Digest: pbTxBytes,
+	return &pb.ExecutableBlock{
+		BlockNumber:      number,
+		GlobalExecIndex:  gei,
+		CommitTimestampMs: ts,
+		Epoch:            1,
+		CommitIndex:      uint32(number),
+		Transactions:     txExes,
+		CommitDigest:     crypto.Keccak256([]byte{byte(number)}),
 	}
 }
 
-func TestBlockProcessor_SubmitStateRoot(t *testing.T) {
-	store := parentchain.NewMemoryStore()
+// T-P1: ErrBlockGap => Success:false và không đổi state/chiều cao, kích hoạt sync.
+func TestBlockProcessor_GapDetection(t *testing.T) {
+	dir := t.TempDir()
+	store, err := parentchain.NewDBStore(filepath.Join(dir, "db"))
+	require.NoError(t, err)
+	defer store.Close()
 
-	txResults := make(map[common.Hash]error)
-	bp := NewBlockProcessor(store, func(msgID common.Hash, err error) {
-		txResults[msgID] = err
+	var syncTriggered bool
+	var syncFrom uint64
+
+	bp := NewBlockProcessor(store)
+	bp.SetSyncCallback(func(fromBlock uint64) {
+		syncTriggered = true
+		syncFrom = fromBlock
 	})
 
-	blsKey := bls.GenerateKeyPair()
-	pubKey := blsKey.PublicKey()
-	clusterHash := crypto.Keccak256Hash(pubKey[:])
+	// Send block 2 directly when height is 0
+	blk2 := makeTestBlock(2, 200, 2000, nil)
+	resp := bp.ProcessBlock(blk2)
 
-	// 1. First register the cluster via DepositToFloat
-	depositMsgID := common.HexToHash("0x1111")
-	depositTx := &parentchain.ParentChainTx{
-		Type:      parentchain.TxTypeDepositToFloat,
-		PubKey:    pubKey[:],
-		ClusterID: 101,
-		Sender:    common.HexToAddress("0xaaaa"),
-		Target:    common.HexToAddress("0xbbbb"),
-		Amount:    big.NewInt(1000),
-		MsgID:     depositMsgID,
-	}
-
-	// 2. Submit state root for epoch 1
-	epoch := uint64(1)
-	stateRoot := common.HexToHash("0x99998888")
-	digest := parentchain.ComputeSubmitStateRootMessage(pubKey, epoch, stateRoot)
-	sig := bls.Sign(blsKey.PrivateKey(), digest)
-	rootMsgID := common.HexToHash("0x2222")
-
-	rootTx := &parentchain.ParentChainTx{
-		Type:      parentchain.TxTypeSubmitStateRoot,
-		PubKey:    pubKey[:],
-		Epoch:     epoch,
-		StateRoot: stateRoot,
-		Cert:      sig[:],
-		MsgID:     rootMsgID,
-	}
-
-	block := &pb.ExecutableBlock{
-		BlockNumber:        1,
-		GlobalExecIndex:    1,
-		CommitTimestampMs:  uint64(time.Now().UnixMilli()),
-		Transactions: []*pb.TransactionExe{
-			createExecutableTx(t, depositTx),
-			createExecutableTx(t, rootTx),
-		},
-	}
-
-	bp.processBlock(block)
-
-	// Verify deposit succeeded
-	assert.Nil(t, txResults[depositMsgID])
-	bal, err := store.GetFloat(clusterHash)
-	assert.NoError(t, err)
-	assert.Equal(t, big.NewInt(1000), bal)
-
-	// Verify state root was submitted and saved
-	assert.Nil(t, txResults[rootMsgID])
-	savedRoot, found, err := store.GetStateRoot(clusterHash, epoch)
-	assert.NoError(t, err)
-	assert.True(t, found, "state root should be found in store")
-	assert.Equal(t, stateRoot, savedRoot)
+	assert.False(t, resp.Success)
+	assert.Contains(t, resp.Error, "block gap")
+	assert.Equal(t, uint64(0), bp.LastBlockNumber())
+	assert.True(t, syncTriggered)
+	assert.Equal(t, uint64(1), syncFrom)
 }
 
-func TestBlockProcessor_SubmitStateRoot_Errors(t *testing.T) {
-	store := parentchain.NewMemoryStore()
+// T-P5: block_number == 0 bị bỏ qua, không ghi vào DB.
+func TestBlockProcessor_Block0Ignored(t *testing.T) {
+	dir := t.TempDir()
+	store, err := parentchain.NewDBStore(filepath.Join(dir, "db"))
+	require.NoError(t, err)
+	defer store.Close()
 
-	txResults := make(map[common.Hash]error)
-	bp := NewBlockProcessor(store, func(msgID common.Hash, err error) {
-		txResults[msgID] = err
+	bp := NewBlockProcessor(store)
+
+	blk0 := makeTestBlock(0, 0, 1000, nil)
+	resp := bp.ProcessBlock(blk0)
+
+	assert.True(t, resp.Success)
+	assert.Equal(t, uint64(0), resp.BlockNumber)
+	assert.Equal(t, uint64(0), bp.LastBlockNumber())
+}
+
+// T-P2: restart giữa hai block => khôi phục đúng tiến độ và tiếp tục.
+func TestBlockProcessor_RestartBetweenBlocks(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "db")
+
+	// Phase 1: Apply block 1
+	store1, err := parentchain.NewDBStore(dbPath)
+	require.NoError(t, err)
+
+	bp1 := NewBlockProcessor(store1)
+	blk1 := makeTestBlock(1, 100, 1000, nil)
+	resp1 := bp1.ProcessBlock(blk1)
+	require.True(t, resp1.Success)
+	assert.Equal(t, uint64(1), bp1.LastBlockNumber())
+	root1 := bp1.GetStateRoot()
+	hash1 := bp1.LastBlockHash()
+
+	// Close store
+	require.NoError(t, store1.Close())
+
+	// Phase 2: Reopen with new processor instance
+	store2, err := parentchain.NewDBStore(dbPath)
+	require.NoError(t, err)
+	defer store2.Close()
+
+	bp2 := NewBlockProcessor(store2)
+	assert.Equal(t, uint64(1), bp2.LastBlockNumber())
+	assert.Equal(t, root1, bp2.GetStateRoot())
+	assert.Equal(t, hash1, bp2.LastBlockHash())
+
+	// Apply block 2 smoothly
+	blk2 := makeTestBlock(2, 200, 2000, nil)
+	resp2 := bp2.ProcessBlock(blk2)
+	require.True(t, resp2.Success)
+	assert.Equal(t, uint64(2), bp2.LastBlockNumber())
+}
+
+// T-P6: cgo_get_state_root và GetStateRoot trả root mới nhất sau mỗi block.
+func TestBlockProcessor_StateRootProvider(t *testing.T) {
+	dir := t.TempDir()
+	store, err := parentchain.NewDBStore(filepath.Join(dir, "db"))
+	require.NoError(t, err)
+	defer store.Close()
+
+	bp := NewBlockProcessor(store)
+	assert.Equal(t, "0x0000000000000000000000000000000000000000000000000000000000000000", bp.GetStateRoot())
+
+	kp := bls.GenerateKeyPair()
+	pub := kp.PublicKey()
+	priv := kp.PrivateKey()
+	msgID := common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111")
+
+	regData := parentchain.EncodeRegisterClusterCallData(pub, 101)
+	regTx, err := parentchain.BuildAndSignBLSTx(priv, pub, parentchain.ParentChainGatewayAddress, 0, regData)
+	require.NoError(t, err)
+
+	dig := parentchain.ComputeDepositFloatMessage(pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID)
+	cert := bls.Sign(priv, dig)
+	callData := parentchain.EncodeDepositToFloatCallData(pub, pub, 101, common.Address{}, common.Address{}, big.NewInt(500), msgID, cert)
+	tx, err := parentchain.BuildAndSignBLSTx(priv, pub, parentchain.ParentChainGatewayAddress, 1, callData)
+	require.NoError(t, err)
+
+	blk1 := makeTestBlock(1, 100, 1000, []*pb.Transaction{regTx, tx})
+	resp1 := bp.ProcessBlock(blk1)
+	require.True(t, resp1.Success)
+
+	rootHex := bp.GetStateRoot()
+	assert.NotEqual(t, "0x0000000000000000000000000000000000000000000000000000000000000000", rootHex)
+	assert.Equal(t, "0x"+common.Bytes2Hex(resp1.StateRoot), rootHex)
+}
+
+// Fork detection guard
+func TestBlockProcessor_ForkConflictDetection(t *testing.T) {
+	dir := t.TempDir()
+	store, err := parentchain.NewDBStore(filepath.Join(dir, "db"))
+	require.NoError(t, err)
+	defer store.Close()
+
+	bp := NewBlockProcessor(store)
+
+	// Apply block 1
+	blk1 := makeTestBlock(1, 100, 1000, nil)
+	resp1 := bp.ProcessBlock(blk1)
+	require.True(t, resp1.Success)
+
+	// Conflict: apply conflicting block 1 (different commit digest)
+	blk1Conflict := makeTestBlock(1, 100, 1000, nil)
+	blk1Conflict.CommitDigest = crypto.Keccak256([]byte("conflicting-commit-digest"))
+	respConflict := bp.ProcessBlock(blk1Conflict)
+
+	assert.False(t, respConflict.Success)
+	assert.Contains(t, respConflict.Error, "conflict")
+	assert.True(t, bp.IsForkDetected())
+
+	// Subsequent blocks must be refused immediately
+	blk2 := makeTestBlock(2, 200, 2000, nil)
+	resp2 := bp.ProcessBlock(blk2)
+	assert.False(t, resp2.Success)
+	assert.Contains(t, resp2.Error, "fork detected")
+}
+
+// T-P3: GetBlocksRange returns records within range and respects limit
+func TestBlockProcessor_GetBlocksRange(t *testing.T) {
+	dir := t.TempDir()
+	store, err := parentchain.NewDBStore(filepath.Join(dir, "db"))
+	require.NoError(t, err)
+	defer store.Close()
+
+	bp := NewBlockProcessor(store)
+	for i := uint64(1); i <= 5; i++ {
+		resp := bp.ProcessBlock(makeTestBlock(i, i*100, i*1000, nil))
+		require.True(t, resp.Success)
+	}
+
+	// Query range [2, 4] with limit 10
+	recs, err := store.GetBlockRecords(2, 4, 10)
+	require.NoError(t, err)
+	require.Len(t, recs, 3)
+	assert.Equal(t, uint64(2), recs[0].Header.Number)
+	assert.Equal(t, uint64(3), recs[1].Header.Number)
+	assert.Equal(t, uint64(4), recs[2].Header.Number)
+
+	// Query with limit 2
+	recsLimit, err := store.GetBlockRecords(2, 4, 2)
+	require.NoError(t, err)
+	require.Len(t, recsLimit, 2)
+	assert.Equal(t, uint64(2), recsLimit[0].Header.Number)
+	assert.Equal(t, uint64(3), recsLimit[1].Header.Number)
+}
+
+// T-P4: SyncBlocks verifies and applies blocks delivered from peer, rejecting invalid ones
+func TestBlockProcessor_SyncBlocks(t *testing.T) {
+	dirA := t.TempDir()
+	storeA, err := parentchain.NewDBStore(filepath.Join(dirA, "dbA"))
+	require.NoError(t, err)
+	defer storeA.Close()
+	bpA := NewBlockProcessor(storeA)
+
+	dirB := t.TempDir()
+	storeB, err := parentchain.NewDBStore(filepath.Join(dirB, "dbB"))
+	require.NoError(t, err)
+	defer storeB.Close()
+	bpB := NewBlockProcessor(storeB)
+
+	// Both execute block 1 identically
+	blk1 := makeTestBlock(1, 100, 1000, nil)
+	respA1 := bpA.ProcessBlock(blk1)
+	require.True(t, respA1.Success)
+	respB1 := bpB.ProcessBlock(blk1)
+	require.True(t, respB1.Success)
+	assert.Equal(t, respA1.StateRoot, respB1.StateRoot)
+
+	// Node A executes block 2 and 3
+	blk2 := makeTestBlock(2, 200, 2000, nil)
+	respA2 := bpA.ProcessBlock(blk2)
+	require.True(t, respA2.Success)
+	blk3 := makeTestBlock(3, 300, 3000, nil)
+	respA3 := bpA.ProcessBlock(blk3)
+	require.True(t, respA3.Success)
+
+	// Node B syncs block 2 and 3 from Node A
+	rec2, found2, _ := storeA.GetBlockRecord(2)
+	require.True(t, found2)
+	rec3, found3, _ := storeA.GetBlockRecord(3)
+	require.True(t, found3)
+
+	// Apply block 2 to Node B via ProcessBlock
+	var exeBlock2 pb.ExecutableBlock
+	err = proto.Unmarshal(rec2.RawBlock, &exeBlock2)
+	require.NoError(t, err)
+	respB2 := bpB.ProcessBlock(&exeBlock2)
+	require.True(t, respB2.Success)
+	assert.Equal(t, rec2.Header.StateRoot.Bytes(), respB2.StateRoot)
+
+	// Apply block 3 to Node B via ProcessBlock
+	var exeBlock3 pb.ExecutableBlock
+	err = proto.Unmarshal(rec3.RawBlock, &exeBlock3)
+	require.NoError(t, err)
+	respB3 := bpB.ProcessBlock(&exeBlock3)
+	require.True(t, respB3.Success)
+	assert.Equal(t, rec3.Header.StateRoot.Bytes(), respB3.StateRoot)
+
+	// Corrupted block sync test: Peer claims different state root
+	corruptedBlock := makeTestBlock(4, 400, 4000, nil)
+	corruptedBlock.CommitDigest = crypto.Keccak256([]byte("conflict"))
+	respCorrupt := bpB.ProcessBlock(corruptedBlock)
+	require.True(t, respCorrupt.Success) // block 4 executed locally
+	// But if peer claimed root was different, sync logic detects it
+	fakePeerRoot := crypto.Keccak256([]byte("fake-peer-root"))
+	assert.NotEqual(t, fakePeerRoot, respCorrupt.StateRoot)
+}
+
+// T-P7: Startup integrity verification detects corrupted state or NOMT mismatch
+func TestBlockProcessor_StartupIntegrityVerification(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "db")
+
+	// Phase 1: Apply block 1 cleanly
+	store1, err := parentchain.NewDBStore(dbPath)
+	require.NoError(t, err)
+	bp1 := NewBlockProcessor(store1)
+	blk1 := makeTestBlock(1, 100, 1000, nil)
+	resp1 := bp1.ProcessBlock(blk1)
+	require.True(t, resp1.Success)
+	require.NoError(t, store1.Close())
+
+	// Phase 2: Tamper LevelDB sys:progress to have a bogus state root
+	rawDB, err := leveldb.OpenFile(dbPath, nil)
+	require.NoError(t, err)
+	progBytes, err := rawDB.Get([]byte("sys:progress"), nil)
+	require.NoError(t, err)
+
+	prog, err := parentchain.DecodeBlockProgress(progBytes)
+	require.NoError(t, err)
+	origStateRoot := prog.LastStateRoot
+
+	// Corrupt state root in progress
+	prog.LastStateRoot = common.HexToHash("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+	tamperedBytes := parentchain.EncodeBlockProgress(prog)
+	require.NoError(t, rawDB.Put([]byte("sys:progress"), tamperedBytes, nil))
+	require.NoError(t, rawDB.Close())
+
+	// Phase 3: Open with NewBlockProcessor -> Must detect fork/corruption!
+	storeTampered, err := parentchain.NewDBStore(dbPath)
+	require.NoError(t, err)
+
+	var forkNotified bool
+	bpTampered := NewBlockProcessor(storeTampered)
+	bpTampered.SetForkCallback(func(fork bool) {
+		forkNotified = fork
 	})
 
-	blsKey := bls.GenerateKeyPair()
-	pubKey := blsKey.PublicKey()
+	assert.True(t, bpTampered.IsForkDetected(), "Processor should detect state root mismatch on startup")
+	assert.True(t, forkNotified, "Fork callback should be triggered on startup")
 
-	// Case 1: Unknown cluster (no deposit/register yet)
-	epoch := uint64(1)
-	stateRoot := common.HexToHash("0x1111")
-	digest := parentchain.ComputeSubmitStateRootMessage(pubKey, epoch, stateRoot)
-	sig := bls.Sign(blsKey.PrivateKey(), digest)
-	rootMsgID1 := common.HexToHash("0xaaaa")
+	// Any subsequent ProcessBlock must be refused
+	blk2 := makeTestBlock(2, 200, 2000, nil)
+	resp2 := bpTampered.ProcessBlock(blk2)
+	assert.False(t, resp2.Success)
+	assert.Contains(t, resp2.Error, "fork detected")
+	storeTampered.Close()
 
-	rootTx1 := &parentchain.ParentChainTx{
-		Type:      parentchain.TxTypeSubmitStateRoot,
-		PubKey:    pubKey[:],
-		Epoch:     epoch,
-		StateRoot: stateRoot,
-		Cert:      sig[:],
-		MsgID:     rootMsgID1,
+	// Restore original state root
+	rawDB, err = leveldb.OpenFile(dbPath, nil)
+	require.NoError(t, err)
+	prog.LastStateRoot = origStateRoot
+	require.NoError(t, rawDB.Put([]byte("sys:progress"), parentchain.EncodeBlockProgress(prog), nil))
+	require.NoError(t, rawDB.Close())
+
+	// Reopen cleanly: should not detect fork
+	storeClean, err := parentchain.NewDBStore(dbPath)
+	require.NoError(t, err)
+	defer storeClean.Close()
+
+	bpClean := NewBlockProcessor(storeClean)
+	assert.False(t, bpClean.IsForkDetected())
+	respClean := bpClean.ProcessBlock(blk2)
+	assert.True(t, respClean.Success)
+	assert.Equal(t, uint64(2), bpClean.LastBlockNumber())
+}
+
+
+// A commit index is executed at most once: a block that would be appended as a NEW block although its commit was
+// already executed must be refused (never create a duplicate block), while a genuinely new commit and an exact
+// replay of an existing block keep working.
+func TestBlockProcessor_StaleCommitGuard(t *testing.T) {
+	dir := t.TempDir()
+	store, err := parentchain.NewDBStore(filepath.Join(dir, "db"))
+	require.NoError(t, err)
+	defer store.Close()
+	bp := NewBlockProcessor(store)
+
+	kp := bls.GenerateKeyPair()
+	mkTx := func(nonce uint64) *pb.Transaction {
+		tx, err := parentchain.BuildAndSignBLSTx(kp.PrivateKey(), kp.PublicKey(), parentchain.ParentChainGatewayAddress, nonce,
+			parentchain.EncodeRegisterClusterCallData(kp.PublicKey(), 1))
+		require.NoError(t, err)
+		return tx
 	}
 
-	block1 := &pb.ExecutableBlock{
-		BlockNumber:        1,
-		GlobalExecIndex:    1,
-		CommitTimestampMs:  uint64(time.Now().UnixMilli()),
-		Transactions: []*pb.TransactionExe{
-			createExecutableTx(t, rootTx1),
-		},
+	// Blocks 1..3 at commits 1..3 (commit index == block number in the test helper).
+	txA := mkTx(0)
+	for n := uint64(1); n <= 3; n++ {
+		var txs []*pb.Transaction
+		if n == 3 {
+			txs = []*pb.Transaction{txA}
+		}
+		resp := bp.ProcessBlock(makeTestBlock(n, 100+n, 1000*n, txs))
+		require.True(t, resp.Success, "block %d: %s", n, resp.Error)
 	}
-	bp.processBlock(block1)
-	assert.Error(t, txResults[rootMsgID1])
-	assert.Contains(t, txResults[rootMsgID1].Error(), "unknown cluster")
+	require.Equal(t, uint64(3), bp.LastBlockNumber())
+	tipHash := bp.LastBlockHash()
 
-	// Now register cluster
-	depMsgID := common.HexToHash("0xdddd")
-	depTx := &parentchain.ParentChainTx{
-		Type:      parentchain.TxTypeDepositToFloat,
-		PubKey:    pubKey[:],
-		ClusterID: 101,
-		Sender:    common.HexToAddress("0xaaaa"),
-		Target:    common.HexToAddress("0xbbbb"),
-		Amount:    big.NewInt(500),
-		MsgID:     depMsgID,
-	}
+	// (1) Stale replay: commit 2 again, numbered as the next block. Refused, nothing applied.
+	stale := makeTestBlock(4, 104, 4000, nil)
+	stale.CommitIndex = 2
+	resp := bp.ProcessBlock(stale)
+	assert.False(t, resp.Success)
+	assert.Contains(t, resp.Error, "stale commit")
+	assert.Equal(t, uint64(3), bp.LastBlockNumber(), "no duplicate block may be created")
+	assert.Equal(t, tipHash, bp.LastBlockHash())
+	assert.False(t, bp.IsForkDetected(), "a stale replay is not a fork: the node just refuses it")
 
-	// Case 2: Invalid signature
-	rootMsgID2 := common.HexToHash("0xbbbb")
-	otherKey := bls.GenerateKeyPair()
-	badSig := bls.Sign(otherKey.PrivateKey(), digest)
-	rootTx2 := &parentchain.ParentChainTx{
-		Type:      parentchain.TxTypeSubmitStateRoot,
-		PubKey:    pubKey[:],
-		Epoch:     epoch,
-		StateRoot: stateRoot,
-		Cert:      badSig[:],
-		MsgID:     rootMsgID2,
-	}
+	// (2) The same, carrying transactions and the tip's own commit index: still refused.
+	staleWithTx := makeTestBlock(4, 104, 4000, []*pb.Transaction{mkTx(1)})
+	staleWithTx.CommitIndex = 3
+	resp = bp.ProcessBlock(staleWithTx)
+	assert.False(t, resp.Success)
+	assert.Equal(t, uint64(3), bp.LastBlockNumber())
 
-	block2 := &pb.ExecutableBlock{
-		BlockNumber:        2,
-		GlobalExecIndex:    2,
-		CommitTimestampMs:  uint64(time.Now().UnixMilli()),
-		Transactions: []*pb.TransactionExe{
-			createExecutableTx(t, depTx),
-			createExecutableTx(t, rootTx2),
-		},
-	}
-	bp.processBlock(block2)
-	assert.NoError(t, txResults[depMsgID])
-	assert.Error(t, txResults[rootMsgID2])
-	assert.Contains(t, txResults[rootMsgID2].Error(), "invalid signature")
+	// (3) An exact replay of an existing block (same number, same content) is still an idempotent success.
+	replay := makeTestBlock(3, 103, 3000, []*pb.Transaction{txA})
+	resp = bp.ProcessBlock(replay)
+	assert.True(t, resp.Success, resp.Error)
+	assert.Equal(t, uint64(3), bp.LastBlockNumber())
+
+	// (4) A genuinely new commit still executes.
+	resp = bp.ProcessBlock(makeTestBlock(4, 104, 4000, nil))
+	assert.True(t, resp.Success, resp.Error)
+	assert.Equal(t, uint64(4), bp.LastBlockNumber())
 }

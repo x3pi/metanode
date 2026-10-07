@@ -11,11 +11,9 @@ const (
 	ReadTransaction    = "ReadTransaction"
 	EstimateGas        = "EstimateGas"
 
-	SendTransaction                 = "SendTransaction"
-	SendTransactions                = "SendTransactions"
+	SendRawTransaction              = "SendRawTransaction"
+	SendRawTransactions             = "SendRawTransactions"
 	SendProcessedVirtualTransaction = "SendProcessedVirtualTransaction"
-
-	SendTransactionWithDeviceKey  = "SendTransactionWithDeviceKey"
 	TxWithDeviceKeyFromMainMaster = "TxWithDeviceKeyFromMainMaster"
 	BlockFromMainMaster           = "BlockFromMainMaster"
 	BlockDataFromMainMaster       = "BlockDataFromMainMaster"

@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,21 +21,23 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 
 	"github.com/ethereum/go-ethereum/rpc"
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 var (
-	errInvalidBlockRange  = errors.New("invalid block range params")
-	errExceedMaxTopics    = errors.New("exceed max topics")
-	ErrInvalidSig         = errors.New("invalid transaction v, r, s values")
-	errInvalidCredentials   = errors.New("invalid credentials")
-	errPasswordNotConfigured = errors.New("admin password is not configured")
-	errInvalidTypeState     = errors.New("invalid type state")
-	errStateNotReady        = errors.New("state not ready")
+	errInvalidBlockRange      = errors.New("invalid block range params")
+	errExceedMaxTopics        = errors.New("exceed max topics")
+	ErrInvalidSig             = errors.New("invalid transaction v, r, s values")
+	errInvalidCredentials     = errors.New("invalid credentials")
+	errPasswordNotConfigured  = errors.New("admin password is not configured")
+	errAdminFromBrowserOrigin = errors.New("admin API refuses requests carrying a browser Origin header")
+	errInvalidTypeState       = errors.New("invalid type state")
+	errStateNotReady          = errors.New("state not ready")
 )
 
 const maxTopics = 4
@@ -56,29 +56,29 @@ const (
 
 // RPCTransaction represents a transaction that will serialize to the RPC representation of a transaction
 type RPCTransaction struct {
-	BlockHash           *common.Hash      `json:"blockHash"`
-	BlockNumber         *hexutil.Big      `json:"blockNumber"`
-	From                common.Address    `json:"from"`
-	Gas                 hexutil.Uint64    `json:"gas"`
-	GasPrice            *hexutil.Big      `json:"gasPrice"`
-	GasFeeCap           *hexutil.Big      `json:"maxFeePerGas,omitempty"`
-	GasTipCap           *hexutil.Big      `json:"maxPriorityFeePerGas,omitempty"`
-	MaxFeePerBlobGas    *hexutil.Big      `json:"maxFeePerBlobGas,omitempty"`
-	Hash                common.Hash       `json:"hash"`
-	Input               hexutil.Bytes     `json:"input"`
-	Nonce               hexutil.Uint64    `json:"nonce"`
-	To                  *common.Address   `json:"to"`
-	TransactionIndex    *hexutil.Uint64   `json:"transactionIndex"`
-	Value               *hexutil.Big      `json:"value"`
-	Type                hexutil.Uint64    `json:"type"`
-	Accesses            *types.AccessList `json:"accessList,omitempty"`
-	ChainID             *hexutil.Big      `json:"chainId,omitempty"`
-	BlobVersionedHashes []common.Hash     `json:"blobVersionedHashes,omitempty"`
+	BlockHash           *common.Hash                 `json:"blockHash"`
+	BlockNumber         *hexutil.Big                 `json:"blockNumber"`
+	From                common.Address               `json:"from"`
+	Gas                 hexutil.Uint64               `json:"gas"`
+	GasPrice            *hexutil.Big                 `json:"gasPrice"`
+	GasFeeCap           *hexutil.Big                 `json:"maxFeePerGas,omitempty"`
+	GasTipCap           *hexutil.Big                 `json:"maxPriorityFeePerGas,omitempty"`
+	MaxFeePerBlobGas    *hexutil.Big                 `json:"maxFeePerBlobGas,omitempty"`
+	Hash                common.Hash                  `json:"hash"`
+	Input               hexutil.Bytes                `json:"input"`
+	Nonce               hexutil.Uint64               `json:"nonce"`
+	To                  *common.Address              `json:"to"`
+	TransactionIndex    *hexutil.Uint64              `json:"transactionIndex"`
+	Value               *hexutil.Big                 `json:"value"`
+	Type                hexutil.Uint64               `json:"type"`
+	Accesses            *types.AccessList            `json:"accessList,omitempty"`
+	ChainID             *hexutil.Big                 `json:"chainId,omitempty"`
+	BlobVersionedHashes []common.Hash                `json:"blobVersionedHashes,omitempty"`
 	AuthorizationList   []types.SetCodeAuthorization `json:"authorizationList,omitempty"`
-	V                   *hexutil.Big      `json:"v"`
-	R                   *hexutil.Big      `json:"r"`
-	S                   *hexutil.Big      `json:"s"`
-	YParity             *hexutil.Uint64   `json:"yParity,omitempty"`
+	V                   *hexutil.Big                 `json:"v"`
+	R                   *hexutil.Big                 `json:"r"`
+	S                   *hexutil.Big                 `json:"s"`
+	YParity             *hexutil.Uint64              `json:"yParity,omitempty"`
 }
 
 // OverrideAccount indicates the overriding fields of account during the execution
@@ -99,6 +99,12 @@ type OverrideAccount struct {
 // StateOverride is the collection of overridden accounts.
 type StateOverride map[common.Address]OverrideAccount
 
+// BlockGasInfo holds precomputed block gas values for O(1) receipt and block queries.
+type BlockGasInfo struct {
+	TotalGasUsed  uint64
+	CumulativeGas []uint64 // Cumulative gas up to transaction index i
+}
+
 // MetaAPI xử lý các RPC calls của Ethereum
 type MetaAPI struct {
 	App                  *App // Export field Client
@@ -109,7 +115,7 @@ type MetaAPI struct {
 	cachedChainId        hexutil.Big  // Never changes — set once at init
 	cachedGasPrice       *hexutil.Big // Hardcoded value — set once at init
 	cachedMaxPriorityFee *hexutil.Big // Hardcoded value — set once at init
-
+	blockGasCache        *lru.Cache[common.Hash, *BlockGasInfo]
 }
 
 // initCaches pre-computes values that never change or change rarely.
@@ -122,11 +128,14 @@ func (api *MetaAPI) initCaches() {
 	hexGasPrice := hexutil.Big(*gasPrice)
 	api.cachedGasPrice = &hexGasPrice
 
-	// MaxPriorityFeePerGas is currently hardcoded at 0x5f5e100
-	priority := big.NewInt(0x5f5e100)
+	// MaxPriorityFeePerGas: 0 for flat fee model (ADR D2)
+	priority := big.NewInt(0)
 	hexPriority := hexutil.Big(*priority)
 	api.cachedMaxPriorityFee = &hexPriority
 
+	if gasCache, err := lru.New[common.Hash, *BlockGasInfo](2048); err == nil {
+		api.blockGasCache = gasCache
+	}
 }
 
 // decodeHash parses a hex-encoded 32-byte hash. The input may optionally
@@ -324,13 +333,13 @@ func NewServer(app *App) *http.ServeMux {
 		logger.SyncFileLog()
 		os.Exit(1)
 	}
-	// CORS middleware — only allows wildcard origin on the public RPC root path.
-	// Admin, debug, and pipeline endpoints do NOT get CORS headers to prevent
+	// CORS middleware — allows wildcard origin on browser-facing public RPC and
+	// health endpoints. Admin, debug, and pipeline endpoints do NOT get CORS headers to prevent
 	// cross-site attacks (e.g. browser-based admin API abuse via CSRF).
 	corsMiddleware := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Only allow CORS on public RPC paths (MetaMask / browser wallets)
-			if r.URL.Path == "/" || r.URL.Path == "/ws" {
+			// Only allow CORS on browser-facing public endpoints.
+			if r.URL.Path == "/" || r.URL.Path == "/ws" || r.URL.Path == "/health" || r.URL.Path == "/readiness" {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 				w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -468,33 +477,40 @@ func NewServer(app *App) *http.ServeMux {
 	// Backward-compatible JSON metrics endpoint
 	mux.Handle("/metrics/json", metricsCollector)
 	// Enhanced /health endpoint (Liveness)
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/health", corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		status := map[string]interface{}{
 			"status": "ok",
 		}
 
-		if app != nil && app.blockProcessor != nil {
-			lastBlock := app.blockProcessor.GetLastBlock()
-			if lastBlock != nil && lastBlock.Header() != nil {
-				status["block"] = lastBlock.Header().BlockNumber()
-				status["epoch"] = lastBlock.Header().Epoch()
+		if app != nil {
+			keyStatus, warn := app.CommitteeKeyStatus()
+			status["committee_key"] = keyStatus
+			if warn != "" {
+				status["committee_key_warning"] = warn
+			}
+			if app.blockProcessor != nil {
+				lastBlock := app.blockProcessor.GetLastBlock()
+				if lastBlock != nil && lastBlock.Header() != nil {
+					status["block"] = lastBlock.Header().BlockNumber()
+					status["epoch"] = lastBlock.Header().Epoch()
 
-				// Calculate block age
-				blockTimeMs := lastBlock.Header().TimeStamp()
-				if blockTimeMs > 0 {
-					blockAgeMs := time.Now().UnixNano()/1e6 - int64(blockTimeMs)
-					status["last_block_age_ms"] = blockAgeMs
+					// Calculate block age
+					blockTimeMs := lastBlock.Header().TimeStamp()
+					if blockTimeMs > 0 {
+						blockAgeMs := time.Now().UnixNano()/1e6 - int64(blockTimeMs)
+						status["last_block_age_ms"] = blockAgeMs
+					}
 				}
 			}
 		}
 
 		json.NewEncoder(w).Encode(status)
-	})
+	})))
 
 	// /readiness endpoint (Readiness Probe)
-	mux.HandleFunc("/readiness", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/readiness", corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		ready := true
@@ -505,6 +521,15 @@ func NewServer(app *App) *http.ServeMux {
 		if app == nil || app.blockProcessor == nil || app.blockProcessor.GetLastBlock() == nil {
 			ready = false
 			checks["db"] = "not_initialized"
+		}
+
+		if app != nil {
+			keyStatus, warn := app.CommitteeKeyStatus()
+			checks["committee_key"] = keyStatus
+			if keyStatus == "mismatch" {
+				ready = false
+				checks["committee_key_warning"] = warn
+			}
 		}
 
 		status := map[string]interface{}{
@@ -518,7 +543,7 @@ func NewServer(app *App) *http.ServeMux {
 			w.WriteHeader(http.StatusOK)
 		}
 		json.NewEncoder(w).Encode(status)
-	})
+	})))
 
 	// Pipeline monitoring endpoints
 	mux.HandleFunc("/pipeline/stats", func(w http.ResponseWriter, r *http.Request) {
@@ -540,8 +565,6 @@ func NewServer(app *App) *http.ServeMux {
 		w.Write([]byte(`{"status":"reset"}`))
 	})
 
-	mux.HandleFunc("/mtn/sendRawTransactionBin", sendRawTransactionBinHandler(customAPI))
-
 	// Áp dụng middleware vào handler WebSocket
 	wsHandler := server.WebsocketHandler([]string{"*"})
 	mux.Handle("/ws", wsHandler)
@@ -552,52 +575,6 @@ func NewServer(app *App) *http.ServeMux {
 	}
 
 	return mux
-}
-
-func decodeBinaryRawTxPayload(payload []byte) ([]byte, []byte, []byte, error) {
-	const headerSize = 4
-	if len(payload) < headerSize*3 {
-		return nil, nil, nil, fmt.Errorf("payload too short")
-	}
-
-	readSegment := func(buf []byte) ([]byte, []byte, error) {
-		if len(buf) < headerSize {
-			return nil, nil, fmt.Errorf("not enough data for length header")
-		}
-		segmentLen := binary.BigEndian.Uint32(buf[:headerSize])
-		buf = buf[headerSize:]
-		if segmentLen == 0 {
-			return nil, buf, nil
-		}
-		if uint32(len(buf)) < segmentLen {
-			return nil, nil, fmt.Errorf("segment length %d exceeds remaining payload %d", segmentLen, len(buf))
-		}
-		segment := buf[:segmentLen]
-		return segment, buf[segmentLen:], nil
-	}
-
-	var (
-		metaTx []byte
-		ethTx  []byte
-		pubKey []byte
-		rest   = payload
-		err    error
-	)
-
-	if metaTx, rest, err = readSegment(rest); err != nil {
-		return nil, nil, nil, err
-	}
-	if ethTx, rest, err = readSegment(rest); err != nil {
-		return nil, nil, nil, err
-	}
-	if pubKey, rest, err = readSegment(rest); err != nil {
-		return nil, nil, nil, err
-	}
-	if len(rest) != 0 {
-		return nil, nil, nil, fmt.Errorf("unexpected trailing bytes (%d)", len(rest))
-	}
-
-	return metaTx, ethTx, pubKey, nil
 }
 
 // writeJSONRPCError writes a standard JSON-RPC error response.
@@ -614,60 +591,3 @@ func writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
-
-type rawTxBinSender interface {
-	SendRawTransactionWithDeviceKey(ctx context.Context, metaTx, ethTx, pubKey []byte) (common.Hash, error)
-}
-
-func sendRawTransactionBinHandler(sender rawTxBinSender) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		defer r.Body.Close()
-
-		const maxRawTxPayloadSize = 8 << 20 // 8 MB limit to prevent OOM
-		r.Body = http.MaxBytesReader(w, r.Body, maxRawTxPayloadSize)
-		rawPayload, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to read request body: %v", err), http.StatusBadRequest)
-			return
-		}
-
-		metaTx, ethTx, pubKey, err := decodeBinaryRawTxPayload(rawPayload)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("invalid payload: %v", err), http.StatusBadRequest)
-			return
-		}
-
-		txHash, err := sender.SendRawTransactionWithDeviceKey(r.Context(), metaTx, ethTx, pubKey)
-		if err != nil {
-			var revErr *revertError
-			if errors.As(err, &revErr) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusConflict)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"code":    revErr.ErrorCode(),
-					"message": revErr.Error(),
-					"data":    revErr.ErrorData(),
-				})
-				return
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"code":    -32000,
-				"message": err.Error(),
-			})
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/octet-stream")
-		if _, writeErr := w.Write(txHash.Bytes()); writeErr != nil {
-			logger.Warn("failed to write binary transaction hash response: %v", writeErr)
-		}
-	}
-}
-

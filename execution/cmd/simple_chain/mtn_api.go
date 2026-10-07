@@ -18,7 +18,6 @@ import (
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rpc"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/meta-node-blockchain/meta-node/executor"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -27,11 +26,8 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mining" // Import mining package
-	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
-	"github.com/meta-node-blockchain/meta-node/pkg/shared_memory"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
-	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -189,39 +185,7 @@ func (api *MtnAPI) GetExecuteSCResultsHash(ctx context.Context, blockNumber hexu
 	return resultsHash, nil
 }
 
-func (api *MtnAPI) SendRawTransactionWithDeviceKey(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
-	var isExistOverloaded bool
-	value, exists := sharedmemory.GlobalSharedMemory.Read("pendingOverloaded")
-	if exists {
-		var ok bool
-		isExistOverloaded, ok = value.(bool)
-		if ok && isExistOverloaded {
-			return common.Hash{}, fmt.Errorf("system overloaded. waiting")
-		}
-	}
 
-	txD := &mt_proto.TransactionWithDeviceKey{}
-	err := proto.Unmarshal(input, txD)
-	if err != nil {
-		logger.Error("Error Unmarshal input:", err)
-		return common.Hash{}, err
-	}
-	txM := &transaction.Transaction{}
-	txM.FromProto(txD.Transaction)
-
-	output, err := api.App.transactionProcessor.ProcessTransactionFromRpcWithDeviceKey(txD)
-	if err != nil {
-		return common.Hash{}, newError(err, output)
-
-	}
-	return txM.Hash(), nil
-
-}
-
-func (api *MtnAPI) GetDeviceKey(ctx context.Context, hash common.Hash) (common.Hash, error) {
-	data, err := api.App.stateProcessor.GetDeviceKey(hash)
-	return data, err
-}
 
 func (api *MtnAPI) GetAccountState(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (result map[string]interface{}, retErr error) {
 	defer func() {
@@ -596,82 +560,7 @@ func (api *MtnAPI) GetTransactionsAndTPSInRange(ctx context.Context, startBlock 
 	}, nil
 }
 
-// RegisterBlsKeyParams holds the parameters for BLS key registration.
-type RegisterBlsKeyParams struct {
-	Address       string `json:"address"`
-	BlsPrivateKey string `json:"blsPrivateKey"`
-	Timestamp     string `json:"timestamp"`
-	Signature     string `json:"signature"`
-}
 
-// RegisterBlsKeyWithSignature verifies an ECDSA signature proving address
-// ownership, then stores the BLS private key in the Master's encrypted key
-// store. This merges the RPC client's rpc_registerBlsKeyWithSignature handler.
-func (api *MtnAPI) RegisterBlsKeyWithSignature(ctx context.Context, params RegisterBlsKeyParams) (string, error) {
-	if api.App.blsKeyStore == nil {
-		return "", fmt.Errorf("BLS key store is not configured (set master_password and app_pepper in config)")
-	}
-
-	// Validate address
-	if !common.IsHexAddress(params.Address) {
-		return "", fmt.Errorf("invalid Ethereum address format")
-	}
-	signerAddress := common.HexToAddress(params.Address)
-
-	// Validate BLS key format
-	if !strings.HasPrefix(params.BlsPrivateKey, "0x") || len(params.BlsPrivateKey) != 66 {
-		return "", fmt.Errorf("invalid BLS private key format: expected 0x-prefixed 32-byte hex")
-	}
-	blsKeyBytes := common.FromHex(params.BlsPrivateKey)
-	if len(blsKeyBytes) != 32 {
-		return "", fmt.Errorf("invalid BLS private key: expected 32 bytes")
-	}
-
-	// Validate timestamp
-	clientTimestamp, err := time.Parse(time.RFC3339Nano, params.Timestamp)
-	if err != nil {
-		clientTimestamp, err = time.Parse(time.RFC3339, params.Timestamp)
-		if err != nil {
-			return "", fmt.Errorf("invalid timestamp format: expected ISO 8601")
-		}
-	}
-	if time.Since(clientTimestamp).Abs() > 2*time.Minute {
-		return "", fmt.Errorf("timestamp is too old or in the future")
-	}
-
-	// Verify ECDSA signature
-	messageToVerify := fmt.Sprintf("BLS Data: %s\nTimestamp: %s", params.BlsPrivateKey, params.Timestamp)
-	prefixedMessage := fmt.Sprintf("\x19Ethereum Signed Message:\n%d%s", len(messageToVerify), messageToVerify)
-	messageHash := crypto.Keccak256Hash([]byte(prefixedMessage))
-
-	sigBytes := common.FromHex(params.Signature)
-	if len(sigBytes) == 65 && (sigBytes[64] == 27 || sigBytes[64] == 28) {
-		sigBytes[64] -= 27
-	}
-
-	recoveredPubKeyBytes, err := crypto.Ecrecover(messageHash.Bytes(), sigBytes)
-	if err != nil {
-		return "", fmt.Errorf("signature verification failed: could not recover public key")
-	}
-	unmarshaledPubKey, err := crypto.UnmarshalPubkey(recoveredPubKeyBytes)
-	if err != nil {
-		return "", fmt.Errorf("signature verification failed: could not unmarshal public key")
-	}
-	recoveredAddress := crypto.PubkeyToAddress(*unmarshaledPubKey)
-
-	if recoveredAddress != signerAddress {
-		return "", fmt.Errorf("signature verification failed: address mismatch (recovered=%s, expected=%s)",
-			recoveredAddress.Hex(), signerAddress.Hex())
-	}
-
-	// Store the BLS private key
-	if err := api.App.blsKeyStore.SetPrivateKey(signerAddress, params.BlsPrivateKey); err != nil {
-		return "", fmt.Errorf("failed to store BLS private key: %w", err)
-	}
-
-	logger.Info("[RegisterBlsKey] BLS key registered for %s", signerAddress.Hex())
-	return "BLS private key successfully registered.", nil
-}
 
 // GetPerformanceMetrics returns the current system performance metrics, including average latencies based on recent transaction traces.
 func (api *MtnAPI) GetPerformanceMetrics(ctx context.Context, limit int) (map[string]interface{}, error) {
@@ -812,6 +701,32 @@ func (api *MtnAPI) GetCommitVotes(ctx context.Context, commitIndex uint32) (map[
 const devnetSenderPrivateKeyHex = "a3e6d454ea7a3b464af1f8c891259d5ff48f331004d56d1331388ec3c3915fe1"
 const devnetSenderBLSPrivateKeyHex = "0f0f8761e3fe67cdc9e7573adf72c7e929e2a00f981834298867d5628ca2d8f6"
 
+// GetConservation reports the cluster conservation invariant: the BLS float on the Parent Chain versus the sum of the
+// cluster's accounts, the amount legitimately in flight, and whether cross-chain is currently allowed.
+func (api *MtnAPI) GetConservation(ctx context.Context) (map[string]interface{}, error) {
+	last, lastErr, verified, blocked, mode := api.App.conservation.Status()
+	out := map[string]interface{}{"mode": string(mode), "verified": verified, "blocked": blocked}
+	if last.Supply != nil {
+		out["supply"] = last.Supply.String()
+		out["float"] = last.Float.String()
+		out["diff"] = last.Diff.String()
+		out["pending"] = last.Pending.String()
+		out["stable"] = last.Stable
+		out["ok"] = last.OK
+		out["reason"] = last.Reason
+	}
+	if lastErr != nil {
+		out["error"] = lastErr.Error()
+	}
+	if err := api.App.conservation.Allow(); err != nil {
+		out["allow"] = false
+		out["halt_reason"] = err.Error()
+	} else {
+		out["allow"] = true
+	}
+	return out, nil
+}
+
 // SendCrossChainTransfer submits a cross-node transfer as a REAL signed transaction targeting
 // PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, so it goes through the normal tx pool -> consensus ->
 // block execution -> Commit() pipeline like any other transaction. It must NOT call
@@ -825,6 +740,11 @@ const devnetSenderBLSPrivateKeyHex = "0f0f8761e3fe67cdc9e7573adf72c7e929e2a00f98
 // senderKeyHex / blsKeyHex override the sender's ECDSA and BLS private keys, so stress tests can
 // use many independent senders instead of racing on one shared account's nonce.
 func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, amountHex string, senderKeyHex *string, blsKeyHex *string) (string, error) {
+	// Halt-not-guess: no new value leaves the cluster while its BLS float is unverified or the conservation invariant is
+	// violated. This is a node-local admission check only; block execution of already admitted transfers is unaffected.
+	if err := api.App.conservation.Allow(); err != nil {
+		return "", err
+	}
 	// Verify that the execution nodes are not a separate chain but share the chainid with the parent chain
 	// A separate chain (L2) would have a GatewayContract configured for cross-chain value transfer.
 	if api.App.config.CrossChain.GatewayContract != "" {
@@ -850,9 +770,9 @@ func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, am
 	// Sender is the devnet-only test account funded in run_devnet.sh's genesis (see
 	// devnetSenderPrivateKeyHex's doc comment). Derived from the key itself rather than a
 	// separately hardcoded address literal, so the two can never drift out of sync.
-	ecdsaHex, blsHex := devnetSenderPrivateKeyHex, devnetSenderBLSPrivateKeyHex
-	if senderKeyHex != nil && blsKeyHex != nil {
-		ecdsaHex, blsHex = strings.TrimPrefix(*senderKeyHex, "0x"), strings.TrimPrefix(*blsKeyHex, "0x")
+	ecdsaHex := devnetSenderPrivateKeyHex
+	if senderKeyHex != nil {
+		ecdsaHex = strings.TrimPrefix(*senderKeyHex, "0x")
 	}
 	privKey, err := crypto.HexToECDSA(ecdsaHex)
 	if err != nil {
@@ -860,18 +780,11 @@ func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, am
 	}
 	senderAddr := crypto.PubkeyToAddress(privKey.PublicKey)
 
-	if api.App.blsKeyStore != nil {
-		if has, _ := api.App.blsKeyStore.HasPrivateKey(senderAddr); !has {
-			if err := api.App.blsKeyStore.SetPrivateKey(senderAddr, blsHex); err != nil {
-				return "", fmt.Errorf("failed to register devnet sender BLS key: %w", err)
-			}
-		}
-	}
-
 	accountState, err := api.App.chainState.GetAccountStateDB().AccountState(senderAddr)
 	if err != nil {
 		return "", fmt.Errorf("failed to load sender account state: %w", err)
 	}
+
 	nonce := uint64(0)
 	if accountState != nil {
 		nonce = accountState.Nonce()

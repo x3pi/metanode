@@ -1421,3 +1421,78 @@ async fn test_calculate_scoring_subdag_scores_on_genuinely_empty_subdag_does_not
     assert_eq!(range_end, 0);
     assert_eq!(range_end, scores.commit_range.end());
 }
+
+#[tokio::test]
+async fn test_reset_to_network_baseline_injects_correct_digest_and_gc_round() {
+    let (context, _) = Context::new_for_test(4);
+    let context = Arc::new(context);
+    let store = Arc::new(MemStore::new());
+    let mut dag_state = DagState::new(context.clone(), store.clone());
+
+    // Initially, no commit exists
+    assert!(dag_state.last_commit.is_none());
+    assert_eq!(dag_state.last_commit_index(), 0);
+    assert_eq!(dag_state.last_commit_digest(), CommitDigest::MIN);
+    assert_eq!(dag_state.gc_round(), 0);
+
+    // Inject a network baseline with a specific real digest
+    let test_digest = CommitDigest::from([42u8; 32]);
+    let target_round: Round = 100;
+    let synced_commit: CommitIndex = 50;
+    let timestamp_ms: BlockTimestampMs = 123456789;
+    let scores = vec![(AuthorityIndex::new_for_test(0), 100u64)];
+
+    dag_state.reset_to_network_baseline(
+        target_round,
+        synced_commit,
+        test_digest,
+        timestamp_ms,
+        Some(scores.clone()),
+    );
+
+    // Verify last_commit_digest matches test_digest EXACTLY (not BCS hash of dummy commit)
+    assert_eq!(dag_state.last_commit_digest(), test_digest);
+    assert_eq!(dag_state.last_commit_index(), synced_commit);
+    assert_eq!(dag_state.last_commit_round(), target_round);
+    assert_eq!(dag_state.last_commit_timestamp_ms(), timestamp_ms);
+    let gc_depth = context.protocol_config.gc_depth();
+    assert_eq!(dag_state.gc_round(), target_round.saturating_sub(gc_depth));
+    assert_eq!(dag_state.baseline_reputation_scores, Some(scores));
+}
+
+#[tokio::test]
+async fn test_reset_to_network_baseline_rejects_min_digest_overwriting_valid_commit() {
+    let (context, _) = Context::new_for_test(4);
+    let context = Arc::new(context);
+    let store = Arc::new(MemStore::new());
+    let mut dag_state = DagState::new(context.clone(), store.clone());
+
+    // 1. Establish a valid baseline
+    let real_digest = CommitDigest::from([77u8; 32]);
+    dag_state.reset_to_network_baseline(
+        150,
+        2107,
+        real_digest,
+        1790955581745,
+        None,
+    );
+    assert_eq!(dag_state.last_commit_digest(), real_digest);
+    assert_eq!(dag_state.last_commit_index(), 2107);
+    assert_eq!(dag_state.last_commit_round(), 150);
+
+    // 2. An escalation attempt tries to overwrite valid state with CommitDigest::MIN and round=0.
+    // Invariant defense MUST reject this!
+    dag_state.reset_to_network_baseline(
+        0,
+        2107,
+        CommitDigest::MIN,
+        0,
+        None,
+    );
+
+    // Valid state must remain completely uncorrupted
+    assert_eq!(dag_state.last_commit_digest(), real_digest);
+    assert_eq!(dag_state.last_commit_index(), 2107);
+    assert_eq!(dag_state.last_commit_round(), 150);
+}
+

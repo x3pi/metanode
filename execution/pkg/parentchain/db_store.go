@@ -1,319 +1,245 @@
 package parentchain
 
 import (
-	"encoding/binary"
-	"encoding/json"
-	"errors"
+	"fmt"
+	"log"
 	"math/big"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi"
 	"github.com/syndtr/goleveldb/leveldb"
-	"github.com/syndtr/goleveldb/leveldb/util"
-)
-
-var (
-	PrefixChainRegistry = []byte("cr:")
-	PrefixFloat         = []byte("fl:")
-	PrefixClaimed       = []byte("cl:")
-	PrefixTransfer      = []byte("tx:")
-	PrefixSeq           = []byte("sq:")
-	PrefixVelocity      = []byte("vl:")
-	PrefixAccount       = []byte("ac:")
-	PrefixStateRoot     = []byte("sr:")
 )
 
 type DBStore struct {
-	db *leveldb.DB
-	mu sync.RWMutex
+	db         *leveldb.DB
+	nomtHandle *nomt_ffi.Handle
+	committer  *TreeBlockCommitter
+	mu         sync.RWMutex
 }
 
 func NewDBStore(path string) (*DBStore, error) {
+	if err := os.MkdirAll(path, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create base db directory: %w", err)
+	}
+
 	db, err := leveldb.OpenFile(path, nil)
 	if err != nil {
 		return nil, err
 	}
-	return &DBStore{db: db}, nil
-}
 
-func (s *DBStore) Close() error {
-	return s.db.Close()
-}
-
-func (s *DBStore) GetChainRegistry(key common.Hash) (ChainRegistryEntry, bool, error) {
-	data, err := s.db.Get(append(PrefixChainRegistry, key.Bytes()...), nil)
-	if err != nil {
-		if err == leveldb.ErrNotFound {
-			return ChainRegistryEntry{}, false, nil
-		}
-		return ChainRegistryEntry{}, false, err
+	nomtPath := filepath.Join(path, "nomt")
+	if err := os.MkdirAll(nomtPath, 0755); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to create NOMT directory: %w", err)
 	}
-	var entry ChainRegistryEntry
-	if err := json.Unmarshal(data, &entry); err != nil {
-		return ChainRegistryEntry{}, false, err
-	}
-	return entry, true, nil
-}
 
-func (s *DBStore) SetChainRegistry(key common.Hash, entry ChainRegistryEntry) error {
-	data, err := json.Marshal(entry)
+	// Open NOMT with: 4 workers, 64MB page cache, 64MB leaf cache, 64000 hashtable buckets, preallocate
+	handle, err := nomt_ffi.Open(nomtPath, 4, 64, 64, 64000, true)
 	if err != nil {
-		return err
-	}
-	return s.db.Put(append(PrefixChainRegistry, key.Bytes()...), data, nil)
-}
-
-func (s *DBStore) GetFloat(key common.Hash) (*big.Int, error) {
-	data, err := s.db.Get(append(PrefixFloat, key.Bytes()...), nil)
-	if err != nil {
-		if err == leveldb.ErrNotFound {
-			return big.NewInt(0), nil
-		}
+		_ = db.Close()
 		return nil, err
 	}
-	val := new(big.Int)
-	val.SetBytes(data)
-	return val, nil
-}
 
-func (s *DBStore) SetFloat(key common.Hash, balance *big.Int) error {
-	if balance == nil || balance.Sign() < 0 {
-		return errors.New("negative balance")
-	}
-	return s.db.Put(append(PrefixFloat, key.Bytes()...), balance.Bytes(), nil)
-}
+	committer := NewTreeBlockCommitter(db, handle)
 
-func (s *DBStore) GetClaimed(messageID common.Hash) (FloatOutcome, error) {
-	data, err := s.db.Get(append(PrefixClaimed, messageID.Bytes()...), nil)
-	if err != nil {
-		if err == leveldb.ErrNotFound {
-			return FloatOutcomeNone, nil
-		}
-		return FloatOutcomeNone, err
-	}
-	if len(data) > 0 {
-		return FloatOutcome(data[0]), nil
-	}
-	return FloatOutcomeNone, nil
-}
-
-func (s *DBStore) SetClaimed(messageID common.Hash, outcome FloatOutcome) error {
-	return s.db.Put(append(PrefixClaimed, messageID.Bytes()...), []byte{byte(outcome)}, nil)
-}
-
-func (s *DBStore) GetTransferRecord(messageID common.Hash) (FloatTransferRecord, bool, error) {
-	data, err := s.db.Get(append(PrefixTransfer, messageID.Bytes()...), nil)
-	if err != nil {
-		if err == leveldb.ErrNotFound {
-			return FloatTransferRecord{}, false, nil
-		}
-		return FloatTransferRecord{}, false, err
-	}
-	var rec FloatTransferRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return FloatTransferRecord{}, false, err
-	}
-	return rec, true, nil
-}
-
-func (s *DBStore) SetTransferRecord(messageID common.Hash, rec FloatTransferRecord) error {
-	data, err := json.Marshal(rec)
-	if err != nil {
-		return err
-	}
-	return s.db.Put(append(PrefixTransfer, messageID.Bytes()...), data, nil)
-}
-
-func (s *DBStore) GetFloatSeq(key common.Hash) (uint64, error) {
-	data, err := s.db.Get(append(PrefixSeq, key.Bytes()...), nil)
-	if err != nil {
-		if err == leveldb.ErrNotFound {
-			return 0, nil
-		}
-		return 0, err
-	}
-	val := new(big.Int)
-	val.SetBytes(data)
-	return val.Uint64(), nil
-}
-
-func (s *DBStore) SetFloatSeq(key common.Hash, seq uint64) error {
-	val := new(big.Int).SetUint64(seq)
-	return s.db.Put(append(PrefixSeq, key.Bytes()...), val.Bytes(), nil)
-}
-
-func (s *DBStore) GetVelocity(key common.Hash) (FloatVelocityState, error) {
-	data, err := s.db.Get(append(PrefixVelocity, key.Bytes()...), nil)
-	if err != nil {
-		if err == leveldb.ErrNotFound {
-			return FloatVelocityState{
-				WindowBaseAlloc: big.NewInt(0),
-				Spent:           big.NewInt(0),
-			}, nil
-		}
-		return FloatVelocityState{}, err
-	}
-	var st FloatVelocityState
-	if err := json.Unmarshal(data, &st); err != nil {
-		return FloatVelocityState{}, err
-	}
-	if st.WindowBaseAlloc == nil {
-		st.WindowBaseAlloc = big.NewInt(0)
-	}
-	if st.Spent == nil {
-		st.Spent = big.NewInt(0)
-	}
-	return st, nil
-}
-
-func (s *DBStore) SetVelocity(key common.Hash, st FloatVelocityState) error {
-	data, err := json.Marshal(st)
-	if err != nil {
-		return err
-	}
-	return s.db.Put(append(PrefixVelocity, key.Bytes()...), data, nil)
-}
-
-func (s *DBStore) GetAccountRegistry(userAddress common.Address) (cm.PublicKey, bool, error) {
-	data, err := s.db.Get(append(PrefixAccount, userAddress.Bytes()...), nil)
-	if err != nil {
-		if err == leveldb.ErrNotFound {
-			return cm.PublicKey{}, false, nil
-		}
-		return cm.PublicKey{}, false, err
-	}
-	return cm.PubkeyFromBytes(data), true, nil
-}
-
-func (s *DBStore) SetAccountRegistry(userAddress common.Address, floatIdentityKey cm.PublicKey) error {
-	return s.db.Put(append(PrefixAccount, userAddress.Bytes()...), floatIdentityKey.Bytes(), nil)
-}
-
-func (s *DBStore) GetAllChainRegistryKeys() ([]common.Hash, error) {
-	iter := s.db.NewIterator(nil, nil)
-	defer iter.Release()
-	
-	var keys []common.Hash
-	for iter.Next() {
-		k := iter.Key()
-		if len(k) > len(PrefixChainRegistry) && string(k[:len(PrefixChainRegistry)]) == string(PrefixChainRegistry) {
-			hashBytes := k[len(PrefixChainRegistry):]
-			if len(hashBytes) == 32 {
-				keys = append(keys, common.BytesToHash(hashBytes))
+	// Startup verification (following simple_chain app_blockchain.go pattern)
+	prog, err := committer.LastApplied()
+	if err == nil && prog.LastBlock > 0 {
+		if actualRoot, rErr := handle.Root(); rErr == nil {
+			actualRootHash := common.BytesToHash(actualRoot[:])
+			if actualRootHash != prog.LastStateRoot {
+				log.Printf("⚠️ [PARENT-CHAIN-STARTUP] NOMT root mismatch: nomt=%s, leveldb=%s (lastBlock=%d)",
+					actualRootHash.Hex(), prog.LastStateRoot.Hex(), prog.LastBlock)
+			} else {
+				log.Printf("🔍 [PARENT-CHAIN-STARTUP] NOMT state root verified with block #%d: %s",
+					prog.LastBlock, actualRootHash.Hex())
 			}
 		}
 	}
-	return keys, iter.Error()
+
+	return &DBStore{
+		db:         db,
+		nomtHandle: handle,
+		committer:  committer,
+	}, nil
 }
 
-var (
-	PrefixInbound    = []byte("in:")
-	PrefixInboundSeq = []byte("in_sq:")
-)
+func (s *DBStore) NomtHandle() *nomt_ffi.Handle {
+	return s.nomtHandle
+}
 
-func (s *DBStore) AppendInboundTransfer(destKeyHash common.Hash, event *TransferEvent) error {
-	data, err := json.Marshal(event)
+func (s *DBStore) NomtRoot() (common.Hash, error) {
+	if s.nomtHandle == nil {
+		return common.Hash{}, fmt.Errorf("nomt handle not initialized")
+	}
+	r, err := s.nomtHandle.Root()
 	if err != nil {
-		return err
+		return common.Hash{}, err
 	}
-	
-	seqKey := append(PrefixInboundSeq, destKeyHash.Bytes()...)
-	var curSeq uint64
-	seqData, err := s.db.Get(seqKey, nil)
-	if err == nil && len(seqData) == 8 {
-		curSeq = binary.BigEndian.Uint64(seqData)
-	}
-
-	// Create a unique monotonically increasing key using destination key hash + sequence
-	// This guarantees new events are ALWAYS appended strictly after previous events in LevelDB.
-	key := make([]byte, 0, len(PrefixInbound)+32+8)
-	key = append(key, PrefixInbound...)
-	key = append(key, destKeyHash.Bytes()...)
-	
-	var seqBytes [8]byte
-	binary.BigEndian.PutUint64(seqBytes[:], curSeq)
-	key = append(key, seqBytes[:]...)
-	
-	if err := s.db.Put(key, data, nil); err != nil {
-		return err
-	}
-
-	var nextSeqBytes [8]byte
-	binary.BigEndian.PutUint64(nextSeqBytes[:], curSeq+1)
-	return s.db.Put(seqKey, nextSeqBytes[:], nil)
+	return common.BytesToHash(r[:]), nil
 }
 
-func (s *DBStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([]*TransferEvent, uint64, error) {
-	prefix := make([]byte, 0, len(PrefixInbound)+32)
-	prefix = append(prefix, PrefixInbound...)
-	prefix = append(prefix, destKeyHash.Bytes()...)
-	
-	slice := util.BytesPrefix(prefix)
-	if cursor > 0 {
-		startKey := make([]byte, 0, len(prefix)+8)
-		startKey = append(startKey, prefix...)
-		var cursorBytes [8]byte
-		binary.BigEndian.PutUint64(cursorBytes[:], cursor)
-		startKey = append(startKey, cursorBytes[:]...)
-		slice.Start = startKey
+func (s *DBStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var errs []error
+	if s.nomtHandle != nil {
+		s.nomtHandle.Close()
 	}
-	
-	iter := s.db.NewIterator(slice, nil)
-	defer iter.Release()
-	
-	var events []*TransferEvent
-	curPos := cursor
-	for iter.Next() {
-		var event TransferEvent
-		if err := json.Unmarshal(iter.Value(), &event); err == nil {
-			events = append(events, &event)
-			curPos++
-		}
-		if len(events) >= 50 {
-			break
+	if s.db != nil {
+		if err := s.db.Close(); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	
-	if err := iter.Error(); err != nil {
-		return nil, cursor, err
+	if len(errs) > 0 {
+		return errs[0]
 	}
-	
-	return events, curPos, nil
+	return nil
+}
+
+func (s *DBStore) Committer() BlockCommitter {
+	return s.committer
+}
+
+// ─── IMPLEMENT BlockCommitter ────────────────────────────────────────────────
+
+func (s *DBStore) LastApplied() (BlockProgress, error) {
+	return s.committer.LastApplied()
+}
+
+func (s *DBStore) GetBlockRecord(number uint64) (BlockRecord, bool, error) {
+	return s.committer.GetBlockRecord(number)
+}
+
+func (s *DBStore) GetBlockRecordByHash(hash common.Hash) (BlockRecord, bool, error) {
+	return s.committer.GetBlockRecordByHash(hash)
+}
+
+func (s *DBStore) GetBlockRecords(from, to uint64, limit int) ([]BlockRecord, error) {
+	return s.committer.GetBlockRecords(from, to, limit)
+}
+
+func (s *DBStore) GetTxLocation(txHash common.Hash) (uint64, uint32, bool, error) {
+	return s.committer.GetTxLocation(txHash)
+}
+
+func (s *DBStore) GetReceipt(txHash common.Hash) (*Receipt, bool, error) {
+	return s.committer.GetReceipt(txHash)
+}
+
+// SetGenesisInit installs the genesis state initializer run inside block 1.
+func (s *DBStore) SetGenesisInit(f func(Store) error) {
+	s.committer.SetGenesisInit(f)
+}
+
+func (s *DBStore) ApplyBlock(in BlockInput, exec TxExecutor) (BlockResult, error) {
+	return s.committer.ApplyBlock(in, exec)
+}
+
+func (s *DBStore) GenerateProof(key [32]byte) ([]byte, error) {
+	return s.committer.GenerateProof(key)
+}
+
+func (s *DBStore) Store() Store {
+	return s.committer.Store()
+}
+
+// ─── IMPLEMENT Store INTERFACE VIA committer.Store() ─────────────────────────
+
+func (s *DBStore) GetChainRegistry(key common.Hash) (ChainRegistryEntry, bool, error) {
+	return s.committer.Store().GetChainRegistry(key)
+}
+
+func (s *DBStore) SetChainRegistry(key common.Hash, entry ChainRegistryEntry) error {
+	return s.committer.Store().SetChainRegistry(key, entry)
+}
+
+func (s *DBStore) GetAllChainRegistryKeys() ([]common.Hash, error) {
+	return s.committer.Store().GetAllChainRegistryKeys()
+}
+
+func (s *DBStore) GetFloat(key common.Hash) (*big.Int, error) {
+	return s.committer.Store().GetFloat(key)
+}
+
+func (s *DBStore) SetFloat(key common.Hash, balance *big.Int) error {
+	return s.committer.Store().SetFloat(key, balance)
+}
+
+func (s *DBStore) GetClaimed(messageID common.Hash) (FloatOutcome, error) {
+	return s.committer.Store().GetClaimed(messageID)
+}
+
+func (s *DBStore) SetClaimed(messageID common.Hash, outcome FloatOutcome) error {
+	return s.committer.Store().SetClaimed(messageID, outcome)
+}
+
+func (s *DBStore) GetTransferRecord(messageID common.Hash) (FloatTransferRecord, bool, error) {
+	return s.committer.Store().GetTransferRecord(messageID)
+}
+
+func (s *DBStore) SetTransferRecord(messageID common.Hash, rec FloatTransferRecord) error {
+	return s.committer.Store().SetTransferRecord(messageID, rec)
+}
+
+func (s *DBStore) GetFloatSeq(key common.Hash) (uint64, error) {
+	return s.committer.Store().GetFloatSeq(key)
+}
+
+func (s *DBStore) SetFloatSeq(key common.Hash, seq uint64) error {
+	return s.committer.Store().SetFloatSeq(key, seq)
+}
+
+func (s *DBStore) GetVelocity(key common.Hash) (FloatVelocityState, error) {
+	return s.committer.Store().GetVelocity(key)
+}
+
+func (s *DBStore) SetVelocity(key common.Hash, st FloatVelocityState) error {
+	return s.committer.Store().SetVelocity(key, st)
+}
+
+func (s *DBStore) GetAccountRegistry(userAddress common.Address) (cm.PublicKey, bool, error) {
+	return s.committer.Store().GetAccountRegistry(userAddress)
+}
+
+func (s *DBStore) SetAccountRegistry(userAddress common.Address, floatIdentityKey cm.PublicKey) error {
+	return s.committer.Store().SetAccountRegistry(userAddress, floatIdentityKey)
 }
 
 func (s *DBStore) GetStateRoot(clusterKeyHash common.Hash, epoch uint64) (common.Hash, bool, error) {
-	key := make([]byte, 0, len(PrefixStateRoot)+32+8)
-	key = append(key, PrefixStateRoot...)
-	key = append(key, clusterKeyHash.Bytes()...)
-	var epochBytes [8]byte
-	for i := 7; i >= 0; i-- {
-		epochBytes[i] = byte(epoch >> (8 * (7 - i)))
-	}
-	key = append(key, epochBytes[:]...)
-
-	data, err := s.db.Get(key, nil)
-	if err != nil {
-		if err == leveldb.ErrNotFound {
-			return common.Hash{}, false, nil
-		}
-		return common.Hash{}, false, err
-	}
-	if len(data) != 32 {
-		return common.Hash{}, false, errors.New("invalid state root length")
-	}
-	return common.BytesToHash(data), true, nil
+	return s.committer.Store().GetStateRoot(clusterKeyHash, epoch)
 }
 
 func (s *DBStore) SetStateRoot(clusterKeyHash common.Hash, epoch uint64, root common.Hash) error {
-	key := make([]byte, 0, len(PrefixStateRoot)+32+8)
-	key = append(key, PrefixStateRoot...)
-	key = append(key, clusterKeyHash.Bytes()...)
-	var epochBytes [8]byte
-	for i := 7; i >= 0; i-- {
-		epochBytes[i] = byte(epoch >> (8 * (7 - i)))
-	}
-	key = append(key, epochBytes[:]...)
-
-	return s.db.Put(key, root.Bytes(), nil)
+	return s.committer.Store().SetStateRoot(clusterKeyHash, epoch, root)
 }
+
+func (s *DBStore) AppendInboundTransfer(destKeyHash common.Hash, event *TransferEvent) error {
+	return s.committer.Store().AppendInboundTransfer(destKeyHash, event)
+}
+
+func (s *DBStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([]*TransferEvent, uint64, error) {
+	return s.committer.Store().GetInboundTransfers(destKeyHash, cursor)
+}
+
+func (s *DBStore) AppendAccountRegistration(clusterKeyHash common.Hash, event *AccountRegisteredEvent) error {
+	return s.committer.Store().AppendAccountRegistration(clusterKeyHash, event)
+}
+
+func (s *DBStore) GetAccountRegistrations(clusterKeyHash common.Hash, cursor uint64) ([]*AccountRegisteredEvent, uint64, error) {
+	return s.committer.Store().GetAccountRegistrations(clusterKeyHash, cursor)
+}
+
+func (s *DBStore) GetNonce(sender common.Address) (uint64, error) {
+	return s.committer.Store().GetNonce(sender)
+}
+
+func (s *DBStore) SetNonce(sender common.Address, nonce uint64) error {
+	return s.committer.Store().SetNonce(sender, nonce)
+}
+

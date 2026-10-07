@@ -3,6 +3,7 @@ package executor
 import (
 	"bufio"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -10,8 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -612,4 +617,56 @@ func TestHandoff_FullTransitionLifecycle(t *testing.T) {
 	resp, err = client.getCurrentEpoch()
 	require.NoError(t, err)
 	assert.Equal(t, uint64(2), resp.GetGetCurrentEpochResponse().GetEpoch())
+}
+
+// P0-1b: Verify that HandleGetActiveValidatorsRequest excludes zero-stake validators
+// and jailed validators, ensuring unprivileged accounts cannot enter consensus committee.
+func TestP0_1b_HandleGetActiveValidators_ZeroStakeFiltered(t *testing.T) {
+	prevBackend := trie.GetStateBackend()
+	trie.SetStateBackend(trie.BackendMPT)
+	t.Cleanup(func() { trie.SetStateBackend(prevBackend) })
+
+	stakeStorage := storage.NewMemoryDb()
+	stakeTrie, err := trie.NewStateTrie(common.Hash{}, stakeStorage, true)
+	require.NoError(t, err)
+	stakeDB := stake_state_db.NewStakeStateDB(stakeTrie, stakeStorage)
+
+	// 1. Validator 1: Staked validator (1000 MTN)
+	val1Addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	require.NoError(t, stakeDB.CreateRegisterWithKeys(val1Addr, "val-1", "", "", "", 5,
+		big.NewInt(0), "127.0.0.1:6200", "127.0.0.1:4012", "/ip4/127.0.0.1/tcp/9100",
+		"", []byte{0x01}, []byte{0x02}, "v1", []byte{0x03}))
+	stake, _ := new(big.Int).SetString("1000000000000000000000", 10)
+	require.NoError(t, stakeDB.Delegate(val1Addr, val1Addr, stake))
+
+	// 2. Validator 2: Registered with ZERO stake (like registerValidator from unprivileged user)
+	val2Addr := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	require.NoError(t, stakeDB.CreateRegisterWithKeys(val2Addr, "val-zero", "", "", "", 0,
+		big.NewInt(0), "127.0.0.1:6201", "127.0.0.1:4013", "/ip4/127.0.0.1/tcp/9101",
+		"", []byte{0x04}, []byte{0x05}, "v2", []byte{0x06}))
+
+	// 3. Validator 3: Jailed validator with positive stake
+	val3Addr := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	require.NoError(t, stakeDB.CreateRegisterWithKeys(val3Addr, "val-jailed", "", "", "", 5,
+		big.NewInt(0), "127.0.0.1:6202", "127.0.0.1:4014", "/ip4/127.0.0.1/tcp/9102",
+		"", []byte{0x07}, []byte{0x08}, "v3", []byte{0x09}))
+	require.NoError(t, stakeDB.Delegate(val3Addr, val3Addr, stake))
+	val3State, err := stakeDB.GetValidator(val3Addr)
+	require.NoError(t, err)
+	val3State.SetJailed(true, time.Now())
+
+	// Flush to trie
+	_, err = stakeDB.IntermediateRoot()
+	require.NoError(t, err)
+
+	cs := blockchain.NewTestChainState()
+	cs.SetStakeStateDB(stakeDB)
+
+	rh := NewRequestHandler(nil, cs, "")
+	valList, err := rh.HandleGetActiveValidatorsRequest(&pb.GetActiveValidatorsRequest{})
+	require.NoError(t, err)
+	require.NotNil(t, valList)
+	// ONLY val-1 must be returned! val-zero and val-jailed MUST be excluded!
+	require.Len(t, valList.Validators, 1)
+	assert.Equal(t, val1Addr.Hex(), valList.Validators[0].Address)
 }

@@ -3,7 +3,7 @@
 Hệ thống Ansible tự động hóa triển khai, quản lý vòng đời và kiểm thử tích hợp cho kiến trúc **Parent Chain + Sharded Execution Clusters (Rollup Architecture)** của MetaNode, đi kèm tích hợp thông báo trạng thái & cảnh báo thời gian thực qua **Telegram Bot**.
 
 > 📚 **Tài liệu hướng dẫn toàn diện:** Chi tiết kiến trúc, cấu hình đa máy chủ, giải thích 5 kịch bản kiểm thử, cơ chế phục hồi offline và xử lý lỗi được trình bày đầy đủ tại:  
-> 👉 [**DEPLOYMENT_AND_TESTING_GUIDE.md**](file:///home/abc/chain-n/metanode/deploy/ansible_clusters/DEPLOYMENT_AND_TESTING_GUIDE.md)
+> 👉 [**DEPLOYMENT_AND_TESTING_GUIDE.md**](DEPLOYMENT_AND_TESTING_GUIDE.md)
 
 ---
 
@@ -11,7 +11,7 @@ Hệ thống Ansible tự động hóa triển khai, quản lý vòng đời và
 
 | Thành Phần | Định Danh & Cổng | Vai Trò & Cơ Chế |
 | :--- | :--- | :--- |
-| **Parent Chain** | HTTP RPC: `:8547`<br>P2P: `:4000` | Native State Store (Float Accounts, Account Registry, Cluster Registry, Claimed Messages). Quản lý cọc float và điều phối bảo lãnh chuyển tiền. |
+| **Parent Chain** | ChainID: `991`<br>HTTP RPC: `:8547`<br>P2P: `:4000` | Native State Store (Float Accounts, Account Registry, Cluster Registry, Claimed Messages). Quản lý cọc float và điều phối bảo lãnh chuyển tiền. |
 | **Exec Cluster 1** | ClusterID: `1`<br>EVM ChainID: `991`<br>RPC: `:8646`<br>P2P: `:4200` | Cụm thực thi Shard 1. Chạy Rollup workers (`SendWorker`, `ReceiveWorker`, `ReclaimWorker`). Tiếp nhận giao dịch EVM chuẩn. |
 | **Exec Cluster 2** | ClusterID: `2`<br>EVM ChainID: `991`<br>RPC: `:8647`<br>P2P: `:4202` | Cụm thực thi Shard 2. Tương tác giao dịch xuyên cụm (cross-cluster transfer) với Cluster 1 qua Float Account trên Parent Chain. |
 
@@ -22,14 +22,14 @@ Hệ thống Ansible tự động hóa triển khai, quản lý vòng đời và
 ```
 deploy/ansible_clusters/
 ├── ansible.cfg                # Cấu hình Ansible tối ưu (pipelining, timeouts, callbacks)
-├── inventory.example.yml      # Mẫu file inventory khai báo hosts và cluster
-├── inventory.yml              # File inventory hiện hành
+├── inventory.example.yml      # Mẫu file inventory tham khảo (che các khóa/mật khẩu bí mật)
+├── inventory.yml              # File inventory thực tế (đã đưa vào .gitignore chống lộ key)
 ├── .env.example               # Mẫu cấu hình Telegram Bot Token & Chat ID
-├── .env                       # File cấu hình Telegram bí mật
+├── .env                       # File cấu hình Telegram bí mật (gitignore)
 ├── deploy.yml                 # Ansible Playbook chính (Build, Parent Chain, Exec Clusters, Test)
 ├── deploy_clusters.sh         # Script điều phối 1-click tích hợp thông báo Telegram
 ├── group_vars/
-│   └── all.yml                # Biến toàn cục (ChainID 991, paths, RPC URLs)
+│   └── all.yml                # Biến toàn cục (paths, RPC URLs, log dirs)
 ├── roles/
 │   ├── build/                 # Biên dịch binaries (parent_chain, simple_chain)
 │   ├── common/                # Tạo thư mục /opt/metanode, phân phối binaries
@@ -46,6 +46,29 @@ deploy/ansible_clusters/
 ---
 
 ## ⚡ Hướng Dẫn Sử Dụng Nhanh (1-Click)
+
+### File endpoint dùng chung
+
+`--reset`, `--export-config`, `--test` và `--test-only` xuất cấu hình cluster vào
+`/tmp/rpc_nodes.json`, giữ nguyên node public chain `m0–m4` cùng metadata hiện có.
+Các map `nodes`, `rpc_nodes`, `ws_nodes`, `tcp_nodes`, `raft_nodes`, `forward_nodes`
+được bổ sung node cluster theo tên inventory (`exec1_replica1`, `exec2_replica1`, ...).
+Node cluster cũ có tiền tố `exec`/`parent_node_` được thay bằng dữ liệu inventory hiện tại.
+
+Bộ test tích hợp đọc `root_anchor`, `private_chains.chain_a.rpc_url` và
+`private_chains.chain_b.rpc_url` từ file này để truyền vào `PARENT_CHAIN_URL`,
+`EXEC1_URL`, `EXEC2_URL`. `chain_a`/`chain_b` tương ứng cluster ID 1/2;
+`root_anchor` là endpoint dịch vụ `parent_chain` từ inventory, không phải alias cho `m0`.
+Khi nhóm parent rỗng, endpoint này lấy từ `parent_chain_host`/`parent_chain_rpc_port`.
+Do file này chứa private-chain credentials, nó luôn được ghi với quyền `0600`.
+
+Public chain (`ansible_deploy.sh`) cũng tự gộp endpoint khi chạy, giữ nguyên cluster đã xuất;
+khởi động lần lượt public trước hay cluster trước đều không làm mất cấu hình bên còn lại.
+Không cần chạy export thủ công sau khi khởi động.
+
+Có thể cập nhật riêng file mà không reset node bằng `./deploy_clusters.sh --export-config`.
+Việc dùng chung endpoint không thay thế yêu cầu API `parent_chain` của bộ test;
+kịch bản lỗi node 8–9 vẫn phụ thuộc cổng/đường dẫn local được định nghĩa trong test Go.
 
 ### 1. Cấu hình Telegram (Tùy chọn)
 Chỉnh sửa file `.env`:
@@ -67,7 +90,7 @@ Lệnh trên sẽ:
 1. Gửi thông báo 🚀 **Deploy Bắt đầu** lên Telegram (kèm commit hash, author, nhánh git).
 2. Tự động kiểm tra và build các binary Go (`parent_chain`, `simple_chain`).
 3. Khởi chạy **Parent Chain** trên cổng `:8547` và kiểm tra HTTP RPC sẵn sàng.
-4. Khởi chạy **Exec Cluster 1** (`:8646`) và **Exec Cluster 2** (`:8647`) với `cluster_id: 1, 2` và `chainId: 991`.
+4. Khởi chạy **Exec Cluster 1** (`:8646`, ChainID `991`) và **Exec Cluster 2** (`:8647`, ChainID `991`).
 5. Gửi thông báo ✅ **Dịch Vụ Sẵn Sàng** lên Telegram (kèm block heights và ports).
 6. Tự động thực thi **Bộ kiểm thử tích hợp 5 kịch bản thực tế**:
    - *Kịch bản 1:* Đăng ký tài khoản mới & ánh xạ vào Account Registry trên Parent Chain.
@@ -132,3 +155,15 @@ exec_clusters:
 ./deploy_clusters.sh --setup --systemd --env=production --vault-password-file .vault_pass
 ```
 Mỗi server sẽ tự động tạo systemd service riêng (`metanode-parentchain.service`, `metanode-cluster-1.service`, `metanode-cluster-2.service`) với cấu hình tự khởi động lại (`Restart=always`) và giới hạn file descriptors cao (`LimitNOFILE=65536`).
+
+## Firewall (UFW) — opt-in và giới hạn nguồn
+
+Triển khai bình thường (`setup`, `deploy`, `restart`, `reset`) **không** thay đổi tường lửa. Chỉ khi chạy với `--open-ports`
+(`deploy_action=open_ports`) và UFW đang bật thì role mới thêm rule:
+
+- Cổng **client** (RPC của exec, HTTP RPC của parent chain): mở cho mọi nguồn.
+- Cổng **nội bộ** (P2P, Raft, Forward của exec; peer RPC và metrics của parent chain): chỉ mở cho IP của các node khác trong
+  inventory (`exec_clusters` + `parent_chain_nodes`, bỏ `127.0.0.1`), cộng thêm danh sách `ufw_extra_sources` nếu khai báo
+  (ví dụ máy giám sát lấy metrics). Raft và Forward là kênh nội bộ giữa các node, không nên mở ra toàn mạng.
+
+Ví dụ thêm máy giám sát: `-e '{"ufw_extra_sources":["10.0.0.5"]}'`.

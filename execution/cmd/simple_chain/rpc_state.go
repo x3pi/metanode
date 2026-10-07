@@ -13,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -136,6 +137,10 @@ func (api *MetaAPI) processCallRequest(ctx context.Context, rawInput json.RawMes
 		).(*transaction.Transaction)
 
 		txM.SetReadOnly(true)
+		if len(args.AuthList) > 0 {
+			txM.SetAuthorizationList(transaction.FromEthAuthorizationList(args.AuthList))
+			txM.SetType(uint64(eth_types.SetCodeTxType))
+		}
 	}
 
 	if txM.GetNonce() == 0 {
@@ -286,11 +291,23 @@ func (api *MetaAPI) GetTransactionCount(ctx context.Context, address common.Addr
 	if err != nil {
 		return nil, err
 	}
-	if as == nil {
-		zero := hexutil.Uint64(0)
-		return &zero, nil
+	var stateNonce uint64
+	if as != nil {
+		stateNonce = as.Nonce()
 	}
-	count := hexutil.Uint64(as.Nonce())
+
+	// If block parameter is "pending", include pending mempool transactions (geth standard)
+	if blockNr, ok := blockNrOrHash.Number(); ok && blockNr == rpc.PendingBlockNumber {
+		if api.App != nil && api.App.transactionProcessor != nil {
+			if pool := api.App.transactionProcessor.GetTransactionPool(); pool != nil {
+				pendingNonce := pool.GetPendingNonce(address, stateNonce)
+				res := hexutil.Uint64(pendingNonce)
+				return &res, nil
+			}
+		}
+	}
+
+	count := hexutil.Uint64(stateNonce)
 	return &count, nil
 }
 

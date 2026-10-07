@@ -4,24 +4,39 @@
 
 - name: Check if genesis.json exists to determine if we should overwrite
   ansible.builtin.stat:
-    path: "{{ deploy_dir }}/genesis.json"
+    path: "{{ cluster_config_dir }}/genesis.json"
   register: genesis_stat
   when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
 
 - name: Fail if keys already exist and overwrite not enabled (gen_keys)
   ansible.builtin.fail:
-    msg: "Keys and genesis.json already exist at {{ deploy_dir }}. Use --overwrite to force regeneration."
+    msg: "Keys and genesis.json already exist at {{ cluster_config_dir }}. Use --overwrite to force regeneration."
   when: >
     cluster_nodes is defined and ansible_action == 'gen_keys'
     and (genesis_stat.stat.exists | default(false))
     and not (ansible_overwrite | default('false') | bool)
 
+- name: Create isolated cluster configuration directory
+  ansible.builtin.file:
+    path: "{{ cluster_config_dir }}"
+    state: directory
+    mode: '0700'
+  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
+
+- name: Seed isolated genesis template
+  ansible.builtin.copy:
+    src: "{{ deploy_dir }}/genesis.json.example"
+    dest: "{{ cluster_config_dir }}/genesis.json.example"
+    mode: '0600'
+    force: false
+  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
+
 - name: Reset validators in genesis.json on fresh setup (preserves custom alloc/accounts)
   ansible.builtin.shell: |
     python3 -c '
     import json, os
-    target = "{{ deploy_dir }}/genesis.json"
-    template = "{{ deploy_dir }}/genesis.json.example"
+    target = "{{ cluster_config_dir }}/genesis.json"
+    template = "{{ cluster_config_dir }}/genesis.json.example"
     src = target if os.path.exists(target) else template
     if os.path.exists(src):
         with open(src, "r") as f:
@@ -32,16 +47,18 @@
             f.write("\n")
     '
   args:
-    chdir: "{{ deploy_dir }}"
+    chdir: "{{ cluster_config_dir }}"
   when: >
     cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
     and (ansible_overwrite | default('false') | bool or not (genesis_stat.stat.exists | default(false)))
 
 - name: Generate Validator Keys
   ansible.builtin.shell: |
-    python3 gen_validator_entry.py \
+    python3 "{{ deploy_dir }}/gen_validator_entry.py" \
       --hostname "node-{{ item.node_id }}" \
       --node-id "{{ item.node_id }}" \
+      --chain-id "{{ chain_id | default(991) }}" \
+      --install-dir "{{ metanode_install_dir }}/node-{{ item.node_id }}" \
       --node-type "{% if item.is_synconly | default(false) %}synconly{% else %}validator{% endif %}" {% if item.is_rpc | default(false) %}--is-rpc{% endif %} {% if item.snapshot_enabled | default(false) %}--snapshot-enabled{% endif %} \
       --ip "{{ item.ip }}" \
       --total-nodes "{{ cluster_nodes | length }}" \
@@ -51,11 +68,11 @@
       --max-part-size-mb "{{ snapshot_max_part_size_mb | default(600) }}" \
       --epoch-duration-seconds "{{ epoch_duration_seconds | default(600) }}" \
       --epochs-to-keep "{{ item.epochs_to_keep | default(0) }}" \
-      --keys-dir "{{ deploy_dir }}/node-{{ item.node_id }}_keys" \
-      --output "{{ deploy_dir }}/node-{{ item.node_id }}_keys/node-{{ item.node_id }}_genesis.json" \
+      --keys-dir "{{ cluster_config_dir }}/node-{{ item.node_id }}_keys" \
+      --output "{{ cluster_config_dir }}/node-{{ item.node_id }}_keys/node-{{ item.node_id }}_genesis.json" \
       --metanode-bin "{% if ansible_use_prebuilt | default(false) | bool and ansible_prebuilt_bin_dir | default('') != '' %}{{ ansible_prebuilt_bin_dir }}/metanode{% else %}{{ deploy_dir }}/../../target/release/metanode{% endif %}"
   args:
-    chdir: "{{ deploy_dir }}"
+    chdir: "{{ cluster_config_dir }}"
   loop: "{{ cluster_nodes }}"
   when: >
     cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']

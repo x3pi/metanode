@@ -59,6 +59,7 @@ import "C"
 import (
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -280,7 +281,7 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 			} else {
 				serializeAndSetResponse(response, outPayload, outLen)
 			}
-			return C.bool(true)
+			return C.bool(response != nil && response.GetSuccess())
 		case <-time.After(executeBlockResponseTimeout):
 			logger.Error("🚨 [FFI BRIDGE] Timeout waiting for speculative execution response (GEI=%d) — treating as failure so Rust can retry instead of hanging forever", subDag.GetGlobalExecIndex())
 			serializeAndSetResponse(&pb.ExecuteBlockResponse{
@@ -427,8 +428,31 @@ func cgo_free_go_buffer(ptr *C.uint8_t) {
 	}
 }
 
+var (
+	stateRootProviderMu     sync.RWMutex
+	globalStateRootProvider func() string
+)
+
+// SetStateRootProvider allows applications (e.g. parent_chain) without SnapshotManager
+// to provide the authoritative state root for Rust consensus via cgo_get_state_root.
+func SetStateRootProvider(fn func() string) {
+	stateRootProviderMu.Lock()
+	defer stateRootProviderMu.Unlock()
+	globalStateRootProvider = fn
+}
+
 //export cgo_get_state_root
 func cgo_get_state_root() *C.char {
+	stateRootProviderMu.RLock()
+	provider := globalStateRootProvider
+	stateRootProviderMu.RUnlock()
+	if provider != nil {
+		root := provider()
+		if root != "" {
+			return C.CString(root)
+		}
+	}
+
 	sm := GetGlobalSnapshotManager()
 	if sm != nil && sm.stateRootCallback != nil {
 		root := sm.stateRootCallback()

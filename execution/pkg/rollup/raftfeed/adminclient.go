@@ -67,7 +67,7 @@ func (c *AdminClient) do(method, addr, path, rawQuery string, body []byte) (int,
 	}
 	req.Header.Set(hdrNode, c.sender())
 	req.Header.Set(hdrTs, strconv.FormatInt(ts, 10))
-	req.Header.Set(hdrMac, forwardMAC(c.Secret, c.sender(), ts, append([]byte(rawQuery), body...)))
+	req.Header.Set(hdrMac, forwardMAC(c.Secret, c.sender(), ts, path, append([]byte(rawQuery), body...)))
 	resp, err := c.client().Do(req)
 	if err != nil {
 		return 0, nil, nil, err
@@ -103,7 +103,7 @@ func (c *AdminClient) BlockHash(addr string, n uint64) (string, bool) {
 	}
 	req.Header.Set(hdrNode, c.sender())
 	req.Header.Set(hdrTs, strconv.FormatInt(ts, 10))
-	req.Header.Set(hdrMac, forwardMAC(c.Secret, c.sender(), ts, []byte(q)))
+	req.Header.Set(hdrMac, forwardMAC(c.Secret, c.sender(), ts, hashPath, []byte(q)))
 	resp, err := c.client().Do(req)
 	if err != nil {
 		return "", false
@@ -349,7 +349,17 @@ func (c *AdminClient) AddReplica(members []Member, nm Member, dryRun bool) ([]st
 	all := append(append([]Member(nil), members...), nm)
 	rep := c.Check(members)
 	if rep.Leader == "" || !rep.QuorumOK {
-		return nil, errors.New("refused: the cluster has no leader or no quorum")
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+			rep = c.Check(members)
+			if rep.Leader != "" && rep.QuorumOK {
+				break
+			}
+		}
+		if rep.Leader == "" || !rep.QuorumOK {
+			return nil, errors.New("refused: the cluster has no leader or no quorum")
+		}
 	}
 	lm, _ := rep.leaderMember(members)
 	ls := rep.replica(rep.Leader).Status
@@ -456,7 +466,17 @@ func (c *AdminClient) sameChainAt(all []Member, lm, nm Member, ns Status) error 
 func (c *AdminClient) RemoveReplica(members []Member, id string, transferFirst, dryRun bool) ([]string, error) {
 	rep := c.Check(members)
 	if rep.Leader == "" {
-		return nil, errors.New("refused: no leader")
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+			rep = c.Check(members)
+			if rep.Leader != "" {
+				break
+			}
+		}
+		if rep.Leader == "" {
+			return nil, errors.New("refused: no leader")
+		}
 	}
 	var infos []ServerInfo
 	live := map[string]bool{}

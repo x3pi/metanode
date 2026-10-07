@@ -10,15 +10,17 @@ import (
 )
 
 type mockAccountStateDB struct {
-	mu       sync.Mutex
-	balances map[common.Address]*big.Int
-	nonces   map[common.Address]uint64
+	mu        sync.Mutex
+	balances  map[common.Address]*big.Int
+	nonces    map[common.Address]uint64
+	parentReg map[common.Address]bool
 }
 
 func newMockAccountStateDB() *mockAccountStateDB {
 	return &mockAccountStateDB{
-		balances: make(map[common.Address]*big.Int),
-		nonces:   make(map[common.Address]uint64),
+		balances:  make(map[common.Address]*big.Int),
+		nonces:    make(map[common.Address]uint64),
+		parentReg: make(map[common.Address]bool),
 	}
 }
 
@@ -68,6 +70,24 @@ func (m *mockAccountStateDB) SetNonce(addr common.Address, nonce uint64) {
 	m.nonces[addr] = nonce
 }
 
+func (m *mockAccountStateDB) GetParentRegistered(addr common.Address) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.parentReg == nil {
+		return false
+	}
+	return m.parentReg[addr]
+}
+
+func (m *mockAccountStateDB) SetParentRegistered(addr common.Address, registered bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.parentReg == nil {
+		m.parentReg = make(map[common.Address]bool)
+	}
+	m.parentReg[addr] = registered
+}
+
 func TestCrossNodeHandler(t *testing.T) {
 	scDB := &mockDB{data: make(map[common.Address]map[common.Hash][]byte)}
 	store := NewDBStore(scDB)
@@ -95,9 +115,10 @@ func TestCrossNodeHandler(t *testing.T) {
 		t.Fatalf("Expected success, got: %v", err)
 	}
 
-	// Verify balance deducted
-	if stateDB.GetBalance(sender).Cmp(big.NewInt(500)) != 0 {
-		t.Errorf("Expected balance 500, got %v", stateDB.GetBalance(sender))
+	// Verify balance deducted: value (500) AND the transfer fee (100), the same total the Parent Chain removes from the
+	// cluster's float.
+	if stateDB.GetBalance(sender).Cmp(big.NewInt(400)) != 0 {
+		t.Errorf("Expected balance 400 (1000 - 500 value - 100 fee), got %v", stateDB.GetBalance(sender))
 	}
 
 	// Verify nonce incremented
@@ -161,7 +182,7 @@ func TestCrossNodeHandler_NilBalanceHandling(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Expected error when balance is nil/zero, got success with msgID: %v", msgID)
 	}
-	if err.Error() != "insufficient balance: have 0, need 500" {
+	if err.Error() != "insufficient balance: have 0, need 600 (value 500 + fee 100)" {
 		t.Errorf("Unexpected error message: %v", err)
 	}
 }

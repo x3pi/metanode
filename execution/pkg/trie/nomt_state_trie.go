@@ -64,13 +64,47 @@ import (
 //   - Only one writer (block processor) calls Update/BatchUpdate/Commit
 // ═══════════════════════════════════════════════════════════════════════════════
 
+type NomtPersistenceState uint32
+
+const (
+	NomtPersistencePending NomtPersistenceState = iota
+	NomtPersistenceDurable
+	NomtPersistenceFailed
+)
+
+type NomtPersistenceTicket struct {
+	state atomic.Uint32
+}
+
+func NewNomtPersistenceTicket() *NomtPersistenceTicket {
+	t := &NomtPersistenceTicket{}
+	t.state.Store(uint32(NomtPersistencePending))
+	return t
+}
+
+func (t *NomtPersistenceTicket) State() NomtPersistenceState {
+	if t == nil {
+		return NomtPersistenceDurable
+	}
+	return NomtPersistenceState(t.state.Load())
+}
+
+func (t *NomtPersistenceTicket) SetState(s NomtPersistenceState) {
+	if t != nil {
+		// Terminal state machine: only transition from Pending to target state (Durable or Failed).
+		// Once in a terminal state, it cannot be changed.
+		t.state.CompareAndSwap(uint32(NomtPersistencePending), uint32(s))
+	}
+}
+
 // nomtReadView is an immutable snapshot of trie state for lock-free readers.
 // Once stored via atomic.Pointer.Store(), the maps inside MUST NOT be mutated.
 // Readers call atomic.Pointer.Load() (~1ns) to get a consistent view.
 type nomtReadView struct {
-	dirty      map[string]*nomtDirtyEntry // uncommitted changes (current block)
-	committing map[string]*nomtDirtyEntry // being flushed to disk (previous block)
-	rootHash   e_common.Hash              // last committed NOMT root
+	dirty        map[string]*nomtDirtyEntry // uncommitted changes (current block)
+	committing   map[string]*nomtDirtyEntry // being flushed to disk (previous block)
+	commitTicket *NomtPersistenceTicket     // shared persistence ticket across clones
+	rootHash     e_common.Hash              // last committed NOMT root
 }
 
 // NomtStateTrie implements StateTrie using NOMT as the backing store.
@@ -105,6 +139,7 @@ type NomtStateTrie struct {
 	sessionInitMu          sync.Mutex // Serializes session creation FFI
 	activeSession          *nomt_ffi.Session
 	pendingFinishedSession *nomt_ffi.FinishedSession
+	pendingCommitTicket    *NomtPersistenceTicket
 
 	// pendingChangelog holds changelog entries generated during Commit
 	// to be asynchronously flushed to disk during CommitPayload
@@ -511,12 +546,44 @@ func NewNomtStateTrie(handle *nomt_ffi.Handle, isHash bool, namespace string) *N
 
 // publishReadView atomically publishes a new immutable snapshot for lock-free readers.
 // The maps passed in MUST NOT be mutated after this call.
-func (n *NomtStateTrie) publishReadView(dirty, committing map[string]*nomtDirtyEntry, rootHash e_common.Hash) {
+func (n *NomtStateTrie) publishReadView(dirty, committing map[string]*nomtDirtyEntry, rootHash e_common.Hash, ticket ...*NomtPersistenceTicket) {
+	var t *NomtPersistenceTicket
+	if len(ticket) > 0 && ticket[0] != nil {
+		t = ticket[0]
+	} else if committing != nil {
+		if cur := n.loadReadView(); cur != nil {
+			t = cur.commitTicket
+		}
+	}
 	n.readView.Store(&nomtReadView{
-		dirty:      dirty,
-		committing: committing,
-		rootHash:   rootHash,
+		dirty:        dirty,
+		committing:   committing,
+		commitTicket: t,
+		rootHash:     rootHash,
 	})
+}
+
+// CanEvict implements EvictableStateTrie for NomtStateTrie.
+// It verifies that there are no uncommitted changes in memory and that all
+// committing data has been made durable on disk via its persistence ticket.
+func (n *NomtStateTrie) CanEvict() bool {
+	if n == nil {
+		return true
+	}
+	if n.HasUnbatchedChanges() {
+		return false
+	}
+	view := n.loadReadView()
+	if view == nil {
+		return true
+	}
+	if view.commitTicket != nil && view.commitTicket.State() != NomtPersistenceDurable {
+		return false
+	}
+	if len(view.committing) > 0 && view.commitTicket == nil {
+		return false
+	}
+	return true
 }
 
 // loadReadView returns the current read view for lock-free access. ~1ns cost.
@@ -1500,6 +1567,11 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		}
 	}
 
+	// Wait for any in-flight background commit (CommitAsync) to finish persisting
+	// before opening a new NOMT write session. NOMT panics (self.secondary_staging.is_none())
+	// if a new session finishes while secondary_staging is still being committed by beatree.
+	n.commitWg.Wait()
+
 	t0 := time.Now()
 	session := nomt_ffi.BeginSession(n.handle)
 	if session == nil {
@@ -1647,7 +1719,13 @@ func (n *NomtStateTrie) AbortPending() {
 	n.pendingChangelog = nil
 	n.pendingChangelogBlock = 0
 	n.pendingCommittingMap = nil
+	ticket := n.pendingCommitTicket
+	n.pendingCommitTicket = nil
 	n.sessionMu.Unlock()
+
+	if ticket != nil {
+		ticket.SetState(NomtPersistenceFailed)
+	}
 
 	if active != nil {
 		active.Abort()
@@ -1727,9 +1805,10 @@ func (n *NomtStateTrie) Copy() StateTrie {
 		changelogDB:       lockedChangelogDB,
 	}
 	t.readView.Store(&nomtReadView{
-		dirty:      newDirty,
-		committing: newCommitting,
-		rootHash:   view.rootHash,
+		dirty:        newDirty,
+		committing:   newCommitting,
+		commitTicket: view.commitTicket,
+		rootHash:     view.rootHash,
 	})
 	return t
 }
@@ -1742,36 +1821,59 @@ func (n *NomtStateTrie) CommitPayload() error {
 	blockNum := n.pendingChangelogBlock
 	n.pendingChangelog = nil
 	n.pendingChangelogBlock = 0
+	ticket := n.pendingCommitTicket
+	n.pendingCommitTicket = nil
 	n.sessionMu.Unlock()
 
 	if fs == nil && len(changes) == 0 {
+		view := n.loadReadView()
+		if view != nil && len(view.committing) > 0 {
+			if ticket != nil {
+				ticket.SetState(NomtPersistenceFailed)
+			}
+			return fmt.Errorf("cannot commit payload: committing overlay is present but finished session is nil (session aborted)")
+		}
+		if ticket != nil {
+			ticket.SetState(NomtPersistenceDurable)
+		}
 		return nil
 	}
 
+	var commitErr error
 	if fs != nil {
 		n.handle.LockCommitPayload()
 		err := fs.CommitPayload(n.handle)
 		n.handle.UnlockCommitPayload()
 
 		if err != nil {
-			return err
-		}
-
-		if string(n.namespace) == "account_state" && blockNum > 0 {
+			commitErr = err
+		} else if string(n.namespace) == "account_state" && blockNum > 0 {
 			storage.UpdateLastNomtCommittedBlock(blockNum)
 		}
 	}
 
-	if n.changelogDB != nil && len(changes) > 0 {
+	if commitErr == nil && n.changelogDB != nil && len(changes) > 0 {
 		if err := n.changelogDB.WriteBlockChanges(blockNum, changes); err != nil {
 			logger.Error("❌ [CommitPayload] Failed to write changelog (namespace=%s): %v", string(n.namespace), err)
-			return err
+			commitErr = err
 		}
+	}
+
+	if commitErr != nil {
+		if ticket != nil {
+			ticket.SetState(NomtPersistenceFailed)
+		}
+		n.setAsyncError(commitErr)
+		return commitErr
+	}
+
+	if ticket != nil {
+		ticket.SetState(NomtPersistenceDurable)
 	}
 
 	n.writerMu.Lock()
 	view := n.loadReadView()
-	n.publishReadView(view.dirty, nil, view.rootHash)
+	n.publishReadView(view.dirty, nil, view.rootHash, ticket)
 	n.writerMu.Unlock()
 
 	return nil
@@ -1783,6 +1885,7 @@ type NomtPayload struct {
 	doneOnce        sync.Once
 	changes         []state_changelog.StateChange
 	blockNum        uint64
+	commitTicket    *NomtPersistenceTicket
 }
 
 func (p *NomtPayload) SetBlockNumber(blockNum uint64) {
@@ -1801,6 +1904,9 @@ func (p *NomtPayload) Discard() {
 				p.finishedSession = nil
 			}
 			p.changes = nil
+			if p.commitTicket != nil {
+				p.commitTicket.SetState(NomtPersistenceFailed)
+			}
 			p.trie.commitWg.Done()
 		})
 	}
@@ -1814,9 +1920,21 @@ func (n *NomtStateTrie) ExtractPendingPayload() *NomtPayload {
 	blockNum := n.pendingChangelogBlock
 	n.pendingChangelog = nil
 	n.pendingChangelogBlock = 0
+	ticket := n.pendingCommitTicket
+	n.pendingCommitTicket = nil
 	n.sessionMu.Unlock()
 
 	if fs == nil && len(changes) == 0 {
+		view := n.loadReadView()
+		if view != nil && len(view.committing) > 0 {
+			if ticket != nil {
+				ticket.SetState(NomtPersistenceFailed)
+			}
+			return nil
+		}
+		if ticket != nil {
+			ticket.SetState(NomtPersistenceDurable)
+		}
 		return nil
 	}
 
@@ -1826,6 +1944,7 @@ func (n *NomtStateTrie) ExtractPendingPayload() *NomtPayload {
 		finishedSession: fs,
 		changes:         changes,
 		blockNum:        blockNum,
+		commitTicket:    ticket,
 	}
 }
 
@@ -1846,37 +1965,54 @@ func (p *NomtPayload) CommitAsync() {
 	if p == nil {
 		return
 	}
-	go func() {
-		defer p.doneOnce.Do(func() {
-			p.trie.commitWg.Done()
-		})
+	p.doneOnce.Do(func() {
+		go func() {
+			defer p.trie.commitWg.Done()
 
-		if p.finishedSession != nil {
-			p.trie.handle.LockCommitPayload()
-			err := p.finishedSession.CommitPayload(p.trie.handle)
-			p.trie.handle.UnlockCommitPayload()
+			var commitErr error
+			if p.finishedSession != nil {
+				p.trie.handle.LockCommitPayload()
+				err := p.finishedSession.CommitPayload(p.trie.handle)
+				p.trie.handle.UnlockCommitPayload()
+				p.finishedSession = nil
 
-			if err != nil {
-				p.trie.setAsyncError(err)
-				logger.Error("❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: %v", err)
-			} else {
-				logger.Debug("[NOMT-ASYNC-COMMIT] Successfully committed NOMT payload asynchronously")
+				if err != nil {
+					commitErr = err
+					p.trie.setAsyncError(err)
+					logger.Error("❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: %v", err)
+				} else {
+					logger.Debug("[NOMT-ASYNC-COMMIT] Successfully committed NOMT payload asynchronously")
+				}
 			}
-		}
 
-		if p.trie.changelogDB != nil && len(p.changes) > 0 {
-			if err := p.trie.changelogDB.WriteBlockChanges(p.blockNum, p.changes); err != nil {
-				logger.Error("❌ [NOMT-ASYNC-COMMIT] Failed to write changelog (namespace=%s): %v", string(p.trie.namespace), err)
+			if commitErr == nil && p.trie.changelogDB != nil && len(p.changes) > 0 {
+				if err := p.trie.changelogDB.WriteBlockChanges(p.blockNum, p.changes); err != nil {
+					commitErr = err
+					p.trie.setAsyncError(err)
+					logger.Error("❌ [NOMT-ASYNC-COMMIT] Failed to write changelog (namespace=%s): %v", string(p.trie.namespace), err)
+				}
+				p.changes = nil
 			}
-			p.changes = nil
-		}
 
-		// Clear committing from readView since data is now on disk
-		p.trie.writerMu.Lock()
-		view := p.trie.loadReadView()
-		p.trie.publishReadView(view.dirty, nil, view.rootHash)
-		p.trie.writerMu.Unlock()
-	}()
+			if commitErr != nil {
+				if p.commitTicket != nil {
+					p.commitTicket.SetState(NomtPersistenceFailed)
+				}
+				// CRITICAL FAIL-CLOSED FIX: Do NOT clear committing when persistence fails!
+				return
+			}
+
+			if p.commitTicket != nil {
+				p.commitTicket.SetState(NomtPersistenceDurable)
+			}
+
+			// Clear committing from readView since data is now on disk
+			p.trie.writerMu.Lock()
+			view := p.trie.loadReadView()
+			p.trie.publishReadView(view.dirty, nil, view.rootHash, p.commitTicket)
+			p.trie.writerMu.Unlock()
+		}()
+	})
 }
 
 func (n *NomtStateTrie) CommitPayloadAsync() {}
@@ -2157,7 +2293,7 @@ func (n *NomtStateTrie) ExportDirty() NomtDirtyState {
 }
 
 // ClearDirty clears the writer buffers and publishes a new read view.
-func (n *NomtStateTrie) ClearDirty(newRoot e_common.Hash) {
+func (n *NomtStateTrie) ClearDirty(newRoot e_common.Hash, ticket ...*NomtPersistenceTicket) {
 	n.writerMu.Lock()
 	defer n.writerMu.Unlock()
 
@@ -2172,10 +2308,23 @@ func (n *NomtStateTrie) ClearDirty(newRoot e_common.Hash) {
 	// contract-storage write.
 	n.lastCommitBatch = nomtReplicationBatch(committingSnapshot)
 
+	var t *NomtPersistenceTicket
+	if len(ticket) > 0 && ticket[0] != nil {
+		t = ticket[0]
+	} else if len(committingSnapshot) > 0 {
+		t = NewNomtPersistenceTicket()
+		n.sessionMu.Lock()
+		if n.pendingCommitTicket == nil {
+			n.pendingCommitTicket = t
+		}
+		n.sessionMu.Unlock()
+	}
+
 	n.publishReadView(
 		make(map[string]*nomtDirtyEntry),
 		committingSnapshot, // keep in readView until asynchronously committed
 		newRoot,
+		t,
 	)
 }
 
@@ -2322,4 +2471,11 @@ func (n *NomtStateTrie) SetPendingChangelog(changes []state_changelog.StateChang
 	defer n.sessionMu.Unlock()
 	n.pendingChangelog = changes
 	n.pendingChangelogBlock = blockNum
+}
+
+// SetPendingCommitTicket sets the pending persistence ticket for the trie.
+func (n *NomtStateTrie) SetPendingCommitTicket(ticket *NomtPersistenceTicket) {
+	n.sessionMu.Lock()
+	defer n.sessionMu.Unlock()
+	n.pendingCommitTicket = ticket
 }

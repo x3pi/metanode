@@ -5,6 +5,7 @@ package processor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -245,6 +246,39 @@ func (vp *TxValidatorPool) GetExcludedItemsCount() int {
 	return len(vp.excludedItems)
 }
 
+// checkSecpProtoIngress applies the node-local admission rules of Type 0xFF (secp256k1 proto) transactions:
+// the signed ChainID must be this node's chain (anti cross-chain replay) and the BLS Sign field must be empty.
+// Shared by the single and batch ingress paths so both enforce the same rules. Signature validity itself is
+// checked by tx_processor.VerifyTransaction.
+func (vp *TxValidatorPool) checkSecpProtoIngress(tx types.Transaction) (int64, error) {
+	if tx.Type() != 0xFF {
+		return 0, nil
+	}
+	cfg := vp.chainState.GetConfig()
+	if !cfg.SecpOnlyTxSignatures() {
+		return transaction.InvalidSign.Code, fmt.Errorf("transaction type 0xFF is disabled on this chain")
+	}
+	nodeChainID := cfg.ChainId
+	if nodeChainID == nil || nodeChainID.Sign() <= 0 {
+		return transaction.InvalidChainId.Code, fmt.Errorf("node chain ID is not configured: cannot accept type 0xFF transactions")
+	}
+	if tx.GetChainID() != nodeChainID.Uint64() {
+		return transaction.InvalidChainId.Code, fmt.Errorf("transaction chain ID (%d) does not match node chain ID (%d)", tx.GetChainID(), nodeChainID.Uint64())
+	}
+	if len(tx.SignBytes()) != 0 {
+		return transaction.InvalidSign.Code, fmt.Errorf("transaction type 0xFF must not contain Sign bytes")
+	}
+	return 0, nil
+}
+
+// GetTransactionPool returns the underlying mempool transaction pool.
+func (vp *TxValidatorPool) GetTransactionPool() *transaction_pool.TransactionPool {
+	if vp == nil {
+		return nil
+	}
+	return vp.transactionPool
+}
+
 // AddTransactionToPool validates and adds a transaction to the pool
 func (vp *TxValidatorPool) AddTransactionToPool(tx types.Transaction) (int64, error) {
 	return vp.addTransactionToPoolInternal(tx, false)
@@ -268,7 +302,9 @@ func (vp *TxValidatorPool) AddVerifiedTransactionsToPool(txs []types.Transaction
 
 // addTransactionToPoolInternal handles the core logic with an option to skip expensive verification
 func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, skipVerification bool) (int64, error) {
-
+	if vp == nil {
+		return transaction.InvalidTransaction.Code, fmt.Errorf("TxValidatorPool is nil")
+	}
 	if tx == nil {
 		return transaction.InvalidTransaction.Code, fmt.Errorf("tx nil")
 	}
@@ -276,6 +312,10 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 	minGasPrice := vp.chainState.GetConfig().MinGasPrice
 	if minGasPrice > 0 && tx.MaxGasPrice() < minGasPrice {
 		return transaction.InvalidTransaction.Code, fmt.Errorf("transaction gas price (%d) is below node minimum (%d)", tx.MaxGasPrice(), minGasPrice)
+	}
+
+	if code, err := vp.checkSecpProtoIngress(tx); err != nil {
+		return code, err
 	}
 
 	// Limit pool size to prevent GC stall / OOM.
@@ -338,13 +378,17 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 	if !skipVerification {
 		if err := tx_processor.VerifyTransaction(tx, vp.chainState, as); err != nil {
 			logger.Error("Transaction verification failed: %v", err)
-			return transaction.VerifyTransactionError.Code, fmt.Errorf(err.Description)
+			return err.Code, err
 		}
 	}
 
 	err := vp.transactionPool.AddTransaction(tx)
 	if err != nil {
 		logger.Error("❌ [TX FLOW] Failed to add transaction to pool: %v", err)
+		var te *transaction.TransactionError
+		if errors.As(err, &te) {
+			return te.Code, err
+		}
 		return transaction.AddToPoolError.Code, fmt.Errorf("failed to add transaction %s to pool: %w", tx.Hash().Hex(), err)
 	}
 
@@ -371,6 +415,13 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 // It verifies them individually but adds them to the pool and pending manager in bulk
 // to minimize lock contention.
 func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction, skipVerification bool) []error {
+	if vp == nil {
+		errs := make([]error, len(txs))
+		for i := range errs {
+			errs[i] = fmt.Errorf("TxValidatorPool is nil")
+		}
+		return errs
+	}
 	// Disabled vp_debug.log writing in hot-path for performance
 
 	if len(txs) == 0 {
@@ -421,6 +472,14 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	t0 := time.Now()
 	var validTxs []types.Transaction
 	var errorsList = make([]error, len(txs))
+	for i, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		if code, err := vp.checkSecpProtoIngress(tx); err != nil {
+			errorsList[i] = fmt.Errorf("[code:%d] %s", code, err.Error())
+		}
+	}
 
 	// Phase 1.5 (TPS Optimization): Batch Cache Warming
 	// Collect unique addresses to fetch in parallel without blocking muTrie.Lock
@@ -496,6 +555,10 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	// PERF: Cap workers at numCPU/2 (max 48) to reduce sync.Map contention on
 	// verifiedSignaturesCache. 104 goroutines cause excessive cache-line bouncing.
 	if !skipVerification {
+		// Batch-verify all BLS signatures first (blst random-linear-combination, ~2-3x cheaper CPU per
+		// signature than one-by-one) so the per-tx VerifyTransaction calls below hit the warm cache.
+		tx_processor.PrewarmSignatureCache(vp.chainState, txs, senderStates)
+
 		// GOMAXPROCS(0), not NumCPU(): see native_fast_path.go for why.
 		numWorkers := runtime.GOMAXPROCS(0) / 2
 		if numWorkers < 4 {
@@ -521,7 +584,7 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 			go func(s, e int) {
 				defer wg.Done()
 				for i := s; i < e; i++ {
-					if txs[i] == nil {
+					if txs[i] == nil || errorsList[i] != nil {
 						continue
 					}
 					if minGasPrice > 0 && txs[i].MaxGasPrice() < minGasPrice {
@@ -533,7 +596,7 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 						senderState = senderStates[txs[i].FromAddress()]
 					}
 					if err := tx_processor.VerifyTransaction(txs[i], vp.chainState, senderState); err != nil {
-						errorsList[i] = fmt.Errorf("[code:%d] %s", err.Code, err.Description)
+						errorsList[i] = fmt.Errorf("[code:%d] %w", err.Code, err)
 					}
 				}
 			}(start, end)

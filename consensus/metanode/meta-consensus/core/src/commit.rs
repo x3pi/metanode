@@ -238,6 +238,30 @@ impl TrustedCommit {
         Self::new_trusted(commit, serialized)
     }
 
+    /// Construct a synthetic baseline commit whose digest matches the actual network digest.
+    /// This is used when restoring from snapshot or fast-forwarding to avoid divergent commit digests.
+    pub(crate) fn new_synthetic_baseline(
+        index: CommitIndex,
+        digest: CommitDigest,
+        round: Round,
+        timestamp_ms: BlockTimestampMs,
+    ) -> Self {
+        let commit = Commit::new(
+            index,
+            CommitDigest::MIN,
+            timestamp_ms,
+            BlockRef::new(round, AuthorityIndex::ZERO, consensus_types::block::BlockDigest::MIN),
+            vec![],
+            index as u64,
+        );
+        let serialized = commit.serialize().unwrap();
+        Self {
+            inner: Arc::new(commit),
+            digest,
+            serialized,
+        }
+    }
+
     pub(crate) fn reference(&self) -> CommitRef {
         CommitRef {
             index: self.index(),
@@ -338,6 +362,12 @@ impl CommitDigest {
 impl Hash for CommitDigest {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write(&self.0[..8]);
+    }
+}
+
+impl From<[u8; consensus_config::DIGEST_LENGTH]> for CommitDigest {
+    fn from(bytes: [u8; consensus_config::DIGEST_LENGTH]) -> Self {
+        Self(bytes)
     }
 }
 

@@ -1,45 +1,34 @@
 package processor
 
 import (
-	"encoding/json"
-	"fmt"
 	"log"
 	"time"
 
 	"github.com/meta-node-blockchain/meta-node/executor"
-	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"google.golang.org/protobuf/proto"
 )
 
 const maxTxPerBatch = 2000
 
-// TxBatcher collects ParentChainTxs from RPC, batches them, and submits them to Rust consensus.
+// TxBatcher collects signed transactions accepted by the RPC ingress, batches them, and submits them to the
+// Rust consensus core. Ordering and execution happen after consensus, identically on every validator.
 type TxBatcher struct {
-	txChan chan *parentchain.ParentChainTx
+	txChan chan *pb.Transaction
 	stop   chan struct{}
 }
 
+// NewTxBatcher creates a batcher whose ingress queue holds at most queueSize transactions.
 func NewTxBatcher(queueSize int) *TxBatcher {
 	return &TxBatcher{
-		txChan: make(chan *parentchain.ParentChainTx, queueSize),
+		txChan: make(chan *pb.Transaction, queueSize),
 		stop:   make(chan struct{}),
 	}
 }
 
-// Chan returns the channel HTTPServer writes accepted txs into directly, so app.go can wire
-// the two together without exposing the unexported field itself.
-func (tb *TxBatcher) Chan() chan *parentchain.ParentChainTx {
+// Chan returns the bounded channel the HTTP server pushes accepted transactions into.
+func (tb *TxBatcher) Chan() chan *pb.Transaction {
 	return tb.txChan
-}
-
-func (tb *TxBatcher) SubmitTx(tx *parentchain.ParentChainTx) error {
-	select {
-	case tb.txChan <- tx:
-		return nil
-	default:
-		return fmt.Errorf("parent chain tx queue is full")
-	}
 }
 
 func (tb *TxBatcher) Start() {
@@ -54,60 +43,43 @@ func (tb *TxBatcher) batchingLoop() {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	var pending []*parentchain.ParentChainTx
+	var pending []*pb.Transaction
+	flush := func() {
+		if len(pending) > 0 {
+			tb.submitBatch(pending)
+			pending = nil
+		}
+	}
 
 	for {
 		select {
 		case <-tb.stop:
 			return
 		case tx := <-tb.txChan:
-			pending = append(pending, tx)
-		drainLoop:
+			if tx != nil {
+				pending = append(pending, tx)
+			}
+		drain:
 			for len(pending) < maxTxPerBatch {
 				select {
 				case extra := <-tb.txChan:
-					pending = append(pending, extra)
+					if extra != nil {
+						pending = append(pending, extra)
+					}
 				default:
-					break drainLoop
+					break drain
 				}
 			}
-			tb.submitBatch(pending)
-			pending = nil
+			flush()
 		case <-ticker.C:
-			if len(pending) > 0 {
-				tb.submitBatch(pending)
-				pending = nil
-			}
+			flush()
 		}
 	}
 }
 
-func (tb *TxBatcher) submitBatch(txs []*parentchain.ParentChainTx) {
-	if len(txs) == 0 {
-		return
-	}
-
-	// We wrap the marshaled ParentChainTxs into pb.Transactions so that Rust consensus
-	// (tx_socket_server.rs) can parse it properly using prost::encoding::decode_varint.
+func (tb *TxBatcher) submitBatch(txs []*pb.Transaction) {
 	var batch pb.Transactions
-	for _, tx := range txs {
-		raw, err := json.Marshal(tx)
-		if err != nil {
-			log.Printf("Failed to marshal ParentChainTx: %v", err)
-			continue
-		}
-		// In Metanode, pb.Transactions is a list of raw bytes in protobuf encoding.
-		// Actually, pb.Transactions is repeated pb.Transaction. We need to create a pb.Transaction
-		// or just append to Transactions. Let's look at how MarshalTransactions works.
-		// To match transaction.MarshalTransactions, we wrap it in pb.Transaction.
-		batch.Transactions = append(batch.Transactions, &pb.Transaction{
-			Data: raw, // We put the raw JSON in Data field, which Rust consensus extracts
-		})
-	}
-
-	if len(batch.Transactions) == 0 {
-		return
-	}
+	batch.Transactions = txs
 
 	batchBytes, err := proto.Marshal(&batch)
 	if err != nil {
@@ -115,11 +87,13 @@ func (tb *TxBatcher) submitBatch(txs []*parentchain.ParentChainTx) {
 		return
 	}
 
-	// Submit to Rust consensus core
-	success := executor.SubmitTransactionBatch(batchBytes)
-	if !success {
-		log.Printf("Warning: SubmitTransactionBatch returned false for %d txs", len(batch.Transactions))
-		// In a real implementation we might requeue, but for Parent Chain we just log.
-		// Bounded wait logic in Rust handles retry.
+	// Rust returns false when its bounded FFI channel is full: keep the batch and retry (never drop an accepted
+	// tx). While we retry the bounded ingress queue fills and the RPC answers 503, which is the backpressure.
+	for !executor.SubmitTransactionBatch(batchBytes) {
+		select {
+		case <-tb.stop:
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }

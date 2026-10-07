@@ -4,6 +4,105 @@ import os
 import re
 import subprocess
 import json
+import fcntl
+import tempfile
+
+def inventory_export_namespace(file_path):
+    content, err, _ = load_inventory_content(file_path)
+    if err or not content:
+        return "root"
+    match = re.search(r'^\s*rpc_export_namespace:\s*["\']?([^\s#"\']+)', content, re.MULTILINE)
+    return match.group(1) if match else "root"
+
+
+def write_json_atomic(target_path, data, mode=0o600):
+    os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
+    lock_path = f"{target_path}.lock"
+    with open(lock_path, 'a', encoding='utf-8') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                                             dir=os.path.dirname(os.path.abspath(target_path)),
+                                             delete=False) as f:
+                tmp_path = f.name
+                json.dump(data, f, indent=2)
+            os.chmod(tmp_path, mode)
+            os.replace(tmp_path, target_path)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+
+def merge_and_save_rpc_nodes(target_file, public_nodes, namespace="root"):
+    os.makedirs(os.path.dirname(os.path.abspath(target_file)), exist_ok=True)
+    lock_file = f"{target_file}.lock"
+    with open(lock_file, 'a', encoding='utf-8') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        existing = {}
+        if os.path.isfile(target_file):
+            try:
+                with open(target_file, encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content:
+                        existing = json.loads(content)
+            except Exception:
+                existing = {}
+
+        if namespace and namespace != "root":
+            # If the file already has cluster info (e.g., shared with deploy_clusters),
+            # store under public_chains[namespace] to preserve all cluster endpoints.
+            is_shared = any(k in existing for k in ('private_chains', 'parent_nodes', 'parent', 'raft_nodes', 'forward_nodes', 'public_chains'))
+            if is_shared:
+                public_chains = dict(existing.get("public_chains", {}))
+                public_chains[namespace] = public_nodes
+                existing["public_chains"] = public_chains
+                out = existing
+            else:
+                out = dict(existing)
+                out.update(public_nodes)
+        else:
+            out = dict(existing)
+            for name, nodes in public_nodes.items():
+                if isinstance(nodes, dict):
+                    merged = {k: v for k, v in existing.get(name, {}).items()
+                              if not re.fullmatch(r'm[0-9]+', k)}
+                    merged.update(nodes)
+                    out[name] = merged
+                else:
+                    out[name] = nodes
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                                             dir=os.path.dirname(os.path.abspath(target_file)),
+                                             delete=False) as f:
+                tmp_path = f.name
+                json.dump(out, f, indent=2)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, target_file)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+
+def export_rpc_nodes(public_nodes, file_path=None, namespace="root"):
+    if not file_path:
+        file_path = os.environ.get("RPC_NODES_JSON_FILE", "/tmp/rpc_nodes.json")
+
+    # 1. If namespace != "root", write directly to dedicated namespace file
+    if namespace and namespace != "root":
+        ns_file = f"/tmp/rpc_nodes.{namespace}.json"
+        write_json_atomic(ns_file, public_nodes)
+
+    # 2. Merge into the requested file_path
+    if file_path and file_path != f"/tmp/rpc_nodes.{namespace}.json":
+        merge_and_save_rpc_nodes(file_path, public_nodes, namespace=namespace)
+
+    # 3. Always maintain /tmp/rpc_nodes.json for global network topology
+    if file_path != "/tmp/rpc_nodes.json":
+        merge_and_save_rpc_nodes("/tmp/rpc_nodes.json", public_nodes, namespace=namespace)
+
 
 def get_local_ips():
     ips = {'127.0.0.1', 'localhost', '::1'}
@@ -474,7 +573,7 @@ def check_reachability(inv_file, target_node='all', timeout=2.0):
 
 if __name__ == '__main__':
     if len(sys.argv) < 3:
-        print("Usage: parse_inventory.py <inventory_file> <target_node|roles|json|check_reachability> [target_node]")
+        print("Usage: parse_inventory.py <inventory_file> <target_node|roles|json|export|check_reachability> [target_node]")
         sys.exit(1)
         
     inv_file = sys.argv[1]
@@ -495,7 +594,7 @@ if __name__ == '__main__':
         
     node_map, is_synconly_map, is_rpc_map, ssh_user_map, ssh_key_map = result
         
-    if target == 'json':
+    if target in ('json', 'export'):
         out = {
             "nodes": {},
             "roles": {},
@@ -523,6 +622,11 @@ if __name__ == '__main__':
                 "user": ssh_user_map.get(nid, "abc"),
                 "key": ssh_key_map.get(nid, "")
             }
+        if target == 'export':
+            custom_target = None
+            if len(sys.argv) > 3 and not sys.argv[3].startswith('-'):
+                custom_target = sys.argv[3]
+            export_rpc_nodes(out, file_path=custom_target, namespace=inventory_export_namespace(inv_file))
         print(json.dumps(out, indent=2))
         sys.exit(0)
 

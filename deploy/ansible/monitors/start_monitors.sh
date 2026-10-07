@@ -5,8 +5,42 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Each independent chain gets its own config, logs and PID files. The root
+# monitor keeps the historical paths for backward compatibility.
+MONITOR_NAMESPACE="${MONITOR_NAMESPACE:-root}"
+NO_VOTE_MONITOR="${NO_VOTE_MONITOR:-false}"
+CUSTOM_RPC_JSON_PATH="${RPC_JSON_PATH:-}"
+
+for ((arg_index=1; arg_index<=$#; arg_index++)); do
+    arg_value="${!arg_index}"
+    if [ "$arg_value" = "--namespace" ]; then
+        next_index=$((arg_index + 1))
+        MONITOR_NAMESPACE="${!next_index:-root}"
+    elif [[ "$arg_value" == --namespace=* ]]; then
+        MONITOR_NAMESPACE="${arg_value#--namespace=}"
+    elif [ "$arg_value" = "--no-vote" ] || [ "$arg_value" = "--no-votes" ] || [ "$arg_value" = "--skip-vote" ] || [ "$arg_value" = "--raft" ]; then
+        NO_VOTE_MONITOR="true"
+    elif [ "$arg_value" = "--config" ] || [ "$arg_value" = "--rpc-nodes-file" ]; then
+        next_index=$((arg_index + 1))
+        CUSTOM_RPC_JSON_PATH="${!next_index}"
+    elif [[ "$arg_value" == --config=* ]]; then
+        CUSTOM_RPC_JSON_PATH="${arg_value#--config=}"
+    elif [[ "$arg_value" == --rpc-nodes-file=* ]]; then
+        CUSTOM_RPC_JSON_PATH="${arg_value#--rpc-nodes-file=}"
+    fi
+done
+export NO_VOTE_MONITOR
+MONITOR_NAMESPACE="$(printf '%s' "$MONITOR_NAMESPACE" | tr -cd 'A-Za-z0-9_.-')"
+MONITOR_NAMESPACE="${MONITOR_NAMESPACE:-root}"
+MONITOR_PID_DIR="/tmp/metanode-monitors-${MONITOR_NAMESPACE}"
+mkdir -p "$MONITOR_PID_DIR"
+
 # Helper functions to locate inventory and parser
 get_inv_path() {
+    if [ -n "${MONITOR_INVENTORY:-}" ] && [ -f "$MONITOR_INVENTORY" ]; then
+        echo "$MONITOR_INVENTORY"
+        return
+    fi
     if [ -f "${SCRIPT_DIR}/../inventory.yml" ]; then
         echo "${SCRIPT_DIR}/../inventory.yml"
     elif [ -f "${SCRIPT_DIR}/inventory.yml" ]; then
@@ -15,6 +49,17 @@ get_inv_path() {
 }
 
 get_parse_py() {
+    if [ -n "${MONITOR_INVENTORY:-}" ]; then
+        local inv_dir
+        inv_dir="$(dirname "$MONITOR_INVENTORY")"
+        if [ -f "${inv_dir}/scripts/parse_inventory.py" ]; then
+            echo "${inv_dir}/scripts/parse_inventory.py"
+            return
+        elif [ -f "${inv_dir}/parse_inventory.py" ]; then
+            echo "${inv_dir}/parse_inventory.py"
+            return
+        fi
+    fi
     if [ -f "${SCRIPT_DIR}/../parse_inventory.py" ]; then
         echo "${SCRIPT_DIR}/../parse_inventory.py"
     elif [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
@@ -56,14 +101,22 @@ INV_PATH=$(get_inv_path)
 PARSE_PY=$(get_parse_py)
 
 if [ -n "$INV_PATH" ]; then
-    BOT_TOKEN=$(grep -E '^\s*(telegram_bot_token|bot_token):' "$INV_PATH" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
-    CHAT_ID=$(grep -E '^\s*(telegram_chat_id|chat_id):' "$INV_PATH" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+    BOT_TOKEN=$(grep -E '^\s*(telegram_bot_token|bot_token):' "$INV_PATH" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
+    CHAT_ID=$(grep -E '^\s*(telegram_chat_id|chat_id):' "$INV_PATH" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
     if [ -n "$BOT_TOKEN" ]; then export TELEGRAM_BOT_TOKEN="$BOT_TOKEN"; fi
     if [ -n "$CHAT_ID" ]; then export TELEGRAM_CHAT_ID="$CHAT_ID"; fi
 fi
 export TELEGRAM_BOT_TOKEN
 export TELEGRAM_CHAT_ID
-RPC_JSON_PATH="/tmp/rpc_nodes.json"
+if [ -n "$CUSTOM_RPC_JSON_PATH" ]; then
+    RPC_JSON_PATH="$CUSTOM_RPC_JSON_PATH"
+elif [ -z "${RPC_JSON_PATH:-}" ]; then
+    if [ "$MONITOR_NAMESPACE" = "root" ]; then
+        RPC_JSON_PATH="/tmp/rpc_nodes.json"
+    else
+        RPC_JSON_PATH="/tmp/rpc_nodes.${MONITOR_NAMESPACE}.json"
+    fi
+fi
 
 # Chain-stall probe transaction key (2026-09-08, see send_stall_probe_tx() below). Same
 # fallback pattern as deploy/systemd/start_relayer_daemon.sh's RELAYER_KEY: env var first, then
@@ -244,6 +297,7 @@ resolve_ssh_auth() {
     SSH_PASS=""
     if [ -n "$key" ] && [ -f "$key" ]; then
         SSH_OPTS="-i $key $SSH_OPTS"
+    else
         SSH_PASS=$(SCRIPT_DIR="$SCRIPT_DIR" INV_PATH="$INV_PATH" TARGET_NODE_ID="$node_id" python3 -c '
 import sys, os
 script_dir = os.environ.get("SCRIPT_DIR", "")
@@ -266,6 +320,8 @@ try:
         for h in hosts.values():
             if isinstance(h, dict) and node_id in (h.get("node_ids") or []):
                 p = h.get("ansible_ssh_pass", gv.get("ansible_ssh_pass", ""))
+                if "{{ ansible_become_pass }}" in str(p) or not p:
+                    p = h.get("ansible_become_pass", gv.get("ansible_become_pass", ""))
                 if p and p != "[VAULT_ENCRYPTED]":
                     print(p)
                 break
@@ -291,6 +347,21 @@ scp_remote() {
     fi
 }
 
+stop_monitor_instance() {
+    local pid_file pid
+    for pid_file in "$MONITOR_PID_DIR"/*.pid; do
+        [ -f "$pid_file" ] || continue
+        pid=$(cat "$pid_file" 2>/dev/null || true)
+        if [[ "$pid" =~ ^[0-9]+$ ]] && [ -r "/proc/$pid/cmdline" ]; then
+            command_line=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+            if [[ "$command_line" == *start_monitors.sh* || "$command_line" == *block_hash_checker* || "$command_line" == *vote_monitor* ]]; then
+                kill "$pid" 2>/dev/null || true
+            fi
+        fi
+        rm -f "$pid_file"
+    done
+}
+
 
 # ─── ACTION: IGNORE / UNIGNORE NODES FROM MONITORING ────────────────────────
 if [ "${1:-}" == "ignore" ] || [ "${1:-}" == "--ignore" ]; then
@@ -313,15 +384,44 @@ if [ "${1:-}" == "unignore" ] || [ "${1:-}" == "--unignore" ]; then
     exit 0
 fi
 
+# ─── ACTION: CHECK STATUS OF MONITORS ─────────────────────────────────────────
+if [ "${1:-}" == "status" ] || [ "${1:-}" == "--status" ]; then
+    echo "🔍 Trạng thái các tiến trình Monitor ngầm:"
+    found=0
+    for d in /tmp/metanode-monitors-*; do
+        [ -d "$d" ] || continue
+        ns="${d#/tmp/metanode-monitors-}"
+        for pid_f in "$d"/*.pid; do
+            [ -f "$pid_f" ] || continue
+            p_name=$(basename "$pid_f" .pid)
+            pid=$(cat "$pid_f" 2>/dev/null || echo "")
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                echo "  • [${ns}] ${p_name}: ▶️ RUNNING (PID ${pid})"
+                found=1
+            else
+                echo "  • [${ns}] ${p_name}: ⏹️ STOPPED (stale PID ${pid})"
+            fi
+        done
+    done
+    if [ $found -eq 0 ]; then
+        echo "  • Chưa có monitor nào đang chạy."
+    fi
+    exit 0
+fi
+
 # ─── ACTION: STOP LOCAL MONITORS ─────────────────────────────────────────────
 if [ "${1:-}" == "stop" ] || [ "${1:-}" == "--stop" ]; then
-    echo "🛑 Đang dừng các tiến trình monitor cục bộ..."
-    pkill -9 -f "[s]tart_monitors.sh health" || true
-    pkill -9 -f "[s]tart_monitors.sh resources" || true
-    pkill -9 -f "[b]lock_hash_checker" || true
-    pkill -9 -f "[v]ote_monitor" || true
-    pkill -9 -f "go run [m]ain.go.*--no-stop-flag" || true
-    echo "✅ Đã dừng toàn bộ monitors cục bộ."
+    echo "🛑 Đang dừng monitor namespace ${MONITOR_NAMESPACE}..."
+    stop_monitor_instance
+    if [ "$MONITOR_NAMESPACE" = "root" ]; then
+        # Clean up monitor processes created before per-chain PID files existed.
+        pkill -9 -f "[s]tart_monitors.sh health$" || true
+        pkill -9 -f "[s]tart_monitors.sh resources$" || true
+        pkill -9 -f "[b]lock_hash_checker.*--config config-m-nodes.json" || true
+        pkill -9 -f "[v]ote_monitor --daemon --interval 2s$" || true
+        pkill -9 -f "go run [m]ain.go.*--no-stop-flag" || true
+    fi
+    echo "✅ Đã dừng monitor namespace ${MONITOR_NAMESPACE}."
     exit 0
 fi
 
@@ -329,16 +429,31 @@ fi
 if [ "${1:-}" == "stop-all" ] || [ "${1:-}" == "--stop-all" ]; then
     echo "🛑 Đang dừng các tiến trình monitor trên toàn bộ cụm máy..."
     if [ -n "$INV_PATH" ] && command -v ansible >/dev/null 2>&1; then
-        ansible metanode_cluster -i "$INV_PATH" -m shell -a "pkill -9 -f '[s]tart_monitors.sh health' || true; pkill -9 -f '[s]tart_monitors.sh resources' || true; pkill -9 -f '[b]lock_hash_checker' || true; pkill -9 -f '[v]ote_monitor' || true; pkill -9 -f 'go run [m]ain.go.*--no-stop-flag' || true" >/dev/null 2>&1 || true
+        ansible metanode_cluster -i "$INV_PATH" -m shell -a "pkill -9 -f '[s]tart_monitors.sh health$' || true; pkill -9 -f '[s]tart_monitors.sh resources$' || true; pkill -9 -f '[b]lock_hash_checker.*--config config-m-nodes.json' || true; pkill -9 -f '[v]ote_monitor --daemon --interval 2s$' || true; pkill -9 -f 'go run [m]ain.go.*--no-stop-flag' || true" >/dev/null 2>&1 || true
     fi
-    pkill -9 -f "[s]tart_monitors.sh health" || true
-    pkill -9 -f "[s]tart_monitors.sh resources" || true
-    pkill -9 -f "[b]lock_hash_checker" || true
-    pkill -9 -f "[v]ote_monitor" || true
+    stop_monitor_instance
+    pkill -9 -f "[s]tart_monitors.sh health$" || true
+    pkill -9 -f "[s]tart_monitors.sh resources$" || true
+    pkill -9 -f "[b]lock_hash_checker.*--config config-m-nodes.json" || true
+    pkill -9 -f "[v]ote_monitor --daemon --interval 2s$" || true
     pkill -9 -f "go run [m]ain.go.*--no-stop-flag" || true
     echo "✅ Đã dừng toàn bộ monitors trên tất cả các node."
     exit 0
 fi
+
+# ─── PARSE OPTIONAL FROM BLOCK ARGUMENT ──────────────────────────────────────
+FROM_BLOCK="${FROM_BLOCK:-}"
+for ((i=1; i<=$#; i++)); do
+    arg="${!i}"
+    if [[ "$arg" == "--from" ]] || [[ "$arg" == "from" ]]; then
+        next_idx=$((i+1))
+        FROM_BLOCK="${!next_idx}"
+    elif [[ "$arg" =~ ^--from=([0-9]+)$ ]] || [[ "$arg" =~ ^from=([0-9]+)$ ]]; then
+        FROM_BLOCK="${BASH_REMATCH[1]}"
+    elif [[ "$arg" =~ ^[0-9]+$ ]] && [ -z "$FROM_BLOCK" ]; then
+        FROM_BLOCK="$arg"
+    fi
+done
 
 # ─── ACTION: DISTRIBUTED MULTI-HOST MONITOR LAUNCH ───────────────────────────
 if [ "${1:-}" == "--all-hosts" ] || [ "${1:-}" == "--all" ] || [ "${1:-}" == "--multi" ]; then
@@ -350,8 +465,8 @@ if [ "${1:-}" == "--all-hosts" ] || [ "${1:-}" == "--all" ] || [ "${1:-}" == "--
     fi
 
     if [ -n "$INV_PATH" ]; then
-        BOT_TOKEN=$(grep -E '^\s*(telegram_bot_token|bot_token):' "$INV_PATH" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
-        CHAT_ID=$(grep -E '^\s*(telegram_chat_id|chat_id):' "$INV_PATH" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+        BOT_TOKEN=$(grep -E '^\s*(telegram_bot_token|bot_token):' "$INV_PATH" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
+        CHAT_ID=$(grep -E '^\s*(telegram_chat_id|chat_id):' "$INV_PATH" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
         if [ -n "$BOT_TOKEN" ]; then export TELEGRAM_BOT_TOKEN="$BOT_TOKEN"; fi
         if [ -n "$CHAT_ID" ]; then export TELEGRAM_CHAT_ID="$CHAT_ID"; fi
     fi
@@ -466,7 +581,7 @@ if [ "${1:-}" == "health" ]; then
         INV_PATH=$(get_inv_path)
         PARSE_PY=$(get_parse_py)
 
-        if [ -n "$PARSE_PY" ] && [ -n "$INV_PATH" ]; then
+        if [ -z "$CUSTOM_RPC_JSON_PATH" ] && [ -n "$PARSE_PY" ] && [ -n "$INV_PATH" ]; then
             (umask 077 && python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true)
             chmod 0600 "$RPC_JSON_PATH" 2>/dev/null || true
         fi
@@ -1035,7 +1150,7 @@ if [ "${1:-}" == "resources" ]; then
         INV_PATH=$(get_inv_path)
         PARSE_PY=$(get_parse_py)
 
-        if [ -n "$PARSE_PY" ] && [ -n "$INV_PATH" ]; then
+        if [ -z "$CUSTOM_RPC_JSON_PATH" ] && [ -n "$PARSE_PY" ] && [ -n "$INV_PATH" ]; then
             (umask 077 && python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true)
             chmod 0600 "$RPC_JSON_PATH" 2>/dev/null || true
         fi
@@ -1072,7 +1187,7 @@ if [ "${1:-}" == "resources" ]; then
 
                 RAM_LIMIT=95
                 CPU_LIMIT=97
-                DISK_LIMIT=85
+                DISK_LIMIT=95
 
                 if [[ -n "$ram_usage" ]] && [[ -n "$cpu_usage" ]] && [[ -n "$disk_usage" ]]; then
                     if [[ "$ram_usage" -ge "$RAM_LIMIT" ]] || [[ "$cpu_usage" -ge "$CPU_LIMIT" ]] || [[ "$disk_usage" -ge "$DISK_LIMIT" ]]; then
@@ -1110,20 +1225,27 @@ fi
 # ─── LOCAL MONITOR INITIALIZATION ────────────────────────────────────────────
 echo "🔄 Đang khởi động các tiến trình giám sát trên máy này (${MONITOR_IP:-localhost})..."
 
-# 1. Kill old processes
-pkill -f "go run main.go.*--no-stop-flag" || true
-pkill -f "block_hash_checker.*--daemon" || true
-pkill -f "vote_monitor.*--daemon" || true
-pkill -f "vote_monitor" || true
-pkill -f "start_monitors.sh health" || true
-pkill -f "start_monitors.sh resources" || true
+# 1. Stop only the previous processes for this chain.
+stop_monitor_instance
+if [ "$MONITOR_NAMESPACE" = "root" ]; then
+    # Clean up legacy root processes which predate PID-file ownership.
+    pkill -f "go run [m]ain.go.*--no-stop-flag" || true
+    pkill -f "[b]lock_hash_checker.*--config config-m-nodes.json.*--daemon" || true
+    pkill -f "[v]ote_monitor --daemon --interval 2s$" || true
+    pkill -f "[s]tart_monitors.sh health$" || true
+    pkill -f "[s]tart_monitors.sh resources$" || true
+fi
 
 # 2. Start Health Monitor in background
-nohup /bin/bash "${SCRIPT_DIR}/start_monitors.sh" health > /dev/null 2>&1 &
+nohup setsid env MONITOR_NAMESPACE="$MONITOR_NAMESPACE" MONITOR_INVENTORY="${INV_PATH:-}" \
+    /bin/bash "${SCRIPT_DIR}/start_monitors.sh" health "$MONITOR_NAMESPACE" > /dev/null 2>&1 &
+echo $! > "$MONITOR_PID_DIR/health.pid"
 echo "✅ Đã bật Health Monitor (kiểm tra node sống/chết)"
 
 # 3. Start Resource Monitor in background
-nohup /bin/bash "${SCRIPT_DIR}/start_monitors.sh" resources > /dev/null 2>&1 &
+nohup setsid env MONITOR_NAMESPACE="$MONITOR_NAMESPACE" MONITOR_INVENTORY="${INV_PATH:-}" \
+    /bin/bash "${SCRIPT_DIR}/start_monitors.sh" resources "$MONITOR_NAMESPACE" > /dev/null 2>&1 &
+echo $! > "$MONITOR_PID_DIR/resources.pid"
 echo "✅ Đã bật Resource Monitor (kiểm tra RAM/CPU quá tải)"
 
 # 4. Start Block Hash Checker in background
@@ -1131,11 +1253,11 @@ BLOCK_CHECKER_DIR="${SCRIPT_DIR}/block_hash_checker"
 if [ -d "$BLOCK_CHECKER_DIR" ]; then
     INV_PATH=$(get_inv_path)
     PARSE_PY=$(get_parse_py)
-    if [ -n "$PARSE_PY" ] && [ -n "$INV_PATH" ]; then
+    if [ -z "$CUSTOM_RPC_JSON_PATH" ] && [ -n "$PARSE_PY" ] && [ -n "$INV_PATH" ]; then
         python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true
     fi
 
-    if [ -s "$RPC_JSON_PATH" ]; then
+    if [ -s "$RPC_JSON_PATH" ] && [ "$MONITOR_NAMESPACE" = "root" ]; then
         cp -f "$RPC_JSON_PATH" "$BLOCK_CHECKER_DIR/config-m-nodes.json"
         if [ -d "/opt/metanode/monitors/block_hash_checker" ]; then
             cp -f "$RPC_JSON_PATH" "/opt/metanode/monitors/block_hash_checker/config-m-nodes.json" 2>/dev/null || true
@@ -1149,14 +1271,28 @@ if [ -d "$BLOCK_CHECKER_DIR" ]; then
     
     if [ -f "block_hash_checker" ]; then
         chmod +x "block_hash_checker"
-        nohup ./block_hash_checker --watch --interval 5s --config config-m-nodes.json --daemon > block_checker_daemon.log 2>&1 &
+        BLOCK_CHECKER_BIN="$BLOCK_CHECKER_DIR/block_hash_checker"
+        if [ "$MONITOR_NAMESPACE" != "root" ]; then
+            BLOCK_WORK_DIR="$MONITOR_PID_DIR/block_hash_checker"
+            mkdir -p "$BLOCK_WORK_DIR"
+            cd "$BLOCK_WORK_DIR" || exit 1
+        fi
+        EXTRA_FROM=""
+        if [ -n "$FROM_BLOCK" ]; then
+            EXTRA_FROM="--from $FROM_BLOCK"
+            echo "🎯 Cấu hình Block Hash Monitor bắt đầu từ Block #$FROM_BLOCK"
+        fi
+        BLOCK_CONFIG="$RPC_JSON_PATH"
+        BLOCK_LOG="block_checker_daemon.${MONITOR_NAMESPACE}.log"
+        nohup setsid "$BLOCK_CHECKER_BIN" --watch --interval 5s --config "$BLOCK_CONFIG" --daemon $EXTRA_FROM > "$BLOCK_LOG" 2>&1 &
         PID=$!
+        echo "$PID" > "$MONITOR_PID_DIR/block_hash_checker.pid"
         sleep 2
         
         if ! kill -0 $PID 2>/dev/null; then
             echo -e "\033[0;31m❌ [ERROR] Block Hash Monitor khởi động thất bại!\033[0m"
-            echo -e "\033[0;33mChi tiết lỗi trong block_checker_daemon.log:\033[0m"
-            cat block_checker_daemon.log 2>/dev/null || true
+            echo -e "\033[0;33mChi tiết lỗi trong ${BLOCK_LOG}:\033[0m"
+            cat "$BLOCK_LOG" 2>/dev/null || true
         else
             echo "✅ Đã bật Block Hash Monitor (kiểm tra lệch hash)"
         fi
@@ -1166,26 +1302,46 @@ else
 fi
 
 # 5. Start Validator Vote Monitor in background
-VOTE_MONITOR_DIR="${SCRIPT_DIR}/vote_monitor"
-if [ -d "$VOTE_MONITOR_DIR" ]; then
-    cd "$VOTE_MONITOR_DIR" || exit 1
-    if { [ ! -f "vote_monitor" ] || [ "main.go" -nt "vote_monitor" ]; } && command -v go >/dev/null 2>&1; then
-        go build -buildvcs=false -o vote_monitor main.go || true
+if [ "$NO_VOTE_MONITOR" = "true" ]; then
+    echo "ℹ️ Bỏ qua Validator Vote Monitor (Cụm node không chạy BFT Committee / Chạy Raft Consensus)."
+else
+    VOTE_NODES_COUNT=0
+    if [ -f "$RPC_JSON_PATH" ] && [ -s "$RPC_JSON_PATH" ]; then
+        VOTE_NODES_COUNT=$(python3 -c "import json; d=json.load(open('$RPC_JSON_PATH')); print(len(d.get('nodes', d.get('rpc_nodes', {}))))" 2>/dev/null || echo "0")
     fi
-    if [ -f "vote_monitor" ]; then
-        chmod +x "vote_monitor"
-        nohup ./vote_monitor --daemon --interval 2s > /dev/null 2>&1 &
-        VOTE_PID=$!
-        sleep 1
-        if ! kill -0 $VOTE_PID 2>/dev/null; then
-            echo -e "\033[0;31m❌ [ERROR] Validator Vote Monitor khởi động thất bại!\033[0m"
+    if [ "$VOTE_NODES_COUNT" -lt 2 ]; then
+        echo "ℹ️ Bỏ qua Validator Vote Monitor (Cụm node không chạy BFT Committee / Chạy Raft Consensus)."
+    else
+        VOTE_MONITOR_DIR="${SCRIPT_DIR}/vote_monitor"
+        if [ -d "$VOTE_MONITOR_DIR" ]; then
+            cd "$VOTE_MONITOR_DIR" || exit 1
+            if { [ ! -f "vote_monitor" ] || [ "main.go" -nt "vote_monitor" ]; } && command -v go >/dev/null 2>&1; then
+                go build -buildvcs=false -o vote_monitor main.go || true
+            fi
+            if [ -f "vote_monitor" ]; then
+                chmod +x "vote_monitor"
+                VOTE_MONITOR_BIN="$VOTE_MONITOR_DIR/vote_monitor"
+                if [ "$MONITOR_NAMESPACE" != "root" ]; then
+                    VOTE_WORK_DIR="$MONITOR_PID_DIR/vote_monitor"
+                    mkdir -p "$VOTE_WORK_DIR"
+                    cd "$VOTE_WORK_DIR" || exit 1
+                fi
+                VOTE_LOG="vote_monitor.${MONITOR_NAMESPACE}.log"
+                nohup "$VOTE_MONITOR_BIN" --daemon --interval 2s --config "$RPC_JSON_PATH" --log "$VOTE_LOG" > /dev/null 2>&1 &
+                VOTE_PID=$!
+                echo "$VOTE_PID" > "$MONITOR_PID_DIR/vote_monitor.pid"
+                sleep 1
+                if ! kill -0 $VOTE_PID 2>/dev/null; then
+                    echo -e "\033[0;31m❌ [ERROR] Validator Vote Monitor khởi động thất bại!\033[0m"
+                else
+                    echo "✅ Đã bật Validator Vote Monitor (giám sát vote block tuần tự & stall 10p)"
+                fi
+            fi
+            cd "$SCRIPT_DIR" || true
         else
-            echo "✅ Đã bật Validator Vote Monitor (giám sát vote block tuần tự & stall 10p)"
+            echo "⚠️ Không tìm thấy thư mục vote_monitor"
         fi
     fi
-    cd "$SCRIPT_DIR" || true
-else
-    echo "⚠️ Không tìm thấy thư mục vote_monitor"
 fi
 
 echo "🎉 Hoàn tất khởi động các Monitors ngầm!"

@@ -5,34 +5,19 @@
     pkill -9 -f 'block_hash_checker' || true
   failed_when: false
   changed_when: false
-  when: target_node | default('all') == 'all'
-
-- name: Find all metanode services
-  ansible.builtin.shell: "systemctl list-unit-files | grep -E '^metanode-.*\\.service' | awk '{print $1}'"
-  register: all_metanode_services
-  changed_when: false
-  failed_when: false
-  when: target_node | default('all') == 'all'
-
-- name: Stop and disable all metanode services to prevent rogue nodes
-  ansible.builtin.systemd:
-    name: "{{ item }}"
-    state: stopped
-    enabled: no
-  loop: "{{ all_metanode_services.stdout_lines | default([]) }}"
-  when: (target_node | default('all') == 'all') and (all_metanode_services.stdout_lines is defined and all_metanode_services.stdout_lines | length > 0)
-  failed_when: false
-
-- name: Check if metanode or simple_chain processes are still running
-  ansible.builtin.shell: "pgrep -x metanode || pgrep -x simple_chain || pgrep -x rpc-client-bin"
-  register: process_check
-  failed_when: false
-  changed_when: false
-  when: target_node | default('all') == 'all'
+  when: manage_global_monitors | default(true) | bool
 
 - name: Stop and disable targeted metanode execution services
   ansible.builtin.systemd:
     name: "metanode-execution-{{ item }}"
+    state: stopped
+    enabled: no
+  loop: "{{ active_nodes }}"
+  failed_when: false
+
+- name: Stop and disable targeted metanode consensus services
+  ansible.builtin.systemd:
+    name: "metanode-consensus-{{ item }}"
     state: stopped
     enabled: no
   loop: "{{ active_nodes }}"
@@ -125,22 +110,11 @@
       không thoát graceful trong 90s, phải SIGKILL. Xem /var/log/metanode/shutdown_times.log để theo dõi xu hướng.
   when: (graceful_exit_wait.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length) > 0
 
-- name: Clean up stale unix domain sockets in /tmp (all nodes)
-  ansible.builtin.shell: |
-    rm -f /tmp/executor*.sock /tmp/rust-go-*.sock /tmp/metanode-tx-*.sock 2>/dev/null || true
-  args:
-    executable: /bin/bash
-  when: target_node | default('all') == 'all'
-  failed_when: false
-  changed_when: false
-
 - name: Clean up targeted node unix domain sockets in /tmp
   ansible.builtin.shell: |
     rm -f /tmp/executor*{{ item }}*.sock /tmp/rust-go-*{{ item }}*.sock /tmp/metanode-tx-*{{ item }}*.sock 2>/dev/null || true
   args:
     executable: /bin/bash
   loop: "{{ active_nodes }}"
-  when: target_node | default('all') != 'all'
   failed_when: false
   changed_when: false
-

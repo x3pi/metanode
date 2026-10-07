@@ -247,21 +247,17 @@ impl Linearizer {
         drop(dag_state);
 
         // ACTOR WRITE: Now that we don't hold the read lock, we can set them as committed!
-        if !is_historical {
-            for block in &to_commit {
-                if !self.dag_state_writer.set_committed(block.reference()) {
-                    tracing::warn!(
-                        "⚠️ [LINEARIZER] Block with reference {:?} was already marked as committed. \
-                         This can happen during catch-up syncing or amnesia recovery. Proceeding.",
-                        block.reference()
-                    );
-                }
+        // Always mark blocks in to_commit as committed (idempotent). Even for historical commits,
+        // this ensures that the local cache reflects their committed status to prevent
+        // re-linearization in future rounds.
+        for block in &to_commit {
+            if !self.dag_state_writer.set_committed(block.reference()) {
+                tracing::debug!(
+                    "⚠️ [LINEARIZER] Block with reference {:?} was already marked as committed. \
+                     This can happen during catch-up syncing or amnesia recovery. Proceeding.",
+                    block.reference()
+                );
             }
-        } else {
-            tracing::debug!(
-                "⏭️ [SCHEDULE-RECOVERY] Skipping set_committed for {} blocks. They are from a historical commit and already committed.",
-                to_commit.len()
-            );
         }
 
         let commit = if let Some(trusted_commit) = final_commit {

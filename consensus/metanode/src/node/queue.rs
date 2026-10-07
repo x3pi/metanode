@@ -5,6 +5,7 @@ use crate::node::tx_submitter::TransactionSubmitter;
 use crate::node::ConsensusNode;
 use anyhow::Result;
 use consensus_core::SystemTransaction;
+use sha3::Digest;
 use std::io::{Read, Write};
 use std::path::Path;
 use tokio::sync::Mutex;
@@ -111,29 +112,29 @@ pub async fn submit_queued_transactions(node: &mut ConsensusNode) -> Result<usiz
         committed_hashes.len()
     );
 
-    // P0-1 FIX: Compute hash ONCE per TX, carry (tx_data, hash) through filter + dedup.
-    // Previously hashed every TX twice (once for committed filter, once for dedup),
-    // wasting ~400ms CPU at 200K queued TXs during epoch transition.
+    // P0-1 / P0-9 FIX: Filter against committed_hashes and dedup queued transactions
+    // using full payload hash (sha3::Keccak256) so mutated proto variants cannot
+    // displace or suppress real transactions.
     let mut skipped_duplicates = 0;
 
     let mut txs_with_hash: Vec<(Vec<u8>, Vec<u8>)> = queue
         .iter()
         .filter_map(|tx| {
-            let hash = crate::types::tx_hash::calculate_transaction_hash_single(tx);
-            if committed_hashes.contains(&hash) {
+            let payload_hash = sha3::Keccak256::digest(tx).to_vec();
+            if committed_hashes.contains(&payload_hash) {
                 skipped_duplicates += 1;
                 trace!(
                     "⏭️ [TX FLOW] Skipping already committed transaction: {}",
-                    hex::encode(hash)
+                    hex::encode(&payload_hash[..8.min(payload_hash.len())])
                 );
                 None
             } else {
-                Some((tx.clone(), hash))
+                Some((tx.clone(), payload_hash))
             }
         })
         .collect();
 
-    // Dedup among remaining transactions (using already-computed hashes)
+    // Dedup among remaining transactions (using full payload hash)
     txs_with_hash.sort_by(|(_, a), (_, b)| a.cmp(b));
     txs_with_hash.dedup_by(|a, b| a.1 == b.1);
 
@@ -287,3 +288,60 @@ pub async fn submit_queued_transactions(node: &mut ConsensusNode) -> Result<usiz
 
     Ok(successful_count)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_queue_dedup_fake_variant_does_not_suppress_real_tx() {
+        let _envelope = b"mock_envelope_for_testing";
+        let fake_tx_bytes = b"tx_fake_bytes_with_mock_envelope".to_vec();
+        let real_tx_bytes = b"tx_real_bytes_with_mock_envelope".to_vec();
+
+        let queue = vec![fake_tx_bytes.clone(), real_tx_bytes.clone()];
+        let committed_hashes = std::sync::Arc::new(dashmap::DashSet::<Vec<u8>>::new());
+
+        // 1. Dedup when both fake and real tx are in queue:
+        let mut txs_with_hash: Vec<(Vec<u8>, Vec<u8>)> = queue
+            .iter()
+            .filter_map(|tx| {
+                let payload_hash = sha3::Keccak256::digest(tx).to_vec();
+                if committed_hashes.contains(&payload_hash) {
+                    None
+                } else {
+                    Some((tx.clone(), payload_hash))
+                }
+            })
+            .collect();
+
+        txs_with_hash.sort_by(|(_, a), (_, b)| a.cmp(b));
+        txs_with_hash.dedup_by(|a, b| a.1 == b.1);
+
+        assert_eq!(
+            txs_with_hash.len(),
+            2,
+            "Both fake and real tx must be preserved so execution engine can reject fake and execute real"
+        );
+
+        // 2. When fake_tx has already committed:
+        let fake_payload_hash = sha3::Keccak256::digest(&fake_tx_bytes).to_vec();
+        committed_hashes.insert(fake_payload_hash);
+
+        // Real tx must NOT be skipped:
+        let remaining: Vec<Vec<u8>> = vec![real_tx_bytes.clone()]
+            .into_iter()
+            .filter(|tx| {
+                let payload_hash = sha3::Keccak256::digest(tx).to_vec();
+                !committed_hashes.contains(&payload_hash)
+            })
+            .collect();
+
+        assert_eq!(
+            remaining.len(),
+            1,
+            "Real tx must not be skipped even if a fake mutated variant with same envelope was committed"
+        );
+    }
+}
+

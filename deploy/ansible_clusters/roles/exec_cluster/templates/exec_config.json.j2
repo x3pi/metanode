@@ -1,9 +1,8 @@
 {
   "debug": true,
   "cluster_id": {{ cluster_id }},
-  "enable_private_gateway": false,
-  "master_password": "devnet-test-password",
-  "app_pepper": "devnet-test-pepper",
+  "master_password": "{{ master_password | default('devnet-test-password') }}",
+  "app_pepper": "{{ app_pepper | default('devnet-test-pepper') }}",
   "private_key": "{{ private_key }}",
   "address": "{{ address }}",
   "log_path": "{{ node_data_dir }}/logs",
@@ -16,9 +15,9 @@
   "rpc_port": ":{{ rpc_port }}",
   "db_type": 2,
   "genesis_file_path": "{{ node_data_dir }}/genesis.json",
-  "pk_admin_file_storage": "87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623",
-  "bls_admin_storage": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
-  "owner_file_storage_address": "0xC6E6474A8DEAD25B0e75b1aeA5d35FA19f69588a",
+  "pk_admin_file_storage": "{{ pk_admin_file_storage | default('87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623') }}",
+  "bls_admin_storage": "{{ bls_admin_storage | default('2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b') }}",
+  "owner_file_storage_address": "{{ owner_file_storage_address | default('0xC6E6474A8DEAD25B0e75b1aeA5d35FA19f69588a') }}",
   "Databases": {
     "RootPath": "{{ node_data_dir }}/data",
     "DBEngine": "sharded",
@@ -27,11 +26,12 @@
     "SnapshotPath": "{{ node_data_dir }}/snapshot"
   },
   "is_rpc_node": true,
+  "account_gate": "{{ account_gate | default('parent_registered') }}",
   "consensus_mode": "{{ consensus_mode | default('raft') }}",
 {% if (consensus_mode | default('raft')) == 'raft' %}
   "snapshot_enabled": false,
   "raft": {
-    "node_id": "{{ raft_node_id | default(node_id | default(inventory_hostname)) }}",
+    "node_id": "{{ node_id | default(raft_node_id | default(inventory_hostname)) }}",
     "bind_address": "{{ raft_bind_address | default((ansible_host | default('127.0.0.1')) ~ ':' ~ (raft_port | default(7110))) }}",
     "advertise_address": "{{ raft_advertise_address | default((ansible_host | default('127.0.0.1')) ~ ':' ~ (raft_port | default(7110))) }}",
     "data_dir": "{{ node_data_dir }}/raft",
@@ -45,13 +45,33 @@
     "commit_timeout_ms": {{ raft_commit_timeout_ms | default(30) }},
     "propose_queue_size": {{ raft_propose_queue_size | default(1024) }},
     "peers": [
-{% for peer in raft_peers | default([{'id': raft_node_id | default(node_id | default(inventory_hostname)), 'address': (ansible_host | default('127.0.0.1')) ~ ':' ~ (raft_port | default(7110)), 'forward_address': (ansible_host | default('127.0.0.1')) ~ ':' ~ (forward_port | default(7210))}]) %}
+{% if raft_peers is defined and raft_peers %}
+{% for peer in raft_peers %}
       {
         "id": "{{ peer.id }}",
         "address": "{{ peer.address }}",
         "forward_address": "{{ peer.forward_address }}"
       }{% if not loop.last %},{% endif %}
 {% endfor %}
+{% else %}
+{# Auto-discover raft peers from all hosts in exec_clusters belonging to this cluster_id #}
+{% set cluster_hosts = groups['exec_clusters'] | default([]) | map('extract', hostvars) | selectattr('cluster_id', 'defined') | selectattr('cluster_id', 'equalto', cluster_id) | list %}
+{% if cluster_hosts | length > 0 %}
+{% for peer_host in cluster_hosts %}
+      {
+        "id": "{{ peer_host.node_id | default(peer_host.raft_node_id | default(peer_host.inventory_hostname)) }}",
+        "address": "{{ peer_host.ansible_host | default('127.0.0.1') }}:{{ peer_host.raft_port | default(raft_port | default(7110)) }}",
+        "forward_address": "{{ peer_host.ansible_host | default('127.0.0.1') }}:{{ peer_host.forward_port | default(forward_port | default(7210)) }}"
+      }{% if not loop.last %},{% endif %}
+{% endfor %}
+{% else %}
+      {
+        "id": "{{ node_id | default(raft_node_id | default(inventory_hostname)) }}",
+        "address": "{{ ansible_host | default('127.0.0.1') }}:{{ raft_port | default(7110) }}",
+        "forward_address": "{{ ansible_host | default('127.0.0.1') }}:{{ forward_port | default(7210) }}"
+      }
+{% endif %}
+{% endif %}
     ]
   }
 {% else %}

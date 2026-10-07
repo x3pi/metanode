@@ -64,7 +64,8 @@ type TransactionArgs struct {
 	Commitments []kzg4844.Commitment `json:"commitments"`
 	Proofs      []kzg4844.Proof      `json:"proofs"`
 
-	// This configures whether blobs are allowed to be passed.
+	// Introduced by EIP-7702 SetCodeTxType
+	AuthList []types.SetCodeAuthorization `json:"authorizationList,omitempty"`
 }
 
 // from retrieves the transaction sender address.
@@ -220,6 +221,8 @@ func (args *TransactionArgs) ToMessage(baseFee *big.Int, skipNonceCheck, skipEoA
 func (args *TransactionArgs) ToTransaction(defaultType int) *types.Transaction {
 	usedType := types.LegacyTxType
 	switch {
+	case len(args.AuthList) > 0 || defaultType == types.SetCodeTxType:
+		usedType = types.SetCodeTxType
 	case args.BlobHashes != nil || defaultType == types.BlobTxType:
 		usedType = types.BlobTxType
 	case args.MaxFeePerGas != nil || defaultType == types.DynamicFeeTxType:
@@ -233,6 +236,27 @@ func (args *TransactionArgs) ToTransaction(defaultType int) *types.Transaction {
 	}
 	var data types.TxData
 	switch usedType {
+	case types.SetCodeTxType:
+		al := types.AccessList{}
+		if args.AccessList != nil {
+			al = *args.AccessList
+		}
+		var to common.Address
+		if args.To != nil {
+			to = *args.To
+		}
+		data = &types.SetCodeTx{
+			ChainID:    uint256.MustFromBig((*big.Int)(args.ChainID)),
+			Nonce:      uint64(*args.Nonce),
+			GasTipCap:  uint256.MustFromBig((*big.Int)(args.MaxPriorityFeePerGas)),
+			GasFeeCap:  uint256.MustFromBig((*big.Int)(args.MaxFeePerGas)),
+			Gas:        uint64(*args.Gas),
+			To:         to,
+			Value:      uint256.MustFromBig((*big.Int)(args.Value)),
+			Data:       args.data(),
+			AccessList: al,
+			AuthList:   args.AuthList,
+		}
 	case types.BlobTxType:
 		al := types.AccessList{}
 		if args.AccessList != nil {

@@ -3,6 +3,7 @@ package tx_processor
 import (
 	"bytes"
 	"fmt"
+	"math/big"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -11,8 +12,9 @@ import (
 	"os"
 
 	eth_common "github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	e_types "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -155,11 +157,20 @@ func VerifyTransaction(
 		isExplicitDev := os.Getenv("METANODE_DEVNET") == "true"
 		isProd := os.Getenv("NODE_ENV") == "production" ||
 			os.Getenv("ENVIRONMENT") == "production" ||
-			os.Getenv("METANODE_ENV") == "production"
+			os.Getenv("METANODE_ENV") == "production" ||
+			(chainState != nil && chainState.GetConfig() != nil && chainState.GetConfig().ChainId != nil && chainState.GetConfig().ChainId.Cmp(big.NewInt(991)) == 0)
 		if !isExplicitDev || isProd {
-			logger.Error("🚨 [SECURITY VIOLATION] SKIP_MEMPOOL_SIG_VERIFY=true invoked without explicit METANODE_DEVNET=true or in production environment! Bypassing is blocked.")
+			logger.Error("🚨 [SECURITY VIOLATION] SKIP_MEMPOOL_SIG_VERIFY=true invoked without explicit METANODE_DEVNET=true or on production chain (991)! Bypassing is blocked.")
 		} else {
 			return nil
+		}
+	}
+
+	// P0-9: Enforce strict envelope binding at mempool admission
+	if tx != nil && len(tx.RawEnvelope()) > 0 {
+		if err := transaction.ValidateEnvelopeBinding(tx); err != nil {
+			logger.Error("❌ [VERIFY] envelope binding failed: txHash=%s, err=%v", tx.Hash().Hex(), err)
+			return transaction.ErrEnvelopeBindingMismatch
 		}
 	}
 
@@ -209,22 +220,61 @@ func VerifyTransaction(
 	// so this bypass never fires on Master (which is correct).
 	// ════════════════════════════════════════════════════════════════
 	isSubNodeLagging := len(as.PublicKeyBls()) == 0 && (tx.GetNonce() > 0 || as.Nonce() > 0)
+	pol := sigPolicyOf(chainState)
+
+	// Rollup system events are applied from their payload alone, so only BLS-native node identities may submit them.
+	// No sub-node-lagging exemption: an attacker (no BLS key, nonce > 0) looks exactly like a lagging account. System
+	// txs are produced by the master node's own workers, which always hold the node identity's state.
+	if tx.ToAddress() == rollup.RollupSystemAddress && !isNodeBLSIdentity(tx, as) {
+		return transaction.UnauthorizedSystemSender
+	}
 
 	if as.Nonce() != 0 || tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		txHash := tx.Hash()
 
-		if isSubNodeLagging {
-			// logger.Warn("⚠️ [BLS-LAG-DEBUG] account=%s | as.Nonce=%d | tx.Nonce=%d | blsKeyLen=%d | stateIsPreloaded=%v | tx=%s",
-			// 	tx.FromAddress().String(),
-			// 	as.Nonce(),
-			// 	tx.GetNonce(),
-			// 	len(as.PublicKeyBls()),
-			// 	preloadedState != nil,
-			// 	tx.Hash().Hex()[:16]+"...",
-			// )
+		if tx.Type() == 0xFF {
+			if perr := pol.secpProtoError(tx); perr != nil {
+				logger.Error("❌ [VERIFY] Type 0xFF tx rejected (%s): txHash=%s chainID=%d", perr.Description, txHash.Hex(), tx.GetChainID())
+				return perr
+			}
+			secpCacheKey := sigCacheKey(tx, nil)
+			if !LoadVerifiedSignature(secpCacheKey) {
+				if !tx.ValidSecpProtoSign() {
+					logger.Error("❌ [VERIFY] Secp256k1 Proto Verification failed: txHash=%s, from=%s", txHash.Hex(), tx.FromAddress().Hex())
+					return transaction.InvalidSign
+				}
+				StoreVerifiedSignature(secpCacheKey)
+				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
+				if count == maxVerifiedSignaturesCacheSize {
+					rotateVerifiedSignatures()
+					atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
+				}
+			}
+		} else if pol.secp && !isNodeBLSIdentity(tx, as) {
+			// secp mode: a user tx must carry a valid ETH/secp256k1 signature. No BLS attempt and NO sub-node-lagging
+			// bypass: secp-only accounts have no BLS key, so that bypass would skip verification for all of them.
+			secpCacheKey := sigCacheKey(tx, nil)
+			if !LoadVerifiedSignature(secpCacheKey) {
+				if !tx.ValidEthSign() {
+					logger.Error("❌ [VERIFY] secp-mode signature verification failed: txHash=%s, from=%s", txHash.Hex(), tx.FromAddress().Hex())
+					return transaction.InvalidSign
+				}
+				StoreVerifiedSignature(secpCacheKey)
+				if len(tx.RawEnvelope()) > 0 {
+					// ValidEthSign ran the envelope binding too, so the block-time filter may skip it on a hit.
+					StoreVerifiedSignature(boundSigKey(secpCacheKey))
+				}
+				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
+				if count == maxVerifiedSignaturesCacheSize {
+					rotateVerifiedSignatures()
+					atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
+				}
+			}
+		} else if isSubNodeLagging {
 			// Let it pass local verification; assume Master will reject if invalid.
 		} else {
-			if !LoadVerifiedSignature(txHash) {
+			blsCacheKey := sigCacheKey(tx, as.PublicKeyBls())
+			if !LoadVerifiedSignature(blsCacheKey) {
 				request := transaction.NewVerifyTransactionRequest(
 					tx.Hash(),
 					common.PubkeyFromBytes(as.PublicKeyBls()),
@@ -244,7 +294,7 @@ func VerifyTransaction(
 					}
 				}
 				// Only cache on successful validation
-				StoreVerifiedSignature(txHash)
+				StoreVerifiedSignature(blsCacheKey)
 				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
 				if count == maxVerifiedSignaturesCacheSize {
 					rotateVerifiedSignatures()
@@ -254,10 +304,22 @@ func VerifyTransaction(
 		}
 	}
 
+	if regErr := pol.senderRegisteredError(tx, as); regErr != nil {
+		logger.Warn("❌ [VERIFY] Sender not registered on parent chain: from=%s, txHash=%s", tx.FromAddress().Hex(), tx.Hash().Hex())
+		return regErr
+	}
+
 	if as.AccountType() == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
-		if !tx.ValidEthSign() {
+		if !tx.ValidSecpSign() {
 			return transaction.RequiresTwoSignatures
 		}
+	}
+
+	// Payload data size limit check (DoS prevention)
+	const maxDataSize = 6 * 1024 * 1024
+	if len(tx.Data()) > maxDataSize {
+		logger.Error("Transaction data size exceeds limit", "hash", tx.Hash().Hex(), "size", len(tx.Data()), "limit", maxDataSize)
+		return transaction.InvalidData
 	}
 
 	if tx.ToAddress() == utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
@@ -273,12 +335,12 @@ func VerifyTransaction(
 
 		switch {
 		case as.Nonce() == 0 && isSetBls:
-			txHash := tx.Hash()
-			if !LoadVerifiedSignature(txHash) {
-				if !tx.ValidEthSign() {
+			setBlsCacheKey := sigCacheKey(tx, nil)
+			if !LoadVerifiedSignature(setBlsCacheKey) {
+				if !tx.ValidSecpSign() {
 					return transaction.InvalidSignSecp
 				}
-				StoreVerifiedSignature(txHash)
+				StoreVerifiedSignature(setBlsCacheKey)
 				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
 				if count == maxVerifiedSignaturesCacheSize {
 					rotateVerifiedSignatures()
@@ -301,7 +363,11 @@ func VerifyTransaction(
 			return transaction.InvalidData
 		}
 	} else {
-		if as.Nonce() == 0 && !isSubNodeLagging {
+		// Legacy rule: an account's first tx must bind its BLS key (setBlsPublicKey) before any ordinary tx. In secp
+		// mode users never have a BLS key, so the rule would lock every fresh secp-only account out; node (BLS-native)
+		// identities keep it.
+		secpUser := pol.secp && !isNodeBLSIdentity(tx, as)
+		if as.Nonce() == 0 && !isSubNodeLagging && !secpUser {
 			return transaction.InvalidAddressMatchForTx0
 		}
 		if !tx.ValidDeployData() {
@@ -341,13 +407,6 @@ func VerifyTransaction(
 				}
 			}
 		}
-	}
-
-	// Thêm kiểm tra kích thước Call Data
-	const maxDataSize = 6 * 1024 * 1024
-	if len(tx.Data()) > maxDataSize {
-		logger.Error("Transaction data size exceeds limit", "hash", tx.Hash().Hex(), "size", len(tx.Data()), "limit", maxDataSize)
-		return transaction.InvalidData // Sử dụng lỗi InvalidData hoặc tạo lỗi mới nếu cần
 	}
 
 	if !tx.ValidChainID(chainState.GetConfig().ChainId.Uint64()) {
@@ -401,6 +460,17 @@ func VerifyTransaction(
 		return transaction.InvalidMaxGas
 	}
 
+	// EIP-7702 (F2/F3): MaxGas must at least cover intrinsic gas (base 21000 + 25000 per auth tuple).
+	// params.TxGas (21000), not this chain's native TRANSFER_GAS_COST (20000): a SetCode tx that calls a
+	// contract is priced by core.IntrinsicGas (21000 base) in the VM, so admitting less would let it in
+	// only to fail at execution with "intrinsic gas too low".
+	if len(tx.AuthorizationList()) > 0 {
+		requiredGas := params.TxGas + uint64(len(tx.AuthorizationList()))*params.CallNewAccountGas
+		if tx.MaxGas() < requiredGas {
+			return transaction.InvalidMaxGas
+		}
+	}
+
 	// verify last hash
 
 	// Verify DeviceKey nếu được bật trong cấu hình
@@ -434,33 +504,15 @@ func PreVerifySignatures(txs []types.Transaction, chainState *blockchain.ChainSt
 	}
 
 	accountDB := chainState.GetAccountStateDB()
+	pol := sigPolicyOf(chainState)
 
 	verifyFn := func(tx types.Transaction) {
-		txHash := tx.Hash()
-		if LoadVerifiedSignature(txHash) {
-			return
-		}
-
 		as, err := accountDB.AccountStateReadOnly(tx.FromAddress())
-		if err != nil || as == nil || len(as.PublicKeyBls()) == 0 {
-			// fallback to ECDSA pre-verification if BLS key is missing
-			if tx.ValidEthSign() {
-				StoreVerifiedSignature(txHash)
-			}
-			return
+		if err != nil {
+			as = nil
 		}
-
-		request := transaction.NewVerifyTransactionRequest(
-			txHash,
-			common.PubkeyFromBytes(as.PublicKeyBls()),
-			tx.Sign(),
-		)
-		if request.Valid() {
-			StoreVerifiedSignature(txHash)
-		} else if tx.ValidEthSign() {
-			// Fallback just in case a registered BLS account sent an EVM tx
-			StoreVerifiedSignature(txHash)
-		}
+		// Same pure check the consensus-level filter uses; populates the cache on success.
+		checkTxSignature(tx, as, pol)
 	}
 
 	if numWorkers <= 1 {

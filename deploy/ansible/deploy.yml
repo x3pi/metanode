@@ -86,6 +86,9 @@
 
     - name: Set cluster vars from metanode_cluster
       set_fact:
+        chain_id: "{{ hostvars[groups['metanode_cluster'][0]]['chain_id'] | default(991) }}"
+        cluster_config_dir: "{{ hostvars[groups['metanode_cluster'][0]]['cluster_config_dir'] | default(deploy_dir) }}"
+        metanode_install_dir: "{{ hostvars[groups['metanode_cluster'][0]]['metanode_install_dir'] | default('/opt/metanode') }}"
         snapshot_frequency_blocks: "{{ hostvars[groups['metanode_cluster'][0]]['snapshot_frequency_blocks'] | default(50) }}"
         epoch_duration_seconds: "{{ hostvars[groups['metanode_cluster'][0]]['epoch_duration_seconds'] | default(60) }}"
         snapshot_max_snapshots: "{{ hostvars[groups['metanode_cluster'][0]]['snapshot_max_snapshots'] | default(2) }}"
@@ -123,7 +126,7 @@
     - name: Check if node key directory exists locally
       delegate_to: localhost
       ansible.builtin.stat:
-        path: "{{ deploy_dir }}/node-{{ item }}_keys"
+        path: "{{ cluster_config_dir }}/node-{{ item }}_keys"
       loop: "{{ target_active_nodes }}"
       register: local_node_keys_stat
       become: no
@@ -161,7 +164,7 @@
           --install-dir {{ metanode_install_dir | quote }}
           {{ '--clean' if not (keep_data | bool) else '' }}
           {{ '--reset-all' if (target_node == 'all' and not (keep_data | bool)) else '' }}
-      when: ansible_action in ['deploy', 'setup'] and active_nodes | length > 0
+      when: manage_snapshot_storage | default(true) | bool and ansible_action in ['deploy', 'setup'] and active_nodes | length > 0
 
     - name: Validate snapshot storage resize or recreation before stopping nodes
       ansible.builtin.script:
@@ -169,10 +172,10 @@
         executable: python3
       changed_when: false
       any_errors_fatal: true
-      when: ansible_action in ['deploy', 'setup'] and active_nodes | length > 0
+      when: manage_snapshot_storage | default(true) | bool and ansible_action in ['deploy', 'setup'] and active_nodes | length > 0
     - name: Check snapshot_enabled for each node
       delegate_to: localhost
-      ansible.builtin.shell: "grep -q '\"snapshot_enabled\": true' {{ deploy_dir }}/node-{{ item }}_keys/execution.json && echo 'true' || echo 'false'"
+      ansible.builtin.shell: "grep -q '\"snapshot_enabled\": true' {{ cluster_config_dir }}/node-{{ item }}_keys/execution.json && echo 'true' || echo 'false'"
       loop: "{{ active_nodes }}"
       register: snapshot_check
       become: no
@@ -227,6 +230,10 @@
   connection: local
   gather_facts: false
   tags: ["post_deploy"]
+  pre_tasks:
+    - name: Resolve monitor ownership for this cluster
+      ansible.builtin.set_fact:
+        manage_global_monitors: "{{ hostvars[groups['metanode_cluster'][0]]['manage_global_monitors'] | default(true) }}"
   roles:
     # Runs before the Prometheus config generation below so Alertmanager is already listening on
     # :9093 by the time Prometheus (re)starts with the alerting: block that points at it.
@@ -243,36 +250,37 @@
     # should never block or misreport the status of the actual deploy. A real environment where
     # this becomes needed should configure passwordless sudo for this play instead of relying on
     # this being silently skipped.
-    - { role: alertmanager, become: true, when: "ansible_action not in ['stop', 'open_ports']", ignore_errors: true }
+    - { role: alertmanager, become: true, when: "manage_global_monitors | default(true) | bool and ansible_action not in ['stop', 'open_ports']", ignore_errors: true }
   tasks:
     - name: Generate /tmp/rpc_nodes.json for testing tools
-      ansible.builtin.shell: |
-        rm -f /tmp/rpc_nodes.json
-        (umask 077 && python3 "{{ playbook_dir }}/parse_inventory.py" "{{ playbook_dir }}/inventory.yml" json > /tmp/rpc_nodes.json)
-        chmod 0600 /tmp/rpc_nodes.json
-      args:
-        executable: /bin/bash
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/parse_inventory.py"
+          - "{{ hostvars['localhost'].resolved_inventory_file | default(playbook_dir ~ '/inventory.yml') }}"
+          - export
+      register: public_rpc_export
       when: "ansible_action not in ['stop', 'open_ports']"
 
-    - name: Sync /tmp/rpc_nodes.json to block_hash_checker config-m-nodes.json
+    - name: Sync public endpoints to block_hash_checker config-m-nodes.json
       ansible.builtin.copy:
-        src: /tmp/rpc_nodes.json
+        content: "{{ public_rpc_export.stdout }}"
         dest: "{{ playbook_dir }}/monitors/block_hash_checker/config-m-nodes.json"
         mode: '0600'
-      when: "ansible_action not in ['stop', 'open_ports']"
+      when: "manage_global_monitors | default(true) | bool and ansible_action not in ['stop', 'open_ports']"
 
     - name: Ensure Prometheus directory exists
       ansible.builtin.file:
         path: "{{ project_root }}/execution/deploy/prometheus"
         state: directory
         mode: '0755'
-      when: "ansible_action not in ['stop', 'open_ports']"
+      when: "manage_global_monitors | default(true) | bool and ansible_action not in ['stop', 'open_ports']"
 
     - name: Generate prometheus.yml dynamically for monitoring
       ansible.builtin.template:
         src: "{{ playbook_dir }}/roles/monitoring_config/templates/prometheus.yml.j2"
         dest: "{{ project_root }}/execution/deploy/prometheus/prometheus.yml"
-      when: "ansible_action not in ['stop', 'open_ports']"
+      when: "manage_global_monitors | default(true) | bool and ansible_action not in ['stop', 'open_ports']"
 
     - name: Copy alert_rules.yml alongside the generated prometheus.yml (docker-compose path)
       # execution/docker-compose.monitoring.yml mounts execution/deploy/prometheus/ straight into
@@ -282,7 +290,7 @@
       ansible.builtin.template:
         src: "{{ playbook_dir }}/roles/monitoring_config/templates/alert_rules.yml.j2"
         dest: "{{ project_root }}/execution/deploy/prometheus/alert_rules.yml"
-      when: "ansible_action not in ['stop', 'open_ports']"
+      when: "manage_global_monitors | default(true) | bool and ansible_action not in ['stop', 'open_ports']"
 
     # 2026-09-08: found that a bare-metal `prometheus` systemd service (this box's actual live
     # setup, e.g. m0) reads its config from /etc/prometheus/prometheus.yml -- a completely
@@ -296,7 +304,7 @@
       ansible.builtin.stat:
         path: /etc/prometheus
       register: bare_metal_prometheus_dir
-      when: "ansible_action not in ['stop', 'open_ports']"
+      when: "manage_global_monitors | default(true) | bool and ansible_action not in ['stop', 'open_ports']"
 
     - name: Sync generated prometheus.yml to the bare-metal Prometheus config
       ansible.builtin.copy:
@@ -317,7 +325,7 @@
       # should configure passwordless sudo for this play instead of relying on this being
       # silently skipped.
       ignore_errors: true
-      when: "ansible_action not in ['stop'] and bare_metal_prometheus_dir.stat.exists | default(false)"
+      when: "manage_global_monitors | default(true) | bool and ansible_action not in ['stop'] and bare_metal_prometheus_dir.stat.exists | default(false)"
 
     - name: Sync alert_rules.yml to the bare-metal Prometheus config
       ansible.builtin.template:
@@ -328,7 +336,7 @@
         mode: '0644'
       become: true
       ignore_errors: true
-      when: "ansible_action not in ['stop'] and bare_metal_prometheus_dir.stat.exists | default(false)"
+      when: "manage_global_monitors | default(true) | bool and ansible_action not in ['stop'] and bare_metal_prometheus_dir.stat.exists | default(false)"
 
     - name: Clear systemd start-limit lockout before restarting Prometheus
       # Prometheus's own unit file has no StartLimitBurst today, so this is a precaution rather
@@ -340,7 +348,7 @@
       failed_when: false
       changed_when: false
       ignore_errors: true
-      when: "ansible_action not in ['stop'] and bare_metal_prometheus_dir.stat.exists | default(false)"
+      when: "manage_global_monitors | default(true) | bool and ansible_action not in ['stop'] and bare_metal_prometheus_dir.stat.exists | default(false)"
 
     - name: Restart local Prometheus service
       ansible.builtin.shell: systemctl restart prometheus || true
@@ -348,4 +356,4 @@
       args:
         executable: /bin/bash
       ignore_errors: true
-      when: "ansible_action not in ['stop', 'open_ports']"
+      when: "manage_global_monitors | default(true) | bool and ansible_action not in ['stop', 'open_ports']"

@@ -100,6 +100,29 @@ var (
 	VerifyTransactionError      = &TransactionError{66, "verify transaction failed"}
 	AddToPoolError              = &TransactionError{67, "failed to add transaction to pool"}
 	UploadChunkError            = &TransactionError{68, "failed to upload chunk"}
+	AccountNotRegistered        = &TransactionError{69, "account not registered on parent chain"}
+	UnauthorizedSystemSender    = &TransactionError{70, "unauthorized sender for a rollup system event"}
+
+	// Ethereum native ingress & envelope admission errors
+	ErrDecodeRawEth           = &TransactionError{71, "failed to decode raw Ethereum transaction envelope"}
+	ErrPreEIP155              = &TransactionError{72, "pre-EIP-155 unprotected transactions are not allowed"}
+	ErrMalleableSignature     = &TransactionError{73, "malleable signature: s exceeds curve order / 2 (EIP-2)"}
+	ErrSenderRecovery         = &TransactionError{74, "failed to recover sender address from signature"}
+	ErrExceedsMaxEnvelopeSize = &TransactionError{75, "transaction envelope exceeds maximum allowed size"}
+	ErrExceedsMaxBatchSize    = &TransactionError{76, "batch contains too many transactions"}
+	ErrAlreadyKnown           = &TransactionError{77, "transaction already known in mempool or blockchain"}
+	ErrNonceTooLow            = &TransactionError{78, "nonce too low"}
+	ErrNonceTooHigh           = &TransactionError{79, "nonce too high"}
+	ErrInsufficientFunds      = &TransactionError{80, "insufficient funds for gas * price + value"}
+	ErrReplacementUnderpriced = &TransactionError{81, "replacement transaction underpriced"}
+	ErrIntrinsicGasTooLow     = &TransactionError{82, "intrinsic gas too low"}
+	ErrExceedsBlockGasLimit   = &TransactionError{83, "exceeds block gas limit"}
+	ErrInvalidSender          = &TransactionError{84, "invalid sender"}
+	ErrTxTypeNotSupported     = &TransactionError{85, "transaction type not supported"}
+	ErrMaxInitCodeSizeExceeded = &TransactionError{86, "max initcode size exceeded"}
+	ErrGasLimitReached        = &TransactionError{87, "gas limit reached"}
+	ErrEnvelopeBindingMismatch = &TransactionError{88, "transaction fields do not match raw envelope"}
+	ErrInvalidEnvelope         = &TransactionError{89, "invalid raw envelope bytes"}
 )
 
 var CodeToError = map[int64]*TransactionError{
@@ -175,6 +198,31 @@ var CodeToError = map[int64]*TransactionError{
 
 	// upload chunk
 	68: UploadChunkError,
+
+	// account registration gate
+	69: AccountNotRegistered,
+	70: UnauthorizedSystemSender,
+
+	// Ethereum native ingress & envelope admission errors
+	71: ErrDecodeRawEth,
+	72: ErrPreEIP155,
+	73: ErrMalleableSignature,
+	74: ErrSenderRecovery,
+	75: ErrExceedsMaxEnvelopeSize,
+	76: ErrExceedsMaxBatchSize,
+	77: ErrAlreadyKnown,
+	78: ErrNonceTooLow,
+	79: ErrNonceTooHigh,
+	80: ErrInsufficientFunds,
+	81: ErrReplacementUnderpriced,
+	82: ErrIntrinsicGasTooLow,
+	83: ErrExceedsBlockGasLimit,
+	84: ErrInvalidSender,
+	85: ErrTxTypeNotSupported,
+	86: ErrMaxInitCodeSizeExceeded,
+	87: ErrGasLimitReached,
+	88: ErrEnvelopeBindingMismatch,
+	89: ErrInvalidEnvelope,
 }
 
 // DescriptionToError provides reverse lookup from error description to TransactionError.
@@ -187,6 +235,54 @@ func init() {
 			DescriptionToError[err.Description] = err
 		}
 	}
+}
+
+func (te *TransactionError) Error() string {
+	if te == nil {
+		return ""
+	}
+	return te.Description
+}
+
+func (te *TransactionError) Is(target error) bool {
+	if te == nil {
+		return target == nil
+	}
+	t, ok := target.(*TransactionError)
+	if !ok {
+		return false
+	}
+	if te.Code == t.Code {
+		return true
+	}
+	// Semantic aliases
+	if (te.Code == InvalidNonce.Code && t.Code == ErrNonceTooLow.Code) ||
+		(te.Code == ErrNonceTooLow.Code && t.Code == InvalidNonce.Code) {
+		return true
+	}
+	if isFundsError(te.Code) && isFundsError(t.Code) {
+		return true
+	}
+	if isSenderError(te.Code) && isSenderError(t.Code) {
+		return true
+	}
+	if (te.Code == ErrIntrinsicGasTooLow.Code && t.Code == InvalidMaxGas.Code) ||
+		(te.Code == InvalidMaxGas.Code && t.Code == ErrIntrinsicGasTooLow.Code) {
+		return true
+	}
+	if (te.Code == ErrMaxInitCodeSizeExceeded.Code && t.Code == ErrMaxCodeSizeExceeded.Code) ||
+		(te.Code == ErrMaxCodeSizeExceeded.Code && t.Code == ErrMaxInitCodeSizeExceeded.Code) {
+		return true
+	}
+	return false
+}
+
+func isFundsError(code int64) bool {
+	return code == ErrInsufficientFunds.Code || code == ErrInsufficientBalance.Code || code == InvalidMaxFee.Code || code == InvalidAmount.Code
+}
+
+func isSenderError(code int64) bool {
+	return code == ErrInvalidSender.Code || code == InvalidSign.Code || code == InvalidSignSecp.Code || code == ErrSenderRecovery.Code
 }
 
 func (te *TransactionError) Proto() *pb.TransactionError {

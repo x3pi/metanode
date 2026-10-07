@@ -13,6 +13,7 @@
 use anyhow::Result;
 use consensus_core::{BlockAPI, CommittedSubDag, SystemTransaction};
 use prost::Message;
+use sha3::Digest;
 
 use tracing::{debug, info, trace, warn};
 
@@ -1495,7 +1496,7 @@ impl ExecutorClient {
         let (_, all_txs_to_process, _) = 
             crate::consensus::commit_processor::executor::compute_commit_gei_and_valid_txs(subdag, true)?;
 
-        let mut all_transactions_with_hash: Vec<(&[u8], Vec<u8>)> = Vec::new();
+        let mut all_transactions_with_hash: Vec<(&[u8], Vec<u8>, [u8; 32])> = Vec::new();
         let mut system_transactions: Vec<Vec<u8>> = Vec::new();
         let mut skipped_count = 0;
 
@@ -1518,27 +1519,31 @@ impl ExecutorClient {
                 continue;
             }
 
-            all_transactions_with_hash.push((tx_data, tx_hash));
+            let payload_hash: [u8; 32] = sha3::Keccak256::digest(tx_data).into();
+            all_transactions_with_hash.push((tx_data, tx_hash, payload_hash));
         }
 
-        // Dedup by txHash
+        // Dedup by payload_hash (full tx bytes) so mutated proto variants with identical
+        // raw_envelope cannot displace valid transactions.
         let original_len = all_transactions_with_hash.len();
         let mut unique_txs = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for (tx_data, tx_hash) in all_transactions_with_hash {
-            if seen.insert(tx_hash.clone()) {
-                unique_txs.push((tx_data, tx_hash));
+        for (tx_data, tx_hash, payload_hash) in all_transactions_with_hash {
+            if seen.insert(payload_hash) {
+                unique_txs.push((tx_data, tx_hash, payload_hash));
             }
         }
         let dedup_removed = original_len - unique_txs.len();
 
-        // Sort by txHash for deterministic ordering
-        unique_txs.sort_by(|(_, hash_a), (_, hash_b)| hash_a.cmp(hash_b));
+        // Sort by (tx_hash, payload_hash) for deterministic ordering
+        unique_txs.sort_by(|(_, hash_a, payload_a), (_, hash_b, payload_b)| {
+            hash_a.cmp(hash_b).then_with(|| payload_a.cmp(payload_b))
+        });
 
         // Convert to TransactionExe
         let transactions: Vec<TransactionExe> = unique_txs
             .iter()
-            .map(|(tx_data_ref, _)| TransactionExe {
+            .map(|(tx_data_ref, _, _)| TransactionExe {
                 digest: tx_data_ref.to_vec(),
                 worker_id: 0,
             })

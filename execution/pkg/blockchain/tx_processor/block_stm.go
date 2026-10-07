@@ -36,6 +36,11 @@ func ProcessTransactionsOptimistic(
 	[]types.ExecuteSCResult,
 	map[common.Hash]common.Address,
 ) {
+	// ZERO-FORK / BYZANTINE SAFETY: enforce signatures on EVERY execution path (speculative,
+	// canonical, validator, sync), independent of skipSignatureVerify. The filter is a pure function
+	// of (tx, pre-block sender state), so all honest nodes drop the exact same txs.
+	groupedGroups = FilterInvalidSignatures(chainState, groupedGroups)
+
 	var totalTxs int
 	for _, group := range groupedGroups {
 		totalTxs += len(group.Items)
@@ -107,7 +112,9 @@ func ProcessTransactionsOptimistic(
 	logger.Debug("⚡ [PERF] Pre-fetched %d unique addresses in %v", len(addrSlice), time.Since(startPreload))
 
 	// ─── Pre-verify BLS signatures once (covers both pipelines) ───────────────
-	if !skipSignatureVerify {
+	// FilterInvalidSignatures above already verified every tx and warmed the cache, so PreVerifySignatures
+	// is redundant unless the filter was bypassed (devnet switches).
+	if !skipSignatureVerify && (sigVerifyBypassedForDevnet() || execFilterDisabledForDevnetBenchmark()) {
 		startPreVerify := time.Now()
 		flatAll := make([]types.Transaction, 0, totalTxs)
 		for _, group := range groupedGroups {

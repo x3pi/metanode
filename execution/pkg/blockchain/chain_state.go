@@ -757,12 +757,18 @@ func (cs *ChainState) CloneSpeculative(header types.BlockHeader) (*ChainState, e
 	}
 
 	// 3. Copy SmartContractDB
-	clonedScDB := smart_contract_db.NewSmartContractDB(
-		cs.storageManager.GetStorageCode(),
-		cs.storageManager.GetStorageSmartContract(),
-		clonedAccDB,
-		cs.GetSmartContractDB().GetChangelogDB(),
-	)
+	scDB := cs.GetSmartContractDB()
+	var clonedScDB *smart_contract_db.SmartContractDB
+	if scDB != nil {
+		clonedScDB = scDB.Copy(clonedAccDB)
+	} else {
+		clonedScDB = smart_contract_db.NewSmartContractDB(
+			cs.storageManager.GetStorageCode(),
+			cs.storageManager.GetStorageSmartContract(),
+			clonedAccDB,
+			nil,
+		)
+	}
 
 	// 4. Construct cloned ChainState
 	clonedCS := &ChainState{
@@ -1691,24 +1697,8 @@ func (cs *ChainState) Close() {
 	}
 }
 
-// CloseSpeculative releases in-memory trie sessions of a cloned ChainState
-// WITHOUT closing the shared changelog databases.
-func (cs *ChainState) CloseSpeculative() {
-	if asDB := cs.GetAccountStateDB(); asDB != nil {
-		asDB.Close()
-	}
-	if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
-		if closer, ok := stakeDB.Trie().(interface{ Close() }); ok {
-			closer.Close()
-		}
-	}
-	if scDB := cs.GetSmartContractDB(); scDB != nil {
-		scDB.Discard()
-	}
-}
-
-// AbortSpeculative discards a speculative ChainState that lost a conflict and will never be adopted: unlike
-// CloseSpeculative it does not persist the tries' pending NOMT sessions, it aborts them, releasing the shared
+// AbortSpeculative discards a speculative ChainState that lost a conflict and will never be adopted:
+// it does not persist the tries' pending NOMT sessions, it aborts them, releasing the shared
 // handle for the sequential re-execution of the same block.
 func (cs *ChainState) AbortSpeculative() {
 	abort := func(t interface{}) {

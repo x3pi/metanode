@@ -165,38 +165,39 @@ func (tp *TransactionProcessor) MonitorDeviceKeyGoroutines() {
 // ════════════════════════════════════════════════════════════════════════
 
 func (v *TxVirtualExecutor) sendTransactionError(conn network.Connection, txHash common.Hash, code int64, message string, output []byte, msgID string) {
-	if v.messageSender != nil {
-		logger.Error("output %v", common.Bytes2Hex(output))
-		logger.Error("txHash %v", txHash)
-
-		body, err := proto.Marshal(
-			transaction.NewTransactionHashWithError(
-				txHash,
-				code,
-				message,
-				output,
-			).Proto(),
-		)
-		if err != nil {
-			logger.Error("sendTransactionError: marshal error: %v", err)
-			return
-		}
-		respMsg := p_network.NewMessage(&pb.Message{
-			Header: &pb.Header{
-				Command: command.TransactionError,
-				ID:      msgID,
-			},
-			Body: body,
-		})
-		conn.SendMessage(respMsg)
+	if v == nil || v.messageSender == nil {
+		return
 	}
+	logger.Error("output %v", common.Bytes2Hex(output))
+	logger.Error("txHash %v", txHash)
+
+	body, err := proto.Marshal(
+		transaction.NewTransactionHashWithError(
+			txHash,
+			code,
+			message,
+			output,
+		).Proto(),
+	)
+	if err != nil {
+		logger.Error("sendTransactionError: marshal error: %v", err)
+		return
+	}
+	respMsg := p_network.NewMessage(&pb.Message{
+		Header: &pb.Header{
+			Command: command.TransactionError,
+			ID:      msgID,
+		},
+		Body: body,
+	})
+	conn.SendMessage(respMsg)
 }
 
 // sendTransactionResult gửi phản hồi thành công qua command TransactionError với txHash và msgID.
 // Body chỉ chứa txHash bytes (không wrap trong TransactionHashWithError).
 // msgID được đặt trong header để client có thể match response với request.
 func (v *TxVirtualExecutor) sendTransactionResult(conn network.Connection, txHash common.Hash, msgID string) {
-	if v.messageSender == nil {
+	if v == nil || v.messageSender == nil {
 		return
 	}
 
@@ -206,6 +207,22 @@ func (v *TxVirtualExecutor) sendTransactionResult(conn network.Connection, txHas
 			ID:      msgID,
 		},
 		Body: txHash.Bytes(),
+	})
+	conn.SendMessage(respMsg)
+}
+
+// sendTransactionSuccessBytes sends a successful response with an arbitrary byte payload (e.g. RLP encoded list of hashes).
+func (v *TxVirtualExecutor) sendTransactionSuccessBytes(conn network.Connection, body []byte, msgID string) {
+	if v == nil || v.messageSender == nil {
+		return
+	}
+
+	respMsg := p_network.NewMessage(&pb.Message{
+		Header: &pb.Header{
+			Command: command.TransactionSuccess,
+			ID:      msgID,
+		},
+		Body: body,
 	})
 	conn.SendMessage(respMsg)
 }

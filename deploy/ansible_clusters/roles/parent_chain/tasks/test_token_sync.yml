@@ -1,0 +1,108 @@
+---
+# Keep --test-only non-disruptive when the configured credential is already
+# active. A process cannot observe an environment-file change until it restarts.
+- name: Render Parent Chain security environment for integration tests
+  ansible.builtin.template:
+    src: security.env.j2
+    dest: "{{ node_data_dir }}/security.env"
+    mode: '0600'
+  register: parent_chain_security_env
+  no_log: true
+
+- name: Check whether Parent Chain has the configured RPC token
+  ansible.builtin.shell: |
+    python3 - <<'PY'
+    import pathlib
+    import re
+    import subprocess
+
+    security_env = pathlib.Path("{{ node_data_dir }}/security.env").read_bytes()
+    expected_match = re.search(rb'^PARENT_CHAIN_RPC_TOKEN="(.*)"$', security_env, re.MULTILINE)
+    listener = subprocess.run(
+        ["ss", "-ltnpH", "sport = :{{ parent_http_port | default(8547) }}"],
+        capture_output=True,
+        check=False,
+    ).stdout.decode(errors="replace")
+    pid_match = re.search(r"pid=(\d+)", listener)
+
+    if not expected_match or not pid_match:
+        print("restart-required")
+        raise SystemExit(0)
+
+    pid = pid_match.group(1)
+    cmdline_path = pathlib.Path(f"/proc/{pid}/cmdline")
+    environ_path = pathlib.Path(f"/proc/{pid}/environ")
+    if not cmdline_path.exists() or not environ_path.exists():
+        print("restart-required")
+        raise SystemExit(0)
+
+    executable = cmdline_path.read_bytes().split(b"\0", 1)[0]
+    if executable != b"{{ bin_dir }}/parent_chain":
+        print("restart-required")
+        raise SystemExit(0)
+
+    active = next(
+        (item.split(b"=", 1)[1] for item in environ_path.read_bytes().split(b"\0")
+         if item.startswith(b"PARENT_CHAIN_RPC_TOKEN=")),
+        None,
+    )
+    print("in-sync" if active == expected_match.group(1) else "restart-required")
+    PY
+  args:
+    executable: /bin/bash
+  register: parent_chain_token_state
+  changed_when: false
+  no_log: true
+
+- name: Restart Parent Chain when its RPC token is stale
+  when: parent_chain_security_env.changed or parent_chain_token_state.stdout == 'restart-required'
+  block:
+    - name: Restart Parent Chain via systemd
+      when: use_systemd | default(false) | bool
+      ansible.builtin.systemd:
+        name: metanode-parentchain
+        state: restarted
+
+    - name: Restart Parent Chain daemon with the synchronized environment
+      when: not (use_systemd | default(false) | bool)
+      become_user: "{{ ansible_user | default('abc') }}"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        pid_file="{{ node_data_dir }}/parent_chain.pid"
+        for pid in $(ss -ltnpH "sport = :{{ parent_http_port | default(8547) }}" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p'); do
+          if [ -r "/proc/$pid/cmdline" ] && tr '\0' '\n' < "/proc/$pid/cmdline" | grep -Fxq "{{ bin_dir }}/parent_chain"; then
+            kill -SIGTERM "$pid"
+            for _ in $(seq 1 20); do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 1
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+              echo "Parent Chain process $pid did not stop" >&2
+              exit 1
+            fi
+          fi
+        done
+        rm -f "$pid_file"
+        if ss -ltnpH "sport = :{{ parent_http_port | default(8547) }}" 2>/dev/null | grep -q .; then
+          echo "Parent Chain RPC port is still occupied" >&2
+          exit 1
+        fi
+        set -a
+        . "{{ node_data_dir }}/security.env"
+        set +a
+        nohup "{{ bin_dir }}/parent_chain" \
+          -data-dir "{{ node_data_dir }}" \
+          -http ":{{ parent_http_port | default(8547) }}" \
+          -rust-config "{{ node_data_dir }}/node_parent.toml" \
+          >> "{{ base_log_dir }}/parent_chain.log" 2>&1 &
+        echo $! > "$pid_file"
+      args:
+        executable: /bin/bash
+        chdir: "{{ node_data_dir }}"
+
+    - name: Wait for synchronized Parent Chain RPC
+      ansible.builtin.wait_for:
+        port: "{{ parent_http_port | default(8547) }}"
+        host: "{{ ansible_host | default('127.0.0.1') }}"
+        delay: 1
+        timeout: 25

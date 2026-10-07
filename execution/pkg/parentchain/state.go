@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
@@ -17,6 +18,7 @@ var (
 	ErrFloatInsufficientBalance = errors.New("float account: insufficient balance")
 	ErrFloatAlreadyResolved     = errors.New("float account: messageID already resolved (claimed or reclaimed)")
 	ErrFloatUnknownMessage      = errors.New("float account: unknown messageID")
+	ErrFloatUnknownSource       = errors.New("float account: deposit source is not a registered cluster")
 	ErrFloatReclaimTooEarly     = errors.New("float account: reclaim timeout not reached yet")
 	ErrFloatNotReclaimable      = errors.New("float account: this messageID cannot be reclaimed")
 	ErrFloatVelocityExceeded    = errors.New("float account: transfer outflow velocity limit exceeded")
@@ -26,6 +28,7 @@ var (
 )
 
 var (
+	DepositFloatDomainTag    = []byte("DEPOSIT_FLOAT_V1:")
 	TransferFloatDomainTag   = []byte("TRANSFER_FLOAT_V1:")
 	ReclaimFloatDomainTag    = []byte("RECLAIM_FLOAT_V1:")
 	MarkClaimedDomainTag     = []byte("MARK_CLAIMED_FLOAT_V1:")
@@ -53,6 +56,18 @@ func padTo32(val *big.Int) []byte {
 	res := make([]byte, 32)
 	copy(res[32-len(b):], b)
 	return res
+}
+
+func ComputeDepositFloatMessage(destKey cm.PublicKey, destClusterID uint64, sender, target common.Address, amount *big.Int, msgID common.Hash) []byte {
+	buf := make([]byte, 0, len(DepositFloatDomainTag)+48+8+20+20+32+32)
+	buf = append(buf, DepositFloatDomainTag...)
+	buf = append(buf, destKey[:]...)
+	buf = appendUint64BE(buf, destClusterID)
+	buf = append(buf, sender.Bytes()...)
+	buf = append(buf, target.Bytes()...)
+	buf = append(buf, padTo32(amount)...)
+	buf = append(buf, msgID.Bytes()...)
+	return buf
 }
 
 func ComputeTransferFloatMessage(fromKey, toKey cm.PublicKey, sender, target common.Address, value, fee *big.Int, payloadHash common.Hash, nonce uint64) []byte {
@@ -110,8 +125,8 @@ func ensureChainRegistry(store Store, keyHash common.Hash, key cm.PublicKey, clu
 	return nil
 }
 
-// DepositToFloat credits destKey's NodeFloatAccount by amount and records messageID.
-func DepositToFloat(store Store, destKey cm.PublicKey, destClusterIDDesc uint64, sender, target common.Address, amount *big.Int, messageID common.Hash, blockTime uint64) error {
+// DepositToFloat credits destKey's NodeFloatAccount by amount with certified proof from sourceKey, and records messageID.
+func DepositToFloat(store Store, sourceKey, destKey cm.PublicKey, destClusterIDDesc uint64, sender, target common.Address, amount *big.Int, messageID common.Hash, cert cm.Sign, blockTime uint64) error {
 	if destKey == (cm.PublicKey{}) {
 		return errors.New("DepositToFloat: zero destination public key")
 	}
@@ -122,6 +137,25 @@ func DepositToFloat(store Store, destKey cm.PublicKey, destClusterIDDesc uint64,
 		return err
 	} else if found {
 		return fmt.Errorf("DepositToFloat: %w: %s", ErrFloatAlreadyResolved, messageID.Hex())
+	}
+
+	// 1. The source cluster must be a registered cluster and must certify the deposit. A deposit mints float,
+	// so there is no unauthenticated mode: a missing (zero) source key is rejected, never skipped.
+	if sourceKey == (cm.PublicKey{}) {
+		return fmt.Errorf("DepositToFloat: %w", ErrFloatUnknownSource)
+	}
+	sourceHash := crypto.Keccak256Hash(sourceKey[:])
+	if src, found, err := store.GetChainRegistry(sourceHash); err != nil {
+		return err
+	} else if !found || !src.Authorized {
+		// A registry entry that exists only because the key RECEIVED float is not a trusted certifier.
+		return fmt.Errorf("DepositToFloat: %w", ErrFloatUnknownSource)
+	}
+
+	// 2. Verify the source cluster's BLS signature on the deposit message
+	digest := ComputeDepositFloatMessage(destKey, destClusterIDDesc, sender, target, amount, messageID)
+	if !bls.VerifySign(sourceKey, cert, digest) {
+		return fmt.Errorf("DepositToFloat: %w", ErrInvalidSignature)
 	}
 
 	destHash := crypto.Keccak256Hash(destKey[:])
@@ -148,8 +182,9 @@ func DepositToFloat(store Store, destKey cm.PublicKey, destClusterIDDesc uint64,
 	if err := store.SetFloat(floatTotalSupplyKey, newTotal); err != nil {
 		return err
 	}
+	srcKeyCopy := sourceKey
 	err = store.SetTransferRecord(messageID, FloatTransferRecord{
-		SourceKey:            nil,
+		SourceKey:            &srcKeyCopy,
 		DestKey:              destKey,
 		Value:                new(big.Int).Set(amount),
 		ConfirmedAtBlockTime: blockTime,
@@ -193,11 +228,11 @@ func TransferFloat(
 	toHash := crypto.Keccak256Hash(toKey[:])
 
 	// The source chain must exist (since it has funds), no lazy create for source.
-	_, found, err := store.GetChainRegistry(fromHash)
+	srcEntry, found, err := store.GetChainRegistry(fromHash)
 	if err != nil {
 		return common.Hash{}, err
 	}
-	if !found {
+	if !found || !srcEntry.Authorized {
 		return common.Hash{}, errors.New("TransferFloat: unknown source chain")
 	}
 
@@ -452,18 +487,115 @@ func RegisterAccount(store Store, userAddress common.Address, floatIdentityKey c
 		// It's a self-registration, the cluster BLS signature is sufficient.
 	} else {
 		// Normal user registration requires a valid ECDSA signature.
-		userHash := crypto.Keccak256Hash(digest)
-		pubKey, err := crypto.SigToPub(userHash.Bytes(), userSig)
-		if err != nil {
-			return fmt.Errorf("RegisterAccount: invalid user signature: %w", err)
+		s := make([]byte, len(userSig))
+		copy(s, userSig)
+		if len(s) == 65 && s[64] >= 27 {
+			s[64] -= 27
 		}
-		recoveredAddr := crypto.PubkeyToAddress(*pubKey)
+		userHash := crypto.Keccak256Hash(digest)
+		pubKey, err := crypto.SigToPub(userHash.Bytes(), s)
+		var recoveredAddr common.Address
+		if err == nil {
+			recoveredAddr = crypto.PubkeyToAddress(*pubKey)
+		}
+		if recoveredAddr != userAddress {
+			// Also accept standard Ethereum personal_sign prefix
+			ethHash := accounts.TextHash(digest)
+			if pubKey2, err2 := crypto.SigToPub(ethHash, s); err2 == nil {
+				recoveredAddr = crypto.PubkeyToAddress(*pubKey2)
+			}
+		}
 		if recoveredAddr != userAddress {
 			return fmt.Errorf("RegisterAccount: user signature address mismatch: got %s, want %s", recoveredAddr.Hex(), userAddress.Hex())
 		}
 	}
 
-	return store.SetAccountRegistry(userAddress, floatIdentityKey)
+	if err := store.SetAccountRegistry(userAddress, floatIdentityKey); err != nil {
+		return err
+	}
+
+	clusterHash := crypto.Keccak256Hash(floatIdentityKey.Bytes())
+	return store.AppendAccountRegistration(clusterHash, &AccountRegisteredEvent{
+		UserAddress: userAddress,
+		ClusterKey:  floatIdentityKey,
+	})
+}
+
+// ErrBalanceInsufficient is returned by TransferBalance when the sender cannot cover the amount.
+var ErrBalanceInsufficient = errors.New("float account: insufficient balance")
+
+// TransferBalance moves amount from fromKey to toKey: a plain account-to-account transfer between BLS identities.
+// It has no cluster semantics (no certificate, no inbound event, no velocity window) and never changes the total
+// supply. The recipient is entered in the ChainRegistry (unauthorized) so the supply invariant counts it, and in the
+// AccountRegistry under the address derived from its key so it can sign its own transactions later.
+func TransferBalance(store Store, fromKey, toKey cm.PublicKey, amount *big.Int) error {
+	if amount == nil || amount.Sign() <= 0 {
+		return ErrFloatInvalidAmount
+	}
+	if toKey == (cm.PublicKey{}) {
+		return errors.New("TransferBalance: zero destination public key")
+	}
+	if fromKey == toKey {
+		return errors.New("TransferBalance: source and destination key are the same")
+	}
+	fromHash := crypto.Keccak256Hash(fromKey[:])
+	toHash := crypto.Keccak256Hash(toKey[:])
+
+	fromBal, err := store.GetFloat(fromHash)
+	if err != nil {
+		return err
+	}
+	if fromBal.Cmp(amount) < 0 {
+		return fmt.Errorf("TransferBalance: %w (has %s, needs %s)", ErrBalanceInsufficient, fromBal.String(), amount.String())
+	}
+	toBal, err := store.GetFloat(toHash)
+	if err != nil {
+		return err
+	}
+	if err := ensureChainRegistry(store, toHash, toKey, 0); err != nil {
+		return err
+	}
+	toAddr := common.BytesToAddress(toHash[12:])
+	if _, found, err := store.GetAccountRegistry(toAddr); err != nil {
+		return err
+	} else if !found {
+		if err := store.SetAccountRegistry(toAddr, toKey); err != nil {
+			return err
+		}
+	}
+	if err := store.SetFloat(fromHash, new(big.Int).Sub(fromBal, amount)); err != nil {
+		return err
+	}
+	return store.SetFloat(toHash, new(big.Int).Add(toBal, amount))
+}
+
+// ApplyGenesisFloat creates the float balances that exist at genesis (and the total supply they add up to). Every
+// validator runs it with the same genesis file inside block 1, so the result is deterministic and part of block 1's
+// state root. Each holder is entered in the ChainRegistry (unauthorized) and the AccountRegistry.
+func ApplyGenesisFloat(store Store, allocs []FloatAllocation) error {
+	total, err := store.GetFloat(floatTotalSupplyKey)
+	if err != nil {
+		return err
+	}
+	total = new(big.Int).Set(total)
+	for _, a := range allocs {
+		h := crypto.Keccak256Hash(a.Key[:])
+		cur, err := store.GetFloat(h)
+		if err != nil {
+			return err
+		}
+		if err := ensureChainRegistry(store, h, a.Key, 0); err != nil {
+			return err
+		}
+		if err := store.SetAccountRegistry(common.BytesToAddress(h[12:]), a.Key); err != nil {
+			return err
+		}
+		if err := store.SetFloat(h, new(big.Int).Add(cur, a.Balance)); err != nil {
+			return err
+		}
+		total.Add(total, a.Balance)
+	}
+	return store.SetFloat(floatTotalSupplyKey, total)
 }
 
 // CheckFloatSupplyInvariant verifies that the sum of all NodeFloatAccounts equals the total deposited.
@@ -507,11 +639,11 @@ func SubmitStateRoot(store Store, clusterPubKey cm.PublicKey, epoch uint64, stat
 	clusterHash := crypto.Keccak256Hash(clusterPubKey[:])
 	
 	// Check if cluster exists
-	_, found, err := store.GetChainRegistry(clusterHash)
+	entry, found, err := store.GetChainRegistry(clusterHash)
 	if err != nil {
 		return err
 	}
-	if !found {
+	if !found || !entry.Authorized {
 		return fmt.Errorf("SubmitStateRoot: unknown cluster")
 	}
 

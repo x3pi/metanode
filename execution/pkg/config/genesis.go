@@ -21,9 +21,10 @@ type GenesisConfig struct {
 
 // GenesisData cấu trúc dữ liệu chính cho toàn bộ genesis.json
 type GenesisData struct {
-	Config     GenesisConfig            `json:"config"`
-	Validators []*pb.Validator          `json:"validators"`
-	Alloc      []state.JsonAccountState `json:"alloc"`
+	Config             GenesisConfig            `json:"config"`
+	Validators         []*pb.Validator          `json:"validators"`
+	Alloc              []state.JsonAccountState `json:"alloc"`
+	RegisteredAccounts []string                 `json:"registered_accounts,omitempty"`
 }
 
 // LoadGenesisData loads genesis data from a JSON file.  Returns an error if the file cannot be opened or parsed.

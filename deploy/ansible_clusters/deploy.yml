@@ -10,35 +10,64 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  become: false
+  any_errors_fatal: true
   tags: ["build", "prepare"]
   roles:
     - role: build
+      when: deploy_action in ['setup', 'deploy', 'restart', 'reset']
 
 # ── Play 2: Deploy Parent Chain ──────────────────────────────────────────────
 - name: "Phase 2: Deploy Parent Chain Node"
   hosts: parent_chain_nodes
   gather_facts: true
   become: true
-  tags: ["parent_chain", "core"]
+  any_errors_fatal: true
+  tags: ["parent_chain", "core", "open_ports"]
   roles:
     - role: common
+      when: deploy_action != 'open_ports'
     - role: parent_chain
 
 # ── Play 3: Deploy Execution Clusters ────────────────────────────────────────
-- name: "Phase 3: Deploy Sharded Execution Clusters (EVM ChainID 991)"
+- name: "Phase 3: Deploy Sharded Execution Clusters (EVM Chain ID 991)"
   hosts: exec_clusters
   gather_facts: true
   become: true
-  tags: ["exec_clusters", "shards"]
+  any_errors_fatal: true
+  tags: ["exec_clusters", "shards", "open_ports"]
   roles:
     - role: common
+      when: deploy_action != 'open_ports'
     - role: exec_cluster
 
+# ── Test authentication preflight ────────────────────────────────────────────
+# Test-only runs must use the same deposit credential as the already-running
+# Parent Chain. This role restarts only the Parent Chain when that credential is
+# stale; it does not redeploy the execution clusters.
+- name: "Phase 4: Synchronize Parent Chain RPC authentication for tests"
+  hosts: parent_chain_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tags: ["test", "verify"]
+  tasks:
+    - name: Synchronize Parent Chain token before integration tests
+      ansible.builtin.include_role:
+        name: parent_chain
+        tasks_from: test_token_sync
+      when:
+        - deploy_action not in ['stop', 'clean']
+        - run_integration_tests | default(false) | bool
+
+
 # ── Play 4: Post-Deployment Testing ──────────────────────────────────────────
-- name: "Phase 4: Integration & Scenario Testing"
+- name: "Phase 5: Integration & Scenario Testing"
   hosts: localhost
   connection: local
   gather_facts: false
+  become: false
+  any_errors_fatal: true
   tags: ["test", "verify"]
   roles:
     - role: testing

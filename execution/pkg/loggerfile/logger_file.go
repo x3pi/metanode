@@ -17,6 +17,7 @@ import (
 
 // Global log directory configuration
 var globalLogDir = "logs"
+var globalLogDirMu sync.RWMutex // SetGlobalLogDir runs at startup while other goroutines may already create file loggers
 
 // Global epoch tracking for log directories
 var (
@@ -32,11 +33,15 @@ const (
 
 // SetGlobalLogDir sets the global log directory
 func SetGlobalLogDir(logDir string) {
+	globalLogDirMu.Lock()
 	globalLogDir = logDir
+	globalLogDirMu.Unlock()
 }
 
 // GetGlobalLogDir returns the current global log directory
 func GetGlobalLogDir() string {
+	globalLogDirMu.RLock()
+	defer globalLogDirMu.RUnlock()
 	return globalLogDir
 }
 
@@ -58,7 +63,7 @@ func GetGlobalEpoch() uint64 {
 // resolveLogRoot prepares the absolute path for the log root directory.
 func resolveLogRoot(root string) (string, error) {
 	if strings.TrimSpace(root) == "" {
-		root = globalLogDir
+		root = GetGlobalLogDir()
 	}
 	if strings.TrimSpace(root) == "" {
 		return "", errors.New("log root directory is empty")
@@ -69,10 +74,10 @@ func resolveLogRoot(root string) (string, error) {
 		return "", fmt.Errorf("failed to resolve log root %q: %w", root, err)
 	}
 
-	globalAbs, err := filepath.Abs(filepath.Clean(globalLogDir))
+	globalAbs, err := filepath.Abs(filepath.Clean(GetGlobalLogDir()))
 	if err == nil && globalAbs != "" {
 		if err := ensureWithinRoot(globalAbs, absRoot); err != nil {
-			return "", fmt.Errorf("security violation: requested root %q escapes global log dir %q", root, globalLogDir)
+			return "", fmt.Errorf("security violation: requested root %q escapes global log dir %q", root, GetGlobalLogDir())
 		}
 	}
 
@@ -241,7 +246,7 @@ func getEpochDir() string {
 // Log được tổ chức theo thư mục ngày: logs/YYYY-MM-DD/<filename>.log
 // Tự động tạo thư mục ngày và rotate khi file vượt quá 200MB
 func NewFileLogger(filePath string) (*FileLogger, error) {
-	logDir := globalLogDir
+	logDir := GetGlobalLogDir()
 	epochDir := getEpochDir()
 
 	currentDate := time.Now().Format("2006-01-02")

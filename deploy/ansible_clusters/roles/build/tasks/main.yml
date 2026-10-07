@@ -1,0 +1,52 @@
+---
+- name: Build and verify binaries locally
+  delegate_to: localhost
+  run_once: true
+  block:
+    - name: Ensure target local bin directory exists
+      ansible.builtin.file:
+        path: "{{ local_bin_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Check if parent_chain binary already exists
+      ansible.builtin.stat:
+        path: "{{ local_bin_dir }}/parent_chain"
+      register: parent_bin_stat
+
+    - name: Check if simple_chain binary already exists
+      ansible.builtin.stat:
+        path: "{{ local_bin_dir }}/simple_chain"
+      register: simple_bin_stat
+
+    - name: Build parent_chain binary
+      when: not (skip_build | default(false)) or not parent_bin_stat.stat.exists
+      ansible.builtin.command:
+        cmd: "go build -o {{ local_bin_dir }}/parent_chain ."
+        chdir: "{{ playbook_dir }}/../../execution/cmd/parent_chain"
+      environment:
+        PATH: "/usr/local/go/bin:{{ ansible_env.PATH | default('/usr/local/bin:/usr/bin:/bin') }}"
+
+    - name: Build simple_chain binary
+      when: not (skip_build | default(false)) or not simple_bin_stat.stat.exists
+      ansible.builtin.command:
+        cmd: "go build -o {{ local_bin_dir }}/simple_chain ."
+        chdir: "{{ playbook_dir }}/../../execution/cmd/simple_chain"
+      environment:
+        PATH: "/usr/local/go/bin:{{ ansible_env.PATH | default('/usr/local/bin:/usr/bin:/bin') }}"
+
+    - name: Build bls_pubkey tool (controller-side validator key pre-flight; not distributed to nodes)
+      ansible.builtin.command:
+        cmd: "go build -o {{ local_bin_dir }}/bls_pubkey ."
+        chdir: "{{ playbook_dir }}/../../execution/cmd/tool/bls_pubkey"
+      environment:
+        PATH: "/usr/local/go/bin:{{ ansible_env.PATH | default('/usr/local/bin:/usr/bin:/bin') }}"
+
+    - name: Set executable permissions on built binaries
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: '0755'
+      loop:
+        - "{{ local_bin_dir }}/parent_chain"
+        - "{{ local_bin_dir }}/simple_chain"
+        - "{{ local_bin_dir }}/bls_pubkey"

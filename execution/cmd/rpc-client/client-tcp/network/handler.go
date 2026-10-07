@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp/command"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -24,13 +25,15 @@ import (
 var ErrorCommandNotFound = errors.New("command not found")
 
 type Handler struct {
-	accountStateChan     chan types.AccountState
-	receiptChan          chan types.Receipt
-	eventLogChan         chan types.EventLogs
-	transactionErrorChan chan types.TransactionError
-	deviceKeyChan        chan types.LastDeviceKey
-	nonceChan            chan uint64
-	txErrorChan          chan error
+	accountStateChan       chan types.AccountState
+	receiptChan            chan types.Receipt
+	eventLogChan           chan types.EventLogs
+	transactionErrorChan   chan types.TransactionError
+	deviceKeyChan          chan types.LastDeviceKey
+	nonceChan              chan uint64
+	txErrorChan            chan error
+	txSuccessChan          chan common.Hash
+	batchSuccessHashesChan chan []common.Hash
 }
 
 func NewHandler(
@@ -41,17 +44,27 @@ func NewHandler(
 	nonceChan chan uint64,
 ) *Handler {
 	return &Handler{
-		accountStateChan:     accountStateChan,
-		receiptChan:          receiptChan,
-		deviceKeyChan:        deviceKeyChan,
-		transactionErrorChan: transactionErrorChan,
-		nonceChan:            nonceChan,
-		txErrorChan:          make(chan error, 1),
+		accountStateChan:       accountStateChan,
+		receiptChan:            receiptChan,
+		deviceKeyChan:          deviceKeyChan,
+		transactionErrorChan:   transactionErrorChan,
+		nonceChan:              nonceChan,
+		txErrorChan:            make(chan error, 1),
+		txSuccessChan:          make(chan common.Hash, 100),
+		batchSuccessHashesChan: make(chan []common.Hash, 100),
 	}
 }
 
 func (h *Handler) TxErrorChan() chan error {
 	return h.txErrorChan
+}
+
+func (h *Handler) TxSuccessChan() chan common.Hash {
+	return h.txSuccessChan
+}
+
+func (h *Handler) BatchSuccessHashesChan() chan []common.Hash {
+	return h.batchSuccessHashesChan
 }
 
 func (h *Handler) HandleRequest(request network.Request) (err error) {
@@ -84,8 +97,42 @@ func (h *Handler) HandleRequest(request network.Request) (err error) {
 	case command.Receipt:
 		return h.handleReceipt(request)
 	case command.TransactionSuccess:
-		// Giao dịch đã vào mempool thành công, server trả về txHash (bỏ qua hoặc log debug)
-		// Không có action đặc biệt nào cần làm vì tx_sender sẽ poll receipt
+		// Giao dịch đã vào mempool thành công, server trả về txHash (hoặc RLP encoded list of hashes cho batch)
+		body := request.Message().Body()
+		if len(body) > 0 {
+			var firstHash common.Hash
+			var allHashes []common.Hash
+
+			if len(body) == 32 {
+				firstHash = common.BytesToHash(body)
+				allHashes = []common.Hash{firstHash}
+			} else {
+				var rawList [][]byte
+				if err := rlp.DecodeBytes(body, &rawList); err == nil && len(rawList) > 0 {
+					for _, b := range rawList {
+						h := common.BytesToHash(b)
+						allHashes = append(allHashes, h)
+					}
+					firstHash = allHashes[0]
+				} else if len(body) >= 32 {
+					firstHash = common.BytesToHash(body[:32])
+					allHashes = []common.Hash{firstHash}
+				}
+			}
+
+			if h.txSuccessChan != nil && firstHash != (common.Hash{}) {
+				select {
+				case h.txSuccessChan <- firstHash:
+				default:
+				}
+			}
+			if h.batchSuccessHashesChan != nil && len(allHashes) > 0 {
+				select {
+				case h.batchSuccessHashesChan <- allHashes:
+				default:
+				}
+			}
+		}
 		return nil
 	case command.DeviceKey:
 		return h.handleDeviceKey(request)

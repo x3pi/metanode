@@ -37,7 +37,7 @@ func (n *Node) handleBlockHash(w http.ResponseWriter, r *http.Request) {
 	skew := n.now().Sub(time.UnixMilli(ts))
 	known := n.knownNode(sender)
 	got, macErr := hex.DecodeString(r.Header.Get(hdrMac))
-	want, _ := hex.DecodeString(forwardMAC(n.secret, sender, ts, []byte(q)))
+	want, _ := hex.DecodeString(forwardMAC(n.secret, sender, ts, hashPath, []byte(q)))
 	if err != nil || tsErr != nil || macErr != nil || !known || skew > maxForwardSkew || skew < -maxForwardSkew || !macEqual(got, want) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -63,7 +63,7 @@ func (n *Node) fetchPeerHash(addr string, num uint64) (string, bool) {
 	}
 	req.Header.Set(hdrNode, n.cfg.NodeID)
 	req.Header.Set(hdrTs, strconv.FormatInt(ts, 10))
-	req.Header.Set(hdrMac, forwardMAC(n.secret, n.cfg.NodeID, ts, []byte(q)))
+	req.Header.Set(hdrMac, forwardMAC(n.secret, n.cfg.NodeID, ts, hashPath, []byte(q)))
 	resp, err := n.client.Do(req)
 	if err != nil {
 		return "", false

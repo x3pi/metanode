@@ -3,9 +3,21 @@
   set_fact:
     is_systemd: "{{ use_systemd | default(false) | bool }}"
 
+# Secure by default: a closed registry (the default) needs an explicit allow-list, otherwise nobody could ever
+# register and the chain would be unusable. Devnet must opt in with parent_open_cluster_registration: true.
+- name: Require an explicit cluster policy before deploying the Parent Chain genesis
+  when: "deploy_action in ['deploy', 'reset']"
+  ansible.builtin.assert:
+    that:
+      - (parent_open_cluster_registration | default(false) | bool) or ((parent_allowed_clusters | default([])) | length > 0) or ((parent_float_accounts | default([])) | length > 0)
+    fail_msg: >-
+      parent_open_cluster_registration is false (the default) but parent_allowed_clusters is empty. Set
+      parent_allowed_clusters (founding clusters) or parent_float_accounts (genesis balances; any key reaching parent_min_float_to_register may register) for production, or
+      parent_open_cluster_registration: true (devnet only).
+
 # ── Stop Service ─────────────────────────────────────────────────────────────
 - name: Stop Parent Chain service
-  when: "deploy_action in ['stop', 'restart', 'reset', 'clean']"
+  when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy', 'setup']"
   block:
     - name: Stop via systemd
       when: is_systemd
@@ -18,11 +30,17 @@
       when: not is_systemd
       ansible.builtin.shell: |
         if [ -f "{{ node_data_dir }}/parent_chain.pid" ]; then
-          kill -SIGTERM $(cat "{{ node_data_dir }}/parent_chain.pid") 2>/dev/null || true
+          kill -9 $(cat "{{ node_data_dir }}/parent_chain.pid") 2>/dev/null || true
           rm -f "{{ node_data_dir }}/parent_chain.pid"
         fi
-        pkill -f "{{ bin_dir }}/parent_chain.*:{{ parent_http_port | default(8547) }}" 2>/dev/null || true
-      ignore_errors: true
+        pkill -9 -f "{{ bin_dir }}/parent_chain.*{{ node_data_dir }}" 2>/dev/null || true
+        for pid in $(pgrep -f "{{ bin_dir }}/parent_chain" 2>/dev/null || true); do
+          cwd_path=$(readlink -f /proc/$pid/cwd 2>/dev/null || true)
+          if [ "$cwd_path" = "{{ node_data_dir }}" ]; then
+            kill -9 $pid 2>/dev/null || true
+          fi
+        done
+      failed_when: false
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────
 - name: Clean Parent Chain data directories
@@ -33,9 +51,62 @@
         path: "{{ item }}"
         state: absent
       loop:
+        - "{{ node_data_dir }}/chain_data"
+        - "{{ node_data_dir }}/storage"
         - "{{ node_data_dir }}/parentchain_db"
         - "{{ node_data_dir }}/consensus"
+        - "{{ node_data_dir }}/consensus_storage"
         - "{{ node_data_dir }}/rocksdb_dummy_init"
+        - "{{ node_data_dir }}/backup"
+
+# ── Firewall (UFW) Configuration ───────────────────────────────────────────
+# OPT-IN only (`--open-ports` => deploy_action=open_ports). The HTTP RPC is client-facing; the peer RPC and the metrics
+# endpoint are internal and are opened only to the other cluster members (plus `ufw_extra_sources`, e.g. a monitoring
+# host that scrapes metrics).
+- name: Firewall (UFW) Configuration for Parent Chain
+  when: "deploy_action == 'open_ports' or (open_ports | default(false) | bool)"
+  block:
+    - name: Check if UFW is active on Parent Chain host
+      ansible.builtin.command: ufw status
+      register: ufw_status_parent
+      changed_when: false
+      failed_when: false
+      become: true
+
+    - name: Compute the cluster member IPs allowed on internal ports
+      ansible.builtin.set_fact:
+        ufw_peer_ips: >-
+          {{ (((groups['exec_clusters'] | default([])) + (groups['parent_chain_nodes'] | default([])))
+              | unique
+              | map('extract', hostvars, 'ansible_host')
+              | select('defined')
+              | map('string')
+              | reject('equalto', '127.0.0.1')
+              | unique
+              | list) + (ufw_extra_sources | default([])) }}
+
+    - name: Automatically configure firewall (UFW) rules for Parent Chain
+      when:
+        - ufw_status_parent.rc == 0
+        - "'Status: active' in ufw_status_parent.stdout"
+      become: true
+      block:
+        - name: Allow the client-facing Parent Chain HTTP RPC port in UFW
+          ansible.builtin.command: "ufw allow {{ parent_http_port | default(parent_chain_rpc_port | default(8547)) }}/tcp comment 'Metanode Parent Chain HTTP RPC {{ inventory_hostname }}'"
+          register: ufw_parent_http
+          changed_when: "'Rule added' in ufw_parent_http.stdout or 'Rule updated' in ufw_parent_http.stdout"
+
+        - name: Allow internal Parent Chain ports (peer RPC, metrics, P2P) only from cluster members
+          ansible.builtin.command: "ufw allow from {{ item.1 }} to any port {{ item.0 }} proto tcp comment 'Metanode Parent Chain internal {{ inventory_hostname }}'"
+          loop: "{{ [peer_rpc_port | default(19501), metrics_port | default(19601), parent_p2p_port | default(19001)] | product(ufw_peer_ips) | list }}"
+          register: ufw_parent_rules
+          changed_when: "'Rule added' in ufw_parent_rules.stdout or 'Rule updated' in ufw_parent_rules.stdout"
+
+        - name: Reload UFW to apply port rules
+          ansible.builtin.command: ufw reload
+          when: >-
+            (ufw_parent_http is defined and ufw_parent_http.changed) or
+            (ufw_parent_rules is defined and ufw_parent_rules.changed)
 
 # ── Setup Configuration & Service Unit ───────────────────────────────────────
 - name: Setup Parent Chain configuration
@@ -46,6 +117,9 @@
         path: "{{ item }}"
         state: directory
         mode: '0755'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+        recurse: yes
       loop:
         - "{{ node_data_dir }}"
         - "{{ base_log_dir }}"
@@ -55,12 +129,44 @@
         src: parentchain_config.json.j2
         dest: "{{ node_data_dir }}/config.json"
         mode: '0644'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+
+    - name: Deploy Parent Chain genesis file
+      ansible.builtin.template:
+        src: parent_genesis.json.j2
+        dest: "{{ node_data_dir }}/parent_genesis.json"
+        mode: '0644'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+
+    - name: Copy Parent Chain consensus keys
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../consensus/metanode/config/{{ item }}"
+        dest: "{{ node_data_dir }}/{{ item }}"
+        mode: '0600'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+      loop:
+        - "node_{{ parent_node_id | default(0) }}_protocol_key.json"
+        - "node_{{ parent_node_id | default(0) }}_network_key.json"
 
     - name: Deploy Parent Chain Rust consensus node_parent.toml
       ansible.builtin.template:
         src: node_parent.toml.j2
         dest: "{{ node_data_dir }}/node_parent.toml"
         mode: '0644'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+
+    - name: Write security environment file (tokens / pins from vault vars, 0600)
+      ansible.builtin.template:
+        src: security.env.j2
+        dest: "{{ node_data_dir }}/security.env"
+        mode: '0600'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+      no_log: true
 
     - name: Deploy systemd service unit
       when: is_systemd
@@ -83,12 +189,15 @@
 
     - name: Start process via background daemon
       when: not is_systemd
+      become_user: "{{ ansible_user | default('abc') }}"
       ansible.builtin.shell: |
+        set -a; [ -f {{ node_data_dir }}/security.env ] && . {{ node_data_dir }}/security.env; set +a
         nohup {{ bin_dir }}/parent_chain \
           -data-dir {{ node_data_dir }} \
           -http :{{ parent_http_port | default(8547) }} \
           -rust-config {{ node_data_dir }}/node_parent.toml \
-          >> {{ base_log_dir }}/parent_chain.log 2>&1 &
+          -genesis {{ node_data_dir }}/parent_genesis.json \
+          >> {{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log 2>&1 &
         echo $! > {{ node_data_dir }}/parent_chain.pid
       args:
         chdir: "{{ node_data_dir }}"

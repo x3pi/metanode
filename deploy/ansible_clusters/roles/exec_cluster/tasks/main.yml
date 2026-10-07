@@ -1,11 +1,17 @@
 ---
+- name: Build the parent chain endpoint list (all validators, for quorum reads and failover)
+  ansible.builtin.set_fact:
+    parent_chain_urls_csv: "{% for h in groups['parent_chain_nodes'] %}http://{{ hostvars[h].ansible_host | default('127.0.0.1') }}:{{ hostvars[h].parent_http_port | default(8547) }}{% if not loop.last %},{% endif %}{% endfor %}"
+  when: groups['parent_chain_nodes'] is defined and (groups['parent_chain_nodes'] | length) > 0
+
+
 - name: Determine process management mode
   set_fact:
     is_systemd: "{{ use_systemd | default(false) | bool }}"
 
 # ── Stop Service ─────────────────────────────────────────────────────────────
 - name: Stop Execution Node {{ inventory_hostname }}
-  when: "deploy_action in ['stop', 'restart', 'reset', 'clean']"
+  when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy', 'setup']"
   block:
     - name: Stop via systemd
       when: is_systemd
@@ -18,11 +24,17 @@
       when: not is_systemd
       ansible.builtin.shell: |
         if [ -f "{{ node_data_dir }}/cluster.pid" ]; then
-          kill -SIGTERM $(cat "{{ node_data_dir }}/cluster.pid") 2>/dev/null || true
+          kill -9 $(cat "{{ node_data_dir }}/cluster.pid") 2>/dev/null || true
           rm -f "{{ node_data_dir }}/cluster.pid"
         fi
-        pkill -f "{{ bin_dir }}/simple_chain.*{{ node_data_dir }}/config.json" 2>/dev/null || true
-      ignore_errors: true
+        pkill -9 -f "{{ bin_dir }}/simple_chain.*{{ node_data_dir }}" 2>/dev/null || true
+        for pid in $(pgrep -f "{{ bin_dir }}/simple_chain" 2>/dev/null || true); do
+          cwd_path=$(readlink -f /proc/$pid/cwd 2>/dev/null || true)
+          if [ "$cwd_path" = "{{ node_data_dir }}" ]; then
+            kill -9 $pid 2>/dev/null || true
+          fi
+        done
+      failed_when: false
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────
 - name: Clean Execution Node {{ inventory_hostname }} data directories
@@ -40,6 +52,69 @@
         - "{{ node_data_dir }}/explorer-ro"
         - "{{ node_data_dir }}/raft"
         - "{{ node_data_dir }}/backup"
+        - "{{ node_data_dir }}/genesis.json"
+
+    - name: Remove temporary integrity sentinel
+      ansible.builtin.file:
+        path: /tmp/MTN_INTEGRITY_FAILED
+        state: absent
+      ignore_errors: true
+
+# ── Firewall (UFW) Configuration ───────────────────────────────────────────
+# OPT-IN only (`--open-ports` => deploy_action=open_ports): a normal setup/deploy/restart/reset must never change the
+# firewall. Client-facing ports (RPC) are opened to everyone; INTERNAL ports (P2P, Raft, Forward) are opened only to
+# the other cluster members (plus `ufw_extra_sources`, e.g. a monitoring host), never to the whole network.
+- name: Firewall (UFW) Configuration for Execution Node {{ inventory_hostname }}
+  when: "deploy_action == 'open_ports' or (open_ports | default(false) | bool)"
+  block:
+    - name: Check if UFW is active on {{ inventory_hostname }}
+      ansible.builtin.command: ufw status
+      register: ufw_status_exec
+      changed_when: false
+      failed_when: false
+      become: true
+
+    - name: Compute the cluster member IPs allowed on internal ports
+      ansible.builtin.set_fact:
+        ufw_peer_ips: >-
+          {{ (((groups['exec_clusters'] | default([])) + (groups['parent_chain_nodes'] | default([])))
+              | unique
+              | map('extract', hostvars, 'ansible_host')
+              | select('defined')
+              | map('string')
+              | reject('equalto', '127.0.0.1')
+              | unique
+              | list) + (ufw_extra_sources | default([])) }}
+
+    - name: Automatically configure firewall (UFW) rules for execution node
+      when:
+        - ufw_status_exec.rc == 0
+        - "'Status: active' in ufw_status_exec.stdout"
+      become: true
+      block:
+        - name: Allow the client-facing RPC port in UFW
+          ansible.builtin.command: "ufw allow {{ rpc_port }}/tcp comment 'Metanode RPC {{ inventory_hostname }}'"
+          register: ufw_exec_rpc
+          changed_when: "'Rule added' in ufw_exec_rpc.stdout or 'Rule updated' in ufw_exec_rpc.stdout"
+
+        - name: Allow internal cluster ports (P2P, Raft, Forward) only from cluster members
+          ansible.builtin.command: "ufw allow from {{ item.1 }} to any port {{ item.0 }} proto tcp comment 'Metanode internal {{ inventory_hostname }}'"
+          loop: "{{ [p2p_port, raft_port, forward_port] | product(ufw_peer_ips) | list }}"
+          register: ufw_exec_rules
+          changed_when: "'Rule added' in ufw_exec_rules.stdout or 'Rule updated' in ufw_exec_rules.stdout"
+
+        - name: Allow Parent Chain RPC port in UFW if host matches parent_chain_host
+          ansible.builtin.command: "ufw allow {{ parent_chain_rpc_port | default(10751) }}/tcp comment 'Metanode Parent Chain RPC'"
+          when: "(ansible_host | default('127.0.0.1')) == (parent_chain_host | default('127.0.0.1')) or (ansible_connection | default('')) == 'local'"
+          register: ufw_parent_rule
+          changed_when: "'Rule added' in ufw_parent_rule.stdout or 'Rule updated' in ufw_parent_rule.stdout"
+
+        - name: Reload UFW to apply port rules
+          ansible.builtin.command: ufw reload
+          when: >-
+            (ufw_exec_rpc is defined and ufw_exec_rpc.changed) or
+            (ufw_exec_rules is defined and ufw_exec_rules.changed) or
+            (ufw_parent_rule is defined and ufw_parent_rule.changed)
 
 # ── Setup Configuration, Genesis & Service Unit ──────────────────────────────
 - name: Setup Execution Node {{ inventory_hostname }}
@@ -50,6 +125,9 @@
         path: "{{ item }}"
         state: directory
         mode: '0755'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+        recurse: yes
       loop:
         - "{{ node_data_dir }}"
         - "{{ node_data_dir }}/data"
@@ -61,39 +139,187 @@
         - "{{ node_data_dir }}/explorer-ro"
         - "{{ base_log_dir }}"
 
-    - name: Ensure Raft HMAC secret key exists
+    - name: Ensure the Raft HMAC secret exists on this cluster's bootstrap source
       when: "(consensus_mode | default('raft')) == 'raft'"
       block:
-        - name: Check if Raft secret file exists
+        - name: Require an explicit bootstrap source for the shared Raft HMAC secret
+          ansible.builtin.assert:
+            that:
+              - >-
+                raft_secret_source is defined and
+                raft_secret_source in groups['exec_clusters'] and
+                (hostvars[raft_secret_source].raft_bootstrap | default(false) | bool) and
+                ((hostvars[raft_secret_source].cluster_id | string) == (cluster_id | string))
+            fail_msg: >-
+              {{ inventory_hostname }}: raft_secret_source must name the bootstrap replica in this cluster.
+              Refusing to generate a per-replica secret because that would break Raft HMAC authentication.
+
+        - name: Ensure the Raft HMAC secret directory exists on every replica
+          ansible.builtin.file:
+            path: "{{ (raft_secret_file | default(install_dir ~ '/raft_secret.key')) | dirname }}"
+            state: directory
+            mode: '0755'
+            owner: "{{ ansible_user | default('abc') }}"
+            group: "{{ ansible_user | default('abc') }}"
+
+        - name: Check the bootstrap source Raft secret
           ansible.builtin.stat:
             path: "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
-          register: raft_secret_stat
+          register: raft_secret_source_stat
+          when: inventory_hostname == raft_secret_source
 
-        - name: Generate random 32-byte HMAC secret if missing
-          when: not raft_secret_stat.stat.exists
+        - name: Generate a Raft HMAC secret on the bootstrap source if it is missing
+          when:
+            - inventory_hostname == raft_secret_source
+            - not raft_secret_source_stat.stat.exists
           ansible.builtin.shell: |
             mkdir -p "{{ install_dir }}"
             python3 -c "import secrets; print(secrets.token_hex(32), end='')" > "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
             chmod 600 "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
+            chown {{ ansible_user | default('abc') }}:{{ ansible_user | default('abc') }} "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
+          no_log: true
+
+        - name: Read the cluster Raft HMAC secret from its bootstrap source
+          ansible.builtin.slurp:
+            src: "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
+          delegate_to: "{{ raft_secret_source }}"
+          register: raft_secret_source_content
+          changed_when: false
+          no_log: true
+
+        - name: Synchronize the cluster Raft HMAC secret to this replica
+          ansible.builtin.copy:
+            content: "{{ raft_secret_source_content.content | b64decode }}"
+            dest: "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
+            owner: "{{ ansible_user | default('abc') }}"
+            group: "{{ ansible_user | default('abc') }}"
+            mode: '0600'
+          no_log: true
+
+    # ── Pre-flight: the validator's BLS secret must produce the public key that genesis registers ──────────────
+    # Runs on the controller with the freshly built tool (it is never shipped to nodes). The secret goes through
+    # stdin and no_log keeps it out of argv, process lists and Ansible output. A mismatch (or a missing tool /
+    # missing bls_pubkey in production) FAILS the deploy: attestations from such a node would stay PENDING forever.
+    - name: Pre-flight validator BLS key verification
+      when:
+        - "deploy_action in ['setup', 'deploy', 'restart']"
+        - bls_priv is defined and (bls_priv | length) > 0
+      delegate_to: localhost
+      become: false
+      block:
+        - name: Check that the bls_pubkey tool was built
+          ansible.builtin.stat:
+            path: "{{ local_bin_dir }}/bls_pubkey"
+          register: bls_pubkey_tool_stat
+
+        - name: Require the tool and an explicit bls_pubkey (genesis must never fall back to the private key)
+          ansible.builtin.assert:
+            that:
+              - bls_pubkey_tool_stat.stat.exists
+              - bls_pubkey is defined and (bls_pubkey | length) > 0
+            fail_msg: >-
+              {{ inventory_hostname }}: bls_priv is set but {{ local_bin_dir }}/bls_pubkey is missing or bls_pubkey is not
+              configured; refusing to deploy without verifying the validator BLS key.
+
+        - name: Derive the min-pk BLS public key from bls_priv (secret via stdin, no_log)
+          ansible.builtin.command:
+            cmd: "{{ local_bin_dir }}/bls_pubkey -stdin -hex"
+            stdin: "{{ bls_priv }}"
+          register: derived_bls_pubkey_res
+          changed_when: false
+          no_log: true
+
+        - name: Assert derived BLS pubkey matches configured bls_pubkey
+          ansible.builtin.assert:
+            that:
+              - (derived_bls_pubkey_res.stdout | trim | lower) == (bls_pubkey | trim | lower)
+            fail_msg: >-
+              VALIDATOR BLS KEY MISMATCH on {{ inventory_hostname }}: bls_priv derives
+              {{ derived_bls_pubkey_res.stdout | trim | lower }} but bls_pubkey is {{ bls_pubkey | trim | lower }}.
+              Attestations from this validator would stay PENDING indefinitely.
+            success_msg: "Validator BLS key verified on {{ inventory_hostname }}"
 
     - name: Generate cluster genesis if not present or reset
       ansible.builtin.shell: |
         python3 -c "
-        import json
-        with open('{{ deploy_dir }}/execution/cmd/simple_chain/genesis.json') as f:
+        import json, os
+        with open('{{ install_dir }}/genesis_base.json') as f:
             base = json.load(f)
 
-        devnet_sender_alloc = {
-            'address': '0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24',
+        # By design ONE cluster BLS key (the execution node's key) manages many accounts, so every
+        # genesis alloc below is registered with the same publicKeyBls.
+        cluster_bls = '{{ bls_pubkey | default(bls_pub | default(bls_priv)) }}'
+        alloc_map = {}
+
+        # 1. Base allocs from template (align publicKeyBls to cluster_bls)
+        for a in base.get('alloc', []):
+            addr_key = a.get('address', '').lower()
+            if addr_key:
+                a_copy = dict(a)
+                a_copy['publicKeyBls'] = cluster_bls
+                alloc_map[addr_key] = a_copy
+
+        # 2. Add dev keys from private_dev_keys.json matching cluster and 'common'
+        cid = str({{ cluster_id | default(1) }})
+        cname = '{{ cluster_name | default("exec1") }}'
+        dev_keys_path = '{{ install_dir }}/private_dev_keys.json'
+        if os.path.exists(dev_keys_path):
+            with open(dev_keys_path) as df:
+                dev_data = json.load(df)
+            allowed_groups = [
+                'cluster_' + cid,
+                cid,
+                cname,
+                '10' + cid,
+                'common'
+            ]
+            for group in allowed_groups:
+                for item in dev_data.get(group, []):
+                    addr = item.get('address', '')
+                    if addr:
+                        alloc_map[addr.lower()] = {
+                            'address': addr,
+                            'balance': '2000000000000000000000000000000',
+                            'pending_balance': '0',
+                            'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
+                            'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
+                            'publicKeyBls': cluster_bls,
+                        }
+
+        # 2.5. Add spam keys from generated_keys.json (if present) for TPS benchmarking
+        spam_keys_path = '{{ install_dir }}/generated_keys.json'
+        if os.path.exists(spam_keys_path):
+            with open(spam_keys_path) as skf:
+                spam_keys = json.load(skf)
+            for item in spam_keys:
+                s_addr = item.get('address', '')
+                if s_addr and s_addr.lower() not in alloc_map:
+                    alloc_map[s_addr.lower()] = {
+                        'address': s_addr,
+                        'balance': '2000000000000000000000000000000',
+                        'pending_balance': '0',
+                        'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
+                        'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
+                        'publicKeyBls': cluster_bls,
+                    }
+
+        # 3. Add explicit test devnet sender. It is signed by mtn_api.go's
+        # devnetSenderBLSPrivateKeyHex, so it must not use the cluster BLS key.
+        devnet_sender_addr = '0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24'
+        devnet_sender_bls = '{{ devnet_sender_bls_pubkey | default('0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc') }}'
+        alloc_map[devnet_sender_addr.lower()] = {
+            'address': devnet_sender_addr,
             'balance': '2000000000000000000000000000000',
             'pending_balance': '0',
             'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
             'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
-            'publicKeyBls': '0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc',
+            'publicKeyBls': devnet_sender_bls,
         }
 
-        exec1_alloc = {
-            'address': '0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5',
+        # 4. Cross-cluster validator allocs with explicit BLS public keys for Rollup signature verification
+        exec1_addr = '0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5'
+        alloc_map[exec1_addr.lower()] = {
+            'address': exec1_addr,
             'balance': '2000000000000000000000000000000',
             'pending_balance': '0',
             'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
@@ -101,8 +327,9 @@
             'publicKeyBls': '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128',
         }
 
-        exec2_alloc = {
-            'address': '0x0d4CC97b62a149a8fe8DE81262270426A80B0935',
+        exec2_addr = '0x0d4CC97b62a149a8fe8DE81262270426A80B0935'
+        alloc_map[exec2_addr.lower()] = {
+            'address': exec2_addr,
             'balance': '2000000000000000000000000000000',
             'pending_balance': '0',
             'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
@@ -110,26 +337,22 @@
             'publicKeyBls': '0x83221629eeff1a69aa96ac6aadea402a7b62a74647633c0743cd517b71dcd5cd39fec42841b953fc481dac039bceb465',
         }
 
-        cluster_alloc = {
-            'address': '{{ address }}',
+        # 5. Cluster self sequencer address
+        cluster_addr = '{{ address }}'
+        alloc_map[cluster_addr.lower()] = {
+            'address': cluster_addr,
             'balance': '2000000000000000000000000000000',
             'pending_balance': '0',
             'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
             'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
-            'publicKeyBls': '{{ bls_pubkey | default(bls_priv) }}',
+            'publicKeyBls': cluster_bls,
         }
 
-        # Load committee if exists (BFT mode fallback)
-        try:
-            with open('{{ deploy_dir }}/consensus/metanode/config/devnet_{{ cluster_name }}_keys/committee.json') as f:
-                committee = json.load(f)
-            auth = committee['authorities'][0]
-        except Exception:
-            auth = base['validators'][0]
+        auth = base['validators'][0]
 
         stake = '1000000000000000000000'
         g = dict(base)
-        g['config']['chainId'] = {{ evm_chain_id | default(991) }}
+        g['config']['chainId'] = {{ chain_id | default(991) }}
         g['validators'] = [{
             'address': '{{ address }}',
             'primary_address': '127.0.0.1:4000',
@@ -151,22 +374,52 @@
         g['total_stake'] = 1000
         g['quorum_threshold'] = 1000
         g['validity_threshold'] = 1000
-        
-        # Deduplicate alloc entries by address (case-insensitive)
-        alloc_map = {}
-        for a in list(base.get('alloc', [])) + [devnet_sender_alloc, exec1_alloc, exec2_alloc, cluster_alloc]:
-            alloc_map[a['address'].lower()] = a
         g['alloc'] = list(alloc_map.values())
 
         with open('{{ node_data_dir }}/genesis.json', 'w') as out:
             json.dump(g, out, indent=2)
         "
 
+    - name: Assert production secrets are not default devnet values (Issue #104 & #5.4)
+      ansible.builtin.assert:
+        that:
+          - (master_password | default('devnet-test-password')) != 'devnet-test-password'
+          - (app_pepper | default('devnet-test-pepper')) != 'devnet-test-pepper'
+          - (pk_admin_file_storage | default('87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623')) != '87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623'
+        fail_msg: "FATAL: In production environment (metanode_env=production), master_password, app_pepper, and pk_admin_file_storage must be explicitly configured via Ansible Vault and cannot use devnet defaults!"
+      when: "(metanode_env | default('production')) != 'devnet' and (node_env | default('production')) != 'devnet' and not (metanode_devnet | default(false) | bool)"
+
     - name: Deploy Execution Node config.json
       ansible.builtin.template:
         src: exec_config.json.j2
         dest: "{{ node_data_dir }}/config.json"
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
         mode: '0644'
+
+    - name: Write security environment file (tokens / pins from vault vars, 0600)
+      ansible.builtin.template:
+        src: security.env.j2
+        dest: "{{ node_data_dir }}/security.env"
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+        mode: '0600'
+      no_log: true
+
+    - name: Ensure correct ownership of node data directory and files
+      ansible.builtin.file:
+        path: "{{ node_data_dir }}"
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+        recurse: yes
+
+    - name: Ensure base log directory ownership
+      ansible.builtin.file:
+        path: "{{ base_log_dir }}"
+        state: directory
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
+        mode: '0755'
 
     - name: Deploy systemd service unit
       when: is_systemd
@@ -189,8 +442,13 @@
 
     - name: Start process via background daemon
       when: not is_systemd
+      become_user: "{{ ansible_user | default('abc') }}"
       ansible.builtin.shell: |
+        set -a; [ -f {{ node_data_dir }}/security.env ] && . {{ node_data_dir }}/security.env; set +a
         nohup env PARENT_CHAIN_URL="http://{{ parent_chain_host | default('127.0.0.1') }}:{{ parent_chain_rpc_port | default(8547) }}" \
+          PARENT_CHAIN_URLS="{{ parent_chain_urls_csv | default('') }}" \
+          BLS_CONSERVATION_MODE="{{ bls_conservation_mode | default('enforce') }}" \
+          BLS_CONSERVATION_INTERVAL_SECONDS="{{ bls_conservation_interval_seconds | default('300') }}" \
           {{ bin_dir }}/simple_chain \
           -config {{ node_data_dir }}/config.json \
           >> {{ base_log_dir }}/{{ inventory_hostname }}.log 2>&1 &
@@ -201,7 +459,7 @@
     - name: Wait for Cluster RPC port to respond
       ansible.builtin.wait_for:
         port: "{{ rpc_port }}"
-        host: "{{ ansible_host | default('127.0.0.1') }}"
+        host: "127.0.0.1"
         delay: 2
         timeout: 30
 

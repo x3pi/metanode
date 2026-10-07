@@ -23,6 +23,8 @@ benchmark_results/
 **/_book/
 **/book/
 **/build/
+# ...but the ansible_clusters "build" ROLE is source code, not a build artifact
+!deploy/ansible_clusters/roles/build/
 /build
 /build_app
 # Build artifacts
@@ -476,6 +478,9 @@ execution/cmd/rpc-client/rpc-client-bin
 
 # Ignore local inventory configurations & secrets
 deploy/ansible/inventory.yml
+deploy/ansible/inventory.*.yml
+!deploy/ansible/inventory.example.yml
+!deploy/ansible/inventory.sample.yml
 deploy/ansible/monitors/inventory.yml
 **/inventory.yml
 !**/inventory.example.yml
@@ -578,3 +583,13 @@ deploy/.bin.lock
 deploy/.build.lock
 deploy/.bin_staging.*
 execution/gen_recovery_committee
+
+# Generated exports of the fraud-proof doc (source of truth is the .md)
+execution/pkg/rollup/FRAUD_PROOF_FEASIBILITY_AND_SOLUTIONS.html
+execution/pkg/rollup/FRAUD_PROOF_FEASIBILITY_AND_SOLUTIONS.pdf
+deploy/ansible/monitors/block_hash_checker/checkpoint.json
+
+# chaos burn-in crash reports (multi-GB logs)
+execution/scripts/chaos_crash_reports/
+execution/parent_chain
+execution/scripts/test/bls_pubkey

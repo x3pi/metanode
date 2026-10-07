@@ -109,3 +109,18 @@ dev cục bộ thật (mặc định flag `-config` của `simple_chain` chính 
 Không sửa (không phải rủi ro cao — chỉ dùng cho dev cục bộ, không nằm trong đường triển khai
 thật của `deploy/`), nhưng nếu muốn dọn: gộp về 1 file `config.dev.json.example` + README ghi rõ
 "khoá devnet công khai, không dùng thật" là đủ, không cần xoá các biến thể theo node.
+
+## 5. Biến môi trường bảo mật thêm 2026-09-30 (đợt fix audit nội bộ)
+
+| Biến | Nơi dùng | Ý nghĩa |
+| :--- | :--- | :--- |
+| `SNAPSHOT_SERVER_TOKEN` | `executor/snapshot_server.go` | Nếu đặt: mọi request tới snapshot server (port `snapshot_server_port`) cần `Authorization: Bearer <token>`. `POST /api/snapshots/create` **luôn** cần token (không đặt = endpoint bị vô hiệu vì nó pause Go+Rust và rotate mất snapshot thật). |
+| `SNAPSHOT_SERVER_BIND` | `executor/snapshot_server.go` | Ghi đè địa chỉ bind (mặc định `0.0.0.0`; nên đặt `127.0.0.1` nếu không cần peer tải). |
+| `QUIC_PINNED_CERT_SHA256` | `pkg/quic_network/quic.go` | Danh sách SHA-256 (hex, phân cách dấu phẩy) của leaf cert peer hợp lệ. Không đặt = QUIC không xác thực peer (chỉ cảnh báo log). |
+
+Thay đổi hành vi (KHÔNG cần biến): (1) mọi đường thực thi block giờ lọc tx sai chữ ký
+(`tx_processor.FilterInvalidSignatures`) — bypass duy nhất là `SKIP_MEMPOOL_SIG_VERIFY=true` +
+`METANODE_DEVNET=true` (không production); (2) HMAC của raftfeed gắn thêm path + length-prefix
+⇒ **phải nâng cấp đồng thời mọi replica của cùng cluster**; (3) `admin_*` RPC từ chối request có
+header `Origin` (browser); (4) `/debug/logs/*` cần `Authorization: Bearer <securepassword>` và
+WS chỉ chấp nhận same-origin.

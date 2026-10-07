@@ -50,16 +50,16 @@ load_telegram_config() {
     local token=""
     local chat_id=""
 
-    # 1. First priority: Read directly from target YAML (inventory.yml or monitors/inventory.yml)
-    # BUG FIX: under `set -euo pipefail`, a `grep` that matches nothing (the normal case for
-    # any cluster without Telegram configured, e.g. a local dev cluster) exits 1, which
-    # pipefail propagates through `| head | awk | sed` and kills the WHOLE script right here
-    # with zero output -- reproduced live testing this on local 232's inventory.yml (no
-    # telegram_bot_token line). `|| true` on each grep keeps a genuine no-match a normal,
-    # silent "not configured" case instead of a fatal, unexplained script exit.
+    # 1. First priority: Read directly from target YAML (e.g. inventory.chain2.yml or inventory.yml)
     if [ -f "$target_yml" ]; then
-        token=$(grep -E '^\s*(telegram_bot_token|bot_token):' "$target_yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
-        chat_id=$(grep -E '^\s*(telegram_chat_id|chat_id):' "$target_yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+        token=$(grep -E '^\s*(telegram_bot_token|bot_token):' "$target_yml" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
+        chat_id=$(grep -E '^\s*(telegram_chat_id|chat_id):' "$target_yml" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
+    fi
+
+    # 1b. Fallback to default inventory.yml if not found in custom inventory
+    if [ -z "$token" ] && [ -f "${SCRIPT_DIR}/inventory.yml" ]; then
+        token=$(grep -E '^\s*(telegram_bot_token|bot_token):' "${SCRIPT_DIR}/inventory.yml" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
+        [ -z "$chat_id" ] && chat_id=$(grep -E '^\s*(telegram_chat_id|chat_id):' "${SCRIPT_DIR}/inventory.yml" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
     fi
 
     # 2. Fallback to .env if not found in YAML
@@ -162,6 +162,17 @@ if [[ $# -gt 0 ]] && [[ "$1" == --* && "$1" != "--help" && "$1" != "-h" ]]; then
             --fast)        NEW_ARGS+=(--fast) ;;
             --debug-cpp)   NEW_ARGS+=(--debug-cpp) ;;
             --overwrite)   NEW_ARGS+=(--overwrite) ;;
+            --inventory|-i)
+                if [[ $# -lt 2 || "$2" =~ ^-- ]]; then echo -e "\033[0;31m❌ Thiếu đường dẫn cho $1\033[0m" >&2; exit 1; fi
+                NEW_ARGS+=(--inventory "$2"); shift
+                ;;
+            --all)
+                NEW_ARGS+=(--all); HAS_TARGET="true"
+                ;;
+            --rpc-nodes-file|--rpc-nodes-json|--rpc-json)
+                if [[ $# -lt 2 || "$2" =~ ^-- ]]; then echo -e "\033[0;31m❌ Thiếu đường dẫn cho $1\033[0m" >&2; exit 1; fi
+                NEW_ARGS+=(--rpc-nodes-file "$2"); shift
+                ;;
             --clean)
                 echo -e "\033[0;31m❌ [LỖI] Flag --clean độc lập đã bị loại bỏ. Hãy dùng lệnh 'reset-data' hoặc 'reset-all' tùy mục đích.\033[0m" >&2
                 exit 1
@@ -232,7 +243,7 @@ esac
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        --inventory)
+        --inventory|-i)
             if [[ $# -lt 2 || "$2" =~ ^-- ]]; then echo -e "\033[0;31m❌ Thiếu đường dẫn cho --inventory\033[0m"; exit 1; fi
             INVENTORY="$2"; shift
             ;;
@@ -258,6 +269,10 @@ while [[ "$#" -gt 0 ]]; do
         --btrfs-size)
             if [[ $# -lt 2 || "$2" =~ ^-- ]]; then echo -e "\033[0;31m❌ Thiếu giá trị cho --btrfs-size\033[0m"; exit 1; fi
             BTRFS_SIZE_VAL="$2"; shift
+            ;;
+        --rpc-nodes-file|--rpc-nodes-json|--rpc-json)
+            if [[ $# -lt 2 || "$2" =~ ^-- ]]; then echo -e "\033[0;31m❌ Thiếu đường dẫn cho $1\033[0m"; exit 1; fi
+            CUSTOM_RPC_NODES_FILE="$2"; shift
             ;;
         --open-ports) WITH_FIREWALL="true" ;;
         --overwrite) OVERWRITE="true" ;;
@@ -292,6 +307,7 @@ if [[ "$COMMAND" == "help" ]]; then
     echo "  --yes-reset-all      Xác nhận phá hủy cụm"
     echo "  --snapshot-url URL   URL để khôi phục snapshot"
     echo "  --btrfs-size SIZE    Kích thước phân vùng BTRFS"
+    echo "  --rpc-nodes-file PATH Đường dẫn RPC JSON file tùy chỉnh (mặc định: auto theo namespace)"
     exit 0
 fi
 
@@ -304,6 +320,26 @@ if [[ "$COMMAND" =~ ^(deploy|start|stop|restart|open-ports|reset-data)$ ]]; then
     if [[ -z "$TARGET_NODE" && "$ALL_NODES" == "false" ]]; then
         echo -e "\033[0;31m❌ [LỖI] Lệnh $COMMAND yêu cầu phải có --node N hoặc --all.\033[0m"
         exit 1
+    fi
+fi
+
+# Secondary independent clusters must not stop/restart the root cluster's monitors.
+RPC_EXPORT_NAMESPACE=$(awk '/^[[:space:]]*rpc_export_namespace:/ {gsub(/["\047]/, "", $2); print $2; exit}' "$INVENTORY" 2>/dev/null || true)
+RPC_EXPORT_NAMESPACE="${RPC_EXPORT_NAMESPACE:-root}"
+MANAGE_GLOBAL_MONITORS=$(awk '/^[[:space:]]*manage_global_monitors:/ {print tolower($2); exit}' "$INVENTORY" 2>/dev/null || true)
+if [ -z "$MANAGE_GLOBAL_MONITORS" ]; then
+    if [ "$RPC_EXPORT_NAMESPACE" != "root" ]; then
+        MANAGE_GLOBAL_MONITORS="false"
+    else
+        MANAGE_GLOBAL_MONITORS="true"
+    fi
+fi
+MANAGE_CHAIN_MONITORS=$(awk '/^[[:space:]]*manage_chain_monitors:/ {print tolower($2); exit}' "$INVENTORY" 2>/dev/null || true)
+if [ -z "$MANAGE_CHAIN_MONITORS" ]; then
+    if [ "$RPC_EXPORT_NAMESPACE" != "root" ]; then
+        MANAGE_CHAIN_MONITORS="true"
+    else
+        MANAGE_CHAIN_MONITORS="false"
     fi
 fi
 
@@ -397,10 +433,14 @@ case "$COMMAND" in
         fi
         ;;
     monitors)
-        echo -e "\033[0;31m❌ [LỖI] Lệnh monitors chưa được hỗ trợ trong wrapper.\033[0m"
-        exit 1
+        bash "${SCRIPT_DIR}/monitors/start_monitors.sh" status
+        exit 0
         ;;
 esac
+
+if [[ "$WITH_FIREWALL" == "true" ]]; then
+    OPEN_PORTS="true"
+fi
 
 if [[ -z "$TARGET_NODE" && "$ALL_NODES" == "true" ]]; then
     TARGET_NODE="all"
@@ -427,12 +467,11 @@ if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --is-inside-
 fi
 
 # Resolve Telegram configuration from YAML:
-# If --all-monitors flag is active, read from monitors/inventory.yml.
-# Otherwise read from standard inventory.yml.
+# Prioritize target inventory being deployed, fallback to standard inventory.yml
 if [ "$ALL_MONITORS" == "true" ]; then
     TG_CONFIG_YML="${SCRIPT_DIR}/monitors/inventory.yml"
 else
-    TG_CONFIG_YML="${SCRIPT_DIR}/inventory.yml"
+    TG_CONFIG_YML="$INVENTORY"
 fi
 load_telegram_config "$TG_CONFIG_YML"
 
@@ -483,6 +522,9 @@ if [ "$USE_PREBUILT" == "true" ]; then
     fi
 
     chmod +x "${PREBUILT_BIN_DIR}/metanode" "${PREBUILT_BIN_DIR}/simple_chain" 2>/dev/null || true
+    if [ -f "${PREBUILT_BIN_DIR}/parent_chain" ]; then
+        chmod +x "${PREBUILT_BIN_DIR}/parent_chain" 2>/dev/null || true
+    fi
     for tool in cross_chain_relayer register_chains bls_pubkey; do
         if [ -f "${PREBUILT_BIN_DIR}/${tool}" ]; then
             chmod +x "${PREBUILT_BIN_DIR}/${tool}" 2>/dev/null || true
@@ -579,6 +621,18 @@ else
     WATCHER_STATUS="Đã tắt (Inactive) 🔴"
 fi
 
+# Determine RPC nodes JSON file path
+RESOLVED_RPC_NODES_FILE=""
+if [ -n "${CUSTOM_RPC_NODES_FILE:-}" ]; then
+    RESOLVED_RPC_NODES_FILE="$CUSTOM_RPC_NODES_FILE"
+elif [ -n "${RPC_NODES_JSON_PATH:-}" ]; then
+    RESOLVED_RPC_NODES_FILE="${RPC_NODES_JSON_PATH}"
+elif [ "$RPC_EXPORT_NAMESPACE" != "root" ]; then
+    RESOLVED_RPC_NODES_FILE="/tmp/rpc_nodes.${RPC_EXPORT_NAMESPACE}.json"
+else
+    RESOLVED_RPC_NODES_FILE="/tmp/rpc_nodes.json"
+fi
+
 # Resolve Target Node IPs dynamically from inventory.yml
 TARGET_NODES_IPS=""
 if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
@@ -586,11 +640,11 @@ if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
         echo -e "\n\033[0;31m❌ [LỖI DỪNG THỰC THI] Cấu hình ${INVENTORY} không hợp lệ! Vui lòng sửa cấu hình theo thông báo trên trước khi tiếp tục.\033[0m\n"
         exit 1
     fi
-    rm -f "/tmp/rpc_nodes.json" 2>/dev/null || true
-    if ! (umask 077 && python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" json > "/tmp/rpc_nodes.json"); then
+    if ! python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" export "$RESOLVED_RPC_NODES_FILE" > /dev/null; then
         echo -e "\n\033[0;31m❌ [LỖI DỪNG THỰC THI] Không thể xuất thông tin RPC từ ${INVENTORY}!\033[0m\n"
         exit 1
     fi
+    chmod 0600 "$RESOLVED_RPC_NODES_FILE" 2>/dev/null || true
     chmod 0600 "/tmp/rpc_nodes.json" 2>/dev/null || true
 fi
 
@@ -665,7 +719,7 @@ ${ROLES_OUTPUT}
 </pre>"
 
 # Prepare extra vars
-EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST} ansible_debug_cpp=${DEBUG_CPP} ansible_use_prebuilt=${USE_PREBUILT} ansible_prebuilt_bin_dir='${PREBUILT_BIN_DIR}' ansible_overwrite=${OVERWRITE}"
+EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST} ansible_debug_cpp=${DEBUG_CPP} ansible_use_prebuilt=${USE_PREBUILT} ansible_prebuilt_bin_dir='${PREBUILT_BIN_DIR}' ansible_overwrite=${OVERWRITE} metanode_env=${METANODE_ENV:-production} node_env=${NODE_ENV:-production}"
 if [ -n "$SNAPSHOT_URL" ]; then
     EXTRA_VARS="${EXTRA_VARS} snapshot_url='${SNAPSHOT_URL}'"
 fi
@@ -678,7 +732,7 @@ fi
 # on the ansible-playbook command line -- `-e` extra-vars are visible in plaintext to any
 # local user via `ps aux`/`/proc/<pid>/cmdline` for the whole run. The env var achieves the
 # same effect (ansible-playbook reads it automatically) without that exposure.
-INVENTORY_BECOME_PASS=$(grep -E '^\s*ansible_become_pass:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+INVENTORY_BECOME_PASS=$(grep -E '^\s*ansible_become_pass:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
 if [ -n "$INVENTORY_BECOME_PASS" ] && [ "$INVENTORY_BECOME_PASS" != "!vault" ] && [[ "$INVENTORY_BECOME_PASS" != \{\{* ]]; then
     export ANSIBLE_BECOME_PASS="$INVENTORY_BECOME_PASS"
 fi
@@ -741,15 +795,89 @@ if [ "$ACTION" == "gen_keys" ]; then
     exit $exit_code
 fi
 
-if [ "$ACTION" != "open_ports" ]; then
+# ─── PARENT CHAIN ORCHESTRATION ───────────────────────────────────────────
+stop_parent_chain() {
+    if pgrep -f "/opt/metanode/bin/parent_chain" >/dev/null 2>&1; then
+        echo -e "\n🏛️ [PARENT CHAIN] Đang dừng cụm Parent Chain..."
+        pkill -9 -f "/opt/metanode/bin/parent_chain" 2>/dev/null || true
+        for i in 0 1 2 3; do
+            rm -f "/opt/metanode/parent_chain_${i}/parent_chain.pid" 2>/dev/null || true
+        done
+        echo "✅ [PARENT CHAIN] Đã dừng toàn bộ Parent Chain."
+    fi
+}
+
+clean_parent_chain_data() {
+    stop_parent_chain
+    if [ -d "/opt/metanode/parent_chain_0" ]; then
+        echo -e "🧹 [PARENT CHAIN] Dọn dẹp dữ liệu cũ của Parent Chain (reset-all)..."
+        rm -rf /opt/metanode/parent_chain_*/parentchain_db /opt/metanode/parent_chain_*/consensus /opt/metanode/parent_chain_*/rocksdb_dummy_init 2>/dev/null || true
+    fi
+}
+
+start_parent_chain() {
+    if [ ! -d "/opt/metanode/parent_chain_0" ] || [ ! -f "/opt/metanode/bin/parent_chain" ]; then
+        return 0
+    fi
+    local base_http_port
+    base_http_port=$(grep -E '^\s*parent_chain_http_port:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
+    base_http_port="${base_http_port:-18601}"
+
+    echo -e "\n🏛️ [PARENT CHAIN] Khởi động cụm Parent Chain (BFT Consensus, Chain ID 991, HTTP ${base_http_port}..$((base_http_port + 3)))..."
+    stop_parent_chain
+    sleep 1
+    for i in 0 1 2 3; do
+        if [ -d "/opt/metanode/parent_chain_${i}" ]; then
+            # Đảm bảo chain_id trong parent_genesis.json luôn là 991 (đồng bộ với Child Chain)
+            if [ -f "/opt/metanode/parent_chain_${i}/parent_genesis.json" ]; then
+                sed -i 's/"chain_id": 990/"chain_id": 991/g' "/opt/metanode/parent_chain_${i}/parent_genesis.json" 2>/dev/null || true
+            fi
+            cd "/opt/metanode/parent_chain_${i}"
+            nohup /opt/metanode/bin/parent_chain \
+                -data-dir "/opt/metanode/parent_chain_${i}" \
+                -http ":$((base_http_port + i))" \
+                -rust-config "/opt/metanode/parent_chain_${i}/node_parent.toml" \
+                -genesis "/opt/metanode/parent_chain_${i}/parent_genesis.json" \
+                >> "/var/log/metanode/parent_chain_${i}.log" 2>&1 &
+            echo $! > "/opt/metanode/parent_chain_${i}/parent_chain.pid"
+        fi
+    done
+    # Chờ port base_http_port sẵn sàng
+    local retries=15
+    local ready=false
+    while [ $retries -gt 0 ]; do
+        if curl -s "http://127.0.0.1:${base_http_port}/status" 2>/dev/null | grep -q "chain_id"; then
+            ready=true
+            break
+        fi
+        sleep 1
+        retries=$((retries - 1))
+    done
+    if [ "$ready" == "true" ]; then
+        echo -e "✅ [PARENT CHAIN] Parent Chain đã sẵn sàng tại http://127.0.0.1:${base_http_port} (Chain ID: 991)"
+    else
+        echo -e "⚠️ [PARENT CHAIN] Chưa nhận được phản hồi từ http://127.0.0.1:${base_http_port}/status sau 15s"
+    fi
+}
+
+if [ "$ACTION" != "open_ports" ] && [[ "$TARGET_NODE" == "all" || -z "$TARGET_NODE" ]]; then
+    if [ "$KEEP_DATA" == "false" ]; then
+        clean_parent_chain_data
+    elif [ "$ACTION" == "stop" ]; then
+        stop_parent_chain
+    fi
+fi
+
+if [ "$ACTION" != "open_ports" ] && [ "$MANAGE_GLOBAL_MONITORS" = "true" ]; then
     echo -e "\n⏸ Tạm dừng Health Monitor trên toàn bộ cụm trong quá trình Deploy để tránh cảnh báo sai..."
     if [ -f "${SCRIPT_DIR}/monitors/start_monitors.sh" ]; then
         bash "${SCRIPT_DIR}/monitors/start_monitors.sh" --stop-all >/dev/null 2>&1 || true
     fi
-    pkill -9 -f "start_monitors.sh" || true
-    pkill -9 -f "block_hash_checker" || true
-    pkill -9 -f "vote_monitor" || true
-    pkill -9 -f "go run main.go.*--no-stop-flag" || true
+    pkill -9 -f "[s]tart_monitors.sh health$" || true
+    pkill -9 -f "[s]tart_monitors.sh resources$" || true
+    pkill -9 -f "[b]lock_hash_checker.*--config config-m-nodes.json" || true
+    pkill -9 -f "[v]ote_monitor --daemon --interval 2s$" || true
+    pkill -9 -f "go run [m]ain.go.*--no-stop-flag" || true
 
     if [ "$KEEP_DATA" == "false" ]; then
         echo -e "🧹 Dọn dẹp cache và log cũ của Monitors do dữ liệu Node bị xoá..."
@@ -760,6 +888,12 @@ if [ "$ACTION" != "open_ports" ]; then
         rm -f "${SCRIPT_DIR}/monitors/vote_monitor/vote_monitor.log"
         rm -f "${SCRIPT_DIR}/monitors/vote_monitor/vote_monitor_daemon.log"
     fi
+fi
+
+if [ "$ACTION" != "open_ports" ] && [ "$MANAGE_CHAIN_MONITORS" = "true" ]; then
+    echo -e "\n⏸ Tạm dừng monitor riêng của ${RPC_EXPORT_NAMESPACE} trong quá trình deploy..."
+    MONITOR_NAMESPACE="$RPC_EXPORT_NAMESPACE" MONITOR_INVENTORY="$INVENTORY" CUSTOM_RPC_JSON_PATH="$RESOLVED_RPC_NODES_FILE" \
+        bash "${SCRIPT_DIR}/monitors/start_monitors.sh" --stop >/dev/null 2>&1 || true
 fi
 
 cd "$SCRIPT_DIR"
@@ -782,14 +916,31 @@ if [ $ansible_exit -eq 0 ]; then
         git rev-parse HEAD > "${SCRIPT_DIR}/.last_deployed_commit" 2>/dev/null || true
     fi
 
-    # Read and format Node RPC IPs, WebSocket URLs and TCP Nodes from /tmp/rpc_nodes.json
+    # Read and format Node RPC IPs, WebSocket URLs and TCP Nodes from resolved RPC JSON file
     RPC_NODES_LIST=""
     WS_NODES_LIST=""
     TCP_NODES_LIST=""
-    if [ -f "/tmp/rpc_nodes.json" ]; then
-        RPC_NODES_LIST=$(jq -r '.nodes | to_entries[] | "  • \(.key): \(.value)"' /tmp/rpc_nodes.json 2>/dev/null || true)
-        WS_NODES_LIST=$(jq -r '.ws_nodes // {} | to_entries[] | "  • \(.key): \(.value)"' /tmp/rpc_nodes.json 2>/dev/null || true)
-        TCP_NODES_LIST=$(jq -r '.tcp_nodes | to_entries[] | "  • \(.key): \(.value)"' /tmp/rpc_nodes.json 2>/dev/null || true)
+    
+    ACTUAL_READ_JSON=""
+    if [ -n "$RESOLVED_RPC_NODES_FILE" ] && [ -f "$RESOLVED_RPC_NODES_FILE" ]; then
+        ACTUAL_READ_JSON="$RESOLVED_RPC_NODES_FILE"
+    elif [ "$RPC_EXPORT_NAMESPACE" != "root" ] && [ -f "/tmp/rpc_nodes.${RPC_EXPORT_NAMESPACE}.json" ]; then
+        ACTUAL_READ_JSON="/tmp/rpc_nodes.${RPC_EXPORT_NAMESPACE}.json"
+    elif [ -f "/tmp/rpc_nodes.json" ]; then
+        ACTUAL_READ_JSON="/tmp/rpc_nodes.json"
+    fi
+
+    if [ -n "$ACTUAL_READ_JSON" ]; then
+        HAS_NS=$(jq -r --arg ns "$RPC_EXPORT_NAMESPACE" 'if .public_chains[$ns] then "true" else "false" end' "$ACTUAL_READ_JSON" 2>/dev/null || echo "false")
+        if [ "$RPC_EXPORT_NAMESPACE" != "root" ] && [ "$HAS_NS" == "true" ]; then
+            RPC_NODES_LIST=$(jq -r --arg ns "$RPC_EXPORT_NAMESPACE" '.public_chains[$ns].nodes // {} | to_entries[] | "  • \(.key): \(.value)"' "$ACTUAL_READ_JSON" 2>/dev/null || true)
+            WS_NODES_LIST=$(jq -r --arg ns "$RPC_EXPORT_NAMESPACE" '.public_chains[$ns].ws_nodes // {} | to_entries[] | "  • \(.key): \(.value)"' "$ACTUAL_READ_JSON" 2>/dev/null || true)
+            TCP_NODES_LIST=$(jq -r --arg ns "$RPC_EXPORT_NAMESPACE" '.public_chains[$ns].tcp_nodes // {} | to_entries[] | "  • \(.key): \(.value)"' "$ACTUAL_READ_JSON" 2>/dev/null || true)
+        else
+            RPC_NODES_LIST=$(jq -r '.nodes // {} | to_entries[] | "  • \(.key): \(.value)"' "$ACTUAL_READ_JSON" 2>/dev/null || true)
+            WS_NODES_LIST=$(jq -r '.ws_nodes // {} | to_entries[] | "  • \(.key): \(.value)"' "$ACTUAL_READ_JSON" 2>/dev/null || true)
+            TCP_NODES_LIST=$(jq -r '.tcp_nodes // {} | to_entries[] | "  • \(.key): \(.value)"' "$ACTUAL_READ_JSON" 2>/dev/null || true)
+        fi
     fi
 
     echo -e "\n⚙️ Danh sách Node RPC (IP & Port):"
@@ -803,6 +954,22 @@ if [ $ansible_exit -eq 0 ]; then
     echo -e "\n🌐 Danh sách Node TCP (Consensus P2P):"
     echo "$TCP_NODES_LIST"
 
+    # Khởi động cụm Parent Chain nếu triển khai toàn cụm
+    if [[ "$ACTION" =~ ^(setup|deploy|start|restart)$ ]] && [[ "$TARGET_NODE" == "all" || -z "$TARGET_NODE" ]]; then
+        start_parent_chain
+    fi
+
+    if [ -d "/opt/metanode/parent_chain_0" ]; then
+        p_port=$(grep -E '^\s*parent_chain_http_port:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
+        p_port="${p_port:-18601}"
+        p_ip="${DEPLOY_IP:-127.0.0.1}"
+        echo -e "\n🏛️ Danh sách Parent Chain RPC (IP & Port):"
+        echo -e "  • parent_chain_0: http://${p_ip}:${p_port} (Chain ID: 991, BFT Leader)"
+        echo -e "  • parent_chain_1: http://${p_ip}:$((p_port + 1)) (Chain ID: 991, Replica)"
+        echo -e "  • parent_chain_2: http://${p_ip}:$((p_port + 2)) (Chain ID: 991, Replica)"
+        echo -e "  • parent_chain_3: http://${p_ip}:$((p_port + 3)) (Chain ID: 991, Replica)"
+    fi
+
     # Tự động đồng bộ cấu hình sang metanode-suite (update-ip.sh)
     UPDATE_IP_SCRIPT="${SCRIPT_DIR}/../../../metanode-suite/scripts/update-ip/update-ip.sh"
     if [ -f "$UPDATE_IP_SCRIPT" ]; then
@@ -814,6 +981,8 @@ if [ $ansible_exit -eq 0 ]; then
     echo -e  "\n📋 *Node Roles:*"
     echo "${ROLES_OUTPUT}"
     send_telegram_notification "✅ <b>[${ACTION_LABEL}]</b> Quá trình Ansible ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> hoàn tất thành công!
+- Cluster / Namespace: <code>${RPC_EXPORT_NAMESPACE}</code>
+- RPC Config File: <code>${ACTUAL_READ_JSON}</code>
 - Deployer Server IP: <code>${DEPLOY_IP}</code>
 - Target Node IPs: <code>${TARGET_NODES_IPS}</code>
 - Watcher Daemon: <code>${WATCHER_STATUS}</code>
@@ -871,7 +1040,7 @@ else
 fi
 
 MONITOR_SCRIPT="${SCRIPT_DIR}/monitors/start_monitors.sh"
-if [ "$ACTION" != "open_ports" ]; then
+if [ "$ACTION" != "open_ports" ] && [ "$MANAGE_GLOBAL_MONITORS" = "true" ]; then
     if [ -f "$MONITOR_SCRIPT" ] && [ "$ACTION" != "stop" ]; then
         if [ "$ALL_MONITORS" == "true" ]; then
             echo -e "\n▶️ Bật Giám Sát Chéo Đa Máy (Mutual Cross-Monitors) trên TẤT CẢ các máy..."
@@ -882,10 +1051,21 @@ if [ "$ACTION" != "open_ports" ]; then
         fi
     elif [ "$ACTION" == "stop" ]; then
         echo -e "\n⏸ Không bật lại Health Monitor vì hệ thống đang ở trạng thái STOP..."
-        pkill -f "vote_monitor" || true
+        stop_parent_chain
+        pkill -f "[v]ote_monitor" || true
         if [ "$ALL_MONITORS" == "true" ]; then
-            ansible metanode_cluster -i "$INVENTORY" -m shell -a "pkill -f 'start_monitors.sh' || true; pkill -f 'block_hash_checker' || true; pkill -f 'vote_monitor' || true" >/dev/null 2>&1 || true
+            ansible metanode_cluster -i "$INVENTORY" -m shell -a "pkill -f '[s]tart_monitors.sh' || true; pkill -f '[b]lock_hash_checker' || true; pkill -f '[v]ote_monitor' || true" >/dev/null 2>&1 || true
         fi
+    fi
+fi
+
+if [ "$ACTION" != "open_ports" ] && [ "$MANAGE_CHAIN_MONITORS" = "true" ]; then
+    if [ $ansible_exit -eq 0 ] && [ "$ACTION" != "stop" ]; then
+        echo -e "\n▶️ Bật monitor riêng cho ${RPC_EXPORT_NAMESPACE}..."
+        MONITOR_NAMESPACE="$RPC_EXPORT_NAMESPACE" MONITOR_INVENTORY="$INVENTORY" CUSTOM_RPC_JSON_PATH="$RESOLVED_RPC_NODES_FILE" \
+            bash "$MONITOR_SCRIPT"
+    elif [ "$ACTION" == "stop" ]; then
+        echo -e "\n⏸ Monitor ${RPC_EXPORT_NAMESPACE} giữ trạng thái dừng cùng các node."
     fi
 fi
 

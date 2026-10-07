@@ -199,24 +199,41 @@ case "${1:-status}" in
         shift
         cmd_run_now "$@"
         ;;
+    test-child|child)
+        shift
+        cmd_run_now --only child_chain_a "$@"
+        ;;
     __internal_loop)
         __internal_loop
         ;;
     -h|--help|help)
-        echo "Cách sử dụng: $0 {start|stop|restart|status|logs|run-now [flags]}"
+        echo "Cách sử dụng: $0 {start|stop|restart|status|logs|run-now [flags]|test-child [flags]}"
         echo ""
         echo "Lệnh:"
-        echo "  start     Khởi động watcher daemon ngầm"
-        echo "  stop      Dừng watcher daemon"
-        echo "  restart   Khởi động lại watcher daemon"
-        echo "  status    Xem trạng thái hoạt động và commit đã test gần nhất"
-        echo "  logs      Xem file log realtime của watcher"
-        echo "  run-now   Kích hoạt chạy test ngay lập tức (không cần đợi commit)"
+        echo "  start       Khởi động watcher daemon ngầm"
+        echo "  stop        Dừng watcher daemon"
+        echo "  restart     Khởi động lại watcher daemon"
+        echo "  status      Xem trạng thái hoạt động và commit đã test gần nhất"
+        echo "  logs        Xem file log realtime của watcher"
+        echo "  run-now     Kích hoạt chạy test ngay lập tức (không cần đợi commit)"
+        echo "  test-child  Chạy bộ test cho chain con (Execution Clusters - chain_a)"
         echo ""
-        echo "Ví dụ chạy test cụ thể:"
-        echo "  $0 run-now --only node_chaos_restart --restart-chain  # Khởi động lại chain trước khi test"
-        echo "  $0 run-now --only tps_blast                          # Chỉ test bài TPS"
-        echo "  $0 run-now --restart-chain                           # Restart chain và chạy toàn bộ tests"
+        echo "⚡ Ví dụ kiểm thử chain con (Execution Clusters):"
+        echo "  $0 test-child                                        # Reset và chạy 34 bài test cho chain_a"
+        echo "  $0 test-child --no-reset                             # Chạy test ngay trên cụm chain con không reset DB"
+        echo "  $0 run-now --child-chain                             # Chạy toàn bộ các bài test cho Child Chain (chain con)"
+        echo "  $0 run-now --only child_chain_a                      # Test 34 kịch bản Block-STM trên Child Chain (chain_a)"
+        echo "  $0 run-now --only tps_blast_child_a                  # Benchmark Max TPS trên Child Chain (chain_a)"
+        echo "  $0 run-now --only child_chain_a --reset-exec         # Ép reset Execution Clusters trước khi test"
+        echo "  $0 run-now --only child_chain_a --restart-exec       # Khởi động lại service chain con trước khi test"
+        echo "  $0 run-now --restart-exec                            # Restart Execution Clusters (Child Chain)"
+        echo "  $0 run-now --reset-exec                              # Reset Execution Clusters (Child Chain)"
+        echo "  $0 run-now --exec-only                               # Chỉ chạy các bài test thuộc chain con"
+        echo ""
+        echo "Ví dụ chạy test cụ thể khác:"
+        echo "  $0 run-now --only node_chaos_restart --restart-chain  # Khởi động lại Public Chain trước khi test"
+        echo "  $0 run-now --only tps_blast                          # Chỉ test bài TPS Public Chain"
+        echo "  $0 run-now --restart-chain                           # Restart Public Chain và chạy toàn bộ tests"
         echo "  $0 run-now --dry-run                                 # Xem trước kế hoạch chạy"
         ;;
     *)

@@ -1,10 +1,13 @@
 package transaction
 
 import (
+	"bytes"
 	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	e_types "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -268,8 +271,24 @@ func TestTransaction_IsRegularTransaction(t *testing.T) {
 
 func TestTransaction_IsDeployContract(t *testing.T) {
 	tx := makeTestContractDeployTx()
-	assert.True(t, tx.IsDeployContract(), "tx with data to zero address and nonce>0 is deploy")
+	assert.True(t, tx.IsDeployContract(), "tx with data to zero address is deploy")
 	assert.False(t, tx.IsRegularTransaction())
+
+	txNonce0 := NewTransaction(
+		common.HexToAddress("0xaaaa"),
+		common.Address{},
+		big.NewInt(0),
+		100000,
+		10,
+		0,
+		[]byte{0x60, 0x80, 0x60, 0x40},
+		nil,
+		common.Hash{},
+		common.Hash{},
+		0,
+		1000,
+	)
+	assert.True(t, txNonce0.IsDeployContract(), "tx with data to zero address and nonce=0 is deploy")
 }
 
 func TestTransaction_IsCallContract(t *testing.T) {
@@ -377,13 +396,37 @@ func TestTransaction_MaxFee(t *testing.T) {
 	assert.Equal(t, big.NewInt(210000), maxFee)
 }
 
-// TestTransaction_EffectiveGasPrice_PerType guards the fix for a real bug: fee
-// charging (native_fast_path.go, true_block_stm.go) and MaxFee()/
-// ValidMaxGasPrice() must all price EIP-1559/EIP-4844 txs via GasFeeCap, not
-// the flat MaxGasPrice field — which FromEthEIP1559Tx/FromEthBlobTx deliberately
-// leave at 0. Before EffectiveGasPrice() existed, three separate call sites in
-// tx_processor charged literally zero execution gas fee for these tx types.
+// TestTransaction_EffectiveGasPrice_PerType verifies ADR D2 fee semantics:
+// - Legacy/EIP-2930: flat MaxGasPrice
+// - EIP-1559/EIP-4844/EIP-7702: min(GasFeeCap, F + GasTipCap) where F = MINIMUM_BASE_FEE (100,000)
 func TestTransaction_EffectiveGasPrice_PerType(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		txType      uint64
+		maxGasPrice uint64
+		gasFeeCap   []byte
+		gasTipCap   []byte
+		want        *big.Int
+	}{
+		{"legacy uses flat MaxGasPrice", 0, 42, nil, nil, big.NewInt(42)},
+		{"eip2930 uses flat MaxGasPrice", 1, 42, nil, nil, big.NewInt(42)},
+		{"eip1559 pays F + tip when below cap", 2, 0, big.NewInt(150000).Bytes(), big.NewInt(10000).Bytes(), big.NewInt(110000)},
+		{"eip1559 capped at GasFeeCap when tip is high", 2, 0, big.NewInt(105000).Bytes(), big.NewInt(10000).Bytes(), big.NewInt(105000)},
+		{"eip4844 with zero tip pays flat F", 3, 0, big.NewInt(200000).Bytes(), nil, big.NewInt(100000)},
+		{"eip7702 pays F + tip", 4, 0, big.NewInt(120000).Bytes(), big.NewInt(5000).Bytes(), big.NewInt(105000)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tx := &Transaction{proto: &pb.Transaction{
+				Type: c.txType, MaxGasPrice: c.maxGasPrice, GasFeeCap: c.gasFeeCap, GasTipCap: c.gasTipCap,
+			}}
+			assert.Equal(t, c.want, tx.EffectiveGasPrice())
+		})
+	}
+}
+
+// TestTransaction_GasPriceCap_PerType verifies GasPriceCap returns the ceiling:
+// MaxGasPrice for legacy/2930, GasFeeCap for 1559/4844/7702.
+func TestTransaction_GasPriceCap_PerType(t *testing.T) {
 	for _, c := range []struct {
 		name        string
 		txType      uint64
@@ -391,16 +434,17 @@ func TestTransaction_EffectiveGasPrice_PerType(t *testing.T) {
 		gasFeeCap   []byte
 		want        *big.Int
 	}{
-		{"legacy uses flat MaxGasPrice", 0, 42, nil, big.NewInt(42)},
-		{"eip2930 uses flat MaxGasPrice", 1, 42, nil, big.NewInt(42)},
-		{"eip1559 uses GasFeeCap, not MaxGasPrice", 2, 0, big.NewInt(999).Bytes(), big.NewInt(999)},
-		{"eip4844 uses GasFeeCap, not MaxGasPrice", 3, 0, big.NewInt(777).Bytes(), big.NewInt(777)},
+		{"legacy cap is MaxGasPrice", 0, 42, nil, big.NewInt(42)},
+		{"eip2930 cap is MaxGasPrice", 1, 42, nil, big.NewInt(42)},
+		{"eip1559 cap is GasFeeCap", 2, 0, big.NewInt(150000).Bytes(), big.NewInt(150000)},
+		{"eip4844 cap is GasFeeCap", 3, 0, big.NewInt(200000).Bytes(), big.NewInt(200000)},
+		{"eip7702 cap is GasFeeCap", 4, 0, big.NewInt(120000).Bytes(), big.NewInt(120000)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tx := &Transaction{proto: &pb.Transaction{
 				Type: c.txType, MaxGasPrice: c.maxGasPrice, GasFeeCap: c.gasFeeCap,
 			}}
-			assert.Equal(t, c.want, tx.EffectiveGasPrice())
+			assert.Equal(t, c.want, tx.GasPriceCap())
 		})
 	}
 }
@@ -503,4 +547,95 @@ func TestTransaction_Fee_Overflow(t *testing.T) {
 	// Fee must be positive (not negative due to overflow)
 	assert.Positive(t, fee.Sign(),
 		"Fee() must not be negative — uint64 overflow must not occur with large MaxGas")
+}
+
+// P0-8: Cross-language Go <-> Rust hash equivalence test (Zero-Fork invariant).
+func TestCrossLanguage_HashEquivalence_RawEnvelope(t *testing.T) {
+	envelope := []byte("sample_raw_eip2718_envelope_bytes")
+	expectedHash := crypto.Keccak256Hash(envelope)
+
+	pTx := &pb.Transaction{
+		FromAddress: bytes.Repeat([]byte{0x01}, 20),
+		ToAddress:   bytes.Repeat([]byte{0x02}, 20),
+		RawEnvelope: envelope,
+	}
+	tx := TransactionFromProto(pTx)
+
+	assert.Equal(t, expectedHash, tx.Hash(), "Go Hash() must match Keccak256(RawEnvelope)")
+	assert.Equal(t, expectedHash, tx.EthHash(), "Go EthHash() must match Keccak256(RawEnvelope)")
+}
+
+func TestCrossLanguage_HashEquivalence_SystemTxWithoutEnvelope(t *testing.T) {
+	// Rust calculate_single_transaction_hash for this exact proto calculates:
+	// SYSTEM_TX_HASH: 1925db928262bc9d4db0f4dba30bdd01a29ffa7d5d4ae5f418b0a63ba373c9eb
+	expectedRustHash := common.HexToHash("0x1925db928262bc9d4db0f4dba30bdd01a29ffa7d5d4ae5f418b0a63ba373c9eb")
+
+	pTx := &pb.Transaction{
+		FromAddress: bytes.Repeat([]byte{0xaa}, 20),
+		ToAddress:   bytes.Repeat([]byte{0xbb}, 20),
+		Amount:      []byte{0x01},
+		MaxGas:      21000,
+		MaxGasPrice: 100000,
+		RawEnvelope: nil, // empty envelope = system transaction
+	}
+	tx := TransactionFromProto(pTx)
+
+	assert.Equal(t, expectedRustHash, tx.Hash(), "Go system tx Hash() must exactly match Rust consensus calculate_single_transaction_hash")
+}
+
+func TestSingleCanonicalHash_AllEthTxTypes(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	to := common.HexToAddress("0x0000000000000000000000000000000000abcdef")
+
+	// 1. Legacy
+	legacyInner := &e_types.LegacyTx{
+		Nonce:    1,
+		GasPrice: big.NewInt(100000),
+		Gas:      21000,
+		To:       &to,
+		Value:    big.NewInt(100),
+	}
+	ethLegacy, err := e_types.SignNewTx(key, e_types.NewEIP155Signer(big.NewInt(1337)), legacyInner)
+	require.NoError(t, err)
+
+	metaLegacy, err := NewTransactionFromEth(ethLegacy)
+	require.NoError(t, err)
+	assert.Equal(t, ethLegacy.Hash(), metaLegacy.Hash(), "Legacy: meta.Hash() must equal eth.Hash()")
+	assert.Equal(t, ethLegacy.Hash(), metaLegacy.EthHash(), "Legacy: meta.EthHash() must equal eth.Hash()")
+
+	// 2. EIP-2930
+	eip2930Inner := &e_types.AccessListTx{
+		ChainID:  big.NewInt(1337),
+		Nonce:    2,
+		GasPrice: big.NewInt(100000),
+		Gas:      21000,
+		To:       &to,
+		Value:    big.NewInt(200),
+	}
+	eth2930, err := e_types.SignNewTx(key, e_types.NewLondonSigner(big.NewInt(1337)), eip2930Inner)
+	require.NoError(t, err)
+
+	meta2930, err := NewTransactionFromEth(eth2930)
+	require.NoError(t, err)
+	assert.Equal(t, eth2930.Hash(), meta2930.Hash(), "EIP-2930: meta.Hash() must equal eth.Hash()")
+	assert.Equal(t, eth2930.Hash(), meta2930.EthHash(), "EIP-2930: meta.EthHash() must equal eth.Hash()")
+
+	// 3. EIP-1559
+	eip1559Inner := &e_types.DynamicFeeTx{
+		ChainID:   big.NewInt(1337),
+		Nonce:     3,
+		GasTipCap: big.NewInt(1000),
+		GasFeeCap: big.NewInt(100000),
+		Gas:       21000,
+		To:        &to,
+		Value:     big.NewInt(300),
+	}
+	eth1559, err := e_types.SignNewTx(key, e_types.NewLondonSigner(big.NewInt(1337)), eip1559Inner)
+	require.NoError(t, err)
+
+	meta1559, err := NewTransactionFromEth(eth1559)
+	require.NoError(t, err)
+	assert.Equal(t, eth1559.Hash(), meta1559.Hash(), "EIP-1559: meta.Hash() must equal eth.Hash()")
+	assert.Equal(t, eth1559.Hash(), meta1559.EthHash(), "EIP-1559: meta.EthHash() must equal eth.Hash()")
 }

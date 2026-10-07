@@ -1770,6 +1770,8 @@ private:
     if (!is_delegation_designator(code)) {
       return code;
     }
+    // EIP-7702: Charge warm account access gas for resolving delegation designator
+    gas_tracker.add_gas_used(getTouchedAddressGasCost());
     const Address delegate = delegation_designator_address(code);
     Code delegateCode = gs.get(delegate).acc.get_code();
     if (is_delegation_designator(delegateCode)) {
@@ -1782,6 +1784,8 @@ private:
     const auto op = get_op();
     ctxt->s.pop(); // gas limit not used
     const auto addr = pop_addr(ctxt->s);
+    // Charge account access gas for CALL opcode
+    gas_tracker.add_gas_used(getTouchedAddressGasCost());
     const auto value =
         (op == DELEGATECALL || op == STATICCALL) ? 0 : ctxt->s.pop();
     const auto offIn = ctxt->s.pop64();

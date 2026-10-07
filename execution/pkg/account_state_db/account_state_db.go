@@ -40,6 +40,7 @@ var byteSlicePool = sync.Pool{
 type AccountStateDB struct {
 	trie p_trie.StateTrie // The underlying trie storing account states (interface for MPT or FlatState)
 
+	rootMu         sync.RWMutex    // guards originRootHash only (a leaf lock): written by PersistAsync on the committer goroutine, read by commitWorker
 	originRootHash common.Hash     // The root hash of the trie when the DB was initialized or last committed/reloaded
 	db             storage.Storage // The persistent key-value store backing the trie
 
@@ -175,7 +176,7 @@ func (db *AccountStateDB) ReloadTrie(rootHash common.Hash) error {
 	_, isFlat := newTrie.(*p_trie.FlatStateTrie)
 	_, isNomt := newTrie.(*p_trie.NomtStateTrie)
 	db.isFlatTrie = isFlat || isNomt
-	db.originRootHash = rootHash
+	db.storeOriginRoot(rootHash)
 	db.dirtyAccounts.Clear()  // Clear dirty accounts under lock
 	db.loadedAccounts.Clear() // Clear loaded accounts too
 	db.cacheEpoch.Add(2)      // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
@@ -187,14 +188,26 @@ func (db *AccountStateDB) ReloadTrie(rootHash common.Hash) error {
 
 // GetOriginRootHash returns the current origin root hash of the trie (for debugging).
 func (db *AccountStateDB) GetOriginRootHash() common.Hash {
+	return db.loadOriginRoot()
+}
+
+func (db *AccountStateDB) loadOriginRoot() common.Hash {
+	db.rootMu.RLock()
+	defer db.rootMu.RUnlock()
 	return db.originRootHash
+}
+
+func (db *AccountStateDB) storeOriginRoot(h common.Hash) {
+	db.rootMu.Lock()
+	db.originRootHash = h
+	db.rootMu.Unlock()
 }
 
 // SetOriginRootHash explicitly updates the origin root hash.
 // This is critical for Sub nodes when applying block states from the network,
 // so that subsequent empty blocks don't incorrectly return an old origin root hash.
 func (db *AccountStateDB) SetOriginRootHash(hash common.Hash) {
-	db.originRootHash = hash
+	db.storeOriginRoot(hash)
 }
 
 // Trie returns the underlying StateTrie instance.
@@ -473,7 +486,7 @@ func (db *AccountStateDB) Discard() (err error) {
 	db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 
 	// Reload trie from the original hash
-	originHash := db.originRootHash
+	originHash := db.loadOriginRoot()
 
 	currentDb := db.db // Use the existing db instance
 
@@ -1027,7 +1040,7 @@ func (db *AccountStateDB) CopyFrom(sourceDB types.AccountStateDB) error {
 	// in a way that breaks the destination before its next commit/reload.
 	asDB.muTrie.RLock()
 	sourceTrie := asDB.trie
-	sourceOriginHash := asDB.originRootHash
+	sourceOriginHash := asDB.loadOriginRoot()
 	sourceDb := asDB.db
 	asDB.muTrie.RUnlock()
 
@@ -1039,7 +1052,7 @@ func (db *AccountStateDB) CopyFrom(sourceDB types.AccountStateDB) error {
 		}
 	}
 	db.trie = sourceTrie
-	db.originRootHash = sourceOriginHash
+	db.storeOriginRoot(sourceOriginHash)
 	db.db = sourceDb
 	db.muTrie.Unlock()
 

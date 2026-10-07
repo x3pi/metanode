@@ -219,3 +219,111 @@ func TestDatabasesConfig_Defaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "./data", db.RootPath)
 }
+
+func TestTxSignatureMode(t *testing.T) {
+	chain := big.NewInt(991)
+	for _, tc := range []struct {
+		mode    string
+		chainID *big.Int
+		secp    bool
+		wantErr bool
+	}{
+		{"", nil, false, false},
+		{TxSignatureModeBLSLegacy, nil, false, true}, // bls_legacy must fail fast with clear error
+		{TxSignatureModeSecp, chain, true, false},
+		// Deployed configs do not carry chainId (the genesis does), so loading must NOT depend on it.
+		{TxSignatureModeSecp, nil, true, false},
+		{"SECP", chain, false, true}, // typos must fail startup, never silently pick another rule set
+		{"bls", chain, false, true},
+	} {
+		c := &SimpleChainConfig{TxSignatureMode: tc.mode, ChainId: tc.chainID}
+		if got := c.SecpOnlyTxSignatures(); got != tc.secp {
+			t.Errorf("mode %q: SecpOnlyTxSignatures()=%v, want %v", tc.mode, got, tc.secp)
+		}
+		if err := c.validateTxSignatureMode(); (err != nil) != tc.wantErr {
+			t.Errorf("mode %q chain %v: validate err=%v, wantErr=%v", tc.mode, tc.chainID, err, tc.wantErr)
+		}
+		if !tc.wantErr && c.TxSignatureMode != TxSignatureModeSecp {
+			t.Errorf("mode %q after validation must normalize to secp, got %q", tc.mode, c.TxSignatureMode)
+		}
+	}
+	var nilCfg *SimpleChainConfig
+	if nilCfg.SecpOnlyTxSignatures() {
+		t.Error("nil config must be false")
+	}
+}
+
+// Replay protection of secp txs rests on the chain ID, so once the genesis has supplied it a secp chain without a
+// positive chain ID must not start; other modes are unaffected.
+func TestValidateChainBinding(t *testing.T) {
+	for _, tc := range []struct {
+		mode    string
+		chainID *big.Int
+		wantErr bool
+	}{
+		{TxSignatureModeSecp, big.NewInt(991), false},
+		{TxSignatureModeSecp, nil, true},
+		{TxSignatureModeSecp, big.NewInt(0), true},
+		{TxSignatureModeSecp, big.NewInt(-1), true},
+		{"", nil, false},
+		{TxSignatureModeBLSLegacy, big.NewInt(0), false},
+	} {
+		c := &SimpleChainConfig{TxSignatureMode: tc.mode, ChainId: tc.chainID}
+		if err := c.ValidateChainBinding(); (err != nil) != tc.wantErr {
+			t.Errorf("mode %q chain %v: err=%v, wantErr=%v", tc.mode, tc.chainID, err, tc.wantErr)
+		}
+	}
+}
+
+// A deployed (ansible-shaped) secp config has no chainId at all; it must load and validate, and only fail the chain
+// binding check if the genesis then fails to provide a chain ID.
+func TestDeployedSecpConfigWithoutChainIDLoads(t *testing.T) {
+	raw := `{"consensus_mode":"raft","tx_signature_mode":"secp","account_gate":"parent_registered","rpc_port":":8646"}`
+	var c SimpleChainConfig
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.validateTxSignatureMode(); err != nil {
+		t.Fatalf("a secp config without chainId must load: %v", err)
+	}
+	if err := c.validateAccountGate(); err != nil {
+		t.Fatalf("gate config must validate: %v", err)
+	}
+	if err := c.ValidateChainBinding(); err == nil {
+		t.Fatal("before the genesis supplies the chain ID the binding check must fail")
+	}
+	c.ChainId = big.NewInt(991) // what initNetwork does with genesis.Config.ChainId
+	if err := c.ValidateChainBinding(); err != nil {
+		t.Fatalf("with a genesis chain ID the binding check must pass: %v", err)
+	}
+}
+
+func TestAccountGate(t *testing.T) {
+	for _, tc := range []struct {
+		gate        string
+		sigMode     string
+		registered  bool
+		wantErr     bool
+		description string
+	}{
+		{"", "", false, false, "empty gate is valid (disabled)"},
+		{AccountGateOff, "", false, false, "off gate is valid (disabled)"},
+		{AccountGateParentRegistered, TxSignatureModeSecp, true, false, "parent_registered in secp mode is valid"},
+		{AccountGateParentRegistered, "", true, true, "parent_registered in empty (legacy) mode must error"},
+		{AccountGateParentRegistered, TxSignatureModeBLSLegacy, true, true, "parent_registered in bls_legacy mode must error"},
+		{"parent", TxSignatureModeSecp, false, true, "typo/unknown gate must error"},
+		{"REGISTERED", TxSignatureModeSecp, false, true, "uppercase/unknown gate must error"},
+	} {
+		c := &SimpleChainConfig{AccountGate: tc.gate, TxSignatureMode: tc.sigMode}
+		if got := c.AccountGateParentRegistered(); got != tc.registered {
+			t.Errorf("[%s] AccountGateParentRegistered()=%v, want %v", tc.description, got, tc.registered)
+		}
+		if err := c.validateAccountGate(); (err != nil) != tc.wantErr {
+			t.Errorf("[%s] validateAccountGate() err=%v, wantErr=%v", tc.description, err, tc.wantErr)
+		}
+	}
+	var nilCfg *SimpleChainConfig
+	if nilCfg.AccountGateParentRegistered() {
+		t.Error("nil config must report false for AccountGateParentRegistered")
+	}
+}

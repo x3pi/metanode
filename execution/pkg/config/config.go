@@ -184,6 +184,7 @@ type SimpleChainConfig struct {
 	ClusterId                          *big.Int       `json:"cluster_id,omitempty"`
 	ClusterIdCamel                     *big.Int       `json:"clusterId,omitempty"`
 	ConsensusMode                      string         `json:"consensus_mode,omitempty"`
+	PrivacyMode                        bool           `json:"privacy_mode,omitempty"`
 	Raft                               *RaftConfig    `json:"raft,omitempty"` // only read when consensus_mode="raft"; nil = single-node feed (C1)
 	PrivateKey                         string         `json:"private_key"`
 	Address                            string         `json:"address"`
@@ -213,6 +214,21 @@ type SimpleChainConfig struct {
 
 	MinGasPrice uint64 `json:"min_gas_price,omitempty"`
 
+	// TxSignatureMode selects how user transactions are authenticated by this chain:
+	//   "" / "bls_legacy": the legacy simple chain (default). BLS-signed dapp transactions and ETH-signed
+	//                      transactions are accepted exactly as before; secp256k1 proto txs (type 0xFF) are rejected.
+	//   "secp":            the new execution node. Users sign only with secp256k1 (ETH txs or proto type 0xFF).
+	//                      BLS-signed transactions are accepted ONLY from node identities (an account whose address is
+	//                      derived from its own registered BLS public key, e.g. the node's rollup system txs).
+	// CAUTION: consensus-critical. Every validator of a chain MUST use the same value (a mismatch forks); changing it
+	// on a chain with history requires a wipe + simultaneous redeploy.
+	TxSignatureMode string `json:"tx_signature_mode,omitempty"`
+
+	// AccountGate controls whether user transactions are gated on Parent Chain account registration.
+	// Values: "" or "off" (default, disabled), "parent_registered" (enforced).
+	// Can only be "parent_registered" when tx_signature_mode == "secp".
+	AccountGate string `json:"account_gate,omitempty"`
+
 	// Cross-chain configuration
 	CrossChain CrossChainConfig `json:"cross_chain"`
 
@@ -226,9 +242,6 @@ type SimpleChainConfig struct {
 	MasterPassword       string `json:"master_password,omitempty"`
 	AppPepper            string `json:"app_pepper,omitempty"`
 
-	// Unified Node RPC (Private Gateway) configuration
-	EnablePrivateGateway bool   `json:"enable_private_gateway"` // Nếu true, Node sẽ tự động chặn ETH tx, chạy Speculative Execution và bọc BLS
-	GatewayBLSKey        string `json:"gateway_bls_key"`        // Private Key BLS dùng để ký bảo lãnh cho các giao dịch bị chặn
 	VerifyDeviceKey      bool   `json:"verify_device_key"`      // Bật/tắt kiểm tra DeviceKey khi xác thực giao dịch (mặc định: false)
 
 	// Snapshot configuration
@@ -303,6 +316,59 @@ func JoinPathIfNotURL(basePath, path string) string {
 	return filepath.Join(basePath, path)
 }
 
+const (
+	TxSignatureModeBLSLegacy = "bls_legacy"
+	TxSignatureModeSecp      = "secp"
+
+	AccountGateOff              = "off"
+	AccountGateParentRegistered = "parent_registered"
+)
+
+// SecpOnlyTxSignatures reports whether user transactions must be secp256k1-signed (see TxSignatureMode).
+func (c *SimpleChainConfig) SecpOnlyTxSignatures() bool {
+	return c != nil && c.TxSignatureMode == TxSignatureModeSecp
+}
+
+// validateTxSignatureMode rejects bls_legacy and unknown modes, allowing "secp" or empty.
+func (c *SimpleChainConfig) validateTxSignatureMode() error {
+	switch c.TxSignatureMode {
+	case "", TxSignatureModeSecp:
+		c.TxSignatureMode = TxSignatureModeSecp
+		return nil
+	case TxSignatureModeBLSLegacy:
+		return fmt.Errorf("bls_legacy signature mode is no longer supported; this node is eth-only")
+	}
+	return fmt.Errorf("invalid tx_signature_mode %q (only %q is supported, or omit)", c.TxSignatureMode, TxSignatureModeSecp)
+}
+
+// ValidateChainBinding must be called once the chain ID is known (after it is read from the genesis). Replay protection
+// of secp-signed transactions rests on the chain ID, so a secp chain without a positive chain ID must not start.
+func (c *SimpleChainConfig) ValidateChainBinding() error {
+	if c.SecpOnlyTxSignatures() && (c.ChainId == nil || c.ChainId.Sign() <= 0) {
+		return fmt.Errorf("tx_signature_mode %q requires a positive chain ID (genesis config.chainId)", TxSignatureModeSecp)
+	}
+	return nil
+}
+
+// AccountGateParentRegistered reports whether the parent-registered account gate is enabled.
+func (c *SimpleChainConfig) AccountGateParentRegistered() bool {
+	return c != nil && c.AccountGate == AccountGateParentRegistered
+}
+
+// validateAccountGate rejects unknown values and enforces that parent_registered requires secp mode.
+func (c *SimpleChainConfig) validateAccountGate() error {
+	switch c.AccountGate {
+	case "", AccountGateOff:
+		return nil
+	case AccountGateParentRegistered:
+		if !c.SecpOnlyTxSignatures() {
+			return fmt.Errorf("account_gate %q requires tx_signature_mode %q", AccountGateParentRegistered, TxSignatureModeSecp)
+		}
+		return nil
+	}
+	return fmt.Errorf("invalid account_gate %q (want %q, %q or empty)", c.AccountGate, AccountGateOff, AccountGateParentRegistered)
+}
+
 // LoadConfig đọc và xử lý file cấu hình.
 func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 	var err error
@@ -319,6 +385,13 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		err = json.Unmarshal(raw, ConfigApp)
 		if err != nil {
 			err = fmt.Errorf("failed to parse config file %s: %w", configPath, err)
+			return
+		}
+
+		if err = ConfigApp.validateTxSignatureMode(); err != nil {
+			return
+		}
+		if err = ConfigApp.validateAccountGate(); err != nil {
 			return
 		}
 
@@ -406,9 +479,6 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		if v := os.Getenv("META_ROOT_ANCHOR_SUBMITTER_PRIVATE_KEY_HEX"); v != "" {
 			ConfigApp.CrossChain.RootAnchorSubmitterPrivateKeyHex = v
 		}
-		if v := os.Getenv("META_GATEWAY_BLS_KEY"); v != "" {
-			ConfigApp.GatewayBLSKey = v
-		}
 		if v := os.Getenv("META_MASTER_PASSWORD"); v != "" {
 			ConfigApp.MasterPassword = v
 		}
@@ -445,4 +515,10 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		}
 	})
 	return ConfigApp, err
+}
+
+// ResetConfigForTesting resets the once guard and ConfigApp so tests can load different configs.
+func ResetConfigForTesting() {
+	loadConfig = sync.Once{}
+	ConfigApp = nil
 }

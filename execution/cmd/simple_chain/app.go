@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -19,29 +18,31 @@ import (
 	"time"
 
 	e_common "github.com/ethereum/go-ethereum/common"
-	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/explorer"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
+	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	"github.com/meta-node-blockchain/meta-node/pkg/mining"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/pkg/network"
 	"github.com/meta-node-blockchain/meta-node/pkg/node"
+	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/pruning"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/tracing"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
-	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
-	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	mt_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
@@ -90,9 +91,6 @@ type App struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// BLS Key Store (merged from RPC client)
-	blsKeyStore *PrivateKeyStore
-
 	// Performance monitoring
 	handler          *network.Handler
 	metricsCollector *MetricsCollector
@@ -101,13 +99,45 @@ type App struct {
 	pruningManager *pruning.PruningManager
 
 	// Rollup Components
-	rollupStore      rollup.Store
-	crossNodeHandler *rollup.CrossNodeHandler
-	sendWorker       *rollup.SendWorker
-	recvWorker       *rollup.ReceiveWorker
-	reclaimWorker    *rollup.ReclaimWorker
-	parentClient     parentchain.Client
-	rollupEnabled    bool // true only when PARENT_CHAIN_URL is set: rollup workers + parent-chain registration
+	rollupStore            rollup.Store
+	crossNodeHandler       *rollup.CrossNodeHandler
+	accountRegistryHandler *rollup.AccountRegistryHandler
+	sendWorker             *rollup.SendWorker
+	recvWorker             *rollup.ReceiveWorker
+	reclaimWorker          *rollup.ReclaimWorker
+	regWorker              *rollup.RegistrationWorker
+	regRelay               *rollup.RegistrationRelay
+	parentClient           parentchain.Client
+	rollupEnabled          bool // true only when PARENT_CHAIN_URL is set: rollup workers + parent-chain registration
+
+	// conservation checks that the cluster's BLS float on the Parent Chain equals the sum of the cluster's accounts and
+	// gates new outbound cross-chain transfers (BLS_CONSERVATION_MODE=enforce|warn|off, default enforce).
+	conservation     *rollup.ConservationGuard
+	conservationRun  func() // starts the periodic measurement
+	conservationStop chan struct{}
+
+	// Committee key health status
+	committeeKeyStatusMu sync.RWMutex
+	committeeKeyStatus   string // "ok", "mismatch", "not_validator", "unknown"
+	committeeKeyWarn     string
+}
+
+// CommitteeKeyStatus returns the current validator committee key status ("ok", "mismatch", "not_validator", "unknown") and any warning message.
+func (app *App) CommitteeKeyStatus() (string, string) {
+	app.committeeKeyStatusMu.RLock()
+	defer app.committeeKeyStatusMu.RUnlock()
+	status := app.committeeKeyStatus
+	if status == "" {
+		status = "unknown"
+	}
+	return status, app.committeeKeyWarn
+}
+
+func (app *App) setCommitteeKeyStatus(status, warn string) {
+	app.committeeKeyStatusMu.Lock()
+	defer app.committeeKeyStatusMu.Unlock()
+	app.committeeKeyStatus = status
+	app.committeeKeyWarn = warn
 }
 
 // NewApp creates and initializes a new blockchain application
@@ -133,17 +163,23 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	// Issue #103: Enforce that SKIP_MEMPOOL_SIG_VERIFY is fail-closed.
+	// Issue #103 / P0-2: Enforce that SKIP_MEMPOOL_SIG_VERIFY is fail-closed.
 	// Bypassing mempool signature verification is ONLY allowed if explicitly enabled
-	// for development/benchmarks (METANODE_DEVNET=true) and strictly forbidden otherwise (e.g. production).
+	// for development/benchmarks (METANODE_DEVNET=true) on non-production chains.
+	// It is strictly forbidden on production chain (ChainId == 991) or production environments.
 	if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") == "true" {
 		isExplicitDev := os.Getenv("METANODE_DEVNET") == "true"
 		isProduction := os.Getenv("NODE_ENV") == "production" ||
 			os.Getenv("ENVIRONMENT") == "production" ||
-			os.Getenv("METANODE_ENV") == "production"
+			os.Getenv("METANODE_ENV") == "production" ||
+			(app.config.ChainId != nil && app.config.ChainId.Cmp(big.NewInt(991)) == 0)
 
 		if !isExplicitDev || isProduction {
-			return nil, fmt.Errorf("FATAL SECURITY VIOLATION (Issue #103): SKIP_MEMPOOL_SIG_VERIFY=true is only allowed when METANODE_DEVNET=true is explicitly set, and strictly forbidden in production (NODE_ENV/METANODE_ENV=production)")
+			return nil, fmt.Errorf("FATAL SECURITY VIOLATION (Issue #103): SKIP_MEMPOOL_SIG_VERIFY=true is strictly forbidden on production chain (Chain ID 991) or without explicit METANODE_DEVNET=true")
+		}
+		isPrivacy := app.config.PrivacyMode || os.Getenv("PRIVACY_MODE") == "true"
+		if strings.ToLower(app.config.ConsensusMode) == "raft" || isPrivacy {
+			return nil, fmt.Errorf("FATAL SECURITY VIOLATION (Issue #103): SKIP_MEMPOOL_SIG_VERIFY=true is strictly forbidden when consensus_mode is 'raft' or privacy_mode is true")
 		}
 		logger.Warn("⚠️ [SECURITY WARNING] SKIP_MEMPOOL_SIG_VERIFY=true: Transaction signature verification is BYPASSED (explicit devnet benchmark mode)!")
 	}
@@ -269,13 +305,37 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	// are enabled only when PARENT_CHAIN_URL is set explicitly. The client is still built (default URL) so RPC
 	// handlers that reference it never see a nil pointer.
 	parentChainURL := os.Getenv("PARENT_CHAIN_URL")
-	app.rollupEnabled = parentChainURL != ""
-	if !app.rollupEnabled {
-		parentChainURL = "http://127.0.0.1:8547"
-		logger.Info("PARENT_CHAIN_URL is not set: rollup workers and parent-chain registration are disabled")
+	parentChainURLs := os.Getenv("PARENT_CHAIN_URLS")
+	var urls []string
+	if parentChainURLs != "" {
+		for _, u := range strings.Split(parentChainURLs, ",") {
+			u = strings.TrimSpace(u)
+			if u != "" {
+				urls = append(urls, u)
+			}
+		}
+	} else if parentChainURL != "" {
+		for _, u := range strings.Split(parentChainURL, ",") {
+			u = strings.TrimSpace(u)
+			if u != "" {
+				urls = append(urls, u)
+			}
+		}
 	}
-	parentClient := parentchain.NewHTTPClient(parentChainURL)
+
+	app.rollupEnabled = len(urls) > 0
+	if !app.rollupEnabled {
+		urls = []string{"http://127.0.0.1:8547"}
+		logger.Info("PARENT_CHAIN_URL / PARENT_CHAIN_URLS is not set: rollup workers and parent-chain registration are disabled")
+	}
+	parentClient := parentchain.NewQuorumClient(urls, app.keyPair.PrivateKey(), app.keyPair.PublicKey())
 	app.parentClient = parentClient
+
+	if app.rollupEnabled {
+		if err := verifyParentChainID(parentClient, parentchain.ParentChainID); err != nil {
+			return nil, err
+		}
+	}
 
 	scAdapter := &smartContractDBAdapter{chainState: app.chainState}
 	rollupStore := rollup.NewDBStore(scAdapter)
@@ -300,10 +360,60 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		clusterID = app.config.ChainId.Uint64()
 	}
 
+	// Register this cluster's key as a cluster on the Parent Chain. Whether it takes effect is decided by the
+	// parent genesis (allow-list, or open registration on devnet); a rejection is only logged here.
+	if app.rollupEnabled {
+		if _, regErr := parentClient.SendRegisterCluster(clusterID); regErr != nil {
+			logger.Warn("Failed to submit cluster registration to parent chain: %v", regErr)
+		}
+	}
+
 	app.crossNodeHandler = rollup.NewCrossNodeHandler(app.keyPair.PublicKey())
+	app.accountRegistryHandler = rollup.NewAccountRegistryHandler(app.keyPair.PublicKey())
 	app.sendWorker = rollup.NewSendWorker(rollupStore, parentClient, app.keyPair, app.keyPair.PublicKey(), clusterID)
 	app.recvWorker = rollup.NewReceiveWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 	app.reclaimWorker = rollup.NewReclaimWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
+	app.regWorker = rollup.NewRegistrationWorker(stateDBAdapter, parentClient, app.keyPair, app.keyPair.PublicKey())
+	// Users register ONLY with this node (mtn_registerAccount); the relay forwards the cluster-signed registration to the
+	// Parent Chain automatically and tracks the outcome. Same key the node already uses to self-register on the parent.
+	app.regRelay = rollup.NewRegistrationRelay(parentClient, app.keyPair.PublicKey(),
+		func(digest []byte) cm.Sign { return bls.Sign(app.keyPair.PrivateKey(), digest) },
+		stateDBAdapter.GetParentRegistered)
+	if app.storageManager != nil && app.storageManager.GetStorageMapping() != nil {
+		store := rollup.NewKVRelayStore(durableKV{app.storageManager.GetStorageMapping()})
+		if err := app.regRelay.SetStore(store); err != nil {
+			logger.Warn("Failed to initialize durable storage for registration relay: %v", err)
+		}
+	}
+
+	// Conservation: the cluster's BLS identity represents all of its accounts, so its float on the Parent Chain must
+	// always equal the sum of the accounts (plus what is demonstrably in flight). Until that is verified, and while a
+	// violation is confirmed, no new value may leave the cluster.
+	consMode := rollup.ConservationOff
+	if app.rollupEnabled {
+		m, modeErr := rollup.ParseConservationMode(os.Getenv("BLS_CONSERVATION_MODE"))
+		if modeErr != nil {
+			return nil, modeErr
+		}
+		consMode = m
+	}
+	app.conservation = rollup.NewConservationGuard(consMode)
+	app.conservationStop = make(chan struct{})
+	app.sendWorker.Gate = app.conservation.Allow
+	consInterval := 300 * time.Second
+	if v, convErr := strconv.Atoi(os.Getenv("BLS_CONSERVATION_INTERVAL_SECONDS")); convErr == nil && v > 0 {
+		consInterval = time.Duration(v) * time.Second
+	}
+	consInputs := rollup.ConservationInputs{
+		Store:       rollupStore,
+		Client:      parentClient,
+		Float:       parentClient,
+		BLS:         app.keyPair.PublicKey(),
+		TotalSupply: stateDBAdapter.TotalSupply,
+		RecvCursor:  app.recvWorker.Cursor,
+	}
+	app.conservationRun = func() { app.conservation.Run(consInputs, consInterval, app.conservationStop) }
+	logger.Info("BLS conservation mode: %s (interval %s)", consMode, consInterval)
 	tx_processor.InitParentChainGatewayHandler(crossChainTransferDispatcherAdapter{
 		h:          app.crossNodeHandler,
 		sendWorker: app.sendWorker,
@@ -321,20 +431,69 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	var rollupLastDBNonce uint64
 	rollupLastProgress := time.Now()
 
-	type RollupSystemPayload struct {
-		Event        rollup.Event  `json:"event"`
-		MsgID        e_common.Hash `json:"msg_id"`
-		SourceSeq    uint64        `json:"source_seq"`
-		SourcePubKey cm.PublicKey  `json:"source_pub_key"`
-		DestPubKey   cm.PublicKey  `json:"dest_pub_key"`
-		PayloadHash  e_common.Hash `json:"payload_hash"`
+	// Attestations are signed with this validator's committee key (Databases.BLSPrivateKey, the key whose public half is
+	// the validator account's PublicKeyBls); single-key deployments fall back to the node key.
+	attestKey := app.keyPair
+	if hexKey := app.config.Databases.BLSPrivateKey; hexKey != "" {
+		if priv, _, _ := bls.GenerateKeyPairFromSecretKey(hexKey); len(priv.Bytes()) > 0 {
+			attestKey = bls.NewKeyPair(priv.Bytes())
+		} else {
+			logger.Warn("Invalid Databases.BLSPrivateKey: registration attestations fall back to the node key")
+		}
 	}
+	app.regWorker.SetAttestationKey(attestKey)
+
+	// P0-3 & Phase 2 (B4): Check attestation key ↔ on-chain validator account at startup
+	cfgAddr := e_common.HexToAddress(app.config.Address)
+	attestPub := attestKey.PublicKey()
+	if isVal, warn := tx_processor.VerifyNodeCommitteeKey(app.chainState, app.keyPair.Address(), cfgAddr, attestPub); isVal {
+		if warn != "" {
+			metrics.ValidatorCommitteeKeyValid.Set(0)
+			app.setCommitteeKeyStatus("mismatch", warn)
+			logger.Error("❌ [COMMITTEE-KEY-MISMATCH] %s", warn)
+		} else {
+			metrics.ValidatorCommitteeKeyValid.Set(1)
+			app.setCommitteeKeyStatus("ok", "")
+			logger.Info("✅ [COMMITTEE-KEY-OK] Validator attestation key %x verified in active committee", attestPub[:6])
+		}
+	} else {
+		metrics.ValidatorCommitteeKeyValid.Set(-1)
+		app.setCommitteeKeyStatus("not_validator", "")
+		logger.Info("ℹ️ [COMMITTEE-KEY-INFO] Node address %s is not in the validator committee (non-validator/RPC node)", app.keyPair.Address().Hex())
+	}
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			// Point lookups only (never GetAllValidators from a timer goroutine: it races the block commit).
+			isVal, warn, err := tx_processor.VerifyNodeCommitteeKeyLight(app.chainState, app.keyPair.Address(), cfgAddr, attestPub)
+			switch {
+			case err != nil:
+				logger.Warn("[COMMITTEE-KEY-PERIODIC-CHECK] state read failed, keeping previous status: %v", err)
+			case isVal && warn != "":
+				metrics.ValidatorCommitteeKeyValid.Set(0)
+				app.setCommitteeKeyStatus("mismatch", warn)
+				logger.Error("❌ [COMMITTEE-KEY-PERIODIC-CHECK] %s", warn)
+			case isVal:
+				metrics.ValidatorCommitteeKeyValid.Set(1)
+				app.setCommitteeKeyStatus("ok", "")
+			default:
+				metrics.ValidatorCommitteeKeyValid.Set(-1)
+				app.setCommitteeKeyStatus("not_validator", "")
+			}
+			if app.regRelay != nil {
+				cnt, maxAge := app.regRelay.PendingStats()
+				metrics.AccountRegistrationPendingTotal.Set(float64(cnt))
+				metrics.AccountRegistrationPendingMaxAgeSeconds.Set(maxAge)
+			}
+		}
+	}()
 
 	eventProposer := func(event rollup.Event, msgID e_common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash e_common.Hash) error {
 		rollupNonceMutex.Lock()
 		defer rollupNonceMutex.Unlock()
 
-		state, err := app.chainState.GetAccountStateDB().AccountState(app.keyPair.Address())
+		state, err := app.chainState.GetAccountStateDB().AccountState(attestKey.Address())
 		var dbNonce uint64
 		if err == nil {
 			dbNonce = state.Nonce()
@@ -377,7 +536,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			rollupPendingNonce = dbNonce
 		}
 
-		payload := RollupSystemPayload{
+		payload := rollup.RollupSystemPayload{
 			Event:        event,
 			MsgID:        msgID,
 			SourceSeq:    sourceSeq,
@@ -385,10 +544,38 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			DestPubKey:   destPubKey,
 			PayloadHash:  payloadHash,
 		}
-		eventData, _ := json.Marshal(payload)
+		innerData, err := rollup.MarshalRollupSystemPayload(&payload)
+		if err != nil {
+			logger.Error("failed to marshal RollupSystemPayload: %v", err)
+			return err
+		}
+		chainID := app.config.ChainId.Uint64()
+
+		// Skip if already attested on chain by this node or already applied (tombstone)
+		if rollup.HasPendingRollupSystemAttestation(&smartContractDBAdapter{chainState: app.chainState}, chainID, innerData, attestKey.PublicKey()) {
+			return nil
+		}
+
+		digest := rollup.ComputeRollupSystemEventDigest(chainID, innerData)
+		sig := bls.Sign(attestKey.PrivateKey(), digest)
+		attested := rollup.RollupSystemAttestedPayload{
+			Kind:  rollup.PayloadKindRollupSystemAttested,
+			Inner: innerData,
+			Attestations: []rollup.RegistrationAttestation{
+				{
+					ValidatorPubkey: attestKey.PublicKey(),
+					Signature:       sig,
+				},
+			},
+		}
+		eventData, err := rollup.MarshalRollupSystemAttestedPayload(&attested)
+		if err != nil {
+			logger.Error("failed to marshal RollupSystemAttestedPayload: %v", err)
+			return err
+		}
 
 		tx := transaction.NewTransaction(
-			app.keyPair.Address(),
+			attestKey.Address(),
 			rollup.RollupSystemAddress,
 			big.NewInt(0),
 			21000,
@@ -401,7 +588,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			// enough to cover this indefinitely.
 			0, // maxTimeUse
 			eventData,
-			nil, // relatedAddresses
+			nil,             // relatedAddresses
 			e_common.Hash{}, // lastDeviceKey
 			e_common.Hash{}, // newDeviceKey
 			rollupPendingNonce,
@@ -409,7 +596,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			// hardcoded literal -- found live: hardcoded 1 was rejected with "invalid chain id"
 			// on this devnet, whose real ChainId is 991 (0x3df).
 		)
-		tx.SetSign(app.keyPair.PrivateKey())
+		tx.SetSign(attestKey.PrivateKey())
 
 		// Must go through TxValidatorPool (app.transactionProcessor's embedded pool), NOT
 		// app.transactionPool.AddTransaction(). app.transactionPool (pkg/transaction_pool) is
@@ -436,6 +623,65 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	app.sendWorker.EventProposer = eventProposer
 	app.recvWorker.EventProposer = eventProposer
 	app.reclaimWorker.EventProposer = eventProposer
+	app.regWorker.AlreadyAttested = func(user e_common.Address, parentSeq uint64) bool {
+		return rollup.HasPendingAttestation(&smartContractDBAdapter{chainState: app.chainState},
+			parentchain.ParentChainID, user, app.keyPair.PublicKey(), parentSeq, attestKey.PublicKey())
+	}
+	app.regWorker.EventProposer = func(payload []byte) error {
+		rollupNonceMutex.Lock()
+		defer rollupNonceMutex.Unlock()
+
+		state, err := app.chainState.GetAccountStateDB().AccountState(attestKey.Address())
+		var dbNonce uint64
+		if err == nil {
+			dbNonce = state.Nonce()
+		}
+		if dbNonce != rollupLastDBNonce {
+			rollupLastDBNonce = dbNonce
+			rollupLastProgress = time.Now()
+		}
+		for k, n := range rollupInflight {
+			if n < dbNonce {
+				delete(rollupInflight, k)
+			}
+		}
+		if len(rollupInflight) > 0 && time.Since(rollupLastProgress) > 60*time.Second {
+			rollupInflight = map[rollupInflightKey]uint64{}
+			rollupLastProgress = time.Now()
+		}
+		payloadHash := e_common.BytesToHash(crypto.Keccak256(payload))
+		inflightKey := rollupInflightKey{msgID: payloadHash, typ: rollup.EventType(rollup.SystemPayloadKindAccountRegistered)}
+		if _, pending := rollupInflight[inflightKey]; pending {
+			return nil
+		}
+		if len(rollupInflight) == 0 || rollupPendingNonce < dbNonce {
+			rollupPendingNonce = dbNonce
+		}
+
+		tx := transaction.NewTransaction(
+			attestKey.Address(),
+			rollup.RollupSystemAddress,
+			big.NewInt(0),
+			21000,
+			1_000_000_000,
+			0,
+			payload,
+			nil,
+			e_common.Hash{},
+			e_common.Hash{},
+			rollupPendingNonce,
+			app.config.ChainId.Uint64(),
+		)
+		tx.SetSign(attestKey.PrivateKey())
+
+		_, err = app.transactionProcessor.AddTransactionToPool(tx)
+		if err == nil {
+			rollupInflight[inflightKey] = rollupPendingNonce
+			rollupPendingNonce++
+			logger.Info("📡 [REGISTRATION-PROPOSER] Proposed account_registered event to Tx Pool (Nonce %d)", tx.GetNonce())
+		}
+		return err
+	}
 
 	if app.config.IsMining {
 		// 1. Khởi tạo EthTransactionBroadcaster
@@ -458,22 +704,6 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	// Initialize processors and routes
 	app.initProcessors()
 	app.initRoutes()
-
-	// Initialize BLS key store (merged from RPC client) — only if configured
-	if app.config.MasterPassword != "" && app.config.AppPepper != "" {
-		pks, err := NewPrivateKeyStore(
-			app.config.Databases.RootPath,
-			app.config.MasterPassword,
-			app.config.AppPepper,
-		)
-		if err != nil {
-			logger.Warn("BLS key store initialization failed (non-fatal): %v", err)
-		} else {
-			app.blsKeyStore = pks
-			logger.Info("BLS key store initialized successfully")
-		}
-	}
-
 	return app, nil
 }
 
@@ -501,6 +731,9 @@ func (app *App) initProcessors() {
 	// Set node references
 	app.blockProcessor.SetNode(app.node)
 
+	// Set Raw Ethereum Converter for SendRawTransaction / SendRawTransactions (shared with RPC)
+	app.transactionProcessor.SetRawEthConverter(app.ConvertRawEthTxToMetaTx)
+
 	// Set Rollup System Event Interceptor.
 	// NOTE: this TxValidatorPool-based interceptor is NOT part of the live BlockSTM execution
 	// path (TrueBlockSTM never routes RollupSystemAddress txs through TxValidatorPool at all —
@@ -525,35 +758,30 @@ func (app *App) initProcessors() {
 
 	tx_processor.InitRollupSystemHandler(rollupSystemEventDispatcherFunc(func(store rollup.Store, stateDB tx_processor.AccountStateAccessor, data []byte) error {
 		return handleRollupSystemEvent(app, store, stateDB, data)
-	}))
+	}), app.accountRegistryHandler)
 }
 
-type rollupSystemPayload struct {
-	Event        rollup.Event  `json:"event"`
-	MsgID        e_common.Hash `json:"msg_id"`
-	SourceSeq    uint64        `json:"source_seq"`
-	SourcePubKey cm.PublicKey  `json:"source_pub_key"`
-	DestPubKey   cm.PublicKey  `json:"dest_pub_key"`
-	PayloadHash  e_common.Hash `json:"payload_hash"`
-}
-
-// store is the WRITE store: barrier-tx-scoped (a speculative-execution snapshot), supplied by
-// RollupSystemHandler.HandleTransaction via newLiveRollupStore(chainState) where chainState is
-// that call's own per-tx parameter. app.rollupStore is passed separately as the READ store: it
-// is scoped to app.chainState directly (see NewApp's construction of app.rollupStore), which is
-// the live, always-current pointer that worker goroutines (e.g. ReceiveWorker) write through —
-// unlike the barrier-tx snapshot, it never goes stale relative to those writes. See
-// CrossNodeHandler.HandleSystemEvent's doc comment in pkg/rollup/cross_node_handler.go for why
-// this read/write split is required (a barrier-tx snapshot taken before a worker's own direct
-// Put() cannot see that Put(), causing e.g. EventClaimedConfirmed to be rejected against a
-// stale MARKED_CLAIMED_PENDING_CREDIT read even though the record had already advanced).
+// handleRollupSystemEvent applies a system event deterministically.
+// store is passed as BOTH readStore and writeStore: it is the live block-execution store
+// (newLiveRollupStore(chainState)), ensuring 100% deterministic state transitions and state root
+// parity across all replicas, during normal execution, catchup sync, and post-restart block replay.
 func handleRollupSystemEvent(app *App, store rollup.Store, stateDB rollup.AccountStateDB, data []byte) error {
-	var payload rollupSystemPayload
-	if err := json.Unmarshal(data, &payload); err != nil {
+	if rollup.IsAccountRegistrationPayload(data) {
+		if app.accountRegistryHandler == nil {
+			return errors.New("account registry handler not initialized")
+		}
+		err := app.accountRegistryHandler.Apply(stateDB, data)
+		if err == nil && app.regWorker != nil {
+			app.regWorker.WakeUp()
+		}
+		return err
+	}
+	var payload rollup.RollupSystemPayload
+	if err := rollup.UnmarshalRollupSystemPayload(data, &payload); err != nil {
 		return fmt.Errorf("failed to unmarshal RollupSystemPayload: %w", err)
 	}
 	err := app.crossNodeHandler.HandleSystemEvent(
-		app.rollupStore,
+		store,
 		store,
 		stateDB,
 		payload.Event,
@@ -733,6 +961,15 @@ func (app *App) Run() error {
 		go app.sendWorker.Start()
 		go app.recvWorker.Start()
 		go app.reclaimWorker.Start()
+		if app.regWorker != nil {
+			go app.regWorker.Start()
+		}
+		if app.regRelay != nil && app.config.AccountGateParentRegistered() {
+			app.regRelay.Start()
+		}
+		if app.conservationRun != nil {
+			go app.conservationRun()
+		}
 	}
 
 	// Bắt đầu tiến trình tải dữ liệu history nếu là rpc node
@@ -821,6 +1058,13 @@ func (app *App) GetAccountStateTrie(stateRoot e_common.Hash) (mt_trie.StateTrie,
 // Stop gracefully stops the application and releases resources
 func (app *App) Stop() {
 	logger.Info("Stopping app...")
+	if app.conservationStop != nil {
+		select {
+		case <-app.conservationStop:
+		default:
+			close(app.conservationStop)
+		}
+	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// SHUTDOWN ORDERING FIX (May 2026):
@@ -840,6 +1084,22 @@ func (app *App) Stop() {
 
 	if app.pruningManager != nil {
 		app.pruningManager.Stop()
+	}
+
+	if app.sendWorker != nil {
+		app.sendWorker.Stop()
+	}
+	if app.recvWorker != nil {
+		app.recvWorker.Stop()
+	}
+	if app.reclaimWorker != nil {
+		app.reclaimWorker.Stop()
+	}
+	if app.regWorker != nil {
+		app.regWorker.Stop()
+	}
+	if app.regRelay != nil {
+		app.regRelay.Stop()
 	}
 
 	// Stop server non-blocking so it doesn't block the critical DB flush if clients hang
@@ -919,10 +1179,6 @@ func (app *App) Stop() {
 
 	if app.explorerSearch != nil {
 		app.explorerSearch.Close()
-	}
-
-	if app.blsKeyStore != nil {
-		app.blsKeyStore.Close()
 	}
 
 	logger.Info("App stopped.")
@@ -1078,4 +1334,44 @@ func readProcessRSSKB() (uint64, error) {
 		return 0, err
 	}
 	return 0, fmt.Errorf("readProcessRSSKB: VmRSS not found in /proc/self/status")
+}
+
+// verifyParentChainID queries the Parent Chain status and ensures that its chain ID
+// matches the local execution node configuration. If the parent chain is unreachable,
+// it logs a warning and allows startup to proceed (relay will stay in PENDING status).
+func verifyParentChainID(client parentchain.Client, localChainID uint64) error {
+	if client == nil {
+		metrics.ParentChainIDMismatch.Set(0)
+		return nil
+	}
+	status, err := client.GetStatus()
+	if err != nil {
+		logger.Warn("Failed to query parent chain status at startup: %v (continuing with configured chain ID %d)", err, localChainID)
+		metrics.ParentChainIDMismatch.Set(0)
+		return nil
+	}
+	if status.ChainID > 0 && status.ChainID != localChainID {
+		metrics.ParentChainIDMismatch.Set(1)
+		return fmt.Errorf("parent chain ID mismatch: parent reports %d, local config has %d", status.ChainID, localChainID)
+	}
+	metrics.ParentChainIDMismatch.Set(0)
+	return nil
+}
+
+// durableKV makes every relay write durable (fsync) before it returns. Registration requests are rare, so the cost is
+// negligible, and a request the user was told is PENDING must survive a crash or power loss.
+type durableKV struct{ storage.Storage }
+
+func (d durableKV) Put(key, value []byte) error {
+	if err := d.Storage.Put(key, value); err != nil {
+		return err
+	}
+	return storage.SyncDurable(d.Storage)
+}
+
+func (d durableKV) Delete(key []byte) error {
+	if err := d.Storage.Delete(key); err != nil {
+		return err
+	}
+	return storage.SyncDurable(d.Storage)
 }

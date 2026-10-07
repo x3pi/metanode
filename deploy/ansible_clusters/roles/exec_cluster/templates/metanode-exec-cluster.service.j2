@@ -1,9 +1,10 @@
 [Unit]
-Description=MetaNode Execution Service - {{ inventory_hostname }} (Cluster {{ cluster_id }}, EVM ChainID {{ evm_chain_id | default(991) }})
+Description=MetaNode Execution Service - {{ inventory_hostname }} (Cluster {{ cluster_id }}, ChainID {{ chain_id | default(991) }})
 After=network.target network-online.target
 Wants=network-online.target
 
 [Service]
+EnvironmentFile=-{{ node_data_dir }}/security.env
 Type=simple
 User={{ ansible_user | default('metanode') }}
 WorkingDirectory={{ node_data_dir }}
@@ -15,6 +16,11 @@ TimeoutStopSec=30
 LimitNOFILE=65536
 LimitCORE=infinity
 Environment="PARENT_CHAIN_URL=http://{{ parent_chain_host | default('127.0.0.1') }}:{{ parent_chain_rpc_port | default(8547) }}"
+Environment="PARENT_CHAIN_URLS={{ parent_chain_urls_csv | default('') }}"
+Environment="BLS_CONSERVATION_MODE={{ bls_conservation_mode | default('enforce') }}"
+Environment="BLS_CONSERVATION_INTERVAL_SECONDS={{ bls_conservation_interval_seconds | default('300') }}"
+Environment="METANODE_ENV={{ metanode_env | default('production') }}"
+Environment="NODE_ENV={{ node_env | default('production') }}"
 
 StandardOutput=append:{{ base_log_dir }}/{{ inventory_hostname }}.log
 StandardError=append:{{ base_log_dir }}/{{ inventory_hostname }}.log

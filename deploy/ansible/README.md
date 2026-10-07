@@ -45,6 +45,8 @@ Dưới đây là danh sách đầy đủ các tham số cấu hình mà bạn c
 | `--fast` | `false` | Truyền `--fast` xuống `build_release.sh` ở bước `local_build` — build Rust ở chế độ **debug** (`cargo build` không kèm `--release`) thay vì release, biên dịch nhanh hơn nhiều nhưng binary chạy chậm hơn đáng kể. **Chỉ dùng để lặp lại nhanh khi test, không dùng cho node production thật.** |
 | `--prebuilt-bin [DIR]` / `--skip-build` | `false` | **Chạy từ Binary có sẵn (Bỏ qua build code):** Không cần cài Go, Rust hay biên dịch lại. Lấy trực tiếp file nhị phân (`metanode`, `simple_chain`...) đã build từ `deploy/build_private_chain_bins.sh` (mặc định tại `deploy/bin/` hoặc thư mục tùy chọn `DIR`). Tiết kiệm thời gian và rất phù hợp khi gửi binary cho người khác vận hành. |
 | `--bin-dir DIR` | N/A | Chỉ định rõ thư mục chứa các file binary có sẵn để deploy. |
+| `-i FILE` / `--inventory FILE` | `inventory.yml` | Chỉ định file cấu hình Inventory tùy chọn (ví dụ: `inventory.chain2.yml` để chạy cụm Chain 2 độc lập). |
+| `--rpc-nodes-file FILE` | Tự động theo namespace (mặc định `/tmp/rpc_nodes.json` hoặc `/tmp/rpc_nodes.<namespace>.json`) | Đường dẫn file cấu hình RPC JSON tùy chọn. Hỗ trợ chia sẻ và Smart Merge chung file với cụm `deploy_clusters.sh`. |
 
 ---
 
@@ -153,6 +155,31 @@ rồi từ root repo chạy:
 
 Chi tiết giới hạn, dung lượng vật lý và lỗi cần xử lý:
 [DEPLOY_GUIDE.md — BTRFS snapshot](DEPLOY_GUIDE.md#6-tăng-dung-lượng-hoặc-tạo-lại-btrfs-snapshot).
+
+---
+
+### 2.3. Triển khai Chuỗi Mới Độc Lập: Chain 2 (`inventory.chain2.yml`)
+
+Bạn có thể chạy song song nhiều chuỗi blockchain độc lập trên cùng hạ tầng máy chủ mà không sợ trùng port hay xung đột dữ liệu. Ví dụ hồ sơ **Chain 2** (`inventory.chain2.yml`):
+- **4 Validator Nodes:** `m5`, `m6`, `m7`, `m8` (RPC: `10751-10754`, TCP P2P: `6205-6208`, BFT: `9105-9108`).
+- **Chain ID:** `991` (khác Chain gốc `990`).
+- **Namespace riêng:** `chain_2` (data tách biệt tại `/opt/metanode-chain-2/`).
+
+```bash
+# 1. Khởi tạo Chain 2 mới tinh từ Block 0 (Clean & Gen Keys):
+./ansible_deploy.sh reset-all --inventory ./inventory.chain2.yml --yes-reset-all
+
+# 2. Cập nhật code / binary cho Chain 2 (giữ nguyên dữ liệu):
+./ansible_deploy.sh deploy --all --inventory ./inventory.chain2.yml
+
+# 3. Xuất RPC config vào file tùy ý hoặc dùng chung file với cụm Cluster:
+./ansible_deploy.sh deploy --all --inventory ./inventory.chain2.yml --rpc-nodes-file /tmp/rpc_nodes.custom.json
+
+# 4. Dừng hoặc khởi động lại riêng cụm Chain 2:
+./ansible_deploy.sh stop --all --inventory ./inventory.chain2.yml
+./ansible_deploy.sh restart --all --inventory ./inventory.chain2.yml
+```
+> 📖 Hướng dẫn chi tiết đầy đủ về Chain 2 xem tại [DEPLOY_GUIDE.md (Mục 4.1)](DEPLOY_GUIDE.md#41-chạy-cụm-chain-2-chain-id-991-độc-lập-với-chain-gốc).
 
 ---
 

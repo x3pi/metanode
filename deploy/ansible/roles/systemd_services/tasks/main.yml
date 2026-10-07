@@ -17,6 +17,7 @@
   changed_when: false
   run_once: true
   delegate_to: localhost
+  become: no
 
 - name: "SECURITY: Reject plaintext credentials in production (Issue #104)"
   ansible.builtin.assert:
@@ -26,6 +27,7 @@
   when: (metanode_env | default('production')) == 'production' or (node_env | default('production')) == 'production'
   run_once: true
   delegate_to: localhost
+  become: no
 
 - name: Create metanode system group
   ansible.builtin.group:
@@ -108,7 +110,7 @@
 
 - name: Copy genesis file
   ansible.builtin.copy:
-    src: "{{ deploy_dir }}/genesis.json"
+    src: "{{ cluster_config_dir }}/genesis.json"
     dest: "{{ metanode_install_dir }}/node-{{ item }}/config/genesis.json"
     remote_src: no
     owner: metanode
@@ -116,6 +118,17 @@
     mode: '0644'
   loop: "{{ active_nodes }}"
   when: ansible_action in ['deploy', 'setup']
+
+- name: Write security environment file (tokens / pins from vault vars, 0600)
+  ansible.builtin.template:
+    src: security.env.j2
+    dest: "{{ metanode_install_dir }}/node-{{ item }}/config/security.env"
+    owner: metanode
+    group: metanode
+    mode: '0600'
+  loop: "{{ active_nodes }}"
+  no_log: true
+  notify: reload systemd
 
 - name: Generate systemd service for Execution
   ansible.builtin.template:

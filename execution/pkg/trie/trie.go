@@ -590,3 +590,34 @@ func clearDirty(n node.Node) {
 		// Leaf values and external hashes do not maintain dirty flags or children
 	}
 }
+
+// CanEvict implements EvictableStateTrie for MerklePatriciaTrie.
+func (t *MerklePatriciaTrie) CanEvict() bool {
+	if t == nil || t.root == nil {
+		return true
+	}
+	return !hasDirtyNode(t.root)
+}
+
+func hasDirtyNode(n node.Node) bool {
+	if n == nil {
+		return false
+	}
+	switch cn := n.(type) {
+	case *node.ShortNode:
+		if cn.Flags.Dirty {
+			return true
+		}
+		return hasDirtyNode(cn.Val)
+	case *node.FullNode:
+		if cn.Flags.Dirty {
+			return true
+		}
+		for i := 0; i < len(cn.Children); i++ {
+			if cn.Children[i] != nil && hasDirtyNode(cn.Children[i]) {
+				return true
+			}
+		}
+	}
+	return false
+}

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
-SUDO_PASS="1234@abcd"
+# The sudo password must come from the environment (SUDO_PASS); it is never stored in the repository.
+: "${SUDO_PASS:?export SUDO_PASS before running this script}"
 
 echo "1. Dừng toàn bộ tiến trình Parent Chain và Execution Clusters..."
 echo "$SUDO_PASS" | sudo -S pkill -9 -f "/opt/metanode/bin/simple_chain" 2>/dev/null || true

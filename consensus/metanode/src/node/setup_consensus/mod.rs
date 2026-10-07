@@ -360,6 +360,7 @@ impl ConsensusNode {
                 if let Err(e) = crate::node::recovery::perform_block_recovery_check(
                     &executor_client_for_proc,
                     storage.last_global_exec_index,
+                    go_replay_after,
                     storage.epoch_base_exec_index,
                     storage.current_epoch,
                     &recovery_store,

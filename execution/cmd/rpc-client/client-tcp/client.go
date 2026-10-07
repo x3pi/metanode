@@ -1,6 +1,7 @@
 package client
 
 import (
+	"crypto/ecdsa"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp/client_context"
 	"github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp/command"
@@ -42,8 +44,10 @@ type Client struct {
 	transactionController client_types.TransactionController
 	subscribeSCAddresses  []common.Address
 
-	keepAliveStop chan struct{}
-	txErrorChan   chan error
+	keepAliveStop          chan struct{}
+	txErrorChan            chan error
+	txSuccessChan          chan common.Hash
+	batchSuccessHashesChan chan []common.Hash
 }
 
 type receiptRequestType int
@@ -102,13 +106,17 @@ func NewClient(
 	)
 	logger.Error("Connecting to parent node at %s", config.ParentConnectionAddress)
 	parentConn.SetRealConnAddr(config.ParentConnectionAddress)
-	clientContext.Handler = c_network.NewHandler(
+	clientHandler := c_network.NewHandler(
 		client.accountStateChan,
 		client.receiptChan,
 		client.deviceKeyChan,
 		client.transactionErrorChan,
 		client.nonce,
 	)
+	clientContext.Handler = clientHandler
+	client.txErrorChan = clientHandler.TxErrorChan()
+	client.txSuccessChan = clientHandler.TxSuccessChan()
+	client.batchSuccessHashesChan = clientHandler.BatchSuccessHashesChan()
 	clientContext.SocketServer, _ = p_network.NewSocketServer(
 		nil,
 		clientContext.KeyPair,
@@ -469,6 +477,212 @@ asDrained:
 	}
 }
 
+// SendSecpProtoTransaction signs and sends a Type 0xFF transaction using an ECDSA secp256k1 key and waits (up to 60s)
+// for its receipt.
+func (client *Client) SendSecpProtoTransaction(
+	privKey *ecdsa.PrivateKey,
+	toAddress common.Address,
+	amount *big.Int,
+	maxGas uint64,
+	maxGasPrice uint64,
+	data []byte,
+) (types.Receipt, types.Transaction, error) {
+	tx, err := client.SendSecpProtoTransactionNoWait(privKey, toAddress, amount, maxGas, maxGasPrice, data)
+	if err != nil {
+		return nil, nil, err
+	}
+	receipt, err := client.waitReceipt(tx.Hash(), 60*time.Second)
+	return receipt, tx, err
+}
+
+// WaitForReceipt waits up to timeout for the receipt of a transaction already sent on this connection.
+func (client *Client) WaitForReceipt(txHash common.Hash, timeout time.Duration) (types.Receipt, error) {
+	return client.waitReceipt(txHash, timeout)
+}
+
+// SendSecpProtoTransactionNoWait signs a Type 0xFF transaction with an ECDSA secp256k1 key and sends it over TCP
+// without waiting for a receipt (a rejected transaction never produces one). Use WaitForReceipt to wait.
+func (client *Client) SendSecpProtoTransactionNoWait(
+	privKey *ecdsa.PrivateKey,
+	toAddress common.Address,
+	amount *big.Int,
+	maxGas uint64,
+	maxGasPrice uint64,
+	data []byte,
+) (types.Transaction, error) {
+	fromAddress := crypto.PubkeyToAddress(privKey.PublicKey)
+
+	// Fetch current on-chain account state to get nonce
+	as, err := client.AccountState(fromAddress)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get account state for %s: %w", fromAddress.Hex(), err)
+	}
+
+	tx := mt_transaction.NewTransaction(
+		fromAddress,
+		toAddress,
+		amount,
+		maxGas,
+		maxGasPrice,
+		0, // maxTimeUse
+		data,
+		nil, // relatedAddress
+		common.Hash{},
+		common.Hash{},
+		as.Nonce(),
+		client.clientContext.Config.ChainId,
+	)
+	concreteTx, ok := tx.(*mt_transaction.Transaction)
+	if !ok {
+		return nil, fmt.Errorf("transaction is not *mt_transaction.Transaction")
+	}
+	concreteTx.SetType(0xFF)
+	if err := concreteTx.SignSecpProto(privKey); err != nil {
+		return nil, fmt.Errorf("failed to sign secp proto tx: %w", err)
+	}
+
+	bTransaction, err := tx.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal tx: %w", err)
+	}
+
+	parentConn := client.clientContext.ConnectionsManager.ParentConnection()
+	if parentConn == nil {
+		return nil, fmt.Errorf("parent connection is nil")
+	}
+
+	err = client.clientContext.MessageSender.SendBytes(
+		parentConn,
+		command.SendTransaction,
+		bTransaction,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send bytes via TCP: %w", err)
+	}
+
+	logger.Info("══════ SECP PROTO TX 0xFF SENT ══════")
+	logger.Info("  Hash:      %v", tx.Hash().Hex())
+	logger.Info("  From:      %v", fromAddress.Hex())
+	logger.Info("  To:        %v", toAddress.Hex())
+	logger.Info("  Nonce:     %d", tx.GetNonce())
+	logger.Info("  Amount:    %v", amount.String())
+	logger.Info("  ChainID:   %d", tx.GetChainID())
+	logger.Info("═════════════════════════════════════")
+
+	return tx, nil
+}
+
+// SendRawEthTransaction gửi EIP-2718 raw Ethereum transaction binary envelope qua TCP.
+// Đợi TransactionSuccess response chứa txHash hoặc TransactionError, hoặc timeout sau 5 giây.
+func (client *Client) SendRawEthTransaction(rawTx []byte) (common.Hash, error) {
+	parentConn := client.clientContext.ConnectionsManager.ParentConnection()
+	if parentConn == nil || !parentConn.IsConnect() {
+		logger.Info("🔌 [RAW ETH TX] Parent connection lost, reconnecting...")
+		if err := client.ReconnectToParent(); err != nil {
+			return common.Hash{}, fmt.Errorf("cannot send raw eth TX: reconnect failed: %w", err)
+		}
+		parentConn = client.clientContext.ConnectionsManager.ParentConnection()
+		if parentConn == nil || !parentConn.IsConnect() {
+			return common.Hash{}, fmt.Errorf("cannot send raw eth TX: still disconnected after reconnect")
+		}
+	}
+
+	// Drain any stale errors/successes
+	for {
+		select {
+		case <-client.txErrorChan:
+		case <-client.txSuccessChan:
+		default:
+			goto drained
+		}
+	}
+drained:
+
+	err := client.clientContext.MessageSender.SendBytes(
+		parentConn,
+		command.SendRawTransaction,
+		rawTx,
+	)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to send SendRawTransaction via TCP: %w", err)
+	}
+
+	// Wait for TransactionSuccess or TransactionError
+	select {
+	case txHash := <-client.txSuccessChan:
+		return txHash, nil
+	case err := <-client.txErrorChan:
+		return common.Hash{}, err
+	case <-time.After(5 * time.Second):
+		return common.Hash{}, fmt.Errorf("timeout waiting for SendRawTransaction response")
+	}
+}
+
+// SendRawEthTransactions gửi batch EIP-2718 raw Ethereum transactions qua TCP.
+// Trả về hash của transaction đầu tiên trong batch được chấp nhận thành công.
+func (client *Client) SendRawEthTransactions(rawBatch [][]byte) (common.Hash, error) {
+	hashes, err := client.SendRawEthTransactionsDetailed(rawBatch)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if len(hashes) == 0 {
+		return common.Hash{}, fmt.Errorf("no transactions accepted from batch")
+	}
+	return hashes[0], nil
+}
+
+// SendRawEthTransactionsDetailed gửi batch EIP-2718 raw Ethereum transactions qua TCP
+// và trả về toàn bộ danh sách các transaction hash được chấp nhận thành công.
+func (client *Client) SendRawEthTransactionsDetailed(rawBatch [][]byte) ([]common.Hash, error) {
+	parentConn := client.clientContext.ConnectionsManager.ParentConnection()
+	if parentConn == nil || !parentConn.IsConnect() {
+		logger.Info("🔌 [RAW ETH TXs] Parent connection lost, reconnecting...")
+		if err := client.ReconnectToParent(); err != nil {
+			return nil, fmt.Errorf("cannot send raw eth TXs: reconnect failed: %w", err)
+		}
+		parentConn = client.clientContext.ConnectionsManager.ParentConnection()
+		if parentConn == nil || !parentConn.IsConnect() {
+			return nil, fmt.Errorf("cannot send raw eth TXs: still disconnected after reconnect")
+		}
+	}
+
+	// Drain any stale errors/successes
+	for {
+		select {
+		case <-client.txErrorChan:
+		case <-client.txSuccessChan:
+		case <-client.batchSuccessHashesChan:
+		default:
+			goto drainedBatch
+		}
+	}
+drainedBatch:
+
+	// Encode batch into RLP [][]byte
+	batchRLP, err := rlp.EncodeToBytes(rawBatch)
+	if err != nil {
+		return nil, fmt.Errorf("failed to RLP encode batch: %w", err)
+	}
+
+	err = client.clientContext.MessageSender.SendBytes(
+		parentConn,
+		command.SendRawTransactions,
+		batchRLP,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send SendRawTransactions via TCP: %w", err)
+	}
+
+	select {
+	case hashes := <-client.batchSuccessHashesChan:
+		return hashes, nil
+	case err := <-client.txErrorChan:
+		return nil, err
+	case <-time.After(5 * time.Second):
+		return nil, fmt.Errorf("timeout waiting for SendRawTransactions response")
+	}
+}
+
 func (client *Client) ReadTransaction(
 	fromAddress common.Address,
 	toAddress common.Address,
@@ -678,108 +892,7 @@ func CreateSignedSetBLSPublicKeyTx(
 	return signedTx, nil
 }
 
-func (client *Client) SendTransactionWithDeviceKey(
-	fromAddress common.Address,
-	toAddress common.Address,
-	amount *big.Int,
-	data []byte,
-	relatedAddress []common.Address,
-	maxGas uint64,
-	maxGasPrice uint64,
-	maxTimeUse uint64,
-) (types.Receipt, error) {
-	// Lấy kết nối tới Parent Node
-	parentConn := client.clientContext.ConnectionsManager.ParentConnection()
 
-	if parentConn == nil || !parentConn.IsConnect() {
-		err := client.ReconnectToParent()
-		if err != nil {
-			return nil, err
-		}
-		parentConn = client.clientContext.ConnectionsManager.ParentConnection()
-	}
-	// Gửi yêu cầu lấy trạng thái tài khoản
-	client.clientContext.MessageSender.SendBytes(
-		parentConn,
-		command.GetAccountState,
-		fromAddress.Bytes(),
-	)
-	logger.Info("TcpRemoteAddr: %v", parentConn.TcpRemoteAddr())
-
-	logger.Info("TcpLocalAddr: %v", parentConn.TcpLocalAddr())
-	// Lắng nghe tài khoản trong kênh accountStateChan bằng for range
-	for as := range client.accountStateChan {
-		// Nếu không phải tài khoản mong muốn, tiếp tục lắng nghe mà không bỏ dữ liệu
-		if as.Address() != fromAddress {
-			// Gửi lại dữ liệu cho luồng khác đọc (không bỏ dữ liệu)
-			client.accountStateChan <- as
-			time.Sleep(50 * time.Millisecond) // Delay trước khi tiếp tục lặp
-			continue
-		}
-
-		// Nếu tìm thấy tài khoản phù hợp, xử lý giao dịch
-		lastHash := as.LastHash()
-		pendingBalance := as.PendingBalance()
-
-		err := client.clientContext.MessageSender.SendBytes(
-			parentConn,
-			"GetDeviceKey",
-			lastHash.Bytes(),
-		)
-
-		if err != nil {
-			return nil, err
-		}
-
-		// Lắng nghe deviceKey từ server
-		receiveDeviceKey := <-client.deviceKeyChan
-		TransactionHash := receiveDeviceKey.TransactionHash
-		lastDeviceKey := common.HexToHash(
-			hex.EncodeToString(receiveDeviceKey.LastDeviceKeyFromServer),
-		)
-
-		// Tạo khóa thiết bị mới
-		rawNewDeviceKeyBytes := []byte(fmt.Sprintf("%s-%d", hex.EncodeToString(TransactionHash), time.Now().Unix()))
-		rawNewDeviceKey := crypto.Keccak256(rawNewDeviceKeyBytes)
-		newDeviceKey := crypto.Keccak256Hash(rawNewDeviceKey)
-
-		// Chuyển đổi danh sách địa chỉ liên quan sang mảng byte
-		bRelatedAddresses := make([][]byte, len(relatedAddress))
-		for i, v := range relatedAddress {
-			bRelatedAddresses[i] = v.Bytes()
-		}
-		// Gửi giao dịch với device key
-		tx, err := client.transactionController.SendTransactionWithDeviceKey(
-			fromAddress,
-			toAddress,
-			pendingBalance,
-			amount,
-			maxGas,
-			maxGasPrice,
-			maxTimeUse,
-			data,
-			bRelatedAddresses,
-			lastDeviceKey,
-			newDeviceKey,
-			as.Nonce(),
-			rawNewDeviceKey,
-			client.clientContext.Config.ChainId,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		// Chờ biên lai giao dịch (receipt)
-		receipt, err := client.waitReceipt(tx.Hash(), 0)
-		if err != nil {
-			return nil, err
-		}
-		return receipt, nil
-	}
-
-	// Nếu kênh accountStateChan bị đóng, trả lỗi
-	return nil, fmt.Errorf("account state channel closed unexpectedly")
-}
 
 func (client *Client) SendAllTransactionsInDirectory(
 	directoryPath string, // Đường dẫn đến thư mục chứa các tệp giao dịch

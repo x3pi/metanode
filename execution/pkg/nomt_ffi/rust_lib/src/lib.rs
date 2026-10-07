@@ -1021,6 +1021,70 @@ pub unsafe extern "C" fn nomt_free_proof(proof_ptr: *mut u8, len: usize) {
     })
 }
 
+/// Verify a Merkle proof against a root for a 32-byte key path.
+/// If `value` is NULL or `value_len` is 0, verifies non-existence.
+/// Otherwise, verifies that `key` has `value`.
+///
+/// Returns:
+///   1: Proof is valid and statement holds
+///   0: Proof is invalid or statement does not hold (e.g. root mismatch, wrong value)
+///  -1: Error (null pointer, invalid proof format)
+#[no_mangle]
+pub unsafe extern "C" fn nomt_verify_proof(
+    root: *const u8,
+    key: *const u8,
+    value: *const u8,
+    value_len: size_t,
+    proof_ptr: *const u8,
+    proof_len: size_t,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+        if root.is_null() || key.is_null() || proof_ptr.is_null() || proof_len == 0 {
+            return -1;
+        }
+
+        let root_slice = slice::from_raw_parts(root, 32);
+        let mut root_node = [0u8; 32];
+        root_node.copy_from_slice(root_slice);
+
+        let key_slice = slice::from_raw_parts(key, 32);
+        let mut key_path = [0u8; 32];
+        key_path.copy_from_slice(key_slice);
+
+        let proof_bytes = slice::from_raw_parts(proof_ptr, proof_len);
+        let proof: nomt_core::proof::PathProof = match bincode::deserialize(proof_bytes) {
+            Ok(p) => p,
+            Err(_) => return -1,
+        };
+
+        use bitvec::view::BitView;
+        use nomt_core::hasher::ValueHasher;
+        let bits = key_path.view_bits::<bitvec::order::Msb0>();
+        let verified = match proof.verify::<Blake3Hasher>(bits, root_node) {
+            Ok(v) => v,
+            Err(_) => return 0,
+        };
+
+        if value.is_null() || value_len == 0 {
+            match verified.confirm_nonexistence(&key_path) {
+                Ok(true) => 1,
+                _ => 0,
+            }
+        } else {
+            let val_slice = slice::from_raw_parts(value, value_len);
+            let value_hash = Blake3Hasher::hash_value(val_slice);
+            let expected_leaf = nomt_core::trie::LeafData {
+                key_path,
+                value_hash,
+            };
+            match verified.confirm_value(&expected_leaf) {
+                Ok(true) => 1,
+                _ => 0,
+            }
+        }
+    })
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // UNIFIED STATE DB FFI APIs (SIMPLIFIED BRIDGE)
 // ═══════════════════════════════════════════════════════════════════════════════

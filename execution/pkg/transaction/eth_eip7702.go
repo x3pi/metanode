@@ -203,6 +203,12 @@ func ToEthAuthorizationList(list []*pb.SetCodeAuthorization) []types.SetCodeAuth
 	return out
 }
 
+// FromEthAuthorizationList converts a go-ethereum types.SetCodeAuthorization slice
+// into internal protobuf SetCodeAuthorization representations.
+func FromEthAuthorizationList(list []types.SetCodeAuthorization) []*pb.SetCodeAuthorization {
+	return fromEthAuthorizationList(list)
+}
+
 func fromEthAuthorizationList(list []types.SetCodeAuthorization) []*pb.SetCodeAuthorization {
 	out := make([]*pb.SetCodeAuthorization, len(list))
 	for i, a := range list {

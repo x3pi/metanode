@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
@@ -33,7 +35,6 @@ var (
 	pprofAddr         = flag.String("pprof-addr", "localhost:6060", "Địa chỉ bind pprof (để trống để tắt)")
 
 	// Tool flags
-	toolRegisterValidator = flag.String("tool-register-validator", "", "Path to config.json for validator registration tool. If set, runs the tool and exits.")
 	toolGetAddress        = flag.String("tool-get-address", "", "Hex private key to calculate address. If set, prints address and exits.")
 	toolC0Spike           = flag.String("tool-c0-spike", "", "Run C0 spike: 'worker', 'verify'")
 	c0DataDir             = flag.String("c0-data-dir", "", "Data directory for C0 worker")
@@ -71,11 +72,6 @@ func main() {
 	// KHỞI TẠO CỜ LỆNH
 	// Gọi Parse() sau khi đã định nghĩa TẤT CẢ các flag
 	flag.Parse()
-
-	if *toolRegisterValidator != "" {
-		runRegisterValidator(*toolRegisterValidator)
-		os.Exit(0)
-	}
 
 	if *toolGetAddress != "" {
 		runGetAddress(*toolGetAddress)
@@ -941,4 +937,10 @@ func logCgroupLimits() {
 			}
 		}
 	}
+}
+
+func runGetAddress(privateKeyHex string) {
+	bytes := common.FromHex(privateKeyHex)
+	kp := bls.NewKeyPair(bytes)
+	fmt.Printf("%s", kp.Address().Hex())
 }

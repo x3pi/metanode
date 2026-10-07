@@ -1,6 +1,7 @@
 package transaction
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"encoding/binary"
 	"encoding/hex"
@@ -40,14 +41,41 @@ var (
 )
 
 type Transaction struct {
-	proto         *pb.Transaction
-	cachedHash    atomic.Pointer[common.Hash]
-	cachedRHash   atomic.Pointer[common.Hash]
-	cachedBytes   atomic.Pointer[[]byte]
-	cachedEthTx   atomic.Pointer[e_types.Transaction]
-	cachedEthHash atomic.Pointer[common.Hash]
+	proto             *pb.Transaction
+	cachedHash        atomic.Pointer[common.Hash]
+	cachedSigningHash atomic.Pointer[common.Hash]
+	cachedRHash       atomic.Pointer[common.Hash]
+	cachedBytes       atomic.Pointer[[]byte]
+	cachedEthTx       atomic.Pointer[e_types.Transaction]
+	cachedEthHash     atomic.Pointer[common.Hash]
+	cachedEnvTx       atomic.Pointer[envelopeDecode]
 
 	isDebug bool
+}
+
+// envelopeDecode memoizes the decode of RawEnvelope (and, through go-ethereum's own per-tx sender cache, the
+// ecrecover done on it) so repeated envelope-binding checks on one tx do not redo them. raw is kept so a stale entry
+// can never be served for a different envelope.
+type envelopeDecode struct {
+	raw []byte
+	tx  *e_types.Transaction
+}
+
+// envelopeEthTx decodes proto.RawEnvelope (memoized). Unlike ToEthTransaction it never falls back to rebuilding the
+// tx from proto fields, so the result is always exactly what the envelope encodes.
+func (t *Transaction) envelopeEthTx() (*e_types.Transaction, error) {
+	raw := t.proto.RawEnvelope
+	if c := t.cachedEnvTx.Load(); c != nil && bytes.Equal(c.raw, raw) {
+		return c.tx, nil
+	}
+	ethTx := new(e_types.Transaction)
+	if err := ethTx.UnmarshalBinary(raw); err != nil {
+		return nil, err
+	}
+	t.cachedEnvTx.Store(&envelopeDecode{raw: raw, tx: ethTx})
+	// Share the object with ToEthTransaction (same content) so ValidEthSign reuses the already recovered sender.
+	t.cachedEthTx.CompareAndSwap(nil, ethTx)
+	return ethTx, nil
 }
 
 // Hàm này sẽ gọi các hàm chuyển đổi cụ thể dựa trên loại giao dịch.
@@ -56,27 +84,37 @@ func FromEthTransaction(ethTx *e_types.Transaction, pTx *pb.Transaction) error {
 		return errors.New("FromEthTransaction: ethTx hoặc pTx không được rỗng")
 	}
 
+	var err error
 	switch ethTx.Type() {
 	case e_types.LegacyTxType:
-		// Giả định FromEthLegacyTx đã được định nghĩa và có thể truy cập
-		// (ví dụ: trong cùng package hoặc import từ package chứa nó)
-		return FromEthLegacyTx(ethTx, pTx) //
+		err = FromEthLegacyTx(ethTx, pTx)
 	case e_types.AccessListTxType:
-		// Giả định FromEthEIP2930Tx đã được định nghĩa
-		return FromEthEIP2930Tx(ethTx, pTx) //
+		err = FromEthEIP2930Tx(ethTx, pTx)
 	case e_types.DynamicFeeTxType:
-		// Giả định FromEthEIP1559Tx đã được định nghĩa
-		return FromEthEIP1559Tx(ethTx, pTx) //
+		err = FromEthEIP1559Tx(ethTx, pTx)
 	case e_types.BlobTxType:
-		if err := FromEthBlobTx(ethTx, pTx); err != nil {
-			return err
+		if err = FromEthBlobTx(ethTx, pTx); err == nil {
+			err = VerifyBlobSidecar(pTx)
 		}
-		return VerifyBlobSidecar(pTx)
 	case e_types.SetCodeTxType:
-		return FromEthSetCodeTx(ethTx, pTx)
+		err = FromEthSetCodeTx(ethTx, pTx)
 	default:
 		return errors.New("FromEthTransaction: loại giao dịch Ethereum không được hỗ trợ")
 	}
+	if err != nil {
+		return err
+	}
+
+	// Cutover bundle v1 / ADR D3:
+	// Set RawEnvelope for single canonical hash keccak256(raw_envelope)
+	txForEnvelope := ethTx
+	if ethTx.BlobTxSidecar() != nil {
+		txForEnvelope = ethTx.WithoutBlobTxSidecar()
+	}
+	if raw, marshalErr := txForEnvelope.MarshalBinary(); marshalErr == nil {
+		pTx.RawEnvelope = raw
+	}
+	return nil
 }
 
 // NewTransactionFromEth creates a new types.Transaction from an Ethereum e_types.Transaction.
@@ -102,13 +140,28 @@ func NewTransactionFromEth(ethTx *e_types.Transaction) (types.Transaction, error
 	case e_types.SetCodeTxType:
 		err = FromEthSetCodeTx(ethTx, pTx)
 	default:
-		return nil, errors.New("NewTransactionFromEth: unsupported Ethereum transaction type")
+		return nil, fmt.Errorf("%w: unsupported Ethereum transaction type", ErrTxTypeNotSupported)
 	}
 
 	if err != nil {
 		return nil, err
 	}
-	return TransactionFromProto(pTx), nil
+
+	// Cutover bundle v1 / ADR D3:
+	// Set RawEnvelope for single canonical hash keccak256(raw_envelope)
+	txForEnvelope := ethTx
+	if ethTx.BlobTxSidecar() != nil {
+		txForEnvelope = ethTx.WithoutBlobTxSidecar()
+	}
+	if raw, marshalErr := txForEnvelope.MarshalBinary(); marshalErr == nil {
+		pTx.RawEnvelope = raw
+	}
+
+	res := TransactionFromProto(pTx)
+	if concrete, ok := res.(*Transaction); ok && ethTx.BlobTxSidecar() == nil {
+		concrete.cachedEthTx.Store(ethTx)
+	}
+	return res, nil
 }
 
 // Hàm tổng quát để chuyển đổi pb.Transaction sang types.Transaction của go-ethereum
@@ -130,6 +183,18 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 	tx := t.proto
 	if tx == nil {
 		return nil
+	}
+
+	// Cutover bundle v1 / ADR D3:
+	// Loss-free unmarshaling directly from raw EIP-2718 envelope when available
+	if len(tx.RawEnvelope) > 0 {
+		ethTx = new(e_types.Transaction)
+		if unmarshalErr := ethTx.UnmarshalBinary(tx.RawEnvelope); unmarshalErr == nil {
+			t.cachedEthTx.Store(ethTx)
+			return ethTx
+		} else {
+			logger.Warn("ToEthTransaction: failed to unmarshal RawEnvelope: %v, falling back to field reconstruction", unmarshalErr)
+		}
 	}
 
 	data := []byte{}
@@ -437,7 +502,7 @@ func (t *Transaction) Unmarshal(b []byte) error {
 
 // Kiểm tra giao dịch có phải là Deploy Contract không
 func (t *Transaction) IsDeployContract() bool {
-	return t.GetNonce() != 0 && t.FromAddress() != t.ToAddress() && t.ToAddress() == (common.Address{}) && len(t.Data()) > 0
+	return t.FromAddress() != t.ToAddress() && t.ToAddress() == (common.Address{}) && len(t.Data()) > 0
 }
 
 // Kiểm tra giao dịch có phải là Call Contract không
@@ -633,10 +698,12 @@ func (t *Transaction) String() (str string) {
 }
 func (t *Transaction) ClearCacheHash() {
 	t.cachedHash.Store(nil)
+	t.cachedSigningHash.Store(nil)
 	t.cachedRHash.Store(nil)
 	t.cachedBytes.Store(nil)
 	t.cachedEthTx.Store(nil)
 	t.cachedEthHash.Store(nil)
+	t.cachedEnvTx.Store(nil)
 }
 
 func (t *Transaction) EthHash() common.Hash {
@@ -645,6 +712,11 @@ func (t *Transaction) EthHash() common.Hash {
 	}
 	if cached := t.cachedEthHash.Load(); cached != nil {
 		return *cached
+	}
+	if t.proto != nil && len(t.proto.RawEnvelope) > 0 {
+		h := crypto.Keccak256Hash(t.proto.RawEnvelope)
+		t.cachedEthHash.Store(&h)
+		return h
 	}
 	ethTx := t.ToEthTransaction()
 	if ethTx == nil {
@@ -670,6 +742,29 @@ func (t *Transaction) Hash() (hash common.Hash) {
 
 	if cached := t.cachedHash.Load(); cached != nil {
 		return *cached // Trả về giá trị đã cache nếu có
+	}
+
+	// Cutover bundle v1 / ADR D3 / W4:
+	// If RawEnvelope is present (standard Ethereum transaction),
+	// canonical hash is keccak256(RawEnvelope) matching go-ethereum and Rust consensus.
+	if len(t.proto.RawEnvelope) > 0 {
+		hash = crypto.Keccak256Hash(t.proto.RawEnvelope)
+		t.cachedHash.Store(&hash)
+		return hash
+	}
+
+	hash = t.ProtoHash()
+	t.cachedHash.Store(&hash)
+	return hash
+}
+
+// ProtoHash computes the canonical keccak256 hash of the transaction's protobuf fields
+// (TransactionHashData). Unlike Hash(), which returns keccak256(RawEnvelope) for Ethereum
+// transactions, ProtoHash always covers all protobuf execution fields.
+// This is used to ensure signature cache keys bind to the exact proto payload.
+func (t *Transaction) ProtoHash() (hash common.Hash) {
+	if t == nil || t.proto == nil {
+		return common.Hash{}
 	}
 
 	hashPb := txHashDataPool.Get().(*pb.TransactionHashData)
@@ -713,16 +808,75 @@ func (t *Transaction) Hash() (hash common.Hash) {
 
 	bHashPb, err := proto.MarshalOptions{Deterministic: true}.MarshalAppend(buf, hashPb)
 	if err != nil {
-		logger.Error("Transaction.Hash: proto.Marshal failed: %v", err)
+		logger.Error("Transaction.ProtoHash: proto.Marshal failed: %v", err)
 		return common.Hash{}
 	}
 
-	// Tính giá trị băm
+	return crypto.Keccak256Hash(bHashPb)
+}
+
+// SigningHash computes the deterministic Keccak256 hash of TransactionHashData
+// with R, S, and V cleared. This is the exact hash signed by the secp256k1 private key
+// for Type 0xFF transactions, breaking the circular hash dependency.
+func (t *Transaction) SigningHash() (hash common.Hash) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("Panic in SigningHash: %v", r)
+			hash = common.Hash{}
+		}
+	}()
+
+	if t == nil || t.proto == nil {
+		return common.Hash{}
+	}
+
+	if cached := t.cachedSigningHash.Load(); cached != nil {
+		return *cached
+	}
+
+	hashPb := txHashDataPool.Get().(*pb.TransactionHashData)
+	defer func() {
+		proto.Reset(hashPb)
+		txHashDataPool.Put(hashPb)
+	}()
+
+	hashPb.FromAddress = t.proto.FromAddress
+	hashPb.ToAddress = t.proto.ToAddress
+	hashPb.Amount = t.proto.Amount
+	hashPb.MaxGas = t.proto.MaxGas
+	hashPb.MaxGasPrice = t.proto.MaxGasPrice
+	hashPb.MaxTimeUse = t.proto.MaxTimeUse
+	hashPb.Data = t.proto.Data
+	hashPb.Type = t.proto.Type
+	hashPb.LastDeviceKey = t.proto.LastDeviceKey
+	hashPb.NewDeviceKey = t.proto.NewDeviceKey
+	hashPb.Nonce = t.proto.Nonce
+	hashPb.ChainID = t.proto.ChainID
+	// R, S, V are intentionally nil for SigningHash
+	hashPb.R = nil
+	hashPb.S = nil
+	hashPb.V = nil
+	hashPb.GasTipCap = t.proto.GasTipCap
+	hashPb.GasFeeCap = t.proto.GasFeeCap
+	hashPb.AccessList = t.proto.AccessList
+	hashPb.BlobVersionedHashes = t.proto.BlobVersionedHashes
+	hashPb.MaxFeePerBlobGas = t.proto.MaxFeePerBlobGas
+	hashPb.AuthorizationList = t.proto.AuthorizationList
+
+	bufPtr := hashBufferPool.Get().(*[]byte)
+	buf := (*bufPtr)[:0]
+	defer func() {
+		hashBufferPool.Put(bufPtr)
+	}()
+
+	bHashPb, err := proto.MarshalOptions{Deterministic: true}.MarshalAppend(buf, hashPb)
+	if err != nil {
+		logger.Error("Transaction.SigningHash: proto.Marshal failed: %v", err)
+		return common.Hash{}
+	}
+
 	hash = crypto.Keccak256Hash(bHashPb)
-
-	// Lưu vào cache (atomic)
-	t.cachedHash.Store(&hash)
-
+	t.cachedSigningHash.Store(&hash)
 	return hash
 }
 
@@ -842,6 +996,13 @@ func (t *Transaction) Sign() p_common.Sign {
 	return p_common.SignFromBytes(t.proto.Sign)
 }
 
+func (t *Transaction) SignBytes() []byte {
+	if t == nil || t.proto == nil {
+		return nil
+	}
+	return t.proto.Sign
+}
+
 func (t *Transaction) Amount() *big.Int {
 	return big.NewInt(0).SetBytes(t.proto.Amount)
 }
@@ -872,6 +1033,21 @@ func (t *Transaction) SetType(txType uint64) {
 // GetType trả về TX type từ proto.Type (field 16).
 func (t *Transaction) GetType() uint64 {
 	return t.proto.Type
+}
+
+func (t *Transaction) RawEnvelope() []byte {
+	if t == nil || t.proto == nil {
+		return nil
+	}
+	return t.proto.RawEnvelope
+}
+
+func (t *Transaction) SetRawEnvelope(raw []byte) {
+	if t == nil || t.proto == nil {
+		return
+	}
+	t.proto.RawEnvelope = raw
+	t.ClearCacheHash()
 }
 
 func (t *Transaction) GetRelatedAddresses() []common.Address {
@@ -954,6 +1130,11 @@ func (t *Transaction) AuthorizationList() []*pb.SetCodeAuthorization {
 	return t.proto.AuthorizationList
 }
 
+// SetAuthorizationList sets the EIP-7702 authorization tuples.
+func (t *Transaction) SetAuthorizationList(list []*pb.SetCodeAuthorization) {
+	t.proto.AuthorizationList = list
+}
+
 // EthAccessList returns the tx's EIP-2930 access list converted to
 // go-ethereum's representation. Empty for tx types that don't carry one.
 // Used for intrinsic-gas accounting (see vm_processor.computeIntrinsicGas).
@@ -973,15 +1154,10 @@ func (t *Transaction) MaxGasPrice() uint64 {
 	return t.proto.MaxGasPrice
 }
 
-// EffectiveGasPrice returns the price-per-gas-unit this tx actually pays for
-// EXECUTION gas (never blob gas, which is priced/charged separately — see
-// MaxFeePerBlobGas). Legacy/EIP-2930 carry a real flat MaxGasPrice; EIP-1559
-// and EIP-4844 (and any later fee-cap-based type) leave MaxGasPrice at 0 by
-// design and price via GasFeeCap instead (see FromEthEIP1559Tx/FromEthBlobTx).
-// This is the single place that dispatch lives — MaxFee(), ValidMaxGasPrice(),
-// and every fee-charging call site all go through this so a new tx type only
-// needs to be taught the rule once.
-func (t *Transaction) EffectiveGasPrice() *big.Int {
+// GasPriceCap returns the maximum gas price the user is willing to pay for execution gas:
+// flat MaxGasPrice for Legacy/EIP-2930, GasFeeCap for EIP-1559/EIP-4844/EIP-7702.
+// Used for admission gate (>= MINIMUM_BASE_FEE) and balance checks (gasLimit * cap + value) (ADR D2).
+func (t *Transaction) GasPriceCap() *big.Int {
 	switch t.proto.Type {
 	case 0, 1: // Legacy, EIP-2930
 		return big.NewInt(0).SetUint64(t.proto.MaxGasPrice)
@@ -990,9 +1166,33 @@ func (t *Transaction) EffectiveGasPrice() *big.Int {
 	}
 }
 
+// EffectiveGasPrice returns the price-per-gas-unit this tx actually pays for
+// EXECUTION gas (never blob gas, which is priced/charged separately — see
+// MaxFeePerBlobGas).
+// Under ADR D2 (flat fee model v1):
+// - Legacy/EIP-2930: flat MaxGasPrice
+// - EIP-1559, EIP-4844, EIP-7702: min(maxFeePerGas, F + maxPriorityFeePerGas)
+//   where F = MINIMUM_BASE_FEE (100,000 wei).
+// Used for fee charging, receipt effectiveGasPrice, and eth_getTransactionByHash.gasPrice.
+func (t *Transaction) EffectiveGasPrice() *big.Int {
+	switch t.proto.Type {
+	case 0, 1: // Legacy, EIP-2930
+		return big.NewInt(0).SetUint64(t.proto.MaxGasPrice)
+	default: // EIP-1559, EIP-4844, and later fee-cap-based types
+		gasFeeCap := t.GasFeeCap()
+		gasTipCap := t.GasTipCap()
+		baseFee := new(big.Int).SetUint64(p_common.MINIMUM_BASE_FEE)
+		effective := new(big.Int).Add(baseFee, gasTipCap)
+		if effective.Cmp(gasFeeCap) > 0 {
+			return new(big.Int).Set(gasFeeCap)
+		}
+		return effective
+	}
+}
+
 func (tx *Transaction) MaxFee() *big.Int {
 	maxGas := big.NewInt(0).SetUint64(tx.MaxGas())
-	return new(big.Int).Mul(maxGas, tx.EffectiveGasPrice())
+	return new(big.Int).Mul(maxGas, tx.GasPriceCap())
 }
 
 func (t *Transaction) MaxTimeUse() uint64 {
@@ -1050,6 +1250,17 @@ func (t *Transaction) SetToAddress(address common.Address) {
 
 // validate
 func (t *Transaction) ValidEthSign() bool {
+	if t == nil || t.proto == nil {
+		return false
+	}
+	// P0-9: If RawEnvelope is present, strictly verify that all proto fields match
+	// the canonical representation decoded from RawEnvelope.
+	if len(t.proto.RawEnvelope) > 0 {
+		if err := validateEnvelopeBindingTx(t); err != nil {
+			logger.Warn("ValidEthSign envelope binding failed: %v", err)
+			return false
+		}
+	}
 	ethTx := t.ToEthTransaction()
 	if ethTx == nil {
 		return false
@@ -1060,6 +1271,111 @@ func (t *Transaction) ValidEthSign() bool {
 		return false
 	}
 	return from == t.FromAddress()
+}
+
+// Type returns the transaction type from proto.Type (field 16).
+// Alias of GetType for idiomatic Go.
+func (t *Transaction) Type() uint64 {
+	if t == nil || t.proto == nil {
+		return 0
+	}
+	return t.proto.Type
+}
+
+// ValidSecpProtoSign validates secp256k1 signatures directly encoded on Protobuf
+// (Transaction Type 0xFF).
+// Invariants enforced:
+// 1. Type must be 0xFF.
+// 2. Sign field must be empty (prevent confusion with BLS/cross-chain signature).
+// 3. R and S must be exactly 32 bytes each.
+// 4. V must be exactly 1 byte with value 0 or 1.
+// 5. ChainID must be non-zero (anti-replay).
+// 6. s must be in the lower half of the curve order (s <= N/2, homestead/EIP-2 compliant).
+// 7. Recovered public key address must match FromAddress.
+func (t *Transaction) ValidSecpProtoSign() bool {
+	if t == nil || t.proto == nil {
+		return false
+	}
+	if t.proto.Type != 0xFF {
+		return false
+	}
+	if len(t.proto.Sign) != 0 {
+		return false
+	}
+	if len(t.proto.R) != 32 || len(t.proto.S) != 32 || len(t.proto.V) != 1 {
+		return false
+	}
+	v := t.proto.V[0]
+	if v > 1 {
+		return false
+	}
+	if t.proto.ChainID == 0 {
+		return false
+	}
+	r := new(big.Int).SetBytes(t.proto.R)
+	s := new(big.Int).SetBytes(t.proto.S)
+	if !crypto.ValidateSignatureValues(v, r, s, true) {
+		return false
+	}
+
+	sig := make([]byte, 65)
+	copy(sig[0:32], t.proto.R)
+	copy(sig[32:64], t.proto.S)
+	sig[64] = v
+
+	h := t.SigningHash()
+	pubKey, err := crypto.SigToPub(h.Bytes(), sig)
+	if err != nil {
+		return false
+	}
+	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
+	return recoveredAddr == t.FromAddress()
+}
+
+// ValidSecpSign is the unified validation seam for ECDSA secp256k1 signatures.
+// If Type == 0xFF, it validates via ValidSecpProtoSign().
+// Otherwise, it validates standard Ethereum tx formats via ValidEthSign().
+func (t *Transaction) ValidSecpSign() bool {
+	if t == nil || t.proto == nil {
+		return false
+	}
+	if t.proto.Type == 0xFF {
+		return t.ValidSecpProtoSign()
+	}
+	return t.ValidEthSign()
+}
+
+// SignSecpProto signs the transaction with a secp256k1 private key for Type 0xFF.
+// It sets Type = 0xFF, clears Sign, computes SigningHash(), signs it with crypto.Sign,
+// and populates R (32B), S (32B), V (1B).
+func (t *Transaction) SignSecpProto(privKey *ecdsa.PrivateKey) error {
+	if t == nil || t.proto == nil {
+		return errors.New("transaction is nil")
+	}
+	if privKey == nil {
+		return errors.New("private key is nil")
+	}
+	t.proto.Type = 0xFF
+	t.proto.Sign = nil
+	t.ClearCacheHash()
+
+	h := t.SigningHash()
+	sig, err := crypto.Sign(h.Bytes(), privKey)
+	if err != nil {
+		return fmt.Errorf("crypto.Sign failed: %w", err)
+	}
+	if len(sig) != 65 {
+		return fmt.Errorf("invalid signature length: %d", len(sig))
+	}
+
+	t.proto.R = make([]byte, 32)
+	copy(t.proto.R, sig[0:32])
+	t.proto.S = make([]byte, 32)
+	copy(t.proto.S, sig[32:64])
+	t.proto.V = []byte{sig[64]}
+	t.ClearCacheHash()
+
+	return nil
 }
 
 // DerivePublicKeyFromEthTransaction khôi phục và trả về public key của người gửi từ một giao dịch.
@@ -1250,7 +1566,7 @@ func (t *Transaction) ValidMaxGasPrice(currentGasPrice uint64) bool {
 		return true
 	}
 
-	return t.EffectiveGasPrice().Cmp(new(big.Int).SetUint64(currentGasPrice)) >= 0
+	return t.GasPriceCap().Cmp(new(big.Int).SetUint64(currentGasPrice)) >= 0
 }
 
 func (t *Transaction) ValidAmountSpend(

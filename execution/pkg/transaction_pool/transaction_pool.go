@@ -2,6 +2,7 @@ package transaction_pool
 
 import (
 	"fmt"
+	"math/big"
 	"os"
 	"sort"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -268,6 +270,24 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 	return totalEvicted
 }
 
+// checkPriceBump verifies that newPrice is at least 10% higher than oldPrice (go-ethereum standard).
+func checkPriceBump(oldPrice, newPrice *big.Int) bool {
+	if newPrice == nil || newPrice.Sign() <= 0 {
+		return false
+	}
+	if oldPrice == nil || oldPrice.Sign() <= 0 {
+		return true
+	}
+	// threshold = oldPrice + max(1, oldPrice * 10 / 100)
+	bump := new(big.Int).Mul(oldPrice, big.NewInt(10))
+	bump.Div(bump, big.NewInt(100))
+	if bump.Sign() == 0 {
+		bump.SetInt64(1)
+	}
+	threshold := new(big.Int).Add(oldPrice, bump)
+	return newPrice.Cmp(threshold) >= 0
+}
+
 func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 	shardIdx := tp.getShardIndex(tx.FromAddress())
 	shard := tp.shards[shardIdx]
@@ -277,9 +297,52 @@ func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 
 	key := txPoolKey{addr: tx.FromAddress(), nonce: tx.GetNonce()}
 	if shard.transactionKeys[key] {
-		logger.Info("Transaction already exists in pool, skipping key addr=%s nonce=%d", key.addr.Hex(), key.nonce)
-		traceTx("REJECT-DUP", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", shardIdx))
-		return fmt.Errorf("transaction already exists in pool, skipping")
+		// Look up existing transaction with the same key
+		var oldTx types.Transaction
+		var oldIdx = -1
+		for idx, t := range shard.transactions {
+			if t.FromAddress() == key.addr && t.GetNonce() == key.nonce {
+				oldTx = t
+				oldIdx = idx
+				break
+			}
+		}
+
+		if oldTx != nil {
+			// 1. Same hash -> duplicate / already known
+			if oldTx.Hash() == tx.Hash() {
+				logger.Info("Transaction already exists in pool, skipping key addr=%s nonce=%d", key.addr.Hex(), key.nonce)
+				traceTx("REJECT-DUP", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", shardIdx))
+				return fmt.Errorf("%w: transaction already exists in pool, skipping", transaction.ErrAlreadyKnown)
+			}
+
+			// 2. Replacement transaction: check price bump (standard >= 10%)
+			oldPrice := oldTx.EffectiveGasPrice()
+			newPrice := tx.EffectiveGasPrice()
+			if !checkPriceBump(oldPrice, newPrice) {
+				logger.Info("Replacement transaction underpriced: addr=%s nonce=%d oldPrice=%v newPrice=%v",
+					key.addr.Hex(), key.nonce, oldPrice, newPrice)
+				traceTx("REJECT-UNDERPRICED", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("old=%v new=%v", oldPrice, newPrice))
+				return fmt.Errorf("%w: replacement transaction underpriced", transaction.ErrReplacementUnderpriced)
+			}
+
+			// 3. Price bump satisfied: replace old transaction in place
+			oldHash := oldTx.Hash()
+			delete(shard.txHashMap, oldHash)
+			shard.transactions[oldIdx] = tx
+			newHash := tx.Hash()
+			if newHash != (common.Hash{}) {
+				shard.txHashMap[newHash] = tx
+			}
+			logger.Info("🔄 [REPLACEMENT-TX] Replaced tx addr=%s nonce=%d oldHash=%s newHash=%s (bumped %v -> %v)",
+				key.addr.Hex(), key.nonce, oldHash.Hex(), newHash.Hex(), oldPrice, newPrice)
+			traceTx("REPLACE", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("oldHash=%s newHash=%s oldPrice=%v newPrice=%v",
+				oldHash.Hex(), newHash.Hex(), oldPrice, newPrice))
+			tp.notifyWork()
+			return nil
+		}
+
+		return fmt.Errorf("%w: transaction already exists in pool, skipping", transaction.ErrAlreadyKnown)
 	}
 
 	// CROSS-CHAIN DEBUG logic (unchanged)
@@ -331,21 +394,28 @@ func (tp *TransactionPool) AddTransactions(txs []types.Transaction) {
 				totalAdded++
 				addedAny = true
 			} else {
-				// Unlike AddTransaction (singular), this path used to drop a
-				// duplicate key with no log line and no trace at all -- found
-				// 2026-09-02 while chasing a small (~0.5-1%) permanently-lost
-				// fraction of transactions under extreme sustained overload.
-				// This is the only re-insertion path used for requeued
-				// future-nonce and overflow transactions (see
-				// ProcessTransactionsInPoolSub / TxBatchForwarder), so a
-				// silent drop here is a plausible way for a transaction that
-				// was legitimately still pending to vanish without any trace
-				// of why. Logging it (kept at Warn, not Info, since a
-				// genuine client-side retry hitting this is an expected,
-				// harmless case) at minimum makes the next occurrence
-				// diagnosable instead of invisible.
-				logger.Warn("AddTransactions: dropped duplicate key on re-insert addr=%s nonce=%d", key.addr.Hex(), key.nonce)
-				traceTx("REJECT-DUP-BATCH", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", idx))
+				var oldTx types.Transaction
+				var oldIdx = -1
+				for i, t := range shard.transactions {
+					if t.FromAddress() == key.addr && t.GetNonce() == key.nonce {
+						oldTx = t
+						oldIdx = i
+						break
+					}
+				}
+				if oldTx != nil && oldTx.Hash() != tx.Hash() && checkPriceBump(oldTx.EffectiveGasPrice(), tx.EffectiveGasPrice()) {
+					delete(shard.txHashMap, oldTx.Hash())
+					shard.transactions[oldIdx] = tx
+					h := tx.Hash()
+					if h != (common.Hash{}) {
+						shard.txHashMap[h] = tx
+					}
+					addedAny = true
+					traceTx("REPLACE-BATCH", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", idx))
+				} else {
+					logger.Warn("AddTransactions: dropped duplicate key on re-insert addr=%s nonce=%d", key.addr.Hex(), key.nonce)
+					traceTx("REJECT-DUP-BATCH", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", idx))
+				}
 			}
 		}
 		shard.mu.Unlock()
@@ -461,3 +531,43 @@ func (tp *TransactionPool) GetTransactionByHash(hashToFind common.Hash) (types.T
 
 	return nil, false
 }
+
+// GetPendingNonce returns the next available nonce for addr starting from stateNonce,
+// accounting for consecutive pending transactions in the mempool.
+// Any nonce gaps halt the progression, matching standard go-ethereum behavior.
+func (tp *TransactionPool) GetPendingNonce(addr common.Address, stateNonce uint64) uint64 {
+	shardIdx := tp.getShardIndex(addr)
+	shard := tp.shards[shardIdx]
+
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+
+	nextNonce := stateNonce
+	for {
+		key := txPoolKey{addr: addr, nonce: nextNonce}
+		if shard.transactionKeys[key] {
+			nextNonce++
+		} else {
+			break
+		}
+	}
+	return nextNonce
+}
+
+// GetPendingCount returns the count of transactions currently in the pool for addr.
+func (tp *TransactionPool) GetPendingCount(addr common.Address) int {
+	shardIdx := tp.getShardIndex(addr)
+	shard := tp.shards[shardIdx]
+
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+
+	count := 0
+	for _, tx := range shard.transactions {
+		if tx.FromAddress() == addr {
+			count++
+		}
+	}
+	return count
+}
+

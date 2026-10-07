@@ -12,6 +12,8 @@
 package blockchain
 
 import (
+	"fmt"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/failpoint"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -25,6 +27,12 @@ import (
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // CommitOption configures how CommitBlockState behaves for different callers.
+// requiresBlockChain reports whether a commit with this config cannot run without the BlockChain singleton: every
+// commit except a rebuild-only recovery commit (which persists no block and writes no hash mappings).
+func (c *commitConfig) requiresBlockChain() bool {
+	return !c.rebuildTries || c.persistToDB || c.saveTxMapping || c.commitMaps
+}
+
 type CommitOption func(*commitConfig)
 
 type commitConfig struct {
@@ -92,6 +100,16 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 	blockNum := header.BlockNumber()
 	blockHash := header.Hash()
 
+	// Fail closed when the BlockChain singleton is missing: only a rebuild-only recovery commit (which touches
+	// neither the block DB nor the hash mappings) may run without it. Silently skipping the block->hash / tx
+	// mappings while still reporting success would leave a committed block that RPC lookups cannot find.
+	if GetBlockChainInstance() == nil {
+		if cfg.requiresBlockChain() {
+			return blockNum, fmt.Errorf("blockchain singleton not initialized: refusing to commit block #%d", blockNum)
+		}
+		logger.Warn("⚠️ [COMMIT STATE] BlockChain singleton not initialized: rebuild-only commit of block #%d skips block caches and mappings", blockNum)
+	}
+
 	// ═══════════════════════════════════════════════════════════════════════
 	// SEQUENTIAL GUARD: Reject duplicate/old blocks
 	// Go chỉ thực thi tuần tự — block phải tăng dần.
@@ -153,7 +171,9 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 	// ─── 2. Add block to in-memory block cache immediately (always) ──────
 	// Doing this early satisfies concurrent read requests (e.g. from block hash checker)
 	// without waiting for disk database persistence or block mapping updates.
-	bc.AddBlockToCache(blk)
+	if bc != nil {
+		bc.AddBlockToCache(blk)
+	}
 
 	// ─── 3. Persist block to DB (optional) ───────────────────────────────
 	// CRITICAL CONCURRENCY FIX: This MUST run BEFORE SetBlockNumberToHash and UpdateLastBlockNumber
@@ -171,13 +191,15 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 	}
 
 	// ─── 4. Update block number → hash mapping (always) ──────────────────
-	if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
-		logger.Error("❌ [COMMIT STATE] Failed to set block→hash mapping for block #%d: %v", blockNum, err)
-		return blockNum, err
+	if bc != nil {
+		if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
+			logger.Error("❌ [COMMIT STATE] Failed to set block→hash mapping for block #%d: %v", blockNum, err)
+			return blockNum, err
+		}
 	}
 
 	// ─── 5. Save tx hash → block number mappings (optional) ──────────────
-	if cfg.saveTxMapping {
+	if bc != nil && cfg.saveTxMapping {
 		txs := blk.Transactions()
 		if len(txs) > 0 {
 			bc.SetTxHashMapBlockNumberBatch(txs, blockNum)
@@ -237,7 +259,7 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 	}
 
 	// ─── 8. Commit mappings to LevelDB (optional) ────────────────────────
-	if cfg.commitMaps {
+	if bc != nil && cfg.commitMaps {
 		if err := bc.Commit(); err != nil {
 			logger.Error("❌ [COMMIT STATE] Failed to commit mappings for block #%d: %v", blockNum, err)
 			return blockNum, err

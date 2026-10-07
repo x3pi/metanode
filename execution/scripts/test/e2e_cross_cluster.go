@@ -38,7 +38,22 @@ func rpcCall(url, method string, params []interface{}) (map[string]interface{}, 
 }
 
 func main() {
-	parentClient := parentchain.NewHTTPClient("http://127.0.0.1:8547")
+	// All parent chain writes are signed transactions. This script acts through a dedicated relayer cluster with
+	// its own throw-away BLS key: it registers itself as a cluster (devnet genesis allows open registration),
+	// certifies deposits and relays account registrations, and talks to all four parent validators.
+	parentURLs := []string{"http://127.0.0.1:8547", "http://127.0.0.1:18602", "http://127.0.0.1:18603", "http://127.0.0.1:18604"}
+	relayerKP := bls.GenerateKeyPair()
+	parentClient := parentchain.NewQuorumClient(parentURLs, relayerKP.PrivateKey(), relayerKP.PublicKey())
+	if _, err := parentClient.SendRegisterCluster(9001); err != nil {
+		fmt.Printf("relayer cluster registration failed: %v\n", err)
+		return
+	}
+	for i := 0; i < 30; i++ {
+		time.Sleep(time.Second)
+		if _, found, err := parentClient.GetAccountRegistry(relayerKP.Address()); err == nil && found {
+			break
+		}
+	}
 
 	// exec1/exec2's real FloatIdentityKey is app.keyPair.PublicKey() (cmd/simple_chain/app_network.go:
 	// app.keyPair = bls.NewKeyPair(config.PrivateKey)) — the config.json TOP-LEVEL "private_key"

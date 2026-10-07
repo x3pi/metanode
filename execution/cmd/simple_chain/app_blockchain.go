@@ -22,6 +22,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
+	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
@@ -550,6 +551,12 @@ func (app *App) initBlockchain() error {
 			return fmt.Errorf("failed NewChainState: %v", err)
 		}
 
+		// Initialize blockchain singleton early so recovery operations like CommitBlockState have access to it
+		blockchain.InitBlockChain(100, blockDatabase, app.storageManager)
+		if app.chainState != nil && blockchain.GetBlockChainInstance() != nil {
+			blockchain.GetBlockChainInstance().SetChangelogDB(app.chainState.GetChangelogDB())
+		}
+
 		// A crash can leave the canonical block durable while its asynchronous
 		// NOMT payload is not. The changelog is synced before block publication,
 		// so rebuild both NOMT domains to the canonical header before integrity
@@ -661,12 +668,36 @@ func (app *App) initBlockchain() error {
 		// Depth is conditional on previous shutdown type:
 		//   - Clean shutdown: verify last 50 blocks (fast sanity check, ~1ms)
 		//   - Crash/SIGKILL:  full walk to genesis (recover all lost mappings)
+		// Depth is conditional on previous shutdown type and migration status:
+		//   - If full historical rebuild was never completed on this DB: full walk to genesis
+		//   - Clean shutdown + full rebuild completed: verify last 50 blocks (fast sanity check)
+		//   - Crash/SIGKILL: full walk to genesis (recover all lost mappings)
 		// ═══════════════════════════════════════════════════════════════════
-		rebuildMaxBlocks := 0 // unlimited — full recovery walk
-		if wasCleanShutdown {
+		const fullRebuildMarkerKey = "full_mapping_rebuild_v1_complete"
+		rebuildMaxBlocks := 0 // unlimited — full recovery walk by default
+		fullRebuildDone := false
+		if markerData, mErr := app.storageManager.GetStorageMapping().Get([]byte(fullRebuildMarkerKey)); mErr == nil && len(markerData) > 0 {
+			fullRebuildDone = true
+		}
+
+		if wasCleanShutdown && fullRebuildDone {
 			rebuildMaxBlocks = 50 // fast sanity check only
 		}
-		blockchain.GetBlockChainInstance().RebuildMappingsFromBlock(app.startLastBlock, rebuildMaxBlocks)
+
+		rebuilt, err := blockchain.GetBlockChainInstance().RebuildMappingsFromBlock(app.startLastBlock, rebuildMaxBlocks)
+		if err != nil {
+			// Mappings only serve RPC lookups (not consensus state), so a failed rebuild
+			// must not stop the node from starting. Skip the marker so the next start retries the full walk.
+			logger.Error("❌ [STARTUP-REBUILD] Mapping rebuild incomplete (RPC tx/receipt lookups may miss old txs): %v", err)
+		} else if rebuildMaxBlocks == 0 && !fullRebuildDone {
+			// Mark full rebuild complete in DB once an unlimited walk has successfully finished
+			if mErr := app.storageManager.GetStorageMapping().Put([]byte(fullRebuildMarkerKey), []byte{1}); mErr != nil {
+				logger.Error("⚠️ [STARTUP-REBUILD] Failed to write full rebuild marker: %v", mErr)
+			} else {
+				_ = app.storageManager.GetStorageMapping().Flush()
+				logger.Info("✅ [STARTUP-REBUILD] Marked full mapping rebuild complete in DB (%d mappings recovered)", rebuilt)
+			}
+		}
 	}
 
 SKIP_GENESIS:
@@ -962,6 +993,15 @@ func (app *App) alignStartupTipToBlock(blk types.Block) {
 }
 
 // initGenesisBlock creates the genesis block if it doesn't exist
+// genesisAccountsRegistered reports whether genesis accounts must be flagged ParentRegistered. It is true ONLY when the
+// account gate is enabled: with the gate off the flag must not be written, so the genesis state of a chain that does
+// not use the gate stays byte-identical to what it was before the flag existed (same account encoding, same genesis
+// root). Writing it unconditionally would change every legacy chain's genesis root and break startup integrity
+// checks and compatibility with nodes running older binaries.
+func (app *App) genesisAccountsRegistered() bool {
+	return app.config != nil && app.config.AccountGateParentRegistered()
+}
+
 func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 	logger.Info("Starting genesis block initialization...")
 
@@ -1012,7 +1052,26 @@ func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 		}
 		addressMap[a.Address()] = true
 		a.PlusOneNonce()
+		if app.genesisAccountsRegistered() {
+			a.SetParentRegistered(true)
+		}
 		app.chainState.GetAccountStateDB().SetState(a)
+	}
+
+	for _, rawAddr := range app.genesis.RegisteredAccounts {
+		if !app.genesisAccountsRegistered() {
+			break
+		}
+		addr := e_common.HexToAddress(rawAddr)
+		if addr == (e_common.Address{}) {
+			continue
+		}
+		as, _ := app.chainState.GetAccountStateDB().AccountState(addr)
+		if as == nil {
+			as = state.NewAccountState(addr)
+		}
+		as.SetParentRegistered(true)
+		app.chainState.GetAccountStateDB().SetState(as)
 	}
 
 	// Commit state changes
@@ -1278,7 +1337,26 @@ func (app *App) repopulateGenesisState() error {
 		}
 		addressMap[a.Address()] = true
 		a.PlusOneNonce()
+		if app.genesisAccountsRegistered() {
+			a.SetParentRegistered(true)
+		}
 		app.chainState.GetAccountStateDB().SetState(a)
+	}
+
+	for _, rawAddr := range app.genesis.RegisteredAccounts {
+		if !app.genesisAccountsRegistered() {
+			break
+		}
+		addr := e_common.HexToAddress(rawAddr)
+		if addr == (e_common.Address{}) {
+			continue
+		}
+		as, _ := app.chainState.GetAccountStateDB().AccountState(addr)
+		if as == nil {
+			as = state.NewAccountState(addr)
+		}
+		as.SetParentRegistered(true)
+		app.chainState.GetAccountStateDB().SetState(as)
 	}
 
 	// Commit account state changes

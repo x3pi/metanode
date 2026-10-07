@@ -1,31 +1,128 @@
 package processor
 
 import (
+	"bytes"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"log"
-	"time"
-	
+	"math/big"
+	"sort"
+	"sync"
+
 	"github.com/ethereum/go-ethereum/common"
-	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/meta-node-blockchain/meta-node/executor"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
-	"github.com/meta-node-blockchain/meta-node/executor"
 	"google.golang.org/protobuf/proto"
 )
 
 type BlockProcessor struct {
-	store      parentchain.Store
-	queue      chan *pb.ExecutableBlock
-	quit       chan struct{}
-	onTxResult func(msgID common.Hash, err error)
+	committer    parentchain.BlockCommitter
+	queue        chan *pb.ExecutableBlock
+	quit         chan struct{}
+	syncCallback func(fromBlock uint64)
+	forkCallback func(fork bool)
+
+	mu              sync.RWMutex
+	lastBlockNumber uint64
+	lastGEI         uint64
+	lastStateRoot   common.Hash
+	lastBlockHash   common.Hash
+	forkDetected    bool
 }
 
-func NewBlockProcessor(store parentchain.Store, onTxResult func(msgID common.Hash, err error)) *BlockProcessor {
-	return &BlockProcessor{
-		store:      store,
-		queue:      make(chan *pb.ExecutableBlock, 100),
-		quit:       make(chan struct{}),
-		onTxResult: onTxResult,
+func NewBlockProcessor(committer parentchain.BlockCommitter) *BlockProcessor {
+	bp := &BlockProcessor{
+		committer: committer,
+		queue:     make(chan *pb.ExecutableBlock, 100),
+		quit:      make(chan struct{}),
+	}
+
+	// Startup recovery and state integrity verification
+	if committer != nil {
+		prog, err := committer.LastApplied()
+		if err == nil && prog.LastBlock > 0 {
+			bp.lastBlockNumber = prog.LastBlock
+			bp.lastGEI = prog.LastGEI
+			bp.lastStateRoot = prog.LastStateRoot
+			bp.lastBlockHash = prog.LastHash
+
+			// 1. Verify LevelDB block record integrity for LastBlock
+			rec, found, recErr := committer.GetBlockRecord(prog.LastBlock)
+			if recErr != nil || !found {
+				log.Printf("🚨 [PARENT-CHAIN-STARTUP] Block record #%d missing or unreadable: %v", prog.LastBlock, recErr)
+				bp.forkDetected = true
+				parentchain.ParentChainForkDetected.Set(1)
+			} else {
+				if rec.Header.StateRoot != prog.LastStateRoot {
+					log.Printf("🚨 [PARENT-CHAIN-STARTUP] Block record #%d state root mismatch: rec=%s vs prog=%s",
+						prog.LastBlock, rec.Header.StateRoot.Hex(), prog.LastStateRoot.Hex())
+					bp.forkDetected = true
+					parentchain.ParentChainForkDetected.Set(1)
+				}
+				if rec.BlockHash != prog.LastHash {
+					log.Printf("🚨 [PARENT-CHAIN-STARTUP] Block record #%d block hash mismatch: rec=%s vs prog=%s",
+						prog.LastBlock, rec.BlockHash.Hex(), prog.LastHash.Hex())
+					bp.forkDetected = true
+					parentchain.ParentChainForkDetected.Set(1)
+				}
+				computedHash := rec.Header.Hash()
+				if rec.BlockHash != computedHash {
+					log.Printf("🚨 [PARENT-CHAIN-STARTUP] Block record #%d corrupted hash! stored=%s vs computed=%s",
+						prog.LastBlock, rec.BlockHash.Hex(), computedHash.Hex())
+					bp.forkDetected = true
+					parentchain.ParentChainForkDetected.Set(1)
+				}
+				if rec.Header.CommitIndex > 0 {
+					storage.UpdateLastHandledCommitIndex(rec.Header.CommitIndex)
+				}
+			}
+
+			// 2. Verify NOMT Merkle tree root matches durable prog.LastStateRoot
+			if actualRoot, rErr := committer.NomtRoot(); rErr == nil {
+				if actualRoot != prog.LastStateRoot {
+					log.Printf("🚨 [PARENT-CHAIN-STARTUP] CRITICAL STATE ROOT MISMATCH! LevelDB LastStateRoot=%s != NOMT Root=%s at block #%d",
+						prog.LastStateRoot.Hex(), actualRoot.Hex(), prog.LastBlock)
+					bp.forkDetected = true
+					parentchain.ParentChainForkDetected.Set(1)
+				}
+			}
+
+			if !bp.forkDetected {
+				storage.UpdateLastBlockNumber(prog.LastBlock)
+				storage.UpdateLastAssignedBlockNumber(prog.LastBlock)
+				storage.UpdateLastGlobalExecIndex(prog.LastGEI)
+				log.Printf("Parent Chain: Recovered at block #%d (GEI %d), stateRoot=%s",
+					prog.LastBlock, prog.LastGEI, prog.LastStateRoot.Hex())
+			} else {
+				log.Printf("🚨 Parent Chain: QUARANTINED ON STARTUP due to state corruption / fork detection at block #%d", prog.LastBlock)
+			}
+		}
+	}
+
+	// Register StateRootProvider hook for cgo_get_state_root FFI
+	executor.SetStateRootProvider(bp.GetStateRoot)
+
+	return bp
+}
+
+func (bp *BlockProcessor) SetSyncCallback(cb func(fromBlock uint64)) {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+	bp.syncCallback = cb
+}
+
+func (bp *BlockProcessor) SetForkCallback(cb func(fork bool)) {
+	bp.mu.Lock()
+	bp.forkCallback = cb
+	isFork := bp.forkDetected
+	bp.mu.Unlock()
+	if isFork && cb != nil {
+		cb(true)
 	}
 }
 
@@ -33,9 +130,32 @@ func (bp *BlockProcessor) GetQueue() chan *pb.ExecutableBlock {
 	return bp.queue
 }
 
+func (bp *BlockProcessor) Committer() parentchain.BlockCommitter {
+	return bp.committer
+}
+
 func (bp *BlockProcessor) GetStateRoot() string {
-	// TODO: implement actual state root if needed
-	return "0000000000000000000000000000000000000000000000000000000000000000"
+	bp.mu.RLock()
+	defer bp.mu.RUnlock()
+	return "0x" + hex.EncodeToString(bp.lastStateRoot.Bytes())
+}
+
+func (bp *BlockProcessor) LastBlockNumber() uint64 {
+	bp.mu.RLock()
+	defer bp.mu.RUnlock()
+	return bp.lastBlockNumber
+}
+
+func (bp *BlockProcessor) LastBlockHash() common.Hash {
+	bp.mu.RLock()
+	defer bp.mu.RUnlock()
+	return bp.lastBlockHash
+}
+
+func (bp *BlockProcessor) IsForkDetected() bool {
+	bp.mu.RLock()
+	defer bp.mu.RUnlock()
+	return bp.forkDetected
 }
 
 func (bp *BlockProcessor) Start() {
@@ -53,87 +173,240 @@ func (bp *BlockProcessor) loop() {
 		case <-bp.quit:
 			return
 		case block := <-bp.queue:
-			bp.processBlock(block)
+			bp.ProcessBlock(block)
 		case req, ok := <-authQueue:
 			if !ok {
 				log.Println("Parent Chain: Authoritative block queue closed")
 				return
 			}
-			bp.processBlock(req.Block)
+			resp := bp.ProcessBlock(req.Block)
 			if req.ResponseCh != nil {
-				req.ResponseCh <- &pb.ExecuteBlockResponse{Success: true}
+				req.ResponseCh <- resp
 			}
 		}
 	}
 }
 
-func (bp *BlockProcessor) processBlock(block *pb.ExecutableBlock) {
-	log.Printf("Parent Chain: Processing block %d (GEI %d) with %d txs", block.BlockNumber, block.GlobalExecIndex, len(block.Transactions))
-	
-	blockTime := block.CommitTimestampMs / 1000
-	if blockTime == 0 {
-		blockTime = uint64(time.Now().Unix())
+// ProcessBlock processes an ExecutableBlock deterministically.
+func (bp *BlockProcessor) ProcessBlock(block *pb.ExecutableBlock) *pb.ExecuteBlockResponse {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+
+	// 1. Guard against fork
+	if bp.forkDetected {
+		log.Printf("Parent Chain: REFUSING TO PROCESS block #%d because fork was previously detected", block.BlockNumber)
+		return &pb.ExecuteBlockResponse{
+			BlockNumber: block.BlockNumber,
+			Success:     false,
+			Error:       "fork detected",
+		}
 	}
 
-	for i, txExe := range block.Transactions {
+	// 2. Ignore block 0 (genesis boundary block in consensus)
+	if block.BlockNumber == 0 {
+		log.Printf("Parent Chain: Skipping block 0 (boundary block)")
+		return &pb.ExecuteBlockResponse{
+			BlockNumber:  0,
+			ActualGei:    block.GlobalExecIndex,
+			GeisConsumed: 1,
+			Success:      true,
+			StateRoot:    bp.lastStateRoot.Bytes(),
+		}
+	}
+
+	// 2b. Idempotent-execution guard (same role as the main chain's LAYER-4 guard): a commit index is executed at
+	// most once. Rust can re-deliver commits Go has already executed (a restart whose recovery position was read
+	// before Go finished syncing blocks). Without this, the replay would be applied again as brand new blocks
+	// (found live: the same 230-transaction commit became block 8 and then block 16 on one node, whose chain
+	// then differed from the other validators').
+	if resp := bp.staleCommitGuard(block); resp != nil {
+		return resp
+	}
+
+	log.Printf("Parent Chain: Processing block %d (GEI %d) with %d txs",
+		block.BlockNumber, block.GlobalExecIndex, len(block.Transactions))
+
+	// 3. Extract and deterministically order transaction bytes
+	// Sort by (FromAddress ASC, Nonce ASC, TxHash ASC) so that multiple transactions from the
+	// same account are executed in strict nonce order (0, 1, 2...) without nonce gaps/rejections.
+	type txItem struct {
+		from  common.Address
+		nonce uint64
+		hash  common.Hash
+		raw   []byte
+	}
+	items := make([]txItem, 0, len(block.Transactions))
+	for _, txExe := range block.Transactions {
 		var pbTx pb.Transaction
-		if err := proto.Unmarshal(txExe.Digest, &pbTx); err != nil {
-			log.Printf("Parent Chain: failed to unmarshal pb.Transaction %d in block %d: %v", i, block.BlockNumber, err)
-			continue
-		}
-		tx, err := parentchain.UnmarshalParentChainTx(pbTx.Data)
-		if err != nil {
-			log.Printf("Parent Chain: failed to unmarshal tx %d in block %d: %v", i, block.BlockNumber, err)
-			continue
-		}
-
-		var sig cm.Sign
-		if len(tx.Cert) > 0 {
-			sig = cm.Sign(tx.Cert)
-		}
-		var pubKey cm.PublicKey
-		if len(tx.PubKey) > 0 {
-			copy(pubKey[:], tx.PubKey)
-		}
-
-		clusterID := tx.ClusterID
-		if clusterID == 0 {
-			clusterID = tx.ChainID
-		}
-
-		switch tx.Type {
-		case parentchain.TxTypeDepositToFloat:
-			err = parentchain.DepositToFloat(bp.store, pubKey, clusterID, tx.Sender, tx.Target, tx.Amount, tx.MsgID, blockTime)
-		case parentchain.TxTypeTransferFloat:
-			var toPubKey cm.PublicKey
-			if len(tx.ToPubKey) > 0 {
-				copy(toPubKey[:], tx.ToPubKey)
+		if err := proto.Unmarshal(txExe.Digest, &pbTx); err == nil {
+			var n uint64
+			if len(pbTx.Nonce) >= 8 {
+				n = binary.BigEndian.Uint64(pbTx.Nonce[:8])
+			} else if len(pbTx.Nonce) > 0 {
+				n = new(big.Int).SetBytes(pbTx.Nonce).Uint64()
 			}
-			_, err = parentchain.TransferFloat(
-				bp.store, pubKey, toPubKey, clusterID, tx.Sender, tx.Target,
-				tx.Amount, tx.Fee, tx.Payload, tx.Nonce, sig, tx.IsRefund, 0, blockTime,
-			)
-		case parentchain.TxTypeMarkClaimed:
-			err = parentchain.MarkClaimed(bp.store, tx.MsgID, tx.Outcome, sig)
-		case parentchain.TxTypeReclaimFloat:
-			err = parentchain.ReclaimFloat(bp.store, tx.MsgID, sig, blockTime, 60) // 60s timeout for reclaim by default
-		case parentchain.TxTypeRegisterAccount:
-			err = parentchain.RegisterAccount(bp.store, tx.UserAddress, pubKey, tx.UserSig, sig)
-		case parentchain.TxTypeSubmitStateRoot:
-			err = parentchain.SubmitStateRoot(bp.store, pubKey, tx.Epoch, tx.StateRoot, sig)
-		default:
-			log.Printf("Parent Chain: unknown tx type %s", tx.Type)
-		}
-
-		if err != nil {
-			log.Printf("Parent Chain: tx %d failed: %v", i, err)
-		}
-		if bp.onTxResult != nil {
-			bp.onTxResult(tx.MsgID, err)
+			items = append(items, txItem{
+				from:  common.BytesToAddress(pbTx.FromAddress),
+				nonce: n,
+				hash:  parentchain.ComputeTxHash(&pbTx),
+				raw:   txExe.Digest,
+			})
+		} else {
+			items = append(items, txItem{
+				hash: crypto.Keccak256Hash(txExe.Digest),
+				raw:  txExe.Digest,
+			})
 		}
 	}
 
-	// Tell the FFI that the block has been processed
-	storage.UpdateLastBlockNumber(block.BlockNumber)
-	storage.UpdateLastAssignedBlockNumber(block.BlockNumber)
+	sort.SliceStable(items, func(i, j int) bool {
+		cmp := items[i].from.Cmp(items[j].from)
+		if cmp != 0 {
+			return cmp < 0
+		}
+		if items[i].nonce != items[j].nonce {
+			return items[i].nonce < items[j].nonce
+		}
+		return bytes.Compare(items[i].hash.Bytes(), items[j].hash.Bytes()) < 0
+	})
+
+	var rawTxs [][]byte
+	for _, it := range items {
+		rawTxs = append(rawTxs, it.raw)
+	}
+
+	rawBlock, _ := proto.Marshal(block)
+
+	in := parentchain.BlockInput{
+		Number:        block.BlockNumber,
+		Epoch:         block.Epoch,
+		CommitIndex:   block.CommitIndex,
+		GEI:           block.GlobalExecIndex,
+		TimestampMs:   block.CommitTimestampMs,
+		LeaderAddress: common.BytesToAddress(block.LeaderAddress),
+		CommitDigest:  common.BytesToHash(block.CommitDigest),
+		Txs:           rawTxs,
+		RawBlock:      rawBlock,
+	}
+
+	// 4. Apply Block atomically
+	blockTime := block.CommitTimestampMs / 1000
+	res, err := bp.committer.ApplyBlock(in, func(store parentchain.Store, txIndex int, rawTx []byte) (*parentchain.Receipt, error) {
+		var pbTx pb.Transaction
+		if err := proto.Unmarshal(rawTx, &pbTx); err != nil {
+			return nil, err
+		}
+		return parentchain.ExecuteTx(store, &pbTx, blockTime)
+	})
+
+	if err != nil {
+		if errors.Is(err, parentchain.ErrBlockGap) {
+			log.Printf("Parent Chain: Block GAP detected at block #%d (last was #%d)", block.BlockNumber, bp.lastBlockNumber)
+			if bp.syncCallback != nil {
+				bp.syncCallback(bp.lastBlockNumber + 1)
+			}
+			return &pb.ExecuteBlockResponse{
+				BlockNumber: block.BlockNumber,
+				Success:     false,
+				Error:       fmt.Sprintf("block gap: %v", err),
+			}
+		}
+
+		if errors.Is(err, parentchain.ErrBlockConflict) {
+			log.Printf("🚨 Parent Chain: CRITICAL FORK DETECTED at block #%d! State conflict: %v", block.BlockNumber, err)
+			bp.forkDetected = true
+			parentchain.ParentChainForkDetected.Set(1)
+			if bp.forkCallback != nil {
+				bp.forkCallback(true)
+			}
+			return &pb.ExecuteBlockResponse{
+				BlockNumber: block.BlockNumber,
+				Success:     false,
+				Error:       fmt.Sprintf("critical block conflict: %v", err),
+			}
+		}
+
+		log.Printf("Parent Chain: ApplyBlock failed for block #%d: %v", block.BlockNumber, err)
+		return &pb.ExecuteBlockResponse{
+			BlockNumber: block.BlockNumber,
+			Success:     false,
+			Error:       err.Error(),
+		}
+	}
+
+	// 5. Update local state pointers on success
+	bp.lastBlockNumber = res.Record.Header.Number
+	bp.lastGEI = res.Record.Header.GEI
+	bp.lastStateRoot = res.Record.Header.StateRoot
+	bp.lastBlockHash = res.Record.BlockHash
+
+	storage.UpdateLastBlockNumber(res.Record.Header.Number)
+	storage.UpdateLastAssignedBlockNumber(res.Record.Header.Number)
+	storage.UpdateLastGlobalExecIndex(res.Record.Header.GEI)
+	if res.Record.Header.CommitIndex > 0 {
+		storage.UpdateLastHandledCommitIndex(res.Record.Header.CommitIndex)
+	}
+
+	// Update Prometheus metrics (H9)
+	parentchain.ParentChainLastBlock.Set(float64(res.Record.Header.Number))
+	parentchain.ParentChainBlocksTotal.Inc()
+	parentchain.ParentChainTxsTotal.Add(float64(len(res.Record.Receipts)))
+	parentchain.ParentChainStateRoot.Reset()
+	parentchain.ParentChainStateRoot.WithLabelValues(res.Record.Header.StateRoot.Hex()).Set(1)
+
+	// Log failed transactions (their receipts, with status 0, are part of the block and its receipts_root).
+	for i, rcpt := range res.Record.Receipts {
+		if rcpt.Status == 0 {
+			var txErr error
+			if i < len(res.TxErrors) {
+				txErr = res.TxErrors[i]
+			}
+			log.Printf("block_processor: tx %s rejected in block #%d: errCode=%d err=%v",
+				rcpt.TxHash.Hex()[:10], res.Record.Header.Number, rcpt.ErrorCode, txErr)
+		}
+	}
+
+	log.Printf("Parent Chain: Block #%d applied successfully: txs=%d receipts=%d hash=%s stateRoot=%s",
+		res.Record.Header.Number, len(block.Transactions), len(res.Record.Receipts), res.Record.BlockHash.Hex()[:18], res.Record.Header.StateRoot.Hex()[:18])
+
+	return &pb.ExecuteBlockResponse{
+		BlockNumber:  res.Record.Header.Number,
+		ActualGei:    res.Record.Header.GEI,
+		GeisConsumed: 1,
+		Success:      true,
+		StateRoot:    res.Record.Header.StateRoot.Bytes(),
+	}
+}
+
+// staleCommitGuard refuses a block that would be appended as a NEW block although its commit was already executed
+// (its commit index is not above the last applied block's, in the same epoch). It returns nil when the block must
+// be handled normally.
+//
+// Blocks numbered at or below the tip are NOT judged here: ApplyBlock already treats those as an idempotent
+// replay (same content) or a conflict (different content, which is a fork). Only a block numbered above the tip
+// with an old commit index is the dangerous case: appending it would create a duplicate block and a divergent
+// chain. It is refused WITHOUT creating a block; Rust keeps retrying a refused commit, so the node pauses
+// (nothing is guessed, nothing forks) until its recovery position is corrected.
+func (bp *BlockProcessor) staleCommitGuard(block *pb.ExecutableBlock) *pb.ExecuteBlockResponse {
+	if block.CommitIndex == 0 || bp.committer == nil {
+		return nil
+	}
+	prog, err := bp.committer.LastApplied()
+	if err != nil || prog.LastBlock == 0 || block.BlockNumber <= prog.LastBlock {
+		return nil
+	}
+	rec, found, err := bp.committer.GetBlockRecord(prog.LastBlock)
+	if err != nil || !found || rec.Header.Epoch != block.Epoch || block.CommitIndex > rec.Header.CommitIndex {
+		return nil
+	}
+
+	log.Printf("🛑 Parent Chain: REFUSING stale commit %d (epoch %d, incoming block #%d, %d txs): last applied block #%d is at commit %d. "+
+		"Not creating a duplicate block.",
+		block.CommitIndex, block.Epoch, block.BlockNumber, len(block.Transactions), rec.Header.Number, rec.Header.CommitIndex)
+	return &pb.ExecuteBlockResponse{
+		BlockNumber: block.BlockNumber,
+		Success:     false,
+		Error: fmt.Sprintf("stale commit %d: already executed (last applied block #%d is at commit %d)",
+			block.CommitIndex, rec.Header.Number, rec.Header.CommitIndex),
+	}
 }

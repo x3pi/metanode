@@ -31,6 +31,8 @@ type AccountStateAccessor interface {
 	SubBalance(address common.Address, amount *big.Int)
 	GetNonce(address common.Address) uint64
 	SetNonce(address common.Address, nonce uint64)
+	GetParentRegistered(address common.Address) bool
+	SetParentRegistered(address common.Address, registered bool)
 }
 
 type liveAccountStateAccessor struct {
@@ -71,6 +73,19 @@ func (a *liveAccountStateAccessor) GetNonce(address common.Address) uint64 {
 func (a *liveAccountStateAccessor) SetNonce(address common.Address, nonce uint64) {
 	_ = a.db.SetNonce(address, nonce)
 }
+
+func (a *liveAccountStateAccessor) GetParentRegistered(address common.Address) bool {
+	state, err := a.db.AccountState(address)
+	if err != nil || state == nil {
+		return false
+	}
+	return state.ParentRegistered()
+}
+
+func (a *liveAccountStateAccessor) SetParentRegistered(address common.Address, registered bool) {
+	_ = a.db.SetParentRegistered(address, registered)
+}
+
 
 // liveSmartContractDB adapts *smart_contract_db.SmartContractDB to rollup.SmartContractDB,
 // wrapping the barrier-tx call's own chainState.GetSmartContractDB() result. Has the exact same
@@ -192,10 +207,27 @@ func (h *ParentChainGatewayHandler) HandleTransaction(
 		return h.errorReceipt(tx, "target address cannot be zero"), nil, nil
 	}
 
+	if tx.Amount() == nil || tx.Amount().Sign() <= 0 {
+		logger.Error("❌ ParentChainGatewayHandler: transfer amount must be positive")
+		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+		return h.errorReceipt(tx, "transfer amount must be positive"), nil, nil
+	}
+
 	// Calculate and pre-validate gas fee and total balance before deducting anything
 	gasUsed := uint64(mt_common.TRANSFER_GAS_COST) // Use standard transfer gas cost
-	gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), tx.EffectiveGasPrice())
+	gasPrice := tx.EffectiveGasPrice()
+	if gasPrice == nil || gasPrice.Sign() < 0 {
+		logger.Error("❌ ParentChainGatewayHandler: invalid gas price")
+		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+		return h.errorReceipt(tx, "invalid gas price"), nil, nil
+	}
+	gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), gasPrice)
+	// Total required: transfer amount + cross-chain transfer fee + EVM gas fee. The dispatcher deducts amount+fee and
+	// this handler deducts the gas fee afterwards, so all three must be covered up front: otherwise the gas
+	// SubBalance could drive the balance below zero after the dispatcher already took amount+fee.
+	crossChainFee := big.NewInt(rollup.CrossNodeTransferFee)
 	totalRequired := new(big.Int).Add(tx.Amount(), gasFee)
+	totalRequired.Add(totalRequired, crossChainFee)
 
 	curBal := stateDB.GetBalance(tx.FromAddress())
 	if curBal == nil || curBal.Cmp(totalRequired) < 0 {
@@ -231,9 +263,17 @@ func (h *ParentChainGatewayHandler) HandleTransaction(
 }
 
 func (h *ParentChainGatewayHandler) errorReceipt(tx types.Transaction, errMsg string) types.Receipt {
+	amt := tx.Amount()
+	if amt == nil {
+		amt = big.NewInt(0)
+	}
+	gasPrice := uint64(0)
+	if tx.EffectiveGasPrice() != nil {
+		gasPrice = tx.EffectiveGasPrice().Uint64()
+	}
 	return receipt.NewReceipt(
-		tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
+		tx.Hash(), tx.FromAddress(), tx.ToAddress(), amt,
 		pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(errMsg), pb.EXCEPTION_NONE,
-		tx.EffectiveGasPrice().Uint64(), 0, nil, 0, common.Hash{}, 0,
+		gasPrice, 0, nil, 0, common.Hash{}, 0,
 	)
 }

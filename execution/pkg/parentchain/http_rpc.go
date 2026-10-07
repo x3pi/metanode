@@ -2,7 +2,6 @@ package parentchain
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,12 +10,15 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"google.golang.org/protobuf/proto"
 )
 
 var defaultHTTPTransport = &http.Transport{
@@ -33,40 +35,21 @@ var defaultHTTPTransport = &http.Transport{
 
 var defaultHTTPClient = &http.Client{
 	Transport: defaultHTTPTransport,
-	Timeout:   15 * time.Second,
+	Timeout:   45 * time.Second,
 }
 
-// httpClient implements Client
+// httpClient is the read/submit client for a single parent chain node. Signing and nonce handling live in
+// QuorumClient; there is no unsigned or JSON transaction path.
 type httpClient struct {
 	endpoint string
 	client   *http.Client
 }
 
-func NewHTTPClient(endpoint string) Client {
+func NewHTTPClient(endpoint string) *httpClient {
 	return &httpClient{
 		endpoint: endpoint,
 		client:   defaultHTTPClient,
 	}
-}
-
-func (c *httpClient) post(path string, req interface{}, resp interface{}) error {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return err
-	}
-	r, err := c.client.Post(c.endpoint+path, "application/json", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	defer r.Body.Close()
-	if r.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(r.Body)
-		return fmt.Errorf("HTTP error %d: %s", r.StatusCode, string(respBody))
-	}
-	if resp != nil {
-		return json.NewDecoder(r.Body).Decode(resp)
-	}
-	return nil
 }
 
 func (c *httpClient) get(path string, resp interface{}) error {
@@ -85,87 +68,6 @@ func (c *httpClient) get(path string, resp interface{}) error {
 	return nil
 }
 
-func (c *httpClient) SendDepositToFloat(
-	pubKey cm.PublicKey,
-	destClusterID uint64,
-	sender, target common.Address,
-	amount *big.Int,
-) (common.Hash, error) {
-	req := ParentChainTx{
-		Type:      TxTypeDepositToFloat,
-		PubKey:    pubKey[:],
-		ClusterID: destClusterID,
-		ChainID:   destClusterID,
-		Sender:    sender,
-		Target:    target,
-		Amount:    amount,
-		Nonce:     uint64(time.Now().UnixNano()),
-	}
-	var resp struct {
-		MsgID common.Hash `json:"msg_id"`
-	}
-	err := c.post("/tx", req, &resp)
-	return resp.MsgID, err
-}
-
-func (c *httpClient) SendTransferFloat(
-	pubKey, destPubKey cm.PublicKey,
-	destClusterID uint64,
-	sender, target common.Address,
-	amount, gasFee *big.Int,
-	nonce uint64,
-	cert []byte,
-	isRefund bool,
-) (common.Hash, error) {
-	req := ParentChainTx{
-		Type:      TxTypeTransferFloat,
-		PubKey:    pubKey[:],
-		ToPubKey:  destPubKey[:],
-		ClusterID: destClusterID,
-		ChainID:   destClusterID,
-		Sender:    sender,
-		Target:    target,
-		Amount:    amount,
-		Nonce:     nonce,
-		Cert:      cert,
-		IsRefund:  isRefund,
-		Payload:   nil,
-		Fee:       gasFee,
-	}
-	var resp struct {
-		MsgID common.Hash `json:"msg_id"`
-	}
-	err := c.post("/tx", req, &resp)
-	return resp.MsgID, err
-}
-
-func (c *httpClient) SendMarkClaimed(msgID common.Hash, outcome FloatOutcome, cert []byte) (common.Hash, error) {
-	req := ParentChainTx{
-		Type:    TxTypeMarkClaimed,
-		MsgID:   msgID,
-		Outcome: outcome,
-		Cert:    cert,
-	}
-	var resp struct {
-		MsgID common.Hash `json:"msg_id"`
-	}
-	err := c.post("/tx", req, &resp)
-	return resp.MsgID, err
-}
-
-func (c *httpClient) SendReclaimFloat(msgID common.Hash, cert []byte) (common.Hash, error) {
-	req := ParentChainTx{
-		Type:  TxTypeReclaimFloat,
-		MsgID: msgID,
-		Cert:  cert,
-	}
-	var resp struct {
-		MsgID common.Hash `json:"msg_id"`
-	}
-	err := c.post("/tx", req, &resp)
-	return resp.MsgID, err
-}
-
 func (c *httpClient) GetInboundTransfers(pubKey cm.PublicKey, cursor uint64) ([]*TransferEvent, uint64, error) {
 	pubKeyHex := hexEncode(pubKey[:])
 	var resp struct {
@@ -173,6 +75,16 @@ func (c *httpClient) GetInboundTransfers(pubKey cm.PublicKey, cursor uint64) ([]
 		Cursor uint64           `json:"cursor"`
 	}
 	err := c.get(fmt.Sprintf("/inbound?pubkey=%s&cursor=%d", pubKeyHex, cursor), &resp)
+	return resp.Events, resp.Cursor, err
+}
+
+func (c *httpClient) GetInboundAccountRegistrations(pubKey cm.PublicKey, cursor uint64) ([]*AccountRegisteredEvent, uint64, error) {
+	pubKeyHex := hexEncode(pubKey[:])
+	var resp struct {
+		Events []*AccountRegisteredEvent `json:"events"`
+		Cursor uint64                    `json:"cursor"`
+	}
+	err := c.get(fmt.Sprintf("/inbound_registrations?pubkey=%s&cursor=%d", pubKeyHex, cursor), &resp)
 	return resp.Events, resp.Cursor, err
 }
 
@@ -193,6 +105,15 @@ func (c *httpClient) GetClaimed(msgID common.Hash) (FloatOutcome, error) {
 	return resp.Outcome, err
 }
 
+// GetNonce returns the committed sender nonce of addr (the nonce its next transaction must carry).
+func (c *httpClient) GetNonce(addr common.Address) (uint64, error) {
+	var resp struct {
+		Nonce uint64 `json:"nonce"`
+	}
+	err := c.get(fmt.Sprintf("/nonce?address=%s", addr.Hex()), &resp)
+	return resp.Nonce, err
+}
+
 func (c *httpClient) GetFloatSeq(pubKey cm.PublicKey) (uint64, error) {
 	pubKeyHex := hexEncode(pubKey[:])
 	var resp struct {
@@ -200,21 +121,6 @@ func (c *httpClient) GetFloatSeq(pubKey cm.PublicKey) (uint64, error) {
 	}
 	err := c.get(fmt.Sprintf("/seq?pubkey=%s", pubKeyHex), &resp)
 	return resp.Seq, err
-}
-
-func (c *httpClient) SendRegisterAccount(userAddress common.Address, floatIdentityKey cm.PublicKey, userSig []byte, clusterSig cm.Sign) (common.Hash, error) {
-	req := ParentChainTx{
-		Type:        TxTypeRegisterAccount,
-		UserAddress: userAddress,
-		PubKey:      floatIdentityKey[:],
-		UserSig:     userSig,
-		Cert:        clusterSig[:],
-	}
-	var resp struct {
-		MsgID common.Hash `json:"msg_id"`
-	}
-	err := c.post("/tx", req, &resp)
-	return resp.MsgID, err
 }
 
 func (c *httpClient) GetAccountRegistry(userAddress common.Address) (cm.PublicKey, bool, error) {
@@ -230,21 +136,6 @@ func (c *httpClient) GetAccountRegistry(userAddress common.Address) (cm.PublicKe
 	return pubKey, resp.Found, err
 }
 
-func (c *httpClient) SendSubmitStateRoot(clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash, cert cm.Sign) (common.Hash, error) {
-	req := ParentChainTx{
-		Type:      TxTypeSubmitStateRoot,
-		PubKey:    clusterPubKey[:],
-		Epoch:     epoch,
-		StateRoot: stateRoot,
-		Cert:      cert[:],
-	}
-	var resp struct {
-		MsgID common.Hash `json:"msg_id"`
-	}
-	err := c.post("/tx", req, &resp)
-	return resp.MsgID, err
-}
-
 func (c *httpClient) GetStateRoot(clusterPubKey cm.PublicKey, epoch uint64) (common.Hash, bool, error) {
 	pubKeyHex := hexEncode(clusterPubKey[:])
 	var resp struct {
@@ -253,6 +144,94 @@ func (c *httpClient) GetStateRoot(clusterPubKey cm.PublicKey, epoch uint64) (com
 	}
 	err := c.get(fmt.Sprintf("/state_root?pubkey=%s&epoch=%d", pubKeyHex, epoch), &resp)
 	return resp.Root, resp.Found, err
+}
+
+func (c *httpClient) GetBlockByNumber(number uint64) (BlockRecord, bool, error) {
+	var resp struct {
+		Record BlockRecord `json:"record"`
+		Found  bool        `json:"found"`
+	}
+	err := c.get(fmt.Sprintf("/block?number=%d", number), &resp)
+	return resp.Record, resp.Found, err
+}
+
+func (c *httpClient) GetBlockByHash(hash common.Hash) (BlockRecord, bool, error) {
+	var resp struct {
+		Record BlockRecord `json:"record"`
+		Found  bool        `json:"found"`
+	}
+	err := c.get(fmt.Sprintf("/block?hash=%s", hash.Hex()), &resp)
+	return resp.Record, resp.Found, err
+}
+
+func (c *httpClient) GetTransaction(txHash common.Hash) (uint64, uint32, bool, error) {
+	var resp struct {
+		BlockNumber uint64 `json:"block_number"`
+		Index       uint32 `json:"index"`
+		Found       bool   `json:"found"`
+	}
+	err := c.get(fmt.Sprintf("/tx?hash=%s", txHash.Hex()), &resp)
+	return resp.BlockNumber, resp.Index, resp.Found, err
+}
+
+func (c *httpClient) GetReceipt(txHash common.Hash) (*Receipt, bool, error) {
+	var resp struct {
+		Receipt *Receipt `json:"receipt"`
+		Found   bool     `json:"found"`
+	}
+	err := c.get(fmt.Sprintf("/receipt?hash=%s", txHash.Hex()), &resp)
+	return resp.Receipt, resp.Found, err
+}
+
+func (c *httpClient) GetStatus() (ChainStatus, error) {
+	var resp ChainStatus
+	err := c.get("/status", &resp)
+	return resp, err
+}
+
+// GetFloat returns the float balance of a BLS identity and the block it was read at.
+func (c *httpClient) GetFloat(pubKey cm.PublicKey) (*big.Int, uint64, error) {
+	var resp struct {
+		Balance   string `json:"balance"`
+		LastBlock uint64 `json:"last_block"`
+	}
+	if err := c.get(fmt.Sprintf("/float?pubkey=0x%x", pubKey[:]), &resp); err != nil {
+		return nil, 0, err
+	}
+	v, ok := new(big.Int).SetString(resp.Balance, 10)
+	if !ok {
+		return nil, 0, fmt.Errorf("parentchain: node returned an unparsable float balance %q", resp.Balance)
+	}
+	return v, resp.LastBlock, nil
+}
+
+func (c *httpClient) GetProof(key [32]byte) (ProofResult, error) {
+	var resp ProofResult
+	err := c.get(fmt.Sprintf("/proof?key=0x%x", key), &resp)
+	return resp, err
+}
+
+// SendRawTransaction submits a signed, proto-encoded pb.Transaction (raw bytes body) to the node's ingress.
+func (c *httpClient) SendRawTransaction(rawTx []byte) (common.Hash, error) {
+	hreq, err := http.NewRequest(http.MethodPost, c.endpoint+"/send_raw_transaction", bytes.NewReader(rawTx))
+	if err != nil {
+		return common.Hash{}, err
+	}
+	hreq.Header.Set("Content-Type", "application/octet-stream")
+	r, err := c.client.Do(hreq)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(r.Body)
+		return common.Hash{}, fmt.Errorf("HTTP error %d: %s", r.StatusCode, string(respBody))
+	}
+	var resp struct {
+		TxHash common.Hash `json:"tx_hash"`
+	}
+	err = json.NewDecoder(r.Body).Decode(&resp)
+	return resp.TxHash, err
 }
 
 func hexEncode(b []byte) string {
@@ -264,227 +243,83 @@ func hexEncode(b []byte) string {
 // ---------------------------------------------------------
 
 type HTTPServer struct {
-	store      Store
-	txChan     chan *ParentChainTx
-	pendingTxs sync.Map // map[common.Hash]chan error
+	store        Store
+	committer    BlockCommitter
+	txChan       chan *pb.Transaction
+	syncing      atomic.Bool
+	forkDetected atomic.Bool
+	validatorsMu sync.RWMutex
+	validators   []*pb.ValidatorInfo
 }
 
-func NewHTTPServer(store Store, txChan chan *ParentChainTx) *HTTPServer {
-	return &HTTPServer{
-		store:  store,
-		txChan: txChan,
+func NewHTTPServer(store Store) *HTTPServer {
+	s := &HTTPServer{store: store}
+	if c, ok := store.(BlockCommitter); ok {
+		s.committer = c
 	}
+	return s
 }
 
-func (s *HTTPServer) NotifyTxResult(msgID common.Hash, err error) {
-	if chIntf, ok := s.pendingTxs.Load(msgID); ok {
-		ch := chIntf.(chan error)
-		if err != nil {
-			select {
-			case ch <- err:
-			default:
-			}
-		} else {
-			close(ch)
-		}
-		s.pendingTxs.Delete(msgID)
-	}
+// SetTxChan sets the bounded queue that accepted signed transactions are pushed into (consumed by TxBatcher).
+func (s *HTTPServer) SetTxChan(ch chan *pb.Transaction) {
+	s.txChan = ch
+}
+
+func (s *HTTPServer) SetSyncing(syncing bool) {
+	s.syncing.Store(syncing)
+}
+
+func (s *HTTPServer) SetForkDetected(fork bool) {
+	s.forkDetected.Store(fork)
+}
+
+func (s *HTTPServer) SetValidators(vals []*pb.ValidatorInfo) {
+	s.validatorsMu.Lock()
+	defer s.validatorsMu.Unlock()
+	s.validators = vals
 }
 
 func (s *HTTPServer) Start(addr string) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/tx", s.handleTx)
+	mux.HandleFunc("/tx", s.handleTxLookup)
+	mux.HandleFunc("/block", s.handleBlock)
+	mux.HandleFunc("/receipt", s.handleReceipt)
+	mux.HandleFunc("/proof", s.handleProof)
+	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/validators", s.handleValidators)
+	mux.HandleFunc("/send_raw_transaction", s.handleSendRawTransaction)
+
 	mux.HandleFunc("/inbound", s.handleInbound)
+	mux.HandleFunc("/inbound_registrations", s.handleInboundRegistrations)
 	mux.HandleFunc("/record", s.handleRecord)
 	mux.HandleFunc("/claimed", s.handleClaimed)
 	mux.HandleFunc("/seq", s.handleSeq)
+	mux.HandleFunc("/nonce", s.handleNonce)
 	mux.HandleFunc("/account", s.handleAccount)
 	mux.HandleFunc("/state_root", s.handleStateRoot)
-	return http.ListenAndServe(addr, mux)
-}
-
-func (s *HTTPServer) handleTx(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
+	mux.HandleFunc("/float", s.handleFloat)
+	mux.Handle("/metrics", promhttp.Handler())
+	// I/O timeouts only bound slow or stalled clients (slowloris); they never influence consensus or dispatch.
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
-	var tx ParentChainTx
-	if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	
-	var msgID common.Hash
-	if tx.Type == TxTypeTransferFloat {
-		if tx.Amount == nil || tx.Amount.Sign() <= 0 {
-			http.Error(w, "invalid amount", http.StatusBadRequest)
-			return
-		}
-		if len(tx.PubKey) != 48 || len(tx.ToPubKey) != 48 {
-			http.Error(w, "invalid public key length", http.StatusBadRequest)
-			return
-		}
-		var fromKey, toKey cm.PublicKey
-		copy(fromKey[:], tx.PubKey)
-		copy(toKey[:], tx.ToPubKey)
-		
-		payloadHash := crypto.Keccak256Hash(tx.Payload)
-		digest := ComputeTransferFloatMessage(fromKey, toKey, tx.Sender, tx.Target, tx.Amount, tx.Fee, payloadHash, tx.Nonce)
-		if len(tx.Cert) != 96 {
-			http.Error(w, "invalid signature length", http.StatusBadRequest)
-			return
-		}
-		if !bls.VerifySign(fromKey, cm.Sign(tx.Cert), digest) {
-			http.Error(w, "invalid signature", http.StatusUnauthorized)
-			return
-		}
-		msgID = crypto.Keccak256Hash(digest)
-		tx.MsgID = msgID
-	} else if tx.Type == TxTypeDepositToFloat {
-		if tx.Amount == nil || tx.Amount.Sign() <= 0 {
-			http.Error(w, "invalid amount", http.StatusBadRequest)
-			return
-		}
-		if len(tx.PubKey) != 48 {
-			http.Error(w, "invalid public key length", http.StatusBadRequest)
-			return
-		}
-		if tx.MsgID != (common.Hash{}) {
-			msgID = tx.MsgID
-		} else {
-			var pubKey cm.PublicKey
-			copy(pubKey[:], tx.PubKey)
-			data := append(append(pubKey[:], tx.Sender.Bytes()...), tx.Target.Bytes()...)
-			data = append(data, tx.Amount.Bytes()...)
-			nonce := tx.Nonce
-			if nonce == 0 {
-				nonce = uint64(time.Now().UnixNano())
-			}
-			var nonceBytes [8]byte
-			binary.BigEndian.PutUint64(nonceBytes[:], nonce)
-			data = append(data, nonceBytes[:]...)
-			msgID = crypto.Keccak256Hash(data)
-			tx.MsgID = msgID
-		}
-	} else if tx.Type == TxTypeSubmitStateRoot {
-		if len(tx.PubKey) != 48 {
-			http.Error(w, "invalid public key length", http.StatusBadRequest)
-			return
-		}
-		if len(tx.Cert) != 96 {
-			http.Error(w, "invalid signature length", http.StatusBadRequest)
-			return
-		}
-		var clusterPubKey cm.PublicKey
-		copy(clusterPubKey[:], tx.PubKey)
-		digest := ComputeSubmitStateRootMessage(clusterPubKey, tx.Epoch, tx.StateRoot)
-		if !bls.VerifySign(clusterPubKey, cm.Sign(tx.Cert), digest) {
-			http.Error(w, "invalid signature", http.StatusUnauthorized)
-			return
-		}
-		msgID = crypto.Keccak256Hash(append(digest, tx.Cert...))
-		tx.MsgID = msgID
-	} else if tx.Type == TxTypeRegisterAccount {
-		var floatIdentityKey cm.PublicKey
-		copy(floatIdentityKey[:], tx.PubKey)
-		digest := ComputeRegisterAccountMessage(tx.UserAddress, floatIdentityKey)
-		
-		if len(tx.Cert) != 96 {
-			http.Error(w, "invalid signature length", http.StatusBadRequest)
-			return
-		}
-		if !bls.VerifySign(floatIdentityKey, cm.Sign(tx.Cert), digest) {
-			http.Error(w, "invalid cluster signature", http.StatusUnauthorized)
-			return
-		}
-		msgID = crypto.Keccak256Hash(digest)
-		tx.MsgID = msgID
-	} else if tx.Type == TxTypeMarkClaimed {
-		rec, found, err := s.store.GetTransferRecord(tx.MsgID)
-		if err != nil || !found {
-			http.Error(w, "unknown messageID", http.StatusBadRequest)
-			return
-		}
-		digest := ComputeMarkClaimedMessage(tx.MsgID, tx.Outcome)
-		if len(tx.Cert) != 96 {
-			http.Error(w, "invalid signature length", http.StatusBadRequest)
-			return
-		}
-		if !bls.VerifySign(rec.DestKey, cm.Sign(tx.Cert), digest) {
-			http.Error(w, "invalid signature", http.StatusUnauthorized)
-			return
-		}
-		msgID = tx.MsgID
-	} else if tx.Type == TxTypeReclaimFloat {
-		rec, found, err := s.store.GetTransferRecord(tx.MsgID)
-		if err != nil || !found {
-			http.Error(w, "unknown messageID", http.StatusBadRequest)
-			return
-		}
-		if rec.SourceKey == nil {
-			http.Error(w, "cannot reclaim direct deposit", http.StatusBadRequest)
-			return
-		}
-		digest := ComputeReclaimFloatMessage(tx.MsgID, *rec.SourceKey)
-		if len(tx.Cert) != 96 {
-			http.Error(w, "invalid signature length", http.StatusBadRequest)
-			return
-		}
-		if !bls.VerifySign(*rec.SourceKey, cm.Sign(tx.Cert), digest) {
-			http.Error(w, "invalid signature", http.StatusUnauthorized)
-			return
-		}
-		msgID = tx.MsgID
-	} else {
-		msgID = tx.MsgID
-	}
-
-	async := r.URL.Query().Get("async") == "true" || r.Header.Get("X-Async") == "true"
-	if async {
-		select {
-		case s.txChan <- &tx:
-			json.NewEncoder(w).Encode(map[string]interface{}{"msg_id": msgID, "status": "queued"})
-			return
-		default:
-			http.Error(w, "tx queue full", http.StatusServiceUnavailable)
-			return
-		}
-	}
-
-	resultCh := make(chan error, 1)
-	s.pendingTxs.Store(msgID, resultCh)
-	defer s.pendingTxs.Delete(msgID)
-
-	timer := time.NewTimer(10 * time.Second)
-	defer timer.Stop()
-
-	select {
-	case s.txChan <- &tx:
-		// Transaction successfully queued. Wait for consensus to process it.
-		select {
-		case err := <-resultCh:
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			json.NewEncoder(w).Encode(map[string]interface{}{"msg_id": msgID})
-		case <-timer.C:
-			http.Error(w, "timeout waiting for consensus", http.StatusGatewayTimeout)
-		}
-	default:
-		http.Error(w, "tx queue full", http.StatusServiceUnavailable)
-	}
+	return srv.ListenAndServe()
 }
 
 func (s *HTTPServer) handleInbound(w http.ResponseWriter, r *http.Request) {
 	pubKeyHex := r.URL.Query().Get("pubkey")
 	cursorStr := r.URL.Query().Get("cursor")
 	cursor, _ := strconv.ParseUint(cursorStr, 10, 64)
-	
+
 	pubKeyBytes := common.FromHex(pubKeyHex)
 	var pubKey cm.PublicKey
 	copy(pubKey[:], pubKeyBytes)
-	
+
 	destHash := crypto.Keccak256Hash(pubKey[:])
 	events, nextCursor, err := s.store.GetInboundTransfers(destHash, cursor)
 	if err != nil {
@@ -494,7 +329,29 @@ func (s *HTTPServer) handleInbound(w http.ResponseWriter, r *http.Request) {
 	if events == nil {
 		events = []*TransferEvent{}
 	}
-	
+
+	json.NewEncoder(w).Encode(map[string]interface{}{"events": events, "cursor": nextCursor})
+}
+
+func (s *HTTPServer) handleInboundRegistrations(w http.ResponseWriter, r *http.Request) {
+	pubKeyHex := r.URL.Query().Get("pubkey")
+	cursorStr := r.URL.Query().Get("cursor")
+	cursor, _ := strconv.ParseUint(cursorStr, 10, 64)
+
+	pubKeyBytes := common.FromHex(pubKeyHex)
+	var pubKey cm.PublicKey
+	copy(pubKey[:], pubKeyBytes)
+
+	destHash := crypto.Keccak256Hash(pubKey[:])
+	events, nextCursor, err := s.store.GetAccountRegistrations(destHash, cursor)
+	if err != nil {
+		events = []*AccountRegisteredEvent{}
+		nextCursor = cursor
+	}
+	if events == nil {
+		events = []*AccountRegisteredEvent{}
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{"events": events, "cursor": nextCursor})
 }
 
@@ -513,15 +370,26 @@ func (s *HTTPServer) handleClaimed(w http.ResponseWriter, r *http.Request) {
 func (s *HTTPServer) handleSeq(w http.ResponseWriter, r *http.Request) {
 	pubKeyHex := r.URL.Query().Get("pubkey")
 	pubKeyBytes := common.FromHex(pubKeyHex)
-	
+
 	seq, _ := s.store.GetFloatSeq(crypto.Keccak256Hash(pubKeyBytes))
 	json.NewEncoder(w).Encode(map[string]interface{}{"seq": seq})
+}
+
+// handleNonce returns the committed sender nonce (the number of the next tx this address must use).
+func (s *HTTPServer) handleNonce(w http.ResponseWriter, r *http.Request) {
+	addr := common.HexToAddress(r.URL.Query().Get("address"))
+	nonce, err := s.store.GetNonce(addr)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"nonce": nonce})
 }
 
 func (s *HTTPServer) handleAccount(w http.ResponseWriter, r *http.Request) {
 	addrHex := r.URL.Query().Get("address")
 	addr := common.HexToAddress(addrHex)
-	
+
 	pubKey, found, _ := s.store.GetAccountRegistry(addr)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"float_identity_key": pubKey[:],
@@ -529,10 +397,56 @@ func (s *HTTPServer) handleAccount(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleFloat returns the committed float balance of a BLS identity (GET /float?pubkey=<48-byte hex>) together
+// with the chain-wide float total supply.
+func (s *HTTPServer) handleFloat(w http.ResponseWriter, r *http.Request) {
+	pubKeyBytes := common.FromHex(r.URL.Query().Get("pubkey"))
+	if len(pubKeyBytes) != 48 {
+		http.Error(w, "pubkey must be a 48-byte BLS public key (hex)", http.StatusBadRequest)
+		return
+	}
+	// last_block is the block the values belong to: read it before and after and retry until the same block was
+	// applied throughout, so a client comparing nodes can require "same block, same balance".
+	var bal, total *big.Int
+	var block uint64
+	for attempt := 0; attempt < 5; attempt++ {
+		before := s.lastAppliedBlock()
+		var err error
+		if bal, err = s.store.GetFloat(crypto.Keccak256Hash(pubKeyBytes)); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if total, err = s.store.GetFloat(floatTotalSupplyKey); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		block = before
+		if s.lastAppliedBlock() == before {
+			break
+		}
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"balance":      bal.String(),
+		"total_supply": total.String(),
+		"last_block":   block,
+	})
+}
+
+func (s *HTTPServer) lastAppliedBlock() uint64 {
+	if s.committer == nil {
+		return 0
+	}
+	prog, err := s.committer.LastApplied()
+	if err != nil {
+		return 0
+	}
+	return prog.LastBlock
+}
+
 func (s *HTTPServer) handleStateRoot(w http.ResponseWriter, r *http.Request) {
 	pubKeyHex := r.URL.Query().Get("pubkey")
 	pubKeyBytes := common.FromHex(pubKeyHex)
-	
+
 	epochStr := r.URL.Query().Get("epoch")
 	epoch, _ := strconv.ParseUint(epochStr, 10, 64)
 
@@ -543,3 +457,231 @@ func (s *HTTPServer) handleStateRoot(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *HTTPServer) handleBlock(w http.ResponseWriter, r *http.Request) {
+	if s.committer == nil {
+		http.Error(w, "block storage not available", http.StatusServiceUnavailable)
+		return
+	}
+	numStr := r.URL.Query().Get("number")
+	hashStr := r.URL.Query().Get("hash")
+
+	var rec BlockRecord
+	var found bool
+	var err error
+
+	if hashStr != "" {
+		h := common.HexToHash(hashStr)
+		rec, found, err = s.committer.GetBlockRecordByHash(h)
+	} else if numStr != "" {
+		num, pErr := strconv.ParseUint(numStr, 10, 64)
+		if pErr != nil {
+			http.Error(w, "invalid block number", http.StatusBadRequest)
+			return
+		}
+		rec, found, err = s.committer.GetBlockRecord(num)
+	} else {
+		prog, pErr := s.committer.LastApplied()
+		if pErr != nil || prog.LastBlock == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"found": false})
+			return
+		}
+		rec, found, err = s.committer.GetBlockRecord(prog.LastBlock)
+	}
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"record": rec,
+		"found":  found,
+	})
+}
+
+// handleTxLookup returns where a transaction was included (GET /tx?hash=...). Transactions are submitted only
+// through /send_raw_transaction; POST /tx no longer exists.
+func (s *HTTPServer) handleTxLookup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed: submit signed transactions to /send_raw_transaction", http.StatusMethodNotAllowed)
+		return
+	}
+	{
+		hashStr := r.URL.Query().Get("hash")
+		if hashStr == "" {
+			http.Error(w, "missing hash query parameter", http.StatusBadRequest)
+			return
+		}
+		txHash := common.HexToHash(hashStr)
+		if s.committer == nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"found": false})
+			return
+		}
+		bNum, idx, found, err := s.committer.GetTxLocation(txHash)
+		if err != nil || !found {
+			json.NewEncoder(w).Encode(map[string]interface{}{"found": false})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"block_number": bNum,
+			"index":        idx,
+			"found":        true,
+		})
+		return
+	}
+}
+
+func (s *HTTPServer) handleReceipt(w http.ResponseWriter, r *http.Request) {
+	hashStr := r.URL.Query().Get("hash")
+	if hashStr == "" {
+		http.Error(w, "missing hash query parameter", http.StatusBadRequest)
+		return
+	}
+	txHash := common.HexToHash(hashStr)
+	if s.committer == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"found": false})
+		return
+	}
+	rcpt, found, err := s.committer.GetReceipt(txHash)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"receipt": rcpt,
+		"found":   found,
+	})
+}
+
+func (s *HTTPServer) handleProof(w http.ResponseWriter, r *http.Request) {
+	if s.committer == nil {
+		http.Error(w, "committer not available", http.StatusServiceUnavailable)
+		return
+	}
+	keyStr := r.URL.Query().Get("key")
+	if keyStr == "" {
+		http.Error(w, "missing key query parameter", http.StatusBadRequest)
+		return
+	}
+	keyBytes := common.FromHex(keyStr)
+	var key [32]byte
+	copy(key[:], keyBytes)
+
+	proof, err := s.committer.GenerateProof(key)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to generate proof: %v", err), http.StatusInternalServerError)
+		return
+	}
+	prog, _ := s.committer.LastApplied()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"key":        common.BytesToHash(key[:]),
+		"proof":      proof,
+		"state_root": prog.LastStateRoot,
+		"verified":   len(proof) > 0,
+	})
+}
+
+func (s *HTTPServer) handleStatus(w http.ResponseWriter, r *http.Request) {
+	var lastBlock uint64
+	var lastHash common.Hash
+	var stateRoot common.Hash
+	if s.committer != nil {
+		prog, _ := s.committer.LastApplied()
+		lastBlock = prog.LastBlock
+		lastHash = prog.LastHash
+		stateRoot = prog.LastStateRoot
+	}
+	forkDetected := s.forkDetected.Load()
+	UpdateMetrics(lastBlock, stateRoot.Hex(), forkDetected)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"chain_id":      ParentChainID,
+		"last_block":    lastBlock,
+		"last_hash":     lastHash,
+		"state_root":    stateRoot,
+		"syncing":       s.syncing.Load(),
+		"fork_detected": forkDetected,
+	})
+}
+
+func (s *HTTPServer) handleValidators(w http.ResponseWriter, r *http.Request) {
+	s.validatorsMu.RLock()
+	vals := s.validators
+	s.validatorsMu.RUnlock()
+	if vals == nil {
+		vals = []*pb.ValidatorInfo{}
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"validators": vals,
+	})
+}
+
+// maxRawTxBytes bounds the body of /send_raw_transaction.
+const maxRawTxBytes = 1 << 20
+
+func (s *HTTPServer) handleSendRawTransaction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.syncing.Load() {
+		http.Error(w, "node is syncing, transactions rejected", http.StatusServiceUnavailable)
+		return
+	}
+
+	rawBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRawTxBytes))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	var tx pb.Transaction
+	if err := proto.Unmarshal(rawBytes, &tx); err != nil {
+		http.Error(w, fmt.Sprintf("failed to unmarshal transaction: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if tx.ChainID != ParentChainID {
+		http.Error(w, fmt.Sprintf("invalid chain ID: %d", tx.ChainID), http.StatusBadRequest)
+		return
+	}
+	if len(tx.FromAddress) != 20 {
+		http.Error(w, "invalid from address", http.StatusBadRequest)
+		return
+	}
+
+	if common.BytesToAddress(tx.ToAddress) != ParentChainGatewayAddress {
+		http.Error(w, "invalid to address", http.StatusBadRequest)
+		return
+	}
+	// Admission filter: unsigned or forged transactions never reach consensus (they would only burn block space
+	// and receipt storage). Execution re-verifies deterministically, so this is purely a pre-filter on committed
+	// state: a sender must already be registered (or carry its own registration) and the nonce must not be stale.
+	if _, err := VerifyTxSignature(&tx, s.store); err != nil {
+		http.Error(w, fmt.Sprintf("rejected: %v", err), http.StatusBadRequest)
+		return
+	}
+	if committed, err := s.store.GetNonce(common.BytesToAddress(tx.FromAddress)); err == nil && TxNonceValue(&tx) < committed {
+		http.Error(w, fmt.Sprintf("rejected: stale nonce %d < committed %d", TxNonceValue(&tx), committed), http.StatusBadRequest)
+		return
+	}
+
+	txHash := ComputeTxHash(&tx)
+
+	if s.txChan != nil {
+		select {
+		case s.txChan <- &tx:
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"tx_hash": txHash,
+				"status":  "queued",
+			})
+		default:
+			http.Error(w, "transaction queue is full", http.StatusServiceUnavailable)
+		}
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"tx_hash": txHash,
+		"status":  "accepted",
+	})
+}

@@ -38,6 +38,7 @@ type RequestHandler struct {
 	CustomGetEpochBoundaryDataCallback func(request *pb.GetEpochBoundaryDataRequest) (*pb.EpochBoundaryData, error)
 	CustomGetValidatorsCallback        func(request *pb.GetValidatorsAtBlockRequest) ([]*pb.ValidatorInfo, error)
 	CustomGetBlocksRangeCallback       func(request *pb.GetBlocksRangeRequest) (*pb.GetBlocksRangeResponse, error)
+	CustomGetLastBlockNumberCallback   func(request *pb.GetLastBlockNumberRequest) (*pb.LastBlockNumberResponse, error)
 }
 
 func NewRequestHandler(storageManager *storage.StorageManager, chainState *blockchain.ChainState, genesisPath string) *RequestHandler {

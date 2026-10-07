@@ -1,90 +1,51 @@
 package main
 
-// eth_tx_converter.go — EthTx → MetaTx conversion embedded in the Master.
-// Replaces the RPC client's processSendRawTransaction + BuildTransactionWithDeviceKeyFromEthTx
-// by performing the conversion locally without any HTTP round-trips.
+// eth_tx_converter.go — Canonical EIP-2718 EthTx → MetaTx conversion.
+// Shared by both TCP ingress (SendRawTransaction / SendRawTransactions)
+// and RPC ingress (eth_sendRawTransaction).
 
 import (
-"os"
-	"bytes"
-	"encoding/hex"
 	"fmt"
-	"math/big"
-	"time"
 
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
-
-	"github.com/meta-node-blockchain/meta-node/pkg/bls"
-	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	mt_transaction "github.com/meta-node-blockchain/meta-node/pkg/transaction"
-	"github.com/meta-node-blockchain/meta-node/pkg/utils"
-
-	"google.golang.org/protobuf/proto"
+	mt_types "github.com/meta-node-blockchain/meta-node/types"
 )
 
-// buildMetaTxFromEthTx converts an Ethereum-format signed transaction into a
-// MetaNode TransactionWithDeviceKey protobuf. It does everything the old
-// rpc-client's processSendRawTransaction + BuildTransactionWithDeviceKeyFromEthTx
-// did, but without any network round-trip — account state is read directly from
-// the in-process trie DB.
-func buildMetaTxFromEthTx(
-	ethTx *types.Transaction,
-	chainID *big.Int,
-	blsPrivateKey mt_common.PrivateKey,
-	app *App,
-) ([]byte, *mt_transaction.Transaction, error) {
-
-	// 1. Derive sender from the Ethereum TX signature
-	signer := types.LatestSignerForChainID(chainID)
-	fromAddress, err := types.Sender(signer, ethTx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to derive sender: %w", err)
+// ConvertRawEthTxToMetaTx is the canonical, unified converter for EIP-2718 raw Ethereum
+// transaction envelopes into MetaNode Transactions. Shared by both TCP ingress (SendRawTransaction /
+// SendRawTransactions) and RPC ingress (eth_sendRawTransaction).
+//
+// Pipeline:
+// 1. Envelope size limit check (MaxStandardTxEnvelopeSize / MaxRawEthTxEnvelopeSize).
+// 2. UnmarshalBinary into go-ethereum types.Transaction.
+// 3. Strict envelope validation via ValidateEthTxEnvelope (anti-malleable, positive chainId match, no pre-EIP-155, recoverable sender).
+// 4. Convert to MetaTx via NewTransactionFromEth.
+// 5. EIP-4844: Persist blob sidecar into blob_store (if present) and strip sidecar before mempool.
+func (app *App) ConvertRawEthTxToMetaTx(rawEth []byte) (mt_types.Transaction, *e_types.Transaction, error) {
+	if len(rawEth) == 0 {
+		return nil, nil, fmt.Errorf("%w: empty raw transaction body", mt_transaction.ErrDecodeRawEth)
+	}
+	if len(rawEth) > mt_transaction.MaxRawEthTxEnvelopeSize {
+		return nil, nil, fmt.Errorf("%w: transaction envelope size %d exceeds max allowed %d", mt_transaction.ErrExceedsMaxEnvelopeSize, len(rawEth), mt_transaction.MaxRawEthTxEnvelopeSize)
 	}
 
-	// 2. Get account state from LIVE trie
-	// We use AccountStateReadOnly to query the live state (including mempool changes)
-	// and benefit from the global loadedAccounts cache, ensuring consistency with mtn_getAccountState.
-	as, err := app.chainState.GetAccountStateDB().AccountStateReadOnly(fromAddress)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get account state for %s: %w", fromAddress.Hex(), err)
+	ethTx := new(types.Transaction)
+	if err := ethTx.UnmarshalBinary(rawEth); err != nil {
+		return nil, nil, fmt.Errorf("%w: failed to decode Ethereum transaction: %v", mt_transaction.ErrDecodeRawEth, err)
 	}
 
-	// 3. Verify BLS public key is registered on-chain (skip for account setting TX)
-	if ethTx.To() == nil || *ethTx.To() != utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
-		if len(as.PublicKeyBls()) == 0 {
-			isExplicitDev := os.Getenv("METANODE_DEVNET") == "true"
-			isProd := os.Getenv("NODE_ENV") == "production" ||
-				os.Getenv("ENVIRONMENT") == "production" ||
-				os.Getenv("METANODE_ENV") == "production"
-			if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") == "true" && isExplicitDev && !isProd {
-				// DO NOTHING, bypass in explicit devnet only
-			} else {
-				return nil, nil, fmt.Errorf("account %s has no BLS public key registered on-chain", fromAddress.Hex())
-			}
-		} else {
-			// Derive expected public key from the provided private key
-			kp := bls.NewKeyPair(blsPrivateKey[:])
-			if !bytes.Equal(as.PublicKeyBls(), kp.BytesPublicKey()) {
-				return nil, nil, fmt.Errorf("registered BLS public key does not match the signing key for %s, expected: %s, got: %s", fromAddress.Hex(), hex.EncodeToString(as.PublicKeyBls()), hex.EncodeToString(kp.BytesPublicKey()))
-			}
-		}
+	if ethTx.Type() != types.BlobTxType && len(rawEth) > mt_transaction.MaxStandardTxEnvelopeSize {
+		return nil, nil, fmt.Errorf("%w: standard transaction envelope size %d exceeds max allowed %d", mt_transaction.ErrExceedsMaxEnvelopeSize, len(rawEth), mt_transaction.MaxStandardTxEnvelopeSize)
 	}
 
-	// 4. Build device key
-	deviceKey, err := app.stateProcessor.GetDeviceKey(as.LastHash())
-	if err != nil {
-		logger.Info("[ETH_TX_CONVERTER] device key lookup failed (non-fatal): %v", err)
+	if err := mt_transaction.ValidateEthTxEnvelope(ethTx, app.config.ChainId); err != nil {
+		return nil, nil, err
 	}
 
-	rawNewDeviceKeyBytes := []byte(fmt.Sprintf("%s-%d",
-		hex.EncodeToString(as.LastHash().Bytes()), time.Now().Unix()))
-	rawNewDeviceKey := crypto.Keccak256(rawNewDeviceKeyBytes)
-	newDeviceKey := crypto.Keccak256Hash(rawNewDeviceKey)
-
-	// 5. Build MetaTx from EthTx
 	metaTxIface, err := mt_transaction.NewTransactionFromEth(ethTx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build MetaTx from EthTx: %w", err)
@@ -94,41 +55,29 @@ func buildMetaTxFromEthTx(
 		return nil, nil, fmt.Errorf("unexpected transaction type from NewTransactionFromEth")
 	}
 
-	// EIP-4844: NewTransactionFromEth already KZG-verified the sidecar (see
-	// transaction.VerifyBlobSidecar). Persist it to blob_store keyed by versioned
-	// hash, then strip it from the tx before it's signed/propagated/persisted —
-	// consensus and every other node only ever see the committed versioned
-	// hashes, never the raw blob bytes. See Transaction.Sidecar's comment in
-	// transaction.proto and blob_store's package doc for why this is safe.
-	if metaTxProto, ok := metaTx.Proto().(*mt_proto.Transaction); ok && metaTxProto.Type == uint64(types.BlobTxType) && metaTxProto.Sidecar != nil {
-		sidecar := metaTxProto.Sidecar
-		if bs := app.chainState.GetBlobStore(); bs != nil {
-			blockNumber := app.blockProcessor.GetLastBlock().Header().BlockNumber() + 1
-			for i, vh := range metaTxProto.BlobVersionedHashes {
-				if err := bs.Put(blockNumber, vh, sidecar.Commitments[i], sidecar.Proofs[i], sidecar.Blobs[i]); err != nil {
-					return nil, nil, fmt.Errorf("failed to persist blob sidecar: %w", err)
+	// EIP-4844: persist sidecar to blob_store if present, then strip sidecar
+	if metaTxProto, ok := metaTx.Proto().(*mt_proto.Transaction); ok {
+		if metaTxProto.Type == uint64(types.BlobTxType) && metaTxProto.Sidecar != nil {
+			sidecar := metaTxProto.Sidecar
+			if bs := app.chainState.GetBlobStore(); bs != nil {
+				var blockNumber uint64
+				if app.blockProcessor != nil && app.blockProcessor.GetLastBlock() != nil && app.blockProcessor.GetLastBlock().Header() != nil {
+					blockNumber = app.blockProcessor.GetLastBlock().Header().BlockNumber() + 1
+				}
+				for i, vh := range metaTxProto.BlobVersionedHashes {
+					if err := bs.Put(blockNumber, vh, sidecar.Commitments[i], sidecar.Proofs[i], sidecar.Blobs[i]); err != nil {
+						return nil, nil, fmt.Errorf("failed to persist blob sidecar: %w", err)
+					}
 				}
 			}
+			metaTxProto.Sidecar = nil
 		}
-		metaTxProto.Sidecar = nil
+		if metaTxProto.Type != uint64(types.BlobTxType) && len(metaTxProto.RawEnvelope) == 0 {
+			metaTxProto.RawEnvelope = append([]byte(nil), rawEth...)
+			metaTx.ClearCacheHash()
+		}
 	}
 
-	metaTx.UpdateDeriver(deviceKey, newDeviceKey)
-	metaTx.SetSign(blsPrivateKey)
-
-	// 6. Marshal as TransactionWithDeviceKey proto
-	txWithDK := &mt_proto.TransactionWithDeviceKey{
-		Transaction: metaTx.Proto().(*mt_proto.Transaction),
-		DeviceKey:   rawNewDeviceKey,
-	}
-
-	data, err := proto.Marshal(txWithDK)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal TransactionWithDeviceKey: %w", err)
-	}
-
-	logger.Info("[ETH_TX_CONVERTER] Built MetaTx %s from EthTx, sender=%s",
-		metaTx.Hash().Hex(), fromAddress.Hex())
-
-	return data, metaTx, nil
+	logger.Debug("[ETH_TX_CONVERTER] Converted EthTx %s -> MetaTx %s", ethTx.Hash().Hex(), metaTx.Hash().Hex())
+	return metaTx, ethTx, nil
 }
