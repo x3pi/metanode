@@ -82,6 +82,56 @@ func BenchmarkValidateProtoEnvelopeBinding_Legacy(b *testing.B) {
 	}
 }
 
+// BenchmarkValidateEnvelopeBinding_TxObject measures binding check when reusing memoized *Transaction
+func BenchmarkValidateEnvelopeBinding_TxObject(b *testing.B) {
+	metaTx, _ := createBenchTx(b, true)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if err := ValidateEnvelopeBinding(metaTx); err != nil {
+			b.Fatalf("validation failed: %v", err)
+		}
+	}
+}
+
+// BenchmarkValidateEnvelopeBinding_TxObject_NativeTransfer measures binding on native transfers (no calldata)
+func BenchmarkValidateEnvelopeBinding_TxObject_NativeTransfer(b *testing.B) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		b.Fatalf("generate key: %v", err)
+	}
+	chainID := big.NewInt(991)
+	signer := types.LatestSignerForChainID(chainID)
+	to := common.HexToAddress("0x1234567890123456789012345678901234567890")
+
+	ethTx, err := types.SignNewTx(key, signer, &types.DynamicFeeTx{
+		ChainID:   chainID,
+		Nonce:     1,
+		GasTipCap: big.NewInt(1000),
+		GasFeeCap: big.NewInt(100000),
+		Gas:       21000,
+		To:        &to,
+		Value:     big.NewInt(1000000),
+	})
+	if err != nil {
+		b.Fatalf("sign tx: %v", err)
+	}
+
+	metaTx, err := NewTransactionFromEth(ethTx)
+	if err != nil {
+		b.Fatalf("new transaction: %v", err)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if err := ValidateEnvelopeBinding(metaTx); err != nil {
+			b.Fatalf("validation failed: %v", err)
+		}
+	}
+}
+
 // BenchmarkECRecover_Only isolates raw ecrecover cryptographic computation cost
 func BenchmarkECRecover_Only(b *testing.B) {
 	key, err := crypto.GenerateKey()

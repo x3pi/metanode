@@ -2,6 +2,7 @@ package transaction
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/big"
@@ -10,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -142,6 +144,342 @@ func validateProtoEnvelopeBinding(pTx *pb.Transaction, owner *Transaction) error
 		return fmt.Errorf("%w: failed to unmarshal RawEnvelope: %v", ErrInvalidEnvelope, decErr)
 	}
 
+	return validateDirectEnvelopeBinding(pTx, ethTx)
+}
+
+// validateDirectEnvelopeBinding verifies that every execution-relevant field in pTx matches
+// the envelope data in ethTx directly, without constructing an intermediate pb.Transaction.
+// This significantly reduces GC overhead and memory allocations on high-throughput ingress paths.
+func validateDirectEnvelopeBinding(pTx *pb.Transaction, ethTx *e_types.Transaction) error {
+	var (
+		signer  e_types.Signer
+		convErr error
+		txType  = ethTx.Type()
+	)
+
+	switch txType {
+	case e_types.LegacyTxType:
+		txChainID := ethTx.ChainId()
+		if txChainID != nil && txChainID.Sign() != 0 {
+			signer = e_types.NewEIP155Signer(txChainID)
+		} else {
+			signer = e_types.HomesteadSigner{}
+		}
+
+	case e_types.AccessListTxType:
+		txChainID := ethTx.ChainId()
+		if txChainID == nil {
+			convErr = errors.New("giao dịch EIP-2930 từ Ethereum thiếu ChainID")
+		} else if ethTx.GasPrice() == nil {
+			convErr = errors.New("giao dịch EIP-2930 từ Ethereum thiếu GasPrice")
+		} else {
+			signer = e_types.NewLondonSigner(txChainID)
+		}
+
+	case e_types.DynamicFeeTxType:
+		txChainID := ethTx.ChainId()
+		if txChainID == nil {
+			convErr = errors.New("EIP-1559 transaction from Ethereum is missing ChainID")
+		} else {
+			signer = e_types.NewLondonSigner(txChainID)
+		}
+
+	case e_types.BlobTxType:
+		to := ethTx.To()
+		if to == nil || *to == (common.Address{}) {
+			convErr = errors.New("EIP-4844 transaction cannot be a contract creation")
+		} else if blobHashes := ethTx.BlobHashes(); len(blobHashes) == 0 {
+			convErr = errors.New("EIP-4844 transaction must carry at least one blob hash")
+		} else if len(blobHashes) > p_common.MAX_BLOBS_PER_TX {
+			convErr = fmt.Errorf("EIP-4844 transaction carries %d blobs, exceeds the %d/tx limit", len(blobHashes), p_common.MAX_BLOBS_PER_TX)
+		} else if txChainID := ethTx.ChainId(); txChainID == nil || txChainID.Sign() <= 0 {
+			convErr = errors.New("EIP-4844 transaction is missing ChainID")
+		} else {
+			signer = e_types.NewCancunSigner(txChainID)
+		}
+
+	case e_types.SetCodeTxType:
+		to := ethTx.To()
+		if to == nil || *to == (common.Address{}) {
+			convErr = errors.New("EIP-7702 transaction cannot be a contract creation")
+		} else if authList := ethTx.SetCodeAuthorizations(); len(authList) == 0 {
+			convErr = errors.New("EIP-7702 transaction must carry at least one authorization tuple")
+		} else if txChainID := ethTx.ChainId(); txChainID == nil || txChainID.Sign() <= 0 {
+			convErr = errors.New("EIP-7702 transaction is missing ChainID")
+		} else {
+			signer = e_types.NewPragueSigner(txChainID)
+		}
+
+	default:
+		convErr = errors.New("unsupported Ethereum transaction type")
+	}
+
+	if convErr != nil {
+		return fmt.Errorf("%w: failed to convert EthTx to canonical proto: %v", ErrInvalidEnvelope, convErr)
+	}
+
+	// 1. FromAddress
+	fromAddress, err := e_types.Sender(signer, ethTx)
+	if err != nil {
+		return fmt.Errorf("%w: failed to convert EthTx to canonical proto: %v", ErrInvalidEnvelope, err)
+	}
+	if !bytes.Equal(pTx.FromAddress, fromAddress.Bytes()) {
+		return fmt.Errorf("%w: FromAddress mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	// 2. ToAddress
+	if ethTx.To() != nil {
+		if !bytes.Equal(pTx.ToAddress, ethTx.To().Bytes()) {
+			return fmt.Errorf("%w: ToAddress mismatch", ErrEnvelopeBindingMismatch)
+		}
+	} else {
+		if len(pTx.ToAddress) != 0 {
+			return fmt.Errorf("%w: ToAddress mismatch", ErrEnvelopeBindingMismatch)
+		}
+	}
+
+	// 3. Amount
+	var amtBytes []byte
+	if ethTx.Value() != nil {
+		amtBytes = ethTx.Value().Bytes()
+	}
+	if !bytes.Equal(pTx.Amount, amtBytes) {
+		return fmt.Errorf("%w: Amount mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	// 4. Nonce
+	var nonceBytes [8]byte
+	binary.BigEndian.PutUint64(nonceBytes[:], ethTx.Nonce())
+	if !bytes.Equal(pTx.Nonce, nonceBytes[:]) {
+		return fmt.Errorf("%w: Nonce mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	// 5. MaxGas
+	if pTx.MaxGas != ethTx.Gas() {
+		return fmt.Errorf("%w: MaxGas mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, pTx.MaxGas, ethTx.Gas())
+	}
+
+	// 6. MaxGasPrice, 7. GasFeeCap, 8. GasTipCap
+	switch txType {
+	case e_types.LegacyTxType, e_types.AccessListTxType:
+		expectedPrice := uint64(0)
+		if ethTx.GasPrice() != nil {
+			expectedPrice = ethTx.GasPrice().Uint64()
+		}
+		if pTx.MaxGasPrice != expectedPrice {
+			return fmt.Errorf("%w: MaxGasPrice mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, pTx.MaxGasPrice, expectedPrice)
+		}
+		if len(pTx.GasFeeCap) != 0 {
+			return fmt.Errorf("%w: GasFeeCap mismatch", ErrEnvelopeBindingMismatch)
+		}
+		if len(pTx.GasTipCap) != 0 {
+			return fmt.Errorf("%w: GasTipCap mismatch", ErrEnvelopeBindingMismatch)
+		}
+	case e_types.DynamicFeeTxType, e_types.BlobTxType, e_types.SetCodeTxType:
+		if pTx.MaxGasPrice != 0 {
+			return fmt.Errorf("%w: MaxGasPrice mismatch: got %d, expected 0", ErrEnvelopeBindingMismatch, pTx.MaxGasPrice)
+		}
+		var expectedFee, expectedTip []byte
+		if ethTx.GasFeeCap() != nil {
+			expectedFee = ethTx.GasFeeCap().Bytes()
+		}
+		if ethTx.GasTipCap() != nil {
+			expectedTip = ethTx.GasTipCap().Bytes()
+		}
+		if !bytes.Equal(pTx.GasFeeCap, expectedFee) {
+			return fmt.Errorf("%w: GasFeeCap mismatch", ErrEnvelopeBindingMismatch)
+		}
+		if !bytes.Equal(pTx.GasTipCap, expectedTip) {
+			return fmt.Errorf("%w: GasTipCap mismatch", ErrEnvelopeBindingMismatch)
+		}
+	}
+
+	// 9. Data (covers CallData / DeployData)
+	txData := ethTx.Data()
+	if len(txData) == 0 {
+		if len(pTx.Data) != 0 {
+			return fmt.Errorf("%w: Data mismatch", ErrEnvelopeBindingMismatch)
+		}
+	} else {
+		storageAddr := common.HexToAddress("0xda7284fac5e804f8b9d71aa39310f0f86776b51d")
+		if txType == e_types.BlobTxType || txType == e_types.SetCodeTxType {
+			storageAddr = common.Address{}
+		}
+		expectedData, err := prepareTransactionSpecificData(ethTx, storageAddr)
+		if err != nil {
+			return fmt.Errorf("%w: failed to convert EthTx to canonical proto: %v", ErrInvalidEnvelope, err)
+		}
+		if !bytes.Equal(pTx.Data, expectedData) {
+			return fmt.Errorf("%w: Data mismatch", ErrEnvelopeBindingMismatch)
+		}
+	}
+
+	// 10. Type
+	if pTx.Type != uint64(txType) {
+		return fmt.Errorf("%w: Type mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, pTx.Type, txType)
+	}
+
+	// 11. ChainID
+	var expectedChainID uint64
+	if ethTx.ChainId() != nil {
+		expectedChainID = ethTx.ChainId().Uint64()
+	}
+	if pTx.ChainID != expectedChainID {
+		return fmt.Errorf("%w: ChainID mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, pTx.ChainID, expectedChainID)
+	}
+
+	// 12. R, S, V and 17. Sign (R || S || V)
+	v, r, s := ethTx.RawSignatureValues()
+	var rBytes, sBytes, vBytes []byte
+	if r != nil {
+		rBytes = r.Bytes()
+	}
+	if s != nil {
+		sBytes = s.Bytes()
+	}
+	if v != nil {
+		vBytes = v.Bytes()
+	}
+	if !bytes.Equal(pTx.R, rBytes) {
+		return fmt.Errorf("%w: R mismatch", ErrEnvelopeBindingMismatch)
+	}
+	if !bytes.Equal(pTx.S, sBytes) {
+		return fmt.Errorf("%w: S mismatch", ErrEnvelopeBindingMismatch)
+	}
+	if !bytes.Equal(pTx.V, vBytes) {
+		return fmt.Errorf("%w: V mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	if v != nil && r != nil && s != nil {
+		var recoveryID byte
+		if txType == e_types.LegacyTxType {
+			txChainID := ethTx.ChainId()
+			if txChainID != nil && txChainID.Sign() != 0 {
+				expectedVBase := new(big.Int).Mul(txChainID, big.NewInt(2))
+				expectedVBase.Add(expectedVBase, big.NewInt(35))
+				vTmp := new(big.Int).Sub(v, expectedVBase)
+				recoveryID = byte(vTmp.Uint64())
+			} else {
+				recoveryID = byte(v.Uint64() - 27)
+			}
+		} else {
+			if len(vBytes) > 0 {
+				recoveryID = vBytes[len(vBytes)-1]
+			} else {
+				recoveryID = 0
+			}
+		}
+
+		sigLen := len(rBytes) + len(sBytes) + 1
+		var expectedSign []byte
+		if sigLen <= 65 {
+			var sigBuf [65]byte
+			copy(sigBuf[0:], rBytes)
+			copy(sigBuf[len(rBytes):], sBytes)
+			sigBuf[len(rBytes)+len(sBytes)] = recoveryID
+			expectedSign = sigBuf[:sigLen]
+		} else {
+			expectedSign = make([]byte, 0, sigLen)
+			expectedSign = append(expectedSign, rBytes...)
+			expectedSign = append(expectedSign, sBytes...)
+			expectedSign = append(expectedSign, recoveryID)
+		}
+
+		if len(expectedSign) > 0 && !bytes.Equal(pTx.Sign, expectedSign) {
+			return fmt.Errorf("%w: Sign mismatch", ErrEnvelopeBindingMismatch)
+		}
+	} else if len(pTx.Sign) > 0 {
+		return fmt.Errorf("%w: Sign mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	// 13. AccessList
+	ethAL := ethTx.AccessList()
+	if len(pTx.AccessList) != len(ethAL) {
+		return fmt.Errorf("%w: AccessList length mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, len(pTx.AccessList), len(ethAL))
+	}
+	for i := range ethAL {
+		if !bytes.Equal(pTx.AccessList[i].Address, ethAL[i].Address.Bytes()) {
+			return fmt.Errorf("%w: AccessList[%d].Address mismatch", ErrEnvelopeBindingMismatch, i)
+		}
+		if len(pTx.AccessList[i].StorageKeys) != len(ethAL[i].StorageKeys) {
+			return fmt.Errorf("%w: AccessList[%d].StorageKeys length mismatch", ErrEnvelopeBindingMismatch, i)
+		}
+		for j := range ethAL[i].StorageKeys {
+			if !bytes.Equal(pTx.AccessList[i].StorageKeys[j], ethAL[i].StorageKeys[j].Bytes()) {
+				return fmt.Errorf("%w: AccessList[%d].StorageKeys[%d] mismatch", ErrEnvelopeBindingMismatch, i, j)
+			}
+		}
+	}
+
+	// 14. BlobVersionedHashes & 15. MaxFeePerBlobGas
+	if txType == e_types.BlobTxType {
+		blobHashes := ethTx.BlobHashes()
+		if len(pTx.BlobVersionedHashes) != len(blobHashes) {
+			return fmt.Errorf("%w: BlobVersionedHashes length mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, len(pTx.BlobVersionedHashes), len(blobHashes))
+		}
+		for i, h := range blobHashes {
+			if !bytes.Equal(pTx.BlobVersionedHashes[i], h.Bytes()) {
+				return fmt.Errorf("%w: BlobVersionedHashes[%d] mismatch", ErrEnvelopeBindingMismatch, i)
+			}
+		}
+		var expectedBlobFee []byte
+		if ethTx.BlobGasFeeCap() != nil {
+			expectedBlobFee = ethTx.BlobGasFeeCap().Bytes()
+		}
+		if !bytes.Equal(pTx.MaxFeePerBlobGas, expectedBlobFee) {
+			return fmt.Errorf("%w: MaxFeePerBlobGas mismatch", ErrEnvelopeBindingMismatch)
+		}
+	} else {
+		if len(pTx.BlobVersionedHashes) != 0 {
+			return fmt.Errorf("%w: BlobVersionedHashes length mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, len(pTx.BlobVersionedHashes), 0)
+		}
+		if len(pTx.MaxFeePerBlobGas) != 0 {
+			return fmt.Errorf("%w: MaxFeePerBlobGas mismatch", ErrEnvelopeBindingMismatch)
+		}
+	}
+
+	// 16. AuthorizationList
+	if txType == e_types.SetCodeTxType {
+		authList := ethTx.SetCodeAuthorizations()
+		if len(pTx.AuthorizationList) != len(authList) {
+			return fmt.Errorf("%w: AuthorizationList length mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, len(pTx.AuthorizationList), len(authList))
+		}
+		for i, a := range authList {
+			pAuth := pTx.AuthorizationList[i]
+			authChainID := a.ChainID.Uint64()
+			rAuthBytes := a.R.Bytes()
+			sAuthBytes := a.S.Bytes()
+			if pAuth.ChainID != authChainID || !bytes.Equal(pAuth.Address, a.Address.Bytes()) || pAuth.Nonce != a.Nonce ||
+				len(pAuth.YParity) != 1 || pAuth.YParity[0] != a.V || !bytes.Equal(pAuth.R, rAuthBytes) || !bytes.Equal(pAuth.S, sAuthBytes) {
+				return fmt.Errorf("%w: AuthorizationList[%d] mismatch", ErrEnvelopeBindingMismatch, i)
+			}
+		}
+	} else {
+		if len(pTx.AuthorizationList) != 0 {
+			return fmt.Errorf("%w: AuthorizationList length mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, len(pTx.AuthorizationList), 0)
+		}
+	}
+
+	// 18. Unbound fields
+	if pTx.MaxTimeUse != 0 {
+		return fmt.Errorf("%w: MaxTimeUse mismatch: got %d, expected %d", ErrEnvelopeBindingMismatch, pTx.MaxTimeUse, 0)
+	}
+	if len(pTx.LastDeviceKey) != 0 {
+		return fmt.Errorf("%w: LastDeviceKey mismatch", ErrEnvelopeBindingMismatch)
+	}
+	if len(pTx.NewDeviceKey) != 0 {
+		return fmt.Errorf("%w: NewDeviceKey mismatch", ErrEnvelopeBindingMismatch)
+	}
+	if pTx.ReadOnly {
+		return fmt.Errorf("%w: ReadOnly mismatch", ErrEnvelopeBindingMismatch)
+	}
+
+	return nil
+}
+
+// validateCanonicalEnvelopeBinding constructs the canonical protobuf transaction from ethTx
+// and verifies every field matches pTx. Kept for differential testing against validateDirectEnvelopeBinding.
+func validateCanonicalEnvelopeBinding(pTx *pb.Transaction, ethTx *e_types.Transaction) error {
 	canonicalPb := &pb.Transaction{}
 	var convErr error
 	switch ethTx.Type() {

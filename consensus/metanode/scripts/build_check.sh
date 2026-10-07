@@ -152,6 +152,10 @@ if [ "$BUILD_GO" = true ]; then
         # Go simple_chain binary & helper tools
         run_step "Go simple_chain (go build)" \
             bash -c "cd '$GO_ROOT/cmd/simple_chain' && export CGO_ENABLED=1 && rm -f simple_chain && touch '$GO_ROOT/executor/ffi_bridge.go' '$GO_ROOT/pkg/nomt_ffi/bridge.go' && go build -p $GO_JOBS -o simple_chain . && mkdir -p '$GO_ROOT/bin' '$REPO_ROOT/bin' && go build -p $GO_JOBS -o '$GO_ROOT/bin/bls_pubkey' '$GO_ROOT/cmd/tool/bls_pubkey' && cp '$GO_ROOT/bin/bls_pubkey' '$REPO_ROOT/bin/bls_pubkey'"
+
+        # Go packages check (includes cmd/rpc-client and core packages)
+        run_step "Go packages check (go build ./pkg/... ./cmd/rpc-client/...)" \
+            bash -c "cd '$GO_ROOT' && export CGO_ENABLED=1 && go build -p $GO_JOBS ./pkg/... ./cmd/rpc-client/..."
     fi
 fi
 
