@@ -717,9 +717,6 @@ func GethStandardRPCError(err error) (int, string) {
 	if err == nil {
 		return 0, ""
 	}
-	if errors.Is(err, ErrInvalidBlobProof) {
-		return -32000, ErrInvalidBlobProof.Error()
-	}
 	var te *TransactionError
 	if !errors.As(err, &te) {
 		te = ClassifyEthTxError(err)
@@ -764,6 +761,8 @@ func GethStandardRPCError(err error) (int, string) {
 		return -32000, "transaction fields do not match raw envelope"
 	case ErrInvalidEnvelope.Code:
 		return -32000, "invalid raw envelope bytes"
+	case ErrInvalidBlobProof.Code:
+		return -32000, "KZG proof verification failed"
 	default:
 		return -32000, te.Description
 	}

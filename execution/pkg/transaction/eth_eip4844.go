@@ -15,9 +15,6 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
-// ErrInvalidBlobProof identifies a cryptographic rejection at blob admission.
-var ErrInvalidBlobProof = errors.New("KZG proof verification failed")
-
 // ToEthBlobTx converts an internal Transaction into a go-ethereum EIP-4844 blob
 // transaction. The returned tx never carries a Sidecar: blob content lives in
 // execution/pkg/blob_store, keyed by versioned hash, and is pruned independently
