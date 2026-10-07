@@ -1,0 +1,30 @@
+=== TOP INUSE MEMORY ALLOCATIONS (Wave 1: 50k txs vs Wave 8: 400k txs) ===
+
+--- Wave 1 val0 Top Allocations ---
+86.44 MB : 
+38.15 MB : #	0x1432ebd	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.NewTransactionProcessor+0xbd	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/transaction_processor.go:177
+7.63 MB : #	0x108230b	github.com/meta-node-blockchain/meta-node/pkg/network.NewSocketServer+0x1ab	/home/abc/chain-n/metanode/execution/pkg/network/server.go:83
+7.16 MB : #	0x5c3486	reflect.growslice+0x46								/usr/local/go/src/runtime/slice.go:336
+5.98 MB : #	0x1067264	github.com/meta-node-blockchain/meta-node/pkg/blockchain.(*ethHashMapBlsHashMap).StoreBatch+0x104				/home/abc/chain-n/metanode/execution/pkg/blockchain/blockchain.go:911
+4.38 MB : #	0x1067a04	github.com/meta-node-blockchain/meta-node/pkg/blockchain.(*txHashToBlockNumberMap).StoreBatch+0xe4		/home/abc/chain-n/metanode/execution/pkg/blockchain/blockchain.go:965
+4.00 MB : #	0xebe910	github.com/cockroachdb/pebble.(*Batch).grow+0x70								/home/abc/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/batch.go:1421
+3.44 MB : #	0xe60f19	github.com/cockroachdb/pebble/record.init.func1+0x19						/home/abc/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/record/log_writer.go:322
+3.00 MB : #	0xc2447e	github.com/meta-node-blockchain/meta-node/pkg/logger.startLogWriter+0x1e	/home/abc/chain-n/metanode/execution/pkg/logger/logger.go:499
+2.79 MB : #	0xfc55c4	github.com/meta-node-blockchain/meta-node/pkg/trie.getSharedRegistry+0x424	/home/abc/chain-n/metanode/execution/pkg/trie/nomt_state_trie.go:311
+
+--- Wave 8 val0 Top Allocations ---
+197.06 MB : 
+47.81 MB : #	0x1067264	github.com/meta-node-blockchain/meta-node/pkg/blockchain.(*ethHashMapBlsHashMap).StoreBatch+0x104				/home/abc/chain-n/metanode/execution/pkg/blockchain/blockchain.go:911
+38.15 MB : #	0x1432ebd	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.NewTransactionProcessor+0xbd	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/transaction_processor.go:177
+35.06 MB : #	0x1067a04	github.com/meta-node-blockchain/meta-node/pkg/blockchain.(*txHashToBlockNumberMap).StoreBatch+0xe4		/home/abc/chain-n/metanode/execution/pkg/blockchain/blockchain.go:965
+10.50 MB : #	0x5d54d4	sync.(*Map).Swap+0x2d4												/usr/local/go/src/sync/map.go:389
+9.19 MB : #	0x5d54d4	sync.(*Map).Swap+0x2d4												/usr/local/go/src/sync/map.go:389
+7.63 MB : #	0x108230b	github.com/meta-node-blockchain/meta-node/pkg/network.NewSocketServer+0x1ab	/home/abc/chain-n/metanode/execution/pkg/network/server.go:83
+7.16 MB : #	0x5c3486	reflect.growslice+0x46								/usr/local/go/src/runtime/slice.go:336
+4.00 MB : #	0xebe910	github.com/cockroachdb/pebble.(*Batch).grow+0x70								/home/abc/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/batch.go:1421
+3.45 MB : #	0x5d54d4	sync.(*Map).Swap+0x2d4															/usr/local/go/src/sync/map.go:389
+3.45 MB : #	0x5d5e24	sync.(*Map).dirtyLocked+0x64														/usr/local/go/src/sync/map.go:523
+3.00 MB : #	0xc2447e	github.com/meta-node-blockchain/meta-node/pkg/logger.startLogWriter+0x1e	/home/abc/chain-n/metanode/execution/pkg/logger/logger.go:499
+2.95 MB : #	0x141c75e	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.GenerateBlockData+0x27e				/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_utils.go:29
+2.79 MB : #	0xfc55c4	github.com/meta-node-blockchain/meta-node/pkg/trie.getSharedRegistry+0x424	/home/abc/chain-n/metanode/execution/pkg/trie/nomt_state_trie.go:311
+2.30 MB : #	0xe60f19	github.com/cockroachdb/pebble/record.init.func1+0x19						/home/abc/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/record/log_writer.go:322

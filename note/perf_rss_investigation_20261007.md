@@ -10,6 +10,10 @@ Nhiệm vụ kiểm tra theo [note/plan_fix_nomt_reports_evidence_20261007.md](f
 4. Áp dụng tiêu chuẩn nghiệm thu xác định trước (A priori acceptance criteria) với phân tích hồi quy tuyến tính (slope $m$, $R^2$, 95% CI) và phân tích memstats profile.
 5. Đo đạc thực nghiệm có kiểm soát so sánh đối chứng giữa `GOGC=800` (mặc định) và `GOGC=50` trên cùng một khối lượng tải giao dịch (25,000 txs, $n=3$ mỗi cấu hình).
 
+> [!NOTE]
+> **Quy chuẩn lưu trữ bằng chứng:** Để giữ cho git repository gọn nhẹ (≤ 10 MB), thư mục `note/evidence/perf_rss_20261007/` chỉ lưu trữ file log kết quả `rss_investigation_8waves.log`, bảng tổng hợp `rss_8waves_summary.csv`, và trích đoạn allocations `memstats_top_inuse_summary.txt`.
+> Toàn bộ 90 MB dữ liệu thô đầy đủ (bao gồm 36 file `heap_*.pb.gz`, 36 file `memstats_*.txt`, 36 file `smaps_*.txt`) được đóng gói thành archive ngoài git tại `/home/abc/evidence_archive/perf_rss_20261007/rss_raw_full.tar.gz` (SHA256: `43f2b16ee80fc94828ef1ee5dd1ee95514f062c1417e0569bc0e7b8407b5a910`, dung lượng: 9,880,670 bytes) và được đăng ký kiểm chứng trong trường `external` của `MANIFEST.json` (`evidence:rss_investigation_8waves`).
+
 ---
 
 ## 2. Phát Hiện Kỹ Thuật (Root Causes)
@@ -154,12 +158,12 @@ Chạy trên cùng một khối lượng tải (workload 25,000 transactions Sec
 > [!NOTE]
 > Bảng dưới đây kết hợp dữ liệu đã đo đạc thực nghiệm với các suy luận kỹ thuật vận hành. Mọi mục chưa có đo đạc trực tiếp đều được ghi chú minh bạch.
 
-| Hồ sơ phần cứng | RAM Khuyến nghị | Cấu hình đề xuất | Đỉnh RSS kỳ vọng | Throughput TPS dự kiến | Tình trạng đo đạc thực nghiệm |
-| :--- | :---: | :--- | :---: | :---: | :--- |
-| **Tiêu chuẩn (Standard Validator)** | **32 GB** | `GOMEMLIMIT=8GiB`<br>`GOGC=800` (mặc định) | 6.0 – 7.5 GB/node | **6,400 – 7,500 tx/s** | **ĐÃ ĐO THỰC TẾ** (Wave 1-8: TPS ~7,500 tx/s, RSS ~6.5 GB/node) |
-| **Tiết kiệm RAM (Resource-Constrained)** | **16 GB** | `GOMEMLIMIT=4GiB`<br>`GOGC=50` | 2.0 – 2.5 GB/node | **5,700 – 6,200 tx/s** | **ĐÃ ĐO THỰC TẾ** (Thí nghiệm GOGC=50: TPS ~6,006 tx/s, RSS ~2.09 GB/node) |
-| **Enterprise / Tier 1 Validator** | **≥ 64 GB** | `GOMEMLIMIT=16GiB`<br>`GOGC=200` | 8.0 – 12.0 GB/node | **7,500+ tx/s** | *SUY LUẬN KỸ THUẬT, CHƯA ĐO ĐẠC TRỰC TIẾP* |
-| **Sentry / RPC Node nhỏ** | **8 GB** | `GOMEMLIMIT=2GiB`<br>`GOGC=30` | 1.0 – 1.5 GB/node | **4,000 – 4,500 tx/s** | *SUY LUẬN KỸ THUẬT, CHƯA ĐO ĐẠC TRỰC TIẾP* |
+| Hồ sơ phần cứng | RAM Khuyến nghị | Cấu hình đề xuất | Đỉnh RSS kỳ vọng | Throughput TPS dự kiến | Tình trạng đo đạc thực nghiệm | Evidence |
+| :--- | :---: | :--- | :---: | :---: | :--- | :---: |
+| **Tiêu chuẩn (Standard Validator)** | **32 GB** | `GOMEMLIMIT=8GiB`<br>`GOGC=800` (mặc định) | 6.0 – 7.5 GB/node | **6,400 – 7,500 tx/s** | **ĐÃ ĐO THỰC TẾ** (Wave 1-8: TPS ~7,500 tx/s, RSS ~6.5 GB/node) | `evidence:rss_investigation_8waves` |
+| **Tiết kiệm RAM (Resource-Constrained)** | **16 GB** | `GOMEMLIMIT=4GiB`<br>`GOGC=50` | 2.0 – 2.5 GB/node | **5,700 – 6,200 tx/s** | **ĐÃ ĐO THỰC TẾ** (Thí nghiệm GOGC=50: TPS ~6,006 tx/s, RSS ~2.09 GB/node) | `evidence:rss_investigation_8waves` |
+| **Enterprise / Tier 1 Validator** | **≥ 64 GB** | `GOMEMLIMIT=16GiB`<br>`GOGC=200` | 8.0 – 12.0 GB/node | **7,500+ tx/s** | *SUY LUẬN KỸ THUẬT, CHƯA ĐO ĐẠC TRỰC TIẾP* | `evidence:rss_investigation_8waves` |
+| **Sentry / RPC Node nhỏ** | **8 GB** | `GOMEMLIMIT=2GiB`<br>`GOGC=30` | 1.0 – 1.5 GB/node | **4,000 – 4,500 tx/s** | *SUY LUẬN KỸ THUẬT, CHƯA ĐO ĐẠC TRỰC TIẾP* | `evidence:rss_investigation_8waves` |
 
 ---
 

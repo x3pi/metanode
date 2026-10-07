@@ -1,5 +1,6 @@
 {
   "manifest_version": "1.0",
+  "report": "note/perf_rss_investigation_20261007.md",
   "entries": [
     {
       "id": "rss_investigation_8waves",
@@ -20,8 +21,120 @@
           "path": "rss_8waves_summary.csv",
           "sha256": "6c4b02fa89f97d53e697232d363b29a312211a5862a5134ec4910b55642dfbdb",
           "bytes": 1609
+        },
+        {
+          "path": "memstats_top_inuse_summary.txt",
+          "sha256": "9eb5277cacc2d95f8385abf88ec966fe2518fa83cc86ff035735e868f489c807",
+          "bytes": 3716
+        }
+      ],
+      "extract": [
+        {
+          "name": "HeapAlloc_slope",
+          "file": "rss_investigation_8waves.log",
+          "regex": "HeapAlloc Regression: Slope = \\+(\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "MB/100k txs"
+        },
+        {
+          "name": "RSS_slope",
+          "file": "rss_investigation_8waves.log",
+          "regex": "RSS Regression:\\s+Slope = \\+(\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "MB/100k txs"
+        },
+        {
+          "name": "GOGC_DEFAULT_TPS",
+          "file": "rss_investigation_8waves.log",
+          "regex": "Default GOGC: TPS = (\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "tx/s"
+        },
+        {
+          "name": "GOGC_DEFAULT_RSS",
+          "file": "rss_investigation_8waves.log",
+          "regex": "Default GOGC:.*?Peak RSS = (\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "MB"
+        },
+        {
+          "name": "GOGC_50_TPS",
+          "file": "rss_investigation_8waves.log",
+          "regex": "GOGC=50:\\s+TPS = (\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "tx/s"
+        },
+        {
+          "name": "GOGC_50_RSS",
+          "file": "rss_investigation_8waves.log",
+          "regex": "GOGC=50:.*?Peak RSS = (\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "MB"
+        },
+        {
+          "name": "ETH_BLS_W1",
+          "file": "memstats_top_inuse_summary.txt",
+          "regex": "(\\d+\\.\\d+)\\s+MB\\s+:\\s+#[^\\n]+ethHashMapBlsHashMap",
+          "group": 1,
+          "stat": "raw",
+          "unit": "MB"
+        },
+        {
+          "name": "ETH_BLS_W8",
+          "file": "memstats_top_inuse_summary.txt",
+          "regex": "Wave 8.*?(\\d+\\.\\d+)\\s+MB\\s+:\\s+#[^\\n]+ethHashMapBlsHashMap",
+          "group": 1,
+          "stat": "raw",
+          "unit": "MB"
+        },
+        {
+          "name": "TX_HASH_W8",
+          "file": "memstats_top_inuse_summary.txt",
+          "regex": "Wave 8.*?(\\d+\\.\\d+)\\s+MB\\s+:\\s+#[^\\n]+txHashToBlockNumberMap",
+          "group": 1,
+          "stat": "raw",
+          "unit": "MB"
+        },
+        {
+          "name": "PEBBLE_BATCH_W8",
+          "file": "memstats_top_inuse_summary.txt",
+          "regex": "Wave 8.*?(\\d+\\.\\d+)\\s+MB\\s+:\\s+#[^\\n]+pebble\\.\\(\\*Batch\\)\\.grow",
+          "group": 1,
+          "stat": "raw",
+          "unit": "MB"
+        },
+        {
+          "name": "SOCKET_SERVER_W1",
+          "file": "memstats_top_inuse_summary.txt",
+          "regex": "(\\d+\\.\\d+)\\s+MB\\s+:\\s+#[^\\n]+network\\.NewSocketServer",
+          "group": 1,
+          "stat": "raw",
+          "unit": "MB"
+        },
+        {
+          "name": "TX_PROCESSOR_W1",
+          "file": "memstats_top_inuse_summary.txt",
+          "regex": "(\\d+\\.\\d+)\\s+MB\\s+:\\s+#[^\\n]+NewTransactionProcessor",
+          "group": 1,
+          "stat": "raw",
+          "unit": "MB"
         }
       ]
+    }
+  ],
+  "external": [
+    {
+      "name": "rss_raw_full.tar.gz",
+      "sha256": "43f2b16ee80fc94828ef1ee5dd1ee95514f062c1417e0569bc0e7b8407b5a910",
+      "bytes": 9880670,
+      "stored_at": "/home/abc/evidence_archive/perf_rss_20261007/rss_raw_full.tar.gz",
+      "reason": "Full raw heap profiles (pb.gz), full memstats text dumps, and smaps rollups archived externally to keep git repository lightweight"
     }
   ]
 }
