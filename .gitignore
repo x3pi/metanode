@@ -591,3 +591,5 @@ deploy/ansible/monitors/block_hash_checker/checkpoint.json
 
 # chaos burn-in crash reports (multi-GB logs)
 execution/scripts/chaos_crash_reports/
+execution/parent_chain
+execution/scripts/test/bls_pubkey

@@ -14,6 +14,9 @@ import { TransferTab } from './components/TransferTab';
 import { RollupTransferTab } from './components/RollupTransferTab';
 import { NetworkMonitorTab } from './components/NetworkMonitorTab';
 import {
+  PRESET_CLUSTERS,
+  DEFAULT_CLUSTER_ID,
+  LAN_IP,
   getAllClusters,
   saveCustomCluster,
   connectWallet,
@@ -25,9 +28,12 @@ import {
 export default function App() {
   const [allClusters, setAllClusters] = useState(getAllClusters());
   const [account, setAccount] = useState(null);
+  const [walletPrivateKey, setWalletPrivateKey] = useState(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [activeTab, setActiveTab] = useState('gate');
-  const [selectedCluster, setSelectedCluster] = useState(() => allClusters[0]); // Default Exec1
+  const defaultCluster =
+    allClusters.find((c) => c.id === DEFAULT_CLUSTER_ID) || allClusters[0];
+  const [selectedCluster, setSelectedCluster] = useState(defaultCluster);
   const [clusterStatus, setClusterStatus] = useState(null);
   const [accountInfo, setAccountInfo] = useState(null);
   const [parentRegInfo, setParentRegInfo] = useState(null);
@@ -39,12 +45,13 @@ export default function App() {
     setAllClusters(updated);
   };
 
-  // Connect Wallet
+  // Connect MetaMask Wallet
   const handleConnect = async () => {
     setIsConnecting(true);
     try {
       const res = await connectWallet();
       setAccount(res.address);
+      setWalletPrivateKey(null);
     } catch (err) {
       alert(err.message || 'Failed to connect wallet');
     } finally {
@@ -52,8 +59,15 @@ export default function App() {
     }
   };
 
+  // Connect Custom Private Key Wallet
+  const handleConnectCustomWallet = (addr, pk) => {
+    setAccount(addr);
+    setWalletPrivateKey(pk);
+  };
+
   const handleDisconnect = () => {
     setAccount(null);
+    setWalletPrivateKey(null);
     setAccountInfo(null);
     setParentRegInfo(null);
   };
@@ -66,7 +80,7 @@ export default function App() {
 
     // 2. Account on Execution Cluster
     if (account) {
-      const info = await fetchAccountInfo(selectedCluster.rpcUrl, account);
+      const info = await fetchAccountInfo(selectedCluster.rpcUrl, account, selectedCluster);
       setAccountInfo(info);
 
       // 3. Account on Parent Chain
@@ -114,6 +128,7 @@ export default function App() {
         onSelectCluster={setSelectedCluster}
         clusterStatus={clusterStatus}
         isConnecting={isConnecting}
+        isPrivateKeyMode={!!walletPrivateKey}
         allClusters={allClusters}
         onAddCustomCluster={handleAddCustomCluster}
       />
@@ -172,6 +187,10 @@ export default function App() {
             parentRegInfo={parentRegInfo}
             selectedCluster={selectedCluster}
             onRefresh={refreshState}
+            onConnectCustomWallet={handleConnectCustomWallet}
+            onConnectMetaMask={handleConnect}
+            isPrivateKeyMode={!!walletPrivateKey}
+            walletPrivateKey={walletPrivateKey}
             allClusters={allClusters}
           />
         )}
@@ -182,6 +201,7 @@ export default function App() {
             accountInfo={accountInfo}
             selectedCluster={selectedCluster}
             onRefresh={refreshState}
+            walletPrivateKey={walletPrivateKey}
             onNavigateToGate={() => setActiveTab('gate')}
           />
         )}

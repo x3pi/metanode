@@ -65,7 +65,7 @@
 # firewall. Client-facing ports (RPC) are opened to everyone; INTERNAL ports (P2P, Raft, Forward) are opened only to
 # the other cluster members (plus `ufw_extra_sources`, e.g. a monitoring host), never to the whole network.
 - name: Firewall (UFW) Configuration for Execution Node {{ inventory_hostname }}
-  when: "deploy_action == 'open_ports'"
+  when: "deploy_action == 'open_ports' or (open_ports | default(false) | bool)"
   block:
     - name: Check if UFW is active on {{ inventory_hostname }}
       ansible.builtin.command: ufw status

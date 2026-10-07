@@ -619,14 +619,14 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
         // CRITICAL LOGGING: Trace commits found for sync debugging
         if !commits.is_empty() {
             let commit_indices: Vec<u32> = commits.iter().map(|c| c.index()).collect();
-            info!(
+            debug!(
                 "📦 [FETCH-COMMITS] Found {} commits in range {:?}: indices={:?}",
                 commits.len(),
                 commit_range,
                 commit_indices
             );
         } else {
-            info!(
+            debug!(
                 "⚠️ [FETCH-COMMITS] No commits found in current store for range {:?}",
                 commit_range
             );
@@ -645,13 +645,13 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
         // Log final commits being returned
         if !commits.is_empty() {
             let final_indices: Vec<u32> = commits.iter().map(|c| c.index()).collect();
-            info!(
+            debug!(
                 "✅ [FETCH-COMMITS] Returning {} commits: indices={:?}",
                 commits.len(),
                 final_indices
             );
         } else {
-            info!("⚠️ [FETCH-COMMITS] No commits to return after quorum check");
+            debug!("⚠️ [FETCH-COMMITS] No commits to return after quorum check");
         }
 
         let mut certifier_blocks = vec![];

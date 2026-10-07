@@ -1,0 +1,38 @@
+{
+  "defaultHost": "192.168.1.234",
+  "defaultClusterId": "exec1",
+  "clusters": [
+    {
+      "id": "exec1",
+      "name": "Execution Cluster 1 (HA Raft, Port 8747)",
+      "chainId": 991,
+      "rpcUrl": "http://192.168.1.234:8747",
+      "clusterKey": "0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128",
+      "isExec": true,
+      "accountGate": true
+    },
+    {
+      "id": "rpc_gateway",
+      "name": "MetaCoSign RPC Gateway (Port 8545)",
+      "chainId": 991,
+      "rpcUrl": "http://192.168.1.234:8545",
+      "clusterKey": "0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128",
+      "isExec": true,
+      "accountGate": true
+    },
+    {
+      "id": "parent_chain",
+      "name": "Parent Chain (BFT Hub, Port 18601)",
+      "chainId": 991,
+      "rpcUrl": "http://192.168.1.234:18601",
+      "isParent": true
+    },
+    {
+      "id": "root_validator",
+      "name": "Validator Root Chain (Node-0, Port 10746)",
+      "chainId": 991,
+      "rpcUrl": "http://192.168.1.234:10746",
+      "isExec": false
+    }
+  ]
+}

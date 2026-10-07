@@ -271,8 +271,24 @@ func TestTransaction_IsRegularTransaction(t *testing.T) {
 
 func TestTransaction_IsDeployContract(t *testing.T) {
 	tx := makeTestContractDeployTx()
-	assert.True(t, tx.IsDeployContract(), "tx with data to zero address and nonce>0 is deploy")
+	assert.True(t, tx.IsDeployContract(), "tx with data to zero address is deploy")
 	assert.False(t, tx.IsRegularTransaction())
+
+	txNonce0 := NewTransaction(
+		common.HexToAddress("0xaaaa"),
+		common.Address{},
+		big.NewInt(0),
+		100000,
+		10,
+		0,
+		[]byte{0x60, 0x80, 0x60, 0x40},
+		nil,
+		common.Hash{},
+		common.Hash{},
+		0,
+		1000,
+	)
+	assert.True(t, txNonce0.IsDeployContract(), "tx with data to zero address and nonce=0 is deploy")
 }
 
 func TestTransaction_IsCallContract(t *testing.T) {

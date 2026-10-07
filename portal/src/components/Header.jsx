@@ -10,6 +10,7 @@ export function Header({
   onSelectCluster,
   clusterStatus,
   isConnecting,
+  isPrivateKeyMode,
   allClusters,
   onAddCustomCluster,
 }) {
@@ -84,14 +85,23 @@ export function Header({
         <div className="header-content">
           {/* Brand */}
           <div className="brand-section">
-            <div className="brand-logo-icon">
-              <Shield className="w-5 h-5 text-white" />
+            <div className="brand-logo-container">
+              <img
+                src="https://metanode.co/image/logo.png"
+                alt="MetaNode Logo"
+                className="brand-logo-img"
+                onError={(e) => {
+                  e.target.style.display = 'none';
+                  if (e.target.nextSibling) e.target.nextSibling.style.display = 'flex';
+                }}
+              />
+              <div className="brand-logo-fallback" style={{ display: 'none' }}>
+                <Shield className="w-5 h-5 text-cyan" />
+              </div>
             </div>
             <div>
               <div className="brand-title">METANODE PORTAL</div>
-              <div className="brand-tagline">
-                Account Gate &middot; Zero-Fork &middot; Rollup Gateway
-              </div>
+              <div className="brand-tagline">Account Gate & Ecosystem Gateway</div>
             </div>
           </div>
 
@@ -109,7 +119,7 @@ export function Header({
                 fontWeight: 600,
               }}
             >
-              Chain ID: {selectedCluster.chainId || 991}
+              Chain ID: {selectedCluster?.chainId || 991}
             </div>
 
             {/* Cluster Selector */}
@@ -126,7 +136,7 @@ export function Header({
               />
               <select
                 className="network-select-input"
-                value={selectedCluster.id}
+                value={selectedCluster?.id}
                 onChange={(e) => {
                   const found = clustersList.find((c) => c.id === e.target.value);
                   if (found) handleSwitchNetwork(found);
@@ -154,6 +164,22 @@ export function Header({
             {/* Connect / Account Button */}
             {account ? (
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                {isPrivateKeyMode && (
+                  <span
+                    style={{
+                      fontSize: '0.7rem',
+                      background: 'rgba(6, 182, 212, 0.15)',
+                      color: 'var(--cyan-bright)',
+                      border: '1px solid rgba(6, 182, 212, 0.3)',
+                      padding: '3px 8px',
+                      borderRadius: '6px',
+                      fontWeight: 600,
+                    }}
+                    title="Connected via direct Private Key"
+                  >
+                    PK Mode
+                  </span>
+                )}
                 <button
                   className="btn btn-secondary"
                   style={{ fontFamily: 'var(--font-mono)', fontSize: '0.82rem' }}

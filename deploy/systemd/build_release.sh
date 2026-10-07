@@ -144,6 +144,13 @@ build_binaries() {
             log_ok "simple_chain binary compiled."
 
             cd "$PROJECT_ROOT/execution"
+            if [ -d "cmd/parent_chain" ]; then
+                log_step "Building Parent Chain Go Binary"
+                go build -o parent_chain ./cmd/parent_chain
+                cp parent_chain "$STAGING_BIN_DIR/"
+                log_ok "parent_chain binary compiled."
+            fi
+
             # Tools build (optional but good to have)
             for tool in cross_chain_relayer register_chains bls_pubkey; do
                 if [ -d "cmd/tool/$tool" ]; then

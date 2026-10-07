@@ -297,6 +297,7 @@ resolve_ssh_auth() {
     SSH_PASS=""
     if [ -n "$key" ] && [ -f "$key" ]; then
         SSH_OPTS="-i $key $SSH_OPTS"
+    else
         SSH_PASS=$(SCRIPT_DIR="$SCRIPT_DIR" INV_PATH="$INV_PATH" TARGET_NODE_ID="$node_id" python3 -c '
 import sys, os
 script_dir = os.environ.get("SCRIPT_DIR", "")
@@ -319,6 +320,8 @@ try:
         for h in hosts.values():
             if isinstance(h, dict) and node_id in (h.get("node_ids") or []):
                 p = h.get("ansible_ssh_pass", gv.get("ansible_ssh_pass", ""))
+                if "{{ ansible_become_pass }}" in str(p) or not p:
+                    p = h.get("ansible_become_pass", gv.get("ansible_become_pass", ""))
                 if p and p != "[VAULT_ENCRYPTED]":
                     print(p)
                 break
@@ -377,6 +380,31 @@ if [ "${1:-}" == "unignore" ] || [ "${1:-}" == "--unignore" ]; then
     else
         sed -i "/\b${node_to_unignore}\b/d" /tmp/monitors_ignore_nodes 2>/dev/null || true
         echo "✅ Đã xóa '$node_to_unignore' khỏi danh sách bỏ qua giám sát."
+    fi
+    exit 0
+fi
+
+# ─── ACTION: CHECK STATUS OF MONITORS ─────────────────────────────────────────
+if [ "${1:-}" == "status" ] || [ "${1:-}" == "--status" ]; then
+    echo "🔍 Trạng thái các tiến trình Monitor ngầm:"
+    found=0
+    for d in /tmp/metanode-monitors-*; do
+        [ -d "$d" ] || continue
+        ns="${d#/tmp/metanode-monitors-}"
+        for pid_f in "$d"/*.pid; do
+            [ -f "$pid_f" ] || continue
+            p_name=$(basename "$pid_f" .pid)
+            pid=$(cat "$pid_f" 2>/dev/null || echo "")
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                echo "  • [${ns}] ${p_name}: ▶️ RUNNING (PID ${pid})"
+                found=1
+            else
+                echo "  • [${ns}] ${p_name}: ⏹️ STOPPED (stale PID ${pid})"
+            fi
+        done
+    done
+    if [ $found -eq 0 ]; then
+        echo "  • Chưa có monitor nào đang chạy."
     fi
     exit 0
 fi

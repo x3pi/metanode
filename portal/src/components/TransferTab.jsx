@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
 import { Send, AlertTriangle, CheckCircle, Clock, ExternalLink, ArrowRight, ShieldCheck } from 'lucide-react';
-import { callJsonRpc, switchOrAddNetwork } from '../services/metanodeRpc';
+import { callJsonRpc, switchOrAddNetwork, sendTransactionWithPrivateKey } from '../services/metanodeRpc';
 
 export function TransferTab({
   account,
   accountInfo,
   selectedCluster,
   onRefresh,
+  walletPrivateKey,
   onNavigateToGate,
 }) {
   const [recipient, setRecipient] = useState('');
@@ -34,34 +35,46 @@ export function TransferTab({
     setTxReceipt(null);
 
     try {
-      // 1. Ensure wallet is on correct Chain ID
-      const targetChainId = selectedCluster.chainId || 991;
-      const currentChainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
-      const currentChainId = parseInt(currentChainIdHex, 16);
+      let txHash;
+      if (walletPrivateKey) {
+        // Direct private key mode: sign and broadcast directly with ethers
+        txHash = await sendTransactionWithPrivateKey(
+          selectedCluster.rpcUrl,
+          walletPrivateKey,
+          recipient,
+          amount
+        );
+      } else {
+        // MetaMask mode:
+        // 1. Ensure wallet is on correct Chain ID
+        const targetChainId = selectedCluster.chainId || 991;
+        const currentChainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
+        const currentChainId = parseInt(currentChainIdHex, 16);
 
-      if (currentChainId !== targetChainId) {
-        try {
-          await switchOrAddNetwork(selectedCluster);
-        } catch (switchErr) {
-          throw new Error(`Please switch your wallet network to Chain ID ${targetChainId}`);
+        if (currentChainId !== targetChainId) {
+          try {
+            await switchOrAddNetwork(selectedCluster);
+          } catch (switchErr) {
+            throw new Error(`Please switch your wallet network to Chain ID ${targetChainId}`);
+          }
         }
+
+        // 2. Convert amount in MTN to Wei Hex
+        const amountWei = BigInt(Math.floor(parseFloat(amount) * 1e18));
+        const valueHex = `0x${amountWei.toString(16)}`;
+
+        const txParams = {
+          from: account,
+          to: recipient,
+          value: valueHex,
+        };
+
+        // 3. Request MetaMask to send transaction
+        txHash = await window.ethereum.request({
+          method: 'eth_sendTransaction',
+          params: [txParams],
+        });
       }
-
-      // 2. Convert amount in MTN to Wei Hex
-      const amountWei = BigInt(Math.floor(parseFloat(amount) * 1e18));
-      const valueHex = `0x${amountWei.toString(16)}`;
-
-      const txParams = {
-        from: account,
-        to: recipient,
-        value: valueHex,
-      };
-
-      // 3. Request MetaMask to send transaction
-      const txHash = await window.ethereum.request({
-        method: 'eth_sendTransaction',
-        params: [txParams],
-      });
 
       setTxReceipt({
         hash: txHash,
