@@ -102,6 +102,7 @@
               | list) + (ufw_extra_sources | default([])) }}
 
     - name: Automatically configure firewall (UFW) rules for execution node
+      throttle: 1
       when:
         - ufw_status_exec.rc == 0
         - "'Status: active' in ufw_status_exec.stdout"
