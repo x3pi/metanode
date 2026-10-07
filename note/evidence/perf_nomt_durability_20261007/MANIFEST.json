@@ -39,6 +39,39 @@
           "sha256": "89e1d1733f1c07fa87cb2f2f8a487230f2ab98bf2bfd8cff76588359b62fad2f",
           "bytes": 2426
         }
+      ],
+      "extract": [
+        {
+          "name": "DUR_ROUNDS_COUNT",
+          "file": "durability_20rounds_summary.csv",
+          "csv_col": "Round",
+          "stat": "count",
+          "unit": "rounds"
+        },
+        {
+          "name": "DUR_PASS_COUNT",
+          "file": "durability_20rounds_summary.csv",
+          "csv_col": "Verdict",
+          "filter": "Verdict=PASS",
+          "stat": "count",
+          "unit": "rounds"
+        },
+        {
+          "name": "DUR_R20_CHECKBLOCK",
+          "file": "durability_20rounds_summary.csv",
+          "csv_col": "CheckBlock",
+          "filter": "Round=20",
+          "stat": "raw",
+          "unit": "block"
+        },
+        {
+          "name": "DUR_R20_HBEFORE",
+          "file": "durability_20rounds_summary.csv",
+          "csv_col": "H_before",
+          "filter": "Round=20",
+          "stat": "raw",
+          "unit": "block"
+        }
       ]
     },
     {
@@ -57,6 +90,34 @@
           "bytes": 1757
         }
       ]
+    }
+  ],
+  "tables": [
+    {
+      "name": "Durability 20 Rounds Table",
+      "file": "durability_20rounds_summary.csv",
+      "header_marker": "Block kiểm tra",
+      "columns": {
+        "Vòng": "Round",
+        "Quorum Pause": "QuorumPause",
+        "H_before": "H_before",
+        "Block kiểm tra": "CheckBlock",
+        "Block Hash": "BlockHash",
+        "State Root": "StateRoot",
+        "Kết quả": "Verdict"
+      }
+    }
+  ],
+  "claims": [
+    {
+      "description": "5 vòng liveness pause khi mất quorum",
+      "regex": "Hành\\s+vi\\s+dừng\\s+Liveness\\s+khi\\s+mất\\s+Quorum\\s*\\((\\d+)\\s+vòng",
+      "expected": 5
+    },
+    {
+      "description": "6 vòng kill đơn lẻ leader val0",
+      "regex": "Phục\\s+hồi\\s+sau\\s+khi\\s+Leader.*?bị\\s+hạ\\s+gục\\s*\\((\\d+)\\s+vòng",
+      "expected": 6
     }
   ]
 }

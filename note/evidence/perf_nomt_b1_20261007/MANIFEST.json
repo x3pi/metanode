@@ -74,6 +74,102 @@
           "group": 1,
           "stat": "raw",
           "unit": "ms"
+        },
+        {
+          "name": "B1_100_diff_pct",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*100\\s*\\|[^\\n]*?\\|\\s*([+-]?\\d+\\.\\d+)%",
+          "group": 1,
+          "stat": "raw",
+          "unit": "%"
+        },
+        {
+          "name": "B1_100_threshold",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*100\\s*\\|[^\\n]*?B\\s*<=\\s*(\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "ms"
+        },
+        {
+          "name": "B1_100_t",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*100\\s*\\|[^\\n]*?t=([+-]?\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "stat"
+        },
+        {
+          "name": "B1_100_df",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*100\\s*\\|[^\\n]*?\\(df=(\\d+\\.\\d+)\\)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "df"
+        },
+        {
+          "name": "B1_1000_diff_pct",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*1000\\s*\\|[^\\n]*?\\|\\s*([+-]?\\d+\\.\\d+)%",
+          "group": 1,
+          "stat": "raw",
+          "unit": "%"
+        },
+        {
+          "name": "B1_1000_threshold",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*1000\\s*\\|[^\\n]*?B\\s*<=\\s*(\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "ms"
+        },
+        {
+          "name": "B1_1000_t",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*1000\\s*\\|[^\\n]*?t=([+-]?\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "stat"
+        },
+        {
+          "name": "B1_1000_df",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*1000\\s*\\|[^\\n]*?\\(df=(\\d+\\.\\d+)\\)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "df"
+        },
+        {
+          "name": "B1_5000_diff_pct",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*5000\\s*\\|[^\\n]*?\\|\\s*([+-]?\\d+\\.\\d+)%",
+          "group": 1,
+          "stat": "raw",
+          "unit": "%"
+        },
+        {
+          "name": "B1_5000_threshold",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*5000\\s*\\|[^\\n]*?B\\s*<=\\s*(\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "ms"
+        },
+        {
+          "name": "B1_5000_t",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*5000\\s*\\|[^\\n]*?t=([+-]?\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "stat"
+        },
+        {
+          "name": "B1_5000_df",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*5000\\s*\\|[^\\n]*?\\(df=(\\d+\\.\\d+)\\)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "df"
         }
       ]
     }

@@ -117,6 +117,9 @@ def extract_values_from_file(evidence_dir, ext_def):
                         match = False
                         break
                 if match and col_name in row:
+                    if stat_type == "count":
+                        matched_values.append(1.0)
+                        continue
                     try:
                         val = float(row[col_name])
                         matched_values.append(val)
@@ -274,6 +277,31 @@ def verify_manifest(manifest_path, evidence_dir, strict=False, max_mb=10.0):
                 extractors[f"{eid}#{name}"] = val
                 extractors[name] = val
 
+    # Tables configuration
+    tables = []
+    for tdef in data.get("tables", []):
+        tname = tdef.get("name", "table")
+        tfile = tdef.get("file")
+        if not tfile:
+            errors.append(f"Table '{tname}' missing 'file' attribute")
+            continue
+        tpath = os.path.join(evidence_dir, tfile)
+        if not os.path.isfile(tpath):
+            errors.append(f"Table '{tname}' file not found: {tfile}")
+            continue
+        try:
+            with open(tpath, "r", encoding="utf-8") as f:
+                reader = list(csv.DictReader(f))
+            tables.append({
+                "def": tdef,
+                "rows": reader
+            })
+        except Exception as e:
+            errors.append(f"Failed to read CSV table '{tfile}': {e}")
+
+    # Free-text claims configuration
+    claims = data.get("claims", [])
+
     # External files registry
     external_files = {}
     for ext_finfo in data.get("external", []):
@@ -314,6 +342,8 @@ def verify_manifest(manifest_path, evidence_dir, strict=False, max_mb=10.0):
         "files": manifest_files,
         "external": external_files,
         "extractors": extractors,
+        "tables": tables,
+        "claims": claims,
         "report": manifest_report,
         "total_bytes": total_bytes
     }, errors
@@ -363,75 +393,215 @@ def verify_report(report_path, manifest_info):
                         f"Line {line_num}: Forbidden claim '{forbidden}' found without adjacent evidence:<id> reference: '{line.strip()}'"
                     )
 
-    # Validate Table Data Rows:
-    # Any row in a markdown table containing numbers MUST have an evidence:<id> tag
-    in_table = False
-    is_header = False
+    # Check free-text claims defined in manifest
+    for claim in manifest_info.get("claims", []):
+        desc = claim.get("description", claim.get("regex", "claim"))
+        pat = claim.get("regex")
+        if not pat:
+            continue
+        m = re.search(pat, content, re.DOTALL)
+        if not m:
+            errors.append(f"Claim verification failed: pattern '{pat}' not found in report ({desc})")
+            continue
+        if "expected" in claim:
+            expected = claim["expected"]
+            val_str = m.group(1).replace(",", "").strip()
+            try:
+                val = float(val_str)
+                if abs(val - float(expected)) > 1e-4:
+                    errors.append(f"Claim mismatch for '{desc}': report has {val}, expected {expected}")
+            except ValueError:
+                if val_str != str(expected):
+                    errors.append(f"Claim mismatch for '{desc}': report has '{val_str}', expected '{expected}'")
+        elif "extractor" in claim:
+            ext_name = claim["extractor"]
+            exp_val = extractors.get(ext_name)
+            if exp_val is None:
+                errors.append(f"Claim references unknown extractor '{ext_name}' ({desc})")
+                continue
+            val_str = m.group(1).replace(",", "").strip()
+            try:
+                val = float(val_str)
+                tol = claim.get("tolerance", 0.005)
+                rel_err = abs(val - exp_val) / abs(exp_val) if exp_val != 0 else abs(val)
+                if rel_err > tol:
+                    errors.append(
+                        f"Claim mismatch for '{desc}': report has {val}, extractor '{ext_name}' has {exp_val} "
+                        f"(rel err: {rel_err:.4f} > {tol})"
+                    )
+            except ValueError:
+                errors.append(f"Claim numeric conversion failed for '{desc}': '{val_str}'")
+
+    # Parse markdown table blocks
+    table_blocks = []
+    current_block = []
     for line_num, line in enumerate(lines, start=1):
         stripped = line.strip()
         if stripped.startswith("|") and stripped.endswith("|"):
-            # Check if separator row (| :--- | :---: | :---: |)
-            if re.match(r"^\|[\s\-\:\*\|]+$", stripped):
-                is_header = False
-                in_table = True
-                continue
-            if not in_table:
-                # Top header row of table
-                is_header = True
-                in_table = True
-                continue
-            if in_table and not is_header:
-                # Data row: check if it contains numeric figures
-                # Match numbers like 10, 5.495, 1,000, +98.89, -7.3%
-                has_number = bool(re.search(r"\d", stripped))
-                if has_number:
-                    has_tag = bool(evidence_id_pattern.search(stripped))
-                    if not has_tag:
+            current_block.append((line_num, stripped))
+        else:
+            if current_block:
+                table_blocks.append(current_block)
+                current_block = []
+    if current_block:
+        table_blocks.append(current_block)
+
+    # Validate each table block
+    for block in table_blocks:
+        if len(block) < 2:
+            continue
+        header_line_num, header_str = block[0]
+        sep_line_num, sep_str = block[1]
+        if not re.match(r"^\|[\s\-\:\*\|]+$", sep_str):
+            # Not a standard table header/separator
+            continue
+
+        headers = [c.strip() for c in header_str.strip('|').split('|')]
+        data_rows = block[2:]
+
+        # Check if table matches any declared table in manifest
+        matched_table_info = None
+        for tinfo in manifest_info.get("tables", []):
+            tdef = tinfo["def"]
+            h_marker = tdef.get("header_marker")
+            if h_marker and (h_marker in header_str or any(h_marker in h for h in headers)):
+                matched_table_info = tinfo
+                break
+
+        if matched_table_info:
+            tdef = matched_table_info["def"]
+            csv_rows = matched_table_info["rows"]
+            tname = tdef.get("name", tdef.get("file", "table"))
+
+            if len(data_rows) != len(csv_rows):
+                errors.append(
+                    f"Table '{tname}' row count mismatch: report has {len(data_rows)} data rows, but CSV has {len(csv_rows)} rows"
+                )
+
+            for r_idx, (r_line_num, r_str) in enumerate(data_rows):
+                if r_idx >= len(csv_rows):
+                    break
+                csv_row = csv_rows[r_idx]
+                cells = [c.strip() for c in r_str.strip('|').split('|')]
+                if len(cells) != len(headers):
+                    errors.append(
+                        f"Line {r_line_num}: Table '{tname}' cell count ({len(cells)}) mismatch with headers ({len(headers)})"
+                    )
+                    continue
+
+                for md_col_name, col_rule in tdef.get("columns", {}).items():
+                    # locate column index
+                    col_idx = -1
+                    for c_i, h in enumerate(headers):
+                        if md_col_name in h:
+                            col_idx = c_i
+                            break
+                    if col_idx == -1:
+                        errors.append(f"Table '{tname}' column '{md_col_name}' not found in headers {headers}")
+                        continue
+                    if col_idx >= len(cells):
+                        continue
+
+                    raw_md_cell = cells[col_idx]
+                    clean_md = raw_md_cell.replace("**", "").replace("`", "").strip()
+
+                    csv_col = col_rule.get("csv_col", md_col_name) if isinstance(col_rule, dict) else col_rule
+                    exp_csv = csv_row.get(csv_col, "").strip()
+
+                    # Comparison
+                    matched = False
+                    if clean_md == exp_csv:
+                        matched = True
+                    elif clean_md.lstrip('#') == exp_csv.lstrip('#') or clean_md.lstrip('R') == exp_csv.lstrip('R'):
+                        matched = True
+                    elif clean_md == f"#{exp_csv}" or clean_md == f"R{exp_csv}":
+                        matched = True
+                    else:
+                        # Numeric match
+                        try:
+                            f_md = float(clean_md.lstrip('#').lstrip('R'))
+                            f_csv = float(exp_csv.lstrip('#').lstrip('R'))
+                            if abs(f_md - f_csv) < 1e-4:
+                                matched = True
+                        except ValueError:
+                            pass
+
+                    if not matched:
                         errors.append(
-                            f"Line {line_num}: Data table row contains numbers but lacks mandatory 'evidence:<id>' tag: '{stripped[:60]}...'"
+                            f"Line {r_line_num}: Table '{tname}' cell mismatch for '{md_col_name}'! "
+                            f"Report has '{clean_md}', CSV has '{exp_csv}'"
                         )
 
-                # Check extracted values if tagged with evidence:<id>#<names>
-                line_matches = evidence_id_pattern.findall(stripped)
-                for eid, names_str in line_matches:
-                    if names_str:
-                        for ext_name in names_str.split(","):
-                            ext_name = ext_name.strip()
-                            key = f"{eid}#{ext_name}"
-                            exp_val = extractors.get(key)
-                            if exp_val is None:
-                                exp_val = extractors.get(ext_name)
+        # For every data row in this table block:
+        for r_line_num, r_str in data_rows:
+            # 1. Check mandatory evidence tag if row contains numbers
+            has_number = bool(re.search(r"\d", r_str))
+            if has_number:
+                has_tag = bool(evidence_id_pattern.search(r_str))
+                if not has_tag:
+                    errors.append(
+                        f"Line {r_line_num}: Data table row contains numbers but lacks mandatory 'evidence:<id>' tag: '{r_str[:60]}...'"
+                    )
 
-                            if exp_val is not None:
-                                # Extract all numbers on the row
-                                row_nums = []
-                                for num_str in re.findall(r"[-+]?\d*\.?\d+", stripped.replace(",", "")):
-                                    try:
-                                        row_nums.append(float(num_str))
-                                    except ValueError:
-                                        pass
+            # 2. Check arithmetic verdict consistency (e.g. B <= threshold => PASS)
+            r_cells = [c.strip() for c in r_str.strip('|').split('|')]
+            thresh_cell = next((c for c in r_cells if re.search(r"B\s*(?:<=|≤)", c)), None)
+            if thresh_cell:
+                m_thresh = re.search(r"B\s*(?:<=|≤)\s*([0-9\.]+)", thresh_cell)
+                if m_thresh:
+                    thresh_val = float(m_thresh.group(1))
+                    b_col_idx = next((i for i, h in enumerate(headers) if "Cấu hình B" in h), -1)
+                    b_val = None
+                    if b_col_idx != -1 and b_col_idx < len(r_cells):
+                        m_b = re.search(r"([0-9\.]+)", r_cells[b_col_idx])
+                        if m_b:
+                            b_val = float(m_b.group(1))
+                    if b_val is not None:
+                        if "**FAIL**" in r_str and b_val <= thresh_val:
+                            errors.append(
+                                f"Line {r_line_num}: Inconsistent verdict! Measured B ({b_val}) <= threshold ({thresh_val}), but row marks FAIL"
+                            )
+                        elif "**PASS**" in r_str and b_val > thresh_val:
+                            errors.append(
+                                f"Line {r_line_num}: Inconsistent verdict! Measured B ({b_val}) > threshold ({thresh_val}), but row marks PASS"
+                            )
 
-                                # Find matching number with <= 0.5% relative error or exact int match
-                                found = False
-                                for rn in row_nums:
-                                    if exp_val == 0:
-                                        if abs(rn) < 1e-4:
-                                            found = True
-                                            break
-                                    else:
-                                        rel_err = abs(rn - exp_val) / abs(exp_val)
-                                        if rel_err <= 0.005:  # <= 0.5% tolerance
-                                            found = True
-                                            break
+            # 3. Check extracted values tagged with evidence:<id>#<names>
+            line_matches = evidence_id_pattern.findall(r_str)
+            for eid, names_str in line_matches:
+                if names_str:
+                    for ext_name in names_str.split(","):
+                        ext_name = ext_name.strip()
+                        key = f"{eid}#{ext_name}"
+                        exp_val = extractors.get(key)
+                        if exp_val is None:
+                            exp_val = extractors.get(ext_name)
 
-                                if not found:
-                                    errors.append(
-                                        f"Line {line_num}: Number mismatch for extract '{ext_name}' ({eid}#{ext_name})! "
-                                        f"Computed value: {exp_val}, but row numbers {row_nums} have no match within 0.5%."
-                                    )
-        else:
-            in_table = False
-            is_header = False
+                        if exp_val is not None:
+                            row_nums = []
+                            for num_str in re.findall(r"[-+]?\d*\.?\d+", r_str.replace(",", "")):
+                                try:
+                                    row_nums.append(float(num_str))
+                                except ValueError:
+                                    pass
+
+                            found = False
+                            for rn in row_nums:
+                                if exp_val == 0:
+                                    if abs(rn) < 1e-4:
+                                        found = True
+                                        break
+                                else:
+                                    rel_err = abs(rn - exp_val) / abs(exp_val)
+                                    if rel_err <= 0.005:  # <= 0.5% tolerance
+                                        found = True
+                                        break
+
+                            if not found:
+                                errors.append(
+                                    f"Line {r_line_num}: Number mismatch for extract '{ext_name}' ({eid}#{ext_name})! "
+                                    f"Computed value: {exp_val}, but row numbers {row_nums} have no match within 0.5%."
+                                )
 
     # Check text round counts vs listed items (e.g. "7 vòng giết leader (R3, R6, R11, R14, R17, R20)")
     round_mismatch_pat = re.compile(r"(\d+)\s+vòng\s+([^,;\.\(\n]+)\s*\(([R\d\s,]+)\)")

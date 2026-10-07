@@ -1,0 +1,27 @@
+==================================================================
+🧪 RUNNING MUTATION AUDIT ON verify_evidence.py
+==================================================================
+▶️ [BASELINE] Checking unmutated reports...
+  • Durability baseline: PASS (exit 0)
+  • B1 baseline:         PASS (exit 0)
+  • RSS baseline:        PASS (exit 0)
+
+▶️ [MUTATIONS] Executing reviewer mutation matrix...
+  [1] CAUGHT: Durability: Mutate CheckBlock #310 -> #999
+  [2] CAUGHT: Durability: Mutate BlockHash 0xa50c... -> 0xdeadbeef...
+  [3] CAUGHT: Durability: Mutate QuorumPause PAUSED_AT_#318 -> PAUSED_AT_#999
+  [4] CAUGHT: Durability: Mutate text claim dual-kill count (5 vòng -> 4 vòng)
+  [5] CAUGHT: Durability: Mutate text claim leader-kill count (6 vòng -> 5 vòng)
+  [6] CAUGHT: Durability: Mutate table row Verdict PASS -> FAIL
+  [7] CAUGHT: B1: Mutate percentage difference +1.62% -> +99.9%
+  [8] CAUGHT: B1: Mutate table row verdict PASS -> FAIL
+  [9] CAUGHT: B1: Remove evidence tag from table row 53
+  [10] CAUGHT: B1: Remove evidence tag from iteration row 61
+  [11] CAUGHT: RSS: Mutate HeapAlloc slope m = +98.89 -> +12.34
+  [12] CAUGHT: RSS: Mutate EthHashMap Wave 8 InUse 47.81 -> 99.99 MB
+  [13] CAUGHT: RSS: Mutate TxHash Wave 8 InUse 35.06 -> 88.88 MB
+  [14] CAUGHT: RSS: Mutate EthHashMap Wave 1 InUse 5.98 -> 1.23 MB
+
+==================================================================
+📊 MUTATION AUDIT SUMMARY: 14 / 14 CAUGHT (100%)
+🎉 100% OF MUTATIONS CAUGHT! verify_evidence.py is AIRTIGHT.

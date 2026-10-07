@@ -212,5 +212,79 @@ Trong thí nghiệm này, chúng tôi chạy 7 vòng giết leader (R3, R6, R11,
         res = self.run_verifier()
         self.assertEqual(res.returncode, 0)
 
+    def test_catches_table_cell_mutation_against_csv(self):
+        # Create CSV file and declare in tables
+        csv_name = "rounds.csv"
+        csv_path = os.path.join(self.evidence_dir, csv_name)
+        with open(csv_path, "w", encoding="utf-8") as f:
+            f.write("Round,BlockNum,Verdict\n1,310,PASS\n")
+
+        # Update manifest
+        self.manifest_data["entries"][0]["files"].append({
+            "path": csv_name,
+            "sha256": hashlib.sha256(b"Round,BlockNum,Verdict\n1,310,PASS\n").hexdigest(),
+            "bytes": len(b"Round,BlockNum,Verdict\n1,310,PASS\n")
+        })
+        self.manifest_data["tables"] = [
+            {
+                "name": "Test Table",
+                "file": csv_name,
+                "header_marker": "BlockNum",
+                "columns": {
+                    "BlockNum": "BlockNum",
+                    "Verdict": "Verdict"
+                }
+            }
+        ]
+        with open(self.manifest_path, "w", encoding="utf-8") as f:
+            json.dump(self.manifest_data, f, indent=2)
+
+        # Report with mutated block number (999 instead of 310)
+        with open(self.report_path, "w", encoding="utf-8") as f:
+            f.write("""# Test Report
+| Round | BlockNum | Verdict | Evidence |
+| :---: | :---: | :---: | :---: |
+| R1 | #999 | **PASS** | evidence:run_01 |
+""")
+        res = self.run_verifier()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("cell mismatch for 'BlockNum'", res.stdout)
+
+    def test_catches_arithmetic_verdict_inconsistency(self):
+        # Measured B = 5.584, threshold = 6.105, but report marks FAIL!
+        with open(self.report_path, "w", encoding="utf-8") as f:
+            f.write("""# Test Report
+| Keys | Cấu hình A Mean ± SD (ms) | Cấu hình B Mean ± SD (ms) | Ngưỡng Cho phép | Kết quả | Evidence |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| 100 | 5.495 ± 0.649 ms | 5.584 ± 0.254 ms | B ≤ 6.105 ms | **FAIL** | evidence:run_01 |
+""")
+        res = self.run_verifier()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Inconsistent verdict", res.stdout)
+
+    def test_catches_free_text_claim_mutation(self):
+        # Add claim to manifest
+        self.manifest_data["claims"] = [
+            {
+                "description": "Leader kill count",
+                "regex": r"chạy\s+(\d+)\s+vòng\s+leader",
+                "expected": 6
+            }
+        ]
+        with open(self.manifest_path, "w", encoding="utf-8") as f:
+            json.dump(self.manifest_data, f, indent=2)
+
+        # Mutate to 5
+        with open(self.report_path, "w", encoding="utf-8") as f:
+            f.write("""# Test Report
+Chúng tôi chạy 5 vòng leader thành công.
+| Config | Elapsed (ms) | Status | Evidence |
+| :--- | :---: | :---: | :---: |
+| Config A | **5.495 ± 0.649** | PASS | evidence:run_01#B1_100_A_mean |
+""")
+        res = self.run_verifier()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Claim mismatch for 'Leader kill count'", res.stdout)
+
 if __name__ == "__main__":
     unittest.main()
