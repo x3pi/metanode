@@ -1237,13 +1237,13 @@ if [ "$MONITOR_NAMESPACE" = "root" ]; then
 fi
 
 # 2. Start Health Monitor in background
-nohup env MONITOR_NAMESPACE="$MONITOR_NAMESPACE" MONITOR_INVENTORY="${INV_PATH:-}" \
+nohup setsid env MONITOR_NAMESPACE="$MONITOR_NAMESPACE" MONITOR_INVENTORY="${INV_PATH:-}" \
     /bin/bash "${SCRIPT_DIR}/start_monitors.sh" health "$MONITOR_NAMESPACE" > /dev/null 2>&1 &
 echo $! > "$MONITOR_PID_DIR/health.pid"
 echo "✅ Đã bật Health Monitor (kiểm tra node sống/chết)"
 
 # 3. Start Resource Monitor in background
-nohup env MONITOR_NAMESPACE="$MONITOR_NAMESPACE" MONITOR_INVENTORY="${INV_PATH:-}" \
+nohup setsid env MONITOR_NAMESPACE="$MONITOR_NAMESPACE" MONITOR_INVENTORY="${INV_PATH:-}" \
     /bin/bash "${SCRIPT_DIR}/start_monitors.sh" resources "$MONITOR_NAMESPACE" > /dev/null 2>&1 &
 echo $! > "$MONITOR_PID_DIR/resources.pid"
 echo "✅ Đã bật Resource Monitor (kiểm tra RAM/CPU quá tải)"
@@ -1284,7 +1284,7 @@ if [ -d "$BLOCK_CHECKER_DIR" ]; then
         fi
         BLOCK_CONFIG="$RPC_JSON_PATH"
         BLOCK_LOG="block_checker_daemon.${MONITOR_NAMESPACE}.log"
-        nohup "$BLOCK_CHECKER_BIN" --watch --interval 5s --config "$BLOCK_CONFIG" --daemon $EXTRA_FROM > "$BLOCK_LOG" 2>&1 &
+        nohup setsid "$BLOCK_CHECKER_BIN" --watch --interval 5s --config "$BLOCK_CONFIG" --daemon $EXTRA_FROM > "$BLOCK_LOG" 2>&1 &
         PID=$!
         echo "$PID" > "$MONITOR_PID_DIR/block_hash_checker.pid"
         sleep 2

@@ -1,4 +1,4 @@
-/#!/usr/bin/env bash
+#!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════════
 #  🚀 METANODE MULTI-CLUSTER DEPLOYMENT & TESTING ORCHESTRATOR
 #  Automates deployment of Parent Chain & Sharded Execution Clusters,
@@ -278,8 +278,14 @@ resolve_target_host() {
         exec2_r1|r4)
             echo "exec2_replica1"
             ;;
+        exec2_r2|r5)
+            echo "exec2_replica2"
+            ;;
+        exec2_r3|r6)
+            echo "exec2_replica3"
+            ;;
         exec2|cluster_2|cluster2)
-            echo "exec2_replica1"
+            echo "exec2_replica1,exec2_replica2,exec2_replica3"
             ;;
         parent|parent_chain|parent_node)
             echo "parent_node"
@@ -307,8 +313,53 @@ fi
 # ── Monitor Helpers (Tái sử dụng start_monitors.sh & block_hash_checker) ─────
 MONITOR_SCRIPT="${METANODE_ROOT}/deploy/ansible/monitors/start_monitors.sh"
 
+get_exec_monitor_names() {
+    python3 - "$INVENTORY" "${SCRIPT_DIR}/scripts" <<'PY'
+import sys
+
+inventory, scripts_dir = sys.argv[1:]
+sys.path.insert(0, scripts_dir)
+import parse_inventory as pi
+
+for cluster_id, cluster in pi.parse_inventory(inventory).get("clusters", {}).items():
+    if cluster.get("replicas"):
+        print(cluster.get("cluster_name", f"exec{cluster_id}"))
+PY
+}
+
+print_monitor_status() {
+    echo "🔍 Trạng thái tiến trình Monitor ngầm:"
+    local found=0
+    local ns
+    while IFS= read -r ns; do
+        [ -n "$ns" ] || continue
+        if [ -d "/tmp/metanode-monitors-${ns}" ]; then
+            local pid_f p_name pid
+            for pid_f in "/tmp/metanode-monitors-${ns}"/*.pid; do
+                if [ -f "$pid_f" ]; then
+                    p_name=$(basename "$pid_f" .pid)
+                    pid=$(cat "$pid_f" 2>/dev/null || echo "")
+                    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                        echo "  • [${ns}] ${p_name}: ▶️ RUNNING (PID ${pid})"
+                        found=1
+                    fi
+                fi
+            done
+        fi
+    done < <(get_exec_monitor_names 2>/dev/null || true)
+
+    if pgrep -f "[p]arent_chain_monitor.py" >/dev/null 2>&1; then
+        echo "  • [parent] liveness/hash monitor: ▶️ RUNNING"
+        found=1
+    fi
+
+    if [ "$found" -eq 0 ]; then
+        echo "  • Chưa có monitor nào đang chạy."
+    fi
+}
+
 stop_cluster_monitors() {
-    echo "⏸️  Tạm dừng tất cả Monitor ngầm (exec1, parent) để tránh báo động giả..."
+    echo "⏸️  Tạm dừng monitor ngầm của tất cả execution cluster và parent chain để tránh báo động giả..."
     if [ -f "$MONITOR_SCRIPT" ]; then
         for pid_dir in /tmp/metanode-monitors-*; do
             if [ -d "$pid_dir" ]; then
@@ -316,14 +367,15 @@ stop_cluster_monitors() {
                 bash "$MONITOR_SCRIPT" --stop --namespace "$ns" >/dev/null 2>&1 || true
             fi
         done
-        bash "$MONITOR_SCRIPT" --stop --namespace exec1 >/dev/null 2>&1 || true
-        bash "$MONITOR_SCRIPT" --stop --namespace parent >/dev/null 2>&1 || true
+        while IFS= read -r ns; do
+            [ -n "$ns" ] || continue
+            bash "$MONITOR_SCRIPT" --stop --namespace "$ns" >/dev/null 2>&1 || true
+        done < <(get_exec_monitor_names 2>/dev/null || true)
     fi
     if [ -f "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" ]; then
         python3 "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" --stop >/dev/null 2>&1 || true
     fi
     pkill -f "parent_chain_monitor.py" >/dev/null 2>&1 || true
-    pkill -f "block_hash_checker.*exec1" >/dev/null 2>&1 || true
 }
 
 clean_monitor_state() {
@@ -342,12 +394,7 @@ start_cluster_monitors() {
     
     # 1. Kích hoạt monitor cho các Exec Clusters trong Inventory (Child Chains chạy Raft Consensus, bỏ qua Validator Vote Monitor)
     if [ "$PARENT_ONLY" != "true" ] && [ -f "$MONITOR_SCRIPT" ]; then
-        CLUSTER_NAMES=$(python3 -c "
-import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
-import parse_inventory as pi
-info = pi.parse_inventory('${INVENTORY}')
-print(' '.join(c.get('cluster_name', f'exec{cid}') for cid, c in info.get('clusters', {}).items()))
-" 2>/dev/null || echo "exec1")
+        CLUSTER_NAMES=$(get_exec_monitor_names 2>/dev/null || true)
 
         for ns in $CLUSTER_NAMES; do
             c_file="/tmp/rpc_nodes.${ns}.json"
@@ -384,7 +431,7 @@ print('true' if info.get('parent_nodes') else 'false')
 
 if [ "$ACTION" = "stop_monitor" ]; then
     stop_cluster_monitors
-    echo "✅ Đã dừng các tiến trình monitor ngầm (exec1, parent)."
+    echo "✅ Đã dừng các tiến trình monitor ngầm của toàn bộ cluster và parent chain."
     exit 0
 fi
 
@@ -395,25 +442,7 @@ if [ "$ACTION" = "monitor_only" ]; then
 fi
 
 if [ "$ACTION" = "monitor_status" ]; then
-    echo "🔍 Trạng thái tiến trình Monitor ngầm (start_monitors.sh):"
-    found=0
-    for ns in exec1 parent; do
-        if [ -d "/tmp/metanode-monitors-${ns}" ]; then
-            for pid_f in "/tmp/metanode-monitors-${ns}"/*.pid; do
-                if [ -f "$pid_f" ]; then
-                    p_name=$(basename "$pid_f" .pid)
-                    pid=$(cat "$pid_f" 2>/dev/null || echo "")
-                    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                        echo "  • [${ns}] ${p_name}: ▶️ RUNNING (PID ${pid})"
-                        found=1
-                    fi
-                fi
-            done
-        fi
-    done
-    if [ $found -eq 0 ]; then
-        echo "  • Chưa có monitor nào đang chạy."
-    fi
+    print_monitor_status
     exit 0
 fi
 
@@ -425,25 +454,7 @@ check_status() {
         python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" status
     fi
     echo ""
-    echo "🔍 Trạng thái tiến trình Monitor ngầm (start_monitors.sh):"
-    found=0
-    for ns in exec1 parent; do
-        if [ -d "/tmp/metanode-monitors-${ns}" ]; then
-            for pid_f in "/tmp/metanode-monitors-${ns}"/*.pid; do
-                if [ -f "$pid_f" ]; then
-                    p_name=$(basename "$pid_f" .pid)
-                    pid=$(cat "$pid_f" 2>/dev/null || echo "")
-                    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                        echo "  • [${ns}] ${p_name}: ▶️ RUNNING (PID ${pid})"
-                        found=1
-                    fi
-                fi
-            done
-        fi
-    done
-    if [ $found -eq 0 ]; then
-        echo "  • Chưa có monitor nào đang chạy."
-    fi
+    print_monitor_status
     echo ""
 }
 

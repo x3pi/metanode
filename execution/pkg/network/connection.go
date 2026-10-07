@@ -211,7 +211,7 @@ func (c *Connection) run() {
 		}
 	}
 
-	startIO := func(conn net.Conn) {
+	startIO := func(conn net.Conn, idleTimeout time.Duration) {
 		requestChan = make(chan network.Request, c.config.RequestChanSize)
 		errorChan = make(chan error, c.config.ErrorChanSize)
 		sendChan = make(chan network.Message, c.config.SendChanSize)
@@ -226,7 +226,7 @@ func (c *Connection) run() {
 
 		go c.writeLoop(conn, sendChan, &writeWg)
 		// Truyền quitChan và readWg vào readLoop
-		go c.readLoop(conn, requestChan, errorChan, &readWg, quitChan)
+		go c.readLoop(conn, requestChan, errorChan, &readWg, quitChan, idleTimeout)
 	}
 
 	for {
@@ -266,7 +266,7 @@ func (c *Connection) run() {
 			c.cachedTcpLocalAddr = tcpConn.LocalAddr()
 			c.metaLastUpdate = time.Now()
 			c.metaMu.Unlock()
-			startIO(tcpConn)
+			startIO(tcpConn, c.config.AcceptedConnectionIdleTimeout)
 
 			// Signal rằng cmdAccept đã được xử lý xong và sendChan đã được khởi tạo
 			if v.resp != nil {
@@ -294,7 +294,7 @@ func (c *Connection) run() {
 			c.cachedTcpLocalAddr = tcpConn.LocalAddr()
 			c.metaLastUpdate = time.Now()
 			c.metaMu.Unlock()
-			startIO(tcpConn)
+			startIO(tcpConn, 0)
 			v.resp <- nil
 
 		case cmdSendMessage:
@@ -788,11 +788,18 @@ func (c *Connection) writeLoop(tcpConn net.Conn, sendChan chan network.Message, 
 	}
 }
 
-func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Request, errorChan chan<- error, wg *sync.WaitGroup, quit <-chan struct{}) {
+func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Request, errorChan chan<- error, wg *sync.WaitGroup, quit <-chan struct{}, idleTimeout time.Duration) {
 	defer wg.Done()
 
 	reader := bufio.NewReader(tcpConn)
 	remoteAddr := tcpConn.RemoteAddr().String()
+	resetPingDeadline := func() {
+		if idleTimeout <= 0 {
+			return
+		}
+		_ = tcpConn.SetReadDeadline(time.Now().Add(idleTimeout))
+	}
+	resetPingDeadline()
 
 	// Hàm này xử lý việc gửi các lỗi nghiêm trọng (khiến kết nối phải đóng)
 	// một cách an toàn để không bị panic.
@@ -845,6 +852,9 @@ func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Reque
 		if err != nil {
 			handleTerminalError(fmt.Errorf("unmarshal error: %w", err), "unmarshaling")
 			return
+		}
+		if msgProto.GetHeader().GetCommand() == "Ping" {
+			resetPingDeadline()
 		}
 
 		// logger.Info(
