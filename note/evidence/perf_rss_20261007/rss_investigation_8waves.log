@@ -1,0 +1,105 @@
+==================================================================
+🔬 GIAI ĐOẠN 3: ĐO ĐẠC RSS & BỘ NHỚ NOMT QUA 8 ĐỢT TẢI (400,000 TXS)
+   Base Directory: /tmp/gate_4val_p06
+   Evidence Dir:   note/evidence/perf_rss_20261007
+   Acceptance:     Linear regression slope <= 30 MB / 100k txs
+==================================================================
+📌 Active PIDs: {'val0': 3708266, 'val1': 3708608, 'val2': 3708943, 'val3': 3709333}
+
+📊 [1/4] Capturing Baseline (0 txs)...
+   • val0 (PID 3708266): Alloc=105.0 MB, Inuse=112.3 MB, Sys=394.9 MB, RSS=565.4 MB
+   • val1 (PID 3708608): Alloc=104.9 MB, Inuse=112.7 MB, Sys=415.1 MB, RSS=524.3 MB
+   • val2 (PID 3708943): Alloc=105.0 MB, Inuse=112.6 MB, Sys=414.9 MB, RSS=547.7 MB
+   • val3 (PID 3709333): Alloc=104.9 MB, Inuse=112.2 MB, Sys=411.0 MB, RSS=511.0 MB
+
+🚀 [2/4] Executing 8 Waves of 50,000 SECP Transactions (400k total)...
+
+🌊 Wave 1/8 (+50,000 txs -> Cumulative: 50,000 txs)...
+   • Workload completed in 8.69s (TPS: 7406.5 tx/s, Peak RSS: 11103 MB)
+     - val0: Alloc=220.2 MB | Inuse=286.6 MB | RSS=2689.5 MB
+     - val1: Alloc=204.2 MB | Inuse=273.7 MB | RSS=2366.4 MB
+     - val2: Alloc=219.4 MB | Inuse=287.7 MB | RSS=2644.1 MB
+     - val3: Alloc=203.1 MB | Inuse=271.0 MB | RSS=2490.0 MB
+
+🌊 Wave 2/8 (+50,000 txs -> Cumulative: 100,000 txs)...
+   • Workload completed in 8.68s (TPS: 7464.5 tx/s, Peak RSS: 12963 MB)
+     - val0: Alloc=254.4 MB | Inuse=340.8 MB | RSS=3020.8 MB
+     - val1: Alloc=235.6 MB | Inuse=329.2 MB | RSS=3143.5 MB
+     - val2: Alloc=243.0 MB | Inuse=335.4 MB | RSS=3005.9 MB
+     - val3: Alloc=239.6 MB | Inuse=333.1 MB | RSS=3170.8 MB
+
+🌊 Wave 3/8 (+50,000 txs -> Cumulative: 150,000 txs)...
+   • Workload completed in 8.51s (TPS: 7612.0 tx/s, Peak RSS: 14998 MB)
+     - val0: Alloc=290.8 MB | Inuse=390.1 MB | RSS=3497.9 MB
+     - val1: Alloc=283.4 MB | Inuse=388.8 MB | RSS=3330.3 MB
+     - val2: Alloc=284.7 MB | Inuse=392.9 MB | RSS=3523.7 MB
+     - val3: Alloc=293.8 MB | Inuse=399.5 MB | RSS=3525.2 MB
+
+🌊 Wave 4/8 (+50,000 txs -> Cumulative: 200,000 txs)...
+   • Workload completed in 8.54s (TPS: 7589.0 tx/s, Peak RSS: 17945 MB)
+     - val0: Alloc=353.6 MB | Inuse=469.0 MB | RSS=4000.7 MB
+     - val1: Alloc=333.6 MB | Inuse=453.1 MB | RSS=3762.8 MB
+     - val2: Alloc=332.9 MB | Inuse=450.1 MB | RSS=3957.3 MB
+     - val3: Alloc=352.3 MB | Inuse=467.6 MB | RSS=3898.2 MB
+
+🌊 Wave 5/8 (+50,000 txs -> Cumulative: 250,000 txs)...
+   • Workload completed in 8.78s (TPS: 7356.9 tx/s, Peak RSS: 20711 MB)
+     - val0: Alloc=432.8 MB | Inuse=566.7 MB | RSS=4928.5 MB
+     - val1: Alloc=412.3 MB | Inuse=545.3 MB | RSS=4377.6 MB
+     - val2: Alloc=403.1 MB | Inuse=535.6 MB | RSS=4607.2 MB
+     - val3: Alloc=391.3 MB | Inuse=529.4 MB | RSS=4696.6 MB
+
+🌊 Wave 6/8 (+50,000 txs -> Cumulative: 300,000 txs)...
+   • Workload completed in 8.63s (TPS: 7497.1 tx/s, Peak RSS: 23123 MB)
+     - val0: Alloc=440.0 MB | Inuse=592.4 MB | RSS=5632.2 MB
+     - val1: Alloc=432.0 MB | Inuse=584.9 MB | RSS=5402.1 MB
+     - val2: Alloc=432.3 MB | Inuse=585.2 MB | RSS=5487.3 MB
+     - val3: Alloc=547.4 MB | Inuse=703.8 MB | RSS=5481.3 MB
+
+🌊 Wave 7/8 (+50,000 txs -> Cumulative: 350,000 txs)...
+   • Workload completed in 8.57s (TPS: 7592.9 tx/s, Peak RSS: 24931 MB)
+     - val0: Alloc=523.0 MB | Inuse=693.5 MB | RSS=6349.5 MB
+     - val1: Alloc=517.9 MB | Inuse=689.8 MB | RSS=5722.8 MB
+     - val2: Alloc=515.6 MB | Inuse=687.4 MB | RSS=6079.2 MB
+     - val3: Alloc=510.0 MB | Inuse=686.7 MB | RSS=6220.2 MB
+
+🌊 Wave 8/8 (+50,000 txs -> Cumulative: 400,000 txs)...
+   • Workload completed in 8.46s (TPS: 7735.2 tx/s, Peak RSS: 25393 MB)
+     - val0: Alloc=529.4 MB | Inuse=710.2 MB | RSS=6503.5 MB
+     - val1: Alloc=527.1 MB | Inuse=706.4 MB | RSS=6206.8 MB
+     - val2: Alloc=525.2 MB | Inuse=707.6 MB | RSS=6263.8 MB
+     - val3: Alloc=519.5 MB | Inuse=707.2 MB | RSS=6431.9 MB
+
+📈 [3/4] Linear Regression & Pprof Diff Analysis:
+==================================================================
+📊 HeapAlloc Regression: Slope = +98.89 ± 11.97 MB / 100k txs (R² = 0.986)
+📊 RSS Regression:       Slope = +1154.96 MB / 100k txs (R² = 0.986)
+
+🔍 Top InUse Memory Changes from Wave 1 to Wave 8 (pprof -base):
+
+⚙️ [4/4] Controlled GOGC Comparison (Default 800 vs GOGC=50 on 25k txs)...
+
+▶️ Running 3 Trials under Default GOGC (800)...
+   • Default Trial 1: TPS = 6876.4 tx/s | Peak RSS = 19366 MB | Duration = 5.09s
+   • Default Trial 2: TPS = 6388.3 tx/s | Peak RSS = 28323 MB | Duration = 5.37s
+   • Default Trial 3: TPS = 6182.9 tx/s | Peak RSS = 31133 MB | Duration = 5.49s
+
+🔄 Reconfiguring cluster with GOGC=50 and restarting...
+📌 Active PIDs after GOGC=50 restart: {'val0': 3722571, 'val1': 3722663, 'val2': 3722763, 'val3': 3722924}
+
+▶️ Running 3 Trials under GOGC=50...
+   • GOGC=50 Trial 1: TPS = 5713.7 tx/s | Peak RSS = 7242 MB | Duration = 5.83s
+   • GOGC=50 Trial 2: TPS = 6231.0 tx/s | Peak RSS = 8404 MB | Duration = 5.53s
+   • GOGC=50 Trial 3: TPS = 6074.1 tx/s | Peak RSS = 9475 MB | Duration = 5.62s
+
+🔄 Reverting cluster to default GOGC and restarting...
+
+==================================================================
+📊 GOGC Comparison Results (Same 25k TX Workload, n=3):
+   • Default GOGC: TPS = 6482.5 ± 356.2 tx/s | Peak RSS = 26274 ± 6145 MB
+   • GOGC=50:      TPS = 6006.3 ± 265.2 tx/s | Peak RSS = 8374 ± 1117 MB
+   • TPS Impact:   -7.3%
+   • RSS Impact:   -68.1%
+==================================================================
+
+✅ Summary CSV saved to note/evidence/perf_rss_20261007/rss_8waves_summary.csv

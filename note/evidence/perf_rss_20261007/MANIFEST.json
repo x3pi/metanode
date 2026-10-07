@@ -1,0 +1,27 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "rss_investigation_8waves",
+      "command": "python3 -u /home/abc/chain-n/metanode/execution/scripts/test/evidence/run_rss_investigation.py",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "564e9c7fc8d4c702307ebaf121d13ee2b6b5a8a3",
+      "git_status": "",
+      "started_at": "2026-10-07T11:37:29Z",
+      "finished_at": "2026-10-07T11:41:07Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "rss_investigation_8waves.log",
+          "sha256": "a9ebe0e18a7dc016c476672510f267847d648da6efa1928bdfa63b4365012c65",
+          "bytes": 5654
+        },
+        {
+          "path": "rss_8waves_summary.csv",
+          "sha256": "6c4b02fa89f97d53e697232d363b29a312211a5862a5134ec4910b55642dfbdb",
+          "bytes": 1609
+        }
+      ]
+    }
+  ]
+}
