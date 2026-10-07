@@ -433,7 +433,7 @@ func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptx
 		out = append(out, ng)
 	}
 	// Cost visibility for throughput investigations: this runs on the block critical path of EVERY validator.
-	if elapsed := time.Since(startFilter); elapsed > 20*time.Millisecond || dropped > 0 {
+	if elapsed := time.Since(startFilter); total > 0 {
 		logger.Info("🔏 [SIG-ENFORCE] %d txs in %v (cache_hit=%d batch_verified=%d individual=%d dropped=%d)",
 			total, elapsed, st.cacheHits, st.batched, st.individual, dropped)
 	}

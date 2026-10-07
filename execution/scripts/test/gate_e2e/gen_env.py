@@ -140,6 +140,8 @@ def main():
     ap.add_argument("--repo", default=os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..")))
     ap.add_argument("--gate", default="parent_registered", help="account_gate value for exec2 (exec1 always uses parent_registered); '' = off")
     ap.add_argument("--validators", type=int, default=1, choices=[1, 4], help="1 = Raft 2-cluster replay test, 4 = Mysticeti 4-validator co-attestation")
+    ap.add_argument("--alloc-count", type=int, default=20, help="Number of accounts from genesis.json to allocate (default 20; 0 = all)")
+    ap.add_argument("--debug", action="store_true", default=False, help="Enable verbose debug logging in nodes")
     a = ap.parse_args()
     base, pb = os.path.abspath(a.base), a.port_base
     if a.validators == 4:
@@ -175,8 +177,9 @@ def main():
         with open(os.path.join(a.repo, "execution/cmd/simple_chain/genesis.json")) as f:
             gbase = json.load(f)
 
+        alloc_limit = a.alloc_count if a.alloc_count > 0 else len(gbase["alloc"])
         alloc_c1 = {}
-        for x in gbase["alloc"][:20]:
+        for x in gbase["alloc"][:alloc_limit]:
             alloc_c1[x["address"].lower()] = dict(x, publicKeyBls=CLUSTERS[0]["bls_pub"])
         alloc_c1[FUNDER["address"].lower()] = acc(FUNDER["address"], FUNDER["bls_pub"])
         alloc_c1[CLUSTERS[0]["address"].lower()] = acc(CLUSTERS[0]["address"], CLUSTERS[0]["bls_pub"])
@@ -186,7 +189,7 @@ def main():
         supply_c1 = sum(int(x["balance"]) for x in alloc_c1.values())
 
         alloc_c2 = {}
-        for x in gbase["alloc"][:20]:
+        for x in gbase["alloc"][:alloc_limit]:
             alloc_c2[x["address"].lower()] = dict(x, publicKeyBls=c2["bls_pub"])
         alloc_c2[FUNDER["address"].lower()] = acc(FUNDER["address"], FUNDER["bls_pub"])
         alloc_c2[CLUSTERS[0]["address"].lower()] = acc(CLUSTERS[0]["address"], CLUSTERS[0]["bls_pub"])
@@ -276,7 +279,7 @@ def main():
                 ))
 
             config = {
-                "debug": True, "cluster_id": 1, "enable_private_gateway": False,
+                "debug": a.debug, "cluster_id": 1, "enable_private_gateway": False,
                 "master_password": "devnet-test-password", "app_pepper": "devnet-test-pepper",
                 "private_key": CLUSTERS[0]["private_key"], "address": v["address"],
                 "log_path": d + "/logs", "backup_path": d + "/backup",
@@ -288,14 +291,14 @@ def main():
                 "Databases": {"RootPath": d + "/data", "DBEngine": "sharded", "Version": "0.0.1.0",
                               "BLSPrivateKey": v["bls_priv"], "SnapshotPath": d + "/snapshot"},
                 "is_rpc_node": True, "snapshot_enabled": False,
-                "tx_signature_mode": "secp", "account_gate": "parent_registered",
+                "tx_signature_mode": "secp", "account_gate": a.gate,
             }
             with open(os.path.join(d, "config.json"), "w") as f:
                 json.dump(config, f, indent=2)
 
         # ---------------- exec2 cluster config & genesis ----------------
         config_c2 = {
-            "debug": True, "cluster_id": 2, "enable_private_gateway": False,
+            "debug": a.debug, "cluster_id": 2, "enable_private_gateway": False,
             "master_password": "devnet-test-password", "app_pepper": "devnet-test-pepper",
             "private_key": c2["private_key"], "address": c2["address"],
             "log_path": d2 + "/logs", "backup_path": d2 + "/backup",
@@ -305,7 +308,7 @@ def main():
             "Databases": {"RootPath": d2 + "/data", "DBEngine": "sharded", "Version": "0.0.1.0",
                           "BLSPrivateKey": c2.get("bls_priv", c2["private_key"]), "SnapshotPath": d2 + "/snapshot"},
             "is_rpc_node": True, "consensus_mode": "raft", "snapshot_enabled": False,
-            "tx_signature_mode": "secp", "account_gate": "parent_registered",
+            "tx_signature_mode": "secp", "account_gate": a.gate,
             "raft": {
                 "node_id": "exec2_r1", "bind_address": "127.0.0.1:%d" % p2["raft"],
                 "advertise_address": "127.0.0.1:%d" % p2["raft"], "data_dir": d2 + "/raft", "bootstrap": True,

@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -73,6 +74,7 @@ type Config struct {
 	VerifyParity bool
 	ReportFile   string
 	DurationSec  int
+	RateLimit    int
 }
 
 // BenchmarkResult stores the summary of the benchmark run
@@ -99,6 +101,8 @@ type BenchmarkResult struct {
 	BlocksProduced      uint64        `json:"blocks_produced"`
 	ZeroForkVerified    bool          `json:"zero_fork_verified"`
 	NodeRootsConsistent bool          `json:"node_roots_consistent"`
+	MaxCPU              string        `json:"max_cpu"`
+	MaxRSSMB            int           `json:"max_rss_mb"`
 }
 
 type rawTCPClient struct {
@@ -344,6 +348,7 @@ func main() {
 		flagVerifyParity = flag.Bool("verify-parity", true, "Verify 100% Zero-Fork parity across all online nodes")
 		flagReport       = flag.String("report", "", "File path to save JSON benchmark report")
 		flagDuration     = flag.Int("duration", 0, "Sustained blasting duration in seconds (if >0, ignores count)")
+		flagRateLimit    = flag.Int("rate-limit", 0, "Target injection rate limit in tx/s (0 = unlimited)")
 	)
 	flag.Parse()
 
@@ -496,11 +501,16 @@ func main() {
 		VerifyParity: *flagVerifyParity,
 		ReportFile:   *flagReport,
 		DurationSec:  *flagDuration,
+		RateLimit:    *flagRateLimit,
 	}
 
-	for r := 1; r <= cfg.Rounds; r++ {
-		fmt.Printf("\n▶️ RUNNING ROUND %d/%d\n", r, cfg.Rounds)
-		runBenchmarkRound(r, cfg, accounts[:cfg.Count])
+	if cfg.DurationSec > 0 {
+		runSustainedBenchmark(cfg, accounts)
+	} else {
+		for r := 1; r <= cfg.Rounds; r++ {
+			fmt.Printf("\n▶️ RUNNING ROUND %d/%d\n", r, cfg.Rounds)
+			runBenchmarkRound(r, cfg, accounts[:cfg.Count])
+		}
 	}
 }
 
@@ -600,8 +610,8 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 					GasTipCap: big.NewInt(0),
 					GasFeeCap: big.NewInt(cfg.GasPrice),
 					Gas:       21000,
-					To:       &targetAddr,
-					Value:    big.NewInt(100),
+					To:        &targetAddr,
+					Value:     big.NewInt(100),
 				})
 			}
 			if err != nil {
@@ -640,6 +650,47 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 	// Step 4: Inject Transactions
 	fmt.Printf("\n🔥 BLASTING %d Transactions across cluster (Mode: %s)...\n", len(signedTxs), cfg.Mode)
 	tInject0 := time.Now()
+
+	var maxRecordedCPU float64
+	var maxRecordedRSS uint64
+	var resMu sync.Mutex
+	stopCpuMon := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(300 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCpuMon:
+				return
+			case <-ticker.C:
+				out, err := exec.Command("ps", "-o", "%cpu,rss", "--no-headers", "-C", "simple_chain").Output()
+				if err == nil {
+					lines := strings.Split(string(out), "\n")
+					var curTotalCPU float64
+					var curTotalRSS uint64
+					for _, line := range lines {
+						fields := strings.Fields(line)
+						if len(fields) >= 2 {
+							var c float64
+							var r uint64
+							fmt.Sscanf(fields[0], "%f", &c)
+							fmt.Sscanf(fields[1], "%d", &r)
+							curTotalCPU += c
+							curTotalRSS += r
+						}
+					}
+					resMu.Lock()
+					if curTotalCPU > maxRecordedCPU {
+						maxRecordedCPU = curTotalCPU
+					}
+					if curTotalRSS > maxRecordedRSS {
+						maxRecordedRSS = curTotalRSS
+					}
+					resMu.Unlock()
+				}
+			}
+		}
+	}()
 
 	var submittedTxs int
 	var injectedHashes []common.Hash
@@ -789,7 +840,13 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 		}(h, i)
 	}
 	trackWg.Wait()
+	close(stopCpuMon)
 	commitDur := time.Since(tCommit0)
+
+	resMu.Lock()
+	finalCPU := maxRecordedCPU
+	finalRSS := int(maxRecordedRSS / 1024)
+	resMu.Unlock()
 
 	// Step 6: Statistics & Latency Percentiles
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
@@ -834,6 +891,8 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 	fmt.Printf("   • Latency P99:        %v\n", p99)
 	fmt.Printf("   • Latency Avg:        %v\n", avgLat)
 	fmt.Printf("   • Blocks Produced:    %d (#%d -> #%d)\n", blocksProduced, startBlock, endBlock)
+	fmt.Printf("   • Peak CPU (Nodes):   %.1f%%\n", finalCPU)
+	fmt.Printf("   • Peak RSS (Nodes):   %d MB\n", finalRSS)
 
 	// Step 7: Zero-Fork Invariant Verification (AGENTS.md Part 2.5)
 	zeroForkOk := true
@@ -899,6 +958,460 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 		BlocksProduced:      blocksProduced,
 		ZeroForkVerified:    zeroForkOk,
 		NodeRootsConsistent: zeroForkOk,
+		MaxCPU:              fmt.Sprintf("%.1f%%", finalCPU),
+		MaxRSSMB:            finalRSS,
+	}
+
+	if cfg.ReportFile != "" {
+		if data, err := json.MarshalIndent(result, "", "  "); err == nil {
+			_ = os.WriteFile(cfg.ReportFile, data, 0644)
+			fmt.Printf("📄 JSON Benchmark report saved to: %s\n", cfg.ReportFile)
+		}
+	}
+	fmt.Println("==================================================================")
+}
+
+func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
+	fmt.Println("==================================================================")
+	fmt.Printf("⏱️ SUSTAINED BENCHMARK: Target Duration: %d seconds\n", cfg.DurationSec)
+	fmt.Printf("   Mode: %s | TxType: %s | Wallets: %d | BatchSize: %d\n", cfg.Mode, cfg.TxType, len(accounts), cfg.BatchSize)
+	fmt.Println("==================================================================")
+
+	startBlock, err := getBlockNumber(cfg.RPCUrls[0])
+	if err != nil {
+		fmt.Printf("⚠️ Warning: unable to get start block: %v\n", err)
+	}
+	fmt.Printf("🏁 Start Block: #%d\n", startBlock)
+
+	// Step 1: Concurrently Fetch Starting Nonces
+	fmt.Printf("\n🔍 Fetching starting nonces for %d accounts...\n", len(accounts))
+	tNonce0 := time.Now()
+	type SustainedAccount struct {
+		Key     *ecdsa.PrivateKey
+		Address common.Address
+		Nonce   uint64
+	}
+	activeAccs := make([]*SustainedAccount, 0, len(accounts))
+	var accMu sync.Mutex
+	workerPool := make(chan struct{}, 64)
+	var wg sync.WaitGroup
+
+	for i := range accounts {
+		wg.Add(1)
+		workerPool <- struct{}{}
+		go func(idx int) {
+			defer wg.Done()
+			defer func() { <-workerPool }()
+
+			acc := accounts[idx]
+			key, err := crypto.HexToECDSA(acc.PrivateKey)
+			if err != nil {
+				return
+			}
+			addr := crypto.PubkeyToAddress(key.PublicKey)
+			rpcEndpoint := cfg.RPCUrls[idx%len(cfg.RPCUrls)]
+			nonce, err := getPendingNonce(rpcEndpoint, addr)
+			if err != nil {
+				return
+			}
+			accMu.Lock()
+			activeAccs = append(activeAccs, &SustainedAccount{
+				Key:     key,
+				Address: addr,
+				Nonce:   nonce,
+			})
+			accMu.Unlock()
+		}(i)
+	}
+	wg.Wait()
+	fmt.Printf("✅ %d active wallets ready with starting nonces (fetched in %v)\n", len(activeAccs), time.Since(tNonce0))
+
+	if len(activeAccs) == 0 {
+		fmt.Println("❌ No valid accounts available for sustained blasting.")
+		return
+	}
+
+	// Step 2: Establish TCP pool if TCP mode
+	var tcpClients []*rawTCPClient
+	if cfg.Mode == "tcp" || cfg.Mode == "both" {
+		fmt.Printf("\n🔌 Establishing %d TCP connections for high-throughput pipeline...\n", len(cfg.TCPAddrs))
+		clientCounter := 1
+		for _, addr := range cfg.TCPAddrs {
+			clientAddr := common.BigToAddress(big.NewInt(int64(clientCounter)))
+			clientCounter++
+			c, err := newRawTCPClient(addr, clientAddr)
+			if err != nil {
+				fmt.Printf("⚠️ TCP connect failed to %s: %v\n", addr, err)
+				continue
+			}
+			tcpClients = append(tcpClients, c)
+		}
+		defer func() {
+			for _, c := range tcpClients {
+				c.Close()
+			}
+		}()
+		fmt.Printf("✅ %d TCP connections connected.\n", len(tcpClients))
+	}
+
+	// Step 3: Sustained Injection Loop
+	fmt.Printf("\n🔥 BLASTING CONTINUOUSLY FOR %d SECONDS...\n", cfg.DurationSec)
+	tBlast0 := time.Now()
+	deadline := tBlast0.Add(time.Duration(cfg.DurationSec) * time.Second)
+
+	var totalSubmitted atomic.Uint64
+	type SampleTx struct {
+		Hash   common.Hash
+		SentAt time.Time
+	}
+	var sampleMu sync.Mutex
+	var sampleTxs []SampleTx
+
+	signer := types.LatestSignerForChainID(big.NewInt(cfg.ChainID))
+	targetAddr := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
+
+	batchSize := cfg.BatchSize
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+
+	var maxRecordedCPU float64
+	var maxRecordedRSS uint64
+	var resMu sync.Mutex
+
+	sampleTicker := time.NewTicker(3 * time.Second)
+	defer sampleTicker.Stop()
+	go func() {
+		for range sampleTicker.C {
+			if time.Now().After(deadline) {
+				return
+			}
+			out, err := exec.Command("ps", "-o", "%cpu,rss", "--no-headers", "-C", "simple_chain").Output()
+			if err == nil {
+				lines := strings.Split(string(out), "\n")
+				var curTotalCPU float64
+				var curTotalRSS uint64
+				for _, line := range lines {
+					fields := strings.Fields(line)
+					if len(fields) >= 2 {
+						var c float64
+						var r uint64
+						fmt.Sscanf(fields[0], "%f", &c)
+						fmt.Sscanf(fields[1], "%d", &r)
+						curTotalCPU += c
+						curTotalRSS += r
+					}
+				}
+				resMu.Lock()
+				if curTotalCPU > maxRecordedCPU {
+					maxRecordedCPU = curTotalCPU
+				}
+				if curTotalRSS > maxRecordedRSS {
+					maxRecordedRSS = curTotalRSS
+				}
+				resMu.Unlock()
+			}
+		}
+	}()
+
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	go func() {
+		for range ticker.C {
+			if time.Now().After(deadline) {
+				return
+			}
+			sub := totalSubmitted.Load()
+			el := time.Since(tBlast0)
+			resMu.Lock()
+			cpuSnap := maxRecordedCPU
+			rssSnap := maxRecordedRSS / 1024
+			resMu.Unlock()
+			fmt.Printf("   ⏳ [PROGRESS %s / %ds] Injected %d txs (Current Injection TPS: %.2f tx/s | Peak CPU: %.1f%% | Peak RSS: %d MB)\n",
+				el.Truncate(time.Second), cfg.DurationSec, sub, float64(sub)/el.Seconds(), cpuSnap, rssSnap)
+		}
+	}()
+
+	var blastWg sync.WaitGroup
+	numWorkers := 16
+	if len(tcpClients) > 0 && len(tcpClients) < numWorkers {
+		numWorkers = len(tcpClients) * 4
+	}
+
+	var chunkInterval time.Duration
+	if cfg.RateLimit > 0 && batchSize > 0 {
+		chunkInterval = time.Duration(float64(numWorkers) * float64(batchSize) / float64(cfg.RateLimit) * float64(time.Second))
+		fmt.Printf("⏱️ Throttling injection: Target %d tx/s across %d workers (~%v per batch)\n",
+			cfg.RateLimit, numWorkers, chunkInterval)
+	}
+
+	for w := 0; w < numWorkers; w++ {
+		blastWg.Add(1)
+		go func(workerID int) {
+			defer blastWg.Done()
+
+			workerAccs := make([]*SustainedAccount, 0)
+			for i := workerID; i < len(activeAccs); i += numWorkers {
+				workerAccs = append(workerAccs, activeAccs[i])
+			}
+			if len(workerAccs) == 0 {
+				return
+			}
+
+			accIdx := 0
+			for time.Now().Before(deadline) {
+				chunkStart := time.Now()
+				txsChunk := make([]*types.Transaction, 0, batchSize)
+				for len(txsChunk) < batchSize && time.Now().Before(deadline) {
+					acc := workerAccs[accIdx%len(workerAccs)]
+					accIdx++
+
+					txNonce := acc.Nonce
+					acc.Nonce++
+
+					var tx *types.Transaction
+					var err error
+					if cfg.TxType == "legacy" {
+						tx, err = types.SignNewTx(acc.Key, signer, &types.LegacyTx{
+							Nonce:    txNonce,
+							GasPrice: big.NewInt(cfg.GasPrice),
+							Gas:      21000,
+							To:       &targetAddr,
+							Value:    big.NewInt(100),
+						})
+					} else {
+						tx, err = types.SignNewTx(acc.Key, signer, &types.DynamicFeeTx{
+							ChainID:   big.NewInt(cfg.ChainID),
+							Nonce:     txNonce,
+							GasTipCap: big.NewInt(0),
+							GasFeeCap: big.NewInt(cfg.GasPrice),
+							Gas:       21000,
+							To:        &targetAddr,
+							Value:     big.NewInt(100),
+						})
+					}
+					if err == nil && tx != nil {
+						txsChunk = append(txsChunk, tx)
+					}
+				}
+
+				if len(txsChunk) == 0 {
+					break
+				}
+
+				sampleMu.Lock()
+				if len(sampleTxs) < 100 {
+					sampleTxs = append(sampleTxs, SampleTx{
+						Hash:   txsChunk[0].Hash(),
+						SentAt: time.Now(),
+					})
+				}
+				sampleMu.Unlock()
+
+				if (cfg.Mode == "tcp" || cfg.Mode == "both") && len(tcpClients) > 0 {
+					client := tcpClients[workerID%len(tcpClients)]
+					if err := client.SendBatch(txsChunk); err != nil {
+						time.Sleep(10 * time.Millisecond)
+					} else {
+						totalSubmitted.Add(uint64(len(txsChunk)))
+					}
+				} else {
+					for _, tx := range txsChunk {
+						raw, err := tx.MarshalBinary()
+						if err == nil {
+							rpcURL := cfg.RPCUrls[workerID%len(cfg.RPCUrls)]
+							_, err = rpcCallTo(rpcURL, "eth_sendRawTransaction", fmt.Sprintf("0x%x", raw))
+							if err == nil {
+								totalSubmitted.Add(1)
+							}
+						}
+					}
+				}
+
+				if chunkInterval > 0 {
+					chunkElapsed := time.Since(chunkStart)
+					if chunkElapsed < chunkInterval {
+						time.Sleep(chunkInterval - chunkElapsed)
+					}
+				}
+			}
+		}(w)
+	}
+
+	blastWg.Wait()
+	injectDur := time.Since(tBlast0)
+	subTxs := int(totalSubmitted.Load())
+	injectTPS := float64(subTxs) / injectDur.Seconds()
+	fmt.Printf("\n⚡ Injected total %d TXs over %v (Injection TPS: %.2f tx/s)\n", subTxs, injectDur, injectTPS)
+
+	// Step 4: Consensus stabilization & Receipt Confirmation
+	fmt.Printf("\n⏱️ Waiting 10 seconds for consensus commit & tracking receipt latencies...\n")
+	time.Sleep(10 * time.Second)
+
+	var confirmedCount atomic.Uint64
+	var revertedCount atomic.Uint64
+	var latencies []time.Duration
+	var latMu sync.Mutex
+
+	var trackWg sync.WaitGroup
+	trackWorkers := make(chan struct{}, 32)
+	timeout := 30 * time.Second
+
+	for i, s := range sampleTxs {
+		trackWg.Add(1)
+		trackWorkers <- struct{}{}
+		go func(st SampleTx, sIdx int) {
+			defer trackWg.Done()
+			defer func() { <-trackWorkers }()
+
+			start := time.Now()
+			deadline := start.Add(timeout)
+			rpcURL := cfg.RPCUrls[sIdx%len(cfg.RPCUrls)]
+
+			for time.Now().Before(deadline) {
+				res, err := rpcCallTo(rpcURL, "eth_getTransactionReceipt", st.Hash.Hex())
+				if err == nil && len(res) > 0 && string(res) != "null" {
+					var rec struct {
+						Status string `json:"status"`
+					}
+					json.Unmarshal(res, &rec)
+					var status uint64
+					fmt.Sscanf(rec.Status, "0x%x", &status)
+
+					elapsed := time.Since(st.SentAt)
+					latMu.Lock()
+					latencies = append(latencies, elapsed)
+					latMu.Unlock()
+
+					if status == 1 {
+						confirmedCount.Add(1)
+					} else {
+						revertedCount.Add(1)
+					}
+					return
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+		}(s, i)
+	}
+	trackWg.Wait()
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	var p50, p90, p95, p99, avgLat time.Duration
+	if len(latencies) > 0 {
+		p50 = latencies[len(latencies)*50/100]
+		p90 = latencies[len(latencies)*90/100]
+		p95 = latencies[len(latencies)*95/100]
+		p99 = latencies[len(latencies)*99/100]
+		var totalLat time.Duration
+		for _, l := range latencies {
+			totalLat += l
+		}
+		avgLat = totalLat / time.Duration(len(latencies))
+	}
+
+	endBlock, _ := getBlockNumber(cfg.RPCUrls[0])
+	blocksProduced := uint64(0)
+	if endBlock >= startBlock {
+		blocksProduced = endBlock - startBlock
+	}
+
+	var totalOnChainTxs uint64
+	for b := startBlock + 1; b <= endBlock; b++ {
+		res, err := rpcCallTo(cfg.RPCUrls[0], "eth_getBlockByNumber", fmt.Sprintf("0x%x", b), false)
+		if err == nil && len(res) > 0 && string(res) != "null" {
+			var bObj struct {
+				Transactions []interface{} `json:"transactions"`
+			}
+			if err := json.Unmarshal(res, &bObj); err == nil {
+				totalOnChainTxs += uint64(len(bObj.Transactions))
+			}
+		}
+	}
+
+	effectiveTPS := float64(totalOnChainTxs) / injectDur.Seconds()
+
+	fmt.Printf("\n📊 SUSTAINED BENCHMARK METRICS:\n")
+	fmt.Printf("   • Duration:           %v (Target: %ds)\n", injectDur, cfg.DurationSec)
+	fmt.Printf("   • Total Submitted:    %d txs\n", subTxs)
+	fmt.Printf("   • Total Confirmed:    %d txs on-chain across %d blocks\n", totalOnChainTxs, blocksProduced)
+	fmt.Printf("   • Injection Speed:    %.2f tx/s\n", injectTPS)
+	fmt.Printf("   • Sustained TPS:      %.2f tx/s\n", effectiveTPS)
+	fmt.Printf("   • Latency P50:        %v\n", p50)
+	fmt.Printf("   • Latency P90:        %v\n", p90)
+	fmt.Printf("   • Latency P95:        %v\n", p95)
+	fmt.Printf("   • Latency P99:        %v\n", p99)
+	fmt.Printf("   • Latency Avg:        %v\n", avgLat)
+	fmt.Printf("   • Sample Verified:    %d/%d (Confirmed: %d, Reverted: %d)\n",
+		confirmedCount.Load()+revertedCount.Load(), len(sampleTxs), confirmedCount.Load(), revertedCount.Load())
+	fmt.Printf("   • Blocks Produced:    %d (#%d -> #%d)\n", blocksProduced, startBlock, endBlock)
+	resMu.Lock()
+	finalCPU := maxRecordedCPU
+	finalRSS := int(maxRecordedRSS / 1024)
+	resMu.Unlock()
+	fmt.Printf("   • Peak CPU (Nodes):   %.1f%%\n", finalCPU)
+	fmt.Printf("   • Peak RSS (Nodes):   %d MB\n", finalRSS)
+
+	// Step 5: Zero-Fork Invariant Verification
+	zeroForkOk := true
+	if cfg.VerifyParity && len(cfg.RPCUrls) > 1 {
+		fmt.Printf("\n🛡️ VERIFYING ZERO-FORK INVARIANT ACROSS %d NODES...\n", len(cfg.RPCUrls))
+		targetBlockNum := fmt.Sprintf("0x%x", endBlock)
+		var blockHashes = make(map[string][]string)
+		var stateRoots = make(map[string][]string)
+
+		for _, u := range cfg.RPCUrls {
+			res, err := rpcCallTo(u, "eth_getBlockByNumber", targetBlockNum, false)
+			if err != nil || len(res) == 0 || string(res) == "null" {
+				fmt.Printf("   ⚠️ Node %s did not return block %s\n", u, targetBlockNum)
+				continue
+			}
+			var b struct {
+				Hash      string        `json:"hash"`
+				StateRoot string        `json:"stateRoot"`
+				Txs       []interface{} `json:"transactions"`
+			}
+			if err := json.Unmarshal(res, &b); err == nil && b.Hash != "" {
+				blockHashes[b.Hash] = append(blockHashes[b.Hash], u)
+				stateRoots[b.StateRoot] = append(stateRoots[b.StateRoot], u)
+				fmt.Printf("   • Node %s: Block %s | Hash: %s... | Root: %s... | Txs: %d\n",
+					u, targetBlockNum, b.Hash[:12], b.StateRoot[:12], len(b.Txs))
+			}
+		}
+
+		if len(blockHashes) > 1 || len(stateRoots) > 1 {
+			zeroForkOk = false
+			fmt.Printf("🚨 [CRITICAL FORK DETECTED] Multiple block hashes or state roots found across nodes!\n")
+		} else {
+			fmt.Println("✅ [ZERO-FORK VERIFIED] 100% agreement across all online nodes on Block Hash & State Root!")
+		}
+	}
+
+	result := BenchmarkResult{
+		Timestamp:           time.Now().UTC().Format(time.RFC3339),
+		ChainID:             cfg.ChainID,
+		Mode:                cfg.Mode,
+		TxType:              cfg.TxType,
+		TotalSubmitted:      subTxs,
+		TotalConfirmed:      int(totalOnChainTxs),
+		TotalReverted:       int(revertedCount.Load()),
+		TotalDropped:        subTxs - int(totalOnChainTxs),
+		InjectionDuration:   injectDur.String(),
+		InjectionTPS:        injectTPS,
+		CommitDuration:      injectDur.String(),
+		EffectiveTPS:        effectiveTPS,
+		LatencyP50:          p50,
+		LatencyP90:          p90,
+		LatencyP95:          p95,
+		LatencyP99:          p99,
+		LatencyAvg:          avgLat,
+		StartBlock:          startBlock,
+		EndBlock:            endBlock,
+		BlocksProduced:      blocksProduced,
+		ZeroForkVerified:    zeroForkOk,
+		NodeRootsConsistent: zeroForkOk,
+		MaxCPU:              fmt.Sprintf("%.1f%%", finalCPU),
+		MaxRSSMB:            finalRSS,
 	}
 
 	if cfg.ReportFile != "" {
