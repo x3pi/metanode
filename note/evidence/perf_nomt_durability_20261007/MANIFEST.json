@@ -1,0 +1,39 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "durability_negative_control",
+      "command": "env NEGATIVE_CONTROL=mismatch_root ROUNDS=1 SUMMARY_REPORT=/tmp/negative_control_summary.log /home/abc/chain-n/metanode/execution/scripts/test/test_crash_recovery_nomt_expanded.sh /tmp/gate_4val_p06",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "97763e228a8986a70ee19af84ea4ef876c2d5981",
+      "git_status": " M execution/scripts/test/test_crash_recovery_nomt_expanded.sh;?? note/evidence/;?? note/plan_fix_nomt_reports_evidence_20261007.md;",
+      "started_at": "2026-10-07T10:54:47Z",
+      "finished_at": "2026-10-07T10:55:31Z",
+      "exit_code": 1,
+      "files": [
+        {
+          "path": "durability_negative_control.log",
+          "sha256": "a0a9cb06492802cbc25afbc1350f8804ad1cd6fdd2a91ea2ac87c284d0b8ef4c",
+          "bytes": 3908
+        }
+      ]
+    },
+    {
+      "id": "durability_20rounds_expanded",
+      "command": "env ROUNDS=20 SUMMARY_REPORT=/tmp/crash_recovery_20rounds_summary.log /home/abc/chain-n/metanode/execution/scripts/test/test_crash_recovery_nomt_expanded.sh /tmp/gate_4val_p06",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "97763e228a8986a70ee19af84ea4ef876c2d5981",
+      "git_status": " M execution/scripts/test/test_crash_recovery_nomt_expanded.sh;?? note/evidence/;?? note/plan_fix_nomt_reports_evidence_20261007.md;",
+      "started_at": "2026-10-07T11:07:22Z",
+      "finished_at": "2026-10-07T11:22:35Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "durability_20rounds_expanded.log",
+          "sha256": "436c715ae5913b874469d5bbd4f234d9d58b532bb3dd587f3059799fa7fd6124",
+          "bytes": 42194
+        }
+      ]
+    }
+  ]
+}

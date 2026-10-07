@@ -1,86 +1,106 @@
-# Báo cáo Kiểm chứng Độ bền Mở rộng & Phục hồi Crash NOMT (20 Vòng)
+# Báo cáo Kiểm chứng Độ bền Mở rộng & Phục hồi Crash NOMT (20 Vòng — Bản Chuẩn hoá Evidence)
 
 **Ngày thực hiện:** 2026-10-07  
 **Tác giả:** Antigravity Agent (Metanode Core Dev)  
-**Mục tiêu:** Thực hiện toàn diện Giai đoạn 4 của [note/plan_nomt_durability_rss_followup_20261007.md](file:///home/abc/chain-n/metanode/note/plan_nomt_durability_rss_followup_20261007.md).  
-**Cam kết:** 100% số liệu thực nghiệm từ cluster cô lập `/tmp/gate_4val_p06`, trung thực, minh bạch, tuân thủ nguyên tắc Zero-Fork (AGENTS.md Part 2.5).
+**Mục tiêu:** Thực hiện Giai đoạn 1 của [note/plan_fix_nomt_reports_evidence_20261007.md](file:///home/abc/chain-n/metanode/note/plan_fix_nomt_reports_evidence_20261007.md).  
+**Cam kết:** Dữ liệu thực nghiệm 100% kiểm chứng được từ log thô trong `note/evidence/perf_nomt_durability_20261007/` (`evidence:durability_20rounds_expanded`), tuyệt đối không bịa số liệu, tuân thủ nguyên tắc Zero-Fork (AGENTS.md Part 2.5).
 
 ---
 
-## 1. Thiết kế Thí nghiệm Kiểm thử Độ bền Mở rộng
+## 1. Tuyên bố Thay thế & Rút lại Báo cáo Cũ (Retraction Notice)
 
-Khác với các bài test crash cũ chỉ kiểm tra `val1`..`val3` với tải nhỏ (1,000 txs), bài kiểm thử mở rộng này thực hiện với các tiêu chuẩn khắt khe:
-1. **Quy mô tải lớn:** 10,000 giao dịch Secp256k1 EIP-1559 mỗi vòng (batch 1,000 txs qua kết nối TCP), tạo áp lực dirty keys liên tục lên FFI NOMT.
-2. **Đối tượng hạ gục đa dạng:**
-   - **Hạ gục Leader (`val0`):** 7 vòng (R3, R6, R8, R11, R14, R17, R18, R20) nhằm kiểm chứng khả năng phục hồi của node chủ trì đề xuất block.
-   - **Hạ gục 2 node đồng thời (Dual-node crash):** 5 vòng (R5: `val1`+`val2`, R8: `val0`+`val3`, R12: `val2`+`val3`, R15: `val1`+`val3`, R18: `val0`+`val1`).
-   - **Hạ gục từng node đơn lẻ (`val1`..`val3`):** 8 vòng còn lại.
-3. **Thời điểm hạ gục (Kill timing) ngẫu nhiên:** Thay đổi độ trễ từ 0.05s đến 0.25s sau khi phát lệnh blast để lệnh `kill -9` rơi trúng vào lúc FFI `CommitPayload` và background disk flush đang diễn ra.
-4. **Tiêu chí nghiệm thu Zero-Fork & Integrity:**
-   - Không có node nào exit với mã 78 (Startup Data Integrity Check lỗi).
-   - Không có file sentinel cảnh báo `/tmp/MTN_INTEGRITY_FAILED`.
-   - 100% khớp tuyệt đối Block Hash và State Root trên cả 4 validator sau khi node hồi phục.
+Bản báo cáo này **chính thức thay thế và hủy bỏ giá trị** của bảng số liệu 20 vòng cũ (trong commit trước):
+- **Lý do kỹ thuật:** Script cũ `test_crash_recovery_nomt_expanded.sh` có lỗi nghiệm thu nghiêm trọng: khi vòng lặp 40 lần thăm dò không đạt điều kiện bám sát, biến `SYNC_PASS` mang giá trị `false` và `LAST_BLOCK=0`, nhưng script vẫn truy vấn block `0x0` (Genesis Block) để đối chiếu hash/root. Vì Genesis block luôn khớp, script đã in ra kết luận PASS giả tạo ở vòng R20 tại block #0.
+- **Hiện tượng trùng lặp block:** Ở bản cũ, nhiều vòng liên tiếp kiểm tra cùng 1 block (R3–R4 #7, R11–R12 #18, R15–R16 #21, R17–R19 #24) do mempool cạn giao dịch sau khi node chết, không chứng minh được node phục hồi đã tham gia đề xuất và commit block mới.
+- **Khắc phục:** Script mới đã được nâng cấp bắt buộc:
+  1. Ghi nhận $H_{before} = \min(B_0..B_3)$ trước mỗi vòng.
+  2. Bắt buộc mọi node phải đạt $H \ge H_{before} + 2$ (đã commit ít nhất 2 block mới sau crash).
+  3. Bổ sung tải kiểm chứng sau phục hồi (Post-recovery workload) để kích hoạt mạng commit block mới với sự tham gia của node vừa restart.
+  4. Đối chiếu Parity (Block Hash & State Root) độc lập trên cả 2 block mới nhất ($H$ và $H-1$).
+  5. Độc lập kiểm chứng điều khiển âm (Negative Control) chứng minh script báo đỏ khi có lỗi.
 
 ---
 
-## 2. Bảng Kết quả Thực nghiệm 20 Vòng Kill -9
+## 2. Tiêu chí Chấp nhận (Acceptance Criteria — Ghi trước khi chạy)
 
-Toàn bộ 20 vòng kiểm thử được thực thi tự động thông qua script [execution/scripts/test/test_crash_recovery_nomt_expanded.sh](file:///home/abc/chain-n/metanode/execution/scripts/test/test_crash_recovery_nomt_expanded.sh):
-
-| Vòng | Mục tiêu bị `kill -9` | Delay kill | Exit Code Restart | Sentinel File | Trạng thái Parity | Block kiểm tra | Block Hash | State Root |
-| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **R1** | `val1` | 0.12s | 0 | Không có | **PASS** | #2 | `0xadb99f536fe6...` | `0x263f76529e2c...` |
-| **R2** | `val2` | 0.20s | 0 | Không có | **PASS** | #5 | `0xe4612da3c362...` | `0x7b8bbcf687b7...` |
-| **R3** | `val0` *(Leader)* | 0.08s | 0 | Không có | **PASS** | #7 | `0xa358320cc8ea...` | `0x4a772e36c310...` |
-| **R4** | `val3` | 0.15s | 0 | Không có | **PASS** | #7 | `0xa358320cc8ea...` | `0x4a772e36c310...` |
-| **R5** | `val1` + `val2` *(Dual)* | 0.25s | 0 | Không có | **PASS** | #8 | `0xb7e598d31ad4...` | `0x3c8922a99e1e...` |
-| **R6** | `val0` *(Leader)* | 0.10s | 0 | Không có | **PASS** | #9 | `0x3f264e83140e...` | `0x4a898db6a251...` |
-| **R7** | `val2` | 0.18s | 0 | Không có | **PASS** | #11 | `0xd54c7cf69ea7...` | `0x346f51a47498...` |
-| **R8** | `val0` + `val3` *(Dual)* | 0.06s | 0 | Không có | **PASS** | #12 | `0x88266aa420ed...` | `0x2461eab1a2d4...` |
-| **R9** | `val1` | 0.22s | 0 | Không có | **PASS** | #13 | `0x33e981b878fb...` | `0x7b0be14f9cab...` |
-| **R10** | `val3` | 0.05s | 0 | Không có | **PASS** | #16 | `0xdca2fb4f7252...` | `0x1330219dd64b...` |
-| **R11** | `val0` *(Leader)* | 0.12s | 0 | Không có | **PASS** | #18 | `0x91d72a8ad093...` | `0x23b4a936660d...` |
-| **R12** | `val2` + `val3` *(Dual)* | 0.20s | 0 | Không có | **PASS** | #18 | `0x91d72a8ad093...` | `0x23b4a936660d...` |
-| **R13** | `val1` | 0.08s | 0 | Không có | **PASS** | #19 | `0x9703a1a31ad1...` | `0x51f6bf31cf79...` |
-| **R14** | `val0` *(Leader)* | 0.15s | 0 | Không có | **PASS** | #20 | `0xce54731ed687...` | `0x523816417dac...` |
-| **R15** | `val1` + `val3` *(Dual)* | 0.25s | 0 | Không có | **PASS** | #21 | `0x563a217039ba...` | `0x07a6543a1e59...` |
-| **R16** | `val2` | 0.10s | 0 | Không có | **PASS** | #21 | `0x563a217039ba...` | `0x07a6543a1e59...` |
-| **R17** | `val0` *(Leader)* | 0.18s | 0 | Không có | **PASS** | #24 | `0xc7da494f1677...` | `0x590a13f675f0...` |
-| **R18** | `val0` + `val1` *(Dual)* | 0.06s | 0 | Không có | **PASS** | #24 | `0xc7da494f1677...` | `0x590a13f675f0...` |
-| **R19** | `val3` | 0.22s | 0 | Không có | **PASS** | #24 | `0xc7da494f1677...` | `0x590a13f675f0...` |
-| **R20** | `val0` *(Leader)* | 0.05s | 0 | Không có | **PASS** | #0 (Genesis check) | `0xfba50a6784d7...` | `0x0f9a505e8c4f...` |
+1. **Điều khiển âm (Negative Control):** Khi cố ý inject sai lệch `StateRoot` ở 1 node, script phải phát hiện ngay lập tức, ghi nhận `FAIL_FORK` và thoát với mã lỗi khác 0 (`evidence:durability_negative_control`).
+2. **Tính toàn vẹn dữ liệu khởi động:** Không có node nào exit với mã 78 (Startup Data Integrity Check thất bại), không sinh file cảnh báo `/tmp/MTN_INTEGRITY_FAILED` (`evidence:durability_20rounds_expanded`).
+3. **Tiến trình hợp thức (Forward Progress):** Sau khi restart, toàn bộ 4 node phải đồng bộ đạt chiều cao $H \ge H_{before} + 2$ (`evidence:durability_20rounds_expanded`).
+4. **Bảo toàn Quorum (Quorum Pause):** Khi 2 node bị hạ đồng thời ($n=4, f=1$, số node sống $2 < 2f+1=3$), hệ thống phải tạm dừng tạo block mới (chiều cao đứng yên) cho đến khi ít nhất 1 node sống lại (`evidence:durability_20rounds_expanded`).
+5. **Zero-Fork Parity:** Block Hash và State Root phải trùng khớp trên cả 4 validator tại cả 2 block $H$ và $H-1$ (`evidence:durability_20rounds_expanded`).
 
 ---
 
-## 3. Phân tích Kỹ thuật & Ứng xử Hệ thống
+## 3. Điều khiển Âm (Negative Control Verification)
 
-### 3.1. Hành vi khi Leader (`val0`) bị `kill -9`
-- Khi `val0` chết đột ngột, kết nối RPC và TCP tới leader bị ngắt.
-- Giao thức đồng thuận Mysticeti tự động xử lý việc thiếu leader block trong round hiện tại; 3 validator còn lại (`val1`, `val2`, `val3`) vẫn duy trì đủ đa số tuyệt đối 2f+1 (3/4 nodes), do đó hệ thống không hề bị deadlock.
+Trước khi thực hiện 20 vòng kiểm thử chính thức, một lượt chạy điều khiển âm đã được thực thi với cờ `NEGATIVE_CONTROL=mismatch_root ROUNDS=1` thông qua `run_logged.sh`:
+- **Lệnh thực thi:** `env NEGATIVE_CONTROL=mismatch_root ROUNDS=1 /home/abc/chain-n/metanode/execution/scripts/test/test_crash_recovery_nomt_expanded.sh /tmp/gate_4val_p06`
+- **Kết quả ghi nhận:** Script phát hiện sai lệch StateRoot tại Block #17 (`val1: 0xdeadbeefbad...` vs `val0/2/3: 0x724ebf3b...`), ghi nhận `FAIL_FORK`, in cảnh báo `❌ [FORK DETECTED in Round 1 at Block #17]` và thoát với exit code 1 (`evidence:durability_negative_control`).
+- **File bằng chứng:** `note/evidence/perf_nomt_durability_20261007/durability_negative_control.log` (SHA256: `a0a9cb06492802cbc25afbc1350f8804ad1cd6fdd2a91ea2ac87c284d0b8ef4c`, 3908 bytes) (`evidence:durability_negative_control`).
+
+---
+
+## 4. Kết quả Thực nghiệm 20 Vòng Kill -9 (Expanded Durability)
+
+Toàn bộ 20 vòng kiểm thử được thực thi tự động qua `run_logged.sh` ghi log vào `note/evidence/perf_nomt_durability_20261007/durability_20rounds_expanded.log` (SHA256: `436c715ae5913b874469d5bbd4f234d9d58b532bb3dd587f3059799fa7fd6124`, 42194 bytes):
+
+| Vòng | Mục tiêu bị `kill -9` | Delay | Kill Phase | Quorum Pause | Exit Code | Sentinel | H_before | Block kiểm tra | Block Hash | State Root | Kết quả | Evidence |
+| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **R1** | `val1` | 0.05s | unknown_or_between_commits | N/A | 0 | None | #307 | #310 | `0xa50c39fa15e920b2...` | `0x550d69db0b123746...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R2** | `val2` | 0.12s | unknown_or_between_commits | N/A | 0 | None | #310 | #313 | `0xfb4e8802b3454658...` | `0x14732ffd371cb1aa...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R3** | `val0` *(Leader)* | 0.20s | unknown_or_between_commits | N/A | 0 | None | #313 | #316 | `0x46209f381f196cfe...` | `0x713c9d0f34be332e...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R4** | `val3` | 0.08s | unknown_or_between_commits | N/A | 0 | None | #316 | #318 | `0x65e560f24c5ff877...` | `0x216ce5e500569f78...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R5** | `val1 val2` *(Dual)* | 0.15s | unknown_or_between_commits | PAUSED_AT_#318 | 0 | None | #318 | #321 | `0x1f37af7425bdfb3e...` | `0x08ee2dbd5eedb565...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R6** | `val0` *(Leader)* | 0.25s | unknown_or_between_commits | N/A | 0 | None | #321 | #324 | `0x49bf9767947283c7...` | `0x11a5974460eb1c90...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R7** | `val2` | 0.10s | unknown_or_between_commits | N/A | 0 | None | #324 | #326 | `0xffdfed06b4622f80...` | `0x74b0f3485d10363d...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R8** | `val0 val3` *(Dual)* | 0.18s | unknown_or_between_commits | PAUSED_AT_#327 | 0 | None | #327 | #330 | `0x4eb1bdb1e0ac651e...` | `0x4f5611c2781d8d76...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R9** | `val1` | 0.06s | unknown_or_between_commits | N/A | 0 | None | #330 | #332 | `0xd726ae945c9e5edb...` | `0x31f0efc37d0b3bff...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R10** | `val3` | 0.22s | unknown_or_between_commits | N/A | 0 | None | #332 | #334 | `0x43010b879d0d9f41...` | `0x75a248cc441e42cd...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R11** | `val0` *(Leader)* | 0.05s | unknown_or_between_commits | N/A | 0 | None | #334 | #338 | `0x1f797f4dacceac3e...` | `0x1c6907d6c3ff16de...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R12** | `val2 val3` *(Dual)* | 0.12s | unknown_or_between_commits | PAUSED_AT_#338 | 0 | None | #338 | #341 | `0x985989f8d1a07665...` | `0x76b902874d2c9c63...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R13** | `val1` | 0.20s | unknown_or_between_commits | N/A | 0 | None | #341 | #344 | `0x5ca977b5a5f60e24...` | `0x11fe097c687fdb68...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R14** | `val0` *(Leader)* | 0.08s | unknown_or_between_commits | N/A | 0 | None | #344 | #348 | `0x2aa09df440fd5022...` | `0x6b8919415d246d0e...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R15** | `val1 val3` *(Dual)* | 0.15s | unknown_or_between_commits | PAUSED_AT_#348 | 0 | None | #348 | #350 | `0xb4652fefcc230cdf...` | `0x71ec596f1d998c6d...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R16** | `val2` | 0.25s | unknown_or_between_commits | N/A | 0 | None | #350 | #353 | `0x2e0b2855ffebfcdc...` | `0x693c3aed080ed474...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R17** | `val0` *(Leader)* | 0.10s | unknown_or_between_commits | N/A | 0 | None | #353 | #357 | `0x616ab2b9557a2724...` | `0x175c13d8e91beb92...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R18** | `val0 val1` *(Dual)* | 0.18s | unknown_or_between_commits | PAUSED_AT_#357 | 0 | None | #357 | #360 | `0x6af6cded61f1ea18...` | `0x1c03579241201723...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R19** | `val3` | 0.06s | unknown_or_between_commits | N/A | 0 | None | #360 | #363 | `0xea1c63b15140ee25...` | `0x5033ea69ac422502...` | **PASS** | `evidence:durability_20rounds_expanded` |
+| **R20** | `val0` *(Leader)* | 0.22s | unknown_or_between_commits | N/A | 0 | None | #363 | #367 | `0x95c1d75bcceee092...` | `0x3f97196cadcf8e57...` | **PASS** | `evidence:durability_20rounds_expanded` |
+
+---
+
+## 5. Phân tích Ứng xử Hệ thống từ Dữ liệu Thật
+
+### 5.1. Phục hồi sau khi Leader (`val0`) bị hạ gục (7 vòng: R3, R6, R11, R14, R17, R20)
+- Khi `val0` bị hạ, giao thức Mysticeti chuyển giao đề xuất round tiếp theo cho các validator còn lại (`val1..val3`).
 - Khi `val0` khởi động lại:
-  * Startup check (5 bước kiểm tra tính toàn vẹn) quét lại block cuối cùng và đối chiếu root trong NOMT.
-  * `val0` nhận các Certified Commit từ các peer còn lại và bắt kịp (catch up) nhanh chóng.
-  * Không phát hiện bất kỳ sự sai lệch trạng thái nào (`StateRoot` luôn trùng khớp 100%).
+  * 5 bước Startup Integrity Check đọc lại block mapping và đối chiếu StateRoot trong NOMT thành công (0 lỗi).
+  * `val0` nhận commit chứng thực từ các peer, bắt kịp trạng thái và tiếp tục tham gia ký block.
+  * Tại vòng R20, `val0` đã bắt kịp từ #363 lên #367 và đồng thuận chính xác trên cả 2 block #366 và #367 (`evidence:durability_20rounds_expanded`).
 
-### 3.2. Hành vi khi 2 Node bị hạ gục đồng thời (Dual Crash)
-- Với cụm $n = 4$, số lỗi Byzantine tối đa chịu đựng được là $f = 1$. Khi 2 node bị hạ gục đồng thời, số node hoạt động chỉ còn $2 < 2f+1 = 3$, do đó cụm tạm thời **dừng tạo block mới** (liveness tạm dừng) nhằm bảo vệ tính nhất quán tuyệt đối.
-- Tuân thủ nghiêm ngặt **Bất biến Zero-Fork (AGENTS.md Part 2.5)**: Không có node nào tự ý dispatch block theo timeout.
-- Ngay khi 1 hoặc cả 2 node khởi động lại, số lượng node online quay trở lại $\ge 3$, cụm tái lập quorum ngay lập tức, tiếp tục chu trình propose và commit mà không sinh ra bất kỳ nhánh rẽ (fork) nào.
+### 5.2. Hành vi dừng Liveness khi mất Quorum (5 vòng: R5, R8, R12, R15, R18)
+- Với $n=4, f=1$, khi 2 node bị hạ đồng thời, số node hoạt động là $2 < 2f+1=3$.
+- Bằng chứng thực nghiệm ghi nhận trạng thái:
+  * R5: Chiều cao đóng băng tại #318 (`PAUSED_AT_#318`).
+  * R8: Chiều cao đóng băng tại #327 (`PAUSED_AT_#327`).
+  * R12: Chiều cao đóng băng tại #338 (`PAUSED_AT_#338`).
+  * R15: Chiều cao đóng băng tại #348 (`PAUSED_AT_#348`).
+  * R18: Chiều cao đóng băng tại #357 (`PAUSED_AT_#357`).
+- Không có node nào tự ý dispatch commit theo timeout. Khi các node được bật lại, quorum được tái lập và chuỗi tiếp tục tiến triển (`evidence:durability_20rounds_expanded`).
 
----
-
-## 4. Phạm vi Đã Bao Phủ & Giới hạn "Chưa Bao Phủ Power-Loss"
-
-### 4.1. Phạm vi ĐÃ kiểm chứng thành công
-- ✅ **Process Crash (`kill -9`):** Khả năng sống sót và khôi phục của NOMT Trie, Pebble Block DB, và Mysticeti Consensus State trước việc tiến trình Go/Rust bị chấm dứt đột ngột ở bất kỳ chu kỳ thực thi nào.
-- ✅ **Bảo vệ tính toàn vẹn:** FFI NOMT ghi WAL và Metadata đồng bộ, không để xảy ra tình trạng root trong DB bị rỗng, mồ côi hoặc không khớp block header (0 lỗi exit 78).
-- ✅ **Zero-Fork:** 100% các block sau khôi phục đều có đồng thuận tuyệt đối về `BlockHash` và `StateRoot`.
-
-### 4.2. Giới hạn minh bạch: CHƯA KIỂM CHỨNG POWER-LOSS VẬT LÝ
-Theo đúng tinh thần Quy tắc 0.4 và 0.7 của [note/plan_nomt_durability_rss_followup_20261007.md](file:///home/abc/chain-n/metanode/note/plan_nomt_durability_rss_followup_20261007.md):
-- **Bản chất kỹ thuật:** Lệnh `kill -9` chỉ giải phóng tài nguyên ở tầng user-space process. Dữ liệu đã ghi vào buffer cache (page cache) của Linux Kernel vẫn được kernel tiếp tục flush xuống ổ đĩa vật lý sau khi tiến trình chết. Do đó, `kill -9` không thể mô phỏng 100% tình huống mất điện đột ngột phần cứng (hardware power loss / cutting power), nơi dữ liệu chưa kịp flush khỏi cache controller của ổ đĩa có thể bị mất.
-- **Về công cụ FUSE failure injection (`trickfs` / `torture`):** Bộ công cụ upstream của NOMT tại `consensus/vendor/nomt/torture` phụ thuộc vào crate `fuser` và `trickfs`. Khi kiểm tra build thử nghiệm, hệ thống thiếu thư viện hệ thống `libfuse3-dev` / `libfuse-dev`. Theo quy định bắt buộc, agent tuyệt đối không dùng `sudo` tuỳ tiện để cài đặt package trên máy chủ dùng chung của user.
-- **Khuyến nghị đề xuất:** Để kiểm chứng triệt để kịch bản ngắt nguồn điện vật lý (Giai đoạn B2 của kế hoạch production launch), khuyến nghị user triển khai môi trường máy ảo riêng (VM/QEMU) với cơ chế cache `none` hoặc dùng `dm-flakey` trên loop device cô lập, nơi có thể bắn lệnh hard-reset VM đột ngột.
+### 5.3. Kill Timing & Commit Phase
+- Toàn bộ 20 vòng được ghi nhận là `unknown_or_between_commits` thay vì khẳng định cảm tính "kill trúng commit". Mặc dù `kill -9` được phát ngẫu nhiên từ 0.05s đến 0.25s sau khi phát lệnh nạp giao dịch, do lệnh nạp chạy bất đồng bộ qua TCP và log không ghi nhận được stacktrace dừng chính xác tại khung hình FFI call, báo cáo giữ nguyên nhãn trung thực theo đúng quy tắc chống báo cáo giả (`evidence:durability_20rounds_expanded`).
 
 ---
-*Báo cáo kết thúc Giai đoạn 4 — Chuyển tiếp thực thi Giai đoạn 5 (RSS).*
+
+## 6. Giới hạn & Công việc Chưa làm
+
+### 6.1. Giới hạn minh bạch (Limitations)
+- **Giới hạn Process Crash:** Lệnh `kill -9` chỉ kết thúc tiến trình Go/Rust ở không gian người dùng (user-space). Các trang nhớ bẩn (dirty pages) đã ghi vào Linux page cache vẫn tiếp tục được hệ điều hành flush xuống thiết bị lưu trữ vật lý sau khi tiến trình chết. Do đó, `kill -9` **chưa chứng minh được độ bền trước tình huống mất điện phần cứng đột ngột (hardware power loss / power cut)**.
+- **Giới hạn Công cụ FUSE (trickfs / torture):** Không thể chạy bài test FUSE failure injection trong `consensus/vendor/nomt/torture` do máy chủ thiếu thư viện hệ thống `libfuse3-dev` và agent tuân thủ quy tắc không dùng `sudo` tùy tiện.
+
+### 6.2. Công việc Chưa làm (Pending Work)
+- Kiểm thử ngắt nguồn điện vật lý hoặc mô phỏng mất nguồn (Power-Loss Durability) thông qua máy ảo QEMU cô lập hoặc `dm-flakey` loop device (dành cho Giai đoạn B2 theo yêu cầu phối hợp với user).
+
+---
+*Báo cáo Giai đoạn 1 hoàn tất — Bằng chứng đầy đủ tại `note/evidence/perf_nomt_durability_20261007/`.*
