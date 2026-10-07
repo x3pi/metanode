@@ -17,19 +17,21 @@ wait_rpc() { for _ in $(seq 1 "${2:-120}"); do
 
 start_exec() {
   local name="$1" rpc; rpc="$(j "d['ports']['$name']['rpc']")"
+  local pprof_port=$((rpc - 200))
   ( cd "$BASE/$name" && \
     PARENT_CHAIN_URL="http://127.0.0.1:$PH" BLS_CONSERVATION_MODE=enforce BLS_CONSERVATION_INTERVAL_SECONDS=300 \
-    exec "$BIN/simple_chain" -config="$BASE/$name/config.json" --pprof-addr= >>"$BASE/logs/$name.log" 2>&1 ) &
+    exec "$BIN/simple_chain" -config="$BASE/$name/config.json" --pprof-addr="127.0.0.1:$pprof_port" >>"$BASE/logs/$name.log" 2>&1 ) &
   echo $! >"$BASE/pids/$name.pid"
   wait_rpc "http://127.0.0.1:$rpc" 180 || { tail -20 "$BASE/logs/$name.log"; return 1; }
-  echo "$name up (rpc :$rpc, pid $(cat "$BASE/pids/$name.pid"))"
+  echo "$name up (rpc :$rpc, pprof :$pprof_port, pid $(cat "$BASE/pids/$name.pid"))"
 }
 
 start_exec_async() {
-  local name="$1"
+  local name="$1" rpc; rpc="$(j "d['ports']['$name']['rpc']")"
+  local pprof_port=$((rpc - 200))
   ( cd "$BASE/$name" && \
     PARENT_CHAIN_URL="http://127.0.0.1:$PH" BLS_CONSERVATION_MODE=enforce BLS_CONSERVATION_INTERVAL_SECONDS=300 \
-    exec "$BIN/simple_chain" -config="$BASE/$name/config.json" --pprof-addr= >>"$BASE/logs/$name.log" 2>&1 ) &
+    exec "$BIN/simple_chain" -config="$BASE/$name/config.json" --pprof-addr="127.0.0.1:$pprof_port" >>"$BASE/logs/$name.log" 2>&1 ) &
   echo $! >"$BASE/pids/$name.pid"
 }
 

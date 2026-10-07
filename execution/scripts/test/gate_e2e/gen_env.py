@@ -141,6 +141,7 @@ def main():
     ap.add_argument("--gate", default="parent_registered", help="account_gate value for exec2 (exec1 always uses parent_registered); '' = off")
     ap.add_argument("--validators", type=int, default=1, choices=[1, 4], help="1 = Raft 2-cluster replay test, 4 = Mysticeti 4-validator co-attestation")
     ap.add_argument("--alloc-count", type=int, default=20, help="Number of accounts from genesis.json to allocate (default 20; 0 = all)")
+    ap.add_argument("--keys", default="", help="Path to generated_keys.json to allocate for TPS benchmarking")
     ap.add_argument("--debug", action="store_true", default=False, help="Enable verbose debug logging in nodes")
     a = ap.parse_args()
     base, pb = os.path.abspath(a.base), a.port_base
@@ -186,6 +187,13 @@ def main():
         alloc_c1[CLUSTERS[1]["address"].lower()] = acc(CLUSTERS[1]["address"], CLUSTERS[1]["bls_pub"])
         for v in VALS_4:
             alloc_c1[v["address"].lower()] = acc(v["address"], v["bls_pub"])
+        if a.keys and os.path.exists(a.keys):
+            with open(a.keys) as kf:
+                skeys = json.load(kf)
+            for k in skeys:
+                addr = k.get("address", "")
+                if addr and addr.lower() not in alloc_c1:
+                    alloc_c1[addr.lower()] = acc(addr, CLUSTERS[0]["bls_pub"])
         supply_c1 = sum(int(x["balance"]) for x in alloc_c1.values())
 
         alloc_c2 = {}

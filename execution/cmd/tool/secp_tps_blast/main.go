@@ -75,6 +75,7 @@ type Config struct {
 	ReportFile   string
 	DurationSec  int
 	RateLimit    int
+	TargetPIDs   []string
 }
 
 // BenchmarkResult stores the summary of the benchmark run
@@ -103,6 +104,8 @@ type BenchmarkResult struct {
 	NodeRootsConsistent bool          `json:"node_roots_consistent"`
 	MaxCPU              string        `json:"max_cpu"`
 	MaxRSSMB            int           `json:"max_rss_mb"`
+	TargetNodeCount     int           `json:"target_node_count,omitempty"`
+	AvgRSSPerNodeMB     int           `json:"avg_rss_per_node_mb,omitempty"`
 }
 
 type rawTCPClient struct {
@@ -349,6 +352,7 @@ func main() {
 		flagReport       = flag.String("report", "", "File path to save JSON benchmark report")
 		flagDuration     = flag.Int("duration", 0, "Sustained blasting duration in seconds (if >0, ignores count)")
 		flagRateLimit    = flag.Int("rate-limit", 0, "Target injection rate limit in tx/s (0 = unlimited)")
+		flagPids         = flag.String("pids", "", "Comma-separated target simple_chain PIDs to track (default: auto-detect from /tmp/gate_4val_p06/pids or all simple_chain)")
 	)
 	flag.Parse()
 
@@ -356,6 +360,30 @@ func main() {
 	fmt.Println("🚀 SECP256K1 / EIP-1559 HIGH-PERFORMANCE WORKLOAD BENCHMARK")
 	fmt.Println("   Zero-Fork Compliant (AGENTS.md Part 2.5) | Production SECP Mode")
 	fmt.Println("==================================================================")
+
+	var targetPIDs []string
+	if *flagPids != "" {
+		for _, p := range strings.Split(*flagPids, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				targetPIDs = append(targetPIDs, p)
+			}
+		}
+	} else if pidFiles, err := filepath.Glob("/tmp/gate_4val_p06/pids/val*.pid"); err == nil && len(pidFiles) > 0 {
+		for _, pf := range pidFiles {
+			if data, err := os.ReadFile(pf); err == nil {
+				pid := strings.TrimSpace(string(data))
+				if pid != "" {
+					targetPIDs = append(targetPIDs, pid)
+				}
+			}
+		}
+	}
+	if len(targetPIDs) > 0 {
+		fmt.Printf("🎯 Tracking %d target simple_chain PIDs: %s\n", len(targetPIDs), strings.Join(targetPIDs, ", "))
+	} else {
+		fmt.Println("ℹ️ No specific target PIDs specified; tracking all simple_chain processes on host")
+	}
 
 	var rpcURLs []string
 	var tcpAddrs []string
@@ -502,6 +530,7 @@ func main() {
 		ReportFile:   *flagReport,
 		DurationSec:  *flagDuration,
 		RateLimit:    *flagRateLimit,
+		TargetPIDs:   targetPIDs,
 	}
 
 	if cfg.DurationSec > 0 {
@@ -663,31 +692,15 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 			case <-stopCpuMon:
 				return
 			case <-ticker.C:
-				out, err := exec.Command("ps", "-o", "%cpu,rss", "--no-headers", "-C", "simple_chain").Output()
-				if err == nil {
-					lines := strings.Split(string(out), "\n")
-					var curTotalCPU float64
-					var curTotalRSS uint64
-					for _, line := range lines {
-						fields := strings.Fields(line)
-						if len(fields) >= 2 {
-							var c float64
-							var r uint64
-							fmt.Sscanf(fields[0], "%f", &c)
-							fmt.Sscanf(fields[1], "%d", &r)
-							curTotalCPU += c
-							curTotalRSS += r
-						}
-					}
-					resMu.Lock()
-					if curTotalCPU > maxRecordedCPU {
-						maxRecordedCPU = curTotalCPU
-					}
-					if curTotalRSS > maxRecordedRSS {
-						maxRecordedRSS = curTotalRSS
-					}
-					resMu.Unlock()
+				curTotalCPU, curTotalRSS := sampleProcessesMetrics(cfg.TargetPIDs)
+				resMu.Lock()
+				if curTotalCPU > maxRecordedCPU {
+					maxRecordedCPU = curTotalCPU
 				}
+				if curTotalRSS > maxRecordedRSS {
+					maxRecordedRSS = curTotalRSS
+				}
+				resMu.Unlock()
 			}
 		}
 	}()
@@ -890,9 +903,13 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 	fmt.Printf("   • Latency P95:        %v\n", p95)
 	fmt.Printf("   • Latency P99:        %v\n", p99)
 	fmt.Printf("   • Latency Avg:        %v\n", avgLat)
-	fmt.Printf("   • Blocks Produced:    %d (#%d -> #%d)\n", blocksProduced, startBlock, endBlock)
 	fmt.Printf("   • Peak CPU (Nodes):   %.1f%%\n", finalCPU)
-	fmt.Printf("   • Peak RSS (Nodes):   %d MB\n", finalRSS)
+	if len(cfg.TargetPIDs) > 0 {
+		avgPerNode := float64(finalRSS) / float64(len(cfg.TargetPIDs))
+		fmt.Printf("   • Peak RSS (%d Target Nodes): %d MB (avg %.1f MB/node)\n", len(cfg.TargetPIDs), finalRSS, avgPerNode)
+	} else {
+		fmt.Printf("   • Peak RSS (Nodes):   %d MB\n", finalRSS)
+	}
 
 	// Step 7: Zero-Fork Invariant Verification (AGENTS.md Part 2.5)
 	zeroForkOk := true
@@ -1086,31 +1103,15 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 			if time.Now().After(deadline) {
 				return
 			}
-			out, err := exec.Command("ps", "-o", "%cpu,rss", "--no-headers", "-C", "simple_chain").Output()
-			if err == nil {
-				lines := strings.Split(string(out), "\n")
-				var curTotalCPU float64
-				var curTotalRSS uint64
-				for _, line := range lines {
-					fields := strings.Fields(line)
-					if len(fields) >= 2 {
-						var c float64
-						var r uint64
-						fmt.Sscanf(fields[0], "%f", &c)
-						fmt.Sscanf(fields[1], "%d", &r)
-						curTotalCPU += c
-						curTotalRSS += r
-					}
-				}
-				resMu.Lock()
-				if curTotalCPU > maxRecordedCPU {
-					maxRecordedCPU = curTotalCPU
-				}
-				if curTotalRSS > maxRecordedRSS {
-					maxRecordedRSS = curTotalRSS
-				}
-				resMu.Unlock()
+			curTotalCPU, curTotalRSS := sampleProcessesMetrics(cfg.TargetPIDs)
+			resMu.Lock()
+			if curTotalCPU > maxRecordedCPU {
+				maxRecordedCPU = curTotalCPU
 			}
+			if curTotalRSS > maxRecordedRSS {
+				maxRecordedRSS = curTotalRSS
+			}
+			resMu.Unlock()
 		}
 	}()
 
@@ -1344,13 +1345,17 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 	fmt.Printf("   • Latency Avg:        %v\n", avgLat)
 	fmt.Printf("   • Sample Verified:    %d/%d (Confirmed: %d, Reverted: %d)\n",
 		confirmedCount.Load()+revertedCount.Load(), len(sampleTxs), confirmedCount.Load(), revertedCount.Load())
-	fmt.Printf("   • Blocks Produced:    %d (#%d -> #%d)\n", blocksProduced, startBlock, endBlock)
 	resMu.Lock()
 	finalCPU := maxRecordedCPU
 	finalRSS := int(maxRecordedRSS / 1024)
 	resMu.Unlock()
 	fmt.Printf("   • Peak CPU (Nodes):   %.1f%%\n", finalCPU)
-	fmt.Printf("   • Peak RSS (Nodes):   %d MB\n", finalRSS)
+	if len(cfg.TargetPIDs) > 0 {
+		avgPerNode := float64(finalRSS) / float64(len(cfg.TargetPIDs))
+		fmt.Printf("   • Peak RSS (%d Target Nodes): %d MB (avg %.1f MB/node)\n", len(cfg.TargetPIDs), finalRSS, avgPerNode)
+	} else {
+		fmt.Printf("   • Peak RSS (Nodes):   %d MB\n", finalRSS)
+	}
 
 	// Step 5: Zero-Fork Invariant Verification
 	zeroForkOk := true
@@ -1422,3 +1427,32 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 	}
 	fmt.Println("==================================================================")
 }
+
+func sampleProcessesMetrics(targetPIDs []string) (float64, uint64) {
+	var out []byte
+	var err error
+	if len(targetPIDs) > 0 {
+		out, err = exec.Command("ps", "-o", "%cpu,rss", "--no-headers", "-p", strings.Join(targetPIDs, ",")).Output()
+	} else {
+		out, err = exec.Command("ps", "-o", "%cpu,rss", "--no-headers", "-C", "simple_chain").Output()
+	}
+	if err != nil {
+		return 0, 0
+	}
+	lines := strings.Split(string(out), "\n")
+	var curTotalCPU float64
+	var curTotalRSS uint64
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			var c float64
+			var r uint64
+			fmt.Sscanf(fields[0], "%f", &c)
+			fmt.Sscanf(fields[1], "%d", &r)
+			curTotalCPU += c
+			curTotalRSS += r
+		}
+	}
+	return curTotalCPU, curTotalRSS
+}
+
