@@ -274,7 +274,7 @@ export function RollupTransferTab({ account, accountInfo, allClusters }) {
                   <div className="step-circle">{tx.step > 2 ? '✓' : '2'}</div>
                   <div className="step-label">2. Parent Relayed (f+1)</div>
                 </div>
-                <div className={`step-item ${tx.step >= 3 ? 'completed' : ''}`}>
+                <div className={`step-item ${tx.step >= 3 ? 'active completed' : ''}`}>
                   <div className="step-circle">{tx.step >= 3 ? '✓' : '3'}</div>
                   <div className="step-label">3. Dest Claimed</div>
                 </div>

@@ -586,7 +586,7 @@ export function AccountGateCard({
                         <div className="step-circle">{currentMmStep > 3 ? '✓' : '3'}</div>
                         <div className="step-label">Parent Consensus</div>
                       </div>
-                      <div className={`step-item ${currentMmStep >= 4 ? 'completed' : ''}`}>
+                      <div className={`step-item ${currentMmStep >= 4 ? 'active completed' : ''}`}>
                         <div className="step-circle">{currentMmStep >= 4 ? '✓' : '4'}</div>
                         <div className="step-label">Ready</div>
                       </div>
@@ -836,7 +836,7 @@ export function AccountGateCard({
                     <div className="step-circle">{pkStep > 3 ? '✓' : '3'}</div>
                     <div className="step-label">Parent Consensus</div>
                   </div>
-                  <div className={`step-item ${pkStep >= 4 ? 'completed' : ''}`}>
+                  <div className={`step-item ${pkStep >= 4 ? 'active completed' : ''}`}>
                     <div className="step-circle">{pkStep >= 4 ? '✓' : '4'}</div>
                     <div className="step-label">Ready</div>
                   </div>
