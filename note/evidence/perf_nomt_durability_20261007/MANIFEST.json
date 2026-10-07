@@ -1,5 +1,6 @@
 {
   "manifest_version": "1.0",
+  "report": "note/perf_nomt_durability_20261007.md",
   "entries": [
     {
       "id": "durability_negative_control",
@@ -32,6 +33,11 @@
           "path": "durability_20rounds_expanded.log",
           "sha256": "436c715ae5913b874469d5bbd4f234d9d58b532bb3dd587f3059799fa7fd6124",
           "bytes": 42194
+        },
+        {
+          "path": "durability_20rounds_summary.csv",
+          "sha256": "89e1d1733f1c07fa87cb2f2f8a487230f2ab98bf2bfd8cff76588359b62fad2f",
+          "bytes": 2426
         }
       ]
     }

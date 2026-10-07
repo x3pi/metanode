@@ -1,12 +1,13 @@
 {
   "manifest_version": "1.0",
+  "report": "note/perf_nomt_b1_20261007.md",
   "entries": [
     {
       "id": "b1_microbenchmark_a_vs_b",
       "command": "python3 -u /home/abc/chain-n/metanode/execution/scripts/test/evidence/run_b1_benchmarks.py",
       "cwd": "/home/abc/chain-n/metanode",
       "git_commit": "904519d465c961b7e352c01bf53cc9e44514a504",
-      "git_status": " M execution/pkg/trie/nomt_commit_bench_test.go;?? note/evidence/perf_nomt_b1_20261007/;",
+      "git_status": "",
       "started_at": "2026-10-07T11:32:05Z",
       "finished_at": "2026-10-07T11:34:07Z",
       "exit_code": 0,
@@ -15,6 +16,64 @@
           "path": "b1_microbenchmark_a_vs_b.log",
           "sha256": "da45e54971839b7fc0be62c4004cb772656534cd331e89fdf4e5984310dee2de",
           "bytes": 3834
+        }
+      ],
+      "extract": [
+        {
+          "name": "B1_100_A_mean",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*100\\s*\\|\\s*(\\d+\\.\\d+)\\s*±\\s*(\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "ms"
+        },
+        {
+          "name": "B1_100_A_sd",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*100\\s*\\|\\s*(\\d+\\.\\d+)\\s*±\\s*(\\d+\\.\\d+)",
+          "group": 2,
+          "stat": "raw",
+          "unit": "ms"
+        },
+        {
+          "name": "B1_100_B_mean",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*100\\s*\\|\\s*\\d+\\.\\d+\\s*±\\s*\\d+\\.\\d+\\s*ms\\s*\\|\\s*(\\d+\\.\\d+)\\s*±\\s*(\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "ms"
+        },
+        {
+          "name": "B1_1000_A_mean",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*1000\\s*\\|\\s*(\\d+\\.\\d+)\\s*±\\s*(\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "ms"
+        },
+        {
+          "name": "B1_1000_B_mean",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*1000\\s*\\|\\s*\\d+\\.\\d+\\s*±\\s*\\d+\\.\\d+\\s*ms\\s*\\|\\s*(\\d+\\.\\d+)\\s*±\\s*(\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "ms"
+        },
+        {
+          "name": "B1_5000_A_mean",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*5000\\s*\\|\\s*(\\d+\\.\\d+)\\s*±\\s*(\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "ms"
+        },
+        {
+          "name": "B1_5000_B_mean",
+          "file": "b1_microbenchmark_a_vs_b.log",
+          "regex": "\\|\\s*5000\\s*\\|\\s*\\d+\\.\\d+\\s*±\\s*\\d+\\.\\d+\\s*ms\\s*\\|\\s*(\\d+\\.\\d+)\\s*±\\s*(\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "ms"
         }
       ]
     }
