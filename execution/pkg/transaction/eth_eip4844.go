@@ -267,7 +267,7 @@ func VerifyBlobSidecar(pTx *pb.Transaction) error {
 		}
 
 		if err := kzg4844.VerifyBlobProof(&blob, commitment, proof); err != nil {
-			return fmt.Errorf("blob %d: KZG proof verification failed: %w", i, err)
+			return fmt.Errorf("blob %d: %w: %v", i, ErrInvalidBlobProof, err)
 		}
 	}
 	return nil
