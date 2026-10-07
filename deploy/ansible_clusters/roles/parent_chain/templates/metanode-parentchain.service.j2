@@ -1,12 +1,12 @@
 [Unit]
-Description=MetaNode Parent Chain Consensus and Float State Service (ChainID {{ parent_chain_id | default(991) }})
+Description=MetaNode Parent Chain Consensus and Float State Service - {{ inventory_hostname }} (Node {{ parent_node_id | default(0) }}, ChainID {{ parent_chain_id | default(991) }})
 After=network.target network-online.target
 Wants=network-online.target
 
 [Service]
 EnvironmentFile=-{{ node_data_dir }}/security.env
 Type=simple
-User={{ ansible_user | default('metanode') }}
+User={{ ansible_user | default('abc') }}
 WorkingDirectory={{ node_data_dir }}
 ExecStart={{ bin_dir }}/parent_chain -data-dir {{ node_data_dir }} -http :{{ parent_http_port | default(8547) }} -rust-config {{ node_data_dir }}/node_parent.toml -genesis {{ node_data_dir }}/parent_genesis.json
 ExecStop=/bin/kill -SIGTERM $MAINPID
@@ -16,9 +16,9 @@ TimeoutStopSec=30
 LimitNOFILE=65536
 LimitCORE=infinity
 
-StandardOutput=append:{{ base_log_dir }}/parent_chain.log
-StandardError=append:{{ base_log_dir }}/parent_chain.log
-SyslogIdentifier=metanode-parentchain
+StandardOutput=append:{{ node_data_dir }}/logs/parent_chain.log
+StandardError=append:{{ node_data_dir }}/logs/parent_chain.log
+SyslogIdentifier=metanode-{{ inventory_hostname }}
 
 [Install]
 WantedBy=multi-user.target

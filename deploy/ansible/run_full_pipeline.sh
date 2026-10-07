@@ -231,6 +231,14 @@ fi
 # ==============================================================================
 # BƯỚC 1: DEPLOY PUBLIC CHAIN CLUSTER (ROOT ANCHOR - CHAIN 991)
 # ==============================================================================
+# PR #161 removed deploy/ansible_private_chains (private chains + relayer tmux). This pipeline needs both, so fail fast
+# BEFORE the destructive public-chain reset below instead of dying halfway through.
+if [ ! -d "${METANODE_DIR}/deploy/ansible_private_chains" ]; then
+    echo -e "${RED:-}❌ deploy/ansible_private_chains đã bị gỡ (PR #161): pipeline cross-chain đầy đủ không còn chạy được.${NC:-}" >&2
+    echo "   Chỉ triển khai Public/Parent/Exec cluster: dùng deploy/ansible/ansible_deploy.sh hoặc deploy/ansible_clusters/deploy_clusters.sh." >&2
+    exit 1
+fi
+
 CURRENT_STEP="[Bước 1/6] Triển khai Public Chain (Root Anchor - Chain 991)"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${BOLD}🏗️  [BƯỚC 1/6] TRIỂN KHAI PUBLIC CHAIN CLUSTER (ROOT ANCHOR - CHAIN 991)${NC}"

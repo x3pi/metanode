@@ -397,7 +397,7 @@ impl Core {
                 // Get current commit index from dag_state
                 let current_commit_index = self.dag_state.read().last_commit_index();
 
-                tracing::warn!(
+                tracing::debug!(
                     "🔍 Leader checking for system transactions: epoch={}, commit_index={}",
                     current_epoch,
                     current_commit_index
@@ -435,7 +435,7 @@ impl Core {
             } else {
                 // Not leader - don't inject system transactions
                 // Other nodes will receive the system transaction from the leader's block
-                tracing::warn!(
+                tracing::debug!(
                     "⏭️ Skipping system transaction injection: not leader for round {} (leader={})",
                     clock_round,
                     leader_for_round.value()
@@ -973,11 +973,20 @@ impl Core {
             return (vec![], BTreeSet::new());
         }
 
-        warn!(
-            "Included {} ancestors & excluded {} low performing or equivocating ancestors for proposal in round {clock_round}",
-            ancestors_to_propose.len(),
-            excluded_and_equivocating_ancestors.len()
-        );
+        // Excluding low-performing / equivocating ancestors is a Byzantine-behaviour signal: keep it visible at warn
+        // and only demote the routine "nothing excluded" case.
+        if excluded_and_equivocating_ancestors.is_empty() {
+            debug!(
+                "Included {} ancestors & excluded 0 low performing or equivocating ancestors for proposal in round {clock_round}",
+                ancestors_to_propose.len()
+            );
+        } else {
+            warn!(
+                "Included {} ancestors & excluded {} low performing or equivocating ancestors for proposal in round {clock_round}",
+                ancestors_to_propose.len(),
+                excluded_and_equivocating_ancestors.len()
+            );
+        }
 
         (ancestors_to_propose, excluded_and_equivocating_ancestors)
     }

@@ -18,7 +18,6 @@ ACTION=""
 OPEN_PORTS_FLAG="false"
 RUN_TESTS="false"
 NOTIFY="true"
-USE_SYSTEMD="false"
 EXEC_ONLY="false"
 PARENT_ONLY="false"
 TARGET_NODE=""
@@ -189,7 +188,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --systemd)
-            USE_SYSTEMD="true"
+            # Systemd is now the default and only mode
             shift
             ;;
         --inventory=*)
@@ -364,6 +363,7 @@ stop_cluster_monitors() {
         for pid_dir in /tmp/metanode-monitors-*; do
             if [ -d "$pid_dir" ]; then
                 ns="${pid_dir##*-}"
+                [ "$ns" = "root" ] && continue
                 bash "$MONITOR_SCRIPT" --stop --namespace "$ns" >/dev/null 2>&1 || true
             fi
         done
@@ -482,7 +482,7 @@ run_tests_suite() {
         -i "$INVENTORY" \
         "$PLAYBOOK" \
         --tags test \
-        --extra-vars "run_integration_tests=true deploy_action=test use_systemd=${USE_SYSTEMD} metanode_env=${METANODE_ENV} node_env=${NODE_ENV}" \
+        --extra-vars "run_integration_tests=true deploy_action=test metanode_env=${METANODE_ENV} node_env=${NODE_ENV}" \
         "${VAULT_CLUSTER_ARGS[@]}" \
         "${EXTRA_ANSIBLE_ARGS[@]}" 2>&1 | tee "${test_log}.ansible"
     local test_rc=${PIPESTATUS[0]}
@@ -762,7 +762,7 @@ set +e
 ansible-playbook \
     -i "$INVENTORY" \
     "$PLAYBOOK" \
-    --extra-vars "deploy_action=${ACTION} open_ports=${OPEN_PORTS_FLAG} use_systemd=${USE_SYSTEMD} run_integration_tests=false metanode_env=${METANODE_ENV} node_env=${NODE_ENV}" \
+    --extra-vars "deploy_action=${ACTION} open_ports=${OPEN_PORTS_FLAG} run_integration_tests=false metanode_env=${METANODE_ENV} node_env=${NODE_ENV}" \
     "${VAULT_CLUSTER_ARGS[@]}" \
     "${EXTRA_ANSIBLE_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
 ANSIBLE_RC=${PIPESTATUS[0]}

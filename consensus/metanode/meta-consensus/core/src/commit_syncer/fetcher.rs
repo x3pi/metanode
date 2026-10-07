@@ -10,7 +10,7 @@ use futures::{stream::FuturesOrdered, StreamExt as _};
 use itertools::Itertools as _;
 use rand::{prelude::SliceRandom as _, rngs::ThreadRng};
 use tokio::{runtime::Handle, time::sleep};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use super::{CommitSyncer, Inner};
 use crate::{
@@ -144,7 +144,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 .await
                 {
                     Ok(Ok(commits)) => {
-                        info!("Finished fetching commits in {commit_range:?}");
+                        debug!("Finished fetching commits in {commit_range:?}");
                         return (commit_range.end(), commits);
                     }
                     Ok(Err(e)) => {

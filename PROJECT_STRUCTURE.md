@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-10-07 (Completed all remaining production readiness gaps: P1-1 legacy removal, P1-5 client compatibility, P2-2 benchmarks recorded, Cutover BLS pre-flight rehearsal, P0-6 ci runner; Added cmd/tool/secp_tps_blast benchmark tool for native Secp256k1/EIP-1559 throughput measurement, verified CI secp_tps / tps_blast PASS 100%, and completed NOMT fsync B1 benchmark with 10-round kill -9 zero-fork crash audit, and recorded 3-run baseline vs HEAD comparison with 5-minute sustained 304,000 tx zero-fork audit in note/perf_secp_tps_20261007.md).
+> **Last updated:** 2026-10-07 (PR #161: removed `deploy/ansible_private_chains/` and the Parent Chain orchestration from `ansible_deploy.sh`; cluster deploys are systemd-only via `deploy/ansible_clusters/`; consensus log levels demoted except quorum-bypass audit and equivocation warnings).
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 ---
 
@@ -28,7 +28,6 @@ metanode/
 │   │   │   ├── block_hash_checker/  ← Real-time multi-node block hash synchronization monitor
 │   │   │   └── start_monitors.sh    ← Background daemon manager for all monitors
 │   │   └── stop_all.sh     ← Script to stop all background deployment processes
-│   ├── ansible_private_chains/ ← Decoupled Ansible manager for Multi-Machine Private Chains
 │   ├── ansible_clusters/   ← Ansible automation for Parent Chain & Sharded Execution Clusters with Telegram alerts
 │   │   └── scripts/parse_inventory.py ← Merges public + cluster endpoints into /tmp/rpc_nodes.json; roles/testing reads root_anchor + private_chains URLs
 │   └── systemd/            ← Systemd deployment scripts, key generators (gen_validator_entry.py, gen_private_chain.py), and env templates

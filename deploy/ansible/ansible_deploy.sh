@@ -727,15 +727,75 @@ if [ -n "$BTRFS_SIZE_VAL" ]; then
     EXTRA_VARS="${EXTRA_VARS} btrfs_size='${BTRFS_SIZE_VAL}'"
 fi
 
-# Detect become password from inventory for localhost become tasks (devnet only).
-# SECURITY: pass it via the ANSIBLE_BECOME_PASS env var, NOT `-e ansible_become_pass=...`
-# on the ansible-playbook command line -- `-e` extra-vars are visible in plaintext to any
-# local user via `ps aux`/`/proc/<pid>/cmdline` for the whole run. The env var achieves the
-# same effect (ansible-playbook reads it automatically) without that exposure.
-INVENTORY_BECOME_PASS=$(grep -E '^\s*ansible_become_pass:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
-if [ -n "$INVENTORY_BECOME_PASS" ] && [ "$INVENTORY_BECOME_PASS" != "!vault" ] && [[ "$INVENTORY_BECOME_PASS" != \{\{* ]]; then
-    export ANSIBLE_BECOME_PASS="$INVENTORY_BECOME_PASS"
+# Detect become password from inventory for localhost become tasks.
+# Supports both plaintext and Ansible Vault encrypted strings (!vault | ...).
+SUDO_CHECK_OUTPUT=$(python3 - "$INVENTORY" "${SCRIPT_DIR}/.vault_pass" << 'EOF' 2>/dev/null || echo "CHECK_FAILED"
+import sys, os, re, subprocess
+from ansible.parsing.vault import VaultLib, VaultSecret
+from ansible.constants import DEFAULT_VAULT_ID_MATCH
+
+inv_path = sys.argv[1]
+vault_file = sys.argv[2]
+
+pwd = os.environ.get('ANSIBLE_BECOME_PASS', '')
+vault_candidates = [vault_file, os.path.join(os.path.dirname(inv_path), '.vault_pass'), os.path.expanduser('~/.vault_pass')]
+if not pwd:
+    for vf in vault_candidates:
+        if os.path.exists(vf) and os.path.exists(inv_path):
+            try:
+                with open(vf, 'rb') as f:
+                    vpass = f.read().strip()
+                vault = VaultLib([(DEFAULT_VAULT_ID_MATCH, VaultSecret(vpass))])
+                with open(inv_path) as f:
+                    text = f.read()
+                m = re.search(r'ansible_become_pass:\s*!vault\s*\|\s*\n([\s\S]+?)(?=\n\s*[a-zA-Z_#]|\Z)', text)
+                if m:
+                    lines = [line.strip() for line in m.group(1).splitlines() if line.strip()]
+                    pwd = vault.decrypt('\n'.join(lines)).decode('utf-8')
+                    if pwd:
+                        break
+            except Exception:
+                continue
+
+if not pwd and os.path.exists(inv_path):
+    with open(inv_path) as f:
+        for line in f:
+            if 'ansible_become_pass:' in line and '!vault' not in line:
+                val = line.split('ansible_become_pass:', 1)[1].strip().strip('"\'')
+                if val and not val.startswith('{{'):
+                    pwd = val
+                    break
+
+if pwd:
+    try:
+        p = subprocess.run(['sudo', '-S', '-v'], input=(pwd + '\n').encode('utf-8'), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+        if p.returncode == 0:
+            print('OK:' + pwd)
+            sys.exit(0)
+    except Exception:
+        pass
+
+if subprocess.run(['sudo', '-n', 'true'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+    print('OK')
+    sys.exit(0)
+
+print('NO_PASS')
+EOF
+)
+
+if [[ "$SUDO_CHECK_OUTPUT" =~ ^OK:(.*) ]]; then
+    export ANSIBLE_BECOME_PASS="${BASH_REMATCH[1]}"
 fi
+
+run_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo "$@"
+    elif [ -n "${ANSIBLE_BECOME_PASS:-}" ]; then
+        echo "${ANSIBLE_BECOME_PASS}" | sudo -S "$@"
+    else
+        sudo "$@"
+    fi
+}
 
 # Check for plaintext credentials using centralized validator (Issue #104)
 if [ -f "${SCRIPT_DIR}/check_inventory_security.py" ] && [ -f "$INVENTORY" ]; then
@@ -795,78 +855,6 @@ if [ "$ACTION" == "gen_keys" ]; then
     exit $exit_code
 fi
 
-# ─── PARENT CHAIN ORCHESTRATION ───────────────────────────────────────────
-stop_parent_chain() {
-    if pgrep -f "/opt/metanode/bin/parent_chain" >/dev/null 2>&1; then
-        echo -e "\n🏛️ [PARENT CHAIN] Đang dừng cụm Parent Chain..."
-        pkill -9 -f "/opt/metanode/bin/parent_chain" 2>/dev/null || true
-        for i in 0 1 2 3; do
-            rm -f "/opt/metanode/parent_chain_${i}/parent_chain.pid" 2>/dev/null || true
-        done
-        echo "✅ [PARENT CHAIN] Đã dừng toàn bộ Parent Chain."
-    fi
-}
-
-clean_parent_chain_data() {
-    stop_parent_chain
-    if [ -d "/opt/metanode/parent_chain_0" ]; then
-        echo -e "🧹 [PARENT CHAIN] Dọn dẹp dữ liệu cũ của Parent Chain (reset-all)..."
-        rm -rf /opt/metanode/parent_chain_*/parentchain_db /opt/metanode/parent_chain_*/consensus /opt/metanode/parent_chain_*/rocksdb_dummy_init 2>/dev/null || true
-    fi
-}
-
-start_parent_chain() {
-    if [ ! -d "/opt/metanode/parent_chain_0" ] || [ ! -f "/opt/metanode/bin/parent_chain" ]; then
-        return 0
-    fi
-    local base_http_port
-    base_http_port=$(grep -E '^\s*parent_chain_http_port:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
-    base_http_port="${base_http_port:-18601}"
-
-    echo -e "\n🏛️ [PARENT CHAIN] Khởi động cụm Parent Chain (BFT Consensus, Chain ID 991, HTTP ${base_http_port}..$((base_http_port + 3)))..."
-    stop_parent_chain
-    sleep 1
-    for i in 0 1 2 3; do
-        if [ -d "/opt/metanode/parent_chain_${i}" ]; then
-            # Đảm bảo chain_id trong parent_genesis.json luôn là 991 (đồng bộ với Child Chain)
-            if [ -f "/opt/metanode/parent_chain_${i}/parent_genesis.json" ]; then
-                sed -i 's/"chain_id": 990/"chain_id": 991/g' "/opt/metanode/parent_chain_${i}/parent_genesis.json" 2>/dev/null || true
-            fi
-            cd "/opt/metanode/parent_chain_${i}"
-            nohup /opt/metanode/bin/parent_chain \
-                -data-dir "/opt/metanode/parent_chain_${i}" \
-                -http ":$((base_http_port + i))" \
-                -rust-config "/opt/metanode/parent_chain_${i}/node_parent.toml" \
-                -genesis "/opt/metanode/parent_chain_${i}/parent_genesis.json" \
-                >> "/var/log/metanode/parent_chain_${i}.log" 2>&1 &
-            echo $! > "/opt/metanode/parent_chain_${i}/parent_chain.pid"
-        fi
-    done
-    # Chờ port base_http_port sẵn sàng
-    local retries=15
-    local ready=false
-    while [ $retries -gt 0 ]; do
-        if curl -s "http://127.0.0.1:${base_http_port}/status" 2>/dev/null | grep -q "chain_id"; then
-            ready=true
-            break
-        fi
-        sleep 1
-        retries=$((retries - 1))
-    done
-    if [ "$ready" == "true" ]; then
-        echo -e "✅ [PARENT CHAIN] Parent Chain đã sẵn sàng tại http://127.0.0.1:${base_http_port} (Chain ID: 991)"
-    else
-        echo -e "⚠️ [PARENT CHAIN] Chưa nhận được phản hồi từ http://127.0.0.1:${base_http_port}/status sau 15s"
-    fi
-}
-
-if [ "$ACTION" != "open_ports" ] && [[ "$TARGET_NODE" == "all" || -z "$TARGET_NODE" ]]; then
-    if [ "$KEEP_DATA" == "false" ]; then
-        clean_parent_chain_data
-    elif [ "$ACTION" == "stop" ]; then
-        stop_parent_chain
-    fi
-fi
 
 if [ "$ACTION" != "open_ports" ] && [ "$MANAGE_GLOBAL_MONITORS" = "true" ]; then
     echo -e "\n⏸ Tạm dừng Health Monitor trên toàn bộ cụm trong quá trình Deploy để tránh cảnh báo sai..."
@@ -954,21 +942,6 @@ if [ $ansible_exit -eq 0 ]; then
     echo -e "\n🌐 Danh sách Node TCP (Consensus P2P):"
     echo "$TCP_NODES_LIST"
 
-    # Khởi động cụm Parent Chain nếu triển khai toàn cụm
-    if [[ "$ACTION" =~ ^(setup|deploy|start|restart)$ ]] && [[ "$TARGET_NODE" == "all" || -z "$TARGET_NODE" ]]; then
-        start_parent_chain
-    fi
-
-    if [ -d "/opt/metanode/parent_chain_0" ]; then
-        p_port=$(grep -E '^\s*parent_chain_http_port:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
-        p_port="${p_port:-18601}"
-        p_ip="${DEPLOY_IP:-127.0.0.1}"
-        echo -e "\n🏛️ Danh sách Parent Chain RPC (IP & Port):"
-        echo -e "  • parent_chain_0: http://${p_ip}:${p_port} (Chain ID: 991, BFT Leader)"
-        echo -e "  • parent_chain_1: http://${p_ip}:$((p_port + 1)) (Chain ID: 991, Replica)"
-        echo -e "  • parent_chain_2: http://${p_ip}:$((p_port + 2)) (Chain ID: 991, Replica)"
-        echo -e "  • parent_chain_3: http://${p_ip}:$((p_port + 3)) (Chain ID: 991, Replica)"
-    fi
 
     # Tự động đồng bộ cấu hình sang metanode-suite (update-ip.sh)
     UPDATE_IP_SCRIPT="${SCRIPT_DIR}/../../../metanode-suite/scripts/update-ip/update-ip.sh"
@@ -1051,7 +1024,6 @@ if [ "$ACTION" != "open_ports" ] && [ "$MANAGE_GLOBAL_MONITORS" = "true" ]; then
         fi
     elif [ "$ACTION" == "stop" ]; then
         echo -e "\n⏸ Không bật lại Health Monitor vì hệ thống đang ở trạng thái STOP..."
-        stop_parent_chain
         pkill -f "[v]ote_monitor" || true
         if [ "$ALL_MONITORS" == "true" ]; then
             ansible metanode_cluster -i "$INVENTORY" -m shell -a "pkill -f '[s]tart_monitors.sh' || true; pkill -f '[b]lock_hash_checker' || true; pkill -f '[v]ote_monitor' || true" >/dev/null 2>&1 || true

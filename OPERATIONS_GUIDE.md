@@ -1,4 +1,6 @@
 # 📖 SỔ TAY VẬN HÀNH & HƯỚNG DẪN TRIỂN KHAI TOÀN DIỆN
+
+> ⚠️ **Đã gỡ (PR #161):** thư mục `deploy/ansible_private_chains/` (private chains, `deploy_private_chains.sh`, `run_relayer_tmux.sh`, `fetch_node_logs.sh`) đã bị xoá khỏi repo. Các hướng dẫn tham chiếu tới nó bên dưới chỉ còn giá trị lịch sử; dùng `deploy/ansible_clusters/deploy_clusters.sh` cho cụm Execution/Parent.
 ### HỆ THỐNG BLOCKCHAIN METANODE (PUBLIC ROOT ANCHOR + PRIVATE CHAINS + CROSS-CHAIN RELAYER)
 
 ---
