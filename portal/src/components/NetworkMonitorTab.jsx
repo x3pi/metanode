@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Activity,
   CheckCircle2,
@@ -26,7 +26,7 @@ export function NetworkMonitorTab({ allClusters }) {
   const [clusterMetrics, setClusterMetrics] = useState(null);
   const [metricsLoading, setMetricsLoading] = useState(false);
 
-  const fetchAllNodes = async () => {
+  const fetchAllNodes = useCallback(async () => {
     setIsRefreshing(true);
     const results = {};
     for (const cluster of clusters) {
@@ -35,13 +35,13 @@ export function NetworkMonitorTab({ allClusters }) {
     setNodesStatus(results);
     setLastRefreshed(new Date().toLocaleTimeString());
     setIsRefreshing(false);
-  };
+  }, [clusters]);
 
   useEffect(() => {
     fetchAllNodes();
     const interval = setInterval(fetchAllNodes, 5000);
     return () => clearInterval(interval);
-  }, [clusters.length]);
+  }, [fetchAllNodes]);
 
   // Open Metrics Inspector for a cluster
   const handleInspectMetrics = async (cluster) => {

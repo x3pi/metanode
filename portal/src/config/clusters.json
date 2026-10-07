@@ -1,10 +1,19 @@
 {
-  "defaultHost": "192.168.1.234",
-  "defaultClusterId": "exec1",
+  "defaultHost": "127.0.0.1",
+  "defaultClusterId": "local_exec1",
   "clusters": [
     {
+      "id": "local_exec1",
+      "name": "Local Execution Node (Port 8646)",
+      "chainId": 991,
+      "rpcUrl": "http://127.0.0.1:8646",
+      "clusterKey": "0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128",
+      "isExec": true,
+      "accountGate": true
+    },
+    {
       "id": "exec1",
-      "name": "Execution Cluster 1 (HA Raft, Port 8747)",
+      "name": "Ansible Cluster 1 (HA Raft, Port 8747)",
       "chainId": 991,
       "rpcUrl": "http://192.168.1.234:8747",
       "clusterKey": "0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128",

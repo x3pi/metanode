@@ -1,16 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   ShieldCheck,
-  ShieldAlert,
   ShieldX,
   KeyRound,
   ArrowRight,
   CheckCircle2,
   Clock,
-  ExternalLink,
-  Layers,
   Sparkles,
-  Cpu,
   Eye,
   EyeOff,
   Copy,
