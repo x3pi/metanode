@@ -82,6 +82,18 @@ var (
 		Name: "master_raw_eth_txs_rejected_total",
 		Help: "Total rejected raw Ethereum transactions, labeled by error code",
 	}, []string{"code"})
+
+	// BlockGasCacheHitsTotal counts cache hits in getBlockGasInfo.
+	BlockGasCacheHitsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "master_rpc_block_gas_cache_hits_total",
+		Help: "Total number of cache hits in RPC block gas calculation",
+	})
+
+	// BlockGasCacheMissesTotal counts cache misses in getBlockGasInfo.
+	BlockGasCacheMissesTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "master_rpc_block_gas_cache_misses_total",
+		Help: "Total number of cache misses in RPC block gas calculation",
+	})
 )
 
 // ─── Gauges ──────────────────────────────────────────────────────────────────

@@ -520,8 +520,8 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 				}
 			}
 		}
-	}
-	if cumulativeGasUsed == 0 {
+	} else {
+		logger.Warn("⚠️ [RPC-RECEIPT] getBlockGasInfo returned nil for block %v, falling back to rcp.GasUsed() for tx %v", blockData.Header().Hash().Hex(), searchHash.Hex())
 		cumulativeGasUsed = rcp.GasUsed()
 	}
 
