@@ -147,12 +147,12 @@ tests:
   # 4. BÀI TEST TPS CAO ĐIỂM (BENCHMARK THROUGHPUT - PUBLIC CHAIN)
   # ----------------------------------------------------------------------------
   - id: "tps_blast"
-    name: "TPS Blast Benchmark (Public Chain)"
+    name: "TPS Blast Benchmark (Native Secp256k1 / EIP-1559)"
     enabled: true
-    # Tự động nạp keys vào genesis, reset cụm Public Chain sạch để đo Max TPS tuyệt đối
-    pre_action: "prepare_tps"
-    cwd: "test_tps/tps_blast_cc"
-    command: "./run_tps_test.sh --chain public --no-reset --count 25000 --rounds 1 --load_balance=true --batch=2000 --amount 1"
+    # Tự động nạp keys vào genesis, reset cụm sạch để đo Max TPS tuyệt đối
+    pre_action: "none"
+    cwd: "execution"
+    command: "go run ./cmd/tool/secp_tps_blast -nodes-config /tmp/rpc_nodes.exec1.json -count 25000 -batch 1000 -rounds 1 -verify-parity"
     timeout_seconds: 900
     continue_on_failure: false
 

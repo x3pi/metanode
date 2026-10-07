@@ -19,6 +19,8 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
+	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -26,7 +28,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	mt_types "github.com/meta-node-blockchain/meta-node/types"
-	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
 // getBlockGasInfo returns the cached BlockGasInfo or computes and caches it.
@@ -37,8 +38,10 @@ func (api *MetaAPI) getBlockGasInfo(block mt_types.Block) *BlockGasInfo {
 	blockHash := block.Header().Hash()
 	if api != nil && api.blockGasCache != nil {
 		if info, ok := api.blockGasCache.Get(blockHash); ok && info != nil {
+			metrics.BlockGasCacheHitsTotal.Inc()
 			return info
 		}
+		metrics.BlockGasCacheMissesTotal.Inc()
 	}
 
 	txs := block.Transactions()
@@ -71,9 +74,11 @@ func (api *MetaAPI) getBlockGasInfo(block mt_types.Block) *BlockGasInfo {
 	var runningGas uint64
 	for i, txH := range txs {
 		rcp, err := rcpDb.GetReceipt(txH)
-		if err == nil && rcp != nil {
-			runningGas += rcp.GasUsed()
+		if err != nil || rcp == nil {
+			logger.Warn("⚠️ [RPC-GAS] missing receipt for tx %v in block %v (err=%v): aborting gas calculation to avoid caching corrupt state", txH.Hex(), blockHash.Hex(), err)
+			return nil
 		}
+		runningGas += rcp.GasUsed()
 		cumGas[i] = runningGas
 	}
 
@@ -118,7 +123,7 @@ func MarshalBlockToMapWithGas(block mt_types.Block, fullTx bool, fetchTx func(co
 	}
 	blockMap["gasUsed"] = hexutil.EncodeUint64(totalBlockGasUsed) // Gas đã sử dụng trong khối
 
-	blockMap["timestamp"] = hexutil.EncodeUint64(block.Header().TimeStamp() / 1000) // Thời gian tạo khối (giây)
+	blockMap["timestamp"] = hexutil.EncodeUint64(block.Header().TimeStamp() / 1000)  // Thời gian tạo khối (giây)
 	blockMap["extraData"] = "0x"                                                     // Dữ liệu bổ sung
 	blockMap["mixHash"] = common.Hash{}                                              // Hash của proof-of-work
 	blockMap["nonce"] = "0x0000000000000000"                                         // Nonce của khối
@@ -126,8 +131,8 @@ func MarshalBlockToMapWithGas(block mt_types.Block, fullTx bool, fetchTx func(co
 	blockMap["withdrawalsRoot"] = trie.EmptyRootHash                                 // Root của Merkle Patricia Trie chứa các giao dịch rút tiền (EIP-3675)
 	blockMap["blobGasUsed"] = hexutil.EncodeUint64(block.Header().BlobGasUsed())     // Gas đã sử dụng cho blobs (EIP-4844)
 	blockMap["excessBlobGas"] = hexutil.EncodeUint64(block.Header().ExcessBlobGas()) // Gas dư thừa cho blobs (EIP-4844)
-	blockMap["parentBeaconBlockRoot"] = common.Hash{}                        // Root của khối beacon cha (trong trường hợp sharding)
-	blockMap["totalDifficulty"] = hexutil.EncodeUint64(0)                    // Tổng độ khó của chuỗi cho đến khối này
+	blockMap["parentBeaconBlockRoot"] = common.Hash{}                                // Root của khối beacon cha (trong trường hợp sharding)
+	blockMap["totalDifficulty"] = hexutil.EncodeUint64(0)                            // Tổng độ khó của chuỗi cho đến khối này
 
 	// ═══════════════════════════════════════════════════════════════════════
 	// CUSTOM FIELDS: Not part of ETH standard, but included for debugging.
@@ -989,4 +994,3 @@ func (api *MetaAPI) GetCommitVotes(ctx context.Context, commitIndex uint32) (map
 	}
 	return result, nil
 }
-
