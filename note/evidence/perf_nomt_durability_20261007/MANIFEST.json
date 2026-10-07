@@ -99,6 +99,8 @@
       "header_marker": "Block kiểm tra",
       "columns": {
         "Vòng": "Round",
+        "Delay": "KillTiming",
+        "Exit Code": "RestartExitCode",
         "Quorum Pause": "QuorumPause",
         "H_before": "H_before",
         "Block kiểm tra": "CheckBlock",

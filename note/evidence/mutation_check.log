@@ -1,12 +1,12 @@
 ==================================================================
-🧪 RUNNING MUTATION AUDIT ON verify_evidence.py
+🧪 PART 1: FIXED REGRESSION MUTATION SUITE
 ==================================================================
 ▶️ [BASELINE] Checking unmutated reports...
   • Durability baseline: PASS (exit 0)
   • B1 baseline:         PASS (exit 0)
   • RSS baseline:        PASS (exit 0)
 
-▶️ [MUTATIONS] Executing reviewer mutation matrix...
+▶️ [MUTATIONS] Executing fixed regression mutation cases...
   [1] CAUGHT: Durability: Mutate CheckBlock #310 -> #999
   [2] CAUGHT: Durability: Mutate BlockHash 0xa50c... -> 0xdeadbeef...
   [3] CAUGHT: Durability: Mutate QuorumPause PAUSED_AT_#318 -> PAUSED_AT_#999
@@ -23,5 +23,38 @@
   [14] CAUGHT: RSS: Mutate EthHashMap Wave 1 InUse 5.98 -> 1.23 MB
 
 ==================================================================
-📊 MUTATION AUDIT SUMMARY: 14 / 14 CAUGHT (100%)
-🎉 100% OF MUTATIONS CAUGHT! verify_evidence.py is AIRTIGHT.
+📊 FIXED REGRESSION SUMMARY: 14 / 14 CAUGHT
+==================================================================
+
+==================================================================
+🎲 PART 2: RANDOMIZED FUZZ MUTATION AUDIT (Seed: 11)
+==================================================================
+==================================================================
+🎲 FUZZ MUTATION COVERAGE AUDIT (Seed: 11, Sample: 60)
+==================================================================
+
+▶️ Auditing manifest: note/evidence/perf_nomt_b1_20261007/MANIFEST.json
+   Report: note/perf_nomt_b1_20261007.md
+   Tokens found: 102 | Tested: 60
+   Caught: 60 | Missed: 0
+   Catch Rate: 100.00%
+
+▶️ Auditing manifest: note/evidence/perf_nomt_durability_20261007/MANIFEST.json
+   Report: note/perf_nomt_durability_20261007.md
+   Tokens found: 85 | Tested: 60
+   Caught: 60 | Missed: 0
+   Catch Rate: 100.00%
+
+▶️ Auditing manifest: note/evidence/perf_rss_20261007/MANIFEST.json
+   Report: note/perf_rss_investigation_20261007.md
+   Tokens found: 406 | Tested: 60
+   Caught: 60 | Missed: 0
+   Catch Rate: 100.00%
+
+==================================================================
+📊 OVERALL FUZZ AUDIT SUMMARY (Seed: 11):
+   Total Tested: 180
+   Total Caught: 180
+   Total Missed: 0
+   Overall Catch Rate: 100.00%
+==================================================================

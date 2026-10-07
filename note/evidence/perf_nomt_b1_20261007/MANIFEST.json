@@ -16,6 +16,21 @@
           "path": "b1_microbenchmark_a_vs_b.log",
           "sha256": "da45e54971839b7fc0be62c4004cb772656534cd331e89fdf4e5984310dee2de",
           "bytes": 3834
+        },
+        {
+          "path": "b1_iterations_pivot.csv",
+          "sha256": "c3b4c3eee731704fdadf0cbb4dac6bf8117d6ebc02a7aaf24d87ea55fe0db15b",
+          "bytes": 513
+        },
+        {
+          "path": "b1_fsync_summary.csv",
+          "sha256": "345b76cab38bef9a6af63bc1ec8ec03f996f80fde96225a16fb1d57156933534",
+          "bytes": 86
+        },
+        {
+          "path": "b1_summary_keys.csv",
+          "sha256": "534be7d7589595e686cb39effc0b811a648d31a4b69efeb50bbba24353b07b51",
+          "bytes": 260
         }
       ],
       "extract": [
@@ -172,6 +187,72 @@
           "unit": "df"
         }
       ]
+    }
+  ],
+  "tables": [
+    {
+      "name": "B1 Iterations Table",
+      "file": "b1_iterations_pivot.csv",
+      "header_marker": "100 Keys (A / B)",
+      "columns": {
+        "Lượt": "Round",
+        "100 Keys (A / B)": {
+          "type": "composite_ab_ratio",
+          "a_col": "A_100",
+          "b_col": "B_100",
+          "ratio_col": "Ratio_100"
+        },
+        "1,000 Keys (A / B)": {
+          "type": "composite_ab_ratio",
+          "a_col": "A_1000",
+          "b_col": "B_1000",
+          "ratio_col": "Ratio_1000"
+        },
+        "5,000 Keys (A / B)": {
+          "type": "composite_ab_ratio",
+          "a_col": "A_5000",
+          "b_col": "B_5000",
+          "ratio_col": "Ratio_5000"
+        }
+      }
+    },
+    {
+      "name": "B1 Fsync Table",
+      "file": "b1_fsync_summary.csv",
+      "header_marker": "Số lần gọi",
+      "columns": {
+        "Cấu hình": "Config",
+        "Số lần gọi": "Calls",
+        "Thời gian trung bình": "Usecs",
+        "Tổng thời gian": "Secs"
+      }
+    },
+    {
+      "name": "B1 Summary Table",
+      "file": "b1_summary_keys.csv",
+      "header_marker": "Số Keys",
+      "columns": {
+        "Số Keys": "Keys",
+        "Cấu hình A Mean ± SD": {
+          "type": "composite_mean_sd",
+          "mean_col": "A_Mean",
+          "sd_col": "A_SD"
+        },
+        "Cấu hình B Mean ± SD": {
+          "type": "composite_mean_sd",
+          "mean_col": "B_Mean",
+          "sd_col": "B_SD"
+        },
+        "Tỷ lệ B/A": "Ratio",
+        "Chênh lệch B vs A (%)": "DiffPct",
+        "Welch t (df)": {
+          "type": "composite_welch_t",
+          "t_col": "T_Stat",
+          "df_col": "DF",
+          "p_col": "P_Bound"
+        },
+        "Ngưỡng Cho phép": "Threshold"
+      }
     }
   ]
 }

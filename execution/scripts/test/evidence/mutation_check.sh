@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Mutation Test Runner for verify_evidence.py
-# Systematically mutates numbers, hashes, claims, and tags in markdown reports
-# and verifies that 100% of mutations are CAUGHT (exit code != 0).
+# Fixed Regression Suite & Fuzz Mutation Runner for verify_evidence.py
+# 1. Runs deterministic regression mutations on known edge cases.
+#    (Note: This fixed set is for regression only and does not represent overall coverage).
+# 2. Runs randomized fuzz mutation coverage via fuzz_mutation_check.py.
 # ==============================================================================
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 cd "$REPO_ROOT"
 
+SEED="${1:-11}"
+
 VERIFY_PY="execution/scripts/test/evidence/verify_evidence.py"
+FUZZ_PY="execution/scripts/test/evidence/fuzz_mutation_check.py"
 TMP_DIR=$(mktemp -d /tmp/mutation_check_XXXXXX)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -69,7 +73,7 @@ with open('$tmp_rep', 'w', encoding='utf-8') as f:
 }
 
 echo "=================================================================="
-echo "🧪 RUNNING MUTATION AUDIT ON verify_evidence.py"
+echo "🧪 PART 1: FIXED REGRESSION MUTATION SUITE"
 echo "=================================================================="
 
 # 0. Baseline Clean Checks (Must all pass / exit 0)
@@ -79,7 +83,7 @@ python3 "$VERIFY_PY" "$B1_DIR" --strict >/dev/null && echo "  • B1 baseline:  
 python3 "$VERIFY_PY" "$RSS_DIR" --strict >/dev/null && echo "  • RSS baseline:        PASS (exit 0)"
 
 echo ""
-echo "▶️ [MUTATIONS] Executing reviewer mutation matrix..."
+echo "▶️ [MUTATIONS] Executing fixed regression mutation cases..."
 
 # --- Durability Mutations ---
 run_mutation "$DUR_DIR" "$DUR_REP" \
@@ -145,12 +149,17 @@ run_mutation "$RSS_DIR" "$RSS_REP" \
 
 echo ""
 echo "=================================================================="
-echo "📊 MUTATION AUDIT SUMMARY: $CAUGHT / $TOTAL CAUGHT ($(( CAUGHT * 100 / TOTAL ))%)"
-if [ "$MISSED" -eq 0 ]; then
-    echo "🎉 100% OF MUTATIONS CAUGHT! verify_evidence.py is AIRTIGHT."
-    exit 0
-else
-    echo "❌ $MISSED MUTATIONS MISSED!"
+echo "📊 FIXED REGRESSION SUMMARY: $CAUGHT / $TOTAL CAUGHT"
+echo "=================================================================="
+
+if [ "$MISSED" -ne 0 ]; then
+    echo "❌ $MISSED regression mutations were missed!"
     exit 1
 fi
+
+echo ""
 echo "=================================================================="
+echo "🎲 PART 2: RANDOMIZED FUZZ MUTATION AUDIT (Seed: $SEED)"
+echo "=================================================================="
+python3 "$FUZZ_PY" --seed "$SEED" --sample 60
+

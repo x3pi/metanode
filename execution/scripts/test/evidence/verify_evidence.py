@@ -185,6 +185,159 @@ def extract_values_from_file(evidence_dir, ext_def):
 
     return None, "Extractor must specify either 'regex' or 'csv_col'"
 
+def match_table_cell(raw_md_cell, csv_row, col_rule):
+    clean_md = raw_md_cell.replace("**", "").replace("*", "").replace("`", "").strip()
+    if clean_md == "":
+        return True, None
+
+    # Rule can be string (csv_col) or dict with advanced matching
+    if isinstance(col_rule, str):
+        csv_col = col_rule
+        rule_type = "auto"
+        tol = 0.05
+    else:
+        csv_col = col_rule.get("csv_col")
+        rule_type = col_rule.get("type", "auto")
+        tol = col_rule.get("tolerance", 0.05)
+
+    # 1. Composite A / B (ratio) mode (for B1 benchmark)
+    if rule_type == "composite_ab_ratio" or (isinstance(col_rule, dict) and "a_col" in col_rule):
+        a_col = col_rule["a_col"]
+        b_col = col_rule["b_col"]
+        ratio_col = col_rule["ratio_col"]
+
+        m = re.search(r'([0-9\.]+)\s*ms\s*/\s*([0-9\.]+)\s*ms\s*\(\s*([0-9\.]+)\s*\)', clean_md)
+        if not m:
+            return False, f"Failed to parse composite cell '{clean_md}'"
+        v_a, v_b, v_ratio = float(m.group(1)), float(m.group(2)), float(m.group(3))
+        exp_a = float(csv_row.get(a_col, 0))
+        exp_b = float(csv_row.get(b_col, 0))
+        exp_ratio = float(csv_row.get(ratio_col, 0))
+
+        if abs(v_a - exp_a) > 1e-3:
+            return False, f"A mismatch: {v_a} vs CSV {exp_a}"
+        if abs(v_b - exp_b) > 1e-3:
+            return False, f"B mismatch: {v_b} vs CSV {exp_b}"
+        if abs(v_ratio - exp_ratio) > 1e-3:
+            return False, f"Ratio mismatch: {v_ratio} vs CSV {exp_ratio}"
+        return True, None
+
+    # 2. Composite Mean +- SD mode (for B1 summary table)
+    if rule_type == "composite_mean_sd" or (isinstance(col_rule, dict) and "mean_col" in col_rule):
+        mean_col = col_rule["mean_col"]
+        sd_col = col_rule["sd_col"]
+        m = re.search(r'([0-9\.]+)\s*±\s*([0-9\.]+)', clean_md)
+        if not m:
+            return False, f"Failed to parse Mean +- SD cell '{clean_md}'"
+        v_mean, v_sd = float(m.group(1)), float(m.group(2))
+        exp_mean = float(csv_row.get(mean_col, 0))
+        exp_sd = float(csv_row.get(sd_col, 0))
+        if abs(v_mean - exp_mean) > 1e-3:
+            return False, f"Mean mismatch: {v_mean} vs CSV {exp_mean}"
+        if abs(v_sd - exp_sd) > 1e-3:
+            return False, f"SD mismatch: {v_sd} vs CSV {exp_sd}"
+        return True, None
+
+    # 3. Composite Welch t (df) mode: e.g. "t = 0.34 (df = 7.8, p > 0.05)"
+    if rule_type == "composite_welch_t" or (isinstance(col_rule, dict) and "t_col" in col_rule):
+        t_col = col_rule.get("t_col", "T_Stat")
+        df_col = col_rule.get("df_col", "DF")
+        p_col = col_rule.get("p_col", "P_Bound")
+        m = re.search(r't\s*=\s*([+-]?[0-9\.]+)\s*\(\s*df\s*=\s*([0-9\.]+)\s*,\s*p\s*>\s*([0-9\.]+)\s*\)', clean_md)
+        if not m:
+            return False, f"Failed to parse composite Welch t cell '{clean_md}'"
+        v_t, v_df, v_p = float(m.group(1)), float(m.group(2)), float(m.group(3))
+        exp_t = float(csv_row.get(t_col, 0))
+        exp_df = float(csv_row.get(df_col, 0))
+        exp_p = float(csv_row.get(p_col, 0.05))
+        if abs(v_t - exp_t) > 0.01:
+            return False, f"T mismatch: {v_t} vs CSV {exp_t}"
+        if abs(v_df - exp_df) > 0.01:
+            return False, f"DF mismatch: {v_df} vs CSV {exp_df}"
+        if abs(v_p - exp_p) > 0.001:
+            return False, f"P threshold mismatch: {v_p} vs CSV {exp_p}"
+        return True, None
+
+    # 4. Constant value comparison
+    if rule_type == "constant" or (isinstance(col_rule, dict) and "value" in col_rule):
+        exp_val = float(col_rule.get("value", 0))
+        m_num = re.search(r'([+-]?[0-9]+(?:\.[0-9]+)?)', clean_md.replace(",", ""))
+        if not m_num:
+            return False, f"No number found in constant cell: '{clean_md}'"
+        v_num = float(m_num.group(1))
+        if abs(v_num - exp_val) > 1e-3:
+            return False, f"Constant mismatch: {v_num} vs expected {exp_val}"
+        return True, None
+
+    # 5. Wave label comparison (e.g. Baseline -> 0, Wave 1 -> 1)
+    if rule_type == "wave_label" or (isinstance(col_rule, dict) and "wave_col" in col_rule):
+        wave_col = col_rule.get("wave_col", "Wave")
+        exp_wave = str(csv_row.get(wave_col, "")).strip()
+        if "Baseline" in clean_md:
+            if exp_wave != "0":
+                return False, f"Wave mismatch: Baseline vs CSV Wave {exp_wave}"
+            return True, None
+        m_w = re.search(r'Wave\s*(\d+)', clean_md)
+        if not m_w:
+            return False, f"Wave label format mismatch: '{clean_md}'"
+        v_wave = m_w.group(1)
+        if v_wave != exp_wave:
+            return False, f"Wave mismatch: {v_wave} vs CSV Wave {exp_wave}"
+        return True, None
+
+    exp_csv = str(csv_row.get(csv_col, "")).strip()
+
+    # Exact string match
+    if clean_md == exp_csv:
+        return True, None
+
+    # Prefix match (e.g. 0xa50c... vs 0xa50c39fa...)
+    if clean_md.endswith("...") and exp_csv.startswith(clean_md[:-3]):
+        return True, None
+    if exp_csv.endswith("...") and clean_md.startswith(exp_csv[:-3]):
+        return True, None
+
+    # Strip prefixes like #, R
+    if clean_md.lstrip('#').lstrip('R') == exp_csv.lstrip('#').lstrip('R'):
+        return True, None
+    if clean_md == f"#{exp_csv}" or clean_md == f"R{exp_csv}":
+        return True, None
+
+    # Hex hashes starting with 0x must not fall through to numeric parsing (which would match '0')
+    if clean_md.startswith("0x") or exp_csv.startswith("0x"):
+        return False, f"Hex mismatch: '{clean_md}' vs CSV '{exp_csv}'"
+
+    # Numeric comparison with unit and comma removal
+    m_md = re.search(r'([+-]?[0-9]+(?:\.[0-9]+)?)', clean_md.replace(",", ""))
+    m_csv = re.search(r'([+-]?[0-9]+(?:\.[0-9]+)?)', exp_csv.replace(",", ""))
+    if m_md and m_csv:
+        try:
+            f_md = float(m_md.group(1))
+            f_csv = float(m_csv.group(1))
+
+            md_str = m_md.group(1).lstrip('+')
+            csv_str = m_csv.group(1).lstrip('+')
+            md_decimals = len(md_str.split('.')[1]) if '.' in md_str else 0
+            csv_decimals = len(csv_str.split('.')[1]) if '.' in csv_str else 0
+
+            if md_decimals < csv_decimals:
+                # Report rounded the CSV number, e.g. 6276.17 -> 6276.2 (1 decimal vs 2)
+                tol = (0.5 * (10 ** (-md_decimals))) + 0.01
+            else:
+                # Same precision or integer, allow up to 0.1 of last digit
+                tol = 0.1 * (10 ** (-md_decimals))
+
+            if isinstance(col_rule, dict) and "tolerance" in col_rule:
+                tol = col_rule["tolerance"]
+
+            if abs(f_md - f_csv) <= tol:
+                return True, None
+            return False, f"Numeric mismatch: {f_md} vs CSV {f_csv} (diff: {abs(f_md - f_csv):.4f} > tol: {tol})"
+        except ValueError:
+            pass
+
+    return False, f"String mismatch: '{clean_md}' vs CSV '{exp_csv}'"
+
 def verify_manifest(manifest_path, evidence_dir, strict=False, max_mb=10.0):
     errors = []
     if not os.path.isfile(manifest_path):
@@ -344,6 +497,7 @@ def verify_manifest(manifest_path, evidence_dir, strict=False, max_mb=10.0):
         "extractors": extractors,
         "tables": tables,
         "claims": claims,
+        "unchecked": data.get("unchecked", []),
         "report": manifest_report,
         "total_bytes": total_bytes
     }, errors
@@ -473,15 +627,19 @@ def verify_report(report_path, manifest_info):
             csv_rows = matched_table_info["rows"]
             tname = tdef.get("name", tdef.get("file", "table"))
 
+            # Apply CSV filter if defined
+            if "filter" in tdef:
+                csv_rows = [r for r in csv_rows if all(r.get(k) == v for k, v in tdef["filter"].items())]
+
             if len(data_rows) != len(csv_rows):
                 errors.append(
                     f"Table '{tname}' row count mismatch: report has {len(data_rows)} data rows, but CSV has {len(csv_rows)} rows"
                 )
 
+            row_match_cfg = tdef.get("row_match")
+            current_grp = None
+
             for r_idx, (r_line_num, r_str) in enumerate(data_rows):
-                if r_idx >= len(csv_rows):
-                    break
-                csv_row = csv_rows[r_idx]
                 cells = [c.strip() for c in r_str.strip('|').split('|')]
                 if len(cells) != len(headers):
                     errors.append(
@@ -489,8 +647,46 @@ def verify_report(report_path, manifest_info):
                     )
                     continue
 
+                if row_match_cfg:
+                    grp_col_name = row_match_cfg.get("group_col", "Cấu hình")
+                    grp_idx = next((i for i, h in enumerate(headers) if grp_col_name in h), -1)
+                    if grp_idx != -1 and grp_idx < len(cells) and cells[grp_idx].strip():
+                        current_grp = cells[grp_idx].strip().replace("**", "").replace("*", "").replace("`", "")
+
+                    mapped_grp = current_grp
+                    for k_pat, v_map in row_match_cfg.get("group_map", {}).items():
+                        if current_grp and k_pat in current_grp:
+                            mapped_grp = v_map
+                            break
+
+                    round_col_name = row_match_cfg.get("round_col", "Lần chạy")
+                    round_idx = next((i for i, h in enumerate(headers) if round_col_name in h), -1)
+                    round_val = None
+                    if round_idx != -1 and round_idx < len(cells):
+                        m_r = re.search(r'(\d+)', cells[round_idx])
+                        if m_r:
+                            round_val = int(m_r.group(1))
+
+                    matched_csv_row = None
+                    rnd_field = row_match_cfg.get("round_csv", "Round")
+                    grp_field = row_match_cfg.get("group_csv", "Config")
+                    for crow in csv_rows:
+                        if (mapped_grp is None or crow.get(grp_field) == mapped_grp) and \
+                           (round_val is None or str(crow.get(rnd_field)) == str(round_val)):
+                            matched_csv_row = crow
+                            break
+                    if not matched_csv_row:
+                        errors.append(
+                            f"Line {r_line_num}: Table '{tname}' could not find CSV row matching group='{mapped_grp}', round={round_val}"
+                        )
+                        continue
+                    csv_row = matched_csv_row
+                else:
+                    if r_idx >= len(csv_rows):
+                        break
+                    csv_row = csv_rows[r_idx]
+
                 for md_col_name, col_rule in tdef.get("columns", {}).items():
-                    # locate column index
                     col_idx = -1
                     for c_i, h in enumerate(headers):
                         if md_col_name in h:
@@ -503,41 +699,28 @@ def verify_report(report_path, manifest_info):
                         continue
 
                     raw_md_cell = cells[col_idx]
-                    clean_md = raw_md_cell.replace("**", "").replace("`", "").strip()
-
-                    csv_col = col_rule.get("csv_col", md_col_name) if isinstance(col_rule, dict) else col_rule
-                    exp_csv = csv_row.get(csv_col, "").strip()
-
-                    # Comparison
-                    matched = False
-                    if clean_md == exp_csv:
-                        matched = True
-                    elif clean_md.lstrip('#') == exp_csv.lstrip('#') or clean_md.lstrip('R') == exp_csv.lstrip('R'):
-                        matched = True
-                    elif clean_md == f"#{exp_csv}" or clean_md == f"R{exp_csv}":
-                        matched = True
-                    else:
-                        # Numeric match
-                        try:
-                            f_md = float(clean_md.lstrip('#').lstrip('R'))
-                            f_csv = float(exp_csv.lstrip('#').lstrip('R'))
-                            if abs(f_md - f_csv) < 1e-4:
-                                matched = True
-                        except ValueError:
-                            pass
-
+                    matched, reason = match_table_cell(raw_md_cell, csv_row, col_rule)
                     if not matched:
                         errors.append(
-                            f"Line {r_line_num}: Table '{tname}' cell mismatch for '{md_col_name}'! "
-                            f"Report has '{clean_md}', CSV has '{exp_csv}'"
+                            f"Line {r_line_num}: Table '{tname}' cell mismatch for '{md_col_name}'! {reason} | Cell: '{raw_md_cell}'"
                         )
 
         # For every data row in this table block:
+        unchecked_list = manifest_info.get("unchecked", [])
         for r_line_num, r_str in data_rows:
+            # Check if line is explicitly marked unchecked
+            is_unchecked = any(re.search(u.get("line_regex", ""), r_str) for u in unchecked_list)
+            if is_unchecked:
+                continue
+
             # 1. Check mandatory evidence tag if row contains numbers
             has_number = bool(re.search(r"\d", r_str))
             if has_number:
                 has_tag = bool(evidence_id_pattern.search(r_str))
+                if not has_tag:
+                    errors.append(
+                        f"Line {r_line_num}: Data table row contains numbers but lacks mandatory 'evidence:<id>' tag: '{r_str[:60]}...'"
+                    )
                 if not has_tag:
                     errors.append(
                         f"Line {r_line_num}: Data table row contains numbers but lacks mandatory 'evidence:<id>' tag: '{r_str[:60]}...'"

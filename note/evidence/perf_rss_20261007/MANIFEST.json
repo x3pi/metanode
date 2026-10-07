@@ -19,8 +19,8 @@
         },
         {
           "path": "rss_8waves_summary.csv",
-          "sha256": "6c4b02fa89f97d53e697232d363b29a312211a5862a5134ec4910b55642dfbdb",
-          "bytes": 1609
+          "sha256": "39a2e7856ea6a913470242759732cdbdbb7432108321042fef18b41b9e83f136",
+          "bytes": 1901
         },
         {
           "path": "memstats_top_inuse_summary.txt",
@@ -260,6 +260,91 @@
       "bytes": 9880670,
       "stored_at": "/home/abc/evidence_archive/perf_rss_20261007/rss_raw_full.tar.gz",
       "reason": "Full raw heap profiles (pb.gz), full memstats text dumps, and smaps rollups archived externally to keep git repository lightweight"
+    }
+  ],
+  "tables": [
+    {
+      "name": "RSS 8 Waves Table",
+      "file": "rss_8waves_summary.csv",
+      "header_marker": "HeapAlloc sau GC",
+      "columns": {
+        "Đợt": {
+          "type": "wave_label",
+          "wave_col": "Wave"
+        },
+        "Txs tích luỹ": "CumTxs",
+        "Node": "Node",
+        "PID": "PID",
+        "HeapAlloc sau GC": "HeapAllocMB",
+        "HeapInuse sau GC": "HeapInuseMB",
+        "HeapSys": "HeapSysMB",
+        "RSS Thực tế": "RssMB"
+      }
+    },
+    {
+      "name": "Controlled Benchmarks GOGC Table",
+      "file": "controlled_benchmarks_summary.csv",
+      "header_marker": "CPU tiêu thụ (s) | Bằng chứng",
+      "filter": {
+        "Experiment": "GOGC"
+      },
+      "row_match": {
+        "group_col": "Cấu hình",
+        "group_map": {
+          "Default GOGC (800)": "Default",
+          "GOGC=50": "GOGC50"
+        },
+        "round_col": "Lần chạy",
+        "round_csv": "Round",
+        "group_csv": "Config"
+      },
+      "columns": {
+        "Lần chạy": "Round",
+        "Workload": {
+          "type": "constant",
+          "value": 25000
+        },
+        "Thời gian": "Duration_s",
+        "Effective TPS": "TPS",
+        "Peak RSS Cụm": "PeakRSS_MB",
+        "CPU tiêu thụ": "CPU_s"
+      }
+    },
+    {
+      "name": "Controlled Benchmarks Debug Table",
+      "file": "controlled_benchmarks_summary.csv",
+      "header_marker": "Log Size (KB)",
+      "filter": {
+        "Experiment": "DebugFlag"
+      },
+      "row_match": {
+        "group_col": "Cấu hình",
+        "group_map": {
+          "Debug On": "DebugOn",
+          "Debug Off": "DebugOff"
+        },
+        "round_col": "Lần chạy",
+        "round_csv": "Round",
+        "group_csv": "Config"
+      },
+      "columns": {
+        "Lần chạy": "Round",
+        "Workload": {
+          "type": "constant",
+          "value": 25000
+        },
+        "Thời gian": "Duration_s",
+        "Effective TPS": "TPS",
+        "Peak RSS Cụm": "PeakRSS_MB",
+        "CPU tiêu thụ": "CPU_s",
+        "Log Size": "LogSize_KB"
+      }
+    }
+  ],
+  "unchecked": [
+    {
+      "line_regex": "Tiêu chuẩn \\(Standard Validator\\)|Tiết kiệm RAM \\(Resource-Constrained\\)|Enterprise / Tier 1 Validator|Sentry / RPC Node nhỏ",
+      "reason": "Operational hardware recommendations based on technical reasoning and capacity extrapolation rather than raw empirical CSV benchmarks"
     }
   ]
 }
