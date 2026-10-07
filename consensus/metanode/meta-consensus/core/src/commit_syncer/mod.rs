@@ -1417,7 +1417,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         );
 
                         if old_state != new_state {
-                            info!(
+                            debug!(
                                 "🔄 [NODE4-DEBUG] STATE TRANSITION: {:?} → {:?}",
                                 old_state, new_state
                             );
@@ -1663,7 +1663,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 && lag > 0
                 && now.duration_since(self.last_schedule_log_at) >= Duration::from_secs(10)
         {
-            info!(
+            debug!(
                 "[NODE4-DEBUG] schedule: phase={:?}, synced={}, local={}, quorum={}, lag={}, scheduled={:?}",
                 self.coordination_hub.get_phase(),
                 self.synced_commit_index,
@@ -1733,7 +1733,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 break;
             }
             let new_range: CommitRange = (range_start..=range_end).into();
-            info!(
+            debug!(
                 "[NODE4-DEBUG] scheduling fetch: range={:?}, pending_count={}",
                 new_range,
                 self.pending_fetches.len()
@@ -2560,7 +2560,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         );
                         self.synced_commit_index = safe_jump_limit;
                     } else {
-                        tracing::info!(
+                        tracing::debug!(
                             "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} (from local DAG, phase={:?}, handled_gap={})",
                             self.synced_commit_index,
                             local_commit,
@@ -2577,7 +2577,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     // code into the gap>50 arm above, silently turning it into a no-op
                     // and breaking single_validator_advances_synced_commit_index_while_
                     // catching_up (caught by the full consensus-core suite before commit).
-                    tracing::info!(
+                    tracing::debug!(
                         "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} (from local DAG, phase={:?}, handled_gap={})",
                         self.synced_commit_index,
                         local_commit,
@@ -2588,7 +2588,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 }
             }
         }
-        info!(
+        debug!(
             "[NODE4-DEBUG] fetched result: range={}→{}, synced_commit={}, pending_ranges={}",
             commit_start,
             commit_end,
@@ -2614,7 +2614,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         if self.synced_commit_index < commit_end || commit_end > highest_handled_for_range {
             self.fetched_ranges
                 .insert((commit_start..=commit_end).into(), certified_commits);
-            info!(
+            debug!(
                 "[NODE4-DEBUG] inserted fetched range {}→{} into fetched_ranges (len={})",
                 commit_start,
                 commit_end,
@@ -2628,7 +2628,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             let (fetched_commit_range, commits) = if fetched_commit_range.start()
                 <= self.synced_commit_index + 1
             {
-                info!(
+                debug!(
                     "[NODE4-DEBUG] processing range {}→{} (synced={})",
                     fetched_commit_range.start(),
                     fetched_commit_range.end(),
@@ -2690,7 +2690,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
             // If core thread cannot handle the incoming blocks, it is ok to block here
             // to slow down the commit syncer.
-            info!(
+            debug!(
                 "[NODE4-DEBUG] sending commits {}→{} to Core, commits_count={}",
                 fetched_commit_range.start(),
                 fetched_commit_range.end(),
@@ -2722,7 +2722,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 // it is unnecessary to try to sync their causal history. If they are required
                 // for the progress of the DAG, they will be included in a future commit.
                 Ok(missing) => {
-                    info!(
+                    debug!(
                         "[NODE4-DEBUG] Core accepted range {}→{}, missing_blocks={}",
                         fetched_commit_range.start(),
                         fetched_commit_range.end(),
@@ -2779,7 +2779,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 self.schedule_recovery_fetch_pending = false;
             }
 
-            info!(
+            debug!(
                 "[NODE4-DEBUG] synced_commit_index advanced to {} (network_synced_commits={})",
                 self.synced_commit_index, self.network_synced_commits
             );
@@ -3068,7 +3068,7 @@ impl<C: NetworkClient> Inner<C> {
             // sparse DAG; its committed-block bookkeeping then no longer matched the network's, and a later leader
             // re-collected blocks whose transactions were already executed (a duplicate block, i.e. a fork). A healthy
             // node now needs 2f+1 votes for the commit before it may replace its own.
-            tracing::info!(
+            tracing::debug!(
                 "🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit {} from peer {} \
                  (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.",
                 end_commit_ref,

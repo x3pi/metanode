@@ -5,35 +5,50 @@
   when: groups['parent_chain_nodes'] is defined and (groups['parent_chain_nodes'] | length) > 0
 
 
-- name: Determine process management mode
-  set_fact:
-    is_systemd: "{{ use_systemd | default(false) | bool }}"
-
 # ── Stop Service ─────────────────────────────────────────────────────────────
 - name: Stop Execution Node {{ inventory_hostname }}
   when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy', 'setup']"
   block:
     - name: Stop via systemd
-      when: is_systemd
       ansible.builtin.systemd:
         name: "metanode-{{ inventory_hostname }}"
         state: stopped
       ignore_errors: true
 
-    - name: Stop via process kill (daemon mode)
-      when: not is_systemd
-      ansible.builtin.shell: |
-        if [ -f "{{ node_data_dir }}/cluster.pid" ]; then
-          kill -9 $(cat "{{ node_data_dir }}/cluster.pid") 2>/dev/null || true
-          rm -f "{{ node_data_dir }}/cluster.pid"
-        fi
-        pkill -9 -f "{{ bin_dir }}/simple_chain.*{{ node_data_dir }}" 2>/dev/null || true
-        for pid in $(pgrep -f "{{ bin_dir }}/simple_chain" 2>/dev/null || true); do
-          cwd_path=$(readlink -f /proc/$pid/cwd 2>/dev/null || true)
-          if [ "$cwd_path" = "{{ node_data_dir }}" ]; then
-            kill -9 $pid 2>/dev/null || true
+    - name: Terminate lingering process for this exact execution node
+      ansible.builtin.shell:
+        cmd: |
+          # 1. Kill via PID file if valid for this node data directory
+          if [ -f "{{ node_data_dir }}/cluster.pid" ]; then
+            pid=$(cat "{{ node_data_dir }}/cluster.pid" 2>/dev/null || true)
+            if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+              if grep -q -F "{{ node_data_dir }}" "/proc/$pid/cmdline" 2>/dev/null; then
+                kill -15 "$pid" 2>/dev/null || true
+                sleep 0.5
+                kill -9 "$pid" 2>/dev/null || true
+              fi
+            fi
+            rm -f "{{ node_data_dir }}/cluster.pid"
           fi
-        done
+
+          # 2. Kill only processes whose cmdline explicitly references this node data directory
+          for pid in $(pgrep -f "{{ node_data_dir }}" 2>/dev/null || true); do
+            if grep -q -F "simple_chain" "/proc/$pid/cmdline" 2>/dev/null && grep -q -F "{{ node_data_dir }}" "/proc/$pid/cmdline" 2>/dev/null; then
+              kill -15 "$pid" 2>/dev/null || true
+              sleep 0.5
+              kill -9 "$pid" 2>/dev/null || true
+            fi
+          done
+
+          # 3. Kill process holding this node specific RPC port if it belongs to simple_chain
+          target_port="{{ rpc_port }}"
+          for pid in $(ss -ltnpH "sport = :$target_port" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p'); do
+            if grep -q -F "simple_chain" "/proc/$pid/cmdline" 2>/dev/null; then
+              kill -15 "$pid" 2>/dev/null || true
+              sleep 0.5
+              kill -9 "$pid" 2>/dev/null || true
+            fi
+          done
       failed_when: false
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────
@@ -422,7 +437,6 @@
         mode: '0755'
 
     - name: Deploy systemd service unit
-      when: is_systemd
       ansible.builtin.template:
         src: metanode-exec-cluster.service.j2
         dest: "/etc/systemd/system/metanode-{{ inventory_hostname }}.service"
@@ -434,27 +448,11 @@
   when: "deploy_action in ['setup', 'deploy', 'start', 'restart', 'reset']"
   block:
     - name: Start service via systemd
-      when: is_systemd
       ansible.builtin.systemd:
         name: "metanode-{{ inventory_hostname }}"
         state: started
         enabled: yes
-
-    - name: Start process via background daemon
-      when: not is_systemd
-      become_user: "{{ ansible_user | default('abc') }}"
-      ansible.builtin.shell: |
-        set -a; [ -f {{ node_data_dir }}/security.env ] && . {{ node_data_dir }}/security.env; set +a
-        nohup env PARENT_CHAIN_URL="http://{{ parent_chain_host | default('127.0.0.1') }}:{{ parent_chain_rpc_port | default(8547) }}" \
-          PARENT_CHAIN_URLS="{{ parent_chain_urls_csv | default('') }}" \
-          BLS_CONSERVATION_MODE="{{ bls_conservation_mode | default('enforce') }}" \
-          BLS_CONSERVATION_INTERVAL_SECONDS="{{ bls_conservation_interval_seconds | default('300') }}" \
-          {{ bin_dir }}/simple_chain \
-          -config {{ node_data_dir }}/config.json \
-          >> {{ base_log_dir }}/{{ inventory_hostname }}.log 2>&1 &
-        echo $! > {{ node_data_dir }}/cluster.pid
-      args:
-        chdir: "{{ node_data_dir }}"
+        daemon_reload: yes
 
     - name: Wait for Cluster RPC port to respond
       ansible.builtin.wait_for:

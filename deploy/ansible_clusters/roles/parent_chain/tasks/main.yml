@@ -1,8 +1,4 @@
 ---
-- name: Determine process management mode
-  set_fact:
-    is_systemd: "{{ use_systemd | default(false) | bool }}"
-
 # Secure by default: a closed registry (the default) needs an explicit allow-list, otherwise nobody could ever
 # register and the chain would be unusable. Devnet must opt in with parent_open_cluster_registration: true.
 - name: Require an explicit cluster policy before deploying the Parent Chain genesis
@@ -16,30 +12,56 @@
       parent_open_cluster_registration: true (devnet only).
 
 # ── Stop Service ─────────────────────────────────────────────────────────────
-- name: Stop Parent Chain service
+- name: Stop Parent Chain service {{ inventory_hostname }}
   when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy', 'setup']"
   block:
-    - name: Stop via systemd
-      when: is_systemd
+    - name: Stop Parent Chain via systemd
       ansible.builtin.systemd:
-        name: metanode-parentchain
+        name: "metanode-{{ inventory_hostname }}"
         state: stopped
       ignore_errors: true
 
-    - name: Stop via process kill (daemon mode)
-      when: not is_systemd
-      ansible.builtin.shell: |
-        if [ -f "{{ node_data_dir }}/parent_chain.pid" ]; then
-          kill -9 $(cat "{{ node_data_dir }}/parent_chain.pid") 2>/dev/null || true
-          rm -f "{{ node_data_dir }}/parent_chain.pid"
-        fi
-        pkill -9 -f "{{ bin_dir }}/parent_chain.*{{ node_data_dir }}" 2>/dev/null || true
-        for pid in $(pgrep -f "{{ bin_dir }}/parent_chain" 2>/dev/null || true); do
-          cwd_path=$(readlink -f /proc/$pid/cwd 2>/dev/null || true)
-          if [ "$cwd_path" = "{{ node_data_dir }}" ]; then
-            kill -9 $pid 2>/dev/null || true
+    - name: Stop legacy metanode-parentchain via systemd if present
+      ansible.builtin.systemd:
+        name: metanode-parentchain
+        state: stopped
+      when: (parent_node_id | default(0) | int) == 0
+      ignore_errors: true
+
+    - name: Terminate lingering process for this exact parent node
+      ansible.builtin.shell:
+        cmd: |
+          # 1. Kill via PID file if valid for this node data directory
+          if [ -f "{{ node_data_dir }}/parent_chain.pid" ]; then
+            pid=$(cat "{{ node_data_dir }}/parent_chain.pid" 2>/dev/null || true)
+            if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+              if grep -q -F "{{ node_data_dir }}" "/proc/$pid/cmdline" 2>/dev/null; then
+                kill -15 "$pid" 2>/dev/null || true
+                sleep 0.5
+                kill -9 "$pid" 2>/dev/null || true
+              fi
+            fi
+            rm -f "{{ node_data_dir }}/parent_chain.pid"
           fi
-        done
+
+          # 2. Kill only processes whose cmdline explicitly references this node data directory
+          for pid in $(pgrep -f "{{ node_data_dir }}" 2>/dev/null || true); do
+            if grep -q -F "parent_chain" "/proc/$pid/cmdline" 2>/dev/null && grep -q -F "{{ node_data_dir }}" "/proc/$pid/cmdline" 2>/dev/null; then
+              kill -15 "$pid" 2>/dev/null || true
+              sleep 0.5
+              kill -9 "$pid" 2>/dev/null || true
+            fi
+          done
+
+          # 3. Kill process holding this node specific HTTP port if it belongs to parent_chain
+          target_port="{{ parent_http_port | default(8547) }}"
+          for pid in $(ss -ltnpH "sport = :$target_port" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p'); do
+            if grep -q -F "parent_chain" "/proc/$pid/cmdline" 2>/dev/null; then
+              kill -15 "$pid" 2>/dev/null || true
+              sleep 0.5
+              kill -9 "$pid" 2>/dev/null || true
+            fi
+          done
       failed_when: false
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────
@@ -58,6 +80,7 @@
         - "{{ node_data_dir }}/consensus_storage"
         - "{{ node_data_dir }}/rocksdb_dummy_init"
         - "{{ node_data_dir }}/backup"
+        - "{{ node_data_dir }}/logs"
 
 # ── Firewall (UFW) Configuration ───────────────────────────────────────────
 # OPT-IN only (`--open-ports` => deploy_action=open_ports). The HTTP RPC is client-facing; the peer RPC and the metrics
@@ -122,7 +145,27 @@
         recurse: yes
       loop:
         - "{{ node_data_dir }}"
+        - "{{ node_data_dir }}/logs"
         - "{{ base_log_dir }}"
+
+    - name: Check if legacy log exists in base_log_dir as regular file
+      ansible.builtin.stat:
+        path: "{{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log"
+      register: legacy_parent_log_stat
+
+    - name: Archive legacy parent chain log if it is a regular file
+      ansible.builtin.command:
+        cmd: "mv {{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log {{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log.old"
+      when: legacy_parent_log_stat.stat.exists and not legacy_parent_log_stat.stat.islnk
+      failed_when: false
+
+    - name: Create convenience symlink in base_log_dir pointing to node logs
+      ansible.builtin.file:
+        src: "{{ node_data_dir }}/logs/parent_chain.log"
+        dest: "{{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log"
+        state: link
+        force: yes
+      ignore_errors: true
 
     - name: Deploy Parent Chain config.json
       ansible.builtin.template:
@@ -169,10 +212,9 @@
       no_log: true
 
     - name: Deploy systemd service unit
-      when: is_systemd
       ansible.builtin.template:
         src: metanode-parentchain.service.j2
-        dest: /etc/systemd/system/metanode-parentchain.service
+        dest: "/etc/systemd/system/metanode-{{ inventory_hostname }}.service"
         mode: '0644'
       notify: Reload systemd
 
@@ -181,26 +223,11 @@
   when: "deploy_action in ['setup', 'deploy', 'start', 'restart', 'reset']"
   block:
     - name: Start service via systemd
-      when: is_systemd
       ansible.builtin.systemd:
-        name: metanode-parentchain
+        name: "metanode-{{ inventory_hostname }}"
         state: started
         enabled: yes
-
-    - name: Start process via background daemon
-      when: not is_systemd
-      become_user: "{{ ansible_user | default('abc') }}"
-      ansible.builtin.shell: |
-        set -a; [ -f {{ node_data_dir }}/security.env ] && . {{ node_data_dir }}/security.env; set +a
-        nohup {{ bin_dir }}/parent_chain \
-          -data-dir {{ node_data_dir }} \
-          -http :{{ parent_http_port | default(8547) }} \
-          -rust-config {{ node_data_dir }}/node_parent.toml \
-          -genesis {{ node_data_dir }}/parent_genesis.json \
-          >> {{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log 2>&1 &
-        echo $! > {{ node_data_dir }}/parent_chain.pid
-      args:
-        chdir: "{{ node_data_dir }}"
+        daemon_reload: yes
 
     - name: Wait for Parent Chain HTTP RPC port to respond
       ansible.builtin.wait_for:

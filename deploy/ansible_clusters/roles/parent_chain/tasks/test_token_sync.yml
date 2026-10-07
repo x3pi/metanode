@@ -58,47 +58,10 @@
   when: parent_chain_security_env.changed or parent_chain_token_state.stdout == 'restart-required'
   block:
     - name: Restart Parent Chain via systemd
-      when: use_systemd | default(false) | bool
       ansible.builtin.systemd:
-        name: metanode-parentchain
+        name: "metanode-{{ inventory_hostname }}"
         state: restarted
-
-    - name: Restart Parent Chain daemon with the synchronized environment
-      when: not (use_systemd | default(false) | bool)
-      become_user: "{{ ansible_user | default('abc') }}"
-      ansible.builtin.shell: |
-        set -euo pipefail
-        pid_file="{{ node_data_dir }}/parent_chain.pid"
-        for pid in $(ss -ltnpH "sport = :{{ parent_http_port | default(8547) }}" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p'); do
-          if [ -r "/proc/$pid/cmdline" ] && tr '\0' '\n' < "/proc/$pid/cmdline" | grep -Fxq "{{ bin_dir }}/parent_chain"; then
-            kill -SIGTERM "$pid"
-            for _ in $(seq 1 20); do
-              kill -0 "$pid" 2>/dev/null || break
-              sleep 1
-            done
-            if kill -0 "$pid" 2>/dev/null; then
-              echo "Parent Chain process $pid did not stop" >&2
-              exit 1
-            fi
-          fi
-        done
-        rm -f "$pid_file"
-        if ss -ltnpH "sport = :{{ parent_http_port | default(8547) }}" 2>/dev/null | grep -q .; then
-          echo "Parent Chain RPC port is still occupied" >&2
-          exit 1
-        fi
-        set -a
-        . "{{ node_data_dir }}/security.env"
-        set +a
-        nohup "{{ bin_dir }}/parent_chain" \
-          -data-dir "{{ node_data_dir }}" \
-          -http ":{{ parent_http_port | default(8547) }}" \
-          -rust-config "{{ node_data_dir }}/node_parent.toml" \
-          >> "{{ base_log_dir }}/parent_chain.log" 2>&1 &
-        echo $! > "$pid_file"
-      args:
-        executable: /bin/bash
-        chdir: "{{ node_data_dir }}"
+        daemon_reload: yes
 
     - name: Wait for synchronized Parent Chain RPC
       ansible.builtin.wait_for:

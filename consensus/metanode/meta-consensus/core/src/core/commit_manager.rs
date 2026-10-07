@@ -24,7 +24,7 @@ impl Core {
         let commits_count = certified_commits.commits().len();
         let first_idx = certified_commits.commits().first().map(|c| c.index());
         let last_idx = certified_commits.commits().last().map(|c| c.index());
-        tracing::info!(
+        tracing::debug!(
             "[NODE4-DEBUG] Core::add_certified_commits: local_commit={}, received {} commits ({}→{})",
             last_commit, commits_count, first_idx.unwrap_or(0), last_idx.unwrap_or(0)
         );
@@ -32,7 +32,7 @@ impl Core {
         let votes = certified_commits.votes().to_vec();
         let commits = match self.filter_new_commits(certified_commits.commits().to_vec()) {
             Ok(commits) => {
-                tracing::info!(
+                tracing::debug!(
                     "[NODE4-DEBUG] filter_new_commits passed: {} commits to process",
                     commits.len()
                 );
@@ -53,7 +53,7 @@ impl Core {
         match self.try_commit(commits) {
             Ok(subdags) => {
                 let new_commit_index = self.dag_state.read().last_commit_index();
-                tracing::info!(
+                tracing::debug!(
                     "[NODE4-DEBUG] try_commit succeeded: {} subdags, new_commit_index={}",
                     subdags.len(),
                     new_commit_index
