@@ -20,6 +20,7 @@
 # ── Play 2: Deploy Parent Chain ──────────────────────────────────────────────
 - name: "Phase 2: Deploy Parent Chain Node"
   hosts: parent_chain_nodes
+  serial: 1
   gather_facts: true
   become: true
   any_errors_fatal: true
@@ -47,6 +48,7 @@
 # stale; it does not redeploy the execution clusters.
 - name: "Phase 4: Synchronize Parent Chain RPC authentication for tests"
   hosts: parent_chain_nodes
+  serial: 1
   gather_facts: false
   become: true
   any_errors_fatal: true

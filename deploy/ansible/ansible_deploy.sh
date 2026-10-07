@@ -856,30 +856,35 @@ if [ "$ACTION" == "gen_keys" ]; then
 fi
 
 # ─── PARENT CHAIN ORCHESTRATION ───────────────────────────────────────────
-stop_parent_chain() {
-    echo -e "\n🏛️ [PARENT CHAIN] Đang dừng cụm Parent Chain..."
-    for i in 0 1 2 3; do
-        run_sudo systemctl stop "metanode-parent_node_${i}.service" 2>/dev/null || true
-        # Dọn dẹp tiến trình sót lại của đúng node parent_chain_${i}
-        if [ -f "/opt/metanode/parent_chain_${i}/parent_chain.pid" ]; then
-            local pid
-            pid=$(cat "/opt/metanode/parent_chain_${i}/parent_chain.pid" 2>/dev/null || echo "")
-            if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
-                local cmd
-                cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || echo "")
-                if echo "$cmd" | grep -q "/opt/metanode/parent_chain_${i}"; then
-                    run_sudo kill -9 "$pid" 2>/dev/null || true
-                fi
-            fi
-            rm -f "/opt/metanode/parent_chain_${i}/parent_chain.pid" 2>/dev/null || true
-        fi
-        for p in $(pgrep -f "/opt/metanode/parent_chain_${i}" 2>/dev/null || true); do
+stop_parent_node() {
+    local i="$1"
+    run_sudo systemctl stop "metanode-parent_node_${i}.service" 2>/dev/null || true
+    # Dọn dẹp tiến trình sót lại của đúng node parent_chain_${i}
+    if [ -f "/opt/metanode/parent_chain_${i}/parent_chain.pid" ]; then
+        local pid
+        pid=$(cat "/opt/metanode/parent_chain_${i}/parent_chain.pid" 2>/dev/null || echo "")
+        if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
             local cmd
-            cmd=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null || echo "")
-            if echo "$cmd" | grep -q "parent_chain" && echo "$cmd" | grep -q "/opt/metanode/parent_chain_${i}"; then
-                run_sudo kill -9 "$p" 2>/dev/null || true
+            cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || echo "")
+            if echo "$cmd" | grep -q "/opt/metanode/parent_chain_${i}"; then
+                run_sudo kill -9 "$pid" 2>/dev/null || true
             fi
-        done
+        fi
+        rm -f "/opt/metanode/parent_chain_${i}/parent_chain.pid" 2>/dev/null || true
+    fi
+    for p in $(pgrep -f "/opt/metanode/parent_chain_${i}" 2>/dev/null || true); do
+        local cmd
+        cmd=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null || echo "")
+        if echo "$cmd" | grep -q "parent_chain" && echo "$cmd" | grep -q "/opt/metanode/parent_chain_${i}"; then
+            run_sudo kill -9 "$p" 2>/dev/null || true
+        fi
+    done
+}
+
+stop_parent_chain() {
+    echo -e "\n🏛️ [PARENT CHAIN] Đang dừng toàn bộ cụm Parent Chain..."
+    for i in 0 1 2 3; do
+        stop_parent_node "$i"
     done
     run_sudo systemctl stop "metanode-parentchain.service" 2>/dev/null || true
     echo "✅ [PARENT CHAIN] Đã dừng toàn bộ Parent Chain."
@@ -901,11 +906,13 @@ start_parent_chain() {
     base_http_port=$(grep -E '^\s*parent_chain_http_port:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
     base_http_port="${base_http_port:-18601}"
 
-    echo -e "\n🏛️ [PARENT CHAIN] Khởi động cụm Parent Chain qua systemd (BFT Consensus, Chain ID 991, HTTP ${base_http_port}..$((base_http_port + 3)))..."
-    stop_parent_chain
-    sleep 1
+    echo -e "\n🏛️ [PARENT CHAIN] Khởi động cụm Parent Chain rolling update (BFT Consensus, Chain ID 991, HTTP ${base_http_port}..$((base_http_port + 3)))..."
     for i in 0 1 2 3; do
         if [ -d "/opt/metanode/parent_chain_${i}" ]; then
+            local node_http_port=$((base_http_port + i))
+            echo -e "🔄 [PARENT CHAIN] Rolling restart Parent Node ${i} (Port ${node_http_port})..."
+            stop_parent_node "$i"
+
             mkdir -p "/opt/metanode/parent_chain_${i}/logs"
             # Đảm bảo chain_id trong parent_genesis.json luôn là 991 (đồng bộ với Child Chain)
             if [ -f "/opt/metanode/parent_chain_${i}/parent_genesis.json" ]; then
@@ -913,8 +920,7 @@ start_parent_chain() {
             fi
 
             local unit_file="/etc/systemd/system/metanode-parent_node_${i}.service"
-            if [ ! -f "$unit_file" ]; then
-                run_sudo bash -c "cat << 'EOF_UNIT' > '$unit_file'
+            run_sudo bash -c "cat << 'EOF_UNIT' > '$unit_file'
 [Unit]
 Description=MetaNode Parent Chain Consensus and Float State Service - parent_node_${i} (Node ${i}, ChainID 991)
 After=network.target network-online.target
@@ -925,7 +931,7 @@ EnvironmentFile=-/opt/metanode/parent_chain_${i}/security.env
 Type=simple
 User=abc
 WorkingDirectory=/opt/metanode/parent_chain_${i}
-ExecStart=/opt/metanode/bin/parent_chain -data-dir /opt/metanode/parent_chain_${i} -http :$((base_http_port + i)) -rust-config /opt/metanode/parent_chain_${i}/node_parent.toml -genesis /opt/metanode/parent_chain_${i}/parent_genesis.json
+ExecStart=/opt/metanode/bin/parent_chain -data-dir /opt/metanode/parent_chain_${i} -http :${node_http_port} -rust-config /opt/metanode/parent_chain_${i}/node_parent.toml -genesis /opt/metanode/parent_chain_${i}/parent_genesis.json
 ExecStop=/bin/kill -SIGTERM \$MAINPID
 Restart=always
 RestartSec=3s
@@ -940,30 +946,31 @@ SyslogIdentifier=metanode-parent_node_${i}
 [Install]
 WantedBy=multi-user.target
 EOF_UNIT"
-                run_sudo chmod 644 "$unit_file"
-            fi
+            run_sudo chmod 644 "$unit_file"
 
             run_sudo systemctl daemon-reload
-            run_sudo systemctl enable "metanode-parent_node_${i}.service" >/dev/null 2>&1 || true
+            run_sudo systemctl enable "metanode-parent_node_${i}.service"
             run_sudo systemctl restart "metanode-parent_node_${i}.service"
+
+            # Chờ port của node i sẵn sàng trước khi sang node tiếp theo (BFT rolling restart)
+            local retries=15
+            local ready=false
+            while [ $retries -gt 0 ]; do
+                if curl -s "http://127.0.0.1:${node_http_port}/status" 2>/dev/null | grep -q "chain_id"; then
+                    ready=true
+                    break
+                fi
+                sleep 1
+                retries=$((retries - 1))
+            done
+            if [ "$ready" == "true" ]; then
+                echo -e "✅ [PARENT CHAIN] Node ${i} đã sẵn sàng tại http://127.0.0.1:${node_http_port}"
+            else
+                echo -e "❌ [PARENT CHAIN] Node ${i} chưa sẵn sàng; hủy rolling update để giữ quorum."
+                return 1
+            fi
         fi
     done
-    # Chờ port base_http_port sẵn sàng
-    local retries=15
-    local ready=false
-    while [ $retries -gt 0 ]; do
-        if curl -s "http://127.0.0.1:${base_http_port}/status" 2>/dev/null | grep -q "chain_id"; then
-            ready=true
-            break
-        fi
-        sleep 1
-        retries=$((retries - 1))
-    done
-    if [ "$ready" == "true" ]; then
-        echo -e "✅ [PARENT CHAIN] Parent Chain đã sẵn sàng tại http://127.0.0.1:${base_http_port} (Chain ID: 991, qua systemd)"
-    else
-        echo -e "⚠️ [PARENT CHAIN] Chưa nhận được phản hồi từ http://127.0.0.1:${base_http_port}/status sau 15s"
-    fi
 }
 
 if [ "$ACTION" != "open_ports" ] && [[ "$TARGET_NODE" == "all" || -z "$TARGET_NODE" ]]; then
