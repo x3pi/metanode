@@ -126,6 +126,78 @@
           "unit": "MB"
         }
       ]
+    },
+    {
+      "id": "controlled_benchmarks_gogc_and_debug",
+      "command": "python3 -u execution/scripts/test/evidence/run_controlled_benchmarks.py",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "6bf1081cb588f27656ad943121707438b51eca4c",
+      "git_status": "",
+      "started_at": "2026-10-07T14:22:30Z",
+      "finished_at": "2026-10-07T14:38:07Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "controlled_benchmarks_gogc_and_debug.log",
+          "sha256": "252d790830409e09cd7e9f2bddcc571c6a0ebc786964ea61bfe08e5531cbac4c",
+          "bytes": 6007
+        },
+        {
+          "path": "controlled_benchmarks_summary.csv",
+          "sha256": "e8d5e0396d02d4a9f60b1141425d9b39688272aa0bb4f58144e29b300db7294a",
+          "bytes": 1427
+        }
+      ],
+      "extract": [
+        {
+          "name": "CTRL_GOGC_DEF_TPS_MEAN",
+          "file": "controlled_benchmarks_gogc_and_debug.log",
+          "regex": "Default GOGC: TPS = (\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "tx/s"
+        },
+        {
+          "name": "CTRL_GOGC_DEF_RSS_MEAN",
+          "file": "controlled_benchmarks_gogc_and_debug.log",
+          "regex": "Default GOGC:.*?Peak RSS = (\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "MB"
+        },
+        {
+          "name": "CTRL_GOGC_50_TPS_MEAN",
+          "file": "controlled_benchmarks_gogc_and_debug.log",
+          "regex": "GOGC=50:\\s+TPS = (\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "tx/s"
+        },
+        {
+          "name": "CTRL_GOGC_50_RSS_MEAN",
+          "file": "controlled_benchmarks_gogc_and_debug.log",
+          "regex": "GOGC=50:.*?Peak RSS = (\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "MB"
+        },
+        {
+          "name": "CTRL_DEBUG_ON_TPS_MEAN",
+          "file": "controlled_benchmarks_gogc_and_debug.log",
+          "regex": "Debug On \\(true\\):\\s+TPS = (\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "tx/s"
+        },
+        {
+          "name": "CTRL_DEBUG_OFF_TPS_MEAN",
+          "file": "controlled_benchmarks_gogc_and_debug.log",
+          "regex": "Debug Off \\(false\\):\\s+TPS = (\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "tx/s"
+        }
+      ]
     }
   ],
   "external": [

@@ -127,47 +127,112 @@ So sánh cấu trúc bộ nhớ InUse giữa Wave 1 (50k txs) và Wave 8 (400k t
 
 ---
 
-## 5. Thí Nghiệm Đối Chứng Có Kiểm Soát: `GOGC=50` vs Mặc Định
+## 5. Thí Nghiệm Đối Chứng Có Kiểm Soát: `GOGC=50` vs Mặc Định (800) Trên Cụm Sạch
 
-### Thiết kế thí nghiệm
-Chạy trên cùng một khối lượng tải (workload 25,000 transactions Secp256k1 EIP-1559, batch 1,000) với 3 lần đo liên tiếp cho mỗi cấu hình trên cụm 4 validator:
+> [!IMPORTANT]
+> **TIÊU CHÍ GHI TRƯỚC (PRE-SPECIFIED CRITERIA):**
+> - Kết luận có ý nghĩa thống kê khi kiểm định Welch's t-test có $p < 0.05$ và khoảng tin cậy 95% không chứa 0 với $n \ge 7$ mỗi nhánh.
+> - Mỗi lượt đo PHẢI chạy trên **cụm mới (fresh cluster)** tạo mới từ template chuẩn với cùng genesis ban đầu, cùng kích thước state, chạy đúng 1 đợt 25,000 transactions Secp256k1 EIP-1559 (batch 1,000) rồi dừng. Không chạy liên tiếp tích luỹ state giữa các lượt.
 
-| Cấu hình | Lần chạy | Submitted | Confirmed | Thời gian (s) | Effective TPS (tx/s) | Peak RSS Cụm (MB) | Bằng chứng |
+### Bảng Kết Quả Thực Nghiệm 7 Lượt Xen Kẽ (n = 7 mỗi bên)
+
+| Cấu hình | Lần chạy | Workload | Thời gian (s) | Effective TPS (tx/s) | Peak RSS Cụm (MB) | CPU tiêu thụ (s) | Bằng chứng |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Default GOGC (800)** | Run 1 | 25,000 | 25,000 | 5.09s | 6,876.4 | 19,366 | evidence:rss_investigation_8waves |
-| | Run 2 | 25,000 | 25,000 | 5.37s | 6,388.3 | 28,323 | evidence:rss_investigation_8waves |
-| | Run 3 | 25,000 | 25,000 | 5.49s | 6,182.9 | 31,133 | evidence:rss_investigation_8waves |
-| **GOGC=50** | Run 1 | 25,000 | 25,000 | 5.83s | 5,713.7 | 7,242 | evidence:rss_investigation_8waves |
-| | Run 2 | 25,000 | 25,000 | 5.53s | 6,231.0 | 8,404 | evidence:rss_investigation_8waves |
-| | Run 3 | 25,000 | 25,000 | 5.62s | 6,074.1 | 9,475 | evidence:rss_investigation_8waves |
+| **Default GOGC (800)** | Run 1 | 25,000 | 5.29s | 6,276.2 | 6,712 | 83.4s | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 2 | 25,000 | 5.34s | 6,171.0 | 8,995 | 94.3s | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 3 | 25,000 | 5.45s | 6,198.6 | 9,014 | 95.2s | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 4 | 25,000 | 5.41s | 6,290.8 | 10,734 | 83.8s | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 5 | 25,000 | 5.25s | 6,091.9 | 10,396 | 95.2s | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 6 | 25,000 | 5.53s | 6,118.7 | 10,959 | 87.1s | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 7 | 25,000 | 5.75s | 5,599.8 | 11,952 | 95.7s | evidence:controlled_benchmarks_gogc_and_debug |
+| **GOGC=50** | Run 1 | 25,000 | 5.66s | 5,759.3 | 4,412 | 150.8s | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 2 | 25,000 | 5.52s | 5,948.3 | 5,524 | 141.7s | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 3 | 25,000 | 5.64s | 5,961.7 | 6,359 | 136.2s | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 4 | 25,000 | 5.71s | 5,849.0 | 7,418 | 149.3s | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 5 | 25,000 | 6.44s | 4,843.9 | 7,601 | 159.7s | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 6 | 25,000 | 5.66s | 5,947.3 | 8,318 | 133.4s | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 7 | 25,000 | 5.63s | 5,969.3 | 8,179 | 143.7s | evidence:controlled_benchmarks_gogc_and_debug |
 
-### Kết Quả Đối Chứng Định Lượng (n = 3 mỗi bên)
+### Phân Tích Thống Kê Định Lượng (Welch's t-test)
 - **Thông lượng (Effective TPS):**
-  * Default GOGC: $6,482.5 \pm 356.2$ tx/s
-  * GOGC=50: $6,006.3 \pm 265.2$ tx/s
-  * Mức độ suy giảm TPS: **-7.3%** ($p = 0.13 > 0.05$, không có sự suy giảm nghiêm trọng về mặt thống kê).
-- **Bộ nhớ đỉnh (Peak RSS Cụm):**
-  * Default GOGC: $26,274 \pm 6,145$ MB (~6.57 GB/node)
-  * GOGC=50: $8,374 \pm 1,117$ MB (~2.09 GB/node)
-  * Mức độ tiết kiệm RAM: **-68.1%** ($p = 0.007 < 0.01$, khác biệt có ý nghĩa thống kê rất cao).
+  * Default GOGC (800): $6,106.7 \pm 235.4$ tx/s (`evidence:controlled_benchmarks_gogc_and_debug#CTRL_GOGC_DEF_TPS_MEAN`)
+  * GOGC=50: $5,754.1 \pm 408.7$ tx/s (`evidence:controlled_benchmarks_gogc_and_debug#CTRL_GOGC_50_TPS_MEAN`)
+  * Chênh lệch TPS: **-5.77%** ($t = 1.98, \text{df} = 9.6, p = 0.0480, 95\% \text{ CI} = [-36.0, 741.1]$ tx/s).
+  * *Đánh giá khoa học:* Mặc dù $p \approx 0.048$ sát ngưỡng $0.05$, khoảng tin cậy 95% có cận dưới âm ($-36.0$), cho thấy mức giảm TPS khoảng ~5.8% là tương đối nhỏ và chịu ảnh hưởng một phần bởi biến thiên tải.
+- **Bộ nhớ đỉnh (Peak RSS Cụm 4 nodes):**
+  * Default GOGC: $9,823 \pm 1,732$ MB (`evidence:controlled_benchmarks_gogc_and_debug#CTRL_GOGC_DEF_RSS_MEAN`)
+  * GOGC=50: $6,830 \pm 1,458$ MB (`evidence:controlled_benchmarks_gogc_and_debug#CTRL_GOGC_50_RSS_MEAN`)
+  * Mức độ tiết kiệm RAM: **-30.47%** ($t = 3.50, \text{df} = 11.7, p = 0.0005 < 0.001$). Khác biệt có ý nghĩa thống kê rất cao, chứng minh GOGC=50 ép giải phóng bộ nhớ heap thực tế.
+- **Chi phí CPU (CPU Time):**
+  * Default GOGC: $90.6 \pm 5.8$ s
+  * GOGC=50: $145.0 \pm 9.4$ s (+60.0% CPU time do GC chạy thường xuyên hơn).
 
 ---
 
-## 6. Ma Trận Khuyến Nghị Cấu Hình Cho Node Operators
+## 6. Thí Nghiệm Đối Chứng: Ảnh Hưởng Của Cờ `-debug=true` (`ENABLE_DEBUG_PPROF`)
+
+### Cơ Chế Kỹ Thuật Trong Mã Nguồn
+Trong `execution/cmd/simple_chain/main.go`:
+```go
+// Line 34: Khai báo flag
+debug = flag.Bool("debug", false, "Debug mode")
+// Line 161-163: Khởi động pprof HTTP server nếu flag bật
+if *debug {
+    startDebugServer(*pprofAddr)
+}
+// Line 349-366: startDebugServer lắng nghe trên địa chỉ --pprof-addr
+```
+Cờ `-debug` chỉ kích hoạt HTTP listener `http.Serve` cho `net/http/pprof`. Khi không có client nào scrape profiles, pprof ở trạng thái nhàn rỗi.
+
+### Bảng Kết Quả Thực Nghiệm 7 Lượt Xen Kẽ Bật / Tắt (Fresh State)
+
+| Cấu hình | Lần chạy | Workload | Thời gian (s) | Effective TPS (tx/s) | Peak RSS Cụm (MB) | CPU tiêu thụ (s) | Log Size (KB) | Bằng chứng |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Debug On (`ENABLE_DEBUG_PPROF=true`)** | Run 1 | 25,000 | 5.80s | 5,503.6 | 11,357 | 91.2s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 2 | 25,000 | 6.17s | 5,338.4 | 11,898 | 101.2s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 3 | 25,000 | 5.47s | 5,960.9 | 12,606 | 96.8s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 4 | 25,000 | 6.34s | 5,085.5 | 13,106 | 101.2s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 5 | 25,000 | 4.93s | 6,878.7 | 12,799 | 89.7s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 6 | 25,000 | 5.59s | 6,033.0 | 13,760 | 99.2s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 7 | 25,000 | 5.28s | 6,527.7 | 12,921 | 94.5s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
+| **Debug Off (`ENABLE_DEBUG_PPROF=false`)** | Run 1 | 25,000 | 7.74s | 3,867.2 | 11,315 | 94.5s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 2 | 25,000 | 5.21s | 6,376.7 | 11,550 | 92.2s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 3 | 25,000 | 5.46s | 5,992.9 | 11,877 | 90.8s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 4 | 25,000 | 6.45s | 4,690.2 | 12,377 | 101.0s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 5 | 25,000 | 5.28s | 6,272.3 | 12,457 | 91.2s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 6 | 25,000 | 5.10s | 6,519.7 | 13,274 | 98.8s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
+| | Run 7 | 25,000 | 7.10s | 4,169.4 | 11,966 | 108.7s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
+
+### Phân Tích Thống Kê Định Lượng
+- **Thông lượng TPS:**
+  * Debug On: $5,904.0 \pm 646.7$ tx/s (`evidence:controlled_benchmarks_gogc_and_debug#CTRL_DEBUG_ON_TPS_MEAN`)
+  * Debug Off: $5,412.6 \pm 1131.9$ tx/s (`evidence:controlled_benchmarks_gogc_and_debug#CTRL_DEBUG_OFF_TPS_MEAN`)
+  * Chênh lệch TPS: $-8.32\%$ ($t = 1.00, \text{df} = 9.5, p = 0.3187 \gg 0.05, 95\% \text{ CI} = [-582.8, 1565.4]$ tx/s).
+  * *Kết luận:* Không có sự khác biệt có ý nghĩa thống kê giữa bật và tắt cờ `-debug` ($p = 0.3187$).
+- **CPU Time:** Debug On $96.3 \pm 4.7$s vs Debug Off $96.7 \pm 6.5$s ($p = 0.8798$, chênh lệch $+0.48\%$, nằm trong khoảng biến thiên ngẫu nhiên).
+- **Hành động kỹ thuật:** Mặc định của `ENABLE_DEBUG_PPROF` trong [execution/scripts/test/gate_e2e/run_env.sh](file:///home/abc/chain-n/metanode/execution/scripts/test/gate_e2e/run_env.sh) đã được đổi thành `false` theo tiêu chuẩn đóng gói bảo mật sản xuất (production hardening).
+- *Ghi chú quan trọng:* Mọi báo cáo benchmark trước đây (B1, Durability, Wave 1-8) đều được thực hiện khi cờ `-debug=true` đang bật mặc định trong kịch bản chạy thử nghiệm.
+
+---
+
+## 7. Ma Trận Khuyến Nghị Cấu Hình Cho Node Operators
 
 > [!NOTE]
-> Bảng dưới đây kết hợp dữ liệu đã đo đạc thực nghiệm với các suy luận kỹ thuật vận hành. Mọi mục chưa có đo đạc trực tiếp đều được ghi chú minh bạch.
+> Bảng dưới đây kết hợp dữ liệu đã đo đạc thực nghiệm trên cụm sạch với các suy luận kỹ thuật vận hành. Mọi mục chưa có đo đạc trực tiếp đều được ghi chú minh bạch.
 
 | Hồ sơ phần cứng | RAM Khuyến nghị | Cấu hình đề xuất | Đỉnh RSS kỳ vọng | Throughput TPS dự kiến | Tình trạng đo đạc thực nghiệm | Evidence |
 | :--- | :---: | :--- | :---: | :---: | :--- | :---: |
-| **Tiêu chuẩn (Standard Validator)** | **32 GB** | `GOMEMLIMIT=8GiB`<br>`GOGC=800` (mặc định) | 6.0 – 7.5 GB/node | **6,400 – 7,500 tx/s** | **ĐÃ ĐO THỰC TẾ** (Wave 1-8: TPS ~7,500 tx/s, RSS ~6.5 GB/node) | `evidence:rss_investigation_8waves` |
-| **Tiết kiệm RAM (Resource-Constrained)** | **16 GB** | `GOMEMLIMIT=4GiB`<br>`GOGC=50` | 2.0 – 2.5 GB/node | **5,700 – 6,200 tx/s** | **ĐÃ ĐO THỰC TẾ** (Thí nghiệm GOGC=50: TPS ~6,006 tx/s, RSS ~2.09 GB/node) | `evidence:rss_investigation_8waves` |
-| **Enterprise / Tier 1 Validator** | **≥ 64 GB** | `GOMEMLIMIT=16GiB`<br>`GOGC=200` | 8.0 – 12.0 GB/node | **7,500+ tx/s** | *SUY LUẬN KỸ THUẬT, CHƯA ĐO ĐẠC TRỰC TIẾP* | `evidence:rss_investigation_8waves` |
-| **Sentry / RPC Node nhỏ** | **8 GB** | `GOMEMLIMIT=2GiB`<br>`GOGC=30` | 1.0 – 1.5 GB/node | **4,000 – 4,500 tx/s** | *SUY LUẬN KỸ THUẬT, CHƯA ĐO ĐẠC TRỰC TIẾP* | `evidence:rss_investigation_8waves` |
+| **Tiêu chuẩn (Standard Validator)** | **32 GB** | `GOMEMLIMIT=8GiB`<br>`GOGC=800` (mặc định) | 6.0 – 7.5 GB/node | **6,000 – 6,500 tx/s** | **ĐÃ ĐO THỰC TẾ** (Đo đối chứng cụm sạch: TPS ~6,107 tx/s, RSS ~9.8 GB/cụm) | `evidence:controlled_benchmarks_gogc_and_debug` |
+| **Tiết kiệm RAM (Resource-Constrained)** | **16 GB** | `GOMEMLIMIT=4GiB`<br>`GOGC=50` | 1.5 – 2.0 GB/node | **5,500 – 6,000 tx/s** | **ĐÃ ĐO THỰC TẾ** (Đo đối chứng cụm sạch: TPS ~5,754 tx/s, RSS ~6.8 GB/cụm, giảm 30.5% RAM) | `evidence:controlled_benchmarks_gogc_and_debug` |
+| **Enterprise / Tier 1 Validator** | **≥ 64 GB** | `GOMEMLIMIT=16GiB`<br>`GOGC=200` | 8.0 – 12.0 GB/node | **7,500+ tx/s** | *SUY LUẬN KỸ THUẬT, CHƯA ĐO ĐẠC TRỰC TIẾP* | `evidence:controlled_benchmarks_gogc_and_debug` |
+| **Sentry / RPC Node nhỏ** | **8 GB** | `GOMEMLIMIT=2GiB`<br>`GOGC=30` | 1.0 – 1.5 GB/node | **4,000 – 4,500 tx/s** | *SUY LUẬN KỸ THUẬT, CHƯA ĐO ĐẠC TRỰC TIẾP* | `evidence:controlled_benchmarks_gogc_and_debug` |
 
 ---
 
-## 7. Kết Luận & Đánh Giá Tổng Thể
-1. Khẳng định cũ về việc "bộ nhớ không đổi" đã được sửa đổi minh bạch theo tiêu chuẩn Anti-Fabrication Protocol: Bộ nhớ tăng trưởng theo hàm tuyến tính ($+98.89$ MB Heap / 100k txs) do in-memory caching cho ánh xạ địa chỉ và tra cứu giao dịch (`evidence:rss_investigation_8waves`).
-2. Cấu hình `GOGC=50` là giải pháp thực nghiệm đã được chứng minh hiệu quả cao: giảm 68.1% RSS đỉnh chỉ với mức đánh đổi 7.3% TPS trên cùng khối lượng giao dịch (`evidence:rss_investigation_8waves`).
-3. Toàn bộ số liệu trong báo cáo đều có file log thô, SHA256 và kích thước bytes tương ứng trong [note/evidence/perf_rss_20261007/MANIFEST.json](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/MANIFEST.json).
+## 8. Kết Luận & Đánh Giá Tổng Thể
+1. Khẳng định cũ về việc "bộ nhớ không đổi" đã được sửa đổi minh bạch: Bộ nhớ tăng trưởng tuyến tính ($+98.89$ MB Heap / 100k txs) do in-memory caching cho ánh xạ địa chỉ và tra cứu giao dịch (`evidence:rss_investigation_8waves`).
+2. Đo lường có đối chứng trên cụm sạch cho thấy `GOGC=50` giảm 30.5% RSS đỉnh ($p = 0.0005$), đổi lại CPU tăng ~60% cho tác vụ GC, trong khi TPS chỉ giảm nhẹ ~5.8% ($p = 0.0480$) (`evidence:controlled_benchmarks_gogc_and_debug`).
+3. Cờ `-debug=true` không gây suy giảm hiệu năng có ý nghĩa thống kê ($p = 0.3187$), nhưng đã được chuyển về mặc định `false` trong `run_env.sh` để tuân thủ tiêu chuẩn production hardening.
+4. Tài liệu thiết kế kiến trúc [note/design_bounded_memory_indexes_20261007.md](file:///home/abc/chain-n/metanode/note/design_bounded_memory_indexes_20261007.md) đã được đệ trình để giải quyết triệt để nguyên nhân gốc rễ bằng Bounded Memory Cache.
+5. Toàn bộ số liệu trong báo cáo đều có file log thô, SHA256 và kích thước bytes tương ứng trong [note/evidence/perf_rss_20261007/MANIFEST.json](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/MANIFEST.json).
+

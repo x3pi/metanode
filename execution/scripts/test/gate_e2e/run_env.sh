@@ -19,7 +19,7 @@ start_exec() {
   local name="$1" rpc; rpc="$(j "d['ports']['$name']['rpc']")"
   local pprof_port=$((rpc - 200))
   local pprof_args=""
-  if [ "${ENABLE_DEBUG_PPROF:-true}" = "true" ]; then
+  if [ "${ENABLE_DEBUG_PPROF:-false}" = "true" ]; then
     pprof_args="-debug=true --pprof-addr=127.0.0.1:$pprof_port"
   fi
   ( cd "$BASE/$name" && \
@@ -34,7 +34,7 @@ start_exec_async() {
   local name="$1" rpc; rpc="$(j "d['ports']['$name']['rpc']")"
   local pprof_port=$((rpc - 200))
   local pprof_args=""
-  if [ "${ENABLE_DEBUG_PPROF:-true}" = "true" ]; then
+  if [ "${ENABLE_DEBUG_PPROF:-false}" = "true" ]; then
     pprof_args="-debug=true --pprof-addr=127.0.0.1:$pprof_port"
   fi
   ( cd "$BASE/$name" && \
