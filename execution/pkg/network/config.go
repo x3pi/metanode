@@ -13,7 +13,7 @@ type Config struct {
 	RequestChanSize               int
 	ErrorChanSize                 int
 	WriteTimeout                  time.Duration
-	AcceptedConnectionIdleTimeout time.Duration // Accepted peers must send Ping before this deadline expires.
+	AcceptedConnectionIdleTimeout time.Duration // Maximum interval without a complete valid inbound message from an accepted peer.
 	RequestChanWaitTimeout        time.Duration
 	DialTimeout                   time.Duration
 	RetryParentInterval           time.Duration

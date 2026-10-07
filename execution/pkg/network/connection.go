@@ -27,7 +27,10 @@ var (
 	ErrRequestChanFull     = errors.New("error: request channel is full after timeout")
 )
 
-const postDisconnectGrace = 3 * time.Second
+const (
+	postDisconnectGrace        = 3 * time.Second
+	minimumInboundTransferRate = 1024 * 1024 // bytes per second
+)
 
 var requestPool = sync.Pool{
 	New: func() interface{} {
@@ -793,13 +796,29 @@ func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Reque
 
 	reader := bufio.NewReader(tcpConn)
 	remoteAddr := tcpConn.RemoteAddr().String()
-	resetPingDeadline := func() {
+	resetIdleDeadline := func() {
 		if idleTimeout <= 0 {
 			return
 		}
 		_ = tcpConn.SetReadDeadline(time.Now().Add(idleTimeout))
 	}
-	resetPingDeadline()
+	messageReadDeadline := func(messageLength uint64) {
+		if idleTimeout <= 0 {
+			return
+		}
+
+		// A complete valid message resets the normal idle deadline below. Give a
+		// large, already-admitted frame enough bounded time to arrive so that an
+		// active transfer is not cut off solely by the 90-second idle interval.
+		seconds := (messageLength + minimumInboundTransferRate - 1) / minimumInboundTransferRate
+		transferTimeout := time.Duration(seconds) * time.Second
+		if transferTimeout > idleTimeout {
+			_ = tcpConn.SetReadDeadline(time.Now().Add(transferTimeout))
+			return
+		}
+		resetIdleDeadline()
+	}
+	resetIdleDeadline()
 
 	// Hàm này xử lý việc gửi các lỗi nghiêm trọng (khiến kết nối phải đóng)
 	// một cách an toàn để không bị panic.
@@ -837,6 +856,7 @@ func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Reque
 			handleTerminalError(errExceed, "checking message length")
 			return
 		}
+		messageReadDeadline(messageLength)
 
 		buf := bytebufferpool.Get()
 		_, err = io.CopyN(buf, reader, int64(messageLength))
@@ -853,9 +873,10 @@ func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Reque
 			handleTerminalError(fmt.Errorf("unmarshal error: %w", err), "unmarshaling")
 			return
 		}
-		if msgProto.GetHeader().GetCommand() == "Ping" {
-			resetPingDeadline()
-		}
+		// Any complete, valid protobuf message is client activity. Ping is no
+		// longer special: transaction senders and other TCP clients stay alive
+		// while they continue sending valid frames.
+		resetIdleDeadline()
 
 		// logger.Info(
 		// 	"readLoop %s: received command %s (%d bytes body)",

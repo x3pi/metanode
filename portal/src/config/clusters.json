@@ -1,6 +1,6 @@
 {
   "defaultHost": "127.0.0.1",
-  "defaultClusterId": "local_exec1",
+  "defaultClusterId": "exec1",
   "clusters": [
     {
       "id": "exec1",

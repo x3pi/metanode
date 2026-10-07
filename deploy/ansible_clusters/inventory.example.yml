@@ -96,6 +96,9 @@ all:
             p2p_port: 4200
             raft_port: 7110
             forward_port: 7210
+            # One bootstrap replica is the source of the shared Raft HMAC secret.
+            # Every replica in this cluster receives the exact same secret.
+            raft_secret_source: "exec1_replica1"
             node_data_dir: "/opt/metanode/data"
             private_key: "0f326c0b9bb86353ac317dd8f9b045fd1877473674ba24500139fed777b26a0c"
             address: "0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5"
@@ -142,6 +145,7 @@ all:
         #     p2p_port: 4202
         #     raft_port: 7120
         #     forward_port: 7220
+        #     raft_secret_source: "exec2_replica1"
         #     node_data_dir: "/opt/metanode/exec2"
         #     private_key: "YOUR_CLUSTER2_PRIVATE_KEY_HEX"
         #     address: "0xYourCluster2SequencerAddress"

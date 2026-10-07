@@ -142,15 +142,35 @@
     - name: Ensure the Raft HMAC secret exists on this cluster's bootstrap source
       when: "(consensus_mode | default('raft')) == 'raft'"
       block:
+        - name: Require an explicit bootstrap source for the shared Raft HMAC secret
+          ansible.builtin.assert:
+            that:
+              - >-
+                raft_secret_source is defined and
+                raft_secret_source in groups['exec_clusters'] and
+                (hostvars[raft_secret_source].raft_bootstrap | default(false) | bool) and
+                ((hostvars[raft_secret_source].cluster_id | string) == (cluster_id | string))
+            fail_msg: >-
+              {{ inventory_hostname }}: raft_secret_source must name the bootstrap replica in this cluster.
+              Refusing to generate a per-replica secret because that would break Raft HMAC authentication.
+
+        - name: Ensure the Raft HMAC secret directory exists on every replica
+          ansible.builtin.file:
+            path: "{{ (raft_secret_file | default(install_dir ~ '/raft_secret.key')) | dirname }}"
+            state: directory
+            mode: '0755'
+            owner: "{{ ansible_user | default('abc') }}"
+            group: "{{ ansible_user | default('abc') }}"
+
         - name: Check the bootstrap source Raft secret
           ansible.builtin.stat:
             path: "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
           register: raft_secret_source_stat
-          when: inventory_hostname == (raft_secret_source | default(inventory_hostname))
+          when: inventory_hostname == raft_secret_source
 
         - name: Generate a Raft HMAC secret on the bootstrap source if it is missing
           when:
-            - inventory_hostname == (raft_secret_source | default(inventory_hostname))
+            - inventory_hostname == raft_secret_source
             - not raft_secret_source_stat.stat.exists
           ansible.builtin.shell: |
             mkdir -p "{{ install_dir }}"
@@ -162,7 +182,7 @@
         - name: Read the cluster Raft HMAC secret from its bootstrap source
           ansible.builtin.slurp:
             src: "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}"
-          delegate_to: "{{ raft_secret_source | default(inventory_hostname) }}"
+          delegate_to: "{{ raft_secret_source }}"
           register: raft_secret_source_content
           changed_when: false
           no_log: true
