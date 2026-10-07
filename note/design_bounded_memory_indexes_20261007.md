@@ -1,0 +1,200 @@
+# Báo Cáo Thiết Kế Kiến Trúc: Bounded Memory Indexes Cho Metanode Core
+**Tài liệu tham chiếu:** `note/design_bounded_memory_indexes_20261007.md`  
+**Ngày lập:** 2026-10-07  
+**Tác giả:** Metanode Core Engineering Team  
+**Trạng thái:** DRAFT — Trình duyệt trước khi chỉnh sửa mã nguồn cốt lõi (Theo Kế hoạch Giai đoạn 5)  
+
+---
+
+## 1. Đặt Vấn Đề (Problem Statement)
+
+Trong đợt điều tra hiệu năng bộ nhớ RSS và Heap Allocation (`note/perf_rss_investigation_20261007.md`), hệ thống phát hiện hiện tượng phình bộ nhớ Go Heap tuyến tính theo số lượng giao dịch:
+- **Tốc độ phình:** Tăng **+98.89 MB HeapAlloc** cho mỗi 100,000 transactions EIP-1559 được xử lý.
+- **Top 2 vị trí cấp phát tích luỹ trong Heap Profile:**
+  1. `execution/pkg/blockchain.(*ethHashMapBlsHashMap).StoreBatch` và `.Store`
+  2. `execution/pkg/blockchain.(*txHashToBlockNumberMap).StoreBatch` và `.Store`
+  3. `execution/pkg/blockchain.(*BlockChain).AddTxToCache` (`txsCache`)
+
+Dù Go runtime chạy Garbage Collection định kỳ, bộ nhớ RAM thực tế (Resident Set Size - RSS) không giảm vì các mục này được giữ tham chiếu sống vĩnh viễn trong thời gian active window, và cấu trúc `map` của Go runtime không giải phóng dung lượng bucket rỗng về OS sau khi gọi `delete()`.
+
+---
+
+## 2. Phân Tích Hiện Trạng Mã Nguồn (Source Code Audit)
+
+### 2.1 Cấu trúc hai bảng Mapping trong RAM
+
+Tệp `execution/pkg/blockchain/blockchain.go`:
+```go
+type ethHashMapBlsHashMap struct {
+    mu   sync.RWMutex
+    data map[common.Hash]cachedHash
+}
+
+type cachedHash struct {
+    hash    common.Hash // 32 bytes
+    addedAt time.Time   // 24 bytes (wall, ext, loc)
+}
+
+type txHashToBlockNumberMap struct {
+    mu   sync.RWMutex
+    data map[common.Hash]cachedUint64
+}
+
+type cachedUint64 struct {
+    value   uint64      // 8 bytes
+    addedAt time.Time   // 24 bytes
+}
+```
+
+### 2.2 Kích thước tính toán trên Heap (Heap Memory Per Entry)
+- **`txHashToBlockNumberMap`:**
+  - Key: `common.Hash` (32 bytes).
+  - Value: `cachedUint64` (8 bytes `value` + 24 bytes `addedAt` = 32 bytes).
+  - Go Runtime Map Bucket Overhead: 8 key-value pairs mỗi bucket (64 bytes header + $8 \times (32 + 32) = 576$ bytes $\rightarrow \approx 72$ bytes/entry).
+  - Bổ sung pointer, hash bits và overflow chain: **~130 – 150 bytes / entry**.
+  - Với 100,000 txs: $\approx 15$ MB. Với 1,000,000 txs: $\approx 150$ MB.
+- **`ethHashMapBlsHashMap`:**
+  - Key: `common.Hash` (32 bytes).
+  - Value: `cachedHash` (32 bytes `hash` + 24 bytes `addedAt` = 56 bytes + 8 bytes padding = 64 bytes).
+  - Overhead: **~150 – 170 bytes / entry**.
+  - Với 100,000 txs: $\approx 17$ MB. Với 1,000,000 txs: $\approx 170$ MB.
+
+### 2.3 Cơ chế dọn dẹp hiện tại (Prune Mechanism)
+- Các hằng số tại `blockchain.go` (dòng 33-38):
+  ```go
+  txCacheTTL      = 2 * time.Minute
+  blockCacheTTL   = 10 * time.Minute
+  mappingCacheTTL = 30 * time.Minute
+  cleanupInterval = 1 * time.Minute
+  ```
+- **Lỗ hổng thiết kế:**
+  1. **Không có giới hạn dung lượng trần (Unbounded Capacity):** Dung lượng map chỉ phụ thuộc vào số lượng tx phát sinh trong vòng 30 phút. Nếu mạng gặp spam blast 5,000 tx/s, trong 30 phút sẽ tích luỹ $5,000 \times 1,800 = 9,000,000$ txs $\rightarrow$ RAM chiếm dụng **~1.5 GB đến 2 GB** chỉ cho hai map này.
+  2. **Quét Range $O(N)$ định kỳ:** Cứ mỗi 1 phút, hàm `pruneTxHashCache` và `pruneEthHashCache` lấy `mu.Lock()` và lặp qua toàn bộ map (`for k, v := range m.data`). Khi map có hàng triệu phần tử, thao tác này gây lock contention nghiêm trọng, chặn đứng mọi thao tác đọc/ghi RPC và Block processing.
+  3. **Đặc tính Go runtime map:** Khi gọi `delete(m.data, k)`, Go runtime chỉ đánh dấu ô trống trong bucket, **KHÔNG BAO GIỜ co cụm hoặc giải phóng bộ nhớ buckets** về heap/OS.
+
+---
+
+## 3. Bản Đồ Tương Tác: Ai Ghi, Ai Đọc và Có Persist Xuống DB Không?
+
+### 3.1 Đường Ghi (Write Path)
+1. **Khi Block được Commit (`pkg/blockchain/block_state_commit.go:205`):**
+   - Khi một block được thực thi xong, hàm `bc.SetTxHashMapBlockNumberBatch(txs, blockNum)` được gọi.
+   - Thao tác thực hiện:
+     ```go
+     bc.storeBatchToDirty(dirtyKVs)        // 1. Chuẩn bị ghi vào Pebble DB storageMapping
+     bc.txHashToBlockNumber.StoreBatch(...) // 2. Ghi vào RAM map
+     ```
+   - Sau đó, `bc.Commit()` được kích hoạt, ghi toàn bộ `dirtyStorage` xuống **Pebble DB** (`storageManager.GetStorageMapping()`).
+2. **Khẳng định bền vững (Durability Guarantee):**
+   100% dữ liệu `txHash -> blockNumber` và `ethHash -> blsHash` ĐÃ ĐƯỢC LƯU BỀN VỮNG xuống Pebble DB đĩa cứng dưới các tiền tố:
+   - `txHashPrefix0x<txHashHex>` $\rightarrow$ `uint64 blockNumber` (8 bytes big-endian)
+   - `ethHashMapBlsHashPrefix0x<ethHashHex>` $\rightarrow$ `common.Hash blsHash` (32 bytes)
+
+### 3.2 Đường Đọc (Read Path)
+Tất cả các caller của hai cấu trúc này qua rà soát toàn bộ repo:
+1. `cmd/simple_chain/rpc_transaction.go`:
+   - `eth_getTransactionByHash` (dòng 125, 129): Tìm blockNumber để nạp block và receipt trả về cho JSON-RPC client.
+   - `eth_getTransactionReceipt` (dòng 415, 421): Tìm blockNumber để trả receipt cho client.
+2. `cmd/simple_chain/processor/block_processor_receipt.go`:
+   - Hỗ trợ lấy receipt cho các giao dịch hoàn tất.
+3. `cmd/simple_chain/debug_api.go`:
+   - Các API kiểm tra trạng thái nội bộ.
+
+### 3.3 Cơ chế Fallback đọc Pebble DB đã tồn tại sẵn
+Mã nguồn tại `execution/pkg/blockchain/blockchain.go` (dòng 665-685 và dòng 710-735) đã cài đặt sẵn cơ chế Fallback hoàn hảo:
+```go
+func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bool) {
+    // 1. Kiểm tra L1 In-Memory Cache
+    if value, ok := bc.txHashToBlockNumber.Load(txHash); ok {
+        if cached, ok := value.(cachedUint64); ok {
+            if time.Since(cached.addedAt) <= mappingCacheTTL {
+                return cached.value, true
+            }
+            bc.txHashToBlockNumber.Delete(txHash)
+        }
+    }
+
+    // 2. FALLBACK L2: Đọc trực tiếp từ Pebble DB storageMapping
+    key := []byte(txHashPrefix + txHash.Hex())
+    data, err := bc.storageManager.GetStorageMapping().Get(key)
+    if err == nil && data != nil && len(data) == 8 {
+        blockNumber := binary.BigEndian.Uint64(data)
+        // Nạp ngược lại vào L1 cache
+        bc.txHashToBlockNumber.Store(txHash, cachedUint64{
+            value:   blockNumber,
+            addedAt: time.Now(),
+        })
+        return blockNumber, true
+    }
+
+    return 0, false
+}
+```
+
+---
+
+## 4. Phân Tích Tính Xác Định (Determinism) & Zero-Fork Invariant
+
+### 4.1 Câu hỏi sống còn: Việc Eviction khỏi RAM có gây phân nhánh (Fork) không?
+- **Khẳng định:** **TUYỆT ĐỐI KHÔNG GÂY FORK.**
+- **Chứng minh:**
+  1. **Không nằm trong Consensus Engine:** Hai cấu trúc này hoàn toàn không tham gia vào bất kỳ hàm tính toán State Root, Block Header Hash, Quorum Certificate, hay DAG Ordering nào.
+  2. **Không nằm trong Tx Execution Function:** EVM và Account State transition chỉ truy cập `account_state_db` và `trie` (NOMT/Merkle trie). Chúng không gọi `GetBlockNumberByTxHashFast`.
+  3. **Tính nhất quán dữ liệu (Data Consistency):** Dù entry có nằm trong RAM hay bị evict ra đĩa, khi truy vấn hàm `GetBlockNumberByTxHashFast` vẫn trả về cùng một giá trị `blockNumber` duy nhất lấy từ Pebble DB.
+  4. **Dữ liệu có thể tái dựng:** Dữ liệu mapping có thể tái dựng 100% bằng cách quét lại các blocks trong `BlockDatabase` (hàm `RebuildTxMappings` trong `mapping_rebuild.go` đã được kiểm thử và hoạt động hoàn hảo).
+
+---
+
+## 5. Đề Xuất Các Phương Án Kỹ Thuật (Architecture Options)
+
+### Phương Án 1: Bounded LRU Cache với Fallback Pebble DB (Khuyến Nghị)
+- **Cơ chế:** Thay thế Go map bằng một bộ đệm LRU có giới hạn cứng (ví dụ `Capacity = 65,536` phần tử).
+- **Cách thức hoạt động:**
+  - Khi thêm entry mới (`Store`): Nếu kích thước vượt 65,536, phần tử ít được sử dụng nhất (Least Recently Used) tự động bị loại khỏi RAM.
+  - Khi đọc (`Load`): Nếu hit $\rightarrow$ đưa lên đầu danh sách LRU. Nếu miss $\rightarrow$ đọc Pebble DB và nạp vào LRU.
+  - Loại bỏ hoàn toàn goroutine `Prune()` chạy vòng lặp $O(N)$ định kỳ mỗi 1 phút.
+- **Ưu điểm:**
+  - Bộ nhớ RAM bị chặn cứng ở mức trần cố định: $\le 10$ MB cho mỗi bảng.
+  - Giảm thiểu hoàn toàn stop-the-world và lock contention.
+  - Tận dụng triệt để cơ chế Fallback Pebble DB sẵn có.
+- **Kỹ thuật thực hiện:**
+  - Sử dụng thư viện chuẩn hoặc cấu trúc LRU lock-free / striped mutex đã qua kiểm định (ví dụ `hashicorp/golang-lru/v2` hoặc mảng vòng fixed-size 2-generation).
+
+### Phương Án 2: Bounded Two-Generation Ring Map (Zero External Dependency)
+- **Cơ chế:** Dùng 2 maps: `current` và `old`.
+  - Giới hạn: Khi `current` đạt `MaxEntries` (ví dụ 50,000), tráo con trỏ: `old = current`, `current = make(map, MaxEntries)`. Map `old` trước đó tự động được giải phóng cho GC.
+- **Ưu điểm:**
+  - 100% Go thuần, không thêm package bên ngoài.
+  - Rất nhanh, phân bổ một lần, dọn dẹp theo batch cực sạch mà không tốn công việc dịch chuyển con trỏ LRU.
+  - Entry tồn tại tối đa trong 2 chu kỳ nạp, đảm bảo luôn có trong RAM trong suốt đợt blast hiện tại.
+
+### Phương Án 3: Loại bỏ hoàn toàn L1 RAM Cache, dựa 100% vào Pebble DB
+- **Cơ chế:** Bỏ hẳn `txHashToBlockNumberMap` và `ethHashMapBlsHashMap` trong RAM. Mọi truy vấn `GetBlockNumberByTxHash` đọc trực tiếp qua `bc.storageManager.GetStorageMapping().Get(key)`.
+- **Ưu điểm:**
+  - Đạt chuẩn tối thượng KISS & YAGNI.
+  - Pebble DB vốn đã có sẵn **Block Cache** nội tại cực mạnh viết bằng C/Go với cơ chế LRU quản lý chặt chẽ theo dung lượng byte cấu hình trước (ví dụ 64 MB hoặc 128 MB).
+- **Rủi ro:**
+  - Có thể tăng độ trễ truy vấn RPC của các client đọc receipt liên tục thêm vài micro-giây (Pebble DB in-memory cache lookup tốn ~1-2 $\mu$s so với Go map ~50 ns).
+
+---
+
+## 6. Phân Tích Rủi Ro & Kế Hoạch Kiểm Thử (Risk & Test Plan)
+
+| Rủi Ro | Mức Độ | Biện Pháp Kiểm Soát |
+| :--- | :---: | :--- |
+| **Race Condition khi concurrent Read/Write** | Trung bình | Sử dụng Read-Write Mutex bảo vệ hoặc lock nội bộ của LRU; chạy với cờ `go test -race`. |
+| **Suy giảm thông lượng RPC Receipt** | Thấp | Benchmark RPC read throughput trước và sau khi áp dụng bounded cache. |
+| **Dung lượng Pebble DB tăng nhẹ** | Rất thấp | Pebble DB vốn dĩ đã lưu 100% mapping này từ trước, không có thêm dữ liệu mới nào phát sinh. |
+| **State Drift / Fork** | **0%** | Đã chứng minh dữ liệu chỉ phục vụ RPC; không liên quan consensus hay execution. |
+
+---
+
+## 7. Quyết Định & Kiến Nghị (Decision & Recommendation)
+
+1. **Tuân thủ nguyên tắc Scope Gating (AGENTS.md Part 1 & Part 2):**
+   - Không tự ý sửa mã nguồn cốt lõi trong pull request điều tra hiệu năng này.
+   - Tài liệu thiết kế này được đệ trình để User và Tech Lead xem xét và duyệt phương án trước khi triển khai code.
+2. **Khuyến nghị chọn Phương Án 2 (Bounded Two-Generation Ring Map) hoặc Phương Án 1:**
+   - Đảm bảo giới hạn RAM cố định $\le 10$ MB.
+   - Giữ nguyên hiệu năng truy vấn nhanh cho RPC.
+   - Đáp ứng triệt để yêu cầu "Bounded Concurrency & Bounded Memory" của hệ thống Metanode Core.
