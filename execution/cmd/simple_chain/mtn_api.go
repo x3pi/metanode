@@ -30,7 +30,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/mining" // Import mining package
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
-	"github.com/meta-node-blockchain/meta-node/pkg/shared_memory"
+	sharedmemory "github.com/meta-node-blockchain/meta-node/pkg/shared_memory"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
@@ -251,6 +251,7 @@ func (api *MtnAPI) GetAccountState(ctx context.Context, address common.Address, 
 			"publicKeyBls":       "",
 			"nonce":              uint64(0),
 			"accountType":        uint64(0),
+			"parentRegistered":   false,
 			"smartContractState": common.Hash{}.String(),
 		}
 		return account, nil
@@ -279,6 +280,7 @@ func (api *MtnAPI) GetAccountState(ctx context.Context, address common.Address, 
 		"publicKeyBls":       hex.EncodeToString(as.PublicKeyBls()),
 		"nonce":              as.Nonce(),
 		"accountType":        as.AccountType(),
+		"parentRegistered":   as.ParentRegistered(),
 		"smartContractState": smartContractState,
 	}
 

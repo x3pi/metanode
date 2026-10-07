@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { ArrowLeftRight, CheckCircle2, Clock, Layers, Sparkles, AlertCircle } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { ArrowLeftRight, Clock, Layers, Sparkles, AlertCircle } from 'lucide-react';
 import { getAllClusters, sendCrossChainTransfer, callJsonRpc } from '../services/metanodeRpc';
 
 export function RollupTransferTab({ account, accountInfo, allClusters }) {
@@ -12,19 +12,13 @@ export function RollupTransferTab({ account, accountInfo, allClusters }) {
   const [amount, setAmount] = useState('0.5');
   const [isProcessing, setIsProcessing] = useState(false);
   const [transferError, setTransferError] = useState(null);
+  const [transfers, setTransfers] = useState([]);
+  const trackerTimers = useRef(new Set());
 
-  const [transfers, setTransfers] = useState([
-    {
-      id: 'msg-0x9f182c48a2',
-      fromCluster: 'Exec Cluster 1',
-      toCluster: 'Exec Cluster 2',
-      recipient: account || '0x71C...3972',
-      amount: '5.0 MTN',
-      step: 3, // Complete
-      time: '10 mins ago',
-      mode: 'Attested',
-    },
-  ]);
+  useEffect(() => () => {
+    trackerTimers.current.forEach((timer) => clearInterval(timer));
+    trackerTimers.current.clear();
+  }, []);
 
   // Keep recipient updated when account connects
   useEffect(() => {
@@ -36,12 +30,60 @@ export function RollupTransferTab({ account, accountInfo, allClusters }) {
   const srcClusterObj = execClusters.find((c) => c.id === srcClusterId) || execClusters[0];
   const destClusterObj = execClusters.find((c) => c.id === destClusterId) || execClusters[1];
 
+  const trackTransfer = (transfer, expectedBalance) => {
+    const check = async () => {
+      try {
+        const receipt = await callJsonRpc(srcClusterObj.rpcUrl, 'eth_getTransactionReceipt', [transfer.id]);
+        if (receipt?.status && receipt.status !== '0x1') {
+          setTransfers((prev) => prev.map((item) => (
+            item.id === transfer.id ? { ...item, failed: true, status: 'Source transaction failed' } : item
+          )));
+          return true;
+        }
+
+        const balanceHex = await callJsonRpc(destClusterObj.rpcUrl, 'eth_getBalance', [transfer.recipient, 'latest']);
+        const destinationBalance = BigInt(balanceHex);
+        const sourceConfirmed = receipt?.status === '0x1';
+        const credited = destinationBalance >= expectedBalance;
+
+        setTransfers((prev) => prev.map((item) => (
+          item.id === transfer.id
+            ? {
+                ...item,
+                step: credited ? 3 : (sourceConfirmed ? 2 : 1),
+                status: credited
+                  ? 'Destination balance credited'
+                  : (sourceConfirmed ? 'Source confirmed; waiting for Parent Chain relay' : 'Submitted; waiting for source confirmation'),
+                destinationBalance: destinationBalance.toString(),
+              }
+            : item
+        )));
+        return credited;
+      } catch (error) {
+        setTransfers((prev) => prev.map((item) => (
+          item.id === transfer.id ? { ...item, status: `Polling: ${error.message}` } : item
+        )));
+        return false;
+      }
+    };
+
+    const timer = setInterval(async () => {
+      if (await check()) {
+        clearInterval(timer);
+        trackerTimers.current.delete(timer);
+      }
+    }, 2000);
+    trackerTimers.current.add(timer);
+    check().then((complete) => {
+      if (complete) {
+        clearInterval(timer);
+        trackerTimers.current.delete(timer);
+      }
+    });
+  };
+
   const handleCreateRollupTransfer = async (e) => {
     e.preventDefault();
-    if (!account) {
-      alert('Please connect your wallet first.');
-      return;
-    }
     if (!recipient || !recipient.startsWith('0x') || recipient.length !== 42) {
       alert('Please enter a valid 20-byte destination address (0x...)');
       return;
@@ -61,54 +103,32 @@ export function RollupTransferTab({ account, accountInfo, allClusters }) {
     const amountWei = BigInt(Math.floor(amountFloat * 1e18));
     const valueHex = `0x${amountWei.toString(16)}`;
 
-    let realMsgId = null;
-    let isRealCall = false;
-
-    // Try calling real RPC method mtn_sendCrossChainTransfer on source cluster
     try {
-      if (srcClusterObj?.rpcUrl) {
-        realMsgId = await sendCrossChainTransfer(srcClusterObj.rpcUrl, recipient, valueHex);
-        if (realMsgId) {
-          isRealCall = true;
-        }
+      if (!srcClusterObj?.rpcUrl || !destClusterObj?.rpcUrl || srcClusterObj.id === destClusterObj.id) {
+        throw new Error('Choose two different online execution clusters.');
       }
+      const balanceHex = await callJsonRpc(destClusterObj.rpcUrl, 'eth_getBalance', [recipient, 'latest']);
+      const expectedBalance = BigInt(balanceHex) + amountWei;
+      const txHash = await sendCrossChainTransfer(srcClusterObj.rpcUrl, recipient, valueHex);
+      if (!txHash) throw new Error('Source cluster did not return a transaction hash.');
+
+      const newTransfer = {
+        id: txHash,
+        fromCluster: srcClusterObj.name,
+        toCluster: destClusterObj.name,
+        recipient,
+        amount: `${amount} MTN`,
+        step: 1,
+        mode: 'Devnet node-signed transfer',
+        status: 'Submitted; waiting for source confirmation',
+      };
+      setTransfers((prev) => [newTransfer, ...prev]);
+      trackTransfer(newTransfer, expectedBalance);
     } catch (rpcErr) {
-      console.warn('Real mtn_sendCrossChainTransfer returned error, will run simulation flow:', rpcErr);
-      // If the node threw a real business error (e.g. conservation violated or account gated), report it
-      if (rpcErr.message && !rpcErr.message.includes('not exist') && !rpcErr.message.includes('not available')) {
-        setTransferError(`Cluster notice: ${rpcErr.message}`);
-      }
-    }
-
-    const transferId = realMsgId || `msg-0x${Math.random().toString(16).slice(2, 10)}`;
-
-    const newTransfer = {
-      id: transferId,
-      fromCluster: srcClusterObj?.name || 'Source',
-      toCluster: destClusterObj?.name || 'Destination',
-      recipient,
-      amount: `${amount} MTN`,
-      step: 1, // 1: Source Locked
-      time: 'Just now',
-      mode: isRealCall ? 'Real Node Tx' : 'Co-Attested Rollup',
-    };
-
-    setTransfers((prev) => [newTransfer, ...prev]);
-
-    // Advance Stage 2: Parent Relayed & BLS Co-Attestation
-    setTimeout(() => {
-      setTransfers((prev) =>
-        prev.map((t) => (t.id === newTransfer.id ? { ...t, step: 2 } : t))
-      );
-    }, 2500);
-
-    // Advance Stage 3: Destination Claimed
-    setTimeout(() => {
-      setTransfers((prev) =>
-        prev.map((t) => (t.id === newTransfer.id ? { ...t, step: 3 } : t))
-      );
+      setTransferError(`Cross-cluster transfer was not submitted: ${rpcErr.message}`);
+    } finally {
       setIsProcessing(false);
-    }, 6000);
+    }
   };
 
   return (
@@ -202,7 +222,7 @@ export function RollupTransferTab({ account, accountInfo, allClusters }) {
             type="submit"
             className="btn btn-primary"
             style={{ width: '100%', marginTop: '8px' }}
-            disabled={isProcessing || !account}
+            disabled={isProcessing || execClusters.length < 2}
           >
             {isProcessing ? (
               <>
@@ -219,8 +239,9 @@ export function RollupTransferTab({ account, accountInfo, allClusters }) {
         </form>
 
         <div style={{ marginTop: '16px', padding: '12px', background: 'rgba(15, 23, 42, 0.5)', borderRadius: '8px', fontSize: '0.76rem', color: 'var(--text-muted)' }}>
-          <strong>Architecture Seam:</strong> Float transfers are certified on-chain with BLS f+1 multi-signatures.
-          Cross-cluster value is strictly conserved across clusters with zero inflationary minting.
+          <strong>Devnet sender:</strong> this RPC currently signs with the funded node test account, not MetaMask.
+          Register the recipient with the destination cluster first. The tracker advances only after source receipt and
+          destination balance RPC checks; it never simulates success.
         </div>
       </div>
 
@@ -264,19 +285,23 @@ export function RollupTransferTab({ account, accountInfo, allClusters }) {
                 {tx.amount} &nbsp;({tx.fromCluster} &rarr; {tx.toCluster})
               </div>
 
+              <div style={{ fontSize: '0.76rem', color: tx.failed ? 'var(--danger)' : 'var(--text-muted)', marginBottom: '10px' }}>
+                {tx.status}
+              </div>
+
               {/* 3-Step Lifecycle Visualizer */}
               <div className="steps-container" style={{ margin: '8px 0 0' }}>
                 <div className={`step-item ${tx.step >= 1 ? 'active' : ''} ${tx.step > 1 ? 'completed' : ''}`}>
                   <div className="step-circle">{tx.step > 1 ? '✓' : '1'}</div>
-                  <div className="step-label">1. Source Locked</div>
+                  <div className="step-label">1. Submitted</div>
                 </div>
                 <div className={`step-item ${tx.step >= 2 ? 'active' : ''} ${tx.step > 2 ? 'completed' : ''}`}>
                   <div className="step-circle">{tx.step > 2 ? '✓' : '2'}</div>
-                  <div className="step-label">2. Parent Relayed (f+1)</div>
+                  <div className="step-label">2. Source Confirmed</div>
                 </div>
                 <div className={`step-item ${tx.step >= 3 ? 'completed' : ''}`}>
                   <div className="step-circle">{tx.step >= 3 ? '✓' : '3'}</div>
-                  <div className="step-label">3. Dest Claimed</div>
+                  <div className="step-label">3. Dest Credited</div>
                 </div>
               </div>
             </div>

@@ -224,11 +224,30 @@ func main() {
 		fmt.Printf("❌ Relayer chưa có trong registry sau khi đăng ký (genesis không cho đăng ký cluster mở?): found=%v err=%v\n", found, err)
 		os.Exit(1)
 	}
-	_, exec1PubKey, _ := bls.GenerateKeyPairFromSecretKey(exec1PrivHex)
+	exec1Priv, exec1PubKey, _ := bls.GenerateKeyPairFromSecretKey(exec1PrivHex)
 	exec2Priv, exec2PubKey, _ := bls.GenerateKeyPairFromSecretKey(exec2PrivHex)
 
 	senderECDSAKey, _ := crypto.HexToECDSA(devnetSenderECDSA)
 	senderAddr := crypto.PubkeyToAddress(senderECDSAKey.PublicKey)
+
+	// The devnet gateway RPC signs outgoing transfers with senderAddr. Register it
+	// against Exec 1 using the same two signatures as a normal account registration;
+	// otherwise the Parent Registered account gate correctly rejects the source tx.
+	senderDigest := parentchain.ComputeRegisterAccountMessage(senderAddr, exec1PubKey)
+	senderUserSig, _ := crypto.Sign(crypto.Keccak256(senderDigest), senderECDSAKey)
+	if _, err := parentClient.SendRegisterAccount(senderAddr, exec1PubKey, senderUserSig, bls.Sign(exec1Priv, senderDigest)); err != nil {
+		fmt.Printf("❌ Không thể đăng ký devnet sender vào Exec 1: %v\n", err)
+		os.Exit(1)
+	}
+	waitRegistered(parentClient, senderAddr)
+	if registeredKey, found, err := parentClient.GetAccountRegistry(senderAddr); err != nil || !found || registeredKey != exec1PubKey {
+		fmt.Printf("❌ Devnet sender chưa được Parent Chain ánh xạ đúng vào Exec 1: found=%v err=%v\n", found, err)
+		os.Exit(1)
+	}
+	if !waitForChildRegistration(exec1URL, senderAddr, 30*time.Second) {
+		fmt.Println("❌ Exec 1 chưa commit ParentRegistered cho devnet sender")
+		os.Exit(1)
+	}
 
 	// Step 0: Pre-flight check
 	printHeader("BƯỚC 0: KIỂM TRA TRẠNG THÁI HỆ THỐNG BAN ĐẦU")
@@ -782,6 +801,25 @@ func waitRegistered(c parentchain.Client, a common.Address) {
 			return
 		}
 	}
+}
+
+// waitForChildRegistration waits for the RegistrationWorker's ordered system transaction to
+// commit ParentRegistered on the child chain. Parent registry confirmation alone is not enough
+// for the child account gate to admit a source transaction.
+func waitForChildRegistration(url string, a common.Address, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		res, err := rpcCall(url, "mtn_getAccountState", []interface{}{a.Hex(), "latest"})
+		if err == nil {
+			if state, ok := res["result"].(map[string]interface{}); ok {
+				if registered, ok := state["parentRegistered"].(bool); ok && registered {
+					return true
+				}
+			}
+		}
+		time.Sleep(time.Second)
+	}
+	return false
 }
 
 func waitBalance(url string, a common.Address, want *big.Int, d time.Duration) bool {
