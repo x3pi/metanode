@@ -46,8 +46,8 @@
 📊 KẾT QUẢ THỐNG KÊ GOGC (Fresh State, n=7 mỗi nhánh):
    • Default GOGC: TPS = 6106.7 ± 235.4 tx/s | Peak RSS = 9823 ± 1732 MB
    • GOGC=50:      TPS = 5754.1 ± 408.7 tx/s | Peak RSS = 6830 ± 1458 MB
-   • TPS Chênh lệch: -5.77% (t=1.98, df=9.6, p=0.0480, 95% CI=[-36.0, 741.1])
-   • RSS Chênh lệch: -30.47% (t=3.50, df=11.7, p=0.0005)
+   • TPS Chênh lệch: -5.77% (t=1.98, df=9.6, p=0.0774, 95% CI=[-47.0, 752.1])
+   • RSS Chênh lệch: -30.47% (t=3.50, df=11.7, p=0.0046, 95% CI=[1122.7, 4863.3])
 ==================================================================
 
 ▶️ [2/2] Chạy Thực Nghiệm Debug Flag: ENABLE_DEBUG_PPROF=true vs false (7 lượt xen kẽ)...
@@ -91,7 +91,7 @@
 📊 KẾT QUẢ THỐNG KÊ DEBUG FLAG (Fresh State, n=7 mỗi nhánh):
    • Debug On (true):   TPS = 5904.0 ± 646.7 tx/s | CPU = 96.3 ± 4.7 s | Log = 0.0 KB
    • Debug Off (false):  TPS = 5412.6 ± 1131.9 tx/s | CPU = 96.7 ± 6.5 s | Log = 0.0 KB
-   • Chênh lệch TPS:    -8.32% (t=1.00, df=9.5, p=0.3187, 95% CI=[-582.8, 1565.4])
+   • Chênh lệch TPS:    -8.32% (t=1.00, df=9.5, p=0.3433, 95% CI=[-613.7, 1596.4])
    • Chênh lệch CPU:    +0.48% (t=-0.15, df=10.8, p=0.8798)
 ==================================================================
 

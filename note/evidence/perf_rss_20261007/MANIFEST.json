@@ -88,7 +88,7 @@
         {
           "name": "ETH_BLS_W8",
           "file": "memstats_top_inuse_summary.txt",
-          "regex": "Wave 8.*?(\\d+\\.\\d+)\\s+MB\\s+:\\s+#[^\\n]+ethHashMapBlsHashMap",
+          "regex": "---\\s*Wave 8.*?(\\d+\\.\\d+)\\s+MB\\s+:\\s+#[^\\n]+ethHashMapBlsHashMap",
           "group": 1,
           "stat": "raw",
           "unit": "MB"
@@ -96,7 +96,7 @@
         {
           "name": "TX_HASH_W8",
           "file": "memstats_top_inuse_summary.txt",
-          "regex": "Wave 8.*?(\\d+\\.\\d+)\\s+MB\\s+:\\s+#[^\\n]+txHashToBlockNumberMap",
+          "regex": "---\\s*Wave 8.*?(\\d+\\.\\d+)\\s+MB\\s+:\\s+#[^\\n]+txHashToBlockNumberMap",
           "group": 1,
           "stat": "raw",
           "unit": "MB"
@@ -139,8 +139,8 @@
       "files": [
         {
           "path": "controlled_benchmarks_gogc_and_debug.log",
-          "sha256": "252d790830409e09cd7e9f2bddcc571c6a0ebc786964ea61bfe08e5531cbac4c",
-          "bytes": 6007
+          "sha256": "987e89373d96e4e32b32829888c06f99b285651d0c7ac36142e909244e1fa0c3",
+          "bytes": 6032
         },
         {
           "path": "controlled_benchmarks_summary.csv",
@@ -198,6 +198,59 @@
           "unit": "tx/s"
         }
       ]
+    },
+    {
+      "id": "rss_drift_diagnostic",
+      "command": "python3 -u execution/scripts/test/evidence/diagnose_rss_drift.py",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "5ce291c311d4acd5fc51bf346434c6353aa28eb7",
+      "git_status": "",
+      "started_at": "2026-10-07T15:00:00Z",
+      "finished_at": "2026-10-07T15:02:40Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "rss_drift_diagnostic.log",
+          "sha256": "619ad847256e5d32366b312bdffd5e43586863dbf958381ab2f3eb2f265657c9",
+          "bytes": 3871
+        }
+      ],
+      "extract": [
+        {
+          "name": "DIAG_BASELINE_DRIFT_PCT",
+          "file": "rss_drift_diagnostic.log",
+          "regex": "Baseline Drift \\(Round 3 vs Round 1\\):\\s+([+-]?\\d+\\.\\d+)%",
+          "group": 1,
+          "stat": "raw",
+          "unit": "%"
+        }
+      ]
+    }
+  ],
+  "claims": [
+    {
+      "description": "HeapAlloc slope claim in text",
+      "regex": "\\$m = \\+(\\d+\\.\\d+)\\$",
+      "extractor": "HeapAlloc_slope",
+      "tolerance": 0.005
+    },
+    {
+      "description": "ETH_BLS_W1 claim in text",
+      "regex": "Wave 1:\\s+(\\d+\\.\\d+)\\s+MB InUse",
+      "extractor": "ETH_BLS_W1",
+      "tolerance": 0.005
+    },
+    {
+      "description": "ETH_BLS_W8 claim in text",
+      "regex": "ethHashMapBlsHashMap.*?Wave 8:\\s+(\\d+\\.\\d+)\\s+MB InUse",
+      "extractor": "ETH_BLS_W8",
+      "tolerance": 0.005
+    },
+    {
+      "description": "TX_HASH_W8 claim in text",
+      "regex": "txHashToBlockNumberMap.*?Wave 8:\\s+(\\d+\\.\\d+)\\s+MB InUse",
+      "extractor": "TX_HASH_W8",
+      "tolerance": 0.005
     }
   ],
   "external": [

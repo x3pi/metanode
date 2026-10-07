@@ -123,7 +123,7 @@ So sánh cấu trúc bộ nhớ InUse giữa Wave 1 (50k txs) và Wave 8 (400k t
    - Network socket server buffer (`network.NewSocketServer`): 7.63 MB (bất biến từ Wave 1 đến Wave 8).
    - Transaction processor workers (`NewTransactionProcessor`): 38.15 MB (bất biến từ Wave 1 đến Wave 8).
 
-**Kết luận kỹ thuật:** Mức tăng trưởng HeapAlloc $+98.89$ MB / 100k txs xuất phát từ **việc lưu trữ index và state mapping trong RAM** cho các tài khoản và giao dịch mới, chứ **không phải** rò rỉ bộ nhớ vô tận từ goroutines hay network sockets. Tuy nhiên, việc giữ index trong bộ nhớ không có giới hạn dung lượng (unbounded cache) có nguy cơ làm cạn kiệt RAM sau hàng triệu giao dịch và cần cơ chế dọn dẹp LRU cache.
+**Kết luận kỹ thuật:** Mức tăng trưởng HeapAlloc $+98.89$ MB / 100k txs xuất phát từ **việc lưu trữ index và state mapping trong RAM** cho các tài khoản và giao dịch mới, chứ **không phải** rò rỉ bộ nhớ vô tận từ goroutines hay network sockets. Các map này hiện được chặn theo thời gian (TTL 30 phút qua `mappingCacheTTL`) nhưng **chưa có giới hạn dung lượng phần tử (unbounded by capacity)**, dẫn đến nguy cơ tích tụ RAM lớn trong cửa sổ 30 phút nếu gặp lượng giao dịch dồn dập, và cần cơ chế bounded cache (LRU hoặc Two-Generation map) để kiểm soát trần bộ nhớ xác định.
 
 ---
 
@@ -157,12 +157,12 @@ So sánh cấu trúc bộ nhớ InUse giữa Wave 1 (50k txs) và Wave 8 (400k t
 - **Thông lượng (Effective TPS):**
   * Default GOGC (800): $6,106.7 \pm 235.4$ tx/s (`evidence:controlled_benchmarks_gogc_and_debug#CTRL_GOGC_DEF_TPS_MEAN`)
   * GOGC=50: $5,754.1 \pm 408.7$ tx/s (`evidence:controlled_benchmarks_gogc_and_debug#CTRL_GOGC_50_TPS_MEAN`)
-  * Chênh lệch TPS: **-5.77%** ($t = 1.98, \text{df} = 9.6, p = 0.0480, 95\% \text{ CI} = [-36.0, 741.1]$ tx/s).
-  * *Đánh giá khoa học:* Mặc dù $p \approx 0.048$ sát ngưỡng $0.05$, khoảng tin cậy 95% có cận dưới âm ($-36.0$), cho thấy mức giảm TPS khoảng ~5.8% là tương đối nhỏ và chịu ảnh hưởng một phần bởi biến thiên tải.
+  * Chênh lệch TPS: **-5.77%** ($t = 1.98, \text{df} = 9.6, p = 0.0774, 95\% \text{ CI} = [-47.0, 752.1]$ tx/s).
+  * *Kết luận theo tiêu chí ghi trước:* **INCONCLUSIVE** (Không phát hiện chênh lệch TPS có ý nghĩa thống kê với $n=7$ vì $p = 0.0774 > 0.05$ và khoảng tin cậy $95\%$ $[-47.0, 752.1]$ chứa số $0$).
 - **Bộ nhớ đỉnh (Peak RSS Cụm 4 nodes):**
   * Default GOGC: $9,823 \pm 1,732$ MB (`evidence:controlled_benchmarks_gogc_and_debug#CTRL_GOGC_DEF_RSS_MEAN`)
   * GOGC=50: $6,830 \pm 1,458$ MB (`evidence:controlled_benchmarks_gogc_and_debug#CTRL_GOGC_50_RSS_MEAN`)
-  * Mức độ tiết kiệm RAM: **-30.47%** ($t = 3.50, \text{df} = 11.7, p = 0.0005 < 0.001$). Khác biệt có ý nghĩa thống kê rất cao, chứng minh GOGC=50 ép giải phóng bộ nhớ heap thực tế.
+  * Mức độ tiết kiệm RAM: **-30.47%** ($t = 3.50, \text{df} = 11.7, p = 0.0046, 95\% \text{ CI} = [1122.7, 4863.3]$ MB). Khác biệt có ý nghĩa thống kê cao ($p < 0.01$).
 - **Chi phí CPU (CPU Time):**
   * Default GOGC: $90.6 \pm 5.8$ s
   * GOGC=50: $145.0 \pm 9.4$ s (+60.0% CPU time do GC chạy thường xuyên hơn).
@@ -207,8 +207,8 @@ Cờ `-debug` chỉ kích hoạt HTTP listener `http.Serve` cho `net/http/pprof`
 - **Thông lượng TPS:**
   * Debug On: $5,904.0 \pm 646.7$ tx/s (`evidence:controlled_benchmarks_gogc_and_debug#CTRL_DEBUG_ON_TPS_MEAN`)
   * Debug Off: $5,412.6 \pm 1131.9$ tx/s (`evidence:controlled_benchmarks_gogc_and_debug#CTRL_DEBUG_OFF_TPS_MEAN`)
-  * Chênh lệch TPS: $-8.32\%$ ($t = 1.00, \text{df} = 9.5, p = 0.3187 \gg 0.05, 95\% \text{ CI} = [-582.8, 1565.4]$ tx/s).
-  * *Kết luận:* Không có sự khác biệt có ý nghĩa thống kê giữa bật và tắt cờ `-debug` ($p = 0.3187$).
+  * Chênh lệch TPS: $-8.32\%$ ($t = 1.00, \text{df} = 9.5, p = 0.3433 \gg 0.05, 95\% \text{ CI} = [-613.7, 1596.4]$ tx/s).
+  * *Kết luận:* Không có sự khác biệt có ý nghĩa thống kê giữa bật và tắt cờ `-debug` ($p = 0.3433$).
 - **CPU Time:** Debug On $96.3 \pm 4.7$s vs Debug Off $96.7 \pm 6.5$s ($p = 0.8798$, chênh lệch $+0.48\%$, nằm trong khoảng biến thiên ngẫu nhiên).
 - **Hành động kỹ thuật:** Mặc định của `ENABLE_DEBUG_PPROF` trong [execution/scripts/test/gate_e2e/run_env.sh](file:///home/abc/chain-n/metanode/execution/scripts/test/gate_e2e/run_env.sh) đã được đổi thành `false` theo tiêu chuẩn đóng gói bảo mật sản xuất (production hardening).
 - *Ghi chú quan trọng:* Mọi báo cáo benchmark trước đây (B1, Durability, Wave 1-8) đều được thực hiện khi cờ `-debug=true` đang bật mặc định trong kịch bản chạy thử nghiệm.
@@ -231,8 +231,8 @@ Cờ `-debug` chỉ kích hoạt HTTP listener `http.Serve` cho `net/http/pprof`
 
 ## 8. Kết Luận & Đánh Giá Tổng Thể
 1. Khẳng định cũ về việc "bộ nhớ không đổi" đã được sửa đổi minh bạch: Bộ nhớ tăng trưởng tuyến tính ($+98.89$ MB Heap / 100k txs) do in-memory caching cho ánh xạ địa chỉ và tra cứu giao dịch (`evidence:rss_investigation_8waves`).
-2. Đo lường có đối chứng trên cụm sạch cho thấy `GOGC=50` giảm 30.5% RSS đỉnh ($p = 0.0005$), đổi lại CPU tăng ~60% cho tác vụ GC, trong khi TPS chỉ giảm nhẹ ~5.8% ($p = 0.0480$) (`evidence:controlled_benchmarks_gogc_and_debug`).
-3. Cờ `-debug=true` không gây suy giảm hiệu năng có ý nghĩa thống kê ($p = 0.3187$), nhưng đã được chuyển về mặc định `false` trong `run_env.sh` để tuân thủ tiêu chuẩn production hardening.
+2. Đo lường có đối chứng trên cụm sạch cho thấy `GOGC=50` giảm 30.5% RSS đỉnh ($p = 0.0046$), đổi lại CPU tăng ~60% cho tác vụ GC, trong khi chênh lệch TPS là **INCONCLUSIVE** ($p = 0.0774 > 0.05$, khoảng tin cậy 95% chứa số 0) (`evidence:controlled_benchmarks_gogc_and_debug`).
+3. Cờ `-debug=true` không gây suy giảm hiệu năng có ý nghĩa thống kê ($p = 0.3433$), nhưng đã được chuyển về mặc định `false` trong `run_env.sh` để tuân thủ tiêu chuẩn production hardening.
 4. Tài liệu thiết kế kiến trúc [note/design_bounded_memory_indexes_20261007.md](file:///home/abc/chain-n/metanode/note/design_bounded_memory_indexes_20261007.md) đã được đệ trình để giải quyết triệt để nguyên nhân gốc rễ bằng Bounded Memory Cache.
 5. Toàn bộ số liệu trong báo cáo đều có file log thô, SHA256 và kích thước bytes tương ứng trong [note/evidence/perf_rss_20261007/MANIFEST.json](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/MANIFEST.json).
 
