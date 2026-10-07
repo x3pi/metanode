@@ -41,7 +41,6 @@ type TransactionController interface {
 		chainId uint64,
 	) (types.Transaction, error)
 
-
 	SaveTransactionWithDeviceKeyToFile(
 		fromAddress common.Address,
 		toAddress common.Address,

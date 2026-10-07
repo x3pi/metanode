@@ -6,7 +6,6 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -143,8 +142,6 @@ func (tc *TransactionController) SendTransactions(
 	)
 	return err
 }
-
-
 
 func (tc *TransactionController) SaveTransactionWithDeviceKeyToFile(
 	fromAddress common.Address,
@@ -302,3 +299,93 @@ func (tc *TransactionController) SendAllTransactionsWidthDeviceKeyInDirectory(
 			command.SendTransaction,
 			byteT,
 		)
+		if err != nil {
+			log.Printf("Failed to SendBytes transaction from file %s: %v", filePath, err)
+		}
+	}
+
+	successCount := len(files) - errorCount
+	log.Printf("--- Sending Complete ---")
+	log.Printf("Total transactions to send: %d", len(files))
+	log.Printf("Successfully sent: %d", successCount)
+	log.Printf("Failed: %d", errorCount)
+	log.Printf("------------------------")
+
+	return combinedError
+}
+
+func (tc *TransactionController) SendAllTransactionsInDirectory(
+	directoryPath string, // Đường dẫn đến thư mục chứa các tệp giao dịch
+) error {
+
+	parentConnection := tc.clientContext.ConnectionsManager.ParentConnection()
+	// Kiểm tra nếu kết nối cha là nil
+
+	clientConn := network.NewConnection(common.Address{}, "CLIENT_CONN", network.DefaultConfig())
+	clientConn.SetRealConnAddr(parentConnection.RemoteAddr())
+
+	if err := clientConn.Connect(); err != nil {
+		log.Fatalf("Client không thể kết nối: %v", err)
+	}
+
+	defer clientConn.Disconnect()
+	log.Printf("Client đã kết nối thành công!")
+
+	files, err := ioutil.ReadDir(directoryPath)
+	if err != nil {
+		return fmt.Errorf("failed to read directory: %w", err)
+	}
+
+	// Thu thập lỗi
+	var combinedError error
+	errorCount := 0
+	var txs []types.Transaction
+	// Duyệt qua từng tệp và xử lý tuần tự
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+
+		filePath := filepath.Join(directoryPath, file.Name())
+		log.Printf("Processing transaction from file %s", filePath)
+
+		tx, _, err := tc.LoadTransactionWithDeviceKeyFromFile(filePath)
+		if err != nil {
+			log.Printf("Failed to LoadTransactionWithDeviceKeyFromFile transaction from file %s: %v", filePath, err)
+			continue
+		}
+
+		// SỬA LỖI Ở ĐÂY: Gán kết quả của append vào txs
+		txs = append(txs, tx)
+	}
+
+	bTransaction, err := transaction.MarshalTransactions(txs)
+	if err != nil {
+		return err
+	}
+	err = tc.clientContext.MessageSender.SendBytes(
+		parentConnection,
+		command.SendTransactions,
+		bTransaction,
+	)
+	if err != nil {
+		log.Printf("Failed to SendBytes transaction from file : %v", err)
+	}
+	successCount := len(files) - errorCount
+	log.Printf("--- Sending Complete ---")
+	log.Printf("Total transactions to send: %d", len(files))
+	log.Printf("Successfully sent: %d", successCount)
+	log.Printf("Failed: %d", errorCount)
+	log.Printf("------------------------")
+
+	return combinedError
+}
+
+// SendNewTransactionWithDeviceKey is no longer supported: the server dropped the SendTransactionWithDeviceKey
+// command with the legacy rpc/tcp purge (P1-1). Kept only so the TransactionController interface stays stable.
+func (tc *TransactionController) SendNewTransactionWithDeviceKey(
+	transaction types.Transaction,
+	deviceKey []byte,
+) (types.Transaction, error) {
+	return nil, fmt.Errorf("SendTransactionWithDeviceKey was removed with the legacy rpc/tcp path; use eth_sendRawTransaction")
+}
