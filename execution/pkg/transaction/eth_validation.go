@@ -109,6 +109,20 @@ func ValidateEthTxEnvelope(ethTx *e_types.Transaction, expectedChainId *big.Int)
 // Data/CallData/DeployData, Type, ChainID, R/S/V, AccessList, BlobVersionedHashes,
 // MaxFeePerBlobGas, AuthorizationList).
 func ValidateProtoEnvelopeBinding(pTx *pb.Transaction) error {
+	return validateProtoEnvelopeBinding(pTx, nil)
+}
+
+// validateEnvelopeBindingTx is ValidateProtoEnvelopeBinding for a tx object: it reuses the tx's memoized envelope
+// decode (and the sender already recovered on it) instead of decoding + ecrecover-ing again on every call.
+func validateEnvelopeBindingTx(t *Transaction) error {
+	if t == nil {
+		return errors.New("transaction is nil")
+	}
+	return validateProtoEnvelopeBinding(t.proto, t)
+}
+
+// validateProtoEnvelopeBinding: owner (optional) supplies the memoized envelope decode; the checks are identical.
+func validateProtoEnvelopeBinding(pTx *pb.Transaction, owner *Transaction) error {
 	if pTx == nil {
 		return errors.New("transaction proto is nil")
 	}
@@ -116,9 +130,16 @@ func ValidateProtoEnvelopeBinding(pTx *pb.Transaction) error {
 		return nil // Non-envelope transaction (e.g. system BLS transaction)
 	}
 
-	ethTx := new(e_types.Transaction)
-	if err := ethTx.UnmarshalBinary(pTx.RawEnvelope); err != nil {
-		return fmt.Errorf("%w: failed to unmarshal RawEnvelope: %v", ErrInvalidEnvelope, err)
+	var ethTx *e_types.Transaction
+	var decErr error
+	if owner != nil {
+		ethTx, decErr = owner.envelopeEthTx()
+	} else {
+		ethTx = new(e_types.Transaction)
+		decErr = ethTx.UnmarshalBinary(pTx.RawEnvelope)
+	}
+	if decErr != nil {
+		return fmt.Errorf("%w: failed to unmarshal RawEnvelope: %v", ErrInvalidEnvelope, decErr)
 	}
 
 	canonicalPb := &pb.Transaction{}
@@ -285,6 +306,9 @@ func ValidateEnvelopeBinding(tx types.Transaction) error {
 	pTx, ok := tx.Proto().(*pb.Transaction)
 	if !ok || pTx == nil {
 		return nil
+	}
+	if concrete, ok := tx.(*Transaction); ok && concrete.proto == pTx {
+		return validateEnvelopeBindingTx(concrete)
 	}
 	return ValidateProtoEnvelopeBinding(pTx)
 }

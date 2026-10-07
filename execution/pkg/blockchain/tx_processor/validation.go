@@ -260,6 +260,10 @@ func VerifyTransaction(
 					return transaction.InvalidSign
 				}
 				StoreVerifiedSignature(secpCacheKey)
+				if len(tx.RawEnvelope()) > 0 {
+					// ValidEthSign ran the envelope binding too, so the block-time filter may skip it on a hit.
+					StoreVerifiedSignature(boundSigKey(secpCacheKey))
+				}
 				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
 				if count == maxVerifiedSignaturesCacheSize {
 					rotateVerifiedSignatures()

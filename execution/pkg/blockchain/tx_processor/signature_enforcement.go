@@ -34,6 +34,21 @@ func sigCacheKey(tx types.Transaction, blsKey []byte) eth_common.Hash {
 	return crypto.Keccak256Hash(buf)
 }
 
+// boundSigKey is the cache key of an entry that is stored ONLY after the envelope binding AND the signature both
+// passed for exactly this (tx, proto fields, signature, BLS key). A hit therefore proves both, so the filter can skip
+// the binding (decode + ecrecover) too. Plain sigCacheKey entries may come from paths that never ran the binding
+// (e.g. the BLS mempool path), so they must NOT short-circuit it: honest nodes with different cache contents would
+// then reach different verdicts.
+func boundSigKey(key eth_common.Hash) eth_common.Hash {
+	return crypto.Keccak256Hash(key[:], []byte{0xB1})
+}
+
+// storeVerifiedBound records both the plain and the binding-proven cache entry. Call only after binding + signature passed.
+func storeVerifiedBound(key eth_common.Hash) {
+	StoreVerifiedSignature(key)
+	StoreVerifiedSignature(boundSigKey(key))
+}
+
 // sigPolicy is the per-chain signature rule set, derived from the node config (identical on every validator of a
 // chain). It keeps every signature verdict a pure function of (tx, sender state, policy).
 type sigPolicy struct {
@@ -127,11 +142,7 @@ func checkTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy
 	if tx == nil {
 		return false
 	}
-	if len(tx.RawEnvelope()) > 0 {
-		if err := transaction.ValidateEnvelopeBinding(tx); err != nil {
-			return false
-		}
-	}
+	// Cheap, state/policy-only rejections first; verdicts are unchanged because every check is an independent AND.
 	if pol.secpProtoError(tx) != nil {
 		return false
 	}
@@ -145,7 +156,20 @@ func checkTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy
 		accountType = int32(as.AccountType())
 	}
 	key := sigCacheKey(tx, blsKey)
+	hasEnvelope := len(tx.RawEnvelope()) > 0
+	// A binding-proven hit skips decode + ecrecover entirely.
+	if hasEnvelope && LoadVerifiedSignature(boundSigKey(key)) {
+		return true
+	}
+	if hasEnvelope {
+		if err := transaction.ValidateEnvelopeBinding(tx); err != nil {
+			return false
+		}
+	}
 	if LoadVerifiedSignature(key) {
+		if hasEnvelope {
+			StoreVerifiedSignature(boundSigKey(key)) // binding just passed above
+		}
 		return true
 	}
 
@@ -160,7 +184,11 @@ func checkTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy
 		ok = false
 	}
 	if ok {
-		StoreVerifiedSignature(key)
+		if hasEnvelope {
+			storeVerifiedBound(key)
+		} else {
+			StoreVerifiedSignature(key)
+		}
 	}
 	return ok
 }
@@ -249,12 +277,6 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 			valid[i] = false
 			return
 		}
-		if len(txs[i].RawEnvelope()) > 0 {
-			if err := transaction.ValidateEnvelopeBinding(txs[i]); err != nil {
-				valid[i] = false
-				return
-			}
-		}
 		as := loadState(i)
 		if pol.senderRegisteredError(txs[i], as) != nil {
 			valid[i] = false
@@ -262,14 +284,30 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 		}
 		if as != nil && len(as.PublicKeyBls()) > 0 && as.AccountType() == 0 && txs[i].Type() != 0xFF && pol.blsAllowed(txs[i], as) {
 			key := sigCacheKey(txs[i], as.PublicKeyBls())
+			hasEnvelope := len(txs[i].RawEnvelope()) > 0
+			if hasEnvelope {
+				if LoadVerifiedSignature(boundSigKey(key)) { // binding + signature already proven
+					valid[i] = true
+					atomic.AddInt64(&st.cacheHits, 1)
+					return
+				}
+				if err := transaction.ValidateEnvelopeBinding(txs[i]); err != nil {
+					valid[i] = false
+					return
+				}
+			}
 			if LoadVerifiedSignature(key) {
 				valid[i] = true
+				if hasEnvelope {
+					StoreVerifiedSignature(boundSigKey(key)) // binding just passed above
+				}
 				atomic.AddInt64(&st.cacheHits, 1)
 			} else {
 				queued[i] = &pending{i: i, key: key, pub: as.PublicKeyBls()}
 			}
 			return
 		}
+		// Everything else (secp, 0xFF, AccountType 1, no key yet): checkTxSignature does its own binding.
 		valid[i] = checkTxSignature(txs[i], as, pol)
 		atomic.AddInt64(&st.individual, 1)
 	})

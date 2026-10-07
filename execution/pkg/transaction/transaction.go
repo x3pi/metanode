@@ -1,6 +1,7 @@
 package transaction
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"encoding/binary"
 	"encoding/hex"
@@ -47,8 +48,34 @@ type Transaction struct {
 	cachedBytes       atomic.Pointer[[]byte]
 	cachedEthTx       atomic.Pointer[e_types.Transaction]
 	cachedEthHash     atomic.Pointer[common.Hash]
+	cachedEnvTx       atomic.Pointer[envelopeDecode]
 
 	isDebug bool
+}
+
+// envelopeDecode memoizes the decode of RawEnvelope (and, through go-ethereum's own per-tx sender cache, the
+// ecrecover done on it) so repeated envelope-binding checks on one tx do not redo them. raw is kept so a stale entry
+// can never be served for a different envelope.
+type envelopeDecode struct {
+	raw []byte
+	tx  *e_types.Transaction
+}
+
+// envelopeEthTx decodes proto.RawEnvelope (memoized). Unlike ToEthTransaction it never falls back to rebuilding the
+// tx from proto fields, so the result is always exactly what the envelope encodes.
+func (t *Transaction) envelopeEthTx() (*e_types.Transaction, error) {
+	raw := t.proto.RawEnvelope
+	if c := t.cachedEnvTx.Load(); c != nil && bytes.Equal(c.raw, raw) {
+		return c.tx, nil
+	}
+	ethTx := new(e_types.Transaction)
+	if err := ethTx.UnmarshalBinary(raw); err != nil {
+		return nil, err
+	}
+	t.cachedEnvTx.Store(&envelopeDecode{raw: raw, tx: ethTx})
+	// Share the object with ToEthTransaction (same content) so ValidEthSign reuses the already recovered sender.
+	t.cachedEthTx.CompareAndSwap(nil, ethTx)
+	return ethTx, nil
 }
 
 // Hàm này sẽ gọi các hàm chuyển đổi cụ thể dựa trên loại giao dịch.
@@ -676,6 +703,7 @@ func (t *Transaction) ClearCacheHash() {
 	t.cachedBytes.Store(nil)
 	t.cachedEthTx.Store(nil)
 	t.cachedEthHash.Store(nil)
+	t.cachedEnvTx.Store(nil)
 }
 
 func (t *Transaction) EthHash() common.Hash {
@@ -1228,7 +1256,7 @@ func (t *Transaction) ValidEthSign() bool {
 	// P0-9: If RawEnvelope is present, strictly verify that all proto fields match
 	// the canonical representation decoded from RawEnvelope.
 	if len(t.proto.RawEnvelope) > 0 {
-		if err := ValidateProtoEnvelopeBinding(t.proto); err != nil {
+		if err := validateEnvelopeBindingTx(t); err != nil {
 			logger.Warn("ValidEthSign envelope binding failed: %v", err)
 			return false
 		}
