@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-10-07 (Phase 1 Pipelined Commit Delivery: added non-blocking async FFI protocol `enqueue_block_async` and `metanode_notify_block_executed` between Rust Consensus and Go Executor).
+> **Last updated:** 2026-10-07 (Phase 2 Pipelined Commit Delivery: implemented `PreparedBlockQueue` in Go executor for parallel unmarshaling, signature verification, and group indexing on in-flight blocks without state drift).
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 ---
 
@@ -232,6 +232,8 @@ metanode/
 | `transaction_virtual_processor.go` | Virtual tx processing |
 | `state_processor.go` | State transition processor |
 | `vote_recovery.go` | Vote/quorum recovery |
+| `prepared_block_queue.go` | **Pipelined delivery**: in-flight block transaction pre-verification & grouping |
+| `speculative_executor.go` | **Speculative & pipelined block execution coordinator** (zero-fork gate) ⚠️ |
 
 ### `pkg/` — Shared Packages (Critical Ones)
 | Package | Role | Concurrency Risk |

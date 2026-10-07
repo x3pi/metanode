@@ -155,6 +155,7 @@ type SpeculativeExecutor struct {
 	concurrencySem chan struct{} // Bounded concurrency (max 2 sessions)
 	inFlight       sync.Map      // GEI (uint64) -> *inFlightSession, executions currently running
 	activeWorkers  atomic.Int32  // Number of EVM speculative worker goroutines currently executing
+	preparedQueue  *PreparedBlockQueue // Bounded pipeline for parallel tx unmarshal & envelope verification
 
 	// committedThrough is the highest GEI whose commit (or sequential re-execution) the committer has finished;
 	// commitWake is closed and replaced on every advance so waiters can block without polling.
@@ -183,6 +184,7 @@ func NewSpeculativeExecutor(bp *BlockProcessor) *SpeculativeExecutor {
 		resultChan:     make(chan *SpeculativeResult, 1000),
 		concurrencySem: make(chan struct{}, 2), // Max 2 parallel speculative EVMs
 		commitWake:     make(chan struct{}),
+		preparedQueue:  NewPreparedBlockQueue(4), // Max 4 parallel block preparations
 	}
 }
 
@@ -295,13 +297,43 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		session:    session,
 	})
 
-	se.concurrencySem <- struct{}{} // Acquire concurrency slot
-	se.activeWorkers.Add(1)
 	go func() {
-		tGoroutineStart := time.Now().UnixNano() // [FFI-TRACE] past the semaphore + goroutine-scheduling delay
+		tGoroutineStart := time.Now().UnixNano() // [FFI-TRACE] goroutine scheduled
+
+		// ═══════════════════════════════════════════════════════════════════════
+		// STAGE 1: PARALLEL PREPARATION (Pure Computational, 100% Zero-Fork Safe)
+		// ═══════════════════════════════════════════════════════════════════════
+		// Runs parallel unmarshal, envelope binding verification (boundSigKey cache),
+		// deduplication, sorting, and item group extraction concurrently across
+		// in-flight blocks BEFORE predecessor commits complete.
+		// ZERO-FORK INVARIANT: Does NOT touch ChainState, NOMT, or the database.
+		tBeforePrep := time.Now().UnixNano()
+		prepBlock, prepErr := se.preparedQueue.PrepareBlock(ctx, epochData, blockNum)
+		tAfterPrep := time.Now().UnixNano()
+		if prepErr != nil {
+			logger.Warn("⚠️ [SPECULATIVE] GEI=%d PrepareBlock aborted: %v", gei, prepErr)
+			se.activeSessions.Delete(gei)
+			se.inFlight.Delete(gei)
+			return
+		}
+
+		// ═══════════════════════════════════════════════════════════════════════
+		// STAGE 2: ACQUIRE EVM CONCURRENCY SLOT (Bounded to max 2 parallel EVMs)
+		// ═══════════════════════════════════════════════════════════════════════
+		select {
+		case se.concurrencySem <- struct{}{}:
+		case <-ctx.Done():
+			logger.Warn("⚠️ [SPECULATIVE] GEI=%d cancelled while waiting for concurrencySem", gei)
+			se.activeSessions.Delete(gei)
+			se.inFlight.Delete(gei)
+			se.preparedQueue.DeletePreparedBlock(gei)
+			return
+		}
+		se.activeWorkers.Add(1)
 		defer func() {
 			se.activeWorkers.Add(-1)
 			<-se.concurrencySem // Release concurrency slot
+			se.preparedQueue.DeletePreparedBlock(gei)
 		}()
 
 		// 🔒 CONCURRENCY & FORK-SAFETY GATE:
@@ -312,7 +344,9 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			defer se.bp.ExecutionMutex.RUnlock()
 		}
 
-		// ZERO-FORK SERIALIZATION GATE:
+		// ═══════════════════════════════════════════════════════════════════════
+		// STAGE 3: ZERO-FORK SERIALIZATION GATE (BẤT KHẢ XÂM PHẠM)
+		// ═══════════════════════════════════════════════════════════════════════
 		// Blockchain state transition S_N = f(S_{N-1}, Block_N) strictly requires S_{N-1}
 		// to be fully committed before Block N clones state and executes EVM transactions.
 		if gei > 1 && !se.isCommitted(gei-1) {
@@ -388,30 +422,15 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			}
 		}
 
-		// NOTE: inFlight[gei] is intentionally NOT deleted here. Deleting it as
-		// soon as this goroutine returns raced against the asynchronous
-		// GEI-persistence pipeline (PushAsyncGEIUpdate -> geiUpdateChan ->
-		// geiWorker -> commitChannel -> storage.UpdateLastGlobalExecIndex),
-		// which can lag well behind the actual commit under load. A retry
-		// landing in that gap saw neither inFlight[gei] (already deleted) nor
-		// gei <= lastGEI (not yet updated) and fell through to a full,
-		// redundant re-execution — corrupting the global, non-versioned
-		// Xapian DB (XapianManager::instances is a single shared static
-		// registry, not cloned per speculative session like account/token
-		// state). inFlight[gei] is now deleted by CleanGEI instead, tying its
-		// lifetime to the committer's own authoritative completion signal
-		// instead of this goroutine's unrelated return timing.
 		commitIndex := epochData.GetCommitIndex()
 		epochNum := epochData.GetEpoch()
 
-		// 2. Prepare transactions (Deduplicate and sort lexicographically by TxHash)
-		allTransactions := PrepareTransactions(epochData)
+		// 2. Transactions and Grouping items are ALREADY prepared in Stage 1!
+		allTransactions := prepBlock.Txs
+		items := prepBlock.Items
 
 		// 3. Epoch boundary check
 		isEpochBoundary := lastBlockHeader.Epoch() > 0 && epochNum > lastBlockHeader.Epoch()
-
-		// 4. Handle empty block speculative shortcut (REMOVED)
-		// We no longer skip empty blocks. They will be executed and created to ensure 100% fork-safety and sequential block progression.
 
 		// 5. Clone chainState
 		tBeforeClone := time.Now().UnixNano()
@@ -434,8 +453,6 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			return
 		}
 
-		// 6. (Preload accounts removed - now handled exclusively in block_stm.go)
-
 		// 7. Deterministic timestamp
 		commitTimestampMs := epochData.GetCommitTimestampMs()
 		if commitTimestampMs == 0 {
@@ -447,21 +464,12 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		leaderAddr := se.bp.GetLeaderAddress(epochData.GetLeaderAddress(), epochData.GetLeaderAuthorIndex())
 
 		// 9. Execute EVM speculatively
-		items := make([]grouptxns.Item, 0, len(allTransactions))
-		for i, tx := range allTransactions {
-			items = append(items, grouptxns.Item{
-				ID:    i,
-				Array: grouptxns.BuildDeterministicGroupAddrs(tx),
-				Tx:    tx,
-			})
-		}
 		tBeforeGroup := time.Now().UnixNano()
 		groupedGroups := grouptxns.GroupTransactionsDeterministic(items, csCopy.HasCode)
 		tAfterGroup := time.Now().UnixNano()
 
-		// (Wait for preload removed)
-
-		logger.Info("🔄 [SPECULATIVE] Executing GEI=%d speculatively with %d txs (block #%d)", gei, len(allTransactions), blockNum)
+		logger.Info("🔄 [SPECULATIVE] Executing GEI=%d speculatively with %d txs (block #%d, prep took %v)",
+			gei, len(allTransactions), blockNum, prepBlock.PrepDuration)
 		startTime := time.Now()
 		gatedCtx := tx_processor.WithIRGate(ctx, se.newIRGate(gei, lastBlockHeader.Hash(), func() (common.Hash, bool) {
 			tip := se.bp.GetLastBlock()
@@ -475,7 +483,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(accumulatedResults.Transactions), 0, execDuration.Microseconds())
 		if ffiTraceEnabled {
 			logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_SPEC goroutine_sched_ns=%d prepare_tx_ns=%d clone_ns=%d group_ns=%d exec_ns=%d",
-				gei, tGoroutineStart-tDispatch, tBeforeClone-tGoroutineStart, tAfterClone-tBeforeClone, tAfterGroup-tBeforeGroup, execDuration.Nanoseconds())
+				gei, tGoroutineStart-tDispatch, tAfterPrep-tBeforePrep, tAfterClone-tBeforeClone, tAfterGroup-tBeforeGroup, execDuration.Nanoseconds())
 		}
 
 		if ctx.Err() != nil {
@@ -649,6 +657,11 @@ func (se *SpeculativeExecutor) AbortAllSpeculative() {
 	se.CancelInFlight()
 	se.WaitForInFlight(200 * time.Millisecond)
 
+	// Clear prepared block queue
+	if se.preparedQueue != nil {
+		se.preparedQueue.Clear()
+	}
+
 	// 2. Discard and abort all FinishedSessions in activeSessions
 	lastCommittedGEI := storage.GetLastGlobalExecIndex()
 	se.activeSessions.Range(func(key, value interface{}) bool {
@@ -757,15 +770,16 @@ func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 					infSession.mu.Unlock()
 				}
 			}
-			// inFlight[k] is deleted here rather than by the execution goroutine
-			// itself: this is the single authoritative point where the committer
-			// (or a P2P-sync fast-forward) has confirmed GEI=k no longer needs
-			// local dedup, independent of the async GEI-persistence pipeline's
-			// lag. See the comment in ExecuteSpeculative's dispatch goroutine.
 			se.inFlight.Delete(k)
+			if se.preparedQueue != nil {
+				se.preparedQueue.DeletePreparedBlock(k)
+			}
 		}
 		return true
 	})
+	if se.preparedQueue != nil {
+		se.preparedQueue.CleanThrough(gei)
+	}
 }
 
 // GetSpeculativeResult returns speculative result by GEI if available.
