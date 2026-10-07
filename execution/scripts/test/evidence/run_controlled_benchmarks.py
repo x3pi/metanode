@@ -16,6 +16,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from stats_util import mean, sample_sd, welch_t_test, t_critical, spearman_correlation
+
 BENCH_BASE = "/tmp/gate_4val_controlled_bench"
 TEMPLATE_BASE = "/tmp/gate_4val_clean_template"
 BIN_DIR = "/tmp/p06_bins"
@@ -102,6 +105,17 @@ def get_cpu_ticks(pids):
 
 def get_log_size_kb():
     total_bytes = 0
+    # 1. Check $BASE/logs (run_env.sh redirects stdout/stderr to $BASE/logs/<name>.log)
+    base_log_dir = f"{BENCH_BASE}/logs"
+    if os.path.isdir(base_log_dir):
+        for fname in os.listdir(base_log_dir):
+            fpath = os.path.join(base_log_dir, fname)
+            if os.path.isfile(fpath):
+                try:
+                    total_bytes += os.path.getsize(fpath)
+                except Exception:
+                    pass
+    # 2. Also check node-specific logs if created
     for n in NODES:
         log_dir = f"{BENCH_BASE}/{n}/logs"
         if os.path.isdir(log_dir):
@@ -150,33 +164,8 @@ def run_blast(tx_count=25000, batch=1000):
 
     return tps, peak_rss, duration, cpu_seconds, log_size_kb
 
-def welch_t_test(group1, group2):
-    n1, n2 = len(group1), len(group2)
-    m1, m2 = sum(group1) / n1, sum(group2) / n2
-    v1 = sum((x - m1) ** 2 for x in group1) / (n1 - 1) if n1 > 1 else 0
-    v2 = sum((x - m2) ** 2 for x in group2) / (n2 - 1) if n2 > 1 else 0
-    se = math.sqrt(v1 / n1 + v2 / n2)
-    if se == 0:
-        return 0, 0, 1.0, (m1 - m2, m1 - m2)
-    t = (m1 - m2) / se
-    df_denom = ((v1 / n1) ** 2) / (n1 - 1) + ((v2 / n2) ** 2) / (n2 - 1)
-    df = ((v1 / n1 + v2 / n2) ** 2) / df_denom if df_denom > 0 else 1.0
-    # approximate p-value using normal distribution for df >= 10
-    z = abs(t)
-    p = 2 * (1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0))))
-    # 95% confidence interval of difference (m1 - m2)
-    t_crit = 2.18  # roughly for df ~ 10-12 at alpha=0.05
-    diff = m1 - m2
-    ci = (diff - t_crit * se, diff + t_crit * se)
-    return t, df, p, ci
-
 def mean_sd(vals):
-    n = len(vals)
-    if n == 0:
-        return 0, 0
-    m = sum(vals) / n
-    sd = math.sqrt(sum((x - m) ** 2 for x in vals) / (n - 1)) if n > 1 else 0
-    return m, sd
+    return mean(vals), sample_sd(vals)
 
 def main():
     print("==================================================================")

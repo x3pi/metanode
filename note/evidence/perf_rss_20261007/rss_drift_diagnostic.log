@@ -1,0 +1,52 @@
+==================================================================
+🔬 RSS DRIFT DIAGNOSTIC: 3 FRESH CLUSTER ROUNDS
+   Goal: Determine whether RSS baseline drifts or Peak RSS measurement accumulates
+==================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+▶️ [ROUND 1/3] Setting up FRESH cluster from template...
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   • Pre-start lingering bench processes: 0
+   • Fresh val0 initial disk size: 2050.03 MB
+   • Cluster started with PIDs: {'val0': 197647, 'val1': 197852, 'val2': 198073, 'val3': 198107}
+   📊 Baseline Total RSS (after start): 7384.7 MB (per node: {'val0': 1885.20703125, 'val1': 1930.359375, 'val2': 1794.1953125, 'val3': 1774.96875})
+   • Blast Duration: 5.47s
+   • Blast Tool Reported Peak RSS: 11289 MB
+   • /proc Sampled Peak RSS:       11161.2 MB
+   • Post-blast val0 disk size:    2050.06 MB
+   • Post-stop lingering bench processes: 0
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+▶️ [ROUND 2/3] Setting up FRESH cluster from template...
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   • Pre-start lingering bench processes: 0
+   • Fresh val0 initial disk size: 2050.03 MB
+   • Cluster started with PIDs: {'val0': 203486, 'val1': 203578, 'val2': 203803, 'val3': 203980}
+   📊 Baseline Total RSS (after start): 7760.8 MB (per node: {'val0': 1947.234375, 'val1': 1992.3515625, 'val2': 1851.921875, 'val3': 1969.24609375})
+   • Blast Duration: 5.70s
+   • Blast Tool Reported Peak RSS: 11881 MB
+   • /proc Sampled Peak RSS:       11858.0 MB
+   • Post-blast val0 disk size:    2050.08 MB
+   • Post-stop lingering bench processes: 0
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+▶️ [ROUND 3/3] Setting up FRESH cluster from template...
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   • Pre-start lingering bench processes: 0
+   • Fresh val0 initial disk size: 2050.03 MB
+   • Cluster started with PIDs: {'val0': 208376, 'val1': 208469, 'val2': 208745, 'val3': 208839}
+   📊 Baseline Total RSS (after start): 7993.3 MB (per node: {'val0': 2104.04296875, 'val1': 1999.90625, 'val2': 2052.60546875, 'val3': 1836.765625})
+   • Blast Duration: 5.61s
+   • Blast Tool Reported Peak RSS: 11966 MB
+   • /proc Sampled Peak RSS:       11943.0 MB
+   • Post-blast val0 disk size:    2050.07 MB
+   • Post-stop lingering bench processes: 0
+
+==================================================================
+📊 DIAGNOSTIC SUMMARY ACROSS 3 ROUNDS:
+   • Baseline Total RSS (Round 1..3): [7384.73046875, 7760.75390625, 7993.3203125]
+   • Baseline Drift (Round 3 vs Round 1): +8.24% (R1=7384.7 MB, R3=7993.3 MB)
+   • Tool Reported Peak RSS:           [11289, 11881, 11966]
+   • /proc Status Sampled Peak RSS:    [11161.24609375, 11858.0078125, 11943.046875]
+   • Spearman Correlation (Tool Peak): 1.0000
+==================================================================
