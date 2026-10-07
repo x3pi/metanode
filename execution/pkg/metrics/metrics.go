@@ -94,6 +94,36 @@ var (
 		Name: "master_rpc_block_gas_cache_misses_total",
 		Help: "Total number of cache misses in RPC block gas calculation",
 	})
+
+	// SigFilterTxsTotal counts total transactions processed by FilterInvalidSignatures.
+	SigFilterTxsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "master_sig_filter_txs_total",
+		Help: "Total transactions processed by signature filter on committed blocks",
+	})
+
+	// SigFilterCacheHitsTotal counts BLS / general signature cache hits in FilterInvalidSignatures.
+	SigFilterCacheHitsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "master_sig_filter_cache_hits_total",
+		Help: "Total general signature cache hits in FilterInvalidSignatures",
+	})
+
+	// SigFilterBoundHitsTotal counts boundSigKey cache hits (memoized envelope binding + ecrecover) in FilterInvalidSignatures.
+	SigFilterBoundHitsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "master_sig_filter_bound_hits_total",
+		Help: "Total boundSigKey cache hits in FilterInvalidSignatures",
+	})
+
+	// SigFilterIndividualTotal counts individual signature verifications in FilterInvalidSignatures.
+	SigFilterIndividualTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "master_sig_filter_individual_total",
+		Help: "Total individual signature verifications in FilterInvalidSignatures",
+	})
+
+	// SigFilterDroppedTotal counts transactions dropped by FilterInvalidSignatures.
+	SigFilterDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "master_sig_filter_dropped_total",
+		Help: "Total transactions dropped by FilterInvalidSignatures due to invalid signatures",
+	})
 )
 
 // ─── Gauges ──────────────────────────────────────────────────────────────────
@@ -300,6 +330,13 @@ var (
 		Name:    "master_raw_eth_conversion_seconds",
 		Help:    "Latency of decoding and validating raw Ethereum envelopes in seconds",
 		Buckets: []float64{0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.005, 0.01},
+	})
+
+	// SigFilterDuration tracks the time taken by FilterInvalidSignatures on the block critical path.
+	SigFilterDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "master_sig_filter_duration_seconds",
+		Help:    "Duration of signature filter on committed blocks in seconds",
+		Buckets: []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0},
 	})
 )
 

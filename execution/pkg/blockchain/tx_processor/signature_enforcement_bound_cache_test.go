@@ -5,9 +5,14 @@ import (
 	"testing"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
+	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/types"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -54,4 +59,43 @@ func TestFilterInvalidSignatures_BoundCacheNeverSkipsUnprovenBinding(t *testing.
 	if out := FilterInvalidSignatures(cs, groupsOf(bad)); len(out) != 0 {
 		t.Fatalf("plain cache entry must not bypass the envelope binding, got %d groups", len(out))
 	}
+}
+
+func TestFilterInvalidSignatures_BoundHitsTrackedAndLogged(t *testing.T) {
+	cs := setupTestChainState(t)
+	cs.GetConfig().TxSignatureMode = config.TxSignatureModeSecp
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+
+	good, _, from := createSignedEIP1559Tx(t, 1, 0)
+	as := state.NewAccountState(from)
+	as.AddBalance(big.NewInt(1_000_000_000_000_000))
+	cs.GetAccountStateDB().SetState(as)
+
+	rotateVerifiedSignatures()
+	rotateVerifiedSignatures()
+
+	// 1. Pass 1: Cold verification via verifySignatures
+	valid, st := verifySignatures(cs.GetAccountStateDB(), []types.Transaction{good}, nil, sigPolicyOf(cs))
+	require.True(t, valid[0])
+	assert.Equal(t, int64(0), st.boundHits, "cold pass must have 0 bound hits")
+	assert.Equal(t, int64(1), st.individual, "cold pass must verify individually")
+
+	// 2. Pass 2: Warm verification via verifySignatures hitting boundSigKey
+	valid, st = verifySignatures(cs.GetAccountStateDB(), []types.Transaction{good}, nil, sigPolicyOf(cs))
+	require.True(t, valid[0])
+	assert.Equal(t, int64(1), st.boundHits, "warm pass must increment boundHits")
+	assert.Equal(t, int64(0), st.individual, "warm pass must not increment individual")
+
+	// 3. Test FilterInvalidSignatures updates Prometheus metric
+	boundHitsBefore := testutil.ToFloat64(metrics.SigFilterBoundHitsTotal)
+	txsBefore := testutil.ToFloat64(metrics.SigFilterTxsTotal)
+
+	out := FilterInvalidSignatures(cs, groupsOf(good))
+	require.Len(t, out, 1)
+
+	boundHitsAfter := testutil.ToFloat64(metrics.SigFilterBoundHitsTotal)
+	txsAfter := testutil.ToFloat64(metrics.SigFilterTxsTotal)
+
+	assert.Equal(t, boundHitsBefore+1, boundHitsAfter, "Prometheus bound hits counter must increment by 1")
+	assert.Equal(t, txsBefore+1, txsAfter, "Prometheus total txs counter must increment by 1")
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -133,21 +134,37 @@ func (p sigPolicy) chainBindingError(tx types.Transaction) *transaction.Transact
 	return nil
 }
 
+// sigVerdict indicates how checkTxSignature verified the transaction.
+type sigVerdict int
+
+const (
+	sigVerdictInvalid sigVerdict = iota
+	sigVerdictBoundHit
+	sigVerdictCacheHit
+	sigVerdictVerified
+)
+
 // checkTxSignature is a pure function of (tx, sender account state): every node evaluating the same
 // tx against the same pre-block state gets the same verdict, so it is safe to use as a consensus-level
 // execution filter (no clocks, no peer-local data other than the cache, which only memoizes this result).
 // It mirrors the signature rules of VerifyTransaction (BLS key if registered, ETH secp256k1 otherwise or
 // as fallback; AccountType 1 additionally requires the ETH signature).
 func checkTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy) bool {
+	return evalTxSignature(tx, as, pol) != sigVerdictInvalid
+}
+
+// evalTxSignature evaluates the transaction's signature and envelope binding, returning the specific
+// verdict (bound hit, plain cache hit, newly verified individual, or invalid).
+func evalTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy) sigVerdict {
 	if tx == nil {
-		return false
+		return sigVerdictInvalid
 	}
 	// Cheap, state/policy-only rejections first; verdicts are unchanged because every check is an independent AND.
 	if pol.secpProtoError(tx) != nil {
-		return false
+		return sigVerdictInvalid
 	}
 	if pol.senderRegisteredError(tx, as) != nil {
-		return false
+		return sigVerdictInvalid
 	}
 	var blsKey []byte
 	accountType := int32(0)
@@ -159,18 +176,18 @@ func checkTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy
 	hasEnvelope := len(tx.RawEnvelope()) > 0
 	// A binding-proven hit skips decode + ecrecover entirely.
 	if hasEnvelope && LoadVerifiedSignature(boundSigKey(key)) {
-		return true
+		return sigVerdictBoundHit
 	}
 	if hasEnvelope {
 		if err := transaction.ValidateEnvelopeBinding(tx); err != nil {
-			return false
+			return sigVerdictInvalid
 		}
 	}
 	if LoadVerifiedSignature(key) {
 		if hasEnvelope {
 			StoreVerifiedSignature(boundSigKey(key)) // binding just passed above
 		}
-		return true
+		return sigVerdictCacheHit
 	}
 
 	ok := false
@@ -189,12 +206,13 @@ func checkTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy
 		} else {
 			StoreVerifiedSignature(key)
 		}
+		return sigVerdictVerified
 	}
-	return ok
+	return sigVerdictInvalid
 }
 
 // sigStats reports how a verification pass was served (for throughput investigations).
-type sigStats struct{ cacheHits, batched, individual int64 }
+type sigStats struct{ cacheHits, boundHits, batched, individual int64 }
 
 // batchChunk is the size of one random-linear-combination batch. On a failing chunk we BISECT instead of
 // re-verifying every member one by one, so a single bad signature costs ~O(log n) batch calls rather than n
@@ -288,7 +306,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 			if hasEnvelope {
 				if LoadVerifiedSignature(boundSigKey(key)) { // binding + signature already proven
 					valid[i] = true
-					atomic.AddInt64(&st.cacheHits, 1)
+					atomic.AddInt64(&st.boundHits, 1)
 					return
 				}
 				if err := transaction.ValidateEnvelopeBinding(txs[i]); err != nil {
@@ -308,8 +326,16 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 			return
 		}
 		// Everything else (secp, 0xFF, AccountType 1, no key yet): checkTxSignature does its own binding.
-		valid[i] = checkTxSignature(txs[i], as, pol)
-		atomic.AddInt64(&st.individual, 1)
+		verdict := evalTxSignature(txs[i], as, pol)
+		valid[i] = (verdict != sigVerdictInvalid)
+		switch verdict {
+		case sigVerdictBoundHit:
+			atomic.AddInt64(&st.boundHits, 1)
+		case sigVerdictCacheHit:
+			atomic.AddInt64(&st.cacheHits, 1)
+		case sigVerdictVerified:
+			atomic.AddInt64(&st.individual, 1)
+		}
 	})
 
 	toBatch := make([]*pending, 0, total)
@@ -347,8 +373,16 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 			return
 		}
 		for _, p := range part {
-			valid[p.i] = checkTxSignature(txs[p.i], loadState(p.i), pol)
-			atomic.AddInt64(&st.individual, 1)
+			verdict := evalTxSignature(txs[p.i], loadState(p.i), pol)
+			valid[p.i] = (verdict != sigVerdictInvalid)
+			switch verdict {
+			case sigVerdictBoundHit:
+				atomic.AddInt64(&st.boundHits, 1)
+			case sigVerdictCacheHit:
+				atomic.AddInt64(&st.cacheHits, 1)
+			case sigVerdictVerified:
+				atomic.AddInt64(&st.individual, 1)
+			}
 		}
 	}
 	nChunks := (len(toBatch) + batchChunk - 1) / batchChunk
@@ -433,13 +467,23 @@ func FilterInvalidSignatures(chainState *blockchain.ChainState, groups []grouptx
 		out = append(out, ng)
 	}
 	// Cost visibility for throughput investigations: this runs on the block critical path of EVERY validator.
-	if elapsed := time.Since(startFilter); total > 0 {
-		logger.Info("🔏 [SIG-ENFORCE] %d txs in %v (cache_hit=%d batch_verified=%d individual=%d dropped=%d)",
-			total, elapsed, st.cacheHits, st.batched, st.individual, dropped)
+	elapsed := time.Since(startFilter)
+	if elapsed > 20*time.Millisecond || dropped > 0 {
+		logger.Info("🔏 [SIG-ENFORCE] %d txs in %v (cache_hit=%d bound_hit=%d batch_verified=%d individual=%d dropped=%d)",
+			total, elapsed, st.cacheHits, st.boundHits, st.batched, st.individual, dropped)
+	} else if total > 0 {
+		logger.Debug("🔏 [SIG-ENFORCE] %d txs in %v (cache_hit=%d bound_hit=%d batch_verified=%d individual=%d dropped=%d)",
+			total, elapsed, st.cacheHits, st.boundHits, st.batched, st.individual, dropped)
 	}
 	if dropped > 0 {
 		logger.Warn("❌ [SIG-ENFORCE] dropped %d/%d txs with invalid signatures", dropped, total)
 	}
+	metrics.SigFilterDuration.Observe(elapsed.Seconds())
+	metrics.SigFilterTxsTotal.Add(float64(total))
+	metrics.SigFilterCacheHitsTotal.Add(float64(st.cacheHits))
+	metrics.SigFilterBoundHitsTotal.Add(float64(st.boundHits))
+	metrics.SigFilterIndividualTotal.Add(float64(st.individual))
+	metrics.SigFilterDroppedTotal.Add(float64(dropped))
 	return out
 }
 

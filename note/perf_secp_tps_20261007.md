@@ -75,7 +75,7 @@ Thực hiện bài test chịu tải liên tục trong 5 phút (300 giây) trên
 - **Tổng giao dịch gửi:** **304,000 txs** (50,000 ví khác nhau, nonce tự tăng liên tục)
 - **Tổng giao dịch on-chain:** **304,000 txs** (tỷ lệ thành công 100%, 0 dropped, 0 reverted)
 - **Tốc độ Ingest:** 999.90 tx/s
-- **Throughput bền vững (Sustained TPS):** **999.90 tx/s** (khớp hoàn hảo với target rate-limit 1,000 tx/s)
+- **Throughput tại mức cấu hình Rate-limit:** **999.90 tx/s** (bị giới hạn chủ động bởi tham số `-rate-limit 1000`, KHÔNG phản ánh trần năng lực tối đa của cluster; trần thực tế xử lý không giới hạn đạt 6,231.62 tx/s)
 - **Số blocks sản sinh:** **76 blocks** (từ block `#11` đến `#87`, trung bình 4,000 txs/block)
 - **Tải CPU đỉnh:** 693.2%
 - **Bộ nhớ đỉnh (Peak RSS):** 39,080 MB (~9.7 GB/node cho 304,000 txs on-chain)
