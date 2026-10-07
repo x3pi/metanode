@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"errors"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -49,6 +51,33 @@ func TestVerifyBlobSidecar_Valid(t *testing.T) {
 
 	if err := VerifyBlobSidecar(pTx); err != nil {
 		t.Fatalf("VerifyBlobSidecar: expected valid sidecar to pass, got: %v", err)
+	}
+}
+
+func TestCorruptBlobProofRPCRejection(t *testing.T) {
+	blob, commitment, proof, vh := makeValidBlobSidecar(t)
+	proof[0] ^= 0xff
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := types.SignTx(types.NewTx(&types.BlobTx{
+		ChainID: uint256.NewInt(991), To: common.Address{19: 1},
+		Gas: 21000, GasFeeCap: uint256.NewInt(20_000_000_000),
+		GasTipCap: uint256.NewInt(1_000_000_000), Value: uint256.NewInt(0),
+		BlobFeeCap: uint256.NewInt(1_000_000_000), BlobHashes: []common.Hash{vh},
+		Sidecar: &types.BlobTxSidecar{Blobs: []kzg4844.Blob{blob}, Commitments: []kzg4844.Commitment{commitment}, Proofs: []kzg4844.Proof{proof}},
+	}), types.NewCancunSigner(big.NewInt(991)), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewTransactionFromEth(tx)
+	if !errors.Is(err, ErrInvalidBlobProof) {
+		t.Fatalf("expected KZG rejection from converter, got %v", err)
+	}
+	code, message := GethStandardRPCError(fmt.Errorf("failed to build MetaTx from EthTx: %w", err))
+	if code != -32000 || message != "KZG proof verification failed" {
+		t.Fatalf("unexpected RPC error: %d %q", code, message)
 	}
 }
 

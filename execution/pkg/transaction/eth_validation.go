@@ -717,6 +717,9 @@ func GethStandardRPCError(err error) (int, string) {
 	if err == nil {
 		return 0, ""
 	}
+	if errors.Is(err, ErrInvalidBlobProof) {
+		return -32000, ErrInvalidBlobProof.Error()
+	}
 	var te *TransactionError
 	if !errors.As(err, &te) {
 		te = ClassifyEthTxError(err)
