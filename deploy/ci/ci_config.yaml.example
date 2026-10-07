@@ -42,10 +42,6 @@ chain_actions:
   # Lệnh reset Public Chain (Root Anchor - Chain 991): Nạp ví spam vào genesis.json, Xóa DB cũ, tạo Genesis mới, mở ports
   reset_cmd: "python3 {SUITE_DIR}/test_tps/gen_spam_keys/manage_genesis.py add {METANODE_DIR}/deploy/systemd/genesis.json.example {SUITE_DIR}/test_tps/gen_spam_keys/generated_keys.json {METANODE_DIR}/deploy/systemd/genesis.json && cd {METANODE_DIR}/deploy/ansible && ./ansible_deploy.sh --reset-all --open-ports"
   
-  # Lệnh deploy toàn bộ Private Chains (101-104) + Khởi động lại Relayer + Cập nhật IP
-  # Lệnh này CHỈ chạy khi bài test cross-chain được bật (enabled: true)
-  deploy_private_cmd: "cd {METANODE_DIR}/deploy/ansible_private_chains && ./deploy_private_chains.sh --reset-all && ./run_relayer_tmux.sh restart && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
-  
   # Lệnh restart nhanh các service systemd của node mà không xóa dữ liệu
   restart_cmd: "cd {METANODE_DIR}/deploy/ansible && ./ansible_deploy.sh --restart"
   

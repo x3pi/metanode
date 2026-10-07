@@ -1,5 +1,7 @@
 # 🚀 Hướng Dẫn Sử Dụng Script Tự Động Hóa `run_pipeline.sh`
 
+> ⚠️ **Đã gỡ (PR #161):** thư mục `deploy/ansible_private_chains/` (private chains, `deploy_private_chains.sh`, `run_relayer_tmux.sh`, `fetch_node_logs.sh`) đã bị xoá khỏi repo. Các hướng dẫn tham chiếu tới nó bên dưới chỉ còn giá trị lịch sử; dùng `deploy/ansible_clusters/deploy_clusters.sh` cho cụm Execution/Parent.
+
 Tài liệu này hướng dẫn chi tiết cách vận hành script tự động hóa **`run_pipeline.sh`** (hoặc `deploy/ansible/run_full_pipeline.sh`) để triển khai toàn diện cụm Public Chain, Private Chains, Relayer và chạy toàn bộ các bài test Cross-Chain cùng Block-STM.
 
 ---

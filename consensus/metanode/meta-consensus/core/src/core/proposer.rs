@@ -973,11 +973,20 @@ impl Core {
             return (vec![], BTreeSet::new());
         }
 
-        debug!(
-            "Included {} ancestors & excluded {} low performing or equivocating ancestors for proposal in round {clock_round}",
-            ancestors_to_propose.len(),
-            excluded_and_equivocating_ancestors.len()
-        );
+        // Excluding low-performing / equivocating ancestors is a Byzantine-behaviour signal: keep it visible at warn
+        // and only demote the routine "nothing excluded" case.
+        if excluded_and_equivocating_ancestors.is_empty() {
+            debug!(
+                "Included {} ancestors & excluded 0 low performing or equivocating ancestors for proposal in round {clock_round}",
+                ancestors_to_propose.len()
+            );
+        } else {
+            warn!(
+                "Included {} ancestors & excluded {} low performing or equivocating ancestors for proposal in round {clock_round}",
+                ancestors_to_propose.len(),
+                excluded_and_equivocating_ancestors.len()
+            );
+        }
 
         (ancestors_to_propose, excluded_and_equivocating_ancestors)
     }

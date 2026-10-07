@@ -31,9 +31,11 @@
             rm -f "{{ node_data_dir }}/cluster.pid"
           fi
 
-          # 2. Kill only processes whose cmdline explicitly references this node data directory
-          for pid in $(pgrep -f "{{ node_data_dir }}" 2>/dev/null || true); do
-            if grep -q -F "simple_chain" "/proc/$pid/cmdline" 2>/dev/null && grep -q -F "{{ node_data_dir }}" "/proc/$pid/cmdline" 2>/dev/null; then
+          # 2. Kill only simple_chain processes started for THIS node (exact process name + this node's config/data dir).
+          #    Match on the process name (pgrep -x), NOT on the command line: this script's own `sh -c` command line
+          #    contains the same strings and would otherwise terminate itself.
+          for pid in $(pgrep -x simple_chain 2>/dev/null || true); do
+            if tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q -F "{{ node_data_dir }}"; then
               kill -15 "$pid" 2>/dev/null || true
               sleep 0.5
               kill -9 "$pid" 2>/dev/null || true
