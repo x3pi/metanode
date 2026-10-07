@@ -23,7 +23,7 @@ func openBenchNomtHandle(b *testing.B) *nomt_ffi.Handle {
 // Block N writes keys -> Commit(false) [IntermediateRoot] -> CreateNomtPayload().CommitAsync() [background disk persist & fsync]
 // Block N+1 writes keys -> Commit(false) [which waits for commitWg if previous commit is still flushing].
 func BenchmarkNomtCommit_BlockPipeline(b *testing.B) {
-	for _, numKeys := range []int{100, 1000} {
+	for _, numKeys := range []int{100, 1000, 5000} {
 		b.Run(fmt.Sprintf("Keys_%d", numKeys), func(b *testing.B) {
 			h := openBenchNomtHandle(b)
 			trie := NewNomtStateTrie(h, true, "account_state")
@@ -65,7 +65,7 @@ func BenchmarkNomtCommit_BlockPipeline(b *testing.B) {
 // BenchmarkNomtCommit_Sync measures fully synchronous commits:
 // Block N writes keys -> Commit(false) -> CommitPayload() [synchronous wait for disk write and fsync]
 func BenchmarkNomtCommit_Sync(b *testing.B) {
-	for _, numKeys := range []int{100, 1000} {
+	for _, numKeys := range []int{100, 1000, 5000} {
 		b.Run(fmt.Sprintf("Keys_%d", numKeys), func(b *testing.B) {
 			h := openBenchNomtHandle(b)
 			trie := NewNomtStateTrie(h, true, "account_state")

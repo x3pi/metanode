@@ -1,0 +1,22 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "b1_microbenchmark_a_vs_b",
+      "command": "python3 -u /home/abc/chain-n/metanode/execution/scripts/test/evidence/run_b1_benchmarks.py",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "904519d465c961b7e352c01bf53cc9e44514a504",
+      "git_status": " M execution/pkg/trie/nomt_commit_bench_test.go;?? note/evidence/perf_nomt_b1_20261007/;",
+      "started_at": "2026-10-07T11:32:05Z",
+      "finished_at": "2026-10-07T11:34:07Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "b1_microbenchmark_a_vs_b.log",
+          "sha256": "da45e54971839b7fc0be62c4004cb772656534cd331e89fdf4e5984310dee2de",
+          "bytes": 3834
+        }
+      ]
+    }
+  ]
+}
