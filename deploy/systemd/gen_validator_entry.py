@@ -389,7 +389,6 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "tx_trace_enabled": False,
         "go_mem_limit_gb": 32,
         "mvm_cache_enabled": False,
-        "tx_signature_mode": getattr(args, "tx_signature_mode", "secp"),
         "chainId": args.chain_id,
         "private_key": bls_private_hex,
         "address": eth_addr_stripped,

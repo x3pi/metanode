@@ -90,7 +90,6 @@ all:
             cluster_id: 1
             cluster_name: "exec1"
             consensus_mode: "raft"
-            tx_signature_mode: "secp"
             account_gate: "parent_registered"
             # Cổng và thư mục mặc định (chuẩn hóa trên tất cả các máy khi chạy multi-server)
             rpc_port: 8747

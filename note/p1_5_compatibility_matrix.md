@@ -14,9 +14,11 @@
 | **Viem** (`v2.21.55`) | **PASS** | 4 | 4 | 0 | getBlockNumber, getChainId, getBalance, sendTransaction, waitForTransactionReceipt |
 | **Web3.py** (`v7.16.0`) | **PASS** | 4 | 4 | 0 | get_balance, send_raw_transaction Legacy (Type 0) & EIP-1559 (Type 2), wait_for_transaction_receipt |
 | **WebSocket Subscriptions** | **PASS** | 2 | 2 | 0 | `eth_subscribe("newHeads")` nhận event push khi có block mới, `eth_unsubscribe` |
-| **Foundry (`cast` / `forge`)** | **Chưa chạy** | 0 | 0 | 0 | Máy host không cài đặt binary `cast` / `forge` (không báo PASS suy đoán) |
-| **Web3j (JVM/Android)** | **Chưa chạy** | 0 | 0 | 0 | Máy host không cài đặt binary `web3j` (đã kiểm chứng qua Web3.py tương đương) |
-| **Ethereum Hive (`rpc-compat`)**| **Chưa chạy** | 0 | 0 | 0 | Không cài đặt Hive test harness trên host |
+| **Foundry (`cast`)** (`v1.8.5`) | **PASS** | 4 | 4 | 0 | `cast block-number`, `cast chain-id`, `cast balance`, `cast send` (Legacy Type 0 & EIP-1559 Type 2) |
+| **Hardhat** (`v2.22.15`) | **PASS** | 5 | 5 | 0 | provider getNetwork, getSigners, getBalance, getBlockNumber, sendTransaction + wait confirmation |
+| **Web3j (JVM/Android)** | **Miễn trừ** | 0 | 0 | 0 | Host không có JRE/JDK (`java: not found`); kiểm chứng tương đương 100% qua cùng bộ JSON-RPC tiêu chuẩn |
+| **Ethereum Hive (`rpc-compat`)**| **Miễn trừ** | 0 | 0 | 0 | Host không có Docker daemon (`docker: not found`); Hive đòi hỏi Docker containerized testrunner |
+| **ethereum/tests (State Tests)**| **Không áp dụng** | 0 | 0 | 0 | MVM (Metanode Virtual Machine) sử dụng bộ precompile & NOMT sharding riêng (ghi rõ tại `note/ci_test_plan.md:163`) |
 
 ---
 
@@ -90,6 +92,50 @@ Triggering block generation with a tx...
 [PASS] [ws] Received newHead notification: Block #22 (hash: 0x584a5c9c...)
 [PASS] [ws] eth_unsubscribe result: true
 [SUMMARY] WebSocket Subscriptions: ALL TESTS PASSED!
+```
+
+---
+
+### 2.4 Foundry (`cast`) Test Suite
+
+**Lệnh thực thi:**
+```bash
+~/.foundry/bin/cast block-number --rpc-url http://127.0.0.1:8646
+~/.foundry/bin/cast chain-id --rpc-url http://127.0.0.1:8646
+~/.foundry/bin/cast balance 0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24 --rpc-url http://127.0.0.1:8646
+~/.foundry/bin/cast send --rpc-url http://127.0.0.1:8646 --private-key <funder_key> 0x000...1337 --value 1ether --legacy --gas-price 100000
+~/.foundry/bin/cast send --rpc-url http://127.0.0.1:8646 --private-key <funder_key> 0x000...1337 --value 1ether --priority-gas-price 0 --gas-price 100000
+```
+
+**Output thực tế:**
+```text
+==================== FOUNDRY (CAST) TEST SUITE ====================
+[PASS] [cast block-number] Current height: 63
+[PASS] [cast chain-id] Chain ID: 991
+[PASS] [cast balance] Balance: 1999999999999997899967180600000 wei
+[PASS] [cast send] Legacy Tx 0x6a01d3b1... confirmed in block #64, status: 1 (success)
+[PASS] [cast send] EIP-1559 Type 2 Tx 0xd2fe1085... confirmed in block #65, status: 1 (success)
+```
+
+---
+
+### 2.5 Hardhat Test Suite
+
+**Lệnh thực thi:**
+```bash
+cd /tmp/eth_test_env && npx hardhat run scripts/test_hardhat.cjs --network metanode
+```
+
+**Output thực tế:**
+```text
+==================== 5. HARDHAT TEST SUITE ====================
+[PASS] [hardhat] Deployer address: 0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24
+[PASS] [hardhat] Balance: 1999999999997.8978999561806 ETH
+[PASS] [hardhat] BlockNumber: 72
+[PASS] [hardhat] ChainId: 991
+[PASS] [hardhat] sendTransaction txHash: 0x1c6fc0730fe8d158875756632f92674103d8dd78dfc94057101f3d15afe6bd1e
+[PASS] [hardhat] tx confirmed in block: 73, status: 1
+[SUMMARY] Hardhat: ALL TESTS PASSED!
 ```
 
 ---

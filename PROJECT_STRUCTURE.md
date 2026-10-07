@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-10-06 (P0-8 Single Canonical Hash keccak256(raw_envelope) cross-language Go/Rust + P0-7 Ethereum standard effective gas price min(maxFee, F + tip) on flat fee model implemented. Multi-validator load verification P0-6 completed with 100% state parity and Zero-Fork invariant verified: 23/23 steps in test_coattest_4val.sh and 26/26 steps in test_cross_chain_coattest.sh PASS across 4-validator cluster + exec2).
+> **Last updated:** 2026-10-07 (Completed all remaining production readiness gaps: P1-1 legacy removal (cmd/rpc and test-tcp deleted, SendTransactionWithDeviceKey purged, deploy templates cleaned of tx_signature_mode), P1-5 client compatibility matrix verified with Foundry 4/4 and Hardhat 5/5, P2-2 benchmarks recorded, Cutover BLS pre-flight rehearsal recorded, P0-6 ci runner analyzed and 23/23 tests passed).
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 ---
 

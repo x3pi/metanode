@@ -12,7 +12,6 @@ const (
 	// Send messages
 	ReadTransaction              = "ReadTransaction"
 	SendTransaction              = "SendTransaction"
-	SendTransactionWithDeviceKey = "SendTransactionWithDeviceKey"
 	SendTransactions             = "SendTransactions"
 	SendRawTransaction           = "SendRawTransaction"
 	SendRawTransactions          = "SendRawTransactions"

@@ -59,7 +59,6 @@
       --node-id "{{ item.node_id }}" \
       --chain-id "{{ chain_id | default(991) }}" \
       --install-dir "{{ metanode_install_dir }}/node-{{ item.node_id }}" \
-      --tx-signature-mode "{{ tx_signature_mode | default('secp') }}" \
       --node-type "{% if item.is_synconly | default(false) %}synconly{% else %}validator{% endif %}" {% if item.is_rpc | default(false) %}--is-rpc{% endif %} {% if item.snapshot_enabled | default(false) %}--snapshot-enabled{% endif %} \
       --ip "{{ item.ip }}" \
       --total-nodes "{{ cluster_nodes | length }}" \

@@ -1,1 +1,0 @@
-*Tài liệu gốc: [Google Docs](https://docs.google.com/document/d/1NoiwuTtX3VWc3FRic5wD6Sxv4BPgPyDhfNK7JcRxhOw/edit?tab=t.0#heading=h.tucjrfwfotx2)*

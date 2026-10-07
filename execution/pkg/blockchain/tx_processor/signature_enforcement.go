@@ -38,7 +38,7 @@ func sigCacheKey(tx types.Transaction, blsKey []byte) eth_common.Hash {
 // chain). It keeps every signature verdict a pure function of (tx, sender state, policy).
 type sigPolicy struct {
 	chainID     uint64 // configured chain ID (0 = unset)
-	secp        bool   // tx_signature_mode == "secp": users sign only with secp256k1
+	secp        bool   // users sign only with secp256k1 (eth-only)
 	accountGate bool   // account_gate == "parent_registered"
 }
 

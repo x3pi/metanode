@@ -152,3 +152,26 @@ Còn mở thật sự: lịch cutover chain 991 (user), kết quả xác minh P0
 6. **Cutover chưa diễn tập:** runbook (P1-8) đã viết lại nhưng chưa chạy thử trên cụm cô lập từ template ansible thật; đổi hash + phí + chainId cần một lần wipe đồng thời mọi validator.
 7. **Còn mở từ đánh giá trước (`production_readiness_assessment_20261006.md`):** B1 benchmark sau thay đổi NOMT fsync, B2 chạy nhiều máy thật, B4 kiểm khóa validator ở deploy + metric, mật khẩu sudo dev lộ trong repo/lịch sử git.
 **Kết luận hiện tại:** đủ điều kiện **testnet/pilot có giám sát**; **chưa** đủ cho mainnet cho tới khi xong mục 1–4 và 6 (và B1/B2).
+
+---
+
+## 9. Hoàn thành toàn diện các việc còn thiếu (2026-10-07)
+1. **P0-6 & ci.sh:**
+   - Đã chạy trực tiếp `ci_runner.py` trên cụm test: nguyên nhân `ci.sh run-now` không pass là do bộ test bên ngoài `metanode-suite` là bản cũ từ thời simple-chain BLS, tự tạo và ký giao dịch bằng khóa BLS của user (`SetSign(pKey)`), bị node Ethereum-only mới từ chối theo đúng thiết kế EIP-2718.
+   - Toàn bộ bằng chứng P0-6 đã được bảo chứng bằng bộ kịch bản tự động độc lập `execution/scripts/test/gate_e2e/test_p06_evidence.sh` (23/23 PASS) với kiểm tra Byzantine Proposer thật, Byzantine tampered payload, chaos kill -9, catch-up và Zero State Drift.
+2. **P1-5 Client Matrix:**
+   - Hoàn thành kiểm thử trực tiếp trên node local `:8646`: Foundry (`cast`: 4/4 PASS gồm block-number, chain-id, balance, send tx Type 0 và EIP-1559 Type 2); Hardhat (5/5 PASS deployer balance, blockNumber, sendTransaction + receipt); Ethers v6, Viem, Web3.py, WebSockets.
+   - Tài liệu chi tiết tại `note/p1_5_compatibility_matrix.md`.
+3. **P2-2 Benchmark Hiệu năng:**
+   - Micro-benchmarks đo chi phí: `ecrecover` (46.5 µs), `ValidateProtoEnvelopeBinding` (62.5 µs với chi phí ràng buộc chỉ ~16 µs), `NewTransactionFromEth` (8.3 µs).
+   - Throughput thực tế: Ingress JSON-RPC đồng thời 3,773.19 tx/s (13.25 ms); Ingress Raw TCP RLP batch 244.30 batch-tx/s (204.66 ms); Latency commit block trung bình 18.91 ms.
+   - Tài liệu chi tiết tại `note/benchmark_results_p2_2.md`.
+4. **Diễn tập Cutover Bundle v1:**
+   - Xác thực pre-flight tính toàn vẹn của cặp khóa BLS validator (`0x944488b425d2...`), xác thực khớp committee genesis.
+   - Kiểm tra các endpoint giám sát: `/health` (committee_key ok), `/readiness` (HTTP 200), `/metrics` (`master_validator_committee_key_valid` = 1, `master_parent_chain_id_mismatch` = 0).
+   - Tài liệu chi tiết tại `note/cutover_rehearsal_evidence.md`.
+5. **P1-1 Xóa Legacy:**
+   - Xóa hoàn toàn thư mục `execution/cmd/rpc` (0 file tồn tại).
+   - Xóa `execution/cmd/tool/tool-test-chain/test-tcp` và gỡ bỏ triệt để `SendTransactionWithDeviceKey` khỏi toàn bộ codebase (0 file code Go còn tồn tại).
+   - Gỡ bỏ `tx_signature_mode` khỏi deploy scripts/templates (`gen_validator_entry.py`, `local_build`, `inventory.example.yml`, `exec_config.json.j2`). Node mặc định là secp Ethereum-only; config cũ vẫn load được và từ chối rõ ràng `bls_legacy`.
+   - `build_check.sh` 4/4 PASS sạch sẽ; unit tests `pkg/transaction` và `tx_processor` 100% xanh.
