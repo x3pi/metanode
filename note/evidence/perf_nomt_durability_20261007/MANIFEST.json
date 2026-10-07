@@ -40,6 +40,23 @@
           "bytes": 2426
         }
       ]
+    },
+    {
+      "id": "durability_negative_control_sync_timeout",
+      "command": "env NEGATIVE_CONTROL=sync_timeout ROUNDS=1 SUMMARY_REPORT=/tmp/negative_control_sync_timeout_summary.log /home/abc/chain-n/metanode/execution/scripts/test/test_crash_recovery_nomt_expanded.sh /tmp/gate_4val_p06",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "efe7ec618474fa987219aa865797ac9a43125d48",
+      "git_status": "?? note/plan_evidence_tool_rss_memory_followup_20261007.md;",
+      "started_at": "2026-10-07T14:13:41Z",
+      "finished_at": "2026-10-07T14:14:50Z",
+      "exit_code": 1,
+      "files": [
+        {
+          "path": "durability_negative_control_sync_timeout.log",
+          "sha256": "069855ec89eee1348fc6844e098a00a690420c92496da3a716a84782d33bb2bb",
+          "bytes": 1757
+        }
+      ]
     }
   ]
 }

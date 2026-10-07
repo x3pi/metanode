@@ -33,10 +33,20 @@ Bản báo cáo này **chính thức thay thế và hủy bỏ giá trị** củ
 
 ## 3. Điều khiển Âm (Negative Control Verification)
 
-Trước khi thực hiện 20 vòng kiểm thử chính thức, một lượt chạy điều khiển âm đã được thực thi với cờ `NEGATIVE_CONTROL=mismatch_root ROUNDS=1` thông qua `run_logged.sh`:
+Trước khi thực hiện 20 vòng kiểm thử chính thức, hai lượt chạy điều khiển âm đã được thực thi và ghi nhận log độc lập qua `run_logged.sh`:
+
+### 3.1. Bơm sai lệch StateRoot (`mismatch_root`)
 - **Lệnh thực thi:** `env NEGATIVE_CONTROL=mismatch_root ROUNDS=1 /home/abc/chain-n/metanode/execution/scripts/test/test_crash_recovery_nomt_expanded.sh /tmp/gate_4val_p06`
 - **Kết quả ghi nhận:** Script phát hiện sai lệch StateRoot tại Block #17 (`val1: 0xdeadbeefbad...` vs `val0/2/3: 0x724ebf3b...`), ghi nhận `FAIL_FORK`, in cảnh báo `❌ [FORK DETECTED in Round 1 at Block #17]` và thoát với exit code 1 (`evidence:durability_negative_control`).
 - **File bằng chứng:** `note/evidence/perf_nomt_durability_20261007/durability_negative_control.log` (SHA256: `a0a9cb06492802cbc25afbc1350f8804ad1cd6fdd2a91ea2ac87c284d0b8ef4c`, 3908 bytes) (`evidence:durability_negative_control`).
+
+### 3.2. Bơm lỗi đồng bộ không tiến triển (`sync_timeout`)
+- **Lệnh thực thi:** `env NEGATIVE_CONTROL=sync_timeout ROUNDS=1 /home/abc/chain-n/metanode/execution/scripts/test/test_crash_recovery_nomt_expanded.sh /tmp/gate_4val_p06`
+- **Kết quả ghi nhận:** Khi việc đồng bộ không đạt điều kiện $H \ge H_{before} + 2$, script phát hiện `SYNC_PASS=false`, ghi nhận `FAIL_SYNC_TIMEOUT`, in cảnh báo `❌ [SYNC / FORWARD PROGRESS FAILED in Round 1]` và thoát với exit code 1 (`evidence:durability_negative_control_sync_timeout`). Script không in PASS và không so sánh parity ở block #0.
+- **File bằng chứng:** `note/evidence/perf_nomt_durability_20261007/durability_negative_control_sync_timeout.log` (SHA256: `069855ec89eee1348fc6844e098a00a690420c92496da3a716a84782d33bb2bb`, 1757 bytes) (`evidence:durability_negative_control_sync_timeout`).
+
+> [!WARNING]
+> **Giới hạn kiểm chứng điều khiển âm:** Hai thí nghiệm điều khiển âm trên chứng minh bộ so sánh parity và bộ kiểm tra đồng bộ trong harness hoạt động chính xác (đều báo đỏ khi có lỗi). Tuy nhiên, việc bơm giao dịch ngoài consensus trực tiếp vào 1 node riêng rẽ trên cụm mạng sống để kích hoạt fork trạng thái thật từ hệ thống chưa được thực hiện, do đó khả năng phát hiện fork trạng thái sinh ra từ lỗi hệ điều hành/phần cứng thực tế được phân loại trung thực là **INCONCLUSIVE**.
 
 ---
 
@@ -71,7 +81,8 @@ Toàn bộ 20 vòng kiểm thử được thực thi tự động qua `run_logge
 
 ## 5. Phân tích Ứng xử Hệ thống từ Dữ liệu Thật
 
-### 5.1. Phục hồi sau khi Leader (`val0`) bị hạ gục (7 vòng: R3, R6, R11, R14, R17, R20)
+### 5.1. Phục hồi sau khi Leader (`val0`) bị hạ gục (6 vòng đơn lẻ: R3, R6, R11, R14, R17, R20)
+- Ngoài 6 vòng kill đơn lẻ leader `val0` kể trên, `val0` còn tham gia vào 2 vòng kill kép là R8 (`val0, val1`) và R18 (`val0, val2`).
 - Khi `val0` bị hạ, giao thức Mysticeti chuyển giao đề xuất round tiếp theo cho các validator còn lại (`val1..val3`).
 - Khi `val0` khởi động lại:
   * 5 bước Startup Integrity Check đọc lại block mapping và đối chiếu StateRoot trong NOMT thành công (0 lỗi).

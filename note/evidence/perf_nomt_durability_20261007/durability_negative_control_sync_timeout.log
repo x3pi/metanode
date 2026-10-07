@@ -1,0 +1,25 @@
+==================================================================
+💥 NOMT EXPANDED CRASH RECOVERY UNDER LOAD — 1 ROUNDS (KILL -9)
+   Cluster Base:     /tmp/gate_4val_p06
+   Leader RPC Port:  31646
+   Workload:         10,000 txs/round (8k crash blast + 2k recovery blast)
+   Min New Blocks:   N >= 2 beyond H_before
+   Negative Control: sync_timeout
+   Summary CSV:      /tmp/negative_control_sync_timeout_summary.log
+==================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔥 [ROUND 1/1] Targets: val1
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 [0/6] Baseline Height: H_before = #8539 (val0:#8539, val1:#8539, val2:#8539, val3:#8539)
+🚀 [1/6] Blasting 8,000 SECP transactions during active kill...
+💥 [2/6] Killing val1 (PID 3728379) with KILL -9 (delay 0.05s at 2026-10-07T14:13:42.381Z)...
+   • Estimated kill phase: unknown_or_between_commits
+✅ [3/6] Stage 1 background workload submission ended.
+🔄 [4/6] Restarting val1...
+✅ [5/6] All restarted node(s) running cleanly (0 exit 78, no integrity failure).
+🛡️ [6/6] Verifying state catchup (>= H_before + 2) and Zero-Fork parity across cluster...
+🧪 [NEGATIVE CONTROL] Intentionally forcing SYNC_PASS=false...
+❌ [SYNC / FORWARD PROGRESS FAILED in Round 1]
+   Nodes did NOT reach H_before (8539) + 2 new blocks within timeout!
+   Latest heights: val0:#8542, val1:#8539, val2:#8542, val3:#8542 (min=#8539)
