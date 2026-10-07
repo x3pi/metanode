@@ -222,6 +222,7 @@ Khi một giao dịch gửi qua TCP hoặc RPC bị từ chối, node sẽ trả
 | **83** | `ErrInsufficientFunds` | Số dư tài khoản không đủ trả `gasLimit * gasPrice + value` | `-32000` (insufficient funds) |
 | **84** | `ErrAlreadyKnown` | Giao dịch cùng hash đã có sẵn trong mempool | `-32000` (already known) |
 | **85** | `ErrReplacementUnderpriced`| Thay thế giao dịch cùng nonce nhưng gas price không tăng đủ tối thiểu 10% | `-32000` (replacement transaction underpriced) |
+| **90** | `ErrInvalidBlobProof` | Xác minh bằng chứng KZG thất bại (KZG proof verification failed) cho giao dịch EIP-4844 blob | `-32000` (invalid blob proof) |
 
 ---
 

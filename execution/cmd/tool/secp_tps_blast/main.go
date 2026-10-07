@@ -1455,4 +1455,3 @@ func sampleProcessesMetrics(targetPIDs []string) (float64, uint64) {
 	}
 	return curTotalCPU, curTotalRSS
 }
-
