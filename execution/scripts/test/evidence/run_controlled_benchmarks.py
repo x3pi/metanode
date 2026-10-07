@@ -6,6 +6,7 @@ Controlled Benchmarks Runner for Phase 4:
 Strict Anti-Fabrication Protocol: All metrics logged, fresh state per round, Welch's t-test computed.
 """
 
+import argparse
 import csv
 import json
 import math
@@ -168,133 +169,142 @@ def mean_sd(vals):
     return mean(vals), sample_sd(vals)
 
 def main():
+    parser = argparse.ArgumentParser(description="Controlled Benchmarks for GOGC and Debug Flag")
+    parser.add_argument("--rounds", type=int, default=7, help="Number of interleaved rounds (default: 7)")
+    parser.add_argument("--test", choices=["all", "gogc", "debug"], default="all", help="Which benchmark to run")
+    parser.add_argument("--output-csv", default=None, help="Custom output CSV path")
+    args = parser.parse_args()
+
+    rounds = args.rounds
+
     print("==================================================================")
-    print("🔬 GIAI ĐOẠN 4: BENCHMARK ĐỐI CHỨNG CÓ KIỂM SOÁT (GOGC & DEBUG FLAG)")
+    print("🔬 BENCHMARK ĐỐI CHỨNG CÓ KIỂM SOÁT (GOGC & DEBUG FLAG)")
     print("   Nguyên tắc: Mỗi lượt chạy trên CLUSTER MỚI (fresh genesis)")
-    print("   Lượt đo:    7 lượt xen kẽ mỗi nhánh (n=7 mỗi bên, tổng 28 lượt)")
+    print(f"   Lượt đo:    {rounds} lượt xen kẽ mỗi nhánh")
     print("   Workload:   25,000 transactions Secp256k1 EIP-1559, batch 1,000")
     print("==================================================================")
 
     ensure_template()
 
-    # ---------------- 4.1. GOGC Benchmark ----------------
-    print("\n▶️ [1/2] Chạy Thực Nghiệm GOGC: Mặc Định (800) vs GOGC=50 (7 lượt xen kẽ)...")
     gogc_results = {"Default": [], "GOGC50": []}
     gogc_rss = {"Default": [], "GOGC50": []}
     gogc_cpu = {"Default": [], "GOGC50": []}
     gogc_log = {"Default": [], "GOGC50": []}
     gogc_dur = {"Default": [], "GOGC50": []}
-    rounds = 7
 
-    for r in range(1, rounds + 1):
-        # Default run
-        print(f"\n   [Lượt {r}/{rounds}] Cấu hình: GOGC Mặc Định (800)...")
-        setup_fresh_cluster(gogc=800)
-        if start_cluster(enable_debug=True):
-            tps, rss, dur, cpu_s, log_kb = run_blast()
-            print(f"      • Default #{r}: TPS={tps:.1f} tx/s, Peak RSS={rss} MB, CPU={cpu_s:.1f}s, Log={log_kb:.1f}KB, Dur={dur:.2f}s")
-            if tps and rss:
-                gogc_results["Default"].append(tps)
-                gogc_rss["Default"].append(rss)
-                gogc_cpu["Default"].append(cpu_s)
-                gogc_log["Default"].append(log_kb)
-                gogc_dur["Default"].append(dur)
-        stop_and_clean_bench()
+    # ---------------- 4.1. GOGC Benchmark ----------------
+    if args.test in ["all", "gogc"]:
+        print(f"\n▶️ [1/2] Chạy Thực Nghiệm GOGC: Mặc Định (800) vs GOGC=50 ({rounds} lượt xen kẽ)...")
+        for r in range(1, rounds + 1):
+            # Default run
+            print(f"\n   [Lượt {r}/{rounds}] Cấu hình: GOGC Mặc Định (800)...")
+            setup_fresh_cluster(gogc=800)
+            if start_cluster(enable_debug=True):
+                tps, rss, dur, cpu_s, log_kb = run_blast()
+                print(f"      • Default #{r}: TPS={tps:.1f} tx/s, Peak RSS={rss} MB, CPU={cpu_s:.1f}s, Log={log_kb:.1f}KB, Dur={dur:.2f}s")
+                if tps and rss:
+                    gogc_results["Default"].append(tps)
+                    gogc_rss["Default"].append(rss)
+                    gogc_cpu["Default"].append(cpu_s)
+                    gogc_log["Default"].append(log_kb)
+                    gogc_dur["Default"].append(dur)
+            stop_and_clean_bench()
 
-        # GOGC=50 run
-        print(f"   [Lượt {r}/{rounds}] Cấu hình: GOGC=50...")
-        setup_fresh_cluster(gogc=50)
-        if start_cluster(enable_debug=True):
-            tps, rss, dur, cpu_s, log_kb = run_blast()
-            print(f"      • GOGC50 #{r}: TPS={tps:.1f} tx/s, Peak RSS={rss} MB, CPU={cpu_s:.1f}s, Log={log_kb:.1f}KB, Dur={dur:.2f}s")
-            if tps and rss:
-                gogc_results["GOGC50"].append(tps)
-                gogc_rss["GOGC50"].append(rss)
-                gogc_cpu["GOGC50"].append(cpu_s)
-                gogc_log["GOGC50"].append(log_kb)
-                gogc_dur["GOGC50"].append(dur)
-        stop_and_clean_bench()
+            # GOGC=50 run
+            print(f"   [Lượt {r}/{rounds}] Cấu hình: GOGC=50...")
+            setup_fresh_cluster(gogc=50)
+            if start_cluster(enable_debug=True):
+                tps, rss, dur, cpu_s, log_kb = run_blast()
+                print(f"      • GOGC50 #{r}: TPS={tps:.1f} tx/s, Peak RSS={rss} MB, CPU={cpu_s:.1f}s, Log={log_kb:.1f}KB, Dur={dur:.2f}s")
+                if tps and rss:
+                    gogc_results["GOGC50"].append(tps)
+                    gogc_rss["GOGC50"].append(rss)
+                    gogc_cpu["GOGC50"].append(cpu_s)
+                    gogc_log["GOGC50"].append(log_kb)
+                    gogc_dur["GOGC50"].append(dur)
+            stop_and_clean_bench()
 
-    # Stats for GOGC
-    def_tps_m, def_tps_sd = mean_sd(gogc_results["Default"])
-    g50_tps_m, g50_tps_sd = mean_sd(gogc_results["GOGC50"])
-    def_rss_m, def_rss_sd = mean_sd(gogc_rss["Default"])
-    g50_rss_m, g50_rss_sd = mean_sd(gogc_rss["GOGC50"])
+        # Stats for GOGC
+        def_tps_m, def_tps_sd = mean_sd(gogc_results["Default"])
+        g50_tps_m, g50_tps_sd = mean_sd(gogc_results["GOGC50"])
+        def_rss_m, def_rss_sd = mean_sd(gogc_rss["Default"])
+        g50_rss_m, g50_rss_sd = mean_sd(gogc_rss["GOGC50"])
 
-    t_stat_tps, df_tps, p_tps, ci_tps = welch_t_test(gogc_results["Default"], gogc_results["GOGC50"])
-    t_stat_rss, df_rss, p_rss, ci_rss = welch_t_test(gogc_rss["Default"], gogc_rss["GOGC50"])
+        t_stat_tps, df_tps, p_tps, ci_tps = welch_t_test(gogc_results["Default"], gogc_results["GOGC50"])
+        t_stat_rss, df_rss, p_rss, ci_rss = welch_t_test(gogc_rss["Default"], gogc_rss["GOGC50"])
 
-    pct_diff_tps = ((g50_tps_m - def_tps_m) / def_tps_m) * 100
-    pct_diff_rss = ((g50_rss_m - def_rss_m) / def_rss_m) * 100
+        pct_diff_tps = ((g50_tps_m - def_tps_m) / def_tps_m) * 100
+        pct_diff_rss = ((g50_rss_m - def_rss_m) / def_rss_m) * 100
 
-    print("\n==================================================================")
-    print("📊 KẾT QUẢ THỐNG KÊ GOGC (Fresh State, n=7 mỗi nhánh):")
-    print(f"   • Default GOGC: TPS = {def_tps_m:.1f} ± {def_tps_sd:.1f} tx/s | Peak RSS = {def_rss_m:.0f} ± {def_rss_sd:.0f} MB")
-    print(f"   • GOGC=50:      TPS = {g50_tps_m:.1f} ± {g50_tps_sd:.1f} tx/s | Peak RSS = {g50_rss_m:.0f} ± {g50_rss_sd:.0f} MB")
-    print(f"   • TPS Chênh lệch: {pct_diff_tps:+.2f}% (t={t_stat_tps:.2f}, df={df_tps:.1f}, p={p_tps:.4f}, 95% CI=[{ci_tps[0]:.1f}, {ci_tps[1]:.1f}])")
-    print(f"   • RSS Chênh lệch: {pct_diff_rss:+.2f}% (t={t_stat_rss:.2f}, df={df_rss:.1f}, p={p_rss:.4f})")
-    print("==================================================================")
+        print("\n==================================================================")
+        print(f"📊 KẾT QUẢ THỐNG KÊ GOGC (Fresh State, n={rounds} mỗi nhánh):")
+        print(f"   • Default GOGC: TPS = {def_tps_m:.1f} ± {def_tps_sd:.1f} tx/s | Peak RSS = {def_rss_m:.0f} ± {def_rss_sd:.0f} MB")
+        print(f"   • GOGC=50:      TPS = {g50_tps_m:.1f} ± {g50_tps_sd:.1f} tx/s | Peak RSS = {g50_rss_m:.0f} ± {g50_rss_sd:.0f} MB")
+        print(f"   • TPS Chênh lệch: {pct_diff_tps:+.2f}% (t={t_stat_tps:.2f}, df={df_tps:.1f}, p={p_tps:.4f}, 95% CI=[{ci_tps[0]:.1f}, {ci_tps[1]:.1f}])")
+        print(f"   • RSS Chênh lệch: {pct_diff_rss:+.2f}% (t={t_stat_rss:.2f}, df={df_rss:.1f}, p={p_rss:.4f})")
+        print("==================================================================")
 
-    # ---------------- 4.2. Debug Flag Benchmark ----------------
-    print("\n▶️ [2/2] Chạy Thực Nghiệm Debug Flag: ENABLE_DEBUG_PPROF=true vs false (7 lượt xen kẽ)...")
     dbg_results = {"DebugOn": [], "DebugOff": []}
     dbg_rss = {"DebugOn": [], "DebugOff": []}
     dbg_cpu = {"DebugOn": [], "DebugOff": []}
     dbg_log = {"DebugOn": [], "DebugOff": []}
     dbg_dur = {"DebugOn": [], "DebugOff": []}
 
-    for r in range(1, rounds + 1):
-        # Debug On
-        print(f"\n   [Lượt {r}/{rounds}] Cấu hình: Debug On (ENABLE_DEBUG_PPROF=true)...")
-        setup_fresh_cluster(gogc=800)
-        if start_cluster(enable_debug=True):
-            tps, rss, dur, cpu_s, log_kb = run_blast()
-            print(f"      • DebugOn #{r}: TPS={tps:.1f} tx/s, Peak RSS={rss} MB, CPU={cpu_s:.1f}s, Log={log_kb:.1f}KB, Dur={dur:.2f}s")
-            if tps and rss:
-                dbg_results["DebugOn"].append(tps)
-                dbg_rss["DebugOn"].append(rss)
-                dbg_cpu["DebugOn"].append(cpu_s)
-                dbg_log["DebugOn"].append(log_kb)
-                dbg_dur["DebugOn"].append(dur)
-        stop_and_clean_bench()
+    # ---------------- 4.2. Debug Flag Benchmark ----------------
+    if args.test in ["all", "debug"]:
+        print(f"\n▶️ [2/2] Chạy Thực Nghiệm Debug Flag: ENABLE_DEBUG_PPROF=true vs false ({rounds} lượt xen kẽ)...")
+        for r in range(1, rounds + 1):
+            # Debug On
+            print(f"\n   [Lượt {r}/{rounds}] Cấu hình: Debug On (ENABLE_DEBUG_PPROF=true)...")
+            setup_fresh_cluster(gogc=800)
+            if start_cluster(enable_debug=True):
+                tps, rss, dur, cpu_s, log_kb = run_blast()
+                print(f"      • DebugOn #{r}: TPS={tps:.1f} tx/s, Peak RSS={rss} MB, CPU={cpu_s:.1f}s, Log={log_kb:.1f}KB, Dur={dur:.2f}s")
+                if tps and rss:
+                    dbg_results["DebugOn"].append(tps)
+                    dbg_rss["DebugOn"].append(rss)
+                    dbg_cpu["DebugOn"].append(cpu_s)
+                    dbg_log["DebugOn"].append(log_kb)
+                    dbg_dur["DebugOn"].append(dur)
+            stop_and_clean_bench()
 
-        # Debug Off
-        print(f"   [Lượt {r}/{rounds}] Cấu hình: Debug Off (ENABLE_DEBUG_PPROF=false)...")
-        setup_fresh_cluster(gogc=800)
-        if start_cluster(enable_debug=False):
-            tps, rss, dur, cpu_s, log_kb = run_blast()
-            print(f"      • DebugOff #{r}: TPS={tps:.1f} tx/s, Peak RSS={rss} MB, CPU={cpu_s:.1f}s, Log={log_kb:.1f}KB, Dur={dur:.2f}s")
-            if tps and rss:
-                dbg_results["DebugOff"].append(tps)
-                dbg_rss["DebugOff"].append(rss)
-                dbg_cpu["DebugOff"].append(cpu_s)
-                dbg_log["DebugOff"].append(log_kb)
-                dbg_dur["DebugOff"].append(dur)
-        stop_and_clean_bench()
+            # Debug Off
+            print(f"   [Lượt {r}/{rounds}] Cấu hình: Debug Off (ENABLE_DEBUG_PPROF=false)...")
+            setup_fresh_cluster(gogc=800)
+            if start_cluster(enable_debug=False):
+                tps, rss, dur, cpu_s, log_kb = run_blast()
+                print(f"      • DebugOff #{r}: TPS={tps:.1f} tx/s, Peak RSS={rss} MB, CPU={cpu_s:.1f}s, Log={log_kb:.1f}KB, Dur={dur:.2f}s")
+                if tps and rss:
+                    dbg_results["DebugOff"].append(tps)
+                    dbg_rss["DebugOff"].append(rss)
+                    dbg_cpu["DebugOff"].append(cpu_s)
+                    dbg_log["DebugOff"].append(log_kb)
+                    dbg_dur["DebugOff"].append(dur)
+            stop_and_clean_bench()
 
-    # Stats for Debug Flag
-    don_tps_m, don_tps_sd = mean_sd(dbg_results["DebugOn"])
-    doff_tps_m, doff_tps_sd = mean_sd(dbg_results["DebugOff"])
-    don_cpu_m, don_cpu_sd = mean_sd(dbg_cpu["DebugOn"])
-    doff_cpu_m, doff_cpu_sd = mean_sd(dbg_cpu["DebugOff"])
-    don_log_m, don_log_sd = mean_sd(dbg_log["DebugOn"])
-    doff_log_m, doff_log_sd = mean_sd(dbg_log["DebugOff"])
+        # Stats for Debug Flag
+        don_tps_m, don_tps_sd = mean_sd(dbg_results["DebugOn"])
+        doff_tps_m, doff_tps_sd = mean_sd(dbg_results["DebugOff"])
+        don_cpu_m, don_cpu_sd = mean_sd(dbg_cpu["DebugOn"])
+        doff_cpu_m, doff_cpu_sd = mean_sd(dbg_cpu["DebugOff"])
+        don_log_m, don_log_sd = mean_sd(dbg_log["DebugOn"])
+        doff_log_m, doff_log_sd = mean_sd(dbg_log["DebugOff"])
 
-    t_dbg, df_dbg, p_dbg, ci_dbg = welch_t_test(dbg_results["DebugOn"], dbg_results["DebugOff"])
-    t_cpu, df_cpu, p_cpu, ci_cpu = welch_t_test(dbg_cpu["DebugOn"], dbg_cpu["DebugOff"])
-    pct_diff_dbg = ((doff_tps_m - don_tps_m) / don_tps_m) * 100
-    pct_diff_cpu = ((doff_cpu_m - don_cpu_m) / don_cpu_m) * 100
+        t_dbg, df_dbg, p_dbg, ci_dbg = welch_t_test(dbg_results["DebugOn"], dbg_results["DebugOff"])
+        t_cpu, df_cpu, p_cpu, ci_cpu = welch_t_test(dbg_cpu["DebugOn"], dbg_cpu["DebugOff"])
+        pct_diff_dbg = ((doff_tps_m - don_tps_m) / don_tps_m) * 100
+        pct_diff_cpu = ((doff_cpu_m - don_cpu_m) / don_cpu_m) * 100
 
-    print("\n==================================================================")
-    print("📊 KẾT QUẢ THỐNG KÊ DEBUG FLAG (Fresh State, n=7 mỗi nhánh):")
-    print(f"   • Debug On (true):   TPS = {don_tps_m:.1f} ± {don_tps_sd:.1f} tx/s | CPU = {don_cpu_m:.1f} ± {don_cpu_sd:.1f} s | Log = {don_log_m:.1f} KB")
-    print(f"   • Debug Off (false):  TPS = {doff_tps_m:.1f} ± {doff_tps_sd:.1f} tx/s | CPU = {doff_cpu_m:.1f} ± {doff_cpu_sd:.1f} s | Log = {doff_log_m:.1f} KB")
-    print(f"   • Chênh lệch TPS:    {pct_diff_dbg:+.2f}% (t={t_dbg:.2f}, df={df_dbg:.1f}, p={p_dbg:.4f}, 95% CI=[{ci_dbg[0]:.1f}, {ci_dbg[1]:.1f}])")
-    print(f"   • Chênh lệch CPU:    {pct_diff_cpu:+.2f}% (t={t_cpu:.2f}, df={df_cpu:.1f}, p={p_cpu:.4f})")
-    print("==================================================================")
+        print("\n==================================================================")
+        print(f"📊 KẾT QUẢ THỐNG KÊ DEBUG FLAG (Fresh State, n={rounds} mỗi nhánh):")
+        print(f"   • Debug On (true):   TPS = {don_tps_m:.1f} ± {don_tps_sd:.1f} tx/s | CPU = {don_cpu_m:.1f} ± {don_cpu_sd:.1f} s | Log = {don_log_m:.1f} KB")
+        print(f"   • Debug Off (false):  TPS = {doff_tps_m:.1f} ± {doff_tps_sd:.1f} tx/s | CPU = {doff_cpu_m:.1f} ± {doff_cpu_sd:.1f} s | Log = {doff_log_m:.1f} KB")
+        print(f"   • Chênh lệch TPS:    {pct_diff_dbg:+.2f}% (t={t_dbg:.2f}, df={df_dbg:.1f}, p={p_dbg:.4f}, 95% CI=[{ci_dbg[0]:.1f}, {ci_dbg[1]:.1f}])")
+        print(f"   • Chênh lệch CPU:    {pct_diff_cpu:+.2f}% (t={t_cpu:.2f}, df={df_cpu:.1f}, p={p_cpu:.4f})")
+        print("==================================================================")
 
     # Save CSV
-    csv_file = f"{EVIDENCE_DIR}/controlled_benchmarks_summary.csv"
+    csv_file = args.output_csv if args.output_csv else f"{EVIDENCE_DIR}/controlled_benchmarks_summary.csv"
     with open(csv_file, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["Experiment", "Round", "Config", "TPS", "PeakRSS_MB", "Duration_s", "CPU_s", "LogSize_KB"])

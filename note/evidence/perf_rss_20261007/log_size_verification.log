@@ -1,0 +1,33 @@
+==================================================================
+🔬 BENCHMARK ĐỐI CHỨNG CÓ KIỂM SOÁT (GOGC & DEBUG FLAG)
+   Nguyên tắc: Mỗi lượt chạy trên CLUSTER MỚI (fresh genesis)
+   Lượt đo:    3 lượt xen kẽ mỗi nhánh
+   Workload:   25,000 transactions Secp256k1 EIP-1559, batch 1,000
+==================================================================
+
+▶️ [2/2] Chạy Thực Nghiệm Debug Flag: ENABLE_DEBUG_PPROF=true vs false (3 lượt xen kẽ)...
+
+   [Lượt 1/3] Cấu hình: Debug On (ENABLE_DEBUG_PPROF=true)...
+      • DebugOn #1: TPS=5711.0 tx/s, Peak RSS=12350 MB, CPU=99.1s, Log=208.9KB, Dur=5.83s
+   [Lượt 1/3] Cấu hình: Debug Off (ENABLE_DEBUG_PPROF=false)...
+      • DebugOff #1: TPS=5663.1 tx/s, Peak RSS=12077 MB, CPU=95.8s, Log=206.8KB, Dur=5.51s
+
+   [Lượt 2/3] Cấu hình: Debug On (ENABLE_DEBUG_PPROF=true)...
+      • DebugOn #2: TPS=6054.9 tx/s, Peak RSS=12443 MB, CPU=103.0s, Log=208.0KB, Dur=5.41s
+   [Lượt 2/3] Cấu hình: Debug Off (ENABLE_DEBUG_PPROF=false)...
+      • DebugOff #2: TPS=6066.9 tx/s, Peak RSS=12770 MB, CPU=108.6s, Log=209.6KB, Dur=5.25s
+
+   [Lượt 3/3] Cấu hình: Debug On (ENABLE_DEBUG_PPROF=true)...
+      • DebugOn #3: TPS=5949.7 tx/s, Peak RSS=12402 MB, CPU=92.2s, Log=207.9KB, Dur=5.48s
+   [Lượt 3/3] Cấu hình: Debug Off (ENABLE_DEBUG_PPROF=false)...
+      • DebugOff #3: TPS=6321.0 tx/s, Peak RSS=12359 MB, CPU=89.8s, Log=211.9KB, Dur=5.22s
+
+==================================================================
+📊 KẾT QUẢ THỐNG KÊ DEBUG FLAG (Fresh State, n=3 mỗi nhánh):
+   • Debug On (true):   TPS = 5905.2 ± 176.2 tx/s | CPU = 98.1 ± 5.5 s | Log = 208.3 KB
+   • Debug Off (false):  TPS = 6017.0 ± 331.8 tx/s | CPU = 98.1 ± 9.6 s | Log = 209.5 KB
+   • Chênh lệch TPS:    +1.89% (t=-0.52, df=3.0, p=0.6413, 95% CI=[-796.4, 572.7])
+   • Chênh lệch CPU:    -0.00% (t=0.00, df=3.2, p=0.9996)
+==================================================================
+
+✅ Summary CSV saved to note/evidence/perf_rss_20261007/log_size_verification_summary.csv

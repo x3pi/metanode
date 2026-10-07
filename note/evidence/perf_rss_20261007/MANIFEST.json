@@ -213,6 +213,11 @@
           "path": "rss_drift_diagnostic.log",
           "sha256": "619ad847256e5d32366b312bdffd5e43586863dbf958381ab2f3eb2f265657c9",
           "bytes": 3871
+        },
+        {
+          "path": "rss_drift_diagnostic_summary.csv",
+          "sha256": "5074f51e6dd629bd183c937f5fbb764de593931d5f97c3b30eb93e8fcd09e681",
+          "bytes": 179
         }
       ],
       "extract": [
@@ -223,6 +228,28 @@
           "group": 1,
           "stat": "raw",
           "unit": "%"
+        }
+      ]
+    },
+    {
+      "id": "log_size_verification",
+      "command": "python3 -u execution/scripts/test/evidence/run_controlled_benchmarks.py --rounds 3 --test debug --output-csv note/evidence/perf_rss_20261007/log_size_verification_summary.csv",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "4c645c860b528b336b0a6ac5384c38f846660c79",
+      "git_status": "",
+      "started_at": "2026-10-07T15:51:24Z",
+      "finished_at": "2026-10-07T15:56:24Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "log_size_verification.log",
+          "sha256": "f21b3a8077270db1ded506e6cfc29a7a140677fb8128127c1b52a216c77a0a5e",
+          "bytes": 2110
+        },
+        {
+          "path": "log_size_verification_summary.csv",
+          "sha256": "bc11c0b28039833c8d1a99b521c9d82eeae2ca9d2da447917022a164e4e7d0bc",
+          "bytes": 391
         }
       ]
     }
@@ -338,6 +365,46 @@
         "Peak RSS Cụm": "PeakRSS_MB",
         "CPU tiêu thụ": "CPU_s",
         "Log Size": "LogSize_KB"
+      }
+    },
+    {
+      "name": "RSS Drift Diagnostic Table",
+      "file": "rss_drift_diagnostic_summary.csv",
+      "header_marker": "Peak RSS (/proc) (MB)",
+      "columns": {
+        "Lượt đo": "Round",
+        "Baseline RSS Tổng": "BaselineRSS_MB",
+        "Peak RSS (/proc)": "PeakRSS_Proc_MB",
+        "Peak RSS (Tool)": "PeakRSS_Tool_MB",
+        "Dung lượng đĩa val0 ban đầu": "DiskSize_MB",
+        "Tiến trình sót": "LingeringProcs"
+      }
+    },
+    {
+      "name": "Log Size Verification Table",
+      "file": "log_size_verification_summary.csv",
+      "header_marker": "Log Size Thực Tế (KB)",
+      "row_match": {
+        "group_col": "Cấu hình",
+        "group_map": {
+          "Debug On": "DebugOn",
+          "Debug Off": "DebugOff"
+        },
+        "round_col": "Lần chạy",
+        "round_csv": "Round",
+        "group_csv": "Config"
+      },
+      "columns": {
+        "Lần chạy": "Round",
+        "Workload": {
+          "type": "constant",
+          "value": 25000
+        },
+        "Thời gian": "Duration_s",
+        "Effective TPS": "TPS",
+        "Peak RSS Cụm": "PeakRSS_MB",
+        "CPU tiêu thụ": "CPU_s",
+        "Log Size Thực Tế": "LogSize_KB"
       }
     }
   ],

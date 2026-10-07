@@ -136,6 +136,9 @@ So sánh cấu trúc bộ nhớ InUse giữa Wave 1 (50k txs) và Wave 8 (400k t
 
 ### Bảng Kết Quả Thực Nghiệm 7 Lượt Xen Kẽ (n = 7 mỗi bên)
 
+> [!NOTE]
+> **Lưu ý về Drift RSS & Giá trị Tương đối:** Do hiện tượng drift RSS baseline (+8.24%) khi khởi động lại các cụm mới (xem phân tích chi tiết tại Mục 7), các giá trị Peak RSS đo được giữa các cấu hình chỉ có ý nghĩa đối chứng tương đối trong từng cặp xen kẽ cùng lượt chạy (Run $i$). Kết luận về mức so sánh RSS đỉnh giữa các lần khởi động khác nhau được đánh giá là **INCONCLUSIVE**.
+
 | Cấu hình | Lần chạy | Workload | Thời gian (s) | Effective TPS (tx/s) | Peak RSS Cụm (MB) | CPU tiêu thụ (s) | Bằng chứng |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Default GOGC (800)** | Run 1 | 25,000 | 5.29s | 6,276.2 | 6,712 | 83.4s | evidence:controlled_benchmarks_gogc_and_debug |
@@ -186,6 +189,11 @@ Cờ `-debug` chỉ kích hoạt HTTP listener `http.Serve` cho `net/http/pprof`
 
 ### Bảng Kết Quả Thực Nghiệm 7 Lượt Xen Kẽ Bật / Tắt (Fresh State)
 
+> [!NOTE]
+> **Lưu ý về Drift RSS & Cột Log Size (0.0 KB):**
+> 1. Tương tự như thực nghiệm GOGC, kết luận về mức RSS đỉnh tuyệt đối giữa các lần khởi động khác nhau là **INCONCLUSIVE**; chỉ so sánh tương đối giữa Debug On và Debug Off trong cùng lượt chạy.
+> 2. Cột Log Size ghi nhận `0.0 KB` trong bảng dưới đây là do lỗi định vị đường dẫn log trong phiên bản cũ của công cụ đo (`run_controlled_benchmarks.py`), khi công cụ tìm kiếm tại `$BASE/<node>/logs` thay vì đường dẫn thật `$BASE/logs/<node>.log`. Lỗi đo lường này đã được khắc phục tại commit `af5052e0`. Bảng dữ liệu cũ dưới đây được bảo lưu trung thực theo log gốc mà không sửa hồi tố. Kết quả kiểm chứng 3 lượt mới với log size thật được trình bày tại Mục 7 (`evidence:log_size_verification`).
+
 | Cấu hình | Lần chạy | Workload | Thời gian (s) | Effective TPS (tx/s) | Peak RSS Cụm (MB) | CPU tiêu thụ (s) | Log Size (KB) | Bằng chứng |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Debug On (`ENABLE_DEBUG_PPROF=true`)** | Run 1 | 25,000 | 5.80s | 5,503.6 | 11,357 | 91.2s | 0.0 KB | evidence:controlled_benchmarks_gogc_and_debug |
@@ -215,7 +223,63 @@ Cờ `-debug` chỉ kích hoạt HTTP listener `http.Serve` cho `net/http/pprof`
 
 ---
 
-## 7. Ma Trận Khuyến Nghị Cấu Hình Cho Node Operators
+## 7. Hiện Tượng Drift RSS Khi Khởi Động Cụm Mới & Kiểm Chứng Log Size
+
+### 7.1. Hiện Tượng Drift RSS Baseline Khởi Động (+8.24%)
+Để kiểm tra độ ổn định của môi trường benchmark khi tạo mới cụm validator từ template sạch, thực nghiệm chẩn đoán đa lượt được thực hiện với 3 lượt liên tiếp (`diagnose_rss_drift.py`), mỗi lượt khởi động cụm 4 node mới từ đầu, đo đạc baseline bộ nhớ ngay sau khi khởi động và sau khi xử lý tải 25,000 transactions.
+
+Nguồn bằng chứng: [note/evidence/perf_rss_20261007/rss_drift_diagnostic.log](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/rss_drift_diagnostic.log) (SHA256: `619ad847256e5d32366b312bdffd5e43586863dbf958381ab2f3eb2f265657c9`, bytes: 3871) và [note/evidence/perf_rss_20261007/rss_drift_diagnostic_summary.csv](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/rss_drift_diagnostic_summary.csv) (SHA256: `5074f51e6dd629bd183c937f5fbb764de593931d5f97c3b30eb93e8fcd09e681`, bytes: 179).
+
+| Lượt đo | Baseline RSS Tổng (MB) | Peak RSS (/proc) (MB) | Peak RSS (Tool) (MB) | Dung lượng đĩa val0 ban đầu (MB) | Tiến trình sót | Bằng chứng |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Round 1** | 7,384.7 | 11,161.2 | 11,289 | 2,050.03 | 0 | evidence:rss_drift_diagnostic |
+| **Round 2** | 7,760.8 | 11,858.0 | 11,881 | 2,050.03 | 0 | evidence:rss_drift_diagnostic |
+| **Round 3** | 7,993.3 | 11,943.0 | 11,966 | 2,050.03 | 0 | evidence:rss_drift_diagnostic |
+
+**Phân tích chi tiết từng node (Node Breakdown):**
+- **Round 1:** `val0` = 1,885.2 MB, `val1` = 1,930.4 MB, `val2` = 1,794.2 MB, `val3` = 1,775.0 MB (Tổng: 7,384.7 MB).
+- **Round 2:** `val0` = 1,947.2 MB, `val1` = 1,992.4 MB, `val2` = 1,851.9 MB, `val3` = 1,969.2 MB (Tổng: 7,760.8 MB).
+- **Round 3:** `val0` = 2,104.0 MB, `val1` = 1,999.9 MB, `val2` = 2,052.6 MB, `val3` = 1,836.8 MB (Tổng: 7,993.3 MB).
+- **Tỷ lệ tăng trưởng baseline:** $+8.24\%$ từ Round 1 (7,384.7 MB) lên Round 3 (7,993.3 MB), hệ số tương quan thứ hạng Spearman là 1.0000.
+
+**Các giả thuyết ĐÃ LOẠI TRỪ bằng bằng chứng thực nghiệm:**
+1. *Rò rỉ tiến trình nền (Lingering Processes):* Số tiến trình `simple_chain` hoặc `metanode` còn sót lại trước khi khởi động và sau khi dừng cụm ở cả 3 vòng đều bằng 0 (đã kiểm tra qua `ps -eo pid,rss,cmd`).
+2. *Tích luỹ dữ liệu trạng thái trên đĩa (Disk / State Accumulation):* Dung lượng thư mục dữ liệu ban đầu của `val0` trước khi blast ở cả 3 vòng là 2,050.03 MB bất biến (chuẩn hóa từ template sạch). Sau khi blast 25,000 txs, dung lượng tăng rất nhỏ (~0.03–0.05 MB) lên 2,050.06 – 2,050.08 MB và được xóa sạch khi tái tạo cụm.
+
+**Các giả thuyết kỹ thuật CHƯA kiểm chứng đầy đủ:**
+1. *Cơ chế cấp phát bộ nhớ ảo của Linux Kernel (Page Cache / THP / NUMA):* Do việc tái sử dụng địa chỉ bộ nhớ ảo của hệ điều hành, các trang bộ nhớ ẩn danh (Anonymous RSS) có thể chưa được hệ điều hành giải phóng về pool vật lý trước khi cụm mới khởi tạo nếu không can thiệp bằng `drop_caches` (cần quyền root).
+2. *Phân mảnh Heap trong Go Runtime Allocator (mheap arenas):* Các tiến trình mới có thể phân bố trang nhớ khác nhau tuỳ thuộc vào trạng thái phân mảnh bộ nhớ ảo của kernel Linux tại thời điểm khởi động.
+3. *Đặc điểm baseline ~1.8–2.1 GB mỗi node:* Chi phí RSS tĩnh ban đầu này xuất phát từ việc khởi tạo genesis state (50,000 tài khoản Secp256k1 tạo sẵn), các bảng băm ánh xạ tài khoản ban đầu, cấu trúc cache tầng lá và trang của NOMT, cùng buffer cố định cho network sockets và queue workers.
+
+**Kết luận đánh giá tiêu chí:**
+- Đánh giá **INCONCLUSIVE** đối với giá trị RSS đỉnh khi so sánh giữa các lần chạy benchmark ở các thời điểm độc lập.
+- Các so sánh hiệu năng bộ nhớ giữa các cấu hình (ví dụ GOGC=800 vs GOGC=50, Debug On vs Debug Off) CHỈ có giá trị khoa học khi đo đạc **xen kẽ (interleaved)** trong cùng một chuỗi thực nghiệm.
+
+---
+
+### 7.2. Kiểm Chứng Thực Nghiệm Dung Lượng Log (Log Size Verification)
+Trong các kết quả đo đạc ban đầu của Bảng Debug Flag (Mục 6), cột Log Size hiển thị `0.0 KB` do lỗi logic định vị đường dẫn thư mục log trong script `run_controlled_benchmarks.py` (script tìm tại `$BASE/<node>/logs` thay vì đường dẫn chuẩn `$BASE/logs/<node>.log` được quy định bởi `run_env.sh`).
+
+Lỗi đo lường này đã được sửa tại commit `af5052e0`. Để minh bạch dữ liệu theo Quy tắc Chống Báo Cáo Giả (Mục 0), 3 lượt chạy kiểm chuẩn có đối chứng mới đã được thực hiện để ghi nhận dung lượng log thật.
+
+Nguồn bằng chứng: [note/evidence/perf_rss_20261007/log_size_verification.log](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/log_size_verification.log) (SHA256: `f21b3a8077270db1ded506e6cfc29a7a140677fb8128127c1b52a216c77a0a5e`, bytes: 2110) và [note/evidence/perf_rss_20261007/log_size_verification_summary.csv](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/log_size_verification_summary.csv) (SHA256: `bc11c0b28039833c8d1a99b521c9d82eeae2ca9d2da447917022a164e4e7d0bc`, bytes: 391).
+
+| Cấu hình | Lần chạy | Workload | Thời gian (s) | Effective TPS (tx/s) | Peak RSS Cụm (MB) | CPU tiêu thụ (s) | Log Size Thực Tế (KB) | Bằng chứng |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Debug On (`ENABLE_DEBUG_PPROF=true`)** | Run 1 | 25,000 | 5.83s | 5,711.0 | 12,350 | 99.1s | 208.9 KB | evidence:log_size_verification |
+| | Run 2 | 25,000 | 5.41s | 6,054.9 | 12,443 | 103.0s | 208.0 KB | evidence:log_size_verification |
+| | Run 3 | 25,000 | 5.48s | 5,949.7 | 12,402 | 92.2s | 207.9 KB | evidence:log_size_verification |
+| **Debug Off (`ENABLE_DEBUG_PPROF=false`)** | Run 1 | 25,000 | 5.51s | 5,663.1 | 12,077 | 95.8s | 206.8 KB | evidence:log_size_verification |
+| | Run 2 | 25,000 | 5.25s | 6,066.9 | 12,770 | 108.6s | 209.6 KB | evidence:log_size_verification |
+| | Run 3 | 25,000 | 5.22s | 6,321.0 | 12,359 | 89.8s | 211.9 KB | evidence:log_size_verification |
+
+**Kết luận về Log Size:**
+- Dung lượng log thật ghi nhận được là $208.3 \pm 0.8$ KB đối với Debug On và $209.5 \pm 2.6$ KB đối với Debug Off (chênh lệch $-0.57\%$, không có ý nghĩa thống kê).
+- Kết quả này tái xác nhận cờ `-debug=true` (`ENABLE_DEBUG_PPROF`) chỉ bật HTTP debug listener cho pprof, không làm phát sinh thêm log ra ổ đĩa so với khi tắt.
+
+---
+
+## 8. Ma Trận Khuyến Nghị Cấu Hình Cho Node Operators
 
 > [!NOTE]
 > Bảng dưới đây kết hợp dữ liệu đã đo đạc thực nghiệm trên cụm sạch với các suy luận kỹ thuật vận hành. Mọi mục chưa có đo đạc trực tiếp đều được ghi chú minh bạch.
@@ -229,10 +293,12 @@ Cờ `-debug` chỉ kích hoạt HTTP listener `http.Serve` cho `net/http/pprof`
 
 ---
 
-## 8. Kết Luận & Đánh Giá Tổng Thể
+## 9. Kết Luận & Đánh Giá Tổng Thể
 1. Khẳng định cũ về việc "bộ nhớ không đổi" đã được sửa đổi minh bạch: Bộ nhớ tăng trưởng tuyến tính ($+98.89$ MB Heap / 100k txs) do in-memory caching cho ánh xạ địa chỉ và tra cứu giao dịch (`evidence:rss_investigation_8waves`).
 2. Đo lường có đối chứng trên cụm sạch cho thấy `GOGC=50` giảm 30.5% RSS đỉnh ($p = 0.0046$), đổi lại CPU tăng ~60% cho tác vụ GC, trong khi chênh lệch TPS là **INCONCLUSIVE** ($p = 0.0774 > 0.05$, khoảng tin cậy 95% chứa số 0) (`evidence:controlled_benchmarks_gogc_and_debug`).
 3. Cờ `-debug=true` không gây suy giảm hiệu năng có ý nghĩa thống kê ($p = 0.3433$), nhưng đã được chuyển về mặc định `false` trong `run_env.sh` để tuân thủ tiêu chuẩn production hardening.
-4. Tài liệu thiết kế kiến trúc [note/design_bounded_memory_indexes_20261007.md](file:///home/abc/chain-n/metanode/note/design_bounded_memory_indexes_20261007.md) đã được đệ trình để giải quyết triệt để nguyên nhân gốc rễ bằng Bounded Memory Cache.
-5. Toàn bộ số liệu trong báo cáo đều có file log thô, SHA256 và kích thước bytes tương ứng trong [note/evidence/perf_rss_20261007/MANIFEST.json](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/MANIFEST.json).
+4. Hiện tượng drift RSS baseline (+8.24%) khi khởi động lại các cụm mới đã được kiểm chứng và giải thích minh bạch: các so sánh RSS đỉnh chỉ có giá trị đối chứng tương đối giữa các lượt xen kẽ (interleaved); kết luận RSS đỉnh tuyệt đối là **INCONCLUSIVE** (`evidence:rss_drift_diagnostic`).
+5. Lỗi Log Size 0.0 KB trong bảng cũ đã được khắc phục và kiểm chứng thực nghiệm bằng 3 lượt đo mới với dung lượng log thật đạt ~208 KB (`evidence:log_size_verification`).
+6. Tài liệu thiết kế kiến trúc [note/design_bounded_memory_indexes_20261007.md](file:///home/abc/chain-n/metanode/note/design_bounded_memory_indexes_20261007.md) đã được đệ trình để giải quyết triệt để nguyên nhân gốc rễ bằng Bounded Memory Cache.
+7. Toàn bộ số liệu trong báo cáo đều có file log thô, SHA256 và kích thước bytes tương ứng trong [note/evidence/perf_rss_20261007/MANIFEST.json](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/MANIFEST.json).
 

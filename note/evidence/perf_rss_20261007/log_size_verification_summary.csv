@@ -1,0 +1,7 @@
+Experiment,Round,Config,TPS,PeakRSS_MB,Duration_s,CPU_s,LogSize_KB
+DebugFlag,1,DebugOn,5711.02,12350,5.83,99.09,208.91
+DebugFlag,1,DebugOff,5663.09,12077,5.51,95.82,206.85
+DebugFlag,2,DebugOn,6054.85,12443,5.41,102.98,207.99
+DebugFlag,2,DebugOff,6066.94,12770,5.25,108.63,209.62
+DebugFlag,3,DebugOn,5949.71,12402,5.48,92.21,207.91
+DebugFlag,3,DebugOff,6321.02,12359,5.22,89.82,211.89
