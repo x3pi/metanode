@@ -19,6 +19,7 @@ typedef struct {
     char* (*get_state_root)();
     void (*update_tx_trace)(uint8_t* hash_ptr, char* step_ptr, char* details_ptr);
     void (*log_message)(int level, char* msg_ptr, size_t msg_len);
+    int32_t (*enqueue_block_async)(uint8_t* payload, size_t len, uint64_t delivery_id);
 } GoCallbacks;
 
 void metanode_register_callbacks(GoCallbacks callbacks);
@@ -34,6 +35,16 @@ int32_t metanode_attest_payload_loss_for_commit(uint32_t commit_index);
 char* metanode_get_consensus_votes();
 char* metanode_get_commit_votes(uint32_t commit_index);
 void metanode_free_string(char* s);
+void metanode_notify_block_executed(
+    uint64_t delivery_id,
+    bool success,
+    uint64_t actual_gei,
+    uint64_t block_number,
+    uint64_t geis_consumed,
+    const uint8_t* state_root_ptr,
+    size_t state_root_len,
+    const char* error_msg_ptr
+);
 
 // Gateway functions that we will export
 extern bool cgo_execute_block(uint8_t* payload, size_t len, uint8_t** out_payload, size_t* out_len);
@@ -42,6 +53,7 @@ extern void cgo_free_go_buffer(uint8_t* ptr);
 extern char* cgo_get_state_root();
 extern void cgo_update_tx_trace(uint8_t* hash_ptr, char* step_ptr, char* details_ptr);
 extern void cgo_log_message(int level, char* msg_ptr, size_t msg_len);
+extern int32_t cgo_enqueue_block_async(uint8_t* payload, size_t len, uint64_t delivery_id);
 
 static inline void register_callbacks_to_rust() {
     GoCallbacks cbs = {
@@ -51,6 +63,7 @@ static inline void register_callbacks_to_rust() {
         .get_state_root = cgo_get_state_root,
         .update_tx_trace = cgo_update_tx_trace,
         .log_message = cgo_log_message,
+        .enqueue_block_async = cgo_enqueue_block_async,
     };
     metanode_register_callbacks(cbs);
 }
@@ -586,3 +599,93 @@ func GetCommitVotes(commitIndex uint32) (string, error) {
 	defer C.metanode_free_string(cStr)
 	return C.GoString(cStr), nil
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PIPELINED BLOCK DELIVERY: NON-BLOCKING ASYNC PROTOCOL (Giai đoạn 1)
+// ══════════════════════════════════════════════════════════════════════════════
+
+//export cgo_enqueue_block_async
+func cgo_enqueue_block_async(payload *C.uint8_t, length C.size_t, deliveryID C.uint64_t) (ret C.int32_t) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("[FFI Bridge] ⚠️ PANIC recovered in cgo_enqueue_block_async: %v", r)
+			ret = C.int32_t(2) // Invalid payload / error
+		}
+	}()
+
+	if payload == nil || length == 0 || length > 100*1024*1024 {
+		logger.Error("[FFI Bridge] Invalid block payload or length in async enqueue: %d", length)
+		return C.int32_t(2) // Invalid payload
+	}
+
+	data := C.GoBytes(unsafe.Pointer(payload), C.int(length))
+	var subDag pb.ExecutableBlock
+	err := subDag.UnmarshalVT(data)
+	if err != nil {
+		logger.Error("[FFI Bridge] Failed to unmarshal ExecutableBlock in async enqueue: %v", err)
+		return C.int32_t(2) // Invalid payload
+	}
+
+	if defaultAuthoritativeBlockQueue == nil {
+		logger.Error("[FFI Bridge] Authoritative block queue is not initialized for async enqueue")
+		return C.int32_t(3) // Not initialized
+	}
+
+	responseCh := make(chan *pb.ExecuteBlockResponse, 1)
+	req := &AuthoritativeBlockRequest{
+		Block:      &subDag,
+		ResponseCh: responseCh,
+	}
+
+	select {
+	case defaultAuthoritativeBlockQueue <- req:
+		delID := uint64(deliveryID)
+		go func(id uint64, ch <-chan *pb.ExecuteBlockResponse) {
+			select {
+			case resp := <-ch:
+				notifyBlockExecutedToRust(id, resp)
+			case <-time.After(executeBlockResponseTimeout):
+				logger.Error("🚨 [FFI Bridge] Async execution timeout (deliveryID=%d, GEI=%d)", id, subDag.GetGlobalExecIndex())
+				notifyBlockExecutedToRust(id, &pb.ExecuteBlockResponse{
+					Success: false,
+					Error:   "timed out waiting for Go execution response",
+				})
+			}
+		}(delID, responseCh)
+		return C.int32_t(0) // Enqueued successfully
+	default:
+		logger.Warn("🚨 [FFI Bridge] authQueue is FULL! Backpressure rejecting deliveryID=%d (block %d)", deliveryID, subDag.GetBlockNumber())
+		return C.int32_t(1) // Queue full / backpressure
+	}
+}
+
+func notifyBlockExecutedToRust(deliveryID uint64, resp *pb.ExecuteBlockResponse) {
+	if resp == nil {
+		resp = &pb.ExecuteBlockResponse{
+			Success: false,
+			Error:   "nil response from execution committer",
+		}
+	}
+	var stateRootPtr *C.uint8_t
+	var stateRootLen C.size_t
+	if len(resp.StateRoot) > 0 {
+		stateRootPtr = (*C.uint8_t)(unsafe.Pointer(&resp.StateRoot[0]))
+		stateRootLen = C.size_t(len(resp.StateRoot))
+	}
+	var cErr *C.char
+	if resp.Error != "" {
+		cErr = C.CString(resp.Error)
+		defer C.free(unsafe.Pointer(cErr))
+	}
+	C.metanode_notify_block_executed(
+		C.uint64_t(deliveryID),
+		C.bool(resp.Success),
+		C.uint64_t(resp.ActualGei),
+		C.uint64_t(resp.BlockNumber),
+		C.uint64_t(resp.GeisConsumed),
+		stateRootPtr,
+		stateRootLen,
+		cErr,
+	)
+}
+

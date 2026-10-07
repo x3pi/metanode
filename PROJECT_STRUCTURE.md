@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-10-07 (Completed all remaining production readiness gaps: P1-1 legacy removal (cmd/rpc and test-tcp deleted, SendTransactionWithDeviceKey purged, deploy templates cleaned of tx_signature_mode), P1-5 client compatibility matrix verified with Foundry 4/4 and Hardhat 5/5, P2-2 benchmarks recorded, Cutover BLS pre-flight rehearsal recorded, P0-6 ci runner analyzed and 23/23 tests passed).
+> **Last updated:** 2026-10-07 (Phase 1 Pipelined Commit Delivery: added non-blocking async FFI protocol `enqueue_block_async` and `metanode_notify_block_executed` between Rust Consensus and Go Executor).
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 ---
 
@@ -495,6 +495,7 @@ metanode/
 | Channel | Direction | Protocol | Files |
 |---------|-----------|----------|-------|
 | Block commit delivery | Rust → Go | UDS socket (send stream) | `block_sending.rs` → `listener.go` |
+| Pipelined block delivery | Rust ↔ Go | FFI (`enqueue_block_async` / `metanode_notify_block_executed`) | `block_sending.rs` ↔ `ffi_bridge.go` |
 | Commit notification | Rust → Go | FFI callback | `commit_callbacks.rs` |
 | Tx batch forwarding | Go → Rust | UDS socket | `tx_batch_forwarder_core.go` → `tx_socket_server.rs` |
 | RPC queries (epoch, block, GEI) | Rust → Go | UDS connection pool | `rpc_queries.rs` → `unix_socket_handler*.go` |
