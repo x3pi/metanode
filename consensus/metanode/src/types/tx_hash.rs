@@ -152,4 +152,71 @@ mod tests {
             "System tx hash must match Go golden hash"
         );
     }
+
+    #[test]
+    fn test_fake_variant_dedup_and_payload_hash() {
+        let envelope = b"valid_signed_eip1559_envelope";
+        let canonical_tx_hash = Keccak256::digest(envelope).to_vec();
+
+        // Real transaction
+        let real_tx = Transaction {
+            from_address: vec![0x11; 20],
+            to_address: vec![0x22; 20],
+            amount: vec![0x05],
+            nonce: vec![10],
+            raw_envelope: envelope.to_vec(),
+            ..Default::default()
+        };
+        let mut real_bytes = Vec::new();
+        real_tx.encode(&mut real_bytes).unwrap();
+
+        // Mutated fake variant (same envelope, altered proto fields by Byzantine node)
+        let fake_tx = Transaction {
+            from_address: vec![0x11; 20],
+            to_address: vec![0x99; 20], // mutated To
+            amount: vec![0x99],         // mutated Amount
+            nonce: vec![10],
+            raw_envelope: envelope.to_vec(),
+            ..Default::default()
+        };
+        let mut fake_bytes = Vec::new();
+        fake_tx.encode(&mut fake_bytes).unwrap();
+
+        // 1. Both share the exact same canonical Ethereum tx_hash
+        assert_eq!(
+            calculate_transaction_hash_single(&real_bytes),
+            calculate_transaction_hash_single(&fake_bytes),
+            "Both transactions share the same envelope hash"
+        );
+        assert_eq!(
+            calculate_transaction_hash_single(&real_bytes),
+            canonical_tx_hash
+        );
+
+        // 2. But their full payload hashes are strictly distinct
+        let real_payload_hash = Keccak256::digest(&real_bytes).to_vec();
+        let fake_payload_hash = Keccak256::digest(&fake_bytes).to_vec();
+        assert_ne!(
+            real_payload_hash, fake_payload_hash,
+            "Payload hashes must differ to prevent displacement"
+        );
+
+        // 3. Simulating subdag dedup: fake tx comes first!
+        let all_txs: Vec<(&[u8], Vec<u8>, Vec<u8>)> = vec![
+            (&fake_bytes[..], canonical_tx_hash.clone(), fake_payload_hash.clone()),
+            (&real_bytes[..], canonical_tx_hash.clone(), real_payload_hash.clone()),
+        ];
+
+        // Deduplicate by payload_hash
+        let mut seen = std::collections::HashSet::new();
+        let mut unique_txs = Vec::new();
+        for (tx_data, tx_hash, payload_hash) in all_txs {
+            if seen.insert(payload_hash.clone()) {
+                unique_txs.push((tx_data, tx_hash, payload_hash));
+            }
+        }
+
+        // Both transactions must be preserved! The real tx is NOT displaced by fake tx.
+        assert_eq!(unique_txs.len(), 2, "Both transactions must be retained when deduping by payload_hash");
+    }
 }

@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use consensus_core::{BlockAPI, CommitConsumerMonitor, CommittedSubDag};
+use sha3::{Digest, Keccak256};
 use std::sync::Arc;
 
 use tracing::{debug, info, trace, warn};
@@ -470,12 +471,11 @@ pub async fn dispatch_commit(
                         // for BlockV3 (compact) blocks.
                         let committed_tx_data = extract_committed_tx_data(subdag);
                         for tx_data in &committed_tx_data {
-                            let tx_hash =
-                                crate::types::tx_hash::calculate_transaction_hash_single(
-                                    tx_data,
-                                );
-                            hashes_arc.insert(tx_hash.clone());
-                            batch_hashes.push(tx_hash);
+                            // Key committed transactions by full payload hash (sha3::Keccak256)
+                            // so that fake/mutated proto variants cannot falsely mark real transactions as committed.
+                            let payload_hash = Keccak256::digest(tx_data).to_vec();
+                            hashes_arc.insert(payload_hash.clone());
+                            batch_hashes.push(payload_hash);
                             tracked_count += 1;
                         }
 
