@@ -122,3 +122,45 @@ func TestCommitteeKeyHealthAndEndpoints(t *testing.T) {
 	assert.Equal(t, "mismatch", checksMap["committee_key"])
 	assert.Equal(t, "key mismatch", checksMap["committee_key_warning"])
 }
+
+func TestCommitteeKeyWarning_RedactsSecretsAndKeys(t *testing.T) {
+	// Test sanitizeHealthWarning with 64-hex-char private key and 96-hex-char BLS key
+	rawPrivKey := "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+	rawBlsKey := "8899aabbccddeeff8899aabbccddeeff8899aabbccddeeff8899aabbccddeeff8899aabbccddeeff8899aabbccddeeff"
+	normalAddr := "0x1111222233334444555566667777888899990000"
+
+	inputWarn := "validator " + normalAddr + " key " + rawPrivKey + " mismatch BLS " + rawBlsKey
+	sanitized := sanitizeHealthWarning(inputWarn)
+
+	assert.NotContains(t, sanitized, rawPrivKey, "raw private key must be redacted")
+	assert.NotContains(t, sanitized, rawBlsKey, "raw BLS key must be redacted")
+	assert.Contains(t, sanitized, "0x1234...cdef", "must contain redacted prefix/suffix")
+	assert.Contains(t, sanitized, "8899...eeff", "must contain redacted prefix/suffix")
+	assert.Contains(t, sanitized, normalAddr, "validator address (40 hex chars) must remain readable")
+
+	// Test endpoint handler behavior
+	app := &App{}
+	app.setCommitteeKeyStatus("mismatch", inputWarn)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	rec := httptest.NewRecorder()
+
+	healthHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		status := map[string]interface{}{"status": "ok"}
+		if app != nil {
+			keyStatus, warn := app.CommitteeKeyStatus()
+			status["committee_key"] = keyStatus
+			if warn != "" {
+				status["committee_key_warning"] = sanitizeHealthWarning(warn)
+			}
+		}
+		json.NewEncoder(w).Encode(status)
+	})
+	healthHandler.ServeHTTP(rec, req)
+
+	respBody := rec.Body.String()
+	assert.NotContains(t, respBody, rawPrivKey)
+	assert.NotContains(t, respBody, rawBlsKey)
+	assert.Contains(t, respBody, "0x1234...cdef")
+}

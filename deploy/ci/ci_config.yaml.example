@@ -146,7 +146,7 @@ tests:
   # ----------------------------------------------------------------------------
   # 4. BÀI TEST TPS CAO ĐIỂM (BENCHMARK THROUGHPUT - PUBLIC CHAIN)
   # ----------------------------------------------------------------------------
-  - id: "tps_blast"
+  - id: "secp_tps"
     name: "TPS Blast Benchmark (Native Secp256k1 / EIP-1559)"
     enabled: true
     # Tự động nạp keys vào genesis, reset cụm sạch để đo Max TPS tuyệt đối

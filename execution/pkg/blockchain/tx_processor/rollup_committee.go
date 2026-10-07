@@ -115,7 +115,7 @@ func VerifyNodeCommitteeKey(chainState *blockchain.ChainState, nodeAddr, cfgAddr
 		return true, fmt.Sprintf("validator %s on-chain account has missing or invalid PublicKeyBls (len %d, expected 48)", matchedAddr.Hex(), len(pub))
 	}
 	if !bytes.Equal(pub, attestPubKey.Bytes()) {
-		return true, fmt.Sprintf("validator %s on-chain PublicKeyBls (%x) does not match node attestation key (%x): attestations will stay PENDING forever", matchedAddr.Hex(), pub, attestPubKey.Bytes())
+		return true, fmt.Sprintf("validator %s on-chain PublicKeyBls (%s) does not match node attestation key (%s): attestations will stay PENDING forever", matchedAddr.Hex(), maskKeyHex(pub), maskKeyHex(attestPubKey.Bytes()))
 	}
 
 	provider := NewLiveCommitteeProvider(chainState)
@@ -131,7 +131,7 @@ func VerifyNodeCommitteeKey(chainState *blockchain.ChainState, nodeAddr, cfgAddr
 		}
 	}
 	if !inCommittee {
-		return true, fmt.Sprintf("validator %s attestation key %x is not in active committee (active committee size %d)", matchedAddr.Hex(), attestPubKey[:6], len(keys))
+		return true, fmt.Sprintf("validator %s attestation key %s is not in active committee (active committee size %d)", matchedAddr.Hex(), maskKeyHex(attestPubKey.Bytes()), len(keys))
 	}
 
 	return true, ""
@@ -177,9 +177,20 @@ func VerifyNodeCommitteeKeyLight(chainState *blockchain.ChainState, nodeAddr, cf
 			return true, fmt.Sprintf("validator %s on-chain account has missing or invalid PublicKeyBls (len %d, expected 48)", addr.Hex(), len(pub)), nil
 		}
 		if !bytes.Equal(pub, attestPubKey.Bytes()) {
-			return true, fmt.Sprintf("validator %s on-chain PublicKeyBls (%x) does not match node attestation key (%x): attestations will stay PENDING forever", addr.Hex(), pub, attestPubKey.Bytes()), nil
+			return true, fmt.Sprintf("validator %s on-chain PublicKeyBls (%s) does not match node attestation key (%s): attestations will stay PENDING forever", addr.Hex(), maskKeyHex(pub), maskKeyHex(attestPubKey.Bytes())), nil
 		}
 		return true, "", nil
 	}
 	return false, "", nil
+}
+
+// maskKeyHex masks public keys to avoid dumping full key material in warnings (e.g. 0x1234...cdef).
+func maskKeyHex(key []byte) string {
+	if len(key) == 0 {
+		return "none"
+	}
+	if len(key) <= 8 {
+		return fmt.Sprintf("0x%x", key)
+	}
+	return fmt.Sprintf("0x%x...%x", key[:4], key[len(key)-4:])
 }

@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -488,7 +489,7 @@ func NewServer(app *App) *http.ServeMux {
 			keyStatus, warn := app.CommitteeKeyStatus()
 			status["committee_key"] = keyStatus
 			if warn != "" {
-				status["committee_key_warning"] = warn
+				status["committee_key_warning"] = sanitizeHealthWarning(warn)
 			}
 			if app.blockProcessor != nil {
 				lastBlock := app.blockProcessor.GetLastBlock()
@@ -528,7 +529,7 @@ func NewServer(app *App) *http.ServeMux {
 			checks["committee_key"] = keyStatus
 			if keyStatus == "mismatch" {
 				ready = false
-				checks["committee_key_warning"] = warn
+				checks["committee_key_warning"] = sanitizeHealthWarning(warn)
 			}
 		}
 
@@ -590,4 +591,15 @@ func writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// rawKeyRegex matches raw hex key or secret material (48+ consecutive hex characters)
+var rawKeyRegex = regexp.MustCompile(`(?i)(0x)?([0-9a-f]{4})[0-9a-f]{40,}([0-9a-f]{4})`)
+
+// sanitizeHealthWarning ensures no full secret or raw key material (>48 hex chars) leaks over public endpoints.
+func sanitizeHealthWarning(warn string) string {
+	if warn == "" {
+		return ""
+	}
+	return rawKeyRegex.ReplaceAllString(warn, "${1}${2}...${3}")
 }
