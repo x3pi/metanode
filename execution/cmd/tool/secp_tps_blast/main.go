@@ -1084,8 +1084,6 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 		Hash   common.Hash
 		SentAt time.Time
 	}
-	var sampleMu sync.Mutex
-	var sampleTxs []SampleTx
 
 	signer := types.LatestSignerForChainID(big.NewInt(cfg.ChainID))
 	targetAddr := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
@@ -1149,6 +1147,54 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 			cfg.RateLimit, numWorkers, chunkInterval)
 	}
 
+	var confirmedCount atomic.Uint64
+	var revertedCount atomic.Uint64
+	var latencies []time.Duration
+	var latMu sync.Mutex
+	sampleChan := make(chan SampleTx, 2000)
+	var trackWg sync.WaitGroup
+
+	numTrackers := 16
+	for tr := 0; tr < numTrackers; tr++ {
+		trackWg.Add(1)
+		go func(workerID int) {
+			defer trackWg.Done()
+			for st := range sampleChan {
+				deadline := st.SentAt.Add(30 * time.Second)
+				rpcURL := cfg.RPCUrls[workerID%len(cfg.RPCUrls)]
+				confirmed := false
+				for time.Now().Before(deadline) {
+					res, err := rpcCallTo(rpcURL, "eth_getTransactionReceipt", st.Hash.Hex())
+					if err == nil && len(res) > 0 && string(res) != "null" {
+						var rec struct {
+							Status string `json:"status"`
+						}
+						_ = json.Unmarshal(res, &rec)
+						var status uint64
+						fmt.Sscanf(rec.Status, "0x%x", &status)
+
+						elapsed := time.Since(st.SentAt)
+						latMu.Lock()
+						latencies = append(latencies, elapsed)
+						latMu.Unlock()
+
+						if status == 1 {
+							confirmedCount.Add(1)
+						} else {
+							revertedCount.Add(1)
+						}
+						confirmed = true
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+				if !confirmed {
+					revertedCount.Add(1)
+				}
+			}
+		}(tr)
+	}
+
 	for w := 0; w < numWorkers; w++ {
 		blastWg.Add(1)
 		go func(workerID int) {
@@ -1163,6 +1209,7 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 			}
 
 			accIdx := 0
+			sampleCounter := 0
 			for time.Now().Before(deadline) {
 				chunkStart := time.Now()
 				txsChunk := make([]*types.Transaction, 0, batchSize)
@@ -1203,14 +1250,13 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 					break
 				}
 
-				sampleMu.Lock()
-				if len(sampleTxs) < 100 {
-					sampleTxs = append(sampleTxs, SampleTx{
-						Hash:   txsChunk[0].Hash(),
-						SentAt: time.Now(),
-					})
+				sampleCounter++
+				if sampleCounter%5 == 0 {
+					select {
+					case sampleChan <- SampleTx{Hash: txsChunk[0].Hash(), SentAt: time.Now()}:
+					default:
+					}
 				}
-				sampleMu.Unlock()
 
 				if (cfg.Mode == "tcp" || cfg.Mode == "both") && len(tcpClients) > 0 {
 					client := tcpClients[workerID%len(tcpClients)]
@@ -1248,56 +1294,9 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 	injectTPS := float64(subTxs) / injectDur.Seconds()
 	fmt.Printf("\n⚡ Injected total %d TXs over %v (Injection TPS: %.2f tx/s)\n", subTxs, injectDur, injectTPS)
 
-	// Step 4: Consensus stabilization & Receipt Confirmation
-	fmt.Printf("\n⏱️ Waiting 10 seconds for consensus commit & tracking receipt latencies...\n")
-	time.Sleep(10 * time.Second)
-
-	var confirmedCount atomic.Uint64
-	var revertedCount atomic.Uint64
-	var latencies []time.Duration
-	var latMu sync.Mutex
-
-	var trackWg sync.WaitGroup
-	trackWorkers := make(chan struct{}, 32)
-	timeout := 30 * time.Second
-
-	for i, s := range sampleTxs {
-		trackWg.Add(1)
-		trackWorkers <- struct{}{}
-		go func(st SampleTx, sIdx int) {
-			defer trackWg.Done()
-			defer func() { <-trackWorkers }()
-
-			start := time.Now()
-			deadline := start.Add(timeout)
-			rpcURL := cfg.RPCUrls[sIdx%len(cfg.RPCUrls)]
-
-			for time.Now().Before(deadline) {
-				res, err := rpcCallTo(rpcURL, "eth_getTransactionReceipt", st.Hash.Hex())
-				if err == nil && len(res) > 0 && string(res) != "null" {
-					var rec struct {
-						Status string `json:"status"`
-					}
-					json.Unmarshal(res, &rec)
-					var status uint64
-					fmt.Sscanf(rec.Status, "0x%x", &status)
-
-					elapsed := time.Since(st.SentAt)
-					latMu.Lock()
-					latencies = append(latencies, elapsed)
-					latMu.Unlock()
-
-					if status == 1 {
-						confirmedCount.Add(1)
-					} else {
-						revertedCount.Add(1)
-					}
-					return
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-		}(s, i)
-	}
+	// Step 4: Consensus stabilization & Drain remaining sample receipts
+	fmt.Printf("\n⏱️ Draining remaining sample receipts and stabilizing (up to 10s)...\n")
+	close(sampleChan)
 	trackWg.Wait()
 
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
@@ -1347,7 +1346,7 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 	fmt.Printf("   • Latency P99:        %v\n", p99)
 	fmt.Printf("   • Latency Avg:        %v\n", avgLat)
 	fmt.Printf("   • Sample Verified:    %d/%d (Confirmed: %d, Reverted: %d)\n",
-		confirmedCount.Load()+revertedCount.Load(), len(sampleTxs), confirmedCount.Load(), revertedCount.Load())
+		confirmedCount.Load()+revertedCount.Load(), len(latencies), confirmedCount.Load(), revertedCount.Load())
 	resMu.Lock()
 	finalCPU := maxRecordedCPU
 	finalRSS := int(maxRecordedRSS / 1024)
