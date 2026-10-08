@@ -1,0 +1,6 @@
+File: simple_chain
+Build ID: 94c998bac8d6a90e9641692fa34bee510bbdba70
+Type: delay
+Time: 2026-10-08 04:52:57 UTC
+Showing nodes accounting for 0, 0% of 0 total
+      flat  flat%   sum%        cum   cum%
