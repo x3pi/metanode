@@ -334,9 +334,12 @@ export function AccountGateCard({
     setLookupLoading(true);
     setLookupResult(null);
 
-    const parentCluster = clusters.find((c) => c.isParent) || clusters[2];
+    const parentCluster =
+      clusters.find((c) => c.isParent) ||
+      clusters.find((c) => c.id?.includes('parent'));
+    const parentRpcUrl = parentCluster?.rpcUrl || 'http://127.0.0.1:18601';
     const clusterKey = targetCluster?.clusterKey || '';
-    const res = await checkParentRegistration(parentCluster.rpcUrl, clusterKey, lookupAddress);
+    const res = await checkParentRegistration(parentRpcUrl, clusterKey, lookupAddress);
     setLookupResult(res);
     setLookupLoading(false);
   };

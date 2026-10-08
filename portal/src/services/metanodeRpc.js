@@ -661,3 +661,102 @@ export async function sendTransactionWithPrivateKey(rpcUrl, privateKey, to, amou
   });
   return tx.hash;
 }
+
+/**
+ * Fetch Block by Number (hex/int/'latest') or Hash (0x 66 chars)
+ * Supports fullTx=true returning RPCTransaction objects with EIP-2718 / EIP-1559 / groupId
+ */
+export async function fetchBlockByNumberOrHash(rpcUrl, tagOrHash = 'latest', fullTx = true) {
+  if (!rpcUrl) return null;
+  try {
+    let block;
+    if (typeof tagOrHash === 'string' && tagOrHash.startsWith('0x') && tagOrHash.length === 66) {
+      block = await callJsonRpc(rpcUrl, 'eth_getBlockByHash', [tagOrHash, fullTx]);
+    } else {
+      let blockNumHex = tagOrHash;
+      if (typeof tagOrHash === 'number') {
+        blockNumHex = `0x${tagOrHash.toString(16)}`;
+      } else if (typeof tagOrHash === 'string' && !tagOrHash.startsWith('0x') && tagOrHash !== 'latest') {
+        const parsed = parseInt(tagOrHash, 10);
+        if (!isNaN(parsed)) {
+          blockNumHex = `0x${parsed.toString(16)}`;
+        }
+      }
+      block = await callJsonRpc(rpcUrl, 'eth_getBlockByNumber', [blockNumHex, fullTx]);
+    }
+    return block;
+  } catch (err) {
+    console.warn(`fetchBlockByNumberOrHash failed for ${tagOrHash}:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Fetch Recent Blocks Stream for Live Explorer Feed
+ */
+export async function fetchRecentBlocks(rpcUrl, limit = 8) {
+  if (!rpcUrl) return [];
+  try {
+    const latestBlock = await fetchBlockByNumberOrHash(rpcUrl, 'latest', true);
+    if (!latestBlock || latestBlock.number === null || latestBlock.number === undefined) {
+      return [];
+    }
+    const latestNum = parseInt(latestBlock.number, 16);
+    const blocks = [latestBlock];
+    const fetchPromises = [];
+    for (let i = 1; i < limit && latestNum - i >= 0; i++) {
+      const numHex = `0x${(latestNum - i).toString(16)}`;
+      fetchPromises.push(
+        callJsonRpc(rpcUrl, 'eth_getBlockByNumber', [numHex, false]).catch(() => null)
+      );
+    }
+    const olderBlocks = await Promise.all(fetchPromises);
+    for (const b of olderBlocks) {
+      if (b) blocks.push(b);
+    }
+    return blocks;
+  } catch (err) {
+    console.warn('fetchRecentBlocks failed:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Fetch Full Transaction and its Receipt by 32-byte Tx Hash
+ */
+export async function fetchTransactionDetails(rpcUrl, txHash) {
+  if (!rpcUrl || !txHash) return null;
+  try {
+    const [tx, receipt] = await Promise.all([
+      callJsonRpc(rpcUrl, 'eth_getTransactionByHash', [txHash]).catch(() => null),
+      callJsonRpc(rpcUrl, 'eth_getTransactionReceipt', [txHash]).catch(() => null),
+    ]);
+    return { tx, receipt };
+  } catch (err) {
+    console.warn('fetchTransactionDetails failed:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Format Hex/Dec Wei Value into MTN Human-Readable String
+ */
+export function formatWei(weiValue) {
+  if (!weiValue) return '0.0000 MTN';
+  try {
+    let bn;
+    if (typeof weiValue === 'string' && weiValue.startsWith('0x')) {
+      bn = BigInt(weiValue);
+    } else {
+      bn = BigInt(weiValue.toString());
+    }
+    const divisor = BigInt('1000000000000000000');
+    const whole = bn / divisor;
+    const remainder = bn % divisor;
+    const decimals = (remainder / BigInt('100000000000000')).toString().padStart(4, '0');
+    return `${whole}.${decimals} MTN`;
+  } catch (_) {
+    return '0.0000 MTN';
+  }
+}
+

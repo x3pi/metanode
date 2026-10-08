@@ -7,12 +7,14 @@ import {
   Layers,
   HelpCircle,
   ExternalLink,
+  Boxes,
 } from 'lucide-react';
 import { Header } from './components/Header';
 import { AccountGateCard } from './components/AccountGateCard';
 import { TransferTab } from './components/TransferTab';
 import { RollupTransferTab } from './components/RollupTransferTab';
 import { NetworkMonitorTab } from './components/NetworkMonitorTab';
+import { BlockExplorerTab } from './components/BlockExplorerTab';
 import {
   PRESET_CLUSTERS,
   DEFAULT_CLUSTER_ID,
@@ -84,12 +86,15 @@ export default function App() {
       setAccountInfo(info);
 
       // 3. Account on Parent Chain
-      const parentCluster = allClusters.find((c) => c.isParent) || allClusters[2];
+      const parentCluster =
+        allClusters.find((c) => c.isParent) ||
+        allClusters.find((c) => c.id?.includes('parent'));
+      const parentRpcUrl = parentCluster?.rpcUrl || 'http://127.0.0.1:18601';
       const clusterKey =
         info?.dynamicClusterKey ||
-        selectedCluster.clusterKey ||
+        selectedCluster?.clusterKey ||
         '0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128';
-      const parentInfo = await checkParentRegistration(parentCluster.rpcUrl, clusterKey, account);
+      const parentInfo = await checkParentRegistration(parentRpcUrl, clusterKey, account);
       setParentRegInfo(parentInfo);
     }
   }, [account, selectedCluster, allClusters]);
@@ -171,6 +176,14 @@ export default function App() {
           </button>
 
           <button
+            className={`tab-btn ${activeTab === 'explorer' ? 'active' : ''}`}
+            onClick={() => setActiveTab('explorer')}
+          >
+            <Boxes className="w-4 h-4" />
+            Block &amp; FullTx Explorer
+          </button>
+
+          <button
             className={`tab-btn ${activeTab === 'monitor' ? 'active' : ''}`}
             onClick={() => setActiveTab('monitor')}
           >
@@ -212,6 +225,10 @@ export default function App() {
             accountInfo={accountInfo}
             allClusters={allClusters}
           />
+        )}
+
+        {activeTab === 'explorer' && (
+          <BlockExplorerTab selectedCluster={selectedCluster} />
         )}
 
         {activeTab === 'monitor' && <NetworkMonitorTab allClusters={allClusters} />}
