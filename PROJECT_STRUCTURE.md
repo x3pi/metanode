@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-10-08 (Phase 1-3 Complete: Standardized `eth_getBlockByNumber/Hash(fullTx=true)` with `RPCTransaction` + `groupId`, added `rpc_block_fulltx_test.go`, verified ethers/viem/web3py/cast compatibility, split empirical vs inferred RSS matrix, verified fuzz coverage across 3 new seeds, running 45-min TTL experiment).
+> **Last updated:** 2026-10-08 (Bounded Mapping Cache: implemented Two-Generation Ring Map for txHashToBlockNumber and ethHashMapBlsHash, removed O(N) periodic prune, verified race-free bounds and Pebble fallback).
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 ---
 

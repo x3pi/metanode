@@ -2,7 +2,7 @@
 **Tài liệu tham chiếu:** `note/design_bounded_memory_indexes_20261007.md`  
 **Ngày lập:** 2026-10-07  
 **Tác giả:** Metanode Core Engineering Team  
-**Trạng thái:** DRAFT — Trình duyệt trước khi chỉnh sửa mã nguồn cốt lõi (Theo Kế hoạch Giai đoạn 5)  
+**Trạng thái:** Implemented (Phương Án 2: Bounded Two-Generation Ring Map) — Đã kiểm chứng thực nghiệm bằng unit test race (`go_test_race_blockchain.log`) và JSON-RPC cold restart (`verify_pebble_fallback_rpc.log`).  
 
 ---
 
@@ -221,12 +221,14 @@ func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bo
 
 ---
 
-## 7. Quyết Định & Kiến Nghị (Decision & Recommendation)
+## 7. Quyết Định & Kết Quả Triển Khai (Decision & Implementation Results)
 
-1. **Tuân thủ nguyên tắc Scope Gating (AGENTS.md Part 1 & Part 2):**
-   - Không tự ý sửa mã nguồn cốt lõi trong pull request điều tra hiệu năng này.
-   - Tài liệu thiết kế này được đệ trình để User và Tech Lead xem xét và duyệt phương án trước khi triển khai code.
-2. **Khuyến nghị chọn Phương Án 2 (Bounded Two-Generation Ring Map) hoặc Phương Án 1:**
-   - Đảm bảo giới hạn RAM cố định $\le 10$ MB.
-   - Giữ nguyên hiệu năng truy vấn nhanh cho RPC.
-   - Đáp ứng triệt để yêu cầu "Bounded Concurrency & Bounded Memory" của hệ thống Metanode Core.
+1. **Phương Án Đã Chọn & Triển Khai:** **Phương Án 2 (Bounded Two-Generation Ring Map, Go thuần)**
+   - Đã cài đặt tại `execution/pkg/blockchain/blockchain.go` với hằng số trần `maxMappingCacheEntries = 50_000` cho cả hai map `txHashToBlockNumber` và `ethHashMapBlsHash`.
+   - Cơ chế rotation: khi `current` đầy (`>= MaxEntries`), thực hiện tráo thế hệ `old = current; current = make(map, MaxEntries)`. Khi `Load` trúng tại `old`, phần tử được nạp lên `current`.
+   - Đã loại bỏ các hàm dọn dẹp định kỳ $O(N)$ `pruneTxHashCache` và `pruneEthHashCache`, giải tỏa triệt để lock contention định kỳ mỗi phút.
+   - Bỏ trường `addedAt` (tiết kiệm 24 byte/entry trên heap cho `cachedUint64`).
+2. **Kiểm Chứng Thực Nghiệm Chạy Thật (Evidence):**
+   - **Unit Test Race Invariants (`execution/pkg/blockchain/bounded_mapping_cache_test.go`):** Kiểm tra swap khi đầy, đọc từ `old`, eviction sau 2 chu kỳ, bất biến `len(current) + len(old) <= 2*MaxEntries` khi ghi 10x `MaxEntries`, và concurrent read/write/delete dưới cờ `go test -race`. Nguồn bằng chứng: [note/evidence/bounded_mapping_cache_20261008/go_test_race_blockchain.log](file:///home/abc/chain-n/metanode/note/evidence/bounded_mapping_cache_20261008/go_test_race_blockchain.log) (SHA256: `7ae76841cc5a94e5b6534e9f6966b43d299fb842c39d613874d4bccbf71e532f`, 313,569 bytes).
+   - **JSON-RPC End-to-End Cold Restart (`execution/scripts/test/evidence/verify_pebble_fallback_rpc.py`):** Khởi động cụm 4 node, blast 200 txs EIP-1559, tắt cụm để xóa sạch RAM, khởi động lại với RAM rỗng và truy vấn `eth_getTransactionReceipt` và `eth_getTransactionByHash`. Tất cả truy vấn đều fallback Pebble DB thành công và trả về dữ liệu nguyên vẹn. Nguồn bằng chứng: [note/evidence/bounded_mapping_cache_20261008/verify_pebble_fallback_rpc.log](file:///home/abc/chain-n/metanode/note/evidence/bounded_mapping_cache_20261008/verify_pebble_fallback_rpc.log) (SHA256: `281c3d8420800cdbc01f987d6d80d342e4052331f970055e61648f5df0e17d44`, 2,085 bytes).
+   - **Build check verification:** Script `consensus/metanode/scripts/build_check.sh` chạy qua 5/5 components (EVM & NOMT FFI, Rust consensus, Rust NOMT FFI, Go simple_chain, Go all packages) thành công 100% không cảnh báo hay lỗi.
