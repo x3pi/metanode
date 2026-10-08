@@ -491,6 +491,8 @@ deploy/ansible/monitors/inventory.yml
 **/.vault_pass
 **/config-local.json
 !**/config-local.example.json
+portal/src/config/clusters.json
+!portal/src/config/clusters.json.example
 **/test_rpc
 deploy/ansible/monitors/block_hash_checker/config-m-nodes.json
 deploy/ansible/monitors/parse_inventory.py

@@ -1,0 +1,31 @@
+{
+  "defaultHost": "127.0.0.1",
+  "defaultClusterId": "local_exec1",
+  "clusters": [
+    {
+      "id": "local_exec1",
+      "name": "Local Cluster 1 (Exec Port 8646)",
+      "chainId": 991,
+      "rpcUrl": "http://127.0.0.1:8646",
+      "clusterKey": "0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128",
+      "isExec": true,
+      "accountGate": true
+    },
+    {
+      "id": "local_exec2",
+      "name": "Local Cluster 2 (Exec Port 8647)",
+      "chainId": 991,
+      "rpcUrl": "http://127.0.0.1:8647",
+      "clusterKey": "0x822288b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c222",
+      "isExec": true,
+      "accountGate": true
+    },
+    {
+      "id": "local_parent",
+      "name": "Local Parent Chain (BFT Hub Port 18601)",
+      "chainId": 991,
+      "rpcUrl": "http://127.0.0.1:18601",
+      "isParent": true
+    }
+  ]
+}
