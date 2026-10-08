@@ -2,7 +2,7 @@
 **Tài liệu tham chiếu:** `note/design_bounded_memory_indexes_20261007.md`  
 **Ngày lập:** 2026-10-07  
 **Tác giả:** Metanode Core Engineering Team  
-**Trạng thái:** Implemented (Phương Án 2: Bounded Two-Generation Ring Map) — Đã kiểm chứng thực nghiệm bằng unit test race (`go_test_race_blockchain.log`) và JSON-RPC cold restart (`verify_pebble_fallback_rpc.log`).  
+**Trạng thái:** Implemented — memory verification pending (Phương Án 2: Bounded Two-Generation Ring Map; unit test race, benchmark đọc và RPC cold-restart đã hoàn tất; thí nghiệm bộ nhớ 45 phút × 2 đang chờ chạy/kiểm chứng).  
 
 ---
 
@@ -224,11 +224,18 @@ func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bo
 ## 7. Quyết Định & Kết Quả Triển Khai (Decision & Implementation Results)
 
 1. **Phương Án Đã Chọn & Triển Khai:** **Phương Án 2 (Bounded Two-Generation Ring Map, Go thuần)**
-   - Đã cài đặt tại `execution/pkg/blockchain/blockchain.go` với hằng số trần `maxMappingCacheEntries = 50_000` cho cả hai map `txHashToBlockNumber` và `ethHashMapBlsHash`.
-   - Cơ chế rotation: khi `current` đầy (`>= MaxEntries`), thực hiện tráo thế hệ `old = current; current = make(map, MaxEntries)`. Khi `Load` trúng tại `old`, phần tử được nạp lên `current`.
-   - Đã loại bỏ các hàm dọn dẹp định kỳ $O(N)$ `pruneTxHashCache` và `pruneEthHashCache`, giải tỏa triệt để lock contention định kỳ mỗi phút.
-   - Bỏ trường `addedAt` (tiết kiệm 24 byte/entry trên heap cho `cachedUint64`).
+   - Đã cài đặt tại `execution/pkg/blockchain/blockchain.go` với hằng số trần `maxMappingCacheEntries = 50_000` cho mỗi thế hệ.
+   - Dung lượng trần: Tối đa $2 \times 50,000 = 100,000$ entries cho mỗi map (`len(current) <= 50,000` và `len(old) <= 50,000`).
+   - Cơ chế rotation: khi `current` đầy (`>= MaxEntries`), thực hiện tráo thế hệ `old = current; current = make(map, MaxEntries)`. Phép `make(map, limit)` cấp phát trước dung lượng bucket giúp giảm rehash. Khi `Load` trúng tại `old`, phần tử được nạp lên `current` và xóa khỏi `old`.
+   - Đã loại bỏ các hàm dọn dẹp định kỳ $O(N)$ `pruneTxHashCache` và `pruneEthHashCache` (loại bỏ thao tác quét duyệt toàn bộ map mỗi phút; chưa đo đạc lock contention cụ thể).
+   - Bỏ trường `addedAt` trong `cachedUint64` (tiết kiệm 24 byte/entry trên heap).
 2. **Kiểm Chứng Thực Nghiệm Chạy Thật (Evidence):**
+   - **Benchmark Đường Đọc & Ghi (Đo thực tế trên 104-core Intel Xeon Platinum 8272CL):**
+     * `Load (Hit Current)`: **29.60 ns/op** (42.5 triệu ops/s)
+     * `Load (Miss)`: **18.90 ns/op** (63.2 triệu ops/s)
+     * `Load (Hit Old / Promote)`: **637.0 ns/op** (2.5 triệu ops/s, bao gồm nâng cấp write lock, thêm vào current và xóa khỏi old)
+     * `Store`: **188.9 ns/op** (5.76 triệu ops/s)
    - **Unit Test Race Invariants (`execution/pkg/blockchain/bounded_mapping_cache_test.go`):** Kiểm tra swap khi đầy, đọc từ `old`, eviction sau 2 chu kỳ, bất biến `len(current) + len(old) <= 2*MaxEntries` khi ghi 10x `MaxEntries`, và concurrent read/write/delete dưới cờ `go test -race`. Nguồn bằng chứng: [note/evidence/bounded_mapping_cache_20261008/go_test_race_blockchain.log](file:///home/abc/chain-n/metanode/note/evidence/bounded_mapping_cache_20261008/go_test_race_blockchain.log) (SHA256: `7ae76841cc5a94e5b6534e9f6966b43d299fb842c39d613874d4bccbf71e532f`, 313,569 bytes).
    - **JSON-RPC End-to-End Cold Restart (`execution/scripts/test/evidence/verify_pebble_fallback_rpc.py`):** Khởi động cụm 4 node, blast 200 txs EIP-1559, tắt cụm để xóa sạch RAM, khởi động lại với RAM rỗng và truy vấn `eth_getTransactionReceipt` và `eth_getTransactionByHash`. Tất cả truy vấn đều fallback Pebble DB thành công và trả về dữ liệu nguyên vẹn. Nguồn bằng chứng: [note/evidence/bounded_mapping_cache_20261008/verify_pebble_fallback_rpc.log](file:///home/abc/chain-n/metanode/note/evidence/bounded_mapping_cache_20261008/verify_pebble_fallback_rpc.log) (SHA256: `281c3d8420800cdbc01f987d6d80d342e4052331f970055e61648f5df0e17d44`, 2,085 bytes).
    - **Build check verification:** Script `consensus/metanode/scripts/build_check.sh` chạy qua 5/5 components (EVM & NOMT FFI, Rust consensus, Rust NOMT FFI, Go simple_chain, Go all packages) thành công 100% không cảnh báo hay lỗi.
+   - **Thí nghiệm bão hoà bộ nhớ 45 phút × 2:** Đã đăng ký tiêu chí tại [note/evidence/bounded_mapping_cache_20261008/PREREGISTERED.md](file:///home/abc/chain-n/metanode/note/evidence/bounded_mapping_cache_20261008/PREREGISTERED.md). Đang chờ thực hiện đo đạc thực tế để ghi nhận slope và heap profiles.
