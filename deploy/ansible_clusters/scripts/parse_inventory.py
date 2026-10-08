@@ -371,11 +371,76 @@ def check_live_status(info):
             except Exception:
                 print(f"  • {name} ({rpc_url}): ❌ OFFLINE (Unreachable)")
 
+def resolve_target(info, target):
+    if not target:
+        return ""
+    target_clean = target.strip()
+
+    # 1. Parent chain aliases
+    parent_map = {
+        'p0': 'parent_node_0', 'parent0': 'parent_node_0', 'parent_0': 'parent_node_0',
+        'p1': 'parent_node_1', 'parent1': 'parent_node_1', 'parent_1': 'parent_node_1',
+        'p2': 'parent_node_2', 'parent2': 'parent_node_2', 'parent_2': 'parent_node_2',
+        'p3': 'parent_node_3', 'parent3': 'parent_node_3', 'parent_3': 'parent_node_3',
+    }
+    if target_clean in parent_map:
+        return parent_map[target_clean]
+
+    if target_clean in ['parent', 'parent_chain', 'parents', 'parent_node', 'parent_nodes']:
+        all_p = list(info.get('parent_nodes', {}).keys())
+        return ','.join(all_p) if all_p else 'parent_chain_nodes'
+
+    # 2. Execution cluster aliases
+    exec_map = {
+        'r1': 'exec1_replica1', 'exec1_r1': 'exec1_replica1', '1': 'exec1_replica1',
+        'r2': 'exec1_replica2', 'exec1_r2': 'exec1_replica2', '2': 'exec1_replica2',
+        'r3': 'exec1_replica3', 'exec1_r3': 'exec1_replica3', '3': 'exec1_replica3',
+        'r4': 'exec2_replica1', 'exec2_r1': 'exec2_replica1',
+        'r5': 'exec2_replica2', 'exec2_r2': 'exec2_replica2',
+        'r6': 'exec2_replica3', 'exec2_r3': 'exec2_replica3',
+    }
+    if target_clean in exec_map:
+        return exec_map[target_clean]
+
+    if target_clean in ['exec1', 'cluster1', 'cluster_1']:
+        c1 = info.get('clusters', {}).get('1', {}).get('replicas', {})
+        if c1:
+            return ','.join(c1.keys())
+        return 'exec1_replica1,exec1_replica2,exec1_replica3'
+
+    if target_clean in ['exec2', 'cluster2', 'cluster_2']:
+        c2 = info.get('clusters', {}).get('2', {}).get('replicas', {})
+        if c2:
+            return ','.join(c2.keys())
+        return 'exec2_replica1,exec2_replica2,exec2_replica3'
+
+    # 3. Check if target matches IP address or hostname
+    matched_nodes = []
+    for p_name, p_data in info.get('parent_nodes', {}).items():
+        if p_data.get('ip') == target_clean:
+            matched_nodes.append(p_name)
+
+    for cid, c_data in info.get('clusters', {}).items():
+        for r_name, r_data in c_data.get('replicas', {}).items():
+            if r_data.get('ip') == target_clean:
+                matched_nodes.append(r_name)
+
+    if matched_nodes:
+        return ','.join(matched_nodes)
+
+    return target_clean
+
 if __name__ == '__main__':
     inv_file = sys.argv[1] if len(sys.argv) > 1 else 'inventory.yml'
     mode = sys.argv[2] if len(sys.argv) > 2 else 'summary'
 
     parsed = parse_inventory(inv_file)
+
+    if mode == 'resolve':
+        target = sys.argv[3] if len(sys.argv) > 3 else ''
+        print(resolve_target(parsed, target))
+        sys.exit(0)
+
     custom_target = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith('-') else None
     export_tmp_files(parsed, rpc_nodes_file=custom_target)
 

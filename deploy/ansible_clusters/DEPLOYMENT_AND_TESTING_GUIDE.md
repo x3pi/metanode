@@ -215,17 +215,18 @@ unset p
 ---
 
 ##### 2. Mã hóa mật khẩu `sudo` máy thật (`ansible_become_pass`):
-Thay `'mat_khau_sudo_that'` bằng chính xác mật khẩu đăng nhập máy tính (`sudo`) của bạn:
+Thay `'mat_khau_sudo_that'` bằng chính xác mật khẩu đăng nhập máy tính (`sudo`) của bạn (vì `ansible.cfg` đã có sẵn cấu hình `.vault_pass`, bạn không cần truyền lại `--vault-password-file`):
 ```bash
-ansible-vault encrypt_string --vault-password-file .vault_pass 'mat_khau_sudo_that' --name ansible_become_pass
+ansible-vault encrypt_string 'mat_khau_sudo_that' --name ansible_become_pass
 ```
+*(Nếu muốn truyền tường minh đường dẫn file vault: thêm cờ `--encrypt-vault-id default` để tránh trùng lặp với `ansible.cfg`: `ansible-vault encrypt_string --vault-password-file .vault_pass --encrypt-vault-id default 'mat_khau_sudo_that' --name ansible_become_pass`)*
 
 ---
 
 ##### 3. Tạo ngẫu nhiên và mã hóa Token bảo mật Parent Chain (`parent_chain_rpc_token`):
 Chạy lệnh sau để tự sinh chuỗi hex 32-byte ngẫu nhiên và mã hóa trực tiếp vào Vault:
 ```bash
-ansible-vault encrypt_string --vault-password-file .vault_pass "$(openssl rand -hex 32)" --name parent_chain_rpc_token
+ansible-vault encrypt_string "$(openssl rand -hex 32)" --name parent_chain_rpc_token
 ```
 
 ---

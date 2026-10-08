@@ -136,22 +136,97 @@ def normalize_endpoint(endpoint, server_ip, default_port=""):
             return ep.replace(loopback, server_ip)
     return ep
 
-def notify_deploy_start(clusters_info="Parent Chain + Exec Clusters", target_env="Local/Devnet"):
+ACTION_META = {
+    'setup': {
+        'icon': '🛠️',
+        'title': 'CÀI ĐẶT & TRIỂN KHAI CỤM',
+        'desc': 'Cài đặt cấu hình, build binaries và khởi chạy toàn bộ',
+        'ongoing': 'Đang biên dịch, đồng bộ cấu hình và khởi chạy các service...',
+        'completed': 'Tất cả dịch vụ đã được cài đặt và khởi chạy sẵn sàng!',
+    },
+    'deploy': {
+        'icon': '🚀',
+        'title': 'DEPLOY BINARY MỚI',
+        'desc': 'Cập nhật mã nguồn/binaries mới và khởi động lại dịch vụ',
+        'ongoing': 'Đang build và triển khai binary mới tới các node...',
+        'completed': 'Đã cập nhật binary mới và khởi động lại dịch vụ thành công!',
+    },
+    'start': {
+        'icon': '▶️',
+        'title': 'BẬT DỊCH VỤ',
+        'desc': 'Khởi chạy lại các node/tiến trình dịch vụ',
+        'ongoing': 'Đang khởi chạy dịch vụ qua systemd...',
+        'completed': 'Các node trong phạm vi chỉ định đã được bật và sẵn sàng!',
+    },
+    'stop': {
+        'icon': '🛑',
+        'title': 'DỪNG DỊCH VỤ',
+        'desc': 'Dừng các tiến trình và service',
+        'ongoing': 'Đang dừng an toàn các tiến trình node...',
+        'completed': 'Tất cả các dịch vụ trong phạm vi chỉ định đã được dừng an toàn.',
+    },
+    'restart': {
+        'icon': '🔄',
+        'title': 'KHỞI ĐỘNG LẠI DỊCH VỤ',
+        'desc': 'Khởi động lại (restart) các node',
+        'ongoing': 'Đang khởi động lại dịch vụ...',
+        'completed': 'Các node trong phạm vi chỉ định đã được khởi động lại thành công!',
+    },
+    'clean': {
+        'icon': '🧹',
+        'title': 'DỌN DẸP DỮ LIỆU',
+        'desc': 'Dọn dẹp database & log (giữ nguyên config và keys)',
+        'ongoing': 'Đang dọn dẹp các thư mục dữ liệu chain_data, consensus, log...',
+        'completed': 'Đã dọn dẹp dữ liệu sạch sẽ, cấu hình và keys vẫn an toàn.',
+    },
+    'reset': {
+        'icon': '♻️',
+        'title': 'RESET BLOCKCHAIN VỀ BLOCK 0',
+        'desc': 'Xóa toàn bộ database và khởi chạy lại mạng từ block 0',
+        'ongoing': 'Đang reset toàn bộ dữ liệu và khởi động lại từ genesis block 0...',
+        'completed': 'Đã reset blockchain thành công và mạng đã khởi chạy từ block 0!',
+    },
+    'open_ports': {
+        'icon': '🛡️',
+        'title': 'MỞ CỔNG TƯỜNG LỬA (UFW)',
+        'desc': 'Mở các cổng RPC client-facing và internal P2P/Raft',
+        'ongoing': 'Đang cấu hình quy tắc tường lửa UFW...',
+        'completed': 'Đã cấu hình và mở cổng tường lửa thành công!',
+    },
+}
+
+def get_action_meta(action):
+    act = (action or "deploy").lower().strip()
+    return ACTION_META.get(act, {
+        'icon': '⚡',
+        'title': f'THAO TÁC {act.upper()}',
+        'desc': f'Thực hiện {act}',
+        'ongoing': 'Đang thực thi các tác vụ...',
+        'completed': 'Hoàn tất tác vụ.',
+    })
+
+def notify_action_start(action="deploy", scope="Toàn bộ hệ thống", target_env="Local/Devnet"):
+    meta = get_action_meta(action)
     git = get_git_info()
     now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
     server_ip = get_server_ip()
     msg = (
-        f"🚀 <b>[METANODE CLUSTER DEPLOY BẮT ĐẦU]</b>\n\n"
+        f"{meta['icon']} <b>[METANODE CLUSTER - {meta['title']} BẮT ĐẦU]</b>\n\n"
+        f"🎯 <b>Hành động:</b> <code>{meta['desc']}</code>\n"
+        f"🎯 <b>Phạm vi áp dụng:</b> <b>{html.escape(str(scope))}</b>\n"
         f"🖥 <b>Server IP:</b> <code>{server_ip}</code>\n"
         f"🌿 <b>Nhánh:</b> <code>{html.escape(git['branch'])}</code>\n"
         f"📌 <b>Commit:</b> <code>{git['hash']}</code> (bởi <b>{html.escape(git['author'])}</b>)\n"
         f"💬 <b>Nội dung:</b> <i>{html.escape(git['message'])}</i>\n"
-        f"🖥 <b>Môi trường:</b> <code>{target_env}</code>\n"
-        f"🎯 <b>Cụm triển khai:</b> {clusters_info}\n"
+        f"⚙️ <b>Môi trường:</b> <code>{target_env}</code>\n"
         f"🕒 <b>Bắt đầu:</b> <code>{now_str}</code>\n\n"
-        f"⏳ <i>Đang biên dịch, đồng bộ cấu hình và khởi chạy các service...</i>"
+        f"⏳ <i>{meta['ongoing']}</i>"
     )
     return send_telegram_message(html_message=msg)
+
+def notify_deploy_start(clusters_info="Parent Chain + Exec Clusters", target_env="Local/Devnet", action="setup", scope=None):
+    sc = scope if scope is not None else clusters_info
+    return notify_action_start(action=action, scope=sc, target_env=target_env)
 
 def get_parent_chain_committee(info=None, server_ip=None, rpc_nodes_path=None):
     """
@@ -290,7 +365,7 @@ def get_parent_chain_committee(info=None, server_ip=None, rpc_nodes_path=None):
 
     return committee
 
-def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration_secs=0, rpc_nodes_path=None):
+def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration_secs=0, rpc_nodes_path=None, action="setup", scope="Toàn bộ hệ thống"):
     """
     Thông báo danh sách các port dịch vụ gọn gàng, rõ ràng qua Telegram.
     Hiển thị đầy đủ Ủy ban BFT Parent Chain (mọi validator node) và các Execution Clusters.
@@ -349,7 +424,7 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
         try:
             import parse_inventory as pi
             info = pi.parse_inventory(info_or_parent)
-            return notify_services_ready(info, duration_secs=dur)
+            return notify_services_ready(info, duration_secs=dur, action=action, scope=scope)
         except Exception:
             pass
     elif isinstance(info_or_parent, dict) and isinstance(exec_clusters_info, list):
@@ -395,13 +470,16 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
             if p_p2p and not any(p_name in line for line in tcp_lines):
                 tcp_lines.insert(0, f"  • {p_name}: {p_p2p}")
 
+    meta = get_action_meta(action)
     msg_parts = [
-        "✅ <b>[DỊCH VỤ CỤM METANODE ĐÃ KHỞI CHẠY THÀNH CÔNG]</b>\n",
+        f"{meta['icon']} <b>[METANODE CLUSTER - {meta['title']} THÀNH CÔNG]</b>\n",
+        f"🎯 <b>Hành động:</b> <code>{meta['desc']}</code>",
+        f"🎯 <b>Phạm vi áp dụng:</b> <b>{html.escape(str(scope))}</b>",
         f"🖥 <b>Server IP:</b> <code>{server_ip}</code>",
         f"🌿 <b>Nhánh:</b> <code>{html.escape(git['branch'])}</code>",
         f"📌 <b>Commit:</b> <code>{git['hash']}</code> (bởi <b>{html.escape(git['author'])}</b>)",
-        f"⏱️ <b>Thời gian khởi chạy:</b> <code>{dur:.1f}s</code>",
-        f"🕒 <b>Thời gian:</b> <code>{now_str}</code>\n"
+        f"⏱️ <b>Thời gian thực hiện:</b> <code>{dur:.1f}s</code>",
+        f"🕒 <b>Thời gian hoàn tất:</b> <code>{now_str}</code>\n"
     ]
 
     if parent_committee_lines:
@@ -428,48 +506,55 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
     msg = "\n".join(msg_parts)
     return send_telegram_message(html_message=msg)
 
-def notify_test_results(scenarios, total_duration=0, all_passed=True):
-    git = get_git_info()
+def notify_action_complete(action="setup", scope="Toàn bộ hệ thống", info_or_parent=None, exec_clusters_info=None, duration_secs=0, rpc_nodes_path=None):
+    """
+    Gửi thông báo hoàn tất thao tác tới Telegram với đúng trạng thái và thông tin tương ứng.
+    - Với stop, clean, open_ports: Gửi thông báo hoàn tất súc tích và chính xác.
+    - Với setup, deploy, start, restart, reset: Gửi thông báo kèm trạng thái các endpoints.
+    """
+    act = (action or "deploy").lower().strip()
+    meta = get_action_meta(act)
     now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
-    status_icon = "🎉" if all_passed else "⚠️"
-    status_title = "KIỂM THỬ TÍCH HỢP HOÀN TẤT THÀNH CÔNG" if all_passed else "KIỂM THỬ PHÁT HIỆN LỖI"
+    git = get_git_info()
+    server_ip = get_server_ip()
 
-    lines = [
-        f"{status_icon} <b>[METANODE CLUSTER - {status_title}]</b>\n",
-        f"📌 <b>Commit:</b> <code>{git['hash']}</code>",
-        f"⏱️ <b>Tổng thời gian test:</b> <code>{total_duration:.1f}s</code>",
-        f"🕒 <b>Thời gian:</b> <code>{now_str}</code>\n",
-        f"📊 <b>Chi tiết từng kịch bản sử dụng thực tế:</b>"
-    ]
+    dur = 0
+    if isinstance(duration_secs, (int, float)) and duration_secs > 0:
+        dur = duration_secs
 
-    for s in scenarios:
-        s_icon = "✅" if s.get("passed", True) else "❌"
-        s_name = html.escape(s.get("name", "Kịch bản"))
-        s_dur = f"({s.get('duration', 0):.1f}s)" if "duration" in s else ""
-        s_detail = s.get("detail", "")
-        lines.append(f"  {s_icon} <b>{s_name}</b> {s_dur}")
-        if s_detail:
-            lines.append(f"     └─ <i>{html.escape(s_detail)}</i>")
+    if act in ['stop', 'clean', 'open_ports']:
+        msg = (
+            f"{meta['icon']} <b>[METANODE CLUSTER - {meta['title']} THÀNH CÔNG]</b>\n\n"
+            f"🎯 <b>Hành động:</b> <code>{meta['desc']}</code>\n"
+            f"🎯 <b>Phạm vi đã áp dụng:</b> <b>{html.escape(str(scope))}</b>\n"
+            f"🖥 <b>Server IP:</b> <code>{server_ip}</code>\n"
+            f"🌿 <b>Nhánh:</b> <code>{html.escape(git['branch'])}</code>\n"
+            f"📌 <b>Commit:</b> <code>{git['hash']}</code> (bởi <b>{html.escape(git['author'])}</b>)\n"
+            f"⏱️ <b>Thời gian thực hiện:</b> <code>{dur:.1f}s</code>\n"
+            f"🕒 <b>Thời gian hoàn tất:</b> <code>{now_str}</code>\n\n"
+            f"{meta['icon']} <i>{meta['completed']}</i>"
+        )
+        return send_telegram_message(html_message=msg)
 
-    if all_passed:
-        lines.append("\n🏆 <i>Tất cả các tính năng cross-cluster, float accounts & resilience đều hoạt động hoàn hảo!</i>")
-    else:
-        lines.append("\n🚨 <i>Vui lòng kiểm tra log để biết nguyên nhân thất bại!</i>")
+    return notify_services_ready(info_or_parent, exec_clusters_info, duration_secs=dur, rpc_nodes_path=rpc_nodes_path, action=act, scope=scope)
 
-    return send_telegram_message(html_message="\n".join(lines))
-
-def notify_deploy_failure(stage, error_msg, tail_logs=""):
+def notify_deploy_failure(stage, error_msg, tail_logs="", action="deploy", scope=""):
+    meta = get_action_meta(action)
     git = get_git_info()
     now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
     server_ip = get_server_ip()
-    
+
     clean_tail = ""
     if tail_logs:
         log_lines = str(tail_logs).strip().splitlines()[-20:]
         clean_tail = html.escape("\n".join(log_lines))
 
+    act_str = f" KHI {meta['title']}" if action else ""
+    scope_str = f"🎯 <b>Phạm vi:</b> <b>{html.escape(str(scope))}</b>\n" if scope else ""
+
     msg = (
-        f"🚨 <b>[METANODE CLUSTER DEPLOY THẤT BẠI]</b>\n\n"
+        f"🚨 <b>[METANODE CLUSTER - THẤT BẠI{act_str}]</b>\n\n"
+        f"{scope_str}"
         f"🖥 <b>Server IP:</b> <code>{server_ip}</code>\n"
         f"🌿 <b>Nhánh:</b> <code>{html.escape(git['branch'])}</code>\n"
         f"📌 <b>Commit:</b> <code>{git['hash']}</code> (bởi <b>{html.escape(git['author'])}</b>)\n"
