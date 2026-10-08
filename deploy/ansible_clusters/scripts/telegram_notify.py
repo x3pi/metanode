@@ -538,6 +538,36 @@ def notify_action_complete(action="setup", scope="Toàn bộ hệ thống", info
 
     return notify_services_ready(info_or_parent, exec_clusters_info, duration_secs=dur, rpc_nodes_path=rpc_nodes_path, action=act, scope=scope)
 
+def notify_test_results(scenarios, total_duration=0, all_passed=True):
+    git = get_git_info()
+    now_str = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+    status_icon = "🎉" if all_passed else "⚠️"
+    status_title = "KIỂM THỬ TÍCH HỢP HOÀN TẤT THÀNH CÔNG" if all_passed else "KIỂM THỬ PHÁT HIỆN LỖI"
+
+    lines = [
+        f"{status_icon} <b>[METANODE CLUSTER - {status_title}]</b>\n",
+        f"📌 <b>Commit:</b> <code>{git['hash']}</code>",
+        f"⏱️ <b>Tổng thời gian test:</b> <code>{total_duration:.1f}s</code>",
+        f"🕒 <b>Thời gian:</b> <code>{now_str}</code>\n",
+        f"📊 <b>Chi tiết từng kịch bản sử dụng thực tế:</b>"
+    ]
+
+    for s in scenarios:
+        s_icon = "✅" if s.get("passed", True) else "❌"
+        s_name = html.escape(s.get("name", "Kịch bản"))
+        s_dur = f"({s.get('duration', 0):.1f}s)" if "duration" in s else ""
+        s_detail = s.get("detail", "")
+        lines.append(f"  {s_icon} <b>{s_name}</b> {s_dur}")
+        if s_detail:
+            lines.append(f"     └─ <i>{html.escape(s_detail)}</i>")
+
+    if all_passed:
+        lines.append("\n🏆 <i>Tất cả các tính năng cross-cluster, float accounts & resilience đều hoạt động hoàn hảo!</i>")
+    else:
+        lines.append("\n🚨 <i>Vui lòng kiểm tra log để biết nguyên nhân thất bại!</i>")
+
+    return send_telegram_message(html_message="\n".join(lines))
+
 def notify_deploy_failure(stage, error_msg, tail_logs="", action="deploy", scope=""):
     meta = get_action_meta(action)
     git = get_git_info()
