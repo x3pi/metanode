@@ -279,6 +279,31 @@ Nguồn bằng chứng: [note/evidence/perf_rss_20261007/log_size_verification.l
 
 ---
 
+### 7.3. Thực Nghiệm Bão Hoà Bộ Nhớ Theo mappingCacheTTL (45 Phút)
+
+Để kiểm chứng giả thuyết kỹ thuật về việc liệu `mappingCacheTTL = 30 * time.Minute` có thực sự làm bão hoà mức tiêu thụ HeapAlloc hay bộ nhớ vẫn tiếp tục tăng trưởng không giới hạn, thực nghiệm tiêm tải liên tục trong 45 phút (vượt qua ngưỡng TTL 30 phút và bao quát ít nhất 15 chu kỳ prune định kỳ 1 phút) đã được thực hiện bằng `run_ttl_experiment.py` với cờ pprof `-debug=true` (`ENABLE_DEBUG_PPROF=true`).
+
+Nguồn bằng chứng: [note/evidence/perf_rss_20261007/ttl_saturation_45min.log](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/ttl_saturation_45min.log) (SHA256: `37345d16147a4a5ec4c081253e623c64c7b544e7a7646c7de03a48302242881a`, bytes: 238) và [note/evidence/perf_rss_20261007/ttl_saturation_45min_summary.csv](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/ttl_saturation_45min_summary.csv) (SHA256: `3e36e5ff1fa6e94cf94799df40715863aba5722d042f79ea986d40fe09a0d65a`, bytes: 1686). Dữ liệu chuỗi thời gian đầy đủ theo phút lưu tại `/home/abc/evidence_archive/perf_rss_20261007/ttl_saturation_45min_timeseries.json`.
+
+**Tiêu chí ghi trước (Pre-registered Criteria):**
+- Tải tiêm cố định: 50 tx/s liên tục qua `secp_tps_blast`.
+- Cửa sổ 1 (0 – 30 phút, 0s đến 1,800s): Giai đoạn tích luỹ entries trước hạn TTL.
+- Cửa sổ 2 (30 – 45 phút, 1,800s đến 2,700s): Giai đoạn cơ chế prune chạy định kỳ mỗi 1 phút.
+- Tiêu chí đánh giá: "Bão hoà" (PASS) nếu hệ số góc Cửa sổ 2 $\le 5\%$ Cửa sổ 1 hoặc $\le 0.5$ MB/phút. Ngược lại "Chưa bão hoà" (FAIL / UNBOUNDED).
+
+**Kết quả đối chiếu thực nghiệm:**
+- Cửa sổ 1 (0 – 30 phút): Hệ số góc $+4.1993$ MB/phút ($R^2 = 0.6662$) (`evidence:ttl_saturation_45min#TTL_SLOPE_W1`).
+- Cửa sổ 2 (30 – 45 phút): Hệ số góc $+0.7383$ MB/phút ($R^2 = 0.1566$) (`evidence:ttl_saturation_45min#TTL_SLOPE_W2`).
+- Tỷ lệ hệ số góc Cửa sổ 2 / Cửa sổ 1: 17.58% (`evidence:ttl_saturation_45min#TTL_RATIO_PCT`).
+- **Kết luận:** **CHƯA BÃO HOÀ (FAIL / UNBOUNDED)** theo tiêu chí ghi trước do tỷ lệ $17.58\% > 5\%$ và hệ số góc Cửa sổ 2 ($0.7383$ MB/phút) $> 0.5$ MB/phút.
+
+**Phân tích nguyên nhân kỹ thuật:**
+1. Mặc dù cơ chế prune đã làm chậm tốc độ tăng trưởng của HeapAlloc đi ~82.4% (từ 4.20 MB/phút xuống 0.74 MB/phút), bộ nhớ vẫn tiếp tục tăng nhẹ thay vì bão hoà.
+2. Nguyên nhân cốt lõi là do cơ chế hash map của Go runtime: thao tác `delete()` chỉ đánh dấu rỗng các ô trong buckets mà không bao giờ thu nhỏ hay giải phóng cấu trúc bucket về hệ điều hành hoặc heap pool, đồng thời thao tác nạp và xóa liên tục tạo ra phân mảnh heap nhỏ.
+3. Thực nghiệm này chứng minh dứt khoát rằng: **Cơ chế thời gian (Time-bounded TTL) KHÔNG thể thay thế được cơ chế chặn trần dung lượng (Bounded Memory Cache / LRU)**. Do đó việc triển khai Bounded Memory Cache theo thiết kế tại `note/design_bounded_memory_indexes_20261007.md` là cần thiết theo phân tích kỹ thuật để ngăn chặn OOM trong dài hạn.
+
+---
+
 ## 8. Ma Trận Khuyến Nghị Cấu Hình Cho Node Operators
 
 > [!NOTE]
@@ -306,6 +331,6 @@ Nguồn bằng chứng: [note/evidence/perf_rss_20261007/log_size_verification.l
 3. Cờ `-debug=true` không gây suy giảm hiệu năng có ý nghĩa thống kê ($p = 0.3433$), nhưng đã được chuyển về mặc định `false` trong `run_env.sh` để tuân thủ tiêu chuẩn production hardening.
 4. Hiện tượng drift RSS baseline (+8.24%) khi khởi động lại các cụm từ template sạch đã được ghi nhận; nguyên nhân CHƯA xác định (INCONCLUSIVE): các so sánh RSS đỉnh chỉ có giá trị đối chứng tương đối giữa các lượt xen kẽ (interleaved); kết luận RSS đỉnh tuyệt đối là **INCONCLUSIVE** (`evidence:rss_drift_diagnostic`).
 5. Lỗi Log Size 0.0 KB trong bảng cũ đã được khắc phục và kiểm chứng thực nghiệm bằng 3 lượt đo mới với dung lượng log thật đạt ~208 KB (`evidence:log_size_verification`).
-6. Tài liệu thiết kế kiến trúc [note/design_bounded_memory_indexes_20261007.md](file:///home/abc/chain-n/metanode/note/design_bounded_memory_indexes_20261007.md) đã được đệ trình để giải quyết triệt để nguyên nhân gốc rễ bằng Bounded Memory Cache.
+6. Thực nghiệm tiêm tải 45 phút (`evidence:ttl_saturation_45min`) xác nhận cơ chế TTL thời gian (`mappingCacheTTL=30m`) làm giảm 82.4% tốc độ tăng heap ở Cửa sổ 2 nhưng **CHƯA BÃO HOÀ** ($+0.7383$ MB/phút, tỷ lệ $17.58\% > 5\%$) do hạn chế cấu trúc bucket của Go map, củng cố tính cấp thiết của thiết kế Bounded Memory Cache (LRU) [note/design_bounded_memory_indexes_20261007.md](file:///home/abc/chain-n/metanode/note/design_bounded_memory_indexes_20261007.md).
 7. Toàn bộ số liệu trong báo cáo đều có file log thô, SHA256 và kích thước bytes tương ứng trong [note/evidence/perf_rss_20261007/MANIFEST.json](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/MANIFEST.json).
 

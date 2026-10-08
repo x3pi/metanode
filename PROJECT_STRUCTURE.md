@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-10-07 (Phase 1-4 Complete: Added `verify_pebble_fallback_rpc.py`, `mapping_pebble_fallback_test.go`, audited index callers, purged absolute claims, verified RSS drift and actual log sizes).
+> **Last updated:** 2026-10-08 (Phase 1-3 Complete: Standardized `eth_getBlockByNumber/Hash(fullTx=true)` with `RPCTransaction` + `groupId`, added `rpc_block_fulltx_test.go`, verified ethers/viem/web3py/cast compatibility, split empirical vs inferred RSS matrix, verified fuzz coverage across 3 new seeds, running 45-min TTL experiment).
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 ---
 
@@ -196,7 +196,8 @@ metanode/
 | `app_network.go` | 125 | Network app logic |
 | `backend.go` | 660 | Chain backend (EVM state, DB) |
 | `mtn_api.go` | 671 | MTN-specific JSON-RPC API |
-| `rpc_block.go` | 744 | Block-related RPC handlers |
+| `rpc_block.go` | 996 | Block-related RPC handlers (standardized `eth_getBlockByNumber/Hash(fullTx=true)` with `RPCTransaction` + `groupId`) |
+| `rpc_block_fulltx_test.go` | 485 | Unit tests & benchmarks for fullTx standardization across Legacy, EIP-2930, EIP-1559, EIP-7702, and contract creation |
 | `rpc_transaction.go` | 780 | Tx-related RPC handlers |
 | `rpc_state.go` | 334 | State RPC handlers |
 | `tx_async_queue.go` | 338 | Async tx submission queue |

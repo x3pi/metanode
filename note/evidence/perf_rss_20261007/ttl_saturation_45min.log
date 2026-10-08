@@ -1,0 +1,5 @@
+TTL Saturation Analysis (Split at 1800.0s):
+Window 1 (0 -> 1800.0s): slope = 4.1993 MB/min (R2 = 0.6662)
+Window 2 (1800.0s -> 2700s): slope = 0.7383 MB/min (R2 = 0.1566)
+Slope ratio (Window 2 / Window 1): 17.58%
+Verdict: FAIL (UNBOUNDED)

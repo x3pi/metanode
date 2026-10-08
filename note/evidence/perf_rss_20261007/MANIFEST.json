@@ -252,6 +252,54 @@
           "bytes": 391
         }
       ]
+    },
+    {
+      "id": "ttl_saturation_45min",
+      "command": "python3 -u execution/scripts/test/evidence/run_ttl_experiment.py --duration 2700 --interval 60 --rate 50 --output ttl_saturation_45min",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "6e1107b0",
+      "git_status": "",
+      "started_at": "2026-10-08T01:12:11Z",
+      "finished_at": "2026-10-08T01:58:11Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "ttl_saturation_45min.log",
+          "sha256": "37345d16147a4a5ec4c081253e623c64c7b544e7a7646c7de03a48302242881a",
+          "bytes": 238
+        },
+        {
+          "path": "ttl_saturation_45min_summary.csv",
+          "sha256": "3e36e5ff1fa6e94cf94799df40715863aba5722d042f79ea986d40fe09a0d65a",
+          "bytes": 1686
+        }
+      ],
+      "extract": [
+        {
+          "name": "TTL_SLOPE_W1",
+          "file": "ttl_saturation_45min.log",
+          "regex": "Window 1.*?slope = (\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "MB/min"
+        },
+        {
+          "name": "TTL_SLOPE_W2",
+          "file": "ttl_saturation_45min.log",
+          "regex": "Window 2.*?slope = (\\d+\\.\\d+)",
+          "group": 1,
+          "stat": "raw",
+          "unit": "MB/min"
+        },
+        {
+          "name": "TTL_RATIO_PCT",
+          "file": "ttl_saturation_45min.log",
+          "regex": "Slope ratio.*?([0-9\\.]+)%",
+          "group": 1,
+          "stat": "raw",
+          "unit": "%"
+        }
+      ]
     }
   ],
   "claims": [
@@ -278,6 +326,24 @@
       "regex": "txHashToBlockNumberMap.*?Wave 8:\\s+(\\d+\\.\\d+)\\s+MB InUse",
       "extractor": "TX_HASH_W8",
       "tolerance": 0.005
+    },
+    {
+      "description": "TTL Slope Window 1 claim in text",
+      "regex": "Cửa sổ 1 \\(0 – 30 phút\\):.*?\\+(\\d+\\.\\d+)\\$? MB/phút",
+      "extractor": "TTL_SLOPE_W1",
+      "tolerance": 0.005
+    },
+    {
+      "description": "TTL Slope Window 2 claim in text",
+      "regex": "Cửa sổ 2 \\(30 – 45 phút\\):.*?\\+(\\d+\\.\\d+)\\$? MB/phút",
+      "extractor": "TTL_SLOPE_W2",
+      "tolerance": 0.005
+    },
+    {
+      "description": "TTL Slope Ratio claim in text",
+      "regex": "Tỷ lệ hệ số góc Cửa sổ 2 / Cửa sổ 1:\\s+(\\d+\\.\\d+)%",
+      "extractor": "TTL_RATIO_PCT",
+      "tolerance": 0.005
     }
   ],
   "external": [
@@ -287,6 +353,13 @@
       "bytes": 9880670,
       "stored_at": "/home/abc/evidence_archive/perf_rss_20261007/rss_raw_full.tar.gz",
       "reason": "Full raw heap profiles (pb.gz), full memstats text dumps, and smaps rollups archived externally to keep git repository lightweight"
+    },
+    {
+      "name": "ttl_saturation_45min_timeseries.json",
+      "sha256": "cb84084e63d99d5ccfddff1dd0551ecf3ce0108ddd9c5aa9a38bd5d5bcd8d79c",
+      "bytes": 52208,
+      "stored_at": "/home/abc/evidence_archive/perf_rss_20261007/ttl_saturation_45min_timeseries.json",
+      "reason": "Complete per-minute, per-node 4-validator pprof and proc timeseries telemetry data archived externally"
     }
   ],
   "tables": [
