@@ -55,6 +55,8 @@ type SpeculativeResult struct {
 	// Without this, GetSpeculativeResult could return the empty placeholder
 	// to the committer before execution has actually produced anything.
 	IsFinished bool
+	// precomputeRootsChan receives precomputed Merkle roots calculated concurrently in background
+	precomputeRootsChan chan *PrecomputedBlockRoots
 }
 
 // TakeClonedState atomically claims ownership of ClonedState.
@@ -492,22 +494,33 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		latestRespCh := session.respCh
 		session.mu.Unlock()
 
+		// Precompute Merkle Roots concurrently in background right after EVM finishes
+		precomputeRootsCh := make(chan *PrecomputedBlockRoots, 1)
+		if execErr == nil && len(accumulatedResults.Transactions) > 0 && se.bp != nil {
+			go func(txs []types.Transaction, rps []types.Receipt, bNum uint64, g uint64) {
+				precomputeRootsCh <- se.bp.PrecomputeRoots(txs, rps, bNum, g)
+			}(accumulatedResults.Transactions, accumulatedResults.Receipts, blockNum, gei)
+		} else {
+			precomputeRootsCh <- nil
+		}
+
 		res := &SpeculativeResult{
-			BlockNum:        blockNum,
-			GEI:             gei,
-			CommitIndex:     commitIndex,
-			Epoch:           epochNum,
-			TimestampMs:     commitTimestampMs,
-			LeaderAddr:      leaderAddr,
-			RawBlock:        epochData,
-			Txs:             allTransactions,
-			ProcessResult:   accumulatedResults,
-			ClonedState:     csCopy,
-			ExecuteErr:      execErr,
-			IsEpochBoundary: isEpochBoundary,
-			AuthRespCh:      latestRespCh,
-			session:         session,
-			IsFinished:      true,
+			BlockNum:            blockNum,
+			GEI:                 gei,
+			CommitIndex:         commitIndex,
+			Epoch:               epochNum,
+			TimestampMs:         commitTimestampMs,
+			LeaderAddr:          leaderAddr,
+			RawBlock:            epochData,
+			Txs:                 allTransactions,
+			ProcessResult:       accumulatedResults,
+			ClonedState:         csCopy,
+			ExecuteErr:          execErr,
+			IsEpochBoundary:     isEpochBoundary,
+			AuthRespCh:          latestRespCh,
+			session:             session,
+			IsFinished:          true,
+			precomputeRootsChan: precomputeRootsCh,
 		}
 
 		// [FIX DEADLOCK / LEAK]: Check if block has already been committed to DB
@@ -1071,7 +1084,7 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		currentBlockNumber = res.BlockNum
 		storage.UpdateLastAssignedBlockNumber(currentBlockNumber)
 
-		emptyBlock := bp.createBlockFromResults(emptyResult, currentBlockNumber, res.Epoch, true, batchID, res.TimestampMs, res.GEI, res.CommitIndex, res.LeaderAddr)
+		emptyBlock := bp.createBlockFromResults(emptyResult, currentBlockNumber, res.Epoch, true, batchID, res.TimestampMs, res.GEI, res.CommitIndex, nil, res.LeaderAddr)
 		if emptyBlock != nil {
 			select {
 			case bp.createdBlocksChan <- emptyBlock:
@@ -1088,7 +1101,12 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 	currentBlockNumber = res.BlockNum
 	storage.UpdateLastAssignedBlockNumber(currentBlockNumber)
 
-	newBlock := bp.createBlockFromResults(accumulatedResults, currentBlockNumber, res.Epoch, true, batchID, res.TimestampMs, res.GEI, res.CommitIndex, res.LeaderAddr)
+	var precomputedRoots *PrecomputedBlockRoots
+	if res.precomputeRootsChan != nil {
+		precomputedRoots = <-res.precomputeRootsChan
+	}
+
+	newBlock := bp.createBlockFromResults(accumulatedResults, currentBlockNumber, res.Epoch, true, batchID, res.TimestampMs, res.GEI, res.CommitIndex, precomputedRoots, res.LeaderAddr)
 	if newBlock == nil {
 		commitErr = fmt.Errorf("failed to create block from speculative results (verifyDraftBlock reverted block)")
 		return commitErr

@@ -1,0 +1,4438 @@
+{
+  "workload": "B1 (Parallel Speculative Root Derivation)",
+  "protocol": "60s sustained unlimited blast, batch 1000, 4-node cluster",
+  "num_runs": 5,
+  "b1_tps_runs": [
+    13794.51953651098,
+    13923.654726596946,
+    13509.648337710074,
+    13425.540822550971,
+    13244.2541882345
+  ],
+  "mean_tps_b1": 13579.523522320693,
+  "sd_tps_b1": 276.42734646995126,
+  "mean_tps_a1_baseline": 10898.0,
+  "sd_tps_a1_baseline": 391.5229303629609,
+  "delta_tps": 2681.523522320693,
+  "pct_improvement": 24.605648030103623,
+  "welch_t_stat": 12.510767619985621,
+  "welch_df": 7.194149591195419,
+  "zero_fork_all_runs_verified": true,
+  "runs_detail": [
+    {
+      "run": 1,
+      "prefix": "b1_unlimited_60s_run_1",
+      "tps": 13794.51953651098,
+      "confirmed_txs": 827898,
+      "blocks_produced": 127,
+      "zero_fork_verified": true,
+      "node_roots_consistent": true,
+      "timeline_metrics": {
+        "num_steady_blocks": 84,
+        "steady_blocks": [
+          {
+            "gei": 3,
+            "tx_count": 9000,
+            "wait_predecessor_ms": 972.693984,
+            "exec_block_stm_ms": 274.807977,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 334.36926199999994,
+            "tb_persist_ms": 137.320273,
+            "cycle_ms": 0
+          },
+          {
+            "gei": 4,
+            "tx_count": 3000,
+            "wait_predecessor_ms": 436.604404,
+            "exec_block_stm_ms": 267.794407,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 305.318227,
+            "tb_persist_ms": 37.602824,
+            "cycle_ms": 999.998318
+          },
+          {
+            "gei": 5,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 548.390777,
+            "exec_block_stm_ms": 63.466662,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 78.3746,
+            "tb_persist_ms": 20.457893,
+            "cycle_ms": 775.458374
+          },
+          {
+            "gei": 6,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 295.562744,
+            "exec_block_stm_ms": 68.869624,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 82.069733,
+            "tb_persist_ms": 17.384306,
+            "cycle_ms": 527.620682
+          },
+          {
+            "gei": 7,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 383.902186,
+            "exec_block_stm_ms": 94.308063,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 121.151812,
+            "tb_persist_ms": 51.782886,
+            "cycle_ms": 689.064018
+          },
+          {
+            "gei": 8,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 304.850598,
+            "exec_block_stm_ms": 55.614441,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 73.941133,
+            "tb_persist_ms": 20.690059,
+            "cycle_ms": 513.216928
+          },
+          {
+            "gei": 9,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 583.93972,
+            "exec_block_stm_ms": 113.933586,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 145.805755,
+            "tb_persist_ms": 54.498876,
+            "cycle_ms": 985.014896
+          },
+          {
+            "gei": 10,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 310.640722,
+            "exec_block_stm_ms": 56.270236,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 70.837277,
+            "tb_persist_ms": 23.098112,
+            "cycle_ms": 529.432569
+          },
+          {
+            "gei": 11,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 287.539323,
+            "exec_block_stm_ms": 55.369393,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 71.648308,
+            "tb_persist_ms": 17.216322,
+            "cycle_ms": 485.496562
+          },
+          {
+            "gei": 12,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 290.608063,
+            "exec_block_stm_ms": 63.878731,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 77.352221,
+            "tb_persist_ms": 22.465517,
+            "cycle_ms": 528.693929
+          },
+          {
+            "gei": 13,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 333.768623,
+            "exec_block_stm_ms": 45.644157,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 59.869051,
+            "tb_persist_ms": 22.53747,
+            "cycle_ms": 528.262641
+          },
+          {
+            "gei": 14,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 785.064358,
+            "exec_block_stm_ms": 172.815799,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 213.12074,
+            "tb_persist_ms": 47.972166,
+            "cycle_ms": 1366.147895
+          },
+          {
+            "gei": 15,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 1050.344439,
+            "exec_block_stm_ms": 180.337224,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 223.410843,
+            "tb_persist_ms": 68.299846,
+            "cycle_ms": 1742.276876
+          },
+          {
+            "gei": 16,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 508.361536,
+            "exec_block_stm_ms": 84.738801,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 110.383911,
+            "tb_persist_ms": 29.090184,
+            "cycle_ms": 878.443267
+          },
+          {
+            "gei": 17,
+            "tx_count": 18000,
+            "wait_predecessor_ms": 1196.92333,
+            "exec_block_stm_ms": 206.225279,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 252.795365,
+            "tb_persist_ms": 87.840304,
+            "cycle_ms": 2073.345224
+          },
+          {
+            "gei": 18,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 900.455975,
+            "exec_block_stm_ms": 152.961706,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 195.36152699999997,
+            "tb_persist_ms": 53.341892,
+            "cycle_ms": 1466.104547
+          },
+          {
+            "gei": 19,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 1004.072617,
+            "exec_block_stm_ms": 139.954977,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 178.121332,
+            "tb_persist_ms": 104.107729,
+            "cycle_ms": 1736.885344
+          },
+          {
+            "gei": 20,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 271.895644,
+            "exec_block_stm_ms": 227.877057,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 240.701771,
+            "tb_persist_ms": 20.614489,
+            "cycle_ms": 702.99649
+          },
+          {
+            "gei": 21,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 584.343557,
+            "exec_block_stm_ms": 113.655555,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 137.79864300000003,
+            "tb_persist_ms": 44.011089,
+            "cycle_ms": 1019.748543
+          },
+          {
+            "gei": 22,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 301.749744,
+            "exec_block_stm_ms": 83.619807,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 101.87375899999999,
+            "tb_persist_ms": 21.455345,
+            "cycle_ms": 548.352785
+          },
+          {
+            "gei": 23,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 298.335326,
+            "exec_block_stm_ms": 103.988525,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 119.644259,
+            "tb_persist_ms": 19.652007,
+            "cycle_ms": 619.545497
+          },
+          {
+            "gei": 24,
+            "tx_count": 20000,
+            "wait_predecessor_ms": 1396.541299,
+            "exec_block_stm_ms": 269.457468,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 339.692919,
+            "tb_persist_ms": 82.697614,
+            "cycle_ms": 2349.140787
+          },
+          {
+            "gei": 25,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 611.19804,
+            "exec_block_stm_ms": 76.520403,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 107.891816,
+            "tb_persist_ms": 35.10668,
+            "cycle_ms": 988.112943
+          },
+          {
+            "gei": 26,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 775.37517,
+            "exec_block_stm_ms": 148.926231,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 180.827388,
+            "tb_persist_ms": 45.284491,
+            "cycle_ms": 1284.698779
+          },
+          {
+            "gei": 27,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 587.634466,
+            "exec_block_stm_ms": 108.000454,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 141.357577,
+            "tb_persist_ms": 46.398734,
+            "cycle_ms": 1000.847323
+          },
+          {
+            "gei": 28,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 578.080468,
+            "exec_block_stm_ms": 82.614546,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 101.324369,
+            "tb_persist_ms": 28.757242,
+            "cycle_ms": 933.5228
+          },
+          {
+            "gei": 29,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 670.090977,
+            "exec_block_stm_ms": 130.770877,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 157.97238600000003,
+            "tb_persist_ms": 53.766227,
+            "cycle_ms": 1196.318111
+          },
+          {
+            "gei": 30,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 562.541047,
+            "exec_block_stm_ms": 117.433092,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 138.027837,
+            "tb_persist_ms": 29.799056,
+            "cycle_ms": 982.27427
+          },
+          {
+            "gei": 31,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 847.344101,
+            "exec_block_stm_ms": 153.175554,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 189.51412700000003,
+            "tb_persist_ms": 38.791365,
+            "cycle_ms": 1378.53286
+          },
+          {
+            "gei": 32,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 975.527699,
+            "exec_block_stm_ms": 169.504127,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 220.22290800000002,
+            "tb_persist_ms": 57.551644,
+            "cycle_ms": 1622.758633
+          },
+          {
+            "gei": 33,
+            "tx_count": 18000,
+            "wait_predecessor_ms": 1148.829948,
+            "exec_block_stm_ms": 168.49681,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 209.604588,
+            "tb_persist_ms": 63.661542,
+            "cycle_ms": 1848.421668
+          },
+          {
+            "gei": 34,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 608.11464,
+            "exec_block_stm_ms": 73.285251,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 92.798485,
+            "tb_persist_ms": 28.217345,
+            "cycle_ms": 923.475186
+          },
+          {
+            "gei": 35,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 573.906968,
+            "exec_block_stm_ms": 91.735614,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 111.98578599999999,
+            "tb_persist_ms": 34.048204,
+            "cycle_ms": 934.339812
+          },
+          {
+            "gei": 36,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 327.401012,
+            "exec_block_stm_ms": 44.658308,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 57.011495999999994,
+            "tb_persist_ms": 20.064756,
+            "cycle_ms": 505.294032
+          },
+          {
+            "gei": 37,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 751.667016,
+            "exec_block_stm_ms": 162.206511,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 201.281523,
+            "tb_persist_ms": 51.40278,
+            "cycle_ms": 1295.083975
+          },
+          {
+            "gei": 38,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1100.575271,
+            "exec_block_stm_ms": 161.516785,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 213.303586,
+            "tb_persist_ms": 57.625704,
+            "cycle_ms": 1737.869722
+          },
+          {
+            "gei": 39,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1095.622815,
+            "exec_block_stm_ms": 177.557673,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 220.652063,
+            "tb_persist_ms": 84.410708,
+            "cycle_ms": 1774.006514
+          },
+          {
+            "gei": 40,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 601.553875,
+            "exec_block_stm_ms": 88.017682,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 109.69317699999999,
+            "tb_persist_ms": 26.76664,
+            "cycle_ms": 962.370851
+          },
+          {
+            "gei": 41,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 744.490736,
+            "exec_block_stm_ms": 123.091354,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 154.61249999999998,
+            "tb_persist_ms": 50.861251,
+            "cycle_ms": 1230.255334
+          },
+          {
+            "gei": 42,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 713.030314,
+            "exec_block_stm_ms": 104.463381,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 142.222292,
+            "tb_persist_ms": 40.299966,
+            "cycle_ms": 1194.670866
+          },
+          {
+            "gei": 43,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 658.593381,
+            "exec_block_stm_ms": 96.879803,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 121.414907,
+            "tb_persist_ms": 40.219891,
+            "cycle_ms": 1065.536704
+          },
+          {
+            "gei": 44,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 905.319854,
+            "exec_block_stm_ms": 141.607287,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 173.79664700000004,
+            "tb_persist_ms": 50.234633,
+            "cycle_ms": 1465.973723
+          },
+          {
+            "gei": 45,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 686.175436,
+            "exec_block_stm_ms": 94.932849,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 119.57542000000001,
+            "tb_persist_ms": 28.904618,
+            "cycle_ms": 1108.837022
+          },
+          {
+            "gei": 46,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 955.803385,
+            "exec_block_stm_ms": 134.339664,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 169.092137,
+            "tb_persist_ms": 46.061495,
+            "cycle_ms": 1481.178341
+          },
+          {
+            "gei": 47,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1092.103238,
+            "exec_block_stm_ms": 169.763976,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 212.805635,
+            "tb_persist_ms": 52.615277,
+            "cycle_ms": 1707.561067
+          },
+          {
+            "gei": 48,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 890.557824,
+            "exec_block_stm_ms": 114.370492,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 141.985033,
+            "tb_persist_ms": 49.264723,
+            "cycle_ms": 1364.936107
+          },
+          {
+            "gei": 49,
+            "tx_count": 18000,
+            "wait_predecessor_ms": 1244.298433,
+            "exec_block_stm_ms": 193.203524,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 251.094656,
+            "tb_persist_ms": 72.212707,
+            "cycle_ms": 1982.625126
+          },
+          {
+            "gei": 50,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 159.340518,
+            "exec_block_stm_ms": 144.495328,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 153.465823,
+            "tb_persist_ms": 11.097715,
+            "cycle_ms": 404.594196
+          },
+          {
+            "gei": 51,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1106.291076,
+            "exec_block_stm_ms": 161.647175,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 209.620969,
+            "tb_persist_ms": 48.384177,
+            "cycle_ms": 1742.736816
+          },
+          {
+            "gei": 52,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 384.701972,
+            "exec_block_stm_ms": 71.678027,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 88.885228,
+            "tb_persist_ms": 17.262888,
+            "cycle_ms": 676.511649
+          },
+          {
+            "gei": 53,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 971.252573,
+            "exec_block_stm_ms": 143.338583,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 179.654383,
+            "tb_persist_ms": 47.581596,
+            "cycle_ms": 1544.354721
+          },
+          {
+            "gei": 54,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 640.972854,
+            "exec_block_stm_ms": 89.83388,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 110.321822,
+            "tb_persist_ms": 36.339186,
+            "cycle_ms": 998.656852
+          },
+          {
+            "gei": 55,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 638.595047,
+            "exec_block_stm_ms": 129.384649,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 151.454051,
+            "tb_persist_ms": 26.702276,
+            "cycle_ms": 1022.287117
+          },
+          {
+            "gei": 56,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 403.667137,
+            "exec_block_stm_ms": 55.576546,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 67.874055,
+            "tb_persist_ms": 17.255411,
+            "cycle_ms": 637.11518
+          },
+          {
+            "gei": 57,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 379.955755,
+            "exec_block_stm_ms": 58.492567,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 70.8153,
+            "tb_persist_ms": 26.145236,
+            "cycle_ms": 605.455238
+          },
+          {
+            "gei": 58,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 521.694765,
+            "exec_block_stm_ms": 73.83687,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 90.31612200000001,
+            "tb_persist_ms": 24.285946,
+            "cycle_ms": 805.832347
+          },
+          {
+            "gei": 59,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 777.157919,
+            "exec_block_stm_ms": 107.066324,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 132.426345,
+            "tb_persist_ms": 32.931587,
+            "cycle_ms": 1204.111472
+          },
+          {
+            "gei": 60,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 573.206479,
+            "exec_block_stm_ms": 76.726222,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 93.08652400000001,
+            "tb_persist_ms": 19.84983,
+            "cycle_ms": 852.677786
+          },
+          {
+            "gei": 61,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 525.658608,
+            "exec_block_stm_ms": 109.577085,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 126.812072,
+            "tb_persist_ms": 31.888741,
+            "cycle_ms": 870.330356
+          },
+          {
+            "gei": 62,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 505.939582,
+            "exec_block_stm_ms": 112.22373,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 132.422375,
+            "tb_persist_ms": 29.802899,
+            "cycle_ms": 860.911885
+          },
+          {
+            "gei": 63,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 629.616073,
+            "exec_block_stm_ms": 109.025875,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 135.175746,
+            "tb_persist_ms": 54.344197,
+            "cycle_ms": 1027.166856
+          },
+          {
+            "gei": 64,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 847.394552,
+            "exec_block_stm_ms": 120.501389,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 150.31149,
+            "tb_persist_ms": 51.631271,
+            "cycle_ms": 1313.368352
+          },
+          {
+            "gei": 65,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 429.583742,
+            "exec_block_stm_ms": 65.166311,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 80.14008099999998,
+            "tb_persist_ms": 31.459301,
+            "cycle_ms": 694.121377
+          },
+          {
+            "gei": 66,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 279.543009,
+            "exec_block_stm_ms": 52.842871,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 66.60064200000001,
+            "tb_persist_ms": 23.916652,
+            "cycle_ms": 465.819769
+          },
+          {
+            "gei": 67,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 969.229398,
+            "exec_block_stm_ms": 173.090562,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 212.354407,
+            "tb_persist_ms": 58.564414,
+            "cycle_ms": 1631.273108
+          },
+          {
+            "gei": 68,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 565.07224,
+            "exec_block_stm_ms": 97.539029,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 120.74562300000001,
+            "tb_persist_ms": 30.387051,
+            "cycle_ms": 912.559378
+          },
+          {
+            "gei": 69,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 139.650286,
+            "exec_block_stm_ms": 21.835568,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 27.835783,
+            "tb_persist_ms": 0,
+            "cycle_ms": 274.75222
+          },
+          {
+            "gei": 70,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 136.296974,
+            "exec_block_stm_ms": 19.527578,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 27.638465,
+            "tb_persist_ms": 12.111802,
+            "cycle_ms": 236.328592
+          },
+          {
+            "gei": 71,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 726.741957,
+            "exec_block_stm_ms": 129.798556,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 160.48403699999997,
+            "tb_persist_ms": 41.225444,
+            "cycle_ms": 1209.686068
+          },
+          {
+            "gei": 72,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 665.819284,
+            "exec_block_stm_ms": 120.144128,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 148.08935,
+            "tb_persist_ms": 33.758326,
+            "cycle_ms": 1101.009998
+          },
+          {
+            "gei": 73,
+            "tx_count": 20000,
+            "wait_predecessor_ms": 1274.061843,
+            "exec_block_stm_ms": 178.508127,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 232.30230799999998,
+            "tb_persist_ms": 73.009187,
+            "cycle_ms": 1995.988907
+          },
+          {
+            "gei": 74,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 279.865496,
+            "exec_block_stm_ms": 92.893502,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 103.944056,
+            "tb_persist_ms": 26.809542,
+            "cycle_ms": 515.383089
+          },
+          {
+            "gei": 75,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 426.137238,
+            "exec_block_stm_ms": 72.249877,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 92.96275,
+            "tb_persist_ms": 29.553839,
+            "cycle_ms": 690.323787
+          },
+          {
+            "gei": 76,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 540.489123,
+            "exec_block_stm_ms": 88.561828,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 107.555473,
+            "tb_persist_ms": 29.194019,
+            "cycle_ms": 860.235912
+          },
+          {
+            "gei": 77,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 574.944249,
+            "exec_block_stm_ms": 74.335879,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 91.54585,
+            "tb_persist_ms": 30.423429,
+            "cycle_ms": 898.371803
+          },
+          {
+            "gei": 78,
+            "tx_count": 19924,
+            "wait_predecessor_ms": 1250.920035,
+            "exec_block_stm_ms": 196.885054,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 242.840387,
+            "tb_persist_ms": 61.825848,
+            "cycle_ms": 1960.045773
+          },
+          {
+            "gei": 79,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1050.410209,
+            "exec_block_stm_ms": 147.279925,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 184.819506,
+            "tb_persist_ms": 48.516169,
+            "cycle_ms": 1635.515429
+          },
+          {
+            "gei": 80,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 563.127217,
+            "exec_block_stm_ms": 97.200066,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 115.140375,
+            "tb_persist_ms": 26.967253,
+            "cycle_ms": 910.806648
+          },
+          {
+            "gei": 81,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 741.631675,
+            "exec_block_stm_ms": 125.214967,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 163.176652,
+            "tb_persist_ms": 34.968996,
+            "cycle_ms": 1267.531496
+          },
+          {
+            "gei": 82,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 787.055112,
+            "exec_block_stm_ms": 114.470384,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 152.079773,
+            "tb_persist_ms": 37.46305,
+            "cycle_ms": 1244.555076
+          },
+          {
+            "gei": 83,
+            "tx_count": 28000,
+            "wait_predecessor_ms": 1642.86011,
+            "exec_block_stm_ms": 240.724989,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 305.38561799999997,
+            "tb_persist_ms": 98.72757,
+            "cycle_ms": 2629.567503
+          },
+          {
+            "gei": 84,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 734.690954,
+            "exec_block_stm_ms": 263.264538,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 298.06324900000004,
+            "tb_persist_ms": 37.780809,
+            "cycle_ms": 1388.604741
+          },
+          {
+            "gei": 85,
+            "tx_count": 7855,
+            "wait_predecessor_ms": 522.451806,
+            "exec_block_stm_ms": 77.874192,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 94.279656,
+            "tb_persist_ms": 23.679402,
+            "cycle_ms": 821.522956
+          },
+          {
+            "gei": 86,
+            "tx_count": 5299,
+            "wait_predecessor_ms": 333.307759,
+            "exec_block_stm_ms": 88.015119,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 102.225682,
+            "tb_persist_ms": 14.645016,
+            "cycle_ms": 608.335183
+          }
+        ],
+        "avg_ta_computation_ms": 148.7686049404762,
+        "avg_tb_persist_ms": 40.678035202380954,
+        "avg_cycle_ms": 1103.0505732168674,
+        "avg_tx_per_block": 9774.738095238095,
+        "baseline_steady_tps": 8861.550261228425,
+        "amdahl_ceiling_tps": 65704.30702868434,
+        "delta_tps_potential_pct": 641.4538663303383
+      }
+    },
+    {
+      "run": 2,
+      "prefix": "b1_unlimited_60s_run_2",
+      "tps": 13923.654726596946,
+      "confirmed_txs": 835633,
+      "blocks_produced": 87,
+      "zero_fork_verified": true,
+      "node_roots_consistent": true,
+      "timeline_metrics": {
+        "num_steady_blocks": 88,
+        "steady_blocks": [
+          {
+            "gei": 3,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 1426.579704,
+            "exec_block_stm_ms": 333.275644,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 390.235478,
+            "tb_persist_ms": 128.977243,
+            "cycle_ms": 0
+          },
+          {
+            "gei": 4,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 611.672603,
+            "exec_block_stm_ms": 108.702022,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 136.456594,
+            "tb_persist_ms": 21.973304,
+            "cycle_ms": 980.813721
+          },
+          {
+            "gei": 5,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 147.30694,
+            "exec_block_stm_ms": 23.722521,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 33.06797,
+            "tb_persist_ms": 10.07914,
+            "cycle_ms": 250.417948
+          },
+          {
+            "gei": 6,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 430.422966,
+            "exec_block_stm_ms": 97.655828,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 124.071952,
+            "tb_persist_ms": 17.073591,
+            "cycle_ms": 704.500838
+          },
+          {
+            "gei": 7,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 324.418603,
+            "exec_block_stm_ms": 69.941796,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 84.90404799999999,
+            "tb_persist_ms": 20.688174,
+            "cycle_ms": 530.468009
+          },
+          {
+            "gei": 8,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 157.117692,
+            "exec_block_stm_ms": 35.249126,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 46.60314699999999,
+            "tb_persist_ms": 10.463097,
+            "cycle_ms": 268.757966
+          },
+          {
+            "gei": 9,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 330.399989,
+            "exec_block_stm_ms": 62.259582,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 75.454444,
+            "tb_persist_ms": 21.881435,
+            "cycle_ms": 523.478771
+          },
+          {
+            "gei": 10,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 160.822025,
+            "exec_block_stm_ms": 37.727718,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 46.881600000000006,
+            "tb_persist_ms": 11.156091,
+            "cycle_ms": 274.149835
+          },
+          {
+            "gei": 11,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 340.058871,
+            "exec_block_stm_ms": 65.995957,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 81.423217,
+            "tb_persist_ms": 21.096989,
+            "cycle_ms": 540.884724
+          },
+          {
+            "gei": 12,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 609.017582,
+            "exec_block_stm_ms": 101.18363,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 130.870699,
+            "tb_persist_ms": 36.098509,
+            "cycle_ms": 1024.017892
+          },
+          {
+            "gei": 13,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 628.327841,
+            "exec_block_stm_ms": 86.946316,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 110.126514,
+            "tb_persist_ms": 29.824457,
+            "cycle_ms": 1007.874784
+          },
+          {
+            "gei": 14,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 307.157993,
+            "exec_block_stm_ms": 47.245364,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 60.912935000000004,
+            "tb_persist_ms": 15.853489,
+            "cycle_ms": 481.97196
+          },
+          {
+            "gei": 15,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 625.73924,
+            "exec_block_stm_ms": 92.928978,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 119.057495,
+            "tb_persist_ms": 37.346969,
+            "cycle_ms": 1035.56822
+          },
+          {
+            "gei": 16,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 830.057905,
+            "exec_block_stm_ms": 140.325743,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 177.24485199999998,
+            "tb_persist_ms": 44.258469,
+            "cycle_ms": 1353.874497
+          },
+          {
+            "gei": 17,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1185.862185,
+            "exec_block_stm_ms": 212.566735,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 258.024883,
+            "tb_persist_ms": 66.089783,
+            "cycle_ms": 1912.556241
+          },
+          {
+            "gei": 18,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 311.220768,
+            "exec_block_stm_ms": 65.974774,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 80.82945099999999,
+            "tb_persist_ms": 20.092628,
+            "cycle_ms": 553.526519
+          },
+          {
+            "gei": 19,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 440.491154,
+            "exec_block_stm_ms": 82.095322,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 106.66213199999999,
+            "tb_persist_ms": 36.289737,
+            "cycle_ms": 744.876096
+          },
+          {
+            "gei": 20,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 569.99548,
+            "exec_block_stm_ms": 111.732255,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 140.666319,
+            "tb_persist_ms": 33.324729,
+            "cycle_ms": 956.495451
+          },
+          {
+            "gei": 21,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 687.353103,
+            "exec_block_stm_ms": 117.848412,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 144.54856,
+            "tb_persist_ms": 34.540737,
+            "cycle_ms": 1166.512719
+          },
+          {
+            "gei": 22,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 208.81169,
+            "exec_block_stm_ms": 180.928748,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 190.03476200000003,
+            "tb_persist_ms": 0,
+            "cycle_ms": 476.780739
+          },
+          {
+            "gei": 23,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 431.87374,
+            "exec_block_stm_ms": 81.019238,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 102.218029,
+            "tb_persist_ms": 34.396955,
+            "cycle_ms": 761.411031
+          },
+          {
+            "gei": 24,
+            "tx_count": 18000,
+            "wait_predecessor_ms": 1370.507148,
+            "exec_block_stm_ms": 315.01086,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 384.168571,
+            "tb_persist_ms": 80.365864,
+            "cycle_ms": 2318.432047
+          },
+          {
+            "gei": 25,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 802.801162,
+            "exec_block_stm_ms": 141.516352,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 173.96014200000002,
+            "tb_persist_ms": 58.022675,
+            "cycle_ms": 1353.866281
+          },
+          {
+            "gei": 26,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 310.855527,
+            "exec_block_stm_ms": 44.292616,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 56.464368,
+            "tb_persist_ms": 28.694907,
+            "cycle_ms": 512.107065
+          },
+          {
+            "gei": 27,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 895.878697,
+            "exec_block_stm_ms": 149.541541,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 191.61732899999998,
+            "tb_persist_ms": 60.392671,
+            "cycle_ms": 1449.418549
+          },
+          {
+            "gei": 28,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 608.377243,
+            "exec_block_stm_ms": 90.014289,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 120.70930500000001,
+            "tb_persist_ms": 38.611956,
+            "cycle_ms": 961.890745
+          },
+          {
+            "gei": 29,
+            "tx_count": 18000,
+            "wait_predecessor_ms": 1196.248875,
+            "exec_block_stm_ms": 207.518873,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 275.713365,
+            "tb_persist_ms": 71.529392,
+            "cycle_ms": 1997.550615
+          },
+          {
+            "gei": 30,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 644.887867,
+            "exec_block_stm_ms": 97.442723,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 120.805757,
+            "tb_persist_ms": 45.465545,
+            "cycle_ms": 1022.52087
+          },
+          {
+            "gei": 31,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 784.663519,
+            "exec_block_stm_ms": 130.323405,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 162.065726,
+            "tb_persist_ms": 31.86269,
+            "cycle_ms": 1324.92217
+          },
+          {
+            "gei": 32,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 851.465572,
+            "exec_block_stm_ms": 108.704874,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 150.472116,
+            "tb_persist_ms": 35.993329,
+            "cycle_ms": 1320.379327
+          },
+          {
+            "gei": 33,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 816.223227,
+            "exec_block_stm_ms": 107.136903,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 134.121557,
+            "tb_persist_ms": 45.61877,
+            "cycle_ms": 1264.005267
+          },
+          {
+            "gei": 34,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 963.510631,
+            "exec_block_stm_ms": 137.577044,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 173.223029,
+            "tb_persist_ms": 56.702173,
+            "cycle_ms": 1503.493738
+          },
+          {
+            "gei": 35,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 947.045178,
+            "exec_block_stm_ms": 131.165391,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 169.467872,
+            "tb_persist_ms": 50.764598,
+            "cycle_ms": 1528.958695
+          },
+          {
+            "gei": 36,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 413.865747,
+            "exec_block_stm_ms": 71.594481,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 85.567639,
+            "tb_persist_ms": 24.229282,
+            "cycle_ms": 668.7236
+          },
+          {
+            "gei": 37,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 434.148682,
+            "exec_block_stm_ms": 66.557581,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 95.707869,
+            "tb_persist_ms": 32.6858,
+            "cycle_ms": 743.545618
+          },
+          {
+            "gei": 38,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 294.171688,
+            "exec_block_stm_ms": 42.618953,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 60.135935,
+            "tb_persist_ms": 20.116919,
+            "cycle_ms": 489.733251
+          },
+          {
+            "gei": 39,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 732.515583,
+            "exec_block_stm_ms": 121.24902,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 159.70559,
+            "tb_persist_ms": 51.976898,
+            "cycle_ms": 1205.651778
+          },
+          {
+            "gei": 40,
+            "tx_count": 20000,
+            "wait_predecessor_ms": 1356.788706,
+            "exec_block_stm_ms": 234.880478,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 288.730087,
+            "tb_persist_ms": 75.532198,
+            "cycle_ms": 2208.932524
+          },
+          {
+            "gei": 41,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 1052.327405,
+            "exec_block_stm_ms": 182.931018,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 230.595819,
+            "tb_persist_ms": 62.032681,
+            "cycle_ms": 1713.167837
+          },
+          {
+            "gei": 42,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 896.247131,
+            "exec_block_stm_ms": 140.894728,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 176.370453,
+            "tb_persist_ms": 49.947269,
+            "cycle_ms": 1445.994405
+          },
+          {
+            "gei": 43,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 801.967361,
+            "exec_block_stm_ms": 135.511152,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 169.79119400000002,
+            "tb_persist_ms": 61.732697,
+            "cycle_ms": 1360.827882
+          },
+          {
+            "gei": 44,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 536.806962,
+            "exec_block_stm_ms": 99.363371,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 134.494792,
+            "tb_persist_ms": 35.629825,
+            "cycle_ms": 927.659695
+          },
+          {
+            "gei": 45,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 933.238909,
+            "exec_block_stm_ms": 153.634199,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 194.265282,
+            "tb_persist_ms": 65.567502,
+            "cycle_ms": 1536.875191
+          },
+          {
+            "gei": 46,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 690.689073,
+            "exec_block_stm_ms": 148.68545,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 177.02970200000001,
+            "tb_persist_ms": 49.879535,
+            "cycle_ms": 1149.54505
+          },
+          {
+            "gei": 47,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 768.979828,
+            "exec_block_stm_ms": 129.046769,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 157.13170200000002,
+            "tb_persist_ms": 36.350733,
+            "cycle_ms": 1191.479901
+          },
+          {
+            "gei": 48,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 539.870125,
+            "exec_block_stm_ms": 91.966632,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 110.02839200000001,
+            "tb_persist_ms": 27.068228,
+            "cycle_ms": 887.939061
+          },
+          {
+            "gei": 49,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 674.086304,
+            "exec_block_stm_ms": 104.216225,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 129.756585,
+            "tb_persist_ms": 26.932875,
+            "cycle_ms": 1069.182192
+          },
+          {
+            "gei": 50,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 519.369928,
+            "exec_block_stm_ms": 79.428064,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 98.05701400000001,
+            "tb_persist_ms": 29.240928,
+            "cycle_ms": 854.534529
+          },
+          {
+            "gei": 51,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 1082.401864,
+            "exec_block_stm_ms": 136.628249,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 175.97510100000002,
+            "tb_persist_ms": 44.809971,
+            "cycle_ms": 1625.445621
+          },
+          {
+            "gei": 52,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1184.098154,
+            "exec_block_stm_ms": 179.825125,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 224.126112,
+            "tb_persist_ms": 53.938489,
+            "cycle_ms": 1825.228198
+          },
+          {
+            "gei": 53,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1094.78574,
+            "exec_block_stm_ms": 151.22885,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 204.675425,
+            "tb_persist_ms": 57.757161,
+            "cycle_ms": 1731.419367
+          },
+          {
+            "gei": 54,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 716.996121,
+            "exec_block_stm_ms": 90.250851,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 114.14099399999999,
+            "tb_persist_ms": 32.866409,
+            "cycle_ms": 1151.829078
+          },
+          {
+            "gei": 55,
+            "tx_count": 22000,
+            "wait_predecessor_ms": 1381.102203,
+            "exec_block_stm_ms": 248.821415,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 311.356271,
+            "tb_persist_ms": 70.5047,
+            "cycle_ms": 2295.371641
+          },
+          {
+            "gei": 56,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 936.570706,
+            "exec_block_stm_ms": 154.722746,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 195.791636,
+            "tb_persist_ms": 57.756708,
+            "cycle_ms": 1535.983202
+          },
+          {
+            "gei": 57,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 931.992457,
+            "exec_block_stm_ms": 151.02672,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 187.43558700000003,
+            "tb_persist_ms": 60.433909,
+            "cycle_ms": 1507.00128
+          },
+          {
+            "gei": 58,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 777.771303,
+            "exec_block_stm_ms": 125.96253,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 160.248659,
+            "tb_persist_ms": 62.100427,
+            "cycle_ms": 1286.660477
+          },
+          {
+            "gei": 59,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 504.46724,
+            "exec_block_stm_ms": 102.080068,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 125.611836,
+            "tb_persist_ms": 34.230987,
+            "cycle_ms": 864.858221
+          },
+          {
+            "gei": 60,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1021.175782,
+            "exec_block_stm_ms": 166.379162,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 210.048156,
+            "tb_persist_ms": 62.054866,
+            "cycle_ms": 1678.739881
+          },
+          {
+            "gei": 61,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 310.62237,
+            "exec_block_stm_ms": 42.293026,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 55.792888,
+            "tb_persist_ms": 22.578459,
+            "cycle_ms": 503.579805
+          },
+          {
+            "gei": 62,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 679.385705,
+            "exec_block_stm_ms": 110.867132,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 179.654844,
+            "tb_persist_ms": 24.691548,
+            "cycle_ms": 1125.15757
+          },
+          {
+            "gei": 63,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 772.184765,
+            "exec_block_stm_ms": 111.255843,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 137.773667,
+            "tb_persist_ms": 29.536092,
+            "cycle_ms": 1205.487489
+          },
+          {
+            "gei": 64,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 259.523408,
+            "exec_block_stm_ms": 36.641067,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 50.619299,
+            "tb_persist_ms": 15.989288,
+            "cycle_ms": 431.583043
+          },
+          {
+            "gei": 65,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 530.913293,
+            "exec_block_stm_ms": 76.115041,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 94.26155500000002,
+            "tb_persist_ms": 17.49361,
+            "cycle_ms": 817.830934
+          },
+          {
+            "gei": 66,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 526.218988,
+            "exec_block_stm_ms": 75.156497,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 93.123223,
+            "tb_persist_ms": 32.7272,
+            "cycle_ms": 855.747307
+          },
+          {
+            "gei": 67,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 800.364894,
+            "exec_block_stm_ms": 108.606528,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 136.02131,
+            "tb_persist_ms": 39.441336,
+            "cycle_ms": 1220.346885
+          },
+          {
+            "gei": 68,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 535.697143,
+            "exec_block_stm_ms": 72.527242,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 90.634304,
+            "tb_persist_ms": 27.427241,
+            "cycle_ms": 833.810489
+          },
+          {
+            "gei": 69,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 297.341403,
+            "exec_block_stm_ms": 50.311101,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 58.776434,
+            "tb_persist_ms": 16.328357,
+            "cycle_ms": 469.702402
+          },
+          {
+            "gei": 70,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1019.626462,
+            "exec_block_stm_ms": 158.087604,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 195.54120999999998,
+            "tb_persist_ms": 55.246763,
+            "cycle_ms": 1583.057468
+          },
+          {
+            "gei": 71,
+            "tx_count": 18000,
+            "wait_predecessor_ms": 1160.532283,
+            "exec_block_stm_ms": 189.008529,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 232.125227,
+            "tb_persist_ms": 57.354384,
+            "cycle_ms": 1846.471454
+          },
+          {
+            "gei": 72,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 505.0277,
+            "exec_block_stm_ms": 109.285297,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 129.55436500000002,
+            "tb_persist_ms": 31.551875,
+            "cycle_ms": 859.39419
+          },
+          {
+            "gei": 73,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 732.639984,
+            "exec_block_stm_ms": 104.615006,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 128.34255,
+            "tb_persist_ms": 51.396097,
+            "cycle_ms": 1139.930447
+          },
+          {
+            "gei": 74,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 669.058175,
+            "exec_block_stm_ms": 118.0088,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 144.485256,
+            "tb_persist_ms": 35.113238,
+            "cycle_ms": 1144.921037
+          },
+          {
+            "gei": 75,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 542.174356,
+            "exec_block_stm_ms": 95.899468,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 115.462099,
+            "tb_persist_ms": 36.348617,
+            "cycle_ms": 871.916252
+          },
+          {
+            "gei": 76,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 172.955614,
+            "exec_block_stm_ms": 29.843325,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 35.689155,
+            "tb_persist_ms": 0,
+            "cycle_ms": 286.217246
+          },
+          {
+            "gei": 77,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 241.270682,
+            "exec_block_stm_ms": 46.198874,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 55.697546,
+            "tb_persist_ms": 18.517111,
+            "cycle_ms": 409.396485
+          },
+          {
+            "gei": 78,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 800.651225,
+            "exec_block_stm_ms": 112.640412,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 144.140966,
+            "tb_persist_ms": 38.450872,
+            "cycle_ms": 1266.507948
+          },
+          {
+            "gei": 79,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 810.226929,
+            "exec_block_stm_ms": 116.054054,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 150.502015,
+            "tb_persist_ms": 46.021613,
+            "cycle_ms": 1296.957598
+          },
+          {
+            "gei": 80,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 766.574088,
+            "exec_block_stm_ms": 146.389081,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 177.743358,
+            "tb_persist_ms": 40.346609,
+            "cycle_ms": 1298.616989
+          },
+          {
+            "gei": 81,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1033.255142,
+            "exec_block_stm_ms": 186.469664,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 234.006022,
+            "tb_persist_ms": 53.847586,
+            "cycle_ms": 1688.851936
+          },
+          {
+            "gei": 82,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1002.69242,
+            "exec_block_stm_ms": 159.48016,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 205.726992,
+            "tb_persist_ms": 57.66966,
+            "cycle_ms": 1634.978263
+          },
+          {
+            "gei": 83,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 762.557756,
+            "exec_block_stm_ms": 131.729342,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 177.00740000000002,
+            "tb_persist_ms": 55.415495,
+            "cycle_ms": 1297.257515
+          },
+          {
+            "gei": 84,
+            "tx_count": 8274,
+            "wait_predecessor_ms": 536.384404,
+            "exec_block_stm_ms": 90.684148,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 112.405638,
+            "tb_persist_ms": 40.595033,
+            "cycle_ms": 915.230308
+          },
+          {
+            "gei": 85,
+            "tx_count": 8771,
+            "wait_predecessor_ms": 586.535949,
+            "exec_block_stm_ms": 101.440209,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 125.899598,
+            "tb_persist_ms": 32.140875,
+            "cycle_ms": 972.213996
+          },
+          {
+            "gei": 86,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 317.649063,
+            "exec_block_stm_ms": 56.990538,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 71.922421,
+            "tb_persist_ms": 19.186746,
+            "cycle_ms": 519.61083
+          },
+          {
+            "gei": 87,
+            "tx_count": 10536,
+            "wait_predecessor_ms": 739.277672,
+            "exec_block_stm_ms": 96.364941,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 120.532077,
+            "tb_persist_ms": 37.754128,
+            "cycle_ms": 1148.015773
+          },
+          {
+            "gei": 88,
+            "tx_count": 8052,
+            "wait_predecessor_ms": 568.988847,
+            "exec_block_stm_ms": 88.00476,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 106.16739000000001,
+            "tb_persist_ms": 32.958248,
+            "cycle_ms": 910.83648
+          },
+          {
+            "gei": 89,
+            "tx_count": 1613,
+            "wait_predecessor_ms": 130.232666,
+            "exec_block_stm_ms": 24.152571,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 31.191131999999996,
+            "tb_persist_ms": 0,
+            "cycle_ms": 223.399895
+          },
+          {
+            "gei": 90,
+            "tx_count": 1283,
+            "wait_predecessor_ms": 100.162983,
+            "exec_block_stm_ms": 26.19506,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 29.548048,
+            "tb_persist_ms": 0,
+            "cycle_ms": 166.369826
+          }
+        ],
+        "avg_ta_computation_ms": 142.61602317045455,
+        "avg_tb_persist_ms": 38.716308795454545,
+        "avg_cycle_ms": 1080.5311571264367,
+        "avg_tx_per_block": 9483.28409090909,
+        "baseline_steady_tps": 8776.50221223507,
+        "amdahl_ceiling_tps": 66495.22178566623,
+        "delta_tps_potential_pct": 657.6506013177683
+      }
+    },
+    {
+      "run": 3,
+      "prefix": "b1_unlimited_60s_run_3",
+      "tps": 13509.648337710074,
+      "confirmed_txs": 810773,
+      "blocks_produced": 87,
+      "zero_fork_verified": true,
+      "node_roots_consistent": true,
+      "timeline_metrics": {
+        "num_steady_blocks": 91,
+        "steady_blocks": [
+          {
+            "gei": 3,
+            "tx_count": 11000,
+            "wait_predecessor_ms": 1276.149231,
+            "exec_block_stm_ms": 301.804898,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 353.88228999999995,
+            "tb_persist_ms": 87.245435,
+            "cycle_ms": 0
+          },
+          {
+            "gei": 4,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 518.466209,
+            "exec_block_stm_ms": 120.830385,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 167.302658,
+            "tb_persist_ms": 43.401083,
+            "cycle_ms": 932.613462
+          },
+          {
+            "gei": 5,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 801.355733,
+            "exec_block_stm_ms": 133.591823,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 178.088708,
+            "tb_persist_ms": 45.044839,
+            "cycle_ms": 1396.950734
+          },
+          {
+            "gei": 6,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 376.015688,
+            "exec_block_stm_ms": 45.016681,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 56.610141999999996,
+            "tb_persist_ms": 20.289777,
+            "cycle_ms": 591.247513
+          },
+          {
+            "gei": 7,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 455.678021,
+            "exec_block_stm_ms": 69.77966,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 90.227822,
+            "tb_persist_ms": 26.518401,
+            "cycle_ms": 728.193759
+          },
+          {
+            "gei": 8,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 320.194043,
+            "exec_block_stm_ms": 61.968886,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 77.004243,
+            "tb_persist_ms": 24.646594,
+            "cycle_ms": 533.611066
+          },
+          {
+            "gei": 9,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 345.771912,
+            "exec_block_stm_ms": 68.908008,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 83.325776,
+            "tb_persist_ms": 19.274983,
+            "cycle_ms": 565.051842
+          },
+          {
+            "gei": 10,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 355.590908,
+            "exec_block_stm_ms": 57.307245,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 73.745609,
+            "tb_persist_ms": 24.206889,
+            "cycle_ms": 562.729076
+          },
+          {
+            "gei": 11,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 1009.899284,
+            "exec_block_stm_ms": 165.334173,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 201.272624,
+            "tb_persist_ms": 62.470504,
+            "cycle_ms": 1620.434978
+          },
+          {
+            "gei": 12,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 539.713754,
+            "exec_block_stm_ms": 83.168482,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 101.158459,
+            "tb_persist_ms": 28.30046,
+            "cycle_ms": 867.18164
+          },
+          {
+            "gei": 13,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 895.23065,
+            "exec_block_stm_ms": 196.936816,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 246.35086399999997,
+            "tb_persist_ms": 56.389012,
+            "cycle_ms": 1542.733321
+          },
+          {
+            "gei": 14,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 755.835461,
+            "exec_block_stm_ms": 144.769945,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 188.252303,
+            "tb_persist_ms": 48.971028,
+            "cycle_ms": 1382.070212
+          },
+          {
+            "gei": 15,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 862.905104,
+            "exec_block_stm_ms": 167.607939,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 214.90626699999999,
+            "tb_persist_ms": 53.198857,
+            "cycle_ms": 1521.111387
+          },
+          {
+            "gei": 16,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 819.901645,
+            "exec_block_stm_ms": 171.132214,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 203.59939500000002,
+            "tb_persist_ms": 42.441186,
+            "cycle_ms": 1445.467041
+          },
+          {
+            "gei": 17,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 263.601859,
+            "exec_block_stm_ms": 130.375668,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 142.13321399999998,
+            "tb_persist_ms": 17.836192,
+            "cycle_ms": 576.997745
+          },
+          {
+            "gei": 18,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 814.123926,
+            "exec_block_stm_ms": 131.327949,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 165.15621199999998,
+            "tb_persist_ms": 48.554154,
+            "cycle_ms": 1322.519391
+          },
+          {
+            "gei": 19,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 592.248965,
+            "exec_block_stm_ms": 100.698543,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 122.14226500000001,
+            "tb_persist_ms": 29.707423,
+            "cycle_ms": 973.573416
+          },
+          {
+            "gei": 20,
+            "tx_count": 20000,
+            "wait_predecessor_ms": 1508.35548,
+            "exec_block_stm_ms": 195.447945,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 252.12971199999998,
+            "tb_persist_ms": 86.303255,
+            "cycle_ms": 2458.557584
+          },
+          {
+            "gei": 21,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 154.666794,
+            "exec_block_stm_ms": 665.901558,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 677.9389430000001,
+            "tb_persist_ms": 11.172187,
+            "cycle_ms": 1011.728957
+          },
+          {
+            "gei": 22,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 887.658851,
+            "exec_block_stm_ms": 162.845231,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 223.660346,
+            "tb_persist_ms": 55.757618,
+            "cycle_ms": 1438.388712
+          },
+          {
+            "gei": 23,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 566.428147,
+            "exec_block_stm_ms": 92.635726,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 127.44273900000002,
+            "tb_persist_ms": 40.18706,
+            "cycle_ms": 962.20736
+          },
+          {
+            "gei": 24,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 698.814797,
+            "exec_block_stm_ms": 126.103795,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 162.087838,
+            "tb_persist_ms": 47.598168,
+            "cycle_ms": 1151.594342
+          },
+          {
+            "gei": 25,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 578.330851,
+            "exec_block_stm_ms": 98.122363,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 129.648851,
+            "tb_persist_ms": 52.126031,
+            "cycle_ms": 976.192509
+          },
+          {
+            "gei": 26,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 274.494948,
+            "exec_block_stm_ms": 46.506649,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 57.938455000000005,
+            "tb_persist_ms": 24.054623,
+            "cycle_ms": 481.103248
+          },
+          {
+            "gei": 27,
+            "tx_count": 20000,
+            "wait_predecessor_ms": 1243.003118,
+            "exec_block_stm_ms": 287.300405,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 363.45752000000005,
+            "tb_persist_ms": 88.578891,
+            "cycle_ms": 2139.68551
+          },
+          {
+            "gei": 28,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 544.441731,
+            "exec_block_stm_ms": 121.570363,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 142.863664,
+            "tb_persist_ms": 35.995082,
+            "cycle_ms": 949.356306
+          },
+          {
+            "gei": 29,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 879.288919,
+            "exec_block_stm_ms": 150.538972,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 187.427559,
+            "tb_persist_ms": 53.14284,
+            "cycle_ms": 1436.797053
+          },
+          {
+            "gei": 30,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1080.177759,
+            "exec_block_stm_ms": 219.897846,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 278.740004,
+            "tb_persist_ms": 92.542299,
+            "cycle_ms": 1869.935712
+          },
+          {
+            "gei": 31,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 538.824123,
+            "exec_block_stm_ms": 102.164749,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 123.090145,
+            "tb_persist_ms": 41.110715,
+            "cycle_ms": 921.512562
+          },
+          {
+            "gei": 32,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 846.194212,
+            "exec_block_stm_ms": 123.878888,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 156.921466,
+            "tb_persist_ms": 44.175254,
+            "cycle_ms": 1316.509676
+          },
+          {
+            "gei": 33,
+            "tx_count": 24000,
+            "wait_predecessor_ms": 1671.726097,
+            "exec_block_stm_ms": 289.559009,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 360.362495,
+            "tb_persist_ms": 121.497047,
+            "cycle_ms": 2708.42267
+          },
+          {
+            "gei": 34,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1178.418458,
+            "exec_block_stm_ms": 190.26961,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 261.95597399999997,
+            "tb_persist_ms": 91.248193,
+            "cycle_ms": 1937.718136
+          },
+          {
+            "gei": 35,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 810.68108,
+            "exec_block_stm_ms": 151.541883,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 180.14347300000003,
+            "tb_persist_ms": 41.055675,
+            "cycle_ms": 1328.8768
+          },
+          {
+            "gei": 36,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 652.837127,
+            "exec_block_stm_ms": 99.930134,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 122.288529,
+            "tb_persist_ms": 41.239726,
+            "cycle_ms": 1064.282506
+          },
+          {
+            "gei": 37,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 145.150466,
+            "exec_block_stm_ms": 31.959394,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 37.989603,
+            "tb_persist_ms": 0,
+            "cycle_ms": 251.125523
+          },
+          {
+            "gei": 38,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 266.448083,
+            "exec_block_stm_ms": 40.827073,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 50.938488,
+            "tb_persist_ms": 14.862111,
+            "cycle_ms": 431.963879
+          },
+          {
+            "gei": 39,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1077.559264,
+            "exec_block_stm_ms": 161.807765,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 207.484694,
+            "tb_persist_ms": 45.022741,
+            "cycle_ms": 1637.29787
+          },
+          {
+            "gei": 40,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 810.409704,
+            "exec_block_stm_ms": 106.468229,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 137.010077,
+            "tb_persist_ms": 33.156871,
+            "cycle_ms": 1230.38889
+          },
+          {
+            "gei": 41,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 653.679697,
+            "exec_block_stm_ms": 117.013264,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 139.153411,
+            "tb_persist_ms": 27.133949,
+            "cycle_ms": 1068.620069
+          },
+          {
+            "gei": 42,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 435.232786,
+            "exec_block_stm_ms": 57.975445,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 72.712548,
+            "tb_persist_ms": 25.890363,
+            "cycle_ms": 676.396326
+          },
+          {
+            "gei": 43,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 664.641458,
+            "exec_block_stm_ms": 120.922936,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 160.560706,
+            "tb_persist_ms": 40.372791,
+            "cycle_ms": 1121.774939
+          },
+          {
+            "gei": 44,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 458.239412,
+            "exec_block_stm_ms": 70.059264,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 84.352189,
+            "tb_persist_ms": 28.453969,
+            "cycle_ms": 715.000398
+          },
+          {
+            "gei": 45,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 712.893022,
+            "exec_block_stm_ms": 112.726641,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 141.334087,
+            "tb_persist_ms": 36.245746,
+            "cycle_ms": 1107.041446
+          },
+          {
+            "gei": 46,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 904.776649,
+            "exec_block_stm_ms": 120.021639,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 152.101044,
+            "tb_persist_ms": 43.046197,
+            "cycle_ms": 1394.995883
+          },
+          {
+            "gei": 47,
+            "tx_count": 22000,
+            "wait_predecessor_ms": 1452.584548,
+            "exec_block_stm_ms": 221.279407,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 275.727807,
+            "tb_persist_ms": 83.472222,
+            "cycle_ms": 2286.317466
+          },
+          {
+            "gei": 48,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 348.650147,
+            "exec_block_stm_ms": 44.064266,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 59.658703,
+            "tb_persist_ms": 15.088793,
+            "cycle_ms": 532.125032
+          },
+          {
+            "gei": 49,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 799.733264,
+            "exec_block_stm_ms": 122.213467,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 149.99928,
+            "tb_persist_ms": 30.788865,
+            "cycle_ms": 1233.763179
+          },
+          {
+            "gei": 50,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 525.821243,
+            "exec_block_stm_ms": 80.96752,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 98.81965399999999,
+            "tb_persist_ms": 34.05449,
+            "cycle_ms": 864.564727
+          },
+          {
+            "gei": 51,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 269.014296,
+            "exec_block_stm_ms": 271.223932,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 286.81894800000003,
+            "tb_persist_ms": 16.628925,
+            "cycle_ms": 675.900169
+          },
+          {
+            "gei": 52,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1033.529064,
+            "exec_block_stm_ms": 154.135437,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 210.558337,
+            "tb_persist_ms": 46.490921,
+            "cycle_ms": 1632.453801
+          },
+          {
+            "gei": 53,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 288.903777,
+            "exec_block_stm_ms": 39.848607,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 49.089158999999995,
+            "tb_persist_ms": 12.803363,
+            "cycle_ms": 456.726585
+          },
+          {
+            "gei": 54,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 391.856264,
+            "exec_block_stm_ms": 56.786802,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 70.417156,
+            "tb_persist_ms": 21.792309,
+            "cycle_ms": 671.634064
+          },
+          {
+            "gei": 55,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 505.613122,
+            "exec_block_stm_ms": 89.898995,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 108.959313,
+            "tb_persist_ms": 23.305819,
+            "cycle_ms": 804.244377
+          },
+          {
+            "gei": 56,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 147.283617,
+            "exec_block_stm_ms": 29.378683,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 35.625894,
+            "tb_persist_ms": 0,
+            "cycle_ms": 250.183151
+          },
+          {
+            "gei": 57,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 777.25194,
+            "exec_block_stm_ms": 141.567883,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 193.07741799999997,
+            "tb_persist_ms": 71.818299,
+            "cycle_ms": 1388.346481
+          },
+          {
+            "gei": 58,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1027.525568,
+            "exec_block_stm_ms": 183.982006,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 237.057542,
+            "tb_persist_ms": 70.824748,
+            "cycle_ms": 1717.160785
+          },
+          {
+            "gei": 59,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 580.807845,
+            "exec_block_stm_ms": 94.869443,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 116.861513,
+            "tb_persist_ms": 40.225741,
+            "cycle_ms": 947.731681
+          },
+          {
+            "gei": 60,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 817.783333,
+            "exec_block_stm_ms": 138.152876,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 185.36291899999998,
+            "tb_persist_ms": 58.890684,
+            "cycle_ms": 1407.462911
+          },
+          {
+            "gei": 61,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 963.096586,
+            "exec_block_stm_ms": 184.593598,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 230.23073899999997,
+            "tb_persist_ms": 56.759993,
+            "cycle_ms": 1615.300684
+          },
+          {
+            "gei": 62,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 265.252693,
+            "exec_block_stm_ms": 50.666662,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 65.622992,
+            "tb_persist_ms": 17.981092,
+            "cycle_ms": 463.079477
+          },
+          {
+            "gei": 63,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 541.426035,
+            "exec_block_stm_ms": 102.059557,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 131.422727,
+            "tb_persist_ms": 43.910033,
+            "cycle_ms": 940.189585
+          },
+          {
+            "gei": 64,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 545.142469,
+            "exec_block_stm_ms": 90.75791,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 114.84322499999999,
+            "tb_persist_ms": 42.809508,
+            "cycle_ms": 912.174968
+          },
+          {
+            "gei": 65,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 416.373774,
+            "exec_block_stm_ms": 95.018549,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 113.41349399999999,
+            "tb_persist_ms": 31.236525,
+            "cycle_ms": 712.951573
+          },
+          {
+            "gei": 66,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 777.201472,
+            "exec_block_stm_ms": 162.746788,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 202.956736,
+            "tb_persist_ms": 96.794951,
+            "cycle_ms": 1355.591404
+          },
+          {
+            "gei": 67,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 513.185364,
+            "exec_block_stm_ms": 88.400729,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 106.468862,
+            "tb_persist_ms": 24.606616,
+            "cycle_ms": 812.996559
+          },
+          {
+            "gei": 68,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 287.164765,
+            "exec_block_stm_ms": 42.818264,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 51.968793,
+            "tb_persist_ms": 13.944066,
+            "cycle_ms": 461.30224
+          },
+          {
+            "gei": 69,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 259.995738,
+            "exec_block_stm_ms": 52.664743,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 62.83014,
+            "tb_persist_ms": 19.419651,
+            "cycle_ms": 439.521848
+          },
+          {
+            "gei": 70,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 479.323126,
+            "exec_block_stm_ms": 114.8901,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 133.58624400000002,
+            "tb_persist_ms": 32.269292,
+            "cycle_ms": 822.065245
+          },
+          {
+            "gei": 71,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 855.950735,
+            "exec_block_stm_ms": 134.149861,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 167.19016399999998,
+            "tb_persist_ms": 54.014836,
+            "cycle_ms": 1423.352915
+          },
+          {
+            "gei": 72,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 142.980171,
+            "exec_block_stm_ms": 96.020556,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 101.34264,
+            "tb_persist_ms": 0,
+            "cycle_ms": 318.904278
+          },
+          {
+            "gei": 73,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 710.086995,
+            "exec_block_stm_ms": 132.124294,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 153.185527,
+            "tb_persist_ms": 34.689758,
+            "cycle_ms": 1115.682848
+          },
+          {
+            "gei": 74,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 802.276052,
+            "exec_block_stm_ms": 129.961978,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 161.185213,
+            "tb_persist_ms": 37.559997,
+            "cycle_ms": 1265.789174
+          },
+          {
+            "gei": 75,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 140.676368,
+            "exec_block_stm_ms": 45.612817,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 50.345613,
+            "tb_persist_ms": 0,
+            "cycle_ms": 254.653775
+          },
+          {
+            "gei": 76,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 472.787571,
+            "exec_block_stm_ms": 73.917471,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 90.481391,
+            "tb_persist_ms": 27.763813,
+            "cycle_ms": 784.908806
+          },
+          {
+            "gei": 77,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 799.78995,
+            "exec_block_stm_ms": 112.631641,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 140.594696,
+            "tb_persist_ms": 41.274834,
+            "cycle_ms": 1233.155602
+          },
+          {
+            "gei": 78,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 493.244971,
+            "exec_block_stm_ms": 80.847454,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 101.165021,
+            "tb_persist_ms": 31.910876,
+            "cycle_ms": 859.994606
+          },
+          {
+            "gei": 79,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 767.678469,
+            "exec_block_stm_ms": 145.578902,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 183.4807,
+            "tb_persist_ms": 61.713202,
+            "cycle_ms": 1331.837518
+          },
+          {
+            "gei": 80,
+            "tx_count": 20000,
+            "wait_predecessor_ms": 1366.685518,
+            "exec_block_stm_ms": 218.275695,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 282.715999,
+            "tb_persist_ms": 85.431052,
+            "cycle_ms": 2230.118081
+          },
+          {
+            "gei": 81,
+            "tx_count": 3649,
+            "wait_predecessor_ms": 250.227373,
+            "exec_block_stm_ms": 44.569019,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 54.741279,
+            "tb_persist_ms": 15.905802,
+            "cycle_ms": 447.071472
+          },
+          {
+            "gei": 82,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 577.059236,
+            "exec_block_stm_ms": 86.616084,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 106.24235300000001,
+            "tb_persist_ms": 24.923031,
+            "cycle_ms": 923.931852
+          },
+          {
+            "gei": 83,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 912.337443,
+            "exec_block_stm_ms": 143.67695,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 181.258884,
+            "tb_persist_ms": 63.999959,
+            "cycle_ms": 1481.17866
+          },
+          {
+            "gei": 84,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 755.015244,
+            "exec_block_stm_ms": 133.530399,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 165.922195,
+            "tb_persist_ms": 51.786391,
+            "cycle_ms": 1258.581437
+          },
+          {
+            "gei": 85,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 557.054472,
+            "exec_block_stm_ms": 110.504874,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 128.614828,
+            "tb_persist_ms": 36.292399,
+            "cycle_ms": 927.493441
+          },
+          {
+            "gei": 86,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 413.427855,
+            "exec_block_stm_ms": 67.944585,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 88.748161,
+            "tb_persist_ms": 23.447193,
+            "cycle_ms": 696.520932
+          },
+          {
+            "gei": 87,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 766.068216,
+            "exec_block_stm_ms": 135.85588,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 162.92464,
+            "tb_persist_ms": 36.166057,
+            "cycle_ms": 1239.793292
+          },
+          {
+            "gei": 88,
+            "tx_count": 7124,
+            "wait_predecessor_ms": 488.270791,
+            "exec_block_stm_ms": 84.05995,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 102.522268,
+            "tb_persist_ms": 29.310498,
+            "cycle_ms": 784.419145
+          },
+          {
+            "gei": 89,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 779.665471,
+            "exec_block_stm_ms": 134.527757,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 162.23476700000003,
+            "tb_persist_ms": 46.945526,
+            "cycle_ms": 1262.562013
+          },
+          {
+            "gei": 90,
+            "tx_count": 3630,
+            "wait_predecessor_ms": 241.308111,
+            "exec_block_stm_ms": 43.40725,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 51.655463,
+            "tb_persist_ms": 11.403009,
+            "cycle_ms": 400.291242
+          },
+          {
+            "gei": 91,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 286.190824,
+            "exec_block_stm_ms": 44.616481,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 54.551179000000005,
+            "tb_persist_ms": 18.067475,
+            "cycle_ms": 455.543507
+          },
+          {
+            "gei": 92,
+            "tx_count": 4897,
+            "wait_predecessor_ms": 330.769978,
+            "exec_block_stm_ms": 52.267524,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 63.647504999999995,
+            "tb_persist_ms": 18.482264,
+            "cycle_ms": 528.573683
+          },
+          {
+            "gei": 93,
+            "tx_count": 4511,
+            "wait_predecessor_ms": 302.814669,
+            "exec_block_stm_ms": 52.580317,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 62.106637,
+            "tb_persist_ms": 16.989703,
+            "cycle_ms": 494.715501
+          }
+        ],
+        "avg_ta_computation_ms": 151.2651442747253,
+        "avg_tb_persist_ms": 39.71934945054945,
+        "avg_cycle_ms": 1060.8091469,
+        "avg_tx_per_block": 9173.747252747253,
+        "baseline_steady_tps": 8647.877216703562,
+        "amdahl_ceiling_tps": 60646.80198953199,
+        "delta_tps_potential_pct": 601.2912009480358
+      }
+    },
+    {
+      "run": 4,
+      "prefix": "b1_unlimited_60s_run_4",
+      "tps": 13425.540822550971,
+      "confirmed_txs": 805713,
+      "blocks_produced": 111,
+      "zero_fork_verified": true,
+      "node_roots_consistent": true,
+      "timeline_metrics": {
+        "num_steady_blocks": 82,
+        "steady_blocks": [
+          {
+            "gei": 3,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 929.477348,
+            "exec_block_stm_ms": 314.349894,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 368.809167,
+            "tb_persist_ms": 53.272213,
+            "cycle_ms": 0
+          },
+          {
+            "gei": 4,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 541.502901,
+            "exec_block_stm_ms": 120.160579,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 168.371532,
+            "tb_persist_ms": 43.490182,
+            "cycle_ms": 962.653268
+          },
+          {
+            "gei": 5,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 509.770224,
+            "exec_block_stm_ms": 70.011714,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 90.356786,
+            "tb_persist_ms": 21.824758,
+            "cycle_ms": 761.456326
+          },
+          {
+            "gei": 6,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 329.169799,
+            "exec_block_stm_ms": 73.549976,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 93.320504,
+            "tb_persist_ms": 20.804739,
+            "cycle_ms": 552.821552
+          },
+          {
+            "gei": 7,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 188.780604,
+            "exec_block_stm_ms": 34.737097,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 42.296162,
+            "tb_persist_ms": 12.295608,
+            "cycle_ms": 317.386161
+          },
+          {
+            "gei": 8,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 327.490023,
+            "exec_block_stm_ms": 61.525086,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 76.092003,
+            "tb_persist_ms": 19.683634,
+            "cycle_ms": 521.45037
+          },
+          {
+            "gei": 9,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 198.938108,
+            "exec_block_stm_ms": 27.651905,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 37.388706,
+            "tb_persist_ms": 11.621297,
+            "cycle_ms": 302.573964
+          },
+          {
+            "gei": 10,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 157.267027,
+            "exec_block_stm_ms": 24.750009,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 32.351554,
+            "tb_persist_ms": 10.359651,
+            "cycle_ms": 254.826039
+          },
+          {
+            "gei": 11,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 865.341671,
+            "exec_block_stm_ms": 170.303553,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 227.10083699999998,
+            "tb_persist_ms": 61.251133,
+            "cycle_ms": 1530.54545
+          },
+          {
+            "gei": 12,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 949.889792,
+            "exec_block_stm_ms": 184.620786,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 231.462536,
+            "tb_persist_ms": 54.624455,
+            "cycle_ms": 1605.951004
+          },
+          {
+            "gei": 13,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 725.490808,
+            "exec_block_stm_ms": 135.967666,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 185.238041,
+            "tb_persist_ms": 51.491995,
+            "cycle_ms": 1214.334222
+          },
+          {
+            "gei": 14,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 929.228097,
+            "exec_block_stm_ms": 167.847794,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 203.94611999999998,
+            "tb_persist_ms": 53.529491,
+            "cycle_ms": 1495.995936
+          },
+          {
+            "gei": 15,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1285.506823,
+            "exec_block_stm_ms": 193.638895,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 241.706446,
+            "tb_persist_ms": 71.95827,
+            "cycle_ms": 2052.795883
+          },
+          {
+            "gei": 16,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 292.887631,
+            "exec_block_stm_ms": 180.206148,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 192.18784300000002,
+            "tb_persist_ms": 17.209461,
+            "cycle_ms": 620.581781
+          },
+          {
+            "gei": 17,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 840.700585,
+            "exec_block_stm_ms": 135.298901,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 167.44505,
+            "tb_persist_ms": 46.743963,
+            "cycle_ms": 1426.265254
+          },
+          {
+            "gei": 18,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 870.534206,
+            "exec_block_stm_ms": 156.25417,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 188.233828,
+            "tb_persist_ms": 52.368366,
+            "cycle_ms": 1427.958565
+          },
+          {
+            "gei": 19,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 266.788563,
+            "exec_block_stm_ms": 88.888976,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 99.041249,
+            "tb_persist_ms": 13.398655,
+            "cycle_ms": 499.916615
+          },
+          {
+            "gei": 20,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 501.375044,
+            "exec_block_stm_ms": 99.4297,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 120.417621,
+            "tb_persist_ms": 34.533684,
+            "cycle_ms": 872.376846
+          },
+          {
+            "gei": 21,
+            "tx_count": 18000,
+            "wait_predecessor_ms": 1277.593711,
+            "exec_block_stm_ms": 237.080658,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 293.084124,
+            "tb_persist_ms": 77.214507,
+            "cycle_ms": 2178.238059
+          },
+          {
+            "gei": 22,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 1159.045063,
+            "exec_block_stm_ms": 214.034233,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 259.150288,
+            "tb_persist_ms": 54.64319,
+            "cycle_ms": 1873.809675
+          },
+          {
+            "gei": 23,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 647.884258,
+            "exec_block_stm_ms": 89.817509,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 111.856776,
+            "tb_persist_ms": 32.727999,
+            "cycle_ms": 990.648426
+          },
+          {
+            "gei": 24,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 146.781068,
+            "exec_block_stm_ms": 26.73704,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 36.52406,
+            "tb_persist_ms": 0,
+            "cycle_ms": 261.55861
+          },
+          {
+            "gei": 25,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 703.549413,
+            "exec_block_stm_ms": 100.142701,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 127.43473,
+            "tb_persist_ms": 41.945896,
+            "cycle_ms": 1109.839672
+          },
+          {
+            "gei": 26,
+            "tx_count": 24000,
+            "wait_predecessor_ms": 1461.289888,
+            "exec_block_stm_ms": 291.113145,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 366.911299,
+            "tb_persist_ms": 139.964897,
+            "cycle_ms": 2525.291054
+          },
+          {
+            "gei": 27,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 859.236216,
+            "exec_block_stm_ms": 117.965837,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 145.772196,
+            "tb_persist_ms": 34.13448,
+            "cycle_ms": 1364.428004
+          },
+          {
+            "gei": 28,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1021.596236,
+            "exec_block_stm_ms": 158.929464,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 198.40333199999998,
+            "tb_persist_ms": 47.831302,
+            "cycle_ms": 1639.021886
+          },
+          {
+            "gei": 29,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 836.050443,
+            "exec_block_stm_ms": 105.340057,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 144.996655,
+            "tb_persist_ms": 35.125683,
+            "cycle_ms": 1258.578973
+          },
+          {
+            "gei": 30,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 761.625783,
+            "exec_block_stm_ms": 126.037728,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 161.469382,
+            "tb_persist_ms": 36.706032,
+            "cycle_ms": 1268.266902
+          },
+          {
+            "gei": 31,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 622.56085,
+            "exec_block_stm_ms": 116.230825,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 139.224323,
+            "tb_persist_ms": 34.010117,
+            "cycle_ms": 1006.60722
+          },
+          {
+            "gei": 32,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 524.924947,
+            "exec_block_stm_ms": 89.014195,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 111.350036,
+            "tb_persist_ms": 26.577317,
+            "cycle_ms": 843.562079
+          },
+          {
+            "gei": 33,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1009.949874,
+            "exec_block_stm_ms": 183.46216,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 226.89875,
+            "tb_persist_ms": 54.91287,
+            "cycle_ms": 1645.261938
+          },
+          {
+            "gei": 34,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1105.877048,
+            "exec_block_stm_ms": 191.375154,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 237.823659,
+            "tb_persist_ms": 70.286455,
+            "cycle_ms": 1816.030907
+          },
+          {
+            "gei": 35,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 822.267479,
+            "exec_block_stm_ms": 123.633807,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 164.038889,
+            "tb_persist_ms": 53.718082,
+            "cycle_ms": 1344.636953
+          },
+          {
+            "gei": 36,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 996.519753,
+            "exec_block_stm_ms": 179.591976,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 220.16238599999997,
+            "tb_persist_ms": 73.864011,
+            "cycle_ms": 1658.255195
+          },
+          {
+            "gei": 37,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 858.854617,
+            "exec_block_stm_ms": 111.430543,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 140.398096,
+            "tb_persist_ms": 43.342044,
+            "cycle_ms": 1321.714607
+          },
+          {
+            "gei": 38,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1064.150897,
+            "exec_block_stm_ms": 148.496955,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 191.777755,
+            "tb_persist_ms": 52.745962,
+            "cycle_ms": 1678.859628
+          },
+          {
+            "gei": 39,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 436.980324,
+            "exec_block_stm_ms": 51.531182,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 67.759085,
+            "tb_persist_ms": 24.18491,
+            "cycle_ms": 679.044869
+          },
+          {
+            "gei": 40,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 420.020282,
+            "exec_block_stm_ms": 53.682708,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 68.834451,
+            "tb_persist_ms": 27.376208,
+            "cycle_ms": 669.873975
+          },
+          {
+            "gei": 41,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 429.631792,
+            "exec_block_stm_ms": 64.171249,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 82.35642100000001,
+            "tb_persist_ms": 27.294568,
+            "cycle_ms": 680.480486
+          },
+          {
+            "gei": 42,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 841.434191,
+            "exec_block_stm_ms": 168.543306,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 213.25251400000002,
+            "tb_persist_ms": 52.746513,
+            "cycle_ms": 1432.219662
+          },
+          {
+            "gei": 43,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 449.710296,
+            "exec_block_stm_ms": 70.900081,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 88.802329,
+            "tb_persist_ms": 27.372802,
+            "cycle_ms": 724.776502
+          },
+          {
+            "gei": 44,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 529.490923,
+            "exec_block_stm_ms": 98.718043,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 116.683613,
+            "tb_persist_ms": 21.713736,
+            "cycle_ms": 862.056778
+          },
+          {
+            "gei": 45,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 428.941535,
+            "exec_block_stm_ms": 67.443488,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 80.641527,
+            "tb_persist_ms": 24.241822,
+            "cycle_ms": 683.302773
+          },
+          {
+            "gei": 46,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 538.135057,
+            "exec_block_stm_ms": 80.725219,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 96.76536399999999,
+            "tb_persist_ms": 31.785416,
+            "cycle_ms": 868.291918
+          },
+          {
+            "gei": 47,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 288.230807,
+            "exec_block_stm_ms": 42.890232,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 51.319404999999996,
+            "tb_persist_ms": 14.992382,
+            "cycle_ms": 448.191056
+          },
+          {
+            "gei": 48,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1089.60093,
+            "exec_block_stm_ms": 178.644155,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 222.550922,
+            "tb_persist_ms": 42.422294,
+            "cycle_ms": 1685.463875
+          },
+          {
+            "gei": 49,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1105.343743,
+            "exec_block_stm_ms": 148.218357,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 187.11185700000001,
+            "tb_persist_ms": 52.400769,
+            "cycle_ms": 1670.729137
+          },
+          {
+            "gei": 50,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 440.650843,
+            "exec_block_stm_ms": 62.445078,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 74.811738,
+            "tb_persist_ms": 14.764549,
+            "cycle_ms": 675.157334
+          },
+          {
+            "gei": 51,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1025.67967,
+            "exec_block_stm_ms": 166.832527,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 203.637888,
+            "tb_persist_ms": 50.630725,
+            "cycle_ms": 1628.138346
+          },
+          {
+            "gei": 52,
+            "tx_count": 18000,
+            "wait_predecessor_ms": 1271.409529,
+            "exec_block_stm_ms": 158.72587,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 203.53065099999998,
+            "tb_persist_ms": 61.988217,
+            "cycle_ms": 1965.136495
+          },
+          {
+            "gei": 53,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 884.502609,
+            "exec_block_stm_ms": 108.826884,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 140.009613,
+            "tb_persist_ms": 30.805375,
+            "cycle_ms": 1367.565636
+          },
+          {
+            "gei": 54,
+            "tx_count": 20000,
+            "wait_predecessor_ms": 1288.340664,
+            "exec_block_stm_ms": 177.649874,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 220.419757,
+            "tb_persist_ms": 53.028042,
+            "cycle_ms": 2008.864226
+          },
+          {
+            "gei": 55,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 810.964684,
+            "exec_block_stm_ms": 114.1989,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 142.033011,
+            "tb_persist_ms": 39.431754,
+            "cycle_ms": 1256.184352
+          },
+          {
+            "gei": 56,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 269.12868,
+            "exec_block_stm_ms": 52.536134,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 66.96497199999999,
+            "tb_persist_ms": 18.434379,
+            "cycle_ms": 455.911205
+          },
+          {
+            "gei": 57,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 629.690048,
+            "exec_block_stm_ms": 87.470352,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 108.13925800000001,
+            "tb_persist_ms": 32.885213,
+            "cycle_ms": 1000.33872
+          },
+          {
+            "gei": 58,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 668.584132,
+            "exec_block_stm_ms": 122.21626,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 142.716638,
+            "tb_persist_ms": 30.801607,
+            "cycle_ms": 1060.656387
+          },
+          {
+            "gei": 59,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 531.592223,
+            "exec_block_stm_ms": 68.230895,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 90.033724,
+            "tb_persist_ms": 25.809852,
+            "cycle_ms": 845.593877
+          },
+          {
+            "gei": 60,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 152.305971,
+            "exec_block_stm_ms": 18.830387,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 27.311516,
+            "tb_persist_ms": 0,
+            "cycle_ms": 250.86766
+          },
+          {
+            "gei": 61,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 401.659079,
+            "exec_block_stm_ms": 78.516311,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 91.690342,
+            "tb_persist_ms": 25.737086,
+            "cycle_ms": 641.203852
+          },
+          {
+            "gei": 62,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 784.087127,
+            "exec_block_stm_ms": 121.506986,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 159.965414,
+            "tb_persist_ms": 44.383064,
+            "cycle_ms": 1262.047993
+          },
+          {
+            "gei": 63,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 698.451473,
+            "exec_block_stm_ms": 100.331568,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 123.924659,
+            "tb_persist_ms": 49.677692,
+            "cycle_ms": 1097.920736
+          },
+          {
+            "gei": 64,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 952.48992,
+            "exec_block_stm_ms": 204.507516,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 257.52842400000003,
+            "tb_persist_ms": 55.882873,
+            "cycle_ms": 1577.301786
+          },
+          {
+            "gei": 65,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 659.643265,
+            "exec_block_stm_ms": 120.287063,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 145.424139,
+            "tb_persist_ms": 42.752996,
+            "cycle_ms": 1065.989679
+          },
+          {
+            "gei": 66,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 444.319965,
+            "exec_block_stm_ms": 71.531852,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 87.896688,
+            "tb_persist_ms": 33.427268,
+            "cycle_ms": 713.901874
+          },
+          {
+            "gei": 67,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1002.541635,
+            "exec_block_stm_ms": 158.836932,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 198.800448,
+            "tb_persist_ms": 68.943788,
+            "cycle_ms": 1675.398743
+          },
+          {
+            "gei": 68,
+            "tx_count": 6815,
+            "wait_predecessor_ms": 453.843393,
+            "exec_block_stm_ms": 81.876015,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 98.912319,
+            "tb_persist_ms": 40.118683,
+            "cycle_ms": 773.031774
+          },
+          {
+            "gei": 69,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1076.574981,
+            "exec_block_stm_ms": 155.722837,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 197.018949,
+            "tb_persist_ms": 73.710504,
+            "cycle_ms": 1677.663714
+          },
+          {
+            "gei": 70,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 264.727906,
+            "exec_block_stm_ms": 42.899308,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 51.854067,
+            "tb_persist_ms": 15.085414,
+            "cycle_ms": 458.026983
+          },
+          {
+            "gei": 71,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 548.259013,
+            "exec_block_stm_ms": 83.703381,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 110.026707,
+            "tb_persist_ms": 27.928348,
+            "cycle_ms": 864.29341
+          },
+          {
+            "gei": 72,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 144.149653,
+            "exec_block_stm_ms": 99.596044,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 109.72233200000001,
+            "tb_persist_ms": 0,
+            "cycle_ms": 332.139567
+          },
+          {
+            "gei": 73,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 828.300236,
+            "exec_block_stm_ms": 135.786165,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 182.10776900000002,
+            "tb_persist_ms": 40.271471,
+            "cycle_ms": 1292.555719
+          },
+          {
+            "gei": 74,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 816.353925,
+            "exec_block_stm_ms": 115.963843,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 143.87973499999998,
+            "tb_persist_ms": 32.11522,
+            "cycle_ms": 1245.623209
+          },
+          {
+            "gei": 75,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 253.172624,
+            "exec_block_stm_ms": 174.822772,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 187.52272799999997,
+            "tb_persist_ms": 12.663414,
+            "cycle_ms": 552.990315
+          },
+          {
+            "gei": 76,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 514.605652,
+            "exec_block_stm_ms": 78.084759,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 95.27225700000001,
+            "tb_persist_ms": 31.397501,
+            "cycle_ms": 842.223586
+          },
+          {
+            "gei": 77,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 882.003026,
+            "exec_block_stm_ms": 173.474539,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 205.81058,
+            "tb_persist_ms": 46.734793,
+            "cycle_ms": 1462.258591
+          },
+          {
+            "gei": 78,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 683.146848,
+            "exec_block_stm_ms": 118.931108,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 142.802597,
+            "tb_persist_ms": 41.587339,
+            "cycle_ms": 1100.661285
+          },
+          {
+            "gei": 79,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 547.290195,
+            "exec_block_stm_ms": 81.657905,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 103.400774,
+            "tb_persist_ms": 31.032889,
+            "cycle_ms": 892.097294
+          },
+          {
+            "gei": 80,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 990.977483,
+            "exec_block_stm_ms": 151.822902,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 207.055949,
+            "tb_persist_ms": 66.476452,
+            "cycle_ms": 1651.068639
+          },
+          {
+            "gei": 81,
+            "tx_count": 5806,
+            "wait_predecessor_ms": 373.284378,
+            "exec_block_stm_ms": 60.392367,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 78.61553599999999,
+            "tb_persist_ms": 26.242934,
+            "cycle_ms": 634.102833
+          },
+          {
+            "gei": 82,
+            "tx_count": 12102,
+            "wait_predecessor_ms": 831.789124,
+            "exec_block_stm_ms": 125.48075,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 156.667421,
+            "tb_persist_ms": 45.077359,
+            "cycle_ms": 1322.274653
+          },
+          {
+            "gei": 83,
+            "tx_count": 6672,
+            "wait_predecessor_ms": 503.979206,
+            "exec_block_stm_ms": 75.549458,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 109.780336,
+            "tb_persist_ms": 38.630811,
+            "cycle_ms": 829.126135
+          },
+          {
+            "gei": 84,
+            "tx_count": 2270,
+            "wait_predecessor_ms": 152.974954,
+            "exec_block_stm_ms": 37.115878,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 44.20345100000001,
+            "tb_persist_ms": 0,
+            "cycle_ms": 258.430429
+          }
+        ],
+        "avg_ta_computation_ms": 146.69039751219512,
+        "avg_tb_persist_ms": 38.47806623170732,
+        "avg_cycle_ms": 1103.0330505185184,
+        "avg_tx_per_block": 9752.012195121952,
+        "baseline_steady_tps": 8841.087935250613,
+        "amdahl_ceiling_tps": 66480.23565626521,
+        "delta_tps_potential_pct": 651.9463231578043
+      }
+    },
+    {
+      "run": 5,
+      "prefix": "b1_unlimited_60s_run_5",
+      "tps": 13244.2541882345,
+      "confirmed_txs": 794834,
+      "blocks_produced": 84,
+      "zero_fork_verified": true,
+      "node_roots_consistent": true,
+      "timeline_metrics": {
+        "num_steady_blocks": 86,
+        "steady_blocks": [
+          {
+            "gei": 3,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 565.810995,
+            "exec_block_stm_ms": 410.599408,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 421.770114,
+            "tb_persist_ms": 38.757695,
+            "cycle_ms": 0
+          },
+          {
+            "gei": 4,
+            "tx_count": 11000,
+            "wait_predecessor_ms": 1379.470025,
+            "exec_block_stm_ms": 335.974215,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 394.826458,
+            "tb_persist_ms": 69.942549,
+            "cycle_ms": 2223.220204
+          },
+          {
+            "gei": 5,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 416.04895,
+            "exec_block_stm_ms": 76.940327,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 99.763348,
+            "tb_persist_ms": 14.336886,
+            "cycle_ms": 668.679847
+          },
+          {
+            "gei": 6,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 311.177459,
+            "exec_block_stm_ms": 43.886382,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 60.081745,
+            "tb_persist_ms": 20.036252,
+            "cycle_ms": 499.898903
+          },
+          {
+            "gei": 7,
+            "tx_count": 2764,
+            "wait_predecessor_ms": 277.465729,
+            "exec_block_stm_ms": 47.661454,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 62.884271,
+            "tb_persist_ms": 0,
+            "cycle_ms": 422.441033
+          },
+          {
+            "gei": 8,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 317.396061,
+            "exec_block_stm_ms": 65.558225,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 148.074007,
+            "tb_persist_ms": 24.387094,
+            "cycle_ms": 633.013558
+          },
+          {
+            "gei": 10,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 309.568304,
+            "exec_block_stm_ms": 58.152145,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 74.274112,
+            "tb_persist_ms": 23.264434,
+            "cycle_ms": 632.510501
+          },
+          {
+            "gei": 11,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 307.47059,
+            "exec_block_stm_ms": 50.48877,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 71.32682600000001,
+            "tb_persist_ms": 26.905121,
+            "cycle_ms": 517.104023
+          },
+          {
+            "gei": 12,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 341.798272,
+            "exec_block_stm_ms": 51.252681,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 68.99084,
+            "tb_persist_ms": 19.999961,
+            "cycle_ms": 551.002092
+          },
+          {
+            "gei": 13,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 309.885695,
+            "exec_block_stm_ms": 57.495062,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 72.08623899999999,
+            "tb_persist_ms": 18.273205,
+            "cycle_ms": 521.470349
+          },
+          {
+            "gei": 14,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 334.136597,
+            "exec_block_stm_ms": 58.58321,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 74.90266600000001,
+            "tb_persist_ms": 20.566647,
+            "cycle_ms": 536.87288
+          },
+          {
+            "gei": 15,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 333.739424,
+            "exec_block_stm_ms": 60.721482,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 75.290076,
+            "tb_persist_ms": 22.325699,
+            "cycle_ms": 541.477596
+          },
+          {
+            "gei": 16,
+            "tx_count": 2000,
+            "wait_predecessor_ms": 184.098812,
+            "exec_block_stm_ms": 36.017827,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 43.354092,
+            "tb_persist_ms": 11.355633,
+            "cycle_ms": 302.964702
+          },
+          {
+            "gei": 17,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 278.626874,
+            "exec_block_stm_ms": 47.300615,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 60.646418999999995,
+            "tb_persist_ms": 17.74555,
+            "cycle_ms": 451.876845
+          },
+          {
+            "gei": 18,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 848.297717,
+            "exec_block_stm_ms": 149.592851,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 192.048624,
+            "tb_persist_ms": 65.589467,
+            "cycle_ms": 1455.526698
+          },
+          {
+            "gei": 19,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 842.40049,
+            "exec_block_stm_ms": 132.876452,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 165.93551200000002,
+            "tb_persist_ms": 47.219123,
+            "cycle_ms": 1364.264601
+          },
+          {
+            "gei": 20,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1218.204368,
+            "exec_block_stm_ms": 175.218917,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 226.77002000000002,
+            "tb_persist_ms": 78.82882,
+            "cycle_ms": 1972.776099
+          },
+          {
+            "gei": 21,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 883.53471,
+            "exec_block_stm_ms": 130.619668,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 165.334671,
+            "tb_persist_ms": 48.126751,
+            "cycle_ms": 1446.981698
+          },
+          {
+            "gei": 22,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 560.006655,
+            "exec_block_stm_ms": 124.834765,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 150.777488,
+            "tb_persist_ms": 35.695364,
+            "cycle_ms": 960.027987
+          },
+          {
+            "gei": 23,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 836.706614,
+            "exec_block_stm_ms": 131.000154,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 166.14490899999998,
+            "tb_persist_ms": 47.525056,
+            "cycle_ms": 1328.936771
+          },
+          {
+            "gei": 24,
+            "tx_count": 20000,
+            "wait_predecessor_ms": 1390.672301,
+            "exec_block_stm_ms": 250.953675,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 322.499482,
+            "tb_persist_ms": 84.909642,
+            "cycle_ms": 2238.630474
+          },
+          {
+            "gei": 25,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 654.718278,
+            "exec_block_stm_ms": 169.759769,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 224.759642,
+            "tb_persist_ms": 75.189927,
+            "cycle_ms": 1282.678845
+          },
+          {
+            "gei": 26,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 648.01062,
+            "exec_block_stm_ms": 135.239056,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 159.429626,
+            "tb_persist_ms": 41.003256,
+            "cycle_ms": 1158.77814
+          },
+          {
+            "gei": 27,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 469.504416,
+            "exec_block_stm_ms": 94.704607,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 117.490775,
+            "tb_persist_ms": 36.398952,
+            "cycle_ms": 799.54396
+          },
+          {
+            "gei": 28,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 511.133396,
+            "exec_block_stm_ms": 120.245967,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 143.36792,
+            "tb_persist_ms": 36.043713,
+            "cycle_ms": 937.098164
+          },
+          {
+            "gei": 29,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 516.711778,
+            "exec_block_stm_ms": 84.947502,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 113.975284,
+            "tb_persist_ms": 40.279692,
+            "cycle_ms": 960.411893
+          },
+          {
+            "gei": 30,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 543.014083,
+            "exec_block_stm_ms": 93.644113,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 117.445275,
+            "tb_persist_ms": 40.214778,
+            "cycle_ms": 892.356845
+          },
+          {
+            "gei": 31,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 299.465952,
+            "exec_block_stm_ms": 47.125913,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 58.11517,
+            "tb_persist_ms": 24.918755,
+            "cycle_ms": 494.758452
+          },
+          {
+            "gei": 32,
+            "tx_count": 28000,
+            "wait_predecessor_ms": 1771.660599,
+            "exec_block_stm_ms": 292.224773,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 373.338076,
+            "tb_persist_ms": 109.613518,
+            "cycle_ms": 2872.450432
+          },
+          {
+            "gei": 33,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 827.852,
+            "exec_block_stm_ms": 128.608387,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 175.082281,
+            "tb_persist_ms": 45.565205,
+            "cycle_ms": 1412.627308
+          },
+          {
+            "gei": 34,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1123.262363,
+            "exec_block_stm_ms": 200.984088,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 271.679026,
+            "tb_persist_ms": 70.223529,
+            "cycle_ms": 1868.515003
+          },
+          {
+            "gei": 35,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 399.866858,
+            "exec_block_stm_ms": 77.666703,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 96.477284,
+            "tb_persist_ms": 32.511674,
+            "cycle_ms": 699.110063
+          },
+          {
+            "gei": 36,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 931.529955,
+            "exec_block_stm_ms": 169.049326,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 213.20808000000002,
+            "tb_persist_ms": 67.210951,
+            "cycle_ms": 1538.349076
+          },
+          {
+            "gei": 37,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 868.909195,
+            "exec_block_stm_ms": 125.870496,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 161.20117900000002,
+            "tb_persist_ms": 48.624413,
+            "cycle_ms": 1398.707379
+          },
+          {
+            "gei": 38,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 543.29793,
+            "exec_block_stm_ms": 80.189236,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 109.845931,
+            "tb_persist_ms": 35.809655,
+            "cycle_ms": 901.632702
+          },
+          {
+            "gei": 39,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 766.915335,
+            "exec_block_stm_ms": 103.23593,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 127.08946399999999,
+            "tb_persist_ms": 48.993828,
+            "cycle_ms": 1180.110222
+          },
+          {
+            "gei": 40,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 869.388112,
+            "exec_block_stm_ms": 122.765687,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 153.897888,
+            "tb_persist_ms": 40.26656,
+            "cycle_ms": 1368.302681
+          },
+          {
+            "gei": 41,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 806.37159,
+            "exec_block_stm_ms": 126.824115,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 168.008039,
+            "tb_persist_ms": 88.399791,
+            "cycle_ms": 1323.478404
+          },
+          {
+            "gei": 42,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 863.685948,
+            "exec_block_stm_ms": 159.823969,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 194.665554,
+            "tb_persist_ms": 67.561322,
+            "cycle_ms": 1428.342292
+          },
+          {
+            "gei": 43,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 787.664816,
+            "exec_block_stm_ms": 174.174693,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 212.265506,
+            "tb_persist_ms": 47.994045,
+            "cycle_ms": 1355.367565
+          },
+          {
+            "gei": 44,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 330.837566,
+            "exec_block_stm_ms": 38.868393,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 50.69083,
+            "tb_persist_ms": 19.893199,
+            "cycle_ms": 540.212509
+          },
+          {
+            "gei": 45,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 659.017083,
+            "exec_block_stm_ms": 103.640149,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 140.836003,
+            "tb_persist_ms": 45.980977,
+            "cycle_ms": 1093.724104
+          },
+          {
+            "gei": 46,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 776.524932,
+            "exec_block_stm_ms": 153.199019,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 183.968483,
+            "tb_persist_ms": 50.398737,
+            "cycle_ms": 1290.662899
+          },
+          {
+            "gei": 47,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 966.210597,
+            "exec_block_stm_ms": 166.653001,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 203.35004800000002,
+            "tb_persist_ms": 58.194604,
+            "cycle_ms": 1585.350983
+          },
+          {
+            "gei": 48,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 874.991467,
+            "exec_block_stm_ms": 120.385423,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 148.59188699999999,
+            "tb_persist_ms": 46.275214,
+            "cycle_ms": 1356.987869
+          },
+          {
+            "gei": 49,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 565.080284,
+            "exec_block_stm_ms": 85.705652,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 105.533526,
+            "tb_persist_ms": 34.611627,
+            "cycle_ms": 892.887238
+          },
+          {
+            "gei": 50,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 570.266293,
+            "exec_block_stm_ms": 85.582338,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 105.729881,
+            "tb_persist_ms": 28.786113,
+            "cycle_ms": 905.88285
+          },
+          {
+            "gei": 51,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 726.925044,
+            "exec_block_stm_ms": 91.735558,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 115.912048,
+            "tb_persist_ms": 36.982765,
+            "cycle_ms": 1123.62976
+          },
+          {
+            "gei": 52,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 566.999466,
+            "exec_block_stm_ms": 92.197749,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 112.038359,
+            "tb_persist_ms": 40.636406,
+            "cycle_ms": 918.107043
+          },
+          {
+            "gei": 53,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 275.97247,
+            "exec_block_stm_ms": 38.702767,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 50.21399,
+            "tb_persist_ms": 22.026144,
+            "cycle_ms": 450.842128
+          },
+          {
+            "gei": 54,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 389.292284,
+            "exec_block_stm_ms": 64.852559,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 80.905267,
+            "tb_persist_ms": 26.989721,
+            "cycle_ms": 649.263571
+          },
+          {
+            "gei": 55,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 686.921699,
+            "exec_block_stm_ms": 113.940782,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 144.292155,
+            "tb_persist_ms": 42.87858,
+            "cycle_ms": 1135.859929
+          },
+          {
+            "gei": 56,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 776.621765,
+            "exec_block_stm_ms": 167.21302,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 199.239985,
+            "tb_persist_ms": 86.579557,
+            "cycle_ms": 1325.224003
+          },
+          {
+            "gei": 57,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 816.344452,
+            "exec_block_stm_ms": 144.732912,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 174.484182,
+            "tb_persist_ms": 49.025818,
+            "cycle_ms": 1310.710037
+          },
+          {
+            "gei": 58,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 514.680277,
+            "exec_block_stm_ms": 91.595714,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 115.89742,
+            "tb_persist_ms": 39.521813,
+            "cycle_ms": 890.426032
+          },
+          {
+            "gei": 59,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1030.231856,
+            "exec_block_stm_ms": 204.061698,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 259.403765,
+            "tb_persist_ms": 72.172328,
+            "cycle_ms": 1754.422194
+          },
+          {
+            "gei": 60,
+            "tx_count": 20000,
+            "wait_predecessor_ms": 1335.58024,
+            "exec_block_stm_ms": 229.813994,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 297.085755,
+            "tb_persist_ms": 84.592229,
+            "cycle_ms": 2266.657005
+          },
+          {
+            "gei": 61,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 761.077241,
+            "exec_block_stm_ms": 105.571032,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 136.562389,
+            "tb_persist_ms": 45.855314,
+            "cycle_ms": 1212.344886
+          },
+          {
+            "gei": 62,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 854.350582,
+            "exec_block_stm_ms": 134.860694,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 173.958047,
+            "tb_persist_ms": 52.66089,
+            "cycle_ms": 1379.534429
+          },
+          {
+            "gei": 63,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 743.299229,
+            "exec_block_stm_ms": 130.498685,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 169.434034,
+            "tb_persist_ms": 45.635598,
+            "cycle_ms": 1225.847403
+          },
+          {
+            "gei": 64,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 443.474366,
+            "exec_block_stm_ms": 60.286614,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 74.93061900000001,
+            "tb_persist_ms": 20.23422,
+            "cycle_ms": 672.349456
+          },
+          {
+            "gei": 65,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 908.153786,
+            "exec_block_stm_ms": 142.261375,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 177.79566599999998,
+            "tb_persist_ms": 60.508548,
+            "cycle_ms": 1488.303351
+          },
+          {
+            "gei": 66,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 869.114613,
+            "exec_block_stm_ms": 130.448512,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 166.722887,
+            "tb_persist_ms": 53.053012,
+            "cycle_ms": 1358.295797
+          },
+          {
+            "gei": 67,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 642.08068,
+            "exec_block_stm_ms": 145.840361,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 174.121243,
+            "tb_persist_ms": 38.934981,
+            "cycle_ms": 1105.675452
+          },
+          {
+            "gei": 68,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 810.078385,
+            "exec_block_stm_ms": 133.829131,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 165.289042,
+            "tb_persist_ms": 54.507093,
+            "cycle_ms": 1340.445195
+          },
+          {
+            "gei": 69,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 632.501863,
+            "exec_block_stm_ms": 102.430491,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 126.75404800000001,
+            "tb_persist_ms": 42.793895,
+            "cycle_ms": 1022.344688
+          },
+          {
+            "gei": 70,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 389.781517,
+            "exec_block_stm_ms": 60.238774,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 76.630094,
+            "tb_persist_ms": 27.328995,
+            "cycle_ms": 631.172748
+          },
+          {
+            "gei": 71,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 663.632156,
+            "exec_block_stm_ms": 111.844702,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 143.036023,
+            "tb_persist_ms": 38.164397,
+            "cycle_ms": 1099.161043
+          },
+          {
+            "gei": 72,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 650.766397,
+            "exec_block_stm_ms": 95.701206,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 122.69355099999999,
+            "tb_persist_ms": 38.85813,
+            "cycle_ms": 1047.18147
+          },
+          {
+            "gei": 73,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 412.802622,
+            "exec_block_stm_ms": 62.78855,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 77.469144,
+            "tb_persist_ms": 42.23691,
+            "cycle_ms": 712.012886
+          },
+          {
+            "gei": 74,
+            "tx_count": 4000,
+            "wait_predecessor_ms": 261.12135,
+            "exec_block_stm_ms": 52.296923,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 62.201842,
+            "tb_persist_ms": 18.497775,
+            "cycle_ms": 440.0557
+          },
+          {
+            "gei": 75,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 541.184114,
+            "exec_block_stm_ms": 87.382457,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 109.32999000000001,
+            "tb_persist_ms": 26.515745,
+            "cycle_ms": 863.421551
+          },
+          {
+            "gei": 76,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1075.466185,
+            "exec_block_stm_ms": 156.993441,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 205.68140699999998,
+            "tb_persist_ms": 50.736406,
+            "cycle_ms": 1649.939152
+          },
+          {
+            "gei": 77,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 416.956575,
+            "exec_block_stm_ms": 56.88443,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 69.808634,
+            "tb_persist_ms": 27.737728,
+            "cycle_ms": 677.913238
+          },
+          {
+            "gei": 78,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 520.629158,
+            "exec_block_stm_ms": 80.586284,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 100.46056000000002,
+            "tb_persist_ms": 28.139626,
+            "cycle_ms": 844.598587
+          },
+          {
+            "gei": 79,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 824.243594,
+            "exec_block_stm_ms": 160.131453,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 190.334815,
+            "tb_persist_ms": 39.447298,
+            "cycle_ms": 1323.329237
+          },
+          {
+            "gei": 80,
+            "tx_count": 6000,
+            "wait_predecessor_ms": 411.073751,
+            "exec_block_stm_ms": 61.241208,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 74.848421,
+            "tb_persist_ms": 25.149103,
+            "cycle_ms": 667.770593
+          },
+          {
+            "gei": 81,
+            "tx_count": 10000,
+            "wait_predecessor_ms": 617.175014,
+            "exec_block_stm_ms": 100.46513,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 122.963764,
+            "tb_persist_ms": 33.456585,
+            "cycle_ms": 993.395545
+          },
+          {
+            "gei": 82,
+            "tx_count": 14000,
+            "wait_predecessor_ms": 887.552485,
+            "exec_block_stm_ms": 142.881264,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 177.861339,
+            "tb_persist_ms": 52.953636,
+            "cycle_ms": 1451.810945
+          },
+          {
+            "gei": 83,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 790.731569,
+            "exec_block_stm_ms": 160.361818,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 198.27971,
+            "tb_persist_ms": 62.859653,
+            "cycle_ms": 1367.137621
+          },
+          {
+            "gei": 84,
+            "tx_count": 31775,
+            "wait_predecessor_ms": 2193.400943,
+            "exec_block_stm_ms": 350.10935,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 458.706457,
+            "tb_persist_ms": 132.260602,
+            "cycle_ms": 3551.658186
+          },
+          {
+            "gei": 85,
+            "tx_count": 12000,
+            "wait_predecessor_ms": 885.849942,
+            "exec_block_stm_ms": 155.084209,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 199.018139,
+            "tb_persist_ms": 57.393976,
+            "cycle_ms": 1491.8116
+          },
+          {
+            "gei": 86,
+            "tx_count": 16000,
+            "wait_predecessor_ms": 1026.922257,
+            "exec_block_stm_ms": 194.461564,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 249.25142000000002,
+            "tb_persist_ms": 71.27023,
+            "cycle_ms": 1774.600894
+          },
+          {
+            "gei": 87,
+            "tx_count": 8000,
+            "wait_predecessor_ms": 519.766072,
+            "exec_block_stm_ms": 101.805966,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 125.936284,
+            "tb_persist_ms": 35.563678,
+            "cycle_ms": 895.572824
+          },
+          {
+            "gei": 88,
+            "tx_count": 9583,
+            "wait_predecessor_ms": 622.450944,
+            "exec_block_stm_ms": 129.949508,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 157.913385,
+            "tb_persist_ms": 39.000255,
+            "cycle_ms": 1052.7262
+          },
+          {
+            "gei": 89,
+            "tx_count": 4310,
+            "wait_predecessor_ms": 330.104534,
+            "exec_block_stm_ms": 55.540778,
+            "roots_ms": 0.0,
+            "ta_computation_ms": 67.668873,
+            "tb_persist_ms": 20.736817,
+            "cycle_ms": 538.398195
+          }
+        ],
+        "avg_ta_computation_ms": 152.94138755813952,
+        "avg_tb_persist_ms": 44.193621406976746,
+        "avg_cycle_ms": 1135.4347683882352,
+        "avg_tx_per_block": 9667.813953488372,
+        "baseline_steady_tps": 8514.636175191257,
+        "amdahl_ceiling_tps": 63212.54245070338,
+        "delta_tps_potential_pct": 642.3986316042858
+      }
+    }
+  ]
+}

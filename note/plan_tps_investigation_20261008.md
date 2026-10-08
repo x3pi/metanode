@@ -60,9 +60,9 @@ Viết `note/tps_investigation_report_20261008.md`:
 - Tối ưu `FilterInvalidSignatures` thêm (đã ~1,2 µs/tx).
 
 ## Tiêu chí hoàn thành
-- [ ] `PREREGISTERED.md` commit trước khi chạy
-- [ ] Baseline ≥5 lượt, zero-fork xác nhận
-- [ ] Bảng phân rã ms/block theo giai đoạn, xác định nút thắt có bằng chứng
-- [ ] Profile CPU/lock (hoặc ghi rõ lý do không lấy được)
-- [ ] Báo cáo kèm đề xuất xếp hạng và đánh giá rủi ro zero-fork, chưa sửa consensus
-- [ ] `build_check.sh` sạch nếu có thêm code quan sát
+- [x] `PREREGISTERED.md` commit trước khi chạy (commit `30c8268e`)
+- [x] Baseline ≥5 lượt, zero-fork xác nhận (Mean 6.098,6 tx/s, 100% Zero-Fork PASS)
+- [x] Bảng phân rã ms/block theo giai đoạn, xác định nút thắt có bằng chứng (`wait_predecessor` 44,7%, Block-STM 19,8%)
+- [x] Profile CPU/lock (hoặc ghi rõ lý do không lấy được) (Go pprof + Linux native perf 18k samples)
+- [x] Báo cáo kèm đề xuất xếp hạng và đánh giá rủi ro zero-fork, chưa sửa consensus (xem `note/tps_investigation_report_20261008.md`)
+- [x] `build_check.sh` sạch nếu có thêm code quan sát (không sửa code core, giữ nguyên hiện trạng)

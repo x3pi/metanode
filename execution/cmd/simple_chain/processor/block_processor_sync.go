@@ -686,7 +686,7 @@ PROCESS_BLOCK:
 		*currentBlockNumber = bNum
 		storage.UpdateLastAssignedBlockNumber(*currentBlockNumber)
 
-		emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
+		emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, nil, leader)
 		if emptyBlock != nil {
 			// ═══════════════════════════════════════════════════════════════
 			// BLOCK_GAP FIX (2026-05-20): Removed duplicate CommitJob dispatch.
@@ -1164,7 +1164,7 @@ PROCESS_BLOCK:
 		batchID := fmt.Sprintf("SYNC-%d-%d", globalExecIndex, time.Now().UnixNano())
 		*currentBlockNumber = bNum
 		storage.UpdateLastAssignedBlockNumber(*currentBlockNumber)
-		emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, leader)
+		emptyBlock := bp.createBlockFromResults(emptyResult, *currentBlockNumber, epochNum, true, batchID, epochData.GetCommitTimestampMs(), globalExecIndex, commitIndex, nil, leader)
 		if emptyBlock != nil {
 			select {
 			case bp.createdBlocksChan <- emptyBlock:
@@ -1240,7 +1240,7 @@ PROCESS_BLOCK:
 			*currentBlockNumber, capturedAccountRoot.Hex()[:18]+"...", capturedStakeRoot.Hex()[:18]+"...")
 	}
 
-	newBlock := bp.createBlockFromResults(accumulatedResults, *currentBlockNumber, epochNum, true, batchID, commitTimestampMs, globalExecIndex, commitIndex, leaderAddr)
+	newBlock := bp.createBlockFromResults(accumulatedResults, *currentBlockNumber, epochNum, true, batchID, commitTimestampMs, globalExecIndex, commitIndex, nil, leaderAddr)
 	createBlockDuration := time.Since(createBlockStart)
 
 	var endGC runtime_debug.GCStats

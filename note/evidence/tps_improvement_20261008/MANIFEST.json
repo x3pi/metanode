@@ -1312,5 +1312,810 @@
   "logs_a3_batch_1000_run_4/val3_IntermediateRoot.log": "473ff301f40438314440038e95b524ccd3a9d3a5461b36107667302a3b99c36d",
   "logs_a3_batch_1000_run_4/val3_cache_debug.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "logs_a3_batch_1000_run_4/val3_execution.log": "387684b055dc535958a0aad479911c27c70a84f7530223c4942b5f2379e5c9b0",
-  "logs_a3_batch_1000_run_4/val3_runSocketExecutor_committer.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  "logs_a3_batch_1000_run_4/val3_runSocketExecutor_committer.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "b1_unlimited_60s_run_1_report.json": {
+    "sha256": "ff8144bfc6c3f1ec89a475ca290975ed61290e350266e1dc396d3dac3f296872",
+    "size_bytes": 689,
+    "recorded_at": "2026-10-08T07:40:05Z"
+  },
+  "b1_unlimited_60s_run_1_blast.log": {
+    "sha256": "1e922f2e78e4a12dd581dbb1e5b929a617b9e94058152b9fba44c00f6f78447a",
+    "size_bytes": 3162,
+    "recorded_at": "2026-10-08T07:40:05Z"
+  },
+  "logs_b1_unlimited_60s_run_1/exec2.log": {
+    "sha256": "f88f4f9521bfea81cc76f8b2e923fec8f480dfee685e0ee995dd44b831f84bc0",
+    "size_bytes": 46246,
+    "recorded_at": "2026-10-08T07:38:16Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val3_IntermediateRoot.log": {
+    "sha256": "0648c926003d74b7044929ab2d529c3a7e446d1a30148523ea25e828a0467c07",
+    "size_bytes": 265532,
+    "recorded_at": "2026-10-08T07:40:02Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val0_cache_debug.log": {
+    "sha256": "4dfc8a424f5f30435fac93aa2dfb43b35895cf300faf60178c5913f3ac4b29f3",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:39:42Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val3_App.log": {
+    "sha256": "faf0296b034f9dc91bb7ca2a2ff44b683d3c3ba389345cf0afcf1b0ae2b9e2b2",
+    "size_bytes": 2268,
+    "recorded_at": "2026-10-08T07:39:58Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val0_Commit.log": {
+    "sha256": "7413dc87e969c4618d2566371592956b258dda5b10702aa5b44ebb97e8c22179",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:43:22Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val0_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:43:22Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val2_cache_debug.log": {
+    "sha256": "b7d517071374ddf3bb887b2367ae3fa261f9cfe524911830e986b3ae29923138",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:39:44Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val1_execution.log": {
+    "sha256": "575a5cc80e369c800acfbdd797f0606557cb6144a62c8579a75525fef8f25abd",
+    "size_bytes": 6746548,
+    "recorded_at": "2026-10-08T07:40:05Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val1.log": {
+    "sha256": "43d01a20456ae3c01a4733ea9647230733aeb04dbc825c55f3d3a8778acbaca9",
+    "size_bytes": 40563,
+    "recorded_at": "2026-10-08T07:38:14Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val3.log": {
+    "sha256": "eb403b9a4ef96361ad292b0979e171b4b7f0379f6f1b5eccb320708f19d42c90",
+    "size_bytes": 40563,
+    "recorded_at": "2026-10-08T07:38:15Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val2_IntermediateRoot.log": {
+    "sha256": "b852307b77e26d082e7ba4feeb4bcf4947b631554d138c0c871acffcfdee0339",
+    "size_bytes": 265532,
+    "recorded_at": "2026-10-08T07:40:00Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val2_Commit.log": {
+    "sha256": "0d46b2bf416666cc996ec4e29951d9247bcfd93ce35b19973d537c6315697a44",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:15Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val1_App.log": {
+    "sha256": "9d0a0644ed2357da001debab91f34bf5a5dea4b592ccefd1171dc7cbabdadfaf",
+    "size_bytes": 2269,
+    "recorded_at": "2026-10-08T07:39:57Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val3_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:23Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val0.log": {
+    "sha256": "325488c3ceb37bf7eba0d5110f9f43f5fae6431b8f975d96adc8746b8023acca",
+    "size_bytes": 40563,
+    "recorded_at": "2026-10-08T07:38:12Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val3_Commit.log": {
+    "sha256": "1c30bf8822a85b4574503b118c4126cd702e3906594203dbe1496443dc6f2d33",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:23Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val1_cache_debug.log": {
+    "sha256": "b7d517071374ddf3bb887b2367ae3fa261f9cfe524911830e986b3ae29923138",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:39:44Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val1_IntermediateRoot.log": {
+    "sha256": "2bfc62f6ff371690f6340979282551d5be29ae431b216e38acd632f726946e49",
+    "size_bytes": 265532,
+    "recorded_at": "2026-10-08T07:40:01Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val3_cache_debug.log": {
+    "sha256": "d0c98e27f06ae96f55466fd99aa5d37941ea8e09601b12ad8beb9de53ed42d9e",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:39:45Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val1_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:07Z"
+  },
+  "logs_b1_unlimited_60s_run_1/parent.log": {
+    "sha256": "08f7ccac82adf9ad8a2365c28d72f5aed1f4feadd106d1151c77443d5a8e3881",
+    "size_bytes": 125167,
+    "recorded_at": "2026-10-08T07:40:05Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val0_execution.log": {
+    "sha256": "fdac29b30391ea43bdacfa991060074e8bd3b194435fd7aefa7a3cd7c5b620a9",
+    "size_bytes": 6501398,
+    "recorded_at": "2026-10-08T07:40:05Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val2_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:15Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val2_App.log": {
+    "sha256": "b3a91fca89846cb73c5378bd98ca4a0ee773c3d7f267f9199ed1d1530d76f82a",
+    "size_bytes": 2269,
+    "recorded_at": "2026-10-08T07:39:57Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val2.log": {
+    "sha256": "7b0fa0cb6edfb4aee4fca789de3b396b747c956d8de6913763e94d7de312afe3",
+    "size_bytes": 40655,
+    "recorded_at": "2026-10-08T07:38:14Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val2_execution.log": {
+    "sha256": "a9559a01b7ab6eabd321d1f7b8f6b87965206c2a0034dc613cca432537bd83f3",
+    "size_bytes": 6676556,
+    "recorded_at": "2026-10-08T07:40:05Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val3_execution.log": {
+    "sha256": "ee22911585ca0d02c8234a35ba15f5ed2dac776250b74da448485088e697f59f",
+    "size_bytes": 6724489,
+    "recorded_at": "2026-10-08T07:40:05Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val0_IntermediateRoot.log": {
+    "sha256": "351a343bbf4b82679c2955c1b9f818001a70e9ad2e0d8f15cf880c3a120f8754",
+    "size_bytes": 265532,
+    "recorded_at": "2026-10-08T07:39:59Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val1_Commit.log": {
+    "sha256": "9c9624c64ac0ff88a8fea7a65d50bc65b550c3ea08907be3d29338426a246d6a",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:07Z"
+  },
+  "logs_b1_unlimited_60s_run_1/val0_App.log": {
+    "sha256": "d4f9c7871772d8cc4dc3b3d4d50f56029298279989ebc4ad080232796e1fb65c",
+    "size_bytes": 2496,
+    "recorded_at": "2026-10-08T07:40:05Z"
+  },
+  "b1_unlimited_60s_run_2_report.json": {
+    "sha256": "640eeeb6ae5c2354815aca09546df2f377b3e9e6cb2e23b0c5fdc52876ab71b1",
+    "size_bytes": 686,
+    "recorded_at": "2026-10-08T07:42:37Z"
+  },
+  "b1_unlimited_60s_run_2_blast.log": {
+    "sha256": "5257e10e3bb190c2bf55e15a1eb6df8313b015e79684007c9c7ed26e098932df",
+    "size_bytes": 3165,
+    "recorded_at": "2026-10-08T07:42:37Z"
+  },
+  "logs_b1_unlimited_60s_run_2/exec2.log": {
+    "sha256": "6035b15999b9dc3bc136e5b4335df91732a72e7c43ea43b7c41ad6c6725ab63d",
+    "size_bytes": 46155,
+    "recorded_at": "2026-10-08T07:40:44Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val3_IntermediateRoot.log": {
+    "sha256": "ff3d3469dea9d3018353dc9e00c25886b9e2d417ceefd385178f8f9939004487",
+    "size_bytes": 269966,
+    "recorded_at": "2026-10-08T07:42:31Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val0_cache_debug.log": {
+    "sha256": "e2d660036e33e38be8f71d298430be1eea299e117620c1706b0606ab633f339d",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:42:10Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val3_App.log": {
+    "sha256": "7829d7f284c78d50073c4cbe28e41ebfa4b6f5a511c731932c84cb7a2e8d176a",
+    "size_bytes": 2498,
+    "recorded_at": "2026-10-08T07:42:36Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val0_Commit.log": {
+    "sha256": "7413dc87e969c4618d2566371592956b258dda5b10702aa5b44ebb97e8c22179",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:43:22Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val0_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:43:22Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val2_cache_debug.log": {
+    "sha256": "41c08a93184fa77e43831faa7ee7e195c734882bf274f6fef7a37e0c43b6ccb0",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:42:12Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val1_execution.log": {
+    "sha256": "da97f30b20eaf65489de5d8d95bd48419f158b0dd608ae85fe4b7d399e39d726",
+    "size_bytes": 6652472,
+    "recorded_at": "2026-10-08T07:42:37Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val1.log": {
+    "sha256": "ba2e95d2d0d2e2e6ecb3cfa7860908734921e3d9cbeea55fee97d495fc0c3cc2",
+    "size_bytes": 40564,
+    "recorded_at": "2026-10-08T07:40:41Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val3.log": {
+    "sha256": "8a3f0804b22df2213a4d4f930347efa40cd2be807c1c8bb424f6f3df7bd53b9e",
+    "size_bytes": 40562,
+    "recorded_at": "2026-10-08T07:40:43Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val2_IntermediateRoot.log": {
+    "sha256": "e17a2c730b2839570db299294324c2dd71c216f8386aff4ebc3616d6e78c2504",
+    "size_bytes": 269966,
+    "recorded_at": "2026-10-08T07:42:29Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val2_Commit.log": {
+    "sha256": "0d46b2bf416666cc996ec4e29951d9247bcfd93ce35b19973d537c6315697a44",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:15Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val1_App.log": {
+    "sha256": "46256c30564f3c91a4d495103ce1d5968e3b0f1d7122a9d23e5d4f9116ab5c66",
+    "size_bytes": 2496,
+    "recorded_at": "2026-10-08T07:42:34Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val3_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:23Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val0.log": {
+    "sha256": "5827f1279908d9c2bece20b61932c1381b480fb74d2e2ab5dedb2ceac203b0cd",
+    "size_bytes": 40655,
+    "recorded_at": "2026-10-08T07:40:40Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val3_Commit.log": {
+    "sha256": "1c30bf8822a85b4574503b118c4126cd702e3906594203dbe1496443dc6f2d33",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:23Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val1_cache_debug.log": {
+    "sha256": "e57402fbb61bbde06acf37495ffa4a917d4688dd994122f86799d3033404d9f5",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:42:11Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val1_IntermediateRoot.log": {
+    "sha256": "f34d48e7a7304686f3cc7a5860cff20ad62daf6234928113f3692cbc518c3eeb",
+    "size_bytes": 269966,
+    "recorded_at": "2026-10-08T07:42:32Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val3_cache_debug.log": {
+    "sha256": "c545bd707c479097da86fb06de23413e6aed1bf3818245c86f7f16524784f355",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:42:13Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val1_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:07Z"
+  },
+  "logs_b1_unlimited_60s_run_2/parent.log": {
+    "sha256": "48318cd356c54e911a748301fbdeca6a8b04af29eab01c535027de8104f6b45b",
+    "size_bytes": 128255,
+    "recorded_at": "2026-10-08T07:42:37Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val0_execution.log": {
+    "sha256": "7938f495bc6efaf5a39a78c8a796a2a0306fed43297165da221af3375826ef45",
+    "size_bytes": 7044601,
+    "recorded_at": "2026-10-08T07:42:37Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val2_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:15Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val2_App.log": {
+    "sha256": "3e7521cec983455ebe29fd07cdb56b90c6aeba7c6a16a2b4cb8f043cb4d41a5a",
+    "size_bytes": 2498,
+    "recorded_at": "2026-10-08T07:42:35Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val2.log": {
+    "sha256": "6dfa114fd91ab35238b1cfe6d47705eeb01b48bc1f74d6a1f5418267626cde65",
+    "size_bytes": 40564,
+    "recorded_at": "2026-10-08T07:40:42Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val2_execution.log": {
+    "sha256": "93c56b2aa67283ae0f606b1395b7fde5389758379bf5cbf36760981f71b72f89",
+    "size_bytes": 6855265,
+    "recorded_at": "2026-10-08T07:42:37Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val3_execution.log": {
+    "sha256": "012da3d96c75218f8b69479b0c4d92f9d100c00da423c2438c0bb76b7f02daca",
+    "size_bytes": 6503311,
+    "recorded_at": "2026-10-08T07:42:37Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val0_IntermediateRoot.log": {
+    "sha256": "badfbeae7d9a53ef1ceecb5e5b020d5512ee3aa11ef71edef5d8a8588de4c9d2",
+    "size_bytes": 269966,
+    "recorded_at": "2026-10-08T07:42:31Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val1_Commit.log": {
+    "sha256": "9c9624c64ac0ff88a8fea7a65d50bc65b550c3ea08907be3d29338426a246d6a",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:07Z"
+  },
+  "logs_b1_unlimited_60s_run_2/val0_App.log": {
+    "sha256": "6d5a5e8076e64e7eb6021d6ed6e295ad2b66bcc33bb6df7348a4119065f3abfa",
+    "size_bytes": 2494,
+    "recorded_at": "2026-10-08T07:42:33Z"
+  },
+  "b1_unlimited_60s_run_3_report.json": {
+    "sha256": "a286701d09e985267c4a356608772b9ace11f46678d5ad72f8d5a3248576d77e",
+    "size_bytes": 685,
+    "recorded_at": "2026-10-08T07:45:07Z"
+  },
+  "b1_unlimited_60s_run_3_blast.log": {
+    "sha256": "4e6df3367efe519743b50bd6f0b9f53d9de2c5074de341a480707fb89ebe81d4",
+    "size_bytes": 3166,
+    "recorded_at": "2026-10-08T07:45:07Z"
+  },
+  "logs_b1_unlimited_60s_run_3/exec2.log": {
+    "sha256": "77f6faf9ed2dc7f44e84b7ed49eb7f6d0d97df4decdcb21d2198078410d07d49",
+    "size_bytes": 46156,
+    "recorded_at": "2026-10-08T07:43:15Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val3_IntermediateRoot.log": {
+    "sha256": "7b93a2b5c0b2a7acf39a3ded205e74412168fa913d7fbe4e3d44135fdd34fd4f",
+    "size_bytes": 277732,
+    "recorded_at": "2026-10-08T07:45:00Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val0_cache_debug.log": {
+    "sha256": "d1055649432cbf6d6f9b3252b7f3b1772b538a6eeacbea7d70c4f42c22fb810a",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:44:40Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val3_App.log": {
+    "sha256": "69c982939649bf24aba4bfb75f5128b6e56e2a6b71bebc2bf66cd4459bdfffbe",
+    "size_bytes": 2497,
+    "recorded_at": "2026-10-08T07:45:07Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val0_Commit.log": {
+    "sha256": "7413dc87e969c4618d2566371592956b258dda5b10702aa5b44ebb97e8c22179",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:43:22Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val0_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:43:22Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val2_cache_debug.log": {
+    "sha256": "f179274ecefc7c7c16d147ac3c8b95f2e776f7438119683794c69032c34964b4",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:44:43Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val1_execution.log": {
+    "sha256": "c3fc0db4377e86ba2620e7cfa7ec91cb9b7713b034866bc8d7e72bbcc3623ba1",
+    "size_bytes": 7545652,
+    "recorded_at": "2026-10-08T07:45:07Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val1.log": {
+    "sha256": "2259b1bfaa4e0ce208450a042a62d903ef25d6690f618198042f843ccfba0849",
+    "size_bytes": 40563,
+    "recorded_at": "2026-10-08T07:43:12Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val3.log": {
+    "sha256": "4b54ea0123ba96a679a7655b407367e5ff19476e1b00a99f9a293ce96fed9eeb",
+    "size_bytes": 40654,
+    "recorded_at": "2026-10-08T07:43:14Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val2_IntermediateRoot.log": {
+    "sha256": "60868f34cc3a9c004214d61710c6ae515fd3d4fa31681bf8f8f756965cc1108b",
+    "size_bytes": 277732,
+    "recorded_at": "2026-10-08T07:45:02Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val2_Commit.log": {
+    "sha256": "0d46b2bf416666cc996ec4e29951d9247bcfd93ce35b19973d537c6315697a44",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:15Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val1_App.log": {
+    "sha256": "d8b93f7c46d205318c43df2a9725d0763c7e387565901e864567d8de14a72532",
+    "size_bytes": 2573,
+    "recorded_at": "2026-10-08T07:45:05Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val3_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:23Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val0.log": {
+    "sha256": "d544089786cad78f5b95c4e9b0d6ee1e39b6523169e4ddc6ab346bc7809411eb",
+    "size_bytes": 40453,
+    "recorded_at": "2026-10-08T07:43:10Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val3_Commit.log": {
+    "sha256": "1c30bf8822a85b4574503b118c4126cd702e3906594203dbe1496443dc6f2d33",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:23Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val1_cache_debug.log": {
+    "sha256": "0e2a871d8125fd4e1691908e6aa1df0dc31f27b0f198fb78f1c6fe45dc39521a",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:44:42Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val1_IntermediateRoot.log": {
+    "sha256": "bcc813120a22e6b4524a79415f7466641843b3ed0e2b991b8c2863ea01b3c4ee",
+    "size_bytes": 277732,
+    "recorded_at": "2026-10-08T07:45:01Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val3_cache_debug.log": {
+    "sha256": "2d039b5f1bba9b7d66ca8405ea890135f47db3fea3b4b01e1b4b7cc4530144dc",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:44:44Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val1_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:07Z"
+  },
+  "logs_b1_unlimited_60s_run_3/parent.log": {
+    "sha256": "d93829eeec9d68a68ef0dc103a6f948dfbf7ccf4fd6b499e231d96abd1197b4f",
+    "size_bytes": 128248,
+    "recorded_at": "2026-10-08T07:45:07Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val0_execution.log": {
+    "sha256": "4f23c298b76b5b9996539ec2849252a2b4b924f69700bf6273c5ef7c1831fdb1",
+    "size_bytes": 6848037,
+    "recorded_at": "2026-10-08T07:45:07Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val2_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:15Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val2_App.log": {
+    "sha256": "44877d406d6a112700fe5cd355bff81004023ac506851d63c46d4fbcc62ea0e3",
+    "size_bytes": 2495,
+    "recorded_at": "2026-10-08T07:45:06Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val2.log": {
+    "sha256": "0f3b86ba0de0359d0227c212fbea403fd0b6e5e6f5b2be911bbb1913dc27df57",
+    "size_bytes": 40655,
+    "recorded_at": "2026-10-08T07:43:13Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val2_execution.log": {
+    "sha256": "17c054181ec59fa302ce4a70e3478ede8d5004f7816f6fb00424eafc80a94486",
+    "size_bytes": 7361712,
+    "recorded_at": "2026-10-08T07:45:07Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val3_execution.log": {
+    "sha256": "fb24ab7b6575db8032ff40f9e7b268332a63d95aa99e145146736bbeec0787f8",
+    "size_bytes": 7160349,
+    "recorded_at": "2026-10-08T07:45:07Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val0_IntermediateRoot.log": {
+    "sha256": "f8c0ed43766a6e45ce4e30288a016468e3c02ecc740ca112ccbfd5b2ab17cc00",
+    "size_bytes": 277732,
+    "recorded_at": "2026-10-08T07:45:03Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val1_Commit.log": {
+    "sha256": "9c9624c64ac0ff88a8fea7a65d50bc65b550c3ea08907be3d29338426a246d6a",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:07Z"
+  },
+  "logs_b1_unlimited_60s_run_3/val0_App.log": {
+    "sha256": "12eb73f58926757fde549108d041b1031b6f4eb8f52ef7193911b3c750c825c1",
+    "size_bytes": 2493,
+    "recorded_at": "2026-10-08T07:45:03Z"
+  },
+  "b1_unlimited_60s_run_4_report.json": {
+    "sha256": "1f54c234acbfb54df9c43235da8c0b281ff913fc0a9e8f32f358421a93a2816f",
+    "size_bytes": 690,
+    "recorded_at": "2026-10-08T07:47:32Z"
+  },
+  "b1_unlimited_60s_run_4_blast.log": {
+    "sha256": "6e471d57a9b9464171c805b7c05e943696785c42e32a3145ed78247db4025bf6",
+    "size_bytes": 3161,
+    "recorded_at": "2026-10-08T07:47:32Z"
+  },
+  "logs_b1_unlimited_60s_run_4/exec2.log": {
+    "sha256": "be5004c500c0e93d4ad4634aca1388cb9bd32bc23c1a3c321a58ba932b68e678",
+    "size_bytes": 46246,
+    "recorded_at": "2026-10-08T07:45:45Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val3_IntermediateRoot.log": {
+    "sha256": "59f771e8fe995888fa51875c5015815452eb9c70061ee09dc10ed0e83d2a107d",
+    "size_bytes": 259354,
+    "recorded_at": "2026-10-08T07:47:28Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val0_cache_debug.log": {
+    "sha256": "adb772e8dcd931e6616e3cfa0578015a29da002be9aee105292fa160b629f712",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:47:10Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val3_App.log": {
+    "sha256": "31e35040c4961864b178c7bf9e06e3bdc9826bc1777c6b66836eeb7acbc4794f",
+    "size_bytes": 2267,
+    "recorded_at": "2026-10-08T07:47:27Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val0_Commit.log": {
+    "sha256": "7413dc87e969c4618d2566371592956b258dda5b10702aa5b44ebb97e8c22179",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:43:22Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val0_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:43:22Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val2_cache_debug.log": {
+    "sha256": "438d858813a005403fe4cb00c39e30d0fd13a4911aeff678a9ee21a54555f99e",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:47:12Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val1_execution.log": {
+    "sha256": "6972410be6408db8dc69f795df8dc34582a10cb9013582e73c0cca1d6786e1ca",
+    "size_bytes": 6773986,
+    "recorded_at": "2026-10-08T07:47:32Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val1.log": {
+    "sha256": "737e21ad2a46c89bdb9132d942548cf137d3c1ca0fb8397ab0c9dba9f2ccfd6b",
+    "size_bytes": 40563,
+    "recorded_at": "2026-10-08T07:45:41Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val3.log": {
+    "sha256": "a7e9a8a0bc7e6b8e41e3c8e88dfb26e1614dffddb89526afe924988406bddaee",
+    "size_bytes": 40564,
+    "recorded_at": "2026-10-08T07:45:44Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val2_IntermediateRoot.log": {
+    "sha256": "13ff693afe4d898fb6abbab6887b0dd00232fb4f1f16c0feba5bd8dcbef5ffc2",
+    "size_bytes": 259354,
+    "recorded_at": "2026-10-08T07:47:27Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val2_Commit.log": {
+    "sha256": "0d46b2bf416666cc996ec4e29951d9247bcfd93ce35b19973d537c6315697a44",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:15Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val1_App.log": {
+    "sha256": "c98e406049d4cb7c1a3999019680e8fc5730fe57a2ccaaed81a86c868830d901",
+    "size_bytes": 2267,
+    "recorded_at": "2026-10-08T07:47:24Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val3_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:23Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val0.log": {
+    "sha256": "0570a68ce53c8dccff4e6d745d5486349875f4a0add0a8d28fbea06bbd47aa28",
+    "size_bytes": 40563,
+    "recorded_at": "2026-10-08T07:45:40Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val3_Commit.log": {
+    "sha256": "1c30bf8822a85b4574503b118c4126cd702e3906594203dbe1496443dc6f2d33",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:23Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val1_cache_debug.log": {
+    "sha256": "74218dce545fa7acbdc030bdac059ea542fad1f44efd050a3bea060074efb5e4",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:47:11Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val1_IntermediateRoot.log": {
+    "sha256": "1e3a3be98926761fd0396ebf343c6d0700645fd884389ac3e716563577613429",
+    "size_bytes": 259354,
+    "recorded_at": "2026-10-08T07:47:27Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val3_cache_debug.log": {
+    "sha256": "fb14edce7af033391c106abd49ffe0dbfb188fcf867e94bcb240ff06fe1a4b51",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:47:14Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val1_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:07Z"
+  },
+  "logs_b1_unlimited_60s_run_4/parent.log": {
+    "sha256": "ce0d72897397d656908e91f62bd8d9402e27c8301c5ae70670f342cd3d4f8e35",
+    "size_bytes": 124994,
+    "recorded_at": "2026-10-08T07:47:32Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val0_execution.log": {
+    "sha256": "3daf0677158bd8e68ca1ace0a96e89274a7f989dbce720052f6754e6a6bfaa03",
+    "size_bytes": 6232514,
+    "recorded_at": "2026-10-08T07:47:32Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val2_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:15Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val2_App.log": {
+    "sha256": "6cda00cd707cf711a9d5ab8d6156259c3f17eeb84694b40ec41bc17e999442b0",
+    "size_bytes": 2264,
+    "recorded_at": "2026-10-08T07:47:25Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val2.log": {
+    "sha256": "ecc250a3c2aeca9667101a64decafa98fc6a56ffecbc4986d4e27d85c6f37953",
+    "size_bytes": 40563,
+    "recorded_at": "2026-10-08T07:45:42Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val2_execution.log": {
+    "sha256": "638dbf4c1fe1604b3dddc17daa7e01af9a0f8176ded749b3103bdd87c292aec1",
+    "size_bytes": 6371362,
+    "recorded_at": "2026-10-08T07:47:32Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val3_execution.log": {
+    "sha256": "c1d7f3dde0a716c6dd900560f5dc7116d6118477048b45861713bb4e7b4bfe5a",
+    "size_bytes": 6480967,
+    "recorded_at": "2026-10-08T07:47:32Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val0_IntermediateRoot.log": {
+    "sha256": "bb0b2d7101e71d98c9bd1cf75312cff43ec7baba22b376dbd14c2f09089f064a",
+    "size_bytes": 259354,
+    "recorded_at": "2026-10-08T07:47:26Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val1_Commit.log": {
+    "sha256": "9c9624c64ac0ff88a8fea7a65d50bc65b550c3ea08907be3d29338426a246d6a",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:07Z"
+  },
+  "logs_b1_unlimited_60s_run_4/val0_App.log": {
+    "sha256": "d399b74b8bf0f4bcb97a3a62632c064bc42047abab81b0feb879233e5f7a48f8",
+    "size_bytes": 2267,
+    "recorded_at": "2026-10-08T07:47:23Z"
+  },
+  "b1_unlimited_60s_run_5_report.json": {
+    "sha256": "ea35ad4bd0ae0c2aef62ab56ce5368b38bf77c5095a699ad011e7388c186b47b",
+    "size_bytes": 686,
+    "recorded_at": "2026-10-08T07:50:00Z"
+  },
+  "b1_unlimited_60s_run_5_blast.log": {
+    "sha256": "1c6c88e1b8d59ec43809b2d4ab67b6ae6d8d827e8417ac06c951016bab176160",
+    "size_bytes": 3170,
+    "recorded_at": "2026-10-08T07:50:00Z"
+  },
+  "logs_b1_unlimited_60s_run_5/exec2.log": {
+    "sha256": "0314e58bf7beed6c4f3c398a462735aa12b79fe32e2dda3abc9ac41f7328777b",
+    "size_bytes": 46155,
+    "recorded_at": "2026-10-08T07:48:09Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val3_IntermediateRoot.log": {
+    "sha256": "d13f9d8a95c32f151b541ce2f4717d332e14e5c0ee1a16b97a84270bdba90b13",
+    "size_bytes": 273623,
+    "recorded_at": "2026-10-08T07:49:54Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val0_cache_debug.log": {
+    "sha256": "76a68b0096f64d3750d1fc5c197afe73562e427ea7a69b6d7768ca0066782bd9",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:49:35Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val3_App.log": {
+    "sha256": "d00bfe4438f8f5558e1fa3646ade57ccef262a71850e1a825e50c4d56f339b7e",
+    "size_bytes": 2270,
+    "recorded_at": "2026-10-08T07:49:51Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val0_Commit.log": {
+    "sha256": "7413dc87e969c4618d2566371592956b258dda5b10702aa5b44ebb97e8c22179",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:43:22Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val0_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:43:22Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val2_cache_debug.log": {
+    "sha256": "be8026805a1115d4bb80ce9c7871b50bd5c0672c515ce1c009f98b2a4e25688a",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:49:37Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val1_execution.log": {
+    "sha256": "c4d4e1dc735ffeaf62a50265b1d69303609f02aa43e82c2c7a5a3a4c36b77b98",
+    "size_bytes": 7001335,
+    "recorded_at": "2026-10-08T07:50:00Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val1.log": {
+    "sha256": "586129d4362488b886d929d17ca9e367324bc7e8a9a7bfbde5d244c06dbd0984",
+    "size_bytes": 40563,
+    "recorded_at": "2026-10-08T07:48:06Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val3.log": {
+    "sha256": "d73ea846ffe394a621da955f9fd8790f0247605c566e6ab7a6b66b737513d153",
+    "size_bytes": 40564,
+    "recorded_at": "2026-10-08T07:48:08Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val2_IntermediateRoot.log": {
+    "sha256": "1b464134eb29e70e69fcdb80448d81df73e947fbb92a2f15ec324ee74061044d",
+    "size_bytes": 273623,
+    "recorded_at": "2026-10-08T07:49:55Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val2_Commit.log": {
+    "sha256": "0d46b2bf416666cc996ec4e29951d9247bcfd93ce35b19973d537c6315697a44",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:15Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val1_App.log": {
+    "sha256": "1d87269114da3f7a4226cdedd2a4a638090b6570aac28e8e8610128e8a27717f",
+    "size_bytes": 2496,
+    "recorded_at": "2026-10-08T07:49:59Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val3_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:23Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val0.log": {
+    "sha256": "28c478a014b0ab4d6524f895a0b9293e55a64790da833a6b1b55563a0505dfc0",
+    "size_bytes": 40563,
+    "recorded_at": "2026-10-08T07:48:05Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val3_Commit.log": {
+    "sha256": "1c30bf8822a85b4574503b118c4126cd702e3906594203dbe1496443dc6f2d33",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:23Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val1_cache_debug.log": {
+    "sha256": "2f2e81786bc7e10707f033f5c07931db9075ee1db30c396e9987537aee90ab35",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:49:36Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val1_IntermediateRoot.log": {
+    "sha256": "108f928745ebc4f0f7bbef6051978eca950822ab57feefca3a964f674b1bf910",
+    "size_bytes": 273623,
+    "recorded_at": "2026-10-08T07:49:55Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val3_cache_debug.log": {
+    "sha256": "8a172ff1b10b86768361ea2f58ce39be908c6c3f33d2e28ab4677560413415db",
+    "size_bytes": 171,
+    "recorded_at": "2026-10-08T07:49:38Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val1_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:07Z"
+  },
+  "logs_b1_unlimited_60s_run_5/parent.log": {
+    "sha256": "55067e5315b2df9e3b5ce98b2c9aa38ef25ec1f550cf841962dd8ebaafc86b2a",
+    "size_bytes": 127667,
+    "recorded_at": "2026-10-08T07:49:59Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val0_execution.log": {
+    "sha256": "3945de33efa52819be03b3702b2896f933726f22e35fc3a4c375cdc71457b3a2",
+    "size_bytes": 6373253,
+    "recorded_at": "2026-10-08T07:50:00Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val2_runSocketExecutor_committer.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "recorded_at": "2026-10-08T04:44:15Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val2_App.log": {
+    "sha256": "55cae83f52f27e11c7d0c6d4335c4b63a16299656a7bef746a58f4172b50f120",
+    "size_bytes": 2271,
+    "recorded_at": "2026-10-08T07:49:50Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val2.log": {
+    "sha256": "02bb2579b4640c31cd63bb28c2a32cf580ec0550622b1bc19b6fa1885ffe9c9a",
+    "size_bytes": 40563,
+    "recorded_at": "2026-10-08T07:48:07Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val2_execution.log": {
+    "sha256": "dc712250f454aa4163df01d7ff23fa1adb6a57e367b730d7005763a07cd539e3",
+    "size_bytes": 7128289,
+    "recorded_at": "2026-10-08T07:50:00Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val3_execution.log": {
+    "sha256": "8e8ebecca63c7e0780294784e94739e3737625ad6dc431732aa01ec48378fcb7",
+    "size_bytes": 6950562,
+    "recorded_at": "2026-10-08T07:50:00Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val0_IntermediateRoot.log": {
+    "sha256": "681914857ff9211c5fde2b35af4d28d4778eb4616bdb1ba19746d2b9ccb815f2",
+    "size_bytes": 273623,
+    "recorded_at": "2026-10-08T07:49:57Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val1_Commit.log": {
+    "sha256": "9c9624c64ac0ff88a8fea7a65d50bc65b550c3ea08907be3d29338426a246d6a",
+    "size_bytes": 277,
+    "recorded_at": "2026-10-08T04:44:07Z"
+  },
+  "logs_b1_unlimited_60s_run_5/val0_App.log": {
+    "sha256": "9deb4b9e55a26c893f82be35a6d4b2915e963afbd935c91f7caa5831c1178778",
+    "size_bytes": 2496,
+    "recorded_at": "2026-10-08T07:49:58Z"
+  },
+  "b1_speculative_roots_summary.json": {
+    "sha256": "611e76fcad91453e0f3a114b0b37adaef61d3a7b4b7b6b76a14869dab7507216",
+    "size_bytes": 142317,
+    "recorded_at": "2026-10-08T07:50:26Z"
+  }
 }

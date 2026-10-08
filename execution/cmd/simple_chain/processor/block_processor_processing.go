@@ -13,7 +13,6 @@ import (
 	"context"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
@@ -50,7 +49,7 @@ import (
 // around just because nothing happens to hit it today. Now a caller that forgets to pass one
 // gets a loud, immediate panic instead of a hash that might quietly diverge from every other
 // node's.
-func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.ProcessResult, currentBlockNumber uint64, epoch uint64, isStateChanging bool, batchID string, commitTimestampMs uint64, globalExecIndex uint64, commitIndex uint32, leaderAddressOverride ...common.Address) *block.Block {
+func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.ProcessResult, currentBlockNumber uint64, epoch uint64, isStateChanging bool, batchID string, commitTimestampMs uint64, globalExecIndex uint64, commitIndex uint32, precomputed *PrecomputedBlockRoots, leaderAddressOverride ...common.Address) *block.Block {
 	if len(leaderAddressOverride) != 1 {
 		panic(fmt.Sprintf("🚨 [FORK-SAFETY] createBlockFromResults called for block #%d with %d leaderAddressOverride values (must be exactly 1, decided by Rust consensus) -- refusing to guess a node-local leader address, that would risk a fork",
 			currentBlockNumber, len(leaderAddressOverride)))
@@ -71,67 +70,49 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	defer span.End()
 
 	// Phase 1: Calculate Roots — PARALLEL (receiptsRoot and txsRoot are independent)
-	txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(common.Hash{}, bp.storageManager.GetStorageTransaction())
-	if err != nil {
-		logger.Error("🚨 [REVERT-GATE] NewTransactionStateDBFromRoot failed: %v — reverting block #%d", err, currentBlockNumber)
-		bp.revertDraftBlock(nil, currentBlockNumber)
-		return nil
-	}
-
-	// Run receiptsRoot and txsRoot in parallel — they operate on independent data structures
+	var txDB *transaction_state_db.TransactionStateDB
 	var receipts types.Receipts
 	var receiptsRoot common.Hash
 	var txsRoot common.Hash
-	var txsRootErr error
 	var receiptsRootDuration time.Duration
 	var txsRootDuration time.Duration
 
-	var rootsWg sync.WaitGroup
-	rootsWg.Add(2)
+	if precomputed != nil && precomputed.TxDB != nil && precomputed.Receipts != nil && precomputed.Err == nil {
+		txDB = precomputed.TxDB
+		txsRoot = precomputed.TxsRoot
+		receipts = precomputed.Receipts
+		receiptsRoot = precomputed.ReceiptsRoot
+		logger.Debug("⚡ [PRECOMPUTED-ROOTS] Using precomputed roots for block #%d (GEI=%d, txsRoot=%s, receiptsRoot=%s)",
+			currentBlockNumber, globalExecIndex, txsRoot.Hex(), receiptsRoot.Hex())
+	} else {
+		var rootsWg sync.WaitGroup
+		var txsRootErr error
+		rootsWg.Add(2)
 
-	// Goroutine 1: receiptsRoot
-	go func() {
-		defer rootsWg.Done()
-		startReceipts := time.Now()
+		// Goroutine 1: receiptsRoot
+		go func() {
+			defer rootsWg.Done()
+			startReceipts := time.Now()
+			receipts, receiptsRoot = bp.ComputeReceiptsRoot(processResults.Receipts, currentBlockNumber, globalExecIndex)
+			receiptsRootDuration = time.Since(startReceipts)
+		}()
 
-		if len(processResults.Receipts) > 0 {
-			var combinedHash common.Hash
-			for _, rcp := range processResults.Receipts {
-				combinedHash = crypto.Keccak256Hash(combinedHash.Bytes(), rcp.TransactionHash().Bytes(), []byte{byte(rcp.Status())})
-			}
-			logger.Debug("🔍 [FORENSIC] Block %d: Input %d receipts to calculateReceiptsRoot. Combined Input Hash: %s", currentBlockNumber, len(processResults.Receipts), combinedHash.Hex())
+		// Goroutine 2: txsRoot
+		go func() {
+			defer rootsWg.Done()
+			startTxRoot := time.Now()
+			txDB, txsRoot, txsRootErr = bp.ComputeTxsRoot(processResults.Transactions, currentBlockNumber)
+			txsRootDuration = time.Since(startTxRoot)
+			logger.Debug("[PERF] Phase1.txsRoot: %v (%d txs)", txsRootDuration, len(processResults.Transactions))
+		}()
+
+		rootsWg.Wait()
+
+		if txsRootErr != nil {
+			logger.Error("🚨 [REVERT-GATE] Error getting txsRoot for block #%d: %v — reverting", currentBlockNumber, txsRootErr)
+			bp.revertDraftBlock(txDB, currentBlockNumber)
+			return nil
 		}
-
-		receipts, receiptsRoot = bp.calculateReceiptsRoot(processResults.Receipts)
-		receiptsRootDuration = time.Since(startReceipts)
-		logger.Info("🧾 [RECEIPTS-ROOT] Block #%d | GEI: %d | ReceiptsRoot: %s | Count: %d | Duration: %v", currentBlockNumber, globalExecIndex, receiptsRoot.Hex(), len(processResults.Receipts), receiptsRootDuration)
-	}()
-
-	// Goroutine 2: txsRoot (must AddTransactions first)
-	go func() {
-		defer rootsWg.Done()
-		startTxRoot := time.Now()
-
-		if len(processResults.Transactions) > 0 {
-			var combinedHash common.Hash
-			for _, tx := range processResults.Transactions {
-				combinedHash = crypto.Keccak256Hash(combinedHash.Bytes(), tx.Hash().Bytes())
-			}
-			logger.Debug("🔍 [FORENSIC] Block %d: Input %d txs to txDB. Combined Input Hash: %s", currentBlockNumber, len(processResults.Transactions), combinedHash.Hex())
-		}
-
-		txDB.AddTransactions(processResults.Transactions)
-		txsRoot, txsRootErr = txDB.IntermediateRoot()
-		txsRootDuration = time.Since(startTxRoot)
-		logger.Debug("[PERF] Phase1.txsRoot: %v (%d txs)", txsRootDuration, len(processResults.Transactions))
-	}()
-
-	rootsWg.Wait()
-
-	if txsRootErr != nil {
-		logger.Error("🚨 [REVERT-GATE] Error getting txsRoot for block #%d: %v — reverting", currentBlockNumber, txsRootErr)
-		bp.revertDraftBlock(txDB, currentBlockNumber)
-		return nil
 	}
 
 	if len(processResults.Transactions) > 0 {
@@ -160,6 +141,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	blockLeaderAddress := leaderAddressOverride[0]
 
 	var bl *block.Block
+	var err error
 	if isStateChanging {
 		accountRoot := processResults.Root
 		lastConfirmedBlock := bp.GetLastBlock()
