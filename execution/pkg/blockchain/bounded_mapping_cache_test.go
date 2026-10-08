@@ -24,10 +24,10 @@ func makeTestHash(i int) common.Hash {
 }
 
 // TestBoundedTwoGenMap_SwapAndFallbackPebble verifies that:
-// 1. Filling MaxEntries triggers a pointer swap (old = current, current = new).
-// 2. Old entries are still readable from old generation, and reading promotes them to current.
-// 3. After two swaps, unread entries are evicted from RAM, but GetBlockNumberByTxHashFast
-//    and GetEthHashMapblsHash return the correct values via Pebble DB fallback and re-populate RAM.
+//  1. Filling MaxEntries triggers a pointer swap (old = current, current = new).
+//  2. Old entries are still readable from old generation, and reading promotes them to current.
+//  3. After two swaps, unread entries are evicted from RAM, but GetBlockNumberByTxHashFast
+//     and GetEthHashMapblsHash return the correct values via Pebble DB fallback and re-populate RAM.
 func TestBoundedTwoGenMap_SwapAndFallbackPebble(t *testing.T) {
 	dbDir := filepath.Join(t.TempDir(), "pebble_bounded_cache_test")
 	pebbleDb, err := storage.NewShardelDB(dbDir, 1, 1, storage.TypePebbleDB, "")
