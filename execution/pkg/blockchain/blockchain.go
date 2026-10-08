@@ -88,8 +88,7 @@ type cachedHash struct {
 }
 
 type cachedUint64 struct {
-	value   uint64
-	addedAt time.Time
+	value uint64
 }
 
 func (bc *BlockChain) GenerateMappingBatchForBlock(bl mtn_types.Block, txs []mtn_types.Transaction) ([]byte, error) {
@@ -119,7 +118,6 @@ func (bc *BlockChain) GenerateMappingBatchForBlock(bl mtn_types.Block, txs []mtn
 	// Pre-allocate maps
 	dirtyKVs := make(map[string][]byte, len(txs))
 	ethKVs := make(map[common.Hash]cachedHash, len(txs))
-	now := time.Now()
 	for _, tx := range txs {
 		ethHash := tx.EthHash()
 		if ethHash != (common.Hash{}) {
@@ -133,8 +131,7 @@ func (bc *BlockChain) GenerateMappingBatchForBlock(bl mtn_types.Block, txs []mtn
 			ethKey := string(ethKeyBytes)
 			dirtyKVs[ethKey] = tx.Hash().Bytes()
 			ethKVs[ethHash] = cachedHash{
-				hash:    tx.Hash(),
-				addedAt: now,
+				hash: tx.Hash(),
 			}
 		}
 	}
@@ -217,8 +214,6 @@ func (bc *BlockChain) StartCleanupWorker() {
 				bc.pruneTxCache(now.Add(-txCacheTTL))
 				bc.pruneBlockCache(now.Add(-blockCacheTTL))
 				bc.pruneBlockNumberCache(now.Add(-mappingCacheTTL))
-				bc.pruneTxHashCache(now.Add(-mappingCacheTTL))
-				bc.pruneEthHashCache(now.Add(-mappingCacheTTL))
 			}
 		}
 	}()
@@ -318,13 +313,7 @@ func (bc *BlockChain) pruneBlockNumberCache(expireBefore time.Time) {
 	})
 }
 
-func (bc *BlockChain) pruneTxHashCache(expireBefore time.Time) {
-	bc.txHashToBlockNumber.Prune(expireBefore)
-}
 
-func (bc *BlockChain) pruneEthHashCache(expireBefore time.Time) {
-	bc.ethHashMapBlsHash.Prune(expireBefore)
-}
 
 // ============================================================================
 // BLOCK & DB OPERATIONS
@@ -625,8 +614,7 @@ func (bc *BlockChain) SetTxHashMapBlockNumber(txHash common.Hash, blockNumber ui
 	bc.storeToDirty(key, blockNumberBytes)
 
 	bc.txHashToBlockNumber.Store(txHash, cachedUint64{
-		value:   blockNumber,
-		addedAt: time.Now(),
+		value: blockNumber,
 	})
 	return nil
 }
@@ -637,14 +625,12 @@ func (bc *BlockChain) SetTxHashMapBlockNumberBatch(txHashes []common.Hash, block
 
 	dirtyKVs := make(map[string][]byte)
 	cacheKVs := make(map[common.Hash]cachedUint64)
-	now := time.Now()
 
 	for _, txHash := range txHashes {
 		key := txHashPrefix + txHash.Hex()
 		dirtyKVs[key] = blockNumberBytes
 		cacheKVs[txHash] = cachedUint64{
-			value:   blockNumber,
-			addedAt: now,
+			value: blockNumber,
 		}
 	}
 
@@ -665,10 +651,7 @@ func (bc *BlockChain) SetTxHashMapBlockNumberBatch(txHashes []common.Hash, block
 func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bool) {
 	if value, ok := bc.txHashToBlockNumber.Load(txHash); ok {
 		if cached, ok := value.(cachedUint64); ok {
-			if time.Since(cached.addedAt) <= mappingCacheTTL {
-				return cached.value, true
-			}
-			bc.txHashToBlockNumber.Delete(txHash)
+			return cached.value, true
 		}
 	}
 
@@ -677,8 +660,7 @@ func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bo
 	if err == nil && data != nil && len(data) == 8 {
 		blockNumber := binary.BigEndian.Uint64(data)
 		bc.txHashToBlockNumber.Store(txHash, cachedUint64{
-			value:   blockNumber,
-			addedAt: time.Now(),
+			value: blockNumber,
 		})
 		return blockNumber, true
 	}
@@ -701,8 +683,7 @@ func (bc *BlockChain) SetEthHashMapblsHash(ethHash common.Hash, blsHash common.H
 	bc.storeToDirty(key, blsHash.Bytes())
 
 	bc.ethHashMapBlsHash.Store(ethHash, cachedHash{
-		hash:    blsHash,
-		addedAt: time.Now(),
+		hash: blsHash,
 	})
 	return nil
 }
@@ -710,10 +691,7 @@ func (bc *BlockChain) SetEthHashMapblsHash(ethHash common.Hash, blsHash common.H
 func (bc *BlockChain) GetEthHashMapblsHash(ethHash common.Hash) (common.Hash, bool) {
 	if value, ok := bc.ethHashMapBlsHash.Load(ethHash); ok {
 		if cached, ok := value.(cachedHash); ok {
-			if time.Since(cached.addedAt) <= mappingCacheTTL {
-				return cached.hash, true
-			}
-			bc.ethHashMapBlsHash.Delete(ethHash)
+			return cached.hash, true
 		}
 	}
 
@@ -729,8 +707,7 @@ func (bc *BlockChain) GetEthHashMapblsHash(ethHash common.Hash) (common.Hash, bo
 	blsHash := common.BytesToHash(data)
 
 	bc.ethHashMapBlsHash.Store(ethHash, cachedHash{
-		hash:    blsHash,
-		addedAt: time.Now(),
+		hash: blsHash,
 	})
 	return blsHash, true
 }
@@ -884,110 +861,246 @@ func (m *dirtyStorageMap) Range(f func(key, value any) bool) {
 	}
 }
 
+const maxMappingCacheEntries = 50_000
+
 type ethHashMapBlsHashMap struct {
-	mu   sync.RWMutex
-	data map[common.Hash]cachedHash
+	mu         sync.RWMutex
+	maxEntries int
+	current    map[common.Hash]cachedHash
+	old        map[common.Hash]cachedHash
 }
 
 func newEthHashMapBlsHashMap() *ethHashMapBlsHashMap {
+	return newEthHashMapBlsHashMapWithCap(maxMappingCacheEntries)
+}
+
+func newEthHashMapBlsHashMapWithCap(maxEntries int) *ethHashMapBlsHashMap {
+	if maxEntries <= 0 {
+		maxEntries = maxMappingCacheEntries
+	}
 	return &ethHashMapBlsHashMap{
-		data: make(map[common.Hash]cachedHash),
+		maxEntries: maxEntries,
+		current:    make(map[common.Hash]cachedHash, maxEntries),
+		old:        make(map[common.Hash]cachedHash),
 	}
 }
 
 func (m *ethHashMapBlsHashMap) Store(key, value any) {
-	m.mu.Lock()
 	k, ok1 := key.(common.Hash)
-	v, ok2 := value.(cachedHash)
-	if ok1 && ok2 {
-		m.data[k] = v
+	if !ok1 {
+		return
 	}
+	var v cachedHash
+	switch val := value.(type) {
+	case cachedHash:
+		v = val
+	case common.Hash:
+		v = cachedHash{hash: val}
+	default:
+		return
+	}
+
+	m.mu.Lock()
+	limit := m.maxEntries
+	if limit <= 0 {
+		limit = maxMappingCacheEntries
+	}
+	if _, exists := m.current[k]; !exists && len(m.current) >= limit {
+		m.old = m.current
+		m.current = make(map[common.Hash]cachedHash, limit)
+	}
+	m.current[k] = v
 	m.mu.Unlock()
 }
 
 func (m *ethHashMapBlsHashMap) StoreBatch(kvs map[common.Hash]cachedHash) {
+	if len(kvs) == 0 {
+		return
+	}
 	m.mu.Lock()
+	limit := m.maxEntries
+	if limit <= 0 {
+		limit = maxMappingCacheEntries
+	}
 	for k, v := range kvs {
-		m.data[k] = v
+		if _, exists := m.current[k]; !exists && len(m.current) >= limit {
+			m.old = m.current
+			m.current = make(map[common.Hash]cachedHash, limit)
+		}
+		m.current[k] = v
 	}
 	m.mu.Unlock()
 }
 
 func (m *ethHashMapBlsHashMap) Load(key common.Hash) (any, bool) {
 	m.mu.RLock()
-	val, ok := m.data[key]
+	if val, ok := m.current[key]; ok {
+		m.mu.RUnlock()
+		return val, true
+	}
+	_, ok := m.old[key]
 	m.mu.RUnlock()
-	return val, ok
+	if !ok {
+		return nil, false
+	}
+
+	m.mu.Lock()
+	if currVal, exists := m.current[key]; exists {
+		m.mu.Unlock()
+		return currVal, true
+	}
+	if oldVal, exists := m.old[key]; exists {
+		limit := m.maxEntries
+		if limit <= 0 {
+			limit = maxMappingCacheEntries
+		}
+		if _, inCurr := m.current[key]; !inCurr && len(m.current) >= limit {
+			m.old = m.current
+			m.current = make(map[common.Hash]cachedHash, limit)
+		}
+		m.current[key] = oldVal
+		delete(m.old, key)
+		m.mu.Unlock()
+		return oldVal, true
+	}
+	m.mu.Unlock()
+	return nil, false
 }
 
 func (m *ethHashMapBlsHashMap) Delete(key any) {
-	m.mu.Lock()
-	if k, ok := key.(common.Hash); ok {
-		delete(m.data, k)
+	k, ok := key.(common.Hash)
+	if !ok {
+		return
 	}
+	m.mu.Lock()
+	delete(m.current, k)
+	delete(m.old, k)
 	m.mu.Unlock()
 }
 
-func (m *ethHashMapBlsHashMap) Prune(expireBefore time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for k, v := range m.data {
-		if v.addedAt.Before(expireBefore) {
-			delete(m.data, k)
-		}
-	}
+func (m *ethHashMapBlsHashMap) Len() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.current) + len(m.old)
 }
 
 type txHashToBlockNumberMap struct {
-	mu   sync.RWMutex
-	data map[common.Hash]cachedUint64
+	mu         sync.RWMutex
+	maxEntries int
+	current    map[common.Hash]cachedUint64
+	old        map[common.Hash]cachedUint64
 }
 
 func newTxHashToBlockNumberMap() *txHashToBlockNumberMap {
+	return newTxHashToBlockNumberMapWithCap(maxMappingCacheEntries)
+}
+
+func newTxHashToBlockNumberMapWithCap(maxEntries int) *txHashToBlockNumberMap {
+	if maxEntries <= 0 {
+		maxEntries = maxMappingCacheEntries
+	}
 	return &txHashToBlockNumberMap{
-		data: make(map[common.Hash]cachedUint64),
+		maxEntries: maxEntries,
+		current:    make(map[common.Hash]cachedUint64, maxEntries),
+		old:        make(map[common.Hash]cachedUint64),
 	}
 }
 
 func (m *txHashToBlockNumberMap) Store(key, value any) {
-	m.mu.Lock()
 	k, ok1 := key.(common.Hash)
-	v, ok2 := value.(cachedUint64)
-	if ok1 && ok2 {
-		m.data[k] = v
+	if !ok1 {
+		return
 	}
+	var v cachedUint64
+	switch val := value.(type) {
+	case cachedUint64:
+		v = val
+	case uint64:
+		v = cachedUint64{value: val}
+	default:
+		return
+	}
+
+	m.mu.Lock()
+	limit := m.maxEntries
+	if limit <= 0 {
+		limit = maxMappingCacheEntries
+	}
+	if _, exists := m.current[k]; !exists && len(m.current) >= limit {
+		m.old = m.current
+		m.current = make(map[common.Hash]cachedUint64, limit)
+	}
+	m.current[k] = v
 	m.mu.Unlock()
 }
 
 func (m *txHashToBlockNumberMap) StoreBatch(kvs map[common.Hash]cachedUint64) {
+	if len(kvs) == 0 {
+		return
+	}
 	m.mu.Lock()
+	limit := m.maxEntries
+	if limit <= 0 {
+		limit = maxMappingCacheEntries
+	}
 	for k, v := range kvs {
-		m.data[k] = v
+		if _, exists := m.current[k]; !exists && len(m.current) >= limit {
+			m.old = m.current
+			m.current = make(map[common.Hash]cachedUint64, limit)
+		}
+		m.current[k] = v
 	}
 	m.mu.Unlock()
 }
 
 func (m *txHashToBlockNumberMap) Load(key common.Hash) (any, bool) {
 	m.mu.RLock()
-	val, ok := m.data[key]
+	if val, ok := m.current[key]; ok {
+		m.mu.RUnlock()
+		return val, true
+	}
+	_, ok := m.old[key]
 	m.mu.RUnlock()
-	return val, ok
+	if !ok {
+		return nil, false
+	}
+
+	m.mu.Lock()
+	if currVal, exists := m.current[key]; exists {
+		m.mu.Unlock()
+		return currVal, true
+	}
+	if oldVal, exists := m.old[key]; exists {
+		limit := m.maxEntries
+		if limit <= 0 {
+			limit = maxMappingCacheEntries
+		}
+		if _, inCurr := m.current[key]; !inCurr && len(m.current) >= limit {
+			m.old = m.current
+			m.current = make(map[common.Hash]cachedUint64, limit)
+		}
+		m.current[key] = oldVal
+		delete(m.old, key)
+		m.mu.Unlock()
+		return oldVal, true
+	}
+	m.mu.Unlock()
+	return nil, false
 }
 
 func (m *txHashToBlockNumberMap) Delete(key any) {
-	m.mu.Lock()
-	if k, ok := key.(common.Hash); ok {
-		delete(m.data, k)
+	k, ok := key.(common.Hash)
+	if !ok {
+		return
 	}
+	m.mu.Lock()
+	delete(m.current, k)
+	delete(m.old, k)
 	m.mu.Unlock()
 }
 
-func (m *txHashToBlockNumberMap) Prune(expireBefore time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for k, v := range m.data {
-		if v.addedAt.Before(expireBefore) {
-			delete(m.data, k)
-		}
-	}
+func (m *txHashToBlockNumberMap) Len() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.current) + len(m.old)
 }
