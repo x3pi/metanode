@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-10-08T14:55:35Z",
+  "chain_id": 991,
+  "mode": "tcp",
+  "tx_type": "1559",
+  "total_submitted": 25000,
+  "total_confirmed": 25000,
+  "total_reverted": 0,
+  "total_dropped": 0,
+  "injection_duration": "77.369196ms",
+  "injection_tps": 323126.01516500185,
+  "commit_duration": "1.871546369s",
+  "effective_tps": 13357.937806990023,
+  "latency_p50": 1269188551,
+  "latency_p90": 1791244599,
+  "latency_p95": 1796451111,
+  "latency_p99": 1948954943,
+  "latency_avg": 1200061272,
+  "start_block": 0,
+  "end_block": 13,
+  "blocks_produced": 13,
+  "zero_fork_verified": true,
+  "node_roots_consistent": true,
+  "max_cpu": "874.0%",
+  "max_rss_mb": 4422,
+  "machine_load_before": [
+    42.8857421875,
+    25.98388671875,
+    14.72900390625
+  ],
+  "test_duration_actual_sec": 2.8959853649139404
+}
