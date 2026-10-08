@@ -277,3 +277,49 @@ func TestBoundedTwoGenMap_DeleteFromBothGenerations(t *testing.T) {
 	_, okLoad := txMap.Load(h1)
 	assert.False(t, okLoad, "h1 must not be loadable after deletion")
 }
+
+// ============================================================================
+// BENCHMARKS: Load hit (current), Load hit (old / promote), Load miss, Store
+// ============================================================================
+
+func BenchmarkBoundedMap_Load_HitCurrent(b *testing.B) {
+	m := newTxHashToBlockNumberMap()
+	h := makeTestHash(1)
+	m.Store(h, cachedUint64{value: 100})
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = m.Load(h)
+	}
+}
+
+func BenchmarkBoundedMap_Load_Miss(b *testing.B) {
+	m := newTxHashToBlockNumberMap()
+	hMissing := makeTestHash(999999)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = m.Load(hMissing)
+	}
+}
+
+func BenchmarkBoundedMap_Load_HitOld_Promote(b *testing.B) {
+	m := newTxHashToBlockNumberMapWithCap(b.N + 100)
+	// Pre-populate old map with distinct keys
+	m.mu.Lock()
+	for i := 0; i < b.N; i++ {
+		m.old[makeTestHash(5000000+i)] = cachedUint64{value: uint64(i)}
+	}
+	m.mu.Unlock()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = m.Load(makeTestHash(5000000 + i))
+	}
+}
+
+func BenchmarkBoundedMap_Store(b *testing.B) {
+	m := newTxHashToBlockNumberMap()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m.Store(makeTestHash(i), cachedUint64{value: uint64(i)})
+	}
+}
