@@ -1172,43 +1172,134 @@ func PrepareTransactions(epochData *pb.ExecutableBlock) []types.Transaction {
 	if epochData == nil {
 		return nil
 	}
+	t0 := time.Now().UnixNano()
 
 	// 1. Unmarshal all transactions in parallel
+	tUnmarshalStart := time.Now().UnixNano()
 	rawTxs := ParallelUnmarshalTransactions(epochData.Transactions)
+	tUnmarshalDone := time.Now().UnixNano()
 
-	// 2. Deduplicate transactions by TxHash
+	// 2. Parallel validate envelope binding & deduplicate sequentially (Giai đoạn 2b)
+	tValStart := time.Now().UnixNano()
+	isValid := ValidateEnvelopeBindingsParallel(rawTxs)
+	tValDone := time.Now().UnixNano()
+	validateBindingDuration := tValDone - tValStart
+
 	seenTxs := make(map[common.Hash]bool, len(rawTxs))
 	dedupedTxs := make([]types.Transaction, 0, len(rawTxs))
-	for _, tx := range rawTxs {
+	var dedupeMapDuration int64
+	var droppedBindingCount int
+
+	for i, tx := range rawTxs {
 		if tx == nil {
 			continue
 		}
 		// P0-9: Drop transactions whose proto fields do not match their RawEnvelope
 		// before deduplication, so an invalid variant cannot occupy the hash slot.
-		if len(tx.RawEnvelope()) > 0 {
-			if err := transaction.ValidateEnvelopeBinding(tx); err != nil {
-				fmt.Printf("❌ [PrepareTransactions] dropping tx with invalid envelope binding: hash=%s err=%v\n", tx.Hash().Hex(), err)
-				continue
-			}
+		if !isValid[i] {
+			droppedBindingCount++
+			continue
 		}
+		tDedupeStart := time.Now().UnixNano()
 		hash := tx.Hash()
 		if seenTxs[hash] {
+			dedupeMapDuration += time.Now().UnixNano() - tDedupeStart
 			continue // Skip duplicates
 		}
 		seenTxs[hash] = true
 		dedupedTxs = append(dedupedTxs, tx)
+		dedupeMapDuration += time.Now().UnixNano() - tDedupeStart
+	}
+
+	if droppedBindingCount > 0 {
+		logger.Warn("❌ [PrepareTransactions] dropped %d txs with invalid envelope binding", droppedBindingCount)
 	}
 
 	// 3. Sort lexicographically by TxHash (bytes comparison)
+	tSortStart := time.Now().UnixNano()
 	sort.Slice(dedupedTxs, func(i, j int) bool {
 		hashI := dedupedTxs[i].Hash()
 		hashJ := dedupedTxs[j].Hash()
 		return bytes.Compare(hashI.Bytes(), hashJ.Bytes()) < 0
 	})
+	tSortDone := time.Now().UnixNano()
 
-	fmt.Printf("✅ [PrepareTransactions] rawTxs: %d, dedupedTxs: %d\n", len(rawTxs), len(dedupedTxs))
+	unmarshalNs := tUnmarshalDone - tUnmarshalStart
+	sortNs := tSortDone - tSortStart
+	totalNs := tSortDone - t0
+
+	logger.Warn("⏱️ [PREPARE-TX] gei=%d raw_txs=%d deduped_txs=%d unmarshal_ns=%d validate_binding_ns=%d dedupe_map_ns=%d sort_ns=%d total_prep_ns=%d",
+		epochData.GetGlobalExecIndex(), len(rawTxs), len(dedupedTxs), unmarshalNs, validateBindingDuration, dedupeMapDuration, sortNs, totalNs)
 
 	return dedupedTxs
+}
+
+// ValidateEnvelopeBindingsParallel validates envelope bindings for a slice of transactions in parallel.
+// Returns a boolean slice where isValid[i] is true if rawTxs[i] is non-nil and has a valid envelope binding.
+// For transactions without a RawEnvelope, isValid[i] is true.
+func ValidateEnvelopeBindingsParallel(rawTxs []types.Transaction) []bool {
+	numTxs := len(rawTxs)
+	if numTxs == 0 {
+		return nil
+	}
+	isValid := make([]bool, numTxs)
+
+	numWorkers := runtime.GOMAXPROCS(0)
+	if numWorkers > 16 {
+		numWorkers = 16
+	}
+	if numTxs < 200 {
+		numWorkers = 1 // Sequential is faster for small slices due to goroutine scheduling overhead
+	}
+
+	if numWorkers <= 1 {
+		for i, tx := range rawTxs {
+			if tx == nil {
+				continue
+			}
+			if len(tx.RawEnvelope()) == 0 {
+				isValid[i] = true
+				continue
+			}
+			if err := transaction.ValidateEnvelopeBinding(tx); err == nil {
+				isValid[i] = true
+			}
+		}
+		return isValid
+	}
+
+	chunkSize := (numTxs + numWorkers - 1) / numWorkers
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunkSize
+		if start >= numTxs {
+			break
+		}
+		end := start + chunkSize
+		if end > numTxs {
+			end = numTxs
+		}
+
+		wg.Add(1)
+		go func(startIdx, endIdx int) {
+			defer wg.Done()
+			for i := startIdx; i < endIdx; i++ {
+				tx := rawTxs[i]
+				if tx == nil {
+					continue
+				}
+				if len(tx.RawEnvelope()) == 0 {
+					isValid[i] = true
+					continue
+				}
+				if err := transaction.ValidateEnvelopeBinding(tx); err == nil {
+					isValid[i] = true
+				}
+			}
+		}(start, end)
+	}
+	wg.Wait()
+	return isValid
 }
 
 // ParallelUnmarshalTransactions decodes transaction digests in parallel using multiple CPU workers.
