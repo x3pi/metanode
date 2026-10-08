@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-run_raft_benchmark.py - Automated Benchmarking & Zero-Fork Verification for Raft Consensus Mode.
+run_raft_peak_search.py - Find Peak Saturation Throughput for 3-Node Raft Consensus.
 
-Sets up a clean 3-node HashiCorp Raft replicated cluster (n0, n1, n2) with Quorum 2/3,
-deploys the latest simple_chain binary with parallelized PrepareTransactions (Phase 2b),
-injects real EIP-1559 signed transactions via secp_tps_blast, verifies cross-node parity,
-measures block cycle duration and PrepareTransactions latency, and outputs structured results.
+Tests scaling workloads: 10,000 -> 20,000 -> 30,000 -> 50,000 transactions
+using real EIP-1559 signed txs from 50,000 distinct pre-funded accounts.
+Measures Peak Effective TPS, block size dynamics, latency percentiles, and verifies Zero-Fork.
 """
 
 import os
@@ -13,10 +12,8 @@ import sys
 import time
 import json
 import secrets
-import signal
 import subprocess
 import urllib.request
-import urllib.error
 from pathlib import Path
 
 REPO_ROOT = Path("/home/abc/chain-n/metanode")
@@ -25,7 +22,7 @@ BIN_BLAST = Path("/tmp/p06_bins/secp_tps_blast")
 BIN_ROLLUP_CLUSTER = Path("/tmp/p06_bins/rollup-cluster")
 KEYS_FILE = Path("/home/abc/chain-n/metanode-suite/test_tps/gen_spam_keys/generated_keys.json")
 GENESIS_FILE = Path("/tmp/gate_4val_clean_template/exec2/genesis.json")
-WORK_DIR = Path("/tmp/raft_bench_cluster")
+WORK_DIR = Path("/tmp/raft_peak_cluster")
 EVIDENCE_DIR = REPO_ROOT / "note/evidence/tps_prepare_tx_opt_20261008"
 
 SEQ_PRIV = "2a61eac9235fab64ae377b2b7e39f8fa9648c5737094d28c7ee68a14b5086d39"
@@ -38,8 +35,7 @@ NODES = [
 ]
 
 def kill_existing():
-    print("🧹 Cleaning up old raft / simple_chain processes...")
-    subprocess.run(["pkill", "-9", "-f", "simple_chain.*raft_bench_cluster"], stderr=subprocess.DEVNULL)
+    subprocess.run(["pkill", "-9", "-f", "simple_chain.*raft_peak_cluster"], stderr=subprocess.DEVNULL)
     time.sleep(1)
 
 def rpc_call(url: str, method: str, params: list = None, timeout: float = 3.0):
@@ -150,7 +146,7 @@ def setup_cluster():
                 "election_timeout_ms": 200,
                 "leader_lease_timeout_ms": 80,
                 "commit_timeout_ms": 30,
-                "propose_queue_size": 2048,
+                "propose_queue_size": 4096,
                 "peers": [
                     {"id": m["id"], "address": f"127.0.0.1:{m['raft']}", "forward_address": f"127.0.0.1:{m['fwd']}"}
                     for m in NODES
@@ -160,7 +156,7 @@ def setup_cluster():
         (ndir / "config.json").write_text(json.dumps(cfg, indent=2))
 
     processes = []
-    print("🚀 Launching 3 Raft Replicas (n0, n1, n2)...")
+    print("🚀 Khởi chạy Cụm 3 Node Raft n0, n1, n2 (Propose Queue: 4096)...")
     for n in NODES:
         ndir = WORK_DIR / n["id"]
         cfg_file = ndir / "config.json"
@@ -168,58 +164,28 @@ def setup_cluster():
         p = subprocess.Popen([str(BIN_SIMPLE_CHAIN), "-config", str(cfg_file)],
                              stdout=log_file, stderr=log_file, cwd=str(ndir))
         processes.append((n["id"], p, log_file))
-        print(f"   • Replica {n['id']} launched (PID {p.pid}, RPC :{n['rpc']}, Raft :{n['raft']})")
 
-    print("⏳ Waiting for RPC and Raft quorum election...")
+    print("⏳ Chờ bầu Leader và RPC sẵn sàng...")
     for n in NODES:
         if not wait_for_rpc(n["rpc"], timeout=25.0):
-            print(f"❌ Failed to reach RPC for node {n['id']}")
+            print(f"❌ Không kết nối được RPC {n['id']}")
             return None, secret_file, processes
-        print(f"   ✅ Node {n['id']} RPC ready at :{n['rpc']}")
+        print(f"   ✅ Node {n['id']} RPC sẵn sàng tại port :{n['rpc']}")
 
     leader = discover_leader(secret_file)
-    print(f"👑 Cluster Leader identified: {leader['id']} (RPC :{leader['rpc']}, TCP :{leader['tcp']})")
+    print(f"👑 Leader cụm: Node {leader['id']} (RPC :{leader['rpc']}, TCP :{leader['tcp']})")
     time.sleep(2)
     return leader, secret_file, processes
 
-def extract_log_latencies(log_path: Path):
-    """Parses PrepareTransactions and Block execution metrics from node.log"""
-    prep_times = []
-    cycle_times = []
-    if not log_path.exists():
-        return prep_times, cycle_times
-
-    with open(log_path, "r", errors="ignore") as f:
-        for line in f:
-            if "PrepTotal=" in line:
-                try:
-                    part = line.split("PrepTotal=")[1].split()[0]
-                    if part.endswith("ms"):
-                        prep_times.append(float(part[:-2]))
-                    elif part.endswith("µs") or part.endswith("us"):
-                        prep_times.append(float(part[:-2]) / 1000.0)
-                except Exception:
-                    pass
-            if "Completed execution of block" in line and "in " in line:
-                try:
-                    part = line.split("in ")[1].split()[0]
-                    if part.endswith("ms"):
-                        cycle_times.append(float(part[:-2]))
-                    elif part.endswith("µs") or part.endswith("us"):
-                        cycle_times.append(float(part[:-2]) / 1000.0)
-                except Exception:
-                    pass
-    return prep_times, cycle_times
-
 def main():
     print("=" * 80)
-    print("🚀 BENCHMARK: HIỆU NĂNG ĐỒNG THUẬN RAFT (HASHICORP/RAFT 3-NODE QUORUM 2/3)")
+    print("🎯 KHẢO SÁT ĐỈNH THÔNG LƯỢNG TỐI ĐA (PEAK TPS) CỤM RAFT (10K -> 50K TXS)")
     print("=" * 80)
 
     EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
     leader, secret_file, processes = setup_cluster()
     if leader is None:
-        print("❌ Cannot proceed: cluster setup failed.")
+        print("❌ Lỗi khởi tạo cụm.")
         sys.exit(1)
 
     rpc_nodes_cfg = {
@@ -232,19 +198,21 @@ def main():
 
     pids_arg = ",".join(str(p.pid) for _, p, _ in processes)
 
-    workloads = [
-        {"name": "Warmup_1000", "count": 1000, "batch": 500},
-        {"name": "Medium_2000", "count": 2000, "batch": 500},
-        {"name": "High_4000",   "count": 4000, "batch": 1000},
-        {"name": "Extreme_8000","count": 8000, "batch": 1000},
+    stages = [
+        {"name": "Stage_10k", "count": 10000, "batch": 1000},
+        {"name": "Stage_20k", "count": 20000, "batch": 1000},
+        {"name": "Stage_30k", "count": 30000, "batch": 1000},
+        {"name": "Stage_50k", "count": 50000, "batch": 1000},
     ]
 
-    all_results = []
+    results = []
 
     try:
-        for idx, w in enumerate(workloads, start=1):
-            print(f"\n▶️ [WORKLOAD {idx}/{len(workloads)}] {w['name']}: {w['count']} txs (batch size {w['batch']})...")
-            report_file = EVIDENCE_DIR / f"raft_bench_{w['name']}.json"
+        for idx, s in enumerate(stages, start=1):
+            print(f"\n" + "-" * 70)
+            print(f"🔥 [NẤC {idx}/{len(stages)}] Bơm {s['count']:,} txs EIP-1559 (batch {s['batch']})...")
+            print("-" * 70)
+            report_file = EVIDENCE_DIR / f"raft_peak_{s['name']}.json"
 
             cmd = [
                 str(BIN_BLAST),
@@ -253,71 +221,66 @@ def main():
                 "-tcp", f"127.0.0.1:{leader['tcp']}",
                 "-mode", "tcp",
                 "-type", "1559",
-                "-count", str(w["count"]),
-                "-batch", str(w["batch"]),
+                "-count", str(s["count"]),
+                "-batch", str(s["batch"]),
                 "-keys", str(KEYS_FILE),
                 "-pids", pids_arg,
                 "-verify-parity",
                 "-report", str(report_file),
             ]
 
-            t_start = time.time()
+            t0 = time.time()
             res = subprocess.run(cmd, capture_output=True, text=True)
-            t_total = time.time() - t_start
+            t_cmd = time.time() - t0
 
-            print(f"   Command completed in {t_total:.2f}s (exit code {res.returncode})")
             if res.returncode != 0:
-                print(f"⚠️ Blast error output:\n{res.stderr}\n{res.stdout}")
+                print(f"⚠️ Lỗi chạy blast: {res.stderr}\n{res.stdout}")
+            else:
+                print(f"   Lệnh hoàn tất sau {t_cmd:.2f}s")
 
             if report_file.exists():
                 with open(report_file, "r") as rf:
-                    bench_data = json.load(rf)
-                eff_tps = bench_data.get("effective_tps", 0.0)
-                inj_tps = bench_data.get("injection_tps", 0.0)
-                zero_fork = bench_data.get("zero_fork_verified", False)
-                p50 = bench_data.get("latency_p50", 0) / 1e6
-                p99 = bench_data.get("latency_p99", 0) / 1e6
-                blocks = bench_data.get("blocks_produced", 0)
-                print(f"   📊 Effective TPS: {eff_tps:,.1f} | Injection: {inj_tps:,.1f} | Blocks: {blocks} | Latency P50: {p50:.1f}ms, P99: {p99:.1f}ms | Zero-Fork: {zero_fork}")
-                all_results.append({
-                    "workload": w["name"],
-                    "count": w["count"],
-                    "batch": w["batch"],
+                    d = json.load(rf)
+                eff_tps = d.get("effective_tps", 0.0)
+                inj_tps = d.get("injection_tps", 0.0)
+                dur = d.get("commit_duration", "N/A")
+                blks = d.get("blocks_produced", 0)
+                p50 = d.get("latency_p50", 0) / 1e6
+                p99 = d.get("latency_p99", 0) / 1e6
+                cpu = d.get("max_cpu", "N/A")
+                rss = d.get("max_rss_mb", 0)
+                zero_fork = d.get("zero_fork_verified", False)
+                print(f"   ⚡ Effective TPS:    {eff_tps:,.2f} tx/s")
+                print(f"   ⏱️ Commit Duration:  {dur}")
+                print(f"   📦 Blocks Produced:  {blks} blocks (Trung bình ~{int(s['count']/max(1, blks)):,} txs/block)")
+                print(f"   ⏳ Latency:          P50 = {p50:.1f}ms | P99 = {p99:.1f}ms")
+                print(f"   💻 Peak Resource:    CPU = {cpu} | RSS = {rss:,} MB")
+                print(f"   🛡️ Zero-Fork Parity: {zero_fork}")
+                results.append({
+                    "stage": s["name"],
+                    "count": s["count"],
                     "effective_tps": eff_tps,
                     "injection_tps": inj_tps,
-                    "blocks_produced": blocks,
+                    "commit_duration": dur,
+                    "blocks": blks,
+                    "avg_txs_per_block": int(s['count'] / max(1, blks)),
                     "latency_p50_ms": p50,
                     "latency_p99_ms": p99,
-                    "zero_fork_verified": zero_fork,
-                    "raw_report": str(report_file.name)
+                    "peak_cpu": cpu,
+                    "peak_rss_mb": rss,
+                    "zero_fork_verified": zero_fork
                 })
-            else:
-                print(f"⚠️ Report file not generated for {w['name']}")
+            time.sleep(3)
 
-            time.sleep(2)
-
-        # Trích xuất số liệu latency từ log của Leader và Follower
-        leader_log = WORK_DIR / leader["id"] / "node.log"
-        prep_times, exec_times = extract_log_latencies(leader_log)
-        avg_prep = sum(prep_times) / len(prep_times) if prep_times else 0.0
-        avg_exec = sum(exec_times) / len(exec_times) if exec_times else 0.0
-
-        summary = {
+        summary_file = EVIDENCE_DIR / "raft_peak_search_summary.json"
+        summary_data = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "consensus_mode": "raft",
-            "architecture": "3-Node Replicated HashiCorp Raft Cluster (Quorum 2/3)",
-            "nodes": [n["id"] for n in NODES],
-            "leader": leader["id"],
+            "cluster": "3-Node Replicated HashiCorp Raft (Quorum 2/3)",
             "binary": str(BIN_SIMPLE_CHAIN),
-            "prepare_transactions_parallel": True,
-            "avg_prepare_tx_ms": avg_prep,
-            "avg_block_exec_ms": avg_exec,
-            "results": all_results
+            "stages": results
         }
-
-        summary_file = EVIDENCE_DIR / "raft_consensus_benchmark_summary.json"
-        summary_file.write_text(json.dumps(summary, indent=2))
-        print(f"\n✅ Đã lưu kết quả tổng hợp Raft vào: {summary_file}")
+        summary_file.write_text(json.dumps(summary_data, indent=2))
+        print(f"\n🎉 Hoàn tất toàn bộ bài kiểm tra đỉnh TPS! Đã lưu: {summary_file}")
 
     finally:
         kill_existing()

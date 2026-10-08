@@ -679,5 +679,10 @@
   "raft_bench_High_4000.json": "e2ac05c2aa5f3cbc5efbe81c3e736ba5bea2f462e4f15bdac76e2b755afb2273",
   "raft_bench_Medium_2000.json": "8182ae1799c1fa6220c03a20c81bd0c715697f8d7791912668883ee7d7ae4d1c",
   "raft_bench_Warmup_1000.json": "d7f08b57b40c5f25b7ca138092092549c2ac663f484583f068d04885dc1cb371",
-  "raft_consensus_benchmark_summary.json": "bd2ed0af1be6d59250621d8de49d244f492615ed8647632a62ced947f532d747"
+  "raft_consensus_benchmark_summary.json": "bd2ed0af1be6d59250621d8de49d244f492615ed8647632a62ced947f532d747",
+  "raft_peak_Stage_10k.json": "1576ee4fcae58f40e95ff55e21b541855e3a8084434bd12fe181995b6abd3c65",
+  "raft_peak_Stage_20k.json": "309714e2fa335272cd68c8df99f7595dde375bb8f73666a0bc53c7fefcbf5721",
+  "raft_peak_Stage_30k.json": "79913cde046b56b115d37b854cd367df94cdb331f9628570d070e460d8d969a6",
+  "raft_peak_Stage_50k.json": "39042c38071cddc4e9db31372225dde83424c33b428b76386811dcd6d1a4e73d",
+  "raft_peak_search_summary.json": "02792bb8086701991bcf65a6fb8eefa4621e9e0983b92e8d1b722fec371df2ce"
 }
