@@ -144,6 +144,30 @@ export function NetworkMonitorTab({ allClusters }) {
                   {cluster.name}
                 </div>
                 <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                  {status?.role === 'leader' || status?.isLeader ? (
+                    <span
+                      className="badge"
+                      style={{
+                        background: 'rgba(234, 179, 8, 0.2)',
+                        color: '#facc15',
+                        border: '1px solid rgba(234, 179, 8, 0.4)',
+                        fontWeight: 700,
+                      }}
+                    >
+                      👑 Master
+                    </span>
+                  ) : status?.role === 'follower' ? (
+                    <span
+                      className="badge"
+                      style={{
+                        background: 'rgba(148, 163, 184, 0.15)',
+                        color: '#cbd5e1',
+                        border: '1px solid rgba(148, 163, 184, 0.3)',
+                      }}
+                    >
+                      Follower
+                    </span>
+                  ) : null}
                   <span className={`badge ${isOnline ? 'badge-success' : 'badge-danger'}`}>
                     {isOnline ? 'Online' : 'Offline'}
                   </span>

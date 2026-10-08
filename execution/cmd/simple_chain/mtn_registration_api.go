@@ -10,6 +10,7 @@ import (
 
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 )
 
 // Account registration RPC (namespace "mtn"). With the account gate on, an address may only send transactions once the
@@ -22,10 +23,13 @@ var errRegistrationDisabled = errors.New("account registration is not enabled on
 
 // ClusterIdentity is returned by mtn_getClusterIdentity.
 type ClusterIdentity struct {
-	ClusterKey  string `json:"clusterKey"`  // BLS public key of this cluster (hex)
-	ChainID     uint64 `json:"chainId"`     // chain ID of this execution chain
-	AccountGate bool   `json:"accountGate"` // whether senders must be parent-registered
-	MessageTag  string `json:"messageTag"`  // domain tag of the message to sign
+	ClusterKey    string `json:"clusterKey"`              // BLS public key of this cluster (hex)
+	ChainID       uint64 `json:"chainId"`                 // chain ID of this execution chain
+	AccountGate   bool   `json:"accountGate"`             // whether senders must be parent-registered
+	MessageTag    string `json:"messageTag"`              // domain tag of the message to sign
+	ConsensusMode string `json:"consensusMode,omitempty"` // "raft" or empty
+	IsLeader      bool   `json:"isLeader"`                // true if this node is currently the master/leader
+	Role          string `json:"role,omitempty"`          // "leader", "follower", or "disabled"
 }
 
 // RegistrationMessage is returned by mtn_getRegistrationMessage: sign HashToSign (raw secp256k1 signature over the
@@ -64,12 +68,18 @@ func (api *MtnAPI) GetClusterIdentity() (*ClusterIdentity, error) {
 		return nil, err
 	}
 	key := relay.ClusterKey()
-	return &ClusterIdentity{
+	cid := &ClusterIdentity{
 		ClusterKey:  "0x" + hex.EncodeToString(key[:]),
 		ChainID:     api.App.config.ChainId.Uint64(),
 		AccountGate: true,
 		MessageTag:  string(parentchain.RegisterAccountDomainTag),
-	}, nil
+	}
+	if raftfeed.Enabled() {
+		cid.ConsensusMode = "raft"
+		cid.IsLeader = raftfeed.IsLeader()
+		cid.Role = raftfeed.Role()
+	}
+	return cid, nil
 }
 
 // GetRegistrationMessage returns the exact bytes a user must sign to register address with this cluster.

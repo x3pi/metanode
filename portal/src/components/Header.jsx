@@ -122,6 +122,39 @@ export function Header({
               Chain ID: {selectedCluster?.chainId || 991}
             </div>
 
+            {/* Raft Role Badge */}
+            {clusterStatus?.isLeader ? (
+              <div
+                className="badge-pill"
+                style={{
+                  background: 'rgba(234, 179, 8, 0.2)',
+                  color: '#facc15',
+                  border: '1px solid rgba(234, 179, 8, 0.4)',
+                  padding: '6px 10px',
+                  fontSize: '0.78rem',
+                  fontWeight: 700,
+                }}
+                title="This node is the active Raft Master (Leader)"
+              >
+                👑 Master
+              </div>
+            ) : clusterStatus?.role === 'follower' ? (
+              <div
+                className="badge-pill"
+                style={{
+                  background: 'rgba(148, 163, 184, 0.15)',
+                  color: '#cbd5e1',
+                  border: '1px solid rgba(148, 163, 184, 0.3)',
+                  padding: '6px 10px',
+                  fontSize: '0.78rem',
+                  fontWeight: 600,
+                }}
+                title="This node is a Raft Follower"
+              >
+                Follower
+              </div>
+            ) : null}
+
             {/* Cluster Selector */}
             <div className="network-selector">
               <span

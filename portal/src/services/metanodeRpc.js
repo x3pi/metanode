@@ -243,6 +243,10 @@ export async function checkNodeStatus(target) {
       clusterIdentity,
       accountGate: clusterIdentity?.accountGate || false,
       clusterKey: clusterIdentity?.clusterKey || null,
+      isLeader: healthData?.is_leader ?? clusterIdentity?.isLeader ?? false,
+      role: healthData?.role ?? clusterIdentity?.role ?? null,
+      leaderId: healthData?.leader_id || null,
+      consensusMode: healthData?.consensus_mode ?? clusterIdentity?.consensusMode ?? 'bft',
     };
   } catch (err) {
     return {

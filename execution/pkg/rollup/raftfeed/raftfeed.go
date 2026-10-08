@@ -14,6 +14,7 @@ package raftfeed
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -183,6 +184,31 @@ func Ready() bool {
 	}
 	f := current.Load()
 	return f != nil && f.running.Load() && !f.failed.Load() && len(f.queue) < cap(f.queue)
+}
+
+// IsLeader reports whether this node is currently the active Raft leader (Master).
+// Returns false if Raft consensus mode is not active or this node is a follower.
+func IsLeader() bool {
+	if n := cluster.Load(); n != nil {
+		return n.IsLeader()
+	}
+	return false
+}
+
+// Role reports the current node role in Raft mode: "leader", "follower", "candidate", etc.
+func Role() string {
+	if n := cluster.Load(); n != nil {
+		return strings.ToLower(n.State())
+	}
+	return "disabled"
+}
+
+// LeaderID reports the ServerID of the current cluster leader, or empty if unknown.
+func LeaderID() string {
+	if n := cluster.Load(); n != nil {
+		return n.LeaderID()
+	}
+	return ""
 }
 
 func (f *Feeder) run() {

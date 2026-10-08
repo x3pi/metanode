@@ -516,7 +516,29 @@ func (n *Node) Ready() bool {
 }
 
 // IsLeader reports whether this replica currently leads.
-func (n *Node) IsLeader() bool { return n.raft.State() == raft.Leader }
+func (n *Node) IsLeader() bool {
+	if n.raft == nil {
+		return false
+	}
+	return n.raft.State() == raft.Leader
+}
+
+// State returns the current Raft state string ("Leader", "Follower", "Candidate", etc.).
+func (n *Node) State() string {
+	if n.raft == nil {
+		return "unknown"
+	}
+	return n.raft.State().String()
+}
+
+// LeaderID returns the ServerID of the current cluster leader.
+func (n *Node) LeaderID() string {
+	if n.raft == nil {
+		return ""
+	}
+	_, id := n.raft.LeaderWithID()
+	return string(id)
+}
 
 // AppliedIndex is the last Raft index applied to the FSM.
 func (n *Node) AppliedIndex() uint64 { return n.raft.AppliedIndex() }

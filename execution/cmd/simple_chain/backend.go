@@ -25,6 +25,7 @@ import (
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 
 	"github.com/ethereum/go-ethereum/rpc"
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -504,6 +505,14 @@ func NewServer(app *App) *http.ServeMux {
 						blockAgeMs := time.Now().UnixNano()/1e6 - int64(blockTimeMs)
 						status["last_block_age_ms"] = blockAgeMs
 					}
+				}
+			}
+			if raftfeed.Enabled() {
+				status["consensus_mode"] = "raft"
+				status["is_leader"] = raftfeed.IsLeader()
+				status["role"] = raftfeed.Role()
+				if lid := raftfeed.LeaderID(); lid != "" {
+					status["leader_id"] = lid
 				}
 			}
 		}
