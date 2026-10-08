@@ -1,0 +1,55 @@
+==================================================================
+🚀 SECP256K1 / EIP-1559 HIGH-PERFORMANCE WORKLOAD BENCHMARK
+   Zero-Fork Compliant (AGENTS.md Part 2.5) | Production SECP Mode
+==================================================================
+🎯 Tracking 4 target simple_chain PIDs: 2875913, 2876298, 2876700, 2877116
+🌐 RPC Pool (4 nodes): http://127.0.0.1:31646, http://127.0.0.1:31647, http://127.0.0.1:31648, http://127.0.0.1:31649
+⚡ TCP Pool (4 nodes): 127.0.0.1:31200, 127.0.0.1:31201, 127.0.0.1:31202, 127.0.0.1:31203
+🆔 Chain ID: 991
+🔑 Loaded 50000 pre-allocated accounts from generated_keys.json
+==================================================================
+⏱️ SUSTAINED BENCHMARK: Target Duration: 60 seconds
+   Mode: tcp | TxType: 1559 | Wallets: 5000 | BatchSize: 500
+==================================================================
+🏁 Start Block: #1
+
+🔍 Fetching starting nonces for 5000 accounts...
+✅ 5000 active wallets ready with starting nonces (fetched in 198.049571ms)
+
+🔌 Establishing 4 TCP connections for high-throughput pipeline...
+⚠️ TCP connect failed to 127.0.0.1:31203: dial tcp 127.0.0.1:31203: connect: connection refused
+✅ 3 TCP connections connected.
+
+🔥 BLASTING CONTINUOUSLY FOR 60 SECONDS...
+⏱️ Throttling injection: Target 4500 tx/s across 12 workers (~1.333333333s per batch)
+   ⏳ [PROGRESS 15s / 60s] Injected 72000 txs (Current Injection TPS: 4799.87 tx/s | Peak CPU: 1211.0% | Peak RSS: 9870 MB)
+   ⏳ [PROGRESS 30s / 60s] Injected 138000 txs (Current Injection TPS: 4599.90 tx/s | Peak CPU: 1477.0% | Peak RSS: 15197 MB)
+   ⏳ [PROGRESS 45s / 60s] Injected 204000 txs (Current Injection TPS: 4533.22 tx/s | Peak CPU: 1608.0% | Peak RSS: 18643 MB)
+
+⚡ Injected total 270000 TXs over 1m0.033157214s (Injection TPS: 4497.51 tx/s)
+
+⏱️ Waiting 10 seconds for consensus commit & tracking receipt latencies...
+
+📊 SUSTAINED BENCHMARK METRICS:
+   • Duration:           1m0.033157214s (Target: 60s)
+   • Total Submitted:    270000 txs
+   • Total Confirmed:    270000 txs on-chain across 119 blocks
+   • Injection Speed:    4497.51 tx/s
+   • Sustained TPS:      4497.51 tx/s
+   • Latency P50:        1m4.766511596s
+   • Latency P90:        1m10.036878851s
+   • Latency P95:        1m10.060963397s
+   • Latency P99:        1m10.069657215s
+   • Latency Avg:        1m5.18279167s
+   • Sample Verified:    100/100 (Confirmed: 100, Reverted: 0)
+   • Peak CPU (Nodes):   1648.0%
+   • Peak RSS (4 Target Nodes): 21386 MB (avg 5346.5 MB/node)
+
+🛡️ VERIFYING ZERO-FORK INVARIANT ACROSS 4 NODES...
+   • Node http://127.0.0.1:31646: Block 0x78 | Hash: 0xd972cc4d8d... | Root: 0x3e0db01735... | Txs: 2000
+   • Node http://127.0.0.1:31647: Block 0x78 | Hash: 0xd972cc4d8d... | Root: 0x3e0db01735... | Txs: 2000
+   • Node http://127.0.0.1:31648: Block 0x78 | Hash: 0xd972cc4d8d... | Root: 0x3e0db01735... | Txs: 2000
+   • Node http://127.0.0.1:31649: Block 0x78 | Hash: 0xd972cc4d8d... | Root: 0x3e0db01735... | Txs: 2000
+✅ [ZERO-FORK VERIFIED] 100% agreement across all online nodes on Block Hash & State Root!
+📄 JSON Benchmark report saved to: /home/abc/chain-n/metanode/note/evidence/tps_improvement_20261008/a2_ratelimited_60s_run_4_report.json
+==================================================================

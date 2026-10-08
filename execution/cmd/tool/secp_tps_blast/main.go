@@ -989,6 +989,9 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 }
 
 func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
+	if cfg.Count > 0 && cfg.Count < len(accounts) {
+		accounts = accounts[:cfg.Count]
+	}
 	fmt.Println("==================================================================")
 	fmt.Printf("⏱️ SUSTAINED BENCHMARK: Target Duration: %d seconds\n", cfg.DurationSec)
 	fmt.Printf("   Mode: %s | TxType: %s | Wallets: %d | BatchSize: %d\n", cfg.Mode, cfg.TxType, len(accounts), cfg.BatchSize)

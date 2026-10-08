@@ -1,0 +1,50 @@
+==================================================================
+🚀 SECP256K1 / EIP-1559 HIGH-PERFORMANCE WORKLOAD BENCHMARK
+   Zero-Fork Compliant (AGENTS.md Part 2.5) | Production SECP Mode
+==================================================================
+🎯 Tracking 4 target simple_chain PIDs: 3051248, 3051610, 3052006, 3052434
+🌐 RPC Pool (4 nodes): http://127.0.0.1:31646, http://127.0.0.1:31647, http://127.0.0.1:31648, http://127.0.0.1:31649
+⚡ TCP Pool (4 nodes): 127.0.0.1:31200, 127.0.0.1:31201, 127.0.0.1:31202, 127.0.0.1:31203
+🆔 Chain ID: 991
+🔑 Loaded 50000 pre-allocated accounts from generated_keys.json
+
+▶️ RUNNING ROUND 1/1
+🏁 Start Block: #1
+
+🔍 Fetching nonces for 25000 accounts across 4 RPC nodes...
+✅ Nonces fetched in 488.601909ms (Errors: 0)
+
+✍️ Pre-signing 25000 1559 transactions...
+✅ Pre-signed 25000 txs in 49.853769ms (501466.60 tx/s signing speed)
+
+🔌 Initializing TCP connection pool (4 endpoints)...
+⚠️ Failed to connect TCP to 127.0.0.1:31203: dial tcp 127.0.0.1:31203: connect: connection refused
+✅ 3 TCP connections established & registered.
+
+🔥 BLASTING 25000 Transactions across cluster (Mode: tcp)...
+📦 Splitting into 25 TCP batches (batch size: 1000)...
+⚡ Injected 25000 TXs in 110.709164ms (Injection TPS: 225816.90 tx/s)
+
+⏱️ Tracking Transaction Receipts for Consensus Inclusion & Latency...
+
+📊 BENCHMARK METRICS (Round 1):
+   • Total Submitted:    25000 txs
+   • Sample Verified:    50/50 (Success: 50, Reverted: 0)
+   • Injection Speed:    225816.90 tx/s (Duration: 110.709164ms)
+   • Effective TPS:      6282.82 tx/s (Duration: 3.979104884s)
+   • Latency P50:        2.873976531s
+   • Latency P90:        4.081639937s
+   • Latency P95:        4.088853367s
+   • Latency P99:        4.089852229s
+   • Latency Avg:        3.166919074s
+   • Peak CPU (Nodes):   1010.0%
+   • Peak RSS (4 Target Nodes): 6903 MB (avg 1725.8 MB/node)
+
+🛡️ VERIFYING ZERO-FORK INVARIANT ACROSS 4 NODES...
+   • Node http://127.0.0.1:31646: Block 0x4 | Hash: 0xad05f37d5b... | Root: 0x57297f24a4... | Txs: 11000
+   • Node http://127.0.0.1:31647: Block 0x4 | Hash: 0xad05f37d5b... | Root: 0x57297f24a4... | Txs: 11000
+   • Node http://127.0.0.1:31648: Block 0x4 | Hash: 0xad05f37d5b... | Root: 0x57297f24a4... | Txs: 11000
+   • Node http://127.0.0.1:31649: Block 0x4 | Hash: 0xad05f37d5b... | Root: 0x57297f24a4... | Txs: 11000
+✅ [ZERO-FORK VERIFIED] 100% agreement across all online nodes on Block Hash & State Root!
+📄 JSON Benchmark report saved to: /home/abc/chain-n/metanode/note/evidence/tps_improvement_20261008/a3_batch_1000_run_1_report.json
+==================================================================

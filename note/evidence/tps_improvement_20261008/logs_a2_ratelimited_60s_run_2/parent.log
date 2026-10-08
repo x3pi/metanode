@@ -1,0 +1,555 @@
+[State Cleaner Thread] Started.
+2026/10/08 07:05:50 Starting Parent Chain Node...
+[nomt_ffi] Detected existing HT file for path '/tmp/gate_4val_p06/parent/parentchain_db/nomt' with 64000 pages (requested 64000). Overriding.
+2026/10/08 07:05:50 🔍 [PARENT-CHAIN-STARTUP] NOMT state root verified with block #84: 0x7570d0a370e0b03336f7fd82fbc3edaa5e8a85acd6162235a2afde1b66b14e00
+⚠️ Warning: Genesis has 1 validators (< 4). Minimum 4 required for BFT quorum in production.
+2026/10/08 07:05:50 Loaded genesis from /tmp/gate_4val_p06/parent/parent_genesis.json: chain_id=991, validators=1
+2026/10/08 07:05:50 ⚠️ open_cluster_registration=true: ANY key may register as a cluster and certify deposits (devnet only)
+2026/10/08 07:05:50 Genesis float: 2 account(s) will be created in block 1
+2026/10/08 07:05:50 ⚠️ allow_deposit_to_float=true: clusters can MINT float (devnet only)
+2026/10/08 07:05:50 Parent Chain: Recovered at block #84 (GEI 84), stateRoot=0x7570d0a370e0b03336f7fd82fbc3edaa5e8a85acd6162235a2afde1b66b14e00
+2026/10/08 07:05:50 Initializing FFI Bridge...
+2026/10/08 07:05:50 Loaded last block #84 from DBStore (state_root=0x7570d0a370e0b03336f7fd82fbc3edaa5e8a85acd6162235a2afde1b66b14e00, commit_index=63705)
+[32m[INFO][Oct  8 07:05:50]  ✅ [INIT-DEBUG] SetBlockchainInitDone() CALLED! flag=1 (should be 1), lastBlockNumber=84[0m
+2026/10/08 07:05:50 Starting Parent Chain RPC server on :31601
+[32m[INFO][Oct  8 07:05:50]  [FFI Bridge] Starting MetaNode Consensus Engine via CGo FFI[0m
+Starting MetaNode Consensus Engine via CGo FFI. Config: /tmp/gate_4val_p06/parent/node_parent.toml
+[33m[WARN][Oct  8 07:05:50]  [FFI Bridge] MetaNode Consensus Engine exited[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.319170Z  INFO metanode::ffi: Starting MetaNode Consensus Engine (FFI Thread)...[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.319426Z  INFO metanode::liveness_watchdog: 🐕 [LIVENESS WATCHDOG] started (timeout=30s) -- see liveness_watchdog.rs doc comment / project memory Phuong an A mục 21[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.333081Z  INFO metanode::ffi: Storage path unified to Go data dir: "/tmp/gate_4val_p06/parent/consensus/rust_consensus"[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.333131Z  INFO metanode::ffi: Node ID: 0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.333143Z  INFO metanode::ffi: Network address: 127.0.0.1:31001[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.333227Z  INFO metanode::node::startup: 🔌 [STARTUP] Early FFI Transaction Channel initialized to prevent Go deadlocks.[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.333441Z  INFO metanode::node::startup: Metrics server started at http://127.0.0.1:31901/metrics[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.333504Z  INFO metanode::node::consensus_node: Initializing consensus node 0...[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.333624Z  INFO metanode::node::setup_storage: 🚀 [STARTUP] Loading latest block, epoch and committee from Go state...[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.333644Z  INFO metanode::node::executor_client: 🔧 [EXECUTOR CLIENT] Creating executor client: initial_next_expected=1, storage_path=Some("/tmp/gate_4val_p06/parent/consensus/rust_consensus")[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.333669Z  INFO metanode::node::executor_client::connection_pool: 🏊 [CONN POOL] Created NO-OP pool (FFI mode — connections bypassed)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.335056Z  INFO metanode::node::setup_storage: ✅ [STARTUP] Got block number 84 from Go (is_ready=true) (attempt 1)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.335137Z  INFO metanode::node::setup_storage: ✅ [STARTUP] Got epoch 0 from Go (block=84)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.335164Z  INFO metanode::node::setup_storage: 📋 [STARTUP] Using LOCAL Go epoch 0 (skipping peer discovery to prevent deadlock)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.335175Z  INFO metanode::node::setup_storage: 📊 [STARTUP] Go State: Block 84, Epoch 0 (peer_block=84)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.335232Z  INFO metanode::node::setup_storage: 📊 [STARTUP] Using epoch 0 (synced with Go)[0m
+[32m[INFO][Oct  8 07:05:50]  [Go Server] Received GetEpochBoundaryDataRequest (unified epoch boundary) for epoch 0[0m
+[32m[INFO][Oct  8 07:05:50]  📊 [EPOCH BOUNDARY] Handling GetEpochBoundaryDataRequest%!(EXTRA string=epoch, uint64=0)[0m
+[32m[INFO][Oct  8 07:05:50]  [Go Server] GetEpochBoundaryDataRequest handled, sending EpochBoundaryData with epoch=0, timestamp_ms=1700000000000, boundary_block=0, validator_count=1[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.335574Z  INFO metanode::node::executor_client::rpc_queries_epoch: 📥 [EXECUTOR-REQ] Received 282 bytes from Go FFI (GetEpochBoundaryData), decoding...[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.335599Z  INFO metanode::node::executor_client::rpc_queries_epoch: ✅ [EPOCH BOUNDARY] Received unified epoch boundary data from Go FFI: epoch=0, timestamp_ms=1700000000000, boundary_block=0, validator_count=1[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.335623Z  INFO metanode::node::executor_client::rpc_queries_epoch: 📥 [RUST←GO] EpochBoundaryData Validator[0]: address=0x7e615e4a500AB42b7Bb3FdBb62Fbb8Bd10385fC5, stake=1000000000000000000, name=node-0, authority_key=91462b62f7ff7c3532805f3e9c874d013000967414dc16520f...[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.335636Z  INFO metanode::node::setup_storage: ✅ [STARTUP] Got epoch boundary data for epoch 0 from Go (epoch_duration=86400s, boundary_gei=0)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.335644Z  INFO metanode::node::setup_storage: 📊 [STARTUP] Using epoch boundary data: epoch=0, boundary_block=0, epoch_timestamp=1700000000000ms, validators=1, boundary_gei=0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.335815Z  INFO metanode::node::committee: 📊 Built committee with 1 authorities and 1 eth_addresses for epoch 0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.335829Z  INFO metanode::node::setup_storage: ✅ Loaded committee with 1 authorities and 1 eth_addresses (from epoch boundary). Committee hash=355ccff787b55d59... (epoch 0)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.335839Z  INFO metanode::node::setup_storage:   📋 [COMMITTEE] Validator 0: ETH=0x7e615e4a500ab42b7bb3fdbb62fbb8bd10385fc5, Protocol=7cdfc1340f0f1728c4de1725ca3c6791882316547a336ee3a5ba1cabb5fce3b6, Network=8d9fe40cd34f06c657503dbc15cc4c2cb67ebc26426c426852f741f33811bee8[0m
+[32m[INFO][Oct  8 07:05:50]  [Go Server] 📥 Received GetLastHandledCommitIndexRequest (GO-AUTH GEI recovery)[0m
+[33m[WARN][Oct  8 07:05:50]  BlockChain instance has not been initialized. Call InitBlockChain() first.[0m
+[32m[INFO][Oct  8 07:05:50]  🔑 [GO-AUTH GEI] Recovery query: last_commit=63705 (epoch=0), last_gei=84, last_block=84, current_epoch=0, authoritative=true, ts=0, state_root=[0m
+[32m[INFO][Oct  8 07:05:50]  [Go Server] ✅ GetLastHandledCommitIndexRequest: last_commit=63705, last_gei=84, block=84, epoch=0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336180Z  INFO metanode::node::executor_client::rpc_queries: 🔑 [GO-AUTH GEI] Recovery state received: last_commit=63705, last_gei=84, block=84, epoch=0, authoritative=true, timestamp=0, state_root=0 bytes[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336194Z  INFO metanode::node::setup_storage::index_sync: 🔑 [GO-AUTH GEI] Post-init query: state_root=0x, go_epoch=0, rust_epoch=0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336215Z  INFO metanode::node::setup_storage::index_sync: 📊 [STARTUP] No peer reference, using Local Go Last GEI: 84 (Block: 84)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336253Z  INFO metanode::node::setup_storage: ✅ [STARTUP] Using epoch_base=0 from Go boundary_gei (epoch=0, boundary_block=0)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336264Z  INFO metanode::node::setup_storage: 📊 [STARTUP] Synchronizing executor client memory state from Go Master prior to recovery check...[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336307Z  INFO metanode::node::executor_client: 📊 [INIT] Fetched current epoch from Go: 0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336380Z  INFO metanode::node::executor_client: 📊 [INIT] Connected to Go Master. Last block=84, GEI=84, Epoch=0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336391Z  INFO metanode::node::executor_client: 📊 [INIT] Initialized next_block_number to 85 (from Go last_block_number=84, old=0)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336398Z  INFO metanode::node::executor_client: 📊 [INIT] Initialized last_processed_epoch to 0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336404Z  INFO metanode::node::executor_client: 📊 [INIT] Updating next_expected_index from 1 to 85 (last_global_exec_index=84, go_next_expected=85)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336413Z  INFO metanode::node::executor_client: ✅ [READY] Rust executor: go_connection=connected, next_expected=85, go_last_block=84[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336419Z  INFO metanode::node::setup_storage: ✅ [STARTUP] Executor client memory state synchronized successfully (block/GEI guards updated).[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336602Z  INFO metanode::node::setup_storage: 🔑 [STARTUP] Rust Protocol PubKey (hex): 7cdfc1340f0f1728c4de1725ca3c6791882316547a336ee3a5ba1cabb5fce3b6[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336613Z  INFO metanode::node::setup_storage: 🔑 [STARTUP] Rust Network PubKey (hex): 8d9fe40cd34f06c657503dbc15cc4c2cb67ebc26426c426852f741f33811bee8[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336626Z  INFO metanode::node::setup_storage: ✅ [IDENTITY] Found self in committee at index [0] using protocol_key match[0m
+[33m[WARN][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336720Z  WARN consensus_core::recovery_barrier: 🛡️ [RECOVERY-BARRIER] ACTIVATED: Inactive → GoSyncing. Snapshot recovery detected. ALL proposals blocked until recovery completes.[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336747Z  INFO consensus_core::coordination_hub: 🛡️ [SPARSE-DAG-BOUNDARY] Recovery session activated. Sparse DAG Evaluation Prevention will be enabled when transitioning to Healthy.[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336758Z  INFO metanode::node::setup_consensus: 🛡️ [RECOVERY-BARRIER] Go has prior state (block=84, last_handled=Some(63705), dag_has_history=true). Activating unified recovery barrier. ALL proposals blocked until GoSyncing → DagCatchingUp → ScheduleVerifying → Ready.[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336770Z  INFO metanode::node::setup_consensus: 🔑 [GO-AUTH GEI] Setting go_replay_after=63705 based on Go Authoritative LastHandledCommitIndex.[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336777Z  INFO metanode::node::setup_consensus: 📊 [STARTUP] CommitConsumerArgs: go_replay_after=63705 (from authoritative Go/fallback)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.336785Z  INFO metanode::node::setup_consensus: 🤝 [HANDSHAKE] Passing last_executed_commit_hash from Go to Rust DAG: "b527c570ce75ae1e781c0fc062d4e91afd75fc665afef48c4ea40449ea71369b"[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.337140Z  INFO metanode::node::transition::tx_recovery: 📋 [TX HASH REGISTRY] Loaded 148 committed transaction hashes from epoch 0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.337153Z  INFO metanode::node::setup_consensus: 💾 Loaded 148 committed transaction hashes from epoch 0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.337234Z  INFO metanode::node::setup_consensus: 📊 [COMMIT PROCESSOR INIT] Startup: next_expected_commit_index=63706, from go_replay_after=63705[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.337262Z  INFO consensus_core::system_transaction_provider: 📅 SystemTransactionProvider initialized: epoch=0, epoch_start=1700000000000ms, now=1791443150337ms, elapsed=91443150s, duration=86400s, time_based_enabled=false[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.337271Z  INFO metanode::node::executor_client: 🔧 [EXECUTOR CLIENT] Creating executor client: initial_next_expected=85, storage_path=Some("/tmp/gate_4val_p06/parent/consensus/rust_consensus")[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.337283Z  INFO metanode::node::executor_client::connection_pool: 🏊 [CONN POOL] Created NO-OP pool (FFI mode — connections bypassed)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.337303Z  INFO consensus_core::coordination_hub: 🔒 [STARTUP-SYNC] Proposals LOCKED until sync completes[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.838264Z  INFO metanode::node::setup_consensus::startup_sync: 📡 [PEER RPC] Starting EARLY server on 0.0.0.0:31501 to prevent STARTUP-SYNC deadlock[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.838590Z  INFO metanode::node::setup_consensus::startup_sync: 📡 [PEER RPC] EARLY server confirmed bound on 0.0.0.0:31501[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.838591Z  INFO metanode::network::peer_rpc::server: 🌐 [PEER RPC] Started on 0.0.0.0:31501 (node_id=0, network_address=127.0.0.1:31001)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.838689Z  INFO metanode::node::setup_consensus::startup_sync: 📊 [STARTUP-SYNC] Barrier using verified block=84 from setup_storage()[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.838951Z  INFO metanode::node::setup_consensus::startup_sync: ✅ [STARTUP-SYNC] No peers configured (single-node or seed). Skipping startup sync.[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.839007Z  INFO metanode::node::setup_consensus::startup_sync: 📡 [PEER RPC] Stopping early server. Handing over to full server in startup.rs...[0m
+[32m[INFO][Oct  8 07:05:50]  [Go Server] 📥 Received GetLastHandledCommitIndexRequest (GO-AUTH GEI recovery)[0m
+[33m[WARN][Oct  8 07:05:50]  BlockChain instance has not been initialized. Call InitBlockChain() first.[0m
+[32m[INFO][Oct  8 07:05:50]  🔑 [GO-AUTH GEI] Recovery query: last_commit=63705 (epoch=0), last_gei=84, last_block=84, current_epoch=0, authoritative=true, ts=0, state_root=[0m
+[32m[INFO][Oct  8 07:05:50]  [Go Server] ✅ GetLastHandledCommitIndexRequest: last_commit=63705, last_gei=84, block=84, epoch=0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.839476Z  INFO metanode::node::executor_client::rpc_queries: 🔑 [GO-AUTH GEI] Recovery state received: last_commit=63705, last_gei=84, block=84, epoch=0, authoritative=true, timestamp=0, state_root=0 bytes[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.839514Z  INFO metanode::node::setup_consensus: 🔍 [CONSISTENCY CHECK] Go state: block=84, gei=84, commit_index=63705, epoch=0, Rust state: go_replay_after=63705, current_epoch=0, next_expected_commit=63706[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.839531Z  INFO metanode::node::setup_consensus: ✅ [CONSISTENCY CHECK] Post-sync state OK: block=84, gei=84, commit_index=63705, epoch=0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.839593Z  INFO metanode::node::executor_client: 📊 [INIT] Fetched current epoch from Go: 0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.839740Z  INFO metanode::node::executor_client: 📊 [INIT] Connected to Go Master. Last block=84, GEI=84, Epoch=0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.839761Z  INFO metanode::node::executor_client: 📊 [INIT] Initialized next_block_number to 85 (from Go last_block_number=84, old=0)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.839774Z  INFO metanode::node::executor_client: 📊 [INIT] Initialized last_processed_epoch to 0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.839784Z  INFO metanode::node::executor_client: 📊 [INIT] next_expected_index matches Go Master: last_global_exec_index=84, next_expected=85[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.839798Z  INFO metanode::node::executor_client: ✅ [READY] Rust executor: go_connection=connected, next_expected=85, go_last_block=84[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.839812Z  INFO metanode::node::setup_consensus: ✅ [STARTUP] initialize_from_go() completed synchronously (block/GEI guards updated)[0m
+[32m[INFO][Oct  8 07:05:50]  [Go Server] 📥 Received GetLastHandledCommitIndexRequest (GO-AUTH GEI recovery)[0m
+[33m[WARN][Oct  8 07:05:50]  BlockChain instance has not been initialized. Call InitBlockChain() first.[0m
+[32m[INFO][Oct  8 07:05:50]  🔑 [GO-AUTH GEI] Recovery query: last_commit=63705 (epoch=0), last_gei=84, last_block=84, current_epoch=0, authoritative=true, ts=0, state_root=[0m
+[32m[INFO][Oct  8 07:05:50]  [Go Server] ✅ GetLastHandledCommitIndexRequest: last_commit=63705, last_gei=84, block=84, epoch=0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.839911Z  INFO metanode::node::executor_client::rpc_queries: 🔑 [GO-AUTH GEI] Recovery state received: last_commit=63705, last_gei=84, block=84, epoch=0, authoritative=true, timestamp=0, state_root=0 bytes[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.839929Z  INFO metanode::node::setup_consensus: 🔍 [SYNC-PARITY] Post-init state comparison:
+  CommitProcessor:  go_last_commit_index=63705, next_expected_index=63706
+  ExecutorClient:   next_expected_index=85
+  Go (authoritative): commit_index=63705, gei=84, block=84, epoch=0
+  Go State Root: 0x[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.839959Z  INFO metanode::node::setup_consensus: ✅ [SYNC-PARITY] ExecutorClient and CommitProcessor GEI matched (EC=85, CP=85)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.840053Z  INFO metanode::node::setup_consensus: 🔍 [GEI-CROSSCHECK] Post-startup state: block=84, gei=84[0m
+[33m[WARN][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.840074Z  WARN metanode::consensus::commit_processor::gei_validator: 🔍 [GEI-VALIDATOR] No peers configured for cross-check (local_gei=84, block=84)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.840101Z  INFO metanode::node::setup_consensus: ✅ [GEI-CROSSCHECK] Post-startup GEI validation passed (gei=84, block=84)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.840139Z  INFO consensus_core::recovery_barrier: ✅ [RECOVERY-BARRIER] GoSyncing → DagCatchingUp. Go execution layer synced. Waiting for Rust DAG to catch up via CertifiedCommits.[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.840153Z  INFO consensus_core::coordination_hub: ✅ [STARTUP-SYNC] Go sync completed, advancing barrier to DagCatchingUp[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.840202Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Initializing -> Bootstrapping[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.840347Z  INFO metanode::node::setup_consensus: 🚀 Starting consensus authority node (phase=Bootstrapping)...[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.840341Z  INFO metanode::node::setup_consensus::verification: ℹ️ [POST-GATE-VERIFY] No peers configured. Setting block_hash_verified=true (single-node mode).[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.840456Z  INFO consensus_core::coordination_hub: ✅ [BLOCK-HASH-GATE] Block hash VERIFIED against peers. Gate 5 cleared — node state is bit-perfect.[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.840567Z  INFO consensus_core::authority_node: Starting consensus authority [0] node-0, ProtocolVersion(105), epoch start timestamp 1700000000000, boot counter 0, replaying after commit index 63705, consumer last processed commit index 63705[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.840597Z  INFO consensus_core::authority_node: Consensus authorities: [0]: node-0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.840607Z  INFO consensus_core::authority_node: Consensus parameters: Parameters { db_path: "/tmp/gate_4val_p06/parent/consensus/rust_consensus/epochs/epoch_0/consensus_db", leader_timeout: 200ms, min_round_delay: 25ms, max_forward_time_drift: 500ms, max_blocks_per_sync: 32, max_blocks_per_fetch: 1000, sync_last_known_own_block_timeout: 5s, round_prober_interval_ms: 5000, round_prober_request_timeout_ms: 4000, propagation_delay_stop_proposal_threshold: 100, dag_state_cached_rounds: 500, commit_sync_parallel_fetches: 32, commit_sync_batch_size: 500, commit_sync_batches_ahead: 128, tonic: TonicParameters { keepalive_interval: 10s, connection_buffer_size: 33554432, excessive_message_size: 16777216, message_size_limit: 67108864 }, adaptive_delay_enabled: false, compact_blocks_enabled: false }[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.840681Z  INFO consensus_core::authority_node: Consensus committee: Committee { epoch: 0, total_stake: 1000000000000000000, quorum_threshold: 666666666666666667, validity_threshold: 333333333333333334, authorities: [Authority { stake: 1000000000000000000, address: Multiaddr(/ip4/127.0.0.1/tcp/31001), hostname: "node-0", authority_key: AuthorityPublicKey(kUYrYvf/fDUygF8+nIdNATAAlnQU3BZSD3aGuHNoAZQv3OJOIZKW+Uw+UbH/1LWCAlbyWnQra9vUSDJfFVIxlV4XlraaNkLsZSb3HMJJQK3qEc1L20Yqb5YM8uGRXvnB), protocol_key: ProtocolPublicKey(fN/BNA8PFyjE3hclyjxnkYgjFlR6M27jpbocq7X847Y=), network_key: NetworkPublicKey(jZ/kDNNPBsZXUD28FcxMLLZ+vCZCbEJoUvdB8zgRvug=) }] }[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.841799Z  INFO consensus_core::transaction: TransactionConsumer initialized with max_num_transactions_in_block: 4000, max_transactions_in_block_bytes: 2097152[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.841905Z  INFO consensus_core::authority_node: 📡 [AUTHORITY NODE] Broadcast sender keeper obtained, receiver_count=1, total_senders_should_be=3[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.877697Z  INFO consensus_core::dag_state::dag_state_impl: ✅ Loaded 1 genesis block refs from storage for epoch 0[0m
+[33m[WARN][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.877802Z  WARN consensus_core::dag_state::dag_state_impl: Missing genesis block for ref B0([0],TjU0bSUY8KHY6u0jkTMGbX53pNYIckp+8ya7DChrH5k=)[0m
+[33m[WARN][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.877816Z  WARN consensus_core::dag_state::dag_state_impl: Incomplete genesis blocks in storage (0 vs 1), regenerating[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.877822Z  INFO consensus_core::block: 🛠️ [GENESIS DEBUG] Generating genesis blocks for epoch 0 with timestamp 1700000000000ms. Committee size: 1[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.877840Z  INFO consensus_core::block: 🛠️ [GENESIS DEBUG] Generated B0 for Auth AuthorityIndex(0) (KeyPrefix: [145, 70, 43, 98]): Hash=TjU0bSUY8KHY6u0jkTMGbX53pNYIckp+8ya7DChrH5k=, Timestamp=1700000000000ms[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.877867Z  INFO consensus_core::threshold_clock: Recovered ThresholdClock at round 1[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.878184Z  INFO consensus_core::dag_state::dag_state_impl: Recovering committed state from C63600(rUTf) CommitInfo { committed_rounds: [63600], reputation_scores: ReputationScores { scores_per_authority: [2852094820647174144], commit_range: CommitRange(63301..=63600) } }[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.882871Z  INFO consensus_core::dag_state::dag_state_impl: DagState was initialized with the following state: Some(TrustedCommit { inner: V1(CommitV1 { index: 63849, previous_digest: 5zjXZA7mrbaceWIpy+18PGVmy8ajIJtx3ob9S8S9IIQ=, timestamp_ms: 1791434694562, leader: B63849([0],uFuEhKmi6vKnFMVUy2ecoIMLrVXYc7Yqnil5bpVjAr8=), blocks: [B63849([0],uFuEhKmi6vKnFMVUy2ecoIMLrVXYc7Yqnil5bpVjAr8=)], global_exec_index: 63849, leader_address: [126, 97, 94, 74, 80, 10, 180, 43, 123, 179, 253, 187, 98, 251, 184, 189, 16, 56, 95, 197] }), digest: qITBm5uCCK36C79gPnWm3MWh2WBPL5e5yvaL4tJyrjs=, serialized: b"\0i\xf9\0\0\xe78\xd7d\x0e\xe6\xad\xb6\x9cyb)\xcb\xed|<ef\xcb\xc6\xa3 \x9bq\xde\x86\xfdK\xc4\xbd \x84\xa2\x1f\xd4\x19\xa1\x01\0\0i\xf9\0\0\0\0\0\0\xb8[\x84\x84\xa9\xa2\xea\xf2\xa7\x14\xc5T\xcbg\x9c\xa0\x83\x0b\xadU\xd8s\xb6*\x9e)yn\x95c\x02\xbf\x01i\xf9\0\0\0\0\0\0\xb8[\x84\x84\xa9\xa2\xea\xf2\xa7\x14\xc5T\xcbg\x9c\xa0\x83\x0b\xadU\xd8s\xb6*\x9e)yn\x95c\x02\xbfi\xf9\0\0\0\0\0\0\x14~a^JP\n\xb4+{\xb3\xfd\xbbb\xfb\xb8\xbd\x108_\xc5" }); [63849]; 249 unscored committed subdags; 249 scored subdags[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.884963Z  INFO consensus_core::dag_state::dag_state_impl: Recovering block commit statuses from commit index 63849 and backwards until leader of round <= gc_round 63649[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.886414Z  INFO consensus_core::dag_state::dag_state_impl: Recovering finished, reached commit leader round 63649 <= gc_round 63649[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887246Z  INFO consensus_core::authority_node: 📊 [STARTUP] CommitConsumerMonitor aligned: go_handled=63705, dag_handled=63849, effective=63849[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887262Z  INFO consensus_core::authority_node: 🔴 [GUARD-POLICY] Recovery Mode (dag=63849, go=63705): RECOVERY-GUARD active. Waiting for 5 network CertifiedCommits to prove density before local evaluation.[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887348Z  INFO consensus_core::block: 🛠️ [GENESIS DEBUG] Generating genesis blocks for epoch 0 with timestamp 1700000000000ms. Committee size: 1[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887362Z  INFO consensus_core::block: 🛠️ [GENESIS DEBUG] Generated B0 for Auth AuthorityIndex(0) (KeyPrefix: [145, 70, 43, 98]): Hash=TjU0bSUY8KHY6u0jkTMGbX53pNYIckp+8ya7DChrH5k=, Timestamp=1700000000000ms[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887376Z  INFO consensus_core::authority_node: 📡 [AUTHORITY NODE] About to spawn ProposedBlockHandler, keeper receiver_count=2[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887389Z  INFO consensus_core::authority_node: Sync last known own block: false[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887478Z  INFO consensus_core::leader_schedule: LeaderSchedule recovered using LeaderSwapTable for CommitRange(63301..=63600), good_nodes: [] with stake: 0, bad_nodes: Map { iter: [] } with stake: 0. There are 249 committed subdags scored in DagState. schedule_confirmed=true[0m
+[33m[WARN][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887526Z  WARN consensus_core::commit_observer: ⚠️ [ANTI-FORK] Hash mismatch detected! Hash from Go ([181, 39, 197, 112, 206, 117, 174, 30, 120, 28, 15, 192, 98, 212, 233, 26, 253, 117, 252, 102, 90, 254, 244, 140, 78, 164, 4, 73, 234, 113, 54, 155]) != Local hash at block 63705 ([81, 196, 159, 135, 11, 227, 255, 208, 77, 95, 78, 14, 223, 175, 22, 104, 141, 115, 167, 1, 5, 253, 200, 248, 169, 59, 59, 79, 172, 78, 56, 236]). Auto-aligning to local DAG hash (single source of truth) to prevent deadlock and preserve data.[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887510Z  INFO consensus_core::proposed_block_handler: 🚀 [PROPOSED BLOCK HANDLER] RUN LOOP STARTED[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887564Z  INFO consensus_core::commit_observer: Recovering commit observer in the range [63706..=63849][0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887470Z  INFO consensus_core::dag_state_actor: 🟢 [DAG-STATE-ACTOR] Started on dedicated thread[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887519Z  INFO consensus_core::commit_finalizer: 🚀 [COMMIT FINALIZER] RUN LOOP STARTED[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887585Z  INFO metanode::node::setup_consensus: 🔄 [ANTI-FORK] Aligner callback triggered, calling Go to set hash to: 51c49f870be3ffd04d5f4e0edfaf16688d73a70105fdc8f8a93b3b4fac4e38ec[0m
+[32m[INFO][Oct  8 07:05:50]  [Go Server] 📥 Received SetLastExecutedCommitHashRequest[0m
+[32m[INFO][Oct  8 07:05:50]  ✅ [RPC] Aligned LastExecutedCommitHash to: 51c49f870be3ffd04d5f4e0edfaf16688d73a70105fdc8f8a93b3b4fac4e38ec[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887830Z  INFO consensus_core::commit_observer: Recovering 144 unsent commits in range [63706..=63849][0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.887904Z  INFO metanode::node::executor_client::rpc_queries: ✅ [EXECUTOR-REQ] SetLastExecutedCommitHash successful[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.889530Z  INFO consensus_core::commit_observer: Commit observer recovery [63706..=63849] completed, took 2.027524ms[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.889680Z  INFO consensus_core::transaction_certifier: Recovering certifier state from round 63650[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.892332Z  INFO consensus_core::transaction_certifier: Recovered and voting on 202 blocks from authority [0] node-0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.892824Z  INFO consensus_core::authority_node: Adaptive delay enabled: base_delay=25ms[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.892935Z  INFO consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in Bootstrapping phase (startup_sync_active=true). Waiting for DAG to fully catch up.[0m
+[33m[WARN][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.892948Z  WARN consensus_core::core::proposer: Skip proposing for round 63852: node phase is Bootstrapping[0m
+[33m[WARN][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.892957Z  WARN consensus_core::core::proposer: Skip proposing for round 63852: node phase is Bootstrapping[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.892965Z  INFO consensus_core::core: Core recovery completed with last proposed block B63851([0],LYqhQabe6fGNiwgYAlq75mClGm4e4xVHWYi5hH/RrOk=)([B63850([0],kQeb)];1791434695167ms;0t;1c)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.893038Z  INFO consensus_core::authority_node: ℹ️ [AUTHORITY START] No existing LegacyEpochStoreManager provided[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.893057Z  INFO consensus_core::network::tonic_network: Starting tonic service[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.893087Z  INFO consensus_core::core_thread: 🚀 [CORE THREAD] Started core thread[0m
+🔧 [COMMIT-SYNCER-LOOP] ENTERED! phase=[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.893144Z  INFO consensus_core::commit_syncer: 🛡️ [SUPERVISOR] Starting CommitSyncer task...[0m
+Bootstrapping[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.893176Z  INFO consensus_core::commit_syncer: 🛡️ [SUPERVISOR] Pre-seeded CommitVoteMonitor with highest_handled=63705 before restart[0m
+, synced=63849, interval=200ms
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.893266Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63600 (current cycle: 212)[0m
+[33m[WARN][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.893315Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #63849 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.893559Z  INFO consensus_core::network::tonic_network: Server started at: 127.0.0.1:31001[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.893578Z  INFO consensus_core::authority_node: ✅ [AUTHORITY NODE] Consensus authority started, took 51.796857ms[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.893588Z  INFO metanode::node::setup_consensus: 🔍 [RECOVERY] Initiating block recovery check using the active consensus store instance...[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.893594Z  INFO metanode::node::recovery: 🔍 [RECOVERY] Checking for missing blocks from index 85 (epoch_base=0)...[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.893906Z  INFO metanode::node::recovery: 🔍 [RECOVERY] Scanning 144 commit(s) above Go's last commit 63705 (next GEI 85)...[0m
+[33m[WARN][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.894738Z  WARN consensus_core::core::proposer: Skip proposing for round 63852: node phase is Bootstrapping[0m
+[33m[WARN][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.894779Z  WARN consensus_core::core::proposer: Skip proposing for round 63852: node phase is Bootstrapping[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903330Z  INFO metanode::node::recovery: ✅ [RECOVERY] No missing commits found in local DB that need replaying.[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903356Z  INFO metanode::node::setup_consensus: ♻️ [TX RECYCLER] Created shared TxRecycler instance[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903391Z  INFO consensus_core::legacy_store: 📦 [LEGACY STORE] Creating LegacyEpochStoreManager with max_epochs=5[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903421Z  INFO metanode::node::epoch_transition_manager: 🔧 [STATE MANAGER] Initializing: epoch=0, mode=Validator[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903438Z  INFO metanode::node::consensus_node: 🔧 [STARTUP] Initialized StateTransitionManager: epoch=0, mode=Validator[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903458Z  INFO metanode::node::epoch_monitor: 🔄 [EPOCH MONITOR] Starting unified epoch monitor for node-0 (poll_interval=5s)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903467Z  INFO metanode::node::consensus_node: 🔄 Started unified epoch monitor for Validator mode at epoch=0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903471Z  INFO metanode::node::recovery: 🔍 [FORK DETECTION] Checking state (Epoch: 0, LastCommit: 84)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903476Z  INFO metanode::node::consensus_node: ♻️ [TX RECYCLER] Background recycler task spawned[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903491Z  INFO metanode::node: ✅ Registered node in global transition handler registry[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903497Z  INFO metanode::node::startup: RPC server available at http://127.0.0.1:32901[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903502Z  INFO metanode::node::startup: ♻️ [TX RECYCLER] Injected into UDS server[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903507Z  INFO metanode::node::startup: FFI transaction interface initialized[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903514Z  INFO metanode::node::startup: 📡 [PEER RPC] Node reference injected for dynamic transaction routing[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903495Z  INFO metanode::consensus::commit_processor::processor: 🛡️ [DIGEST-GATE] Initialized: committee_size=1, quorum_threshold=1, digest_verifier=true[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903622Z  INFO metanode::consensus::commit_processor::wal: 📝 [WAL] Initialized FFI Write-Ahead Log at "/tmp/gate_4val_p06/parent/consensus/rust_consensus/commit_ffi_wal.log"[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903683Z  INFO metanode::node::setup_consensus: 🛡️ [DAG-GATE] Waiting for CommitSyncer to explicitly complete historical sync...[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903747Z  INFO metanode::node::block_delivery: 🚚 [STATION 4: DELIVERY] Started BlockDeliveryManager loop. Conveyor belt active.[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903911Z  INFO metanode::node::startup: 📡 [PEER RPC] Server started on 0.0.0.0:31501 for WAN sync[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903919Z  INFO metanode::node::startup: ✅ [STARTUP] Node initialized. Entering supervisor loop.[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903904Z  INFO metanode::network::peer_rpc::server: 🌐 [PEER RPC] Started on 0.0.0.0:31501 (node_id=0, network_address=127.0.0.1:31001)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903808Z  INFO metanode::consensus::tx_recycler: ♻️ [TX RECYCLER] Background recycler started (timeout=300s, max_retries=3)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.903827Z  INFO metanode::network::rpc: RPC server started on 127.0.0.1:32901 (supports HTTP POST and length-prefixed binary)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.904205Z  INFO metanode::consensus::tx_recycler: 💾 [TX RECYCLER] Hydrated 2 pending transactions from disk[0m
+[DIAG tx_recycler] pending=2 submitted=0 confirmed=0 recycled=0 expired=0 capacity_evicted=0
+[33m[WARN][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.919514Z  WARN consensus_core::core::proposer: Skip proposing for round 63852: node phase is Bootstrapping[0m
+[DIAG dispatch_commit] dispatched_txs=0 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=1
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.937255Z  INFO metanode::consensus::commit_processor::processor: 🚀 [COMMIT PROCESSOR] PHASE-B: Go-Authoritative GEI. epoch=0, next_expected_index=63706[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.937275Z  INFO metanode::consensus::commit_processor::processor: 🛡️ LagMonitor spawned for CommitProcessor.[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.937280Z  INFO metanode::consensus::commit_processor::processor: 📡 [COMMIT PROCESSOR] Waiting for commits from consensus...[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.937288Z  INFO metanode::consensus::commit_processor::processor: 💓 [COMMIT PROCESSOR HEARTBEAT] Processed 63706 commits (last 1000 commits in 0s, pending_ooo=0, next_expected=63706)[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.937309Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=1 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+[32m[INFO][Oct  8 07:05:50]  [RUST] 2026-10-08T07:05:50.938219Z  INFO metanode::consensus::commit_processor::lag_monitor: 🛡️ [LAG-MONITOR] Started with moderate_threshold=100, severe_threshold=200[0m
+[33m[WARN][Oct  8 07:05:51]  [RUST] 2026-10-08T07:05:51.094525Z  WARN consensus_core::core::proposer: Skip proposing for round 63852: node phase is Bootstrapping[0m
+[33m[WARN][Oct  8 07:05:51]  [RUST] 2026-10-08T07:05:51.850482Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000[0m
+[32m[INFO][Oct  8 07:05:51]  [RUST] 2026-10-08T07:05:51.850560Z  INFO metanode::ffi: 📊 [FFI TX METRICS] total_batches=1, total_bytes=336, channel_full_events=0, capacity_remaining=128/10000[0m
+[33m[WARN][Oct  8 07:05:51]  [RUST] 2026-10-08T07:05:51.856880Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000[0m
+[33m[WARN][Oct  8 07:05:51]  [RUST] 2026-10-08T07:05:51.894218Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #63849 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:05:52]  [RUST] 2026-10-08T07:05:52.895170Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #63849 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:05:52]  [RUST] 2026-10-08T07:05:52.901672Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000[0m
+[33m[WARN][Oct  8 07:05:52]  [RUST] 2026-10-08T07:05:52.908266Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000[0m
+[33m[WARN][Oct  8 07:05:53]  [RUST] 2026-10-08T07:05:53.896103Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #63849 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:05:53]  [RUST] 2026-10-08T07:05:53.908269Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000[0m
+[33m[WARN][Oct  8 07:05:53]  [RUST] 2026-10-08T07:05:53.914783Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000[0m
+[33m[WARN][Oct  8 07:05:54]  [RUST] 2026-10-08T07:05:54.897780Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #63849 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:05:54]  [RUST] 2026-10-08T07:05:54.950555Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000[0m
+[33m[WARN][Oct  8 07:05:54]  [RUST] 2026-10-08T07:05:54.957244Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000[0m
+[33m[WARN][Oct  8 07:05:55]  [RUST] 2026-10-08T07:05:55.893938Z  WARN consensus_core::core::proposer: Skip proposing for round 63852: node phase is Bootstrapping[0m
+[33m[WARN][Oct  8 07:05:55]  [RUST] 2026-10-08T07:05:55.894149Z  WARN consensus_core::core::proposer: Skip proposing for round 63852: node phase is Bootstrapping[0m
+[33m[WARN][Oct  8 07:05:55]  [RUST] 2026-10-08T07:05:55.899382Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #63849 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:05:55]  [RUST] 2026-10-08T07:05:55.899492Z  INFO consensus_core::commit_syncer: 🔍 [BOOTSTRAP] Actively polling peers to discover true quorum_commit_index...[0m
+[32m[INFO][Oct  8 07:05:55]  [RUST] 2026-10-08T07:05:55.899508Z  INFO consensus_core::commit_syncer: ℹ️ [BOOTSTRAP] Single-node cluster detected. Skipping peer polling.[0m
+[32m[INFO][Oct  8 07:05:55]  [RUST] 2026-10-08T07:05:55.899523Z  INFO consensus_core::commit_syncer: 🚀 [COMMIT-SYNCER] Starting with phase=Bootstrapping, interval=200ms[0m
+[33m[WARN][Oct  8 07:05:55]  [RUST] 2026-10-08T07:05:55.900648Z  WARN consensus_core::commit_syncer: ⚠️ [RECOVERY-BARRIER] Lag is 0, but schedule_recovery_pending=true. Node restored from snapshot but failed to fetch baseline. MUST enter ScheduleVerifying to rebuild LeaderSchedule naturally.[0m
+[32m[INFO][Oct  8 07:05:55]  [RUST] 2026-10-08T07:05:55.900674Z  INFO consensus_core::recovery_barrier: ✅ [RECOVERY-BARRIER] DagCatchingUp → ScheduleVerifying. DAG reached quorum. Waiting for a full 300-commit LeaderSchedule scoring cycle.[0m
+[32m[INFO][Oct  8 07:05:55]  [RUST] 2026-10-08T07:05:55.900708Z  INFO consensus_core::commit_syncer::cold_start: 🚀 [BOOTSTRAP] Snapshot restore complete. quorum=63849, transitioning to CatchingUp.[0m
+[32m[INFO][Oct  8 07:05:55]  [RUST] 2026-10-08T07:05:55.900728Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Bootstrapping -> CatchingUp[0m
+[DIAG tx_recycler] pending=4 submitted=2 confirmed=0 recycled=0 expired=0 capacity_evicted=0
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.100376Z  INFO consensus_core::commit_syncer::cold_start: ✅ [COMMIT-SYNCER] Mathematical parity reached (synced=63849 >= quorum=63849, network_synced=0) and RecoveryBarrier=Ready. Clearing startup_sync. Local committer will unlock after DAG density confirmed.[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.100503Z  INFO consensus_core::coordination_hub: 🔓 [STARTUP-SYNC] Proposals UNLOCKED — sync complete[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.100519Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.100532Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.100564Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.100810Z  INFO consensus_core::transaction: Proposing block with 8 transactions (2184 bytes). Limit reached: AllTransactionsIncluded[0m
+[DIAG submit_no_wait] ok=1 gc=0 timeout=0
+[33m[WARN][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.101575Z  WARN consensus_core::commit_finalizer: ⚠️ [COMMIT FINALIZER] Non-sequential commit: expected index 63706, got 63850. Gap of 144 commits (likely FORWARD-JUMP catch-up). Proceeding.[0m
+[DIAG digest-gate] direct_ok=1 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=0 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=145
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.103922Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=145 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+[33m[WARN][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.210562Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.210643Z  INFO metanode::ffi: 📊 [FFI TX METRICS] total_batches=9, total_bytes=2544, channel_full_events=0, capacity_remaining=128/10000[0m
+[33m[WARN][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.217217Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.300747Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63600 (current cycle: 212)[0m
+[33m[WARN][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.300892Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #63849 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.302197Z  INFO consensus_core::transaction: Proposing block with 2 transactions (546 bytes). Limit reached: AllTransactionsIncluded[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.417685Z  INFO metanode::node::setup_consensus: ✅ [DAG-GATE] CommitSyncer explicitly unlocked node! Notifying SystemTransactionProvider.[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.506114Z  INFO metanode::consensus::tx_recycler: ♻️ [TX RECYCLER] Confirmed 2 TXs from committed sub-DAG (4 still pending)[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.506216Z  INFO metanode::node::executor_client::block_sending: 🔪 [FRAGMENT-BUILD] Built sorted TX list: input=8, filtered=0, deduped=6, final=2, system_txs=0[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.506293Z  INFO metanode::node::executor_client::block_sending: 📊 [BLOCK-NUM-ASSIGN] Assigned block_number=85 for GEI=85, epoch=0, commit_idx=63852, txs_user=2, txs_sys=0[0m
+[32m[INFO][Oct  8 07:05:56]  🔄 [FORCE COMMIT] Received ForceCommitRequest from Rust (reason: commit_g85_e0)[0m
+2026/10/08 07:05:56 Parent Chain: Processing block 85 (GEI 85) with 2 txs
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.506766Z  INFO metanode::node::executor_client::rpc_queries: ✅ [EXECUTOR-REQ] ForceCommit successful: ForceCommit callback is not initialized[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.738064Z  INFO metanode::consensus::tx_recycler: ♻️ [TX RECYCLER] Confirmed 2 TXs from committed sub-DAG (2 still pending)[0m
+[32m[INFO][Oct  8 07:05:56]  🔄 [FORCE COMMIT] Received ForceCommitRequest from Rust (reason: commit_g86_e0)[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.738391Z  INFO metanode::node::executor_client::rpc_queries: ✅ [EXECUTOR-REQ] ForceCommit successful: ForceCommit callback is not initialized[0m
+2026/10/08 07:05:56 block_processor: tx 0x25e8438a rejected in block #85: errCode=215 err=RegisterAccount: float account: account already registered
+2026/10/08 07:05:56 Parent Chain: Block #85 applied successfully: txs=2 receipts=2 hash=0x45a2ae3ed99d6e0e stateRoot=0x57b87f9910643ca7
+[33m[WARN][Oct  8 07:05:56]  ⏱️ [FFI-TRACE] gei=85 stage=GO_CGO unmarshal_ns=30883 queue_to_resp_ns=277706418 serialize_ns=152929 total_ns=277895109[0m
+[33m[WARN][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.784525Z  WARN metanode::node::executor_client::block_sending: ⏱️ [FFI-TRACE] gei=85 stage=RUST sched_ns=134991 cgo_ns=277936654 decode_ns=111845[0m
+[33m[WARN][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.784589Z  WARN metanode::node::executor_client::block_sending: ⏱️ [PERF-RUST] FFI execute_block for gei 85 (size=643 bytes): 278.250439ms[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.784634Z  INFO metanode::node::executor_client::block_sending: 💾 [BLOCK-SEND] Go computed StateRoot for GEI=85: 0x57b87f9910643ca78259e5f0f3aafbfa335ccbd55433f5ce39f3a8a688d1afda[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.785045Z  INFO metanode::node::executor_client::block_store: 💾 [BLOCK STORE] Stored 1 executable blocks (GEI 85→85)[0m
+[DIAG block_delivery] ok_commits=[33m[WARN][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.785077Z  WARN metanode::node::block_delivery: 🐌 [PERF-WARN] send_committed_subdag took 279.088602ms for commit 63852 (GEI=85). Go Execution is lagging![0m
+1 ok_txs=8
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.785225Z  INFO metanode::node::executor_client::block_sending: 🔪 [FRAGMENT-BUILD] Built sorted TX list: input=2, filtered=0, deduped=0, final=2, system_txs=0[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.785249Z  INFO metanode::node::executor_client::block_sending: 📊 [BLOCK-NUM-ASSIGN] Assigned block_number=86 for GEI=86, epoch=0, commit_idx=63853, txs_user=2, txs_sys=0[0m
+2026/10/08 07:05:56 Parent Chain: Processing block 86 (GEI 86) with 2 txs
+2026/10/08 07:05:56 block_processor: tx 0xdfd4bba3 rejected in block #86: errCode=215 err=RegisterAccount: float account: account already registered
+2026/10/08 07:05:56 Parent Chain: Block #86 applied successfully: txs=2 receipts=2 hash=0xd305ca07d0bc8e04 stateRoot=0x6428254ad6c0a1fc
+[33m[WARN][Oct  8 07:05:56]  ⏱️ [FFI-TRACE] gei=86 stage=GO_CGO unmarshal_ns=15998 queue_to_resp_ns=12067310 serialize_ns=11122 total_ns=12106468[0m
+[33m[WARN][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.797636Z  WARN metanode::node::executor_client::block_sending: ⏱️ [FFI-TRACE] gei=86 stage=RUST sched_ns=39818 cgo_ns=12182772 decode_ns=103593[0m
+[33m[WARN][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.797708Z  WARN metanode::node::executor_client::block_sending: ⏱️ [PERF-RUST] FFI execute_block for gei 86 (size=643 bytes): 12.400429ms[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.797727Z  INFO metanode::node::executor_client::block_sending: 💾 [BLOCK-SEND] Go computed StateRoot for GEI=86: 0x6428254ad6c0a1fcd524d88755540b8fb6073d2303569ef548c54fa74f3cf7fe[0m
+[32m[INFO][Oct  8 07:05:56]  [RUST] 2026-10-08T07:05:56.798180Z  INFO metanode::node::executor_client::block_store: 💾 [BLOCK STORE] Stored 1 executable blocks (GEI 86→86)[0m
+[33m[WARN][Oct  8 07:05:57]  [RUST] 2026-10-08T07:05:57.302224Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #63849 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=11 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=153
+[33m[WARN][Oct  8 07:05:58]  [RUST] 2026-10-08T07:05:58.303478Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #63849 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:05:59]  [RUST] 2026-10-08T07:05:59.304699Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #63849 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=21 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=163
+[33m[WARN][Oct  8 07:06:00]  [RUST] 2026-10-08T07:06:00.306484Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #63849 from network. Retrying in 1s...[0m
+[DIAG tx_recycler] pending=2 submitted=4 confirmed=4 recycled=0 expired=0 capacity_evicted=0
+[32m[INFO][Oct  8 07:06:01]  [RUST] 2026-10-08T07:06:01.144166Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=170 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+[33m[WARN][Oct  8 07:06:01]  [RUST] 2026-10-08T07:06:01.307170Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #63849 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:06:01]  [RUST] 2026-10-08T07:06:01.307308Z  INFO consensus_core::commit_syncer: 🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 63875 | Synced: 63849 | Network Quorum: 63875 | Lag(dag): 0 | Lag(synced,gates-on-this): 26 | Block Source: CONSENSUS (Healthy)[0m
+[32m[INFO][Oct  8 07:06:01]  [RUST] 2026-10-08T07:06:01.307340Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Healthy -> CatchingUp[0m
+[32m[INFO][Oct  8 07:06:01]  [RUST] 2026-10-08T07:06:01.307369Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:06:01]  [RUST] 2026-10-08T07:06:01.307380Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:06:01]  [RUST] 2026-10-08T07:06:01.307415Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63600 (current cycle: 212)[0m
+[33m[WARN][Oct  8 07:06:01]  [RUST] 2026-10-08T07:06:01.307467Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #63875 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:06:01]  [RUST] 2026-10-08T07:06:01.307528Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[DIAG digest-gate] direct_ok=31 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=173
+[33m[WARN][Oct  8 07:06:02]  [RUST] 2026-10-08T07:06:02.307798Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #63875 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:03]  [RUST] 2026-10-08T07:06:03.309031Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #63875 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=41 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=183
+[33m[WARN][Oct  8 07:06:04]  [RUST] 2026-10-08T07:06:04.310703Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #63875 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:05]  [RUST] 2026-10-08T07:06:05.312538Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #63875 from network. Retrying in 1s...[0m
+[DIAG tx_recycler] pending=2 submitted=4 confirmed=4 recycled=0 expired=0 capacity_evicted=0
+[33m[WARN][Oct  8 07:06:06]  [RUST] 2026-10-08T07:06:06.144861Z  WARN consensus_core::core::commit_manager: 🚫 [SCHEDULE-RECOVERY] DAG lacks 300 commits at schedule update boundary (commit_index=63900). Skipping LeaderSchedule update to prevent reputation score divergence. Local committer will remain permanently blocked for this epoch.[0m
+[DIAG digest-gate] direct_ok=51 buffered=0 poll_recovered=0 dropped=0
+[32m[INFO][Oct  8 07:06:06]  [RUST] 2026-10-08T07:06:06.145354Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=195 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=193
+[33m[WARN][Oct  8 07:06:06]  [RUST] 2026-10-08T07:06:06.313707Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #63875 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:06:06]  [RUST] 2026-10-08T07:06:06.313851Z  INFO consensus_core::commit_syncer: 🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 63900 | Synced: 63875 | Network Quorum: 63900 | Lag(dag): 0 | Lag(synced,gates-on-this): 25 | Block Source: CONSENSUS (Healthy)[0m
+[32m[INFO][Oct  8 07:06:06]  [RUST] 2026-10-08T07:06:06.313887Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Healthy -> CatchingUp[0m
+[32m[INFO][Oct  8 07:06:06]  [RUST] 2026-10-08T07:06:06.313924Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:06:06]  [RUST] 2026-10-08T07:06:06.313941Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:06:06]  [RUST] 2026-10-08T07:06:06.313969Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63900 (current cycle: 213)[0m
+[33m[WARN][Oct  8 07:06:06]  [RUST] 2026-10-08T07:06:06.314000Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #63900 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:06:06]  [RUST] 2026-10-08T07:06:06.314023Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[33m[WARN][Oct  8 07:06:07]  [RUST] 2026-10-08T07:06:07.315268Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #63900 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=61 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=203
+[33m[WARN][Oct  8 07:06:08]  [RUST] 2026-10-08T07:06:08.316001Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #63900 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:09]  [RUST] 2026-10-08T07:06:09.316751Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #63900 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=71 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=213
+[33m[WARN][Oct  8 07:06:10]  [RUST] 2026-10-08T07:06:10.317957Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #63900 from network. Retrying in 1s...[0m
+[DIAG tx_recycler] pending=2 submitted=4 confirmed=4 recycled=0 expired=0 capacity_evicted=0
+[32m[INFO][Oct  8 07:06:11]  [RUST] 2026-10-08T07:06:11.160390Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=220 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+[33m[WARN][Oct  8 07:06:11]  [RUST] 2026-10-08T07:06:11.319222Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #63900 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:06:11]  [RUST] 2026-10-08T07:06:11.319333Z  INFO consensus_core::commit_syncer: 🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 63925 | Synced: 63900 | Network Quorum: 63925 | Lag(dag): 0 | Lag(synced,gates-on-this): 25 | Block Source: CONSENSUS (Healthy)[0m
+[32m[INFO][Oct  8 07:06:11]  [RUST] 2026-10-08T07:06:11.319367Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Healthy -> CatchingUp[0m
+[32m[INFO][Oct  8 07:06:11]  [RUST] 2026-10-08T07:06:11.319396Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:06:11]  [RUST] 2026-10-08T07:06:11.319407Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:06:11]  [RUST] 2026-10-08T07:06:11.319431Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63900 (current cycle: 213)[0m
+[33m[WARN][Oct  8 07:06:11]  [RUST] 2026-10-08T07:06:11.319450Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #63925 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:06:11]  [RUST] 2026-10-08T07:06:11.319476Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[DIAG digest-gate] direct_ok=81 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=223
+[33m[WARN][Oct  8 07:06:12]  [RUST] 2026-10-08T07:06:12.320217Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #63925 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:13]  [RUST] 2026-10-08T07:06:13.320937Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #63925 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=91 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=233
+[33m[WARN][Oct  8 07:06:14]  [RUST] 2026-10-08T07:06:14.322427Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #63925 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:15]  [RUST] 2026-10-08T07:06:15.323337Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #63925 from network. Retrying in 1s...[0m
+[DIAG tx_recycler] pending=2 submitted=4 confirmed=4 recycled=0 expired=0 capacity_evicted=0
+[DIAG digest-gate] direct_ok=101 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=243
+[32m[INFO][Oct  8 07:06:16]  [RUST] 2026-10-08T07:06:16.165638Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=245 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+[33m[WARN][Oct  8 07:06:16]  [RUST] 2026-10-08T07:06:16.324383Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #63925 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:06:16]  [RUST] 2026-10-08T07:06:16.324473Z  INFO consensus_core::commit_syncer: 🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 63950 | Synced: 63925 | Network Quorum: 63950 | Lag(dag): 0 | Lag(synced,gates-on-this): 25 | Block Source: CONSENSUS (Healthy)[0m
+[32m[INFO][Oct  8 07:06:16]  [RUST] 2026-10-08T07:06:16.324497Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Healthy -> CatchingUp[0m
+[32m[INFO][Oct  8 07:06:16]  [RUST] 2026-10-08T07:06:16.324514Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:06:16]  [RUST] 2026-10-08T07:06:16.324519Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:06:16]  [RUST] 2026-10-08T07:06:16.324531Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63900 (current cycle: 213)[0m
+[33m[WARN][Oct  8 07:06:16]  [RUST] 2026-10-08T07:06:16.324542Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #63950 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:06:16]  [RUST] 2026-10-08T07:06:16.324555Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[33m[WARN][Oct  8 07:06:17]  [RUST] 2026-10-08T07:06:17.325302Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #63950 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=111 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=253
+[33m[WARN][Oct  8 07:06:18]  [RUST] 2026-10-08T07:06:18.326321Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #63950 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:19]  [RUST] 2026-10-08T07:06:19.327713Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #63950 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=121 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=263
+[33m[WARN][Oct  8 07:06:20]  [RUST] 2026-10-08T07:06:20.328960Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #63950 from network. Retrying in 1s...[0m
+[DIAG tx_recycler] pending=2 submitted=4 confirmed=4 recycled=0 expired=0 capacity_evicted=0
+[33m[WARN][Oct  8 07:06:20]  [RUST] 2026-10-08T07:06:20.905079Z  WARN metanode::node::health_check: ⚠️ [HEALTH] No peers configured. Skipping health check.[0m
+[32m[INFO][Oct  8 07:06:20]  [RUST] 2026-10-08T07:06:20.905208Z  INFO metanode::node::setup_consensus: ✅ [HEALTH] Post-recovery health check PASSED (attempt 1/3): HealthCheckResult { block_parity: true, gei_parity: true, state_root_match: true, committee_match: true }[0m
+[32m[INFO][Oct  8 07:06:21]  [RUST] 2026-10-08T07:06:21.196790Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=270 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+[33m[WARN][Oct  8 07:06:21]  [RUST] 2026-10-08T07:06:21.330400Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #63950 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:06:21]  [RUST] 2026-10-08T07:06:21.330613Z  INFO consensus_core::commit_syncer: 🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 63975 | Synced: 63950 | Network Quorum: 63975 | Lag(dag): 0 | Lag(synced,gates-on-this): 25 | Block Source: CONSENSUS (Healthy)[0m
+[32m[INFO][Oct  8 07:06:21]  [RUST] 2026-10-08T07:06:21.330645Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Healthy -> CatchingUp[0m
+[32m[INFO][Oct  8 07:06:21]  [RUST] 2026-10-08T07:06:21.330673Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:06:21]  [RUST] 2026-10-08T07:06:21.330683Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:06:21]  [RUST] 2026-10-08T07:06:21.330705Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63900 (current cycle: 213)[0m
+[33m[WARN][Oct  8 07:06:21]  [RUST] 2026-10-08T07:06:21.330730Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #63975 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:06:21]  [RUST] 2026-10-08T07:06:21.330753Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[DIAG digest-gate] direct_ok=131 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=273
+[33m[WARN][Oct  8 07:06:22]  [RUST] 2026-10-08T07:06:22.332112Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #63975 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:23]  [RUST] 2026-10-08T07:06:23.333567Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #63975 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=141 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=283
+[33m[WARN][Oct  8 07:06:24]  [RUST] 2026-10-08T07:06:24.335546Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #63975 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:25]  [RUST] 2026-10-08T07:06:25.336159Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #63975 from network. Retrying in 1s...[0m
+[DIAG tx_recycler] pending=2 submitted=4 confirmed=4 recycled=0 expired=0 capacity_evicted=0
+[DIAG digest-gate] direct_ok=150 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=292
+[32m[INFO][Oct  8 07:06:26]  [RUST] 2026-10-08T07:06:26.042698Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=294 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+[33m[WARN][Oct  8 07:06:26]  [RUST] 2026-10-08T07:06:26.337213Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #63975 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:06:26]  [RUST] 2026-10-08T07:06:26.337424Z  INFO consensus_core::commit_syncer: 🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 64000 | Synced: 63975 | Network Quorum: 64000 | Lag(dag): 0 | Lag(synced,gates-on-this): 25 | Block Source: CONSENSUS (Healthy)[0m
+[32m[INFO][Oct  8 07:06:26]  [RUST] 2026-10-08T07:06:26.337462Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Healthy -> CatchingUp[0m
+[32m[INFO][Oct  8 07:06:26]  [RUST] 2026-10-08T07:06:26.337491Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:06:26]  [RUST] 2026-10-08T07:06:26.337507Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:06:26]  [RUST] 2026-10-08T07:06:26.337545Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63900 (current cycle: 213)[0m
+[33m[WARN][Oct  8 07:06:26]  [RUST] 2026-10-08T07:06:26.337566Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #64000 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:06:26]  [RUST] 2026-10-08T07:06:26.337599Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[33m[WARN][Oct  8 07:06:27]  [RUST] 2026-10-08T07:06:27.338209Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #64000 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=161 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=303
+[33m[WARN][Oct  8 07:06:28]  [RUST] 2026-10-08T07:06:28.339323Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #64000 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:29]  [RUST] 2026-10-08T07:06:29.340607Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #64000 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=171 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=313
+[33m[WARN][Oct  8 07:06:30]  [RUST] 2026-10-08T07:06:30.342034Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #64000 from network. Retrying in 1s...[0m
+[DIAG tx_recycler] pending=2 submitted=4 confirmed=4 recycled=0 expired=0 capacity_evicted=0
+[32m[INFO][Oct  8 07:06:31]  [RUST] 2026-10-08T07:06:31.183607Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=320 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+[33m[WARN][Oct  8 07:06:31]  [RUST] 2026-10-08T07:06:31.343164Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #64000 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:06:31]  [RUST] 2026-10-08T07:06:31.343255Z  INFO consensus_core::commit_syncer: 🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 64025 | Synced: 64000 | Network Quorum: 64025 | Lag(dag): 0 | Lag(synced,gates-on-this): 25 | Block Source: CONSENSUS (Healthy)[0m
+[32m[INFO][Oct  8 07:06:31]  [RUST] 2026-10-08T07:06:31.343437Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Healthy -> CatchingUp[0m
+[32m[INFO][Oct  8 07:06:31]  [RUST] 2026-10-08T07:06:31.343469Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:06:31]  [RUST] 2026-10-08T07:06:31.343479Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:06:31]  [RUST] 2026-10-08T07:06:31.343511Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63900 (current cycle: 213)[0m
+[33m[WARN][Oct  8 07:06:31]  [RUST] 2026-10-08T07:06:31.343529Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #64025 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:06:31]  [RUST] 2026-10-08T07:06:31.343555Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[DIAG digest-gate] direct_ok=181 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=323
+[33m[WARN][Oct  8 07:06:32]  [RUST] 2026-10-08T07:06:32.344021Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #64025 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:33]  [RUST] 2026-10-08T07:06:33.345193Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #64025 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=191 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=333
+[33m[WARN][Oct  8 07:06:34]  [RUST] 2026-10-08T07:06:34.346375Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #64025 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:35]  [RUST] 2026-10-08T07:06:35.346763Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #64025 from network. Retrying in 1s...[0m
+[DIAG tx_recycler] pending=2 submitted=4 confirmed=4 recycled=0 expired=0 capacity_evicted=0
+[DIAG digest-gate] direct_ok=201 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10[32m[INFO][Oct  8 07:06:36]  [RUST] 2026-10-08T07:06:36.185307Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=345 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+ gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=343
+[33m[WARN][Oct  8 07:06:36]  [RUST] 2026-10-08T07:06:36.348529Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #64025 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:06:36]  [RUST] 2026-10-08T07:06:36.348610Z  INFO consensus_core::commit_syncer: 🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 64050 | Synced: 64025 | Network Quorum: 64050 | Lag(dag): 0 | Lag(synced,gates-on-this): 25 | Block Source: CONSENSUS (Healthy)[0m
+[32m[INFO][Oct  8 07:06:36]  [RUST] 2026-10-08T07:06:36.348634Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Healthy -> CatchingUp[0m
+[32m[INFO][Oct  8 07:06:36]  [RUST] 2026-10-08T07:06:36.348670Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:06:36]  [RUST] 2026-10-08T07:06:36.348681Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:06:36]  [RUST] 2026-10-08T07:06:36.348701Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63900 (current cycle: 213)[0m
+[33m[WARN][Oct  8 07:06:36]  [RUST] 2026-10-08T07:06:36.348718Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #64050 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:06:36]  [RUST] 2026-10-08T07:06:36.348735Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[33m[WARN][Oct  8 07:06:37]  [RUST] 2026-10-08T07:06:37.350720Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #64050 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=211 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=353
+[33m[WARN][Oct  8 07:06:38]  [RUST] 2026-10-08T07:06:38.352477Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #64050 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:39]  [RUST] 2026-10-08T07:06:39.353300Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #64050 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=221 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=363
+[33m[WARN][Oct  8 07:06:40]  [RUST] 2026-10-08T07:06:40.354687Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #64050 from network. Retrying in 1s...[0m
+[DIAG tx_recycler] pending=2 submitted=4 confirmed=4 recycled=0 expired=0 capacity_evicted=0
+[32m[INFO][Oct  8 07:06:41]  [RUST] 2026-10-08T07:06:41.196024Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=370 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+[33m[WARN][Oct  8 07:06:41]  [RUST] 2026-10-08T07:06:41.356374Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #64050 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:06:41]  [RUST] 2026-10-08T07:06:41.356443Z  INFO consensus_core::commit_syncer: 🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 64075 | Synced: 64050 | Network Quorum: 64075 | Lag(dag): 0 | Lag(synced,gates-on-this): 25 | Block Source: CONSENSUS (Healthy)[0m
+[32m[INFO][Oct  8 07:06:41]  [RUST] 2026-10-08T07:06:41.356479Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Healthy -> CatchingUp[0m
+[32m[INFO][Oct  8 07:06:41]  [RUST] 2026-10-08T07:06:41.356499Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:06:41]  [RUST] 2026-10-08T07:06:41.356506Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:06:41]  [RUST] 2026-10-08T07:06:41.356536Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63900 (current cycle: 213)[0m
+[33m[WARN][Oct  8 07:06:41]  [RUST] 2026-10-08T07:06:41.356549Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #64075 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:06:41]  [RUST] 2026-10-08T07:06:41.356563Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[DIAG digest-gate] direct_ok=231 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=373
+[33m[WARN][Oct  8 07:06:42]  [RUST] 2026-10-08T07:06:42.357572Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #64075 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:43]  [RUST] 2026-10-08T07:06:43.359491Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #64075 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=240 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=382
+[33m[WARN][Oct  8 07:06:44]  [RUST] 2026-10-08T07:06:44.360027Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #64075 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:45]  [RUST] 2026-10-08T07:06:45.361329Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #64075 from network. Retrying in 1s...[0m
+[DIAG tx_recycler] pending=2 submitted=4 confirmed=4 recycled=0 expired=0 capacity_evicted=0
+[DIAG digest-gate] direct_ok=251 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=[32m[INFO][Oct  8 07:06:46]  [RUST] 2026-10-08T07:06:46.200519Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=395 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+393
+[33m[WARN][Oct  8 07:06:46]  [RUST] 2026-10-08T07:06:46.362014Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #64075 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:06:46]  [RUST] 2026-10-08T07:06:46.362108Z  INFO consensus_core::commit_syncer: 🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 64100 | Synced: 64075 | Network Quorum: 64100 | Lag(dag): 0 | Lag(synced,gates-on-this): 25 | Block Source: CONSENSUS (Healthy)[0m
+[32m[INFO][Oct  8 07:06:46]  [RUST] 2026-10-08T07:06:46.362128Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Healthy -> CatchingUp[0m
+[32m[INFO][Oct  8 07:06:46]  [RUST] 2026-10-08T07:06:46.362143Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:06:46]  [RUST] 2026-10-08T07:06:46.362147Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:06:46]  [RUST] 2026-10-08T07:06:46.362180Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63900 (current cycle: 213)[0m
+[33m[WARN][Oct  8 07:06:46]  [RUST] 2026-10-08T07:06:46.362191Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #64100 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:06:46]  [RUST] 2026-10-08T07:06:46.362204Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[33m[WARN][Oct  8 07:06:47]  [RUST] 2026-10-08T07:06:47.363033Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #64100 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=261 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=403
+[33m[WARN][Oct  8 07:06:48]  [RUST] 2026-10-08T07:06:48.363915Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #64100 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:49]  [RUST] 2026-10-08T07:06:49.365161Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #64100 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=271 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=413
+[33m[WARN][Oct  8 07:06:50]  [RUST] 2026-10-08T07:06:50.366081Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #64100 from network. Retrying in 1s...[0m
+[DIAG tx_recycler] pending=[32m[INFO][Oct  8 07:06:50]  [RUST] 2026-10-08T07:06:50.906305Z  INFO metanode::consensus::tx_recycler: ♻️ [TX RECYCLER STATS] pending=2, submitted=4, confirmed=4, recycled=0, expired=0, capacity_evicted=0[0m
+2 submitted=4 confirmed=4 recycled=0 expired=0 capacity_evicted=0
+[32m[INFO][Oct  8 07:06:51]  [RUST] 2026-10-08T07:06:51.004219Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=419 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+[33m[WARN][Oct  8 07:06:51]  [RUST] 2026-10-08T07:06:51.366839Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #64100 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:06:51]  [RUST] 2026-10-08T07:06:51.366966Z  INFO consensus_core::commit_syncer: 🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 64125 | Synced: 64100 | Network Quorum: 64125 | Lag(dag): 0 | Lag(synced,gates-on-this): 25 | Block Source: CONSENSUS (Healthy)[0m
+[32m[INFO][Oct  8 07:06:51]  [RUST] 2026-10-08T07:06:51.366995Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Healthy -> CatchingUp[0m
+[32m[INFO][Oct  8 07:06:51]  [RUST] 2026-10-08T07:06:51.367018Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:06:51]  [RUST] 2026-10-08T07:06:51.367029Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:06:51]  [RUST] 2026-10-08T07:06:51.367045Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63900 (current cycle: 213)[0m
+[33m[WARN][Oct  8 07:06:51]  [RUST] 2026-10-08T07:06:51.367056Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #64125 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:06:51]  [RUST] 2026-10-08T07:06:51.367072Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[DIAG digest-gate] direct_ok=281 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=423
+[33m[WARN][Oct  8 07:06:52]  [RUST] 2026-10-08T07:06:52.368017Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #64125 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:53]  [RUST] 2026-10-08T07:06:53.369407Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #64125 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=290 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=432
+[33m[WARN][Oct  8 07:06:54]  [RUST] 2026-10-08T07:06:54.370126Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #64125 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:55]  [RUST] 2026-10-08T07:06:55.370958Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #64125 from network. Retrying in 1s...[0m
+[DIAG tx_recycler] pending=2 submitted=4 confirmed=4 recycled=0 expired=0 capacity_evicted=0
+[DIAG digest-gate] direct_ok=300 buffered=0 poll_recovered=0 dropped=0
+[32m[INFO][Oct  8 07:06:56]  [RUST] 2026-10-08T07:06:56.089942Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=444 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=442
+[33m[WARN][Oct  8 07:06:56]  [RUST] 2026-10-08T07:06:56.371801Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #64125 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:06:56]  [RUST] 2026-10-08T07:06:56.371883Z  INFO consensus_core::commit_syncer: 🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 64150 | Synced: 64125 | Network Quorum: 64150 | Lag(dag): 0 | Lag(synced,gates-on-this): 25 | Block Source: CONSENSUS (Healthy)[0m
+[32m[INFO][Oct  8 07:06:56]  [RUST] 2026-10-08T07:06:56.371907Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Healthy -> CatchingUp[0m
+[32m[INFO][Oct  8 07:06:56]  [RUST] 2026-10-08T07:06:56.371926Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:06:56]  [RUST] 2026-10-08T07:06:56.371933Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:06:56]  [RUST] 2026-10-08T07:06:56.371953Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63900 (current cycle: 213)[0m
+[33m[WARN][Oct  8 07:06:56]  [RUST] 2026-10-08T07:06:56.371965Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #64150 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:06:56]  [RUST] 2026-10-08T07:06:56.371989Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[33m[WARN][Oct  8 07:06:57]  [RUST] 2026-10-08T07:06:57.373006Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #64150 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=311 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=453
+[33m[WARN][Oct  8 07:06:58]  [RUST] 2026-10-08T07:06:58.374304Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #64150 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:06:59]  [RUST] 2026-10-08T07:06:59.375037Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #64150 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=320 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=462
+[33m[WARN][Oct  8 07:07:00]  [RUST] 2026-10-08T07:07:00.376256Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #64150 from network. Retrying in 1s...[0m
+[DIAG tx_recycler] pending=2 submitted=4 confirmed=4 recycled=0 expired=0 capacity_evicted=0
+[32m[INFO][Oct  8 07:07:01]  [RUST] 2026-10-08T07:07:01.015731Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=469 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+[33m[WARN][Oct  8 07:07:01]  [RUST] 2026-10-08T07:07:01.377669Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #64150 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:07:01]  [RUST] 2026-10-08T07:07:01.377762Z  INFO consensus_core::commit_syncer: 🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 64175 | Synced: 64150 | Network Quorum: 64175 | Lag(dag): 0 | Lag(synced,gates-on-this): 25 | Block Source: CONSENSUS (Healthy)[0m
+[32m[INFO][Oct  8 07:07:01]  [RUST] 2026-10-08T07:07:01.377803Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Healthy -> CatchingUp[0m
+[32m[INFO][Oct  8 07:07:01]  [RUST] 2026-10-08T07:07:01.377837Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:07:01]  [RUST] 2026-10-08T07:07:01.377848Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:07:01]  [RUST] 2026-10-08T07:07:01.377903Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #63900 (current cycle: 213)[0m
+[33m[WARN][Oct  8 07:07:01]  [RUST] 2026-10-08T07:07:01.377928Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #64175 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:07:01]  [RUST] 2026-10-08T07:07:01.377952Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[DIAG digest-gate] direct_ok=331 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=473
+[33m[WARN][Oct  8 07:07:02]  [RUST] 2026-10-08T07:07:02.379554Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #64175 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:07:03]  [RUST] 2026-10-08T07:07:03.380224Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #64175 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=340 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=482
+[33m[WARN][Oct  8 07:07:04]  [RUST] 2026-10-08T07:07:04.381302Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #64175 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:07:05]  [RUST] 2026-10-08T07:07:05.381887Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #64175 from network. Retrying in 1s...[0m
+[DIAG tx_recycler] pending=2 submitted=4 confirmed=4 recycled=0 expired=0 capacity_evicted=0
+[DIAG digest-gate] direct_ok=350 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=492
+[32m[INFO][Oct  8 07:07:06]  [RUST] 2026-10-08T07:07:06.020967Z  INFO metanode::consensus::commit_processor::processor: [DIAG leader-addr] preembedded=494 resolved_ok=0 waiting_iters=0 out_of_bounds=0 invalid_len=0[0m
+[33m[WARN][Oct  8 07:07:06]  [RUST] 2026-10-08T07:07:06.222289Z  WARN consensus_core::core::commit_manager: 🚫 [SCHEDULE-RECOVERY] DAG lacks 300 commits at schedule update boundary (commit_index=64200). Skipping LeaderSchedule update to prevent reputation score divergence. Local committer will remain permanently blocked for this epoch.[0m
+[33m[WARN][Oct  8 07:07:06]  [RUST] 2026-10-08T07:07:06.383664Z  WARN consensus_core::commit_syncer: 🚨 [BASELINE] Failed to fetch baseline commit #64175 after 5 attempts. ALL peers unreachable (network partition?). Skipping baseline — entering ScheduleVerifying for natural rebuild. Fork-safe: no proposals until schedule is verified.[0m
+[32m[INFO][Oct  8 07:07:06]  [RUST] 2026-10-08T07:07:06.383757Z  INFO consensus_core::commit_syncer: 🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 64200 | Synced: 64175 | Network Quorum: 64200 | Lag(dag): 0 | Lag(synced,gates-on-this): 25 | Block Source: CONSENSUS (Healthy)[0m
+[32m[INFO][Oct  8 07:07:06]  [RUST] 2026-10-08T07:07:06.383891Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: Healthy -> CatchingUp[0m
+[32m[INFO][Oct  8 07:07:06]  [RUST] 2026-10-08T07:07:06.383925Z  INFO consensus_core::coordination_hub: 🔄 [HUB] Phase transition: CatchingUp -> Healthy[0m
+[32m[INFO][Oct  8 07:07:06]  [RUST] 2026-10-08T07:07:06.383937Z  INFO consensus_core::commit_syncer: 🛡️ [DAG-GC-GUARD] Transitioning to Healthy. Local committer will automatically remain blocked if it falls behind gc_round.[0m
+[32m[INFO][Oct  8 07:07:06]  [RUST] 2026-10-08T07:07:06.383966Z  INFO consensus_core::commit_syncer: 🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #64200 (current cycle: 214)[0m
+[33m[WARN][Oct  8 07:07:06]  [RUST] 2026-10-08T07:07:06.384031Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 1/5: Failed to fetch baseline commit #64200 from network. Retrying in 1s...[0m
+[32m[INFO][Oct  8 07:07:06]  [RUST] 2026-10-08T07:07:06.384058Z  INFO consensus_core::commit_syncer: 🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...[0m
+[33m[WARN][Oct  8 07:07:07]  [RUST] 2026-10-08T07:07:07.385561Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 2/5: Failed to fetch baseline commit #64200 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=360 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=502
+[33m[WARN][Oct  8 07:07:08]  [RUST] 2026-10-08T07:07:08.386891Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 3/5: Failed to fetch baseline commit #64200 from network. Retrying in 1s...[0m
+[33m[WARN][Oct  8 07:07:09]  [RUST] 2026-10-08T07:07:09.388240Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 4/5: Failed to fetch baseline commit #64200 from network. Retrying in 1s...[0m
+[DIAG digest-gate] direct_ok=370 buffered=0 poll_recovered=0 dropped=0
+[DIAG dispatch_commit] dispatched_txs=10 gei_guard_skips=0 gei_guard_skipped_txs=0 fast_skip_empty=512
+[33m[WARN][Oct  8 07:07:10]  [RUST] 2026-10-08T07:07:10.389788Z  WARN consensus_core::commit_syncer: ⚠️ [BASELINE] Attempt 5/5: Failed to fetch baseline commit #64200 from network. Retrying in 1s...[0m
