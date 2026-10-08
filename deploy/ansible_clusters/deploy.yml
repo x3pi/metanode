@@ -17,6 +17,33 @@
     - role: build
       when: deploy_action in ['setup', 'deploy', 'restart', 'reset']
 
+# ── Play 1.5: Pre-stop all Nodes on reset/clean/restart ────────────────────────
+- name: "Phase 1.5: Stop all Parent Chain Nodes simultaneously on reset/clean/restart"
+  hosts: parent_chain_nodes
+  gather_facts: false
+  become: true
+  tags: ["parent_chain", "core"]
+  tasks:
+    - name: Stop Parent Chain service to prevent ghost quorum gossip during reset/restart
+      ansible.builtin.systemd:
+        name: "metanode-{{ inventory_hostname }}"
+        state: stopped
+      when: deploy_action in ['reset', 'clean', 'restart', 'deploy']
+      ignore_errors: true
+
+- name: "Phase 1.6: Stop all Execution Nodes simultaneously on reset/clean/restart"
+  hosts: exec_clusters
+  gather_facts: false
+  become: true
+  tags: ["exec_clusters", "shards"]
+  tasks:
+    - name: Stop Execution Cluster services before reset/clean/restart
+      ansible.builtin.systemd:
+        name: "metanode-{{ inventory_hostname }}"
+        state: stopped
+      when: deploy_action in ['reset', 'clean', 'restart', 'deploy']
+      ignore_errors: true
+
 # ── Play 2: Deploy Parent Chain ──────────────────────────────────────────────
 - name: "Phase 2: Deploy Parent Chain Node"
   hosts: parent_chain_nodes
