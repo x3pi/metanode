@@ -2,6 +2,15 @@
 """
 Verification tool for evidence manifests, raw logs, and markdown reports.
 Strict anti-fabrication enforcement. Exits non-zero on any discrepancy.
+
+TOLERANCE SPECIFICATION & CONSEQUENCES:
+- Exact string / integer matching: 0% tolerance (e.g. block hashes, block numbers, transaction counts, status codes).
+- 3-decimal floating point table cells: abs(diff) <= 0.001 (exact to 3 printed decimal places).
+- Extracted metrics from logs (`extract` rules): relative error rel_err <= 0.005 (0.5% tolerance) to accommodate
+  string-rounding of floating-point metrics (e.g. regression slopes, mean TPS).
+- Consequence: any mutation or discrepancy smaller than 0.5% in extracted float values is within round-off tolerance
+  and will not trigger an alert; changes exceeding 0.5% are caught strictly.
+
 Usage:
     python3 -I execution/scripts/test/evidence/verify_evidence.py <evidence_dir> [--report <report.md>] [--strict] [--max-mb <MB>]
 """

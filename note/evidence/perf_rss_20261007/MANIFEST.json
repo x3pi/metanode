@@ -410,7 +410,7 @@
   ],
   "unchecked": [
     {
-      "line_regex": "Tiêu chuẩn \\(Standard Validator\\)|Tiết kiệm RAM \\(Resource-Constrained\\)|Enterprise / Tier 1 Validator|Sentry / RPC Node nhỏ",
+      "line_regex": "Enterprise / Tier 1 Validator|Sentry / RPC Node nhỏ",
       "reason": "Operational hardware recommendations based on technical reasoning and capacity extrapolation rather than raw empirical CSV benchmarks"
     }
   ]

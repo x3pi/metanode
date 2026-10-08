@@ -226,7 +226,7 @@ Cờ `-debug` chỉ kích hoạt HTTP listener `http.Serve` cho `net/http/pprof`
 ## 7. Hiện Tượng Drift RSS Khi Khởi Động Cụm Mới & Kiểm Chứng Log Size
 
 ### 7.1. Hiện Tượng Drift RSS Baseline Khởi Động (+8.24%)
-Để kiểm tra độ ổn định của môi trường benchmark khi tạo mới cụm validator từ template sạch, thực nghiệm chẩn đoán đa lượt được thực hiện với 3 lượt liên tiếp (`diagnose_rss_drift.py`), mỗi lượt khởi động cụm 4 node mới từ đầu, đo đạc baseline bộ nhớ ngay sau khi khởi động và sau khi xử lý tải 25,000 transactions.
+Để kiểm tra độ ổn định của môi trường benchmark khi nhân bản cụm validator từ template sạch (`TEMPLATE_BASE`, ví dụ `/tmp/gate_4val_clean_template` với thông số: 50,000 tài khoản genesis Secp256k1 tạo sẵn, block ban đầu #0, dung lượng đĩa mỗi node ban đầu ~2,050.03 MB, RSS baseline tĩnh sau khởi động ~1,846 – 1,998 MB/node tương đương tổng cụm 7,384.7 – 7,993.3 MB), thực nghiệm chẩn đoán đa lượt được thực hiện với 3 lượt liên tiếp (`diagnose_rss_drift.py`), mỗi lượt khởi tạo cụm 4 node từ template trên, đo đạc baseline bộ nhớ ngay sau khi khởi động và sau khi xử lý tải 25,000 transactions.
 
 Nguồn bằng chứng: [note/evidence/perf_rss_20261007/rss_drift_diagnostic.log](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/rss_drift_diagnostic.log) (SHA256: `619ad847256e5d32366b312bdffd5e43586863dbf958381ab2f3eb2f265657c9`, bytes: 3871) và [note/evidence/perf_rss_20261007/rss_drift_diagnostic_summary.csv](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/rss_drift_diagnostic_summary.csv) (SHA256: `5074f51e6dd629bd183c937f5fbb764de593931d5f97c3b30eb93e8fcd09e681`, bytes: 179).
 
@@ -282,14 +282,21 @@ Nguồn bằng chứng: [note/evidence/perf_rss_20261007/log_size_verification.l
 ## 8. Ma Trận Khuyến Nghị Cấu Hình Cho Node Operators
 
 > [!NOTE]
-> Bảng dưới đây kết hợp dữ liệu đã đo đạc thực nghiệm trên cụm sạch với các suy luận kỹ thuật vận hành. Mọi mục chưa có đo đạc trực tiếp đều được ghi chú minh bạch.
+> Bảng khuyến nghị được phân tách rõ ràng thành hai phần: (8.1) Cấu hình đã đo đạc thực nghiệm trên cụm template sạch (có bằng chứng kiểm tra); và (8.2) Cấu hình suy luận kỹ thuật vận hành cho các quy mô chưa đo đạc trực tiếp.
 
-| Hồ sơ phần cứng | RAM Khuyến nghị | Cấu hình đề xuất | Đỉnh RSS kỳ vọng | Throughput TPS dự kiến | Tình trạng đo đạc thực nghiệm | Evidence |
+### 8.1. Cấu hình Khuyến Nghị Đã Đo Đạc Thực Nghiệm
+
+| Hồ sơ phần cứng | RAM Khuyến nghị | Cấu hình đề xuất | Đỉnh RSS cụm thực đo | Throughput TPS thực đo | Tình trạng đo đạc thực nghiệm | Evidence |
 | :--- | :---: | :--- | :---: | :---: | :--- | :---: |
-| **Tiêu chuẩn (Standard Validator)** | **32 GB** | `GOMEMLIMIT=8GiB`<br>`GOGC=800` (mặc định) | 6.0 – 7.5 GB/node | **6,000 – 6,500 tx/s** | **ĐÃ ĐO THỰC TẾ** (Đo đối chứng cụm sạch: TPS ~6,107 tx/s, RSS ~9.8 GB/cụm) | `evidence:controlled_benchmarks_gogc_and_debug` |
-| **Tiết kiệm RAM (Resource-Constrained)** | **16 GB** | `GOMEMLIMIT=4GiB`<br>`GOGC=50` | 1.5 – 2.0 GB/node | **5,500 – 6,000 tx/s** | **ĐÃ ĐO THỰC TẾ** (Đo đối chứng cụm sạch: TPS ~5,754 tx/s, RSS ~6.8 GB/cụm, giảm 30.5% RAM) | `evidence:controlled_benchmarks_gogc_and_debug` |
-| **Enterprise / Tier 1 Validator** | **≥ 64 GB** | `GOMEMLIMIT=16GiB`<br>`GOGC=200` | 8.0 – 12.0 GB/node | **7,500+ tx/s** | *SUY LUẬN KỸ THUẬT, CHƯA ĐO ĐẠC TRỰC TIẾP* | `evidence:controlled_benchmarks_gogc_and_debug` |
-| **Sentry / RPC Node nhỏ** | **8 GB** | `GOMEMLIMIT=2GiB`<br>`GOGC=30` | 1.0 – 1.5 GB/node | **4,000 – 4,500 tx/s** | *SUY LUẬN KỸ THUẬT, CHƯA ĐO ĐẠC TRỰC TIẾP* | `evidence:controlled_benchmarks_gogc_and_debug` |
+| **Tiêu chuẩn (Standard Validator)** | **32 GB** | `GOMEMLIMIT=8GiB`<br>`GOGC=800` (mặc định) | 9823 MB | 6106.7 tx/s | **ĐÃ ĐO THỰC TẾ** (Đo đối chứng cụm template sạch) | `evidence:controlled_benchmarks_gogc_and_debug#CTRL_GOGC_DEF_TPS_MEAN,CTRL_GOGC_DEF_RSS_MEAN` |
+| **Tiết kiệm RAM (Resource-Constrained)** | **16 GB** | `GOMEMLIMIT=4GiB`<br>`GOGC=50` | 6830 MB | 5754.1 tx/s | **ĐÃ ĐO THỰC TẾ** (Đo đối chứng cụm template sạch) | `evidence:controlled_benchmarks_gogc_and_debug#CTRL_GOGC_50_TPS_MEAN,CTRL_GOGC_50_RSS_MEAN` |
+
+### 8.2. Cấu hình Suy Luận Kỹ Thuật (Chưa Đo Đạc Trực Tiếp)
+
+| Hồ sơ phần cứng | RAM Khuyến nghị | Cấu hình đề xuất | Đỉnh RSS kỳ vọng | Throughput TPS dự kiến | Tình trạng đo đạc thực nghiệm |
+| :--- | :---: | :--- | :---: | :---: | :--- |
+| **Enterprise / Tier 1 Validator** | **≥ 64 GB** | `GOMEMLIMIT=16GiB`<br>`GOGC=200` | 8.0 – 12.0 GB/node | 7,500+ tx/s | *SUY LUẬN KỸ THUẬT, CHƯA ĐO ĐẠC TRỰC TIẾP* |
+| **Sentry / RPC Node nhỏ** | **8 GB** | `GOMEMLIMIT=2GiB`<br>`GOGC=30` | 1.0 – 1.5 GB/node | 4,000 – 4,500 tx/s | *SUY LUẬN KỸ THUẬT, CHƯA ĐO ĐẠC TRỰC TIẾP* |
 
 ---
 
@@ -297,7 +304,7 @@ Nguồn bằng chứng: [note/evidence/perf_rss_20261007/log_size_verification.l
 1. Khẳng định cũ về việc "bộ nhớ không đổi" đã được sửa đổi minh bạch: Bộ nhớ tăng trưởng tuyến tính ($+98.89$ MB Heap / 100k txs) do in-memory caching cho ánh xạ địa chỉ và tra cứu giao dịch (`evidence:rss_investigation_8waves`).
 2. Đo lường có đối chứng trên cụm sạch cho thấy `GOGC=50` giảm 30.5% RSS đỉnh ($p = 0.0046$), đổi lại CPU tăng ~60% cho tác vụ GC, trong khi chênh lệch TPS là **INCONCLUSIVE** ($p = 0.0774 > 0.05$, khoảng tin cậy 95% chứa số 0) (`evidence:controlled_benchmarks_gogc_and_debug`).
 3. Cờ `-debug=true` không gây suy giảm hiệu năng có ý nghĩa thống kê ($p = 0.3433$), nhưng đã được chuyển về mặc định `false` trong `run_env.sh` để tuân thủ tiêu chuẩn production hardening.
-4. Hiện tượng drift RSS baseline (+8.24%) khi khởi động lại các cụm mới đã được kiểm chứng và giải thích minh bạch: các so sánh RSS đỉnh chỉ có giá trị đối chứng tương đối giữa các lượt xen kẽ (interleaved); kết luận RSS đỉnh tuyệt đối là **INCONCLUSIVE** (`evidence:rss_drift_diagnostic`).
+4. Hiện tượng drift RSS baseline (+8.24%) khi khởi động lại các cụm từ template sạch đã được ghi nhận; nguyên nhân CHƯA xác định (INCONCLUSIVE): các so sánh RSS đỉnh chỉ có giá trị đối chứng tương đối giữa các lượt xen kẽ (interleaved); kết luận RSS đỉnh tuyệt đối là **INCONCLUSIVE** (`evidence:rss_drift_diagnostic`).
 5. Lỗi Log Size 0.0 KB trong bảng cũ đã được khắc phục và kiểm chứng thực nghiệm bằng 3 lượt đo mới với dung lượng log thật đạt ~208 KB (`evidence:log_size_verification`).
 6. Tài liệu thiết kế kiến trúc [note/design_bounded_memory_indexes_20261007.md](file:///home/abc/chain-n/metanode/note/design_bounded_memory_indexes_20261007.md) đã được đệ trình để giải quyết triệt để nguyên nhân gốc rễ bằng Bounded Memory Cache.
 7. Toàn bộ số liệu trong báo cáo đều có file log thô, SHA256 và kích thước bytes tương ứng trong [note/evidence/perf_rss_20261007/MANIFEST.json](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/MANIFEST.json).

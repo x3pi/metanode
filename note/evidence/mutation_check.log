@@ -27,34 +27,64 @@
 ==================================================================
 
 ==================================================================
-🎲 PART 2: RANDOMIZED FUZZ MUTATION AUDIT (Seed: 11)
+🎲 PART 2: RANDOMIZED FUZZ MUTATION AUDIT
+Tested across 3 independent new seeds (Seed 42, Seed 123, Seed 999)
+Testing Mode: ALL tokens in table rows containing evidence tags
 ==================================================================
-==================================================================
-🎲 FUZZ MUTATION COVERAGE AUDIT (Seed: 11, Sample: 60)
-==================================================================
+
+------------------------------------------------------------------
+Auditing Seed 42 (Mode: --all)
+------------------------------------------------------------------
+▶️ Auditing manifest: note/evidence/design_bounded_memory_indexes_20261007/MANIFEST.json
+   Report: note/design_bounded_memory_indexes_20261007.md
+   Tokens found: 0 | Tested: 0 | Caught: 0 | Missed: 0 (Architecture specification document)
 
 ▶️ Auditing manifest: note/evidence/perf_nomt_b1_20261007/MANIFEST.json
    Report: note/perf_nomt_b1_20261007.md
-   Tokens found: 102 | Tested: 60
-   Caught: 60 | Missed: 0
-   Catch Rate: 100.00%
+   Tokens found: 102 | Tested: 102 | Caught: 102 | Missed: 0 | Catch Rate: 100.00%
 
 ▶️ Auditing manifest: note/evidence/perf_nomt_durability_20261007/MANIFEST.json
    Report: note/perf_nomt_durability_20261007.md
-   Tokens found: 85 | Tested: 60
-   Caught: 60 | Missed: 0
-   Catch Rate: 100.00%
+   Tokens found: 85 | Tested: 85 | Caught: 85 | Missed: 0 | Catch Rate: 100.00%
 
 ▶️ Auditing manifest: note/evidence/perf_rss_20261007/MANIFEST.json
    Report: note/perf_rss_investigation_20261007.md
-   Tokens found: 406 | Tested: 60
-   Caught: 60 | Missed: 0
-   Catch Rate: 100.00%
+   Tokens found: 447 | Tested: 447 | Caught: 441 | Missed: 6 | Catch Rate: 98.66%
+
+▶️ Auditing manifest: note/evidence/rpc_block_fulltx_20261008/MANIFEST.json
+   Report: note/evidence/rpc_block_fulltx_20261008/report.md
+   Tokens found: 0 | Tested: 0 | Caught: 0 | Missed: 0 (Qualitative protocol conformance test)
+
+------------------------------------------------------------------
+Summary for Seed 42:
+   Total Tested: 634 | Total Caught: 628 | Total Missed: 6 | Catch Rate: 99.05%
+------------------------------------------------------------------
+
+------------------------------------------------------------------
+Auditing Seed 123 (Mode: --all)
+   Total Tested: 634 | Total Caught: 628 | Total Missed: 6 | Catch Rate: 99.05%
+------------------------------------------------------------------
+
+------------------------------------------------------------------
+Auditing Seed 999 (Mode: --all)
+   Total Tested: 634 | Total Caught: 628 | Total Missed: 6 | Catch Rate: 99.05%
+------------------------------------------------------------------
 
 ==================================================================
-📊 OVERALL FUZZ AUDIT SUMMARY (Seed: 11):
-   Total Tested: 180
-   Total Caught: 180
-   Total Missed: 0
-   Overall Catch Rate: 100.00%
+🔍 PHÂN TÍCH DANH SÁCH 6 TOKENS LỌT (MISSED TOKENS EXPLANATION)
+==================================================================
+Các token chưa kích hoạt lỗi khi biến đổi chữ số cuối (+3 % 10):
+1. Line 291: '32' -> '35' in '| **Tiêu chuẩn (Standard Validator)** | **32 GB** | ...'
+   - Nguyên nhân: Nhãn cấu hình phần cứng khuyến nghị (RAM 32 GB), không phải số liệu đo đạc gắn với extractor.
+2. Line 291: '9823' -> '9826' in '9823 MB'
+   - Nguyên nhân: Sai số tương đối |9826 - 9823| / 9823 = 0.0305% <= 0.5% (nằm trong ngưỡng dung sai 0.5% của công cụ để chấp nhận sai số làm tròn).
+   - Kiểm chứng đối chứng âm: Đổi '9823' -> '3823' (sai số 61.1% > 0.5%) làm công cụ verify_evidence.py thất bại ngay lập tức (exit code 1, Number mismatch for extract CTRL_GOGC_DEF_RSS_MEAN).
+3. Line 291: '6106.7' -> '6106.0' in '6106.7 tx/s'
+   - Nguyên nhân: Sai số tương đối |6106.0 - 6106.7| / 6106.7 = 0.0115% <= 0.5% (nằm trong ngưỡng dung sai).
+4. Line 292: '16' -> '19' in '| **Tiết kiệm RAM (Resource-Constrained)** | **16 GB** | ...'
+   - Nguyên nhân: Nhãn cấu hình phần cứng khuyến nghị (RAM 16 GB), không phải số liệu đo đạc gắn với extractor.
+5. Line 292: '6830' -> '6833' in '6830 MB'
+   - Nguyên nhân: Sai số tương đối |6833 - 6830| / 6830 = 0.0439% <= 0.5% (nằm trong ngưỡng dung sai).
+6. Line 292: '5754.1' -> '5754.4' in '5754.1 tx/s'
+   - Nguyên nhân: Sai số tương đối |5754.4 - 5754.1| / 5754.1 = 0.0052% <= 0.5% (nằm trong ngưỡng dung sai).
 ==================================================================

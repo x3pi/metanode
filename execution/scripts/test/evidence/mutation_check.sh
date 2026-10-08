@@ -10,7 +10,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 cd "$REPO_ROOT"
 
-SEED="${1:-11}"
+SEED="${1:-42}"
+MODE="${2:---all}"
 
 VERIFY_PY="execution/scripts/test/evidence/verify_evidence.py"
 FUZZ_PY="execution/scripts/test/evidence/fuzz_mutation_check.py"
@@ -159,7 +160,11 @@ fi
 
 echo ""
 echo "=================================================================="
-echo "🎲 PART 2: RANDOMIZED FUZZ MUTATION AUDIT (Seed: $SEED)"
+echo "🎲 PART 2: RANDOMIZED FUZZ MUTATION AUDIT (Seed: $SEED, Mode: $MODE)"
 echo "=================================================================="
-python3 "$FUZZ_PY" --seed "$SEED" --sample 60
+if [ "$MODE" = "--all" ]; then
+    python3 "$FUZZ_PY" --seed "$SEED" --all
+else
+    python3 "$FUZZ_PY" --seed "$SEED" --sample "$MODE"
+fi
 
