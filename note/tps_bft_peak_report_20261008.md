@@ -7,6 +7,12 @@
 **Cấu hình mạng:** Cụm 4 Validator DAG BFT (`val0`, `val1`, `val2`, `val3` - Quorum 3/4)  
 **Bộ dữ liệu:** 50.000 ví độc lập pre-funded từ [`generated_keys.json`](file:///home/abc/chain-n/metanode-suite/test_tps/gen_spam_keys/generated_keys.json), ký EIP-1559 Dynamic Fee  
 
+> ⚠️ **LƯU Ý PHƯƠNG PHÁP & ĐÍNH CHÍNH (2026-10-08):**  
+> Báo cáo này chỉ đo **1 lượt duy nhất** cho mỗi mức tải trên cùng một cụm đang chạy liên tiếp. Do độ biến thiên của BFT khá lớn (SD 1.596), con số 9.512 tx/s là một lượt cá biệt ở biên trên chứ không phải mức trung vị điển hình.  
+> Tham chiếu báo cáo đo lại độc lập (wipe cụm trước mỗi lượt) tại [`note/tps_remeasure_bft_vs_raft_report_20261008.md`](file:///home/abc/chain-n/metanode/note/tps_remeasure_bft_vs_raft_report_20261008.md):  
+> • **Burst 25k (n=5):** Trung vị **7.227 tx/s** (Trung bình 7.959 tx/s, Min–Max: 6.542 – 10.612 tx/s).  
+> • **Sustained 60s liên tục (n=3):** Trung vị **14.826 tx/s** (Trung bình 14.240 tx/s, Min–Max: 12.830 – 15.062 tx/s).
+
 ---
 
 ## 1. Bối Cảnh & Mục Tiêu

@@ -7,6 +7,13 @@
 **Cấu hình mạng:** Cụm 3 Node Raft (`n0`, `n1`, `n2` - Quorum 2/3), `propose_queue_size = 4096`  
 **Bộ dữ liệu:** 50.000 tài khoản ví độc lập pre-funded từ [`generated_keys.json`](file:///home/abc/chain-n/metanode-suite/test_tps/gen_spam_keys/generated_keys.json), ký EIP-1559 Dynamic Fee  
 
+> ⚠️ **LƯU Ý PHƯƠNG PHÁP & ĐÍNH CHÍNH (2026-10-08):**  
+> Báo cáo này đo 1 lượt duy nhất mỗi nấc trên cùng một cụm đang chạy liên tiếp.  
+> Tham chiếu báo cáo đo lại độc lập (wipe cụm trước mỗi lượt) tại [`note/tps_remeasure_bft_vs_raft_report_20261008.md`](file:///home/abc/chain-n/metanode/note/tps_remeasure_bft_vs_raft_report_20261008.md):  
+> • **Burst 20k (n=3):** Trung vị **19.100 tx/s** (Trung bình 19.422 tx/s, Min–Max: 19.088 – 20.076 tx/s).  
+> • **Burst 25k (n=5):** Trung vị **13.650 tx/s** (Trung bình 13.836 tx/s, Min–Max: 13.326 – 14.679 tx/s).  
+> • **Sustained 60s liên tục (n=3):** Trung vị **9.998 tx/s** (Trung bình 10.061 tx/s). Ở chế độ tải sustained kéo dài, BFT (~14,8k tx/s) vượt trội hơn so với Raft (~10,0k tx/s).
+
 ---
 
 ## 1. Mục Tiêu & Phương Pháp Thực Nghiệm

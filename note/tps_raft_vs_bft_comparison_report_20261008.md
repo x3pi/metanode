@@ -6,6 +6,12 @@
 **Binary thử nghiệm:** `/tmp/p06_bins/simple_chain` (đã tích hợp Phase 2b `PrepareTransactions` song song hóa)  
 **Công cụ phát tải:** `/tmp/p06_bins/secp_tps_blast` (EIP-1559 Dynamic Fee, ECDSA secp256k1)  
 
+> ⚠️ **ĐÍNH CHÍNH QUAN TRỌNG (2026-10-08):**  
+> Báo cáo dưới đây chứa lỗi phương pháp luận (so sánh một điểm BFT 1.393 tx/s ở tải vi sai 2k txs với Raft 10.754 txs ở tải 8k txs để kết luận "Raft nhanh hơn 7,72 lần"). Khẳng định này **đã bị thu hồi**.  
+> Tham chiếu báo cáo đo lại độc lập với phương pháp thống kê chặt chẽ (wipe cluster mỗi lượt, tính trung vị và độ lệch chuẩn) tại [`note/tps_remeasure_bft_vs_raft_report_20261008.md`](file:///home/abc/chain-n/metanode/note/tps_remeasure_bft_vs_raft_report_20261008.md):  
+> • **Tải Burst 25k (n=5):** Raft (trung vị 13.650 tx/s) ≈ **1,9×** BFT (trung vị 7.227 tx/s).  
+> • **Tải Sustained 60s liên tục (n=3):** BFT (trung vị 14.826 tx/s) ≈ **1,48×** Raft (trung vị 9.998 tx/s).
+
 ---
 
 ## 1. Bối Cảnh & Kiến Trúc Dual-Consensus
