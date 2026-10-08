@@ -158,6 +158,11 @@ func MarshalBlockToMapWithGas(block mt_types.Block, fullTx bool, fetchTx func(co
 		return blockMap, nil
 	}
 
+	if len(txHashes) == 0 {
+		blockMap["transactions"] = transactions
+		return blockMap, nil
+	}
+
 	if fetchTx == nil {
 		return nil, fmt.Errorf("fetchTx is nil while fullTx is requested")
 	}
@@ -173,34 +178,34 @@ func MarshalBlockToMapWithGas(block mt_types.Block, fullTx bool, fetchTx func(co
 	groupInfoMap := make(map[common.Hash]txGroupInfo, len(txHashes))
 
 	// Open the receipt trie for this block (read-only, no new trie is created)
-	rcpDb, rcpErr := receipt.NewReceiptsFromRoot(block.Header().ReceiptRoot(), storageReceipt)
-	if rcpErr != nil {
-		logger.Error("❌ [RPC-BLOCK] Cannot open receipt trie for block #%d: %v", block.Header().BlockNumber(), rcpErr)
-		return nil, fmt.Errorf("cannot open receipt trie for block %d: %w", block.Header().BlockNumber(), rcpErr)
+	if storageReceipt != nil {
+		rcpDb, rcpErr := receipt.NewReceiptsFromRoot(block.Header().ReceiptRoot(), storageReceipt)
+		if rcpErr != nil {
+			logger.Warn("⚠️ [RPC-BLOCK] Cannot open receipt trie for block #%d: %v (falling back to sequential indices)", block.Header().BlockNumber(), rcpErr)
+		} else {
+			for _, txHash := range txHashes {
+				rcp, err := rcpDb.GetReceipt(txHash)
+				if err != nil {
+					logger.Warn("⚠️ [RPC-BLOCK] Receipt not found for tx %s in block #%d: %v", txHash.Hex(), block.Header().BlockNumber(), err)
+					continue
+				}
+				groupInfoMap[txHash] = txGroupInfo{
+					groupIndex:       rcp.GroupIndex(),
+					transactionIndex: rcp.TransactionIndex(),
+				}
+			}
+		}
 	}
 
-	for _, txHash := range txHashes {
-		rcp, err := rcpDb.GetReceipt(txHash)
-		if err != nil {
-			logger.Error("❌ [RPC-BLOCK] Receipt not found for tx %s in block #%d", txHash.Hex(), block.Header().BlockNumber())
-			return nil, fmt.Errorf("receipt not found for tx %s: %w", txHash.Hex(), err)
-		}
-		groupInfoMap[txHash] = txGroupInfo{
-			groupIndex:       rcp.GroupIndex(),
-			transactionIndex: rcp.TransactionIndex(),
-		}
-		// 🔍 DIAGNOSTIC: Log GroupIndex/TransactionIndex from receipt trie (helps debug m4 mismatch)
-		// logger.Info("📋 [RPC-RECEIPT-IDX] Block #%d tx=%s...→ groupId=%d, txIndex=%d",
-		// 	block.Header().BlockNumber(), txHash.Hex()[:18], rcp.GroupIndex(), rcp.TransactionIndex())
-	}
+	blockHash := block.Header().Hash()
+	blockNumber := block.Header().BlockNumber()
 
-	for _, txHash := range txHashes {
+	for i, txHash := range txHashes {
 		tx, err := fetchTx(txHash)
 		if err != nil {
 			return nil, err
 		}
-		txMap := make(map[string]interface{})
-		v, r, s := tx.RawSignatureValues()
+		_, r, s := tx.RawSignatureValues()
 
 		ethHash := tx.Hash()
 		// Tính mã băm: nếu có chữ ký ETH (r và s khác 0) thì tính theo Ethereum, ngược lại tính theo Core (BLS)
@@ -211,26 +216,21 @@ func MarshalBlockToMapWithGas(block mt_types.Block, fullTx bool, fetchTx func(co
 				}
 			}
 		}
-		txMap["hash"] = ethHash
-		txMap["from"] = tx.FromAddress()                           // Địa chỉ người gửi
-		txMap["to"] = tx.ToAddress()                               // Địa chỉ người nhận
-		txMap["value"] = (*hexutil.Big)(tx.Amount())               // Số lượng tiền được chuyển
-		txMap["input"] = hexutil.Bytes(tx.CallData().Input())      // Dữ liệu đầu vào của giao dịch (data)
-		txMap["nonce"] = hexutil.EncodeUint64(tx.GetNonce())       // Nonce của giao dịch
-		txMap["gas"] = hexutil.EncodeUint64(tx.MaxGas())           // Giới hạn gas của giao dịch
-		txMap["gasPrice"] = hexutil.EncodeUint64(tx.MaxGasPrice()) // Giá gas của giao dịch
-		txMap["chainId"] = hexutil.EncodeUint64(tx.GetChainID())   // ID của chuỗi
-		txMap["v"] = (*hexutil.Big)(v)                             // Giá trị V trong chữ ký
-		txMap["r"] = (*hexutil.Big)(r)                             // Giá trị R trong chữ ký
-		txMap["s"] = (*hexutil.Big)(s)                             // Giá trị S trong chữ ký
 
-		// Add grouping info from stored receipts (stamped during block processing)
-		if info, exists := groupInfoMap[tx.Hash()]; exists {
-			txMap["groupId"] = hexutil.EncodeUint64(info.groupIndex)
-			txMap["transactionIndex"] = hexutil.EncodeUint64(info.transactionIndex)
+		txIndexVal := uint64(i)
+		var groupIdx *uint64
+		if info, exists := groupInfoMap[txHash]; exists {
+			txIndexVal = info.transactionIndex
+			g := info.groupIndex
+			groupIdx = &g
+		} else if info, exists := groupInfoMap[tx.Hash()]; exists {
+			txIndexVal = info.transactionIndex
+			g := info.groupIndex
+			groupIdx = &g
 		}
 
-		transactions = append(transactions, txMap)
+		rpcTx := newCommittedRPCTransactionWithGroup(tx, blockHash, blockNumber, txIndexVal, ethHash, groupIdx)
+		transactions = append(transactions, rpcTx)
 	}
 	blockMap["transactions"] = transactions // Mảng các giao dịch trong khối
 

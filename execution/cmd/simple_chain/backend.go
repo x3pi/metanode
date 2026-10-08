@@ -80,6 +80,7 @@ type RPCTransaction struct {
 	R                   *hexutil.Big                 `json:"r"`
 	S                   *hexutil.Big                 `json:"s"`
 	YParity             *hexutil.Uint64              `json:"yParity,omitempty"`
+	GroupID             *hexutil.Uint64              `json:"groupId,omitempty"`
 }
 
 // OverrideAccount indicates the overriding fields of account during the execution

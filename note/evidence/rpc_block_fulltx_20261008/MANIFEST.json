@@ -1,0 +1,38 @@
+{
+  "manifest_version": "1.0",
+  "report": "note/evidence/rpc_block_fulltx_20261008/report.md",
+  "entries": [
+    {
+      "id": "rpc_block_fulltx_live_e2e",
+      "command": "python3 note/evidence/rpc_block_fulltx_20261008/verify_fulltx_live.py",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "95928882",
+      "git_status": "",
+      "started_at": "2026-10-08T00:55:01Z",
+      "finished_at": "2026-10-08T00:55:29Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "live_e2e_verification.log",
+          "sha256": "a5bfccb707d1cd045cff0ef6c6f996f441bc4dc6ca046f069bc9036f3d6ffbab",
+          "bytes": 10959
+        },
+        {
+          "path": "test_ethers_viem.mjs",
+          "sha256": "b87e4364b2dac021c5f9a58687fc118e6cbc3fbc463d5541a599d0addb2bb92d",
+          "bytes": 2304
+        },
+        {
+          "path": "test_web3py.py",
+          "sha256": "896cc9ce3e2b68c2e8ba042e05e0ce81b6a3e1e3a4f2b2d67a29d4766e6178d3",
+          "bytes": 1029
+        },
+        {
+          "path": "verify_fulltx_live.py",
+          "sha256": "bba4a55d884d552e9be919268b64a9cda1fb34b682a7ed566230c17bc7b365bd",
+          "bytes": 7549
+        }
+      ]
+    }
+  ]
+}

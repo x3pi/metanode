@@ -41,6 +41,17 @@ func newCommittedRPCTransaction(
 	txIndex uint64,
 	ethHash common.Hash,
 ) *RPCTransaction {
+	return newCommittedRPCTransactionWithGroup(tx, blockHash, blockNumber, txIndex, ethHash, nil)
+}
+
+func newCommittedRPCTransactionWithGroup(
+	tx mt_types.Transaction,
+	blockHash common.Hash,
+	blockNumber uint64,
+	txIndex uint64,
+	ethHash common.Hash,
+	groupId *uint64,
+) *RPCTransaction {
 	v, r, s := tx.RawSignatureValues()
 
 	toAddress := tx.ToAddress()
@@ -52,18 +63,35 @@ func newCommittedRPCTransaction(
 	}
 
 	var gasFeeCap, gasTipCap, maxFeePerBlobGas *hexutil.Big
-	if fc := tx.GasFeeCap(); fc != nil && fc.Sign() != 0 {
-		gasFeeCap = (*hexutil.Big)(fc)
+	if tx.GetType() >= eth_types.DynamicFeeTxType {
+		if fc := tx.GasFeeCap(); fc != nil {
+			gasFeeCap = (*hexutil.Big)(fc)
+		}
+		if tc := tx.GasTipCap(); tc != nil {
+			gasTipCap = (*hexutil.Big)(tc)
+		}
+	} else {
+		if fc := tx.GasFeeCap(); fc != nil && fc.Sign() != 0 {
+			gasFeeCap = (*hexutil.Big)(fc)
+		}
+		if tc := tx.GasTipCap(); tc != nil && tc.Sign() != 0 {
+			gasTipCap = (*hexutil.Big)(tc)
+		}
 	}
-	if tc := tx.GasTipCap(); tc != nil && tc.Sign() != 0 {
-		gasTipCap = (*hexutil.Big)(tc)
-	}
-	if bf := tx.MaxFeePerBlobGas(); bf != nil && bf.Sign() != 0 {
+	if tx.GetType() == eth_types.BlobTxType {
+		if bf := tx.MaxFeePerBlobGas(); bf != nil {
+			maxFeePerBlobGas = (*hexutil.Big)(bf)
+		}
+	} else if bf := tx.MaxFeePerBlobGas(); bf != nil && bf.Sign() != 0 {
 		maxFeePerBlobGas = (*hexutil.Big)(bf)
 	}
 
 	var accesses *eth_types.AccessList
-	if al := tx.EthAccessList(); len(al) > 0 {
+	if tx.GetType() != eth_types.LegacyTxType {
+		al := tx.EthAccessList()
+		if al == nil {
+			al = eth_types.AccessList{}
+		}
 		accesses = &al
 	}
 
@@ -73,11 +101,15 @@ func newCommittedRPCTransaction(
 		for i, h := range bh {
 			blobVersionedHashes[i] = common.BytesToHash(h)
 		}
+	} else if tx.GetType() == eth_types.BlobTxType {
+		blobVersionedHashes = []common.Hash{}
 	}
 
 	var authList []eth_types.SetCodeAuthorization
 	if al := tx.EthAuthorizationList(); len(al) > 0 {
 		authList = al
+	} else if tx.GetType() == eth_types.SetCodeTxType {
+		authList = []eth_types.SetCodeAuthorization{}
 	}
 
 	// yParity mirrors V for the post-EIP-155 tx types (1/2/3/4), where V is
@@ -88,6 +120,12 @@ func newCommittedRPCTransaction(
 	if tx.GetType() != eth_types.LegacyTxType && v != nil {
 		yp := hexutil.Uint64(v.Uint64())
 		yParity = &yp
+	}
+
+	var groupIDHex *hexutil.Uint64
+	if groupId != nil {
+		val := hexutil.Uint64(*groupId)
+		groupIDHex = &val
 	}
 
 	txIndexHex := hexutil.Uint64(txIndex)
@@ -116,6 +154,7 @@ func newCommittedRPCTransaction(
 		R:                   (*hexutil.Big)(r),
 		S:                   (*hexutil.Big)(s),
 		YParity:             yParity,
+		GroupID:             groupIDHex,
 	}
 }
 
@@ -151,32 +190,62 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 			}
 
 			var maxFeePerBlobGas *hexutil.Big
-			if bf := txE.BlobGasFeeCap(); bf != nil && bf.Sign() != 0 {
+			if txE.Type() == eth_types.BlobTxType {
+				if bf := txE.BlobGasFeeCap(); bf != nil {
+					maxFeePerBlobGas = (*hexutil.Big)(bf)
+				}
+			} else if bf := txE.BlobGasFeeCap(); bf != nil && bf.Sign() != 0 {
 				maxFeePerBlobGas = (*hexutil.Big)(bf)
 			}
+
 			var accesses *eth_types.AccessList
-			if al := txE.AccessList(); len(al) > 0 {
+			if txE.Type() != eth_types.LegacyTxType {
+				al := txE.AccessList()
 				accesses = &al
 			}
+
 			var blobVersionedHashes []common.Hash
 			if bh := txE.BlobHashes(); len(bh) > 0 {
 				blobVersionedHashes = bh
+			} else if txE.Type() == eth_types.BlobTxType {
+				blobVersionedHashes = []common.Hash{}
 			}
+
 			var authList []eth_types.SetCodeAuthorization
 			if al := txE.SetCodeAuthorizations(); len(al) > 0 {
 				authList = al
+			} else if txE.Type() == eth_types.SetCodeTxType {
+				authList = []eth_types.SetCodeAuthorization{}
 			}
+
 			var yParity *hexutil.Uint64
 			if txE.Type() != eth_types.LegacyTxType && v != nil {
 				yp := hexutil.Uint64(v.Uint64())
 				yParity = &yp
 			}
 
+			var gasFeeCap, gasTipCap *hexutil.Big
+			if txE.Type() >= eth_types.DynamicFeeTxType {
+				if fc := txE.GasFeeCap(); fc != nil {
+					gasFeeCap = (*hexutil.Big)(fc)
+				}
+				if tc := txE.GasTipCap(); tc != nil {
+					gasTipCap = (*hexutil.Big)(tc)
+				}
+			} else {
+				if fc := txE.GasFeeCap(); fc != nil && fc.Sign() != 0 {
+					gasFeeCap = (*hexutil.Big)(fc)
+				}
+				if tc := txE.GasTipCap(); tc != nil && tc.Sign() != 0 {
+					gasTipCap = (*hexutil.Big)(tc)
+				}
+			}
+
 			return &RPCTransaction{
 				Gas:                 hexutil.Uint64(txE.Gas()),
 				GasPrice:            (*hexutil.Big)(txE.GasPrice()),
-				GasFeeCap:           (*hexutil.Big)(txE.GasFeeCap()),
-				GasTipCap:           (*hexutil.Big)(txE.GasTipCap()),
+				GasFeeCap:           gasFeeCap,
+				GasTipCap:           gasTipCap,
 				MaxFeePerBlobGas:    maxFeePerBlobGas,
 				Hash:                txE.Hash(),
 				Input:               txE.Data(),
