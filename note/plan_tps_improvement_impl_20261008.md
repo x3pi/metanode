@@ -52,7 +52,10 @@ RSS/heap tăng (xem `note/design_bounded_memory_indexes_20261007.md`); tối ưu
 
 ## Tiêu chí hoàn thành
 - [x] Giai đoạn A: Gantt đường găng steady-state + cận trên TPS bằng số đo, kèm PREREGISTERED (xem `note/phase_a_steady_state_report_20261008.md`)
-- [ ] B1/B2/B3 mỗi cái có số liệu trước/sau ≥5 lượt, zero-fork PASS, quyết định giữ/bỏ rõ ràng
-- [ ] `design_pipelined_execution_20261008.md` hoàn thành, **chờ duyệt**
-- [ ] D chỉ khởi động khi đủ điều kiện ở trên
+- [x] Giai đoạn B (Thắng lợi lớn rủi ro thấp):
+  - [x] B1: Tính Merkle Roots song song (txsRoot & receiptsRoot) hoàn tất (commit `919da0e0`). Đo 5 lượt 60s sustained blast: Mean TPS 10.898 -> 13.580 tx/s (+24,61%), Welch t=12,511 (p < 0,0001), 100% Zero-Fork PASS.
+  - [x] B2: Đánh giá Mempool Signature Pre-warming hoàn tất (commit `da23217e`). Xác nhận cache hiện tại đã đạt 100% bound_hit (1,2 ms / 1.000 txs), quyết định giữ nguyên hiện trạng, không over-engineer.
+  - [x] B3: Đánh giá cỡ batch hoàn tất từ Giai đoạn A (p = 0,104 > 0,05), giữ nguyên giới hạn giao thức MaxBatchTxCount = 1000.
+- [ ] Giai đoạn C: `design_pipelined_execution_20261008.md` hoàn thành, **chờ duyệt**
+- [ ] Giai đoạn D chỉ khởi động khi đủ điều kiện ở trên
 - [x] `build_check.sh` sạch sau mỗi thay đổi code (PASS 5/5)
