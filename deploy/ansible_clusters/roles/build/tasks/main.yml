@@ -19,6 +19,18 @@
         path: "{{ local_bin_dir }}/simple_chain"
       register: simple_bin_stat
 
+    - name: Build Rust consensus and nomt FFI libraries
+      when: not (skip_build | default(false)) or not parent_bin_stat.stat.exists or not simple_bin_stat.stat.exists
+      ansible.builtin.shell: |
+        cargo build --release -p mtn-nomt-ffi
+        cargo build --release -p metanode
+        mkdir -p consensus/metanode/target/release
+        cp -p target/release/libmetanode.a consensus/metanode/target/release/libmetanode.a
+      args:
+        chdir: "{{ playbook_dir }}/../../"
+      environment:
+        PATH: "{{ lookup('env', 'HOME') }}/.cargo/bin:{{ ansible_env.PATH | default('/usr/local/bin:/usr/bin:/bin') }}"
+
     - name: Build parent_chain binary
       when: not (skip_build | default(false)) or not parent_bin_stat.stat.exists
       ansible.builtin.command:
