@@ -53,7 +53,7 @@ RSS/heap tăng (xem `note/design_bounded_memory_indexes_20261007.md`); tối ưu
 ## Tiêu chí hoàn thành
 - [x] Giai đoạn A: Gantt đường găng steady-state + cận trên TPS bằng số đo, kèm PREREGISTERED (xem `note/phase_a_steady_state_report_20261008.md`)
 - [x] Giai đoạn B (Thắng lợi lớn rủi ro thấp):
-  - [x] B1: Tính Merkle Roots song song (txsRoot & receiptsRoot) hoàn tất (commit `919da0e0`). Đo 5 lượt 60s sustained blast: Mean TPS 10.898 -> 13.580 tx/s (+24,61%), Welch t=12,511 (p < 0,0001), 100% Zero-Fork PASS.
+  - [x] B1: Tính Merkle Roots song song (txsRoot & receiptsRoot) hoàn tất (commit `919da0e0`). [ĐÍNH CHÍNH 2026-10-08 sau kiểm định A/B xen kẽ 16 lượt]: Con số báo cáo ban đầu +24,61% (t=12,5) bị nhiễu do không chạy xen kẽ và tính sai SD baseline (SD thực = 1.798 chứ không phải 391, t ≈ 3,3). Kết quả kiểm định A/B xen kẽ độc lập 16 lượt (8 BEFORE vs 8 AFTER, seed 20261008, blast 60s sustained batch 1000): Mean TPS tăng từ 13.295,7 lên 13.720,6 tx/s (+3,20%), Median tăng từ 13.368,1 lên 13.559,9 tx/s (+1,43%), Welch t = 1,498 (p = 0,157), 95% CI [-193,1, +1.042,9] tx/s (chứa 0). B1 không đạt tiêu chí preregistered (+5% và CI loại 0). Mức tăng thực tế ~1,4% - 3,2% phù hợp với việc B1 giảm ~52ms Ta trên chu kỳ block ~1.040ms. 100% 16/16 lượt đạt Zero-Fork Verified.
   - [x] B2: Đánh giá Mempool Signature Pre-warming hoàn tất (commit `da23217e`). Xác nhận cache hiện tại đã đạt 100% bound_hit (1,2 ms / 1.000 txs), quyết định giữ nguyên hiện trạng, không over-engineer.
   - [x] B3: Đánh giá cỡ batch hoàn tất từ Giai đoạn A (p = 0,104 > 0,05), giữ nguyên giới hạn giao thức MaxBatchTxCount = 1000.
 - [ ] Giai đoạn C: `design_pipelined_execution_20261008.md` hoàn thành, **chờ duyệt**

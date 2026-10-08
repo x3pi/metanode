@@ -272,6 +272,8 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 				tRespRecv := time.Now().UnixNano()
 				serializeAndSetResponse(response, outPayload, outLen)
 				tSerialized := time.Now().UnixNano()
+				logger.Warn("⏱️ [TIMELINE-CGO] gei=%d t_enter=%d t_queued=%d t_resp=%d t_exit=%d total_ns=%d",
+					subDag.GetGlobalExecIndex(), tEntry, tQueued, tRespRecv, tSerialized, tSerialized-tEntry)
 				logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_CGO unmarshal_ns=%d queue_to_resp_ns=%d serialize_ns=%d total_ns=%d",
 					subDag.GetGlobalExecIndex(),
 					tAfterUnmarshal-tEntry,

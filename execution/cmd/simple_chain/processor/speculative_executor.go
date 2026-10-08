@@ -57,6 +57,12 @@ type SpeculativeResult struct {
 	IsFinished bool
 	// precomputeRootsChan receives precomputed Merkle roots calculated concurrently in background
 	precomputeRootsChan chan *PrecomputedBlockRoots
+	// Nanosecond timeline timestamps for diagnosing execution pipeline latency
+	TGateStart       int64
+	TGateDone        int64
+	TExecStart       int64
+	TExecDone        int64
+	TPushedCommitter int64
 }
 
 // TakeClonedState atomically claims ownership of ClonedState.
@@ -317,6 +323,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		// ZERO-FORK SERIALIZATION GATE:
 		// Blockchain state transition S_N = f(S_{N-1}, Block_N) strictly requires S_{N-1}
 		// to be fully committed before Block N clones state and executes EVM transactions.
+		tGateStart := time.Now().UnixNano()
 		if gei > 1 && !se.isCommitted(gei-1) {
 			if se.bp != nil {
 				se.bp.ExecutionMutex.RUnlock()
@@ -332,6 +339,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 				return
 			}
 		}
+		tGateDone := time.Now().UnixNano()
 
 		// If block was committed to DB while waiting for the lock (e.g. by P2P Sync),
 		// bypass speculative execution immediately and unblock Rust.
@@ -464,6 +472,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		// (Wait for preload removed)
 
 		logger.Info("🔄 [SPECULATIVE] Executing GEI=%d speculatively with %d txs (block #%d)", gei, len(allTransactions), blockNum)
+		tExecStart := time.Now().UnixNano()
 		startTime := time.Now()
 		gatedCtx := tx_processor.WithIRGate(ctx, se.newIRGate(gei, lastBlockHeader.Hash(), func() (common.Hash, bool) {
 			tip := se.bp.GetLastBlock()
@@ -474,6 +483,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		}, &executionLock{release: se.bp.ExecutionMutex.RUnlock, reacquire: se.bp.ExecutionMutex.RLock}))
 		accumulatedResults, execErr := tx_processor.ProcessTransactions(gatedCtx, csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum, true)
 		execDuration := time.Since(startTime)
+		tExecDone := time.Now().UnixNano()
 		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(accumulatedResults.Transactions), 0, execDuration.Microseconds())
 		if ffiTraceEnabled {
 			logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_SPEC goroutine_sched_ns=%d prepare_tx_ns=%d clone_ns=%d group_ns=%d exec_ns=%d",
@@ -521,6 +531,11 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			session:             session,
 			IsFinished:          true,
 			precomputeRootsChan: precomputeRootsCh,
+			TGateStart:          tGateStart,
+			TGateDone:           tGateDone,
+			TExecStart:          tExecStart,
+			TExecDone:           tExecDone,
+			TPushedCommitter:    time.Now().UnixNano(),
 		}
 
 		// [FIX DEADLOCK / LEAK]: Check if block has already been committed to DB
@@ -857,11 +872,12 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 
 // commitSpeculativeResult commits a single speculative execution result
 func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLogger *loggerfile.FileLogger) (commitErr error) {
+	tCommitterStart := time.Now().UnixNano()
 	bp.ExecutionMutex.RLock()
 	defer bp.ExecutionMutex.RUnlock()
 
 	if ffiTraceEnabled {
-		logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_COMMIT_DEQUEUED t_ns=%d", res.GEI, time.Now().UnixNano())
+		logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_COMMIT_DEQUEUED t_ns=%d", res.GEI, tCommitterStart)
 	}
 
 	// Claim ownership of speculative state upfront so CleanGEI or worker cleanup cannot race with committer
@@ -1105,11 +1121,26 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 	if res.precomputeRootsChan != nil {
 		precomputedRoots = <-res.precomputeRootsChan
 	}
+	tRootsDone := time.Now().UnixNano()
 
 	newBlock := bp.createBlockFromResults(accumulatedResults, currentBlockNumber, res.Epoch, true, batchID, res.TimestampMs, res.GEI, res.CommitIndex, precomputedRoots, res.LeaderAddr)
 	if newBlock == nil {
 		commitErr = fmt.Errorf("failed to create block from speculative results (verifyDraftBlock reverted block)")
 		return commitErr
+	}
+	tBlockCreated := time.Now().UnixNano()
+
+	if ffiTraceEnabled {
+		logger.Warn("⏱️ [TIMELINE-GO] gei=%d block=#%d txs=%d gate_wait_ns=%d exec_ns=%d roots_wait_ns=%d create_block_ns=%d committer_total_ns=%d",
+			res.GEI, res.BlockNum, len(res.Txs),
+			res.TGateDone-res.TGateStart,
+			res.TExecDone-res.TExecStart,
+			tRootsDone-tCommitterStart,
+			tBlockCreated-tRootsDone,
+			tBlockCreated-tCommitterStart,
+		)
+		logger.Warn("⏱️ [TIMELINE-POINTS] gei=%d t_gate_start=%d t_gate_done=%d t_exec_start=%d t_exec_done=%d t_committer_start=%d t_roots_done=%d t_block_created=%d",
+			res.GEI, res.TGateStart, res.TGateDone, res.TExecStart, res.TExecDone, tCommitterStart, tRootsDone, tBlockCreated)
 	}
 
 	// Lưu SystemTransactions nếu có

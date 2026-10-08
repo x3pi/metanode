@@ -1,4 +1,9 @@
 {
+  "errata_note_20261008": {
+    "status": "SUPERSEDED_BY_INTERLEAVED_VALIDATION",
+    "description": "Baseline SD=391 and Welch t=12.5 in this early report resulted from omitting the first baseline run (14,061 tx/s). When all 5 baseline runs (14,061 / 10,118 / 10,137 / 9,626 / 10,547) are included, baseline Mean=10,898 tx/s, actual SD=1,798 tx/s, and Welch t=3.3. Furthermore, sequential non-interleaved execution allowed thermal/machine drift. Rigorous 16-run interleaved validation (seed 20261008) showed actual gain of +1.4% to +3.2% (+424.9 tx/s, p=0.157), consistent with cutting ~52ms from Ta on a ~1,040ms block cycle. See note/evidence/tps_phase_b_validation_20261008/ab_interleaved_validation_summary.json.",
+    "protocol_label": "60s sustained blast (batch 1000, 4-node cluster) - DO NOT CROSS-COMPARE WITH 25k TX BURST (~6.1k tx/s)"
+  },
   "workload": "B1 (Parallel Speculative Root Derivation)",
   "protocol": "60s sustained unlimited blast, batch 1000, 4-node cluster",
   "num_runs": 5,
