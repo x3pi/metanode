@@ -149,16 +149,17 @@ def read_proc_rss_kb(pid):
             pass
     return 0
 
-def run_experiment(duration_sec, sample_interval_sec, rate_limit, output_prefix):
-    os.makedirs(EVIDENCE_DIR, exist_ok=True)
-    json_path = os.path.join(EVIDENCE_DIR, f"{output_prefix}_timeseries.json")
-    csv_path = os.path.join(EVIDENCE_DIR, f"{output_prefix}_summary.csv")
-    log_path = os.path.join(EVIDENCE_DIR, f"{output_prefix}.log")
+def run_experiment(duration_sec, sample_interval_sec, rate_limit, output_prefix, evidence_dir=EVIDENCE_DIR):
+    os.makedirs(evidence_dir, exist_ok=True)
+    json_path = os.path.join(evidence_dir, f"{output_prefix}_timeseries.json")
+    csv_path = os.path.join(evidence_dir, f"{output_prefix}_summary.csv")
+    log_path = os.path.join(evidence_dir, f"{output_prefix}.log")
 
     print(f"🚀 Starting TTL Saturation Experiment:")
     print(f"   Duration: {duration_sec}s ({duration_sec / 60.0:.1f} mins)")
     print(f"   Sample interval: {sample_interval_sec}s")
     print(f"   Rate limit: {rate_limit} tx/s")
+    print(f"   Evidence Dir: {evidence_dir}")
     print(f"   Output JSON: {json_path}")
     print(f"   Output CSV:  {csv_path}")
 
@@ -178,6 +179,8 @@ def run_experiment(duration_sec, sample_interval_sec, rate_limit, output_prefix)
         "-rate-limit", str(rate_limit),
         "-mode", "tcp",
         "-batch", "100",
+        "-type", "1559",
+        "-verify-parity=false",
         "-tcp", ",".join(tcp_endpoints),
         "-keys", KEYS_FILE,
         "-pids", ",".join(str(pids[n]) for n in NODES if n in pids)
@@ -189,6 +192,7 @@ def run_experiment(duration_sec, sample_interval_sec, rate_limit, output_prefix)
     start_time = time.time()
     samples = []
     sample_index = 0
+    captured_snapshots = set()
 
     try:
         while True:
@@ -237,6 +241,18 @@ def run_experiment(duration_sec, sample_interval_sec, rate_limit, output_prefix)
 
             samples.append(sample_record)
             print(f"   [{elapsed:6.1f}s / {duration_sec}s] Total HeapAlloc: {sample_record['total_heap_alloc_mb']:8.2f} MB | RSS: {sample_record['total_rss_mb']:8.2f} MB")
+
+            # Snapshot heap profiles at key milestones: 10m (600s), 30m (1800s), 45m (2700s)
+            for target_min, target_sec in [(10, 600), (30, 1800), (45, 2700)]:
+                if elapsed >= target_sec and target_min not in captured_snapshots:
+                    captured_snapshots.add(target_min)
+                    try:
+                        pprof_url = f"http://127.0.0.1:{PPROF_PORTS['val0']}/debug/pprof/heap"
+                        pprof_dest = os.path.join(evidence_dir, f"{output_prefix}_val0_heap_min{target_min}.pprof")
+                        urllib.request.urlretrieve(pprof_url, pprof_dest)
+                        print(f"   📸 Captured heap profile snapshot at min {target_min}: {pprof_dest}")
+                    except Exception as e:
+                        print(f"   ⚠️ Failed to capture heap profile at min {target_min}: {e}")
 
             sample_index += 1
             time.sleep(sample_interval_sec)
@@ -304,6 +320,8 @@ if __name__ == "__main__":
     parser.add_argument("--interval", type=int, default=60, help="Sampling interval in seconds (default: 60s)")
     parser.add_argument("--rate", type=int, default=50, help="Blast rate limit in tx/s (default: 50)")
     parser.add_argument("--output", type=str, default="ttl_45min", help="Output prefix")
+    parser.add_argument("--evidence-dir", type=str, default=EVIDENCE_DIR, help="Evidence directory")
     args = parser.parse_args()
 
-    run_experiment(args.duration, args.interval, args.rate, args.output)
+    run_experiment(args.duration, args.interval, args.rate, args.output, evidence_dir=args.evidence_dir)
+
