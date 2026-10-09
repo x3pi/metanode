@@ -75,3 +75,33 @@ Lỗi phụ nhưng thật, cùng đợt:
 - Các số TPS ở trên chạy trên một máy chung nhiều node, binary build lại từ cây mã; chưa chạy trên nhiều máy hay với SDK thật.
 - Bản sửa forwarder được giữ vì khôi phục đúng ý định có ghi chú trong mã, nhưng **tác dụng riêng lên TPS chưa đo được**.
 - Cần review kỹ thay đổi trước khi merge vào `main`: chúng nằm ở đường ingress dùng chung cho cả BFT lẫn Raft.
+
+## 7. Đo lại toàn bộ ma trận bằng binary cuối (49 lượt + 4 lượt đối chiếu)
+
+Binary Q = cây mã đã commit (`ece1e0b4`), blast = cây mã hiện tại. Giao thức rút cạn: bơm, rồi chờ chain xử lý hết và so tx trên chain với tx đã gửi. "e2e" = từ lúc gửi tx đầu đến khi tx cuối lên chain (nhịp poll 2 giây, nên **chỉ đáng tin ở lượt dài**). Mọi lượt: zero-fork PASS, root nhất quán.
+
+| Cấu hình | Binary | Lượt | Hoàn tất (100% lên chain) | Thông lượng |
+|---|---|---|---|---|
+| Raft sustained 60 s | **Q (đã sửa)** | 5 | **5/5** | e2e trung vị **12.790** tx/s (12.053–13.831) |
+| Raft sustained 60 s | A (gốc) | 3 | **0/3** (dừng ở 210.000–250.000 tx) | không đo được |
+| BFT sustained 20 s | **Q** | 3 | **3/3** | e2e trung vị **13.490** tx/s (13.419–14.283) |
+| BFT sustained 20 s | A | 3 | **0/3** (799.000–885.000 tx, dừng vĩnh viễn) | không đo được |
+| Raft burst 20k / 25k / 30k | Q | 5 mỗi mức | 5/5 mỗi mức | gồm thời gian bơm, trung vị: **12.486 / 13.446 / 13.827** tx/s |
+| Raft burst 25k | A | 3 | 3/3 | gồm thời gian bơm, trung vị 13.217 tx/s (burst nhỏ không chạm ngưỡng quá tải) |
+| BFT burst 25k | Q | 5 | 5/5 | gồm thời gian bơm, trung vị **7.426** tx/s |
+
+Độ trễ ở tốc độ bơm cố định (60 s, 3 lượt mỗi ô; mọi tx lên chain):
+
+| Chế độ | Tốc độ bơm | Binary | P50 | P99 |
+|---|---|---|---|---|
+| BFT | 5.000 | Q | 1.856 ms | 2.028 ms |
+| BFT | 8.000 | Q | 1.871 ms | 2.162 ms |
+| Raft | 5.000 | Q | 413 / 408 / 413 ms | 524–536 ms |
+| Raft | 8.000 | Q | 412 / 328 / 414 ms | 434–621 ms |
+| Raft | 5.000 | A (gốc) | 326 / 328 / 417 ms | 519–529 ms |
+
+Nhận xét:
+- **Bản sửa biến 0/6 lượt hoàn tất thành 8/8** ở hai kịch bản bão hòa (Raft sustained 60 s, BFT sustained 20 s). Ở burst nhỏ (≤30k) cả hai binary đều trọn vẹn nên không có khác biệt.
+- **BFT không có hồi quy**: độ trễ ở tốc độ cố định giữ ~1,86 s như lần đo trước.
+- **Độ trễ Raft ở tốc độ cố định hôm nay là ~330–410 ms cho cả binary gốc A lẫn Q**, trong khi lần đo trước (cùng binary A, cùng công cụ blast bản cũ) cho ~103 ms. Mình đã kiểm tra lại bằng chính binary blast cũ nhưng vẫn ra 326 ms, và máy không có tải nền đáng kể. Khác biệt so với lần đo cũ **chưa được giải thích**, nhưng không do bản sửa.
+- Số "end-to-end" ở burst ngắn (2–5 giây) nhiễu vì nhịp poll nên không dùng; dùng số gồm thời gian bơm.

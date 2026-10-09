@@ -1,0 +1,1 @@
+{"tag": "m_bft_sust20_A_r3", "mode": "bft", "bin": "simple_chain_A", "args": ["-duration", "20", "-batch", "1000"], "submitted": 808000, "on_chain": 799000, "complete": false, "blast_secs": 46.1, "e2e_secs": null, "e2e_tps": null, "tool_tps": 28583, "p50_ms": 35205, "p99_ms": 38844, "zero_fork": true, "roots": true}

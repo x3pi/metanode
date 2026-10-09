@@ -1,0 +1,1 @@
+{"tag": "m_raft_rate8000_Q_r2", "mode": "raft", "bin": "simple_chain_Q", "args": ["-duration", "60", "-batch", "1000", "-rate-limit", "8000"], "submitted": 480000, "on_chain": 480000, "complete": true, "blast_secs": 66.9, "e2e_secs": 69.2, "e2e_tps": 6941, "tool_tps": 7991, "p50_ms": 328, "p99_ms": 437, "zero_fork": true, "roots": true}

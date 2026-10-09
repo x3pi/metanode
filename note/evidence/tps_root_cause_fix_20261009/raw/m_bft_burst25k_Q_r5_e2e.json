@@ -1,0 +1,1 @@
+{"tag": "m_bft_burst25k_Q_r5", "mode": "bft", "bin": "simple_chain_Q", "args": ["-count", "25000", "-batch", "1000"], "submitted": 25000, "on_chain": 25000, "complete": true, "blast_secs": 5.1, "e2e_secs": 5.1, "e2e_tps": 4910, "tool_tps": 7231, "p50_ms": 2892, "p99_ms": 3557, "zero_fork": true, "roots": true}

@@ -1,0 +1,1 @@
+{"tag": "m_raft_burst20k_Q_r2", "mode": "raft", "bin": "simple_chain_Q", "args": ["-count", "20000", "-batch", "1000"], "submitted": 20000, "on_chain": 20000, "complete": true, "blast_secs": 2.6, "e2e_secs": 2.7, "e2e_tps": 7532, "tool_tps": 12811, "p50_ms": 915, "p99_ms": 1634, "zero_fork": true, "roots": true}

@@ -1,0 +1,1 @@
+{"tag": "m_raft_sust60_Q_r2", "mode": "raft", "bin": "simple_chain_Q", "args": ["-duration", "60", "-batch", "1000"], "submitted": 1413000, "on_chain": 1413000, "complete": true, "blast_secs": 96.4, "e2e_secs": 116.2, "e2e_tps": 12157, "tool_tps": 17578, "p50_ms": 26817, "p99_ms": 51829, "zero_fork": true, "roots": true}
