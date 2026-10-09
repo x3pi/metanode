@@ -188,6 +188,89 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 		}
 	}()
 
+	// dispatch hands one received request to the worker pool. It returns a non-nil error only when the connection
+	// handler must stop (server shutting down).
+	dispatch := func(request network.Request) error {
+		cmd := request.Message().Command()
+
+		if cmd == p_common.InitConnection {
+			// ─── InitConnection: BLOCKING send (NEVER drop) ──────────────
+			// Use blocking send with timeout to guarantee InitConnection
+			// reaches the worker pool. This fixes Race 4.
+			select {
+			case s.requestChan <- request:
+				logger.Info("HandleConnection: InitConnection queued successfully for %s", conn.RemoteAddrSafe())
+			case <-time.After(5 * time.Second):
+				logger.Error(
+					"HandleConnection: CRITICAL - InitConnection timed out (5s) waiting for queue space! remote=%s",
+					conn.RemoteAddrSafe(),
+				)
+				// Still try non-blocking as last resort
+				select {
+				case s.requestChan <- request:
+					logger.Info("HandleConnection: InitConnection queued (retry) for %s", conn.RemoteAddrSafe())
+				default:
+					logger.Error("HandleConnection: FATAL - InitConnection DROPPED for %s", conn.RemoteAddrSafe())
+					if req, ok := request.(*Request); ok {
+						requestPool.Put(req)
+					}
+				}
+			}
+			// Signal that InitConnection has been queued — unblock other commands
+			initOnce.Do(func() { close(initReady) })
+			return nil
+		}
+
+		// ─── All other commands: WAIT for InitConnection first ────────
+		// This fixes Race 1: ensures ProcessInitConnection runs before
+		// SendTransaction/GetAccountState for the same client connection.
+		select {
+		case <-initReady:
+			// InitConnection already queued, proceed
+		case <-s.ctx.Done():
+			return s.ctx.Err()
+		}
+
+		// Transaction submissions are delivered losslessly: raw-tx clients are fire-and-forget, so a dropped or
+		// rejected batch leaves a nonce gap for every sender in it and everything after it can never execute.
+		// Wait for admission (overload gate), then block for a worker slot; only this connection's reader waits,
+		// so TCP flow control slows the client down.
+		if isTxSubmissionCommand(cmd) {
+			if gate := loadTxAdmissionGate(); gate != nil {
+				if err := gate(s.ctx); err != nil {
+					return err
+				}
+			}
+			select {
+			case <-s.ctx.Done():
+				return s.ctx.Err()
+			case s.requestChan <- request:
+			}
+			return nil
+		}
+
+		// Normal dispatch: non-blocking send to worker pool
+		select {
+		case <-s.ctx.Done():
+			return s.ctx.Err()
+		case s.requestChan <- request:
+			// logger.Info("⚠️  [SERVER DEBUG] Command queued to requestChan: %s", cmd)
+			// Success
+		default:
+			logger.Warn(
+				"HandleConnection: Server's central request channel is full. Dropping request from %s (Command: %s)",
+				conn.RemoteAddrSafe(),
+				cmd,
+			)
+			if req, ok := request.(*Request); ok {
+				requestPool.Put(req)
+			}
+			busyMsg := generateMessage(conn.Address(), p_common.ServerBusy, nil, s.version)
+			_ = conn.SendMessage(busyMsg)
+		}
+		return nil
+	}
+
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -200,65 +283,8 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 			if request == nil {
 				continue
 			}
-
-			cmd := request.Message().Command()
-
-			if cmd == p_common.InitConnection {
-				// ─── InitConnection: BLOCKING send (NEVER drop) ──────────────
-				// Use blocking send with timeout to guarantee InitConnection
-				// reaches the worker pool. This fixes Race 4.
-				select {
-				case s.requestChan <- request:
-					logger.Info("HandleConnection: InitConnection queued successfully for %s", conn.RemoteAddrSafe())
-				case <-time.After(5 * time.Second):
-					logger.Error(
-						"HandleConnection: CRITICAL - InitConnection timed out (5s) waiting for queue space! remote=%s",
-						conn.RemoteAddrSafe(),
-					)
-					// Still try non-blocking as last resort
-					select {
-					case s.requestChan <- request:
-						logger.Info("HandleConnection: InitConnection queued (retry) for %s", conn.RemoteAddrSafe())
-					default:
-						logger.Error("HandleConnection: FATAL - InitConnection DROPPED for %s", conn.RemoteAddrSafe())
-						if req, ok := request.(*Request); ok {
-							requestPool.Put(req)
-						}
-					}
-				}
-				// Signal that InitConnection has been queued — unblock other commands
-				initOnce.Do(func() { close(initReady) })
-				continue
-			}
-
-			// ─── All other commands: WAIT for InitConnection first ────────
-			// This fixes Race 1: ensures ProcessInitConnection runs before
-			// SendTransaction/GetAccountState for the same client connection.
-			select {
-			case <-initReady:
-				// InitConnection already queued, proceed
-			case <-s.ctx.Done():
-				return s.ctx.Err()
-			}
-
-			// Normal dispatch: non-blocking send to worker pool
-			select {
-			case <-s.ctx.Done():
-				return s.ctx.Err()
-			case s.requestChan <- request:
-				// logger.Info("⚠️  [SERVER DEBUG] Command queued to requestChan: %s", cmd)
-				// Success
-			default:
-				logger.Warn(
-					"HandleConnection: Server's central request channel is full. Dropping request from %s (Command: %s)",
-					conn.RemoteAddrSafe(),
-					cmd,
-				)
-				if req, ok := request.(*Request); ok {
-					requestPool.Put(req)
-				}
-				busyMsg := generateMessage(conn.Address(), p_common.ServerBusy, nil, s.version)
-				_ = conn.SendMessage(busyMsg)
+			if err := dispatch(request); err != nil {
+				return err
 			}
 
 		case err, ok := <-errorChan:
@@ -267,8 +293,25 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 			}
 			if !(errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed)) {
 				logger.Error("HandleConnection: Unrecoverable error on connection %s: %v. Closing connection.", conn.RemoteAddrSafe(), err)
+				return err
 			}
-			return err
+			// The peer closed the connection (normal for a client that wrote its batches and left). Everything it
+			// sent is already in requestChan, and readLoop reports EOF only after queuing it. Deliver those requests
+			// before tearing the connection down; returning right away silently discards every batch still queued,
+			// and with backpressure that queue can hold a large part of what the client sent.
+			for {
+				select {
+				case request, ok := <-requestChan:
+					if !ok || request == nil {
+						return err
+					}
+					if derr := dispatch(request); derr != nil {
+						return err
+					}
+				default:
+					return err
+				}
+			}
 		}
 	}
 }

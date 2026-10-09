@@ -295,6 +295,19 @@ func (vp *TxValidatorPool) AddTransactionsToPool(txs []types.Transaction) []erro
 	return vp.addTransactionsToPoolInternal(txs, false)
 }
 
+// AddAdmittedTransactionsToPool is AddTransactionsToPool for callers that already reserved room in the mempool (the
+// TCP submission path waits for room first, see TransactionProcessor.waitForPoolRoom). It skips the pool's own
+// evict-lowest-fee-or-reject step: that step runs against a count the forwarder temporarily lowers while it holds a
+// drained batch, so it can still fire right after admission and drop pending transactions of fire-and-forget senders.
+func (vp *TxValidatorPool) AddAdmittedTransactionsToPool(txs []types.Transaction) []error {
+	return vp.addTransactionsToPoolInternalCap(txs, false, false)
+}
+
+// AddAdmittedTransactionToPool is the single-transaction counterpart of AddAdmittedTransactionsToPool.
+func (vp *TxValidatorPool) AddAdmittedTransactionToPool(tx types.Transaction) (int64, error) {
+	return vp.addTransactionToPoolInternalCap(tx, false, false)
+}
+
 // AddVerifiedTransactionsToPool adds a batch of pre-verified transactions to the pool
 func (vp *TxValidatorPool) AddVerifiedTransactionsToPool(txs []types.Transaction) []error {
 	return vp.addTransactionsToPoolInternal(txs, true)
@@ -302,6 +315,11 @@ func (vp *TxValidatorPool) AddVerifiedTransactionsToPool(txs []types.Transaction
 
 // addTransactionToPoolInternal handles the core logic with an option to skip expensive verification
 func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, skipVerification bool) (int64, error) {
+	return vp.addTransactionToPoolInternalCap(tx, skipVerification, true)
+}
+
+// addTransactionToPoolInternalCap is addTransactionToPoolInternal with the MaxMempoolSize evict-or-reject step optional.
+func (vp *TxValidatorPool) addTransactionToPoolInternalCap(tx types.Transaction, skipVerification bool, enforceCap bool) (int64, error) {
 	if vp == nil {
 		return transaction.InvalidTransaction.Code, fmt.Errorf("TxValidatorPool is nil")
 	}
@@ -341,7 +359,7 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 	// find one already in flight skip straight to the "pool full" rejection
 	// instead of also scanning+sorting the whole pool — the in-flight pass
 	// will make room shortly regardless.
-	if vp.transactionPool.CountTransactions() >= MaxMempoolSize {
+	if enforceCap && vp.transactionPool.CountTransactions() >= MaxMempoolSize {
 		if vp.evictionInProgress.CompareAndSwap(false, true) {
 			evicted := func() int {
 				defer vp.evictionInProgress.Store(false)
@@ -415,6 +433,11 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 // It verifies them individually but adds them to the pool and pending manager in bulk
 // to minimize lock contention.
 func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction, skipVerification bool) []error {
+	return vp.addTransactionsToPoolInternalCap(txs, skipVerification, true)
+}
+
+// addTransactionsToPoolInternalCap is addTransactionsToPoolInternal with the MaxMempoolSize evict-or-reject step optional.
+func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transaction, skipVerification bool, enforceCap bool) []error {
 	if vp == nil {
 		errs := make([]error, len(txs))
 		for i := range errs {
@@ -429,7 +452,7 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	}
 
 	// Limit pool size to prevent GC stall / OOM
-	if vp.transactionPool.CountTransactions()+len(txs) >= MaxMempoolSize {
+	if enforceCap && vp.transactionPool.CountTransactions()+len(txs) >= MaxMempoolSize {
 		if vp.evictionInProgress.CompareAndSwap(false, true) {
 			evicted := func() int {
 				defer vp.evictionInProgress.Store(false)

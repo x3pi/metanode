@@ -21,6 +21,10 @@ type Config struct {
 	SendChanSize                  int // <-- THÊM DÒNG NÀY
 	MaxConnections                int // GO-M2: max concurrent TCP connections (0 = default 1000)
 	MaxConnectionsPerIP           int // NET-02: max concurrent TCP connections per remote IP (0 = default 100)
+	// ConnRequestChanSize is the inbound request buffer of each accepted connection (0 = RequestChanSize). A small value
+	// is what turns "the handler is slow" into TCP flow control: once it is full readLoop stops reading the socket and
+	// the sender blocks. A huge buffer just moves the backlog into this process's memory.
+	ConnRequestChanSize int
 }
 
 // DefaultConfig tự động tạo ra một cấu hình mặc định hợp lý

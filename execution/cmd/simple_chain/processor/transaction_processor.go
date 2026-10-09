@@ -91,6 +91,9 @@ type injectionRequest struct {
 type RawEthTxConverter func(rawEth []byte) (types.Transaction, *e_types.Transaction, error)
 
 type TransactionProcessor struct {
+	// admitMu makes "wait for mempool room" + "add to mempool" atomic across workers on the TCP submission paths.
+	// Without it, N workers all observe room and all add, overshooting MaxMempoolSize and hitting evict-or-reject.
+	admitMu       sync.Mutex
 	env           ITransactionProcessorEnvironment
 	txManagerMap  *TransactionManagerSyncMap
 	messageSender network.MessageSender
@@ -386,7 +389,10 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_RECEIVED", fmt.Sprintf("Received from connection: %s", conn.RemoteAddrSafe()))
 
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_START", "Adding transaction to mempool")
-	code, err := tp.AddTransactionToPool(tx)
+	tp.admitMu.Lock()
+	tp.waitForPoolRoom(1)
+	code, err := tp.AddAdmittedTransactionToPool(tx)
+	tp.admitMu.Unlock()
 	if err != nil {
 		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_FAILED", err.Error())
 		logger.Warn("⚠️ [TX REJECTED] AddTransactionToPool failed: txHash=%s, msg=%s", tx.Hash().Hex(), err.Error())
@@ -435,25 +441,9 @@ func (tp *TransactionProcessor) ProcessRawTransactionFromClient(
 	request network.Request,
 ) error {
 
-	var isExistOverloaded bool
-	value, exists := sharedmemory.GlobalSharedMemory.Read("pendingOverloaded")
-
-	if !exists {
-		isExistOverloaded = false
-	} else {
-		var ok bool
-		isExistOverloaded, ok = value.(bool)
-		if !ok {
-			err := fmt.Errorf("error: cannot convert 'pendingOverloaded' to bool")
-			request.Connection().Disconnect()
-			return err
-		}
-	}
-	if isExistOverloaded {
-		err := fmt.Errorf("system overloaded. waiting")
-		request.Connection().Disconnect()
-		return err
-	}
+	// Overload is handled upstream by backpressure (network.SetTxAdmissionGate): the connection reader waits before the
+	// request is enqueued. Rejecting or disconnecting here would silently drop the batch of a fire-and-forget client
+	// and leave a nonce gap for every sender in it.
 
 	body := request.Message().Body()
 	if len(body) == 0 {
@@ -492,29 +482,38 @@ func (tp *TransactionProcessor) ProcessRawTransactionFromClient(
 	return nil
 }
 
+// poolAdmissionHeadroom is kept free below MaxMempoolSize when admitting from TCP. Every forwarder tick takes up to
+// 40,000 transactions out of the pool (maxPoolDrainPerTick in StartForwardingLoop) and puts back everything it did not
+// forward (future nonces and the part above the block cap), so the pool size swings by that much. Admitting right up
+// to MaxMempoolSize lets such a swing push the pool over the hard cap and trigger evict-or-reject.
+const poolAdmissionHeadroom = 40000
+
+// waitForPoolRoom is admission backpressure for the TCP submission paths. Raw-tx clients are fire-and-forget, so when
+// the mempool is full the pool's evict-or-reject path drops transactions the client never learns about; each dropped
+// tx is a permanent nonce gap and every later tx of that sender sits in the pool as "future" forever. Waiting here
+// (the worker blocks, the central queue fills, the connection reader blocks, TCP flow control slows the client)
+// keeps the stream lossless. It waits regardless of the connection state: the batch was received in full, so it is not
+// discarded because the client already left, and giving up would fall back to the lossy path. The pool drains as soon
+// as the forwarder makes progress (futures are dropped after FutureTxTimeout). Callers hold admitMu.
+func (tp *TransactionProcessor) waitForPoolRoom(n int) {
+	start := time.Now()
+	warned := false
+	for tp.transactionPool.CountTransactions()+n >= MaxMempoolSize-poolAdmissionHeadroom {
+		if !warned && time.Since(start) > 5*time.Second {
+			warned = true
+			logger.Warn("⏳ [ADMISSION] waiting for mempool room (pool=%d, limit=%d) for %v", tp.transactionPool.CountTransactions(), MaxMempoolSize-poolAdmissionHeadroom, time.Since(start).Round(time.Millisecond))
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // ProcessRawTransactionsFromClient receives a batch of raw Ethereum EIP-2718 envelopes via TCP,
 // encoded as RLP [][]byte.
 func (tp *TransactionProcessor) ProcessRawTransactionsFromClient(request network.Request) error {
 
-	var isExistOverloaded bool
-	value, exists := sharedmemory.GlobalSharedMemory.Read("pendingOverloaded")
-
-	if !exists {
-		isExistOverloaded = false
-	} else {
-		var ok bool
-		isExistOverloaded, ok = value.(bool)
-		if !ok {
-			err := fmt.Errorf("error: cannot convert 'pendingOverloaded' to bool")
-			request.Connection().Disconnect()
-			return err
-		}
-	}
-	if isExistOverloaded {
-		err := fmt.Errorf("system overloaded. waiting")
-		request.Connection().Disconnect()
-		return err
-	}
+	// Overload is handled upstream by backpressure (network.SetTxAdmissionGate): the connection reader waits before the
+	// request is enqueued. Rejecting or disconnecting here would silently drop the batch of a fire-and-forget client
+	// and leave a nonce gap for every sender in it.
 
 	startTime := time.Now()
 	body := request.Message().Body()
@@ -677,7 +676,10 @@ func (tp *TransactionProcessor) ProcessRawTransactionsFromClient(request network
 			end = len(processedTxs)
 		}
 		chunkTxs := processedTxs[i:end]
-		chunkErrs := tp.AddTransactionsToPool(chunkTxs)
+		tp.admitMu.Lock()
+		tp.waitForPoolRoom(len(chunkTxs))
+		chunkErrs := tp.AddAdmittedTransactionsToPool(chunkTxs)
+		tp.admitMu.Unlock()
 		allErrors = append(allErrors, chunkErrs...)
 	}
 

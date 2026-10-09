@@ -1282,7 +1282,15 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 				if (cfg.Mode == "tcp" || cfg.Mode == "both") && len(tcpClients) > 0 {
 					client := tcpClients[workerID%len(tcpClients)]
 					if err := client.SendBatch(txsChunk); err != nil {
-						time.Sleep(10 * time.Millisecond)
+						// The nonces of this chunk are already consumed, so a failed send must be retried with the SAME
+						// chunk. Moving on would leave a nonce gap and every later tx of these senders could never run.
+						for time.Now().Before(deadline) {
+							time.Sleep(10 * time.Millisecond)
+							if client.SendBatch(txsChunk) == nil {
+								totalSubmitted.Add(uint64(len(txsChunk)))
+								break
+							}
+						}
 					} else {
 						totalSubmitted.Add(uint64(len(txsChunk)))
 					}

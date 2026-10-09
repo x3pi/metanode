@@ -864,8 +864,12 @@ func (app *App) initRoutes() {
 	// Create socket server
 	handler := network.NewHandler(r, limits)
 	app.handler = handler
+	socketCfg := network.DefaultConfig()
+	// Small per-connection inbound buffer: with the default (500,000 requests) readLoop swallows whatever a client sends
+	// into memory and TCP never pushes back, so overload could only be handled by dropping transactions.
+	socketCfg.ConnRequestChanSize = 256
 	app.socketServer, _ = network.NewSocketServer(
-		nil,
+		socketCfg,
 		app.keyPair,
 		app.connectionsManager,
 		handler,
