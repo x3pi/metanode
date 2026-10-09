@@ -1,0 +1,1 @@
+{"tag": "s10_raft_timeout_wide_r4", "arm": "wide", "tps": 3932.164364830876, "submitted": 239000, "on_chain": 236000, "lost_pct": 1.3, "blocks": 122, "block_span_s": 15, "election_msgs": 2}

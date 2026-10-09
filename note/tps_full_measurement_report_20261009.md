@@ -143,6 +143,26 @@ Số liệu trích trong `raw/s9_raft_investigate_key_log_lines.txt` và `raw/s9
 - **Giả thuyết chưa kiểm chứng:** lần bầu lại leader làm mất các batch đang bay (hoặc tx bị bỏ ở đường forward), tạo khoảng trống nonce cho từng ví; các tx sau khoảng trống nằm mãi ở trạng thái "future" nên không có block mới. Chưa xác định tx nào bị mất và ở bước nào.
 - **Hệ quả cho việc đọc số liệu:** ở tải bão hòa không giới hạn, Raft có thể nhận tx rồi không đưa lên chain (mất im lặng, chưa rõ có phải chỉ do cấu hình timeout quá gắt trong phép đo hay không). Con số "Raft sustained" **không phải năng lực ổn định** của Raft. Khi tốc độ bơm cố định ở 5.000–8.000 tx/s thì không có hiện tượng này (confirmed = submitted).
 
+
+### 5.4 Thử nới timeout Raft (S10: 8 lượt, binary A, xen kẽ ngẫu nhiên, seed 20261010)
+So sánh `heartbeat/election/lease` hiện tại **100/200/80 ms** với **500/1000/400 ms**, Raft sustained 60 s, 4 lượt mỗi nhóm:
+
+| Nhóm | Lượt | TPS công cụ báo | Tx đã gửi | Tx lên chain | Không lên chain | Khoảng thời gian có block | Dòng "starting election" |
+|---|---|---|---|---|---|---|---|
+| 100/200/80 | r1 | 10.581 | 801.543 | 638.484 | 20,3% | 40 s | 0 |
+| 100/200/80 | r2 | 10.440 | 786.274 | 629.860 | 19,9% | 40 s | 0 |
+| 100/200/80 | r3 | 10.055 | 758.348 | 606.602 | 20,0% | 39 s | 0 |
+| 100/200/80 | r4 | 9.825 | 786.814 | 592.434 | 24,7% | 38 s | 0 |
+| 500/1000/400 | r1 | 10.133 | 759.015 | 609.801 | 19,7% | 39 s | 0 |
+| 500/1000/400 | r2 | **4.132** | **250.000** | 248.000 | 0,8% | **15 s** | 2 |
+| 500/1000/400 | r3 | **3.749** | **227.000** | 225.000 | 0,9% | **13 s** | 2 |
+| 500/1000/400 | r4 | **3.932** | **239.000** | 236.000 | 1,3% | **15 s** | 2 |
+
+- **Nới timeout không khắc phục hiện tượng dừng.** Nhóm 100/200/80 (4/4 lượt) và một lượt 500/1000/400 vẫn dừng ở giây ~38–40 và mất ~20–25% tx.
+- **Ba trong bốn lượt 500/1000/400 rơi vào một chế độ khác:** client chỉ gửi được 227.000–250.000 tx rồi bị chặn (tiến độ bơm không tăng từ giây 15), block chỉ kéo dài 13–15 s, và TPS công cụ báo ~3,7–4,1k. Đây cùng dạng với kết quả "~3,9k" của lần chạy Phase 2 (253.000 và 222.000 tx lên chain, 112–129 block), nên 3,9k là **một chế độ hỏng có thật và tái hiện được**, không phải nhiễu đo, nhưng không phải thông lượng của Raft.
+- Chế độ này xuất hiện với cấu hình 500/1000/400 nhiều hơn (3/4), trong khi cấu hình hiện tại không gặp trong 4 lượt của S10 (hay trong 11 lượt Raft sustained trước đó của báo cáo này). Chưa đủ lượt để kết luận tần suất, nhưng không có dấu hiệu nới timeout là cách chữa.
+- **Kết luận:** nguyên nhân Raft ngừng nhận/tạo block dưới tải bão hòa chưa được xác định; cần theo dõi từng tx (đường TCP ingress → `Submit` → forward → pool) thay vì chỉnh timeout.
+
 ---
 
 ## 6. Kết luận
@@ -161,14 +181,14 @@ Số liệu trích trong `raw/s9_raft_investigate_key_log_lines.txt` và `raw/s9
 ## 7. Hạn chế
 - Một máy chung cho tất cả node; số tuyệt đối không chuyển sang triển khai nhiều máy.
 - Số lượt: 3–8 mỗi cấu hình. Warm-up (n=4), trace (n=3), tốc độ cố định (n=3) có khoảng tin cậy rộng.
-- Phần điều tra Raft dừng giữa chừng dựa trên 3 lượt có dấu thời gian block/log (S8 ×2, S9 ×1). Chuỗi nhân quả (bầu lại leader → khoảng trống nonce) chưa được chứng minh.
+- Phần điều tra Raft dừng giữa chừng dựa trên 3 lượt có dấu thời gian block/log (S8 ×2, S9 ×1) và 8 lượt thử timeout (S10). Chuỗi nhân quả (bầu lại leader → khoảng trống nonce) chưa được chứng minh.
 - Dấu thời gian block có độ phân giải 1 giây, nên tốc độ theo cửa sổ nhỏ chỉ mang tính tham khảo.
 - Các lượt BFT dùng binary A (không có bộ đếm Raft, không ảnh hưởng BFT). `parent_chain` dùng binary có sẵn.
 - Lượt trace đầu tiên (S5) không lấy được log thời gian nên chỉ dùng S5b (3 lượt) cho phần phân rã.
 - Chưa so sánh BFT burst với độ trễ gồm thời gian bơm trong cùng chế độ (BFT bơm ~0,1 s nên chênh lệch nhỏ: 7.804 so với 8.111).
 
 ## 8. Việc đề xuất làm tiếp
-1. **Điều tra Raft bầu lại leader dưới tải:** thử `heartbeat_timeout`/`election_timeout`/`leader_lease` rộng hơn và giới hạn bộ nhớ cao hơn; kiểm tra xem tx có bị mất ở đường forward hay do khoảng trống nonce; xác nhận bằng cách theo dõi nonce của vài ví trước và sau lần bầu lại.
+1. **Tìm nguyên nhân Raft ngừng nhận/tạo block dưới tải bão hòa** (nới timeout đã thử ở mục 5.4 và không chữa được): theo dõi từng tx đi qua TCP ingress → `Submit` → forward → pool; kiểm tra khoảng trống nonce của vài ví trước/sau khi dừng; thử giới hạn bộ nhớ cao hơn (`GOMEMLIMIT`); thêm bộ đếm tx bị `Submit` trả về false.
 2. **Sửa công cụ blast:** báo thêm "TPS tính từ lúc gửi đầu tiên đến receipt cuối", số tx được nhận nhưng không lên chain, và số block cuối cùng theo dấu thời gian; ghi rõ định nghĩa mẫu số trong output.
 3. Gán nguồn cho ~190 ms/block chưa giải thích của BFT (chuẩn bị tx, FFI giải mã, khóa, hàng đợi) bằng timeline nhiều điểm hơn.
 4. Nếu cần so sánh BFT và Raft công bằng: cùng mô hình tin cậy, nhiều máy, tốc độ bơm cố định và độ trễ gửi → receipt.
