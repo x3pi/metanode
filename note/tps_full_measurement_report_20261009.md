@@ -163,13 +163,16 @@ So sánh `heartbeat/election/lease` hiện tại **100/200/80 ms** với **500/1
 - Chế độ này xuất hiện với cấu hình 500/1000/400 nhiều hơn (3/4), trong khi cấu hình hiện tại không gặp trong 4 lượt của S10 (hay trong 11 lượt Raft sustained trước đó của báo cáo này). Chưa đủ lượt để kết luận tần suất, nhưng không có dấu hiệu nới timeout là cách chữa.
 - **Kết luận:** nguyên nhân Raft ngừng nhận/tạo block dưới tải bão hòa chưa được xác định; cần theo dõi từng tx (đường TCP ingress → `Submit` → forward → pool) thay vì chỉnh timeout.
 
+### 5.5 Gốc rễ đã được xác định và sửa (2026-10-09)
+Hiện tượng dừng giữa chừng không do Raft hay cấu hình timeout: đường nhận giao dịch qua TCP **bỏ giao dịch khi quá tải** (ngắt kết nối khi pool > 150.000, evict/reject khi mempool chạm 200.000, bỏ yêu cầu khi hàng đợi đầy hoặc khi client đóng kết nối), trong khi client là fire-and-forget; mỗi tx bị bỏ để lại một khoảng trống nonce và pool chỉ còn tx "future". Chi tiết bằng chứng, danh sách thay đổi mã và kết quả kiểm chứng ở `note/tps_stall_root_cause_fix_20261009.md`. Sau sửa, các lượt Raft sustained 60 s và 20 s và BFT 20 s đều đạt **100% tx lên chain, không dừng**, thông lượng end-to-end khi rút cạn Raft ≈ 12,3–14k tx/s và BFT ≈ 13,5k tx/s. Các số "Raft sustained" ở mục 1 và bảng mục 5.1–5.4 là của **binary trước khi sửa** và không phản ánh năng lực của Raft.
+
 ---
 
 ## 6. Kết luận
 
 1. **Số đáng dùng (trung vị, 1 máy, cụm sạch):**
    - BFT: sustained **14,1k tx/s** (đối chiếu block-time 15,0–15,2k); burst 25k cold-start **7,8k tx/s** (gồm thời gian bơm).
-   - Raft: burst 20k/25k/30k đều **≈13,0k tx/s** (gồm thời gian bơm). Raft sustained **chưa có số ổn định** vì cụm dừng tạo block ở giây ~40–44; trong khoảng còn tạo block, tốc độ commit là ~16,2–16,6k tx/s (≈20–22k tx/s trong 20 giây đầu), dấu thời gian block có độ phân giải 1 giây.
+   - Raft: burst 20k/25k/30k đều **≈13,0k tx/s** (gồm thời gian bơm). Raft sustained **chưa có số ổn định ở binary được đo** vì cụm dừng tạo block ở giây ~40–44 (gốc rễ đã tìm ra và sửa, xem mục 5.5); trong khoảng còn tạo block, tốc độ commit là ~16,2–16,6k tx/s (≈20–22k tx/s trong 20 giây đầu), dấu thời gian block có độ phân giải 1 giây.
 2. **Raft có độ trễ commit thấp hơn BFT khoảng 18 lần** ở cùng tốc độ bơm 5.000–8.000 tx/s (0,10 s so với 1,85–1,89 s), và giữ đủ tốc độ 5.000 và 8.000 tx/s không mất tx.
 3. **BFT mất ít tx hơn nhiều ở tải bão hòa** (1,1% so với 22–23% của Raft), tuy vậy cũng không phải 0%.
 4. **Cảnh báo về mô hình tin cậy:** BFT chịu lỗi Byzantine (3/4), Raft chỉ chịu lỗi sập (2/3) và cụm Raft thử nghiệm không có parent chain hay Rust FFI. So sánh chỉ mang tính tham khảo.
@@ -188,7 +191,7 @@ So sánh `heartbeat/election/lease` hiện tại **100/200/80 ms** với **500/1
 - Chưa so sánh BFT burst với độ trễ gồm thời gian bơm trong cùng chế độ (BFT bơm ~0,1 s nên chênh lệch nhỏ: 7.804 so với 8.111).
 
 ## 8. Việc đề xuất làm tiếp
-1. **Tìm nguyên nhân Raft ngừng nhận/tạo block dưới tải bão hòa** (nới timeout đã thử ở mục 5.4 và không chữa được): theo dõi từng tx đi qua TCP ingress → `Submit` → forward → pool; kiểm tra khoảng trống nonce của vài ví trước/sau khi dừng; thử giới hạn bộ nhớ cao hơn (`GOMEMLIMIT`); thêm bộ đếm tx bị `Submit` trả về false.
+1. **Đã xong:** tìm và sửa gốc rễ việc dừng/mất tx dưới tải bão hòa (xem mục 5.5). Việc còn lại: đo lại toàn bộ bảng mục 1 bằng binary đã sửa và với giao thức rút cạn; review thay đổi ingress trước khi merge.
 2. **Sửa công cụ blast:** báo thêm "TPS tính từ lúc gửi đầu tiên đến receipt cuối", số tx được nhận nhưng không lên chain, và số block cuối cùng theo dấu thời gian; ghi rõ định nghĩa mẫu số trong output.
 3. Gán nguồn cho ~190 ms/block chưa giải thích của BFT (chuẩn bị tx, FFI giải mã, khóa, hàng đợi) bằng timeline nhiều điểm hơn.
 4. Nếu cần so sánh BFT và Raft công bằng: cùng mô hình tin cậy, nhiều máy, tốc độ bơm cố định và độ trễ gửi → receipt.

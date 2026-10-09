@@ -1,0 +1,1 @@
+{"tag": "s13_breaker_C_r1", "bin": "simple_chain_C", "tcp_conns": "1", "tps": 6575, "submitted": 3531137, "on_chain": 394496, "lost_pct": 88.8, "blocks": 238, "block_span_s": 101, "breaker_on": 0, "overload_errors": 0}
