@@ -57,9 +57,10 @@ type Status struct {
 	Draining          bool         `json:"draining"`
 	SnapshotsHeld     bool         `json:"snapshots_held"`
 	Failed            bool         `json:"failed"`
-	SequencerAddress  string       `json:"sequencer_address"`
-	Attested          uint64       `json:"attested"`
-	Mismatches        uint64       `json:"mismatches"`
+	SequencerAddress  string          `json:"sequencer_address"`
+	Attested          uint64          `json:"attested"`
+	Mismatches        uint64          `json:"mismatches"`
+	Metrics           MetricsSnapshot `json:"metrics"`
 }
 
 func statUint(m map[string]string, k string) uint64 {
@@ -87,6 +88,7 @@ func (n *Node) Status() Status {
 		SequencerAddress:  n.cfg.SequencerAddress,
 		Attested:          n.attested.Load(),
 		Mismatches:        n.mismatches.Load(),
+		Metrics:           n.Metrics(),
 	}
 	if n.durable != nil {
 		s.LastBlock = n.durable()
