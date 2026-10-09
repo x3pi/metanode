@@ -106,6 +106,11 @@ type BenchmarkResult struct {
 	MaxRSSMB            int           `json:"max_rss_mb"`
 	TargetNodeCount     int           `json:"target_node_count,omitempty"`
 	AvgRSSPerNodeMB     int           `json:"avg_rss_per_node_mb,omitempty"`
+	SampleTotal         int           `json:"sample_total,omitempty"`
+	SampleConfirmed     int           `json:"sample_confirmed,omitempty"`
+	SampleReverted      int           `json:"sample_reverted,omitempty"`
+	SampleUnconfirmed   int           `json:"sample_unconfirmed,omitempty"`
+	SampleCutoffRatio   float64       `json:"sample_cutoff_ratio,omitempty"`
 }
 
 type rawTCPClient struct {
@@ -892,10 +897,16 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 	}
 	effectiveTPS := float64(extrapolatedConfirmed) / commitDur.Seconds()
 
+	sampleUnconf := len(sampleHashes) - int(confirmedCount.Load()+revertedCount.Load())
+	cutoffRatio := 0.0
+	if len(sampleHashes) > 0 {
+		cutoffRatio = float64(sampleUnconf) / float64(len(sampleHashes))
+	}
+
 	fmt.Printf("\n📊 BENCHMARK METRICS (Round %d):\n", round)
 	fmt.Printf("   • Total Submitted:    %d txs\n", submittedTxs)
-	fmt.Printf("   • Sample Verified:    %d/%d (Success: %d, Reverted: %d)\n",
-		confirmedCount.Load()+revertedCount.Load(), len(sampleHashes), confirmedCount.Load(), revertedCount.Load())
+	fmt.Printf("   • Sample Verified:    %d/%d (Confirmed: %d, Reverted: %d, Unconfirmed/Timeout: %d | Cutoff: %.1f%%)\n",
+		confirmedCount.Load()+revertedCount.Load(), len(sampleHashes), confirmedCount.Load(), revertedCount.Load(), sampleUnconf, cutoffRatio*100)
 	fmt.Printf("   • Injection Speed:    %.2f tx/s (Duration: %v)\n", injectTPS, injectDur)
 	fmt.Printf("   • Effective TPS:      %.2f tx/s (Duration: %v)\n", effectiveTPS, commitDur)
 	fmt.Printf("   • Latency P50:        %v\n", p50)
@@ -977,6 +988,11 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 		NodeRootsConsistent: zeroForkOk,
 		MaxCPU:              fmt.Sprintf("%.1f%%", finalCPU),
 		MaxRSSMB:            finalRSS,
+		SampleTotal:         len(sampleHashes),
+		SampleConfirmed:     int(confirmedCount.Load()),
+		SampleReverted:      int(revertedCount.Load()),
+		SampleUnconfirmed:   sampleUnconf,
+		SampleCutoffRatio:   cutoffRatio,
 	}
 
 	if cfg.ReportFile != "" {
@@ -1147,12 +1163,17 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 			cfg.RateLimit, numWorkers, chunkInterval)
 	}
 
+	var sampleTotal atomic.Uint64
 	var confirmedCount atomic.Uint64
 	var revertedCount atomic.Uint64
+	var unconfirmedCount atomic.Uint64
 	var latencies []time.Duration
 	var latMu sync.Mutex
-	sampleChan := make(chan SampleTx, 2000)
+	sampleChan := make(chan SampleTx, 5000)
 	var trackWg sync.WaitGroup
+
+	drainDuration := 20 * time.Second
+	trackerDeadline := deadline.Add(drainDuration)
 
 	numTrackers := 16
 	for tr := 0; tr < numTrackers; tr++ {
@@ -1160,10 +1181,9 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 		go func(workerID int) {
 			defer trackWg.Done()
 			for st := range sampleChan {
-				deadline := st.SentAt.Add(30 * time.Second)
 				rpcURL := cfg.RPCUrls[workerID%len(cfg.RPCUrls)]
 				confirmed := false
-				for time.Now().Before(deadline) {
+				for time.Now().Before(trackerDeadline) {
 					res, err := rpcCallTo(rpcURL, "eth_getTransactionReceipt", st.Hash.Hex())
 					if err == nil && len(res) > 0 && string(res) != "null" {
 						var rec struct {
@@ -1189,7 +1209,7 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 					time.Sleep(100 * time.Millisecond)
 				}
 				if !confirmed {
-					revertedCount.Add(1)
+					unconfirmedCount.Add(1)
 				}
 			}
 		}(tr)
@@ -1254,6 +1274,7 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 				if sampleCounter%5 == 0 {
 					select {
 					case sampleChan <- SampleTx{Hash: txsChunk[0].Hash(), SentAt: time.Now()}:
+						sampleTotal.Add(1)
 					default:
 					}
 				}
@@ -1295,7 +1316,7 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 	fmt.Printf("\n⚡ Injected total %d TXs over %v (Injection TPS: %.2f tx/s)\n", subTxs, injectDur, injectTPS)
 
 	// Step 4: Consensus stabilization & Drain remaining sample receipts
-	fmt.Printf("\n⏱️ Draining remaining sample receipts and stabilizing (up to 10s)...\n")
+	fmt.Printf("\n⏱️ Draining remaining sample receipts and stabilizing (up to %v)...\n", drainDuration)
 	close(sampleChan)
 	trackWg.Wait()
 
@@ -1334,6 +1355,15 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 
 	effectiveTPS := float64(totalOnChainTxs) / injectDur.Seconds()
 
+	totSampled := sampleTotal.Load()
+	conf := confirmedCount.Load()
+	rev := revertedCount.Load()
+	unconf := unconfirmedCount.Load()
+	cutoffRatio := 0.0
+	if totSampled > 0 {
+		cutoffRatio = float64(unconf) / float64(totSampled)
+	}
+
 	fmt.Printf("\n📊 SUSTAINED BENCHMARK METRICS:\n")
 	fmt.Printf("   • Duration:           %v (Target: %ds)\n", injectDur, cfg.DurationSec)
 	fmt.Printf("   • Total Submitted:    %d txs\n", subTxs)
@@ -1345,8 +1375,8 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 	fmt.Printf("   • Latency P95:        %v\n", p95)
 	fmt.Printf("   • Latency P99:        %v\n", p99)
 	fmt.Printf("   • Latency Avg:        %v\n", avgLat)
-	fmt.Printf("   • Sample Verified:    %d/%d (Confirmed: %d, Reverted: %d)\n",
-		confirmedCount.Load()+revertedCount.Load(), len(latencies), confirmedCount.Load(), revertedCount.Load())
+	fmt.Printf("   • Sample Verified:    %d/%d (Confirmed: %d, Reverted: %d, Unconfirmed/Timeout: %d | Cutoff: %.1f%%)\n",
+		conf+rev, totSampled, conf, rev, unconf, cutoffRatio*100)
 	resMu.Lock()
 	finalCPU := maxRecordedCPU
 	finalRSS := int(maxRecordedRSS / 1024)
@@ -1401,7 +1431,7 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 		TxType:              cfg.TxType,
 		TotalSubmitted:      subTxs,
 		TotalConfirmed:      int(totalOnChainTxs),
-		TotalReverted:       int(revertedCount.Load()),
+		TotalReverted:       int(rev),
 		TotalDropped:        subTxs - int(totalOnChainTxs),
 		InjectionDuration:   injectDur.String(),
 		InjectionTPS:        injectTPS,
@@ -1419,6 +1449,11 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 		NodeRootsConsistent: zeroForkOk,
 		MaxCPU:              fmt.Sprintf("%.1f%%", finalCPU),
 		MaxRSSMB:            finalRSS,
+		SampleTotal:         int(totSampled),
+		SampleConfirmed:     int(conf),
+		SampleReverted:      int(rev),
+		SampleUnconfirmed:   int(unconf),
+		SampleCutoffRatio:   cutoffRatio,
 	}
 
 	if cfg.ReportFile != "" {
