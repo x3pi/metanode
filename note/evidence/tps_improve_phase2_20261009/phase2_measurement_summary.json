@@ -1,0 +1,333 @@
+{
+  "timestamp": "2026-10-09 01:27:13 UTC",
+  "bins_sha256": {
+    "simple_chain": "b3d6c0ed86d809dc63449b479c413a22cf25ea360a7a171f2edcb202df23e60a",
+    "secp_tps_blast": "943dace33e9af20280c85a51f2c43bdf01993631ae6ae86f74e5449a5cd1d5bd",
+    "rollup-cluster": "dd712e0fd70be70aac51fc47db93900fe9c7ffe72700629eb2eb3f301f519e92"
+  },
+  "experiments": {
+    "raft_sustained": {
+      "tps": {
+        "n": 8,
+        "median": 3932.52,
+        "mean": 3915.78,
+        "sd": 297.54,
+        "min": 3549.19,
+        "max": 4215.45,
+        "ci95": [
+          3667.0,
+          4164.57
+        ]
+      },
+      "latency_p50_ms": {
+        "n": 8,
+        "median": 5899.29,
+        "mean": 5841.7,
+        "sd": 2532.93,
+        "min": 1928.41,
+        "max": 8667.53,
+        "ci95": [
+          3723.78,
+          7959.62
+        ]
+      },
+      "propose_q_wait_ms": {
+        "n": 8,
+        "median": 0.01,
+        "mean": 0.01,
+        "sd": 0.01,
+        "min": 0.01,
+        "max": 0.03,
+        "ci95": [
+          0.01,
+          0.02
+        ]
+      },
+      "raft_apply_ms": {
+        "n": 8,
+        "median": 35.12,
+        "mean": 34.75,
+        "sd": 1.55,
+        "min": 32.08,
+        "max": 36.25,
+        "ci95": [
+          33.46,
+          36.04
+        ]
+      },
+      "fsm_decode_ms": {
+        "n": 8,
+        "median": 5.65,
+        "mean": 5.51,
+        "sd": 0.37,
+        "min": 4.88,
+        "max": 5.93,
+        "ci95": [
+          5.2,
+          5.82
+        ]
+      },
+      "fsm_build_ms": {
+        "n": 8,
+        "median": 9.19,
+        "mean": 9.19,
+        "sd": 0.36,
+        "min": 8.59,
+        "max": 9.7,
+        "ci95": [
+          8.89,
+          9.49
+        ]
+      },
+      "fsm_sink_wait_ms": {
+        "n": 8,
+        "median": 0.0,
+        "mean": 0.0,
+        "sd": 0.0,
+        "min": 0.0,
+        "max": 0.01,
+        "ci95": [
+          0.0,
+          0.0
+        ]
+      },
+      "boltdb_fsync_ms": {
+        "n": 8,
+        "median": 7.51,
+        "mean": 7.48,
+        "sd": 0.51,
+        "min": 6.76,
+        "max": 8.16,
+        "ci95": [
+          7.06,
+          7.91
+        ]
+      },
+      "evm_exec_ms": null,
+      "pebbledb_save_ms": null
+    },
+    "raft_burst_20k": {
+      "tps": {
+        "n": 12,
+        "median": 13256.76,
+        "mean": 13217.73,
+        "sd": 469.23,
+        "min": 12405.39,
+        "max": 14197.77,
+        "ci95": [
+          12919.59,
+          13515.87
+        ]
+      },
+      "latency_p50_ms": {
+        "n": 12,
+        "median": 1060.93,
+        "mean": 1060.82,
+        "sd": 61.0,
+        "min": 960.43,
+        "max": 1158.99,
+        "ci95": [
+          1022.06,
+          1099.58
+        ]
+      },
+      "status_full_count_sum": 0,
+      "split_batch_count_sum": 0
+    },
+    "raft_burst_25k": {
+      "tps": {
+        "n": 8,
+        "median": 13398.69,
+        "mean": 13519.64,
+        "sd": 756.55,
+        "min": 12558.76,
+        "max": 14589.45,
+        "ci95": [
+          12887.04,
+          14152.23
+        ]
+      },
+      "latency_p50_ms": {
+        "n": 8,
+        "median": 1278.64,
+        "mean": 1264.94,
+        "sd": 63.22,
+        "min": 1130.69,
+        "max": 1347.52,
+        "ci95": [
+          1212.07,
+          1317.8
+        ]
+      },
+      "status_full_count_sum": 0,
+      "split_batch_count_sum": 0
+    },
+    "raft_burst_30k": {
+      "tps": {
+        "n": 8,
+        "median": 13141.55,
+        "mean": 13280.64,
+        "sd": 446.71,
+        "min": 12873.38,
+        "max": 14075.83,
+        "ci95": [
+          12907.12,
+          13654.15
+        ]
+      },
+      "latency_p50_ms": {
+        "n": 8,
+        "median": 1478.9,
+        "mean": 1503.72,
+        "sd": 180.26,
+        "min": 1233.8,
+        "max": 1820.62,
+        "ci95": [
+          1353.0,
+          1654.45
+        ]
+      },
+      "status_full_count_sum": 0,
+      "split_batch_count_sum": 0
+    },
+    "bft_sustained": {
+      "overall_tps": {
+        "n": 8,
+        "median": 13863.48,
+        "mean": 14015.47,
+        "sd": 920.84,
+        "min": 12847.11,
+        "max": 15363.07,
+        "ci95": [
+          13245.51,
+          14785.43
+        ]
+      },
+      "latency_p50_ms": {
+        "n": 8,
+        "median": 43481.88,
+        "mean": 44788.05,
+        "sd": 4001.41,
+        "min": 40449.16,
+        "max": 52529.56,
+        "ci95": [
+          41442.25,
+          48133.84
+        ]
+      },
+      "tps_first_10s": {
+        "n": 0,
+        "median": 0.0,
+        "mean": 0.0,
+        "sd": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "ci95": [
+          0.0,
+          0.0
+        ]
+      },
+      "tps_next_50s": {
+        "n": 0,
+        "median": 0.0,
+        "mean": 0.0,
+        "sd": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "ci95": [
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "bft_burst25k_cold_start": {
+      "tps": {
+        "n": 4,
+        "median": 7751.5,
+        "mean": 8044.2,
+        "sd": 849.15,
+        "min": 7391.54,
+        "max": 9282.27,
+        "ci95": [
+          6693.19,
+          9395.2
+        ]
+      },
+      "latency_p50_ms": {
+        "n": 4,
+        "median": 2536.03,
+        "mean": 2491.88,
+        "sd": 279.81,
+        "min": 2129.86,
+        "max": 2765.61,
+        "ci95": [
+          2046.7,
+          2937.06
+        ]
+      }
+    },
+    "bft_burst25k_warm_up": {
+      "tps": {
+        "n": 4,
+        "median": 9887.36,
+        "mean": 9941.61,
+        "sd": 315.88,
+        "min": 9667.21,
+        "max": 10324.51,
+        "ci95": [
+          9439.05,
+          10444.17
+        ]
+      },
+      "latency_p50_ms": {
+        "n": 4,
+        "median": 1875.66,
+        "mean": 1860.59,
+        "sd": 93.32,
+        "min": 1744.75,
+        "max": 1946.28,
+        "ci95": [
+          1712.12,
+          2009.06
+        ]
+      }
+    },
+    "bft_burst25k_cooldown_10s": {
+      "tps": {
+        "n": 4,
+        "median": 7862.75,
+        "mean": 7916.3,
+        "sd": 317.2,
+        "min": 7591.95,
+        "max": 8347.76,
+        "ci95": [
+          7411.63,
+          8420.97
+        ]
+      },
+      "latency_p50_ms": {
+        "n": 4,
+        "median": 2600.99,
+        "mean": 2603.71,
+        "sd": 187.02,
+        "min": 2416.55,
+        "max": 2796.32,
+        "ci95": [
+          2306.16,
+          2901.26
+        ]
+      }
+    }
+  },
+  "decision_gate": {
+    "status": "PASSED",
+    "details": {
+      "total_estimated_cycle_ms": 43.94,
+      "raft_apply_pct": 79.1,
+      "fsm_build_pct": 20.9,
+      "boltdb_fsync_pct": 17.0,
+      "amdahl_upper_bound_coalesce_pct": 39.5,
+      "passed_gate": true
+    }
+  }
+}

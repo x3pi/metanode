@@ -1,0 +1,44 @@
+==================================================================
+🚀 SECP256K1 / EIP-1559 HIGH-PERFORMANCE WORKLOAD BENCHMARK
+   Zero-Fork Compliant (AGENTS.md Part 2.5) | Production SECP Mode
+==================================================================
+🎯 Tracking 3 target simple_chain PIDs: 666400, 666401, 666402
+🌐 RPC Pool (1 nodes): http://127.0.0.1:8810
+⚡ TCP Pool (1 nodes): 127.0.0.1:4310
+🆔 Chain ID: 991
+🔑 Loaded 50000 pre-allocated accounts from generated_keys.json
+
+▶️ RUNNING ROUND 1/1
+🏁 Start Block: #0
+
+🔍 Fetching nonces for 25000 accounts across 1 RPC nodes...
+✅ Nonces fetched in 615.582828ms (Errors: 0)
+
+✍️ Pre-signing 25000 1559 transactions...
+✅ Pre-signed 25000 txs in 51.5763ms (484718.76 tx/s signing speed)
+
+🔌 Initializing TCP connection pool (1 endpoints)...
+✅ 1 TCP connections established & registered.
+
+🔥 BLASTING 25000 Transactions across cluster (Mode: tcp)...
+📦 Splitting into 25 TCP batches (batch size: 1000)...
+⚡ Injected 25000 TXs in 92.462802ms (Injection TPS: 270379.00 tx/s)
+
+⏱️ Tracking Transaction Receipts for Consensus Inclusion & Latency...
+
+📊 BENCHMARK METRICS (Round 1):
+   • Total Submitted:    25000 txs
+   • Sample Verified:    50/50 (Confirmed: 50, Reverted: 0, Unconfirmed/Timeout: 0 | Cutoff: 0.0%)
+   • Injection Speed:    270379.00 tx/s (Duration: 92.462802ms)
+   • Effective TPS:      13467.80 tx/s (Duration: 1.856279047s)
+   • Latency P50:        1.292549607s
+   • Latency P90:        1.690459285s
+   • Latency P95:        1.813711013s
+   • Latency P99:        1.948768601s
+   • Latency Avg:        1.1494529s
+   • Peak CPU (Nodes):   791.0%
+   • Peak RSS (3 Target Nodes): 4935 MB (avg 1645.0 MB/node)
+📄 JSON Benchmark report saved to: /home/abc/chain-n/metanode/note/evidence/tps_improve_phase2_20261009/raw/raft_burst_25k_r5.json
+==================================================================
+
+--STDERR--
