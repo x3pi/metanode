@@ -1,0 +1,1 @@
+{"tag": "m4_raft_sust60_R40_r3", "mode": "raft", "bin": "simple_chain_R40", "args": ["-duration", "60", "-batch", "1000"], "submitted": 1743106, "on_chain": 1743106, "complete": true, "blast_secs": 96.2, "e2e_secs": 126.7, "e2e_tps": 13753, "tool_tps": 18233, "p50_ms": 39770, "p99_ms": 47637, "zero_fork": true, "roots": true}
