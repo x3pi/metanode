@@ -354,44 +354,67 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     }
                     // Retry block fetches up to 3 times with backoff before propagating the error.
                     const MAX_BLOCK_FETCH_RETRIES: u32 = 3;
-                    let serialized_blocks = {
-                        let mut last_err = None;
-                        let mut result = None;
-                        for attempt in 0..MAX_BLOCK_FETCH_RETRIES {
-                            match inner
-                                .network_client
-                                .fetch_blocks(
-                                    target_authority,
-                                    request_block_refs.to_vec(),
-                                    vec![],
-                                    false,
-                                    timeout,
-                                )
-                                .await
-                            {
-                                Ok(blocks) => {
-                                    result = Some(blocks);
-                                    break;
-                                }
-                                Err(e) => {
-                                    let hostname = &inner.context.committee.authority(target_authority).hostname;
-                                    warn!(
-                                        "Commit sync: retry {}/{} fetching blocks from {hostname}: {e}",
-                                        attempt + 1,
-                                        MAX_BLOCK_FETCH_RETRIES
-                                    );
-                                    last_err = Some(e);
-                                    if attempt + 1 < MAX_BLOCK_FETCH_RETRIES {
-                                        sleep(Duration::from_millis(500 * (attempt as u64 + 1))).await;
+                    // The network client may legitimately return only a PREFIX of the requested refs: it stops reading
+                    // once the response exceeds its byte budget (MAX_TOTAL_FETCHED_BYTES), which saturated-load blocks
+                    // reach well below max_blocks_per_fetch. Re-requesting the identical full chunk would fail the same
+                    // way forever (a lagging node could never catch up), so keep the prefix and fetch the remainder.
+                    // Every returned block is still checked against its requested ref below (step 7), so a peer that
+                    // skips or reorders blocks is rejected exactly as before.
+                    let mut serialized_blocks: Vec<Bytes> = Vec::new();
+                    while serialized_blocks.len() < request_block_refs.len() {
+                        let remaining = &request_block_refs[serialized_blocks.len()..];
+                        let batch = {
+                            let mut last_err = None;
+                            let mut result = None;
+                            for attempt in 0..MAX_BLOCK_FETCH_RETRIES {
+                                match inner
+                                    .network_client
+                                    .fetch_blocks(
+                                        target_authority,
+                                        remaining.to_vec(),
+                                        vec![],
+                                        false,
+                                        timeout,
+                                    )
+                                    .await
+                                {
+                                    Ok(blocks) => {
+                                        result = Some(blocks);
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        let hostname = &inner.context.committee.authority(target_authority).hostname;
+                                        warn!(
+                                            "Commit sync: retry {}/{} fetching blocks from {hostname}: {e}",
+                                            attempt + 1,
+                                            MAX_BLOCK_FETCH_RETRIES
+                                        );
+                                        last_err = Some(e);
+                                        if attempt + 1 < MAX_BLOCK_FETCH_RETRIES {
+                                            sleep(Duration::from_millis(500 * (attempt as u64 + 1))).await;
+                                        }
                                     }
                                 }
                             }
+                            match result {
+                                Some(blocks) => blocks,
+                                None => return Err(last_err.expect("last_err must be set after failed retries")),
+                            }
+                        };
+                        // No progress (or an over-long reply): stop and let the count check below reject it.
+                        if batch.is_empty() || batch.len() > remaining.len() {
+                            serialized_blocks.extend(batch);
+                            break;
                         }
-                        match result {
-                            Some(blocks) => blocks,
-                            None => return Err(last_err.expect("last_err must be set after failed retries")),
+                        if serialized_blocks.len() + batch.len() < request_block_refs.len() {
+                            debug!(
+                                "Commit sync: partial block response from {target_authority}: got {} of {} remaining, fetching the rest",
+                                batch.len(),
+                                remaining.len()
+                            );
                         }
-                    };
+                        serialized_blocks.extend(batch);
+                    }
                     // 5. Verify the same number of blocks are returned as requested.
                     if request_block_refs.len() != serialized_blocks.len() {
                         return Err(ConsensusError::UnexpectedNumberOfBlocksFetched {
