@@ -1079,13 +1079,27 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 		}
 
 		// Sort by FromAddress and Nonce to ensure contiguous evaluation
-		sort.Slice(allTxs, func(i, j int) bool {
-			cmp := allTxs[i].FromAddress().Cmp(allTxs[j].FromAddress())
+		// Sort keys are extracted once per tx: calling FromAddress() inside the comparator re-decodes the address
+		// bytes on every comparison (~180ms for 40k txs). Ordering is identical (address, then nonce).
+		type sortItem struct {
+			from  common.Address
+			nonce uint64
+			tx    types.Transaction
+		}
+		sortItems := make([]sortItem, len(allTxs))
+		for i, tx := range allTxs {
+			sortItems[i] = sortItem{from: tx.FromAddress(), nonce: tx.GetNonce(), tx: tx}
+		}
+		sort.Slice(sortItems, func(i, j int) bool {
+			cmp := sortItems[i].from.Cmp(sortItems[j].from)
 			if cmp != 0 {
 				return cmp < 0
 			}
-			return allTxs[i].GetNonce() < allTxs[j].GetNonce()
+			return sortItems[i].nonce < sortItems[j].nonce
 		})
+		for i := range sortItems {
+			allTxs[i] = sortItems[i].tx
+		}
 
 		for _, tx := range allTxs {
 			from := tx.FromAddress()

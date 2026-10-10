@@ -82,7 +82,21 @@ func ValidateEthTxEnvelope(ethTx *e_types.Transaction, expectedChainId *big.Int)
 	}
 
 	// 4. Recover sender address
-	signer := e_types.LatestSignerForChainID(chainID)
+	// Use the same per-type signer as the later binding/conversion steps: go-ethereum's per-tx sender cache is
+	// invalidated whenever the signer differs (LatestSigner vs London/Cancun/Prague), which re-ran ecrecover.
+	var signer e_types.Signer
+	switch ethTx.Type() {
+	case e_types.LegacyTxType:
+		signer = e_types.NewEIP155Signer(chainID) // chainID > 0 and Protected() already checked above
+	case e_types.AccessListTxType, e_types.DynamicFeeTxType:
+		signer = e_types.NewLondonSigner(chainID)
+	case e_types.BlobTxType:
+		signer = e_types.NewCancunSigner(chainID)
+	case e_types.SetCodeTxType:
+		signer = e_types.NewPragueSigner(chainID)
+	default:
+		signer = e_types.LatestSignerForChainID(chainID)
+	}
 	from, err := e_types.Sender(signer, ethTx)
 	if err != nil {
 		return fmt.Errorf("%w: failed to recover sender: %v", ErrSenderRecovery, err)
