@@ -1,0 +1,1 @@
+{"tag": "m9_A2_2", "mode": "raft", "bin": "simple_chain_A2", "args": ["-duration", "60", "-batch", "1000"], "submitted": 1581000, "on_chain": 1581000, "complete": true, "blast_secs": 87.7, "e2e_secs": 94.6, "e2e_tps": 16709, "tool_tps": 22599, "p50_ms": 26067, "p99_ms": 52670, "zero_fork": true, "roots": true}

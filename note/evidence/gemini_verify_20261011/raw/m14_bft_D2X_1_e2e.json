@@ -1,0 +1,1 @@
+{"tag": "m14_bft_D2X_1", "mode": "bft", "bin": "simple_chain_D2X", "args": ["-duration", "60", "-batch", "1000"], "submitted": 4388000, "on_chain": 4388000, "complete": true, "blast_secs": 152.5, "e2e_secs": 347.1, "e2e_tps": 12643, "tool_tps": 12826, "p50_ms": 61742, "p99_ms": 74793, "zero_fork": true, "roots": true}

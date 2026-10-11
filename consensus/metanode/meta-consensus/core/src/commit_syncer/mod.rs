@@ -2838,7 +2838,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
     }
 }
 
-struct Inner<C: NetworkClient> {
+pub(crate) struct Inner<C: NetworkClient> {
     context: Arc<Context>,
     core_thread_dispatcher: Arc<dyn CoreThreadDispatcher>,
     commit_vote_monitor: Arc<CommitVoteMonitor>,
@@ -3738,6 +3738,151 @@ mod tests {
             false,
         );
         assert!(res.is_ok(), "catch-up must still accept a commit that replaces nothing: {:?}", res.map(|_| ()));
+    }
+
+    #[derive(Default)]
+    struct PrefixMockNetworkClient {
+        commit_bytes: Bytes,
+        blocks: std::collections::HashMap<BlockRef, Bytes>,
+        prefix_limit: usize,
+        fetch_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl NetworkClient for PrefixMockNetworkClient {
+        async fn send_block(&self, _peer: AuthorityIndex, _serialized_block: &VerifiedBlock, _timeout: Duration) -> ConsensusResult<()> {
+            unimplemented!()
+        }
+        async fn subscribe_blocks(&self, _peer: AuthorityIndex, _last_received: Round, _timeout: Duration) -> ConsensusResult<BlockStream> {
+            unimplemented!()
+        }
+        async fn fetch_blocks(
+            &self,
+            _peer: AuthorityIndex,
+            block_refs: Vec<BlockRef>,
+            _highest_accepted_rounds: Vec<Round>,
+            _breadth_first: bool,
+            _timeout: Duration,
+        ) -> ConsensusResult<Vec<Bytes>> {
+            self.fetch_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let limit = self.prefix_limit.min(block_refs.len());
+            let mut res = Vec::new();
+            for r in &block_refs[..limit] {
+                if let Some(b) = self.blocks.get(r) {
+                    res.push(b.clone());
+                }
+            }
+            Ok(res)
+        }
+        async fn fetch_commits(
+            &self,
+            _peer: AuthorityIndex,
+            _commit_range: CommitRange,
+            _timeout: Duration,
+        ) -> ConsensusResult<(Vec<Bytes>, Vec<Bytes>, Vec<Bytes>)> {
+            Ok((vec![self.commit_bytes.clone()], vec![], vec![]))
+        }
+        async fn fetch_commits_by_global_range(
+            &self,
+            _peer: AuthorityIndex,
+            _start_global_index: u64,
+            _max_global_index: u64,
+            _timeout: Duration,
+        ) -> ConsensusResult<Vec<crate::network::tonic_network::GlobalCommitInfo>> {
+            unimplemented!()
+        }
+        async fn send_epoch_change_proposal(&self, _peer: AuthorityIndex, _proposal: &crate::epoch_change::EpochChangeProposal, _timeout: Duration) -> ConsensusResult<()> {
+            unimplemented!()
+        }
+        async fn send_epoch_change_vote(&self, _peer: AuthorityIndex, _vote: &crate::epoch_change::EpochChangeVote, _timeout: Duration) -> ConsensusResult<()> {
+            unimplemented!()
+        }
+        async fn fetch_latest_blocks(&self, _peer: AuthorityIndex, _authorities: Vec<AuthorityIndex>, _timeout: Duration) -> ConsensusResult<Vec<Bytes>> {
+            unimplemented!()
+        }
+        async fn get_latest_rounds(&self, _peer: AuthorityIndex, _timeout: Duration) -> ConsensusResult<(Vec<Round>, Vec<Round>)> {
+            unimplemented!()
+        }
+        async fn get_epoch_status(&self, _peer: AuthorityIndex, _timeout: Duration) -> ConsensusResult<crate::network::tonic_network::GetEpochStatusResponse> {
+            Ok(crate::network::tonic_network::GetEpochStatusResponse {
+                epoch: 0,
+                current_epoch_start_commit: 0,
+                last_commit_index: 10,
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_fetch_blocks_recovers_when_peer_returns_partial_prefix() {
+        let (context, _) = Context::new_for_test(4);
+        let context = Arc::new(context);
+        let block_verifier = Arc::new(NoopBlockVerifier {});
+        let core_thread_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
+        let store = Arc::new(MemStore::new());
+        let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
+        let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let transaction_certifier = TransactionCertifier::new(
+            context.clone(),
+            block_verifier.clone(),
+            dag_state.clone(),
+            blocks_sender,
+        );
+        let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
+        let commit_consumer_monitor = Arc::new(CommitConsumerMonitor::new(0, 0));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        let hub = crate::coordination_hub::ConsensusCoordinationHub::new_for_testing();
+
+        // Create 4 blocks
+        let b0 = VerifiedBlock::new_for_test(TestBlock::new(1, 0).build());
+        let b1 = VerifiedBlock::new_for_test(TestBlock::new(1, 1).build());
+        let b2 = VerifiedBlock::new_for_test(TestBlock::new(1, 2).build());
+        let b3 = VerifiedBlock::new_for_test(TestBlock::new(1, 3).build());
+
+        let mut blocks_map = std::collections::HashMap::new();
+        blocks_map.insert(b0.reference(), b0.serialized().clone());
+        blocks_map.insert(b1.reference(), b1.serialized().clone());
+        blocks_map.insert(b2.reference(), b2.serialized().clone());
+        blocks_map.insert(b3.reference(), b3.serialized().clone());
+
+        let leader = b0.reference();
+        let block_refs = vec![b0.reference(), b1.reference(), b2.reference(), b3.reference()];
+        let commit = crate::commit::Commit::new(1, CommitDigest::MIN, 1000, leader, block_refs, 1);
+        let commit_bytes = commit.serialize().unwrap();
+
+        let fetch_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let network_client = Arc::new(PrefixMockNetworkClient {
+            commit_bytes,
+            blocks: blocks_map,
+            prefix_limit: 2, // Return only 2 of the 4 requested blocks per fetch
+            fetch_calls: fetch_calls.clone(),
+        });
+
+        let inner = Arc::new(super::Inner {
+            context: context.clone(),
+            core_thread_dispatcher,
+            commit_vote_monitor,
+            commit_consumer_monitor,
+            block_verifier,
+            transaction_certifier,
+            network_client,
+            dag_state,
+            dag_state_writer,
+            _coordination_hub: hub,
+        });
+
+        // Calling fetch_once with prefix_limit = 2:
+        // Must succeed by fetching remainder on second iteration!
+        let target = AuthorityIndex::new_for_test(1);
+        let res = CommitSyncer::<PrefixMockNetworkClient>::fetch_once(
+            inner,
+            target,
+            CommitRange::new(1..=1),
+            Duration::from_secs(5),
+            false,
+        ).await;
+
+        assert!(res.is_ok(), "fetch_once must recover when peer returns partial prefix, got {:?}", res.err());
+        assert_eq!(fetch_calls.load(std::sync::atomic::Ordering::SeqCst), 2, "must have made 2 fetch_blocks calls to retrieve 4 blocks in batches of 2");
     }
 }
 pub mod cold_start;

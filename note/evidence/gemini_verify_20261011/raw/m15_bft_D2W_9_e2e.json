@@ -1,0 +1,1 @@
+{"tag": "m15_bft_D2W_9", "mode": "bft", "bin": "simple_chain_D2W", "args": ["-duration", "60", "-batch", "1000"], "submitted": 4504000, "on_chain": 4504000, "complete": true, "blast_secs": 135.5, "e2e_secs": 359.8, "e2e_tps": 12519, "tool_tps": 13088, "p50_ms": 60051, "p99_ms": 74392, "zero_fork": true, "roots": true}

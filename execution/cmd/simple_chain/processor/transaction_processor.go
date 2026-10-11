@@ -496,6 +496,9 @@ const poolAdmissionHeadroom = 40000
 // discarded because the client already left, and giving up would fall back to the lossy path. The pool drains as soon
 // as the forwarder makes progress (futures are dropped after FutureTxTimeout). Callers hold admitMu.
 func (tp *TransactionProcessor) waitForPoolRoom(n int) {
+	if tp.TxValidatorPool == nil || tp.transactionPool == nil { // only unit-test fixtures lack a pool; nothing to wait for
+		return
+	}
 	start := time.Now()
 	warned := false
 	for tp.transactionPool.CountTransactions()+n >= MaxMempoolSize-poolAdmissionHeadroom {

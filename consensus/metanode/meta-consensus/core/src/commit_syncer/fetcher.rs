@@ -196,7 +196,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
     // Fetches commits and blocks from a single authority. At a high level, first the commits are
     // fetched and verified. After that, blocks referenced in the certified commits are fetched
     // and sent to Core for processing.
-    async fn fetch_once(
+    pub(crate) async fn fetch_once(
         inner: Arc<Inner<C>>,
         target_authority: AuthorityIndex,
         mut commit_range: CommitRange,
