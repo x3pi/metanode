@@ -90,3 +90,16 @@ Nếu thiếu thời gian, **không cắt số lần** của một việc để 
 - Mọi con số trong báo cáo truy ngược được tới file thô và khớp `summarize.py`.
 - Claude sẽ tự chạy lại ngẫu nhiên 2–3 test (`cargo test ... commit_syncer`, `go test ... TestSortEquivalence`) và đối chiếu sha256 binary/file thô.
 - `git status` sạch ngoài các file được phép; không có thay đổi mã sản phẩm nằm ngoài danh sách đã duyệt.
+
+---
+
+## 9. Bổ sung sau khi Claude đọc `note/gemini_phase2_report_20261011.md` (bản nháp Gemini nộp trong lúc kế hoạch này được soạn)
+
+Báo cáo đã tồn tại ⇒ **sửa bản này, không viết lại từ đầu**. Các điểm phải sửa (đã đối chiếu với mã):
+
+1. **§3.3 giả thuyết 2 (CQ ring overflow, worker đi ngủ khi CQE chưa được gặt) mâu thuẫn với chính mã `run_worker`** (`consensus/vendor/nomt/nomt/src/io/linux.rs`): một lệnh chỉ rời `pending` khi CQE của nó được gặt (`pending.remove(...)` trong vòng xử lý completion). Worker chỉ vào nhánh `command_rx.recv()` khi `pending.is_empty()` — tức mọi CQE đã được gặt và completion đã `send`. Vì vậy kịch bản "CQE chưa được gặt mà worker vẫn ngủ" không thể xảy ra theo mã này. Hoặc (a) chỉ ra đường dẫn mã cụ thể (file:dòng) mà kịch bản đó có thể xảy ra, hoặc (b) bỏ giả thuyết, hoặc (c) ghi rõ là **suy đoán chưa có căn cứ**. Cụm "hàng trăm ngàn I/O requests" cần số liệu hoặc bỏ.
+2. **Đoạn mã trích trong §3.2.1 (`make_handle`, `IoHandle { sender, receiver }`) không khớp mã thật** (`IoHandle` thật có `sender: Weak<Sender<IoPacket>>`, `completion_sender`, `completion_receiver`; xem `io/mod.rs` quanh dòng 202). Mọi đoạn mã trích trong báo cáo phải **sao chép nguyên văn kèm `file:dòng`**; không diễn giải lại thành "mã minh hoạ".
+3. **"Loại trừ 100%"** chỉ đúng nếu có kết quả grep cụ thể kèm lệnh. Ghi lệnh và số kết quả; nếu không, hạ xuống "không tìm thấy trong grep …".
+4. Giả thuyết còn mở hợp lý hơn cần xem xét thay cho (2): completion bị mất ở kênh `completion_sender → completion_receiver` do `Err` bị nuốt (`let _ = completion_sender.send(...)` trong `run_worker`), hoặc `write_ht` đếm `sent` lệch với số lệnh worker thực sự nhận (ví dụ lệnh bị `Weak::upgrade` thất bại ở `IoHandle::send` rồi `unwrap`). Dùng log chẩn đoán ở Việc C để kiểm, không kết luận trước.
+5. **§ về `secp_tps_blast` treo socket:** báo cáo nói "bị treo vĩnh viễn" nhưng không dẫn tag/log. Thêm bằng chứng (tag lần chạy, thời gian treo, stack nếu có) hoặc rút lại (xem Việc A).
+6. Các bảng số TPS trong báo cáo phải **tách theo phiên bản tool blast** và được in bởi `summarize.py` (Việc E), không gõ tay.
