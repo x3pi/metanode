@@ -3120,7 +3120,7 @@ mod tests {
         context::Context,
         core_thread::MockCoreThreadDispatcher,
         dag_state::DagState,
-        error::ConsensusResult,
+        error::{ConsensusError, ConsensusResult},
         network::{BlockStream, NetworkClient},
         storage::mem_store::MemStore,
         transaction_certifier::TransactionCertifier,
@@ -3883,6 +3883,340 @@ mod tests {
 
         assert!(res.is_ok(), "fetch_once must recover when peer returns partial prefix, got {:?}", res.err());
         assert_eq!(fetch_calls.load(std::sync::atomic::Ordering::SeqCst), 2, "must have made 2 fetch_blocks calls to retrieve 4 blocks in batches of 2");
+    }
+
+    #[derive(Clone)]
+    enum SafetyMockBehavior {
+        /// Peer drops a block in the middle (e.g. returns b0, b2, b3 when [b0, b1, b2, b3] was requested)
+        SkipBlockIndex(usize),
+        /// Peer makes no progress: returns prefix on first call, empty response on second call
+        StallOnSecondCall(usize),
+        /// Peer returns valid SignedBlock format but with mismatched digest / corrupted payload
+        CorruptBlock(usize, Bytes),
+        /// Peer returns more blocks than requested
+        ExcessBlocks(Bytes),
+    }
+
+    struct SafetyMockNetworkClient {
+        commit_bytes: Bytes,
+        blocks: std::collections::HashMap<BlockRef, Bytes>,
+        behavior: SafetyMockBehavior,
+        fetch_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl NetworkClient for SafetyMockNetworkClient {
+        async fn send_block(&self, _peer: AuthorityIndex, _serialized_block: &VerifiedBlock, _timeout: Duration) -> ConsensusResult<()> {
+            unimplemented!()
+        }
+        async fn subscribe_blocks(&self, _peer: AuthorityIndex, _last_received: Round, _timeout: Duration) -> ConsensusResult<BlockStream> {
+            unimplemented!()
+        }
+        async fn fetch_blocks(
+            &self,
+            _peer: AuthorityIndex,
+            block_refs: Vec<BlockRef>,
+            _highest_accepted_rounds: Vec<Round>,
+            _breadth_first: bool,
+            _timeout: Duration,
+        ) -> ConsensusResult<Vec<Bytes>> {
+            let call = self.fetch_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match &self.behavior {
+                SafetyMockBehavior::SkipBlockIndex(skip_idx) => {
+                    let mut res = Vec::new();
+                    for (i, r) in block_refs.iter().enumerate() {
+                        if i == *skip_idx {
+                            continue;
+                        }
+                        if let Some(b) = self.blocks.get(r) {
+                            res.push(b.clone());
+                        }
+                    }
+                    Ok(res)
+                }
+                SafetyMockBehavior::StallOnSecondCall(prefix_len) => {
+                    if call >= 1 {
+                        Ok(Vec::new())
+                    } else {
+                        let limit = (*prefix_len).min(block_refs.len());
+                        let mut res = Vec::new();
+                        for r in &block_refs[..limit] {
+                            if let Some(b) = self.blocks.get(r) {
+                                res.push(b.clone());
+                            }
+                        }
+                        Ok(res)
+                    }
+                }
+                SafetyMockBehavior::CorruptBlock(corrupt_idx, corrupt_bytes) => {
+                    let mut res = Vec::new();
+                    for (i, r) in block_refs.iter().enumerate() {
+                        if i == *corrupt_idx {
+                            res.push(corrupt_bytes.clone());
+                        } else if let Some(b) = self.blocks.get(r) {
+                            res.push(b.clone());
+                        }
+                    }
+                    Ok(res)
+                }
+                SafetyMockBehavior::ExcessBlocks(extra_bytes) => {
+                    let mut res = Vec::new();
+                    for r in &block_refs {
+                        if let Some(b) = self.blocks.get(r) {
+                            res.push(b.clone());
+                        }
+                    }
+                    res.push(extra_bytes.clone());
+                    Ok(res)
+                }
+            }
+        }
+        async fn fetch_commits(
+            &self,
+            _peer: AuthorityIndex,
+            _commit_range: CommitRange,
+            _timeout: Duration,
+        ) -> ConsensusResult<(Vec<Bytes>, Vec<Bytes>, Vec<Bytes>)> {
+            Ok((vec![self.commit_bytes.clone()], vec![], vec![]))
+        }
+        async fn fetch_commits_by_global_range(
+            &self,
+            _peer: AuthorityIndex,
+            _start_global_index: u64,
+            _max_global_index: u64,
+            _timeout: Duration,
+        ) -> ConsensusResult<Vec<crate::network::tonic_network::GlobalCommitInfo>> {
+            unimplemented!()
+        }
+        async fn send_epoch_change_proposal(&self, _peer: AuthorityIndex, _proposal: &crate::epoch_change::EpochChangeProposal, _timeout: Duration) -> ConsensusResult<()> {
+            unimplemented!()
+        }
+        async fn send_epoch_change_vote(&self, _peer: AuthorityIndex, _vote: &crate::epoch_change::EpochChangeVote, _timeout: Duration) -> ConsensusResult<()> {
+            unimplemented!()
+        }
+        async fn fetch_latest_blocks(&self, _peer: AuthorityIndex, _authorities: Vec<AuthorityIndex>, _timeout: Duration) -> ConsensusResult<Vec<Bytes>> {
+            unimplemented!()
+        }
+        async fn get_latest_rounds(&self, _peer: AuthorityIndex, _timeout: Duration) -> ConsensusResult<(Vec<Round>, Vec<Round>)> {
+            unimplemented!()
+        }
+        async fn get_epoch_status(&self, _peer: AuthorityIndex, _timeout: Duration) -> ConsensusResult<crate::network::tonic_network::GetEpochStatusResponse> {
+            Ok(crate::network::tonic_network::GetEpochStatusResponse {
+                epoch: 0,
+                current_epoch_start_commit: 0,
+                last_commit_index: 10,
+            })
+        }
+    }
+
+    #[allow(dead_code)]
+    struct SafetyTestSetup {
+        inner: Arc<super::Inner<SafetyMockNetworkClient>>,
+        fetch_calls: Arc<std::sync::atomic::AtomicUsize>,
+        b0: VerifiedBlock,
+        b1: VerifiedBlock,
+        b2: VerifiedBlock,
+        b3: VerifiedBlock,
+    }
+
+    fn setup_safety_test(behavior: SafetyMockBehavior) -> SafetyTestSetup {
+        let (context, _) = Context::new_for_test(4);
+        let context = Arc::new(context);
+        let block_verifier = Arc::new(NoopBlockVerifier {});
+        let core_thread_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
+        let store = Arc::new(MemStore::new());
+        let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
+        let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let transaction_certifier = TransactionCertifier::new(
+            context.clone(),
+            block_verifier.clone(),
+            dag_state.clone(),
+            blocks_sender,
+        );
+        let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
+        let commit_consumer_monitor = Arc::new(CommitConsumerMonitor::new(0, 0));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        let hub = crate::coordination_hub::ConsensusCoordinationHub::new_for_testing();
+
+        let b0 = VerifiedBlock::new_for_test(TestBlock::new(1, 0).build());
+        let b1 = VerifiedBlock::new_for_test(TestBlock::new(1, 1).build());
+        let b2 = VerifiedBlock::new_for_test(TestBlock::new(1, 2).build());
+        let b3 = VerifiedBlock::new_for_test(TestBlock::new(1, 3).build());
+
+        let mut blocks_map = std::collections::HashMap::new();
+        blocks_map.insert(b0.reference(), b0.serialized().clone());
+        blocks_map.insert(b1.reference(), b1.serialized().clone());
+        blocks_map.insert(b2.reference(), b2.serialized().clone());
+        blocks_map.insert(b3.reference(), b3.serialized().clone());
+
+        let leader = b0.reference();
+        let block_refs = vec![b0.reference(), b1.reference(), b2.reference(), b3.reference()];
+        let commit = crate::commit::Commit::new(1, CommitDigest::MIN, 1000, leader, block_refs, 1);
+        let commit_bytes = commit.serialize().unwrap();
+
+        let fetch_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let network_client = Arc::new(SafetyMockNetworkClient {
+            commit_bytes,
+            blocks: blocks_map,
+            behavior,
+            fetch_calls: fetch_calls.clone(),
+        });
+
+        let inner = Arc::new(super::Inner {
+            context: context.clone(),
+            core_thread_dispatcher,
+            commit_vote_monitor,
+            commit_consumer_monitor,
+            block_verifier,
+            transaction_certifier,
+            network_client,
+            dag_state,
+            dag_state_writer,
+            _coordination_hub: hub,
+        });
+
+        SafetyTestSetup {
+            inner,
+            fetch_calls,
+            b0,
+            b1,
+            b2,
+            b3,
+        }
+    }
+
+    /// Task T4 - Test 1: Peer drops block in the middle (returns b0, b2, b3 instead of b0, b1, b2, b3).
+    /// fetch_once must reject the response with an error (e.g. UnexpectedBlockForCommit), refusing misplaced blocks.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_fetch_blocks_rejects_missing_block_in_middle() {
+        // Skip index 1 (b1): peer returns [b0, b2, b3] for 4-block request
+        let setup = setup_safety_test(SafetyMockBehavior::SkipBlockIndex(1));
+        let target = AuthorityIndex::new_for_test(1);
+
+        let res = CommitSyncer::<SafetyMockNetworkClient>::fetch_once(
+            setup.inner,
+            target,
+            CommitRange::new(1..=1),
+            Duration::from_secs(5),
+            false,
+        ).await;
+
+        assert!(
+            res.is_err(),
+            "fetch_once must fail when peer drops a block in the middle, but got Ok"
+        );
+        let err = res.err().unwrap();
+        assert!(
+            matches!(
+                err,
+                ConsensusError::UnexpectedBlockForCommit { .. }
+                    | ConsensusError::UnexpectedNumberOfBlocksFetched { .. }
+            ),
+            "expected UnexpectedBlockForCommit or UnexpectedNumberOfBlocksFetched, got {:?}",
+            err
+        );
+    }
+
+    /// Task T4 - Test 2: Peer makes no progress (returns prefix on first call, empty on second call).
+    /// fetch_once must gracefully return UnexpectedNumberOfBlocksFetched without hanging or infinite loop.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_fetch_blocks_fails_gracefully_when_peer_makes_no_progress() {
+        // First fetch gets 2 blocks (prefix_limit=2), second fetch gets empty response
+        let setup = setup_safety_test(SafetyMockBehavior::StallOnSecondCall(2));
+        let target = AuthorityIndex::new_for_test(1);
+
+        // Guard with a 5-second test timeout to verify no infinite loop occurs
+        let fetch_future = CommitSyncer::<SafetyMockNetworkClient>::fetch_once(
+            setup.inner,
+            target,
+            CommitRange::new(1..=1),
+            Duration::from_secs(5),
+            false,
+        );
+
+        let res = tokio::time::timeout(Duration::from_secs(5), fetch_future)
+            .await
+            .expect("fetch_once timed out, possible infinite loop detected when peer stalls!");
+
+        assert!(
+            res.is_err(),
+            "fetch_once must return error when peer makes no progress"
+        );
+        let err = res.err().unwrap();
+        match err {
+            ConsensusError::UnexpectedNumberOfBlocksFetched { authority, requested, received } => {
+                assert_eq!(authority, target);
+                assert_eq!(requested, 4);
+                assert_eq!(received, 2);
+            }
+            other => panic!("expected UnexpectedNumberOfBlocksFetched, got {:?}", other),
+        }
+    }
+
+    /// Task T4 - Test 3: Peer returns corrupted block digest (correct count, but block digest mismatch).
+    /// fetch_once must reject with UnexpectedBlockForCommit.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_fetch_blocks_rejects_corrupted_block_digest() {
+        // Create an illegitimate block with round 1, author 99 to simulate tampered content
+        let corrupted_block = VerifiedBlock::new_for_test(TestBlock::new(1, 99).build());
+        let setup = setup_safety_test(SafetyMockBehavior::CorruptBlock(
+            1, // Corrupt block at index 1 (expected b1)
+            corrupted_block.serialized().clone(),
+        ));
+        let target = AuthorityIndex::new_for_test(1);
+
+        let res = CommitSyncer::<SafetyMockNetworkClient>::fetch_once(
+            setup.inner,
+            target,
+            CommitRange::new(1..=1),
+            Duration::from_secs(5),
+            false,
+        ).await;
+
+        assert!(
+            res.is_err(),
+            "fetch_once must reject block with mismatched digest"
+        );
+        let err = res.err().unwrap();
+        match err {
+            ConsensusError::UnexpectedBlockForCommit { peer, requested, received } => {
+                assert_eq!(peer, target);
+                assert_eq!(requested, setup.b1.reference());
+                assert_eq!(received, corrupted_block.reference());
+            }
+            other => panic!("expected UnexpectedBlockForCommit, got {:?}", other),
+        }
+    }
+
+    /// Task T4 - Test 4: Peer returns more blocks than requested (excess blocks).
+    /// fetch_once must reject with UnexpectedNumberOfBlocksFetched.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_fetch_blocks_rejects_excess_blocks() {
+        let extra_block = VerifiedBlock::new_for_test(TestBlock::new(1, 99).build());
+        let setup = setup_safety_test(SafetyMockBehavior::ExcessBlocks(extra_block.serialized().clone()));
+        let target = AuthorityIndex::new_for_test(1);
+
+        let res = CommitSyncer::<SafetyMockNetworkClient>::fetch_once(
+            setup.inner,
+            target,
+            CommitRange::new(1..=1),
+            Duration::from_secs(5),
+            false,
+        ).await;
+
+        assert!(
+            res.is_err(),
+            "fetch_once must reject excess blocks from peer"
+        );
+        let err = res.err().unwrap();
+        match err {
+            ConsensusError::UnexpectedNumberOfBlocksFetched { authority, requested, received } => {
+                assert_eq!(authority, target);
+                assert_eq!(requested, 4);
+                assert_eq!(received, 5);
+            }
+            other => panic!("expected UnexpectedNumberOfBlocksFetched, got {:?}", other),
+        }
     }
 }
 pub mod cold_start;
