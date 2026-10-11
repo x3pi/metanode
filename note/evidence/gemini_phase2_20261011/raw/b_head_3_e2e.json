@@ -1,0 +1,1 @@
+{"tag": "b_head_3", "mode": "bft", "bin": "simple_chain_HEAD", "args": ["-duration", "60", "-batch", "1000"], "submitted": 3883000, "on_chain": 3883000, "complete": true, "blast_secs": 84.4, "e2e_secs": 298.0, "e2e_tps": 13032, "tool_tps": 17420, "p50_ms": 45509, "p99_ms": 73285, "zero_fork": true, "roots": true}
