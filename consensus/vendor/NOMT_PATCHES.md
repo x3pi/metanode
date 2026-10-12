@@ -12,8 +12,10 @@ The vendored tree MUST equal upstream plus ONLY the patches listed here (verify 
    `nomt_commit_payload -> write_ht -> IoHandle::recv`, while the diagnostics showed `completion_channel_len=11,
    channel_is_empty=false`, all 36297 I/O packets received/reaped/completed, and every io-worker idle: the completions
    were queued but the receiver was never woken. The loop only re-checks the queue; it waits for the same completions
-   indefinitely and decides nothing by time, so it cannot change any committed state. If the workaround ever fires it
-   prints `[NOMT-IO] recovered a lost wake-up`.
+   indefinitely and decides nothing by time, so it cannot change any committed state. A `recv` that needed at least one full poll slice
+   prints `[NOMT-IO] recv waited ... (slow I/O or a recovered lost wake-up)` (first 20, then every 1000th); crossbeam returns
+   the recovered message as Ok, so this cannot distinguish slow I/O from a recovered wake-up. The evidence that the patch
+   works is the hang rate: 0 hangs in 43 saturated BFT runs with it vs about 1 in 10 without (5 hangs seen).
 
 DO NOT remove fsync/`sync_all`/`sync_data` calls (`io/fsyncer.rs`, `seglog/mod.rs`, `seglog/segment_rw.rs`). An earlier
 version of this vendor commit shipped with ALL NOMT fsyncs disabled (copied from a locally hand-edited cargo checkout);
