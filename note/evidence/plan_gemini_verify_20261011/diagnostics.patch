@@ -1,0 +1,110 @@
+diff --git a/consensus/metanode/meta-consensus/core/src/authority_service/handlers.rs b/consensus/metanode/meta-consensus/core/src/authority_service/handlers.rs
+index 714e0fd3..41b4d160 100644
+--- a/consensus/metanode/meta-consensus/core/src/authority_service/handlers.rs
++++ b/consensus/metanode/meta-consensus/core/src/authority_service/handlers.rs
+@@ -586,6 +586,24 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
+             }
+         }
+ 
++        // DIAGNOSTIC (no behaviour change): report which requested refs could not be served at all.
++        if highest_accepted_rounds.is_empty() && blocks.len() < block_refs.len() {
++            let served: std::collections::HashSet<_> = blocks.iter().map(|b| b.reference()).collect();
++            let missing: Vec<_> = block_refs.iter().filter(|r| !served.contains(r)).collect();
++            let gc_round = self.dag_state.read().gc_round();
++            tracing::warn!(
++                "🔎 [FETCH-BLOCKS-DIAG] peer={} requested={} served={} missing={} gc_round={} missing_refs(first 8)={:?} requested_round_range={:?}..={:?}",
++                _peer,
++                block_refs.len(),
++                blocks.len(),
++                missing.len(),
++                gc_round,
++                missing.iter().take(8).collect::<Vec<_>>(),
++                block_refs.iter().map(|r| r.round).min(),
++                block_refs.iter().map(|r| r.round).max()
++            );
++        }
++
+         // Return the serialized blocks
+         let bytes = blocks
+             .into_iter()
+diff --git a/consensus/metanode/meta-consensus/core/src/commit_syncer/fetcher.rs b/consensus/metanode/meta-consensus/core/src/commit_syncer/fetcher.rs
+index f3256c13..ae810fb4 100644
+--- a/consensus/metanode/meta-consensus/core/src/commit_syncer/fetcher.rs
++++ b/consensus/metanode/meta-consensus/core/src/commit_syncer/fetcher.rs
+@@ -340,6 +340,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
+             .len()
+             .div_ceil(inner.context.parameters.max_blocks_per_fetch)
+             as u32;
++        let num_commits = commits.len();
+         let mut requests: FuturesOrdered<_> = block_refs
+             .chunks(inner.context.parameters.max_blocks_per_fetch)
+             .enumerate()
+@@ -394,6 +395,23 @@ impl<C: NetworkClient> CommitSyncer<C> {
+                     };
+                     // 5. Verify the same number of blocks are returned as requested.
+                     if request_block_refs.len() != serialized_blocks.len() {
++                        // DIAGNOSTIC (no behaviour change): list the refs the peer did not return.
++                        let returned: std::collections::HashSet<BlockRef> = serialized_blocks
++                            .iter()
++                            .filter_map(|b| {
++                                let sb: SignedBlock = bcs::from_bytes(b).ok()?;
++                                Some(BlockRef::new(sb.round(), sb.author(), VerifiedBlock::compute_digest(b)))
++                            })
++                            .collect();
++                        let missing: Vec<_> = request_block_refs.iter().filter(|r| !returned.contains(*r)).collect();
++                        warn!(
++                            "🔎 [FETCH-DIAG] peer={} requested={} returned={} not_returned(first 8)={:?} num_commits={}",
++                            target_authority,
++                            request_block_refs.len(),
++                            serialized_blocks.len(),
++                            missing.iter().take(8).collect::<Vec<_>>(),
++                            num_commits
++                        );
+                         return Err(ConsensusError::UnexpectedNumberOfBlocksFetched {
+                             authority: target_authority,
+                             requested: request_block_refs.len(),
+diff --git a/execution/pkg/utils/watchdog.go b/execution/pkg/utils/watchdog.go
+index 37d18309..73874fd8 100644
+--- a/execution/pkg/utils/watchdog.go
++++ b/execution/pkg/utils/watchdog.go
+@@ -1,11 +1,30 @@
+ package utils
+ 
+ import (
++	"fmt"
++	"os"
++	"runtime"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+ )
+ 
++var watchdogDumped atomic.Bool
++
++// dumpGoroutinesOnce writes all goroutine stacks to a file (once per process) so a hang can be diagnosed post-mortem.
++func dumpGoroutinesOnce(name string) {
++	if !watchdogDumped.CompareAndSwap(false, true) {
++		return
++	}
++	buf := make([]byte, 64<<20)
++	n := runtime.Stack(buf, true)
++	path := fmt.Sprintf("/tmp/watchdog_goroutines_%s_%d_%d.txt", name, os.Getpid(), time.Now().Unix())
++	if err := os.WriteFile(path, buf[:n], 0o644); err == nil {
++		logger.Warn("🆘 [WATCHDOG-%s] goroutine dump written to %s (%d bytes)", name, path, n)
++	}
++}
++
+ // StartWatchdog starts a background goroutine that prints a warning if it takes longer than the timeout.
+ // getContext is called every time the timer fires to get the latest status.
+ // It returns a Stop function that MUST be called when the tracked process finishes.
+@@ -20,6 +39,9 @@ func StartWatchdog(name string, timeout time.Duration, getContext func() string)
+ 			select {
+ 			case <-timer.C:
+ 				logger.Warn("🆘 [WATCHDOG-%s] TIẾN TRÌNH KẸT QUÁ LÂU (%v)! Ngữ cảnh: %s", name, time.Since(startTime), getContext())
++				if time.Since(startTime) >= 10*time.Second {
++					dumpGoroutinesOnce(name)
++				}
+ 				timer.Reset(timeout)
+ 			case <-doneChan:
+ 				return
