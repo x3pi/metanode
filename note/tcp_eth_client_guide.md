@@ -191,10 +191,10 @@ console.log("Receipt status:", receipt.status);
 
 | Tham số / Giới hạn | Ngưỡng tối đa | Cơ chế cưỡng chế | Hành vi khi vượt quá |
 | :--- | :--- | :--- | :--- |
-| **Standard Tx Envelope** | `128 KB` (131,072 bytes) | `MaxStandardTxEnvelopeSize` | Trả mã lỗi 76 (`ErrExceedsMaxEnvelopeSize`), drop ngay tại TCP readloop |
+| **Standard Tx Envelope** | `768 KB` (786,432 bytes) | `MaxStandardTxEnvelopeSize` | Trả mã lỗi 76 (`ErrExceedsMaxEnvelopeSize`), drop ngay tại TCP readloop |
 | **Blob Tx Envelope (4844)** | `1 MB` (1,048,576 bytes) | `MaxRawEthTxEnvelopeSize` | Trả mã lỗi 76 (`ErrExceedsMaxEnvelopeSize`) |
 | **TCP Batch Size** | `1,000` giao dịch / request | `MaxBatchTxCount` | Trả mã lỗi 75 (`ErrExceedsMaxBatchSize`), từ chối cả batch |
-| **Contract InitCode Size** | `48 KB` (49,152 bytes) | EIP-3860 `MaxInitCodeSize` | Trả mã lỗi 86 (`ErrMaxInitCodeSizeExceeded`) |
+| **Contract InitCode Size** | `512 KB` (524,288 bytes) | `MaxInitCodeSize` | Trả mã lỗi 86 (`ErrMaxInitCodeSizeExceeded`) |
 | **Access List Size** | `1,024` tuples | `MaxAccessListTuples` | Trả mã lỗi `InvalidTransaction` |
 | **TCP Ingress Rate Limit** | `50,000` req/s (burst 5,000) | Token Bucket Rate Limiter | Trả message `ServerBusy` (non-blocking) |
 | **TCP Read Rate Limit** | `500,000` req/s (burst 50,000) | Token Bucket Rate Limiter | Trả message `ServerBusy` (non-blocking) |
@@ -214,9 +214,9 @@ Khi một giao dịch gửi qua TCP hoặc RPC bị từ chối, node sẽ trả
 | **73** | `ErrMalleableSignature` | Chữ ký dẻo: giá trị $s > N/2$ (vi phạm EIP-2) | `-32000` (malleable signature) |
 | **74** | `ErrSenderRecovery` | Không thể phục hồi địa chỉ người gửi từ chữ ký secp256k1 | `-32000` (invalid sender) |
 | **75** | `ErrExceedsMaxBatchSize` | Batch TCP vượt quá giới hạn 1,000 giao dịch | `-32000` (batch exceeds max size) |
-| **76** | `ErrExceedsMaxEnvelopeSize`| Kích thước envelope vượt quá 128 KB (hoặc 1 MB cho blob) | `-32000` (envelope exceeds max size) |
+| **76** | `ErrExceedsMaxEnvelopeSize`| Kích thước envelope vượt quá 768 KB (hoặc 1 MB cho blob) | `-32000` (envelope exceeds max size) |
 | **77** | `ErrInvalidEnvelope` | RawEnvelope rỗng hoặc không phân tích được khi kiểm tra ràng buộc P0-9 | `-32000` (invalid envelope) |
-| **86** | `ErrMaxInitCodeSizeExceeded`| Kích thước initcode khi deploy contract vượt quá 49,152 bytes (EIP-3860) | `-32000` (max initcode size exceeded) |
+| **86** | `ErrMaxInitCodeSizeExceeded`| Kích thước initcode khi deploy contract vượt quá 512 KB | `-32000` (max initcode size exceeded) |
 | **81** | `ErrNonceTooLow` | Nonce của giao dịch nhỏ hơn nonce hiện tại on-chain | `-32000` (nonce too low) |
 | **82** | `ErrNonceTooHigh` | Nonce của giao dịch tạo khoảng trống (nonce gap) | `-32000` (nonce too high) |
 | **83** | `ErrInsufficientFunds` | Số dư tài khoản không đủ trả `gasLimit * gasPrice + value` | `-32000` (insufficient funds) |

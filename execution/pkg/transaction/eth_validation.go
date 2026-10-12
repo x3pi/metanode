@@ -17,14 +17,14 @@ import (
 )
 
 const (
-	// MaxStandardTxEnvelopeSize is the maximum allowed size for standard (non-blob) EIP-2718 envelopes (128 KB).
-	MaxStandardTxEnvelopeSize = 128 * 1024
+	// MaxStandardTxEnvelopeSize is the maximum allowed size for standard (non-blob) EIP-2718 envelopes (768 KB).
+	MaxStandardTxEnvelopeSize = 768 * 1024
 	// MaxRawEthTxEnvelopeSize is the maximum envelope size for EIP-4844 blob transactions with KZG sidecars (1 MB).
 	MaxRawEthTxEnvelopeSize = 1024 * 1024
 	// MaxBatchTxCount is the maximum number of transactions allowed in a single TCP batch.
 	MaxBatchTxCount = 1000
-	// MaxInitCodeSize is the maximum allowed size for contract creation bytecode (48 KB per EIP-3860).
-	MaxInitCodeSize = 49152
+	// MaxInitCodeSize is the maximum allowed size for contract creation bytecode (512 KB for appchain contracts).
+	MaxInitCodeSize = 512 * 1024
 	// MaxAccessListTuples is the maximum allowed number of access list tuples to prevent DoS.
 	MaxAccessListTuples = 1024
 )
@@ -91,7 +91,7 @@ func ValidateEthTxEnvelope(ethTx *e_types.Transaction, expectedChainId *big.Int)
 		return fmt.Errorf("%w: recovered sender address cannot be zero", ErrInvalidSender)
 	}
 
-	// 5. EIP-3860: Reject initcode exceeding MaxInitCodeSize (49152 bytes)
+	// 5. Reject initcode exceeding MaxInitCodeSize (512 KB)
 	if ethTx.To() == nil && len(ethTx.Data()) > MaxInitCodeSize {
 		return fmt.Errorf("%w: initcode size %d exceeds max allowed %d", ErrMaxInitCodeSizeExceeded, len(ethTx.Data()), MaxInitCodeSize)
 	}
