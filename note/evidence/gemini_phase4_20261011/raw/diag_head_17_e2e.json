@@ -1,0 +1,1 @@
+{"tag": "diag_head_17", "mode": "bft", "bin": "simple_chain_HEAD_DIAG", "args": ["-duration", "60", "-batch", "1000"], "submitted": 4597000, "on_chain": 4597000, "complete": true, "blast_secs": 164.5, "e2e_secs": 362.1, "e2e_tps": 12694, "tool_tps": 13152, "p50_ms": 43222, "p99_ms": 76888, "zero_fork": true, "roots": true}

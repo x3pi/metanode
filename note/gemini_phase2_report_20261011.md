@@ -16,6 +16,22 @@
 
 ---
 
+## 0.1 Tổng Quan Kết Quả Đo Đạc & Rủi Ro Phát Hiện
+
+Báo cáo đã thực hiện đo đạc độc lập 100% trên toàn bộ các bộ test (Raft A/B, BFT 128 MiB tool gốc, BFT 128 MiB tool sửa, và Soak 16 MiB cỡ mẫu đủ). Kết quả tổng thể như sau:
+
+1. **Hiệu năng Raft A/B (T1a):** HEAD tăng **+19.11%** so với BASE (Trung vị: 16,700 vs 14,021 tx/s), vượt xa tiêu chuẩn $\ge +10.0\%$. Hoàn tất 13/13 runs (100%), không có sự cố nào.
+2. **Hiệu năng BFT 128 MiB Tool Gốc (T1b):** Chênh lệch trung vị HEAD vs BASE là **-0.82%** (12,872 vs 12,979 tx/s), đạt ngưỡng không suy giảm quá -5.0%.
+3. **Tính ổn định & Chữ ký lỗi phát hiện ở BFT 128 MiB (Cap Thật):**
+   - **BASE có 1/6 lần không hoàn tất (`b_orig_base_4`):** Xuất hiện **946 lỗi Chữ ký 1** (`SIG_1: Byte truncation`), validator `val2` kẹt ở block 252 trong khi các node khác ở block 842. Tỷ lệ tx lên chain đạt 92.6%.
+   - **HEAD có 1/6 lần không hoàn tất (`b_orig_head_3`):** Không có bất kỳ lỗi Chữ ký 1 nào (0 lỗi `SIG_1`), tuy nhiên xuất hiện **Chữ ký 2 (`SIG_2: EVM Watchdog hang`)** với 148 cảnh báo `WATCHDOG-EVM ... ProcessTransactionsOptimistic`, validator `val0` kẹt ở block #26 (chỉ 270,000 / 4,773,567 tx lên chain, tương đương 5.7%).
+4. **Bản fix Fetcher (`27330f8d`) ở Soak 16 MiB (T3a):**
+   - **BASE dính lỗi Chữ ký 1 ở 3/6 lần chạy** (tổng cộng 42,800 lỗi truncation), trong đó run 5 kẹt vĩnh viễn (on-chain 3.7%), run 6 gãy xích từ block 12 (on-chain 3.9%).
+   - **HEAD đạt 0 lỗi Chữ ký 1 trên 6/6 lần chạy**, bảo vệ chain không bị gãy xích do cắt cụt byte.
+5. **Kết luận trung thực:** Mặc dù hiệu năng và fix fetcher đã được xác nhận độc lập, **rủi ro lớn nhất còn lại của hệ thống là hiện tượng treo validator do EVM Watchdog / NOMT hang (`SIG_2`)** như đã xuất hiện ở `b_orig_head_3`. Đây là trọng tâm giải quyết và điều tra tận gốc trong Giai đoạn 4.
+
+---
+
 ## 1. Môi trường & Build Xác Nhận
 
 ### 1.1 Thông số phần cứng & Hệ điều hành
@@ -132,7 +148,7 @@ Chạy kịch bản kiểm tra toàn diện cả Go, Rust, C++ và FFI (`consens
   - Tại HEAD: **0 lỗi Chữ ký 1** trong toàn bộ 6 lần chạy, khẳng định bản fix `27330f8d` giải quyết triệt để lỗi fetcher.
   - Tại `b_orig_head_3`: Xuất hiện Chữ ký 2 (148 cảnh báo EVM Watchdog), `val0` kẹt ở block 26.
   - 100% các lần chạy đều bảo đảm `zero_fork = true`, `roots = true`.
-- **Kết luận T1b (Tool-Original): 🟢 PASS HOÀN TOÀN.**
+- **Kết luận T1b (Tool-Original): 🟡 PASS VỚI LƯU Ý.** Mức chênh lệch trung vị TPS (-0.82%) hoàn toàn thỏa mãn tiêu chuẩn $\ge -5.0\%$, và tỷ lệ hoàn tất tương đương giữa 2 bản (5/6 runs = 83.3%). Tuy nhiên, cả hai bản đều ghi nhận 1 lần không hoàn tất: BASE dính Chữ ký 1 (lỗi cắt cụt fetcher), HEAD dính Chữ ký 2 (EVM Watchdog hang). Do đó, rủi ro treo validator Chữ ký 2 là trọng tâm điều tra tiếp theo.
 
 ---
 
