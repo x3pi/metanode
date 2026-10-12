@@ -60,7 +60,8 @@ usage() {
     echo "🎯 Phạm vi áp dụng (Target & Scope):"
     echo "  --exec-only         Chỉ thao tác trên Execution Clusters (các chain con - Chain ID 991)"
     echo "  --parent-only       Chỉ thao tác trên Parent Chain"
-    echo "  --node=NAME, -n     Chỉ thao tác trên 1 node cụ thể (vd: exec1_r1, exec1_r3, parent)"
+    echo "  --node=NAME, -n     Chỉ thao tác trên 1 node cụ thể (vd: exec1_r1, p0, parent_node_0, exec1)"
+    echo "  --host=IP, --server=IP Chỉ thao tác trên toàn bộ node thuộc 1 máy chủ/IP cụ thể (vd: 192.168.1.223)"
     echo ""
     echo "🧪 Kiểm Thử (Testing):"
     echo "  --test              Chạy bộ kiểm thử tích hợp thực tế sau khi deploy"
@@ -147,6 +148,14 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -n|--node)
+            TARGET_NODE="$2"
+            shift 2
+            ;;
+        --server=*|--host=*|--machine=*)
+            TARGET_NODE="${1#*=}"
+            shift
+            ;;
+        --server|--host|--machine)
             TARGET_NODE="$2"
             shift 2
             ;;
@@ -261,6 +270,17 @@ send_tele() {
 
 resolve_target_host() {
     local target="$1"
+    # 1. Thử phân giải qua script parse_inventory.py (hỗ trợ IP máy chủ, aliases, groups)
+    if [ -f "$INVENTORY" ] && [ -f "${SCRIPT_DIR}/scripts/parse_inventory.py" ]; then
+        local py_res
+        py_res=$(python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" resolve "$target" 2>/dev/null || true)
+        if [ -n "$py_res" ]; then
+            echo "$py_res"
+            return
+        fi
+    fi
+
+    # 2. Fallback trường hợp không chạy được python
     case "$target" in
         exec1_r1|r1|1)
             echo "exec1_replica1"
@@ -286,8 +306,20 @@ resolve_target_host() {
         exec2|cluster_2|cluster2)
             echo "exec2_replica1,exec2_replica2,exec2_replica3"
             ;;
-        parent|parent_chain|parent_node)
-            echo "parent_node"
+        parent|parent_chain|parent_node|parents|parent_nodes)
+            echo "parent_chain_nodes"
+            ;;
+        p0|parent0|parent_0)
+            echo "parent_node_0"
+            ;;
+        p1|parent1|parent_1)
+            echo "parent_node_1"
+            ;;
+        p2|parent2|parent_2)
+            echo "parent_node_2"
+            ;;
+        p3|parent3|parent_3)
+            echo "parent_node_3"
             ;;
         *)
             echo "$target"
@@ -591,10 +623,6 @@ if [ -f "$INVENTORY" ] && [ -f "${SCRIPT_DIR}/scripts/parse_inventory.py" ]; the
     python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" export "$RPC_NODES_FILE"
 fi
 
-# 1. Send Deploy Start Telegram Notification
-echo "📢 Gửi thông báo bắt đầu triển khai đến Telegram..."
-send_tele "tn.notify_deploy_start('Parent Chain BFT Committee (4 Validators) + Exec Cluster 1 (3 Replicas) + Exec Cluster 2')"
-
 CHECK_SEC_SCRIPT="${METANODE_ROOT}/deploy/ansible/check_inventory_security.py"
 
 # Pre-flight Security check for plaintext credentials (Issue #104)
@@ -712,9 +740,11 @@ EOF
 fi
 
 # 2. Scope & Target Node Resolution
+TARGET_SCOPE_DESC="Toàn bộ hệ thống (Parent Chain + Exec Clusters)"
 if [ -n "$TARGET_NODE" ]; then
     RESOLVED_HOST=$(resolve_target_host "$TARGET_NODE")
     echo "🎯 Targeting specific node: ${RESOLVED_HOST} (from parameter: ${TARGET_NODE})"
+    TARGET_SCOPE_DESC="Node/Máy: ${TARGET_NODE} (${RESOLVED_HOST})"
     if [[ "$ACTION" =~ ^(setup|deploy|restart|reset)$ ]]; then
         EXTRA_ANSIBLE_ARGS+=(--limit "localhost,${RESOLVED_HOST}")
     else
@@ -725,15 +755,19 @@ if [ -n "$TARGET_NODE" ]; then
     fi
 elif [ "$ACTION" = "open_ports" ]; then
     echo "🛡️  Targeting Firewall (UFW) port opening..."
+    TARGET_SCOPE_DESC="Cổng tường lửa (UFW) toàn hệ thống"
     if [ "$EXEC_ONLY" = "true" ]; then
+        TARGET_SCOPE_DESC="Cổng tường lửa (UFW) Execution Clusters"
         EXTRA_ANSIBLE_ARGS+=(--tags "exec_clusters,open_ports")
     elif [ "$PARENT_ONLY" = "true" ]; then
+        TARGET_SCOPE_DESC="Cổng tường lửa (UFW) Parent Chain"
         EXTRA_ANSIBLE_ARGS+=(--tags "parent_chain,open_ports")
     else
         EXTRA_ANSIBLE_ARGS+=(--tags "open_ports")
     fi
 elif [ "$EXEC_ONLY" = "true" ]; then
     echo "⛓️  Targeting Execution Clusters only (Child Chains - EVM Chain ID 991)"
+    TARGET_SCOPE_DESC="Chỉ Execution Clusters (Child Chains - ID 991)"
     if [[ "$ACTION" =~ ^(setup|deploy|restart|reset)$ ]]; then
         EXTRA_ANSIBLE_ARGS+=(--tags "build,exec_clusters")
     else
@@ -741,6 +775,7 @@ elif [ "$EXEC_ONLY" = "true" ]; then
     fi
 elif [ "$PARENT_ONLY" = "true" ]; then
     echo "🏛️  Targeting Parent Chain only"
+    TARGET_SCOPE_DESC="Chỉ Parent Chain (Root Anchor)"
     if [[ "$ACTION" =~ ^(setup|deploy|restart|reset)$ ]]; then
         EXTRA_ANSIBLE_ARGS+=(--tags "build,parent_chain")
     else
@@ -754,6 +789,16 @@ if [[ "$ACTION" =~ ^(setup|deploy|restart|reset|clean|stop)$ ]]; then
     if [[ "$ACTION" =~ ^(reset|clean)$ ]]; then
         clean_monitor_state
     fi
+fi
+
+# 2.6. Gửi thông báo Bắt Đầu Thao Tác đến Telegram với đúng trạng thái và phạm vi
+if [ "$NOTIFY" = "true" ]; then
+    echo "📢 Gửi thông báo bắt đầu thao tác (${ACTION}) đến Telegram..."
+    python3 -c "
+import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
+import telegram_notify as tn
+tn.notify_action_start(action='${ACTION}', scope='${TARGET_SCOPE_DESC}', target_env='${METANODE_ENV}')
+" 2>/dev/null || true
 fi
 
 # 3. Execute Ansible Playbook
@@ -772,14 +817,16 @@ if [ $ANSIBLE_RC -ne 0 ]; then
     echo "❌ Ansible playbook thất bại với mã lỗi ${ANSIBLE_RC}!"
     if [ "$NOTIFY" = "true" ]; then
         TAIL_LOGS=$(tail -n 20 "$LOG_FILE" 2>/dev/null || echo "")
-        python3 - "${SCRIPT_DIR}" "${ACTION}" "${ANSIBLE_RC}" "${TAIL_LOGS}" << 'EOF' 2>/dev/null || true
+        python3 - "${SCRIPT_DIR}" "${ACTION}" "${ANSIBLE_RC}" "${TAIL_LOGS}" "${TARGET_SCOPE_DESC}" << 'EOF' 2>/dev/null || true
 import sys, os
 sys.path.insert(0, os.path.join(sys.argv[1], 'scripts'))
 import telegram_notify as tn
-stage = f"Ansible Playbook ({sys.argv[2]})"
+action = sys.argv[2]
+stage = f"Ansible Playbook ({action})"
 err = f"Exit code: {sys.argv[3]}"
 tail = sys.argv[4]
-tn.notify_deploy_failure(stage, err, tail_logs=tail)
+scope = sys.argv[5] if len(sys.argv) > 5 else ""
+tn.notify_deploy_failure(stage, err, tail_logs=tail, action=action, scope=scope)
 EOF
     fi
     exit $ANSIBLE_RC
@@ -788,13 +835,20 @@ fi
 DEPLOY_END_TIME=$(date +%s)
 TOTAL_DEPLOY_DURATION=$((DEPLOY_END_TIME - DEPLOY_START_TIME))
 
-# Nếu là action stop hoặc clean: kết thúc ngay mà không cần check RPC status
+# Nếu là action stop hoặc clean: kết thúc ngay và gửi thông báo hoàn tất tương ứng
 if [ "$ACTION" = "stop" ]; then
     stop_cluster_monitors
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
     echo "🛑 ĐÃ DỪNG TOÀN BỘ TIẾN TRÌNH CỤM METANODE THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
     echo "═══════════════════════════════════════════════════════════════"
+    if [ "$NOTIFY" = "true" ]; then
+        python3 -c "
+import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
+import telegram_notify as tn
+tn.notify_action_complete(action='stop', scope='${TARGET_SCOPE_DESC}', duration_secs=${TOTAL_DEPLOY_DURATION})
+" 2>/dev/null || true
+    fi
     exit 0
 fi
 
@@ -804,6 +858,13 @@ if [ "$ACTION" = "clean" ]; then
     echo "═══════════════════════════════════════════════════════════════"
     echo "🧹 ĐÃ DỌN DẸP DỮ LIỆU CỤM METANODE THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
     echo "═══════════════════════════════════════════════════════════════"
+    if [ "$NOTIFY" = "true" ]; then
+        python3 -c "
+import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
+import telegram_notify as tn
+tn.notify_action_complete(action='clean', scope='${TARGET_SCOPE_DESC}', duration_secs=${TOTAL_DEPLOY_DURATION})
+" 2>/dev/null || true
+    fi
     exit 0
 fi
 
@@ -813,12 +874,16 @@ if [ "$ACTION" = "open_ports" ]; then
     echo "🛡️  ĐÃ MỞ THÔNG TẤT CẢ CÁC CỔNG TƯỜNG LỬA (UFW) TRÊN CỤM SERVER THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
     echo "═══════════════════════════════════════════════════════════════"
     if [ "$NOTIFY" = "true" ]; then
-        send_tele "tn.send_telegram_message(html_message='🛡️ <b>[METANODE CLUSTER FIREWALL]</b>\nĐã mở thông tất cả các cổng tường lửa (UFW) trên cụm server thành công (<b>${TOTAL_DEPLOY_DURATION}s</b>)!')"
+        python3 -c "
+import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
+import telegram_notify as tn
+tn.notify_action_complete(action='open_ports', scope='${TARGET_SCOPE_DESC}', duration_secs=${TOTAL_DEPLOY_DURATION})
+" 2>/dev/null || true
     fi
     exit 0
 fi
 
-# 3. Export RPC JSON & Notify Services Ready
+# 3. Export RPC JSON & Notify Services Ready (setup, deploy, start, restart, reset)
 echo "📢 Xuất cấu hình cổng vào ${RPC_NODES_FILE} và gửi thông báo dịch vụ sẵn sàng lên Telegram..."
 python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" export "$RPC_NODES_FILE"
 python3 -c "
@@ -828,7 +893,7 @@ import telegram_notify as tn
 
 info = pi.parse_inventory('${INVENTORY}')
 if '${NOTIFY}' == 'true':
-    tn.notify_services_ready(info, duration_secs=${TOTAL_DEPLOY_DURATION}, rpc_nodes_path='${RPC_NODES_FILE}')
+    tn.notify_action_complete(action='${ACTION}', scope='${TARGET_SCOPE_DESC}', info_or_parent=info, duration_secs=${TOTAL_DEPLOY_DURATION}, rpc_nodes_path='${RPC_NODES_FILE}')
 " || true
 
 echo ""

@@ -1,0 +1,1 @@
+{"tag": "m5_raft_sust60_D1T_r3", "mode": "raft", "bin": "simple_chain_D1T", "args": ["-duration", "60", "-batch", "1000"], "submitted": 2153000, "on_chain": 2153000, "complete": true, "blast_secs": 171.2, "e2e_secs": 182.2, "e2e_tps": 11814, "tool_tps": 24846, "p50_ms": 28110, "p99_ms": 42869, "zero_fork": true, "roots": true}

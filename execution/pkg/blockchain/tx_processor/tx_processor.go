@@ -128,7 +128,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	startExec := time.Now()
 
 	// Watchdog for EVM/BlockSTM Execution
-	stopWatchdogOpt := utils.StartWatchdog("EVM", 5*time.Second, func() string {
+	stopWatchdogOpt := utils.StartWatchdogFatal("EVM", 5*time.Second, func() string {
 		return fmt.Sprintf("Block #%d (chứa %d groups) đang thực thi ProcessTransactionsOptimistic (Thực thi Smart Contract)!", blockNum, len(groupedGroups))
 	})
 
@@ -162,7 +162,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	trie_database.GetTrieDatabaseManager().IntermediateRoot()
 	trieDBIRDuration := time.Since(startTrieDBIR)
 
-	stopWatchdogIR := utils.StartWatchdog("STATE", 5*time.Second, func() string {
+	stopWatchdogIR := utils.StartWatchdogFatal("STATE", 5*time.Second, func() string {
 		return fmt.Sprintf("Block #%d đang thực thi IntermediateRoot (Lưu State xuống NOMT/PebbleDB)!", blockNum)
 	})
 

@@ -1,0 +1,19 @@
+{
+  "blocks_at_harness_end": {
+    "val0": 1049,
+    "val1": 956,
+    "val2": 1049,
+    "val3": 978
+  },
+  "observation_needed": true,
+  "caught_up": true,
+  "stuck_permanently": false,
+  "catchup_duration_secs": 10.01,
+  "catchup_rate_blks_per_sec": 9.29,
+  "final_blocks_after_wait": {
+    "val0": 1049,
+    "val1": 1049,
+    "val2": 1049,
+    "val3": 1049
+  }
+}

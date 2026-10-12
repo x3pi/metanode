@@ -61,6 +61,18 @@ pub struct BlockDeliveryManager {
     metrics: Arc<crate::node::sync_metrics::SyncMetrics>,
 }
 
+fn now_ns() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+fn ffi_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("METANODE_FFI_TRACE").as_deref() == Ok("true"))
+}
+
 impl BlockDeliveryManager {
     pub fn new(
         executor_client: Arc<ExecutorClient>,
@@ -77,10 +89,29 @@ impl BlockDeliveryManager {
 
     pub async fn run(mut self) {
         info!("🚚 [STATION 4: DELIVERY] Started BlockDeliveryManager loop. Conveyor belt active.");
+        let mut last_send_done: u128 = 0;
         while let Some(msg) = self.receiver.recv().await {
+            let t_recv_consensus = now_ns();
             let commit_index = msg.subdag.commit_ref.index;
+            let gei = msg.global_exec_index;
 
+            let t_send_start = now_ns();
             let geis_consumed = self.deliver_with_halt_retry(&msg).await;
+            let t_send_done = now_ns();
+
+            if ffi_trace_enabled() {
+                let rust_idle_wait_consensus_ns = if last_send_done > 0 {
+                    t_recv_consensus.saturating_sub(last_send_done)
+                } else {
+                    0
+                };
+                let rust_wait_go_ns = t_send_done.saturating_sub(t_send_start);
+                tracing::warn!(
+                    "⏱️ [TIMELINE-RUST] commit_index={} gei={} t_recv={} t_send_start={} t_send_done={} wait_go_ns={} idle_consensus_ns={}",
+                    commit_index, gei, t_recv_consensus, t_send_start, t_send_done, rust_wait_go_ns, rust_idle_wait_consensus_ns
+                );
+            }
+            last_send_done = t_send_done;
 
             let tx_count: usize = msg.subdag.blocks.iter().map(|b| {
                 let d = b.tx_digests();

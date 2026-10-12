@@ -1,0 +1,1 @@
+{"phase1": {"submitted": 997000, "on_chain_after_wait": 98000, "series_tail": [[94, 53, 98000], [99, 53, 98000], [104, 53, 98000], [109, 53, 98000]], "rpc_alive": true, "valid_prefix_expected_max": 99000}, "phase3": {"submitted": 20000, "included": 20000, "full": true}, "raft_entries": {"n0": 65, "n1": 65, "n2": 65}}

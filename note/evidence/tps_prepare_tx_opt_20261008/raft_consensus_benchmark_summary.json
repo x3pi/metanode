@@ -1,0 +1,65 @@
+{
+  "timestamp": "2026-10-08T13:52:16Z",
+  "consensus_mode": "raft",
+  "architecture": "3-Node Replicated HashiCorp Raft Cluster (Quorum 2/3)",
+  "nodes": [
+    "n0",
+    "n1",
+    "n2"
+  ],
+  "leader": "n0",
+  "binary": "/tmp/p06_bins/simple_chain",
+  "prepare_transactions_parallel": true,
+  "avg_prepare_tx_ms": 0.0,
+  "avg_block_exec_ms": 0.0,
+  "results": [
+    {
+      "workload": "Warmup_1000",
+      "count": 1000,
+      "batch": 500,
+      "effective_tps": 1562.1753506713428,
+      "injection_tps": 23433.441071703117,
+      "blocks_produced": 1,
+      "latency_p50_ms": 680.277929,
+      "latency_p99_ms": 682.812646,
+      "zero_fork_verified": true,
+      "raw_report": "raft_bench_Warmup_1000.json"
+    },
+    {
+      "workload": "Medium_2000",
+      "count": 2000,
+      "batch": 500,
+      "effective_tps": 6752.408889797493,
+      "injection_tps": 155865.96088481366,
+      "blocks_produced": 1,
+      "latency_p50_ms": 301.66764,
+      "latency_p99_ms": 309.050763,
+      "zero_fork_verified": true,
+      "raw_report": "raft_bench_Medium_2000.json"
+    },
+    {
+      "workload": "High_4000",
+      "count": 4000,
+      "batch": 1000,
+      "effective_tps": 8373.361928364318,
+      "injection_tps": 170578.66808849672,
+      "blocks_produced": 3,
+      "latency_p50_ms": 438.944826,
+      "latency_p99_ms": 501.156034,
+      "zero_fork_verified": true,
+      "raw_report": "raft_bench_High_4000.json"
+    },
+    {
+      "workload": "Extreme_8000",
+      "count": 8000,
+      "batch": 1000,
+      "effective_tps": 10754.575643433658,
+      "injection_tps": 210747.4952857761,
+      "blocks_produced": 6,
+      "latency_p50_ms": 507.041991,
+      "latency_p99_ms": 781.856603,
+      "zero_fork_verified": true,
+      "raw_report": "raft_bench_Extreme_8000.json"
+    }
+  ]
+}

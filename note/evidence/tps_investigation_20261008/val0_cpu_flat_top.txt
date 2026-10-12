@@ -1,0 +1,147 @@
+File: simple_chain
+Build ID: 94c998bac8d6a90e9641692fa34bee510bbdba70
+Type: cpu
+Time: 2026-10-08 04:52:46 UTC
+Duration: 25.14s, Total samples = 293.76s (1168.62%)
+Showing nodes accounting for 222.24s, 75.65% of 293.76s total
+Dropped 1742 nodes (cum <= 1.47s)
+      flat  flat%   sum%        cum   cum%
+    62.24s 21.19% 21.19%     62.73s 21.35%  runtime.cgocall
+    19.60s  6.67% 27.86%     19.60s  6.67%  blake2::Blake2bVarCore::compress
+    17.84s  6.07% 33.93%     17.84s  6.07%  keccak::keccak_p
+     9.66s  3.29% 37.22%      9.66s  3.29%  __memcpy_evex_unaligned_erms
+     7.98s  2.72% 39.94%      7.98s  2.72%  <core::hash::sip::Hasher<S> as core::hash::Hasher>::write
+     6.84s  2.33% 42.27%      6.84s  2.33%  runtime.memmove
+     6.24s  2.12% 44.39%      6.24s  2.12%  syscall
+     6.03s  2.05% 46.44%      6.03s  2.05%  runtime.memclrNoHeapPointers
+     5.95s  2.03% 48.47%      5.95s  2.03%  <core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::try_fold
+     5.84s  1.99% 50.46%      5.84s  1.99%  golang.org/x/crypto/sha3.keccakF1600.abi0
+     5.29s  1.80% 52.26%      5.29s  1.80%  metanode::network::tx_socket_server::TxSocketServer::process_ffi_batch::{{closure}}
+     5.10s  1.74% 53.99%      7.77s  2.65%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress
+     5.01s  1.71% 55.70%      5.01s  1.71%  __memcmp_evex_movbe
+        5s  1.70% 57.40%     16.41s  5.59%  runtime.mallocgc
+     3.83s  1.30% 58.70%      3.83s  1.30%  consensus_core::transaction::TxCacheReadHandle::get
+     3.55s  1.21% 59.91%      3.59s  1.22%  __libc_calloc
+     3.39s  1.15% 61.07%      3.39s  1.15%  consensus_core::transaction::TxCacheReadHandleForCommit::get
+     3.03s  1.03% 62.10%      3.03s  1.03%  __GI___libc_write
+        3s  1.02% 63.12%      3.63s  1.24%  ZSTD_compressBlock_doubleFast_noDict_generic (inline)
+     2.87s  0.98% 64.10%      2.92s  0.99%  runtime.greyobject (partial-inline)
+     2.83s  0.96% 65.06%      2.87s  0.98%  _int_free
+     2.73s  0.93% 65.99%      2.73s  0.93%  malloc_consolidate
+     2.72s  0.93% 66.92%      2.85s  0.97%  __GI___libc_free
+     2.30s  0.78% 67.70%      2.30s  0.78%  <alloc::string::String as core::iter::traits::collect::FromIterator<char>>::from_iter
+     2.02s  0.69% 68.39%      2.02s  0.69%  <alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter
+     1.85s  0.63% 69.02%      1.85s  0.63%  <hex::BytesToHexChars as core::iter::traits::iterator::Iterator>::next
+     1.82s  0.62% 69.64%      2.02s  0.69%  __GI___libc_malloc
+     1.77s   0.6% 70.24%      3.07s  1.05%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Hash
+     1.75s   0.6% 70.83%      7.73s  2.63%  runtime.scanobject
+     1.72s  0.59% 71.42%      1.79s  0.61%  runtime.findObject
+     1.70s  0.58% 72.00%      1.70s  0.58%  aeshashbody
+     1.58s  0.54% 72.54%      1.91s  0.65%  _int_malloc
+     1.46s   0.5% 73.03%      1.96s  0.67%  runtime.mapaccess2
+     1.19s  0.41% 73.44%      9.32s  3.17%  runtime.gcDrain
+     0.73s  0.25% 73.69%      1.82s  0.62%  runtime.evacuate
+     0.71s  0.24% 73.93%      1.60s  0.54%  runtime.stealWork
+     0.44s  0.15% 74.08%      2.78s  0.95%  github.com/meta-node-blockchain/meta-node/pkg/transaction.safeBytesToAddress (partial-inline)
+     0.41s  0.14% 74.22%      3.22s  1.10%  runtime.mapassign
+     0.33s  0.11% 74.33%      5.02s  1.71%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub.func2
+     0.26s 0.089% 74.42%      1.67s  0.57%  runtime.mapassign_faststr
+     0.25s 0.085% 74.50%         3s  1.02%  runtime.(*mcache).refill
+     0.24s 0.082% 74.58%     24.94s  8.49%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateDirectEnvelopeBinding
+     0.24s 0.082% 74.67%      8.62s  2.93%  runtime.newobject
+     0.24s 0.082% 74.75%      2.36s   0.8%  sync.(*Map).Swap
+     0.18s 0.061% 74.81%      1.66s  0.57%  runtime.growslice
+     0.15s 0.051% 74.86%      3.75s  1.28%  runtime.makeslice
+     0.14s 0.048% 74.91%     11.43s  3.89%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub
+     0.14s 0.048% 74.96%      3.40s  1.16%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.(*TransactionPool).AddTransactions
+     0.13s 0.044% 75.00%      2.37s  0.81%  encoding/json.mapEncoder.encode
+     0.12s 0.041% 75.04%     43.96s 14.96%  github.com/ethereum/go-ethereum/core/types.Sender
+     0.12s 0.041% 75.08%      2.28s  0.78%  runtime.(*mcentral).cacheSpan
+     0.10s 0.034% 75.12%      1.55s  0.53%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).ProtoHash
+     0.10s 0.034% 75.15%      1.62s  0.55%  golang.org/x/crypto/sha3.(*state).Write
+     0.09s 0.031% 75.18%      1.78s  0.61%  github.com/ethereum/go-ethereum/core/types.newModernSigner
+     0.09s 0.031% 75.21%    152.91s 52.05%  runtime._ExternalCode
+     0.08s 0.027% 75.24%      6.11s  2.08%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerTransaction).MarshalJSON
+     0.06s  0.02% 75.26%     41.21s 14.03%  github.com/ethereum/go-ethereum/core/types.recoverPlain
+     0.06s  0.02% 75.28%      2.05s   0.7%  github.com/ethereum/go-ethereum/crypto.NewKeccakState (inline)
+     0.06s  0.02% 75.30%      1.77s   0.6%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient
+     0.05s 0.017% 75.32%      1.53s  0.52%  github.com/ethereum/go-ethereum/rlp.(*Stream).Decode
+     0.05s 0.017% 75.33%      4.81s  1.64%  golang.org/x/crypto/sha3.(*state).Read
+     0.05s 0.017% 75.35%      2.05s   0.7%  google.golang.org/protobuf/proto.MarshalOptions.marshal
+     0.04s 0.014% 75.36%      2.42s  0.82%  encoding/json.(*encodeState).reflectValue
+     0.04s 0.014% 75.38%      1.76s   0.6%  github.com/ethereum/go-ethereum/core/types.(*Transaction).UnmarshalBinary
+     0.04s 0.014% 75.39%      1.55s  0.53%  github.com/ethereum/go-ethereum/core/types.prefixedRlpHash
+     0.04s 0.014% 75.41%      2.58s  0.88%  github.com/ethereum/go-ethereum/crypto.Keccak256 (partial-inline)
+     0.04s 0.014% 75.42%      5.33s  1.81%  github.com/ethereum/go-ethereum/crypto.Keccak256Hash (partial-inline)
+     0.04s 0.014% 75.43%     28.32s  9.64%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+     0.04s 0.014% 75.45%     11.28s  3.84%  github.com/meta-node-blockchain/meta-node/pkg/transaction.FromEthEIP1559Tx
+     0.03s  0.01% 75.46%      1.62s  0.55%  github.com/ethereum/go-ethereum/rlp.DecodeBytes
+     0.03s  0.01% 75.47%     11.48s  3.91%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*SpeculativeExecutor).ExecuteSpeculative.func1
+     0.03s  0.01% 75.48%      2.79s  0.95%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.sigCacheKey
+     0.03s  0.01% 75.49%     28.42s  9.67%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+     0.03s  0.01% 75.50%      2.15s  0.73%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).ValidEthSign
+     0.03s  0.01% 75.51%      4.71s  1.60%  golang.org/x/crypto/sha3.(*state).padAndPermute
+     0.03s  0.01% 75.52%     24.49s  8.34%  main.(*App).ConvertRawEthTxToMetaTx
+     0.03s  0.01% 75.53%      3.17s  1.08%  runtime.(*mcache).nextFree
+     0.03s  0.01% 75.54%      2.06s   0.7%  runtime.findRunnable
+     0.02s 0.0068% 75.54%      2.68s  0.91%  encoding/json.Marshal
+     0.02s 0.0068% 75.55%      1.58s  0.54%  github.com/ethereum/go-ethereum/core/types.(*DynamicFeeTx).decode
+     0.02s 0.0068% 75.56%     43.07s 14.66%  github.com/ethereum/go-ethereum/core/types.(*modernSigner).Sender
+     0.02s 0.0068% 75.57%      1.58s  0.54%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).indexSingleBlock
+     0.02s 0.0068% 75.57%      4.25s  1.45%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.VerifyTransaction
+     0.02s 0.0068% 75.58%      1.50s  0.51%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).ValidSecpSign
+     0.02s 0.0068% 75.59%     11.80s  4.02%  github.com/meta-node-blockchain/meta-node/pkg/transaction.NewTransactionFromEth
+     0.02s 0.0068% 75.59%      1.68s  0.57%  runtime.cgocallback.abi0
+     0.02s 0.0068% 75.60%      2.23s  0.76%  runtime.schedule
+     0.01s 0.0034% 75.60%      1.68s  0.57%  github.com/ethereum/go-ethereum/core/types.(*DynamicFeeTx).sigHash
+     0.01s 0.0034% 75.61%     39.99s 13.61%  github.com/ethereum/go-ethereum/crypto/secp256k1.RecoverPubkey.func1
+     0.01s 0.0034% 75.61%     24.67s  8.40%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient.func1
+     0.01s 0.0034% 75.61%      4.32s  1.47%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).addTransactionsToPoolInternal.func3
+     0.01s 0.0034% 75.62%     10.21s  3.48%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.PrepareTransactions
+     0.01s 0.0034% 75.62%     20.74s  7.06%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.evalTxSignature
+     0.01s 0.0034% 75.62%     22.92s  7.80%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func1.1
+     0.01s 0.0034% 75.63%      1.52s  0.52%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func2
+     0.01s 0.0034% 75.63%     22.91s  7.80%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func3
+     0.01s 0.0034% 75.63%      1.78s  0.61%  github.com/meta-node-blockchain/meta-node/pkg/network.(*Handler).HandleRequest
+     0.01s 0.0034% 75.64%      1.59s  0.54%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*PebbleDB).BatchPut
+     0.01s 0.0034% 75.64%     25.03s  8.52%  github.com/meta-node-blockchain/meta-node/pkg/transaction.ValidateEnvelopeBinding
+     0.01s 0.0034% 75.64%      2.45s  0.83%  runtime.mcall
+     0.01s 0.0034% 75.65%      1.56s  0.53%  runtime.park_m
+     0.01s 0.0034% 75.65%      2.04s  0.69%  sort.partialInsertionSort_func
+     0.01s 0.0034% 75.65%      3.02s  1.03%  sort.partition_func
+         0     0% 75.65%      3.63s  1.24%  ZSTD_compressBlock_doubleFast
+         0     0% 75.65%      3.59s  1.22%  ZSTD_compressBlock_doubleFast_noDict_5 (inline)
+         0     0% 75.65%      1.54s  0.52%  _cgoexp_896559b718e0_cgo_process_rpc_request
+         0     0% 75.65%      2.42s  0.82%  encoding/json.(*encodeState).marshal
+         0     0% 75.65%      2.29s  0.78%  github.com/ethereum/go-ethereum/common.BytesToAddress (inline)
+         0     0% 75.65%      1.72s  0.59%  github.com/ethereum/go-ethereum/core/types.(*Transaction).decodeTyped
+         0     0% 75.65%     40.06s 13.64%  github.com/ethereum/go-ethereum/crypto/secp256k1.RecoverPubkey
+         0     0% 75.65%     39.93s 13.59%  github.com/ethereum/go-ethereum/crypto/secp256k1._Cfunc_secp256k1_ext_ecdsa_recover.abi0
+         0     0% 75.65%      1.67s  0.57%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).commitWorker
+         0     0% 75.65%      1.58s  0.54%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).startIndexingProcess
+         0     0% 75.65%     24.49s  8.34%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).convertRawEth
+         0     0% 75.65%     13.88s  4.72%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxBatchForwarder).StartForwardingLoop
+         0     0% 75.65%      1.77s   0.6%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes.InitRoutes.InitRoutes.func1.func3
+         0     0% 75.65%      1.54s  0.52%  github.com/meta-node-blockchain/meta-node/executor.cgo_process_rpc_request
+         0     0% 75.65%      1.83s  0.62%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.(*shardedSignatureCache).Store
+         0     0% 75.65%      1.51s  0.51%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.storeVerifiedBound
+         0     0% 75.65%      1.47s   0.5%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).Commit.func1
+         0     0% 75.65%     19.35s  6.59%  github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).ReplaceDocumentByTerm
+         0     0% 75.65%     19.29s  6.57%  github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).ReplaceDocumentByTerm.func2
+         0     0% 75.65%     19.28s  6.56%  github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_replace_document_by_term.abi0
+         0     0% 75.65%      1.78s  0.61%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1
+         0     0% 75.65%      1.78s  0.61%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1.1
+         0     0% 75.65%      1.77s   0.6%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*LazyPebbleDB).flushToDisk
+         0     0% 75.65%     11.38s  3.87%  github.com/meta-node-blockchain/meta-node/pkg/transaction.ValidateEthTxEnvelope
+         0     0% 75.65%     26.25s  8.94%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateProtoEnvelopeBinding
+         0     0% 75.65%     13.88s  4.72%  main.(*App).Run.gowrap2
+         0     0% 75.65%      1.71s  0.58%  runtime.(*mcentral).grow
+         0     0% 75.65%      1.56s  0.53%  runtime.(*mspan).markBitsForIndex (inline)
+         0     0% 75.65%      1.66s  0.57%  runtime.cgocallbackg
+         0     0% 75.65%      1.66s  0.57%  runtime.cgocallbackg1
+         0     0% 75.65%      9.35s  3.18%  runtime.gcBgMarkWorker
+         0     0% 75.65%      9.32s  3.17%  runtime.gcBgMarkWorker.func2
+         0     0% 75.65%      1.82s  0.62%  runtime.growWork
+         0     0% 75.65%     11.59s  3.95%  runtime.systemstack.abi0
+         0     0% 75.65%      5.24s  1.78%  sort.Slice
+         0     0% 75.65%      5.24s  1.78%  sort.pdqsort_func

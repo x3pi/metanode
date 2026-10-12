@@ -62,8 +62,9 @@ type ClusterConfig struct {
 
 // proposal is one batch on its way into the log; done receives the outcome of its commit exactly once.
 type proposal struct {
-	batch []byte
-	done  chan error
+	batch      []byte
+	done       chan error
+	receivedAt time.Time
 }
 
 func (p proposal) finish(err error) {
@@ -74,8 +75,9 @@ func (p proposal) finish(err error) {
 }
 
 type inflight struct {
-	future raft.ApplyFuture
-	p      proposal
+	future     raft.ApplyFuture
+	p          proposal
+	applyStart time.Time
 }
 
 // Node is one Raft replica. Leader: batches enter a bounded queue and are proposed. Follower: batches are
@@ -89,6 +91,7 @@ type Node struct {
 
 	proposeQ chan proposal
 	inflight chan inflight
+	metrics  *Metrics
 
 	forwardAddr   map[raft.ServerID]string
 	forwardAddrOf func(raft.ServerID) (string, bool) // test hook (members the static list does not know)
@@ -164,6 +167,7 @@ func startNode(cc ClusterConfig) (*Node, error) {
 		cfg: rc, secret: secret, now: cc.Now,
 		proposeQ:      make(chan proposal, rc.ProposeQueueSize),
 		inflight:      make(chan inflight, rc.ProposeQueueSize),
+		metrics:       &Metrics{},
 		forwardAddr:   map[raft.ServerID]string{},
 		forwardAddrOf: cc.ForwardAddrOf,
 		state:         stateTransfer{base: cc.StateTransferDir, source: cc.StateSource},
@@ -253,6 +257,7 @@ func (n *Node) start(cc ClusterConfig) error {
 		stamper{epoch: 0, leader: common.HexToAddress(rc.SequencerAddress), nextIndex: 1, nextBlock: 1},
 		cc.Sink, cc.Durable, n.stop, onFatal,
 	)
+	n.fsm.metrics = n.metrics
 
 	rcfg := raft.DefaultConfig()
 	rcfg.LocalID = raft.ServerID(rc.NodeID)
@@ -278,7 +283,7 @@ func (n *Node) start(cc ClusterConfig) error {
 	}
 	// A log write that fails may or may not have reached the disk: continuing (as a leader that keeps sending
 	// heartbeats, or a follower that acks) could acknowledge entries that are not durable. Leave the cluster.
-	logStore = &failClosedLogStore{LogStore: logStore, onFatal: func(err error) { go onFatal(err) }}
+	logStore = &failClosedLogStore{LogStore: logStore, metrics: n.metrics, onFatal: func(err error) { go onFatal(err) }}
 	n.logStore = logStore
 	if n.raft, err = raft.NewRaft(rcfg, n.fsm, logStore, stable, snaps, trans); err != nil {
 		return fmt.Errorf("raft start: %w", err)
@@ -303,6 +308,9 @@ func (n *Node) start(cc ClusterConfig) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(submitPath, n.handleSubmit)
 	mux.HandleFunc(hashPath, n.handleBlockHash)
+	mux.HandleFunc("/raft/v1/metrics", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, n.metrics.Snapshot())
+	})
 	n.registerAdmin(mux)
 	n.registerState(mux)
 	n.httpSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second}
@@ -368,16 +376,22 @@ func (n *Node) submitLocal(batch []byte) submitStatus {
 		logger.Error("❌ [RAFT] dropping a batch that cannot become a block: %v", err)
 		return statusAccepted
 	}
+	if len(pieces) > 1 {
+		n.metrics.RecordSplit(len(pieces))
+	}
 	if cap(n.proposeQ)-len(n.proposeQ) < len(pieces) {
+		n.metrics.RecordStatusFull()
 		return statusFull
 	}
 	dones := make([]chan error, 0, len(pieces))
 	for _, p := range pieces {
-		pr := proposal{batch: p, done: make(chan error, 1)}
+		pr := proposal{batch: p, done: make(chan error, 1), receivedAt: time.Now()}
+		n.metrics.RecordEnqueue(len(n.proposeQ))
 		select {
 		case n.proposeQ <- pr:
 			dones = append(dones, pr.done)
 		default:
+			n.metrics.RecordStatusFull()
 			return statusFull // pieces already queued still commit; a retry only duplicates them
 		}
 	}
@@ -450,6 +464,7 @@ func (n *Node) proposeLoop() {
 		case <-n.stop:
 			return
 		case p := <-n.proposeQ:
+			n.metrics.RecordQueueWait(time.Since(p.receivedAt))
 			txs, err := transaction.UnmarshalTransactions(p.batch)
 			if err != nil || len(txs) == 0 {
 				n.dropped.Add(1)
@@ -468,9 +483,10 @@ func (n *Node) proposeLoop() {
 				p.finish(nil)
 				continue
 			}
+			applyStart := time.Now()
 			f := n.raft.Apply(data, 0)
 			select {
-			case n.inflight <- inflight{future: f, p: p}:
+			case n.inflight <- inflight{future: f, p: p, applyStart: applyStart}:
 			case <-n.stop:
 				return
 			}
@@ -485,7 +501,9 @@ func (n *Node) resultLoop() {
 		case <-n.stop:
 			return
 		case in := <-n.inflight:
-			if err := in.future.Error(); err != nil {
+			err := in.future.Error()
+			n.metrics.RecordRaftApply(time.Since(in.applyStart))
+			if err != nil {
 				in.p.finish(err) // leadership lost / not leader / shutting down: the caller retries
 				if errors.Is(err, raft.ErrRaftShutdown) {
 					return
@@ -543,6 +561,14 @@ func (n *Node) LeaderID() string {
 // AppliedIndex is the last Raft index applied to the FSM.
 func (n *Node) AppliedIndex() uint64 { return n.raft.AppliedIndex() }
 
+// Metrics returns a snapshot of this replica's micro-benchmarks.
+func (n *Node) Metrics() MetricsSnapshot {
+	if n == nil || n.metrics == nil {
+		return MetricsSnapshot{}
+	}
+	return n.metrics.Snapshot()
+}
+
 // Dropped / Skipped / Failed expose the counters used by tests and diagnostics.
 func (n *Node) Dropped() uint64    { return n.dropped.Load() }
 func (n *Node) Skipped() uint64    { return n.fsm.skipped.Load() }
@@ -561,6 +587,7 @@ func (logWriter) Write(p []byte) (int, error) {
 // failClosedLogStore turns the first failed log write into a fatal error for this replica.
 type failClosedLogStore struct {
 	raft.LogStore
+	metrics *Metrics
 	onFatal func(error)
 	once    sync.Once
 }
@@ -568,7 +595,11 @@ type failClosedLogStore struct {
 func (f *failClosedLogStore) StoreLog(l *raft.Log) error { return f.StoreLogs([]*raft.Log{l}) }
 
 func (f *failClosedLogStore) StoreLogs(ls []*raft.Log) error {
+	t0 := time.Now()
 	err := f.LogStore.StoreLogs(ls)
+	if f.metrics != nil {
+		f.metrics.RecordBoltStore(time.Since(t0), len(ls))
+	}
 	if err != nil {
 		f.once.Do(func() { f.onFatal(fmt.Errorf("raft log store write failed: %w", err)) })
 	}

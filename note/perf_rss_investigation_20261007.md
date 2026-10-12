@@ -297,10 +297,13 @@ Nguồn bằng chứng: [note/evidence/perf_rss_20261007/ttl_saturation_45min.lo
 - Tỷ lệ hệ số góc Cửa sổ 2 / Cửa sổ 1: 17.58% (`evidence:ttl_saturation_45min#TTL_RATIO_PCT`).
 - **Kết luận:** **CHƯA BÃO HOÀ (FAIL / UNBOUNDED)** theo tiêu chí ghi trước do tỷ lệ $17.58\% > 5\%$ và hệ số góc Cửa sổ 2 ($0.7383$ MB/phút) $> 0.5$ MB/phút.
 
-**Phân tích nguyên nhân kỹ thuật:**
-1. Mặc dù cơ chế prune đã làm chậm tốc độ tăng trưởng của HeapAlloc đi ~82.4% (từ 4.20 MB/phút xuống 0.74 MB/phút), bộ nhớ vẫn tiếp tục tăng nhẹ thay vì bão hoà.
-2. Nguyên nhân cốt lõi là do cơ chế hash map của Go runtime: thao tác `delete()` chỉ đánh dấu rỗng các ô trong buckets mà không bao giờ thu nhỏ hay giải phóng cấu trúc bucket về hệ điều hành hoặc heap pool, đồng thời thao tác nạp và xóa liên tục tạo ra phân mảnh heap nhỏ.
-3. Thực nghiệm này chứng minh dứt khoát rằng: **Cơ chế thời gian (Time-bounded TTL) KHÔNG thể thay thế được cơ chế chặn trần dung lượng (Bounded Memory Cache / LRU)**. Do đó việc triển khai Bounded Memory Cache theo thiết kế tại `note/design_bounded_memory_indexes_20261007.md` là cần thiết theo phân tích kỹ thuật để ngăn chặn OOM trong dài hạn.
+**Phân tích nguyên nhân kỹ thuật & Giới hạn đo lường:**
+1. Mặc dù cơ chế prune đã làm chậm tốc độ tăng trưởng của HeapAlloc đi ~82.4% (từ 4.20 MB/phút xuống 0.74 MB/phút, kiểm tra độc lập từ CSV: W1 = +4.1993 MB/phút, W2 = +0.7383 MB/phút), bộ nhớ vẫn tiếp tục tăng nhẹ thay vì bão hoà.
+2. Nguyên nhân cốt lõi được nêu: cơ chế hash map của Go runtime với thao tác `delete()` chỉ đánh dấu rỗng các ô trong buckets mà không bao giờ thu nhỏ hay giải phóng cấu trúc bucket về hệ điều hành hoặc heap pool, đồng thời thao tác nạp và xóa liên tục tạo ra phân mảnh heap nhỏ.
+3. Đây là giả thuyết phù hợp với dữ liệu; chưa xác nhận bằng heap profile: **Cơ chế thời gian (Time-bounded TTL) KHÔNG thể thay thế được cơ chế chặn trần dung lượng (Bounded Memory Cache / LRU)**. Do đó việc triển khai Bounded Memory Cache theo thiết kế tại `note/design_bounded_memory_indexes_20261007.md` là giải pháp kỹ thuật cần thiết để chặn trần bộ nhớ dài hạn.
+4. *Lưu ý về độ nhiễu và phạm vi giải thích:*
+   - Cửa sổ 2 có hệ số tương quan $R^2 = 0.1566$ (mức độ nhiễu cao); HeapAlloc tại Cửa sổ 2 có điểm đỉnh 626.14 MB (phút 43) cao hơn điểm cuối 608.51 MB (phút 44). Ngưỡng $\le 5\%$ hoặc $\le 0.5$ MB/phút là tiêu chí ghi trước rất chặt.
+   - Tổng RSS toàn cụm (~7.4 → 9.5 GB) lớn hơn rất nhiều so với Go HeapAlloc (~418 → 608 MB), do đó sự tăng trưởng của hai map này không giải thích được toàn bộ mức tăng RSS (cần phân tích thêm các thành phần khác như NOMT, Pebble block cache, Rust allocations).
 
 ---
 
@@ -331,6 +334,6 @@ Nguồn bằng chứng: [note/evidence/perf_rss_20261007/ttl_saturation_45min.lo
 3. Cờ `-debug=true` không gây suy giảm hiệu năng có ý nghĩa thống kê ($p = 0.3433$), nhưng đã được chuyển về mặc định `false` trong `run_env.sh` để tuân thủ tiêu chuẩn production hardening.
 4. Hiện tượng drift RSS baseline (+8.24%) khi khởi động lại các cụm từ template sạch đã được ghi nhận; nguyên nhân CHƯA xác định (INCONCLUSIVE): các so sánh RSS đỉnh chỉ có giá trị đối chứng tương đối giữa các lượt xen kẽ (interleaved); kết luận RSS đỉnh tuyệt đối là **INCONCLUSIVE** (`evidence:rss_drift_diagnostic`).
 5. Lỗi Log Size 0.0 KB trong bảng cũ đã được khắc phục và kiểm chứng thực nghiệm bằng 3 lượt đo mới với dung lượng log thật đạt ~208 KB (`evidence:log_size_verification`).
-6. Thực nghiệm tiêm tải 45 phút (`evidence:ttl_saturation_45min`) xác nhận cơ chế TTL thời gian (`mappingCacheTTL=30m`) làm giảm 82.4% tốc độ tăng heap ở Cửa sổ 2 nhưng **CHƯA BÃO HOÀ** ($+0.7383$ MB/phút, tỷ lệ $17.58\% > 5\%$) do hạn chế cấu trúc bucket của Go map, củng cố tính cấp thiết của thiết kế Bounded Memory Cache (LRU) [note/design_bounded_memory_indexes_20261007.md](file:///home/abc/chain-n/metanode/note/design_bounded_memory_indexes_20261007.md).
+6. Thực nghiệm tiêm tải 45 phút (`evidence:ttl_saturation_45min`) xác nhận cơ chế TTL thời gian (`mappingCacheTTL=30m`) làm giảm 82.4% tốc độ tăng heap ở Cửa sổ 2 nhưng **CHƯA BÃO HOÀ** ($+0.7383$ MB/phút, tỷ lệ $17.58\% > 5\%$) theo tiêu chí ghi trước, đưa ra giả thuyết phù hợp với dữ liệu về hạn chế bucket Go map (chưa xác nhận bằng heap profile), củng cố tính cấp thiết của thiết kế Bounded Memory Cache (LRU) [note/design_bounded_memory_indexes_20261007.md](file:///home/abc/chain-n/metanode/note/design_bounded_memory_indexes_20261007.md).
 7. Toàn bộ số liệu trong báo cáo đều có file log thô, SHA256 và kích thước bytes tương ứng trong [note/evidence/perf_rss_20261007/MANIFEST.json](file:///home/abc/chain-n/metanode/note/evidence/perf_rss_20261007/MANIFEST.json).
 

@@ -1,0 +1,1 @@
+{"tag": "s33_bftN_20s", "bin": "simple_chain_N", "duration": "20", "submitted": 2576000, "on_chain_final": 2576000, "final_pct": 100.0, "secs": 192, "blocks": 537, "stalled": false, "tail": [[175, 402, 2396102], [181, 437, 2481236], [187, 511, 2553848], [192, 537, 2576000]]}

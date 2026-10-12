@@ -1,0 +1,62 @@
+{
+  "tag": "s16_orig_base_5",
+  "mode": "bft",
+  "bin": "simple_chain_BASE_16M",
+  "args": [
+    "-duration",
+    "60",
+    "-batch",
+    "1000"
+  ],
+  "submitted": 6491908,
+  "on_chain": 237047,
+  "complete": false,
+  "blast_secs": 82.2,
+  "e2e_secs": null,
+  "e2e_tps": null,
+  "tool_tps": 3041,
+  "p50_ms": 24995,
+  "p99_ms": 74314,
+  "zero_fork": true,
+  "roots": true,
+  "uptime_before": "08:23:08 up 17 days,  1:57, 38 users,  load average: 21.33, 43.34, 42.47",
+  "uptime_after": "08:36:42 up 17 days,  2:11, 38 users,  load average: 4.30, 12.14, 27.75",
+  "catchup_observation": {
+    "blocks_at_harness_end": {
+      "val0": 32,
+      "val1": 349,
+      "val2": 338,
+      "val3": 334
+    },
+    "observation_needed": true,
+    "caught_up": false,
+    "stuck_permanently": true,
+    "catchup_duration_secs": 0.0,
+    "catchup_rate_blks_per_sec": 0.0,
+    "final_blocks_after_wait": {
+      "val0": 32,
+      "val1": 542,
+      "val2": 542,
+      "val3": 542
+    }
+  },
+  "log_analysis": {
+    "sig1_expected_mismatch_errors": 9920,
+    "byte_limit_exceeded_count": 9924,
+    "partial_block_responses": 0,
+    "sig2_watchdog_hangs": 288,
+    "catchup_phases_observed": 138,
+    "val_final_blocks": {
+      "val0": 33,
+      "val1": 542,
+      "val2": 542,
+      "val3": 542
+    },
+    "sig1_details": [
+      "val0: 5528 errors (sample: Expected 643 but received 40 blocks returned)",
+      "val3: 4392 errors (sample: Expected 47 but received 45 blocks returned)"
+    ],
+    "classification": "SIG_1 (Byte truncation error: 9920 occurrences)"
+  },
+  "failure_classification": "SIG_1 (Byte truncation error: 9920 occurrences)"
+}

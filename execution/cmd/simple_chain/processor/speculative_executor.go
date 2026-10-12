@@ -55,6 +55,14 @@ type SpeculativeResult struct {
 	// Without this, GetSpeculativeResult could return the empty placeholder
 	// to the committer before execution has actually produced anything.
 	IsFinished bool
+	// precomputeRootsChan receives precomputed Merkle roots calculated concurrently in background
+	precomputeRootsChan chan *PrecomputedBlockRoots
+	// Nanosecond timeline timestamps for diagnosing execution pipeline latency
+	TGateStart       int64
+	TGateDone        int64
+	TExecStart       int64
+	TExecDone        int64
+	TPushedCommitter int64
 }
 
 // TakeClonedState atomically claims ownership of ClonedState.
@@ -315,6 +323,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		// ZERO-FORK SERIALIZATION GATE:
 		// Blockchain state transition S_N = f(S_{N-1}, Block_N) strictly requires S_{N-1}
 		// to be fully committed before Block N clones state and executes EVM transactions.
+		tGateStart := time.Now().UnixNano()
 		if gei > 1 && !se.isCommitted(gei-1) {
 			if se.bp != nil {
 				se.bp.ExecutionMutex.RUnlock()
@@ -330,6 +339,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 				return
 			}
 		}
+		tGateDone := time.Now().UnixNano()
 
 		// If block was committed to DB while waiting for the lock (e.g. by P2P Sync),
 		// bypass speculative execution immediately and unblock Rust.
@@ -462,6 +472,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		// (Wait for preload removed)
 
 		logger.Info("🔄 [SPECULATIVE] Executing GEI=%d speculatively with %d txs (block #%d)", gei, len(allTransactions), blockNum)
+		tExecStart := time.Now().UnixNano()
 		startTime := time.Now()
 		gatedCtx := tx_processor.WithIRGate(ctx, se.newIRGate(gei, lastBlockHeader.Hash(), func() (common.Hash, bool) {
 			tip := se.bp.GetLastBlock()
@@ -472,6 +483,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		}, &executionLock{release: se.bp.ExecutionMutex.RUnlock, reacquire: se.bp.ExecutionMutex.RLock}))
 		accumulatedResults, execErr := tx_processor.ProcessTransactions(gatedCtx, csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum, true)
 		execDuration := time.Since(startTime)
+		tExecDone := time.Now().UnixNano()
 		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(accumulatedResults.Transactions), 0, execDuration.Microseconds())
 		if ffiTraceEnabled {
 			logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_SPEC goroutine_sched_ns=%d prepare_tx_ns=%d clone_ns=%d group_ns=%d exec_ns=%d",
@@ -492,22 +504,38 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		latestRespCh := session.respCh
 		session.mu.Unlock()
 
+		// Precompute Merkle Roots concurrently in background right after EVM finishes
+		precomputeRootsCh := make(chan *PrecomputedBlockRoots, 1)
+		if execErr == nil && len(accumulatedResults.Transactions) > 0 && se.bp != nil {
+			go func(txs []types.Transaction, rps []types.Receipt, bNum uint64, g uint64) {
+				precomputeRootsCh <- se.bp.PrecomputeRoots(txs, rps, bNum, g)
+			}(accumulatedResults.Transactions, accumulatedResults.Receipts, blockNum, gei)
+		} else {
+			precomputeRootsCh <- nil
+		}
+
 		res := &SpeculativeResult{
-			BlockNum:        blockNum,
-			GEI:             gei,
-			CommitIndex:     commitIndex,
-			Epoch:           epochNum,
-			TimestampMs:     commitTimestampMs,
-			LeaderAddr:      leaderAddr,
-			RawBlock:        epochData,
-			Txs:             allTransactions,
-			ProcessResult:   accumulatedResults,
-			ClonedState:     csCopy,
-			ExecuteErr:      execErr,
-			IsEpochBoundary: isEpochBoundary,
-			AuthRespCh:      latestRespCh,
-			session:         session,
-			IsFinished:      true,
+			BlockNum:            blockNum,
+			GEI:                 gei,
+			CommitIndex:         commitIndex,
+			Epoch:               epochNum,
+			TimestampMs:         commitTimestampMs,
+			LeaderAddr:          leaderAddr,
+			RawBlock:            epochData,
+			Txs:                 allTransactions,
+			ProcessResult:       accumulatedResults,
+			ClonedState:         csCopy,
+			ExecuteErr:          execErr,
+			IsEpochBoundary:     isEpochBoundary,
+			AuthRespCh:          latestRespCh,
+			session:             session,
+			IsFinished:          true,
+			precomputeRootsChan: precomputeRootsCh,
+			TGateStart:          tGateStart,
+			TGateDone:           tGateDone,
+			TExecStart:          tExecStart,
+			TExecDone:           tExecDone,
+			TPushedCommitter:    time.Now().UnixNano(),
 		}
 
 		// [FIX DEADLOCK / LEAK]: Check if block has already been committed to DB
@@ -844,11 +872,12 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 
 // commitSpeculativeResult commits a single speculative execution result
 func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLogger *loggerfile.FileLogger) (commitErr error) {
+	tCommitterStart := time.Now().UnixNano()
 	bp.ExecutionMutex.RLock()
 	defer bp.ExecutionMutex.RUnlock()
 
 	if ffiTraceEnabled {
-		logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_COMMIT_DEQUEUED t_ns=%d", res.GEI, time.Now().UnixNano())
+		logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_COMMIT_DEQUEUED t_ns=%d", res.GEI, tCommitterStart)
 	}
 
 	// Claim ownership of speculative state upfront so CleanGEI or worker cleanup cannot race with committer
@@ -986,7 +1015,9 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 	var accumulatedResults tx_processor.ProcessResult
 
 	// 2. Xử lý trường hợp Conflict -> Re-execute tuần tự
+	reExecuted := false
 	if hasConflict && len(res.Txs) > 0 {
+		reExecuted = true
 		logger.Info("🔄 [COMMITTER] Re-executing GEI=%d sequentially...", res.GEI)
 
 		// The speculative state is discarded. Its trie may hold a NOMT session that IntermediateRoot already
@@ -1071,7 +1102,7 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		currentBlockNumber = res.BlockNum
 		storage.UpdateLastAssignedBlockNumber(currentBlockNumber)
 
-		emptyBlock := bp.createBlockFromResults(emptyResult, currentBlockNumber, res.Epoch, true, batchID, res.TimestampMs, res.GEI, res.CommitIndex, res.LeaderAddr)
+		emptyBlock := bp.createBlockFromResults(emptyResult, currentBlockNumber, res.Epoch, true, batchID, res.TimestampMs, res.GEI, res.CommitIndex, nil, res.LeaderAddr)
 		if emptyBlock != nil {
 			select {
 			case bp.createdBlocksChan <- emptyBlock:
@@ -1088,10 +1119,36 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 	currentBlockNumber = res.BlockNum
 	storage.UpdateLastAssignedBlockNumber(currentBlockNumber)
 
-	newBlock := bp.createBlockFromResults(accumulatedResults, currentBlockNumber, res.Epoch, true, batchID, res.TimestampMs, res.GEI, res.CommitIndex, res.LeaderAddr)
+	var precomputedRoots *PrecomputedBlockRoots
+	if res.precomputeRootsChan != nil {
+		precomputedRoots = <-res.precomputeRootsChan
+	}
+	// The precomputed roots were derived from the SPECULATIVE execution's txs/receipts. After a sequential
+	// re-execution the receipts can differ (and whether a node re-executes depends on local timing), so using
+	// them would put a stale txs/receipts root in the block header: a fork hazard. Recompute from the results.
+	if reExecuted {
+		precomputedRoots = nil
+	}
+	tRootsDone := time.Now().UnixNano()
+
+	newBlock := bp.createBlockFromResults(accumulatedResults, currentBlockNumber, res.Epoch, true, batchID, res.TimestampMs, res.GEI, res.CommitIndex, precomputedRoots, res.LeaderAddr)
 	if newBlock == nil {
 		commitErr = fmt.Errorf("failed to create block from speculative results (verifyDraftBlock reverted block)")
 		return commitErr
+	}
+	tBlockCreated := time.Now().UnixNano()
+
+	if ffiTraceEnabled {
+		logger.Warn("⏱️ [TIMELINE-GO] gei=%d block=#%d txs=%d gate_wait_ns=%d exec_ns=%d roots_wait_ns=%d create_block_ns=%d committer_total_ns=%d",
+			res.GEI, res.BlockNum, len(res.Txs),
+			res.TGateDone-res.TGateStart,
+			res.TExecDone-res.TExecStart,
+			tRootsDone-tCommitterStart,
+			tBlockCreated-tRootsDone,
+			tBlockCreated-tCommitterStart,
+		)
+		logger.Warn("⏱️ [TIMELINE-POINTS] gei=%d t_gate_start=%d t_gate_done=%d t_exec_start=%d t_exec_done=%d t_committer_start=%d t_roots_done=%d t_block_created=%d",
+			res.GEI, res.TGateStart, res.TGateDone, res.TExecStart, res.TExecDone, tCommitterStart, tRootsDone, tBlockCreated)
 	}
 
 	// Lưu SystemTransactions nếu có
@@ -1123,43 +1180,136 @@ func PrepareTransactions(epochData *pb.ExecutableBlock) []types.Transaction {
 	if epochData == nil {
 		return nil
 	}
+	t0 := time.Now().UnixNano()
 
 	// 1. Unmarshal all transactions in parallel
+	tUnmarshalStart := time.Now().UnixNano()
 	rawTxs := ParallelUnmarshalTransactions(epochData.Transactions)
+	tUnmarshalDone := time.Now().UnixNano()
 
-	// 2. Deduplicate transactions by TxHash
+	// 2. Parallel validate envelope binding & deduplicate sequentially (Giai đoạn 2b)
+	tValStart := time.Now().UnixNano()
+	isValid := ValidateEnvelopeBindingsParallel(rawTxs)
+	tValDone := time.Now().UnixNano()
+	validateBindingDuration := tValDone - tValStart
+
 	seenTxs := make(map[common.Hash]bool, len(rawTxs))
 	dedupedTxs := make([]types.Transaction, 0, len(rawTxs))
-	for _, tx := range rawTxs {
+	var dedupeMapDuration int64
+	var droppedBindingCount int
+
+	for i, tx := range rawTxs {
 		if tx == nil {
 			continue
 		}
 		// P0-9: Drop transactions whose proto fields do not match their RawEnvelope
 		// before deduplication, so an invalid variant cannot occupy the hash slot.
-		if len(tx.RawEnvelope()) > 0 {
-			if err := transaction.ValidateEnvelopeBinding(tx); err != nil {
-				fmt.Printf("❌ [PrepareTransactions] dropping tx with invalid envelope binding: hash=%s err=%v\n", tx.Hash().Hex(), err)
-				continue
-			}
+		if !isValid[i] {
+			droppedBindingCount++
+			continue
 		}
+		tDedupeStart := time.Now().UnixNano()
 		hash := tx.Hash()
 		if seenTxs[hash] {
+			dedupeMapDuration += time.Now().UnixNano() - tDedupeStart
 			continue // Skip duplicates
 		}
 		seenTxs[hash] = true
 		dedupedTxs = append(dedupedTxs, tx)
+		dedupeMapDuration += time.Now().UnixNano() - tDedupeStart
+	}
+
+	if droppedBindingCount > 0 {
+		logger.Warn("❌ [PrepareTransactions] dropped %d txs with invalid envelope binding", droppedBindingCount)
 	}
 
 	// 3. Sort lexicographically by TxHash (bytes comparison)
+	tSortStart := time.Now().UnixNano()
 	sort.Slice(dedupedTxs, func(i, j int) bool {
 		hashI := dedupedTxs[i].Hash()
 		hashJ := dedupedTxs[j].Hash()
 		return bytes.Compare(hashI.Bytes(), hashJ.Bytes()) < 0
 	})
+	tSortDone := time.Now().UnixNano()
 
-	fmt.Printf("✅ [PrepareTransactions] rawTxs: %d, dedupedTxs: %d\n", len(rawTxs), len(dedupedTxs))
+	unmarshalNs := tUnmarshalDone - tUnmarshalStart
+	sortNs := tSortDone - tSortStart
+	totalNs := tSortDone - t0
+
+	if ffiTraceEnabled { // per-block perf trace: only when METANODE_FFI_TRACE is on, not on every production block
+		logger.Warn("⏱️ [PREPARE-TX] gei=%d raw_txs=%d deduped_txs=%d unmarshal_ns=%d validate_binding_ns=%d dedupe_map_ns=%d sort_ns=%d total_prep_ns=%d",
+			epochData.GetGlobalExecIndex(), len(rawTxs), len(dedupedTxs), unmarshalNs, validateBindingDuration, dedupeMapDuration, sortNs, totalNs)
+	}
 
 	return dedupedTxs
+}
+
+// ValidateEnvelopeBindingsParallel validates envelope bindings for a slice of transactions in parallel.
+// Returns a boolean slice where isValid[i] is true if rawTxs[i] is non-nil and has a valid envelope binding.
+// For transactions without a RawEnvelope, isValid[i] is true.
+func ValidateEnvelopeBindingsParallel(rawTxs []types.Transaction) []bool {
+	numTxs := len(rawTxs)
+	if numTxs == 0 {
+		return nil
+	}
+	isValid := make([]bool, numTxs)
+
+	numWorkers := runtime.GOMAXPROCS(0)
+	if numWorkers > 16 {
+		numWorkers = 16
+	}
+	if numTxs < 200 {
+		numWorkers = 1 // Sequential is faster for small slices due to goroutine scheduling overhead
+	}
+
+	if numWorkers <= 1 {
+		for i, tx := range rawTxs {
+			if tx == nil {
+				continue
+			}
+			if len(tx.RawEnvelope()) == 0 {
+				isValid[i] = true
+				continue
+			}
+			if err := transaction.ValidateEnvelopeBinding(tx); err == nil {
+				isValid[i] = true
+			}
+		}
+		return isValid
+	}
+
+	chunkSize := (numTxs + numWorkers - 1) / numWorkers
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunkSize
+		if start >= numTxs {
+			break
+		}
+		end := start + chunkSize
+		if end > numTxs {
+			end = numTxs
+		}
+
+		wg.Add(1)
+		go func(startIdx, endIdx int) {
+			defer wg.Done()
+			for i := startIdx; i < endIdx; i++ {
+				tx := rawTxs[i]
+				if tx == nil {
+					continue
+				}
+				if len(tx.RawEnvelope()) == 0 {
+					isValid[i] = true
+					continue
+				}
+				if err := transaction.ValidateEnvelopeBinding(tx); err == nil {
+					isValid[i] = true
+				}
+			}
+		}(start, end)
+	}
+	wg.Wait()
+	return isValid
 }
 
 // ParallelUnmarshalTransactions decodes transaction digests in parallel using multiple CPU workers.

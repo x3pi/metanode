@@ -1,0 +1,1 @@
+{"tag": "b_diag_2", "mode": "bft", "bin": "simple_chain_DIAG", "args": ["-duration", "60", "-batch", "1000"], "submitted": 4371361, "on_chain": 4371361, "complete": true, "blast_secs": 85.0, "e2e_secs": 332.1, "e2e_tps": 13163, "tool_tps": 14518, "p50_ms": 42202, "p99_ms": 72899, "zero_fork": true, "roots": true}

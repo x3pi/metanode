@@ -1,0 +1,173 @@
+File: simple_chain
+Build ID: 94c998bac8d6a90e9641692fa34bee510bbdba70
+Type: inuse_space
+Time: 2026-10-08 04:52:57 UTC
+Showing nodes accounting for 327.29MB, 93.79% of 348.96MB total
+Dropped 68 nodes (cum <= 1.74MB)
+      flat  flat%   sum%        cum   cum%
+   38.15MB 10.93% 10.93%    39.59MB 11.34%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.NewTransactionProcessor
+   22.01MB  6.31% 17.24%    55.01MB 15.77%  github.com/meta-node-blockchain/meta-node/pkg/transaction.NewTransactionFromEth
+      19MB  5.45% 22.69%       19MB  5.45%  encoding/json.(*decodeState).literalStore
+   16.52MB  4.74% 27.42%    20.02MB  5.74%  sync.(*Map).Swap
+      16MB  4.59% 32.01%       16MB  4.59%  math/big.nat.make (inline)
+   15.27MB  4.37% 36.38%    15.27MB  4.37%  github.com/meta-node-blockchain/meta-node/pkg/network.(*Connection).run.func2
+   13.50MB  3.87% 40.25%    25.50MB  7.31%  github.com/ethereum/go-ethereum/rlp.decodeBigInt
+   10.54MB  3.02% 43.27%    10.54MB  3.02%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.(*TransactionPool).AddTransactions
+      10MB  2.87% 46.13%       10MB  2.87%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.newPoolShard (inline)
+      10MB  2.87% 49.00%    17.50MB  5.02%  github.com/ethereum/go-ethereum/core/types.newModernSigner
+    9.51MB  2.73% 51.72%     9.51MB  2.73%  google.golang.org/protobuf/internal/impl.consumeBytesNoZero
+    9.50MB  2.72% 54.45%    23.50MB  6.73%  github.com/meta-node-blockchain/meta-node/pkg/transaction.FromEthEIP1559Tx
+    8.50MB  2.44% 56.88%     8.50MB  2.44%  golang.org/x/crypto/sha3.NewLegacyKeccak256 (inline)
+    7.63MB  2.19% 59.07%     7.63MB  2.19%  github.com/meta-node-blockchain/meta-node/pkg/network.NewSocketServer
+    7.16MB  2.05% 61.12%     7.16MB  2.05%  reflect.growslice
+       7MB  2.01% 63.13%       35MB 10.03%  github.com/ethereum/go-ethereum/core/types.(*Transaction).decodeTyped
+       7MB  2.01% 65.14%    10.28MB  2.95%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*ReceiptTracker).StoreTxHashConnEntry
+       6MB  1.72% 66.86%        6MB  1.72%  maps.Equal[go.shape.map[uint8]struct {},go.shape.map[uint8]struct {},go.shape.uint8,go.shape.struct {}] (inline)
+    5.98MB  1.71% 68.57%     5.98MB  1.71%  github.com/meta-node-blockchain/meta-node/pkg/blockchain.newEthHashMapBlsHashMapWithCap (inline)
+       5MB  1.43% 70.00%        5MB  1.43%  bytes.growSlice
+    4.50MB  1.29% 71.29%     7.50MB  2.15%  github.com/meta-node-blockchain/meta-node/pkg/transaction.UnmarshalTransaction
+    4.50MB  1.29% 72.58%     8.28MB  2.37%  github.com/meta-node-blockchain/meta-node/pkg/blockchain.(*BlockChain).AddTxToCache
+    4.50MB  1.29% 73.87%     4.50MB  1.29%  github.com/meta-node-blockchain/meta-node/pkg/transaction.TransactionFromProto (inline)
+    4.50MB  1.29% 75.16%     7.50MB  2.15%  github.com/ethereum/go-ethereum/core/types.NewEIP155Signer
+    4.50MB  1.29% 76.45%     9.57MB  2.74%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.storeVerifiedBound
+       4MB  1.15% 77.60%        4MB  1.15%  math/big.(*Int).Bytes
+    3.50MB  1.00% 78.60%       21MB  6.02%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).envelopeEthTx
+    3.50MB  1.00% 79.60%    19.14MB  5.48%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.VerifyTransaction
+    3.50MB  1.00% 80.61%     3.50MB  1.00%  sync.newEntry (inline)
+    3.15MB   0.9% 81.51%     3.15MB   0.9%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.(*TransactionPool).TransactionsWithAggSign
+    3.01MB  0.86% 82.37%     3.01MB  0.86%  github.com/meta-node-blockchain/meta-node/pkg/logger.startLogWriter
+       3MB  0.86% 83.23%     5.07MB  1.45%  github.com/meta-node-blockchain/meta-node/pkg/account_state_db.(*AccountStateDB).PreloadAccounts.func1
+       3MB  0.86% 84.09%    11.50MB  3.30%  github.com/ethereum/go-ethereum/core/types.Sender
+    2.83MB  0.81% 84.90%     2.83MB  0.81%  github.com/valyala/bytebufferpool.(*ByteBuffer).ReadFrom
+    2.80MB   0.8% 85.70%     2.80MB   0.8%  github.com/meta-node-blockchain/meta-node/pkg/blockchain.newTxHashToBlockNumberMapWithCap (inline)
+    2.80MB   0.8% 86.50%     5.30MB  1.52%  github.com/meta-node-blockchain/meta-node/pkg/trie.getSharedRegistry
+    2.76MB  0.79% 87.29%     6.91MB  1.98%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub
+    2.50MB  0.72% 88.01%    81.52MB 23.36%  main.(*App).ConvertRawEthTxToMetaTx
+    2.50MB  0.72% 88.73%     2.50MB  0.72%  encoding/hex.EncodeToString (inline)
+    2.50MB  0.72% 89.44%     2.50MB  0.72%  reflect.New
+    2.36MB  0.68% 90.12%     2.36MB  0.68%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.NewTxTraceStore (inline)
+    2.13MB  0.61% 90.73%     2.13MB  0.61%  github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi.init.func4
+    2.08MB   0.6% 91.33%     2.08MB   0.6%  github.com/ethereum/go-ethereum/rlp.(*encBuffer).writeBytes
+    2.02MB  0.58% 91.90%     2.02MB  0.58%  runtime.procresize
+    1.54MB  0.44% 92.34%    32.76MB  9.39%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient
+    1.50MB  0.43% 92.77%     3.50MB  1.00%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.sigCacheKey
+       1MB  0.29% 93.06%     4.63MB  1.33%  github.com/meta-node-blockchain/meta-node/pkg/account_state_db.(*AccountStateDB).AccountStateReadOnly
+       1MB  0.29% 93.35%     2.50MB  0.72%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Hash
+    0.54MB  0.16% 93.50%    10.58MB  3.03%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).addTransactionsToPoolInternal
+    0.50MB  0.14% 93.65%        3MB  0.86%  github.com/ethereum/go-ethereum/crypto.Keccak256
+    0.50MB  0.14% 93.79%     3.50MB  1.00%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.boundSigKey (inline)
+         0     0% 93.79%        5MB  1.43%  bytes.(*Buffer).Write
+         0     0% 93.79%        5MB  1.43%  bytes.(*Buffer).grow
+         0     0% 93.79%    26.17MB  7.50%  encoding/json.(*Decoder).Decode
+         0     0% 93.79%    26.17MB  7.50%  encoding/json.(*decodeState).array
+         0     0% 93.79%    26.17MB  7.50%  encoding/json.(*decodeState).object
+         0     0% 93.79%    26.17MB  7.50%  encoding/json.(*decodeState).unmarshal
+         0     0% 93.79%    26.17MB  7.50%  encoding/json.(*decodeState).value
+         0     0% 93.79%     2.60MB  0.74%  github.com/cockroachdb/pebble.Open
+         0     0% 93.79%       28MB  8.02%  github.com/ethereum/go-ethereum/core/types.(*DynamicFeeTx).decode
+         0     0% 93.79%        5MB  1.43%  github.com/ethereum/go-ethereum/core/types.(*DynamicFeeTx).encode
+         0     0% 93.79%        5MB  1.43%  github.com/ethereum/go-ethereum/core/types.(*Transaction).MarshalBinary
+         0     0% 93.79%       35MB 10.03%  github.com/ethereum/go-ethereum/core/types.(*Transaction).UnmarshalBinary
+         0     0% 93.79%        5MB  1.43%  github.com/ethereum/go-ethereum/core/types.(*Transaction).encodeTyped
+         0     0% 93.79%        6MB  1.72%  github.com/ethereum/go-ethereum/core/types.(*modernSigner).Equal
+         0     0% 93.79%     2.50MB  0.72%  github.com/ethereum/go-ethereum/core/types.(*modernSigner).Sender
+         0     0% 93.79%    16.50MB  4.73%  github.com/ethereum/go-ethereum/core/types.NewLondonSigner (inline)
+         0     0% 93.79%        6MB  1.72%  github.com/ethereum/go-ethereum/crypto.Keccak256Hash
+         0     0% 93.79%     8.50MB  2.44%  github.com/ethereum/go-ethereum/crypto.NewKeccakState (inline)
+         0     0% 93.79%       28MB  8.02%  github.com/ethereum/go-ethereum/rlp.(*Stream).Decode
+         0     0% 93.79%       12MB  3.44%  github.com/ethereum/go-ethereum/rlp.(*Stream).decodeBigInt
+         0     0% 93.79%     2.08MB   0.6%  github.com/ethereum/go-ethereum/rlp.(*encBuffer).encode
+         0     0% 93.79%        5MB  1.43%  github.com/ethereum/go-ethereum/rlp.(*encBuffer).writeTo
+         0     0% 93.79%       28MB  8.02%  github.com/ethereum/go-ethereum/rlp.DecodeBytes
+         0     0% 93.79%        5MB  1.43%  github.com/ethereum/go-ethereum/rlp.Encode
+         0     0% 93.79%     2.08MB   0.6%  github.com/ethereum/go-ethereum/rlp.EncodeToBytes
+         0     0% 93.79%     2.50MB  0.72%  github.com/ethereum/go-ethereum/rlp.makeNilPtrDecoder.func1
+         0     0% 93.79%     2.08MB   0.6%  github.com/ethereum/go-ethereum/rlp.makeSliceWriter.func2
+         0     0% 93.79%       28MB  8.02%  github.com/ethereum/go-ethereum/rlp.makeStructDecoder.func1
+         0     0% 93.79%     2.08MB   0.6%  github.com/ethereum/go-ethereum/rlp.writeBytes
+         0     0% 93.79%     4.63MB  1.33%  github.com/ethereum/go-ethereum/rpc.(*callback).call
+         0     0% 93.79%     4.63MB  1.33%  github.com/ethereum/go-ethereum/rpc.(*handler).handleCall
+         0     0% 93.79%     4.63MB  1.33%  github.com/ethereum/go-ethereum/rpc.(*handler).handleCallMsg
+         0     0% 93.79%     4.63MB  1.33%  github.com/ethereum/go-ethereum/rpc.(*handler).handleMsg.func1.1
+         0     0% 93.79%     4.63MB  1.33%  github.com/ethereum/go-ethereum/rpc.(*handler).handleNonBatchCall
+         0     0% 93.79%     4.63MB  1.33%  github.com/ethereum/go-ethereum/rpc.(*handler).runMethod
+         0     0% 93.79%     4.63MB  1.33%  github.com/ethereum/go-ethereum/rpc.(*handler).startCallProc.func1
+         0     0% 93.79%     6.91MB  1.98%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).TxsProcessor2
+         0     0% 93.79%        2MB  0.57%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*SpeculativeExecutor).ExecuteSpeculative.func1
+         0     0% 93.79%    81.52MB 23.36%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient.func1
+         0     0% 93.79%    81.52MB 23.36%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).convertRawEth
+         0     0% 93.79%     6.91MB  1.98%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxBatchForwarder).StartForwardingLoop
+         0     0% 93.79%    10.58MB  3.03%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).AddTransactionsToPool (inline)
+         0     0% 93.79%    19.14MB  5.48%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).addTransactionsToPoolInternal.func3
+         0     0% 93.79%    40.93MB 11.73%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.InitProcessors
+         0     0% 93.79%     7.50MB  2.15%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.ParallelUnmarshalTransactions.func1
+         0     0% 93.79%        2MB  0.57%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.PrepareTransactions
+         0     0% 93.79%    32.76MB  9.39%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes.InitRoutes.InitRoutes.func1.func3
+         0     0% 93.79%     8.78MB  2.51%  github.com/meta-node-blockchain/meta-node/pkg/blockchain.InitBlockChain
+         0     0% 93.79%     8.78MB  2.51%  github.com/meta-node-blockchain/meta-node/pkg/blockchain.InitBlockChain.func1
+         0     0% 93.79%     2.35MB  0.67%  github.com/meta-node-blockchain/meta-node/pkg/blockchain.NewChainStateWithGenesis
+         0     0% 93.79%     5.98MB  1.71%  github.com/meta-node-blockchain/meta-node/pkg/blockchain.newEthHashMapBlsHashMap (inline)
+         0     0% 93.79%     2.80MB   0.8%  github.com/meta-node-blockchain/meta-node/pkg/blockchain.newTxHashToBlockNumberMap (inline)
+         0     0% 93.79%    12.21MB  3.50%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.(*shardedSignatureCache).Store
+         0     0% 93.79%    12.21MB  3.50%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.StoreVerifiedSignature (inline)
+         0     0% 93.79%    50.07MB 14.35%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.evalTxSignature
+         0     0% 93.79%     2.36MB  0.68%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.init
+         0     0% 93.79%    50.07MB 14.35%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func1.1
+         0     0% 93.79%    50.07MB 14.35%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func3
+         0     0% 93.79%    26.17MB  7.50%  github.com/meta-node-blockchain/meta-node/pkg/config.LoadGenesisData
+         0     0% 93.79%     3.01MB  0.86%  github.com/meta-node-blockchain/meta-node/pkg/logger.Info
+         0     0% 93.79%     3.01MB  0.86%  github.com/meta-node-blockchain/meta-node/pkg/logger.enqueueLog
+         0     0% 93.79%     7.84MB  2.25%  github.com/meta-node-blockchain/meta-node/pkg/network.(*Connection).readLoop
+         0     0% 93.79%    15.27MB  4.37%  github.com/meta-node-blockchain/meta-node/pkg/network.(*Connection).run
+         0     0% 93.79%    32.76MB  9.39%  github.com/meta-node-blockchain/meta-node/pkg/network.(*Handler).HandleRequest
+         0     0% 93.79%    32.76MB  9.39%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1
+         0     0% 93.79%    32.76MB  9.39%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1.1
+         0     0% 93.79%     2.13MB  0.61%  github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi.(*Handle).StateDbGet
+         0     0% 93.79%        2MB  0.57%  github.com/meta-node-blockchain/meta-node/pkg/state.(*AccountState).Unmarshal
+         0     0% 93.79%       10MB  2.87%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).ValidEthSign
+         0     0% 93.79%        7MB  2.01%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).ValidSecpSign
+         0     0% 93.79%     3.50MB  1.00%  github.com/meta-node-blockchain/meta-node/pkg/transaction.DeriveSenderFromEthTransaction
+         0     0% 93.79%       31MB  8.88%  github.com/meta-node-blockchain/meta-node/pkg/transaction.ValidateEnvelopeBinding
+         0     0% 93.79%     2.50MB  0.72%  github.com/meta-node-blockchain/meta-node/pkg/transaction.ValidateEthTxEnvelope
+         0     0% 93.79%    16.50MB  4.73%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateDirectEnvelopeBinding
+         0     0% 93.79%    37.50MB 10.75%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateEnvelopeBindingTx (inline)
+         0     0% 93.79%    37.50MB 10.75%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateProtoEnvelopeBinding
+         0     0% 93.79%       10MB  2.87%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.NewTransactionPool (inline)
+         0     0% 93.79%     2.13MB  0.61%  github.com/meta-node-blockchain/meta-node/pkg/trie.(*NomtStateTrie).GetLockFree
+         0     0% 93.79%     5.30MB  1.52%  github.com/meta-node-blockchain/meta-node/pkg/trie.NewNomtStateTrie
+         0     0% 93.79%     5.30MB  1.52%  github.com/meta-node-blockchain/meta-node/pkg/trie.NewStateTrie
+         0     0% 93.79%     9.51MB  2.73%  google.golang.org/protobuf/internal/impl.(*MessageInfo).unmarshal
+         0     0% 93.79%     9.51MB  2.73%  google.golang.org/protobuf/internal/impl.(*MessageInfo).unmarshalPointer
+         0     0% 93.79%     9.51MB  2.73%  google.golang.org/protobuf/internal/impl.(*MessageInfo).unmarshalPointerEager
+         0     0% 93.79%     9.51MB  2.73%  google.golang.org/protobuf/proto.Unmarshal
+         0     0% 93.79%     9.51MB  2.73%  google.golang.org/protobuf/proto.UnmarshalOptions.unmarshal
+         0     0% 93.79%     2.83MB  0.81%  io.Copy (inline)
+         0     0% 93.79%     2.83MB  0.81%  io.CopyN
+         0     0% 93.79%     2.83MB  0.81%  io.copyBuffer
+         0     0% 93.79%     5.30MB  1.52%  main.(*App).GetAccountStateTrie
+         0     0% 93.79%    26.43MB  7.57%  main.(*App).initBlockchain
+         0     0% 93.79%    26.17MB  7.50%  main.(*App).initNetwork
+         0     0% 93.79%    40.93MB 11.73%  main.(*App).initProcessors
+         0     0% 93.79%     7.63MB  2.19%  main.(*App).initRoutes
+         0     0% 93.79%     4.63MB  1.33%  main.(*MetaAPI).GetTransactionCount
+         0     0% 93.79%     4.63MB  1.33%  main.(*MetaAPI).resolveAccountState
+         0     0% 93.79%   104.12MB 29.84%  main.NewApp
+         0     0% 93.79%   107.12MB 30.70%  main.main
+         0     0% 93.79%        3MB  0.86%  math/big.(*Int).Mul
+         0     0% 93.79%       12MB  3.44%  math/big.(*Int).SetBytes (inline)
+         0     0% 93.79%        3MB  0.86%  math/big.nat.mul
+         0     0% 93.79%        3MB  0.86%  math/big.nat.mulAddWW
+         0     0% 93.79%       12MB  3.44%  math/big.nat.setBytes
+         0     0% 93.79%     4.63MB  1.33%  reflect.Value.Call
+         0     0% 93.79%     7.16MB  2.05%  reflect.Value.Grow
+         0     0% 93.79%     4.63MB  1.33%  reflect.Value.call
+         0     0% 93.79%     7.16MB  2.05%  reflect.Value.grow
+         0     0% 93.79%     2.36MB  0.68%  runtime.doInit (inline)
+         0     0% 93.79%     2.36MB  0.68%  runtime.doInit1
+         0     0% 93.79%   109.48MB 31.37%  runtime.main
+         0     0% 93.79%     2.02MB  0.58%  runtime.rt0_go
+         0     0% 93.79%     2.02MB  0.58%  runtime.schedinit
+         0     0% 93.79%    20.02MB  5.74%  sync.(*Map).Store (inline)
+         0     0% 93.79%    11.78MB  3.38%  sync.(*Once).Do (inline)
+         0     0% 93.79%    11.78MB  3.38%  sync.(*Once).doSlow
+         0     0% 93.79%     3.15MB   0.9%  sync.(*Pool).Get

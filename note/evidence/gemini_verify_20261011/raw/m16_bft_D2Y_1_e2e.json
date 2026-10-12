@@ -1,0 +1,1 @@
+{"tag": "m16_bft_D2Y_1", "mode": "bft", "bin": "simple_chain_D2Y", "args": ["-duration", "60", "-batch", "1000"], "submitted": 4517000, "on_chain": 4517000, "complete": true, "blast_secs": 145.0, "e2e_secs": 339.0, "e2e_tps": 13323, "tool_tps": 13881, "p50_ms": 55487, "p99_ms": 76329, "zero_fork": true, "roots": true}

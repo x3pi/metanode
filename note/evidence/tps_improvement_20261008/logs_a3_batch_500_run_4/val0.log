@@ -1,0 +1,334 @@
+[State Cleaner Thread] Started.
+[32m[INFO][Oct  8 04:40:23]  🚀 Bắt đầu ghi CPU Profile ra file startup_cpu.prof (25s)[0m
+[32m[INFO][Oct  8 04:40:23]  [MAIN] ===== Khởi động process =====[0m
+[32m[INFO][Oct  8 04:40:23]  [MAIN] PID: 2548766[0m
+[32m[INFO][Oct  8 04:40:23]  [MAIN] UID: 1001, GID: 1001[0m
+[32m[INFO][Oct  8 04:40:23]  [MAIN] PPID (Parent PID): 2548397[0m
+[32m[INFO][Oct  8 04:40:23]  [PERF] Set GOMAXPROCS from 104 to 104 (NumCPU: 104)[0m
+[32m[INFO][Oct  8 04:40:23]  [PERF] Adjusted GC target from 100% to 800% heap growth (default, may be overridden by config)[0m
+[32m[INFO][Oct  8 04:40:23]  [PERF] Set GOMEMLIMIT=8GB (default, may be overridden by config)[0m
+[32m[INFO][Oct  8 04:40:23]  [RESOURCE] ===== Resource Limits =====[0m
+[32m[INFO][Oct  8 04:40:23]  [RESOURCE] RLIMIT_STACK: soft=8192 KB (8.00 MB), hard=0 KB (0.00 MB)[0m
+[32m[INFO][Oct  8 04:40:23]  [RESOURCE] RLIMIT_CORE: soft=0, hard=0[0m
+[32m[INFO][Oct  8 04:40:23]  [RESOURCE] RLIMIT_NOFILE: soft=1048576, hard=1048576[0m
+[32m[INFO][Oct  8 04:40:23]  [RESOURCE] RLIMIT_AS: soft=0 KB (0.00 MB), hard=0 KB (0.00 MB)[0m
+[32m[INFO][Oct  8 04:40:23]  [RESOURCE] RLIMIT_CPU: soft=0, hard=0[0m
+[32m[INFO][Oct  8 04:40:23]  [RESOURCE] RLIMIT_FSIZE: soft=0, hard=0[0m
+[32m[INFO][Oct  8 04:40:23]  [RESOURCE] RLIMIT_DATA: soft=0 KB (0.00 MB), hard=0 KB (0.00 MB)[0m
+[32m[INFO][Oct  8 04:40:23]  [RESOURCE] ===== End Resource Limits =====[0m
+[32m[INFO][Oct  8 04:40:23]  [FD] Số lượng file descriptors đang mở: 27[0m
+[32m[INFO][Oct  8 04:40:23]  [FD] Giới hạn: 1048576, Đang sử dụng: 0.00%[0m
+[32m[INFO][Oct  8 04:40:23]  [MAIN] Memory ban đầu - Alloc: 9450 KB, Sys: 23125 KB, NumGC: 2[0m
+[32m[INFO][Oct  8 04:40:23]  [MAIN] Goroutines ban đầu: 4[0m
+[32m[INFO][Oct  8 04:40:23]  Incrementing counter initialized to current Unix timestamp: 1791434423[0m
+[32m[INFO][Oct  8 04:40:23]  🔧 [MVM CACHE] C++ MVM account state caching enabled: true[0m
+SetXapianBasePath /tmp/gate_4val_p06/val0/data/consensus/xapian
+[32m[INFO][Oct  8 04:40:23]  🔧 [TRIE] State backend using default: nomt[0m
+[32m[INFO][Oct  8 04:40:23]  🔧 [MVM] Execution mode set to: CGO (in-process mvm+Xapian, default)[0m
+[32m[INFO][Oct  8 04:40:23]  🚀 [TRIE] NOMT global config initialized, base_path=/tmp/gate_4val_p06/val0/data/consensus/nomt_db[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [PEBBLE] Created 512MB shared block cache[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [PEBBLE] Created shared table cache (shards=16, size=10000)[0m
+2026/10/08 04:40:23 [JOB 1] WAL file /tmp/gate_4val_p06/val0/backup/consensus/backup_db/db_shard_0/000564.log with log number 000564 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 04:40:23]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/backup/consensus/backup_db/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/backup/consensus/backup_db/db_shard_0[0m
+Node Type: MASTER
+Node networking: TCP (pkg/network)
+[32m[INFO][Oct  8 04:40:23]  Added/Updated storage for topic: backup using sync.Map[0m
+[32m[INFO][Oct  8 04:40:23]  Start initStorageDatabases[0m
+[32m[INFO][Oct  8 04:40:23]  Initializing local ShardelDB at: /consensus/account_state/ with 1 shards[0m
+[32m[INFO][Oct  8 04:40:23]  Started periodic cleanup task for stale receiving states.[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/consensus/account_state/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/consensus/account_state/db_shard_0[0m
+[32m[INFO][Oct  8 04:40:23]  Initializing local ShardelDB at: /history/receipts/ with 1 shards[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/history/receipts/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/history/receipts/db_shard_0[0m
+[32m[INFO][Oct  8 04:40:23]  Initializing local ShardelDB at: /history/transaction_state/ with 1 shards[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/history/transaction_state/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/history/transaction_state/db_shard_0[0m
+[32m[INFO][Oct  8 04:40:23]  Initializing local ShardelDB at: /consensus/backup_device_key_storage/ with 1 shards[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/consensus/backup_device_key_storage/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/consensus/backup_device_key_storage/db_shard_0[0m
+[32m[INFO][Oct  8 04:40:23]  Initializing local ShardelDB at: /consensus/smart_contract_storage/ with 1 shards[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/consensus/smart_contract_storage/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/consensus/smart_contract_storage/db_shard_0[0m
+[32m[INFO][Oct  8 04:40:23]  Initializing local ShardelDB at: /consensus/smart_contract_code/ with 1 shards[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/consensus/smart_contract_code/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/consensus/smart_contract_code/db_shard_0[0m
+[32m[INFO][Oct  8 04:40:23]  Initializing local ShardelDB at: /consensus/trie_database/ with 1 shards[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/consensus/trie_database/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/consensus/trie_database/db_shard_0[0m
+[32m[INFO][Oct  8 04:40:23]  Initializing local ShardelDB at: /history/blocks/ with 1 shards[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/history/blocks/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/history/blocks/db_shard_0[0m
+[32m[INFO][Oct  8 04:40:23]  Initializing local ShardelDB at: /history/mapping/ with 1 shards[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/history/mapping/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/history/mapping/db_shard_0[0m
+[32m[INFO][Oct  8 04:40:23]  Initializing local ShardelDB at: /consensus/stake_db/ with 1 shards[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/consensus/stake_db/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/consensus/stake_db/db_shard_0[0m
+[32m[INFO][Oct  8 04:40:23]  End initStorageDatabases[0m
+[32m[INFO][Oct  8 04:40:23]  initBlockchain started[0m
+[33m[WARN][Oct  8 04:40:23]  ⚠️ [STARTUP] No clean shutdown indicator found — previous shutdown was unclean (crash/SIGKILL)[0m
+[33m[WARN][Oct  8 04:40:23]  ⚠️  [BLOCK-DB] GetLastBlock from DB failed: pebble: not found. Trying backup file...[0m
+[32m[INFO][Oct  8 04:40:23]  📦 [BLOCK-BACKUP] Loaded block from backup file: block=#8647, hash=0x660c089853a95fda...[0m
+[32m[INFO][Oct  8 04:40:23]  🔄 [BLOCK-DB] Recovered lastBlock #8647 from backup file. Re-saving to database...[0m
+[32m[INFO][Oct  8 04:40:23]  Using existing block (not init genesis)[0m
+[32m[INFO][Oct  8 04:40:23]  lastblock header 2: 
+BlockHeader{
+  LastBlockHash: 0xa6e22a49d078eebcc55a3a6f47c36f7ecee6f3abfd3088f0d2247fe001b28482,
+  BlockNumber: 8647,
+  AccountStatesRoot: 0x63097a2bee42cac86b99f8a2b7e90b3c7d17a36fb3fd8c6161fc979986869c7d,
+  StakeStatesRoot: 0x04edbf5cb5d549f890396a031986d85c9aacafe86048cbe328a0a4ec4c233dbb,
+  ReceiptRoot: 0x0ea80138029a6bd424d06adf56e233775cd217affe2206ca28dddb50f8909303,
+  TransactionsRoot: 0x75429cf4a65421aace3c61eeebcec41a441ddcbc3c7a540f2c2dfd231dc59000,
+  LeaderAddress: 0x52f6A7a34d1FD2B91E86BE5ef150341304F74319,
+  TimeStamp: 1791384114362,
+  AggregateSignature: [],
+  Epoch: 0,
+  GlobalExecIndex: 8647
+}
+ (using existing block)[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [STARTUP] Initialized LastGlobalExecIndex from last block header: gei=8647 (block=#8647)[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [STARTUP] Loaded LastExecutedCommitHash from BackupDb: 37866e7f658bd67cfcdaf880a792081d98afbc02e031d0438df1a1fbb2b91c43[0m
+[32m[INFO][Oct  8 04:40:23]  ✅ [STARTUP] Initialized LastHandledCommitIndex from last block header: 58375 (epoch=0)[0m
+[32m[INFO][Oct  8 04:40:23]  🔒 [STARTUP-SYNC] Go Master state loaded from LevelDB: block=8647, account_root=0x63097a2bee42cac86b99f8a2b7e90b3c7d17a36fb3fd8c6161fc979986869c7d, stake_root=0x04edbf5cb5d549f890396a031986d85c9aacafe86048cbe328a0a4ec4c233dbb[0m
+[32m[INFO][Oct  8 04:40:24]  🚀 [TRIE] NOMT instance initialized for namespace account_state at /tmp/gate_4val_p06/val0/data/consensus/nomt_db/account_state (concurrency=4, pageCacheMB=128, leafCacheMB=128)[0m
+[32m[INFO][Oct  8 04:40:24]  [NomtStateTrie] ⚠️ No registry found for namespace=account_state (fresh start)[0m
+[32m[INFO][Oct  8 04:40:24]  🚀 [TRIE] NOMT instance initialized for namespace stake_db at /tmp/gate_4val_p06/val0/data/consensus/nomt_db/stake_db (concurrency=4, pageCacheMB=64, leafCacheMB=64)[0m
+[32m[INFO][Oct  8 04:40:24]  [NomtStateTrie] ⚠️ No registry found for namespace=stake_db (fresh start)[0m
+[32m[INFO][Oct  8 04:40:24]  🔍 [STARTUP] account_state NOMT root=0x0000000000000000000000000000000000000000000000000000000000000000, header AccountStatesRoot=0x63097a2bee42cac86b99f8a2b7e90b3c7d17a36fb3fd8c6161fc979986869c7d | stake_db NOMT root=0x0000000000000000000000000000000000000000000000000000000000000000, header StakeStatesRoot=0x04edbf5cb5d549f890396a031986d85c9aacafe86048cbe328a0a4ec4c233dbb[0m
+[32m[INFO][Oct  8 04:40:24]  🎯 [TRIE] Dynamically determined EmptyNomtRoot for config 10000000_false: 0x0000000000000000000000000000000000000000000000000000000000000000[0m
+[32m[INFO][Oct  8 04:40:24]  🎯 [TRIE] Dynamically determined EmptyNomtRoot for config 64000_true: 0x0000000000000000000000000000000000000000000000000000000000000000[0m
+[31m[ERROR][Oct  8 04:40:24]  ❌ [STARTUP] Failed to find blockNumber_0 in LevelDB mapping: pebble: not found[0m
+[33m[WARN][Oct  8 04:40:24]  ⚠️ [STARTUP] account_state NOMT database is EMPTY (root=0x0000000000000000...) but header expects 0x63097a2bee42cac8.... STARTUP-SYNC will fetch missing blocks and reconcile.[0m
+[33m[WARN][Oct  8 04:40:24]  ⚠️ [STARTUP] stake_db NOMT database is EMPTY (root=0x0000000000000000...) but header expects 0x04edbf5cb5d549f8.... STARTUP-SYNC will fetch missing blocks and reconcile.[0m
+[33m[WARN][Oct  8 04:40:24]  ⚠️ [STARTUP] NOMT database is EMPTY (account=0x0000000000000000000000000000000000000000000000000000000000000000, stake=0x0000000000000000000000000000000000000000000000000000000000000000) but header expects (account=0x63097a2bee42cac8..., stake=0x04edbf5cb5d549f8...). Aligning startup tip block height to genesis (block #0) to allow re-execution/reconcile.[0m
+[32m[INFO][Oct  8 04:40:24]  [NomtStateTrie] ⚠️ No registry found for namespace=account_state (fresh start)[0m
+[32m[INFO][Oct  8 04:40:24]  📜 [CHANGELOG] Initialized StateChangelogDB at /tmp/gate_4val_p06/val0/data/history/changelog_db_account for namespace account_state (startBlock=0, highestBlock=0)[0m
+[32m[INFO][Oct  8 04:40:24]  ✅ [STATE CHANGELOG] Enabled for account_state[0m
+[32m[INFO][Oct  8 04:40:24]  [NomtStateTrie] ⚠️ No registry found for namespace=stake_db (fresh start)[0m
+[32m[INFO][Oct  8 04:40:24]  📜 [CHANGELOG] Initialized StateChangelogDB at /tmp/gate_4val_p06/val0/data/history/changelog_db_stake for namespace stake_db (startBlock=0, highestBlock=0)[0m
+[32m[INFO][Oct  8 04:40:24]  ✅ [STATE CHANGELOG] Enabled for stake_db[0m
+[32m[INFO][Oct  8 04:40:24]  🫧 [BLOB-STORE] Initialized at /tmp/gate_4val_p06/val0/data/history/blob_store for namespace blob[0m
+[32m[INFO][Oct  8 04:40:24]  🚀 [TRIE] NOMT instance initialized for namespace smart_contract_storage at /tmp/gate_4val_p06/val0/data/consensus/nomt_db/smart_contract_storage (concurrency=4, pageCacheMB=128, leafCacheMB=128)[0m
+[32m[INFO][Oct  8 04:40:24]  📜 [CHANGELOG] Initialized StateChangelogDB at /tmp/gate_4val_p06/val0/data/history/changelog_db_sc for namespace smart_contract_storage (startBlock=0, highestBlock=0)[0m
+[32m[INFO][Oct  8 04:40:24]  ✅ [STATE CHANGELOG] Enabled for smart_contract_storage[0m
+[32m[INFO][Oct  8 04:40:24]  📁 [EPOCH PERSISTENCE] Using node-specific backup path: /tmp/gate_4val_p06/val0/backup[0m
+[32m[INFO][Oct  8 04:40:24]  🔄 [EPOCH PERSISTENCE] Attempting to load epoch data from database...[0m
+[32m[INFO][Oct  8 04:40:24]  📖 [EPOCH PERSISTENCE] Starting to load epoch data...[0m
+[32m[INFO][Oct  8 04:40:24]  📦 [EPOCH PERSISTENCE] Found epoch data in backup file%!(EXTRA string=file, string=/tmp/gate_4val_p06/val0/backup/epoch_data_backup.json, string=data_size, int=1234)[0m
+[32m[INFO][Oct  8 04:40:24]  ✅ [EPOCH VALIDATORS] Loaded cached validators for 1 epochs[0m
+[32m[INFO][Oct  8 04:40:24]  ✅ [EPOCH PERSISTENCE] Epoch data successfully loaded and restored%!(EXTRA string=source, string=backup file, string=current_epoch, uint64=0, string=epoch_timestamp_ms, uint64=1791367997996, string=num_historical_epochs, int=1, string=num_boundary_blocks, int=1)[0m
+[32m[INFO][Oct  8 04:40:24]  ✅ [EPOCH PERSISTENCE] Successfully loaded epoch data - current_epoch={}, epoch_timestamp_ms={}%!(EXTRA uint64=0, uint64=1791367997996)[0m
+2026/10/08 04:40:24 BlockChain instance initialized with Background Cleanup Worker (High Perf Mode)
+[32m[INFO][Oct  8 04:40:24]  ✅ [SNAPSHOT FIX] Epoch aligned: ChainState.currentEpoch=0 matches lastBlock.epoch=0[0m
+[32m[INFO][Oct  8 04:40:24]  🛡️ [SCRUBBER] Background State Scrubbing started. Interval: 24h0m0s[0m
+[31m[ERROR][Oct  8 04:40:24]  TransactionStateDB GetTransaction transaction not found%!(EXTRA common.Hash=0x1c96e3bc610d7367e42a6e64e16eb96e9314deb83af25ebc87625c0a4b4b5fd0)[0m
+[31m[ERROR][Oct  8 04:40:24]  ❌ [STARTUP-REBUILD] Failed to read transaction 0x1c96e3bc610d7367e42a6e64e16eb96e9314deb83af25ebc87625c0a4b4b5fd0 for block #8647: TransactionStateDB GetTransaction transaction not found[0m
+[31m[ERROR][Oct  8 04:40:24]  ❌ [STARTUP-REBUILD] Mapping rebuild incomplete (RPC tx/receipt lookups may miss old txs): failed to read transaction 0x1c96e3bc610d7367e42a6e64e16eb96e9314deb83af25ebc87625c0a4b4b5fd0 for block #8647: TransactionStateDB GetTransaction transaction not found[0m
+[31m[ERROR][Oct  8 04:40:24]  ❌ [INTEGRITY] Block #8647 references parent 0xa6e22a49d078eebc... but parent NOT FOUND in DB: pebble: not found[0m
+[31m[ERROR][Oct  8 04:40:24]  🚨 [INTEGRITY] 2 CRITICAL ERROR(s) detected:[0m
+[31m[ERROR][Oct  8 04:40:24]     ❌ [1/2] Block chain is broken at block #8647 — blocks before this point may be missing or corrupted[0m
+[31m[ERROR][Oct  8 04:40:24]     ❌ [2/2] NOMT account_state root MISMATCH: header=0x63097a2bee42cac8..., NOMT=0x0000000000000000... — state is corrupted[0m
+[31m[ERROR][Oct  8 04:40:24]  ╔══════════════════════════════════════════════════════════════╗[0m
+[31m[ERROR][Oct  8 04:40:24]  ║  🚨 CRITICAL: DATA INTEGRITY CHECK FAILED                  ║[0m
+[31m[ERROR][Oct  8 04:40:24]  ║  Node CANNOT safely start with corrupted data.             ║[0m
+[31m[ERROR][Oct  8 04:40:24]  ║                                                            ║[0m
+[31m[ERROR][Oct  8 04:40:24]  ║  ACTION REQUIRED:                                          ║[0m
+[31m[ERROR][Oct  8 04:40:24]  ║  1. Stop this node immediately                             ║[0m
+[31m[ERROR][Oct  8 04:40:24]  ║  2. Restore from the latest snapshot:                       ║[0m
+[31m[ERROR][Oct  8 04:40:24]  ║     ./mtn-orchestrator.sh restore-node <node_id>           ║[0m
+[31m[ERROR][Oct  8 04:40:24]  ║  3. If no snapshot available, re-sync from other nodes:     ║[0m
+[31m[ERROR][Oct  8 04:40:24]  ║     ./mtn-orchestrator.sh resync-node <node_id>            ║[0m
+[31m[ERROR][Oct  8 04:40:24]  ║  4. If this is the only node, contact the dev team.        ║[0m
+[31m[ERROR][Oct  8 04:40:24]  ║                                                            ║[0m
+[32m[INFO][Oct  8 04:40:24]  ═══════════════════════════════════════════════════════════[0m
+[32m[INFO][Oct  8 04:40:24]  🔍 [INTEGRITY] Starting data integrity check (depth=100)...[0m
+[32m[INFO][Oct  8 04:40:24]  ═══════════════════════════════════════════════════════════[0m
+[32m[INFO][Oct  8 04:40:24]  ✅ [INTEGRITY] CHECK 1/5: LastBlock loaded: #8647 hash=0x660c089853a95fda...[0m
+[32m[INFO][Oct  8 04:40:24]  ✅ [INTEGRITY] CHECK 3/5: Block mapping for #8647 verified[0m
+[32m[INFO][Oct  8 04:40:24]  ✅ [INTEGRITY] CHECK 5/5: Global state counters: lastBlockNumber=8647, lastBlock=#8647, GEI=8647[0m
+[32m[INFO][Oct  8 04:40:24]  ═══════════════════════════════════════════════════════════[0m
+[32m[INFO][Oct  8 04:40:24]  ═══════════════════════════════════════════════════════════[0m
+[31m[ERROR][Oct  8 04:40:24]  ║  Errors found:                                             ║[0m
+[31m[ERROR][Oct  8 04:40:24]  ║  ❌ Block chain is broken at block #8647 — blocks befo...   ║[0m
+[31m[ERROR][Oct  8 04:40:24]  ║  ❌ NOMT account_state root MISMATCH: header=0x63097a2be... ║[0m
+[31m[ERROR][Oct  8 04:40:24]  ╚══════════════════════════════════════════════════════════════╝[0m
+[31m[ERROR][Oct  8 04:40:24]  🛑 Exiting with code 78 (EX_CONFIG) — restore from snapshot to fix.[0m
+[State Cleaner Thread] Started.
+[32m[INFO][Oct  8 07:17:52]  🚀 Bắt đầu ghi CPU Profile ra file startup_cpu.prof (25s)[0m
+[32m[INFO][Oct  8 07:17:52]  [MAIN] ===== Khởi động process =====[0m
+[32m[INFO][Oct  8 07:17:52]  [MAIN] PID: 2997059[0m
+[32m[INFO][Oct  8 07:17:52]  [MAIN] UID: 1001, GID: 1001[0m
+[32m[INFO][Oct  8 07:17:52]  [MAIN] PPID (Parent PID): 2996691[0m
+[32m[INFO][Oct  8 07:17:52]  [PERF] Set GOMAXPROCS from 104 to 104 (NumCPU: 104)[0m
+[32m[INFO][Oct  8 07:17:52]  [PERF] Adjusted GC target from 100% to 800% heap growth (default, may be overridden by config)[0m
+[32m[INFO][Oct  8 07:17:52]  [PERF] Set GOMEMLIMIT=8GB (default, may be overridden by config)[0m
+[32m[INFO][Oct  8 07:17:52]  [RESOURCE] ===== Resource Limits =====[0m
+[32m[INFO][Oct  8 07:17:52]  [RESOURCE] RLIMIT_CORE: soft=0, hard=0[0m
+[32m[INFO][Oct  8 07:17:52]  [RESOURCE] RLIMIT_NOFILE: soft=1048576, hard=1048576[0m
+[32m[INFO][Oct  8 07:17:52]  [RESOURCE] RLIMIT_AS: soft=0 KB (0.00 MB), hard=0 KB (0.00 MB)[0m
+[32m[INFO][Oct  8 07:17:52]  [RESOURCE] RLIMIT_CPU: soft=0, hard=0[0m
+[32m[INFO][Oct  8 07:17:52]  [RESOURCE] RLIMIT_FSIZE: soft=0, hard=0[0m
+[32m[INFO][Oct  8 07:17:52]  [RESOURCE] RLIMIT_DATA: soft=0 KB (0.00 MB), hard=0 KB (0.00 MB)[0m
+[32m[INFO][Oct  8 07:17:52]  [RESOURCE] RLIMIT_STACK: soft=8192 KB (8.00 MB), hard=0 KB (0.00 MB)[0m
+[32m[INFO][Oct  8 07:17:52]  [RESOURCE] ===== End Resource Limits =====[0m
+[32m[INFO][Oct  8 07:17:52]  [FD] Số lượng file descriptors đang mở: 7[0m
+[32m[INFO][Oct  8 07:17:52]  [FD] Giới hạn: 1048576, Đang sử dụng: 0.00%[0m
+[32m[INFO][Oct  8 07:17:52]  [MAIN] Memory ban đầu - Alloc: 9439 KB, Sys: 22613 KB, NumGC: 2[0m
+[32m[INFO][Oct  8 07:17:52]  [MAIN] Goroutines ban đầu: 4[0m
+[32m[INFO][Oct  8 07:17:52]  Incrementing counter initialized to current Unix timestamp: 1791443872[0m
+[32m[INFO][Oct  8 07:17:52]  🔧 [MVM CACHE] C++ MVM account state caching enabled: true[0m
+SetXapianBasePath /tmp/gate_4val_p06/val0/data/consensus/xapian
+[32m[INFO][Oct  8 07:17:52]  🔧 [TRIE] State backend using default: nomt[0m
+[32m[INFO][Oct  8 07:17:52]  🔧 [MVM] Execution mode set to: CGO (in-process mvm+Xapian, default)[0m
+[32m[INFO][Oct  8 07:17:52]  🚀 [TRIE] NOMT global config initialized, base_path=/tmp/gate_4val_p06/val0/data/consensus/nomt_db[0m
+[32m[INFO][Oct  8 07:17:52]  ✅ [PEBBLE] Created 512MB shared block cache[0m
+[32m[INFO][Oct  8 07:17:52]  ✅ [PEBBLE] Created shared table cache (shards=16, size=10000)[0m
+2026/10/08 07:17:52 [JOB 1] WAL file /tmp/gate_4val_p06/val0/backup/consensus/backup_db/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 07:17:52]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/backup/consensus/backup_db/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 07:17:52]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/backup/consensus/backup_db/db_shard_0[0m
+Node Type: MASTER
+Node networking: TCP (pkg/network)
+[32m[INFO][Oct  8 07:17:53]  Added/Updated storage for topic: backup using sync.Map[0m
+[32m[INFO][Oct  8 07:17:53]  Start initStorageDatabases[0m
+[32m[INFO][Oct  8 07:17:53]  Initializing local ShardelDB at: /consensus/account_state/ with 1 shards[0m
+[32m[INFO][Oct  8 07:17:53]  Started periodic cleanup task for stale receiving states.[0m
+2026/10/08 07:17:53 [JOB 1] WAL file /tmp/gate_4val_p06/val0/data/consensus/account_state/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 07:17:53]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/consensus/account_state/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/consensus/account_state/db_shard_0[0m
+[32m[INFO][Oct  8 07:17:53]  Initializing local ShardelDB at: /history/receipts/ with 1 shards[0m
+2026/10/08 07:17:53 [JOB 1] WAL file /tmp/gate_4val_p06/val0/data/history/receipts/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 07:17:53]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/history/receipts/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/history/receipts/db_shard_0[0m
+[32m[INFO][Oct  8 07:17:53]  Initializing local ShardelDB at: /history/transaction_state/ with 1 shards[0m
+2026/10/08 07:17:53 [JOB 1] WAL file /tmp/gate_4val_p06/val0/data/history/transaction_state/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 07:17:53]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/history/transaction_state/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/history/transaction_state/db_shard_0[0m
+[32m[INFO][Oct  8 07:17:53]  Initializing local ShardelDB at: /consensus/backup_device_key_storage/ with 1 shards[0m
+2026/10/08 07:17:53 [JOB 1] WAL file /tmp/gate_4val_p06/val0/data/consensus/backup_device_key_storage/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 07:17:53]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/consensus/backup_device_key_storage/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/consensus/backup_device_key_storage/db_shard_0[0m
+[32m[INFO][Oct  8 07:17:53]  Initializing local ShardelDB at: /consensus/smart_contract_storage/ with 1 shards[0m
+2026/10/08 07:17:53 [JOB 1] WAL file /tmp/gate_4val_p06/val0/data/consensus/smart_contract_storage/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 07:17:53]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/consensus/smart_contract_storage/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/consensus/smart_contract_storage/db_shard_0[0m
+[32m[INFO][Oct  8 07:17:53]  Initializing local ShardelDB at: /consensus/smart_contract_code/ with 1 shards[0m
+2026/10/08 07:17:53 [JOB 1] WAL file /tmp/gate_4val_p06/val0/data/consensus/smart_contract_code/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 07:17:53]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/consensus/smart_contract_code/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/consensus/smart_contract_code/db_shard_0[0m
+[32m[INFO][Oct  8 07:17:53]  Initializing local ShardelDB at: /consensus/trie_database/ with 1 shards[0m
+2026/10/08 07:17:53 [JOB 1] WAL file /tmp/gate_4val_p06/val0/data/consensus/trie_database/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 07:17:53]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/consensus/trie_database/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/consensus/trie_database/db_shard_0[0m
+[32m[INFO][Oct  8 07:17:53]  Initializing local ShardelDB at: /history/blocks/ with 1 shards[0m
+2026/10/08 07:17:53 [JOB 1] WAL file /tmp/gate_4val_p06/val0/data/history/blocks/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 07:17:53]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/history/blocks/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/history/blocks/db_shard_0[0m
+[32m[INFO][Oct  8 07:17:53]  Initializing local ShardelDB at: /history/mapping/ with 1 shards[0m
+2026/10/08 07:17:53 [JOB 1] WAL file /tmp/gate_4val_p06/val0/data/history/mapping/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 07:17:53]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/history/mapping/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/history/mapping/db_shard_0[0m
+[32m[INFO][Oct  8 07:17:53]  Initializing local ShardelDB at: /consensus/stake_db/ with 1 shards[0m
+2026/10/08 07:17:53 [JOB 1] WAL file /tmp/gate_4val_p06/val0/data/consensus/stake_db/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 07:17:53]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_p06/val0/data/consensus/stake_db/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_p06/val0/data/consensus/stake_db/db_shard_0[0m
+[32m[INFO][Oct  8 07:17:53]  End initStorageDatabases[0m
+[32m[INFO][Oct  8 07:17:53]  initBlockchain started[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [STARTUP] Clean shutdown detected — skipping expensive integrity checks[0m
+[32m[INFO][Oct  8 07:17:53]  Using existing block (not init genesis)[0m
+[nomt_ffi] Detected existing HT file for path '[32m[INFO][Oct  8 07:17:53]  lastblock header 2: 
+BlockHeader{
+  LastBlockHash: 0x0000000000000000000000000000000000000000000000000000000000000000,
+  BlockNumber: 0,
+  AccountStatesRoot: 0x0f9a505e8c4f3de731c84fb343a7adeb48517b2b5f1c26a54c637c41a3a9b606,
+  StakeStatesRoot: 0x43b5c1fbda3aae8479780c18ad9b921fe7c0adc6a66dbe30c680d3bfda3671dc,
+  ReceiptRoot: 0x0000000000000000000000000000000000000000000000000000000000000000,
+  TransactionsRoot: 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421,
+  LeaderAddress: 0x0000000000000000000000000000000000000000,
+  TimeStamp: 1791367997996,
+  AggregateSignature: [],
+  Epoch: 0,
+  GlobalExecIndex: 0
+}
+ (using existing block)[0m
+[32m[INFO][Oct  8 07:17:53]  ℹ️  [STARTUP] Last block header has GlobalExecIndex=0 (legacy or genesis). GEI will be set by Rust on first commit.[0m
+/tmp/gate_4val_p06/val0/data/consensus/nomt_db/account_state' with [32m[INFO][Oct  8 07:17:53]  ℹ️  [STARTUP] Defaulted LastExecutedCommitHash to zero hash (not found in BackupDb)[0m
+[33m[WARN][Oct  8 07:17:53]  🚨 [STARTUP] blockNumber is 0 (Genesis). IGNORING BackupDb to prevent Cold Start Deadlock from stale data![0m
+[32m[INFO][Oct  8 07:17:53]  🔒 [STARTUP-SYNC] Go Master state loaded from LevelDB: block=0, account_root=0x0f9a505e8c4f3de731c84fb343a7adeb48517b2b5f1c26a54c637c41a3a9b606, stake_root=0x43b5c1fbda3aae8479780c18ad9b921fe7c0adc6a66dbe30c680d3bfda3671dc[0m
+10000000 pages (requested 10000000). Overriding.
+[32m[INFO][Oct  8 07:17:53]  🚀 [TRIE] NOMT instance initialized for namespace account_state at /tmp/gate_4val_p06/val0/data/consensus/nomt_db/account_state (concurrency=4, pageCacheMB=128, leafCacheMB=128)[0m
+[nomt_ffi] Detected existing HT file for path '/tmp/gate_4val_p06/val0/data/consensus/nomt_db/stake_db' with 64000 pages (requested 64000). Overriding.
+[32m[INFO][Oct  8 07:17:53]  [NomtStateTrie] ✅ Loaded 50151 known keys from registry FILE (namespace=account_state)[0m
+[32m[INFO][Oct  8 07:17:53]  🚀 [TRIE] NOMT instance initialized for namespace stake_db at /tmp/gate_4val_p06/val0/data/consensus/nomt_db/stake_db (concurrency=4, pageCacheMB=64, leafCacheMB=64)[0m
+[32m[INFO][Oct  8 07:17:53]  [NomtStateTrie] ✅ Loaded 4 known keys from registry FILE (namespace=stake_db)[0m
+[32m[INFO][Oct  8 07:17:53]  🔍 [STARTUP] account_state NOMT root=0x0f9a505e8c4f3de731c84fb343a7adeb48517b2b5f1c26a54c637c41a3a9b606, header AccountStatesRoot=0x0f9a505e8c4f3de731c84fb343a7adeb48517b2b5f1c26a54c637c41a3a9b606 | stake_db NOMT root=0x43b5c1fbda3aae8479780c18ad9b921fe7c0adc6a66dbe30c680d3bfda3671dc, header StakeStatesRoot=0x43b5c1fbda3aae8479780c18ad9b921fe7c0adc6a66dbe30c680d3bfda3671dc[0m
+[32m[INFO][Oct  8 07:17:53]  🎯 [TRIE] Dynamically determined EmptyNomtRoot for config 10000000_false: 0x0000000000000000000000000000000000000000000000000000000000000000[0m
+[32m[INFO][Oct  8 07:17:53]  🎯 [TRIE] Dynamically determined EmptyNomtRoot for config 64000_true: 0x0000000000000000000000000000000000000000000000000000000000000000[0m
+2026/10/08 07:17:53 [JOB 1] WAL file /tmp/gate_4val_p06/val0/data/history/changelog_db_account/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 07:17:53]  📜 [CHANGELOG] Loaded startBlock=0 for namespace account_state[0m
+[32m[INFO][Oct  8 07:17:53]  📜 [CHANGELOG] Initialized StateChangelogDB at /tmp/gate_4val_p06/val0/data/history/changelog_db_account for namespace account_state (startBlock=0, highestBlock=0)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [STATE CHANGELOG] Enabled for account_state[0m
+2026/10/08 07:17:53 [JOB 1] WAL file /tmp/gate_4val_p06/val0/data/history/changelog_db_stake/000002.log with log number 000002 stopped reading at offset: 3095; replayed 5 keys in 1 batches
+[32m[INFO][Oct  8 07:17:53]  📜 [CHANGELOG] Loaded startBlock=0 for namespace stake_db[0m
+[32m[INFO][Oct  8 07:17:53]  📜 [CHANGELOG] Initialized StateChangelogDB at /tmp/gate_4val_p06/val0/data/history/changelog_db_stake for namespace stake_db (startBlock=0, highestBlock=0)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [STATE CHANGELOG] Enabled for stake_db[0m
+2026/10/08 07:17:53 [JOB 1] WAL file /tmp/gate_4val_p06/val0/data/history/blob_store/000002.log with log number 000002 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 07:17:53]  🫧 [BLOB-STORE] Initialized at /tmp/gate_4val_p06/val0/data/history/blob_store for namespace blob[0m
+[nomt_ffi] Detected existing HT file for path '/tmp/gate_4val_p06/val0/data/consensus/nomt_db/smart_contract_storage' with 10000000 pages (requested 10000000). Overriding.
+[32m[INFO][Oct  8 07:17:53]  🚀 [TRIE] NOMT instance initialized for namespace smart_contract_storage at /tmp/gate_4val_p06/val0/data/consensus/nomt_db/smart_contract_storage (concurrency=4, pageCacheMB=128, leafCacheMB=128)[0m
+2026/10/08 07:17:53 [JOB 1] WAL file /tmp/gate_4val_p06/val0/data/history/changelog_db_sc/000002.log with log number 000002 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct  8 07:17:53]  📜 [CHANGELOG] Initialized StateChangelogDB at /tmp/gate_4val_p06/val0/data/history/changelog_db_sc for namespace smart_contract_storage (startBlock=0, highestBlock=0)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [STATE CHANGELOG] Enabled for smart_contract_storage[0m
+[32m[INFO][Oct  8 07:17:53]  📁 [EPOCH PERSISTENCE] Using node-specific backup path: /tmp/gate_4val_p06/val0/backup[0m
+[32m[INFO][Oct  8 07:17:53]  🔄 [EPOCH PERSISTENCE] Attempting to load epoch data from database...[0m
+[32m[INFO][Oct  8 07:17:53]  📖 [EPOCH PERSISTENCE] Starting to load epoch data...[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [EPOCH VALIDATORS] Loaded cached validators for 1 epochs[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [EPOCH PERSISTENCE] Epoch data successfully loaded and restored%!(EXTRA string=source, string=database, string=current_epoch, uint64=0, string=epoch_timestamp_ms, uint64=1791367997996, string=num_historical_epochs, int=1, string=num_boundary_blocks, int=1)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [EPOCH PERSISTENCE] Successfully loaded epoch data - current_epoch={}, epoch_timestamp_ms={}%!(EXTRA uint64=0, uint64=1791367997996)[0m
+2026/10/08 07:17:53 BlockChain instance initialized with Background Cleanup Worker (High Perf Mode)
+[32m[INFO][Oct  8 07:17:53]  ✅ [SNAPSHOT FIX] Epoch aligned: ChainState.currentEpoch=0 matches lastBlock.epoch=0[0m
+[32m[INFO][Oct  8 07:17:53]  🛡️ [SCRUBBER] Background State Scrubbing started. Interval: 24h0m0s[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [STARTUP-REBUILD] All 1 checked block & tx mappings are intact (took 21.171µs)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [STARTUP-REBUILD] Marked full mapping rebuild complete in DB (0 mappings recovered)[0m
+[32m[INFO][Oct  8 07:17:53]  ═══════════════════════════════════════════════════════════[0m
+[32m[INFO][Oct  8 07:17:53]  🔍 [INTEGRITY] Starting data integrity check (depth=10)...[0m
+[32m[INFO][Oct  8 07:17:53]  ═══════════════════════════════════════════════════════════[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [INTEGRITY] CHECK 1/5: LastBlock loaded: #0 hash=0x78a152d2939a019c...[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [INTEGRITY] CHECK 2/5: Block chain verified for 1 blocks (from #0 back)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [INTEGRITY] CHECK 3/5: Block mapping for #0 verified[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [INTEGRITY] CHECK 4/5: NOMT account_state root matches header: 0x0f9a505e8c4f3de7...[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [INTEGRITY] CHECK 5/5: Global state counters: lastBlockNumber=0, lastBlock=#0, GEI=0[0m
+[32m[INFO][Oct  8 07:17:53]  ═══════════════════════════════════════════════════════════[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [INTEGRITY] All checks passed — data is consistent[0m
+[32m[INFO][Oct  8 07:17:53]  ═══════════════════════════════════════════════════════════[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [STARTUP] NOMT handle root matches trie cached root: 0x0f9a505e8c4f3de7...[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [STARTUP] NOMT stake_db handle root matches header: 0x43b5c1fbda3aae84...[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [STARTUP-DIAG] Final state: GEI=0, CommitIndex=0, Block=0, Epoch=0[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [STARTUP-MAPPING] Block #0 mapping already present and correct: 0x78a152d2939a019c1ba5fca213a9442a2f883b8a2705674886b011ef641eea74[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [INIT-DEBUG] SetBlockchainInitDone() CALLED! flag=1 (should be 1), lastBlockNumber=0[0m
+2026/10/08 07:17:53 RegistrationRelay: restored 0 persisted registration request(s) (0 tracked in memory)
+[32m[INFO][Oct  8 07:17:53]  BLS conservation mode: enforce (interval 5m0s)[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ [COMMITTEE-KEY-OK] Validator attestation key 985265185a2a verified in active committee[0m
+🔌 [TX CLIENT] Pool initialized (lazy): target=127.0.0.1:10100, poolSize=10 — connections will be created when target is available
+[32m[INFO][Oct  8 07:17:53]  🔏 [BLOCK SIGNER] Initialized with address=0x4018b2e0572e446ca130999Ce9F218dF2b49c812, pubkey=985265185a2a1a62...29f8ba66[0m
+[32m[INFO][Oct  8 07:17:53]  🔏 [BLOCK SIGNER] Block signing enabled for Master node[0m
+[32m[INFO][Oct  8 07:17:53]  📸 [SNAPSHOT-INIT] snapshot_enabled=false, snapshot_server_port=0, snapshot_blocks_delay=0[0m
+[32m[INFO][Oct  8 07:17:53]  📸 [SNAPSHOT] Snapshot system DISABLED — but log rotation callback will be registered[0m
+[32m[INFO][Oct  8 07:17:53]  📸 [SNAPSHOT] Initial epoch from chainState: 0[0m
+[32m[INFO][Oct  8 07:17:53]  📸 [SNAPSHOT] Block commit callback registered[0m
+[32m[INFO][Oct  8 07:17:53]  📸 [SNAPSHOT-INIT] ✅ Block commit callback registered (log rotation + snapshot)[0m
+[32m[INFO][Oct  8 07:17:53]  🌐 [PEER DISCOVERY] Go Master TCP socket listener is intentionally disabled to avoid port conflict with Rust PeerRpcServer[0m
+[32m[INFO][Oct  8 07:17:53]  🔌 [FFI BRIDGE] Initializing Rust MetaNode Consensus via FFI[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ State Committer Worker đã khởi động[0m
+[32m[INFO][Oct  8 07:17:53]  📸 [SNAPSHOT] SnapshotManager wired into RequestHandler[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ Worker monitoring Input TPS initiated[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ BackupDb Worker initiated (fixed pool of 4 workers)[0m
+[32m[INFO][Oct  8 07:17:53]  📡 [SYNC→SUB] NetworkComponents wired into RequestHandler (Master push enabled)[0m
+[32m[INFO][Oct  8 07:17:53]  Đã tự động đăng ký handler cho lệnh 'ServerBusy'.[0m
+[32m[INFO][Oct  8 07:17:53]  ✅ Indexing process initiated[0m
+2026/10/08 07:17:53 🧹 [LOG-CLEANER] Bắt đầu dọn dẹp logs (giữ 3 epoch gần nhất)...
+[32m[INFO][Oct  8 07:17:53]  Starting scan for missing blocks to add to queue...[0m
+2026/10/08 07:17:53 🧹 [LOG-CLEANER] Hoàn thành dọn dẹp logs.
+[32m[INFO][Oct  8 07:17:53]  🧹 [LOG] Đã dọn dẹp logs cũ khi khởi động[0m
+[32m[INFO][Oct  8 07:17:53]  🧹 [LOG] Đã khởi động periodic cleanup (giữ 3 epoch gần nhất)[0m

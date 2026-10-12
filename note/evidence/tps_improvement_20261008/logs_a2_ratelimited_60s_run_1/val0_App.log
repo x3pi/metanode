@@ -1,0 +1,21 @@
+2026-10-08T07:04:25Z: === MEMORY & GOROUTINE DEBUG ===
+2026-10-08T07:04:25Z: Heap Alloc: 1062MB | Sys: 1426MB | NumGC: 6 | Goroutines: 820
+2026-10-08T07:04:25Z: Process RSS(OS): 1715MB (bao gồm cả cgo/C++ heap, VD Xapian)
+2026-10-08T07:04:35Z: === MEMORY & GOROUTINE DEBUG ===
+2026-10-08T07:04:35Z: Heap Alloc: 2021MB | Sys: 2170MB | NumGC: 7 | Goroutines: 820
+2026-10-08T07:04:35Z: Process RSS(OS): 2767MB (bao gồm cả cgo/C++ heap, VD Xapian)
+2026-10-08T07:04:45Z: === MEMORY & GOROUTINE DEBUG ===
+2026-10-08T07:04:45Z: Heap Alloc: 793MB | Sys: 3095MB | NumGC: 9 | Goroutines: 818
+2026-10-08T07:04:45Z: Process RSS(OS): 4049MB (bao gồm cả cgo/C++ heap, VD Xapian)
+2026-10-08T07:04:55Z: === MEMORY & GOROUTINE DEBUG ===
+2026-10-08T07:04:55Z: Heap Alloc: 834MB | Sys: 3447MB | NumGC: 10 | Goroutines: 818
+2026-10-08T07:04:55Z: Process RSS(OS): 4686MB (bao gồm cả cgo/C++ heap, VD Xapian)
+2026-10-08T07:05:05Z: === MEMORY & GOROUTINE DEBUG ===
+2026-10-08T07:05:05Z: Heap Alloc: 3533MB | Sys: 3747MB | NumGC: 10 | Goroutines: 819
+2026-10-08T07:05:05Z: Process RSS(OS): 5195MB (bao gồm cả cgo/C++ heap, VD Xapian)
+2026-10-08T07:05:15Z: === MEMORY & GOROUTINE DEBUG ===
+2026-10-08T07:05:15Z: Heap Alloc: 3073MB | Sys: 4014MB | NumGC: 11 | Goroutines: 824
+2026-10-08T07:05:15Z: Process RSS(OS): 5622MB (bao gồm cả cgo/C++ heap, VD Xapian)
+2026-10-08T07:05:25Z: === MEMORY & GOROUTINE DEBUG ===
+2026-10-08T07:05:25Z: Heap Alloc: 1092MB | Sys: 4040MB | NumGC: 12 | Goroutines: 822
+2026-10-08T07:05:25Z: Process RSS(OS): 5743MB (bao gồm cả cgo/C++ heap, VD Xapian)

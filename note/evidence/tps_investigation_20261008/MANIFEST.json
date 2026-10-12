@@ -1,0 +1,807 @@
+{
+  "generated_at": "2026-10-08T05:06:00Z",
+  "git_commit": "0e9cb3319f10bb49d1ac6740d45bb7de88fd932d",
+  "host": "192.168.1.232 (104 vCPUs, 188 GB RAM)",
+  "files": {
+    "PREREGISTERED.md": {
+      "size_bytes": 6089,
+      "sha256": "de40cfc6b0899aef0b80dbafe6b8ac18919404c78a91eecffab61443bbe467f4"
+    },
+    "baseline_run_1.json": {
+      "size_bytes": 668,
+      "sha256": "a56415cd2363e1fe2a49f5061e4291bbd7f8b884fe33d6fb04512a7e817bb83d"
+    },
+    "baseline_run_1.log": {
+      "size_bytes": 2607,
+      "sha256": "2de9faa35b2508156ce928553ea3f0da29255e6ad9b34e4f17d2662a0e017476"
+    },
+    "baseline_run_2.json": {
+      "size_bytes": 668,
+      "sha256": "8827a8a9116c0dfe353a62466a7b9681e18c41442008fda9f6a638ac89777ac5"
+    },
+    "baseline_run_2.log": {
+      "size_bytes": 2608,
+      "sha256": "55c4be4d37a4a990bd95193a5f3435121ef668b8eb0424b62e2fe6483eb584d3"
+    },
+    "baseline_run_3.json": {
+      "size_bytes": 668,
+      "sha256": "458658d4fcb445c8f8124432fbdac36d7731414e93589fb7a5e3839baadef840"
+    },
+    "baseline_run_3.log": {
+      "size_bytes": 2610,
+      "sha256": "f362a6eb651e539d3784c95d86781ba9bbb219b1e12103240bf27c7cc8b3ecc6"
+    },
+    "baseline_run_4.json": {
+      "size_bytes": 668,
+      "sha256": "c57015b68123b3f799de68bde2aa35a91f248e46135c2d0d4f1d997868329129"
+    },
+    "baseline_run_4.log": {
+      "size_bytes": 2612,
+      "sha256": "638f664980008e505519fb583acdcf8781016ede65e41c9b19ab772a8baba3e3"
+    },
+    "baseline_run_5.json": {
+      "size_bytes": 668,
+      "sha256": "01f58b4b1f9dc9807b6b3edb200cc8ffeb8c734818301d0e98a97eb76f73a10c"
+    },
+    "baseline_run_5.log": {
+      "size_bytes": 2607,
+      "sha256": "1de2beab440428b9c09c26692d4ae38e7b32293a2a67a9550c9b6f173df0dec7"
+    },
+    "baseline_summary.json": {
+      "size_bytes": 2158,
+      "sha256": "44046a6796d105762f55ce0baef0b662dc69cc8b908fde61680f8f7b8eca5db6"
+    },
+    "block_breakdown_analysis.json": {
+      "size_bytes": 17970,
+      "sha256": "6d569363ce5f33570abce0978d594b54c7a28576fed2e984f18d206b2393a2a0"
+    },
+    "exp_batch2000_run_1.json": {
+      "size_bytes": 672,
+      "sha256": "4574adb0bd4995238b83517defa6d2d812c8f3a425804d96fdc9f82a152282b3"
+    },
+    "exp_batch2000_run_1.log": {
+      "size_bytes": 2709,
+      "sha256": "6b8cd996c7adf00274fa3ec06b313d97e1f23953322f8a6b565867ca829fab2a"
+    },
+    "exp_batch250_run_1.json": {
+      "size_bytes": 667,
+      "sha256": "84253892a625a29dc774222084760bbb1ec84250ee1e64f386ecc3d8e088f714"
+    },
+    "exp_batch250_run_1.log": {
+      "size_bytes": 2611,
+      "sha256": "0707855a7a02842e59117adc79af2677c2027a05df10ff0f096649bf78d09b6b"
+    },
+    "exp_batch250_run_2.json": {
+      "size_bytes": 667,
+      "sha256": "6d6736bb6416f8f0333920f2d29a9d7ad06a87f7778391eac19f3d55962097f8"
+    },
+    "exp_batch250_run_2.log": {
+      "size_bytes": 2611,
+      "sha256": "36cf25c79f82b2401ba0b95561659d12acd8ded61a67b1efd9bbf075786b13ec"
+    },
+    "exp_batch250_run_3.json": {
+      "size_bytes": 667,
+      "sha256": "99f94cb0255099daf828edea941d32db48464e10f5297ce38340f05003b31ded"
+    },
+    "exp_batch250_run_3.log": {
+      "size_bytes": 2612,
+      "sha256": "5ecc1f90303f94dfa5e8b35a2a841bd052e7f27219b679a8f27e1bd858c33122"
+    },
+    "exp_batch500_run_1.json": {
+      "size_bytes": 669,
+      "sha256": "89df493574e597d9771e8c907099b09facfc3c3f83b30aa1d56f1eeff87637fc"
+    },
+    "exp_batch500_run_1.log": {
+      "size_bytes": 2615,
+      "sha256": "fad566abaf880557d24a679030a428165c854dd988aab2c658cf443849c7955b"
+    },
+    "exp_batch500_run_2.json": {
+      "size_bytes": 668,
+      "sha256": "9160343f9a1da532438e1010f6cb8453de92ed4d5c9055d8ffd27e12d582a32f"
+    },
+    "exp_batch500_run_2.log": {
+      "size_bytes": 2668,
+      "sha256": "50b09eecb249737d0e0c8ad618db2d6e144b9c2036a17ec029a9c759e6813c39"
+    },
+    "exp_batch500_run_3.json": {
+      "size_bytes": 669,
+      "sha256": "5690ff711ff34a217ad655fad8ab61f52ca2419d5bfdea5f7f202a2122446424"
+    },
+    "exp_batch500_run_3.log": {
+      "size_bytes": 2670,
+      "sha256": "cf50b42ad42a4ff532b2faaff814c5b28703df447918cf6a112342c8f6d2d53f"
+    },
+    "exp_cpupin_run_1.json": {
+      "size_bytes": 668,
+      "sha256": "ecbf01cc4d0593b6ab54ed264de81f311ec6bc666860ae34dac7221a2ded41aa"
+    },
+    "exp_cpupin_run_1.log": {
+      "size_bytes": 2607,
+      "sha256": "ce6fef9cce7a36158b1168f6ce4d8eba69373baf9a319eb71b22fcd7a255674f"
+    },
+    "exp_cpupin_run_2.json": {
+      "size_bytes": 666,
+      "sha256": "5356f14ca1f4740280e545bc9cb7b8c97f30ec9366c02d87bc0b030d112edf1a"
+    },
+    "exp_cpupin_run_2.log": {
+      "size_bytes": 2608,
+      "sha256": "ed5f37f9354660cb727aa67224b44ee0e4d9b681c513f4fbbdbd0e7205ea2b66"
+    },
+    "exp_cpupin_run_3.json": {
+      "size_bytes": 668,
+      "sha256": "63001d386fd8ca854b5a2a8e5b648a9c5b3130e6976c94d872a33983c790bc4f"
+    },
+    "exp_cpupin_run_3.log": {
+      "size_bytes": 2610,
+      "sha256": "d784e86be2fce1c4cc74b78e4f3cf4acbbc739696c14689f0dc7a1d5ba099276"
+    },
+    "profile_blast.log": {
+      "size_bytes": 3027,
+      "sha256": "e95562ca82a3e1ffdf893b73656fbbcd6e6f2546ae54963d5909aa3e355a2b0c"
+    },
+    "profile_blast_report.json": {
+      "size_bytes": 687,
+      "sha256": "486ed2cd0c2251277e763e50304f45b907cde8f4e776338f8ba5611e16d2eb87"
+    },
+    "step4_variable_isolation_summary.json": {
+      "size_bytes": 4420,
+      "sha256": "04a1a53cac5105c303dad9e575816e8f9c55f41543c8132ffe5d5b865f4b6c5e"
+    },
+    "val0_block.pprof": {
+      "size_bytes": 958,
+      "sha256": "5fb8116440c9d26e68a05bb98975895bdb124309fc3ce42b674cc8574edb1868"
+    },
+    "val0_block_top.txt": {
+      "size_bytes": 201,
+      "sha256": "0086e962a20e9f8a7fa28b0f3b538bf5537c7c0f4058bcca2734712bd2236b88"
+    },
+    "val0_cpu.pprof": {
+      "size_bytes": 203712,
+      "sha256": "c78ef78adee589fd0d50c0b2b274ccb6567c8269ca624b4dc837ed6c1ec60a09"
+    },
+    "val0_cpu_cum_top.txt": {
+      "size_bytes": 14267,
+      "sha256": "5cd9af4e426b480926d3a1863b757ce35324c3fc010324565fa1cdd28adfb601"
+    },
+    "val0_cpu_flat_top.txt": {
+      "size_bytes": 14267,
+      "sha256": "cb1cb5752360cc7fcc98c03cf53dcf2d9a36ff00b2b4c695ae6952f8439210eb"
+    },
+    "val0_goroutine.pprof": {
+      "size_bytes": 9578,
+      "sha256": "9449847b8258537d0ff7d8fb9434154caf4838e4791f084ba4faaa338a9433d5"
+    },
+    "val0_goroutine_top.txt": {
+      "size_bytes": 3944,
+      "sha256": "7e1b85f0d7997681f9cef42ef168f477be97033b201da3067aaeae6951a40438"
+    },
+    "val0_heap.pprof": {
+      "size_bytes": 50300,
+      "sha256": "4910a6e23f2f230678b759d40b2a04fa336fc8a3be69834836a005bf6a596247"
+    },
+    "val0_heap_top.txt": {
+      "size_bytes": 17925,
+      "sha256": "9da6040fc7f7247179cd6d4a0c46b07ff7f0d4bcc85d32f402dee8e19f52e6f9"
+    },
+    "val0_mutex.pprof": {
+      "size_bytes": 959,
+      "sha256": "fc812e107ed744b5fad65d6f3a1c746ee585141c6b6aa7f093d4ada82b072ced"
+    },
+    "val0_mutex_top.txt": {
+      "size_bytes": 201,
+      "sha256": "0086e962a20e9f8a7fa28b0f3b538bf5537c7c0f4058bcca2734712bd2236b88"
+    },
+    "val0_perf.data": {
+      "size_bytes": 3637970,
+      "sha256": "d9c9dbace46fd062e986fd5cb51d0f7910302ba73de99849e47198d3f76e45cc"
+    },
+    "val0_perf_flat_top.txt": {
+      "size_bytes": 5184,
+      "sha256": "92dceef0950787dbecf9006ec90c7a5688ec13309549e5acd23056118c446403"
+    },
+    "val0_perf_top.txt": {
+      "size_bytes": 11711,
+      "sha256": "63aa3619e19ec87e4854d8f40a5929bc9f646a056aa2c724a015f3b5ae0cd8b3"
+    },
+    "logs_run_3/exec2.log": {
+      "size_bytes": 46246,
+      "sha256": "df5f5277c23e74af8e68d66978bdfb29d44c4b79ebaf91a386c5ebc23e1413e0"
+    },
+    "logs_run_3/parent.log": {
+      "size_bytes": 56494,
+      "sha256": "562460866dae667a458dd3ee1ddd60d4b1a323bd4fb85d5ffc747f4236f4d183"
+    },
+    "logs_run_3/val0.log": {
+      "size_bytes": 40655,
+      "sha256": "9a4b243828afb3491cea70099eccd890df2b99411df229e6f2b4db7be4ef1114"
+    },
+    "logs_run_3/val0_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_3/val0_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "7413dc87e969c4618d2566371592956b258dda5b10702aa5b44ebb97e8c22179"
+    },
+    "logs_run_3/val0_IntermediateRoot.log": {
+      "size_bytes": 10304,
+      "sha256": "b1bb2f508ee16c0e0c3fb2fd78a945132735f8b004578826ddf10d1f08c9e200"
+    },
+    "logs_run_3/val0_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_3/val0_execution.log": {
+      "size_bytes": 968964,
+      "sha256": "8d94d36d6653952915721d9a7115f8b24fcdcfb93f3992b682547af4e34aace6"
+    },
+    "logs_run_3/val0_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_3/val1.log": {
+      "size_bytes": 40272,
+      "sha256": "f9bdcc4d82f620c98eea08b1110d057dbe61ebdaaf2a465b7413d68aaa835587"
+    },
+    "logs_run_3/val1_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_3/val1_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "9c9624c64ac0ff88a8fea7a65d50bc65b550c3ea08907be3d29338426a246d6a"
+    },
+    "logs_run_3/val1_IntermediateRoot.log": {
+      "size_bytes": 10304,
+      "sha256": "4bbc2d9ffd6f1c279f4732851a9655264ab7211caca4c21ab1bec2c7f9654e20"
+    },
+    "logs_run_3/val1_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_3/val1_execution.log": {
+      "size_bytes": 1052464,
+      "sha256": "bb554436dca368ca973abf54cc35f82b9ac7102b5310265c3452ce0626f254cb"
+    },
+    "logs_run_3/val1_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_3/val2.log": {
+      "size_bytes": 40654,
+      "sha256": "21cef5ed3b810442ff9c39c8ca4b96742e6073d206c91e0d4fbb3a638f7ef12f"
+    },
+    "logs_run_3/val2_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_3/val2_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "0d46b2bf416666cc996ec4e29951d9247bcfd93ce35b19973d537c6315697a44"
+    },
+    "logs_run_3/val2_IntermediateRoot.log": {
+      "size_bytes": 10304,
+      "sha256": "6f48f9717df08a25fd3be3e413347565a67560a459b77ee0f98d5a7e2b5afe59"
+    },
+    "logs_run_3/val2_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_3/val2_execution.log": {
+      "size_bytes": 1032576,
+      "sha256": "c7a9badff28426a93fdc569d42d288ed26be4ce89fc6ccdc7f2b701dc3fecdc8"
+    },
+    "logs_run_3/val2_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_3/val3.log": {
+      "size_bytes": 40564,
+      "sha256": "a869cf0e20125ec11d729bfb35102b079018e7a52792e10848e767971752e052"
+    },
+    "logs_run_3/val3_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_3/val3_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "1c30bf8822a85b4574503b118c4126cd702e3906594203dbe1496443dc6f2d33"
+    },
+    "logs_run_3/val3_IntermediateRoot.log": {
+      "size_bytes": 10304,
+      "sha256": "d20c9db5dc816af6790e39f073cafe5ec4d5475eb0d0be6d624b05b42d43e294"
+    },
+    "logs_run_3/val3_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_3/val3_execution.log": {
+      "size_bytes": 1025190,
+      "sha256": "8cb18560199ec007d714012430d7e543c00e87974bd41907c1b4a938b9f1edca"
+    },
+    "logs_run_3/val3_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_1/exec2.log": {
+      "size_bytes": 46155,
+      "sha256": "01290a330e13a5f81450be98384fc06eca0eeea49afb78000446a566a99adfab"
+    },
+    "logs_run_1/parent.log": {
+      "size_bytes": 62131,
+      "sha256": "01c282910ce6c964c21b3b2e4be83273750abb8173a867b08f53449818332157"
+    },
+    "logs_run_1/val0.log": {
+      "size_bytes": 40654,
+      "sha256": "425b4251b23bb6e7992a550a76e1256eb7993b50f275edb92e3bdb1cdc6a55b2"
+    },
+    "logs_run_1/val0_App.log": {
+      "size_bytes": 223,
+      "sha256": "dc565bc9cb1a1a482f35f86785d4c6c7a56a7aaa5134fd6a7f35749b15030469"
+    },
+    "logs_run_1/val0_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "7413dc87e969c4618d2566371592956b258dda5b10702aa5b44ebb97e8c22179"
+    },
+    "logs_run_1/val0_IntermediateRoot.log": {
+      "size_bytes": 10352,
+      "sha256": "e62460b94fc4f6b205d3a2c6b38176800cc9a0f5be35dff23e9469207afd2cb6"
+    },
+    "logs_run_1/val0_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_1/val0_execution.log": {
+      "size_bytes": 974402,
+      "sha256": "9f203fe0420d8d0b61bbc6ac1893fece469a0484e472700dfbbf75c33fac17e8"
+    },
+    "logs_run_1/val0_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_1/val1.log": {
+      "size_bytes": 40563,
+      "sha256": "03c1661f641e3e335661f5ef5cc1a3cdcebef336eb6e48bf3e502ba9d26fe4dd"
+    },
+    "logs_run_1/val1_App.log": {
+      "size_bytes": 225,
+      "sha256": "1eb4852b56dd5bd803bfb21f9259c816f0a9f60e55a731e85aedeed09a5b9538"
+    },
+    "logs_run_1/val1_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "9c9624c64ac0ff88a8fea7a65d50bc65b550c3ea08907be3d29338426a246d6a"
+    },
+    "logs_run_1/val1_IntermediateRoot.log": {
+      "size_bytes": 10352,
+      "sha256": "ad0a1ffa7f2f590b02644379365b88f541da3f1a0d7af5bba8f40c7a10701a58"
+    },
+    "logs_run_1/val1_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_1/val1_execution.log": {
+      "size_bytes": 1045146,
+      "sha256": "e47abd377794375e2ea39f823be073f0b14d7d0bc88d5632e0c5d052ef83ca6d"
+    },
+    "logs_run_1/val1_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_1/val2.log": {
+      "size_bytes": 40564,
+      "sha256": "98019c55035d9f70814b6df65b3f7d68e731ce35824c814eab57640276d29415"
+    },
+    "logs_run_1/val2_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_1/val2_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "0d46b2bf416666cc996ec4e29951d9247bcfd93ce35b19973d537c6315697a44"
+    },
+    "logs_run_1/val2_IntermediateRoot.log": {
+      "size_bytes": 10352,
+      "sha256": "eec063d402e4a5c9577d75263081c30649605c7dd82ae8732d42cbe267f713cb"
+    },
+    "logs_run_1/val2_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_1/val2_execution.log": {
+      "size_bytes": 1035847,
+      "sha256": "db346ed0a3ef88600e318dcc6840ead28a7b847b3fc253dedb331dd76cd29130"
+    },
+    "logs_run_1/val2_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_1/val3.log": {
+      "size_bytes": 40413,
+      "sha256": "b9dc4479d0f29f66f1847c150f435115d013cc4f9c96988ec94ee86720480e57"
+    },
+    "logs_run_1/val3_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_1/val3_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "1c30bf8822a85b4574503b118c4126cd702e3906594203dbe1496443dc6f2d33"
+    },
+    "logs_run_1/val3_IntermediateRoot.log": {
+      "size_bytes": 10352,
+      "sha256": "167f30c6223b4392f37d223c1b56a8a8d4bedb41c5240a1b4464b2b28992adbe"
+    },
+    "logs_run_1/val3_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_1/val3_execution.log": {
+      "size_bytes": 1024040,
+      "sha256": "345a416e3eee68db915455787fcaf6d876445bb60c4909b534cb7223ea7104fc"
+    },
+    "logs_run_1/val3_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_2/exec2.log": {
+      "size_bytes": 46156,
+      "sha256": "f761b2bad3f3255644d7d4245959d85b5b4c526de3a614d8ec87e85027ef8dd3"
+    },
+    "logs_run_2/parent.log": {
+      "size_bytes": 56495,
+      "sha256": "8621c26bb341ba7cf48c0e2c335be1bca68e872eaa55d125e58f51a25da51460"
+    },
+    "logs_run_2/val0.log": {
+      "size_bytes": 40563,
+      "sha256": "f2b7660e77a9c2aa4357cbff6bfd7ab8157c20898bdcaaa51c6c2b9f27dc887e"
+    },
+    "logs_run_2/val0_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_2/val0_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "7413dc87e969c4618d2566371592956b258dda5b10702aa5b44ebb97e8c22179"
+    },
+    "logs_run_2/val0_IntermediateRoot.log": {
+      "size_bytes": 11859,
+      "sha256": "5139fceb4d24824ff027aa28028ebc9cee19654d57db2f5bbd6db9f9f3a286a5"
+    },
+    "logs_run_2/val0_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_2/val0_execution.log": {
+      "size_bytes": 982068,
+      "sha256": "4b124708df4b0312ac131f5ecaed3794952ff16e1262f201bf170462b499cd82"
+    },
+    "logs_run_2/val0_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_2/val1.log": {
+      "size_bytes": 40564,
+      "sha256": "153bfb6d963f02ce91c48e5a776728187254205bc6bdec8d851a14120062b2e0"
+    },
+    "logs_run_2/val1_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_2/val1_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "9c9624c64ac0ff88a8fea7a65d50bc65b550c3ea08907be3d29338426a246d6a"
+    },
+    "logs_run_2/val1_IntermediateRoot.log": {
+      "size_bytes": 11859,
+      "sha256": "29edc545fa98d8f6cabcaa2a594e1b4c0ba38d9f5b9b6ead638c67f70bb77db9"
+    },
+    "logs_run_2/val1_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_2/val1_execution.log": {
+      "size_bytes": 1065930,
+      "sha256": "d199354d4d7eb6fcb50e167a07cdef222f6e8a21d929ab1e18fc0787f972104f"
+    },
+    "logs_run_2/val1_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_2/val2.log": {
+      "size_bytes": 40152,
+      "sha256": "6a775b682ab684ed972d2e9521820cfd5995aa04826309f399d9b4d9ce5e283e"
+    },
+    "logs_run_2/val2_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_2/val2_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "0d46b2bf416666cc996ec4e29951d9247bcfd93ce35b19973d537c6315697a44"
+    },
+    "logs_run_2/val2_IntermediateRoot.log": {
+      "size_bytes": 11859,
+      "sha256": "56b823c77b631af6b1936f3f5edc1df71a7d762aa1bec5484e0b2cc3457124b9"
+    },
+    "logs_run_2/val2_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_2/val2_execution.log": {
+      "size_bytes": 1045854,
+      "sha256": "9a765ba19425178d10522771995b63e8f7d51367be749f89f254e0cf5a271d2b"
+    },
+    "logs_run_2/val2_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_2/val3.log": {
+      "size_bytes": 40653,
+      "sha256": "e8a29c4719ca75ec4441d6b0d0ad98573042bf2b57b7ab24c60517a53aefa0b6"
+    },
+    "logs_run_2/val3_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_2/val3_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "1c30bf8822a85b4574503b118c4126cd702e3906594203dbe1496443dc6f2d33"
+    },
+    "logs_run_2/val3_IntermediateRoot.log": {
+      "size_bytes": 11859,
+      "sha256": "94f12e7d806d696086d2d136c92e43bb10e2177c94239a161268ce1ecbae6886"
+    },
+    "logs_run_2/val3_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_2/val3_execution.log": {
+      "size_bytes": 1041367,
+      "sha256": "ba2692dab03f85da527b5cd8cae668c779d88a446138b20463040cd0fb06b23b"
+    },
+    "logs_run_2/val3_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_4/exec2.log": {
+      "size_bytes": 46245,
+      "sha256": "a783089109cc9cb0957f92e211b62d53e01224f02c10509ca102c3754fabf88b"
+    },
+    "logs_run_4/parent.log": {
+      "size_bytes": 56292,
+      "sha256": "d4d261db210182a9b3bacb9b74c42b4c84f2aa0951442f46a3ef44649cc2cdcd"
+    },
+    "logs_run_4/val0.log": {
+      "size_bytes": 40563,
+      "sha256": "d903b90e5f8d26f95ed759e142f9d9e0aa0a66948dea7498e1393393b7b2cb97"
+    },
+    "logs_run_4/val0_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_4/val0_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "7413dc87e969c4618d2566371592956b258dda5b10702aa5b44ebb97e8c22179"
+    },
+    "logs_run_4/val0_IntermediateRoot.log": {
+      "size_bytes": 11858,
+      "sha256": "b84328a7bbfecbb64af7fdd93c34a8c280b2883e5a71fb960e55d70d11420081"
+    },
+    "logs_run_4/val0_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_4/val0_execution.log": {
+      "size_bytes": 986534,
+      "sha256": "c2d308e62637211ad987bde382567eb388b63eee2bb2e18e4a5e5c6b415b33cf"
+    },
+    "logs_run_4/val0_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_4/val1.log": {
+      "size_bytes": 40477,
+      "sha256": "362bc92ee16c2a7cf1af4c7149a0bba43d898758cb9a78451a400ca7b6c6267f"
+    },
+    "logs_run_4/val1_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_4/val1_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "9c9624c64ac0ff88a8fea7a65d50bc65b550c3ea08907be3d29338426a246d6a"
+    },
+    "logs_run_4/val1_IntermediateRoot.log": {
+      "size_bytes": 11858,
+      "sha256": "aedf5145b63f65dc11b8a64987f3c8c361d1fe0e278e455f12ce7f29afc5d4e8"
+    },
+    "logs_run_4/val1_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_4/val1_execution.log": {
+      "size_bytes": 1065306,
+      "sha256": "0ea36ea25a9d5c12dfdc9a928dea9d3aab9ab0c4273af5ca9574ecdb378cfbd2"
+    },
+    "logs_run_4/val1_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_4/val2.log": {
+      "size_bytes": 40654,
+      "sha256": "5a064ad71c0d5d7febefbef5cfdf8e9dcf5abc8b24f61f4084e5a0c710408492"
+    },
+    "logs_run_4/val2_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_4/val2_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "0d46b2bf416666cc996ec4e29951d9247bcfd93ce35b19973d537c6315697a44"
+    },
+    "logs_run_4/val2_IntermediateRoot.log": {
+      "size_bytes": 11858,
+      "sha256": "61d680e4699802d633469dc2bf7ecf2b3760c7a9181f0f313ca6330fb9d22a19"
+    },
+    "logs_run_4/val2_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_4/val2_execution.log": {
+      "size_bytes": 1046993,
+      "sha256": "60bd39518e3bfab30d93669865d58b306ed95dd59c457208dfef8fe17896aeff"
+    },
+    "logs_run_4/val2_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_4/val3.log": {
+      "size_bytes": 40076,
+      "sha256": "bf1cf5fb7f3a97d704a882072f6b159882799f2b5ae91a4d677d07fb332f38d0"
+    },
+    "logs_run_4/val3_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_4/val3_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "1c30bf8822a85b4574503b118c4126cd702e3906594203dbe1496443dc6f2d33"
+    },
+    "logs_run_4/val3_IntermediateRoot.log": {
+      "size_bytes": 11858,
+      "sha256": "5392575b687592e8ec4414edb8469358de7809e70fa90616773fb32475db92b4"
+    },
+    "logs_run_4/val3_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_4/val3_execution.log": {
+      "size_bytes": 1040383,
+      "sha256": "87788b1366969ffca99cc4ec5d4b2976beef5dca8554a6ed6070022cdaaf1da8"
+    },
+    "logs_run_4/val3_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_5/exec2.log": {
+      "size_bytes": 46245,
+      "sha256": "d811e1e3c5a86bc62214181124599518ffdeb427f3d2ee8cc4428a0358ad1100"
+    },
+    "logs_run_5/parent.log": {
+      "size_bytes": 56497,
+      "sha256": "aa873d608cc38dd57205a253c8870bf45f3d524814873e3081379d1adef807f2"
+    },
+    "logs_run_5/val0.log": {
+      "size_bytes": 40563,
+      "sha256": "a8356937a6433620f9daee81b851577e06d50a98d3ebcd3c59e31455c18a5728"
+    },
+    "logs_run_5/val0_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_5/val0_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "7413dc87e969c4618d2566371592956b258dda5b10702aa5b44ebb97e8c22179"
+    },
+    "logs_run_5/val0_IntermediateRoot.log": {
+      "size_bytes": 11858,
+      "sha256": "77752f07e57bed9d5937be4461604c4f079ea7babc43432953d0b5a2b7e0bd06"
+    },
+    "logs_run_5/val0_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_5/val0_execution.log": {
+      "size_bytes": 985119,
+      "sha256": "aadddf18d4e611a5438c341f630f5a8ba3d70e5128ed0c6159fe1fc4403a3f85"
+    },
+    "logs_run_5/val0_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_5/val1.log": {
+      "size_bytes": 40543,
+      "sha256": "ff8ea15e03cfc4df55fc6f0015324275fc2026b262b831da00fae9bacb845a5b"
+    },
+    "logs_run_5/val1_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_5/val1_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "9c9624c64ac0ff88a8fea7a65d50bc65b550c3ea08907be3d29338426a246d6a"
+    },
+    "logs_run_5/val1_IntermediateRoot.log": {
+      "size_bytes": 11858,
+      "sha256": "d83e1be099078b705bab7809ad99c1f529f861f2803f44f85becd421b82b13e5"
+    },
+    "logs_run_5/val1_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_5/val1_execution.log": {
+      "size_bytes": 1059968,
+      "sha256": "2034f39de2b2344608dc856bb154ce0a426b87f8ee57795c034326b50fd70493"
+    },
+    "logs_run_5/val1_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_5/val2.log": {
+      "size_bytes": 40362,
+      "sha256": "4b43227be86837a1ff8321add9233dde9facec010e32a3d6a28279e13cb0d603"
+    },
+    "logs_run_5/val2_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_5/val2_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "0d46b2bf416666cc996ec4e29951d9247bcfd93ce35b19973d537c6315697a44"
+    },
+    "logs_run_5/val2_IntermediateRoot.log": {
+      "size_bytes": 11858,
+      "sha256": "4c86928135ca1a55b5fccdf9385ef50ff6d928f807462b83e3d632cfab1ad5f1"
+    },
+    "logs_run_5/val2_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_5/val2_execution.log": {
+      "size_bytes": 1046176,
+      "sha256": "929bf0e6d0f3209130581fade748e7db659bdb7164b899e758037222a70cb9bc"
+    },
+    "logs_run_5/val2_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_5/val3.log": {
+      "size_bytes": 40564,
+      "sha256": "a042ed02572ec5b91031791be0217502066da2a3a930205d63a3f194c1f9730f"
+    },
+    "logs_run_5/val3_App.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_5/val3_Commit.log": {
+      "size_bytes": 277,
+      "sha256": "1c30bf8822a85b4574503b118c4126cd702e3906594203dbe1496443dc6f2d33"
+    },
+    "logs_run_5/val3_IntermediateRoot.log": {
+      "size_bytes": 11858,
+      "sha256": "135326ed19c24e7873cf2afa042cea5bea1d8c9758bd96e86c84ebf16562146b"
+    },
+    "logs_run_5/val3_cache_debug.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "logs_run_5/val3_execution.log": {
+      "size_bytes": 1039103,
+      "sha256": "2c79fd2f384a2fa587323380c0edd311e179e955134e77ec7c466c07986189b0"
+    },
+    "logs_run_5/val3_runSocketExecutor_committer.log": {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+}

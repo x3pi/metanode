@@ -1,0 +1,18 @@
+{
+  "benchmark_session": "bounded_mapping_cache_20261008",
+  "generated_at": "2026-10-08T03:25:00Z",
+  "artifacts": [
+    {
+      "file": "go_test_race_blockchain.log",
+      "sha256": "7ae76841cc5a94e5b6534e9f6966b43d299fb842c39d613874d4bccbf71e532f",
+      "bytes": 313569,
+      "description": "Full race-detector test run for execution/pkg/blockchain/... covering swap, promote, fallback, and concurrent race safety."
+    },
+    {
+      "file": "verify_pebble_fallback_rpc.log",
+      "sha256": "281c3d8420800cdbc01f987d6d80d342e4052331f970055e61648f5df0e17d44",
+      "bytes": 2085,
+      "description": "End-to-end JSON-RPC verification on cold cluster restart confirming Pebble DB fallback for eth_getTransactionReceipt and eth_getTransactionByHash."
+    }
+  ]
+}

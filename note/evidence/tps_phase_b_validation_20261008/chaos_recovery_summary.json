@@ -1,0 +1,58 @@
+{
+  "timestamp": "2026-10-08T10:40:30Z",
+  "binary_sha256": "9158b0eea906cfffef24133887136fcd75357c9dc55deceee6f2b8143ae4dee7",
+  "target_binary": "/tmp/p06_bins/simple_chain",
+  "chaos_cycles_completed": 5,
+  "chaos_events": [
+    {
+      "cycle": 1,
+      "target": "val1",
+      "downtime_sec": 3.5,
+      "restart_time_sec": 4.209532022476196,
+      "timestamp": 1791455844.1645045
+    },
+    {
+      "cycle": 2,
+      "target": "val2",
+      "downtime_sec": 3.5,
+      "restart_time_sec": 6.263500690460205,
+      "timestamp": 1791455859.0022259
+    },
+    {
+      "cycle": 3,
+      "target": "val3",
+      "downtime_sec": 3.5,
+      "restart_time_sec": 9.32236623764038,
+      "timestamp": 1791455876.894955
+    },
+    {
+      "cycle": 4,
+      "target": "val1",
+      "downtime_sec": 3.5,
+      "restart_time_sec": 6.272093296051025,
+      "timestamp": 1791455891.7487352
+    },
+    {
+      "cycle": 5,
+      "target": "val2",
+      "downtime_sec": 3.5,
+      "restart_time_sec": 4.214306592941284,
+      "timestamp": 1791455904.54137
+    }
+  ],
+  "node_heights": {
+    "val0": 77,
+    "val1": 77,
+    "val2": 77,
+    "val3": 77
+  },
+  "verified_blocks_count": 77,
+  "parity_mismatches": 0,
+  "zero_fork_verified": true,
+  "blast_metrics": {
+    "total_submitted": 791000,
+    "total_confirmed": 705030,
+    "effective_tps": 9398.62532086474,
+    "tool_zero_fork_verified": true
+  }
+}

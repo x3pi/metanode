@@ -1,0 +1,42 @@
+{
+  "tag": "s16_base_3",
+  "mode": "bft",
+  "bin": "simple_chain_BASE_16M",
+  "args": [
+    "-duration",
+    "60",
+    "-batch",
+    "1000"
+  ],
+  "submitted": 2553000,
+  "on_chain": 2553000,
+  "complete": true,
+  "blast_secs": 84.7,
+  "e2e_secs": 190.6,
+  "e2e_tps": 13394,
+  "tool_tps": 17454,
+  "p50_ms": 49604,
+  "p99_ms": 77306,
+  "zero_fork": true,
+  "roots": true,
+  "uptime_before": "03:04:11 up 16 days, 20:38, 38 users,  load average: 23.74, 38.99, 31.42",
+  "uptime_after": "03:08:21 up 16 days, 20:42, 38 users,  load average: 34.69, 49.48, 38.47",
+  "log_analysis": {
+    "sig1_expected_mismatch_errors": 696,
+    "byte_limit_exceeded_count": 696,
+    "sig2_watchdog_hangs": 0,
+    "catchup_phases_observed": 0,
+    "val_final_blocks": {
+      "val0": 545,
+      "val1": 543,
+      "val2": 545,
+      "val3": 545
+    },
+    "catchup_rate_blks_per_sec": null,
+    "sig1_details": [
+      "val3: 696 errors (sample: Failed to fetch CommitRange(41..=44) from val0: Expected 19 but received 16 bloc)"
+    ],
+    "classification": "SIG_1 (Byte truncation error: 696 occurrences)"
+  },
+  "failure_classification": "SIG_1 (Byte truncation error: 696 occurrences)"
+}

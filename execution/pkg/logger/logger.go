@@ -63,6 +63,11 @@ func getFlag() int {
 	return config.Flag
 }
 
+// IsDebugEnabled returns true if the current log level includes DEBUG or higher.
+func IsDebugEnabled() bool {
+	return getFlag() >= FLAG_DEBUG
+}
+
 func getFormat() string {
 	cfgMu.RLock()
 	defer cfgMu.RUnlock()

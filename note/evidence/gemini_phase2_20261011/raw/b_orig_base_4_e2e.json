@@ -1,0 +1,41 @@
+{
+  "tag": "b_orig_base_4",
+  "mode": "bft",
+  "bin": "simple_chain_BASE",
+  "args": [
+    "-duration",
+    "60",
+    "-batch",
+    "1000"
+  ],
+  "submitted": 4285000,
+  "on_chain": 3969175,
+  "complete": false,
+  "blast_secs": 90.2,
+  "e2e_secs": null,
+  "e2e_tps": null,
+  "tool_tps": 12469,
+  "p50_ms": 43289,
+  "p99_ms": 77048,
+  "zero_fork": true,
+  "roots": true,
+  "uptime_before": "05:02:03 up 16 days, 22:36, 38 users,  load average: 12.10, 38.79, 47.42",
+  "uptime_after": "05:09:29 up 16 days, 22:44, 38 users,  load average: 9.50, 37.08, 46.31",
+  "log_analysis": {
+    "sig1_expected_mismatch_errors": 946,
+    "byte_limit_exceeded_count": 1726,
+    "sig2_watchdog_hangs": 94,
+    "catchup_phases_observed": 42,
+    "val_final_blocks": {
+      "val0": 842,
+      "val1": 842,
+      "val2": 252,
+      "val3": 842
+    },
+    "sig1_details": [
+      "val2: 946 errors"
+    ],
+    "classification": "SIG_1 (Byte truncation: 946 errors)"
+  },
+  "failure_classification": "SIG_1 (Byte truncation: 946 errors)"
+}

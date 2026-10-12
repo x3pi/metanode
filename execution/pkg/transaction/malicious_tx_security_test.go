@@ -17,8 +17,8 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
-// TestMaliciousTx_OversizedInitcode tests that contract deployment with initcode > 49152 bytes
-// is rejected at envelope validation with ErrMaxInitCodeSizeExceeded per EIP-3860.
+// TestMaliciousTx_OversizedInitcode tests that contract deployment with initcode > MaxInitCodeSize
+// is rejected at envelope validation with ErrMaxInitCodeSizeExceeded.
 func TestMaliciousTx_OversizedInitcode(t *testing.T) {
 	chainID := big.NewInt(991)
 	signer := types.NewPragueSigner(chainID)
@@ -26,7 +26,7 @@ func TestMaliciousTx_OversizedInitcode(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	require.NoError(t, err)
 
-	// 1. Initcode exceeding MaxInitCodeSize (49152 bytes)
+	// 1. Initcode exceeding MaxInitCodeSize (512 KB)
 	hugeInitcode := make([]byte, MaxInitCodeSize+1)
 	for i := range hugeInitcode {
 		hugeInitcode[i] = 0x60 // PUSH1
@@ -47,7 +47,7 @@ func TestMaliciousTx_OversizedInitcode(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrMaxInitCodeSizeExceeded), "expected ErrMaxInitCodeSizeExceeded, got: %v", err)
 
-	// 2. Initcode within limit (exactly 49152 bytes)
+	// 2. Initcode within limit (exactly MaxInitCodeSize)
 	validInitcode := make([]byte, MaxInitCodeSize)
 	txDataValid := &types.LegacyTx{
 		Nonce:    0,

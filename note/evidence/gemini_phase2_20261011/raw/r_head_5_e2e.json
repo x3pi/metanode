@@ -1,0 +1,24 @@
+{
+  "tag": "r_head_5",
+  "mode": "raft",
+  "bin": "simple_chain_HEAD",
+  "args": [
+    "-duration",
+    "60",
+    "-batch",
+    "1000"
+  ],
+  "submitted": 1549216,
+  "on_chain": 1549216,
+  "complete": true,
+  "blast_secs": 87.5,
+  "e2e_secs": 94.2,
+  "e2e_tps": 16445,
+  "tool_tps": 23015,
+  "p50_ms": 22683,
+  "p99_ms": 40130,
+  "zero_fork": true,
+  "roots": true,
+  "uptime_before": "02:11:54 up 16 days, 19:46, 38 users,  load average: 13.11, 20.65, 18.92",
+  "uptime_after": "02:13:49 up 16 days, 19:48, 38 users,  load average: 12.51, 18.41, 18.32"
+}

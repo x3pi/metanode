@@ -1,0 +1,120 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 18K of event 'cycles:P'
+# Event count (approx.): 349518060735
+#
+# Children      Self       Samples  Command          Shared Object         Symbol                                                                                                                                                                                                                                                                                                                                                                                                           IPC   [IPC Coverage]
+# ........  ........  ............  ...............  ....................  ...............................................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    38.39%     0.00%             0  simple_chain     simple_chain          [.] runtime.goexit.abi0                                                                                                                                                                                                                                                                                                                                                                                          -      -            
+            |
+            ---runtime.goexit.abi0
+               |          
+               |--6.46%--main.(*App).Run.gowrap2
+               |          github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxBatchForwarder).StartForwardingLoop
+               |          |          
+               |           --5.54%--github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub
+               |                     |          
+               |                     |--2.59%--sort.Slice
+               |                     |          sort.pdqsort_func
+               |                     |          |          
+               |                     |          |--1.64%--sort.pdqsort_func
+               |                     |          |          |          
+               |                     |          |           --0.97%--sort.pdqsort_func
+               |                     |          |          
+               |                     |           --0.76%--sort.partition_func
+               |                     |                     |          
+               |                     |                      --0.74%--github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub.func2
+               |                     |                                |          
+               |                     |                                 --0.71%--github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress
+               |                     |          
+               |                     |--0.78%--github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.(*TransactionPool).AddTransactions
+               |                     |          
+               |                     |--0.72%--github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress
+               |                     |          
+               |                      --0.71%--github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.addressesSuspectedStaleCache
+               |          
+               |--6.01%--github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func1.1
+               |          |          
+               |           --5.99%--github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func3
+               |                     |          
+               |                     |--5.04%--github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.evalTxSignature
+               |                     |          |          
+               |                     |          |--1.81%--github.com/meta-node-blockchain/meta-node/pkg/transaction.ValidateEnvelopeBinding
+               |                     |          |          github.com/meta-node-blockchain/meta-node/pkg/transaction.validateProtoEnvelopeBinding
+               |                     |          |          |          
+               |                     |          |          |--1.11%--github.com/meta-node-blockchain/meta-node/pkg/transaction.validateDirectEnvelopeBinding
+               |                     |          |          |          |          
+               |                     |          |          |           --0.59%--github.com/ethereum/go-ethereum/core/types.Sender
+               |                     |          |          |                     |          
+               |                     |          |          |                      --0.53%--github.com/ethereum/go-ethereum/core/types.(*modernSigner).Sender
+               |                     |          |          |          
+               |                     |          |           --0.63%--github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).envelopeEthTx
+               |                     |          |                     |          
+               |                     |          |                      --0.56%--github.com/ethereum/go-ethereum/core/types.(*Transaction).UnmarshalBinary
+               |                     |          |                                |          
+               |                     |          |                                 --0.53%--github.com/ethereum/go-ethereum/core/types.(*Transaction).decodeTyped
+               |                     |          |          
+               |                     |          |--0.91%--github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.storeVerifiedBound
+               |                     |          |          |          
+               |                     |          |           --0.74%--github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.(*shardedSignatureCache).Store
+               |                     |          |                     |          
+               |                     |          |                      --0.73%--sync.(*Map).Swap
+               |                     |          |          
+               |                     |          |--0.89%--github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).ValidSecpSign
+               |                     |          |          |          
+               |                     |          |           --0.88%--github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).ValidEthSign
+               |                     |          |          
+               |                     |           --0.83%--github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.sigCacheKey
+               |                     |          
+               |                      --0.70%--github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func2
+               |                                |          
+               |                                 --0.53%--github.com/meta-node-blockchain/meta-node/pkg/account_state_db.(*AccountStateDB).AccountStateReadOnly
+               |          
+               |--5.14%--runtime.gcBgMarkStartWorkers.gowrap1
+               |          runtime.gcBgMarkWorker
+               |          |          
+               |           --5.12%--runtime.systemstack.abi0
+               |                     runtime.gcBgMarkWorker.func2
+               |                     |          
+               |                      --5.11%--runtime.gcDrain
+               |                                |          
+               |                                 --4.69%--runtime.scanobject
+               |                                           |          
+               |                                           |--1.36%--runtime.greyobject
+               |                                           |          
+               |                                           |--1.18%--runtime.findObject
+               |                                           |          
+               |                                            --0.99%--runtime.(*mspan).heapBitsSmallForAddr
+               |                                                      |          
+               |                                                       --0.55%--0xffffffffaf800bc7
+               |                                                                 |          
+               |                                                                  --0.55%--0xffffffffaf6591c3
+               |                                                                            |          
+               |                                                                             --0.54%--0xffffffffae4d9149
+               |                                                                                       |          
+               |                                                                                        --0.54%--0xffffffffae8330ea
+               |                                                                                                  |          
+               |                                                                                                   --0.53%--0xffffffffae832e14
+               |                                                                                                             |          
+               |                                                                                                              --0.53%--0xffffffffae83274e
+               |          
+               |--4.26%--github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+               |          |          
+               |           --4.12%--github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+               |                     |          
+               |                      --2.51%--github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerTransaction).MarshalJSON
+               |                                |          
+               |                                 --1.15%--encoding/json.Marshal
+               |                                           |          
+               |                                            --1.02%--encoding/json.(*encodeState).marshal
+               |                                                      |          
+               |                                                       --1.01%--encoding/json.(*encodeState).reflectValue
+               |                                                                 |          
+               |                                                                  --0.99%--encoding/json.mapEncoder.encode-fm
+               |                                                                            |          
+               |                                                                             --0.98%--encoding/json.mapEncoder.encode
+               |          

@@ -1,0 +1,39 @@
+{
+  "tag": "b_head_1",
+  "mode": "bft",
+  "bin": "simple_chain_HEAD",
+  "args": [
+    "-duration",
+    "60",
+    "-batch",
+    "1000"
+  ],
+  "submitted": 3211000,
+  "on_chain": 3211000,
+  "complete": true,
+  "blast_secs": 84.8,
+  "e2e_secs": 246.1,
+  "e2e_tps": 13049,
+  "tool_tps": 17424,
+  "p50_ms": 45126,
+  "p99_ms": 78254,
+  "zero_fork": true,
+  "roots": true,
+  "uptime_before": "03:17:39 up 16 days, 20:52, 38 users,  load average: 18.87, 38.63, 39.07",
+  "uptime_after": "03:22:43 up 16 days, 20:57, 38 users,  load average: 20.43, 39.62, 40.43",
+  "log_analysis": {
+    "sig1_expected_mismatch_errors": 0,
+    "byte_limit_exceeded_count": 0,
+    "sig2_watchdog_hangs": 0,
+    "catchup_phases_observed": 0,
+    "val_final_blocks": {
+      "val0": 749,
+      "val1": 749,
+      "val2": 749,
+      "val3": 749
+    },
+    "sig1_details": [],
+    "classification": "CLEAN_COMPLETED"
+  },
+  "failure_classification": "CLEAN_COMPLETED"
+}

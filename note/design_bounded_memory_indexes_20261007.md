@@ -2,7 +2,7 @@
 **Tài liệu tham chiếu:** `note/design_bounded_memory_indexes_20261007.md`  
 **Ngày lập:** 2026-10-07  
 **Tác giả:** Metanode Core Engineering Team  
-**Trạng thái:** DRAFT — Trình duyệt trước khi chỉnh sửa mã nguồn cốt lõi (Theo Kế hoạch Giai đoạn 5)  
+**Trạng thái:** Implemented — memory verification pending (Phương Án 2: Bounded Two-Generation Ring Map; unit test race, benchmark đọc và RPC cold-restart đã hoàn tất; thí nghiệm bộ nhớ 45 phút × 2 đang chờ chạy/kiểm chứng).  
 
 ---
 
@@ -72,8 +72,9 @@ type cachedUint64 struct {
   - Toàn bộ bài benchmark 8 đợt 400k txs chỉ kéo dài khoảng **3.5 phút** (mỗi wave ~25 giây).
   - Do thời gian chạy ngắn hơn rất nhiều so với ngưỡng `mappingCacheTTL = 30 * time.Minute`, toàn bộ entry được thêm vào đều chưa đến hạn hết hạn, nên các hàm `pruneTxHashCache` và `pruneEthHashCache` (chạy mỗi 1 phút) chưa thực hiện evict bất kỳ entry nào.
 - **Kiểm chứng thực nghiệm 45 phút (Evidence `ttl_saturation_45min`):**
-  - Thực nghiệm tiêm tải liên tục 50 tx/s trong 45 phút trên cụm kiểm thử cô lập (xem chi tiết tại Mục 7.3 của [note/perf_rss_investigation_20261007.md](file:///home/abc/chain-n/metanode/note/perf_rss_investigation_20261007.md)) đã xác nhận hiện tượng này: tại Cửa sổ 2 (sau 30 phút, khi TTL có hiệu lực), tốc độ tăng HeapAlloc đã giảm từ $+4.20$ MB/phút xuống $+0.74$ MB/phút (giảm 82.4%), nhưng kết luận theo tiêu chí định lượng vẫn là **CHƯA BÃO HOÀ (UNBOUNDED)** do hệ số góc vẫn dương và tỷ lệ đạt $17.58\% > 5\%$.
-  - Kết quả này củng cố dứt khoát nguyên nhân kiến trúc: cơ chế thời gian (Time-bounded TTL) không thể thay thế được cơ chế chặn trần dung lượng (Bounded Memory Cache / LRU) vì Go runtime map không bao giờ giải phóng cấu trúc bucket sau thao tác `delete()`.
+  - Thực nghiệm tiêm tải liên tục 50 tx/s trong 45 phút trên cụm kiểm thử cô lập (xem chi tiết tại Mục 7.3 của [note/perf_rss_investigation_20261007.md](file:///home/abc/chain-n/metanode/note/perf_rss_investigation_20261007.md)) đã xác nhận hiện tượng này: tại Cửa sổ 2 (sau 30 phút, khi TTL có hiệu lực), tốc độ tăng HeapAlloc đã giảm từ $+4.20$ MB/phút xuống $+0.74$ MB/phút (giảm 82.4%, tính toán độc lập từ CSV: W1 = $+4.1993$ MB/phút, W2 = $+0.7383$ MB/phút), nhưng kết luận theo tiêu chí định lượng vẫn là **CHƯA BÃO HOÀ (UNBOUNDED)** do hệ số góc vẫn dương và tỷ lệ đạt $17.58\% > 5\%$.
+  - Đây là giả thuyết phù hợp với dữ liệu; chưa xác nhận bằng heap profile: cơ chế thời gian (Time-bounded TTL) không thể thay thế được cơ chế chặn trần dung lượng (Bounded Memory Cache / LRU) vì cấu trúc bucket Go map không giải phóng sau `delete()`.
+  - *Lưu ý về độ nhiễu và độ lệch RSS:* Cửa sổ 2 có $R^2 = 0.1566$ (dữ liệu có nhiễu cao); HeapAlloc đạt đỉnh 626.14 MB ở phút 43 cao hơn điểm cuối 608.51 MB ở phút 44; tiêu chí $\le 5\%$ hoặc $\le 0.5$ MB/phút là ngưỡng đặt rất chặt. Đồng thời, RSS toàn cụm (~7.4 → 9.5 GB) lớn hơn HeapAlloc rất nhiều nên hai map này không giải thích được toàn bộ RSS.
 - **Rủi ro kiến trúc cần giải quyết:**
   1. **Không có giới hạn trần dung lượng (Unbounded by Size):** Dung lượng map chỉ phụ thuộc vào số lượng tx phát sinh trong vòng 30 phút. Nếu mạng gặp spam blast 5,000 tx/s, trong 30 phút sẽ tích luỹ $5,000 \times 1,800 = 9,000,000$ txs $\rightarrow$ RAM chiếm dụng **~1.5 GB đến 2 GB** chỉ cho hai map này trước khi bắt đầu prune.
   2. **Quét Range $O(N)$ định kỳ:** Cứ mỗi 1 phút, hàm `pruneTxHashCache` và `pruneEthHashCache` lấy `mu.Lock()` và lặp qua toàn bộ map (`for k, v := range m.data`). Khi map có hàng triệu phần tử, thao tác này gây lock contention nghiêm trọng, chặn đứng mọi thao tác đọc/ghi RPC và Block processing.
@@ -220,12 +221,21 @@ func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bo
 
 ---
 
-## 7. Quyết Định & Kiến Nghị (Decision & Recommendation)
+## 7. Quyết Định & Kết Quả Triển Khai (Decision & Implementation Results)
 
-1. **Tuân thủ nguyên tắc Scope Gating (AGENTS.md Part 1 & Part 2):**
-   - Không tự ý sửa mã nguồn cốt lõi trong pull request điều tra hiệu năng này.
-   - Tài liệu thiết kế này được đệ trình để User và Tech Lead xem xét và duyệt phương án trước khi triển khai code.
-2. **Khuyến nghị chọn Phương Án 2 (Bounded Two-Generation Ring Map) hoặc Phương Án 1:**
-   - Đảm bảo giới hạn RAM cố định $\le 10$ MB.
-   - Giữ nguyên hiệu năng truy vấn nhanh cho RPC.
-   - Đáp ứng triệt để yêu cầu "Bounded Concurrency & Bounded Memory" của hệ thống Metanode Core.
+1. **Phương Án Đã Chọn & Triển Khai:** **Phương Án 2 (Bounded Two-Generation Ring Map, Go thuần)**
+   - Đã cài đặt tại `execution/pkg/blockchain/blockchain.go` với hằng số trần `maxMappingCacheEntries = 50_000` cho mỗi thế hệ.
+   - Dung lượng trần: Tối đa $2 \times 50,000 = 100,000$ entries cho mỗi map (`len(current) <= 50,000` và `len(old) <= 50,000`).
+   - Cơ chế rotation: khi `current` đầy (`>= MaxEntries`), thực hiện tráo thế hệ `old = current; current = make(map, MaxEntries)`. Phép `make(map, limit)` cấp phát trước dung lượng bucket giúp giảm rehash. Khi `Load` trúng tại `old`, phần tử được nạp lên `current` và xóa khỏi `old`.
+   - Đã loại bỏ các hàm dọn dẹp định kỳ $O(N)$ `pruneTxHashCache` và `pruneEthHashCache` (loại bỏ thao tác quét duyệt toàn bộ map mỗi phút; chưa đo đạc lock contention cụ thể).
+   - Bỏ trường `addedAt` trong `cachedUint64` (tiết kiệm 24 byte/entry trên heap).
+2. **Kiểm Chứng Thực Nghiệm Chạy Thật (Evidence):**
+   - **Benchmark Đường Đọc & Ghi (Đo thực tế trên 104-core Intel Xeon Platinum 8272CL):**
+     * `Load (Hit Current)`: **29.60 ns/op** (42.5 triệu ops/s)
+     * `Load (Miss)`: **18.90 ns/op** (63.2 triệu ops/s)
+     * `Load (Hit Old / Promote)`: **637.0 ns/op** (2.5 triệu ops/s, bao gồm nâng cấp write lock, thêm vào current và xóa khỏi old)
+     * `Store`: **188.9 ns/op** (5.76 triệu ops/s)
+   - **Unit Test Race Invariants (`execution/pkg/blockchain/bounded_mapping_cache_test.go`):** Kiểm tra swap khi đầy, đọc từ `old`, eviction sau 2 chu kỳ, bất biến `len(current) + len(old) <= 2*MaxEntries` khi ghi 10x `MaxEntries`, và concurrent read/write/delete dưới cờ `go test -race`. Nguồn bằng chứng: [note/evidence/bounded_mapping_cache_20261008/go_test_race_blockchain.log](file:///home/abc/chain-n/metanode/note/evidence/bounded_mapping_cache_20261008/go_test_race_blockchain.log) (SHA256: `7ae76841cc5a94e5b6534e9f6966b43d299fb842c39d613874d4bccbf71e532f`, 313,569 bytes).
+   - **JSON-RPC End-to-End Cold Restart (`execution/scripts/test/evidence/verify_pebble_fallback_rpc.py`):** Khởi động cụm 4 node, blast 200 txs EIP-1559, tắt cụm để xóa sạch RAM, khởi động lại với RAM rỗng và truy vấn `eth_getTransactionReceipt` và `eth_getTransactionByHash`. Tất cả truy vấn đều fallback Pebble DB thành công và trả về dữ liệu nguyên vẹn. Nguồn bằng chứng: [note/evidence/bounded_mapping_cache_20261008/verify_pebble_fallback_rpc.log](file:///home/abc/chain-n/metanode/note/evidence/bounded_mapping_cache_20261008/verify_pebble_fallback_rpc.log) (SHA256: `281c3d8420800cdbc01f987d6d80d342e4052331f970055e61648f5df0e17d44`, 2,085 bytes).
+   - **Build check verification:** Script `consensus/metanode/scripts/build_check.sh` chạy qua 5/5 components (EVM & NOMT FFI, Rust consensus, Rust NOMT FFI, Go simple_chain, Go all packages) thành công 100% không cảnh báo hay lỗi.
+   - **Thí nghiệm bão hoà bộ nhớ 45 phút × 2:** Đã đăng ký tiêu chí tại [note/evidence/bounded_mapping_cache_20261008/PREREGISTERED.md](file:///home/abc/chain-n/metanode/note/evidence/bounded_mapping_cache_20261008/PREREGISTERED.md). Đang chờ thực hiện đo đạc thực tế để ghi nhận slope và heap profiles.

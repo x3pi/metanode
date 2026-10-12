@@ -1,0 +1,1 @@
+{"tag": "m_bft_rate8000_Q_r2", "mode": "bft", "bin": "simple_chain_Q", "args": ["-duration", "60", "-batch", "1000", "-rate-limit", "8000"], "submitted": 480000, "on_chain": 480000, "complete": true, "blast_secs": 65.9, "e2e_secs": 67.0, "e2e_tps": 7168, "tool_tps": 7998, "p50_ms": 1871, "p99_ms": 2155, "zero_fork": true, "roots": true}

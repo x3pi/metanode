@@ -1,0 +1,64 @@
+{
+  "timestamp": "2026-10-08T14:04:04Z",
+  "cluster": "4-Validator Mysticeti DAG BFT Cluster (Quorum 3/4)",
+  "binary": "/tmp/p06_bins/simple_chain",
+  "optimization": "Phase 2b Parallelized PrepareTransactions (Worker pool <= 16)",
+  "stages": [
+    {
+      "stage": "Stage_10k",
+      "count": 10000,
+      "effective_tps": 4426.670263554638,
+      "injection_tps": 207059.05309700192,
+      "commit_duration": "2.259034309s",
+      "blocks": 2,
+      "avg_txs_per_block": 5000,
+      "latency_p50_ms": 2058.267376,
+      "latency_p99_ms": 2307.368501,
+      "peak_cpu": "492.6%",
+      "peak_rss_mb": 4011,
+      "zero_fork_verified": true
+    },
+    {
+      "stage": "Stage_20k",
+      "count": 20000,
+      "effective_tps": 8209.225671306678,
+      "injection_tps": 211823.18203919043,
+      "commit_duration": "2.436283372s",
+      "blocks": 3,
+      "avg_txs_per_block": 6666,
+      "latency_p50_ms": 2130.971209,
+      "latency_p99_ms": 2530.748853,
+      "peak_cpu": "752.5%",
+      "peak_rss_mb": 7453,
+      "zero_fork_verified": true
+    },
+    {
+      "stage": "Stage_25k",
+      "count": 25000,
+      "effective_tps": 9512.77112525446,
+      "injection_tps": 252825.65025847076,
+      "commit_duration": "2.628045989s",
+      "blocks": 3,
+      "avg_txs_per_block": 8333,
+      "latency_p50_ms": 2026.044068,
+      "latency_p99_ms": 2726.956693,
+      "peak_cpu": "904.3%",
+      "peak_rss_mb": 11779,
+      "zero_fork_verified": true
+    },
+    {
+      "stage": "Stage_30k",
+      "count": 30000,
+      "effective_tps": 8595.965332038579,
+      "injection_tps": 200378.3570855604,
+      "commit_duration": "3.490009422s",
+      "blocks": 5,
+      "avg_txs_per_block": 6000,
+      "latency_p50_ms": 2625.672532,
+      "latency_p99_ms": 3639.775972,
+      "peak_cpu": "1061.7%",
+      "peak_rss_mb": 15362,
+      "zero_fork_verified": true
+    }
+  ]
+}

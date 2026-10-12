@@ -1,0 +1,1 @@
+{"tag": "s10_raft_timeout_cur_r3", "arm": "cur", "tps": 10055.499583939338, "submitted": 758348, "on_chain": 606602, "lost_pct": 20.0, "blocks": 336, "block_span_s": 39, "election_msgs": 0}

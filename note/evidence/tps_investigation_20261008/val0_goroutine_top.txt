@@ -1,0 +1,49 @@
+File: simple_chain
+Build ID: 94c998bac8d6a90e9641692fa34bee510bbdba70
+Type: goroutine
+Time: 2026-10-08 04:52:57 UTC
+Showing nodes accounting for 799, 95.92% of 833 total
+Dropped 125 nodes (cum <= 4)
+      flat  flat%   sum%        cum   cum%
+       799 95.92% 95.92%        799 95.92%  runtime.gopark
+         0     0% 95.92%          4  0.48%  bufio.(*Reader).Peek
+         0     0% 95.92%          4  0.48%  bufio.(*Reader).fill
+         0     0% 95.92%         15  1.80%  github.com/cockroachdb/pebble.(*cleanupManager).mainLoop
+         0     0% 95.92%         16  1.92%  github.com/cockroachdb/pebble.(*tableCacheShard).releaseLoop
+         0     0% 95.92%         16  1.92%  github.com/cockroachdb/pebble.(*tableCacheShard).releaseLoop.func1
+         0     0% 95.92%         15  1.80%  github.com/cockroachdb/pebble.openCleanupManager.func1
+         0     0% 95.92%         15  1.80%  github.com/cockroachdb/pebble.openCleanupManager.func1.1
+         0     0% 95.92%         15  1.80%  github.com/cockroachdb/pebble/record.(*LogWriter).flushLoop
+         0     0% 95.92%         15  1.80%  github.com/cockroachdb/pebble/record.(*flusherCond).Wait (inline)
+         0     0% 95.92%         15  1.80%  github.com/cockroachdb/pebble/record.NewLogWriter.func2
+         0     0% 95.92%         15  1.80%  github.com/cockroachdb/pebble/vfs.(*diskHealthCheckingFS).startTickerLocked.func1
+         0     0% 95.92%         30  3.60%  github.com/cockroachdb/pebble/vfs.(*diskHealthCheckingFile).startTicker.func1
+         0     0% 95.92%          4  0.48%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).backupDbWorker.func1
+         0     0% 95.92%        300 36.01%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).startInjectionWorkers.func1
+         0     0% 95.92%        200 24.01%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxVirtualExecutor).startReadTxWorkers.func1
+         0     0% 95.92%         64  7.68%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+         0     0% 95.92%         64  7.68%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1
+         0     0% 95.92%         11  1.32%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*LazyPebbleDB).backgroundFlusher
+         0     0% 95.92%          4  0.48%  internal/poll.(*FD).Accept
+         0     0% 95.92%          6  0.72%  internal/poll.(*FD).Read
+         0     0% 95.92%          9  1.08%  internal/poll.(*pollDesc).wait
+         0     0% 95.92%          9  1.08%  internal/poll.(*pollDesc).waitRead (inline)
+         0     0% 95.92%          9  1.08%  internal/poll.runtime_pollWait
+         0     0% 95.92%          4  0.48%  net.(*TCPListener).Accept
+         0     0% 95.92%          4  0.48%  net.(*TCPListener).accept
+         0     0% 95.92%          6  0.72%  net.(*conn).Read
+         0     0% 95.92%          6  0.72%  net.(*netFD).Read
+         0     0% 95.92%          4  0.48%  net.(*netFD).accept
+         0     0% 95.92%          4  0.48%  net/http.(*conn).serve
+         0     0% 95.92%          4  0.48%  runtime.cgocallback
+         0     0% 95.92%          4  0.48%  runtime.cgocallbackg
+         0     0% 95.92%          4  0.48%  runtime.cgocallbackg1
+         0     0% 95.92%        628 75.39%  runtime.chanrecv
+         0     0% 95.92%          5   0.6%  runtime.chanrecv1
+         0     0% 95.92%        623 74.79%  runtime.chanrecv2
+         0     0% 95.92%         16  1.92%  runtime.goparkunlock (inline)
+         0     0% 95.92%          9  1.08%  runtime.netpollblock
+         0     0% 95.92%        145 17.41%  runtime.selectgo
+         0     0% 95.92%         46  5.52%  runtime/pprof.Do
+         0     0% 95.92%         15  1.80%  sync.(*Cond).Wait
+         0     0% 95.92%         15  1.80%  sync.runtime_notifyListWait

@@ -1,0 +1,46 @@
+==================================================================
+🔬 PEBBLE DB FALLBACK RPC VERIFICATION ON COLD CACHE / RESTART
+==================================================================
+Timestamp: 2026-10-08T03:23:52Z
+
+▶️ [Step 1] Initializing fresh isolated cluster from template...
+   • Cluster running on ports 31000..31003. RPC responsive.
+
+▶️ [Step 2] Sending transaction workload (200 txs EIP-1559)...
+   • Current Block Height: #20542
+
+▶️ [Step 3] Fetching committed block and target transaction...
+   • Target Tx Hash: 0xff72864f0392de0c4ef762b1a66fb0f88f25a91db1eee4effa90919d805f279c
+   • Target Block:   #20542
+
+▶️ [Step 4] Querying receipt BEFORE restart (warm RAM cache)...
+   • Warm Status:       0x1
+   • Warm Block Number: 20542
+   • Warm Gas Used:     20000
+
+▶️ [Step 5] Stopping cluster (evicting 100% of RAM caches)...
+   • All node processes terminated. RAM caches destroyed.
+
+▶️ [Step 6] Restarting cluster with COLD RAM caches...
+   • Node val0 restarted with empty in-memory tx caches (mapping_rebuild.go:113).
+
+▶️ [Step 7] Querying eth_getTransactionReceipt on COLD cache (forcing Pebble DB fallback)...
+   • Cold Status:       0x1 (Expected: 0x1)
+   • Cold Block Number: 20542 (Expected: 20542)
+   • Cold Gas Used:     20000 (Expected: 20000)
+
+▶️ [Step 8] Querying eth_getTransactionByHash on COLD cache...
+   • Cold Tx Hash:      0xff72864f0392de0c4ef762b1a66fb0f88f25a91db1eee4effa90919d805f279c
+   • Cold Tx Value:     100
+
+▶️ [Step 9] Cleaning up benchmark cluster...
+   • Isolated benchmark cluster stopped and removed.
+
+==================================================================
+✅ VERIFICATION SUCCESSFUL:
+   1. Tx hash -> block number mapping persists in Pebble DB.
+   2. When RAM cache is cold/evicted, GetBlockNumberByTxHashFast transparently
+      reads from Pebble DB storageMapping.
+   3. eth_getTransactionReceipt and eth_getTransactionByHash return exact
+      data without loss or errors.
+==================================================================

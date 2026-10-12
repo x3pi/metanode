@@ -1,0 +1,2072 @@
+[
+  {
+    "sample_idx": 0,
+    "elapsed_sec": 0.0,
+    "timestamp": 1791430940.6334832,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 119232824,
+        "HeapInuse": 127942656,
+        "HeapIdle": 303644672,
+        "HeapReleased": 13156352,
+        "NumGC": 4,
+        "VmRSS_KB": 502156,
+        "smaps_pss_kb": 449435
+      },
+      "val1": {
+        "HeapAlloc": 119111368,
+        "HeapInuse": 127729664,
+        "HeapIdle": 299827200,
+        "HeapReleased": 9494528,
+        "NumGC": 4,
+        "VmRSS_KB": 497260,
+        "smaps_pss_kb": 444201
+      },
+      "val2": {
+        "HeapAlloc": 119136840,
+        "HeapInuse": 127467520,
+        "HeapIdle": 304087040,
+        "HeapReleased": 15761408,
+        "NumGC": 4,
+        "VmRSS_KB": 471964,
+        "smaps_pss_kb": 418838
+      },
+      "val3": {
+        "HeapAlloc": 118666856,
+        "HeapInuse": 126214144,
+        "HeapIdle": 222076928,
+        "HeapReleased": 12279808,
+        "NumGC": 4,
+        "VmRSS_KB": 382952,
+        "smaps_pss_kb": 330115
+      }
+    },
+    "total_heap_alloc_mb": 454.09,
+    "total_heap_inuse_mb": 485.758,
+    "total_rss_mb": 1810.871
+  },
+  {
+    "sample_idx": 1,
+    "elapsed_sec": 60.21,
+    "timestamp": 1791431000.8444123,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 137938208,
+        "HeapInuse": 152608768,
+        "HeapIdle": 275734528,
+        "HeapReleased": 12689408,
+        "NumGC": 5,
+        "VmRSS_KB": 544180,
+        "smaps_pss_kb": 489937
+      },
+      "val1": {
+        "HeapAlloc": 138011936,
+        "HeapInuse": 152002560,
+        "HeapIdle": 272900096,
+        "HeapReleased": 8650752,
+        "NumGC": 5,
+        "VmRSS_KB": 571056,
+        "smaps_pss_kb": 516838
+      },
+      "val2": {
+        "HeapAlloc": 137868872,
+        "HeapInuse": 152322048,
+        "HeapIdle": 276283392,
+        "HeapReleased": 15515648,
+        "NumGC": 5,
+        "VmRSS_KB": 502376,
+        "smaps_pss_kb": 448061
+      },
+      "val3": {
+        "HeapAlloc": 138341528,
+        "HeapInuse": 153395200,
+        "HeapIdle": 190930944,
+        "HeapReleased": 9248768,
+        "NumGC": 5,
+        "VmRSS_KB": 440372,
+        "smaps_pss_kb": 386120
+      }
+    },
+    "total_heap_alloc_mb": 526.581,
+    "total_heap_inuse_mb": 582.055,
+    "total_rss_mb": 2009.75
+  },
+  {
+    "sample_idx": 2,
+    "elapsed_sec": 120.44,
+    "timestamp": 1791431061.074848,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 138934984,
+        "HeapInuse": 154697728,
+        "HeapIdle": 272957440,
+        "HeapReleased": 197083136,
+        "NumGC": 6,
+        "VmRSS_KB": 395696,
+        "smaps_pss_kb": 341417
+      },
+      "val1": {
+        "HeapAlloc": 138412456,
+        "HeapInuse": 153444352,
+        "HeapIdle": 270868480,
+        "HeapReleased": 193585152,
+        "NumGC": 6,
+        "VmRSS_KB": 408156,
+        "smaps_pss_kb": 353870
+      },
+      "val2": {
+        "HeapAlloc": 138641184,
+        "HeapInuse": 154238976,
+        "HeapIdle": 273973248,
+        "HeapReleased": 196362240,
+        "NumGC": 6,
+        "VmRSS_KB": 328828,
+        "smaps_pss_kb": 274506
+      },
+      "val3": {
+        "HeapAlloc": 138943032,
+        "HeapInuse": 155672576,
+        "HeapIdle": 187899904,
+        "HeapReleased": 14696448,
+        "NumGC": 6,
+        "VmRSS_KB": 447008,
+        "smaps_pss_kb": 392695
+      }
+    },
+    "total_heap_alloc_mb": 529.224,
+    "total_heap_inuse_mb": 589.422,
+    "total_rss_mb": 1542.664
+  },
+  {
+    "sample_idx": 3,
+    "elapsed_sec": 180.65,
+    "timestamp": 1791431121.2848885,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 139975832,
+        "HeapInuse": 155746304,
+        "HeapIdle": 271581184,
+        "HeapReleased": 226926592,
+        "NumGC": 7,
+        "VmRSS_KB": 410164,
+        "smaps_pss_kb": 355881
+      },
+      "val1": {
+        "HeapAlloc": 139432928,
+        "HeapInuse": 155467776,
+        "HeapIdle": 268058624,
+        "HeapReleased": 227639296,
+        "NumGC": 7,
+        "VmRSS_KB": 421108,
+        "smaps_pss_kb": 366817
+      },
+      "val2": {
+        "HeapAlloc": 139068400,
+        "HeapInuse": 154664960,
+        "HeapIdle": 272924672,
+        "HeapReleased": 229957632,
+        "NumGC": 7,
+        "VmRSS_KB": 332284,
+        "smaps_pss_kb": 277957
+      },
+      "val3": {
+        "HeapAlloc": 139687008,
+        "HeapInuse": 155901952,
+        "HeapIdle": 187310080,
+        "HeapReleased": 141918208,
+        "NumGC": 7,
+        "VmRSS_KB": 343760,
+        "smaps_pss_kb": 289451
+      }
+    },
+    "total_heap_alloc_mb": 532.307,
+    "total_heap_inuse_mb": 592.977,
+    "total_rss_mb": 1471.988
+  },
+  {
+    "sample_idx": 4,
+    "elapsed_sec": 240.86,
+    "timestamp": 1791431181.4913878,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 140208264,
+        "HeapInuse": 156385280,
+        "HeapIdle": 270712832,
+        "HeapReleased": 226926592,
+        "NumGC": 8,
+        "VmRSS_KB": 427576,
+        "smaps_pss_kb": 373293
+      },
+      "val1": {
+        "HeapAlloc": 140013776,
+        "HeapInuse": 156327936,
+        "HeapIdle": 266903552,
+        "HeapReleased": 227639296,
+        "NumGC": 8,
+        "VmRSS_KB": 433556,
+        "smaps_pss_kb": 379265
+      },
+      "val2": {
+        "HeapAlloc": 140110264,
+        "HeapInuse": 156753920,
+        "HeapIdle": 270540800,
+        "HeapReleased": 229957632,
+        "NumGC": 8,
+        "VmRSS_KB": 335152,
+        "smaps_pss_kb": 280825
+      },
+      "val3": {
+        "HeapAlloc": 140337000,
+        "HeapInuse": 157089792,
+        "HeapIdle": 186056704,
+        "HeapReleased": 141918208,
+        "NumGC": 8,
+        "VmRSS_KB": 346996,
+        "smaps_pss_kb": 292687
+      }
+    },
+    "total_heap_alloc_mb": 534.696,
+    "total_heap_inuse_mb": 597.531,
+    "total_rss_mb": 1507.109
+  },
+  {
+    "sample_idx": 5,
+    "elapsed_sec": 301.04,
+    "timestamp": 1791431241.6769538,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 146768592,
+        "HeapInuse": 164700160,
+        "HeapIdle": 262152192,
+        "HeapReleased": 132284416,
+        "NumGC": 9,
+        "VmRSS_KB": 573600,
+        "smaps_pss_kb": 519173
+      },
+      "val1": {
+        "HeapAlloc": 150499632,
+        "HeapInuse": 167903232,
+        "HeapIdle": 254722048,
+        "HeapReleased": 128548864,
+        "NumGC": 9,
+        "VmRSS_KB": 543236,
+        "smaps_pss_kb": 488801
+      },
+      "val2": {
+        "HeapAlloc": 151092240,
+        "HeapInuse": 169172992,
+        "HeapIdle": 257466368,
+        "HeapReleased": 128737280,
+        "NumGC": 9,
+        "VmRSS_KB": 445532,
+        "smaps_pss_kb": 391061
+      },
+      "val3": {
+        "HeapAlloc": 148258760,
+        "HeapInuse": 166584320,
+        "HeapIdle": 176119808,
+        "HeapReleased": 122068992,
+        "NumGC": 9,
+        "VmRSS_KB": 439280,
+        "smaps_pss_kb": 384823
+      }
+    },
+    "total_heap_alloc_mb": 568.98,
+    "total_heap_inuse_mb": 637.398,
+    "total_rss_mb": 1954.734
+  },
+  {
+    "sample_idx": 6,
+    "elapsed_sec": 361.29,
+    "timestamp": 1791431301.9278905,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 160205600,
+        "HeapInuse": 191823872,
+        "HeapIdle": 414793728,
+        "HeapReleased": 12001280,
+        "NumGC": 10,
+        "VmRSS_KB": 945772,
+        "smaps_pss_kb": 891265
+      },
+      "val1": {
+        "HeapAlloc": 163794296,
+        "HeapInuse": 195239936,
+        "HeapIdle": 415522816,
+        "HeapReleased": 17285120,
+        "NumGC": 10,
+        "VmRSS_KB": 839440,
+        "smaps_pss_kb": 784909
+      },
+      "val2": {
+        "HeapAlloc": 160906024,
+        "HeapInuse": 192372736,
+        "HeapIdle": 418308096,
+        "HeapReleased": 15171584,
+        "NumGC": 10,
+        "VmRSS_KB": 743872,
+        "smaps_pss_kb": 689311
+      },
+      "val3": {
+        "HeapAlloc": 160167656,
+        "HeapInuse": 193880064,
+        "HeapIdle": 488464384,
+        "HeapReleased": 12263424,
+        "NumGC": 10,
+        "VmRSS_KB": 938812,
+        "smaps_pss_kb": 884157
+      }
+    },
+    "total_heap_alloc_mb": 615.19,
+    "total_heap_inuse_mb": 737.492,
+    "total_rss_mb": 3386.617
+  },
+  {
+    "sample_idx": 7,
+    "elapsed_sec": 421.63,
+    "timestamp": 1791431362.267201,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 156469768,
+        "HeapInuse": 193077248,
+        "HeapIdle": 413425664,
+        "HeapReleased": 3047424,
+        "NumGC": 11,
+        "VmRSS_KB": 979344,
+        "smaps_pss_kb": 924700
+      },
+      "val1": {
+        "HeapAlloc": 162137792,
+        "HeapInuse": 200294400,
+        "HeapIdle": 422805504,
+        "HeapReleased": 4923392,
+        "NumGC": 11,
+        "VmRSS_KB": 872800,
+        "smaps_pss_kb": 818031
+      },
+      "val2": {
+        "HeapAlloc": 157360160,
+        "HeapInuse": 194043904,
+        "HeapIdle": 416358400,
+        "HeapReleased": 5971968,
+        "NumGC": 11,
+        "VmRSS_KB": 763432,
+        "smaps_pss_kb": 708734
+      },
+      "val3": {
+        "HeapAlloc": 159983432,
+        "HeapInuse": 199065600,
+        "HeapIdle": 483213312,
+        "HeapReleased": 10436608,
+        "NumGC": 11,
+        "VmRSS_KB": 947288,
+        "smaps_pss_kb": 892619
+      }
+    },
+    "total_heap_alloc_mb": 606.49,
+    "total_heap_inuse_mb": 750.047,
+    "total_rss_mb": 3479.359
+  },
+  {
+    "sample_idx": 8,
+    "elapsed_sec": 482.04,
+    "timestamp": 1791431422.6780527,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 158227048,
+        "HeapInuse": 199589888,
+        "HeapIdle": 406798336,
+        "HeapReleased": 2228224,
+        "NumGC": 12,
+        "VmRSS_KB": 994712,
+        "smaps_pss_kb": 940042
+      },
+      "val1": {
+        "HeapAlloc": 157068648,
+        "HeapInuse": 198950912,
+        "HeapIdle": 423755776,
+        "HeapReleased": 3719168,
+        "NumGC": 12,
+        "VmRSS_KB": 882816,
+        "smaps_pss_kb": 828032
+      },
+      "val2": {
+        "HeapAlloc": 156750128,
+        "HeapInuse": 197591040,
+        "HeapIdle": 412794880,
+        "HeapReleased": 4653056,
+        "NumGC": 12,
+        "VmRSS_KB": 775284,
+        "smaps_pss_kb": 720570
+      },
+      "val3": {
+        "HeapAlloc": 157438760,
+        "HeapInuse": 200466432,
+        "HeapIdle": 481550336,
+        "HeapReleased": 28590080,
+        "NumGC": 12,
+        "VmRSS_KB": 951204,
+        "smaps_pss_kb": 896359
+      }
+    },
+    "total_heap_alloc_mb": 600.323,
+    "total_heap_inuse_mb": 759.695,
+    "total_rss_mb": 3519.547
+  },
+  {
+    "sample_idx": 9,
+    "elapsed_sec": 542.4,
+    "timestamp": 1791431483.0356565,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 158944344,
+        "HeapInuse": 203407360,
+        "HeapIdle": 407175168,
+        "HeapReleased": 5201920,
+        "NumGC": 13,
+        "VmRSS_KB": 1006040,
+        "smaps_pss_kb": 951338
+      },
+      "val1": {
+        "HeapAlloc": 158255144,
+        "HeapInuse": 202973184,
+        "HeapIdle": 419766272,
+        "HeapReleased": 3538944,
+        "NumGC": 13,
+        "VmRSS_KB": 886800,
+        "smaps_pss_kb": 832015
+      },
+      "val2": {
+        "HeapAlloc": 157005544,
+        "HeapInuse": 201138176,
+        "HeapIdle": 409149440,
+        "HeapReleased": 4653056,
+        "NumGC": 13,
+        "VmRSS_KB": 779552,
+        "smaps_pss_kb": 724838
+      },
+      "val3": {
+        "HeapAlloc": 158806032,
+        "HeapInuse": 204570624,
+        "HeapIdle": 477511680,
+        "HeapReleased": 41697280,
+        "NumGC": 13,
+        "VmRSS_KB": 970328,
+        "smaps_pss_kb": 915483
+      }
+    },
+    "total_heap_alloc_mb": 603.686,
+    "total_heap_inuse_mb": 774.469,
+    "total_rss_mb": 3557.344
+  },
+  {
+    "sample_idx": 10,
+    "elapsed_sec": 602.78,
+    "timestamp": 1791431543.4154396,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 156341744,
+        "HeapInuse": 204439552,
+        "HeapIdle": 477478912,
+        "HeapReleased": 5914624,
+        "NumGC": 14,
+        "VmRSS_KB": 1080864,
+        "smaps_pss_kb": 1026162
+      },
+      "val1": {
+        "HeapAlloc": 160077808,
+        "HeapInuse": 209027072,
+        "HeapIdle": 476528640,
+        "HeapReleased": 4784128,
+        "NumGC": 14,
+        "VmRSS_KB": 953096,
+        "smaps_pss_kb": 898311
+      },
+      "val2": {
+        "HeapAlloc": 156517024,
+        "HeapInuse": 204693504,
+        "HeapIdle": 468541440,
+        "HeapReleased": 5013504,
+        "NumGC": 14,
+        "VmRSS_KB": 851864,
+        "smaps_pss_kb": 797059
+      },
+      "val3": {
+        "HeapAlloc": 161470488,
+        "HeapInuse": 211345408,
+        "HeapIdle": 470704128,
+        "HeapReleased": 2490368,
+        "NumGC": 14,
+        "VmRSS_KB": 1015988,
+        "smaps_pss_kb": 961127
+      }
+    },
+    "total_heap_alloc_mb": 605.018,
+    "total_heap_inuse_mb": 791.078,
+    "total_rss_mb": 3810.363
+  },
+  {
+    "sample_idx": 11,
+    "elapsed_sec": 663.19,
+    "timestamp": 1791431603.8214533,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 163962088,
+        "HeapInuse": 215924736,
+        "HeapIdle": 466092032,
+        "HeapReleased": 5775360,
+        "NumGC": 15,
+        "VmRSS_KB": 1085812,
+        "smaps_pss_kb": 1031104
+      },
+      "val1": {
+        "HeapAlloc": 163906304,
+        "HeapInuse": 215195648,
+        "HeapIdle": 470343680,
+        "HeapReleased": 4431872,
+        "NumGC": 15,
+        "VmRSS_KB": 939500,
+        "smaps_pss_kb": 884710
+      },
+      "val2": {
+        "HeapAlloc": 163155832,
+        "HeapInuse": 214851584,
+        "HeapIdle": 458350592,
+        "HeapReleased": 4825088,
+        "NumGC": 15,
+        "VmRSS_KB": 856876,
+        "smaps_pss_kb": 802071
+      },
+      "val3": {
+        "HeapAlloc": 160034680,
+        "HeapInuse": 212869120,
+        "HeapIdle": 469213184,
+        "HeapReleased": 2138112,
+        "NumGC": 15,
+        "VmRSS_KB": 988828,
+        "smaps_pss_kb": 933967
+      }
+    },
+    "total_heap_alloc_mb": 620.898,
+    "total_heap_inuse_mb": 819.055,
+    "total_rss_mb": 3780.289
+  },
+  {
+    "sample_idx": 12,
+    "elapsed_sec": 723.54,
+    "timestamp": 1791431664.1774864,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 163866656,
+        "HeapInuse": 218562560,
+        "HeapIdle": 463372288,
+        "HeapReleased": 6168576,
+        "NumGC": 16,
+        "VmRSS_KB": 1075084,
+        "smaps_pss_kb": 1020376
+      },
+      "val1": {
+        "HeapAlloc": 163525520,
+        "HeapInuse": 218775552,
+        "HeapIdle": 466616320,
+        "HeapReleased": 23519232,
+        "NumGC": 16,
+        "VmRSS_KB": 941212,
+        "smaps_pss_kb": 886422
+      },
+      "val2": {
+        "HeapAlloc": 160980152,
+        "HeapInuse": 215728128,
+        "HeapIdle": 457424896,
+        "HeapReleased": 4825088,
+        "NumGC": 16,
+        "VmRSS_KB": 830692,
+        "smaps_pss_kb": 775888
+      },
+      "val3": {
+        "HeapAlloc": 166757640,
+        "HeapInuse": 223985664,
+        "HeapIdle": 457768960,
+        "HeapReleased": 37404672,
+        "NumGC": 16,
+        "VmRSS_KB": 992292,
+        "smaps_pss_kb": 937431
+      }
+    },
+    "total_heap_alloc_mb": 624.781,
+    "total_heap_inuse_mb": 836.422,
+    "total_rss_mb": 3749.297
+  },
+  {
+    "sample_idx": 13,
+    "elapsed_sec": 783.95,
+    "timestamp": 1791431724.579041,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 164821640,
+        "HeapInuse": 222838784,
+        "HeapIdle": 459145216,
+        "HeapReleased": 24526848,
+        "NumGC": 17,
+        "VmRSS_KB": 1076532,
+        "smaps_pss_kb": 1021824
+      },
+      "val1": {
+        "HeapAlloc": 162478104,
+        "HeapInuse": 220585984,
+        "HeapIdle": 464838656,
+        "HeapReleased": 23519232,
+        "NumGC": 17,
+        "VmRSS_KB": 929324,
+        "smaps_pss_kb": 874523
+      },
+      "val2": {
+        "HeapAlloc": 161342752,
+        "HeapInuse": 219594752,
+        "HeapIdle": 453509120,
+        "HeapReleased": 37314560,
+        "NumGC": 17,
+        "VmRSS_KB": 834420,
+        "smaps_pss_kb": 779573
+      },
+      "val3": {
+        "HeapAlloc": 161549376,
+        "HeapInuse": 221380608,
+        "HeapIdle": 460177408,
+        "HeapReleased": 37797888,
+        "NumGC": 17,
+        "VmRSS_KB": 998740,
+        "smaps_pss_kb": 943868
+      }
+    },
+    "total_heap_alloc_mb": 620.071,
+    "total_heap_inuse_mb": 843.43,
+    "total_rss_mb": 3749.039
+  },
+  {
+    "sample_idx": 14,
+    "elapsed_sec": 844.32,
+    "timestamp": 1791431784.952877,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 162457224,
+        "HeapInuse": 222765056,
+        "HeapIdle": 459087872,
+        "HeapReleased": 24657920,
+        "NumGC": 18,
+        "VmRSS_KB": 1068708,
+        "smaps_pss_kb": 1014000
+      },
+      "val1": {
+        "HeapAlloc": 166100936,
+        "HeapInuse": 226869248,
+        "HeapIdle": 458522624,
+        "HeapReleased": 37437440,
+        "NumGC": 18,
+        "VmRSS_KB": 931536,
+        "smaps_pss_kb": 876735
+      },
+      "val2": {
+        "HeapAlloc": 164381680,
+        "HeapInuse": 225558528,
+        "HeapIdle": 447578112,
+        "HeapReleased": 37314560,
+        "NumGC": 18,
+        "VmRSS_KB": 836712,
+        "smaps_pss_kb": 781865
+      },
+      "val3": {
+        "HeapAlloc": 167418176,
+        "HeapInuse": 230121472,
+        "HeapIdle": 451354624,
+        "HeapReleased": 46538752,
+        "NumGC": 18,
+        "VmRSS_KB": 1000920,
+        "smaps_pss_kb": 946048
+      }
+    },
+    "total_heap_alloc_mb": 629.766,
+    "total_heap_inuse_mb": 863.375,
+    "total_rss_mb": 3747.926
+  },
+  {
+    "sample_idx": 15,
+    "elapsed_sec": 904.69,
+    "timestamp": 1791431845.3244064,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 162688128,
+        "HeapInuse": 225918976,
+        "HeapIdle": 455819264,
+        "HeapReleased": 5095424,
+        "NumGC": 19,
+        "VmRSS_KB": 1127820,
+        "smaps_pss_kb": 1073070
+      },
+      "val1": {
+        "HeapAlloc": 161992704,
+        "HeapInuse": 225886208,
+        "HeapIdle": 463732736,
+        "HeapReleased": 4440064,
+        "NumGC": 19,
+        "VmRSS_KB": 971296,
+        "smaps_pss_kb": 916481
+      },
+      "val2": {
+        "HeapAlloc": 162393968,
+        "HeapInuse": 226041856,
+        "HeapIdle": 455303168,
+        "HeapReleased": 4472832,
+        "NumGC": 19,
+        "VmRSS_KB": 879320,
+        "smaps_pss_kb": 824473
+      },
+      "val3": {
+        "HeapAlloc": 161947656,
+        "HeapInuse": 225804288,
+        "HeapIdle": 468238336,
+        "HeapReleased": 5316608,
+        "NumGC": 19,
+        "VmRSS_KB": 1075208,
+        "smaps_pss_kb": 1020325
+      }
+    },
+    "total_heap_alloc_mb": 618.956,
+    "total_heap_inuse_mb": 861.789,
+    "total_rss_mb": 3958.637
+  },
+  {
+    "sample_idx": 16,
+    "elapsed_sec": 965.11,
+    "timestamp": 1791431905.742104,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 163855560,
+        "HeapInuse": 228818944,
+        "HeapIdle": 452870144,
+        "HeapReleased": 4554752,
+        "NumGC": 20,
+        "VmRSS_KB": 1121436,
+        "smaps_pss_kb": 1066675
+      },
+      "val1": {
+        "HeapAlloc": 164681176,
+        "HeapInuse": 229548032,
+        "HeapIdle": 460021760,
+        "HeapReleased": 4341760,
+        "NumGC": 20,
+        "VmRSS_KB": 945564,
+        "smaps_pss_kb": 890753
+      },
+      "val2": {
+        "HeapAlloc": 163610040,
+        "HeapInuse": 229064704,
+        "HeapIdle": 452329472,
+        "HeapReleased": 3399680,
+        "NumGC": 20,
+        "VmRSS_KB": 870412,
+        "smaps_pss_kb": 815522
+      },
+      "val3": {
+        "HeapAlloc": 167530304,
+        "HeapInuse": 232824832,
+        "HeapIdle": 461234176,
+        "HeapReleased": 4456448,
+        "NumGC": 20,
+        "VmRSS_KB": 1068428,
+        "smaps_pss_kb": 1013535
+      }
+    },
+    "total_heap_alloc_mb": 629.117,
+    "total_heap_inuse_mb": 877.625,
+    "total_rss_mb": 3911.953
+  },
+  {
+    "sample_idx": 17,
+    "elapsed_sec": 1025.5,
+    "timestamp": 1791431966.1324906,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 159863232,
+        "HeapInuse": 225304576,
+        "HeapIdle": 456351744,
+        "HeapReleased": 19300352,
+        "NumGC": 21,
+        "VmRSS_KB": 1087340,
+        "smaps_pss_kb": 1032579
+      },
+      "val1": {
+        "HeapAlloc": 158143512,
+        "HeapInuse": 223870976,
+        "HeapIdle": 465715200,
+        "HeapReleased": 33464320,
+        "NumGC": 21,
+        "VmRSS_KB": 914404,
+        "smaps_pss_kb": 859593
+      },
+      "val2": {
+        "HeapAlloc": 159762680,
+        "HeapInuse": 225542144,
+        "HeapIdle": 455852032,
+        "HeapReleased": 16769024,
+        "NumGC": 21,
+        "VmRSS_KB": 833588,
+        "smaps_pss_kb": 778698
+      },
+      "val3": {
+        "HeapAlloc": 159396712,
+        "HeapInuse": 225009664,
+        "HeapIdle": 469098496,
+        "HeapReleased": 23683072,
+        "NumGC": 21,
+        "VmRSS_KB": 1023952,
+        "smaps_pss_kb": 969059
+      }
+    },
+    "total_heap_alloc_mb": 607.649,
+    "total_heap_inuse_mb": 858.047,
+    "total_rss_mb": 3768.832
+  },
+  {
+    "sample_idx": 18,
+    "elapsed_sec": 1085.87,
+    "timestamp": 1791432026.5060885,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 161687808,
+        "HeapInuse": 228237312,
+        "HeapIdle": 453402624,
+        "HeapReleased": 55508992,
+        "NumGC": 22,
+        "VmRSS_KB": 1088508,
+        "smaps_pss_kb": 1033747
+      },
+      "val1": {
+        "HeapAlloc": 165809048,
+        "HeapInuse": 233095168,
+        "HeapIdle": 456556544,
+        "HeapReleased": 68337664,
+        "NumGC": 22,
+        "VmRSS_KB": 915704,
+        "smaps_pss_kb": 860893
+      },
+      "val2": {
+        "HeapAlloc": 166264360,
+        "HeapInuse": 234307584,
+        "HeapIdle": 446775296,
+        "HeapReleased": 57204736,
+        "NumGC": 22,
+        "VmRSS_KB": 835972,
+        "smaps_pss_kb": 781082
+      },
+      "val3": {
+        "HeapAlloc": 161653016,
+        "HeapInuse": 228876288,
+        "HeapIdle": 465133568,
+        "HeapReleased": 75292672,
+        "NumGC": 22,
+        "VmRSS_KB": 1029684,
+        "smaps_pss_kb": 974791
+      }
+    },
+    "total_heap_alloc_mb": 625.052,
+    "total_heap_inuse_mb": 881.688,
+    "total_rss_mb": 3779.168
+  },
+  {
+    "sample_idx": 19,
+    "elapsed_sec": 1146.26,
+    "timestamp": 1791432086.8928363,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 165620240,
+        "HeapInuse": 233611264,
+        "HeapIdle": 448077824,
+        "HeapReleased": 55508992,
+        "NumGC": 23,
+        "VmRSS_KB": 1089244,
+        "smaps_pss_kb": 1034483
+      },
+      "val1": {
+        "HeapAlloc": 164681712,
+        "HeapInuse": 233660416,
+        "HeapIdle": 455958528,
+        "HeapReleased": 68337664,
+        "NumGC": 23,
+        "VmRSS_KB": 916408,
+        "smaps_pss_kb": 861597
+      },
+      "val2": {
+        "HeapAlloc": 165796560,
+        "HeapInuse": 235872256,
+        "HeapIdle": 445292544,
+        "HeapReleased": 57204736,
+        "NumGC": 23,
+        "VmRSS_KB": 837536,
+        "smaps_pss_kb": 782646
+      },
+      "val3": {
+        "HeapAlloc": 163916864,
+        "HeapInuse": 232792064,
+        "HeapIdle": 461217792,
+        "HeapReleased": 75292672,
+        "NumGC": 23,
+        "VmRSS_KB": 1034876,
+        "smaps_pss_kb": 979979
+      }
+    },
+    "total_heap_alloc_mb": 629.44,
+    "total_heap_inuse_mb": 892.578,
+    "total_rss_mb": 3787.172
+  },
+  {
+    "sample_idx": 20,
+    "elapsed_sec": 1206.64,
+    "timestamp": 1791432147.275352,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 164469472,
+        "HeapInuse": 235003904,
+        "HeapIdle": 455073792,
+        "HeapReleased": 3522560,
+        "NumGC": 24,
+        "VmRSS_KB": 1148304,
+        "smaps_pss_kb": 1093543
+      },
+      "val1": {
+        "HeapAlloc": 170516424,
+        "HeapInuse": 242507776,
+        "HeapIdle": 446898176,
+        "HeapReleased": 3473408,
+        "NumGC": 24,
+        "VmRSS_KB": 980296,
+        "smaps_pss_kb": 925485
+      },
+      "val2": {
+        "HeapAlloc": 164463872,
+        "HeapInuse": 235732992,
+        "HeapIdle": 453722112,
+        "HeapReleased": 6184960,
+        "NumGC": 24,
+        "VmRSS_KB": 899728,
+        "smaps_pss_kb": 844806
+      },
+      "val3": {
+        "HeapAlloc": 169475944,
+        "HeapInuse": 240574464,
+        "HeapIdle": 453468160,
+        "HeapReleased": 8101888,
+        "NumGC": 24,
+        "VmRSS_KB": 1100724,
+        "smaps_pss_kb": 1045799
+      }
+    },
+    "total_heap_alloc_mb": 637.937,
+    "total_heap_inuse_mb": 909.633,
+    "total_rss_mb": 4032.277
+  },
+  {
+    "sample_idx": 21,
+    "elapsed_sec": 1267.1,
+    "timestamp": 1791432207.730576,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 165322344,
+        "HeapInuse": 238034944,
+        "HeapIdle": 452042752,
+        "HeapReleased": 3342336,
+        "NumGC": 25,
+        "VmRSS_KB": 1125204,
+        "smaps_pss_kb": 1070443
+      },
+      "val1": {
+        "HeapAlloc": 167431832,
+        "HeapInuse": 240345088,
+        "HeapIdle": 449044480,
+        "HeapReleased": 3342336,
+        "NumGC": 25,
+        "VmRSS_KB": 963428,
+        "smaps_pss_kb": 908609
+      },
+      "val2": {
+        "HeapAlloc": 164584160,
+        "HeapInuse": 238075904,
+        "HeapIdle": 451379200,
+        "HeapReleased": 5259264,
+        "NumGC": 25,
+        "VmRSS_KB": 880552,
+        "smaps_pss_kb": 825630
+      },
+      "val3": {
+        "HeapAlloc": 165953680,
+        "HeapInuse": 237961216,
+        "HeapIdle": 456081408,
+        "HeapReleased": 8036352,
+        "NumGC": 25,
+        "VmRSS_KB": 1065388,
+        "smaps_pss_kb": 1010463
+      }
+    },
+    "total_heap_alloc_mb": 632.565,
+    "total_heap_inuse_mb": 910.203,
+    "total_rss_mb": 3940.012
+  },
+  {
+    "sample_idx": 22,
+    "elapsed_sec": 1327.49,
+    "timestamp": 1791432268.119536,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 167815552,
+        "HeapInuse": 241737728,
+        "HeapIdle": 448208896,
+        "HeapReleased": 30212096,
+        "NumGC": 26,
+        "VmRSS_KB": 1125684,
+        "smaps_pss_kb": 1070923
+      },
+      "val1": {
+        "HeapAlloc": 173013040,
+        "HeapInuse": 247316480,
+        "HeapIdle": 442089472,
+        "HeapReleased": 28114944,
+        "NumGC": 26,
+        "VmRSS_KB": 965176,
+        "smaps_pss_kb": 910365
+      },
+      "val2": {
+        "HeapAlloc": 171096160,
+        "HeapInuse": 245637120,
+        "HeapIdle": 443817984,
+        "HeapReleased": 33046528,
+        "NumGC": 26,
+        "VmRSS_KB": 882224,
+        "smaps_pss_kb": 827302
+      },
+      "val3": {
+        "HeapAlloc": 170291760,
+        "HeapInuse": 243924992,
+        "HeapIdle": 450068480,
+        "HeapReleased": 48291840,
+        "NumGC": 26,
+        "VmRSS_KB": 1068188,
+        "smaps_pss_kb": 1013263
+      }
+    },
+    "total_heap_alloc_mb": 650.612,
+    "total_heap_inuse_mb": 933.281,
+    "total_rss_mb": 3946.555
+  },
+  {
+    "sample_idx": 23,
+    "elapsed_sec": 1387.89,
+    "timestamp": 1791432328.5210786,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 165258936,
+        "HeapInuse": 240295936,
+        "HeapIdle": 449716224,
+        "HeapReleased": 30212096,
+        "NumGC": 27,
+        "VmRSS_KB": 1114088,
+        "smaps_pss_kb": 1059327
+      },
+      "val1": {
+        "HeapAlloc": 170538304,
+        "HeapInuse": 246497280,
+        "HeapIdle": 442925056,
+        "HeapReleased": 28114944,
+        "NumGC": 27,
+        "VmRSS_KB": 968732,
+        "smaps_pss_kb": 913921
+      },
+      "val2": {
+        "HeapAlloc": 168110264,
+        "HeapInuse": 243949568,
+        "HeapIdle": 445571072,
+        "HeapReleased": 33046528,
+        "NumGC": 27,
+        "VmRSS_KB": 884464,
+        "smaps_pss_kb": 829542
+      },
+      "val3": {
+        "HeapAlloc": 168739032,
+        "HeapInuse": 244285440,
+        "HeapIdle": 449724416,
+        "HeapReleased": 48291840,
+        "NumGC": 27,
+        "VmRSS_KB": 1070744,
+        "smaps_pss_kb": 1015819
+      }
+    },
+    "total_heap_alloc_mb": 641.486,
+    "total_heap_inuse_mb": 929.859,
+    "total_rss_mb": 3943.387
+  },
+  {
+    "sample_idx": 24,
+    "elapsed_sec": 1448.3,
+    "timestamp": 1791432388.9288802,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 169744336,
+        "HeapInuse": 245686272,
+        "HeapIdle": 444358656,
+        "HeapReleased": 44630016,
+        "NumGC": 28,
+        "VmRSS_KB": 1114620,
+        "smaps_pss_kb": 1059811
+      },
+      "val1": {
+        "HeapAlloc": 167224968,
+        "HeapInuse": 244695040,
+        "HeapIdle": 444628992,
+        "HeapReleased": 28114944,
+        "NumGC": 28,
+        "VmRSS_KB": 958396,
+        "smaps_pss_kb": 903579
+      },
+      "val2": {
+        "HeapAlloc": 169163288,
+        "HeapInuse": 246824960,
+        "HeapIdle": 442793984,
+        "HeapReleased": 33046528,
+        "NumGC": 28,
+        "VmRSS_KB": 886504,
+        "smaps_pss_kb": 831577
+      },
+      "val3": {
+        "HeapAlloc": 168226112,
+        "HeapInuse": 244637696,
+        "HeapIdle": 449437696,
+        "HeapReleased": 48291840,
+        "NumGC": 28,
+        "VmRSS_KB": 1074296,
+        "smaps_pss_kb": 1019365
+      }
+    },
+    "total_heap_alloc_mb": 643.119,
+    "total_heap_inuse_mb": 936.359,
+    "total_rss_mb": 3939.273
+  },
+  {
+    "sample_idx": 25,
+    "elapsed_sec": 1508.7,
+    "timestamp": 1791432449.333228,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 164775584,
+        "HeapInuse": 243105792,
+        "HeapIdle": 451100672,
+        "HeapReleased": 13541376,
+        "NumGC": 29,
+        "VmRSS_KB": 1148816,
+        "smaps_pss_kb": 1094007
+      },
+      "val1": {
+        "HeapAlloc": 170551512,
+        "HeapInuse": 249487360,
+        "HeapIdle": 448258048,
+        "HeapReleased": 10379264,
+        "NumGC": 29,
+        "VmRSS_KB": 997480,
+        "smaps_pss_kb": 942663
+      },
+      "val2": {
+        "HeapAlloc": 168880552,
+        "HeapInuse": 248176640,
+        "HeapIdle": 449863680,
+        "HeapReleased": 10633216,
+        "NumGC": 29,
+        "VmRSS_KB": 921464,
+        "smaps_pss_kb": 866537
+      },
+      "val3": {
+        "HeapAlloc": 171234640,
+        "HeapInuse": 250068992,
+        "HeapIdle": 448200704,
+        "HeapReleased": 10280960,
+        "NumGC": 29,
+        "VmRSS_KB": 1116680,
+        "smaps_pss_kb": 1061749
+      }
+    },
+    "total_heap_alloc_mb": 644.152,
+    "total_heap_inuse_mb": 944.938,
+    "total_rss_mb": 4086.367
+  },
+  {
+    "sample_idx": 26,
+    "elapsed_sec": 1569.13,
+    "timestamp": 1791432509.766569,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 163245968,
+        "HeapInuse": 242237440,
+        "HeapIdle": 451969024,
+        "HeapReleased": 12492800,
+        "NumGC": 30,
+        "VmRSS_KB": 1112076,
+        "smaps_pss_kb": 1057267
+      },
+      "val1": {
+        "HeapAlloc": 163400112,
+        "HeapInuse": 242704384,
+        "HeapIdle": 455008256,
+        "HeapReleased": 9551872,
+        "NumGC": 30,
+        "VmRSS_KB": 938120,
+        "smaps_pss_kb": 883303
+      },
+      "val2": {
+        "HeapAlloc": 163312320,
+        "HeapInuse": 242262016,
+        "HeapIdle": 455680000,
+        "HeapReleased": 10076160,
+        "NumGC": 30,
+        "VmRSS_KB": 863312,
+        "smaps_pss_kb": 808385
+      },
+      "val3": {
+        "HeapAlloc": 163458568,
+        "HeapInuse": 243023872,
+        "HeapIdle": 455245824,
+        "HeapReleased": 10280960,
+        "NumGC": 30,
+        "VmRSS_KB": 1058476,
+        "smaps_pss_kb": 1003545
+      }
+    },
+    "total_heap_alloc_mb": 623.147,
+    "total_heap_inuse_mb": 925.281,
+    "total_rss_mb": 3878.891
+  },
+  {
+    "sample_idx": 27,
+    "elapsed_sec": 1629.55,
+    "timestamp": 1791432570.186087,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 169124992,
+        "HeapInuse": 248553472,
+        "HeapIdle": 445603840,
+        "HeapReleased": 56352768,
+        "NumGC": 31,
+        "VmRSS_KB": 1114500,
+        "smaps_pss_kb": 1059691
+      },
+      "val1": {
+        "HeapAlloc": 170732320,
+        "HeapInuse": 251789312,
+        "HeapIdle": 445890560,
+        "HeapReleased": 68296704,
+        "NumGC": 31,
+        "VmRSS_KB": 945680,
+        "smaps_pss_kb": 890863
+      },
+      "val2": {
+        "HeapAlloc": 169429936,
+        "HeapInuse": 250396672,
+        "HeapIdle": 447496192,
+        "HeapReleased": 69918720,
+        "NumGC": 31,
+        "VmRSS_KB": 868920,
+        "smaps_pss_kb": 813993
+      },
+      "val3": {
+        "HeapAlloc": 168897712,
+        "HeapInuse": 249217024,
+        "HeapIdle": 449019904,
+        "HeapReleased": 68902912,
+        "NumGC": 31,
+        "VmRSS_KB": 1082356,
+        "smaps_pss_kb": 1027425
+      }
+    },
+    "total_heap_alloc_mb": 646.768,
+    "total_heap_inuse_mb": 953.633,
+    "total_rss_mb": 3917.438
+  },
+  {
+    "sample_idx": 28,
+    "elapsed_sec": 1689.97,
+    "timestamp": 1791432630.6039119,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 170053008,
+        "HeapInuse": 251043840,
+        "HeapIdle": 443080704,
+        "HeapReleased": 56352768,
+        "NumGC": 32,
+        "VmRSS_KB": 1121948,
+        "smaps_pss_kb": 1067139
+      },
+      "val1": {
+        "HeapAlloc": 170665016,
+        "HeapInuse": 252690432,
+        "HeapIdle": 444989440,
+        "HeapReleased": 64569344,
+        "NumGC": 32,
+        "VmRSS_KB": 950100,
+        "smaps_pss_kb": 895283
+      },
+      "val2": {
+        "HeapAlloc": 171470296,
+        "HeapInuse": 253337600,
+        "HeapIdle": 444456960,
+        "HeapReleased": 68853760,
+        "NumGC": 32,
+        "VmRSS_KB": 872660,
+        "smaps_pss_kb": 817733
+      },
+      "val3": {
+        "HeapAlloc": 169181608,
+        "HeapInuse": 250945536,
+        "HeapIdle": 447193088,
+        "HeapReleased": 68902912,
+        "NumGC": 32,
+        "VmRSS_KB": 1085304,
+        "smaps_pss_kb": 1030373
+      }
+    },
+    "total_heap_alloc_mb": 649.805,
+    "total_heap_inuse_mb": 961.32,
+    "total_rss_mb": 3935.559
+  },
+  {
+    "sample_idx": 29,
+    "elapsed_sec": 1750.39,
+    "timestamp": 1791432691.0263977,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 169353600,
+        "HeapInuse": 250683392,
+        "HeapIdle": 443441152,
+        "HeapReleased": 56352768,
+        "NumGC": 33,
+        "VmRSS_KB": 1127736,
+        "smaps_pss_kb": 1072927
+      },
+      "val1": {
+        "HeapAlloc": 167210440,
+        "HeapInuse": 250331136,
+        "HeapIdle": 447348736,
+        "HeapReleased": 64569344,
+        "NumGC": 33,
+        "VmRSS_KB": 952436,
+        "smaps_pss_kb": 897619
+      },
+      "val2": {
+        "HeapAlloc": 167092552,
+        "HeapInuse": 249921536,
+        "HeapIdle": 447971328,
+        "HeapReleased": 68321280,
+        "NumGC": 33,
+        "VmRSS_KB": 880292,
+        "smaps_pss_kb": 825365
+      },
+      "val3": {
+        "HeapAlloc": 166983400,
+        "HeapInuse": 249659392,
+        "HeapIdle": 448512000,
+        "HeapReleased": 68313088,
+        "NumGC": 33,
+        "VmRSS_KB": 1089872,
+        "smaps_pss_kb": 1034941
+      }
+    },
+    "total_heap_alloc_mb": 639.572,
+    "total_heap_inuse_mb": 954.242,
+    "total_rss_mb": 3955.406
+  },
+  {
+    "sample_idx": 30,
+    "elapsed_sec": 1810.84,
+    "timestamp": 1791432751.4722426,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 170579360,
+        "HeapInuse": 254517248,
+        "HeapIdle": 439623680,
+        "HeapReleased": 7315456,
+        "NumGC": 34,
+        "VmRSS_KB": 1178348,
+        "smaps_pss_kb": 1123491
+      },
+      "val1": {
+        "HeapAlloc": 173375872,
+        "HeapInuse": 258211840,
+        "HeapIdle": 439500800,
+        "HeapReleased": 7061504,
+        "NumGC": 34,
+        "VmRSS_KB": 1009080,
+        "smaps_pss_kb": 954263
+      },
+      "val2": {
+        "HeapAlloc": 172059720,
+        "HeapInuse": 256278528,
+        "HeapIdle": 441696256,
+        "HeapReleased": 11763712,
+        "NumGC": 34,
+        "VmRSS_KB": 937880,
+        "smaps_pss_kb": 882947
+      },
+      "val3": {
+        "HeapAlloc": 170787320,
+        "HeapInuse": 255025152,
+        "HeapIdle": 443179008,
+        "HeapReleased": 13828096,
+        "NumGC": 34,
+        "VmRSS_KB": 1145052,
+        "smaps_pss_kb": 1090116
+      }
+    },
+    "total_heap_alloc_mb": 654.986,
+    "total_heap_inuse_mb": 976.594,
+    "total_rss_mb": 4170.273
+  },
+  {
+    "sample_idx": 31,
+    "elapsed_sec": 1871.32,
+    "timestamp": 1791432811.9507115,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 165140168,
+        "HeapInuse": 250585088,
+        "HeapIdle": 443621376,
+        "HeapReleased": 7159808,
+        "NumGC": 35,
+        "VmRSS_KB": 1144460,
+        "smaps_pss_kb": 1089603
+      },
+      "val1": {
+        "HeapAlloc": 170517320,
+        "HeapInuse": 257507328,
+        "HeapIdle": 440205312,
+        "HeapReleased": 6586368,
+        "NumGC": 35,
+        "VmRSS_KB": 980808,
+        "smaps_pss_kb": 925992
+      },
+      "val2": {
+        "HeapAlloc": 168753176,
+        "HeapInuse": 254099456,
+        "HeapIdle": 443793408,
+        "HeapReleased": 11640832,
+        "NumGC": 35,
+        "VmRSS_KB": 895716,
+        "smaps_pss_kb": 840784
+      },
+      "val3": {
+        "HeapAlloc": 169130312,
+        "HeapInuse": 254803968,
+        "HeapIdle": 443400192,
+        "HeapReleased": 12926976,
+        "NumGC": 35,
+        "VmRSS_KB": 1116748,
+        "smaps_pss_kb": 1061812
+      }
+    },
+    "total_heap_alloc_mb": 642.339,
+    "total_heap_inuse_mb": 969.883,
+    "total_rss_mb": 4040.754
+  },
+  {
+    "sample_idx": 32,
+    "elapsed_sec": 1931.74,
+    "timestamp": 1791432872.3741903,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 170975920,
+        "HeapInuse": 257884160,
+        "HeapIdle": 436256768,
+        "HeapReleased": 50102272,
+        "NumGC": 36,
+        "VmRSS_KB": 1150296,
+        "smaps_pss_kb": 1095434
+      },
+      "val1": {
+        "HeapAlloc": 170865808,
+        "HeapInuse": 259006464,
+        "HeapIdle": 438706176,
+        "HeapReleased": 40271872,
+        "NumGC": 36,
+        "VmRSS_KB": 983024,
+        "smaps_pss_kb": 928202
+      },
+      "val2": {
+        "HeapAlloc": 171545296,
+        "HeapInuse": 258654208,
+        "HeapIdle": 439287808,
+        "HeapReleased": 56926208,
+        "NumGC": 36,
+        "VmRSS_KB": 901024,
+        "smaps_pss_kb": 846044
+      },
+      "val3": {
+        "HeapAlloc": 169356408,
+        "HeapInuse": 256106496,
+        "HeapIdle": 442097664,
+        "HeapReleased": 41484288,
+        "NumGC": 36,
+        "VmRSS_KB": 1122956,
+        "smaps_pss_kb": 1068015
+      }
+    },
+    "total_heap_alloc_mb": 651.115,
+    "total_heap_inuse_mb": 983.859,
+    "total_rss_mb": 4059.863
+  },
+  {
+    "sample_idx": 33,
+    "elapsed_sec": 1992.16,
+    "timestamp": 1791432932.7970333,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 169377776,
+        "HeapInuse": 257613824,
+        "HeapIdle": 436477952,
+        "HeapReleased": 49569792,
+        "NumGC": 37,
+        "VmRSS_KB": 1151628,
+        "smaps_pss_kb": 1096764
+      },
+      "val1": {
+        "HeapAlloc": 169816432,
+        "HeapInuse": 259194880,
+        "HeapIdle": 438484992,
+        "HeapReleased": 40271872,
+        "NumGC": 37,
+        "VmRSS_KB": 983828,
+        "smaps_pss_kb": 929005
+      },
+      "val2": {
+        "HeapAlloc": 171450112,
+        "HeapInuse": 261292032,
+        "HeapIdle": 436568064,
+        "HeapReleased": 56926208,
+        "NumGC": 37,
+        "VmRSS_KB": 903020,
+        "smaps_pss_kb": 848038
+      },
+      "val3": {
+        "HeapAlloc": 169727352,
+        "HeapInuse": 257597440,
+        "HeapIdle": 440639488,
+        "HeapReleased": 37756928,
+        "NumGC": 37,
+        "VmRSS_KB": 1126996,
+        "smaps_pss_kb": 1072053
+      }
+    },
+    "total_heap_alloc_mb": 648.853,
+    "total_heap_inuse_mb": 987.719,
+    "total_rss_mb": 4067.844
+  },
+  {
+    "sample_idx": 34,
+    "elapsed_sec": 2052.63,
+    "timestamp": 1791432993.2619517,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 173067312,
+        "HeapInuse": 262569984,
+        "HeapIdle": 431325184,
+        "HeapReleased": 49569792,
+        "NumGC": 38,
+        "VmRSS_KB": 1151932,
+        "smaps_pss_kb": 1097068
+      },
+      "val1": {
+        "HeapAlloc": 167569952,
+        "HeapInuse": 257622016,
+        "HeapIdle": 440025088,
+        "HeapReleased": 40271872,
+        "NumGC": 38,
+        "VmRSS_KB": 978488,
+        "smaps_pss_kb": 923664
+      },
+      "val2": {
+        "HeapAlloc": 171361264,
+        "HeapInuse": 261242880,
+        "HeapIdle": 436682752,
+        "HeapReleased": 56393728,
+        "NumGC": 38,
+        "VmRSS_KB": 905956,
+        "smaps_pss_kb": 850974
+      },
+      "val3": {
+        "HeapAlloc": 168870368,
+        "HeapInuse": 258498560,
+        "HeapIdle": 439771136,
+        "HeapReleased": 37756928,
+        "NumGC": 38,
+        "VmRSS_KB": 1127344,
+        "smaps_pss_kb": 1072401
+      }
+    },
+    "total_heap_alloc_mb": 649.327,
+    "total_heap_inuse_mb": 991.758,
+    "total_rss_mb": 4066.133
+  },
+  {
+    "sample_idx": 35,
+    "elapsed_sec": 2113.06,
+    "timestamp": 1791433053.6953804,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 166164448,
+        "HeapInuse": 256843776,
+        "HeapIdle": 437231616,
+        "HeapReleased": 13991936,
+        "NumGC": 39,
+        "VmRSS_KB": 1189560,
+        "smaps_pss_kb": 1134696
+      },
+      "val1": {
+        "HeapAlloc": 170664664,
+        "HeapInuse": 262406144,
+        "HeapIdle": 435208192,
+        "HeapReleased": 13582336,
+        "NumGC": 39,
+        "VmRSS_KB": 1011740,
+        "smaps_pss_kb": 956917
+      },
+      "val2": {
+        "HeapAlloc": 170435248,
+        "HeapInuse": 260784128,
+        "HeapIdle": 437223424,
+        "HeapReleased": 6709248,
+        "NumGC": 39,
+        "VmRSS_KB": 955780,
+        "smaps_pss_kb": 900798
+      },
+      "val3": {
+        "HeapAlloc": 171248760,
+        "HeapInuse": 261169152,
+        "HeapIdle": 436936704,
+        "HeapReleased": 20135936,
+        "NumGC": 39,
+        "VmRSS_KB": 1144484,
+        "smaps_pss_kb": 1089541
+      }
+    },
+    "total_heap_alloc_mb": 647.081,
+    "total_heap_inuse_mb": 992.969,
+    "total_rss_mb": 4200.746
+  },
+  {
+    "sample_idx": 36,
+    "elapsed_sec": 2173.53,
+    "timestamp": 1791433114.167163,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 169521160,
+        "HeapInuse": 261144576,
+        "HeapIdle": 432930816,
+        "HeapReleased": 13713408,
+        "NumGC": 40,
+        "VmRSS_KB": 1190252,
+        "smaps_pss_kb": 1135388
+      },
+      "val1": {
+        "HeapAlloc": 172392992,
+        "HeapInuse": 265043968,
+        "HeapIdle": 432635904,
+        "HeapReleased": 13295616,
+        "NumGC": 40,
+        "VmRSS_KB": 1013188,
+        "smaps_pss_kb": 958365
+      },
+      "val2": {
+        "HeapAlloc": 169716480,
+        "HeapInuse": 262168576,
+        "HeapIdle": 435838976,
+        "HeapReleased": 6242304,
+        "NumGC": 40,
+        "VmRSS_KB": 931980,
+        "smaps_pss_kb": 876998
+      },
+      "val3": {
+        "HeapAlloc": 173704680,
+        "HeapInuse": 265011200,
+        "HeapIdle": 433029120,
+        "HeapReleased": 18989056,
+        "NumGC": 40,
+        "VmRSS_KB": 1145932,
+        "smaps_pss_kb": 1090989
+      }
+    },
+    "total_heap_alloc_mb": 653.587,
+    "total_heap_inuse_mb": 1004.57,
+    "total_rss_mb": 4181.008
+  },
+  {
+    "sample_idx": 37,
+    "elapsed_sec": 2233.98,
+    "timestamp": 1791433174.6164896,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 167740072,
+        "HeapInuse": 259047424,
+        "HeapIdle": 435027968,
+        "HeapReleased": 13713408,
+        "NumGC": 41,
+        "VmRSS_KB": 1165868,
+        "smaps_pss_kb": 1111004
+      },
+      "val1": {
+        "HeapAlloc": 171555640,
+        "HeapInuse": 263766016,
+        "HeapIdle": 433864704,
+        "HeapReleased": 13950976,
+        "NumGC": 41,
+        "VmRSS_KB": 985428,
+        "smaps_pss_kb": 930605
+      },
+      "val2": {
+        "HeapAlloc": 169079488,
+        "HeapInuse": 261627904,
+        "HeapIdle": 436379648,
+        "HeapReleased": 35799040,
+        "NumGC": 41,
+        "VmRSS_KB": 933992,
+        "smaps_pss_kb": 879010
+      },
+      "val3": {
+        "HeapAlloc": 172977752,
+        "HeapInuse": 264093696,
+        "HeapIdle": 433864704,
+        "HeapReleased": 18464768,
+        "NumGC": 41,
+        "VmRSS_KB": 1127884,
+        "smaps_pss_kb": 1072941
+      }
+    },
+    "total_heap_alloc_mb": 649.789,
+    "total_heap_inuse_mb": 999.961,
+    "total_rss_mb": 4114.426
+  },
+  {
+    "sample_idx": 38,
+    "elapsed_sec": 2294.41,
+    "timestamp": 1791433235.0420656,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 174160152,
+        "HeapInuse": 266330112,
+        "HeapIdle": 427696128,
+        "HeapReleased": 38739968,
+        "NumGC": 42,
+        "VmRSS_KB": 1171152,
+        "smaps_pss_kb": 1116290
+      },
+      "val1": {
+        "HeapAlloc": 172068984,
+        "HeapInuse": 264970240,
+        "HeapIdle": 432742400,
+        "HeapReleased": 40984576,
+        "NumGC": 42,
+        "VmRSS_KB": 989428,
+        "smaps_pss_kb": 934606
+      },
+      "val2": {
+        "HeapAlloc": 172424312,
+        "HeapInuse": 265060352,
+        "HeapIdle": 433012736,
+        "HeapReleased": 35799040,
+        "NumGC": 42,
+        "VmRSS_KB": 935724,
+        "smaps_pss_kb": 880743
+      },
+      "val3": {
+        "HeapAlloc": 171870496,
+        "HeapInuse": 263397376,
+        "HeapIdle": 434675712,
+        "HeapReleased": 32940032,
+        "NumGC": 42,
+        "VmRSS_KB": 1133608,
+        "smaps_pss_kb": 1078667
+      }
+    },
+    "total_heap_alloc_mb": 658.535,
+    "total_heap_inuse_mb": 1010.664,
+    "total_rss_mb": 4130.773
+  },
+  {
+    "sample_idx": 39,
+    "elapsed_sec": 2354.84,
+    "timestamp": 1791433295.478473,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 167975632,
+        "HeapInuse": 260194304,
+        "HeapIdle": 433881088,
+        "HeapReleased": 38805504,
+        "NumGC": 43,
+        "VmRSS_KB": 1155988,
+        "smaps_pss_kb": 1101126
+      },
+      "val1": {
+        "HeapAlloc": 172337752,
+        "HeapInuse": 264781824,
+        "HeapIdle": 432701440,
+        "HeapReleased": 40984576,
+        "NumGC": 43,
+        "VmRSS_KB": 992028,
+        "smaps_pss_kb": 937206
+      },
+      "val2": {
+        "HeapAlloc": 171021296,
+        "HeapInuse": 263102464,
+        "HeapIdle": 434937856,
+        "HeapReleased": 35799040,
+        "NumGC": 43,
+        "VmRSS_KB": 939128,
+        "smaps_pss_kb": 884148
+      },
+      "val3": {
+        "HeapAlloc": 169832024,
+        "HeapInuse": 260980736,
+        "HeapIdle": 437059584,
+        "HeapReleased": 31408128,
+        "NumGC": 43,
+        "VmRSS_KB": 1121860,
+        "smaps_pss_kb": 1066919
+      }
+    },
+    "total_heap_alloc_mb": 649.611,
+    "total_heap_inuse_mb": 1000.461,
+    "total_rss_mb": 4110.355
+  },
+  {
+    "sample_idx": 40,
+    "elapsed_sec": 2415.29,
+    "timestamp": 1791433355.9216852,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 174793592,
+        "HeapInuse": 267730944,
+        "HeapIdle": 426311680,
+        "HeapReleased": 2981888,
+        "NumGC": 44,
+        "VmRSS_KB": 1206544,
+        "smaps_pss_kb": 1151666
+      },
+      "val1": {
+        "HeapAlloc": 177658392,
+        "HeapInuse": 272474112,
+        "HeapIdle": 428826624,
+        "HeapReleased": 6758400,
+        "NumGC": 44,
+        "VmRSS_KB": 1030932,
+        "smaps_pss_kb": 976110
+      },
+      "val2": {
+        "HeapAlloc": 176456224,
+        "HeapInuse": 269418496,
+        "HeapIdle": 428589056,
+        "HeapReleased": 5783552,
+        "NumGC": 44,
+        "VmRSS_KB": 972200,
+        "smaps_pss_kb": 917219
+      },
+      "val3": {
+        "HeapAlloc": 174122016,
+        "HeapInuse": 266174464,
+        "HeapIdle": 431931392,
+        "HeapReleased": 9543680,
+        "NumGC": 44,
+        "VmRSS_KB": 1157076,
+        "smaps_pss_kb": 1102135
+      }
+    },
+    "total_heap_alloc_mb": 670.462,
+    "total_heap_inuse_mb": 1025.961,
+    "total_rss_mb": 4264.406
+  },
+  {
+    "sample_idx": 41,
+    "elapsed_sec": 2475.75,
+    "timestamp": 1791433416.3853028,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 172206672,
+        "HeapInuse": 265486336,
+        "HeapIdle": 428621824,
+        "HeapReleased": 2809856,
+        "NumGC": 45,
+        "VmRSS_KB": 1172728,
+        "smaps_pss_kb": 1117866
+      },
+      "val1": {
+        "HeapAlloc": 178647704,
+        "HeapInuse": 272285696,
+        "HeapIdle": 429047808,
+        "HeapReleased": 7774208,
+        "NumGC": 45,
+        "VmRSS_KB": 1020580,
+        "smaps_pss_kb": 965758
+      },
+      "val2": {
+        "HeapAlloc": 172419928,
+        "HeapInuse": 265846784,
+        "HeapIdle": 432193536,
+        "HeapReleased": 5644288,
+        "NumGC": 45,
+        "VmRSS_KB": 950068,
+        "smaps_pss_kb": 895088
+      },
+      "val3": {
+        "HeapAlloc": 179790928,
+        "HeapInuse": 271335424,
+        "HeapIdle": 426721280,
+        "HeapReleased": 9166848,
+        "NumGC": 45,
+        "VmRSS_KB": 1157556,
+        "smaps_pss_kb": 1102615
+      }
+    },
+    "total_heap_alloc_mb": 670.495,
+    "total_heap_inuse_mb": 1025.156,
+    "total_rss_mb": 4200.129
+  },
+  {
+    "sample_idx": 42,
+    "elapsed_sec": 2536.2,
+    "timestamp": 1791433476.8377657,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 173202960,
+        "HeapInuse": 266567680,
+        "HeapIdle": 427524096,
+        "HeapReleased": 32727040,
+        "NumGC": 46,
+        "VmRSS_KB": 1182980,
+        "smaps_pss_kb": 1128118
+      },
+      "val1": {
+        "HeapAlloc": 172705888,
+        "HeapInuse": 266584064,
+        "HeapIdle": 434896896,
+        "HeapReleased": 18776064,
+        "NumGC": 46,
+        "VmRSS_KB": 998744,
+        "smaps_pss_kb": 943922
+      },
+      "val2": {
+        "HeapAlloc": 173014384,
+        "HeapInuse": 266592256,
+        "HeapIdle": 431448064,
+        "HeapReleased": 45752320,
+        "NumGC": 46,
+        "VmRSS_KB": 959420,
+        "smaps_pss_kb": 904440
+      },
+      "val3": {
+        "HeapAlloc": 171244984,
+        "HeapInuse": 263684096,
+        "HeapIdle": 434454528,
+        "HeapReleased": 9166848,
+        "NumGC": 46,
+        "VmRSS_KB": 1110456,
+        "smaps_pss_kb": 1055515
+      }
+    },
+    "total_heap_alloc_mb": 658.196,
+    "total_heap_inuse_mb": 1014.164,
+    "total_rss_mb": 4151.953
+  },
+  {
+    "sample_idx": 43,
+    "elapsed_sec": 2596.69,
+    "timestamp": 1791433537.3240604,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 175941544,
+        "HeapInuse": 270008320,
+        "HeapIdle": 424099840,
+        "HeapReleased": 29442048,
+        "NumGC": 47,
+        "VmRSS_KB": 1190228,
+        "smaps_pss_kb": 1135366
+      },
+      "val1": {
+        "HeapAlloc": 182636480,
+        "HeapInuse": 276766720,
+        "HeapIdle": 424648704,
+        "HeapReleased": 43974656,
+        "NumGC": 47,
+        "VmRSS_KB": 1005996,
+        "smaps_pss_kb": 951174
+      },
+      "val2": {
+        "HeapAlloc": 181303248,
+        "HeapInuse": 275611648,
+        "HeapIdle": 422445056,
+        "HeapReleased": 43622400,
+        "NumGC": 47,
+        "VmRSS_KB": 966084,
+        "smaps_pss_kb": 911104
+      },
+      "val3": {
+        "HeapAlloc": 178245760,
+        "HeapInuse": 271695872,
+        "HeapIdle": 426344448,
+        "HeapReleased": 49496064,
+        "NumGC": 47,
+        "VmRSS_KB": 1119624,
+        "smaps_pss_kb": 1064683
+      }
+    },
+    "total_heap_alloc_mb": 684.859,
+    "total_heap_inuse_mb": 1043.398,
+    "total_rss_mb": 4181.574
+  },
+  {
+    "sample_idx": 44,
+    "elapsed_sec": 2657.15,
+    "timestamp": 1791433597.7845302,
+    "nodes": {
+      "val0": {
+        "HeapAlloc": 172041328,
+        "HeapInuse": 264724480,
+        "HeapIdle": 429416448,
+        "HeapReleased": 29442048,
+        "NumGC": 48,
+        "VmRSS_KB": 1171364,
+        "smaps_pss_kb": 1116502
+      },
+      "val1": {
+        "HeapAlloc": 179598048,
+        "HeapInuse": 274137088,
+        "HeapIdle": 427065344,
+        "HeapReleased": 41312256,
+        "NumGC": 48,
+        "VmRSS_KB": 1011968,
+        "smaps_pss_kb": 957146
+      },
+      "val2": {
+        "HeapAlloc": 176655768,
+        "HeapInuse": 270196736,
+        "HeapIdle": 427941888,
+        "HeapReleased": 38297600,
+        "NumGC": 48,
+        "VmRSS_KB": 975824,
+        "smaps_pss_kb": 920843
+      },
+      "val3": {
+        "HeapAlloc": 174616184,
+        "HeapInuse": 267485184,
+        "HeapIdle": 430489600,
+        "HeapReleased": 47366144,
+        "NumGC": 48,
+        "VmRSS_KB": 1122160,
+        "smaps_pss_kb": 1067219
+      }
+    },
+    "total_heap_alloc_mb": 670.348,
+    "total_heap_inuse_mb": 1026.672,
+    "total_rss_mb": 4180.973
+  }
+]

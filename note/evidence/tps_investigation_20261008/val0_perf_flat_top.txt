@@ -1,0 +1,45 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 18K of event 'cycles:P'
+# Event count (approx.): 349518060735
+#
+# Overhead       Samples  Symbol                                                                                                                                                                                                                                                                                                                                                                                                           IPC   [IPC Coverage]
+# ........  ............  ...............................................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    12.00%          2348  [.] secp256k1_fe_mul_inner                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |          
+             --11.94%--secp256k1_fe_mul_inner
+
+     9.46%          1864  [.] secp256k1_fe_sqr_inner                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |          
+             --9.41%--secp256k1_fe_sqr_inner
+
+     3.16%           625  [.] runtime.mallocgc                                                                                                                                                                                                                                                                                                                                                                                             -      -            
+            |          
+             --3.05%--runtime.mallocgc
+                       |          
+                       |--1.72%--runtime.newobject
+                       |          
+                        --0.58%--runtime.makeslice
+
+     2.86%           585  [.] golang.org/x/crypto/sha3.keccakF1600.abi0                                                                                                                                                                                                                                                                                                                                                                    -      -            
+     2.79%           414  [.] blake2::Blake2bVarCore::compress                                                                                                                                                                                                                                                                                                                                                                             -      -            
+            |          
+             --2.78%--blake2::Blake2bVarCore::compress
+
+     2.52%           315  [.] github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress                                                                                                                                                                                                                                                                                                                         -      -            
+            |          
+             --2.50%--github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress
+                       |          
+                       |--1.41%--github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub.func2
+                       |          |          
+                       |           --1.07%--sort.partition_func
+                       |                     sort.pdqsort_func
+                       |                     |          
+                       |                      --0.65%--sort.pdqsort_func
+                       |          
+                        --0.51%--github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub
+                                  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxBatchForwarder).StartForwardingLoop

@@ -595,3 +595,4 @@ deploy/ansible/monitors/block_hash_checker/checkpoint.json
 execution/scripts/chaos_crash_reports/
 execution/parent_chain
 execution/scripts/test/bls_pubkey
+*.data

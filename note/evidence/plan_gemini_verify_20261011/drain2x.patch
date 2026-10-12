@@ -1,0 +1,18 @@
+diff --git a/execution/cmd/simple_chain/processor/tx_batch_forwarder_core.go b/execution/cmd/simple_chain/processor/tx_batch_forwarder_core.go
+index 7b592e7f..261ad4bb 100644
+--- a/execution/cmd/simple_chain/processor/tx_batch_forwarder_core.go
++++ b/execution/cmd/simple_chain/processor/tx_batch_forwarder_core.go
+@@ -84,7 +84,12 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
+ 	// shard's transactions get their turn -- capping just spreads that
+ 	// guarantee's cost across the ticks it takes to complete one rotation,
+ 	// instead of paying for a full rotation on every single tick.
+-	const maxPoolDrainPerTick = targetBlockSize * 5
++	//
++	// Measured 2026-10-10 (Raft, saturated): only targetBlockSize of each drain is forwarded, but a 5x drain
++	// (~40k txs) cost ~280ms/tick to resolve nonces, sort and classify, plus ~60ms to re-queue the unused 32k.
++	// That serial loop capped the whole pipeline at ~14k tx/s while the executor idled waiting for blocks.
++	// 2x keeps headroom for nonce-order filtering losses and measured ~20.6k tx/s e2e (1x: ~20.5k).
++	const maxPoolDrainPerTick = targetBlockSize * 2
+ 
+ 	// TBAB: Throughput-Based Adaptive Batching state
+ 	emaTPS := 0.0

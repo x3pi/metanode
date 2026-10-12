@@ -314,3 +314,26 @@ func TestValidateConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestRaftFeed_LeaderTelemetry_Defaults(t *testing.T) {
+	if IsLeader() {
+		t.Errorf("IsLeader() = true, want false when disabled")
+	}
+	if role := Role(); role != "disabled" {
+		t.Errorf("Role() = %q, want %q when disabled", role, "disabled")
+	}
+	if lid := LeaderID(); lid != "" {
+		t.Errorf("LeaderID() = %q, want empty when disabled", lid)
+	}
+
+	n := &Node{}
+	if n.IsLeader() {
+		t.Errorf("Node.IsLeader() = true, want false with nil raft")
+	}
+	if state := n.State(); state != "unknown" {
+		t.Errorf("Node.State() = %q, want %q with nil raft", state, "unknown")
+	}
+	if lid := n.LeaderID(); lid != "" {
+		t.Errorf("Node.LeaderID() = %q, want empty with nil raft", lid)
+	}
+}

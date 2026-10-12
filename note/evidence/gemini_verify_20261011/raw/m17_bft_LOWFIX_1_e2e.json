@@ -1,0 +1,1 @@
+{"tag": "m17_bft_LOWFIX_1", "mode": "bft", "bin": "simple_chain_LOWFIX", "args": ["-duration", "60", "-batch", "1000"], "submitted": 4527000, "on_chain": 1687686, "complete": false, "blast_secs": 130.7, "e2e_secs": null, "e2e_tps": null, "tool_tps": 13578, "p50_ms": 61174, "p99_ms": 73438, "zero_fork": true, "roots": true}

@@ -1,0 +1,40 @@
+{
+  "tag": "s16_head_3",
+  "mode": "bft",
+  "bin": "simple_chain_HEAD_16M",
+  "args": [
+    "-duration",
+    "60",
+    "-batch",
+    "1000"
+  ],
+  "submitted": 2543000,
+  "on_chain": 2543000,
+  "complete": true,
+  "blast_secs": 85.2,
+  "e2e_secs": 184.9,
+  "e2e_tps": 13753,
+  "tool_tps": 17813,
+  "p50_ms": 61492,
+  "p99_ms": 76804,
+  "zero_fork": true,
+  "roots": true,
+  "uptime_before": "03:08:33 up 16 days, 20:43, 38 users,  load average: 29.36, 47.85, 38.06",
+  "uptime_after": "03:12:39 up 16 days, 20:47, 38 users,  load average: 31.50, 46.42, 40.12",
+  "log_analysis": {
+    "sig1_expected_mismatch_errors": 0,
+    "byte_limit_exceeded_count": 34,
+    "sig2_watchdog_hangs": 0,
+    "catchup_phases_observed": 0,
+    "val_final_blocks": {
+      "val0": 556,
+      "val1": 556,
+      "val2": 556,
+      "val3": 522
+    },
+    "catchup_rate_blks_per_sec": null,
+    "sig1_details": [],
+    "classification": "CLEAN_COMPLETED"
+  },
+  "failure_classification": "CLEAN_COMPLETED"
+}

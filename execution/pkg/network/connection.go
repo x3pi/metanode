@@ -215,7 +215,11 @@ func (c *Connection) run() {
 	}
 
 	startIO := func(conn net.Conn, idleTimeout time.Duration) {
-		requestChan = make(chan network.Request, c.config.RequestChanSize)
+		reqBuf := c.config.RequestChanSize
+		if c.config.ConnRequestChanSize > 0 {
+			reqBuf = c.config.ConnRequestChanSize
+		}
+		requestChan = make(chan network.Request, reqBuf)
 		errorChan = make(chan error, c.config.ErrorChanSize)
 		sendChan = make(chan network.Message, c.config.SendChanSize)
 		quitChan = make(chan struct{}) // Kênh tín hiệu để dừng
@@ -406,7 +410,17 @@ func (c *Connection) Disconnect() error {
 	return nil
 }
 
-func (c *Connection) SendMessage(message network.Message) error {
+func (c *Connection) SendMessage(message network.Message) (err error) {
+	// The connection owner closes sendChan when it tears the connection down. A sender that already copied the channel
+	// reference can still reach a closed channel (a receipt broadcast racing a client disconnect), and a send on a
+	// closed channel panics and takes the whole node down. That is just "the peer went away": report it as such.
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Warn("SendMessage: sendChan was closed while sending (%v), treating the connection as disconnected", r)
+			err = ErrDisconnected
+		}
+	}()
+
 	// Check cache trước (fast path)
 	if !c.IsConnect() {
 		return ErrDisconnected
@@ -887,6 +901,23 @@ func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Reque
 
 		req := requestPool.Get().(network.Request)
 		req.Reset(c, NewMessage(msgProto))
+
+		// Transaction submissions are never dropped here: the client is fire-and-forget, so a dropped batch is an
+		// unrecoverable nonce gap. Wait for room (this stops reading the socket, which is the backpressure) until the
+		// connection is torn down.
+		if isTxSubmissionCommand(msgProto.GetHeader().GetCommand()) {
+			select {
+			case requestChan <- req:
+			case <-quit:
+				requestPool.Put(req)
+				logger.Warn("readLoop %s: quit signal received, discarding request and exiting.", remoteAddr)
+				return
+			}
+			// The read deadline was last set when this message completed; time spent waiting above is not client
+			// inactivity, so restart it or the next read would fail at once after a long backpressure wait.
+			resetIdleDeadline()
+			continue
+		}
 
 		select {
 		case requestChan <- req:
