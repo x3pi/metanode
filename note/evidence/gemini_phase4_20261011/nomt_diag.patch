@@ -1,0 +1,402 @@
+diff --git a/consensus/vendor/nomt/nomt/src/bitbox/writeout.rs b/consensus/vendor/nomt/nomt/src/bitbox/writeout.rs
+index ab42eb12..bb0f8b21 100644
+--- a/consensus/vendor/nomt/nomt/src/bitbox/writeout.rs
++++ b/consensus/vendor/nomt/nomt/src/bitbox/writeout.rs
+@@ -40,6 +40,7 @@ pub(super) fn write_ht(
+     mut ht: Vec<(u64, Arc<FatPage>)>,
+ ) -> std::io::Result<()> {
+     let mut sent = 0;
++    crate::diag::on_write_ht_start(ht.len() as u64);
+ 
+     ht.sort_unstable_by_key(|item| item.0);
+     for (pn, page) in ht {
+@@ -50,14 +51,18 @@ pub(super) fn write_ht(
+             })
+             .unwrap();
+         sent += 1;
++        crate::diag::on_write_ht_sent_one();
+     }
+ 
+     while sent > 0 {
+-        io_handle.recv().unwrap();
++        let complete = io_handle.recv().unwrap();
++        let is_err = complete.result.is_err();
++        crate::diag::on_write_ht_recv_one(is_err);
+         sent -= 1;
+     }
+ 
+     ht_fd.sync_all()?;
++    crate::diag::on_write_ht_done();
+ 
+     Ok(())
+ }
+diff --git a/consensus/vendor/nomt/nomt/src/diag.rs b/consensus/vendor/nomt/nomt/src/diag.rs
+new file mode 100644
+index 00000000..3cb235cb
+--- /dev/null
++++ b/consensus/vendor/nomt/nomt/src/diag.rs
+@@ -0,0 +1,226 @@
++#![allow(missing_docs)]
++
++use std::fs;
++use std::io::Write;
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++use std::sync::Once;
++use std::time::{Duration, SystemTime, UNIX_EPOCH};
++
++// Atomic counters for write_ht (Part a)
++pub static WRITE_HT_ACTIVE: AtomicBool = AtomicBool::new(false);
++pub static WRITE_HT_START_TS: AtomicU64 = AtomicU64::new(0);
++pub static WRITE_HT_EXPECTED: AtomicU64 = AtomicU64::new(0);
++pub static WRITE_HT_SENT: AtomicU64 = AtomicU64::new(0);
++pub static WRITE_HT_RECV: AtomicU64 = AtomicU64::new(0);
++pub static WRITE_HT_ERR: AtomicU64 = AtomicU64::new(0);
++
++// Atomic counters for io-worker (Part b)
++pub static IO_PACKETS_RECEIVED: AtomicU64 = AtomicU64::new(0);
++pub static IO_SQES_PUSHED: AtomicU64 = AtomicU64::new(0);
++pub static IO_CQES_REAPED: AtomicU64 = AtomicU64::new(0);
++pub static IO_COMPLETIONS_SENT_OK: AtomicU64 = AtomicU64::new(0);
++pub static IO_COMPLETIONS_SENT_ERR: AtomicU64 = AtomicU64::new(0);
++pub static IO_RETRIES_PUSHED: AtomicU64 = AtomicU64::new(0);
++
++// Atomic counters for IoHandle (Part c)
++pub static IO_UPGRADE_FAILED: AtomicU64 = AtomicU64::new(0);
++pub static IO_SEND_ERR: AtomicU64 = AtomicU64::new(0);
++
++#[inline]
++pub fn inc_packets_received() {
++    IO_PACKETS_RECEIVED.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn inc_sqes_pushed() {
++    IO_SQES_PUSHED.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn inc_cqes_reaped() {
++    IO_CQES_REAPED.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn inc_completions_sent_ok() {
++    IO_COMPLETIONS_SENT_OK.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn inc_completions_sent_err() {
++    IO_COMPLETIONS_SENT_ERR.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn inc_retries_pushed() {
++    IO_RETRIES_PUSHED.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn inc_upgrade_failed() {
++    IO_UPGRADE_FAILED.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn inc_send_err() {
++    IO_SEND_ERR.fetch_add(1, Ordering::Relaxed);
++}
++
++pub fn on_write_ht_start(expected: u64) {
++    ensure_hang_monitor_started();
++    let now_ms = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .map(|d| d.as_millis() as u64)
++        .unwrap_or(0);
++    WRITE_HT_START_TS.store(now_ms, Ordering::SeqCst);
++    WRITE_HT_EXPECTED.store(expected, Ordering::SeqCst);
++    WRITE_HT_SENT.store(0, Ordering::SeqCst);
++    WRITE_HT_RECV.store(0, Ordering::SeqCst);
++    WRITE_HT_ERR.store(0, Ordering::SeqCst);
++    WRITE_HT_ACTIVE.store(true, Ordering::SeqCst);
++}
++
++#[inline]
++pub fn on_write_ht_sent_one() {
++    WRITE_HT_SENT.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn on_write_ht_recv_one(is_err: bool) {
++    WRITE_HT_RECV.fetch_add(1, Ordering::Relaxed);
++    if is_err {
++        WRITE_HT_ERR.fetch_add(1, Ordering::Relaxed);
++    }
++}
++
++pub fn on_write_ht_done() {
++    WRITE_HT_ACTIVE.store(false, Ordering::SeqCst);
++}
++
++static MONITOR_INIT: Once = Once::new();
++
++pub fn ensure_hang_monitor_started() {
++    MONITOR_INIT.call_once(|| {
++        eprintln!("[NOMT_DIAG_BUILD_VERIFIED] NOMT Advanced Hang Diagnostics initialized with atomic counters and monitor thread.");
++        std::thread::Builder::new()
++            .name("nomt-diag-hang-mon".to_string())
++            .spawn(hang_monitor_loop)
++            .expect("failed to spawn nomt hang monitor thread");
++    });
++}
++
++fn hang_monitor_loop() {
++    let mut last_warned_elapsed = 0u64;
++    loop {
++        std::thread::sleep(Duration::from_millis(5000));
++        if !WRITE_HT_ACTIVE.load(Ordering::SeqCst) {
++            last_warned_elapsed = 0;
++            continue;
++        }
++
++        let start_ms = WRITE_HT_START_TS.load(Ordering::SeqCst);
++        let now_ms = SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .map(|d| d.as_millis() as u64)
++            .unwrap_or(0);
++
++        if now_ms < start_ms {
++            continue;
++        }
++        let elapsed_secs = (now_ms - start_ms) / 1000;
++
++        if elapsed_secs >= 30 && (elapsed_secs - last_warned_elapsed >= 30) {
++            last_warned_elapsed = elapsed_secs;
++
++            let sent = WRITE_HT_SENT.load(Ordering::Relaxed);
++            let recv = WRITE_HT_RECV.load(Ordering::Relaxed);
++            let errs = WRITE_HT_ERR.load(Ordering::Relaxed);
++            let expected = WRITE_HT_EXPECTED.load(Ordering::Relaxed);
++
++            let pkts_rcv = IO_PACKETS_RECEIVED.load(Ordering::Relaxed);
++            let sqes = IO_SQES_PUSHED.load(Ordering::Relaxed);
++            let cqes = IO_CQES_REAPED.load(Ordering::Relaxed);
++            let comp_ok = IO_COMPLETIONS_SENT_OK.load(Ordering::Relaxed);
++            let comp_err = IO_COMPLETIONS_SENT_ERR.load(Ordering::Relaxed);
++            let retries = IO_RETRIES_PUSHED.load(Ordering::Relaxed);
++            let upg_fail = IO_UPGRADE_FAILED.load(Ordering::Relaxed);
++            let snd_err = IO_SEND_ERR.load(Ordering::Relaxed);
++
++            eprintln!(
++                "[DIAG_HANG_MONITOR] !!! POTENTIAL WRITE_HT HANG DETECTED !!!\n\
++                 Elapsed: {}s, write_ht expected={}, sent={}, received={}, err={}\n\
++                 [DIAG_HANG_MONITOR] Global IO stats: packets_received={}, sqes_pushed={}, cqes_reaped={}, completions_sent_ok={}, completions_sent_err={}, retries_pushed={}, upgrade_failed={}, send_err={}",
++                elapsed_secs, expected, sent, recv, errs,
++                pkts_rcv, sqes, cqes, comp_ok, comp_err, retries, upg_fail, snd_err
++            );
++
++            dump_tasks_and_backtrace(elapsed_secs, sent, recv, pkts_rcv, sqes, cqes, comp_ok, comp_err);
++        }
++    }
++}
++
++fn dump_tasks_and_backtrace(
++    elapsed_secs: u64,
++    sent: u64,
++    recv: u64,
++    pkts_rcv: u64,
++    sqes: u64,
++    cqes: u64,
++    comp_ok: u64,
++    comp_err: u64,
++) {
++    let pid = std::process::id();
++    let mut dump_lines = Vec::new();
++    dump_lines.push(format!(
++        "=== NOMT WRITE_HT HANG DUMP (PID {}, elapsed {}s) ===",
++        pid, elapsed_secs
++    ));
++    dump_lines.push(format!(
++        "write_ht: sent={}, received={}, diff={}",
++        sent, recv, sent.saturating_sub(recv)
++    ));
++    dump_lines.push(format!(
++        "IO worker counters: packets_rcv={}, sqes={}, cqes={}, comp_ok={}, comp_err={}",
++        pkts_rcv, sqes, cqes, comp_ok, comp_err
++    ));
++    dump_lines.push("--- /proc/self/task/*/{comm,stat,wchan} ---".to_string());
++
++    if let Ok(entries) = fs::read_dir("/proc/self/task") {
++        for entry in entries.flatten() {
++            let tid = entry.file_name().to_string_lossy().to_string();
++            let comm = fs::read_to_string(format!("/proc/self/task/{}/comm", tid))
++                .unwrap_or_default()
++                .trim()
++                .to_string();
++            let wchan = fs::read_to_string(format!("/proc/self/task/{}/wchan", tid))
++                .unwrap_or_default()
++                .trim()
++                .to_string();
++            let stat = fs::read_to_string(format!("/proc/self/task/{}/stat", tid))
++                .unwrap_or_default();
++            let state = stat.split_whitespace().nth(2).unwrap_or("?");
++
++            let line = format!("TID {:<8} comm={:<16} state={} wchan={}", tid, comm, state, wchan);
++            if comm.contains("io-worker") || comm.contains("commit") || comm.contains("simple_chain") || state == "D" {
++                eprintln!("[DIAG_HANG_MONITOR] [SUSPECT THREAD] {}", line);
++            }
++            dump_lines.push(line);
++        }
++    }
++
++    let bt = std::backtrace::Backtrace::force_capture();
++    dump_lines.push(format!("\n--- Monitor Thread Backtrace ---\n{}", bt));
++    dump_lines.push("\n[Note: In-process backtraces of arbitrary peer threads without signals/ptrace is not supported in safe Rust. Kernel wait channels (wchan) above provide the exact blocking syscall/primitive.]".to_string());
++
++    let dump_content = dump_lines.join("\n");
++    let dump_dirs = ["/tmp/gemini_verify/meas_out", "/tmp"];
++    for dir in &dump_dirs {
++        let _ = fs::create_dir_all(dir);
++        let path = format!("{}/nomt_hang_dump_{}_{}s.txt", dir, pid, elapsed_secs);
++        if let Ok(mut f) = fs::File::create(&path) {
++            let _ = f.write_all(dump_content.as_bytes());
++            eprintln!("[DIAG_HANG_MONITOR] Saved full thread state dump to {}", path);
++            break;
++        }
++    }
++}
+diff --git a/consensus/vendor/nomt/nomt/src/io/linux.rs b/consensus/vendor/nomt/nomt/src/io/linux.rs
+index a9796bac..d4b8bd24 100644
+--- a/consensus/vendor/nomt/nomt/src/io/linux.rs
++++ b/consensus/vendor/nomt/nomt/src/io/linux.rs
+@@ -59,16 +59,16 @@ fn start_workers(
+     command_rx: Receiver<IoPacket>,
+     io_workers: usize,
+ ) {
+-    for _ in 0..io_workers {
++    for worker_id in 0..io_workers {
+         io_workers_tp.execute({
+             let page_pool = page_pool.clone();
+             let command_rx = command_rx.clone();
+-            move || run_worker(page_pool, command_rx)
++            move || run_worker(worker_id, page_pool, command_rx)
+         });
+     }
+ }
+ 
+-fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
++fn run_worker(_worker_id: usize, page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+     let mut pending: Slab<PendingIo> = Slab::with_capacity(MAX_IN_FLIGHT);
+ 
+     let mut ring = IoUring::<squeue::Entry, cqueue::Entry>::builder()
+@@ -87,6 +87,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+         if !pending.is_empty() {
+             complete_queue.sync();
+             while let Some(completion_event) = complete_queue.next() {
++                crate::diag::inc_cqes_reaped();
+                 if pending.get(completion_event.user_data() as usize).is_none() {
+                     continue;
+                 }
+@@ -106,6 +107,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+                     IoKindResult::Ok => Ok(()),
+                     IoKindResult::Err => Err(std::io::Error::from_raw_os_error(io_uring_res.abs())),
+                     IoKindResult::Retry => {
++                        crate::diag::inc_retries_pushed();
+                         retries.push_back(IoPacket {
+                             command,
+                             completion_sender,
+@@ -115,7 +117,10 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+                 };
+ 
+                 let complete = CompleteIo { command, result };
+-                let _ = completion_sender.send(complete);
++                match completion_sender.send(complete) {
++                    Ok(()) => crate::diag::inc_completions_sent_ok(),
++                    Err(_) => crate::diag::inc_completions_sent_err(),
++                }
+             }
+         } else if shutdown {
+             // No pending IOs and we are shutting down. That means we can exit the worker.
+@@ -142,7 +147,10 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+             } else if pending.is_empty() {
+                 // block on new I/O if nothing in-flight.
+                 match command_rx.recv() {
+-                    Ok(command) => command,
++                    Ok(command) => {
++                        crate::diag::inc_packets_received();
++                        command
++                    }
+                     Err(_) => {
+                         shutdown = true;
+                         break;
+@@ -150,7 +158,10 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+                 }
+             } else {
+                 match command_rx.try_recv() {
+-                    Ok(command) => command,
++                    Ok(command) => {
++                        crate::diag::inc_packets_received();
++                        command
++                    }
+                     Err(TryRecvError::Empty) => break,
+                     Err(TryRecvError::Disconnected) => {
+                         shutdown = true;
+@@ -170,6 +181,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+ 
+             // unwrap: known not full
+             unsafe { submit_queue.push(&entry).unwrap() };
++            crate::diag::inc_sqes_pushed();
+         }
+ 
+         // 3. submit all together.
+diff --git a/consensus/vendor/nomt/nomt/src/io/mod.rs b/consensus/vendor/nomt/nomt/src/io/mod.rs
+index 3448d439..df0ffd78 100644
+--- a/consensus/vendor/nomt/nomt/src/io/mod.rs
++++ b/consensus/vendor/nomt/nomt/src/io/mod.rs
+@@ -125,6 +125,7 @@ struct IoPacket {
+ /// Create an I/O worker managing an io_uring and sending responses back via channels to a number
+ /// of handles.
+ pub fn start_io_pool(io_workers: usize, page_pool: PagePool) -> IoPool {
++    crate::diag::ensure_hang_monitor_started();
+     let io_workers_tp = ThreadPool::with_name("io-worker".to_string(), io_workers);
+     let sender = platform::start_io_worker(page_pool.clone(), &io_workers_tp, io_workers);
+     let sender = Some(Arc::new(sender));
+@@ -210,14 +211,20 @@ impl IoHandle {
+     pub fn send(&self, command: IoCommand) -> Result<(), SendError<IoCommand>> {
+         let sender = match self.sender.upgrade() {
+             Some(sender) => sender,
+-            None => return Err(SendError(command)),
++            None => {
++                crate::diag::inc_upgrade_failed();
++                return Err(SendError(command));
++            }
+         };
+         sender
+             .send(IoPacket {
+                 command,
+                 completion_sender: self.completion_sender.clone(),
+             })
+-            .map_err(|SendError(packet)| SendError(packet.command))
++            .map_err(|SendError(packet)| {
++                crate::diag::inc_send_err();
++                SendError(packet.command)
++            })
+     }
+ 
+     /// Block the current thread on receiving an I/O completion.
+diff --git a/consensus/vendor/nomt/nomt/src/lib.rs b/consensus/vendor/nomt/nomt/src/lib.rs
+index e19a66e1..7afaee65 100644
+--- a/consensus/vendor/nomt/nomt/src/lib.rs
++++ b/consensus/vendor/nomt/nomt/src/lib.rs
+@@ -53,6 +53,14 @@ mod sys;
+ mod task;
+ 
+ mod io;
++#[allow(missing_docs)]
++pub mod diag;
++
++#[doc(hidden)]
++#[allow(missing_docs)]
++pub mod test_io {
++    pub use crate::io::{start_io_pool, FatPage, IoCommand, IoHandle, IoKind, IoPool, PagePool, PAGE_SIZE};
++}
+ 
+ const MAX_COMMIT_CONCURRENCY: usize = 64;
+ 
