@@ -190,3 +190,5 @@ f9ef4c0f25ebf706d1621d8f8b228987cf96a8b7d441ea34cfeb69bcd0eebeac  /home/abc/chai
 464f3674bf37d79c67bce7cc4cc1212e1d8eb69400bf19eaf0dcd50cb28d2ce1  /home/abc/chain-n/metanode/note/evidence/gemini_phase4_20261011/raw/diag_raft_2.json
 bff6de8581bad30ef9e0546fbbfbe26da0f3ac88f77776c3fde8201e82d0382e  /home/abc/chain-n/metanode/note/evidence/gemini_phase4_20261011/raw/diag_raft_2.log
 cbfa1b67d1e5e3b590b20c39a0e96a1df3aa6183e33535b279d699bcb141b710  /home/abc/chain-n/metanode/note/evidence/gemini_phase4_20261011/raw/diag_raft_2_timeline.json
+6effc511dd51aa0466f03a93c52e1bda9bdf8ea02c706d862057183f9ddade70  /home/abc/chain-n/metanode/note/evidence/gemini_phase4_20261011/nomt_diag.patch
+edddd8c3c7ec71e4ebeebb3cb3fd89244a3bd27acdda2975e64395a663e1807b  /home/abc/chain-n/metanode/note/evidence/gemini_phase4_20261011/io_stress.rs

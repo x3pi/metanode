@@ -281,7 +281,7 @@ Trong quá trình thực thi Giai đoạn 4:
 
 | Tên File | Mô tả nội dung | SHA256 Checksum |
 | :--- | :--- | :--- |
-| `nomt_diag.patch` | Bản patch chẩn đoán NOMT | `eab5f6d15cf6dfe10bd506bc85a45e7fb97f66bcf97c28eb9384cbd0a4ee2a77` |
+| `nomt_diag.patch` | Bản patch chẩn đoán NOMT | `6effc511dd51aa0466f03a93c52e1bda9bdf8ea02c706d862057183f9ddade70` |
 | `diag_raft_1_e2e.json` | Kết quả Raft check 1 | `30d812bbf89a3da82b3a7892b73ab52d0dc5af99a151e0aec87ccb0ba627a3dc` |
 | `diag_raft_2_e2e.json` | Kết quả Raft check 2 | `f9ef4c0f25ebf706d1621d8f8b228987cf96a8b7d441ea34cfeb69bcd0eebeac` |
 | `diag_bft_1_e2e.json` | Kết quả BFT check 1 | `4cd2af5e5998a8688cdeea8a4cf50c5dc9b0e70a864c0df8684487164d644cf9` |
