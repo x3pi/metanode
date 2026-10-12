@@ -224,3 +224,26 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		TotalBoltStoreLogs: m.BoltStoreLogsTotal.Load(),
 	}
 }
+
+// stopwatch measures a duration for METRICS ONLY. The clock is read here, not in fsm.go, because the Raft apply path
+// must not depend on local time (test T-AP-06 forbids time.Now in fsm.go): the value only feeds Metrics and never
+// reaches block content. A nil *Metrics yields a no-op stopwatch that never touches the clock.
+type stopwatch struct {
+	start time.Time
+	on    bool
+}
+
+func (m *Metrics) stopwatch() stopwatch {
+	if m == nil {
+		return stopwatch{}
+	}
+	return stopwatch{start: time.Now(), on: true}
+}
+
+// lap returns the time since the stopwatch started (0 if it is a no-op).
+func (s stopwatch) lap() time.Duration {
+	if !s.on {
+		return 0
+	}
+	return time.Since(s.start)
+}
