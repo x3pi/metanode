@@ -1,0 +1,638 @@
+[DIAG_HANG_MONITOR] write_ht call#61 thread=ThreadId(2) waiting 31s: expected=10 sent=10 received=0 err=0 | global: packets_received=13877 sqes_pushed=13877 cqes_reaped=13877 completions_sent_ok=13877 completions_sent_err=0 retries_pushed=0 upgrade_failed=0 send_err=0 workers_idle=9 completed_calls=61
+--- /proc/self/task/*/{comm,state,wchan} ---
+TID 1480949  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480951  comm=simple_chain     state=S wchan=hrtimer_nanosleep
+TID 1480952  comm=simple_chain     state=S wchan=hrtimer_nanosleep
+TID 1480953  comm=simple_chain     state=S wchan=hrtimer_nanosleep
+TID 1480954  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480955  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480956  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480957  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480958  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480959  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480960  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480961  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480962  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480963  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480964  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480965  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480973  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480974  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1480975  comm=nomt-diag-hang-  state=R wchan=0
+TID 1480976  comm=io-worker        state=S wchan=futex_wait_queue
+TID 1480977  comm=io-worker        state=S wchan=futex_wait_queue
+TID 1480978  comm=io-worker        state=S wchan=futex_wait_queue
+TID 1480979  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1480980  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1480981  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1480982  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1480983  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1480984  comm=nomt-fsyncer-bb  state=S wchan=futex_wait_queue
+TID 1480985  comm=nomt-fsyncer-ln  state=S wchan=futex_wait_queue
+TID 1480986  comm=bitbox-sync      state=S wchan=futex_wait_queue
+TID 1480987  comm=bitbox-sync      state=S wchan=futex_wait_queue
+TID 1481042  comm=nomt-commit      state=S wchan=futex_wait_queue
+TID 1481043  comm=nomt-commit      state=S wchan=futex_wait_queue
+TID 1481044  comm=nomt-commit      state=S wchan=futex_wait_queue
+TID 1481045  comm=nomt-commit      state=S wchan=futex_wait_queue
+TID 1481046  comm=io-worker        state=S wchan=futex_wait_queue
+TID 1481047  comm=io-worker        state=S wchan=futex_wait_queue
+TID 1481048  comm=io-worker        state=S wchan=futex_wait_queue
+TID 1481049  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1481050  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1481051  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1481052  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1481053  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1481054  comm=nomt-fsyncer-bb  state=S wchan=futex_wait_queue
+TID 1481055  comm=nomt-fsyncer-ln  state=S wchan=futex_wait_queue
+TID 1481056  comm=bitbox-sync      state=S wchan=futex_wait_queue
+TID 1481057  comm=bitbox-sync      state=S wchan=futex_wait_queue
+TID 1481058  comm=iou-wrk-1481047  state=S wchan=io_wq_worker
+TID 1481059  comm=nomt-commit      state=S wchan=futex_wait_queue
+TID 1481060  comm=nomt-commit      state=S wchan=futex_wait_queue
+TID 1481061  comm=nomt-commit      state=S wchan=futex_wait_queue
+TID 1481062  comm=nomt-commit      state=S wchan=futex_wait_queue
+TID 1481083  comm=io-worker        state=S wchan=futex_wait_queue
+TID 1481084  comm=io-worker        state=S wchan=futex_wait_queue
+TID 1481085  comm=io-worker        state=S wchan=futex_wait_queue
+TID 1481086  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1481087  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1481088  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1481089  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1481090  comm=beatree-sync     state=S wchan=futex_wait_queue
+TID 1481091  comm=nomt-fsyncer-bb  state=S wchan=futex_wait_queue
+TID 1481092  comm=nomt-fsyncer-ln  state=S wchan=futex_wait_queue
+TID 1481093  comm=bitbox-sync      state=S wchan=futex_wait_queue
+TID 1481094  comm=bitbox-sync      state=S wchan=futex_wait_queue
+TID 1481095  comm=nomt-commit      state=S wchan=futex_wait_queue
+TID 1481096  comm=nomt-commit      state=S wchan=futex_wait_queue
+TID 1481097  comm=nomt-commit      state=S wchan=futex_wait_queue
+TID 1481098  comm=nomt-commit      state=S wchan=futex_wait_queue
+TID 1481099  comm=rocksdb:low      state=S wchan=futex_wait_queue
+TID 1481100  comm=rocksdb:low      state=S wchan=futex_wait_queue
+TID 1481101  comm=rocksdb:low      state=S wchan=futex_wait_queue
+TID 1481102  comm=rocksdb:low      state=S wchan=futex_wait_queue
+TID 1481103  comm=rocksdb:low      state=S wchan=futex_wait_queue
+TID 1481104  comm=rocksdb:low      state=S wchan=futex_wait_queue
+TID 1481105  comm=rocksdb:low      state=S wchan=futex_wait_queue
+TID 1481106  comm=rocksdb:low      state=S wchan=futex_wait_queue
+TID 1481107  comm=rocksdb:high     state=S wchan=futex_wait_queue
+TID 1481230  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1481231  comm=liveness-watchd  state=S wchan=hrtimer_nanosleep
+TID 1481232  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481233  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481234  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481235  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481236  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481237  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481238  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481239  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481240  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481241  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481242  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481243  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481244  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481245  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481246  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481247  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481248  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481249  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481250  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481251  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481252  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481253  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481254  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481255  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481256  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481257  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481258  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481259  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481260  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481261  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481262  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481263  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481264  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481265  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481266  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481267  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481268  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481269  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481270  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481271  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481272  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481273  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481274  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481275  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481276  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481277  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481278  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481279  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481280  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481281  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481282  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481283  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481284  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481285  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481286  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481287  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481288  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481289  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481290  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481291  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481292  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481293  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481294  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481295  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481296  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481297  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481298  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481299  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481300  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481301  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481302  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481303  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481304  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481305  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481306  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481307  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481308  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481309  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481310  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481311  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481312  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481313  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481314  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481315  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481316  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481317  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481318  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481319  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481320  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481321  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481322  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481323  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481324  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481325  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481326  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481327  comm=tokio-runtime-w  state=S wchan=ep_poll
+TID 1481328  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481329  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481330  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481331  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481332  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481333  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481334  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481335  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481336  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481363  comm=rocksdb:high     state=S wchan=futex_wait_queue
+TID 1481379  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1481380  comm=dag-state-actor  state=S wchan=futex_wait_queue
+TID 1481381  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481382  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481383  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481384  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481385  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481386  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1481387  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1482502  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482504  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482552  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482553  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482554  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482584  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482585  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482586  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482587  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482588  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482589  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482590  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482591  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482592  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482593  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482663  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482664  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482665  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482666  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482667  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482668  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482669  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482670  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482671  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482672  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482673  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482674  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482675  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482676  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482677  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482678  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482679  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482680  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482681  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482682  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482696  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482697  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482698  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482699  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482700  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482701  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482702  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482703  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482708  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482709  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482710  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482711  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482712  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482713  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482714  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482715  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482737  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482738  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482739  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482930  comm=iou-wrk-1481046  state=S wchan=io_wq_worker
+TID 1482937  comm=iou-wrk-1481048  state=S wchan=io_wq_worker
+TID 1482945  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482953  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482954  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482967  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482968  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482970  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482971  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482972  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1482973  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483088  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483115  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483116  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483117  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483118  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483119  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483120  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483121  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483122  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483123  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483124  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483125  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483126  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483127  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483341  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483342  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483343  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483344  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483345  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483346  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483347  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483348  comm=simple_chain     state=S wchan=ep_poll
+TID 1483349  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483350  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483351  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483353  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483376  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483415  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483753  comm=simple_chain     state=R wchan=0
+TID 1483754  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483755  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483756  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483757  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483758  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483759  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483760  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483814  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483815  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483816  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483817  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483818  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483819  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483820  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483821  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483822  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483823  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483824  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483825  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483826  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483827  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483828  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483829  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483830  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483831  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483832  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483833  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483834  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483835  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483836  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483837  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1483928  comm=iou-wrk-1480976  state=S wchan=io_wq_worker
+TID 1484011  comm=iou-wrk-1480978  state=S wchan=io_wq_worker
+TID 1484016  comm=iou-wrk-1480977  state=S wchan=io_wq_worker
+TID 1484148  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484340  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484341  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484342  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484343  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484344  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484347  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484348  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484349  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484350  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484351  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484352  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484353  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484354  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484355  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484356  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484357  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484358  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484359  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484364  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484365  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484366  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484367  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484368  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484369  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484370  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484371  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484372  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484421  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484422  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484423  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484424  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484425  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484426  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484427  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484428  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484429  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484430  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484431  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484432  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484433  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484434  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484435  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484436  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484437  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484438  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484439  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484440  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484441  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484442  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484443  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484444  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484445  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484446  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484447  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1484448  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1484449  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484450  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1484451  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484452  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484453  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484454  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484455  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484456  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484457  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484458  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484459  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1484460  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484461  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484462  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484463  comm=tokio-runtime-w  state=S wchan=futex_wait_queue
+TID 1484464  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484465  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484466  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484467  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484468  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484469  comm=simple_chain     state=S wchan=futex_wait_queue
+TID 1484471  comm=simple_chain     state=S wchan=futex_wait_queue
+--- io_uring fdinfo ---
+fd 92 -> anon_inode:[io_uring] :: SqHead:	4842 | SqTail:	4842 | CqHead:	4832 | CqTail:	4842 | CachedCqTail:	4842 | SqThread:	-1 | SqThreadCpu:	-1 | UserFiles:	0 | CqOverflowList:
+pos:	0
+flags:	02000002
+mnt_id:	16
+ino:	420453688
+SqMask:	0x3ff
+SqHead:	4842
+SqTail:	4842
+CachedSqHead:	4842
+CqMask:	0x7ff
+CqHead:	4832
+CqTail:	4842
+CachedCqTail:	4842
+SQEs:	0
+CQEs:	10
+  736: user_data:393, res:4096, flag:0
+  737: user_data:358, res:4096, flag:0
+  738: user_data:374, res:4096, flag:0
+  739: user_data:140, res:4096, flag:0
+  740: user_data:39, res:4096, flag:0
+  741: user_data:369, res:4096, flag:0
+  742: user_data:483, res:4096, flag:0
+  743: user_data:31, res:4096, flag:0
+  744: user_data:467, res:4096, flag:0
+  745: user_data:23, res:4096, flag:0
+SqThread:	-1
+SqThreadCpu:	-1
+UserFiles:	0
+UserBufs:	0
+PollList:
+CqOverflowList:
+
+fd 93 -> anon_inode:[io_uring] :: SqHead:	4228 | SqTail:	4228 | CqHead:	4223 | CqTail:	4228 | CachedCqTail:	4228 | SqThread:	-1 | SqThreadCpu:	-1 | UserFiles:	0 | CqOverflowList:
+pos:	0
+flags:	02000002
+mnt_id:	16
+ino:	420469091
+SqMask:	0x3ff
+SqHead:	4228
+SqTail:	4228
+CachedSqHead:	4228
+CqMask:	0x7ff
+CqHead:	4223
+CqTail:	4228
+CachedCqTail:	4228
+SQEs:	0
+CQEs:	5
+  127: user_data:128, res:4096, flag:0
+  128: user_data:86, res:4096, flag:0
+  129: user_data:194, res:4096, flag:0
+  130: user_data:91, res:4096, flag:0
+  131: user_data:321, res:4096, flag:0
+SqThread:	-1
+SqThreadCpu:	-1
+UserFiles:	0
+UserBufs:	0
+PollList:
+CqOverflowList:
+
+fd 94 -> anon_inode:[io_uring] :: SqHead:	4651 | SqTail:	4651 | CqHead:	4645 | CqTail:	4651 | CachedCqTail:	4651 | SqThread:	-1 | SqThreadCpu:	-1 | UserFiles:	0 | CqOverflowList:
+pos:	0
+flags:	02000002
+mnt_id:	16
+ino:	420349927
+SqMask:	0x3ff
+SqHead:	4651
+SqTail:	4651
+CachedSqHead:	4651
+CqMask:	0x7ff
+CqHead:	4645
+CqTail:	4651
+CachedCqTail:	4651
+SQEs:	0
+CQEs:	6
+  549: user_data:31, res:4096, flag:0
+  550: user_data:0, res:4096, flag:0
+  551: user_data:190, res:4096, flag:0
+  552: user_data:106, res:4096, flag:0
+  553: user_data:324, res:4096, flag:0
+  554: user_data:76, res:4096, flag:0
+SqThread:	-1
+SqThreadCpu:	-1
+UserFiles:	0
+UserBufs:	0
+PollList:
+CqOverflowList:
+
+fd 102 -> anon_inode:[io_uring] :: SqHead:	52 | SqTail:	52 | CqHead:	51 | CqTail:	52 | CachedCqTail:	52 | SqThread:	-1 | SqThreadCpu:	-1 | UserFiles:	0 | CqOverflowList:
+pos:	0
+flags:	02000002
+mnt_id:	16
+ino:	420435488
+SqMask:	0x3ff
+SqHead:	52
+SqTail:	52
+CachedSqHead:	52
+CqMask:	0x7ff
+CqHead:	51
+CqTail:	52
+CachedCqTail:	52
+SQEs:	0
+CQEs:	1
+   51: user_data:2, res:4096, flag:0
+SqThread:	-1
+SqThreadCpu:	-1
+UserFiles:	0
+UserBufs:	0
+PollList:
+CqOverflowList:
+
+fd 103 -> anon_inode:[io_uring] :: SqHead:	51 | SqTail:	51 | CqHead:	49 | CqTail:	51 | CachedCqTail:	51 | SqThread:	-1 | SqThreadCpu:	-1 | UserFiles:	0 | CqOverflowList:
+pos:	0
+flags:	02000002
+mnt_id:	16
+ino:	420461710
+SqMask:	0x3ff
+SqHead:	51
+SqTail:	51
+CachedSqHead:	51
+CqMask:	0x7ff
+CqHead:	49
+CqTail:	51
+CachedCqTail:	51
+SQEs:	0
+CQEs:	2
+   49: user_data:3, res:4096, flag:0
+   50: user_data:1, res:4096, flag:0
+SqThread:	-1
+SqThreadCpu:	-1
+UserFiles:	0
+UserBufs:	0
+PollList:
+CqOverflowList:
+
+fd 104 -> anon_inode:[io_uring] :: SqHead:	53 | SqTail:	53 | CqHead:	52 | CqTail:	53 | CachedCqTail:	53 | SqThread:	-1 | SqThreadCpu:	-1 | UserFiles:	0 | CqOverflowList:
+pos:	0
+flags:	02000002
+mnt_id:	16
+ino:	420455746
+SqMask:	0x3ff
+SqHead:	53
+SqTail:	53
+CachedSqHead:	53
+CqMask:	0x7ff
+CqHead:	52
+CqTail:	53
+CachedCqTail:	53
+SQEs:	0
+CQEs:	1
+   52: user_data:0, res:4096, flag:0
+SqThread:	-1
+SqThreadCpu:	-1
+UserFiles:	0
+UserBufs:	0
+PollList:
+CqOverflowList:
+
+fd 136 -> anon_inode:[io_uring] :: SqHead:	0 | SqTail:	0 | CqHead:	0 | CqTail:	0 | CachedCqTail:	0 | SqThread:	-1 | SqThreadCpu:	-1 | UserFiles:	0 | CqOverflowList:
+pos:	0
+flags:	02000002
+mnt_id:	16
+ino:	420459793
+SqMask:	0x3ff
+SqHead:	0
+SqTail:	0
+CachedSqHead:	0
+CqMask:	0x7ff
+CqHead:	0
+CqTail:	0
+CachedCqTail:	0
+SQEs:	0
+CQEs:	0
+SqThread:	-1
+SqThreadCpu:	-1
+UserFiles:	0
+UserBufs:	0
+PollList:
+CqOverflowList:
+
+fd 137 -> anon_inode:[io_uring] :: SqHead:	0 | SqTail:	0 | CqHead:	0 | CqTail:	0 | CachedCqTail:	0 | SqThread:	-1 | SqThreadCpu:	-1 | UserFiles:	0 | CqOverflowList:
+pos:	0
+flags:	02000002
+mnt_id:	16
+ino:	420451647
+SqMask:	0x3ff
+SqHead:	0
+SqTail:	0
+CachedSqHead:	0
+CqMask:	0x7ff
+CqHead:	0
+CqTail:	0
+CachedCqTail:	0
+SQEs:	0
+CQEs:	0
+SqThread:	-1
+SqThreadCpu:	-1
+UserFiles:	0
+UserBufs:	0
+PollList:
+CqOverflowList:
+
+fd 138 -> anon_inode:[io_uring] :: SqHead:	0 | SqTail:	0 | CqHead:	0 | CqTail:	0 | CachedCqTail:	0 | SqThread:	-1 | SqThreadCpu:	-1 | UserFiles:	0 | CqOverflowList:
+pos:	0
+flags:	02000002
+mnt_id:	16
+ino:	420439894
+SqMask:	0x3ff
+SqHead:	0
+SqTail:	0
+CachedSqHead:	0
+CqMask:	0x7ff
+CqHead:	0
+CqTail:	0
+CachedCqTail:	0
+SQEs:	0
+CQEs:	0
+SqThread:	-1
+SqThreadCpu:	-1
+UserFiles:	0
+UserBufs:	0
+PollList:
+CqOverflowList:
+
+--- monitor thread backtrace ---
+   0: nomt::diag::hang_monitor_loop
+   1: std::sys::backtrace::__rust_begin_short_backtrace
+   2: core::ops::function::FnOnce::call_once{{vtable.shim}}
+   3: <alloc::boxed::Box<F,A> as core::ops::function::FnOnce<Args>>::call_once
+             at /rustc/1159e78c4747b02ef996e55082b704c09b970588/library/alloc/src/boxed.rs:1971:9
+   4: std::sys::pal::unix::thread::Thread::new::thread_start
+             at /rustc/1159e78c4747b02ef996e55082b704c09b970588/library/std/src/sys/pal/unix/thread.rs:107:17
+   5: start_thread
+             at ./nptl/pthread_create.c:447:8
+   6: clone3
+             at ./misc/../sysdeps/unix/sysv/linux/x86_64/clone3.S:78:0

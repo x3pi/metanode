@@ -1,7 +1,7 @@
 #[cfg(not(target_family = "unix"))]
 std::compile_error!("NOMT only supports Unix-based OSs");
 
-use crossbeam_channel::{Receiver, RecvError, SendError, Sender, TryRecvError};
+use crossbeam_channel::{Receiver, RecvError, RecvTimeoutError, SendError, Sender, TryRecvError};
 use page_pool::Page;
 use std::{
     fmt,
@@ -222,8 +222,31 @@ impl IoHandle {
 
     /// Block the current thread on receiving an I/O completion.
     /// This fails if the channel has hung up.
+    ///
+    /// LOCAL PATCH (see consensus/vendor/NOMT_PATCHES.md #2): this polls with a short timeout instead of a single
+    /// unbounded `recv()`. A live hang was captured with the completion channel NON-EMPTY (11 queued completions)
+    /// while the committing thread stayed parked inside `recv()` forever, i.e. a lost wake-up. Polling re-checks the
+    /// queue every `RECV_POLL`, so a completion that was queued without waking us is picked up. It still waits for
+    /// exactly the completions it was waiting for, however long that takes: no outcome depends on the elapsed time.
     pub fn recv(&self) -> Result<CompleteIo, RecvError> {
-        self.completion_receiver.recv()
+        const RECV_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+        let mut reported = false;
+        loop {
+            match self.completion_receiver.recv_timeout(RECV_POLL) {
+                Ok(complete) => return Ok(complete),
+                Err(RecvTimeoutError::Disconnected) => return Err(RecvError),
+                Err(RecvTimeoutError::Timeout) => {
+                    // A completion queued but we were not woken for it: the lost wake-up this patch works around.
+                    if !reported && !self.completion_receiver.is_empty() {
+                        reported = true;
+                        eprintln!(
+                            "[NOMT-IO] recovered a lost wake-up: {} completion(s) were queued while recv() stayed parked",
+                            self.completion_receiver.len()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Try to receive an I/O completion without blocking.
