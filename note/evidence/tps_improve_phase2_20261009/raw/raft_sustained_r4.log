@@ -1,0 +1,48 @@
+==================================================================
+🚀 SECP256K1 / EIP-1559 HIGH-PERFORMANCE WORKLOAD BENCHMARK
+   Zero-Fork Compliant (AGENTS.md Part 2.5) | Production SECP Mode
+==================================================================
+🎯 Tracking 3 target simple_chain PIDs: 551598, 551599, 551600
+🌐 RPC Pool (1 nodes): http://127.0.0.1:8810
+⚡ TCP Pool (1 nodes): 127.0.0.1:4310
+🆔 Chain ID: 991
+🔑 Loaded 50000 pre-allocated accounts from generated_keys.json
+==================================================================
+⏱️ SUSTAINED BENCHMARK: Target Duration: 60 seconds
+   Mode: tcp | TxType: 1559 | Wallets: 1000 | BatchSize: 1000
+==================================================================
+🏁 Start Block: #0
+
+🔍 Fetching starting nonces for 1000 accounts...
+✅ 1000 active wallets ready with starting nonces (fetched in 63.266665ms)
+
+🔌 Establishing 1 TCP connections for high-throughput pipeline...
+✅ 1 TCP connections connected.
+
+🔥 BLASTING CONTINUOUSLY FOR 60 SECONDS...
+   ⏳ [PROGRESS 15s / 60s] Injected 252000 txs (Current Injection TPS: 16798.60 tx/s | Peak CPU: 1755.0% | Peak RSS: 14627 MB)
+   ⏳ [PROGRESS 30s / 60s] Injected 252000 txs (Current Injection TPS: 8399.78 tx/s | Peak CPU: 1777.0% | Peak RSS: 17703 MB)
+   ⏳ [PROGRESS 45s / 60s] Injected 252000 txs (Current Injection TPS: 5599.89 tx/s | Peak CPU: 1777.0% | Peak RSS: 17703 MB)
+
+⚡ Injected total 252000 TXs over 1m0.012065731s (Injection TPS: 4199.16 tx/s)
+
+⏱️ Draining remaining sample receipts and stabilizing (up to 20s)...
+
+📊 SUSTAINED BENCHMARK METRICS:
+   • Duration:           1m0.012065731s (Target: 60s)
+   • Total Submitted:    252000 txs
+   • Total Confirmed:    250000 txs on-chain across 129 blocks
+   • Injection Speed:    4199.16 tx/s
+   • Sustained TPS:      4165.83 tx/s
+   • Latency P50:        3.61961693s
+   • Latency P90:        11.654727643s
+   • Latency P95:        12.179251264s
+   • Latency P99:        12.695228355s
+   • Latency Avg:        5.322735379s
+   • Sample Verified:    48/735 (Confirmed: 48, Reverted: 0, Unconfirmed/Timeout: 687 | Cutoff: 93.5%)
+   • Peak CPU (Nodes):   1777.0%
+   • Peak RSS (3 Target Nodes): 17703 MB (avg 5901.0 MB/node)
+📄 JSON Benchmark report saved to: /home/abc/chain-n/metanode/note/evidence/tps_improve_phase2_20261009/raw/raft_sustained_r4.json
+==================================================================
+
+--STDERR--

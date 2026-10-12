@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-10-08 (Bounded Mapping Cache: implemented Two-Generation Ring Map for txHashToBlockNumber and ethHashMapBlsHash, removed O(N) periodic prune, verified race-free bounds and Pebble fallback).
+> **Last updated:** 2026-10-09 (Lossless TCP tx ingress: network admission gate `pkg/network/admission.go`, overload gate + mempool-room backpressure in `processor/`, forwarder success-path bookkeeping restored, `Connection.SendMessage` no longer panics on a closed sendChan, tx submissions never dropped by readLoop, HandleConnection delivers queued requests on peer EOF, configurable per-connection inbound buffer `ConnRequestChanSize`).
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 ---
 
@@ -228,6 +228,8 @@ metanode/
 | `tx_validator_pool_core.go` | Tx validation pool |
 | `tx_virtual_executor_core.go` | Virtual/offchain tx execution |
 | `transaction_processor.go` | Core tx processing (SendRawTransaction/SendRawTransactions, EIP-2718 ingress) |
+| `processors.go` | Processor wiring + system load monitor; `overloadGate` turns the overload flag into backpressure for TCP tx submission (`network.SetTxAdmissionGate`) |
+| `overload_gate_test.go` | Overload gate tests (blocks while overloaded, released on recovery/cancel) |
 | `raw_eth_ingress_test.go` | EIP-2718 TCP ingress & mode gating tests |
 | `transaction_virtual_processor.go` | Virtual tx processing |
 | `state_processor.go` | State transition processor |

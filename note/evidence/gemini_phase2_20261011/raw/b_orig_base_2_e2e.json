@@ -1,0 +1,39 @@
+{
+  "tag": "b_orig_base_2",
+  "mode": "bft",
+  "bin": "simple_chain_BASE",
+  "args": [
+    "-duration",
+    "60",
+    "-batch",
+    "1000"
+  ],
+  "submitted": 4211000,
+  "on_chain": 4211000,
+  "complete": true,
+  "blast_secs": 94.0,
+  "e2e_secs": 322.9,
+  "e2e_tps": 13042,
+  "tool_tps": 13019,
+  "p50_ms": 58640,
+  "p99_ms": 77510,
+  "zero_fork": true,
+  "roots": true,
+  "uptime_before": "04:34:06 up 16 days, 22:08, 38 users,  load average: 22.30, 47.93, 41.78",
+  "uptime_after": "04:40:37 up 16 days, 22:15, 38 users,  load average: 31.39, 55.59, 49.15",
+  "log_analysis": {
+    "sig1_expected_mismatch_errors": 0,
+    "byte_limit_exceeded_count": 0,
+    "sig2_watchdog_hangs": 0,
+    "catchup_phases_observed": 0,
+    "val_final_blocks": {
+      "val0": 991,
+      "val1": 924,
+      "val2": 991,
+      "val3": 919
+    },
+    "sig1_details": [],
+    "classification": "CLEAN_COMPLETED"
+  },
+  "failure_classification": "CLEAN_COMPLETED"
+}

@@ -1,0 +1,55 @@
+==================================================================
+🚀 SECP256K1 / EIP-1559 HIGH-PERFORMANCE WORKLOAD BENCHMARK
+   Zero-Fork Compliant (AGENTS.md Part 2.5) | Production SECP Mode
+==================================================================
+🎯 Tracking 6 target simple_chain PIDs: 752441, 752084, 753929, 752800, 751717, 752882
+🌐 RPC Pool (4 nodes): http://127.0.0.1:31646, http://127.0.0.1:31647, http://127.0.0.1:31648, http://127.0.0.1:31649
+⚡ TCP Pool (4 nodes): 127.0.0.1:31200, 127.0.0.1:31201, 127.0.0.1:31202, 127.0.0.1:31203
+🆔 Chain ID: 991
+🔑 Loaded 50000 pre-allocated accounts from generated_keys.json
+==================================================================
+⏱️ SUSTAINED BENCHMARK: Target Duration: 60 seconds
+   Mode: tcp | TxType: 1559 | Wallets: 1000 | BatchSize: 1000
+==================================================================
+🏁 Start Block: #1
+
+🔍 Fetching starting nonces for 1000 accounts...
+✅ 1000 active wallets ready with starting nonces (fetched in 57.843662ms)
+
+🔌 Establishing 4 TCP connections for high-throughput pipeline...
+✅ 4 TCP connections connected.
+
+🔥 BLASTING CONTINUOUSLY FOR 60 SECONDS...
+   ⏳ [PROGRESS 15s / 60s] Injected 845000 txs (Current Injection TPS: 56332.76 tx/s | Peak CPU: 3817.4% | Peak RSS: 28967 MB)
+   ⏳ [PROGRESS 30s / 60s] Injected 845000 txs (Current Injection TPS: 28165.64 tx/s | Peak CPU: 4294.4% | Peak RSS: 39664 MB)
+   ⏳ [PROGRESS 45s / 60s] Injected 845000 txs (Current Injection TPS: 18777.69 tx/s | Peak CPU: 4298.0% | Peak RSS: 41125 MB)
+
+⚡ Injected total 845000 TXs over 1m0.013318504s (Injection TPS: 14080.21 tx/s)
+
+⏱️ Draining remaining sample receipts and stabilizing (up to 20s)...
+
+📊 SUSTAINED BENCHMARK METRICS:
+   • Duration:           1m0.013318504s (Target: 60s)
+   • Total Submitted:    845000 txs
+   • Total Confirmed:    836000 txs on-chain across 161 blocks
+   • Injection Speed:    14080.21 tx/s
+   • Sustained TPS:      13930.24 tx/s
+   • Latency P50:        45.780945685s
+   • Latency P90:        48.497087599s
+   • Latency P95:        50.177897589s
+   • Latency P99:        54.685316067s
+   • Latency Avg:        40.575896826s
+   • Sample Verified:    161/2682 (Confirmed: 161, Reverted: 0, Unconfirmed/Timeout: 2521 | Cutoff: 94.0%)
+   • Peak CPU (Nodes):   4298.0%
+   • Peak RSS (6 Target Nodes): 42516 MB (avg 7086.0 MB/node)
+
+🛡️ VERIFYING ZERO-FORK INVARIANT ACROSS 4 NODES...
+   • Node http://127.0.0.1:31646: Block 0xa2 | Hash: 0x0f4486ad97... | Root: 0x05062d6125... | Txs: 476
+   • Node http://127.0.0.1:31647: Block 0xa2 | Hash: 0x0f4486ad97... | Root: 0x05062d6125... | Txs: 476
+   • Node http://127.0.0.1:31648: Block 0xa2 | Hash: 0x0f4486ad97... | Root: 0x05062d6125... | Txs: 476
+   • Node http://127.0.0.1:31649: Block 0xa2 | Hash: 0x0f4486ad97... | Root: 0x05062d6125... | Txs: 476
+✅ [ZERO-FORK VERIFIED] 100% agreement across all online nodes on Block Hash & State Root!
+📄 JSON Benchmark report saved to: /home/abc/chain-n/metanode/note/evidence/tps_improve_phase2_20261009/raw/bft_sustained_r4.json
+==================================================================
+
+--STDERR--

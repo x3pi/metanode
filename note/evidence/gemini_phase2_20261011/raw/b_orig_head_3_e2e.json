@@ -1,0 +1,39 @@
+{
+  "tag": "b_orig_head_3",
+  "mode": "bft",
+  "bin": "simple_chain_HEAD",
+  "args": [
+    "-duration",
+    "60",
+    "-batch",
+    "1000"
+  ],
+  "submitted": 4773567,
+  "on_chain": 270000,
+  "complete": false,
+  "blast_secs": 330.8,
+  "e2e_secs": null,
+  "e2e_tps": null,
+  "tool_tps": 827,
+  "p50_ms": 60898,
+  "p99_ms": 76349,
+  "zero_fork": true,
+  "roots": true,
+  "uptime_before": "04:54:13 up 16 days, 22:28, 38 users,  load average: 20.03, 47.27, 50.34",
+  "uptime_after": "05:01:51 up 16 days, 22:36, 38 users,  load average: 14.30, 40.11, 47.93",
+  "log_analysis": {
+    "sig1_expected_mismatch_errors": 0,
+    "byte_limit_exceeded_count": 1016,
+    "sig2_watchdog_hangs": 148,
+    "catchup_phases_observed": 58,
+    "val_final_blocks": {
+      "val0": 26,
+      "val1": 1047,
+      "val2": 1047,
+      "val3": 1047
+    },
+    "sig1_details": [],
+    "classification": "SIG_2 (EVM Watchdog hang: 148 warnings)"
+  },
+  "failure_classification": "SIG_2 (EVM Watchdog hang: 148 warnings)"
+}

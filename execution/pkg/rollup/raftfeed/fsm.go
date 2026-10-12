@@ -52,6 +52,7 @@ type fsm struct {
 
 	failed  atomic.Bool
 	skipped atomic.Uint64
+	metrics *Metrics
 
 	// snapshotBlock is the last block number covered by the newest snapshot this replica took or restored: a
 	// replica joining with a DB older than that cannot be served from the leader's compacted log.
@@ -78,6 +79,7 @@ func (f *fsm) Apply(l *raft.Log) interface{} {
 	if f.failed.Load() {
 		return errors.New("raftfeed: replica failed, not applying")
 	}
+	t0 := time.Now()
 	var rec rpb.BatchRecord
 	if err := proto.Unmarshal(l.Data, &rec); err != nil {
 		return f.fatal(fmt.Errorf("index %d: undecodable BatchRecord: %w", l.Index, err))
@@ -92,13 +94,18 @@ func (f *fsm) Apply(l *raft.Log) interface{} {
 	if len(txs) == 0 || uint32(len(txs)) != rec.TxCount {
 		return f.fatal(fmt.Errorf("index %d: tx_count %d does not match %d decoded txs", l.Index, rec.TxCount, len(txs)))
 	}
+	tDecode := time.Since(t0)
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	t1 := time.Now()
 	blk, err := f.st.build(rec.Txs, rec.TimestampMs)
 	if err != nil {
 		return f.fatal(fmt.Errorf("index %d: %w", l.Index, err))
 	}
+	tBuild := time.Since(t1)
+
+	var tSink time.Duration
 	res := applyResult{BlockNumber: blk.BlockNumber}
 	if blk.BlockNumber <= f.durable() {
 		// Raft replays entries after a restart; the block is already in the DB. Counters still advance so the
@@ -106,15 +113,27 @@ func (f *fsm) Apply(l *raft.Log) interface{} {
 		res.Skipped = true
 		f.skipped.Add(1)
 	} else {
+		t2 := time.Now()
 		select {
 		case f.sink <- blk: // bounded queue: blocks here (backpressure into Raft) when the pipeline is behind
 			f.delivered = blk.BlockNumber
 		case <-f.stop:
 			return errors.New("raftfeed: stopping")
 		}
+		tSink = time.Since(t2)
 	}
 	f.st.advance(blk)
 	f.appliedIndex = l.Index
+
+	if f.metrics != nil {
+		f.metrics.RecordFsmApply(tDecode, tBuild, tSink, len(txs))
+		cnt := f.metrics.EntriesApplied.Load()
+		if cnt > 0 && cnt%50 == 0 {
+			snap := f.metrics.Snapshot()
+			logger.Info("⏱️ [RAFT-METRICS] applied=%d txs=%d qDepthMax=%d qWaitAvg=%.2fms applyAvg=%.2fms fsmBuildAvg=%.2fms sinkWaitAvg=%.2fms boltFsyncAvg=%.2fms",
+				snap.EntriesApplied, snap.TotalTxs, snap.ProposeQDepthMax, snap.AvgProposeQWaitMs, snap.AvgRaftApplyMs, snap.AvgFsmBuildMs, snap.AvgFsmSinkWaitMs, snap.AvgBoltStoreMs)
+		}
+	}
 	return res
 }
 

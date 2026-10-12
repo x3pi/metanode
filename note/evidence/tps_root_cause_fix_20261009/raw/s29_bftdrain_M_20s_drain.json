@@ -1,0 +1,1 @@
+{"tag": "s29_bftdrain_M_20s", "bin": "simple_chain_M", "duration": "20", "submitted": 4193026, "on_chain_final": 4193026, "final_pct": 100.0, "secs": 327, "blocks": 832, "stalled": false, "tail": [[309, 668, 4005083], [315, 715, 4072113], [321, 786, 4135846], [327, 832, 4193026]]}

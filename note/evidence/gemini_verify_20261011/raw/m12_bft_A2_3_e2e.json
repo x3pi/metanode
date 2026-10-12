@@ -1,0 +1,1 @@
+{"tag": "m12_bft_A2_3", "mode": "bft", "bin": "simple_chain_A2", "args": ["-duration", "60", "-batch", "1000"], "submitted": 4393000, "on_chain": 4393000, "complete": true, "blast_secs": 155.6, "e2e_secs": 339.8, "e2e_tps": 12929, "tool_tps": 13514, "p50_ms": 58058, "p99_ms": 76464, "zero_fork": true, "roots": true}

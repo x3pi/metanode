@@ -1,0 +1,1 @@
+{"tag": "s16_drain_F_20s", "bin": "simple_chain_F", "duration": "20", "submitted": 1424796, "on_chain_final": 273164, "final_pct": 19.17, "secs_to_drain": 110, "blocks": 142, "stalled": true, "series_tail": [[85, 142, 273164], [90, 142, 273164], [95, 142, 273164], [100, 142, 273164], [105, 142, 273164], [110, 142, 273164]]}

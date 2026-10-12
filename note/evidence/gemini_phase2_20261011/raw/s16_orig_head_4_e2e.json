@@ -1,0 +1,59 @@
+{
+  "tag": "s16_orig_head_4",
+  "mode": "bft",
+  "bin": "simple_chain_HEAD_16M",
+  "args": [
+    "-duration",
+    "60",
+    "-batch",
+    "1000"
+  ],
+  "submitted": 4284000,
+  "on_chain": 4284000,
+  "complete": true,
+  "blast_secs": 98.4,
+  "e2e_secs": 330.0,
+  "e2e_tps": 12981,
+  "tool_tps": 13412,
+  "p50_ms": 63511,
+  "p99_ms": 77136,
+  "zero_fork": true,
+  "roots": true,
+  "uptime_before": "08:16:11 up 17 days,  1:50, 38 users,  load average: 20.40, 35.75, 37.77",
+  "uptime_after": "08:22:56 up 17 days,  1:57, 38 users,  load average: 27.11, 45.52, 43.15",
+  "catchup_observation": {
+    "blocks_at_harness_end": {
+      "val0": 1049,
+      "val1": 956,
+      "val2": 1049,
+      "val3": 978
+    },
+    "observation_needed": true,
+    "caught_up": true,
+    "stuck_permanently": false,
+    "catchup_duration_secs": 10.01,
+    "catchup_rate_blks_per_sec": 9.29,
+    "final_blocks_after_wait": {
+      "val0": 1049,
+      "val1": 1049,
+      "val2": 1049,
+      "val3": 1049
+    }
+  },
+  "log_analysis": {
+    "sig1_expected_mismatch_errors": 0,
+    "byte_limit_exceeded_count": 108,
+    "partial_block_responses": 0,
+    "sig2_watchdog_hangs": 0,
+    "catchup_phases_observed": 0,
+    "val_final_blocks": {
+      "val0": 1049,
+      "val1": 1049,
+      "val2": 1049,
+      "val3": 1049
+    },
+    "sig1_details": [],
+    "classification": "CLEAN_COMPLETED"
+  },
+  "failure_classification": "CLEAN_COMPLETED"
+}

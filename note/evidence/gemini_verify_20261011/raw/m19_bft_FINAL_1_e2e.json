@@ -1,0 +1,1 @@
+{"tag": "m19_bft_FINAL_1", "mode": "bft", "bin": "simple_chain_FINAL", "args": ["-duration", "60", "-batch", "1000"], "submitted": 4255000, "on_chain": 4255000, "complete": true, "blast_secs": 88.3, "e2e_secs": 328.0, "e2e_tps": 12971, "tool_tps": 13102, "p50_ms": 21410, "p99_ms": 77153, "zero_fork": true, "roots": true}

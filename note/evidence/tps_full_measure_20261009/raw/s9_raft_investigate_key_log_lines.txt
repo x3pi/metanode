@@ -1,0 +1,77 @@
+##### n0 execution.log (filtered)
+[WARN][Oct  9 09:01:42]  🚨 [OOM-GUARD] CRITICAL memory pressure: EstPhys=7760MB (Sys=7786MB, Released=25MB, limit=8192MB). Forcing GC + FreeOSMemory.
+[ERROR][Oct  9 09:01:42]  RESOURCE_MONITOR: 🚨 Very high memory system usage: 7786 MB (possible memory leak! Limit: 8 GB)
+[INFO][Oct  9 09:01:42]  🔍 [DEBUG] ProcessPoolSub: allTxs=40184, validTxs=40184, futureTxs=0
+[INFO][Oct  9 09:01:43]  ⏱️ [RAFT-METRICS] applied=300 txs=529918 qDepthMax=0 qWaitAvg=0.01ms applyAvg=31.13ms fsmBuildAvg=7.42ms sinkWaitAvg=0.00ms boltFsyncAvg=7.99ms
+[WARN][Oct  9 09:01:44]  2026-10-09T09:01:44.638Z [WARN]  raft: rejecting pre-vote request since we have a leader: from=127.0.0.1:7111 leader=127.0.0.1:7112 leader-id=n2
+[INFO][Oct  9 09:01:51]  ⏱️ [RAFT-METRICS] applied=350 txs=629918 qDepthMax=0 qWaitAvg=0.01ms applyAvg=31.14ms fsmBuildAvg=7.55ms sinkWaitAvg=0.00ms boltFsyncAvg=8.00ms
+[INFO][Oct  9 09:01:57]  🔍 [DEBUG] ProcessPoolSub: allTxs=40133, validTxs=0, futureTxs=40133
+[INFO][Oct  9 09:02:04]  🔍 [DEBUG] ProcessPoolSub: allTxs=40128, validTxs=0, futureTxs=40128
+[ERROR][Oct  9 09:02:12]  RESOURCE_MONITOR: 🚨 Very high memory system usage: 8009 MB (possible memory leak! Limit: 8 GB)
+[WARN][Oct  9 09:02:12]  🚨 [OOM-GUARD] CRITICAL memory pressure: EstPhys=7789MB (Sys=8009MB, Released=220MB, limit=8192MB). Forcing GC + FreeOSMemory.
+[INFO][Oct  9 09:02:13]  🔍 [DEBUG] ProcessPoolSub: allTxs=40064, validTxs=0, futureTxs=40064
+[INFO][Oct  9 09:02:19]  🔍 [DEBUG] ProcessPoolSub: allTxs=40134, validTxs=0, futureTxs=40134
+[INFO][Oct  9 09:02:25]  🔍 [DEBUG] ProcessPoolSub: allTxs=40112, validTxs=0, futureTxs=40112
+[INFO][Oct  9 09:02:31]  🔍 [DEBUG] ProcessPoolSub: allTxs=40097, validTxs=0, futureTxs=40097
+[INFO][Oct  9 09:02:36]  🔍 [DEBUG] ProcessPoolSub: allTxs=40140, validTxs=0, futureTxs=40140
+[ERROR][Oct  9 09:02:42]  RESOURCE_MONITOR: 🚨 Very high memory system usage: 8009 MB (possible memory leak! Limit: 8 GB)
+[WARN][Oct  9 09:02:42]  ⚠️ [OOM-GUARD] High memory pressure: EstPhys=6909MB (Sys=8009MB, Released=1100MB, limit=8192MB). Forcing GC.
+[INFO][Oct  9 09:02:43]  🔍 [DEBUG] ProcessPoolSub: allTxs=40282, validTxs=0, futureTxs=40282
+##### n1 execution.log (filtered)
+[INFO][Oct  9 09:01:12]  🛡️ [OOM-GUARD] Memory pressure relief started: limit=8GB, warn=6553MB, crit=7372MB
+[INFO][Oct  9 09:01:12]  🛡️ [OOM-GUARD] Memory pressure relief started: limit=8GB, warn=6553MB, crit=7372MB
+[WARN][Oct  9 09:01:12]  2026-10-09T09:01:12.949Z [WARN]  raft: no known peers, aborting election
+[WARN][Oct  9 09:01:12]  2026-10-09T09:01:12.949Z [WARN]  raft: no known peers, aborting election
+[WARN][Oct  9 09:01:12]  2026-10-09T09:01:12.977Z [WARN]  raft: failed to get previous log: previous-index=1 last-index=0 error="log not found"
+[WARN][Oct  9 09:01:12]  2026-10-09T09:01:12.977Z [WARN]  raft: failed to get previous log: previous-index=1 last-index=0 error="log not found"
+[INFO][Oct  9 09:01:18]  ⏱️ [RAFT-METRICS] applied=50 txs=81422 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.68ms sinkWaitAvg=0.00ms boltFsyncAvg=5.84ms
+[INFO][Oct  9 09:01:18]  ⏱️ [RAFT-METRICS] applied=50 txs=81422 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.68ms sinkWaitAvg=0.00ms boltFsyncAvg=5.84ms
+[INFO][Oct  9 09:01:22]  ⏱️ [RAFT-METRICS] applied=100 txs=160248 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.44ms sinkWaitAvg=0.00ms boltFsyncAvg=5.79ms
+[INFO][Oct  9 09:01:22]  ⏱️ [RAFT-METRICS] applied=100 txs=160248 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.44ms sinkWaitAvg=0.00ms boltFsyncAvg=5.79ms
+[INFO][Oct  9 09:01:25]  ⏱️ [RAFT-METRICS] applied=150 txs=247902 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.47ms sinkWaitAvg=0.00ms boltFsyncAvg=5.98ms
+[INFO][Oct  9 09:01:25]  ⏱️ [RAFT-METRICS] applied=150 txs=247902 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.47ms sinkWaitAvg=0.00ms boltFsyncAvg=5.98ms
+[INFO][Oct  9 09:01:29]  ⏱️ [RAFT-METRICS] applied=200 txs=331051 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.78ms sinkWaitAvg=0.00ms boltFsyncAvg=7.32ms
+[INFO][Oct  9 09:01:29]  ⏱️ [RAFT-METRICS] applied=200 txs=331051 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.78ms sinkWaitAvg=0.00ms boltFsyncAvg=7.32ms
+[INFO][Oct  9 09:01:36]  ⏱️ [RAFT-METRICS] applied=250 txs=429918 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=7.24ms sinkWaitAvg=0.00ms boltFsyncAvg=7.78ms
+[INFO][Oct  9 09:01:36]  ⏱️ [RAFT-METRICS] applied=250 txs=429918 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=7.24ms sinkWaitAvg=0.00ms boltFsyncAvg=7.78ms
+[WARN][Oct  9 09:01:42]  RESOURCE_MONITOR: High memory allocation: 7190 MB (Sys: 7472 MB, Config Limit: 8 GB)
+[WARN][Oct  9 09:01:42]  RESOURCE_MONITOR: High memory allocation: 7190 MB (Sys: 7472 MB, Config Limit: 8 GB)
+[WARN][Oct  9 09:01:42]  🚨 [OOM-GUARD] CRITICAL memory pressure: EstPhys=7446MB (Sys=7472MB, Released=26MB, limit=8192MB). Forcing GC + FreeOSMemory.
+[WARN][Oct  9 09:01:42]  🚨 [OOM-GUARD] CRITICAL memory pressure: EstPhys=7446MB (Sys=7472MB, Released=26MB, limit=8192MB). Forcing GC + FreeOSMemory.
+[INFO][Oct  9 09:01:43]  ⏱️ [RAFT-METRICS] applied=300 txs=529918 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=7.58ms sinkWaitAvg=0.00ms boltFsyncAvg=9.26ms
+[INFO][Oct  9 09:01:43]  ⏱️ [RAFT-METRICS] applied=300 txs=529918 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=7.58ms sinkWaitAvg=0.00ms boltFsyncAvg=9.26ms
+[WARN][Oct  9 09:01:44]  2026-10-09T09:01:44.147Z [WARN]  raft: heartbeat timeout reached, starting election: last-leader-addr=127.0.0.1:7110 last-leader-id=n0
+[WARN][Oct  9 09:01:44]  2026-10-09T09:01:44.147Z [WARN]  raft: heartbeat timeout reached, starting election: last-leader-addr=127.0.0.1:7110 last-leader-id=n0
+[INFO][Oct  9 09:01:51]  ⏱️ [RAFT-METRICS] applied=350 txs=629918 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=7.65ms sinkWaitAvg=0.00ms boltFsyncAvg=9.21ms
+[INFO][Oct  9 09:01:51]  ⏱️ [RAFT-METRICS] applied=350 txs=629918 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=7.65ms sinkWaitAvg=0.00ms boltFsyncAvg=9.21ms
+##### n2 execution.log (filtered)
+[INFO][Oct  9 09:01:12]  🛡️ [OOM-GUARD] Memory pressure relief started: limit=8GB, warn=6553MB, crit=7372MB
+[INFO][Oct  9 09:01:12]  🛡️ [OOM-GUARD] Memory pressure relief started: limit=8GB, warn=6553MB, crit=7372MB
+[WARN][Oct  9 09:01:12]  2026-10-09T09:01:12.960Z [WARN]  raft: no known peers, aborting election
+[WARN][Oct  9 09:01:12]  2026-10-09T09:01:12.960Z [WARN]  raft: no known peers, aborting election
+[WARN][Oct  9 09:01:12]  2026-10-09T09:01:12.977Z [WARN]  raft: failed to get previous log: previous-index=1 last-index=0 error="log not found"
+[WARN][Oct  9 09:01:12]  2026-10-09T09:01:12.977Z [WARN]  raft: failed to get previous log: previous-index=1 last-index=0 error="log not found"
+[INFO][Oct  9 09:01:18]  ⏱️ [RAFT-METRICS] applied=50 txs=81422 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.21ms sinkWaitAvg=0.00ms boltFsyncAvg=5.62ms
+[INFO][Oct  9 09:01:18]  ⏱️ [RAFT-METRICS] applied=50 txs=81422 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.21ms sinkWaitAvg=0.00ms boltFsyncAvg=5.62ms
+[INFO][Oct  9 09:01:22]  ⏱️ [RAFT-METRICS] applied=100 txs=160248 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.05ms sinkWaitAvg=0.00ms boltFsyncAvg=5.61ms
+[INFO][Oct  9 09:01:22]  ⏱️ [RAFT-METRICS] applied=100 txs=160248 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.05ms sinkWaitAvg=0.00ms boltFsyncAvg=5.61ms
+[INFO][Oct  9 09:01:25]  ⏱️ [RAFT-METRICS] applied=150 txs=247902 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.18ms sinkWaitAvg=0.00ms boltFsyncAvg=5.68ms
+[INFO][Oct  9 09:01:25]  ⏱️ [RAFT-METRICS] applied=150 txs=247902 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.18ms sinkWaitAvg=0.00ms boltFsyncAvg=5.68ms
+[INFO][Oct  9 09:01:29]  ⏱️ [RAFT-METRICS] applied=200 txs=331051 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.44ms sinkWaitAvg=0.00ms boltFsyncAvg=6.73ms
+[INFO][Oct  9 09:01:29]  ⏱️ [RAFT-METRICS] applied=200 txs=331051 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.44ms sinkWaitAvg=0.00ms boltFsyncAvg=6.73ms
+[INFO][Oct  9 09:01:36]  ⏱️ [RAFT-METRICS] applied=250 txs=429918 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.81ms sinkWaitAvg=0.00ms boltFsyncAvg=7.20ms
+[INFO][Oct  9 09:01:36]  ⏱️ [RAFT-METRICS] applied=250 txs=429918 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=6.81ms sinkWaitAvg=0.00ms boltFsyncAvg=7.20ms
+[INFO][Oct  9 09:01:43]  ⏱️ [RAFT-METRICS] applied=300 txs=529918 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=7.09ms sinkWaitAvg=0.00ms boltFsyncAvg=8.70ms
+[INFO][Oct  9 09:01:43]  ⏱️ [RAFT-METRICS] applied=300 txs=529918 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=7.09ms sinkWaitAvg=0.00ms boltFsyncAvg=8.70ms
+[WARN][Oct  9 09:01:44]  2026-10-09T09:01:44.150Z [WARN]  raft: rejecting pre-vote request since we have a leader: from=127.0.0.1:7111 leader=127.0.0.1:7110 leader-id=n0
+[WARN][Oct  9 09:01:44]  2026-10-09T09:01:44.150Z [WARN]  raft: rejecting pre-vote request since we have a leader: from=127.0.0.1:7111 leader=127.0.0.1:7110 leader-id=n0
+[WARN][Oct  9 09:01:44]  2026-10-09T09:01:44.204Z [WARN]  raft: heartbeat timeout reached, starting election: last-leader-addr=127.0.0.1:7110 last-leader-id=n0
+[WARN][Oct  9 09:01:44]  2026-10-09T09:01:44.204Z [WARN]  raft: heartbeat timeout reached, starting election: last-leader-addr=127.0.0.1:7110 last-leader-id=n0
+[WARN][Oct  9 09:01:44]  2026-10-09T09:01:44.425Z [WARN]  raft: failed to contact: server-id=n0 time=88.501855ms
+[WARN][Oct  9 09:01:44]  2026-10-09T09:01:44.425Z [WARN]  raft: failed to contact: server-id=n0 time=88.501855ms
+[WARN][Oct  9 09:01:44]  2026-10-09T09:01:44.504Z [WARN]  raft: failed to contact: server-id=n0 time=167.539737ms
+[WARN][Oct  9 09:01:44]  2026-10-09T09:01:44.504Z [WARN]  raft: failed to contact: server-id=n0 time=167.539737ms
+[WARN][Oct  9 09:01:44]  2026-10-09T09:01:44.570Z [WARN]  raft: failed to contact: server-id=n0 time=232.70727ms
+[WARN][Oct  9 09:01:44]  2026-10-09T09:01:44.570Z [WARN]  raft: failed to contact: server-id=n0 time=232.70727ms
+[INFO][Oct  9 09:01:51]  ⏱️ [RAFT-METRICS] applied=350 txs=629918 qDepthMax=0 qWaitAvg=0.01ms applyAvg=28.79ms fsmBuildAvg=7.15ms sinkWaitAvg=0.00ms boltFsyncAvg=8.44ms
+[INFO][Oct  9 09:01:51]  ⏱️ [RAFT-METRICS] applied=350 txs=629918 qDepthMax=0 qWaitAvg=0.01ms applyAvg=28.79ms fsmBuildAvg=7.15ms sinkWaitAvg=0.00ms boltFsyncAvg=8.44ms

@@ -1,0 +1,1 @@
+{"tag": "m9_Q", "mode": "raft", "bin": "simple_chain_Q", "args": ["-duration", "60", "-batch", "1000"], "submitted": 1514000, "on_chain": 1514000, "complete": true, "blast_secs": 86.0, "e2e_secs": 109.3, "e2e_tps": 13851, "tool_tps": 14974, "p50_ms": 31909, "p99_ms": 49970, "zero_fork": true, "roots": true}

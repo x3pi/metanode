@@ -1,0 +1,1 @@
+{"tag": "diag_raft_1", "mode": "raft", "bin": "simple_chain_DIAG", "args": ["-duration", "15", "-batch", "1000"], "submitted": 742000, "on_chain": 742000, "complete": true, "blast_secs": 38.4, "e2e_secs": 44.2, "e2e_tps": 16781, "tool_tps": 36277, "p50_ms": 33395, "p99_ms": 34432, "zero_fork": true, "roots": true}
