@@ -1015,7 +1015,9 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 	var accumulatedResults tx_processor.ProcessResult
 
 	// 2. Xử lý trường hợp Conflict -> Re-execute tuần tự
+	reExecuted := false
 	if hasConflict && len(res.Txs) > 0 {
+		reExecuted = true
 		logger.Info("🔄 [COMMITTER] Re-executing GEI=%d sequentially...", res.GEI)
 
 		// The speculative state is discarded. Its trie may hold a NOMT session that IntermediateRoot already
@@ -1120,6 +1122,12 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 	var precomputedRoots *PrecomputedBlockRoots
 	if res.precomputeRootsChan != nil {
 		precomputedRoots = <-res.precomputeRootsChan
+	}
+	// The precomputed roots were derived from the SPECULATIVE execution's txs/receipts. After a sequential
+	// re-execution the receipts can differ (and whether a node re-executes depends on local timing), so using
+	// them would put a stale txs/receipts root in the block header: a fork hazard. Recompute from the results.
+	if reExecuted {
+		precomputedRoots = nil
 	}
 	tRootsDone := time.Now().UnixNano()
 
@@ -1228,8 +1236,10 @@ func PrepareTransactions(epochData *pb.ExecutableBlock) []types.Transaction {
 	sortNs := tSortDone - tSortStart
 	totalNs := tSortDone - t0
 
-	logger.Warn("⏱️ [PREPARE-TX] gei=%d raw_txs=%d deduped_txs=%d unmarshal_ns=%d validate_binding_ns=%d dedupe_map_ns=%d sort_ns=%d total_prep_ns=%d",
-		epochData.GetGlobalExecIndex(), len(rawTxs), len(dedupedTxs), unmarshalNs, validateBindingDuration, dedupeMapDuration, sortNs, totalNs)
+	if ffiTraceEnabled { // per-block perf trace: only when METANODE_FFI_TRACE is on, not on every production block
+		logger.Warn("⏱️ [PREPARE-TX] gei=%d raw_txs=%d deduped_txs=%d unmarshal_ns=%d validate_binding_ns=%d dedupe_map_ns=%d sort_ns=%d total_prep_ns=%d",
+			epochData.GetGlobalExecIndex(), len(rawTxs), len(dedupedTxs), unmarshalNs, validateBindingDuration, dedupeMapDuration, sortNs, totalNs)
+	}
 
 	return dedupedTxs
 }
