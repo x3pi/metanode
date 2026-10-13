@@ -682,7 +682,18 @@ func (sp *StateProcessor) sendRegisterAccountError(request network.Request, errM
 	return fmt.Errorf("%s", errMsg)
 }
 
-// ProcessRegisterAccount handles RegisterAccount: parses pb.RegisterAccountRequest, stores connection mapping, submits to relay, and responds with ACK.
+// registerAccountRawLen is the fixed size of the raw binary form: 20-byte address || 65-byte signature.
+const registerAccountRawLen = common.AddressLength + 65
+
+func isTerminalRegistration(s rollup.RegistrationStatus) bool {
+	return s == rollup.RegStatusConfirmed || s == rollup.RegStatusRejected || s == rollup.RegStatusFailed
+}
+
+// ProcessRegisterAccount handles RegisterAccount: parses the request, submits it to the relay (which verifies the user's
+// signature), only THEN subscribes the connection for the asynchronous result, and answers with an ACK.
+//
+// Wire format is decided by length, never by "does it happen to parse as proto": a body of exactly 85 bytes is the raw
+// form; anything else must be a pb.RegisterAccountRequest.
 func (sp *StateProcessor) ProcessRegisterAccount(request network.Request) error {
 	if sp.regRelay == nil {
 		return errors.New("account registration is not enabled on this node")
@@ -692,9 +703,14 @@ func (sp *StateProcessor) ProcessRegisterAccount(request network.Request) error 
 	var addr common.Address
 	var sig []byte
 
-	// 1. Try unmarshaling as pb.RegisterAccountRequest
-	var req pb.RegisterAccountRequest
-	if err := proto.Unmarshal(body, &req); err == nil && len(req.Address) > 0 {
+	if len(body) == registerAccountRawLen {
+		addr = common.BytesToAddress(body[:common.AddressLength])
+		sig = body[common.AddressLength:]
+	} else {
+		var req pb.RegisterAccountRequest
+		if err := proto.Unmarshal(body, &req); err != nil || len(req.Address) == 0 {
+			return sp.sendRegisterAccountError(request, "invalid registration request: expected RegisterAccountRequest proto or 85 raw bytes")
+		}
 		if len(req.Address) == common.AddressLength {
 			addr = common.BytesToAddress(req.Address)
 		} else if len(req.Address) == 42 && strings.HasPrefix(string(req.Address), "0x") {
@@ -703,38 +719,28 @@ func (sp *StateProcessor) ProcessRegisterAccount(request network.Request) error 
 			return sp.sendRegisterAccountError(request, "invalid address length in RegisterAccountRequest")
 		}
 		sig = req.Signature
-	} else if len(body) >= common.AddressLength+65 {
-		// Fallback for raw 85-byte binary format
-		addr = common.BytesToAddress(body[:common.AddressLength])
-		sig = body[common.AddressLength : common.AddressLength+65]
-	} else {
-		return sp.sendRegisterAccountError(request, "invalid registration request: expected RegisterAccountRequest proto or 85 raw bytes")
 	}
 
 	if len(sig) != 65 {
 		return sp.sendRegisterAccountError(request, fmt.Sprintf("invalid signature length: %d (expected 65 bytes)", len(sig)))
 	}
 
+	// The relay verifies the user's signature. Nothing is tracked for a request that fails it: an unauthenticated client
+	// must not be able to allocate tracker entries, overwrite another client's subscription, or cancel it.
+	res, err := sp.regRelay.Submit(addr, sig)
+	if err != nil {
+		return sp.sendRegisterAccountError(request, err.Error())
+	}
+
+	subscribed := false
 	if sp.regTracker != nil {
-		sp.regTracker.Store(addr, RegConnEntry{
+		subscribed = sp.regTracker.Store(addr, RegConnEntry{
 			Conn:      request.Connection(),
 			MsgID:     request.Message().ID(),
 			CreatedAt: time.Now(),
 		})
-	}
-
-	res, err := sp.regRelay.Submit(addr, sig)
-	if err != nil {
-		if sp.regTracker != nil {
-			sp.regTracker.Delete(addr)
-		}
-		return sp.sendRegisterAccountError(request, err.Error())
-	}
-
-	// Immediate terminal state: push directly if already confirmed or rejected
-	if res.Status == rollup.RegStatusConfirmed || res.Status == rollup.RegStatusRejected {
-		if sp.regTracker != nil {
-			sp.regTracker.PushResult(addr, res)
+		if !subscribed {
+			logger.Warn("RegisterAccount: push subscription for %s not stored (tracker full or too many waiting connections); the client can poll GetRegistrationStatus", addr.Hex())
 		}
 	}
 
@@ -755,7 +761,16 @@ func (sp *StateProcessor) ProcessRegisterAccount(request network.Request) error 
 		},
 		Body: ackBytes,
 	})
-	return request.Connection().SendMessage(ackMsg)
+	sendErr := request.Connection().SendMessage(ackMsg)
+
+	// Close the race between Submit and Store: if the registration already reached a terminal state (immediately, or while
+	// we were subscribing), the relay's status callback may have fired before our entry existed, so push it ourselves.
+	if subscribed {
+		if cur := sp.regRelay.Status(addr); isTerminalRegistration(cur.Status) {
+			sp.regTracker.PushResult(addr, cur)
+		}
+	}
+	return sendErr
 }
 
 // ProcessGetRegistrationStatus handles GetRegistrationStatus: returns pb.RegistrationResult.
