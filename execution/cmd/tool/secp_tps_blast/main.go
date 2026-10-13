@@ -76,6 +76,11 @@ type Config struct {
 	DurationSec  int
 	RateLimit    int
 	TargetPIDs   []string
+	// Measurement controls (only decide when the MEASUREMENT stops; never influence the system under test)
+	QuietSec      int
+	MaxWaitSec    int
+	ParityWaitSec int
+	PollMs        int
 }
 
 // BenchmarkResult stores the summary of the benchmark run
@@ -111,7 +116,22 @@ type BenchmarkResult struct {
 	SampleReverted      int           `json:"sample_reverted,omitempty"`
 	SampleUnconfirmed   int           `json:"sample_unconfirmed,omitempty"`
 	SampleCutoffRatio   float64       `json:"sample_cutoff_ratio,omitempty"`
+
+	// Counted-from-chain measurement (authoritative). TotalConfirmed/EffectiveTPS above are derived from it.
+	Measurement *ChainMeasurement `json:"measurement,omitempty"`
+	// Old estimation method kept ONLY so old and new numbers can be compared in the same run. Do not report these.
+	LegacyEstimate *LegacyEstimate `json:"legacy_estimate_do_not_report,omitempty"`
+	ToolVersion    string          `json:"tool_version"`
 }
+
+// LegacyEstimate is the pre-2026-10-13 method (sample extrapolation / different numerator and denominator).
+type LegacyEstimate struct {
+	Method                string  `json:"method"`
+	ExtrapolatedConfirmed int     `json:"extrapolated_confirmed"`
+	EffectiveTPS          float64 `json:"effective_tps"`
+}
+
+const toolVersion = "secp_tps_blast/2 (chain-counted)"
 
 type rawTCPClient struct {
 	addr   string
@@ -355,6 +375,10 @@ func main() {
 		flagGasPrice     = flag.Int64("gas-price", 100000, "Gas price in wei")
 		flagVerifyParity = flag.Bool("verify-parity", true, "Verify 100% Zero-Fork parity across all online nodes")
 		flagReport       = flag.String("report", "", "File path to save JSON benchmark report")
+		flagQuiet        = flag.Int("quiet-sec", 8, "Measurement stops after this many seconds without a tx-bearing block (does not affect the system)")
+		flagMaxWait      = flag.Int("max-wait-sec", 120, "Hard cap for the post-injection measurement wait, seconds")
+		flagParityWait   = flag.Int("parity-wait-sec", 30, "How long every validator may take to reach the reference end block before parity is reported INCOMPLETE")
+		flagPollMs       = flag.Int("poll-ms", 25, "Chain poll interval, milliseconds")
 		flagDuration     = flag.Int("duration", 0, "Sustained blasting duration in seconds (if >0, ignores count)")
 		flagRateLimit    = flag.Int("rate-limit", 0, "Target injection rate limit in tx/s (0 = unlimited)")
 		flagPids         = flag.String("pids", "", "Comma-separated target simple_chain PIDs to track (default: auto-detect from /tmp/gate_4val_p06/pids or all simple_chain)")
@@ -521,21 +545,25 @@ func main() {
 	}
 
 	cfg := Config{
-		Count:        numTxs,
-		BatchSize:    *flagBatch,
-		Rounds:       *flagRounds,
-		Mode:         *flagMode,
-		TxType:       *flagTxType,
-		KeysFile:     keysPath,
-		RPCUrls:      rpcURLs,
-		TCPAddrs:     tcpAddrs,
-		ChainID:      chainID,
-		GasPrice:     *flagGasPrice,
-		VerifyParity: *flagVerifyParity,
-		ReportFile:   *flagReport,
-		DurationSec:  *flagDuration,
-		RateLimit:    *flagRateLimit,
-		TargetPIDs:   targetPIDs,
+		Count:         numTxs,
+		BatchSize:     *flagBatch,
+		Rounds:        *flagRounds,
+		Mode:          *flagMode,
+		TxType:        *flagTxType,
+		KeysFile:      keysPath,
+		RPCUrls:       rpcURLs,
+		TCPAddrs:      tcpAddrs,
+		ChainID:       chainID,
+		GasPrice:      *flagGasPrice,
+		VerifyParity:  *flagVerifyParity,
+		ReportFile:    *flagReport,
+		DurationSec:   *flagDuration,
+		RateLimit:     *flagRateLimit,
+		TargetPIDs:    targetPIDs,
+		QuietSec:      *flagQuiet,
+		MaxWaitSec:    *flagMaxWait,
+		ParityWaitSec: *flagParityWait,
+		PollMs:        *flagPollMs,
 	}
 
 	if cfg.DurationSec > 0 {
@@ -683,6 +711,15 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 
 	// Step 4: Inject Transactions
 	fmt.Printf("\n🔥 BLASTING %d Transactions across cluster (Mode: %s)...\n", len(signedTxs), cfg.Mode)
+	// Counted measurement: start watching the chain BEFORE the first byte is sent.
+	wallets := make(map[common.Address]struct{}, len(validAccs))
+	for _, a := range validAccs {
+		wallets[crypto.PubkeyToAddress(a.Key.PublicKey)] = struct{}{}
+	}
+	ingBefore := scrapeAll(cfg.RPCUrls)
+	wStart, _ := getBlockNumber(cfg.RPCUrls[0])
+	watcher := newChainWatcher(cfg.RPCUrls, wStart, time.Duration(cfg.PollMs)*time.Millisecond)
+	watcher.start()
 	tInject0 := time.Now()
 
 	var maxRecordedCPU float64
@@ -787,8 +824,9 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 	}
 
 	injectDur := time.Since(tInject0)
+	tInjectEnd := tInject0.Add(injectDur)
 	injectTPS := float64(submittedTxs) / injectDur.Seconds()
-	fmt.Printf("⚡ Injected %d TXs in %v (Injection TPS: %.2f tx/s)\n", submittedTxs, injectDur, injectTPS)
+	fmt.Printf("⚡ Wrote %d TXs to the transport in %v (write speed %.2f tx/s — NOT a validator-side number)\n", submittedTxs, injectDur, injectTPS)
 
 	// Step 5: Track Inclusion Receipts & Compute Latencies
 	fmt.Printf("\n⏱️ Tracking Transaction Receipts for Consensus Inclusion & Latency...\n")
@@ -866,6 +904,9 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 	finalRSS := int(maxRecordedRSS / 1024)
 	resMu.Unlock()
 
+	// Counted measurement (replaces sample extrapolation)
+	meas, measEnd := finalizeMeasurement(cfg, watcher, wStart, measureInput{BytesSent: submittedTxs, TInjectStart: tInject0, TInjectEnd: tInjectEnd}, wallets, targetAddr, ingBefore, cfg.VerifyParity)
+
 	// Step 6: Statistics & Latency Percentiles
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 	var p50, p90, p95, p99, avgLat time.Duration
@@ -904,11 +945,9 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 	}
 
 	fmt.Printf("\n📊 BENCHMARK METRICS (Round %d):\n", round)
-	fmt.Printf("   • Total Submitted:    %d txs\n", submittedTxs)
-	fmt.Printf("   • Sample Verified:    %d/%d (Confirmed: %d, Reverted: %d, Unconfirmed/Timeout: %d | Cutoff: %.1f%%)\n",
-		confirmedCount.Load()+revertedCount.Load(), len(sampleHashes), confirmedCount.Load(), revertedCount.Load(), sampleUnconf, cutoffRatio*100)
-	fmt.Printf("   • Injection Speed:    %.2f tx/s (Duration: %v)\n", injectTPS, injectDur)
-	fmt.Printf("   • Effective TPS:      %.2f tx/s (Duration: %v)\n", effectiveTPS, commitDur)
+	printMeasurement(meas)
+	fmt.Printf("   • [LEGACY ESTIMATE — do not report] extrapolated_confirmed=%d, effective_tps=%.2f (sample %d/%d, denominator = time after injection until the last sampled receipt)\n",
+		extrapolatedConfirmed, effectiveTPS, confirmedCount.Load()+revertedCount.Load(), len(sampleHashes))
 	fmt.Printf("   • Latency P50:        %v\n", p50)
 	fmt.Printf("   • Latency P90:        %v\n", p90)
 	fmt.Printf("   • Latency P95:        %v\n", p95)
@@ -922,46 +961,17 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 		fmt.Printf("   • Peak RSS (Nodes):   %d MB\n", finalRSS)
 	}
 
-	// Step 7: Zero-Fork Invariant Verification (AGENTS.md Part 2.5)
+	// Step 7: Zero-Fork Invariant Verification (AGENTS.md Part 2.5) — every validator must reach the reference end block.
 	zeroForkOk := true
 	if cfg.VerifyParity && len(cfg.RPCUrls) > 1 {
-		fmt.Printf("\n🛡️ VERIFYING ZERO-FORK INVARIANT ACROSS %d NODES...\n", len(cfg.RPCUrls))
-		targetBlockNum := fmt.Sprintf("0x%x", endBlock)
-		var blockHashes = make(map[string][]string)
-		var stateRoots = make(map[string][]string)
-
-		for _, u := range cfg.RPCUrls {
-			res, err := rpcCallTo(u, "eth_getBlockByNumber", targetBlockNum, false)
-			if err != nil || len(res) == 0 || string(res) == "null" {
-				fmt.Printf("   ⚠️ Node %s did not return block %s\n", u, targetBlockNum)
-				continue
-			}
-			var b struct {
-				Hash      string        `json:"hash"`
-				StateRoot string        `json:"stateRoot"`
-				Txs       []interface{} `json:"transactions"`
-			}
-			if err := json.Unmarshal(res, &b); err == nil && b.Hash != "" {
-				blockHashes[b.Hash] = append(blockHashes[b.Hash], u)
-				stateRoots[b.StateRoot] = append(stateRoots[b.StateRoot], u)
-				fmt.Printf("   • Node %s: Block %s | Hash: %s... | Root: %s... | Txs: %d\n",
-					u, targetBlockNum, b.Hash[:12], b.StateRoot[:12], len(b.Txs))
-			}
-		}
-
-		if len(blockHashes) > 1 || len(stateRoots) > 1 {
-			zeroForkOk = false
-			fmt.Printf("🚨 [CRITICAL FORK DETECTED] Multiple block hashes or state roots found across nodes!\n")
-			for h, nodes := range blockHashes {
-				fmt.Printf("   BlockHash %s: %s\n", h, strings.Join(nodes, ", "))
-			}
-			for r, nodes := range stateRoots {
-				fmt.Printf("   StateRoot %s: %s\n", r, strings.Join(nodes, ", "))
-			}
+		zeroForkOk = strings.HasPrefix(meas.ParityStatus, "OK")
+		if zeroForkOk {
+			fmt.Printf("\n🛡️ [ZERO-FORK] %s\n", meas.ParityStatus)
 		} else {
-			fmt.Println("✅ [ZERO-FORK VERIFIED] 100% agreement across all online nodes on Block Hash & State Root!")
+			fmt.Printf("\n🚨 [PARITY NOT VERIFIED] %s\n", meas.ParityStatus)
 		}
 	}
+	_ = measEnd
 
 	result := BenchmarkResult{
 		Timestamp:           time.Now().UTC().Format(time.RFC3339),
@@ -969,13 +979,16 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 		Mode:                cfg.Mode,
 		TxType:              cfg.TxType,
 		TotalSubmitted:      submittedTxs,
-		TotalConfirmed:      extrapolatedConfirmed,
+		TotalConfirmed:      meas.CommittedOurs,
 		TotalReverted:       int(revertedCount.Load()),
-		TotalDropped:        submittedTxs - extrapolatedConfirmed,
+		TotalDropped:        meas.LossVsSent,
 		InjectionDuration:   injectDur.String(),
 		InjectionTPS:        injectTPS,
-		CommitDuration:      commitDur.String(),
-		EffectiveTPS:        effectiveTPS,
+		CommitDuration:      time.Duration(meas.EndToEndSeconds * float64(time.Second)).String(),
+		EffectiveTPS:        meas.TPSEndToEnd,
+		Measurement:         &meas,
+		ToolVersion:         toolVersion,
+		LegacyEstimate:      &LegacyEstimate{Method: "round: extrapolated from a 50-hash receipt sample; denominator = time from injection end to last sampled receipt", ExtrapolatedConfirmed: extrapolatedConfirmed, EffectiveTPS: effectiveTPS},
 		LatencyP50:          p50,
 		LatencyP90:          p90,
 		LatencyP95:          p95,
@@ -1092,6 +1105,14 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 
 	// Step 3: Sustained Injection Loop
 	fmt.Printf("\n🔥 BLASTING CONTINUOUSLY FOR %d SECONDS...\n", cfg.DurationSec)
+	wallets := make(map[common.Address]struct{}, len(activeAccs))
+	for _, a := range activeAccs {
+		wallets[a.Address] = struct{}{}
+	}
+	ingBefore := scrapeAll(cfg.RPCUrls)
+	wStart, _ := getBlockNumber(cfg.RPCUrls[0])
+	watcher := newChainWatcher(cfg.RPCUrls, wStart, time.Duration(cfg.PollMs)*time.Millisecond)
+	watcher.start()
 	tBlast0 := time.Now()
 	deadline := tBlast0.Add(time.Duration(cfg.DurationSec) * time.Second)
 
@@ -1319,6 +1340,7 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 
 	blastWg.Wait()
 	injectDur := time.Since(tBlast0)
+	tInjectEnd := tBlast0.Add(injectDur)
 	subTxs := int(totalSubmitted.Load())
 	injectTPS := float64(subTxs) / injectDur.Seconds()
 	fmt.Printf("\n⚡ Injected total %d TXs over %v (Injection TPS: %.2f tx/s)\n", subTxs, injectDur, injectTPS)
@@ -1361,7 +1383,11 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 		}
 	}
 
+	// LEGACY (not reportable): numerator includes everything committed during the drain window, denominator is the
+	// injection time only, and the count covers every tx in the blocks, not only ours.
 	effectiveTPS := float64(totalOnChainTxs) / injectDur.Seconds()
+	meas, measEnd := finalizeMeasurement(cfg, watcher, wStart, measureInput{BytesSent: subTxs, TInjectStart: tBlast0, TInjectEnd: tInjectEnd}, wallets, common.HexToAddress("0x000000000000000000000000000000000000dEaD"), ingBefore, cfg.VerifyParity)
+	_ = measEnd
 
 	totSampled := sampleTotal.Load()
 	conf := confirmedCount.Load()
@@ -1374,10 +1400,8 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 
 	fmt.Printf("\n📊 SUSTAINED BENCHMARK METRICS:\n")
 	fmt.Printf("   • Duration:           %v (Target: %ds)\n", injectDur, cfg.DurationSec)
-	fmt.Printf("   • Total Submitted:    %d txs\n", subTxs)
-	fmt.Printf("   • Total Confirmed:    %d txs on-chain across %d blocks\n", totalOnChainTxs, blocksProduced)
-	fmt.Printf("   • Injection Speed:    %.2f tx/s\n", injectTPS)
-	fmt.Printf("   • Sustained TPS:      %.2f tx/s\n", effectiveTPS)
+	printMeasurement(meas)
+	fmt.Printf("   • [LEGACY ESTIMATE — do not report] on-chain txs counted through the drain window=%d across %d blocks; divided by injection time only => %.2f tx/s\n", totalOnChainTxs, blocksProduced, effectiveTPS)
 	fmt.Printf("   • Latency P50:        %v\n", p50)
 	fmt.Printf("   • Latency P90:        %v\n", p90)
 	fmt.Printf("   • Latency P95:        %v\n", p95)
@@ -1397,38 +1421,14 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 		fmt.Printf("   • Peak RSS (Nodes):   %d MB\n", finalRSS)
 	}
 
-	// Step 5: Zero-Fork Invariant Verification
+	// Step 5: Zero-Fork Invariant Verification — every validator must reach the reference end block.
 	zeroForkOk := true
 	if cfg.VerifyParity && len(cfg.RPCUrls) > 1 {
-		fmt.Printf("\n🛡️ VERIFYING ZERO-FORK INVARIANT ACROSS %d NODES...\n", len(cfg.RPCUrls))
-		targetBlockNum := fmt.Sprintf("0x%x", endBlock)
-		var blockHashes = make(map[string][]string)
-		var stateRoots = make(map[string][]string)
-
-		for _, u := range cfg.RPCUrls {
-			res, err := rpcCallTo(u, "eth_getBlockByNumber", targetBlockNum, false)
-			if err != nil || len(res) == 0 || string(res) == "null" {
-				fmt.Printf("   ⚠️ Node %s did not return block %s\n", u, targetBlockNum)
-				continue
-			}
-			var b struct {
-				Hash      string        `json:"hash"`
-				StateRoot string        `json:"stateRoot"`
-				Txs       []interface{} `json:"transactions"`
-			}
-			if err := json.Unmarshal(res, &b); err == nil && b.Hash != "" {
-				blockHashes[b.Hash] = append(blockHashes[b.Hash], u)
-				stateRoots[b.StateRoot] = append(stateRoots[b.StateRoot], u)
-				fmt.Printf("   • Node %s: Block %s | Hash: %s... | Root: %s... | Txs: %d\n",
-					u, targetBlockNum, b.Hash[:12], b.StateRoot[:12], len(b.Txs))
-			}
-		}
-
-		if len(blockHashes) > 1 || len(stateRoots) > 1 {
-			zeroForkOk = false
-			fmt.Printf("🚨 [CRITICAL FORK DETECTED] Multiple block hashes or state roots found across nodes!\n")
+		zeroForkOk = strings.HasPrefix(meas.ParityStatus, "OK")
+		if zeroForkOk {
+			fmt.Printf("\n🛡️ [ZERO-FORK] %s\n", meas.ParityStatus)
 		} else {
-			fmt.Println("✅ [ZERO-FORK VERIFIED] 100% agreement across all online nodes on Block Hash & State Root!")
+			fmt.Printf("\n🚨 [PARITY NOT VERIFIED] %s\n", meas.ParityStatus)
 		}
 	}
 
@@ -1438,13 +1438,16 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 		Mode:                cfg.Mode,
 		TxType:              cfg.TxType,
 		TotalSubmitted:      subTxs,
-		TotalConfirmed:      int(totalOnChainTxs),
+		TotalConfirmed:      meas.CommittedOurs,
 		TotalReverted:       int(rev),
-		TotalDropped:        subTxs - int(totalOnChainTxs),
+		TotalDropped:        meas.LossVsSent,
 		InjectionDuration:   injectDur.String(),
 		InjectionTPS:        injectTPS,
-		CommitDuration:      injectDur.String(),
-		EffectiveTPS:        effectiveTPS,
+		CommitDuration:      time.Duration(meas.EndToEndSeconds * float64(time.Second)).String(),
+		EffectiveTPS:        meas.TPSEndToEnd,
+		Measurement:         &meas,
+		ToolVersion:         toolVersion,
+		LegacyEstimate:      &LegacyEstimate{Method: "sustained: all txs in blocks through the drain window divided by injection time only", ExtrapolatedConfirmed: int(totalOnChainTxs), EffectiveTPS: effectiveTPS},
 		LatencyP50:          p50,
 		LatencyP90:          p90,
 		LatencyP95:          p95,
