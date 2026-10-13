@@ -3,9 +3,9 @@
   "entries": [
     {
       "id": "wdexp_systemd_user",
-      "command": "execution/scripts/test/evidence/watchdog_supervisor_experiment.sh <wd_probe> <out> (transient systemd --user units; probe = execution/cmd/tool/_wd_probe linked to pkg/utils watchdog; script/probe code identical to the recorded commit, the run happened before that commit was made)",
+      "command": "execution/scripts/test/evidence/watchdog_supervisor_experiment.sh <wd_probe> <out> (transient systemd --user units; probe = execution/cmd/tool/_wd_probe linked to pkg/utils watchdog; script/probe code identical to the recorded commit, the run happened before that commit was made; manifest refreshed after a rebase so the recorded commit is reachable)",
       "cwd": "/home/abc/chain-n/metanode",
-      "git_commit": "ab18f31b96f4337c09f5764b88fd3bbb7704b3ae",
+      "git_commit": "b5cf67b787c8398875ea73b1650d0c3be04085e3",
       "git_status": "",
       "started_at": "2026-10-13T02:13:52Z",
       "finished_at": "2026-10-13T02:15:55Z",
