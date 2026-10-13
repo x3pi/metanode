@@ -7,7 +7,7 @@ Quy tắc: không thêm dòng "RE-VERIFIED" nếu chưa có file thô trong `not
 |---|---|---|---|---|
 | 1 | BFT burst 25k cold-start ≈ 7.804 tx/s (n=8) (`tps_full_measurement_report_20261009.md`) | RE-VERIFIED (cùng bậc) | counted: 7.680,93 ± 902,28 (n=7) và 7.773,85 ± 1.069,35 (n=7) — evidence:tps_counted_burst_b | Một máy; không so khác biệt có ý nghĩa với số cũ (ghép cặp p = 0,38) |
 | 2 | BFT sustained 60 s ≈ 14.072 tx/s (n=8) (cùng báo cáo) | NOT REPRODUCED | counted 12.322,88 ± 573,27 (n=5) — evidence:tps_counted_sustained_v2 | Thời gian bơm thực tế 79,7–161,2 s; nguyên nhân khác biệt chưa xác định |
-| 3 | Công cụ cũ ngoại suy từ 50 mẫu / "submitted" = byte ghi socket (đọc code) | RE-VERIFIED | đọc code + test `measure_test.go` | Burst: số cũ ≈ số đếm. Sustained: client "gửi" > validator nhận ở 2/5 lượt |
+| 3 | Công cụ cũ ngoại suy từ 50 mẫu / "submitted" = byte ghi socket (đọc code) | RE-VERIFIED | đọc code + test `measure_test.go`; sustained n=10: số cũ cao hơn số đếm +618,6 tx/s (p = 0,0001) — evidence:tps_ingress_gap_b5 | Burst: số cũ ≈ số đếm. Sustained: số cũ cao hơn ~4,9% |
 | 4 | 129.345 tx/s (Block-STM) và 74.067 tx/s (Go pipeline) trong `tps_summary_results_20261009.md` | NARROWED | đọc code/báo cáo | Là đo từng pha trong micro-benchmark, không phải TPS hệ thống đầu-cuối; không dùng làm số TPS chuỗi |
 | 5 | Mọi lượt đo "chạy trên cụm mới" | NARROWED | `start_block=1` ở 8 JSON của `tps_root_cause_20261008`; block bắt đầu = 1 ở các lượt mới | Không xác định được cho các thí nghiệm GOGC / drift / Pebble fallback (không ghi block bắt đầu) |
 | 6 | Watchdog `SIGABRT` được supervisor khởi động lại | RE-VERIFIED (mẫu deploy) | evidence:wdexp_systemd_user (E1, E2) | Probe liên kết mã watchdog thật nhưng không phải node thật; `run_env.sh` không có supervisor |
@@ -18,6 +18,8 @@ Quy tắc: không thêm dòng "RE-VERIFIED" nếu chưa có file thô trong `not
 | 11 | p-value / hệ số hồi quy RSS / B1 trong báo cáo 2026-10-07..12 | RE-VERIFIED (tính lại) | tính lại bằng `stats_util.py` | Chỉ tính lại từ số liệu có sẵn, không đo lại |
 | 12 | Raft burst ≈ 13k tx/s (20k/25k/30k) | NOT RE-VERIFIED | — | Công cụ đo mới chưa chạy trên Raft |
 | 13 | Số liệu GOGC, drift RSS, TTL, fsync | NOT RE-VERIFIED | — | Chưa chạy lại |
+
+| 14 | Tx client "gửi" nhưng validator không nhận (sustained, 5/19 lượt hợp lệ, 44k–164k tx) | OPEN | tái hiện ở 3 lô, 0/10 ở lô cuối; bộ đếm phẳng 120 s sau, hàng đợi socket rỗng — evidence:tps_ingress_gap_b4 | Vị trí mất chưa biết; chưa có goroutine dump |
 
 ## Giới hạn
 - Chỉ các dòng RE-VERIFIED / NOT REPRODUCED có file thô ở `note/evidence/`; mọi dòng khác chỉ là trích.
