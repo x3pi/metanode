@@ -1,6 +1,7 @@
 package network
 
 import (
+	"context"
 	"encoding/binary"
 	"io"
 	"net"
@@ -191,4 +192,39 @@ func TestIngest_LongBackpressureDoesNotTripIdleTimeout(t *testing.T) {
 	_, err = conn.Write(testFrame(t, "SendRawTransactions", []byte{0xff}))
 	require.NoError(t, err)
 	waitDelivered(t, delivered, n+1, 10*time.Second)
+}
+
+// The client stops sending (but stays connected) while the server still holds a backlog that takes longer than the idle
+// timeout to work through (here: the admission gate lets one batch through per 150 ms). When the idle deadline then
+// fires, everything already queued must still be delivered: "idle" is measured from the client's last byte, not from
+// the server finishing its backlog.
+func TestIngest_IdleTimeoutWithBacklog_NoBatchLost(t *testing.T) {
+	SetTxAdmissionGate(func(ctx context.Context) error {
+		select {
+		case <-time.After(150 * time.Millisecond):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	t.Cleanup(func() { SetTxAdmissionGate(nil) })
+
+	cfg := smallIngestConfig()
+	cfg.ConnRequestChanSize = 64 // the reader queues the whole burst at once, so it is not blocked by backpressure
+	cfg.AcceptedConnectionIdleTimeout = 1 * time.Second
+	addr, delivered := startIngestServer(t, cfg, nil) // 30 batches x 150 ms ~ 4.5 s > 1 s idle timeout
+
+	conn, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	defer conn.Close()
+	_, err = conn.Write(testInitFrame(t))
+	require.NoError(t, err)
+
+	const n = 30
+	for i := 0; i < n; i++ {
+		_, err = conn.Write(testFrame(t, "SendRawTransactions", []byte{byte(i)}))
+		require.NoError(t, err)
+	}
+	// Stay connected and silent: the idle deadline fires about 1 s after the last frame.
+	waitDelivered(t, delivered, n, 30*time.Second)
 }

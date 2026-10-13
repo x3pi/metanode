@@ -35,7 +35,7 @@ NODES = ["val0", "val1", "val2", "val3"]
 
 
 def sh(cmd, **kw):
-    return subprocess.run(cmd, capture_output=True, text=True, check=False, **kw)
+    return subprocess.run(cmd, capture_output=True, text=True, errors="replace", check=False, **kw)
 
 
 def stop_and_clean():
@@ -241,6 +241,11 @@ def one_run(i, args, outdir):
         if k < 8:
             time.sleep(15)
     open(f"{outdir}/{args.tag}_run{i}_post.json", "w").write(json.dumps(post, indent=1))
+    # Per-stage counters of the diagnostic node build (absent in normal builds): last lines of each node log.
+    for n in NODES:
+        r = sh(["bash", "-c", f"cat {BASE}/{n}/logs/*/*.log 2>/dev/null | grep -a NETDIAG | tail -n 1200"])
+        if r.stdout.strip():
+            open(f"{outdir}/{args.tag}_run{i}_{n}_netdiag.txt", "w").write(r.stdout)
     # If txs went missing between client and ingress, dump goroutine stacks (SIGQUIT) of every validator for post-mortem.
     if info.get("bytes_sent") and info.get("received_sum") is not None and info["received_sum"] < info["bytes_sent"]:
         for n, pid in pm.items():
@@ -250,20 +255,18 @@ def one_run(i, args, outdir):
                 pass
         time.sleep(8)
         for n in NODES:
-            lp = f"{BASE}/logs/{n}.log"
-            if os.path.isfile(lp):
-                sh(["bash", "-c", f"awk '/^SIGQUIT: quit/{{f=1}} f' '{lp}' | head -c 6000000 > '{outdir}/{args.tag}_run{i}_{n}_goroutines.txt'"])
+            sh(["bash", "-c", f"cat {BASE}/{n}/logs/*/*.log 2>/dev/null | awk '/\\[SIGNAL\\] Stack trace/{{f=1}} f' | head -c 6000000 > '{outdir}/{args.tag}_run{i}_{n}_goroutines.txt'"])
     # Diagnostics for tx loss between client and ingress: keep warn/error/overload/closed lines of each node log (capped), plus counts.
     diag = {}
     for n in NODES:
         lp = f"{BASE}/logs/{n}.log"
         if os.path.isfile(lp):
-            r = sh(["bash", "-c", f"grep -a -i -E 'warn|error|❌|overload|admission|closed|EOF|reset|dropp' '{lp}' | cut -c1-300"])
+            r = sh(["bash", "-c", f"cat '{lp}' {BASE}/{n}/logs/*/*.log 2>/dev/null | grep -a -i -E 'warn|error|❌|overload|admission|closed|EOF|reset|dropp|discard' | grep -a -v 'Oct  8' | cut -c1-300"])
             lines = r.stdout.splitlines()
             diag[n] = len(lines)
             open(f"{outdir}/{args.tag}_run{i}_{n}_anomalies.txt", "w").write("\n".join(lines[:300]) + "\n")
             # Tail of the node log (the template log carries old lines) + liveness, so a crash leaves evidence.
-            tl = sh(["bash", "-c", f"tail -n 400 '{lp}' | cut -c1-400"]).stdout
+            tl = sh(["bash", "-c", f"tail -n 150 '{lp}' | cut -c1-400; echo ---- execution.log tail ----; tail -n 400 {BASE}/{n}/logs/*/execution.log 2>/dev/null | cut -c1-400"]).stdout
             alive = bool(pm.get(n)) and os.path.exists(f"/proc/{pm[n]}")
             open(f"{outdir}/{args.tag}_run{i}_{n}_tail.txt", "w").write(f"alive_at_end={alive}\n{tl}")
     info["node_anomaly_lines"] = json.dumps(diag)
