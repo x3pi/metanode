@@ -591,3 +591,44 @@ func (db *AccountStateDB) SetParentRegistered(address common.Address, registered
 	return nil
 }
 
+func (db *AccountStateDB) SetLocked(address common.Address, locked bool) error {
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
+
+	if db.lockedFlag.Load() {
+		return errors.New("SetLocked db.lockedFlag is already locked")
+	}
+
+	as, err := db.getOrCreateAccountState(address)
+	if err != nil {
+		return fmt.Errorf("SetLocked: %w", err)
+	}
+	if as == nil {
+		return errors.New("SetLocked: account state is nil")
+	}
+	as.SetLocked(locked)
+	db.setDirtyAccountState(as)
+	return nil
+}
+
+func (db *AccountStateDB) SetProvisional(address common.Address, provisional bool) error {
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
+
+	if db.lockedFlag.Load() {
+		return errors.New("SetProvisional db.lockedFlag is already locked")
+	}
+
+	as, err := db.getOrCreateAccountState(address)
+	if err != nil {
+		return fmt.Errorf("SetProvisional: %w", err)
+	}
+	if as == nil {
+		return errors.New("SetProvisional: account state is nil")
+	}
+	as.SetProvisional(provisional)
+	db.setDirtyAccountState(as)
+	return nil
+}
+
+

@@ -79,6 +79,30 @@ func (a *accountStateDBAdapter) SetParentRegistered(address common.Address, regi
 	_ = a.chainState.GetAccountStateDB().SetParentRegistered(address, registered)
 }
 
+func (a *accountStateDBAdapter) GetProvisional(address common.Address) bool {
+	state, err := a.chainState.GetAccountStateDB().AccountState(address)
+	if err != nil || state == nil {
+		return false
+	}
+	return state.IsProvisional()
+}
+
+func (a *accountStateDBAdapter) SetProvisional(address common.Address, provisional bool) {
+	_ = a.chainState.GetAccountStateDB().SetProvisional(address, provisional)
+}
+
+func (a *accountStateDBAdapter) GetLocked(address common.Address) bool {
+	state, err := a.chainState.GetAccountStateDB().AccountState(address)
+	if err != nil || state == nil {
+		return false
+	}
+	return state.IsLocked()
+}
+
+func (a *accountStateDBAdapter) SetLocked(address common.Address, locked bool) {
+	_ = a.chainState.GetAccountStateDB().SetLocked(address, locked)
+}
+
 // smartContractDBAdapter adapts smart_contract_db to rollup.SmartContractDB.
 // Same staleness hazard as accountStateDBAdapter above -- see its doc comment.
 type smartContractDBAdapter struct {

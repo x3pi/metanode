@@ -36,6 +36,10 @@ type AccountState interface {
 	SetAccountType(pb.ACCOUNT_TYPE) error
 	ParentRegistered() bool
 	SetParentRegistered(bool)
+	IsLocked() bool
+	SetLocked(bool)
+	IsProvisional() bool
+	SetProvisional(bool)
 	//
 	SubPendingBalance(*big.Int) error
 	AddPendingBalance(*big.Int)

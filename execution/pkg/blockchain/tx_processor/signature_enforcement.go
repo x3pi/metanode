@@ -1,6 +1,7 @@
 package tx_processor
 
 import (
+	"bytes"
 	"os"
 	"runtime"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -84,8 +86,75 @@ func isNodeBLSIdentity(tx types.Transaction, as types.AccountState) bool {
 	return len(pub) > 0 && tx.FromAddress() == bls.GetAddressFromPublicKey(pub)
 }
 
+var (
+	erc20TransferSelector     = []byte{0xa9, 0x05, 0x9c, 0xbb} // transfer(address,uint256)
+	erc20TransferFromSelector = []byte{0x23, 0xb8, 0x72, 0x66} // transferFrom(address,address,uint256)
+)
+
+// isPrecompileAddress reports whether addr is an EVM precompile (0x01..0x0a).
+func isPrecompileAddress(addr eth_common.Address) bool {
+	for i := 0; i < 19; i++ {
+		if addr[i] != 0 {
+			return false
+		}
+	}
+	return addr[19] >= 1 && addr[19] <= 10
+}
+
+// isSystemOrExemptAddress reports whether addr is an exempt system destination:
+// - Zero address (contract creation)
+// - EVM precompiles (0x01..0x0a)
+// - RollupSystemAddress
+// - Account setting address selector
+func isSystemOrExemptAddress(addr eth_common.Address) bool {
+	if addr == (eth_common.Address{}) {
+		return true
+	}
+	if isPrecompileAddress(addr) {
+		return true
+	}
+	if addr == rollup.RollupSystemAddress {
+		return true
+	}
+	if addr == utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
+		return true
+	}
+	return false
+}
+
+// extractRawCallData returns the raw calldata bytes from a transaction, handling
+// both proto CallData wrapping and plain byte payloads.
+func extractRawCallData(tx types.Transaction) []byte {
+	if tx == nil {
+		return nil
+	}
+	if cd := tx.CallData(); cd != nil {
+		if in := cd.Input(); len(in) > 0 {
+			return in
+		}
+	}
+	return tx.Data()
+}
+
+// checkAccountAuthorized returns nil if as is permitted under the account gate,
+// or AccountLocked if as is locked, or AccountNotRegistered / RecipientNotRegistered
+// if as is nil or neither registered on parent chain nor provisional.
+func checkAccountAuthorized(as types.AccountState, forRecipient bool) *transaction.TransactionError {
+	if as != nil && as.IsLocked() {
+		return transaction.AccountLocked
+	}
+	if as == nil || (!as.ParentRegistered() && !as.IsProvisional()) {
+		if forRecipient {
+			return transaction.RecipientNotRegistered
+		}
+		return transaction.AccountNotRegistered
+	}
+	return nil
+}
+
 // senderRegisteredError returns nil if the sender is authorized under the account gate,
-// or transaction.AccountNotRegistered if the account is not registered on the parent chain.
+// or transaction.AccountNotRegistered if the account is not registered on the parent chain,
+// or transaction.AccountLocked if the account is locked.
 // Node BLS identities and non-secp or gate-disabled chains are exempt.
 func (p sigPolicy) senderRegisteredError(tx types.Transaction, as types.AccountState) *transaction.TransactionError {
 	if !p.secp || !p.accountGate {
@@ -94,10 +163,100 @@ func (p sigPolicy) senderRegisteredError(tx types.Transaction, as types.AccountS
 	if isNodeBLSIdentity(tx, as) {
 		return nil
 	}
-	if as == nil || !as.ParentRegistered() {
-		return transaction.AccountNotRegistered
+	return checkAccountAuthorized(as, false)
+}
+
+// recipientRegisteredError checks whether value transfer recipients (and ERC-20 transferFrom token owners)
+// satisfy the account gate on this cluster.
+// Returns nil if allowed, or RecipientNotRegistered, AccountLocked, AccountNotRegistered (for owner), or InvalidData.
+func (p sigPolicy) recipientRegisteredError(tx types.Transaction, loadState func(eth_common.Address) types.AccountState) *transaction.TransactionError {
+	if !p.secp || !p.accountGate {
+		return nil
 	}
+	if tx == nil {
+		return nil
+	}
+
+	// 1. Native coin transfer check:
+	// If tx transfers native value (> 0) to a non-exempt recipient, the recipient must be registered.
+	if tx.Amount() != nil && tx.Amount().Sign() > 0 {
+		toAddr := tx.ToAddress()
+		if !isSystemOrExemptAddress(toAddr) {
+			asRec := loadState(toAddr)
+			if err := checkAccountAuthorized(asRec, true); err != nil {
+				return err
+			}
+		}
+	}
+
+	// 2. Direct ERC-20 transfer / transferFrom check:
+	data := extractRawCallData(tx)
+	if len(data) >= 4 {
+		selector := data[:4]
+		if bytes.Equal(selector, erc20TransferSelector) {
+			// ERC-20 transfer(address to, uint256 value)
+			// Must be at least 68 bytes (4 + 32 + 32)
+			if len(data) < 68 {
+				return transaction.InvalidData
+			}
+			// ABI encoding requires upper 12 bytes of 32-byte address word to be zero
+			for _, b := range data[4:16] {
+				if b != 0 {
+					return transaction.InvalidData
+				}
+			}
+			toAddr := eth_common.BytesToAddress(data[16:36])
+			if !isSystemOrExemptAddress(toAddr) {
+				asRec := loadState(toAddr)
+				if err := checkAccountAuthorized(asRec, true); err != nil {
+					return err
+				}
+			}
+		} else if bytes.Equal(selector, erc20TransferFromSelector) {
+			// ERC-20 transferFrom(address from, address to, uint256 value)
+			// Must be at least 100 bytes (4 + 32 + 32 + 32)
+			if len(data) < 100 {
+				return transaction.InvalidData
+			}
+			// Check upper 12 bytes of from (owner)
+			for _, b := range data[4:16] {
+				if b != 0 {
+					return transaction.InvalidData
+				}
+			}
+			ownerAddr := eth_common.BytesToAddress(data[16:36])
+			// Check upper 12 bytes of to (recipient)
+			for _, b := range data[36:48] {
+				if b != 0 {
+					return transaction.InvalidData
+				}
+			}
+			toAddr := eth_common.BytesToAddress(data[48:68])
+
+			// Check token owner (from)
+			if !isSystemOrExemptAddress(ownerAddr) {
+				asOwner := loadState(ownerAddr)
+				if err := checkAccountAuthorized(asOwner, false); err != nil {
+					return err
+				}
+			}
+
+			// Check token recipient (to)
+			if !isSystemOrExemptAddress(toAddr) {
+				asRec := loadState(toAddr)
+				if err := checkAccountAuthorized(asRec, true); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
 	return nil
+}
+
+// CheckTxRecipient exports the recipient gate check for external callers / tests.
+func CheckTxRecipient(tx types.Transaction, loadState func(eth_common.Address) types.AccountState, pol sigPolicy) *transaction.TransactionError {
+	return pol.recipientRegisteredError(tx, loadState)
 }
 
 // blsAllowed: whether a BLS signature may authenticate this tx. Always in legacy mode; only for node identities in
@@ -289,6 +448,16 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 		key eth_common.Hash
 		pub []byte
 	}
+	loadRecipientState := func(addr eth_common.Address) types.AccountState {
+		if accountDB == nil {
+			return nil
+		}
+		as, err := accountDB.AccountStateReadOnly(addr)
+		if err != nil {
+			return nil
+		}
+		return as
+	}
 	queued := make([]*pending, total)
 	parallel(total, 64, func(i int) {
 		if txs[i] == nil {
@@ -297,6 +466,10 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 		}
 		as := loadState(i)
 		if pol.senderRegisteredError(txs[i], as) != nil {
+			valid[i] = false
+			return
+		}
+		if pol.recipientRegisteredError(txs[i], loadRecipientState) != nil {
 			valid[i] = false
 			return
 		}

@@ -13,20 +13,54 @@ import (
 )
 
 type flagDB struct {
-	mu sync.Mutex
-	m  map[common.Address]bool
+	mu   sync.Mutex
+	m    map[common.Address]bool
+	prov map[common.Address]bool
+	lock map[common.Address]bool
 }
 
-func newFlagDB() *flagDB { return &flagDB{m: map[common.Address]bool{}} }
+func newFlagDB() *flagDB {
+	return &flagDB{
+		m:    map[common.Address]bool{},
+		prov: map[common.Address]bool{},
+		lock: map[common.Address]bool{},
+	}
+}
+
 func (f *flagDB) GetParentRegistered(a common.Address) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.m[a]
 }
+
 func (f *flagDB) SetParentRegistered(a common.Address, v bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.m[a] = v
+}
+
+func (f *flagDB) GetProvisional(a common.Address) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.prov[a]
+}
+
+func (f *flagDB) SetProvisional(a common.Address, v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prov[a] = v
+}
+
+func (f *flagDB) GetLocked(a common.Address) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lock[a]
+}
+
+func (f *flagDB) SetLocked(a common.Address, v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lock[a] = v
 }
 
 func clusterKeyOf(b byte) cm.PublicKey {

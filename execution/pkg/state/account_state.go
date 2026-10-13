@@ -37,6 +37,8 @@ type AccountState struct {
 	publicKeyBls       []byte
 	accountType        pb.ACCOUNT_TYPE
 	parentRegistered   bool
+	locked             bool
+	provisional        bool
 	isDirty            bool
 }
 
@@ -64,6 +66,8 @@ func (as *AccountState) Proto() *pb.AccountState {
 		PublicKeyBls:     as.publicKeyBls,
 		AccountType:      as.accountType,
 		ParentRegistered: as.parentRegistered,
+		Locked:           as.locked,
+		Provisional:      as.provisional,
 	}
 	if as.smartContractState != nil {
 		pbAs.SmartContractState = as.smartContractState.Proto()
@@ -89,6 +93,8 @@ func (as *AccountState) FromProto(pbData *pb.AccountState) {
 	as.publicKeyBls = pbData.PublicKeyBls
 	as.accountType = pbData.AccountType
 	as.parentRegistered = pbData.ParentRegistered
+	as.locked = pbData.Locked
+	as.provisional = pbData.Provisional
 }
 
 func (as *AccountState) Marshal() ([]byte, error) {
@@ -130,6 +136,8 @@ func (as *AccountState) Copy() types.AccountState {
 	}
 	copyAs.accountType = as.accountType
 	copyAs.parentRegistered = as.parentRegistered
+	copyAs.locked = as.locked
+	copyAs.provisional = as.provisional
 	copyAs.isDirty = as.isDirty
 	return copyAs
 }
@@ -160,6 +168,24 @@ func (as *AccountState) ParentRegistered() bool {
 
 func (as *AccountState) SetParentRegistered(registered bool) {
 	as.parentRegistered = registered
+	as.isDirty = true
+}
+
+func (as *AccountState) IsLocked() bool {
+	return as.locked
+}
+
+func (as *AccountState) SetLocked(locked bool) {
+	as.locked = locked
+	as.isDirty = true
+}
+
+func (as *AccountState) IsProvisional() bool {
+	return as.provisional
+}
+
+func (as *AccountState) SetProvisional(provisional bool) {
+	as.provisional = provisional
 	as.isDirty = true
 }
 
@@ -326,6 +352,8 @@ type JsonAccountState struct {
 	PublicKeyBls       string                  `json:"publicKeyBls"`
 	AccountType        int32                   `json:"accountType"`
 	ParentRegistered   bool                    `json:"parent_registered,omitempty"`
+	Locked             bool                    `json:"locked,omitempty"`
+	Provisional        bool                    `json:"provisional,omitempty"`
 }
 
 func (j *JsonAccountState) ToAccountState() *AccountState {
@@ -344,6 +372,8 @@ func (j *JsonAccountState) ToAccountState() *AccountState {
 	as.publicKeyBls = common.FromHex(j.PublicKeyBls)
 	as.accountType = pb.ACCOUNT_TYPE(j.AccountType)
 	as.parentRegistered = j.ParentRegistered
+	as.locked = j.Locked
+	as.provisional = j.Provisional
 	return as
 }
 
@@ -361,6 +391,8 @@ func (j *JsonAccountState) FromAccountState(as *AccountState) {
 	j.PublicKeyBls = hex.EncodeToString(as.publicKeyBls)
 	j.AccountType = int32(as.accountType)
 	j.ParentRegistered = as.parentRegistered
+	j.Locked = as.locked
+	j.Provisional = as.provisional
 }
 
 func MarshalSCStatesWithBlockNumber(

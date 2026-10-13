@@ -19,6 +19,10 @@ type AccountStateDB interface {
 	SetNonce(addr common.Address, nonce uint64)
 	GetParentRegistered(addr common.Address) bool
 	SetParentRegistered(addr common.Address, registered bool)
+	GetProvisional(addr common.Address) bool
+	SetProvisional(addr common.Address, provisional bool)
+	GetLocked(addr common.Address) bool
+	SetLocked(addr common.Address, locked bool)
 }
 
 type CrossNodeHandler struct {

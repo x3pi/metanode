@@ -223,6 +223,9 @@ func TestAccountGate_Matrix(t *testing.T) {
 				AccountGate:     tc.gate,
 			})
 			cs.GetAccountStateDB().SetState(tc.as)
+			asRec := state.NewAccountState(to)
+			asRec.SetParentRegistered(true)
+			cs.GetAccountStateDB().SetState(asRec)
 
 			rotateVerifiedSignatures()
 			rotateVerifiedSignatures()
@@ -286,6 +289,10 @@ func TestAccountGate_SignatureCacheBehavior(t *testing.T) {
 	as.SetParentRegistered(false) // Initially UNREGISTERED
 	cs.GetAccountStateDB().SetState(as)
 
+	asRec := state.NewAccountState(to)
+	asRec.SetParentRegistered(true)
+	cs.GetAccountStateDB().SetState(asRec)
+
 	rotateVerifiedSignatures()
 	rotateVerifiedSignatures()
 
@@ -346,6 +353,10 @@ func TestAccountGate_SameBlockPreBlockState(t *testing.T) {
 	preBlockAlice.SetParentRegistered(false)
 	cs.GetAccountStateDB().SetState(preBlockAlice)
 
+	asRec := state.NewAccountState(to)
+	asRec.SetParentRegistered(true)
+	cs.GetAccountStateDB().SetState(asRec)
+
 	// In Block N, evaluating aliceTx against pre-block state must drop it
 	assert.False(t, checkTxSignature(aliceTx, preBlockAlice, pol), "must be dropped in same block when evaluated against pre-block state")
 
@@ -393,6 +404,9 @@ func TestAccountGate_CrossClusterReplay(t *testing.T) {
 	asA.SetNonce(1)
 	asA.SetParentRegistered(true) // Registered on Cluster A
 	csA.GetAccountStateDB().SetState(asA)
+	asRecA := state.NewAccountState(to)
+	asRecA.SetParentRegistered(true)
+	csA.GetAccountStateDB().SetState(asRecA)
 
 	// Setup Cluster B (gate ON)
 	csB := setupTestChainState(t)
@@ -406,6 +420,9 @@ func TestAccountGate_CrossClusterReplay(t *testing.T) {
 	asB.SetNonce(1)
 	asB.SetParentRegistered(false) // NOT registered on Cluster B
 	csB.GetAccountStateDB().SetState(asB)
+	asRecB := state.NewAccountState(to)
+	asRecB.SetParentRegistered(true)
+	csB.GetAccountStateDB().SetState(asRecB)
 
 	// Cluster A: Admission and execution both accept
 	assert.Nil(t, VerifyTransaction(userTx, csA, asA), "Cluster A must accept registered user tx")

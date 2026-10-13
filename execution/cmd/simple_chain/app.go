@@ -379,6 +379,8 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	app.regRelay = rollup.NewRegistrationRelay(parentClient, app.keyPair.PublicKey(),
 		func(digest []byte) cm.Sign { return bls.Sign(app.keyPair.PrivateKey(), digest) },
 		stateDBAdapter.GetParentRegistered)
+	app.regRelay.SetProvisionalChecker(stateDBAdapter.GetProvisional)
+	app.regRelay.SetLockedChecker(stateDBAdapter.GetLocked)
 	if app.storageManager != nil && app.storageManager.GetStorageMapping() != nil {
 		store := rollup.NewKVRelayStore(durableKV{app.storageManager.GetStorageMapping()})
 		if err := app.regRelay.SetStore(store); err != nil {
@@ -627,7 +629,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		return rollup.HasPendingAttestation(&smartContractDBAdapter{chainState: app.chainState},
 			parentchain.ParentChainID, user, app.keyPair.PublicKey(), parentSeq, attestKey.PublicKey())
 	}
-	app.regWorker.EventProposer = func(payload []byte) error {
+	proposeRegPayload := func(payload []byte, kind string) error {
 		rollupNonceMutex.Lock()
 		defer rollupNonceMutex.Unlock()
 
@@ -650,7 +652,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			rollupLastProgress = time.Now()
 		}
 		payloadHash := e_common.BytesToHash(crypto.Keccak256(payload))
-		inflightKey := rollupInflightKey{msgID: payloadHash, typ: rollup.EventType(rollup.SystemPayloadKindAccountRegistered)}
+		inflightKey := rollupInflightKey{msgID: payloadHash, typ: rollup.EventType(kind)}
 		if _, pending := rollupInflight[inflightKey]; pending {
 			return nil
 		}
@@ -678,10 +680,55 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		if err == nil {
 			rollupInflight[inflightKey] = rollupPendingNonce
 			rollupPendingNonce++
-			logger.Info("📡 [REGISTRATION-PROPOSER] Proposed account_registered event to Tx Pool (Nonce %d)", tx.GetNonce())
+			logger.Info("📡 [REGISTRATION-PROPOSER] Proposed %s event to Tx Pool (Nonce %d)", kind, tx.GetNonce())
 		}
 		return err
 	}
+
+	app.regWorker.EventProposer = func(payload []byte) error {
+		return proposeRegPayload(payload, rollup.SystemPayloadKindAccountRegistered)
+	}
+
+	app.regRelay.SetProvisionalProposer(func(user e_common.Address, userSig []byte) error {
+		payload := rollup.AccountRegistrationPayload{
+			Kind:       rollup.SystemPayloadKindAccountProvisional,
+			User:       user,
+			ClusterKey: app.keyPair.PublicKey(),
+			UserSig:    userSig,
+		}
+		if ak := attestKey; ak != nil {
+			digest := rollup.ComputeAccountProvisionalAttestDigest(app.config.ChainId.Uint64(), user, app.keyPair.PublicKey(), userSig)
+			payload.Attestations = []rollup.RegistrationAttestation{{
+				ValidatorPubkey: ak.PublicKey(),
+				Signature:       bls.Sign(ak.PrivateKey(), digest),
+			}}
+		}
+		data, err := payload.MarshalProto()
+		if err != nil {
+			return err
+		}
+		return proposeRegPayload(data, rollup.SystemPayloadKindAccountProvisional)
+	})
+
+	app.regRelay.SetLockProposer(func(user e_common.Address, homeCluster cm.PublicKey) error {
+		payload := rollup.AccountRegistrationPayload{
+			Kind:        rollup.SystemPayloadKindAccountLocked,
+			User:        user,
+			HomeCluster: homeCluster,
+		}
+		if ak := attestKey; ak != nil {
+			digest := rollup.ComputeAccountLockedAttestDigest(app.config.ChainId.Uint64(), user, homeCluster, 0)
+			payload.Attestations = []rollup.RegistrationAttestation{{
+				ValidatorPubkey: ak.PublicKey(),
+				Signature:       bls.Sign(ak.PrivateKey(), digest),
+			}}
+		}
+		data, err := payload.MarshalProto()
+		if err != nil {
+			return err
+		}
+		return proposeRegPayload(data, rollup.SystemPayloadKindAccountLocked)
+	})
 
 	if app.config.IsMining {
 		// 1. Khởi tạo EthTransactionBroadcaster

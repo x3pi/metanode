@@ -309,6 +309,21 @@ func VerifyTransaction(
 		return regErr
 	}
 
+	loadRecipientState := func(addr eth_common.Address) types.AccountState {
+		if chainState == nil || chainState.GetAccountStateDB() == nil {
+			return nil
+		}
+		recAs, err := chainState.GetAccountStateDB().AccountStateReadOnly(addr)
+		if err != nil {
+			return nil
+		}
+		return recAs
+	}
+	if recErr := pol.recipientRegisteredError(tx, loadRecipientState); recErr != nil {
+		logger.Warn("❌ [VERIFY] Recipient/owner rejected by account gate (%s): txHash=%s", recErr.Description, tx.Hash().Hex())
+		return recErr
+	}
+
 	if as.AccountType() == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		if !tx.ValidSecpSign() {
 			return transaction.RequiresTwoSignatures

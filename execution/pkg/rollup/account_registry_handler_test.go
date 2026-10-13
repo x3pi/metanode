@@ -11,12 +11,16 @@ import (
 )
 
 type mockRegistryStateDB struct {
-	flags map[common.Address]bool
+	flags       map[common.Address]bool
+	provisional map[common.Address]bool
+	locked      map[common.Address]bool
 }
 
 func newMockRegistryStateDB() *mockRegistryStateDB {
 	return &mockRegistryStateDB{
-		flags: make(map[common.Address]bool),
+		flags:       make(map[common.Address]bool),
+		provisional: make(map[common.Address]bool),
+		locked:      make(map[common.Address]bool),
 	}
 }
 
@@ -26,6 +30,22 @@ func (m *mockRegistryStateDB) GetParentRegistered(addr common.Address) bool {
 
 func (m *mockRegistryStateDB) SetParentRegistered(addr common.Address, registered bool) {
 	m.flags[addr] = registered
+}
+
+func (m *mockRegistryStateDB) GetProvisional(addr common.Address) bool {
+	return m.provisional[addr]
+}
+
+func (m *mockRegistryStateDB) SetProvisional(addr common.Address, provisional bool) {
+	m.provisional[addr] = provisional
+}
+
+func (m *mockRegistryStateDB) GetLocked(addr common.Address) bool {
+	return m.locked[addr]
+}
+
+func (m *mockRegistryStateDB) SetLocked(addr common.Address, locked bool) {
+	m.locked[addr] = locked
 }
 
 func makeRegistrationPayload(user common.Address, clusterKey cm.PublicKey, seq uint64) []byte {

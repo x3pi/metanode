@@ -46,4 +46,6 @@ message AccountRegistrationPayloadProto {
   bytes cluster_key = 3;        // 48 bytes BLS public key
   uint64 parent_seq = 4;
   repeated RollupAttestationProto attestations = 5;
+  bytes user_sig = 6;
+  bytes home_cluster = 7;
 }

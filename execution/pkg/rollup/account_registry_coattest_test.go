@@ -22,12 +22,18 @@ func (m *mockCommitteeProvider) GetActiveCommitteeBLSKeys() ([]cm.PublicKey, err
 }
 
 type coattestMockStateDB struct {
-	mu         sync.Mutex
-	registered map[common.Address]bool
+	mu          sync.Mutex
+	registered  map[common.Address]bool
+	provisional map[common.Address]bool
+	locked      map[common.Address]bool
 }
 
 func newCoattestMockStateDB() *coattestMockStateDB {
-	return &coattestMockStateDB{registered: make(map[common.Address]bool)}
+	return &coattestMockStateDB{
+		registered:  make(map[common.Address]bool),
+		provisional: make(map[common.Address]bool),
+		locked:      make(map[common.Address]bool),
+	}
 }
 
 func (m *coattestMockStateDB) GetParentRegistered(addr common.Address) bool {
@@ -40,6 +46,30 @@ func (m *coattestMockStateDB) SetParentRegistered(addr common.Address, reg bool)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.registered[addr] = reg
+}
+
+func (m *coattestMockStateDB) GetProvisional(addr common.Address) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.provisional[addr]
+}
+
+func (m *coattestMockStateDB) SetProvisional(addr common.Address, prov bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.provisional[addr] = prov
+}
+
+func (m *coattestMockStateDB) GetLocked(addr common.Address) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.locked[addr]
+}
+
+func (m *coattestMockStateDB) SetLocked(addr common.Address, locked bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.locked[addr] = locked
 }
 
 func TestAccountRegistryHandler_CoAttestation(t *testing.T) {
