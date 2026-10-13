@@ -1,0 +1,72 @@
+diff --git a/execution/pkg/network/connection.go b/execution/pkg/network/connection.go
+index 6b232161..fdbdeb1a 100644
+--- a/execution/pkg/network/connection.go
++++ b/execution/pkg/network/connection.go
+@@ -901,6 +901,9 @@ func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Reque
+ 
+ 		req := requestPool.Get().(network.Request)
+ 		req.Reset(c, NewMessage(msgProto))
++		if isTxSubmissionCommand(msgProto.GetHeader().GetCommand()) {
++			netDiagA.Add(1)
++		}
+ 
+ 		// Transaction submissions are never dropped here: the client is fire-and-forget, so a dropped batch is an
+ 		// unrecoverable nonce gap. Wait for room (this stops reading the socket, which is the backpressure) until the
+@@ -908,6 +911,7 @@ func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Reque
+ 		if isTxSubmissionCommand(msgProto.GetHeader().GetCommand()) {
+ 			select {
+ 			case requestChan <- req:
++				netDiagB.Add(1)
+ 			case <-quit:
+ 				requestPool.Put(req)
+ 				logger.Warn("readLoop %s: quit signal received, discarding request and exiting.", remoteAddr)
+diff --git a/execution/pkg/network/server.go b/execution/pkg/network/server.go
+index ef3be942..59a2bf6c 100644
+--- a/execution/pkg/network/server.go
++++ b/execution/pkg/network/server.go
+@@ -122,6 +122,9 @@ func (s *SocketServer) startWorkerPool() {
+ 							}
+ 						}()
+ 
++						if isTxSubmissionCommand(request.Message().Command()) {
++							netDiagE.Add(1)
++						}
+ 						if err := s.handler.HandleRequest(request); err != nil {
+ 							logger.Warn(
+ 								"Worker %d: Error from handler while processing request from %s (Command: %s): %v",
+@@ -146,13 +149,16 @@ func (s *SocketServer) startWorkerPool() {
+ //  1. InitConnection uses BLOCKING send (never dropped even when requestChan is full)
+ //  2. initReady gate ensures all other commands WAIT until InitConnection is queued
+ //     This guarantees ProcessInitConnection runs before SendTransaction for the same client
+-func (s *SocketServer) HandleConnection(conn network.Connection) error {
++func (s *SocketServer) HandleConnection(conn network.Connection) (retErr error) {
+ 	logger.Info("⚠️  [SERVER DEBUG] HandleConnection started for remote: %v", conn.RemoteAddrSafe())
+ 	requestChan, errorChan := conn.RequestChan()
+ 	if requestChan == nil || errorChan == nil {
+ 		return errors.New("request or error channel is nil")
+ 	}
+ 
++	defer func() {
++		logger.Info("[NETDIAG] HandleConnection exit remote=%v err=%v pending_in_requestChan=%d", conn.RemoteAddrSafe(), retErr, len(requestChan))
++	}()
+ 	// Ensure the connection is cleaned up when this handler exits for any reason
+ 	defer func() {
+ 		if r := recover(); r != nil {
+@@ -192,6 +198,9 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
+ 	// handler must stop (server shutting down).
+ 	dispatch := func(request network.Request) error {
+ 		cmd := request.Message().Command()
++		if isTxSubmissionCommand(cmd) {
++			netDiagC.Add(1)
++		}
+ 
+ 		if cmd == p_common.InitConnection {
+ 			// ─── InitConnection: BLOCKING send (NEVER drop) ──────────────
+@@ -245,6 +254,7 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
+ 			case <-s.ctx.Done():
+ 				return s.ctx.Err()
+ 			case s.requestChan <- request:
++				netDiagD.Add(1)
+ 			}
+ 			return nil
+ 		}

@@ -19,7 +19,8 @@ Quy tắc: không thêm dòng "RE-VERIFIED" nếu chưa có file thô trong `not
 | 12 | Raft burst ≈ 13k tx/s (20k/25k/30k) | NOT RE-VERIFIED | — | Công cụ đo mới chưa chạy trên Raft |
 | 13 | Số liệu GOGC, drift RSS, TTL, fsync | NOT RE-VERIFIED | — | Chưa chạy lại |
 
-| 14 | Tx client "gửi" nhưng validator không nhận (sustained, 5/19 lượt hợp lệ, 44k–164k tx) | OPEN | tái hiện ở 3 lô, 0/10 ở lô cuối; bộ đếm phẳng 120 s sau, hàng đợi socket rỗng — evidence:tps_ingress_gap_b4 | Vị trí mất chưa biết; chưa có goroutine dump |
+| 14 | Tx client "gửi" nhưng validator không nhận (sustained, ~30% lượt trước bản sửa, 34k–191k tx) | RESOLVED (nguyên nhân + sửa + kiểm chứng) | nguyên nhân: `HandleConnection` bỏ hàng đợi khi idle timeout — evidence:tps_ingress_rootcause_hunt5_run2; sau sửa 13/13 lượt hợp lệ không mất — evidence:tps_ingress_fix_validation | Chạy trên 1 máy; chưa Raft/nhiều máy |
+| 15 | Validator tự thoát với `nomt_ffi: failed to commit payload` (stake_db, block 45) | OPEN | 1 lần quan sát — evidence:tps_ingress_node_crash | Nguyên nhân chưa biết; chưa tái hiện |
 
 ## Giới hạn
 - Chỉ các dòng RE-VERIFIED / NOT REPRODUCED có file thô ở `note/evidence/`; mọi dòng khác chỉ là trích.

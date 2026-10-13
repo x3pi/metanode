@@ -3,6 +3,8 @@
 Nhãn: **[ĐO]** = lệnh chạy trong phiên này, có file thô; **[TÍNH]**; **[ĐỌC CODE]**; **[GIẢ THUYẾT]**; **[CHƯA ĐO]**.
 Evidence: `note/evidence/tps_ingress_gap_20261013/` (manifest `MANIFEST.json`). Tiếp nối `note/tps_counted_report_20261013.md` (mục 3.2).
 
+> **Đính chính (cùng ngày):** (1) Câu "log node không có cảnh báo/lỗi nào" ở mục 3.1 chỉ đúng cho log stdout của node; log riêng của node nằm ở `val*/logs/<ngày>/execution.log` mà lúc đó tôi chưa đọc. (2) Nguyên nhân mất tx đã được tìm ra và sửa: xem `note/tps_ingress_rootcause_report_20261013.md`.
+
 ## 1. Câu hỏi
 Ở báo cáo trước, 2 trong 5 lượt sustained có số tx client coi là đã gửi lớn hơn số validator nhận (mọi tx đã nhận đều lên chuỗi). Tx "mất" ở đâu, và có tái hiện được không? Đồng thời: số TPS đếm có thấp hơn số công cụ cũ không, khi n lớn hơn?
 
