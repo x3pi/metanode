@@ -1,0 +1,63 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "lw_repro",
+      "command": "job_lw.sh: lw_repro (crossbeam/std) 4 configs x 300s",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "374bd12cbc1dad53becd28a8b7afd1d213f32ff2",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T06:53:52Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "environment.txt",
+          "sha256": "963ef7ab7da85134dfb156160f7cdae2f4a67e6f4592436230800f6a0e47a053",
+          "bytes": 455
+        },
+        {
+          "path": "lw_crossbeam_load0.log",
+          "sha256": "5f684e7345addc81c66eaaddf12d4c34013c4cca5de797f0512bbefb896a1533",
+          "bytes": 233
+        },
+        {
+          "path": "lw_crossbeam_load100.log",
+          "sha256": "407d932bde41a32a963581a526c97bce6544ab8ce75be6d758675d19d6094dbc",
+          "bytes": 236
+        },
+        {
+          "path": "lw_crossbeam_load200.log",
+          "sha256": "600758044a8c4a6a570732d56b61fca9803b818f660a7e70ae1c4f53e4935bfd",
+          "bytes": 234
+        },
+        {
+          "path": "lw_std_load100.log",
+          "sha256": "dd4356afd999a7a8511a5e109dde3d81e9c7666951fbfdf4349692c35ca43e97",
+          "bytes": 224
+        },
+        {
+          "path": "lw_repro_main.rs.txt",
+          "sha256": "073409a8473e04e89f30e7c5f25b14398821b9a72c74c14b50a5282dc7fb8310",
+          "bytes": 6836
+        },
+        {
+          "path": "Cargo.toml.txt",
+          "sha256": "79209aa6c0b5d653f17edce2314f750b4d9173b6d4cdf193cbd4566c85009582",
+          "bytes": 196
+        },
+        {
+          "path": "job_lw.sh.txt",
+          "sha256": "e8b28f9963f4241722d1871be6cba9084d3a7cefc9fe4c4bb3bd828cac274d25",
+          "bytes": 956
+        },
+        {
+          "path": "done.flag",
+          "sha256": "0ed5569e32690a0b67b38e076c8d7a1c34e18fd997cc6244bb59bb1d8f2d4b1c",
+          "bytes": 12
+        }
+      ]
+    }
+  ],
+  "report": "note/lost_wakeup_repro_20261013.md"
+}
