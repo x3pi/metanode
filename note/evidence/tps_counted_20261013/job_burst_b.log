@@ -1,0 +1,39 @@
+== run_tps_counted mode=burst runs=7 tag=bft_burst25k_b bins=/tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad/bins head=2831d79e
+== uname: 6.8.0-139-generic  cpus=104  loadavg(start)=0.13 0.49 1.58 2/1717 2816806
+
+=== RUN 1/7 ===
+{"run": 1, "paths_rewritten_files": 11, "cluster_start_seconds": 6.6, "baseline_rss_mb": 1475, "template_disk_mb_val0": 1844, "uptime_before": "0.50 0.56 1.59 2/2810 2818966", "blast_wall_seconds": 6.3, "blast_exit": 0, "uptime_after": "4.70 1.43 1.87 1/9563 2826014", "peak_rss_mb_tool": 7207, "tool_version": "secp_tps_blast/2 (chain-counted)", "bytes_sent": 25000, "received_sum": 25000, "rejected_sum": 0, "committed_ours": 25000, "committed_total": 25000, "loss": 0, "tps_end_to_end": 8470.153619235876, "tps_during_injection": 0, "tps_active_commit": 19989.521253084877, "drain_seconds": 2.873380033, "backlog_at_inject_end": 25000, "inject_seconds": 0.078160296, "end_to_end_seconds": 2.951540329, "parity": "OK: all 4 validators agree on hash+stateRoot of #4", "legacy_effective_tps": 8222.769403086497, "legacy_confirmed": 25000, "latency_p50_ms": 1852}
+    stop_reason: reference validator showed 25000 >= 25000 txs and was idle for 1.5s
+
+=== RUN 2/7 ===
+{"run": 2, "paths_rewritten_files": 11, "cluster_start_seconds": 6.6, "baseline_rss_mb": 1528, "template_disk_mb_val0": 1845, "uptime_before": "3.88 1.45 1.87 2/4579 2828447", "blast_wall_seconds": 6.6, "blast_exit": 0, "uptime_after": "4.45 1.61 1.92 2/10190 2834404", "peak_rss_mb_tool": 6931, "tool_version": "secp_tps_blast/2 (chain-counted)", "bytes_sent": 25000, "received_sum": 25000, "rejected_sum": 0, "committed_ours": 25000, "committed_total": 25000, "loss": 0, "tps_end_to_end": 7998.115057990466, "tps_during_injection": 0, "tps_active_commit": 12504.905374260594, "drain_seconds": 3.042966868, "backlog_at_inject_end": 25000, "inject_seconds": 0.082769611, "end_to_end_seconds": 3.125736479, "parity": "OK: all 4 validators agree on hash+stateRoot of #5", "legacy_effective_tps": 8089.827230782625, "legacy_confirmed": 25000, "latency_p50_ms": 2643}
+    stop_reason: reference validator showed 25000 >= 25000 txs and was idle for 1.5s
+
+=== RUN 3/7 ===
+{"run": 3, "paths_rewritten_files": 11, "cluster_start_seconds": 6.6, "baseline_rss_mb": 1522, "template_disk_mb_val0": 1563, "uptime_before": "3.56 1.59 1.90 1/5133 2836918", "blast_wall_seconds": 6.5, "blast_exit": 0, "uptime_after": "8.85 2.83 2.31 4/11095 2843275", "peak_rss_mb_tool": 6806, "tool_version": "secp_tps_blast/2 (chain-counted)", "bytes_sent": 25000, "received_sum": 25000, "rejected_sum": 0, "committed_ours": 25000, "committed_total": 25000, "loss": 0, "tps_end_to_end": 7996.019064846848, "tps_during_injection": 0, "tps_active_commit": 17247.719107984754, "drain_seconds": 3.037317, "backlog_at_inject_end": 25000, "inject_seconds": 0.089238827, "end_to_end_seconds": 3.126555827, "parity": "OK: all 4 validators agree on hash+stateRoot of #4", "legacy_effective_tps": 8758.783729183184, "legacy_confirmed": 25000, "latency_p50_ms": 2907}
+    stop_reason: reference validator showed 25000 >= 25000 txs and was idle for 1.5s
+
+=== RUN 4/7 ===
+{"run": 4, "paths_rewritten_files": 11, "cluster_start_seconds": 6.6, "baseline_rss_mb": 1494, "template_disk_mb_val0": 1845, "uptime_before": "7.11 2.74 2.28 1/5787 2845715", "blast_wall_seconds": 6.4, "blast_exit": 0, "uptime_after": "10.07 3.54 2.55 2/11484 2851750", "peak_rss_mb_tool": 6330, "tool_version": "secp_tps_blast/2 (chain-counted)", "bytes_sent": 25000, "received_sum": 25000, "rejected_sum": 0, "committed_ours": 25000, "committed_total": 25000, "loss": 0, "tps_end_to_end": 8127.411796243491, "tps_during_injection": 0, "tps_active_commit": 12499.63509815258, "drain_seconds": 2.995636654, "backlog_at_inject_end": 25000, "inject_seconds": 0.080373351, "end_to_end_seconds": 3.076010005, "parity": "OK: all 4 validators agree on hash+stateRoot of #5", "legacy_effective_tps": 8335.47395806503, "legacy_confirmed": 25000, "latency_p50_ms": 2206}
+    stop_reason: reference validator showed 25000 >= 25000 txs and was idle for 1.5s
+
+=== RUN 5/7 ===
+{"run": 5, "paths_rewritten_files": 11, "cluster_start_seconds": 6.6, "baseline_rss_mb": 1480, "template_disk_mb_val0": 1563, "uptime_before": "7.66 3.41 2.53 1/6327 2854240", "blast_wall_seconds": 7.7, "blast_exit": 0, "uptime_after": "278.35 59.60 20.71 1/11804 2860121", "peak_rss_mb_tool": 6649, "tool_version": "secp_tps_blast/2 (chain-counted)", "bytes_sent": 25000, "received_sum": 25000, "rejected_sum": 0, "committed_ours": 25000, "committed_total": 25000, "loss": 0, "tps_end_to_end": 6407.861632989142, "tps_during_injection": 0, "tps_active_commit": 22732.658900142258, "drain_seconds": 3.812603765, "backlog_at_inject_end": 25000, "inject_seconds": 0.088853762, "end_to_end_seconds": 3.901457527, "parity": "OK: all 4 validators agree on hash+stateRoot of #3", "legacy_effective_tps": 7192.501055129835, "legacy_confirmed": 25000, "latency_p50_ms": 2875}
+    stop_reason: reference validator showed 25000 >= 25000 txs and was idle for 1.5s
+
+=== RUN 6/7 ===
+{"run": 6, "paths_rewritten_files": 11, "cluster_start_seconds": 6.6, "baseline_rss_mb": 1523, "template_disk_mb_val0": 1563, "uptime_before": "200.60 56.00 20.36 8/6663 2862565", "blast_wall_seconds": 6.4, "blast_exit": 0, "uptime_after": "189.42 56.09 20.58 3/11887 2868211", "peak_rss_mb_tool": 6865, "tool_version": "secp_tps_blast/2 (chain-counted)", "bytes_sent": 25000, "received_sum": 25000, "rejected_sum": 0, "committed_ours": 25000, "committed_total": 25000, "loss": 0, "tps_end_to_end": 8399.558865651024, "tps_during_injection": 0, "tps_active_commit": 17234.717331391483, "drain_seconds": 2.897225937, "backlog_at_inject_end": 25000, "inject_seconds": 0.079120845, "end_to_end_seconds": 2.9763467820000002, "parity": "OK: all 4 validators agree on hash+stateRoot of #4", "legacy_effective_tps": 7740.430261624765, "legacy_confirmed": 25000, "latency_p50_ms": 2526}
+    stop_reason: reference validator showed 25000 >= 25000 txs and was idle for 1.5s
+
+=== RUN 7/7 ===
+{"run": 7, "paths_rewritten_files": 11, "cluster_start_seconds": 6.6, "baseline_rss_mb": 1519, "template_disk_mb_val0": 1563, "uptime_before": "136.31 52.61 20.19 2/6806 2870643", "blast_wall_seconds": 7.7, "blast_exit": 0, "uptime_after": "115.95 51.01 20.02 2/12329 2876598", "peak_rss_mb_tool": 7123, "tool_version": "secp_tps_blast/2 (chain-counted)", "bytes_sent": 25000, "received_sum": 25000, "rejected_sum": 0, "committed_ours": 25000, "committed_total": 25000, "loss": 0, "tps_end_to_end": 6367.3894562623145, "tps_during_injection": 0, "tps_active_commit": 21725.87955635222, "drain_seconds": 3.829739382, "backlog_at_inject_end": 25000, "inject_seconds": 0.096516452, "end_to_end_seconds": 3.926255834, "parity": "OK: all 4 validators agree on hash+stateRoot of #3", "legacy_effective_tps": 6740.024756418275, "legacy_confirmed": 25000, "latency_p50_ms": 2949}
+    stop_reason: reference validator showed 25000 >= 25000 txs and was idle for 1.5s
+
+=== SUMMARY (all numbers read from tool JSON; paired old-vs-new within the SAME run) ===
+tps_end_to_end(new, counted): n=7 mean=7680.93 sd=902.28 min=6367.39 max=8470.15
+tps_during_injection(new): n=7 mean=0.00 sd=0.00 min=0.00 max=0.00
+legacy_effective_tps(old estimate): n=7 mean=7868.54 sd=699.05 min=6740.02 max=8758.78
+paired (legacy - counted): mean=187.61 sd=522.38 n=7 t=0.95 df=6 p=0.3787 CI95=[-295.51,670.73]
+loss_vs_sent: n=7 mean=0.00 sd=0.00 min=0.00 max=0.00
+parity statuses: ['OK: all 4 validators agree on hash+stateRoot of #3', 'OK: all 4 validators agree on hash+stateRoot of #4', 'OK: all 4 validators agree on hash+stateRoot of #5']
+runs with errors: 0
