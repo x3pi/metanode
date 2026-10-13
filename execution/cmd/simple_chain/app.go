@@ -107,6 +107,7 @@ type App struct {
 	reclaimWorker          *rollup.ReclaimWorker
 	regWorker              *rollup.RegistrationWorker
 	regRelay               *rollup.RegistrationRelay
+	regTracker             *processor.RegistrationTracker
 	parentClient           parentchain.Client
 	rollupEnabled          bool // true only when PARENT_CHAIN_URL is set: rollup workers + parent-chain registration
 
@@ -384,6 +385,10 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		if err := app.regRelay.SetStore(store); err != nil {
 			logger.Warn("Failed to initialize durable storage for registration relay: %v", err)
 		}
+	}
+	app.regTracker = processor.NewRegistrationTracker()
+	if app.regRelay != nil {
+		app.regRelay.SetOnStatusChanged(app.regTracker.PushResult)
 	}
 
 	// Conservation: the cluster's BLS identity represents all of its accounts, so its float on the Parent Chain must
@@ -730,6 +735,11 @@ func (app *App) initProcessors() {
 
 	// Set node references
 	app.blockProcessor.SetNode(app.node)
+
+	// Wire account gate registration components to state processor
+	if app.stateProcessor != nil {
+		app.stateProcessor.SetRegistrationComponents(app.regRelay, app.regTracker)
+	}
 
 	// Set Raw Ethereum Converter for SendRawTransaction / SendRawTransactions (shared with RPC)
 	app.transactionProcessor.SetRawEthConverter(app.ConvertRawEthTxToMetaTx)
@@ -1104,6 +1114,9 @@ func (app *App) Stop() {
 	}
 	if app.regRelay != nil {
 		app.regRelay.Stop()
+	}
+	if app.regTracker != nil {
+		app.regTracker.Stop()
 	}
 
 	// Stop server non-blocking so it doesn't block the critical DB flush if clients hang

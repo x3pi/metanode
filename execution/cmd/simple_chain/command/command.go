@@ -72,4 +72,13 @@ const (
 
 	GetChainId = "GetChainId"
 	ChainId    = "ChainId"
+
+	// Account Gate Registration TCP commands
+	GetRegistrationMessage = "GetRegistrationMessage"
+	RegistrationMessage    = "RegistrationMessage"
+	RegisterAccount        = "RegisterAccount"
+	RegisterAccountAck     = "RegisterAccountAck"
+	RegistrationResult     = "RegistrationResult"
+	GetRegistrationStatus  = "GetRegistrationStatus"
+	RegistrationStatus     = "RegistrationStatus"
 )
