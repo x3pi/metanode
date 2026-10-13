@@ -1,6 +1,7 @@
 // Scratch probe (not committed): exercises the REAL pkg/utils watchdog under a supervisor.
-//   MODE=stuck   : starts StartWatchdogFatal and never stops it (simulates a hung block-execution phase)
-//   MODE=healthy : starts it, stops it after 500 ms, then idles (watchdog must NOT fire)
+//
+//	MODE=stuck   : starts StartWatchdogFatal and never stops it (simulates a hung block-execution phase)
+//	MODE=healthy : starts it, stops it after 500 ms, then idles (watchdog must NOT fire)
 package main
 
 import (
