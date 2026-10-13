@@ -255,11 +255,15 @@ func (c *rawTCPClient) Close() {
 }
 
 func rpcCallTo(url, method string, params ...interface{}) (json.RawMessage, error) {
+	return rpcCallToTimeout(url, 5*time.Second, method, params...)
+}
+
+func rpcCallToTimeout(url string, timeout time.Duration, method string, params ...interface{}) (json.RawMessage, error) {
 	reqBody, err := json.Marshal(rpcReq{JSONRPC: "2.0", Method: method, Params: params, ID: 1})
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Post(url, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, err

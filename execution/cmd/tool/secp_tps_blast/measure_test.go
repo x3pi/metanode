@@ -82,10 +82,11 @@ func TestParseIngress(t *testing.T) {
 type fakeTx struct{ From, To common.Address }
 
 type fakeChain struct {
-	mu      sync.Mutex
-	blocks  [][]fakeTx // index i => block number i+1 (genesis #0 is empty)
-	hashTag string     // distinguishes a forked validator
-	flaky   int32      // the first N eth_getBlockTransactionCountByNumber calls fail with an RPC error
+	mu       sync.Mutex
+	blocks   [][]fakeTx      // index i => block number i+1 (genesis #0 is empty)
+	hashTag  string          // distinguishes a forked validator
+	flaky    int32           // the first N eth_getBlockTransactionCountByNumber calls fail with an RPC error
+	failFull map[uint64]bool // eth_getBlockByNumber(fullTx=true) fails for these blocks (models a timeout on a huge block)
 }
 
 func (c *fakeChain) head(lag int) uint64 {
@@ -136,6 +137,10 @@ func (c *fakeChain) serve(lag int, tag string, metricsReceived float64) *httptes
 			full, _ := req.Params[1].(bool)
 			c.mu.Lock()
 			defer c.mu.Unlock()
+			if full && c.failFull[n] {
+				fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"timeout"}}`)
+				return
+			}
 			if int(n) > len(c.blocks)-lag {
 				fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":null}`)
 				return
@@ -205,9 +210,13 @@ func runScenario(t *testing.T, total int, keep func(i int) bool, lag []int, tags
 }
 
 func runScenarioFlaky(t *testing.T, total int, keep func(i int) bool, lag []int, tags []string, flaky int32) ChainMeasurement {
+	return runScenarioFull(t, total, keep, lag, tags, flaky, nil)
+}
+
+func runScenarioFull(t *testing.T, total int, keep func(i int) bool, lag []int, tags []string, flaky int32, failFull map[uint64]bool) ChainMeasurement {
 	t.Helper()
 	wlist, wset := makeWallets(50)
-	chain := &fakeChain{flaky: flaky}
+	chain := &fakeChain{flaky: flaky, failFull: failFull}
 	var urls []string
 	for i := range lag {
 		srv := chain.serve(lag[i], tags[i], float64(total))
@@ -288,5 +297,23 @@ func TestFakeChain_TransientCountErrorsDoNotLoseBlocks(t *testing.T) {
 	m := runScenarioFlaky(t, 1000, func(int) bool { return true }, []int{0, 0, 0}, []string{"", "", ""}, 8)
 	if m.CommittedOurs != 1000 || m.LossVsSent != 0 {
 		t.Fatalf("committed=%d loss=%d", m.CommittedOurs, m.LossVsSent)
+	}
+}
+
+// A block whose transactions cannot be fetched (huge block / timeout) must make committed_ours an explicit LOWER bound with an
+// upper bound that covers the whole block, never a silent undercount reported as loss.
+func TestFakeChain_UnfetchedBlockGivesBounds(t *testing.T) {
+	m := runScenarioFull(t, 1000, func(int) bool { return true }, []int{0, 0, 0}, []string{"", "", ""}, 0, map[uint64]bool{2: true})
+	if m.OursExact || len(m.UnfetchedBlocks) != 1 || m.UnfetchedBlocks[0] != 2 {
+		t.Fatalf("exact=%v unfetched=%v", m.OursExact, m.UnfetchedBlocks)
+	}
+	if m.CommittedOurs >= 1000 || m.OursUpperBound < 1000 {
+		t.Fatalf("lower=%d upper=%d (true ours = 1000)", m.CommittedOurs, m.OursUpperBound)
+	}
+	if m.TPSEndToEndUpper <= m.TPSEndToEnd {
+		t.Fatalf("upper-bound tps %v must exceed lower-bound tps %v", m.TPSEndToEndUpper, m.TPSEndToEnd)
+	}
+	if m.CommittedTotalTxs <= 1000 {
+		t.Fatalf("live total must still be exact: %d", m.CommittedTotalTxs)
 	}
 }

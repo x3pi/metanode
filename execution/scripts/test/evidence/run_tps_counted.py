@@ -15,7 +15,9 @@ import argparse
 import csv
 import json
 import os
+import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -109,6 +111,25 @@ def leftover_old_paths(root, old):
     return n
 
 
+def wait_tcp_ready(timeout=90):
+    """Every validator's TCP ingress port must accept connections before the tool starts: the first sustained attempt
+    found one validator's port still refusing (connect refused), so that validator received no load at all."""
+    nodes = json.load(open(f"{BASE}/rpc_nodes.json")).get("tcp_nodes", {})
+    pending = {n: a for n, a in nodes.items()}
+    end = time.time() + timeout
+    while pending and time.time() < end:
+        for n, a in list(pending.items()):
+            host, port = a.rsplit(":", 1)
+            try:
+                socket.create_connection((host, int(port)), timeout=1).close()
+                del pending[n]
+            except OSError:
+                pass
+        if pending:
+            time.sleep(0.5)
+    return sorted(pending), len(nodes)
+
+
 def one_run(i, args, outdir):
     stop_and_clean()
     # cp -a keeps the sparse NOMT files sparse. shutil.copytree densified them (apparent size ~80 GB per validator,
@@ -135,6 +156,10 @@ def one_run(i, args, outdir):
     if r.returncode != 0:
         return {"run": i, "error": f"cluster start failed: {r.stderr[-300:]}"}
     start_s = time.time() - t0
+    not_ready, n_tcp = wait_tcp_ready()
+    if not_ready:
+        stop_and_clean()
+        return {"run": i, "error": f"TCP ingress not ready after wait on: {not_ready}"}
     pm = pids()
     info = {"run": i, "paths_rewritten_files": n_rewritten, "cluster_start_seconds": round(start_s, 1), "node_pids": pm, "baseline_rss_mb": rss_mb(pm),
             "template_disk_mb_val0": disk_mb(f"{BASE}/val0"), "uptime_before": open("/proc/loadavg").read().strip()}
@@ -153,6 +178,9 @@ def one_run(i, args, outdir):
     info["blast_wall_seconds"] = round(time.time() - t1, 1)
     open(f"{outdir}/{args.tag}_run{i}.log", "w").write(b.stdout + "\n--STDERR--\n" + b.stderr)
     info["blast_exit"] = b.returncode
+    mconn = re.search(r"(\d+) TCP connections", b.stdout)
+    info["tcp_connections_used"] = int(mconn.group(1)) if mconn else None
+    info["tcp_endpoints"] = n_tcp
     info["uptime_after"] = open("/proc/loadavg").read().strip()
     info["peak_rss_mb_tool"] = None
     if os.path.isfile(rep):
@@ -166,6 +194,9 @@ def one_run(i, args, outdir):
             "rejected_sum": sum((m.get("rejected_by_validator") or {}).values()) if m.get("ingress_metrics_ok") else None,
             "committed_ours": m.get("committed_ours"),
             "committed_total": m.get("committed_total_txs"),
+            "ours_exact": m.get("committed_ours_exact"),
+            "ours_upper_bound": m.get("committed_ours_upper_bound"),
+            "tps_end_to_end_upper": m.get("tps_end_to_end_upper_bound"),
             "loss": m.get("loss_vs_sent"),
             "tps_end_to_end": m.get("tps_end_to_end"),
             "tps_during_injection": m.get("tps_during_injection"),
@@ -183,6 +214,8 @@ def one_run(i, args, outdir):
         })
     else:
         info["error"] = "tool produced no JSON report"
+    if info.get("tcp_connections_used") is not None and info["tcp_connections_used"] != info["tcp_endpoints"]:
+        info["error"] = f"tool used {info['tcp_connections_used']} of {info['tcp_endpoints']} TCP endpoints: some validator got no load"
     # blocks from the chain, independent of the tool, for a second source
     stop_and_clean()
     return info
@@ -219,10 +252,10 @@ def main():
         rows.append(row)
         print(json.dumps({k: v for k, v in row.items() if k not in ("node_pids", "stop_reason")}), flush=True)
         print(f"    stop_reason: {row.get('stop_reason')}", flush=True)
-    keys = ["run", "bytes_sent", "received_sum", "rejected_sum", "committed_ours", "committed_total", "loss",
-            "tps_end_to_end", "tps_during_injection", "tps_active_commit", "drain_seconds", "backlog_at_inject_end",
+    keys = ["run", "bytes_sent", "received_sum", "rejected_sum", "committed_ours", "ours_exact", "ours_upper_bound", "committed_total", "loss",
+            "tps_end_to_end", "tps_end_to_end_upper", "tps_during_injection", "tps_active_commit", "drain_seconds", "backlog_at_inject_end",
             "inject_seconds", "end_to_end_seconds", "legacy_effective_tps", "legacy_confirmed", "latency_p50_ms",
-            "parity", "baseline_rss_mb", "peak_rss_mb_tool", "cluster_start_seconds", "blast_exit", "uptime_before", "uptime_after", "error"]
+            "parity", "baseline_rss_mb", "peak_rss_mb_tool", "cluster_start_seconds", "blast_exit", "tcp_connections_used", "tcp_endpoints", "uptime_before", "uptime_after", "error"]
     with open(f"{args.out}/{args.tag}_summary.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
         w.writeheader()

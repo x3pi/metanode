@@ -44,20 +44,24 @@ type timelineEntry struct {
 type ChainMeasurement struct {
 	Method string `json:"method"`
 
-	BytesSentTxs      int     `json:"bytes_sent_txs"`      // txs written to socket / accepted by eth_sendRawTransaction
-	CommittedOurs     int     `json:"committed_ours"`      // txs in blocks (to == target, from in our wallet set)
-	CommittedTotalTxs int     `json:"committed_total_txs"` // every tx in the same blocks
-	LossVsSent        int     `json:"loss_vs_sent"`        // BytesSentTxs - CommittedOurs (may be negative => investigate)
-	LossPctVsSent     float64 `json:"loss_pct_vs_sent"`
+	BytesSentTxs      int      `json:"bytes_sent_txs"`             // txs written to socket / accepted by eth_sendRawTransaction
+	CommittedOurs     int      `json:"committed_ours"`             // txs in blocks (to == target, from in our wallet set)
+	CommittedTotalTxs int      `json:"committed_total_txs"`        // every tx in the same blocks (live count, exact)
+	OursExact         bool     `json:"committed_ours_exact"`       // false when some block's transactions could not be fetched
+	OursUpperBound    int      `json:"committed_ours_upper_bound"` // committed_ours + txs of unfetched blocks
+	UnfetchedBlocks   []uint64 `json:"unfetched_blocks,omitempty"`
+	LossVsSent        int      `json:"loss_vs_sent"` // BytesSentTxs - CommittedOurs (may be negative => investigate)
+	LossPctVsSent     float64  `json:"loss_pct_vs_sent"`
 
 	InjectSeconds   float64 `json:"inject_seconds"`
 	DrainSeconds    float64 `json:"drain_seconds"`      // last our-block observed - inject end (>= 0)
 	EndToEndSeconds float64 `json:"end_to_end_seconds"` // last our-block observed - inject start
 
 	OursByInjectEnd    int     `json:"ours_committed_by_inject_end"`
-	BacklogAtInjectEnd int     `json:"backlog_at_inject_end"`    // BytesSentTxs - OursByInjectEnd
-	TPSDuringInjection float64 `json:"tps_during_injection"`     // OursByInjectEnd / InjectSeconds
-	TPSEndToEnd        float64 `json:"tps_end_to_end"`           // CommittedOurs / EndToEndSeconds
+	BacklogAtInjectEnd int     `json:"backlog_at_inject_end"` // BytesSentTxs - OursByInjectEnd
+	TPSDuringInjection float64 `json:"tps_during_injection"`  // OursByInjectEnd / InjectSeconds
+	TPSEndToEnd        float64 `json:"tps_end_to_end"`        // CommittedOurs / EndToEndSeconds (lower bound when !committed_ours_exact)
+	TPSEndToEndUpper   float64 `json:"tps_end_to_end_upper_bound"`
 	TPSActiveCommit    float64 `json:"tps_active_commit_window"` // CommittedOurs / (last - first our-block observed)
 	FirstCommitSeconds float64 `json:"first_commit_seconds_after_inject_start"`
 
@@ -83,6 +87,7 @@ type measureInput struct {
 	Obs           []blockObs // reference validator, ascending block numbers
 	OursPerBlock  map[uint64]int
 	TotalPerBlock map[uint64]int
+	Unfetched     []uint64 // blocks whose transactions could not be fetched (their `ours` is unknown)
 }
 
 func computeMeasurement(in measureInput) ChainMeasurement {
@@ -92,6 +97,12 @@ func computeMeasurement(in measureInput) ChainMeasurement {
 		InjectSeconds: in.TInjectEnd.Sub(in.TInjectStart).Seconds(),
 	}
 	var firstOurs, lastOurs time.Time
+	unfetched := make(map[uint64]bool, len(in.Unfetched))
+	for _, n := range in.Unfetched {
+		unfetched[n] = true
+	}
+	m.OursExact = len(unfetched) == 0
+	m.UnfetchedBlocks = in.Unfetched
 	for _, o := range in.Obs {
 		ours := in.OursPerBlock[o.Number]
 		total := in.TotalPerBlock[o.Number]
@@ -100,7 +111,12 @@ func computeMeasurement(in measureInput) ChainMeasurement {
 		}
 		m.CommittedOurs += ours
 		m.CommittedTotalTxs += total
-		if ours > 0 {
+		if unfetched[o.Number] {
+			m.OursUpperBound += total // every tx of that block might be ours; the lower bound counts none of them
+		} else {
+			m.OursUpperBound += ours
+		}
+		if ours > 0 || (unfetched[o.Number] && total > 0) {
 			if firstOurs.IsZero() || o.ObservedAt.Before(firstOurs) {
 				firstOurs = o.ObservedAt
 			}
@@ -133,6 +149,7 @@ func computeMeasurement(in measureInput) ChainMeasurement {
 		}
 		if m.EndToEndSeconds > 0 {
 			m.TPSEndToEnd = float64(m.CommittedOurs) / m.EndToEndSeconds
+			m.TPSEndToEndUpper = float64(m.OursUpperBound) / m.EndToEndSeconds
 		}
 		m.FirstCommitSeconds = firstOurs.Sub(in.TInjectStart).Seconds()
 		if w := lastOurs.Sub(firstOurs).Seconds(); w > 0 {
@@ -294,7 +311,10 @@ type fullBlock struct {
 	} `json:"transactions"`
 }
 
-func countOursInBlocks(url string, blocks []uint64, wallets map[common.Address]struct{}, target common.Address) (ours, total map[uint64]int, err error) {
+// fullBlockTimeout is generous on purpose: a block of ~30k txs is tens of MB of JSON that the node serializes on demand.
+const fullBlockTimeout = 180 * time.Second
+
+func countOursInBlocks(url string, blocks []uint64, wallets map[common.Address]struct{}, target common.Address) (ours, total map[uint64]int, unfetched []uint64, err error) {
 	ours = make(map[uint64]int, len(blocks))
 	total = make(map[uint64]int, len(blocks))
 	var mu sync.Mutex
@@ -310,7 +330,7 @@ func countOursInBlocks(url string, blocks []uint64, wallets map[common.Address]s
 			var fb fullBlock
 			var lastErr error
 			for attempt := 0; attempt < 5; attempt++ {
-				res, e := rpcCallTo(url, "eth_getBlockByNumber", fmt.Sprintf("0x%x", n), true)
+				res, e := rpcCallToTimeout(url, fullBlockTimeout, "eth_getBlockByNumber", fmt.Sprintf("0x%x", n), true)
 				if e == nil && string(res) != "null" {
 					if e = json.Unmarshal(res, &fb); e == nil {
 						lastErr = nil
@@ -323,6 +343,7 @@ func countOursInBlocks(url string, blocks []uint64, wallets map[common.Address]s
 			mu.Lock()
 			defer mu.Unlock()
 			if lastErr != nil {
+				unfetched = append(unfetched, n)
 				if firstErr == nil {
 					firstErr = fmt.Errorf("block %d: %w", n, lastErr)
 				}
@@ -340,7 +361,8 @@ func countOursInBlocks(url string, blocks []uint64, wallets map[common.Address]s
 		}(n)
 	}
 	wg.Wait()
-	return ours, total, firstErr
+	sort.Slice(unfetched, func(i, j int) bool { return unfetched[i] < unfetched[j] })
+	return ours, total, unfetched, firstErr
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -473,12 +495,12 @@ func finalizeMeasurement(cfg Config, w *chainWatcher, startBlock uint64, in meas
 		}
 	}
 	sort.Slice(blocks, func(i, j int) bool { return blocks[i] < blocks[j] })
-	ours, total, err := countOursInBlocks(cfg.RPCUrls[0], blocks, wallets, target)
-	in.Obs, in.OursPerBlock, in.TotalPerBlock = obs, ours, total
+	ours, total, unfetched, err := countOursInBlocks(cfg.RPCUrls[0], blocks, wallets, target)
+	in.Obs, in.OursPerBlock, in.TotalPerBlock, in.Unfetched = obs, ours, total, unfetched
 	m := computeMeasurement(in)
 	m.StopReason = reason
 	if err != nil {
-		m.StopReason += fmt.Sprintf(" | WARNING: could not fetch every block (%v); committed_ours is a LOWER BOUND", err)
+		m.StopReason += fmt.Sprintf(" | WARNING: could not fetch %d block(s) (first error: %v); committed_ours is a LOWER BOUND, see committed_ours_upper_bound", len(unfetched), err)
 	}
 
 	after := scrapeAll(cfg.RPCUrls)
@@ -526,7 +548,11 @@ func printMeasurement(m ChainMeasurement) {
 	} else {
 		fmt.Printf("   • received_by_validators: NOT MEASURABLE (a validator's /metrics was unavailable)\n")
 	}
-	fmt.Printf("   • committed_ours (counted in blocks): %d | committed_total_txs in same blocks: %d\n", m.CommittedOurs, m.CommittedTotalTxs)
+	bound := ""
+	if !m.OursExact {
+		bound = fmt.Sprintf(" (LOWER BOUND: %d block(s) not fetched; upper bound %d)", len(m.UnfetchedBlocks), m.OursUpperBound)
+	}
+	fmt.Printf("   • committed_ours (counted in blocks): %d%s | committed_total_txs in same blocks: %d\n", m.CommittedOurs, bound, m.CommittedTotalTxs)
 	fmt.Printf("   • loss_vs_sent: %d (%.2f%%)%s\n", m.LossVsSent, m.LossPctVsSent, map[bool]string{true: "  <-- NEGATIVE: investigate (stale txs from an earlier round or a counting error)", false: ""}[m.LossVsSent < 0])
 	fmt.Printf("   • TPS end-to-end (committed_ours / (last our-block observed - inject start = %.3fs)): %.2f tx/s\n", m.EndToEndSeconds, m.TPSEndToEnd)
 	fmt.Printf("   • TPS during injection (ours committed by inject end = %d, over %.3fs): %.2f tx/s | backlog at inject end: %d | drain after injection: %.3fs\n",
