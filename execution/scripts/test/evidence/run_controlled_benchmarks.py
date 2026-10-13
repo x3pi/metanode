@@ -57,7 +57,7 @@ def stop_and_clean_bench():
 
 def setup_fresh_cluster(gogc=None):
     stop_and_clean_bench()
-    shutil.copytree(TEMPLATE_BASE, BENCH_BASE)
+    subprocess.run(["cp", "-a", TEMPLATE_BASE, BENCH_BASE], check=True)  # cp -a keeps sparse NOMT files sparse (shutil.copytree densified ~80 GB/validator and can fill the disk)
     if gogc is not None:
         for n in NODES:
             cfg_path = f"{BENCH_BASE}/{n}/config.json"

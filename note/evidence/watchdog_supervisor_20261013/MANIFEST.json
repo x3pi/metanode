@@ -1,0 +1,43 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "wdexp_systemd_user",
+      "command": "execution/scripts/test/evidence/watchdog_supervisor_experiment.sh <wd_probe> <out> (transient systemd --user units; probe = execution/cmd/tool/_wd_probe linked to pkg/utils watchdog; script/probe code identical to the recorded commit, the run happened before that commit was made; manifest refreshed after a rebase so the recorded commit is reachable)",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "b5cf67b787c8398875ea73b1650d0c3be04085e3",
+      "git_status": "",
+      "started_at": "2026-10-13T02:13:52Z",
+      "finished_at": "2026-10-13T02:15:55Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "experiment.log",
+          "sha256": "1c1ce5cb4d3344a1de5e3cfbd05815987ba471fd6d345fd463800ffbcdc31d01",
+          "bytes": 6199
+        },
+        {
+          "path": "E1_journal.txt",
+          "sha256": "b3b5106729e13110cc46b28cec3cc71538c4e2984b500b9e04577094cea9219b",
+          "bytes": 2873
+        },
+        {
+          "path": "E2_journal.txt",
+          "sha256": "655315aad9eacc2d27718544572dcb65f9e25cedef51fb835b65ed7fe745621e",
+          "bytes": 2968
+        },
+        {
+          "path": "E6_cons_journal.txt",
+          "sha256": "33c6817be6b1b7b812aea89ee8026ab558709640213e8a990cbac041883e2ba6",
+          "bytes": 849
+        },
+        {
+          "path": "wd_probe_main.go.txt",
+          "sha256": "bfd8b516c59e3e16272b7436f66f99719c52bfa71ca8208cb7f5da2f09c1ba1a",
+          "bytes": 811
+        }
+      ]
+    }
+  ],
+  "report": "note/watchdog_supervisor_audit_20261013.md"
+}

@@ -1,0 +1,20 @@
+Oct 13 02:14:13 root wd_probe[2694598]: probe start pid=2694598 mode=stuck abort_secs="3"
+Oct 13 02:14:13 root wd_probe[2694598]: [WARN][Oct 13 02:14:13]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (500.844547ms)! Ngữ cảnh: probe-context
+Oct 13 02:14:14 root wd_probe[2694598]: [WARN][Oct 13 02:14:14]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (1.002423199s)! Ngữ cảnh: probe-context
+Oct 13 02:14:14 root wd_probe[2694598]: [WARN][Oct 13 02:14:14]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (1.503359344s)! Ngữ cảnh: probe-context
+Oct 13 02:14:15 root wd_probe[2694598]: [WARN][Oct 13 02:14:15]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (2.004178896s)! Ngữ cảnh: probe-context
+Oct 13 02:14:15 root wd_probe[2694598]: [WARN][Oct 13 02:14:15]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (2.505004998s)! Ngữ cảnh: probe-context
+Oct 13 02:14:16 root wd_probe[2694598]: [WARN][Oct 13 02:14:16]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (3.005843624s)! Ngữ cảnh: probe-context
+Oct 13 02:14:16 root wd_probe[2694598]: [ERROR][Oct 13 02:14:16]  🛑 [WATCHDOG-PROBE] stuck for 3s: goroutine dump written to /tmp/metanode_stuck_PROBE_2694598.txt; aborting process (fail-stop) so it restarts and re-syncs
+Oct 13 02:14:17 root systemd[2716]: wdexp-e2.service: Main process exited, code=dumped, status=6/ABRT
+Oct 13 02:14:20 root systemd[2716]: wdexp-e2.service: Scheduled restart job, restart counter is at 1.
+Oct 13 02:14:20 root wd_probe[2694768]: probe start pid=2694768 mode=stuck abort_secs="3"
+Oct 13 02:14:21 root wd_probe[2694768]: [WARN][Oct 13 02:14:21]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (500.796461ms)! Ngữ cảnh: probe-context
+Oct 13 02:14:21 root wd_probe[2694768]: [WARN][Oct 13 02:14:21]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (1.002244985s)! Ngữ cảnh: probe-context
+Oct 13 02:14:22 root wd_probe[2694768]: [WARN][Oct 13 02:14:22]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (1.503215729s)! Ngữ cảnh: probe-context
+Oct 13 02:14:22 root wd_probe[2694768]: [WARN][Oct 13 02:14:22]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (2.004068611s)! Ngữ cảnh: probe-context
+Oct 13 02:14:23 root wd_probe[2694768]: [WARN][Oct 13 02:14:23]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (2.504862144s)! Ngữ cảnh: probe-context
+Oct 13 02:14:23 root wd_probe[2694768]: [WARN][Oct 13 02:14:23]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (3.005731621s)! Ngữ cảnh: probe-context
+Oct 13 02:14:23 root wd_probe[2694768]: [ERROR][Oct 13 02:14:23]  🛑 [WATCHDOG-PROBE] stuck for 3s: goroutine dump written to /tmp/metanode_stuck_PROBE_2694768.txt; aborting process (fail-stop) so it restarts and re-syncs
+Oct 13 02:14:24 root systemd[2716]: wdexp-e2.service: Main process exited, code=dumped, status=6/ABRT
+Oct 13 02:14:27 root systemd[2716]: wdexp-e2.service: Scheduled restart job, restart counter is at 2.

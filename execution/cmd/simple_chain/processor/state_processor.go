@@ -7,9 +7,11 @@ import (
 	"errors" // Đã thêm import này
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"google.golang.org/protobuf/proto"
 
@@ -23,6 +25,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/mining"
 	p_network "github.com/meta-node-blockchain/meta-node/pkg/network"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
@@ -38,6 +41,9 @@ type StateProcessor struct {
 	blockProcessor *BlockProcessor
 	storageManager *storage.StorageManager
 	scResultsCache *lru.Cache[uint64, common.Hash]
+
+	regRelay   *rollup.RegistrationRelay
+	regTracker *RegistrationTracker
 }
 
 func NewStateProcessor(
@@ -52,11 +58,17 @@ func NewStateProcessor(
 		logger.Fatal("Failed to create LRU cache for StateProcessor: %v", err)
 	}
 	return &StateProcessor{
-		messageSender,
-		blockProcessor,
-		storageManager,
-		cache,
+		messageSender:  messageSender,
+		blockProcessor: blockProcessor,
+		storageManager: storageManager,
+		scResultsCache: cache,
 	}
+}
+
+// SetRegistrationComponents configures the registration relay and connection tracker.
+func (sp *StateProcessor) SetRegistrationComponents(relay *rollup.RegistrationRelay, tracker *RegistrationTracker) {
+	sp.regRelay = relay
+	sp.regTracker = tracker
 }
 
 // sendFailureResponse marshals and sends a CompleteJobResponse with Success=false.
@@ -628,4 +640,170 @@ func (sp *StateProcessor) ProcessGetTxHistoryByJobID(request network.Request) er
 		command.TxRewardHistoryByJobID,
 		respBytes,
 	)
+}
+
+// ProcessGetRegistrationMessage handles GetRegistrationMessage: returns 32-byte hashToSign.
+func (sp *StateProcessor) ProcessGetRegistrationMessage(request network.Request) error {
+	if sp.regRelay == nil {
+		return errors.New("account registration is not enabled on this node")
+	}
+	body := request.Message().Body()
+	if len(body) < common.AddressLength {
+		return fmt.Errorf("invalid address length: got %d, expected %d", len(body), common.AddressLength)
+	}
+	addr := common.BytesToAddress(body[:common.AddressLength])
+	digest := sp.regRelay.RegistrationDigest(addr)
+	hashToSign := crypto.Keccak256(digest)
+
+	respMsg := p_network.NewMessage(&pb.Message{
+		Header: &pb.Header{
+			Command: command.RegistrationMessage,
+			ID:      request.Message().ID(),
+		},
+		Body: hashToSign,
+	})
+	return request.Connection().SendMessage(respMsg)
+}
+
+func (sp *StateProcessor) sendRegisterAccountError(request network.Request, errMsg string) error {
+	errResult := &pb.RegistrationResult{
+		Status: string(rollup.RegStatusFailed),
+		Reason: errMsg,
+	}
+	body, _ := proto.Marshal(errResult)
+	respMsg := p_network.NewMessage(&pb.Message{
+		Header: &pb.Header{
+			Command: command.RegisterAccountAck,
+			ID:      request.Message().ID(),
+		},
+		Body: body,
+	})
+	_ = request.Connection().SendMessage(respMsg)
+	return fmt.Errorf("%s", errMsg)
+}
+
+// registerAccountRawLen is the fixed size of the raw binary form: 20-byte address || 65-byte signature.
+const registerAccountRawLen = common.AddressLength + 65
+
+func isTerminalRegistration(s rollup.RegistrationStatus) bool {
+	return s == rollup.RegStatusConfirmed || s == rollup.RegStatusRejected || s == rollup.RegStatusFailed
+}
+
+// ProcessRegisterAccount handles RegisterAccount: parses the request, submits it to the relay (which verifies the user's
+// signature), only THEN subscribes the connection for the asynchronous result, and answers with an ACK.
+//
+// Wire format is decided by length, never by "does it happen to parse as proto": a body of exactly 85 bytes is the raw
+// form; anything else must be a pb.RegisterAccountRequest.
+func (sp *StateProcessor) ProcessRegisterAccount(request network.Request) error {
+	if sp.regRelay == nil {
+		return errors.New("account registration is not enabled on this node")
+	}
+	body := request.Message().Body()
+
+	var addr common.Address
+	var sig []byte
+
+	if len(body) == registerAccountRawLen {
+		addr = common.BytesToAddress(body[:common.AddressLength])
+		sig = body[common.AddressLength:]
+	} else {
+		var req pb.RegisterAccountRequest
+		if err := proto.Unmarshal(body, &req); err != nil || len(req.Address) == 0 {
+			return sp.sendRegisterAccountError(request, "invalid registration request: expected RegisterAccountRequest proto or 85 raw bytes")
+		}
+		if len(req.Address) == common.AddressLength {
+			addr = common.BytesToAddress(req.Address)
+		} else if len(req.Address) == 42 && strings.HasPrefix(string(req.Address), "0x") {
+			addr = common.HexToAddress(string(req.Address))
+		} else {
+			return sp.sendRegisterAccountError(request, "invalid address length in RegisterAccountRequest")
+		}
+		sig = req.Signature
+	}
+
+	if len(sig) != 65 {
+		return sp.sendRegisterAccountError(request, fmt.Sprintf("invalid signature length: %d (expected 65 bytes)", len(sig)))
+	}
+
+	// The relay verifies the user's signature. Nothing is tracked for a request that fails it: an unauthenticated client
+	// must not be able to allocate tracker entries, overwrite another client's subscription, or cancel it.
+	res, err := sp.regRelay.Submit(addr, sig)
+	if err != nil {
+		return sp.sendRegisterAccountError(request, err.Error())
+	}
+
+	subscribed := false
+	if sp.regTracker != nil {
+		subscribed = sp.regTracker.Store(addr, RegConnEntry{
+			Conn:      request.Connection(),
+			MsgID:     request.Message().ID(),
+			CreatedAt: time.Now(),
+		})
+		if !subscribed {
+			logger.Warn("RegisterAccount: push subscription for %s not stored (tracker full or too many waiting connections); the client can poll GetRegistrationStatus", addr.Hex())
+		}
+	}
+
+	ackResult := &pb.RegistrationResult{
+		Status:  string(res.Status),
+		Address: addr.Hex(),
+		Reason:  res.Reason,
+	}
+	if res.HomeCluster != nil {
+		ackResult.HomeCluster = "0x" + hex.EncodeToString(res.HomeCluster[:])
+	}
+	ackBytes, _ := proto.Marshal(ackResult)
+
+	ackMsg := p_network.NewMessage(&pb.Message{
+		Header: &pb.Header{
+			Command: command.RegisterAccountAck,
+			ID:      request.Message().ID(),
+		},
+		Body: ackBytes,
+	})
+	sendErr := request.Connection().SendMessage(ackMsg)
+
+	// Close the race between Submit and Store: if the registration already reached a terminal state (immediately, or while
+	// we were subscribing), the relay's status callback may have fired before our entry existed, so push it ourselves.
+	if subscribed {
+		if cur := sp.regRelay.Status(addr); isTerminalRegistration(cur.Status) {
+			sp.regTracker.PushResult(addr, cur)
+		}
+	}
+	return sendErr
+}
+
+// ProcessGetRegistrationStatus handles GetRegistrationStatus: returns pb.RegistrationResult.
+func (sp *StateProcessor) ProcessGetRegistrationStatus(request network.Request) error {
+	if sp.regRelay == nil {
+		return errors.New("account registration is not enabled on this node")
+	}
+	body := request.Message().Body()
+	if len(body) < common.AddressLength {
+		return fmt.Errorf("invalid address length: got %d, expected %d", len(body), common.AddressLength)
+	}
+	addr := common.BytesToAddress(body[:common.AddressLength])
+	res := sp.regRelay.Status(addr)
+
+	statusResult := &pb.RegistrationResult{
+		Status:  string(res.Status),
+		Address: addr.Hex(),
+		Reason:  res.Reason,
+	}
+	if res.HomeCluster != nil {
+		statusResult.HomeCluster = "0x" + hex.EncodeToString(res.HomeCluster[:])
+	}
+	bodyBytes, err := proto.Marshal(statusResult)
+	if err != nil {
+		return fmt.Errorf("failed to marshal registration status proto: %w", err)
+	}
+
+	respMsg := p_network.NewMessage(&pb.Message{
+		Header: &pb.Header{
+			Command: command.RegistrationStatus,
+			ID:      request.Message().ID(),
+		},
+		Body: bodyBytes,
+	})
+	return request.Connection().SendMessage(respMsg)
 }

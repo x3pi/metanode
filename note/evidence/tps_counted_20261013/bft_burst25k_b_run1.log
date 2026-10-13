@@ -1,0 +1,57 @@
+==================================================================
+🚀 SECP256K1 / EIP-1559 HIGH-PERFORMANCE WORKLOAD BENCHMARK
+   Zero-Fork Compliant (AGENTS.md Part 2.5) | Production SECP Mode
+==================================================================
+🎯 Tracking 4 target simple_chain PIDs: 2817216, 2817581, 2817741, 2818364
+🌐 RPC Pool (4 nodes): http://127.0.0.1:31646, http://127.0.0.1:31647, http://127.0.0.1:31648, http://127.0.0.1:31649
+⚡ TCP Pool (4 nodes): 127.0.0.1:31200, 127.0.0.1:31201, 127.0.0.1:31202, 127.0.0.1:31203
+🆔 Chain ID: 991
+🔑 Loaded 50000 pre-allocated accounts from generated_keys.json
+
+▶️ RUNNING ROUND 1/1
+🏁 Start Block: #1
+
+🔍 Fetching nonces for 25000 accounts across 4 RPC nodes...
+✅ Nonces fetched in 516.816134ms (Errors: 0)
+
+✍️ Pre-signing 25000 1559 transactions...
+✅ Pre-signed 25000 txs in 54.537662ms (458398.82 tx/s signing speed)
+
+🔌 Initializing TCP connection pool (4 endpoints)...
+⚠️ Failed to connect TCP to 127.0.0.1:31203: dial tcp 127.0.0.1:31203: connect: connection refused
+✅ 3 TCP connections established & registered.
+
+🔥 BLASTING 25000 Transactions across cluster (Mode: tcp)...
+📦 Splitting into 25 TCP batches (batch size: 1000)...
+⚡ Wrote 25000 TXs to the transport in 78.160296ms (write speed 319855.49 tx/s — NOT a validator-side number)
+
+⏱️ Tracking Transaction Receipts for Consensus Inclusion & Latency...
+
+📊 BENCHMARK METRICS (Round 1):
+   • Total Submitted:    25000 txs (= bytes_sent_txs: client wrote to transport / got RPC ok; NOT a validator-side number)
+       - validator http://127.0.0.1:31646: received=9000 rejected=0 (delta of master_raw_eth_txs_*_total)
+       - validator http://127.0.0.1:31647: received=8000 rejected=0 (delta of master_raw_eth_txs_*_total)
+       - validator http://127.0.0.1:31648: received=8000 rejected=0 (delta of master_raw_eth_txs_*_total)
+       - validator http://127.0.0.1:31649: received=0 rejected=0 (delta of master_raw_eth_txs_*_total)
+   • received_by_validators: 25000 (rejected 0)
+   • committed_ours (counted in blocks): 25000 | committed_total_txs in same blocks: 25000
+   • loss_vs_sent: 0 (0.00%)
+   • TPS end-to-end (committed_ours / (last our-block observed - inject start = 2.952s)): 8470.15 tx/s
+   • TPS during injection (ours committed by inject end = 0, over 0.078s): 0.00 tx/s | backlog at inject end: 25000 | drain after injection: 2.873s
+   • TPS active commit window (first..last our-block): 19989.52 tx/s | first commit 1.701s after inject start
+   • measurement stop: reference validator showed 25000 >= 25000 txs and was idle for 1.5s
+   • parity: OK: all 4 validators agree on hash+stateRoot of #4
+   • [LEGACY ESTIMATE — do not report] extrapolated_confirmed=25000, effective_tps=8222.77 (sample 50/50, denominator = time after injection until the last sampled receipt)
+   • Latency P50:        1.852274547s
+   • Latency P90:        2.861931021s
+   • Latency P95:        2.866525709s
+   • Latency P99:        3.118516961s
+   • Latency Avg:        2.251125584s
+   • Peak CPU (Nodes):   1232.0%
+   • Peak RSS (4 Target Nodes): 7207 MB (avg 1801.8 MB/node)
+
+🛡️ [ZERO-FORK] OK: all 4 validators agree on hash+stateRoot of #4
+📄 JSON Benchmark report saved to: /tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad/out_counted/bft_burst25k_b_run1.json
+==================================================================
+
+--STDERR--

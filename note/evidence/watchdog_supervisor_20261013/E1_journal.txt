@@ -1,0 +1,20 @@
+Oct 13 02:13:52 root wd_probe[2694023]: probe start pid=2694023 mode=stuck abort_secs="3"
+Oct 13 02:13:53 root wd_probe[2694023]: [WARN][Oct 13 02:13:53]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (500.865578ms)! Ngữ cảnh: probe-context
+Oct 13 02:13:53 root wd_probe[2694023]: [WARN][Oct 13 02:13:53]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (1.002479912s)! Ngữ cảnh: probe-context
+Oct 13 02:13:54 root wd_probe[2694023]: [WARN][Oct 13 02:13:54]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (1.503472814s)! Ngữ cảnh: probe-context
+Oct 13 02:13:54 root wd_probe[2694023]: [WARN][Oct 13 02:13:54]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (2.004422317s)! Ngữ cảnh: probe-context
+Oct 13 02:13:55 root wd_probe[2694023]: [WARN][Oct 13 02:13:55]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (2.505165046s)! Ngữ cảnh: probe-context
+Oct 13 02:13:55 root wd_probe[2694023]: [WARN][Oct 13 02:13:55]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (3.005936909s)! Ngữ cảnh: probe-context
+Oct 13 02:13:55 root wd_probe[2694023]: [ERROR][Oct 13 02:13:55]  🛑 [WATCHDOG-PROBE] stuck for 3s: goroutine dump written to /tmp/metanode_stuck_PROBE_2694023.txt; aborting process (fail-stop) so it restarts and re-syncs
+Oct 13 02:13:55 root wd_probe[2694023]: SIGABRT: abort
+Oct 13 02:13:57 root systemd[2716]: wdexp-e1.service: Main process exited, code=dumped, status=6/ABRT
+Oct 13 02:13:59 root systemd[2716]: wdexp-e1.service: Scheduled restart job, restart counter is at 1.
+Oct 13 02:13:59 root wd_probe[2694177]: probe start pid=2694177 mode=stuck abort_secs="3"
+Oct 13 02:13:59 root wd_probe[2694177]: [WARN][Oct 13 02:13:59]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (500.805131ms)! Ngữ cảnh: probe-context
+Oct 13 02:14:00 root wd_probe[2694177]: [WARN][Oct 13 02:14:00]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (1.00233159s)! Ngữ cảnh: probe-context
+Oct 13 02:14:00 root wd_probe[2694177]: [WARN][Oct 13 02:14:00]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (1.503364873s)! Ngữ cảnh: probe-context
+Oct 13 02:14:01 root wd_probe[2694177]: [WARN][Oct 13 02:14:01]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (2.003751946s)! Ngữ cảnh: probe-context
+Oct 13 02:14:01 root wd_probe[2694177]: [WARN][Oct 13 02:14:01]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (2.504608408s)! Ngữ cảnh: probe-context
+Oct 13 02:14:02 root wd_probe[2694177]: [WARN][Oct 13 02:14:02]  🆘 [WATCHDOG-PROBE] TIẾN TRÌNH KẸT QUÁ LÂU (3.005448668s)! Ngữ cảnh: probe-context
+Oct 13 02:14:02 root wd_probe[2694177]: [ERROR][Oct 13 02:14:02]  🛑 [WATCHDOG-PROBE] stuck for 3s: goroutine dump written to /tmp/metanode_stuck_PROBE_2694177.txt; aborting process (fail-stop) so it restarts and re-syncs
+Oct 13 02:14:02 root wd_probe[2694177]: SIGABRT: abort

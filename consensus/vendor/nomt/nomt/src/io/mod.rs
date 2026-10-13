@@ -230,21 +230,29 @@ impl IoHandle {
     /// exactly the completions it was waiting for, however long that takes: no outcome depends on the elapsed time.
     pub fn recv(&self) -> Result<CompleteIo, RecvError> {
         const RECV_POLL: std::time::Duration = std::time::Duration::from_millis(100);
-        let mut reported = false;
+        // Counts completions that needed at least one full poll slice. That is either genuinely slow I/O or a
+        // lost wake-up that polling recovered; the two cannot be told apart here, so it is only a signal to watch.
+        static SLOW_RECVS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let started = std::time::Instant::now();
         loop {
             match self.completion_receiver.recv_timeout(RECV_POLL) {
-                Ok(complete) => return Ok(complete),
-                Err(RecvTimeoutError::Disconnected) => return Err(RecvError),
-                Err(RecvTimeoutError::Timeout) => {
-                    // A completion queued but we were not woken for it: the lost wake-up this patch works around.
-                    if !reported && !self.completion_receiver.is_empty() {
-                        reported = true;
-                        eprintln!(
-                            "[NOMT-IO] recovered a lost wake-up: {} completion(s) were queued while recv() stayed parked",
-                            self.completion_receiver.len()
-                        );
+                Ok(complete) => {
+                    // crossbeam re-checks the queue when the timeout expires and returns the message as Ok (not as
+                    // Timeout), so a recovered lost wake-up surfaces here after about one poll slice.
+                    if started.elapsed() >= RECV_POLL {
+                        let n = SLOW_RECVS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        if n <= 20 || n % 1000 == 0 {
+                            eprintln!(
+                                "[NOMT-IO] recv waited {:?} (>= one poll slice; slow I/O or a recovered lost wake-up), occurrence #{}",
+                                started.elapsed(),
+                                n
+                            );
+                        }
                     }
+                    return Ok(complete);
                 }
+                Err(RecvTimeoutError::Disconnected) => return Err(RecvError),
+                Err(RecvTimeoutError::Timeout) => continue,
             }
         }
     }

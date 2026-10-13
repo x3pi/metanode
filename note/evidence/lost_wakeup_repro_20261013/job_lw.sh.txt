@@ -1,0 +1,8 @@
+#!/bin/bash
+O=/tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad/lw_out
+{ echo "date: $(date -u +%FT%TZ)"; echo "kernel: $(uname -r)"; rustc -V; cargo -V; grep -A1 'name = "crossbeam-channel"' /tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad/lw_repro/Cargo.lock | tr '\n' ' '; echo; lscpu | grep -E "Model name|^CPU\(s\)|Thread|NUMA node\(s\)"; cat /sys/kernel/mm/transparent_hugepage/enabled; echo "loadavg: $(cat /proc/loadavg)"; } > $O/environment.txt 2>&1
+for cfg in "crossbeam 100" "std 100" "crossbeam 0" "crossbeam 200"; do
+  set -- $cfg; K=$1; L=$2
+  CH=$K LOAD_THREADS=$L RUN_SECS=300 INSTANCES=3 WORKERS=4 STUCK_SECS=5 JITTER_US=50 /tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad/lw_target/release/lw_repro > $O/lw_${K}_load${L}.log 2>&1; echo "exit=$?" >> $O/lw_${K}_load${L}.log
+done
+echo LW-ALL-DONE > $O/done.flag

@@ -81,7 +81,7 @@ def stop_and_kill_bench():
 
 def setup_fresh_cluster():
     stop_and_kill_bench()
-    shutil.copytree(TEMPLATE_BASE, BENCH_BASE)
+    subprocess.run(["cp", "-a", TEMPLATE_BASE, BENCH_BASE], check=True)  # cp -a keeps sparse NOMT files sparse (shutil.copytree densified ~80 GB/validator and can fill the disk)
 
 def start_cluster():
     env = os.environ.copy()

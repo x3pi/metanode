@@ -1,0 +1,328 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "tps_counted_burst_a",
+      "command": "run_tps_counted.py burst 25k x7 (first batch; JSON lost, logs only)",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "0b8cd176915cda73201be9da2d485ffee2f5c246",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T05:43:53Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "bft_burst25k_run1.log",
+          "sha256": "a48afb5ee15cb48ebccfb81accb5191ca023cd2ae7bc99e9a7934d8d2a7941d4",
+          "bytes": 3354
+        },
+        {
+          "path": "bft_burst25k_run2.log",
+          "sha256": "a8fa2b716af0bc5963da7674415d1c444c5ebf3e139a0250846b43e44a763da1",
+          "bytes": 3456
+        },
+        {
+          "path": "bft_burst25k_run3.log",
+          "sha256": "c1f69782094eb20b6091e635c092977818647566ae4b7554ade1f2a7cb536332",
+          "bytes": 3455
+        },
+        {
+          "path": "bft_burst25k_run4.log",
+          "sha256": "7ebfb468314c99f29843a5a4563cf20bf0cadb3a2ffe8f68fe81139b316e917d",
+          "bytes": 3452
+        },
+        {
+          "path": "bft_burst25k_run5.log",
+          "sha256": "d15704b999f1cbd5da5bdb088d71081dd4af91726be63d728be7acea58ff7422",
+          "bytes": 3357
+        },
+        {
+          "path": "bft_burst25k_run6.log",
+          "sha256": "c12367c6fc22c0c7b186e1310187b2451a18df485638424ada621ad3831c09f8",
+          "bytes": 3456
+        },
+        {
+          "path": "bft_burst25k_run7.log",
+          "sha256": "9fe37538c0e176093571cdeded55cdb4c51bcb8ab825cfbddd3e4e6c5943810c",
+          "bytes": 3456
+        },
+        {
+          "path": "job_burst_first_attempt.log",
+          "sha256": "f878014f946d332fca9534fba108fde64806a260d9aaf9eec807d6b974e07eb6",
+          "bytes": 7688
+        }
+      ]
+    },
+    {
+      "id": "tps_counted_burst_b",
+      "command": "run_tps_counted.py burst 25k x7 (second batch)",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "0b8cd176915cda73201be9da2d485ffee2f5c246",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T05:43:54Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "bft_burst25k_b_run1.json",
+          "sha256": "5c579b123fd142f7ef7c1faa2503c20142f556e7bef71ed6c97cf2ff0d470f90",
+          "bytes": 2857
+        },
+        {
+          "path": "bft_burst25k_b_run2.json",
+          "sha256": "a8bbb6eec2c56112a47290f9bef939fea3eda4be187a5c632ecc381c17aa5c8f",
+          "bytes": 2984
+        },
+        {
+          "path": "bft_burst25k_b_run3.json",
+          "sha256": "a8133f40f3331d0557b7e40b4efc2c1034ab3d65b561d18701ba7aba31a90b6c",
+          "bytes": 2862
+        },
+        {
+          "path": "bft_burst25k_b_run4.json",
+          "sha256": "29e5f42e072c7ffc72ade3eb46a546d4df1fb31b88831dda24b5924ae47ad0f8",
+          "bytes": 2977
+        },
+        {
+          "path": "bft_burst25k_b_run5.json",
+          "sha256": "5060f7ea5888fb4bfedff198f067d6a8d265a27661a64b996d4cd1c3e9cfabfb",
+          "bytes": 2737
+        },
+        {
+          "path": "bft_burst25k_b_run6.json",
+          "sha256": "f903aa75940958c51bf4bca53fc61c9af8e54d8be637daffecaa73bdef611f48",
+          "bytes": 2862
+        },
+        {
+          "path": "bft_burst25k_b_run7.json",
+          "sha256": "af4d0f613570223e178ed9d7d0b74485a659e4bdf4c08fc3a6859adf7f65fe9b",
+          "bytes": 2734
+        },
+        {
+          "path": "bft_burst25k_b_run1.log",
+          "sha256": "a7f8890cd815bee0c85ad544f7874dcce361fa7643e999f7f8237f4a3f45f8f6",
+          "bytes": 3500
+        },
+        {
+          "path": "bft_burst25k_b_run2.log",
+          "sha256": "80bceba914197898462c2573eba23d6deae0859ff051a54a68dc897cc26329c7",
+          "bytes": 3399
+        },
+        {
+          "path": "bft_burst25k_b_run3.log",
+          "sha256": "6e8143fb59d7b313882235b6d93ed26ea9437c1ee931962840de5baab7d1c7a8",
+          "bytes": 3500
+        },
+        {
+          "path": "bft_burst25k_b_run4.log",
+          "sha256": "803f3e4a0561d5096cb0fbf1000836ae63f9f9198c8ea638d82e207131a90103",
+          "bytes": 3500
+        },
+        {
+          "path": "bft_burst25k_b_run5.log",
+          "sha256": "d472280d3d921eefa9780a752298048dc33830c29494f3ab5068609c3536ed4c",
+          "bytes": 3498
+        },
+        {
+          "path": "bft_burst25k_b_run6.log",
+          "sha256": "a85ebc1f3e97fe2ec03dabc70c19aa5b235371dbea795f6c9cedfe86f06325a5",
+          "bytes": 3497
+        },
+        {
+          "path": "bft_burst25k_b_run7.log",
+          "sha256": "886b8401bbc35fbe00e8a11b7ab6607479474ddc6eae51a228242141cfb8f283",
+          "bytes": 3500
+        },
+        {
+          "path": "bft_burst25k_b_summary.csv",
+          "sha256": "49df9f474c59624d8e58c099b45f653c8ae8db386a5d5ed702343101794d2234",
+          "bytes": 2273
+        },
+        {
+          "path": "job_burst_b.log",
+          "sha256": "4cec40b5f479264c97e18fc94a7011764ec7ff48bbdafff244650b3572fff9d9",
+          "bytes": 7715
+        }
+      ],
+      "extract": [
+        {
+          "name": "burst_b_counted_mean",
+          "file": "bft_burst25k_b_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean"
+        },
+        {
+          "name": "burst_b_counted_sd",
+          "file": "bft_burst25k_b_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "sd"
+        },
+        {
+          "name": "burst_b_legacy_mean",
+          "file": "bft_burst25k_b_summary.csv",
+          "csv_col": "legacy_effective_tps",
+          "stat": "mean"
+        }
+      ]
+    },
+    {
+      "id": "tps_counted_sustained_v2",
+      "command": "run_tps_counted.py sustained 60s x5 (4 TCP ports)",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "0b8cd176915cda73201be9da2d485ffee2f5c246",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T05:43:54Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "sustained_v2/bft_sustained60_v2_run1.json",
+          "sha256": "ca87d179d96f34579534c506d5336237d1917fe67781728ded8c27a60c41d88f",
+          "bytes": 142484
+        },
+        {
+          "path": "sustained_v2/bft_sustained60_v2_run2.json",
+          "sha256": "0ad77228ecbec09a45fbbf7a4dfe272762fcef96b5484641c2726db05e03ddf1",
+          "bytes": 139031
+        },
+        {
+          "path": "sustained_v2/bft_sustained60_v2_run3.json",
+          "sha256": "e8ae914c3b5095ac0bdabbddae8c72b227d777faadf87cb435475739f105bc82",
+          "bytes": 133954
+        },
+        {
+          "path": "sustained_v2/bft_sustained60_v2_run4.json",
+          "sha256": "0745a0e88b1d881d06384890eb01814b3ececb68ad3cc94d7138750498d30aac",
+          "bytes": 154575
+        },
+        {
+          "path": "sustained_v2/bft_sustained60_v2_run5.json",
+          "sha256": "271f2c2eb9646de5f2d0e6de5159531197378ac91b1b0d330907c342b802b7d3",
+          "bytes": 123811
+        },
+        {
+          "path": "sustained_v2/bft_sustained60_v2_run1.log",
+          "sha256": "02a8ab77bbc4aa62e8338374d84ba6232598368faec36501b24f081eeb462ff4",
+          "bytes": 4032
+        },
+        {
+          "path": "sustained_v2/bft_sustained60_v2_run2.log",
+          "sha256": "5ee44588e39eb6422a53418d11a746388acdb71f9b4db7acbd0c8fbddc29295f",
+          "bytes": 4024
+        },
+        {
+          "path": "sustained_v2/bft_sustained60_v2_run3.log",
+          "sha256": "1a8ffe3e3d0901a83ebd7715f043db6b91de8f4dc526527c73950ff58e949713",
+          "bytes": 4036
+        },
+        {
+          "path": "sustained_v2/bft_sustained60_v2_run4.log",
+          "sha256": "3a44e69a4f9d429758943c0dc1430154b18e2e2c48b36e72db53036550b331bf",
+          "bytes": 4022
+        },
+        {
+          "path": "sustained_v2/bft_sustained60_v2_run5.log",
+          "sha256": "2062160029307ddfee20be03b6e81c4fdb23558476d520ca3727e51efb90ae78",
+          "bytes": 4010
+        },
+        {
+          "path": "sustained_v2/bft_sustained60_v2_summary.csv",
+          "sha256": "76253d8403c651bb350a20b0cf04ad37047ed99ae5f0b8b317e28107a0b9e519",
+          "bytes": 2198
+        },
+        {
+          "path": "sustained_v2/job_sustained_v2.log",
+          "sha256": "1e5e9aa7205cb9a0431b769569d7d629285ccaa1e4da0017e3fcc288a22bf106",
+          "bytes": 6907
+        }
+      ],
+      "extract": [
+        {
+          "name": "sust_counted_mean",
+          "file": "sustained_v2/bft_sustained60_v2_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean"
+        },
+        {
+          "name": "sust_counted_sd",
+          "file": "sustained_v2/bft_sustained60_v2_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "sd"
+        },
+        {
+          "name": "sust_inj_mean",
+          "file": "sustained_v2/bft_sustained60_v2_summary.csv",
+          "csv_col": "tps_during_injection",
+          "stat": "mean"
+        },
+        {
+          "name": "sust_legacy_mean",
+          "file": "sustained_v2/bft_sustained60_v2_summary.csv",
+          "csv_col": "legacy_effective_tps",
+          "stat": "mean"
+        },
+        {
+          "name": "sust_inject_min",
+          "file": "sustained_v2/bft_sustained60_v2_summary.csv",
+          "csv_col": "inject_seconds",
+          "stat": "min"
+        },
+        {
+          "name": "sust_inject_max",
+          "file": "sustained_v2/bft_sustained60_v2_summary.csv",
+          "csv_col": "inject_seconds",
+          "stat": "max"
+        }
+      ]
+    },
+    {
+      "id": "tps_counted_sustained_v1_flawed",
+      "command": "run_tps_counted.py sustained 60s x5 (FLAWED: 3/4 ports, 5s timeout; not a result)",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "0b8cd176915cda73201be9da2d485ffee2f5c246",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T05:43:54Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "sustained_attempt1_flawed/bft_sustained60_run1.log",
+          "sha256": "00fa328afca4913d3614f9f34a8277d518c4f755b4dbd67aa4bfb74f90cca4fe",
+          "bytes": 4307
+        },
+        {
+          "path": "sustained_attempt1_flawed/bft_sustained60_run2.log",
+          "sha256": "11e30c51256cac8206acb0e2996adcaee7819dfb50071584aa182e91740c102c",
+          "bytes": 4303
+        },
+        {
+          "path": "sustained_attempt1_flawed/bft_sustained60_run3.log",
+          "sha256": "bedff456f1a3c538421048098c1b689802bf79dee43d3e22afeb944792bf5a12",
+          "bytes": 4306
+        },
+        {
+          "path": "sustained_attempt1_flawed/bft_sustained60_run4.log",
+          "sha256": "361b5eaf36fb2bf3523012dc8504246cd30cdf8c2ef589c55f7a3c006786bbfe",
+          "bytes": 4306
+        },
+        {
+          "path": "sustained_attempt1_flawed/bft_sustained60_run5.log",
+          "sha256": "601076e0ec14831a8e48923fd15156ad7b7212618c7ac561f2bfe0373d9a17d9",
+          "bytes": 4308
+        },
+        {
+          "path": "sustained_attempt1_flawed/README.txt",
+          "sha256": "029bc8a863b05073793a180a3725352a43a760970a746e8d719027a010a735de",
+          "bytes": 765
+        },
+        {
+          "path": "sustained_attempt1_flawed/job_sustained.log",
+          "sha256": "d4d14245106a2b26671182db9eec30a952506d1e7c5ca2a2216d9be31a4f22a1",
+          "bytes": 7151
+        }
+      ]
+    }
+  ],
+  "report": "note/tps_counted_report_20261013.md",
+  "claims": []
+}

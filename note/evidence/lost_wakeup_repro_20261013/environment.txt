@@ -1,0 +1,11 @@
+date: 2026-10-13T05:40:23Z
+kernel: 6.8.0-139-generic
+rustc 1.90.0 (1159e78c4 2025-09-14)
+cargo 1.90.0 (840b83a10 2025-07-30)
+name = "crossbeam-channel" version = "0.5.15" 
+CPU(s):                                  104
+Model name:                              Intel(R) Xeon(R) Platinum 8272CL CPU @ 2.60GHz
+Thread(s) per core:                      2
+NUMA node(s):                            2
+always [madvise] never
+loadavg: 3.86 19.36 31.50 1/1717 3059482

@@ -1,0 +1,61 @@
+==================================================================
+🚀 SECP256K1 / EIP-1559 HIGH-PERFORMANCE WORKLOAD BENCHMARK
+   Zero-Fork Compliant (AGENTS.md Part 2.5) | Production SECP Mode
+==================================================================
+🎯 Tracking 4 target simple_chain PIDs: 2899940, 2900298, 2900708, 2901154
+🌐 RPC Pool (4 nodes): http://127.0.0.1:31646, http://127.0.0.1:31647, http://127.0.0.1:31648, http://127.0.0.1:31649
+⚡ TCP Pool (4 nodes): 127.0.0.1:31200, 127.0.0.1:31201, 127.0.0.1:31202, 127.0.0.1:31203
+🆔 Chain ID: 991
+🔑 Loaded 50000 pre-allocated accounts from generated_keys.json
+==================================================================
+⏱️ SUSTAINED BENCHMARK: Target Duration: 60 seconds
+   Mode: tcp | TxType: 1559 | Wallets: 1000 | BatchSize: 1000
+==================================================================
+🏁 Start Block: #1
+
+🔍 Fetching starting nonces for 1000 accounts...
+✅ 1000 active wallets ready with starting nonces (fetched in 66.511879ms)
+
+🔌 Establishing 4 TCP connections for high-throughput pipeline...
+⚠️ TCP connect failed to 127.0.0.1:31203: dial tcp 127.0.0.1:31203: connect: connection refused
+✅ 3 TCP connections connected.
+
+🔥 BLASTING CONTINUOUSLY FOR 60 SECONDS...
+   ⏳ [PROGRESS 15s / 60s] Injected 2036000 txs (Current Injection TPS: 135729.78 tx/s | Peak CPU: 4516.0% | Peak RSS: 28213 MB)
+   ⏳ [PROGRESS 30s / 60s] Injected 3088000 txs (Current Injection TPS: 102929.97 tx/s | Peak CPU: 5817.0% | Peak RSS: 37078 MB)
+   ⏳ [PROGRESS 45s / 60s] Injected 3126000 txs (Current Injection TPS: 69465.57 tx/s | Peak CPU: 5986.0% | Peak RSS: 44841 MB)
+
+⚡ Injected total 4333000 TXs over 2m9.658616523s (Injection TPS: 33418.53 tx/s)
+
+⏱️ Draining remaining sample receipts and stabilizing (up to 20s)...
+
+📊 SUSTAINED BENCHMARK METRICS:
+   • Duration:           2m9.658616523s (Target: 60s)
+   • Total Submitted:    4333000 txs (= bytes_sent_txs: client wrote to transport / got RPC ok; NOT a validator-side number)
+       - validator http://127.0.0.1:31646: received=1393000 rejected=0 (delta of master_raw_eth_txs_*_total)
+       - validator http://127.0.0.1:31647: received=1490000 rejected=0 (delta of master_raw_eth_txs_*_total)
+       - validator http://127.0.0.1:31648: received=1450000 rejected=0 (delta of master_raw_eth_txs_*_total)
+       - validator http://127.0.0.1:31649: received=0 rejected=0 (delta of master_raw_eth_txs_*_total)
+   • received_by_validators: 4333000 (rejected 0)
+   • committed_ours (counted in blocks): 4247000 | committed_total_txs in same blocks: 4333000
+   • loss_vs_sent: 86000 (1.98%)
+   • TPS end-to-end (committed_ours / (last our-block observed - inject start = 339.352s)): 12515.05 tx/s
+   • TPS during injection (ours committed by inject end = 1658633, over 129.659s): 12792.31 tx/s | backlog at inject end: 2674367 | drain after injection: 209.693s
+   • TPS active commit window (first..last our-block): 12549.45 tx/s | first commit 0.930s after inject start
+   • measurement stop: reference validator showed 4333000 >= 4333000 txs and was idle for 1.5s | WARNING: could not fetch every block (block 4: Post "http://127.0.0.1:31646": context deadline exceeded (Client.Timeout exceeded while awaiting headers)); committed_ours is a LOWER BOUND
+   • parity: OK: all 4 validators agree on hash+stateRoot of #1072
+   • [LEGACY ESTIMATE — do not report] on-chain txs counted through the drain window=1744633 across 264 blocks; divided by injection time only => 13455.59 tx/s
+   • Latency P50:        50.771804618s
+   • Latency P90:        1m7.418968803s
+   • Latency P95:        1m10.226994248s
+   • Latency P99:        1m13.292020811s
+   • Latency Avg:        44.537930937s
+   • Sample Verified:    165/863 (Confirmed: 165, Reverted: 0, Unconfirmed/Timeout: 698 | Cutoff: 80.9%)
+   • Peak CPU (Nodes):   6033.0%
+   • Peak RSS (4 Target Nodes): 47184 MB (avg 11796.0 MB/node)
+
+🛡️ [ZERO-FORK] OK: all 4 validators agree on hash+stateRoot of #1072
+📄 JSON Benchmark report saved to: /tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad/out_counted/bft_sustained60_run3.json
+==================================================================
+
+--STDERR--

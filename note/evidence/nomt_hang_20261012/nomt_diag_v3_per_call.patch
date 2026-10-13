@@ -1,0 +1,421 @@
+diff --git a/consensus/vendor/nomt/nomt/src/bitbox/writeout.rs b/consensus/vendor/nomt/nomt/src/bitbox/writeout.rs
+index ab42eb12..b47e1551 100644
+--- a/consensus/vendor/nomt/nomt/src/bitbox/writeout.rs
++++ b/consensus/vendor/nomt/nomt/src/bitbox/writeout.rs
+@@ -40,6 +40,7 @@ pub(super) fn write_ht(
+     mut ht: Vec<(u64, Arc<FatPage>)>,
+ ) -> std::io::Result<()> {
+     let mut sent = 0;
++    let diag_guard = crate::diag::write_ht_begin(ht.len() as u64, io_handle.receiver());
+ 
+     ht.sort_unstable_by_key(|item| item.0);
+     for (pn, page) in ht {
+@@ -50,14 +51,18 @@ pub(super) fn write_ht(
+             })
+             .unwrap();
+         sent += 1;
++        diag_guard.sent_one();
+     }
+ 
+     while sent > 0 {
+-        io_handle.recv().unwrap();
++        let complete = io_handle.recv().unwrap();
++        let is_err = complete.result.is_err();
++        diag_guard.recv_one(is_err);
+         sent -= 1;
+     }
+ 
+     ht_fd.sync_all()?;
++    drop(diag_guard);
+ 
+     Ok(())
+ }
+diff --git a/consensus/vendor/nomt/nomt/src/diag.rs b/consensus/vendor/nomt/nomt/src/diag.rs
+new file mode 100644
+index 00000000..5c14885e
+--- /dev/null
++++ b/consensus/vendor/nomt/nomt/src/diag.rs
+@@ -0,0 +1,237 @@
++#![allow(missing_docs)]
++
++use std::fs;
++use std::io::Write;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::{Arc, Mutex, Once};
++use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
++
++// Atomic counters for io-worker (Part b)
++pub static IO_PACKETS_RECEIVED: AtomicU64 = AtomicU64::new(0);
++pub static IO_PACKETS_SENT: AtomicU64 = AtomicU64::new(0);
++
++#[inline]
++pub fn inc_packets_sent() {
++    IO_PACKETS_SENT.fetch_add(1, Ordering::Relaxed);
++}
++pub static IO_SQES_PUSHED: AtomicU64 = AtomicU64::new(0);
++pub static IO_CQES_REAPED: AtomicU64 = AtomicU64::new(0);
++pub static IO_COMPLETIONS_SENT_OK: AtomicU64 = AtomicU64::new(0);
++pub static IO_COMPLETIONS_SENT_ERR: AtomicU64 = AtomicU64::new(0);
++pub static IO_RETRIES_PUSHED: AtomicU64 = AtomicU64::new(0);
++
++// Atomic counters for IoHandle (Part c)
++pub static IO_UPGRADE_FAILED: AtomicU64 = AtomicU64::new(0);
++pub static IO_SEND_ERR: AtomicU64 = AtomicU64::new(0);
++
++#[inline]
++pub fn inc_packets_received() {
++    IO_PACKETS_RECEIVED.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn inc_sqes_pushed() {
++    IO_SQES_PUSHED.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn inc_cqes_reaped() {
++    IO_CQES_REAPED.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn inc_completions_sent_ok() {
++    IO_COMPLETIONS_SENT_OK.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn inc_completions_sent_err() {
++    IO_COMPLETIONS_SENT_ERR.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn inc_retries_pushed() {
++    IO_RETRIES_PUSHED.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn inc_upgrade_failed() {
++    IO_UPGRADE_FAILED.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn inc_send_err() {
++    IO_SEND_ERR.fetch_add(1, Ordering::Relaxed);
++}
++
++
++// Gauge: number of io-workers currently parked in `command_rx.recv()` (pending empty).
++pub static IO_WORKERS_IDLE: AtomicU64 = AtomicU64::new(0);
++
++#[inline]
++pub fn worker_idle_enter() {
++    IO_WORKERS_IDLE.fetch_add(1, Ordering::Relaxed);
++}
++
++#[inline]
++pub fn worker_idle_exit() {
++    IO_WORKERS_IDLE.fetch_sub(1, Ordering::Relaxed);
++}
++
++/// Per-call state of one `write_ht`. Several NOMT instances commit concurrently, so each call has its own state.
++pub struct CallState {
++    id: u64,
++    start: Instant,
++    expected: u64,
++    sent: AtomicU64,
++    recv: AtomicU64,
++    err: AtomicU64,
++    thread: String,
++    last_warn_secs: AtomicU64,
++    rx: crossbeam_channel::Receiver<crate::io::CompleteIo>,
++}
++
++static CALLS: Mutex<Vec<Arc<CallState>>> = Mutex::new(Vec::new());
++static NEXT_ID: AtomicU64 = AtomicU64::new(1);
++static COMPLETED_CALLS: AtomicU64 = AtomicU64::new(0);
++
++/// RAII guard: registers the call on creation and ALWAYS deregisters on drop (also on error/panic paths).
++pub struct WriteHtGuard(Arc<CallState>);
++
++pub fn write_ht_begin(expected: u64, rx: &crossbeam_channel::Receiver<crate::io::CompleteIo>) -> WriteHtGuard {
++    ensure_hang_monitor_started();
++    let st = Arc::new(CallState {
++        id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
++        start: Instant::now(),
++        expected,
++        sent: AtomicU64::new(0),
++        recv: AtomicU64::new(0),
++        err: AtomicU64::new(0),
++        thread: format!("{:?}", std::thread::current().id()),
++        last_warn_secs: AtomicU64::new(0),
++        rx: rx.clone(),
++    });
++    CALLS.lock().unwrap().push(st.clone());
++    WriteHtGuard(st)
++}
++
++impl WriteHtGuard {
++    #[inline]
++    pub fn sent_one(&self) {
++        self.0.sent.fetch_add(1, Ordering::Relaxed);
++    }
++    #[inline]
++    pub fn recv_one(&self, is_err: bool) {
++        self.0.recv.fetch_add(1, Ordering::Relaxed);
++        if is_err {
++            self.0.err.fetch_add(1, Ordering::Relaxed);
++        }
++    }
++}
++
++impl Drop for WriteHtGuard {
++    fn drop(&mut self) {
++        COMPLETED_CALLS.fetch_add(1, Ordering::Relaxed);
++        let id = self.0.id;
++        CALLS.lock().unwrap().retain(|c| c.id != id);
++    }
++}
++
++static MONITOR_INIT: Once = Once::new();
++
++pub fn ensure_hang_monitor_started() {
++    MONITOR_INIT.call_once(|| {
++        eprintln!("[NOMT_DIAG_BUILD_VERIFIED_V2] per-call write_ht tracking + io_uring fdinfo dump initialised");
++        std::thread::Builder::new()
++            .name("nomt-diag-hang-mon".to_string())
++            .spawn(hang_monitor_loop)
++            .expect("failed to spawn nomt hang monitor thread");
++    });
++}
++
++const WARN_AFTER_SECS: u64 = 20;
++
++fn hang_monitor_loop() {
++    loop {
++        std::thread::sleep(Duration::from_millis(2000));
++        let calls: Vec<Arc<CallState>> = CALLS.lock().unwrap().clone();
++        for c in calls {
++            let age = c.start.elapsed().as_secs();
++            let last = c.last_warn_secs.load(Ordering::Relaxed);
++            if age >= WARN_AFTER_SECS && age >= last + 30 {
++                c.last_warn_secs.store(age, Ordering::Relaxed);
++                report_hang(&c, age);
++            }
++        }
++    }
++}
++
++fn report_hang(c: &CallState, age: u64) {
++    let sent = c.sent.load(Ordering::Relaxed);
++    let recv = c.recv.load(Ordering::Relaxed);
++    let err = c.err.load(Ordering::Relaxed);
++    let summary = format!(
++        "[DIAG_HANG_MONITOR] write_ht call#{} thread={} waiting {}s: expected={} sent={} received={} err={} completion_channel_len={} channel_is_empty={} | global: packets_sent={} packets_received={} sqes_pushed={} cqes_reaped={} completions_sent_ok={} completions_sent_err={} retries_pushed={} upgrade_failed={} send_err={} workers_idle={} completed_calls={}",
++        c.id, c.thread, age, c.expected, sent, recv, err, c.rx.len(), c.rx.is_empty(),
++        IO_PACKETS_SENT.load(Ordering::Relaxed),
++        IO_PACKETS_RECEIVED.load(Ordering::Relaxed),
++        IO_SQES_PUSHED.load(Ordering::Relaxed),
++        IO_CQES_REAPED.load(Ordering::Relaxed),
++        IO_COMPLETIONS_SENT_OK.load(Ordering::Relaxed),
++        IO_COMPLETIONS_SENT_ERR.load(Ordering::Relaxed),
++        IO_RETRIES_PUSHED.load(Ordering::Relaxed),
++        IO_UPGRADE_FAILED.load(Ordering::Relaxed),
++        IO_SEND_ERR.load(Ordering::Relaxed),
++        IO_WORKERS_IDLE.load(Ordering::Relaxed),
++        COMPLETED_CALLS.load(Ordering::Relaxed),
++    );
++    eprintln!("{}", summary);
++
++    let pid = std::process::id();
++    let mut out = vec![summary];
++    out.push("--- /proc/self/task/*/{comm,state,wchan} ---".to_string());
++    if let Ok(entries) = fs::read_dir("/proc/self/task") {
++        for entry in entries.flatten() {
++            let tid = entry.file_name().to_string_lossy().to_string();
++            let comm = fs::read_to_string(format!("/proc/self/task/{}/comm", tid)).unwrap_or_default();
++            let wchan = fs::read_to_string(format!("/proc/self/task/{}/wchan", tid)).unwrap_or_default();
++            let stat = fs::read_to_string(format!("/proc/self/task/{}/stat", tid)).unwrap_or_default();
++            let state = stat.split_whitespace().nth(2).unwrap_or("?");
++            out.push(format!("TID {:<8} comm={:<16} state={} wchan={}", tid, comm.trim(), state, wchan.trim()));
++        }
++    }
++    // io_uring ring state as the kernel sees it (head/tail/overflow); readable without root for our own fds.
++    out.push("--- io_uring fdinfo ---".to_string());
++    if let Ok(entries) = fs::read_dir("/proc/self/fd") {
++        for entry in entries.flatten() {
++            let fd = entry.file_name().to_string_lossy().to_string();
++            if let Ok(target) = fs::read_link(format!("/proc/self/fd/{}", fd)) {
++                if target.to_string_lossy().contains("io_uring") {
++                    let info = fs::read_to_string(format!("/proc/self/fdinfo/{}", fd)).unwrap_or_default();
++                    let key: Vec<&str> = info
++                        .lines()
++                        .filter(|l| {
++                            l.starts_with("SqHead") || l.starts_with("SqTail") || l.starts_with("CqHead")
++                                || l.starts_with("CqTail") || l.starts_with("CachedCqTail")
++                                || l.starts_with("SqThread") || l.starts_with("CqOverflowList")
++                                || l.starts_with("OverflowList") || l.starts_with("UserFiles")
++                        })
++                        .collect();
++                    out.push(format!("fd {} -> {} :: {}", fd, target.display(), key.join(" | ")));
++                    out.push(info);
++                }
++            }
++        }
++    }
++    let bt = std::backtrace::Backtrace::force_capture();
++    out.push(format!("--- monitor thread backtrace ---\n{}", bt));
++
++    let dir = std::env::var("NOMT_DIAG_DIR").unwrap_or_else(|_| "/tmp".to_string());
++    let _ = fs::create_dir_all(&dir);
++    let path = format!("{}/nomt_hang_dump_{}_call{}_{}s.txt", dir, pid, c.id, age);
++    if let Ok(mut f) = fs::File::create(&path) {
++        let _ = f.write_all(out.join("\n").as_bytes());
++        eprintln!("[DIAG_HANG_MONITOR] full dump written to {}", path);
++    }
++    let _ = (SystemTime::now(), UNIX_EPOCH);
++}
+diff --git a/consensus/vendor/nomt/nomt/src/io/linux.rs b/consensus/vendor/nomt/nomt/src/io/linux.rs
+index a9796bac..f0bd0cc3 100644
+--- a/consensus/vendor/nomt/nomt/src/io/linux.rs
++++ b/consensus/vendor/nomt/nomt/src/io/linux.rs
+@@ -59,16 +59,16 @@ fn start_workers(
+     command_rx: Receiver<IoPacket>,
+     io_workers: usize,
+ ) {
+-    for _ in 0..io_workers {
++    for worker_id in 0..io_workers {
+         io_workers_tp.execute({
+             let page_pool = page_pool.clone();
+             let command_rx = command_rx.clone();
+-            move || run_worker(page_pool, command_rx)
++            move || run_worker(worker_id, page_pool, command_rx)
+         });
+     }
+ }
+ 
+-fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
++fn run_worker(_worker_id: usize, page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+     let mut pending: Slab<PendingIo> = Slab::with_capacity(MAX_IN_FLIGHT);
+ 
+     let mut ring = IoUring::<squeue::Entry, cqueue::Entry>::builder()
+@@ -87,6 +87,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+         if !pending.is_empty() {
+             complete_queue.sync();
+             while let Some(completion_event) = complete_queue.next() {
++                crate::diag::inc_cqes_reaped();
+                 if pending.get(completion_event.user_data() as usize).is_none() {
+                     continue;
+                 }
+@@ -106,6 +107,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+                     IoKindResult::Ok => Ok(()),
+                     IoKindResult::Err => Err(std::io::Error::from_raw_os_error(io_uring_res.abs())),
+                     IoKindResult::Retry => {
++                        crate::diag::inc_retries_pushed();
+                         retries.push_back(IoPacket {
+                             command,
+                             completion_sender,
+@@ -115,7 +117,10 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+                 };
+ 
+                 let complete = CompleteIo { command, result };
+-                let _ = completion_sender.send(complete);
++                match completion_sender.send(complete) {
++                    Ok(()) => crate::diag::inc_completions_sent_ok(),
++                    Err(_) => crate::diag::inc_completions_sent_err(),
++                }
+             }
+         } else if shutdown {
+             // No pending IOs and we are shutting down. That means we can exit the worker.
+@@ -141,8 +146,14 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+                 retries.pop_front().unwrap()
+             } else if pending.is_empty() {
+                 // block on new I/O if nothing in-flight.
+-                match command_rx.recv() {
+-                    Ok(command) => command,
++                crate::diag::worker_idle_enter();
++                let blocking = command_rx.recv();
++                crate::diag::worker_idle_exit();
++                match blocking {
++                    Ok(command) => {
++                        crate::diag::inc_packets_received();
++                        command
++                    }
+                     Err(_) => {
+                         shutdown = true;
+                         break;
+@@ -150,7 +161,10 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+                 }
+             } else {
+                 match command_rx.try_recv() {
+-                    Ok(command) => command,
++                    Ok(command) => {
++                        crate::diag::inc_packets_received();
++                        command
++                    }
+                     Err(TryRecvError::Empty) => break,
+                     Err(TryRecvError::Disconnected) => {
+                         shutdown = true;
+@@ -170,6 +184,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+ 
+             // unwrap: known not full
+             unsafe { submit_queue.push(&entry).unwrap() };
++            crate::diag::inc_sqes_pushed();
+         }
+ 
+         // 3. submit all together.
+diff --git a/consensus/vendor/nomt/nomt/src/io/mod.rs b/consensus/vendor/nomt/nomt/src/io/mod.rs
+index 3448d439..61c875d1 100644
+--- a/consensus/vendor/nomt/nomt/src/io/mod.rs
++++ b/consensus/vendor/nomt/nomt/src/io/mod.rs
+@@ -125,6 +125,7 @@ struct IoPacket {
+ /// Create an I/O worker managing an io_uring and sending responses back via channels to a number
+ /// of handles.
+ pub fn start_io_pool(io_workers: usize, page_pool: PagePool) -> IoPool {
++    crate::diag::ensure_hang_monitor_started();
+     let io_workers_tp = ThreadPool::with_name("io-worker".to_string(), io_workers);
+     let sender = platform::start_io_worker(page_pool.clone(), &io_workers_tp, io_workers);
+     let sender = Some(Arc::new(sender));
+@@ -208,16 +209,23 @@ pub struct IoHandle {
+ impl IoHandle {
+     /// Send an I/O command. This fails if the channel has hung up, but does not block the thread.
+     pub fn send(&self, command: IoCommand) -> Result<(), SendError<IoCommand>> {
++        crate::diag::inc_packets_sent();
+         let sender = match self.sender.upgrade() {
+             Some(sender) => sender,
+-            None => return Err(SendError(command)),
++            None => {
++                crate::diag::inc_upgrade_failed();
++                return Err(SendError(command));
++            }
+         };
+         sender
+             .send(IoPacket {
+                 command,
+                 completion_sender: self.completion_sender.clone(),
+             })
+-            .map_err(|SendError(packet)| SendError(packet.command))
++            .map_err(|SendError(packet)| {
++                crate::diag::inc_send_err();
++                SendError(packet.command)
++            })
+     }
+ 
+     /// Block the current thread on receiving an I/O completion.
+diff --git a/consensus/vendor/nomt/nomt/src/lib.rs b/consensus/vendor/nomt/nomt/src/lib.rs
+index e19a66e1..7afaee65 100644
+--- a/consensus/vendor/nomt/nomt/src/lib.rs
++++ b/consensus/vendor/nomt/nomt/src/lib.rs
+@@ -53,6 +53,14 @@ mod sys;
+ mod task;
+ 
+ mod io;
++#[allow(missing_docs)]
++pub mod diag;
++
++#[doc(hidden)]
++#[allow(missing_docs)]
++pub mod test_io {
++    pub use crate::io::{start_io_pool, FatPage, IoCommand, IoHandle, IoKind, IoPool, PagePool, PAGE_SIZE};
++}
+ 
+ const MAX_COMMIT_CONCURRENCY: usize = 64;
+ 

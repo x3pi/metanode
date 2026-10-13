@@ -79,7 +79,7 @@ func (f *fsm) Apply(l *raft.Log) interface{} {
 	if f.failed.Load() {
 		return errors.New("raftfeed: replica failed, not applying")
 	}
-	t0 := time.Now()
+	sw := f.metrics.stopwatch() // clock reads live in metrics.go so this file stays clock-free (T-AP-06)
 	var rec rpb.BatchRecord
 	if err := proto.Unmarshal(l.Data, &rec); err != nil {
 		return f.fatal(fmt.Errorf("index %d: undecodable BatchRecord: %w", l.Index, err))
@@ -94,16 +94,16 @@ func (f *fsm) Apply(l *raft.Log) interface{} {
 	if len(txs) == 0 || uint32(len(txs)) != rec.TxCount {
 		return f.fatal(fmt.Errorf("index %d: tx_count %d does not match %d decoded txs", l.Index, rec.TxCount, len(txs)))
 	}
-	tDecode := time.Since(t0)
+	tDecode := sw.lap()
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	t1 := time.Now()
+	sw = f.metrics.stopwatch()
 	blk, err := f.st.build(rec.Txs, rec.TimestampMs)
 	if err != nil {
 		return f.fatal(fmt.Errorf("index %d: %w", l.Index, err))
 	}
-	tBuild := time.Since(t1)
+	tBuild := sw.lap()
 
 	var tSink time.Duration
 	res := applyResult{BlockNumber: blk.BlockNumber}
@@ -113,14 +113,14 @@ func (f *fsm) Apply(l *raft.Log) interface{} {
 		res.Skipped = true
 		f.skipped.Add(1)
 	} else {
-		t2 := time.Now()
+		sw = f.metrics.stopwatch()
 		select {
 		case f.sink <- blk: // bounded queue: blocks here (backpressure into Raft) when the pipeline is behind
 			f.delivered = blk.BlockNumber
 		case <-f.stop:
 			return errors.New("raftfeed: stopping")
 		}
-		tSink = time.Since(t2)
+		tSink = sw.lap()
 	}
 	f.st.advance(blk)
 	f.appliedIndex = l.Index
