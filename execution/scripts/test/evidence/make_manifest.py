@@ -30,7 +30,8 @@ files = []
 for f in a.files:
     s, n = sha(os.path.join(a.dir, f)); files.append({"path": f, "sha256": s, "bytes": n})
 m["entries"].append({"id": a.id, "command": a.command, "cwd": a.cwd, "git_commit": git("rev-parse", "HEAD"),
-                     "git_status": git("status", "--porcelain").replace("\n", ";"),
+                     # Only CODE state matters for reproducibility: ignore note/ (the evidence and reports being produced).
+                     "git_status": ";".join(l for l in git("status", "--porcelain").splitlines() if not l[3:].startswith("note/")),
                      "started_at": a.started, "finished_at": a.finished or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                      "exit_code": a.exit_code, "files": files})
 json.dump(m, open(mp, "w"), indent=2)
