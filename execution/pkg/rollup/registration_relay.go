@@ -247,6 +247,8 @@ type RegistrationRelay struct {
 	quitCh chan struct{}
 	wg     sync.WaitGroup
 	once   sync.Once
+
+	onStatusChanged func(user common.Address, res RegistrationResult)
 }
 
 // NewRegistrationRelay builds a relay. sign must sign the registration digest with the cluster BLS key; registered reads
@@ -324,6 +326,27 @@ func (r *RegistrationRelay) SetStore(store RegistrationRelayStore) error {
 	log.Printf("RegistrationRelay: restored %d persisted registration request(s) (%d tracked in memory)", len(records), len(r.entries))
 	r.wake()
 	return nil
+}
+
+// SetOnStatusChanged registers a callback to receive push notifications when a registration reaches a terminal state.
+func (r *RegistrationRelay) SetOnStatusChanged(fn func(user common.Address, res RegistrationResult)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onStatusChanged = fn
+}
+
+func (r *RegistrationRelay) notifyStatusChanged(user common.Address, res RegistrationResult) {
+	r.mu.Lock()
+	fn := r.onStatusChanged
+	r.mu.Unlock()
+	if fn != nil {
+		go fn(user, res)
+	}
+}
+
+// Wake triggers an immediate batch check on the registration relay loop.
+func (r *RegistrationRelay) Wake() {
+	r.wake()
 }
 
 // ClusterKey returns the cluster identity key users must sign their registration for.
@@ -594,12 +617,14 @@ func (r *RegistrationRelay) retryOrFail(user common.Address, reason string) {
 	})
 	if failed {
 		log.Printf("RegistrationRelay: giving up on %s: %s", user.Hex(), reason)
+		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusFailed, Reason: reason})
 		return
 	}
 	select {
 	case r.queue <- user:
 	default:
 		r.update(user, func(e *relayEntry) { e.status = RegStatusFailed; e.reason = "queue full while retrying" })
+		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusFailed, Reason: "queue full while retrying"})
 	}
 }
 
@@ -611,6 +636,7 @@ func (r *RegistrationRelay) relayOne(user common.Address) {
 	}
 	if r.registered != nil && r.registered(user) {
 		r.update(user, func(e *relayEntry) { e.status = RegStatusConfirmed })
+		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusConfirmed})
 		return
 	}
 
@@ -641,6 +667,7 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 	}
 	if r.registered != nil && r.registered(user) {
 		r.update(user, func(e *relayEntry) { e.status = RegStatusConfirmed })
+		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusConfirmed})
 		return
 	}
 	home, found, err := r.parent.GetAccountRegistry(user)
@@ -648,18 +675,24 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 		r.resolveFound(user, home)
 		return
 	}
+	failed := false
 	r.update(user, func(e *relayEntry) {
 		e.verifies++
 		if e.verifies >= r.maxVerifies {
 			e.status = RegStatusFailed
 			e.reason = "the parent chain did not register the account"
+			failed = true
 		}
 	})
+	if failed {
+		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusFailed, Reason: "the parent chain did not register the account"})
+	}
 }
 
 // resolveFound applies the parent's answer: ours ⇒ stay PENDING until the on-chain flag is applied by the
 // RegistrationWorker (Status then reports CONFIRMED); another cluster's ⇒ REJECTED.
 func (r *RegistrationRelay) resolveFound(user common.Address, home cm.PublicKey) {
+	rejected := false
 	r.update(user, func(e *relayEntry) {
 		if home == r.clusterKey {
 			// Parent chose THIS cluster: wait for the ordered registration event to set the on-chain flag (Status
@@ -673,5 +706,10 @@ func (r *RegistrationRelay) resolveFound(user common.Address, home cm.PublicKey)
 		e.status = RegStatusRejected
 		e.home = &h
 		e.reason = "address is registered to another cluster on the parent chain"
+		rejected = true
 	})
+	if rejected {
+		h := home
+		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusRejected, HomeCluster: &h, Reason: "address is registered to another cluster on the parent chain"})
+	}
 }

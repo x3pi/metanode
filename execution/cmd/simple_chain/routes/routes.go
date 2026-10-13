@@ -61,6 +61,11 @@ func InitRoutes(
 	routes[command.GetTxRewardHistoryByAddress] = stateProcessor.ProcessGetTxHistoryByAddress
 	routes[command.GetTxRewardHistoryByJobID] = stateProcessor.ProcessGetTxHistoryByJobID
 
+	// Account gate registration routes
+	routes[command.GetRegistrationMessage] = stateProcessor.ProcessGetRegistrationMessage
+	routes[command.RegisterAccount] = stateProcessor.ProcessRegisterAccount
+	routes[command.GetRegistrationStatus] = stateProcessor.ProcessGetRegistrationStatus
+
 	// block routes
 	routes[command.GetBlockNumber] = blockProcessor.GetBlockNumber
 	// Đã bỏ: API giao tiếp nội bộ giữa master/sub cũ
