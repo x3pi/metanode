@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import socket
+import urllib.request
 import subprocess
 import sys
 import time
@@ -40,8 +41,11 @@ def sh(cmd, **kw):
 def stop_and_clean():
     if os.path.isdir(BASE):
         sh([RUN_ENV, BASE, "stop"])
-        time.sleep(1)
-        shutil.rmtree(BASE, ignore_errors=True)
+        for _ in range(30):  # nodes may still be shutting down and recreating files: retry until the tree is really gone
+            time.sleep(2)
+            shutil.rmtree(BASE, ignore_errors=True)
+            if not os.path.exists(BASE):
+                break
 
 
 def disk_mb(path):
@@ -216,7 +220,53 @@ def one_run(i, args, outdir):
         info["error"] = "tool produced no JSON report"
     if info.get("tcp_connections_used") is not None and info["tcp_connections_used"] != info["tcp_endpoints"]:
         info["error"] = f"tool used {info['tcp_connections_used']} of {info['tcp_endpoints']} TCP endpoints: some validator got no load"
-    # blocks from the chain, independent of the tool, for a second source
+    # Late-arrival probe: is the gap between client-sent and validator-received really lost, or still draining? Sample the
+    # cumulative received counters and the head block every 15 s for 120 s after the tool finished (cluster still up).
+    post = []
+    for k in range(9):
+        row = {"t": k * 15}
+        for n, port in zip(NODES, (31646, 31647, 31648, 31649)):
+            try:
+                body = urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5).read().decode()
+                m2 = re.search(r"^master_raw_eth_txs_received_total\s+([0-9.e+]+)", body, re.M)
+                row[n] = float(m2.group(1)) if m2 else None
+            except Exception as e:
+                row[n] = f"err:{e}"
+        try:
+            req = urllib.request.Request("http://127.0.0.1:31646", data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}', headers={"Content-Type": "application/json"})
+            row["head"] = int(json.loads(urllib.request.urlopen(req, timeout=5).read())["result"], 16)
+        except Exception as e:
+            row["head"] = f"err:{e}"
+        post.append(row)
+        if k < 8:
+            time.sleep(15)
+    open(f"{outdir}/{args.tag}_run{i}_post.json", "w").write(json.dumps(post, indent=1))
+    # If txs went missing between client and ingress, dump goroutine stacks (SIGQUIT) of every validator for post-mortem.
+    if info.get("bytes_sent") and info.get("received_sum") is not None and info["received_sum"] < info["bytes_sent"]:
+        for n, pid in pm.items():
+            try:
+                os.kill(pid, 3)  # SIGQUIT: Go runtime prints all goroutine stacks to stderr (node log), then exits
+            except OSError:
+                pass
+        time.sleep(8)
+        for n in NODES:
+            lp = f"{BASE}/logs/{n}.log"
+            if os.path.isfile(lp):
+                sh(["bash", "-c", f"awk '/^SIGQUIT: quit/{{f=1}} f' '{lp}' | head -c 6000000 > '{outdir}/{args.tag}_run{i}_{n}_goroutines.txt'"])
+    # Diagnostics for tx loss between client and ingress: keep warn/error/overload/closed lines of each node log (capped), plus counts.
+    diag = {}
+    for n in NODES:
+        lp = f"{BASE}/logs/{n}.log"
+        if os.path.isfile(lp):
+            r = sh(["bash", "-c", f"grep -a -i -E 'warn|error|❌|overload|admission|closed|EOF|reset|dropp' '{lp}' | cut -c1-300"])
+            lines = r.stdout.splitlines()
+            diag[n] = len(lines)
+            open(f"{outdir}/{args.tag}_run{i}_{n}_anomalies.txt", "w").write("\n".join(lines[:300]) + "\n")
+            # Tail of the node log (the template log carries old lines) + liveness, so a crash leaves evidence.
+            tl = sh(["bash", "-c", f"tail -n 400 '{lp}' | cut -c1-400"]).stdout
+            alive = bool(pm.get(n)) and os.path.exists(f"/proc/{pm[n]}")
+            open(f"{outdir}/{args.tag}_run{i}_{n}_tail.txt", "w").write(f"alive_at_end={alive}\n{tl}")
+    info["node_anomaly_lines"] = json.dumps(diag)
     stop_and_clean()
     return info
 
@@ -255,7 +305,7 @@ def main():
     keys = ["run", "bytes_sent", "received_sum", "rejected_sum", "committed_ours", "ours_exact", "ours_upper_bound", "committed_total", "loss",
             "tps_end_to_end", "tps_end_to_end_upper", "tps_during_injection", "tps_active_commit", "drain_seconds", "backlog_at_inject_end",
             "inject_seconds", "end_to_end_seconds", "legacy_effective_tps", "legacy_confirmed", "latency_p50_ms",
-            "parity", "baseline_rss_mb", "peak_rss_mb_tool", "cluster_start_seconds", "blast_exit", "tcp_connections_used", "tcp_endpoints", "uptime_before", "uptime_after", "error"]
+            "parity", "baseline_rss_mb", "peak_rss_mb_tool", "cluster_start_seconds", "blast_exit", "tcp_connections_used", "tcp_endpoints", "uptime_before", "uptime_after", "node_anomaly_lines", "error"]
     with open(f"{args.out}/{args.tag}_summary.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
         w.writeheader()

@@ -1121,6 +1121,7 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 	deadline := tBlast0.Add(time.Duration(cfg.DurationSec) * time.Second)
 
 	var totalSubmitted atomic.Uint64
+	var sendErrBatches, sendAbandonedTxs atomic.Uint64 // diagnostics: failed SendBatch calls / txs whose retries ran out at the deadline
 	type SampleTx struct {
 		Hash   common.Hash
 		SentAt time.Time
@@ -1307,14 +1308,21 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 				if (cfg.Mode == "tcp" || cfg.Mode == "both") && len(tcpClients) > 0 {
 					client := tcpClients[workerID%len(tcpClients)]
 					if err := client.SendBatch(txsChunk); err != nil {
+						sendErrBatches.Add(1)
+						abandoned := true
 						// The nonces of this chunk are already consumed, so a failed send must be retried with the SAME
 						// chunk. Moving on would leave a nonce gap and every later tx of these senders could never run.
 						for time.Now().Before(deadline) {
 							time.Sleep(10 * time.Millisecond)
 							if client.SendBatch(txsChunk) == nil {
 								totalSubmitted.Add(uint64(len(txsChunk)))
+								abandoned = false
 								break
 							}
+							sendErrBatches.Add(1)
+						}
+						if abandoned {
+							sendAbandonedTxs.Add(uint64(len(txsChunk)))
 						}
 					} else {
 						totalSubmitted.Add(uint64(len(txsChunk)))
@@ -1346,6 +1354,7 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 	injectDur := time.Since(tBlast0)
 	tInjectEnd := tBlast0.Add(injectDur)
 	subTxs := int(totalSubmitted.Load())
+	fmt.Printf("   • SendBatch diagnostics: failed calls=%d, txs abandoned after retries=%d\n", sendErrBatches.Load(), sendAbandonedTxs.Load())
 	injectTPS := float64(subTxs) / injectDur.Seconds()
 	fmt.Printf("\n⚡ Injected total %d TXs over %v (Injection TPS: %.2f tx/s)\n", subTxs, injectDur, injectTPS)
 

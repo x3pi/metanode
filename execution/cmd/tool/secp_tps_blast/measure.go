@@ -266,8 +266,13 @@ func blockTxCount(url string, n uint64) (int, error) {
 //   - done when the reference validator has shown >= expectedTxs txs in total and nothing new arrived for settle, or
 //   - done when no tx-bearing block was seen for quiet, or
 //   - done at maxWait.
-func (w *chainWatcher) waitQuiesce(expectedTxs int, settle, quiet, maxWait time.Duration) string {
+func (w *chainWatcher) waitQuiesce(expectedTxs int, settle, quiet, maxWait time.Duration, received func() (int, bool)) string {
 	begin := time.Now()
+	// The quiet rule must not fire while validators report txs they received that no block has shown yet: a chain can
+	// pause for longer than quiet in the middle of draining and then continue (seen live: 19k txs committed after an
+	// 8 s pause). received is polled at most every 2 s; when it is unavailable the plain quiet rule applies.
+	var recvAt time.Time
+	recvN, recvOK := 0, false
 	for {
 		time.Sleep(25 * time.Millisecond)
 		now := time.Now()
@@ -287,6 +292,13 @@ func (w *chainWatcher) waitQuiesce(expectedTxs int, settle, quiet, maxWait time.
 			return fmt.Sprintf("reference validator showed %d >= %d txs and was idle for %v", total, expectedTxs, settle)
 		}
 		if now.Sub(last) >= quiet {
+			if received != nil && now.Sub(recvAt) >= 2*time.Second {
+				recvN, recvOK = received()
+				recvAt = now
+			}
+			if recvOK && recvN > total {
+				continue // validators hold received txs that are not in any block yet: keep waiting (bounded by maxWait)
+			}
 			return fmt.Sprintf("no new tx-bearing block for %v (committed_total_seen=%d expected=%d)", quiet, total, expectedTxs)
 		}
 	}
@@ -485,7 +497,18 @@ func finalizeMeasurement(cfg Config, w *chainWatcher, startBlock uint64, in meas
 	reason := w.waitQuiesce(in.BytesSent,
 		1500*time.Millisecond,
 		time.Duration(cfg.QuietSec)*time.Second,
-		time.Duration(cfg.MaxWaitSec)*time.Second)
+		time.Duration(cfg.MaxWaitSec)*time.Second,
+		func() (int, bool) {
+			now := scrapeAll(cfg.RPCUrls)
+			if len(now) != len(cfg.RPCUrls) || len(before) != len(cfg.RPCUrls) {
+				return 0, false
+			}
+			sum := 0.0
+			for u, c := range now {
+				sum += c.Received - before[u].Received
+			}
+			return int(sum), true
+		})
 	w.Stop()
 	obs, _ := w.snapshot()
 	blocks := make([]uint64, 0, len(obs))
