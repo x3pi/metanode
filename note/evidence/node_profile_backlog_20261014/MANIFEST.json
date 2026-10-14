@@ -1,0 +1,595 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "nb_profile",
+      "command": "overnight run (see report section 2); runs executed with an earlier uncommitted runner, committed afterwards",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "0a0ab453319e90d004bdda3308a1961ddd7b9114",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-14T19:52:45Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "profile/derived_summary.csv",
+          "sha256": "c7e3510619181c788316839f2a5735e38d0a1a56ad204f5c93acb695d83e0d86",
+          "bytes": 536
+        },
+        {
+          "path": "profile/order.txt",
+          "sha256": "0cbee5da0fcfb98695696262ff2c63ca3f177e2acb316d5a026e0e69d769580d",
+          "bytes": 46
+        },
+        {
+          "path": "profile/profile_driver.py.txt",
+          "sha256": "ce8cb2a453ee1156ed3fdd7a144fd801d9e1bd8eb89302616bb974f68e3b48b2",
+          "bytes": 1136
+        },
+        {
+          "path": "profile/prof_v1000k_n1_run1.json",
+          "sha256": "d04d4fb75db44d8c7b221827f74dc5888974f9833bb582772edd2604a7a77e24",
+          "bytes": 29848
+        },
+        {
+          "path": "profile/prof_v1000k_n1_run1.log",
+          "sha256": "dad54e71e72cce38e11bf259b1381ea72ea66f4d085763fc363d293f4c6486bc",
+          "bytes": 4466
+        },
+        {
+          "path": "profile/prof_v1000k_n1_run1_timeline.json",
+          "sha256": "8542d83e7da978090108c2de36c24ab31204bebac969c3cdd96e7c790fbd62e7",
+          "bytes": 1585
+        },
+        {
+          "path": "profile/prof_v1000k_n1_run1_val0_cpu30.pb.gz",
+          "sha256": "f13e712d0faec6cd60e72674020848bb65dc666a90b431eaf604bc674a2f5057",
+          "bytes": 252642
+        },
+        {
+          "path": "profile/prof_v1000k_n1_run1_val0_goroutine.txt",
+          "sha256": "cc8b59c6123a48f20116788c74c2dc1de5fbd99cf90f6973b0c4ee08b7db94dc",
+          "bytes": 26196
+        },
+        {
+          "path": "profile/prof_v1000k_n1_run1_val0_heap.pb.gz",
+          "sha256": "202f87d165eed7a886ee655c5d1dc18b4cdac7af1992118044df8c6b8c189b01",
+          "bytes": 99371
+        },
+        {
+          "path": "profile/prof_v1000k_n2_run1.json",
+          "sha256": "dea9edd1077e0d498ec0523e560d0ebe53a09d7def28d0957e7ac9f0c454bd12",
+          "bytes": 20213
+        },
+        {
+          "path": "profile/prof_v1000k_n2_run1.log",
+          "sha256": "8e384bea9edb589d83788ea40a79379d358abf44be9c2c8b7991d06b5bb1926c",
+          "bytes": 4462
+        },
+        {
+          "path": "profile/prof_v1000k_n2_run1_timeline.json",
+          "sha256": "0f12d9b2221b4e59693bf35ce1ded795a0dddbbc6c29737ed91913038407d470",
+          "bytes": 1587
+        },
+        {
+          "path": "profile/prof_v1000k_n2_run1_val0_cpu30.pb.gz",
+          "sha256": "bdd24fd80a225700322acda26e0cdbcb8899eee3c3f3f002b66c3c1bac3b2170",
+          "bytes": 243073
+        },
+        {
+          "path": "profile/prof_v1000k_n2_run1_val0_goroutine.txt",
+          "sha256": "821051eab09337fdc1e4bf12fd03d5c792c91b463abb204dc7ef1217acdd4ab8",
+          "bytes": 30918
+        },
+        {
+          "path": "profile/prof_v1000k_n2_run1_val0_heap.pb.gz",
+          "sha256": "005a6d26c4448f84c4e1c24a40b0f6a379c62c7c4029abc169e7e79f7673f2df",
+          "bytes": 92324
+        },
+        {
+          "path": "profile/prof_v4000k_n3_run1.json",
+          "sha256": "25a9b6a7f9570246d9e14e28846e4020ae49215f58acd5a1fdefc28fb9d64c6e",
+          "bytes": 124033
+        },
+        {
+          "path": "profile/prof_v4000k_n3_run1.log",
+          "sha256": "37ce484d6530757d5c0548de79f3c45e492a6d01cca341b3f8bcd884aadb48cf",
+          "bytes": 6201
+        },
+        {
+          "path": "profile/prof_v4000k_n3_run1_timeline.json",
+          "sha256": "f87868370824867eef13071a4d84d81f3701be920b55889221f0e766cd63d8ea",
+          "bytes": 14857
+        },
+        {
+          "path": "profile/prof_v4000k_n3_run1_val0_cpu30.pb.gz",
+          "sha256": "a30bec7d41f6814e0da2206dd9568263d33256c1101dcac7274fa74da42a3a9e",
+          "bytes": 242935
+        },
+        {
+          "path": "profile/prof_v4000k_n3_run1_val0_goroutine.txt",
+          "sha256": "6cf76aa981b8c4cacfcd59cdea68de8561ff091ebdcbbae3e4ae07c6ba8c9b5c",
+          "bytes": 33622
+        },
+        {
+          "path": "profile/prof_v4000k_n3_run1_val0_heap.pb.gz",
+          "sha256": "d75bd8b7c8e6bfac9b62fefc41dfa927b08c64a2dc282dface5bc51353d8e184",
+          "bytes": 130947
+        },
+        {
+          "path": "profile/prof_v4000k_n4_run1.json",
+          "sha256": "5659f07a5d20ac2fbf7ae3c696a42cb9116e5b9cac5499fa102dd595d78d073b",
+          "bytes": 123356
+        },
+        {
+          "path": "profile/prof_v4000k_n4_run1.log",
+          "sha256": "e02b4bacbf59934cbb42599cae1999e375a271ac675f333fdcb159c6a5c25229",
+          "bytes": 6203
+        },
+        {
+          "path": "profile/prof_v4000k_n4_run1_timeline.json",
+          "sha256": "3df21dad68e6dfc7c017914a07e38da8727592632915e677ce07546c1a307e97",
+          "bytes": 14181
+        },
+        {
+          "path": "profile/prof_v4000k_n4_run1_val0_cpu30.pb.gz",
+          "sha256": "3c5612d98cb9a1913ed3ff8dff73cd035c67831bcb87407bd1b2f190f43ad59a",
+          "bytes": 259311
+        },
+        {
+          "path": "profile/prof_v4000k_n4_run1_val0_goroutine.txt",
+          "sha256": "6c7d61b77acd993961f81752fb47f53315581ccd37c3f6d11843aa84c6466a5d",
+          "bytes": 25860
+        },
+        {
+          "path": "profile/prof_v4000k_n4_run1_val0_heap.pb.gz",
+          "sha256": "80db957579191e233a97d03f3621e02b74b5b373925a33c0700de893d9f8187d",
+          "bytes": 130102
+        }
+      ],
+      "extract": [
+        {
+          "name": "p1000_e2e_mean",
+          "file": "profile/derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean",
+          "filter": "volume_k=1000"
+        },
+        {
+          "name": "p4000_e2e_mean",
+          "file": "profile/derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean",
+          "filter": "volume_k=4000"
+        }
+      ]
+    },
+    {
+      "id": "nb_profile2",
+      "command": "overnight run (see report section 2); runs executed with an earlier uncommitted runner, committed afterwards",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "0a0ab453319e90d004bdda3308a1961ddd7b9114",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-14T19:52:45Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "profile2/derived_summary.csv",
+          "sha256": "55d6a30ac5c920065d42aa51a2f68151950ab5e1793c10329bcedf7b3a8a60de",
+          "bytes": 431
+        },
+        {
+          "path": "profile2/order.txt",
+          "sha256": "4932436efd04858029d8e5b17a1bf74fb3a79ea341b25217617fbe0e6c6b0afe",
+          "bytes": 20
+        },
+        {
+          "path": "profile2/prof2_default_run1.json",
+          "sha256": "e89df067b3e6674502f2403f0be625d2afbd79a35084e5bd9408ae2a084ed9b6",
+          "bytes": 124911
+        },
+        {
+          "path": "profile2/prof2_default_run1.log",
+          "sha256": "b95470f6e3ac7db1303195eb33161b6a4224c6b9501a6b0cf54517634ae37810",
+          "bytes": 6200
+        },
+        {
+          "path": "profile2/prof2_default_run1_timeline.json",
+          "sha256": "5eca64fab303e9f82dfccbe88e675f36539ccde07780c694dd463991e0babdbd",
+          "bytes": 14639
+        },
+        {
+          "path": "profile2/prof2_default_run1_val0_cpu30.pb.gz",
+          "sha256": "1cb0413a4177583575968f2ed2f3871313c81fb6a89e11b28950376bf682f680",
+          "bytes": 254421
+        },
+        {
+          "path": "profile2/prof2_default_run1_val0_heap.pb.gz",
+          "sha256": "c5d84fb1982d9bd5c838d1b65c9defea798250b69d54b8c3d5c6b892af7d7a0f",
+          "bytes": 133375
+        },
+        {
+          "path": "profile2/prof2_lim12_run1.json",
+          "sha256": "d91ee41180e3bccf47390abbcd124871a3f748be1284da149347ed7cdd64bd59",
+          "bytes": 123095
+        },
+        {
+          "path": "profile2/prof2_lim12_run1.log",
+          "sha256": "bb0b4f3525515612ff24cabb8717f0cf0c3a8bcc76978ac87882ba31c16cacc3",
+          "bytes": 6197
+        },
+        {
+          "path": "profile2/prof2_lim12_run1_timeline.json",
+          "sha256": "2c7bd87a3fdad3c598aba2e36834e87a8d12feee1a9bbdf83e0dc4bf662dca75",
+          "bytes": 14403
+        },
+        {
+          "path": "profile2/prof2_lim12_run1_val0_cpu30.pb.gz",
+          "sha256": "e9935f6e04f7a9a1f80ce0cf345850b378ebc7ce103f33bbd3ded02380bfad93",
+          "bytes": 256474
+        },
+        {
+          "path": "profile2/prof2_lim12_run1_val0_heap.pb.gz",
+          "sha256": "57770d247f186385ee2ccb922127341434fbe179e943d12e4362818e3aea5490",
+          "bytes": 136086
+        },
+        {
+          "path": "profile2/prof2_lim24_run1.json",
+          "sha256": "8400ae113629c326b3e79d4adce04cc35abfd24efb0d21fe3a956d0ffab3b0e9",
+          "bytes": 117921
+        },
+        {
+          "path": "profile2/prof2_lim24_run1.log",
+          "sha256": "bb9c21778568ddb2aea45c442b8352f5747eaa83f158f908160b178f6e60216d",
+          "bytes": 6213
+        },
+        {
+          "path": "profile2/prof2_lim24_run1_timeline.json",
+          "sha256": "2e9502787d39cd2b0703b228932c817eebe54993734c862ed8b4d81e2b9d11d8",
+          "bytes": 13482
+        },
+        {
+          "path": "profile2/prof2_lim24_run1_val0_cpu30.pb.gz",
+          "sha256": "16ba1815341489651680784cbdf4b02667d057f096f54a11a14ec2c24064d5e0",
+          "bytes": 251421
+        },
+        {
+          "path": "profile2/prof2_lim24_run1_val0_heap.pb.gz",
+          "sha256": "f5e6083a00afd88732cfe5a2c495d0373bdbfd491bffbbd7e3c7745c2d718458",
+          "bytes": 130300
+        },
+        {
+          "path": "profile2/profile2_driver.py.txt",
+          "sha256": "7400280650678f9e96012444eb1a52045abfc14258ba0d8b3b06b410e2dc69a5",
+          "bytes": 1025
+        }
+      ],
+      "extract": [
+        {
+          "name": "p2_default",
+          "file": "profile2/derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "raw",
+          "filter": "variant=default"
+        },
+        {
+          "name": "p2_lim12",
+          "file": "profile2/derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "raw",
+          "filter": "variant=lim12"
+        },
+        {
+          "name": "p2_lim24",
+          "file": "profile2/derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "raw",
+          "filter": "variant=lim24"
+        }
+      ]
+    },
+    {
+      "id": "nb_gomem",
+      "command": "overnight run (see report section 2); runs executed with an earlier uncommitted runner, committed afterwards",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "0a0ab453319e90d004bdda3308a1961ddd7b9114",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-14T19:52:45Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "gomem/derived_summary.csv",
+          "sha256": "fd8bbb2d2b83937f561295ffd046f64aee882b445a809f2aa0e7084a1277a63f",
+          "bytes": 838
+        },
+        {
+          "path": "gomem/gomem_default_r1_run1.json",
+          "sha256": "05927b52d7f18ebf99832156395dec2531f365c78e6655e2e0e1e7f8d3ecef28",
+          "bytes": 122363
+        },
+        {
+          "path": "gomem/gomem_default_r1_run1.log",
+          "sha256": "1d79b8847345461afc131d390f6e811f1c78ccc5b973a06795fbb560ae915c18",
+          "bytes": 6196
+        },
+        {
+          "path": "gomem/gomem_default_r2_run1.json",
+          "sha256": "1cfe59631d2fea02a4349e28d705f3213f92933c829110a19de8fb12455d181f",
+          "bytes": 125697
+        },
+        {
+          "path": "gomem/gomem_default_r2_run1.log",
+          "sha256": "153ca0d24261283aa4709f5816368e691a6a59eced76ee1f09e5d0668893ed63",
+          "bytes": 6201
+        },
+        {
+          "path": "gomem/gomem_default_r3_run1.json",
+          "sha256": "d6c35237b343ccc42fca36a5a7e7937cd1aaf33e31d7f9b201bf30ed62d78cfe",
+          "bytes": 125683
+        },
+        {
+          "path": "gomem/gomem_default_r3_run1.log",
+          "sha256": "da13f57471131453f026007e13f4fe6c6e90371b53eb32120b48949868d04345",
+          "bytes": 6199
+        },
+        {
+          "path": "gomem/gomem_default_r4_run1.json",
+          "sha256": "4fc143ca1671d2e779b284ca0863e1b69cd4dc2a6fe6078b93595d6e235a67c8",
+          "bytes": 123616
+        },
+        {
+          "path": "gomem/gomem_default_r4_run1.log",
+          "sha256": "e4269fca2128b5debaf361ed71ad1c2f7c8590fa73a6e72ba05d54695731a1f4",
+          "bytes": 6201
+        },
+        {
+          "path": "gomem/gomem_driver.py.txt",
+          "sha256": "8c8565e37bcb5b11951cba2abf6c407632d76d18278ca6ff1ddd8e53f32bd715",
+          "bytes": 1070
+        },
+        {
+          "path": "gomem/gomem_gomem12_r1_run1.json",
+          "sha256": "a9b207d0a16c95fe9f74a99b3cbbb91978d1c5215f2091853738491acbe0d134",
+          "bytes": 120190
+        },
+        {
+          "path": "gomem/gomem_gomem12_r1_run1.log",
+          "sha256": "4281a28da2661304c981814608d1f33b3c6dcc6a5366872666bede8a7f620816",
+          "bytes": 6202
+        },
+        {
+          "path": "gomem/gomem_gomem12_r2_run1.json",
+          "sha256": "ba30bde1c52ebaad62ced92705b6523f98ba4d6ac18e53e70ca1b6801a047a3a",
+          "bytes": 119574
+        },
+        {
+          "path": "gomem/gomem_gomem12_r2_run1.log",
+          "sha256": "c4d3e74f60f989c668cfbd10a82d8e885ffd08c102a308bf6f33f9bcf80d8599",
+          "bytes": 6199
+        },
+        {
+          "path": "gomem/gomem_gomem12_r3_run1.json",
+          "sha256": "73f3f17625ebd051779cc3d1ff41290efd7a1bf5b36911d2c20578f49d631c57",
+          "bytes": 120709
+        },
+        {
+          "path": "gomem/gomem_gomem12_r3_run1.log",
+          "sha256": "0f68f5e1e98495ca55f02e0cd9b3cf1092805ce2764e088b228be1a0016a5d04",
+          "bytes": 6199
+        },
+        {
+          "path": "gomem/gomem_gomem12_r4_run1.json",
+          "sha256": "4bb0178368618888e1ec6b171e818012177813da79adaca58d985297da4f315f",
+          "bytes": 127778
+        },
+        {
+          "path": "gomem/gomem_gomem12_r4_run1.log",
+          "sha256": "aca08a9bb60a362be180b5f50e6a7b790390beb77499fa9af178309c0d17f7a6",
+          "bytes": 6204
+        },
+        {
+          "path": "gomem/order.txt",
+          "sha256": "417c31e149bd8c4f1ec0f68f685eb513ab619ca7e689fecb61a20545df334f4b",
+          "bytes": 80
+        }
+      ],
+      "extract": [
+        {
+          "name": "gm_default_e2e",
+          "file": "gomem/derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean",
+          "filter": "variant=default"
+        },
+        {
+          "name": "gm_12_e2e",
+          "file": "gomem/derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean",
+          "filter": "variant=gomem12"
+        },
+        {
+          "name": "gm_n",
+          "file": "gomem/derived_summary.csv",
+          "csv_col": "round",
+          "stat": "count"
+        }
+      ]
+    },
+    {
+      "id": "nb_raft_burst",
+      "command": "run_raft_counted.py burst 25000 x5, fresh 3-replica Raft cluster per run",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "0a0ab453319e90d004bdda3308a1961ddd7b9114",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-14T19:52:45Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "raft/derived_burst.csv",
+          "sha256": "acb4a728987025c9dbf476c8a3792c28d9c73d7bd59e2d6d73f2da42506acab7",
+          "bytes": 572
+        },
+        {
+          "path": "raft/job_burst.log",
+          "sha256": "a4d50e0a6f0202125e73daf9130f317d2cf8a3f46ffffaf6dba2a95cabaa7099",
+          "bytes": 2953
+        },
+        {
+          "path": "raft/raft_burst25k_run1.json",
+          "sha256": "a9de6f60ae78786b2db68aaa34642e26c8eb3963f03fc8f1bde0566d1747a92e",
+          "bytes": 4369
+        },
+        {
+          "path": "raft/raft_burst25k_run1.log",
+          "sha256": "c585484f4ce7137751ac4b823487fa49e88b9c744168f1c18b17395e23a7aa75",
+          "bytes": 3239
+        },
+        {
+          "path": "raft/raft_burst25k_run2.json",
+          "sha256": "ecedcbfa3e460f47ad8eaae5a3f5f0cf87415aed9b170581163ed7350d79ea57",
+          "bytes": 4500
+        },
+        {
+          "path": "raft/raft_burst25k_run2.log",
+          "sha256": "96a9ac89d764ac5e71602a6a1629ea889e1688f074faa21e31c812d88e87f37a",
+          "bytes": 3234
+        },
+        {
+          "path": "raft/raft_burst25k_run3.json",
+          "sha256": "21618c80be0c49c6a918fcb6c696ad072b8c421d31dc2007d66752d5ec6e558d",
+          "bytes": 4737
+        },
+        {
+          "path": "raft/raft_burst25k_run3.log",
+          "sha256": "107f092960038fec7044900a6341143c26eb9da654a7d5ec00ad6530c7e0979e",
+          "bytes": 3239
+        },
+        {
+          "path": "raft/raft_burst25k_run4.json",
+          "sha256": "54e84104faeaedc185beb00c43a6d099b42cb61c9bb38fd611e5f4cb6839f33e",
+          "bytes": 4615
+        },
+        {
+          "path": "raft/raft_burst25k_run4.log",
+          "sha256": "e79850a257fd77101c3f74e6ff4943cf5b723e2200808c08cf83359d6c21c39d",
+          "bytes": 3240
+        },
+        {
+          "path": "raft/raft_burst25k_run5.json",
+          "sha256": "cfdba6713b5650c272d0c69c1c7a73278d43d28bf4c76b6e416735f7c21f56e1",
+          "bytes": 4490
+        },
+        {
+          "path": "raft/raft_burst25k_run5.log",
+          "sha256": "00bd8736196bc9c2cc79d710e692af350247dc144dca0f4e3e3c6f63f866833d",
+          "bytes": 3240
+        }
+      ],
+      "extract": [
+        {
+          "name": "rb_mean",
+          "file": "raft/derived_burst.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean"
+        },
+        {
+          "name": "rb_sd",
+          "file": "raft/derived_burst.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "sd"
+        }
+      ]
+    },
+    {
+      "id": "nb_raft_sust",
+      "command": "run_raft_counted.py sustained -max-txs 1000000 x5",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "0a0ab453319e90d004bdda3308a1961ddd7b9114",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-14T19:52:45Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "raft/derived_sust1m.csv",
+          "sha256": "0c3d5ff1707471575dbcf222407e7c295fad2f269812a7ecac1685a42a2afcaa",
+          "bytes": 582
+        },
+        {
+          "path": "raft/job_sust.log",
+          "sha256": "571d6cdc2a3c8a8cd652e459e1058e8603beb738a09e3f746564c50ddef3a477",
+          "bytes": 3106
+        },
+        {
+          "path": "raft/raft_sust1m_run1.json",
+          "sha256": "eaf49bf3241e0fc29805e348e7b136574b59e5d2237f3471844835a3d02b4618",
+          "bytes": 72856
+        },
+        {
+          "path": "raft/raft_sust1m_run1.log",
+          "sha256": "9b744015b4b0df591fc626a4a16d9450072fe8b3b2112d119eb303ec0537da6a",
+          "bytes": 4169
+        },
+        {
+          "path": "raft/raft_sust1m_run2.json",
+          "sha256": "8996e05d9ae454e03729e50ccf73796302b99132182ccc3d123b66c78ce61fd1",
+          "bytes": 72736
+        },
+        {
+          "path": "raft/raft_sust1m_run2.log",
+          "sha256": "2d654f2b718384f4daa63fc12cf28da3070d97001f5b7fa1c58055a968a84108",
+          "bytes": 4168
+        },
+        {
+          "path": "raft/raft_sust1m_run3.json",
+          "sha256": "58d8ddc820a5a69afe9a27c27b81161c92819741dfd765e42fa4b5ab1d732eff",
+          "bytes": 72852
+        },
+        {
+          "path": "raft/raft_sust1m_run3.log",
+          "sha256": "a9a47cb1403c7d4e2057cba6b43200ac4663e098465c3ae51f12a8cded77bdd8",
+          "bytes": 4170
+        },
+        {
+          "path": "raft/raft_sust1m_run4.json",
+          "sha256": "a71d5a00fa061b4f51b12c3978c3d510ffa99f46baf14a08e69dbd59f81b64c5",
+          "bytes": 72349
+        },
+        {
+          "path": "raft/raft_sust1m_run4.log",
+          "sha256": "5b464bde4b18f3cf61c02be12f2562c5dc0d9f346d96b1527df2717d5ab1d162",
+          "bytes": 4171
+        },
+        {
+          "path": "raft/raft_sust1m_run5.json",
+          "sha256": "6017a3d9fbd761e6f02d487ba5010d47c44292f9ab33b8aef54e2e63ef2396b7",
+          "bytes": 72606
+        },
+        {
+          "path": "raft/raft_sust1m_run5.log",
+          "sha256": "e4a4f99b713cad680a95ecede6a3f9f865560fab08122656624aa0f92b57282c",
+          "bytes": 4169
+        }
+      ],
+      "extract": [
+        {
+          "name": "rs_mean",
+          "file": "raft/derived_sust1m.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean"
+        },
+        {
+          "name": "rs_sd",
+          "file": "raft/derived_sust1m.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "sd"
+        }
+      ]
+    }
+  ],
+  "report": "note/node_profile_backlog_raft_report_20261014.md"
+}
