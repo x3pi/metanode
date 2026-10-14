@@ -58,6 +58,7 @@ func TestParentChainGatewayHandler_HandleTransaction(t *testing.T) {
 	senderAddr := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	stateDB := chainState.GetAccountStateDB()
 	stateDB.AddBalance(senderAddr, big.NewInt(1000000000000000000)) // 1 ETH
+	assert.NoError(t, stateDB.SetParentRegistered(senderAddr, true))
 
 	// 3. Create mock transaction
 	destPubKeyHex := "010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101"
@@ -99,10 +100,10 @@ func TestParentChainGatewayHandler_HandleTransaction(t *testing.T) {
 	receipt, _, err := handler.HandleTransaction(context.Background(), chainState, tx, mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, false, 0)
 	assert.NoError(t, err)
 	assert.NotNil(t, receipt)
-	
+
 	// Ensure the receipt status is RETURNED (equivalent to success for barrier TX)
 	assert.Equal(t, pb.RECEIPT_STATUS_RETURNED, receipt.Status())
-	
+
 	// Verify that the dispatcher was called with correct parameters
 	assert.True(t, mockDispatcher.HandleTransferCalled)
 	assert.Equal(t, destPubKeyBytes, mockDispatcher.LastToKey[:])
@@ -115,7 +116,7 @@ func TestParentChainGatewayHandler_HandleTransaction(t *testing.T) {
 	newBalance := accountState.Balance()
 	gasFee := new(big.Int).Mul(big.NewInt(int64(mt_common.TRANSFER_GAS_COST)), big.NewInt(1))
 	expectedBalance := new(big.Int).Sub(big.NewInt(1000000000000000000), gasFee) // since HandleTransfer doesn't deduct from stateDB in the mock
-	
+
 	assert.Equal(t, expectedBalance.String(), newBalance.String())
 }
 
@@ -131,6 +132,7 @@ func TestParentChainGatewayHandler_ErrorCases(t *testing.T) {
 	stateDB := chainState.GetAccountStateDB()
 	senderAddr := common.HexToAddress("0x3333333333333333333333333333333333333333")
 	stateDB.AddBalance(senderAddr, big.NewInt(1000)) // Low balance
+	assert.NoError(t, stateDB.SetParentRegistered(senderAddr, true))
 	stateDB.SetNonce(senderAddr, 5)
 
 	// Case 1: Short calldata (< 100 bytes)
@@ -219,6 +221,7 @@ func TestParentChainGatewayHandler_SecurityAdversarialInputs(t *testing.T) {
 	stateDB := chainState.GetAccountStateDB()
 	sender := common.HexToAddress("0x9999999999999999999999999999999999999999")
 	stateDB.AddBalance(sender, big.NewInt(100_000))
+	assert.NoError(t, stateDB.SetParentRegistered(sender, true))
 	stateDB.SetNonce(sender, 10)
 
 	// Valid 100-byte payload with valid target address
@@ -284,6 +287,7 @@ func TestParentChainGatewayHandler_SecurityAdversarialInputs(t *testing.T) {
 	// Sender has 20,550 (enough for transfer + gas, but 50 wei short of the cross-chain fee).
 	victim := common.HexToAddress("0x7777777777777777777777777777777777777777")
 	stateDB.AddBalance(victim, big.NewInt(20550))
+	assert.NoError(t, stateDB.SetParentRegistered(victim, true))
 	stateDB.SetNonce(victim, 1)
 
 	txEdgeFee := transaction.NewTransaction(
@@ -300,7 +304,6 @@ func TestParentChainGatewayHandler_SecurityAdversarialInputs(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, big.NewInt(20550), asVictim.Balance(), "Balance must remain intact after failed validation")
 }
-
 
 // realDispatcher adapts the production *rollup.CrossNodeHandler (same wiring as cmd/simple_chain's adapter).
 type realDispatcher struct{ h *rollup.CrossNodeHandler }
@@ -344,6 +347,7 @@ func TestParentChainGatewayHandler_BalanceConservationAtBoundary(t *testing.T) {
 	short := common.HexToAddress("0x1111111111111111111111111111111111110001")
 	shortBal := new(big.Int).Sub(need, big.NewInt(1))
 	stateDB.AddBalance(short, shortBal)
+	assert.NoError(t, stateDB.SetParentRegistered(short, true))
 	rcp, _, err := handler.HandleTransaction(context.Background(), chainState, mk(short, 0), mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, false, 0)
 	assert.NoError(t, err)
 	assert.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, rcp.Status(), "one unit short of amount+fee+gas must be rejected")
@@ -353,6 +357,7 @@ func TestParentChainGatewayHandler_BalanceConservationAtBoundary(t *testing.T) {
 	// Exactly enough: succeeds and ends at exactly zero (never negative).
 	exact := common.HexToAddress("0x1111111111111111111111111111111111110002")
 	stateDB.AddBalance(exact, need)
+	assert.NoError(t, stateDB.SetParentRegistered(exact, true))
 	rcp, _, err = handler.HandleTransaction(context.Background(), chainState, mk(exact, 0), mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, false, 0)
 	assert.NoError(t, err)
 	assert.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcp.Status(), "exactly amount+fee+gas must succeed: %s", string(rcp.Return()))

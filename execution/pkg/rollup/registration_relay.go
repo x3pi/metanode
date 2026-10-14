@@ -605,7 +605,7 @@ func (r *RegistrationRelay) submittedUsers(limit int) []common.Address {
 	defer r.mu.Unlock()
 	var out []common.Address
 	for u, e := range r.entries {
-		if e.status == RegStatusPending && e.submitted {
+		if (e.status == RegStatusPending || e.status == RegStatusProvisional) && e.submitted {
 			out = append(out, u)
 			if len(out) >= limit {
 				break
@@ -613,6 +613,27 @@ func (r *RegistrationRelay) submittedUsers(limit int) []common.Address {
 		}
 	}
 	return out
+}
+
+func (r *RegistrationRelay) markProvisionalIfApplied(user common.Address) {
+	r.mu.Lock()
+	checker := r.isProvisional
+	r.mu.Unlock()
+	if checker == nil || !checker(user) {
+		return
+	}
+
+	changed := false
+	r.update(user, func(e *relayEntry) {
+		if e.status == RegStatusPending {
+			e.status = RegStatusProvisional
+			e.reason = ""
+			changed = true
+		}
+	})
+	if changed {
+		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusProvisional})
+	}
 }
 
 func (r *RegistrationRelay) snapshot(user common.Address) (relayEntry, bool) {
@@ -707,6 +728,7 @@ func (r *RegistrationRelay) relayOne(user common.Address) {
 		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusConfirmed})
 		return
 	}
+	r.markProvisionalIfApplied(user)
 
 	home, found, err := r.parent.GetAccountRegistry(user)
 	if err != nil {
@@ -744,7 +766,7 @@ func (r *RegistrationRelay) relayOne(user common.Address) {
 // transaction, and a duplicate (the address already belongs to another cluster) only shows up in its registry.
 func (r *RegistrationRelay) verifyOne(user common.Address) {
 	e, ok := r.snapshot(user)
-	if !ok || e.status != RegStatusPending || !e.submitted {
+	if !ok || (e.status != RegStatusPending && e.status != RegStatusProvisional) || !e.submitted {
 		return
 	}
 	if r.registered != nil && r.registered(user) {
@@ -752,6 +774,7 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusConfirmed})
 		return
 	}
+	r.markProvisionalIfApplied(user)
 	home, found, err := r.parent.GetAccountRegistry(user)
 	if err == nil && found {
 		r.resolveFound(user, home)
@@ -760,7 +783,7 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 	failed := false
 	r.update(user, func(e *relayEntry) {
 		e.verifies++
-		if e.verifies >= r.maxVerifies {
+		if e.status != RegStatusProvisional && e.verifies >= r.maxVerifies {
 			e.status = RegStatusFailed
 			e.reason = "the parent chain did not register the account"
 			failed = true

@@ -686,7 +686,7 @@ func (sp *StateProcessor) sendRegisterAccountError(request network.Request, errM
 const registerAccountRawLen = common.AddressLength + 65
 
 func isTerminalRegistration(s rollup.RegistrationStatus) bool {
-	return s == rollup.RegStatusConfirmed || s == rollup.RegStatusRejected || s == rollup.RegStatusFailed
+	return s == rollup.RegStatusProvisional || s == rollup.RegStatusConfirmed || s == rollup.RegStatusRejected || s == rollup.RegStatusFailed
 }
 
 // ProcessRegisterAccount handles RegisterAccount: parses the request, submits it to the relay (which verifies the user's
