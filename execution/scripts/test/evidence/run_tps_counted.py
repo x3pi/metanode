@@ -241,6 +241,14 @@ def one_run(i, args, outdir):
         if k < 8:
             time.sleep(15)
     open(f"{outdir}/{args.tag}_run{i}_post.json", "w").write(json.dumps(post, indent=1))
+    # NOMT/Rust errors and fatal lines of each node's stdout/stderr log (kept in full: the FIRST error is what poisons the store),
+    # and the whole stdout log of any node that is not alive any more.
+    for n in NODES:
+        lp = f"{BASE}/logs/{n}.log"
+        if os.path.isfile(lp):
+            sh(["bash", "-c", f"grep -a -n -E '\\[nomt_ffi\\]|panic|fatal error|SIGSEGV|SIGABRT|poison|ENOSPC|No space|Input/output|io_uring' '{lp}' | grep -a -v 'Detected existing HT file' | cut -c1-500 > '{outdir}/{args.tag}_run{i}_{n}_nomt_errors.txt'"])
+            if pm.get(n) and not os.path.exists(f"/proc/{pm[n]}"):
+                sh(["bash", "-c", f"gzip -c '{lp}' > '{outdir}/{args.tag}_run{i}_{n}_DEAD_stdout.log.gz'"])
     # Per-stage counters of the diagnostic node build (absent in normal builds): last lines of each node log.
     for n in NODES:
         r = sh(["bash", "-c", f"cat {BASE}/{n}/logs/*/*.log 2>/dev/null | grep -a NETDIAG | tail -n 1200"])
