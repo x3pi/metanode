@@ -21,6 +21,7 @@ import socket
 import urllib.request
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -154,7 +155,10 @@ def one_run(i, args, outdir):
     d["bin"] = args.bins
     json.dump(d, open(env_json, "w"), indent=2)
     env = os.environ.copy()
-    env["ENABLE_DEBUG_PPROF"] = "false"
+    env["ENABLE_DEBUG_PPROF"] = "true" if args.profile_at else "false"
+    for kv in args.node_env:
+        k, _, v = kv.partition("=")
+        env[k] = v
     t0 = time.time()
     r = sh([RUN_ENV, BASE, "start"], env=env)
     if r.returncode != 0:
@@ -180,7 +184,50 @@ def one_run(i, args, outdir):
         if args.max_txs:
             cmd += ["-max-txs", str(args.max_txs)]
     t1 = time.time()
+    prof_thread = None
+    if args.profile_at:
+        def _cpu_jiffies(pid):
+            try:
+                f = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()
+                return int(f[11]) + int(f[12])  # utime + stime
+            except Exception:
+                return None
+        def _profiler():
+            t_start = time.time(); prev = {n: _cpu_jiffies(p) for n, p in pm.items()}; prev_t = t_start
+            rows = []; did = False
+            while not stop_prof.is_set():
+                time.sleep(10)
+                now = time.time(); row = {"t": round(now - t_start)}
+                for n, p in pm.items():
+                    j = _cpu_jiffies(p)
+                    row[f"{n}_cpu_pct"] = None if (j is None or prev.get(n) is None) else round((j - prev[n]) / 100.0 / (now - prev_t) * 100, 1)
+                    prev[n] = j
+                    try:
+                        row[f"{n}_rss_mb"] = int([l for l in open(f"/proc/{p}/status") if l.startswith("VmRSS:")][0].split()[1]) // 1024
+                    except Exception:
+                        row[f"{n}_rss_mb"] = None
+                prev_t = now
+                try:
+                    rq = urllib.request.Request("http://127.0.0.1:31646", data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}', headers={"Content-Type": "application/json"})
+                    row["head"] = int(json.loads(urllib.request.urlopen(rq, timeout=5).read())["result"], 16)
+                except Exception:
+                    row["head"] = None
+                rows.append(row)
+                if not did and now - t_start >= args.profile_at:
+                    did = True
+                    base = f"{outdir}/{args.tag}_run{i}"
+                    for name, url, to in (("cpu30.pb.gz", "profile?seconds=30", 60), ("heap.pb.gz", "heap", 30), ("goroutine.txt", "goroutine?debug=1", 30), ("allocs.pb.gz", "allocs", 30)):
+                        try:
+                            data = urllib.request.urlopen(f"http://127.0.0.1:31446/debug/pprof/{url}", timeout=to).read()
+                            open(f"{base}_val0_{name}", "wb").write(data)
+                        except Exception as e:
+                            open(f"{base}_val0_{name}.err", "w").write(str(e))
+            json.dump(rows, open(f"{outdir}/{args.tag}_run{i}_timeline.json", "w"), indent=1)
+        stop_prof = threading.Event()
+        prof_thread = threading.Thread(target=_profiler, daemon=True); prof_thread.start()
     b = sh(cmd)
+    if prof_thread:
+        stop_prof.set(); prof_thread.join(timeout=90)
     info["blast_wall_seconds"] = round(time.time() - t1, 1)
     open(f"{outdir}/{args.tag}_run{i}.log", "w").write(b.stdout + "\n--STDERR--\n" + b.stderr)
     info["blast_exit"] = b.returncode
@@ -302,6 +349,8 @@ def main():
     ap.add_argument("--batch", type=int, default=1000)
     ap.add_argument("--duration", type=int, default=60)
     ap.add_argument("--rate-limit", type=int, default=0)
+    ap.add_argument("--profile-at", type=int, default=0, help="seconds after the tool starts at which to take Go CPU/heap/goroutine profiles of val0 (enables pprof; adds a 10 s resource timeline)")
+    ap.add_argument("--node-env", action="append", default=[], help="KEY=VALUE environment variable for the node processes (repeatable)")
     ap.add_argument("--max-txs", type=int, default=0, help="sustained: stop injecting after about this many txs")
     ap.add_argument("--max-wait-sec", type=int, default=120)
     ap.add_argument("--quiet-sec", type=int, default=8)
