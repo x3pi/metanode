@@ -177,6 +177,8 @@ def one_run(i, args, outdir):
         cmd += ["-duration", str(args.duration), "-batch", str(args.batch)]
         if args.rate_limit:
             cmd += ["-rate-limit", str(args.rate_limit)]
+        if args.max_txs:
+            cmd += ["-max-txs", str(args.max_txs)]
     t1 = time.time()
     b = sh(cmd)
     info["blast_wall_seconds"] = round(time.time() - t1, 1)
@@ -300,6 +302,7 @@ def main():
     ap.add_argument("--batch", type=int, default=1000)
     ap.add_argument("--duration", type=int, default=60)
     ap.add_argument("--rate-limit", type=int, default=0)
+    ap.add_argument("--max-txs", type=int, default=0, help="sustained: stop injecting after about this many txs")
     ap.add_argument("--max-wait-sec", type=int, default=120)
     ap.add_argument("--quiet-sec", type=int, default=8)
     args = ap.parse_args()
