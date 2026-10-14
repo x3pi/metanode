@@ -1,0 +1,16 @@
+import random, subprocess, os, sys
+S="/tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad"
+reps=int(sys.argv[1]); rnd=random.Random(20261016)
+vols=[500000,1000000,2000000,4000000]
+order=[]
+for r in range(reps):
+    v=vols[:]; rnd.shuffle(v); order+=[(r+1,x) for x in v]
+out=f"{S}/out_sweep"; os.makedirs(out,exist_ok=True)
+open(f"{out}/order.txt","w").write("\n".join(f"{r} {v}" for r,v in order)+"\n")
+for r,v in order:
+    tag=f"sw_v{v//1000}k_r{r}"
+    print(f"### SWEEP {tag}",flush=True)
+    p=subprocess.run(["python3","-I","scripts/test/evidence/run_tps_counted.py","--mode","sustained","--runs","1","--tag",tag,"--bins",f"{S}/bins_new","--out",out,"--duration","300","--max-txs",str(v),"--batch","1000","--max-wait-sec","900"],cwd="/home/abc/chain-n/metanode/execution",capture_output=True,text=True,errors="replace")
+    open(f"{out}/{tag}.stdout","w").write(p.stdout+p.stderr)
+    print(f"### SWEEP {tag} exit={p.returncode}",flush=True)
+print("SWEEP-ALL-DONE",flush=True)

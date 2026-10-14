@@ -5,7 +5,7 @@ Quy tắc: không thêm dòng "RE-VERIFIED" nếu chưa có file thô trong `not
 
 | # | Tuyên bố (nguồn) | Trạng thái | Cơ sở | Ghi chú / giới hạn |
 |---|---|---|---|---|
-| 1 | BFT burst 25k cold-start ≈ 7.804 tx/s (n=8) (`tps_full_measurement_report_20261009.md`) | RE-VERIFIED (cùng bậc) | counted: 7.680,93 ± 902,28 (n=7) và 7.773,85 ± 1.069,35 (n=7) — evidence:tps_counted_burst_b | Một máy; không so khác biệt có ý nghĩa với số cũ (ghép cặp p = 0,38) |
+| 1 | BFT burst 25k cold-start ≈ 7.804 tx/s (n=8) (`tps_full_measurement_report_20261009.md`) | RE-VERIFIED (cùng bậc, cả trước và sau bản sửa) | counted: 7.680,93 ± 902,28 (n=7) và 7.773,85 ± 1.069,35 (n=7) trước sửa — evidence:tps_counted_burst_b; 7.968,06 ± 715,40 (n=7) sau sửa — evidence:tps_vol_burst | Một máy; burst chỉ 3–5 block nên không phản ánh tốc độ ổn định |
 | 2 | BFT sustained 60 s ≈ 14.072 tx/s (n=8) (cùng báo cáo) | EXPLAINED (tái lập được với mã cũ; không phải hồi quy) | mã Go cũ `f97a2fbf` đo 13,4k đầu-cuối ở cùng điều kiện (8 cặp) — evidence:node_ab1; ở khối lượng tx tương đương bản mới nhanh hơn ~6% (5 cặp, p = 0,02) — evidence:node_ab2 | Bản cũ tự chặn client (~0,86M tx/lượt), bản mới nhận ~4,2M tx nên số đầu-cuối 11,4k; số tuyệt đối giữa các ngày dao động ±12% (máy dùng chung); binary cũ là bản lai (Go cũ + Rust hiện tại) |
 | 3 | Công cụ cũ ngoại suy từ 50 mẫu / "submitted" = byte ghi socket (đọc code) | RE-VERIFIED | đọc code + test `measure_test.go`; sustained n=10: số cũ cao hơn số đếm +618,6 tx/s (p = 0,0001) — evidence:tps_ingress_gap_b5 | Burst: số cũ ≈ số đếm. Sustained: số cũ cao hơn ~4,9% |
 | 4 | 129.345 tx/s (Block-STM) và 74.067 tx/s (Go pipeline) trong `tps_summary_results_20261009.md` | NARROWED | đọc code/báo cáo | Là đo từng pha trong micro-benchmark, không phải TPS hệ thống đầu-cuối; không dùng làm số TPS chuỗi |
@@ -21,6 +21,7 @@ Quy tắc: không thêm dòng "RE-VERIFIED" nếu chưa có file thô trong `not
 
 | 14 | Tx client "gửi" nhưng validator không nhận (sustained, ~30% lượt trước bản sửa, 34k–191k tx) | RESOLVED (nguyên nhân + sửa + kiểm chứng) | nguyên nhân: `HandleConnection` bỏ hàng đợi khi idle timeout — evidence:tps_ingress_rootcause_hunt5_run2; sau sửa 13/13 lượt hợp lệ không mất — evidence:tps_ingress_fix_validation | Chạy trên 1 máy; chưa Raft/nhiều máy |
 | 15 | Validator tự thoát với `nomt_ffi: failed to commit payload` (stake_db, block 45) | OPEN | 1 lần quan sát; thông điệp Rust: "Store is poisoned due to prior error" (lỗi đầu tiên bị mất); không tái hiện trong 20 lượt sau — evidence:nomt_crash_hunt | Nguyên nhân gốc chưa biết; "không tái hiện" ≠ "đã hết" |
+| 16 | TPS sustained của node hiện tại giảm khi backlog tăng: 13,1k (0,5 triệu tx) → 12,2k (1) → 11,5k (2) → 10,0k (4), Spearman −0,91 | RE-VERIFIED (quan hệ); cơ chế OPEN | 4 mức × 4 vòng, xáo ngẫu nhiên — evidence:tps_vol_sweep | Một máy; chưa profile node khi xả backlog; phải ghi kèm khối lượng tx khi công bố |
 
 ## Giới hạn
 - Chỉ các dòng RE-VERIFIED / NOT REPRODUCED có file thô ở `note/evidence/`; mọi dòng khác chỉ là trích.
