@@ -20,7 +20,7 @@ Quy tắc: không thêm dòng "RE-VERIFIED" nếu chưa có file thô trong `not
 | 13 | Số liệu GOGC, drift RSS, TTL, fsync | NOT RE-VERIFIED | — | Chưa chạy lại |
 
 | 14 | Tx client "gửi" nhưng validator không nhận (sustained, ~30% lượt trước bản sửa, 34k–191k tx) | RESOLVED (nguyên nhân + sửa + kiểm chứng) | nguyên nhân: `HandleConnection` bỏ hàng đợi khi idle timeout — evidence:tps_ingress_rootcause_hunt5_run2; sau sửa 13/13 lượt hợp lệ không mất — evidence:tps_ingress_fix_validation | Chạy trên 1 máy; chưa Raft/nhiều máy |
-| 15 | Validator tự thoát với `nomt_ffi: failed to commit payload` (stake_db, block 45) | OPEN | 1 lần quan sát — evidence:tps_ingress_node_crash | Nguyên nhân chưa biết; chưa tái hiện |
+| 15 | Validator tự thoát với `nomt_ffi: failed to commit payload` (stake_db, block 45) | OPEN | 1 lần quan sát; thông điệp Rust: "Store is poisoned due to prior error" (lỗi đầu tiên bị mất); không tái hiện trong 20 lượt sau — evidence:nomt_crash_hunt | Nguyên nhân gốc chưa biết; "không tái hiện" ≠ "đã hết" |
 
 ## Giới hạn
 - Chỉ các dòng RE-VERIFIED / NOT REPRODUCED có file thô ở `note/evidence/`; mọi dòng khác chỉ là trích.
