@@ -358,3 +358,222 @@ func TestQuorumClient_AccountRegistrations_MissingNodesNoQuorum(t *testing.T) {
 	assert.Nil(t, events)
 	assert.Equal(t, uint64(0), nextCur, "cursor must NOT advance when responses < threshold")
 }
+
+func createMockAccountServer(key cm.PublicKey, found bool) *httptest.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/account", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"float_identity_key": key[:],
+			"found":              found,
+		})
+	})
+	return httptest.NewServer(mux)
+}
+
+func TestQuorumClient_GetAccountRegistry_Quorum(t *testing.T) {
+	clusterKp := bls.GenerateKeyPair()
+	lyingKp := bls.GenerateKeyPair()
+	_, userAddr := generateECDSAKey()
+
+	t.Run("4 nodes, 1 lies -> honest majority returned", func(t *testing.T) {
+		s0 := createMockAccountServer(clusterKp.PublicKey(), true)
+		defer s0.Close()
+		s1 := createMockAccountServer(clusterKp.PublicKey(), true)
+		defer s1.Close()
+		s2 := createMockAccountServer(clusterKp.PublicKey(), true)
+		defer s2.Close()
+		s3 := createMockAccountServer(lyingKp.PublicKey(), true) // 1 lying node
+		defer s3.Close()
+
+		qc := NewQuorumClient([]string{s0.URL, s1.URL, s2.URL, s3.URL}, cm.PrivateKey{}, cm.PublicKey{})
+		gotKey, found, err := qc.GetAccountRegistry(userAddr)
+		require.NoError(t, err)
+		assert.True(t, found)
+		assert.Equal(t, clusterKp.PublicKey(), gotKey)
+	})
+
+	t.Run("4 nodes, all agree not found -> quorum not found returned", func(t *testing.T) {
+		s0 := createMockAccountServer(cm.PublicKey{}, false)
+		defer s0.Close()
+		s1 := createMockAccountServer(cm.PublicKey{}, false)
+		defer s1.Close()
+		s2 := createMockAccountServer(cm.PublicKey{}, false)
+		defer s2.Close()
+		s3 := createMockAccountServer(cm.PublicKey{}, false)
+		defer s3.Close()
+
+		qc := NewQuorumClient([]string{s0.URL, s1.URL, s2.URL, s3.URL}, cm.PrivateKey{}, cm.PublicKey{})
+		gotKey, found, err := qc.GetAccountRegistry(userAddr)
+		require.NoError(t, err)
+		assert.False(t, found)
+		assert.Equal(t, cm.PublicKey{}, gotKey)
+	})
+
+	t.Run("4 nodes, split vote 2 A / 2 B -> ErrQuorumNotReached (no random winner)", func(t *testing.T) {
+		kpA := bls.GenerateKeyPair()
+		kpB := bls.GenerateKeyPair()
+		s0 := createMockAccountServer(kpA.PublicKey(), true)
+		defer s0.Close()
+		s1 := createMockAccountServer(kpA.PublicKey(), true)
+		defer s1.Close()
+		s2 := createMockAccountServer(kpB.PublicKey(), true)
+		defer s2.Close()
+		s3 := createMockAccountServer(kpB.PublicKey(), true)
+		defer s3.Close()
+
+		qc := NewQuorumClient([]string{s0.URL, s1.URL, s2.URL, s3.URL}, cm.PrivateKey{}, cm.PublicKey{})
+		_, _, err := qc.GetAccountRegistry(userAddr)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrQuorumNotReached)
+	})
+
+	t.Run("disagreement or missing nodes -> ErrQuorumNotReached", func(t *testing.T) {
+		s0 := createMockAccountServer(clusterKp.PublicKey(), true)
+		defer s0.Close()
+
+		qc := NewQuorumClient([]string{s0.URL, "http://127.0.0.1:1", "http://127.0.0.1:2", "http://127.0.0.1:3"}, cm.PrivateKey{}, cm.PublicKey{})
+		_, _, err := qc.GetAccountRegistry(userAddr)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrQuorumNotReached)
+	})
+}
+
+func TestQuorumClient_GetStateRoot_Quorum(t *testing.T) {
+	clusterKp := bls.GenerateKeyPair()
+	rootA := common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111")
+	rootB := common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222")
+	lyingRoot := common.HexToHash("0x9999999999999999999999999999999999999999999999999999999999999999")
+
+	createMockStateRootServer := func(root common.Hash, found bool) *httptest.Server {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/state_root", func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"root":  root,
+				"found": found,
+			})
+		})
+		return httptest.NewServer(mux)
+	}
+
+	t.Run("4 nodes, 1 lies -> honest majority returned", func(t *testing.T) {
+		s0 := createMockStateRootServer(rootA, true)
+		defer s0.Close()
+		s1 := createMockStateRootServer(rootA, true)
+		defer s1.Close()
+		s2 := createMockStateRootServer(rootA, true)
+		defer s2.Close()
+		s3 := createMockStateRootServer(lyingRoot, true)
+		defer s3.Close()
+
+		qc := NewQuorumClient([]string{s0.URL, s1.URL, s2.URL, s3.URL}, cm.PrivateKey{}, cm.PublicKey{})
+		gotRoot, found, err := qc.GetStateRoot(clusterKp.PublicKey(), 1)
+		require.NoError(t, err)
+		assert.True(t, found)
+		assert.Equal(t, rootA, gotRoot)
+	})
+
+	t.Run("4 nodes, split vote 2 A / 2 B -> ErrQuorumNotReached (no random winner)", func(t *testing.T) {
+		s0 := createMockStateRootServer(rootA, true)
+		defer s0.Close()
+		s1 := createMockStateRootServer(rootA, true)
+		defer s1.Close()
+		s2 := createMockStateRootServer(rootB, true)
+		defer s2.Close()
+		s3 := createMockStateRootServer(rootB, true)
+		defer s3.Close()
+
+		qc := NewQuorumClient([]string{s0.URL, s1.URL, s2.URL, s3.URL}, cm.PrivateKey{}, cm.PublicKey{})
+		_, _, err := qc.GetStateRoot(clusterKp.PublicKey(), 1)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrQuorumNotReached)
+	})
+
+	t.Run("4 nodes, all agree not found -> quorum not found returned", func(t *testing.T) {
+		s0 := createMockStateRootServer(common.Hash{}, false)
+		defer s0.Close()
+		s1 := createMockStateRootServer(common.Hash{}, false)
+		defer s1.Close()
+		s2 := createMockStateRootServer(common.Hash{}, false)
+		defer s2.Close()
+		s3 := createMockStateRootServer(common.Hash{}, false)
+		defer s3.Close()
+
+		qc := NewQuorumClient([]string{s0.URL, s1.URL, s2.URL, s3.URL}, cm.PrivateKey{}, cm.PublicKey{})
+		gotRoot, found, err := qc.GetStateRoot(clusterKp.PublicKey(), 1)
+		require.NoError(t, err)
+		assert.False(t, found)
+		assert.Equal(t, common.Hash{}, gotRoot)
+	})
+
+	t.Run("disagreement or missing nodes -> ErrQuorumNotReached", func(t *testing.T) {
+		s0 := createMockStateRootServer(rootA, true)
+		defer s0.Close()
+
+		qc := NewQuorumClient([]string{s0.URL, "http://127.0.0.1:1", "http://127.0.0.1:2", "http://127.0.0.1:3"}, cm.PrivateKey{}, cm.PublicKey{})
+		_, _, err := qc.GetStateRoot(clusterKp.PublicKey(), 1)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrQuorumNotReached)
+	})
+}
+
+func TestQuorumClient_ThresholdFormulas(t *testing.T) {
+	testCases := []struct {
+		n              int
+		expectedRead   int // quorumThreshold: f + 1
+		expectedStrong int // strongQuorumThreshold: (n+f)/2 + 1
+	}{
+		{n: 1, expectedRead: 1, expectedStrong: 1},
+		{n: 2, expectedRead: 1, expectedStrong: 2},
+		{n: 3, expectedRead: 1, expectedStrong: 2},
+		{n: 4, expectedRead: 2, expectedStrong: 3},  // canonical 3f+1, f=1: 2f+1=3, N-f=3
+		{n: 5, expectedRead: 2, expectedStrong: 4},  // non-canonical: f=1, (5+1)/2+1=4 (prevents 3 A / 3 B equivocation)
+		{n: 6, expectedRead: 2, expectedStrong: 4},  // non-canonical: f=1, (6+1)/2+1=4
+		{n: 7, expectedRead: 3, expectedStrong: 5},  // canonical 3f+1, f=2: 2f+1=5, N-f=5
+		{n: 10, expectedRead: 4, expectedStrong: 7}, // canonical 3f+1, f=3: 2f+1=7, N-f=7
+	}
+	for _, tc := range testCases {
+		urls := make([]string, tc.n)
+		for i := 0; i < tc.n; i++ {
+			urls[i] = fmt.Sprintf("http://127.0.0.1:%d", 1000+i)
+		}
+		qc := NewQuorumClient(urls, cm.PrivateKey{}, cm.PublicKey{})
+		assert.Equal(t, tc.expectedRead, qc.quorumThreshold(), "read threshold mismatch for n=%d", tc.n)
+		assert.Equal(t, tc.expectedStrong, qc.strongQuorumThreshold(), "strong threshold mismatch for n=%d", tc.n)
+	}
+}
+
+func TestQuorumClient_5Nodes_EquivocationPrevention(t *testing.T) {
+	userAddr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	kpA := bls.GenerateKeyPair()
+	kpB := bls.GenerateKeyPair()
+
+	// 5 nodes: 3 nodes vote for A, 2 nodes vote for B.
+	// In the old algorithm (Q=3), A would win with 3 votes, allowing Byzantine equivocation.
+	// With the new formula (Q=4), 3 votes is insufficient, so ErrQuorumNotReached is returned.
+	s0 := createMockAccountServer(kpA.PublicKey(), true)
+	defer s0.Close()
+	s1 := createMockAccountServer(kpA.PublicKey(), true)
+	defer s1.Close()
+	s2 := createMockAccountServer(kpA.PublicKey(), true)
+	defer s2.Close()
+	s3 := createMockAccountServer(kpB.PublicKey(), true)
+	defer s3.Close()
+	s4 := createMockAccountServer(kpB.PublicKey(), true)
+	defer s4.Close()
+
+	qc := NewQuorumClient([]string{s0.URL, s1.URL, s2.URL, s3.URL, s4.URL}, cm.PrivateKey{}, cm.PublicKey{})
+	assert.Equal(t, 4, qc.strongQuorumThreshold())
+
+	_, _, err := qc.GetAccountRegistry(userAddr)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrQuorumNotReached)
+
+	// If 4 nodes vote for A (exceeding Q=4), A achieves quorum and wins.
+	s3Honest := createMockAccountServer(kpA.PublicKey(), true)
+	defer s3Honest.Close()
+	qcHonest := NewQuorumClient([]string{s0.URL, s1.URL, s2.URL, s3Honest.URL, s4.URL}, cm.PrivateKey{}, cm.PublicKey{})
+	gotKey, found, err := qcHonest.GetAccountRegistry(userAddr)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, kpA.PublicKey(), gotKey)
+}

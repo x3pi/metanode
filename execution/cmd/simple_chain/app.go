@@ -382,6 +382,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		stateDBAdapter.GetParentRegistered)
 	app.regRelay.SetProvisionalChecker(stateDBAdapter.GetProvisional)
 	app.regRelay.SetLockedChecker(stateDBAdapter.GetLocked)
+	app.regRelay.SetLockedHomeClusterChecker(stateDBAdapter.GetLockedHomeCluster)
 	if app.storageManager != nil && app.storageManager.GetStorageMapping() != nil {
 		store := rollup.NewKVRelayStore(durableKV{app.storageManager.GetStorageMapping()})
 		if err := app.regRelay.SetStore(store); err != nil {

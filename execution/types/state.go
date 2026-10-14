@@ -38,6 +38,8 @@ type AccountState interface {
 	SetParentRegistered(bool)
 	IsLocked() bool
 	SetLocked(bool)
+	LockedHomeCluster() common.PublicKey
+	SetLockedHomeCluster(common.PublicKey)
 	IsProvisional() bool
 	SetProvisional(bool)
 	//

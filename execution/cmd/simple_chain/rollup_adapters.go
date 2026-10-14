@@ -5,6 +5,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 )
 
 // accountStateDBAdapter adapts account_state_db to rollup.AccountStateDB.
@@ -101,6 +102,18 @@ func (a *accountStateDBAdapter) GetLocked(address common.Address) bool {
 
 func (a *accountStateDBAdapter) SetLocked(address common.Address, locked bool) {
 	_ = a.chainState.GetAccountStateDB().SetLocked(address, locked)
+}
+
+func (a *accountStateDBAdapter) GetLockedHomeCluster(address common.Address) cm.PublicKey {
+	state, err := a.chainState.GetAccountStateDB().AccountState(address)
+	if err != nil || state == nil {
+		return cm.PublicKey{}
+	}
+	return state.LockedHomeCluster()
+}
+
+func (a *accountStateDBAdapter) SetLockedHomeCluster(address common.Address, homeCluster cm.PublicKey) {
+	_ = a.chainState.GetAccountStateDB().SetLockedHomeCluster(address, homeCluster)
 }
 
 // smartContractDBAdapter adapts smart_contract_db to rollup.SmartContractDB.

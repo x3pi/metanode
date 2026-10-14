@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-10-13 (secp_tps_blast chain-counted measurement `measure.go` + `run_tps_counted.py`, `make_manifest.py`, `claims_lint.py`, `watchdog_supervisor_experiment.sh`; previous: 2026-10-09 Lossless TCP tx ingress: network admission gate `pkg/network/admission.go`, overload gate + mempool-room backpressure in `processor/`, forwarder success-path bookkeeping restored, `Connection.SendMessage` no longer panics on a closed sendChan, tx submissions never dropped by readLoop, HandleConnection delivers queued requests on peer EOF, configurable per-connection inbound buffer `ConnRequestChanSize`).
+> **Last updated:** 2026-10-14 (Account state protobuf now persists `LockedHomeCluster` for durable Parent Chain reconciliation diagnostics; previous: 2026-10-13 secp_tps_blast chain-counted measurement `measure.go` + `run_tps_counted.py`, `make_manifest.py`, `claims_lint.py`, `watchdog_supervisor_experiment.sh`).
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 ---
 

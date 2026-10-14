@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/stretchr/testify/assert"
@@ -393,3 +394,22 @@ func TestAccountState_ParentRegistered_RootBackwardCompatibility(t *testing.T) {
 	assert.NotEqual(t, bytesFalse, bytesTrue, "Setting ParentRegistered=true must change the marshaled bytes/hash")
 }
 
+func TestAccountState_LockedHomeCluster_MarshalCopyRoundTrip(t *testing.T) {
+	as := NewAccountState(testAddr)
+	winner := p_common.PublicKey{1, 2, 3}
+	as.SetLocked(true)
+	as.SetLockedHomeCluster(winner)
+
+	data, err := as.Marshal()
+	require.NoError(t, err)
+
+	decoded := &AccountState{}
+	require.NoError(t, decoded.Unmarshal(data))
+	assert.True(t, decoded.IsLocked())
+	assert.Equal(t, winner, decoded.LockedHomeCluster())
+	assert.Equal(t, winner, as.Copy().LockedHomeCluster())
+
+	jsonState := &JsonAccountState{}
+	jsonState.FromAccountState(as.(*AccountState))
+	assert.Equal(t, winner, jsonState.ToAccountState().LockedHomeCluster())
+}

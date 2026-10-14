@@ -114,6 +114,9 @@ func (a *liveAccountStateAccessor) SetLocked(address common.Address, locked bool
 	_ = a.db.SetLocked(address, locked)
 }
 
+func (a *liveAccountStateAccessor) SetLockedHomeCluster(address common.Address, homeCluster mt_common.PublicKey) {
+	_ = a.db.SetLockedHomeCluster(address, homeCluster)
+}
 
 // liveSmartContractDB adapts *smart_contract_db.SmartContractDB to rollup.SmartContractDB,
 // wrapping the barrier-tx call's own chainState.GetSmartContractDB() result. Has the exact same
@@ -289,7 +292,7 @@ func (h *ParentChainGatewayHandler) HandleTransaction(
 	}
 
 	// Note: HandleTransfer has already bumped the nonce inside the underlying stateDB.
-	
+
 	logger.Info("✅ ParentChainGatewayHandler: Transfer queued via barrier tx. MsgID: %s, To: %x", msgID.Hex(), destPubKey.Bytes()[:8])
 
 	rcp := receipt.NewReceipt(

@@ -222,6 +222,10 @@ type AccountStateRegistryDB interface {
 	SetLocked(addr common.Address, locked bool)
 }
 
+type lockedHomeClusterStateDB interface {
+	SetLockedHomeCluster(addr common.Address, homeCluster cm.PublicKey)
+}
+
 // NOTE: committee enforcement is NOT active in production yet: no CommitteeProvider is wired in simple_chain, and the
 // RegistrationWorker attaches only its OWN attestation (no signature exchange between validators). Wiring a provider
 // for a committee with f+1 > 1 before that exchange exists would leave every registration PENDING forever.
@@ -469,6 +473,9 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 			return err
 		}
 		if ok {
+			if homeDB, supportsHome := stateDB.(lockedHomeClusterStateDB); supportsHome {
+				homeDB.SetLockedHomeCluster(payload.User, payload.HomeCluster)
+			}
 			stateDB.SetLocked(payload.User, true)
 			stateDB.SetProvisional(payload.User, false)
 			stateDB.SetParentRegistered(payload.User, false)

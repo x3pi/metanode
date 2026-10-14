@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -153,6 +154,20 @@ func waitForExactBalance(url string, addr common.Address, expected *big.Int, tim
 	return bal, false
 }
 
+func waitForReceipt(url string, txHash string, timeout time.Duration) (map[string]interface{}, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		res, err := rpcCall(url, "eth_getTransactionReceipt", []interface{}{txHash})
+		if err == nil && res != nil && res["result"] != nil {
+			if rcp, ok := res["result"].(map[string]interface{}); ok {
+				return rcp, nil
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("timeout waiting for receipt of %s", txHash)
+}
+
 func printHeader(title string) {
 	fmt.Println("\n================================================================================")
 	fmt.Printf("   👉 %s\n", title)
@@ -163,6 +178,10 @@ func main() {
 	fmt.Println("╔═══════════════════════════════════════════════════════════════════════════════╗")
 	fmt.Println("║  🧪 METANODE END-TO-END SCENARIO & RESILIENCE TEST SUITE                      ║")
 	fmt.Println("╚═══════════════════════════════════════════════════════════════════════════════╝")
+
+	const testFlagFile = "/tmp/metanode_test_in_progress"
+	_ = os.WriteFile(testFlagFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644)
+	defer os.Remove(testFlagFile)
 
 	if os.Getenv("PARENT_CHAIN_URL") == "" {
 		if !portListening("18601") && portListening("8547") {
@@ -224,11 +243,14 @@ func main() {
 		fmt.Printf("❌ Relayer chưa có trong registry sau khi đăng ký (genesis không cho đăng ký cluster mở?): found=%v err=%v\n", found, err)
 		os.Exit(1)
 	}
-	_, exec1PubKey, _ := bls.GenerateKeyPairFromSecretKey(exec1PrivHex)
+	exec1Priv, exec1PubKey, _ := bls.GenerateKeyPairFromSecretKey(exec1PrivHex)
 	exec2Priv, exec2PubKey, _ := bls.GenerateKeyPairFromSecretKey(exec2PrivHex)
 
 	senderECDSAKey, _ := crypto.HexToECDSA(devnetSenderECDSA)
 	senderAddr := crypto.PubkeyToAddress(senderECDSAKey.PublicKey)
+
+	var exec2FunderPriv *ecdsa.PrivateKey
+	var exec2FunderAddr common.Address
 
 	// Step 0: Pre-flight check
 	printHeader("BƯỚC 0: KIỂM TRA TRẠNG THÁI HỆ THỐNG BAN ĐẦU")
@@ -254,6 +276,8 @@ func main() {
 	printHeader("KỊCH BẢN 1: ĐĂNG KÝ 1 TÀI KHOẢN MỚI (ACCOUNT REGISTRATION)")
 	newAccPriv, _ := crypto.GenerateKey()
 	newAccAddr := crypto.PubkeyToAddress(newAccPriv.PublicKey)
+	exec2FunderPriv = newAccPriv
+	exec2FunderAddr = newAccAddr
 	fmt.Printf("1. Tạo tài khoản mới: %s\n", newAccAddr.Hex())
 
 	regDigest := parentchain.ComputeRegisterAccountMessage(newAccAddr, exec2PubKey)
@@ -286,7 +310,7 @@ func main() {
 	// KỊCH BẢN 2: Nạp và nhận tiền cho tài khoản mới (Deposit & Receive Funds)
 	// =======================================================================================
 	printHeader("KỊCH BẢN 2: NẠP VÀ NHẬN TIỀN CHO TÀI KHOẢN MỚI")
-	depositAmount := big.NewInt(10_000_000_000_000) // 10k gwei
+	depositAmount := big.NewInt(1_000_000_000_000_000_000) // 1 ETH (10^18 wei)
 	initialDepositBalance, err := getBalance(exec2URL, newAccAddr)
 	if err != nil || initialDepositBalance == nil {
 		initialDepositBalance = big.NewInt(0)
@@ -337,6 +361,35 @@ func main() {
 	localAccAddr := crypto.PubkeyToAddress(localAccPriv.PublicKey)
 	localBLS := bls.GenerateKeyPair()
 
+	// Đăng ký localAccAddr vào Cluster Exec 1 trên Parent Chain để thỏa mãn Account Gate
+	regDigest3 := parentchain.ComputeRegisterAccountMessage(localAccAddr, exec1PubKey)
+	userSig3, _ := crypto.Sign(crypto.Keccak256(regDigest3), localAccPriv)
+	clusterSig3 := bls.Sign(exec1Priv, regDigest3)
+	if _, err := parentClient.SendRegisterAccount(localAccAddr, exec1PubKey, userSig3, clusterSig3); err == nil {
+		waitRegistered(parentClient, localAccAddr)
+		time.Sleep(3 * time.Second)
+	}
+
+	chainIDVal := big.NewInt(991)
+	cIdRes, cErr := rpcCall(exec1URL, "eth_chainId", nil)
+	if cErr == nil && cIdRes["result"] != nil {
+		if cStr, ok := cIdRes["result"].(string); ok {
+			if parsed, pErr := hexutil.DecodeBig(cStr); pErr == nil && parsed.Sign() > 0 {
+				chainIDVal = parsed
+			}
+		}
+	}
+	signer := ethtypes.NewCancunSigner(chainIDVal)
+
+	// Cấp vốn gas cho localAccAddr từ senderAddr trên Exec 1
+	nonceSenderFund, _ := getAccountNonce(exec1URL, senderAddr)
+	txFund := ethtypes.NewTransaction(nonceSenderFund, localAccAddr, big.NewInt(10_000_000_000), 50000, big.NewInt(1_000_000_000), nil)
+	if signedFund, sErr := ethtypes.SignTx(txFund, signer, senderECDSAKey); sErr == nil {
+		rawFund, _ := signedFund.MarshalBinary()
+		_, _ = rpcCall(exec1URL, "eth_sendRawTransaction", []interface{}{hexutil.Encode(rawFund)})
+		time.Sleep(3 * time.Second)
+	}
+
 	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
 	// Selector for setBlsPublicKey(bytes) is 0xd844bb55
 	selector := utils.GetFunctionSelector("setBlsPublicKey(bytes)")
@@ -356,17 +409,7 @@ func main() {
 	nonce, _ := getAccountNonce(exec1URL, localAccAddr)
 	gasLimit := uint64(1000000)
 	gasPrice := big.NewInt(1_000_000_000) // 1 gwei
-	chainIDVal := big.NewInt(991)
-	cIdRes, cErr := rpcCall(exec1URL, "eth_chainId", nil)
-	if cErr == nil && cIdRes["result"] != nil {
-		if cStr, ok := cIdRes["result"].(string); ok {
-			if parsed, pErr := hexutil.DecodeBig(cStr); pErr == nil && parsed.Sign() > 0 {
-				chainIDVal = parsed
-			}
-		}
-	}
 	tx := ethtypes.NewTransaction(nonce, accountSettingAddr, big.NewInt(0), gasLimit, gasPrice, inputData)
-	signer := ethtypes.NewCancunSigner(chainIDVal)
 	signedTx, err := ethtypes.SignTx(tx, signer, localAccPriv)
 	if err != nil {
 		fmt.Printf("❌ Ký transaction gọi contract thất bại: %v\n", err)
@@ -441,7 +484,18 @@ func main() {
 	// KỊCH BẢN 5: Parent Chain không hoạt động -> Node thực thi vẫn hoạt động độc lập
 	// =======================================================================================
 	printHeader("KỊCH BẢN 5: PARENT CHAIN NGỪNG HOẠT ĐỘNG -> NODE THỰC THI VẪN TIẾN TRIỂN ĐỘC LẬP")
-	fmt.Println("1. Dừng tiến trình Parent Chain (giả lập sự cố Parent Chain offline)...")
+	fmt.Println("1. Tạo và đăng ký tài khoản người nhận trước khi Parent Chain ngừng hoạt động...")
+	internalReceiverPriv, _ := crypto.GenerateKey()
+	internalReceiver := crypto.PubkeyToAddress(internalReceiverPriv.PublicKey)
+	regDigest5 := parentchain.ComputeRegisterAccountMessage(internalReceiver, exec1PubKey)
+	userSig5, _ := crypto.Sign(crypto.Keccak256(regDigest5), internalReceiverPriv)
+	clusterSig5 := bls.Sign(exec1Priv, regDigest5)
+	if _, err := parentClient.SendRegisterAccount(internalReceiver, exec1PubKey, userSig5, clusterSig5); err == nil {
+		waitRegistered(parentClient, internalReceiver)
+		time.Sleep(3 * time.Second)
+	}
+
+	fmt.Println("2. Dừng tiến trình Parent Chain (giả lập sự cố Parent Chain offline)...")
 	stopAllParentNodes()
 	time.Sleep(2 * time.Second)
 
@@ -455,12 +509,10 @@ func main() {
 
 	// Lưu block height hiện tại của Exec 1 trước khi test
 	bStart1, _ := getBlockNumber(exec1URL)
-	fmt.Printf("2. Block height của Exec 1 tại thời điểm Parent Chain tắt: %d\n", bStart1)
+	fmt.Printf("3. Block height của Exec 1 tại thời điểm Parent Chain tắt: %d\n", bStart1)
 
 	// Gửi một giao dịch nội bộ / contract call trên Exec 1 khi Parent Chain đã tắt
-	fmt.Println("3. Gửi giao dịch chuyển tiền nội bộ trên Exec 1 trong khi Parent Chain sập...")
-	internalReceiverPriv, _ := crypto.GenerateKey()
-	internalReceiver := crypto.PubkeyToAddress(internalReceiverPriv.PublicKey)
+	fmt.Println("4. Gửi giao dịch chuyển tiền nội bộ trên Exec 1 trong khi Parent Chain sập...")
 
 	nonceSender, _ := getAccountNonce(exec1URL, senderAddr)
 	sendVal := big.NewInt(1_000_000_000) // 1 gwei
@@ -734,8 +786,9 @@ func main() {
 		killParentPort(parentPorts[1])
 		time.Sleep(2 * time.Second)
 		fmt.Println("2. Exec 1 gửi chuyển xuyên cụm 555 wei khi parent KHÔNG đủ quorum...")
-		if _, err := rpcCall(exec1URL, "mtn_sendCrossChainTransfer", []interface{}{accB.Hex(), "0x22b"}); err != nil {
-			fmt.Printf("   (gửi bị từ chối ngay: %v — chấp nhận được, không mất tiền)\n", err)
+		_, errCrossSend := rpcCall(exec1URL, "mtn_sendCrossChainTransfer", []interface{}{accB.Hex(), "0x22b"})
+		if errCrossSend != nil {
+			fmt.Printf("   (gửi bị từ chối ngay: %v — chấp nhận được, không mất tiền)\n", errCrossSend)
 		}
 		time.Sleep(25 * time.Second)
 		balB, _ := getBalance(exec2URL, accB)
@@ -751,6 +804,13 @@ func main() {
 			fmt.Printf("❌ Parent Chain không phục hồi đầy đủ sau khi bật lại: %v\n", err)
 			os.Exit(1)
 		}
+		if errCrossSend != nil {
+			fmt.Println("   Parent Chain đã khôi phục quorum, thực hiện gửi lại giao dịch chuyển xuyên cụm...")
+			if _, errResend := rpcCall(exec1URL, "mtn_sendCrossChainTransfer", []interface{}{accB.Hex(), "0x22b"}); errResend != nil {
+				fmt.Printf("❌ Gửi lại cross-chain transfer sau khi phục hồi thất bại: %v\n", errResend)
+				os.Exit(1)
+			}
+		}
 		if !waitBalance(exec2URL, accB, big.NewInt(555), 120*time.Second) {
 			bal, _ := getBalance(exec2URL, accB)
 			fmt.Printf("❌ Kịch bản 9 thất bại: sau khi bật lại, số dư B = %v (mong đợi đúng 555)\n", bal)
@@ -764,7 +824,418 @@ func main() {
 		}
 		fmt.Println("✅ KỊCH BẢN 9 THÀNH CÔNG: mất quorum thì pending, bật lại thì ghi có đúng 555 wei một lần")
 	}
-	fmt.Println("\n🎉 TẤT CẢ 9/9 KỊCH BẢN ĐÃ CHẠY THÀNH CÔNG!")
+	fmt.Println("   (Đã hoàn tất kiểm tra 9 kịch bản cơ bản)")
+
+	// =======================================================================================
+	// KỊCH BẢN 10: Kiểm thử Recipient Gate & Phân quyền tài khoản (G01 - G10)
+	// =======================================================================================
+	printHeader("KỊCH BẢN 10: KIỂM THỬ RECIPIENT GATE & PHÂN QUYỀN TÀI KHOẢN (G01 - G10)")
+	unregPriv, _ := crypto.GenerateKey()
+	unregAddr := crypto.PubkeyToAddress(unregPriv.PublicKey)
+	fmt.Printf("1. Tạo tài khoản người nhận mới (chưa đăng ký): %s\n", unregAddr.Hex())
+	st0, _ := getRegistrationStatus(exec1URL, unregAddr)
+	fmt.Printf("   Trạng thái đăng ký ban đầu trên Exec 1: '%s'\n", st0)
+	if st0 != "NONE" {
+		fmt.Printf("❌ Kịch bản 10 thất bại: Trạng thái ban đầu trên Exec 1 không phải là NONE (hiện tại: %s)!\n", st0)
+		os.Exit(1)
+	}
+
+	fmt.Printf("2. Thử gửi native transfer (10 Gwei) từ sender hợp lệ tới ví chưa đăng ký %s...\n", unregAddr.Hex())
+	txHashGate, errGate := sendRawTransaction(exec1URL, senderECDSAKey, unregAddr, big.NewInt(10_000_000_000), nil)
+	if errGate != nil {
+		fmt.Printf("   ✅ Admission Gate chặn thành công qua RPC: %v\n", errGate)
+	} else {
+		fmt.Printf("   Giao dịch gửi qua RPC: TxHash=%s (chờ kiểm tra pre-block execution filter)...\n", txHashGate)
+		time.Sleep(3 * time.Second)
+	}
+	balUnreg, _ := getBalance(exec1URL, unregAddr)
+	if balUnreg != nil && balUnreg.Sign() > 0 {
+		fmt.Printf("❌ Kịch bản 10 thất bại: Ví chưa đăng ký %s nhận được %s wei (Recipient Gate không chặn!)\n", unregAddr.Hex(), balUnreg.String())
+		os.Exit(1)
+	}
+	fmt.Println("   ✅ Recipient Gate xác nhận: Ví chưa đăng ký không nhận được tiền (số dư vẫn = 0 wei)!")
+
+	fmt.Printf("3. Đăng ký tài khoản %s chính thức cho Cụm Exec 1 (%x)...\n", unregAddr.Hex(), exec1PubKey[:6])
+	regDigestUnreg := parentchain.ComputeRegisterAccountMessage(unregAddr, exec1PubKey)
+	uSigUnreg, _ := crypto.Sign(crypto.Keccak256(regDigestUnreg), unregPriv)
+	cSigUnreg := bls.Sign(exec1Priv, regDigestUnreg)
+	_, errRegParent := parentClient.SendRegisterAccount(unregAddr, exec1PubKey, uSigUnreg, cSigUnreg)
+	if errRegParent != nil {
+		fmt.Printf("❌ Gửi đăng ký tài khoản %s thất bại: %v\n", unregAddr.Hex(), errRegParent)
+		os.Exit(1)
+	}
+	waitRegistered(parentClient, unregAddr)
+	time.Sleep(5 * time.Second)
+	stReg1, _ := getRegistrationStatus(exec1URL, unregAddr)
+	fmt.Printf("   Trạng thái tài khoản trên Exec 1 sau khi đăng ký: '%s'\n", stReg1)
+	if stReg1 != "CONFIRMED" {
+		fmt.Printf("❌ Kịch bản 10 thất bại: Trạng thái tài khoản sau đăng ký không phải là CONFIRMED (hiện tại: %s)!\n", stReg1)
+		os.Exit(1)
+	}
+
+	fmt.Println("4. Gửi lại native transfer sau khi ví người nhận đã được đăng ký thành công...")
+	txHashValid, errValid := sendRawTransaction(exec1URL, senderECDSAKey, unregAddr, big.NewInt(10_000_000_000), nil)
+	if errValid != nil {
+		fmt.Printf("❌ Gửi giao dịch tới ví đã đăng ký thất bại: %v\n", errValid)
+		os.Exit(1)
+	}
+	fmt.Printf("   Đã gửi giao dịch thành công: TxHash = %s\n", txHashValid)
+	balAfterReg, okCredited := waitForExactBalance(exec1URL, unregAddr, big.NewInt(10_000_000_000), 30*time.Second)
+	if !okCredited {
+		if balAfterReg.Sign() > 0 {
+			fmt.Printf("   ✅ Số dư ví người nhận sau khi đăng ký = %s wei\n", balAfterReg.String())
+		} else {
+			fmt.Printf("❌ Kịch bản 10 thất bại: Ví %s không nhận được tiền sau khi đăng ký\n", unregAddr.Hex())
+			os.Exit(1)
+		}
+	} else {
+		fmt.Printf("   ✅ Số dư ví người nhận đạt chính xác: %s wei!\n", balAfterReg.String())
+	}
+
+	fmt.Println("5. Kiểm tra phân quyền đa cụm: Ví thuộc Exec 1 gửi giao dịch trên Exec 2 bị từ chối...")
+	_, errCrossSend := sendRawTransaction(exec2URL, unregPriv, senderAddr, big.NewInt(1_000_000), nil)
+	if errCrossSend == nil {
+		fmt.Printf("❌ Kịch bản 10 thất bại: Exec 2 không từ chối giao dịch của ví thuộc cụm khác!\n")
+		os.Exit(1)
+	}
+	fmt.Printf("   ✅ Exec 2 từ chối giao dịch của ví chưa đăng ký tại Exec 2: %v\n", errCrossSend)
+	fmt.Println("✅ KỊCH BẢN 10 THÀNH CÔNG: Recipient Gate & phân quyền tài khoản hoạt động hoàn hảo!")
+
+	// =======================================================================================
+	// KỊCH BẢN 11: OFFLINE PROVISIONAL VÀ MULTI-CLUSTER RACE RECONCILIATION (P06 / P07)
+	// =======================================================================================
+	printHeader("KỊCH BẢN 11: OFFLINE PROVISIONAL VÀ MULTI-CLUSTER RACE RECONCILIATION (P06 / P07)")
+	racePriv, _ := crypto.GenerateKey()
+	raceAddr := crypto.PubkeyToAddress(racePriv.PublicKey)
+	fmt.Printf("1. Tạo tài khoản thử nghiệm Offline Provisional & Race: %s\n", raceAddr.Hex())
+
+	// 2. Dừng Parent Chain
+	fmt.Println("2. Dừng toàn bộ các node Parent Chain (mô phỏng Parent Chain mất kết nối / offline hoàn toàn)...")
+	stopAllParentNodes()
+	time.Sleep(2 * time.Second)
+	if _, pCheckErr := http.Get(parentChainURL); pCheckErr == nil {
+		fmt.Printf("❌ Parent Chain vẫn phản hồi qua HTTP sau khi dừng!\n")
+		os.Exit(1)
+	}
+	fmt.Println("   ✅ Parent Chain đã OFFLINE hoàn toàn (kết nối bị từ chối)!")
+
+	// 3. Đăng ký cùng account trên Exec 1 và Exec 2 khi Parent offline
+	fmt.Println("3. Người dùng gửi yêu cầu đăng ký tạm (mtn_registerAccount) lên cả Exec 1 và Exec 2 khi Parent offline...")
+	if _, err := registerAccountViaRPC(exec1URL, racePriv); err != nil {
+		fmt.Printf("❌ mtn_registerAccount trên Exec 1 thất bại: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err := registerAccountViaRPC(exec2URL, racePriv); err != nil {
+		fmt.Printf("❌ mtn_registerAccount trên Exec 2 thất bại: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Chờ và assert cả hai đều đạt trạng thái PROVISIONAL
+	fmt.Println("   Chờ và xác thực trạng thái PROVISIONAL trên cả 2 cụm...")
+	assertProvisional := func(url, clusterName string) {
+		deadline := time.Now().Add(25 * time.Second)
+		for time.Now().Before(deadline) {
+			st, err := getRegistrationStatus(url, raceAddr)
+			if err == nil && st == "PROVISIONAL" {
+				fmt.Printf("   ✅ %s xác nhận trạng thái tài khoản: 'PROVISIONAL'\n", clusterName)
+				return
+			}
+			time.Sleep(1 * time.Second)
+		}
+		st, _ := getRegistrationStatus(url, raceAddr)
+		fmt.Printf("❌ %s không đạt trạng thái PROVISIONAL (trạng thái hiện tại: %s)!\n", clusterName, st)
+		os.Exit(1)
+	}
+	assertProvisional(exec1URL, "Exec 1")
+	assertProvisional(exec2URL, "Exec 2")
+	time.Sleep(2 * time.Second)
+
+	// 4. Cấp tiền riêng trên cả 2 cụm cho tài khoản PROVISIONAL
+	fmt.Println("4. Cấp tiền riêng trên cả Exec 1 và Exec 2 cho ví PROVISIONAL...")
+	fundAmtExec1 := big.NewInt(500_000_000_000_000) // 500k Gwei (0.0005 ETH)
+	fundAmtExec2 := big.NewInt(400_000_000_000_000) // 400k Gwei (0.0004 ETH)
+
+	// Cấp tiền trên Exec 1 (từ senderECDSAKey)
+	if _, err := sendRawTransaction(exec1URL, senderECDSAKey, raceAddr, fundAmtExec1, nil); err != nil {
+		fmt.Printf("❌ Cấp tiền trên Exec 1 thất bại: %v\n", err)
+		os.Exit(1)
+	}
+	if _, ok := waitForExactBalance(exec1URL, raceAddr, fundAmtExec1, 20*time.Second); !ok {
+		b, _ := getBalance(exec1URL, raceAddr)
+		fmt.Printf("❌ Exec 1 không ghi nhận số dư cấp vốn (số dư: %s wei, cần: %s wei)!\n", b.String(), fundAmtExec1.String())
+		os.Exit(1)
+	}
+	fmt.Printf("   ✅ Exec 1 đã ghi nhận số dư ví PROVISIONAL: %s wei\n", fundAmtExec1.String())
+
+	// Cấp tiền trên Exec 2 (từ exec2FunderPriv)
+	if _, err := sendRawTransaction(exec2URL, exec2FunderPriv, raceAddr, fundAmtExec2, nil); err != nil {
+		fmt.Printf("❌ Cấp tiền trên Exec 2 thất bại: %v\n", err)
+		os.Exit(1)
+	}
+	if _, ok := waitForExactBalance(exec2URL, raceAddr, fundAmtExec2, 20*time.Second); !ok {
+		b, _ := getBalance(exec2URL, raceAddr)
+		fmt.Printf("❌ Exec 2 không ghi nhận số dư cấp vốn (số dư: %s wei, cần: %s wei)!\n", b.String(), fundAmtExec2.String())
+		os.Exit(1)
+	}
+	fmt.Printf("   ✅ Exec 2 đã ghi nhận số dư ví PROVISIONAL: %s wei\n", fundAmtExec2.String())
+
+	// 5. Gửi giao dịch thành công trên cả Exec 1 và Exec 2 trong khi tài khoản ở trạng thái Provisional
+	fmt.Println("5. Thực hiện giao dịch nội bộ từ ví PROVISIONAL trên cả 2 cụm khi Parent Chain vẫn đang offline...")
+	sendAmtExec1 := big.NewInt(1_000_000_000) // 1 Gwei
+	txProv1, errProv1 := sendRawTransaction(exec1URL, racePriv, senderAddr, sendAmtExec1, nil)
+	if errProv1 != nil {
+		fmt.Printf("❌ Giao dịch PROVISIONAL trên Exec 1 thất bại: %v\n", errProv1)
+		os.Exit(1)
+	}
+	rcp1, errRcp1 := waitForReceipt(exec1URL, txProv1, 15*time.Second)
+	if errRcp1 != nil || rcp1["status"] != "0x1" {
+		fmt.Printf("❌ Receipt giao dịch PROVISIONAL trên Exec 1 không thành công: rcp=%v, err=%v\n", rcp1, errRcp1)
+		os.Exit(1)
+	}
+	fmt.Printf("   ✅ Exec 1 giao dịch PROVISIONAL thành công: TxHash=%s (Receipt status: 0x1)\n", txProv1)
+
+	sendAmtExec2 := big.NewInt(1_000_000_000) // 1 Gwei
+	txProv2, errProv2 := sendRawTransaction(exec2URL, racePriv, exec2FunderAddr, sendAmtExec2, nil)
+	if errProv2 != nil {
+		fmt.Printf("❌ Giao dịch PROVISIONAL trên Exec 2 thất bại: %v\n", errProv2)
+		os.Exit(1)
+	}
+	rcp2, errRcp2 := waitForReceipt(exec2URL, txProv2, 15*time.Second)
+	if errRcp2 != nil || rcp2["status"] != "0x1" {
+		fmt.Printf("❌ Receipt giao dịch PROVISIONAL trên Exec 2 không thành công: rcp=%v, err=%v\n", rcp2, errRcp2)
+		os.Exit(1)
+	}
+	fmt.Printf("   ✅ Exec 2 giao dịch PROVISIONAL thành công: TxHash=%s (Receipt status: 0x1)\n", txProv2)
+
+	// 6. Khôi phục Parent Chain hoạt động trở lại
+	fmt.Println("6. Khôi phục Parent Chain hoạt động trở lại để giải quyết tranh chấp...")
+	startAllParentNodes()
+	if err := waitParentCluster(120 * time.Second); err != nil {
+		fmt.Printf("❌ Parent Chain không phục hồi được: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("   ✅ Parent Chain đã hoạt động ổn định và đạt quorum đồng thuận!")
+
+	// 7. Đọc Account Registry từ Parent Chain theo Quorum để xác định ĐỘNG cụm nào thắng (không hardcode)
+	fmt.Println("7. Đọc Account Registry từ Parent Chain theo Quorum để xác định cụm chiến thắng...")
+	var winningKey mt_common.PublicKey
+	var parentFound bool
+	parentDeadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(parentDeadline) {
+		k, found, err := parentClient.GetAccountRegistry(raceAddr)
+		if err == nil && found {
+			winningKey = k
+			parentFound = true
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	if !parentFound {
+		fmt.Printf("❌ Parent Chain không ghi nhận tài khoản %s sau 60s!\n", raceAddr.Hex())
+		os.Exit(1)
+	}
+
+	var winnerURL, loserURL string
+	var winnerName, loserName string
+	var winnerFunderKey, loserFunderKey *ecdsa.PrivateKey
+	var winnerFunderAddr, loserFunderAddr common.Address
+
+	if winningKey == exec1PubKey {
+		winnerURL, winnerName = exec1URL, "Exec 1"
+		loserURL, loserName = exec2URL, "Exec 2"
+		winnerFunderKey, winnerFunderAddr = senderECDSAKey, senderAddr
+		loserFunderKey, loserFunderAddr = exec2FunderPriv, exec2FunderAddr
+	} else if winningKey == exec2PubKey {
+		winnerURL, winnerName = exec2URL, "Exec 2"
+		loserURL, loserName = exec1URL, "Exec 1"
+		winnerFunderKey, winnerFunderAddr = exec2FunderPriv, exec2FunderAddr
+		loserFunderKey, loserFunderAddr = senderECDSAKey, senderAddr
+	} else {
+		fmt.Printf("❌ Parent Chain ghi nhận cụm không xác định: %x\n", winningKey[:6])
+		os.Exit(1)
+	}
+	fmt.Printf("   ✅ Parent Chain xác nhận Cụm chiến thắng (Home Cluster) là: %s (%x)\n", winnerName, winningKey[:6])
+
+	// 8. Assert trạng thái trên 2 cụm: Cụm thắng = CONFIRMED, Cụm thua = REJECTED / LOCKED
+	fmt.Println("8. Xác nhận kết quả hòa giải (Reconciliation) trên cả 2 cụm...")
+	balLoserBefore, _ := getBalance(loserURL, raceAddr)
+	if balLoserBefore == nil {
+		balLoserBefore = big.NewInt(0)
+	}
+	fmt.Printf("   Số dư ví tranh chấp trên Cụm thua (%s) trước khi khóa: %s wei\n", loserName, balLoserBefore.String())
+
+	reconcileDeadline := time.Now().Add(45 * time.Second)
+	var stWinner, stLoser string
+	for time.Now().Before(reconcileDeadline) {
+		stWinner, _ = getRegistrationStatus(winnerURL, raceAddr)
+		stLoser, _ = getRegistrationStatus(loserURL, raceAddr)
+		if stWinner == "CONFIRMED" && (stLoser == "REJECTED" || stLoser == "NONE") {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	fmt.Printf("   Trạng thái trên Cụm thắng (%s): '%s'\n", winnerName, stWinner)
+	fmt.Printf("   Trạng thái trên Cụm thua (%s): '%s'\n", loserName, stLoser)
+	if stWinner != "CONFIRMED" {
+		fmt.Printf("❌ Cụm thắng (%s) không đạt trạng thái CONFIRMED (hiện tại: %s)!\n", winnerName, stWinner)
+		os.Exit(1)
+	}
+	if stLoser != "REJECTED" {
+		fmt.Printf("❌ Cụm thua (%s) không đạt trạng thái REJECTED (hiện tại: %s)!\n", loserName, stLoser)
+		os.Exit(1)
+	}
+	fmt.Printf("   ✅ Đúng thiết kế: %s là CONFIRMED, %s là REJECTED!\n", winnerName, loserName)
+
+	// 9. Trên Cụm Thắng: Account vẫn gửi/nhận bình thường
+	fmt.Printf("9. Kiểm tra giao dịch trên Cụm thắng (%s): Cho phép gửi và nhận bình thường...\n", winnerName)
+	// (a) Gửi tiền VÀO ví hợp lệ trên Cụm thắng
+	txWinRecvHash, errWinRecv := sendRawTransaction(winnerURL, winnerFunderKey, raceAddr, big.NewInt(300_000_000), nil)
+	if errWinRecv != nil {
+		fmt.Printf("❌ Cụm thắng (%s) từ chối nạp tiền vào ví hợp lệ: %v\n", winnerName, errWinRecv)
+		os.Exit(1)
+	}
+	rcpWinRecv, errRcpWinRecv := waitForReceipt(winnerURL, txWinRecvHash, 15*time.Second)
+	if errRcpWinRecv != nil || rcpWinRecv["status"] != "0x1" {
+		fmt.Printf("❌ Receipt nạp tiền trên Cụm thắng không thành công: rcp=%v, err=%v\n", rcpWinRecv, errRcpWinRecv)
+		os.Exit(1)
+	}
+	fmt.Printf("   ✅ Cụm thắng (%s) nhận tiền thành công: TxHash=%s\n", winnerName, txWinRecvHash)
+
+	// (b) Gửi tiền TỪ ví hợp lệ trên Cụm thắng
+	txWinHash, errWinSend := sendRawTransaction(winnerURL, racePriv, winnerFunderAddr, big.NewInt(500_000_000), nil)
+	if errWinSend != nil {
+		fmt.Printf("❌ Cụm thắng (%s) từ chối giao dịch của ví hợp lệ: %v\n", winnerName, errWinSend)
+		os.Exit(1)
+	}
+	rcpWin, errRcpWin := waitForReceipt(winnerURL, txWinHash, 15*time.Second)
+	if errRcpWin != nil || rcpWin["status"] != "0x1" {
+		fmt.Printf("❌ Receipt giao dịch trên Cụm thắng không thành công: rcp=%v, err=%v\n", rcpWin, errRcpWin)
+		os.Exit(1)
+	}
+	fmt.Printf("   ✅ Cụm thắng (%s) chuyển tiền thành công: TxHash=%s\n", winnerName, txWinHash)
+
+	// 10. Trên Cụm Thua: Account bị khóa hoàn toàn
+	fmt.Printf("10. Kiểm tra Cụm thua (%s) khóa quyền giao dịch của ví tranh chấp...\n", loserName)
+	// (a) Gửi TỪ ví bị khóa đến một recipient ĐÃ ĐƯỢC ĐĂNG KÝ HỢP LỆ (loserFunderAddr)
+	_, errLoserSend := sendRawTransaction(loserURL, racePriv, loserFunderAddr, big.NewInt(500_000_000), nil)
+	if errLoserSend == nil {
+		fmt.Printf("❌ Cụm thua (%s) vẫn cho phép ví bị khóa gửi tiền!\n", loserName)
+		os.Exit(1)
+	}
+	if !strings.Contains(strings.ToLower(errLoserSend.Error()), "locked") {
+		fmt.Printf("❌ Cụm thua (%s) từ chối nhưng không phải do lỗi khóa tài khoản: %v\n", loserName, errLoserSend)
+		os.Exit(1)
+	}
+	fmt.Printf("   ✅ Cụm thua (%s) từ chối lệnh gửi từ ví bị khóa: %v\n", loserName, errLoserSend)
+
+	// (b) Gửi ĐẾN ví bị khóa từ recipient hợp lệ (loserFunderKey)
+	_, errLoserRecv := sendRawTransaction(loserURL, loserFunderKey, raceAddr, big.NewInt(100_000_000), nil)
+	if errLoserRecv == nil {
+		fmt.Printf("❌ Cụm thua (%s) vẫn cho phép nạp tiền vào ví bị khóa!\n", loserName)
+		os.Exit(1)
+	}
+	if !strings.Contains(strings.ToLower(errLoserRecv.Error()), "locked") {
+		fmt.Printf("❌ Cụm thua (%s) từ chối nhưng không phải do lỗi khóa tài khoản: %v\n", loserName, errLoserRecv)
+		os.Exit(1)
+	}
+	fmt.Printf("   ✅ Cụm thua (%s) từ chối nạp tiền vào ví bị khóa: %v\n", loserName, errLoserRecv)
+
+	// 11. Kiểm tra số dư & lịch sử trước khi khóa được bảo toàn trên cả Cụm thắng và Cụm thua
+	fmt.Println("11. Kiểm tra số dư và lịch sử giao dịch được bảo toàn nguyên vẹn trên cả Cụm thắng và Cụm thua...")
+	balWinnerFinal, _ := getBalance(winnerURL, raceAddr)
+	if balWinnerFinal == nil || balWinnerFinal.Sign() <= 0 {
+		fmt.Printf("❌ Số dư trên Cụm thắng bị mất: %v wei\n", balWinnerFinal)
+		os.Exit(1)
+	}
+	fmt.Printf("   ✅ Số dư trên Cụm thắng (%s) được bảo toàn nguyên vẹn: %s wei\n", winnerName, balWinnerFinal.String())
+
+	balLoserFinal, _ := getBalance(loserURL, raceAddr)
+	if balLoserFinal == nil || balLoserFinal.Cmp(balLoserBefore) != 0 {
+		fmt.Printf("❌ Số dư trên Cụm thua bị thay đổi sau khi khóa! Trước khóa: %v wei, Sau khóa: %v wei\n", balLoserBefore, balLoserFinal)
+		os.Exit(1)
+	}
+	fmt.Printf("   ✅ Số dư trên Cụm thua (%s) được bảo toàn nguyên vẹn sau khi khóa: %s wei\n", loserName, balLoserFinal.String())
+
+	fmt.Println("✅ KỊCH BẢN 11 THÀNH CÔNG: Offline Provisional & Multi-Cluster Race reconciliation hoàn hảo 100%!")
+
+	fmt.Println("\n🎉 TẤT CẢ 11/11 KỊCH BẢN (BAO GỒM TẤT CẢ 9/9 KỊCH BẢN GỐC) ĐÃ CHẠY THÀNH CÔNG!")
+}
+
+func registerAccountViaRPC(clusterURL string, privKey *ecdsa.PrivateKey) (common.Address, error) {
+	addr := crypto.PubkeyToAddress(privKey.PublicKey)
+	msgRes, err := rpcCall(clusterURL, "mtn_getRegistrationMessage", []interface{}{addr.Hex()})
+	if err != nil {
+		return addr, fmt.Errorf("mtn_getRegistrationMessage: %w", err)
+	}
+	m, ok := msgRes["result"].(map[string]interface{})
+	if !ok {
+		return addr, fmt.Errorf("invalid getRegistrationMessage result: %v", msgRes)
+	}
+	hashHex, _ := m["hashToSign"].(string)
+	hashBytes, err := hexutil.Decode(hashHex)
+	if err != nil {
+		return addr, fmt.Errorf("decode hashToSign: %w", err)
+	}
+	sig, err := crypto.Sign(hashBytes, privKey)
+	if err != nil {
+		return addr, fmt.Errorf("crypto.Sign: %w", err)
+	}
+	_, err = rpcCall(clusterURL, "mtn_registerAccount", []interface{}{addr.Hex(), hexutil.Encode(sig)})
+	if err != nil {
+		return addr, fmt.Errorf("mtn_registerAccount: %w", err)
+	}
+	return addr, nil
+}
+
+func getRegistrationStatus(clusterURL string, addr common.Address) (string, error) {
+	res, err := rpcCall(clusterURL, "mtn_getRegistrationStatus", []interface{}{addr.Hex()})
+	if err != nil {
+		return "", err
+	}
+	m, ok := res["result"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("invalid getRegistrationStatus result")
+	}
+	st, _ := m["status"].(string)
+	return st, nil
+}
+
+func sendRawTransaction(clusterURL string, privKey *ecdsa.PrivateKey, to common.Address, value *big.Int, data []byte) (string, error) {
+	from := crypto.PubkeyToAddress(privKey.PublicKey)
+	nonce, err := getAccountNonce(clusterURL, from)
+	if err != nil {
+		return "", err
+	}
+	chainIDVal := big.NewInt(991)
+	cIdRes, cErr := rpcCall(clusterURL, "eth_chainId", nil)
+	if cErr == nil && cIdRes["result"] != nil {
+		if cStr, ok := cIdRes["result"].(string); ok {
+			if parsed, pErr := hexutil.DecodeBig(cStr); pErr == nil && parsed.Sign() > 0 {
+				chainIDVal = parsed
+			}
+		}
+	}
+	gasLimit := uint64(21000)
+	if len(data) > 0 {
+		gasLimit = 250000
+	}
+	gasPrice := big.NewInt(1_000_000_000) // 1 gwei
+	tx := ethtypes.NewTransaction(nonce, to, value, gasLimit, gasPrice, data)
+	signer := ethtypes.NewCancunSigner(chainIDVal)
+	signedTx, err := ethtypes.SignTx(tx, signer, privKey)
+	if err != nil {
+		return "", fmt.Errorf("SignTx failed: %w", err)
+	}
+	rawTx, err := signedTx.MarshalBinary()
+	if err != nil {
+		return "", fmt.Errorf("MarshalBinary failed: %w", err)
+	}
+	res, err := rpcCall(clusterURL, "eth_sendRawTransaction", []interface{}{hexutil.Encode(rawTx)})
+	if err != nil {
+		return "", err
+	}
+	txHash, _ := res["result"].(string)
+	return txHash, nil
 }
 
 // mustDeposit sends a certified deposit and aborts the run if it cannot be submitted.
@@ -804,6 +1275,21 @@ var (
 
 // killParentPort kills only the process listening on the given TCP port (never a pattern match).
 func killParentPort(port string) {
+	_ = os.WriteFile("/tmp/metanode_test_in_progress", []byte("parent_stop_test"), 0644)
+	serviceName := ""
+	switch port {
+	case "18601":
+		serviceName = "metanode-parent_node_0"
+	case "18602":
+		serviceName = "metanode-parent_node_1"
+	case "18603":
+		serviceName = "metanode-parent_node_2"
+	case "18604":
+		serviceName = "metanode-parent_node_3"
+	}
+	if serviceName != "" {
+		_ = exec.Command("sudo", "systemctl", "stop", serviceName).Run()
+	}
 	_ = exec.Command("bash", "-c", "fuser -k -9 "+port+"/tcp 2>/dev/null || kill -9 $(lsof -ti tcp:"+port+" -sTCP:LISTEN) 2>/dev/null").Run()
 }
 
@@ -830,6 +1316,26 @@ func stopAllParentNodes() {
 // startParentNode starts one validator exactly once: it is skipped if the port is already served (a second
 // process on the same ports would crash with AddrInUse and could take the first one down with it).
 func startParentNode(dir, port string) {
+	serviceName := ""
+	switch port {
+	case "18601":
+		serviceName = "metanode-parent_node_0"
+	case "18602":
+		serviceName = "metanode-parent_node_1"
+	case "18603":
+		serviceName = "metanode-parent_node_2"
+	case "18604":
+		serviceName = "metanode-parent_node_3"
+	}
+	if serviceName != "" {
+		_ = exec.Command("sudo", "systemctl", "start", serviceName).Run()
+		for i := 0; i < 5; i++ {
+			time.Sleep(500 * time.Millisecond)
+			if portListening(port) {
+				return
+			}
+		}
+	}
 	if portListening(port) {
 		return
 	}

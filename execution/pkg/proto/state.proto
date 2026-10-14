@@ -33,6 +33,8 @@ message AccountState {
     bool ParentRegistered = 10;
     bool Locked = 11;
     bool Provisional = 12;
+    // BLS public key of the Parent-Chain-confirmed home cluster when Locked is true.
+    bytes LockedHomeCluster = 13;
     // StateChannelState StateChannelState = 7; // DEPRECATED
 }
 

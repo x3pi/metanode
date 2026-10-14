@@ -611,6 +611,28 @@ func (db *AccountStateDB) SetLocked(address common.Address, locked bool) error {
 	return nil
 }
 
+// SetLockedHomeCluster persists the winning Parent Chain cluster for an account
+// locked after multi-cluster registration reconciliation.
+func (db *AccountStateDB) SetLockedHomeCluster(address common.Address, homeCluster p_common.PublicKey) error {
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
+
+	if db.lockedFlag.Load() {
+		return errors.New("SetLockedHomeCluster db.lockedFlag is already locked")
+	}
+
+	as, err := db.getOrCreateAccountState(address)
+	if err != nil {
+		return fmt.Errorf("SetLockedHomeCluster: %w", err)
+	}
+	if as == nil {
+		return errors.New("SetLockedHomeCluster: account state is nil")
+	}
+	as.SetLockedHomeCluster(homeCluster)
+	db.setDirtyAccountState(as)
+	return nil
+}
+
 func (db *AccountStateDB) SetProvisional(address common.Address, provisional bool) error {
 	db.accountLocks[getShardIndex(address)].Lock()
 	defer db.accountLocks[getShardIndex(address)].Unlock()
@@ -630,5 +652,3 @@ func (db *AccountStateDB) SetProvisional(address common.Address, provisional boo
 	db.setDirtyAccountState(as)
 	return nil
 }
-
-

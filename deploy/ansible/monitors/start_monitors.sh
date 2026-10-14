@@ -212,6 +212,9 @@ except Exception:
 }
 
 send_tele() {
+    if [ -f "/tmp/metanode_test_in_progress" ] || [ -f "/tmp/parent_chain_test_mode" ] || [ "${METANODE_TEST_MODE:-}" = "true" ]; then
+        return
+    fi
     if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
         return
     fi

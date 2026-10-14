@@ -232,6 +232,24 @@ func TestRegistrationRelay_LosesTheRaceAfterSubmitting(t *testing.T) {
 	assert.Equal(t, winner, *res.HomeCluster)
 }
 
+func TestRegistrationRelay_LockedAccountReportsDurableHomeCluster(t *testing.T) {
+	h := newRelayHarness()
+	addr, _ := h.userSig(t)
+	winner := bls.GenerateKeyPair().PublicKey()
+	var locked atomic.Bool
+
+	h.relay.SetLockedChecker(func(common.Address) bool { return locked.Load() })
+	h.relay.SetLockedHomeClusterChecker(func(common.Address) cm.PublicKey { return winner })
+	locked.Store(true)
+
+	// This simulates a restart: there is no in-memory relay entry, so the
+	// response must come exclusively from durable account state.
+	res := h.relay.Status(addr)
+	assert.Equal(t, RegStatusRejected, res.Status)
+	require.NotNil(t, res.HomeCluster)
+	assert.Equal(t, winner, *res.HomeCluster)
+}
+
 func TestRegistrationRelay_ParentFailureRetriesThenFailsThenAllowsResubmit(t *testing.T) {
 	h := newRelayHarness()
 	h.relay.maxAttempts = 3

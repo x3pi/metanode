@@ -38,6 +38,7 @@ type AccountState struct {
 	accountType        pb.ACCOUNT_TYPE
 	parentRegistered   bool
 	locked             bool
+	lockedHomeCluster  p_common.PublicKey
 	provisional        bool
 	isDirty            bool
 }
@@ -57,17 +58,18 @@ func (as *AccountState) Proto() *pb.AccountState {
 	nonceBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(nonceBytes, as.nonce)
 	pbAs := &pb.AccountState{
-		Address:        as.address[:],
-		LastHash:       as.lastHash[:],
-		Balance:        as.balance.Bytes(),
-		PendingBalance: as.pendingBalance.Bytes(),
-		DeviceKey:      as.deviceKey[:],
-		Nonce:            nonceBytes,
-		PublicKeyBls:     as.publicKeyBls,
-		AccountType:      as.accountType,
-		ParentRegistered: as.parentRegistered,
-		Locked:           as.locked,
-		Provisional:      as.provisional,
+		Address:           as.address[:],
+		LastHash:          as.lastHash[:],
+		Balance:           as.balance.Bytes(),
+		PendingBalance:    as.pendingBalance.Bytes(),
+		DeviceKey:         as.deviceKey[:],
+		Nonce:             nonceBytes,
+		PublicKeyBls:      as.publicKeyBls,
+		AccountType:       as.accountType,
+		ParentRegistered:  as.parentRegistered,
+		Locked:            as.locked,
+		LockedHomeCluster: as.lockedHomeCluster[:],
+		Provisional:       as.provisional,
 	}
 	if as.smartContractState != nil {
 		pbAs.SmartContractState = as.smartContractState.Proto()
@@ -94,6 +96,7 @@ func (as *AccountState) FromProto(pbData *pb.AccountState) {
 	as.accountType = pbData.AccountType
 	as.parentRegistered = pbData.ParentRegistered
 	as.locked = pbData.Locked
+	copy(as.lockedHomeCluster[:], pbData.LockedHomeCluster)
 	as.provisional = pbData.Provisional
 }
 
@@ -137,6 +140,7 @@ func (as *AccountState) Copy() types.AccountState {
 	copyAs.accountType = as.accountType
 	copyAs.parentRegistered = as.parentRegistered
 	copyAs.locked = as.locked
+	copy(copyAs.lockedHomeCluster[:], as.lockedHomeCluster[:])
 	copyAs.provisional = as.provisional
 	copyAs.isDirty = as.isDirty
 	return copyAs
@@ -177,6 +181,15 @@ func (as *AccountState) IsLocked() bool {
 
 func (as *AccountState) SetLocked(locked bool) {
 	as.locked = locked
+	as.isDirty = true
+}
+
+func (as *AccountState) LockedHomeCluster() p_common.PublicKey {
+	return as.lockedHomeCluster
+}
+
+func (as *AccountState) SetLockedHomeCluster(homeCluster p_common.PublicKey) {
+	as.lockedHomeCluster = homeCluster
 	as.isDirty = true
 }
 
@@ -353,6 +366,7 @@ type JsonAccountState struct {
 	AccountType        int32                   `json:"accountType"`
 	ParentRegistered   bool                    `json:"parent_registered,omitempty"`
 	Locked             bool                    `json:"locked,omitempty"`
+	LockedHomeCluster  string                  `json:"locked_home_cluster,omitempty"`
 	Provisional        bool                    `json:"provisional,omitempty"`
 }
 
@@ -373,6 +387,7 @@ func (j *JsonAccountState) ToAccountState() *AccountState {
 	as.accountType = pb.ACCOUNT_TYPE(j.AccountType)
 	as.parentRegistered = j.ParentRegistered
 	as.locked = j.Locked
+	copy(as.lockedHomeCluster[:], common.FromHex(j.LockedHomeCluster))
 	as.provisional = j.Provisional
 	return as
 }
@@ -392,6 +407,9 @@ func (j *JsonAccountState) FromAccountState(as *AccountState) {
 	j.AccountType = int32(as.accountType)
 	j.ParentRegistered = as.parentRegistered
 	j.Locked = as.locked
+	if as.lockedHomeCluster != (p_common.PublicKey{}) {
+		j.LockedHomeCluster = hex.EncodeToString(as.lockedHomeCluster[:])
+	}
 	j.Provisional = as.provisional
 }
 

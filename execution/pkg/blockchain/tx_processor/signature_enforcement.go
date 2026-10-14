@@ -119,6 +119,11 @@ func isSystemOrExemptAddress(addr eth_common.Address) bool {
 	if addr == utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		return true
 	}
+	if addr == common.VALIDATOR_CONTRACT_ADDRESS ||
+		addr == common.GATEWAY_CONTRACT_ADDRESS ||
+		addr == common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS {
+		return true
+	}
 	return false
 }
 

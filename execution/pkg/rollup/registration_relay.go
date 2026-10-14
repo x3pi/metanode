@@ -234,6 +234,7 @@ type RegistrationRelay struct {
 	registered    func(common.Address) bool // reads the on-chain ParentRegistered flag
 	isProvisional func(common.Address) bool // reads the on-chain Provisional flag
 	isLocked      func(common.Address) bool // reads the on-chain Locked flag
+	lockedHome    func(common.Address) cm.PublicKey
 
 	provisionalProposer func(user common.Address, userSig []byte) error
 	lockProposer        func(user common.Address, homeCluster cm.PublicKey) error
@@ -288,6 +289,14 @@ func (r *RegistrationRelay) SetLockedChecker(fn func(common.Address) bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.isLocked = fn
+}
+
+// SetLockedHomeClusterChecker configures a durable lookup of the home cluster
+// recorded when an account was locked after Parent Chain reconciliation.
+func (r *RegistrationRelay) SetLockedHomeClusterChecker(fn func(common.Address) cm.PublicKey) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lockedHome = fn
 }
 
 // SetProvisionalProposer configures the proposer callback triggered when Parent Chain is offline.
@@ -467,6 +476,14 @@ func (r *RegistrationRelay) Submit(user common.Address, userSig []byte) (Registr
 // Status reports the current state of an address. The on-chain flag always wins.
 func (r *RegistrationRelay) Status(user common.Address) RegistrationResult {
 	if r.isLocked != nil && r.isLocked(user) {
+		var home cm.PublicKey
+		if r.lockedHome != nil {
+			home = r.lockedHome(user)
+		}
+		if home != (cm.PublicKey{}) {
+			h := home
+			return RegistrationResult{Status: RegStatusRejected, HomeCluster: &h, Reason: "account is locked on-chain (registered to another cluster)"}
+		}
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		if e, ok := r.entries[user]; ok && e.home != nil {

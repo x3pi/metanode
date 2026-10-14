@@ -36,12 +36,12 @@ func newMockRegStateDB() *mockRegStateDB {
 	}
 }
 
-func (m *mockRegStateDB) GetParentRegistered(addr common.Address) bool { return m.flags[addr] }
+func (m *mockRegStateDB) GetParentRegistered(addr common.Address) bool    { return m.flags[addr] }
 func (m *mockRegStateDB) SetParentRegistered(addr common.Address, r bool) { m.flags[addr] = r }
-func (m *mockRegStateDB) GetProvisional(addr common.Address) bool { return m.provisional[addr] }
-func (m *mockRegStateDB) SetProvisional(addr common.Address, p bool) { m.provisional[addr] = p }
-func (m *mockRegStateDB) GetLocked(addr common.Address) bool { return m.locked[addr] }
-func (m *mockRegStateDB) SetLocked(addr common.Address, l bool) { m.locked[addr] = l }
+func (m *mockRegStateDB) GetProvisional(addr common.Address) bool         { return m.provisional[addr] }
+func (m *mockRegStateDB) SetProvisional(addr common.Address, p bool)      { m.provisional[addr] = p }
+func (m *mockRegStateDB) GetLocked(addr common.Address) bool              { return m.locked[addr] }
+func (m *mockRegStateDB) SetLocked(addr common.Address, l bool)           { m.locked[addr] = l }
 
 // scriptableParent simulates Parent Chain with toggleable offline status and explicit registry mapping.
 type scriptableParent struct {
@@ -436,6 +436,7 @@ func TestProvisional_P06_MultiClusterRace_ParentConfirmsA_ClusterBLocks(t *testi
 	asBLocked, err := clusterB.cs.GetAccountStateDB().AccountState(u.addr)
 	require.NoError(t, err)
 	assert.True(t, asBLocked.IsLocked(), "Losing cluster must lock the account")
+	assert.Equal(t, clusterA.kp.PublicKey(), asBLocked.LockedHomeCluster(), "Losing cluster must persist the winning home cluster")
 	assert.False(t, asBLocked.IsProvisional(), "Provisional flag must be revoked upon lock")
 	assert.False(t, asBLocked.ParentRegistered(), "Account must not be parent-registered on losing cluster")
 
