@@ -311,3 +311,50 @@ func TestAccountRegistryHandler_S2_LockedAccountCannotBeRegistered(t *testing.T)
 	assert.True(t, db.GetLocked(user))
 	assert.False(t, db.GetParentRegistered(user))
 }
+
+func TestAccountRegistryHandler_S1b_ClusterKeyLockAllowed_AttackerRejected(t *testing.T) {
+	clusterKP := bls.GenerateKeyPair()
+	attacker := bls.GenerateKeyPair()
+	winningCluster := bls.GenerateKeyPair()
+	h := NewAccountRegistryHandler(clusterKP.PublicKey())
+	h.SetChainID(parentchain.ParentChainID)
+
+	db := newMockRegistryStateDB()
+	provUser := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	db.SetProvisional(provUser, true)
+
+	// 1. Attacker tries to lock: must fail
+	attackerDigest := ComputeAccountLockedAttestDigest(parentchain.ParentChainID, provUser, winningCluster.PublicKey(), 0)
+	attackerPayload := AccountRegistrationPayload{
+		Kind:        SystemPayloadKindAccountLocked,
+		User:        provUser,
+		HomeCluster: winningCluster.PublicKey(),
+		Attestations: []RegistrationAttestation{{
+			ValidatorPubkey: attacker.PublicKey(),
+			Signature:       bls.Sign(attacker.PrivateKey(), attackerDigest),
+		}},
+	}
+	bAttacker, err := attackerPayload.MarshalProto()
+	require.NoError(t, err)
+	err = h.ApplyAttested(db, nil, nil, bAttacker)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "lock attestation from untrusted validator")
+	assert.False(t, db.GetLocked(provUser), "Account must NOT be locked by attacker")
+
+	// 2. Cluster key itself signs lock: must succeed
+	clusterDigest := ComputeAccountLockedAttestDigest(parentchain.ParentChainID, provUser, winningCluster.PublicKey(), 0)
+	clusterPayload := AccountRegistrationPayload{
+		Kind:        SystemPayloadKindAccountLocked,
+		User:        provUser,
+		HomeCluster: winningCluster.PublicKey(),
+		Attestations: []RegistrationAttestation{{
+			ValidatorPubkey: clusterKP.PublicKey(),
+			Signature:       bls.Sign(clusterKP.PrivateKey(), clusterDigest),
+		}},
+	}
+	bCluster, err := clusterPayload.MarshalProto()
+	require.NoError(t, err)
+	err = h.ApplyAttested(db, nil, nil, bCluster)
+	require.NoError(t, err)
+	assert.True(t, db.GetLocked(provUser), "Account must be locked by cluster key")
+}

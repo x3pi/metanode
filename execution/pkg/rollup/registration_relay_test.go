@@ -488,3 +488,35 @@ func TestRegistrationRelay_PendingStats(t *testing.T) {
 	require.Equal(t, 1, cnt)
 	require.Greater(t, maxAge, float64(0.005))
 }
+
+func TestRegistrationRelay_LockProposalFailureRetriesAndDoesNotMarkRejected(t *testing.T) {
+	h := newRelayHarness()
+	addr, sig := h.userSig(t)
+	winner := bls.GenerateKeyPair().PublicKey()
+	h.parent.registry[addr] = winner // parent confirmed another cluster
+
+	var lockAttempts int
+	h.relay.SetLockProposer(func(user common.Address, home cm.PublicKey) error {
+		lockAttempts++
+		if lockAttempts == 1 {
+			return errors.New("temporary txpool full")
+		}
+		return nil
+	})
+
+	_, err := h.relay.Submit(addr, sig)
+	require.NoError(t, err)
+
+	// First verify: lockProposer returns error, must NOT be marked Rejected immediately
+	h.relay.ProcessBatch()
+	assert.Equal(t, 1, lockAttempts)
+	assert.Equal(t, RegStatusPending, h.relay.Status(addr).Status, "status must remain pending/retrying")
+
+	// Second verify: lockProposer succeeds, now marked Rejected
+	h.relay.ProcessBatch()
+	assert.Equal(t, 2, lockAttempts)
+	res := h.relay.Status(addr)
+	assert.Equal(t, RegStatusRejected, res.Status)
+	require.NotNil(t, res.HomeCluster)
+	assert.Equal(t, winner, *res.HomeCluster)
+}

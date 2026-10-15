@@ -824,7 +824,11 @@ func (r *RegistrationRelay) resolveFound(user common.Address, home cm.PublicKey)
 		lockProp := r.lockProposer
 		r.mu.Unlock()
 		if lockProp != nil {
-			_ = lockProp(user, home)
+			if err := lockProp(user, home); err != nil {
+				log.Printf("RegistrationRelay: failed to propose lock for %s (will retry): %v", user.Hex(), err)
+				r.retryOrFail(user, fmt.Sprintf("failed to propose account lock: %v", err))
+				return
+			}
 		}
 	}
 	rejected := false
