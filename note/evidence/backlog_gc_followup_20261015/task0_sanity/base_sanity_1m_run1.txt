@@ -1,0 +1,64 @@
+==================================================================
+🚀 SECP256K1 / EIP-1559 HIGH-PERFORMANCE WORKLOAD BENCHMARK
+   Zero-Fork Compliant (AGENTS.md Part 2.5) | Production SECP Mode
+==================================================================
+🎯 Tracking 4 target simple_chain PIDs: 513102, 513459, 513585, 513876
+🌐 RPC Pool (4 nodes): http://127.0.0.1:31646, http://127.0.0.1:31647, http://127.0.0.1:31648, http://127.0.0.1:31649
+⚡ TCP Pool (4 nodes): 127.0.0.1:31200, 127.0.0.1:31201, 127.0.0.1:31202, 127.0.0.1:31203
+🆔 Chain ID: 991
+🔑 Loaded 50000 pre-allocated accounts from generated_keys.json
+==================================================================
+⏱️ SUSTAINED BENCHMARK: Target Duration: 300 seconds
+   Mode: tcp | TxType: 1559 | Wallets: 1000 | BatchSize: 1000
+==================================================================
+🏁 Start Block: #1
+
+🔍 Fetching starting nonces for 1000 accounts...
+✅ 1000 active wallets ready with starting nonces (fetched in 76.623417ms)
+
+🔌 Establishing 4 TCP connections for high-throughput pipeline...
+✅ 4 TCP connections connected.
+
+🔥 BLASTING CONTINUOUSLY FOR 300 SECONDS...
+   • SendBatch diagnostics: failed calls=0, txs abandoned after retries=0
+
+⚡ Injected total 1007408 TXs over 5.824155307s (Injection TPS: 172970.66 tx/s)
+
+⏱️ Draining remaining sample receipts and stabilizing (up to 20s)...
+   ⏳ [PROGRESS 15s / 300s] Injected 1007408 txs (Current Injection TPS: 67155.31 tx/s | Peak CPU: 3972.0% | Peak RSS: 33672 MB)
+   ⏳ [PROGRESS 30s / 300s] Injected 1007408 txs (Current Injection TPS: 33580.05 tx/s | Peak CPU: 4597.0% | Peak RSS: 40377 MB)
+   ⏳ [PROGRESS 45s / 300s] Injected 1007408 txs (Current Injection TPS: 22386.59 tx/s | Peak CPU: 4630.0% | Peak RSS: 45586 MB)
+   ⏳ [PROGRESS 1m0s / 300s] Injected 1007408 txs (Current Injection TPS: 16790.07 tx/s | Peak CPU: 4630.0% | Peak RSS: 46727 MB)
+   ⏳ [PROGRESS 1m15s / 300s] Injected 1007408 txs (Current Injection TPS: 13432.06 tx/s | Peak CPU: 4630.0% | Peak RSS: 48308 MB)
+   ⏳ [PROGRESS 1m30s / 300s] Injected 1007408 txs (Current Injection TPS: 11193.36 tx/s | Peak CPU: 4630.0% | Peak RSS: 48308 MB)
+
+📊 SUSTAINED BENCHMARK METRICS:
+   • Duration:           5.824155307s (Target: 300s)
+   • Total Submitted:    1007408 txs (= bytes_sent_txs: client wrote to transport / got RPC ok; NOT a validator-side number)
+       - validator http://127.0.0.1:31646: received=251328 rejected=0 (delta of master_raw_eth_txs_*_total)
+       - validator http://127.0.0.1:31647: received=252535 rejected=0 (delta of master_raw_eth_txs_*_total)
+       - validator http://127.0.0.1:31648: received=254497 rejected=0 (delta of master_raw_eth_txs_*_total)
+       - validator http://127.0.0.1:31649: received=249048 rejected=0 (delta of master_raw_eth_txs_*_total)
+   • received_by_validators: 1007408 (rejected 0)
+   • committed_ours (counted in blocks): 1007408 | committed_total_txs in same blocks: 1007408
+   • loss_vs_sent: 0 (0.00%)
+   • TPS end-to-end (committed_ours / (last our-block observed - inject start = 66.102s)): 15240.24 tx/s
+   • TPS during injection (ours committed by inject end = 42000, over 5.824s): 7211.35 tx/s | backlog at inject end: 965408 | drain after injection: 60.278s
+   • TPS active commit window (first..last our-block): 15475.34 tx/s | first commit 1.004s after inject start
+   • measurement stop: reference validator showed 1007408 >= 1007408 txs and was idle for 1.5s
+   • parity: OK: all 4 validators agree on hash+stateRoot of #142
+   • [LEGACY ESTIMATE — do not report] on-chain txs counted through the drain window=1005021 across 135 blocks; divided by injection time only => 172560.82 tx/s
+   • Latency P50:        49.764536286s
+   • Latency P90:        55.253490408s
+   • Latency P95:        57.468176251s
+   • Latency P99:        1m1.435806276s
+   • Latency Avg:        42.287708556s
+   • Sample Verified:    194/194 (Confirmed: 194, Reverted: 0, Unconfirmed/Timeout: 0 | Cutoff: 0.0%)
+   • Peak CPU (Nodes):   4630.0%
+   • Peak RSS (4 Target Nodes): 48308 MB (avg 12077.0 MB/node)
+
+🛡️ [ZERO-FORK] OK: all 4 validators agree on hash+stateRoot of #142
+📄 JSON Benchmark report saved to: /home/abc/chain-n/metanode/note/evidence/backlog_gc_followup_20261015/task0_sanity/base_sanity_1m_run1.json
+==================================================================
+
+--STDERR--

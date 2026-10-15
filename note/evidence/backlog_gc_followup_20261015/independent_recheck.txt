@@ -1,0 +1,5 @@
+independent_recheck task1_ab_4m (n=8 pairs):
+  mean_base = 12992.3532 +- 156.6271 tx/s
+  mean_opt  = 14266.8535 +- 385.8287 tx/s
+  mean_diff = +1274.5003 +- 350.3588 tx/s (+9.8104%)
+  t_stat    = 10.2890, df = 7, p_two_tailed = 0.000018

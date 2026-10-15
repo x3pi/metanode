@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Sequential driver for Task 1.4:
+1. 8 interleaved pairs (bins_base vs bins_opt) at 1M tx (seed 2026101502), with --profile-at 20 on Pair 1.
+2. 8 interleaved pairs (bins_base vs bins_opt) at 4M tx (seed 2026101501), with --profile-at 150 on Pair 1.
+Checks MemAvailable >= 20 GB, /tmp >= 100 GB before each run and cleans bulky tail/anomalies files after each run.
+"""
+import glob
+import os
+import random
+import subprocess
+import time
+
+REPO = "/home/abc/chain-n/metanode"
+EXEC = f"{REPO}/execution"
+SCRATCH = "/home/abc/.gemini/antigravity-cli/brain/1d769055-c703-4878-89c7-737036da58bc/scratch"
+BINS_BASE = f"{SCRATCH}/bins_base"
+BINS_OPT = f"{SCRATCH}/bins_opt"
+EVID = f"{REPO}/note/evidence/backlog_gc_followup_20261015"
+
+
+def check_resources():
+    mem_kb = 0
+    for line in open("/proc/meminfo"):
+        if line.startswith("MemAvailable:"):
+            mem_kb = int(line.split()[1])
+            break
+    mem_gb = mem_kb / (1024 * 1024)
+    st = os.statvfs("/tmp")
+    free_gb = (st.f_bavail * st.f_frsize) / (1024 ** 3)
+    if mem_gb < 20.0:
+        raise RuntimeError(f"MemAvailable too low: {mem_gb:.1f} GB < 20 GB")
+    if free_gb < 100.0:
+        raise RuntimeError(f"/tmp free disk too low: {free_gb:.1f} GB < 100 GB")
+    return round(mem_gb, 1), round(free_gb, 1)
+
+
+def clean_bulky_logs(out_dir, tag):
+    for pat in (f"{out_dir}/{tag}_run1_val*_tail.txt", f"{out_dir}/{tag}_run1_val*_anomalies.txt"):
+        for fp in glob.glob(pat):
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
+
+
+def run_ab_suite(name, subdir, seed, n_pairs, max_txs, max_wait_sec, profile_at_p1):
+    out = f"{EVID}/{subdir}"
+    os.makedirs(out, exist_ok=True)
+    rnd = random.Random(seed)
+    order = []
+    for i in range(n_pairs):
+        p = ["base", "opt"]
+        rnd.shuffle(p)
+        order += [(i + 1, v) for v in p]
+    with open(f"{out}/order.txt", "w") as f:
+        f.write("\n".join(f"{i} {v}" for i, v in order) + "\n")
+
+    for i, v in order:
+        tag = f"ab_{name}_{v}_p{i}"
+        rep = f"{out}/{tag}_run1.json"
+        if os.path.isfile(rep):
+            print(f"=== SKIP existing {tag} ===", flush=True)
+            continue
+        mem_gb, free_gb = check_resources()
+        bins = BINS_BASE if v == "base" else BINS_OPT
+        prof_arg = ["--profile-at", str(profile_at_p1)] if i == 1 and profile_at_p1 > 0 else []
+        print(
+            f"=== [Task 1.4 {name}] {tag} (bins={os.path.basename(bins)}, mem={mem_gb}G, disk={free_gb}G, prof={prof_arg}) ===",
+            flush=True,
+        )
+        t0 = time.time()
+        cmd = [
+            "python3", "-I", "scripts/test/evidence/run_tps_counted.py",
+            "--mode", "sustained",
+            "--runs", "1",
+            "--tag", tag,
+            "--bins", bins,
+            "--out", out,
+            "--duration", "300",
+            "--max-txs", str(max_txs),
+            "--batch", "1000",
+            "--max-wait-sec", str(max_wait_sec),
+        ] + prof_arg
+        r = subprocess.run(
+            cmd,
+            cwd=EXEC,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        with open(f"{out}/{tag}.stdout", "w") as f:
+            f.write(r.stdout + r.stderr)
+        clean_bulky_logs(out, tag)
+        print(f"=== [Task 1.4 {name}] {tag} done in {time.time()-t0:.1f}s exit={r.returncode} ===", flush=True)
+        for line in r.stdout.splitlines():
+            if line.startswith("{"):
+                print(f"    {line}", flush=True)
+        time.sleep(60)
+
+
+if __name__ == "__main__":
+    run_ab_suite(
+        name="1m",
+        subdir="task1_ab_1m",
+        seed=2026101502,
+        n_pairs=8,
+        max_txs=1000000,
+        max_wait_sec=600,
+        profile_at_p1=20,
+    )
+    run_ab_suite(
+        name="4m",
+        subdir="task1_ab_4m",
+        seed=2026101501,
+        n_pairs=8,
+        max_txs=4000000,
+        max_wait_sec=900,
+        profile_at_p1=150,
+    )
+    print("=== ALL TASK 1.4 1M AND 4M RUNS COMPLETE ===", flush=True)

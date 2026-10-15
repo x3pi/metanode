@@ -1,0 +1,13 @@
+pair,variant,tag,bytes_sent_txs,received_sum,rejected_sum,committed_ours,loss_vs_sent,commit_ratio,tps_end_to_end,tps_during_injection,tps_active_commit_window,inject_seconds,end_to_end_seconds,end_block,max_rss_mb,stalled,parity_ok,measurement_stop_reason
+1,old_f97a2fbf,raft_ab_old_p1_run1,715000,709000,0,709000,6000,0.991608,18706.625,2363.2367,18819.2038,300.0123,37.901,396,25938,1,OK,no new tx-bearing block for 8s (committed_total_seen=709000 expected=715000)
+1,new_f85bf683,raft_ab_new_p1_run1,1003936,1003936,0,1003936,0,1.0,20667.1348,18900.0733,20753.0529,5.3052,48.5764,557,27745,0,OK,reference validator showed 1003936 >= 1003936 txs and was idle for 1.5s
+2,old_f97a2fbf,raft_ab_old_p2_run1,634000,628000,0,628000,6000,0.990536,18971.9488,2093.2473,19105.1041,300.0123,33.1015,352,25887,1,OK,no new tx-bearing block for 8s (committed_total_seen=628000 expected=634000)
+2,new_f85bf683,raft_ab_new_p2_run1,1004057,1004057,0,1004057,0,1.0,20532.3018,18234.6185,20616.9427,5.3119,48.9013,522,27695,0,OK,reference validator showed 1004057 >= 1004057 txs and was idle for 1.5s
+3,old_f97a2fbf,raft_ab_old_p3_run1,672000,666000,0,666000,6000,0.991071,19220.2106,2219.917,19332.7954,300.0112,34.651,373,25961,1,OK,no new tx-bearing block for 8s (committed_total_seen=666000 expected=672000)
+3,new_f85bf683,raft_ab_new_p3_run1,1005138,1005138,0,1005138,0,1.0,20132.4634,18523.7941,20214.1577,5.3437,49.9262,506,27814,0,OK,reference validator showed 1005138 >= 1005138 txs and was idle for 1.5s
+4,old_f97a2fbf,raft_ab_old_p4_run1,671000,665000,0,665000,6000,0.991058,19954.4177,2216.5785,20091.0725,300.0119,33.326,375,25921,1,OK,no new tx-bearing block for 8s (committed_total_seen=665000 expected=671000)
+4,new_f85bf683,raft_ab_new_p4_run1,1007111,1007111,0,1007111,0,1.0,20242.9017,19296.8622,20325.494,5.3191,49.7513,557,27774,0,OK,reference validator showed 1007111 >= 1007111 txs and was idle for 1.5s
+5,old_f97a2fbf,raft_ab_old_p5_run1,664000,658000,0,658000,6000,0.990964,18573.7846,2193.2372,18680.0407,300.0132,35.4263,370,25957,1,OK,no new tx-bearing block for 8s (committed_total_seen=658000 expected=664000)
+5,new_f85bf683,raft_ab_new_p5_run1,1006968,1006968,0,1006968,0,1.0,20934.2402,18935.6515,21013.2172,5.3821,48.1015,561,27690,0,OK,reference validator showed 1006968 >= 1006968 txs and was idle for 1.5s
+6,old_f97a2fbf,raft_ab_old_p6_run1,653000,646000,0,646000,7000,0.98928,18915.9173,2153.2311,19028.0572,300.0142,34.1511,363,25925,1,OK,no new tx-bearing block for 8s (committed_total_seen=646000 expected=653000)
+6,new_f85bf683,raft_ab_new_p6_run1,1005634,1005634,0,1005634,0,1.0,19660.095,18314.5056,19737.7073,5.3322,51.151,539,27741,0,OK,reference validator showed 1005634 >= 1005634 txs and was idle for 1.5s

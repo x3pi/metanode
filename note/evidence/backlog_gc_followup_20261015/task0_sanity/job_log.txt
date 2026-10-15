@@ -1,0 +1,18 @@
+== run_tps_counted mode=sustained runs=2 tag=base_sanity_1m bins=/home/abc/.gemini/antigravity-cli/brain/1d769055-c703-4878-89c7-737036da58bc/scratch/bins_base head=b6b1ee71
+== uname: 6.8.0-139-generic  cpus=104  loadavg(start)=0.98 0.98 5.69 1/1590 512678
+
+=== RUN 1/2 ===
+{"run": 1, "paths_rewritten_files": 11, "cluster_start_seconds": 7.6, "baseline_rss_mb": 1635, "template_disk_mb_val0": 1845, "uptime_before": "1.05 1.00 5.62 2/2750 514935", "blast_wall_seconds": 93.3, "blast_exit": 0, "tcp_connections_used": 4, "tcp_endpoints": 4, "uptime_after": "23.34 10.45 8.67 2/3204 517863", "peak_rss_mb_tool": 48308, "tool_version": "secp_tps_blast/2 (chain-counted)", "bytes_sent": 1007408, "received_sum": 1007408, "rejected_sum": 0, "committed_ours": 1007408, "committed_total": 1007408, "ours_exact": true, "ours_upper_bound": 1007408, "tps_end_to_end_upper": 15240.236780538542, "loss": 0, "tps_end_to_end": 15240.236780538542, "tps_during_injection": 7211.346158561496, "tps_active_commit": 15475.341775547555, "drain_seconds": 60.277704822, "backlog_at_inject_end": 965408, "inject_seconds": 5.824155307, "end_to_end_seconds": 66.101860129, "parity": "OK: all 4 validators agree on hash+stateRoot of #142", "legacy_effective_tps": 172560.8173243722, "legacy_confirmed": 1005021, "latency_p50_ms": 49765, "node_anomaly_lines": "{\"val0\": 8401, \"val1\": 5693, \"val2\": 5748, \"val3\": 6734}"}
+    stop_reason: reference validator showed 1007408 >= 1007408 txs and was idle for 1.5s
+
+=== RUN 2/2 ===
+{"run": 2, "paths_rewritten_files": 11, "cluster_start_seconds": 6.6, "baseline_rss_mb": 1623, "template_disk_mb_val0": 1845, "uptime_before": "4.10 7.13 7.67 4/2914 524951", "blast_wall_seconds": 91.4, "blast_exit": 0, "tcp_connections_used": 4, "tcp_endpoints": 4, "uptime_after": "27.82 16.83 11.24 2/3337 528372", "peak_rss_mb_tool": 47234, "tool_version": "secp_tps_blast/2 (chain-counted)", "bytes_sent": 1008000, "received_sum": 1008000, "rejected_sum": 0, "committed_ours": 1008000, "committed_total": 1008000, "ours_exact": true, "ours_upper_bound": 1008000, "tps_end_to_end_upper": 15388.931106295053, "loss": 0, "tps_end_to_end": 15388.931106295053, "tps_during_injection": 7541.8902907972315, "tps_active_commit": 15641.739180350554, "drain_seconds": 59.74524356, "backlog_at_inject_end": 964586, "inject_seconds": 5.756381799, "end_to_end_seconds": 65.501625359, "parity": "OK: all 4 validators agree on hash+stateRoot of #134", "legacy_effective_tps": 173056.7976177426, "legacy_confirmed": 996181, "latency_p50_ms": 51480, "node_anomaly_lines": "{\"val0\": 6661, \"val1\": 7174, \"val2\": 9878, \"val3\": 4913}"}
+    stop_reason: reference validator showed 1008000 >= 1008000 txs and was idle for 1.5s
+
+=== SUMMARY (all numbers read from tool JSON; paired old-vs-new within the SAME run) ===
+tps_end_to_end(new, counted): n=2 mean=15314.58 sd=105.14 min=15240.24 max=15388.93
+tps_during_injection(new): n=2 mean=7376.62 sd=233.73 min=7211.35 max=7541.89
+legacy_effective_tps(old estimate): n=2 mean=172808.81 sd=350.71 min=172560.82 max=173056.80
+loss_vs_sent: n=2 mean=0.00 sd=0.00 min=0.00 max=0.00
+parity statuses: ['OK: all 4 validators agree on hash+stateRoot of #134', 'OK: all 4 validators agree on hash+stateRoot of #142']
+runs with errors: 0

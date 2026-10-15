@@ -1,0 +1,16 @@
+1 base
+1 opt
+2 base
+2 opt
+3 base
+3 opt
+4 base
+4 opt
+5 opt
+5 base
+6 base
+6 opt
+7 opt
+7 base
+8 opt
+8 base
