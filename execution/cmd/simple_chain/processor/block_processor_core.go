@@ -717,6 +717,7 @@ func NewBlockProcessor(
 	go bp.startResourceMonitoring()
 	// Cleanup stale pending receipts to prevent memory leak from disconnected clients
 	go bp.cleanupPendingReceipts()
+	go bp.cleanupTxHashConnectionMap()
 	if bp.storageManager.IsExplorer() {
 		go bp.startIndexingProcess()
 	}

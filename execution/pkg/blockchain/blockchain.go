@@ -270,6 +270,13 @@ func (bc *BlockChain) GetTxFromCache(txHash common.Hash) ([]byte, bool) {
 	return append([]byte(nil), cached.raw...), true
 }
 
+func (bc *BlockChain) DeleteTxFromCache(txHash common.Hash) {
+	if bc.txsCache == nil || txHash == (common.Hash{}) {
+		return
+	}
+	bc.txsCache.Delete(txHash)
+}
+
 // ============================================================================
 // PRUNING LOGIC (Called by Worker only)
 // ============================================================================

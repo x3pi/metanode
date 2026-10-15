@@ -25,44 +25,47 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
+type sigCacheShard struct {
+	mu sync.RWMutex
+	m  map[eth_common.Hash]struct{}
+}
+
+// shardedSignatureCache uses a value-typed map[eth_common.Hash]struct{} per shard.
+// Because neither [32]byte nor struct{} contains pointers, the Go runtime allocates all map buckets
+// in noscan spans, eliminating interface{} boxing and removing signature cache entries from GC mark scanning.
 type shardedSignatureCache struct {
-	shards [256]sync.Map
+	shards [256]sigCacheShard
 }
 
-func (s *shardedSignatureCache) getShard(key interface{}) *sync.Map {
-	var hash byte
-	switch k := key.(type) {
-	case string:
-		if len(k) >= 4 {
-			hash = k[0] ^ k[1] ^ k[2] ^ k[3]
-		} else if len(k) >= 2 {
-			hash = k[0] ^ k[1]
-		} else if len(k) == 1 {
-			hash = k[0]
-		}
-	case int64:
-		hash = byte(k)
-	case int:
-		hash = byte(k)
-	case eth_common.Hash:
-		hash = k[0]
-	default:
-		// Fallback hash
+func (s *shardedSignatureCache) Load(key eth_common.Hash) bool {
+	sh := &s.shards[key[0]]
+	sh.mu.RLock()
+	m := sh.m
+	if m == nil {
+		sh.mu.RUnlock()
+		return false
 	}
-	return &s.shards[hash]
+	_, ok := m[key]
+	sh.mu.RUnlock()
+	return ok
 }
 
-func (s *shardedSignatureCache) Load(key interface{}) (value interface{}, ok bool) {
-	return s.getShard(key).Load(key)
-}
-
-func (s *shardedSignatureCache) Store(key, value interface{}) {
-	s.getShard(key).Store(key, value)
+func (s *shardedSignatureCache) Store(key eth_common.Hash) {
+	sh := &s.shards[key[0]]
+	sh.mu.Lock()
+	if sh.m == nil {
+		sh.m = make(map[eth_common.Hash]struct{}, 64)
+	}
+	sh.m[key] = struct{}{}
+	sh.mu.Unlock()
 }
 
 func (s *shardedSignatureCache) Clear() {
 	for i := range s.shards {
-		s.shards[i].Clear()
+		sh := &s.shards[i]
+		sh.mu.Lock()
+		sh.m = nil
+		sh.mu.Unlock()
 	}
 }
 
@@ -83,26 +86,24 @@ func init() {
 	})
 }
 
-func LoadVerifiedSignature(key interface{}) bool {
+func LoadVerifiedSignature(key eth_common.Hash) bool {
 	rc := currentRotatingCache.Load()
 	if rc == nil {
 		return false
 	}
-	if _, ok := rc.active.Load(key); ok {
+	if rc.active.Load(key) {
 		return true
 	}
-	if rc.old != nil {
-		if _, ok := rc.old.Load(key); ok {
-			return true
-		}
+	if rc.old != nil && rc.old.Load(key) {
+		return true
 	}
 	return false
 }
 
-func StoreVerifiedSignature(key interface{}) {
+func StoreVerifiedSignature(key eth_common.Hash) {
 	rc := currentRotatingCache.Load()
 	if rc != nil {
-		rc.active.Store(key, true)
+		rc.active.Store(key)
 	}
 }
 
@@ -114,6 +115,15 @@ func rotateVerifiedSignatures() {
 			old:    rc.active,
 		}
 		currentRotatingCache.Store(newRc)
+	}
+}
+
+func bumpVerifiedSignatureCacheCount() {
+	count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
+	if count >= maxVerifiedSignaturesCacheSize {
+		if atomic.CompareAndSwapInt64(&verifiedSignaturesCacheCount, count, 0) {
+			rotateVerifiedSignatures()
+		}
 	}
 }
 
@@ -244,11 +254,7 @@ func VerifyTransaction(
 					return transaction.InvalidSign
 				}
 				StoreVerifiedSignature(secpCacheKey)
-				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
-				if count == maxVerifiedSignaturesCacheSize {
-					rotateVerifiedSignatures()
-					atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
-				}
+				bumpVerifiedSignatureCacheCount()
 			}
 		} else if pol.secp && !isNodeBLSIdentity(tx, as) {
 			// secp mode: a user tx must carry a valid ETH/secp256k1 signature. No BLS attempt and NO sub-node-lagging
@@ -264,11 +270,7 @@ func VerifyTransaction(
 					// ValidEthSign ran the envelope binding too, so the block-time filter may skip it on a hit.
 					StoreVerifiedSignature(boundSigKey(secpCacheKey))
 				}
-				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
-				if count == maxVerifiedSignaturesCacheSize {
-					rotateVerifiedSignatures()
-					atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
-				}
+				bumpVerifiedSignatureCacheCount()
 			}
 		} else if isSubNodeLagging {
 			// Let it pass local verification; assume Master will reject if invalid.
@@ -295,11 +297,7 @@ func VerifyTransaction(
 				}
 				// Only cache on successful validation
 				StoreVerifiedSignature(blsCacheKey)
-				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
-				if count == maxVerifiedSignaturesCacheSize {
-					rotateVerifiedSignatures()
-					atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
-				}
+				bumpVerifiedSignatureCacheCount()
 			}
 		}
 	}
@@ -341,11 +339,7 @@ func VerifyTransaction(
 					return transaction.InvalidSignSecp
 				}
 				StoreVerifiedSignature(setBlsCacheKey)
-				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
-				if count == maxVerifiedSignaturesCacheSize {
-					rotateVerifiedSignatures()
-					atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
-				}
+				bumpVerifiedSignatureCacheCount()
 			}
 			_, err := UnpackSetBlsPublicKeyInput(dataInput)
 			if err != nil {

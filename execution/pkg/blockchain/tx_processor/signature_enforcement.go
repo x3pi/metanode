@@ -48,6 +48,7 @@ func boundSigKey(key eth_common.Hash) eth_common.Hash {
 func storeVerifiedBound(key eth_common.Hash) {
 	StoreVerifiedSignature(key)
 	StoreVerifiedSignature(boundSigKey(key))
+	bumpVerifiedSignatureCacheCount()
 }
 
 // sigPolicy is the per-chain signature rule set, derived from the node config (identical on every validator of a
@@ -205,6 +206,7 @@ func evalTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy)
 			storeVerifiedBound(key)
 		} else {
 			StoreVerifiedSignature(key)
+			bumpVerifiedSignatureCacheCount()
 		}
 		return sigVerdictVerified
 	}
@@ -364,6 +366,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 				for _, p := range part {
 					valid[p.i] = true
 					StoreVerifiedSignature(p.key)
+					bumpVerifiedSignatureCacheCount()
 				}
 				return
 			}

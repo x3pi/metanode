@@ -231,6 +231,20 @@ func (bp *BlockProcessor) commitWorker() {
 
 		// Remove from pending store now that it is fully committed
 		bp.RemovePendingCommitBlock(blockNum)
+		if bc := blockchain.GetBlockChainInstance(); bc != nil {
+			if job.Block != nil {
+				for _, txHash := range job.Block.Transactions() {
+					bc.DeleteTxFromCache(txHash)
+				}
+			}
+			if job.ProcessResults != nil {
+				for _, tx := range job.ProcessResults.Transactions {
+					if tx != nil {
+						bc.DeleteTxFromCache(tx.EthHash())
+					}
+				}
+			}
+		}
 		lastBlockAfterCommit := storage.GetLastBlockNumber()
 		if lastBlockAfterCommit != blockNum {
 			logger.Error("🚨 [COMMIT-WORKER] Block #%d CommitBlockState completed but lastBlockNumber=%d (expected %d) — BLOCK MAY HAVE BEEN REJECTED!",
