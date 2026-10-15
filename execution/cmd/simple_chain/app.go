@@ -454,7 +454,6 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	}
 	app.regWorker.SetAttestationKey(attestKey)
 
-	// P0-3 & Phase 2 (B4): Check attestation key ↔ on-chain validator account at startup
 	cfgAddr := e_common.HexToAddress(app.config.Address)
 	attestPub := attestKey.PublicKey()
 	if isVal, warn := tx_processor.VerifyNodeCommitteeKey(app.chainState, app.keyPair.Address(), cfgAddr, attestPub); isVal {

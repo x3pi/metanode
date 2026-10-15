@@ -240,11 +240,40 @@ type AccountRegistryHandler struct {
 	clusterPubKey     cm.PublicKey
 	chainID           uint64
 	committeeProvider CommitteeProvider
+	trustedValidators map[cm.PublicKey]bool
 }
 
 // NewAccountRegistryHandler creates a new handler bound to the cluster's public key.
 func NewAccountRegistryHandler(clusterPubKey cm.PublicKey) *AccountRegistryHandler {
-	return &AccountRegistryHandler{clusterPubKey: clusterPubKey}
+	h := &AccountRegistryHandler{clusterPubKey: clusterPubKey}
+	if clusterPubKey != (cm.PublicKey{}) {
+		h.trustedValidators = map[cm.PublicKey]bool{clusterPubKey: true}
+	}
+	return h
+}
+
+// SetTrustedValidators sets explicit trusted validator BLS keys used when committeeProvider == nil.
+func (h *AccountRegistryHandler) SetTrustedValidators(keys []cm.PublicKey) {
+	if len(keys) == 0 {
+		h.trustedValidators = nil
+		return
+	}
+	m := make(map[cm.PublicKey]bool, len(keys))
+	for _, k := range keys {
+		m[k] = true
+	}
+	h.trustedValidators = m
+}
+
+// isTrustedValidator reports whether pubkey is recognized as an authorized validator.
+func (h *AccountRegistryHandler) isTrustedValidator(pubkey cm.PublicKey) bool {
+	if len(h.trustedValidators) > 0 {
+		return h.trustedValidators[pubkey]
+	}
+	if h.clusterPubKey != (cm.PublicKey{}) {
+		return pubkey == h.clusterPubKey
+	}
+	return false
 }
 
 // SetCommitteeProvider sets the committee provider for quorum verification (>= f+1).
@@ -417,6 +446,9 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 		if payload.ClusterKey != h.clusterPubKey {
 			return fmt.Errorf("account registry: cluster key mismatch: got %x, want %x", payload.ClusterKey[:6], h.clusterPubKey[:6])
 		}
+		if stateDB.GetLocked(payload.User) {
+			return fmt.Errorf("account registry: cannot register locked account %s", payload.User.Hex())
+		}
 		// Idempotent: already confirmed is a no-op success
 		if stateDB.GetParentRegistered(payload.User) {
 			return nil
@@ -464,12 +496,24 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 		if payload.HomeCluster == h.clusterPubKey || payload.HomeCluster == (cm.PublicKey{}) {
 			return fmt.Errorf("account registry: lock payload must specify another winning home cluster")
 		}
+		// Invariant: Never allow locking an account that is already officially confirmed on this cluster!
+		if stateDB.GetParentRegistered(payload.User) {
+			return fmt.Errorf("account registry: cannot lock officially confirmed account %s", payload.User.Hex())
+		}
 		if stateDB.GetLocked(payload.User) {
 			return nil // idempotent: already locked
 		}
 
-		if committee == nil && len(payload.Attestations) == 0 {
+		if len(payload.Attestations) == 0 {
 			return errors.New("account registry: lock payload requires at least one valid validator attestation")
+		}
+
+		if committee == nil {
+			for _, att := range payload.Attestations {
+				if !h.isTrustedValidator(att.ValidatorPubkey) {
+					return fmt.Errorf("account registry: lock attestation from untrusted validator %x", att.ValidatorPubkey[:6])
+				}
+			}
 		}
 
 		digest := ComputeAccountLockedAttestDigest(h.attestChainID(), payload.User, payload.HomeCluster, payload.ParentSeq)

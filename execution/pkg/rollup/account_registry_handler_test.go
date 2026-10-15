@@ -5,7 +5,9 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -220,4 +222,92 @@ func TestAccountRegistryHandler_H2_Determinism(t *testing.T) {
 
 	assert.Equal(t, hash1, hash2, "Replicas must produce identical state fingerprint")
 	assert.Equal(t, hash1, hash3, "Replicas must produce identical state fingerprint")
+}
+
+func TestAccountRegistryHandler_S1_ConfirmedAccountCannotBeLocked(t *testing.T) {
+	clusterKey := bls.GenerateKeyPair()
+	handler := NewAccountRegistryHandler(clusterKey.PublicKey())
+	handler.SetChainID(parentchain.ParentChainID)
+
+	db := newMockRegistryStateDB()
+	user := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	// Account is already confirmed on this cluster
+	db.SetParentRegistered(user, true)
+
+	// An attacker or rogue validator tries to send a lock payload
+	winningCluster := bls.GenerateKeyPair()
+	digest := ComputeAccountLockedAttestDigest(parentchain.ParentChainID, user, winningCluster.PublicKey(), 0)
+	lockPayload := AccountRegistrationPayload{
+		Kind:        SystemPayloadKindAccountLocked,
+		User:        user,
+		HomeCluster: winningCluster.PublicKey(),
+		Attestations: []RegistrationAttestation{{
+			ValidatorPubkey: clusterKey.PublicKey(),
+			Signature:       bls.Sign(clusterKey.PrivateKey(), digest),
+		}},
+	}
+	data, err := lockPayload.MarshalProto()
+	require.NoError(t, err)
+
+	err = handler.Apply(db, data)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot lock officially confirmed account")
+
+	// Invariants hold: account remains ParentRegistered and is NOT locked
+	assert.True(t, db.GetParentRegistered(user))
+	assert.False(t, db.GetLocked(user))
+}
+
+func TestAccountRegistryHandler_S1_UntrustedBLSKeyCannotLock(t *testing.T) {
+	clusterKey := bls.GenerateKeyPair()
+	handler := NewAccountRegistryHandler(clusterKey.PublicKey())
+	handler.SetChainID(parentchain.ParentChainID)
+
+	db := newMockRegistryStateDB()
+	user := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	db.SetProvisional(user, true)
+
+	// Attacker generates an arbitrary BLS keypair
+	attackerKey := bls.GenerateKeyPair()
+	winningCluster := bls.GenerateKeyPair()
+	digest := ComputeAccountLockedAttestDigest(parentchain.ParentChainID, user, winningCluster.PublicKey(), 0)
+	lockPayload := AccountRegistrationPayload{
+		Kind:        SystemPayloadKindAccountLocked,
+		User:        user,
+		HomeCluster: winningCluster.PublicKey(),
+		Attestations: []RegistrationAttestation{{
+			ValidatorPubkey: attackerKey.PublicKey(),
+			Signature:       bls.Sign(attackerKey.PrivateKey(), digest),
+		}},
+	}
+	data, err := lockPayload.MarshalProto()
+	require.NoError(t, err)
+
+	err = handler.Apply(db, data)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "lock attestation from untrusted validator")
+
+	// Account remains provisional and is NOT locked
+	assert.True(t, db.GetProvisional(user))
+	assert.False(t, db.GetLocked(user))
+}
+
+func TestAccountRegistryHandler_S2_LockedAccountCannotBeRegistered(t *testing.T) {
+	clusterKey := bls.GenerateKeyPair()
+	handler := NewAccountRegistryHandler(clusterKey.PublicKey())
+	handler.SetChainID(parentchain.ParentChainID)
+
+	db := newMockRegistryStateDB()
+	user := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	// Account is already locked
+	db.SetLocked(user, true)
+
+	regPayload := makeRegistrationPayload(user, clusterKey.PublicKey(), 1)
+	err := handler.Apply(db, regPayload)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot register locked account")
+
+	// Invariants hold: account remains locked and is NOT ParentRegistered
+	assert.True(t, db.GetLocked(user))
+	assert.False(t, db.GetParentRegistered(user))
 }

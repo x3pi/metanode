@@ -4,6 +4,7 @@ import (
 	"context"
 	"math/big"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
@@ -175,7 +176,7 @@ type CrossChainTransferDispatcher interface {
 // ParentChainGatewayHandler handles transactions sent to PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS.
 type ParentChainGatewayHandler struct {
 	dispatcher CrossChainTransferDispatcher
-	ungated    bool // default false: gate is active by default
+	ungated    atomic.Bool // default false: gate is active by default
 }
 
 var (
@@ -188,7 +189,7 @@ func (h *ParentChainGatewayHandler) isAccountGateEnabled() bool {
 	if h == nil {
 		return true
 	}
-	return !h.ungated
+	return !h.ungated.Load()
 }
 
 // InitParentChainGatewayHandler initializes the singleton with a dispatcher (gate active by default).
@@ -201,18 +202,17 @@ func InitParentChainGatewayHandlerWithGate(dispatcher CrossChainTransferDispatch
 	onceParentChainGateway.Do(func() {
 		parentChainGatewayHandlerInstance = &ParentChainGatewayHandler{
 			dispatcher: dispatcher,
-			ungated:    !accountGate,
 		}
 	})
 	if parentChainGatewayHandlerInstance != nil {
-		parentChainGatewayHandlerInstance.ungated = !accountGate
+		parentChainGatewayHandlerInstance.ungated.Store(!accountGate)
 	}
 }
 
 // SetAccountGate dynamically updates the account gate enforcement policy.
 func (h *ParentChainGatewayHandler) SetAccountGate(enabled bool) {
 	if h != nil {
-		h.ungated = !enabled
+		h.ungated.Store(!enabled)
 	}
 }
 
