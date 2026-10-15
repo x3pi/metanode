@@ -3,12 +3,12 @@
   "entries": [
     {
       "id": "pr169_probe",
-      "command": "pr_probe.py: BASE (origin/dev code at 84de9ab3-equivalent) vs PR #169 (e4ccf248) on a fresh 4-validator cluster; probe_readtx sends 6 TCP requests (EstimateGas/ReadTransaction) and matches responses by header ID; pr169.diff = git diff origin/dev...pr169",
+      "command": "pr_probe.py: BASE (origin/dev code at 84de9ab3-equivalent) vs PR #169 (e4ccf248) on a fresh 4-validator cluster; probe_readtx sends 6 TCP requests (EstimateGas/ReadTransaction) and matches responses by header ID; pr169.diff = git diff origin/dev...pr169; manifest refreshed after a rebase so the recorded commit is reachable",
       "cwd": "/home/abc/chain-n/metanode",
-      "git_commit": "b6b1ee712eb2201784e14ed22de44be3a90ef7e8",
+      "git_commit": "6dc4682816015b3c4df8ec333316b9a9e367dbbc",
       "git_status": "",
       "started_at": "",
-      "finished_at": "2026-10-15T02:25:34Z",
+      "finished_at": "2026-10-15T02:54:56Z",
       "exit_code": 0,
       "files": [
         {
