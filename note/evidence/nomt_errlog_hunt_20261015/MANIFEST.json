@@ -1,0 +1,558 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "nomt_errlog",
+      "command": "run_tps_counted.py sustained --max-txs 2000000, node binary with {:#} NOMT error logging; stopped after run 17 by request; 68 nomt_errors files (all empty), no DEAD logs; derived_summary.csv built from the JSON files",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "84de9ab39fbe62be306adc4bca6f80465724ba22",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-15T01:45:15Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "derived_summary.csv",
+          "sha256": "b6f827e792313be278caff12605f9520dbdbf4f76673becd2a466861c4e05f92",
+          "bytes": 1505
+        },
+        {
+          "path": "job.log",
+          "sha256": "f95f4ddfacce1b72b60f7ed5b91b78f1219a431824edbb528f7567d82b77f1b9",
+          "bytes": 21518
+        },
+        {
+          "path": "nomtlog_run10.json",
+          "sha256": "4ec758d94358e260c6eba1755ff2c91c63db5aa9ee60f040951671e8368361a2",
+          "bytes": 52502
+        },
+        {
+          "path": "nomtlog_run10.log",
+          "sha256": "95bef821b614abea02725ab5645e70d47bc88a70cd86a0ddd70b7fba58e52f16",
+          "bytes": 5915
+        },
+        {
+          "path": "nomtlog_run10_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run10_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run10_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run10_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run11.json",
+          "sha256": "64d19bbda1e810b7cd9d1613cb3c16ba50f4039f632ca6643c755402402cf643",
+          "bytes": 51242
+        },
+        {
+          "path": "nomtlog_run11.log",
+          "sha256": "3e7cf837bef006572624b077fe17331cb5f1f693ca618822188e9b76eb077cdf",
+          "bytes": 6049
+        },
+        {
+          "path": "nomtlog_run11_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run11_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run11_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run11_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run12.json",
+          "sha256": "6f4f3f755ffbb0b51125480c6050603dd18a9b2525e58df900414ed1f22be3bb",
+          "bytes": 51516
+        },
+        {
+          "path": "nomtlog_run12.log",
+          "sha256": "f5b5cfb88c4648563a3791634acaa18c04dddb4f22b3d0b51108a5e470269754",
+          "bytes": 6052
+        },
+        {
+          "path": "nomtlog_run12_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run12_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run12_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run12_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run13.json",
+          "sha256": "c38f5281e1b582678332772ce3f2cc9fa6cbc8a8eab09b594604a3d4ab613509",
+          "bytes": 48468
+        },
+        {
+          "path": "nomtlog_run13.log",
+          "sha256": "515b14e2303f06c923b80e510f3577b2f695ee3df5bfdc3c6c28a78832d0d002",
+          "bytes": 6048
+        },
+        {
+          "path": "nomtlog_run13_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run13_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run13_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run13_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run14.json",
+          "sha256": "36de44c32a85962a69f4708b6d5a0fbcf36c7887be963daee5920e5734dbdd97",
+          "bytes": 49441
+        },
+        {
+          "path": "nomtlog_run14.log",
+          "sha256": "e3f6609dac5d867e0c90c1dd16557da879f23d50f77bc332c372c382fc5e662d",
+          "bytes": 6048
+        },
+        {
+          "path": "nomtlog_run14_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run14_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run14_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run14_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run15.json",
+          "sha256": "52cfc8e6d5d8a92b166ca359068948e05927c46b1add87d7ee406e6b27f71235",
+          "bytes": 54103
+        },
+        {
+          "path": "nomtlog_run15.log",
+          "sha256": "a6fc5584bafca0332a82c468772a143d4b57e99f4645812ff5fa3af9f8fd78cf",
+          "bytes": 5917
+        },
+        {
+          "path": "nomtlog_run15_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run15_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run15_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run15_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run16.json",
+          "sha256": "d38a2dcbb55f984cc098ade29955746deb8fedb36b15a91eacc68e2be70c7223",
+          "bytes": 51078
+        },
+        {
+          "path": "nomtlog_run16.log",
+          "sha256": "9c15957a76152b2ae24298b1310039574221105d8e58664398f93bfc3b109209",
+          "bytes": 5917
+        },
+        {
+          "path": "nomtlog_run16_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run16_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run16_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run16_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run17.json",
+          "sha256": "59a8a460da3314a6c5fa37dcb8f7c0c5f3ebec6c649b20a85d9c35fa4bc1dbd4",
+          "bytes": 50481
+        },
+        {
+          "path": "nomtlog_run17.log",
+          "sha256": "5b566af3ef29ba7efc8923585c06483b961542d872da73dd98d12a3954e82316",
+          "bytes": 5922
+        },
+        {
+          "path": "nomtlog_run17_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run17_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run17_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run17_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run1.json",
+          "sha256": "7fcb234a1a68d55f20fd5baef3cd43d9386fe4c6f019912a23f6464466324656",
+          "bytes": 51238
+        },
+        {
+          "path": "nomtlog_run1.log",
+          "sha256": "6f7adbe10503d45db3caf550ba8f0b73cae9e6853f11d717061939400cf02ff5",
+          "bytes": 6049
+        },
+        {
+          "path": "nomtlog_run1_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run1_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run1_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run1_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run2.json",
+          "sha256": "b925117692de7d0324bac1bb5e435d315a75866a5ee16c649ac6d9f81c499acd",
+          "bytes": 53538
+        },
+        {
+          "path": "nomtlog_run2.log",
+          "sha256": "acb57471da0a7f591e07eb6b08a62e05e41d475e853df98d9680e17dc8b5139b",
+          "bytes": 6047
+        },
+        {
+          "path": "nomtlog_run2_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run2_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run2_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run2_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run3.json",
+          "sha256": "30dc5a4366e9ce03fbfd7065240e89ef4dcbd1592d8183cc2908039445a7d172",
+          "bytes": 48714
+        },
+        {
+          "path": "nomtlog_run3.log",
+          "sha256": "ec50db9404563cc0527994c6781bee0e355e9f5e7ad97691500dc807011462ca",
+          "bytes": 6046
+        },
+        {
+          "path": "nomtlog_run3_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run3_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run3_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run3_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run4.json",
+          "sha256": "3a792df3ae8c96d27ae4453c70ee84c6b4523b9f6bc66bbbaa76a06ed4570a47",
+          "bytes": 50505
+        },
+        {
+          "path": "nomtlog_run4.log",
+          "sha256": "a689ba6e48b8e6c3d3e449395c6ff09e61b7ad3332c205ad78892b3bf7fa8ff0",
+          "bytes": 6046
+        },
+        {
+          "path": "nomtlog_run4_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run4_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run4_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run4_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run5.json",
+          "sha256": "513c7c64b3e459ec9d133ed972f49fbbc50e67992f2c233a768b54ebfce01f3d",
+          "bytes": 49972
+        },
+        {
+          "path": "nomtlog_run5.log",
+          "sha256": "c303a16fbe1f7aee9ed6c422e23b7aed7b2001f1dc0ffc3457a612c63fa89c36",
+          "bytes": 5919
+        },
+        {
+          "path": "nomtlog_run5_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run5_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run5_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run5_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run6.json",
+          "sha256": "346e370f6cfe51345befe0600be65d91c78d96b1a0abd7ccae93d25970f6574d",
+          "bytes": 50079
+        },
+        {
+          "path": "nomtlog_run6.log",
+          "sha256": "6e2297e6d5414273307c3c79af6dd8b92aa288a52c30d74c181ed32d07c46293",
+          "bytes": 6052
+        },
+        {
+          "path": "nomtlog_run6_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run6_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run6_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run6_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run7.json",
+          "sha256": "96a789f808745cd02a4b1eba11e7707b828c3ed0e3227bf9a63a023cab69b0e0",
+          "bytes": 52002
+        },
+        {
+          "path": "nomtlog_run7.log",
+          "sha256": "b7485ebb7456374e3ee133c3c9420d7eee0fec112da95c83ba5970457b903a8e",
+          "bytes": 6047
+        },
+        {
+          "path": "nomtlog_run7_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run7_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run7_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run7_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run8.json",
+          "sha256": "cb998fe5aa2b0d6f7595aac73efbd9c4506cb068598b1671051eb970bb94338d",
+          "bytes": 50742
+        },
+        {
+          "path": "nomtlog_run8.log",
+          "sha256": "ecfef78d034ef45f727f659aaa1f28d6406eb2790fcdb175225c84a0298ba91b",
+          "bytes": 5915
+        },
+        {
+          "path": "nomtlog_run8_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run8_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run8_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run8_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run9.json",
+          "sha256": "9600fc6769586c3f2ca2011e1c63a5a316a388f52bac896f4d3aeb3e597e6213",
+          "bytes": 47675
+        },
+        {
+          "path": "nomtlog_run9.log",
+          "sha256": "af22a8d91ad84a0352d40cc52840fe15165927250621787c49f75021eb4648b8",
+          "bytes": 5921
+        },
+        {
+          "path": "nomtlog_run9_val0_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run9_val1_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run9_val2_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "nomtlog_run9_val3_nomt_errors.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      ],
+      "extract": [
+        {
+          "name": "nl_mean",
+          "file": "derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean"
+        },
+        {
+          "name": "nl_sd",
+          "file": "derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "sd"
+        },
+        {
+          "name": "nl_runs",
+          "file": "derived_summary.csv",
+          "csv_col": "run",
+          "stat": "count"
+        }
+      ]
+    }
+  ],
+  "report": "note/nomt_errlog_hunt_report_20261015.md"
+}
