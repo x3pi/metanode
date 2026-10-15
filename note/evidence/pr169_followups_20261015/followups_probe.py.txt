@@ -1,0 +1,23 @@
+import json, os, subprocess, sys, time
+sys.path.insert(0, "/home/abc/chain-n/metanode/execution/scripts/test/evidence")
+import run_tps_counted as m
+S = "/tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad"
+out = open(f"{S}/followups_probe_results.txt", "w")
+def log(s):
+    print(s, flush=True); out.write(s + "\n"); out.flush()
+for name, bins in (("V0 pre-PR169 code (84de9ab3)", f"{S}/bins_nomtlog"), ("V1 PR169 merged (e4ccf248 == dev 41aac343 code)", f"{S}/bins_pr169"), ("V2 follow-ups (this change)", f"{S}/bins_followups")):
+    m.stop_and_clean()
+    assert m.sh(["cp", "-a", m.TEMPLATE, m.BASE]).returncode == 0
+    m.rewrite_paths(m.BASE, "/tmp/gate_4val_p06", m.BASE)
+    d = json.load(open(f"{m.BASE}/env.json")); d["bin"] = bins; json.dump(d, open(f"{m.BASE}/env.json", "w"), indent=2)
+    env = os.environ.copy(); env["ENABLE_DEBUG_PPROF"] = "false"
+    r = m.sh([m.RUN_ENV, m.BASE, "start"], env=env)
+    assert r.returncode == 0, r.stderr[-300:]
+    nr, n = m.wait_tcp_ready(); assert not nr, nr
+    time.sleep(5)
+    log(f"=== {name} ===")
+    p = subprocess.run([f"{S}/probe_readtx2", "-http", "http://127.0.0.1:31646", "-tcp", "127.0.0.1:31200", "-par", "50"], capture_output=True, text=True, errors="replace")
+    log(p.stdout + p.stderr)
+    lg = subprocess.run(["bash", "-c", f"cat {m.BASE}/val0/logs/*/*.log {m.BASE}/logs/val0.log 2>/dev/null | grep -a -c -i -E 'panic|fatal error'"], capture_output=True, text=True, errors="replace").stdout.strip()
+    m.stop_and_clean()
+log("PROBE-DONE")

@@ -1,0 +1,245 @@
+// Temporary probe (not committed): deploys two tiny contracts over HTTP, then drives TCP ReadTransaction / EstimateGas.
+//
+//	retContract : returns 42 (32 bytes), no state change
+//	storeContract: SSTORE(0,1); STOP  -> state-changing; with a read-only VM the SSTORE must fail, with simulation it must succeed
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"crypto/ecdsa"
+	"encoding/binary"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"math/big"
+	"net"
+	"net/http"
+	"os"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/google/uuid"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"google.golang.org/protobuf/proto"
+)
+
+func rpc(url, method string, params ...interface{}) (json.RawMessage, error) {
+	body, _ := json.Marshal(map[string]interface{}{"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var r struct {
+		Result json.RawMessage
+		Error  *struct{ Message string }
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(b, &r); err != nil {
+		return nil, err
+	}
+	if r.Error != nil {
+		return nil, fmt.Errorf("%s", r.Error.Message)
+	}
+	return r.Result, nil
+}
+
+func deploy(url string, key *ecdsa.PrivateKey, initCode []byte, nonce uint64) (common.Address, error) {
+	tx, err := types.SignNewTx(key, types.LatestSignerForChainID(big.NewInt(991)), &types.DynamicFeeTx{ChainID: big.NewInt(991), Nonce: nonce, GasTipCap: big.NewInt(0), GasFeeCap: big.NewInt(100000), Gas: 500000, Value: big.NewInt(0), Data: initCode})
+	if err != nil {
+		return common.Address{}, err
+	}
+	raw, _ := tx.MarshalBinary()
+	res, err := rpc(url, "eth_sendRawTransaction", fmt.Sprintf("0x%x", raw))
+	if err != nil {
+		return common.Address{}, fmt.Errorf("send: %w", err)
+	}
+	var h string
+	json.Unmarshal(res, &h)
+	for i := 0; i < 120; i++ {
+		time.Sleep(500 * time.Millisecond)
+		rr, err := rpc(url, "eth_getTransactionReceipt", h)
+		if err == nil && string(rr) != "null" {
+			var rc struct {
+				ContractAddress string `json:"contractAddress"`
+				Status          string `json:"status"`
+			}
+			json.Unmarshal(rr, &rc)
+			if rc.Status != "0x1" {
+				return common.Address{}, fmt.Errorf("deploy failed status=%s", rc.Status)
+			}
+			return common.HexToAddress(rc.ContractAddress), nil
+		}
+	}
+	return common.Address{}, fmt.Errorf("deploy receipt timeout")
+}
+
+func frame(cmd, id string, body []byte) []byte {
+	b, _ := proto.Marshal(&pb.Message{Header: &pb.Header{Command: cmd, Version: "0.0.1.0", ID: id}, Body: body})
+	out := make([]byte, 8, 8+len(b))
+	binary.LittleEndian.PutUint64(out, uint64(len(b)))
+	return append(out, b...)
+}
+
+type result struct{ cmd, desc string }
+
+func tcpBatch(addr string, reqs map[string][]byte, cmdOf map[string]string) map[string]result {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		panic(err)
+	}
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	init, _ := proto.Marshal(&pb.InitConnection{Address: common.HexToAddress("0x01").Bytes(), Type: "client"})
+	conn.Write(frame("InitConnection", uuid.New().String(), init))
+	time.Sleep(300 * time.Millisecond)
+	for id, body := range reqs {
+		conn.Write(frame(cmdOf[id], id, body))
+	}
+	out := map[string]result{}
+	deadline := time.Now().Add(40 * time.Second)
+	for len(out) < len(reqs) && time.Now().Before(deadline) {
+		conn.SetReadDeadline(deadline)
+		var lb [8]byte
+		if _, err := io.ReadFull(r, lb[:]); err != nil {
+			break
+		}
+		buf := make([]byte, binary.LittleEndian.Uint64(lb[:]))
+		io.ReadFull(r, buf)
+		m := &pb.Message{}
+		proto.Unmarshal(buf, m)
+		id := m.GetHeader().GetID()
+		if _, ok := reqs[id]; !ok {
+			continue
+		}
+		switch m.GetHeader().GetCommand() {
+		case "Receipt":
+			rc := &receipt.Receipt{}
+			if err := rc.Unmarshal(m.GetBody()); err != nil {
+				out[id] = result{"Receipt", "unmarshal error"}
+			} else {
+				out[id] = result{"Receipt", fmt.Sprintf("status=%v gasUsed=%d ret=0x%x", rc.Status(), rc.GasUsed(), rc.Return())}
+			}
+		case "TransactionError":
+			e := &pb.TransactionHashWithError{}
+			proto.Unmarshal(m.GetBody(), e)
+			out[id] = result{"TransactionError", fmt.Sprintf("msg=%q", e.GetDescription())}
+		default:
+			out[id] = result{m.GetHeader().GetCommand(), ""}
+		}
+	}
+	return out
+}
+
+func main() {
+	httpURL := flag.String("http", "http://127.0.0.1:31646", "validator HTTP RPC")
+	tcpAddr := flag.String("tcp", "127.0.0.1:31200", "validator TCP address")
+	keyFile := flag.String("keys", "/home/abc/chain-n/metanode-suite/test_tps/gen_spam_keys/generated_keys.json", "keys")
+	par := flag.Int("par", 50, "parallel identical calls")
+	flag.Parse()
+	raw, _ := os.ReadFile(*keyFile)
+	var ks []struct {
+		PrivateKey string `json:"private_key"`
+		Address    string `json:"address"`
+	}
+	json.Unmarshal(raw, &ks)
+	key, err := crypto.HexToECDSA(strings.TrimPrefix(ks[7].PrivateKey, "0x"))
+	if err != nil {
+		panic(err)
+	}
+	from := crypto.PubkeyToAddress(key.PublicKey)
+	nres, err := rpc(*httpURL, "eth_getTransactionCount", from.Hex(), "latest")
+	if err != nil {
+		panic(err)
+	}
+	var nh string
+	json.Unmarshal(nres, &nh)
+	nonce, _ := new(big.Int).SetString(strings.TrimPrefix(nh, "0x"), 16)
+	retInit := common.FromHex("0x600a600c600039600a6000f3602a60005260206000f3")
+	storeInit := common.FromHex("0x6006600c60003960066000f3600160005500")
+	retAddr, err := deploy(*httpURL, key, retInit, nonce.Uint64())
+	if err != nil {
+		panic(err)
+	}
+	storeAddr, err := deploy(*httpURL, key, storeInit, nonce.Uint64()+1)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("deployed ret=%s store=%s from=%s\n", retAddr.Hex(), storeAddr.Hex(), from.Hex())
+
+	mk := func(to common.Address, chain uint64, input []byte) []byte {
+		cd := transaction.NewCallData(input)
+		bd, _ := cd.Marshal()
+		tx := transaction.NewTransaction(from, to, big.NewInt(0), 1000000, 100000, 0, bd, nil, common.Hash{}, common.Hash{}, 1, chain)
+		b, err := tx.Marshal()
+		if err != nil {
+			panic(err)
+		}
+		return b
+	}
+	storageBefore, _ := rpc(*httpURL, "eth_getStorageAt", storeAddr.Hex(), "0x0", "latest")
+
+	// 1) parallel identical eth_call (ReadTransaction) on retContract
+	reqs := map[string][]byte{}
+	cmdOf := map[string]string{}
+	body := mk(retAddr, 991, []byte{0x01, 0x02, 0x03, 0x04})
+	for i := 0; i < *par; i++ {
+		id := uuid.New().String()
+		reqs[id] = body
+		cmdOf[id] = "ReadTransaction"
+	}
+	res := tcpBatch(*tcpAddr, reqs, cmdOf)
+	cnt := map[string]int{}
+	for _, r := range res {
+		cnt[r.cmd+" "+r.desc]++
+	}
+	fmt.Printf("[parallel %d identical ReadTransaction -> %d responses]\n", *par, len(res))
+	keys := make([]string, 0, len(cnt))
+	for k := range cnt {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Printf("   %3d x %s\n", cnt[k], k)
+	}
+
+	// 2) EstimateGas on retContract and on the state-changing storeContract, 3) ReadTransaction on storeContract (read-only VM)
+	type one struct {
+		name, cmd string
+		body      []byte
+	}
+	ones := []one{
+		{"EstimateGas ret (no state change)", "EstimateGas", mk(retAddr, 991, []byte{1})},
+		{"EstimateGas store (SSTORE)", "EstimateGas", mk(storeAddr, 991, []byte{1})},
+		{"ReadTransaction store (SSTORE, read-only)", "ReadTransaction", mk(storeAddr, 991, []byte{1})},
+		{"ReadTransaction to EOA", "ReadTransaction", mk(common.HexToAddress("0x2222222222222222222222222222222222222222"), 991, []byte{1})},
+	}
+	reqs2 := map[string][]byte{}
+	cmd2 := map[string]string{}
+	ids := make([]string, len(ones))
+	for i, o := range ones {
+		ids[i] = uuid.New().String()
+		reqs2[ids[i]] = o.body
+		cmd2[ids[i]] = o.cmd
+	}
+	res2 := tcpBatch(*tcpAddr, reqs2, cmd2)
+	for i, o := range ones {
+		r, ok := res2[ids[i]]
+		if !ok {
+			fmt.Printf("%-44s -> NO RESPONSE\n", o.name)
+			continue
+		}
+		fmt.Printf("%-44s -> %s %s\n", o.name, r.cmd, r.desc)
+	}
+	time.Sleep(2 * time.Second)
+	storageAfter, _ := rpc(*httpURL, "eth_getStorageAt", storeAddr.Hex(), "0x0", "latest")
+	fmt.Printf("storage slot0 of storeContract before=%s after=%s\n", string(storageBefore), string(storageAfter))
+}

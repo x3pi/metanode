@@ -1,0 +1,31 @@
+=== V0 pre-PR169 code (84de9ab3) ===
+deployed ret=0xe367e12425E33354eb6b09017C1DD12d27D2450C store=0xA976E0d97AbC4CeC0e8aE91d500C6B36d029Bff5 from=0xA398844fCfcB44B62Ce7D928f44B21F5aA0Cc872
+[parallel 50 identical ReadTransaction -> 50 responses]
+    50 x Receipt status=RETURNED gasUsed=18 ret=0x000000000000000000000000000000000000000000000000000000000000002a
+EstimateGas ret (no state change)            -> Receipt status=RETURNED gasUsed=100018 ret=0x000000000000000000000000000000000000000000000000000000000000002a
+EstimateGas store (SSTORE)                   -> Receipt status=TRANSACTION_ERROR gasUsed=100011 ret=0x08c379a0…(revert reason)
+ReadTransaction store (SSTORE, read-only)    -> Receipt status=TRANSACTION_ERROR gasUsed=11 ret=0x08c379a0…(revert reason)
+ReadTransaction to EOA                       -> Receipt status=TRANSACTION_ERROR gasUsed=0 ret=0x08c379a0…(revert reason)
+storage slot0 of storeContract before="0x0000000000000000000000000000000000000000000000000000000000000000" after="0x0000000000000000000000000000000000000000000000000000000000000000"
+
+=== V1 PR169 merged (e4ccf248 == dev 41aac343 code) ===
+deployed ret=0xe367e12425E33354eb6b09017C1DD12d27D2450C store=0xA976E0d97AbC4CeC0e8aE91d500C6B36d029Bff5 from=0xA398844fCfcB44B62Ce7D928f44B21F5aA0Cc872
+[parallel 50 identical ReadTransaction -> 50 responses]
+    50 x Receipt status=RETURNED gasUsed=18 ret=0x000000000000000000000000000000000000000000000000000000000000002a
+EstimateGas ret (no state change)            -> Receipt status=RETURNED gasUsed=100018 ret=0x000000000000000000000000000000000000000000000000000000000000002a
+EstimateGas store (SSTORE)                   -> Receipt status=RETURNED gasUsed=120111 ret=0x
+ReadTransaction store (SSTORE, read-only)    -> Receipt status=TRANSACTION_ERROR gasUsed=11 ret=0x08c379a0…(revert reason)
+ReadTransaction to EOA                       -> Receipt status=TRANSACTION_ERROR gasUsed=0 ret=0x08c379a0…(revert reason)
+storage slot0 of storeContract before="0x0000000000000000000000000000000000000000000000000000000000000000" after="0x0000000000000000000000000000000000000000000000000000000000000000"
+
+=== V2 follow-ups (this change) ===
+deployed ret=0xe367e12425E33354eb6b09017C1DD12d27D2450C store=0xA976E0d97AbC4CeC0e8aE91d500C6B36d029Bff5 from=0xA398844fCfcB44B62Ce7D928f44B21F5aA0Cc872
+[parallel 50 identical ReadTransaction -> 50 responses]
+    50 x Receipt status=RETURNED gasUsed=18 ret=0x000000000000000000000000000000000000000000000000000000000000002a
+EstimateGas ret (no state change)            -> Receipt status=RETURNED gasUsed=100018 ret=0x000000000000000000000000000000000000000000000000000000000000002a
+EstimateGas store (SSTORE)                   -> Receipt status=RETURNED gasUsed=120111 ret=0x
+ReadTransaction store (SSTORE, read-only)    -> Receipt status=TRANSACTION_ERROR gasUsed=11 ret=0x08c379a0…(revert reason)
+ReadTransaction to EOA                       -> Receipt status=TRANSACTION_ERROR gasUsed=0 ret=0x08c379a0…(revert reason)
+storage slot0 of storeContract before="0x0000000000000000000000000000000000000000000000000000000000000000" after="0x0000000000000000000000000000000000000000000000000000000000000000"
+
+PROBE-DONE
