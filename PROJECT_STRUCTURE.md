@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-10-14 (secp_tps_blast `-max-txs`; evidence runners `run_raft_counted.py`, `--profile-at`, `--node-env`; `HandleConnection` now drains queued tx batches on any reader error; previous: 2026-10-13 secp_tps_blast chain-counted measurement `measure.go` + `run_tps_counted.py`, `make_manifest.py`, `claims_lint.py`, `watchdog_supervisor_experiment.sh`; previous: 2026-10-09 Lossless TCP tx ingress: network admission gate `pkg/network/admission.go`, overload gate + mempool-room backpressure in `processor/`, forwarder success-path bookkeeping restored, `Connection.SendMessage` no longer panics on a closed sendChan, tx submissions never dropped by readLoop, HandleConnection delivers queued requests on peer EOF, configurable per-connection inbound buffer `ConnRequestChanSize`).
+> **Last updated:** 2026-10-15 (ReceiptTracker `InFlightTxCount` ingress backpressure + `ingress_backpressure_test.go`; `pkg/goxapian` single-call `database_index_document` C++ FFI + `pkg/explorer` static struct JSON serialization & in-memory block indexing handoff; `tx_processor` `globalEnvelopeBoundCache`; previous: 2026-10-14 secp_tps_blast `-max-txs`; evidence runners `run_raft_counted.py`, `--profile-at`, `--node-env`; `HandleConnection` now drains queued tx batches on any reader error).
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 ---
 
@@ -228,7 +228,9 @@ metanode/
 | `tx_validator_pool_core.go` | Tx validation pool |
 | `tx_virtual_executor_core.go` | Virtual/offchain tx execution |
 | `transaction_processor.go` | Core tx processing (SendRawTransaction/SendRawTransactions, EIP-2718 ingress) |
-| `processors.go` | Processor wiring + system load monitor; `overloadGate` turns the overload flag into backpressure for TCP tx submission (`network.SetTxAdmissionGate`) |
+| `processors.go` | Processor wiring + system load monitor (`computeSystemLoad` with `ReceiptTracker.InFlightTxCount()`); `overloadGate` turns the overload flag into backpressure for TCP tx submission (`network.SetTxAdmissionGate`) |
+| `receipt_tracker.go` | Tracks client connection mappings (`txHashConnectionMap`) and atomic in-flight tx gauge (`inFlightCount`) for receipt broadcast and ingress backpressure |
+| `ingress_backpressure_test.go` | Unit tests for `ReceiptTracker.InFlightTxCount`, `ReconcileInFlightTxCount`, `computeSystemLoad`, and `resolveIngressWatermarks` |
 | `overload_gate_test.go` | Overload gate tests (blocks while overloaded, released on recovery/cancel) |
 | `raw_eth_ingress_test.go` | EIP-2718 TCP ingress & mode gating tests |
 | `transaction_virtual_processor.go` | Virtual tx processing |
