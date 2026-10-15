@@ -82,11 +82,11 @@ const (
 	// MaxMempoolSize is the hard limit on the transaction pool size to prevent GC stalls and high RAM usage.
 	MaxMempoolSize = 200000
 
-	// HighWatermark is the transaction-pool size at which backpressure kicks in.
-	HighWatermark = 150000
+	// HighWatermark is the per-validator in-flight transaction count at which ingress backpressure kicks in.
+	HighWatermark = 300000
 
-	// LowWatermark is the transaction-pool size at which normal flow resumes.
-	LowWatermark = 100000
+	// LowWatermark is the per-validator in-flight transaction count at which normal flow resumes.
+	LowWatermark = 150000
 
 	// mempoolEvictBatchSize is how many lowest-fee transactions get removed
 	// per EvictLowestGasPrice call once the pool hits MaxMempoolSize. Each

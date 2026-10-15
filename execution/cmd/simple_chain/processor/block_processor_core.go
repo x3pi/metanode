@@ -156,10 +156,12 @@ type BlockProcessor struct {
 	lastCommitErrMu sync.RWMutex
 	lastCommitErr   error
 
-	indexingChannel chan uint64
-	indexingLocks   sync.Map
-	inputTxCounter  atomic.Int64
-	nextBlockNumber atomic.Uint64
+	indexingChannel        chan uint64
+	indexingLocks          sync.Map
+	pendingIndexBlocks     sync.Map
+	uncommittedIndexBlocks uint64
+	inputTxCounter         atomic.Int64
+	nextBlockNumber        atomic.Uint64
 
 	// In-flight blocks that are in the commit channel but not yet persisted.
 	// This ensures RPC eth_getBlockByNumber doesn't return null during the async gap.

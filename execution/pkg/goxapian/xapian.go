@@ -136,6 +136,43 @@ func (db *Database) ReplaceDocumentByTerm(uniqueTerm string, doc *Document) erro
 	return nil
 }
 
+func cStringPtr(s string) (*C.char, C.size_t) {
+	if len(s) == 0 {
+		return nil, 0
+	}
+	return (*C.char)(unsafe.Pointer(unsafe.StringData(s))), C.size_t(len(s))
+}
+
+// IndexDocument indexes a document with its data and newline-separated terms
+// in a single CGO transition without C.CString heap allocations.
+// When replaceExisting is false, it uses add_document (skipping the uniqueTerm
+// B-tree lookup on newly committed blocks); when true, it uses replace_document.
+func (db *Database) IndexDocument(uniqueTerm string, data string, termsPacked string, replaceExisting bool) error {
+	if db.isClosed() {
+		return fmt.Errorf("goxapian: database is closed")
+	}
+	termPtr, termLen := cStringPtr(uniqueTerm)
+	dataPtr, dataLen := cStringPtr(data)
+	termsPtr, termsLen := cStringPtr(termsPacked)
+	ok := C.database_index_document(
+		db.ptr,
+		termPtr,
+		termLen,
+		dataPtr,
+		dataLen,
+		termsPtr,
+		termsLen,
+		C.bool(replaceExisting),
+	)
+	runtime.KeepAlive(uniqueTerm)
+	runtime.KeepAlive(data)
+	runtime.KeepAlive(termsPacked)
+	if !bool(ok) {
+		return fmt.Errorf("goxapian: index_document failed for term %q (see stderr for the Xapian error)", uniqueTerm)
+	}
+	return nil
+}
+
 // Commit now returns an error (2026-09, mục 22) -- this is the single most
 // important fix in this package: Commit() used to be a `void` call, so a
 // caller that just wrote documents and called Commit() had ZERO way to

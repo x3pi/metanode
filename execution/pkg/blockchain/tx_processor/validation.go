@@ -177,7 +177,7 @@ func VerifyTransaction(
 	}
 
 	// P0-9: Enforce strict envelope binding at mempool admission
-	if tx != nil && len(tx.RawEnvelope()) > 0 {
+	if tx != nil && len(tx.RawEnvelope()) > 0 && !IsVerifiedEnvelopeBound(tx) {
 		if err := transaction.ValidateEnvelopeBinding(tx); err != nil {
 			logger.Error("❌ [VERIFY] envelope binding failed: txHash=%s, err=%v", tx.Hash().Hex(), err)
 			return transaction.ErrEnvelopeBindingMismatch

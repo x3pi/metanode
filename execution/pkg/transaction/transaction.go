@@ -160,6 +160,9 @@ func NewTransactionFromEth(ethTx *e_types.Transaction) (types.Transaction, error
 	res := TransactionFromProto(pTx)
 	if concrete, ok := res.(*Transaction); ok && ethTx.BlobTxSidecar() == nil {
 		concrete.cachedEthTx.Store(ethTx)
+		if len(pTx.RawEnvelope) > 0 {
+			concrete.cachedEnvTx.Store(&envelopeDecode{raw: pTx.RawEnvelope, tx: ethTx})
+		}
 	}
 	return res, nil
 }
@@ -1260,6 +1263,7 @@ func (t *Transaction) ValidEthSign() bool {
 			logger.Warn("ValidEthSign envelope binding failed: %v", err)
 			return false
 		}
+		return true
 	}
 	ethTx := t.ToEthTransaction()
 	if ethTx == nil {

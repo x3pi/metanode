@@ -182,7 +182,7 @@ func validateDirectEnvelopeBinding(pTx *pb.Transaction, ethTx *e_types.Transacti
 
 	case e_types.AccessListTxType:
 		txChainID := ethTx.ChainId()
-		if txChainID == nil {
+		if txChainID == nil || txChainID.Sign() <= 0 {
 			convErr = errors.New("giao dịch EIP-2930 từ Ethereum thiếu ChainID")
 		} else if ethTx.GasPrice() == nil {
 			convErr = errors.New("giao dịch EIP-2930 từ Ethereum thiếu GasPrice")
@@ -192,7 +192,7 @@ func validateDirectEnvelopeBinding(pTx *pb.Transaction, ethTx *e_types.Transacti
 
 	case e_types.DynamicFeeTxType:
 		txChainID := ethTx.ChainId()
-		if txChainID == nil {
+		if txChainID == nil || txChainID.Sign() <= 0 {
 			convErr = errors.New("EIP-1559 transaction from Ethereum is missing ChainID")
 		} else {
 			signer = e_types.NewLondonSigner(txChainID)

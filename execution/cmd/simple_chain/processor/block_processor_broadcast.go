@@ -184,8 +184,8 @@ func (bp *BlockProcessor) BroadCastReceipts(receipts []types.Receipt) {
 		var txHashEntry TxHashConnEntry
 		hasTxHashConn := false
 
-		if connVal, ok := bp.txHashConnectionMap.LoadAndDelete(txHash); ok {
-			if entry, castOk := connVal.(TxHashConnEntry); castOk && entry.Conn != nil && entry.Conn.IsConnect() {
+		if entry, ok := bp.TakeTxHashConnEntry(txHash); ok {
+			if entry.Conn != nil && entry.Conn.IsConnect() {
 				txHashConn = entry.Conn
 				txHashEntry = entry
 				hasTxHashConn = true
@@ -436,13 +436,15 @@ func (bp *BlockProcessor) cleanupTxHashConnectionMap() {
 		bp.txHashConnectionMap.Range(func(key, value interface{}) bool {
 			entry, ok := value.(TxHashConnEntry)
 			if !ok {
-				bp.txHashConnectionMap.Delete(key)
-				removedCount++
+				if bp.DeleteTxHashConnEntry(key) {
+					removedCount++
+				}
 				return true
 			}
 			if entry.CreatedAt.Before(cutoff) {
-				bp.txHashConnectionMap.Delete(key)
-				removedCount++
+				if bp.DeleteTxHashConnEntry(key) {
+					removedCount++
+				}
 			}
 			return true
 		})

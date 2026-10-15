@@ -51,6 +51,25 @@ func storeVerifiedBound(key eth_common.Hash) {
 	bumpVerifiedSignatureCacheCount()
 }
 
+// IsVerifiedEnvelopeBound reports whether tx has a non-empty RawEnvelope, is not read-only,
+// and already has a binding-proven cache entry for its exact (Hash, ProtoHash, Sign) tuple.
+func IsVerifiedEnvelopeBound(tx types.Transaction) bool {
+	if tx == nil || len(tx.RawEnvelope()) == 0 || tx.GetReadOnly() {
+		return false
+	}
+	return LoadVerifiedSignature(boundSigKey(sigCacheKey(tx, nil)))
+}
+
+// RecordVerifiedEnvelopeBound records a binding-proven cache entry for a standard Ethereum
+// envelope transaction (Type != 0xFF, non-empty RawEnvelope, !GetReadOnly) after
+// ValidateEnvelopeBinding has verified both its ECDSA sender recovery and all proto fields.
+func RecordVerifiedEnvelopeBound(tx types.Transaction) {
+	if tx == nil || len(tx.RawEnvelope()) == 0 || tx.Type() == 0xFF || tx.GetReadOnly() {
+		return
+	}
+	storeVerifiedBound(sigCacheKey(tx, nil))
+}
+
 // sigPolicy is the per-chain signature rule set, derived from the node config (identical on every validator of a
 // chain). It keeps every signature verdict a pure function of (tx, sender state, policy).
 type sigPolicy struct {
@@ -196,9 +215,13 @@ func evalTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy)
 		ok = transaction.NewVerifyTransactionRequest(tx.Hash(), common.PubkeyFromBytes(blsKey), tx.Sign()).Valid()
 	}
 	if !ok {
-		ok = tx.ValidSecpSign()
+		if hasEnvelope && tx.Type() != 0xFF {
+			ok = true
+		} else {
+			ok = tx.ValidSecpSign()
+		}
 	}
-	if ok && accountType == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) && !tx.ValidSecpSign() {
+	if ok && accountType == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) && !(hasEnvelope && tx.Type() != 0xFF) && !tx.ValidSecpSign() {
 		ok = false
 	}
 	if ok {

@@ -132,6 +132,72 @@ extern "C"
         }
     }
 
+    // Batch single-call indexing: constructs a stack-allocated Xapian::Document,
+    // sets document data, parses newline-separated terms from terms_packed, and
+    // either adds (replace_existing == false) or replaces by unique_term
+    // (replace_existing == true). Eliminates 15+ CGO transitions and C.CString
+    // heap allocations per indexed transaction.
+    bool database_index_document(
+        xapian_database_t db,
+        const char *unique_term,
+        size_t unique_term_len,
+        const char *data,
+        size_t data_len,
+        const char *terms_packed,
+        size_t terms_packed_len,
+        bool replace_existing)
+    {
+        if (!db)
+            return false;
+        if (replace_existing && (!unique_term || unique_term_len == 0))
+            return false;
+        try
+        {
+            Xapian::WritableDatabase *wdb = reinterpret_cast<Xapian::WritableDatabase *>(db);
+            Xapian::Document doc;
+            if (data && data_len > 0)
+            {
+                doc.set_data(std::string(data, data_len));
+            }
+            if (terms_packed && terms_packed_len > 0)
+            {
+                const char *p = terms_packed;
+                const char *end = terms_packed + terms_packed_len;
+                while (p < end)
+                {
+                    const char *nl = static_cast<const char *>(memchr(p, '\n', static_cast<size_t>(end - p)));
+                    size_t len = nl ? static_cast<size_t>(nl - p) : static_cast<size_t>(end - p);
+                    if (len > 0)
+                    {
+                        doc.add_term(std::string(p, len));
+                    }
+                    if (!nl)
+                        break;
+                    p = nl + 1;
+                }
+            }
+            if (replace_existing)
+            {
+                wdb->replace_document(std::string(unique_term, unique_term_len), doc);
+            }
+            else
+            {
+                wdb->add_document(doc);
+            }
+            return true;
+        }
+        catch (const Xapian::Error &e)
+        {
+            std::cerr << "[goxapian] database_index_document failed: " << e.get_msg() << std::endl;
+            return false;
+        }
+        catch (...)
+        {
+            std::cerr << "[goxapian] database_index_document: unknown exception" << std::endl;
+            return false;
+        }
+    }
+
     // RETURN VALUE CHANGED (was void, always silently "succeeded" from the
     // caller's point of view even when the underlying commit threw). This is
     // the single most important fix in this file: every previous caller of

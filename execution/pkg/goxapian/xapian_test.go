@@ -107,3 +107,40 @@ func TestConcurrentCloseIsSafe(t *testing.T) {
 	// held. A further Close() must also stay a safe no-op.
 	db.Close()
 }
+
+func TestIndexDocumentAddAndReplace(t *testing.T) {
+	dir, err := os.MkdirTemp("", "goxapian-indexdoc-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	db, err := NewWritableDatabase(dir)
+	if err != nil {
+		t.Fatalf("NewWritableDatabase: %v", err)
+	}
+	defer db.Close()
+
+	terms := "H0xabc\nF0x111\nT0x222\nB1\nRH0xdef"
+	if err := db.IndexDocument("H0xabc", `{"hash":"0xabc","blockNumber":1}`, terms, false); err != nil {
+		t.Fatalf("IndexDocument (add): %v", err)
+	}
+	if err := db.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if got := db.GetDocCount(); got != 1 {
+		t.Fatalf("expected 1 document after add, got %d", got)
+	}
+
+	// Replace the same document by unique term
+	if err := db.IndexDocument("H0xabc", `{"hash":"0xabc","blockNumber":2}`, terms, true); err != nil {
+		t.Fatalf("IndexDocument (replace): %v", err)
+	}
+	if err := db.Commit(); err != nil {
+		t.Fatalf("Commit after replace: %v", err)
+	}
+	if got := db.GetDocCount(); got != 1 {
+		t.Fatalf("expected 1 document after replace, got %d", got)
+	}
+}
+
