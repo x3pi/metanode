@@ -1,0 +1,43 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "pr171_probe",
+      "command": "serialize_probe_main.go.txt run via go run in worktrees: origin/dev (5343cfb9), PR #171 head (46c66b03) as is, PR #171 with the one-line fix applied locally; pr171.diff = git diff origin/dev...pr171",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "5343cfb90908091570a889d4f088c334019bc39d",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-15T07:38:09Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "pr171.diff",
+          "sha256": "b6a13ae39d76ca204ed46d35cdcd56513bddce59fd74943449effb96585bb3d8",
+          "bytes": 279200
+        },
+        {
+          "path": "serialization_dev.txt",
+          "sha256": "9904dcc1d92c632fe90613f9f54bd8e9cbb6bf3df9b193906cb9fe45617100fc",
+          "bytes": 522
+        },
+        {
+          "path": "serialization_pr171_as_is.txt",
+          "sha256": "a23bf3a75b5ccf7cfce273853130b4ba8c729cb3d40fe063d2a873f2b5949111",
+          "bytes": 722
+        },
+        {
+          "path": "serialization_pr171_with_one_line_fix.txt",
+          "sha256": "9904dcc1d92c632fe90613f9f54bd8e9cbb6bf3df9b193906cb9fe45617100fc",
+          "bytes": 522
+        },
+        {
+          "path": "serialize_probe_main.go.txt",
+          "sha256": "af8b8afb981372c5667fdf576b8742b4a67d4cca0a04a3cd3381a0fa516456de",
+          "bytes": 541
+        }
+      ]
+    }
+  ],
+  "report": "note/review_pr171_20261015.md"
+}
