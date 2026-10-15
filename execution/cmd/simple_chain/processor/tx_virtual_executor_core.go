@@ -1,9 +1,8 @@
 package processor
 
 import (
-	"sync"
-
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -17,6 +16,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
 
@@ -70,7 +70,28 @@ func (v *TxVirtualExecutor) SetEnvironment(env ITransactionProcessorEnvironment)
 	v.env = env
 }
 
-// ProcessReadTransaction is the fast-path handler. It unmarshals the TX
+func (v *TxVirtualExecutor) parseReadTx(body []byte) (types.Transaction, error) {
+	if len(body) == 0 {
+		return nil, fmt.Errorf("empty transaction body")
+	}
+
+	chainID := uint64(0)
+	if v.chainState != nil && v.chainState.GetConfig() != nil && v.chainState.GetConfig().ChainId != nil {
+		chainID = v.chainState.GetConfig().ChainId.Uint64()
+	}
+
+	tx := &transaction.Transaction{}
+	err := tx.Unmarshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal transaction: %w", err)
+	}
+	if chainID != 0 && tx.GetChainID() != chainID {
+		return nil, fmt.Errorf("chainId does not match node's (have=%v, want=%v)", tx.GetChainID(), chainID)
+	}
+	return tx, nil
+}
+
+// ProcessReadTransaction is the fast-path handler. It parses the protobuf transaction
 // and enqueues it for async execution by a worker pool (Component A).
 // This decouples the network receive goroutine from the slow EVM execution.
 func (v *TxVirtualExecutor) ProcessReadTransaction(
@@ -78,18 +99,10 @@ func (v *TxVirtualExecutor) ProcessReadTransaction(
 ) error {
 	logger.Info("ProcessReadTransaction: enqueuing for async execution")
 
-	tx := &transaction.Transaction{}
-	err := tx.Unmarshal(request.Message().Body())
+	tx, err := v.parseReadTx(request.Message().Body())
 	if err != nil {
 		v.sendTransactionError(request.Connection(), common.Hash{}, -1, err.Error(), nil, request.Message().ID())
-		logger.Error("Error unmarshalling read transaction: %v", err)
-		return err
-	}
-
-	if !tx.IsCallContract() {
-		err = fmt.Errorf("not a smart contract call")
-		logger.Error("Transaction is not a smart contract call: %v", err)
-		v.sendTransactionError(request.Connection(), tx.RHash(), -1, err.Error(), nil, request.Message().ID())
+		logger.Error("Error parsing read transaction: %v", err)
 		return err
 	}
 
@@ -117,11 +130,10 @@ func (v *TxVirtualExecutor) ProcessEstimateGas(
 ) error {
 	logger.Info("ProcessEstimateGas: enqueuing for async execution")
 
-	tx := &transaction.Transaction{}
-	err := tx.Unmarshal(request.Message().Body())
+	tx, err := v.parseReadTx(request.Message().Body())
 	if err != nil {
 		v.sendTransactionError(request.Connection(), common.Hash{}, -1, err.Error(), nil, request.Message().ID())
-		logger.Error("Error unmarshalling EstimateGas transaction: %v", err)
+		logger.Error("Error parsing EstimateGas transaction: %v", err)
 		return err
 	}
 
@@ -174,8 +186,7 @@ func (v *TxVirtualExecutor) executeAndRespondReadTx(req readTxRequest) {
 	}
 
 	tx := req.tx
-	tx.SetReadOnly(true)
-	tx.SetNonce(storage.GetIncrementingCounter())
+	tx.SetReadOnly(!req.isEstimateGas)
 	tx.ClearCacheHash()
 	txHash := tx.Hash()
 
@@ -188,17 +199,33 @@ func (v *TxVirtualExecutor) executeAndRespondReadTx(req readTxRequest) {
 		v.sendTransactionError(req.conn, tx.RHash(), -1, err.Error(), nil, req.msgID)
 		return
 	}
-	if exRs == nil {
-		logger.Error("ExecuteSCResult is nil for read/estimate TX")
-		v.sendTransactionError(req.conn, tx.RHash(), -1, "evm return nil", nil, req.msgID)
-		return
-	}
+	var (
+		receiptStatus pb.RECEIPT_STATUS
+		ret           []byte
+		exception     pb.EXCEPTION
+		gasUsed       uint64
+		logs          []types.EventLog
+	)
 
-	var gasUsed uint64
-	if req.isEstimateGas {
-		gasUsed = exRs.GasUsed() + mt_common.MINIMUM_BASE_FEE
+	if exRs == nil {
+		if !req.isEstimateGas {
+			logger.Error("ExecuteSCResult is nil for read TX")
+			v.sendTransactionError(req.conn, tx.RHash(), -1, "evm return nil", nil, req.msgID)
+			return
+		}
+		// Plain native transfer (no smart contract execution) -> tốn MINIMUM_BASE_FEE
+		receiptStatus = pb.RECEIPT_STATUS_RETURNED
+		exception = pb.EXCEPTION_NONE
+		gasUsed = uint64(mt_common.MINIMUM_BASE_FEE)
 	} else {
+		receiptStatus = exRs.ReceiptStatus()
+		ret = exRs.Return()
+		exception = exRs.Exception()
+		logs = exRs.EventLogs()
 		gasUsed = exRs.GasUsed()
+		if req.isEstimateGas {
+			gasUsed += mt_common.MINIMUM_BASE_FEE
+		}
 	}
 
 	rcp := receipt.NewReceipt(
@@ -206,12 +233,12 @@ func (v *TxVirtualExecutor) executeAndRespondReadTx(req readTxRequest) {
 		tx.FromAddress(),
 		tx.ToAddress(),
 		tx.Amount(),
-		exRs.ReceiptStatus(),
-		exRs.Return(),
-		exRs.Exception(),
+		receiptStatus,
+		ret,
+		exception,
 		tx.EffectiveGasPrice().Uint64(),
 		gasUsed,
-		exRs.EventLogs(),
+		logs,
 		uint64(0),
 		common.Hash{},
 		0,
