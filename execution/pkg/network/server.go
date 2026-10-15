@@ -292,13 +292,14 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 				return errors.New("connection error channel closed")
 			}
 			if !(errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed)) {
-				logger.Error("HandleConnection: Unrecoverable error on connection %s: %v. Closing connection.", conn.RemoteAddrSafe(), err)
-				return err
+				logger.Error("HandleConnection: Unrecoverable error on connection %s: %v. Closing connection after delivering what is already queued.", conn.RemoteAddrSafe(), err)
 			}
-			// The peer closed the connection (normal for a client that wrote its batches and left). Everything it
-			// sent is already in requestChan, and readLoop reports EOF only after queuing it. Deliver those requests
-			// before tearing the connection down; returning right away silently discards every batch still queued,
-			// and with backpressure that queue can hold a large part of what the client sent.
+			// The reader stopped (the peer closed the connection, or the idle read deadline fired, or the stream broke).
+			// Everything it already decoded is in requestChan, because readLoop reports its terminal error only after
+			// queuing it. Deliver those requests before tearing the connection down, whatever the error was: returning
+			// right away silently discards every batch still queued. That queue can be large (the server may still be
+			// working through a backlog long after the client's last byte, so an idle timeout counted from the client's
+			// last byte fires while up to ConnRequestChanSize batches are still waiting here).
 			for {
 				select {
 				case request, ok := <-requestChan:

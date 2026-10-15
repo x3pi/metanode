@@ -1,0 +1,14 @@
+import random, subprocess, os, sys
+S="/tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad"
+pairs=int(sys.argv[1]); rnd=random.Random(20261015)
+order=[]
+for i in range(pairs):
+    p=["old","new"]; rnd.shuffle(p); order+= [(i+1,v) for v in p]
+out=f"{S}/out_ab2"; os.makedirs(out,exist_ok=True)
+open(f"{out}/order.txt","w").write("\n".join(f"{i} {v}" for i,v in order)+"\n")
+for i,v in order:
+    print(f"### AB pair {i} variant {v}",flush=True)
+    r=subprocess.run(["python3","-I","scripts/test/evidence/run_tps_counted.py","--mode","sustained","--runs","1","--tag",f"ab2_{v}_p{i}","--bins",f"{S}/bins_{v}","--out",out,"--duration",("60" if v=="old" else "7"),"--batch","1000","--max-wait-sec","600"],cwd="/home/abc/chain-n/metanode/execution",capture_output=True,text=True,errors="replace")
+    open(f"{out}/ab2_{v}_p{i}.stdout","w").write(r.stdout+r.stderr)
+    print(f"### AB pair {i} variant {v} exit={r.returncode}",flush=True)
+print("AB-ALL-DONE",flush=True)

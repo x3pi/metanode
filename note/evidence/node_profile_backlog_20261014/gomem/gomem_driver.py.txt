@@ -1,0 +1,16 @@
+import random, subprocess, os, sys
+S="/tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad"
+out=f"{S}/out_gomem"; os.makedirs(out,exist_ok=True)
+reps=int(sys.argv[1]); rnd=random.Random(20261018)
+order=[]
+for r in range(reps):
+    p=["default","gomem12"]; rnd.shuffle(p); order+=[(r+1,v) for v in p]
+open(f"{out}/order.txt","w").write("\n".join(f"{r} {v}" for r,v in order)+"\n")
+for r,v in order:
+    tag=f"gomem_{v}_r{r}"
+    print(f"### GOGC {tag}",flush=True)
+    extra=["--node-env","META_GOMEMLIMIT=12"] if v=="gomem12" else []
+    p=subprocess.run(["python3","-I","scripts/test/evidence/run_tps_counted.py","--mode","sustained","--runs","1","--tag",tag,"--bins",f"{S}/bins_new","--out",out,"--duration","300","--max-txs","4000000","--batch","1000","--max-wait-sec","900"]+extra,cwd="/home/abc/chain-n/metanode/execution",capture_output=True,text=True,errors="replace")
+    open(f"{out}/{tag}.stdout","w").write(p.stdout+p.stderr)
+    print(f"### GOGC {tag} exit={p.returncode}",flush=True)
+print("GOGC-ALL-DONE",flush=True)

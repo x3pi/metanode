@@ -1,0 +1,8 @@
+1 gomem12
+1 default
+2 default
+2 gomem12
+3 gomem12
+3 default
+4 default
+4 gomem12

@@ -1,0 +1,955 @@
+alive_at_end=False
+[32m[INFO][Oct 13 15:57:00]  ✅ [PEBBLE] Created 512MB shared block cache[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [PEBBLE] Created shared table cache (shards=16, size=10000)[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/backup/consensus/backup_db/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct 13 15:57:00]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_tps_counted/val3/backup/consensus/backup_db/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_tps_counted/val3/backup/consensus/backup_db/db_shard_0[0m
+Node Type: MASTER
+Node networking: TCP (pkg/network)
+[32m[INFO][Oct 13 15:57:00]  Added/Updated storage for topic: backup using sync.Map[0m
+[32m[INFO][Oct 13 15:57:00]  Start initStorageDatabases[0m
+[32m[INFO][Oct 13 15:57:00]  Initializing local ShardelDB at: /consensus/account_state/ with 1 shards[0m
+[32m[INFO][Oct 13 15:57:00]  Started periodic cleanup task for stale receiving states.[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/data/consensus/account_state/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct 13 15:57:00]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_tps_counted/val3/data/consensus/account_state/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_tps_counted/val3/data/consensus/account_state/db_shard_0[0m
+[32m[INFO][Oct 13 15:57:00]  Initializing local ShardelDB at: /history/receipts/ with 1 shards[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/data/history/receipts/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct 13 15:57:00]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_tps_counted/val3/data/history/receipts/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_tps_counted/val3/data/history/receipts/db_shard_0[0m
+[32m[INFO][Oct 13 15:57:00]  Initializing local ShardelDB at: /history/transaction_state/ with 1 shards[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/data/history/transaction_state/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct 13 15:57:00]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_tps_counted/val3/data/history/transaction_state/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_tps_counted/val3/data/history/transaction_state/db_shard_0[0m
+[32m[INFO][Oct 13 15:57:00]  Initializing local ShardelDB at: /consensus/backup_device_key_storage/ with 1 shards[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/data/consensus/backup_device_key_storage/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct 13 15:57:00]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_tps_counted/val3/data/consensus/backup_device_key_storage/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_tps_counted/val3/data/consensus/backup_device_key_storage/db_shard_0[0m
+[32m[INFO][Oct 13 15:57:00]  Initializing local ShardelDB at: /consensus/smart_contract_storage/ with 1 shards[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/data/consensus/smart_contract_storage/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct 13 15:57:00]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_tps_counted/val3/data/consensus/smart_contract_storage/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_tps_counted/val3/data/consensus/smart_contract_storage/db_shard_0[0m
+[32m[INFO][Oct 13 15:57:00]  Initializing local ShardelDB at: /consensus/smart_contract_code/ with 1 shards[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/data/consensus/smart_contract_code/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct 13 15:57:00]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_tps_counted/val3/data/consensus/smart_contract_code/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_tps_counted/val3/data/consensus/smart_contract_code/db_shard_0[0m
+[32m[INFO][Oct 13 15:57:00]  Initializing local ShardelDB at: /consensus/trie_database/ with 1 shards[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/data/consensus/trie_database/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct 13 15:57:00]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_tps_counted/val3/data/consensus/trie_database/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_tps_counted/val3/data/consensus/trie_database/db_shard_0[0m
+[32m[INFO][Oct 13 15:57:00]  Initializing local ShardelDB at: /history/blocks/ with 1 shards[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/data/history/blocks/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct 13 15:57:00]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_tps_counted/val3/data/history/blocks/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_tps_counted/val3/data/history/blocks/db_shard_0[0m
+[32m[INFO][Oct 13 15:57:00]  Initializing local ShardelDB at: /history/mapping/ with 1 shards[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/data/history/mapping/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct 13 15:57:00]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_tps_counted/val3/data/history/mapping/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_tps_counted/val3/data/history/mapping/db_shard_0[0m
+[32m[INFO][Oct 13 15:57:00]  Initializing local ShardelDB at: /consensus/stake_db/ with 1 shards[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/data/consensus/stake_db/db_shard_0/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct 13 15:57:00]  ✅ [PEBBLE] Opened database: /tmp/gate_4val_tps_counted/val3/data/consensus/stake_db/db_shard_0 (parallelism=2)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [LAZY PEBBLE] Opened database with Async Memory Cache at: /tmp/gate_4val_tps_counted/val3/data/consensus/stake_db/db_shard_0[0m
+[32m[INFO][Oct 13 15:57:00]  End initStorageDatabases[0m
+[32m[INFO][Oct 13 15:57:00]  initBlockchain started[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [STARTUP] Clean shutdown detected — skipping expensive integrity checks[0m
+[32m[INFO][Oct 13 15:57:00]  Using existing block (not init genesis)[0m
+[nomt_ffi] Detected existing HT file for path '[32m[INFO][Oct 13 15:57:00]  lastblock header 2: 
+BlockHeader{
+  LastBlockHash: 0x0000000000000000000000000000000000000000000000000000000000000000,
+  BlockNumber: 0,
+  AccountStatesRoot: 0x0f9a505e8c4f3de731c84fb343a7adeb48517b2b5f1c26a54c637c41a3a9b606,
+  StakeStatesRoot: 0x43b5c1fbda3aae8479780c18ad9b921fe7c0adc6a66dbe30c680d3bfda3671dc,
+  ReceiptRoot: 0x0000000000000000000000000000000000000000000000000000000000000000,
+  TransactionsRoot: 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421,
+  LeaderAddress: 0x0000000000000000000000000000000000000000,
+  TimeStamp: 1791367997996,
+  AggregateSignature: [],
+  Epoch: 0,
+  GlobalExecIndex: 0
+}
+ (using existing block)[0m
+[32m[INFO][Oct 13 15:57:00]  ℹ️  [STARTUP] Last block header has GlobalExecIndex=0 (legacy or genesis). GEI will be set by Rust on first commit.[0m
+/tmp/gate_4val_tps_counted/val3/data/consensus/nomt_db/account_state[32m[INFO][Oct 13 15:57:00]  ℹ️  [STARTUP] Defaulted LastExecutedCommitHash to zero hash (not found in BackupDb)[0m
+' with [33m[WARN][Oct 13 15:57:00]  🚨 [STARTUP] blockNumber is 0 (Genesis). IGNORING BackupDb to prevent Cold Start Deadlock from stale data![0m
+[32m[INFO][Oct 13 15:57:00]  🔒 [STARTUP-SYNC] Go Master state loaded from LevelDB: block=0, account_root=0x0f9a505e8c4f3de731c84fb343a7adeb48517b2b5f1c26a54c637c41a3a9b606, stake_root=0x43b5c1fbda3aae8479780c18ad9b921fe7c0adc6a66dbe30c680d3bfda3671dc[0m
+10000000 pages (requested 10000000). Overriding.
+[32m[INFO][Oct 13 15:57:00]  🚀 [TRIE] NOMT instance initialized for namespace account_state at /tmp/gate_4val_tps_counted/val3/data/consensus/nomt_db/account_state (concurrency=4, pageCacheMB=128, leafCacheMB=128)[0m
+[nomt_ffi] Detected existing HT file for path '/tmp/gate_4val_tps_counted/val3/data/consensus/nomt_db/stake_db' with 64000 pages (requested 64000). Overriding.
+[32m[INFO][Oct 13 15:57:00]  [NomtStateTrie] ✅ Loaded 50151 known keys from registry FILE (namespace=account_state)[0m
+[32m[INFO][Oct 13 15:57:00]  🚀 [TRIE] NOMT instance initialized for namespace stake_db at /tmp/gate_4val_tps_counted/val3/data/consensus/nomt_db/stake_db (concurrency=4, pageCacheMB=64, leafCacheMB=64)[0m
+[32m[INFO][Oct 13 15:57:00]  [NomtStateTrie] ✅ Loaded 4 known keys from registry FILE (namespace=stake_db)[0m
+[32m[INFO][Oct 13 15:57:00]  🔍 [STARTUP] account_state NOMT root=0x0f9a505e8c4f3de731c84fb343a7adeb48517b2b5f1c26a54c637c41a3a9b606, header AccountStatesRoot=0x0f9a505e8c4f3de731c84fb343a7adeb48517b2b5f1c26a54c637c41a3a9b606 | stake_db NOMT root=0x43b5c1fbda3aae8479780c18ad9b921fe7c0adc6a66dbe30c680d3bfda3671dc, header StakeStatesRoot=0x43b5c1fbda3aae8479780c18ad9b921fe7c0adc6a66dbe30c680d3bfd
+[32m[INFO][Oct 13 15:57:00]  🎯 [TRIE] Dynamically determined EmptyNomtRoot for config 10000000_false: 0x0000000000000000000000000000000000000000000000000000000000000000[0m
+[32m[INFO][Oct 13 15:57:00]  🎯 [TRIE] Dynamically determined EmptyNomtRoot for config 64000_true: 0x0000000000000000000000000000000000000000000000000000000000000000[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/data/history/changelog_db_account/000004.log with log number 000004 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct 13 15:57:00]  📜 [CHANGELOG] Loaded startBlock=0 for namespace account_state[0m
+[32m[INFO][Oct 13 15:57:00]  📜 [CHANGELOG] Initialized StateChangelogDB at /tmp/gate_4val_tps_counted/val3/data/history/changelog_db_account for namespace account_state (startBlock=0, highestBlock=0)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [STATE CHANGELOG] Enabled for account_state[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/data/history/changelog_db_stake/000002.log with log number 000002 stopped reading at offset: 3095; replayed 5 keys in 1 batches
+[32m[INFO][Oct 13 15:57:00]  📜 [CHANGELOG] Loaded startBlock=0 for namespace stake_db[0m
+[32m[INFO][Oct 13 15:57:00]  📜 [CHANGELOG] Initialized StateChangelogDB at /tmp/gate_4val_tps_counted/val3/data/history/changelog_db_stake for namespace stake_db (startBlock=0, highestBlock=0)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [STATE CHANGELOG] Enabled for stake_db[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/data/history/blob_store/000002.log with log number 000002 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct 13 15:57:00]  🫧 [BLOB-STORE] Initialized at /tmp/gate_4val_tps_counted/val3/data/history/blob_store for namespace blob[0m
+[nomt_ffi] Detected existing HT file for path '/tmp/gate_4val_tps_counted/val3/data/consensus/nomt_db/smart_contract_storage' with 10000000 pages (requested 10000000). Overriding.
+[32m[INFO][Oct 13 15:57:00]  🚀 [TRIE] NOMT instance initialized for namespace smart_contract_storage at /tmp/gate_4val_tps_counted/val3/data/consensus/nomt_db/smart_contract_storage (concurrency=4, pageCacheMB=128, leafCacheMB=128)[0m
+2026/10/13 15:57:00 [JOB 1] WAL file /tmp/gate_4val_tps_counted/val3/data/history/changelog_db_sc/000002.log with log number 000002 stopped reading at offset: 0; replayed 0 keys in 0 batches
+[32m[INFO][Oct 13 15:57:00]  📜 [CHANGELOG] Initialized StateChangelogDB at /tmp/gate_4val_tps_counted/val3/data/history/changelog_db_sc for namespace smart_contract_storage (startBlock=0, highestBlock=0)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [STATE CHANGELOG] Enabled for smart_contract_storage[0m
+[32m[INFO][Oct 13 15:57:00]  📁 [EPOCH PERSISTENCE] Using node-specific backup path: /tmp/gate_4val_tps_counted/val3/backup[0m
+[32m[INFO][Oct 13 15:57:00]  🔄 [EPOCH PERSISTENCE] Attempting to load epoch data from database...[0m
+[32m[INFO][Oct 13 15:57:00]  📖 [EPOCH PERSISTENCE] Starting to load epoch data...[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [EPOCH VALIDATORS] Loaded cached validators for 1 epochs[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [EPOCH PERSISTENCE] Epoch data successfully loaded and restored%!(EXTRA string=source, string=database, string=current_epoch, uint64=0, string=epoch_timestamp_ms, uint64=1791367997996, string=num_historical_epochs, int=1, string=num_boundary_blocks, int=1)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [EPOCH PERSISTENCE] Successfully loaded epoch data - current_epoch={}, epoch_timestamp_ms={}%!(EXTRA uint64=0, uint64=1791367997996)[0m
+2026/10/13 15:57:00 BlockChain instance initialized with Background Cleanup Worker (High Perf Mode)
+[32m[INFO][Oct 13 15:57:00]  ✅ [SNAPSHOT FIX] Epoch aligned: ChainState.currentEpoch=0 matches lastBlock.epoch=0[0m
+[32m[INFO][Oct 13 15:57:00]  🛡️ [SCRUBBER] Background State Scrubbing started. Interval: 24h0m0s[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [STARTUP-REBUILD] All 1 checked block & tx mappings are intact (took 8.399µs)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [STARTUP-REBUILD] Marked full mapping rebuild complete in DB (0 mappings recovered)[0m
+[32m[INFO][Oct 13 15:57:00]  ═══════════════════════════════════════════════════════════[0m
+[32m[INFO][Oct 13 15:57:00]  🔍 [INTEGRITY] Starting data integrity check (depth=10)...[0m
+[32m[INFO][Oct 13 15:57:00]  ═══════════════════════════════════════════════════════════[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [INTEGRITY] CHECK 1/5: LastBlock loaded: #0 hash=0x78a152d2939a019c...[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [INTEGRITY] CHECK 2/5: Block chain verified for 1 blocks (from #0 back)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [INTEGRITY] CHECK 3/5: Block mapping for #0 verified[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [INTEGRITY] CHECK 4/5: NOMT account_state root matches header: 0x0f9a505e8c4f3de7...[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [INTEGRITY] CHECK 5/5: Global state counters: lastBlockNumber=0, lastBlock=#0, GEI=0[0m
+[32m[INFO][Oct 13 15:57:00]  ═══════════════════════════════════════════════════════════[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [INTEGRITY] All checks passed — data is consistent[0m
+[32m[INFO][Oct 13 15:57:00]  ═══════════════════════════════════════════════════════════[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [STARTUP] NOMT handle root matches trie cached root: 0x0f9a505e8c4f3de7...[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [STARTUP] NOMT stake_db handle root matches header: 0x43b5c1fbda3aae84...[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [STARTUP-DIAG] Final state: GEI=0, CommitIndex=0, Block=0, Epoch=0[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [STARTUP-MAPPING] Block #0 mapping already present and correct: 0x78a152d2939a019c1ba5fca213a9442a2f883b8a2705674886b011ef641eea74[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [INIT-DEBUG] SetBlockchainInitDone() CALLED! flag=1 (should be 1), lastBlockNumber=0[0m
+2026/10/13 15:57:00 RegistrationRelay: restored 0 persisted registration request(s) (0 tracked in memory)
+[32m[INFO][Oct 13 15:57:00]  BLS conservation mode: enforce (interval 5m0s)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ [COMMITTEE-KEY-OK] Validator attestation key 87ac85af3b1a verified in active committee[0m
+🔌 [TX CLIENT] Pool initialized (lazy): target=127.0.0.1:10100, poolSize=10 — connections will be created when target is available
+[32m[INFO][Oct 13 15:57:00]  🔏 [BLOCK SIGNER] Initialized with address=0x52f6A7a34d1FD2B91E86BE5ef150341304F74319, pubkey=87ac85af3b1a502e...e8165c4c[0m
+[32m[INFO][Oct 13 15:57:00]  🔏 [BLOCK SIGNER] Block signing enabled for Master node[0m
+[32m[INFO][Oct 13 15:57:00]  📸 [SNAPSHOT-INIT] snapshot_enabled=false, snapshot_server_port=0, snapshot_blocks_delay=0[0m
+[32m[INFO][Oct 13 15:57:00]  📸 [SNAPSHOT] Snapshot system DISABLED — but log rotation callback will be registered[0m
+[32m[INFO][Oct 13 15:57:00]  📸 [SNAPSHOT] Initial epoch from chainState: 0[0m
+[32m[INFO][Oct 13 15:57:00]  📸 [SNAPSHOT] Block commit callback registered[0m
+[32m[INFO][Oct 13 15:57:00]  📸 [SNAPSHOT-INIT] ✅ Block commit callback registered (log rotation + snapshot)[0m
+[32m[INFO][Oct 13 15:57:00]  🌐 [PEER DISCOVERY] Go Master TCP socket listener is intentionally disabled to avoid port conflict with Rust PeerRpcServer[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ State Committer Worker đã khởi động[0m
+[32m[INFO][Oct 13 15:57:00]  Đã tự động đăng ký handler cho lệnh 'ServerBusy'.[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ BackupDb Worker initiated (fixed pool of 4 workers)[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ Indexing process initiated[0m
+[32m[INFO][Oct 13 15:57:00]  Starting scan for missing blocks to add to queue...[0m
+[32m[INFO][Oct 13 15:57:00]  ✅ Worker monitoring Input TPS initiated[0m
+2026/10/13 15:57:00 🧹 [LOG-CLEANER] Bắt đầu dọn dẹp logs (giữ 3 epoch gần nhất)...
+[32m[INFO][Oct 13 15:57:00]  🔌 [FFI BRIDGE] Initializing Rust MetaNode Consensus via FFI[0m
+[32m[INFO][Oct 13 15:57:00]  📸 [SNAPSHOT] SnapshotManager wired into RequestHandler[0m
+[32m[INFO][Oct 13 15:57:00]  📡 [SYNC→SUB] NetworkComponents wired into RequestHandler (Master push enabled)[0m
+2026/10/13 15:57:00 🧹 [LOG-CLEANER] Hoàn thành dọn dẹp logs.
+[32m[INFO][Oct 13 15:57:00]  🧹 [LOG] Đã dọn dẹp logs cũ khi khởi động[0m
+[32m[INFO][Oct 13 15:57:00]  🧹 [LOG] Đã khởi động periodic cleanup (giữ 3 epoch gần nhất)[0m
+2026/10/13 15:57:00 🧹 [LOG-CLEANER] Đã khởi động periodic cleanup (mỗi 1h0m0s)
+---- execution.log tail ----
+==> /tmp/gate_4val_tps_counted/val3/logs/2026-10-08/execution.log <==
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1359 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x19)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1360 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x1a)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1361 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x1b)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1362 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x1c)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1363 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x1d)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1364 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x1e)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1365 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x1f)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1366 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x20)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1367 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x21)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1368 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x22)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1369 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x23)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1370 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x24)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1371 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x25)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1372 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x26)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1373 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x27)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1374 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x28)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1375 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x29)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1376 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x2a)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1377 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x2b)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1378 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x2c)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1379 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x2d)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1380 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x2e)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1381 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x2f)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1382 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x30)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1383 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x31)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1384 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x32)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1385 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x33)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1386 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x34)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1387 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x35)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1388 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x36)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1389 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x37)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1390 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x38)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1391 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x39)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1392 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x3a)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1393 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x3b)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1394 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x3c)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1395 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x3d)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1396 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x3e)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1397 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1(0x3f)
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102 +0xe6
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:99 +0x6b
+
+goroutine 1398 [select]:
+github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).logStats(0xc01b88a9a0, 0xc01bb003a4, 0xc01bb003a8, 0x40)
+	/home/abc/chain-n/metanode/execution/pkg/network/server_stats.go:13 +0x238
+created by github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool in goroutine 1279
+	/home/abc/chain-n/metanode/execution/pkg/network/server.go:141 +0x199
+
+goroutine 1414 [IO wait]:
+internal/poll.runtime_pollWait(0x7ac86c81d1e0, 0x72)
+	/usr/local/go/src/runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0xc0003a5980?, 0xc01b847000?, 0x0)
+	/usr/local/go/src/internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.(*pollDesc).waitRead(...)
+	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Read(0xc0003a5980, {0xc01b847000, 0x1000, 0x1000})
+	/usr/local/go/src/internal/poll/fd_unix.go:165 +0x27a
+net.(*netFD).Read(0xc0003a5980, {0xc01b847000?, 0x0?, 0x42c4980?})
+	/usr/local/go/src/net/fd_posix.go:55 +0x25
+net.(*conn).Read(0xc000169818, {0xc01b847000?, 0x0?, 0x0?})
+	/usr/local/go/src/net/net.go:189 +0x45
+net/http.(*persistConn).Read(0xc01b83d9e0, {0xc01b847000?, 0x8e0845?, 0x3d2dca0?})
+	/usr/local/go/src/net/http/transport.go:2052 +0x4a
+bufio.(*Reader).fill(0xc01b9edb60)
+	/usr/local/go/src/bufio/bufio.go:110 +0x103
+bufio.(*Reader).Peek(0xc01b9edb60, 0x1)
+	/usr/local/go/src/bufio/bufio.go:148 +0x53
+net/http.(*persistConn).readLoop(0xc01b83d9e0)
+	/usr/local/go/src/net/http/transport.go:2205 +0x185
+created by net/http.(*Transport).dialConn in goroutine 1217
+	/usr/local/go/src/net/http/transport.go:1874 +0x154f
+
+goroutine 1415 [select]:
+net/http.(*persistConn).writeLoop(0xc01b83d9e0)
+	/usr/local/go/src/net/http/transport.go:2519 +0xe7
+created by net/http.(*Transport).dialConn in goroutine 1217
+	/usr/local/go/src/net/http/transport.go:1875 +0x15a5
+
+[32m[INFO][Oct  8 04:44:27]  [SIGNAL] Đang dừng RPC Server (Ngừng nhận HTTP/WS requests mới)...[0m
+[INFO][Oct  8 04:44:27]  [SIGNAL] Đang dừng RPC Server (Ngừng nhận HTTP/WS requests mới)...
+[32m[INFO][Oct  8 04:44:27]  [SIGNAL] RPC Server đã dừng hoàn toàn[0m
+[INFO][Oct  8 04:44:27]  [SIGNAL] RPC Server đã dừng hoàn toàn
+[32m[INFO][Oct  8 04:44:27]  [SIGNAL] Đang dừng app...[0m
+[INFO][Oct  8 04:44:27]  [SIGNAL] Đang dừng app...
+[32m[INFO][Oct  8 04:44:27]  Stopping app...[0m
+[INFO][Oct  8 04:44:27]  Stopping app...
+[32m[INFO][Oct  8 04:44:27]  🛑 [SHUTDOWN] Draining BlockProcessor pipeline...[0m
+[INFO][Oct  8 04:44:27]  🛑 [SHUTDOWN] Draining BlockProcessor pipeline...
+[32m[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: ENTER — commitChannel=0/8[0m
+[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: ENTER — commitChannel=0/8
+[32m[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: sending commit fence...[0m
+[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: sending commit fence...
+[32m[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: commit fence sent, waiting for commitWorker to process...[0m
+[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: commit fence sent, waiting for commitWorker to process...
+[32m[INFO][Oct  8 04:44:27]  🔧 [COMMIT] commitWorker: received FENCE job (commitChannel=0/8)[0m
+[INFO][Oct  8 04:44:27]  🔧 [COMMIT] commitWorker: received FENCE job (commitChannel=0/8)
+[32m[INFO][Oct  8 04:44:27]  🔧 [COMMIT] commitWorker: FENCE signaled (DoneChan closed)[0m
+[INFO][Oct  8 04:44:27]  🔧 [COMMIT] commitWorker: FENCE signaled (DoneChan closed)
+[32m[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: commit fence DONE.[0m
+[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: commit fence DONE.
+[32m[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: waiting for NOMT async commits to finish...[0m
+[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: waiting for NOMT async commits to finish...
+[32m[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: NOMT async commits DONE.[0m
+[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: NOMT async commits DONE.
+[32m[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: Starting backupDbWg.Wait()...[0m
+[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: Starting backupDbWg.Wait()...
+[32m[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: backupDbWg.Wait() DONE — all persistence complete[0m
+[INFO][Oct  8 04:44:27]  ⏳ [PERSIST] WaitForPersistence: backupDbWg.Wait() DONE — all persistence complete
+[32m[INFO][Oct  8 04:44:27]  🧹 [PRUNING] Pruner stopped[0m
+[INFO][Oct  8 04:44:27]  🧹 [PRUNING] Pruner stopped
+[32m[INFO][Oct  8 04:44:27]  ✅ [SHUTDOWN] BlockProcessor pipeline drained. Safe to flush. (took 94.265µs)[0m
+[INFO][Oct  8 04:44:27]  ✅ [SHUTDOWN] BlockProcessor pipeline drained. Safe to flush. (took 94.265µs)
+[32m[INFO][Oct  8 04:44:27]  Stopping server...[0m
+[INFO][Oct  8 04:44:27]  Stopping server...
+[32m[INFO][Oct  8 04:44:27]  🛑 [FFI BRIDGE] FFI bridge loop stopped cleanly via stopChan[0m
+[INFO][Oct  8 04:44:27]  🛑 [FFI BRIDGE] FFI bridge loop stopped cleanly via stopChan
+[32m[INFO][Oct  8 04:44:27]  SocketServer listener stopped gracefully (context canceled)[0m
+[INFO][Oct  8 04:44:27]  SocketServer listener stopped gracefully (context canceled)
+[32m[INFO][Oct  8 04:44:27]  All workers have shut down.[0m
+[INFO][Oct  8 04:44:27]  All workers have shut down.
+[32m[INFO][Oct  8 04:44:27]  Server stopped.[0m
+[INFO][Oct  8 04:44:27]  Server stopped.
+[32m[INFO][Oct  8 04:44:27]  ✅ [SHUTDOWN] lastBlock #0 synced to disk (hash=0x78a152d2939a019c..., gei=0)[0m
+[INFO][Oct  8 04:44:27]  ✅ [SHUTDOWN] lastBlock #0 synced to disk (hash=0x78a152d2939a019c..., gei=0)
+[32m[INFO][Oct  8 04:44:27]  💾 [SHUTDOWN] Flushing all databases to disk...[0m
+[INFO][Oct  8 04:44:27]  💾 [SHUTDOWN] Flushing all databases to disk...
+[32m[INFO][Oct  8 04:44:27]  ✅ [SHUTDOWN] Blockchain mappings flushed to LevelDB[0m
+[INFO][Oct  8 04:44:27]  ✅ [SHUTDOWN] Blockchain mappings flushed to LevelDB
+[32m[INFO][Oct  8 04:44:27]  ✅ [SHUTDOWN] FlushAll completed in 859.219µs[0m
+[INFO][Oct  8 04:44:27]  ✅ [SHUTDOWN] FlushAll completed in 859.219µs
+[32m[INFO][Oct  8 04:44:27]  🛑 [CRASH SAFETY] Periodic storage flusher stopped[0m
+[INFO][Oct  8 04:44:27]  🛑 [CRASH SAFETY] Periodic storage flusher stopped
+[32m[INFO][Oct  8 04:44:27]  ✅ [SHUTDOWN] Clean shutdown sentinel written to /tmp/gate_4val_p06/val3/data/.clean_shutdown[0m
+[INFO][Oct  8 04:44:27]  ✅ [SHUTDOWN] Clean shutdown sentinel written to /tmp/gate_4val_p06/val3/data/.clean_shutdown
+[32m[INFO][Oct  8 04:44:27]  [TRIE] Closing NOMT handle for namespace: account_state[0m
+[INFO][Oct  8 04:44:27]  [TRIE] Closing NOMT handle for namespace: account_state
+[32m[INFO][Oct  8 04:44:27]  [TRIE] Closing NOMT handle for namespace: stake_db[0m
+[INFO][Oct  8 04:44:27]  [TRIE] Closing NOMT handle for namespace: stake_db
+[32m[INFO][Oct  8 04:44:27]  [TRIE] Closing NOMT handle for namespace: smart_contract_storage[0m
+[INFO][Oct  8 04:44:27]  [TRIE] Closing NOMT handle for namespace: smart_contract_storage
+[32m[INFO][Oct  8 04:44:27]  [TRIE] All NOMT handles closed[0m
+[INFO][Oct  8 04:44:27]  [TRIE] All NOMT handles closed
+[32m[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/backup/consensus/backup_db/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/backup/consensus/backup_db/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/backup/consensus/backup_db/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/backup/consensus/backup_db/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/history/receipts/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/history/receipts/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/history/receipts/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/history/receipts/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/consensus/smart_contract_code/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/consensus/smart_contract_code/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/consensus/smart_contract_code/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/consensus/smart_contract_code/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/consensus/trie_database/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/consensus/trie_database/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/consensus/trie_database/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/consensus/trie_database/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/history/blocks/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/history/blocks/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/history/blocks/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/history/blocks/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/history/mapping/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/history/mapping/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/history/mapping/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/history/mapping/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/consensus/account_state/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/consensus/account_state/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/consensus/account_state/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/consensus/account_state/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/history/transaction_state/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/history/transaction_state/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/history/transaction_state/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/history/transaction_state/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/consensus/backup_device_key_storage/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/consensus/backup_device_key_storage/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/consensus/backup_device_key_storage/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/consensus/backup_device_key_storage/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/consensus/smart_contract_storage/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/consensus/smart_contract_storage/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/consensus/smart_contract_storage/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/consensus/smart_contract_storage/db_shard_0
+[32m[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/consensus/stake_db/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [LAZY PEBBLE] Stopping background flusher for /tmp/gate_4val_p06/val3/data/consensus/stake_db/db_shard_0
+2026/10/08 04:44:27 🔌 Shutting down ExplorerSearchService...
+2026/10/08 04:44:27 🔌 Shutting down ExplorerSearchService...
+2026/10/08 04:44:27    - Index queue closed. No new jobs will be accepted.
+2026/10/08 04:44:27    - Index queue closed. No new jobs will be accepted.
+2026/10/08 04:44:27    - Waiting for all indexing workers to finish...
+2026/10/08 04:44:27    - Waiting for all indexing workers to finish...
+[32m[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/consensus/stake_db/db_shard_0[0m
+[INFO][Oct  8 04:44:27]  🛑 [PEBBLE] Closed database: /tmp/gate_4val_p06/val3/data/consensus/stake_db/db_shard_0
+2026/10/08 04:44:27    - All indexing workers have finished.
+2026/10/08 04:44:27    - All indexing workers have finished.
+2026/10/08 04:44:27 ✅ ExplorerSearchService shut down gracefully.
+2026/10/08 04:44:27 ✅ ExplorerSearchService shut down gracefully.
+[32m[INFO][Oct  8 04:44:27]  App stopped.[0m
+[INFO][Oct  8 04:44:27]  App stopped.
+[32m[INFO][Oct  8 04:44:27]  [SIGNAL] App đã dừng[0m
+[INFO][Oct  8 04:44:27]  [SIGNAL] App đã dừng
+[32m[INFO][Oct  8 04:44:27]  [SIGNAL] Process đang thoát...[0m
+[INFO][Oct  8 04:44:27]  [SIGNAL] Process đang thoát...
+[32m[INFO][Oct  8 04:44:27]  [PERF] Cleaning up TrieDB connection pool on shutdown...[0m
+[INFO][Oct  8 04:44:27]  [PERF] Cleaning up TrieDB connection pool on shutdown...
+
+==> /tmp/gate_4val_tps_counted/val3/logs/2026-10-13/execution.log <==
+[32m[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000[0m
+[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000
+[33m[WARN][Oct 13 15:57:32]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 18.905098618s[0m
+[WARN][Oct 13 15:57:32]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 18.905098618s
+[32m[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions[0m
+[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.463862Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.463862Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.473956Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([1],I6k/OV5bMB+ooVAAyGk8JZHujqK5nsciPGgQuLkTUns=) (txs: 4000): total=20.272075ms, block_verify=16.111822ms, tx_verify/vote=4.159954ms[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.473956Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([1],I6k/OV5bMB+ooVAAyGk8JZHujqK5nsciPGgQuLkTUns=) (txs: 4000): total=20.272075ms, block_verify=16.111822ms, tx_verify/vote=4.159954ms
+[33m[WARN][Oct 13 15:57:32]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 29.280174ms (cache_warm=1.943615ms, state_preload=182.675µs, verify=22.757704ms, conflicts=530.309µs, insert=3.865275ms) for 1000 txs (valid=1000)[0m
+[WARN][Oct 13 15:57:32]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 29.280174ms (cache_warm=1.943615ms, state_preload=182.675µs, verify=22.757704ms, conflicts=530.309µs, insert=3.865275ms) for 1000 txs (valid=1000)
+[32m[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000[0m
+[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000
+[33m[WARN][Oct 13 15:57:32]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 18.9466017s[0m
+[WARN][Oct 13 15:57:32]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 18.9466017s
+[32m[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions[0m
+[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions
+[32m[INFO][Oct 13 15:57:32]  🔄 [FORCE COMMIT] Received ForceCommitRequest from Rust (reason: commit_g83_e0)[0m
+[INFO][Oct 13 15:57:32]  🔄 [FORCE COMMIT] Received ForceCommitRequest from Rust (reason: commit_g83_e0)
+[32m[INFO][Oct 13 15:57:32]  ⚡ [RUST TRIGGER] Rust triggered ForceCommit! Generating block immediately.[0m
+[INFO][Oct 13 15:57:32]  ⚡ [RUST TRIGGER] Rust triggered ForceCommit! Generating block immediately.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.492135Z  INFO metanode::node::executor_client::rpc_queries: ✅ [EXECUTOR-REQ] ForceCommit successful: ForceCommit signal sent successfully[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.492135Z  INFO metanode::node::executor_client::rpc_queries: ✅ [EXECUTOR-REQ] ForceCommit successful: ForceCommit signal sent successfully
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.500655Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([2],4+eME239N2hRtTMk6ZCqq++eCRCPr6a7g25CYwWxKGk=) (txs: 4000): total=21.064989ms, block_verify=16.562783ms, tx_verify/vote=4.502005ms[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.500655Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([2],4+eME239N2hRtTMk6ZCqq++eCRCPr6a7g25CYwWxKGk=) (txs: 4000): total=21.064989ms, block_verify=16.562783ms, tx_verify/vote=4.502005ms
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.501020Z  INFO consensus_core::commit_syncer: 🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit C176@G176(J9nD) from peer [1] (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.501020Z  INFO consensus_core::commit_syncer: 🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit C176@G176(J9nD) from peer [1] (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.501216Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.501216Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.501642Z  INFO add_blocks: consensus_core::transaction: Proposing block with 4000 transactions (1290588 bytes). Limit reached: MaxNumOfTransactions[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.501642Z  INFO add_blocks: consensus_core::transaction: Proposing block with 4000 transactions (1290588 bytes). Limit reached: MaxNumOfTransactions
+[31m[ERROR][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.502529Z ERROR metanode::node::setup_consensus::fork_guard: 🚨 [LAYER-6] Re-verify 3/3: Block #10 STILL MISMATCHES peer majority (3/3)![0m
+[ERROR][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.502529Z ERROR metanode::node::setup_consensus::fork_guard: 🚨 [LAYER-6] Re-verify 3/3: Block #10 STILL MISMATCHES peer majority (3/3)!
+[33m[WARN][Oct 13 15:57:32]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 29.394415ms (cache_warm=761.8µs, state_preload=838.739µs, verify=24.059263ms, conflicts=184.987µs, insert=3.549151ms) for 1000 txs (valid=1000)[0m
+[WARN][Oct 13 15:57:32]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 29.394415ms (cache_warm=761.8µs, state_preload=838.739µs, verify=24.059263ms, conflicts=184.987µs, insert=3.549151ms) for 1000 txs (valid=1000)
+[DIAG submit_no_wait] ok=30 gc=0 timeout=0
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.510386Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.510386Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000[0m
+[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000
+[33m[WARN][Oct 13 15:57:32]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 18.953219445s[0m
+[WARN][Oct 13 15:57:32]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 18.953219445s
+[32m[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions[0m
+[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.519958Z  INFO add_certified_commits: consensus_core::core::commit_manager: Processing synced commits: [(174, B181([2],V6V4wjQtXK8a0TGFGXRVKIhaWWYVuR1V5kSnFOkrtyQ=))][0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.519958Z  INFO add_certified_commits: consensus_core::core::commit_manager: Processing synced commits: [(174, B181([2],V6V4wjQtXK8a0TGFGXRVKIhaWWYVuR1V5kSnFOkrtyQ=))]
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.520088Z  WARN add_certified_commits:try_select_certified_leaders: consensus_core::core::proposer: Selected 1 certified leaders: B181([2],V6V4)[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.520088Z  WARN add_certified_commits:try_select_certified_leaders: consensus_core::core::proposer: Selected 1 certified leaders: B181([2],V6V4)
+[31m[ERROR][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.530553Z ERROR metanode::node::setup_consensus::fork_guard: 🚨🚨🚨 [LAYER-6] CONFIRMED FORK at block #10! 3/3 re-verifications failed against peer MAJORITY (not just 1 peer). Setting is_terminally_failed and halting process.[0m
+[ERROR][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.530553Z ERROR metanode::node::setup_consensus::fork_guard: 🚨🚨🚨 [LAYER-6] CONFIRMED FORK at block #10! 3/3 re-verifications failed against peer MAJORITY (not just 1 peer). Setting is_terminally_failed and halting process.
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.530634Z  WARN metanode::node::setup_consensus::fork_guard: 🛡️🔄 [LAYER-6] Triggering Auto-Healing State Reconciliation for block #10[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.530634Z  WARN metanode::node::setup_consensus::fork_guard: 🛡️🔄 [LAYER-6] Triggering Auto-Healing State Reconciliation for block #10
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.530800Z  INFO metanode::node::setup_consensus::state_recovery: 🔄 [FAST-SYNC] Triggered fast-sync for block 10[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.530800Z  INFO metanode::node::setup_consensus::state_recovery: 🔄 [FAST-SYNC] Triggered fast-sync for block 10
+[33m[WARN][Oct 13 15:57:32]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 34.881441ms (cache_warm=757.448µs, state_preload=296.088µs, verify=29.113578ms, conflicts=175.117µs, insert=4.538671ms) for 1000 txs (valid=1000)[0m
+[WARN][Oct 13 15:57:32]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 34.881441ms (cache_warm=757.448µs, state_preload=296.088µs, verify=29.113578ms, conflicts=175.117µs, insert=4.538671ms) for 1000 txs (valid=1000)
+[32m[INFO][Oct 13 15:57:32]  ✅ [txDB Phase 2] Trie Commit (FFI) & Batch Prep completed in 100.909004ms. Root hash: 0x01889585825123b9ac801ee97e546fc55c165aa7723dd4fe706d2ce5ce7636fd[0m
+[INFO][Oct 13 15:57:32]  ✅ [txDB Phase 2] Trie Commit (FFI) & Batch Prep completed in 100.909004ms. Root hash: 0x01889585825123b9ac801ee97e546fc55c165aa7723dd4fe706d2ce5ce7636fd
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.543679Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.543679Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[32m[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000[0m
+[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000
+[33m[WARN][Oct 13 15:57:32]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 18.96192268s[0m
+[WARN][Oct 13 15:57:32]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 18.96192268s
+[32m[INFO][Oct 13 15:57:32]  ✅ [INIT] Block 44 is in pipeline (assigned > committed). Bypassing backward scan.[0m
+[INFO][Oct 13 15:57:32]  ✅ [INIT] Block 44 is in pipeline (assigned > committed). Bypassing backward scan.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.549355Z  INFO metanode::node::executor_client::block_sync: 📤 [BLOCK SYNC] Requesting blocks 20 to 20 from Go Master[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.549355Z  INFO metanode::node::executor_client::block_sync: 📤 [BLOCK SYNC] Requesting blocks 20 to 20 from Go Master
+[32m[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions[0m
+[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.551096Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.551096Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[32m[INFO][Oct 13 15:57:32]  ✅ [txDB Phase 3] SerializeBatch (12256 entries) completed in 11.68355ms[0m
+[INFO][Oct 13 15:57:32]  ✅ [txDB Phase 3] SerializeBatch (12256 entries) completed in 11.68355ms
+[32m[INFO][Oct 13 15:57:32]  ✅ [Phase 3] DB BatchPut & Serialize completed in 11.712432ms[0m
+[INFO][Oct 13 15:57:32]  ✅ [Phase 3] DB BatchPut & Serialize completed in 11.712432ms
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.559378Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.559378Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[33m[WARN][Oct 13 15:57:32]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 26.835388ms (cache_warm=1.289292ms, state_preload=346.652µs, verify=21.324954ms, conflicts=168.091µs, insert=3.705983ms) for 1000 txs (valid=1000)[0m
+[WARN][Oct 13 15:57:32]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 26.835388ms (cache_warm=1.289292ms, state_preload=346.652µs, verify=21.324954ms, conflicts=168.091µs, insert=3.705983ms) for 1000 txs (valid=1000)
+[32m[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000[0m
+[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000
+[33m[WARN][Oct 13 15:57:32]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 19.004204075s[0m
+[WARN][Oct 13 15:57:32]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 19.004204075s
+[32m[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions[0m
+[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.583631Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.583631Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.584306Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.584306Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.584596Z  INFO add_blocks: consensus_core::transaction: Proposing block with 4000 transactions (1290785 bytes). Limit reached: AllTransactionsIncluded[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.584596Z  INFO add_blocks: consensus_core::transaction: Proposing block with 4000 transactions (1290785 bytes). Limit reached: AllTransactionsIncluded
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.585807Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([0],EywaA35wLRcf4JL8TxvYZf0GEoTBS9VUJtwSZ1AOTIg=) (txs: 2000): total=10.241488ms, block_verify=8.073471ms, tx_verify/vote=2.167853ms[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.585807Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([0],EywaA35wLRcf4JL8TxvYZf0GEoTBS9VUJtwSZ1AOTIg=) (txs: 2000): total=10.241488ms, block_verify=8.073471ms, tx_verify/vote=2.167853ms
+[32m[INFO][Oct 13 15:57:32]  [PERF] Block #44 commitToMemoryParallel Breakdown:
+   - SmartContractDB (Seq):    17.966µs
+   - Tasks (Parallel Max):     112.902191ms (task: txDB)
+   - Persist Account DB:       7.189µs
+   - Persist Stake DB:         2.583µs
+   - Persist Receipts DB:      40.75593ms
+   - 🚀 TOTAL COMMIT MEMORY:    155.524493ms[0m
+[INFO][Oct 13 15:57:32]  [PERF] Block #44 commitToMemoryParallel Breakdown:
+   - SmartContractDB (Seq):    17.966µs
+   - Tasks (Parallel Max):     112.902191ms (task: txDB)
+   - Persist Account DB:       7.189µs
+   - Persist Stake DB:         2.583µs
+   - Persist Receipts DB:      40.75593ms
+   - 🚀 TOTAL COMMIT MEMORY:    155.524493ms
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.594450Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.594450Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.594568Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.594568Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.611311Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([1],I6k/OV5bMB+ooVAAyGk8JZHujqK5nsciPGgQuLkTUns=) (txs: 4000): total=21.361634ms, block_verify=16.817302ms, tx_verify/vote=4.544143ms[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.611311Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([1],I6k/OV5bMB+ooVAAyGk8JZHujqK5nsciPGgQuLkTUns=) (txs: 4000): total=21.361634ms, block_verify=16.817302ms, tx_verify/vote=4.544143ms
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.611865Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.611865Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[32m[INFO][Oct 13 15:57:32]  [PERF] Block #44 Phase 4 Job Prep & Snap Breakdown:
+   - Trie Snap:                2.749µs
+   - Account Snap:             0s
+   - SC Snap:                  0s
+   - Stake Snap:               0s
+   - Mapping Gen:              111.174621ms
+   - commitChannel Push:       5.187µs[0m
+[INFO][Oct 13 15:57:32]  [PERF] Block #44 Phase 4 Job Prep & Snap Breakdown:
+   - Trie Snap:                2.749µs
+   - Account Snap:             0s
+   - SC Snap:                  0s
+   - Stake Snap:               0s
+   - Mapping Gen:              111.174621ms
+   - commitChannel Push:       5.187µs
+[32m[INFO][Oct 13 15:57:32]  📦 [batch_id=E0C122G44] === Block Creation Time 44 (In Memory) [12000 txs] === 📦
+   - Phase 1 (Root Calc):      34.551µs
+   - Phase 2 (Block Data):     8.540303ms
+   - Phase 3.1 (Mapping):      21.408µs
+   - Phase 3.2 (Trie Commit):  155.553452ms
+   - Phase 4 (Job Prep & Snap):22.076346ms
+   - 🚀 TOTAL (IN-MEMORY):     186.240851ms[0m
+[INFO][Oct 13 15:57:32]  📦 [batch_id=E0C122G44] === Block Creation Time 44 (In Memory) [12000 txs] === 📦
+   - Phase 1 (Root Calc):      34.551µs
+   - Phase 2 (Block Data):     8.540303ms
+   - Phase 3.1 (Mapping):      21.408µs
+   - Phase 3.2 (Trie Commit):  155.553452ms
+   - Phase 4 (Job Prep & Snap):22.076346ms
+   - 🚀 TOTAL (IN-MEMORY):     186.240851ms
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.616269Z  WARN metanode::node::executor_client::block_sending: ⏱️ [PERF-RUST] FFI execute_block for gei 44 (size=3947614 bytes): 864.064542ms[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.616269Z  WARN metanode::node::executor_client::block_sending: ⏱️ [PERF-RUST] FFI execute_block for gei 44 (size=3947614 bytes): 864.064542ms
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.616319Z  INFO metanode::node::executor_client::block_sending: 💾 [BLOCK-SEND] Go computed StateRoot for GEI=44: 0x42c6ae39dcc39f87b82deaa01814b564e9e4f492860751762a7f2bd7c1ef2c1c[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.616319Z  INFO metanode::node::executor_client::block_sending: 💾 [BLOCK-SEND] Go computed StateRoot for GEI=44: 0x42c6ae39dcc39f87b82deaa01814b564e9e4f492860751762a7f2bd7c1ef2c1c
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.621465Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.621465Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.625886Z  INFO metanode::node::executor_client::block_store: 💾 [BLOCK STORE] Stored 1 executable blocks (GEI 44→44)[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.625886Z  INFO metanode::node::executor_client::block_store: 💾 [BLOCK STORE] Stored 1 executable blocks (GEI 44→44)
+[32m[INFO][Oct 13 15:57:32]  ✅ [CleanGEI] Sent rescue response for GEI=44 (success=false)[0m
+[INFO][Oct 13 15:57:32]  ✅ [CleanGEI] Sent rescue response for GEI=44 (success=false)
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.641684Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([2],4+eME239N2hRtTMk6ZCqq++eCRCPr6a7g25CYwWxKGk=) (txs: 4000): total=25.510472ms, block_verify=21.59544ms, tx_verify/vote=3.91486ms[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.641684Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([2],4+eME239N2hRtTMk6ZCqq++eCRCPr6a7g25CYwWxKGk=) (txs: 4000): total=25.510472ms, block_verify=21.59544ms, tx_verify/vote=3.91486ms
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.642111Z  INFO consensus_core::commit_syncer: 🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit C176@G176(J9nD) from peer [1] (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.642111Z  INFO consensus_core::commit_syncer: 🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit C176@G176(J9nD) from peer [1] (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.
+[32m[INFO][Oct 13 15:57:32]  ✅ [COMMIT STATE] Block #44 persisted to DB and flushed (hash: 0xe24bcf70837a8a8a, parentHash: 0xf678f12a6c551c6e, txCount: 12000, lastBlockNum_before: 43)[0m
+[INFO][Oct 13 15:57:32]  ✅ [COMMIT STATE] Block #44 persisted to DB and flushed (hash: 0xe24bcf70837a8a8a, parentHash: 0xf678f12a6c551c6e, txCount: 12000, lastBlockNum_before: 43)
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.668051Z  INFO metanode::node::executor_client::block_sync: ✅ [BLOCK SYNC] Received 1 blocks from Go Master[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.668051Z  INFO metanode::node::executor_client::block_sync: ✅ [BLOCK SYNC] Received 1 blocks from Go Master
+[32m[INFO][Oct 13 15:57:32]  Indexing queue empty, marking sync completed[0m
+[INFO][Oct 13 15:57:32]  Indexing queue empty, marking sync completed
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.691553Z  INFO add_certified_commits: consensus_core::core::commit_manager: Processing synced commits: [(175, B182([3],Yq4eieIbalfAv9caK/g4E7dfqfZWvfub42+Zz+UUMPI=))][0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.691553Z  INFO add_certified_commits: consensus_core::core::commit_manager: Processing synced commits: [(175, B182([3],Yq4eieIbalfAv9caK/g4E7dfqfZWvfub42+Zz+UUMPI=))]
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.691677Z  WARN add_certified_commits:try_select_certified_leaders: consensus_core::core::proposer: Selected 1 certified leaders: B182([3],Yq4e)[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.691677Z  WARN add_certified_commits:try_select_certified_leaders: consensus_core::core::proposer: Selected 1 certified leaders: B182([3],Yq4e)
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.692467Z  INFO add_certified_commits: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.692467Z  INFO add_certified_commits: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.696426Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([0],EywaA35wLRcf4JL8TxvYZf0GEoTBS9VUJtwSZ1AOTIg=) (txs: 2000): total=10.989707ms, block_verify=9.047725ms, tx_verify/vote=1.94158ms[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.696426Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([0],EywaA35wLRcf4JL8TxvYZf0GEoTBS9VUJtwSZ1AOTIg=) (txs: 2000): total=10.989707ms, block_verify=9.047725ms, tx_verify/vote=1.94158ms
+[32m[INFO][Oct 13 15:57:32]  🔍 [DEBUG] ProcessPoolSub: allTxs=40261, validTxs=38747, futureTxs=1514[0m
+[INFO][Oct 13 15:57:32]  🔍 [DEBUG] ProcessPoolSub: allTxs=40261, validTxs=38747, futureTxs=1514
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.700145Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.700145Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.708971Z  WARN metanode::node::block_delivery: 🐌 [PERF-WARN] send_committed_subdag took 1.28303778s for commit 122 (GEI=44). Go Execution is lagging![0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.708971Z  WARN metanode::node::block_delivery: 🐌 [PERF-WARN] send_committed_subdag took 1.28303778s for commit 122 (GEI=44). Go Execution is lagging!
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.711835Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.711835Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[DIAG block_delivery] ok_commits=44 ok_txs=316000
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.730739Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.730739Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.731639Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([1],I6k/OV5bMB+ooVAAyGk8JZHujqK5nsciPGgQuLkTUns=) (txs: 4000): total=31.265836ms, block_verify=28.248883ms, tx_verify/vote=3.016768ms[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.731639Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([1],I6k/OV5bMB+ooVAAyGk8JZHujqK5nsciPGgQuLkTUns=) (txs: 4000): total=31.265836ms, block_verify=28.248883ms, tx_verify/vote=3.016768ms
+[32m[INFO][Oct 13 15:57:32]  🔄 [FORCE COMMIT] Received ForceCommitRequest from Rust (reason: commit_g84_e0)[0m
+[INFO][Oct 13 15:57:32]  🔄 [FORCE COMMIT] Received ForceCommitRequest from Rust (reason: commit_g84_e0)
+[32m[INFO][Oct 13 15:57:32]  ⚡ [RUST TRIGGER] Rust triggered ForceCommit! Generating block immediately.[0m
+[INFO][Oct 13 15:57:32]  ⚡ [RUST TRIGGER] Rust triggered ForceCommit! Generating block immediately.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.735745Z  INFO metanode::node::executor_client::rpc_queries: ✅ [EXECUTOR-REQ] ForceCommit successful: ForceCommit signal sent successfully[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.735745Z  INFO metanode::node::executor_client::rpc_queries: ✅ [EXECUTOR-REQ] ForceCommit successful: ForceCommit signal sent successfully
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.745463Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.745463Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.756926Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([2],4+eME239N2hRtTMk6ZCqq++eCRCPr6a7g25CYwWxKGk=) (txs: 4000): total=19.913238ms, block_verify=15.087167ms, tx_verify/vote=4.825943ms[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.756926Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([2],4+eME239N2hRtTMk6ZCqq++eCRCPr6a7g25CYwWxKGk=) (txs: 4000): total=19.913238ms, block_verify=15.087167ms, tx_verify/vote=4.825943ms
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.757189Z  INFO consensus_core::commit_syncer: 🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit C176@G176(J9nD) from peer [2] (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.757189Z  INFO consensus_core::commit_syncer: 🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit C176@G176(J9nD) from peer [2] (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.772110Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.772110Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.793216Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.793216Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.793609Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.793609Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.806072Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.806072Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.819009Z  INFO add_certified_commits: consensus_core::core::commit_manager: Processing synced commits: [(176, B183([0],oQ1bLpJKnjAlPp6icvS2UnUfC1pRlXg4XqoESo8qMqc=))][0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.819009Z  INFO add_certified_commits: consensus_core::core::commit_manager: Processing synced commits: [(176, B183([0],oQ1bLpJKnjAlPp6icvS2UnUfC1pRlXg4XqoESo8qMqc=))]
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.819103Z  WARN add_certified_commits:try_select_certified_leaders: consensus_core::core::proposer: Selected 1 certified leaders: B183([0],oQ1b)[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.819103Z  WARN add_certified_commits:try_select_certified_leaders: consensus_core::core::proposer: Selected 1 certified leaders: B183([0],oQ1b)
+[32m[INFO][Oct 13 15:57:32]  🔄 [FORCE COMMIT] Received ForceCommitRequest from Rust (reason: commit_g85_e0)[0m
+[INFO][Oct 13 15:57:32]  🔄 [FORCE COMMIT] Received ForceCommitRequest from Rust (reason: commit_g85_e0)
+[32m[INFO][Oct 13 15:57:32]  ⚡ [RUST TRIGGER] Rust triggered ForceCommit! Generating block immediately.[0m
+[INFO][Oct 13 15:57:32]  ⚡ [RUST TRIGGER] Rust triggered ForceCommit! Generating block immediately.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.823520Z  INFO metanode::node::executor_client::rpc_queries: ✅ [EXECUTOR-REQ] ForceCommit successful: ForceCommit signal sent successfully[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.823520Z  INFO metanode::node::executor_client::rpc_queries: ✅ [EXECUTOR-REQ] ForceCommit successful: ForceCommit signal sent successfully
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.830512Z  INFO metanode::node::executor_client::block_sending: 🔪 [FRAGMENT-BUILD] Built sorted TX list: input=4000, filtered=0, deduped=0, final=4000, system_txs=0[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.830512Z  INFO metanode::node::executor_client::block_sending: 🔪 [FRAGMENT-BUILD] Built sorted TX list: input=4000, filtered=0, deduped=0, final=4000, system_txs=0
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.834519Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([0],EywaA35wLRcf4JL8TxvYZf0GEoTBS9VUJtwSZ1AOTIg=) (txs: 2000): total=11.595613ms, block_verify=9.298642ms, tx_verify/vote=2.296635ms[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.834519Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([0],EywaA35wLRcf4JL8TxvYZf0GEoTBS9VUJtwSZ1AOTIg=) (txs: 2000): total=11.595613ms, block_verify=9.298642ms, tx_verify/vote=2.296635ms
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.834880Z  INFO metanode::node::executor_client::block_sending: 📊 [BLOCK-NUM-ASSIGN] Assigned block_number=45 for GEI=45, epoch=0, commit_idx=123, txs_user=4000, txs_sys=0[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.834880Z  INFO metanode::node::executor_client::block_sending: 📊 [BLOCK-NUM-ASSIGN] Assigned block_number=45 for GEI=45, epoch=0, commit_idx=123, txs_user=4000, txs_sys=0
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.835417Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.835417Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.836744Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.836744Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.844611Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.844611Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.849206Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.849206Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.859952Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([1],I6k/OV5bMB+ooVAAyGk8JZHujqK5nsciPGgQuLkTUns=) (txs: 4000): total=20.113337ms, block_verify=15.872864ms, tx_verify/vote=4.240236ms[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.859952Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([1],I6k/OV5bMB+ooVAAyGk8JZHujqK5nsciPGgQuLkTUns=) (txs: 4000): total=20.113337ms, block_verify=15.872864ms, tx_verify/vote=4.240236ms
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.865527Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.865527Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.866728Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.866728Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.883080Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.883080Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.885136Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([2],4+eME239N2hRtTMk6ZCqq++eCRCPr6a7g25CYwWxKGk=) (txs: 4000): total=19.875742ms, block_verify=15.990753ms, tx_verify/vote=3.884809ms[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.885136Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B186([2],4+eME239N2hRtTMk6ZCqq++eCRCPr6a7g25CYwWxKGk=) (txs: 4000): total=19.875742ms, block_verify=15.990753ms, tx_verify/vote=3.884809ms
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.885328Z  INFO consensus_core::commit_syncer: 🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit C176@G176(J9nD) from peer [2] (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.885328Z  INFO consensus_core::commit_syncer: 🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit C176@G176(J9nD) from peer [2] (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.888862Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.888862Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.896071Z  INFO add_certified_commits: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.896071Z  INFO add_certified_commits: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.896479Z  INFO add_certified_commits: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.896479Z  INFO add_certified_commits: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.906064Z  INFO add_certified_commits: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.906064Z  INFO add_certified_commits: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.909919Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.909919Z  WARN metanode::ffi: ⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: 128/10000
+[33m[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.915738Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B190([0],+su7pTc1bpH/AGI8pL6wh/dIPupGFEumFQLrPIbkdLs=) (txs: 2000): total=11.578851ms, block_verify=9.195592ms, tx_verify/vote=2.383101ms[0m
+[WARN][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.915738Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B190([0],+su7pTc1bpH/AGI8pL6wh/dIPupGFEumFQLrPIbkdLs=) (txs: 2000): total=11.578851ms, block_verify=9.195592ms, tx_verify/vote=2.383101ms
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.915916Z  INFO consensus_core::commit_syncer: 🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit C178@G178(Tvec) from peer [2] (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.915916Z  INFO consensus_core::commit_syncer: 🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit C178@G178(Tvec) from peer [2] (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.931108Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.931108Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.943550Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.943550Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.954679Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.954679Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[33m[WARN][Oct 13 15:57:32]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 33.541393ms (cache_warm=839.383µs, state_preload=262.466µs, verify=26.689467ms, conflicts=228.86µs, insert=5.520421ms) for 1000 txs (valid=1000)[0m
+[WARN][Oct 13 15:57:32]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 33.541393ms (cache_warm=839.383µs, state_preload=262.466µs, verify=26.689467ms, conflicts=228.86µs, insert=5.520421ms) for 1000 txs (valid=1000)
+[State] Clearing all 0 cached State instances (sync→validator transition)
+[State] All State instances cleared in a thread-safe manner. EVM will re-read from Go on next access.
+[32m[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000[0m
+[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000
+[33m[WARN][Oct 13 15:57:32]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 19.372650623s[0m
+[WARN][Oct 13 15:57:32]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 19.372650623s
+[32m[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions[0m
+[INFO][Oct 13 15:57:32]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions
+[32m[INFO][Oct 13 15:57:32]  🔄 [SPECULATIVE] Executing GEI=45 speculatively with 4000 txs (block #45)[0m
+[INFO][Oct 13 15:57:32]  🔄 [SPECULATIVE] Executing GEI=45 speculatively with 4000 txs (block #45)
+[32m[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.983994Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:32]  [RUST] 2026-10-13T15:57:32.983994Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:32]  🔏 [SIG-ENFORCE] 4000 txs in 21.688307ms (cache_hit=0 bound_hit=0 batch_verified=0 individual=4000 dropped=0)[0m
+[INFO][Oct 13 15:57:32]  🔏 [SIG-ENFORCE] 4000 txs in 21.688307ms (cache_hit=0 bound_hit=0 batch_verified=0 individual=4000 dropped=0)
+[32m[INFO][Oct 13 15:57:32]  🔍 [BLOCK-STM-DEBUG] Block contains 4000 txs, hasEvmTx=false (native=4000 evm=0)[0m
+[INFO][Oct 13 15:57:32]  🔍 [BLOCK-STM-DEBUG] Block contains 4000 txs, hasEvmTx=false (native=4000 evm=0)
+[33m[WARN][Oct 13 15:57:32]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 33.485322ms (cache_warm=1.107408ms, state_preload=197.603µs, verify=28.704849ms, conflicts=126.921µs, insert=3.348176ms) for 1000 txs (valid=1000)[0m
+[WARN][Oct 13 15:57:32]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 33.485322ms (cache_warm=1.107408ms, state_preload=197.603µs, verify=28.704849ms, conflicts=126.921µs, insert=3.348176ms) for 1000 txs (valid=1000)
+[32m[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000[0m
+[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000
+[33m[WARN][Oct 13 15:57:33]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 19.394121787s[0m
+[WARN][Oct 13 15:57:33]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 19.394121787s
+[32m[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions[0m
+[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions
+[32m[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.009880Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.009880Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.010286Z  INFO add_blocks: consensus_core::transaction: Proposing block with 4000 transactions (1290716 bytes). Limit reached: AllTransactionsIncluded[0m
+[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.010286Z  INFO add_blocks: consensus_core::transaction: Proposing block with 4000 transactions (1290716 bytes). Limit reached: AllTransactionsIncluded
+[33m[WARN][Oct 13 15:57:33]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 18.216131ms (cache_warm=547.437µs, state_preload=118.216µs, verify=14.032203ms, conflicts=191.303µs, insert=3.326484ms) for 1000 txs (valid=1000)[0m
+[WARN][Oct 13 15:57:33]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 18.216131ms (cache_warm=547.437µs, state_preload=118.216µs, verify=14.032203ms, conflicts=191.303µs, insert=3.326484ms) for 1000 txs (valid=1000)
+[32m[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000[0m
+[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000
+[33m[WARN][Oct 13 15:57:33]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 19.399894728s[0m
+[WARN][Oct 13 15:57:33]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 19.399894728s
+[32m[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions[0m
+[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions
+[32m[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.021578Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.021578Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.021740Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.021740Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[33m[WARN][Oct 13 15:57:33]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 18.257597ms (cache_warm=701.542µs, state_preload=184.501µs, verify=14.526213ms, conflicts=193.935µs, insert=2.65087ms) for 1000 txs (valid=1000)[0m
+[WARN][Oct 13 15:57:33]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 18.257597ms (cache_warm=701.542µs, state_preload=184.501µs, verify=14.526213ms, conflicts=193.935µs, insert=2.65087ms) for 1000 txs (valid=1000)
+[32m[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.032100Z  INFO metanode::node::setup_consensus::state_recovery: ✅ [FAST-SYNC] Found majority block 10 (3 peers). Pushing to Go Master for State Reconciliation...[0m
+[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.032100Z  INFO metanode::node::setup_consensus::state_recovery: ✅ [FAST-SYNC] Found majority block 10 (3 peers). Pushing to Go Master for State Reconciliation...
+[32m[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.032154Z  INFO metanode::node::executor_client::block_sync: 📤 [BLOCK SYNC] Syncing 1 blocks (10 to 10) to Go Master in chunks (mode=EXECUTE)[0m
+[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.032154Z  INFO metanode::node::executor_client::block_sync: 📤 [BLOCK SYNC] Syncing 1 blocks (10 to 10) to Go Master in chunks (mode=EXECUTE)
+[32m[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.034013Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.034013Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[32m[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000[0m
+[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000
+[33m[WARN][Oct 13 15:57:33]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 19.357914756s[0m
+[WARN][Oct 13 15:57:33]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 19.357914756s
+[32m[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions[0m
+[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions
+[32m[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.037692Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.[0m
+[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.037692Z  INFO add_blocks: consensus_core::core::commit_manager: 🛡️ [PHASE-GUARD] Blocking local committer. Node is in CatchingUp phase (startup_sync_active=false). Waiting for DAG to fully catch up.
+[33m[WARN][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.049031Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B190([0],+su7pTc1bpH/AGI8pL6wh/dIPupGFEumFQLrPIbkdLs=) (txs: 2000): total=17.315047ms, block_verify=15.153571ms, tx_verify/vote=2.161246ms[0m
+[WARN][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.049031Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B190([0],+su7pTc1bpH/AGI8pL6wh/dIPupGFEumFQLrPIbkdLs=) (txs: 2000): total=17.315047ms, block_verify=15.153571ms, tx_verify/vote=2.161246ms
+[33m[WARN][Oct 13 15:57:33]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 21.20746ms (cache_warm=594.753µs, state_preload=140.51µs, verify=17.581792ms, conflicts=114.424µs, insert=2.775494ms) for 1000 txs (valid=1000)[0m
+[WARN][Oct 13 15:57:33]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 21.20746ms (cache_warm=594.753µs, state_preload=140.51µs, verify=17.581792ms, conflicts=114.424µs, insert=2.775494ms) for 1000 txs (valid=1000)
+[32m[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000[0m
+[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000
+[33m[WARN][Oct 13 15:57:33]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 19.340403173s[0m
+[WARN][Oct 13 15:57:33]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 19.340403173s
+[32m[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions[0m
+[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions
+[32m[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.061335Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.061335Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[32m[INFO][Oct 13 15:57:33]  ⚡ [FAST-PATH] Native transfer block: 4000 txs processed in 62.834316ms (63659 tx/s), 1 workers[0m
+[INFO][Oct 13 15:57:33]  ⚡ [FAST-PATH] Native transfer block: 4000 txs processed in 62.834316ms (63659 tx/s), 1 workers
+[32m[INFO][Oct 13 15:57:33]  [PERF] Block Execution (Parallel): 91.003131ms, txCount: 4000, groups: 1[0m
+[INFO][Oct 13 15:57:33]  [PERF] Block Execution (Parallel): 91.003131ms, txCount: 4000, groups: 1
+[32m[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.063447Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.063447Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[nomt_ffi] nomt_commit_payload failed: Store is poisoned due to prior error
+[31m[ERROR][Oct 13 15:57:33]  ❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: nomt_ffi: failed to commit payload[0m
+[ERROR][Oct 13 15:57:33]  ❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: nomt_ffi: failed to commit payload
+[32m[INFO][Oct 13 15:57:33]  📊 [BLOCK-TRACE] Block #44 | TXs: 12000 | WaitGo: 0ms | WaitRust: 0ms | RustFFI: 0ms (FFI: 0ms) | EVM: 232ms | Roots: 0ms | Mem: 155ms | DB: 451ms | Total: 639ms[0m
+[INFO][Oct 13 15:57:33]  📊 [BLOCK-TRACE] Block #44 | TXs: 12000 | WaitGo: 0ms | WaitRust: 0ms | RustFFI: 0ms (FFI: 0ms) | EVM: 232ms | Roots: 0ms | Mem: 155ms | DB: 451ms | Total: 639ms
+[32m[INFO][Oct 13 15:57:33]  🔧 [COMMIT] commitWorker: received FENCE job (commitChannel=0/8)[0m
+[INFO][Oct 13 15:57:33]  🔧 [COMMIT] commitWorker: received FENCE job (commitChannel=0/8)
+[32m[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.070564Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.070564Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[33m[WARN][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.071593Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B190([1],Nwd1OdDYK7mZYW9glj/CWlhJ9SF0j15hPXmXP6dYSP4=) (txs: 4000): total=17.632296ms, block_verify=13.957577ms, tx_verify/vote=3.674577ms[0m
+[WARN][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.071593Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B190([1],Nwd1OdDYK7mZYW9glj/CWlhJ9SF0j15hPXmXP6dYSP4=) (txs: 4000): total=17.632296ms, block_verify=13.957577ms, tx_verify/vote=3.674577ms
+[32m[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.072077Z  INFO consensus_core::commit_syncer: 🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit C180@G180(0pV7) from peer [2] (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.[0m
+[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.072077Z  INFO consensus_core::commit_syncer: 🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit C180@G180(0pV7) from peer [2] (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.
+[32m[INFO][Oct 13 15:57:33]  [Go Server] 📥 Received SyncBlocksRequest: block_count=1[0m
+[INFO][Oct 13 15:57:33]  [Go Server] 📥 Received SyncBlocksRequest: block_count=1
+[32m[INFO][Oct 13 15:57:33]  🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Handling SyncBlocksRequest: block_count=1[0m
+[INFO][Oct 13 15:57:33]  🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Handling SyncBlocksRequest: block_count=1
+[32m[INFO][Oct 13 15:57:33]  ⏳ [SYNC] Waiting for commitWorker to flush pending blocks before processing sync...[0m
+[INFO][Oct 13 15:57:33]  ⏳ [SYNC] Waiting for commitWorker to flush pending blocks before processing sync...
+[32m[INFO][Oct 13 15:57:33]  ⏳ [SNAPSHOT-MANAGER] Manually triggering wait persistence callback to flush pipeline...[0m
+[INFO][Oct 13 15:57:33]  ⏳ [SNAPSHOT-MANAGER] Manually triggering wait persistence callback to flush pipeline...
+[32m[INFO][Oct 13 15:57:33]  ⏳ [PERSIST] WaitForPersistence: ENTER — commitChannel=0/8[0m
+[INFO][Oct 13 15:57:33]  ⏳ [PERSIST] WaitForPersistence: ENTER — commitChannel=0/8
+[32m[INFO][Oct 13 15:57:33]  ⏳ [PERSIST] WaitForPersistence: sending commit fence...[0m
+[INFO][Oct 13 15:57:33]  ⏳ [PERSIST] WaitForPersistence: sending commit fence...
+[32m[INFO][Oct 13 15:57:33]  ⏳ [PERSIST] WaitForPersistence: commit fence sent, waiting for commitWorker to process...[0m
+[INFO][Oct 13 15:57:33]  ⏳ [PERSIST] WaitForPersistence: commit fence sent, waiting for commitWorker to process...
+[32m[INFO][Oct 13 15:57:33]  🔧 [COMMIT] commitWorker: received FENCE job (commitChannel=0/8)[0m
+[INFO][Oct 13 15:57:33]  🔧 [COMMIT] commitWorker: received FENCE job (commitChannel=0/8)
+[32m[INFO][Oct 13 15:57:33]  🔧 [COMMIT] commitWorker: FENCE signaled (DoneChan closed)[0m
+[INFO][Oct 13 15:57:33]  🔧 [COMMIT] commitWorker: FENCE signaled (DoneChan closed)
+[32m[INFO][Oct 13 15:57:33]  ⏳ [PERSIST] WaitForPersistence: commit fence DONE.[0m
+[INFO][Oct 13 15:57:33]  ⏳ [PERSIST] WaitForPersistence: commit fence DONE.
+[32m[INFO][Oct 13 15:57:33]  ⏳ [PERSIST] WaitForPersistence: waiting for NOMT async commits to finish...[0m
+[INFO][Oct 13 15:57:33]  ⏳ [PERSIST] WaitForPersistence: waiting for NOMT async commits to finish...
+[32m[INFO][Oct 13 15:57:33]  broadcastEventsAndReceipts: converted event logs%!(EXTRA string=blockNumber, uint64=44, string=ethEventLogs, int=0)[0m
+[INFO][Oct 13 15:57:33]  broadcastEventsAndReceipts: converted event logs%!(EXTRA string=blockNumber, uint64=44, string=ethEventLogs, int=0)
+[32m[INFO][Oct 13 15:57:33]  [NOMT-COMMIT-PERF] dirty=1 | BeginSession=6.534093ms | BatchRecordRead=948.736µs | BatchWrite=3.941µs | Finish=3.728459ms[0m
+[INFO][Oct 13 15:57:33]  [NOMT-COMMIT-PERF] dirty=1 | BeginSession=6.534093ms | BatchRecordRead=948.736µs | BatchWrite=3.941µs | Finish=3.728459ms
+[32m[INFO][Oct 13 15:57:33]  [NOMT-STATS] namespace=stake_db block=45 pageRequests=89 pageCacheMissRate=0.00% pageFetchAvg=0s valueFetchAvg=0s htOccupancy=0.0016% (occupied=1/cap=64000)[0m
+[INFO][Oct 13 15:57:33]  [NOMT-STATS] namespace=stake_db block=45 pageRequests=89 pageCacheMissRate=0.00% pageFetchAvg=0s valueFetchAvg=0s htOccupancy=0.0016% (occupied=1/cap=64000)
+[33m[WARN][Oct 13 15:57:33]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 26.468016ms (cache_warm=639.259µs, state_preload=160.459µs, verify=21.27227ms, conflicts=168.265µs, insert=4.227154ms) for 1000 txs (valid=1000)[0m
+[WARN][Oct 13 15:57:33]  ⏱️  [PERF-POOL-BATCH] addTransactionsToPoolInternal took 26.468016ms (cache_warm=639.259µs, state_preload=160.459µs, verify=21.27227ms, conflicts=168.265µs, insert=4.227154ms) for 1000 txs (valid=1000)
+[32m[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.080197Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction[0m
+[INFO][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.080197Z  INFO metanode::network::peer_rpc::server: 📡 [TX PRE-PROPAGATE] Cached 2000/2000 TX payloads from peer for compact-block reconstruction
+[33m[WARN][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.084840Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B189([1],i0KgXn4eQV/dzC+vWCHJ++n+up09s7YIG+5lPZxIyn4=) (txs: 4000): total=19.527778ms, block_verify=15.702593ms, tx_verify/vote=3.824982ms[0m
+[WARN][Oct 13 15:57:33]  [RUST] 2026-10-13T15:57:33.084840Z  WARN consensus_core::block_verifier: ⏱️ [PERF-RUST] verify_for_commit_sync block B189([1],i0KgXn4eQV/dzC+vWCHJ++n+up09s7YIG+5lPZxIyn4=) (txs: 4000): total=19.527778ms, block_verify=15.702593ms, tx_verify/vote=3.824982ms
+[32m[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000[0m
+[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Added batch to pool. Total errors: 0, accepted: 1000
+[33m[WARN][Oct 13 15:57:33]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 19.315215835s[0m
+[WARN][Oct 13 15:57:33]  ⏱️  [PERF-CLIENT-BATCH] ProcessRawTransactionsFromClient took 19.315215835s
+[32m[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions[0m
+[INFO][Oct 13 15:57:33]  🔥 ProcessRawTransactionsFromClient: Received batch of 1000 raw Ethereum transactions
+[31m[ERROR][Oct 13 15:57:33]  🚨 [PERSIST] StakeStateDB WaitCommitPayload failed: nomt_ffi: failed to commit payload[0m
+[ERROR][Oct 13 15:57:33]  🚨 [PERSIST] StakeStateDB WaitCommitPayload failed: nomt_ffi: failed to commit payload
+panic: FATAL: StakeStateDB async commit failed: nomt_ffi: failed to commit payload
+
+goroutine 108035 [running]:
+github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).WaitForPersistence.func1()
+	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_core.go:1187 +0x569
+created by github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).WaitForPersistence in goroutine 1024
+	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_core.go:1123 +0x158

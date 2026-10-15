@@ -72,7 +72,7 @@ def setup_fresh_cluster():
     stop_and_kill_bench()
     if not os.path.isdir(TEMPLATE_BASE):
         raise RuntimeError(f"Template base not found at {TEMPLATE_BASE}")
-    shutil.copytree(TEMPLATE_BASE, BENCH_BASE)
+    subprocess.run(["cp", "-a", TEMPLATE_BASE, BENCH_BASE], check=True)  # cp -a keeps sparse NOMT files sparse (shutil.copytree densified ~80 GB/validator and can fill the disk)
 
 def start_cluster():
     env = os.environ.copy()

@@ -1,0 +1,354 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "nomt_crash_hunt",
+      "command": "run_tps_counted.py sustained, fixed node binary, 20 runs (nomt_errors files empty for all 80 node-runs; no DEAD logs); derived_summary.csv generated from the JSON files; runs executed with an earlier uncommitted runner, committed afterwards",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "627a248935afda0618ae60e4a39571a31a2edc42",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-14T05:09:20Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "derived_summary.csv",
+          "sha256": "8da2a84c6242518ca23f560782ea42af7fbe55605d586d83f809a81cf859bf90",
+          "bytes": 1669
+        },
+        {
+          "path": "hunt_run10.json",
+          "sha256": "63bd7f9536f183708e1a7a942b4584cb96e5edf7f4c4762d5da6cb9a02733621",
+          "bytes": 137957
+        },
+        {
+          "path": "hunt_run10.log",
+          "sha256": "f7ea6907f3dabbc0b6c30a9ae60376a67e2b1e20ce35552e8e1ad899dc06e222",
+          "bytes": 4082
+        },
+        {
+          "path": "hunt_run10_post.json",
+          "sha256": "9eb16d0895d76dfadb01da750dfcfc17e1162f93e329ac1a6c74a8238c742990",
+          "bytes": 1056
+        },
+        {
+          "path": "hunt_run11.json",
+          "sha256": "64e8f2b3a4fcb140f376841edbbfe060e42fc554a8675df2cc7dd49fca2676c4",
+          "bytes": 145651
+        },
+        {
+          "path": "hunt_run11.log",
+          "sha256": "3d32137256fe1c7b74f23ba07d28de9e7e8f534297e0891e015cafca87371783",
+          "bytes": 4081
+        },
+        {
+          "path": "hunt_run11_post.json",
+          "sha256": "2aacd76f909ec3e90af3a75ca47ffcb565270a5795e1e05f9670a1519bac1116",
+          "bytes": 1056
+        },
+        {
+          "path": "hunt_run12.json",
+          "sha256": "06f65338e5917bdce0e7910fdc7df52163f811407f8ab7e0b804b76789511700",
+          "bytes": 150138
+        },
+        {
+          "path": "hunt_run12.log",
+          "sha256": "6a1bdcbda0d4fcec1ceedde70c2138db8fea7d9ca616bb9b2a4b24fabd94c947",
+          "bytes": 4084
+        },
+        {
+          "path": "hunt_run12_post.json",
+          "sha256": "fe8a44c74c471b4204b6eb326bebf89f0b2634f9ffb8c1fc6a7365b4878b4e64",
+          "bytes": 1056
+        },
+        {
+          "path": "hunt_run13.json",
+          "sha256": "51ed71ee623191f9cd3b8a2804682fd85b017a55a40995ac825bfcc25fc86f29",
+          "bytes": 150555
+        },
+        {
+          "path": "hunt_run13.log",
+          "sha256": "10abf325c831f3590c4779e140445f3fe3826f053024984a194ed69ece0e36d6",
+          "bytes": 4082
+        },
+        {
+          "path": "hunt_run13_post.json",
+          "sha256": "358d81db665b9cc628d9658dfd60f5e1bdd31d3a8c7fc9a95afc34075765f726",
+          "bytes": 1047
+        },
+        {
+          "path": "hunt_run14.json",
+          "sha256": "e5323d914f7dfa40c104ad9974adfcad7fc756414be1d7d4801fdcac31b19212",
+          "bytes": 170227
+        },
+        {
+          "path": "hunt_run14.log",
+          "sha256": "9f30630e91897a04948327e31f384ac20f822b94f695bd6012d64a0683f9e31a",
+          "bytes": 4085
+        },
+        {
+          "path": "hunt_run14_post.json",
+          "sha256": "348af9bc72129d523d8b77de740631ad740938e6ab74781c48ffecb84286ec22",
+          "bytes": 1056
+        },
+        {
+          "path": "hunt_run15.json",
+          "sha256": "f97445b07ae1f24635634821765775f79ea5444e4943374dc735054a16d555ab",
+          "bytes": 146864
+        },
+        {
+          "path": "hunt_run15.log",
+          "sha256": "ca8c7fc3003ffdcb1f505116eae225de377d0cc9a1f81e7b851b9e4b71b630eb",
+          "bytes": 4085
+        },
+        {
+          "path": "hunt_run15_post.json",
+          "sha256": "ff5a1ef3c45987dce14ccddad375b564f945440feb22fc5f24282eb4052e1b09",
+          "bytes": 1056
+        },
+        {
+          "path": "hunt_run16.json",
+          "sha256": "36a22097a7b5de366e45386b1f58332c337e5e617bec16868f9820f498defd40",
+          "bytes": 131517
+        },
+        {
+          "path": "hunt_run16.log",
+          "sha256": "bdda90f154abab0c37d763554bc72df48b3d21d8611732f89d9382f06c21d2dc",
+          "bytes": 4082
+        },
+        {
+          "path": "hunt_run16_post.json",
+          "sha256": "8ceb88a050efbbc2cd9a2a66eb4f130dbba79dcdeb579c9527a35bb752a7cc20",
+          "bytes": 1038
+        },
+        {
+          "path": "hunt_run17.json",
+          "sha256": "81c25eaf2a90de49064f93915803d57064b38d9184eb0ca05b1c032d3cc5c19b",
+          "bytes": 126119
+        },
+        {
+          "path": "hunt_run17.log",
+          "sha256": "865ac60fb8232c0ddf6b1304d1b70e82b2ed99a42728bc18bb74af7756599410",
+          "bytes": 4080
+        },
+        {
+          "path": "hunt_run17_post.json",
+          "sha256": "8d5e5ae01bd1fea04a57873ced3b8e64518c1d155f1c9209d4f7f81eb74a52a4",
+          "bytes": 1047
+        },
+        {
+          "path": "hunt_run18.json",
+          "sha256": "93009144b219475ef93dec4fbae149613c2ebc2e24b5aa50b68c47aa5474422e",
+          "bytes": 129667
+        },
+        {
+          "path": "hunt_run18.log",
+          "sha256": "069636117902e20f3e23d517b3c0e3b4fb7604647f8803d20d09bc81e12ecff6",
+          "bytes": 4082
+        },
+        {
+          "path": "hunt_run18_post.json",
+          "sha256": "beb6854dbe5092a523ea78290f637dbf3b2dd314112f84c6a4e97463b159c631",
+          "bytes": 1047
+        },
+        {
+          "path": "hunt_run19.json",
+          "sha256": "683394b39fb6ae8e910147bb898d12762b1211a93f60a504b0ca07387a91018d",
+          "bytes": 127110
+        },
+        {
+          "path": "hunt_run19.log",
+          "sha256": "fcbdfc58606d100574fee428d2fcda64f84464ff986f4f679d03c07186dec19e",
+          "bytes": 4082
+        },
+        {
+          "path": "hunt_run19_post.json",
+          "sha256": "2d2637749d855acd8ede06c855bbdc71cdb21ad0166be020e10ec1c03e14568c",
+          "bytes": 1047
+        },
+        {
+          "path": "hunt_run1.json",
+          "sha256": "2e9824ca8215ba3c4dbf44d6a59d9f0fa4e1c7026ab077c4c5b6172f2214c5aa",
+          "bytes": 131290
+        },
+        {
+          "path": "hunt_run1.log",
+          "sha256": "90fdce69612baae8398f5303f62dc67194865ba85b2bf87e7e8c4dece884dccd",
+          "bytes": 4082
+        },
+        {
+          "path": "hunt_run1_post.json",
+          "sha256": "91b9bc48a3fb775fb60f85d099c31db6123744758f253a550b7e3f104840a574",
+          "bytes": 1056
+        },
+        {
+          "path": "hunt_run20.json",
+          "sha256": "45ea5c921deeb304326d97dcd39d8476c9c371db5962396ef4882776f1513399",
+          "bytes": 151747
+        },
+        {
+          "path": "hunt_run20.log",
+          "sha256": "c8a2bdbb0f609119b68e2e78cad7710a412172eec5aaff6aac6d4ab0ab1226bb",
+          "bytes": 4085
+        },
+        {
+          "path": "hunt_run20_post.json",
+          "sha256": "d0be12066e27c9c92f1714b1ced5b350770f384ae9de8cf5f7eda59170d37272",
+          "bytes": 1056
+        },
+        {
+          "path": "hunt_run2.json",
+          "sha256": "c7ddd55750433904c152ff4dc77f835ee94707940bccc1c73d76e8c29db41226",
+          "bytes": 134720
+        },
+        {
+          "path": "hunt_run2.log",
+          "sha256": "df36682d49b1c537c45502c2d35f0664d5cf63521f862f0cf865a7bf535df3d1",
+          "bytes": 4082
+        },
+        {
+          "path": "hunt_run2_post.json",
+          "sha256": "ae2d75af4c07d03662d7b81d341216d78faab72e08f024fba882796f365a9074",
+          "bytes": 1047
+        },
+        {
+          "path": "hunt_run3.json",
+          "sha256": "240d9734c11ae39e1faffecb33604912311c47f7d68b28142e9a385b749c28c6",
+          "bytes": 162382
+        },
+        {
+          "path": "hunt_run3.log",
+          "sha256": "e307dd706284dbb082ea666488fb0f2cef76f4578083a5c3fd0237256e9fbcec",
+          "bytes": 4085
+        },
+        {
+          "path": "hunt_run3_post.json",
+          "sha256": "d5665f31601c3ea7e7b619a030937e004d83b831db7de808fec6f12ccf364289",
+          "bytes": 1056
+        },
+        {
+          "path": "hunt_run4.json",
+          "sha256": "a063d70b27d98f279d8ca0743670793feb9b060df0c4b807f593c87e3adad33e",
+          "bytes": 134672
+        },
+        {
+          "path": "hunt_run4.log",
+          "sha256": "b5f80c09654a1a7e070f90d083e62519920afdf0dfc6671e5922ab2652066846",
+          "bytes": 4080
+        },
+        {
+          "path": "hunt_run4_post.json",
+          "sha256": "d1dc85e1c29296c4f9b8fda4835512c31459a4f074b944d20e5fb9334f076716",
+          "bytes": 1056
+        },
+        {
+          "path": "hunt_run5.json",
+          "sha256": "8071580bffd08a3e4ac06ae63af9c1dfd4ca3d151306ac85f0c7cb215e4cb517",
+          "bytes": 128093
+        },
+        {
+          "path": "hunt_run5.log",
+          "sha256": "28446c5ad489c397c3544d0d54ec7897f53449f4af54b934e47b93d271cb8c7f",
+          "bytes": 4075
+        },
+        {
+          "path": "hunt_run5_post.json",
+          "sha256": "def06c704f6cb2a52855b763ed5080a99bb689bb74b6d155686241c3bfbd3b07",
+          "bytes": 1038
+        },
+        {
+          "path": "hunt_run6.json",
+          "sha256": "78f4140bc7fdf42aa6b8482a922c700846007fbfaac75eca807b9f25d58ed642",
+          "bytes": 126261
+        },
+        {
+          "path": "hunt_run6.log",
+          "sha256": "043e04d790e2355445b730aed05252237f9cef06ee82a889e7d419c19249f25d",
+          "bytes": 4082
+        },
+        {
+          "path": "hunt_run6_post.json",
+          "sha256": "faf77f10667f434e05b87eb3714699914f192ee9c6c643b95fa76fe71fcaf405",
+          "bytes": 1047
+        },
+        {
+          "path": "hunt_run7.json",
+          "sha256": "9859688de6b001fc4949f28f01d52a85b01cd166c75c639c1e2804c67a9ea3e0",
+          "bytes": 135271
+        },
+        {
+          "path": "hunt_run7.log",
+          "sha256": "80be84bd202ab730141b3aa3dc6d89308af4f455b3fea688f3989382d246508a",
+          "bytes": 4080
+        },
+        {
+          "path": "hunt_run7_post.json",
+          "sha256": "974c203cc7e6dd595bbc45c46c6a0aa8f27c11f5c3abe56e03626a431380ce2b",
+          "bytes": 1056
+        },
+        {
+          "path": "hunt_run8.json",
+          "sha256": "7fa570613fd8fc4f0acd9424afa872a77270ec3a3bb484410b5d2868305ac883",
+          "bytes": 126298
+        },
+        {
+          "path": "hunt_run8.log",
+          "sha256": "9a0503940a507c20e0736e7406df6faf59133ff5849afaead5f21dbe0784dc3d",
+          "bytes": 4077
+        },
+        {
+          "path": "hunt_run8_post.json",
+          "sha256": "7f9548d0ed867c4a8f27edfe9a4d27ae726ab4b71026b3bca3d407b9cd453ede",
+          "bytes": 1047
+        },
+        {
+          "path": "hunt_run9.json",
+          "sha256": "f40fbe4c29a1b98e35ad5ea1d5de1ed43699446c7fc6a032e104b370da0c5de5",
+          "bytes": 125176
+        },
+        {
+          "path": "hunt_run9.log",
+          "sha256": "15750ce6d913ba65108e7afae88096951933477162eb729033aaad3d0ebe8c52",
+          "bytes": 4081
+        },
+        {
+          "path": "hunt_run9_post.json",
+          "sha256": "8f6dc0e6bbd7769240985259a230f4f0daab436cd55dc79a60a3de7906dfed05",
+          "bytes": 1047
+        },
+        {
+          "path": "job.log",
+          "sha256": "865e9cd71cf672f7d9bd27280cc1f371e11868f6c84dceed866cefc282d7edcc",
+          "bytes": 25315
+        }
+      ],
+      "extract": [
+        {
+          "name": "hunt_counted_mean",
+          "file": "derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean"
+        },
+        {
+          "name": "hunt_counted_sd",
+          "file": "derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "sd"
+        },
+        {
+          "name": "hunt_legacy_mean",
+          "file": "derived_summary.csv",
+          "csv_col": "legacy_effective_tps",
+          "stat": "mean"
+        },
+        {
+          "name": "hunt_runs",
+          "file": "derived_summary.csv",
+          "csv_col": "run",
+          "stat": "count"
+        }
+      ]
+    }
+  ],
+  "report": "note/nomt_crash_hunt_report_20261013.md"
+}

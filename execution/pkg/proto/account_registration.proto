@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package account_registration;
+
+option go_package = "github.com/meta-node-blockchain/meta-node/pkg/proto";
+
+// RegisterAccountRequest - Request đăng ký tài khoản qua TCP
+message RegisterAccountRequest {
+    bytes address = 1;     // 20 bytes account address
+    bytes signature = 2;   // 65 bytes ECDSA signature
+}
+
+// RegistrationResult - Kết quả đăng ký tài khoản (Ack, Push Notification, Query Status)
+message RegistrationResult {
+    string status = 1;       // "CONFIRMED", "REJECTED", "FAILED", "PENDING"
+    string address = 2;      // hex string "0x..."
+    string home_cluster = 3; // hex string "0x..."
+    string reason = 4;       // error / failure reason nếu có
+}

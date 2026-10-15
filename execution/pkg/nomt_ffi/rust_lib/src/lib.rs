@@ -695,13 +695,13 @@ pub unsafe extern "C" fn nomt_session_commit(
                     0
                 }
                 Err(e) => {
-                    eprintln!("[nomt_ffi] nomt_session_commit: commit failed: {}", e);
+                    eprintln!("[nomt_ffi] nomt_session_commit: commit failed: {:#}", e);
                     -1
                 }
             }
         }
         Err(e) => {
-            eprintln!("[nomt_ffi] nomt_session_commit: finish failed: {}", e);
+            eprintln!("[nomt_ffi] nomt_session_commit: finish failed: {:#}", e);
             -1
         }
     }
@@ -768,7 +768,7 @@ pub unsafe extern "C" fn nomt_session_finish(
             Box::into_raw(finished_handle)
         }
         Err(e) => {
-            eprintln!("[nomt_ffi] nomt_session_finish failed: {}", e);
+            eprintln!("[nomt_ffi] nomt_session_finish failed: {:#}", e);
             ptr::null_mut()
         }
     }
@@ -797,7 +797,7 @@ pub unsafe extern "C" fn nomt_commit_payload(
     match finished_session.finished.commit(&handle.db) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("[nomt_ffi] nomt_commit_payload failed: {}", e);
+            eprintln!("[nomt_ffi] nomt_commit_payload failed: {:#}", e);
             -1
         }
     }
@@ -1287,7 +1287,7 @@ pub unsafe extern "C" fn state_db_commit(
                 0
             }
             Err(e) => {
-                eprintln!("[nomt_ffi] state_db_commit failed: {}", e);
+                eprintln!("[nomt_ffi] state_db_commit failed: {:#}", e);
                 -1
             }
         }

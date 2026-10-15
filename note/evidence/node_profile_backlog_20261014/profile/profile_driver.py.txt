@@ -1,0 +1,14 @@
+import random, subprocess, os, sys
+S="/tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad"
+out=f"{S}/out_profile"; os.makedirs(out,exist_ok=True)
+# (volume txs, profile_at seconds after tool start): profile in the middle of the drain, i.e. a few tens of seconds after injection ends
+plan=[(4000000,150),(1000000,40),(4000000,150),(1000000,40)]
+rnd=random.Random(20261017); rnd.shuffle(plan)
+open(f"{out}/order.txt","w").write("\n".join(f"{v} {a}" for v,a in plan)+"\n")
+for n,(v,a) in enumerate(plan,1):
+    tag=f"prof_v{v//1000}k_n{n}"
+    print(f"### PROFILE {tag}",flush=True)
+    p=subprocess.run(["python3","-I","scripts/test/evidence/run_tps_counted.py","--mode","sustained","--runs","1","--tag",tag,"--bins",f"{S}/bins_new","--out",out,"--duration","300","--max-txs",str(v),"--batch","1000","--max-wait-sec","900","--profile-at",str(a)],cwd="/home/abc/chain-n/metanode/execution",capture_output=True,text=True,errors="replace")
+    open(f"{out}/{tag}.stdout","w").write(p.stdout+p.stderr)
+    print(f"### PROFILE {tag} exit={p.returncode}",flush=True)
+print("PROFILE-ALL-DONE",flush=True)

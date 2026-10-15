@@ -1,0 +1,46 @@
+[02:13:52] 
+[02:13:52] === E1: stuck, abort after 3 s, Restart=on-failure (deploy/ansible template value), RestartSec=2 ===
+[02:13:57]   wdexp-e1 t+5s: Result=core-dump NRestarts=0 ExecMainCode=3 ExecMainStatus=6 ActiveState=activating SubState=auto-restart InvocationID=a43b3828ac3a438089c3f7533d684d57 
+[02:14:02]   wdexp-e1 t+10s: Result=success NRestarts=1 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=1cf524d45957498eb25b24b9f9951bca 
+[02:14:07]   wdexp-e1 t+15s: Result=success NRestarts=2 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=fee644ddbfbf422ab27bd3f0fc4bfed5 
+[02:14:12]   wdexp-e1 t+20s: Result=success NRestarts=3 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=6e646f11b535482898608982eb91bfd3 
+[02:14:13] 
+[02:14:13] === E2: stuck, abort after 3 s, Restart=always (ansible_clusters template value), RestartSec=3 ===
+[02:14:18]   wdexp-e2 t+5s: Result=core-dump NRestarts=0 ExecMainCode=3 ExecMainStatus=6 ActiveState=activating SubState=auto-restart InvocationID=75b162d45f614e5aa8ccc71408e1d92f 
+[02:14:23]   wdexp-e2 t+10s: Result=success NRestarts=1 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=271c2b7c7e7f4c2aaf953e081a87c52a 
+[02:14:28]   wdexp-e2 t+15s: Result=success NRestarts=2 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=a62388f9907f4a16a7da5d8c4dfbb7f6 
+[02:14:33]   wdexp-e2 t+20s: Result=core-dump NRestarts=2 ExecMainCode=3 ExecMainStatus=6 ActiveState=activating SubState=auto-restart InvocationID=a62388f9907f4a16a7da5d8c4dfbb7f6 
+[02:14:33] 
+[02:14:33] === E3 (control): stuck but METANODE_EXEC_STUCK_ABORT_SECS=0 (disabled) => NO restart expected, process stays hung ===
+[02:14:38]   wdexp-e3 t+5s: Result=success NRestarts=0 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=0eedd5a214c84d70a64cb50956176504 
+[02:14:43]   wdexp-e3 t+10s: Result=success NRestarts=0 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=0eedd5a214c84d70a64cb50956176504 
+[02:14:48]   wdexp-e3 t+15s: Result=success NRestarts=0 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=0eedd5a214c84d70a64cb50956176504 
+[02:14:48] 
+[02:14:48] === E4 (control): healthy phase (watchdog stopped after 0.5 s), abort_secs=3 => NO restart expected ===
+[02:14:53]   wdexp-e4 t+5s: Result=success NRestarts=0 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=faa3695a1cbe4f99a419fb017e713153 
+[02:14:58]   wdexp-e4 t+10s: Result=success NRestarts=0 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=faa3695a1cbe4f99a419fb017e713153 
+[02:15:03]   wdexp-e4 t+15s: Result=success NRestarts=0 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=faa3695a1cbe4f99a419fb017e713153 
+[02:15:03] 
+[02:15:03] === E5: crash loop trips StartLimit (StartLimitIntervalSec=300, StartLimitBurst=5, RestartSec=1, abort 1 s) ===
+[02:15:08]   wdexp-e5 t+5s: Result=success NRestarts=1 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=79a62fc54a9a4d03adcd6472778468f9 
+[02:15:13]   wdexp-e5 t+10s: Result=success NRestarts=3 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=afd5cba65f5d4f759f3a48ace0fd5371 
+[02:15:19]   wdexp-e5 t+15s: Result=success NRestarts=4 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=a1b696bbdc4b47a49ebab827851f9d60 
+[02:15:24]   wdexp-e5 t+20s: Result=core-dump NRestarts=5 ExecMainCode=3 ExecMainStatus=6 ActiveState=failed SubState=failed InvocationID=a1b696bbdc4b47a49ebab827851f9d60 
+[02:15:29]   wdexp-e5 t+25s: Result=core-dump NRestarts=5 ExecMainCode=3 ExecMainStatus=6 ActiveState=failed SubState=failed InvocationID=a1b696bbdc4b47a49ebab827851f9d60 
+[02:15:34]   wdexp-e5 t+30s: Result=core-dump NRestarts=5 ExecMainCode=3 ExecMainStatus=6 ActiveState=failed SubState=failed InvocationID=a1b696bbdc4b47a49ebab827851f9d60 
+[02:15:34]   E5 final: Result=core-dump NRestarts=5 ExecMainCode=3 ExecMainStatus=6 ActiveState=failed SubState=failed InvocationID=a1b696bbdc4b47a49ebab827851f9d60 
+[02:15:34] 
+[02:15:34] === E6: dependent unit with Requires=+After= on the stuck unit (mirrors metanode-consensus -> metanode-execution) ===
+[02:15:39]   t+4s exec: Result=core-dump NRestarts=0 ExecMainCode=3 ExecMainStatus=6 ActiveState=activating SubState=auto-restart InvocationID=235eb24d00024c9c953e3c504bbc15b6 
+[02:15:39]   t+4s cons: Result=success NRestarts=0 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=96f507425f6149d8b66e1c41860842e7 
+[02:15:43]   t+8s exec: Result=success NRestarts=1 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=766741e1f8404029a757bdd410009c4f 
+[02:15:43]   t+8s cons: Result=success NRestarts=0 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=75ddf057ff90462cbfe4a6aebad7da04 
+[02:15:47]   t+12s exec: Result=success NRestarts=2 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=0362509500694e1481d2e7ff2992966c 
+[02:15:47]   t+12s cons: Result=success NRestarts=0 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=e43ebacd2b094933b33cd56aec4dfbce 
+[02:15:51]   t+16s exec: Result=core-dump NRestarts=2 ExecMainCode=3 ExecMainStatus=6 ActiveState=activating SubState=auto-restart InvocationID=0362509500694e1481d2e7ff2992966c 
+[02:15:51]   t+16s cons: Result=success NRestarts=0 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=e43ebacd2b094933b33cd56aec4dfbce 
+[02:15:55]   t+20s exec: Result=success NRestarts=3 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=b514681ed81349588f744bf8ddc7f83f 
+[02:15:55]   t+20s cons: Result=success NRestarts=0 ExecMainCode=0 ExecMainStatus=0 ActiveState=active SubState=running InvocationID=36cdf99e7957479c944ca7c19390b1a8 
+[02:15:55] 
+[02:15:55] environment: 6.8.0-139-generic; systemd 255 (255.4-1ubuntu8.17)
+[02:15:55] done
