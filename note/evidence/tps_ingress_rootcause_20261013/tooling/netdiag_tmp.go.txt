@@ -1,0 +1,25 @@
+package network
+
+import (
+	"sync/atomic"
+	"time"
+
+	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+)
+
+// TEMPORARY diagnostics (not for commit): per-stage counters of SendRawTransactions messages.
+var netDiagA, netDiagB, netDiagC, netDiagD, netDiagE atomic.Uint64
+
+func init() {
+	go func() {
+		var last [5]uint64
+		for {
+			time.Sleep(5 * time.Second)
+			cur := [5]uint64{netDiagA.Load(), netDiagB.Load(), netDiagC.Load(), netDiagD.Load(), netDiagE.Load()}
+			if cur != last {
+				logger.Info("[NETDIAG] readLoop_decoded=%d readLoop_enqueued=%d dispatch_in=%d dispatch_enqueued=%d worker_handled=%d", cur[0], cur[1], cur[2], cur[3], cur[4])
+				last = cur
+			}
+		}
+	}()
+}

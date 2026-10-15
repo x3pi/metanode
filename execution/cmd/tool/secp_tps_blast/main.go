@@ -78,6 +78,7 @@ type Config struct {
 	TargetPIDs   []string
 	// Measurement controls (only decide when the MEASUREMENT stops; never influence the system under test)
 	QuietSec      int
+	MaxTxs        int // sustained mode: stop injecting after this many txs (0 = only the duration limit)
 	MaxWaitSec    int
 	ParityWaitSec int
 	PollMs        int
@@ -379,6 +380,7 @@ func main() {
 		flagGasPrice     = flag.Int64("gas-price", 100000, "Gas price in wei")
 		flagVerifyParity = flag.Bool("verify-parity", true, "Verify 100% Zero-Fork parity across all online nodes")
 		flagReport       = flag.String("report", "", "File path to save JSON benchmark report")
+		flagMaxTxs       = flag.Int("max-txs", 0, "Sustained mode: stop injecting after about this many txs (0 = only -duration limits the run; overshoot is at most workers x batch)")
 		flagQuiet        = flag.Int("quiet-sec", 8, "Measurement stops after this many seconds without a tx-bearing block (does not affect the system)")
 		flagMaxWait      = flag.Int("max-wait-sec", 120, "Hard cap for the post-injection measurement wait, seconds")
 		flagParityWait   = flag.Int("parity-wait-sec", 30, "How long every validator may take to reach the reference end block before parity is reported INCOMPLETE")
@@ -565,6 +567,7 @@ func main() {
 		RateLimit:     *flagRateLimit,
 		TargetPIDs:    targetPIDs,
 		QuietSec:      *flagQuiet,
+		MaxTxs:        *flagMaxTxs,
 		MaxWaitSec:    *flagMaxWait,
 		ParityWaitSec: *flagParityWait,
 		PollMs:        *flagPollMs,
@@ -1121,6 +1124,11 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 	deadline := tBlast0.Add(time.Duration(cfg.DurationSec) * time.Second)
 
 	var totalSubmitted atomic.Uint64
+	var sendErrBatches, sendAbandonedTxs atomic.Uint64 // diagnostics: failed SendBatch calls / txs whose retries ran out at the deadline
+	// blastActive is true while workers should keep injecting: before the deadline and, if -max-txs is set, below it.
+	blastActive := func() bool {
+		return time.Now().Before(deadline) && (cfg.MaxTxs <= 0 || totalSubmitted.Load() < uint64(cfg.MaxTxs))
+	}
 	type SampleTx struct {
 		Hash   common.Hash
 		SentAt time.Time
@@ -1255,10 +1263,10 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 
 			accIdx := 0
 			sampleCounter := 0
-			for time.Now().Before(deadline) {
+			for blastActive() {
 				chunkStart := time.Now()
 				txsChunk := make([]*types.Transaction, 0, batchSize)
-				for len(txsChunk) < batchSize && time.Now().Before(deadline) {
+				for len(txsChunk) < batchSize && blastActive() {
 					acc := workerAccs[accIdx%len(workerAccs)]
 					accIdx++
 
@@ -1307,14 +1315,21 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 				if (cfg.Mode == "tcp" || cfg.Mode == "both") && len(tcpClients) > 0 {
 					client := tcpClients[workerID%len(tcpClients)]
 					if err := client.SendBatch(txsChunk); err != nil {
+						sendErrBatches.Add(1)
+						abandoned := true
 						// The nonces of this chunk are already consumed, so a failed send must be retried with the SAME
 						// chunk. Moving on would leave a nonce gap and every later tx of these senders could never run.
 						for time.Now().Before(deadline) {
 							time.Sleep(10 * time.Millisecond)
 							if client.SendBatch(txsChunk) == nil {
 								totalSubmitted.Add(uint64(len(txsChunk)))
+								abandoned = false
 								break
 							}
+							sendErrBatches.Add(1)
+						}
+						if abandoned {
+							sendAbandonedTxs.Add(uint64(len(txsChunk)))
 						}
 					} else {
 						totalSubmitted.Add(uint64(len(txsChunk)))
@@ -1346,6 +1361,7 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 	injectDur := time.Since(tBlast0)
 	tInjectEnd := tBlast0.Add(injectDur)
 	subTxs := int(totalSubmitted.Load())
+	fmt.Printf("   • SendBatch diagnostics: failed calls=%d, txs abandoned after retries=%d\n", sendErrBatches.Load(), sendAbandonedTxs.Load())
 	injectTPS := float64(subTxs) / injectDur.Seconds()
 	fmt.Printf("\n⚡ Injected total %d TXs over %v (Injection TPS: %.2f tx/s)\n", subTxs, injectDur, injectTPS)
 

@@ -1,0 +1,501 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "tps_ingress_rootcause_hunt4_run2",
+      "command": "run_tps_counted.py sustained, node build with temporary stage counters (netdiag v1); run 2 lossy",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "1cea5f0e116abdb57bc605b450ca15fbaec42f99",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T16:48:42Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "rootcause_hunt4_run2/hunt_run2.json",
+          "sha256": "87507e5d953a86c19c9c1d019662a17b44691ad78d0ee5e555998cb427510ebe",
+          "bytes": 143369
+        },
+        {
+          "path": "rootcause_hunt4_run2/hunt_run2.log",
+          "sha256": "d264c66a401caf4884c63948653166b255f1e585b5846a5cb6991565364489f1",
+          "bytes": 4096
+        },
+        {
+          "path": "rootcause_hunt4_run2/hunt_run2_val0_netdiag.txt",
+          "sha256": "8a018fdaf71cdf75cc9ff14528c1856fc1e2272292c97297e6e6c8c58975aa19",
+          "bytes": 429
+        },
+        {
+          "path": "rootcause_hunt4_run2/hunt_run2_val1_netdiag.txt",
+          "sha256": "6635dfc7e1dbebccbc40d6b97e357ca09f519082bae95f8b9d401c8a84f723ac",
+          "bytes": 429
+        },
+        {
+          "path": "rootcause_hunt4_run2/hunt_run2_val2_netdiag.txt",
+          "sha256": "afd8c40e7322f6f843a3fe8185dbffd6c7e1edfb13649c73ecbf655322197464",
+          "bytes": 429
+        },
+        {
+          "path": "rootcause_hunt4_run2/hunt_run2_val3_netdiag.txt",
+          "sha256": "c23e76efdbf652d295b2e04ab9b15a670977c37d05184b5690e006a0cfbd4c50",
+          "bytes": 429
+        },
+        {
+          "path": "tooling/netdiag_tmp.go.txt",
+          "sha256": "ad5bd9aaa51183947ec73a6a15e4fc80a5716721e3029b4a3bbaf0f4bad27d32",
+          "bytes": 679
+        }
+      ]
+    },
+    {
+      "id": "tps_ingress_rootcause_hunt5_run2",
+      "command": "run_tps_counted.py sustained, node build with stage counters + HandleConnection exit log (tooling/netdiag_v2.patch.txt); run 2 lossy",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "1cea5f0e116abdb57bc605b450ca15fbaec42f99",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T16:48:42Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "rootcause_hunt5_run2/hunt_run2.json",
+          "sha256": "91459860646cec149c7fcb59742a3a19627e5333753b5dc0af8d59195584dccd",
+          "bytes": 133035
+        },
+        {
+          "path": "rootcause_hunt5_run2/hunt_run2.log",
+          "sha256": "b423f59b81e580bfad7a4b2003b90a8ff09e0fcc9fec757918224f8362c0104b",
+          "bytes": 4088
+        },
+        {
+          "path": "rootcause_hunt5_run2/hunt_run2_val0_netdiag.txt",
+          "sha256": "9d081406eeab786e02d5d3b488c9169238adad56467c984000963432174f2eb3",
+          "bytes": 7119
+        },
+        {
+          "path": "rootcause_hunt5_run2/hunt_run2_val1_netdiag.txt",
+          "sha256": "5cbaea2d79c974751b5210c649ad3174f735d21484386e21772ddc93279a1f00",
+          "bytes": 7950
+        },
+        {
+          "path": "rootcause_hunt5_run2/hunt_run2_val2_netdiag.txt",
+          "sha256": "402b4a9d4059f3c95bb23ffcaee3adfaca178436db39588ddf2946bad4acf5d8",
+          "bytes": 10316
+        },
+        {
+          "path": "rootcause_hunt5_run2/hunt_run2_val3_netdiag.txt",
+          "sha256": "05bb721df3c228f6962438067aa909d0cfedf9bb0a29b6a4f3e0c73085b8c65b",
+          "bytes": 8506
+        },
+        {
+          "path": "tooling/netdiag_v2.patch.txt",
+          "sha256": "b16a1f590734dfd9a2a7561dd0d78b6221f4214db8febd7a81a4547ffa651d67",
+          "bytes": 3325
+        }
+      ]
+    },
+    {
+      "id": "tps_ingress_prefix",
+      "command": "run_tps_counted.py sustained, pre-fix batches hunt..hunt5 (JSON+log)",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "1cea5f0e116abdb57bc605b450ca15fbaec42f99",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T16:48:42Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "prefix_hunt/hunt_run1.json",
+          "sha256": "778bf832f5e5f67c0135db79f248872f7c8c9be5a4686fab74014847bd4e5a69",
+          "bytes": 162651
+        },
+        {
+          "path": "prefix_hunt/hunt_run1.log",
+          "sha256": "d4127962132713737deddd87bcf2e17672a234af07a07306d75386ae2b48055d",
+          "bytes": 4081
+        },
+        {
+          "path": "prefix_hunt/hunt_run2.json",
+          "sha256": "2e525c3397aa98aa284f5699be95daabad1087b8264823b37cbcd2e354ed3e1d",
+          "bytes": 128294
+        },
+        {
+          "path": "prefix_hunt/hunt_run2.log",
+          "sha256": "d4731216af7fd68e84f400883716faa0cd0d99692ac03defa8605e051da37656",
+          "bytes": 4077
+        },
+        {
+          "path": "prefix_hunt/hunt_run3.json",
+          "sha256": "907a7aa1a29d76b8c9f8209c9e8a3a8585f11b4b47b8511e573607241ff2ba96",
+          "bytes": 134128
+        },
+        {
+          "path": "prefix_hunt/hunt_run3.log",
+          "sha256": "f236a2a0fd66987a0981c99eccb4be6e8d2da3d5fbff0cc2c82b78a2603a2dde",
+          "bytes": 4093
+        },
+        {
+          "path": "prefix_hunt2/hunt_run1.json",
+          "sha256": "833db5f8fe17446424a0907186262b146e31bbf510318f2b6e3a7064e8981d24",
+          "bytes": 130462
+        },
+        {
+          "path": "prefix_hunt2/hunt_run1.log",
+          "sha256": "86988ea500319518f0e71d3a310b6290b83c176f283cd39fd9c8ef27c7435090",
+          "bytes": 4078
+        },
+        {
+          "path": "prefix_hunt2/hunt_run2.json",
+          "sha256": "2259c588ed5316538ae868e3d06d493531ed714e389c70f316c6d761ae3a1d35",
+          "bytes": 139863
+        },
+        {
+          "path": "prefix_hunt2/hunt_run2.log",
+          "sha256": "53ec558649bebae32979a54a0ee475d95adc0f4eceac8625fc0f25e518a50fe4",
+          "bytes": 4085
+        },
+        {
+          "path": "prefix_hunt2/hunt_run3.json",
+          "sha256": "1c6d9ec1c83a9dba9b4654b598f66bd5a143cd489bc57f1b24de9f5b73948639",
+          "bytes": 129259
+        },
+        {
+          "path": "prefix_hunt2/hunt_run3.log",
+          "sha256": "534598e2f57ddb53db9cae493fff2d1bda248ad940608aa5285878a5014d494d",
+          "bytes": 4079
+        },
+        {
+          "path": "prefix_hunt2/hunt_run4.json",
+          "sha256": "6d3213e2e14de15061acaa3f066714d5c713e5a6d1f7f1a9bc3e987fb89b1b95",
+          "bytes": 116858
+        },
+        {
+          "path": "prefix_hunt2/hunt_run4.log",
+          "sha256": "fdc424d58f2bc9b95e0cabb02882bb45060eed0fc61ec890140ab22a895117ac",
+          "bytes": 4093
+        },
+        {
+          "path": "prefix_hunt3/hunt_run1.json",
+          "sha256": "e51fc0fa9ab8cba3f51bb8e10da69cbbb68c6c285245ba0dcd189cbd4e62ffeb",
+          "bytes": 137292
+        },
+        {
+          "path": "prefix_hunt3/hunt_run1.log",
+          "sha256": "7507667a2b29687bf2ba73535057d13aa4ef04381c5138d6bb501cb0f233a0f5",
+          "bytes": 4081
+        },
+        {
+          "path": "prefix_hunt3/hunt_run2.json",
+          "sha256": "7860181ac636c4b09ec2b26a5e8114e37764b2b6ad8e5af170fe53a0d8a13d50",
+          "bytes": 130089
+        },
+        {
+          "path": "prefix_hunt3/hunt_run2.log",
+          "sha256": "e0a5ebf12453e1cb253788d881bd712d41e3db5a350c459a3ee0eb2ed3d5431f",
+          "bytes": 4088
+        },
+        {
+          "path": "prefix_hunt4/hunt_run1.json",
+          "sha256": "524f6e17d226c6aa767cc40224f2615233988fb80c43b5978dbf6f300c4ab95b",
+          "bytes": 124397
+        },
+        {
+          "path": "prefix_hunt4/hunt_run1.log",
+          "sha256": "2ca9a0af3bf35019662afb99a756f13903f37d299a1a36c0b28643a3e3f1d74b",
+          "bytes": 4078
+        },
+        {
+          "path": "prefix_hunt4/hunt_run2.json",
+          "sha256": "87507e5d953a86c19c9c1d019662a17b44691ad78d0ee5e555998cb427510ebe",
+          "bytes": 143369
+        },
+        {
+          "path": "prefix_hunt4/hunt_run2.log",
+          "sha256": "d264c66a401caf4884c63948653166b255f1e585b5846a5cb6991565364489f1",
+          "bytes": 4096
+        },
+        {
+          "path": "prefix_hunt5/hunt_run1.json",
+          "sha256": "2494f121d09a7bf37404a32ecd4cdd2a4e7d25f498b7c089bd99272d7ac8c5cb",
+          "bytes": 125255
+        },
+        {
+          "path": "prefix_hunt5/hunt_run1.log",
+          "sha256": "fe3342118d54d3bcfab093d360375d1785003279c1a7888402ba8132af42214b",
+          "bytes": 4077
+        },
+        {
+          "path": "prefix_hunt5/hunt_run2.json",
+          "sha256": "91459860646cec149c7fcb59742a3a19627e5333753b5dc0af8d59195584dccd",
+          "bytes": 133035
+        },
+        {
+          "path": "prefix_hunt5/hunt_run2.log",
+          "sha256": "b423f59b81e580bfad7a4b2003b90a8ff09e0fcc9fec757918224f8362c0104b",
+          "bytes": 4088
+        }
+      ]
+    },
+    {
+      "id": "tps_ingress_fix_validation",
+      "command": "run_tps_counted.py sustained x14 with the fixed node binary (commit 1cea5f0e source); run 11 invalid (node crash)",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "1cea5f0e116abdb57bc605b450ca15fbaec42f99",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T16:48:43Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "fix_validation/hunt_run10.json",
+          "sha256": "a772d97056df4874ad5e84f0eb029297e2e19a1443a250594f894f4e77334589",
+          "bytes": 130899
+        },
+        {
+          "path": "fix_validation/hunt_run10.log",
+          "sha256": "c7a1860118e777efda36696fb365af9f86e982976be0dacf99c639a3072e04e2",
+          "bytes": 4084
+        },
+        {
+          "path": "fix_validation/hunt_run10_post.json",
+          "sha256": "f1d84473ce3caca774633286c9674fa68dc242d5d19b3fb2b31173013c515a24",
+          "bytes": 1056
+        },
+        {
+          "path": "fix_validation/hunt_run11.json",
+          "sha256": "9a7c821dc21d17c2e41d9aa02d62c44aea0b915a3563f7610c5d6001164e17f0",
+          "bytes": 90909
+        },
+        {
+          "path": "fix_validation/hunt_run11.log",
+          "sha256": "5f1977ac07478c10f69289ec43798399a78b8566fa799a007ed8b0ec8aeabc55",
+          "bytes": 3861
+        },
+        {
+          "path": "fix_validation/hunt_run11_post.json",
+          "sha256": "cf9ce67ca29e1eaabc5eee68fc173a1a35d33f9f00a4915b234753d1283408fd",
+          "bytes": 1434
+        },
+        {
+          "path": "fix_validation/hunt_run12.json",
+          "sha256": "4c74f339eca7166cab30497a19ba248fda0ec600fe9300edf203caf04b8279c2",
+          "bytes": 126916
+        },
+        {
+          "path": "fix_validation/hunt_run12.log",
+          "sha256": "45637deef2bc4bff218fd57d499735e55a28e75594ee30b81e6a79319adcf4cf",
+          "bytes": 4076
+        },
+        {
+          "path": "fix_validation/hunt_run12_post.json",
+          "sha256": "13e5827326567aff3dd8d3646261b8ec8aa93c36b4a264b7c6ab2db1218bafa3",
+          "bytes": 1047
+        },
+        {
+          "path": "fix_validation/hunt_run13.json",
+          "sha256": "a0791a684aa609806798caa2c39094904ff8c8a7c2e450f67d6f045b92c62f75",
+          "bytes": 138829
+        },
+        {
+          "path": "fix_validation/hunt_run13.log",
+          "sha256": "d85a2d271d9b5f1af0d55e1c106a1ba55b00c0d03cfb41720f04d8e729f0e917",
+          "bytes": 4076
+        },
+        {
+          "path": "fix_validation/hunt_run13_post.json",
+          "sha256": "4944f8d1788b4d07ab8e227524f18438f35f694c2044bcd7f8b514ec78a245a1",
+          "bytes": 1038
+        },
+        {
+          "path": "fix_validation/hunt_run14.json",
+          "sha256": "893df4a69436f260f88df5724cb2b53eb20e30623830e59e687c357e1bdba06c",
+          "bytes": 139928
+        },
+        {
+          "path": "fix_validation/hunt_run14.log",
+          "sha256": "2ad054ab95482393d00523afb4d8f1572d35435f3ef6ce1387f9083d0900d5fa",
+          "bytes": 4084
+        },
+        {
+          "path": "fix_validation/hunt_run14_post.json",
+          "sha256": "33b6013c2f9a03c9009262d5ef6c9d42ba5a07dbee412acd8cfe30cacb6a6682",
+          "bytes": 1056
+        },
+        {
+          "path": "fix_validation/hunt_run1.json",
+          "sha256": "501c2a0d4b6dfe646073ce25e0a934179928a089f9f07e8a114f8f95980358d6",
+          "bytes": 144124
+        },
+        {
+          "path": "fix_validation/hunt_run1.log",
+          "sha256": "fea0899197f5b9cbf8cb051fe301a9fc7350d92277bbbbe20791f8275b557239",
+          "bytes": 4081
+        },
+        {
+          "path": "fix_validation/hunt_run1_post.json",
+          "sha256": "54fd7ae34f5c1b635d8e1368bafb3736020311bf88aaaa09b8d815dbf4f58265",
+          "bytes": 1056
+        },
+        {
+          "path": "fix_validation/hunt_run2.json",
+          "sha256": "47e19d5a398702512fc55093924f73ccbfe015c6fe90714deaece24ec57c7f69",
+          "bytes": 133597
+        },
+        {
+          "path": "fix_validation/hunt_run2.log",
+          "sha256": "094e8ef5fed6222f9b3196b41e7745e2b0d2af490e55bf3a506adb4bc21e8e0b",
+          "bytes": 4082
+        },
+        {
+          "path": "fix_validation/hunt_run2_post.json",
+          "sha256": "cdf3f32f8b3734f4a53ecfc1fff028dd8d600a7c1026f562df8e0f1627c107a3",
+          "bytes": 1056
+        },
+        {
+          "path": "fix_validation/hunt_run3.json",
+          "sha256": "2df3a1bc8accc0188fccbf1031b6e0807d3e9fcd340f6d7e4b913508c90f2115",
+          "bytes": 122700
+        },
+        {
+          "path": "fix_validation/hunt_run3.log",
+          "sha256": "741714bbd5fe6ca79399360d2a458720a10945e1a248512d1625ab38970135e4",
+          "bytes": 4078
+        },
+        {
+          "path": "fix_validation/hunt_run3_post.json",
+          "sha256": "1f4422f904071486280241d84033c469ba660d267dd3520d11de3ff0ac7c6523",
+          "bytes": 1038
+        },
+        {
+          "path": "fix_validation/hunt_run4.json",
+          "sha256": "351e72cc2b0ae05bb41cec8f5269284072afdadf346ad798511a1e2efe69bde3",
+          "bytes": 136747
+        },
+        {
+          "path": "fix_validation/hunt_run4.log",
+          "sha256": "9c235ffaceaebe057e7b759402366559d5b267ae8047b9dfab82e89a0ee9655b",
+          "bytes": 4082
+        },
+        {
+          "path": "fix_validation/hunt_run4_post.json",
+          "sha256": "d682dd768ebb1941508bfde7a9629f7f5874594eb4849564c05f98775ac5586a",
+          "bytes": 1056
+        },
+        {
+          "path": "fix_validation/hunt_run5.json",
+          "sha256": "1d00f26b5f45df848d9addace74b5f2fd05b8770f67d99cee32d8201e69797ea",
+          "bytes": 138704
+        },
+        {
+          "path": "fix_validation/hunt_run5.log",
+          "sha256": "efbc1c1470784b97db4c6dc048b3758701c3f80873e8d71f6bda90b79ef80c7d",
+          "bytes": 4082
+        },
+        {
+          "path": "fix_validation/hunt_run5_post.json",
+          "sha256": "0905bd441369ce364093c15326992c8e23226aa5d735d60f6dd9adc177588c74",
+          "bytes": 1056
+        },
+        {
+          "path": "fix_validation/hunt_run6.json",
+          "sha256": "8e10b23cb49b8850db1f71c50e817121242f7d324de4da5afc6a6100f18ffbd3",
+          "bytes": 149390
+        },
+        {
+          "path": "fix_validation/hunt_run6.log",
+          "sha256": "faf9db8e3a8602cca287f3ed3d30e269135a3e7014ed23f9c61550226b6b0d3e",
+          "bytes": 4081
+        },
+        {
+          "path": "fix_validation/hunt_run6_post.json",
+          "sha256": "f290a4654981a053944262f26963805b5b5fa9ecbd9ee433b5208c9278b8035a",
+          "bytes": 1056
+        },
+        {
+          "path": "fix_validation/hunt_run7.json",
+          "sha256": "9d1aaf07314ef2f640b4b03f8c781aad2508dbe792e38a5604ebef253c469822",
+          "bytes": 140124
+        },
+        {
+          "path": "fix_validation/hunt_run7.log",
+          "sha256": "e5e693a4bfbb1e932d5513ff857b5691b615718cf308a1b996e05a215b0fe1b8",
+          "bytes": 4079
+        },
+        {
+          "path": "fix_validation/hunt_run7_post.json",
+          "sha256": "13bb44853ec72653a793a236527dcc076735f8f2dd37ef69cc424f983e97b6a1",
+          "bytes": 1056
+        },
+        {
+          "path": "fix_validation/hunt_run8.json",
+          "sha256": "24d3a99caaad133a5cd76a13158a3530f78be08dbef557654c245874fac9802a",
+          "bytes": 135123
+        },
+        {
+          "path": "fix_validation/hunt_run8.log",
+          "sha256": "b8693166dceaf90602e261ed2db0fee426cda6b9abd1b8139ec41978fcd2d145",
+          "bytes": 4081
+        },
+        {
+          "path": "fix_validation/hunt_run8_post.json",
+          "sha256": "c4cda3ee5497dd4d1ea047d5aaed0c876495d6fae47a0a4168f825f302acac0a",
+          "bytes": 1056
+        },
+        {
+          "path": "fix_validation/hunt_run9.json",
+          "sha256": "6b564ff823ab57b2e5073e09f1fc82a9ff06138ab1fed5043a0b5b93b552de59",
+          "bytes": 133933
+        },
+        {
+          "path": "fix_validation/hunt_run9.log",
+          "sha256": "ecb1b365c864547db992ae0e02e82dd37489c2ba9fa2dd19ef61bdf9c808f5f7",
+          "bytes": 4080
+        },
+        {
+          "path": "fix_validation/hunt_run9_post.json",
+          "sha256": "f6ecfaf5c06fe071b832b2cde06361c776b7bcf19fedf5b79c586fe091bcbc1e",
+          "bytes": 1056
+        },
+        {
+          "path": "fix_validation/hunt_summary.csv",
+          "sha256": "620a4f091badbc7c3db23f78b9465562a42670c1c07128a13e3496ca624c924d",
+          "bytes": 6440
+        },
+        {
+          "path": "fix_validation/job.log",
+          "sha256": "ac47ae9161008c60e3ab3c815c878de4f755651f87186c6c24dc9e95b497080c",
+          "bytes": 19314
+        }
+      ]
+    },
+    {
+      "id": "tps_ingress_node_crash",
+      "command": "run 11 of the fix-validation batch: validator 3 panic, stdout tail + anomalies",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "1cea5f0e116abdb57bc605b450ca15fbaec42f99",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T16:48:43Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "node_crash_run11/hunt_run11.log",
+          "sha256": "5f1977ac07478c10f69289ec43798399a78b8566fa799a007ed8b0ec8aeabc55",
+          "bytes": 3861
+        },
+        {
+          "path": "node_crash_run11/hunt_run11_val3_anomalies.txt",
+          "sha256": "d88197fb223d6447c98a195fc3c1ea1bb32fb764cce63d117f483b97e74caf32",
+          "bytes": 62018
+        },
+        {
+          "path": "node_crash_run11/hunt_run11_val3_tail.txt",
+          "sha256": "59962955aabb819389e5cb413bdb2ceeefd206bb951e99e062666ba5e3de165c",
+          "bytes": 117930
+        }
+      ]
+    }
+  ],
+  "report": "note/tps_ingress_rootcause_report_20261013.md"
+}

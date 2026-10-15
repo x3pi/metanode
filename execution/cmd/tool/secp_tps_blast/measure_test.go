@@ -317,3 +317,33 @@ func TestFakeChain_UnfetchedBlockGivesBounds(t *testing.T) {
 		t.Fatalf("live total must still be exact: %d", m.CommittedTotalTxs)
 	}
 }
+
+// A chain can pause longer than the quiet window while validators still hold received-but-uncommitted txs
+// (seen live: a pause > 8 s, then 19k more txs committed). The quiet rule must not end the measurement then.
+func TestWaitQuiesce_DoesNotStopWhileReceivedTxsArePending(t *testing.T) {
+	newW := func() *chainWatcher {
+		w := &chainWatcher{}
+		w.totalSeen, w.lastTxBlk = 500, time.Now()
+		go func() { // the chain resumes after a pause longer than quiet
+			time.Sleep(2500 * time.Millisecond)
+			w.mu.Lock()
+			w.totalSeen, w.lastTxBlk = 1000, time.Now()
+			w.mu.Unlock()
+		}()
+		return w
+	}
+	pending := func(w *chainWatcher) func() (int, bool) {
+		return func() (int, bool) { return 1000, true } // validators received 1000; only 500 seen in blocks so far
+	}
+	w := newW()
+	reason := w.waitQuiesce(1000, 100*time.Millisecond, 300*time.Millisecond, 20*time.Second, pending(w))
+	if !strings.Contains(reason, "1000 >= 1000") {
+		t.Fatalf("stopped too early: %s", reason)
+	}
+	// Negative control: without received info the plain quiet rule fires during the pause.
+	w2 := newW()
+	reason = w2.waitQuiesce(1000, 100*time.Millisecond, 300*time.Millisecond, 20*time.Second, nil)
+	if !strings.Contains(reason, "no new tx-bearing block") {
+		t.Fatalf("expected the quiet rule without received info, got: %s", reason)
+	}
+}

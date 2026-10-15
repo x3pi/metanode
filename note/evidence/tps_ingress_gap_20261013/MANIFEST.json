@@ -1,0 +1,335 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "tps_ingress_gap_v2ref",
+      "command": "copy of the v2 summary CSV from note/evidence/tps_counted_20261013/sustained_v2 (cross-reference)",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "36a707e7be8d84b6a6c2043bf435d4fe471f3f05",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T10:31:10Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "v2_ref/bft_sustained60_v2_summary.csv",
+          "sha256": "76253d8403c651bb350a20b0cf04ad37047ed99ae5f0b8b317e28107a0b9e519",
+          "bytes": 2198
+        }
+      ]
+    },
+    {
+      "id": "tps_ingress_gap_b2",
+      "command": "run_tps_counted.py sustained, diag build, lossy run 1 (runs executed with earlier uncommitted builds of the tool/runner; final code committed afterwards)",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "36a707e7be8d84b6a6c2043bf435d4fe471f3f05",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T10:31:10Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "b2_run1_lossy/diag_sust_run1.json",
+          "sha256": "8b3842e8c6f4caa5cb3ea23d0d082025effb93b72226d76ba631e75beee063e7",
+          "bytes": 136912
+        },
+        {
+          "path": "b2_run1_lossy/diag_sust_run1.log",
+          "sha256": "960a0eb1050dc53f854e99557f181fd7fe6d822b16b4a3eba5c905accd64328c",
+          "bytes": 4100
+        }
+      ]
+    },
+    {
+      "id": "tps_ingress_gap_b3",
+      "command": "run_tps_counted.py sustained, diag build, lossy run 1 + post probe (runs executed with earlier uncommitted builds of the tool/runner; final code committed afterwards)",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "36a707e7be8d84b6a6c2043bf435d4fe471f3f05",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T10:31:10Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "b3_run1_lossy/diag_sust_run1.json",
+          "sha256": "d637b625a1341d9562187fee6f38011071ae56671c5884aeadab3e0b5362c457",
+          "bytes": 138679
+        },
+        {
+          "path": "b3_run1_lossy/diag_sust_run1.log",
+          "sha256": "9663aab14fba802f6cc484d91d5181e3e15fa0f19ebdcd5dcbc0f44038acfcd5",
+          "bytes": 4093
+        },
+        {
+          "path": "b3_run1_lossy/diag_sust_run1_post.json",
+          "sha256": "2729fb59caaa458ce17b3b449660f1830861abd93145ecaa13703e4b2c81deca",
+          "bytes": 1047
+        }
+      ]
+    },
+    {
+      "id": "tps_ingress_gap_b4",
+      "command": "run_tps_counted.py sustained, real binaries, ss probe (runs executed with earlier uncommitted builds of the tool/runner; final code committed afterwards)",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "36a707e7be8d84b6a6c2043bf435d4fe471f3f05",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T10:31:10Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "b4/diag_sust_run1.json",
+          "sha256": "cbe1c63b499d54ee056e58d92062d017a1f669d80ec3cd1c8aab4f41d09fc1e2",
+          "bytes": 136023
+        },
+        {
+          "path": "b4/diag_sust_run1.log",
+          "sha256": "2e6a8d9045d1f3e6f28ed800f9dbc65614ac0d17812f4dfe7e5557083402b59c",
+          "bytes": 4087
+        },
+        {
+          "path": "b4/diag_sust_run1_post.json",
+          "sha256": "7617853ad329587d82afdcb4b9e47441f6212eafb3704d223c26c494e6147313",
+          "bytes": 1047
+        },
+        {
+          "path": "b4/diag_sust_run2.json",
+          "sha256": "705114aa126bac492f4eafb4497d363ee1e0f4c1ce3c85295a59689ef5fa07ed",
+          "bytes": 119616
+        },
+        {
+          "path": "b4/diag_sust_run2.log",
+          "sha256": "e3f3d6dbfb681fdf7f40de96d343286b4e85283fe9f2a5c4a8d92196a589d7be",
+          "bytes": 4097
+        },
+        {
+          "path": "b4/diag_sust_run2_post.json",
+          "sha256": "ba2e49a94eb4d60f2379177933ef2094b3349e37218e6a86634ec8ddb7355335",
+          "bytes": 1047
+        },
+        {
+          "path": "b4/ss_probe.log",
+          "sha256": "01720bc3b3489271dbb6b5f22d308ddee12120d44ea48fdd1f8d5d2d90011b0a",
+          "bytes": 13168
+        }
+      ]
+    },
+    {
+      "id": "tps_ingress_gap_b5",
+      "command": "run_tps_counted.py sustained x10 (runs executed with earlier uncommitted builds of the tool/runner; final code committed afterwards)",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "36a707e7be8d84b6a6c2043bf435d4fe471f3f05",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-13T10:31:11Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "b5_clean10/diag_sust_run10.json",
+          "sha256": "681284cab090d14eef68d7897b4e2b88d1f18bd70cb1ded2a2d63672dabf37e2",
+          "bytes": 141532
+        },
+        {
+          "path": "b5_clean10/diag_sust_run10.log",
+          "sha256": "9c3958e3a6bf3f28567e76f912401f38f9e86995b672ad535bd57be72d78af45",
+          "bytes": 4090
+        },
+        {
+          "path": "b5_clean10/diag_sust_run10_post.json",
+          "sha256": "01ebbfc0b6408c60c3dce641151227fded09f7513441da31ca43247550736ada",
+          "bytes": 1047
+        },
+        {
+          "path": "b5_clean10/diag_sust_run1.json",
+          "sha256": "09c630ea9f02726c4e86fc1f54bc7e568da092cc481e2586c7f28d2e05f4ec3a",
+          "bytes": 131110
+        },
+        {
+          "path": "b5_clean10/diag_sust_run1.log",
+          "sha256": "114a9a24e7440a8e395928596d8dd58cbe45c13a64e6086d83c0bd6ce7d5cbab",
+          "bytes": 4088
+        },
+        {
+          "path": "b5_clean10/diag_sust_run1_post.json",
+          "sha256": "c222c269bad9852ed09af0d82db49d9896ecf04f238bcc6a87895ee956329c75",
+          "bytes": 1056
+        },
+        {
+          "path": "b5_clean10/diag_sust_run2.json",
+          "sha256": "3fb934678c5678d0ac6c93fea37a607be4955e4773d42432b752575dd00df0a5",
+          "bytes": 133569
+        },
+        {
+          "path": "b5_clean10/diag_sust_run2.log",
+          "sha256": "be072a5f884b9043380f031ea6815536ca11c7c1d14fc00d10671dfc37c03c17",
+          "bytes": 4088
+        },
+        {
+          "path": "b5_clean10/diag_sust_run2_post.json",
+          "sha256": "6a0990d825bb645387eeb5b10f19641bbb0655a52d82f98041998b15d6ce13e0",
+          "bytes": 1047
+        },
+        {
+          "path": "b5_clean10/diag_sust_run3.json",
+          "sha256": "38631f540fd0d7c1d47eac5a3c49eee99e9893936275bdf69ceec6a50f922b28",
+          "bytes": 155027
+        },
+        {
+          "path": "b5_clean10/diag_sust_run3.log",
+          "sha256": "7cf62a6b8d57b16740a85c0dd82e09a0c3722562b6d7d975b29ea7c36baf1f4a",
+          "bytes": 4088
+        },
+        {
+          "path": "b5_clean10/diag_sust_run3_post.json",
+          "sha256": "aecc7a6caba01d2381bf79da2b02dd17eecc5bb31e99461b8e758bb22ae316ff",
+          "bytes": 1056
+        },
+        {
+          "path": "b5_clean10/diag_sust_run4.json",
+          "sha256": "1841f50cc8a13e0a20e2a5e42be6a567565e8415caad1a00ba6007b6ce9a800d",
+          "bytes": 140048
+        },
+        {
+          "path": "b5_clean10/diag_sust_run4.log",
+          "sha256": "175e6d50c6dee42f847fda2763db9750be0d580aacc6d712056308c5f7586ba3",
+          "bytes": 4087
+        },
+        {
+          "path": "b5_clean10/diag_sust_run4_post.json",
+          "sha256": "86a6c64ceaa35673435eb9fc1a9ce7de28659da4b2f516b370b247a2484293be",
+          "bytes": 1056
+        },
+        {
+          "path": "b5_clean10/diag_sust_run5.json",
+          "sha256": "3ffb4c7897e8ded7f3e522a76f50330545e2e6c2404a534b9476f9e7b5948264",
+          "bytes": 132132
+        },
+        {
+          "path": "b5_clean10/diag_sust_run5.log",
+          "sha256": "a1d787758f07e0458d26e1e3c64caced2a23dfdb5a23bf017a630809e70f6de1",
+          "bytes": 4088
+        },
+        {
+          "path": "b5_clean10/diag_sust_run5_post.json",
+          "sha256": "440e29844cba3fbf294050953112b18a239ab5b5db299d6e13a4eba89db9585e",
+          "bytes": 1047
+        },
+        {
+          "path": "b5_clean10/diag_sust_run6.json",
+          "sha256": "7d1dab673463a87aa521a8a4081af063fc36627301af73e25e2301b0328ea23f",
+          "bytes": 147887
+        },
+        {
+          "path": "b5_clean10/diag_sust_run6.log",
+          "sha256": "92bc97739ba2f608513f44068835bdd3c6c2f909ecbc21dd62f03c7a151db77a",
+          "bytes": 4087
+        },
+        {
+          "path": "b5_clean10/diag_sust_run6_post.json",
+          "sha256": "217056925109eae19cdec2c606200cf32828e078b694942e83fb839bd974cb2d",
+          "bytes": 1056
+        },
+        {
+          "path": "b5_clean10/diag_sust_run7.json",
+          "sha256": "9c4bf64a810f45f0ddf6b073444bb8567669acb774a0eeceba4bbdbf5059857f",
+          "bytes": 119277
+        },
+        {
+          "path": "b5_clean10/diag_sust_run7.log",
+          "sha256": "59344508124da63526f26ecef4524ce3efd2deab959d6d1fa61c012366014f2b",
+          "bytes": 4086
+        },
+        {
+          "path": "b5_clean10/diag_sust_run7_post.json",
+          "sha256": "1d84d9668467e4772e7929f60bd3d9aa8488ce3a7bc52daea384f789b73cc7f3",
+          "bytes": 1047
+        },
+        {
+          "path": "b5_clean10/diag_sust_run8.json",
+          "sha256": "132aa3aa0962d94c02e0c419767c331d0dc1e32bdbdc68a91346184bf25d8c91",
+          "bytes": 142245
+        },
+        {
+          "path": "b5_clean10/diag_sust_run8.log",
+          "sha256": "e0bc5c670e5161baf1519eb9a2032a066f488b80ee2182e952729bcf99aa9ee1",
+          "bytes": 4097
+        },
+        {
+          "path": "b5_clean10/diag_sust_run8_post.json",
+          "sha256": "258749776f8b540c7ea3a0618bdbbdd939f3db29c5952a30a7c0dc8dae0e6f07",
+          "bytes": 1047
+        },
+        {
+          "path": "b5_clean10/diag_sust_run9.json",
+          "sha256": "23f03d4087da215a41a45b12e9395db38c606edbe4926eac72c7c2651fdb4426",
+          "bytes": 157464
+        },
+        {
+          "path": "b5_clean10/diag_sust_run9.log",
+          "sha256": "04ca5b399a792c689df8681a7f70ab019ad5a91dc1ee795cf5180a1547a0d926",
+          "bytes": 4089
+        },
+        {
+          "path": "b5_clean10/diag_sust_run9_post.json",
+          "sha256": "0d4d6348be0c303fbf78e1a12ca41478b502e8a61f89ed6aa2bd732b167babe6",
+          "bytes": 1056
+        },
+        {
+          "path": "b5_clean10/diag_sust_summary.csv",
+          "sha256": "b7115d7e7ab61ee451629ba82e67c9247c9d7390d68d9079947a46a23f476e7a",
+          "bytes": 4558
+        },
+        {
+          "path": "b5_clean10/job.log",
+          "sha256": "debe2eea768f49baa72a9b12d90673e01c2ffbb6fe2eb831d4a30f99eba2c338",
+          "bytes": 13795
+        }
+      ],
+      "extract": [
+        {
+          "name": "b5_counted_mean",
+          "file": "b5_clean10/diag_sust_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean"
+        },
+        {
+          "name": "b5_counted_sd",
+          "file": "b5_clean10/diag_sust_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "sd"
+        },
+        {
+          "name": "b5_inj_mean",
+          "file": "b5_clean10/diag_sust_summary.csv",
+          "csv_col": "tps_during_injection",
+          "stat": "mean"
+        },
+        {
+          "name": "b5_legacy_mean",
+          "file": "b5_clean10/diag_sust_summary.csv",
+          "csv_col": "legacy_effective_tps",
+          "stat": "mean"
+        },
+        {
+          "name": "b5_inject_min",
+          "file": "b5_clean10/diag_sust_summary.csv",
+          "csv_col": "inject_seconds",
+          "stat": "min"
+        },
+        {
+          "name": "b5_inject_max",
+          "file": "b5_clean10/diag_sust_summary.csv",
+          "csv_col": "inject_seconds",
+          "stat": "max"
+        },
+        {
+          "name": "b5_counted_max",
+          "file": "b5_clean10/diag_sust_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "max"
+        }
+      ]
+    }
+  ],
+  "report": "note/tps_ingress_gap_report_20261013.md"
+}

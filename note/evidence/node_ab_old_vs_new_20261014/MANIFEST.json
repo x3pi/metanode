@@ -1,0 +1,468 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "node_ab1",
+      "command": "ab_driver.py: 8 pairs old(f97a2fbf Go + current Rust)/new(fixed), sustained 60s both, interleaved; runs executed with an earlier uncommitted runner",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "ea1b170cfb4ba23c69c8d45331c604a8e8d702ab",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-14T09:56:08Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "ab1_heavy_load/ab_driver.py.txt",
+          "sha256": "d28961c6cab8421b88c8c889f744d8bf29c0c2c90064adc597bb8dd37b8c0840",
+          "bytes": 978
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p1_run1.json",
+          "sha256": "4cc706631cb9eed9b4503dddfa7ed4f2099181713cf4f242d5b6d58971ea7dbe",
+          "bytes": 133965
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p1_run1.log",
+          "sha256": "0526c563a8a166ae7368aafd3c344c0fa3b36e20882f6c0be8b48fe31dc688a2",
+          "bytes": 4085
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p2_run1.json",
+          "sha256": "c0adf818a0a334bfa363a882fa9f33ffd84129043c77e71e7b338135afbb4fae",
+          "bytes": 137172
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p2_run1.log",
+          "sha256": "db0b6834af0273def647e99a76d097eb79a7123c0ce2d600616e51a679e914e0",
+          "bytes": 4084
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p3_run1.json",
+          "sha256": "cbec37195e2a50643acf820bcca0d8a8de4c69643461dd18d3959f09d9fc220a",
+          "bytes": 125174
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p3_run1.log",
+          "sha256": "c37424dd254429942fa69d8949afcbc0bb797e1e8ca6e5975a37bf5c9afd0dbd",
+          "bytes": 4078
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p4_run1.json",
+          "sha256": "5e5d0ab4373c17962c6bf0a37cf87062b993c2c972822f02360c576f56dc9ae6",
+          "bytes": 125608
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p4_run1.log",
+          "sha256": "6923494bfdbadfb436a0412ec82677f826870e79546b5238b058a3d47fe13415",
+          "bytes": 4073
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p5_run1.json",
+          "sha256": "b22157e083d715217ef75a7b37b9ec15909aac3c2c8d44299b4bd9a05465b091",
+          "bytes": 151899
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p5_run1.log",
+          "sha256": "80c8ced9f1d238ee68ced6e3824e1fd12aa861d327d44ac390aa8a54bb71876e",
+          "bytes": 4085
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p6_run1.json",
+          "sha256": "3b5d908c8ac9700dcca07275ca4b2edb64b203754364e5fddc3f30b4a77a8dfc",
+          "bytes": 147263
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p6_run1.log",
+          "sha256": "0f4f7dda25364c936e47183e881cda51c49c4adf4ba93b0a0095a31cd73f62d9",
+          "bytes": 4086
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p7_run1.json",
+          "sha256": "9115bc8bcd7b480b145f73318c291e0ec82a5184521a40a5a093b0b6d0ef870b",
+          "bytes": 133290
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p7_run1.log",
+          "sha256": "9d5c04a47537f2f0f8ab8a722e8a23e24141747a7c8135470894f10eb61350bb",
+          "bytes": 4080
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p8_run1.json",
+          "sha256": "9f9da5f01b122e1117d4a3c7df63647ab34c2ee8d5bc872757af638b90671a2c",
+          "bytes": 129920
+        },
+        {
+          "path": "ab1_heavy_load/ab_new_p8_run1.log",
+          "sha256": "9bdf218e437c1057aa867f6306f1f13f3ac28ac5c8d0ad30c5fccc66b1be71fc",
+          "bytes": 4068
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p1_run1.json",
+          "sha256": "5bb61b0116f17daf1ae9eeebe1426ee2778f5ec351a0f406c68ee4112ec8fda2",
+          "bytes": 22615
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p1_run1.log",
+          "sha256": "c8a3baac801074ff93daacc6ec2ff0a624a6c0512fd12e7d02158f0f271d769c",
+          "bytes": 4066
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p2_run1.json",
+          "sha256": "7d8064a8af5a61fe02f90cfb31186fb2bf2870b9e1b870c83a1112428a1fd3d9",
+          "bytes": 24367
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p2_run1.log",
+          "sha256": "9abad179655dab0ae6a232fec903dcfbb5a7e0aef219d6c04c7f4e3fb2990734",
+          "bytes": 4066
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p3_run1.json",
+          "sha256": "4a27e482a299422481262a5b3762bfa9c140673410316698ea25f7e7a3760ec9",
+          "bytes": 22721
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p3_run1.log",
+          "sha256": "a4042f19b09f8fb226fbf02745218dd8b7996a63ce442bc59e70fff55909b3ab",
+          "bytes": 4066
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p4_run1.json",
+          "sha256": "75cb211419da0f4e4864df128d626b314bc2e0eefa0e1602f91aa6a38921cc6d",
+          "bytes": 23357
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p4_run1.log",
+          "sha256": "d545dad2ae598f171366040249b874fdc086aa1630790e8cd67655062d85bffe",
+          "bytes": 4067
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p5_run1.json",
+          "sha256": "0c16056e7a065c5783c481ae296cdf22be7903edd09d13c5ed076756888cde68",
+          "bytes": 24129
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p5_run1.log",
+          "sha256": "5555ec25f65aebe79fbe14aec1f0f8d09e4b8566142e45e9afb87ded9434ca9e",
+          "bytes": 4068
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p6_run1.json",
+          "sha256": "6a0f47961a974a67487cfdd1d5c3c8cbc4a17e0acafcca7302ddaca326ae4fe3",
+          "bytes": 28564
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p6_run1.log",
+          "sha256": "9f19e661d68ed96f40cf14292043de6a3335d2f72f2305dcf1e15fdf5d993745",
+          "bytes": 4075
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p7_run1.json",
+          "sha256": "e1a2333fe1b54fdc43e4f2b6f1b55ccc7fdba112f32c75f4d96bf0a10d9baceb",
+          "bytes": 24109
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p7_run1.log",
+          "sha256": "5bf2bcff478b12227bc6c5e2913046380c7efd7db262c67c0834ee74156249e2",
+          "bytes": 4068
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p8_run1.json",
+          "sha256": "7e27ee04fb0d5ae3f834904432b1a31b043480c53f6be0e2ba1d20a7cc27e044",
+          "bytes": 30944
+        },
+        {
+          "path": "ab1_heavy_load/ab_old_p8_run1.log",
+          "sha256": "51af7046c66addd24ba2e6dbd371c86d918a2a90729ce3f49a3acbc6a69dd971",
+          "bytes": 4075
+        },
+        {
+          "path": "ab1_heavy_load/derived_summary.csv",
+          "sha256": "e7ca4f83352ba53e7ba5faf415f375eab9ad4a8cb77fa6a475f4b4eca727cd2a",
+          "bytes": 1624
+        },
+        {
+          "path": "ab1_heavy_load/driver.log",
+          "sha256": "ae5226bf454e9e76193da8272a280ca7533db9343c0f3cd1c10ab475820e7cc3",
+          "bytes": 956
+        },
+        {
+          "path": "ab1_heavy_load/order.txt",
+          "sha256": "93fbaaee833ad87d289cb8a1acdb801863ed84aad4f0c8477f38ee365e127c67",
+          "bytes": 96
+        }
+      ],
+      "extract": [
+        {
+          "name": "ab1_old_e2e",
+          "file": "ab1_heavy_load/derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean",
+          "filter": "variant=old"
+        },
+        {
+          "name": "ab1_new_e2e",
+          "file": "ab1_heavy_load/derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean",
+          "filter": "variant=new"
+        },
+        {
+          "name": "ab1_old_act",
+          "file": "ab1_heavy_load/derived_summary.csv",
+          "csv_col": "tps_active_commit_window",
+          "stat": "mean",
+          "filter": "variant=old"
+        },
+        {
+          "name": "ab1_new_act",
+          "file": "ab1_heavy_load/derived_summary.csv",
+          "csv_col": "tps_active_commit_window",
+          "stat": "mean",
+          "filter": "variant=new"
+        },
+        {
+          "name": "ab1_old_sent",
+          "file": "ab1_heavy_load/derived_summary.csv",
+          "csv_col": "bytes_sent",
+          "stat": "mean",
+          "filter": "variant=old"
+        },
+        {
+          "name": "ab1_new_sent",
+          "file": "ab1_heavy_load/derived_summary.csv",
+          "csv_col": "bytes_sent",
+          "stat": "mean",
+          "filter": "variant=new"
+        },
+        {
+          "name": "ab1_old_secs",
+          "file": "ab1_heavy_load/derived_summary.csv",
+          "csv_col": "end_to_end_seconds",
+          "stat": "mean",
+          "filter": "variant=old"
+        },
+        {
+          "name": "ab1_new_secs",
+          "file": "ab1_heavy_load/derived_summary.csv",
+          "csv_col": "end_to_end_seconds",
+          "stat": "mean",
+          "filter": "variant=new"
+        }
+      ]
+    },
+    {
+      "id": "node_ab2",
+      "command": "ab_driver4.py: 5 pairs, old 60s / new 7s sustained (matched tx volume), interleaved",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "ea1b170cfb4ba23c69c8d45331c604a8e8d702ab",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-14T09:56:08Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "ab2_matched_load/ab2_new_p1_run1.json",
+          "sha256": "c3aa831b8a0a7fae0ae6d07b816729bafb3e2241b4878f2b907c22cd94d3c398",
+          "bytes": 16461
+        },
+        {
+          "path": "ab2_matched_load/ab2_new_p1_run1.log",
+          "sha256": "63d01d35e3213eb6ca25a996ee0d7d837e98979d427403c94e8244dc94c57579",
+          "bytes": 3647
+        },
+        {
+          "path": "ab2_matched_load/ab2_new_p2_run1.json",
+          "sha256": "eb4a714a64159efb187142af763cc3abe343c99e460249cba492d018eca7e302",
+          "bytes": 18472
+        },
+        {
+          "path": "ab2_matched_load/ab2_new_p2_run1.log",
+          "sha256": "284e1369a6dd3ba8e2037f7b1ba607b4fad4561755dd6ee1d92e898e28e98e01",
+          "bytes": 3652
+        },
+        {
+          "path": "ab2_matched_load/ab2_new_p3_run1.json",
+          "sha256": "aa70278901647939638ed63083ebe351535e670530e3dada4ddf2ee5f89857b0",
+          "bytes": 15432
+        },
+        {
+          "path": "ab2_matched_load/ab2_new_p3_run1.log",
+          "sha256": "6fc4e65264854e90438b45393e8759de7e1a63f4961cbf36f72630bd3b352681",
+          "bytes": 3652
+        },
+        {
+          "path": "ab2_matched_load/ab2_new_p4_run1.json",
+          "sha256": "25f0ae7b4eed1191e677fea110202ad28c45c45985b56b5f70561ee422bf5ec6",
+          "bytes": 17705
+        },
+        {
+          "path": "ab2_matched_load/ab2_new_p4_run1.log",
+          "sha256": "beac159b2b883774bf942d78c078d83306cf2ab2b4f72da87a74a0c03f170009",
+          "bytes": 3650
+        },
+        {
+          "path": "ab2_matched_load/ab2_new_p5_run1.json",
+          "sha256": "6965794d99de176f5ad5c79113705b8977ef91e40f19a2d0520e16971faac6d8",
+          "bytes": 18205
+        },
+        {
+          "path": "ab2_matched_load/ab2_new_p5_run1.log",
+          "sha256": "50cf194e0f85396c34ba3c83108986efca8f6083359a47729872615b35f223ca",
+          "bytes": 3651
+        },
+        {
+          "path": "ab2_matched_load/ab2_old_p1_run1.json",
+          "sha256": "4455c0460e6f6235b3aee9a51907f60e1f3248f33dfe81313366e74d0c9c4ab4",
+          "bytes": 27434
+        },
+        {
+          "path": "ab2_matched_load/ab2_old_p1_run1.log",
+          "sha256": "641e45fe8f18d44f2e9a21388e08d57da118787980bcfaa22f40b8ee5fd130aa",
+          "bytes": 4063
+        },
+        {
+          "path": "ab2_matched_load/ab2_old_p2_run1.json",
+          "sha256": "c7e0311372146b70c949e409ef74bab948d52e8b7425b6f7b43a66fad152dc34",
+          "bytes": 30852
+        },
+        {
+          "path": "ab2_matched_load/ab2_old_p2_run1.log",
+          "sha256": "b3c501364a493b3b338bc822f07e220a29a48198dc5104f1fdd16a2dc7442690",
+          "bytes": 4069
+        },
+        {
+          "path": "ab2_matched_load/ab2_old_p3_run1.json",
+          "sha256": "712ae652749cec556c34246098867e1b1d02ccb22558f4481321463ec4069409",
+          "bytes": 29357
+        },
+        {
+          "path": "ab2_matched_load/ab2_old_p3_run1.log",
+          "sha256": "64b1c3b4ff424be95ff17e4ac3fecdbc0616a564ba3d4268e0022ecf4967e3ca",
+          "bytes": 4064
+        },
+        {
+          "path": "ab2_matched_load/ab2_old_p4_run1.json",
+          "sha256": "6534facf47cfea6d95b4827fd9c897635c0e152f26aaf3eb764d3d9074518d5d",
+          "bytes": 30316
+        },
+        {
+          "path": "ab2_matched_load/ab2_old_p4_run1.log",
+          "sha256": "89fd463478160c80c81d553ae5e31683d9906ca3c81f786dd0f4546dfdce06f1",
+          "bytes": 4068
+        },
+        {
+          "path": "ab2_matched_load/ab2_old_p5_run1.json",
+          "sha256": "3a0211d076f4a47600f4ef50d6ab7a40448a351baa07525ffc6cf8d38d774827",
+          "bytes": 30079
+        },
+        {
+          "path": "ab2_matched_load/ab2_old_p5_run1.log",
+          "sha256": "ad5dfb6a4c45fff2146e1ae396e3dbc8e0ff977d18c69bed08dcb532fcf380b1",
+          "bytes": 4067
+        },
+        {
+          "path": "ab2_matched_load/ab_driver4.py.txt",
+          "sha256": "4a59afcc8c89295defdb853a9390bf6bbddc4dbad0743dc7f505c0a20e6c8a91",
+          "bytes": 1004
+        },
+        {
+          "path": "ab2_matched_load/derived_summary.csv",
+          "sha256": "d54231f734335924455e65d6c5d382e768b2e6447e1b3740dd7203450bad88b3",
+          "bytes": 1037
+        },
+        {
+          "path": "ab2_matched_load/driver.log",
+          "sha256": "360a3871227e1aecc9179a6198119ecc091d1b6cb866e08eddd4ab5caf9ff639",
+          "bytes": 602
+        },
+        {
+          "path": "ab2_matched_load/order.txt",
+          "sha256": "5ca984e27a164ea909cb21f94f332e210630d2689f0595b6cf891633abdd41c6",
+          "bytes": 60
+        }
+      ],
+      "extract": [
+        {
+          "name": "ab2_old_e2e",
+          "file": "ab2_matched_load/derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean",
+          "filter": "variant=old"
+        },
+        {
+          "name": "ab2_new_e2e",
+          "file": "ab2_matched_load/derived_summary.csv",
+          "csv_col": "tps_end_to_end",
+          "stat": "mean",
+          "filter": "variant=new"
+        },
+        {
+          "name": "ab2_old_act",
+          "file": "ab2_matched_load/derived_summary.csv",
+          "csv_col": "tps_active_commit_window",
+          "stat": "mean",
+          "filter": "variant=old"
+        },
+        {
+          "name": "ab2_new_act",
+          "file": "ab2_matched_load/derived_summary.csv",
+          "csv_col": "tps_active_commit_window",
+          "stat": "mean",
+          "filter": "variant=new"
+        },
+        {
+          "name": "ab2_old_sent",
+          "file": "ab2_matched_load/derived_summary.csv",
+          "csv_col": "bytes_sent",
+          "stat": "mean",
+          "filter": "variant=old"
+        },
+        {
+          "name": "ab2_new_sent",
+          "file": "ab2_matched_load/derived_summary.csv",
+          "csv_col": "bytes_sent",
+          "stat": "mean",
+          "filter": "variant=new"
+        },
+        {
+          "name": "ab2_old_secs",
+          "file": "ab2_matched_load/derived_summary.csv",
+          "csv_col": "end_to_end_seconds",
+          "stat": "mean",
+          "filter": "variant=old"
+        },
+        {
+          "name": "ab2_new_secs",
+          "file": "ab2_matched_load/derived_summary.csv",
+          "csv_col": "end_to_end_seconds",
+          "stat": "mean",
+          "filter": "variant=new"
+        }
+      ]
+    },
+    {
+      "id": "node_ab_unmatched",
+      "command": "one new-node run with -duration 20 (2.4M txs; informational)",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "ea1b170cfb4ba23c69c8d45331c604a8e8d702ab",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-14T09:56:08Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "unmatched_20s_info/ab2_new_p1_run1.json",
+          "sha256": "82c3f2b961216f5e63a02d85cf41bbba47cac1c7b3098aa823d432b46d3e60c3",
+          "bytes": 67954
+        },
+        {
+          "path": "unmatched_20s_info/ab2_new_p1_run1.log",
+          "sha256": "93076655ac2f4c11f98220694c502a09b99515a9c307d8830920679b5131b9ce",
+          "bytes": 3806
+        }
+      ]
+    }
+  ],
+  "report": "note/node_ab_old_vs_new_report_20261014.md"
+}
