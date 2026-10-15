@@ -1,0 +1,119 @@
+// Temporary probe (not committed): sends TCP ReadTransaction / EstimateGas requests to one validator and prints what comes back.
+package main
+
+import (
+	"bufio"
+	"encoding/binary"
+	"flag"
+	"fmt"
+	"io"
+	"math/big"
+	"net"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/google/uuid"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"google.golang.org/protobuf/proto"
+)
+
+func frame(cmd, id string, body []byte) []byte {
+	b, _ := proto.Marshal(&pb.Message{Header: &pb.Header{Command: cmd, Version: "0.0.1.0", ID: id}, Body: body})
+	out := make([]byte, 8, 8+len(b))
+	binary.LittleEndian.PutUint64(out, uint64(len(b)))
+	return append(out, b...)
+}
+
+func main() {
+	addr := flag.String("addr", "127.0.0.1:31200", "validator TCP address")
+	chain := flag.Uint64("chain", 991, "node chain id")
+	flag.Parse()
+	conn, err := net.Dial("tcp", *addr)
+	if err != nil {
+		panic(err)
+	}
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	init, _ := proto.Marshal(&pb.InitConnection{Address: common.HexToAddress("0x01").Bytes(), Type: "client"})
+	conn.Write(frame("InitConnection", uuid.New().String(), init))
+	time.Sleep(500 * time.Millisecond)
+
+	from := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	to := common.HexToAddress("0x2222222222222222222222222222222222222222") // not a contract
+	mk := func(chainID uint64) []byte {
+		tx := transaction.NewTransaction(from, to, big.NewInt(1), 1000000, 1, 0, nil, nil, common.Hash{}, common.Hash{}, 1, chainID)
+		b, err := tx.Marshal()
+		if err != nil {
+			panic(err)
+		}
+		return b
+	}
+	type tc struct {
+		name, cmd string
+		body      []byte
+	}
+	cases := []tc{
+		{"estimate plain transfer, chain ok", "EstimateGas", mk(*chain)},
+		{"read plain transfer to EOA, chain ok", "ReadTransaction", mk(*chain)},
+		{"estimate, wrong chain 9999", "EstimateGas", mk(9999)},
+		{"read, chain 0", "ReadTransaction", mk(0)},
+		{"estimate, empty body", "EstimateGas", []byte{}},
+		{"estimate, garbage body", "EstimateGas", []byte{0xff, 0xfe, 0xfd}},
+	}
+	ids := make([]string, len(cases))
+	defer func() {}()
+	for i, c := range cases {
+		ids[i] = uuid.New().String()
+		fmt.Printf("   [tx] %s id=%s\n", c.name, ids[i])
+		conn.Write(frame(c.cmd, ids[i], c.body))
+	}
+	got := map[string]*pb.Message{}
+	t0 := time.Now()
+	deadline := t0.Add(20 * time.Second)
+	matched := func() int {
+		n := 0
+		for _, id := range ids {
+			if got[id] != nil {
+				n++
+			}
+		}
+		return n
+	}
+	for matched() < len(cases) && time.Now().Before(deadline) {
+		conn.SetReadDeadline(deadline)
+		var lb [8]byte
+		if _, err := io.ReadFull(r, lb[:]); err != nil {
+			break
+		}
+		buf := make([]byte, binary.LittleEndian.Uint64(lb[:]))
+		io.ReadFull(r, buf)
+		m := &pb.Message{}
+		proto.Unmarshal(buf, m)
+		got[m.GetHeader().GetID()] = m
+		fmt.Printf("   [rx +%dms] cmd=%s id=%s body=%d\n", time.Since(t0).Milliseconds(), m.GetHeader().GetCommand(), m.GetHeader().GetID(), len(m.GetBody()))
+	}
+	for i, c := range cases {
+		m := got[ids[i]]
+		if m == nil {
+			fmt.Printf("%-40s -> NO RESPONSE WITH MATCHING ID\n", c.name)
+			continue
+		}
+		desc := ""
+		switch m.GetHeader().GetCommand() {
+		case "Receipt":
+			rc := &receipt.Receipt{}
+			if err := rc.Unmarshal(m.GetBody()); err == nil {
+				desc = fmt.Sprintf("status=%v gasUsed=%d", rc.Status(), rc.GasUsed())
+			} else {
+				desc = "receipt unmarshal error " + err.Error()
+			}
+		case "TransactionError":
+			e := &pb.TransactionHashWithError{}
+			proto.Unmarshal(m.GetBody(), e)
+			desc = fmt.Sprintf("code=%d msg=%q", e.GetCode(), e.GetDescription())
+		}
+		fmt.Printf("%-40s -> cmd=%s %s\n", c.name, m.GetHeader().GetCommand(), desc)
+	}
+}

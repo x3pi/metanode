@@ -1,0 +1,31 @@
+=== BASE (origin/dev code) ===
+   [rx +0ms] cmd=InitConnection id=5c881f27-eded-476b-a59c-5d791ea3e232 body=33
+   [rx +0ms] cmd=TransactionError id=13f4e8c6-8aff-4b83-a024-b2f890a24237 body=61
+   [rx +0ms] cmd=TransactionError id=2a75c47d-6c24-4f4d-939c-2c04f9b45977 body=72
+   [rx +0ms] cmd=TransactionError id=962de4b6-b32c-4b3d-8407-7e3c0389a9a4 body=61
+   [rx +0ms] cmd=TransactionError id=02b6c0a4-cab8-44c4-812f-1376620ee1f3 body=61
+   [rx +0ms] cmd=TransactionError id=c6bfaee5-12ac-447a-a16d-c680cdb21487 body=72
+   [rx +1ms] cmd=TransactionError id=9e21ab72-f7a0-4152-b49e-a9d9cff9dbcd body=61
+estimate plain transfer, chain ok        -> cmd=TransactionError code=-1 msg="evm return nil"
+read plain transfer to EOA, chain ok     -> cmd=TransactionError code=-1 msg="not a smart contract call"
+estimate, wrong chain 9999               -> cmd=TransactionError code=-1 msg="evm return nil"
+read, chain 0                            -> cmd=TransactionError code=-1 msg="not a smart contract call"
+estimate, empty body                     -> cmd=TransactionError code=-1 msg="evm return nil"
+estimate, garbage body                   -> cmd=TransactionError code=-1 msg="unexpected EOF"
+
+=== PR #169 (e4ccf248) ===
+   [rx +0ms] cmd=InitConnection id=1fbc5c6d-9d5d-4abf-bb5c-3786adbda53a body=33
+   [rx +0ms] cmd=TransactionError id=80b79075-0d66-4154-aa14-3ca1fc66c6aa body=98
+   [rx +0ms] cmd=TransactionError id=c55e0d3d-5cbb-4eae-893e-8137b377c855 body=69
+   [rx +0ms] cmd=TransactionError id=d387b59a-a92e-4ffa-9df0-fdc87122f131 body=94
+   [rx +0ms] cmd=TransactionError id=c20b6154-095c-4cfe-8f31-484870b5447e body=95
+   [rx +0ms] cmd=TransactionError id=a2fd971a-10cd-4254-8cb9-d7f3f3a81bc1 body=61
+   [rx +1ms] cmd=Receipt id=c27ba412-2c20-4ab9-8cd2-8f84aa1185d2 body=132
+estimate plain transfer, chain ok        -> cmd=Receipt status=RETURNED gasUsed=100000
+read plain transfer to EOA, chain ok     -> cmd=TransactionError code=-1 msg="evm return nil"
+estimate, wrong chain 9999               -> cmd=TransactionError code=-1 msg="chainId does not match node's (have=9999, want=991)"
+read, chain 0                            -> cmd=TransactionError code=-1 msg="chainId does not match node's (have=0, want=991)"
+estimate, empty body                     -> cmd=TransactionError code=-1 msg="empty transaction body"
+estimate, garbage body                   -> cmd=TransactionError code=-1 msg="failed to unmarshal transaction: unexpected EOF"
+
+PROBE-DONE

@@ -1,0 +1,38 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "pr169_probe",
+      "command": "pr_probe.py: BASE (origin/dev code at 84de9ab3-equivalent) vs PR #169 (e4ccf248) on a fresh 4-validator cluster; probe_readtx sends 6 TCP requests (EstimateGas/ReadTransaction) and matches responses by header ID; pr169.diff = git diff origin/dev...pr169; manifest refreshed after a rebase so the recorded commit is reachable",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "6dc4682816015b3c4df8ec333316b9a9e367dbbc",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-15T02:54:56Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "pr169.diff",
+          "sha256": "50411ecd6d1c2823d60b224f21e879e5d9188d5c375c087cfc06ab583b07a771",
+          "bytes": 8989
+        },
+        {
+          "path": "probe_readtx_main.go.txt",
+          "sha256": "d00f6455ef74f741cc7ca72cb6294b4f8436d3e628aa7fa2ba3406dbdfc225da",
+          "bytes": 3725
+        },
+        {
+          "path": "probe_results.txt",
+          "sha256": "ac8236c861e3538a0095f49ead396ca8f6c801333e9a4fe9ec6ea98e52ca28ad",
+          "bytes": 2462
+        },
+        {
+          "path": "pr_probe.py.txt",
+          "sha256": "ff8a8d5ebb6a7b4cdf61ed2a6ece3a8b49818e16377bb2e378d8545765c47a11",
+          "bytes": 1606
+        }
+      ]
+    }
+  ],
+  "report": "note/review_pr169_20261015.md"
+}
