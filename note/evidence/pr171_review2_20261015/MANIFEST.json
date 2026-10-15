@@ -1,0 +1,43 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "pr171_review2_probe",
+      "command": "go test -run TestAdversarial_ ./pkg/rollup on PR #171 head 4e5d942b (zz_adversarial_lock_test.go.txt copied in temporarily); Marshal probe on dev vs PR head; pr171_incremental_code.diff = git diff 46c66b03 pr171b -- execution",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "defc35fd07dde99418c150a8d7dd0ac799236f58",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-15T08:52:41Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "adversarial_test_results.txt",
+          "sha256": "ec02f64ebaa72f2066881980c31c34cc3acd1dccd70392e7f44f307baa5e55ff",
+          "bytes": 800
+        },
+        {
+          "path": "pr171_incremental_code.diff",
+          "sha256": "57c186a992c0a8b3a351642bb1480f5b86b30bb546c760fa129233d545cfc11c",
+          "bytes": 17366
+        },
+        {
+          "path": "serialization_dev.txt",
+          "sha256": "9904dcc1d92c632fe90613f9f54bd8e9cbb6bf3df9b193906cb9fe45617100fc",
+          "bytes": 522
+        },
+        {
+          "path": "serialization_pr171_new_head.txt",
+          "sha256": "9904dcc1d92c632fe90613f9f54bd8e9cbb6bf3df9b193906cb9fe45617100fc",
+          "bytes": 522
+        },
+        {
+          "path": "zz_adversarial_lock_test.go.txt",
+          "sha256": "3b79ca6f0a69f15d17fabd2eeb781de3d61ab4d45d794b03d68f7124e4d3dce5",
+          "bytes": 3649
+        }
+      ]
+    }
+  ],
+  "report": "note/review2_pr171_20261015.md"
+}

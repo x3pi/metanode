@@ -1,0 +1,11 @@
+=== RUN   TestAdversarial_LockConfirmedAccountWithSelfMadeAttestation
+    zz_adversarial_lock_test.go:32: ApplyAttested err=<nil> | locked=true parentRegistered=false
+--- PASS: TestAdversarial_LockConfirmedAccountWithSelfMadeAttestation (0.00s)
+=== RUN   TestAdversarial_NoWayBackFromLocked
+    zz_adversarial_lock_test.go:54: register-after-lock err=<nil> | locked=true parentRegistered=true
+--- PASS: TestAdversarial_NoWayBackFromLocked (0.00s)
+=== RUN   TestAdversarial_ProvisionalNeedsUserSignature
+    zz_adversarial_lock_test.go:74: provisional with garbage user sig: err=account registry: invalid user signature for provisional registration provisional=false
+--- PASS: TestAdversarial_ProvisionalNeedsUserSignature (0.00s)
+PASS
+ok  	github.com/meta-node-blockchain/meta-node/pkg/rollup	0.039s

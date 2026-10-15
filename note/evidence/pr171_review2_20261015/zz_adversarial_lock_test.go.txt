@@ -1,0 +1,77 @@
+package rollup
+
+import (
+	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/stretchr/testify/require"
+)
+
+// A single validator identity (or any holder of an arbitrary BLS key) locks an already CONFIRMED account.
+// committee == nil is the production wiring today (no CommitteeProvider in simple_chain).
+func TestAdversarial_LockConfirmedAccountWithSelfMadeAttestation(t *testing.T) {
+	cluster := cm.PublicKey{1}
+	h := NewAccountRegistryHandler(cluster)
+	db := newMockRegistryStateDB()
+	victim := common.HexToAddress("0x00000000000000000000000000000000000000aa")
+	db.SetParentRegistered(victim, true) // confirmed on THIS cluster by the parent chain
+
+	home := cm.PublicKey{2} // any other "home cluster" the attacker claims
+	attacker := bls.GenerateKeyPair()
+	digest := ComputeAccountLockedAttestDigest(h.attestChainID(), victim, home, 0)
+	p := AccountRegistrationPayload{
+		Kind: SystemPayloadKindAccountLocked, User: victim, HomeCluster: home,
+		Attestations: []RegistrationAttestation{{ValidatorPubkey: attacker.PublicKey(), Signature: bls.Sign(attacker.PrivateKey(), digest)}},
+	}
+	data, err := p.MarshalProto()
+	require.NoError(t, err)
+
+	err = h.ApplyAttested(db, nil, nil, data)
+	t.Logf("ApplyAttested err=%v | locked=%v parentRegistered=%v", err, db.GetLocked(victim), db.GetParentRegistered(victim))
+	require.NoError(t, err)
+	require.True(t, db.GetLocked(victim), "victim got locked by a self-made attestation")
+	require.False(t, db.GetParentRegistered(victim), "confirmation was erased")
+}
+
+// Once locked there is no state path back: a later (validly attested) registration event does not unlock.
+func TestAdversarial_NoWayBackFromLocked(t *testing.T) {
+	cluster := cm.PublicKey{1}
+	h := NewAccountRegistryHandler(cluster)
+	db := newMockRegistryStateDB()
+	user := common.HexToAddress("0x00000000000000000000000000000000000000bb")
+	db.SetLocked(user, true)
+
+	k := bls.GenerateKeyPair()
+	digest := ComputeAccountRegistrationAttestDigest(h.attestChainID(), user, cluster, 1)
+	p := AccountRegistrationPayload{
+		Kind: SystemPayloadKindAccountRegistered, User: user, ClusterKey: cluster, ParentSeq: 1,
+		Attestations: []RegistrationAttestation{{ValidatorPubkey: k.PublicKey(), Signature: bls.Sign(k.PrivateKey(), digest)}},
+	}
+	data, _ := p.MarshalProto()
+	err := h.ApplyAttested(db, nil, nil, data)
+	t.Logf("register-after-lock err=%v | locked=%v parentRegistered=%v", err, db.GetLocked(user), db.GetParentRegistered(user))
+	require.NoError(t, err)
+	require.True(t, db.GetLocked(user), "still locked after a confirmed registration event")
+}
+
+// Sanity: a provisional payload WITHOUT a valid user signature is refused (the user must consent).
+func TestAdversarial_ProvisionalNeedsUserSignature(t *testing.T) {
+	cluster := cm.PublicKey{1}
+	h := NewAccountRegistryHandler(cluster)
+	db := newMockRegistryStateDB()
+	user := common.HexToAddress("0x00000000000000000000000000000000000000cc")
+	k := bls.GenerateKeyPair()
+	bad := make([]byte, 65)
+	digest := ComputeAccountProvisionalAttestDigest(h.attestChainID(), user, cluster, bad)
+	p := AccountRegistrationPayload{
+		Kind: SystemPayloadKindAccountProvisional, User: user, ClusterKey: cluster, UserSig: bad,
+		Attestations: []RegistrationAttestation{{ValidatorPubkey: k.PublicKey(), Signature: bls.Sign(k.PrivateKey(), digest)}},
+	}
+	data, _ := p.MarshalProto()
+	err := h.ApplyAttested(db, nil, nil, data)
+	t.Logf("provisional with garbage user sig: err=%v provisional=%v", err, db.GetProvisional(user))
+	require.Error(t, err)
+	require.False(t, db.GetProvisional(user))
+}
