@@ -6,7 +6,10 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	e_types "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 )
@@ -138,5 +141,30 @@ func TestTxVirtualExecutor_ParseReadTx_ChainIDMatchAndMismatch(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "chainId does not match node's") {
 		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestPlainTransferEstimateGas(t *testing.T) {
+	from := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	to := common.HexToAddress("0x0987654321098765432109876543210987654321")
+	tx := transaction.NewTransaction(from, to, big.NewInt(1), 50000, 1, 0, nil, nil, common.Hash{}, common.Hash{}, 1, 0).(*transaction.Transaction)
+
+	// A plain transfer owes only the minimum base fee.
+	if got := plainTransferEstimateGas(tx); got != mt_common.MINIMUM_BASE_FEE {
+		t.Fatalf("plain transfer: got %d, want %d", got, mt_common.MINIMUM_BASE_FEE)
+	}
+
+	// A SetCode tx also owes the intrinsic gas of every authorization tuple (same rule as HTTP eth_estimateGas).
+	tx.SetAuthorizationList(transaction.FromEthAuthorizationList([]e_types.SetCodeAuthorization{{}, {}}))
+	want := params.TxGas + 2*params.CallNewAccountGas + mt_common.MINIMUM_BASE_FEE
+	if got := plainTransferEstimateGas(tx); got != want {
+		t.Fatalf("SetCode tx with 2 tuples: got %d, want %d", got, want)
+	}
+}
+
+// Clients matched on this wording before the read path accepted plain transfers; keep it stable.
+func TestErrNotSmartContractCallWording(t *testing.T) {
+	if errNotSmartContractCall != "not a smart contract call" {
+		t.Fatalf("wording changed: %q", errNotSmartContractCall)
 	}
 }

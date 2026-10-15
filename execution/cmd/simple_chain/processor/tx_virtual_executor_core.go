@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/command"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
@@ -68,6 +69,19 @@ func NewTxVirtualExecutor(
 // SetEnvironment updates the environment for the executor
 func (v *TxVirtualExecutor) SetEnvironment(env ITransactionProcessorEnvironment) {
 	v.env = env
+}
+
+// errNotSmartContractCall is the error returned to an eth_call whose target is not a smart contract (no VM run).
+// It keeps the wording clients already matched on before the read path started accepting plain transfers.
+const errNotSmartContractCall = "not a smart contract call"
+
+// plainTransferEstimateGas is the gas EstimateGas reports for a native transfer (no VM run). It follows the HTTP
+// eth_estimateGas rule (rpc_block.go): a SetCode (EIP-7702) tx still owes the intrinsic gas of every authorization tuple.
+func plainTransferEstimateGas(tx types.Transaction) uint64 {
+	if n := len(tx.AuthorizationList()); n > 0 {
+		return params.TxGas + uint64(n)*params.CallNewAccountGas + mt_common.MINIMUM_BASE_FEE
+	}
+	return mt_common.MINIMUM_BASE_FEE
 }
 
 func (v *TxVirtualExecutor) parseReadTx(body []byte) (types.Transaction, error) {
@@ -209,14 +223,14 @@ func (v *TxVirtualExecutor) executeAndRespondReadTx(req readTxRequest) {
 
 	if exRs == nil {
 		if !req.isEstimateGas {
-			logger.Error("ExecuteSCResult is nil for read TX")
-			v.sendTransactionError(req.conn, tx.RHash(), -1, "evm return nil", nil, req.msgID)
+			logger.Error("ExecuteSCResult is nil for read TX: %s", errNotSmartContractCall)
+			v.sendTransactionError(req.conn, tx.RHash(), -1, errNotSmartContractCall, nil, req.msgID)
 			return
 		}
 		// Plain native transfer (no smart contract execution) -> tốn MINIMUM_BASE_FEE
 		receiptStatus = pb.RECEIPT_STATUS_RETURNED
 		exception = pb.EXCEPTION_NONE
-		gasUsed = uint64(mt_common.MINIMUM_BASE_FEE)
+		gasUsed = plainTransferEstimateGas(tx)
 	} else {
 		receiptStatus = exRs.ReceiptStatus()
 		ret = exRs.Return()

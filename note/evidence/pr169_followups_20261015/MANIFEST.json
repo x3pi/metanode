@@ -1,0 +1,55 @@
+{
+  "manifest_version": "1.0",
+  "entries": [
+    {
+      "id": "followups_probe",
+      "command": "followups_probe.py: V0 pre-PR169 / V1 PR169 merged / V2 follow-ups on fresh 4-validator clusters; probe_readtx2 deploys 2 contracts, 50 parallel identical ReadTransaction, EstimateGas/ReadTransaction, eth_getStorageAt before/after",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "ecc8b173b3fb7f7673e5ce892cf7864e17a48751",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-15T02:43:51Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "followups_probe_results.txt",
+          "sha256": "81f1412078fe04b9f5858db47a0c6ba449ce479cb113e98d946c74f01dc3d665",
+          "bytes": 3199
+        },
+        {
+          "path": "followups_probe.py.txt",
+          "sha256": "eadba5cc13a7c88fb2f6c8151b5c1af82c87a1fe545d139fcf4d5adbce7e7164",
+          "bytes": 1554
+        },
+        {
+          "path": "probe_readtx2_main.go.txt",
+          "sha256": "cba45b0d165cf2f3c2ad2cb56fd45ae977273b9f52682177461b7465f16a3924",
+          "bytes": 8183
+        },
+        {
+          "path": "followups_code.diff",
+          "sha256": "f818c136fe56e74d6a9df8872b9f6f8c8685bda6d6db833c38d02cde10b8f3d5",
+          "bytes": 4707
+        }
+      ]
+    },
+    {
+      "id": "followups_probe1",
+      "command": "pr_probe.py variant: V2 only with probe_readtx (plain transfer, chain id, body errors)",
+      "cwd": "/home/abc/chain-n/metanode",
+      "git_commit": "ecc8b173b3fb7f7673e5ce892cf7864e17a48751",
+      "git_status": "",
+      "started_at": "",
+      "finished_at": "2026-10-15T02:43:51Z",
+      "exit_code": 0,
+      "files": [
+        {
+          "path": "followups_probe1_results.txt",
+          "sha256": "39dc892206319374c541b428606d24a8ab30cfb9125d75f85cc73be840779cd2",
+          "bytes": 3023
+        }
+      ]
+    }
+  ],
+  "report": "note/pr169_followups_20261015.md"
+}
