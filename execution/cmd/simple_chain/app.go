@@ -421,11 +421,14 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		RecvCursor:  app.recvWorker.Cursor,
 	}
 	app.conservationRun = func() { app.conservation.Run(consInputs, consInterval, app.conservationStop) }
-	logger.Info("BLS conservation mode: %s (interval %s)", consMode, consInterval)
-	tx_processor.InitParentChainGatewayHandler(crossChainTransferDispatcherAdapter{
+	gateEnabled := app.config != nil && app.config.AccountGateParentRegistered()
+	tx_processor.InitParentChainGatewayHandlerWithGate(crossChainTransferDispatcherAdapter{
 		h:          app.crossNodeHandler,
 		sendWorker: app.sendWorker,
-	})
+	}, gateEnabled)
+	if h := tx_processor.GetParentChainGatewayHandler(); h != nil {
+		h.SetAccountGate(gateEnabled)
+	}
 
 	var rollupNonceMutex sync.Mutex
 	var rollupPendingNonce uint64

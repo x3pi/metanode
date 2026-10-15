@@ -793,7 +793,12 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 	}
 	r.markProvisionalIfApplied(user)
 	home, found, err := r.parent.GetAccountRegistry(user)
-	if err == nil && found {
+	if err != nil {
+		// Transient network or quorum error: log warning and retry on next poll without burning an attempt.
+		log.Printf("RegistrationRelay: transient lookup error for %s (will retry): %v", user.Hex(), err)
+		return
+	}
+	if found {
 		r.resolveFound(user, home)
 		return
 	}

@@ -58,18 +58,20 @@ func (as *AccountState) Proto() *pb.AccountState {
 	nonceBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(nonceBytes, as.nonce)
 	pbAs := &pb.AccountState{
-		Address:           as.address[:],
-		LastHash:          as.lastHash[:],
-		Balance:           as.balance.Bytes(),
-		PendingBalance:    as.pendingBalance.Bytes(),
-		DeviceKey:         as.deviceKey[:],
-		Nonce:             nonceBytes,
-		PublicKeyBls:      as.publicKeyBls,
-		AccountType:       as.accountType,
-		ParentRegistered:  as.parentRegistered,
-		Locked:            as.locked,
-		LockedHomeCluster: as.lockedHomeCluster[:],
-		Provisional:       as.provisional,
+		Address:          as.address[:],
+		LastHash:         as.lastHash[:],
+		Balance:          as.balance.Bytes(),
+		PendingBalance:   as.pendingBalance.Bytes(),
+		DeviceKey:        as.deviceKey[:],
+		Nonce:            nonceBytes,
+		PublicKeyBls:     as.publicKeyBls,
+		AccountType:      as.accountType,
+		ParentRegistered: as.parentRegistered,
+		Locked:           as.locked,
+		Provisional:      as.provisional,
+	}
+	if as.lockedHomeCluster != (p_common.PublicKey{}) {
+		pbAs.LockedHomeCluster = as.lockedHomeCluster[:]
 	}
 	if as.smartContractState != nil {
 		pbAs.SmartContractState = as.smartContractState.Proto()
@@ -96,7 +98,11 @@ func (as *AccountState) FromProto(pbData *pb.AccountState) {
 	as.accountType = pbData.AccountType
 	as.parentRegistered = pbData.ParentRegistered
 	as.locked = pbData.Locked
-	copy(as.lockedHomeCluster[:], pbData.LockedHomeCluster)
+	if len(pbData.LockedHomeCluster) == len(as.lockedHomeCluster) {
+		copy(as.lockedHomeCluster[:], pbData.LockedHomeCluster)
+	} else {
+		as.lockedHomeCluster = p_common.PublicKey{}
+	}
 	as.provisional = pbData.Provisional
 }
 

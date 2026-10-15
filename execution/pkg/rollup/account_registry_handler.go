@@ -226,10 +226,11 @@ type lockedHomeClusterStateDB interface {
 	SetLockedHomeCluster(addr common.Address, homeCluster cm.PublicKey)
 }
 
-// NOTE: committee enforcement is NOT active in production yet: no CommitteeProvider is wired in simple_chain, and the
-// RegistrationWorker attaches only its OWN attestation (no signature exchange between validators). Wiring a provider
-// for a committee with f+1 > 1 before that exchange exists would leave every registration PENDING forever.
-// CommitteeProvider returns the active committee validator BLS public keys.
+// NOTE: Committee enforcement is currently in transition: no CommitteeProvider is wired in simple_chain yet,
+// so RegistrationWorker and LockProposer attach their own node attestation. Until full committee co-attestation
+// and signature exchange is enabled in production, the network operates under the Trusted Validator assumption.
+// For destructive actions (SystemPayloadKindAccountLocked), at least one valid attestation is strictly enforced
+// even when committee is nil to prevent unauthenticated freeze attacks.
 type CommitteeProvider interface {
 	GetActiveCommitteeBLSKeys() ([]cm.PublicKey, error)
 }
@@ -465,6 +466,10 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 		}
 		if stateDB.GetLocked(payload.User) {
 			return nil // idempotent: already locked
+		}
+
+		if committee == nil && len(payload.Attestations) == 0 {
+			return errors.New("account registry: lock payload requires at least one valid validator attestation")
 		}
 
 		digest := ComputeAccountLockedAttestDigest(h.attestChainID(), payload.User, payload.HomeCluster, payload.ParentSeq)

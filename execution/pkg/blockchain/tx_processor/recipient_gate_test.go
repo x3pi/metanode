@@ -36,15 +36,15 @@ func makeSecpProtoTx(t *testing.T, key interface{}, from, to common.Address, amo
 		toBytes = to.Bytes()
 	}
 	tx.FromProto(&pb.Transaction{
-		FromAddress:  from.Bytes(),
-		ToAddress:    toBytes,
-		Amount:       amountBytes,
-		Data:         data,
-		Nonce:        nonceBytes,
-		MaxGas:       100000,
-		MaxGasPrice:  p_common.MINIMUM_BASE_FEE,
-		ChainID:      chainID,
-		Type:         0xFF,
+		FromAddress: from.Bytes(),
+		ToAddress:   toBytes,
+		Amount:      amountBytes,
+		Data:        data,
+		Nonce:       nonceBytes,
+		MaxGas:      100000,
+		MaxGasPrice: p_common.MINIMUM_BASE_FEE,
+		ChainID:     chainID,
+		Type:        0xFF,
 	})
 	if ecdsaKey, ok := key.(*ecdsa.PrivateKey); ok {
 		require.NoError(t, tx.SignSecpProto(ecdsaKey))

@@ -144,9 +144,13 @@ func extractRawCallData(tx types.Transaction) []byte {
 // checkAccountAuthorized returns nil if as is permitted under the account gate,
 // or AccountLocked if as is locked, or AccountNotRegistered / RecipientNotRegistered
 // if as is nil or neither registered on parent chain nor provisional.
+// Deployed smart contracts on this cluster are valid recipients.
 func checkAccountAuthorized(as types.AccountState, forRecipient bool) *transaction.TransactionError {
 	if as != nil && as.IsLocked() {
 		return transaction.AccountLocked
+	}
+	if forRecipient && as != nil && as.SmartContractState() != nil {
+		return nil
 	}
 	if as == nil || (!as.ParentRegistered() && !as.IsProvisional()) {
 		if forRecipient {

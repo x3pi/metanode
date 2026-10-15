@@ -413,3 +413,29 @@ func TestAccountState_LockedHomeCluster_MarshalCopyRoundTrip(t *testing.T) {
 	jsonState.FromAccountState(as.(*AccountState))
 	assert.Equal(t, winner, jsonState.ToAccountState().LockedHomeCluster())
 }
+
+func TestAccountState_GoldenBytes_DevCompatibility(t *testing.T) {
+	// Standard untouched account with balance 1000 and nonce 5
+	asNormal := NewAccountState(common.HexToAddress("0x1234567890123456789012345678901234567890"))
+	asNormal.AddBalance(big.NewInt(1000))
+	asNormal.SetNonce(5)
+
+	bNormal, err := asNormal.Marshal()
+	require.NoError(t, err)
+	// Must be exactly 104 bytes, matching the baseline dev branch without LockedHomeCluster field pollution
+	assert.Equal(t, 104, len(bNormal), "Normal account must serialize to exactly 104 bytes matching dev")
+
+	// Account with ParentRegistered = true adds exactly 2 bytes (tag 10 + varint 1)
+	asRegistered := asNormal.Copy()
+	asRegistered.SetParentRegistered(true)
+	bReg, err := asRegistered.Marshal()
+	require.NoError(t, err)
+	assert.Equal(t, 106, len(bReg), "Registered account must serialize to exactly 106 bytes")
+
+	// Only an account with non-zero LockedHomeCluster should include field 13
+	asLocked := asNormal.Copy()
+	asLocked.SetLockedHomeCluster(p_common.PublicKey{1})
+	bLocked, err := asLocked.Marshal()
+	require.NoError(t, err)
+	assert.Equal(t, 154, len(bLocked), "Account with explicit LockedHomeCluster should include 50 bytes of field 13")
+}

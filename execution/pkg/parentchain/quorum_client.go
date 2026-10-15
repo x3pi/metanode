@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"google.golang.org/protobuf/proto"
@@ -62,7 +63,7 @@ func NewQuorumClient(urls []string, privKey cm.PrivateKey, pubKey cm.PublicKey) 
 		sender = common.BytesToAddress(crypto.Keccak256(pubKey[:])[12:])
 	}
 	if len(cleanURLs) > 1 && (len(cleanURLs)-1)%3 != 0 {
-		fmt.Printf("⚠️ [QUORUM-CLIENT] Warning: Parent Chain node count (%d) is not of canonical BFT form (3f + 1, e.g. 4, 7, 10). Safety is maintained with Q=%d, but liveness tolerance may be suboptimal.\n", len(cleanURLs), (len(cleanURLs)+(len(cleanURLs)-1)/3)/2+1)
+		logger.Warn("⚠️ [QUORUM-CLIENT] Warning: Parent Chain node count (%d) is not of canonical BFT form (3f + 1, e.g. 4, 7, 10). Safety is maintained with Q=%d, but liveness tolerance may be suboptimal.", len(cleanURLs), (len(cleanURLs)+(len(cleanURLs)-1)/3)/2+1)
 	}
 	return &QuorumClient{
 		urls:    cleanURLs,
@@ -89,13 +90,17 @@ func (q *QuorumClient) quorumThreshold() int {
 // In a BFT system with N nodes and at most f Byzantine nodes (f = (N - 1) / 3):
 // To prevent Byzantine equivocation (where a Byzantine node lies to both sides to produce two
 // conflicting winning quorums Q1 and Q2), any two quorums must intersect in at least f + 1 nodes:
-//   |Q1 ∩ Q2| = 2*Q - N >= f + 1  ==>  Q >= (N + f)/2 + 1
+//
+//	|Q1 ∩ Q2| = 2*Q - N >= f + 1  ==>  Q >= (N + f)/2 + 1
 //
 // When N is canonical (N = 3f + 1, e.g. 4, 7, 10):
-//   (N + f)/2 + 1 = (3f + 1 + f)/2 + 1 = 2f + 1 = N - f.
-//   This simultaneously guarantees safety against equivocation and liveness up to f node failures.
+//
+//	(N + f)/2 + 1 = (3f + 1 + f)/2 + 1 = 2f + 1 = N - f.
+//	This simultaneously guarantees safety against equivocation and liveness up to f node failures.
+//
 // When N is non-canonical (e.g. 5, 6):
-//   Q = (N + f)/2 + 1 strictly guarantees safety against split-brain equivocation.
+//
+//	Q = (N + f)/2 + 1 strictly guarantees safety against split-brain equivocation.
 func (q *QuorumClient) strongQuorumThreshold() int {
 	n := len(q.clients)
 	if n <= 1 {

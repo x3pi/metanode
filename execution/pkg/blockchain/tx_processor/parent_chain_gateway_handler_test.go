@@ -364,3 +364,41 @@ func TestParentChainGatewayHandler_BalanceConservationAtBoundary(t *testing.T) {
 	asExact, _ := stateDB.AccountState(exact)
 	assert.Equal(t, int64(0), asExact.Balance().Int64(), "debit must be exactly amount + transfer fee + gas fee")
 }
+
+func TestParentChainGatewayHandler_AccountGatePolicy(t *testing.T) {
+	chainState, _, _, _ := newPersistentTestChainState(t)
+	stateDB := chainState.GetAccountStateDB()
+
+	var toKey mt_common.PublicKey
+	toKey[0] = 0x02
+	mockDispatcher := &MockCrossChainDispatcher{MockHash: common.HexToHash("0x1234")}
+	handler := &ParentChainGatewayHandler{dispatcher: mockDispatcher}
+
+	payload := append([]byte(nil), toKey[:]...)
+	payload = append(payload, make([]byte, 32)...)
+	payload = append(payload, common.HexToAddress("0xdead").Bytes()...)
+	cd := transaction.NewCallData(payload)
+	cdBytes, _ := cd.Marshal()
+
+	unregisteredSender := common.HexToAddress("0x9999000011112222333344445555666677778888")
+	stateDB.AddBalance(unregisteredSender, big.NewInt(10_000_000_000))
+	_ = stateDB.SetParentRegistered(unregisteredSender, false)
+
+	tx := transaction.NewTransaction(
+		unregisteredSender, mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS,
+		big.NewInt(100), 21000, 1, 0, cdBytes, nil, common.Hash{}, common.Hash{}, 0, 1,
+	)
+
+	// When accountGate is false: unregistered sender is permitted
+	handler.SetAccountGate(false)
+	rcp, _, err := handler.HandleTransaction(context.Background(), chainState, tx, mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, false, 0)
+	assert.NoError(t, err)
+	assert.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcp.Status(), "Ungated chain should allow unregistered sender")
+
+	// When accountGate is true: unregistered sender is rejected
+	handler.SetAccountGate(true)
+	rcp, _, err = handler.HandleTransaction(context.Background(), chainState, tx, mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, false, 0)
+	assert.NoError(t, err)
+	assert.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, rcp.Status(), "Gated chain must reject unregistered sender")
+	assert.Contains(t, string(rcp.Return()), "not confirmed on parent chain")
+}

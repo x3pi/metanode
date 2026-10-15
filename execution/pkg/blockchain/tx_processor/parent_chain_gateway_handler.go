@@ -175,6 +175,7 @@ type CrossChainTransferDispatcher interface {
 // ParentChainGatewayHandler handles transactions sent to PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS.
 type ParentChainGatewayHandler struct {
 	dispatcher CrossChainTransferDispatcher
+	ungated    bool // default false: gate is active by default
 }
 
 var (
@@ -182,13 +183,37 @@ var (
 	onceParentChainGateway            sync.Once
 )
 
-// InitParentChainGatewayHandler initializes the singleton with a dispatcher.
+// isAccountGateEnabled returns true unless explicitly disabled via ungated policy.
+func (h *ParentChainGatewayHandler) isAccountGateEnabled() bool {
+	if h == nil {
+		return true
+	}
+	return !h.ungated
+}
+
+// InitParentChainGatewayHandler initializes the singleton with a dispatcher (gate active by default).
 func InitParentChainGatewayHandler(dispatcher CrossChainTransferDispatcher) {
+	InitParentChainGatewayHandlerWithGate(dispatcher, true)
+}
+
+// InitParentChainGatewayHandlerWithGate initializes the singleton with a dispatcher and accountGate setting.
+func InitParentChainGatewayHandlerWithGate(dispatcher CrossChainTransferDispatcher, accountGate bool) {
 	onceParentChainGateway.Do(func() {
 		parentChainGatewayHandlerInstance = &ParentChainGatewayHandler{
 			dispatcher: dispatcher,
+			ungated:    !accountGate,
 		}
 	})
+	if parentChainGatewayHandlerInstance != nil {
+		parentChainGatewayHandlerInstance.ungated = !accountGate
+	}
+}
+
+// SetAccountGate dynamically updates the account gate enforcement policy.
+func (h *ParentChainGatewayHandler) SetAccountGate(enabled bool) {
+	if h != nil {
+		h.ungated = !enabled
+	}
 }
 
 // GetParentChainGatewayHandler returns the singleton handler.
@@ -220,7 +245,7 @@ func (h *ParentChainGatewayHandler) HandleTransaction(
 		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
 		return h.errorReceipt(tx, "account is locked"), nil, nil
 	}
-	if !stateDB.GetParentRegistered(tx.FromAddress()) {
+	if h.isAccountGateEnabled() && !stateDB.GetParentRegistered(tx.FromAddress()) {
 		logger.Error("❌ ParentChainGatewayHandler: sender account %s is not confirmed on parent chain (provisional or unregistered cannot transfer cross-chain)", tx.FromAddress().Hex())
 		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
 		return h.errorReceipt(tx, "account is not confirmed on parent chain"), nil, nil
