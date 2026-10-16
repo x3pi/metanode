@@ -2,15 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math/big"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
-	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	eth_params "github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -18,7 +15,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	sharedmemory "github.com/meta-node-blockchain/meta-node/pkg/shared_memory"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -63,7 +59,7 @@ func newCommittedRPCTransactionWithGroup(
 	}
 
 	var gasFeeCap, gasTipCap, maxFeePerBlobGas *hexutil.Big
-	if tx.GetType() >= eth_types.DynamicFeeTxType {
+	if tx.GetType() >= types.DynamicFeeTxType {
 		if fc := tx.GasFeeCap(); fc != nil {
 			gasFeeCap = (*hexutil.Big)(fc)
 		}
@@ -78,7 +74,7 @@ func newCommittedRPCTransactionWithGroup(
 			gasTipCap = (*hexutil.Big)(tc)
 		}
 	}
-	if tx.GetType() == eth_types.BlobTxType {
+	if tx.GetType() == types.BlobTxType {
 		if bf := tx.MaxFeePerBlobGas(); bf != nil {
 			maxFeePerBlobGas = (*hexutil.Big)(bf)
 		}
@@ -86,11 +82,11 @@ func newCommittedRPCTransactionWithGroup(
 		maxFeePerBlobGas = (*hexutil.Big)(bf)
 	}
 
-	var accesses *eth_types.AccessList
-	if tx.GetType() != eth_types.LegacyTxType {
+	var accesses *types.AccessList
+	if tx.GetType() != types.LegacyTxType {
 		al := tx.EthAccessList()
 		if al == nil {
-			al = eth_types.AccessList{}
+			al = types.AccessList{}
 		}
 		accesses = &al
 	}
@@ -101,15 +97,15 @@ func newCommittedRPCTransactionWithGroup(
 		for i, h := range bh {
 			blobVersionedHashes[i] = common.BytesToHash(h)
 		}
-	} else if tx.GetType() == eth_types.BlobTxType {
+	} else if tx.GetType() == types.BlobTxType {
 		blobVersionedHashes = []common.Hash{}
 	}
 
-	var authList []eth_types.SetCodeAuthorization
+	var authList []types.SetCodeAuthorization
 	if al := tx.EthAuthorizationList(); len(al) > 0 {
 		authList = al
-	} else if tx.GetType() == eth_types.SetCodeTxType {
-		authList = []eth_types.SetCodeAuthorization{}
+	} else if tx.GetType() == types.SetCodeTxType {
+		authList = []types.SetCodeAuthorization{}
 	}
 
 	// yParity mirrors V for the post-EIP-155 tx types (1/2/3/4), where V is
@@ -117,7 +113,7 @@ func newCommittedRPCTransactionWithGroup(
 	// see extractSignature's doc on why V's own length can't be trusted, but
 	// its VALUE for these types is exactly the parity bit.
 	var yParity *hexutil.Uint64
-	if tx.GetType() != eth_types.LegacyTxType && v != nil {
+	if tx.GetType() != types.LegacyTxType && v != nil {
 		yp := hexutil.Uint64(v.Uint64())
 		yParity = &yp
 	}
@@ -190,7 +186,7 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 			}
 
 			var maxFeePerBlobGas *hexutil.Big
-			if txE.Type() == eth_types.BlobTxType {
+			if txE.Type() == types.BlobTxType {
 				if bf := txE.BlobGasFeeCap(); bf != nil {
 					maxFeePerBlobGas = (*hexutil.Big)(bf)
 				}
@@ -198,8 +194,8 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 				maxFeePerBlobGas = (*hexutil.Big)(bf)
 			}
 
-			var accesses *eth_types.AccessList
-			if txE.Type() != eth_types.LegacyTxType {
+			var accesses *types.AccessList
+			if txE.Type() != types.LegacyTxType {
 				al := txE.AccessList()
 				accesses = &al
 			}
@@ -207,25 +203,25 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 			var blobVersionedHashes []common.Hash
 			if bh := txE.BlobHashes(); len(bh) > 0 {
 				blobVersionedHashes = bh
-			} else if txE.Type() == eth_types.BlobTxType {
+			} else if txE.Type() == types.BlobTxType {
 				blobVersionedHashes = []common.Hash{}
 			}
 
-			var authList []eth_types.SetCodeAuthorization
+			var authList []types.SetCodeAuthorization
 			if al := txE.SetCodeAuthorizations(); len(al) > 0 {
 				authList = al
-			} else if txE.Type() == eth_types.SetCodeTxType {
-				authList = []eth_types.SetCodeAuthorization{}
+			} else if txE.Type() == types.SetCodeTxType {
+				authList = []types.SetCodeAuthorization{}
 			}
 
 			var yParity *hexutil.Uint64
-			if txE.Type() != eth_types.LegacyTxType && v != nil {
+			if txE.Type() != types.LegacyTxType && v != nil {
 				yp := hexutil.Uint64(v.Uint64())
 				yParity = &yp
 			}
 
 			var gasFeeCap, gasTipCap *hexutil.Big
-			if txE.Type() >= eth_types.DynamicFeeTxType {
+			if txE.Type() >= types.DynamicFeeTxType {
 				if fc := txE.GasFeeCap(); fc != nil {
 					gasFeeCap = (*hexutil.Big)(fc)
 				}
@@ -334,59 +330,7 @@ func (api *MetaAPI) SendRawTransaction(ctx context.Context, input hexutil.Bytes)
 	return api.SendRawEthTransaction(ctx, input)
 }
 
-func TransactionToMap(tx *types.Transaction) (map[string]interface{}, error) {
-	data, err := json.Marshal(tx)
-	if err != nil {
-		return nil, fmt.Errorf("json encoding failed: %v", err)
-	}
-	var dataMap map[string]interface{}
-	if err := json.Unmarshal(data, &dataMap); err != nil {
-		return nil, fmt.Errorf("json unmarshalling failed: %v", err)
-	}
-	return dataMap, nil
-}
-func (api *MetaAPI) startProcessingLogger() {
-	// Biến này lưu số lượng của 10 giây trước
-	var lastCount int64 = 0
-	fileLogger, _ := loggerfile.NewFileLogger(fmt.Sprintf("DebugThread" + ".log"))
-	// Tạo một ticker 10 giây
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
 
-	logger.Info("[ProcessingMonitor] Đã khởi động logger giám sát transaction...")
-
-	// Vòng lặp vô hạn, chạy mỗi 10 giây
-	for range ticker.C {
-		// Lấy số lượng hiện tại (an toàn với atomic)
-		currentCount := api.processingChunkCount.Load()
-
-		// Log thông tin cơ bản
-		fileLogger.Info("[ProcessingMonitor] Giao dịch đang xử lý (đồng thời): %d", currentCount)
-
-		// Phân tích "bị kẹt":
-		// Nếu số lượng > 0 VÀ số lượng hiện tại bằng 10s trước,
-		// đây là một dấu hiệu có thể có transaction bị kẹt.
-		if currentCount > 0 && currentCount == lastCount {
-			fileLogger.Info(
-				"[ProcessingMonitor] CẢNH BÁO: Số lượng xử lý không đổi (%d). Có thể có transaction bị kẹt.",
-				currentCount,
-			)
-		} else if currentCount > lastCount {
-			fileLogger.Info(
-				"[ProcessingMonitor] Tải đang tăng (từ %d -> %d)",
-				lastCount, currentCount,
-			)
-		} else if currentCount < lastCount {
-			fileLogger.Info(
-				"[ProcessingMonitor] Tải đang giảm (từ %d -> %d)",
-				lastCount, currentCount,
-			)
-		}
-
-		// Cập nhật lastCount cho lần lặp sau
-		lastCount = currentCount
-	}
-}
 
 // rpcTxConcurrencyLimiter bounds how many eth_sendRawTransaction requests can
 // be actively executing pool addition at the same time.
@@ -513,7 +457,6 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		logger.Error("❌ [RPC-RECEIPT] failed to open receipts DB from root: %v", err)
 		return nil, nil
 	}
-	// typeHash := "mtnHash"
 	rcp, err := rcpDb.GetReceipt(searchHash)
 	if err != nil {
 		if err == receipt.ErrorReceiptNotFound {
@@ -563,7 +506,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		}
 	}
 
-	var rcpBloom eth_types.Bloom
+	var rcpBloom types.Bloom
 	for _, logData := range events {
 		rcpBloom.Add(logData.Address)
 		for _, topicBytes := range logData.Topics {
@@ -600,7 +543,6 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 	}
 
 	receiptMap := map[string]interface{}{
-		// "typeHash":          typeHash,
 		"type":              hexutil.EncodeUint64(txType),
 		"status":            swapStatusNumber(int32(rcp.Status().Number())),
 		"transactionHash":   hashEth,
@@ -608,7 +550,6 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		"logs":              logs,
 		"logsBloom":         rcpBloom,
 		"transactionIndex":  hexutil.EncodeUint64(rcp.TransactionIndex()),
-		"groupIndex":        hexutil.EncodeUint64(rcp.GroupIndex()), // Debug: deterministic group order
 		"blockHash":         blockHash,
 		"blockNumber":       hexutil.EncodeUint64(uint64(blockNumberInt64)),
 		"effectiveGasPrice": hexutil.EncodeUint64(effectiveGasPrice),
@@ -645,11 +586,11 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 
 // checkBloomFilter checks if a bloom filter might contain the given addresses and topics.
 // If it returns false, we are 100% sure the block does not contain matching logs.
-func checkBloomFilter(bloom eth_types.Bloom, addresses []common.Address, topics [][]common.Hash) bool {
+func checkBloomFilter(bloom types.Bloom, addresses []common.Address, topics [][]common.Hash) bool {
 	if len(addresses) > 0 {
 		var match bool
 		for _, addr := range addresses {
-			if eth_types.BloomLookup(bloom, addr) {
+			if types.BloomLookup(bloom, addr) {
 				match = true
 				break
 			}
@@ -665,7 +606,7 @@ func checkBloomFilter(bloom eth_types.Bloom, addresses []common.Address, topics 
 		}
 		var match bool
 		for _, topic := range sub {
-			if eth_types.BloomLookup(bloom, topic) {
+			if types.BloomLookup(bloom, topic) {
 				match = true
 				break
 			}
@@ -754,7 +695,7 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 		// If the block header has a valid LogsBloom, we can skip decoding the receipts
 		// if the Bloom filter definitively says there's no match.
 		if len(blockData.Header().LogsBloom()) > 0 {
-			bloom := eth_types.BytesToBloom(blockData.Header().LogsBloom())
+			bloom := types.BytesToBloom(blockData.Header().LogsBloom())
 			if !checkBloomFilter(bloom, crit.Addresses, crit.Topics) {
 				currentBlockNum.Add(currentBlockNum, big.NewInt(1))
 				continue

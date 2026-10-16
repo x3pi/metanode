@@ -208,23 +208,10 @@ func VerifyTransaction(
 		}
 	}
 
-	// ════════════════════════════════════════════════════════════════
-	// SUB-NODE SYNC OPTIMIZATION (Fix Code 66 Invalid Sign)
-	// Sub nodes may have incomplete account state: the AccountBatch
-	// replication might replicate nonce but NOT PublicKeyBls.
-	// Two scenarios where we must bypass strict BLS verification:
-	//   1. Sub node has NO state at all: as.Nonce()==0, tx.GetNonce()>0
-	//   2. Sub node has nonce but missing BLS key: as.Nonce()>0, PublicKeyBls empty
-	// In both cases, forward the TX to Master/Rust for proper verification.
-	// On Master nodes, PublicKeyBls is always populated for registered accounts,
-	// so this bypass never fires on Master (which is correct).
-	// ════════════════════════════════════════════════════════════════
-	isSubNodeLagging := len(as.PublicKeyBls()) == 0 && (tx.GetNonce() > 0 || as.Nonce() > 0)
 	pol := sigPolicyOf(chainState)
 
 	// Rollup system events are applied from their payload alone, so only BLS-native node identities may submit them.
-	// No sub-node-lagging exemption: an attacker (no BLS key, nonce > 0) looks exactly like a lagging account. System
-	// txs are produced by the master node's own workers, which always hold the node identity's state.
+	// System txs are produced by the master node's own workers, which always hold the node identity's state.
 	if tx.ToAddress() == rollup.RollupSystemAddress && !isNodeBLSIdentity(tx, as) {
 		return transaction.UnauthorizedSystemSender
 	}
@@ -251,8 +238,7 @@ func VerifyTransaction(
 				}
 			}
 		} else if pol.secp && !isNodeBLSIdentity(tx, as) {
-			// secp mode: a user tx must carry a valid ETH/secp256k1 signature. No BLS attempt and NO sub-node-lagging
-			// bypass: secp-only accounts have no BLS key, so that bypass would skip verification for all of them.
+			// secp mode: a user tx must carry a valid ETH/secp256k1 signature.
 			secpCacheKey := sigCacheKey(tx, nil)
 			if !LoadVerifiedSignature(secpCacheKey) {
 				if !tx.ValidEthSign() {
@@ -270,9 +256,7 @@ func VerifyTransaction(
 					atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
 				}
 			}
-		} else if isSubNodeLagging {
-			// Let it pass local verification; assume Master will reject if invalid.
-		} else {
+		} else if isNodeBLSIdentity(tx, as) {
 			blsCacheKey := sigCacheKey(tx, as.PublicKeyBls())
 			if !LoadVerifiedSignature(blsCacheKey) {
 				request := transaction.NewVerifyTransactionRequest(
@@ -281,17 +265,8 @@ func VerifyTransaction(
 					tx.Sign(),
 				)
 				if !request.Valid() {
-					logger.Error("BLS Verification Failed!")
-					logger.Error("  txHashHex: %s", txHash.Hex())
-					logger.Error("  FromAddress: %s", tx.FromAddress().Hex())
-					logger.Error("  ToAddress: %s", tx.ToAddress().Hex())
-					logger.Error("  SenderPubKey: %x", as.PublicKeyBls())
-					logger.Error("  SenderSign: %x", tx.Sign().Bytes())
-					logger.Error("  Hash() of TX according to SubNode: %x", tx.Hash().Bytes())
-					if !tx.ValidEthSign() {
-						logger.Error("  ETH Verification also failed!")
-						return transaction.InvalidSign
-					}
+					logger.Error("BLS Verification Failed for Node Identity! txHash=%s from=%s", txHash.Hex(), tx.FromAddress().Hex())
+					return transaction.InvalidSign
 				}
 				// Only cache on successful validation
 				StoreVerifiedSignature(blsCacheKey)
@@ -301,6 +276,8 @@ func VerifyTransaction(
 					atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
 				}
 			}
+		} else {
+			return transaction.InvalidSign
 		}
 	}
 
@@ -382,7 +359,7 @@ func VerifyTransaction(
 		// mode users never have a BLS key, so the rule would lock every fresh secp-only account out; node (BLS-native)
 		// identities keep it.
 		secpUser := pol.secp && !isNodeBLSIdentity(tx, as)
-		if as.Nonce() == 0 && !isSubNodeLagging && !secpUser {
+		if as.Nonce() == 0 && !secpUser {
 			return transaction.InvalidAddressMatchForTx0
 		}
 		if !tx.ValidDeployData() {
@@ -439,34 +416,32 @@ func VerifyTransaction(
 		return transaction.InvalidPendingUse
 	}
 
-	// 4. KIỂM TRA PHÍ & SỐ DƯ (Bỏ qua nếu SubNode chưa đồng bộ đủ state)
-	if !isSubNodeLagging {
-		// 4.1. Kiểm tra số dư có đủ trả Amount cơ bản không
-		if !tx.ValidAmount(as) {
-			return transaction.InvalidAmount
+	// 4. KIỂM TRA PHÍ & SỐ DƯ
+	// 4.1. Kiểm tra số dư có đủ trả Amount cơ bản không
+	if !tx.ValidAmount(as) {
+		return transaction.InvalidAmount
+	}
+
+	// 4.2. Xác định giao dịch có được miễn phí không
+	_, isFree := chainState.GetFreeFeeAddress()[tx.ToAddress()]
+	if !isFree {
+		_, isFree = chainState.GetFreeFeeAddress()[tx.FromAddress()]
+	}
+	if tx.GetNonce() == 0 {
+		isFree = true
+	}
+
+	if !isFree {
+		// 4.3. Kiểm tra số dư có đủ trả (MaxFee + Amount) không
+		if !tx.ValidMaxFee(as) {
+			return transaction.InvalidMaxFee
 		}
 
-		// 4.2. Xác định giao dịch có được miễn phí không
-		_, isFree := chainState.GetFreeFeeAddress()[tx.ToAddress()]
-		if !isFree {
-			_, isFree = chainState.GetFreeFeeAddress()[tx.FromAddress()]
-		}
-		if tx.GetNonce() == 0 {
-			isFree = true
-		}
-
-		if !isFree {
-			// 4.3. Kiểm tra số dư có đủ trả (MaxFee + Amount) không
-			if !tx.ValidMaxFee(as) {
-				return transaction.InvalidMaxFee
-			}
-
-			// 4.4. Kiểm tra MaxGasPrice > 0 (chống spam cơ bản)
-			if !tx.ValidMaxGasPrice(common.MINIMUM_BASE_FEE) {
-				return &transaction.TransactionError{
-					Code:        transaction.InvalidMaxGasPrice.Code,
-					Description: fmt.Sprintf("invalid max gas price, expected at least %d", common.MINIMUM_BASE_FEE),
-				}
+		// 4.4. Kiểm tra MaxGasPrice > 0 (chống spam cơ bản)
+		if !tx.ValidMaxGasPrice(common.MINIMUM_BASE_FEE) {
+			return &transaction.TransactionError{
+				Code:        transaction.InvalidMaxGasPrice.Code,
+				Description: fmt.Sprintf("invalid max gas price, expected at least %d", common.MINIMUM_BASE_FEE),
 			}
 		}
 	}
