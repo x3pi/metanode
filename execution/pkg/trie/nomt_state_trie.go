@@ -14,7 +14,6 @@ import (
 	"time"
 
 	e_common "github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi"
@@ -217,26 +216,18 @@ func addressToKeyPathWithNamespace(namespace, key []byte) [32]byte {
 		addr := hex.EncodeToString(key[:20])
 		slot := key[20:]
 		keyPrefix := "smart_contract_storage_" + addr
-		combined := make([]byte, len(keyPrefix)+len(slot))
-		copy(combined, keyPrefix)
-		copy(combined[len(keyPrefix):], slot)
-		return crypto.Keccak256Hash(combined)
+		return keccak256Hash([]byte(keyPrefix), slot)
 	}
 	if len(namespace) == 0 {
-		return crypto.Keccak256Hash(key)
+		return keccak256Hash(key)
 	}
-	combined := make([]byte, len(namespace)+len(key))
-	copy(combined, namespace)
-	copy(combined[len(namespace):], key)
-	return crypto.Keccak256Hash(combined)
+	return keccak256Hash(namespace, key)
 }
 
 // registryKeyPath returns the NOMT KeyPath for storing the keys registry.
 // DEPRECATED: Only used for backward-compatible loading from old NOMT data.
 func registryKeyPath(namespace []byte) [32]byte {
-	registryKey := []byte(nomtRegistryKeyPrefix)
-	registryKey = append(registryKey, namespace...)
-	return crypto.Keccak256Hash(registryKey)
+	return keccak256Hash([]byte(nomtRegistryKeyPrefix), namespace)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

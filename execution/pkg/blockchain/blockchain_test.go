@@ -18,7 +18,7 @@ func newTestBlockChain() *BlockChain {
 	return &BlockChain{
 		blockCache:             new(sync.Map),
 		receiptsCache:          new(sync.Map),
-		txsCache:               new(sync.Map),
+		txsCache:               newTxCacheMap(),
 		blockNumberToHashCache: new(sync.Map),
 		txHashToBlockNumber:    newTxHashToBlockNumberMap(),
 		ethHashMapBlsHash:      newEthHashMapBlsHashMap(),

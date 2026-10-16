@@ -26,10 +26,18 @@ var txTraceEnabled = os.Getenv("METANODE_TX_TRACE") == "1"
 var txTraceMu sync.Mutex
 var txTraceFile *os.File
 
+// TxTraceEnabled reports whether transaction lifecycle tracing is enabled.
+func TxTraceEnabled() bool {
+	return txTraceEnabled
+}
+
 // TraceTx is the exported form of traceTx, for the same diagnostic use from
 // other packages (e.g. processor.ProcessTransactionsInPoolSub's
 // valid/future/past classification, which happens outside this package).
 func TraceTx(event string, addr common.Address, nonce uint64, extra string) {
+	if !txTraceEnabled {
+		return
+	}
 	traceTx(event, addr, nonce, extra)
 }
 
@@ -47,7 +55,7 @@ func traceTx(event string, addr common.Address, nonce uint64, extra string) {
 		txTraceFile = f
 	}
 	fmt.Fprintf(txTraceFile, "%s %s addr=%s nonce=%d %s\n",
-		time.Now().Format("15:04:05.000000"), event, addr.Hex(), nonce, extra)
+		time.Now().Format("15:04:05.000000"), event, addr, nonce, extra)
 }
 
 // NumShards was 256 (keyed by a single address byte) until 2026-09-02. Found
@@ -289,13 +297,14 @@ func checkPriceBump(oldPrice, newPrice *big.Int) bool {
 }
 
 func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
-	shardIdx := tp.getShardIndex(tx.FromAddress())
+	from := tx.FromAddress()
+	shardIdx := tp.getShardIndex(from)
 	shard := tp.shards[shardIdx]
 
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	key := txPoolKey{addr: tx.FromAddress(), nonce: tx.GetNonce()}
+	key := txPoolKey{addr: from, nonce: tx.GetNonce()}
 	if shard.transactionKeys[key] {
 		// Look up existing transaction with the same key
 		var oldTx types.Transaction
@@ -312,7 +321,9 @@ func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 			// 1. Same hash -> duplicate / already known
 			if oldTx.Hash() == tx.Hash() {
 				logger.Info("Transaction already exists in pool, skipping key addr=%s nonce=%d", key.addr.Hex(), key.nonce)
-				traceTx("REJECT-DUP", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", shardIdx))
+				if txTraceEnabled {
+					traceTx("REJECT-DUP", from, key.nonce, fmt.Sprintf("shard=%d", shardIdx))
+				}
 				return fmt.Errorf("%w: transaction already exists in pool, skipping", transaction.ErrAlreadyKnown)
 			}
 
@@ -322,7 +333,9 @@ func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 			if !checkPriceBump(oldPrice, newPrice) {
 				logger.Info("Replacement transaction underpriced: addr=%s nonce=%d oldPrice=%v newPrice=%v",
 					key.addr.Hex(), key.nonce, oldPrice, newPrice)
-				traceTx("REJECT-UNDERPRICED", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("old=%v new=%v", oldPrice, newPrice))
+				if txTraceEnabled {
+					traceTx("REJECT-UNDERPRICED", from, key.nonce, fmt.Sprintf("old=%v new=%v", oldPrice, newPrice))
+				}
 				return fmt.Errorf("%w: replacement transaction underpriced", transaction.ErrReplacementUnderpriced)
 			}
 
@@ -336,8 +349,10 @@ func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 			}
 			logger.Info("🔄 [REPLACEMENT-TX] Replaced tx addr=%s nonce=%d oldHash=%s newHash=%s (bumped %v -> %v)",
 				key.addr.Hex(), key.nonce, oldHash.Hex(), newHash.Hex(), oldPrice, newPrice)
-			traceTx("REPLACE", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("oldHash=%s newHash=%s oldPrice=%v newPrice=%v",
-				oldHash.Hex(), newHash.Hex(), oldPrice, newPrice))
+			if txTraceEnabled {
+				traceTx("REPLACE", from, key.nonce, fmt.Sprintf("oldHash=%s newHash=%s oldPrice=%v newPrice=%v",
+					oldHash.Hex(), newHash.Hex(), oldPrice, newPrice))
+			}
 			tp.notifyWork()
 			return nil
 		}
@@ -348,7 +363,7 @@ func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 	// CROSS-CHAIN DEBUG logic (unchanged)
 	if tx.ToAddress() == common.HexToAddress("0x00000000000000000000000000000000B429C0B2") {
 		logger.Info("📥 [POOL-ARRIVE] Cross-chain TX entered mempool: hash=%s from=%s nonce=%d pool_size=%d",
-			tx.Hash().Hex()[:16], tx.FromAddress().Hex()[:10], tx.GetNonce(), atomic.LoadInt64(&tp.count)+1)
+			tx.Hash().Hex()[:16], from.Hex()[:10], key.nonce, atomic.LoadInt64(&tp.count)+1)
 	}
 
 	shard.transactions = append(shard.transactions, tx)
@@ -359,66 +374,83 @@ func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 		shard.txHashMap[h] = tx
 	}
 
-	traceTx("ADD", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d newCount=%d", shardIdx, len(shard.transactions)))
+	if txTraceEnabled {
+		traceTx("ADD", from, key.nonce, fmt.Sprintf("shard=%d newCount=%d", shardIdx, len(shard.transactions)))
+	}
 	atomic.AddInt64(&tp.count, 1)
 	tp.notifyWork()
 	return nil
 }
 
 func (tp *TransactionPool) AddTransactions(txs []types.Transaction) {
-	// Group transactions by shard to minimize lock contention
-	txsByShard := make(map[uint16][]types.Transaction)
-	for _, tx := range txs {
-		idx := tp.getShardIndex(tx.FromAddress())
-		txsByShard[idx] = append(txsByShard[idx], tx)
+	if len(txs) == 0 {
+		return
 	}
 
 	addedAny := false
 	var totalAdded int64
 
-	for idx, shardTxs := range txsByShard {
-		shard := tp.shards[idx]
-		shard.mu.Lock()
+	var lockedShard *poolShard
+	var lockedIdx uint16
 
-		for _, tx := range shardTxs {
-			key := txPoolKey{addr: tx.FromAddress(), nonce: tx.GetNonce()}
-			if !shard.transactionKeys[key] {
-				shard.transactions = append(shard.transactions, tx)
-				shard.transactionKeys[key] = true
+	for _, tx := range txs {
+		from := tx.FromAddress()
+		idx := tp.getShardIndex(from)
+		if lockedShard == nil || idx != lockedIdx {
+			if lockedShard != nil {
+				lockedShard.mu.Unlock()
+			}
+			lockedIdx = idx
+			lockedShard = tp.shards[idx]
+			lockedShard.mu.Lock()
+		}
 
+		nonce := tx.GetNonce()
+		key := txPoolKey{addr: from, nonce: nonce}
+		if !lockedShard.transactionKeys[key] {
+			lockedShard.transactions = append(lockedShard.transactions, tx)
+			lockedShard.transactionKeys[key] = true
+
+			h := tx.Hash()
+			if h != (common.Hash{}) {
+				lockedShard.txHashMap[h] = tx
+			}
+			if txTraceEnabled {
+				traceTx("ADD-BATCH", from, nonce, fmt.Sprintf("shard=%d", idx))
+			}
+			totalAdded++
+			addedAny = true
+		} else {
+			var oldTx types.Transaction
+			var oldIdx = -1
+			for i, t := range lockedShard.transactions {
+				if t.FromAddress() == key.addr && t.GetNonce() == key.nonce {
+					oldTx = t
+					oldIdx = i
+					break
+				}
+			}
+			if oldTx != nil && oldTx.Hash() != tx.Hash() && checkPriceBump(oldTx.EffectiveGasPrice(), tx.EffectiveGasPrice()) {
+				delete(lockedShard.txHashMap, oldTx.Hash())
+				lockedShard.transactions[oldIdx] = tx
 				h := tx.Hash()
 				if h != (common.Hash{}) {
-					shard.txHashMap[h] = tx
+					lockedShard.txHashMap[h] = tx
 				}
-				traceTx("ADD-BATCH", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", idx))
-				totalAdded++
 				addedAny = true
-			} else {
-				var oldTx types.Transaction
-				var oldIdx = -1
-				for i, t := range shard.transactions {
-					if t.FromAddress() == key.addr && t.GetNonce() == key.nonce {
-						oldTx = t
-						oldIdx = i
-						break
-					}
+				if txTraceEnabled {
+					traceTx("REPLACE-BATCH", from, nonce, fmt.Sprintf("shard=%d", idx))
 				}
-				if oldTx != nil && oldTx.Hash() != tx.Hash() && checkPriceBump(oldTx.EffectiveGasPrice(), tx.EffectiveGasPrice()) {
-					delete(shard.txHashMap, oldTx.Hash())
-					shard.transactions[oldIdx] = tx
-					h := tx.Hash()
-					if h != (common.Hash{}) {
-						shard.txHashMap[h] = tx
-					}
-					addedAny = true
-					traceTx("REPLACE-BATCH", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", idx))
-				} else {
-					logger.Warn("AddTransactions: dropped duplicate key on re-insert addr=%s nonce=%d", key.addr.Hex(), key.nonce)
-					traceTx("REJECT-DUP-BATCH", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", idx))
+			} else {
+				logger.Warn("AddTransactions: dropped duplicate key on re-insert addr=%s nonce=%d", key.addr.Hex(), key.nonce)
+				if txTraceEnabled {
+					traceTx("REJECT-DUP-BATCH", from, nonce, fmt.Sprintf("shard=%d", idx))
 				}
 			}
 		}
-		shard.mu.Unlock()
+	}
+	if lockedShard != nil {
+		lockedShard.mu.Unlock()
 	}
 
 	if addedAny {
@@ -454,6 +486,18 @@ func (tp *TransactionPool) AddTransactions(txs []types.Transaction) {
 // still O(backlog) exactly once, not O(backlog) repeated on every tick.
 func (tp *TransactionPool) TransactionsWithAggSign(maxDrain int) ([]types.Transaction, []byte) {
 	var allTxs []types.Transaction
+	if maxDrain > 0 {
+		initCap := maxDrain
+		if initCap > 16384 {
+			initCap = 16384
+		}
+		if cnt := int(atomic.LoadInt64(&tp.count)); cnt > 0 && cnt < initCap {
+			initCap = cnt
+		}
+		if initCap > 0 {
+			allTxs = make([]types.Transaction, 0, initCap)
+		}
+	}
 	var totalDrained int64
 
 	// FAIRNESS: start from wherever the previous call left off (see the cursor
@@ -488,9 +532,16 @@ func (tp *TransactionPool) TransactionsWithAggSign(maxDrain int) ([]types.Transa
 					traceTx("DRAIN", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", i))
 				}
 			}
-			shard.transactions = make([]types.Transaction, 0)
-			shard.transactionKeys = make(map[txPoolKey]bool)
-			shard.txHashMap = make(map[common.Hash]types.Transaction)
+			if cap(shard.transactions) <= 64 {
+				clear(shard.transactions)
+				shard.transactions = shard.transactions[:0]
+				clear(shard.transactionKeys)
+				clear(shard.txHashMap)
+			} else {
+				shard.transactions = make([]types.Transaction, 0)
+				shard.transactionKeys = make(map[txPoolKey]bool)
+				shard.txHashMap = make(map[common.Hash]types.Transaction)
+			}
 		}
 		shard.mu.Unlock()
 		visited++

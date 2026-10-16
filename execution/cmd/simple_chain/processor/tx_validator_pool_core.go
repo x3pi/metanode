@@ -629,49 +629,14 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transact
 	verificationDuration := time.Since(t2)
 
 	t3 := time.Now()
-	var logFile *os.File
-	// Phase 3 (TPS Optimization): Parallel HasNonceConflict Checks
-	// GOMAXPROCS(0), not NumCPU(): see native_fast_path.go for why.
-	numWorkersConflict := runtime.GOMAXPROCS(0) / 2
-	if numWorkersConflict < 4 {
-		numWorkersConflict = 4
-	}
-	if numWorkersConflict > 48 {
-		numWorkersConflict = 48
-	}
-	if len(txs) < numWorkersConflict {
-		numWorkersConflict = len(txs)
-	}
-
-	var wgConflict sync.WaitGroup
-	wgConflict.Add(numWorkersConflict)
-	chunkSizeConflict := (len(txs) + numWorkersConflict - 1) / numWorkersConflict
-
-	for w := 0; w < numWorkersConflict; w++ {
-		start := w * chunkSizeConflict
-		end := start + chunkSizeConflict
-		if end > len(txs) {
-			end = len(txs)
-		}
-		go func(s, e int) {
-			defer wgConflict.Done()
-			for i := s; i < e; i++ {
-				tx := txs[i]
-				if tx == nil {
-					errorsList[i] = fmt.Errorf("tx nil")
-					continue
-				}
-				if errorsList[i] != nil {
-					continue
-				}
-			}
-		}(start, end)
-	}
-	wgConflict.Wait()
-
+	validTxs = make([]types.Transaction, 0, len(txs))
 	// Sequentially gather the valid transactions (extremely fast, zero contention)
 	for i, tx := range txs {
-		if tx != nil && errorsList[i] == nil {
+		if tx == nil {
+			errorsList[i] = fmt.Errorf("tx nil")
+			continue
+		}
+		if errorsList[i] == nil {
 			validTxs = append(validTxs, tx)
 		}
 	}
@@ -679,11 +644,7 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transact
 
 	t4 := time.Now()
 	if len(validTxs) > 0 {
-		if logFile != nil {
-			logFile.WriteString(fmt.Sprintf("TxValidatorPool.addTransactionsToPoolInternal: vp.transactionPool.AddTransactions called with %d txs\n", len(validTxs)))
-		}
-
-		// Bulk insert to pool (acquires lock ONCE)
+		// Bulk insert to pool (acquires lock ONCE per shard run)
 		vp.transactionPool.AddTransactions(validTxs)
 
 		GlobalPipelineStats.IncrTxsReceived(int64(len(validTxs)))
@@ -976,16 +937,18 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 		}
 
 		startProcess := time.Now()
-
-		var validTxs []types.Transaction
-		var futureTxs []types.Transaction
-		nonceMap := make(map[common.Address]uint64)
+		traceEnabled := transaction_pool.TxTraceEnabled()
 
 		// Preload accounts in batch to warm cache and avoid synchronous DB I/O inside loop
 		preloadSet := make(map[common.Address]struct{}, len(allTxs))
 		for _, tx := range allTxs {
 			preloadSet[tx.FromAddress()] = struct{}{}
 		}
+
+		validTxs := make([]types.Transaction, 0, len(allTxs))
+		var futureTxs []types.Transaction
+		nonceMap := make(map[common.Address]uint64, len(preloadSet))
+
 		if len(preloadSet) > 0 {
 			preloadAddrs := make([]common.Address, 0, len(preloadSet))
 			for addr := range preloadSet {
@@ -1017,14 +980,18 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 				if _, suspectStale := suspectStaleAddrs[addr]; !suspectStale {
 					if val, ok := cache.Load(addr); ok {
 						nonceMap[addr] = val.(uint64)
-						transaction_pool.TraceTx("CACHE-HIT", addr, val.(uint64), fmt.Sprintf("cachePtr=%p", cache))
+						if traceEnabled {
+							transaction_pool.TraceTx("CACHE-HIT", addr, val.(uint64), fmt.Sprintf("cachePtr=%p", cache))
+						}
 						continue
 					}
-				} else {
+				} else if traceEnabled {
 					transaction_pool.TraceTx("CACHE-SUSPECT-STALE", addr, 0, "future tx stuck past StaleFutureCacheThreshold, forcing fresh DB read")
 				}
 				missingAddrs = append(missingAddrs, addr)
-				transaction_pool.TraceTx("CACHE-MISS", addr, 0, fmt.Sprintf("cachePtr=%p", cache))
+				if traceEnabled {
+					transaction_pool.TraceTx("CACHE-MISS", addr, 0, fmt.Sprintf("cachePtr=%p", cache))
+				}
 			}
 
 			// If there are cache misses, fetch nonces from DB in parallel
@@ -1065,7 +1032,9 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 							}
 							localNonces[addr] = nonce
 							cache.Store(addr, nonce) // Cache for future ticks
-							transaction_pool.TraceTx("DB-FETCH", addr, nonce, fmt.Sprintf("cachePtr=%p", cache))
+							if traceEnabled {
+								transaction_pool.TraceTx("DB-FETCH", addr, nonce, fmt.Sprintf("cachePtr=%p", cache))
+							}
 						}
 						nonceMapMutex.Lock()
 						for k, v := range localNonces {
@@ -1089,33 +1058,42 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 
 			if actual > expected {
 				// Future nonce, missing predecessors -> defer to next cycle
-				// logger.Info("⏳ [TX POOL] Chờ nonce (Future TX): hash=%s, from=%s, actualNonce=%d, expectedNonce=%d", tx.Hash().Hex(), from.Hex(), actual, expected)
 				// TTL Logic: Xóa nếu đã chờ quá thời gian FutureTxTimeout
-				if insertTime, exists := vp.futureTxTimeMap[tx.Hash()]; exists {
+				txHash := tx.Hash()
+				if insertTime, exists := vp.futureTxTimeMap[txHash]; exists {
 					if time.Since(insertTime) > FutureTxTimeout {
-						// logger.Info("🗑️ [TX POOL] Xóa giao dịch rác (quá timeout): hash=%s", tx.Hash().Hex())
-						transaction_pool.TraceTx("TTL-DROP", from, actual, fmt.Sprintf("expected=%d waitedSince=%s", expected, insertTime.Format("15:04:05.000000")))
-						delete(vp.futureTxTimeMap, tx.Hash())
+						if traceEnabled {
+							transaction_pool.TraceTx("TTL-DROP", from, actual, fmt.Sprintf("expected=%d waitedSince=%s", expected, insertTime.Format("15:04:05.000000")))
+						}
+						delete(vp.futureTxTimeMap, txHash)
 						continue // KHÔNG append vào futureTxs nữa -> Bị drop vĩnh viễn
 					}
 				} else {
-					vp.futureTxTimeMap[tx.Hash()] = time.Now()
+					vp.futureTxTimeMap[txHash] = time.Now()
 				}
 
-				transaction_pool.TraceTx("CLASSIFY-FUTURE", from, actual, fmt.Sprintf("expected=%d", expected))
+				if traceEnabled {
+					transaction_pool.TraceTx("CLASSIFY-FUTURE", from, actual, fmt.Sprintf("expected=%d", expected))
+				}
 				futureTxs = append(futureTxs, tx)
 			} else if actual == expected {
 				// Valid contiguous nonce
-				// logger.Info("✅ [TX POOL] Chấp nhận tx: hash=%s, from=%s, nonce=%d", tx.Hash().Hex(), from.Hex(), actual)
-				transaction_pool.TraceTx("CLASSIFY-VALID", from, actual, "")
+				if traceEnabled {
+					transaction_pool.TraceTx("CLASSIFY-VALID", from, actual, "")
+				}
 				validTxs = append(validTxs, tx)
 				nonceMap[from]++
-				delete(vp.futureTxTimeMap, tx.Hash()) // Dọn dẹp map
+				if len(vp.futureTxTimeMap) > 0 {
+					delete(vp.futureTxTimeMap, tx.Hash())
+				}
 			} else {
 				// Past nonce (actual < expected) -> drop permanently
-				// logger.Info("❌ [TX POOL] Bỏ qua tx (Past nonce): hash=%s, from=%s, actualNonce=%d, expectedNonce=%d", tx.Hash().Hex(), from.Hex(), actual, expected)
-				transaction_pool.TraceTx("CLASSIFY-PAST-DROP", from, actual, fmt.Sprintf("expected=%d", expected))
-				delete(vp.futureTxTimeMap, tx.Hash()) // Dọn dẹp map
+				if traceEnabled {
+					transaction_pool.TraceTx("CLASSIFY-PAST-DROP", from, actual, fmt.Sprintf("expected=%d", expected))
+				}
+				if len(vp.futureTxTimeMap) > 0 {
+					delete(vp.futureTxTimeMap, tx.Hash())
+				}
 			}
 		}
 
@@ -1175,17 +1153,19 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 			vp.transactionPool.AddTransactions(futureTxs)
 		}
 
-		if f, errFile := os.OpenFile("/tmp/vp_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); errFile == nil {
-			elapsedStr := time.Since(startProcess).String()
-			f.WriteString(fmt.Sprintf("[%s] ProcessPoolSub elapsed: %s, allTxs=%d, validTxs=%d, futureTxs=%d\n", time.Now().Format("15:04:05.000"), elapsedStr, len(allTxs), len(validTxs), len(futureTxs)))
-			if len(allTxs) > 0 {
-				expectedNonce := uint64(0)
-				if nonceMap[allTxs[0].FromAddress()] > 0 {
-					expectedNonce = nonceMap[allTxs[0].FromAddress()] - 1
+		if traceEnabled {
+			if f, errFile := os.OpenFile("/tmp/vp_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); errFile == nil {
+				elapsedStr := time.Since(startProcess).String()
+				f.WriteString(fmt.Sprintf("[%s] ProcessPoolSub elapsed: %s, allTxs=%d, validTxs=%d, futureTxs=%d\n", time.Now().Format("15:04:05.000"), elapsedStr, len(allTxs), len(validTxs), len(futureTxs)))
+				if len(allTxs) > 0 {
+					expectedNonce := uint64(0)
+					if nonceMap[allTxs[0].FromAddress()] > 0 {
+						expectedNonce = nonceMap[allTxs[0].FromAddress()] - 1
+					}
+					f.WriteString(fmt.Sprintf("  Sample Tx: actualNonce=%d, expectedNonce=%d, from=%s\n", allTxs[0].GetNonce(), expectedNonce, allTxs[0].FromAddress().String()))
 				}
-				f.WriteString(fmt.Sprintf("  Sample Tx: actualNonce=%d, expectedNonce=%d, from=%s\n", allTxs[0].GetNonce(), expectedNonce, allTxs[0].FromAddress().String()))
+				f.Close()
 			}
-			f.Close()
 		}
 
 		logger.Info("🔍 [DEBUG] ProcessPoolSub: allTxs=%d, validTxs=%d, futureTxs=%d", len(allTxs), len(validTxs), len(futureTxs))

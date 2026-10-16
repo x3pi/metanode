@@ -8,7 +8,6 @@ import (
 	"time"
 
 	eth_common "github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
@@ -21,18 +20,15 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
+var boundSigSuffix = [1]byte{0xB1}
+
 // sigCacheKey binds a verified-signature cache entry to (tx hash, canonical proto fields hash,
 // signature bytes, BLS key it was verified against). Keying by tx hash alone would let a tx copy
 // carrying a forged signature or mutated proto fields ride on the cache entry of the genuine one.
 func sigCacheKey(tx types.Transaction, blsKey []byte) eth_common.Hash {
-	buf := make([]byte, 0, 64+len(tx.Sign().Bytes())+len(blsKey))
 	h := tx.Hash()
-	buf = append(buf, h[:]...)
 	protoHash := tx.ProtoHash()
-	buf = append(buf, protoHash[:]...)
-	buf = append(buf, tx.Sign().Bytes()...)
-	buf = append(buf, blsKey...)
-	return crypto.Keccak256Hash(buf)
+	return transaction.Keccak256Hash(h[:], protoHash[:], tx.SignBytes(), blsKey)
 }
 
 // boundSigKey is the cache key of an entry that is stored ONLY after the envelope binding AND the signature both
@@ -41,7 +37,7 @@ func sigCacheKey(tx types.Transaction, blsKey []byte) eth_common.Hash {
 // (e.g. the BLS mempool path), so they must NOT short-circuit it: honest nodes with different cache contents would
 // then reach different verdicts.
 func boundSigKey(key eth_common.Hash) eth_common.Hash {
-	return crypto.Keccak256Hash(key[:], []byte{0xB1})
+	return transaction.Keccak256Hash(key[:], boundSigSuffix[:])
 }
 
 // storeVerifiedBound records both the plain and the binding-proven cache entry. Call only after binding + signature passed.
