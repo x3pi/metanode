@@ -509,13 +509,27 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		}
 	}()
 
+	isRollupNonceError := func(err error) bool {
+		if err == nil {
+			return false
+		}
+		if errors.Is(err, transaction.ErrNonceTooLow) ||
+			errors.Is(err, transaction.ErrNonceTooHigh) ||
+			errors.Is(err, transaction.InvalidNonce) ||
+			errors.Is(err, transaction.ErrNonceUintOverflow) {
+			return true
+		}
+		msg := strings.ToLower(err.Error())
+		return strings.Contains(msg, "nonce")
+	}
+
 	eventProposer := func(event rollup.Event, msgID e_common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash e_common.Hash) error {
 		rollupNonceMutex.Lock()
 		defer rollupNonceMutex.Unlock()
 
 		state, err := app.chainState.GetAccountStateDB().AccountState(attestKey.Address())
 		var dbNonce uint64
-		if err == nil {
+		if err == nil && state != nil {
 			dbNonce = state.Nonce()
 		}
 		// Nonce allocation for system txs. TransactionPool keys on (sender, nonce), so two
@@ -632,12 +646,24 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		// accepted into a pool nothing ever reads from, so it was silently never dispatched to
 		// RollupSystemHandler at all.
 		_, err = app.transactionProcessor.AddTransactionToPool(tx)
-		if err == nil {
-			rollupInflight[inflightKey] = rollupPendingNonce
-			rollupPendingNonce++
-			logger.Info("📡 [ROLLUP-PROPOSER] Proposed Event %T to Raft Tx Pool (Nonce %d)", event, tx.GetNonce())
+		if err != nil {
+			if isRollupNonceError(err) {
+				if freshState, sErr := app.chainState.GetAccountStateDB().AccountState(attestKey.Address()); sErr == nil && freshState != nil {
+					dbNonce = freshState.Nonce()
+				}
+				logger.Warn("⚠️ [ROLLUP-PROPOSER] Nonce error detected (%v), resetting pending nonce from %d to on-chain dbNonce %d",
+					err, rollupPendingNonce, dbNonce)
+				rollupInflight = map[rollupInflightKey]uint64{}
+				rollupPendingNonce = dbNonce
+				rollupLastDBNonce = dbNonce
+				rollupLastProgress = time.Now()
+			}
+			return err
 		}
-		return err
+		rollupInflight[inflightKey] = rollupPendingNonce
+		rollupPendingNonce++
+		logger.Info("📡 [ROLLUP-PROPOSER] Proposed Event %T to Raft Tx Pool (Nonce %d)", event, tx.GetNonce())
+		return nil
 	}
 
 	app.sendWorker.EventProposer = eventProposer
@@ -653,7 +679,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 
 		state, err := app.chainState.GetAccountStateDB().AccountState(attestKey.Address())
 		var dbNonce uint64
-		if err == nil {
+		if err == nil && state != nil {
 			dbNonce = state.Nonce()
 		}
 		if dbNonce != rollupLastDBNonce {
@@ -695,12 +721,24 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		tx.SetSign(attestKey.PrivateKey())
 
 		_, err = app.transactionProcessor.AddTransactionToPool(tx)
-		if err == nil {
-			rollupInflight[inflightKey] = rollupPendingNonce
-			rollupPendingNonce++
-			logger.Info("📡 [REGISTRATION-PROPOSER] Proposed %s event to Tx Pool (Nonce %d)", kind, tx.GetNonce())
+		if err != nil {
+			if isRollupNonceError(err) {
+				if freshState, sErr := app.chainState.GetAccountStateDB().AccountState(attestKey.Address()); sErr == nil && freshState != nil {
+					dbNonce = freshState.Nonce()
+				}
+				logger.Warn("⚠️ [REGISTRATION-PROPOSER] Nonce error detected (%v), resetting pending nonce from %d to on-chain dbNonce %d",
+					err, rollupPendingNonce, dbNonce)
+				rollupInflight = map[rollupInflightKey]uint64{}
+				rollupPendingNonce = dbNonce
+				rollupLastDBNonce = dbNonce
+				rollupLastProgress = time.Now()
+			}
+			return err
 		}
-		return err
+		rollupInflight[inflightKey] = rollupPendingNonce
+		rollupPendingNonce++
+		logger.Info("📡 [REGISTRATION-PROPOSER] Proposed %s event to Tx Pool (Nonce %d)", kind, tx.GetNonce())
+		return nil
 	}
 
 	app.regWorker.EventProposer = func(payload []byte) error {

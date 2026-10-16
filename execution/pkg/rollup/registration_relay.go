@@ -725,6 +725,9 @@ func (r *RegistrationRelay) retryOrFail(user common.Address, reason string) {
 		r.update(user, func(e *relayEntry) {
 			if !isProv {
 				e.status = RegStatusFailed
+			} else {
+				e.submitted = true
+				e.verifies = r.maxVerifies
 			}
 			e.reason = "queue full while retrying"
 		})
@@ -749,14 +752,8 @@ func (r *RegistrationRelay) relayOne(user common.Address) {
 
 	home, found, err := r.parent.GetAccountRegistry(user)
 	if err != nil {
-		// Parent lookup failed (offline/network issue): trigger provisional activation proposal!
-		r.mu.Lock()
-		prop := r.provisionalProposer
-		r.mu.Unlock()
-		if prop != nil {
-			_ = prop(user, e.userSig)
-		}
 		r.retryOrFail(user, fmt.Sprintf("parent registry lookup failed: %v", err))
+		r.maybeProposeProvisional(user, e.userSig, err)
 		return
 	}
 	if found {
@@ -766,17 +763,45 @@ func (r *RegistrationRelay) relayOne(user common.Address) {
 
 	digest := r.RegistrationDigest(user)
 	if _, err := r.parent.SendRegisterAccount(user, r.clusterKey, e.userSig, r.sign(digest)); err != nil {
-		// Parent registration submit failed: trigger provisional activation proposal!
-		r.mu.Lock()
-		prop := r.provisionalProposer
-		r.mu.Unlock()
-		if prop != nil {
-			_ = prop(user, e.userSig)
-		}
 		r.retryOrFail(user, fmt.Sprintf("parent registration submit failed: %v", err))
+		r.maybeProposeProvisional(user, e.userSig, err)
 		return
 	}
 	r.update(user, func(e *relayEntry) { e.submitted = true; e.verifies = 0; e.reason = "" })
+}
+
+func isLocalConfigError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, parentchain.ErrNoNodesConfigured) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no parent chain nodes configured") ||
+		strings.Contains(msg, "private key not configured") ||
+		strings.Contains(msg, "private key is nil")
+}
+
+func (r *RegistrationRelay) maybeProposeProvisional(user common.Address, userSig []byte, parentErr error) {
+	if isLocalConfigError(parentErr) {
+		return
+	}
+	entry, ok := r.snapshot(user)
+	if !ok || entry.attempts < 2 || entry.status == RegStatusProvisional {
+		return
+	}
+	r.mu.Lock()
+	isProv := r.isProvisional
+	prop := r.provisionalProposer
+	r.mu.Unlock()
+
+	if isProv != nil && isProv(user) {
+		return
+	}
+	if prop != nil {
+		_ = prop(user, userSig)
+	}
 }
 
 // verifyOne polls the parent registry for a submitted request: the parent executes the registration after accepting the
@@ -803,16 +828,41 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 		return
 	}
 	failed := false
+	resubmit := false
+	r.mu.Lock()
+	isProvOnChain := r.isProvisional != nil && r.isProvisional(user)
+	r.mu.Unlock()
+
 	r.update(user, func(e *relayEntry) {
 		e.verifies++
-		if e.status != RegStatusProvisional && e.verifies >= r.maxVerifies {
-			e.status = RegStatusFailed
-			e.reason = "the parent chain did not register the account"
-			failed = true
+		if e.verifies >= r.maxVerifies {
+			if e.status == RegStatusProvisional || isProvOnChain {
+				e.status = RegStatusProvisional
+				e.submitted = false
+				e.verifies = 0
+				e.reason = "parent did not confirm registration within limit; retrying submission"
+				resubmit = true
+			} else {
+				e.status = RegStatusFailed
+				e.reason = "the parent chain did not register the account"
+				failed = true
+			}
 		}
 	})
 	if failed {
 		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusFailed, Reason: "the parent chain did not register the account"})
+	}
+	if resubmit {
+		select {
+		case r.queue <- user:
+			r.wake()
+		default:
+			r.update(user, func(e *relayEntry) {
+				e.submitted = true
+				e.verifies = r.maxVerifies
+				e.reason = "retry queue full; waiting to resubmit"
+			})
+		}
 	}
 }
 

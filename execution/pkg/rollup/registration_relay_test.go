@@ -15,6 +15,7 @@ import (
 
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 )
 
 // fakeRegParent is a scripted Parent Chain: registry lookups and submissions are recorded and can fail or be redirected.
@@ -585,3 +586,262 @@ func TestRegistrationRelay_WaitsForCommitteeLockExecution(t *testing.T) {
 	require.NotNil(t, entry.home)
 	require.Equal(t, winner, *entry.home)
 }
+
+func TestReview3_BugA_DuplicateProvisionalProposalsEveryTick(t *testing.T) {
+	h := newRelayHarness()
+	user, sig := h.userSig(t)
+	h.parent.lookupErr = errors.New("parent chain offline")
+
+	provisionalCalls := 0
+	h.relay.SetProvisionalProposer(func(u common.Address, us []byte) error {
+		require.Equal(t, user, u)
+		provisionalCalls++
+		return nil
+	})
+	isProv := true
+	h.relay.SetProvisionalChecker(func(a common.Address) bool {
+		return a == user && isProv
+	})
+
+	_, err := h.relay.Submit(user, sig)
+	require.NoError(t, err)
+
+	for i := 0; i < 10; i++ {
+		h.relay.ProcessBatch()
+	}
+
+	assert.Equal(t, 0, provisionalCalls, "provisionalProposer must not be called when account is already provisional on-chain")
+}
+
+func TestReview3_BugB_ProvisionalSubmittedNeverResubmitsAfterMaxVerifies(t *testing.T) {
+	h := newRelayHarness()
+	h.relay.maxVerifies = 5
+	user, sig := h.userSig(t)
+
+	isProv := false
+	h.relay.SetProvisionalChecker(func(a common.Address) bool {
+		return a == user && isProv
+	})
+
+	_, err := h.relay.Submit(user, sig)
+	require.NoError(t, err)
+
+	// Tick 1: ProcessBatch sends SendRegisterAccount (submitted=true)
+	h.relay.ProcessBatch()
+	assert.Equal(t, 1, h.parent.sendCount())
+
+	// Account becomes provisional on-chain
+	isProv = true
+
+	entry, ok := h.relay.snapshot(user)
+	require.True(t, ok)
+	assert.True(t, entry.submitted)
+
+	// Now simulate parent dropped tx from mempool (so found=false, err=nil).
+	// Run past maxVerifies (e.g. 10 ticks).
+	for i := 0; i < 10; i++ {
+		h.relay.ProcessBatch()
+	}
+
+	// Because of R2 fix, it should have reset submitted=false and resubmitted SendRegisterAccount!
+	assert.Greater(t, h.parent.sendCount(), 1, "SendRegisterAccount must be retried after maxVerifies when tx dropped on parent")
+}
+
+func TestReview3_S3_LocalConfigErrorsAndThreshold(t *testing.T) {
+	// Subtest 1: ErrNoNodesConfigured does not trigger provisional proposal
+	t.Run("NoNodesConfigured", func(t *testing.T) {
+		h := newRelayHarness()
+		user, sig := h.userSig(t)
+		h.parent.lookupErr = parentchain.ErrNoNodesConfigured
+		calls := 0
+		h.relay.SetProvisionalProposer(func(u common.Address, us []byte) error {
+			calls++
+			return nil
+		})
+		_, err := h.relay.Submit(user, sig)
+		require.NoError(t, err)
+		for i := 0; i < 5; i++ {
+			h.relay.ProcessBatch()
+		}
+		assert.Equal(t, 0, calls, "ErrNoNodesConfigured must never trigger provisionalProposer")
+	})
+
+	// Subtest 2: Missing private key error does not trigger provisional proposal
+	t.Run("PrivateKeyNotConfigured", func(t *testing.T) {
+		h := newRelayHarness()
+		user, sig := h.userSig(t)
+		h.parent.sendErr = errors.New("cannot SendRegisterAccount: private key not configured")
+		calls := 0
+		h.relay.SetProvisionalProposer(func(u common.Address, us []byte) error {
+			calls++
+			return nil
+		})
+		_, err := h.relay.Submit(user, sig)
+		require.NoError(t, err)
+		for i := 0; i < 5; i++ {
+			h.relay.ProcessBatch()
+		}
+		assert.Equal(t, 0, calls, "private key not configured must never trigger provisionalProposer")
+	})
+
+	// Subtest 3: Network outage requires >= 2 consecutive failures
+	t.Run("ConsecutiveFailuresThreshold", func(t *testing.T) {
+		h := newRelayHarness()
+		user, sig := h.userSig(t)
+		h.parent.lookupErr = errors.New("network timeout")
+		calls := 0
+		h.relay.SetProvisionalProposer(func(u common.Address, us []byte) error {
+			calls++
+			return nil
+		})
+		_, err := h.relay.Submit(user, sig)
+		require.NoError(t, err)
+
+		// Tick 1: 1st failure (attempts becomes 1). Must not trigger yet.
+		h.relay.ProcessBatch()
+		assert.Equal(t, 0, calls, "Must not propose provisional after only 1 failure")
+
+		// Tick 2: 2nd failure (attempts becomes 2). Must trigger!
+		h.relay.ProcessBatch()
+		assert.Equal(t, 1, calls, "Must propose provisional on 2nd consecutive failure")
+	})
+}
+
+func TestRegistrationRelay_FullQueue_VerifyOneRetriesWhenQueueDrains(t *testing.T) {
+	h := newRelayHarness()
+	h.relay.maxVerifies = 2
+	user, sig := h.userSig(t)
+
+	isProv := false
+	h.relay.SetProvisionalChecker(func(a common.Address) bool {
+		return a == user && isProv
+	})
+
+	_, err := h.relay.Submit(user, sig)
+	require.NoError(t, err)
+
+	// Step 1: Send tx, submitted=true
+	h.relay.ProcessBatch()
+	assert.Equal(t, 1, h.parent.sendCount())
+
+	isProv = true
+	entry, ok := h.relay.snapshot(user)
+	require.True(t, ok)
+	assert.True(t, entry.submitted)
+
+	// Fill r.queue to its capacity
+	for {
+		select {
+		case h.relay.queue <- common.HexToAddress("0xdead"):
+		default:
+			goto QueueFull
+		}
+	}
+QueueFull:
+
+	// Step 2: verifyOne reaches maxVerifies (2 times)
+	// verifyOne call 1 (verifies becomes 1)
+	h.relay.verifyOne(user)
+	entry, _ = h.relay.snapshot(user)
+	assert.True(t, entry.submitted)
+
+	// verifyOne call 2 (verifies reaches maxVerifies 2):
+	// Queue is full! It should NOT be dropped; instead submitted remains true and verifies = maxVerifies
+	h.relay.verifyOne(user)
+	entry, _ = h.relay.snapshot(user)
+	assert.True(t, entry.submitted, "Request must remain submitted=true when queue is full")
+	assert.Equal(t, h.relay.maxVerifies, entry.verifies)
+	assert.Equal(t, "retry queue full; waiting to resubmit", entry.reason)
+
+	// Step 3: Drain the queue
+	drained := 0
+	for len(h.relay.queue) > 0 {
+		<-h.relay.queue
+		drained++
+	}
+	require.Positive(t, drained)
+
+	// Step 4: Now queue has room! verifyOne should successfully enqueue
+	h.relay.verifyOne(user)
+	entry, _ = h.relay.snapshot(user)
+	assert.False(t, entry.submitted, "submitted must become false once enqueued")
+	assert.Equal(t, 0, entry.verifies)
+
+	// Step 5: ProcessBatch should pop from queue and resubmit SendRegisterAccount!
+	h.relay.ProcessBatch()
+	assert.Equal(t, 2, h.parent.sendCount(), "SendRegisterAccount must be retried after queue drains")
+}
+
+func TestRegistrationRelay_FullQueue_ParentConfirmsWhileWaiting(t *testing.T) {
+	h := newRelayHarness()
+	h.relay.maxVerifies = 2
+	user, sig := h.userSig(t)
+
+	isProv := false
+	h.relay.SetProvisionalChecker(func(a common.Address) bool {
+		return a == user && isProv
+	})
+
+	_, err := h.relay.Submit(user, sig)
+	require.NoError(t, err)
+
+	h.relay.ProcessBatch()
+	assert.Equal(t, 1, h.parent.sendCount())
+
+	isProv = true
+
+	// Put into full-queue waiting state
+	h.relay.update(user, func(e *relayEntry) {
+		e.status = RegStatusProvisional
+		e.submitted = true
+		e.verifies = h.relay.maxVerifies
+		e.reason = "retry queue full; waiting to resubmit"
+	})
+
+	// Parent confirms while waiting
+	h.parent.mu.Lock()
+	h.parent.registry[user] = h.clusterKP.PublicKey()
+	h.parent.mu.Unlock()
+	h.flags.Store(user, true) // on-chain registered
+
+	// Next verifyOne should confirm the account
+	h.relay.verifyOne(user)
+	res := h.relay.Status(user)
+	assert.Equal(t, RegStatusConfirmed, res.Status, "Account must be confirmed when parent confirms during full queue wait")
+}
+
+func TestRegistrationRelay_FullQueue_RetryOrFailKeepsProvisionalAlive(t *testing.T) {
+	h := newRelayHarness()
+	user, sig := h.userSig(t)
+
+	isProv := false
+	h.relay.SetProvisionalChecker(func(a common.Address) bool {
+		return a == user && isProv
+	})
+
+	_, err := h.relay.Submit(user, sig)
+	require.NoError(t, err)
+
+	isProv = true
+
+	// Fill queue to capacity
+	for {
+		select {
+		case h.relay.queue <- common.HexToAddress("0xdead"):
+		default:
+			goto QueueFilled
+		}
+	}
+QueueFilled:
+
+	// retryOrFail is called when parent fails
+	h.relay.retryOrFail(user, "parent offline")
+
+	entry, ok := h.relay.snapshot(user)
+	require.True(t, ok)
+	assert.Equal(t, RegStatusPending, entry.status, "Provisional request must NOT be marked FAILED on full queue")
+	assert.True(t, entry.submitted, "Provisional request must be marked submitted=true to be polled by verifyOne")
+	assert.Equal(t, h.relay.maxVerifies, entry.verifies)
+}
+
+

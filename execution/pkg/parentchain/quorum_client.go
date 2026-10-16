@@ -211,6 +211,7 @@ func (q *QuorumClient) SendRawTransaction(rawTx []byte) (common.Hash, error) {
 		}
 		lastErr = err
 	}
+	q.ResetNonce()
 	return common.Hash{}, fmt.Errorf("all nodes failed SendRawTransaction: %w", lastErr)
 }
 

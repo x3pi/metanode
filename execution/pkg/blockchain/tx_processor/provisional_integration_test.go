@@ -238,7 +238,8 @@ func TestProvisional_P01_ParentOffline_ProvisionalActivation(t *testing.T) {
 	res := cluster.register(u)
 	require.Equal(t, rollup.RegStatusPending, res.Status)
 
-	// Process batch with parent offline: triggers provisional activation proposal and commit
+	// Process batch with parent offline: triggers provisional activation proposal and commit after >= 2 attempts
+	cluster.relay.ProcessBatch()
 	cluster.relay.ProcessBatch()
 
 	// Verify on-chain account state
@@ -363,7 +364,8 @@ func TestProvisional_P05_ParentRecovery_ProvisionalToConfirmed(t *testing.T) {
 	cluster.fund(u)
 	cluster.register(u)
 
-	// 1. Parent offline: account becomes provisional
+	// 1. Parent offline: account becomes provisional after >= 2 attempts
+	cluster.relay.ProcessBatch()
 	cluster.relay.ProcessBatch()
 	status1 := cluster.relay.Status(u.addr)
 	require.Equal(t, rollup.RegStatusProvisional, status1.Status)
@@ -411,8 +413,10 @@ func TestProvisional_P06_MultiClusterRace_ParentConfirmsA_ClusterBLocks(t *testi
 	_, errB := clusterB.relay.Submit(u.addr, sigB)
 	require.NoError(t, errB)
 
-	// Offline provisional activation on both clusters
+	// Offline provisional activation on both clusters (requires >= 2 attempts)
 	clusterA.relay.ProcessBatch()
+	clusterA.relay.ProcessBatch()
+	clusterB.relay.ProcessBatch()
 	clusterB.relay.ProcessBatch()
 
 	asA, _ := clusterA.cs.GetAccountStateDB().AccountState(u.addr)
@@ -483,6 +487,8 @@ func TestProvisional_P07_MultiClusterRace_ClusterBWins_ClusterALocks(t *testing.
 	_, _ = clusterB.relay.Submit(u.addr, sigB)
 
 	clusterA.relay.ProcessBatch()
+	clusterA.relay.ProcessBatch()
+	clusterB.relay.ProcessBatch()
 	clusterB.relay.ProcessBatch()
 
 	// Parent recovers and Cluster B submits first
@@ -679,6 +685,7 @@ func TestProvisional_P12_ProvisionalGatewayWithdrawalBlocked(t *testing.T) {
 
 	// Make u provisional
 	cluster.register(u)
+	cluster.relay.ProcessBatch()
 	cluster.relay.ProcessBatch()
 
 	as, _ := cluster.cs.GetAccountStateDB().AccountState(u.addr)
