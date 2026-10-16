@@ -999,9 +999,16 @@ func (app *App) initRoutes() {
 	handler := network.NewHandler(r, limits)
 	app.handler = handler
 	socketCfg := network.DefaultConfig()
-	// Small per-connection inbound buffer: with the default (500,000 requests) readLoop swallows whatever a client sends
-	// into memory and TCP never pushes back, so overload could only be handled by dropping transactions.
-	socketCfg.ConnRequestChanSize = 256
+	// Small per-connection inbound buffer: readLoop checks loadTxAdmissionGate() directly before queueing to
+	// requestChan, and keeping ConnRequestChanSize small (default 16 batches = 16,000 txs, overridable via
+	// META_CONN_REQUEST_CHAN_SIZE) ensures TCP flow control pushes back on clients without large per-connection queues.
+	connReqChanSize := 16
+	if raw := os.Getenv("META_CONN_REQUEST_CHAN_SIZE"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			connReqChanSize = v
+		}
+	}
+	socketCfg.ConnRequestChanSize = connReqChanSize
 	app.socketServer, _ = network.NewSocketServer(
 		socketCfg,
 		app.keyPair,

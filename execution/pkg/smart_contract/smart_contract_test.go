@@ -3,6 +3,7 @@ package smart_contract
 import (
 	"encoding/json"
 	"testing"
+	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/assert"
@@ -431,3 +432,66 @@ func TestSmartContractUpdateData_String(t *testing.T) {
 	assert.Contains(t, s, "Code")
 	assert.Contains(t, s, "Storage")
 }
+
+func TestExecuteSCResult_NativeTransferLazyExtAndSize(t *testing.T) {
+	assert.LessOrEqual(t, unsafe.Sizeof(ExecuteSCResult{}), uintptr(112),
+		"ExecuteSCResult struct size must stay <= 112 bytes to avoid 256B size-class allocation and 240B GC pointer scan")
+
+	txHash := common.HexToHash("0x112233")
+	nativeRes := NewExecuteSCResult(
+		txHash,
+		pb.RECEIPT_STATUS_RETURNED,
+		pb.EXCEPTION_NONE,
+		nil,
+		21000,
+		common.Hash{},
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+	)
+	require.NotNil(t, nativeRes)
+	assert.Nil(t, nativeRes.ext, "native transfer without map/log mutations must not allocate executeSCResultExt")
+	assert.Nil(t, nativeRes.MapAddBalance())
+	assert.Nil(t, nativeRes.MapSubBalance())
+	assert.Nil(t, nativeRes.MapCodeHash())
+	assert.Nil(t, nativeRes.MapStorageRoot())
+	assert.Nil(t, nativeRes.EventLogs())
+
+	// Proto and Marshal roundtrip on native transfer result must preserve ext == nil and produce identical hash
+	marshaled, err := nativeRes.Marshal()
+	require.NoError(t, err)
+	restored := &ExecuteSCResult{}
+	require.NoError(t, restored.Unmarshal(marshaled))
+	assert.Nil(t, restored.ext, "Unmarshal of native transfer proto must keep ext == nil")
+	assert.Equal(t, nativeRes.TransactionHash(), restored.TransactionHash())
+	assert.Equal(t, nativeRes.ReceiptStatus(), restored.ReceiptStatus())
+	assert.Equal(t, nativeRes.GasUsed(), restored.GasUsed())
+
+	// Setters lazily allocate ext when non-empty
+	nativeRes.SetMapCodeChange(map[string][]byte{
+		"0xabcd": {0x01, 0x02},
+	})
+	assert.NotNil(t, nativeRes.ext)
+	assert.Len(t, nativeRes.MapCodeChange(), 1)
+}
+
+func TestHashExecuteSCResultsKeccak256_Equivalence(t *testing.T) {
+	nativeRes := NewExecuteSCResult(
+		common.HexToHash("0xaaa1"),
+		pb.RECEIPT_STATUS_RETURNED,
+		pb.EXCEPTION_NONE,
+		nil,
+		21000,
+		common.Hash{},
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+	)
+	scRes := makeTestExecuteSCResult()
+
+	results := []types.ExecuteSCResult{nativeRes, scRes}
+	h1 := HashExecuteSCResultsKeccak256(results)
+	require.NotEqual(t, common.Hash{}, h1)
+
+	pbList := ExecuteSCResultsToProto(results)
+	restored := ExecuteSCResultsFromProto(pbList)
+	h2 := HashExecuteSCResultsKeccak256(restored)
+	assert.Equal(t, h1, h2, "HashExecuteSCResultsKeccak256 must be identical before and after Proto roundtrip")
+}
+

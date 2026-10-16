@@ -70,12 +70,22 @@ func init() {
 	emptyFlatRootHash = computeRootFromBuckets(emptyBuckets)
 }
 
-// hashBufPool reuses keccak256 input buffers to reduce allocations in hot path.
-var hashBufPool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, 0, 256) // pre-allocate reasonable capacity
-		return &buf
+// keccakStatePool reuses crypto.KeccakState instances across trie hashing calls.
+var keccakStatePool = sync.Pool{
+	New: func() any {
+		return crypto.NewKeccakState()
 	},
+}
+
+func keccak256Hash(data ...[]byte) (h e_common.Hash) {
+	d := keccakStatePool.Get().(crypto.KeccakState)
+	d.Reset()
+	for _, b := range data {
+		_, _ = d.Write(b)
+	}
+	_, _ = d.Read(h[:])
+	keccakStatePool.Put(d)
+	return h
 }
 
 // bigIntPool reuses big.Int objects to reduce GC pressure in addModPrime/subModPrime.
@@ -613,16 +623,9 @@ func (f *FlatStateTrie) PreWarm(keys [][]byte) {
 	// No-op: flat reads don't need pre-warming
 }
 
-// keccakContrib computes keccak256(keyBytes || value) using pooled buffer to reduce allocations.
+// keccakContrib computes keccak256(keyBytes || value) using pooled KeccakState to reduce allocations.
 func keccakContrib(keyBytes, value []byte) e_common.Hash {
-	bufPtr := hashBufPool.Get().(*[]byte)
-	buf := (*bufPtr)[:0]
-	buf = append(buf, keyBytes...)
-	buf = append(buf, value...)
-	h := crypto.Keccak256Hash(buf)
-	*bufPtr = buf // return buffer to pool (keeps capacity)
-	hashBufPool.Put(bufPtr)
-	return h
+	return keccak256Hash(keyBytes, value)
 }
 
 // precomputedContrib holds pre-computed keccak hashes for a dirty entry.
@@ -1005,7 +1008,7 @@ func computeRootFromBuckets(buckets [256]e_common.Hash) e_common.Hash {
 	for i := 0; i < 256; i++ {
 		copy(data[i*32:(i+1)*32], buckets[i][:])
 	}
-	h := crypto.Keccak256Hash(data)
+	h := keccak256Hash(data)
 	rootBufPool.Put(dataPtr)
 	return h
 }

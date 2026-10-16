@@ -1,0 +1,9 @@
+pair,variant,tag,bytes_sent_txs,received_sum,rejected_sum,committed_ours,loss_vs_sent,commit_ratio,tps_end_to_end,tps_during_injection,tps_active_commit_window,inject_seconds,end_to_end_seconds,end_block,max_rss_mb,stalled,parity_ok,measurement_stop_reason
+1,A1_base,aa_a_p1_run1,4014430,4014430,0,4014430,0,1.0,13050.7631,13444.5219,13091.7764,66.414,307.6012,981,63593,0,OK,reference validator showed 4014430 >= 4014430 txs and was idle for 1.5s
+1,A2_base,aa_b_p1_run1,4012383,4012383,0,4012383,0,1.0,12957.7309,13166.3377,13006.4146,75.4424,309.6517,949,64391,0,OK,reference validator showed 4012383 >= 4012383 txs and was idle for 1.5s
+2,A1_base,aa_a_p2_run1,4014511,4014511,0,4014511,0,1.0,13333.8558,13458.5612,13381.824,72.3937,301.0765,940,64903,0,OK,reference validator showed 4014511 >= 4014511 txs and was idle for 1.5s
+2,A2_base,aa_b_p2_run1,4011866,4011866,0,4011866,0,1.0,12890.5172,13155.9643,12943.5844,73.1987,311.2261,916,64390,0,OK,reference validator showed 4011866 >= 4011866 txs and was idle for 1.5s
+3,A1_base,aa_a_p3_run1,4013608,4013608,0,4013608,0,1.0,13184.2003,12931.0474,13230.5219,63.9534,304.4256,911,64958,0,OK,reference validator showed 4013608 >= 4013608 txs and was idle for 1.5s
+3,A2_base,aa_b_p3_run1,4011371,4011371,0,4011371,0,1.0,12685.1394,13781.4054,12727.6227,68.9796,316.226,866,80862,0,OK,reference validator showed 4011371 >= 4011371 txs and was idle for 1.5s
+4,A1_base,aa_a_p4_run1,4013223,4013223,0,4013223,0,1.0,10983.0433,12663.1742,11013.3152,70.391,365.4017,773,82954,0,OK,reference validator showed 4013223 >= 4013223 txs and was idle for 1.5s
+4,A2_base,aa_b_p4_run1,4011134,4011134,0,4011134,0,1.0,12449.1643,13059.6938,12491.3172,64.5606,322.2011,871,63977,0,OK,reference validator showed 4011134 >= 4011134 txs and was idle for 1.5s

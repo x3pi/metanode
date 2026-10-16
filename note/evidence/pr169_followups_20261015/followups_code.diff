@@ -1,0 +1,94 @@
+diff --git a/execution/cmd/simple_chain/processor/tx_virtual_executor_core.go b/execution/cmd/simple_chain/processor/tx_virtual_executor_core.go
+index e7bc8642..b9832dad 100644
+--- a/execution/cmd/simple_chain/processor/tx_virtual_executor_core.go
++++ b/execution/cmd/simple_chain/processor/tx_virtual_executor_core.go
+@@ -6,6 +6,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/ethereum/go-ethereum/common"
++	"github.com/ethereum/go-ethereum/params"
+ 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/command"
+ 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+ 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
+@@ -70,6 +71,19 @@ func (v *TxVirtualExecutor) SetEnvironment(env ITransactionProcessorEnvironment)
+ 	v.env = env
+ }
+ 
++// errNotSmartContractCall is the error returned to an eth_call whose target is not a smart contract (no VM run).
++// It keeps the wording clients already matched on before the read path started accepting plain transfers.
++const errNotSmartContractCall = "not a smart contract call"
++
++// plainTransferEstimateGas is the gas EstimateGas reports for a native transfer (no VM run). It follows the HTTP
++// eth_estimateGas rule (rpc_block.go): a SetCode (EIP-7702) tx still owes the intrinsic gas of every authorization tuple.
++func plainTransferEstimateGas(tx types.Transaction) uint64 {
++	if n := len(tx.AuthorizationList()); n > 0 {
++		return params.TxGas + uint64(n)*params.CallNewAccountGas + mt_common.MINIMUM_BASE_FEE
++	}
++	return mt_common.MINIMUM_BASE_FEE
++}
++
+ func (v *TxVirtualExecutor) parseReadTx(body []byte) (types.Transaction, error) {
+ 	if len(body) == 0 {
+ 		return nil, fmt.Errorf("empty transaction body")
+@@ -209,14 +223,14 @@ func (v *TxVirtualExecutor) executeAndRespondReadTx(req readTxRequest) {
+ 
+ 	if exRs == nil {
+ 		if !req.isEstimateGas {
+-			logger.Error("ExecuteSCResult is nil for read TX")
+-			v.sendTransactionError(req.conn, tx.RHash(), -1, "evm return nil", nil, req.msgID)
++			logger.Error("ExecuteSCResult is nil for read TX: %s", errNotSmartContractCall)
++			v.sendTransactionError(req.conn, tx.RHash(), -1, errNotSmartContractCall, nil, req.msgID)
+ 			return
+ 		}
+ 		// Plain native transfer (no smart contract execution) -> tốn MINIMUM_BASE_FEE
+ 		receiptStatus = pb.RECEIPT_STATUS_RETURNED
+ 		exception = pb.EXCEPTION_NONE
+-		gasUsed = uint64(mt_common.MINIMUM_BASE_FEE)
++		gasUsed = plainTransferEstimateGas(tx)
+ 	} else {
+ 		receiptStatus = exRs.ReceiptStatus()
+ 		ret = exRs.Return()
+diff --git a/execution/cmd/simple_chain/processor/tx_virtual_executor_core_test.go b/execution/cmd/simple_chain/processor/tx_virtual_executor_core_test.go
+index 2f78a41d..9b40efe4 100644
+--- a/execution/cmd/simple_chain/processor/tx_virtual_executor_core_test.go
++++ b/execution/cmd/simple_chain/processor/tx_virtual_executor_core_test.go
+@@ -6,7 +6,10 @@ import (
+ 	"testing"
+ 
+ 	"github.com/ethereum/go-ethereum/common"
++	e_types "github.com/ethereum/go-ethereum/core/types"
++	"github.com/ethereum/go-ethereum/params"
+ 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
++	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+ 	"github.com/meta-node-blockchain/meta-node/pkg/config"
+ 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+ )
+@@ -140,3 +143,28 @@ func TestTxVirtualExecutor_ParseReadTx_ChainIDMatchAndMismatch(t *testing.T) {
+ 		t.Fatalf("unexpected error message: %v", err)
+ 	}
+ }
++
++func TestPlainTransferEstimateGas(t *testing.T) {
++	from := common.HexToAddress("0x1234567890123456789012345678901234567890")
++	to := common.HexToAddress("0x0987654321098765432109876543210987654321")
++	tx := transaction.NewTransaction(from, to, big.NewInt(1), 50000, 1, 0, nil, nil, common.Hash{}, common.Hash{}, 1, 0).(*transaction.Transaction)
++
++	// A plain transfer owes only the minimum base fee.
++	if got := plainTransferEstimateGas(tx); got != mt_common.MINIMUM_BASE_FEE {
++		t.Fatalf("plain transfer: got %d, want %d", got, mt_common.MINIMUM_BASE_FEE)
++	}
++
++	// A SetCode tx also owes the intrinsic gas of every authorization tuple (same rule as HTTP eth_estimateGas).
++	tx.SetAuthorizationList(transaction.FromEthAuthorizationList([]e_types.SetCodeAuthorization{{}, {}}))
++	want := params.TxGas + 2*params.CallNewAccountGas + mt_common.MINIMUM_BASE_FEE
++	if got := plainTransferEstimateGas(tx); got != want {
++		t.Fatalf("SetCode tx with 2 tuples: got %d, want %d", got, want)
++	}
++}
++
++// Clients matched on this wording before the read path accepted plain transfers; keep it stable.
++func TestErrNotSmartContractCallWording(t *testing.T) {
++	if errNotSmartContractCall != "not a smart contract call" {
++		t.Fatalf("wording changed: %q", errNotSmartContractCall)
++	}
++}

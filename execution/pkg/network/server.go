@@ -236,9 +236,15 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 		// Wait for admission (overload gate), then block for a worker slot; only this connection's reader waits,
 		// so TCP flow control slows the client down.
 		if isTxSubmissionCommand(cmd) {
-			if gate := loadTxAdmissionGate(); gate != nil {
-				if err := gate(s.ctx); err != nil {
-					return err
+			alreadyAdmitted := false
+			if req, ok := request.(*Request); ok && req.admitted {
+				alreadyAdmitted = true
+			}
+			if !alreadyAdmitted {
+				if gate := loadTxAdmissionGate(); gate != nil {
+					if err := gate(s.ctx); err != nil {
+						return err
+					}
 				}
 			}
 			select {

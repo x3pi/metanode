@@ -1,0 +1,37 @@
+=== V2 follow-ups (this change) ===
+   [tx] estimate plain transfer, chain ok id=60c0c921-f3e5-4be7-a52d-f2154d129ba6
+   [tx] read plain transfer to EOA, chain ok id=c4c171da-72d5-48d9-9c2b-83cc82195c14
+   [tx] estimate, wrong chain 9999 id=02fa3d91-eb6c-47cc-864d-a3104dfcc5c0
+   [tx] read, chain 0 id=e335248f-509a-4bf6-b29b-206c48fa32ab
+   [tx] estimate, empty body id=cddd50c4-d752-45f4-837e-76b9c7d3bc12
+   [tx] estimate, garbage body id=61afb245-ced0-4aa9-8604-8c7e447101ec
+   [rx +0ms] cmd=InitConnection id=cfa78929-5bad-47f7-aee7-943a7186e647 body=33
+   [rx +0ms] cmd=TransactionError id=02fa3d91-eb6c-47cc-864d-a3104dfcc5c0 body=98
+   [rx +0ms] cmd=TransactionError id=cddd50c4-d752-45f4-837e-76b9c7d3bc12 body=69
+   [rx +0ms] cmd=TransactionError id=e335248f-509a-4bf6-b29b-206c48fa32ab body=95
+   [rx +1ms] cmd=TransactionError id=61afb245-ced0-4aa9-8604-8c7e447101ec body=94
+   [rx +1ms] cmd=Receipt id=60c0c921-f3e5-4be7-a52d-f2154d129ba6 body=132
+   [rx +1ms] cmd=TransactionError id=c4c171da-72d5-48d9-9c2b-83cc82195c14 body=72
+estimate plain transfer, chain ok        -> cmd=Receipt status=RETURNED gasUsed=100000
+read plain transfer to EOA, chain ok     -> cmd=TransactionError code=-1 msg="not a smart contract call"
+estimate, wrong chain 9999               -> cmd=TransactionError code=-1 msg="chainId does not match node's (have=9999, want=991)"
+read, chain 0                            -> cmd=TransactionError code=-1 msg="chainId does not match node's (have=0, want=991)"
+estimate, empty body                     -> cmd=TransactionError code=-1 msg="empty transaction body"
+estimate, garbage body                   -> cmd=TransactionError code=-1 msg="failed to unmarshal transaction: unexpected EOF"
+
+--- node log (val0) ---
+[INFO][Oct 15 02:40:38]  ProcessEstimateGas: enqueuing for async execution
+[INFO][Oct 15 02:40:38]  [PERF] Read TX semaphore wait: 18.116µs
+[ERROR][Oct 15 02:40:38]  Error parsing EstimateGas transaction: chainId does not match node's (have=9999, want=991)
+[INFO][Oct 15 02:40:38]  ProcessReadTransaction: enqueuing for async execution
+[INFO][Oct 15 02:40:38]  [PERF] Read/Estimate TX ProcessTransactionOffChain: 46.557µs, hash: 0xe1536c17e30486fcb2a8b2c43cae320ba2a85ef74387ed9d30b502bb6cdb56be
+[INFO][Oct 15 02:40:38] ProcessReadTransaction tx: Transaction Details:
+[INFO][Oct 15 02:40:38]  [PERF] Read TX semaphore wait: 15.551µs
+[INFO][Oct 15 02:40:38]  [PERF] Read/Estimate TX ProcessTransactionOffChain: 6.171µs, hash: 0xe1536c17e30486fcb2a8b2c43cae320ba2a85ef74387ed9d30b502bb6cdb56be
+[ERROR][Oct 15 02:40:38]  ExecuteSCResult is nil for read TX: not a smart contract call
+[ERROR][Oct 15 02:40:38]  Error parsing EstimateGas transaction: failed to unmarshal transaction: unexpected EOF
+[ERROR][Oct 15 02:40:38]  Error parsing EstimateGas transaction: empty transaction body
+[ERROR][Oct 15 02:40:38]  Error parsing read transaction: chainId does not match node's (have=0, want=991)
+[INFO][Oct 15 02:40:38]  Read/Estimate TX executed, sending receipt: 
+
+PROBE-DONE

@@ -38,11 +38,30 @@ var (
 			return &b
 		},
 	}
+	keccakStatePool = sync.Pool{
+		New: func() interface{} {
+			return crypto.NewKeccakState()
+		},
+	}
 )
+
+// Keccak256Hash computes the Keccak256 hash of data using a pooled sponge state
+// with zero heap allocations.
+func Keccak256Hash(data ...[]byte) (h common.Hash) {
+	d := keccakStatePool.Get().(crypto.KeccakState)
+	d.Reset()
+	for _, b := range data {
+		_, _ = d.Write(b)
+	}
+	_, _ = d.Read(h[:])
+	keccakStatePool.Put(d)
+	return h
+}
 
 type Transaction struct {
 	proto             *pb.Transaction
 	cachedHash        atomic.Pointer[common.Hash]
+	cachedProtoHash   atomic.Pointer[common.Hash]
 	cachedSigningHash atomic.Pointer[common.Hash]
 	cachedRHash       atomic.Pointer[common.Hash]
 	cachedBytes       atomic.Pointer[[]byte]
@@ -160,6 +179,9 @@ func NewTransactionFromEth(ethTx *e_types.Transaction) (types.Transaction, error
 	res := TransactionFromProto(pTx)
 	if concrete, ok := res.(*Transaction); ok && ethTx.BlobTxSidecar() == nil {
 		concrete.cachedEthTx.Store(ethTx)
+		if len(pTx.RawEnvelope) > 0 {
+			concrete.cachedEnvTx.Store(&envelopeDecode{raw: pTx.RawEnvelope, tx: ethTx})
+		}
 	}
 	return res, nil
 }
@@ -548,6 +570,7 @@ func (t *Transaction) Proto() protoreflect.ProtoMessage {
 func (t *Transaction) FromProto(pbMessage protoreflect.ProtoMessage) {
 	pbTransaction := pbMessage.(*pb.Transaction)
 	t.proto = pbTransaction
+	t.ClearCacheHash()
 }
 
 func (t *Transaction) CopyTransaction() types.Transaction {
@@ -698,6 +721,7 @@ func (t *Transaction) String() (str string) {
 }
 func (t *Transaction) ClearCacheHash() {
 	t.cachedHash.Store(nil)
+	t.cachedProtoHash.Store(nil)
 	t.cachedSigningHash.Store(nil)
 	t.cachedRHash.Store(nil)
 	t.cachedBytes.Store(nil)
@@ -714,7 +738,7 @@ func (t *Transaction) EthHash() common.Hash {
 		return *cached
 	}
 	if t.proto != nil && len(t.proto.RawEnvelope) > 0 {
-		h := crypto.Keccak256Hash(t.proto.RawEnvelope)
+		h := Keccak256Hash(t.proto.RawEnvelope)
 		t.cachedEthHash.Store(&h)
 		return h
 	}
@@ -728,7 +752,17 @@ func (t *Transaction) EthHash() common.Hash {
 }
 
 // getter
-func (t *Transaction) Hash() (hash common.Hash) {
+func (t *Transaction) Hash() common.Hash {
+	if t == nil || t.proto == nil {
+		return common.Hash{}
+	}
+	if cached := t.cachedHash.Load(); cached != nil {
+		return *cached
+	}
+	return t.computeHash()
+}
+
+func (t *Transaction) computeHash() (hash common.Hash) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("Panic in Hash: %v", r)
@@ -736,19 +770,11 @@ func (t *Transaction) Hash() (hash common.Hash) {
 		}
 	}()
 
-	if t.proto == nil {
-		return common.Hash{}
-	}
-
-	if cached := t.cachedHash.Load(); cached != nil {
-		return *cached // Trả về giá trị đã cache nếu có
-	}
-
 	// Cutover bundle v1 / ADR D3 / W4:
 	// If RawEnvelope is present (standard Ethereum transaction),
 	// canonical hash is keccak256(RawEnvelope) matching go-ethereum and Rust consensus.
 	if len(t.proto.RawEnvelope) > 0 {
-		hash = crypto.Keccak256Hash(t.proto.RawEnvelope)
+		hash = Keccak256Hash(t.proto.RawEnvelope)
 		t.cachedHash.Store(&hash)
 		return hash
 	}
@@ -762,11 +788,17 @@ func (t *Transaction) Hash() (hash common.Hash) {
 // (TransactionHashData). Unlike Hash(), which returns keccak256(RawEnvelope) for Ethereum
 // transactions, ProtoHash always covers all protobuf execution fields.
 // This is used to ensure signature cache keys bind to the exact proto payload.
-func (t *Transaction) ProtoHash() (hash common.Hash) {
+func (t *Transaction) ProtoHash() common.Hash {
 	if t == nil || t.proto == nil {
 		return common.Hash{}
 	}
+	if cached := t.cachedProtoHash.Load(); cached != nil {
+		return *cached
+	}
+	return t.computeProtoHash()
+}
 
+func (t *Transaction) computeProtoHash() (hash common.Hash) {
 	hashPb := txHashDataPool.Get().(*pb.TransactionHashData)
 	defer func() {
 		// Clear to avoid memory leaks of referenced slices safely
@@ -812,27 +844,31 @@ func (t *Transaction) ProtoHash() (hash common.Hash) {
 		return common.Hash{}
 	}
 
-	return crypto.Keccak256Hash(bHashPb)
+	hash = Keccak256Hash(bHashPb)
+	t.cachedProtoHash.Store(&hash)
+	return hash
 }
 
 // SigningHash computes the deterministic Keccak256 hash of TransactionHashData
 // with R, S, and V cleared. This is the exact hash signed by the secp256k1 private key
 // for Type 0xFF transactions, breaking the circular hash dependency.
-func (t *Transaction) SigningHash() (hash common.Hash) {
+func (t *Transaction) SigningHash() common.Hash {
+	if t == nil || t.proto == nil {
+		return common.Hash{}
+	}
+	if cached := t.cachedSigningHash.Load(); cached != nil {
+		return *cached
+	}
+	return t.computeSigningHash()
+}
+
+func (t *Transaction) computeSigningHash() (hash common.Hash) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("Panic in SigningHash: %v", r)
 			hash = common.Hash{}
 		}
 	}()
-
-	if t == nil || t.proto == nil {
-		return common.Hash{}
-	}
-
-	if cached := t.cachedSigningHash.Load(); cached != nil {
-		return *cached
-	}
 
 	hashPb := txHashDataPool.Get().(*pb.TransactionHashData)
 	defer func() {
@@ -875,12 +911,15 @@ func (t *Transaction) SigningHash() (hash common.Hash) {
 		return common.Hash{}
 	}
 
-	hash = crypto.Keccak256Hash(bHashPb)
+	hash = Keccak256Hash(bHashPb)
 	t.cachedSigningHash.Store(&hash)
 	return hash
 }
 
 func (t *Transaction) RHash() common.Hash {
+	if t == nil || t.proto == nil {
+		return common.Hash{}
+	}
 	// Kiểm tra cache có giá trị hay chưa
 	if cached := t.cachedRHash.Load(); cached != nil {
 		return *cached // Trả về giá trị đã cache nếu có
@@ -931,7 +970,7 @@ func (t *Transaction) RHash() common.Hash {
 	}
 
 	// Tính giá trị băm
-	hash := crypto.Keccak256Hash(bHashPb)
+	hash := Keccak256Hash(bHashPb)
 
 	// Lưu vào cache (atomic)
 	t.cachedRHash.Store(&hash)
@@ -940,7 +979,7 @@ func (t *Transaction) RHash() common.Hash {
 }
 
 func (t *Transaction) GetNonce() uint64 {
-	if t.proto != nil && len(t.proto.Nonce) == 8 { // Check for valid length
+	if t != nil && t.proto != nil && len(t.proto.Nonce) == 8 { // Check for valid length
 		return binary.BigEndian.Uint64(t.proto.Nonce)
 	} else {
 		return 0 // Or any default value
@@ -957,39 +996,38 @@ func (t *Transaction) GetNonce32Bytes() []byte {
 }
 
 func (t *Transaction) GetChainID() uint64 {
+	if t == nil || t.proto == nil {
+		return 0
+	}
 	return t.proto.ChainID
 }
 
 func (t *Transaction) NewDeviceKey() common.Hash {
+	if t == nil || t.proto == nil {
+		return common.Hash{}
+	}
 	return common.BytesToHash(t.proto.NewDeviceKey)
 }
 
 func (t *Transaction) LastDeviceKey() common.Hash {
+	if t == nil || t.proto == nil {
+		return common.Hash{}
+	}
 	return common.BytesToHash(t.proto.LastDeviceKey)
 }
 
-// Safe helper to convert bytes to address, preventing panics from corrupted slice headers (e.g., from concurrency or CGo)
-func safeBytesToAddress(b []byte) (addr common.Address) {
-	defer func() {
-		if r := recover(); r != nil {
-			addr = common.Address{}
-		}
-	}()
-	return common.BytesToAddress(b)
-}
-
 func (t *Transaction) FromAddress() common.Address {
-	if t.proto == nil {
+	if t == nil || t.proto == nil {
 		return common.Address{}
 	}
-	return safeBytesToAddress(t.proto.FromAddress)
+	return common.BytesToAddress(t.proto.FromAddress)
 }
 
 func (t *Transaction) ToAddress() common.Address {
-	if t.proto == nil {
+	if t == nil || t.proto == nil {
 		return common.Address{}
 	}
-	return safeBytesToAddress(t.proto.ToAddress)
+	return common.BytesToAddress(t.proto.ToAddress)
 }
 
 func (t *Transaction) Sign() p_common.Sign {
@@ -1133,6 +1171,7 @@ func (t *Transaction) AuthorizationList() []*pb.SetCodeAuthorization {
 // SetAuthorizationList sets the EIP-7702 authorization tuples.
 func (t *Transaction) SetAuthorizationList(list []*pb.SetCodeAuthorization) {
 	t.proto.AuthorizationList = list
+	t.ClearCacheHash()
 }
 
 // EthAccessList returns the tx's EIP-2930 access list converted to
@@ -1226,9 +1265,11 @@ func (t *Transaction) SetSignatureValues(chainID, v, r, s *big.Int) {
 
 func (t *Transaction) SetSign(privateKey p_common.PrivateKey) {
 	t.proto.Sign = bls.Sign(privateKey, t.Hash().Bytes()).Bytes()
+	t.ClearCacheHash()
 }
 func (t *Transaction) SetSignBytes(bytes []byte) {
 	t.proto.Sign = bytes
+	t.ClearCacheHash()
 }
 
 func (t *Transaction) SetNonce(nonce uint64) {
@@ -1260,6 +1301,7 @@ func (t *Transaction) ValidEthSign() bool {
 			logger.Warn("ValidEthSign envelope binding failed: %v", err)
 			return false
 		}
+		return true
 	}
 	ethTx := t.ToEthTransaction()
 	if ethTx == nil {

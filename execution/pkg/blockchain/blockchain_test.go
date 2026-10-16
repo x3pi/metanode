@@ -18,7 +18,7 @@ func newTestBlockChain() *BlockChain {
 	return &BlockChain{
 		blockCache:             new(sync.Map),
 		receiptsCache:          new(sync.Map),
-		txsCache:               new(sync.Map),
+		txsCache:               newTxCacheMap(),
 		blockNumberToHashCache: new(sync.Map),
 		txHashToBlockNumber:    newTxHashToBlockNumberMap(),
 		ethHashMapBlsHash:      newEthHashMapBlsHashMap(),
@@ -117,6 +117,26 @@ func TestBlockChain_AddTxToCache_NilTxsCache(t *testing.T) {
 	assert.False(t, ok)
 	assert.Nil(t, got)
 }
+
+func TestBlockChain_DeleteTxFromCache(t *testing.T) {
+	bc := newTestBlockChain()
+
+	h1 := testTxHash(0x01)
+	h2 := testTxHash(0x02)
+	bc.AddTxToCache(h1, []byte{0xAA})
+	bc.AddTxToCache(h2, []byte{0xBB})
+
+	bc.DeleteTxFromCache(h1)
+	bc.DeleteTxFromCache(common.Hash{}) // zero hash should be no-op
+
+	_, ok1 := bc.GetTxFromCache(h1)
+	assert.False(t, ok1, "deleted tx should not be in txsCache")
+
+	got2, ok2 := bc.GetTxFromCache(h2)
+	require.True(t, ok2, "other tx should remain in txsCache")
+	assert.Equal(t, []byte{0xBB}, got2)
+}
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Pruning Tests

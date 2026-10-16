@@ -6,6 +6,7 @@ import "github.com/meta-node-blockchain/meta-node/types/network"
 type Request struct {
 	connection network.Connection
 	message    network.Message
+	admitted   bool
 }
 
 // NewRequest tạo một instance mới của Request.
@@ -36,4 +37,5 @@ func (r *Request) Connection() network.Connection {
 func (r *Request) Reset(connection network.Connection, message network.Message) {
 	r.connection = connection
 	r.message = message
+	r.admitted = false
 }

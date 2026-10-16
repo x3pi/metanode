@@ -1,0 +1,352 @@
+diff --git a/execution/cmd/simple_chain/app.go b/execution/cmd/simple_chain/app.go
+index b8df86ef..0d3dfd93 100644
+--- a/execution/cmd/simple_chain/app.go
++++ b/execution/cmd/simple_chain/app.go
+@@ -421,11 +421,14 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
+ 		RecvCursor:  app.recvWorker.Cursor,
+ 	}
+ 	app.conservationRun = func() { app.conservation.Run(consInputs, consInterval, app.conservationStop) }
+-	logger.Info("BLS conservation mode: %s (interval %s)", consMode, consInterval)
+-	tx_processor.InitParentChainGatewayHandler(crossChainTransferDispatcherAdapter{
++	gateEnabled := app.config != nil && app.config.AccountGateParentRegistered()
++	tx_processor.InitParentChainGatewayHandlerWithGate(crossChainTransferDispatcherAdapter{
+ 		h:          app.crossNodeHandler,
+ 		sendWorker: app.sendWorker,
+-	})
++	}, gateEnabled)
++	if h := tx_processor.GetParentChainGatewayHandler(); h != nil {
++		h.SetAccountGate(gateEnabled)
++	}
+ 
+ 	var rollupNonceMutex sync.Mutex
+ 	var rollupPendingNonce uint64
+diff --git a/execution/pkg/blockchain/tx_processor/parent_chain_gateway_handler.go b/execution/pkg/blockchain/tx_processor/parent_chain_gateway_handler.go
+index e3cdd64b..0aea94d1 100644
+--- a/execution/pkg/blockchain/tx_processor/parent_chain_gateway_handler.go
++++ b/execution/pkg/blockchain/tx_processor/parent_chain_gateway_handler.go
+@@ -175,6 +175,7 @@ type CrossChainTransferDispatcher interface {
+ // ParentChainGatewayHandler handles transactions sent to PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS.
+ type ParentChainGatewayHandler struct {
+ 	dispatcher CrossChainTransferDispatcher
++	ungated    bool // default false: gate is active by default
+ }
+ 
+ var (
+@@ -182,13 +183,37 @@ var (
+ 	onceParentChainGateway            sync.Once
+ )
+ 
+-// InitParentChainGatewayHandler initializes the singleton with a dispatcher.
++// isAccountGateEnabled returns true unless explicitly disabled via ungated policy.
++func (h *ParentChainGatewayHandler) isAccountGateEnabled() bool {
++	if h == nil {
++		return true
++	}
++	return !h.ungated
++}
++
++// InitParentChainGatewayHandler initializes the singleton with a dispatcher (gate active by default).
+ func InitParentChainGatewayHandler(dispatcher CrossChainTransferDispatcher) {
++	InitParentChainGatewayHandlerWithGate(dispatcher, true)
++}
++
++// InitParentChainGatewayHandlerWithGate initializes the singleton with a dispatcher and accountGate setting.
++func InitParentChainGatewayHandlerWithGate(dispatcher CrossChainTransferDispatcher, accountGate bool) {
+ 	onceParentChainGateway.Do(func() {
+ 		parentChainGatewayHandlerInstance = &ParentChainGatewayHandler{
+ 			dispatcher: dispatcher,
++			ungated:    !accountGate,
+ 		}
+ 	})
++	if parentChainGatewayHandlerInstance != nil {
++		parentChainGatewayHandlerInstance.ungated = !accountGate
++	}
++}
++
++// SetAccountGate dynamically updates the account gate enforcement policy.
++func (h *ParentChainGatewayHandler) SetAccountGate(enabled bool) {
++	if h != nil {
++		h.ungated = !enabled
++	}
+ }
+ 
+ // GetParentChainGatewayHandler returns the singleton handler.
+@@ -220,7 +245,7 @@ func (h *ParentChainGatewayHandler) HandleTransaction(
+ 		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+ 		return h.errorReceipt(tx, "account is locked"), nil, nil
+ 	}
+-	if !stateDB.GetParentRegistered(tx.FromAddress()) {
++	if h.isAccountGateEnabled() && !stateDB.GetParentRegistered(tx.FromAddress()) {
+ 		logger.Error("❌ ParentChainGatewayHandler: sender account %s is not confirmed on parent chain (provisional or unregistered cannot transfer cross-chain)", tx.FromAddress().Hex())
+ 		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+ 		return h.errorReceipt(tx, "account is not confirmed on parent chain"), nil, nil
+diff --git a/execution/pkg/blockchain/tx_processor/parent_chain_gateway_handler_test.go b/execution/pkg/blockchain/tx_processor/parent_chain_gateway_handler_test.go
+index 8b1acb55..116aac6f 100644
+--- a/execution/pkg/blockchain/tx_processor/parent_chain_gateway_handler_test.go
++++ b/execution/pkg/blockchain/tx_processor/parent_chain_gateway_handler_test.go
+@@ -364,3 +364,41 @@ func TestParentChainGatewayHandler_BalanceConservationAtBoundary(t *testing.T) {
+ 	asExact, _ := stateDB.AccountState(exact)
+ 	assert.Equal(t, int64(0), asExact.Balance().Int64(), "debit must be exactly amount + transfer fee + gas fee")
+ }
++
++func TestParentChainGatewayHandler_AccountGatePolicy(t *testing.T) {
++	chainState, _, _, _ := newPersistentTestChainState(t)
++	stateDB := chainState.GetAccountStateDB()
++
++	var toKey mt_common.PublicKey
++	toKey[0] = 0x02
++	mockDispatcher := &MockCrossChainDispatcher{MockHash: common.HexToHash("0x1234")}
++	handler := &ParentChainGatewayHandler{dispatcher: mockDispatcher}
++
++	payload := append([]byte(nil), toKey[:]...)
++	payload = append(payload, make([]byte, 32)...)
++	payload = append(payload, common.HexToAddress("0xdead").Bytes()...)
++	cd := transaction.NewCallData(payload)
++	cdBytes, _ := cd.Marshal()
++
++	unregisteredSender := common.HexToAddress("0x9999000011112222333344445555666677778888")
++	stateDB.AddBalance(unregisteredSender, big.NewInt(10_000_000_000))
++	_ = stateDB.SetParentRegistered(unregisteredSender, false)
++
++	tx := transaction.NewTransaction(
++		unregisteredSender, mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS,
++		big.NewInt(100), 21000, 1, 0, cdBytes, nil, common.Hash{}, common.Hash{}, 0, 1,
++	)
++
++	// When accountGate is false: unregistered sender is permitted
++	handler.SetAccountGate(false)
++	rcp, _, err := handler.HandleTransaction(context.Background(), chainState, tx, mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, false, 0)
++	assert.NoError(t, err)
++	assert.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcp.Status(), "Ungated chain should allow unregistered sender")
++
++	// When accountGate is true: unregistered sender is rejected
++	handler.SetAccountGate(true)
++	rcp, _, err = handler.HandleTransaction(context.Background(), chainState, tx, mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, false, 0)
++	assert.NoError(t, err)
++	assert.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, rcp.Status(), "Gated chain must reject unregistered sender")
++	assert.Contains(t, string(rcp.Return()), "not confirmed on parent chain")
++}
+diff --git a/execution/pkg/blockchain/tx_processor/recipient_gate_test.go b/execution/pkg/blockchain/tx_processor/recipient_gate_test.go
+index 51933227..946a8699 100644
+--- a/execution/pkg/blockchain/tx_processor/recipient_gate_test.go
++++ b/execution/pkg/blockchain/tx_processor/recipient_gate_test.go
+@@ -36,15 +36,15 @@ func makeSecpProtoTx(t *testing.T, key interface{}, from, to common.Address, amo
+ 		toBytes = to.Bytes()
+ 	}
+ 	tx.FromProto(&pb.Transaction{
+-		FromAddress:  from.Bytes(),
+-		ToAddress:    toBytes,
+-		Amount:       amountBytes,
+-		Data:         data,
+-		Nonce:        nonceBytes,
+-		MaxGas:       100000,
+-		MaxGasPrice:  p_common.MINIMUM_BASE_FEE,
+-		ChainID:      chainID,
+-		Type:         0xFF,
++		FromAddress: from.Bytes(),
++		ToAddress:   toBytes,
++		Amount:      amountBytes,
++		Data:        data,
++		Nonce:       nonceBytes,
++		MaxGas:      100000,
++		MaxGasPrice: p_common.MINIMUM_BASE_FEE,
++		ChainID:     chainID,
++		Type:        0xFF,
+ 	})
+ 	if ecdsaKey, ok := key.(*ecdsa.PrivateKey); ok {
+ 		require.NoError(t, tx.SignSecpProto(ecdsaKey))
+diff --git a/execution/pkg/blockchain/tx_processor/signature_enforcement.go b/execution/pkg/blockchain/tx_processor/signature_enforcement.go
+index bc1472ac..86011a44 100644
+--- a/execution/pkg/blockchain/tx_processor/signature_enforcement.go
++++ b/execution/pkg/blockchain/tx_processor/signature_enforcement.go
+@@ -144,10 +144,14 @@ func extractRawCallData(tx types.Transaction) []byte {
+ // checkAccountAuthorized returns nil if as is permitted under the account gate,
+ // or AccountLocked if as is locked, or AccountNotRegistered / RecipientNotRegistered
+ // if as is nil or neither registered on parent chain nor provisional.
++// Deployed smart contracts on this cluster are valid recipients.
+ func checkAccountAuthorized(as types.AccountState, forRecipient bool) *transaction.TransactionError {
+ 	if as != nil && as.IsLocked() {
+ 		return transaction.AccountLocked
+ 	}
++	if forRecipient && as != nil && as.SmartContractState() != nil {
++		return nil
++	}
+ 	if as == nil || (!as.ParentRegistered() && !as.IsProvisional()) {
+ 		if forRecipient {
+ 			return transaction.RecipientNotRegistered
+diff --git a/execution/pkg/parentchain/quorum_client.go b/execution/pkg/parentchain/quorum_client.go
+index 4a7badab..36f76d9a 100644
+--- a/execution/pkg/parentchain/quorum_client.go
++++ b/execution/pkg/parentchain/quorum_client.go
+@@ -13,6 +13,7 @@ import (
+ 	"github.com/ethereum/go-ethereum/crypto"
+ 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+ 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
++	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+ 	"github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi"
+ 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+ 	"google.golang.org/protobuf/proto"
+@@ -62,7 +63,7 @@ func NewQuorumClient(urls []string, privKey cm.PrivateKey, pubKey cm.PublicKey)
+ 		sender = common.BytesToAddress(crypto.Keccak256(pubKey[:])[12:])
+ 	}
+ 	if len(cleanURLs) > 1 && (len(cleanURLs)-1)%3 != 0 {
+-		fmt.Printf("⚠️ [QUORUM-CLIENT] Warning: Parent Chain node count (%d) is not of canonical BFT form (3f + 1, e.g. 4, 7, 10). Safety is maintained with Q=%d, but liveness tolerance may be suboptimal.\n", len(cleanURLs), (len(cleanURLs)+(len(cleanURLs)-1)/3)/2+1)
++		logger.Warn("⚠️ [QUORUM-CLIENT] Warning: Parent Chain node count (%d) is not of canonical BFT form (3f + 1, e.g. 4, 7, 10). Safety is maintained with Q=%d, but liveness tolerance may be suboptimal.", len(cleanURLs), (len(cleanURLs)+(len(cleanURLs)-1)/3)/2+1)
+ 	}
+ 	return &QuorumClient{
+ 		urls:    cleanURLs,
+@@ -89,13 +90,17 @@ func (q *QuorumClient) quorumThreshold() int {
+ // In a BFT system with N nodes and at most f Byzantine nodes (f = (N - 1) / 3):
+ // To prevent Byzantine equivocation (where a Byzantine node lies to both sides to produce two
+ // conflicting winning quorums Q1 and Q2), any two quorums must intersect in at least f + 1 nodes:
+-//   |Q1 ∩ Q2| = 2*Q - N >= f + 1  ==>  Q >= (N + f)/2 + 1
++//
++//	|Q1 ∩ Q2| = 2*Q - N >= f + 1  ==>  Q >= (N + f)/2 + 1
+ //
+ // When N is canonical (N = 3f + 1, e.g. 4, 7, 10):
+-//   (N + f)/2 + 1 = (3f + 1 + f)/2 + 1 = 2f + 1 = N - f.
+-//   This simultaneously guarantees safety against equivocation and liveness up to f node failures.
++//
++//	(N + f)/2 + 1 = (3f + 1 + f)/2 + 1 = 2f + 1 = N - f.
++//	This simultaneously guarantees safety against equivocation and liveness up to f node failures.
++//
+ // When N is non-canonical (e.g. 5, 6):
+-//   Q = (N + f)/2 + 1 strictly guarantees safety against split-brain equivocation.
++//
++//	Q = (N + f)/2 + 1 strictly guarantees safety against split-brain equivocation.
+ func (q *QuorumClient) strongQuorumThreshold() int {
+ 	n := len(q.clients)
+ 	if n <= 1 {
+diff --git a/execution/pkg/rollup/account_registry_handler.go b/execution/pkg/rollup/account_registry_handler.go
+index f9a8e26b..7c7d5f92 100644
+--- a/execution/pkg/rollup/account_registry_handler.go
++++ b/execution/pkg/rollup/account_registry_handler.go
+@@ -226,10 +226,11 @@ type lockedHomeClusterStateDB interface {
+ 	SetLockedHomeCluster(addr common.Address, homeCluster cm.PublicKey)
+ }
+ 
+-// NOTE: committee enforcement is NOT active in production yet: no CommitteeProvider is wired in simple_chain, and the
+-// RegistrationWorker attaches only its OWN attestation (no signature exchange between validators). Wiring a provider
+-// for a committee with f+1 > 1 before that exchange exists would leave every registration PENDING forever.
+-// CommitteeProvider returns the active committee validator BLS public keys.
++// NOTE: Committee enforcement is currently in transition: no CommitteeProvider is wired in simple_chain yet,
++// so RegistrationWorker and LockProposer attach their own node attestation. Until full committee co-attestation
++// and signature exchange is enabled in production, the network operates under the Trusted Validator assumption.
++// For destructive actions (SystemPayloadKindAccountLocked), at least one valid attestation is strictly enforced
++// even when committee is nil to prevent unauthenticated freeze attacks.
+ type CommitteeProvider interface {
+ 	GetActiveCommitteeBLSKeys() ([]cm.PublicKey, error)
+ }
+@@ -467,6 +468,10 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
+ 			return nil // idempotent: already locked
+ 		}
+ 
++		if committee == nil && len(payload.Attestations) == 0 {
++			return errors.New("account registry: lock payload requires at least one valid validator attestation")
++		}
++
+ 		digest := ComputeAccountLockedAttestDigest(h.attestChainID(), payload.User, payload.HomeCluster, payload.ParentSeq)
+ 		ok, err := h.verifyAttestations(store, committee, digest, payload.Attestations)
+ 		if err != nil {
+diff --git a/execution/pkg/rollup/registration_relay.go b/execution/pkg/rollup/registration_relay.go
+index 2bbfedfe..6c88fdb1 100644
+--- a/execution/pkg/rollup/registration_relay.go
++++ b/execution/pkg/rollup/registration_relay.go
+@@ -793,7 +793,12 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
+ 	}
+ 	r.markProvisionalIfApplied(user)
+ 	home, found, err := r.parent.GetAccountRegistry(user)
+-	if err == nil && found {
++	if err != nil {
++		// Transient network or quorum error: log warning and retry on next poll without burning an attempt.
++		log.Printf("RegistrationRelay: transient lookup error for %s (will retry): %v", user.Hex(), err)
++		return
++	}
++	if found {
+ 		r.resolveFound(user, home)
+ 		return
+ 	}
+diff --git a/execution/pkg/state/account_state.go b/execution/pkg/state/account_state.go
+index 62c2c679..1c11e4cf 100644
+--- a/execution/pkg/state/account_state.go
++++ b/execution/pkg/state/account_state.go
+@@ -58,18 +58,20 @@ func (as *AccountState) Proto() *pb.AccountState {
+ 	nonceBytes := make([]byte, 8)
+ 	binary.BigEndian.PutUint64(nonceBytes, as.nonce)
+ 	pbAs := &pb.AccountState{
+-		Address:           as.address[:],
+-		LastHash:          as.lastHash[:],
+-		Balance:           as.balance.Bytes(),
+-		PendingBalance:    as.pendingBalance.Bytes(),
+-		DeviceKey:         as.deviceKey[:],
+-		Nonce:             nonceBytes,
+-		PublicKeyBls:      as.publicKeyBls,
+-		AccountType:       as.accountType,
+-		ParentRegistered:  as.parentRegistered,
+-		Locked:            as.locked,
+-		LockedHomeCluster: as.lockedHomeCluster[:],
+-		Provisional:       as.provisional,
++		Address:          as.address[:],
++		LastHash:         as.lastHash[:],
++		Balance:          as.balance.Bytes(),
++		PendingBalance:   as.pendingBalance.Bytes(),
++		DeviceKey:        as.deviceKey[:],
++		Nonce:            nonceBytes,
++		PublicKeyBls:     as.publicKeyBls,
++		AccountType:      as.accountType,
++		ParentRegistered: as.parentRegistered,
++		Locked:           as.locked,
++		Provisional:      as.provisional,
++	}
++	if as.lockedHomeCluster != (p_common.PublicKey{}) {
++		pbAs.LockedHomeCluster = as.lockedHomeCluster[:]
+ 	}
+ 	if as.smartContractState != nil {
+ 		pbAs.SmartContractState = as.smartContractState.Proto()
+@@ -96,7 +98,11 @@ func (as *AccountState) FromProto(pbData *pb.AccountState) {
+ 	as.accountType = pbData.AccountType
+ 	as.parentRegistered = pbData.ParentRegistered
+ 	as.locked = pbData.Locked
+-	copy(as.lockedHomeCluster[:], pbData.LockedHomeCluster)
++	if len(pbData.LockedHomeCluster) == len(as.lockedHomeCluster) {
++		copy(as.lockedHomeCluster[:], pbData.LockedHomeCluster)
++	} else {
++		as.lockedHomeCluster = p_common.PublicKey{}
++	}
+ 	as.provisional = pbData.Provisional
+ }
+ 
+diff --git a/execution/pkg/state/account_state_test.go b/execution/pkg/state/account_state_test.go
+index 994f2f1d..677a6c29 100644
+--- a/execution/pkg/state/account_state_test.go
++++ b/execution/pkg/state/account_state_test.go
+@@ -413,3 +413,29 @@ func TestAccountState_LockedHomeCluster_MarshalCopyRoundTrip(t *testing.T) {
+ 	jsonState.FromAccountState(as.(*AccountState))
+ 	assert.Equal(t, winner, jsonState.ToAccountState().LockedHomeCluster())
+ }
++
++func TestAccountState_GoldenBytes_DevCompatibility(t *testing.T) {
++	// Standard untouched account with balance 1000 and nonce 5
++	asNormal := NewAccountState(common.HexToAddress("0x1234567890123456789012345678901234567890"))
++	asNormal.AddBalance(big.NewInt(1000))
++	asNormal.SetNonce(5)
++
++	bNormal, err := asNormal.Marshal()
++	require.NoError(t, err)
++	// Must be exactly 104 bytes, matching the baseline dev branch without LockedHomeCluster field pollution
++	assert.Equal(t, 104, len(bNormal), "Normal account must serialize to exactly 104 bytes matching dev")
++
++	// Account with ParentRegistered = true adds exactly 2 bytes (tag 10 + varint 1)
++	asRegistered := asNormal.Copy()
++	asRegistered.SetParentRegistered(true)
++	bReg, err := asRegistered.Marshal()
++	require.NoError(t, err)
++	assert.Equal(t, 106, len(bReg), "Registered account must serialize to exactly 106 bytes")
++
++	// Only an account with non-zero LockedHomeCluster should include field 13
++	asLocked := asNormal.Copy()
++	asLocked.SetLockedHomeCluster(p_common.PublicKey{1})
++	bLocked, err := asLocked.Marshal()
++	require.NoError(t, err)
++	assert.Equal(t, 154, len(bLocked), "Account with explicit LockedHomeCluster should include 50 bytes of field 13")
++}

@@ -228,3 +228,58 @@ func TestIngest_IdleTimeoutWithBacklog_NoBatchLost(t *testing.T) {
 	// Stay connected and silent: the idle deadline fires about 1 s after the last frame.
 	waitDelivered(t, delivered, n, 30*time.Second)
 }
+
+// Verify that when the admission gate closes, Connection.readLoop blocks on the very first transaction batch
+// instead of reading and unmarshaling up to ConnRequestChanSize additional batches into requestChan.
+func TestIngest_AdmissionGateBlocksReadLoopImmediately(t *testing.T) {
+	gateEntered := make(chan struct{}, 1)
+	releaseGate := make(chan struct{})
+	var gateCalls atomic.Int64
+
+	SetTxAdmissionGate(func(ctx context.Context) error {
+		if gateCalls.Add(1) == 1 {
+			select {
+			case gateEntered <- struct{}{}:
+			default:
+			}
+		}
+		select {
+		case <-releaseGate:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	t.Cleanup(func() { SetTxAdmissionGate(nil) })
+
+	cfg := smallIngestConfig()
+	cfg.ConnRequestChanSize = 64
+	addr, delivered := startIngestServer(t, cfg, nil)
+
+	conn, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	defer conn.Close()
+	_, err = conn.Write(testInitFrame(t))
+	require.NoError(t, err)
+
+	const n = 20
+	for i := 0; i < n; i++ {
+		_, err = conn.Write(testFrame(t, "SendRawTransactions", []byte{byte(i)}))
+		require.NoError(t, err)
+	}
+
+	select {
+	case <-gateEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for readLoop to enter admission gate")
+	}
+
+	// Give readLoop time to read ahead if it weren't blocked by the gate.
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, int64(1), gateCalls.Load(), "readLoop must stop on batch #1 while gate is closed")
+	require.Equal(t, int64(0), delivered.Load(), "no batch may be delivered while gate is closed")
+
+	close(releaseGate)
+	waitDelivered(t, delivered, n, 10*time.Second)
+}
+

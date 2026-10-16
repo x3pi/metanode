@@ -1267,12 +1267,13 @@ func ValidateEnvelopeBindingsParallel(rawTxs []types.Transaction) []bool {
 			if tx == nil {
 				continue
 			}
-			if len(tx.RawEnvelope()) == 0 {
+			if len(tx.RawEnvelope()) == 0 || tx_processor.IsVerifiedEnvelopeBound(tx) {
 				isValid[i] = true
 				continue
 			}
 			if err := transaction.ValidateEnvelopeBinding(tx); err == nil {
 				isValid[i] = true
+				tx_processor.RecordVerifiedEnvelopeBound(tx)
 			}
 		}
 		return isValid
@@ -1298,12 +1299,13 @@ func ValidateEnvelopeBindingsParallel(rawTxs []types.Transaction) []bool {
 				if tx == nil {
 					continue
 				}
-				if len(tx.RawEnvelope()) == 0 {
+				if len(tx.RawEnvelope()) == 0 || tx_processor.IsVerifiedEnvelopeBound(tx) {
 					isValid[i] = true
 					continue
 				}
 				if err := transaction.ValidateEnvelopeBinding(tx); err == nil {
 					isValid[i] = true
+					tx_processor.RecordVerifiedEnvelopeBound(tx)
 				}
 			}
 		}(start, end)

@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # Keep GitHub Actions on supported runtimes (e.g. the Node 20 -> 24 move) without manual tracking.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

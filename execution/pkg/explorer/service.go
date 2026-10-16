@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"log"
 	"os"
 	"path/filepath"
@@ -16,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/goxapian"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -24,7 +24,7 @@ import (
 const (
 	defaultNumShards  = 32
 	defaultNumWorkers = 32
-	defaultQueueSize  = 8192
+	defaultQueueSize  = 65536
 	maxQueueSize      = 1 << 22 // ~4M jobs
 	minQueueSize      = 256
 )
@@ -40,6 +40,8 @@ type indexJob struct {
 	Tx          types.Transaction
 	Rcpt        types.Receipt
 	BlockHeader types.BlockHeader // TỐI ƯU HÓA: Chỉ lưu BlockHeader
+	BlockHash   string
+	Replace     bool
 }
 
 // ExplorerSearchService quản lý việc đánh chỉ mục và tìm kiếm dữ liệu trên nhiều shard.
@@ -167,6 +169,11 @@ func (s *ExplorerSearchService) monitorQueue() {
 	}
 }
 
+// QueueDepth returns the current number of pending jobs in indexQueue.
+func (s *ExplorerSearchService) QueueDepth() int {
+	return len(s.indexQueue)
+}
+
 func (s *ExplorerSearchService) Close() error {
 	log.Println("🔌 Shutting down ExplorerSearchService...")
 
@@ -187,6 +194,9 @@ func (s *ExplorerSearchService) Close() error {
 			s.qps[i].Close()
 		}
 		if s.dbs[i] != nil {
+			if err := s.dbs[i].Commit(); err != nil && firstErr == nil {
+				firstErr = err
+			}
 			s.dbs[i].Close()
 		}
 		s.locks[i].Unlock()
@@ -200,19 +210,44 @@ func (s *ExplorerSearchService) Close() error {
 // Explorer indexing is non-critical (doesn't affect consensus/execution).
 // Dropped transactions can be re-indexed offline via the missing block ranges mechanism.
 func (s *ExplorerSearchService) IndexTransaction(tx types.Transaction, rcpt types.Receipt, blockHeader types.BlockHeader) error {
+	return s.IndexTransactionFast(tx, rcpt, blockHeader, "", true)
+}
+
+// IndexTransactionFast enqueues an indexing job with an optional precomputed
+// blockHashHex and replace flag. When replace is false (newly committed blocks),
+// the worker calls Xapian add_document directly instead of performing a random
+// B-tree lookup via replace_document.
+func (s *ExplorerSearchService) IndexTransactionFast(
+	tx types.Transaction,
+	rcpt types.Receipt,
+	blockHeader types.BlockHeader,
+	blockHashHex string,
+	replace bool,
+) error {
 	job := indexJob{
 		Tx:          tx,
 		Rcpt:        rcpt,
 		BlockHeader: blockHeader,
+		BlockHash:   blockHashHex,
+		Replace:     replace,
 	}
 
-	// Non-blocking send: drop job if queue is full rather than blocking pipeline.
+	// Fast non-blocking send when queue has room (zero timer allocation on hot path).
 	select {
 	case s.indexQueue <- job:
-		// Sent successfully
 		return nil
 	default:
-		// Queue full — drop job to prevent backpressure on block processing.
+	}
+
+	// Queue is momentarily full: pace the background indexing producer (up to 50ms)
+	// so bursts from in-memory pendingIndexBlocks match the 32 Xapian workers' drain rate
+	// without dropping jobs, while still failing open if Xapian shards are stalled.
+	timer := time.NewTimer(50 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case s.indexQueue <- job:
+		return nil
+	case <-timer.C:
 		dropped := s.droppedJobs.Add(1)
 		// Log every 100th drop to avoid log spam
 		if dropped%100 == 1 {
@@ -223,11 +258,14 @@ func (s *ExplorerSearchService) IndexTransaction(tx types.Transaction, rcpt type
 	}
 }
 
-// getShardIndex chọn shard cho một key (ví dụ: transaction hash).
+// getShardIndex chọn shard cho một key (ví dụ: transaction hash) sử dụng FNV-1a 32-bit zero-alloc.
 func (s *ExplorerSearchService) getShardIndex(key string) int {
-	h := fnv.New32a()
-	h.Write([]byte(key))
-	return int(h.Sum32()) % s.numShards
+	var h uint32 = 2166136261
+	for i := 0; i < len(key); i++ {
+		h ^= uint32(key[i])
+		h *= 16777619
+	}
+	return int(h) % s.numShards
 }
 
 // startWorkers khởi động các goroutine để xử lý công việc từ indexQueue.
@@ -281,57 +319,111 @@ func (s *ExplorerSearchService) Commit() error {
 
 // doIndexTransaction là hàm thực thi việc đánh chỉ mục, được gọi bởi các worker.
 func (s *ExplorerSearchService) doIndexTransaction(job indexJob) error {
-	hash := strings.ToLower(job.Tx.Hash().Hex())
+	if job.Tx == nil {
+		return errors.New("transaction is nil")
+	}
+
+	// Precompute hex strings, terms, and JSON outside the shard mutex so that
+	// 32 workers never serialize on JSON formatting or string allocations.
+	txHashHex := job.Tx.Hash().Hex()
+	hash := strings.ToLower(txHashHex)
 	shardIndex := s.getShardIndex(hash)
 
-	s.locks[shardIndex].Lock()
-	defer s.locks[shardIndex].Unlock()
-
-	db := s.dbs[shardIndex]
-	if db == nil {
-		return fmt.Errorf("database for shard %d is not initialized or already closed", shardIndex)
+	fromHex := job.Tx.FromAddress().Hex()
+	fromAddr := strings.ToLower(fromHex)
+	toAddress := job.Tx.ToAddress()
+	var toHex, toAddr string
+	if toAddress != (common.Address{}) {
+		toHex = toAddress.Hex()
+		toAddr = strings.ToLower(toHex)
+	}
+	var rHashHex, rHash string
+	if job.Rcpt != nil {
+		rHashHex = job.Rcpt.RHash().Hex()
+		rHash = strings.ToLower(rHashHex)
 	}
 
-	doc := goxapian.NewDocument()
-	if doc == nil {
-		return errors.New("failed to create new Xapian document")
+	uniqueTerm := "H" + hash
+
+	var termsBuf strings.Builder
+	termsBuf.Grow(256)
+	termsBuf.WriteString(uniqueTerm)
+	termsBuf.WriteByte('\n')
+	termsBuf.WriteString("F")
+	termsBuf.WriteString(fromAddr)
+	if toAddr != "" {
+		termsBuf.WriteByte('\n')
+		termsBuf.WriteString("T")
+		termsBuf.WriteString(toAddr)
 	}
-	defer doc.Close()
-
-	fromAddr := strings.ToLower(job.Tx.FromAddress().Hex())
-	toAddr := strings.ToLower(job.Tx.ToAddress().Hex())
-	rHash := strings.ToLower(job.Rcpt.RHash().Hex())
-
-	doc.AddTerm("H" + hash)
-	doc.AddTerm("F" + fromAddr)
-	if toAddr != "0x0000000000000000000000000000000000000000" {
-		doc.AddTerm("T" + toAddr)
+	if job.BlockHeader != nil {
+		termsBuf.WriteByte('\n')
+		termsBuf.WriteString("B")
+		termsBuf.WriteString(strconv.FormatUint(job.BlockHeader.BlockNumber(), 10))
 	}
-	doc.AddTerm("B" + strconv.FormatUint(job.BlockHeader.BlockNumber(), 10)) // TỐI ƯU HÓA
-	doc.AddTerm("RH" + rHash)
+	if rHash != "" {
+		termsBuf.WriteByte('\n')
+		termsBuf.WriteString("RH")
+		termsBuf.WriteString(rHash)
+	}
 
-	if job.Tx.IsCallContract() {
-		tokenContractAddr := toAddr
-		if tokenData, ok := ParseERC20Transfer(job.Tx.FromAddress(), job.Tx.CallData().Input()); ok {
-			tokenFrom := strings.ToLower(tokenData.From.Hex())
-			tokenTo := strings.ToLower(tokenData.To.Hex())
-			doc.AddTerm("K" + tokenContractAddr)
-			doc.AddTerm("TF" + tokenFrom)
-			doc.AddTerm("TT" + tokenTo)
+	var tokenData *ERC20TransferData
+	if job.Tx.IsCallContract() && job.Tx.CallData() != nil {
+		if td, ok := ParseERC20Transfer(job.Tx.FromAddress(), job.Tx.CallData().Input()); ok {
+			tokenData = td
+			tokenFrom := strings.ToLower(td.From.Hex())
+			tokenTo := strings.ToLower(td.To.Hex())
+			termsBuf.WriteByte('\n')
+			termsBuf.WriteString("K")
+			termsBuf.WriteString(toAddr)
+			termsBuf.WriteByte('\n')
+			termsBuf.WriteString("TF")
+			termsBuf.WriteString(tokenFrom)
+			termsBuf.WriteByte('\n')
+			termsBuf.WriteString("TT")
+			termsBuf.WriteString(tokenTo)
 		}
 	}
 
-	explorerTx := NewExplorerTransaction(job.Tx, job.Rcpt, job.BlockHeader) // TỐI ƯU HÓA
-	jsonData, err := explorerTx.ToJSONString()
-	if err != nil {
-		return fmt.Errorf("could not marshal explorer transaction to JSON: %w", err)
+	var jsonData string
+	if job.BlockHeader != nil && job.Rcpt != nil {
+		jsonBytes, err := marshalExplorerTxFull(
+			job.Tx,
+			job.Rcpt,
+			job.BlockHeader,
+			job.BlockHash,
+			txHashHex,
+			fromHex,
+			toAddress,
+			toHex,
+			rHashHex,
+			tokenData,
+			true,
+		)
+		if err != nil {
+			return fmt.Errorf("could not marshal explorer transaction to JSON: %w", err)
+		}
+		jsonData = string(jsonBytes)
+	} else {
+		explorerTx := NewExplorerTransaction(job.Tx, job.Rcpt, job.BlockHeader)
+		var err error
+		jsonData, err = explorerTx.ToJSONString()
+		if err != nil {
+			return fmt.Errorf("could not marshal explorer transaction to JSON: %w", err)
+		}
 	}
-	doc.SetData(jsonData)
 
-	uniqueTerm := "H" + hash // Sử dụng term định danh duy nhất dựa trên hash
-	// 2026-09 mục 22: ReplaceDocumentByTerm now reports failure instead of
-	// silently discarding it -- propagate rather than swallow.
-	if err := db.ReplaceDocumentByTerm(uniqueTerm, doc); err != nil {
+	termsPacked := termsBuf.String()
+
+	s.locks[shardIndex].Lock()
+	db := s.dbs[shardIndex]
+	if db == nil {
+		s.locks[shardIndex].Unlock()
+		return fmt.Errorf("database for shard %d is not initialized or already closed", shardIndex)
+	}
+	err := db.IndexDocument(uniqueTerm, jsonData, termsPacked, job.Replace)
+	s.locks[shardIndex].Unlock()
+	if err != nil {
 		return fmt.Errorf("could not index transaction %s into shard %d: %w", hash, shardIndex, err)
 	}
 	return nil

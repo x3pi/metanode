@@ -9,7 +9,6 @@ import (
 	"time"
 
 	eth_common "github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
@@ -23,18 +22,15 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
+var boundSigSuffix = [1]byte{0xB1}
+
 // sigCacheKey binds a verified-signature cache entry to (tx hash, canonical proto fields hash,
 // signature bytes, BLS key it was verified against). Keying by tx hash alone would let a tx copy
 // carrying a forged signature or mutated proto fields ride on the cache entry of the genuine one.
 func sigCacheKey(tx types.Transaction, blsKey []byte) eth_common.Hash {
-	buf := make([]byte, 0, 64+len(tx.Sign().Bytes())+len(blsKey))
 	h := tx.Hash()
-	buf = append(buf, h[:]...)
 	protoHash := tx.ProtoHash()
-	buf = append(buf, protoHash[:]...)
-	buf = append(buf, tx.Sign().Bytes()...)
-	buf = append(buf, blsKey...)
-	return crypto.Keccak256Hash(buf)
+	return transaction.Keccak256Hash(h[:], protoHash[:], tx.SignBytes(), blsKey)
 }
 
 // boundSigKey is the cache key of an entry that is stored ONLY after the envelope binding AND the signature both
@@ -43,13 +39,33 @@ func sigCacheKey(tx types.Transaction, blsKey []byte) eth_common.Hash {
 // (e.g. the BLS mempool path), so they must NOT short-circuit it: honest nodes with different cache contents would
 // then reach different verdicts.
 func boundSigKey(key eth_common.Hash) eth_common.Hash {
-	return crypto.Keccak256Hash(key[:], []byte{0xB1})
+	return transaction.Keccak256Hash(key[:], boundSigSuffix[:])
 }
 
 // storeVerifiedBound records both the plain and the binding-proven cache entry. Call only after binding + signature passed.
 func storeVerifiedBound(key eth_common.Hash) {
 	StoreVerifiedSignature(key)
 	StoreVerifiedSignature(boundSigKey(key))
+	bumpVerifiedSignatureCacheCount()
+}
+
+// IsVerifiedEnvelopeBound reports whether tx has a non-empty RawEnvelope, is not read-only,
+// and already has a binding-proven cache entry for its exact (Hash, ProtoHash, Sign) tuple.
+func IsVerifiedEnvelopeBound(tx types.Transaction) bool {
+	if tx == nil || len(tx.RawEnvelope()) == 0 || tx.GetReadOnly() {
+		return false
+	}
+	return LoadVerifiedSignature(boundSigKey(sigCacheKey(tx, nil)))
+}
+
+// RecordVerifiedEnvelopeBound records a binding-proven cache entry for a standard Ethereum
+// envelope transaction (Type != 0xFF, non-empty RawEnvelope, !GetReadOnly) after
+// ValidateEnvelopeBinding has verified both its ECDSA sender recovery and all proto fields.
+func RecordVerifiedEnvelopeBound(tx types.Transaction) {
+	if tx == nil || len(tx.RawEnvelope()) == 0 || tx.Type() == 0xFF || tx.GetReadOnly() {
+		return
+	}
+	storeVerifiedBound(sigCacheKey(tx, nil))
 }
 
 // sigPolicy is the per-chain signature rule set, derived from the node config (identical on every validator of a
@@ -363,9 +379,13 @@ func evalTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy)
 		ok = transaction.NewVerifyTransactionRequest(tx.Hash(), common.PubkeyFromBytes(blsKey), tx.Sign()).Valid()
 	}
 	if !ok {
-		ok = tx.ValidSecpSign()
+		if hasEnvelope && tx.Type() != 0xFF {
+			ok = true
+		} else {
+			ok = tx.ValidSecpSign()
+		}
 	}
-	if ok && accountType == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) && !tx.ValidSecpSign() {
+	if ok && accountType == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) && !(hasEnvelope && tx.Type() != 0xFF) && !tx.ValidSecpSign() {
 		ok = false
 	}
 	if ok {
@@ -373,6 +393,7 @@ func evalTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy)
 			storeVerifiedBound(key)
 		} else {
 			StoreVerifiedSignature(key)
+			bumpVerifiedSignatureCacheCount()
 		}
 		return sigVerdictVerified
 	}
@@ -546,6 +567,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 				for _, p := range part {
 					valid[p.i] = true
 					StoreVerifiedSignature(p.key)
+					bumpVerifiedSignatureCacheCount()
 				}
 				return
 			}

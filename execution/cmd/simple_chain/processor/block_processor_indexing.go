@@ -6,12 +6,36 @@ import (
 	"context"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
+
+type pendingIndexBlock struct {
+	header   types.BlockHeader
+	txs      []types.Transaction
+	receipts []types.Receipt
+}
+
+const (
+	explorerCommitBatchBlocks = 64
+	maxPendingIndexBlocks     = 32
+)
+
+func (bp *BlockProcessor) popPendingIndexBlock(blockNum uint64) *pendingIndexBlock {
+	raw, loaded := bp.pendingIndexBlocks.LoadAndDelete(blockNum)
+	if !loaded {
+		return nil
+	}
+	bp.pendingIndexBlockCount.Add(-1)
+	if pending, ok := raw.(*pendingIndexBlock); ok {
+		return pending
+	}
+	return nil
+}
 
 // startIndexingProcess starts the indexing process
 func (bp *BlockProcessor) startIndexingProcess() {
@@ -103,6 +127,18 @@ func (bp *BlockProcessor) startIndexingProcess() {
 
 		case <-tickerSync.C:
 			if len(bp.indexingChannel) == 0 {
+				explorerSvc := bp.storageManager.GetExplorerSearchService()
+				if explorerSvc != nil && explorerSvc.QueueDepth() > 0 {
+					continue
+				}
+				if bp.uncommittedIndexBlocks > 0 {
+					if explorerSvc != nil {
+						if err := explorerSvc.Commit(); err != nil {
+							logger.Error("❌ [INDEXING] Failed to commit explorer search index on idle tick: %v", err)
+						}
+					}
+					bp.uncommittedIndexBlocks = 0
+				}
 				if !bp.isSyncCompleted.Load() {
 					logger.Info("Indexing queue empty, marking sync completed")
 					bp.isSyncCompleted.Store(true)
@@ -112,12 +148,80 @@ func (bp *BlockProcessor) startIndexingProcess() {
 	}
 }
 
+func (bp *BlockProcessor) finalizeIndexedBlock(blockNumber uint64, indexDroppedCount int) {
+	explorerSvc := bp.storageManager.GetExplorerSearchService()
+	if explorerSvc == nil {
+		return
+	}
+	bp.uncommittedIndexBlocks++
+	// Coalesce 32-shard Xapian commits every 64 blocks during bursts; when indexingChannel
+	// becomes idle, tickerSync (every 2s in startIndexingProcess) flushes any remaining blocks.
+	if bp.uncommittedIndexBlocks >= explorerCommitBatchBlocks {
+		if err := explorerSvc.Commit(); err != nil {
+			logger.Error("❌ [INDEXING] Failed to commit explorer search index for block #%d: %v", blockNumber, err)
+		}
+		bp.uncommittedIndexBlocks = 0
+	}
+	if indexDroppedCount == 0 {
+		if err := explorerSvc.AddBlockToIndexRanges(blockNumber); err != nil {
+			logger.Error("Error updating block ranges after indexing block #%d: %v", blockNumber, err)
+		}
+	} else {
+		logger.Warn("⚠️ [EXPLORER] Block #%d had %d index drops — NOT marking as indexed. Periodic re-indexer will retry.",
+			blockNumber, indexDroppedCount)
+	}
+}
+
 // indexSingleBlock indexes a single block
 func (bp *BlockProcessor) indexSingleBlock(blockNum uint64) {
 	if _, loaded := bp.indexingLocks.LoadOrStore(blockNum, true); loaded {
+		bp.popPendingIndexBlock(blockNum)
 		return
 	}
 	defer bp.indexingLocks.Delete(blockNum)
+
+	explorerSvc := bp.storageManager.GetExplorerSearchService()
+	if explorerSvc == nil {
+		bp.popPendingIndexBlock(blockNum)
+		return
+	}
+
+	// Fast path: index directly from in-memory block data handed off by commitWorker,
+	// avoiding 2x trie re-opens and 16,000 protobuf unmarshals per block.
+	if pending := bp.popPendingIndexBlock(blockNum); pending != nil && pending.header != nil {
+		blockHashHex := pending.header.Hash().Hex()
+		indexDroppedCount := 0
+		var rcptByHash map[common.Hash]types.Receipt
+		for i, tx := range pending.txs {
+			if tx == nil {
+				continue
+			}
+			var rpc types.Receipt
+			if i < len(pending.receipts) && pending.receipts[i] != nil && pending.receipts[i].TransactionHash() == tx.Hash() {
+				rpc = pending.receipts[i]
+			} else {
+				if rcptByHash == nil {
+					rcptByHash = make(map[common.Hash]types.Receipt, len(pending.receipts))
+					for _, r := range pending.receipts {
+						if r != nil {
+							rcptByHash[r.TransactionHash()] = r
+						}
+					}
+				}
+				rpc = rcptByHash[tx.Hash()]
+			}
+			if rpc == nil {
+				continue
+			}
+			bp.ProcessedIndexTxCount.Add(1)
+			if err := explorerSvc.IndexTransactionFast(tx, rpc, pending.header, blockHashHex, false); err != nil {
+				indexDroppedCount++
+				continue
+			}
+		}
+		bp.finalizeIndexedBlock(pending.header.BlockNumber(), indexDroppedCount)
+		return
+	}
 
 	var block types.Block
 	for {
@@ -139,6 +243,8 @@ func (bp *BlockProcessor) indexSingleBlock(blockNum uint64) {
 		return
 	}
 
+	blockHashHex := block.Header().Hash().Hex()
+	indexDroppedCount := 0
 	for _, txHash := range block.Transactions() {
 		tx, err := txDB.GetTransaction(txHash)
 		if err != nil {
@@ -152,24 +258,11 @@ func (bp *BlockProcessor) indexSingleBlock(blockNum uint64) {
 		}
 
 		bp.ProcessedIndexTxCount.Add(1)
-		if err := bp.storageManager.GetExplorerSearchService().IndexTransaction(tx, rpc, block.Header()); err != nil {
-			logger.Error("❌ [INDEXING] Cannot index transaction %s in block #%d (skipping): %v", txHash.Hex(), blockNum, err)
+		if err := explorerSvc.IndexTransactionFast(tx, rpc, block.Header(), blockHashHex, true); err != nil {
+			indexDroppedCount++
 			continue
 		}
 	}
 
-	// 2026-09 mục 22: Commit() used to always report success even when a
-	// shard's underlying Xapian commit actually failed (both this wrapper and
-	// goxapian.Database.Commit() itself were `void`/always-nil) -- log it now
-	// that a real error can come back. Explorer/search indexing is not
-	// consensus-critical (the canonical chain state lives elsewhere), so a
-	// failed commit here is logged rather than treated as fatal, but it must
-	// no longer be silent.
-	if err := bp.storageManager.GetExplorerSearchService().Commit(); err != nil {
-		logger.Error("❌ [INDEXING] Failed to commit explorer search index for block #%d: %v", blockNum, err)
-	}
-	err = bp.storageManager.GetExplorerSearchService().AddBlockToIndexRanges(block.Header().BlockNumber())
-	if err != nil {
-		logger.Error("Error updating block ranges after indexing block #%d: %v", block.Header().BlockNumber(), err)
-	}
+	bp.finalizeIndexedBlock(block.Header().BlockNumber(), indexDroppedCount)
 }

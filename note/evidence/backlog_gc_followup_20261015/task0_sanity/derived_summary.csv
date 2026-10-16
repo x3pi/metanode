@@ -1,0 +1,3 @@
+pair,variant,tag,bytes_sent_txs,received_sum,rejected_sum,committed_ours,loss_vs_sent,commit_ratio,tps_end_to_end,tps_during_injection,tps_active_commit_window,inject_seconds,end_to_end_seconds,end_block,max_rss_mb,stalled,parity_ok,measurement_stop_reason
+1,base,base_sanity_1m_run1,1007408,1007408,0,1007408,0,1.0,15240.2368,7211.3462,15475.3418,5.8242,66.1019,0,0,0,OK,reference validator showed committed >= sent and was idle for 1.5s
+2,base,base_sanity_1m_run2,1008000,1008000,0,1008000,0,1.0,15388.9311,7541.8903,15641.7392,5.7564,65.5016,0,0,0,OK,reference validator showed committed >= sent and was idle for 1.5s

@@ -403,7 +403,7 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 	}
 
 	if bc := blockchain.GetBlockChainInstance(); bc != nil {
-		bc.AddTxToCache(ethTxHash, append([]byte(nil), input...))
+		bc.AddTxToCache(ethTxHash, input)
 		if errMap := bc.SetEthHashMapblsHash(ethTxHash, metaTxHash); errMap != nil {
 			logger.Warn("[SendRawEthTransaction] SetEthHashMapblsHash failed: %v", errMap)
 		}

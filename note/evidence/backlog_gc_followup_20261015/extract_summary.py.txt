@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""Extractor script for note/evidence/backlog_gc_followup_20261015/.
+Reads raw *_run*.json files from task0_sanity/, task0_aa_4m/, and task3_raft_ab/,
+writes derived_summary.csv in each subdirectory, and computes paired statistics
+using execution/scripts/test/evidence/stats_util.py.
+"""
+import csv
+import json
+import math
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path("/home/abc/chain-n/metanode")
+sys.path.insert(0, str(ROOT / "execution/scripts/test/evidence"))
+import stats_util
+
+EVID = ROOT / "note/evidence/backlog_gc_followup_20261015"
+
+
+def extract_row(json_path: Path, pair_idx: int, variant: str):
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    m = data.get("measurement") or {}
+    rec_by_val = m.get("received_by_validator") or {}
+    rej_by_val = m.get("rejected_by_validator") or {}
+    rec_sum = sum(rec_by_val.values())
+    rej_sum = sum(rej_by_val.values())
+    sent = int(m.get("bytes_sent_txs") or 0)
+    comm = int(m.get("committed_ours") or 0)
+    loss = int(m.get("loss_vs_sent") or 0)
+    tps_e2e = float(m.get("tps_end_to_end") or 0.0)
+    tps_inj = float(m.get("tps_during_injection") or 0.0)
+    tps_act = float(m.get("tps_active_commit_window") or 0.0)
+    inj_s = float(m.get("inject_seconds") or 0.0)
+    e2e_s = float(m.get("end_to_end_seconds") or 0.0)
+    parity = str(m.get("parity_status") or "")
+    stop_reason = str(m.get("measurement_stop_reason") or "")
+    end_block = int(data.get("end_block") or 0)
+    max_rss_mb = int(data.get("max_rss_mb") or 0)
+    stalled = 1 if ("no new tx-bearing block" in stop_reason or comm < sent) else 0
+    commit_ratio = (comm / sent) if sent > 0 else 0.0
+    return {
+        "pair": pair_idx,
+        "variant": variant,
+        "tag": json_path.stem,
+        "bytes_sent_txs": sent,
+        "received_sum": rec_sum,
+        "rejected_sum": rej_sum,
+        "committed_ours": comm,
+        "loss_vs_sent": loss,
+        "commit_ratio": round(commit_ratio, 6),
+        "tps_end_to_end": round(tps_e2e, 4),
+        "tps_during_injection": round(tps_inj, 4),
+        "tps_active_commit_window": round(tps_act, 4),
+        "inject_seconds": round(inj_s, 4),
+        "end_to_end_seconds": round(e2e_s, 4),
+        "end_block": end_block,
+        "max_rss_mb": max_rss_mb,
+        "stalled": stalled,
+        "parity_ok": "OK" if parity.startswith("OK:") else parity,
+        "measurement_stop_reason": stop_reason,
+    }
+
+
+def write_csv(csv_path: Path, rows):
+    if not rows:
+        return
+    fieldnames = list(rows[0].keys())
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+
+def paired_stats(vals_a, vals_b):
+    """Computes paired statistics for (A, B) where diffs = [b - a for a, b in zip(vals_a, vals_b)]."""
+    n = len(vals_a)
+    diffs = [b - a for a, b in zip(vals_a, vals_b)]
+    pct_diffs = [((b - a) / a) * 100.0 if a != 0 else 0.0 for a, b in zip(vals_a, vals_b)]
+    mean_a = stats_util.mean(vals_a)
+    sd_a = stats_util.sample_sd(vals_a)
+    mean_b = stats_util.mean(vals_b)
+    sd_b = stats_util.sample_sd(vals_b)
+    mean_diff = stats_util.mean(diffs)
+    sd_diff = stats_util.sample_sd(diffs)
+    mean_pct_diff = stats_util.mean(pct_diffs)
+    sd_pct_diff = stats_util.sample_sd(pct_diffs)
+    se_diff = sd_diff / math.sqrt(n) if n > 0 else 0.0
+    t_stat = mean_diff / se_diff if se_diff > 0 else 0.0
+    df = n - 1 if n > 1 else 1
+    p_val = stats_util.t_two_tailed_p(t_stat, df) if se_diff > 0 else 1.0
+    t_crit = stats_util.t_critical(df, 0.05) if n > 1 else 0.0
+    ci_low = mean_diff - t_crit * se_diff
+    ci_high = mean_diff + t_crit * se_diff
+    return {
+        "n_pairs": n,
+        "mean_a": round(mean_a, 4),
+        "sd_a": round(sd_a, 4),
+        "mean_b": round(mean_b, 4),
+        "sd_b": round(sd_b, 4),
+        "mean_diff_b_minus_a": round(mean_diff, 4),
+        "sd_diff": round(sd_diff, 4),
+        "mean_pct_diff": round(mean_pct_diff, 4),
+        "sd_pct_diff": round(sd_pct_diff, 4),
+        "se_diff": round(se_diff, 4),
+        "t_stat": round(t_stat, 4),
+        "df": df,
+        "p_two_tailed": round(p_val, 6),
+        "ci95_low": round(ci_low, 4),
+        "ci95_high": round(ci_high, 4),
+        "diffs": [round(d, 4) for d in diffs],
+        "pct_diffs": [round(d, 4) for d in pct_diffs],
+    }
+
+
+def main():
+    summary = {}
+
+    # 1. Task 0.2 Sanity
+    s_dir = EVID / "task0_sanity"
+    s_rows = []
+    job_log = s_dir / "job_log.txt"
+    if job_log.exists():
+        for line in job_log.read_text(encoding="utf-8").splitlines():
+            line_s = line.strip()
+            if line_s.startswith("{") and line_s.endswith("}"):
+                d = json.loads(line_s)
+                r_idx = int(d.get("run") or (len(s_rows) + 1))
+                sent = int(d.get("bytes_sent") or 0)
+                comm = int(d.get("committed_ours") or 0)
+                s_rows.append({
+                    "pair": r_idx,
+                    "variant": "base",
+                    "tag": f"base_sanity_1m_run{r_idx}",
+                    "bytes_sent_txs": sent,
+                    "received_sum": int(d.get("received_sum") or 0),
+                    "rejected_sum": int(d.get("rejected_sum") or 0),
+                    "committed_ours": comm,
+                    "loss_vs_sent": int(d.get("loss") or 0),
+                    "commit_ratio": round(comm / sent, 6) if sent > 0 else 0.0,
+                    "tps_end_to_end": round(float(d.get("tps_end_to_end") or 0.0), 4),
+                    "tps_during_injection": round(float(d.get("tps_during_injection") or 0.0), 4),
+                    "tps_active_commit_window": round(float(d.get("tps_active_commit") or 0.0), 4),
+                    "inject_seconds": round(float(d.get("inject_seconds") or 0.0), 4),
+                    "end_to_end_seconds": round(float(d.get("end_to_end_seconds") or 0.0), 4),
+                    "end_block": 0,
+                    "max_rss_mb": 0,
+                    "stalled": 0,
+                    "parity_ok": "OK" if str(d.get("parity") or "").startswith("OK:") else str(d.get("parity") or ""),
+                    "measurement_stop_reason": "reference validator showed committed >= sent and was idle for 1.5s",
+                })
+    write_csv(s_dir / "derived_summary.csv", s_rows)
+    if s_rows:
+        tps_vals = [r["tps_end_to_end"] for r in s_rows]
+        summary["task0_sanity"] = {
+            "runs": len(s_rows),
+            "mean_tps_end_to_end": round(stats_util.mean(tps_vals), 4),
+            "sd_tps_end_to_end": round(stats_util.sample_sd(tps_vals), 4),
+            "all_loss_zero": all(r["loss_vs_sent"] == 0 for r in s_rows),
+            "all_parity_ok": all(r["parity_ok"] == "OK" for r in s_rows),
+        }
+
+    # 2. Task 3.2 Raft A/B (6 pairs)
+    r_dir = EVID / "task3_raft_ab"
+    r_rows = []
+    old_tps, new_tps = [], []
+    old_comm, new_comm = [], []
+    old_sent, new_sent = [], []
+    old_ratio, new_ratio = [], []
+    for i in range(1, 7):
+        po = r_dir / f"raft_ab_old_p{i}_run1.json"
+        pn = r_dir / f"raft_ab_new_p{i}_run1.json"
+        if po.exists() and pn.exists():
+            ro = extract_row(po, i, "old_f97a2fbf")
+            rn = extract_row(pn, i, "new_f85bf683")
+            r_rows.extend([ro, rn])
+            old_tps.append(ro["tps_end_to_end"])
+            new_tps.append(rn["tps_end_to_end"])
+            old_comm.append(float(ro["committed_ours"]))
+            new_comm.append(float(rn["committed_ours"]))
+            old_sent.append(float(ro["bytes_sent_txs"]))
+            new_sent.append(float(rn["bytes_sent_txs"]))
+            old_ratio.append(ro["commit_ratio"] * 100.0)
+            new_ratio.append(rn["commit_ratio"] * 100.0)
+    write_csv(r_dir / "derived_summary.csv", r_rows)
+    if old_tps and new_tps:
+        summary["task3_raft_ab"] = {
+            "tps_end_to_end_paired": paired_stats(old_tps, new_tps),
+            "committed_txs_paired": paired_stats(old_comm, new_comm),
+            "sent_txs_paired": paired_stats(old_sent, new_sent),
+            "commit_pct_paired": paired_stats(old_ratio, new_ratio),
+            "old_stalled_runs": sum(r["stalled"] for r in r_rows if r["variant"] == "old_f97a2fbf"),
+            "new_stalled_runs": sum(r["stalled"] for r in r_rows if r["variant"] == "new_f85bf683"),
+        }
+
+    # 3. Task 0.3 BFT A/A 4M (4 pairs)
+    aa_dir = EVID / "task0_aa_4m"
+    aa_rows = []
+    a1_tps, a2_tps = [], []
+    for i in range(1, 5):
+        p1 = aa_dir / f"aa_a_p{i}_run1.json"
+        p2 = aa_dir / f"aa_b_p{i}_run1.json"
+        if p1.exists() and p2.exists():
+            r1 = extract_row(p1, i, "A1_base")
+            r2 = extract_row(p2, i, "A2_base")
+            aa_rows.extend([r1, r2])
+            a1_tps.append(r1["tps_end_to_end"])
+            a2_tps.append(r2["tps_end_to_end"])
+    write_csv(aa_dir / "derived_summary.csv", aa_rows)
+    if a1_tps and a2_tps:
+        all_aa = a1_tps + a2_tps
+        summary["task0_aa_4m"] = {
+            "tps_end_to_end_paired": paired_stats(a1_tps, a2_tps),
+            "all_8_runs_mean_tps": round(stats_util.mean(all_aa), 4),
+            "all_8_runs_sd_tps": round(stats_util.sample_sd(all_aa), 4),
+            "all_loss_zero": all(r["loss_vs_sent"] == 0 for r in aa_rows),
+            "all_parity_ok": all(r["parity_ok"] == "OK" for r in aa_rows),
+        }
+
+    # 4. Task 1.4 BFT A/B 1M (8 pairs)
+    ab1_dir = EVID / "task1_ab_1m"
+    ab1_rows = []
+    b1_tps, o1_tps = [], []
+    b1_rss, o1_rss = [], []
+    for i in range(1, 9):
+        pb = ab1_dir / f"ab_1m_base_p{i}_run1.json"
+        po = ab1_dir / f"ab_1m_opt_p{i}_run1.json"
+        if pb.exists() and po.exists():
+            rb = extract_row(pb, i, "base_f85bf683")
+            ro = extract_row(po, i, "opt_c270b281")
+            ab1_rows.extend([rb, ro])
+            b1_tps.append(rb["tps_end_to_end"])
+            o1_tps.append(ro["tps_end_to_end"])
+            b1_rss.append(float(rb["max_rss_mb"]))
+            o1_rss.append(float(ro["max_rss_mb"]))
+    write_csv(ab1_dir / "derived_summary.csv", ab1_rows)
+    if b1_tps and o1_tps:
+        summary["task1_ab_1m"] = {
+            "tps_end_to_end_paired": paired_stats(b1_tps, o1_tps),
+            "max_rss_mb_paired": paired_stats(b1_rss, o1_rss),
+            "all_loss_zero": all(r["loss_vs_sent"] == 0 for r in ab1_rows),
+            "all_parity_ok": all(r["parity_ok"] == "OK" for r in ab1_rows),
+        }
+
+    # 5. Task 1.4 BFT A/B 4M (8 pairs)
+    ab4_dir = EVID / "task1_ab_4m"
+    ab4_rows = []
+    b4_tps, o4_tps = [], []
+    b4_rss, o4_rss = [], []
+    b4_e2e, o4_e2e = [], []
+    for i in range(1, 9):
+        pb = ab4_dir / f"ab_4m_base_p{i}_run1.json"
+        po = ab4_dir / f"ab_4m_opt_p{i}_run1.json"
+        if pb.exists() and po.exists():
+            rb = extract_row(pb, i, "base_f85bf683")
+            ro = extract_row(po, i, "opt_c270b281")
+            ab4_rows.extend([rb, ro])
+            b4_tps.append(rb["tps_end_to_end"])
+            o4_tps.append(ro["tps_end_to_end"])
+            b4_rss.append(float(rb["max_rss_mb"]))
+            o4_rss.append(float(ro["max_rss_mb"]))
+            b4_e2e.append(rb["end_to_end_seconds"])
+            o4_e2e.append(ro["end_to_end_seconds"])
+    write_csv(ab4_dir / "derived_summary.csv", ab4_rows)
+    if b4_tps and o4_tps:
+        summary["task1_ab_4m"] = {
+            "tps_end_to_end_paired": paired_stats(b4_tps, o4_tps),
+            "max_rss_mb_paired": paired_stats(b4_rss, o4_rss),
+            "end_to_end_seconds_paired": paired_stats(b4_e2e, o4_e2e),
+            "all_loss_zero": all(r["loss_vs_sent"] == 0 for r in ab4_rows),
+            "all_parity_ok": all(r["parity_ok"] == "OK" for r in ab4_rows),
+        }
+
+    (EVID / "stats_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(json.dumps(summary, indent=2))
+
+
+if __name__ == "__main__":
+    main()

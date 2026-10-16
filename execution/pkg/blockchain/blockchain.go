@@ -49,7 +49,7 @@ type BlockChain struct {
 	// Cache Layers (Read-Heavy optimization)
 	blockCache             *sync.Map
 	receiptsCache          *sync.Map
-	txsCache               *sync.Map
+	txsCache               *txCacheMap
 	blockNumberToHashCache *sync.Map
 	txHashToBlockNumber    *txHashToBlockNumberMap
 	ethHashMapBlsHash      *ethHashMapBlsHashMap
@@ -156,7 +156,7 @@ func InitBlockChain(size int, blockDatabase *block.BlockDatabase, storageManager
 		blockChainInstance = &BlockChain{
 			blockCache:             new(sync.Map),
 			receiptsCache:          new(sync.Map),
-			txsCache:               new(sync.Map),
+			txsCache:               newTxCacheMap(),
 			blockNumberToHashCache: new(sync.Map),
 			txHashToBlockNumber:    newTxHashToBlockNumberMap(),
 			ethHashMapBlsHash:      newEthHashMapBlsHashMap(),
@@ -237,12 +237,10 @@ func (bc *BlockChain) AddTxToCache(txHash common.Hash, rawTx []byte) {
 	// Copy dữ liệu để tránh giữ tham chiếu buffer ngoài (Memory safety)
 	snapshot := append([]byte(nil), rawTx...)
 
-	bc.txsCache.Store(txHash, cachedTx{
+	bc.txsCache.StoreTx(txHash, cachedTx{
 		raw:     snapshot,
 		addedAt: time.Now(),
 	})
-	// logger.Debug("Stored transaction in txsCache:", txHash.Hex())
-	// KHÔNG gọi prune ở đây nữa!
 }
 
 func (bc *BlockChain) GetTxFromCache(txHash common.Hash) ([]byte, bool) {
@@ -250,24 +248,25 @@ func (bc *BlockChain) GetTxFromCache(txHash common.Hash) ([]byte, bool) {
 		return nil, false
 	}
 
-	value, ok := bc.txsCache.Load(txHash)
+	cached, ok := bc.txsCache.LoadTx(txHash)
 	if !ok {
-		return nil, false
-	}
-
-	cached, ok := value.(cachedTx)
-	if !ok {
-		bc.txsCache.Delete(txHash)
 		return nil, false
 	}
 
 	// Double check TTL (Lazy expiration) phòng trường hợp Worker chưa kịp quét
 	if time.Since(cached.addedAt) > txCacheTTL {
-		bc.txsCache.Delete(txHash)
+		bc.txsCache.DeleteTx(txHash)
 		return nil, false
 	}
 
 	return append([]byte(nil), cached.raw...), true
+}
+
+func (bc *BlockChain) DeleteTxFromCache(txHash common.Hash) {
+	if bc.txsCache == nil || txHash == (common.Hash{}) {
+		return
+	}
+	bc.txsCache.DeleteTx(txHash)
 }
 
 // ============================================================================
@@ -275,16 +274,10 @@ func (bc *BlockChain) GetTxFromCache(txHash common.Hash) ([]byte, bool) {
 // ============================================================================
 
 func (bc *BlockChain) pruneTxCache(expireBefore time.Time) {
-	bc.txsCache.Range(func(key, value any) bool {
-		if cached, ok := value.(cachedTx); ok {
-			if cached.addedAt.Before(expireBefore) {
-				bc.txsCache.Delete(key)
-			}
-		} else {
-			bc.txsCache.Delete(key) // Xóa dữ liệu rác/sai kiểu
-		}
-		return true
-	})
+	if bc.txsCache == nil {
+		return
+	}
+	bc.txsCache.Prune(expireBefore)
 }
 
 func (bc *BlockChain) pruneBlockCache(expireBefore time.Time) {
@@ -1102,3 +1095,114 @@ func (m *txHashToBlockNumberMap) Len() int {
 	defer m.mu.RUnlock()
 	return len(m.current) + len(m.old)
 }
+
+const (
+	txCacheShardCount         = 64
+	maxTxCacheEntriesPerShard = 1024
+)
+
+type txCacheShard struct {
+	mu         sync.RWMutex
+	maxEntries int
+	current    map[common.Hash]cachedTx
+	old        map[common.Hash]cachedTx
+}
+
+type txCacheMap struct {
+	shards [txCacheShardCount]txCacheShard
+}
+
+func newTxCacheMap() *txCacheMap {
+	m := &txCacheMap{}
+	for i := range m.shards {
+		m.shards[i].maxEntries = maxTxCacheEntriesPerShard
+		m.shards[i].current = make(map[common.Hash]cachedTx, 128)
+		m.shards[i].old = make(map[common.Hash]cachedTx)
+	}
+	return m
+}
+
+func (m *txCacheMap) shardFor(txHash common.Hash) *txCacheShard {
+	return &m.shards[txHash[0]&(txCacheShardCount-1)]
+}
+
+func (m *txCacheMap) StoreTx(txHash common.Hash, val cachedTx) {
+	s := m.shardFor(txHash)
+	s.mu.Lock()
+	limit := s.maxEntries
+	if limit <= 0 {
+		limit = maxTxCacheEntriesPerShard
+	}
+	if _, exists := s.current[txHash]; !exists && len(s.current) >= limit {
+		s.old = s.current
+		s.current = make(map[common.Hash]cachedTx, 256)
+	}
+	s.current[txHash] = val
+	s.mu.Unlock()
+}
+
+func (m *txCacheMap) LoadTx(txHash common.Hash) (cachedTx, bool) {
+	s := m.shardFor(txHash)
+	s.mu.RLock()
+	if val, ok := s.current[txHash]; ok {
+		s.mu.RUnlock()
+		return val, true
+	}
+	val, ok := s.old[txHash]
+	s.mu.RUnlock()
+	return val, ok
+}
+
+func (m *txCacheMap) DeleteTx(txHash common.Hash) {
+	s := m.shardFor(txHash)
+	s.mu.Lock()
+	delete(s.current, txHash)
+	delete(s.old, txHash)
+	s.mu.Unlock()
+}
+
+func (m *txCacheMap) Prune(expireBefore time.Time) {
+	for i := range m.shards {
+		s := &m.shards[i]
+		s.mu.Lock()
+		for k, v := range s.current {
+			if v.addedAt.Before(expireBefore) {
+				delete(s.current, k)
+			}
+		}
+		for k, v := range s.old {
+			if v.addedAt.Before(expireBefore) {
+				delete(s.old, k)
+			}
+		}
+		s.mu.Unlock()
+	}
+}
+
+func (m *txCacheMap) Store(key, value any) {
+	k, ok := key.(common.Hash)
+	if !ok {
+		return
+	}
+	v, ok := value.(cachedTx)
+	if !ok {
+		m.DeleteTx(k)
+		return
+	}
+	m.StoreTx(k, v)
+}
+
+func (m *txCacheMap) Load(key common.Hash) (any, bool) {
+	v, ok := m.LoadTx(key)
+	if !ok {
+		return nil, false
+	}
+	return v, true
+}
+
+func (m *txCacheMap) Delete(key any) {
+	if k, ok := key.(common.Hash); ok {
+		m.DeleteTx(k)
+	}
+}
+

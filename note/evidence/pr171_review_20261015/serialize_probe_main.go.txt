@@ -1,0 +1,20 @@
+package main
+
+import (
+	"fmt"
+	"math/big"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/state"
+)
+
+func main() {
+	as := state.NewAccountState(common.HexToAddress("0x1111111111111111111111111111111111111111"))
+	as.AddBalance(big.NewInt(1000))
+	as.SetNonce(5)
+	b, _ := as.Marshal()
+	fmt.Printf("plain account (no registration/lock): len=%d hex=%x\n", len(b), b)
+	as.SetParentRegistered(true)
+	b2, _ := as.Marshal()
+	fmt.Printf("parent-registered account:            len=%d hex=%x\n", len(b2), b2)
+}

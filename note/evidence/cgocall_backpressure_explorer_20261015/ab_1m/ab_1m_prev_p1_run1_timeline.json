@@ -1,0 +1,74 @@
+[
+ {
+  "t": 10,
+  "val0_cpu_pct": 1557.8,
+  "val0_rss_mb": 7168,
+  "val1_cpu_pct": 1561.8,
+  "val1_rss_mb": 7098,
+  "val2_cpu_pct": 1629.4,
+  "val2_rss_mb": 7216,
+  "val3_cpu_pct": 1553.2,
+  "val3_rss_mb": 7291,
+  "head": 9
+ },
+ {
+  "t": 20,
+  "val0_cpu_pct": 1316.2,
+  "val0_rss_mb": 9958,
+  "val1_cpu_pct": 1341.1,
+  "val1_rss_mb": 9919,
+  "val2_cpu_pct": 1276.6,
+  "val2_rss_mb": 9649,
+  "val3_cpu_pct": 1279.6,
+  "val3_rss_mb": 9902,
+  "head": 29
+ },
+ {
+  "t": 60,
+  "val0_cpu_pct": 1136.0,
+  "val0_rss_mb": 9901,
+  "val1_cpu_pct": 1064.3,
+  "val1_rss_mb": 10107,
+  "val2_cpu_pct": 1091.1,
+  "val2_rss_mb": 10476,
+  "val3_cpu_pct": 1051.9,
+  "val3_rss_mb": 8350,
+  "head": 87
+ },
+ {
+  "t": 70,
+  "val0_cpu_pct": 368.1,
+  "val0_rss_mb": 10358,
+  "val1_cpu_pct": 67.7,
+  "val1_rss_mb": 10202,
+  "val2_cpu_pct": 193.9,
+  "val2_rss_mb": 10515,
+  "val3_cpu_pct": 71.5,
+  "val3_rss_mb": 8784,
+  "head": 136
+ },
+ {
+  "t": 80,
+  "val0_cpu_pct": 352.5,
+  "val0_rss_mb": 10477,
+  "val1_cpu_pct": 17.3,
+  "val1_rss_mb": 10203,
+  "val2_cpu_pct": 16.9,
+  "val2_rss_mb": 10517,
+  "val3_cpu_pct": 16.7,
+  "val3_rss_mb": 8794,
+  "head": 136
+ },
+ {
+  "t": 90,
+  "val0_cpu_pct": 314.3,
+  "val0_rss_mb": 11416,
+  "val1_cpu_pct": 18.7,
+  "val1_rss_mb": 10205,
+  "val2_cpu_pct": 18.5,
+  "val2_rss_mb": 10517,
+  "val3_cpu_pct": 18.7,
+  "val3_rss_mb": 8806,
+  "head": 136
+ }
+]

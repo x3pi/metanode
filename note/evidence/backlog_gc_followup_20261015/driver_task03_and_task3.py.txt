@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Sequential driver for Task 3.2 (Raft A/B old vs new, 6 pairs at 1M tx) and Task 0.3 (BFT A/A control, 4 pairs at 4M tx).
+Checks MemAvailable >= 20 GB, /tmp >= 100 GB, and 31xxx listening ports == 0 before each run.
+"""
+import os
+import random
+import shutil
+import subprocess
+import sys
+import time
+
+REPO = "/home/abc/chain-n/metanode"
+EXEC = f"{REPO}/execution"
+SCRATCH = "/home/abc/.gemini/antigravity-cli/brain/1d769055-c703-4878-89c7-737036da58bc/scratch"
+BINS_BASE = f"{SCRATCH}/bins_base"
+BINS_OLD = f"{SCRATCH}/bins_old"
+EVID = f"{REPO}/note/evidence/backlog_gc_followup_20261015"
+
+
+def check_resources():
+    mem_kb = 0
+    for line in open("/proc/meminfo"):
+        if line.startswith("MemAvailable:"):
+            mem_kb = int(line.split()[1])
+            break
+    mem_gb = mem_kb / (1024 * 1024)
+    st = os.statvfs("/tmp")
+    free_gb = (st.f_bavail * st.f_frsize) / (1024 ** 3)
+    if mem_gb < 20.0:
+        raise RuntimeError(f"MemAvailable too low: {mem_gb:.1f} GB < 20 GB")
+    if free_gb < 100.0:
+        raise RuntimeError(f"/tmp free disk too low: {free_gb:.1f} GB < 100 GB")
+    return round(mem_gb, 1), round(free_gb, 1)
+
+
+def run_task3_raft_ab():
+    out = f"{EVID}/task3_raft_ab"
+    os.makedirs(out, exist_ok=True)
+    rnd = random.Random(2026101503)
+    order = []
+    for i in range(6):
+        p = ["old", "new"]
+        rnd.shuffle(p)
+        order += [(i + 1, v) for v in p]
+    with open(f"{out}/order.txt", "w") as f:
+        f.write("\n".join(f"{i} {v}" for i, v in order) + "\n")
+
+    for i, v in order:
+        tag = f"raft_ab_{v}_p{i}"
+        rep = f"{out}/{tag}_run1.json"
+        if os.path.isfile(rep):
+            print(f"=== SKIP existing {tag} ===", flush=True)
+            continue
+        mem_gb, free_gb = check_resources()
+        bins = BINS_OLD if v == "old" else BINS_BASE
+        print(f"=== [Task 3.2] {tag} (bins={os.path.basename(bins)}, mem={mem_gb}G, disk={free_gb}G) ===", flush=True)
+        t0 = time.time()
+        r = subprocess.run(
+            [
+                "python3", "-I", "scripts/test/evidence/run_raft_counted.py",
+                "--mode", "sustained",
+                "--runs", "1",
+                "--tag", tag,
+                "--bins", bins,
+                "--out", out,
+                "--duration", "300",
+                "--max-txs", "1000000",
+                "--batch", "1000",
+                "--max-wait-sec", "600",
+            ],
+            cwd=EXEC,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        with open(f"{out}/{tag}.stdout", "w") as f:
+            f.write(r.stdout + r.stderr)
+        print(f"=== [Task 3.2] {tag} done in {time.time()-t0:.1f}s exit={r.returncode} ===", flush=True)
+        for line in r.stdout.splitlines():
+            if line.startswith("{"):
+                print(f"    {line}", flush=True)
+
+
+def run_task0_aa_4m():
+    out = f"{EVID}/task0_aa_4m"
+    os.makedirs(out, exist_ok=True)
+    rnd = random.Random(2026101500)
+    order = []
+    for i in range(4):
+        p = ["aa_a", "aa_b"]
+        rnd.shuffle(p)
+        order += [(i + 1, v) for v in p]
+    with open(f"{out}/order.txt", "w") as f:
+        f.write("\n".join(f"{i} {v}" for i, v in order) + "\n")
+
+    for i, v in order:
+        tag = f"{v}_p{i}"
+        rep = f"{out}/{tag}_run1.json"
+        if os.path.isfile(rep):
+            print(f"=== SKIP existing {tag} ===", flush=True)
+            continue
+        mem_gb, free_gb = check_resources()
+        print(f"=== [Task 0.3] {tag} (bins=bins_base, mem={mem_gb}G, disk={free_gb}G) ===", flush=True)
+        t0 = time.time()
+        r = subprocess.run(
+            [
+                "python3", "-I", "scripts/test/evidence/run_tps_counted.py",
+                "--mode", "sustained",
+                "--runs", "1",
+                "--tag", tag,
+                "--bins", BINS_BASE,
+                "--out", out,
+                "--duration", "300",
+                "--max-txs", "4000000",
+                "--batch", "1000",
+                "--max-wait-sec", "900",
+            ],
+            cwd=EXEC,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        with open(f"{out}/{tag}.stdout", "w") as f:
+            f.write(r.stdout + r.stderr)
+        print(f"=== [Task 0.3] {tag} done in {time.time()-t0:.1f}s exit={r.returncode} ===", flush=True)
+        for line in r.stdout.splitlines():
+            if line.startswith("{"):
+                print(f"    {line}", flush=True)
+
+
+if __name__ == "__main__":
+    shutil.copyfile(__file__, f"{EVID}/driver_task03_and_task3.py.txt")
+    run_task3_raft_ab()
+    run_task0_aa_4m()
+    print("=== ALL TASK 3.2 AND TASK 0.3 RUNS COMPLETE ===", flush=True)

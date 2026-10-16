@@ -130,6 +130,60 @@ func TestSignatureCache_AutoResetOnOverflow(t *testing.T) {
 	}
 }
 
+func resetSignatureCacheForTest() {
+	currentRotatingCache.Store(&rotatingSignatureCache{
+		active: new(shardedSignatureCache),
+		old:    new(shardedSignatureCache),
+	})
+	atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
+}
+
+func TestShardedSignatureCache_Operations(t *testing.T) {
+	resetSignatureCacheForTest()
+	defer resetSignatureCacheForTest()
+
+	h1 := common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	h2 := common.HexToHash("0xff02030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+
+	if LoadVerifiedSignature(h1) {
+		t.Fatal("expected h1 not to be present before store")
+	}
+
+	StoreVerifiedSignature(h1)
+	StoreVerifiedSignature(h2)
+	if !LoadVerifiedSignature(h1) || !LoadVerifiedSignature(h2) {
+		t.Fatal("expected h1 and h2 to be present after store")
+	}
+
+	currentRotatingCache.Load().active.Clear()
+	if LoadVerifiedSignature(h1) || LoadVerifiedSignature(h2) {
+		t.Fatal("expected h1 and h2 to be absent after Clear")
+	}
+}
+
+func TestStoreVerifiedBound_RotatesCacheAtCapacity(t *testing.T) {
+	resetSignatureCacheForTest()
+	defer resetSignatureCacheForTest()
+
+	oldGenHash := common.HexToHash("0xaaaa")
+	currentRotatingCache.Load().old.Store(oldGenHash)
+	atomic.StoreInt64(&verifiedSignaturesCacheCount, maxVerifiedSignaturesCacheSize-1)
+
+	triggerHash := common.HexToHash("0xbbbb")
+	storeVerifiedBound(triggerHash)
+
+	if got := atomic.LoadInt64(&verifiedSignaturesCacheCount); got != 0 {
+		t.Fatalf("expected verifiedSignaturesCacheCount to reset to 0 after hitting capacity, got %d", got)
+	}
+	if LoadVerifiedSignature(oldGenHash) {
+		t.Fatal("expected old generation hash to be evicted when storeVerifiedBound rotates cache at capacity")
+	}
+	if !LoadVerifiedSignature(triggerHash) || !LoadVerifiedSignature(boundSigKey(triggerHash)) {
+		t.Fatal("expected triggerHash and boundSigKey(triggerHash) to remain present in rotated old generation")
+	}
+}
+
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Tests for FunctionSelector consistency
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

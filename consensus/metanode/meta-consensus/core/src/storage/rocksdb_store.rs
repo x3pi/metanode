@@ -1,5 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
+// The `DBMapUtils` derive expands `eyre::bail!` with a trailing semicolon, which newer rustc warns about; the
+// code comes from the derive macro, so the lint is silenced for this module only.
+#![allow(unknown_lints, semicolon_in_expressions_from_non_local_macros)]
 
 use std::{
     collections::{BTreeMap, VecDeque},

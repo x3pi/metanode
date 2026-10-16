@@ -311,7 +311,7 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 		logger.Debug("Async injection failed for tx %s: %v", tx.Hash().Hex(), err)
 	} else if req.rawEth && len(req.rawBody) > 0 {
 		if bc := blockchain.GetBlockChainInstance(); bc != nil {
-			bc.AddTxToCache(ethTxHash, append([]byte(nil), req.rawBody...))
+			bc.AddTxToCache(ethTxHash, req.rawBody)
 		}
 	}
 }
@@ -404,20 +404,14 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 		return err
 	}
 
-	// Always save txHash → connection mapping for txHash-based receipt delivery AFTER pool admission
+	// Save txHash → connection mapping for txHash-based receipt delivery AFTER pool admission.
+	// BroadCastReceipts looks up v.TransactionHash() (i.e. tx.Hash()), so storing respHash is redundant.
 	if tp.env != nil {
 		tp.env.StoreTxHashConnEntry(tx.Hash(), TxHashConnEntry{
 			Conn:      conn,
 			MsgID:     msgID,
 			CreatedAt: time.Now(),
 		})
-		if respHash != (common.Hash{}) && respHash != tx.Hash() {
-			tp.env.StoreTxHashConnEntry(respHash, TxHashConnEntry{
-				Conn:      conn,
-				MsgID:     msgID,
-				CreatedAt: time.Now(),
-			})
-		}
 	}
 
 	if respHash != (common.Hash{}) && respHash != tx.Hash() {
@@ -717,16 +711,11 @@ func (tp *TransactionProcessor) ProcessRawTransactionsFromClient(request network
 
 			if bc != nil {
 				_ = bc.SetEthHashMapblsHash(processedEthHashes[i], processedTxs[i].Hash())
-				bc.AddTxToCache(processedEthHashes[i], append([]byte(nil), processedRawEnvs[i]...))
+				bc.AddTxToCache(processedEthHashes[i], processedRawEnvs[i])
 			}
 
 			if tp.env != nil {
 				tp.env.StoreTxHashConnEntry(processedTxs[i].Hash(), TxHashConnEntry{
-					Conn:      request.Connection(),
-					MsgID:     request.Message().ID(),
-					CreatedAt: time.Now(),
-				})
-				tp.env.StoreTxHashConnEntry(processedEthHashes[i], TxHashConnEntry{
 					Conn:      request.Connection(),
 					MsgID:     request.Message().ID(),
 					CreatedAt: time.Now(),

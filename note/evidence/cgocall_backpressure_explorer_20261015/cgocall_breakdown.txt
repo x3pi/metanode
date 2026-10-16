@@ -1,0 +1,174 @@
+=== 1. 4M OPT (ab_4m_opt_p1_run1_val0_cpu30.pb.gz) -peek=runtime.cgocall ===
+File: simple_chain
+Build ID: dc4a5eee1f5a3e1fa91b4f029da868a73d4e2ffc
+Type: cpu
+Time: 2026-10-15 07:13:47 UTC
+Duration: 30.13s, Total samples = 323.72s (1074.40%)
+Showing nodes accounting for 323.72s, 100% of 323.72s total
+----------------------------------------------------------+-------------
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+                                            48.97s 50.45% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_replace_document_by_term
+                                            33.59s 34.60% |   github.com/ethereum/go-ethereum/crypto/secp256k1._Cfunc_secp256k1_ext_ecdsa_recover
+                                               11s 11.33% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+                                             1.08s  1.11% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_add_term
+                                             0.54s  0.56% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._cgo_cmalloc
+                                             0.44s  0.45% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_free
+                                             0.35s  0.36% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_free
+                                             0.31s  0.32% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_state_db_get
+                                             0.29s   0.3% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_set_data
+                                             0.16s  0.16% |   github.com/cockroachdb/pebble/internal/manual._Cfunc_calloc
+                                             0.16s  0.16% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_new
+                                             0.06s 0.062% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_hash_to_g2
+                                             0.05s 0.052% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_sign_pk2_in_g1
+                                             0.03s 0.031% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_commit_payload
+                                             0.02s 0.021% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_session_begin
+                                             0.01s  0.01% |   github.com/meta-node-blockchain/meta-node/pkg/mvm._Cfunc_clearAllStateInstances
+                                             0.01s  0.01% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_session_finish
+    95.83s 29.60% 29.60%     97.07s 29.99%                | runtime.cgocall
+                                             0.69s  0.71% |   runtime.exitsyscall
+                                             0.55s  0.57% |   runtime.entersyscall
+----------------------------------------------------------+-------------
+
+=== 2. 4M OPT (ab_4m_opt_p1_run1_val0_cpu30.pb.gz) -peek=runtime.cgocallback ===
+File: simple_chain
+Build ID: dc4a5eee1f5a3e1fa91b4f029da868a73d4e2ffc
+Type: cpu
+Time: 2026-10-15 07:13:47 UTC
+Duration: 30.13s, Total samples = 323.72s (1074.40%)
+Showing nodes accounting for 323.72s, 100% of 323.72s total
+----------------------------------------------------------+-------------
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+         0     0%     0%      1.11s  0.34%                | runtime.cgocallback
+                                             1.11s   100% |   runtime.cgocallbackg
+----------------------------------------------------------+-------------
+                                             1.11s   100% |   runtime.cgocallback
+         0     0%     0%      1.11s  0.34%                | runtime.cgocallbackg
+                                             1.11s   100% |   runtime.cgocallbackg1
+----------------------------------------------------------+-------------
+                                             1.11s   100% |   runtime.cgocallbackg
+         0     0%     0%      1.11s  0.34%                | runtime.cgocallbackg1
+                                             0.77s 69.37% |   _cgoexp_e20995ee9c64_cgo_process_rpc_request
+                                             0.33s 29.73% |   _cgoexp_e20995ee9c64_cgo_execute_block
+                                             0.01s   0.9% |   _cgoexp_e20995ee9c64_cgo_log_message
+----------------------------------------------------------+-------------
+
+=== 3. 4M BASE (ab_4m_base_p1_run1_val0_cpu30.pb.gz) -peek=runtime.cgocall ===
+File: simple_chain
+Build ID: 5c86e8c15ac2bbd95bdf62de7c35061f19524bd8
+Type: cpu
+Time: 2026-10-15 07:28:37 UTC
+Duration: 30.19s, Total samples = 459.45s (1521.81%)
+Showing nodes accounting for 459.44s, 100% of 459.45s total
+----------------------------------------------------------+-------------
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+                                            45.88s 51.43% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_replace_document_by_term
+                                            29.46s 33.02% |   github.com/ethereum/go-ethereum/crypto/secp256k1._Cfunc_secp256k1_ext_ecdsa_recover
+                                             9.82s 11.01% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+                                             1.03s  1.15% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_add_term
+                                             0.90s  1.01% |   github.com/cockroachdb/pebble/internal/manual._Cfunc_calloc
+                                             0.67s  0.75% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._cgo_cmalloc
+                                             0.43s  0.48% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_free
+                                             0.29s  0.33% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_free
+                                             0.21s  0.24% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_state_db_get
+                                             0.16s  0.18% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_set_data
+                                             0.11s  0.12% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_new
+                                             0.10s  0.11% |   github.com/cockroachdb/pebble/internal/manual._Cfunc_free
+                                             0.06s 0.067% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_sign_pk2_in_g1
+                                             0.03s 0.034% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_hash_to_g2
+                                             0.03s 0.034% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_commit_payload
+                                             0.02s 0.022% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_session_begin
+                                             0.01s 0.011% |   github.com/meta-node-blockchain/meta-node/executor._Cfunc_metanode_submit_transaction_batch
+    87.75s 19.10% 19.10%     89.21s 19.42%                | runtime.cgocall
+                                             0.83s  0.93% |   runtime.exitsyscall
+                                             0.63s  0.71% |   runtime.entersyscall
+----------------------------------------------------------+-------------
+
+=== 4. 4M BASE (ab_4m_base_p1_run1_val0_cpu30.pb.gz) -peek=runtime.cgocallback ===
+File: simple_chain
+Build ID: 5c86e8c15ac2bbd95bdf62de7c35061f19524bd8
+Type: cpu
+Time: 2026-10-15 07:28:37 UTC
+Duration: 30.19s, Total samples = 459.45s (1521.81%)
+Showing nodes accounting for 459.44s, 100% of 459.45s total
+----------------------------------------------------------+-------------
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+         0     0%     0%      1.59s  0.35%                | runtime.cgocallback
+                                             1.59s   100% |   runtime.cgocallbackg
+----------------------------------------------------------+-------------
+                                             1.59s   100% |   runtime.cgocallback
+         0     0%     0%      1.59s  0.35%                | runtime.cgocallbackg
+                                             1.59s   100% |   runtime.cgocallbackg1
+----------------------------------------------------------+-------------
+                                             1.59s   100% |   runtime.cgocallbackg
+         0     0%     0%      1.59s  0.35%                | runtime.cgocallbackg1
+                                             1.28s 80.50% |   _cgoexp_e20995ee9c64_cgo_process_rpc_request
+                                             0.29s 18.24% |   _cgoexp_e20995ee9c64_cgo_execute_block
+                                             0.02s  1.26% |   _cgoexp_e20995ee9c64_cgo_log_message
+----------------------------------------------------------+-------------
+
+=== 5. 1M OPT (ab_1m_opt_p1_run1_val0_cpu30.pb.gz) -peek=runtime.cgocall ===
+File: simple_chain
+Build ID: dc4a5eee1f5a3e1fa91b4f029da868a73d4e2ffc
+Type: cpu
+Time: 2026-10-15 05:54:42 UTC
+Duration: 30.14s, Total samples = 329.63s (1093.52%)
+Showing nodes accounting for 329.63s, 100% of 329.63s total
+----------------------------------------------------------+-------------
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+                                            55.25s 49.82% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_replace_document_by_term
+                                            38.18s 34.43% |   github.com/ethereum/go-ethereum/crypto/secp256k1._Cfunc_secp256k1_ext_ecdsa_recover
+                                            13.36s 12.05% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+                                             1.42s  1.28% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_add_term
+                                             0.84s  0.76% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._cgo_cmalloc
+                                             0.56s   0.5% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_free
+                                             0.41s  0.37% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_free
+                                             0.27s  0.24% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_state_db_get
+                                             0.23s  0.21% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_new
+                                             0.22s   0.2% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_set_data
+                                             0.04s 0.036% |   github.com/meta-node-blockchain/meta-node/executor._Cfunc_metanode_submit_transaction_batch
+                                             0.04s 0.036% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_sign_pk2_in_g1
+                                             0.02s 0.018% |   github.com/cockroachdb/pebble/internal/manual._Cfunc_free
+                                             0.02s 0.018% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_hash_to_g2
+                                             0.02s 0.018% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_commit_payload
+                                             0.01s 0.009% |   github.com/meta-node-blockchain/meta-node/executor._Cfunc_free
+                                             0.01s 0.009% |   github.com/meta-node-blockchain/meta-node/pkg/mvm._Cfunc_clearAllStateInstances
+   109.01s 33.07% 33.07%    110.90s 33.64%                | runtime.cgocall
+                                             1.06s  0.96% |   runtime.exitsyscall
+                                             0.83s  0.75% |   runtime.entersyscall
+----------------------------------------------------------+-------------
+
+=== 6. 1M BASE (ab_1m_base_p1_run1_val0_cpu30.pb.gz) -peek=runtime.cgocall ===
+File: simple_chain
+Build ID: 5c86e8c15ac2bbd95bdf62de7c35061f19524bd8
+Type: cpu
+Time: 2026-10-15 05:49:27 UTC
+Duration: 30.15s, Total samples = 351.85s (1167.11%)
+Showing nodes accounting for 351.85s, 100% of 351.85s total
+----------------------------------------------------------+-------------
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+                                            53.35s 50.64% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_replace_document_by_term
+                                            37.84s 35.91% |   github.com/ethereum/go-ethereum/crypto/secp256k1._Cfunc_secp256k1_ext_ecdsa_recover
+                                            10.75s 10.20% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+                                             0.95s   0.9% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_add_term
+                                             0.76s  0.72% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._cgo_cmalloc
+                                             0.61s  0.58% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_free
+                                             0.38s  0.36% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_set_data
+                                             0.28s  0.27% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_free
+                                             0.16s  0.15% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_state_db_get
+                                             0.15s  0.14% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_document_new
+                                             0.04s 0.038% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_sign_pk2_in_g1
+                                             0.04s 0.038% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_commit_payload
+                                             0.02s 0.019% |   github.com/cockroachdb/pebble/internal/manual._Cfunc_free
+                                             0.01s 0.0095% |   github.com/meta-node-blockchain/meta-node/executor._Cfunc_metanode_submit_transaction_batch
+                                             0.01s 0.0095% |   github.com/meta-node-blockchain/meta-node/pkg/mvm._Cfunc_clearAllStateInstances
+                                             0.01s 0.0095% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_session_begin
+   103.52s 29.42% 29.42%    105.36s 29.94%                | runtime.cgocall
+                                             1.04s  0.99% |   runtime.exitsyscall
+                                             0.80s  0.76% |   runtime.entersyscall
+----------------------------------------------------------+-------------

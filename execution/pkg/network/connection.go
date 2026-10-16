@@ -4,6 +4,7 @@ package network
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -808,6 +809,16 @@ func (c *Connection) writeLoop(tcpConn net.Conn, sendChan chan network.Message, 
 func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Request, errorChan chan<- error, wg *sync.WaitGroup, quit <-chan struct{}, idleTimeout time.Duration) {
 	defer wg.Done()
 
+	readCtx, cancelReadCtx := context.WithCancel(context.Background())
+	defer cancelReadCtx()
+	go func() {
+		select {
+		case <-quit:
+			cancelReadCtx()
+		case <-readCtx.Done():
+		}
+	}()
+
 	reader := bufio.NewReader(tcpConn)
 	remoteAddr := tcpConn.RemoteAddr().String()
 	resetIdleDeadline := func() {
@@ -903,9 +914,19 @@ func (c *Connection) readLoop(tcpConn net.Conn, requestChan chan<- network.Reque
 		req.Reset(c, NewMessage(msgProto))
 
 		// Transaction submissions are never dropped here: the client is fire-and-forget, so a dropped batch is an
-		// unrecoverable nonce gap. Wait for room (this stops reading the socket, which is the backpressure) until the
-		// connection is torn down.
+		// unrecoverable nonce gap. Wait on the admission gate first and then for room in requestChan (stopping
+		// socket reads immediately so TCP flow control pushes back on the client) until the connection is torn down.
 		if isTxSubmissionCommand(msgProto.GetHeader().GetCommand()) {
+			if gate := loadTxAdmissionGate(); gate != nil {
+				if err := gate(readCtx); err != nil {
+					requestPool.Put(req)
+					logger.Warn("readLoop %s: quit signal received during admission wait, discarding request and exiting.", remoteAddr)
+					return
+				}
+				if r, ok := req.(*Request); ok {
+					r.admitted = true
+				}
+			}
 			select {
 			case requestChan <- req:
 			case <-quit:

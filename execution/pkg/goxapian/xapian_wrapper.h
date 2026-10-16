@@ -5,6 +5,7 @@
 // a built-in keyword) and, transitively via cgo, as plain C (where `bool`
 // only exists via <stdbool.h>) -- needed once database_commit/
 // database_replace_document_by_term started returning bool (2026-09, mục 22).
+#include <stddef.h>
 #ifndef __cplusplus
 #include <stdbool.h>
 #endif
@@ -35,6 +36,15 @@ xapian_docid_t database_add_document(xapian_database_t db, xapian_document_t doc
 // failed to persist.
 bool database_commit(xapian_database_t db);
 bool database_replace_document_by_term(xapian_database_t db, const char* unique_term, xapian_document_t doc);
+bool database_index_document(
+    xapian_database_t db,
+    const char* unique_term,
+    size_t unique_term_len,
+    const char* data,
+    size_t data_len,
+    const char* terms_packed,
+    size_t terms_packed_len,
+    bool replace_existing);
 const char* database_dump_all_docs(xapian_database_t db);
 
 // === Document Functions ===

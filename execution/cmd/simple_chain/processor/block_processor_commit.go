@@ -231,6 +231,20 @@ func (bp *BlockProcessor) commitWorker() {
 
 		// Remove from pending store now that it is fully committed
 		bp.RemovePendingCommitBlock(blockNum)
+		if bc := blockchain.GetBlockChainInstance(); bc != nil {
+			if job.Block != nil {
+				for _, txHash := range job.Block.Transactions() {
+					bc.DeleteTxFromCache(txHash)
+				}
+			}
+			if job.ProcessResults != nil {
+				for _, tx := range job.ProcessResults.Transactions {
+					if tx != nil {
+						bc.DeleteTxFromCache(tx.EthHash())
+					}
+				}
+			}
+		}
 		lastBlockAfterCommit := storage.GetLastBlockNumber()
 		if lastBlockAfterCommit != blockNum {
 			logger.Error("🚨 [COMMIT-WORKER] Block #%d CommitBlockState completed but lastBlockNumber=%d (expected %d) — BLOCK MAY HAVE BEEN REJECTED!",
@@ -283,10 +297,28 @@ func (bp *BlockProcessor) commitWorker() {
 		// If indexingChannel is full, skip indexing for this block rather than blocking
 		// This ensures commitWorker can continue and send doneChan signal
 		if bp.storageManager.IsExplorer() {
+			hasMemData := false
+			if job.ProcessResults != nil &&
+				len(job.ProcessResults.Transactions) == len(job.ProcessResults.Receipts) &&
+				bp.pendingIndexBlockCount.Load() < maxPendingIndexBlocks {
+				if _, loaded := bp.pendingIndexBlocks.LoadOrStore(blockNum, &pendingIndexBlock{
+					header:   job.Block.Header(),
+					txs:      job.ProcessResults.Transactions,
+					receipts: job.ProcessResults.Receipts,
+				}); !loaded {
+					bp.pendingIndexBlockCount.Add(1)
+					hasMemData = true
+				}
+			}
 			select {
-			case bp.indexingChannel <- job.Block.Header().BlockNumber():
+			case bp.indexingChannel <- blockNum:
 				// Successfully sent to indexing channel
 			default:
+				if hasMemData {
+					if _, loaded := bp.pendingIndexBlocks.LoadAndDelete(blockNum); loaded {
+						bp.pendingIndexBlockCount.Add(-1)
+					}
+				}
 				// Indexing channel is full, skip indexing for this block to avoid blocking
 				logger.Warn("⚠️  [INDEXING] indexingChannel is full, skipping indexing for block #%d to avoid blocking commitWorker",
 					blockNum)
