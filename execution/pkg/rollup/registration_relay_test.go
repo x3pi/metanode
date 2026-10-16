@@ -520,3 +520,68 @@ func TestRegistrationRelay_LockProposalFailureRetriesAndDoesNotMarkRejected(t *t
 	require.NotNil(t, res.HomeCluster)
 	assert.Equal(t, winner, *res.HomeCluster)
 }
+
+// Exercise asynchronous proposal acceptance separately from committee execution.
+func TestRegistrationRelay_WaitsForCommitteeLockExecution(t *testing.T) {
+	h := newRelayHarness()
+	user, sig := h.userSig(t)
+	winner := bls.GenerateKeyPair().PublicKey()
+	h.parent.registry[user] = winner
+	db := newCoattestMockStateDB()
+	handler := NewAccountRegistryHandler(h.clusterKP.PublicKey())
+	handler.SetChainID(991)
+	vals := []*bls.KeyPair{bls.GenerateKeyPair(), bls.GenerateKeyPair(), bls.GenerateKeyPair(), bls.GenerateKeyPair()}
+	committee := &mockCommitteeProvider{}
+	for _, v := range vals {
+		committee.validators = append(committee.validators, v.PublicKey())
+	}
+	store := NewDBAttestationStore(newMemSCDB())
+	h.relay.SetLockedChecker(db.GetLocked)
+	h.relay.SetProvisionalChecker(db.GetProvisional)
+	makePayload := func(v *bls.KeyPair) []byte {
+		digest := ComputeAccountLockedAttestDigest(991, user, winner, 0)
+		p := AccountRegistrationPayload{Kind: SystemPayloadKindAccountLocked, User: user, HomeCluster: winner,
+			Attestations: []RegistrationAttestation{{ValidatorPubkey: v.PublicKey(), Signature: bls.Sign(v.PrivateKey(), digest)}}}
+		data, err := p.MarshalProto()
+		require.NoError(t, err)
+		return data
+	}
+	attempts := 0
+	var queued []byte
+	h.relay.SetLockProposer(func(u common.Address, home cm.PublicKey) error {
+		require.Equal(t, user, u)
+		require.Equal(t, winner, home)
+		attempts++
+		queued = makePayload(vals[0])
+		return nil // Accepted by pool; execution has not happened yet.
+	})
+	_, err := h.relay.Submit(user, sig)
+	require.NoError(t, err)
+	db.SetProvisional(user, true)
+	h.relay.ProcessBatch()
+	require.Positive(t, attempts)
+	entry, ok := h.relay.snapshot(user)
+	require.True(t, ok)
+	require.NotEqual(t, RegStatusRejected, entry.status)
+	require.True(t, entry.submitted)
+	// An execution rejection must not stop reconciliation.
+	require.Error(t, handler.ApplyAttested(db, store, &mockCommitteeProvider{}, queued))
+	before := attempts
+	h.relay.ProcessBatch()
+	require.Greater(t, attempts, before)
+	// A valid validator key distinct from the cluster key is accepted, but one share is insufficient.
+	require.NoError(t, handler.ApplyAttested(db, store, committee, queued))
+	require.False(t, db.GetLocked(user))
+	h.relay.ProcessBatch()
+	entry, _ = h.relay.snapshot(user)
+	require.NotEqual(t, RegStatusRejected, entry.status)
+	require.NoError(t, handler.ApplyAttested(db, store, committee, makePayload(vals[1])))
+	require.True(t, db.GetLocked(user))
+	before = attempts
+	h.relay.ProcessBatch()
+	require.Equal(t, before, attempts, "do not propose again after lock is committed")
+	entry, _ = h.relay.snapshot(user)
+	require.Equal(t, RegStatusRejected, entry.status)
+	require.NotNil(t, entry.home)
+	require.Equal(t, winner, *entry.home)
+}

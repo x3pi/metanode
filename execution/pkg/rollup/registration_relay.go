@@ -817,18 +817,29 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 }
 
 // resolveFound applies the parent's answer: ours ⇒ stay PENDING until the on-chain flag is applied by the
-// RegistrationWorker (Status then reports CONFIRMED); another cluster's ⇒ propose lock event and mark REJECTED.
+// RegistrationWorker (Status then reports CONFIRMED); another cluster's ⇒ propose lock event and wait for
+// the on-chain lock before marking REJECTED when a lock checker is configured.
 func (r *RegistrationRelay) resolveFound(user common.Address, home cm.PublicKey) {
 	if home != r.clusterKey {
 		r.mu.Lock()
 		lockProp := r.lockProposer
+		isLocked := r.isLocked
 		r.mu.Unlock()
-		if lockProp != nil {
+		if lockProp != nil && (isLocked == nil || !isLocked(user)) {
 			if err := lockProp(user, home); err != nil {
 				log.Printf("RegistrationRelay: failed to propose lock for %s (will retry): %v", user.Hex(), err)
 				r.retryOrFail(user, fmt.Sprintf("failed to propose account lock: %v", err))
 				return
 			}
+		}
+		if isLocked != nil && !isLocked(user) {
+			// Pool admission and partial co-attestations are not proof of execution.
+			// Keep polling even when the parent already had an owner at the first lookup.
+			r.update(user, func(e *relayEntry) {
+				e.submitted = true
+				e.reason = "waiting for account lock on-chain"
+			})
+			return
 		}
 	}
 	rejected := false

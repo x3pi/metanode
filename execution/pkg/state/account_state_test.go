@@ -422,20 +422,30 @@ func TestAccountState_GoldenBytes_DevCompatibility(t *testing.T) {
 
 	bNormal, err := asNormal.Marshal()
 	require.NoError(t, err)
-	// Must be exactly 104 bytes, matching the baseline dev branch without LockedHomeCluster field pollution
-	assert.Equal(t, 104, len(bNormal), "Normal account must serialize to exactly 104 bytes matching dev")
+	// Fixed protobuf wire bytes: address, zero last hash, balance 1000,
+	// zero device key, and big-endian nonce 5. Unset fields must stay omitted.
+	const normalHex = "0a141234567890123456789012345678901234567890" +
+		"12200000000000000000000000000000000000000000000000000000000000000000" +
+		"1a0203e8" +
+		"32200000000000000000000000000000000000000000000000000000000000000000" +
+		"3a080000000000000005"
+	assert.Equal(t, common.FromHex(normalHex), bNormal)
 
 	// Account with ParentRegistered = true adds exactly 2 bytes (tag 10 + varint 1)
 	asRegistered := asNormal.Copy()
 	asRegistered.SetParentRegistered(true)
 	bReg, err := asRegistered.Marshal()
 	require.NoError(t, err)
-	assert.Equal(t, 106, len(bReg), "Registered account must serialize to exactly 106 bytes")
+	assert.Equal(t, common.FromHex(normalHex+"5001"), bReg)
 
 	// Only an account with non-zero LockedHomeCluster should include field 13
 	asLocked := asNormal.Copy()
 	asLocked.SetLockedHomeCluster(p_common.PublicKey{1})
 	bLocked, err := asLocked.Marshal()
 	require.NoError(t, err)
-	assert.Equal(t, 154, len(bLocked), "Account with explicit LockedHomeCluster should include 50 bytes of field 13")
+	const homeHex = "6a3001" +
+		"00000000000000000000000000000000" +
+		"00000000000000000000000000000000" +
+		"000000000000000000000000000000"
+	assert.Equal(t, common.FromHex(normalHex+homeHex), bLocked)
 }

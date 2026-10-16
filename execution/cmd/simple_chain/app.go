@@ -371,6 +371,9 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 
 	app.crossNodeHandler = rollup.NewCrossNodeHandler(app.keyPair.PublicKey())
 	app.accountRegistryHandler = rollup.NewAccountRegistryHandler(app.keyPair.PublicKey())
+	if app.config.ChainId != nil && app.config.ChainId.IsUint64() && app.config.ChainId.Sign() > 0 {
+		app.accountRegistryHandler.SetChainID(app.config.ChainId.Uint64())
+	}
 	app.sendWorker = rollup.NewSendWorker(rollupStore, parentClient, app.keyPair, app.keyPair.PublicKey(), clusterID)
 	app.recvWorker = rollup.NewReceiveWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 	app.reclaimWorker = rollup.NewReclaimWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
@@ -453,6 +456,13 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		}
 	}
 	app.regWorker.SetAttestationKey(attestKey)
+	if app.accountRegistryHandler != nil {
+		trustedKeys := []cm.PublicKey{app.keyPair.PublicKey()}
+		if attestKey != nil && attestKey.PublicKey() != app.keyPair.PublicKey() {
+			trustedKeys = append(trustedKeys, attestKey.PublicKey())
+		}
+		app.accountRegistryHandler.SetTrustedValidators(trustedKeys)
+	}
 
 	cfgAddr := e_common.HexToAddress(app.config.Address)
 	attestPub := attestKey.PublicKey()
@@ -705,7 +715,11 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			UserSig:    userSig,
 		}
 		if ak := attestKey; ak != nil {
-			digest := rollup.ComputeAccountProvisionalAttestDigest(app.config.ChainId.Uint64(), user, app.keyPair.PublicKey(), userSig)
+			chainID := app.config.ChainId.Uint64()
+			if app.accountRegistryHandler != nil {
+				chainID = app.accountRegistryHandler.AttestChainID()
+			}
+			digest := rollup.ComputeAccountProvisionalAttestDigest(chainID, user, app.keyPair.PublicKey(), userSig)
 			payload.Attestations = []rollup.RegistrationAttestation{{
 				ValidatorPubkey: ak.PublicKey(),
 				Signature:       bls.Sign(ak.PrivateKey(), digest),
@@ -724,11 +738,19 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			User:        user,
 			HomeCluster: homeCluster,
 		}
-		if ak := attestKey; ak != nil {
-			digest := rollup.ComputeAccountLockedAttestDigest(app.config.ChainId.Uint64(), user, homeCluster, 0)
+		signer := app.keyPair
+		if signer == nil {
+			signer = attestKey
+		}
+		if signer != nil {
+			chainID := app.config.ChainId.Uint64()
+			if app.accountRegistryHandler != nil {
+				chainID = app.accountRegistryHandler.AttestChainID()
+			}
+			digest := rollup.ComputeAccountLockedAttestDigest(chainID, user, homeCluster, 0)
 			payload.Attestations = []rollup.RegistrationAttestation{{
-				ValidatorPubkey: ak.PublicKey(),
-				Signature:       bls.Sign(ak.PrivateKey(), digest),
+				ValidatorPubkey: signer.PublicKey(),
+				Signature:       bls.Sign(signer.PrivateKey(), digest),
 			}}
 		}
 		data, err := payload.MarshalProto()

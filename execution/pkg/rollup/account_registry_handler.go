@@ -254,24 +254,29 @@ func NewAccountRegistryHandler(clusterPubKey cm.PublicKey) *AccountRegistryHandl
 
 // SetTrustedValidators sets explicit trusted validator BLS keys used when committeeProvider == nil.
 func (h *AccountRegistryHandler) SetTrustedValidators(keys []cm.PublicKey) {
-	if len(keys) == 0 {
+	m := make(map[cm.PublicKey]bool)
+	if h.clusterPubKey != (cm.PublicKey{}) {
+		m[h.clusterPubKey] = true
+	}
+	for _, k := range keys {
+		if k != (cm.PublicKey{}) {
+			m[k] = true
+		}
+	}
+	if len(m) == 0 {
 		h.trustedValidators = nil
 		return
-	}
-	m := make(map[cm.PublicKey]bool, len(keys))
-	for _, k := range keys {
-		m[k] = true
 	}
 	h.trustedValidators = m
 }
 
 // isTrustedValidator reports whether pubkey is recognized as an authorized validator.
 func (h *AccountRegistryHandler) isTrustedValidator(pubkey cm.PublicKey) bool {
+	if h.clusterPubKey != (cm.PublicKey{}) && pubkey == h.clusterPubKey {
+		return true
+	}
 	if len(h.trustedValidators) > 0 {
 		return h.trustedValidators[pubkey]
-	}
-	if h.clusterPubKey != (cm.PublicKey{}) {
-		return pubkey == h.clusterPubKey
 	}
 	return false
 }
@@ -281,13 +286,17 @@ func (h *AccountRegistryHandler) SetCommitteeProvider(cp CommitteeProvider) {
 	h.committeeProvider = cp
 }
 
-// attestChainID is the chain ID bound into the attestation digest: an explicit SetChainID value, otherwise the
+// AttestChainID is the chain ID bound into the attestation digest: an explicit SetChainID value, otherwise the
 // configured shared chain ID (parentchain.ParentChainID), i.e. the same value the RegistrationWorker signs with.
-func (h *AccountRegistryHandler) attestChainID() uint64 {
+func (h *AccountRegistryHandler) AttestChainID() uint64 {
 	if h.chainID != 0 {
 		return h.chainID
 	}
 	return parentchain.ParentChainID
+}
+
+func (h *AccountRegistryHandler) attestChainID() uint64 {
+	return h.AttestChainID()
 }
 
 // SetChainID sets the expected chain ID used for attestation digest calculation.

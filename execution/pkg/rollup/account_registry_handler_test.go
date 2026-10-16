@@ -358,3 +358,73 @@ func TestAccountRegistryHandler_S1b_ClusterKeyLockAllowed_AttackerRejected(t *te
 	require.NoError(t, err)
 	assert.True(t, db.GetLocked(provUser), "Account must be locked by cluster key")
 }
+
+func TestAccountRegistryHandler_S1b_ProductionKeyLayout_ValidatorKeyAllowed(t *testing.T) {
+	clusterKP := bls.GenerateKeyPair()   // shared config private_key
+	validatorKP := bls.GenerateKeyPair() // this validator's Databases.BLSPrivateKey
+	attacker := bls.GenerateKeyPair()
+	winningCluster := bls.GenerateKeyPair().PublicKey()
+
+	h := NewAccountRegistryHandler(clusterKP.PublicKey())
+	h.SetChainID(parentchain.ParentChainID)
+	// Wire trusted validators as app.go does:
+	h.SetTrustedValidators([]cm.PublicKey{validatorKP.PublicKey()})
+
+	db := newMockRegistryStateDB()
+	user := common.HexToAddress("0x5555555555555555555555555555555555555555")
+	db.SetProvisional(user, true)
+
+	// 1. Attacker is rejected
+	attackerDigest := ComputeAccountLockedAttestDigest(parentchain.ParentChainID, user, winningCluster, 0)
+	pAttacker := AccountRegistrationPayload{
+		Kind:        SystemPayloadKindAccountLocked,
+		User:        user,
+		HomeCluster: winningCluster,
+		Attestations: []RegistrationAttestation{{
+			ValidatorPubkey: attacker.PublicKey(),
+			Signature:       bls.Sign(attacker.PrivateKey(), attackerDigest),
+		}},
+	}
+	bAttacker, err := pAttacker.MarshalProto()
+	require.NoError(t, err)
+	err = h.ApplyAttested(db, nil, nil, bAttacker)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "lock attestation from untrusted validator")
+	assert.False(t, db.GetLocked(user))
+
+	// 2. Legit lock signed by validator committee key succeeds
+	valDigest := ComputeAccountLockedAttestDigest(parentchain.ParentChainID, user, winningCluster, 0)
+	pVal := AccountRegistrationPayload{
+		Kind:        SystemPayloadKindAccountLocked,
+		User:        user,
+		HomeCluster: winningCluster,
+		Attestations: []RegistrationAttestation{{
+			ValidatorPubkey: validatorKP.PublicKey(),
+			Signature:       bls.Sign(validatorKP.PrivateKey(), valDigest),
+		}},
+	}
+	bVal, err := pVal.MarshalProto()
+	require.NoError(t, err)
+	err = h.ApplyAttested(db, nil, nil, bVal)
+	require.NoError(t, err)
+	assert.True(t, db.GetLocked(user), "Account must be locked by trusted validator committee key")
+
+	// 3. Cluster key itself remains trusted even after SetTrustedValidators
+	user2 := common.HexToAddress("0x6666666666666666666666666666666666666666")
+	db.SetProvisional(user2, true)
+	clusterDigest := ComputeAccountLockedAttestDigest(parentchain.ParentChainID, user2, winningCluster, 0)
+	pCluster := AccountRegistrationPayload{
+		Kind:        SystemPayloadKindAccountLocked,
+		User:        user2,
+		HomeCluster: winningCluster,
+		Attestations: []RegistrationAttestation{{
+			ValidatorPubkey: clusterKP.PublicKey(),
+			Signature:       bls.Sign(clusterKP.PrivateKey(), clusterDigest),
+		}},
+	}
+	bCluster, err := pCluster.MarshalProto()
+	require.NoError(t, err)
+	err = h.ApplyAttested(db, nil, nil, bCluster)
+	require.NoError(t, err)
+	assert.True(t, db.GetLocked(user2), "Cluster key must remain trusted")
+}
