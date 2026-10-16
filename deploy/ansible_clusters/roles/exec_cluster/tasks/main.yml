@@ -269,17 +269,20 @@
         cluster_bls = '{{ bls_pubkey | default(bls_pub | default(bls_priv)) }}'
         alloc_map = {}
 
-        # 1. Base allocs from template (align publicKeyBls to cluster_bls)
-        for a in base.get('alloc', []):
-            addr_key = a.get('address', '').lower()
-            if addr_key:
-                a_copy = dict(a)
-                a_copy['publicKeyBls'] = cluster_bls
-                alloc_map[addr_key] = a_copy
-
-        # 2. Add dev keys from private_dev_keys.json matching cluster and 'common'
         cid = str({{ cluster_id | default(1) }})
         cname = '{{ cluster_name | default("exec1") }}'
+
+        # 1. Base allocs from template: Only allocated to Cluster 1 to guarantee 100% strict wallet isolation
+        #    Cluster 2 has its own isolated accounts to prevent dual-home conflicts and cross-cluster replay.
+        if cid == '1':
+            for a in base.get('alloc', []):
+                addr_key = a.get('address', '').lower()
+                if addr_key:
+                    a_copy = dict(a)
+                    a_copy['publicKeyBls'] = cluster_bls
+                    alloc_map[addr_key] = a_copy
+
+        # 2. Add dev keys strictly partitioned by cluster from private_dev_keys.json (NO 'common' sharing)
         dev_keys_path = '{{ install_dir }}/private_dev_keys.json'
         if os.path.exists(dev_keys_path):
             with open(dev_keys_path) as df:
@@ -288,8 +291,7 @@
                 'cluster_' + cid,
                 cid,
                 cname,
-                '10' + cid,
-                'common'
+                '10' + cid
             ]
             for group in allowed_groups:
                 for item in dev_data.get(group, []):
@@ -304,12 +306,15 @@
                             'publicKeyBls': cluster_bls,
                         }
 
-        # 2.5. Add spam keys from generated_keys.json (if present) for TPS benchmarking
+        # 2.5. Add spam keys from generated_keys.json: Partition between clusters to prevent overlap
         spam_keys_path = '{{ install_dir }}/generated_keys.json'
         if os.path.exists(spam_keys_path):
             with open(spam_keys_path) as skf:
                 spam_keys = json.load(skf)
-            for item in spam_keys:
+            total_spam = len(spam_keys)
+            half = total_spam // 2
+            my_spam = spam_keys[:half] if cid == '1' else spam_keys[half:]
+            for item in my_spam:
                 s_addr = item.get('address', '')
                 if s_addr and s_addr.lower() not in alloc_map:
                     alloc_map[s_addr.lower()] = {
@@ -321,24 +326,25 @@
                         'publicKeyBls': cluster_bls,
                     }
 
-        # 3. Add explicit test devnet sender. It is signed by mtn_api.go's
-        # devnetSenderBLSPrivateKeyHex, so it must not use the cluster BLS key.
-        devnet_sender_addr = '0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24'
-        devnet_sender_bls = '{{ devnet_sender_bls_pubkey | default('0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc') }}'
-        alloc_map[devnet_sender_addr.lower()] = {
-            'address': devnet_sender_addr,
-            'balance': '2000000000000000000000000000000',
-            'pending_balance': '0',
-            'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
-            'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
-            'publicKeyBls': devnet_sender_bls,
-        }
+        # 3. Test devnet sender: Exclusively allocated to Cluster 1
+        if cid == '1':
+            devnet_sender_addr = '0xb4eb43848E94de7BE8e2b551063dcE2aBeB8ba24'
+            devnet_sender_bls = '{{ devnet_sender_bls_pubkey | default('0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc') }}'
+            alloc_map[devnet_sender_addr.lower()] = {
+                'address': devnet_sender_addr,
+                'balance': '2000000000000000000000000000000',
+                'pending_balance': '0',
+                'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
+                'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
+                'publicKeyBls': devnet_sender_bls,
+            }
 
-        # 4. Cross-cluster validator allocs with explicit BLS public keys for Rollup signature verification
+        # 4. Cross-cluster validator registration (for BLS signature verification of rollup messages)
+        # Note: Non-home cluster validators are registered with balance 0 to prevent spending on foreign clusters
         exec1_addr = '0x1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5'
         alloc_map[exec1_addr.lower()] = {
             'address': exec1_addr,
-            'balance': '2000000000000000000000000000000',
+            'balance': '2000000000000000000000000000000' if cid == '1' else '0',
             'pending_balance': '0',
             'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
             'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',
@@ -348,7 +354,7 @@
         exec2_addr = '0x0d4CC97b62a149a8fe8DE81262270426A80B0935'
         alloc_map[exec2_addr.lower()] = {
             'address': exec2_addr,
-            'balance': '2000000000000000000000000000000',
+            'balance': '2000000000000000000000000000000' if cid == '2' else '0',
             'pending_balance': '0',
             'last_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
             'device_key': '0x0000000000000000000000000000000000000000000000000000000000000000',

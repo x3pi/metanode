@@ -88,6 +88,20 @@ func (m *mockAccountStateDB) SetParentRegistered(addr common.Address, registered
 	m.parentReg[addr] = registered
 }
 
+func (m *mockAccountStateDB) GetProvisional(addr common.Address) bool {
+	return false
+}
+
+func (m *mockAccountStateDB) SetProvisional(addr common.Address, provisional bool) {
+}
+
+func (m *mockAccountStateDB) GetLocked(addr common.Address) bool {
+	return false
+}
+
+func (m *mockAccountStateDB) SetLocked(addr common.Address, locked bool) {
+}
+
 func TestCrossNodeHandler(t *testing.T) {
 	scDB := &mockDB{data: make(map[common.Address]map[common.Hash][]byte)}
 	store := NewDBStore(scDB)

@@ -88,6 +88,7 @@
       when:
         - deploy_action not in ['stop', 'clean']
         - run_integration_tests | default(false) | bool
+        - parent_chain_rpc_token | default('') | length > 0
 
 
 # ── Play 4: Post-Deployment Testing ──────────────────────────────────────────

@@ -509,6 +509,7 @@ run_tests_suite() {
 
     : > "$test_log"
     echo "⏳ Đang chạy kịch bản thử nghiệm..."
+    touch /tmp/metanode_test_in_progress
     set +e
     ansible-playbook \
         -i "$INVENTORY" \
@@ -519,6 +520,7 @@ run_tests_suite() {
         "${EXTRA_ANSIBLE_ARGS[@]}" 2>&1 | tee "${test_log}.ansible"
     local test_rc=${PIPESTATUS[0]}
     set -e
+    rm -f /tmp/metanode_test_in_progress
 
     if [ -s "$test_log" ]; then
         cat "$test_log"
@@ -530,7 +532,7 @@ run_tests_suite() {
 
     local all_passed=false
     local py_passed="False"
-    if [ $test_rc -eq 0 ] && grep -q "TẤT CẢ 9/9 KỊCH BẢN" "$test_log"; then
+    if [ $test_rc -eq 0 ] && (grep -q "TẤT CẢ 11/11 KỊCH BẢN" "$test_log" || grep -q "TẤT CẢ 9/9 KỊCH BẢN" "$test_log"); then
         all_passed=true
         py_passed="True"
         echo ""
@@ -599,6 +601,16 @@ scenarios = [
         "name": "Kịch bản 9: Mất quorum Parent Chain -> pending, bật lại hoàn tất đúng 1 lần",
         "passed": "KỊCH BẢN 9 THÀNH CÔNG" in log_content,
         "detail": "Không tạo tiền khi mất quorum; sau khi bật lại ghi có đúng 1 lần" if "KỊCH BẢN 9 THÀNH CÔNG" in log_content else "Không hoàn tất hoặc bị gián đoạn"
+    },
+    {
+        "name": "Kịch bản 10: Recipient Gate & Phân quyền tài khoản (G01-G10)",
+        "passed": "KỊCH BẢN 10 THÀNH CÔNG" in log_content,
+        "detail": "Chặn người nhận chưa đăng ký, mở quyền sau khi đăng ký thành công" if "KỊCH BẢN 10 THÀNH CÔNG" in log_content else "Không hoàn tất hoặc bị gián đoạn"
+    },
+    {
+        "name": "Kịch bản 11: Offline Provisional & Multi-Cluster Race (P06/P07)",
+        "passed": "KỊCH BẢN 11 THÀNH CÔNG" in log_content,
+        "detail": "Giao dịch nội bộ khi Parent offline, khóa cụm thua sau reconciliation" if "KỊCH BẢN 11 THÀNH CÔNG" in log_content else "Không hoàn tất hoặc bị gián đoạn"
     }
 ]
 

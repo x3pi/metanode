@@ -171,6 +171,86 @@ func TestProcessRegisterAccount_ProtoAndPush(t *testing.T) {
 	assert.Equal(t, userAddr.Hex(), pushRes.Address)
 }
 
+func TestProcessRegisterAccount_RelayCallbackPushesToSameConnection(t *testing.T) {
+	kp := bls.GenerateKeyPair()
+	parent := &testFakeParent{registry: make(map[common.Address]cm.PublicKey)}
+	registered := false
+	relay := rollup.NewRegistrationRelay(parent, kp.PublicKey(),
+		func(d []byte) cm.Sign { return bls.Sign(kp.PrivateKey(), d) },
+		func(common.Address) bool { return registered })
+	tracker := NewRegistrationTracker()
+	defer tracker.Stop()
+	relay.SetOnStatusChanged(tracker.PushResult)
+
+	sp := NewStateProcessor(NewMockMessageSender(), nil, nil, nil)
+	sp.SetRegistrationComponents(relay, tracker)
+
+	privKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	userAddr := crypto.PubkeyToAddress(privKey.PublicKey)
+	sig, err := crypto.Sign(crypto.Keccak256(relay.RegistrationDigest(userAddr)), privKey)
+	require.NoError(t, err)
+
+	conn := newRecordingConn(userAddr)
+	req := NewMockRequest(conn, NewMockMessage(command.RegisterAccount, rawBody(userAddr, sig)))
+	require.NoError(t, sp.ProcessRegisterAccount(req))
+	require.Len(t, conn.AllMessages(), 1)
+	assert.Equal(t, command.RegisterAccountAck, conn.AllMessages()[0].Command())
+
+	registered = true
+	relay.ProcessBatch()
+
+	require.Eventually(t, func() bool { return len(conn.AllMessages()) == 2 }, time.Second, 10*time.Millisecond)
+	push := conn.AllMessages()[1]
+	assert.Equal(t, command.RegistrationResult, push.Command())
+	assert.Equal(t, req.Message().ID(), push.ID())
+
+	var result pb.RegistrationResult
+	require.NoError(t, proto.Unmarshal(push.Body(), &result))
+	assert.Equal(t, string(rollup.RegStatusConfirmed), result.Status)
+	assert.Equal(t, userAddr.Hex(), result.Address)
+}
+
+func TestProcessRegisterAccount_ProvisionalPushesToSameConnection(t *testing.T) {
+	kp := bls.GenerateKeyPair()
+	parent := &testFakeParent{registry: make(map[common.Address]cm.PublicKey)}
+	provisional := false
+	relay := rollup.NewRegistrationRelay(parent, kp.PublicKey(),
+		func(d []byte) cm.Sign { return bls.Sign(kp.PrivateKey(), d) },
+		func(common.Address) bool { return false })
+	relay.SetProvisionalChecker(func(common.Address) bool { return provisional })
+	tracker := NewRegistrationTracker()
+	defer tracker.Stop()
+	relay.SetOnStatusChanged(tracker.PushResult)
+
+	sp := NewStateProcessor(NewMockMessageSender(), nil, nil, nil)
+	sp.SetRegistrationComponents(relay, tracker)
+
+	privKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	userAddr := crypto.PubkeyToAddress(privKey.PublicKey)
+	sig, err := crypto.Sign(crypto.Keccak256(relay.RegistrationDigest(userAddr)), privKey)
+	require.NoError(t, err)
+
+	conn := newRecordingConn(userAddr)
+	req := NewMockRequest(conn, NewMockMessage(command.RegisterAccount, rawBody(userAddr, sig)))
+	require.NoError(t, sp.ProcessRegisterAccount(req))
+	require.Len(t, conn.AllMessages(), 1)
+
+	provisional = true
+	relay.ProcessBatch()
+
+	require.Eventually(t, func() bool { return len(conn.AllMessages()) == 2 }, time.Second, 10*time.Millisecond)
+	push := conn.AllMessages()[1]
+	assert.Equal(t, command.RegistrationResult, push.Command())
+	assert.Equal(t, req.Message().ID(), push.ID())
+
+	var result pb.RegistrationResult
+	require.NoError(t, proto.Unmarshal(push.Body(), &result))
+	assert.Equal(t, string(rollup.RegStatusProvisional), result.Status)
+	assert.Equal(t, userAddr.Hex(), result.Address)
+}
+
 func TestProcessGetRegistrationStatus(t *testing.T) {
 	sp, _, tracker, _ := setupRegistrationTest(t)
 	defer tracker.Stop()

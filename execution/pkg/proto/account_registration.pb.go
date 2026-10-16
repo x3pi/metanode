@@ -82,7 +82,7 @@ type RegistrationResult struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Status      string `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`                              // "CONFIRMED", "REJECTED", "FAILED", "PENDING"
+	Status      string `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`                              // "CONFIRMED", "PROVISIONAL", "REJECTED", "FAILED", "PENDING"
 	Address     string `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`                            // hex string "0x..."
 	HomeCluster string `protobuf:"bytes,3,opt,name=home_cluster,json=homeCluster,proto3" json:"home_cluster,omitempty"` // hex string "0x..."
 	Reason      string `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`                              // error / failure reason nếu có

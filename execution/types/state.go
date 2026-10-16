@@ -36,6 +36,12 @@ type AccountState interface {
 	SetAccountType(pb.ACCOUNT_TYPE) error
 	ParentRegistered() bool
 	SetParentRegistered(bool)
+	IsLocked() bool
+	SetLocked(bool)
+	LockedHomeCluster() common.PublicKey
+	SetLockedHomeCluster(common.PublicKey)
+	IsProvisional() bool
+	SetProvisional(bool)
 	//
 	SubPendingBalance(*big.Int) error
 	AddPendingBalance(*big.Int)

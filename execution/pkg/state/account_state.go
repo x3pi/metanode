@@ -37,6 +37,9 @@ type AccountState struct {
 	publicKeyBls       []byte
 	accountType        pb.ACCOUNT_TYPE
 	parentRegistered   bool
+	locked             bool
+	lockedHomeCluster  p_common.PublicKey
+	provisional        bool
 	isDirty            bool
 }
 
@@ -55,15 +58,20 @@ func (as *AccountState) Proto() *pb.AccountState {
 	nonceBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(nonceBytes, as.nonce)
 	pbAs := &pb.AccountState{
-		Address:        as.address[:],
-		LastHash:       as.lastHash[:],
-		Balance:        as.balance.Bytes(),
-		PendingBalance: as.pendingBalance.Bytes(),
-		DeviceKey:      as.deviceKey[:],
+		Address:          as.address[:],
+		LastHash:         as.lastHash[:],
+		Balance:          as.balance.Bytes(),
+		PendingBalance:   as.pendingBalance.Bytes(),
+		DeviceKey:        as.deviceKey[:],
 		Nonce:            nonceBytes,
 		PublicKeyBls:     as.publicKeyBls,
 		AccountType:      as.accountType,
 		ParentRegistered: as.parentRegistered,
+		Locked:           as.locked,
+		Provisional:      as.provisional,
+	}
+	if as.lockedHomeCluster != (p_common.PublicKey{}) {
+		pbAs.LockedHomeCluster = as.lockedHomeCluster[:]
 	}
 	if as.smartContractState != nil {
 		pbAs.SmartContractState = as.smartContractState.Proto()
@@ -89,6 +97,13 @@ func (as *AccountState) FromProto(pbData *pb.AccountState) {
 	as.publicKeyBls = pbData.PublicKeyBls
 	as.accountType = pbData.AccountType
 	as.parentRegistered = pbData.ParentRegistered
+	as.locked = pbData.Locked
+	if len(pbData.LockedHomeCluster) == len(as.lockedHomeCluster) {
+		copy(as.lockedHomeCluster[:], pbData.LockedHomeCluster)
+	} else {
+		as.lockedHomeCluster = p_common.PublicKey{}
+	}
+	as.provisional = pbData.Provisional
 }
 
 func (as *AccountState) Marshal() ([]byte, error) {
@@ -130,6 +145,9 @@ func (as *AccountState) Copy() types.AccountState {
 	}
 	copyAs.accountType = as.accountType
 	copyAs.parentRegistered = as.parentRegistered
+	copyAs.locked = as.locked
+	copy(copyAs.lockedHomeCluster[:], as.lockedHomeCluster[:])
+	copyAs.provisional = as.provisional
 	copyAs.isDirty = as.isDirty
 	return copyAs
 }
@@ -160,6 +178,33 @@ func (as *AccountState) ParentRegistered() bool {
 
 func (as *AccountState) SetParentRegistered(registered bool) {
 	as.parentRegistered = registered
+	as.isDirty = true
+}
+
+func (as *AccountState) IsLocked() bool {
+	return as.locked
+}
+
+func (as *AccountState) SetLocked(locked bool) {
+	as.locked = locked
+	as.isDirty = true
+}
+
+func (as *AccountState) LockedHomeCluster() p_common.PublicKey {
+	return as.lockedHomeCluster
+}
+
+func (as *AccountState) SetLockedHomeCluster(homeCluster p_common.PublicKey) {
+	as.lockedHomeCluster = homeCluster
+	as.isDirty = true
+}
+
+func (as *AccountState) IsProvisional() bool {
+	return as.provisional
+}
+
+func (as *AccountState) SetProvisional(provisional bool) {
+	as.provisional = provisional
 	as.isDirty = true
 }
 
@@ -326,6 +371,9 @@ type JsonAccountState struct {
 	PublicKeyBls       string                  `json:"publicKeyBls"`
 	AccountType        int32                   `json:"accountType"`
 	ParentRegistered   bool                    `json:"parent_registered,omitempty"`
+	Locked             bool                    `json:"locked,omitempty"`
+	LockedHomeCluster  string                  `json:"locked_home_cluster,omitempty"`
+	Provisional        bool                    `json:"provisional,omitempty"`
 }
 
 func (j *JsonAccountState) ToAccountState() *AccountState {
@@ -344,6 +392,9 @@ func (j *JsonAccountState) ToAccountState() *AccountState {
 	as.publicKeyBls = common.FromHex(j.PublicKeyBls)
 	as.accountType = pb.ACCOUNT_TYPE(j.AccountType)
 	as.parentRegistered = j.ParentRegistered
+	as.locked = j.Locked
+	copy(as.lockedHomeCluster[:], common.FromHex(j.LockedHomeCluster))
+	as.provisional = j.Provisional
 	return as
 }
 
@@ -361,6 +412,11 @@ func (j *JsonAccountState) FromAccountState(as *AccountState) {
 	j.PublicKeyBls = hex.EncodeToString(as.publicKeyBls)
 	j.AccountType = int32(as.accountType)
 	j.ParentRegistered = as.parentRegistered
+	j.Locked = as.locked
+	if as.lockedHomeCluster != (p_common.PublicKey{}) {
+		j.LockedHomeCluster = hex.EncodeToString(as.lockedHomeCluster[:])
+	}
+	j.Provisional = as.provisional
 }
 
 func MarshalSCStatesWithBlockNumber(

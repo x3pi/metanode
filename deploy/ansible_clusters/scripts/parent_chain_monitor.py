@@ -44,6 +44,23 @@ DEFAULT_INVENTORY = os.path.join(ANSIBLE_CLUSTER_DIR, "inventory.yml")
 PID_FILE = "/tmp/parent_chain_monitor.pid"
 LOG_FILE = "/tmp/parent_chain_monitor.log"
 
+TEST_FLAG_FILES = [
+    "/tmp/metanode_test_in_progress",
+    "/tmp/parent_chain_test_mode",
+    "/tmp/monitors_ignore_nodes",
+    "/tmp/metanode_ignore_nodes",
+]
+
+def is_test_in_progress():
+    """
+    Check if an automated test or maintenance mode is currently active.
+    If any test flag file exists or env METANODE_TEST_MODE is set,
+    alerts for node stopping/recovery/hash variance during tests are suppressed.
+    """
+    if os.environ.get("METANODE_TEST_MODE") in ("true", "1"):
+        return True
+    return any(os.path.exists(f) for f in TEST_FLAG_FILES)
+
 def load_config(inventory_path=None):
     """
     Parse inventory.yml directly without hardcoding any nodes or telegram credentials.
@@ -94,6 +111,9 @@ def load_config(inventory_path=None):
 
 def send_telegram(bot_token, chat_id, message_html):
     """Send alert HTML message to Telegram with error handling."""
+    if is_test_in_progress():
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🧪 [TEST MODE] Đang trong quá trình chạy test - Đánh dấu test, bỏ qua gửi cảnh báo Telegram.")
+        return False
     if not bot_token or not chat_id:
         sys.stderr.write("⚠️ Telegram bot_token hoặc chat_id chưa được cấu hình. Bỏ qua thông báo.\n")
         return False
@@ -208,34 +228,41 @@ def run_monitor_loop(inventory_path=None, interval=5):
             for name, url in nodes.items():
                 results[name] = query_node_status(url)
 
+            test_mode = is_test_in_progress()
             # 1. Liveness Check
             for name, res in results.items():
                 if not res["online"]:
                     if throttler.should_alert_node_down(name):
-                        err_text = html.escape(str(res.get('error', 'Unreachable')))
-                        msg = (
-                            f"🚨 <b>[PARENT CHAIN ALERT] Node Offline!</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"<b>Node:</b> <code>{name}</code>\n"
-                            f"<b>Endpoint:</b> <code>{nodes[name]}</code>\n"
-                            f"<b>Lỗi:</b> <code>{err_text}</code>\n"
-                            f"<b>Thời gian:</b> <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
-                            f"⚠️ Cụm Parent Chain đang thiếu validator. Kiểm tra dịch vụ ngay!"
-                        )
-                        print(f"❌ {name} OFFLINE: {res.get('error')}")
-                        send_telegram(bot_token, chat_id, msg)
+                        if test_mode:
+                            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🧪 [TEST MODE] {name} OFFLINE (chạy test dừng node) - Đánh dấu test, bỏ qua thông báo Telegram.")
+                        else:
+                            err_text = html.escape(str(res.get('error', 'Unreachable')))
+                            msg = (
+                                f"🚨 <b>[PARENT CHAIN ALERT] Node Offline!</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━\n"
+                                f"<b>Node:</b> <code>{name}</code>\n"
+                                f"<b>Endpoint:</b> <code>{nodes[name]}</code>\n"
+                                f"<b>Lỗi:</b> <code>{err_text}</code>\n"
+                                f"<b>Thời gian:</b> <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
+                                f"⚠️ Cụm Parent Chain đang thiếu validator. Kiểm tra dịch vụ ngay!"
+                            )
+                            print(f"❌ {name} OFFLINE: {res.get('error')}")
+                            send_telegram(bot_token, chat_id, msg)
                 else:
                     if throttler.should_alert_node_recovered(name):
-                        msg = (
-                            f"✅ <b>[PARENT CHAIN RECOVERY] Node Online</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"<b>Node:</b> <code>{name}</code>\n"
-                            f"<b>Endpoint:</b> <code>{nodes[name]}</code>\n"
-                            f"<b>Block:</b> #{res.get('last_block')} | <b>Latency:</b> {res.get('latency_ms')}ms\n"
-                            f"<b>Thời gian:</b> <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>"
-                        )
-                        print(f"✅ {name} RECOVERED")
-                        send_telegram(bot_token, chat_id, msg)
+                        if test_mode:
+                            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🧪 [TEST MODE] {name} ONLINE trở lại (trong bài test) - Đánh dấu test, bỏ qua thông báo Telegram.")
+                        else:
+                            msg = (
+                                f"✅ <b>[PARENT CHAIN RECOVERY] Node Online</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━\n"
+                                f"<b>Node:</b> <code>{name}</code>\n"
+                                f"<b>Endpoint:</b> <code>{nodes[name]}</code>\n"
+                                f"<b>Block:</b> #{res.get('last_block')} | <b>Latency:</b> {res.get('latency_ms')}ms\n"
+                                f"<b>Thời gian:</b> <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>"
+                            )
+                            print(f"✅ {name} RECOVERED")
+                            send_telegram(bot_token, chat_id, msg)
 
             # 2. Hash Consistency & Fork Check (among online nodes)
             online_nodes = {name: res for name, res in results.items() if res["online"]}

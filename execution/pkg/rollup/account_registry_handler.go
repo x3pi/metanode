@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
@@ -16,8 +17,12 @@ import (
 )
 
 const (
-	SystemPayloadKindAccountRegistered = "account_registered"
-	AttestationDomainAccountRegistered = "ACCT_REG_ATTEST_V1"
+	SystemPayloadKindAccountRegistered  = "account_registered"
+	SystemPayloadKindAccountProvisional = "account_provisional"
+	SystemPayloadKindAccountLocked      = "account_locked"
+	AttestationDomainAccountRegistered  = "ACCT_REG_ATTEST_V1"
+	AttestationDomainAccountProvisional = "ACCT_PROV_ATTEST_V1"
+	AttestationDomainAccountLocked      = "ACCT_LOCK_ATTEST_V1"
 )
 
 // RegistrationAttestation carries a single validator's BLS signature over the event digest.
@@ -42,6 +47,58 @@ func ComputeAccountRegistrationAttestDigest(chainID uint64, user common.Address,
 	return crypto.Keccak256(data)
 }
 
+// ComputeAccountProvisionalAttestDigest computes the deterministic keccak256 digest for provisional account co-attestation:
+// keccak256("ACCT_PROV_ATTEST_V1" || chainID || user || clusterKey || userSig)
+func ComputeAccountProvisionalAttestDigest(chainID uint64, user common.Address, clusterKey cm.PublicKey, userSig []byte) []byte {
+	var data []byte
+	data = append(data, []byte(AttestationDomainAccountProvisional)...)
+	var chainIDBytes [8]byte
+	binary.BigEndian.PutUint64(chainIDBytes[:], chainID)
+	data = append(data, chainIDBytes[:]...)
+	data = append(data, user.Bytes()...)
+	data = append(data, clusterKey[:]...)
+	data = append(data, userSig...)
+	return crypto.Keccak256(data)
+}
+
+// ComputeAccountLockedAttestDigest computes the deterministic keccak256 digest for locked account co-attestation:
+// keccak256("ACCT_LOCK_ATTEST_V1" || chainID || user || homeCluster || parentSeq)
+func ComputeAccountLockedAttestDigest(chainID uint64, user common.Address, homeCluster cm.PublicKey, parentSeq uint64) []byte {
+	var data []byte
+	data = append(data, []byte(AttestationDomainAccountLocked)...)
+	var chainIDBytes [8]byte
+	binary.BigEndian.PutUint64(chainIDBytes[:], chainID)
+	data = append(data, chainIDBytes[:]...)
+	data = append(data, user.Bytes()...)
+	data = append(data, homeCluster[:]...)
+	var seqBytes [8]byte
+	binary.BigEndian.PutUint64(seqBytes[:], parentSeq)
+	data = append(data, seqBytes[:]...)
+	return crypto.Keccak256(data)
+}
+
+// VerifyUserRegistrationSig checks whether userSig recovers to user for this clusterKey.
+func VerifyUserRegistrationSig(user common.Address, clusterKey cm.PublicKey, sig []byte) bool {
+	if len(sig) != 65 {
+		return false
+	}
+	s := make([]byte, len(sig))
+	copy(s, sig)
+	if s[64] >= 27 {
+		s[64] -= 27
+	}
+	digest := parentchain.ComputeRegisterAccountMessage(user, clusterKey)
+	hash := crypto.Keccak256Hash(digest)
+	if pub, err := crypto.SigToPub(hash.Bytes(), s); err == nil && crypto.PubkeyToAddress(*pub) == user {
+		return true
+	}
+	ethHash := accounts.TextHash(digest)
+	if pub2, err2 := crypto.SigToPub(ethHash, s); err2 == nil && crypto.PubkeyToAddress(*pub2) == user {
+		return true
+	}
+	return false
+}
+
 // AccountRegistrationPayload is the canonical payload sent in a system transaction to RollupSystemAddress
 // when an account registration event from Parent Chain is relayed to the execution cluster.
 type AccountRegistrationPayload struct {
@@ -50,6 +107,8 @@ type AccountRegistrationPayload struct {
 	ClusterKey   cm.PublicKey
 	ParentSeq    uint64
 	Attestations []RegistrationAttestation
+	UserSig      []byte
+	HomeCluster  cm.PublicKey
 }
 
 // ToProto converts AccountRegistrationPayload to protobuf representation.
@@ -70,6 +129,8 @@ func (p *AccountRegistrationPayload) ToProto() *pb.AccountRegistrationPayloadPro
 		ClusterKey:   p.ClusterKey[:],
 		ParentSeq:    p.ParentSeq,
 		Attestations: attestations,
+		UserSig:      p.UserSig,
+		HomeCluster:  p.HomeCluster[:],
 	}
 }
 
@@ -97,6 +158,12 @@ func (p *AccountRegistrationPayload) FromProto(pbPayload *pb.AccountRegistration
 			Signature:       sig,
 		})
 	}
+	if len(pbPayload.UserSig) > 0 {
+		p.UserSig = append([]byte(nil), pbPayload.UserSig...)
+	}
+	if len(pbPayload.HomeCluster) == len(p.HomeCluster) {
+		copy(p.HomeCluster[:], pbPayload.HomeCluster)
+	}
 }
 
 // MarshalProto encodes AccountRegistrationPayload as deterministic Protobuf.
@@ -119,14 +186,24 @@ func (p *AccountRegistrationPayload) Unmarshal(data []byte) error {
 	if err := proto.Unmarshal(data, &pbPayload); err != nil {
 		return fmt.Errorf("failed to unmarshal AccountRegistrationPayload protobuf: %w", err)
 	}
-	if pbPayload.Kind != SystemPayloadKindAccountRegistered {
-		return fmt.Errorf("unexpected payload kind %q, expected %q", pbPayload.Kind, SystemPayloadKindAccountRegistered)
-	}
-	if len(pbPayload.ClusterKey) != len(p.ClusterKey) {
-		return fmt.Errorf("account registry: cluster_key must be exactly %d bytes, got %d", len(p.ClusterKey), len(pbPayload.ClusterKey))
+	switch pbPayload.Kind {
+	case SystemPayloadKindAccountRegistered, SystemPayloadKindAccountProvisional, SystemPayloadKindAccountLocked:
+		// valid kinds
+	default:
+		return fmt.Errorf("unexpected payload kind %q", pbPayload.Kind)
 	}
 	if err := requireLen("user", pbPayload.User, common.AddressLength); err != nil {
 		return fmt.Errorf("account registry: %w", err)
+	}
+	if pbPayload.Kind == SystemPayloadKindAccountRegistered || pbPayload.Kind == SystemPayloadKindAccountProvisional {
+		if len(pbPayload.ClusterKey) != len(p.ClusterKey) {
+			return fmt.Errorf("account registry: cluster_key must be exactly %d bytes, got %d", len(p.ClusterKey), len(pbPayload.ClusterKey))
+		}
+	}
+	if pbPayload.Kind == SystemPayloadKindAccountLocked {
+		if len(pbPayload.HomeCluster) != len(p.HomeCluster) {
+			return fmt.Errorf("account registry: home_cluster must be exactly %d bytes, got %d", len(p.HomeCluster), len(pbPayload.HomeCluster))
+		}
 	}
 	if err := validateAttestationsProto(pbPayload.Attestations); err != nil {
 		return fmt.Errorf("account registry: %w", err)
@@ -135,16 +212,25 @@ func (p *AccountRegistrationPayload) Unmarshal(data []byte) error {
 	return nil
 }
 
-// AccountStateRegistryDB is the state interface needed to query and set the ParentRegistered flag.
+// AccountStateRegistryDB is the state interface needed to query and set the ParentRegistered, Provisional, and Locked flags.
 type AccountStateRegistryDB interface {
 	GetParentRegistered(addr common.Address) bool
 	SetParentRegistered(addr common.Address, registered bool)
+	GetProvisional(addr common.Address) bool
+	SetProvisional(addr common.Address, provisional bool)
+	GetLocked(addr common.Address) bool
+	SetLocked(addr common.Address, locked bool)
 }
 
-// NOTE: committee enforcement is NOT active in production yet: no CommitteeProvider is wired in simple_chain, and the
-// RegistrationWorker attaches only its OWN attestation (no signature exchange between validators). Wiring a provider
-// for a committee with f+1 > 1 before that exchange exists would leave every registration PENDING forever.
-// CommitteeProvider returns the active committee validator BLS public keys.
+type lockedHomeClusterStateDB interface {
+	SetLockedHomeCluster(addr common.Address, homeCluster cm.PublicKey)
+}
+
+// NOTE: Committee enforcement is currently in transition: no CommitteeProvider is wired in simple_chain yet,
+// so RegistrationWorker and LockProposer attach their own node attestation. Until full committee co-attestation
+// and signature exchange is enabled in production, the network operates under the Trusted Validator assumption.
+// For destructive actions (SystemPayloadKindAccountLocked), at least one valid attestation is strictly enforced
+// even when committee is nil to prevent unauthenticated freeze attacks.
 type CommitteeProvider interface {
 	GetActiveCommitteeBLSKeys() ([]cm.PublicKey, error)
 }
@@ -154,11 +240,45 @@ type AccountRegistryHandler struct {
 	clusterPubKey     cm.PublicKey
 	chainID           uint64
 	committeeProvider CommitteeProvider
+	trustedValidators map[cm.PublicKey]bool
 }
 
 // NewAccountRegistryHandler creates a new handler bound to the cluster's public key.
 func NewAccountRegistryHandler(clusterPubKey cm.PublicKey) *AccountRegistryHandler {
-	return &AccountRegistryHandler{clusterPubKey: clusterPubKey}
+	h := &AccountRegistryHandler{clusterPubKey: clusterPubKey}
+	if clusterPubKey != (cm.PublicKey{}) {
+		h.trustedValidators = map[cm.PublicKey]bool{clusterPubKey: true}
+	}
+	return h
+}
+
+// SetTrustedValidators sets explicit trusted validator BLS keys used when committeeProvider == nil.
+func (h *AccountRegistryHandler) SetTrustedValidators(keys []cm.PublicKey) {
+	m := make(map[cm.PublicKey]bool)
+	if h.clusterPubKey != (cm.PublicKey{}) {
+		m[h.clusterPubKey] = true
+	}
+	for _, k := range keys {
+		if k != (cm.PublicKey{}) {
+			m[k] = true
+		}
+	}
+	if len(m) == 0 {
+		h.trustedValidators = nil
+		return
+	}
+	h.trustedValidators = m
+}
+
+// isTrustedValidator reports whether pubkey is recognized as an authorized validator.
+func (h *AccountRegistryHandler) isTrustedValidator(pubkey cm.PublicKey) bool {
+	if h.clusterPubKey != (cm.PublicKey{}) && pubkey == h.clusterPubKey {
+		return true
+	}
+	if len(h.trustedValidators) > 0 {
+		return h.trustedValidators[pubkey]
+	}
+	return false
 }
 
 // SetCommitteeProvider sets the committee provider for quorum verification (>= f+1).
@@ -166,13 +286,17 @@ func (h *AccountRegistryHandler) SetCommitteeProvider(cp CommitteeProvider) {
 	h.committeeProvider = cp
 }
 
-// attestChainID is the chain ID bound into the attestation digest: an explicit SetChainID value, otherwise the
+// AttestChainID is the chain ID bound into the attestation digest: an explicit SetChainID value, otherwise the
 // configured shared chain ID (parentchain.ParentChainID), i.e. the same value the RegistrationWorker signs with.
-func (h *AccountRegistryHandler) attestChainID() uint64 {
+func (h *AccountRegistryHandler) AttestChainID() uint64 {
 	if h.chainID != 0 {
 		return h.chainID
 	}
 	return parentchain.ParentChainID
+}
+
+func (h *AccountRegistryHandler) attestChainID() uint64 {
+	return h.AttestChainID()
 }
 
 // SetChainID sets the expected chain ID used for attestation digest calculation.
@@ -185,14 +309,19 @@ func (h *AccountRegistryHandler) ClusterPublicKey() cm.PublicKey {
 	return h.clusterPubKey
 }
 
-// IsAccountRegistrationPayload checks whether the given byte slice is a Protobuf payload with kind="account_registered".
+// IsAccountRegistrationPayload checks whether the given byte slice is a Protobuf payload with kind="account_registered", "account_provisional", or "account_locked".
 func IsAccountRegistrationPayload(data []byte) bool {
 	if len(data) == 0 {
 		return false
 	}
 	var pbPayload pb.AccountRegistrationPayloadProto
-	if err := proto.Unmarshal(data, &pbPayload); err == nil && pbPayload.Kind == SystemPayloadKindAccountRegistered {
-		return true
+	if err := proto.Unmarshal(data, &pbPayload); err == nil {
+		switch pbPayload.Kind {
+		case SystemPayloadKindAccountRegistered,
+			SystemPayloadKindAccountProvisional,
+			SystemPayloadKindAccountLocked:
+			return true
+		}
 	}
 	return false
 }
@@ -219,54 +348,34 @@ type AttestationStore interface {
 // threshold is reached, so no off-chain signature exchange is needed and no timing is involved: an event that lacks
 // signatures simply stays PENDING. With committee == nil (tests / non-enforcing use) any attached signatures are only
 // checked for validity. The call is idempotent (already registered and repeated attestations are no-op successes).
-func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, store AttestationStore, committee CommitteeProvider, data []byte) error {
-	if stateDB == nil {
-		return errors.New("account registry: stateDB is nil")
-	}
-
-	var payload AccountRegistrationPayload
-	if err := payload.Unmarshal(data); err != nil {
-		return fmt.Errorf("account registry: invalid payload: %w", err)
-	}
-	if payload.Kind != SystemPayloadKindAccountRegistered {
-		return fmt.Errorf("account registry: unexpected payload kind %q", payload.Kind)
-	}
-	if payload.User == (common.Address{}) {
-		return errors.New("account registry: empty user address")
-	}
-	if payload.ClusterKey != h.clusterPubKey {
-		return fmt.Errorf("account registry: cluster key mismatch: got %x, want %x", payload.ClusterKey[:6], h.clusterPubKey[:6])
-	}
-
-	// Idempotent: already registered is a no-op success
-	if stateDB.GetParentRegistered(payload.User) {
-		return nil
-	}
-
-	digest := ComputeAccountRegistrationAttestDigest(h.attestChainID(), payload.User, payload.ClusterKey, payload.ParentSeq)
-
+// verifyAttestations validates committee co-attestations or individual BLS signatures against digest.
+func (h *AccountRegistryHandler) verifyAttestations(
+	store AttestationStore,
+	committee CommitteeProvider,
+	digest []byte,
+	attestations []RegistrationAttestation,
+) (bool, error) {
 	if committee == nil {
 		seen := make(map[cm.PublicKey]bool)
-		for _, att := range payload.Attestations {
+		for _, att := range attestations {
 			if seen[att.ValidatorPubkey] {
-				return fmt.Errorf("account registry: duplicate attestation from validator %x", att.ValidatorPubkey[:6])
+				return false, fmt.Errorf("account registry: duplicate attestation from validator %x", att.ValidatorPubkey[:6])
 			}
 			seen[att.ValidatorPubkey] = true
 			if !bls.VerifySign(att.ValidatorPubkey, att.Signature, digest) {
-				return fmt.Errorf("account registry: invalid BLS signature from validator %x", att.ValidatorPubkey[:6])
+				return false, fmt.Errorf("account registry: invalid BLS signature from validator %x", att.ValidatorPubkey[:6])
 			}
 		}
-		stateDB.SetParentRegistered(payload.User, true)
-		return nil
+		return true, nil
 	}
 
 	keys, err := committee.GetActiveCommitteeBLSKeys()
 	if err != nil {
 		metrics.RollupCommitteeReadErrorsTotal.Inc()
-		return fmt.Errorf("account registry: failed to get active committee: %w", err)
+		return false, fmt.Errorf("account registry: failed to get active committee: %w", err)
 	}
 	if len(keys) == 0 {
-		return errors.New("account registry: committee is empty")
+		return false, errors.New("account registry: committee is empty")
 	}
 	committeeSet := make(map[cm.PublicKey]bool, len(keys))
 	for _, k := range keys {
@@ -275,8 +384,8 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 	// Quorum threshold: f = (N - 1) / 3, required = f + 1
 	required := (len(keys)-1)/3 + 1
 
-	if len(payload.Attestations) == 0 {
-		return errors.New("account registry: no attestation in payload")
+	if len(attestations) == 0 {
+		return false, errors.New("account registry: no attestation in payload")
 	}
 	pendingKey := attestationPendingKey(digest)
 	var merged []RegistrationAttestation
@@ -291,19 +400,19 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 	}
 	newInPayload := make(map[cm.PublicKey]bool)
 	changed := false
-	for _, att := range payload.Attestations {
+	for _, att := range attestations {
 		if !committeeSet[att.ValidatorPubkey] {
 			metrics.RollupSignaturesRejectedTotal.WithLabelValues("non_committee").Inc()
-			return fmt.Errorf("account registry: attestation from non-committee validator %x", att.ValidatorPubkey[:6])
+			return false, fmt.Errorf("account registry: attestation from non-committee validator %x", att.ValidatorPubkey[:6])
 		}
 		if newInPayload[att.ValidatorPubkey] {
 			metrics.RollupSignaturesRejectedTotal.WithLabelValues("duplicate").Inc()
-			return fmt.Errorf("account registry: duplicate attestation from validator %x", att.ValidatorPubkey[:6])
+			return false, fmt.Errorf("account registry: duplicate attestation from validator %x", att.ValidatorPubkey[:6])
 		}
 		newInPayload[att.ValidatorPubkey] = true
 		if !bls.VerifySign(att.ValidatorPubkey, att.Signature, digest) {
 			metrics.RollupSignaturesRejectedTotal.WithLabelValues("invalid_signature").Inc()
-			return fmt.Errorf("account registry: invalid BLS signature from validator %x", att.ValidatorPubkey[:6])
+			return false, fmt.Errorf("account registry: invalid BLS signature from validator %x", att.ValidatorPubkey[:6])
 		}
 		if !have[att.ValidatorPubkey] {
 			have[att.ValidatorPubkey] = true
@@ -313,20 +422,127 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 	}
 
 	if len(merged) >= required {
-		stateDB.SetParentRegistered(payload.User, true)
 		if store != nil {
 			store.Clear(pendingKey)
 		}
-		return nil
+		return true, nil
 	}
 	if store == nil {
-		return fmt.Errorf("account registry: insufficient attestations: got %d, required %d (committee size %d)", len(merged), required, len(keys))
+		return false, fmt.Errorf("account registry: insufficient attestations: got %d, required %d (committee size %d)", len(merged), required, len(keys))
 	}
-	// Not enough yet: stay PENDING (success receipt, no registration) and remember the signatures collected so far.
 	if changed {
 		store.Save(pendingKey, merged)
 	}
-	return nil
+	return false, nil
+}
+
+// ApplyAttested executes an account registration, provisional activation, or lock payload against stateDB.
+func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, store AttestationStore, committee CommitteeProvider, data []byte) error {
+	if stateDB == nil {
+		return errors.New("account registry: stateDB is nil")
+	}
+
+	var payload AccountRegistrationPayload
+	if err := payload.Unmarshal(data); err != nil {
+		return fmt.Errorf("account registry: invalid payload: %w", err)
+	}
+	if payload.User == (common.Address{}) {
+		return errors.New("account registry: empty user address")
+	}
+
+	switch payload.Kind {
+	case SystemPayloadKindAccountRegistered:
+		if payload.ClusterKey != h.clusterPubKey {
+			return fmt.Errorf("account registry: cluster key mismatch: got %x, want %x", payload.ClusterKey[:6], h.clusterPubKey[:6])
+		}
+		if stateDB.GetLocked(payload.User) {
+			return fmt.Errorf("account registry: cannot register locked account %s", payload.User.Hex())
+		}
+		// Idempotent: already confirmed is a no-op success
+		if stateDB.GetParentRegistered(payload.User) {
+			return nil
+		}
+
+		digest := ComputeAccountRegistrationAttestDigest(h.attestChainID(), payload.User, payload.ClusterKey, payload.ParentSeq)
+		ok, err := h.verifyAttestations(store, committee, digest, payload.Attestations)
+		if err != nil {
+			return err
+		}
+		if ok {
+			stateDB.SetParentRegistered(payload.User, true)
+			stateDB.SetProvisional(payload.User, false)
+		}
+		return nil
+
+	case SystemPayloadKindAccountProvisional:
+		if payload.ClusterKey != h.clusterPubKey {
+			return fmt.Errorf("account registry: cluster key mismatch: got %x, want %x", payload.ClusterKey[:6], h.clusterPubKey[:6])
+		}
+		if stateDB.GetLocked(payload.User) {
+			return fmt.Errorf("account registry: cannot activate locked account %s", payload.User.Hex())
+		}
+		if stateDB.GetParentRegistered(payload.User) {
+			return nil // already confirmed on parent chain
+		}
+		if stateDB.GetProvisional(payload.User) {
+			return nil // idempotent: already provisional
+		}
+		if !VerifyUserRegistrationSig(payload.User, payload.ClusterKey, payload.UserSig) {
+			return fmt.Errorf("account registry: invalid user signature for provisional registration")
+		}
+
+		digest := ComputeAccountProvisionalAttestDigest(h.attestChainID(), payload.User, payload.ClusterKey, payload.UserSig)
+		ok, err := h.verifyAttestations(store, committee, digest, payload.Attestations)
+		if err != nil {
+			return err
+		}
+		if ok {
+			stateDB.SetProvisional(payload.User, true)
+		}
+		return nil
+
+	case SystemPayloadKindAccountLocked:
+		if payload.HomeCluster == h.clusterPubKey || payload.HomeCluster == (cm.PublicKey{}) {
+			return fmt.Errorf("account registry: lock payload must specify another winning home cluster")
+		}
+		// Invariant: Never allow locking an account that is already officially confirmed on this cluster!
+		if stateDB.GetParentRegistered(payload.User) {
+			return fmt.Errorf("account registry: cannot lock officially confirmed account %s", payload.User.Hex())
+		}
+		if stateDB.GetLocked(payload.User) {
+			return nil // idempotent: already locked
+		}
+
+		if len(payload.Attestations) == 0 {
+			return errors.New("account registry: lock payload requires at least one valid validator attestation")
+		}
+
+		if committee == nil {
+			for _, att := range payload.Attestations {
+				if !h.isTrustedValidator(att.ValidatorPubkey) {
+					return fmt.Errorf("account registry: lock attestation from untrusted validator %x", att.ValidatorPubkey[:6])
+				}
+			}
+		}
+
+		digest := ComputeAccountLockedAttestDigest(h.attestChainID(), payload.User, payload.HomeCluster, payload.ParentSeq)
+		ok, err := h.verifyAttestations(store, committee, digest, payload.Attestations)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if homeDB, supportsHome := stateDB.(lockedHomeClusterStateDB); supportsHome {
+				homeDB.SetLockedHomeCluster(payload.User, payload.HomeCluster)
+			}
+			stateDB.SetLocked(payload.User, true)
+			stateDB.SetProvisional(payload.User, false)
+			stateDB.SetParentRegistered(payload.User, false)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("account registry: unexpected payload kind %q", payload.Kind)
+	}
 }
 
 func attestationPendingKey(digest []byte) common.Hash {

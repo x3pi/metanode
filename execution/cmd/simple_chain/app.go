@@ -53,6 +53,90 @@ import (
 // FreeFeeAddresses is a list of addresses that can transact without fees
 var FreeFeeAddresses = map[e_common.Address]struct{}{}
 
+// rollupInflightKey identifies an in-flight system transaction by payload hash and event type.
+type rollupInflightKey struct {
+	msgID e_common.Hash
+	typ   rollup.EventType
+}
+
+// rollupNonceManager manages in-flight system transactions and sequential nonce assignment.
+// It deduplicates pending payloads, prunes committed nonces, and provides watchdog stall recovery.
+type rollupNonceManager struct {
+	mu           sync.Mutex
+	inflight     map[rollupInflightKey]uint64
+	pendingNonce uint64
+	lastDBNonce  uint64
+	lastProgress time.Time
+}
+
+func newRollupNonceManager() *rollupNonceManager {
+	return &rollupNonceManager{
+		inflight:     make(map[rollupInflightKey]uint64),
+		lastProgress: time.Now(),
+	}
+}
+
+func (m *rollupNonceManager) Lock() {
+	m.mu.Lock()
+}
+
+func (m *rollupNonceManager) Unlock() {
+	m.mu.Unlock()
+}
+
+// PrepareNonce checks if the key is already inflight.
+// If already inflight, returns ok=false (should skip proposing).
+// If not inflight, cleans up committed nonces (< dbNonce) and returns the allocated nonce with ok=true.
+// Must be called with Lock() held.
+func (m *rollupNonceManager) PrepareNonce(key rollupInflightKey, dbNonce uint64) (uint64, bool) {
+	if dbNonce != m.lastDBNonce {
+		m.lastDBNonce = dbNonce
+		m.lastProgress = time.Now()
+	}
+	for k, n := range m.inflight {
+		if n < dbNonce {
+			delete(m.inflight, k)
+		}
+	}
+	if len(m.inflight) > 0 && time.Since(m.lastProgress) > 60*time.Second {
+		m.inflight = make(map[rollupInflightKey]uint64)
+		m.lastProgress = time.Now()
+	}
+	if _, pending := m.inflight[key]; pending {
+		return 0, false
+	}
+	if len(m.inflight) == 0 || m.pendingNonce < dbNonce {
+		m.pendingNonce = dbNonce
+	}
+	return m.pendingNonce, true
+}
+
+// OnSuccess records the transaction as in-flight and advances pendingNonce.
+// Must be called with Lock() held.
+func (m *rollupNonceManager) OnSuccess(key rollupInflightKey, assignedNonce uint64) {
+	m.inflight[key] = assignedNonce
+	if m.pendingNonce <= assignedNonce {
+		m.pendingNonce = assignedNonce + 1
+	}
+}
+
+// OnFailure syncs state after a pool addition failure without dropping other valid in-flight transactions.
+// Must be called with Lock() held.
+func (m *rollupNonceManager) OnFailure(freshDBNonce uint64) {
+	if freshDBNonce != m.lastDBNonce {
+		m.lastDBNonce = freshDBNonce
+		m.lastProgress = time.Now()
+	}
+	for k, n := range m.inflight {
+		if n < freshDBNonce {
+			delete(m.inflight, k)
+		}
+	}
+	if m.pendingNonce < freshDBNonce {
+		m.pendingNonce = freshDBNonce
+	}
+}
+
 // App defines the main application structure
 type App struct {
 	// Configuration
@@ -371,6 +455,9 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 
 	app.crossNodeHandler = rollup.NewCrossNodeHandler(app.keyPair.PublicKey())
 	app.accountRegistryHandler = rollup.NewAccountRegistryHandler(app.keyPair.PublicKey())
+	if app.config.ChainId != nil && app.config.ChainId.IsUint64() && app.config.ChainId.Sign() > 0 {
+		app.accountRegistryHandler.SetChainID(app.config.ChainId.Uint64())
+	}
 	app.sendWorker = rollup.NewSendWorker(rollupStore, parentClient, app.keyPair, app.keyPair.PublicKey(), clusterID)
 	app.recvWorker = rollup.NewReceiveWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 	app.reclaimWorker = rollup.NewReclaimWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
@@ -380,6 +467,9 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	app.regRelay = rollup.NewRegistrationRelay(parentClient, app.keyPair.PublicKey(),
 		func(digest []byte) cm.Sign { return bls.Sign(app.keyPair.PrivateKey(), digest) },
 		stateDBAdapter.GetParentRegistered)
+	app.regRelay.SetProvisionalChecker(stateDBAdapter.GetProvisional)
+	app.regRelay.SetLockedChecker(stateDBAdapter.GetLocked)
+	app.regRelay.SetLockedHomeClusterChecker(stateDBAdapter.GetLockedHomeCluster)
 	if app.storageManager != nil && app.storageManager.GetStorageMapping() != nil {
 		store := rollup.NewKVRelayStore(durableKV{app.storageManager.GetStorageMapping()})
 		if err := app.regRelay.SetStore(store); err != nil {
@@ -418,23 +508,16 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		RecvCursor:  app.recvWorker.Cursor,
 	}
 	app.conservationRun = func() { app.conservation.Run(consInputs, consInterval, app.conservationStop) }
-	logger.Info("BLS conservation mode: %s (interval %s)", consMode, consInterval)
-	tx_processor.InitParentChainGatewayHandler(crossChainTransferDispatcherAdapter{
+	gateEnabled := app.config != nil && app.config.AccountGateParentRegistered()
+	tx_processor.InitParentChainGatewayHandlerWithGate(crossChainTransferDispatcherAdapter{
 		h:          app.crossNodeHandler,
 		sendWorker: app.sendWorker,
-	})
-
-	var rollupNonceMutex sync.Mutex
-	var rollupPendingNonce uint64
-	// In-flight system txs, keyed by (msgID, event type) -> nonce assigned. Guarded by
-	// rollupNonceMutex. See the eventProposer comment for why this exists.
-	type rollupInflightKey struct {
-		msgID e_common.Hash
-		typ   rollup.EventType
+	}, gateEnabled)
+	if h := tx_processor.GetParentChainGatewayHandler(); h != nil {
+		h.SetAccountGate(gateEnabled)
 	}
-	rollupInflight := map[rollupInflightKey]uint64{}
-	var rollupLastDBNonce uint64
-	rollupLastProgress := time.Now()
+
+	rollupNonceMgr := newRollupNonceManager()
 
 	// Attestations are signed with this validator's committee key (Databases.BLSPrivateKey, the key whose public half is
 	// the validator account's PublicKeyBls); single-key deployments fall back to the node key.
@@ -447,8 +530,14 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		}
 	}
 	app.regWorker.SetAttestationKey(attestKey)
+	if app.accountRegistryHandler != nil {
+		trustedKeys := []cm.PublicKey{app.keyPair.PublicKey()}
+		if attestKey != nil && attestKey.PublicKey() != app.keyPair.PublicKey() {
+			trustedKeys = append(trustedKeys, attestKey.PublicKey())
+		}
+		app.accountRegistryHandler.SetTrustedValidators(trustedKeys)
+	}
 
-	// P0-3 & Phase 2 (B4): Check attestation key ↔ on-chain validator account at startup
 	cfgAddr := e_common.HexToAddress(app.config.Address)
 	attestPub := attestKey.PublicKey()
 	if isVal, warn := tx_processor.VerifyNodeCommitteeKey(app.chainState, app.keyPair.Address(), cfgAddr, attestPub); isVal {
@@ -495,12 +584,12 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	}()
 
 	eventProposer := func(event rollup.Event, msgID e_common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash e_common.Hash) error {
-		rollupNonceMutex.Lock()
-		defer rollupNonceMutex.Unlock()
+		rollupNonceMgr.Lock()
+		defer rollupNonceMgr.Unlock()
 
 		state, err := app.chainState.GetAccountStateDB().AccountState(attestKey.Address())
 		var dbNonce uint64
-		if err == nil {
+		if err == nil && state != nil {
 			dbNonce = state.Nonce()
 		}
 		// Nonce allocation for system txs. TransactionPool keys on (sender, nonce), so two
@@ -520,25 +609,10 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		// The stall reset below is proposer-local retry hygiene only (no consensus decision
 		// depends on it): if the on-chain nonce makes no progress while events are in flight
 		// (e.g. a tx was dropped from the pool), forget them and start again from dbNonce.
-		if dbNonce != rollupLastDBNonce {
-			rollupLastDBNonce = dbNonce
-			rollupLastProgress = time.Now()
-		}
-		for k, n := range rollupInflight {
-			if n < dbNonce {
-				delete(rollupInflight, k)
-			}
-		}
-		if len(rollupInflight) > 0 && time.Since(rollupLastProgress) > 60*time.Second {
-			rollupInflight = map[rollupInflightKey]uint64{}
-			rollupLastProgress = time.Now()
-		}
 		inflightKey := rollupInflightKey{msgID: msgID, typ: event.Type}
-		if _, pending := rollupInflight[inflightKey]; pending {
+		assignedNonce, ok := rollupNonceMgr.PrepareNonce(inflightKey, dbNonce)
+		if !ok {
 			return nil
-		}
-		if len(rollupInflight) == 0 || rollupPendingNonce < dbNonce {
-			rollupPendingNonce = dbNonce
 		}
 
 		payload := rollup.RollupSystemPayload{
@@ -596,7 +670,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			nil,             // relatedAddresses
 			e_common.Hash{}, // lastDeviceKey
 			e_common.Hash{}, // newDeviceKey
-			rollupPendingNonce,
+			assignedNonce,
 			app.config.ChainId.Uint64(), // chainID: must match the real configured chain, not a
 			// hardcoded literal -- found live: hardcoded 1 was rejected with "invalid chain id"
 			// on this devnet, whose real ChainId is 991 (0x3df).
@@ -617,12 +691,15 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		// accepted into a pool nothing ever reads from, so it was silently never dispatched to
 		// RollupSystemHandler at all.
 		_, err = app.transactionProcessor.AddTransactionToPool(tx)
-		if err == nil {
-			rollupInflight[inflightKey] = rollupPendingNonce
-			rollupPendingNonce++
-			logger.Info("📡 [ROLLUP-PROPOSER] Proposed Event %T to Raft Tx Pool (Nonce %d)", event, tx.GetNonce())
+		if err != nil {
+			if freshState, sErr := app.chainState.GetAccountStateDB().AccountState(attestKey.Address()); sErr == nil && freshState != nil {
+				rollupNonceMgr.OnFailure(freshState.Nonce())
+			}
+			return err
 		}
-		return err
+		rollupNonceMgr.OnSuccess(inflightKey, assignedNonce)
+		logger.Info("📡 [ROLLUP-PROPOSER] Proposed Event %T to Raft Tx Pool (Nonce %d)", event, tx.GetNonce())
+		return nil
 	}
 
 	app.sendWorker.EventProposer = eventProposer
@@ -632,35 +709,20 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		return rollup.HasPendingAttestation(&smartContractDBAdapter{chainState: app.chainState},
 			parentchain.ParentChainID, user, app.keyPair.PublicKey(), parentSeq, attestKey.PublicKey())
 	}
-	app.regWorker.EventProposer = func(payload []byte) error {
-		rollupNonceMutex.Lock()
-		defer rollupNonceMutex.Unlock()
+	proposeRegPayload := func(payload []byte, kind string) error {
+		rollupNonceMgr.Lock()
+		defer rollupNonceMgr.Unlock()
 
 		state, err := app.chainState.GetAccountStateDB().AccountState(attestKey.Address())
 		var dbNonce uint64
-		if err == nil {
+		if err == nil && state != nil {
 			dbNonce = state.Nonce()
 		}
-		if dbNonce != rollupLastDBNonce {
-			rollupLastDBNonce = dbNonce
-			rollupLastProgress = time.Now()
-		}
-		for k, n := range rollupInflight {
-			if n < dbNonce {
-				delete(rollupInflight, k)
-			}
-		}
-		if len(rollupInflight) > 0 && time.Since(rollupLastProgress) > 60*time.Second {
-			rollupInflight = map[rollupInflightKey]uint64{}
-			rollupLastProgress = time.Now()
-		}
 		payloadHash := e_common.BytesToHash(crypto.Keccak256(payload))
-		inflightKey := rollupInflightKey{msgID: payloadHash, typ: rollup.EventType(rollup.SystemPayloadKindAccountRegistered)}
-		if _, pending := rollupInflight[inflightKey]; pending {
+		inflightKey := rollupInflightKey{msgID: payloadHash, typ: rollup.EventType(kind)}
+		assignedNonce, ok := rollupNonceMgr.PrepareNonce(inflightKey, dbNonce)
+		if !ok {
 			return nil
-		}
-		if len(rollupInflight) == 0 || rollupPendingNonce < dbNonce {
-			rollupPendingNonce = dbNonce
 		}
 
 		tx := transaction.NewTransaction(
@@ -674,19 +736,81 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			nil,
 			e_common.Hash{},
 			e_common.Hash{},
-			rollupPendingNonce,
+			assignedNonce,
 			app.config.ChainId.Uint64(),
 		)
 		tx.SetSign(attestKey.PrivateKey())
 
 		_, err = app.transactionProcessor.AddTransactionToPool(tx)
-		if err == nil {
-			rollupInflight[inflightKey] = rollupPendingNonce
-			rollupPendingNonce++
-			logger.Info("📡 [REGISTRATION-PROPOSER] Proposed account_registered event to Tx Pool (Nonce %d)", tx.GetNonce())
+		if err != nil {
+			if freshState, sErr := app.chainState.GetAccountStateDB().AccountState(attestKey.Address()); sErr == nil && freshState != nil {
+				rollupNonceMgr.OnFailure(freshState.Nonce())
+			}
+			return err
 		}
-		return err
+		rollupNonceMgr.OnSuccess(inflightKey, assignedNonce)
+		logger.Info("📡 [REGISTRATION-PROPOSER] Proposed %s event to Tx Pool (Nonce %d)", kind, tx.GetNonce())
+		return nil
 	}
+
+	app.regWorker.EventProposer = func(payload []byte) error {
+		return proposeRegPayload(payload, rollup.SystemPayloadKindAccountRegistered)
+	}
+
+	app.regRelay.SetProvisionalProposer(func(user e_common.Address, userSig []byte) error {
+		payload := rollup.AccountRegistrationPayload{
+			Kind:       rollup.SystemPayloadKindAccountProvisional,
+			User:       user,
+			ClusterKey: app.keyPair.PublicKey(),
+			UserSig:    userSig,
+		}
+		if ak := attestKey; ak != nil {
+			chainID := app.config.ChainId.Uint64()
+			if app.accountRegistryHandler != nil {
+				chainID = app.accountRegistryHandler.AttestChainID()
+			}
+			digest := rollup.ComputeAccountProvisionalAttestDigest(chainID, user, app.keyPair.PublicKey(), userSig)
+			payload.Attestations = []rollup.RegistrationAttestation{{
+				ValidatorPubkey: ak.PublicKey(),
+				Signature:       bls.Sign(ak.PrivateKey(), digest),
+			}}
+		}
+		data, err := payload.MarshalProto()
+		if err != nil {
+			return err
+		}
+		return proposeRegPayload(data, rollup.SystemPayloadKindAccountProvisional)
+	})
+
+	app.regRelay.SetLockProposer(func(user e_common.Address, homeCluster cm.PublicKey) error {
+		payload := rollup.AccountRegistrationPayload{
+			Kind:        rollup.SystemPayloadKindAccountLocked,
+			User:        user,
+			HomeCluster: homeCluster,
+		}
+		// Same signer preference as the other proposers (attestKey falls back to app.keyPair when no separate
+		// committee key is configured), so verifyAttestations sees the key registered in the committee.
+		signer := attestKey
+		if signer == nil {
+			signer = app.keyPair
+		}
+		if signer != nil {
+			chainID := app.config.ChainId.Uint64()
+			if app.accountRegistryHandler != nil {
+				chainID = app.accountRegistryHandler.AttestChainID()
+			}
+			digest := rollup.ComputeAccountLockedAttestDigest(chainID, user, homeCluster, 0)
+			payload.Attestations = []rollup.RegistrationAttestation{{
+				ValidatorPubkey: signer.PublicKey(),
+				Signature:       bls.Sign(signer.PrivateKey(), digest),
+			}}
+		}
+		data, err := payload.MarshalProto()
+		if err != nil {
+			return err
+		}
+		return proposeRegPayload(data, rollup.SystemPayloadKindAccountLocked)
+	})
 
 	if app.config.IsMining {
 		// 1. Khởi tạo EthTransactionBroadcaster

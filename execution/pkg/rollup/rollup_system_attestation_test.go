@@ -61,6 +61,20 @@ func (m *mockSysAccountDB) SetParentRegistered(addr common.Address, registered b
 	m.registered[addr] = registered
 }
 
+func (m *mockSysAccountDB) GetProvisional(addr common.Address) bool {
+	return false
+}
+
+func (m *mockSysAccountDB) SetProvisional(addr common.Address, provisional bool) {
+}
+
+func (m *mockSysAccountDB) GetLocked(addr common.Address) bool {
+	return false
+}
+
+func (m *mockSysAccountDB) SetLocked(addr common.Address, locked bool) {
+}
+
 type attestedSysEnv struct {
 	vals     []*bls.KeyPair
 	sc       *memSCDB

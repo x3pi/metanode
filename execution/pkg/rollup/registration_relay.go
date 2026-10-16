@@ -22,11 +22,12 @@ import (
 type RegistrationStatus string
 
 const (
-	RegStatusNone      RegistrationStatus = "NONE"      // no request known for this address
-	RegStatusPending   RegistrationStatus = "PENDING"   // accepted; being relayed to / confirmed by the Parent Chain
-	RegStatusConfirmed RegistrationStatus = "CONFIRMED" // Parent Chain registered this address to THIS cluster (flag set on-chain here)
-	RegStatusRejected  RegistrationStatus = "REJECTED"  // Parent Chain registered this address to ANOTHER cluster first
-	RegStatusFailed    RegistrationStatus = "FAILED"    // could not be relayed / confirmed; the user may resubmit
+	RegStatusNone        RegistrationStatus = "NONE"        // no request known for this address
+	RegStatusPending     RegistrationStatus = "PENDING"     // accepted; being relayed to / confirmed by the Parent Chain
+	RegStatusProvisional RegistrationStatus = "PROVISIONAL" // provisionally active on this cluster, pending Parent Chain confirmation
+	RegStatusConfirmed   RegistrationStatus = "CONFIRMED"   // Parent Chain registered this address to THIS cluster (flag set on-chain here)
+	RegStatusRejected    RegistrationStatus = "REJECTED"    // Parent Chain registered this address to ANOTHER cluster first
+	RegStatusFailed      RegistrationStatus = "FAILED"      // could not be relayed / confirmed; the user may resubmit
 )
 
 var (
@@ -227,10 +228,16 @@ func (m *MemoryKVStore) PrefixScan(prefix []byte) ([][2][]byte, error) {
 // ParentRegistered flag, which the RegistrationWorker applies from the parent's ordered registration events. All limits
 // are counts (queue length, tracked requests, attempts) — no wall-clock decides anything.
 type RegistrationRelay struct {
-	parent     RegistrationParent
-	clusterKey cm.PublicKey
-	sign       func(digest []byte) cm.Sign
-	registered func(common.Address) bool // reads the on-chain flag
+	parent        RegistrationParent
+	clusterKey    cm.PublicKey
+	sign          func(digest []byte) cm.Sign
+	registered    func(common.Address) bool // reads the on-chain ParentRegistered flag
+	isProvisional func(common.Address) bool // reads the on-chain Provisional flag
+	isLocked      func(common.Address) bool // reads the on-chain Locked flag
+	lockedHome    func(common.Address) cm.PublicKey
+
+	provisionalProposer func(user common.Address, userSig []byte) error
+	lockProposer        func(user common.Address, homeCluster cm.PublicKey) error
 
 	maxTracked  int
 	maxAttempts int
@@ -270,6 +277,42 @@ func NewRegistrationRelay(parent RegistrationParent, clusterKey cm.PublicKey, si
 	}
 }
 
+// SetProvisionalChecker configures the predicate to check if an address has provisional status on-chain.
+func (r *RegistrationRelay) SetProvisionalChecker(fn func(common.Address) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.isProvisional = fn
+}
+
+// SetLockedChecker configures the predicate to check if an address is locked on-chain.
+func (r *RegistrationRelay) SetLockedChecker(fn func(common.Address) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.isLocked = fn
+}
+
+// SetLockedHomeClusterChecker configures a durable lookup of the home cluster
+// recorded when an account was locked after Parent Chain reconciliation.
+func (r *RegistrationRelay) SetLockedHomeClusterChecker(fn func(common.Address) cm.PublicKey) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lockedHome = fn
+}
+
+// SetProvisionalProposer configures the proposer callback triggered when Parent Chain is offline.
+func (r *RegistrationRelay) SetProvisionalProposer(fn func(user common.Address, userSig []byte) error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.provisionalProposer = fn
+}
+
+// SetLockProposer configures the proposer callback triggered when an address is discovered to belong to another cluster.
+func (r *RegistrationRelay) SetLockProposer(fn func(user common.Address, homeCluster cm.PublicKey) error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lockProposer = fn
+}
+
 // SetStore attaches a durable store to the relay and reloads any unconfirmed requests.
 func (r *RegistrationRelay) SetStore(store RegistrationRelayStore) error {
 	if store == nil {
@@ -288,8 +331,8 @@ func (r *RegistrationRelay) SetStore(store RegistrationRelayStore) error {
 		if rec == nil || rec.User == (common.Address{}) {
 			continue
 		}
-		// Registered on-chain: Status() answers CONFIRMED from chain state, so the persisted record is dead weight.
-		if r.registered != nil && r.registered(rec.User) {
+		// Registered or locked on-chain: Status() answers CONFIRMED/REJECTED from chain state, so the persisted record is cleaned up.
+		if (r.registered != nil && r.registered(rec.User)) || (r.isLocked != nil && r.isLocked(rec.User)) {
 			_ = store.Delete(rec.User)
 			continue
 		}
@@ -314,8 +357,8 @@ func (r *RegistrationRelay) SetStore(store RegistrationRelayStore) error {
 		}
 		r.entries[rec.User] = entry
 
-		// Re-enqueue pending unsubmitted requests so they resume processing
-		if entry.status == RegStatusPending && !entry.submitted {
+		// Re-enqueue pending or provisional requests so they resume reconciliation with parent
+		if (entry.status == RegStatusPending || entry.status == RegStatusProvisional) && !entry.submitted {
 			select {
 			case r.queue <- entry.user:
 			default:
@@ -383,14 +426,20 @@ func (r *RegistrationRelay) verifyUserSig(user common.Address, sig []byte) bool 
 	return false
 }
 
-// Submit accepts a registration request. It is idempotent: an address that is already confirmed, pending or rejected
+// Submit accepts a registration request. It is idempotent: an address that is already confirmed, pending, provisional or rejected
 // returns that state without enqueueing again; a FAILED request is reset and re-queued.
 func (r *RegistrationRelay) Submit(user common.Address, userSig []byte) (RegistrationResult, error) {
 	if user == (common.Address{}) {
 		return RegistrationResult{}, errors.New("empty user address")
 	}
+	if r.isLocked != nil && r.isLocked(user) {
+		return RegistrationResult{Status: RegStatusRejected, Reason: "account is locked on-chain"}, nil
+	}
 	if r.registered != nil && r.registered(user) {
 		return RegistrationResult{Status: RegStatusConfirmed}, nil
+	}
+	if r.isProvisional != nil && r.isProvisional(user) {
+		return RegistrationResult{Status: RegStatusProvisional}, nil
 	}
 	if !r.verifyUserSig(user, userSig) {
 		return RegistrationResult{}, ErrInvalidRegistrationSig
@@ -401,7 +450,7 @@ func (r *RegistrationRelay) Submit(user common.Address, userSig []byte) (Registr
 
 	if e, ok := r.entries[user]; ok {
 		switch e.status {
-		case RegStatusPending, RegStatusRejected, RegStatusConfirmed:
+		case RegStatusPending, RegStatusProvisional, RegStatusRejected, RegStatusConfirmed:
 			return r.resultLocked(e), nil
 		}
 		// FAILED: allow a fresh attempt below
@@ -410,21 +459,43 @@ func (r *RegistrationRelay) Submit(user common.Address, userSig []byte) (Registr
 	}
 
 	e := &relayEntry{user: user, userSig: append([]byte(nil), userSig...), status: RegStatusPending, createdAt: time.Now()}
+	if err := r.saveLocked(e); err != nil {
+		return RegistrationResult{}, fmt.Errorf("failed to persist registration request: %w", err)
+	}
+
 	select {
 	case r.queue <- user:
 	default:
 		return RegistrationResult{}, ErrRegistrationBusy
 	}
 	r.entries[user] = e
-	r.saveLocked(e)
 	r.wake()
 	return r.resultLocked(e), nil
 }
 
 // Status reports the current state of an address. The on-chain flag always wins.
 func (r *RegistrationRelay) Status(user common.Address) RegistrationResult {
+	if r.isLocked != nil && r.isLocked(user) {
+		var home cm.PublicKey
+		if r.lockedHome != nil {
+			home = r.lockedHome(user)
+		}
+		if home != (cm.PublicKey{}) {
+			h := home
+			return RegistrationResult{Status: RegStatusRejected, HomeCluster: &h, Reason: "account is locked on-chain (registered to another cluster)"}
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if e, ok := r.entries[user]; ok && e.home != nil {
+			return r.resultLocked(e)
+		}
+		return RegistrationResult{Status: RegStatusRejected, Reason: "account is locked on-chain (registered to another cluster)"}
+	}
 	if r.registered != nil && r.registered(user) {
 		return RegistrationResult{Status: RegStatusConfirmed}
+	}
+	if r.isProvisional != nil && r.isProvisional(user) {
+		return RegistrationResult{Status: RegStatusProvisional}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -551,7 +622,7 @@ func (r *RegistrationRelay) submittedUsers(limit int) []common.Address {
 	defer r.mu.Unlock()
 	var out []common.Address
 	for u, e := range r.entries {
-		if e.status == RegStatusPending && e.submitted {
+		if (e.status == RegStatusPending || e.status == RegStatusProvisional) && e.submitted {
 			out = append(out, u)
 			if len(out) >= limit {
 				break
@@ -559,6 +630,27 @@ func (r *RegistrationRelay) submittedUsers(limit int) []common.Address {
 		}
 	}
 	return out
+}
+
+func (r *RegistrationRelay) markProvisionalIfApplied(user common.Address) {
+	r.mu.Lock()
+	checker := r.isProvisional
+	r.mu.Unlock()
+	if checker == nil || !checker(user) {
+		return
+	}
+
+	changed := false
+	r.update(user, func(e *relayEntry) {
+		if e.status == RegStatusPending {
+			e.status = RegStatusProvisional
+			e.reason = ""
+			changed = true
+		}
+	})
+	if changed {
+		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusProvisional})
+	}
 }
 
 func (r *RegistrationRelay) snapshot(user common.Address) (relayEntry, bool) {
@@ -580,9 +672,9 @@ func (r *RegistrationRelay) update(user common.Address, fn func(e *relayEntry)) 
 	}
 }
 
-func (r *RegistrationRelay) saveLocked(e *relayEntry) {
+func (r *RegistrationRelay) saveLocked(e *relayEntry) error {
 	if r.store == nil || e == nil {
-		return
+		return nil
 	}
 	var created int64
 	if !e.createdAt.IsZero() {
@@ -601,16 +693,27 @@ func (r *RegistrationRelay) saveLocked(e *relayEntry) {
 	}
 	if err := r.store.Put(rec); err != nil {
 		log.Printf("RegistrationRelay: failed to persist entry %s: %v", e.user.Hex(), err)
+		return err
 	}
+	return nil
 }
 
 // retryOrFail puts a request back for a later tick, or marks it FAILED once its attempts are exhausted.
+// If the account is provisional, network outages do not abandon reconciliation.
 func (r *RegistrationRelay) retryOrFail(user common.Address, reason string) {
 	failed := false
+	r.mu.Lock()
+	checker := r.isProvisional
+	r.mu.Unlock()
+
+	isProvOnChain := checker != nil && checker(user)
+
+	var isProv bool
 	r.update(user, func(e *relayEntry) {
+		isProv = isProvOnChain || e.status == RegStatusProvisional
 		e.attempts++
 		e.reason = reason
-		if e.attempts >= r.maxAttempts {
+		if !isProv && e.attempts >= r.maxAttempts {
 			e.status = RegStatusFailed
 			failed = true
 		}
@@ -623,15 +726,25 @@ func (r *RegistrationRelay) retryOrFail(user common.Address, reason string) {
 	select {
 	case r.queue <- user:
 	default:
-		r.update(user, func(e *relayEntry) { e.status = RegStatusFailed; e.reason = "queue full while retrying" })
-		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusFailed, Reason: "queue full while retrying"})
+		r.update(user, func(e *relayEntry) {
+			if !isProv {
+				e.status = RegStatusFailed
+			} else {
+				e.submitted = true
+				e.verifies = r.maxVerifies
+			}
+			e.reason = "queue full while retrying"
+		})
+		if !isProv {
+			r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusFailed, Reason: "queue full while retrying"})
+		}
 	}
 }
 
 // relayOne asks the parent who owns the address, and if nobody does, sends the cluster-signed registration.
 func (r *RegistrationRelay) relayOne(user common.Address) {
 	e, ok := r.snapshot(user)
-	if !ok || e.status != RegStatusPending {
+	if !ok || (e.status != RegStatusPending && e.status != RegStatusProvisional) {
 		return
 	}
 	if r.registered != nil && r.registered(user) {
@@ -639,10 +752,12 @@ func (r *RegistrationRelay) relayOne(user common.Address) {
 		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusConfirmed})
 		return
 	}
+	r.markProvisionalIfApplied(user)
 
 	home, found, err := r.parent.GetAccountRegistry(user)
 	if err != nil {
 		r.retryOrFail(user, fmt.Sprintf("parent registry lookup failed: %v", err))
+		r.maybeProposeProvisional(user, e.userSig, err)
 		return
 	}
 	if found {
@@ -653,16 +768,51 @@ func (r *RegistrationRelay) relayOne(user common.Address) {
 	digest := r.RegistrationDigest(user)
 	if _, err := r.parent.SendRegisterAccount(user, r.clusterKey, e.userSig, r.sign(digest)); err != nil {
 		r.retryOrFail(user, fmt.Sprintf("parent registration submit failed: %v", err))
+		r.maybeProposeProvisional(user, e.userSig, err)
 		return
 	}
 	r.update(user, func(e *relayEntry) { e.submitted = true; e.verifies = 0; e.reason = "" })
+}
+
+func isLocalConfigError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, parentchain.ErrNoNodesConfigured) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no parent chain nodes configured") ||
+		strings.Contains(msg, "private key not configured") ||
+		strings.Contains(msg, "private key is nil")
+}
+
+func (r *RegistrationRelay) maybeProposeProvisional(user common.Address, userSig []byte, parentErr error) {
+	if isLocalConfigError(parentErr) {
+		return
+	}
+	entry, ok := r.snapshot(user)
+	if !ok || entry.attempts < 2 || entry.status == RegStatusProvisional {
+		return
+	}
+	r.mu.Lock()
+	isProv := r.isProvisional
+	prop := r.provisionalProposer
+	r.mu.Unlock()
+
+	if isProv != nil && isProv(user) {
+		return
+	}
+	if prop != nil {
+		_ = prop(user, userSig)
+	}
 }
 
 // verifyOne polls the parent registry for a submitted request: the parent executes the registration after accepting the
 // transaction, and a duplicate (the address already belongs to another cluster) only shows up in its registry.
 func (r *RegistrationRelay) verifyOne(user common.Address) {
 	e, ok := r.snapshot(user)
-	if !ok || e.status != RegStatusPending || !e.submitted {
+	if !ok || (e.status != RegStatusPending && e.status != RegStatusProvisional) || !e.submitted {
 		return
 	}
 	if r.registered != nil && r.registered(user) {
@@ -670,28 +820,84 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusConfirmed})
 		return
 	}
+	r.markProvisionalIfApplied(user)
 	home, found, err := r.parent.GetAccountRegistry(user)
-	if err == nil && found {
+	if err != nil {
+		// Transient network or quorum error: log warning and retry on next poll without burning an attempt.
+		log.Printf("RegistrationRelay: transient lookup error for %s (will retry): %v", user.Hex(), err)
+		return
+	}
+	if found {
 		r.resolveFound(user, home)
 		return
 	}
 	failed := false
+	resubmit := false
+	r.mu.Lock()
+	isProvOnChain := r.isProvisional != nil && r.isProvisional(user)
+	r.mu.Unlock()
+
 	r.update(user, func(e *relayEntry) {
 		e.verifies++
 		if e.verifies >= r.maxVerifies {
-			e.status = RegStatusFailed
-			e.reason = "the parent chain did not register the account"
-			failed = true
+			if e.status == RegStatusProvisional || isProvOnChain {
+				e.status = RegStatusProvisional
+				e.submitted = false
+				e.verifies = 0
+				e.reason = "parent did not confirm registration within limit; retrying submission"
+				resubmit = true
+			} else {
+				e.status = RegStatusFailed
+				e.reason = "the parent chain did not register the account"
+				failed = true
+			}
 		}
 	})
 	if failed {
 		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusFailed, Reason: "the parent chain did not register the account"})
 	}
+	if resubmit {
+		select {
+		case r.queue <- user:
+			r.wake()
+		default:
+			r.update(user, func(e *relayEntry) {
+				e.submitted = true
+				e.verifies = r.maxVerifies
+				e.reason = "retry queue full; waiting to resubmit"
+			})
+		}
+	}
 }
 
 // resolveFound applies the parent's answer: ours ⇒ stay PENDING until the on-chain flag is applied by the
-// RegistrationWorker (Status then reports CONFIRMED); another cluster's ⇒ REJECTED.
+// RegistrationWorker (Status then reports CONFIRMED); another cluster's ⇒ propose lock event and wait for
+// the on-chain lock before marking REJECTED when a lock checker is configured.
 func (r *RegistrationRelay) resolveFound(user common.Address, home cm.PublicKey) {
+	if home != r.clusterKey {
+		r.mu.Lock()
+		lockProp := r.lockProposer
+		isLocked := r.isLocked
+		r.mu.Unlock()
+		// Re-proposing on every poll is bounded by the proposer: it dedups in-flight payloads by hash (same lock
+		// payload => no new tx until it commits or the 60s stall reset), so this cannot spam the pool.
+		if lockProp != nil && (isLocked == nil || !isLocked(user)) {
+			if err := lockProp(user, home); err != nil {
+				log.Printf("RegistrationRelay: failed to propose lock for %s (will retry): %v", user.Hex(), err)
+				r.retryOrFail(user, fmt.Sprintf("failed to propose account lock: %v", err))
+				return
+			}
+		}
+		if isLocked != nil && !isLocked(user) {
+			// Pool admission and partial co-attestations are not proof of execution.
+			// Keep polling even when the parent already had an owner at the first lookup.
+			r.update(user, func(e *relayEntry) {
+				e.submitted = true
+				e.reason = "waiting for account lock on-chain"
+			})
+			return
+		}
+	}
 	rejected := false
 	r.update(user, func(e *relayEntry) {
 		if home == r.clusterKey {

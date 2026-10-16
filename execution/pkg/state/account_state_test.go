@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/stretchr/testify/assert"
@@ -393,3 +394,58 @@ func TestAccountState_ParentRegistered_RootBackwardCompatibility(t *testing.T) {
 	assert.NotEqual(t, bytesFalse, bytesTrue, "Setting ParentRegistered=true must change the marshaled bytes/hash")
 }
 
+func TestAccountState_LockedHomeCluster_MarshalCopyRoundTrip(t *testing.T) {
+	as := NewAccountState(testAddr)
+	winner := p_common.PublicKey{1, 2, 3}
+	as.SetLocked(true)
+	as.SetLockedHomeCluster(winner)
+
+	data, err := as.Marshal()
+	require.NoError(t, err)
+
+	decoded := &AccountState{}
+	require.NoError(t, decoded.Unmarshal(data))
+	assert.True(t, decoded.IsLocked())
+	assert.Equal(t, winner, decoded.LockedHomeCluster())
+	assert.Equal(t, winner, as.Copy().LockedHomeCluster())
+
+	jsonState := &JsonAccountState{}
+	jsonState.FromAccountState(as.(*AccountState))
+	assert.Equal(t, winner, jsonState.ToAccountState().LockedHomeCluster())
+}
+
+func TestAccountState_GoldenBytes_DevCompatibility(t *testing.T) {
+	// Standard untouched account with balance 1000 and nonce 5
+	asNormal := NewAccountState(common.HexToAddress("0x1234567890123456789012345678901234567890"))
+	asNormal.AddBalance(big.NewInt(1000))
+	asNormal.SetNonce(5)
+
+	bNormal, err := asNormal.Marshal()
+	require.NoError(t, err)
+	// Fixed protobuf wire bytes: address, zero last hash, balance 1000,
+	// zero device key, and big-endian nonce 5. Unset fields must stay omitted.
+	const normalHex = "0a141234567890123456789012345678901234567890" +
+		"12200000000000000000000000000000000000000000000000000000000000000000" +
+		"1a0203e8" +
+		"32200000000000000000000000000000000000000000000000000000000000000000" +
+		"3a080000000000000005"
+	assert.Equal(t, common.FromHex(normalHex), bNormal)
+
+	// Account with ParentRegistered = true adds exactly 2 bytes (tag 10 + varint 1)
+	asRegistered := asNormal.Copy()
+	asRegistered.SetParentRegistered(true)
+	bReg, err := asRegistered.Marshal()
+	require.NoError(t, err)
+	assert.Equal(t, common.FromHex(normalHex+"5001"), bReg)
+
+	// Only an account with non-zero LockedHomeCluster should include field 13
+	asLocked := asNormal.Copy()
+	asLocked.SetLockedHomeCluster(p_common.PublicKey{1})
+	bLocked, err := asLocked.Marshal()
+	require.NoError(t, err)
+	const homeHex = "6a3001" +
+		"00000000000000000000000000000000" +
+		"00000000000000000000000000000000" +
+		"000000000000000000000000000000"
+	assert.Equal(t, common.FromHex(normalHex+homeHex), bLocked)
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"math/big"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
@@ -33,6 +34,10 @@ type AccountStateAccessor interface {
 	SetNonce(address common.Address, nonce uint64)
 	GetParentRegistered(address common.Address) bool
 	SetParentRegistered(address common.Address, registered bool)
+	GetProvisional(address common.Address) bool
+	SetProvisional(address common.Address, provisional bool)
+	GetLocked(address common.Address) bool
+	SetLocked(address common.Address, locked bool)
 }
 
 type liveAccountStateAccessor struct {
@@ -86,6 +91,33 @@ func (a *liveAccountStateAccessor) SetParentRegistered(address common.Address, r
 	_ = a.db.SetParentRegistered(address, registered)
 }
 
+func (a *liveAccountStateAccessor) GetProvisional(address common.Address) bool {
+	state, err := a.db.AccountState(address)
+	if err != nil || state == nil {
+		return false
+	}
+	return state.IsProvisional()
+}
+
+func (a *liveAccountStateAccessor) SetProvisional(address common.Address, provisional bool) {
+	_ = a.db.SetProvisional(address, provisional)
+}
+
+func (a *liveAccountStateAccessor) GetLocked(address common.Address) bool {
+	state, err := a.db.AccountState(address)
+	if err != nil || state == nil {
+		return false
+	}
+	return state.IsLocked()
+}
+
+func (a *liveAccountStateAccessor) SetLocked(address common.Address, locked bool) {
+	_ = a.db.SetLocked(address, locked)
+}
+
+func (a *liveAccountStateAccessor) SetLockedHomeCluster(address common.Address, homeCluster mt_common.PublicKey) {
+	_ = a.db.SetLockedHomeCluster(address, homeCluster)
+}
 
 // liveSmartContractDB adapts *smart_contract_db.SmartContractDB to rollup.SmartContractDB,
 // wrapping the barrier-tx call's own chainState.GetSmartContractDB() result. Has the exact same
@@ -144,6 +176,7 @@ type CrossChainTransferDispatcher interface {
 // ParentChainGatewayHandler handles transactions sent to PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS.
 type ParentChainGatewayHandler struct {
 	dispatcher CrossChainTransferDispatcher
+	ungated    atomic.Bool // default false: gate is active by default
 }
 
 var (
@@ -151,13 +184,36 @@ var (
 	onceParentChainGateway            sync.Once
 )
 
-// InitParentChainGatewayHandler initializes the singleton with a dispatcher.
+// isAccountGateEnabled returns true unless explicitly disabled via ungated policy.
+func (h *ParentChainGatewayHandler) isAccountGateEnabled() bool {
+	if h == nil {
+		return true
+	}
+	return !h.ungated.Load()
+}
+
+// InitParentChainGatewayHandler initializes the singleton with a dispatcher (gate active by default).
 func InitParentChainGatewayHandler(dispatcher CrossChainTransferDispatcher) {
+	InitParentChainGatewayHandlerWithGate(dispatcher, true)
+}
+
+// InitParentChainGatewayHandlerWithGate initializes the singleton with a dispatcher and accountGate setting.
+func InitParentChainGatewayHandlerWithGate(dispatcher CrossChainTransferDispatcher, accountGate bool) {
 	onceParentChainGateway.Do(func() {
 		parentChainGatewayHandlerInstance = &ParentChainGatewayHandler{
 			dispatcher: dispatcher,
 		}
 	})
+	if parentChainGatewayHandlerInstance != nil {
+		parentChainGatewayHandlerInstance.ungated.Store(!accountGate)
+	}
+}
+
+// SetAccountGate dynamically updates the account gate enforcement policy.
+func (h *ParentChainGatewayHandler) SetAccountGate(enabled bool) {
+	if h != nil {
+		h.ungated.Store(!enabled)
+	}
 }
 
 // GetParentChainGatewayHandler returns the singleton handler.
@@ -182,6 +238,17 @@ func (h *ParentChainGatewayHandler) HandleTransaction(
 		logger.Error("❌ ParentChainGatewayHandler: Dispatcher not initialized")
 		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
 		return h.errorReceipt(tx, "dispatcher not initialized"), nil, nil
+	}
+
+	if stateDB.GetLocked(tx.FromAddress()) {
+		logger.Error("❌ ParentChainGatewayHandler: sender account is locked: %s", tx.FromAddress().Hex())
+		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+		return h.errorReceipt(tx, "account is locked"), nil, nil
+	}
+	if h.isAccountGateEnabled() && !stateDB.GetParentRegistered(tx.FromAddress()) {
+		logger.Error("❌ ParentChainGatewayHandler: sender account %s is not confirmed on parent chain (provisional or unregistered cannot transfer cross-chain)", tx.FromAddress().Hex())
+		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+		return h.errorReceipt(tx, "account is not confirmed on parent chain"), nil, nil
 	}
 
 	// tx.Data() returns the raw wrapped bytes (still carrying the CallData envelope's own
@@ -250,7 +317,7 @@ func (h *ParentChainGatewayHandler) HandleTransaction(
 	}
 
 	// Note: HandleTransfer has already bumped the nonce inside the underlying stateDB.
-	
+
 	logger.Info("✅ ParentChainGatewayHandler: Transfer queued via barrier tx. MsgID: %s, To: %x", msgID.Hex(), destPubKey.Bytes()[:8])
 
 	rcp := receipt.NewReceipt(

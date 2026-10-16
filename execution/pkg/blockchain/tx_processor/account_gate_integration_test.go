@@ -74,6 +74,10 @@ func newGateCluster(t *testing.T, parent parentchain.Client) *gateCluster {
 	node.SetPublicKeyBls(kp.PublicKey().Bytes())
 	cs.GetAccountStateDB().SetState(node)
 
+	rec := state.NewAccountState(common.HexToAddress("0x456"))
+	rec.SetParentRegistered(true)
+	cs.GetAccountStateDB().SetState(rec)
+
 	addTestCommitteeValidator(t, cs, kp)
 	flushTestStake(t, cs)
 

@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"google.golang.org/protobuf/proto"
@@ -61,6 +62,9 @@ func NewQuorumClient(urls []string, privKey cm.PrivateKey, pubKey cm.PublicKey) 
 	if pubKey != (cm.PublicKey{}) {
 		sender = common.BytesToAddress(crypto.Keccak256(pubKey[:])[12:])
 	}
+	if len(cleanURLs) > 1 && (len(cleanURLs)-1)%3 != 0 {
+		logger.Warn("⚠️ [QUORUM-CLIENT] Warning: Parent Chain node count (%d) is not of canonical BFT form (3f + 1, e.g. 4, 7, 10). Safety is maintained with Q=%d, but liveness tolerance may be suboptimal.", len(cleanURLs), (len(cleanURLs)+(len(cleanURLs)-1)/3)/2+1)
+	}
 	return &QuorumClient{
 		urls:    cleanURLs,
 		clients: clients,
@@ -79,6 +83,31 @@ func (q *QuorumClient) quorumThreshold() int {
 	// For read attestation, matching responses must be >= f + 1.
 	f := (n - 1) / 3
 	return f + 1
+}
+
+// strongQuorumThreshold returns the minimum number of matching responses required for
+// critical ownership and state attestation (e.g. Account Registry ownership and StateRoot).
+// In a BFT system with N nodes and at most f Byzantine nodes (f = (N - 1) / 3):
+// To prevent Byzantine equivocation (where a Byzantine node lies to both sides to produce two
+// conflicting winning quorums Q1 and Q2), any two quorums must intersect in at least f + 1 nodes:
+//
+//	|Q1 ∩ Q2| = 2*Q - N >= f + 1  ==>  Q >= (N + f)/2 + 1
+//
+// When N is canonical (N = 3f + 1, e.g. 4, 7, 10):
+//
+//	(N + f)/2 + 1 = (3f + 1 + f)/2 + 1 = 2f + 1 = N - f.
+//	This simultaneously guarantees safety against equivocation and liveness up to f node failures.
+//
+// When N is non-canonical (e.g. 5, 6):
+//
+//	Q = (N + f)/2 + 1 strictly guarantees safety against split-brain equivocation.
+func (q *QuorumClient) strongQuorumThreshold() int {
+	n := len(q.clients)
+	if n <= 1 {
+		return 1
+	}
+	f := (n - 1) / 3
+	return (n+f)/2 + 1
 }
 
 // committedNonce returns the sender nonce attested by the parent chain: the (f+1)-th largest value among the
@@ -182,6 +211,7 @@ func (q *QuorumClient) SendRawTransaction(rawTx []byte) (common.Hash, error) {
 		}
 		lastErr = err
 	}
+	q.ResetNonce()
 	return common.Hash{}, fmt.Errorf("all nodes failed SendRawTransaction: %w", lastErr)
 }
 
@@ -655,24 +685,84 @@ func (q *QuorumClient) GetAccountRegistry(userAddress common.Address) (cm.Public
 	if len(q.clients) == 0 {
 		return cm.PublicKey{}, false, ErrNoNodesConfigured
 	}
+	type regItem struct {
+		key   cm.PublicKey
+		found bool
+		err   error
+	}
+	ch := make(chan regItem, len(q.clients))
 	for _, c := range q.clients {
-		key, found, err := c.GetAccountRegistry(userAddress)
-		if err == nil && found {
-			return key, true, nil
+		go func(cl *httpClient) {
+			key, found, err := cl.GetAccountRegistry(userAddress)
+			ch <- regItem{key: key, found: found, err: err}
+		}(c)
+	}
+
+	type regKey struct {
+		found bool
+		key   cm.PublicKey
+	}
+	counts := make(map[regKey]int)
+	threshold := q.strongQuorumThreshold()
+	var lastErr error
+
+	for i := 0; i < len(q.clients); i++ {
+		item := <-ch
+		if item.err != nil {
+			lastErr = item.err
+			continue
+		}
+		k := regKey{found: item.found, key: item.key}
+		counts[k]++
+		if counts[k] >= threshold {
+			return item.key, item.found, nil
 		}
 	}
-	return cm.PublicKey{}, false, nil
+	if lastErr != nil {
+		return cm.PublicKey{}, false, fmt.Errorf("%w: account registry quorum not reached for %s: %v", ErrQuorumNotReached, userAddress.Hex(), lastErr)
+	}
+	return cm.PublicKey{}, false, fmt.Errorf("%w: account registry quorum not reached for %s", ErrQuorumNotReached, userAddress.Hex())
 }
 
 func (q *QuorumClient) GetStateRoot(clusterPubKey cm.PublicKey, epoch uint64) (common.Hash, bool, error) {
 	if len(q.clients) == 0 {
 		return common.Hash{}, false, ErrNoNodesConfigured
 	}
+	type srItem struct {
+		root  common.Hash
+		found bool
+		err   error
+	}
+	ch := make(chan srItem, len(q.clients))
 	for _, c := range q.clients {
-		root, found, err := c.GetStateRoot(clusterPubKey, epoch)
-		if err == nil && found {
-			return root, true, nil
+		go func(cl *httpClient) {
+			root, found, err := cl.GetStateRoot(clusterPubKey, epoch)
+			ch <- srItem{root: root, found: found, err: err}
+		}(c)
+	}
+
+	type srKey struct {
+		found bool
+		root  common.Hash
+	}
+	counts := make(map[srKey]int)
+	threshold := q.strongQuorumThreshold()
+	var lastErr error
+
+	for i := 0; i < len(q.clients); i++ {
+		item := <-ch
+		if item.err != nil {
+			lastErr = item.err
+			continue
+		}
+		k := srKey{found: item.found, root: item.root}
+		counts[k]++
+		if counts[k] >= threshold {
+			return item.root, item.found, nil
 		}
 	}
-	return common.Hash{}, false, nil
+	if lastErr != nil {
+		return common.Hash{}, false, fmt.Errorf("%w: state root quorum not reached for epoch %d: %v", ErrQuorumNotReached, epoch, lastErr)
+	}
+	return common.Hash{}, false, fmt.Errorf("%w: state root quorum not reached for epoch %d", ErrQuorumNotReached, epoch)
 }

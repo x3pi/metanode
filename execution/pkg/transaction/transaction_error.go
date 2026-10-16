@@ -124,6 +124,10 @@ var (
 	ErrEnvelopeBindingMismatch = &TransactionError{88, "transaction fields do not match raw envelope"}
 	ErrInvalidEnvelope         = &TransactionError{89, "invalid raw envelope bytes"}
 	ErrInvalidBlobProof        = &TransactionError{90, "KZG proof verification failed"}
+
+	// Recipient gate and account lock errors
+	RecipientNotRegistered = &TransactionError{91, "recipient not registered on this cluster"}
+	AccountLocked          = &TransactionError{92, "account is locked on this cluster"}
 )
 
 var CodeToError = map[int64]*TransactionError{
@@ -225,6 +229,8 @@ var CodeToError = map[int64]*TransactionError{
 	88: ErrEnvelopeBindingMismatch,
 	89: ErrInvalidEnvelope,
 	90: ErrInvalidBlobProof,
+	91: RecipientNotRegistered,
+	92: AccountLocked,
 }
 
 // DescriptionToError provides reverse lookup from error description to TransactionError.
