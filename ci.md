@@ -191,4 +191,4 @@ Hệ thống CI tự động gửi thông báo về nhóm Telegram:
 - 🚨 **Báo lỗi tức thì:** Trích xuất log nguyên nhân lỗi nếu có bài test bị FAIL.
 - 🏁 **Tổng kết:** Bảng thống kê toàn bộ kết quả khi hoàn thành.
 
-Cấu hình bot token và chat ID tại file [`deploy/ci/ci_config.yaml`](file:///home/abc/nhat/con-chain-v2/metanode/deploy/ci/ci_config.yaml).
+Cấu hình bot token và chat ID tại file [`deploy/ci/ci_config.yaml`](./deploy/ci/ci_config.yaml).

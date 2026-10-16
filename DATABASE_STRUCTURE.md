@@ -1,52 +1,58 @@
-# Kiến trúc lưu trữ Database (Database Directory Structure)
+# Cấu Trúc Lưu Trữ Dữ Liệu (Node Storage & Database Structure)
 
-Hệ thống MetaNode lưu trữ dữ liệu tại `RootPath` được khai báo trong file `config.json`. Dựa trên vai trò của node trong mạng (Validator, RPC, Explorer), cấu trúc thư mục yêu cầu sẽ khác nhau.
-
----
-
-## 1. Node Đồng Thuận (Validator / Consensus Node)
-**Mục đích:** Chỉ tham gia xác thực giao dịch, biểu quyết block, không có nhu cầu tra cứu lịch sử xa (có thể bật `Pruning.Mode = "full"` để tiết kiệm ổ cứng).
-
-Các thư mục **bắt buộc (tối thiểu)** để node có thể chạy và đồng thuận:
-Nằm trong thư mục `consensus/`:
-- `account_state/`: Lưu trữ State của các tài khoản (số dư, nonce).
-- `trie_database/`: Lưu trữ Merkle Trie State Root (hoặc dùng NOMT cache nếu cấu hình `state_backend="nomt"`).
-- `smart_contract_code/`: Lưu trữ Bytecode của Smart Contracts.
-- `smart_contract_storage/`: Lưu trữ bộ nhớ State (storage) của các Smart Contracts.
-- `stake_db/`: Trạng thái Staking và Validator.
-- `backup_db/`: Buffer tạm thời dùng cho quá trình đồng bộ State từ các Node khác.
-- `xapian/`: (Tùy chọn) Index full-text search hỗ trợ cho Smart Contract nếu có.
-- Các thư mục khác: `wallets/`, `mapping/`, `backup_device_key_storage/`.
-
-> [!NOTE]
-> Node Đồng Thuận có thể cắt tỉa (prune) các dữ liệu lịch sử cũ. Thư mục `history/` chỉ cần giữ vài epoch gần nhất.
+Tài liệu này mô tả chi tiết cấu trúc thư mục lưu trữ trên đĩa (`data_dir`, ví dụ `/opt/metanode/node-X/data/` hoặc `execution/cmd/simple_chain/sample/nodeX/`) cho từng loại Node trong mạng lưới MetaNode (**Validator**, **SyncOnly / RPC**, và **Explorer**).
 
 ---
 
-## 2. Node RPC (RPC / Archive Node)
-**Mục đích:** Cho phép Client tra cứu lại **toàn bộ lịch sử** giao dịch từ Genesis block (cần bật `is_rpc_node: true` và `Pruning.Mode = "archive"`).
+## 1. Sơ Đồ Thư Mục Tổng Quan
 
-**Bao gồm toàn bộ thư mục của Node Đồng Thuận**, VÀ BỔ SUNG THÊM thư mục `history/`:
-- `history/blocks/`: Dữ liệu gốc (Header + Body) của toàn bộ các Block đã được tạo.
-- `history/receipts/`: Lưu trữ Transaction Receipts (event logs, gas used, execution status).
-- `history/transaction_block_number/`: Index ánh xạ: `TxHash -> BlockNumber` (Bắt buộc để API `eth_getTransactionByHash` biết giao dịch nằm ở block nào).
-- `history/blocks_hash/`: Ánh xạ `BlockNumber -> BlockHash`.
-- `history/block_hash_to_number/`: Ánh xạ `BlockHash -> BlockNumber`.
-- `history/txs_eth/`: Lưu trữ Raw Transaction bytes (Hex).
-- `history/transaction_state/`: Trạng thái chi tiết của Transaction.
-- `changelog_db_account/` & `changelog_db_stake/`: (Nằm ở cấp Root) Lưu lịch sử thay đổi (Changelog) của NOMT Trie, giúp truy vấn trạng thái tài khoản/stake ở một block bất kỳ trong quá khứ một cách cực nhanh.
+```text
+data/
+├── block_db/                # [PebbleDB] Block headers, block bodies, hash ↔ number index
+├── transaction_db/          # [PebbleDB] Raw transaction data, txHash → blockNumber/index
+├── receipt_db/              # [PebbleDB] Transaction receipts, gas used, return data & logs
+├── account_db/              # [PebbleDB] Account metadata, balance, nonce, storage root
+├── account_db_nomt/         # [Rust NOMT] Authenticated Binary Merkle Trie cho Account State
+├── stake_db/                # [PebbleDB] Validator stake, delegation & committee metadata
+├── stake_db_nomt/           # [Rust NOMT] Authenticated Binary Merkle Trie cho Stake State
+├── code_db/                 # [PebbleDB] EVM Smart Contract bytecode (codeHash → bytecode)
+├── smart_contract_db/       # [PebbleDB] EVM Contract storage key-value & metadata
+├── xapian_db/               # [C++ Xapian] Off-chain full-text search DB cho Xapian precompiles
+├── explorer_search_db/      # [C++ Xapian] Full-text index cho Block Explorer (chỉ bật trên Explorer Node)
+└── snapshot_data/           # [Snapshot] Dữ liệu phục vụ State/Commit Sync cho các node mới
+```
 
-> [!IMPORTANT]
-> Tiến trình `RPCHistorySync` sẽ liên tục chạy ngầm trên RPC Node để tải và "bù đắp" (backfill) các block/receipt còn thiếu vào thư mục `history/` nếu node được phục hồi từ Snapshot.
+*(Lưu ý: Trên các node chạy đồng thuận BFT, tầng Rust Consensus còn lưu trữ DAG per-epoch bằng RocksDB tại thư mục `storage/node_X/epoch_Y/` theo cấu hình `storage_path` trong `node_X.toml`).*
 
 ---
 
-## 3. Node Explorer (Explorer Node)
-**Mục đích:** Xử lý và đánh chỉ mục sâu (Deep Indexing) phục vụ hiển thị lên Web Explorer (cần cấu hình `is_explorer: true`).
+## 2. Phân Biệt Theo Vai Trò Node (Validator vs RPC vs Explorer)
 
-**Bao gồm toàn bộ thư mục của Node RPC**, VÀ BỔ SUNG THÊM cấu hình cơ sở dữ liệu riêng cho Explorer, được định nghĩa qua `config.json`:
-- `explorer_db_path`: Thư mục lưu trữ CSDL riêng của Explorer (thường lưu trữ Account Movements, Token Transfers, Event Index,... đã được bóc tách).
-- `explorer_read_only_db_path`: Thư mục read-only được API Web truy cập nhằm phân tải khỏi tiến trình Explorer Worker đang ghi.
+Tất cả các node (`Validator`, `SyncOnly` / `RPC`, `Explorer`) đều dùng chung một binary `simple_chain`. Sự khác biệt về các thư mục database trên đĩa phụ thuộc vào cờ cấu hình trong `config.json`:
 
-> [!TIP]
-> Do tính chất I/O rất lớn, thư mục `explorer_db_path` nên được đặt trên các ổ cứng NVMe tốc độ cao và tách biệt với CSDL Consensus.
+| Thư mục / Thành phần | Validator Node (`consensus_Validator`) | RPC / SyncOnly Node (`SyncOnly`) | Explorer Node (`EnableExplorerSearch=true`) | Công nghệ & Mục đích |
+| :--- | :---: | :---: | :---: | :--- |
+| **`block_db/`** | ✅ Có | ✅ Có | ✅ Có | **PebbleDB:** Lưu trữ Block Header, danh sách Tx Hashes và chỉ mục chiều cao khối. |
+| **`transaction_db/`** | ✅ Có | ✅ Có | ✅ Có | **PebbleDB:** Lưu trữ chi tiết giao dịch gốc phục vụ `eth_getTransactionByHash`. |
+| **`receipt_db/`** | ✅ Có | ✅ Có | ✅ Có | **PebbleDB:** Lưu trữ biên lai thực thi (`Receipt`), trạng thái thành công/lỗi và `EventLogs`. |
+| **`account_db/`** + **`account_db_nomt/`** | ✅ Có | ✅ Có | ✅ Có | **PebbleDB + Rust NOMT (`libmtn_nomt`):** Lưu trữ trạng thái tài khoản và cây Merkle xác thực (`stateRoot`, `eth_getProof`). |
+| **`stake_db/`** + **`stake_db_nomt/`** | ✅ Có | ✅ Có | ✅ Có | **PebbleDB + Rust NOMT (`libmtn_nomt`):** Lưu trữ trạng thái cổ phần Validator, ủy quyền (Delegation) và danh sách Ủy ban (Committee). |
+| **`code_db/`** | ✅ Có | ✅ Có | ✅ Có | **PebbleDB:** Lưu trữ mã máy (Bytecode) của các hợp đồng thông minh đã triển khai. |
+| **`smart_contract_db/`** | ✅ Có | ✅ Có | ✅ Có | **PebbleDB:** Lưu trữ biến trạng thái (Storage Slots) của hợp đồng thông minh EVM/MVM. |
+| **`xapian_db/`** | ✅ Có | ✅ Có | ✅ Có | **C++ Xapian:** Cơ sở dữ liệu tìm kiếm toàn văn cho các hợp đồng thông minh sử dụng Xapian precompile. |
+| **`snapshot_data/`** | ✅ Có | ✅ Có | ✅ Có | Lưu trữ các bản chụp trạng thái (State Snapshot) giúp node mới đồng bộ nhanh. |
+| **`explorer_search_db/`** | ❌ Không | ❌ Không *(trừ khi bật cờ)* | ✅ **Có** | **C++ Xapian (`ExplorerSearchService`):** Đánh chỉ mục toàn văn cho Block, Transaction, Address và Event Logs phục vụ giao diện Explorer. |
+
+---
+
+## 3. Các Tối Ưu Hóa Lưu Trữ Quan Trọng
+
+1. **Tích hợp NOMT (`account_db_nomt` & `stake_db_nomt`):**
+   - Thay thế cơ chế Merkle Patricia Trie (MPT) truyền thống bằng **NOMT (Nearly Optimal Merkle Trie)** viết bằng Rust và giao tiếp qua CGo FFI (`pkg/nomt_ffi`).
+   - Hỗ trợ tính toán `StateRoot` song song tốc độ cao và sinh bằng chứng Merkle (`eth_getProof`) trực tiếp từ trạng thái mới nhất.
+2. **Loại bỏ hoàn toàn `changelog_db_*` (Đã dọn dẹp):**
+   - Trong kiến trúc cũ, mỗi lần commit trạng thái phải ghi thêm lịch sử thay đổi vào `changelog_db_account/` và `changelog_db_stake/`.
+   - Với kiến trúc NOMT hiện tại, cây trạng thái xác thực được quản lý trực tiếp trong `*_nomt/`. Các thư mục `changelog_db_*` đã được loại bỏ hoàn toàn khỏi mã nguồn để giảm tới **50% chi phí Disk I/O** trong quá trình commit block.
+3. **Tối ưu hóa Đánh chỉ mục Explorer (`explorer_search_db/`):**
+   - Trên các node bật `EnableExplorerSearch` / `ExplorerFullData`, `ExplorerSearchService` sử dụng lời gọi CGo gộp đơn (`database_index_document`), truyền dữ liệu block trực tiếp qua bộ nhớ (`pendingIndexBlocks`) và gom mẻ `Commit()` mỗi 64 block để giảm thiểu chi phí cấp phát bộ nhớ và tải CPU.
+   - Trên các node **Validator** thuần túy, `EnableExplorerSearch` và `ExplorerFullData` luôn được tắt (`false`) để dành toàn bộ tài nguyên CPU/Disk I/O cho đồng thuận BFT và thực thi Block-STM.
