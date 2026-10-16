@@ -53,6 +53,90 @@ import (
 // FreeFeeAddresses is a list of addresses that can transact without fees
 var FreeFeeAddresses = map[e_common.Address]struct{}{}
 
+// rollupInflightKey identifies an in-flight system transaction by payload hash and event type.
+type rollupInflightKey struct {
+	msgID e_common.Hash
+	typ   rollup.EventType
+}
+
+// rollupNonceManager manages in-flight system transactions and sequential nonce assignment.
+// It deduplicates pending payloads, prunes committed nonces, and provides watchdog stall recovery.
+type rollupNonceManager struct {
+	mu           sync.Mutex
+	inflight     map[rollupInflightKey]uint64
+	pendingNonce uint64
+	lastDBNonce  uint64
+	lastProgress time.Time
+}
+
+func newRollupNonceManager() *rollupNonceManager {
+	return &rollupNonceManager{
+		inflight:     make(map[rollupInflightKey]uint64),
+		lastProgress: time.Now(),
+	}
+}
+
+func (m *rollupNonceManager) Lock() {
+	m.mu.Lock()
+}
+
+func (m *rollupNonceManager) Unlock() {
+	m.mu.Unlock()
+}
+
+// PrepareNonce checks if the key is already inflight.
+// If already inflight, returns ok=false (should skip proposing).
+// If not inflight, cleans up committed nonces (< dbNonce) and returns the allocated nonce with ok=true.
+// Must be called with Lock() held.
+func (m *rollupNonceManager) PrepareNonce(key rollupInflightKey, dbNonce uint64) (uint64, bool) {
+	if dbNonce != m.lastDBNonce {
+		m.lastDBNonce = dbNonce
+		m.lastProgress = time.Now()
+	}
+	for k, n := range m.inflight {
+		if n < dbNonce {
+			delete(m.inflight, k)
+		}
+	}
+	if len(m.inflight) > 0 && time.Since(m.lastProgress) > 60*time.Second {
+		m.inflight = make(map[rollupInflightKey]uint64)
+		m.lastProgress = time.Now()
+	}
+	if _, pending := m.inflight[key]; pending {
+		return 0, false
+	}
+	if len(m.inflight) == 0 || m.pendingNonce < dbNonce {
+		m.pendingNonce = dbNonce
+	}
+	return m.pendingNonce, true
+}
+
+// OnSuccess records the transaction as in-flight and advances pendingNonce.
+// Must be called with Lock() held.
+func (m *rollupNonceManager) OnSuccess(key rollupInflightKey, assignedNonce uint64) {
+	m.inflight[key] = assignedNonce
+	if m.pendingNonce <= assignedNonce {
+		m.pendingNonce = assignedNonce + 1
+	}
+}
+
+// OnFailure syncs state after a pool addition failure without dropping other valid in-flight transactions.
+// Must be called with Lock() held.
+func (m *rollupNonceManager) OnFailure(freshDBNonce uint64) {
+	if freshDBNonce != m.lastDBNonce {
+		m.lastDBNonce = freshDBNonce
+		m.lastProgress = time.Now()
+	}
+	for k, n := range m.inflight {
+		if n < freshDBNonce {
+			delete(m.inflight, k)
+		}
+	}
+	if m.pendingNonce < freshDBNonce {
+		m.pendingNonce = freshDBNonce
+	}
+}
+
 // App defines the main application structure
 type App struct {
 	// Configuration
@@ -433,17 +517,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		h.SetAccountGate(gateEnabled)
 	}
 
-	var rollupNonceMutex sync.Mutex
-	var rollupPendingNonce uint64
-	// In-flight system txs, keyed by (msgID, event type) -> nonce assigned. Guarded by
-	// rollupNonceMutex. See the eventProposer comment for why this exists.
-	type rollupInflightKey struct {
-		msgID e_common.Hash
-		typ   rollup.EventType
-	}
-	rollupInflight := map[rollupInflightKey]uint64{}
-	var rollupLastDBNonce uint64
-	rollupLastProgress := time.Now()
+	rollupNonceMgr := newRollupNonceManager()
 
 	// Attestations are signed with this validator's committee key (Databases.BLSPrivateKey, the key whose public half is
 	// the validator account's PublicKeyBls); single-key deployments fall back to the node key.
@@ -510,8 +584,8 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	}()
 
 	eventProposer := func(event rollup.Event, msgID e_common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash e_common.Hash) error {
-		rollupNonceMutex.Lock()
-		defer rollupNonceMutex.Unlock()
+		rollupNonceMgr.Lock()
+		defer rollupNonceMgr.Unlock()
 
 		state, err := app.chainState.GetAccountStateDB().AccountState(attestKey.Address())
 		var dbNonce uint64
@@ -535,25 +609,10 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		// The stall reset below is proposer-local retry hygiene only (no consensus decision
 		// depends on it): if the on-chain nonce makes no progress while events are in flight
 		// (e.g. a tx was dropped from the pool), forget them and start again from dbNonce.
-		if dbNonce != rollupLastDBNonce {
-			rollupLastDBNonce = dbNonce
-			rollupLastProgress = time.Now()
-		}
-		for k, n := range rollupInflight {
-			if n < dbNonce {
-				delete(rollupInflight, k)
-			}
-		}
-		if len(rollupInflight) > 0 && time.Since(rollupLastProgress) > 60*time.Second {
-			rollupInflight = map[rollupInflightKey]uint64{}
-			rollupLastProgress = time.Now()
-		}
 		inflightKey := rollupInflightKey{msgID: msgID, typ: event.Type}
-		if _, pending := rollupInflight[inflightKey]; pending {
+		assignedNonce, ok := rollupNonceMgr.PrepareNonce(inflightKey, dbNonce)
+		if !ok {
 			return nil
-		}
-		if len(rollupInflight) == 0 || rollupPendingNonce < dbNonce {
-			rollupPendingNonce = dbNonce
 		}
 
 		payload := rollup.RollupSystemPayload{
@@ -611,7 +670,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			nil,             // relatedAddresses
 			e_common.Hash{}, // lastDeviceKey
 			e_common.Hash{}, // newDeviceKey
-			rollupPendingNonce,
+			assignedNonce,
 			app.config.ChainId.Uint64(), // chainID: must match the real configured chain, not a
 			// hardcoded literal -- found live: hardcoded 1 was rejected with "invalid chain id"
 			// on this devnet, whose real ChainId is 991 (0x3df).
@@ -634,24 +693,11 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		_, err = app.transactionProcessor.AddTransactionToPool(tx)
 		if err != nil {
 			if freshState, sErr := app.chainState.GetAccountStateDB().AccountState(attestKey.Address()); sErr == nil && freshState != nil {
-				freshDbNonce := freshState.Nonce()
-				if freshDbNonce != rollupLastDBNonce {
-					rollupLastDBNonce = freshDbNonce
-					rollupLastProgress = time.Now()
-				}
-				for k, n := range rollupInflight {
-					if n < freshDbNonce {
-						delete(rollupInflight, k)
-					}
-				}
-				if rollupPendingNonce < freshDbNonce {
-					rollupPendingNonce = freshDbNonce
-				}
+				rollupNonceMgr.OnFailure(freshState.Nonce())
 			}
 			return err
 		}
-		rollupInflight[inflightKey] = rollupPendingNonce
-		rollupPendingNonce++
+		rollupNonceMgr.OnSuccess(inflightKey, assignedNonce)
 		logger.Info("📡 [ROLLUP-PROPOSER] Proposed Event %T to Raft Tx Pool (Nonce %d)", event, tx.GetNonce())
 		return nil
 	}
@@ -664,34 +710,19 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			parentchain.ParentChainID, user, app.keyPair.PublicKey(), parentSeq, attestKey.PublicKey())
 	}
 	proposeRegPayload := func(payload []byte, kind string) error {
-		rollupNonceMutex.Lock()
-		defer rollupNonceMutex.Unlock()
+		rollupNonceMgr.Lock()
+		defer rollupNonceMgr.Unlock()
 
 		state, err := app.chainState.GetAccountStateDB().AccountState(attestKey.Address())
 		var dbNonce uint64
 		if err == nil && state != nil {
 			dbNonce = state.Nonce()
 		}
-		if dbNonce != rollupLastDBNonce {
-			rollupLastDBNonce = dbNonce
-			rollupLastProgress = time.Now()
-		}
-		for k, n := range rollupInflight {
-			if n < dbNonce {
-				delete(rollupInflight, k)
-			}
-		}
-		if len(rollupInflight) > 0 && time.Since(rollupLastProgress) > 60*time.Second {
-			rollupInflight = map[rollupInflightKey]uint64{}
-			rollupLastProgress = time.Now()
-		}
 		payloadHash := e_common.BytesToHash(crypto.Keccak256(payload))
 		inflightKey := rollupInflightKey{msgID: payloadHash, typ: rollup.EventType(kind)}
-		if _, pending := rollupInflight[inflightKey]; pending {
+		assignedNonce, ok := rollupNonceMgr.PrepareNonce(inflightKey, dbNonce)
+		if !ok {
 			return nil
-		}
-		if len(rollupInflight) == 0 || rollupPendingNonce < dbNonce {
-			rollupPendingNonce = dbNonce
 		}
 
 		tx := transaction.NewTransaction(
@@ -705,7 +736,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			nil,
 			e_common.Hash{},
 			e_common.Hash{},
-			rollupPendingNonce,
+			assignedNonce,
 			app.config.ChainId.Uint64(),
 		)
 		tx.SetSign(attestKey.PrivateKey())
@@ -713,24 +744,11 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		_, err = app.transactionProcessor.AddTransactionToPool(tx)
 		if err != nil {
 			if freshState, sErr := app.chainState.GetAccountStateDB().AccountState(attestKey.Address()); sErr == nil && freshState != nil {
-				freshDbNonce := freshState.Nonce()
-				if freshDbNonce != rollupLastDBNonce {
-					rollupLastDBNonce = freshDbNonce
-					rollupLastProgress = time.Now()
-				}
-				for k, n := range rollupInflight {
-					if n < freshDbNonce {
-						delete(rollupInflight, k)
-					}
-				}
-				if rollupPendingNonce < freshDbNonce {
-					rollupPendingNonce = freshDbNonce
-				}
+				rollupNonceMgr.OnFailure(freshState.Nonce())
 			}
 			return err
 		}
-		rollupInflight[inflightKey] = rollupPendingNonce
-		rollupPendingNonce++
+		rollupNonceMgr.OnSuccess(inflightKey, assignedNonce)
 		logger.Info("📡 [REGISTRATION-PROPOSER] Proposed %s event to Tx Pool (Nonce %d)", kind, tx.GetNonce())
 		return nil
 	}

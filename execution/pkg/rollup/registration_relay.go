@@ -706,9 +706,11 @@ func (r *RegistrationRelay) retryOrFail(user common.Address, reason string) {
 	checker := r.isProvisional
 	r.mu.Unlock()
 
+	isProvOnChain := checker != nil && checker(user)
+
 	var isProv bool
 	r.update(user, func(e *relayEntry) {
-		isProv = (checker != nil && checker(user)) || e.status == RegStatusProvisional
+		isProv = isProvOnChain || e.status == RegStatusProvisional
 		e.attempts++
 		e.reason = reason
 		if !isProv && e.attempts >= r.maxAttempts {

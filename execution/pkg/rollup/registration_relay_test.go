@@ -869,6 +869,3 @@ func TestReview5_RetryOrFail_NonProvisionalFailsEvenWithProposerConfigured(t *te
 	require.True(t, ok)
 	assert.Equal(t, RegStatusFailed, entry.status, "Non-provisional request must reach FAILED once maxAttempts exhausted")
 }
-
-
-
