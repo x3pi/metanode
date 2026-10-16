@@ -699,14 +699,16 @@ func (r *RegistrationRelay) saveLocked(e *relayEntry) error {
 }
 
 // retryOrFail puts a request back for a later tick, or marks it FAILED once its attempts are exhausted.
-// If provisional mode is active or the account is provisional, network outages do not abandon reconciliation.
+// If the account is provisional, network outages do not abandon reconciliation.
 func (r *RegistrationRelay) retryOrFail(user common.Address, reason string) {
 	failed := false
 	r.mu.Lock()
-	isProv := (r.isProvisional != nil && r.isProvisional(user)) || r.provisionalProposer != nil
+	checker := r.isProvisional
 	r.mu.Unlock()
 
+	var isProv bool
 	r.update(user, func(e *relayEntry) {
+		isProv = (checker != nil && checker(user)) || e.status == RegStatusProvisional
 		e.attempts++
 		e.reason = reason
 		if !isProv && e.attempts >= r.maxAttempts {

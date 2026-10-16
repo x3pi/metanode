@@ -509,20 +509,6 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		}
 	}()
 
-	isRollupNonceError := func(err error) bool {
-		if err == nil {
-			return false
-		}
-		if errors.Is(err, transaction.ErrNonceTooLow) ||
-			errors.Is(err, transaction.ErrNonceTooHigh) ||
-			errors.Is(err, transaction.InvalidNonce) ||
-			errors.Is(err, transaction.ErrNonceUintOverflow) {
-			return true
-		}
-		msg := strings.ToLower(err.Error())
-		return strings.Contains(msg, "nonce")
-	}
-
 	eventProposer := func(event rollup.Event, msgID e_common.Hash, sourceSeq uint64, sourcePubKey cm.PublicKey, destPubKey cm.PublicKey, payloadHash e_common.Hash) error {
 		rollupNonceMutex.Lock()
 		defer rollupNonceMutex.Unlock()
@@ -647,16 +633,20 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		// RollupSystemHandler at all.
 		_, err = app.transactionProcessor.AddTransactionToPool(tx)
 		if err != nil {
-			if isRollupNonceError(err) {
-				if freshState, sErr := app.chainState.GetAccountStateDB().AccountState(attestKey.Address()); sErr == nil && freshState != nil {
-					dbNonce = freshState.Nonce()
+			if freshState, sErr := app.chainState.GetAccountStateDB().AccountState(attestKey.Address()); sErr == nil && freshState != nil {
+				freshDbNonce := freshState.Nonce()
+				if freshDbNonce != rollupLastDBNonce {
+					rollupLastDBNonce = freshDbNonce
+					rollupLastProgress = time.Now()
 				}
-				logger.Warn("⚠️ [ROLLUP-PROPOSER] Nonce error detected (%v), resetting pending nonce from %d to on-chain dbNonce %d",
-					err, rollupPendingNonce, dbNonce)
-				rollupInflight = map[rollupInflightKey]uint64{}
-				rollupPendingNonce = dbNonce
-				rollupLastDBNonce = dbNonce
-				rollupLastProgress = time.Now()
+				for k, n := range rollupInflight {
+					if n < freshDbNonce {
+						delete(rollupInflight, k)
+					}
+				}
+				if rollupPendingNonce < freshDbNonce {
+					rollupPendingNonce = freshDbNonce
+				}
 			}
 			return err
 		}
@@ -722,16 +712,20 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 
 		_, err = app.transactionProcessor.AddTransactionToPool(tx)
 		if err != nil {
-			if isRollupNonceError(err) {
-				if freshState, sErr := app.chainState.GetAccountStateDB().AccountState(attestKey.Address()); sErr == nil && freshState != nil {
-					dbNonce = freshState.Nonce()
+			if freshState, sErr := app.chainState.GetAccountStateDB().AccountState(attestKey.Address()); sErr == nil && freshState != nil {
+				freshDbNonce := freshState.Nonce()
+				if freshDbNonce != rollupLastDBNonce {
+					rollupLastDBNonce = freshDbNonce
+					rollupLastProgress = time.Now()
 				}
-				logger.Warn("⚠️ [REGISTRATION-PROPOSER] Nonce error detected (%v), resetting pending nonce from %d to on-chain dbNonce %d",
-					err, rollupPendingNonce, dbNonce)
-				rollupInflight = map[rollupInflightKey]uint64{}
-				rollupPendingNonce = dbNonce
-				rollupLastDBNonce = dbNonce
-				rollupLastProgress = time.Now()
+				for k, n := range rollupInflight {
+					if n < freshDbNonce {
+						delete(rollupInflight, k)
+					}
+				}
+				if rollupPendingNonce < freshDbNonce {
+					rollupPendingNonce = freshDbNonce
+				}
 			}
 			return err
 		}

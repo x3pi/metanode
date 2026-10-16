@@ -844,4 +844,31 @@ QueueFilled:
 	assert.Equal(t, h.relay.maxVerifies, entry.verifies)
 }
 
+func TestReview5_RetryOrFail_NonProvisionalFailsEvenWithProposerConfigured(t *testing.T) {
+	h := newRelayHarness()
+	h.relay.maxAttempts = 3
+	user, sig := h.userSig(t)
+
+	// Even if provisionalProposer is configured (standard in production),
+	// an account that is not provisional must still transition to FAILED when attempts exhaust.
+	h.relay.SetProvisionalProposer(func(u common.Address, us []byte) error {
+		return nil
+	})
+	h.relay.SetProvisionalChecker(func(a common.Address) bool {
+		return false
+	})
+
+	_, err := h.relay.Submit(user, sig)
+	require.NoError(t, err)
+
+	for i := 0; i < h.relay.maxAttempts; i++ {
+		h.relay.retryOrFail(user, "persistent error")
+	}
+
+	entry, ok := h.relay.snapshot(user)
+	require.True(t, ok)
+	assert.Equal(t, RegStatusFailed, entry.status, "Non-provisional request must reach FAILED once maxAttempts exhausted")
+}
+
+
 
