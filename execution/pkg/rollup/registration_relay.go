@@ -879,6 +879,8 @@ func (r *RegistrationRelay) resolveFound(user common.Address, home cm.PublicKey)
 		lockProp := r.lockProposer
 		isLocked := r.isLocked
 		r.mu.Unlock()
+		// Re-proposing on every poll is bounded by the proposer: it dedups in-flight payloads by hash (same lock
+		// payload => no new tx until it commits or the 60s stall reset), so this cannot spam the pool.
 		if lockProp != nil && (isLocked == nil || !isLocked(user)) {
 			if err := lockProp(user, home); err != nil {
 				log.Printf("RegistrationRelay: failed to propose lock for %s (will retry): %v", user.Hex(), err)
