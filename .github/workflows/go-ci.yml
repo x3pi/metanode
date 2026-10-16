@@ -23,9 +23,9 @@ jobs:
       run:
         working-directory: execution
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: execution/go.mod
           cache-dependency-path: execution/go.sum
@@ -39,7 +39,7 @@ jobs:
           workspaces: "."
 
       - name: Cache C++ MVM builds
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             execution/pkg/mvm/c_mvm/build

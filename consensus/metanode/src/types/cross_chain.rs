@@ -11,11 +11,19 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-uint::construct_uint! {
-    /// 256-bit unsigned integer type for balances, allocations, and asset IDs.
-    #[derive(Serialize, Deserialize)]
-    pub struct U256(4);
+// `uint` 0.10 expands to deprecated `max_value()` / `std::isize::MAX` and a trailing-semicolon macro that newer
+// rustc versions warn about. The warnings come from the vendored macro, not from our code, so they are scoped here.
+#[allow(deprecated, unknown_lints, semicolon_in_expressions_from_non_local_macros)]
+mod u256 {
+    use super::{Deserialize, Serialize};
+
+    uint::construct_uint! {
+        /// 256-bit unsigned integer type for balances, allocations, and asset IDs.
+        #[derive(Serialize, Deserialize)]
+        pub struct U256(4);
+    }
 }
+pub use u256::U256;
 
 /// 20-byte Ethereum-compatible account address
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
