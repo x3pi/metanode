@@ -331,7 +331,7 @@ cd deploy/ansible
 Profile `inventory.chain2.yml` triển khai một blockchain hoàn toàn độc lập (gọi là **Chain 2**), sử dụng 4 validator nodes (`m5`, `m6`, `m7`, `m8`) với bộ cổng và tài nguyên tách biệt 100% so với Chain gốc (`m0–m4`):
 
 - **Thông số mạng Chain 2:**
-  - Chain ID: `991` (Chain gốc là `990` hoặc tùy chọn)
+  - Chain ID: `991` (tùy chọn, đặt trong inventory)
   - RPC HTTP: `10751 - 10754` (vd: `http://<IP>:10751`)
   - WebSocket: `ws://<IP>:10751/ws` - `10754/ws`
   - Go TCP Consensus P2P: `6205 - 6208`

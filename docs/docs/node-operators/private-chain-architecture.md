@@ -51,7 +51,7 @@ Private Chain chạy với 1 Validator độc lập hoặc cụm Validator nội
 
 - **Ưu điểm:**
   - **Chi phí thấp nhất & Dễ triển khai nhất:** Chỉ cần 1 lệnh script (`init_private_chain.sh`) là có thể khởi chạy một mạng blockchain hoàn chỉnh.
-  - **Latency siêu thấp (<1s):** Phù hợp tuyệt đối cho môi trường Dev, Staging, hoặc hệ thống nội bộ doanh nghiệp closed-loop.
+  - **Latency siêu thấp (&lt;1s):** Phù hợp tuyệt đối cho môi trường Dev, Staging, hoặc hệ thống nội bộ doanh nghiệp closed-loop.
 - **Nhược điểm:**
   - Cần nộp Checkpoint Digest định kỳ lên Public Chain để ngăn chặn việc chỉnh sửa lịch sử dữ liệu (Data Tampering).
 
@@ -286,9 +286,9 @@ Hầu hết các server hiện nay bị giới hạn bởi tốc độ card mạ
 
 - **Trên đường truyền 1 Gbps (Tốc độ thực tế ~125 MB/s):**
   - Nếu mỗi người dùng Upload/Download ở tốc độ **10 Mbps (~1.25 MB/s)**:
-    $$\text{Tối đa đồng thời} = \frac{1000 \text{ Mbps}}{10 \text{ Mbps}} = \mathbf{100 \text{ người cùng lúc}}$$
+    Tối đa đồng thời = 1000 Mbps / 10 Mbps = **100 người cùng lúc**
   - Nếu mỗi người dùng ứng dụng di động/web tải nhẹ ở tốc độ **1 Mbps (~125 KB/s)**:
-    $$\text{Tối đa đồng thời} = \frac{1000 \text{ Mbps}}{1 \text{ Mbps}} = \mathbf{1,000 \text{ người cùng lúc}}$$
+    Tối đa đồng thời = 1000 Mbps / 1 Mbps = **1.000 người cùng lúc**
 - **Khi nâng cấp lên đường truyền 10 Gbps (~1,250 MB/s):**
   - Số người dùng đồng thời ở tốc độ 10 Mbps/người sẽ đạt: **1,000 người cùng lúc**.
 
