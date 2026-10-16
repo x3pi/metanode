@@ -788,9 +788,11 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 			User:        user,
 			HomeCluster: homeCluster,
 		}
-		signer := app.keyPair
+		// Same signer preference as the other proposers (attestKey falls back to app.keyPair when no separate
+		// committee key is configured), so verifyAttestations sees the key registered in the committee.
+		signer := attestKey
 		if signer == nil {
-			signer = attestKey
+			signer = app.keyPair
 		}
 		if signer != nil {
 			chainID := app.config.ChainId.Uint64()
