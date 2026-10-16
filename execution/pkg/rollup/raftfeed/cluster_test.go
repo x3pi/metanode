@@ -388,6 +388,24 @@ func nonceOf(t *testing.T, blk *pb.ExecutableBlock) uint64 {
 // assertIdentical: every member received exactly the same block stream, byte for byte.
 func (h *harness) assertIdentical(members ...*member) {
 	h.t.Helper()
+	// Replication is asynchronous: a replica may still be applying the last committed block (or a re-offered
+	// duplicate batch) when the caller's waitBlocks returned. Give the counts time to converge; a count that never
+	// converges, or any content difference, still fails below.
+	wait := 5 * time.Second
+	if runtime.NumCPU() <= 2 || os.Getenv("CI") != "" {
+		wait = 20 * time.Second
+	}
+	for deadline := time.Now().Add(wait); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		same := true
+		for _, m := range members[1:] {
+			if len(m.disk.blocks()) != len(members[0].disk.blocks()) {
+				same = false
+			}
+		}
+		if same {
+			break
+		}
+	}
 	ref := members[0].disk.blocks()
 	for _, m := range members[1:] {
 		got := m.disk.blocks()
