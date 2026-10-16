@@ -9,6 +9,7 @@ Thư mục này lưu trữ sổ cái kiểm chứng kỹ thuật (`CLAIMS_LEDGER
 - **[`CLAIMS_LEDGER.md`](./CLAIMS_LEDGER.md):** Sổ cái tổng hợp toàn bộ các khẳng định kỹ thuật và số liệu hiệu năng đã được kiểm chứng thực nghiệm (`RE-VERIFIED`, `EXPLAINED`, `RESOLVED`, `OPEN`).
 - **[`evidence/`](./evidence/):** Các gói dữ liệu thô (`MANIFEST.json`, `PREREGISTERED.md`, log đo A/B, pprof profiles) được xác thực tự động bằng `execution/scripts/test/evidence/verify_evidence.py --strict`.
 - **Các báo cáo đo đạc chính:**
+  - [`readloop_gate_explorer_pacing_report_20261016.md`](./readloop_gate_explorer_pacing_report_20261016.md) — Backpressure lớp sớm tại `Connection.readLoop` (`ConnRequestChanSize = 16`), điều tiết `indexSingleBlock` -> `s.indexQueue` (`ExplorerQueueSize = 65536`, chờ tối đa `50ms`) và gom lô `explorerSvc.Commit()` mỗi 64 block.
   - [`cgocall_backpressure_explorer_report_20261015.md`](./cgocall_backpressure_explorer_report_20261015.md) — Phân rã `runtime.cgocall`, tối ưu 1-call CGO `goxapian`, JSON Explorer tĩnh và Backpressure lớp nhận Tx (`ReceiptTracker.InFlightTxCount`).
   - [`backlog_gc_followup_report_20261015.md`](./backlog_gc_followup_report_20261015.md) — Thu gọn đối tượng giữ trên heap Go (`ExecuteSCResult`, 64-shard caches) và đo A/B ở mức tải 1M & 4M tx.
   - [`node_profile_backlog_raft_report_20261014.md`](./node_profile_backlog_raft_report_20261014.md) & [`node_ab_old_vs_new_report_20261014.md`](./node_ab_old_vs_new_report_20261014.md) — Đối chiếu hiệu năng BFT/Raft và phân tích backlog.

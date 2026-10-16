@@ -1,0 +1,1287 @@
+================================================================================
+PROFILE: 1M_PREV
+================================================================================
+
+--- 1M_PREV_CPU30: TOP 30 CUMULATIVE ---
+File: simple_chain
+Build ID: 6fe4f6f036ecc0f66a0022405f150123c221aad0
+Type: cpu
+Time: 2026-10-16 02:22:16 UTC
+Duration: 30.18s, Total samples = 292.23s (968.25%)
+Showing nodes accounting for 184.05s, 62.98% of 292.23s total
+Dropped 1462 nodes (cum <= 1.46s)
+Showing top 30 nodes out of 183
+      flat  flat%   sum%        cum   cum%
+    97.99s 33.53% 33.53%     98.35s 33.65%  runtime.cgocall
+         0     0% 33.53%     63.83s 21.84%  runtime._ExternalCode
+         0     0% 33.53%     59.92s 20.50%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+     0.07s 0.024% 33.56%     59.77s 20.45%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+     0.04s 0.014% 33.57%     49.75s 17.02%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.ValidateEnvelopeBindingsParallel.func1
+         0     0% 33.57%     49.36s 16.89%  github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+     0.01s 0.0034% 33.57%     49.35s 16.89%  github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+     0.02s 0.0068% 33.58%     49.26s 16.86%  github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+    47.04s 16.10% 49.68%     47.04s 16.10%  [simple_chain]
+     0.02s 0.0068% 49.68%     45.05s 15.42%  github.com/meta-node-blockchain/meta-node/pkg/transaction.ValidateEnvelopeBinding
+     0.01s 0.0034% 49.69%     45.03s 15.41%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateEnvelopeBindingTx (inline)
+     0.01s 0.0034% 49.69%     45.02s 15.41%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateProtoEnvelopeBinding
+     0.08s 0.027% 49.72%     42.81s 14.65%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateDirectEnvelopeBinding
+     0.11s 0.038% 49.76%     39.03s 13.36%  github.com/ethereum/go-ethereum/core/types.Sender
+     0.03s  0.01% 49.77%     38.35s 13.12%  github.com/ethereum/go-ethereum/core/types.(*modernSigner).Sender
+     0.01s 0.0034% 49.77%     36.74s 12.57%  github.com/ethereum/go-ethereum/core/types.recoverPlain
+         0     0% 49.77%     35.87s 12.27%  github.com/ethereum/go-ethereum/crypto.Ecrecover (inline)
+     0.02s 0.0068% 49.78%     35.87s 12.27%  github.com/ethereum/go-ethereum/crypto/secp256k1.RecoverPubkey
+         0     0% 49.78%     35.79s 12.25%  github.com/ethereum/go-ethereum/crypto/secp256k1.RecoverPubkey.func1
+         0     0% 49.78%     35.75s 12.23%  github.com/ethereum/go-ethereum/crypto/secp256k1._Cfunc_secp256k1_ext_ecdsa_recover
+     6.71s  2.30% 52.07%     23.87s  8.17%  runtime.mallocgc
+         0     0% 52.07%     19.25s  6.59%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).TxsProcessor2
+     0.02s 0.0068% 52.08%     19.25s  6.59%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxBatchForwarder).StartForwardingLoop
+     0.17s 0.058% 52.14%     18.28s  6.26%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub
+    16.64s  5.69% 57.83%     16.64s  5.69%  [libc.so.6]
+     0.17s 0.058% 57.89%     15.33s  5.25%  github.com/ethereum/go-ethereum/crypto.Keccak256Hash
+     0.03s  0.01% 57.90%     15.24s  5.22%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func1.1
+     0.06s 0.021% 57.92%     15.21s  5.20%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func3
+     0.01s 0.0034% 57.92%     14.79s  5.06%  golang.org/x/crypto/sha3.(*state).permute (inline)
+    14.78s  5.06% 62.98%     14.78s  5.06%  golang.org/x/crypto/sha3.keccakF1600
+
+
+--- 1M_PREV_CPU30: TOP 30 FLAT ---
+File: simple_chain
+Build ID: 6fe4f6f036ecc0f66a0022405f150123c221aad0
+Type: cpu
+Time: 2026-10-16 02:22:16 UTC
+Duration: 30.18s, Total samples = 292.23s (968.25%)
+Showing nodes accounting for 237.26s, 81.19% of 292.23s total
+Dropped 1462 nodes (cum <= 1.46s)
+Showing top 30 nodes out of 183
+      flat  flat%   sum%        cum   cum%
+    97.99s 33.53% 33.53%     98.35s 33.65%  runtime.cgocall
+    47.04s 16.10% 49.63%     47.04s 16.10%  [simple_chain]
+    16.64s  5.69% 55.32%     16.64s  5.69%  [libc.so.6]
+    14.78s  5.06% 60.38%     14.78s  5.06%  golang.org/x/crypto/sha3.keccakF1600
+    11.92s  4.08% 64.46%     11.92s  4.08%  runtime.memmove
+     9.76s  3.34% 67.80%      9.76s  3.34%  runtime.memclrNoHeapPointers
+     6.71s  2.30% 70.10%     23.87s  8.17%  runtime.mallocgc
+     4.99s  1.71% 71.80%      7.78s  2.66%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress
+     3.53s  1.21% 73.01%      6.02s  2.06%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Hash
+     2.75s  0.94% 73.95%      4.90s  1.68%  github.com/cockroachdb/pebble/internal/arenaskl.(*Skiplist).findSpliceForLevel
+     2.30s  0.79% 74.74%      9.56s  3.27%  runtime.gcDrain
+     2.28s  0.78% 75.52%      2.79s  0.95%  runtime.mapaccess2
+     2.22s  0.76% 76.28%      2.22s  0.76%  cmpbody
+     2.11s  0.72% 77.00%      2.12s  0.73%  sync/atomic.(*Int32).Add (inline)
+     1.94s  0.66% 77.66%      1.94s  0.66%  internal/runtime/syscall.Syscall6
+     1.93s  0.66% 78.33%      1.93s  0.66%  runtime.nextFreeFast (inline)
+     1.34s  0.46% 78.78%      6.23s  2.13%  runtime.scanobject
+     1.19s  0.41% 79.19%      1.92s  0.66%  sync.(*RWMutex).Lock
+     1.05s  0.36% 79.55%      2.98s  1.02%  runtime.stealWork
+     0.76s  0.26% 79.81%      2.98s  1.02%  runtime.mapassign
+     0.56s  0.19% 80.00%      3.69s  1.26%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.(*TransactionPool).TransactionsWithAggSign
+     0.50s  0.17% 80.17%      1.94s  0.66%  runtime.mapassign_faststr
+     0.42s  0.14% 80.32%      1.96s  0.67%  github.com/ethereum/go-ethereum/common.(*Address).checksumHex
+     0.40s  0.14% 80.45%      1.94s  0.66%  google.golang.org/protobuf/internal/impl.(*MessageInfo).marshalAppendPointer
+     0.39s  0.13% 80.59%      2.47s  0.85%  google.golang.org/protobuf/internal/impl.(*MessageInfo).unmarshalPointerEager
+     0.38s  0.13% 80.72%      4.93s  1.69%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).ProtoHash
+     0.37s  0.13% 80.84%     12.90s  4.41%  runtime.newobject
+     0.37s  0.13% 80.97%      1.62s  0.55%  runtime.sweepone
+     0.32s  0.11% 81.08%      1.68s  0.57%  encoding/json.structEncoder.encode
+     0.32s  0.11% 81.19%      3.06s  1.05%  github.com/meta-node-blockchain/meta-node/pkg/transaction.safeBytesToAddress
+
+
+--- 1M_PREV_CPU30: PEEK runtime.cgocall ---
+File: simple_chain
+Build ID: 6fe4f6f036ecc0f66a0022405f150123c221aad0
+Type: cpu
+Time: 2026-10-16 02:22:16 UTC
+Duration: 30.18s, Total samples = 292.23s (968.25%)
+Showing nodes accounting for 292.23s, 100% of 292.23s total
+----------------------------------------------------------+-------------
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+                                            49.24s 50.07% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+                                            35.75s 36.35% |   github.com/ethereum/go-ethereum/crypto/secp256k1._Cfunc_secp256k1_ext_ecdsa_recover
+                                            12.83s 13.05% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+                                             0.28s  0.28% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_state_db_get
+                                             0.07s 0.071% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_commit_payload
+                                             0.05s 0.051% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_sign_pk2_in_g1
+                                             0.03s 0.031% |   github.com/meta-node-blockchain/meta-node/executor._Cfunc_free
+                                             0.03s 0.031% |   github.com/meta-node-blockchain/meta-node/executor._Cfunc_metanode_submit_transaction_batch
+                                             0.03s 0.031% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_session_begin
+                                             0.02s  0.02% |   github.com/cockroachdb/pebble/internal/manual._Cfunc_free
+                                             0.02s  0.02% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_hash_to_g2
+    97.99s 33.53% 33.53%     98.35s 33.65%                | runtime.cgocall
+                                             0.25s  0.25% |   runtime.exitsyscall
+                                             0.11s  0.11% |   runtime.entersyscall
+----------------------------------------------------------+-------------
+
+
+--- 1M_PREV_CPU30: PEEK Explorer/goxapian ---
+File: simple_chain
+Build ID: 6fe4f6f036ecc0f66a0022405f150123c221aad0
+Type: cpu
+Time: 2026-10-16 02:22:16 UTC
+Duration: 30.18s, Total samples = 292.23s (968.25%)
+Showing nodes accounting for 292.23s, 100% of 292.23s total
+----------------------------------------------------------+-------------
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+                                             5.01s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+     0.09s 0.031% 0.031%      5.01s  1.71%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.marshalExplorerTxFull
+                                             2.40s 47.90% |   encoding/json.Marshal
+                                             0.62s 12.38% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).RawSignatureValues
+                                             0.57s 11.38% |   math/big.(*Int).Text (inline)
+                                             0.36s  7.19% |   runtime.concatstring2
+                                             0.36s  7.19% |   runtime.newobject
+                                             0.28s  5.59% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Amount
+                                             0.08s  1.60% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).EventLogs
+                                             0.08s  1.60% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).Exception
+                                             0.06s  1.20% |   github.com/meta-node-blockchain/meta-node/pkg/proto.EXCEPTION.String
+                                             0.04s   0.8% |   memeqbody
+                                             0.03s   0.6% |   github.com/meta-node-blockchain/meta-node/pkg/proto.RECEIPT_STATUS.String
+                                             0.03s   0.6% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).Return
+                                             0.01s   0.2% |   runtime.duffcopy
+----------------------------------------------------------+-------------
+                                            59.77s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+     0.07s 0.024% 0.055%     59.77s 20.45%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+                                            49.36s 82.58% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+                                             5.01s  8.38% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.marshalExplorerTxFull
+                                             1.60s  2.68% |   github.com/ethereum/go-ethereum/common.Address.Hex (inline)
+                                             0.83s  1.39% |   strings.ToLower
+                                             0.70s  1.17% |   sync.(*Mutex).Lock (inline)
+                                             0.35s  0.59% |   runtime.slicebytetostring
+                                             0.29s  0.49% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Hash
+                                             0.28s  0.47% |   github.com/ethereum/go-ethereum/common.Hash.Hex (inline)
+                                             0.20s  0.33% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress
+                                             0.19s  0.32% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).ToAddress
+                                             0.18s   0.3% |   strings.(*Builder).WriteString (inline)
+                                             0.15s  0.25% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).IsCallContract
+                                             0.13s  0.22% |   sync.(*Mutex).Unlock (inline)
+                                             0.10s  0.17% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).RHash
+                                             0.10s  0.17% |   runtime.concatstring2
+                                             0.10s  0.17% |   strings.(*Builder).Grow
+                                             0.06s   0.1% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).getShardIndex (inline)
+                                             0.04s 0.067% |   strings.(*Builder).WriteByte (inline)
+                                             0.01s 0.017% |   github.com/meta-node-blockchain/meta-node/pkg/block.(*BlockHeader).BlockNumber
+                                             0.01s 0.017% |   memeqbody
+                                             0.01s 0.017% |   strings.(*Builder).String (inline)
+----------------------------------------------------------+-------------
+                                             0.06s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction (inline)
+     0.06s 0.021% 0.075%      0.06s 0.021%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).getShardIndex
+----------------------------------------------------------+-------------
+                                             0.17s   100% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).indexSingleBlock
+     0.02s 0.0068% 0.082%      0.17s 0.058%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).IndexTransactionFast
+                                             0.13s 76.47% |   runtime.selectnbsend
+                                             0.02s 11.76% |   fmt.Errorf
+----------------------------------------------------------+-------------
+                                            49.26s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+     0.02s 0.0068% 0.089%     49.26s 16.86%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+                                            49.24s   100% |   runtime.cgocall
+----------------------------------------------------------+-------------
+                                             0.79s   100% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).startIndexingProcess
+     0.01s 0.0034% 0.092%      0.79s  0.27%                | github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).indexSingleBlock
+                                             0.27s 34.18% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Hash
+                                             0.20s 25.32% |   github.com/meta-node-blockchain/meta-node/pkg/logger.Error
+                                             0.17s 21.52% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).IndexTransactionFast
+                                             0.10s 12.66% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).TransactionHash
+                                             0.02s  2.53% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).finalizeIndexedBlock
+                                             0.01s  1.27% |   github.com/ethereum/go-ethereum/common.Hash.Hex (inline)
+                                             0.01s  1.27% |   memeqbody
+----------------------------------------------------------+-------------
+                                            49.35s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+     0.01s 0.0034% 0.096%     49.35s 16.89%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+                                            49.26s 99.82% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+                                             0.08s  0.16% |   runtime.cgoCheckPointer
+----------------------------------------------------------+-------------
+                                             0.01s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument (inline)
+     0.01s 0.0034% 0.099%      0.01s 0.0034%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).isClosed
+----------------------------------------------------------+-------------
+                                             0.01s   100% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).finalizeIndexedBlock
+         0     0% 0.099%      0.01s 0.0034%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).Commit
+                                             0.01s   100% |   runtime.newproc
+----------------------------------------------------------+-------------
+         0     0% 0.099%     12.84s  4.39%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).Commit.func1
+                                            12.83s 99.92% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit
+                                             0.01s 0.078% |   sync.(*Mutex).Unlock
+----------------------------------------------------------+-------------
+         0     0% 0.099%     59.92s 20.50%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+                                            59.77s 99.75% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+                                             0.15s  0.25% |   runtime.chanrecv2
+----------------------------------------------------------+-------------
+                                            12.83s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).Commit.func1
+         0     0% 0.099%     12.83s  4.39%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit
+                                            12.83s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit.func1
+----------------------------------------------------------+-------------
+                                            12.83s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit
+         0     0% 0.099%     12.83s  4.39%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit.func1
+                                            12.83s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+----------------------------------------------------------+-------------
+                                            49.36s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+         0     0% 0.099%     49.36s 16.89%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+                                            49.35s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+                                             0.01s  0.02% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).isClosed (inline)
+----------------------------------------------------------+-------------
+                                            12.83s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit.func1
+         0     0% 0.099%     12.83s  4.39%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+                                            12.83s   100% |   runtime.cgocall
+----------------------------------------------------------+-------------
+
+
+--- 1M_PREV_HEAP: INUSE_SPACE TOP 20 ---
+File: simple_chain
+Build ID: 6fe4f6f036ecc0f66a0022405f150123c221aad0
+Type: inuse_space
+Time: 2026-10-16 02:22:46 UTC
+Showing nodes accounting for 179.48MB, 21.21% of 846.15MB total
+Dropped 228 nodes (cum <= 4.23MB)
+Showing top 20 nodes out of 151
+      flat  flat%   sum%        cum   cum%
+  179.48MB 21.21% 21.21%   179.48MB 21.21%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.(*shardedSignatureCache).Store
+         0     0% 21.21%   179.48MB 21.21%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.StoreVerifiedSignature (inline)
+         0     0% 21.21%   179.48MB 21.21%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.storeVerifiedBound
+         0     0% 21.21%   152.41MB 18.01%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*LazyPebbleDB).flushToDisk
+         0     0% 21.21%   151.91MB 17.95%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*PebbleDB).BatchPut
+         0     0% 21.21%   125.98MB 14.89%  sync.(*Pool).Get
+         0     0% 21.21%   106.26MB 12.56%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.ValidateEnvelopeBindingsParallel.func1
+         0     0% 21.21%    99.70MB 11.78%  runtime.main
+         0     0% 21.21%    96.76MB 11.44%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.RecordVerifiedEnvelopeBound
+         0     0% 21.21%    94.83MB 11.21%  main.main
+         0     0% 21.21%    91.82MB 10.85%  main.NewApp
+         0     0% 21.21%    91.05MB 10.76%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func1.1
+         0     0% 21.21%    91.05MB 10.76%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func3
+         0     0% 21.21%    83.23MB  9.84%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.evalTxSignature
+         0     0% 21.21%    82.66MB  9.77%  github.com/cockroachdb/pebble.(*Batch).Commit (inline)
+         0     0% 21.21%    82.66MB  9.77%  github.com/cockroachdb/pebble.(*DB).Apply (inline)
+         0     0% 21.21%    82.66MB  9.77%  github.com/cockroachdb/pebble.(*DB).applyInternal
+         0     0% 21.21%    82.66MB  9.77%  github.com/cockroachdb/pebble.(*DB).commitWrite
+         0     0% 21.21%    82.66MB  9.77%  github.com/cockroachdb/pebble.(*commitPipeline).Commit
+         0     0% 21.21%    82.66MB  9.77%  github.com/cockroachdb/pebble.(*commitPipeline).prepare
+
+
+--- 1M_PREV_HEAP: INUSE_OBJECTS TOP 20 ---
+File: simple_chain
+Build ID: 6fe4f6f036ecc0f66a0022405f150123c221aad0
+Type: inuse_objects
+Time: 2026-10-16 02:22:46 UTC
+Showing nodes accounting for 1481330, 34.86% of 4248875 total
+Dropped 269 nodes (cum <= 21244)
+Showing top 20 nodes out of 110
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%    1084184 25.52%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient
+         0     0%     0%    1084184 25.52%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes.InitRoutes.InitRoutes.func1.func3
+         0     0%     0%    1084184 25.52%  github.com/meta-node-blockchain/meta-node/pkg/network.(*Handler).HandleRequest
+         0     0%     0%    1084184 25.52%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1
+         0     0%     0%    1084184 25.52%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1.1
+         0     0%     0%    1061088 24.97%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient.func1
+         0     0%     0%    1061088 24.97%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).convertRawEth
+     32770  0.77%  0.77%    1061088 24.97%  main.(*App).ConvertRawEthTxToMetaTx
+    308031  7.25%  8.02%     701251 16.50%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*ReceiptTracker).StoreTxHashConnEntry
+         0     0%  8.02%     587285 13.82%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.processNativeTransfersFastPath.func1
+         0     0%  8.02%     579739 13.64%  runtime.main
+         0     0%  8.02%     571312 13.45%  github.com/ethereum/go-ethereum/core/types.(*Transaction).UnmarshalBinary
+     45061  1.06%  9.08%     571312 13.45%  github.com/ethereum/go-ethereum/core/types.(*Transaction).decodeTyped
+         0     0%  9.08%     569829 13.41%  main.main
+         0     0%  9.08%     569828 13.41%  main.NewApp
+    561797 13.22% 22.30%     561797 13.22%  github.com/meta-node-blockchain/meta-node/pkg/smart_contract.NewExecuteSCResult
+    163843  3.86% 26.16%     557062 13.11%  sync.(*Map).Swap
+    369828  8.70% 34.86%     533670 12.56%  github.com/meta-node-blockchain/meta-node/pkg/blockchain.(*BlockChain).AddTxToCache
+         0     0% 34.86%     526251 12.39%  github.com/ethereum/go-ethereum/core/types.(*DynamicFeeTx).decode
+         0     0% 34.86%     526251 12.39%  github.com/ethereum/go-ethereum/rlp.DecodeBytes
+
+
+--- 1M_PREV_ALLOCS: ALLOC_SPACE TOP 20 ---
+File: simple_chain
+Build ID: 6fe4f6f036ecc0f66a0022405f150123c221aad0
+Type: alloc_space
+Time: 2026-10-16 02:22:46 UTC
+Showing nodes accounting for 9234.58MB, 30.50% of 30273.96MB total
+Dropped 554 nodes (cum <= 151.37MB)
+Showing top 20 nodes out of 223
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%  4078.43MB 13.47%  github.com/ethereum/go-ethereum/crypto.NewKeccakState (inline)
+ 4078.43MB 13.47% 13.47%  4078.43MB 13.47%  golang.org/x/crypto/sha3.NewLegacyKeccak256 (inline)
+         0     0% 13.47%  3578.66MB 11.82%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).TxsProcessor2
+         0     0% 13.47%  3578.66MB 11.82%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxBatchForwarder).StartForwardingLoop
+  585.25MB  1.93% 15.40%  3342.27MB 11.04%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub
+  382.51MB  1.26% 16.67%  3160.65MB 10.44%  github.com/ethereum/go-ethereum/crypto.Keccak256Hash
+         0     0% 16.67%  3116.50MB 10.29%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*LazyPebbleDB).flushToDisk
+         0     0% 16.67%     2450MB  8.09%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*PebbleDB).BatchPut
+         0     0% 16.67%  2376.31MB  7.85%  github.com/cockroachdb/pebble.(*Batch).Set
+         0     0% 16.67%  2376.31MB  7.85%  github.com/cockroachdb/pebble.(*Batch).SetDeferred (inline)
+         0     0% 16.67%  2376.31MB  7.85%  github.com/cockroachdb/pebble.(*Batch).prepareDeferredKeyValueRecord
+         0     0% 16.67%  2346.46MB  7.75%  runtime.cgocallback
+         0     0% 16.67%  2346.46MB  7.75%  runtime.cgocallbackg
+         0     0% 16.67%  2346.46MB  7.75%  runtime.cgocallbackg1
+ 2323.16MB  7.67% 24.34%  2323.16MB  7.67%  github.com/cockroachdb/pebble.(*Batch).grow
+         0     0% 24.34%  2279.12MB  7.53%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.ValidateEnvelopeBindingsParallel.func1
+         0     0% 24.34%  2231.18MB  7.37%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func1.1
+         0     0% 24.34%  2231.18MB  7.37%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func3
+ 1865.22MB  6.16% 30.50%  2058.22MB  6.80%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.(*TransactionPool).AddTransactions
+         0     0% 30.50%  1931.12MB  6.38%  _cgoexp_e20995ee9c64_cgo_process_rpc_request
+
+================================================================================
+PROFILE: 1M_NEXT
+================================================================================
+
+--- 1M_NEXT_CPU30: TOP 30 CUMULATIVE ---
+File: simple_chain
+Build ID: 6c4d85bc6168d19e588208808bda31ef553124af
+Type: cpu
+Time: 2026-10-16 02:17:09 UTC
+Duration: 30.15s, Total samples = 294.59s (977.10%)
+Showing nodes accounting for 167.30s, 56.79% of 294.59s total
+Dropped 1438 nodes (cum <= 1.47s)
+Showing top 30 nodes out of 188
+      flat  flat%   sum%        cum   cum%
+   100.95s 34.27% 34.27%    101.48s 34.45%  runtime.cgocall
+         0     0% 34.27%     69.65s 23.64%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+     0.14s 0.048% 34.32%     69.46s 23.58%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+         0     0% 34.32%     58.73s 19.94%  github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+     0.02s 0.0068% 34.32%     58.71s 19.93%  github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+         0     0% 34.32%     58.62s 19.90%  github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+         0     0% 34.32%     57.68s 19.58%  runtime._ExternalCode
+     0.02s 0.0068% 34.33%     47.72s 16.20%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.ValidateEnvelopeBindingsParallel.func1
+    43.70s 14.83% 49.16%     43.70s 14.83%  [simple_chain]
+     0.01s 0.0034% 49.17%     43.51s 14.77%  github.com/meta-node-blockchain/meta-node/pkg/transaction.ValidateEnvelopeBinding
+     0.01s 0.0034% 49.17%     43.50s 14.77%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateEnvelopeBindingTx (inline)
+         0     0% 49.17%     43.49s 14.76%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateProtoEnvelopeBinding
+     0.10s 0.034% 49.20%     41.25s 14.00%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateDirectEnvelopeBinding
+     0.16s 0.054% 49.26%     37.14s 12.61%  github.com/ethereum/go-ethereum/core/types.Sender
+     0.04s 0.014% 49.27%     36.31s 12.33%  github.com/ethereum/go-ethereum/core/types.(*modernSigner).Sender
+     0.01s 0.0034% 49.28%     34.57s 11.73%  github.com/ethereum/go-ethereum/core/types.recoverPlain
+         0     0% 49.28%     33.75s 11.46%  github.com/ethereum/go-ethereum/crypto.Ecrecover (inline)
+         0     0% 49.28%     33.75s 11.46%  github.com/ethereum/go-ethereum/crypto/secp256k1.RecoverPubkey
+     0.01s 0.0034% 49.28%     33.71s 11.44%  github.com/ethereum/go-ethereum/crypto/secp256k1.RecoverPubkey.func1
+     0.02s 0.0068% 49.29%     33.68s 11.43%  github.com/ethereum/go-ethereum/crypto/secp256k1._Cfunc_secp256k1_ext_ecdsa_recover
+     6.81s  2.31% 51.60%     21.97s  7.46%  runtime.mallocgc
+         0     0% 51.60%     20.85s  7.08%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).TxsProcessor2
+     0.02s 0.0068% 51.60%     20.85s  7.08%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxBatchForwarder).StartForwardingLoop
+     0.32s  0.11% 51.71%     19.75s  6.70%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub
+     0.01s 0.0034% 51.72%     16.12s  5.47%  runtime.systemstack
+     0.04s 0.014% 51.73%     15.64s  5.31%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func1.1
+     0.14s 0.048% 51.78%     15.60s  5.30%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func3
+     0.15s 0.051% 51.83%     14.73s  5.00%  github.com/ethereum/go-ethereum/crypto.Keccak256Hash
+     0.04s 0.014% 51.84%     14.62s  4.96%  golang.org/x/crypto/sha3.(*state).permute (inline)
+    14.58s  4.95% 56.79%     14.58s  4.95%  golang.org/x/crypto/sha3.keccakF1600
+
+
+--- 1M_NEXT_CPU30: TOP 30 FLAT ---
+File: simple_chain
+Build ID: 6c4d85bc6168d19e588208808bda31ef553124af
+Type: cpu
+Time: 2026-10-16 02:17:09 UTC
+Duration: 30.15s, Total samples = 294.59s (977.10%)
+Showing nodes accounting for 234.01s, 79.44% of 294.59s total
+Dropped 1438 nodes (cum <= 1.47s)
+Showing top 30 nodes out of 188
+      flat  flat%   sum%        cum   cum%
+   100.95s 34.27% 34.27%    101.48s 34.45%  runtime.cgocall
+    43.70s 14.83% 49.10%     43.70s 14.83%  [simple_chain]
+    14.58s  4.95% 54.05%     14.58s  4.95%  golang.org/x/crypto/sha3.keccakF1600
+    13.87s  4.71% 58.76%     13.87s  4.71%  [libc.so.6]
+    10.93s  3.71% 62.47%     10.93s  3.71%  runtime.memmove
+     6.81s  2.31% 64.78%     21.97s  7.46%  runtime.mallocgc
+     6.56s  2.23% 67.01%      6.56s  2.23%  runtime.memclrNoHeapPointers
+     5.54s  1.88% 68.89%      8.34s  2.83%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress
+     4.42s  1.50% 70.39%     11.87s  4.03%  runtime.gcDrain
+     4.22s  1.43% 71.82%      7.06s  2.40%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Hash
+     3.02s  1.03% 72.85%      5.24s  1.78%  github.com/cockroachdb/pebble/internal/arenaskl.(*Skiplist).findSpliceForLevel
+     2.52s  0.86% 73.70%      3.05s  1.04%  runtime.mapaccess2
+     2.43s  0.82% 74.53%      2.43s  0.82%  cmpbody
+     2.14s  0.73% 75.25%      2.14s  0.73%  internal/runtime/syscall.Syscall6
+     1.97s  0.67% 75.92%      1.97s  0.67%  runtime.nextFreeFast (inline)
+     1.94s  0.66% 76.58%      1.94s  0.66%  sync/atomic.(*Int32).Add (inline)
+     1.51s  0.51% 77.09%      1.51s  0.51%  runtime.(*mspan).base (inline)
+     1.06s  0.36% 77.45%      5.53s  1.88%  runtime.scanobject
+     0.94s  0.32% 77.77%         3s  1.02%  runtime.stealWork
+     0.78s  0.26% 78.04%      3.21s  1.09%  runtime.mapassign
+     0.51s  0.17% 78.21%      2.93s  0.99%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.(*TransactionPool).TransactionsWithAggSign
+     0.44s  0.15% 78.36%      4.72s  1.60%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).ProtoHash
+     0.42s  0.14% 78.50%      3.07s  1.04%  github.com/meta-node-blockchain/meta-node/pkg/transaction.safeBytesToAddress
+     0.42s  0.14% 78.64%      1.99s  0.68%  runtime.mapassign_faststr
+     0.41s  0.14% 78.78%      1.90s  0.64%  google.golang.org/protobuf/internal/impl.(*MessageInfo).marshalAppendPointer
+     0.41s  0.14% 78.92%      2.32s  0.79%  google.golang.org/protobuf/internal/impl.(*MessageInfo).unmarshalPointerEager
+     0.40s  0.14% 79.06%      1.81s  0.61%  encoding/json.structEncoder.encode
+     0.38s  0.13% 79.19%      5.85s  1.99%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.(*TransactionPool).AddTransactions
+     0.37s  0.13% 79.31%     11.60s  3.94%  runtime.newobject
+     0.36s  0.12% 79.44%      1.73s  0.59%  runtime.sweepone
+
+
+--- 1M_NEXT_CPU30: PEEK runtime.cgocall ---
+File: simple_chain
+Build ID: 6c4d85bc6168d19e588208808bda31ef553124af
+Type: cpu
+Time: 2026-10-16 02:17:09 UTC
+Duration: 30.15s, Total samples = 294.59s (977.10%)
+Showing nodes accounting for 294.57s, 100% of 294.59s total
+----------------------------------------------------------+-------------
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+                                            58.62s 57.77% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+                                            33.66s 33.17% |   github.com/ethereum/go-ethereum/crypto/secp256k1._Cfunc_secp256k1_ext_ecdsa_recover
+                                             8.54s  8.42% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+                                             0.36s  0.35% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_state_db_get
+                                             0.10s 0.099% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_commit_payload
+                                             0.06s 0.059% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_session_begin
+                                             0.05s 0.049% |   github.com/meta-node-blockchain/meta-node/executor._Cfunc_metanode_submit_transaction_batch
+                                             0.03s  0.03% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_hash_to_g2
+                                             0.03s  0.03% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_sign_pk2_in_g1
+                                             0.02s  0.02% |   github.com/cockroachdb/pebble/internal/manual._Cfunc_free
+                                             0.01s 0.0099% |   github.com/meta-node-blockchain/meta-node/executor._Cfunc_free
+   100.95s 34.27% 34.27%    101.48s 34.45%                | runtime.cgocall
+                                             0.35s  0.34% |   runtime.exitsyscall
+                                             0.18s  0.18% |   runtime.entersyscall
+----------------------------------------------------------+-------------
+
+
+--- 1M_NEXT_CPU30: PEEK Explorer/goxapian ---
+File: simple_chain
+Build ID: 6c4d85bc6168d19e588208808bda31ef553124af
+Type: cpu
+Time: 2026-10-16 02:17:09 UTC
+Duration: 30.15s, Total samples = 294.59s (977.10%)
+Showing nodes accounting for 294.57s, 100% of 294.59s total
+----------------------------------------------------------+-------------
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+                                            69.46s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+     0.14s 0.048% 0.048%     69.46s 23.58%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+                                            58.73s 84.55% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+                                             5.19s  7.47% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.marshalExplorerTxFull
+                                             1.40s  2.02% |   github.com/ethereum/go-ethereum/common.Address.Hex (inline)
+                                             0.77s  1.11% |   strings.ToLower
+                                             0.69s  0.99% |   sync.(*Mutex).Lock (inline)
+                                             0.35s   0.5% |   sync.(*Mutex).Unlock (inline)
+                                             0.32s  0.46% |   github.com/ethereum/go-ethereum/common.Hash.Hex (inline)
+                                             0.31s  0.45% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress
+                                             0.27s  0.39% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Hash
+                                             0.26s  0.37% |   runtime.slicebytetostring
+                                             0.22s  0.32% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).RHash
+                                             0.18s  0.26% |   strings.(*Builder).WriteString (inline)
+                                             0.17s  0.24% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).IsCallContract
+                                             0.15s  0.22% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).ToAddress
+                                             0.10s  0.14% |   runtime.concatstring2
+                                             0.07s   0.1% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).getShardIndex (inline)
+                                             0.06s 0.086% |   strings.(*Builder).Grow
+                                             0.05s 0.072% |   strings.(*Builder).WriteByte (inline)
+                                             0.02s 0.029% |   github.com/meta-node-blockchain/meta-node/pkg/block.(*BlockHeader).BlockNumber
+                                             0.01s 0.014% |   memeqbody
+----------------------------------------------------------+-------------
+                                             0.07s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction (inline)
+     0.07s 0.024% 0.071%      0.07s 0.024%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).getShardIndex
+----------------------------------------------------------+-------------
+                                             5.19s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+     0.03s  0.01% 0.081%      5.19s  1.76%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.marshalExplorerTxFull
+                                             2.58s 49.71% |   encoding/json.Marshal
+                                             0.66s 12.72% |   math/big.(*Int).Text (inline)
+                                             0.54s 10.40% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).RawSignatureValues
+                                             0.49s  9.44% |   runtime.concatstring2
+                                             0.32s  6.17% |   runtime.newobject
+                                             0.26s  5.01% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Amount
+                                             0.07s  1.35% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).Return
+                                             0.06s  1.16% |   github.com/meta-node-blockchain/meta-node/pkg/proto.EXCEPTION.String
+                                             0.04s  0.77% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).EventLogs
+                                             0.03s  0.58% |   github.com/meta-node-blockchain/meta-node/pkg/proto.RECEIPT_STATUS.String
+                                             0.03s  0.58% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).Exception
+                                             0.03s  0.58% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).GetNonce
+                                             0.02s  0.39% |   encoding/hex.EncodeToString (inline)
+                                             0.01s  0.19% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Data
+                                             0.01s  0.19% |   runtime.duffcopy
+                                             0.01s  0.19% |   runtime.makeslice
+----------------------------------------------------------+-------------
+                                             0.52s   100% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).startIndexingProcess
+     0.02s 0.0068% 0.088%      0.52s  0.18%                | github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).indexSingleBlock
+                                             0.27s 51.92% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Hash
+                                             0.16s 30.77% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).IndexTransactionFast
+                                             0.04s  7.69% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).TransactionHash
+                                             0.02s  3.85% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).finalizeIndexedBlock
+                                             0.01s  1.92% |   memeqbody
+----------------------------------------------------------+-------------
+                                             0.16s   100% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).indexSingleBlock
+     0.02s 0.0068% 0.095%      0.16s 0.054%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).IndexTransactionFast
+                                             0.14s 87.50% |   runtime.selectnbsend
+----------------------------------------------------------+-------------
+                                            58.71s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+     0.02s 0.0068%   0.1%     58.71s 19.93%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+                                            58.62s 99.85% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+                                             0.07s  0.12% |   runtime.cgoCheckPointer
+----------------------------------------------------------+-------------
+                                             0.02s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument (inline)
+     0.02s 0.0068%  0.11%      0.02s 0.0068%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).isClosed
+----------------------------------------------------------+-------------
+                                             0.02s   100% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).finalizeIndexedBlock
+         0     0%  0.11%      0.02s 0.0068%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).AddBlockToIndexRanges
+                                             0.02s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).mergeAndSaveBlockRanges
+----------------------------------------------------------+-------------
+         0     0%  0.11%      8.54s  2.90%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).Commit.func1
+                                             8.54s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit
+----------------------------------------------------------+-------------
+                                             0.02s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).AddBlockToIndexRanges
+         0     0%  0.11%      0.02s 0.0068%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).mergeAndSaveBlockRanges
+                                             0.02s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).saveBlockRanges
+----------------------------------------------------------+-------------
+                                             0.02s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).mergeAndSaveBlockRanges
+         0     0%  0.11%      0.02s 0.0068%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).saveBlockRanges
+                                             0.02s   100% |   os.WriteFile
+----------------------------------------------------------+-------------
+         0     0%  0.11%     69.65s 23.64%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+                                            69.46s 99.73% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+                                             0.19s  0.27% |   runtime.chanrecv2
+----------------------------------------------------------+-------------
+                                             8.54s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).Commit.func1
+         0     0%  0.11%      8.54s  2.90%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit
+                                             8.54s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit.func1
+----------------------------------------------------------+-------------
+                                             8.54s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit
+         0     0%  0.11%      8.54s  2.90%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit.func1
+                                             8.54s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+----------------------------------------------------------+-------------
+                                            58.73s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+         0     0%  0.11%     58.73s 19.94%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+                                            58.71s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+                                             0.02s 0.034% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).isClosed (inline)
+----------------------------------------------------------+-------------
+                                             8.54s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit.func1
+         0     0%  0.11%      8.54s  2.90%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+                                             8.54s   100% |   runtime.cgocall
+----------------------------------------------------------+-------------
+                                            58.62s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+         0     0%  0.11%     58.62s 19.90%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+                                            58.62s   100% |   runtime.cgocall
+----------------------------------------------------------+-------------
+
+
+--- 1M_NEXT_HEAP: INUSE_SPACE TOP 20 ---
+File: simple_chain
+Build ID: 6c4d85bc6168d19e588208808bda31ef553124af
+Type: inuse_space
+Time: 2026-10-16 02:17:39 UTC
+Showing nodes accounting for 159.38MB, 23.75% of 671.10MB total
+Dropped 166 nodes (cum <= 3.36MB)
+Showing top 20 nodes out of 160
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%   114.63MB 17.08%  sync.(*Pool).Get
+         0     0%     0%   107.04MB 15.95%  runtime.main
+         0     0%     0%   103.68MB 15.45%  main.main
+         0     0%     0%   100.67MB 15.00%  main.NewApp
+    0.50MB 0.075% 0.075%    86.53MB 12.89%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.storeVerifiedBound
+   84.03MB 12.52% 12.60%    84.03MB 12.52%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.(*shardedSignatureCache).Store
+         0     0% 12.60%    84.03MB 12.52%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.StoreVerifiedSignature (inline)
+         0     0% 12.60%    80.11MB 11.94%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*LazyPebbleDB).flushToDisk
+         0     0% 12.60%    79.61MB 11.86%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*PebbleDB).BatchPut
+   74.85MB 11.15% 23.75%    74.85MB 11.15%  github.com/cockroachdb/pebble/record.init.func1
+         0     0% 23.75%    73.83MB 11.00%  github.com/cockroachdb/pebble.(*Batch).Commit (inline)
+         0     0% 23.75%    73.83MB 11.00%  github.com/cockroachdb/pebble.(*DB).Apply (inline)
+         0     0% 23.75%    73.83MB 11.00%  github.com/cockroachdb/pebble.(*DB).applyInternal
+         0     0% 23.75%    73.83MB 11.00%  github.com/cockroachdb/pebble.(*DB).commitWrite
+         0     0% 23.75%    73.83MB 11.00%  github.com/cockroachdb/pebble.(*commitPipeline).Commit
+         0     0% 23.75%    73.83MB 11.00%  github.com/cockroachdb/pebble.(*commitPipeline).prepare
+         0     0% 23.75%    73.29MB 10.92%  github.com/cockroachdb/pebble/record.(*LogWriter).SyncRecord
+         0     0% 23.75%    73.29MB 10.92%  github.com/cockroachdb/pebble/record.(*LogWriter).emitFragment
+         0     0% 23.75%    73.29MB 10.92%  github.com/cockroachdb/pebble/record.(*LogWriter).queueBlock
+         0     0% 23.75%    70.51MB 10.51%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.processNativeTransfersFastPath.func1
+
+
+--- 1M_NEXT_HEAP: INUSE_OBJECTS TOP 20 ---
+File: simple_chain
+Build ID: 6c4d85bc6168d19e588208808bda31ef553124af
+Type: inuse_objects
+Time: 2026-10-16 02:17:39 UTC
+Showing nodes accounting for 2218124, 69.06% of 3211829 total
+Dropped 233 nodes (cum <= 16059)
+Showing top 20 nodes out of 93
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%    1040803 32.41%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient
+         0     0%     0%    1040803 32.41%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes.InitRoutes.InitRoutes.func1.func3
+         0     0%     0%    1040803 32.41%  github.com/meta-node-blockchain/meta-node/pkg/network.(*Handler).HandleRequest
+         0     0%     0%    1040803 32.41%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1
+         0     0%     0%    1040803 32.41%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1.1
+    196612  6.12%  6.12%     720904 22.45%  sync.(*Map).Swap
+    401819 12.51% 18.63%     696734 21.69%  github.com/meta-node-blockchain/meta-node/pkg/blockchain.(*BlockChain).AddTxToCache
+         0     0% 18.63%     660111 20.55%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.processNativeTransfersFastPath.func1
+    660111 20.55% 39.18%     660111 20.55%  github.com/meta-node-blockchain/meta-node/pkg/smart_contract.NewExecuteSCResult
+    186787  5.82% 45.00%     580008 18.06%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*ReceiptTracker).StoreTxHashConnEntry
+         0     0% 45.00%     577989 18.00%  runtime.main
+         0     0% 45.00%     577347 17.98%  main.main
+         0     0% 45.00%     577346 17.98%  main.NewApp
+    524292 16.32% 61.32%     524292 16.32%  sync.newEntry (inline)
+         0     0% 61.32%     412361 12.84%  main.(*App).initBlockchain
+         0     0% 61.32%     337768 10.52%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.ValidateEnvelopeBindingsParallel.func1
+         0     0% 61.32%     327683 10.20%  sync.(*Map).Store (inline)
+         1 3.1e-05% 61.32%     248503  7.74%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.NewTransactionPool (inline)
+    248502  7.74% 69.06%     248502  7.74%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.newPoolShard (inline)
+         0     0% 69.06%     243670  7.59%  github.com/meta-node-blockchain/meta-node/pkg/transaction.ValidateEnvelopeBinding
+
+
+--- 1M_NEXT_ALLOCS: ALLOC_SPACE TOP 20 ---
+File: simple_chain
+Build ID: 6c4d85bc6168d19e588208808bda31ef553124af
+Type: alloc_space
+Time: 2026-10-16 02:17:39 UTC
+Showing nodes accounting for 8785.63MB, 26.25% of 33473.59MB total
+Dropped 573 nodes (cum <= 167.37MB)
+Showing top 20 nodes out of 215
+      flat  flat%   sum%        cum   cum%
+ 4625.56MB 13.82% 13.82%  4625.56MB 13.82%  golang.org/x/crypto/sha3.NewLegacyKeccak256 (inline)
+         0     0% 13.82%  4625.06MB 13.82%  github.com/ethereum/go-ethereum/crypto.NewKeccakState (inline)
+         0     0% 13.82%  3584.06MB 10.71%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).TxsProcessor2
+         0     0% 13.82%  3584.06MB 10.71%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxBatchForwarder).StartForwardingLoop
+         0     0% 13.82%  3564.85MB 10.65%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*LazyPebbleDB).flushToDisk
+  431.01MB  1.29% 15.11%  3557.23MB 10.63%  github.com/ethereum/go-ethereum/crypto.Keccak256Hash
+  562.70MB  1.68% 16.79%  3255.80MB  9.73%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub
+         0     0% 16.79%  2801.31MB  8.37%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*PebbleDB).BatchPut
+         0     0% 16.79%  2711.85MB  8.10%  github.com/cockroachdb/pebble.(*Batch).Set
+         0     0% 16.79%  2711.85MB  8.10%  github.com/cockroachdb/pebble.(*Batch).SetDeferred (inline)
+         0     0% 16.79%  2711.85MB  8.10%  github.com/cockroachdb/pebble.(*Batch).prepareDeferredKeyValueRecord
+ 2664.52MB  7.96% 24.75%  2664.52MB  7.96%  github.com/cockroachdb/pebble.(*Batch).grow
+         0     0% 24.75%  2632.73MB  7.87%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.ValidateEnvelopeBindingsParallel.func1
+         0     0% 24.75%  2374.47MB  7.09%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func1.1
+         0     0% 24.75%  2374.47MB  7.09%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func3
+  501.84MB  1.50% 26.25%  2162.82MB  6.46%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+         0     0% 26.25%  2162.82MB  6.46%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+         0     0% 26.25%  2124.85MB  6.35%  runtime.cgocallback
+         0     0% 26.25%  2124.85MB  6.35%  runtime.cgocallbackg
+         0     0% 26.25%  2124.85MB  6.35%  runtime.cgocallbackg1
+
+================================================================================
+PROFILE: 4M_PREV
+================================================================================
+
+--- 4M_PREV_CPU30: TOP 30 CUMULATIVE ---
+File: simple_chain
+Build ID: 6fe4f6f036ecc0f66a0022405f150123c221aad0
+Type: cpu
+Time: 2026-10-16 03:00:02 UTC
+Duration: 30.17s, Total samples = 297.28s (985.26%)
+Showing nodes accounting for 159.74s, 53.73% of 297.28s total
+Dropped 1436 nodes (cum <= 1.49s)
+Showing top 30 nodes out of 189
+      flat  flat%   sum%        cum   cum%
+    96.49s 32.46% 32.46%     96.90s 32.60%  runtime.cgocall
+     0.03s  0.01% 32.47%     59.39s 19.98%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+     0.12s  0.04% 32.51%     59.11s 19.88%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+         0     0% 32.51%     50.81s 17.09%  runtime._ExternalCode
+         0     0% 32.51%     49.70s 16.72%  github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+     0.01s 0.0034% 32.51%     49.70s 16.72%  github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+         0     0% 32.51%     49.61s 16.69%  github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+     0.05s 0.017% 32.53%     48.49s 16.31%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.ValidateEnvelopeBindingsParallel.func1
+     0.02s 0.0067% 32.53%        44s 14.80%  github.com/meta-node-blockchain/meta-node/pkg/transaction.ValidateEnvelopeBinding
+         0     0% 32.53%     43.97s 14.79%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateEnvelopeBindingTx (inline)
+         0     0% 32.53%     43.97s 14.79%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateProtoEnvelopeBinding
+     0.15s  0.05% 32.59%     41.67s 14.02%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateDirectEnvelopeBinding
+    38.52s 12.96% 45.54%     38.52s 12.96%  [simple_chain]
+     0.11s 0.037% 45.58%     37.75s 12.70%  github.com/ethereum/go-ethereum/core/types.Sender
+     0.02s 0.0067% 45.59%     37.02s 12.45%  github.com/ethereum/go-ethereum/core/types.(*modernSigner).Sender
+         0     0% 45.59%     35.39s 11.90%  github.com/ethereum/go-ethereum/core/types.recoverPlain
+         0     0% 45.59%     34.48s 11.60%  github.com/ethereum/go-ethereum/crypto.Ecrecover (inline)
+         0     0% 45.59%     34.48s 11.60%  github.com/ethereum/go-ethereum/crypto/secp256k1.RecoverPubkey
+     0.01s 0.0034% 45.59%     34.42s 11.58%  github.com/ethereum/go-ethereum/crypto/secp256k1.RecoverPubkey.func1
+     0.02s 0.0067% 45.60%     34.37s 11.56%  github.com/ethereum/go-ethereum/crypto/secp256k1._Cfunc_secp256k1_ext_ecdsa_recover
+         0     0% 45.60%     29.03s  9.77%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).TxsProcessor2
+         0     0% 45.60%     29.03s  9.77%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxBatchForwarder).StartForwardingLoop
+     0.43s  0.14% 45.74%     28.55s  9.60%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub
+         0     0% 45.74%     27.79s  9.35%  runtime.systemstack
+         0     0% 45.74%     23.56s  7.93%  runtime.gcBgMarkWorker
+         0     0% 45.74%     23.52s  7.91%  runtime.gcBgMarkWorker.func2
+     7.92s  2.66% 48.41%     23.52s  7.91%  runtime.gcDrain
+     6.24s  2.10% 50.50%     20.57s  6.92%  runtime.mallocgc
+         0     0% 50.50%     15.25s  5.13%  runtime.gcDrainMarkWorkerIdle (inline)
+     9.60s  3.23% 53.73%     14.20s  4.78%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress
+
+
+--- 4M_PREV_CPU30: TOP 30 FLAT ---
+File: simple_chain
+Build ID: 6fe4f6f036ecc0f66a0022405f150123c221aad0
+Type: cpu
+Time: 2026-10-16 03:00:02 UTC
+Duration: 30.17s, Total samples = 297.28s (985.26%)
+Showing nodes accounting for 240.58s, 80.93% of 297.28s total
+Dropped 1436 nodes (cum <= 1.49s)
+Showing top 30 nodes out of 189
+      flat  flat%   sum%        cum   cum%
+    96.49s 32.46% 32.46%     96.90s 32.60%  runtime.cgocall
+    38.52s 12.96% 45.42%     38.52s 12.96%  [simple_chain]
+    13.81s  4.65% 50.06%     13.81s  4.65%  golang.org/x/crypto/sha3.keccakF1600
+    12.17s  4.09% 54.15%     12.17s  4.09%  [libc.so.6]
+    11.26s  3.79% 57.94%     11.26s  3.79%  runtime.memmove
+     9.60s  3.23% 61.17%     14.20s  4.78%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress
+     7.92s  2.66% 63.84%     23.52s  7.91%  runtime.gcDrain
+     6.54s  2.20% 66.04%      6.54s  2.20%  runtime.memclrNoHeapPointers
+     6.24s  2.10% 68.13%     20.57s  6.92%  runtime.mallocgc
+     5.68s  1.91% 70.05%      8.15s  2.74%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Hash
+     3.70s  1.24% 71.29%      6.24s  2.10%  github.com/cockroachdb/pebble/internal/arenaskl.(*Skiplist).findSpliceForLevel
+     3.13s  1.05% 72.34%      3.38s  1.14%  runtime.findObject
+     2.85s  0.96% 73.30%      3.88s  1.31%  runtime.mapaccess2
+     2.71s  0.91% 74.21%     14.12s  4.75%  runtime.scanobject
+     2.66s  0.89% 75.11%      2.66s  0.89%  cmpbody
+     2.62s  0.88% 75.99%      2.63s  0.88%  runtime.(*gcBits).bitp (inline)
+     2.27s  0.76% 76.75%      2.27s  0.76%  internal/runtime/syscall.Syscall6
+     2.21s  0.74% 77.50%      2.21s  0.74%  runtime.(*mspan).base (inline)
+     2.05s  0.69% 78.19%      2.05s  0.69%  runtime.nextFreeFast (inline)
+     1.70s  0.57% 78.76%      1.70s  0.57%  runtime.madvise
+     1.69s  0.57% 79.33%      1.69s  0.57%  encoding/binary.bigEndian.Uint64 (inline)
+     1.10s  0.37% 79.70%      3.34s  1.12%  runtime.stealWork
+     0.94s  0.32% 80.01%      3.73s  1.25%  runtime.mapassign
+     0.49s  0.16% 80.18%      4.76s  1.60%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).ProtoHash
+     0.43s  0.14% 80.32%     28.55s  9.60%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub
+     0.42s  0.14% 80.46%      9.36s  3.15%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.(*TransactionPool).AddTransactions
+     0.38s  0.13% 80.59%      4.73s  1.59%  github.com/meta-node-blockchain/meta-node/pkg/transaction.safeBytesToAddress
+     0.34s  0.11% 80.71%      2.01s  0.68%  google.golang.org/protobuf/internal/impl.(*MessageInfo).unmarshalPointerEager
+     0.33s  0.11% 80.82%      6.09s  2.05%  github.com/meta-node-blockchain/meta-node/pkg/trie.(*FlatStateTrie).applyDirtyToBuckets.func1
+     0.33s  0.11% 80.93%      1.78s   0.6%  runtime.sweepone
+
+
+--- 4M_PREV_CPU30: PEEK runtime.cgocall ---
+File: simple_chain
+Build ID: 6fe4f6f036ecc0f66a0022405f150123c221aad0
+Type: cpu
+Time: 2026-10-16 03:00:02 UTC
+Duration: 30.17s, Total samples = 297.28s (985.26%)
+Showing nodes accounting for 297.26s, 100% of 297.28s total
+----------------------------------------------------------+-------------
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+                                            49.61s 51.20% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+                                            34.35s 35.45% |   github.com/ethereum/go-ethereum/crypto/secp256k1._Cfunc_secp256k1_ext_ecdsa_recover
+                                            12.28s 12.67% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+                                             0.28s  0.29% |   github.com/cockroachdb/pebble/internal/manual._Cfunc_calloc
+                                             0.11s  0.11% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_state_db_get
+                                             0.08s 0.083% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_sign_pk2_in_g1
+                                             0.07s 0.072% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_hash_to_g2
+                                             0.05s 0.052% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_commit_payload
+                                             0.04s 0.041% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_session_finish
+                                             0.01s  0.01% |   github.com/cockroachdb/pebble/internal/manual._Cfunc_free
+                                             0.01s  0.01% |   github.com/meta-node-blockchain/meta-node/executor._Cfunc_metanode_submit_transaction_batch
+                                             0.01s  0.01% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_session_begin
+    96.49s 32.46% 32.46%     96.90s 32.60%                | runtime.cgocall
+                                             0.23s  0.24% |   runtime.exitsyscall
+                                             0.18s  0.19% |   runtime.entersyscall
+----------------------------------------------------------+-------------
+
+
+--- 4M_PREV_CPU30: PEEK Explorer/goxapian ---
+File: simple_chain
+Build ID: 6fe4f6f036ecc0f66a0022405f150123c221aad0
+Type: cpu
+Time: 2026-10-16 03:00:02 UTC
+Duration: 30.17s, Total samples = 297.28s (985.26%)
+Showing nodes accounting for 297.26s, 100% of 297.28s total
+----------------------------------------------------------+-------------
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+                                            59.11s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+     0.12s  0.04%  0.04%     59.11s 19.88%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+                                            49.70s 84.08% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+                                             4.78s  8.09% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.marshalExplorerTxFull
+                                             1.27s  2.15% |   github.com/ethereum/go-ethereum/common.Address.Hex (inline)
+                                             0.65s  1.10% |   strings.ToLower
+                                             0.50s  0.85% |   sync.(*Mutex).Lock (inline)
+                                             0.35s  0.59% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Hash
+                                             0.31s  0.52% |   github.com/ethereum/go-ethereum/common.Hash.Hex (inline)
+                                             0.27s  0.46% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress
+                                             0.27s  0.46% |   sync.(*Mutex).Unlock (inline)
+                                             0.21s  0.36% |   runtime.slicebytetostring
+                                             0.17s  0.29% |   strings.(*Builder).WriteString (inline)
+                                             0.12s   0.2% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).RHash
+                                             0.11s  0.19% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).ToAddress
+                                             0.09s  0.15% |   strings.(*Builder).Grow
+                                             0.07s  0.12% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).IsCallContract
+                                             0.05s 0.085% |   runtime.concatstring2
+                                             0.03s 0.051% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).getShardIndex (inline)
+                                             0.03s 0.051% |   strconv.FormatUint
+                                             0.01s 0.017% |   strings.(*Builder).WriteByte (inline)
+----------------------------------------------------------+-------------
+                                             4.78s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+     0.05s 0.017% 0.057%      4.78s  1.61%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.marshalExplorerTxFull
+                                             2.48s 51.88% |   encoding/json.Marshal
+                                             0.58s 12.13% |   math/big.(*Int).Text (inline)
+                                             0.52s 10.88% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).RawSignatureValues
+                                             0.30s  6.28% |   runtime.concatstring2
+                                             0.27s  5.65% |   runtime.newobject
+                                             0.24s  5.02% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Amount
+                                             0.13s  2.72% |   github.com/meta-node-blockchain/meta-node/pkg/proto.EXCEPTION.String
+                                             0.05s  1.05% |   github.com/meta-node-blockchain/meta-node/pkg/proto.RECEIPT_STATUS.String
+                                             0.05s  1.05% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).Return
+                                             0.03s  0.63% |   memeqbody
+                                             0.02s  0.42% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).EventLogs
+                                             0.02s  0.42% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).Exception
+                                             0.02s  0.42% |   runtime.duffzero
+                                             0.01s  0.21% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).GetNonce
+                                             0.01s  0.21% |   runtime.makeslice
+----------------------------------------------------------+-------------
+                                             0.52s   100% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).startIndexingProcess
+     0.04s 0.013% 0.071%      0.52s  0.17%                | github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).indexSingleBlock
+                                             0.25s 48.08% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Hash
+                                             0.13s 25.00% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).IndexTransactionFast
+                                             0.07s 13.46% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).TransactionHash
+                                             0.01s  1.92% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).finalizeIndexedBlock
+                                             0.01s  1.92% |   github.com/meta-node-blockchain/meta-node/pkg/logger.Error
+                                             0.01s  1.92% |   sync.(*Map).LoadAndDelete
+----------------------------------------------------------+-------------
+                                             0.03s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction (inline)
+     0.03s  0.01% 0.081%      0.03s  0.01%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).getShardIndex
+----------------------------------------------------------+-------------
+     0.03s  0.01% 0.091%     59.39s 19.98%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+                                            59.11s 99.53% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+                                             0.25s  0.42% |   runtime.chanrecv2
+----------------------------------------------------------+-------------
+                                             0.13s   100% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).indexSingleBlock
+     0.01s 0.0034% 0.094%      0.13s 0.044%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).IndexTransactionFast
+                                             0.11s 84.62% |   runtime.selectnbsend
+                                             0.01s  7.69% |   fmt.Errorf
+----------------------------------------------------------+-------------
+                                            49.70s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+     0.01s 0.0034% 0.098%     49.70s 16.72%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+                                            49.61s 99.82% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+                                             0.08s  0.16% |   runtime.cgoCheckPointer
+----------------------------------------------------------+-------------
+                                             0.01s   100% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).finalizeIndexedBlock
+         0     0% 0.098%      0.01s 0.0034%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).AddBlockToIndexRanges
+                                             0.01s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).mergeAndSaveBlockRanges
+----------------------------------------------------------+-------------
+         0     0% 0.098%     12.29s  4.13%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).Commit.func1
+                                            12.28s 99.92% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit
+                                             0.01s 0.081% |   sync.(*Mutex).Unlock
+----------------------------------------------------------+-------------
+                                             0.01s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).AddBlockToIndexRanges
+         0     0% 0.098%      0.01s 0.0034%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).mergeAndSaveBlockRanges
+                                             0.01s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).saveBlockRanges
+----------------------------------------------------------+-------------
+                                             0.01s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).mergeAndSaveBlockRanges
+         0     0% 0.098%      0.01s 0.0034%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).saveBlockRanges
+                                             0.01s   100% |   encoding/json.MarshalIndent
+----------------------------------------------------------+-------------
+                                            12.28s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).Commit.func1
+         0     0% 0.098%     12.28s  4.13%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit
+                                            12.28s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit.func1
+----------------------------------------------------------+-------------
+                                            12.28s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit
+         0     0% 0.098%     12.28s  4.13%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit.func1
+                                            12.28s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+----------------------------------------------------------+-------------
+                                            49.70s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+         0     0% 0.098%     49.70s 16.72%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+                                            49.70s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+----------------------------------------------------------+-------------
+                                            12.28s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit.func1
+         0     0% 0.098%     12.28s  4.13%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+                                            12.28s   100% |   runtime.cgocall
+----------------------------------------------------------+-------------
+                                            49.61s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+         0     0% 0.098%     49.61s 16.69%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+                                            49.61s   100% |   runtime.cgocall
+----------------------------------------------------------+-------------
+
+
+--- 4M_PREV_HEAP: INUSE_SPACE TOP 20 ---
+File: simple_chain
+Build ID: 6fe4f6f036ecc0f66a0022405f150123c221aad0
+Type: inuse_space
+Time: 2026-10-16 03:00:33 UTC
+Showing nodes accounting for 439.44MB, 42.55% of 1032.85MB total
+Dropped 194 nodes (cum <= 5.16MB)
+Showing top 20 nodes out of 145
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%   268.03MB 25.95%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.processNativeTransfersFastPath.func1
+  268.03MB 25.95% 25.95%   268.03MB 25.95%  github.com/meta-node-blockchain/meta-node/pkg/smart_contract.NewExecuteSCResult
+         0     0% 25.95%   137.75MB 13.34%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient
+         0     0% 25.95%   137.75MB 13.34%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes.InitRoutes.InitRoutes.func1.func3
+         0     0% 25.95%   137.75MB 13.34%  github.com/meta-node-blockchain/meta-node/pkg/network.(*Handler).HandleRequest
+         0     0% 25.95%   137.75MB 13.34%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1
+         0     0% 25.95%   137.75MB 13.34%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1.1
+  106.91MB 10.35% 36.30%   106.91MB 10.35%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.(*shardedSignatureCache).Store
+         0     0% 36.30%   106.91MB 10.35%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.StoreVerifiedSignature (inline)
+         0     0% 36.30%   106.91MB 10.35%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.storeVerifiedBound
+         0     0% 36.30%    98.02MB  9.49%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient.func1
+         0     0% 36.30%    98.02MB  9.49%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).convertRawEth
+       2MB  0.19% 36.49%    98.02MB  9.49%  main.(*App).ConvertRawEthTxToMetaTx
+   62.50MB  6.05% 42.55%    97.13MB  9.40%  github.com/meta-node-blockchain/meta-node/pkg/blockchain.(*BlockChain).AddTxToCache
+         0     0% 42.55%    97.11MB  9.40%  runtime.main
+         0     0% 42.55%    94.75MB  9.17%  main.main
+         0     0% 42.55%    93.57MB  9.06%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).StartCommitterLoop
+         0     0% 42.55%    91.74MB  8.88%  main.NewApp
+         0     0% 42.55%    85.89MB  8.32%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).commitSpeculativeResult
+         0     0% 42.55%    85.89MB  8.32%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).createBlockFromResults
+
+
+--- 4M_PREV_HEAP: INUSE_OBJECTS TOP 20 ---
+File: simple_chain
+Build ID: 6fe4f6f036ecc0f66a0022405f150123c221aad0
+Type: inuse_objects
+Time: 2026-10-16 03:00:33 UTC
+Showing nodes accounting for 4841259, 61.26% of 7903130 total
+Dropped 243 nodes (cum <= 39515)
+Showing top 20 nodes out of 96
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%    2509360 31.75%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.processNativeTransfersFastPath.func1
+   2509360 31.75% 31.75%    2509360 31.75%  github.com/meta-node-blockchain/meta-node/pkg/smart_contract.NewExecuteSCResult
+         0     0% 31.75%    2413522 30.54%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient
+         0     0% 31.75%    2413522 30.54%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes.InitRoutes.InitRoutes.func1.func3
+         0     0% 31.75%    2413522 30.54%  github.com/meta-node-blockchain/meta-node/pkg/network.(*Handler).HandleRequest
+         0     0% 31.75%    2413522 30.54%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1
+         0     0% 31.75%    2413522 30.54%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1.1
+   1210917 15.32% 47.07%    1899052 24.03%  github.com/meta-node-blockchain/meta-node/pkg/blockchain.(*BlockChain).AddTxToCache
+         0     0% 47.07%    1879058 23.78%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient.func1
+         0     0% 47.07%    1879058 23.78%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).convertRawEth
+     32770  0.41% 47.49%    1879058 23.78%  main.(*App).ConvertRawEthTxToMetaTx
+    229379  2.90% 50.39%     884754 11.19%  sync.(*Map).Swap
+    125636  1.59% 51.98%     738963  9.35%  github.com/meta-node-blockchain/meta-node/pkg/transaction.NewTransactionFromEth
+         0     0% 51.98%     688144  8.71%  sync.(*Map).Store (inline)
+         0     0% 51.98%     664943  8.41%  github.com/ethereum/go-ethereum/core/types.(*Transaction).UnmarshalBinary
+     77833  0.98% 52.97%     664943  8.41%  github.com/ethereum/go-ethereum/core/types.(*Transaction).decodeTyped
+    655364  8.29% 61.26%     655364  8.29%  sync.newEntry (inline)
+         0     0% 61.26%     587110  7.43%  github.com/ethereum/go-ethereum/core/types.(*DynamicFeeTx).decode
+         0     0% 61.26%     587110  7.43%  github.com/ethereum/go-ethereum/rlp.(*Stream).Decode
+         0     0% 61.26%     587110  7.43%  github.com/ethereum/go-ethereum/rlp.DecodeBytes
+
+
+--- 4M_PREV_ALLOCS: ALLOC_SPACE TOP 20 ---
+File: simple_chain
+Build ID: 6fe4f6f036ecc0f66a0022405f150123c221aad0
+Type: alloc_space
+Time: 2026-10-16 03:00:33 UTC
+Showing nodes accounting for 45.52GB, 34.16% of 133.26GB total
+Dropped 733 nodes (cum <= 0.67GB)
+Showing top 20 nodes out of 221
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%    18.45GB 13.84%  github.com/ethereum/go-ethereum/crypto.NewKeccakState (inline)
+   18.45GB 13.84% 13.84%    18.45GB 13.84%  golang.org/x/crypto/sha3.NewLegacyKeccak256 (inline)
+         0     0% 13.84%    16.14GB 12.11%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).TxsProcessor2
+         0     0% 13.84%    16.14GB 12.11%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxBatchForwarder).StartForwardingLoop
+    2.50GB  1.88% 15.72%    15.24GB 11.44%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub
+    1.72GB  1.29% 17.01%    14.13GB 10.61%  github.com/ethereum/go-ethereum/crypto.Keccak256Hash
+         0     0% 17.01%    13.51GB 10.14%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*LazyPebbleDB).flushToDisk
+         0     0% 17.01%    11.56GB  8.68%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.ValidateEnvelopeBindingsParallel.func1
+         0     0% 17.01%    10.56GB  7.92%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*PebbleDB).BatchPut
+         0     0% 17.01%    10.44GB  7.83%  github.com/cockroachdb/pebble.(*Batch).Set
+         0     0% 17.01%    10.44GB  7.83%  github.com/cockroachdb/pebble.(*Batch).SetDeferred (inline)
+         0     0% 17.01%    10.44GB  7.83%  github.com/cockroachdb/pebble.(*Batch).prepareDeferredKeyValueRecord
+   10.29GB  7.72% 24.73%    10.29GB  7.72%  github.com/cockroachdb/pebble.(*Batch).grow
+         0     0% 24.73%     9.63GB  7.22%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func1.1
+         0     0% 24.73%     9.63GB  7.22%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func3
+    8.67GB  6.50% 31.23%     9.57GB  7.18%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.(*TransactionPool).AddTransactions
+    2.02GB  1.51% 32.75%     8.54GB  6.41%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+         0     0% 32.75%     8.54GB  6.41%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+    0.11GB 0.081% 32.83%     8.47GB  6.35%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.evalTxSignature
+    1.77GB  1.33% 34.16%     8.27GB  6.20%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.sigCacheKey
+
+================================================================================
+PROFILE: 4M_NEXT
+================================================================================
+
+--- 4M_NEXT_CPU30: TOP 30 CUMULATIVE ---
+File: simple_chain
+Build ID: 6c4d85bc6168d19e588208808bda31ef553124af
+Type: cpu
+Time: 2026-10-16 03:13:54 UTC
+Duration: 30.17s, Total samples = 270.53s (896.81%)
+Showing nodes accounting for 143.24s, 52.95% of 270.53s total
+Dropped 1508 nodes (cum <= 1.35s)
+Showing top 30 nodes out of 213
+      flat  flat%   sum%        cum   cum%
+    86.62s 32.02% 32.02%     86.90s 32.12%  runtime.cgocall
+     0.01s 0.0037% 32.02%     54.01s 19.96%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+     0.07s 0.026% 32.05%     53.77s 19.88%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+         0     0% 32.05%     46.80s 17.30%  runtime._ExternalCode
+     0.02s 0.0074% 32.06%     46.18s 17.07%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.ValidateEnvelopeBindingsParallel.func1
+         0     0% 32.06%     45.20s 16.71%  github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+     0.01s 0.0037% 32.06%     45.18s 16.70%  github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+     0.01s 0.0037% 32.06%     45.14s 16.69%  github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+         0     0% 32.06%     41.27s 15.26%  github.com/meta-node-blockchain/meta-node/pkg/transaction.ValidateEnvelopeBinding
+         0     0% 32.06%     41.27s 15.26%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateEnvelopeBindingTx (inline)
+     0.02s 0.0074% 32.07%     41.27s 15.26%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateProtoEnvelopeBinding
+     0.08s  0.03% 32.10%     39.24s 14.50%  github.com/meta-node-blockchain/meta-node/pkg/transaction.validateDirectEnvelopeBinding
+     0.11s 0.041% 32.14%     36.21s 13.38%  github.com/ethereum/go-ethereum/core/types.Sender
+         0     0% 32.14%     35.49s 13.12%  github.com/ethereum/go-ethereum/core/types.(*modernSigner).Sender
+    34.19s 12.64% 44.78%     34.19s 12.64%  [simple_chain]
+         0     0% 44.78%     34.12s 12.61%  github.com/ethereum/go-ethereum/core/types.recoverPlain
+         0     0% 44.78%     33.40s 12.35%  github.com/ethereum/go-ethereum/crypto.Ecrecover (inline)
+     0.02s 0.0074% 44.79%     33.40s 12.35%  github.com/ethereum/go-ethereum/crypto/secp256k1.RecoverPubkey
+         0     0% 44.79%     33.34s 12.32%  github.com/ethereum/go-ethereum/crypto/secp256k1.RecoverPubkey.func1
+         0     0% 44.79%     33.30s 12.31%  github.com/ethereum/go-ethereum/crypto/secp256k1._Cfunc_secp256k1_ext_ecdsa_recover
+         0     0% 44.79%     28.13s 10.40%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).TxsProcessor2
+         0     0% 44.79%     28.13s 10.40%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxBatchForwarder).StartForwardingLoop
+     0.61s  0.23% 45.01%     27.78s 10.27%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub
+         0     0% 45.01%     23.33s  8.62%  runtime.systemstack
+         0     0% 45.01%     19.25s  7.12%  runtime.gcBgMarkWorker
+         0     0% 45.01%     19.24s  7.11%  runtime.gcBgMarkWorker.func2
+     6.15s  2.27% 47.28%     19.24s  7.11%  runtime.gcDrain
+     5.65s  2.09% 49.37%     19.19s  7.09%  runtime.mallocgc
+     9.58s  3.54% 52.91%     14.19s  5.25%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress
+     0.09s 0.033% 52.95%     13.10s  4.84%  github.com/ethereum/go-ethereum/crypto.Keccak256Hash
+
+
+--- 4M_NEXT_CPU30: TOP 30 FLAT ---
+File: simple_chain
+Build ID: 6c4d85bc6168d19e588208808bda31ef553124af
+Type: cpu
+Time: 2026-10-16 03:13:54 UTC
+Duration: 30.17s, Total samples = 270.53s (896.81%)
+Showing nodes accounting for 219.83s, 81.26% of 270.53s total
+Dropped 1508 nodes (cum <= 1.35s)
+Showing top 30 nodes out of 213
+      flat  flat%   sum%        cum   cum%
+    86.62s 32.02% 32.02%     86.90s 32.12%  runtime.cgocall
+    34.19s 12.64% 44.66%     34.19s 12.64%  [simple_chain]
+    12.98s  4.80% 49.45%     12.98s  4.80%  golang.org/x/crypto/sha3.keccakF1600
+    12.52s  4.63% 54.08%     12.52s  4.63%  [libc.so.6]
+    10.74s  3.97% 58.05%     10.74s  3.97%  runtime.memmove
+     9.58s  3.54% 61.59%     14.19s  5.25%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress
+     6.21s  2.30% 63.89%      6.21s  2.30%  runtime.memclrNoHeapPointers
+     6.15s  2.27% 66.16%     19.24s  7.11%  runtime.gcDrain
+     5.65s  2.09% 68.25%     19.19s  7.09%  runtime.mallocgc
+     4.86s  1.80% 70.05%      7.07s  2.61%  github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Hash
+     3.05s  1.13% 71.18%      5.56s  2.06%  github.com/cockroachdb/pebble/internal/arenaskl.(*Skiplist).findSpliceForLevel
+     3.03s  1.12% 72.30%      3.03s  1.12%  internal/runtime/syscall.Syscall6
+     2.80s  1.04% 73.33%      3.70s  1.37%  runtime.mapaccess2
+     2.74s  1.01% 74.34%      2.91s  1.08%  runtime.findObject
+     2.71s  1.00% 75.34%      2.71s  1.00%  cmpbody
+     2.60s  0.96% 76.31%     11.50s  4.25%  runtime.scanobject
+     2.28s  0.84% 77.15%      2.28s  0.84%  runtime.(*gcBits).bitp (inline)
+     1.73s  0.64% 77.79%      1.73s  0.64%  runtime.(*mspan).base (inline)
+     1.72s  0.64% 78.42%      1.74s  0.64%  github.com/golang/snappy.encodeBlock
+     1.59s  0.59% 79.01%      1.59s  0.59%  runtime.nextFreeFast (inline)
+     1.54s  0.57% 79.58%      1.54s  0.57%  runtime.madvise
+     1.01s  0.37% 79.95%      2.73s  1.01%  runtime.stealWork
+     0.80s   0.3% 80.25%      3.13s  1.16%  runtime.mapassign
+     0.61s  0.23% 80.48%     27.78s 10.27%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub
+     0.45s  0.17% 80.64%      4.86s  1.80%  github.com/meta-node-blockchain/meta-node/pkg/transaction.safeBytesToAddress
+     0.38s  0.14% 80.78%      5.46s  2.02%  github.com/meta-node-blockchain/meta-node/pkg/trie.(*FlatStateTrie).applyDirtyToBuckets.func1
+     0.35s  0.13% 80.91%      9.84s  3.64%  runtime.newobject
+     0.32s  0.12% 81.03%      4.63s  1.71%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.addressesSuspectedStaleCache
+     0.31s  0.11% 81.14%      9.40s  3.47%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.(*TransactionPool).AddTransactions
+     0.31s  0.11% 81.26%      1.73s  0.64%  google.golang.org/protobuf/internal/impl.(*MessageInfo).unmarshalPointerEager
+
+
+--- 4M_NEXT_CPU30: PEEK runtime.cgocall ---
+File: simple_chain
+Build ID: 6c4d85bc6168d19e588208808bda31ef553124af
+Type: cpu
+Time: 2026-10-16 03:13:54 UTC
+Duration: 30.17s, Total samples = 270.53s (896.81%)
+Showing nodes accounting for 270.53s, 100% of 270.53s total
+----------------------------------------------------------+-------------
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+                                            45.13s 51.93% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+                                            33.30s 38.32% |   github.com/ethereum/go-ethereum/crypto/secp256k1._Cfunc_secp256k1_ext_ecdsa_recover
+                                             7.74s  8.91% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+                                             0.32s  0.37% |   github.com/cockroachdb/pebble/internal/manual._Cfunc_calloc
+                                             0.16s  0.18% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_state_db_get
+                                             0.05s 0.058% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_hash_to_g2
+                                             0.05s 0.058% |   github.com/meta-node-blockchain/meta-node/pkg/bls/blst/bindings/go._Cfunc_blst_sign_pk2_in_g1
+                                             0.04s 0.046% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_commit_payload
+                                             0.03s 0.035% |   github.com/cockroachdb/pebble/internal/manual._Cfunc_free
+                                             0.02s 0.023% |   github.com/meta-node-blockchain/meta-node/pkg/mvm._Cfunc_clearAllStateInstances
+                                             0.02s 0.023% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_session_begin
+                                             0.02s 0.023% |   github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi._Cfunc_nomt_session_finish
+                                             0.01s 0.012% |   github.com/meta-node-blockchain/meta-node/executor._Cfunc_free
+                                             0.01s 0.012% |   github.com/meta-node-blockchain/meta-node/executor._Cfunc_metanode_submit_transaction_batch
+    86.62s 32.02% 32.02%     86.90s 32.12%                | runtime.cgocall
+                                             0.18s  0.21% |   runtime.exitsyscall
+                                             0.10s  0.12% |   runtime.entersyscall
+----------------------------------------------------------+-------------
+
+
+--- 4M_NEXT_CPU30: PEEK Explorer/goxapian ---
+File: simple_chain
+Build ID: 6c4d85bc6168d19e588208808bda31ef553124af
+Type: cpu
+Time: 2026-10-16 03:13:54 UTC
+Duration: 30.17s, Total samples = 270.53s (896.81%)
+Showing nodes accounting for 270.53s, 100% of 270.53s total
+----------------------------------------------------------+-------------
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+                                            53.77s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+     0.07s 0.026% 0.026%     53.77s 19.88%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+                                            45.20s 84.06% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+                                             3.97s  7.38% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.marshalExplorerTxFull
+                                             1.36s  2.53% |   github.com/ethereum/go-ethereum/common.Address.Hex (inline)
+                                             0.64s  1.19% |   strings.ToLower
+                                             0.53s  0.99% |   sync.(*Mutex).Lock (inline)
+                                             0.33s  0.61% |   github.com/ethereum/go-ethereum/common.Hash.Hex (inline)
+                                             0.32s   0.6% |   runtime.slicebytetostring
+                                             0.30s  0.56% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Hash
+                                             0.20s  0.37% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress
+                                             0.18s  0.33% |   sync.(*Mutex).Unlock (inline)
+                                             0.14s  0.26% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).IsCallContract
+                                             0.12s  0.22% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).RHash
+                                             0.12s  0.22% |   strings.(*Builder).WriteString (inline)
+                                             0.06s  0.11% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).ToAddress
+                                             0.06s  0.11% |   runtime.concatstring2
+                                             0.06s  0.11% |   strconv.FormatUint
+                                             0.06s  0.11% |   strings.(*Builder).Grow
+                                             0.02s 0.037% |   github.com/meta-node-blockchain/meta-node/pkg/block.(*BlockHeader).BlockNumber
+                                             0.02s 0.037% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).getShardIndex (inline)
+                                             0.01s 0.019% |   runtime.memequal
+----------------------------------------------------------+-------------
+                                             3.97s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+     0.05s 0.018% 0.044%      3.97s  1.47%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.marshalExplorerTxFull
+                                             1.90s 47.86% |   encoding/json.Marshal
+                                             0.51s 12.85% |   math/big.(*Int).Text (inline)
+                                             0.45s 11.34% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).RawSignatureValues
+                                             0.34s  8.56% |   runtime.concatstring2
+                                             0.24s  6.05% |   runtime.newobject
+                                             0.21s  5.29% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Amount
+                                             0.09s  2.27% |   github.com/meta-node-blockchain/meta-node/pkg/proto.EXCEPTION.String
+                                             0.06s  1.51% |   github.com/meta-node-blockchain/meta-node/pkg/proto.RECEIPT_STATUS.String
+                                             0.04s  1.01% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).EventLogs
+                                             0.03s  0.76% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).Return
+                                             0.02s   0.5% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).Exception
+                                             0.01s  0.25% |   github.com/meta-node-blockchain/meta-node/pkg/block.(*BlockHeader).BlockNumber
+                                             0.01s  0.25% |   runtime.duffcopy
+                                             0.01s  0.25% |   runtime.wbMove
+----------------------------------------------------------+-------------
+                                             0.47s   100% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).startIndexingProcess
+     0.03s 0.011% 0.055%      0.47s  0.17%                | github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).indexSingleBlock
+                                             0.20s 42.55% |   github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).Hash
+                                             0.14s 29.79% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).IndexTransactionFast
+                                             0.08s 17.02% |   github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipt).TransactionHash
+                                             0.02s  4.26% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).finalizeIndexedBlock
+----------------------------------------------------------+-------------
+                                             0.14s   100% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).indexSingleBlock
+     0.02s 0.0074% 0.063%      0.14s 0.052%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).IndexTransactionFast
+                                             0.12s 85.71% |   runtime.selectnbsend
+----------------------------------------------------------+-------------
+                                             0.02s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction (inline)
+     0.02s 0.0074%  0.07%      0.02s 0.0074%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).getShardIndex
+----------------------------------------------------------+-------------
+                                             0.02s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument (inline)
+     0.02s 0.0074% 0.078%      0.02s 0.0074%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).isClosed
+----------------------------------------------------------+-------------
+     0.01s 0.0037% 0.081%     54.01s 19.96%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+                                            53.77s 99.56% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+                                             0.23s  0.43% |   runtime.chanrecv2
+----------------------------------------------------------+-------------
+                                            45.18s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+     0.01s 0.0037% 0.085%     45.18s 16.70%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+                                            45.14s 99.91% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+                                             0.03s 0.066% |   runtime.cgoCheckPointer
+----------------------------------------------------------+-------------
+                                            45.14s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+     0.01s 0.0037% 0.089%     45.14s 16.69%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document
+                                            45.13s   100% |   runtime.cgocall
+----------------------------------------------------------+-------------
+                                             0.02s   100% |   github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).finalizeIndexedBlock
+         0     0% 0.089%      0.02s 0.0074%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).AddBlockToIndexRanges
+                                             0.02s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).mergeAndSaveBlockRanges
+----------------------------------------------------------+-------------
+         0     0% 0.089%      7.74s  2.86%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).Commit.func1
+                                             7.74s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit
+----------------------------------------------------------+-------------
+                                             0.02s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).AddBlockToIndexRanges
+         0     0% 0.089%      0.02s 0.0074%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).mergeAndSaveBlockRanges
+                                             0.02s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).saveBlockRanges
+----------------------------------------------------------+-------------
+                                             0.02s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).mergeAndSaveBlockRanges
+         0     0% 0.089%      0.02s 0.0074%                | github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).saveBlockRanges
+                                             0.02s   100% |   os.WriteFile
+----------------------------------------------------------+-------------
+                                             7.74s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).Commit.func1
+         0     0% 0.089%      7.74s  2.86%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit
+                                             7.74s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit.func1
+----------------------------------------------------------+-------------
+                                             7.74s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit
+         0     0% 0.089%      7.74s  2.86%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit.func1
+                                             7.74s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+----------------------------------------------------------+-------------
+                                            45.20s   100% |   github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+         0     0% 0.089%     45.20s 16.71%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument
+                                            45.18s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1
+                                             0.02s 0.044% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).isClosed (inline)
+----------------------------------------------------------+-------------
+                                             7.74s   100% |   github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).Commit.func1
+         0     0% 0.089%      7.74s  2.86%                | github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_commit
+                                             7.74s   100% |   runtime.cgocall
+----------------------------------------------------------+-------------
+
+
+--- 4M_NEXT_HEAP: INUSE_SPACE TOP 20 ---
+File: simple_chain
+Build ID: 6c4d85bc6168d19e588208808bda31ef553124af
+Type: inuse_space
+Time: 2026-10-16 03:14:24 UTC
+Showing nodes accounting for 476.83MB, 44.71% of 1066.46MB total
+Dropped 193 nodes (cum <= 5.33MB)
+Showing top 20 nodes out of 131
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%   274.03MB 25.70%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.processNativeTransfersFastPath.func1
+  274.03MB 25.70% 25.70%   274.03MB 25.70%  github.com/meta-node-blockchain/meta-node/pkg/smart_contract.NewExecuteSCResult
+         0     0% 25.70%   155.03MB 14.54%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient.func1
+         0     0% 25.70%   155.03MB 14.54%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).convertRawEth
+    4.50MB  0.42% 26.12%   155.03MB 14.54%  main.(*App).ConvertRawEthTxToMetaTx
+         0     0% 26.12%   143.26MB 13.43%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient
+         0     0% 26.12%   143.26MB 13.43%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes.InitRoutes.InitRoutes.func1.func3
+         0     0% 26.12%   143.26MB 13.43%  github.com/meta-node-blockchain/meta-node/pkg/network.(*Handler).HandleRequest
+         0     0% 26.12%   143.26MB 13.43%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1
+         0     0% 26.12%   143.26MB 13.43%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1.1
+         0     0% 26.12%   105.82MB  9.92%  runtime.main
+         0     0% 26.12%   101.31MB  9.50%  main.main
+   64.50MB  6.05% 32.17%   101.13MB  9.48%  github.com/meta-node-blockchain/meta-node/pkg/blockchain.(*BlockChain).AddTxToCache
+         0     0% 32.17%    98.30MB  9.22%  main.NewApp
+   89.77MB  8.42% 40.58%    89.77MB  8.42%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.(*shardedSignatureCache).Store
+         0     0% 40.58%    89.77MB  8.42%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.StoreVerifiedSignature (inline)
+         0     0% 40.58%    89.77MB  8.42%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.storeVerifiedBound
+   44.02MB  4.13% 44.71%    86.03MB  8.07%  github.com/meta-node-blockchain/meta-node/pkg/transaction.NewTransactionFromEth
+         0     0% 44.71%    77.92MB  7.31%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).StartCommitterLoop
+         0     0% 44.71%    77.92MB  7.31%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).commitSpeculativeResult
+
+
+--- 4M_NEXT_HEAP: INUSE_OBJECTS TOP 20 ---
+File: simple_chain
+Build ID: 6c4d85bc6168d19e588208808bda31ef553124af
+Type: inuse_objects
+Time: 2026-10-16 03:14:24 UTC
+Showing nodes accounting for 5483277, 59.07% of 9282657 total
+Dropped 251 nodes (cum <= 46413)
+Showing top 20 nodes out of 73
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%    3168990 34.14%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient.func1
+         0     0%     0%    3168990 34.14%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).convertRawEth
+     73732  0.79%  0.79%    3168990 34.14%  main.(*App).ConvertRawEthTxToMetaTx
+         0     0%  0.79%    2849500 30.70%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).ProcessRawTransactionsFromClient
+         0     0%  0.79%    2849500 30.70%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/routes.InitRoutes.InitRoutes.func1.func3
+         0     0%  0.79%    2849500 30.70%  github.com/meta-node-blockchain/meta-node/pkg/network.(*Handler).HandleRequest
+         0     0%  0.79%    2849500 30.70%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1
+         0     0%  0.79%    2849500 30.70%  github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1.1
+         0     0%  0.79%    2565540 27.64%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.processNativeTransfersFastPath.func1
+   2565540 27.64% 28.43%    2565540 27.64%  github.com/meta-node-blockchain/meta-node/pkg/smart_contract.NewExecuteSCResult
+   1142263 12.31% 40.74%    2059777 22.19%  github.com/meta-node-blockchain/meta-node/pkg/blockchain.(*BlockChain).AddTxToCache
+    294934  3.18% 43.91%    1474602 15.89%  sync.(*Map).Swap
+    157511  1.70% 45.61%    1288863 13.88%  github.com/meta-node-blockchain/meta-node/pkg/transaction.NewTransactionFromEth
+         0     0% 45.61%    1224749 13.19%  github.com/ethereum/go-ethereum/core/types.(*Transaction).UnmarshalBinary
+     69640  0.75% 46.36%    1224749 13.19%  github.com/ethereum/go-ethereum/core/types.(*Transaction).decodeTyped
+   1179657 12.71% 59.07%    1179657 12.71%  sync.newEntry (inline)
+         0     0% 59.07%    1155109 12.44%  github.com/ethereum/go-ethereum/core/types.(*DynamicFeeTx).decode
+         0     0% 59.07%    1155109 12.44%  github.com/ethereum/go-ethereum/rlp.(*Stream).Decode
+         0     0% 59.07%    1155109 12.44%  github.com/ethereum/go-ethereum/rlp.DecodeBytes
+         0     0% 59.07%    1155109 12.44%  github.com/ethereum/go-ethereum/rlp.makeStructDecoder.func1
+
+
+--- 4M_NEXT_ALLOCS: ALLOC_SPACE TOP 20 ---
+File: simple_chain
+Build ID: 6c4d85bc6168d19e588208808bda31ef553124af
+Type: alloc_space
+Time: 2026-10-16 03:14:24 UTC
+Showing nodes accounting for 44.83GB, 34.16% of 131.23GB total
+Dropped 755 nodes (cum <= 0.66GB)
+Showing top 20 nodes out of 219
+      flat  flat%   sum%        cum   cum%
+   18.23GB 13.89% 13.89%    18.23GB 13.89%  golang.org/x/crypto/sha3.NewLegacyKeccak256 (inline)
+         0     0% 13.89%    18.23GB 13.89%  github.com/ethereum/go-ethereum/crypto.NewKeccakState (inline)
+         0     0% 13.89%    16.84GB 12.83%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).TxsProcessor2
+         0     0% 13.89%    16.84GB 12.83%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxBatchForwarder).StartForwardingLoop
+    2.55GB  1.95% 15.84%    15.91GB 12.12%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub
+    1.64GB  1.25% 17.09%    13.96GB 10.64%  github.com/ethereum/go-ethereum/crypto.Keccak256Hash
+         0     0% 17.09%    12.81GB  9.76%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*LazyPebbleDB).flushToDisk
+         0     0% 17.09%    11.16GB  8.51%  github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.ValidateEnvelopeBindingsParallel.func1
+         0     0% 17.09%     9.99GB  7.61%  github.com/meta-node-blockchain/meta-node/pkg/storage.(*PebbleDB).BatchPut
+    8.88GB  6.76% 23.85%     9.88GB  7.53%  github.com/meta-node-blockchain/meta-node/pkg/transaction_pool.(*TransactionPool).AddTransactions
+         0     0% 23.85%     9.81GB  7.47%  github.com/cockroachdb/pebble.(*Batch).Set
+         0     0% 23.85%     9.81GB  7.47%  github.com/cockroachdb/pebble.(*Batch).SetDeferred (inline)
+         0     0% 23.85%     9.81GB  7.47%  github.com/cockroachdb/pebble.(*Batch).prepareDeferredKeyValueRecord
+    9.70GB  7.39% 31.24%     9.70GB  7.39%  github.com/cockroachdb/pebble.(*Batch).grow
+         0     0% 31.24%     9.63GB  7.34%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func1.1
+         0     0% 31.24%     9.63GB  7.34%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.verifySignatures.func3
+       2GB  1.53% 32.77%     8.58GB  6.53%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransaction
+         0     0% 32.77%     8.58GB  6.53%  github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1
+    0.10GB  0.08% 32.85%     8.48GB  6.46%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.evalTxSignature
+    1.72GB  1.31% 34.16%     8.13GB  6.20%  github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.sigCacheKey
