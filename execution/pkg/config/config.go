@@ -396,7 +396,7 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		}
 
 		if ConfigApp.ExplorerQueueSize == 0 {
-			ConfigApp.ExplorerQueueSize = 8192
+			ConfigApp.ExplorerQueueSize = 65536
 		}
 		if ConfigApp.ExplorerWorkerCount == 0 {
 			ConfigApp.ExplorerWorkerCount = 32

@@ -20,7 +20,22 @@ type pendingIndexBlock struct {
 	receipts []types.Receipt
 }
 
-const explorerCommitBatchBlocks = 64
+const (
+	explorerCommitBatchBlocks = 64
+	maxPendingIndexBlocks     = 32
+)
+
+func (bp *BlockProcessor) popPendingIndexBlock(blockNum uint64) *pendingIndexBlock {
+	raw, loaded := bp.pendingIndexBlocks.LoadAndDelete(blockNum)
+	if !loaded {
+		return nil
+	}
+	bp.pendingIndexBlockCount.Add(-1)
+	if pending, ok := raw.(*pendingIndexBlock); ok {
+		return pending
+	}
+	return nil
+}
 
 // startIndexingProcess starts the indexing process
 func (bp *BlockProcessor) startIndexingProcess() {
@@ -112,8 +127,12 @@ func (bp *BlockProcessor) startIndexingProcess() {
 
 		case <-tickerSync.C:
 			if len(bp.indexingChannel) == 0 {
+				explorerSvc := bp.storageManager.GetExplorerSearchService()
+				if explorerSvc != nil && explorerSvc.QueueDepth() > 0 {
+					continue
+				}
 				if bp.uncommittedIndexBlocks > 0 {
-					if explorerSvc := bp.storageManager.GetExplorerSearchService(); explorerSvc != nil {
+					if explorerSvc != nil {
 						if err := explorerSvc.Commit(); err != nil {
 							logger.Error("❌ [INDEXING] Failed to commit explorer search index on idle tick: %v", err)
 						}
@@ -135,9 +154,9 @@ func (bp *BlockProcessor) finalizeIndexedBlock(blockNumber uint64, indexDroppedC
 		return
 	}
 	bp.uncommittedIndexBlocks++
-	// Coalesce 32-shard Xapian commits during sustained bursts: commit immediately
-	// when the indexing channel drains (len == 0) or every 64 blocks under burst load.
-	if len(bp.indexingChannel) == 0 || bp.uncommittedIndexBlocks >= explorerCommitBatchBlocks {
+	// Coalesce 32-shard Xapian commits every 64 blocks during bursts; when indexingChannel
+	// becomes idle, tickerSync (every 2s in startIndexingProcess) flushes any remaining blocks.
+	if bp.uncommittedIndexBlocks >= explorerCommitBatchBlocks {
 		if err := explorerSvc.Commit(); err != nil {
 			logger.Error("❌ [INDEXING] Failed to commit explorer search index for block #%d: %v", blockNumber, err)
 		}
@@ -156,55 +175,52 @@ func (bp *BlockProcessor) finalizeIndexedBlock(blockNumber uint64, indexDroppedC
 // indexSingleBlock indexes a single block
 func (bp *BlockProcessor) indexSingleBlock(blockNum uint64) {
 	if _, loaded := bp.indexingLocks.LoadOrStore(blockNum, true); loaded {
-		bp.pendingIndexBlocks.Delete(blockNum)
+		bp.popPendingIndexBlock(blockNum)
 		return
 	}
 	defer bp.indexingLocks.Delete(blockNum)
 
 	explorerSvc := bp.storageManager.GetExplorerSearchService()
 	if explorerSvc == nil {
-		bp.pendingIndexBlocks.Delete(blockNum)
+		bp.popPendingIndexBlock(blockNum)
 		return
 	}
 
 	// Fast path: index directly from in-memory block data handed off by commitWorker,
 	// avoiding 2x trie re-opens and 16,000 protobuf unmarshals per block.
-	if raw, ok := bp.pendingIndexBlocks.LoadAndDelete(blockNum); ok {
-		if pending, ok := raw.(*pendingIndexBlock); ok && pending != nil && pending.header != nil {
-			blockHashHex := pending.header.Hash().Hex()
-			indexDroppedCount := 0
-			var rcptByHash map[common.Hash]types.Receipt
-			for i, tx := range pending.txs {
-				if tx == nil {
-					continue
-				}
-				var rpc types.Receipt
-				if i < len(pending.receipts) && pending.receipts[i] != nil && pending.receipts[i].TransactionHash() == tx.Hash() {
-					rpc = pending.receipts[i]
-				} else {
-					if rcptByHash == nil {
-						rcptByHash = make(map[common.Hash]types.Receipt, len(pending.receipts))
-						for _, r := range pending.receipts {
-							if r != nil {
-								rcptByHash[r.TransactionHash()] = r
-							}
+	if pending := bp.popPendingIndexBlock(blockNum); pending != nil && pending.header != nil {
+		blockHashHex := pending.header.Hash().Hex()
+		indexDroppedCount := 0
+		var rcptByHash map[common.Hash]types.Receipt
+		for i, tx := range pending.txs {
+			if tx == nil {
+				continue
+			}
+			var rpc types.Receipt
+			if i < len(pending.receipts) && pending.receipts[i] != nil && pending.receipts[i].TransactionHash() == tx.Hash() {
+				rpc = pending.receipts[i]
+			} else {
+				if rcptByHash == nil {
+					rcptByHash = make(map[common.Hash]types.Receipt, len(pending.receipts))
+					for _, r := range pending.receipts {
+						if r != nil {
+							rcptByHash[r.TransactionHash()] = r
 						}
 					}
-					rpc = rcptByHash[tx.Hash()]
 				}
-				if rpc == nil {
-					continue
-				}
-				bp.ProcessedIndexTxCount.Add(1)
-				if err := explorerSvc.IndexTransactionFast(tx, rpc, pending.header, blockHashHex, false); err != nil {
-					logger.Error("❌ [INDEXING] Cannot index transaction %s in block #%d (skipping): %v", tx.Hash().Hex(), blockNum, err)
-					indexDroppedCount++
-					continue
-				}
+				rpc = rcptByHash[tx.Hash()]
 			}
-			bp.finalizeIndexedBlock(pending.header.BlockNumber(), indexDroppedCount)
-			return
+			if rpc == nil {
+				continue
+			}
+			bp.ProcessedIndexTxCount.Add(1)
+			if err := explorerSvc.IndexTransactionFast(tx, rpc, pending.header, blockHashHex, false); err != nil {
+				indexDroppedCount++
+				continue
+			}
 		}
+		bp.finalizeIndexedBlock(pending.header.BlockNumber(), indexDroppedCount)
+		return
 	}
 
 	var block types.Block
@@ -243,7 +259,6 @@ func (bp *BlockProcessor) indexSingleBlock(blockNum uint64) {
 
 		bp.ProcessedIndexTxCount.Add(1)
 		if err := explorerSvc.IndexTransactionFast(tx, rpc, block.Header(), blockHashHex, true); err != nil {
-			logger.Error("❌ [INDEXING] Cannot index transaction %s in block #%d (skipping): %v", txHash.Hex(), blockNum, err)
 			indexDroppedCount++
 			continue
 		}

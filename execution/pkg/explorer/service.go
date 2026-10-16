@@ -169,6 +169,11 @@ func (s *ExplorerSearchService) monitorQueue() {
 	}
 }
 
+// QueueDepth returns the current number of pending jobs in indexQueue.
+func (s *ExplorerSearchService) QueueDepth() int {
+	return len(s.indexQueue)
+}
+
 func (s *ExplorerSearchService) Close() error {
 	log.Println("🔌 Shutting down ExplorerSearchService...")
 
@@ -227,13 +232,22 @@ func (s *ExplorerSearchService) IndexTransactionFast(
 		Replace:     replace,
 	}
 
-	// Non-blocking send: drop job if queue is full rather than blocking pipeline.
+	// Fast non-blocking send when queue has room (zero timer allocation on hot path).
 	select {
 	case s.indexQueue <- job:
-		// Sent successfully
 		return nil
 	default:
-		// Queue full — drop job to prevent backpressure on block processing.
+	}
+
+	// Queue is momentarily full: pace the background indexing producer (up to 50ms)
+	// so bursts from in-memory pendingIndexBlocks match the 32 Xapian workers' drain rate
+	// without dropping jobs, while still failing open if Xapian shards are stalled.
+	timer := time.NewTimer(50 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case s.indexQueue <- job:
+		return nil
+	case <-timer.C:
 		dropped := s.droppedJobs.Add(1)
 		// Log every 100th drop to avoid log spam
 		if dropped%100 == 1 {

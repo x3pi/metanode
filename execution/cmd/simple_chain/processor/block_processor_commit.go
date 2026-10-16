@@ -298,20 +298,26 @@ func (bp *BlockProcessor) commitWorker() {
 		// This ensures commitWorker can continue and send doneChan signal
 		if bp.storageManager.IsExplorer() {
 			hasMemData := false
-			if job.ProcessResults != nil && len(job.ProcessResults.Transactions) == len(job.ProcessResults.Receipts) {
-				bp.pendingIndexBlocks.Store(blockNum, &pendingIndexBlock{
+			if job.ProcessResults != nil &&
+				len(job.ProcessResults.Transactions) == len(job.ProcessResults.Receipts) &&
+				bp.pendingIndexBlockCount.Load() < maxPendingIndexBlocks {
+				if _, loaded := bp.pendingIndexBlocks.LoadOrStore(blockNum, &pendingIndexBlock{
 					header:   job.Block.Header(),
 					txs:      job.ProcessResults.Transactions,
 					receipts: job.ProcessResults.Receipts,
-				})
-				hasMemData = true
+				}); !loaded {
+					bp.pendingIndexBlockCount.Add(1)
+					hasMemData = true
+				}
 			}
 			select {
 			case bp.indexingChannel <- blockNum:
 				// Successfully sent to indexing channel
 			default:
 				if hasMemData {
-					bp.pendingIndexBlocks.Delete(blockNum)
+					if _, loaded := bp.pendingIndexBlocks.LoadAndDelete(blockNum); loaded {
+						bp.pendingIndexBlockCount.Add(-1)
+					}
 				}
 				// Indexing channel is full, skip indexing for this block to avoid blocking
 				logger.Warn("⚠️  [INDEXING] indexingChannel is full, skipping indexing for block #%d to avoid blocking commitWorker",

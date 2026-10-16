@@ -159,6 +159,7 @@ type BlockProcessor struct {
 	indexingChannel        chan uint64
 	indexingLocks          sync.Map
 	pendingIndexBlocks     sync.Map
+	pendingIndexBlockCount atomic.Int64
 	uncommittedIndexBlocks uint64
 	inputTxCounter         atomic.Int64
 	nextBlockNumber        atomic.Uint64
