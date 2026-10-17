@@ -3,9 +3,12 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -126,3 +129,73 @@ func TestRPCRateLimiter_ExemptEndpoints(t *testing.T) {
 		}
 	}
 }
+
+// TestRPCRateLimiter_WebSocketPerMessageLimiting verifies that messages sent
+// inside an established WebSocket connection are individually rate limited,
+// preventing evasion where sending 50 RPC calls over 1 connection only counts as 1 request.
+func TestRPCRateLimiter_WebSocketPerMessageLimiting(t *testing.T) {
+	cfg := &config.RpcRateLimitConfig{
+		Enabled:           true,
+		GlobalRate:        1000,
+		PerIpRate:         10, // burst is 20
+		BlockDurationSecs: 2,
+	}
+	rl := NewRPCRateLimiter(cfg)
+	defer rl.Close()
+
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+
+	wsEchoHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			mt, message, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			if err := conn.WriteMessage(mt, message); err != nil {
+				break
+			}
+		}
+	})
+
+	ts := httptest.NewServer(rl.WebsocketMiddleware(wsEchoHandler))
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	require.NoError(t, err)
+	defer clientConn.Close()
+
+	// Send 50 messages over this SINGLE WebSocket connection
+	const msgCount = 50
+	var successfulSends int
+	for i := 0; i < msgCount; i++ {
+		payload := []byte(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`)
+		if err := clientConn.WriteMessage(websocket.TextMessage, payload); err != nil {
+			break
+		}
+		_ = clientConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		_, _, err := clientConn.ReadMessage()
+		if err != nil {
+			break
+		}
+		successfulSends++
+	}
+
+	stats := rl.GetStats()
+	totalAllowed := stats["total_allowed"].(int64)
+	totalRejected := stats["total_rejected"].(int64)
+
+	// In the old bug, totalAllowed was 0 (or 1 from handshake) and all 50 messages bypassed limiting.
+	// With the fix, totalAllowed + totalRejected must count multiple messages (more than 1)!
+	assert.Greater(t, totalAllowed+totalRejected, int64(1), "Rate limiter must count messages inside WebSocket, not just handshake")
+	assert.Greater(t, totalRejected, int64(0), "Spamming 50 messages when burst is 20 must trigger rate limiting rejection")
+	assert.Less(t, successfulSends, msgCount, "Connection should be blocked/terminated before all 50 messages succeed")
+}
+

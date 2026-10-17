@@ -163,6 +163,15 @@ func VerifyTransaction(
 	chainState *blockchain.ChainState,
 	preloadedState types.AccountState, // nil = auto-fetch via AccountStateReadOnly
 ) *transaction.TransactionError {
+	return VerifyTransactionWithOptions(tx, chainState, preloadedState, false)
+}
+
+func VerifyTransactionWithOptions(
+	tx types.Transaction,
+	chainState *blockchain.ChainState,
+	preloadedState types.AccountState, // nil = auto-fetch via AccountStateReadOnly
+	skipSignatureVerify bool,
+) *transaction.TransactionError {
 	if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") == "true" {
 		isExplicitDev := os.Getenv("METANODE_DEVNET") == "true"
 		isProd := os.Getenv("NODE_ENV") == "production" ||
@@ -176,13 +185,14 @@ func VerifyTransaction(
 		}
 	}
 
-	// P0-9: Enforce strict envelope binding at mempool admission
-	if tx != nil && len(tx.RawEnvelope()) > 0 && !IsVerifiedEnvelopeBound(tx) {
+	// P0-9: Enforce strict envelope binding at mempool admission (skip only if signature verification is explicitly bypassed)
+	if !skipSignatureVerify && tx != nil && len(tx.RawEnvelope()) > 0 && !IsVerifiedEnvelopeBound(tx) {
 		if err := transaction.ValidateEnvelopeBinding(tx); err != nil {
 			logger.Error("❌ [VERIFY] envelope binding failed: txHash=%s, err=%v", tx.Hash().Hex(), err)
 			return transaction.ErrEnvelopeBindingMismatch
 		}
 	}
+
 
 	var as types.AccountState
 	if preloadedState != nil {
@@ -226,7 +236,7 @@ func VerifyTransaction(
 		return transaction.UnauthorizedSystemSender
 	}
 
-	if as.Nonce() != 0 || tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
+	if !skipSignatureVerify && (as.Nonce() != 0 || tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT)) {
 		txHash := tx.Hash()
 
 		if tx.Type() == 0xFF {
@@ -323,13 +333,15 @@ func VerifyTransaction(
 
 		switch {
 		case as.Nonce() == 0 && isSetBls:
-			setBlsCacheKey := sigCacheKey(tx, nil)
-			if !LoadVerifiedSignature(setBlsCacheKey) {
-				if !tx.ValidSecpSign() {
-					return transaction.InvalidSignSecp
+			if !skipSignatureVerify {
+				setBlsCacheKey := sigCacheKey(tx, nil)
+				if !LoadVerifiedSignature(setBlsCacheKey) {
+					if !tx.ValidSecpSign() {
+						return transaction.InvalidSignSecp
+					}
+					StoreVerifiedSignature(setBlsCacheKey)
+					bumpVerifiedSignatureCacheCount()
 				}
-				StoreVerifiedSignature(setBlsCacheKey)
-				bumpVerifiedSignatureCacheCount()
 			}
 			_, err := UnpackSetBlsPublicKeyInput(dataInput)
 			if err != nil {

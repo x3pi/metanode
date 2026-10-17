@@ -4,8 +4,11 @@ package main
 // Uses golang.org/x/time/rate (already a project dependency via routes.go).
 
 import (
+	"bufio"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -132,6 +135,47 @@ func extractIP(remoteAddr string) string {
 	return host
 }
 
+// CheckRequest evaluates whether an individual RPC call from ip is permitted.
+// If the IP is blocked or exceeds global or per-IP rate limits, it records the rejection,
+// bans the IP if burst was exceeded, and returns an error.
+// If allowed, it increments totalAllowed and returns nil.
+func (rl *RPCRateLimiter) CheckRequest(ip string) error {
+	if rl == nil || !rl.config.Enabled {
+		return nil
+	}
+
+	entry := rl.getIPEntry(ip)
+	now := time.Now()
+	nowNano := now.UnixNano()
+	blockedUntilNano := entry.blockedUntilUnixNano.Load()
+
+	// Check if IP is currently blocked
+	if nowNano < blockedUntilNano {
+		rl.totalRejected.Add(1)
+		return fmt.Errorf("ip_blocked")
+	}
+
+	// Global rate check
+	if !rl.global.Allow() {
+		rl.totalRejected.Add(1)
+		return fmt.Errorf("global_rate_exceeded")
+	}
+
+	// Check per-IP limiter
+	if !entry.limiter.Allow() {
+		rl.totalRejected.Add(1)
+
+		// IP exceeds rate, BAN it
+		blockedUntil := now.Add(time.Duration(rl.config.BlockDurationSecs) * time.Second)
+		entry.blockedUntilUnixNano.Store(blockedUntil.UnixNano())
+		logger.Warn("🚨 [RPC_RATE_LIMIT] IP %s spammed RPC. Banned for %d seconds.", ip, rl.config.BlockDurationSecs)
+		return fmt.Errorf("ip_banned")
+	}
+
+	rl.totalAllowed.Add(1)
+	return nil
+}
+
 // Middleware wraps an http.Handler with rate limiting checks.
 func (rl *RPCRateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -190,6 +234,201 @@ func (rl *RPCRateLimiter) Middleware(next http.Handler) http.Handler {
 		start := time.Now()
 		next.ServeHTTP(w, r)
 		metrics.RPCDuration.WithLabelValues(method).Observe(time.Since(start).Seconds())
+	})
+}
+
+type wsFrameState int
+
+const (
+	wsStateHeader wsFrameState = iota
+	wsStatePayload
+)
+
+// wsRateLimitConn wraps the hijacked net.Conn of a WebSocket to inspect RFC 6455
+// incoming frames and enforce rate limits on every individual JSON-RPC message.
+type wsRateLimitConn struct {
+	net.Conn
+	initialReader io.Reader
+	ip            string
+	rl            *RPCRateLimiter
+
+	state            wsFrameState
+	headerBuf        [14]byte
+	headerLen        int
+	expectedHeader   int
+	payloadRemaining int64
+}
+
+func newWSRateLimitConn(conn net.Conn, initialReader io.Reader, ip string, rl *RPCRateLimiter) *wsRateLimitConn {
+	return &wsRateLimitConn{
+		Conn:          conn,
+		initialReader: initialReader,
+		ip:            ip,
+		rl:            rl,
+		state:         wsStateHeader,
+	}
+}
+
+func (c *wsRateLimitConn) Read(p []byte) (int, error) {
+	var n int
+	var err error
+	if c.initialReader != nil {
+		n, err = c.initialReader.Read(p)
+		if err == io.EOF {
+			c.initialReader = nil
+			if n == 0 {
+				n, err = c.Conn.Read(p)
+			} else {
+				err = nil
+			}
+		}
+	} else {
+		n, err = c.Conn.Read(p)
+	}
+
+	if n > 0 {
+		if parseErr := c.processIncomingBytes(p[:n]); parseErr != nil {
+			return n, parseErr
+		}
+	}
+	return n, err
+}
+
+func (c *wsRateLimitConn) processIncomingBytes(p []byte) error {
+	n := len(p)
+	for i := 0; i < n; i++ {
+		b := p[i]
+		if c.state == wsStateHeader {
+			c.headerBuf[c.headerLen] = b
+			c.headerLen++
+			if c.headerLen == 2 {
+				b1 := c.headerBuf[1]
+				masked := (b1 & 0x80) != 0
+				len7 := b1 & 0x7f
+				extraLen := 0
+				if len7 == 126 {
+					extraLen = 2
+				} else if len7 == 127 {
+					extraLen = 8
+				}
+				maskLen := 0
+				if masked {
+					maskLen = 4
+				}
+				c.expectedHeader = 2 + extraLen + maskLen
+			}
+			if c.headerLen >= 2 && c.headerLen == c.expectedHeader {
+				// Header complete!
+				opcode := c.headerBuf[0] & 0x0f
+				b1 := c.headerBuf[1]
+				len7 := b1 & 0x7f
+				var payloadLen int64
+				if len7 <= 125 {
+					payloadLen = int64(len7)
+				} else if len7 == 126 {
+					payloadLen = int64(binary.BigEndian.Uint16(c.headerBuf[2:4]))
+				} else {
+					payloadLen = int64(binary.BigEndian.Uint64(c.headerBuf[2:10]))
+				}
+
+				// RFC 6455: Opcode 0x1 (Text) and 0x2 (Binary) are incoming RPC request messages
+				if opcode == 0x1 || opcode == 0x2 {
+					if err := c.rl.CheckRequest(c.ip); err != nil {
+						// Write close frame with code 1008 (Policy Violation) and terminate connection
+						_ = c.Conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+						_, _ = c.Conn.Write([]byte{0x88, 0x02, 0x03, 0xf0})
+						_ = c.Conn.Close()
+						return fmt.Errorf("websocket rpc rate limit exceeded for ip %s: %w", c.ip, err)
+					}
+					metrics.RPCRequestsTotal.WithLabelValues("/ws").Inc()
+				}
+
+				c.headerLen = 0
+				c.expectedHeader = 0
+				if payloadLen > 0 {
+					c.state = wsStatePayload
+					c.payloadRemaining = payloadLen
+				} else {
+					c.state = wsStateHeader
+				}
+			}
+		} else if c.state == wsStatePayload {
+			avail := int64(n - i)
+			if avail <= c.payloadRemaining {
+				c.payloadRemaining -= avail
+				if c.payloadRemaining == 0 {
+					c.state = wsStateHeader
+				}
+				break
+			} else {
+				i += int(c.payloadRemaining) - 1
+				c.payloadRemaining = 0
+				c.state = wsStateHeader
+				continue
+			}
+		}
+	}
+	return nil
+}
+
+type wsHijackResponseWriter struct {
+	http.ResponseWriter
+	ip string
+	rl *RPCRateLimiter
+}
+
+func (w *wsHijackResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not implement http.Hijacker")
+	}
+	conn, brw, err := hijacker.Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	var initialReader io.Reader
+	if brw != nil && brw.Reader != nil && brw.Reader.Buffered() > 0 {
+		initialReader = brw.Reader
+	}
+	wrappedConn := newWSRateLimitConn(conn, initialReader, w.ip, w.rl)
+	newBrw := bufio.NewReadWriter(bufio.NewReader(wrappedConn), bufio.NewWriter(wrappedConn))
+	return wrappedConn, newBrw, nil
+}
+
+func (w *wsHijackResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// WebsocketMiddleware wraps a WebSocket http.Handler to enforce per-message rate limiting.
+func (rl *RPCRateLimiter) WebsocketMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !rl.config.Enabled {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		ip := extractIP(r.RemoteAddr)
+		entry := rl.getIPEntry(ip)
+
+		now := time.Now()
+		nowNano := now.UnixNano()
+		blockedUntilNano := entry.blockedUntilUnixNano.Load()
+
+		// Reject initial handshake if IP is currently banned
+		if nowNano < blockedUntilNano {
+			rl.totalRejected.Add(1)
+			writeIPBlockedResponse(w, time.Unix(0, blockedUntilNano))
+			return
+		}
+
+		wrapped := &wsHijackResponseWriter{
+			ResponseWriter: w,
+			ip:             ip,
+			rl:             rl,
+		}
+		next.ServeHTTP(wrapped, r)
 	})
 }
 

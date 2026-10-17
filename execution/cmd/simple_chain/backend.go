@@ -573,8 +573,8 @@ func NewServer(app *App) *http.ServeMux {
 		w.Write([]byte(`{"status":"reset"}`))
 	})
 
-	// Áp dụng middleware vào handler WebSocket
-	wsHandler := rateLimiter.Middleware(server.WebsocketHandler([]string{"*"}))
+	// Áp dụng middleware vào handler WebSocket (giới hạn theo từng message/RPC call)
+	wsHandler := rateLimiter.WebsocketMiddleware(server.WebsocketHandler([]string{"*"}))
 	mux.Handle("/ws", wsHandler)
 	if app.config.Debug {
 		debugApi := &DebugApi{App: app}

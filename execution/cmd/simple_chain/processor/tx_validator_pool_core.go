@@ -457,36 +457,6 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transact
 		return nil
 	}
 
-	// Limit pool size to prevent GC stall / OOM
-	if enforceCap && vp.transactionPool.CountTransactions()+len(txs) >= MaxMempoolSize {
-		if vp.evictionInProgress.CompareAndSwap(false, true) {
-			evicted := func() int {
-				defer vp.evictionInProgress.Store(false)
-				evictCount := len(txs)
-				if evictCount < 1000 {
-					evictCount = 1000
-				}
-				logger.Warn("⚠️ Mempool is near full (limit=%d). Evicting %d lowest-fee transactions to make room for batch.", MaxMempoolSize, evictCount)
-				return vp.transactionPool.EvictLowestGasPrice(evictCount)
-			}()
-			if evicted == 0 {
-				err := fmt.Errorf("transaction pool is full (limit=%d) and could not evict", MaxMempoolSize)
-				errs := make([]error, len(txs))
-				for i := range errs {
-					errs[i] = err
-				}
-				return errs
-			}
-		} else {
-			err := fmt.Errorf("transaction pool is full (limit=%d), eviction already in progress", MaxMempoolSize)
-			errs := make([]error, len(txs))
-			for i := range errs {
-				errs[i] = err
-			}
-			return errs
-		}
-	}
-
 	minGasPrice := vp.chainState.GetConfig().MinGasPrice
 
 	if storage.GetLastBlockNumberFromMaster() > storage.GetLastBlockNumber()+3 {
@@ -587,39 +557,50 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transact
 		// Batch-verify all BLS signatures first (blst random-linear-combination, ~2-3x cheaper CPU per
 		// signature than one-by-one) so the per-tx VerifyTransaction calls below hit the warm cache.
 		tx_processor.PrewarmSignatureCache(vp.chainState, txs, senderStates)
+	}
 
-		// GOMAXPROCS(0), not NumCPU(): see native_fast_path.go for why.
-		numWorkers := runtime.GOMAXPROCS(0) / 2
-		if numWorkers < 4 {
-			numWorkers = 4
-		}
-		if numWorkers > 48 {
-			numWorkers = 48
-		}
-		if len(txs) < numWorkers {
-			numWorkers = len(txs)
-		}
+	// GOMAXPROCS(0), not NumCPU(): see native_fast_path.go for why.
+	numWorkers := runtime.GOMAXPROCS(0) / 2
+	if numWorkers < 4 {
+		numWorkers = 4
+	}
+	if numWorkers > 48 {
+		numWorkers = 48
+	}
+	if len(txs) < numWorkers {
+		numWorkers = len(txs)
+	}
 
-		var wg sync.WaitGroup
-		wg.Add(numWorkers)
-		chunkSize := (len(txs) + numWorkers - 1) / numWorkers
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+	chunkSize := (len(txs) + numWorkers - 1) / numWorkers
 
-		for w := 0; w < numWorkers; w++ {
-			start := w * chunkSize
-			end := start + chunkSize
-			if end > len(txs) {
-				end = len(txs)
-			}
-			go func(s, e int) {
-				defer wg.Done()
-				for i := s; i < e; i++ {
-					if txs[i] == nil || errorsList[i] != nil {
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunkSize
+		end := start + chunkSize
+		if end > len(txs) {
+			end = len(txs)
+		}
+		go func(s, e int) {
+			defer wg.Done()
+			for i := s; i < e; i++ {
+				if txs[i] == nil || errorsList[i] != nil {
+					continue
+				}
+				if minGasPrice > 0 {
+					gasCap := txs[i].GasPriceCap()
+					if gasCap == nil || gasCap.Cmp(new(big.Int).SetUint64(minGasPrice)) < 0 {
+						var capStr string
+						if gasCap != nil {
+							capStr = gasCap.String()
+						} else {
+							capStr = fmt.Sprintf("%d", txs[i].MaxGasPrice())
+						}
+						errorsList[i] = fmt.Errorf("[code:%d] transaction gas price (%s) is below node minimum (%d)", transaction.InvalidTransaction.Code, capStr, minGasPrice)
 						continue
 					}
-					if minGasPrice > 0 && txs[i].MaxGasPrice() < minGasPrice {
-						errorsList[i] = fmt.Errorf("[code:%d] transaction gas price (%d) is below node minimum (%d)", transaction.InvalidTransaction.Code, txs[i].MaxGasPrice(), minGasPrice)
-						continue
-					}
+				}
+				if !skipVerification {
 					var senderState types.AccountState
 					if senderStates != nil {
 						senderState = senderStates[txs[i].FromAddress()]
@@ -628,10 +609,11 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transact
 						errorsList[i] = fmt.Errorf("[code:%d] %w", err.Code, err)
 					}
 				}
-			}(start, end)
-		}
-		wg.Wait()
+			}
+		}(start, end)
 	}
+	wg.Wait()
+
 	verificationDuration := time.Since(t2)
 
 	t3 := time.Now()
@@ -649,6 +631,39 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transact
 	conflictChecksDuration := time.Since(t3)
 
 	t4 := time.Now()
+	// Limit pool size to prevent GC stall / OOM
+	// Eviction runs AFTER verification so invalid spam transactions do not evict legitimate mempool transactions
+	if enforceCap && len(validTxs) > 0 && vp.transactionPool.CountTransactions()+len(validTxs) >= MaxMempoolSize {
+		if vp.evictionInProgress.CompareAndSwap(false, true) {
+			evicted := func() int {
+				defer vp.evictionInProgress.Store(false)
+				evictCount := len(validTxs)
+				if evictCount < 1000 {
+					evictCount = 1000
+				}
+				logger.Warn("⚠️ Mempool is near full (limit=%d). Evicting %d lowest-fee transactions to make room for batch.", MaxMempoolSize, evictCount)
+				return vp.transactionPool.EvictLowestGasPrice(evictCount)
+			}()
+			if evicted == 0 {
+				err := fmt.Errorf("transaction pool is full (limit=%d) and could not evict", MaxMempoolSize)
+				for i := range errorsList {
+					if errorsList[i] == nil {
+						errorsList[i] = err
+					}
+				}
+				validTxs = nil
+			}
+		} else {
+			err := fmt.Errorf("transaction pool is full (limit=%d), eviction already in progress", MaxMempoolSize)
+			for i := range errorsList {
+				if errorsList[i] == nil {
+					errorsList[i] = err
+				}
+			}
+			validTxs = nil
+		}
+	}
+
 	if len(validTxs) > 0 {
 		// Bulk insert to pool (acquires lock ONCE per shard run)
 		vp.transactionPool.AddTransactions(validTxs)

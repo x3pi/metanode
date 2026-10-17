@@ -249,3 +249,92 @@ func TestSecurity_Unit_FastPath_ZeroGasPriceTxRejectedEvenWithCachedSignature(t 
 	assert.Empty(t, outTxs, "Fast path must reject tx with MaxGasPrice=0 even if signature is cached")
 	assert.Empty(t, outRcps, "Fast path must return no receipts for rejected tx")
 }
+
+// TestSecurity_Unit_SkipSignatureVerify_RejectsInvalidGasAndFee verifies that
+// VerifyTransactionWithOptions with skipSignatureVerify=true STILL rejects
+// invalid gas, zero gas price, overdrafts, and stale nonces.
+func TestSecurity_Unit_SkipSignatureVerify_RejectsInvalidGasAndFee(t *testing.T) {
+	cs := setupTestChainState(t)
+	from := common.HexToAddress("0x111")
+	to := common.HexToAddress("0x222")
+
+	as := state.NewAccountState(from)
+	as.AddBalance(big.NewInt(1000000000000000))
+	as.SetNonce(5)
+
+	// 1. MaxGas = 0 must be rejected
+	txZeroGas := transaction.NewTransaction(
+		from, to, big.NewInt(100), 0, p_common.MINIMUM_BASE_FEE, 0,
+		nil, nil, common.Hash{}, common.Hash{}, 5, 1,
+	)
+	err := VerifyTransactionWithOptions(txZeroGas, cs, as, true)
+	require.NotNil(t, err, "skipSignatureVerify=true must reject MaxGas=0")
+	assert.Equal(t, transaction.InvalidMaxGas.Code, err.Code)
+
+	// 2. GasPrice = 0 must be rejected
+	txZeroFee := transaction.NewTransaction(
+		from, to, big.NewInt(100), p_common.TRANSFER_GAS_COST, 0, 1000,
+		nil, nil, common.Hash{}, common.Hash{}, 5, 1,
+	)
+	err = VerifyTransactionWithOptions(txZeroFee, cs, as, true)
+	require.NotNil(t, err, "skipSignatureVerify=true must reject GasPrice=0")
+	assert.Equal(t, transaction.InvalidMaxGasPrice.Code, err.Code)
+
+	// 3. Stale nonce must be rejected
+	txStaleNonce := transaction.NewTransaction(
+		from, to, big.NewInt(100), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, p_common.TRANSFER_GAS_COST,
+		nil, nil, common.Hash{}, common.Hash{}, 1, 1, // nonce 1 < state nonce 5
+	)
+	err = VerifyTransactionWithOptions(txStaleNonce, cs, as, true)
+	require.NotNil(t, err, "skipSignatureVerify=true must reject stale nonce")
+	assert.Equal(t, transaction.InvalidNonce.Code, err.Code)
+
+	// 4. Overdraft must be rejected
+	txOverdraft := transaction.NewTransaction(
+		from, to, big.NewInt(2000000000000000), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, p_common.TRANSFER_GAS_COST,
+		nil, nil, common.Hash{}, common.Hash{}, 5, 1,
+	)
+	err = VerifyTransactionWithOptions(txOverdraft, cs, as, true)
+	require.NotNil(t, err, "skipSignatureVerify=true must reject overdraft")
+	assert.True(t, err.Code == transaction.InvalidAmount.Code || err.Code == transaction.InvalidMaxFee.Code)
+}
+
+// TestSecurity_Unit_FastPath_RejectsInvalidTxWhenSkipSignatureVerifyIsTrue verifies that
+// the production speculative executor path (skipSignatureVerify=true) does NOT execute
+// transactions with zero gas or zero fee.
+func TestSecurity_Unit_FastPath_RejectsInvalidTxWhenSkipSignatureVerifyIsTrue(t *testing.T) {
+	cs := setupTestChainState(t)
+	from := common.HexToAddress("0x111")
+	to := common.HexToAddress("0x222")
+	amount := big.NewInt(100)
+
+	// Zero gas price transaction
+	tx := transaction.NewTransaction(
+		from, to, amount, p_common.TRANSFER_GAS_COST, 0, 1000,
+		nil, nil, common.Hash{}, common.Hash{}, 1, 1,
+	)
+	as := state.NewAccountState(from)
+	as.AddBalance(big.NewInt(1000000000000000))
+	as.SetNonce(1)
+	cs.GetAccountStateDB().SetState(as)
+
+	items := []grouptxns.Item{{ID: 0, Array: grouptxns.BuildDeterministicGroupAddrs(tx), Tx: tx}}
+	groups := grouptxns.GroupTransactionsDeterministic(items, cs.HasCode)
+
+	leaderAddr := common.HexToAddress("0x999")
+	// Run with skipSignatureVerify = true (the speculative executor mode)
+	outTxs, outRcps, _, _ := ProcessTransactionsOptimistic(
+		context.Background(), cs, groups, blankHeader(),
+		false, false, 12345, leaderAddr, true,
+	)
+
+	// Must be rejected: no txs processed, no receipts returned
+	assert.Empty(t, outTxs, "Fast path with skipSignatureVerify=true must reject tx with MaxGasPrice=0")
+	assert.Empty(t, outRcps, "Fast path with skipSignatureVerify=true must return no receipts for rejected tx")
+
+	// Balances must remain unchanged
+	asAfter, errState := cs.GetAccountStateDB().AccountState(from)
+	require.NoError(t, errState)
+	assert.Equal(t, big.NewInt(1000000000000000), asAfter.Balance(), "Balance must not be modified by rejected tx")
+}
+

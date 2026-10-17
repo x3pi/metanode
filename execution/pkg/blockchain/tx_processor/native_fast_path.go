@@ -19,7 +19,6 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
-	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -147,16 +146,12 @@ func processNativeTransfersFastPath(
 					}
 
 					// Verify transaction (signature, amount, gas limits, etc.)
-					// In production (skipSignatureVerify == false), we ALWAYS run VerifyTransaction.
-					// Verified signatures are cached by FilterInvalidSignatures, so VerifyTransaction
-					// hits LoadVerifiedSignature internally and skips crypto, while strictly enforcing
-					// ValidMaxGas, ValidMaxGasPrice, ValidAmount, and ValidMaxFee.
-					var errVerify *transaction.TransactionError
-					if skipSignatureVerify {
-						errVerify = nil
-					} else {
-						errVerify = VerifyTransaction(tx, chainState, as)
-					}
+					// When skipSignatureVerify is true (e.g. from speculative execution or after batch filter),
+					// VerifyTransactionWithOptions bypasses only cryptographic signature recovery while strictly
+					// enforcing all state, fee, gas, and balance invariants: ValidMaxGas, ValidMaxGasPrice,
+					// ValidAmount, ValidMaxFee, Nonce, etc.
+					errVerify := VerifyTransactionWithOptions(tx, chainState, as, skipSignatureVerify)
+
 
 					if errVerify != nil {
 						if enableTrace {
