@@ -146,9 +146,13 @@ func processNativeTransfersFastPath(
 						continue
 					}
 
-					// Verify transaction (BLS signature, amount, etc.)
+					// Verify transaction (signature, amount, gas limits, etc.)
+					// In production (skipSignatureVerify == false), we ALWAYS run VerifyTransaction.
+					// Verified signatures are cached by FilterInvalidSignatures, so VerifyTransaction
+					// hits LoadVerifiedSignature internally and skips crypto, while strictly enforcing
+					// ValidMaxGas, ValidMaxGasPrice, ValidAmount, and ValidMaxFee.
 					var errVerify *transaction.TransactionError
-					if skipSignatureVerify || LoadVerifiedSignature(sigCacheKey(tx, as.PublicKeyBls())) {
+					if skipSignatureVerify {
 						errVerify = nil
 					} else {
 						errVerify = VerifyTransaction(tx, chainState, as)

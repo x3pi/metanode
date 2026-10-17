@@ -24,11 +24,11 @@ const (
 	ipCleanupEvery = 5 * time.Minute
 )
 
-// ipEntry holds a rate limiter and the last time it was used.
+// ipEntry holds a rate limiter and thread-safe timestamps for tracking.
 type ipEntry struct {
-	limiter      *rate.Limiter
-	lastSeen     time.Time
-	blockedUntil time.Time // If set > Now(), all requests are instantly rejected
+	limiter              *rate.Limiter
+	lastSeenUnixNano     atomic.Int64
+	blockedUntilUnixNano atomic.Int64 // If set > Now(), all requests are instantly rejected
 }
 
 // RPCRateLimiter provides global and per-IP rate limiting for the RPC server.
@@ -78,11 +78,12 @@ func (rl *RPCRateLimiter) cleanupLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			cutoff := time.Now().Add(-ipCleanupEvery)
+			cutoffNano := time.Now().Add(-ipCleanupEvery).UnixNano()
+			nowNano := time.Now().UnixNano()
 			rl.perIP.Range(func(key, value any) bool {
 				entry := value.(*ipEntry)
 				// Clean up only if it hasn't been seen recently AND it's not currently blocked
-				if entry.lastSeen.Before(cutoff) && time.Now().After(entry.blockedUntil) {
+				if entry.lastSeenUnixNano.Load() < cutoffNano && nowNano >= entry.blockedUntilUnixNano.Load() {
 					rl.perIP.Delete(key)
 				}
 				return true
@@ -101,9 +102,10 @@ func (rl *RPCRateLimiter) Close() {
 // getIPEntry returns the per-IP entry, creating one if needed.
 // PERFORMANCE: Uses sync.Map for lock-free reads (hot path).
 func (rl *RPCRateLimiter) getIPEntry(ip string) *ipEntry {
+	nowNano := time.Now().UnixNano()
 	if val, ok := rl.perIP.Load(ip); ok {
 		entry := val.(*ipEntry)
-		entry.lastSeen = time.Now()
+		entry.lastSeenUnixNano.Store(nowNano)
 		return entry
 	}
 
@@ -114,9 +116,9 @@ func (rl *RPCRateLimiter) getIPEntry(ip string) *ipEntry {
 
 	// Create new limiter — Store-or-Load pattern avoids duplicates
 	newEntry := &ipEntry{
-		limiter:  rate.NewLimiter(rate.Limit(rl.config.PerIpRate), burst),
-		lastSeen: time.Now(),
+		limiter: rate.NewLimiter(rate.Limit(rl.config.PerIpRate), burst),
 	}
+	newEntry.lastSeenUnixNano.Store(nowNano)
 	actual, _ := rl.perIP.LoadOrStore(ip, newEntry)
 	return actual.(*ipEntry)
 }
@@ -149,10 +151,14 @@ func (rl *RPCRateLimiter) Middleware(next http.Handler) http.Handler {
 		ip := extractIP(r.RemoteAddr)
 		entry := rl.getIPEntry(ip)
 
+		now := time.Now()
+		nowNano := now.UnixNano()
+		blockedUntilNano := entry.blockedUntilUnixNano.Load()
+
 		// Check if IP is currently blocked
-		if time.Now().Before(entry.blockedUntil) {
+		if nowNano < blockedUntilNano {
 			rl.totalRejected.Add(1)
-			writeIPBlockedResponse(w, entry.blockedUntil)
+			writeIPBlockedResponse(w, time.Unix(0, blockedUntilNano))
 			return
 		}
 
@@ -168,10 +174,11 @@ func (rl *RPCRateLimiter) Middleware(next http.Handler) http.Handler {
 			rl.totalRejected.Add(1)
 
 			// IP exceeds rate, BAN it
-			entry.blockedUntil = time.Now().Add(time.Duration(rl.config.BlockDurationSecs) * time.Second)
+			blockedUntil := now.Add(time.Duration(rl.config.BlockDurationSecs) * time.Second)
+			entry.blockedUntilUnixNano.Store(blockedUntil.UnixNano())
 			logger.Warn("🚨 [RPC_RATE_LIMIT] IP %s spammed RPC. Banned for %d seconds.", ip, rl.config.BlockDurationSecs)
 
-			writeIPBlockedResponse(w, entry.blockedUntil)
+			writeIPBlockedResponse(w, blockedUntil)
 			return
 		}
 

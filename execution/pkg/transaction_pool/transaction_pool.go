@@ -162,10 +162,16 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 		shard := tp.shards[i]
 		shard.mu.RLock()
 		for idx, tx := range shard.transactions {
+			var gas uint64
+			if gasCap := tx.GasPriceCap(); gasCap != nil {
+				gas = gasCap.Uint64()
+			} else {
+				gas = tx.MaxGasPrice()
+			}
 			allInfos = append(allInfos, txInfo{
 				shardIdx: i,
 				index:    idx,
-				gas:      tx.MaxGasPrice(),
+				gas:      gas,
 				nonce:    tx.GetNonce(),
 				hash:     tx.Hash(),
 			})

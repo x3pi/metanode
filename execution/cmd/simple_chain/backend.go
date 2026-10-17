@@ -468,8 +468,8 @@ func NewServer(app *App) *http.ServeMux {
 	// Sử dụng mux để xử lý cả HTTP và WebSocket
 	mux := http.NewServeMux()
 
-	// Middleware chain: CORS → ETH SendRawTx Intercept → Rate Limiter → RPC Server
-	httpHandler := corsMiddleware(ethSendRawTxMiddleware(rateLimiter.Middleware(server)))
+	// Middleware chain: CORS → Rate Limiter → ETH SendRawTx Intercept → RPC Server
+	httpHandler := corsMiddleware(rateLimiter.Middleware(ethSendRawTxMiddleware(server)))
 	mux.Handle("/", httpHandler)
 
 	// Prometheus metrics endpoint (standard Prometheus text format)
@@ -574,7 +574,7 @@ func NewServer(app *App) *http.ServeMux {
 	})
 
 	// Áp dụng middleware vào handler WebSocket
-	wsHandler := server.WebsocketHandler([]string{"*"})
+	wsHandler := rateLimiter.Middleware(server.WebsocketHandler([]string{"*"}))
 	mux.Handle("/ws", wsHandler)
 	if app.config.Debug {
 		debugApi := &DebugApi{App: app}

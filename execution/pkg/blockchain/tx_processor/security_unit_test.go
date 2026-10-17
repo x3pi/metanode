@@ -2,12 +2,14 @@ package tx_processor
 
 import (
 	"bytes"
+	"context"
 	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
@@ -163,4 +165,87 @@ func TestSecurity_Unit_AccountSetting_UnauthorizedSelector(t *testing.T) {
 	err := VerifyTransaction(tx, cs, as)
 	require.NotNil(t, err, "Expected VerifyTransaction to reject unauthorized selector")
 	assert.Equal(t, transaction.InvalidData.Code, err.Code)
+}
+
+// TestSecurity_Unit_FastPath_ZeroGasTxRejectedEvenWithCachedSignature verifies that
+// a transaction with MaxGas=0 is rejected in the native fast path,
+// even if its signature is already present in the verified signature cache.
+func TestSecurity_Unit_FastPath_ZeroGasTxRejectedEvenWithCachedSignature(t *testing.T) {
+	cs := setupTestChainState(t)
+	from := common.HexToAddress("0x111")
+	to := common.HexToAddress("0x222")
+	amount := big.NewInt(100)
+
+	// Create transaction with MaxGas = 0
+	tx := transaction.NewTransaction(
+		from, to, amount, 0, p_common.MINIMUM_BASE_FEE, 1000,
+		nil, nil, common.Hash{}, common.Hash{}, 1, 1,
+	)
+	pubKey := signTestTx(tx)
+
+	as := state.NewAccountState(from)
+	as.AddBalance(big.NewInt(1000000000000000))
+	as.SetPublicKeyBls(pubKey)
+	as.SetNonce(1)
+	cs.GetAccountStateDB().SetState(as)
+
+	// Simulate signature filter pre-caching the valid BLS signature
+	cacheKey := sigCacheKey(tx, pubKey)
+	StoreVerifiedSignature(cacheKey)
+	require.True(t, LoadVerifiedSignature(cacheKey), "signature should be cached")
+
+	// Group and execute via ProcessTransactionsOptimistic (fast path) with skipSignatureVerify=false
+	items := []grouptxns.Item{{ID: 0, Array: grouptxns.BuildDeterministicGroupAddrs(tx), Tx: tx}}
+	groups := grouptxns.GroupTransactionsDeterministic(items, cs.HasCode)
+
+	leaderAddr := common.HexToAddress("0x999")
+	outTxs, outRcps, _, _ := ProcessTransactionsOptimistic(
+		context.Background(), cs, groups, blankHeader(),
+		false, false, 12345, leaderAddr, false,
+	)
+
+	// Must be rejected: no txs processed, no receipts returned
+	assert.Empty(t, outTxs, "Fast path must reject tx with MaxGas=0 even if signature is cached")
+	assert.Empty(t, outRcps, "Fast path must return no receipts for rejected tx")
+}
+
+// TestSecurity_Unit_FastPath_ZeroGasPriceTxRejectedEvenWithCachedSignature verifies that
+// a transaction with MaxGasPrice=0 is rejected in the native fast path,
+// even if its signature is already present in the verified signature cache.
+func TestSecurity_Unit_FastPath_ZeroGasPriceTxRejectedEvenWithCachedSignature(t *testing.T) {
+	cs := setupTestChainState(t)
+	from := common.HexToAddress("0x111")
+	to := common.HexToAddress("0x222")
+	amount := big.NewInt(100)
+
+	// Create transaction with MaxGasPrice = 0 (below MINIMUM_BASE_FEE)
+	tx := transaction.NewTransaction(
+		from, to, amount, p_common.TRANSFER_GAS_COST, 0, 1000,
+		nil, nil, common.Hash{}, common.Hash{}, 1, 1,
+	)
+	pubKey := signTestTx(tx)
+
+	as := state.NewAccountState(from)
+	as.AddBalance(big.NewInt(1000000000000000))
+	as.SetPublicKeyBls(pubKey)
+	as.SetNonce(1)
+	cs.GetAccountStateDB().SetState(as)
+
+	// Simulate signature filter pre-caching the valid BLS signature
+	cacheKey := sigCacheKey(tx, pubKey)
+	StoreVerifiedSignature(cacheKey)
+	require.True(t, LoadVerifiedSignature(cacheKey), "signature should be cached")
+
+	items := []grouptxns.Item{{ID: 0, Array: grouptxns.BuildDeterministicGroupAddrs(tx), Tx: tx}}
+	groups := grouptxns.GroupTransactionsDeterministic(items, cs.HasCode)
+
+	leaderAddr := common.HexToAddress("0x999")
+	outTxs, outRcps, _, _ := ProcessTransactionsOptimistic(
+		context.Background(), cs, groups, blankHeader(),
+		false, false, 12345, leaderAddr, false,
+	)
+
+	// Must be rejected: no txs processed, no receipts returned
+	assert.Empty(t, outTxs, "Fast path must reject tx with MaxGasPrice=0 even if signature is cached")
+	assert.Empty(t, outRcps, "Fast path must return no receipts for rejected tx")
 }
