@@ -258,7 +258,7 @@ func VerifyTransaction(
 				}
 				bumpVerifiedSignatureCacheCount()
 			}
-		} else if isNodeBLSIdentity(tx, as) {
+		} else if pol.blsAllowed(tx, as) && len(as.PublicKeyBls()) > 0 {
 			blsCacheKey := sigCacheKey(tx, as.PublicKeyBls())
 			if !LoadVerifiedSignature(blsCacheKey) {
 				request := transaction.NewVerifyTransactionRequest(
@@ -267,11 +267,19 @@ func VerifyTransaction(
 					tx.Sign(),
 				)
 				if !request.Valid() {
-					logger.Error("BLS Verification Failed for Node Identity! txHash=%s from=%s", txHash.Hex(), tx.FromAddress().Hex())
-					return transaction.InvalidSign
+					if pol.secp || !tx.ValidEthSign() {
+						logger.Error("BLS Verification Failed! txHash=%s from=%s", txHash.Hex(), tx.FromAddress().Hex())
+						return transaction.InvalidSign
+					}
 				}
 				// Only cache on successful validation
 				StoreVerifiedSignature(blsCacheKey)
+				bumpVerifiedSignatureCacheCount()
+			}
+		} else if !pol.secp && tx.ValidEthSign() {
+			secpCacheKey := sigCacheKey(tx, nil)
+			if !LoadVerifiedSignature(secpCacheKey) {
+				StoreVerifiedSignature(secpCacheKey)
 				bumpVerifiedSignatureCacheCount()
 			}
 		} else {
@@ -411,35 +419,7 @@ func VerifyTransaction(
 	}
 
 	// 4. KIỂM TRA PHÍ & SỐ DƯ
-	// 4.1. Kiểm tra số dư có đủ trả Amount cơ bản không
-	if !tx.ValidAmount(as) {
-		return transaction.InvalidAmount
-	}
-
-	// 4.2. Xác định giao dịch có được miễn phí không
-	_, isFree := chainState.GetFreeFeeAddress()[tx.ToAddress()]
-	if !isFree {
-		_, isFree = chainState.GetFreeFeeAddress()[tx.FromAddress()]
-	}
-	if tx.GetNonce() == 0 {
-		isFree = true
-	}
-
-	if !isFree {
-		// 4.3. Kiểm tra số dư có đủ trả (MaxFee + Amount) không
-		if !tx.ValidMaxFee(as) {
-			return transaction.InvalidMaxFee
-		}
-
-		// 4.4. Kiểm tra MaxGasPrice > 0 (chống spam cơ bản)
-		if !tx.ValidMaxGasPrice(common.MINIMUM_BASE_FEE) {
-			return &transaction.TransactionError{
-				Code:        transaction.InvalidMaxGasPrice.Code,
-				Description: fmt.Sprintf("invalid max gas price, expected at least %d", common.MINIMUM_BASE_FEE),
-			}
-		}
-	}
-
+	// 4.1. Kiểm tra MaxGas hợp lệ (TRANSFER_GAS_COST <= MaxGas <= BLOCK_GAS_LIMIT)
 	if !tx.ValidMaxGas() {
 		return transaction.InvalidMaxGas
 	}
@@ -452,6 +432,35 @@ func VerifyTransaction(
 		requiredGas := params.TxGas + uint64(len(tx.AuthorizationList()))*params.CallNewAccountGas
 		if tx.MaxGas() < requiredGas {
 			return transaction.InvalidMaxGas
+		}
+	}
+
+	// 4.2. Kiểm tra số dư có đủ trả Amount cơ bản không
+	if !tx.ValidAmount(as) {
+		return transaction.InvalidAmount
+	}
+
+	// 4.3. Xác định giao dịch có được miễn phí không
+	_, isFree := chainState.GetFreeFeeAddress()[tx.ToAddress()]
+	if !isFree {
+		_, isFree = chainState.GetFreeFeeAddress()[tx.FromAddress()]
+	}
+	if tx.GetNonce() == 0 {
+		isFree = true
+	}
+
+	if !isFree {
+		// 4.4. Kiểm tra số dư có đủ trả (MaxFee + Amount) không
+		if !tx.ValidMaxFee(as) {
+			return transaction.InvalidMaxFee
+		}
+
+		// 4.5. Kiểm tra MaxGasPrice > 0 (chống spam cơ bản)
+		if !tx.ValidMaxGasPrice(common.MINIMUM_BASE_FEE) {
+			return &transaction.TransactionError{
+				Code:        transaction.InvalidMaxGasPrice.Code,
+				Description: fmt.Sprintf("invalid max gas price, expected at least %d", common.MINIMUM_BASE_FEE),
+			}
 		}
 	}
 

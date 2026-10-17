@@ -1198,7 +1198,7 @@ func (t *Transaction) MaxGasPrice() uint64 {
 // Used for admission gate (>= MINIMUM_BASE_FEE) and balance checks (gasLimit * cap + value) (ADR D2).
 func (t *Transaction) GasPriceCap() *big.Int {
 	switch t.proto.Type {
-	case 0, 1: // Legacy, EIP-2930
+	case 0, 1, 0xFF: // Legacy, EIP-2930, MetaNode Secp Proto
 		return big.NewInt(0).SetUint64(t.proto.MaxGasPrice)
 	default: // EIP-1559, EIP-4844, and later fee-cap-based types
 		return t.GasFeeCap()
@@ -1215,7 +1215,7 @@ func (t *Transaction) GasPriceCap() *big.Int {
 // Used for fee charging, receipt effectiveGasPrice, and eth_getTransactionByHash.gasPrice.
 func (t *Transaction) EffectiveGasPrice() *big.Int {
 	switch t.proto.Type {
-	case 0, 1: // Legacy, EIP-2930
+	case 0, 1, 0xFF: // Legacy, EIP-2930, MetaNode Secp Proto
 		return big.NewInt(0).SetUint64(t.proto.MaxGasPrice)
 	default: // EIP-1559, EIP-4844, and later fee-cap-based types
 		gasFeeCap := t.GasFeeCap()
