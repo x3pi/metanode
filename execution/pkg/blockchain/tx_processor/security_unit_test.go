@@ -21,8 +21,7 @@ func signTestTx(tx types.Transaction) []byte {
 	pub := keyPair.PublicKey()
 	priv := keyPair.PrivateKey()
 
-	sign := bls.Sign(priv, tx.Hash().Bytes())
-	tx.(*transaction.Transaction).SetSignBytes(sign.Bytes())
+	tx.SetSign(priv)
 	return pub.Bytes()
 }
 

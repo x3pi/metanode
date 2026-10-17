@@ -115,13 +115,13 @@ func TestVerifyTransaction_Success(t *testing.T) {
 func TestVerifyTransaction_InvalidMaxGas_LowerBound(t *testing.T) {
 	cs := setupTestChainState(t)
 	from := common.HexToAddress("0x123")
-	as := state.NewAccountState(from)
-	as.AddBalance(big.NewInt(1000000000000000))
-	as.SetNonce(1)
 
 	// Max gas < TRANSFER_GAS_COST
 	tx, pubKey := createTestTx(from, common.HexToAddress("0x456"), big.NewInt(100), p_common.TRANSFER_GAS_COST-1, p_common.MINIMUM_BASE_FEE, 1)
+	as := state.NewAccountState(from)
+	as.AddBalance(big.NewInt(1000000000000000))
 	as.SetPublicKeyBls(pubKey)
+	as.SetNonce(1)
 
 	err := VerifyTransaction(tx, cs, as)
 	if err != transaction.InvalidMaxGas {
@@ -132,13 +132,13 @@ func TestVerifyTransaction_InvalidMaxGas_LowerBound(t *testing.T) {
 func TestVerifyTransaction_InvalidMaxGas_UpperBound(t *testing.T) {
 	cs := setupTestChainState(t)
 	from := common.HexToAddress("0x123")
-	as := state.NewAccountState(from)
-	as.AddBalance(big.NewInt(2_000_000_000_000_000))
-	as.SetNonce(1)
-
 	// Max gas > BLOCK_GAS_LIMIT
 	tx, pubKey := createTestTx(from, common.HexToAddress("0x456"), big.NewInt(100), p_common.BLOCK_GAS_LIMIT+1, p_common.MINIMUM_BASE_FEE, 1)
+
+	as := state.NewAccountState(from)
+	as.AddBalance(big.NewInt(2_000_000_000_000_000))
 	as.SetPublicKeyBls(pubKey)
+	as.SetNonce(1)
 
 	err := VerifyTransaction(tx, cs, as)
 	if err != transaction.InvalidMaxGas {

@@ -303,12 +303,6 @@ func VerifyTransaction(
 		return recErr
 	}
 
-	if as.AccountType() == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
-		if !tx.ValidSecpSign() {
-			return transaction.RequiresTwoSignatures
-		}
-	}
-
 	// Payload data size limit check (DoS prevention)
 	const maxDataSize = 6 * 1024 * 1024
 	if len(tx.Data()) > maxDataSize {
@@ -415,35 +409,7 @@ func VerifyTransaction(
 	}
 
 	// 4. KIỂM TRA PHÍ & SỐ DƯ
-	// 4.1. Kiểm tra số dư có đủ trả Amount cơ bản không
-	if !tx.ValidAmount(as) {
-		return transaction.InvalidAmount
-	}
-
-	// 4.2. Xác định giao dịch có được miễn phí không
-	_, isFree := chainState.GetFreeFeeAddress()[tx.ToAddress()]
-	if !isFree {
-		_, isFree = chainState.GetFreeFeeAddress()[tx.FromAddress()]
-	}
-	if tx.GetNonce() == 0 {
-		isFree = true
-	}
-
-	if !isFree {
-		// 4.3. Kiểm tra số dư có đủ trả (MaxFee + Amount) không
-		if !tx.ValidMaxFee(as) {
-			return transaction.InvalidMaxFee
-		}
-
-		// 4.4. Kiểm tra MaxGasPrice > 0 (chống spam cơ bản)
-		if !tx.ValidMaxGasPrice(common.MINIMUM_BASE_FEE) {
-			return &transaction.TransactionError{
-				Code:        transaction.InvalidMaxGasPrice.Code,
-				Description: fmt.Sprintf("invalid max gas price, expected at least %d", common.MINIMUM_BASE_FEE),
-			}
-		}
-	}
-
+	// 4.1. Gas limits first: cheap uint64 comparisons reject malformed txs before any big.Int balance math.
 	if !tx.ValidMaxGas() {
 		return transaction.InvalidMaxGas
 	}
@@ -456,6 +422,35 @@ func VerifyTransaction(
 		requiredGas := params.TxGas + uint64(len(tx.AuthorizationList()))*params.CallNewAccountGas
 		if tx.MaxGas() < requiredGas {
 			return transaction.InvalidMaxGas
+		}
+	}
+
+	// 4.2. Kiểm tra số dư có đủ trả Amount cơ bản không
+	if !tx.ValidAmount(as) {
+		return transaction.InvalidAmount
+	}
+
+	// 4.3. Xác định giao dịch có được miễn phí không
+	_, isFree := chainState.GetFreeFeeAddress()[tx.ToAddress()]
+	if !isFree {
+		_, isFree = chainState.GetFreeFeeAddress()[tx.FromAddress()]
+	}
+	if tx.GetNonce() == 0 {
+		isFree = true
+	}
+
+	if !isFree {
+		// 4.4. Kiểm tra số dư có đủ trả (MaxFee + Amount) không
+		if !tx.ValidMaxFee(as) {
+			return transaction.InvalidMaxFee
+		}
+
+		// 4.5. Kiểm tra MaxGasPrice > 0 (chống spam cơ bản)
+		if !tx.ValidMaxGasPrice(common.MINIMUM_BASE_FEE) {
+			return &transaction.TransactionError{
+				Code:        transaction.InvalidMaxGasPrice.Code,
+				Description: fmt.Sprintf("invalid max gas price, expected at least %d", common.MINIMUM_BASE_FEE),
+			}
 		}
 	}
 

@@ -414,6 +414,7 @@ func TestTransaction_EffectiveGasPrice_PerType(t *testing.T) {
 		{"eip1559 capped at GasFeeCap when tip is high", 2, 0, big.NewInt(105000).Bytes(), big.NewInt(10000).Bytes(), big.NewInt(105000)},
 		{"eip4844 with zero tip pays flat F", 3, 0, big.NewInt(200000).Bytes(), nil, big.NewInt(100000)},
 		{"eip7702 pays F + tip", 4, 0, big.NewInt(120000).Bytes(), big.NewInt(5000).Bytes(), big.NewInt(105000)},
+		{"secp proto uses flat MaxGasPrice", 0xFF, 42, nil, nil, big.NewInt(42)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tx := &Transaction{proto: &pb.Transaction{
@@ -425,7 +426,7 @@ func TestTransaction_EffectiveGasPrice_PerType(t *testing.T) {
 }
 
 // TestTransaction_GasPriceCap_PerType verifies GasPriceCap returns the ceiling:
-// MaxGasPrice for legacy/2930, GasFeeCap for 1559/4844/7702.
+// MaxGasPrice for legacy/2930/0xFF, GasFeeCap for 1559/4844/7702.
 func TestTransaction_GasPriceCap_PerType(t *testing.T) {
 	for _, c := range []struct {
 		name        string
@@ -439,6 +440,7 @@ func TestTransaction_GasPriceCap_PerType(t *testing.T) {
 		{"eip1559 cap is GasFeeCap", 2, 0, big.NewInt(150000).Bytes(), big.NewInt(150000)},
 		{"eip4844 cap is GasFeeCap", 3, 0, big.NewInt(200000).Bytes(), big.NewInt(200000)},
 		{"eip7702 cap is GasFeeCap", 4, 0, big.NewInt(120000).Bytes(), big.NewInt(120000)},
+		{"secp proto cap is MaxGasPrice", 0xFF, 42, nil, big.NewInt(42)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tx := &Transaction{proto: &pb.Transaction{
