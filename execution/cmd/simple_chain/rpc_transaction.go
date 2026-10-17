@@ -330,8 +330,6 @@ func (api *MetaAPI) SendRawTransaction(ctx context.Context, input hexutil.Bytes)
 	return api.SendRawEthTransaction(ctx, input)
 }
 
-
-
 // rpcTxConcurrencyLimiter bounds how many eth_sendRawTransaction requests can
 // be actively executing pool addition at the same time.
 const rpcTxConcurrencyLimit = 1000
@@ -403,7 +401,7 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 	}
 
 	if bc := blockchain.GetBlockChainInstance(); bc != nil {
-		bc.AddTxToCache(ethTxHash, input)
+		bc.AddTxToCache(ethTxHash, append([]byte(nil), input...))
 		if errMap := bc.SetEthHashMapblsHash(ethTxHash, metaTxHash); errMap != nil {
 			logger.Warn("[SendRawEthTransaction] SetEthHashMapblsHash failed: %v", errMap)
 		}

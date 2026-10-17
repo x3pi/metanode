@@ -11,9 +11,19 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
+	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func signTestTx(tx types.Transaction) []byte {
+	keyPair := bls.GenerateKeyPair()
+	pub := keyPair.PublicKey()
+	priv := keyPair.PrivateKey()
+
+	tx.SetSign(priv)
+	return pub.Bytes()
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // UNIT SECURITY TEST SUITE: Core Ingress & Verification Hardening
@@ -52,12 +62,11 @@ func TestSecurity_Unit_CrossChainReplay(t *testing.T) {
 		from, to, amount, p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, p_common.TRANSFER_GAS_COST,
 		[]byte{}, nil, common.Hash{}, common.Hash{}, 1, 999, // Foreign ChainId
 	)
-	keyPair := bls.GenerateKeyPair()
-	tx.(*transaction.Transaction).SetSignBytes(bls.Sign(keyPair.PrivateKey(), tx.Hash().Bytes()).Bytes())
+	pubKey := signTestTx(tx)
 
 	as := state.NewAccountState(from)
 	as.AddBalance(big.NewInt(1000000000000000))
-	as.SetPublicKeyBls(keyPair.PublicKey().Bytes())
+	as.SetPublicKeyBls(pubKey)
 	as.SetNonce(1)
 
 	err := VerifyTransaction(tx, cs, as)
@@ -119,12 +128,11 @@ func TestSecurity_Unit_OversizedCallData(t *testing.T) {
 		from, to, amount, p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, p_common.TRANSFER_GAS_COST,
 		hugeData, nil, common.Hash{}, common.Hash{}, 1, 1,
 	)
-	keyPair := bls.GenerateKeyPair()
-	tx.(*transaction.Transaction).SetSignBytes(bls.Sign(keyPair.PrivateKey(), tx.Hash().Bytes()).Bytes())
+	pubKey := signTestTx(tx)
 
 	as := state.NewAccountState(from)
 	as.AddBalance(big.NewInt(1000000000000000))
-	as.SetPublicKeyBls(keyPair.PublicKey().Bytes())
+	as.SetPublicKeyBls(pubKey)
 	as.SetNonce(1)
 
 	err := VerifyTransaction(tx, cs, as)
@@ -145,12 +153,11 @@ func TestSecurity_Unit_AccountSetting_UnauthorizedSelector(t *testing.T) {
 		from, accountSettingAddr, big.NewInt(0), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, p_common.TRANSFER_GAS_COST,
 		fakeData, nil, common.Hash{}, common.Hash{}, 1, 1,
 	)
-	keyPair := bls.GenerateKeyPair()
-	tx.(*transaction.Transaction).SetSignBytes(bls.Sign(keyPair.PrivateKey(), tx.Hash().Bytes()).Bytes())
+	pubKey := signTestTx(tx)
 
 	as := state.NewAccountState(from)
 	as.AddBalance(big.NewInt(1000000000000000))
-	as.SetPublicKeyBls(keyPair.PublicKey().Bytes())
+	as.SetPublicKeyBls(pubKey)
 	as.SetNonce(1)
 
 	err := VerifyTransaction(tx, cs, as)

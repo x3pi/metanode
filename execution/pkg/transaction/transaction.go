@@ -1194,11 +1194,11 @@ func (t *Transaction) MaxGasPrice() uint64 {
 }
 
 // GasPriceCap returns the maximum gas price the user is willing to pay for execution gas:
-// flat MaxGasPrice for Legacy/EIP-2930, GasFeeCap for EIP-1559/EIP-4844/EIP-7702.
+// flat MaxGasPrice for Legacy/EIP-2930/Type 0xFF, GasFeeCap for EIP-1559/EIP-4844/EIP-7702.
 // Used for admission gate (>= MINIMUM_BASE_FEE) and balance checks (gasLimit * cap + value) (ADR D2).
 func (t *Transaction) GasPriceCap() *big.Int {
 	switch t.proto.Type {
-	case 0, 1, 0xFF: // Legacy, EIP-2930, MetaNode Secp Proto
+	case 0, 1, 0xFF: // Legacy, EIP-2930, Type 0xFF (SecpProto)
 		return big.NewInt(0).SetUint64(t.proto.MaxGasPrice)
 	default: // EIP-1559, EIP-4844, and later fee-cap-based types
 		return t.GasFeeCap()
@@ -1209,13 +1209,13 @@ func (t *Transaction) GasPriceCap() *big.Int {
 // EXECUTION gas (never blob gas, which is priced/charged separately — see
 // MaxFeePerBlobGas).
 // Under ADR D2 (flat fee model v1):
-// - Legacy/EIP-2930: flat MaxGasPrice
+// - Legacy/EIP-2930/Type 0xFF: flat MaxGasPrice
 // - EIP-1559, EIP-4844, EIP-7702: min(maxFeePerGas, F + maxPriorityFeePerGas)
 //   where F = MINIMUM_BASE_FEE (100,000 wei).
 // Used for fee charging, receipt effectiveGasPrice, and eth_getTransactionByHash.gasPrice.
 func (t *Transaction) EffectiveGasPrice() *big.Int {
 	switch t.proto.Type {
-	case 0, 1, 0xFF: // Legacy, EIP-2930, MetaNode Secp Proto
+	case 0, 1, 0xFF: // Legacy, EIP-2930, Type 0xFF (SecpProto)
 		return big.NewInt(0).SetUint64(t.proto.MaxGasPrice)
 	default: // EIP-1559, EIP-4844, and later fee-cap-based types
 		gasFeeCap := t.GasFeeCap()

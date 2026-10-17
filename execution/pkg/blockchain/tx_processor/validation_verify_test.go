@@ -118,7 +118,6 @@ func TestVerifyTransaction_InvalidMaxGas_LowerBound(t *testing.T) {
 
 	// Max gas < TRANSFER_GAS_COST
 	tx, pubKey := createTestTx(from, common.HexToAddress("0x456"), big.NewInt(100), p_common.TRANSFER_GAS_COST-1, p_common.MINIMUM_BASE_FEE, 1)
-
 	as := state.NewAccountState(from)
 	as.AddBalance(big.NewInt(1000000000000000))
 	as.SetPublicKeyBls(pubKey)
@@ -133,12 +132,11 @@ func TestVerifyTransaction_InvalidMaxGas_LowerBound(t *testing.T) {
 func TestVerifyTransaction_InvalidMaxGas_UpperBound(t *testing.T) {
 	cs := setupTestChainState(t)
 	from := common.HexToAddress("0x123")
-
 	// Max gas > BLOCK_GAS_LIMIT
 	tx, pubKey := createTestTx(from, common.HexToAddress("0x456"), big.NewInt(100), p_common.BLOCK_GAS_LIMIT+1, p_common.MINIMUM_BASE_FEE, 1)
 
 	as := state.NewAccountState(from)
-	as.AddBalance(big.NewInt(1000000000000000))
+	as.AddBalance(big.NewInt(2_000_000_000_000_000))
 	as.SetPublicKeyBls(pubKey)
 	as.SetNonce(1)
 
@@ -175,25 +173,25 @@ func TestVerifyTransaction_FreeFeeBypass(t *testing.T) {
 func TestVerifyTransaction_LaggingSubnode(t *testing.T) {
 	cs := setupTestChainState(t)
 	from := common.HexToAddress("0x123")
-	// Without lagging bypass, an account with nonce > 0 but missing BLS key cannot pass BLS verification
+	// Without the lagging bypass, an account with nonce > 0 and no PublicKeyBls
+	// submitting a BLS tx without a valid ETH signature must be rejected.
 	tx, _ := createTestTx(from, common.HexToAddress("0x456"), big.NewInt(100), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, 1)
 
 	as := state.NewAccountState(from)
 
-	// Previously: simulated lagging subnode (has nonce > 0, but no PublicKeyBls)
-	// Now: without lagging bypass, an account without PublicKeyBls cannot verify BLS and is rejected
+	// Simulate missing BLS key: has nonce > 0, but no PublicKeyBls
 	as.SetNonce(1)
 
 	err := VerifyTransaction(tx, cs, as)
 	if err != transaction.InvalidSign {
-		t.Errorf("Expected InvalidSign (no lagging bypass), got %v", err)
+		t.Errorf("Expected InvalidSign, got %v", err)
 	}
 
-	// Setting balance still cannot bypass signature verification
+	// Setting balance should still reject due to invalid signature
 	as.AddBalance(big.NewInt(1000000000000000))
 	err2 := VerifyTransaction(tx, cs, as)
 	if err2 != transaction.InvalidSign {
-		t.Errorf("Expected InvalidSign (no lagging bypass even with balance), got %v", err2)
+		t.Errorf("Expected InvalidSign, got %v", err2)
 	}
 }
 
