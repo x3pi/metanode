@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -140,8 +141,19 @@ func extractIP(remoteAddr string) string {
 // bans the IP if burst was exceeded, and returns an error.
 // If allowed, it increments totalAllowed and returns nil.
 func (rl *RPCRateLimiter) CheckRequest(ip string) error {
+	return rl.CheckRequestN(ip, 1)
+}
+
+// CheckRequestN evaluates whether n RPC calls from ip are permitted.
+// If the IP is blocked or exceeds global or per-IP rate limits, it records the rejection,
+// bans the IP if burst was exceeded, and returns an error.
+// If allowed, it increments totalAllowed by n and returns nil.
+func (rl *RPCRateLimiter) CheckRequestN(ip string, n int) error {
 	if rl == nil || !rl.config.Enabled {
 		return nil
+	}
+	if n <= 0 {
+		n = 1
 	}
 
 	entry := rl.getIPEntry(ip)
@@ -151,28 +163,28 @@ func (rl *RPCRateLimiter) CheckRequest(ip string) error {
 
 	// Check if IP is currently blocked
 	if nowNano < blockedUntilNano {
-		rl.totalRejected.Add(1)
+		rl.totalRejected.Add(int64(n))
 		return fmt.Errorf("ip_blocked")
 	}
 
 	// Global rate check
-	if !rl.global.Allow() {
-		rl.totalRejected.Add(1)
+	if !rl.global.AllowN(now, n) {
+		rl.totalRejected.Add(int64(n))
 		return fmt.Errorf("global_rate_exceeded")
 	}
 
 	// Check per-IP limiter
-	if !entry.limiter.Allow() {
-		rl.totalRejected.Add(1)
+	if !entry.limiter.AllowN(now, n) {
+		rl.totalRejected.Add(int64(n))
 
 		// IP exceeds rate, BAN it
 		blockedUntil := now.Add(time.Duration(rl.config.BlockDurationSecs) * time.Second)
 		entry.blockedUntilUnixNano.Store(blockedUntil.UnixNano())
-		logger.Warn("🚨 [RPC_RATE_LIMIT] IP %s spammed RPC. Banned for %d seconds.", ip, rl.config.BlockDurationSecs)
+		logger.Warn("🚨 [RPC_RATE_LIMIT] IP %s spammed RPC (%d calls). Banned for %d seconds.", ip, n, rl.config.BlockDurationSecs)
 		return fmt.Errorf("ip_banned")
 	}
 
-	rl.totalAllowed.Add(1)
+	rl.totalAllowed.Add(int64(n))
 	return nil
 }
 
@@ -237,26 +249,97 @@ func (rl *RPCRateLimiter) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-type wsFrameState int
+const maxWSFramePayload = 8 << 20 // 8 MB limit on WebSocket frame payload
 
-const (
-	wsStateHeader wsFrameState = iota
-	wsStatePayload
-)
+// countBatchItems scans a WebSocket JSON-RPC payload and returns the number of RPC requests.
+// For a single request (JSON object), it returns 1.
+// For a batch request (JSON array), it counts the top-level elements inside the array.
+func countBatchItems(payload []byte) int {
+	i := 0
+	for i < len(payload) && (payload[i] == ' ' || payload[i] == '\t' || payload[i] == '\r' || payload[i] == '\n') {
+		i++
+	}
+	if i >= len(payload) || payload[i] != '[' {
+		return 1
+	}
+	i++ // skip '['
+
+	count := 0
+	inString := false
+	escape := false
+	depth := 0
+
+	for ; i < len(payload); i++ {
+		b := payload[i]
+		if inString {
+			if escape {
+				escape = false
+			} else if b == '\\' {
+				escape = true
+			} else if b == '"' {
+				inString = false
+			}
+			continue
+		}
+
+		switch b {
+		case '"':
+			inString = true
+		case '{', '[':
+			if depth == 0 {
+				count++
+			}
+			depth++
+		case '}', ']':
+			if depth > 0 {
+				depth--
+			} else if b == ']' {
+				if count == 0 {
+					return 1
+				}
+				return count
+			}
+		case ',':
+			// Comma separates elements at depth 0
+		default:
+			// Non-whitespace primitive at depth 0
+			if depth == 0 && b != ' ' && b != '\t' && b != '\r' && b != '\n' {
+				count++
+				for i+1 < len(payload) && payload[i+1] != ',' && payload[i+1] != ']' && payload[i+1] != ' ' && payload[i+1] != '\t' && payload[i+1] != '\r' && payload[i+1] != '\n' {
+					i++
+				}
+			}
+		}
+	}
+	if count == 0 {
+		return 1
+	}
+	return count
+}
+
+type wsParsedFrame struct {
+	fin      bool
+	opcode   byte
+	masked   bool
+	maskKey  [4]byte
+	rawBytes []byte
+	payload  []byte
+}
 
 // wsRateLimitConn wraps the hijacked net.Conn of a WebSocket to inspect RFC 6455
-// incoming frames and enforce rate limits on every individual JSON-RPC message.
+// incoming frames and enforce rate limits on every individual JSON-RPC message, including batches.
 type wsRateLimitConn struct {
 	net.Conn
 	initialReader io.Reader
 	ip            string
 	rl            *RPCRateLimiter
 
-	state            wsFrameState
-	headerBuf        [14]byte
-	headerLen        int
-	expectedHeader   int
-	payloadRemaining int64
+	readMu       sync.Mutex
+	closed       bool
+	rawIn        bytes.Buffer
+	pendingRead  bytes.Buffer
+	fragRawBytes bytes.Buffer
+	fragPayload  bytes.Buffer
 }
 
 func newWSRateLimitConn(conn net.Conn, initialReader io.Reader, ip string, rl *RPCRateLimiter) *wsRateLimitConn {
@@ -265,110 +348,205 @@ func newWSRateLimitConn(conn net.Conn, initialReader io.Reader, ip string, rl *R
 		initialReader: initialReader,
 		ip:            ip,
 		rl:            rl,
-		state:         wsStateHeader,
 	}
+}
+
+func (c *wsRateLimitConn) Close() error {
+	c.readMu.Lock()
+	c.closed = true
+	c.rawIn.Reset()
+	c.pendingRead.Reset()
+	c.fragRawBytes.Reset()
+	c.fragPayload.Reset()
+	c.readMu.Unlock()
+	return c.Conn.Close()
+}
+
+func (c *wsRateLimitConn) readRaw(buf []byte) (int, error) {
+	if c.initialReader != nil {
+		n, err := c.initialReader.Read(buf)
+		if err == io.EOF {
+			c.initialReader = nil
+			if n > 0 {
+				return n, nil
+			}
+			return c.Conn.Read(buf)
+		}
+		return n, err
+	}
+	return c.Conn.Read(buf)
+}
+
+func (c *wsRateLimitConn) tryReadFrame() (*wsParsedFrame, error) {
+	data := c.rawIn.Bytes()
+	if len(data) < 2 {
+		return nil, nil
+	}
+
+	b0 := data[0]
+	b1 := data[1]
+	fin := (b0 & 0x80) != 0
+	opcode := b0 & 0x0f
+	masked := (b1 & 0x80) != 0
+	len7 := b1 & 0x7f
+
+	extraLen := 0
+	if len7 == 126 {
+		extraLen = 2
+	} else if len7 == 127 {
+		extraLen = 8
+	}
+
+	maskLen := 0
+	if masked {
+		maskLen = 4
+	}
+
+	headerLen := 2 + extraLen + maskLen
+	if len(data) < headerLen {
+		return nil, nil
+	}
+
+	var payloadLen int64
+	if len7 <= 125 {
+		payloadLen = int64(len7)
+	} else if len7 == 126 {
+		payloadLen = int64(binary.BigEndian.Uint16(data[2:4]))
+	} else {
+		payloadLen = int64(binary.BigEndian.Uint64(data[2:10]))
+	}
+
+	if payloadLen < 0 || payloadLen > maxWSFramePayload {
+		_ = c.Conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+		_, _ = c.Conn.Write([]byte{0x88, 0x02, 0x03, 0xf1}) // 1009 Message Too Big
+		_ = c.Conn.Close()
+		return nil, fmt.Errorf("websocket frame payload too large: %d bytes (max: %d)", payloadLen, maxWSFramePayload)
+	}
+
+	totalLen := headerLen + int(payloadLen)
+	if len(data) < totalLen {
+		return nil, nil
+	}
+
+	rawBytes := c.rawIn.Next(totalLen)
+
+	var maskKey [4]byte
+	if masked {
+		copy(maskKey[:], rawBytes[2+extraLen:2+extraLen+4])
+	}
+
+	payload := rawBytes[headerLen:]
+
+	return &wsParsedFrame{
+		fin:      fin,
+		opcode:   opcode,
+		masked:   masked,
+		maskKey:  maskKey,
+		rawBytes: rawBytes,
+		payload:  payload,
+	}, nil
+}
+
+func (c *wsRateLimitConn) handleFrame(frame *wsParsedFrame) error {
+	// RFC 6455 Control frames (Close: 0x8, Ping: 0x9, Pong: 0xA) pass through directly
+	if frame.opcode >= 0x8 {
+		c.pendingRead.Write(frame.rawBytes)
+		return nil
+	}
+
+	// Unmask payload
+	unmasked := make([]byte, len(frame.payload))
+	if frame.masked {
+		for i := 0; i < len(frame.payload); i++ {
+			unmasked[i] = frame.payload[i] ^ frame.maskKey[i%4]
+		}
+	} else {
+		copy(unmasked, frame.payload)
+	}
+
+	// Check if this is part of a fragmented message
+	isFragmented := !frame.fin || c.fragPayload.Len() > 0
+
+	if isFragmented {
+		c.fragRawBytes.Write(frame.rawBytes)
+		c.fragPayload.Write(unmasked)
+
+		if !frame.fin {
+			// Await remaining fragments
+			return nil
+		}
+	}
+
+	var fullPayload []byte
+	var allRawBytes []byte
+	if isFragmented {
+		fullPayload = c.fragPayload.Bytes()
+		allRawBytes = c.fragRawBytes.Bytes()
+	} else {
+		fullPayload = unmasked
+		allRawBytes = frame.rawBytes
+	}
+
+	// Count number of JSON-RPC requests (handles single calls and batch arrays)
+	count := countBatchItems(fullPayload)
+
+	if err := c.rl.CheckRequestN(c.ip, count); err != nil {
+		// Policy violation: send close frame 1008 and terminate connection
+		_ = c.Conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+		_, _ = c.Conn.Write([]byte{0x88, 0x02, 0x03, 0xf0})
+		_ = c.Conn.Close()
+
+		c.rawIn.Reset()
+		c.pendingRead.Reset()
+		c.fragRawBytes.Reset()
+		c.fragPayload.Reset()
+		return fmt.Errorf("websocket rpc rate limit exceeded for ip %s (batch size %d): %w", c.ip, count, err)
+	}
+
+	metrics.RPCRequestsTotal.WithLabelValues("/ws").Add(float64(count))
+	c.pendingRead.Write(allRawBytes)
+
+	if isFragmented {
+		c.fragRawBytes.Reset()
+		c.fragPayload.Reset()
+	}
+	return nil
 }
 
 func (c *wsRateLimitConn) Read(p []byte) (int, error) {
-	var n int
-	var err error
-	if c.initialReader != nil {
-		n, err = c.initialReader.Read(p)
-		if err == io.EOF {
-			c.initialReader = nil
-			if n == 0 {
-				n, err = c.Conn.Read(p)
-			} else {
-				err = nil
-			}
-		}
-	} else {
-		n, err = c.Conn.Read(p)
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+
+	if c.closed {
+		return 0, net.ErrClosed
 	}
 
-	if n > 0 {
-		if parseErr := c.processIncomingBytes(p[:n]); parseErr != nil {
-			return n, parseErr
+	for c.pendingRead.Len() == 0 {
+		frame, err := c.tryReadFrame()
+		if err != nil {
+			return 0, err
 		}
-	}
-	return n, err
-}
-
-func (c *wsRateLimitConn) processIncomingBytes(p []byte) error {
-	n := len(p)
-	for i := 0; i < n; i++ {
-		b := p[i]
-		if c.state == wsStateHeader {
-			c.headerBuf[c.headerLen] = b
-			c.headerLen++
-			if c.headerLen == 2 {
-				b1 := c.headerBuf[1]
-				masked := (b1 & 0x80) != 0
-				len7 := b1 & 0x7f
-				extraLen := 0
-				if len7 == 126 {
-					extraLen = 2
-				} else if len7 == 127 {
-					extraLen = 8
-				}
-				maskLen := 0
-				if masked {
-					maskLen = 4
-				}
-				c.expectedHeader = 2 + extraLen + maskLen
+		if frame != nil {
+			if err := c.handleFrame(frame); err != nil {
+				return 0, err
 			}
-			if c.headerLen >= 2 && c.headerLen == c.expectedHeader {
-				// Header complete!
-				opcode := c.headerBuf[0] & 0x0f
-				b1 := c.headerBuf[1]
-				len7 := b1 & 0x7f
-				var payloadLen int64
-				if len7 <= 125 {
-					payloadLen = int64(len7)
-				} else if len7 == 126 {
-					payloadLen = int64(binary.BigEndian.Uint16(c.headerBuf[2:4]))
-				} else {
-					payloadLen = int64(binary.BigEndian.Uint64(c.headerBuf[2:10]))
-				}
+			continue
+		}
 
-				// RFC 6455: Opcode 0x1 (Text) and 0x2 (Binary) are incoming RPC request messages
-				if opcode == 0x1 || opcode == 0x2 {
-					if err := c.rl.CheckRequest(c.ip); err != nil {
-						// Write close frame with code 1008 (Policy Violation) and terminate connection
-						_ = c.Conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
-						_, _ = c.Conn.Write([]byte{0x88, 0x02, 0x03, 0xf0})
-						_ = c.Conn.Close()
-						return fmt.Errorf("websocket rpc rate limit exceeded for ip %s: %w", c.ip, err)
-					}
-					metrics.RPCRequestsTotal.WithLabelValues("/ws").Inc()
-				}
-
-				c.headerLen = 0
-				c.expectedHeader = 0
-				if payloadLen > 0 {
-					c.state = wsStatePayload
-					c.payloadRemaining = payloadLen
-				} else {
-					c.state = wsStateHeader
-				}
-			}
-		} else if c.state == wsStatePayload {
-			avail := int64(n - i)
-			if avail <= c.payloadRemaining {
-				c.payloadRemaining -= avail
-				if c.payloadRemaining == 0 {
-					c.state = wsStateHeader
-				}
+		var buf [4096]byte
+		n, err := c.readRaw(buf[:])
+		if n > 0 {
+			c.rawIn.Write(buf[:n])
+		}
+		if err != nil {
+			if c.pendingRead.Len() > 0 {
 				break
-			} else {
-				i += int(c.payloadRemaining) - 1
-				c.payloadRemaining = 0
-				c.state = wsStateHeader
-				continue
 			}
+			return 0, err
 		}
 	}
-	return nil
+
+	return c.pendingRead.Read(p)
 }
 
 type wsHijackResponseWriter struct {
@@ -401,7 +579,7 @@ func (w *wsHijackResponseWriter) Flush() {
 	}
 }
 
-// WebsocketMiddleware wraps a WebSocket http.Handler to enforce per-message rate limiting.
+// WebsocketMiddleware wraps a WebSocket http.Handler to enforce handshake and per-message rate limiting.
 func (rl *RPCRateLimiter) WebsocketMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !rl.config.Enabled {
@@ -422,6 +600,24 @@ func (rl *RPCRateLimiter) WebsocketMiddleware(next http.Handler) http.Handler {
 			writeIPBlockedResponse(w, time.Unix(0, blockedUntilNano))
 			return
 		}
+
+		// Enforce rate limit on the handshake request itself to prevent connection exhaustion
+		if !rl.global.Allow() {
+			rl.totalRejected.Add(1)
+			writeRateLimitResponse(w)
+			return
+		}
+
+		if !entry.limiter.Allow() {
+			rl.totalRejected.Add(1)
+			blockedUntil := now.Add(time.Duration(rl.config.BlockDurationSecs) * time.Second)
+			entry.blockedUntilUnixNano.Store(blockedUntil.UnixNano())
+			logger.Warn("🚨 [RPC_RATE_LIMIT] IP %s spammed WebSocket handshake. Banned for %d seconds.", ip, rl.config.BlockDurationSecs)
+			writeIPBlockedResponse(w, blockedUntil)
+			return
+		}
+
+		rl.totalAllowed.Add(1)
 
 		wrapped := &wsHijackResponseWriter{
 			ResponseWriter: w,
