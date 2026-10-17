@@ -163,6 +163,15 @@ func VerifyTransaction(
 	chainState *blockchain.ChainState,
 	preloadedState types.AccountState, // nil = auto-fetch via AccountStateReadOnly
 ) *transaction.TransactionError {
+	return VerifyTransactionWithOptions(tx, chainState, preloadedState, false)
+}
+
+func VerifyTransactionWithOptions(
+	tx types.Transaction,
+	chainState *blockchain.ChainState,
+	preloadedState types.AccountState, // nil = auto-fetch via AccountStateReadOnly
+	skipSignatureVerify bool,
+) *transaction.TransactionError {
 	if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") == "true" {
 		isExplicitDev := os.Getenv("METANODE_DEVNET") == "true"
 		isProd := os.Getenv("NODE_ENV") == "production" ||
@@ -176,13 +185,14 @@ func VerifyTransaction(
 		}
 	}
 
-	// P0-9: Enforce strict envelope binding at mempool admission
-	if tx != nil && len(tx.RawEnvelope()) > 0 && !IsVerifiedEnvelopeBound(tx) {
+	// P0-9: Enforce strict envelope binding at mempool admission (skip only if signature verification is explicitly bypassed)
+	if !skipSignatureVerify && tx != nil && len(tx.RawEnvelope()) > 0 && !IsVerifiedEnvelopeBound(tx) {
 		if err := transaction.ValidateEnvelopeBinding(tx); err != nil {
 			logger.Error("❌ [VERIFY] envelope binding failed: txHash=%s, err=%v", tx.Hash().Hex(), err)
 			return transaction.ErrEnvelopeBindingMismatch
 		}
 	}
+
 
 	var as types.AccountState
 	if preloadedState != nil {
@@ -218,28 +228,15 @@ func VerifyTransaction(
 		}
 	}
 
-	// ════════════════════════════════════════════════════════════════
-	// SUB-NODE SYNC OPTIMIZATION (Fix Code 66 Invalid Sign)
-	// Sub nodes may have incomplete account state: the AccountBatch
-	// replication might replicate nonce but NOT PublicKeyBls.
-	// Two scenarios where we must bypass strict BLS verification:
-	//   1. Sub node has NO state at all: as.Nonce()==0, tx.GetNonce()>0
-	//   2. Sub node has nonce but missing BLS key: as.Nonce()>0, PublicKeyBls empty
-	// In both cases, forward the TX to Master/Rust for proper verification.
-	// On Master nodes, PublicKeyBls is always populated for registered accounts,
-	// so this bypass never fires on Master (which is correct).
-	// ════════════════════════════════════════════════════════════════
-	isSubNodeLagging := len(as.PublicKeyBls()) == 0 && (tx.GetNonce() > 0 || as.Nonce() > 0)
 	pol := sigPolicyOf(chainState)
 
 	// Rollup system events are applied from their payload alone, so only BLS-native node identities may submit them.
-	// No sub-node-lagging exemption: an attacker (no BLS key, nonce > 0) looks exactly like a lagging account. System
-	// txs are produced by the master node's own workers, which always hold the node identity's state.
+	// System txs are produced by the master node's own workers, which always hold the node identity's state.
 	if tx.ToAddress() == rollup.RollupSystemAddress && !isNodeBLSIdentity(tx, as) {
 		return transaction.UnauthorizedSystemSender
 	}
 
-	if as.Nonce() != 0 || tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
+	if !skipSignatureVerify && (as.Nonce() != 0 || tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT)) {
 		txHash := tx.Hash()
 
 		if tx.Type() == 0xFF {
@@ -257,8 +254,7 @@ func VerifyTransaction(
 				bumpVerifiedSignatureCacheCount()
 			}
 		} else if pol.secp && !isNodeBLSIdentity(tx, as) {
-			// secp mode: a user tx must carry a valid ETH/secp256k1 signature. No BLS attempt and NO sub-node-lagging
-			// bypass: secp-only accounts have no BLS key, so that bypass would skip verification for all of them.
+			// secp mode: a user tx must carry a valid ETH/secp256k1 signature.
 			secpCacheKey := sigCacheKey(tx, nil)
 			if !LoadVerifiedSignature(secpCacheKey) {
 				if !tx.ValidEthSign() {
@@ -272,9 +268,7 @@ func VerifyTransaction(
 				}
 				bumpVerifiedSignatureCacheCount()
 			}
-		} else if isSubNodeLagging {
-			// Let it pass local verification; assume Master will reject if invalid.
-		} else {
+		} else if len(as.PublicKeyBls()) > 0 {
 			blsCacheKey := sigCacheKey(tx, as.PublicKeyBls())
 			if !LoadVerifiedSignature(blsCacheKey) {
 				request := transaction.NewVerifyTransactionRequest(
@@ -283,21 +277,18 @@ func VerifyTransaction(
 					tx.Sign(),
 				)
 				if !request.Valid() {
-					logger.Error("BLS Verification Failed!")
-					logger.Error("  txHashHex: %s", txHash.Hex())
-					logger.Error("  FromAddress: %s", tx.FromAddress().Hex())
-					logger.Error("  ToAddress: %s", tx.ToAddress().Hex())
-					logger.Error("  SenderPubKey: %x", as.PublicKeyBls())
-					logger.Error("  SenderSign: %x", tx.Sign().Bytes())
-					logger.Error("  Hash() of TX according to SubNode: %x", tx.Hash().Bytes())
+					logger.Error("BLS Verification Failed! txHash=%s from=%s", txHash.Hex(), tx.FromAddress().Hex())
 					if !tx.ValidEthSign() {
-						logger.Error("  ETH Verification also failed!")
 						return transaction.InvalidSign
 					}
 				}
 				// Only cache on successful validation
 				StoreVerifiedSignature(blsCacheKey)
 				bumpVerifiedSignatureCacheCount()
+			}
+		} else {
+			if !tx.ValidEthSign() {
+				return transaction.InvalidSign
 			}
 		}
 	}
@@ -322,12 +313,6 @@ func VerifyTransaction(
 		return recErr
 	}
 
-	if as.AccountType() == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
-		if !tx.ValidSecpSign() {
-			return transaction.RequiresTwoSignatures
-		}
-	}
-
 	// Payload data size limit check (DoS prevention)
 	const maxDataSize = 6 * 1024 * 1024
 	if len(tx.Data()) > maxDataSize {
@@ -348,13 +333,15 @@ func VerifyTransaction(
 
 		switch {
 		case as.Nonce() == 0 && isSetBls:
-			setBlsCacheKey := sigCacheKey(tx, nil)
-			if !LoadVerifiedSignature(setBlsCacheKey) {
-				if !tx.ValidSecpSign() {
-					return transaction.InvalidSignSecp
+			if !skipSignatureVerify {
+				setBlsCacheKey := sigCacheKey(tx, nil)
+				if !LoadVerifiedSignature(setBlsCacheKey) {
+					if !tx.ValidSecpSign() {
+						return transaction.InvalidSignSecp
+					}
+					StoreVerifiedSignature(setBlsCacheKey)
+					bumpVerifiedSignatureCacheCount()
 				}
-				StoreVerifiedSignature(setBlsCacheKey)
-				bumpVerifiedSignatureCacheCount()
 			}
 			_, err := UnpackSetBlsPublicKeyInput(dataInput)
 			if err != nil {
@@ -376,7 +363,7 @@ func VerifyTransaction(
 		// mode users never have a BLS key, so the rule would lock every fresh secp-only account out; node (BLS-native)
 		// identities keep it.
 		secpUser := pol.secp && !isNodeBLSIdentity(tx, as)
-		if as.Nonce() == 0 && !isSubNodeLagging && !secpUser {
+		if as.Nonce() == 0 && !secpUser {
 			return transaction.InvalidAddressMatchForTx0
 		}
 		if !tx.ValidDeployData() {
@@ -433,38 +420,8 @@ func VerifyTransaction(
 		return transaction.InvalidPendingUse
 	}
 
-	// 4. KIỂM TRA PHÍ & SỐ DƯ (Bỏ qua nếu SubNode chưa đồng bộ đủ state)
-	if !isSubNodeLagging {
-		// 4.1. Kiểm tra số dư có đủ trả Amount cơ bản không
-		if !tx.ValidAmount(as) {
-			return transaction.InvalidAmount
-		}
-
-		// 4.2. Xác định giao dịch có được miễn phí không
-		_, isFree := chainState.GetFreeFeeAddress()[tx.ToAddress()]
-		if !isFree {
-			_, isFree = chainState.GetFreeFeeAddress()[tx.FromAddress()]
-		}
-		if tx.GetNonce() == 0 {
-			isFree = true
-		}
-
-		if !isFree {
-			// 4.3. Kiểm tra số dư có đủ trả (MaxFee + Amount) không
-			if !tx.ValidMaxFee(as) {
-				return transaction.InvalidMaxFee
-			}
-
-			// 4.4. Kiểm tra MaxGasPrice > 0 (chống spam cơ bản)
-			if !tx.ValidMaxGasPrice(common.MINIMUM_BASE_FEE) {
-				return &transaction.TransactionError{
-					Code:        transaction.InvalidMaxGasPrice.Code,
-					Description: fmt.Sprintf("invalid max gas price, expected at least %d", common.MINIMUM_BASE_FEE),
-				}
-			}
-		}
-	}
-
+	// 4. KIỂM TRA PHÍ & SỐ DƯ
+	// 4.1. Gas limits first: cheap uint64 comparisons reject malformed txs before any big.Int balance math.
 	if !tx.ValidMaxGas() {
 		return transaction.InvalidMaxGas
 	}
@@ -477,6 +434,35 @@ func VerifyTransaction(
 		requiredGas := params.TxGas + uint64(len(tx.AuthorizationList()))*params.CallNewAccountGas
 		if tx.MaxGas() < requiredGas {
 			return transaction.InvalidMaxGas
+		}
+	}
+
+	// 4.2. Kiểm tra số dư có đủ trả Amount cơ bản không
+	if !tx.ValidAmount(as) {
+		return transaction.InvalidAmount
+	}
+
+	// 4.3. Xác định giao dịch có được miễn phí không
+	_, isFree := chainState.GetFreeFeeAddress()[tx.ToAddress()]
+	if !isFree {
+		_, isFree = chainState.GetFreeFeeAddress()[tx.FromAddress()]
+	}
+	if tx.GetNonce() == 0 {
+		isFree = true
+	}
+
+	if !isFree {
+		// 4.4. Kiểm tra số dư có đủ trả (MaxFee + Amount) không
+		if !tx.ValidMaxFee(as) {
+			return transaction.InvalidMaxFee
+		}
+
+		// 4.5. Kiểm tra MaxGasPrice > 0 (chống spam cơ bản)
+		if !tx.ValidMaxGasPrice(common.MINIMUM_BASE_FEE) {
+			return &transaction.TransactionError{
+				Code:        transaction.InvalidMaxGasPrice.Code,
+				Description: fmt.Sprintf("invalid max gas price, expected at least %d", common.MINIMUM_BASE_FEE),
+			}
 		}
 	}
 

@@ -7,8 +7,8 @@ name: Go CI (execution)
 # stale test assumptions) were cleaned up. Keep this green — a red run here
 # means a real build/vet/test regression, not pre-existing debt.
 #
-# Scope: this repo also contains a Rust consensus crate
-# (consensus/metanode/meta-consensus) which is NOT covered here yet.
+# Scope: the Rust crates (mtn-nomt-ffi, metanode) are built because the Go module links them, but their own unit
+# tests (consensus/metanode/meta-consensus) are NOT run here yet.
 
 on:
   push:
@@ -16,16 +16,27 @@ on:
   pull_request:
     branches: [main, dev]
 
+# Least privilege: this workflow only reads the repository.
+permissions:
+  contents: read
+
+# A newer push to the same PR supersedes the run in progress (dev/main pushes always run to completion) (a full run takes 12-22 min).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   go-build-test:
     runs-on: ubuntu-latest
+    # Observed full runs: ~12 min warm, ~22 min with a cold Rust cache. Fail a hung run instead of waiting 6 h.
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: execution
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: execution/go.mod
           cache-dependency-path: execution/go.sum
@@ -37,9 +48,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "."
+          # Only dev/main runs write the cache; PR runs restore from it, which avoids cache churn per branch.
+          save-if: ${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' }}
 
       - name: Cache C++ MVM builds
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: |
             execution/pkg/mvm/c_mvm/build

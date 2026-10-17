@@ -331,8 +331,8 @@ const (
 // checkTxSignature is a pure function of (tx, sender account state): every node evaluating the same
 // tx against the same pre-block state gets the same verdict, so it is safe to use as a consensus-level
 // execution filter (no clocks, no peer-local data other than the cache, which only memoizes this result).
-// It mirrors the signature rules of VerifyTransaction (BLS key if registered, ETH secp256k1 otherwise or
-// as fallback; AccountType 1 additionally requires the ETH signature).
+// It mirrors the signature rules of VerifyTransaction (BLS key for node identities,
+// ETH secp256k1 for users).
 func checkTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy) bool {
 	return evalTxSignature(tx, as, pol) != sigVerdictInvalid
 }
@@ -351,13 +351,12 @@ func evalTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy)
 		return sigVerdictInvalid
 	}
 	var blsKey []byte
-	accountType := int32(0)
 	if as != nil {
 		blsKey = as.PublicKeyBls()
-		accountType = int32(as.AccountType())
 	}
-	key := sigCacheKey(tx, blsKey)
 	hasEnvelope := len(tx.RawEnvelope()) > 0
+	key := sigCacheKey(tx, blsKey)
+
 	// A binding-proven hit skips decode + ecrecover entirely.
 	if hasEnvelope && LoadVerifiedSignature(boundSigKey(key)) {
 		return sigVerdictBoundHit
@@ -385,9 +384,6 @@ func evalTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy)
 			ok = tx.ValidSecpSign()
 		}
 	}
-	if ok && accountType == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) && !(hasEnvelope && tx.Type() != 0xFF) && !tx.ValidSecpSign() {
-		ok = false
-	}
 	if ok {
 		if hasEnvelope {
 			storeVerifiedBound(key)
@@ -412,7 +408,7 @@ const (
 )
 
 // verifySignatures computes, for every tx, the exact verdict checkTxSignature would give, but verifies plain
-// BLS txs (registered key, AccountType 0) with blst batch verification, in parallel. stateOf(i) returns the
+// BLS txs (registered key) with blst batch verification, in parallel. stateOf(i) returns the
 // sender's account state for txs[i] (nil = load from accountDB). Successful checks populate the
 // verified-signature cache. The result depends only on (tx, sender state): batching never changes a verdict.
 func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Transaction, stateOf func(i int) types.AccountState, pol sigPolicy) ([]bool, sigStats) {
@@ -472,7 +468,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 	}
 
 	// Phase 1: cache hits are accepted; plain BLS txs not yet cached are queued for batch verification;
-	// everything else (ETH-signed, no key yet, AccountType 1, ...) takes the exact per-tx path.
+	// everything else (ETH-signed, no key yet, ...) takes the exact per-tx path.
 	type pending struct {
 		i   int
 		key eth_common.Hash
@@ -503,7 +499,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 			valid[i] = false
 			return
 		}
-		if as != nil && len(as.PublicKeyBls()) > 0 && as.AccountType() == 0 && txs[i].Type() != 0xFF && pol.blsAllowed(txs[i], as) {
+		if as != nil && len(as.PublicKeyBls()) > 0 && txs[i].Type() != 0xFF && pol.blsAllowed(txs[i], as) {
 			key := sigCacheKey(txs[i], as.PublicKeyBls())
 			hasEnvelope := len(txs[i].RawEnvelope()) > 0
 			if hasEnvelope {
@@ -528,7 +524,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 			}
 			return
 		}
-		// Everything else (secp, 0xFF, AccountType 1, no key yet): checkTxSignature does its own binding.
+		// Everything else (secp, 0xFF, no key yet): checkTxSignature does its own binding.
 		verdict := evalTxSignature(txs[i], as, pol)
 		valid[i] = (verdict != sigVerdictInvalid)
 		switch verdict {

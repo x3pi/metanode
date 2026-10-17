@@ -15,6 +15,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -311,3 +312,132 @@ func TestTxValidatorPool_checkSecpProtoIngress(t *testing.T) {
 	_, err = vp2.checkSecpProtoIngress(mk(2, 1337, nil))
 	assert.NoError(t, err)
 }
+
+// TestTxValidatorPool_MinGasPrice_EIP1559 verifies that EIP-1559 transactions
+// (which have MaxGasPrice=0 and fee defined via GasFeeCap) are correctly admitted
+// when GasFeeCap >= MinGasPrice, and rejected when GasFeeCap < MinGasPrice.
+func TestTxValidatorPool_MinGasPrice_EIP1559(t *testing.T) {
+	cs := &blockchain.ChainState{}
+	cs.SetConfig(&config.SimpleChainConfig{
+		ChainId:     big.NewInt(1337),
+		MinGasPrice: 1000,
+	})
+	tp := transaction_pool.NewTransactionPool()
+	vp := &TxValidatorPool{
+		chainState:      cs,
+		transactionPool: tp,
+	}
+
+	// 1. EIP-1559 transaction with GasFeeCap = 1500 (>= MinGasPrice 1000)
+	txGood := &transaction.Transaction{}
+	txGood.FromProto(&pb.Transaction{
+		Type:      2,
+		ChainID:   1337,
+		GasFeeCap: new(big.Int).SetUint64(1500).Bytes(),
+		GasTipCap: new(big.Int).SetUint64(100).Bytes(),
+	})
+
+	// skipVerification = true to test minGasPrice check in isolation without account trie
+	code, err := vp.addTransactionToPoolInternalCap(txGood, true, false)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), code)
+
+	// 2. EIP-1559 transaction with GasFeeCap = 500 (< MinGasPrice 1000)
+	txLow := &transaction.Transaction{}
+	txLow.FromProto(&pb.Transaction{
+		Type:      2,
+		ChainID:   1337,
+		GasFeeCap: new(big.Int).SetUint64(500).Bytes(),
+		GasTipCap: new(big.Int).SetUint64(100).Bytes(),
+	})
+
+	code, err = vp.addTransactionToPoolInternalCap(txLow, true, false)
+	assert.ErrorContains(t, err, "is below node minimum")
+	assert.Equal(t, transaction.InvalidTransaction.Code, code)
+}
+
+// TestTxValidatorPool_MinGasPrice_EIP1559_Batch verifies that EIP-1559 transactions
+// in the batch processing path (addTransactionsToPoolInternalCap) correctly use
+// GasPriceCap() instead of MaxGasPrice().
+func TestTxValidatorPool_MinGasPrice_EIP1559_Batch(t *testing.T) {
+	cs := &blockchain.ChainState{}
+	cs.SetConfig(&config.SimpleChainConfig{
+		ChainId:     big.NewInt(1337),
+		MinGasPrice: 1000,
+	})
+	tp := transaction_pool.NewTransactionPool()
+	vp := &TxValidatorPool{
+		chainState:      cs,
+		transactionPool: tp,
+	}
+
+	txGood := &transaction.Transaction{}
+	txGood.FromProto(&pb.Transaction{
+		Type:      2,
+		ChainID:   1337,
+		GasFeeCap: new(big.Int).SetUint64(1500).Bytes(),
+		GasTipCap: new(big.Int).SetUint64(100).Bytes(),
+	})
+
+	txLow := &transaction.Transaction{}
+	txLow.FromProto(&pb.Transaction{
+		Type:      2,
+		ChainID:   1337,
+		GasFeeCap: new(big.Int).SetUint64(500).Bytes(),
+		GasTipCap: new(big.Int).SetUint64(100).Bytes(),
+	})
+
+	// Run batch validation with skipVerification=true
+	errs := vp.addTransactionsToPoolInternalCap([]types.Transaction{txGood, txLow}, true, false)
+	require.Len(t, errs, 2)
+	assert.NoError(t, errs[0], "Valid EIP-1559 batch tx must not be rejected by minGasPrice")
+	assert.ErrorContains(t, errs[1], "is below node minimum", "Underpriced EIP-1559 batch tx must be rejected")
+}
+
+// TestTxValidatorPool_BatchEviction_DoesNotEvictOnInvalidBatch verifies that
+// when enforceCap=true, invalid transactions in a batch do NOT trigger eviction of
+// legitimate transactions already in the pool.
+func TestTxValidatorPool_BatchEviction_DoesNotEvictOnInvalidBatch(t *testing.T) {
+	cs := &blockchain.ChainState{}
+	cs.SetConfig(&config.SimpleChainConfig{
+		ChainId:     big.NewInt(1337),
+		MinGasPrice: 1000,
+	})
+	tp := transaction_pool.NewTransactionPool()
+	vp := &TxValidatorPool{
+		chainState:      cs,
+		transactionPool: tp,
+	}
+
+	// 1. Seed pool with a legitimate transaction
+	txExisting := &transaction.Transaction{}
+	txExisting.FromProto(&pb.Transaction{
+		Type:        0,
+		ChainID:     1337,
+		MaxGasPrice: 2000,
+		MaxGas:      21000,
+		FromAddress: common.HexToAddress("0x111").Bytes(),
+	})
+	tp.AddTransaction(txExisting)
+	assert.Equal(t, 1, tp.CountTransactions())
+
+	// 2. Incoming batch with an invalid transaction (underpriced, will fail validation)
+	txInvalid := &transaction.Transaction{}
+	txInvalid.FromProto(&pb.Transaction{
+		Type:        0,
+		ChainID:     1337,
+		MaxGasPrice: 100, // below minGasPrice 1000
+		MaxGas:      21000,
+		FromAddress: common.HexToAddress("0x222").Bytes(),
+	})
+
+	// Call with enforceCap=true
+	errs := vp.addTransactionsToPoolInternalCap([]types.Transaction{txInvalid}, true, true)
+	require.Len(t, errs, 1)
+	assert.ErrorContains(t, errs[0], "is below node minimum")
+
+	// 3. Existing legitimate transaction must STILL be in the pool!
+	assert.Equal(t, 1, tp.CountTransactions(), "Existing pool transactions must not be evicted by invalid batch")
+}
+
+

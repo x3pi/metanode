@@ -297,9 +297,12 @@ func TestC4_AddReplicaWithCopiedState(t *testing.T) {
 	h.waitBlocks(50, h.m...)
 	h.assertIdentical(h.m...)
 	voter := false
-	for _, s := range l.node.Status().Servers {
-		if s.ID == "n3" && s.Voter {
-			voter = true
+	// Promotion to voter is a separate, asynchronous Raft config change: poll instead of reading it once.
+	for deadline := time.Now().Add(20 * time.Second); !voter && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		for _, s := range l.node.Status().Servers {
+			if s.ID == "n3" && s.Voter {
+				voter = true
+			}
 		}
 	}
 	if !voter {

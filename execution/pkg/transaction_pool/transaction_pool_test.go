@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	e_types "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -599,4 +601,46 @@ func TestTransactionPool_GetPendingNonce_StaleMempoolTx(t *testing.T) {
 	// Progression starts at 5: sees 5, 6 -> returns 7
 	assert.Equal(t, uint64(7), pool.GetPendingNonce(addr, 5))
 }
+
+// TestEvictLowestGasPrice_BigIntFeeCapNoTruncation ensures that an EIP-1559 transaction
+// with GasPriceCap > 2^64 does not get truncated down to a tiny uint64 and wrongly evicted.
+func TestEvictLowestGasPrice_BigIntFeeCapNoTruncation(t *testing.T) {
+	pool := NewTransactionPool()
+
+	to := common.HexToAddress("0x222")
+
+	// Tx 1: Legacy tx with low fee = 500
+	txLow := makeTestTxWithGas(0x10, 0, 500, []byte{1})
+	require.NoError(t, pool.AddTransaction(txLow))
+
+	// Tx 2: EIP-1559 tx with huge fee cap = 2^64 + 50
+	// If truncated to uint64, it would be 50, which is < 500!
+	hugeFeeCap := new(big.Int).Add(new(big.Int).SetUint64(^uint64(0)), big.NewInt(51))
+	ethTx := e_types.NewTx(&e_types.DynamicFeeTx{
+		ChainID:   big.NewInt(1),
+		Nonce:     0,
+		GasTipCap: big.NewInt(100),
+		GasFeeCap: hugeFeeCap,
+		Gas:       21000,
+		To:        &to,
+		Value:     big.NewInt(100),
+	})
+	key, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	signedEthTx, err := e_types.SignTx(ethTx, e_types.NewLondonSigner(big.NewInt(1)), key)
+	require.NoError(t, err)
+	txHuge, err := transaction.NewTransactionFromEth(signedEthTx)
+	require.NoError(t, err)
+	require.NoError(t, pool.AddTransaction(txHuge))
+
+	// Evict 1 transaction: the lowest fee tx (txLow with 500) MUST be evicted, NOT txHuge!
+	evicted := pool.EvictLowestGasPrice(1)
+	assert.Equal(t, 1, evicted)
+
+	remaining, _ := pool.TransactionsWithAggSign(0)
+	require.Len(t, remaining, 1)
+	assert.Equal(t, txHuge.Hash(), remaining[0].Hash(), "Huge fee cap tx must not be evicted ahead of lower fee tx")
+}
+
+
 

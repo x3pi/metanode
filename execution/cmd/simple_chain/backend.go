@@ -12,7 +12,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -112,7 +111,6 @@ type BlockGasInfo struct {
 type MetaAPI struct {
 	App                  *App // Export field Client
 	events               *filters.EventSystem
-	processingChunkCount atomic.Int64
 
 	// ── Cached results (avoid allocations on hot path) ──
 	cachedChainId        hexutil.Big  // Never changes — set once at init
@@ -302,9 +300,8 @@ func NewServer(app *App) *http.ServeMux {
 
 	server := rpc.NewServer()
 
-	customAPI := &MetaAPI{App: app, events: app.eventSystem, processingChunkCount: atomic.Int64{}}
+	customAPI := &MetaAPI{App: app, events: app.eventSystem}
 	customAPI.initCaches()
-	// go customAPI.startProcessingLogger()
 	if err := server.RegisterName("eth", customAPI); err != nil {
 		logger.Error("[FATAL] Không thể đăng ký API custom: %v", err)
 		logger.SyncFileLog()
@@ -471,8 +468,8 @@ func NewServer(app *App) *http.ServeMux {
 	// Sử dụng mux để xử lý cả HTTP và WebSocket
 	mux := http.NewServeMux()
 
-	// Middleware chain: CORS → ETH SendRawTx Intercept → Rate Limiter → RPC Server
-	httpHandler := corsMiddleware(ethSendRawTxMiddleware(rateLimiter.Middleware(server)))
+	// Middleware chain: CORS → Rate Limiter → ETH SendRawTx Intercept → RPC Server
+	httpHandler := corsMiddleware(rateLimiter.Middleware(ethSendRawTxMiddleware(server)))
 	mux.Handle("/", httpHandler)
 
 	// Prometheus metrics endpoint (standard Prometheus text format)
@@ -576,8 +573,8 @@ func NewServer(app *App) *http.ServeMux {
 		w.Write([]byte(`{"status":"reset"}`))
 	})
 
-	// Áp dụng middleware vào handler WebSocket
-	wsHandler := server.WebsocketHandler([]string{"*"})
+	// Áp dụng middleware vào handler WebSocket (giới hạn theo từng message/RPC call)
+	wsHandler := rateLimiter.WebsocketMiddleware(server.WebsocketHandler([]string{"*"}))
 	mux.Handle("/ws", wsHandler)
 	if app.config.Debug {
 		debugApi := &DebugApi{App: app}

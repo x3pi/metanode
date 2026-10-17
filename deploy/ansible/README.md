@@ -162,7 +162,7 @@ Chi tiết giới hạn, dung lượng vật lý và lỗi cần xử lý:
 
 Bạn có thể chạy song song nhiều chuỗi blockchain độc lập trên cùng hạ tầng máy chủ mà không sợ trùng port hay xung đột dữ liệu. Ví dụ hồ sơ **Chain 2** (`inventory.chain2.yml`):
 - **4 Validator Nodes:** `m5`, `m6`, `m7`, `m8` (RPC: `10751-10754`, TCP P2P: `6205-6208`, BFT: `9105-9108`).
-- **Chain ID:** `991` (khác Chain gốc `990`).
+- **Chain ID:** `991`.
 - **Namespace riêng:** `chain_2` (data tách biệt tại `/opt/metanode-chain-2/`).
 
 ```bash
