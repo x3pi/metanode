@@ -21,11 +21,13 @@ import (
 // ============================================================================
 
 type MockConnection struct {
-	address    e_common.Address
-	connected  bool
-	connType   string
-	remoteAddr string
-	sentCount  int
+	address      e_common.Address
+	connected    bool
+	connType     string
+	remoteAddr   string
+	sentCount    int
+	sentMessages []network.Message
+	mu           sync.Mutex
 }
 
 func NewMockConnection(addr e_common.Address) *MockConnection {
@@ -52,14 +54,39 @@ func (mc *MockConnection) Init(addr e_common.Address, t string) {
 	mc.address = addr
 	mc.connType = t
 }
-func (mc *MockConnection) SetRealConnAddr(addr string)           { mc.remoteAddr = addr }
-func (mc *MockConnection) SendMessage(msg network.Message) error { mc.sentCount++; return nil }
-func (mc *MockConnection) SentCount() int                        { return mc.sentCount }
-func (mc *MockConnection) Connect() error                        { mc.connected = true; return nil }
-func (mc *MockConnection) Disconnect() error                     { mc.connected = false; return nil }
-func (mc *MockConnection) IsConnect() bool                       { return mc.connected }
-func (mc *MockConnection) ReadRequest()                          {}
-func (mc *MockConnection) Clone() network.Connection             { return mc }
+func (mc *MockConnection) SetRealConnAddr(addr string) { mc.remoteAddr = addr }
+func (mc *MockConnection) SendMessage(msg network.Message) error {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	mc.sentCount++
+	mc.sentMessages = append(mc.sentMessages, msg)
+	return nil
+}
+func (mc *MockConnection) SentCount() int {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	return mc.sentCount
+}
+func (mc *MockConnection) SentMessages() []network.Message {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	res := make([]network.Message, len(mc.sentMessages))
+	copy(res, mc.sentMessages)
+	return res
+}
+func (mc *MockConnection) LastSentMessage() network.Message {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	if len(mc.sentMessages) == 0 {
+		return nil
+	}
+	return mc.sentMessages[len(mc.sentMessages)-1]
+}
+func (mc *MockConnection) Connect() error            { mc.connected = true; return nil }
+func (mc *MockConnection) Disconnect() error         { mc.connected = false; return nil }
+func (mc *MockConnection) IsConnect() bool           { return mc.connected }
+func (mc *MockConnection) ReadRequest()              {}
+func (mc *MockConnection) Clone() network.Connection { return mc }
 
 // ============================================================================
 // MockMessage — implements network.Message

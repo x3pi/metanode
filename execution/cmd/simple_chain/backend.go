@@ -12,7 +12,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -112,7 +111,6 @@ type BlockGasInfo struct {
 type MetaAPI struct {
 	App                  *App // Export field Client
 	events               *filters.EventSystem
-	processingChunkCount atomic.Int64
 
 	// ── Cached results (avoid allocations on hot path) ──
 	cachedChainId        hexutil.Big  // Never changes — set once at init
@@ -302,9 +300,8 @@ func NewServer(app *App) *http.ServeMux {
 
 	server := rpc.NewServer()
 
-	customAPI := &MetaAPI{App: app, events: app.eventSystem, processingChunkCount: atomic.Int64{}}
+	customAPI := &MetaAPI{App: app, events: app.eventSystem}
 	customAPI.initCaches()
-	// go customAPI.startProcessingLogger()
 	if err := server.RegisterName("eth", customAPI); err != nil {
 		logger.Error("[FATAL] Không thể đăng ký API custom: %v", err)
 		logger.SyncFileLog()

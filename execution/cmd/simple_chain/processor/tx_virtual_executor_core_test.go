@@ -3,15 +3,25 @@ package processor
 import (
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/command"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestTxVirtualExecutor_ParseReadTx_Protobuf(t *testing.T) {
@@ -167,4 +177,190 @@ func TestErrNotSmartContractCallWording(t *testing.T) {
 	if errNotSmartContractCall != "not a smart contract call" {
 		t.Fatalf("wording changed: %q", errNotSmartContractCall)
 	}
+}
+
+func TestTxVirtualExecutor_ExecuteAndRespondReadTx_MockConnection(t *testing.T) {
+	prevBackend := trie.GetStateBackend()
+	trie.SetStateBackend(trie.BackendMPT)
+	t.Cleanup(func() { trie.SetStateBackend(prevBackend) })
+
+	header := block.NewBlockHeader(
+		common.Hash{}, 0, common.Hash{}, common.Hash{}, common.Hash{},
+		common.Address{}, 0, common.Hash{}, 0,
+	)
+	accountStorage := storage.NewDummyStorage("")
+	codeStorage := storage.NewDummyStorage("")
+	scStorage := storage.NewDummyStorage("")
+	cs, err := blockchain.NewChainStateRemote(header, accountStorage, codeStorage, scStorage, map[common.Address]struct{}{})
+	if err != nil {
+		t.Fatalf("failed to create chain state: %v", err)
+	}
+	cs.SetConfig(&config.SimpleChainConfig{
+		ChainId: big.NewInt(1),
+	})
+
+	from := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	to := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	// Set initial balance for from and to
+	asFrom, err := cs.GetAccountStateDB().AccountState(from)
+	require.NoError(t, err)
+	asFrom.AddBalance(big.NewInt(1_000_000_000))
+	cs.GetAccountStateDB().PublicSetDirtyAccountState(asFrom)
+
+	asTo, err := cs.GetAccountStateDB().AccountState(to)
+	require.NoError(t, err)
+	asTo.AddBalance(big.NewInt(500))
+	cs.GetAccountStateDB().PublicSetDirtyAccountState(asTo)
+
+	initialBalFrom := new(big.Int).Set(asFrom.Balance())
+	initialBalTo := new(big.Int).Set(asTo.Balance())
+
+	v := &TxVirtualExecutor{
+		chainState:          cs,
+		messageSender:       NewMockMessageSender(),
+		readTxLimiter:       make(chan struct{}, 10),
+		blockProcessingLock: &sync.RWMutex{},
+	}
+
+	tx := transaction.NewTransaction(
+		from, to, big.NewInt(100), 50000, 100000, 0, nil, nil, common.Hash{}, common.Hash{}, 1, 1,
+	).(*transaction.Transaction)
+
+	// 1. eth_call (isEstimateGas = false) on an ordinary EOA (no smart contract):
+	// Must respond with TransactionError command and errNotSmartContractCall ("not a smart contract call")
+	conn1 := NewMockConnection(from)
+	req1 := readTxRequest{
+		conn:          conn1,
+		tx:            tx,
+		msgID:         "test-call-msg-id-1",
+		isEstimateGas: false,
+	}
+	v.executeAndRespondReadTx(req1)
+
+	require.Equal(t, 1, conn1.SentCount())
+	lastMsg1 := conn1.LastSentMessage()
+	require.NotNil(t, lastMsg1)
+	assert.Equal(t, command.TransactionError, lastMsg1.Command())
+	assert.Equal(t, "test-call-msg-id-1", lastMsg1.ID())
+
+	errPb := &pb.TransactionHashWithError{}
+	err = proto.Unmarshal(lastMsg1.Body(), errPb)
+	require.NoError(t, err)
+	assert.Equal(t, errNotSmartContractCall, errPb.Description)
+
+	// 2. eth_estimateGas (isEstimateGas = true) on a plain transfer:
+	// Must respond with Receipt command, RETURNED status, and gasUsed == MINIMUM_BASE_FEE
+	conn2 := NewMockConnection(from)
+	req2 := readTxRequest{
+		conn:          conn2,
+		tx:            tx,
+		msgID:         "test-estimate-msg-id-2",
+		isEstimateGas: true,
+	}
+	v.executeAndRespondReadTx(req2)
+
+	require.Equal(t, 1, conn2.SentCount())
+	lastMsg2 := conn2.LastSentMessage()
+	require.NotNil(t, lastMsg2)
+	assert.Equal(t, command.Receipt, lastMsg2.Command())
+	assert.Equal(t, "test-estimate-msg-id-2", lastMsg2.ID())
+
+	rcp2 := &receipt.Receipt{}
+	err = rcp2.Unmarshal(lastMsg2.Body())
+	require.NoError(t, err)
+	assert.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcp2.Status())
+	assert.Equal(t, uint64(mt_common.MINIMUM_BASE_FEE), rcp2.GasUsed())
+
+	// 3. Verify state safety: neither from nor to account balance must have changed!
+	asFromPost, err := cs.GetAccountStateDB().AccountState(from)
+	require.NoError(t, err)
+	assert.Equal(t, initialBalFrom, asFromPost.Balance(), "from balance must not change during virtual execution")
+
+	asToPost, err := cs.GetAccountStateDB().AccountState(to)
+	require.NoError(t, err)
+	assert.Equal(t, initialBalTo, asToPost.Balance(), "to balance must not change during virtual execution")
+}
+
+func TestTxVirtualExecutor_EstimateGas_EIP7702_And_StateImmutability(t *testing.T) {
+	prevBackend := trie.GetStateBackend()
+	trie.SetStateBackend(trie.BackendMPT)
+	t.Cleanup(func() { trie.SetStateBackend(prevBackend) })
+
+	header := block.NewBlockHeader(
+		common.Hash{}, 0, common.Hash{}, common.Hash{}, common.Hash{},
+		common.Address{}, 0, common.Hash{}, 0,
+	)
+	accountStorage := storage.NewDummyStorage("")
+	codeStorage := storage.NewDummyStorage("")
+	scStorage := storage.NewDummyStorage("")
+	cs, err := blockchain.NewChainStateRemote(header, accountStorage, codeStorage, scStorage, map[common.Address]struct{}{})
+	if err != nil {
+		t.Fatalf("failed to create chain state: %v", err)
+	}
+	cs.SetConfig(&config.SimpleChainConfig{
+		ChainId: big.NewInt(1),
+	})
+
+	from := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	to := common.HexToAddress("0x4444444444444444444444444444444444444444")
+
+	asFrom, err := cs.GetAccountStateDB().AccountState(from)
+	require.NoError(t, err)
+	asFrom.AddBalance(big.NewInt(10_000_000_000))
+	cs.GetAccountStateDB().PublicSetDirtyAccountState(asFrom)
+
+	asTo, err := cs.GetAccountStateDB().AccountState(to)
+	require.NoError(t, err)
+	asTo.AddBalance(big.NewInt(10_000_000))
+	cs.GetAccountStateDB().PublicSetDirtyAccountState(asTo)
+
+	// Set contract storage slot using cs.GetSmartContractDB()
+	slotKey := common.HexToHash("0x01")
+	slotVal := common.HexToHash("0x42")
+	err = cs.GetSmartContractDB().SetStorageValue(to, slotKey.Bytes(), slotVal.Bytes())
+	require.NoError(t, err)
+
+	v := &TxVirtualExecutor{
+		chainState:          cs,
+		messageSender:       NewMockMessageSender(),
+		readTxLimiter:       make(chan struct{}, 10),
+		blockProcessingLock: &sync.RWMutex{},
+	}
+
+	// 1. EIP-7702 (SetCode) transaction estimate gas:
+	// Verify calculation: TxGas + n*CallNewAccountGas + MINIMUM_BASE_FEE
+	tx7702 := transaction.NewTransaction(
+		from, from, big.NewInt(0), 100000, 100000, 0, nil, nil, common.Hash{}, common.Hash{}, 1, 1,
+	).(*transaction.Transaction)
+	nAuth := 3
+	auths := make([]e_types.SetCodeAuthorization, nAuth)
+	tx7702.SetAuthorizationList(transaction.FromEthAuthorizationList(auths))
+
+	conn7702 := NewMockConnection(from)
+	req7702 := readTxRequest{
+		conn:          conn7702,
+		tx:            tx7702,
+		msgID:         "msg-eip7702-test",
+		isEstimateGas: true,
+	}
+	v.executeAndRespondReadTx(req7702)
+
+	require.Equal(t, 1, conn7702.SentCount())
+	lastMsg := conn7702.LastSentMessage()
+	require.NotNil(t, lastMsg)
+	assert.Equal(t, command.Receipt, lastMsg.Command())
+	assert.Equal(t, "msg-eip7702-test", lastMsg.ID())
+
+	rcp := &receipt.Receipt{}
+	err = rcp.Unmarshal(lastMsg.Body())
+	require.NoError(t, err)
+	assert.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcp.Status())
+	expectedGas := params.TxGas + uint64(nAuth)*params.CallNewAccountGas + mt_common.MINIMUM_BASE_FEE
+	assert.Equal(t, expectedGas, rcp.GasUsed(), "EIP-7702 gas must include intrinsic auth gas + MINIMUM_BASE_FEE")
+
+	// 2. Verify storage slots remain unmodified:
+	storedVal, ok := cs.GetSmartContractDB().StorageValue(to, slotKey.Bytes())
+	assert.True(t, ok)
+	assert.Equal(t, slotVal.Bytes(), storedVal, "storage slot must remain unchanged after EstimateGas")
 }

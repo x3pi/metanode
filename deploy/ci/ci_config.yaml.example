@@ -48,9 +48,9 @@ chain_actions:
   # Lệnh cập nhật IP / RPC endpoints cho toàn bộ các file test config
   update_ip_cmd: "cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
 
-  # Lệnh reset Execution Clusters (Chain Con - Chain ID 991: Cluster 1 / chain_a, Cluster 2 / chain_b)
-  reset_exec_cmd: "cd {METANODE_DIR}/deploy/ansible_clusters && ./deploy_clusters.sh --reset --exec-only && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
-  reset_exec: "cd {METANODE_DIR}/deploy/ansible_clusters && ./deploy_clusters.sh --reset --exec-only && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
+  # Lệnh reset toàn bộ cụm Execution Clusters & Parent Chain + cập nhật IP endpoints
+  reset_exec_cmd: "cd {METANODE_DIR}/deploy/ansible_clusters && ./deploy_clusters.sh --reset && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
+  reset_exec: "cd {METANODE_DIR}/deploy/ansible_clusters && ./deploy_clusters.sh --reset && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
 
   # Lệnh restart Execution Clusters (Chain Con)
   restart_exec_cmd: "cd {METANODE_DIR}/deploy/ansible_clusters && ./deploy_clusters.sh --restart --exec-only && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"

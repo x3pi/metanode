@@ -169,7 +169,7 @@ extern "C"
                     size_t len = nl ? static_cast<size_t>(nl - p) : static_cast<size_t>(end - p);
                     if (len > 0)
                     {
-                        doc.add_term(std::string(p, len));
+                        doc.add_boolean_term(std::string(p, len));
                     }
                     if (!nl)
                         break;
