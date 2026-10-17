@@ -198,6 +198,110 @@ extern "C"
         }
     }
 
+    static inline uint32_t read_u32_le(const char *p)
+    {
+        const uint8_t *u = reinterpret_cast<const uint8_t *>(p);
+        return static_cast<uint32_t>(u[0]) |
+               (static_cast<uint32_t>(u[1]) << 8) |
+               (static_cast<uint32_t>(u[2]) << 16) |
+               (static_cast<uint32_t>(u[3]) << 24);
+    }
+
+    bool database_index_documents_batch_packed(
+        xapian_database_t db,
+        const char *packed_data,
+        size_t packed_len)
+    {
+        if (!db || !packed_data || packed_len == 0)
+            return false;
+        try
+        {
+            Xapian::WritableDatabase *wdb = reinterpret_cast<Xapian::WritableDatabase *>(db);
+            const char *p = packed_data;
+            const char *end = packed_data + packed_len;
+
+            while (p < end)
+            {
+                if (static_cast<size_t>(end - p) < 13)
+                    return false;
+
+                bool replace_existing = (*reinterpret_cast<const uint8_t *>(p) != 0);
+                p += 1;
+
+                uint32_t unique_term_len = read_u32_le(p);
+                p += 4;
+                if (static_cast<size_t>(end - p) < unique_term_len)
+                    return false;
+                const char *unique_term_ptr = p;
+                p += unique_term_len;
+
+                if (replace_existing && unique_term_len == 0)
+                    return false;
+
+                if (static_cast<size_t>(end - p) < 4)
+                    return false;
+                uint32_t data_len = read_u32_le(p);
+                p += 4;
+                if (static_cast<size_t>(end - p) < data_len)
+                    return false;
+                const char *data_ptr = p;
+                p += data_len;
+
+                if (static_cast<size_t>(end - p) < 4)
+                    return false;
+                uint32_t terms_len = read_u32_le(p);
+                p += 4;
+                if (static_cast<size_t>(end - p) < terms_len)
+                    return false;
+                const char *terms_ptr = p;
+                p += terms_len;
+
+                Xapian::Document doc;
+                if (data_len > 0)
+                {
+                    doc.set_data(std::string(data_ptr, data_len));
+                }
+                if (terms_len > 0)
+                {
+                    const char *tp = terms_ptr;
+                    const char *tend = terms_ptr + terms_len;
+                    while (tp < tend)
+                    {
+                        const char *nl = static_cast<const char *>(memchr(tp, '\n', static_cast<size_t>(tend - tp)));
+                        size_t len = nl ? static_cast<size_t>(nl - tp) : static_cast<size_t>(tend - tp);
+                        if (len > 0)
+                        {
+                            doc.add_boolean_term(std::string(tp, len));
+                        }
+                        if (!nl)
+                            break;
+                        tp = nl + 1;
+                    }
+                }
+
+                if (replace_existing)
+                {
+                    wdb->replace_document(std::string(unique_term_ptr, unique_term_len), doc);
+                }
+                else
+                {
+                    wdb->add_document(doc);
+                }
+            }
+            return true;
+        }
+        catch (const Xapian::Error &e)
+        {
+            std::cerr << "[goxapian] database_index_documents_batch_packed failed: " << e.get_msg() << std::endl;
+            return false;
+        }
+        catch (...)
+        {
+            std::cerr << "[goxapian] database_index_documents_batch_packed: unknown exception" << std::endl;
+            return false;
+        }
+    }
+
     // RETURN VALUE CHANGED (was void, always silently "succeeded" from the
     // caller's point of view even when the underlying commit threw). This is
     // the single most important fix in this file: every previous caller of

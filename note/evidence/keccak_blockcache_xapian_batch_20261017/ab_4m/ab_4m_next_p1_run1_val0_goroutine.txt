@@ -1,0 +1,414 @@
+goroutine profile: total 837
+300 @ 0x5c098e 0x5548fc 0x5544d2 0x144df32 0x5c95a1
+#	0x144df31	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).startInjectionWorkers.func1+0xd1	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/transaction_processor.go:234
+
+200 @ 0x5c098e 0x5548fc 0x5544d2 0x1463933 0x5c95a1
+#	0x1463932	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxVirtualExecutor).startReadTxWorkers.func1+0xf2	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/tx_virtual_executor_core.go:178
+
+64 @ 0x5c098e 0x59c0a5 0x108e466 0x5c95a1
+#	0x108e465	github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).startWorkerPool.func1+0xe5	/home/abc/chain-n/metanode/execution/pkg/network/server.go:102
+
+32 @ 0x5c098e 0x5548fc 0x5544d2 0xf8d63e 0x5c95a1
+#	0xf8d63d	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1+0xdd	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:280
+
+30 @ 0x5c098e 0x59c0a5 0xddc0e5 0x5c95a1
+#	0xddc0e4	github.com/cockroachdb/pebble/vfs.(*diskHealthCheckingFile).startTicker.func1+0xc4	/home/abc/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/vfs/disk_health.go:171
+
+30 @ 0x5c95a1
+
+16 @ 0x5c098e 0x5548fc 0x5544d2 0xf59f8e 0x92b4ac 0xf59ecc 0x5c95a1
+# labels: {"pebble":"table-cache"}
+#	0xf59f8d	github.com/cockroachdb/pebble.(*tableCacheShard).releaseLoop.func1+0x8d	/home/abc/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/table_cache.go:385
+#	0x92b4ab	runtime/pprof.Do+0x8b							/usr/local/go/src/runtime/pprof/runtime.go:51
+#	0xf59ecb	github.com/cockroachdb/pebble.(*tableCacheShard).releaseLoop+0x4b	/home/abc/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/table_cache.go:383
+
+15 @ 0x5c098e 0x5548fc 0x5544d2 0xec9445 0xec8f77 0x92b4ac 0xec8f50 0x5c95a1
+# labels: {"pebble":"gc"}
+#	0xec9444	github.com/cockroachdb/pebble.(*cleanupManager).mainLoop+0xe4	/home/abc/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/cleaner.go:155
+#	0xec8f76	github.com/cockroachdb/pebble.openCleanupManager.func1.1+0x16	/home/abc/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/cleaner.go:86
+#	0x92b4ab	runtime/pprof.Do+0x8b						/usr/local/go/src/runtime/pprof/runtime.go:51
+#	0xec8f4f	github.com/cockroachdb/pebble.openCleanupManager.func1+0x4f	/home/abc/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/cleaner.go:85
+
+15 @ 0x5c098e 0x59c0a5 0xddd9af 0x5c95a1
+#	0xddd9ae	github.com/cockroachdb/pebble/vfs.(*diskHealthCheckingFS).startTickerLocked.func1+0xee	/home/abc/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/vfs/disk_health.go:566
+
+15 @ 0x5c098e 0x5c25f9 0x5c25d9 0x5d4705 0xe65369 0xe65364 0x92b4ac 0xe64cf0 0x5c95a1
+# labels: {"pebble":"wal-sync"}
+#	0x5c25d8	sync.runtime_notifyListWait+0x138					/usr/local/go/src/runtime/sema.go:587
+#	0x5d4704	sync.(*Cond).Wait+0x84							/usr/local/go/src/sync/cond.go:71
+#	0xe65368	github.com/cockroachdb/pebble/record.(*flusherCond).Wait+0x668		/home/abc/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/record/log_writer.go:204
+#	0xe65363	github.com/cockroachdb/pebble/record.(*LogWriter).flushLoop+0x663	/home/abc/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/record/log_writer.go:436
+#	0x92b4ab	runtime/pprof.Do+0x8b							/usr/local/go/src/runtime/pprof/runtime.go:51
+#	0xe64cef	github.com/cockroachdb/pebble/record.NewLogWriter.func2+0x4f		/home/abc/go/pkg/mod/github.com/cockroachdb/pebble@v1.1.5/record/log_writer.go:355
+
+13 @ 0x5b9f2b 0xf83d88 0xf85e5a 0xf85ca7 0xf90b25 0xf8d8db 0x5c95a1
+#	0xf83d87	github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_documents_batch_packed+0x47	_cgo_gotypes.go:202
+#	0xf85e59	github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocumentsBatch.func1+0x59		/home/abc/chain-n/metanode/execution/pkg/goxapian/xapian.go:243
+#	0xf85ca6	github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocumentsBatch+0x3e6			/home/abc/chain-n/metanode/execution/pkg/goxapian/xapian.go:243
+#	0xf90b24	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransactionsBatch+0x624	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:490
+#	0xf8d8da	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1+0x37a	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:303
+
+12 @ 0x5c098e 0x59d145 0x59d114 0x5c2345 0x5d65fd 0xf909f1 0xf90990 0xf8d8db 0x5c95a1
+#	0x5c2344	sync.runtime_SemacquireMutex+0x24										/usr/local/go/src/runtime/sema.go:95
+#	0x5d65fc	sync.(*Mutex).lockSlow+0x15c											/usr/local/go/src/sync/mutex.go:173
+#	0xf909f0	sync.(*Mutex).Lock+0x4f0											/usr/local/go/src/sync/mutex.go:92
+#	0xf9098f	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransactionsBatch+0x48f	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:483
+#	0xf8d8da	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1+0x37a	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:303
+
+11 @ 0x5c098e 0x59c0a5 0xf9ef50 0x5c95a1
+#	0xf9ef4f	github.com/meta-node-blockchain/meta-node/pkg/storage.(*LazyPebbleDB).backgroundFlusher+0xaf	/home/abc/chain-n/metanode/execution/pkg/storage/pebble_db.go:416
+
+4 @ 0x5c098e 0x5548fc 0x5544d2 0x1416fdb 0x5c95a1
+#	0x1416fda	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).backupDbWorker.func1+0xfa	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_commit.go:706
+
+3 @ 0x5b9f2b 0xf83bc8 0xf8583b 0xf8564b 0xf8591e 0xf90b25 0xf8d8db 0x5c95a1
+#	0xf83bc7	github.com/meta-node-blockchain/meta-node/pkg/goxapian._Cfunc_database_index_document+0x47			_cgo_gotypes.go:182
+#	0xf8583a	github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument.func1+0xba			/home/abc/chain-n/metanode/execution/pkg/goxapian/xapian.go:167
+#	0xf8564a	github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocument+0xca				/home/abc/chain-n/metanode/execution/pkg/goxapian/xapian.go:167
+#	0xf8591d	github.com/meta-node-blockchain/meta-node/pkg/goxapian.(*Database).IndexDocumentsBatch+0x5d			/home/abc/chain-n/metanode/execution/pkg/goxapian/xapian.go:199
+#	0xf90b24	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransactionsBatch+0x624	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:490
+#	0xf8d8da	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1+0x37a	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:303
+
+2 @ 0x5c098e 0x5548fc 0x5544d2 0xf8c3e5 0x5c95a1
+#	0xf8c3e4	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).monitorQueue+0xa4	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:163
+
+2 @ 0x5c098e 0x5826d7 0x5bfc85 0x645367 0x64665a 0x646648 0x7959e5 0x7a5845 0x8c822b 0x84aa83 0x84abb3 0x8cd578 0x5c95a1
+#	0x5bfc84	internal/poll.runtime_pollWait+0x84		/usr/local/go/src/runtime/netpoll.go:351
+#	0x645366	internal/poll.(*pollDesc).wait+0x26		/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
+#	0x646659	internal/poll.(*pollDesc).waitRead+0x279	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+#	0x646647	internal/poll.(*FD).Read+0x267			/usr/local/go/src/internal/poll/fd_unix.go:165
+#	0x7959e4	net.(*netFD).Read+0x24				/usr/local/go/src/net/fd_posix.go:55
+#	0x7a5844	net.(*conn).Read+0x44				/usr/local/go/src/net/net.go:189
+#	0x8c822a	net/http.(*connReader).Read+0x14a		/usr/local/go/src/net/http/server.go:798
+#	0x84aa82	bufio.(*Reader).fill+0x102			/usr/local/go/src/bufio/bufio.go:110
+#	0x84abb2	bufio.(*Reader).Peek+0x52			/usr/local/go/src/bufio/bufio.go:148
+#	0x8cd577	net/http.(*conn).serve+0x737			/usr/local/go/src/net/http/server.go:2127
+
+1 @ 0x105bf3c 0x146281d 0x1460ba5 0x145a105 0x149c30c 0x5c95a1
+#	0x105bf3b	github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).FromAddress+0xdb					/home/abc/chain-n/metanode/execution/pkg/transaction/transaction.go:1019
+#	0x146281c	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.SortTxsByFromAndNonce+0xdc					/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/tx_validator_pool_core.go:1189
+#	0x1460ba4	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).ProcessTransactionsInPoolSub+0x2c4	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/tx_validator_pool_core.go:1051
+#	0x145a104	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxBatchForwarder).StartForwardingLoop+0x304		/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/tx_batch_forwarder_core.go:157
+#	0x149c30b	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).TxsProcessor2+0x2b			/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_core.go:1266
+
+1 @ 0x55a429 0x5c2dc9 0x1197df3 0x5c95a1
+#	0x5c2dc8	os/signal.signal_recv+0x28	/usr/local/go/src/runtime/sigqueue.go:152
+#	0x1197df2	os/signal.loop+0x12		/usr/local/go/src/os/signal/signal_unix.go:23
+
+1 @ 0x55b515 0x105d665 0xf8897a 0xf8fbd3 0xf9063d 0xf8d8db 0x5c95a1
+#	0x105d664	github.com/meta-node-blockchain/meta-node/pkg/transaction.(*Transaction).RawSignatureValues+0x124		/home/abc/chain-n/metanode/execution/pkg/transaction/transaction.go:1248
+#	0xf88979	github.com/meta-node-blockchain/meta-node/pkg/explorer.marshalExplorerTxFull+0x6f9				/home/abc/chain-n/metanode/execution/pkg/explorer/explorer.go:117
+#	0xf8fbd2	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).prepareIndexDoc+0x16f2		/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:411
+#	0xf9063c	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransactionsBatch+0x13c	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:471
+#	0xf8d8da	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1+0x37a	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:303
+
+1 @ 0x57edd1 0x5bf85d 0x921151 0x920f85 0x91ddab 0x148620f 0x1486cbe 0x8cea69 0x8d096a 0x8ef04e 0x8cd410 0x5c95a1
+#	0x921150	runtime/pprof.writeRuntimeProfile+0xb0	/usr/local/go/src/runtime/pprof/pprof.go:793
+#	0x920f84	runtime/pprof.writeGoroutine+0x44	/usr/local/go/src/runtime/pprof/pprof.go:752
+#	0x91ddaa	runtime/pprof.(*Profile).WriteTo+0x14a	/usr/local/go/src/runtime/pprof/pprof.go:374
+#	0x148620e	net/http/pprof.handler.ServeHTTP+0x52e	/usr/local/go/src/net/http/pprof/pprof.go:272
+#	0x1486cbd	net/http/pprof.Index+0xdd		/usr/local/go/src/net/http/pprof/pprof.go:388
+#	0x8cea68	net/http.HandlerFunc.ServeHTTP+0x28	/usr/local/go/src/net/http/server.go:2220
+#	0x8d0969	net/http.(*ServeMux).ServeHTTP+0x1c9	/usr/local/go/src/net/http/server.go:2747
+#	0x8ef04d	net/http.serverHandler.ServeHTTP+0x8d	/usr/local/go/src/net/http/server.go:3210
+#	0x8cd40f	net/http.(*conn).serve+0x5cf		/usr/local/go/src/net/http/server.go:2092
+
+1 @ 0x5bcba5 0xfc8709 0xfc9a09 0x116e09c 0x116d119 0x14168d0 0x5c95a1
+#	0xfc8708	github.com/meta-node-blockchain/meta-node/pkg/trie.(*FlatStateTrie).applyDirtyToBuckets+0x1c8					/home/abc/chain-n/metanode/execution/pkg/trie/flat_state_trie.go:692
+#	0xfc9a08	github.com/meta-node-blockchain/meta-node/pkg/trie.(*FlatStateTrie).Hash+0x148							/home/abc/chain-n/metanode/execution/pkg/trie/flat_state_trie.go:818
+#	0x116e09b	github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipts).IntermediateRoot+0x17b					/home/abc/chain-n/metanode/execution/pkg/receipt/receipts.go:437
+#	0x116d118	github.com/meta-node-blockchain/meta-node/pkg/receipt.(*Receipts).CommitPipeline+0x58						/home/abc/chain-n/metanode/execution/pkg/receipt/receipts.go:319
+#	0x14168cf	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).commitToMemoryParallel.func2+0xaf	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_commit.go:547
+
+1 @ 0x5bcba5 0xfc8709 0xfc9c45 0x10628a9 0x1416ab4 0x5c95a1
+#	0xfc8708	github.com/meta-node-blockchain/meta-node/pkg/trie.(*FlatStateTrie).applyDirtyToBuckets+0x1c8					/home/abc/chain-n/metanode/execution/pkg/trie/flat_state_trie.go:692
+#	0xfc9c44	github.com/meta-node-blockchain/meta-node/pkg/trie.(*FlatStateTrie).Commit+0x124						/home/abc/chain-n/metanode/execution/pkg/trie/flat_state_trie.go:835
+#	0x10628a8	github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db.(*TransactionStateDB).Commit+0x248				/home/abc/chain-n/metanode/execution/pkg/transaction_state_db/transaction_state_db.go:291
+#	0x1416ab3	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).commitToMemoryParallel.func1+0x93	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_commit.go:536
+
+1 @ 0x5c098e 0x5548fc 0x5544b2 0x14338c5 0x5c95a1
+#	0x14338c4	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.startSystemLoadMonitor.func1+0xc4	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/processors.go:118
+
+1 @ 0x5c098e 0x5548fc 0x5544b2 0x1453387 0x5c95a1
+#	0x1453386	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxVirtualExecutor).cleanupReadTxHashes+0x66	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/transaction_processor_helpers.go:58
+
+1 @ 0x5c098e 0x5548fc 0x5544b2 0x14648f4 0x5c95a1
+#	0x14648f3	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.StartSendToAllConnectionsTpsLogger.func1+0x73	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/transaction_rate_tracker.go:176
+
+1 @ 0x5c098e 0x5548fc 0x5544b2 0x14c09f3 0x14c01a5 0x589dcb 0x5c95a1
+#	0x14c09f2	main.handleExitSignals+0x152	/home/abc/chain-n/metanode/execution/cmd/simple_chain/main.go:414
+#	0x14c01a4	main.main+0xee4			/home/abc/chain-n/metanode/execution/cmd/simple_chain/main.go:298
+#	0x589dca	runtime.main+0x28a		/usr/local/go/src/runtime/proc.go:272
+
+1 @ 0x5c098e 0x5548fc 0x5544b2 0x14c0ab2 0x5c95a1
+#	0x14c0ab1	main.handleExitSignals.func1+0x71	/home/abc/chain-n/metanode/execution/cmd/simple_chain/main.go:376
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x1082ef6 0x5c95a1
+#	0x1082ef5	github.com/meta-node-blockchain/meta-node/pkg/network.(*Connection).run+0x1d5	/home/abc/chain-n/metanode/execution/pkg/network/connection.go:241
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x1086719 0x5c95a1
+#	0x1086718	github.com/meta-node-blockchain/meta-node/pkg/network.(*Connection).writeLoop+0x1d8	/home/abc/chain-n/metanode/execution/pkg/network/connection.go:781
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x108aea6 0x5c95a1
+#	0x108aea5	github.com/meta-node-blockchain/meta-node/pkg/network.(*Handler).logTPS+0x85	/home/abc/chain-n/metanode/execution/pkg/network/handler.go:85
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x1106a50 0x5c95a1
+#	0x1106a4f	github.com/meta-node-blockchain/meta-node/pkg/metrics.StartSystemMetricsCollector.func1+0xaf	/home/abc/chain-n/metanode/execution/pkg/metrics/metrics.go:351
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x1409b96 0x5c95a1
+#	0x1409b95	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockBuffers).cleanupStateCommitBlockBuffer+0x95	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_buffers.go:44
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x1409f36 0x5c95a1
+#	0x1409f35	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockBuffers).cleanupSubNodeBlockBuffer+0x95	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_buffers.go:79
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x1410de8 0x5c95a1
+#	0x1410de7	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).cleanupPendingReceipts+0xa7	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_broadcast.go:395
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x1411208 0x5c95a1
+#	0x1411207	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).cleanupTxHashConnectionMap+0xa7	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_broadcast.go:432
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x14117ca 0x5c95a1
+#	0x14117c9	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).commitWorker+0xa9	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_commit.go:49
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x1414d65 0x1428305 0x143f34e 0x143d9c6 0x5c95a1
+#	0x1414d64	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).commitToMemoryParallel+0x6e4	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_commit.go:598
+#	0x1428304	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).createBlockFromResults+0x1704	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_processing.go:317
+#	0x143f34d	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).commitSpeculativeResult+0x110d	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/speculative_executor.go:1134
+#	0x143d9c5	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).StartCommitterLoop+0x385		/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/speculative_executor.go:859
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x1416d32 0x5c95a1
+#	0x1416d31	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).backupDbWorker+0x151	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_commit.go:713
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x141f48b 0x5c95a1
+#	0x141f48a	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).geiWorker+0x4a	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_epoch.go:106
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x14239ce 0x5c95a1
+#	0x14239cd	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).startResourceMonitoring+0xad	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_monitoring.go:17
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x14308ab 0x5c95a1
+#	0x14308aa	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).stateCommitter+0x6a	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_state.go:23
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x1431077 0x5c95a1
+#	0x1431076	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).inputTPSWorker+0x96	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_state.go:166
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x144cf68 0x5c95a1
+#	0x144cf67	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*SubscribeProcessor).cleanupDisconnectedSubscribers+0xa7	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/subscribe_processor.go:156
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x145314d 0x5c95a1
+#	0x145314c	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).MonitorCacheSize.func1+0xac	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/transaction_processor_helpers.go:34
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x1453608 0x5c95a1
+#	0x1453607	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).cleanupExecutedMvmIds+0xa7	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/transaction_processor_helpers.go:81
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x14539ce 0x5c95a1
+#	0x14539cd	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TransactionProcessor).MonitorDeviceKeyGoroutines+0xad	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/transaction_processor_helpers.go:114
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x145bbf2 0x5c95a1
+#	0x145bbf1	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*TxValidatorPool).StartMemoryMonitor.func1+0xb1	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/tx_validator_pool_core.go:213
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x1499b7b 0x5c95a1
+#	0x1499b7a	main.NewApp.func3+0xba	/home/abc/chain-n/metanode/execution/cmd/simple_chain/app.go:561
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x14c154c 0x5c95a1
+#	0x14c154b	main.memoryPressureRelief+0x1eb	/home/abc/chain-n/metanode/execution/cmd/simple_chain/main.go:476
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0x14e708e 0x5c95a1
+#	0x14e708d	main.(*App).Run.func3+0xad	/home/abc/chain-n/metanode/execution/cmd/simple_chain/app.go:1074
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0xc2939d 0x5c95a1
+#	0xc2939c	github.com/meta-node-blockchain/meta-node/pkg/logger.startLogWriter.func1+0xdc	/home/abc/chain-n/metanode/execution/pkg/logger/logger.go:506
+
+1 @ 0x5c098e 0x5548fc 0x5544d2 0xfa9ee5 0x5c95a1
+#	0xfa9ee4	github.com/meta-node-blockchain/meta-node/pkg/storage.(*StorageManager).startPendingDeviceKeyCleaner.func1+0xa4	/home/abc/chain-n/metanode/execution/pkg/storage/storage_manager.go:325
+
+1 @ 0x5c098e 0x5826d7 0x5bfc85 0x645367 0x64665a 0x646648 0x7959e5 0x7a5845 0x84afb7 0x63afb0 0x108702a 0x1087008 0x5c95a1
+#	0x5bfc84	internal/poll.runtime_pollWait+0x84							/usr/local/go/src/runtime/netpoll.go:351
+#	0x645366	internal/poll.(*pollDesc).wait+0x26							/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
+#	0x646659	internal/poll.(*pollDesc).waitRead+0x279						/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+#	0x646647	internal/poll.(*FD).Read+0x267								/usr/local/go/src/internal/poll/fd_unix.go:165
+#	0x7959e4	net.(*netFD).Read+0x24									/usr/local/go/src/net/fd_posix.go:55
+#	0x7a5844	net.(*conn).Read+0x44									/usr/local/go/src/net/net.go:189
+#	0x84afb6	bufio.(*Reader).Read+0x196								/usr/local/go/src/bufio/bufio.go:241
+#	0x63afaf	io.ReadAtLeast+0x8f									/usr/local/go/src/io/io.go:335
+#	0x1087029	io.ReadFull+0x409									/usr/local/go/src/io/io.go:354
+#	0x1087007	github.com/meta-node-blockchain/meta-node/pkg/network.(*Connection).readLoop+0x3e7	/home/abc/chain-n/metanode/execution/pkg/network/connection.go:866
+
+1 @ 0x5c098e 0x5826d7 0x5bfc85 0x645367 0x64665a 0x646648 0x7959e5 0x7a5845 0x8e7f6a 0x84aa83 0x84abb3 0x8e8aa5 0x5c95a1
+#	0x5bfc84	internal/poll.runtime_pollWait+0x84		/usr/local/go/src/runtime/netpoll.go:351
+#	0x645366	internal/poll.(*pollDesc).wait+0x26		/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
+#	0x646659	internal/poll.(*pollDesc).waitRead+0x279	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+#	0x646647	internal/poll.(*FD).Read+0x267			/usr/local/go/src/internal/poll/fd_unix.go:165
+#	0x7959e4	net.(*netFD).Read+0x24				/usr/local/go/src/net/fd_posix.go:55
+#	0x7a5844	net.(*conn).Read+0x44				/usr/local/go/src/net/net.go:189
+#	0x8e7f69	net/http.(*persistConn).Read+0x49		/usr/local/go/src/net/http/transport.go:2052
+#	0x84aa82	bufio.(*Reader).fill+0x102			/usr/local/go/src/bufio/bufio.go:110
+#	0x84abb2	bufio.(*Reader).Peek+0x52			/usr/local/go/src/bufio/bufio.go:148
+#	0x8e8aa4	net/http.(*persistConn).readLoop+0x184		/usr/local/go/src/net/http/transport.go:2205
+
+1 @ 0x5c098e 0x5826d7 0x5bfc85 0x645367 0x64a735 0x64a723 0x7979a9 0x7aef1e 0x7ae0f0 0x108fd24 0x149c3d5 0x5c95a1
+#	0x5bfc84	internal/poll.runtime_pollWait+0x84							/usr/local/go/src/runtime/netpoll.go:351
+#	0x645366	internal/poll.(*pollDesc).wait+0x26							/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
+#	0x64a734	internal/poll.(*pollDesc).waitRead+0x294						/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+#	0x64a722	internal/poll.(*FD).Accept+0x282							/usr/local/go/src/internal/poll/fd_unix.go:620
+#	0x7979a8	net.(*netFD).accept+0x28								/usr/local/go/src/net/fd_unix.go:172
+#	0x7aef1d	net.(*TCPListener).accept+0x1d								/usr/local/go/src/net/tcpsock_posix.go:159
+#	0x7ae0ef	net.(*TCPListener).Accept+0x2f								/usr/local/go/src/net/tcpsock.go:372
+#	0x108fd23	github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).Listen+0x263	/home/abc/chain-n/metanode/execution/pkg/network/server.go:346
+#	0x149c3d4	main.(*App).Run.func2+0x34								/home/abc/chain-n/metanode/execution/cmd/simple_chain/app.go:1058
+
+1 @ 0x5c098e 0x5826d7 0x5bfc85 0x645367 0x64a735 0x64a723 0x7979a9 0x7aef1e 0x7ae0f0 0x8d248c 0x14c0845 0x14c0846 0x5c95a1
+#	0x5bfc84	internal/poll.runtime_pollWait+0x84		/usr/local/go/src/runtime/netpoll.go:351
+#	0x645366	internal/poll.(*pollDesc).wait+0x26		/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
+#	0x64a734	internal/poll.(*pollDesc).waitRead+0x294	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+#	0x64a722	internal/poll.(*FD).Accept+0x282		/usr/local/go/src/internal/poll/fd_unix.go:620
+#	0x7979a8	net.(*netFD).accept+0x28			/usr/local/go/src/net/fd_unix.go:172
+#	0x7aef1d	net.(*TCPListener).accept+0x1d			/usr/local/go/src/net/tcpsock_posix.go:159
+#	0x7ae0ef	net.(*TCPListener).Accept+0x2f			/usr/local/go/src/net/tcpsock.go:372
+#	0x8d248b	net/http.(*Server).Serve+0x30b			/usr/local/go/src/net/http/server.go:3330
+#	0x14c0844	net/http.Serve+0xe4				/usr/local/go/src/net/http/server.go:2858
+#	0x14c0845	main.startDebugServer.func1+0xe5		/home/abc/chain-n/metanode/execution/cmd/simple_chain/main.go:362
+
+1 @ 0x5c098e 0x5826d7 0x5bfc85 0x645367 0x64a735 0x64a723 0x7979a9 0x7aef1e 0x7ae0f0 0x8d248c 0x8d2151 0x14c1294 0x5c95a1
+#	0x5bfc84	internal/poll.runtime_pollWait+0x84		/usr/local/go/src/runtime/netpoll.go:351
+#	0x645366	internal/poll.(*pollDesc).wait+0x26		/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
+#	0x64a734	internal/poll.(*pollDesc).waitRead+0x294	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+#	0x64a722	internal/poll.(*FD).Accept+0x282		/usr/local/go/src/internal/poll/fd_unix.go:620
+#	0x7979a8	net.(*netFD).accept+0x28			/usr/local/go/src/net/fd_unix.go:172
+#	0x7aef1d	net.(*TCPListener).accept+0x1d			/usr/local/go/src/net/tcpsock_posix.go:159
+#	0x7ae0ef	net.(*TCPListener).Accept+0x2f			/usr/local/go/src/net/tcpsock.go:372
+#	0x8d248b	net/http.(*Server).Serve+0x30b			/usr/local/go/src/net/http/server.go:3330
+#	0x8d2150	net/http.(*Server).ListenAndServe+0x70		/usr/local/go/src/net/http/server.go:3259
+#	0x14c1293	main.startRPCServer.func1+0x1b3			/home/abc/chain-n/metanode/execution/cmd/simple_chain/main.go:450
+
+1 @ 0x5c098e 0x5826d7 0x5bfc85 0x645367 0x64a735 0x64a723 0x7979a9 0x7aef1e 0x7ae0f0 0x8d248c 0x8d2151 0x14e6fb1 0x14e6fb2 0x5c95a1
+#	0x5bfc84	internal/poll.runtime_pollWait+0x84		/usr/local/go/src/runtime/netpoll.go:351
+#	0x645366	internal/poll.(*pollDesc).wait+0x26		/usr/local/go/src/internal/poll/fd_poll_runtime.go:84
+#	0x64a734	internal/poll.(*pollDesc).waitRead+0x294	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+#	0x64a722	internal/poll.(*FD).Accept+0x282		/usr/local/go/src/internal/poll/fd_unix.go:620
+#	0x7979a8	net.(*netFD).accept+0x28			/usr/local/go/src/net/fd_unix.go:172
+#	0x7aef1d	net.(*TCPListener).accept+0x1d			/usr/local/go/src/net/tcpsock_posix.go:159
+#	0x7ae0ef	net.(*TCPListener).Accept+0x2f			/usr/local/go/src/net/tcpsock.go:372
+#	0x8d248b	net/http.(*Server).Serve+0x30b			/usr/local/go/src/net/http/server.go:3330
+#	0x8d2150	net/http.(*Server).ListenAndServe+0x70		/usr/local/go/src/net/http/server.go:3259
+#	0x14e6fb0	net/http.ListenAndServe+0xf0			/usr/local/go/src/net/http/server.go:3514
+#	0x14e6fb1	main.(*App).Run.func1+0xf1			/home/abc/chain-n/metanode/execution/cmd/simple_chain/app.go:1044
+
+1 @ 0x5c098e 0x59c0a5 0x106d10f 0x5c95a1
+#	0x106d10e	github.com/meta-node-blockchain/meta-node/pkg/blockchain.(*BlockChain).StartCleanupWorker.func1+0x14e	/home/abc/chain-n/metanode/execution/pkg/blockchain/blockchain.go:210
+
+1 @ 0x5c098e 0x59c0a5 0x107f905 0x5c95a1
+#	0x107f904	github.com/meta-node-blockchain/meta-node/pkg/blockchain.(*Scrubber).Start.func1+0x124	/home/abc/chain-n/metanode/execution/pkg/blockchain/scrubber.go:44
+
+1 @ 0x5c098e 0x59c0a5 0x1088047 0x5c95a1
+#	0x1088046	github.com/meta-node-blockchain/meta-node/pkg/network.(*Connection).readLoop.func1+0x66	/home/abc/chain-n/metanode/execution/pkg/network/connection.go:815
+
+1 @ 0x5c098e 0x59c0a5 0x108eba5 0x1090667 0x5c95a1
+#	0x108eba4	github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).HandleConnection+0x304	/home/abc/chain-n/metanode/execution/pkg/network/server.go:281
+#	0x1090666	github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).Listen.func1+0x86		/home/abc/chain-n/metanode/execution/pkg/network/server.go:404
+
+1 @ 0x5c098e 0x59c0a5 0x1091478 0x5c95a1
+#	0x1091477	github.com/meta-node-blockchain/meta-node/pkg/network.(*SocketServer).logStats+0x237	/home/abc/chain-n/metanode/execution/pkg/network/server_stats.go:13
+
+1 @ 0x5c098e 0x59c0a5 0x10dd42c 0x5c95a1
+#	0x10dd42b	github.com/meta-node-blockchain/meta-node/pkg/filters.(*EventSystem).eventLoop+0x3ab	/home/abc/chain-n/metanode/execution/pkg/filters/filter_system.go:556
+
+1 @ 0x5c098e 0x59c0a5 0x1236ef5 0x1499ef8 0x5c95a1
+#	0x1236ef4	github.com/meta-node-blockchain/meta-node/pkg/rollup.(*ConservationGuard).Run+0x194	/home/abc/chain-n/metanode/execution/pkg/rollup/conservation.go:289
+#	0x1499ef7	main.NewApp.func2+0x57									/home/abc/chain-n/metanode/execution/cmd/simple_chain/app.go:510
+
+1 @ 0x5c098e 0x59c0a5 0x1248509 0x5c95a1
+#	0x1248508	github.com/meta-node-blockchain/meta-node/pkg/rollup.(*ReceiveWorker).loop+0x108	/home/abc/chain-n/metanode/execution/pkg/rollup/worker_receive.go:126
+
+1 @ 0x5c098e 0x59c0a5 0x124bc92 0x5c95a1
+#	0x124bc91	github.com/meta-node-blockchain/meta-node/pkg/rollup.(*ReclaimWorker).loop+0xf1	/home/abc/chain-n/metanode/execution/pkg/rollup/worker_reclaim.go:58
+
+1 @ 0x5c098e 0x59c0a5 0x124da15 0x5c95a1
+#	0x124da14	github.com/meta-node-blockchain/meta-node/pkg/rollup.(*RegistrationWorker).loop+0x114	/home/abc/chain-n/metanode/execution/pkg/rollup/worker_registration.go:127
+
+1 @ 0x5c098e 0x59c0a5 0x124efb5 0x5c95a1
+#	0x124efb4	github.com/meta-node-blockchain/meta-node/pkg/rollup.(*SendWorker).loop+0x114	/home/abc/chain-n/metanode/execution/pkg/rollup/worker_send.go:117
+
+1 @ 0x5c098e 0x59c0a5 0x1393de8 0x1395a2a 0x552acb 0x55275a 0x5c934c 0x5c95a1
+#	0x1393de7	github.com/meta-node-blockchain/meta-node/executor.cgo_execute_block+0x6e7	/home/abc/chain-n/metanode/execution/executor/ffi_bridge.go:269
+#	0x1395a29	_cgoexp_e20995ee9c64_cgo_execute_block+0x29					_cgo_gotypes.go:333
+#	0x552aca	runtime.cgocallbackg1+0x28a							/usr/local/go/src/runtime/cgocall.go:437
+#	0x552759	runtime.cgocallbackg+0x139							/usr/local/go/src/runtime/cgocall.go:350
+#	0x5c934b	runtime.cgocallback+0xcb							/usr/local/go/src/runtime/asm_amd64.s:1084
+
+1 @ 0x5c098e 0x59c0a5 0x13e28b3 0x5c95a1
+#	0x13e28b2	github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor.StartSignatureCacheCleanup.func1+0xb2	/home/abc/chain-n/metanode/execution/pkg/blockchain/tx_processor/validation.go:146
+
+1 @ 0x5c098e 0x59c0a5 0x13fe771 0x5c95a1
+#	0x13fe770	github.com/meta-node-blockchain/meta-node/pkg/node.NewHostNode.func1+0x130	/home/abc/chain-n/metanode/execution/pkg/node/node.go:135
+
+1 @ 0x5c098e 0x59c0a5 0x14040ce 0x5c95a1
+#	0x14040cd	github.com/meta-node-blockchain/meta-node/pkg/txsender.(*Client).monitorConnections+0xcd	/home/abc/chain-n/metanode/execution/pkg/txsender/client.go:72
+
+1 @ 0x5c098e 0x59c0a5 0x141fa05 0x5c95a1
+#	0x141fa04	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).startIndexingProcess+0x1c4	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_indexing.go:123
+
+1 @ 0x5c098e 0x59c0a5 0x141fc71 0x5c95a1
+#	0x141fc70	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).startIndexingProcess.func2+0x70	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_indexing.go:84
+
+1 @ 0x5c098e 0x59c0a5 0x1425bac 0x5c95a1
+#	0x1425bab	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).runUnixSocket+0x12cb	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_network.go:206
+
+1 @ 0x5c098e 0x59c0a5 0x14261ff 0x5c95a1
+#	0x14261fe	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).processRustEpochData+0xfe	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_network.go:226
+
+1 @ 0x5c098e 0x59c0a5 0x143885a 0x5c95a1
+#	0x1438859	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*RegistrationTracker).cleanupLoop+0xf9	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/registration_tracker.go:187
+
+1 @ 0x5c098e 0x59c0a5 0x148c445 0x5c95a1
+#	0x148c444	github.com/meta-node-blockchain/meta-node/pkg/pruning.(*PruningManager).runLoop+0xc4	/home/abc/chain-n/metanode/execution/pkg/pruning/pruning_manager.go:68
+
+1 @ 0x5c098e 0x59c0a5 0x149d39d 0x5c95a1
+#	0x149d39c	main.(*App).periodicStorageFlusher+0xfc	/home/abc/chain-n/metanode/execution/cmd/simple_chain/app.go:1373
+
+1 @ 0x5c098e 0x59c0a5 0x8ea4a7 0x5c95a1
+#	0x8ea4a6	net/http.(*persistConn).writeLoop+0xe6	/usr/local/go/src/net/http/transport.go:2519
+
+1 @ 0x5c098e 0x59c0a5 0xc21e6a 0x5c95a1
+#	0xc21e69	github.com/meta-node-blockchain/meta-node/pkg/loggerfile.(*LogCleaner).StartPeriodicCleanup.func1+0x169	/home/abc/chain-n/metanode/execution/pkg/loggerfile/log_cleaner.go:249
+
+1 @ 0x5c098e 0x59c0a5 0xc28a15 0x5c95a1
+#	0xc28a14	github.com/meta-node-blockchain/meta-node/pkg/logger.startSizeCheckLocked.func1+0xb4	/home/abc/chain-n/metanode/execution/pkg/logger/logger.go:847
+
+1 @ 0x5c098e 0x59d145 0x59d114 0x5c2285 0x5d7da8 0x1416265 0x5c95a1
+#	0x5c2284	sync.runtime_Semacquire+0x24													/usr/local/go/src/runtime/sema.go:71
+#	0x5d7da7	sync.(*WaitGroup).Wait+0x47													/usr/local/go/src/sync/waitgroup.go:118
+#	0x1416264	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).commitToMemoryParallel.func6+0x24	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_commit.go:590
+
+1 @ 0x5c3093 0x106bfaf 0x142ac05 0x5c95a1
+#	0x106bfae	github.com/meta-node-blockchain/meta-node/pkg/blockchain.(*BlockChain).GenerateMappingBatchForBlock+0x38e			/home/abc/chain-n/metanode/execution/pkg/blockchain/blockchain.go:113
+#	0x142ac04	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor.(*BlockProcessor).createBlockFromResults.func3+0xe4	/home/abc/chain-n/metanode/execution/cmd/simple_chain/processor/block_processor_processing.go:301
+
+1 @ 0x5c3093 0xf8e599 0xf8e585 0xf8e543 0xf9063d 0xf8d8db 0x5c95a1
+#	0xf8e598	github.com/ethereum/go-ethereum/common/hexutil.Encode+0xb8							/home/abc/go/pkg/mod/github.com/ethereum/go-ethereum@v1.15.11/common/hexutil/hexutil.go:85
+#	0xf8e584	github.com/ethereum/go-ethereum/common.Hash.Hex+0xa4								/home/abc/go/pkg/mod/github.com/ethereum/go-ethereum@v1.15.11/common/types.go:86
+#	0xf8e542	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).prepareIndexDoc+0x62		/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:349
+#	0xf9063c	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransactionsBatch+0x13c	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:471
+#	0xf8d8da	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1+0x37a	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:303
+
+1 @ 0x5c3825 0x940aca 0x947ef7 0xf8e795 0xf8e70c 0xf9063d 0xf8d8db 0x5c95a1
+#	0x940ac9	golang.org/x/crypto/sha3.(*state).Sum+0x109									/home/abc/go/pkg/mod/golang.org/x/crypto@v0.35.0/sha3/sha3.go:172
+#	0x947ef6	github.com/ethereum/go-ethereum/common.(*Address).checksumHex+0x116						/home/abc/go/pkg/mod/github.com/ethereum/go-ethereum@v1.15.11/common/types.go:267
+#	0xf8e794	github.com/ethereum/go-ethereum/common.Address.Hex+0x2b4							/home/abc/go/pkg/mod/github.com/ethereum/go-ethereum@v1.15.11/common/types.go:253
+#	0xf8e70b	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).prepareIndexDoc+0x22b		/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:353
+#	0xf9063c	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransactionsBatch+0x13c	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:471
+#	0xf8d8da	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1+0x37a	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:303
+
+1 @ 0x5c3825 0xf90718 0xf8d8db 0x5c95a1
+#	0xf90717	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).doIndexTransactionsBatch+0x217	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:476
+#	0xf8d8da	github.com/meta-node-blockchain/meta-node/pkg/explorer.(*ExplorerSearchService).startWorkers.func1+0x37a	/home/abc/chain-n/metanode/execution/pkg/explorer/service.go:303
+
+1 @ 0x5e6fe5 0x5e4ff8 0x64668e 0x646676 0x646511 0x7959e5 0x7a5845 0x8c7d97 0x5c95a1
+#	0x5e6fe4	syscall.Syscall+0x24				/usr/local/go/src/syscall/syscall_linux.go:73
+#	0x5e4ff7	syscall.read+0x37				/usr/local/go/src/syscall/zsyscall_linux_amd64.go:736
+#	0x64668d	syscall.Read+0x2ad				/usr/local/go/src/syscall/syscall_unix.go:183
+#	0x646675	internal/poll.ignoringEINTRIO+0x295		/usr/local/go/src/internal/poll/fd_unix.go:745
+#	0x646510	internal/poll.(*FD).Read+0x130			/usr/local/go/src/internal/poll/fd_unix.go:161
+#	0x7959e4	net.(*netFD).Read+0x24				/usr/local/go/src/net/fd_posix.go:55
+#	0x7a5844	net.(*conn).Read+0x44				/usr/local/go/src/net/net.go:189
+#	0x8c7d96	net/http.(*connReader).backgroundRead+0x36	/usr/local/go/src/net/http/server.go:690
+

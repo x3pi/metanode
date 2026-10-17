@@ -6,6 +6,7 @@
 // only exists via <stdbool.h>) -- needed once database_commit/
 // database_replace_document_by_term started returning bool (2026-09, mục 22).
 #include <stddef.h>
+#include <stdint.h>
 #ifndef __cplusplus
 #include <stdbool.h>
 #endif
@@ -45,6 +46,10 @@ bool database_index_document(
     const char* terms_packed,
     size_t terms_packed_len,
     bool replace_existing);
+bool database_index_documents_batch_packed(
+    xapian_database_t db,
+    const char* packed_data,
+    size_t packed_len);
 const char* database_dump_all_docs(xapian_database_t db);
 
 // === Document Functions ===

@@ -10,6 +10,7 @@ const int DB_CREATE_OR_OPEN = 4;
 */
 import "C"
 import (
+	"encoding/binary"
 	"fmt"
 	"runtime"
 	"sync/atomic"
@@ -172,6 +173,79 @@ func (db *Database) IndexDocument(uniqueTerm string, data string, termsPacked st
 	}
 	return nil
 }
+
+// BatchDocumentInput represents a single document to be indexed in a batch.
+type BatchDocumentInput struct {
+	UniqueTerm      string
+	Data            string
+	TermsPacked     string
+	ReplaceExisting bool
+}
+
+// IndexDocumentsBatch indexes multiple documents in a single CGO transition.
+// It packs all document payloads into a single contiguous byte buffer, avoiding
+// multiple CGO transitions, nested pointers, and redundant memory allocations.
+func (db *Database) IndexDocumentsBatch(docs []BatchDocumentInput) error {
+	n := len(docs)
+	if n == 0 {
+		return nil
+	}
+	if db.isClosed() {
+		return fmt.Errorf("goxapian: database is closed")
+	}
+	if n == 1 {
+		return db.IndexDocument(docs[0].UniqueTerm, docs[0].Data, docs[0].TermsPacked, docs[0].ReplaceExisting)
+	}
+
+	// Calculate total buffer capacity needed:
+	// Each doc: 1 (flag) + 4 (termLen) + len(term) + 4 (dataLen) + len(data) + 4 (termsLen) + len(termsPacked)
+	totalSize := 0
+	for i := 0; i < n; i++ {
+		totalSize += 13 + len(docs[i].UniqueTerm) + len(docs[i].Data) + len(docs[i].TermsPacked)
+	}
+
+	buf := make([]byte, totalSize)
+	offset := 0
+	for i := 0; i < n; i++ {
+		if docs[i].ReplaceExisting {
+			buf[offset] = 1
+		} else {
+			buf[offset] = 0
+		}
+		offset++
+
+		termLen := len(docs[i].UniqueTerm)
+		binary.LittleEndian.PutUint32(buf[offset:], uint32(termLen))
+		offset += 4
+		copy(buf[offset:], docs[i].UniqueTerm)
+		offset += termLen
+
+		dataLen := len(docs[i].Data)
+		binary.LittleEndian.PutUint32(buf[offset:], uint32(dataLen))
+		offset += 4
+		copy(buf[offset:], docs[i].Data)
+		offset += dataLen
+
+		termsLen := len(docs[i].TermsPacked)
+		binary.LittleEndian.PutUint32(buf[offset:], uint32(termsLen))
+		offset += 4
+		copy(buf[offset:], docs[i].TermsPacked)
+		offset += termsLen
+	}
+
+	ptr := (*C.char)(unsafe.Pointer(&buf[0]))
+	ok := C.database_index_documents_batch_packed(
+		db.ptr,
+		ptr,
+		C.size_t(len(buf)),
+	)
+	runtime.KeepAlive(buf)
+	if !bool(ok) {
+		return fmt.Errorf("goxapian: index_documents_batch_packed failed for %d documents", n)
+	}
+	return nil
+}
+
 
 // Commit now returns an error (2026-09, mục 22) -- this is the single most
 // important fix in this package: Commit() used to be a `void` call, so a

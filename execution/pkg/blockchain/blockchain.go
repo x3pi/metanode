@@ -35,6 +35,9 @@ const (
 	mappingCacheTTL = 30 * time.Minute
 	// Cấu hình Worker dọn dẹp
 	cleanupInterval = 1 * time.Minute // Quét dọn mỗi 1 phút
+
+	// Giới hạn số lượng block tối đa trong blockCache
+	maxBlockCacheEntries = 64
 )
 
 var (
@@ -47,7 +50,7 @@ var (
 // Sử dụng sync.Map cho concurrent read và Background Worker cho việc dọn dẹp.
 type BlockChain struct {
 	// Cache Layers (Read-Heavy optimization)
-	blockCache             *sync.Map
+	blockCache             *blockCacheMap
 	receiptsCache          *sync.Map
 	txsCache               *txCacheMap
 	blockNumberToHashCache *sync.Map
@@ -154,7 +157,7 @@ func (bc *BlockChain) GenerateMappingBatchForBlock(bl mtn_types.Block, txs []mtn
 func InitBlockChain(size int, blockDatabase *block.BlockDatabase, storageManager *storage.StorageManager) {
 	once.Do(func() {
 		blockChainInstance = &BlockChain{
-			blockCache:             new(sync.Map),
+			blockCache:             newBlockCacheMap(),
 			receiptsCache:          new(sync.Map),
 			txsCache:               newTxCacheMap(),
 			blockNumberToHashCache: new(sync.Map),
@@ -281,16 +284,10 @@ func (bc *BlockChain) pruneTxCache(expireBefore time.Time) {
 }
 
 func (bc *BlockChain) pruneBlockCache(expireBefore time.Time) {
-	bc.blockCache.Range(func(key, value any) bool {
-		if cached, ok := value.(cachedBlock); ok {
-			if cached.addedAt.Before(expireBefore) {
-				bc.blockCache.Delete(key)
-			}
-		} else {
-			bc.blockCache.Delete(key)
-		}
-		return true
-	})
+	if bc.blockCache == nil {
+		return
+	}
+	bc.blockCache.Prune(expireBefore)
 }
 
 func (bc *BlockChain) pruneBlockNumberCache(expireBefore time.Time) {
@@ -314,7 +311,7 @@ func (bc *BlockChain) AddBlockToCache(block mtn_types.Block) {
 	if block == nil || bc.blockCache == nil {
 		return
 	}
-	bc.blockCache.Store(block.Header().Hash(), cachedBlock{
+	bc.blockCache.StoreBlock(block.Header().Hash(), cachedBlock{
 		block:   block,
 		addedAt: time.Now(),
 	})
@@ -322,13 +319,11 @@ func (bc *BlockChain) AddBlockToCache(block mtn_types.Block) {
 
 func (bc *BlockChain) GetBlock(hash common.Hash) mtn_types.Block {
 	// 1. Check Cache
-	if value, ok := bc.blockCache.Load(hash); ok {
-		if cached, ok := value.(cachedBlock); ok {
-			if time.Since(cached.addedAt) <= blockCacheTTL {
-				return cached.block
-			}
-			bc.blockCache.Delete(hash)
+	if cached, ok := bc.blockCache.LoadBlock(hash); ok {
+		if time.Since(cached.addedAt) <= blockCacheTTL {
+			return cached.block
 		}
+		bc.blockCache.DeleteBlock(hash)
 	}
 
 	// 2. Check DB
@@ -337,8 +332,8 @@ func (bc *BlockChain) GetBlock(hash common.Hash) mtn_types.Block {
 		return nil
 	}
 
-	// 3. Store Cache (O(1))
-	bc.blockCache.Store(hash, cachedBlock{
+	// 3. Store Cache (bounded)
+	bc.blockCache.StoreBlock(hash, cachedBlock{
 		block:   block,
 		addedAt: time.Now(),
 	})
@@ -1203,6 +1198,97 @@ func (m *txCacheMap) Load(key common.Hash) (any, bool) {
 func (m *txCacheMap) Delete(key any) {
 	if k, ok := key.(common.Hash); ok {
 		m.DeleteTx(k)
+	}
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Bounded Block Cache Map (Max 64 blocks, RWLock, Expire + Oldest Eviction)
+// ══════════════════════════════════════════════════════════════════════════════
+
+type blockCacheMap struct {
+	mu      sync.RWMutex
+	entries map[common.Hash]cachedBlock
+}
+
+func newBlockCacheMap() *blockCacheMap {
+	return &blockCacheMap{
+		entries: make(map[common.Hash]cachedBlock, maxBlockCacheEntries),
+	}
+}
+
+func (m *blockCacheMap) Len() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.entries)
+}
+
+func (m *blockCacheMap) StoreBlock(hash common.Hash, cb cachedBlock) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.entries[hash]; !exists && len(m.entries) >= maxBlockCacheEntries {
+		now := time.Now()
+		// 1. Quét dọn các mục đã hết hạn TTL
+		for k, v := range m.entries {
+			if now.Sub(v.addedAt) > blockCacheTTL {
+				delete(m.entries, k)
+			}
+		}
+		// 2. Nếu vẫn đầy ngưỡng, tìm và xóa 1 mục cũ nhất (addedAt nhỏ nhất)
+		if len(m.entries) >= maxBlockCacheEntries {
+			var oldestHash common.Hash
+			var oldestTime time.Time
+			first := true
+			for k, v := range m.entries {
+				if first || v.addedAt.Before(oldestTime) {
+					oldestHash = k
+					oldestTime = v.addedAt
+					first = false
+				}
+			}
+			if !first {
+				delete(m.entries, oldestHash)
+			}
+		}
+	}
+	m.entries[hash] = cb
+}
+
+func (m *blockCacheMap) LoadBlock(hash common.Hash) (cachedBlock, bool) {
+	if m == nil {
+		return cachedBlock{}, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	cb, ok := m.entries[hash]
+	return cb, ok
+}
+
+func (m *blockCacheMap) DeleteBlock(hash common.Hash) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.entries, hash)
+}
+
+func (m *blockCacheMap) Prune(expireBefore time.Time) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, v := range m.entries {
+		if v.addedAt.Before(expireBefore) {
+			delete(m.entries, k)
+		}
 	}
 }
 

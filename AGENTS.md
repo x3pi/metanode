@@ -45,6 +45,7 @@ while strictly avoiding over-engineering.
 | **Deterministic Merging** | NEVER trust local unverified state over network consensus hashes. |
 | **Output Language** | Code comments in English. Post-process summary in Vietnamese (see Part 5). |
 | **Build Verification** | ALWAYS run or ask the user to run `build_check.sh` inside `consensus/metanode/scripts/` after editing code to verify that both Go, Rust, and FFI build correctly without any compile errors or warnings. The agent is responsible for fixing all errors, warnings, and compilation issues to guarantee a completely clean, warning-free build check; complex runtime testing and pipeline validation are left for the user. |
+| **Zero Hallucination & Real Data Only** | NEVER fabricate, estimate, extrapolate, or hand-type metrics, test results, benchmark numbers, or `p-values`. Every quantitative claim MUST be backed by actual command output or raw artifact files (`.json`, `.csv`, `.pb.gz`, `.log`) generated during execution (see Part 2.6). |
 
 ---
 
@@ -108,6 +109,39 @@ while strictly avoiding over-engineering.
 - [ ] Nếu commit chưa verified → nó có được giữ PENDING không? → **BẮT BUỘC**
 - [ ] Deadlock escape có dựa trên data từ peers không? → **BẮT BUỘC**
 
+---
+
+## 📊 PART 2.6: CHỐNG HOANG TƯỞNG / CHỐNG BỊA SỐ LIỆU (BẤT KHẢ XÂM PHẠM)
+
+> 🚨 **MỌI số liệu, kết quả test, benchmark và tuyên bố kỹ thuật PHẢI dựa trên bằng chứng thực tế 100%. Nghiêm cấm tuyệt đối việc suy diễn, ước lượng cảm tính hoặc bịa số liệu.**
+
+### 1. Không Có Log / File Raw Thật = Không Có Số Liệu
+- **TUYỆT ĐỐI KHÔNG** tự gõ tay một con số TPS, Latency, CPU (`s`/`%`), Heap/RSS (`MB`/`GB`), số lượng object, kết quả test (`PASS`/`FAIL`), hay `p-value` nếu không có file raw output (`.json`, `.csv`, `.pb.gz`, `.log`) hoặc terminal stdout thực tế sinh ra trong phiên chạy đó.
+- **TUYỆT ĐỐI KHÔNG** ngoại suy (extrapolate), nội suy (interpolate), hoặc "ước lượng hợp lý" từ lần chạy cũ hay từ phân tích lý thuyết trên code rồi viết như thể đã đo thực tế.
+- **TUYỆT ĐỐI KHÔNG** tuyên bố đã chạy test / `build_check.sh` thành công nếu chưa thực sự thực thi lệnh và kiểm tra exit code + log đầu ra. Không viết unit test rỗng/giả tạo (chỉ assert điều hiển nhiên mà không gọi vào hàm/nhánh logic cần test).
+
+### 2. Bắt Buộc Gắn Nhãn Bằng Chứng (Claim Labels)
+Trong mọi báo cáo kỹ thuật, kế hoạch kiểm chứng, hoặc khi cập nhật `note/CLAIMS_LEDGER.md`, mọi phát biểu định lượng/kỹ thuật **BẮT BUỘC** phải gắn nhãn rõ ràng:
+- `[ĐO]`: Đo trực tiếp từ thực nghiệm — **PHẢI** kèm đường dẫn tới file raw artifact (ví dụ: `summary.csv`, `pprof/*.pb.gz`, `run_XX.json`, log test).
+- `[TÍNH]`: Tính toán toán học/thống kê từ các số `[ĐO]` — **PHẢI** nêu rõ công thức hoặc script tính (ví dụ: `execution/scripts/ab_analyze.py`).
+- `[ĐỌC CODE]`: Quan sát tĩnh từ mã nguồn — **PHẢI** kèm link `file:///...:Lxx-Lyy`. **KHÔNG ĐƯỢC** biến nhận định `[ĐỌC CODE]` thành số liệu hiệu năng thực tế.
+- `[GIẢ THUYẾT]`: Nhận định lý thuyết chưa được kiểm chứng bằng thực nghiệm.
+- `[CHƯA ĐO]`: Hạng mục chưa có điều kiện chạy thực tế (ví dụ: môi trường thiếu cluster/service hoặc bị giới hạn tài nguyên). Nếu chưa chạy được, **PHẢI** ghi rõ `[CHƯA ĐO]` kèm nguyên nhân — **thà báo cáo chưa đo được chứ TUYỆT ĐỐI không bịa số liệu**.
+
+### 3. Preregistration & Bảo Toàn Binary Khi Benchmark A/B
+- Trước khi chạy bất kỳ bài đo A/B nào, **BẮT BUỘC** ghi lại commit hash và `sha256sum` của cả 2 binary (`bins_prev` và `bins_next`) vào `PREREGISTERED.md`.
+- Nếu `sha256sum` của 2 binary giống hệt nhau hoặc binary không khớp với commit code vừa sửa → **DỪNG NGAY LẬP TỨC**, coi toàn bộ kết quả đo là vô hiệu.
+
+### 4. Báo Cáo Trung Thực Toàn Diện (No Cherry-Picking)
+- Giữ nguyên mọi kết quả thực nghiệm kể cả khi thay đổi code **không** mang lại cải thiện thống kê (`p >= 0.05`) hoặc làm giảm hiệu năng ở một metric khác. Báo cáo đúng sự thật để rút kinh nghiệm kỹ thuật.
+- Không bao giờ đánh dấu một claim trong `note/CLAIMS_LEDGER.md` là `RE-VERIFIED` nếu chưa có file bằng chứng raw trong `note/evidence/` hoặc unit test độc lập chạy PASS thực tế.
+
+### Checklist Tự Kiểm Tra Chống Hoang Tưởng (Trước Khi Báo Cáo)
+- [ ] Mọi con số trong báo cáo có truy ngược được về lệnh chạy thực tế hoặc file trong `note/evidence/` không? → **BẮT BUỘC**
+- [ ] Có đang lấy lý thuyết đọc code (`[ĐỌC CODE]`) để kết luận thay cho đo đạc thực nghiệm (`[ĐO]`) không? → **CẤM**
+- [ ] Nếu một bước test/benchmark lỗi hoặc chưa chạy được, đã ghi trung thực `[CHƯA ĐO]` / `ERROR` thay vì tự điền số đẹp chưa? → **BẮT BUỘC**
+
+---
 
 ## 🔄 PART 3: ARCHITECTURAL CONTEXT
 

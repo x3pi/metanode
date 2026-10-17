@@ -1,6 +1,7 @@
 package goxapian
 
 import (
+	"fmt"
 	"os"
 	"testing"
 )
@@ -143,4 +144,65 @@ func TestIndexDocumentAddAndReplace(t *testing.T) {
 		t.Fatalf("expected 1 document after replace, got %d", got)
 	}
 }
+
+func TestIndexDocumentsBatchAddAndReplace(t *testing.T) {
+	dir, err := os.MkdirTemp("", "goxapian-batch-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	db, err := NewWritableDatabase(dir)
+	if err != nil {
+		t.Fatalf("NewWritableDatabase: %v", err)
+	}
+	defer db.Close()
+
+	// 1. Batch add 5 docs
+	var docs []BatchDocumentInput
+	for i := 1; i <= 5; i++ {
+		docs = append(docs, BatchDocumentInput{
+			UniqueTerm:      fmt.Sprintf("H0x%d", i),
+			Data:            fmt.Sprintf(`{"hash":"0x%d","blockNumber":%d}`, i, i),
+			TermsPacked:     fmt.Sprintf("H0x%d\nF0xaaa\nT0xbbb\nB%d", i, i),
+			ReplaceExisting: false,
+		})
+	}
+
+	if err := db.IndexDocumentsBatch(docs); err != nil {
+		t.Fatalf("IndexDocumentsBatch (add): %v", err)
+	}
+	if err := db.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if got := db.GetDocCount(); got != 5 {
+		t.Fatalf("expected 5 documents after batch add, got %d", got)
+	}
+
+	// 2. Batch replace doc 1 and add doc 6
+	replaceDocs := []BatchDocumentInput{
+		{
+			UniqueTerm:      "H0x1",
+			Data:            `{"hash":"0x1","blockNumber":99}`,
+			TermsPacked:     "H0x1\nF0xaaa\nT0xbbb\nB99",
+			ReplaceExisting: true,
+		},
+		{
+			UniqueTerm:      "H0x6",
+			Data:            `{"hash":"0x6","blockNumber":6}`,
+			TermsPacked:     "H0x6\nF0xaaa\nT0xbbb\nB6",
+			ReplaceExisting: false,
+		},
+	}
+	if err := db.IndexDocumentsBatch(replaceDocs); err != nil {
+		t.Fatalf("IndexDocumentsBatch (replace+add): %v", err)
+	}
+	if err := db.Commit(); err != nil {
+		t.Fatalf("Commit after replace: %v", err)
+	}
+	if got := db.GetDocCount(); got != 6 {
+		t.Fatalf("expected 6 documents, got %d", got)
+	}
+}
+
 

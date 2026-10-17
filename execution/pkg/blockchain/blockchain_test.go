@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,7 +17,7 @@ import (
 // Does NOT require a real BlockDatabase or StorageManager.
 func newTestBlockChain() *BlockChain {
 	return &BlockChain{
-		blockCache:             new(sync.Map),
+		blockCache:             newBlockCacheMap(),
 		receiptsCache:          new(sync.Map),
 		txsCache:               newTxCacheMap(),
 		blockNumberToHashCache: new(sync.Map),
@@ -377,4 +378,40 @@ func TestBlockChain_Commit_SynchronousAndErrorPropagation(t *testing.T) {
 	err = bc.Commit()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "simulated fsync failure")
+}
+
+func TestBlockCache_BoundedCapacity(t *testing.T) {
+	bc := newTestBlockChain()
+
+	// Chèn liên tiếp 200 block giả lập vào bc.AddBlockToCache(...)
+	var lastHashes []common.Hash
+	for i := 1; i <= 200; i++ {
+		bNum := uint64(i)
+		parentHash := testBlockHash(byte(i - 1))
+		header := block.NewBlockHeader(parentHash, bNum, common.Hash{}, common.Hash{}, common.Hash{},
+			common.Address{}, 1000+bNum, common.Hash{}, 1)
+		blk := block.NewBlock(header, nil, nil)
+		h := blk.Header().Hash()
+		lastHashes = append(lastHashes, h)
+
+		bc.AddBlockToCache(blk)
+	}
+
+	// 1. Số lượng block đang lưu trong cache luôn <= maxBlockCacheEntries (64)
+	assert.LessOrEqual(t, bc.blockCache.Len(), maxBlockCacheEntries)
+	assert.Equal(t, maxBlockCacheEntries, bc.blockCache.Len())
+
+	// 2. Các block mới nhất vừa chèn (64 block cuối cùng) vẫn đọc ra bình thường
+	for _, h := range lastHashes[len(lastHashes)-maxBlockCacheEntries:] {
+		cb, ok := bc.blockCache.LoadBlock(h)
+		assert.True(t, ok, "recent block must exist in blockCache")
+		assert.NotNil(t, cb.block)
+		assert.Equal(t, h, cb.block.Header().Hash())
+	}
+
+	// 3. Các block cũ đầu tiên (ví dụ block 1..10) đã bị đẩy ra khỏi cache (evicted)
+	for _, h := range lastHashes[:10] {
+		_, ok := bc.blockCache.LoadBlock(h)
+		assert.False(t, ok, "evicted block must not exist in blockCache")
+	}
 }

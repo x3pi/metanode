@@ -268,16 +268,44 @@ func (s *ExplorerSearchService) getShardIndex(key string) int {
 	return int(h) % s.numShards
 }
 
+const maxWorkerBatchDrain = 64
+
 // startWorkers khởi động các goroutine để xử lý công việc từ indexQueue.
 func (s *ExplorerSearchService) startWorkers(numWorkers int) {
 	s.wg.Add(numWorkers)
 	for i := 0; i < numWorkers; i++ {
 		go func() {
 			defer s.wg.Done()
-			for job := range s.indexQueue {
-				if err := s.doIndexTransaction(job); err != nil {
-					logger.Error("Failed to index transaction", "hash", job.Tx.Hash().Hex(), "error", err)
+			var batchJobs []indexJob
+			for firstJob := range s.indexQueue {
+				batchJobs = append(batchJobs[:0], firstJob)
+			drainLoop:
+				for len(batchJobs) < maxWorkerBatchDrain {
+					select {
+					case nextJob, ok := <-s.indexQueue:
+						if !ok {
+							break drainLoop
+						}
+						batchJobs = append(batchJobs, nextJob)
+					default:
+						break drainLoop
+					}
 				}
+
+				if len(batchJobs) == 1 {
+					if err := s.doIndexTransaction(batchJobs[0]); err != nil {
+						txHash := "<nil>"
+						if batchJobs[0].Tx != nil {
+							txHash = batchJobs[0].Tx.Hash().Hex()
+						}
+						logger.Error("Failed to index transaction", "hash", txHash, "error", err)
+					}
+					clear(batchJobs)
+					continue
+				}
+
+				s.doIndexTransactionsBatch(batchJobs)
+				clear(batchJobs)
 			}
 		}()
 	}
@@ -317,14 +345,12 @@ func (s *ExplorerSearchService) Commit() error {
 	return errors.Join(errs...)
 }
 
-// doIndexTransaction là hàm thực thi việc đánh chỉ mục, được gọi bởi các worker.
-func (s *ExplorerSearchService) doIndexTransaction(job indexJob) error {
+// prepareIndexDoc tách toàn bộ việc chuẩn bị dữ liệu (hex, terms, JSON, shard hash) ra ngoài shard mutex.
+func (s *ExplorerSearchService) prepareIndexDoc(job indexJob) (int, goxapian.BatchDocumentInput, error) {
 	if job.Tx == nil {
-		return errors.New("transaction is nil")
+		return 0, goxapian.BatchDocumentInput{}, errors.New("transaction is nil")
 	}
 
-	// Precompute hex strings, terms, and JSON outside the shard mutex so that
-	// 32 workers never serialize on JSON formatting or string allocations.
 	txHashHex := job.Tx.Hash().Hex()
 	hash := strings.ToLower(txHashHex)
 	shardIndex := s.getShardIndex(hash)
@@ -401,7 +427,7 @@ func (s *ExplorerSearchService) doIndexTransaction(job indexJob) error {
 			true,
 		)
 		if err != nil {
-			return fmt.Errorf("could not marshal explorer transaction to JSON: %w", err)
+			return 0, goxapian.BatchDocumentInput{}, fmt.Errorf("could not marshal explorer transaction to JSON: %w", err)
 		}
 		jsonData = string(jsonBytes)
 	} else {
@@ -409,11 +435,24 @@ func (s *ExplorerSearchService) doIndexTransaction(job indexJob) error {
 		var err error
 		jsonData, err = explorerTx.ToJSONString()
 		if err != nil {
-			return fmt.Errorf("could not marshal explorer transaction to JSON: %w", err)
+			return 0, goxapian.BatchDocumentInput{}, fmt.Errorf("could not marshal explorer transaction to JSON: %w", err)
 		}
 	}
 
-	termsPacked := termsBuf.String()
+	return shardIndex, goxapian.BatchDocumentInput{
+		UniqueTerm:      uniqueTerm,
+		Data:            jsonData,
+		TermsPacked:     termsBuf.String(),
+		ReplaceExisting: job.Replace,
+	}, nil
+}
+
+// doIndexTransaction là hàm thực thi việc đánh chỉ mục đơn lẻ.
+func (s *ExplorerSearchService) doIndexTransaction(job indexJob) error {
+	shardIndex, doc, err := s.prepareIndexDoc(job)
+	if err != nil {
+		return err
+	}
 
 	s.locks[shardIndex].Lock()
 	db := s.dbs[shardIndex]
@@ -421,12 +460,48 @@ func (s *ExplorerSearchService) doIndexTransaction(job indexJob) error {
 		s.locks[shardIndex].Unlock()
 		return fmt.Errorf("database for shard %d is not initialized or already closed", shardIndex)
 	}
-	err := db.IndexDocument(uniqueTerm, jsonData, termsPacked, job.Replace)
+	err = db.IndexDocument(doc.UniqueTerm, doc.Data, doc.TermsPacked, doc.ReplaceExisting)
 	s.locks[shardIndex].Unlock()
 	if err != nil {
-		return fmt.Errorf("could not index transaction %s into shard %d: %w", hash, shardIndex, err)
+		return fmt.Errorf("could not index transaction %s into shard %d: %w", doc.UniqueTerm, shardIndex, err)
 	}
 	return nil
+}
+
+// doIndexTransactionsBatch gom lô các tài liệu theo shardIndex và chỉ lock mỗi shard 1 lần duy nhất.
+func (s *ExplorerSearchService) doIndexTransactionsBatch(jobs []indexJob) {
+	shardDocs := make([][]goxapian.BatchDocumentInput, s.numShards)
+
+	for _, job := range jobs {
+		shardIndex, doc, err := s.prepareIndexDoc(job)
+		if err != nil {
+			txHash := "<nil>"
+			if job.Tx != nil {
+				txHash = job.Tx.Hash().Hex()
+			}
+			logger.Error("Failed to prepare index doc", "hash", txHash, "error", err)
+			continue
+		}
+		shardDocs[shardIndex] = append(shardDocs[shardIndex], doc)
+	}
+
+	for shardIdx, docs := range shardDocs {
+		if len(docs) == 0 {
+			continue
+		}
+		s.locks[shardIdx].Lock()
+		db := s.dbs[shardIdx]
+		if db == nil {
+			s.locks[shardIdx].Unlock()
+			logger.Error("Database for shard is not initialized or closed", "shard", shardIdx)
+			continue
+		}
+		err := db.IndexDocumentsBatch(docs)
+		s.locks[shardIdx].Unlock()
+		if err != nil {
+			logger.Error("Failed to batch index into shard", "shard", shardIdx, "count", len(docs), "error", err)
+		}
+	}
 }
 
 // SearchTransactions thực hiện tìm kiếm trên tất cả các shard và tổng hợp kết quả.
