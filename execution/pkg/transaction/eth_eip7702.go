@@ -157,7 +157,7 @@ func FromEthSetCodeTx(ethTx *types.Transaction, pTx *pb.Transaction) error {
 		pTx.S = s.Bytes()
 		pTx.V = v.Bytes()
 
-		signer := types.NewPragueSigner(txChainID)
+		signer := CachedPragueSigner(txChainID)
 		fromAddress, err := types.Sender(signer, ethTx)
 		if err != nil {
 			return fmt.Errorf("error deriving sender for EIP-7702 transaction: %w", err)

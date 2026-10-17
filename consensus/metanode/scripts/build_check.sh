@@ -142,8 +142,16 @@ if [ "$BUILD_GO" = true ]; then
         mkdir -p "$REPO_ROOT/target/release"
         
         if [ "$RELEASE" = false ]; then
-            cp "$REPO_ROOT/target/debug/libmetanode.a" "$RUST_ROOT/target/release/libmetanode.a" 2>/dev/null || true
-            cp "$REPO_ROOT/target/debug/libmtn_nomt.a" "$REPO_ROOT/target/release/libmtn_nomt.a" 2>/dev/null || true
+            if [ ! -f "$RUST_ROOT/target/release/libmetanode.a" ]; then
+                if [ -f "$REPO_ROOT/target/release/libmetanode.a" ]; then
+                    cp "$REPO_ROOT/target/release/libmetanode.a" "$RUST_ROOT/target/release/libmetanode.a" 2>/dev/null || true
+                else
+                    cp "$REPO_ROOT/target/debug/libmetanode.a" "$RUST_ROOT/target/release/libmetanode.a" 2>/dev/null || true
+                fi
+            fi
+            if [ ! -f "$REPO_ROOT/target/release/libmtn_nomt.a" ]; then
+                cp "$REPO_ROOT/target/debug/libmtn_nomt.a" "$REPO_ROOT/target/release/libmtn_nomt.a" 2>/dev/null || true
+            fi
         else
             cp "$REPO_ROOT/target/release/libmetanode.a" "$RUST_ROOT/target/release/libmetanode.a" 2>/dev/null || true
         fi

@@ -129,7 +129,7 @@ func bumpVerifiedSignatureCacheCount() {
 
 const (
 	// Maximum cache entries before forced reset (safety valve)
-	maxVerifiedSignaturesCacheSize = 500_000
+	maxVerifiedSignaturesCacheSize = 2_500_000
 	// Periodic cleanup interval
 	signatureCacheCleanupInterval = 10 * time.Minute
 )
@@ -177,10 +177,16 @@ func VerifyTransaction(
 	}
 
 	// P0-9: Enforce strict envelope binding at mempool admission
-	if tx != nil && len(tx.RawEnvelope()) > 0 && !IsVerifiedEnvelopeBound(tx) {
-		if err := transaction.ValidateEnvelopeBinding(tx); err != nil {
-			logger.Error("❌ [VERIFY] envelope binding failed: txHash=%s, err=%v", tx.Hash().Hex(), err)
-			return transaction.ErrEnvelopeBindingMismatch
+	envelopeBoundOK := false
+	if tx != nil && len(tx.RawEnvelope()) > 0 {
+		if IsVerifiedEnvelopeBound(tx) {
+			envelopeBoundOK = true
+		} else {
+			if err := transaction.ValidateEnvelopeBinding(tx); err != nil {
+				logger.Error("❌ [VERIFY] envelope binding failed: txHash=%s, err=%v", tx.Hash().Hex(), err)
+				return transaction.ErrEnvelopeBindingMismatch
+			}
+			envelopeBoundOK = true
 		}
 	}
 
@@ -247,7 +253,9 @@ func VerifyTransaction(
 			// secp mode: a user tx must carry a valid ETH/secp256k1 signature.
 			secpCacheKey := sigCacheKey(tx, nil)
 			if !LoadVerifiedSignature(secpCacheKey) {
-				if !tx.ValidEthSign() {
+				if envelopeBoundOK && len(tx.RawEnvelope()) > 0 {
+					// ValidateEnvelopeBinding above already fully verified secp signature and envelope fields
+				} else if !tx.ValidEthSign() {
 					logger.Error("❌ [VERIFY] secp-mode signature verification failed: txHash=%s, from=%s", txHash.Hex(), tx.FromAddress().Hex())
 					return transaction.InvalidSign
 				}
@@ -268,7 +276,9 @@ func VerifyTransaction(
 				)
 				if !request.Valid() {
 					logger.Error("BLS Verification Failed! txHash=%s from=%s", txHash.Hex(), tx.FromAddress().Hex())
-					if !tx.ValidEthSign() {
+					if envelopeBoundOK && len(tx.RawEnvelope()) > 0 {
+						// Valid envelope binding already passed above
+					} else if !tx.ValidEthSign() {
 						return transaction.InvalidSign
 					}
 				}
@@ -277,7 +287,9 @@ func VerifyTransaction(
 				bumpVerifiedSignatureCacheCount()
 			}
 		} else {
-			if !tx.ValidEthSign() {
+			if envelopeBoundOK && len(tx.RawEnvelope()) > 0 {
+				// Valid envelope binding already passed above
+			} else if !tx.ValidEthSign() {
 				return transaction.InvalidSign
 			}
 		}

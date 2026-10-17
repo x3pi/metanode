@@ -194,7 +194,7 @@ func FromEthBlobTx(ethTx *types.Transaction, pTx *pb.Transaction) error {
 		pTx.S = s.Bytes()
 		pTx.V = v.Bytes()
 
-		signer := types.NewCancunSigner(txChainID)
+		signer := CachedCancunSigner(txChainID)
 		fromAddress, err := types.Sender(signer, ethTx)
 		if err != nil {
 			return fmt.Errorf("error deriving sender for EIP-4844 transaction: %w", err)

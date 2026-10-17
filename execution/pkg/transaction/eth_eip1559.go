@@ -135,7 +135,7 @@ func FromEthEIP1559Tx(ethTx *types.Transaction, pTx *pb.Transaction) error {
 		pTx.V = v.Bytes()
 
 		// txChainID is already captured and checked for nil above.
-		signer := types.NewLondonSigner(txChainID) // EIP-1559 was introduced in London
+		signer := CachedLondonSigner(txChainID) // EIP-1559 was introduced in London
 		fromAddress, err := types.Sender(signer, ethTx)
 		if err != nil {
 			return fmt.Errorf("error deriving sender for EIP-1559 transaction: %w", err)

@@ -1433,32 +1433,32 @@ func DerivePublicKeyFromEthTransaction(tx *e_types.Transaction, chainID *big.Int
 	switch txType {
 	case e_types.LegacyTxType:
 		if chainID != nil && chainID.Sign() > 0 && tx.ChainId() != nil && tx.ChainId().Cmp(chainID) == 0 {
-			signer = e_types.NewEIP155Signer(chainID)
+			signer = CachedEIP155Signer(chainID)
 		} else if tx.ChainId() == nil || tx.ChainId().Sign() == 0 {
 			signer = e_types.HomesteadSigner{}
 		} else {
-			signer = e_types.NewEIP155Signer(tx.ChainId())
+			signer = CachedEIP155Signer(tx.ChainId())
 		}
 	case e_types.AccessListTxType:
 		if tx.ChainId() == nil || tx.ChainId().Sign() <= 0 {
 			return nil, fmt.Errorf("EIP-2930 transaction is missing a valid chainID")
 		}
-		signer = e_types.NewLondonSigner(tx.ChainId())
+		signer = CachedLondonSigner(tx.ChainId())
 	case e_types.DynamicFeeTxType:
 		if tx.ChainId() == nil || tx.ChainId().Sign() <= 0 {
 			return nil, fmt.Errorf("EIP-1559 transaction is missing a valid chainID")
 		}
-		signer = e_types.NewLondonSigner(tx.ChainId())
+		signer = CachedLondonSigner(tx.ChainId())
 	case e_types.BlobTxType:
 		if tx.ChainId() == nil || tx.ChainId().Sign() <= 0 {
 			return nil, fmt.Errorf("EIP-4844 transaction is missing a valid chainID")
 		}
-		signer = e_types.NewCancunSigner(tx.ChainId())
+		signer = CachedCancunSigner(tx.ChainId())
 	case e_types.SetCodeTxType:
 		if tx.ChainId() == nil || tx.ChainId().Sign() <= 0 {
 			return nil, fmt.Errorf("EIP-7702 transaction is missing a valid chainID")
 		}
-		signer = e_types.NewPragueSigner(tx.ChainId())
+		signer = CachedPragueSigner(tx.ChainId())
 	default:
 		return nil, fmt.Errorf("unsupported transaction type: %d", txType)
 	}
@@ -1524,7 +1524,7 @@ func DeriveSenderFromEthTransaction(tx *e_types.Transaction, chainID *big.Int) (
 		// The 'chainID' parameter to this function should be the actual current chain's ID.
 		if chainID != nil && chainID.Sign() > 0 && tx.ChainId() != nil && tx.ChainId().Cmp(chainID) == 0 {
 			// If the tx has a EIP-155 ChainID that matches the current chain.
-			signer = e_types.NewEIP155Signer(chainID)
+			signer = CachedEIP155Signer(chainID)
 		} else if tx.ChainId() == nil || tx.ChainId().Sign() == 0 {
 			// Pre-EIP155 transaction
 			signer = e_types.HomesteadSigner{}
@@ -1536,7 +1536,7 @@ func DeriveSenderFromEthTransaction(tx *e_types.Transaction, chainID *big.Int) (
 			// is being inspected, or if the passed chainID implies no EIP155 protection
 			// but the tx itself is EIP-155.
 			// For sender recovery, using the tx's embedded ChainId is correct for EIP155.
-			signer = e_types.NewEIP155Signer(tx.ChainId())
+			signer = CachedEIP155Signer(tx.ChainId())
 		}
 
 	case e_types.AccessListTxType:
@@ -1546,7 +1546,7 @@ func DeriveSenderFromEthTransaction(tx *e_types.Transaction, chainID *big.Int) (
 			return common.Address{}, fmt.Errorf("EIP-2930 transaction is missing a valid chainID for sender recovery")
 		}
 		// BerlinSigner or LondonSigner are appropriate; LondonSigner is more recent.
-		signer = e_types.NewLondonSigner(tx.ChainId())
+		signer = CachedLondonSigner(tx.ChainId())
 
 	case e_types.DynamicFeeTxType:
 		// EIP-1559 (DynamicFeeTx) transactions are also EIP-155 protected and require a chainID.
@@ -1554,20 +1554,20 @@ func DeriveSenderFromEthTransaction(tx *e_types.Transaction, chainID *big.Int) (
 		if tx.ChainId() == nil || tx.ChainId().Sign() <= 0 {
 			return common.Address{}, fmt.Errorf("EIP-1559 transaction is missing a valid chainID for sender recovery")
 		}
-		signer = e_types.NewLondonSigner(tx.ChainId())
+		signer = CachedLondonSigner(tx.ChainId())
 
 	case e_types.BlobTxType: // EIP-4844
 		if tx.ChainId() == nil || tx.ChainId().Sign() <= 0 {
 			return common.Address{}, fmt.Errorf("EIP-4844 transaction is missing a valid chainID for sender recovery")
 		}
 		// CancunSigner or a specific BlobTxSigner
-		signer = e_types.NewCancunSigner(tx.ChainId())
+		signer = CachedCancunSigner(tx.ChainId())
 
 	case e_types.SetCodeTxType: // EIP-7702
 		if tx.ChainId() == nil || tx.ChainId().Sign() <= 0 {
 			return common.Address{}, fmt.Errorf("EIP-7702 transaction is missing a valid chainID for sender recovery")
 		}
-		signer = e_types.NewPragueSigner(tx.ChainId())
+		signer = CachedPragueSigner(tx.ChainId())
 
 	default:
 		return common.Address{}, fmt.Errorf("unsupported transaction type: %d", txType)

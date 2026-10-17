@@ -268,7 +268,7 @@ func (s *ExplorerSearchService) getShardIndex(key string) int {
 	return int(h) % s.numShards
 }
 
-const maxWorkerBatchDrain = 64
+const maxWorkerBatchDrain = 256
 
 // startWorkers khởi động các goroutine để xử lý công việc từ indexQueue.
 func (s *ExplorerSearchService) startWorkers(numWorkers int) {

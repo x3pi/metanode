@@ -87,13 +87,13 @@ func ValidateEthTxEnvelope(ethTx *e_types.Transaction, expectedChainId *big.Int)
 	var signer e_types.Signer
 	switch ethTx.Type() {
 	case e_types.LegacyTxType:
-		signer = e_types.NewEIP155Signer(chainID) // chainID > 0 and Protected() already checked above
+		signer = CachedEIP155Signer(chainID) // chainID > 0 and Protected() already checked above
 	case e_types.AccessListTxType, e_types.DynamicFeeTxType:
-		signer = e_types.NewLondonSigner(chainID)
+		signer = CachedLondonSigner(chainID)
 	case e_types.BlobTxType:
-		signer = e_types.NewCancunSigner(chainID)
+		signer = CachedCancunSigner(chainID)
 	case e_types.SetCodeTxType:
-		signer = e_types.NewPragueSigner(chainID)
+		signer = CachedPragueSigner(chainID)
 	default:
 		signer = e_types.LatestSignerForChainID(chainID)
 	}
@@ -175,7 +175,7 @@ func validateDirectEnvelopeBinding(pTx *pb.Transaction, ethTx *e_types.Transacti
 	case e_types.LegacyTxType:
 		txChainID := ethTx.ChainId()
 		if txChainID != nil && txChainID.Sign() != 0 {
-			signer = e_types.NewEIP155Signer(txChainID)
+			signer = CachedEIP155Signer(txChainID)
 		} else {
 			signer = e_types.HomesteadSigner{}
 		}
@@ -187,7 +187,7 @@ func validateDirectEnvelopeBinding(pTx *pb.Transaction, ethTx *e_types.Transacti
 		} else if ethTx.GasPrice() == nil {
 			convErr = errors.New("giao dịch EIP-2930 từ Ethereum thiếu GasPrice")
 		} else {
-			signer = e_types.NewLondonSigner(txChainID)
+			signer = CachedLondonSigner(txChainID)
 		}
 
 	case e_types.DynamicFeeTxType:
@@ -195,7 +195,7 @@ func validateDirectEnvelopeBinding(pTx *pb.Transaction, ethTx *e_types.Transacti
 		if txChainID == nil || txChainID.Sign() <= 0 {
 			convErr = errors.New("EIP-1559 transaction from Ethereum is missing ChainID")
 		} else {
-			signer = e_types.NewLondonSigner(txChainID)
+			signer = CachedLondonSigner(txChainID)
 		}
 
 	case e_types.BlobTxType:
@@ -209,7 +209,7 @@ func validateDirectEnvelopeBinding(pTx *pb.Transaction, ethTx *e_types.Transacti
 		} else if txChainID := ethTx.ChainId(); txChainID == nil || txChainID.Sign() <= 0 {
 			convErr = errors.New("EIP-4844 transaction is missing ChainID")
 		} else {
-			signer = e_types.NewCancunSigner(txChainID)
+			signer = CachedCancunSigner(txChainID)
 		}
 
 	case e_types.SetCodeTxType:
@@ -221,7 +221,7 @@ func validateDirectEnvelopeBinding(pTx *pb.Transaction, ethTx *e_types.Transacti
 		} else if txChainID := ethTx.ChainId(); txChainID == nil || txChainID.Sign() <= 0 {
 			convErr = errors.New("EIP-7702 transaction is missing ChainID")
 		} else {
-			signer = e_types.NewPragueSigner(txChainID)
+			signer = CachedPragueSigner(txChainID)
 		}
 
 	default:

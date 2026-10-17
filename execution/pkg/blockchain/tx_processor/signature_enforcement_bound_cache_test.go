@@ -99,3 +99,61 @@ func TestFilterInvalidSignatures_BoundHitsTrackedAndLogged(t *testing.T) {
 	assert.Equal(t, boundHitsBefore+1, boundHitsAfter, "Prometheus bound hits counter must increment by 1")
 	assert.Equal(t, txsBefore+1, txsAfter, "Prometheus total txs counter must increment by 1")
 }
+
+func TestEvalTxSignature_BoundHitWithRegisteredBLSKey(t *testing.T) {
+	cs := setupTestChainState(t)
+	cs.GetConfig().TxSignatureMode = config.TxSignatureModeSecp
+
+	good, _, from := createSignedEIP1559Tx(t, 1, 0)
+	as := state.NewAccountState(from)
+	as.AddBalance(big.NewInt(1_000_000_000_000_000))
+	// Registered BLS key on a user account in secp mode (like the test template wallets)
+	dummyBLSKey := make([]byte, 48)
+	dummyBLSKey[0] = 0x99
+	as.SetPublicKeyBls(dummyBLSKey)
+	cs.GetAccountStateDB().SetState(as)
+
+	rotateVerifiedSignatures()
+	rotateVerifiedSignatures()
+
+	// Record binding verified
+	RecordVerifiedEnvelopeBound(good)
+
+	// evalTxSignature must return sigVerdictBoundHit directly, without re-validating or missing cache
+	verdict := evalTxSignature(good, as, sigPolicyOf(cs))
+	assert.Equal(t, sigVerdictBoundHit, verdict, "evalTxSignature must hit bound cache even when user account has PublicKeyBls registered")
+}
+
+func TestVerifyTransaction_PopulatesBothCacheKeys(t *testing.T) {
+	cs := setupTestChainState(t)
+	cs.GetConfig().TxSignatureMode = config.TxSignatureModeSecp
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+
+	good, _, from := createSignedEIP1559Tx(t, 1, 0)
+
+	as := state.NewAccountState(from)
+	as.AddBalance(big.NewInt(1_000_000_000_000_000))
+	dummyBLSKey := make([]byte, 48)
+	dummyBLSKey[0] = 0xaa
+	as.SetPublicKeyBls(dummyBLSKey)
+	cs.GetAccountStateDB().SetState(as)
+
+	toAs := state.NewAccountState(good.ToAddress())
+	toAs.SetSmartContractState(state.NewEmptySmartContractState())
+	cs.GetAccountStateDB().SetState(toAs)
+
+	rotateVerifiedSignatures()
+	rotateVerifiedSignatures()
+
+	vErr := VerifyTransaction(good, cs, as)
+	require.Nil(t, vErr)
+
+	secpKey := sigCacheKey(good, nil)
+	assert.True(t, LoadVerifiedSignature(secpKey), "VerifyTransaction must store secpCacheKey")
+	assert.True(t, LoadVerifiedSignature(boundSigKey(secpKey)), "VerifyTransaction must store boundSigKey")
+
+	// Subsequently, evalTxSignature should immediately return sigVerdictBoundHit
+	verdict := evalTxSignature(good, as, sigPolicyOf(cs))
+	assert.Equal(t, sigVerdictBoundHit, verdict, "evalTxSignature must hit boundSigKey after VerifyTransaction")
+}
+

@@ -170,7 +170,7 @@ func FromEthEIP2930Tx(ethTx *types.Transaction, pTx *pb.Transaction) error {
 		pTx.S = s.Bytes()
 		pTx.V = v.Bytes() // v ở đây đã là YParity (0 hoặc 1)
 
-		signer := types.NewLondonSigner(txChainID) // EIP-2930 was part of Berlin/London
+		signer := CachedLondonSigner(txChainID) // EIP-2930 was part of Berlin/London
 		fromAddress, err := types.Sender(signer, ethTx)
 		if err != nil {
 			return fmt.Errorf("error deriving sender for EIP-2930 transaction: %w", err)

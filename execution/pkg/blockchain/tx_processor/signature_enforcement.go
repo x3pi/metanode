@@ -351,14 +351,14 @@ func evalTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy)
 		return sigVerdictInvalid
 	}
 	var blsKey []byte
-	if as != nil {
+	if as != nil && tx.Type() != 0xFF && pol.blsAllowed(tx, as) {
 		blsKey = as.PublicKeyBls()
 	}
 	hasEnvelope := len(tx.RawEnvelope()) > 0
 	key := sigCacheKey(tx, blsKey)
 
 	// A binding-proven hit skips decode + ecrecover entirely.
-	if hasEnvelope && LoadVerifiedSignature(boundSigKey(key)) {
+	if hasEnvelope && (LoadVerifiedSignature(boundSigKey(key)) || (len(blsKey) > 0 && IsVerifiedEnvelopeBound(tx))) {
 		return sigVerdictBoundHit
 	}
 	if hasEnvelope {
@@ -374,7 +374,7 @@ func evalTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy)
 	}
 
 	ok := false
-	if tx.Type() != 0xFF && len(blsKey) > 0 && pol.blsAllowed(tx, as) {
+	if len(blsKey) > 0 {
 		ok = transaction.NewVerifyTransactionRequest(tx.Hash(), common.PubkeyFromBytes(blsKey), tx.Sign()).Valid()
 	}
 	if !ok {
@@ -503,7 +503,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 			key := sigCacheKey(txs[i], as.PublicKeyBls())
 			hasEnvelope := len(txs[i].RawEnvelope()) > 0
 			if hasEnvelope {
-				if LoadVerifiedSignature(boundSigKey(key)) { // binding + signature already proven
+				if LoadVerifiedSignature(boundSigKey(key)) || IsVerifiedEnvelopeBound(txs[i]) { // binding + signature already proven
 					valid[i] = true
 					atomic.AddInt64(&st.boundHits, 1)
 					return

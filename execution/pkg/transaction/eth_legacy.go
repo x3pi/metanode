@@ -120,7 +120,7 @@ func FromEthLegacyTx(ethTx *types.Transaction, pTx *pb.Transaction) error {
 		txChainID := ethTx.ChainId() //
 
 		if txChainID != nil && txChainID.Sign() != 0 { // EIP-155 //
-			signer = types.NewEIP155Signer(txChainID)
+			signer = CachedEIP155Signer(txChainID)
 		} else { // Pre-EIP-155 (Homestead)
 			signer = types.HomesteadSigner{}
 		}
