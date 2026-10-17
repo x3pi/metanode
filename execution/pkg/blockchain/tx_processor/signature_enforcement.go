@@ -408,7 +408,7 @@ const (
 )
 
 // verifySignatures computes, for every tx, the exact verdict checkTxSignature would give, but verifies plain
-// BLS txs (registered key, AccountType 0) with blst batch verification, in parallel. stateOf(i) returns the
+// BLS txs (registered key) with blst batch verification, in parallel. stateOf(i) returns the
 // sender's account state for txs[i] (nil = load from accountDB). Successful checks populate the
 // verified-signature cache. The result depends only on (tx, sender state): batching never changes a verdict.
 func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Transaction, stateOf func(i int) types.AccountState, pol sigPolicy) ([]bool, sigStats) {
@@ -468,7 +468,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 	}
 
 	// Phase 1: cache hits are accepted; plain BLS txs not yet cached are queued for batch verification;
-	// everything else (ETH-signed, no key yet, AccountType 1, ...) takes the exact per-tx path.
+	// everything else (ETH-signed, no key yet, ...) takes the exact per-tx path.
 	type pending struct {
 		i   int
 		key eth_common.Hash
@@ -499,7 +499,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 			valid[i] = false
 			return
 		}
-		if as != nil && len(as.PublicKeyBls()) > 0 && as.AccountType() == 0 && txs[i].Type() != 0xFF && pol.blsAllowed(txs[i], as) {
+		if as != nil && len(as.PublicKeyBls()) > 0 && txs[i].Type() != 0xFF && pol.blsAllowed(txs[i], as) {
 			key := sigCacheKey(txs[i], as.PublicKeyBls())
 			hasEnvelope := len(txs[i].RawEnvelope()) > 0
 			if hasEnvelope {
