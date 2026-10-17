@@ -307,12 +307,6 @@ func VerifyTransaction(
 		return recErr
 	}
 
-	if as.AccountType() == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) {
-		if !tx.ValidSecpSign() {
-			return transaction.RequiresTwoSignatures
-		}
-	}
-
 	// Payload data size limit check (DoS prevention)
 	const maxDataSize = 6 * 1024 * 1024
 	if len(tx.Data()) > maxDataSize {

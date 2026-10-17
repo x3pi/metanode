@@ -331,8 +331,8 @@ const (
 // checkTxSignature is a pure function of (tx, sender account state): every node evaluating the same
 // tx against the same pre-block state gets the same verdict, so it is safe to use as a consensus-level
 // execution filter (no clocks, no peer-local data other than the cache, which only memoizes this result).
-// It mirrors the signature rules of VerifyTransaction (BLS key if registered, ETH secp256k1 otherwise or
-// as fallback; AccountType 1 additionally requires the ETH signature).
+// It mirrors the signature rules of VerifyTransaction (BLS key for node identities,
+// ETH secp256k1 for users).
 func checkTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy) bool {
 	return evalTxSignature(tx, as, pol) != sigVerdictInvalid
 }
@@ -351,13 +351,12 @@ func evalTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy)
 		return sigVerdictInvalid
 	}
 	var blsKey []byte
-	accountType := int32(0)
 	if as != nil {
 		blsKey = as.PublicKeyBls()
-		accountType = int32(as.AccountType())
 	}
-	key := sigCacheKey(tx, blsKey)
 	hasEnvelope := len(tx.RawEnvelope()) > 0
+	key := sigCacheKey(tx, blsKey)
+
 	// A binding-proven hit skips decode + ecrecover entirely.
 	if hasEnvelope && LoadVerifiedSignature(boundSigKey(key)) {
 		return sigVerdictBoundHit
@@ -384,9 +383,6 @@ func evalTxSignature(tx types.Transaction, as types.AccountState, pol sigPolicy)
 		} else {
 			ok = tx.ValidSecpSign()
 		}
-	}
-	if ok && accountType == 1 && tx.ToAddress() != utils.GetAddressSelector(common.ACCOUNT_SETTING_ADDRESS_SELECT) && !(hasEnvelope && tx.Type() != 0xFF) && !tx.ValidSecpSign() {
-		ok = false
 	}
 	if ok {
 		if hasEnvelope {
@@ -528,7 +524,7 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 			}
 			return
 		}
-		// Everything else (secp, 0xFF, AccountType 1, no key yet): checkTxSignature does its own binding.
+		// Everything else (secp, 0xFF, no key yet): checkTxSignature does its own binding.
 		verdict := evalTxSignature(txs[i], as, pol)
 		valid[i] = (verdict != sigVerdictInvalid)
 		switch verdict {
