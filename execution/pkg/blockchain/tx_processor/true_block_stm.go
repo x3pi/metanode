@@ -500,7 +500,8 @@ func (stm *TrueBlockSTM) execOne(
 
 	// Nonce Check (adds to ReadSet)
 	fromAccount, err := mvccDB.AccountState(tx.FromAddress())
-	senderExisted := err == nil && fromAccount != nil
+	// AccountState never returns nil: it creates an empty entry for an unknown address. Test real existence instead.
+	senderExisted := err == nil && accountHasState(fromAccount)
 
 	// Allow ACCOUNT_SETTING_ADDRESS_SELECT to bypass nil account check for new registrations (e.g. tps_blast)
 	if fromAccount == nil && tx.GetNonce() == 0 && tx.ToAddress() == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {

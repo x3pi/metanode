@@ -86,3 +86,25 @@ func TestMalformedBarrierAndAccountSettingTxConsumeTheNonce(t *testing.T) {
 		})
 	}
 }
+
+// Garbage calldata sent to the account setting address from a brand-new key must not create state: AccountState() hands out
+// an empty entry for an unknown address, so "exists" has to mean "has a balance / nonce / BLS key / code", not "non-nil".
+func TestMalformedAccountSettingTxFromFreshKeyCreatesNoState(t *testing.T) {
+	auditEnv(t)
+	leader := common.HexToAddress(auditLeader)
+	acct := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
+	cs := newTestChainState(t)
+	cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(991)})
+	fresh := common.HexToAddress("0x9999999999999999999999999999999999999a1")
+	seedAccount(t, cs, leader, big.NewInt(0), 0)
+
+	tx := transaction.NewTransaction(fresh, acct, big.NewInt(0), 100000, 0, 1000, nil, nil, common.Hash{}, common.Hash{}, 0, 991)
+	_, rcps, _, _ := NewTrueBlockSTM([]mt_types.Transaction{tx}).Process(context.Background(), cs, leader, blankHeader(), 999)
+	require.Len(t, rcps, 1)
+	require.NotNil(t, rcps[0])
+	assert.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, rcps[0].Status())
+	st, err := cs.GetAccountStateDB().AccountState(fresh)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), st.Nonce(), "a fresh key's garbage tx must not turn into a nonce-1 account")
+	assert.False(t, accountHasState(st))
+}

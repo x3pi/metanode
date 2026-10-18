@@ -1,6 +1,8 @@
 package tx_processor
 
 import (
+	"bytes"
+
 	eth_common "github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -31,8 +33,27 @@ func isFeeExempt(chainState *blockchain.ChainState, tx types.Transaction) bool {
 // isFreeRegistrationTx is the one nonce-0 tx that is free by protocol: the BLS-key registration sent to the account
 // setting address (the account has no balance yet). A nonce-0 tx of any other kind pays like everyone else; exempting all
 // nonce-0 txs let an unlimited number of fresh zero-balance keys flood the pool and the chain at price 0.
+//
+// "Registration" means a well-formed setBlsPublicKey(bytes) call carrying a 48-byte key -- the same shape the executor
+// accepts. Calldata that would just be rejected must not ride the exemption: a proposer could otherwise put price-0
+// garbage sent to the account setting address from fresh keys into a block for free.
 func isFreeRegistrationTx(tx types.Transaction) bool {
-	return tx.GetNonce() == 0 && tx.ToAddress() == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
+	if tx.GetNonce() != 0 || tx.ToAddress() != utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
+		return false
+	}
+	data := tx.CallData().Input()
+	if len(data) < 4 || !bytes.Equal(data[:4], utils.GetFunctionSelector("setBlsPublicKey(bytes)")) {
+		return false
+	}
+	key, err := UnpackSetBlsPublicKeyInput(data)
+	return err == nil && len(key) == 48
+}
+
+// accountHasState reports whether as is a real, pre-existing account. AccountStateDB.AccountState creates an empty entry
+// for an address it has never seen, so "non-nil" proves nothing; an account counts as existing once it holds a balance, has
+// sent a tx, registered a BLS key or carries code.
+func accountHasState(as types.AccountState) bool {
+	return as != nil && (as.Nonce() > 0 || as.TotalBalance().Sign() > 0 || len(as.PublicKeyBls()) > 0 || as.SmartContractState() != nil)
 }
 
 // feeFloorOK reports whether tx pays at least the chain's minimum gas price. It applies exactly the rule the mempool

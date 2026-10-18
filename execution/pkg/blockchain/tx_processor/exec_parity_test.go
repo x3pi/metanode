@@ -212,10 +212,29 @@ func TestFeeFloorOK(t *testing.T) {
 	assert.True(t, feeFloorOK(parityTx(a, b, 7, 1, min), free), "exactly the floor")
 	assert.True(t, feeFloorOK(parityTx(a, b, 7, 1, min+1), free))
 	assert.False(t, feeFloorOK(parityTx(a, b, 0, 1, 0), free), "a nonce-0 transfer pays like any other (only the BLS registration is free)")
-	reg := transaction.NewTransaction(a, utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT), big.NewInt(0), 21000, 0, 1000, nil, nil, common.Hash{}, common.Hash{}, 0, parityChainID)
-	assert.True(t, feeFloorOK(reg, free), "the nonce-0 BLS registration to the account setting address is free")
-	regLater := transaction.NewTransaction(a, utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT), big.NewInt(0), 21000, 0, 1000, nil, nil, common.Hash{}, common.Hash{}, 3, parityChainID)
+	acct := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
+	blsKey := make([]byte, 48)
+	for i := range blsKey {
+		blsKey[i] = byte(i + 1)
+	}
+	regData, err := PackSetBlsPublicKey(blsKey)
+	require.NoError(t, err)
+	reg := transaction.NewTransaction(a, acct, big.NewInt(0), 100000, 0, 1000, regData, nil, common.Hash{}, common.Hash{}, 0, parityChainID)
+	assert.True(t, feeFloorOK(reg, free), "the nonce-0 BLS registration (valid setBlsPublicKey calldata) is free")
+	regLater := transaction.NewTransaction(a, acct, big.NewInt(0), 100000, 0, 1000, regData, nil, common.Hash{}, common.Hash{}, 3, parityChainID)
 	assert.False(t, feeFloorOK(regLater, free), "only the nonce-0 registration is free, not later account-setting txs")
+	shortKey, err := PackSetBlsPublicKey(blsKey[:20])
+	require.NoError(t, err)
+	for name, data := range map[string][]byte{
+		"empty calldata":            nil,
+		"garbage calldata":          {1, 2, 3, 4, 5, 6, 7, 8},
+		"selector only":             regData[:4],
+		"wrong key length":          shortKey,
+		"setAccountType, not a BLS": {0x01, 0x02},
+	} {
+		junk := transaction.NewTransaction(a, acct, big.NewInt(0), 100000, 0, 1000, data, nil, common.Hash{}, common.Hash{}, 0, parityChainID)
+		assert.False(t, feeFloorOK(junk, free), "price-0 nonce-0 tx to the account setting address with %s must NOT ride the registration exemption", name)
+	}
 	assert.True(t, feeFloorOK(parityTx(a, freeAddr, 7, 1, 0), free), "free recipient is exempt")
 	assert.True(t, feeFloorOK(parityTx(freeAddr, b, 7, 1, 0), free), "free sender is exempt")
 }
