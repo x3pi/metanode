@@ -198,6 +198,11 @@ func (api *MetaAPI) processCallRequest(ctx context.Context, rawInput json.RawMes
 			}
 		}
 
+		if header == nil {
+			// An unknown block hash / number (or no block loaded yet) leaves no header to take the state root from.
+			resultChan <- CallResult{Result: common.FromHex("0x00"), Error: errors.New("header not found for the requested block")}
+			return
+		}
 		stateRoot := header.AccountStatesRoot()
 		rs, err = api.App.transactionProcessor.ProcessTransactionOffChainWithState(txM, stateRoot, header)
 	}

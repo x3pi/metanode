@@ -234,7 +234,10 @@ func (h *ValidatorHandler) handleBalanceOf(
 	if err != nil {
 		return nil, fmt.Errorf("error fetching account state for %s: %w", accountAddress.Hex(), err)
 	}
-	balance := account.TotalBalance()
+	balance := big.NewInt(0) // an account that does not exist has a zero balance
+	if account != nil {
+		balance = account.TotalBalance()
+	}
 
 	// 4. ABI-encode dữ liệu trả về
 	returnData, err := method.Outputs.Pack(balance)

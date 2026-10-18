@@ -291,7 +291,11 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 	// cần code thêm
 	if executeTransaction.ToAddress() == utils.GetAddressSelector(mt_common.IDENTIFIER_STAKE) {
 		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
-		lastBlockHeader := *v.chainState.GetcurrentBlockHeader()
+		headerPtr := v.chainState.GetcurrentBlockHeader()
+		if headerPtr == nil {
+			return nil, fmt.Errorf("current block header is not available")
+		}
+		lastBlockHeader := *headerPtr
 		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, lastBlockHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data") // Empty backupPath for temporary chain state
 		if err != nil {
 			return nil, err
@@ -319,7 +323,11 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 			break
 		}
 	}
-	lastBlockHeader := *v.chainState.GetcurrentBlockHeader()
+	currentHeader := v.chainState.GetcurrentBlockHeader()
+	if currentHeader == nil {
+		return nil, fmt.Errorf("current block header is not available")
+	}
+	lastBlockHeader := *currentHeader
 	stateRoot := lastBlockHeader.AccountStatesRoot()
 
 	accountStateTrie, err := trie.NewStateTrie(stateRoot, v.storageManager.GetStorageAccount(), true)
