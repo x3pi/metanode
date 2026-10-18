@@ -65,6 +65,9 @@ var (
 	// Parent Chain Gateway contract address - 0x1003 (Phase F: EVM Integration).
 	// Handled as a Go-native barrier transaction for high-speed cross-node float transfers.
 	PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS = common.HexToAddress("0x0000000000000000000000000000000000001003")
+	// Rollup system address - 0x72. Rollup system events are barrier transactions addressed here (RollupSystemHandler);
+	// it is defined in this shared package so the grouping step can route a plain transfer to it without importing rollup.
+	ROLLUP_SYSTEM_ADDRESS = common.HexToAddress("0x0000000000000000000000000000000000000072")
 	// use global
 	CROSS_CHAIN_CONTRACT_ADDRESS = common.HexToAddress("0x00000000000000000000000000000000B429C0B2")
 )

@@ -548,16 +548,22 @@ func (vmP *VmProcessor) UpdateStateDB(
 			}
 		}
 
-		if mvmRs.GasUsed > 0 && !isFreeGass {
-			fromAddr := transaction.FromAddress()
-			gasUsedBig := new(big.Int).SetUint64(mvmRs.GasUsed)
-			gasPriceBig := new(big.Int).Set(transaction.EffectiveGasPrice())
-			gasFee := new(big.Int).Mul(gasUsedBig, gasPriceBig)
-			errSub := vmP.accountStateDB.SubTotalBalance(fromAddr, gasFee)
-			if errSub != nil {
-				logger.Error("failed to subtract gas fee for reverted tx %s (amount: %s): %v", transaction.Hash().Hex(), gasFee.String(), errSub)
+		if mvmRs.GasUsed > 0 {
+			if isFreeGass {
+				// Nothing is charged, so no gas may be reported: the leader reward is derived from the receipt gas.
+				mvmRs.GasUsed = 0
+			} else {
+				fromAddr := transaction.FromAddress()
+				gasUsedBig := new(big.Int).SetUint64(mvmRs.GasUsed)
+				gasPriceBig := new(big.Int).Set(transaction.EffectiveGasPrice())
+				gasFee := new(big.Int).Mul(gasUsedBig, gasPriceBig)
+				errSub := vmP.accountStateDB.SubTotalBalance(fromAddr, gasFee)
+				if errSub != nil {
+					logger.Error("failed to subtract gas fee for reverted tx %s (amount: %s): %v", transaction.Hash().Hex(), gasFee.String(), errSub)
+					mvmRs.GasUsed = 0 // the fee was NOT debited: report no gas, so the leader is not rewarded for it
+				}
+				hasChanges = true
 			}
-			hasChanges = true
 		}
 
 		if span != nil { // GUARD
@@ -1072,12 +1078,22 @@ func (vmP *VmProcessor) UpdateStateDB(
 		}
 	}
 
-	if mvmRs.GasUsed > 0 && !isFreeGass {
-		fromAddr := transaction.FromAddress()
-		gasUsedBig := new(big.Int).SetUint64(mvmRs.GasUsed)
-		gasPriceBig := new(big.Int).Set(transaction.EffectiveGasPrice())
-		gasFee := new(big.Int).Mul(gasUsedBig, gasPriceBig)
-		vmP.accountStateDB.SubTotalBalance(fromAddr, gasFee)
+	// Reported gas must equal the gas actually charged: TrueBlockSTM.Process derives the leader reward from the receipt gas
+	// (GasUsed x EffectiveGasPrice), so a fee that was waived (free sender) or could not be debited must report 0 gas, or the
+	// leader is credited fee that no account paid. (noncePlusOne always reports 50000 gas, even for an empty account.)
+	if mvmRs.GasUsed > 0 {
+		if isFreeGass {
+			mvmRs.GasUsed = 0
+		} else {
+			fromAddr := transaction.FromAddress()
+			gasUsedBig := new(big.Int).SetUint64(mvmRs.GasUsed)
+			gasPriceBig := new(big.Int).Set(transaction.EffectiveGasPrice())
+			gasFee := new(big.Int).Mul(gasUsedBig, gasPriceBig)
+			if errSub := vmP.accountStateDB.SubTotalBalance(fromAddr, gasFee); errSub != nil {
+				logger.Error("failed to subtract gas fee for tx %s (amount: %s): %v", transaction.Hash().Hex(), gasFee.String(), errSub)
+				mvmRs.GasUsed = 0
+			}
+		}
 	}
 
 	// --- Final Return ---

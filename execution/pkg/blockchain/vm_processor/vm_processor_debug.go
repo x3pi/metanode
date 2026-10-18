@@ -655,7 +655,11 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 	}
 
 	// Kiểm tra xem địa chỉ gửi có được miễn phí gas không
-	_, isFreeSender := vmP.chainState.GetFreeFeeAddress()[tx.FromAddress()]
+	// Free if the sender OR the recipient is a free-fee address (same predicate as admission and the native pipelines).
+	free := vmP.chainState.GetFreeFeeAddress()
+	_, isFreeFrom := free[tx.FromAddress()]
+	_, isFreeTo := free[tx.ToAddress()]
+	isFreeSender := isFreeFrom || isFreeTo
 
 	// Gọi hàm NoncePlusOne từ MVM
 	mvmResult := mvmE.NoncePlusOne(

@@ -610,13 +610,15 @@ func (h *GatewayHandler) HandleTransaction(
 	toAddress common.Address, enableTrace bool, blockTime uint64,
 ) (types.Receipt, types.ExecuteSCResult, bool) {
 	inputData := tx.CallData().Input()
+	// Included in the block => the sender's nonce is consumed even when the calldata is malformed (see
+	// ValidatorHandler.HandleTransaction): a bare error receipt left the nonce unchanged and stranded the sender's next tx.
 	if len(inputData) < 4 {
-		return createErrorReceipt(tx, toAddress, fmt.Errorf("invalid gateway calldata: too short")), nil, true
+		return HandleRevertedTransaction(ctx, chainState, tx, toAddress, toAddress, blockTime, enableTrace, "invalid gateway calldata: too short")
 	}
 
 	method, err := h.abi.MethodById(inputData[:4])
 	if err != nil {
-		return createErrorReceipt(tx, toAddress, fmt.Errorf("unknown gateway method selector: %w", err)), nil, true
+		return HandleRevertedTransaction(ctx, chainState, tx, toAddress, toAddress, blockTime, enableTrace, fmt.Sprintf("unknown gateway method selector: %v", err))
 	}
 
 	switch method.Name {

@@ -429,13 +429,18 @@ func classifyGroup(items []Item, hasCode HasCodeFunc) GroupKind {
 		// pipeline (delegation designator write, nonce bump) even when
 		// they carry no calldata and would otherwise look like a plain
 		// value transfer — the native fast-path never runs it.
-		if tx.GetType() == uint64(e_types.SetCodeTxType) {
+		if tx.GetType() == uint64(e_types.SetCodeTxType) || len(tx.AuthorizationList()) > 0 {
 			isEvm = true
 		}
 
 		to := tx.ToAddress()
+		// Every address TrueBlockSTM runs as a barrier tx (validator, gateway, parent-chain gateway, rollup system) must
+		// be routed to the EVM pipeline here too: a plain transfer (no calldata) to one of them would otherwise be
+		// classified native and "delivered" by the fast path, trapping the value at a system address.
 		if to == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
 			to == mt_common.GATEWAY_CONTRACT_ADDRESS ||
+			to == mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS ||
+			to == mt_common.ROLLUP_SYSTEM_ADDRESS ||
 			to == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
 			to == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 			isEvm = true

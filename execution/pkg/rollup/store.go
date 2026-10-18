@@ -13,7 +13,7 @@ import (
 
 var (
 	// System address for Rollup DB
-	RollupSystemAddress = common.HexToAddress("0x0000000000000000000000000000000000000072")
+	RollupSystemAddress = cm.ROLLUP_SYSTEM_ADDRESS
 	// Index key to keep track of non-terminal messages
 	RollupIndexKey = crypto.Keccak256Hash([]byte("RollupIndexKey"))
 	// Key to keep track of this cluster's float sequence (nonce)

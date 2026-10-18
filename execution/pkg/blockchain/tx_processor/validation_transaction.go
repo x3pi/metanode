@@ -52,17 +52,17 @@ func GetValidatorHandler() (*ValidatorHandler, error) {
 func (h *ValidatorHandler) HandleTransaction(ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction, mvmId common.Address, enableTrace bool, blockTime uint64) (types.Receipt, types.ExecuteSCResult, bool) {
 	toAddress := tx.ToAddress()
 	inputData := tx.CallData().Input()
+	// A barrier tx that reaches this handler is included in the block, so even a malformed one must consume the sender's
+	// nonce (HandleRevertedTransaction does it, and charges the nonce-only gas): a bare error receipt left the account
+	// nonce unchanged and stranded every later tx of the sender.
 	if len(inputData) < 4 {
-		err := fmt.Errorf("dữ liệu input không hợp lệ")
-		rcp := createErrorReceipt(tx, toAddress, err)
-		return rcp, nil, true // hasFailed = true
+		return HandleRevertedTransaction(ctx, chainState, tx, toAddress, mvmId, blockTime, enableTrace, "invalid input data")
 	}
 
 	method, err := h.abi.MethodById(inputData[:4])
 	if err != nil {
 		logger.Error("Không tìm thấy method tương ứng với ID trong ABI: %v", err)
-		rcp := createErrorReceipt(tx, toAddress, err)
-		return rcp, nil, true
+		return HandleRevertedTransaction(ctx, chainState, tx, toAddress, mvmId, blockTime, enableTrace, "unknown method selector")
 	}
 	var eventLogs []types.EventLog
 	var logicErr error

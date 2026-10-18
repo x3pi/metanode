@@ -500,6 +500,7 @@ func (stm *TrueBlockSTM) execOne(
 
 	// Nonce Check (adds to ReadSet)
 	fromAccount, err := mvccDB.AccountState(tx.FromAddress())
+	senderExisted := err == nil && fromAccount != nil
 
 	// Allow ACCOUNT_SETTING_ADDRESS_SELECT to bypass nil account check for new registrations (e.g. tps_blast)
 	if fromAccount == nil && tx.GetNonce() == 0 && tx.ToAddress() == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
@@ -663,6 +664,16 @@ func (stm *TrueBlockSTM) execOne(
 					tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			}
+		}
+		// A tx included in the block with an ERROR receipt must still consume the sender's nonce (the rule every other
+		// path follows): otherwise the receipt exists, the account nonce does not move, and the sender's next tx is
+		// stuck behind it. Only for an account that already exists, so garbage calldata from a fresh key creates no state.
+		if rcp.Status() == pb.RECEIPT_STATUS_TRANSACTION_ERROR && senderExisted && fromAccount.Nonce() == tx.GetNonce() {
+			mvccDB.PlusOneNonce(tx.FromAddress())
+			mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
+			commitDeviceKeyIfPending(chainState, tx.Hash())
+			stm.accountMap.Write(tx.FromAddress(), mvcc.Version(txIndex), fromAccount.Copy())
+			mvccDB.WriteSet[tx.FromAddress()] = true
 		}
 	} else {
 		// Generate mvmId (0xFE + blockHash[:15] + txIndex)

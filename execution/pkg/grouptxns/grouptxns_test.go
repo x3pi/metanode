@@ -5,6 +5,9 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/stretchr/testify/assert"
 )
@@ -44,6 +47,9 @@ func (m *mockTx) IsRegularTransaction() bool {
 }
 func (m *mockTx) GetType() uint64 {
 	return 0
+}
+func (m *mockTx) AuthorizationList() []*pb.SetCodeAuthorization {
+	return nil
 }
 
 // ============================================================================
@@ -152,4 +158,20 @@ func TestClassifyGroup_HasCodeFunc(t *testing.T) {
 		}, hasCode)
 		assert.Equal(t, GroupKindMixed, kind)
 	})
+}
+
+// Every address TrueBlockSTM runs as a barrier tx must be routed to the EVM pipeline by the grouping step, including for a
+// plain value transfer (no calldata); otherwise the fast path "delivers" the value to a system address.
+func TestClassifyGroup_BarrierAddressesAreNeverNative(t *testing.T) {
+	from := common.HexToAddress("0x11")
+	for name, to := range map[string]common.Address{
+		"validator contract":       mt_common.VALIDATOR_CONTRACT_ADDRESS,
+		"gateway":                  mt_common.GATEWAY_CONTRACT_ADDRESS,
+		"parent chain gateway":     mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS,
+		"rollup system":            mt_common.ROLLUP_SYSTEM_ADDRESS,
+		"account setting selector": utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT),
+	} {
+		tx := &mockValueTransferTx{mockTx: mockTx{hash: common.HexToHash("0xa"), from: from, nonce: 1}, to: to, amount: big.NewInt(1)}
+		assert.Equal(t, GroupKindContractOnly, classifyGroup([]Item{{ID: 0, Tx: tx}}, nil), name)
+	}
 }
