@@ -659,7 +659,9 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 	}
 
 	// Kiểm tra khoảng block hợp lệ
-	if beginBlock.Cmp(big.NewInt(0)) > 0 && endBlock.Cmp(big.NewInt(0)) > 0 && beginBlock.Cmp(endBlock) > 0 {
+	// Any negative number that is not one of the named tags handled above (earliest=0, latest/pending/finalized/safe)
+	// is not a block: big.Int.Uint64() of it is undefined, so it must never reach the loop below.
+	if beginBlock.Sign() < 0 || endBlock.Sign() < 0 || beginBlock.Cmp(endBlock) > 0 {
 		return nil, errInvalidBlockRange
 	}
 

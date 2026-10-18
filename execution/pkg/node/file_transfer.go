@@ -145,6 +145,10 @@ func normalizeSyncItemKey(rawName string) string {
 // HandleFileTransfer xử lý việc nhận file qua TCP route "FileTransfer".
 // Request body chứa file data đã được encode dưới dạng JSON metadata + raw content.
 func (node *HostNode) HandleFileTransfer(request network.Request) error {
+	if !node.isFromParent(request) {
+		logger.Warn("FileTransfer rejected: it did not arrive on this node's own connection to its master")
+		return fmt.Errorf("file transfer rejected: not from the parent connection")
+	}
 	body := request.Message().Body()
 	if len(body) == 0 {
 		return fmt.Errorf("empty file transfer data")
@@ -647,6 +651,12 @@ func (node *HostNode) SendFolderViaTCP(conn network.Connection, folderPath strin
 
 // HandleFreeFeeResponse xử lý response fee addresses nhận từ Master qua TCP.
 func (node *HostNode) HandleFreeFeeResponse(request network.Request) error {
+	if !node.isFromParent(request) {
+		// The free-fee set changes what the node charges at execution: only the master this node itself connected to
+		// may set it, never an unsolicited peer.
+		logger.Warn("FreeFeeResponse rejected: it did not arrive on this node's own connection to its master")
+		return fmt.Errorf("free fee response rejected: not from the parent connection")
+	}
 	body := request.Message().Body()
 	if len(body) == 0 {
 		return fmt.Errorf("empty FreeFeeResponse")
@@ -687,4 +697,15 @@ func CleanupOldStates(maxIdleTime time.Duration) {
 	if cleanedCount > 0 {
 		logger.Info("Finished cleaning up stale receiving states. Removed:", cleanedCount)
 	}
+}
+
+// isFromParent reports whether request arrived on the connection this node itself opened to its master. Unlike a
+// connection "type" announced by a remote peer (InitConnection is unauthenticated), the parent connection is an object
+// this node created by dialing, so an inbound peer cannot claim it.
+func (node *HostNode) isFromParent(request network.Request) bool {
+	if node == nil || node.ConnectionsManager == nil || request == nil || request.Connection() == nil {
+		return false
+	}
+	parent := node.ConnectionsManager.ParentConnection()
+	return parent != nil && request.Connection() == parent
 }

@@ -521,3 +521,68 @@ func TestRPCRateLimiter_WebSocketReservedBitRejected(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, 0, n)
 }
+
+// A batch padded with more than the old 512-byte look-ahead of whitespace must still be counted per call, and padding
+// beyond the hard cap is refused instead of slipping through as "1 call".
+func TestRPCRateLimiter_HTTPBatchPaddedWithWhitespaceStillCounted(t *testing.T) {
+	rl := NewRPCRateLimiter(&config.RpcRateLimitConfig{Enabled: true, GlobalRate: 1000, PerIpRate: 10, BlockDurationSecs: 60}) // burst 20
+	defer rl.Close()
+	var got string
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b := new(strings.Builder)
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Body.Read(buf)
+			b.Write(buf[:n])
+			if err != nil {
+				break
+			}
+		}
+		got = b.String()
+		w.WriteHeader(http.StatusOK)
+	})
+	h := rl.Middleware(next)
+	items := make([]string, 30)
+	for i := range items {
+		items[i] = `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`
+	}
+	batch := "[" + strings.Join(items, ",") + "]"
+
+	for name, pad := range map[string]int{"padded 1000 (> old 512 window)": 1000} {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat(" ", pad)+batch))
+		req.RemoteAddr = "10.1.0.1:1"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusTooManyRequests, rec.Code, name+": a 30-call batch exceeds burst 20 whatever the padding")
+	}
+
+	// Padding past the cap is refused outright.
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat(" ", maxHTTPLeadingWhitespace+10)+batch))
+	req.RemoteAddr = "10.1.0.2:1"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+
+	// A small padded batch passes and the exact bytes (padding included) reach the handler.
+	small := "[" + items[0] + "]"
+	req = httptest.NewRequest(http.MethodPost, "/", strings.NewReader("   \n\t "+small))
+	req.RemoteAddr = "10.1.0.3:1"
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "   \n\t "+small, got)
+}
+
+// The per-IP table must stay bounded: past maxIPEntries distinct addresses, new ones share one overflow bucket.
+func TestRPCRateLimiter_IPTableIsBounded(t *testing.T) {
+	rl := NewRPCRateLimiter(&config.RpcRateLimitConfig{Enabled: true, GlobalRate: 100000, PerIpRate: 10, BlockDurationSecs: 60})
+	defer rl.Close()
+	for i := 0; i < maxIPEntries+500; i++ {
+		_ = rl.getIPEntry(fmt.Sprintf("10.%d.%d.%d", (i>>16)&255, (i>>8)&255, i&255))
+	}
+	count := 0
+	rl.perIP.Range(func(_, _ any) bool { count++; return true })
+	assert.LessOrEqual(t, count, maxIPEntries, "tracked addresses must not exceed the cap")
+	assert.Equal(t, int64(count), rl.ipCount.Load(), "the counter must match the table")
+	assert.Same(t, rl.overflow, rl.getIPEntry("203.0.113.250"), "an address beyond the cap uses the shared overflow entry")
+}

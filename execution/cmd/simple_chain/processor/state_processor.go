@@ -114,6 +114,9 @@ func (sp *StateProcessor) ProcessGetAccountState(request network.Request) error 
 	if err != nil {
 		return err
 	}
+	if as == nil {
+		return fmt.Errorf("account state not found for %s", address.Hex())
+	}
 
 	// msgID := request.Message().ID()
 	// if msgID != "" {
@@ -138,6 +141,9 @@ func (sp *StateProcessor) ProcessGetNonce(request network.Request) error {
 	if err != nil {
 		return err
 	}
+	if as == nil {
+		return fmt.Errorf("account state not found for %s", address.Hex())
+	}
 	msgID := request.Message().ID()
 	respMsg := p_network.NewMessage(&pb.Message{
 		Header: &pb.Header{
@@ -150,7 +156,11 @@ func (sp *StateProcessor) ProcessGetNonce(request network.Request) error {
 }
 
 func (sp *StateProcessor) ProcessGetTransactionsByBlockNumber(request network.Request) error {
-	blockNumber := binary.BigEndian.Uint64(request.Message().Body())
+	body := request.Message().Body()
+	if len(body) < 8 {
+		return fmt.Errorf("invalid request body: need an 8-byte block number, got %d bytes", len(body))
+	}
+	blockNumber := binary.BigEndian.Uint64(body)
 	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
 	if !ok {
 		return fmt.Errorf("cannot find block hash for block number %d", blockNumber)
@@ -189,7 +199,11 @@ func (sp *StateProcessor) ProcessGetTransactionsByBlockNumber(request network.Re
 }
 
 func (sp *StateProcessor) ProcessGetBlockHeaderByBlockNumber(request network.Request) error {
-	blockNumber := binary.BigEndian.Uint64(request.Message().Body())
+	body := request.Message().Body()
+	if len(body) < 8 {
+		return fmt.Errorf("invalid request body: need an 8-byte block number, got %d bytes", len(body))
+	}
+	blockNumber := binary.BigEndian.Uint64(body)
 	blockHash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(blockNumber)
 	if !ok {
 		return fmt.Errorf("cannot find block hash for block number %d", blockNumber)
@@ -405,9 +419,9 @@ func (sp *StateProcessor) ProcessCompleteJob(request network.Request) error {
 		return fmt.Errorf("invalid request format: %w", err)
 	}
 
-	address := common.BytesToAddress(reqProto.Address.Value)
+	address := common.BytesToAddress(reqProto.GetAddress().GetValue())
 	jobID := reqProto.JobId
-	hashExecute := common.BytesToHash(reqProto.HashExecute.Value)
+	hashExecute := common.BytesToHash(reqProto.GetHashExecute().GetValue())
 
 	logger.Info("Received CompleteJob request for JobID '%s' from address %s", jobID, address.Hex())
 
@@ -511,7 +525,7 @@ func (sp *StateProcessor) ProcessGetTxHistoryByAddress(request network.Request) 
 		return errors.New(errMsg)
 	}
 
-	address := common.BytesToAddress(reqProto.Address.Value)
+	address := common.BytesToAddress(reqProto.GetAddress().GetValue())
 	offset := int(reqProto.Offset)
 	limit := int(reqProto.Limit)
 

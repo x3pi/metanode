@@ -64,6 +64,9 @@ var (
 type LogListParams struct {
 	Root  string `json:"root"`
 	Epoch string `json:"epoch"`
+	// Password is the admin password. Required by the JSON-RPC methods (debug_listLogFiles / debug_getLogFileContent),
+	// which take a caller-supplied root directory; the HTTP handlers authenticate with a Bearer header instead.
+	Password string `json:"password"`
 }
 
 // LogFileParams đại diện cho tham số yêu cầu đọc nội dung log.
@@ -73,6 +76,7 @@ type LogFileParams struct {
 	FileName string `json:"fileName"`
 	MaxBytes int64  `json:"maxBytes"`
 	Format   string `json:"format"`
+	Password string `json:"password"`
 }
 
 // ConnectionListParams xác định bộ lọc cho danh sách kết nối.
@@ -311,8 +315,27 @@ func (api *DebugApi) authorizeHTTP(w http.ResponseWriter, r *http.Request) bool 
 	return true
 }
 
-// ListLogFiles trả về danh sách file log theo epoch.
+// checkLogPassword gates the JSON-RPC log methods with the admin password (constant time, fail-closed when none is set).
+func (api *DebugApi) checkLogPassword(password string) error {
+	pw := ""
+	if api != nil && api.App != nil && api.App.config != nil {
+		pw = strings.TrimSpace(api.App.config.Securepassword)
+	}
+	if pw == "" || subtle.ConstantTimeCompare([]byte(password), []byte(pw)) != 1 {
+		return fmt.Errorf("unauthorized")
+	}
+	return nil
+}
+
+// ListLogFiles trả về danh sách file log theo epoch (yêu cầu mật khẩu admin).
 func (api *DebugApi) ListLogFiles(ctx context.Context, params LogListParams) ([]string, error) {
+	if err := api.checkLogPassword(params.Password); err != nil {
+		return nil, err
+	}
+	return api.listLogFilesInternal(ctx, params)
+}
+
+func (api *DebugApi) listLogFilesInternal(ctx context.Context, params LogListParams) ([]string, error) {
 	files, err := loggerfile.ListLogFiles(params.Root, params.Epoch)
 	if err != nil {
 		return nil, fmt.Errorf("ListLogFiles: %w", err)
@@ -320,8 +343,15 @@ func (api *DebugApi) ListLogFiles(ctx context.Context, params LogListParams) ([]
 	return files, nil
 }
 
-// GetLogFileContent đọc nội dung file log theo epoch, có thể giới hạn tối đa số byte trả về.
+// GetLogFileContent đọc nội dung file log theo epoch, có thể giới hạn tối đa số byte trả về (yêu cầu mật khẩu admin).
 func (api *DebugApi) GetLogFileContent(ctx context.Context, params LogFileParams) (string, error) {
+	if err := api.checkLogPassword(params.Password); err != nil {
+		return "", err
+	}
+	return api.getLogFileContentInternal(ctx, params)
+}
+
+func (api *DebugApi) getLogFileContentInternal(ctx context.Context, params LogFileParams) (string, error) {
 	content, err := loggerfile.ReadLogFile(params.Root, params.Epoch, params.FileName, params.MaxBytes)
 	if err != nil {
 		return "", fmt.Errorf("GetLogFileContent: %w", err)
@@ -359,7 +389,7 @@ func (api *DebugApi) ServeLogPreview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	content, err := api.GetLogFileContent(r.Context(), params)
+	content, err := api.getLogFileContentInternal(r.Context(), params)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

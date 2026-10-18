@@ -861,6 +861,20 @@ func (api *MetaAPI) FeeHistory(ctx context.Context, blockCount math.HexOrDecimal
 	if count == 0 {
 		return nil, fmt.Errorf("blockCount must be > 0")
 	}
+	// Same ceiling as go-ethereum's default: the loop below does a block + receipt-trie read per block, and the result
+	// slices are pre-sized from count, so an unbounded count lets one request read the whole chain / allocate GBs.
+	const maxFeeHistoryBlocks = 1024
+	if count > maxFeeHistoryBlocks {
+		count = maxFeeHistoryBlocks
+	}
+	if len(rewardPercentiles) > 100 {
+		return nil, fmt.Errorf("too many reward percentiles (max 100)")
+	}
+	for i, p := range rewardPercentiles {
+		if !(p >= 0 && p <= 100) { // also rejects NaN
+			return nil, fmt.Errorf("invalid reward percentile %v at index %d: must be within [0, 100]", p, i)
+		}
+	}
 	if count > lastBlockNum+1 {
 		count = lastBlockNum + 1
 	}

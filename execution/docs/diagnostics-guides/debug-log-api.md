@@ -10,6 +10,7 @@ Tài liệu này hướng dẫn sử dụng hai phương thức JSON-RPC mới t
 | Trường | Kiểu | Bắt buộc | Mô tả |
 | --- | --- | --- | --- |
 | `root` | string | Không | Đường dẫn thư mục gốc chứa log. Bỏ trống để sử dụng giá trị từ cấu hình `log_path` (ví dụ `./sample/simple/data/logs`). Chấp nhận cả đường dẫn tuyệt đối. |
+| `password` | string | **Có** | Mật khẩu admin (`securepassword` trong cấu hình). Các phương thức JSON-RPC này nhận `root` do người gọi chỉ định nên luôn yêu cầu xác thực; node không cấu hình mật khẩu sẽ từ chối. (Các endpoint HTTP `/debug/logs/*` dùng header `Authorization: Bearer <password>`.) |
 | `date` | string | Không | Chuỗi ngày cần truy cập. Hỗ trợ định dạng `YYYY-MM-DD`, `YYYY/MM/DD` hoặc `YYYYMMDD`. Nếu bỏ trống, thao tác trực tiếp trên `root`. |
 
 ### 3. Liệt kê danh sách file log

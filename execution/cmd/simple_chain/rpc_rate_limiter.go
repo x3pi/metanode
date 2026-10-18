@@ -51,8 +51,12 @@ type RPCRateLimiter struct {
 
 	// PERFORMANCE: use sync.Map for lock-free reads on the hot path
 	// Only cleanup needs a full scan via Range()
-	perIP   sync.Map // map[string]*ipEntry
-	closeCh chan struct{}
+	perIP   sync.Map     // map[string]*ipEntry
+	ipCount atomic.Int64 // entries in perIP (bounded by maxIPEntries)
+	// overflow is the single shared entry used once perIP holds maxIPEntries addresses, so a flood of distinct source
+	// addresses (spoofed or IPv6) cannot grow the table without bound; the excess shares one bucket.
+	overflow *ipEntry
+	closeCh  chan struct{}
 
 	// PERFORMANCE: atomic counters — zero mutex contention
 	totalAllowed  atomic.Int64
@@ -76,6 +80,7 @@ func NewRPCRateLimiter(cfg *config.RpcRateLimitConfig) *RPCRateLimiter {
 		global:  rate.NewLimiter(rate.Limit(cfg.GlobalRate), globalBurst),
 		closeCh: make(chan struct{}),
 	}
+	rl.overflow = rl.newIPEntry(time.Now().UnixNano())
 
 	if cfg.Enabled {
 		go rl.cleanupLoop()
@@ -97,7 +102,9 @@ func (rl *RPCRateLimiter) cleanupLoop() {
 				entry := value.(*ipEntry)
 				// Clean up only if it hasn't been seen recently AND it's not currently blocked
 				if entry.lastSeenUnixNano.Load() < cutoffNano && nowNano >= entry.blockedUntilUnixNano.Load() {
-					rl.perIP.Delete(key)
+					if _, loaded := rl.perIP.LoadAndDelete(key); loaded {
+						rl.ipCount.Add(-1)
+					}
 				}
 				return true
 			})
@@ -112,8 +119,6 @@ func (rl *RPCRateLimiter) Close() {
 	close(rl.closeCh)
 }
 
-// getIPEntry returns the per-IP entry, creating one if needed.
-// PERFORMANCE: Uses sync.Map for lock-free reads (hot path).
 // perIPBurst is the token-bucket burst of a per-IP limiter; a single request carrying more calls than this can never
 // be admitted, whatever the IP's history.
 func (rl *RPCRateLimiter) perIPBurst() int {
@@ -124,6 +129,15 @@ func (rl *RPCRateLimiter) perIPBurst() int {
 	return burst
 }
 
+func (rl *RPCRateLimiter) newIPEntry(nowNano int64) *ipEntry {
+	e := &ipEntry{limiter: rate.NewLimiter(rate.Limit(rl.config.PerIpRate), rl.perIPBurst())}
+	e.lastSeenUnixNano.Store(nowNano)
+	return e
+}
+
+// getIPEntry returns the per-IP entry, creating one if needed.
+// PERFORMANCE: Uses sync.Map for lock-free reads (hot path).
+// Once maxIPEntries addresses are tracked, new addresses share the overflow entry instead of growing the table.
 func (rl *RPCRateLimiter) getIPEntry(ip string) *ipEntry {
 	nowNano := time.Now().UnixNano()
 	if val, ok := rl.perIP.Load(ip); ok {
@@ -131,15 +145,16 @@ func (rl *RPCRateLimiter) getIPEntry(ip string) *ipEntry {
 		entry.lastSeenUnixNano.Store(nowNano)
 		return entry
 	}
-
-	burst := rl.perIPBurst()
+	if rl.ipCount.Load() >= maxIPEntries {
+		rl.overflow.lastSeenUnixNano.Store(nowNano)
+		return rl.overflow
+	}
 
 	// Create new limiter — Store-or-Load pattern avoids duplicates
-	newEntry := &ipEntry{
-		limiter: rate.NewLimiter(rate.Limit(rl.config.PerIpRate), burst),
+	actual, loaded := rl.perIP.LoadOrStore(ip, rl.newIPEntry(nowNano))
+	if !loaded {
+		rl.ipCount.Add(1)
 	}
-	newEntry.lastSeenUnixNano.Store(nowNano)
-	actual, _ := rl.perIP.LoadOrStore(ip, newEntry)
 	return actual.(*ipEntry)
 }
 
@@ -260,6 +275,8 @@ const (
 	maxWSMessagePayload = 8 << 20
 	// maxHTTPBatchScan bounds how much of a POST body is read to count a JSON-RPC batch.
 	maxHTTPBatchScan = 8 << 20
+	// maxHTTPLeadingWhitespace bounds the padding accepted before the first JSON byte of an HTTP RPC body.
+	maxHTTPLeadingWhitespace = 4096
 )
 
 // httpRPCCallCount returns how many JSON-RPC calls an HTTP request carries: the number of top-level elements for a
@@ -270,27 +287,44 @@ func httpRPCCallCount(r *http.Request) int {
 	}
 	orig := r.Body
 	br := bufio.NewReaderSize(orig, 4096)
-	head, _ := br.Peek(512) // may be shorter than 512; whatever is available is enough to find the first byte
+	// Skip leading JSON whitespace byte by byte (no fixed look-ahead window a client could pad past) and keep what was
+	// consumed so the body can be restored exactly. A pathological amount of padding is refused as an oversized request.
+	var lead bytes.Buffer
 	first := byte(0)
-	for _, b := range head {
-		if b != ' ' && b != '\t' && b != '\r' && b != '\n' {
-			first = b
+	for {
+		b, err := br.ReadByte()
+		if err != nil {
 			break
 		}
+		if b == ' ' || b == '\t' || b == '\r' || b == '\n' {
+			if lead.Len() >= maxHTTPLeadingWhitespace {
+				r.Body = struct {
+					io.Reader
+					io.Closer
+				}{io.MultiReader(&lead, br), orig}
+				return maxHTTPBatchScan // far above any burst: refused as batch_too_large
+			}
+			lead.WriteByte(b)
+			continue
+		}
+		first = b
+		_ = br.UnreadByte()
+		break
 	}
 	if first != '[' {
 		r.Body = struct {
 			io.Reader
 			io.Closer
-		}{br, orig}
+		}{io.MultiReader(&lead, br), orig}
 		return 1
 	}
 	data, _ := io.ReadAll(io.LimitReader(br, maxHTTPBatchScan))
+	full := append(append([]byte(nil), lead.Bytes()...), data...)
 	r.Body = struct {
 		io.Reader
 		io.Closer
-	}{io.MultiReader(bytes.NewReader(data), br), orig}
-	return countBatchItems(data)
+	}{io.MultiReader(bytes.NewReader(full), br), orig}
+	return countBatchItems(full)
 }
 
 func writeBatchTooLargeResponse(w http.ResponseWriter, n, max int) {

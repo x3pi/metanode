@@ -171,7 +171,7 @@ curl "http://127.0.0.1:8080/debug/logs/content?file=rpc-client.log&epoch=2&maxBy
 
 ### 4. Log JSON-RPC/HTTP của master/sub (Debug API)
 
-Các phương thức `debug_listLogFiles` và `debug_getLogFileContent` (JSON-RPC) trên node master/sub hỗ trợ tham số `format` khi gọi `debug_getLogFileContent`:
+Các phương thức `debug_listLogFiles` và `debug_getLogFileContent` (JSON-RPC) trên node master/sub **yêu cầu trường `password`** (mật khẩu admin) trong tham số, và hỗ trợ tham số `format` khi gọi `debug_getLogFileContent`:
 
 - `format="html"`: trả về HTML `<pre>` đã escape ký tự đặc biệt, tiện xem trong trình duyệt.
 - `format="plain"` hoặc bỏ trống: trả string thuần.
@@ -190,7 +190,8 @@ curl -X POST http://127.0.0.1:8646 \
       "epoch": "2",
       "fileName": "App.log",
       "maxBytes": 131072,
-      "format": "html"
+      "format": "html",
+      "password": "<admin password>"
     }]
   }'
 
