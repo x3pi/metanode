@@ -168,40 +168,13 @@ func (node *HostNode) HandleFileTransfer(request network.Request) error {
 	return nil
 }
 
-// HandleFileRequest xử lý yêu cầu file/folder sync qua TCP route "FileRequest".
-// Master nhận request và gửi lại folder data.
+// HandleFileRequest is disabled. It used to answer any TCP peer that sent "sys" by compressing and streaming the node's
+// ENTIRE data directory (keys, state, config) to it, with no authentication -- a data leak and a cheap DoS (a 7z of the
+// whole directory per request). Nothing in this repository sends such a request any more (SendRequestToMaster has no
+// callers); state is distributed through the snapshot service instead.
 func (node *HostNode) HandleFileRequest(request network.Request) error {
-	bodyStr := strings.TrimSpace(string(request.Message().Body()))
-	if bodyStr == "" {
-		return fmt.Errorf("empty file request")
-	}
-
-	logger.Info(fmt.Sprintf("📂 Received file request: %s", bodyStr))
-
-	conn := request.Connection()
-	if conn == nil || !conn.IsConnect() {
-		return fmt.Errorf("connection not available for file request response")
-	}
-
-	// Gửi "OK" response
-	if node.MessageSender != nil {
-		err := node.MessageSender.SendBytes(conn, "FileRequestResponse", []byte("OK"))
-		if err != nil {
-			return fmt.Errorf("failed to send OK response: %w", err)
-		}
-	}
-
-	// Gửi folder nếu request là "sys" (folder sync)
-	if bodyStr == "sys" {
-		logger.Info(fmt.Sprintf("Starting folder sync for root path: %s", node.rootPath))
-		go func() {
-			if err := node.SendFolderViaTCP(conn, node.rootPath, 1000); err != nil {
-				logger.Error(fmt.Sprintf("Failed to send folder via TCP: %v", err))
-			}
-		}()
-	}
-
-	return nil
+	logger.Warn("FileRequest rejected: folder sync over TCP is disabled")
+	return fmt.Errorf("file request rejected: folder sync over TCP is disabled")
 }
 
 // processIncomingData xử lý dữ liệu nhận từ TCP (thay processIncomingStream).

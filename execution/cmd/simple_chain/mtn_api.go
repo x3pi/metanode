@@ -141,6 +141,8 @@ func (api *MtnAPI) GetExecuteSCResultsHash(ctx context.Context, blockNumber hexu
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to create chainState for block %d: %w", blockNumber, err)
 	}
+	// Release the temporary chain state (its background Scrubber goroutine otherwise leaks on every call).
+	defer chainState.Close()
 
 	// 6. Group transactions
 	items := make([]grouptxns.Item, 0, len(txs))

@@ -990,7 +990,7 @@ func (app *App) initRoutes() {
 	// Node-level TCP routes (replacing libp2p stream protocols)
 	if app.node != nil {
 		r["FileTransfer"] = app.node.HandleFileTransfer
-		r["FileRequest"] = app.node.HandleFileRequest
+		// "FileRequest" is intentionally NOT routed: serving the data directory to any peer is disabled (see HandleFileRequest).
 		r["FreeFeeRequest"] = app.node.HandleFreeFeeRequest
 		r["FreeFeeResponse"] = app.node.HandleFreeFeeResponse
 	}

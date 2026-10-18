@@ -371,6 +371,7 @@ func (sp *StateProcessor) GetExecuteSCResultsHashCore(ctx context.Context, block
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to create chainState for block %d: %w", blockNumber, err)
 	}
+	defer chainState.Close() // temporary chain state: release it (and its background goroutines) on every return
 
 	items := make([]grouptxns.Item, 0, len(txs))
 	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
