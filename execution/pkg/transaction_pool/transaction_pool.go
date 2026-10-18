@@ -151,7 +151,7 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 	type txInfo struct {
 		shardIdx int
 		index    int
-		gas      uint64
+		gas      *big.Int
 		nonce    uint64
 		hash     common.Hash
 	}
@@ -162,10 +162,16 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 		shard := tp.shards[i]
 		shard.mu.RLock()
 		for idx, tx := range shard.transactions {
+			// Compared as *big.Int (a fee cap above 2^64 must not wrap). The value is only read, so use it
+			// directly: this scan visits every tx in the pool and must not allocate per tx.
+			gas := tx.GasPriceCap()
+			if gas == nil {
+				gas = new(big.Int).SetUint64(tx.MaxGasPrice())
+			}
 			allInfos = append(allInfos, txInfo{
 				shardIdx: i,
 				index:    idx,
-				gas:      tx.MaxGasPrice(),
+				gas:      gas,
 				nonce:    tx.GetNonce(),
 				hash:     tx.Hash(),
 			})
@@ -209,8 +215,9 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 	// sustained overload without changing the eviction count or the
 	// fee-market ordering for txs that actually have different gas prices.
 	sort.Slice(allInfos, func(i, j int) bool {
-		if allInfos[i].gas != allInfos[j].gas {
-			return allInfos[i].gas < allInfos[j].gas
+		cmp := allInfos[i].gas.Cmp(allInfos[j].gas)
+		if cmp != 0 {
+			return cmp < 0
 		}
 		return allInfos[i].nonce > allInfos[j].nonce
 	})

@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-10-17 (PR #171 & PR #172/#173 sync: added rollup adapters & proposer dedup test in `cmd/simple_chain/`, registration TCP test & virtual executor tests in `cmd/simple_chain/processor/`, synchronized BFT supermajority threshold `(N+f)/2 + 1` in `pkg/parentchain` QuorumClient & Rollup).
+> **Last updated:** 2026-10-18 (RPC rate limiter WS/HTTP batch accounting, mempool eviction after verification; PR #171 & PR #172/#173 sync: added rollup adapters & proposer dedup test in `cmd/simple_chain/`, registration TCP test & virtual executor tests in `cmd/simple_chain/processor/`, synchronized BFT supermajority threshold `(N+f)/2 + 1` in `pkg/parentchain` QuorumClient & Rollup).
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 ---
 
@@ -209,6 +209,7 @@ metanode/
 | `c0_spike_stub.go` | 25 | Stub for production binary (`//go:build !c0spike`), exits cleanly if invoked without build tag |
 | `rollup_adapters.go` | 145 | Adapter wrappers bridging simple_chain core to rollup engine (`RollupBlockProcessorAdapter`, `RollupTxValidatorAdapter`, `RollupTxPoolAdapter`, `RollupTxReceiptAdapter`) |
 | `proposer_dedup_test.go` | 131 | Proposer transaction deduplication unit tests |
+| `rpc_rate_limiter.go` / `rpc_rate_limiter_test.go` | — | Global + per-IP RPC rate limiter (off by default, `rpc_rate_limit`). HTTP counts every call of a JSON-RPC batch; `WebsocketMiddleware` wraps the hijacked WS connection and rate-limits each message/batch item (RFC 6455 frame parser; refuses reserved bits, caps a reassembled fragmented message at 8 MB, closes with 1008/1009/1002 without delivering rejected bytes to the decoder). A batch larger than the burst is refused without banning the IP. Middleware order: CORS → rate limiter → eth_sendRawTransaction intercept → RPC server |
 
 *CLI Flags & Config:*
 - `--tool-c0-spike=verify|worker`: Tool mode for C0 multi-process spike verification harness.
