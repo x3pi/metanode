@@ -19,7 +19,6 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
-	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -70,7 +69,7 @@ func processNativeTransfersFastPath(
 	// ProcessTX by hundreds of ms per block. Log the first few, then only
 	// report the total at the end of the block.
 	const maxRejectLogsPerBlock = 5
-	var nonceRejectCount, verifyRejectCount atomic.Int64
+	var nonceRejectCount atomic.Int64
 
 	// Pre-allocate result containers per group (indexed by original group order)
 	type groupResult struct {
@@ -119,21 +118,11 @@ func processNativeTransfersFastPath(
 				scRs := make([]types.ExecuteSCResult, 0, len(group.Items))
 				totalGasFee := big.NewInt(0)
 
-				failedSenders := make(map[common.Address]bool, 4)
-
 				for _, item := range group.Items {
 					tx := item.Tx
 
 					if enableTrace {
 						GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTION_START", "Native transfer fast-path execution")
-					}
-
-					// Skip if sender has prior failure in this group
-					if failedSenders[tx.FromAddress()] {
-						if enableTrace {
-							GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTION_SKIPPED", "Skipped: prior sender failure")
-						}
-						continue
 					}
 
 					// Load sender state for nonce/balance checks
@@ -142,30 +131,16 @@ func processNativeTransfersFastPath(
 						if enableTrace {
 							GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTION_SKIPPED", "Sender account not found")
 						}
-						failedSenders[tx.FromAddress()] = true
 						continue
 					}
 
-					// Verify transaction (BLS signature, amount, etc.)
-					var errVerify *transaction.TransactionError
-					if skipSignatureVerify || LoadVerifiedSignature(sigCacheKey(tx, as.PublicKeyBls())) {
-						errVerify = nil
-					} else {
-						errVerify = VerifyTransaction(tx, chainState, as)
-					}
-
-					if errVerify != nil {
-						if enableTrace {
-							GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_VERIFY_REJECTED", errVerify.Description)
-						}
-						if verifyRejectCount.Add(1) <= maxRejectLogsPerBlock {
-							logger.Warn("❌ [FAST-PATH-VERIFY-REJECT] %v for tx %s (From: %s)", errVerify.Description, tx.Hash().Hex(), tx.FromAddress().Hex())
-						}
-						if errVerify.Code != 120001 { // InvalidNonce code
-							failedSenders[tx.FromAddress()] = true
-						}
-						continue
-					}
+					// NO VerifyTransaction here. Signatures, envelope binding and the account gate were already
+					// enforced for the whole block by FilterInvalidSignatures (a pure function of the tx and the
+					// pre-block state, identical on every node), and the fee floor by FilterBelowFeeFloor. Running the
+					// mempool-admission validator again depended on node-local state (the signature cache and the
+					// skipSignatureVerify flag, which differs between the speculative, sync, replay and fallback call
+					// sites), so two honest nodes could drop a different set of txs and fork. Like TrueBlockSTM, every
+					// tx is decided only by the nonce check below and the balance check inside the transfer.
 
 					// Nonce check
 					if tx.GetNonce() != as.Nonce() {
@@ -176,9 +151,6 @@ func processNativeTransfersFastPath(
 							}
 							if nonceRejectCount.Add(1) <= maxRejectLogsPerBlock {
 								logger.Warn("❌ [FAST-PATH-NONCE-REJECT] %v for tx %s (From: %s)", err, tx.Hash().Hex(), tx.FromAddress().Hex())
-							}
-							if tx.GetNonce() > as.Nonce() {
-								failedSenders[tx.FromAddress()] = true
 							}
 							continue
 						}
@@ -234,7 +206,8 @@ func processNativeTransfersFastPath(
 						rcp := createErrorReceipt(tx, toAddress, err)
 						txs = append(txs, tx)
 						rcps = append(rcps, rcp)
-						failedSenders[tx.FromAddress()] = true
+						// The transfer already consumed the sender's nonce (see ExecuteNativeTransfer), so the sender's
+						// next tx is still valid and must be executed -- exactly as TrueBlockSTM does.
 						continue
 					}
 
@@ -351,9 +324,6 @@ func processNativeTransfersFastPath(
 	)
 	if n := nonceRejectCount.Load(); n > maxRejectLogsPerBlock {
 		logger.Warn("❌ [FAST-PATH-NONCE-REJECT] total %d txs rejected by nonce check in this block (only first %d logged) — likely duplicate copies of already-committed txs", n, maxRejectLogsPerBlock)
-	}
-	if n := verifyRejectCount.Load(); n > maxRejectLogsPerBlock {
-		logger.Warn("❌ [FAST-PATH-VERIFY-REJECT] total %d txs rejected by verification in this block (only first %d logged)", n, maxRejectLogsPerBlock)
 	}
 
 	return allTransactions, allReceipts, allExecuteSCResults, allMvmIdMap

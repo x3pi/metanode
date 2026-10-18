@@ -757,15 +757,27 @@ func (stm *TrueBlockSTM) execOne(
 				totalCost.Add(totalCost, blobFee)
 			}
 
+			// feeCharged tracks whether the sender was really debited. The leader reward is re-derived from
+			// receipt.GasUsed() x EffectiveGasPrice(), so a failed tx whose fee was NOT debited must report
+			// GasUsed 0 -- otherwise the leader is credited fee that no account paid (supply inflation), and the
+			// result would differ from the native fast path, which never rewards a failed transfer.
+			feeCharged := true
 			if errSub == nil {
 				if blobErr != nil {
 					errSub = blobErr
+					feeCharged = false
 				} else {
 					errSub = mvccDB.SubTotalBalance(tx.FromAddress(), totalCost)
+					if errSub != nil {
+						feeCharged = false
+					}
 				}
 			} else {
-				// Failed early due to intrinsic gas or out of gas: charge gas fee capped at balance
-				_ = mvccDB.SubTotalBalance(tx.FromAddress(), gasFee)
+				// Failed early due to intrinsic gas or out of gas: charge the gas fee; if the balance cannot
+				// cover even that, nothing is debited.
+				if errFee := mvccDB.SubTotalBalance(tx.FromAddress(), gasFee); errFee != nil {
+					feeCharged = false
+				}
 			}
 
 			// Always update nonce and state hashes even if balance deduction fails (prevents infinite replay)
@@ -780,10 +792,14 @@ func (stm *TrueBlockSTM) execOne(
 
 			if errSub != nil {
 				// Revert Native Transfer
+				receiptGasUsed := totalGasUsed
+				if !feeCharged {
+					receiptGasUsed = 0
+				}
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
 					pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(errSub.Error()), pb.EXCEPTION_NONE,
-					tx.EffectiveGasPrice().Uint64(), totalGasUsed,
+					tx.EffectiveGasPrice().Uint64(), receiptGasUsed,
 					[]types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			} else {

@@ -40,6 +40,8 @@ func ProcessTransactionsOptimistic(
 	// canonical, validator, sync), independent of skipSignatureVerify. The filter is a pure function
 	// of (tx, pre-block sender state), so all honest nodes drop the exact same txs.
 	groupedGroups = FilterInvalidSignatures(chainState, groupedGroups)
+	// Fee floor: one deterministic rule for both pipelines (native fast path and Block-STM).
+	groupedGroups = FilterBelowFeeFloor(chainState, groupedGroups)
 
 	var totalTxs int
 	for _, group := range groupedGroups {
