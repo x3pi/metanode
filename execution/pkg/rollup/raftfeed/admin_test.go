@@ -151,7 +151,16 @@ func TestC4_TransferLeaderUnderLoad(t *testing.T) {
 	}
 	ld := h.startLoad(t, 4, 0)
 	time.Sleep(300 * time.Millisecond)
-	steps, err := h.admin().TransferLeader(h.members(), target.id, false)
+	// Under CPU starvation (100 ms election timeout, parallel packages) a re-election can be in flight when the tool asks
+	// for the leader; that is "no leader", not a failure of the transfer. Retry only on that transient refusal.
+	var steps []string
+	var err error
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		steps, err = h.admin().TransferLeader(h.members(), target.id, false)
+		if err == nil || !(strings.Contains(err.Error(), "no leader") || strings.Contains(err.Error(), "no quorum")) {
+			break
+		}
+	}
 	if err != nil {
 		t.Fatalf("transfer: %v (steps %v)", err, steps)
 	}
@@ -359,7 +368,7 @@ func TestC4_EmptyReplicaRefusedWhenLogCompacted(t *testing.T) {
 		t.Fatalf("expected a refusal about the compacted log, got %v", err)
 	}
 	// force it at the node level
-	if err := l.node.AddMember("n3", "n3", false); err != nil {
+	if err := h.addMember("n3", "n3", false); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "the empty replica to stop itself", 15*time.Second, func() bool { return n3.node.Failed() })
@@ -397,7 +406,7 @@ func TestC4_NodeRefusesUnsafeMembershipCalls(t *testing.T) {
 	h := newHarness(t, 3)
 	h.startAll()
 	l := h.leader()
-	if err := l.node.AddMember("n9", "n9", true); err == nil {
+	if err := h.addMember("n9", "n9", true); err == nil {
 		t.Fatal("a brand-new replica was added straight as a voter")
 	}
 	if err := l.node.RemoveMember(l.id); err == nil {
@@ -413,11 +422,11 @@ func TestC4_NodeRefusesUnsafeMembershipCalls(t *testing.T) {
 			}
 		}
 	}
-	if err := l.node.AddMember("n0x", "n0x", false); err != nil {
+	if err := h.addMember("n0x", "n0x", false); err != nil {
 		t.Fatal(err)
 	}
 	// a non-voter that does not exist as a process cannot be promoted
-	if err := l.node.AddMember("n0x", "n0x", true); err == nil {
+	if err := h.addMember("n0x", "n0x", true); err == nil {
 		t.Fatal("an unreachable non-voter was promoted")
 	}
 }
@@ -559,14 +568,14 @@ func TestC4_NodeRefusesPromotingALaggingReplica(t *testing.T) {
 	n3 := h.newMember("n3")
 	h.join = map[string]bool{"n3": true}
 	h.start(n3)
-	if err := l.node.AddMember("n3", "n3", false); err != nil {
+	if err := h.addMember("n3", "n3", false); err != nil {
 		t.Fatal(err)
 	}
 	h.isolate(n3) // its HTTP endpoint answers, its Raft transport does not: it cannot catch up
 	for i := 0; i < 150; i++ {
 		h.submit(l, testBatch(t, uint64(i)))
 	}
-	err := l.node.AddMember("n3", "n3", true)
+	err := h.addMember("n3", "n3", true)
 	if err == nil || !strings.Contains(err.Error(), "behind") {
 		t.Fatalf("a lagging non-voter was promoted (or wrong error): %v", err)
 	}
@@ -604,11 +613,11 @@ func TestC4_NodeRefusesPromotingAReplicaThatHasNotExecuted(t *testing.T) {
 	n3.disk.mu.Unlock()
 	h.join = map[string]bool{"n3": true}
 	h.start(n3)
-	if err := l.node.AddMember("n3", "n3", false); err != nil {
+	if err := h.addMember("n3", "n3", false); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "n3 to apply the log", 15*time.Second, func() bool { return n3.node.Status().AppliedIndex+promoteMaxLag >= l.node.Status().CommitIndex })
-	err := l.node.AddMember("n3", "n3", true)
+	err := h.addMember("n3", "n3", true)
 	if err == nil || !strings.Contains(err.Error(), "executed") {
 		t.Fatalf("a replica that has not executed the log was promoted (or wrong error): %v", err)
 	}
