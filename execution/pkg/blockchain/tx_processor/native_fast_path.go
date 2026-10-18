@@ -193,6 +193,13 @@ func processNativeTransfersFastPath(
 					var err error
 					if blobErr != nil {
 						err = blobErr
+						// Match TrueBlockSTM and blobFeeOrReject's contract: a tx included in the block with an error
+						// receipt still consumes the sender's nonce so its receipt does not contradict account state.
+						_ = globalAccountDB.PlusOneNonce(tx.FromAddress())
+						_ = globalAccountDB.SetLastHash(tx.FromAddress(), tx.Hash())
+						if tx.NewDeviceKey() != (common.Hash{}) {
+							_ = globalAccountDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+						}
 					} else if grouptxns.IsNativeParallelAddress(tx.FromAddress()) || grouptxns.IsNativeParallelAddress(toAddress) {
 						err = globalAccountDB.ExecuteNativeTransfer(tx.FromAddress(), toAddress, tx.Amount(), totalFee, tx.Hash(), tx.NewDeviceKey())
 					} else {

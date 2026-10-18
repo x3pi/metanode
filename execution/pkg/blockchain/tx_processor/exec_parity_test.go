@@ -137,18 +137,66 @@ func TestExecParity_FailedThenValidSameSender(t *testing.T) {
 // admission-only ValidMaxFee), with the filter bypassed so the cache stays cold.
 func TestExecParity_FastPathIndependentOfSkipSignatureVerify(t *testing.T) {
 	const price = uint64(mt_common.MINIMUM_BASE_FEE)
-	// actual fee for an existing recipient = TRANSFER_GAS_COST*price (20000*price); MaxFee would be 21000*price.
-	balance := big.NewInt(0).Add(big.NewInt(5), new(big.Int).Mul(big.NewInt(int64(mt_common.TRANSFER_GAS_COST)), new(big.Int).SetUint64(price)))
+	// actual fee per tx for an existing recipient = TRANSFER_GAS_COST*price (20000*price); MaxFee would be 21000*price.
+	// Fund enough for 2 txs' actual cost (2 * (20000*price + 5)) plus 500_000, so after tx #0 (nonce 0, fee-exempt at
+	// admission), tx #1 (nonce 1, NOT fee-exempt at admission) has enough for the real execution cost (20000*price + 5)
+	// but less than ValidMaxFee (21000*price + 5).
+	oneTxActual := new(big.Int).Add(big.NewInt(5), new(big.Int).Mul(big.NewInt(int64(mt_common.TRANSFER_GAS_COST)), new(big.Int).SetUint64(price)))
+	balance := new(big.Int).Mul(oneTxActual, big.NewInt(2))
 	balance.Add(balance, big.NewInt(500_000))
 	mk := func(a, b common.Address) []mt_types.Transaction {
-		return []mt_types.Transaction{parityTx(a, b, 0, 5, price)}
+		return []mt_types.Transaction{
+			parityTx(a, b, 0, 5, price),
+			parityTx(a, b, 1, 5, price),
+		}
 	}
-	// nonce 0 is fee-exempt at admission, so use a state nonce of 0 but also exercise a nonce-1 tx below.
 	skipTrue, _ := runParity(t, false, true, balance, mk)
 	skipFalse, _ := runParity(t, false, false, balance, mk)
 	assert.Equal(t, skipTrue, skipFalse, "fast-path outcome must not depend on skipSignatureVerify")
-	require.Equal(t, 1, skipFalse.receipts)
-	assert.Equal(t, pb.RECEIPT_STATUS_RETURNED, skipFalse.statuses[0])
+	require.Equal(t, 2, skipFalse.receipts)
+	assert.Equal(t, []pb.RECEIPT_STATUS{pb.RECEIPT_STATUS_RETURNED, pb.RECEIPT_STATUS_RETURNED}, skipFalse.statuses)
+	assert.Equal(t, uint64(2), skipFalse.senderNon)
+}
+
+// A native blob transfer rejected by blobFeeOrReject (e.g. MaxFeePerBlobGas below blockBlobBaseFee) still produces an
+// error receipt in the block and therefore must consume the sender's nonce in both pipelines so a subsequent tx from
+// the same sender in the same block executes identically.
+func TestExecParity_RejectedBlobTransferStillConsumesNonce(t *testing.T) {
+	const price = uint64(1)
+	mk := func(a, b common.Address) []mt_types.Transaction {
+		underpricedBlobTx := transaction.TransactionFromProto(&pb.Transaction{
+			Type:                3,
+			FromAddress:         a.Bytes(),
+			ToAddress:           b.Bytes(),
+			Amount:              big.NewInt(10).Bytes(),
+			MaxGas:              21000,
+			MaxGasPrice:         price,
+			GasFeeCap:           big.NewInt(int64(price)).Bytes(),
+			GasTipCap:           big.NewInt(0).Bytes(),
+			Nonce:               make([]byte, 8), // nonce 0
+			ChainID:             parityChainID,
+			BlobVersionedHashes: [][]byte{{0x01}},
+			MaxFeePerBlobGas:    big.NewInt(0).Bytes(), // 0 < min blob base fee (1 wei)
+		})
+		return []mt_types.Transaction{
+			underpricedBlobTx,
+			parityTx(a, b, 1, 5, price),
+		}
+	}
+	fast, beforeF := runParity(t, false, true, big.NewInt(100_000), mk)
+	stm, beforeS := runParity(t, true, true, big.NewInt(100_000), mk)
+
+	for name, r := range map[string]parityResult{"fast-path": fast, "block-stm": stm} {
+		require.Equal(t, 2, r.receipts, name)
+		assert.Equal(t, []pb.RECEIPT_STATUS{pb.RECEIPT_STATUS_TRANSACTION_ERROR, pb.RECEIPT_STATUS_RETURNED}, r.statuses, name)
+		assert.Equal(t, uint64(0), r.gasUsed[0], "%s: rejected blob tx must report 0 gas used", name)
+		assert.Equal(t, uint64(2), r.senderNon, "%s: rejected blob tx must still advance nonce so tx #2 executes", name)
+	}
+	assert.Equal(t, 0, fast.senderBal.Cmp(stm.senderBal), "sender balance fast %s stm %s", fast.senderBal, stm.senderBal)
+	assert.Equal(t, 0, fast.toBal.Cmp(stm.toBal), "recipient balance fast %s stm %s", fast.toBal, stm.toBal)
+	assert.Equal(t, fast.gasUsed, stm.gasUsed, "receipt gas must not depend on the pipeline")
+	assert.Equal(t, 0, fast.totalAfter.Cmp(beforeF), "fast-path supply must be conserved")
+	assert.Equal(t, 0, stm.totalAfter.Cmp(beforeS), "block-stm supply must be conserved")
 }
 
 func TestFeeFloorOK(t *testing.T) {
