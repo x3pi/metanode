@@ -126,16 +126,29 @@ func (h *CrossNodeHandler) HandleTransfer(
 	}
 
 	// 5. Apply Actions Atomically (In Memory / DB)
+	// Every error return below must leave the account state exactly as it was: the caller (the Parent Chain gateway
+	// handler) consumes the sender's nonce itself when HandleTransfer fails, and an error after the deduction used to
+	// both lose the value and make the caller bump an already-bumped nonce.
+	origNonce := stateDB.GetNonce(sender)
+	var deducted []Action
 	for _, action := range actions {
 		if action.Type == ActionDeductBalance {
 			stateDB.SubBalance(action.Target, action.Amount)
+			deducted = append(deducted, action)
 		}
+	}
+	rollback := func() {
+		for _, d := range deducted {
+			_ = stateDB.AddBalance(d.Target, d.Amount)
+		}
+		stateDB.SetNonce(sender, origNonce)
 	}
 
 	if err := store.IncrementFloatSeq(); err != nil {
+		rollback()
 		return common.Hash{}, fmt.Errorf("failed to increment float seq: %w", err)
 	}
-	stateDB.SetNonce(sender, stateDB.GetNonce(sender)+1)
+	stateDB.SetNonce(sender, origNonce+1)
 
 	// 6. Create and Save Record
 	record := &MessageRecord{
@@ -153,6 +166,7 @@ func (h *CrossNodeHandler) HandleTransfer(
 	}
 
 	if err := store.Put(record); err != nil {
+		rollback()
 		return common.Hash{}, fmt.Errorf("failed to save rollup record: %w", err)
 	}
 

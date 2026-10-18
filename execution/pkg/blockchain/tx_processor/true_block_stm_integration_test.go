@@ -244,10 +244,19 @@ func TestProcessTransactionsOptimistic_MixedBlock_LeaderRewardNotLost(t *testing
 	// nativeReceiver is never seeded (a genuinely brand-new account), so the native leg
 	// also pays the anti-dust-account surcharge (EXE-03 fix, 2026-08-27, see
 	// note/threat_matrix_verified_fixes_execution_plan.md Task 4): TRANSFER_GAS_COST +
-	// CallNewAccountGas, on top of the unrelated STM leg's own TRANSFER_GAS_COST.
-	wantFee := new(big.Int).SetUint64(2*mt_common.TRANSFER_GAS_COST + params.CallNewAccountGas)
+	// CallNewAccountGas. The STM leg is the nonce-0 BLS registration, which is FREE by protocol: it debits nothing, so
+	// the leader must earn nothing from it (this test used to expect a further TRANSFER_GAS_COST here, i.e. a reward
+	// for a fee no account paid -- see TestAccountSetting_BlsRegistrationIsFreeAndRewardsNobody).
+	wantFee := new(big.Int).SetUint64(mt_common.TRANSFER_GAS_COST + params.CallNewAccountGas)
 	if leaderState.TotalBalance().Cmp(wantFee) != 0 {
-		t.Errorf("leader reward = %s, want %s (native fee [+ new-account surcharge] + STM fee, no lost update)", leaderState.TotalBalance(), wantFee)
+		t.Errorf("leader reward = %s, want %s (native fee + new-account surcharge only; the free registration earns the leader nothing)", leaderState.TotalBalance(), wantFee)
+	}
+	blsState, err := cs.GetAccountStateDB().AccountState(blsSender)
+	if err != nil || blsState == nil {
+		t.Fatalf("expected the registering account to exist, err=%v", err)
+	}
+	if blsState.TotalBalance().Cmp(big.NewInt(1_000_000)) != 0 {
+		t.Errorf("the free registration debited the sender: balance %s, want 1000000", blsState.TotalBalance())
 	}
 }
 

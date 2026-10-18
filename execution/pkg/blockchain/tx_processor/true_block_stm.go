@@ -24,6 +24,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	mt_state "github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
@@ -600,10 +601,13 @@ func (stm *TrueBlockSTM) execOne(
 						stm.accountMap.Write(fromAddr, mvcc.Version(txIndex), fromAccount.Copy())
 						mvccDB.WriteSet[fromAddr] = true
 
+						// The nonce-0 BLS registration is free by protocol (the account has no balance yet; mempool admission
+						// exempts it too). Nothing is debited, so no gas is reported: the leader reward is re-derived from
+						// receipt gas, and reporting gas here minted GasUsed x price out of thin air for every registration.
 						rcp = receipt.NewReceipt(
 							tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 							pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-							tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
+							tx.EffectiveGasPrice().Uint64(), 0,
 							[]types.EventLog{}, 0, common.Hash{}, 0,
 						)
 					}
@@ -618,7 +622,17 @@ func (stm *TrueBlockSTM) execOne(
 						tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 					)
 				} else {
-					fromAccount.SetAccountType(acType)
+					// Unlike the nonce-0 registration, this tx is not free: it must really pay, or the receipt (and the
+					// leader reward derived from it) would bill a fee nobody paid.
+					accSetFee := new(big.Int).Mul(new(big.Int).SetUint64(mt_common.TRANSFER_GAS_COST), tx.EffectiveGasPrice())
+					var feeErr error
+					if accSetFee.Sign() > 0 {
+						feeErr = mvccDB.SubTotalBalance(fromAddr, accSetFee)
+					}
+					if feeErr == nil {
+						fromAccount.SetAccountType(acType)
+					}
+					// Included in the block either way, so the nonce is consumed (same rule as a failed transfer).
 					mvccDB.PlusOneNonce(fromAddr)
 					mvccDB.SetLastHash(fromAddr, tx.Hash())
 					commitDeviceKeyIfPending(chainState, tx.Hash())
@@ -626,12 +640,20 @@ func (stm *TrueBlockSTM) execOne(
 					stm.accountMap.Write(fromAddr, mvcc.Version(txIndex), fromAccount.Copy())
 					mvccDB.WriteSet[fromAddr] = true
 
-					rcp = receipt.NewReceipt(
-						tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
-						pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-						tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
-						[]types.EventLog{}, 0, common.Hash{}, 0,
-					)
+					if feeErr != nil {
+						rcp = receipt.NewReceipt(
+							tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
+							pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte("insufficient balance for gas"), pb.EXCEPTION_NONE,
+							tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
+						)
+					} else {
+						rcp = receipt.NewReceipt(
+							tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
+							pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
+							tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
+							[]types.EventLog{}, 0, common.Hash{}, 0,
+						)
+					}
 				}
 			} else {
 				logger.Warn("Unknown Account Setting selector or invalid nonce for TX %s", tx.Hash().Hex())
@@ -707,7 +729,15 @@ func (stm *TrueBlockSTM) execOne(
 			}
 		}
 
-		if tx.IsRegularTransaction() {
+		// A plain value transfer (no calldata) to an address that has code must go through the EVM so its
+		// receive()/fallback/delegate runs (classifyGroup already routes such txs to this pipeline for that reason; the
+		// native branch below only moves balance and used to skip the code silently). The code check uses the chain state
+		// as of the START of the batch -- the same boundary grouptxns.HasCodeFunc documents for classification -- not a
+		// per-tx MVCC read, so a delegation created by an earlier tx of the same batch does not flip later credits
+		// (the documented, accepted limitation) and the decision is identical on every node and every re-execution.
+		nativeTransfer := tx.IsRegularTransaction() && !chainState.HasCode(tx.ToAddress())
+
+		if nativeTransfer {
 			// Native Transfer
 			var newAccountGas uint64
 			toAddr := tx.ToAddress()
@@ -743,7 +773,12 @@ func (stm *TrueBlockSTM) execOne(
 				errSub = errors.New("gas limit too low: intrinsic gas plus the new-account surcharge exceed MaxGas")
 			}
 
+			// Free-fee txs (to/from a configured free address) pay no fee, in every pipeline (see isFeeExempt).
+			feeExempt := isFeeExempt(chainState, tx)
 			gasFee := new(big.Int).Mul(new(big.Int).SetUint64(totalGasUsed), tx.EffectiveGasPrice())
+			if feeExempt {
+				gasFee = new(big.Int)
+			}
 
 			// EIP-4844: blob fee is burned (never added to totalGasFee / leader
 			// reward, unlike gasFee above) — see blobFeeOrReject's doc. blobErr
@@ -761,7 +796,7 @@ func (stm *TrueBlockSTM) execOne(
 			// receipt.GasUsed() x EffectiveGasPrice(), so a failed tx whose fee was NOT debited must report
 			// GasUsed 0 -- otherwise the leader is credited fee that no account paid (supply inflation), and the
 			// result would differ from the native fast path, which never rewards a failed transfer.
-			feeCharged := true
+			feeCharged := !feeExempt
 			if errSub == nil {
 				if blobErr != nil {
 					errSub = blobErr
@@ -775,8 +810,10 @@ func (stm *TrueBlockSTM) execOne(
 			} else {
 				// Failed early due to intrinsic gas or out of gas: charge the gas fee; if the balance cannot
 				// cover even that, nothing is debited.
-				if errFee := mvccDB.SubTotalBalance(tx.FromAddress(), gasFee); errFee != nil {
-					feeCharged = false
+				if gasFee.Sign() > 0 {
+					if errFee := mvccDB.SubTotalBalance(tx.FromAddress(), gasFee); errFee != nil {
+						feeCharged = false
+					}
 				}
 			}
 
@@ -818,10 +855,14 @@ func (stm *TrueBlockSTM) execOne(
 				}
 
 				// Create receipt for native transfer
+				successGas := totalGasUsed
+				if feeExempt {
+					successGas = 0 // nothing charged => nothing to report or to reward
+				}
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
 					pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-					tx.EffectiveGasPrice().Uint64(), totalGasUsed,
+					tx.EffectiveGasPrice().Uint64(), successGas,
 					[]types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			}
@@ -983,6 +1024,17 @@ func (stm *TrueBlockSTM) execOne(
 							}
 						}
 					} // end of canPayGas
+					if !canPayGas {
+						// The receipt says "failed, nothing charged": the stored EVM result must say the same. The raw
+						// result still carries the successful run's deployed bytecode / code hash / storage root /
+						// BLS key / account type / event logs, and the end-of-block merge (applyCodeAndStorageRootOnly,
+						// flushEventLogs) applies whatever sits in scResults without looking at the receipt -- which
+						// would commit a contract and logs for a transaction that was rejected. Keep only the outcome.
+						exRs = smart_contract.NewExecuteSCResult(
+							tx.Hash(), receiptStatus, exception, ret, 0, common.Hash{},
+							nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+						)
+					}
 				}
 				mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
 				mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())

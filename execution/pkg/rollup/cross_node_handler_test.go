@@ -1,6 +1,7 @@
 package rollup
 
 import (
+	"errors"
 	"math/big"
 	"sync"
 	"testing"
@@ -245,3 +246,33 @@ func TestCrossNodeHandler_NilGuards(t *testing.T) {
 	}
 }
 
+
+// failingPutStore makes the final record write fail, after the balance was deducted and the nonce bumped.
+type failingPutStore struct{ Store }
+
+func (failingPutStore) Put(*MessageRecord) error { return errors.New("disk full") }
+
+// An error AFTER the deduction must leave the account exactly as it was: the value comes back and the nonce is not
+// advanced (the Parent Chain gateway handler consumes the nonce itself when HandleTransfer fails; leaving it already
+// advanced made it skip one more nonce and strand the sender's next tx, and the value was lost for good).
+func TestHandleTransfer_PutFailureRollsBackBalanceAndNonce(t *testing.T) {
+	scDB := &mockDB{data: make(map[common.Address]map[common.Hash][]byte)}
+	store := failingPutStore{NewDBStore(scDB)}
+	stateDB := newMockAccountStateDB()
+	handler := NewCrossNodeHandler(cm.PublicKey{})
+
+	sender := common.HexToAddress("0xaaa")
+	stateDB.balances[sender] = big.NewInt(1000)
+	stateDB.nonces[sender] = 7
+
+	_, err := handler.HandleTransfer(store, stateDB, cm.PublicKey{}, sender, common.HexToAddress("0xbbb"), big.NewInt(500), common.HexToHash("0x111"))
+	if err == nil {
+		t.Fatal("expected the failing store to surface an error")
+	}
+	if got := stateDB.GetBalance(sender); got.Cmp(big.NewInt(1000)) != 0 {
+		t.Fatalf("balance not restored after a failed transfer: have %v, want 1000", got)
+	}
+	if got := stateDB.GetNonce(sender); got != 7 {
+		t.Fatalf("nonce must be left untouched on error, have %d, want 7", got)
+	}
+}

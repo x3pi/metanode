@@ -71,10 +71,10 @@ func (h *ValidatorHandler) HandleTransaction(ctx context.Context, chainState *bl
 	switch method.Name {
 	case "registerValidator":
 		isCall = true
-		eventLogs, logicErr = h.handleRegisterValidator(chainState, tx, method, inputData[4:], blockTime)
+		eventLogs, logicErr = h.handleRegisterValidator(chainState, tx, method, inputData[4:], blockTime, true)
 	case "deregisterValidator":
 		isCall = true
-		eventLogs, logicErr = h.handleDeregisterValidator(chainState, tx, blockTime)
+		eventLogs, logicErr = h.handleDeregisterValidator(chainState, tx, blockTime, true)
 	case "setCommissionRate":
 		isCall = true
 		eventLogs, logicErr = h.handleSetCommissionRate(inputData[4:], method, chainState, tx, blockTime)
@@ -130,6 +130,7 @@ func (h *ValidatorHandler) handleRegisterValidator(
 	chainState *blockchain.ChainState, tx types.Transaction,
 	method *abi.Method, inputData []byte,
 	blockTime uint64,
+	notifyConsensus bool,
 ) ([]types.EventLog, error) {
 	stakeStateDB := chainState.GetStakeStateDB()
 	args, err := method.Inputs.Unpack(inputData)
@@ -209,7 +210,11 @@ func (h *ValidatorHandler) handleRegisterValidator(
 
 	// 📢 Notify Rust Metanode about committee change
 	validatorCount, _ := stakeStateDB.GetValidatorCount()
-	executor.NotifyValidatorRegistered(0, validatorAddr.Hex(), uint64(validatorCount))
+	// Only a real block execution may tell the consensus engine about a committee change; an eth_call/estimateGas
+	// simulation runs this same handler against a throwaway state and must have no side effect outside it.
+	if notifyConsensus {
+		executor.NotifyValidatorRegistered(0, validatorAddr.Hex(), uint64(validatorCount))
+	}
 
 	return eventLogs, nil
 }
@@ -217,6 +222,7 @@ func (h *ValidatorHandler) handleRegisterValidator(
 func (h *ValidatorHandler) handleDeregisterValidator(
 	chainState *blockchain.ChainState, tx types.Transaction,
 	blockTime uint64,
+	notifyConsensus bool,
 ) ([]types.EventLog, error) {
 	validatorAddr := tx.FromAddress()
 	stakeStateDB := chainState.GetStakeStateDB()
@@ -251,7 +257,9 @@ func (h *ValidatorHandler) handleDeregisterValidator(
 
 	// 📢 Notify Rust Metanode about committee change
 	validatorCount, _ := stakeStateDB.GetValidatorCount()
-	executor.NotifyValidatorDeregistered(0, validatorAddr.Hex(), uint64(validatorCount))
+	if notifyConsensus {
+		executor.NotifyValidatorDeregistered(0, validatorAddr.Hex(), uint64(validatorCount))
+	}
 
 	return eventLogs, nil
 }
@@ -273,6 +281,10 @@ func (h *ValidatorHandler) handleSetCommissionRate(
 		return nil, fmt.Errorf("lỗi unpack input: %w", err)
 	}
 	newRate, _ := args[0].(uint64)
+	// Same bound as registerValidator: a rate above 100% makes the delegators' share (reward - commission) negative.
+	if newRate > 10000 {
+		return nil, fmt.Errorf("Commission rate too high")
+	}
 
 	stakeStateDB.SetCommissionRate(validatorAddr, newRate)
 
@@ -469,7 +481,15 @@ func (h *ValidatorHandler) handleUnDelegate(
 func (h *ValidatorHandler) _withdrawRewards(tx types.Transaction, chainState *blockchain.ChainState, validator state.ValidatorState, delegatorAddr common.Address, amount *big.Int) (types.EventLog, error) {
 	acc, _ := chainState.GetAccountStateDB().AccountState(tx.ToAddress())
 	delegator, _ := chainState.GetAccountStateDB().AccountState(delegatorAddr)
-	// check tiền rút có lớn hơn tiền SM
+	// Check the contract can pay BEFORE touching the reward ledger: WithdrawRewardFromValidator zeroes the delegator's
+	// pending reward, so failing afterwards (and reporting the tx as reverted) would destroy a reward that was never paid.
+	pending, err := chainState.GetStakeStateDB().GetPendingRewards(validator.Address(), delegatorAddr)
+	if err != nil {
+		return nil, err
+	}
+	if acc.TotalBalance().Cmp(new(big.Int).Add(pending, amount)) < 0 {
+		return nil, fmt.Errorf("Insufficient validator balance.")
+	}
 	rewardAmount, err := chainState.GetStakeStateDB().WithdrawRewardFromValidator(validator.Address(), delegatorAddr)
 	if err != nil {
 		return nil, err
@@ -533,77 +553,17 @@ func (h *ValidatorHandler) handleWithdrawRewards(
 
 	return eventLogs, nil
 }
+// handleDistributeRewards is disabled. Block rewards are distributed by the protocol itself, once per block
+// (RewardBlockLeader), and the gas fee share is credited to the validator contract as custody for the delegators'
+// claims. This manual entry point took ANY caller's amount out of the contract's whole balance -- which also holds every
+// delegator's staked principal and every unclaimed reward -- and paid the "commission" part to the validator owner: a
+// validator that sets its commission to 100% could drain the stake pool with one call.
 func (h *ValidatorHandler) handleDistributeRewards(
-
 	inputData []byte,
 	method *abi.Method,
 	chainState *blockchain.ChainState,
 	tx types.Transaction,
 	blockTime uint64,
 ) ([]types.EventLog, error) {
-
-	toAddress := tx.ToAddress()
-	accountStateDB := chainState.GetAccountStateDB()
-	stakeStateDB := chainState.GetStakeStateDB()
-
-	args, err := method.Inputs.Unpack(inputData)
-	if err != nil {
-		return nil, fmt.Errorf("unpack distributeRewards params: %w", err)
-	}
-
-	validatorAddr, _ := args[0].(common.Address)
-	rewardAmount, _ := args[1].(*big.Int)
-
-	if rewardAmount.Sign() <= 0 {
-		return nil, fmt.Errorf("reward must be positive")
-	}
-
-	validator, err := stakeStateDB.GetValidator(validatorAddr)
-	if err != nil {
-		return nil, fmt.Errorf("get validator state: %w", err)
-	}
-	if validator == nil {
-		return nil, fmt.Errorf("validator does not exist")
-	}
-
-	contractAccount, err := accountStateDB.AccountState(toAddress)
-	if err != nil {
-		return nil, fmt.Errorf("get contract account state: %w", err)
-	}
-	if contractAccount.TotalBalance().Cmp(rewardAmount) < 0 {
-		return nil, fmt.Errorf("insufficient contract balance to distribute rewards")
-	}
-	if validator.TotalStakedAmount().Sign() <= 0 {
-		return nil, fmt.Errorf("no delegators staking with this validator")
-	}
-	reward, _ := stakeStateDB.DistributeRewardsToValidator(validatorAddr, rewardAmount)
-	if rewardAmount.Sign() > 0 {
-		ownerAddr := validator.Address()
-		ownerAccount, _ := accountStateDB.AccountState(ownerAddr)
-
-		err = chainState.TransferFrom(contractAccount, ownerAccount, big.NewInt(0).Sub(rewardAmount, reward))
-		if err != nil {
-			return nil, fmt.Errorf("failed to transfer commission: %w", err)
-		}
-	}
-	eventDef, ok := h.abi.Events["RewardsDistributed"]
-	if !ok {
-		return nil, fmt.Errorf("event 'RewardsDistributed' not found in ABI")
-	}
-
-	eventData, err := eventDef.Inputs.NonIndexed().Pack(rewardAmount)
-	if err != nil {
-		return nil, fmt.Errorf("pack event data 'RewardsDistributed': %w", err)
-	}
-
-	eventLog := smart_contract.NewEventLog(
-		tx.Hash(),
-		toAddress,
-		eventData,
-		[][]byte{
-			eventDef.ID.Bytes(),
-			validatorAddr.Bytes(),
-		},
-	)
-	return []types.EventLog{eventLog}, nil
+	return nil, fmt.Errorf("distributeRewards is disabled: rewards are distributed per block by the protocol")
 }

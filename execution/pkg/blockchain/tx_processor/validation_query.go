@@ -79,9 +79,9 @@ func (h *ValidatorHandler) HandleOffChainQuery(tx types.Transaction, chainState 
 	var logicErr error
 	switch method.Name {
 	case "registerValidator":
-		_, logicErr = h.handleRegisterValidator(chainState, tx, method, inputData[4:], blockTime)
+		_, logicErr = h.handleRegisterValidator(chainState, tx, method, inputData[4:], blockTime, false)
 	case "deregisterValidator":
-		_, logicErr = h.handleDeregisterValidator(chainState, tx, blockTime)
+		_, logicErr = h.handleDeregisterValidator(chainState, tx, blockTime, false)
 	case "setCommissionRate":
 		_, logicErr = h.handleSetCommissionRate(inputData[4:], method, chainState, tx, blockTime)
 	case "updateValidatorInfo":

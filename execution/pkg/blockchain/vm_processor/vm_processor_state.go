@@ -551,7 +551,7 @@ func (vmP *VmProcessor) UpdateStateDB(
 		if mvmRs.GasUsed > 0 && !isFreeGass {
 			fromAddr := transaction.FromAddress()
 			gasUsedBig := new(big.Int).SetUint64(mvmRs.GasUsed)
-			gasPriceBig := new(big.Int).SetUint64(transaction.MaxGasPrice())
+			gasPriceBig := new(big.Int).Set(transaction.EffectiveGasPrice())
 			gasFee := new(big.Int).Mul(gasUsedBig, gasPriceBig)
 			errSub := vmP.accountStateDB.SubTotalBalance(fromAddr, gasFee)
 			if errSub != nil {
@@ -1075,7 +1075,7 @@ func (vmP *VmProcessor) UpdateStateDB(
 	if mvmRs.GasUsed > 0 && !isFreeGass {
 		fromAddr := transaction.FromAddress()
 		gasUsedBig := new(big.Int).SetUint64(mvmRs.GasUsed)
-		gasPriceBig := new(big.Int).SetUint64(transaction.MaxGasPrice())
+		gasPriceBig := new(big.Int).Set(transaction.EffectiveGasPrice())
 		gasFee := new(big.Int).Mul(gasUsedBig, gasPriceBig)
 		vmP.accountStateDB.SubTotalBalance(fromAddr, gasFee)
 	}

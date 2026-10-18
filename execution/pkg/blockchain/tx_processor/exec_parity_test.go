@@ -13,6 +13,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	mt_state "github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	mt_types "github.com/meta-node-blockchain/meta-node/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -210,7 +211,11 @@ func TestFeeFloorOK(t *testing.T) {
 	assert.False(t, feeFloorOK(parityTx(a, b, 7, 1, min-1), free), "one below the floor")
 	assert.True(t, feeFloorOK(parityTx(a, b, 7, 1, min), free), "exactly the floor")
 	assert.True(t, feeFloorOK(parityTx(a, b, 7, 1, min+1), free))
-	assert.True(t, feeFloorOK(parityTx(a, b, 0, 1, 0), free), "nonce 0 is exempt, like at admission")
+	assert.False(t, feeFloorOK(parityTx(a, b, 0, 1, 0), free), "a nonce-0 transfer pays like any other (only the BLS registration is free)")
+	reg := transaction.NewTransaction(a, utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT), big.NewInt(0), 21000, 0, 1000, nil, nil, common.Hash{}, common.Hash{}, 0, parityChainID)
+	assert.True(t, feeFloorOK(reg, free), "the nonce-0 BLS registration to the account setting address is free")
+	regLater := transaction.NewTransaction(a, utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT), big.NewInt(0), 21000, 0, 1000, nil, nil, common.Hash{}, common.Hash{}, 3, parityChainID)
+	assert.False(t, feeFloorOK(regLater, free), "only the nonce-0 registration is free, not later account-setting txs")
 	assert.True(t, feeFloorOK(parityTx(a, freeAddr, 7, 1, 0), free), "free recipient is exempt")
 	assert.True(t, feeFloorOK(parityTx(freeAddr, b, 7, 1, 0), free), "free sender is exempt")
 }

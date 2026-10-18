@@ -166,7 +166,10 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 			defer mvm.UnprotectMVMApi(vmP.mvmId)
 		}
 
-		if tx.IsRegularTransaction() || tx.ToAddress() == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
+		// A plain value transfer (no calldata) to an address that has code must run that code (receive()/fallback or an
+		// EIP-7702 delegate), exactly like mainnet and like the grouping step assumes (grouptxns.HasCodeFunc);
+		// sendNative only moves balance.
+		if (tx.IsRegularTransaction() && !vmP.recipientHasCode(tx.ToAddress())) || tx.ToAddress() == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 			mvmRs, execErr = vmP.sendNative(execCtx, tx, mvmE, isCache)
 		} else if tx.IsDeployContract() {
 			if !tx.ValidDeployData() {
@@ -551,6 +554,16 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(
 }
 
 // executeSmartContract xử lý việc thực thi smart contract (call).
+// recipientHasCode reports whether addr currently has code (a deployed contract or an EIP-7702-delegated EOA) in the
+// state view this processor executes against. Same predicate as ChainState.HasCode, which the grouping step uses.
+func (vmP *VmProcessor) recipientHasCode(addr common.Address) bool {
+	if vmP.accountStateDB == nil {
+		return false
+	}
+	as, err := vmP.accountStateDB.AccountState(addr)
+	return err == nil && as != nil && as.SmartContractState() != nil
+}
+
 func (vmP *VmProcessor) sendNative(
 	ctx context.Context,
 	tx types.Transaction,

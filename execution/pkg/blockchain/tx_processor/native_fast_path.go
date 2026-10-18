@@ -160,20 +160,25 @@ func processNativeTransfersFastPath(
 					// NATIVE TRANSFER EXECUTION (directly on global DB)
 					// ═══════════════════════════════════════════════════
 					toAddress := tx.ToAddress()
-					_, isFree := chainState.GetFreeFeeAddress()[toAddress]
+					// Free-fee txs (to/from a configured free address) are charged NOTHING here and in Block-STM. This path
+					// used to bill MAX_GASS_FEE (5M gas, 250x a normal transfer) for them: that constant is the gas LIMIT
+					// the VM grants free contracts, not a price.
+					feeExempt := isFeeExempt(chainState, tx)
 					baseGasCost := uint64(mt_common.TRANSFER_GAS_COST)
 					if !globalAccountDB.ExistAccount(toAddress) {
 						baseGasCost += params.CallNewAccountGas
 					}
 					gasLimit := baseGasCost
-					if isFree {
-						gasLimit = uint64(mt_common.MAX_GASS_FEE)
-					}
 					// EffectiveGasPrice dispatches by tx type: flat MaxGasPrice for
 					// Legacy/EIP-2930, GasFeeCap for EIP-1559/EIP-4844/later — tx.MaxGasPrice()
 					// alone is 0 by design for the latter (see EffectiveGasPrice's doc),
 					// which previously made this fast path charge zero execution fee for them.
 					gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasLimit), tx.EffectiveGasPrice())
+					receiptGas := baseGasCost
+					if feeExempt {
+						gasFee = new(big.Int)
+						receiptGas = 0 // nothing charged => no gas to report (the leader reward in Block-STM is derived from it)
+					}
 
 					// EIP-4844: blob fee is burned — deducted from the sender in the same
 					// call as gasFee (ExecuteNativeTransfer only takes one fee param), but
@@ -225,14 +230,14 @@ func processNativeTransfersFastPath(
 					rcp := receipt.NewReceipt(
 						tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 						pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-						tx.EffectiveGasPrice().Uint64(), baseGasCost,
+						tx.EffectiveGasPrice().Uint64(), receiptGas,
 						[]types.EventLog{}, 0, common.Hash{}, 0,
 					)
 
 					// Create minimal ExecuteSCResult (for consistency with pipeline)
 					exRs := smart_contract.NewExecuteSCResult(
 						tx.Hash(), pb.RECEIPT_STATUS_RETURNED, pb.EXCEPTION_NONE, nil,
-						baseGasCost, common.Hash{},
+						receiptGas, common.Hash{},
 						nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 					)
 
@@ -318,7 +323,9 @@ func processNativeTransfersFastPath(
 	// Apply total gas fee to leader (coinbase), split between validator commission and
 	// delegators' pro-rata share -- see RewardBlockLeader's doc comment for why this happens
 	// per block rather than batched at epoch boundary.
-	RewardBlockLeader(chainState, leaderAddr, totalBlockGasFee, globalAccountDB.AddPendingBalance)
+	// AddBalance (as Block-STM does), not AddPendingBalance: the same reward must land in the same account field
+	// whichever pipeline executed the block. All workers have finished, so no extra locking is needed.
+	RewardBlockLeader(chainState, leaderAddr, totalBlockGasFee, globalAccountDB.AddBalance)
 
 	// Record Block-STM metrics (1 round, 0 conflicts for fast-path)
 	metrics.BlockStmRounds.Observe(1.0)

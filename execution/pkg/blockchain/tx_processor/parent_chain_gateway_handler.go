@@ -305,10 +305,13 @@ func (h *ParentChainGatewayHandler) HandleTransaction(
 
 	// Route the transfer to the actual CrossNodeHandler logic.
 	// NOTE: The dispatcher itself deducts the balance using AccountStateDB and records the transfer event.
+	preNonce := stateDB.GetNonce(tx.FromAddress())
 	msgID, err := h.dispatcher.HandleTransfer(newLiveRollupStore(chainState), stateDB, destPubKey, tx.FromAddress(), targetAddr, tx.Amount(), payloadHash)
 	if err != nil {
 		logger.Error("❌ ParentChainGatewayHandler: Dispatcher failed: %v", err)
-		stateDB.SetNonce(tx.FromAddress(), stateDB.GetNonce(tx.FromAddress())+1)
+		// Set (not "+1"): a failing dispatcher may already have advanced the nonce, and adding one more would skip a
+		// nonce and strand the sender's next tx.
+		stateDB.SetNonce(tx.FromAddress(), preNonce+1)
 		return h.errorReceipt(tx, err.Error()), nil, nil
 	}
 

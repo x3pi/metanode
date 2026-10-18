@@ -818,6 +818,23 @@ func (h *GatewayHandler) handleWrite(
 			// insufficient allowance/balance in the token contract) FIRST, then burn the
 			// native Tip LAST, so Tip can never be stuck-burned by a subsequent asset-lock
 			// failure.
+			//
+			// The mirror-image failure (token locked, then the native Tip/GasFee burn fails and the tx
+			// reverts with the token already taken) is closed by checking the native balance BEFORE the
+			// lock, so the burn below cannot run short once the lock has happened.
+			preExtras := big.NewInt(0)
+			if params.Tip != nil && params.Tip.Sign() > 0 {
+				preExtras.Add(preExtras, params.Tip)
+			}
+			if params.GasFee != nil && params.GasFee.Sign() > 0 {
+				preExtras.Add(preExtras, params.GasFee)
+			}
+			if preExtras.Sign() > 0 {
+				fromAcc, accErr := chainState.GetAccountStateDB().AccountState(tx.FromAddress())
+				if accErr != nil || fromAcc == nil || fromAcc.TotalBalance().Cmp(preExtras) < 0 {
+					return nil, nil, fmt.Errorf("outbound: insufficient native balance for tip/gasFee (checked before locking the asset)")
+				}
+			}
 			if params.Value != nil && params.Value.Sign() > 0 {
 				asset, err := engine.AssetRegistry.GetAsset(params.AssetID)
 				if err != nil {

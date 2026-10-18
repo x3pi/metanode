@@ -447,7 +447,8 @@ func VerifyTransaction(
 	if !isFree {
 		_, isFree = chainState.GetFreeFeeAddress()[tx.FromAddress()]
 	}
-	if tx.GetNonce() == 0 {
+	// Only the BLS-key registration is free at nonce 0 (see isFreeRegistrationTx); every other nonce-0 tx pays.
+	if isFreeRegistrationTx(tx) {
 		isFree = true
 	}
 

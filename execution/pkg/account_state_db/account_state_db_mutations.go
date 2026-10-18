@@ -540,9 +540,10 @@ func (db *AccountStateDB) ExecuteNativeTransferLockFree(
 	// must consume its nonce or its own receipt contradicts the account's
 	// own nonce bookkeeping).
 	as.SetNonce(as.Nonce() + 1)
-	if newDeviceKey != (common.Hash{}) {
-		as.SetNewDeviceKey(newDeviceKey)
-	}
+	// Same bookkeeping as ExecuteNativeTransfer and Block-STM: LastHash and the (possibly empty) device key are part of the
+	// account state, so skipping them made the resulting state depend on whether the lock-free or the locked variant ran.
+	as.SetLastHash(txHash)
+	as.SetNewDeviceKey(newDeviceKey)
 	db.setDirtyAccountState(as)
 
 	// SubTotalBalance in-place -- may fail (insufficient balance); the
