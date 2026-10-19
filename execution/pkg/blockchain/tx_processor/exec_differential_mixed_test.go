@@ -10,9 +10,11 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	mt_types "github.com/meta-node-blockchain/meta-node/types"
 )
@@ -24,6 +26,26 @@ import (
 // rollup system 0x72) carry malformed calldata here, which is the case where nonce and fee handling used to diverge.
 
 var diffMixedLeader = common.HexToAddress("0xAAAA000000000000000000000000000000000001")
+
+// diffEscrow receives the value a valid parent-chain gateway transfer locks (the real dispatcher moves it into the float
+// account); keeping it in the watch list lets the test check supply conservation across that barrier tx.
+var diffEscrow = common.HexToAddress("0x000000000000000000000000000000000000BEEF")
+
+// statefulGatewayDispatcher is a deterministic stand-in for the cross-chain dispatcher: it debits the sender and credits
+// diffEscrow, and refuses a transfer the sender cannot cover. It keeps no state of its own, so it is safe to share.
+type statefulGatewayDispatcher struct{}
+
+func (statefulGatewayDispatcher) HandleTransfer(_ rollup.Store, st AccountStateAccessor, _ mt_common.PublicKey,
+	sender, target common.Address, value *big.Int, payloadHash common.Hash) (common.Hash, error) {
+	if st.GetBalance(sender).Cmp(value) < 0 {
+		return common.Hash{}, fmt.Errorf("insufficient balance for cross-chain transfer")
+	}
+	st.SubBalance(sender, value)
+	if err := st.AddBalance(diffEscrow, value); err != nil {
+		return common.Hash{}, err
+	}
+	return crypto.Keccak256Hash(sender.Bytes(), target.Bytes(), value.Bytes(), payloadHash.Bytes()), nil
+}
 
 type mixedFixture struct {
 	native   []diffAccount // plain transfers among these
@@ -73,7 +95,18 @@ func mixedBlock(t *testing.T, r *rand.Rand, f mixedFixture, contract common.Addr
 	for i := 0; i < n; i++ {
 		from := f.evm[r.Intn(len(f.evm))].addr
 		var tx mt_types.Transaction
-		switch r.Intn(4) {
+		switch r.Intn(5) {
+		case 4: // valid parent-chain gateway transfer: destPubKey(48) || payloadHash(32) || target(20) in a CallData envelope
+			raw := make([]byte, 0, 100)
+			key := make([]byte, 48)
+			r.Read(key)
+			raw = append(raw, key...)
+			raw = append(raw, make([]byte, 32)...)
+			raw = append(raw, f.native[r.Intn(len(f.native))].addr.Bytes()...)
+			data, _ := transaction.NewCallData(raw).Marshal()
+			tx = transaction.NewTransaction(from, mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS, big.NewInt(int64(r.Intn(3000))),
+				gasLimits[r.Intn(len(gasLimits))], prices[r.Intn(len(prices))], uint64(5000+i), data, nil,
+				common.Hash{}, common.Hash{}, next(from), 991)
 		case 0: // deploy
 			args, _ := testWrappedAssetABI(t).Pack("", big.NewInt(int64(1000+r.Intn(1000))))
 			tx = newHighGasTx(from, common.Address{}, next(from), big.NewInt(0), append(append([]byte{}, code...), args...))
@@ -114,9 +147,19 @@ func mixedRun(t *testing.T, seed int64, useSTMOnly bool) (mixedOutcome, []mt_typ
 		seedAccount(t, cs, a.addr, big.NewInt(a.balance), 0)
 		supplyBefore.Add(supplyBefore, big.NewInt(a.balance))
 	}
+	// the parent-chain gateway refuses senders that are not registered on the parent chain (account gate)
+	for _, a := range f.evm {
+		if err := cs.GetAccountStateDB().SetParentRegistered(a.addr, true); err != nil {
+			t.Fatalf("register %s: %v", a.addr.Hex(), err)
+		}
+	}
+	seedAccount(t, cs, diffEscrow, big.NewInt(0), 0)
+	prevHandler := parentChainGatewayHandlerInstance
+	parentChainGatewayHandlerInstance = &ParentChainGatewayHandler{dispatcher: statefulGatewayDispatcher{}}
+	t.Cleanup(func() { parentChainGatewayHandlerInstance = prevHandler })
 	contract := deployTestWrappedAsset(t, cs, f.deployer, big.NewInt(1000))
 	// the deployer pays gas for the pre-deploy, so the supply baseline is read after it
-	watch := []common.Address{diffMixedLeader, f.deployer, contract}
+	watch := []common.Address{diffMixedLeader, f.deployer, contract, diffEscrow}
 	for _, a := range append(append([]diffAccount{}, f.native...), f.evm...) {
 		watch = append(watch, a.addr)
 	}
@@ -214,6 +257,14 @@ func TestExecDifferential_MixedBlocks_OptimisticVsTrueBlockSTMOnly(t *testing.T)
 		for name, o := range map[string]mixedOutcome{"optimistic": opt, "stm-only": ref} {
 			if o.supply.Cmp(before) != 0 {
 				t.Errorf("seed %d %s: supply not conserved, before %s after %s\n%s", seed, name, before, o.supply, describeMixed(txs))
+			}
+		}
+		// Block-STM bugs depend on goroutine scheduling: run the reference again and require the identical outcome.
+		for rep := 0; rep < 2; rep++ {
+			again, _, _ := mixedRun(t, seed, true)
+			if strings.Join(again.accounts, "\n") != strings.Join(ref.accounts, "\n") || strings.Join(again.receipts, "\n") != strings.Join(ref.receipts, "\n") {
+				t.Errorf("seed %d: Block-STM gave a different outcome on repeat %d for the same block\n%s", seed, rep+1, describeMixed(txs))
+				break
 			}
 		}
 		same := strings.Join(opt.accounts, "\n") == strings.Join(ref.accounts, "\n") &&
