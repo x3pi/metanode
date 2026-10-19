@@ -536,7 +536,7 @@ func (stm *TrueBlockSTM) execOne(
 
 		// This incarnation wrote nothing (nonce check failed before any write),
 		// so every address/slot the previous incarnation wrote is now orphaned.
-		stm.cleanupStaleWrites(txIndex, oldWriteSet, mvccDB.WriteSet, oldScWriteSet, scDB.WriteSet)
+		removedAddrs, removedSc := stm.cleanupStaleWrites(txIndex, oldWriteSet, mvccDB.WriteSet, oldScWriteSet, scDB.WriteSet)
 		stm.registerReaders(int(txIndex), mvccDB.ReadSet, scDB.ReadSet)
 
 		for {
@@ -546,6 +546,8 @@ func (stm *TrueBlockSTM) execOne(
 				break
 			}
 		}
+		// Whatever the previous incarnation wrote is gone: anything that read it must be re-validated.
+		stm.cascadeInvalidate(ctx, int(txIndex), removedAddrs, removedSc, validateCh, activeTasks, doneCh)
 		atomic.AddInt32(activeTasks, 1)
 		pushTask(ctx, validateCh, txIndex)
 		return
@@ -1088,7 +1090,7 @@ func (stm *TrueBlockSTM) execOne(
 	// Remove anything the PREVIOUS incarnation wrote that this one didn't
 	// rewrite (e.g. a different branch taken this time). Keys written by both
 	// incarnations were already overwritten in place during execution above.
-	stm.cleanupStaleWrites(txIndex, oldWriteSet, mvccDB.WriteSet, oldScWriteSet, scDB.WriteSet)
+	removedAddrs, removedSc := stm.cleanupStaleWrites(txIndex, oldWriteSet, mvccDB.WriteSet, oldScWriteSet, scDB.WriteSet)
 	stm.registerReaders(int(txIndex), mvccDB.ReadSet, scDB.ReadSet)
 
 	// 5. Mark as Executed
@@ -1102,7 +1104,26 @@ func (stm *TrueBlockSTM) execOne(
 
 	// Targeted cascade invalidation: only TXs that actually read one of the
 	// addresses/slots this incarnation just wrote need to be re-validated.
-	stm.cascadeInvalidate(ctx, int(txIndex), mvccDB.WriteSet, scDB.WriteSet, validateCh, activeTasks, doneCh)
+	// Keys this incarnation stopped writing (removedAddrs/removedSc) are invalidated for the same reason: their readers
+	// saw a value that no longer exists.
+	invAddrs, invSc := mvccDB.WriteSet, scDB.WriteSet
+	if len(removedAddrs) > 0 || len(removedSc) > 0 {
+		invAddrs = make(map[common.Address]bool, len(mvccDB.WriteSet)+len(removedAddrs))
+		for a := range mvccDB.WriteSet {
+			invAddrs[a] = true
+		}
+		for a := range removedAddrs {
+			invAddrs[a] = true
+		}
+		invSc = make(map[string]bool, len(scDB.WriteSet)+len(removedSc))
+		for k := range scDB.WriteSet {
+			invSc[k] = true
+		}
+		for k := range removedSc {
+			invSc[k] = true
+		}
+	}
+	stm.cascadeInvalidate(ctx, int(txIndex), invAddrs, invSc, validateCh, activeTasks, doneCh)
 
 	// 6. Push to validation AFTER cascading is fully complete
 	atomic.AddInt32(activeTasks, 1)
@@ -1280,16 +1301,25 @@ func (stm *TrueBlockSTM) validateOne(
 // execution, and deleting-then-rewriting them would only bump their WriteID
 // for no reason, needlessly invalidating readers who already saw this exact
 // value.
+//
+// It returns the keys it DELETED. Every reader of a deleted key read a value that no longer exists, so the caller must
+// cascade-invalidate them: a tx that read the previous incarnation's write and is never re-validated keeps results
+// computed from state that was not committed (found by the mixed-block differential test: a rejected duplicate-nonce
+// tx's speculative write was read by the sender's next tx, which then lost the earlier tx's debit).
 func (stm *TrueBlockSTM) cleanupStaleWrites(
 	txIndex uint32,
 	oldWriteSet map[common.Address]bool,
 	newWriteSet map[common.Address]bool,
 	oldScWriteSet map[string]bool,
 	newScWriteSet map[string]bool,
-) {
+) (removedAddrs map[common.Address]bool, removedSc map[string]bool) {
 	for addr := range oldWriteSet {
 		if !newWriteSet[addr] {
 			stm.accountMap.Delete(addr, mvcc.Version(txIndex))
+			if removedAddrs == nil {
+				removedAddrs = make(map[common.Address]bool)
+			}
+			removedAddrs[addr] = true
 		}
 	}
 	for sKey := range oldScWriteSet {
@@ -1297,9 +1327,14 @@ func (stm *TrueBlockSTM) cleanupStaleWrites(
 			if len(sKey) >= 42 {
 				addr := common.HexToAddress(sKey[:42])
 				stm.storageMap.Delete(addr, sKey[42:], mvcc.Version(txIndex))
+				if removedSc == nil {
+					removedSc = make(map[string]bool)
+				}
+				removedSc[sKey] = true
 			}
 		}
 	}
+	return removedAddrs, removedSc
 }
 
 // registerReaders records that txIndex read the given addresses/storage-slots,
