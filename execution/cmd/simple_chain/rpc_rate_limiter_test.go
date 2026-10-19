@@ -586,3 +586,43 @@ func TestRPCRateLimiter_IPTableIsBounded(t *testing.T) {
 	assert.Equal(t, int64(count), rl.ipCount.Load(), "the counter must match the table")
 	assert.Same(t, rl.overflow, rl.getIPEntry("203.0.113.250"), "an address beyond the cap uses the shared overflow entry")
 }
+
+func TestRPCRateLimiter_WebSocketEmptyFragmentsRawBytesCapped(t *testing.T) {
+	c := newWSRateLimitConn(nil, nil, "127.0.0.1", nil)
+	first := &wsParsedFrame{fin: false, opcode: 1, masked: true, rawBytes: []byte{1, 129, 0, 0, 0, 0, 'a'}, payload: []byte{'a'}}
+	require.NoError(t, c.handleFrame(first))
+	empty := &wsParsedFrame{fin: false, opcode: 0, masked: true, rawBytes: []byte{0, 128, 0, 0, 0, 0}}
+	for i := 0; i < maxWSMessagePayload/6+1; i++ {
+		if err := c.handleFrame(empty); err != nil {
+			return // successfully capped and rejected
+		}
+	}
+	t.Fatalf("accepted raw buffered bytes=%d with payload bytes=%d; message cap=%d", c.fragRawBytes.Len(), c.fragPayload.Len(), maxWSMessagePayload)
+}
+
+func TestRPCRateLimiter_WebSocketCloseUnblocksRead(t *testing.T) {
+	rl := NewRPCRateLimiter(&config.RpcRateLimitConfig{Enabled: true, GlobalRate: 1000, PerIpRate: 1000, BlockDurationSecs: 5})
+	defer rl.Close()
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	wrapped := newWSRateLimitConn(serverConn, nil, "192.168.1.63", rl)
+
+	readDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 64)
+		_, err := wrapped.Read(buf)
+		readDone <- err
+	}()
+
+	// Close from another goroutine while Read is blocked waiting for network data
+	time.Sleep(10 * time.Millisecond)
+	err := wrapped.Close()
+	assert.NoError(t, err)
+
+	select {
+	case readErr := <-readDone:
+		assert.Error(t, readErr, "Read must be unblocked by Close")
+	case <-time.After(2 * time.Second):
+		t.Fatal("wrapped.Close() did not unblock concurrent wrapped.Read() - potential deadlock")
+	}
+}

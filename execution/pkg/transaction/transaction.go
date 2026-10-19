@@ -68,6 +68,7 @@ type Transaction struct {
 	cachedEthTx       atomic.Pointer[e_types.Transaction]
 	cachedEthHash     atomic.Pointer[common.Hash]
 	cachedEnvTx       atomic.Pointer[envelopeDecode]
+	cachedGasPriceCap atomic.Pointer[big.Int]
 
 	isDebug bool
 }
@@ -728,6 +729,7 @@ func (t *Transaction) ClearCacheHash() {
 	t.cachedEthTx.Store(nil)
 	t.cachedEthHash.Store(nil)
 	t.cachedEnvTx.Store(nil)
+	t.cachedGasPriceCap.Store(nil)
 }
 
 func (t *Transaction) EthHash() common.Hash {
@@ -1197,12 +1199,21 @@ func (t *Transaction) MaxGasPrice() uint64 {
 // flat MaxGasPrice for Legacy/EIP-2930/Type 0xFF, GasFeeCap for EIP-1559/EIP-4844/EIP-7702.
 // Used for admission gate (>= MINIMUM_BASE_FEE) and balance checks (gasLimit * cap + value) (ADR D2).
 func (t *Transaction) GasPriceCap() *big.Int {
+	if t == nil || t.proto == nil {
+		return big.NewInt(0)
+	}
+	if c := t.cachedGasPriceCap.Load(); c != nil {
+		return c
+	}
+	var res *big.Int
 	switch t.proto.Type {
 	case 0, 1, 0xFF: // Legacy, EIP-2930, Type 0xFF (SecpProto)
-		return big.NewInt(0).SetUint64(t.proto.MaxGasPrice)
+		res = big.NewInt(0).SetUint64(t.proto.MaxGasPrice)
 	default: // EIP-1559, EIP-4844, and later fee-cap-based types
-		return t.GasFeeCap()
+		res = t.GasFeeCap()
 	}
+	t.cachedGasPriceCap.Store(res)
+	return res
 }
 
 // EffectiveGasPrice returns the price-per-gas-unit this tx actually pays for

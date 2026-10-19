@@ -144,6 +144,10 @@ func (tp *TransactionPool) CountTransactions() int {
 }
 
 func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
+	return tp.EvictLowestGasPriceThan(countToEvict, nil)
+}
+
+func (tp *TransactionPool) EvictLowestGasPriceThan(countToEvict int, minNewGas *big.Int) int {
 	if countToEvict <= 0 {
 		return 0
 	}
@@ -179,19 +183,51 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 		shard.mu.RUnlock()
 	}
 
+	if len(allInfos) == 0 {
+		return 0
+	}
+
+	// Sort by GasPrice ascending, so eviction still respects the fee market as
+	// the primary signal -- but break ties by nonce DESCENDING
+	sort.Slice(allInfos, func(i, j int) bool {
+		cmp := allInfos[i].gas.Cmp(allInfos[j].gas)
+		if cmp != 0 {
+			return cmp < 0
+		}
+		return allInfos[i].nonce > allInfos[j].nonce
+	})
+
+	// When minNewGas is provided, only evict transactions paying strictly less than minNewGas
+	if minNewGas != nil {
+		actualCount := 0
+		for actualCount < countToEvict && actualCount < len(allInfos) {
+			if allInfos[actualCount].gas.Cmp(minNewGas) >= 0 {
+				break
+			}
+			actualCount++
+		}
+		countToEvict = actualCount
+		if countToEvict == 0 {
+			return 0
+		}
+	}
+
 	if len(allInfos) <= countToEvict {
 		// Evict all
 		var totalEvicted int
 		for i := 0; i < NumShards; i++ {
 			shard := tp.shards[i]
 			shard.mu.Lock()
-			totalEvicted += len(shard.transactions)
-			shard.transactions = make([]types.Transaction, 0)
-			shard.transactionKeys = make(map[txPoolKey]bool)
-			shard.txHashMap = make(map[common.Hash]types.Transaction)
+			n := len(shard.transactions)
+			if n > 0 {
+				totalEvicted += n
+				shard.transactions = make([]types.Transaction, 0)
+				shard.transactionKeys = make(map[txPoolKey]bool)
+				shard.txHashMap = make(map[common.Hash]types.Transaction)
+			}
 			shard.mu.Unlock()
 		}
-		atomic.StoreInt64(&tp.count, 0)
+		atomic.AddInt64(&tp.count, int64(-totalEvicted))
 		return totalEvicted
 	}
 
@@ -301,6 +337,48 @@ func checkPriceBump(oldPrice, newPrice *big.Int) bool {
 	}
 	threshold := new(big.Int).Add(oldPrice, bump)
 	return newPrice.Cmp(threshold) >= 0
+}
+
+// TxAddStatus indicates whether a transaction is new, an in-place replacement, duplicate, or underpriced.
+type TxAddStatus int
+
+const (
+	TxAddStatusNew TxAddStatus = iota
+	TxAddStatusReplace
+	TxAddStatusDuplicate
+	TxAddStatusUnderpriced
+)
+
+// CheckAddStatus inspects whether tx would be a net-new addition, an in-place replacement,
+// a duplicate, or an underpriced replacement. It does not modify pool state.
+func (tp *TransactionPool) CheckAddStatus(tx types.Transaction) (TxAddStatus, error) {
+	if tx == nil {
+		return TxAddStatusNew, fmt.Errorf("tx nil")
+	}
+	from := tx.FromAddress()
+	shardIdx := tp.getShardIndex(from)
+	shard := tp.shards[shardIdx]
+
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+
+	key := txPoolKey{addr: from, nonce: tx.GetNonce()}
+	if !shard.transactionKeys[key] {
+		return TxAddStatusNew, nil
+	}
+
+	for _, t := range shard.transactions {
+		if t.FromAddress() == key.addr && t.GetNonce() == key.nonce {
+			if t.Hash() == tx.Hash() {
+				return TxAddStatusDuplicate, transaction.ErrAlreadyKnown
+			}
+			if !checkPriceBump(t.EffectiveGasPrice(), tx.EffectiveGasPrice()) {
+				return TxAddStatusUnderpriced, transaction.ErrReplacementUnderpriced
+			}
+			return TxAddStatusReplace, nil
+		}
+	}
+	return TxAddStatusDuplicate, transaction.ErrAlreadyKnown
 }
 
 func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {

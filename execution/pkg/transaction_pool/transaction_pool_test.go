@@ -642,5 +642,81 @@ func TestEvictLowestGasPrice_BigIntFeeCapNoTruncation(t *testing.T) {
 	assert.Equal(t, txHuge.Hash(), remaining[0].Hash(), "Huge fee cap tx must not be evicted ahead of lower fee tx")
 }
 
+func TestEvictLowestGasPrice_EvictAllPreservesConcurrentCount(t *testing.T) {
+	pool := NewTransactionPool()
+	tx1 := makeTestTx(0x10, 0)
+	require.NoError(t, pool.AddTransaction(tx1))
+
+	// Evict countToEvict=10 (> 1)
+	evicted := pool.EvictLowestGasPrice(10)
+	assert.Equal(t, 1, evicted)
+	assert.Equal(t, 0, pool.CountTransactions())
+
+	// Add another transaction and evict again with countToEvict >= existing
+	tx2 := makeTestTx(0x11, 0)
+	require.NoError(t, pool.AddTransaction(tx2))
+	assert.Equal(t, 1, pool.CountTransactions())
+
+	evicted = pool.EvictLowestGasPrice(5)
+	assert.Equal(t, 1, evicted)
+	assert.Equal(t, 0, pool.CountTransactions(), "Count must be exactly 0, not desynced")
+}
+
+func TestCheckAddStatus_Cases(t *testing.T) {
+	pool := NewTransactionPool()
+	tx1 := makeTestTx(0x20, 0)
+	require.NoError(t, pool.AddTransaction(tx1))
+
+	// 1. Same transaction hash -> Duplicate
+	status, err := pool.CheckAddStatus(tx1)
+	assert.ErrorIs(t, err, transaction.ErrAlreadyKnown)
+	assert.Equal(t, TxAddStatusDuplicate, status)
+
+	// 2. Same sender and nonce, but different gas price
+	from := tx1.FromAddress()
+	to := tx1.ToAddress()
+	// Same nonce 0, different payload/amount, lower or same gas price -> Underpriced
+	txUnderpriced := transaction.NewTransaction(
+		from, to, big.NewInt(200), 21000, 1, 0, nil, nil,
+		common.Hash{}, common.Hash{}, 0, 1,
+	)
+	status, err = pool.CheckAddStatus(txUnderpriced)
+	assert.ErrorIs(t, err, transaction.ErrReplacementUnderpriced)
+	assert.Equal(t, TxAddStatusUnderpriced, status)
+
+	// Same nonce 0, higher gas price (>= 10% bump) -> Replace
+	txReplacement := transaction.NewTransaction(
+		from, to, big.NewInt(100), 21000, 2, 0, nil, nil,
+		common.Hash{}, common.Hash{}, 0, 1,
+	)
+	status, err = pool.CheckAddStatus(txReplacement)
+	assert.NoError(t, err)
+	assert.Equal(t, TxAddStatusReplace, status)
+
+	// 3. New nonce or new sender -> New
+	txNew := makeTestTx(0x21, 0)
+	status, err = pool.CheckAddStatus(txNew)
+	assert.NoError(t, err)
+	assert.Equal(t, TxAddStatusNew, status)
+}
+
+func TestEvictLowestGasPriceThan_FloorRespected(t *testing.T) {
+	pool := NewTransactionPool()
+	tx1 := makeTestTxWithGas(0x30, 0, 100, []byte{1})
+	require.NoError(t, pool.AddTransaction(tx1))
+
+	// An incoming transaction has gas price 50 (< existing 100)
+	// It should NOT evict existing higher-paying transaction!
+	evicted := pool.EvictLowestGasPriceThan(1, big.NewInt(50))
+	assert.Equal(t, 0, evicted, "Must not evict tx that pays more than incoming tx")
+	assert.Equal(t, 1, pool.CountTransactions())
+
+	// An incoming transaction has gas price 200 (> existing 100)
+	// Now it CAN evict the lower-paying transaction
+	evicted = pool.EvictLowestGasPriceThan(1, big.NewInt(200))
+	assert.Equal(t, 1, evicted)
+	assert.Equal(t, 0, pool.CountTransactions())
+}
+
 
 

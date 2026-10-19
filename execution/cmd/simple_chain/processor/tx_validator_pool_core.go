@@ -390,32 +390,39 @@ func (vp *TxValidatorPool) addTransactionToPoolInternalCap(tx types.Transaction,
 		}
 	}
 
-	// Limit pool size to prevent GC stall / OOM.
-	// Only evict AFTER verifying that the incoming transaction is valid!
-	//
-	// CRITICAL: EvictLowestGasPrice does a full scan of every shard plus an
-	// O(n log n) sort of the entire pool just to remove a handful of entries
-	// (see transaction_pool.go). Found live (2026-09-02) under a sustained
-	// burst of real transactions: once the pool sits at/above MaxMempoolSize,
-	// EVERY concurrent incoming tx re-enters this branch and — without a
-	// guard — EVERY one of them independently launches another full-pool
-	// scan+sort. With thousands of concurrent submissions (e.g. 3000+ RPC
-	// connections under load) and a pool sitting at 200k+ entries, that's
-	// thousands of redundant O(n log n) passes running at once.
-	//
-	// Fix: only one eviction pass runs at a time. Concurrent callers that
-	// find one already in flight skip straight to the "pool full" rejection
-	// instead of also scanning+sorting the whole pool — the in-flight pass
-	// will make room shortly regardless.
-	if enforceCap && vp.transactionPool.CountTransactions() >= MaxMempoolSize {
+	// PRE-EVICTION VALIDATION: check duplicate and replacement conditions BEFORE evicting.
+	// Otherwise, an existing or underpriced transaction could evict legitimate transactions
+	// only to be rejected in AddTransaction.
+	addStatus, statusErr := vp.transactionPool.CheckAddStatus(tx)
+	if statusErr != nil {
+		var te *transaction.TransactionError
+		if errors.As(statusErr, &te) {
+			return te.Code, statusErr
+		}
+		if errors.Is(statusErr, transaction.ErrAlreadyKnown) {
+			return transaction.ErrAlreadyKnown.Code, fmt.Errorf("%w: transaction already exists in pool, skipping", transaction.ErrAlreadyKnown)
+		}
+		if errors.Is(statusErr, transaction.ErrReplacementUnderpriced) {
+			return transaction.ErrReplacementUnderpriced.Code, fmt.Errorf("%w: replacement transaction underpriced", transaction.ErrReplacementUnderpriced)
+		}
+		return transaction.InvalidTransaction.Code, statusErr
+	}
+
+	// In-place replacement (TxAddStatusReplace) does not increase pool size, so no eviction is needed.
+	// Only net-new transactions (TxAddStatusNew) need room made when pool sits at capacity.
+	if enforceCap && addStatus == transaction_pool.TxAddStatusNew && vp.transactionPool.CountTransactions() >= MaxMempoolSize {
+		newGas := tx.GasPriceCap()
+		if newGas == nil {
+			newGas = new(big.Int).SetUint64(tx.MaxGasPrice())
+		}
 		if vp.evictionInProgress.CompareAndSwap(false, true) {
 			evicted := func() int {
 				defer vp.evictionInProgress.Store(false)
 				logger.Warn("⚠️ Mempool is full (limit=%d). Evicting lowest-fee transactions to make room for new txs.", MaxMempoolSize)
-				return vp.transactionPool.EvictLowestGasPrice(mempoolEvictBatchSize)
+				return vp.transactionPool.EvictLowestGasPriceThan(mempoolEvictBatchSize, newGas)
 			}()
 			if evicted == 0 {
-				return transaction.AddToPoolError.Code, fmt.Errorf("transaction pool is full (limit=%d) and could not evict", MaxMempoolSize)
+				return transaction.AddToPoolError.Code, fmt.Errorf("transaction pool is full (limit=%d) and transaction underpriced to evict", MaxMempoolSize)
 			}
 		} else {
 			return transaction.AddToPoolError.Code, fmt.Errorf("transaction pool is full (limit=%d), eviction already in progress", MaxMempoolSize)
@@ -643,13 +650,22 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transact
 
 	t3 := time.Now()
 	validTxs = make([]types.Transaction, 0, len(txs))
-	// Sequentially gather the valid transactions (extremely fast, zero contention)
+	// Sequentially gather the valid transactions and filter duplicates/replacements before eviction
+	netNewCount := 0
 	for i, tx := range txs {
 		if tx == nil {
 			errorsList[i] = fmt.Errorf("tx nil")
 			continue
 		}
 		if errorsList[i] == nil {
+			status, err := vp.transactionPool.CheckAddStatus(tx)
+			if err != nil {
+				errorsList[i] = err
+				continue
+			}
+			if status == transaction_pool.TxAddStatusNew {
+				netNewCount++
+			}
 			validTxs = append(validTxs, tx)
 		}
 	}
@@ -657,12 +673,13 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transact
 
 	t4 := time.Now()
 	// Limit pool size to prevent GC stall / OOM
-	// Eviction runs AFTER verification so invalid spam transactions do not evict legitimate mempool transactions
-	if enforceCap && len(validTxs) > 0 && vp.transactionPool.CountTransactions()+len(validTxs) >= MaxMempoolSize {
+	// Eviction runs AFTER verification so invalid spam transactions do not evict legitimate mempool transactions.
+	// Only net-new additions require space; in-place replacements do not increase pool size.
+	if enforceCap && netNewCount > 0 && vp.transactionPool.CountTransactions()+netNewCount >= MaxMempoolSize {
 		if vp.evictionInProgress.CompareAndSwap(false, true) {
 			evicted := func() int {
 				defer vp.evictionInProgress.Store(false)
-				evictCount := len(validTxs)
+				evictCount := netNewCount
 				if evictCount < 1000 {
 					evictCount = 1000
 				}

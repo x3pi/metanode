@@ -425,6 +425,7 @@ type wsRateLimitConn struct {
 
 	readMu       sync.Mutex
 	closed       bool
+	inFragment   bool
 	rawIn        bytes.Buffer
 	pendingRead  bytes.Buffer
 	fragRawBytes bytes.Buffer
@@ -441,14 +442,19 @@ func newWSRateLimitConn(conn net.Conn, initialReader io.Reader, ip string, rl *R
 }
 
 func (c *wsRateLimitConn) Close() error {
+	var err error
+	if c.Conn != nil {
+		err = c.Conn.Close()
+	}
 	c.readMu.Lock()
 	c.closed = true
+	c.inFragment = false
 	c.rawIn.Reset()
 	c.pendingRead.Reset()
 	c.fragRawBytes.Reset()
 	c.fragPayload.Reset()
 	c.readMu.Unlock()
-	return c.Conn.Close()
+	return err
 }
 
 func (c *wsRateLimitConn) readRaw(buf []byte) (int, error) {
@@ -562,13 +568,16 @@ func (c *wsRateLimitConn) handleFrame(frame *wsParsedFrame) error {
 	}
 
 	// Check if this is part of a fragmented message
-	isFragmented := !frame.fin || c.fragPayload.Len() > 0
+	isFragmented := !frame.fin || c.inFragment
 
 	if isFragmented {
-		if c.fragPayload.Len()+len(unmasked) > maxWSMessagePayload {
-			_ = c.Conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
-			_, _ = c.Conn.Write([]byte{0x88, 0x02, 0x03, 0xf1}) // 1009 Message Too Big
-			_ = c.Conn.Close()
+		if c.fragPayload.Len()+len(unmasked) > maxWSMessagePayload || c.fragRawBytes.Len()+len(frame.rawBytes) > maxWSMessagePayload {
+			if c.Conn != nil {
+				_ = c.Conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+				_, _ = c.Conn.Write([]byte{0x88, 0x02, 0x03, 0xf1}) // 1009 Message Too Big
+				_ = c.Conn.Close()
+			}
+			c.inFragment = false
 			c.rawIn.Reset()
 			c.pendingRead.Reset()
 			c.fragRawBytes.Reset()
@@ -579,9 +588,11 @@ func (c *wsRateLimitConn) handleFrame(frame *wsParsedFrame) error {
 		c.fragPayload.Write(unmasked)
 
 		if !frame.fin {
+			c.inFragment = true
 			// Await remaining fragments
 			return nil
 		}
+		c.inFragment = false
 	}
 
 	var fullPayload []byte
@@ -599,10 +610,13 @@ func (c *wsRateLimitConn) handleFrame(frame *wsParsedFrame) error {
 
 	if err := c.rl.CheckRequestN(c.ip, count); err != nil {
 		// Policy violation: send close frame 1008 and terminate connection
-		_ = c.Conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
-		_, _ = c.Conn.Write([]byte{0x88, 0x02, 0x03, 0xf0})
-		_ = c.Conn.Close()
+		if c.Conn != nil {
+			_ = c.Conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+			_, _ = c.Conn.Write([]byte{0x88, 0x02, 0x03, 0xf0})
+			_ = c.Conn.Close()
+		}
 
+		c.inFragment = false
 		c.rawIn.Reset()
 		c.pendingRead.Reset()
 		c.fragRawBytes.Reset()
