@@ -43,5 +43,6 @@ Thư mục này lưu trữ sổ cái kiểm chứng kỹ thuật (`CLAIMS_LEDGER
 
 - [`runbook_parent_chain_multinode.md`](./runbook_parent_chain_multinode.md) — Vận hành cụm đa node Parent Chain.
 - [`runbook_root_anchor_genesis_ceremony.md`](./runbook_root_anchor_genesis_ceremony.md) — Quy trình khởi tạo Genesis và Ủy ban Root Anchor.
+- [`runbook_deploy_audit_rounds_and_stm_fix_20261019.md`](./runbook_deploy_audit_rounds_and_stm_fix_20261019.md) — Triển khai đợt sửa execution (audit round 2/3, Block-STM `c96640f4`) và thay đổi RPC: chọn quy trình, pre-flight, Go/No-Go, rollback.
 - [`runbook_chain_death_recovery.md`](./runbook_chain_death_recovery.md) — Quy trình cứu hộ khẩn cấp khi một chuỗi ngừng hoạt động.
 - [`known_bugs/`](./known_bugs/) — Hồ sơ phân tích nguyên nhân gốc (Root Cause Postmortems) của các lỗi đồng bộ/fork lịch sử đã được khắc phục.
