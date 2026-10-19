@@ -1,6 +1,6 @@
 # Thêm Node Mới và Committee vào Go State
 
-Tài liệu này mô tả quy trình đăng ký một node mới vào hệ thống mtn-consensus/Meta-Node, bao gồm cách thêm node vào Go state và đồng bộ với committee của Rust consensus.
+Tài liệu này mô tả quy trình đăng ký một node mới vào hệ thống MetaNode, bao gồm cách thêm node vào Go state và đồng bộ với committee của Rust consensus.
 
 ## Tổng Quan Kiến Trúc
 
@@ -325,7 +325,7 @@ sequenceDiagram
 
 ## Xem Thêm
 
-- [Validator State Interface](../pkg/state/validator_state.go)
-- [Stake State DB](../pkg/state_db/stake_state_db.go)
-- [Validation Transaction Handler](../pkg/blockchain/tx_processor/validation_transaction.go)
-- [Committee Configuration](../../mtn-consensus/metanode/meta-consensus/config/src/committee.rs)
+- [Validator State Interface](../../pkg/state/validator_state.go)
+- [Stake State DB](../../pkg/state_db/stake_state_db.go)
+- [Validation Transaction Handler](../../pkg/blockchain/tx_processor/validation_transaction.go)
+- [Committee Configuration](../../../consensus/metanode/meta-consensus/config/src/committee.rs)

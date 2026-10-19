@@ -1,5 +1,5 @@
 site_name: Meta Node Documentation (Simple)
-site_description: Technical architecture and guidelines for the mtn-simple-2025 node.
+site_description: Technical architecture and guidelines for the MetaNode node.
 
 theme:
   name: material
@@ -44,12 +44,8 @@ markdown_extensions:
 
 nav:
   - Trang chủ: index.md
-  - Introduction:
-    - Context: introduction/context.md
   - Architecture:
-    - Blockchain Flow: architecture/blockchain-flow.md
     - Storage: architecture/nomt-storage-architecture.md
-    - QUIC Stream: architecture/quic--stream--architecture.md
     - Socket Protocol: architecture/socket-protocol.md
     - Gateway Native: architecture/gateway-native-execution.md
     - Message Received: architecture/message-received-handling.md
@@ -58,7 +54,6 @@ nav:
   - Core Concepts:
     - Block Signing: core-concepts/block-signing.md
     - Flat vs MPT: core-concepts/flat-vs-mpt-comparison.md
-    - Transaction Flow: core-concepts/transaction-flow.md
     - Fork Safety: core-concepts/transaction-flow-fork-safety-analysis.md
   - Performance & Scaling:
     - High Throughput: performance-scaling/high-throughput-optimization.md

@@ -3,7 +3,7 @@
 ## 1. Mục Tiêu & Bối Cảnh Thực Nghiệm
 Báo cáo kiểm thử hiệu năng trước đó ghi nhận con số đỉnh RSS lên tới ~39,080 MB (~39 GB) toàn cụm 4 node validator (~9.7 GB/node) sau khi xử lý tải 304,000 transactions (50,000 ví). Con số này làm dấy lên nghi vấn về rò rỉ bộ nhớ (memory leak) hoặc cấu hình cache không giới hạn trong execution/consensus engine.
 
-Nhiệm vụ kiểm tra theo [note/plan_fix_nomt_reports_evidence_20261007.md](file:///home/abc/chain-n/metanode/note/plan_fix_nomt_reports_evidence_20261007.md):
+Nhiệm vụ kiểm tra theo note/plan_fix_nomt_reports_evidence_20261007.md (đã hoàn tất, kế hoạch đã gỡ):
 1. Tách biệt cụm test cô lập (cổng `31xxx`, thư mục `/tmp/gate_4val_p06`) với 9 tiến trình `/opt/metanode` đang chạy ngầm của user trên máy chủ.
 2. Phân rã cấu trúc bộ nhớ: Go Heap (InUse, Idle, Released), Rust Consensus, NOMT Cache, CGO, mmap.
 3. Xác minh thực nghiệm đa đợt: Đo đạc 8 đợt tải liên tiếp (tổng 400,000 txs Secp256k1 EIP-1559) kèm lệnh gọi force GC sau mỗi đợt trên toàn bộ 4 validator để kiểm tra xu hướng tích luỹ bộ nhớ.
@@ -42,7 +42,7 @@ Trong file `execution/cmd/simple_chain/main.go`:
 ## 3. Tiêu Chuẩn Nghiệm Thu & Thực Nghiệm 8 Đợt Tải (400,000 Transactions)
 
 ### Tiêu chuẩn nghiệm thu đặt trước (A Priori Acceptance Criteria)
-Theo kế hoạch kiểm định [note/plan_fix_nomt_reports_evidence_20261007.md](file:///home/abc/chain-n/metanode/note/plan_fix_nomt_reports_evidence_20261007.md):
+Theo kế hoạch kiểm định note/plan_fix_nomt_reports_evidence_20261007.md (đã hoàn tất, kế hoạch đã gỡ):
 - **Tiêu chí độ dốc hồi quy tuyến tính:** Tính hồi quy `HeapAlloc_after_GC = m * cumulative_txs + b`. Ngưỡng ban đầu đề ra: `slope m <= 30 MB / 100k txs` (với 95% CI không chứa giá trị > 50 MB) để kết luận "bộ nhớ không đổi".
 - **Quy tắc phân loại:** Nếu $m > 30$ MB / 100k txs, đánh giá là **FAIL** đối với tiêu chí "bộ nhớ không đổi". Tiếp tục phân tích memstats stack traces để xác định nguyên nhân: nếu bộ nhớ tăng ở in-memory state/indexing thì kết luận **State Growth**, nếu tăng ở channels/goroutines thì kết luận **Memory Leak**.
 

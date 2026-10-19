@@ -1,5 +1,5 @@
 site_name: Meta Node Consensus Documentation
-site_description: Consensus protocol and epoch transition analysis for mtn-consensus.
+site_description: Consensus protocol and epoch transition analysis for MetaNode.
 
 theme:
   name: material

@@ -270,7 +270,7 @@ Go là chương trình lưu trữ và thực thi giao dịch. Khi khởi động
 
 ### Code flow
 
-**Bắt đầu tại** [app.go:184](file:///home/abc/nhat/con-chain-v2/metanode/execution/cmd/simple_chain/app.go#L184):
+**Bắt đầu tại** app.go:184:
 ```go
 // Initialize blockchain components
 if err := app.initBlockchain(); err != nil {
@@ -280,7 +280,7 @@ if err := app.initBlockchain(); err != nil {
 storage.SetBlockchainInitDone()  // ← Rust chỉ tin giá trị Go sau dòng này
 ```
 
-**Bên trong** [app_blockchain.go:28](file:///home/abc/nhat/con-chain-v2/metanode/execution/cmd/simple_chain/app_blockchain.go#L28):
+**Bên trong** app_blockchain.go:28:
 ```go
 func (app *App) initBlockchain() error {
     // 1. Mở Block Database (PebbleDB)
@@ -319,7 +319,7 @@ Rust cần biết: *Node này đang ở đâu? Epoch nào? Ai trong committee? G
 
 ### Code flow
 
-**File:** [consensus_node.rs:141](file:///home/abc/nhat/con-chain-v2/metanode/consensus/metanode/src/node/consensus_node.rs#L141)
+**File:** consensus_node.rs:141
 
 #### Bước 1: Kết nối Go và lấy block number
 
@@ -411,7 +411,7 @@ GEI = epoch_base_index + commit_index + fragment_offset
 
 ### Code flow
 
-**File:** [consensus_node.rs:1103](file:///home/abc/nhat/con-chain-v2/metanode/consensus/metanode/src/node/consensus_node.rs#L1103)
+**File:** consensus_node.rs:1103
 
 #### Bước 1: Bật Recovery Barrier
 
@@ -489,7 +489,7 @@ STARTUP-SYNC Loop:
     └─ EXIT LOOP → "Local state in sync" ✅
 ```
 
-**Code thực tế** (simplified) tại [consensus_node.rs:~1460](file:///home/abc/nhat/con-chain-v2/metanode/consensus/metanode/src/node/consensus_node.rs#L1460):
+**Code thực tế** (simplified) tại consensus_node.rs:~1460:
 
 ```rust
     loop {
@@ -534,12 +534,12 @@ STARTUP-SYNC Loop:
 ## 6. Phase 4: Rust — Networking & Epoch Management
 
 ### setup_networking()
-**File:** [consensus_node.rs:3387](file:///home/abc/nhat/con-chain-v2/metanode/consensus/metanode/src/node/consensus_node.rs#L3387)
+**File:** consensus_node.rs:3387
 
 Chỉ khởi tạo `ClockSyncManager` cho đồng bộ thời gian NTP. Node cần đồng hồ chính xác để timestamp block đúng.
 
 ### setup_epoch_management()
-**File:** [consensus_node.rs:3414](file:///home/abc/nhat/con-chain-v2/metanode/consensus/metanode/src/node/consensus_node.rs#L3414)
+**File:** consensus_node.rs:3414
 
 - **StateTransitionManager**: Quản lý chuyển đổi epoch (thay đổi committee).
 - **epoch_monitor**: Chạy nền, poll mỗi 10s, kiểm tra `local_epoch vs network_epoch`:
@@ -553,7 +553,7 @@ Chỉ khởi tạo `ClockSyncManager` cho đồng bộ thời gian NTP. Node c�
 
 Khi Rust gửi blocks cho Go qua lệnh `sync_and_execute_blocks`, Go nhận và xử lý tại:
 
-**File:** [unix_socket_handler_epoch.go:1422](file:///home/abc/nhat/con-chain-v2/metanode/execution/executor/unix_socket_handler_epoch.go#L1422)
+**File:** unix_socket_handler_epoch.go:1422
 
 ```
 HandleSyncBlocksRequest(blocks)

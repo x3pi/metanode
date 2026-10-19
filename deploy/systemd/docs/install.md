@@ -1,7 +1,7 @@
 
 # 🔧 Giải thích chi tiết `install.sh` và file cấu hình JSON/TOML
 
-> Tài liệu này dành cho developer/maintainer của dự án muốn hiểu **cơ chế bên trong** của script deployment. Người vận hành node (node operator) bình thường chỉ cần đọc tài liệu [Validator Setup](./validator-setup) hoặc [Sync-Only Setup](./synconly-setup).
+> Tài liệu này dành cho developer/maintainer của dự án muốn hiểu **cơ chế bên trong** của script deployment. Người vận hành node (node operator) bình thường chỉ cần đọc tài liệu Validator Setup hoặc Sync-Only Setup.
 
 ---
 

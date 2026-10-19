@@ -49,7 +49,7 @@
 ## 📂 Cấu trúc Thư mục Chính
 
 - `src/lib.rs` & `src/ffi/`: Điểm vào C-ABI FFI (`start_consensus_node_ffi`, `submit_transactions_ffi`, callbacks sang Go).
-- `src/node/`: Quản lý vòng đời `ConsensusNode`, khởi tạo Ủy ban (`committee.rs`), đồng bộ Epoch (`epoch_monitor.rs`, `transition/`) và `executor_client/`.
+- `src/node/`: Quản lý vòng đời `ConsensusNode`, khởi tạo Ủy ban (`committee.rs`), đồng bộ Epoch (`epoch_monitor/mod.rs`, `transition/`) và `executor_client/`.
 - `src/consensus/`: Điều phối `commit_processor/`, `epoch_transition.rs`, `tx_recycler.rs`.
 - `meta-consensus/core/`: Lõi thuật toán Mysticeti DAG-BFT (`authority_node.rs`, `linearizer.rs`, `commit_vote_monitor.rs`, `coordination_hub.rs`, `commit_syncer/`).
 - `scripts/`:

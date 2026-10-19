@@ -67,7 +67,7 @@ Do SyncOnly không có consensus stream liên tục, nó rất dễ bị tình t
 *   **Vấn đề**: Go Master báo Epoch 2 đã bắt đầu, nhưng có thể nó chưa tải xong 100 block cuối của Epoch 1.
 *   **Giải pháp**: `EpochMonitor` phải thực hiện **Wait Barrier**:
     ```rust
-    // Logic trong epoch_monitor.rs
+    // Logic trong epoch_monitor/mod.rs
     loop {
         if go_last_block >= peer_last_block {
              break; // Safe to transition

@@ -28,7 +28,7 @@ graph TD
 
 ## 🚀 Phase 1: Smart Contract Khởi Tạo (Solidity)
 
-Bắt đầu từ hàm [runStep1_Setup](file:///home/abc/nhat/con-chain-v2/metanode/execution/cmd/tool/tool-test-chain/contract/test-db-xapiant-v2.sol#L234-L241):
+Bắt đầu từ hàm runStep1_Setup:
 
 ```solidity
 // test-db-xapiant-v2.sol, line 234
@@ -42,7 +42,7 @@ function runStep1_Setup() public {
 }
 ```
 
-Hàm [_setupInternal](file:///home/abc/nhat/con-chain-v2/metanode/execution/cmd/tool/tool-test-chain/contract/test-db-xapiant-v2.sol#L243-L282) thực hiện 3 bước:
+Hàm _setupInternal thực hiện 3 bước:
 
 ### Bước 1.1: Tạo/Mở Database
 
@@ -70,7 +70,7 @@ docIds[0] = _insertProduct(
 );
 ```
 
-Hàm [_insertProduct](file:///home/abc/nhat/con-chain-v2/metanode/execution/cmd/tool/tool-test-chain/contract/test-db-xapiant-v2.sol#L284-L324) gọi 6 precompile calls:
+Hàm _insertProduct gọi 6 precompile calls:
 
 | # | Solidity Call | Mục đích |
 |---|--------------|----------|
@@ -85,7 +85,7 @@ Hàm [_insertProduct](file:///home/abc/nhat/con-chain-v2/metanode/execution/cmd/
 
 ## ⚙️ Phase 2: FFI Bridge — Từ EVM đến C++
 
-Khi EVM gặp lời gọi đến precompile `0x107`, nó kích hoạt C++ handler [MyExtension::FullDatabase()](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/linker/src/my_extension/xapian_handlers.cpp#L51-L95):
+Khi EVM gặp lời gọi đến precompile `0x107`, nó kích hoạt C++ handler MyExtension::FullDatabase():
 
 ```cpp
 // xapian_handlers.cpp, line 51
@@ -142,7 +142,7 @@ if (opCode == mvm::FunctionSelector::XAPIAN_GET_OR_CREATE_DB) {
 
 Trong phiên bản mới, tất cả các hàm ghi/xóa dữ liệu (`new_document`, `add_term`, `index_text`, v.v.) từ `xapian_handlers.cpp` đều truyền thêm `mvmId` xuống `XapianManager`. Điều này giúp hệ thống lưu trữ context giao dịch chính xác hơn.
 
-[new_document()](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/linker/src/xapian/xapian_manager.cpp#L252-L302):
+new_document():
 
 ```cpp
 // xapian_manager.cpp, line 252
@@ -184,7 +184,7 @@ Xapian::docid XapianManager::new_document(const std::string &data, uint256_t blo
 
 Khi update document **ở block khác** với block tạo ra nó, Xapian tạo **phiên bản mới** thay vì ghi đè.
 
-Ví dụ [add_value()](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/linker/src/xapian/xapian_manager.cpp#L355-L452):
+Ví dụ add_value():
 
 ```cpp
 // xapian_manager.cpp, line 403-421
@@ -251,7 +251,7 @@ Sau khi MVM thực thi xong toàn bộ Smart Contract code, hệ thống quyết
 
 ### 5.1 Xử Lý Exception Tại MVM (C++)
 
-Nếu trong quá trình gọi precompile có lỗi xảy ra (ví dụ: revert từ smart contract), `MVM` (trong [processor.cpp](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/c_mvm/src/processor.cpp)) sẽ ưu tiên bắt các lỗi này và trích xuất nguyên bản `exception message` từ `returnData` của nested call thay vì dùng chuỗi lỗi mặc định:
+Nếu trong quá trình gọi precompile có lỗi xảy ra (ví dụ: revert từ smart contract), `MVM` (trong processor.cpp) sẽ ưu tiên bắt các lỗi này và trích xuất nguyên bản `exception message` từ `returnData` của nested call thay vì dùng chuỗi lỗi mặc định:
 
 ```cpp
 if (result.ex == ET::ErrExecutionReverted) {
@@ -269,7 +269,7 @@ if (result.ex == ET::ErrExecutionReverted) {
 
 ### 5.2 Luồng Quyết Định Commit/Revert (Tầng Go)
 
-Xem [block_processor_commit.go](file:///home/abc/nhat/con-chain-v2/metanode/execution/cmd/simple_chain/processor/block_processor_commit.go#L72-L116):
+Xem block_processor_commit.go:
 
 ```go
 // block_processor_commit.go, line 72-106
@@ -304,7 +304,7 @@ if job.ProcessResults != nil {
 
 ### 5.3 CommitFullDb() — FFI Go → C++
 
-[mvm_api.go, line 922-931](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/mvm_api.go#L922-L931):
+mvm_api.go, line 922-931:
 
 ```go
 func (a *MVMApi) CommitFullDb() bool {
@@ -316,7 +316,7 @@ func (a *MVMApi) CommitFullDb() bool {
 }
 ```
 
-C++ Registry xử lý: [commitTransaction()](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/linker/src/xapian/xapian_registry.cpp#L506-L532)
+C++ Registry xử lý: commitTransaction()
 
 ```cpp
 void XapianRegistry::commitTransaction(unsigned char *mvmId) {
@@ -332,7 +332,7 @@ void XapianRegistry::commitTransaction(unsigned char *mvmId) {
 
 ### 5.4 RevertFullDb() — Hủy Tất Cả Thay Đổi
 
-[cancelTransaction()](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/linker/src/xapian/xapian_registry.cpp#L476-L503):
+cancelTransaction():
 
 ```cpp
 void XapianRegistry::cancelTransaction(unsigned char *mvmId) {
@@ -361,7 +361,7 @@ Trước khi commit, mỗi node tính **hash của tất cả thay đổi Xapian
 
 ### 6.1 Tính Hash Cho Từng Manager
 
-[getComprehensiveStateHash()](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/linker/src/xapian/xapian_manager.cpp#L929-L948):
+getComprehensiveStateHash():
 
 ```cpp
 std::array<uint8_t, 32u> XapianManager::getComprehensiveStateHash() {
@@ -378,7 +378,7 @@ std::array<uint8_t, 32u> XapianManager::getComprehensiveStateHash() {
 
 ### 6.2 Nhóm Theo Contract Address
 
-[getGroupHashForMvmId()](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/linker/src/xapian/xapian_registry.cpp#L266-L319):
+getGroupHashForMvmId():
 
 ```mermaid
 graph LR
@@ -401,7 +401,7 @@ graph LR
 
 ### 7.1 Cleaner Thread (Background — Mỗi 1 Phút)
 
-[xapian_manager.cpp, line 956-1008](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/linker/src/xapian/xapian_manager.cpp#L956-L1008):
+xapian_manager.cpp, line 956-1008:
 
 ```cpp
 // Luồng chạy nền — khởi tạo tĩnh khi chương trình start
@@ -429,7 +429,7 @@ std::thread cleaner_thread([] {
 
 ### 7.2 destroyInstance() — Đóng DB Tường Minh
 
-[xapian_manager.cpp, line 1144-1194](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/linker/src/xapian/xapian_manager.cpp#L1144-L1194):
+xapian_manager.cpp, line 1144-1194:
 
 ```cpp
 bool XapianManager::destroyInstance(const std::string &db_path_str) {
@@ -451,7 +451,7 @@ bool XapianManager::destroyInstance(const std::string &db_path_str) {
 
 ### 7.3 Registry Cleanup — Sau Mỗi TX
 
-[xapian_registry.cpp, line 431](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/linker/src/xapian/xapian_registry.cpp#L394-L434):
+xapian_registry.cpp, line 431:
 
 ```cpp
 bool XapianRegistry::commitChangesForMvmId(unsigned char *mvmId) {
@@ -527,12 +527,12 @@ sequenceDiagram
 
 | Layer | File | Vai trò |
 |-------|------|---------|
-| **Solidity** | [test-db-xapiant-v2.sol](file:///home/abc/nhat/con-chain-v2/metanode/execution/cmd/tool/tool-test-chain/contract/test-db-xapiant-v2.sol) | Smart contract test, gọi precompile `0x107` |
-| **C++ Handler** | [xapian_handlers.cpp](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/linker/src/my_extension/xapian_handlers.cpp) | ABI decode → dispatch opcode → gọi XapianManager |
-| **C++ Core** | [xapian_manager.cpp](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/linker/src/xapian/xapian_manager.cpp) | CRUD + versioning + logging + transaction |
-| **C++ Registry** | [xapian_registry.cpp](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/linker/src/xapian/xapian_registry.cpp) | Quản lý lifecycle per-mvmId, commit/revert/hash |
-| **Go FFI** | [mvm_api.go](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/mvm/mvm_api.go#L922-L941) | `CommitFullDb()` / `RevertFullDb()` — cầu nối Go↔C++ |
-| **Go Commit** | [block_processor_commit.go](file:///home/abc/nhat/con-chain-v2/metanode/execution/cmd/simple_chain/processor/block_processor_commit.go#L72-L116) | Quyết định commit/revert dựa trên TX status |
+| **Solidity** | test-db-xapiant-v2.sol | Smart contract test, gọi precompile `0x107` |
+| **C++ Handler** | xapian_handlers.cpp | ABI decode → dispatch opcode → gọi XapianManager |
+| **C++ Core** | xapian_manager.cpp | CRUD + versioning + logging + transaction |
+| **C++ Registry** | xapian_registry.cpp | Quản lý lifecycle per-mvmId, commit/revert/hash |
+| **Go FFI** | mvm_api.go | `CommitFullDb()` / `RevertFullDb()` — cầu nối Go↔C++ |
+| **Go Commit** | block_processor_commit.go | Quyết định commit/revert dựa trên TX status |
 
 ---
 

@@ -156,4 +156,3 @@ Nếu transaction vượt quá giới hạn, sẽ nhận lỗi khi submit.
 ## Xem thêm
 
 - [../metanode/Readme.md](../metanode/Readme.md) - Tài liệu MetaNode
-- [../docs/metanode/DEPLOYMENT.md](../docs/metanode/DEPLOYMENT.md) - Hướng dẫn triển khai nodes

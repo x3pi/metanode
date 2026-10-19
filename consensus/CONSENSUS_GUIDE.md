@@ -52,46 +52,47 @@ The MetaNode system is a **unified single-process architecture** (embedded via C
 ## Repository Structure
 
 ```
-mtn-consensus/
+consensus/
 ├── metanode/                        # Main application (Rust binary)
 │   ├── Cargo.toml                   # Workspace root, version 0.9.42
 │   ├── src/
 │   │   ├── main.rs                  # Entry point (CLI: start / generate)
 │   │   ├── config.rs                # NodeConfig loading (TOML)
 │   │   ├── consensus/               # High-level consensus orchestration
-│   │   │   ├── commit_processor.rs  # Sends committed blocks to Go ExecutorClient
+│   │   │   ├── commit_processor/    # Sends committed blocks to Go ExecutorClient
 │   │   │   ├── epoch_transition.rs  # Handles EndOfEpoch system transactions
 │   │   │   ├── tx_recycler.rs       # Recycles uncommitted txs after leader change
 │   │   │   └── clock_sync.rs        # NTP-based clock synchronization
 │   │   ├── node/                    # Node lifecycle & state machine
 │   │   │   ├── consensus_node.rs    # Core ConsensusNode struct (holds authority, sync, mode)
 │   │   │   ├── startup.rs           # InitializedNode, bootstrapping logic
-│   │   │   ├── epoch_monitor.rs     # Polls Go for epoch changes, triggers transitions
-│   │   │   ├── block_coordinator.rs # Dual-Stream deduplication (Consensus vs Sync blocks)
+│   │   │   ├── epoch_monitor/       # Polls Go for epoch changes, triggers transitions
 │   │   │   ├── committee.rs         # Committee construction from Go validator data
 │   │   │   ├── committee_source.rs  # Peer discovery for committee data
 │   │   │   ├── transition/          # Epoch transition state machine
 │   │   │   ├── executor_client/     # FFI client to Go bridge
-│   │   │   ├── dual_stream.rs       # Manages concurrent Consensus + Sync data streams
+│   │   │   ├── block_delivery.rs    # Block delivery to the Go executor (Validator)
+│   │   │   ├── rust_sync_node/      # SyncOnly node logic
 │   │   │   ├── epoch_checkpoint.rs  # Crash-recovery checkpointing for transitions
 │   │   │   ├── sync.rs              # SyncOnly mode logic
 │   │   │   └── catchup.rs           # CatchupManager for peer block fetching
 │   │   ├── network/
-│   │   │   └── tx_receiver.rs       # Receives transaction batches from Go via FFI
+│   │   │   ├── tx_socket_server.rs  # Receives transaction batches from Go
+│   │   └── peer_rpc/            # Peer RPC (snapshots, committee, sync)
 │   │   └── types/                   # Shared type definitions
 │   │
 │   ├── meta-consensus/              # Core consensus library
 │   │   ├── core/src/
-│   │   │   ├── authority_node.rs    # AuthorityNode (consensus participant)
-│   │   │   ├── linearizer.rs        # DAG → linear sequence converter
+│   │   │   ├── authority_node/        # AuthorityNode (consensus participant)
+│   │   │   ├── linearizer/             # DAG → linear sequence converter
 │   │   │   ├── commit_observer.rs   # Monitors commits, attaches reputation scores
-│   │   │   ├── commit_syncer.rs     # Syncs commits from peers (SyncOnly mode)
-│   │   │   ├── commit_finalizer.rs  # Finalizes commit sub-DAGs
+│   │   │   ├── commit_syncer/         # Syncs commits from peers (SyncOnly mode)
+│   │   │   ├── commit_finalizer/     # Finalizes commit sub-DAGs
 │   │   │   ├── core.rs / core_thread.rs  # Core consensus loop
-│   │   │   ├── synchronizer.rs      # Block synchronization with peers
-│   │   │   ├── block_manager.rs     # Manages DAG block storage
+│   │   │   ├── synchronizer/         # Block synchronization with peers
+│   │   │   ├── block_manager/        # Manages DAG block storage
 │   │   │   ├── block_verifier.rs    # Validates incoming blocks
-│   │   │   ├── authority_service.rs # RPC service for serving blocks to peers
+│   │   │   ├── authority_service/    # RPC service for serving blocks to peers
 │   │   │   ├── leader_schedule.rs   # Leader election per round
 │   │   │   ├── legacy_store.rs      # LegacyEpochStoreManager for cross-epoch sync
 │   │   │   └── transaction.rs       # Transaction handling
@@ -146,12 +147,8 @@ A MetaNode operates in one of two modes:
   - `SendCommittedSubDag` — Send ordered transactions to Go for execution via callback.
   - `SyncBlocks` — Bulk block sync for SyncOnly mode.
 
-### Block Coordinator (Dual-Stream)
-Two sources feed blocks to Go:
-1. **Consensus Stream** — Blocks from local consensus (strict sequential).
-2. **Sync Stream** — Blocks from peer sync (gap-filling).
-
-The `BlockCoordinator` in `block_coordinator.rs` deduplicates and sequences them using `next_expected_index` and a `BTreeMap` buffer.
+### Block delivery
+Validator nodes deliver committed sub-DAGs to Go through `CommitProcessor` + `BlockDeliveryManager`; SyncOnly nodes use `RustSyncNode` (`src/node/rust_sync_node/`). The old Dual-Stream/BlockCoordinator design was removed.
 
 ---
 
@@ -168,7 +165,7 @@ cargo +nightly build --release
 ### Standalone Execution (For Tooling/Testing)
 The Rust consensus engine can optionally be run as a standalone binary for specific testing or local simulation scenarios, although the main production mode is statically embedded into Go.
 ```bash
-./target/release/metanode start --config config/node-0.toml
+./target/release/metanode start --config <node.toml>
 ```
 
 ### Run the full cluster (5 validators)

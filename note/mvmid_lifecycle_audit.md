@@ -212,10 +212,10 @@ if tx.IsRegularTransaction() || tx.ToAddress() == ACCOUNT_SETTING {
 ### BUG #2: Cross-chain handlers KHÔNG bao giờ clear mvmId (Rò rỉ bộ nhớ + Rủi ro lệch hash)
 
 **Files:**
-- [cross_chain_outbound.go:86](../execution/pkg/cross_chain_handler/cross_chain_outbound.go#L86) — `handleLockAndBridge`
-- [cross_chain_outbound.go:212](../execution/pkg/cross_chain_handler/cross_chain_outbound.go#L212) — `handleSendMessage`
-- [cross_chain_inbound.go:39](../execution/pkg/cross_chain_handler/cross_chain_inbound.go#L39) — `executeMintForInbound`
-- [cross_chain_inbound.go:222](../execution/pkg/cross_chain_handler/cross_chain_inbound.go#L222) — `executeConfirmation`
+- cross_chain_outbound.go:86 — `handleLockAndBridge`
+- cross_chain_outbound.go:212 — `handleSendMessage`
+- cross_chain_inbound.go:39 — `executeMintForInbound`
+- cross_chain_inbound.go:222 — `executeConfirmation`
 
 **Pattern lặp lại ở cả 4 hàm:**
 

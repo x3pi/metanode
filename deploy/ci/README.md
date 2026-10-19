@@ -28,7 +28,7 @@ Bạn có thể chạy trực tiếp lệnh `./ci.sh` từ thư mục gốc củ
 
 ## ⚙️ 2. Cách Thêm Hoặc Bật/Tắt Bài Test Trong `ci_config.yaml`
 
-Mở file [`ci_config.yaml`](file:///home/abc/nhat/con-chain-v2/metanode/deploy/ci/ci_config.yaml). Trong mục `tests:`, mỗi bài test được định nghĩa rõ ràng.
+Mở file `ci_config.yaml`. Trong mục `tests:`, mỗi bài test được định nghĩa rõ ràng.
 
 ### Ví dụ thêm 1 bài test mới:
 ```yaml

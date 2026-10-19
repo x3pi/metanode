@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-10-18 (audit round 3: barrier fee/gas honesty, nonce on malformed barrier txs, FileRequest disabled; execution audit round 2: reward/fee/state-persistence parity, free-fee unification, distributeRewards disabled; execution parity: fast path = Block-STM rules, `fee_floor.go`; RPC rate limiter WS/HTTP batch accounting, mempool eviction after verification; PR #171 & PR #172/#173 sync: added rollup adapters & proposer dedup test in `cmd/simple_chain/`, registration TCP test & virtual executor tests in `cmd/simple_chain/processor/`, synchronized BFT supermajority threshold `(N+f)/2 + 1` in `pkg/parentchain` QuorumClient & Rollup).
+> **Last updated:** 2026-10-19 (docs cleanup: removed stale per-file rows and dead references, `local_devnet` replaces ignored `local_parent_chain`; audit round 3: barrier fee/gas honesty, nonce on malformed barrier txs, FileRequest disabled; execution audit round 2: reward/fee/state-persistence parity, free-fee unification, distributeRewards disabled; execution parity: fast path = Block-STM rules, `fee_floor.go`; RPC rate limiter WS/HTTP batch accounting, mempool eviction after verification; PR #171 & PR #172/#173 sync: added rollup adapters & proposer dedup test in `cmd/simple_chain/`, registration TCP test & virtual executor tests in `cmd/simple_chain/processor/`, synchronized BFT supermajority threshold `(N+f)/2 + 1` in `pkg/parentchain` QuorumClient & Rollup).
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 ---
 
@@ -11,7 +11,7 @@ metanode/
 ├── ci.sh                   ← Convenient project-root symlink to deploy/ci/ci_watcher.sh
 ├── deploy/                 ← Deployment configurations and scripts parent folder
 │   ├── cluster/
-│   │   └── local_parent_chain/ ← 4-node Parent Chain cluster setup (run.sh, toml configs, test_cluster.go)
+│   │   └── local_devnet/   ← Local single-chain devnet scripts (start_single_chain.sh, stop_single_chain.sh, run_load_test.sh)
 │   ├── ci/                 ← Automated CI/CD Testing Daemon, Git Watcher & Telegram Alerts
 │   │   ├── ci_config.yaml  ← Test matrix configuration (Block-STM, Cross-Chain, Spam, TPS)
 │   │   ├── ci_watcher.sh   ← Remote Git commit listener daemon
@@ -31,7 +31,7 @@ metanode/
 │   │   └── stop_all.sh     ← Script to stop all background deployment processes
 │   ├── ansible_clusters/   ← Ansible automation for Parent Chain & Sharded Execution Clusters with Telegram alerts
 │   │   └── scripts/parse_inventory.py ← Merges public + cluster endpoints into /tmp/rpc_nodes.json; roles/testing reads root_anchor + private_chains URLs
-│   └── systemd/            ← Systemd deployment scripts, key generators (gen_validator_entry.py, gen_private_chain.py), and env templates
+│   └── systemd/            ← Systemd deployment scripts, key generators (gen_validator_entry.py), and env templates
 ├── execution/          ← Go execution engine (EVM-compatible layer, Parent Chain, Rollup/Raft, NOMT FFI)
 │   └── debug_nil/      ← Go standalone tests for nil/slice panic debugging
 ├── consensus/          ← Rust consensus engine (Mysticeti BFT/DAG & NOMT FFI workspace)
@@ -202,7 +202,6 @@ metanode/
 | `rpc_block_fulltx_test.go` | 485 | Unit tests & benchmarks for fullTx standardization across Legacy, EIP-2930, EIP-1559, EIP-7702, and contract creation |
 | `rpc_transaction.go` | 780 | Tx-related RPC handlers |
 | `rpc_state.go` | 334 | State RPC handlers |
-| `tx_async_queue.go` | 338 | Async tx submission queue |
 | `debug_api.go` | 870 | Debug/admin endpoints |
 | `startup_integrity_check.go` | 272 | Post-crash integrity verification |
 | `c0_spike.go` | ~1300 | C0 spike harness (`//go:build c0spike`): multi-round determinism, EVM+Gateway workload, per-store durability failpoints with run-scoped markers (`C0_RUN_ID`), `kill -9` recovery, measured Rust-consensus isolation |
@@ -225,7 +224,6 @@ metanode/
 | `block_processor_commit.go` | Block commit pipeline |
 | `block_processor_processing.go` | Tx execution pipeline |
 | `block_processor_network.go` | Network message handling |
-| `block_processor_batch.go` | Batch tx processing |
 | `block_processor_attestation.go` | BLS attestation logic |
 | `block_processor_epoch.go` | Epoch transition handling |
 | `block_processor_state.go` | State root verification |
@@ -240,9 +238,7 @@ metanode/
 | `raw_eth_ingress_test.go` | EIP-2718 TCP ingress & mode gating tests |
 | `registration_tcp_test.go` | Unit tests for TCP registration handler & account barrier synchronization |
 | `tx_virtual_executor_core_test.go` | Unit tests for off-chain read tx execution (`executeAndRespondReadTx`), EIP-7702 SetCode intrinsic gas validation, and state immutability across virtual execution |
-| `transaction_virtual_processor.go` | Virtual tx processing |
 | `state_processor.go` | State transition processor |
-| `vote_recovery.go` | Vote/quorum recovery |
 
 ### `pkg/` — Shared Packages (Critical Ones)
 | Package | Role | Concurrency Risk |
@@ -367,7 +363,6 @@ metanode/
 | `queue.rs` | 283 | Internal task queue | 🟡 MED |
 | `coordinator.rs` | 89 | Cross-module coordinator | 🟡 MED |
 | `block_delivery.rs` | 85 | Block delivery to consumers | 🟡 MED |
-| `notification_server.rs` | 142 | Push notification server | 🟢 LOW |
 | `tx_submitter.rs` | 176 | Submit txs to consensus | 🟡 MED |
 | `epoch_transition_tests.rs` | 942 | Epoch transition test suite | 🟢 TEST |
 

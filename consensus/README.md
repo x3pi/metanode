@@ -11,7 +11,7 @@
   - **Epoch transition:** Chuyển giao Epoch và lấy danh sách Ủy ban (Committee) từ trạng thái Go qua FFI.
   - **Quorum CommitSyncer & CatchupManager:** Đồng bộ `CertifiedCommit` và khôi phục lịch sử cho các node khởi động lại hoặc chạy ở chế độ `SyncOnly`.
 - **`vendor/nomt/`**: NOMT được vendor; thư viện C-ABI `libmtn_nomt` (crate `mtn-nomt-ffi`, `execution/pkg/nomt_ffi/rust_lib`) đóng gói NOMT phục vụ lưu trữ trạng thái xác thực tốc độ cao và sinh bằng chứng Merkle (`eth_getProof`) cho `account_db_nomt` và `stake_db_nomt`.
-- **`crates/`**: Các thư viện nền tảng dùng chung: mật mã học BLS12-381/Ed25519 (`shared-crypto`), lưu trữ RocksDB (`typed-store`), mạng P2P (`mysten-network` / `anemo`) và Prometheus metrics (`mysten-metrics`).
+- **`../crates/`** (ở root repo): Các thư viện nền tảng dùng chung: mật mã học BLS12-381/Ed25519 (`shared-crypto`), lưu trữ RocksDB (`typed-store`), mạng P2P (`mysten-network` / `anemo`) và Prometheus metrics (`mysten-metrics`).
 
 ---
 

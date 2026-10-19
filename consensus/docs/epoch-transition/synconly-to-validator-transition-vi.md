@@ -207,6 +207,3 @@ if node.current_epoch >= new_epoch {
 
 ## 7. Tham Khảo
 
-- [Epoch Transition Architecture](../knowledge/epoch_transitions.md)
-- [Fork Prevention](../knowledge/fork_prevention_and_recovery.md)
-- [Transition Safety Mechanisms](../knowledge/transition_safety_mechanisms.md)

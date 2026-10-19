@@ -333,7 +333,7 @@ go run cmd/keygen/main.go
 
 ---
 
-→ Xem chi tiết tại [storage_map.md](file:///home/abc/chain-n/mtn-simple-2025/docs/06-diagnostics-guides/storage-map.md)
+→ Xem chi tiết tại storage_map.md
 
 ---
 

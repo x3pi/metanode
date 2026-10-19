@@ -93,8 +93,8 @@ cd /home/abc/nhat/con-chain-v2/metanode
 # 2. Test đo hiệu năng đỉnh Max TPS trên Child Chain (chain_a - 25,000 txs từ 50k ví spam):
 ./ci.sh run-now --only tps_blast_child_a
 
-# 3. Test đo hiệu năng đỉnh Max TPS trên Public Chain (Root Chain - 25,000 txs):
-./ci.sh run-now --only tps_blast
+# 3. Test đo hiệu năng đỉnh TPS bằng secp_tps_blast (25,000 txs, native Secp256k1 / EIP-1559):
+./ci.sh run-now --only secp_tps
 
 # 4. Test spam hợp đồng thông minh đa node RPC (Spam Contract):
 ./ci.sh run-now --only spam_contract
@@ -176,7 +176,7 @@ Daemon chạy ngầm liên tục theo dõi Git remote nhánh `main`. Khi có com
 | `child_chain_a` | Child Chain Block-STM Tests | **Child Chain** | Chạy 34 kịch bản kiểm tra logic Block-STM trên `chain_a` |
 | `tps_blast_child_a` | Child Chain TPS Blast Benchmark | **Child Chain** | Bơm 25,000 txs từ 50,000 ví độc lập đo Max TPS trên `chain_a` |
 | `spam_contract` | Spam Contract Multi-RPC Test | **Chung** | Gửi giao dịch spam smart contract dàn trải trên các node RPC |
-| `tps_blast` | TPS Blast Benchmark (Public Chain) | **Public Chain** | Bơm 25,000 txs đo Max TPS trên Public Chain |
+| `secp_tps` | TPS Blast Benchmark (Native Secp256k1 / EIP-1559) | **Public Chain** | Bơm 25,000 txs bằng `secp_tps_blast`, đo TPS và kiểm tra parity |
 | `blockstm_logic` | Block-STM Logic Tests | **Public Chain** | Chạy bộ test logic 32+ kịch bản trên chain chính |
 | `node_chaos_restart` | Chaos Rolling Restart & Zero-Fork | **Hạ tầng** | Tắt/bật luân phiên từng node, restart cả cụm & verify Zero-Fork |
 | `snapshot_recovery` | Snapshot Generation & State Recovery | **Hạ tầng** | Tạo snapshot và khôi phục trạng thái node luân phiên qua Ansible |

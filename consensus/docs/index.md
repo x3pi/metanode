@@ -1,11 +1,7 @@
-# Meta Node Consensus Protocol
+# MetaNode Consensus
 
-Welcome to the **Meta Node Consensus** documentation. This knowledge base covers the highly technical specifications of the consensus protocols, epoch transitions, and state validations within `mtn-consensus`.
+Tài liệu phân tích đồng thuận Mysticeti DAG-BFT, chuyển giao epoch và chống fork (`consensus/metanode`).
 
-## 📌 Protocol Highlights
-
-- 🔄 **[Epoch Transitions](02-epoch-transition/comparison-epoch-transition-vi.md)**
-- 🛡️ **[Fork Prevention & Safety](02-epoch-transition/epoch-transition-fork-prevention-vi.md)**
-- 🔗 **[Committee Synchronization](01-overview/committee_loading_vi.md)**
-
-Explore the folders for detailed architectural analysis regarding node state divergence, crash recovery, and cold-start synchronization.
+- **Epoch transition:** [so sánh](epoch-transition/comparison-epoch-transition-vi.md) · [phát hiện biên epoch](epoch-transition/epoch-boundary-detection-vi.md) · [SyncOnly → Validator](epoch-transition/synconly-to-validator-transition-vi.md)
+- **Chống fork:** [epoch transition fork prevention](epoch-transition/epoch-transition-fork-prevention-vi.md) · [phân tích](epoch-transition/fork-prevention-analysis-vi.md)
+- **Tổng quan:** [nạp committee](overview/committee-loading-vi.md) · [restart](overview/restart-analysis.md) · [đồng bộ](overview/synchronization-analysis.md)

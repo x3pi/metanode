@@ -17,7 +17,7 @@ Khi chuyển sang Validator, nó trở thành **Proposer** (Người đề xuấ
 
 ## 2. Giải Pháp: Sync Barrier & Deterministic Handover
 
-Để ngăn chặn vấn đề trên, hệ thống sử dụng cơ chế "Sync Barrier" (Rào chắn đồng bộ) trong `epoch_monitor.rs`.
+Để ngăn chặn vấn đề trên, hệ thống sử dụng cơ chế "Sync Barrier" (Rào chắn đồng bộ) trong `epoch_monitor/mod.rs`.
 
 ### 2.1. Sync Barrier Logic
 
@@ -27,7 +27,7 @@ Trước khi gọi `transition_to_epoch`, node thực hiện các bước kiểm
 2.  **Local Check**: Hỏi Go Master của chính mình: "Đã execute đến block nào rồi?" (`go_last_block`).
 3.  **The Wait Loop**:
     ```rust
-    // Pseudocode logic trong epoch_monitor.rs
+    // Pseudocode logic trong epoch_monitor/mod.rs
     loop {
         if go_last_block >= peer_last_block {
             break; // AN TOÀN: Đã bắt kịp mạng lưới
@@ -129,7 +129,7 @@ Nếu bạn gặp vấn đề Fork hoặc Block Rejection, hãy kiểm tra theo 
 
 ### 5.1. Cách Rust Phát Hiện Epoch Kết Thúc
 
-Trong `commit_processor.rs`, mỗi khi nhận được một `CommittedSubDag`, Rust kiểm tra xem có chứa **EndOfEpoch System Transaction** hay không:
+Trong `commit_processor/mod.rs`, mỗi khi nhận được một `CommittedSubDag`, Rust kiểm tra xem có chứa **EndOfEpoch System Transaction** hay không:
 
 ```rust
 // File: metanode/src/consensus/commit_processor.rs (dòng 290-320)

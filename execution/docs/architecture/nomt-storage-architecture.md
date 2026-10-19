@@ -501,7 +501,6 @@ mtn_getAccountState(address) hoặc eth_getBalance(address)
 | [`account_state_db_commit.go`](../../pkg/account_state_db/account_state_db_commit.go) | Commit (genesis fix), CommitPipeline, PersistAsync |
 | [`stake_state_db.go`](../../pkg/state_db/stake_state_db.go) | StakeStateDB: InvalidateAllCaches, CommitPipeline |
 | [`smart_contract_db.go`](../../pkg/smart_contract_db/smart_contract_db.go) | SmartContractDB: per-contract NOMT trie management |
-| [`block_processor_batch.go`](../../cmd/simple_chain/processor/block_processor_batch.go) | applyBlockBatch: NOMT replication + cache invalidation |
 | [`app_blockchain.go`](../../cmd/simple_chain/app_blockchain.go) | Genesis init (no PebbleDB fallback) |
 | [`database-and-trie-storage.md`](./database-and-trie-storage.md) | Tổng quan tất cả backends (MPT, FlatStateTrie, NOMT) |
-| [`flat_trie_storage.md`](../flat_trie_storage.md) | Chi tiết FlatStateTrie + Bucket Accumulator |
+| [`flat_trie_storage.md`](./flat-trie-storage.md) | Chi tiết FlatStateTrie + Bucket Accumulator |

@@ -23,7 +23,7 @@ VALIDATOR MODE:
 
 FULL NODE (SyncOnly) MODE:
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  1. epoch_monitor.rs poll Go Master định kỳ (cấu hình, mặc định 10s) │
+│  1. epoch_monitor/mod.rs poll Go Master định kỳ (cấu hình, mặc định 10s) │
 │  2. Gọi get_current_epoch() → phát hiện epoch thay đổi                  │
 │  3. Gọi get_epoch_boundary_data(new_epoch) để lấy:                      │
 │     - boundary_block (global_exec_index cuối epoch trước)               │

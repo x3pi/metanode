@@ -54,13 +54,13 @@ Tại kịch bản crash `crash_after_mapping_k2` (failpoint `after-mapping-barr
 
 ## 3. Các Điểm Mã Nguồn Bị Ảnh Hưởng (Affected Code Locations)
 
-1. **[smart_contract_db.go:480-486](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/smart_contract_db/smart_contract_db.go#L480-L486):**
+1. **smart_contract_db.go:480-486:**
    - `nomtTrie.CommitPayload()` ghi đĩa quá sớm khi block mới chỉ đang ở giai đoạn draft/processing trong bộ nhớ.
-2. **[block_processor_sync.go:80-145](file:///home/abc/nhat/con-chain-v2/metanode/execution/cmd/simple_chain/processor/block_processor_sync.go#L80-L145):**
+2. **block_processor_sync.go:80-145:**
    - Cơ chế `NOMT-SYNC-RECOVERY` và `nomtAheadReplay` chỉ kiểm tra và đồng bộ `"account_state"` và `"stake_db"`, hoàn toàn bỏ quên namespace `"smart_contract_storage"`.
-3. **[chain_state.go:358-390](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/blockchain/chain_state.go#L358-L390):**
+3. **chain_state.go:358-390:**
    - `updateStateForNewHeader()` chỉ gọi `AlignWithExpectedRoot()` cho Account và Stake. Không có cơ chế realign storage trie cho smart contracts về `StorageRoot` của header block trước đó.
-4. **[nomt_state_trie.go:435, 808, 905](file:///home/abc/nhat/con-chain-v2/metanode/execution/pkg/trie/nomt_state_trie.go#L435):**
+4. **nomt_state_trie.go:435, 808, 905:**
    - Namespace `"smart_contract_storage"` bị `skipRegistry` và **không được gán `StateChangelogDB`**, khiến hệ thống không thể quay lui (undo) các slot đã ghi.
 
 ---

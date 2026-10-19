@@ -72,8 +72,9 @@ metanode/
 ├── consensus/                   # Rust Workspace: Mysticeti DAG-BFT & NOMT FFI
 │   ├── metanode/                # Main consensus node & CGo FFI library (libmetanode)
 │   │   └── scripts/             # build_check.sh & local cluster orchestration scripts
-│   ├── vendor/nomt/             # Vendored NOMT (Merkle Trie); FFI wrapper lives in execution/pkg/nomt_ffi/rust_lib
-│   └── crates/                  # Shared crypto (BLS12-381), RocksDB typed-store, anemo P2P
+│   └── vendor/nomt/             # Vendored NOMT (Merkle Trie); FFI wrapper lives in execution/pkg/nomt_ffi/rust_lib
+│
+├── crates/                      # Shared Rust crates: crypto (BLS12-381), RocksDB typed-store, anemo P2P, metrics
 │
 ├── execution/                   # Go Module: Execution Engine, Parent Chain & Tooling
 │   ├── cmd/

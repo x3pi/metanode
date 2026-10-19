@@ -2,7 +2,7 @@
 
 **Ngày thực hiện:** 2026-10-07  
 **Tác giả:** Antigravity Agent (Metanode Core Dev)  
-**Mục tiêu:** Thực hiện Giai đoạn 1 của [note/plan_fix_nomt_reports_evidence_20261007.md](file:///home/abc/chain-n/metanode/note/plan_fix_nomt_reports_evidence_20261007.md).  
+**Mục tiêu:** Thực hiện Giai đoạn 1 của note/plan_fix_nomt_reports_evidence_20261007.md (đã hoàn tất, kế hoạch đã gỡ).  
 **Cam kết:** Dữ liệu thực nghiệm 100% kiểm chứng được từ log thô trong `note/evidence/perf_nomt_durability_20261007/` (`evidence:durability_20rounds_expanded`), tuyệt đối không bịa số liệu, tuân thủ nguyên tắc Zero-Fork (AGENTS.md Part 2.5).
 
 ---

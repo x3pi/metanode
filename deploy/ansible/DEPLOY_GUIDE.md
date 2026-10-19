@@ -234,7 +234,7 @@ cd deploy/ansible
 
 ### Kịch bản 3: Khôi phục 1 Node bị lỗi từ Snapshot (Lệch Hash / Hỏng DB / Lag > 5 Epoch)
 * **Khi nào dùng:** 
-  - [block_hash_checker](file:///home/abc/nhat/con-chain-v2/metanode/deploy/ansible/monitors/block_hash_checker/main.go) báo lệch hash / stateRoot trên riêng Node X.
+  - block_hash_checker báo lệch hash / stateRoot trên riêng Node X.
   - Ổ đĩa của Node X bị hỏng, corrupt RocksDB, hoặc node bị offline quá lâu dẫn đến tụt lại phía sau quá 5 epochs không sync kịp P2P.
 * **⚠️ Lưu ý:** Lệnh restore chỉ xóa dữ liệu cũ của node đích được chỉ định và kéo snapshot về, không ảnh hưởng đến các validator khác đang chạy.
 * **Câu lệnh:**

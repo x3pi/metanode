@@ -20,7 +20,7 @@
 
 ## Hướng dẫn chi tiết
 
-Xem [`BLS_SPAM_TPS_GUIDE.md`](./BLS_SPAM_TPS_GUIDE.md)
+Xem [`BLS_SPAM_TPS_GUIDE.md`](../../../docs/tooling/bls-spam-tps-guide.md)
 
 ## Chạy nhanh
 

@@ -158,7 +158,7 @@ sequenceDiagram
 Ngay trước transition, thực hiện kiểm tra cuối:
 
 ```rust
-// epoch_monitor.rs (Unified Epoch Monitor)
+// epoch_monitor/mod.rs (Unified Epoch Monitor)
 let fresh_source = CommitteeSource::discover(&config).await?;
 // Monitor fetches blocks from peers and advances Go epoch
 if local_go_block < fresh_source.last_block {
@@ -310,8 +310,8 @@ Tất cả nodes trong cùng epoch PHẢI có log giống nhau:
 | 1 | **Deterministic Indexing** | `Base + Offset` height calculation | `CommitProcessor` |
 | 2 | **Mandatory Mirroring** | Consensus timestamps → Go headers | `block_processor_utils.go` |
 | 3 | **Fatal Consistency** | Panic on 0-timestamp | `block_processor_utils.go` |
-| 4 | **Final Sync Barrier** | Peer verify before promote | `epoch_monitor.rs` |
-| 5 | **Catch-up Barrier** | Wait until local = peer tip | `epoch_monitor.rs` |
+| 4 | **Final Sync Barrier** | Peer verify before promote | `epoch_monitor/mod.rs` |
+| 5 | **Catch-up Barrier** | Wait until local = peer tip | `epoch_monitor/mod.rs` |
 | 6 | **Atomic Promotion** | N-1 handoff | `SetConsensusStartBlock` |
 | 7 | **Atomic Demotion** | M+1 handoff | `SetSyncStartBlock` |
 | 8 | **Monotonic Guards** | No duplicate transitions | `mod.rs` |
@@ -322,6 +322,3 @@ Tất cả nodes trong cùng epoch PHẢI có log giống nhau:
 
 ## 9. Tham Khảo
 
-- [Node Modes and Transitions](../knowledge/node_modes_and_transitions.md)
-- [Consensus Determinism and Indexing](../knowledge/consensus_determinism_and_indexing.md)
-- [Transition Safety Mechanisms](../knowledge/transition_safety_mechanisms.md)

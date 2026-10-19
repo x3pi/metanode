@@ -48,7 +48,7 @@ Trong khi `startup.rs` đang chờ (blocking loop), `ConsensusNode` đã khởi 
 
 Có 2 component chính chịu trách nhiệm đồng bộ:
 
-#### 1. CommitSyncer (`commit_syncer.rs`) - Đồng bộ Khối lượng lớn (Bulk Sync)
+#### 1. CommitSyncer (`commit_syncer/mod.rs`) - Đồng bộ Khối lượng lớn (Bulk Sync)
 Đây là "công nhân" chính khi node bị tụt hậu xa.
 
 *   **Logic chính:**
@@ -64,7 +64,7 @@ Có 2 component chính chịu trách nhiệm đồng bộ:
         4.  `verify_blocks`: Xác thực Block.
         5.  `core_thread_dispatcher.add_certified_commits`: Đẩy Block đã verify vào Core để xử lý và lưu xuống DB.
 
-#### 2. Synchronizer (`synchronizer.rs`) - Đồng bộ Live (Gap nhỏ)
+#### 2. Synchronizer (`synchronizer/mod.rs`) - Đồng bộ Live (Gap nhỏ)
 Component này xử lý các thiếu hụt nhỏ, tức thời (ví dụ: nhận được Block B nhưng thiếu cha A).
 
 *   **Logic chính:**

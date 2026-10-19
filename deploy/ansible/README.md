@@ -2,7 +2,7 @@
 
 > 📖 **Cẩm Nang Triển Khai Nhanh & Tình Huống Vận Hành:** Xem file [DEPLOY_GUIDE.md](DEPLOY_GUIDE.md).
 > 📘 **Tài liệu Hướng dẫn Vận hành Toàn diện:** Xem file [OPERATIONS_GUIDE.md](../../OPERATIONS_GUIDE.md).
-> 🚀 **Script Tự Động Hóa 1 Lệnh (Full Pipeline):** Xem [RUN_PIPELINE_GUIDE.md](RUN_PIPELINE_GUIDE.md) để chạy trọn gói từ Deploy Public/Private Chains đến Full Test Cross-Chain & Block-STM với `./run_full_pipeline.sh` (hoặc `./run_pipeline.sh` tại root).
+> 🚀 **Full pipeline 1 lệnh:** chạy `./run_full_pipeline.sh` trong thư mục này (deploy + test cross-chain & Block-STM).
 
 Tài liệu này bao gồm 2 phần:
 - **Phần 1:** Cẩm nang lệnh chạy siêu tốc & Giải thích chi tiết trình tự xử lý của từng lệnh.

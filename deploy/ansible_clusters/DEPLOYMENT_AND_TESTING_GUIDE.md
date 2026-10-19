@@ -75,7 +75,7 @@
 
 ## 🛠️ 3. CHI TIẾT SCRIPT ĐIỀU PHỐI: `deploy_clusters.sh`
 
-File thực thi: [`deploy/ansible_clusters/deploy_clusters.sh`](file:///home/abc/nhat/con-chain-v2/metanode/deploy/ansible_clusters/deploy_clusters.sh)
+File thực thi: `deploy/ansible_clusters/deploy_clusters.sh`
 
 ### Cú pháp:
 ```bash
@@ -272,7 +272,7 @@ Ansible sẽ tự phân phối token này cho Parent Chain và truyền tự đ�
 ## 🧪 4. BỘ SCRIPT KIỂM THỬ CHUYÊN SÂU (TESTING SCRIPTS)
 
 ### 4.1 Kiểm thử Tích hợp 5 Kịch bản Thực tế (E2E Integration Test)
-File script: [`execution/scripts/test/test_real_world_scenarios.go`](file:///home/abc/nhat/con-chain-v2/metanode/execution/scripts/test/test_real_world_scenarios.go)
+File script: `execution/scripts/test/test_real_world_scenarios.go`
 
 #### Cách chạy:
 ```bash
@@ -304,7 +304,7 @@ go run execution/scripts/test/test_real_world_scenarios.go
 ---
 
 ### 4.2 Kiểm thử Khả Năng Chịu Lỗi Cụm Raft (CFT / Auto-Failover Test)
-File script: [`execution/scripts/test/test_raft_fault_tolerance.go`](file:///home/abc/nhat/con-chain-v2/metanode/execution/scripts/test/test_raft_fault_tolerance.go)
+File script: `execution/scripts/test/test_raft_fault_tolerance.go`
 
 #### Cách chạy:
 ```bash
@@ -324,7 +324,7 @@ go run execution/scripts/test/test_raft_fault_tolerance.go
 ## 🔧 5. CÁC SCRIPT BỔ TRỢ & TIỆN ÍCH QUẢN TRỊ
 
 ### 5.1 Tra cứu & Xuất cấu hình cổng: `parse_inventory.py`
-File script: [`deploy/ansible_clusters/scripts/parse_inventory.py`](file:///home/abc/nhat/con-chain-v2/metanode/deploy/ansible_clusters/scripts/parse_inventory.py)
+File script: `deploy/ansible_clusters/scripts/parse_inventory.py`
 
 ```bash
 cd deploy/ansible_clusters
@@ -349,7 +349,7 @@ python3 scripts/parse_inventory.py inventory.yml json
 ---
 
 ### 5.2 Bắn thông báo Telegram: `telegram_notify.py`
-File script: [`deploy/ansible_clusters/scripts/telegram_notify.py`](file:///home/abc/nhat/con-chain-v2/metanode/deploy/ansible_clusters/scripts/telegram_notify.py)
+File script: `deploy/ansible_clusters/scripts/telegram_notify.py`
 
 ```bash
 cd deploy/ansible_clusters
@@ -367,7 +367,7 @@ python3 scripts/telegram_notify.py --start
 ---
 
 ### 5.3 Kiểm tra toàn bộ mã nguồn: `build_check.sh`
-File script: [`consensus/metanode/scripts/build_check.sh`](file:///home/abc/nhat/con-chain-v2/metanode/consensus/metanode/scripts/build_check.sh)
+File script: `consensus/metanode/scripts/build_check.sh`
 
 ```bash
 cd consensus/metanode/scripts
