@@ -570,6 +570,22 @@ func checkRecoveredHistoricalRoot(recovered, expected common.Hash) error {
 	return nil
 }
 
+// releaseHistoricalRebuildCache closes the cached rebuilt trie and deletes its temp directory (hundreds of MB on a real
+// chain). Called on shutdown; skipped when a rebuild is running, in which case the directory is left as before.
+func releaseHistoricalRebuildCache() {
+	if lockHistoricalRebuild() != nil {
+		return
+	}
+	defer verifyCacheMu.Unlock()
+	if verifyCachedHandle != nil {
+		verifyCachedHandle.Close()
+	}
+	if verifyCachedDir != "" {
+		os.RemoveAll(verifyCachedDir)
+	}
+	verifyCachedTrie, verifyCachedHandle, verifyCachedDir, verifyCachedOK = nil, nil, "", false
+}
+
 var errHistoricalProofBusy = errors.New("another historical state reconstruction is in progress, retry shortly")
 
 func (api *MetaAPI) reconstructHistoricalTrieLocked(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (
