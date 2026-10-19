@@ -513,12 +513,20 @@ func (api *MetaAPI) GetProof(ctx context.Context, address common.Address, blockN
 	// If direct access fails (e.g. historical block in NOMT), fallback to reconstruction
 	if mt_trie.GetStateBackend() == mt_trie.BackendNOMT {
 		logger.Info("🔍 [GetProof] Direct trie access failed, falling back to reconstructHistoricalTrie for block %v", blockNrOrHash)
-		verifyCacheMu.Lock()
+		// Rebuilding a historical trie is O(all accounts) and serialized by verifyCacheMu. Public callers must not queue
+		// behind it without bound, so refuse instead of blocking when a rebuild is already running.
+		if err := lockHistoricalRebuild(); err != nil {
+			return nil, err
+		}
 		defer verifyCacheMu.Unlock()
 
-		trie, _, _, _, _, errReconstruct := api.reconstructHistoricalTrieLocked(ctx, blockNrOrHash)
+		trie, _, expectedRoot, _, _, errReconstruct := api.reconstructHistoricalTrieLocked(ctx, blockNrOrHash)
 		if errReconstruct != nil {
 			return nil, fmt.Errorf("failed to reconstruct historical trie: %w", errReconstruct)
+		}
+		// A proof is only meaningful against the block's own stateRoot; never hand out one from a trie that differs.
+		if err := checkRecoveredHistoricalRoot(trie.Hash(), expectedRoot); err != nil {
+			return nil, err
 		}
 
 		proof, errProof := trie.GenerateProof(address.Bytes())
@@ -537,7 +545,32 @@ var (
 	verifyCachedBlock  uint64
 	verifyCachedDir    string
 	verifyCachedHandle *nomt_ffi.Handle
+	// verifyCachedOK is true only when verifyCachedTrie's root matched the block header's stateRoot for verifyCachedBlock.
+	verifyCachedOK bool
 )
+
+// cachedHistoricalTrieHit reports whether the cached rebuilt trie is exactly the state of block target. Caller holds verifyCacheMu.
+func cachedHistoricalTrieHit(target uint64, expectedRoot common.Hash) bool {
+	return verifyCachedTrie != nil && verifyCachedOK && target == verifyCachedBlock && verifyCachedTrie.Hash() == expectedRoot
+}
+
+// lockHistoricalRebuild takes verifyCacheMu without waiting; the caller must Unlock on a nil error.
+func lockHistoricalRebuild() error {
+	if !verifyCacheMu.TryLock() {
+		return errHistoricalProofBusy
+	}
+	return nil
+}
+
+// checkRecoveredHistoricalRoot refuses a rebuilt trie that does not reproduce the block header's stateRoot.
+func checkRecoveredHistoricalRoot(recovered, expected common.Hash) error {
+	if recovered != expected {
+		return fmt.Errorf("historical state does not reproduce block stateRoot (recovered %s, expected %s)", recovered.Hex(), expected.Hex())
+	}
+	return nil
+}
+
+var errHistoricalProofBusy = errors.New("another historical state reconstruction is in progress, retry shortly")
 
 func (api *MetaAPI) reconstructHistoricalTrieLocked(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (
 	*mt_trie.NomtStateTrie, uint64, common.Hash, bool, int, error) {
@@ -587,6 +620,36 @@ func (api *MetaAPI) reconstructHistoricalTrieLocked(ctx context.Context, blockNr
 		return nil, 0, common.Hash{}, false, 0, fmt.Errorf("ChangelogDB is not available")
 	}
 
+	// Cheap paths first (they need none of the full-state scans below). Both only trust a cached trie whose root was
+	// verified against its block header, so a cache hit yields exactly what a full rebuild would.
+	if verifyCachedTrie != nil && verifyCachedOK {
+		if cachedHistoricalTrieHit(targetBlockNumber, expectedRoot) {
+			return verifyCachedTrie, targetBlockNumber, expectedRoot, true, -1, nil
+		}
+		if targetBlockNumber == verifyCachedBlock+1 {
+			if changes, errChange := changelogDB.GetBlockChanges(targetBlockNumber); errChange == nil {
+				verifyCachedOK = false // the cached trie is mid-update until its root is re-verified below
+				for _, change := range changes {
+					val := change.NewValue
+					if bytes.Equal(val, []byte("DEL")) {
+						verifyCachedTrie.Update(change.Key, []byte{})
+					} else {
+						verifyCachedTrie.Update(change.Key, val)
+					}
+				}
+				if _, _, _, errCommit := verifyCachedTrie.Commit(true); errCommit != nil {
+					return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to commit cached trie: %w", errCommit)
+				}
+				if err := verifyCachedTrie.CommitPayload(); err != nil {
+					return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to commit payload to cached trie: %w", err)
+				}
+				verifyCachedBlock = targetBlockNumber
+				verifyCachedOK = verifyCachedTrie.Hash() == expectedRoot
+				return verifyCachedTrie, targetBlockNumber, expectedRoot, true, -1, nil
+			}
+		}
+	}
+
 	// 3. Get all known addresses from current trie
 	lastBlock := api.App.blockProcessor.GetLastBlock()
 	if lastBlock == nil {
@@ -613,33 +676,6 @@ func (api *MetaAPI) reconstructHistoricalTrieLocked(ctx context.Context, blockNr
 				currentVal, _ := nomtTrie.Get(addr)
 				allEntries[hexKey] = currentVal
 			}
-		}
-	}
-
-	// FAST PATH
-	if verifyCachedTrie != nil && targetBlockNumber == verifyCachedBlock+1 {
-		changes, errChange := changelogDB.GetBlockChanges(targetBlockNumber)
-		if errChange == nil {
-			for _, change := range changes {
-				val := change.NewValue
-				if bytes.Equal(val, []byte("DEL")) {
-					verifyCachedTrie.Update(change.Key, []byte{})
-				} else {
-					verifyCachedTrie.Update(change.Key, val)
-				}
-			}
-
-			// Commit with persistToDisk=true
-			_, _, _, errCommit := verifyCachedTrie.Commit(true)
-			if errCommit != nil {
-				return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to commit cached trie: %w", errCommit)
-			}
-			if err := verifyCachedTrie.CommitPayload(); err != nil {
-				return nil, 0, common.Hash{}, false, 0, fmt.Errorf("failed to commit payload to cached trie: %w", err)
-			}
-
-			verifyCachedBlock = targetBlockNumber
-			return verifyCachedTrie, targetBlockNumber, expectedRoot, true, -1, nil
 		}
 	}
 
@@ -731,6 +767,7 @@ func (api *MetaAPI) reconstructHistoricalTrieLocked(ctx context.Context, blockNr
 	verifyCachedHandle = tempHandle
 	verifyCachedDir = tempDir
 	verifyCachedBlock = targetBlockNumber
+	verifyCachedOK = tempTrie.Hash() == expectedRoot
 
 	return verifyCachedTrie, targetBlockNumber, expectedRoot, false, len(allEntries), nil
 }
