@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -164,7 +165,9 @@ type barrierOutcome struct {
 	roots              string
 }
 
-func barrierRun(t *testing.T, seed int64, mode string) (barrierOutcome, []mt_types.Transaction) {
+// barrierSetup builds the chain state every barrier test shares: funded native and barrier-sender accounts, the node identity as
+// the committee validator, three pre-registered validators, gateway destination chain 102 and the rollup system handler.
+func barrierSetup(t *testing.T) (barrierEnv, *blockchain.ChainState) {
 	t.Helper()
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "true")
 	t.Setenv("METANODE_DEVNET", "true")
@@ -207,6 +210,13 @@ func barrierRun(t *testing.T, seed int64, mode string) (barrierOutcome, []mt_typ
 	prev := rollupSystemHandlerInstance
 	rollupSystemHandlerInstance = &RollupSystemHandler{dispatcher: &MockRollupSystemDispatcher{}, registryHandler: rollup.NewAccountRegistryHandler(diffBarrierCluster)}
 	t.Cleanup(func() { rollupSystemHandlerInstance = prev })
+
+	return env, cs
+}
+
+func barrierRun(t *testing.T, seed int64, mode string) (barrierOutcome, []mt_types.Transaction) {
+	t.Helper()
+	env, cs := barrierSetup(t)
 
 	txs := barrierBlock(t, rand.New(rand.NewSource(seed)), env)
 	idx := map[common.Hash]int{}
