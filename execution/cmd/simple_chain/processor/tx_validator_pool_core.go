@@ -52,6 +52,10 @@ type TxValidatorPool struct {
 	// evictionInProgress guards EvictLowestGasPrice against being triggered
 	// concurrently — see addTransactionToPoolInternal for why this matters.
 	evictionInProgress atomic.Bool
+
+	// admitMu synchronizes status checks, capacity reservations, evictions, and pool insertions
+	// across both single and batch paths, preventing concurrent capacity overshoots.
+	admitMu sync.Mutex
 	
 	// RollupInterceptor allows simple_chain/app.go to intercept System Events (like CreditObserved)
 	// before they are sent to the EVM processor, ensuring Zero State Drift across the cluster.
@@ -314,6 +318,24 @@ func (vp *TxValidatorPool) AddVerifiedTransactionsToPool(txs []types.Transaction
 	return vp.addTransactionsToPoolInternal(txs, true)
 }
 
+// RequeueTransactions re-adds previously drained transactions back into the mempool.
+// Because these transactions held in-flight reservations since being drained, requeuing
+// them transitions their reserved slots back into the pool shards without dropping any transactions.
+func (vp *TxValidatorPool) RequeueTransactions(txs []types.Transaction) {
+	if len(txs) == 0 || vp == nil || vp.transactionPool == nil {
+		return
+	}
+	vp.transactionPool.RequeueTransactions(txs)
+}
+
+// RequeueTransactionsWithDrainID re-adds previously drained transactions holding a matching drainID reservation.
+func (vp *TxValidatorPool) RequeueTransactionsWithDrainID(txs []types.Transaction, drainID uint64) int {
+	if len(txs) == 0 || vp == nil || vp.transactionPool == nil {
+		return 0
+	}
+	return vp.transactionPool.RequeueTransactionsWithDrainID(txs, drainID)
+}
+
 // addTransactionToPoolInternal handles the core logic with an option to skip expensive verification
 func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, skipVerification bool) (int64, error) {
 	return vp.addTransactionToPoolInternalCap(tx, skipVerification, true)
@@ -324,21 +346,22 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 // reject it before any verification. Eviction itself still happens only AFTER a tx has been verified (so invalid spam
 // can never evict legitimate txs). Returns nil when the caller should proceed.
 func (vp *TxValidatorPool) rejectIfPoolFullAndEvicting(n int) error {
-	if vp.evictionInProgress.Load() && vp.transactionPool.CountTransactions()+n >= MaxMempoolSize {
-		return fmt.Errorf("transaction pool is full (limit=%d), eviction already in progress", MaxMempoolSize)
+	if vp.evictionInProgress.Load() && vp.transactionPool.UsedSlots()+n >= MaxMempoolSize {
+		return fmt.Errorf("%w (limit=%d), eviction already in progress", transaction.ErrPoolFull, MaxMempoolSize)
 	}
 	return nil
 }
 
 // addTransactionToPoolInternalCap is addTransactionToPoolInternal with the MaxMempoolSize evict-or-reject step optional.
-func (vp *TxValidatorPool) addTransactionToPoolInternalCap(tx types.Transaction, skipVerification bool, enforceCap bool) (int64, error) {
+// When allowEviction is false (e.g. TCP ingress), eviction of other transactions is disabled, but hard capacity is strictly enforced.
+func (vp *TxValidatorPool) addTransactionToPoolInternalCap(tx types.Transaction, skipVerification bool, allowEviction bool) (int64, error) {
 	if vp == nil {
 		return transaction.InvalidTransaction.Code, fmt.Errorf("TxValidatorPool is nil")
 	}
 	if tx == nil {
 		return transaction.InvalidTransaction.Code, fmt.Errorf("tx nil")
 	}
-	if enforceCap {
+	if allowEviction {
 		if err := vp.rejectIfPoolFullAndEvicting(1); err != nil {
 			return transaction.AddToPoolError.Code, err
 		}
@@ -390,47 +413,40 @@ func (vp *TxValidatorPool) addTransactionToPoolInternalCap(tx types.Transaction,
 		}
 	}
 
-	// PRE-EVICTION VALIDATION: check duplicate and replacement conditions BEFORE evicting.
-	// Otherwise, an existing or underpriced transaction could evict legitimate transactions
-	// only to be rejected in AddTransaction.
-	addStatus, statusErr := vp.transactionPool.CheckAddStatus(tx)
-	if statusErr != nil {
-		var te *transaction.TransactionError
-		if errors.As(statusErr, &te) {
-			return te.Code, statusErr
-		}
-		if errors.Is(statusErr, transaction.ErrAlreadyKnown) {
-			return transaction.ErrAlreadyKnown.Code, fmt.Errorf("%w: transaction already exists in pool, skipping", transaction.ErrAlreadyKnown)
-		}
-		if errors.Is(statusErr, transaction.ErrReplacementUnderpriced) {
-			return transaction.ErrReplacementUnderpriced.Code, fmt.Errorf("%w: replacement transaction underpriced", transaction.ErrReplacementUnderpriced)
-		}
-		return transaction.InvalidTransaction.Code, statusErr
-	}
+	// PRE-EVICTION SIFTING: estimate whether tx is net-new or replacement/duplicate.
+	// Only net-new transactions need room made when pool sits at capacity.
+	addStatus, _ := vp.transactionPool.CheckAddStatus(tx)
 
 	// In-place replacement (TxAddStatusReplace) does not increase pool size, so no eviction is needed.
 	// Only net-new transactions (TxAddStatusNew) need room made when pool sits at capacity.
-	if enforceCap && addStatus == transaction_pool.TxAddStatusNew && vp.transactionPool.CountTransactions() >= MaxMempoolSize {
+	// Eviction runs outside locks with evictionInProgress CAS so heavy scan/sort never stalls concurrent callers.
+	if allowEviction && addStatus == transaction_pool.TxAddStatusNew && vp.transactionPool.AvailableSlots() == 0 {
 		newGas := tx.GasPriceCap()
 		if newGas == nil {
 			newGas = new(big.Int).SetUint64(tx.MaxGasPrice())
 		}
 		if vp.evictionInProgress.CompareAndSwap(false, true) {
-			evicted := func() int {
-				defer vp.evictionInProgress.Store(false)
-				logger.Warn("⚠️ Mempool is full (limit=%d). Evicting lowest-fee transactions to make room for new txs.", MaxMempoolSize)
-				return vp.transactionPool.EvictLowestGasPriceThan(mempoolEvictBatchSize, newGas)
-			}()
-			if evicted == 0 {
-				return transaction.AddToPoolError.Code, fmt.Errorf("transaction pool is full (limit=%d) and transaction underpriced to evict", MaxMempoolSize)
+			logger.Warn("⚠️ Mempool is full (limit=%d). Evicting lowest-fee transactions to make room for new txs.", MaxMempoolSize)
+			evicted := vp.transactionPool.EvictLowestGasPriceThan(mempoolEvictBatchSize, newGas)
+			vp.evictionInProgress.Store(false)
+			if evicted == 0 || vp.transactionPool.AvailableSlots() == 0 {
+				return transaction.ErrPoolFull.Code, fmt.Errorf("%w: transaction pool is full (limit=%d) and transaction underpriced to evict", transaction.ErrPoolFull, MaxMempoolSize)
 			}
-		} else {
-			return transaction.AddToPoolError.Code, fmt.Errorf("transaction pool is full (limit=%d), eviction already in progress", MaxMempoolSize)
 		}
 	}
 
-	err := vp.transactionPool.AddTransaction(tx)
+	// Insert atomically under shard lock (authoritatively enforces capacity, price bumps, and duplicates)
+	err := vp.transactionPool.AddTransactionCap(tx, allowEviction)
 	if err != nil {
+		if errors.Is(err, transaction.ErrPoolFull) {
+			return transaction.ErrPoolFull.Code, err
+		}
+		if errors.Is(err, transaction.ErrAlreadyKnown) {
+			return transaction.ErrAlreadyKnown.Code, fmt.Errorf("%w: transaction already exists in pool, skipping", transaction.ErrAlreadyKnown)
+		}
+		if errors.Is(err, transaction.ErrReplacementUnderpriced) {
+			return transaction.ErrReplacementUnderpriced.Code, fmt.Errorf("%w: replacement transaction underpriced", transaction.ErrReplacementUnderpriced)
+		}
 		logger.Error("❌ [TX FLOW] Failed to add transaction to pool: %v", err)
 		var te *transaction.TransactionError
 		if errors.As(err, &te) {
@@ -466,7 +482,8 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 }
 
 // addTransactionsToPoolInternalCap is addTransactionsToPoolInternal with the MaxMempoolSize evict-or-reject step optional.
-func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transaction, skipVerification bool, enforceCap bool) []error {
+// When allowEviction is false (e.g. TCP ingress), eviction of other transactions is disabled, but hard capacity is strictly enforced.
+func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transaction, skipVerification bool, allowEviction bool) []error {
 	if vp == nil {
 		errs := make([]error, len(txs))
 		for i := range errs {
@@ -479,7 +496,7 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transact
 	if len(txs) == 0 {
 		return nil
 	}
-	if enforceCap {
+	if allowEviction {
 		if err := vp.rejectIfPoolFullAndEvicting(len(txs)); err != nil {
 			errs := make([]error, len(txs))
 			for i := range errs {
@@ -650,21 +667,27 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transact
 
 	t3 := time.Now()
 	validTxs = make([]types.Transaction, 0, len(txs))
-	// Sequentially gather the valid transactions and filter duplicates/replacements before eviction
+	// Pre-screen valid transactions to estimate net-new count and batch floor for eviction.
+	// Runs outside locks so heavy scan never stalls concurrent callers.
 	netNewCount := 0
+	var batchFloor *big.Int
+
 	for i, tx := range txs {
 		if tx == nil {
 			errorsList[i] = fmt.Errorf("tx nil")
 			continue
 		}
 		if errorsList[i] == nil {
-			status, err := vp.transactionPool.CheckAddStatus(tx)
-			if err != nil {
-				errorsList[i] = err
-				continue
-			}
+			status, _ := vp.transactionPool.CheckAddStatus(tx)
 			if status == transaction_pool.TxAddStatusNew {
 				netNewCount++
+				g := tx.GasPriceCap()
+				if g == nil {
+					g = new(big.Int).SetUint64(tx.MaxGasPrice())
+				}
+				if batchFloor == nil || g.Cmp(batchFloor) < 0 {
+					batchFloor = g
+				}
 			}
 			validTxs = append(validTxs, tx)
 		}
@@ -674,43 +697,55 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transact
 	t4 := time.Now()
 	// Limit pool size to prevent GC stall / OOM
 	// Eviction runs AFTER verification so invalid spam transactions do not evict legitimate mempool transactions.
-	// Only net-new additions require space; in-place replacements do not increase pool size.
-	if enforceCap && netNewCount > 0 && vp.transactionPool.CountTransactions()+netNewCount >= MaxMempoolSize {
+	// Eviction runs OUTSIDE locks using single-flight CAS guard so heavy scan/sort never stalls concurrent callers.
+	if allowEviction && netNewCount > 0 && vp.transactionPool.UsedSlots()+netNewCount > MaxMempoolSize {
 		if vp.evictionInProgress.CompareAndSwap(false, true) {
-			evicted := func() int {
-				defer vp.evictionInProgress.Store(false)
-				evictCount := netNewCount
-				if evictCount < 1000 {
-					evictCount = 1000
-				}
-				logger.Warn("⚠️ Mempool is near full (limit=%d). Evicting %d lowest-fee transactions to make room for batch.", MaxMempoolSize, evictCount)
-				return vp.transactionPool.EvictLowestGasPrice(evictCount)
-			}()
-			if evicted == 0 {
-				err := fmt.Errorf("transaction pool is full (limit=%d) and could not evict", MaxMempoolSize)
-				for i := range errorsList {
-					if errorsList[i] == nil {
-						errorsList[i] = err
-					}
-				}
-				validTxs = nil
+			evictCount := netNewCount
+			if evictCount < 1000 {
+				evictCount = 1000
 			}
-		} else {
-			err := fmt.Errorf("transaction pool is full (limit=%d), eviction already in progress", MaxMempoolSize)
-			for i := range errorsList {
-				if errorsList[i] == nil {
-					errorsList[i] = err
-				}
-			}
-			validTxs = nil
+			logger.Warn("⚠️ Mempool is near full (limit=%d). Evicting %d lowest-fee transactions to make room for batch.", MaxMempoolSize, evictCount)
+			vp.transactionPool.EvictLowestGasPriceThan(evictCount, batchFloor)
+			vp.evictionInProgress.Store(false)
 		}
 	}
 
-	if len(validTxs) > 0 {
-		// Bulk insert to pool (acquires lock ONCE per shard run)
-		vp.transactionPool.AddTransactions(validTxs)
+	// Insert atomically through TransactionPool under per-shard locks.
+	// Every transaction's outcome is authoritatively determined under the shard write lock.
+	var txsToInsert []types.Transaction
+	var origIndices []int
+	for i, tx := range txs {
+		if errorsList[i] == nil && tx != nil {
+			txsToInsert = append(txsToInsert, tx)
+			origIndices = append(origIndices, i)
+		}
+	}
 
-		GlobalPipelineStats.IncrTxsReceived(int64(len(validTxs)))
+	var totalInserted int
+	if len(txsToInsert) > 0 {
+		insertErrs := vp.transactionPool.AddTransactionsCap(txsToInsert, allowEviction)
+		for j, err := range insertErrs {
+			origIdx := origIndices[j]
+			if err != nil {
+				if errors.Is(err, transaction.ErrAlreadyKnown) {
+					// Idempotent duplicate: already known in pool
+					errorsList[origIdx] = nil
+				} else if errors.Is(err, transaction.ErrReplacementUnderpriced) {
+					errorsList[origIdx] = fmt.Errorf("[code:%d] %w", transaction.ErrReplacementUnderpriced.Code, err)
+				} else if errors.Is(err, transaction.ErrPoolFull) {
+					errorsList[origIdx] = fmt.Errorf("[code:%d] %w", transaction.ErrPoolFull.Code, err)
+				} else {
+					errorsList[origIdx] = err
+				}
+			} else {
+				errorsList[origIdx] = nil
+				totalInserted++
+			}
+		}
+	}
+
+	if totalInserted > 0 {
+		GlobalPipelineStats.IncrTxsReceived(int64(totalInserted))
 	}
 	poolInsertionDuration := time.Since(t4)
 
@@ -988,15 +1023,17 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 // pool this call (0 = unbounded) -- see TransactionsWithAggSign's comment for
 // why: with a huge backlog, sorting/validating everything on every tick just
 // to use a small slice of it made a single tick take tens of seconds.
-func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxDrain int) []types.Transaction {
+func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxDrain int) ([]types.Transaction, uint64) {
 	var txs []types.Transaction
+	var drainID uint64
 	if setEmptyBlock {
 		txs = make([]types.Transaction, 0)
 	} else {
-		allTxs, _ := vp.transactionPool.TransactionsWithAggSign(maxDrain)
+		allTxs, dID, _ := vp.transactionPool.TransactionsWithDrainID(maxDrain)
+		drainID = dID
 
 		if len(allTxs) == 0 {
-			return allTxs
+			return allTxs, drainID
 		}
 
 		startProcess := time.Now()
@@ -1010,6 +1047,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 
 		validTxs := make([]types.Transaction, 0, len(allTxs))
 		var futureTxs []types.Transaction
+		var droppedTxs []types.Transaction
 		nonceMap := make(map[common.Address]uint64, len(preloadSet))
 
 		if len(preloadSet) > 0 {
@@ -1113,6 +1151,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 		// Sort by FromAddress and Nonce to ensure contiguous evaluation
 		SortTxsByFromAndNonce(allTxs)
 
+		var droppedCount int
 		for _, tx := range allTxs {
 			from := tx.FromAddress()
 
@@ -1129,6 +1168,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 							transaction_pool.TraceTx("TTL-DROP", from, actual, fmt.Sprintf("expected=%d waitedSince=%s", expected, insertTime.Format("15:04:05.000000")))
 						}
 						delete(vp.futureTxTimeMap, txHash)
+						droppedCount++
 						continue // KHÔNG append vào futureTxs nữa -> Bị drop vĩnh viễn
 					}
 				} else {
@@ -1157,7 +1197,12 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 				if len(vp.futureTxTimeMap) > 0 {
 					delete(vp.futureTxTimeMap, tx.Hash())
 				}
+				droppedTxs = append(droppedTxs, tx)
 			}
+		}
+
+		if len(droppedTxs) > 0 {
+			vp.transactionPool.ReleaseInFlightWithDrainID(droppedTxs, drainID)
 		}
 
 		// NOTE (investigated at length 2026-09-02, measuring sustained
@@ -1211,9 +1256,9 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 		// transactions with nothing left that could re-queue them. See that
 		// function's doc comment for the full reasoning.
 
-		// Re-add future transactions back to the pool
+		// Re-add future transactions back to the pool with pool cap enforcement
 		if len(futureTxs) > 0 {
-			vp.transactionPool.AddTransactions(futureTxs)
+			vp.RequeueTransactionsWithDrainID(futureTxs, drainID)
 		}
 
 		if traceEnabled {
@@ -1235,7 +1280,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 
 		txs = validTxs
 	}
-	return txs
+	return txs, drainID
 }
 
 // SortTxsByFromAndNonce sorts transactions by FromAddress and then Nonce to ensure contiguous evaluation.

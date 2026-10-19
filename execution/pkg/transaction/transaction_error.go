@@ -128,6 +128,7 @@ var (
 	// Recipient gate and account lock errors
 	RecipientNotRegistered = &TransactionError{91, "recipient not registered on this cluster"}
 	AccountLocked          = &TransactionError{92, "account is locked on this cluster"}
+	ErrPoolFull            = &TransactionError{93, "transaction pool is full"}
 )
 
 var CodeToError = map[int64]*TransactionError{
@@ -231,6 +232,7 @@ var CodeToError = map[int64]*TransactionError{
 	90: ErrInvalidBlobProof,
 	91: RecipientNotRegistered,
 	92: AccountLocked,
+	93: ErrPoolFull,
 }
 
 // DescriptionToError provides reverse lookup from error description to TransactionError.

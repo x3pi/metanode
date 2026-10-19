@@ -154,7 +154,7 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 		}
 
 		poolSizeBefore = bf.transactionProcessor.transactionPool.CountTransactions()
-		txs := bf.transactionProcessor.ProcessTransactionsInPoolSub(setEmptyBlock, maxPoolDrainPerTick)
+		txs, drainID := bf.transactionProcessor.ProcessTransactionsInPoolSub(setEmptyBlock, maxPoolDrainPerTick)
 		poolSizeAfter := bf.transactionProcessor.transactionPool.CountTransactions()
 
 		// TBAB: Update TPS
@@ -179,7 +179,11 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 		if len(txs) > targetBlockSize {
 			remainingTxs := txs[targetBlockSize:]
-			bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)
+			if bf.transactionProcessor != nil && bf.transactionProcessor.TxValidatorPool != nil {
+				bf.transactionProcessor.TxValidatorPool.RequeueTransactionsWithDrainID(remainingTxs, drainID)
+			} else if bf.transactionProcessor != nil && bf.transactionProcessor.transactionPool != nil {
+				bf.transactionProcessor.transactionPool.RequeueTransactionsWithDrainID(remainingTxs, drainID)
+			}
 			txs = txs[:targetBlockSize]
 			totalTxs = len(txs) // Update totalTxs to match the capped list
 		}
@@ -213,6 +217,9 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			bTransaction, err := transaction.MarshalTransactions(batchTxs)
 			if err != nil {
 				logger.Error("MarshalTransactions for batch %d: %v", batchNum, err)
+				if bf.transactionProcessor != nil && bf.transactionProcessor.transactionPool != nil {
+					bf.transactionProcessor.transactionPool.ReleaseInFlightWithDrainID(batchTxs, drainID)
+				}
 				continue
 			}
 
@@ -277,6 +284,9 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			}
 			// Pipeline stats: track TXs forwarded to Rust
 			GlobalPipelineStats.IncrTxsForwarded(int64(len(batchTxs)))
+			if bf.transactionProcessor != nil && bf.transactionProcessor.transactionPool != nil {
+				bf.transactionProcessor.transactionPool.ReleaseInFlightWithDrainID(batchTxs, drainID)
+			}
 			// ── RUST CONSENSUS TIMER: stamp when last batch enters Rust ──────
 			LastSendBatchTimeNano.Store(time.Now().UnixNano())
 			LastSendBatchTxCount.Store(int64(totalTxs))

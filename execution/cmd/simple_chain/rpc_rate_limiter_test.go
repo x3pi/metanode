@@ -592,12 +592,18 @@ func TestRPCRateLimiter_WebSocketEmptyFragmentsRawBytesCapped(t *testing.T) {
 	first := &wsParsedFrame{fin: false, opcode: 1, masked: true, rawBytes: []byte{1, 129, 0, 0, 0, 0, 'a'}, payload: []byte{'a'}}
 	require.NoError(t, c.handleFrame(first))
 	empty := &wsParsedFrame{fin: false, opcode: 0, masked: true, rawBytes: []byte{0, 128, 0, 0, 0, 0}}
+	var cappedErr error
 	for i := 0; i < maxWSMessagePayload/6+1; i++ {
 		if err := c.handleFrame(empty); err != nil {
-			return // successfully capped and rejected
+			cappedErr = err
+			break
 		}
 	}
-	t.Fatalf("accepted raw buffered bytes=%d with payload bytes=%d; message cap=%d", c.fragRawBytes.Len(), c.fragPayload.Len(), maxWSMessagePayload)
+	require.Error(t, cappedErr, "frame sequence exceeding maxWSMessagePayload must be rejected")
+	assert.Contains(t, cappedErr.Error(), "exceeds", "error should describe exceeding size limit")
+	assert.False(t, c.inFragment, "inFragment state must be reset to false upon rejection")
+	assert.Equal(t, 0, c.fragRawBytes.Len(), "fragRawBytes buffer must be reset upon rejection")
+	assert.Equal(t, 0, c.fragPayload.Len(), "fragPayload buffer must be reset upon rejection")
 }
 
 func TestRPCRateLimiter_WebSocketCloseUnblocksRead(t *testing.T) {
@@ -614,10 +620,21 @@ func TestRPCRateLimiter_WebSocketCloseUnblocksRead(t *testing.T) {
 		readDone <- err
 	}()
 
-	// Close from another goroutine while Read is blocked waiting for network data
+	// Wait briefly so wrapped.Read is blocked in socket read holding readMu
 	time.Sleep(10 * time.Millisecond)
-	err := wrapped.Close()
-	assert.NoError(t, err)
+
+	// Close from a goroutine so that if Close deadlocks on readMu, the test fails with a clear timeout
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- wrapped.Close()
+	}()
+
+	select {
+	case err := <-closeDone:
+		assert.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wrapped.Close() deadlocked (likely blocked acquiring readMu while Read is blocked on socket)")
+	}
 
 	select {
 	case readErr := <-readDone:

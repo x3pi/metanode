@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -389,10 +390,18 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_RECEIVED", fmt.Sprintf("Received from connection: %s", conn.RemoteAddrSafe()))
 
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_START", "Adding transaction to mempool")
-	tp.admitMu.Lock()
-	tp.waitForPoolRoom(1)
-	code, err := tp.AddAdmittedTransactionToPool(tx)
-	tp.admitMu.Unlock()
+	var code int64
+	var err error
+	for {
+		tp.admitMu.Lock()
+		code, err = tp.AddAdmittedTransactionToPool(tx)
+		tp.admitMu.Unlock()
+		if err != nil && errors.Is(err, transaction.ErrPoolFull) {
+			tp.waitForPoolRoom(1)
+			continue
+		}
+		break
+	}
 	if err != nil {
 		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_FAILED", err.Error())
 		logger.Warn("⚠️ [TX REJECTED] AddTransactionToPool failed: txHash=%s, msg=%s", tx.Hash().Hex(), err.Error())
@@ -476,29 +485,23 @@ func (tp *TransactionProcessor) ProcessRawTransactionFromClient(
 	return nil
 }
 
-// poolAdmissionHeadroom is kept free below MaxMempoolSize when admitting from TCP. Every forwarder tick takes up to
-// 40,000 transactions out of the pool (maxPoolDrainPerTick in StartForwardingLoop) and puts back everything it did not
-// forward (future nonces and the part above the block cap), so the pool size swings by that much. Admitting right up
-// to MaxMempoolSize lets such a swing push the pool over the hard cap and trigger evict-or-reject.
-const poolAdmissionHeadroom = 40000
-
 // waitForPoolRoom is admission backpressure for the TCP submission paths. Raw-tx clients are fire-and-forget, so when
 // the mempool is full the pool's evict-or-reject path drops transactions the client never learns about; each dropped
 // tx is a permanent nonce gap and every later tx of that sender sits in the pool as "future" forever. Waiting here
 // (the worker blocks, the central queue fills, the connection reader blocks, TCP flow control slows the client)
-// keeps the stream lossless. It waits regardless of the connection state: the batch was received in full, so it is not
-// discarded because the client already left, and giving up would fall back to the lossy path. The pool drains as soon
-// as the forwarder makes progress (futures are dropped after FutureTxTimeout). Callers hold admitMu.
+// keeps the stream lossless. It waits based on UsedSlots() (in-pool count + in-flight reservations),
+// guaranteeing that drained-but-unforwarded transactions do not trigger false swings. Callers hold admitMu.
 func (tp *TransactionProcessor) waitForPoolRoom(n int) {
 	if tp.TxValidatorPool == nil || tp.transactionPool == nil { // only unit-test fixtures lack a pool; nothing to wait for
 		return
 	}
 	start := time.Now()
 	warned := false
-	for tp.transactionPool.CountTransactions()+n >= MaxMempoolSize-poolAdmissionHeadroom {
+	maxCap := tp.transactionPool.MaxCapacity()
+	for tp.transactionPool.UsedSlots()+n > maxCap {
 		if !warned && time.Since(start) > 5*time.Second {
 			warned = true
-			logger.Warn("⏳ [ADMISSION] waiting for mempool room (pool=%d, limit=%d) for %v", tp.transactionPool.CountTransactions(), MaxMempoolSize-poolAdmissionHeadroom, time.Since(start).Round(time.Millisecond))
+			logger.Warn("⏳ [ADMISSION] waiting for mempool room (used=%d, limit=%d) for %v", tp.transactionPool.UsedSlots(), maxCap, time.Since(start).Round(time.Millisecond))
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -673,10 +676,35 @@ func (tp *TransactionProcessor) ProcessRawTransactionsFromClient(request network
 			end = len(processedTxs)
 		}
 		chunkTxs := processedTxs[i:end]
-		tp.admitMu.Lock()
-		tp.waitForPoolRoom(len(chunkTxs))
-		chunkErrs := tp.AddAdmittedTransactionsToPool(chunkTxs)
-		tp.admitMu.Unlock()
+		chunkErrs := make([]error, len(chunkTxs))
+		pendingIndices := make([]int, len(chunkTxs))
+		for k := range pendingIndices {
+			pendingIndices[k] = k
+		}
+
+		for len(pendingIndices) > 0 {
+			txsToTry := make([]types.Transaction, len(pendingIndices))
+			for k, idx := range pendingIndices {
+				txsToTry[k] = chunkTxs[idx]
+			}
+			tp.admitMu.Lock()
+			errs := tp.AddAdmittedTransactionsToPool(txsToTry)
+			tp.admitMu.Unlock()
+
+			var nextPending []int
+			for k, err := range errs {
+				origIdx := pendingIndices[k]
+				if err != nil && errors.Is(err, transaction.ErrPoolFull) {
+					nextPending = append(nextPending, origIdx)
+				} else {
+					chunkErrs[origIdx] = err
+				}
+			}
+			if len(nextPending) > 0 {
+				tp.waitForPoolRoom(1)
+			}
+			pendingIndices = nextPending
+		}
 		allErrors = append(allErrors, chunkErrs...)
 	}
 

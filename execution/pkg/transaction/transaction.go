@@ -1198,6 +1198,7 @@ func (t *Transaction) MaxGasPrice() uint64 {
 // GasPriceCap returns the maximum gas price the user is willing to pay for execution gas:
 // flat MaxGasPrice for Legacy/EIP-2930/Type 0xFF, GasFeeCap for EIP-1559/EIP-4844/EIP-7702.
 // Used for admission gate (>= MINIMUM_BASE_FEE) and balance checks (gasLimit * cap + value) (ADR D2).
+// Note: The returned *big.Int is cached internally and is read-only. Callers must not mutate it.
 func (t *Transaction) GasPriceCap() *big.Int {
 	if t == nil || t.proto == nil {
 		return big.NewInt(0)
