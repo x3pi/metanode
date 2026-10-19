@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -67,5 +68,44 @@ func TestCachedHistoricalTrieHit_OnlyForTheVerifiedSameBlock(t *testing.T) {
 	verifyCachedOK = false
 	if cachedHistoricalTrieHit(7, root) {
 		t.Fatal("an unverified cached trie must never hit")
+	}
+}
+
+func TestReleaseHistoricalRebuildCache_RemovesTempDirAndResetsCache(t *testing.T) {
+	dir, err := os.MkdirTemp("", "nomt_verify_test_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	handle, err := nomt_ffi.Open(dir, 1, 64, 64, 0, true)
+	if err != nil {
+		t.Skipf("nomt ffi unavailable: %v", err)
+	}
+	verifyCacheMu.Lock()
+	oldT, oldH, oldD, oldB, oldOK := verifyCachedTrie, verifyCachedHandle, verifyCachedDir, verifyCachedBlock, verifyCachedOK
+	verifyCachedTrie, verifyCachedHandle, verifyCachedDir, verifyCachedBlock, verifyCachedOK = mt_trie.NewNomtStateTrie(handle, false, "account_state"), handle, dir, 5, true
+	verifyCacheMu.Unlock()
+	defer func() {
+		verifyCacheMu.Lock()
+		verifyCachedTrie, verifyCachedHandle, verifyCachedDir, verifyCachedBlock, verifyCachedOK = oldT, oldH, oldD, oldB, oldOK
+		verifyCacheMu.Unlock()
+	}()
+
+	// While a rebuild runs, shutdown must not block on it and must leave everything in place.
+	verifyCacheMu.Lock()
+	releaseHistoricalRebuildCache()
+	verifyCacheMu.Unlock()
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("a busy rebuild lock must leave the directory alone: %v", err)
+	}
+
+	releaseHistoricalRebuildCache()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("temp dir must be removed, stat err=%v", err)
+	}
+	verifyCacheMu.Lock()
+	defer verifyCacheMu.Unlock()
+	if verifyCachedTrie != nil || verifyCachedHandle != nil || verifyCachedDir != "" || verifyCachedOK {
+		t.Fatal("cache state must be reset")
 	}
 }

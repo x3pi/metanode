@@ -1210,6 +1210,7 @@ func (app *App) Stop() {
 			close(app.conservationStop)
 		}
 	}
+	releaseHistoricalRebuildCache()
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// SHUTDOWN ORDERING FIX (May 2026):
