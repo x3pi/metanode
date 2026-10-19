@@ -7,6 +7,7 @@ Thư mục này lưu trữ sổ cái kiểm chứng kỹ thuật (`CLAIMS_LEDGER
 ## 1. Sổ Cái Bằng Chứng & Báo Cáo Đo Đạc (`CLAIMS_LEDGER.md` & `evidence/`)
 
 - **[`CLAIMS_LEDGER.md`](./CLAIMS_LEDGER.md):** Sổ cái tổng hợp toàn bộ các khẳng định kỹ thuật và số liệu hiệu năng đã được kiểm chứng thực nghiệm (`RE-VERIFIED`, `EXPLAINED`, `RESOLVED`, `OPEN`).
+- **[`system_assessment_20261019.md`](./system_assessment_20261019.md):** Đánh giá tổng thể điểm mạnh và điểm yếu của hệ thống (gắn nhãn `[ĐO]`/`[ĐỌC CODE]`/`[GIẢ THUYẾT]`/`[CHƯA ĐO]`, trích từ `CLAIMS_LEDGER.md`).
 - **[`evidence/`](./evidence/):** Các gói dữ liệu thô (`MANIFEST.json`, `PREREGISTERED.md`, log đo A/B, pprof profiles) được xác thực tự động bằng `execution/scripts/test/evidence/verify_evidence.py --strict`.
 - **Các báo cáo đo đạc chính:**
   - [`readloop_gate_explorer_pacing_report_20261016.md`](./readloop_gate_explorer_pacing_report_20261016.md) — Backpressure lớp sớm tại `Connection.readLoop` (`ConnRequestChanSize = 16`), điều tiết `indexSingleBlock` -> `s.indexQueue` (`ExplorerQueueSize = 65536`, chờ tối đa `50ms`) và gom lô `explorerSvc.Commit()` mỗi 64 block.
