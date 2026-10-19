@@ -19,7 +19,7 @@ A sleek, responsive, real-time Web3 Portal designed for **Metanode Core**. It pr
 
 3. **🌉 Cross-Cluster Rollup Transfers:**
    - Bridge assets between Execution Clusters via Parent Chain Float Model &amp; BLS f+1 Co-Attestation.
-   - Real RPC transfer execution via `mtn_sendCrossChainTransfer` or interactive simulation.
+   - Real RPC transfer execution via `mtn_sendCrossChainTransfer` (devnet only: the node must run with `"devnet_rpc": true`) or interactive simulation.
    - 3-Stage visual timeline: `(1) Source Locked` &rarr; `(2) Parent Relayed (f+1)` &rarr; `(3) Dest Claimed`.
 
 4. **📊 Multi-Node Health & Zero-Fork Telemetry:**

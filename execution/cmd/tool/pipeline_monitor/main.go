@@ -57,13 +57,22 @@ func fetchStats(url string) (*PipelineSnapshot, error) {
 	return &snap, nil
 }
 
-func resetStats(url string) error {
+func resetStats(url, password string) error {
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Post(url+"/pipeline/reset", "application/json", nil)
+	req, err := http.NewRequest(http.MethodPost, url+"/pipeline/reset", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-Password", password)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("reset refused: HTTP %d", resp.StatusCode)
+	}
 	return nil
 }
 
@@ -83,19 +92,20 @@ func main() {
 	goMasterURL := flag.String("master", "http://127.0.0.1:8747", "Go Master HTTP URL")
 	interval := flag.Duration("interval", 1*time.Second, "Poll interval")
 	reset := flag.Bool("reset", false, "Reset all counters and exit")
+	password := flag.String("password", "", "Admin password (securepassword of the node config), required with -reset")
 	flag.Parse()
 
 	if *reset {
 		subURLs := strings.Split(*goSubURL, ",")
 		for _, url := range subURLs {
 			url = strings.TrimSpace(url)
-			if err := resetStats(url); err != nil {
+			if err := resetStats(url, *password); err != nil {
 				fmt.Printf("❌ Failed to reset %s: %v\n", url, err)
 			} else {
 				fmt.Printf("✅ Reset %s\n", url)
 			}
 		}
-		if err := resetStats(*goMasterURL); err != nil {
+		if err := resetStats(*goMasterURL, *password); err != nil {
 			fmt.Printf("❌ Failed to reset %s: %v\n", *goMasterURL, err)
 		} else {
 			fmt.Printf("✅ Reset %s\n", *goMasterURL)

@@ -200,6 +200,7 @@ go run ./cmd/tool/test_account_model                  # genesis→chuyển→ng�
 
 ### 4.2. Bảo toàn tổng coin của cụm thực thi (BLS Conservation Guard & Công cụ `gen_float_accounts`)
 
+- **RPC devnet:** `mtn_sendCrossChainTransfer` ký bằng khóa devnet công khai nên mặc định bị tắt; chỉ bật bằng `"devnet_rpc": true` trong config node (đã bật sẵn ở `exec_config.json.j2` và `run_devnet.sh`). Không bật trên mạng có giá trị thật. `/pipeline/reset` cần header `X-Admin-Password` (= `securepassword`), không kèm `Origin`.
 - **Bất biến bảo toàn:** Trên Parent Chain, `float(BLS cụm) == Σ (balance + pending_balance)` của mọi tài khoản trong cụm thực thi khi hệ thống ở trạng thái tĩnh. Khi đang có giao dịch cross-chain đang bay, `0 ≤ float − Σ ≤ pending`.
 - **Chế độ bảo vệ:** Node thực thi hỗ trợ biến môi trường `BLS_CONSERVATION_MODE`:
   - `enforce` (Production): Chặn gửi giao dịch ra ngoài (`SendWorker` và `mtn_sendCrossChainTransfer`) nếu không đạt bảo toàn sau 3 lần đo liên tiếp hoặc chưa có phép đo OK đầu tiên.

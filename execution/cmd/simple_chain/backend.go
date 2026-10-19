@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"crypto/subtle"
 	"net/http"
 	"os"
 	"regexp"
@@ -37,6 +38,7 @@ var (
 	errInvalidCredentials     = errors.New("invalid credentials")
 	errPasswordNotConfigured  = errors.New("admin password is not configured")
 	errAdminFromBrowserOrigin = errors.New("admin API refuses requests carrying a browser Origin header")
+	errDevnetRPCDisabled      = errors.New("devnet-only RPC is disabled (set devnet_rpc=true in the node config on a devnet)")
 	errInvalidTypeState       = errors.New("invalid type state")
 	errStateNotReady          = errors.New("state not ready")
 )
@@ -563,15 +565,7 @@ func NewServer(app *App) *http.ServeMux {
 		}
 		w.Write(data)
 	})
-	mux.HandleFunc("/pipeline/reset", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		app.blockProcessor.ResetPipelineStats()
-		w.Write([]byte(`{"status":"reset"}`))
-	})
+	mux.HandleFunc("/pipeline/reset", pipelineResetHandler(app))
 
 	// Áp dụng middleware vào handler WebSocket (giới hạn theo từng message/RPC call)
 	wsHandler := rateLimiter.WebsocketMiddleware(server.WebsocketHandler([]string{"*"}))
@@ -609,4 +603,31 @@ func sanitizeHealthWarning(warn string) string {
 		return ""
 	}
 	return rawKeyRegex.ReplaceAllString(warn, "${1}${2}...${3}")
+}
+
+// pipelineResetHandler clears the pipeline counters. It is an operator action (curl/CLI): it needs POST, the admin
+// password in the X-Admin-Password header, and no browser Origin header (a browser request is a cross-site request).
+func pipelineResetHandler(app *App) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.Header.Get("Origin") != "" {
+			http.Error(w, errAdminFromBrowserOrigin.Error(), http.StatusForbidden)
+			return
+		}
+		configured := strings.TrimSpace(app.config.Securepassword)
+		if configured == "" {
+			http.Error(w, errPasswordNotConfigured.Error(), http.StatusForbidden)
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Admin-Password")), []byte(app.config.Securepassword)) != 1 {
+			http.Error(w, errInvalidCredentials.Error(), http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		app.blockProcessor.ResetPipelineStats()
+		w.Write([]byte(`{"status":"reset"}`))
+	}
 }

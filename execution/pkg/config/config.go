@@ -166,6 +166,9 @@ type LogConfig struct {
 // SimpleChainConfig là struct chính, đại diện cho toàn bộ file config JSON.
 type SimpleChainConfig struct {
 	Debug                   bool   `json:"debug"`
+	// DevnetRPC enables devnet-only test RPCs (mtn_sendCrossChainTransfer: node-side signing with a public devnet key and
+	// a node-key destination fallback). Must stay false on any network that holds real value.
+	DevnetRPC               bool   `json:"devnet_rpc"`
 	ExplorereDbPath         string `json:"explorer_db_path"`
 	ExplorereReadOnlyDbPath string `json:"explorer_read_only_db_path"`
 

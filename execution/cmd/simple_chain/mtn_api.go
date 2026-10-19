@@ -742,6 +742,11 @@ func (api *MtnAPI) GetConservation(ctx context.Context) (map[string]interface{},
 // senderKeyHex / blsKeyHex override the sender's ECDSA and BLS private keys, so stress tests can
 // use many independent senders instead of racing on one shared account's nonce.
 func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, amountHex string, senderKeyHex *string, blsKeyHex *string) (string, error) {
+	// The node signs with a publicly known devnet key and falls back to its own BLS key for unregistered recipients, so
+	// this RPC must never be reachable on a network that holds real value.
+	if !api.App.config.DevnetRPC {
+		return "", errDevnetRPCDisabled
+	}
 	// Halt-not-guess: no new value leaves the cluster while its BLS float is unverified or the conservation invariant is
 	// violated. This is a node-local admission check only; block execution of already admitted transfers is unaffected.
 	if err := api.App.conservation.Allow(); err != nil {
