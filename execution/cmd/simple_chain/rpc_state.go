@@ -735,9 +735,11 @@ func (api *MetaAPI) reconstructHistoricalTrieLocked(ctx context.Context, blockNr
 	return verifyCachedTrie, targetBlockNumber, expectedRoot, false, len(allEntries), nil
 }
 
-// VerifyHistoricalRoot recreates the NOMT trie at a historical block using ChangelogDB
+// verifyHistoricalRoot recreates the NOMT trie at a historical block using ChangelogDB
 // to verify if the computed root matches the stateRoot in the block header.
-func (api *MetaAPI) VerifyHistoricalRoot(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (map[string]interface{}, error) {
+// It rebuilds the whole account state under a global mutex, so it is deliberately unexported: the only RPC entry
+// point is admin_verifyHistoricalRoot (password protected), never the public eth namespace.
+func (api *MetaAPI) verifyHistoricalRoot(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (map[string]interface{}, error) {
 	verifyCacheMu.Lock()
 	defer verifyCacheMu.Unlock()
 

@@ -310,7 +310,7 @@ func NewServer(app *App) *http.ServeMux {
 		os.Exit(1)
 	}
 
-	adminApi := &AdminApi{App: app, events: app.eventSystem}
+	adminApi := &AdminApi{App: app, events: app.eventSystem, meta: customAPI}
 
 	if err := server.RegisterName("admin", adminApi); err != nil {
 		logger.Error("[FATAL] Không thể đăng ký API adminApi: %v", err)

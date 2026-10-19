@@ -18,6 +18,7 @@ import (
 type AdminApi struct {
 	App    *App // Export field Client
 	events *mt_filters.EventSystem
+	meta   *MetaAPI // used by admin_verifyHistoricalRoot
 }
 
 // authenticate checks if admin password is configured and matches constant-time.
@@ -127,4 +128,17 @@ func (api *AdminApi) CreateBackup(ctx context.Context, password string) (string,
 		return "", errStateNotReady
 
 	}
+}
+
+// VerifyHistoricalRoot (admin_verifyHistoricalRoot) rebuilds the account trie at a historical block from the changelog
+// and compares the recovered root with the block header's stateRoot. It is a full-state rebuild under a global mutex,
+// so it is an operator diagnostic and not part of the public eth namespace.
+func (api *AdminApi) VerifyHistoricalRoot(ctx context.Context, password string, blockNrOrHash rpc.BlockNumberOrHash) (map[string]interface{}, error) {
+	if err := api.authenticate(ctx, password); err != nil {
+		return nil, err
+	}
+	if api.meta == nil {
+		return nil, fmt.Errorf("verifyHistoricalRoot is not available")
+	}
+	return api.meta.verifyHistoricalRoot(ctx, blockNrOrHash)
 }

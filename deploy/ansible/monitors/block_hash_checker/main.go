@@ -1778,7 +1778,9 @@ func getLatestBlockNumber(client *http.Client, url string) (uint64, error) {
 	return num, nil
 }
 
-// checkVerifyHistoricalRoot calls meta_verifyHistoricalRoot to diagnose state root mismatches
+// checkVerifyHistoricalRoot is DISABLED in practice: the RPC is now admin_verifyHistoricalRoot(password, block) and no longer
+// eth_/meta_verifyHistoricalRoot, so this call (and its commented-out call sites) must pass the node admin password first.
+// It calls meta_verifyHistoricalRoot to diagnose state root mismatches
 func checkVerifyHistoricalRoot(client *http.Client, nodeURL string, blockNum uint64) string {
 	hexBlock := fmt.Sprintf("0x%x", blockNum)
 	req := rpcRequest{

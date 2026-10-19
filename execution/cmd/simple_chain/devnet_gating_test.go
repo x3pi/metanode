@@ -4,7 +4,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
@@ -62,5 +65,32 @@ func TestSendCrossChainTransfer_DisabledUnlessDevnetRPC(t *testing.T) {
 	api := &MtnAPI{App: &App{config: &config.SimpleChainConfig{Debug: true}}}
 	if _, err := api.SendCrossChainTransfer(context.Background(), "0x0000000000000000000000000000000000000001", "0x1", nil, nil); err != errDevnetRPCDisabled {
 		t.Fatalf("want errDevnetRPCDisabled, got %v", err)
+	}
+}
+
+func TestVerifyHistoricalRoot_NotInPublicEthNamespaceAndAdminProtected(t *testing.T) {
+	srv := rpc.NewServer()
+	if err := srv.RegisterName("eth", &MetaAPI{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.RegisterName("admin", &AdminApi{App: &App{config: &config.SimpleChainConfig{Securepassword: "pw"}}}); err != nil {
+		t.Fatal(err)
+	}
+	cl := rpc.DialInProc(srv)
+	defer cl.Close()
+
+	var out map[string]interface{}
+	err := cl.Call(&out, "eth_verifyHistoricalRoot", "0x1")
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("eth_verifyHistoricalRoot must not be exposed, got %v", err)
+	}
+	err = cl.Call(&out, "admin_verifyHistoricalRoot", "wrong", "0x1")
+	if err == nil || !strings.Contains(err.Error(), errInvalidCredentials.Error()) {
+		t.Fatalf("wrong password must be rejected, got %v", err)
+	}
+	// Right password reaches the method; with no MetaAPI wired it reports unavailable instead of rebuilding anything.
+	err = cl.Call(&out, "admin_verifyHistoricalRoot", "pw", "0x1")
+	if err == nil || !strings.Contains(err.Error(), "not available") {
+		t.Fatalf("authenticated call must reach the method, got %v", err)
 	}
 }
