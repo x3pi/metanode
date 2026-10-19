@@ -34,9 +34,9 @@ jobs:
       run:
         working-directory: execution
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: execution/go.mod
           cache-dependency-path: execution/go.sum
@@ -52,7 +52,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' }}
 
       - name: Cache C++ MVM builds
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             execution/pkg/mvm/c_mvm/build
