@@ -209,7 +209,9 @@ func (tp *TransactionPool) ReleaseInFlightHashesWithDrainID(hashes []common.Hash
 	return released
 }
 
-// ReleaseInFlight frees n arbitrary in-flight reservation slots (legacy test compatibility).
+// ReleaseInFlight frees n ARBITRARY in-flight reservation slots (map order). TEST HELPER ONLY: it bypasses the drainID check
+// that prevents a late release from freeing a newer drain's reservation, so production code must use
+// ReleaseInFlightWithDrainID.
 func (tp *TransactionPool) ReleaseInFlight(count int) {
 	if count <= 0 {
 		return
@@ -578,11 +580,9 @@ func (tp *TransactionPool) addTxToShardLocked(shard *poolShard, shardIdx uint16,
 	return true, nil // added net-new
 }
 
+// AddTransaction inserts tx. The pool always enforces its capacity (count + in-flight reservations <= maxCapacity), rejecting a
+// net-new tx with transaction.ErrPoolFull; evicting cheaper txs to make room is the caller's job (see TxValidatorPool).
 func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
-	return tp.AddTransactionCap(tx, true)
-}
-
-func (tp *TransactionPool) AddTransactionCap(tx types.Transaction, enforceCap bool) error {
 	if tx == nil {
 		return fmt.Errorf("tx nil")
 	}
@@ -605,10 +605,6 @@ func (tp *TransactionPool) AddTransactionCap(tx types.Transaction, enforceCap bo
 // allowing subsequent transactions with the same sender/nonce to see earlier ones,
 // and returns exact insertion errors for each transaction.
 func (tp *TransactionPool) AddTransactions(txs []types.Transaction) []error {
-	return tp.AddTransactionsCap(txs, true)
-}
-
-func (tp *TransactionPool) AddTransactionsCap(txs []types.Transaction, enforceCap bool) []error {
 	if len(txs) == 0 {
 		return nil
 	}
@@ -746,7 +742,8 @@ func (tp *TransactionPool) RequeueTransactionsWithDrainID(txs []types.Transactio
 	return requeued
 }
 
-// RequeueTransactions re-inserts drained in-flight transactions back into the pool shards (legacy test helper).
+// RequeueTransactions re-inserts drained in-flight transactions, inferring the drainID from the first tx that holds a
+// reservation. TEST HELPER ONLY: production code knows its drainID and must use RequeueTransactionsWithDrainID.
 func (tp *TransactionPool) RequeueTransactions(txs []types.Transaction) {
 	tp.capacityMu.Lock()
 	var dID uint64
@@ -889,7 +886,8 @@ func (tp *TransactionPool) TransactionsWithDrainID(maxDrain int) ([]types.Transa
 }
 
 // TransactionsWithAggSign drains up to maxDrain transactions from the pool.
-// Preserves original signature for backward compatibility.
+// TEST HELPER ONLY: it discards the drainID, so the in-flight reservations of the returned txs can only be released through
+// the test helpers above. Production code must use TransactionsWithDrainID and release or requeue every drained tx.
 func (tp *TransactionPool) TransactionsWithAggSign(maxDrain int) ([]types.Transaction, []byte) {
 	txs, _, aggSign := tp.TransactionsWithDrainID(maxDrain)
 	return txs, aggSign

@@ -768,13 +768,15 @@ func TestEvictLowestGasPriceThan_FullPoolNoCandidateFastPath(t *testing.T) {
 
 	// Incoming transaction has gas price 100 (same as all txs in pool).
 	// Under flat-fee market, no pool tx is strictly cheaper than 100.
-	start := time.Now()
-	evicted := pool.EvictLowestGasPriceThan(100, big.NewInt(100))
-	duration := time.Since(start)
-
+	floor := big.NewInt(100)
+	evicted := pool.EvictLowestGasPriceThan(100, floor) // also fills each tx's GasPriceCap cache
 	assert.Equal(t, 0, evicted, "Must not evict any tx when none is cheaper")
 	assert.Equal(t, count, pool.CountTransactions())
-	assert.Less(t, duration, 500*time.Millisecond, "Fast path must return quickly without sorting entire pool")
+
+	// Deterministic instead of a wall-clock bound (which flaked under -race): with no candidate the scan must not build the
+	// per-tx candidate list, hash or sort anything, so its allocations cannot grow with the pool size.
+	allocs := testing.AllocsPerRun(5, func() { pool.EvictLowestGasPriceThan(100, floor) })
+	assert.Less(t, allocs, 50.0, "no-candidate fast path must not allocate per transaction (pool has %d txs)", count)
 }
 
 func BenchmarkEvictLowestGasPriceThan_NoCheaperTx(b *testing.B) {

@@ -436,7 +436,7 @@ func (vp *TxValidatorPool) addTransactionToPoolInternalCap(tx types.Transaction,
 	}
 
 	// Insert atomically under shard lock (authoritatively enforces capacity, price bumps, and duplicates)
-	err := vp.transactionPool.AddTransactionCap(tx, allowEviction)
+	err := vp.transactionPool.AddTransaction(tx)
 	if err != nil {
 		if errors.Is(err, transaction.ErrPoolFull) {
 			return transaction.ErrPoolFull.Code, err
@@ -723,7 +723,7 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transact
 
 	var totalInserted int
 	if len(txsToInsert) > 0 {
-		insertErrs := vp.transactionPool.AddTransactionsCap(txsToInsert, allowEviction)
+		insertErrs := vp.transactionPool.AddTransactions(txsToInsert)
 		for j, err := range insertErrs {
 			origIdx := origIndices[j]
 			if err != nil {
