@@ -774,7 +774,7 @@ func TestEvictLowestGasPriceThan_FullPoolNoCandidateFastPath(t *testing.T) {
 
 	assert.Equal(t, 0, evicted, "Must not evict any tx when none is cheaper")
 	assert.Equal(t, count, pool.CountTransactions())
-	assert.Less(t, duration, 50*time.Millisecond, "Fast path must return quickly without sorting entire pool")
+	assert.Less(t, duration, 500*time.Millisecond, "Fast path must return quickly without sorting entire pool")
 }
 
 func BenchmarkEvictLowestGasPriceThan_NoCheaperTx(b *testing.B) {

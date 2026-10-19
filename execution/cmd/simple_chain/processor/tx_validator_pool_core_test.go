@@ -14,11 +14,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -1491,5 +1494,90 @@ func TestTransactionProcessor_TCPChunkRetry_PartialFullHandling(t *testing.T) {
 
 	// Final pool contains tx1, tx2, tx3 (txA was drained and released, txDup was duplicate) = 3
 	assert.Equal(t, 3, pool.CountTransactions())
+}
+
+// TestTxValidatorPool_ClassificationInvariants_NoOrphanInFlightReservations tests that
+// across all 4 classification branches in ProcessTransactionsInPoolSub:
+// 1. Valid tx -> returned for forwarding, reservation maintained in-flight until forwarder releases
+// 2. Future tx -> requeued into mempool, reservation consumed & converted back to in-pool count
+// 3. Past tx -> dropped permanently, reservation released
+// 4. TTL-dropped future tx -> dropped permanently, reservation released (BLOCKER REGRESSION GUARD)
+// Invariant check: only forwarded txs retain reservations, and usedSlots == len(txs) + count.
+func TestTxValidatorPool_ClassificationInvariants_NoOrphanInFlightReservations(t *testing.T) {
+	prevBackend := trie.GetStateBackend()
+	trie.SetStateBackend(trie.BackendMPT)
+	t.Cleanup(func() { trie.SetStateBackend(prevBackend) })
+
+	header := block.NewBlockHeader(
+		common.Hash{}, 0, common.Hash{}, common.Hash{}, common.Hash{},
+		common.Address{}, 0, common.Hash{}, 0,
+	)
+	accountStorage := storage.NewDummyStorage("")
+	codeStorage := storage.NewDummyStorage("")
+	scStorage := storage.NewDummyStorage("")
+	cs, err := blockchain.NewChainStateRemote(header, accountStorage, codeStorage, scStorage, map[common.Address]struct{}{})
+	require.NoError(t, err)
+	cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(1337)})
+
+	pool := transaction_pool.NewTransactionPool()
+	vp := &TxValidatorPool{
+		chainState:      cs,
+		transactionPool: pool,
+		futureTxTimeMap: make(map[common.Hash]time.Time),
+	}
+
+	addrValid := common.Address{0x01}
+	addrFuture := common.Address{0x02}
+	addrTTL := common.Address{0x03}
+	addrPast := common.Address{0x04}
+
+	// addrPast has current nonce 10 in account state
+	asPast, err := cs.GetAccountStateDB().AccountState(addrPast)
+	require.NoError(t, err)
+	asPast.SetNonce(10)
+	cs.GetAccountStateDB().PublicSetDirtyAccountState(asPast)
+
+	// Create transactions for the 4 classification branches:
+	// 1. txValid: nonce 0, state nonce is 0 -> contiguous/valid
+	txValid := transaction.NewTransaction(addrValid, common.HexToAddress("0xFF"), big.NewInt(1), 21000, 1000, 0, nil, nil, common.Hash{}, common.Hash{}, 0, 1337)
+	// 2. txFuture: nonce 5, state nonce is 0 -> future nonce, inserted now
+	txFuture := transaction.NewTransaction(addrFuture, common.HexToAddress("0xFF"), big.NewInt(1), 21000, 1000, 0, nil, nil, common.Hash{}, common.Hash{}, 5, 1337)
+	// 3. txTTL: nonce 5, state nonce is 0 -> future nonce, but inserted earlier than FutureTxTimeout
+	txTTL := transaction.NewTransaction(addrTTL, common.HexToAddress("0xFF"), big.NewInt(1), 21000, 1000, 0, nil, nil, common.Hash{}, common.Hash{}, 5, 1337)
+	vp.futureTxTimeMap[txTTL.Hash()] = time.Now().Add(-2 * FutureTxTimeout)
+	// 4. txPast: nonce 2, state nonce is 10 -> past nonce (actual < expected)
+	txPast := transaction.NewTransaction(addrPast, common.HexToAddress("0xFF"), big.NewInt(1), 21000, 1000, 0, nil, nil, common.Hash{}, common.Hash{}, 2, 1337)
+
+	require.NoError(t, pool.AddTransaction(txValid))
+	require.NoError(t, pool.AddTransaction(txFuture))
+	require.NoError(t, pool.AddTransaction(txTTL))
+	require.NoError(t, pool.AddTransaction(txPast))
+
+	require.Equal(t, 4, pool.CountTransactions())
+	require.Equal(t, 4, pool.UsedSlots())
+	require.Equal(t, 0, pool.InFlightTransactions())
+
+	// Process transactions through validator pool
+	txs, drainID := vp.ProcessTransactionsInPoolSub(false, 100)
+
+	// Invariant 1: Only the valid tx is returned for forwarding
+	require.Len(t, txs, 1, "Only valid tx must be returned for forwarding")
+	assert.Equal(t, txValid.Hash(), txs[0].Hash())
+
+	// Invariant 2: Only txs returned for forwarding retain in-flight reservations
+	require.Equal(t, len(txs), pool.InFlightTransactions(), "Only forwarded txs must hold in-flight reservations")
+
+	// Invariant 3: Only the non-expired future tx was requeued in the pool
+	require.Equal(t, 1, pool.CountTransactions(), "Only non-expired future tx must be requeued in pool")
+
+	// Invariant 4: No orphaned in-flight slots across all 4 branches
+	require.Equal(t, len(txs)+pool.CountTransactions(), pool.UsedSlots(), "UsedSlots must exactly equal in-flight + in-pool count")
+
+	// Forwarder simulates successful block submission and releases in-flight reservation
+	released := pool.ReleaseInFlightWithDrainID(txs, drainID)
+	assert.Equal(t, 1, released)
+	assert.Equal(t, 0, pool.InFlightTransactions(), "All in-flight reservations released after forwarder completes")
+	assert.Equal(t, 1, pool.UsedSlots())
+	assert.Equal(t, 1, pool.CountTransactions())
 }
 

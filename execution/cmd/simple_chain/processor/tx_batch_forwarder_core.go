@@ -179,10 +179,14 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 		if len(txs) > targetBlockSize {
 			remainingTxs := txs[targetBlockSize:]
+			requeued := 0
 			if bf.transactionProcessor != nil && bf.transactionProcessor.TxValidatorPool != nil {
-				bf.transactionProcessor.TxValidatorPool.RequeueTransactionsWithDrainID(remainingTxs, drainID)
+				requeued = bf.transactionProcessor.TxValidatorPool.RequeueTransactionsWithDrainID(remainingTxs, drainID)
 			} else if bf.transactionProcessor != nil && bf.transactionProcessor.transactionPool != nil {
-				bf.transactionProcessor.transactionPool.RequeueTransactionsWithDrainID(remainingTxs, drainID)
+				requeued = bf.transactionProcessor.transactionPool.RequeueTransactionsWithDrainID(remainingTxs, drainID)
+			}
+			if requeued < len(remainingTxs) {
+				logger.Warn("⚠️ [TX FLOW] Requeue count mismatch: expected %d, requeued %d (drainID=%d)", len(remainingTxs), requeued, drainID)
 			}
 			txs = txs[:targetBlockSize]
 			totalTxs = len(txs) // Update totalTxs to match the capped list

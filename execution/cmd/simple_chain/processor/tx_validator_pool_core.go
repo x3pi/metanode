@@ -1151,7 +1151,6 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 		// Sort by FromAddress and Nonce to ensure contiguous evaluation
 		SortTxsByFromAndNonce(allTxs)
 
-		var droppedCount int
 		for _, tx := range allTxs {
 			from := tx.FromAddress()
 
@@ -1168,8 +1167,8 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 							transaction_pool.TraceTx("TTL-DROP", from, actual, fmt.Sprintf("expected=%d waitedSince=%s", expected, insertTime.Format("15:04:05.000000")))
 						}
 						delete(vp.futureTxTimeMap, txHash)
-						droppedCount++
-						continue // KHÔNG append vào futureTxs nữa -> Bị drop vĩnh viễn
+						droppedTxs = append(droppedTxs, tx)
+						continue // Dropped permanently, release in-flight reservation
 					}
 				} else {
 					vp.futureTxTimeMap[txHash] = time.Now()

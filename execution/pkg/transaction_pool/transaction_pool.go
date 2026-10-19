@@ -171,10 +171,9 @@ func (tp *TransactionPool) AvailableSlots() int {
 }
 
 // ReleaseInFlightWithDrainID frees in-flight reservation slots for specific transactions matching drainID.
-// If drainID is 0, any matching hash is freed (legacy / untokenized support).
 // Protects against ABA problem where delayed release from an earlier round could release a newer round's reservation.
 func (tp *TransactionPool) ReleaseInFlightWithDrainID(txs []types.Transaction, drainID uint64) int {
-	if len(txs) == 0 {
+	if len(txs) == 0 || drainID == 0 {
 		return 0
 	}
 	tp.capacityMu.Lock()
@@ -185,7 +184,7 @@ func (tp *TransactionPool) ReleaseInFlightWithDrainID(txs []types.Transaction, d
 			continue
 		}
 		h := tx.Hash()
-		if id, ok := tp.inFlightTxs[h]; ok && (drainID == 0 || id == drainID) {
+		if id, ok := tp.inFlightTxs[h]; ok && id == drainID {
 			delete(tp.inFlightTxs, h)
 			released++
 		}
@@ -195,14 +194,14 @@ func (tp *TransactionPool) ReleaseInFlightWithDrainID(txs []types.Transaction, d
 
 // ReleaseInFlightHashesWithDrainID frees in-flight reservation slots for specific tx hashes matching drainID.
 func (tp *TransactionPool) ReleaseInFlightHashesWithDrainID(hashes []common.Hash, drainID uint64) int {
-	if len(hashes) == 0 {
+	if len(hashes) == 0 || drainID == 0 {
 		return 0
 	}
 	tp.capacityMu.Lock()
 	defer tp.capacityMu.Unlock()
 	released := 0
 	for _, h := range hashes {
-		if id, ok := tp.inFlightTxs[h]; ok && (drainID == 0 || id == drainID) {
+		if id, ok := tp.inFlightTxs[h]; ok && id == drainID {
 			delete(tp.inFlightTxs, h)
 			released++
 		}
@@ -475,7 +474,7 @@ func (tp *TransactionPool) CheckAddStatus(tx types.Transaction) (TxAddStatus, er
 	return TxAddStatusDuplicate, transaction.ErrAlreadyKnown
 }
 
-func (tp *TransactionPool) addTxToShardLocked(shard *poolShard, shardIdx uint16, tx types.Transaction, enforceCap bool) (bool, error) {
+func (tp *TransactionPool) addTxToShardLocked(shard *poolShard, shardIdx uint16, tx types.Transaction) (bool, error) {
 	from := tx.FromAddress()
 	nonce := tx.GetNonce()
 	key := txPoolKey{addr: from, nonce: nonce}
@@ -594,7 +593,7 @@ func (tp *TransactionPool) AddTransactionCap(tx types.Transaction, enforceCap bo
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	_, err := tp.addTxToShardLocked(shard, shardIdx, tx, enforceCap)
+	_, err := tp.addTxToShardLocked(shard, shardIdx, tx)
 	if err != nil {
 		return err
 	}
@@ -640,7 +639,7 @@ func (tp *TransactionPool) AddTransactionsCap(txs []types.Transaction, enforceCa
 			lockedShard.mu.Lock()
 		}
 
-		_, err := tp.addTxToShardLocked(lockedShard, idx, tx, enforceCap)
+		_, err := tp.addTxToShardLocked(lockedShard, idx, tx)
 		errorsList[i] = err
 	}
 
@@ -656,7 +655,7 @@ func (tp *TransactionPool) AddTransactionsCap(txs []types.Transaction, enforceCa
 //    updates shard if replacement, but DOES NOT increment count.
 // 4. If tx has no valid reservation: explicitly rejected, never admitted silently.
 func (tp *TransactionPool) RequeueTransactionsWithDrainID(txs []types.Transaction, drainID uint64) int {
-	if len(txs) == 0 {
+	if len(txs) == 0 || drainID == 0 {
 		return 0
 	}
 
@@ -689,9 +688,11 @@ func (tp *TransactionPool) RequeueTransactionsWithDrainID(txs []types.Transactio
 		// Verify and consume reservation under capacityMu
 		tp.capacityMu.Lock()
 		curDrainID, hasReservation := tp.inFlightTxs[h]
-		if !hasReservation || (drainID != 0 && curDrainID != drainID) {
+		if !hasReservation || curDrainID != drainID {
 			// No valid in-flight reservation or token mismatch -> reject
 			tp.capacityMu.Unlock()
+			logger.Warn("⚠️ [REQUEUE-REJECTED] Tx has no valid reservation or drainID mismatch: hash=%s drainID=%d curDrainID=%d hasRes=%v",
+				h.Hex(), drainID, curDrainID, hasReservation)
 			continue
 		}
 
@@ -730,9 +731,14 @@ func (tp *TransactionPool) RequeueTransactionsWithDrainID(txs []types.Transactio
 				if h != (common.Hash{}) {
 					lockedShard.txHashMap[h] = tx
 				}
+				logger.Info("🔄 [REQUEUE-REPLACE] Replaced tx addr=%s nonce=%d oldHash=%s newHash=%s",
+					key.addr.Hex(), key.nonce, oldTx.Hash().Hex(), h.Hex())
 			}
 			requeued++
 		}
+	}
+	if requeued < len(txs) {
+		logger.Warn("⚠️ [REQUEUE-PARTIAL] Requeued %d/%d transactions (drainID=%d)", requeued, len(txs), drainID)
 	}
 	if requeued > 0 {
 		tp.notifyWork()
@@ -740,9 +746,20 @@ func (tp *TransactionPool) RequeueTransactionsWithDrainID(txs []types.Transactio
 	return requeued
 }
 
-// RequeueTransactions re-inserts drained in-flight transactions back into the pool shards (drainID=0 matches any).
+// RequeueTransactions re-inserts drained in-flight transactions back into the pool shards (legacy test helper).
 func (tp *TransactionPool) RequeueTransactions(txs []types.Transaction) {
-	tp.RequeueTransactionsWithDrainID(txs, 0)
+	tp.capacityMu.Lock()
+	var dID uint64
+	for _, tx := range txs {
+		if tx != nil {
+			if id, ok := tp.inFlightTxs[tx.Hash()]; ok {
+				dID = id
+				break
+			}
+		}
+	}
+	tp.capacityMu.Unlock()
+	tp.RequeueTransactionsWithDrainID(txs, dID)
 }
 
 // TransactionsWithAggSign drains up to maxDrain transactions from the pool
