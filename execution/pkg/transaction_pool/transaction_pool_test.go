@@ -5,7 +5,9 @@ import (
 	"math/big"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	e_types "github.com/ethereum/go-ethereum/core/types"
@@ -178,8 +180,9 @@ func TestTransactionsWithAggSign_RotatesDrainStartAcrossCalls(t *testing.T) {
 	}
 
 	firstAddrByte := func() byte {
-		txs, _ := pool.TransactionsWithAggSign(0)
+		txs, dID, _ := pool.TransactionsWithDrainID(0)
 		require.Len(t, txs, 2)
+		pool.ReleaseInFlightWithDrainID(txs, dID)
 		return txs[0].FromAddress()[0]
 	}
 
@@ -640,6 +643,299 @@ func TestEvictLowestGasPrice_BigIntFeeCapNoTruncation(t *testing.T) {
 	remaining, _ := pool.TransactionsWithAggSign(0)
 	require.Len(t, remaining, 1)
 	assert.Equal(t, txHuge.Hash(), remaining[0].Hash(), "Huge fee cap tx must not be evicted ahead of lower fee tx")
+}
+
+func TestEvictLowestGasPrice_EvictAllPreservesConcurrentCount(t *testing.T) {
+	pool := NewTransactionPool()
+	const initialCount = 100
+	for i := 0; i < initialCount; i++ {
+		require.NoError(t, pool.AddTransaction(makeTestTxWithGas(byte(i%250), uint64(i/250), 10, []byte{byte(i)})))
+	}
+
+	var wg sync.WaitGroup
+	insertedConcurrently := int64(0)
+	stopInsert := make(chan struct{})
+
+	// Concurrently insert higher-paying txs (gas price 500)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		idx := initialCount
+		for {
+			select {
+			case <-stopInsert:
+				return
+			default:
+				tx := makeTestTxWithGas(byte(idx%250), uint64(idx/250+10), 500, []byte{byte(idx)})
+				if err := pool.AddTransaction(tx); err == nil {
+					atomic.AddInt64(&insertedConcurrently, 1)
+				}
+				idx++
+				time.Sleep(50 * time.Microsecond)
+			}
+		}
+	}()
+
+	// Evict low-paying txs using floor 200 (must only evict gas 10 txs, never concurrent gas 500 txs)
+	time.Sleep(2 * time.Millisecond)
+	evicted := pool.EvictLowestGasPriceThan(initialCount, big.NewInt(200))
+	assert.GreaterOrEqual(t, evicted, 1)
+	assert.LessOrEqual(t, evicted, initialCount)
+
+	close(stopInsert)
+	wg.Wait()
+
+	// Verify pool.CountTransactions() equals the sum of transactions across all shards
+	actualCount := 0
+	for i := 0; i < NumShards; i++ {
+		shard := pool.shards[i]
+		shard.mu.RLock()
+		actualCount += len(shard.transactions)
+		for _, tx := range shard.transactions {
+			if tx.EffectiveGasPrice().Uint64() >= 200 {
+				assert.Equal(t, uint64(500), tx.EffectiveGasPrice().Uint64())
+			}
+		}
+		shard.mu.RUnlock()
+	}
+
+	assert.Equal(t, actualCount, pool.CountTransactions(), "CountTransactions must exactly match physical shard transactions count under concurrency")
+}
+
+func TestCheckAddStatus_Cases(t *testing.T) {
+	pool := NewTransactionPool()
+	tx1 := makeTestTx(0x20, 0)
+	require.NoError(t, pool.AddTransaction(tx1))
+
+	// 1. Same transaction hash -> Duplicate
+	status, err := pool.CheckAddStatus(tx1)
+	assert.ErrorIs(t, err, transaction.ErrAlreadyKnown)
+	assert.Equal(t, TxAddStatusDuplicate, status)
+
+	// 2. Same sender and nonce, but different gas price
+	from := tx1.FromAddress()
+	to := tx1.ToAddress()
+	// Same nonce 0, different payload/amount, lower or same gas price -> Underpriced
+	txUnderpriced := transaction.NewTransaction(
+		from, to, big.NewInt(200), 21000, 1, 0, nil, nil,
+		common.Hash{}, common.Hash{}, 0, 1,
+	)
+	status, err = pool.CheckAddStatus(txUnderpriced)
+	assert.ErrorIs(t, err, transaction.ErrReplacementUnderpriced)
+	assert.Equal(t, TxAddStatusUnderpriced, status)
+
+	// Same nonce 0, higher gas price (>= 10% bump) -> Replace
+	txReplacement := transaction.NewTransaction(
+		from, to, big.NewInt(100), 21000, 2, 0, nil, nil,
+		common.Hash{}, common.Hash{}, 0, 1,
+	)
+	status, err = pool.CheckAddStatus(txReplacement)
+	assert.NoError(t, err)
+	assert.Equal(t, TxAddStatusReplace, status)
+
+	// 3. New nonce or new sender -> New
+	txNew := makeTestTx(0x21, 0)
+	status, err = pool.CheckAddStatus(txNew)
+	assert.NoError(t, err)
+	assert.Equal(t, TxAddStatusNew, status)
+}
+
+func TestEvictLowestGasPriceThan_FloorRespected(t *testing.T) {
+	pool := NewTransactionPool()
+	tx1 := makeTestTxWithGas(0x30, 0, 100, []byte{1})
+	require.NoError(t, pool.AddTransaction(tx1))
+
+	// An incoming transaction has gas price 50 (< existing 100)
+	// It should NOT evict existing higher-paying transaction!
+	evicted := pool.EvictLowestGasPriceThan(1, big.NewInt(50))
+	assert.Equal(t, 0, evicted, "Must not evict tx that pays more than incoming tx")
+	assert.Equal(t, 1, pool.CountTransactions())
+
+	// An incoming transaction has gas price 200 (> existing 100)
+	// Now it CAN evict the lower-paying transaction
+	evicted = pool.EvictLowestGasPriceThan(1, big.NewInt(200))
+	assert.Equal(t, 1, evicted)
+	assert.Equal(t, 0, pool.CountTransactions())
+}
+
+func TestEvictLowestGasPriceThan_FullPoolNoCandidateFastPath(t *testing.T) {
+	pool := NewTransactionPool()
+	const count = 2000
+	for i := 0; i < count; i++ {
+		require.NoError(t, pool.AddTransaction(makeTestTxWithGas(byte(i%250), uint64(i/250), 100, []byte{byte(i)})))
+	}
+	assert.Equal(t, count, pool.CountTransactions())
+
+	// Incoming transaction has gas price 100 (same as all txs in pool).
+	// Under flat-fee market, no pool tx is strictly cheaper than 100.
+	start := time.Now()
+	evicted := pool.EvictLowestGasPriceThan(100, big.NewInt(100))
+	duration := time.Since(start)
+
+	assert.Equal(t, 0, evicted, "Must not evict any tx when none is cheaper")
+	assert.Equal(t, count, pool.CountTransactions())
+	assert.Less(t, duration, 500*time.Millisecond, "Fast path must return quickly without sorting entire pool")
+}
+
+func BenchmarkEvictLowestGasPriceThan_NoCheaperTx(b *testing.B) {
+	pool := NewTransactionPool()
+	const count = 10000
+	for i := 0; i < count; i++ {
+		_ = pool.AddTransaction(makeTestTxWithGas(byte(i%250), uint64(i/250), 100, []byte{byte(i)}))
+	}
+	minGas := big.NewInt(100)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = pool.EvictLowestGasPriceThan(1000, minGas)
+	}
+}
+
+func TestTransactionPool_Reservation_ABAPrevention(t *testing.T) {
+	pool := NewTransactionPool()
+	pool.SetMaxCapacity(10)
+
+	txA := makeTestTxWithGas(0x01, 0, 100, []byte("txA"))
+	require.NoError(t, pool.AddTransaction(txA))
+	assert.Equal(t, 1, pool.CountTransactions())
+	assert.Equal(t, 0, pool.InFlightTransactions())
+	assert.Equal(t, 1, pool.UsedSlots())
+
+	// Round 1: Drain txA -> gets drainID1
+	drained1, drainID1, _ := pool.TransactionsWithDrainID(1)
+	require.Len(t, drained1, 1)
+	assert.Equal(t, txA.Hash(), drained1[0].Hash())
+	assert.NotZero(t, drainID1)
+	assert.Equal(t, 0, pool.CountTransactions())
+	assert.Equal(t, 1, pool.InFlightTransactions())
+	assert.Equal(t, 1, pool.UsedSlots())
+
+	// Round 1: txA is requeued (e.g. forward failed or future nonce)
+	requeued := pool.RequeueTransactionsWithDrainID(drained1, drainID1)
+	assert.Equal(t, 1, requeued)
+	assert.Equal(t, 1, pool.CountTransactions())
+	assert.Equal(t, 0, pool.InFlightTransactions())
+	assert.Equal(t, 1, pool.UsedSlots())
+
+	// Round 2: Drain txA again -> gets drainID2 (different generation token)
+	drained2, drainID2, _ := pool.TransactionsWithDrainID(1)
+	require.Len(t, drained2, 1)
+	assert.Equal(t, txA.Hash(), drained2[0].Hash())
+	assert.NotEqual(t, drainID1, drainID2)
+	assert.Equal(t, 0, pool.CountTransactions())
+	assert.Equal(t, 1, pool.InFlightTransactions())
+	assert.Equal(t, 1, pool.UsedSlots())
+
+	// ABA Scenario: A delayed release or requeue from Round 1 arrives late with drainID1
+	releasedStale := pool.ReleaseInFlightWithDrainID(drained2, drainID1)
+	assert.Equal(t, 0, releasedStale, "Stale release from round 1 must be rejected and release 0 slots")
+	assert.Equal(t, 1, pool.InFlightTransactions(), "In-flight reservation for round 2 must be preserved")
+	assert.Equal(t, 1, pool.UsedSlots())
+
+	// Stale requeue with drainID1 must also be rejected
+	requeuedStale := pool.RequeueTransactionsWithDrainID(drained2, drainID1)
+	assert.Equal(t, 0, requeuedStale, "Stale requeue from round 1 must be rejected")
+	assert.Equal(t, 0, pool.CountTransactions())
+	assert.Equal(t, 1, pool.InFlightTransactions())
+
+	// Legitimate release with drainID2 succeeds
+	releasedValid := pool.ReleaseInFlightWithDrainID(drained2, drainID2)
+	assert.Equal(t, 1, releasedValid)
+	assert.Equal(t, 0, pool.InFlightTransactions())
+	assert.Equal(t, 0, pool.UsedSlots())
+	assert.Equal(t, 10, pool.AvailableSlots())
+}
+
+func TestTransactionPool_TokenizedRequeue_CollisionAndValidation(t *testing.T) {
+	pool := NewTransactionPool()
+	pool.SetMaxCapacity(5)
+
+	tx1 := makeTestTxWithGas(0x02, 0, 100, []byte("tx1"))
+	tx2 := makeTestTxWithGas(0x03, 0, 100, []byte("tx2"))
+	require.NoError(t, pool.AddTransaction(tx1))
+	require.NoError(t, pool.AddTransaction(tx2))
+	assert.Equal(t, 2, pool.CountTransactions())
+
+	drained, drainID, _ := pool.TransactionsWithDrainID(2)
+	require.Len(t, drained, 2)
+	assert.Equal(t, 0, pool.CountTransactions())
+	assert.Equal(t, 2, pool.InFlightTransactions())
+
+	// 1. Requeue an unreserved transaction (random hash) -> must be rejected
+	bogusTx := makeTestTxWithGas(0x04, 0, 100, []byte("bogus"))
+	requeuedBogus := pool.RequeueTransactionsWithDrainID([]types.Transaction{bogusTx}, drainID)
+	assert.Equal(t, 0, requeuedBogus, "Unreserved transaction must be rejected from requeue")
+	assert.Equal(t, 0, pool.CountTransactions())
+	assert.Equal(t, 2, pool.InFlightTransactions())
+
+	// 2. Net-new requeue for tx1 -> converts reservation to in-pool slot
+	requeued1 := pool.RequeueTransactionsWithDrainID([]types.Transaction{tx1}, drainID)
+	assert.Equal(t, 1, requeued1)
+	assert.Equal(t, 1, pool.CountTransactions())
+	assert.Equal(t, 1, pool.InFlightTransactions())
+
+	// 3. Duplicate requeue for tx1 (already in shard) with same drainID -> reservation already consumed
+	requeuedDup := pool.RequeueTransactionsWithDrainID([]types.Transaction{tx1}, drainID)
+	assert.Equal(t, 0, requeuedDup, "Requeuing already-consumed tx must be rejected")
+	assert.Equal(t, 1, pool.CountTransactions())
+	assert.Equal(t, 1, pool.InFlightTransactions())
+
+	// 4. Shard collision with higher gas price:
+	// A new tx with address 0x03, nonce 0 (same as tx2) was added while tx2 was in-flight
+	tx2Collision := makeTestTxWithGas(0x03, 0, 100, []byte("tx2_collision"))
+	require.NoError(t, pool.AddTransaction(tx2Collision))
+	assert.Equal(t, 2, pool.CountTransactions())
+	assert.Equal(t, 1, pool.InFlightTransactions()) // tx2 is still in-flight
+	assert.Equal(t, 3, pool.UsedSlots())
+
+	// Requeue tx2: address and nonce already exist in shard
+	requeuedBump := pool.RequeueTransactionsWithDrainID([]types.Transaction{tx2}, drainID)
+	assert.Equal(t, 1, requeuedBump)
+	// Crucial check: count must NOT increase because the slot was already occupied by tx2Collision!
+	assert.Equal(t, 0, pool.InFlightTransactions())
+	assert.Equal(t, 2, pool.UsedSlots())
+}
+
+// TestTransactionPool_InFlightDedup_RejectsDuplicateAndDoesNotIncreaseCount verifies that
+// transactions currently in-flight cannot be re-admitted as duplicates, and that
+// re-submitting an in-flight transaction leaves reservation and counters unchanged.
+func TestTransactionPool_InFlightDedup_RejectsDuplicateAndDoesNotIncreaseCount(t *testing.T) {
+	pool := NewTransactionPool()
+	pool.SetMaxCapacity(10)
+
+	txA := makeTestTx(0x01, 0)
+	require.NoError(t, pool.AddTransaction(txA))
+	assert.Equal(t, 1, pool.CountTransactions())
+	assert.Equal(t, 1, pool.UsedSlots())
+
+	// Drain txA -> becomes in-flight
+	drained, drainID, _ := pool.TransactionsWithDrainID(1)
+	require.Len(t, drained, 1)
+	assert.Equal(t, 0, pool.CountTransactions())
+	assert.Equal(t, 1, pool.InFlightTransactions())
+	assert.Equal(t, 1, pool.UsedSlots())
+
+	// Client re-submits exact same transaction txA while in-flight
+	err := pool.AddTransaction(txA)
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, transaction.ErrAlreadyKnown)
+
+	// Counters must NOT change
+	assert.Equal(t, 0, pool.CountTransactions(), "Pool count must remain 0")
+	assert.Equal(t, 1, pool.InFlightTransactions(), "In-flight count must remain 1")
+	assert.Equal(t, 1, pool.UsedSlots(), "Used slots must remain 1")
+
+	// CheckAddStatus on txA must also report duplicate / already known
+	status, err := pool.CheckAddStatus(txA)
+	assert.Equal(t, TxAddStatusDuplicate, status)
+	assert.ErrorIs(t, err, transaction.ErrAlreadyKnown)
+
+	// Requeue txA using its valid drainID token
+	requeued := pool.RequeueTransactionsWithDrainID(drained, drainID)
+	assert.Equal(t, 1, requeued)
+	assert.Equal(t, 1, pool.CountTransactions())
+	assert.Equal(t, 0, pool.InFlightTransactions())
+	assert.Equal(t, 1, pool.UsedSlots())
 }
 
 

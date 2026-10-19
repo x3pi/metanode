@@ -101,28 +101,128 @@ func newPoolShard() *poolShard {
 }
 
 type TransactionPool struct {
-	shards     [NumShards]*poolShard
-	NotifyChan chan struct{} // GO-2: Event channel to notify workers of new transactions
-	count      int64         // Atomic counter for lock-free count queries
-	// drainCursor tracks where TransactionsWithAggSign() left off, so each
-	// call resumes exactly where the last one stopped instead of restarting
-	// from shard 0 (see there for why: the caller caps how many of the
-	// returned txs it forwards per tick and re-queues the rest, so a fixed
-	// restart point lets whichever low-numbered shards are currently hot
-	// perpetually starve every higher-numbered shard under sustained load --
-	// and, since 2026-09-02, also lets a single call stop early once it has
-	// collected enough transactions rather than always sweeping every shard).
+	shards      [NumShards]*poolShard
+	NotifyChan  chan struct{}          // GO-2: Event channel to notify workers of new transactions
+	capacityMu  sync.Mutex             // Short lock protecting mempool capacity invariant: used = count + len(inFlightTxs)
+	count       int64                  // Counter for in-pool transactions
+	inFlightTxs map[common.Hash]uint64 // Map of txHash -> drainID holding reservations (solves ABA)
+	nextDrainID uint64                 // Generation token counter for drain operations
+	maxCapacity int64                  // Hard limit on total committed transactions (in-pool + in-flight)
 	drainCursor uint32
 }
 
 func NewTransactionPool() *TransactionPool {
 	tp := &TransactionPool{
-		NotifyChan: make(chan struct{}, 1),
+		NotifyChan:  make(chan struct{}, 1),
+		inFlightTxs: make(map[common.Hash]uint64),
+		nextDrainID: 1,
+		maxCapacity: 200000,
 	}
 	for i := 0; i < NumShards; i++ {
 		tp.shards[i] = newPoolShard()
 	}
 	return tp
+}
+
+// SetMaxCapacity sets the maximum capacity for the pool.
+func (tp *TransactionPool) SetMaxCapacity(c int64) {
+	tp.capacityMu.Lock()
+	defer tp.capacityMu.Unlock()
+	tp.maxCapacity = c
+}
+
+// MaxCapacity returns the pool's configured capacity.
+func (tp *TransactionPool) MaxCapacity() int {
+	tp.capacityMu.Lock()
+	defer tp.capacityMu.Unlock()
+	if tp.maxCapacity <= 0 {
+		return 200000
+	}
+	return int(tp.maxCapacity)
+}
+
+// InFlightTransactions returns the count of drained in-flight transactions holding reservations.
+func (tp *TransactionPool) InFlightTransactions() int {
+	tp.capacityMu.Lock()
+	defer tp.capacityMu.Unlock()
+	return len(tp.inFlightTxs)
+}
+
+// UsedSlots returns total capacity currently committed: in-pool transactions plus in-flight reservations.
+func (tp *TransactionPool) UsedSlots() int {
+	tp.capacityMu.Lock()
+	defer tp.capacityMu.Unlock()
+	return int(tp.count) + len(tp.inFlightTxs)
+}
+
+// AvailableSlots returns the number of slots available for new admissions.
+func (tp *TransactionPool) AvailableSlots() int {
+	tp.capacityMu.Lock()
+	defer tp.capacityMu.Unlock()
+	cap := tp.maxCapacity
+	if cap <= 0 {
+		cap = 200000
+	}
+	used := tp.count + int64(len(tp.inFlightTxs))
+	if used >= cap {
+		return 0
+	}
+	return int(cap - used)
+}
+
+// ReleaseInFlightWithDrainID frees in-flight reservation slots for specific transactions matching drainID.
+// Protects against ABA problem where delayed release from an earlier round could release a newer round's reservation.
+func (tp *TransactionPool) ReleaseInFlightWithDrainID(txs []types.Transaction, drainID uint64) int {
+	if len(txs) == 0 || drainID == 0 {
+		return 0
+	}
+	tp.capacityMu.Lock()
+	defer tp.capacityMu.Unlock()
+	released := 0
+	for _, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		h := tx.Hash()
+		if id, ok := tp.inFlightTxs[h]; ok && id == drainID {
+			delete(tp.inFlightTxs, h)
+			released++
+		}
+	}
+	return released
+}
+
+// ReleaseInFlightHashesWithDrainID frees in-flight reservation slots for specific tx hashes matching drainID.
+func (tp *TransactionPool) ReleaseInFlightHashesWithDrainID(hashes []common.Hash, drainID uint64) int {
+	if len(hashes) == 0 || drainID == 0 {
+		return 0
+	}
+	tp.capacityMu.Lock()
+	defer tp.capacityMu.Unlock()
+	released := 0
+	for _, h := range hashes {
+		if id, ok := tp.inFlightTxs[h]; ok && id == drainID {
+			delete(tp.inFlightTxs, h)
+			released++
+		}
+	}
+	return released
+}
+
+// ReleaseInFlight frees n arbitrary in-flight reservation slots (legacy test compatibility).
+func (tp *TransactionPool) ReleaseInFlight(count int) {
+	if count <= 0 {
+		return
+	}
+	tp.capacityMu.Lock()
+	defer tp.capacityMu.Unlock()
+	for h := range tp.inFlightTxs {
+		delete(tp.inFlightTxs, h)
+		count--
+		if count == 0 {
+			break
+		}
+	}
 }
 
 // notifyWork sends a non-blocking signal that new work is available (GO-2)
@@ -140,10 +240,16 @@ func (tp *TransactionPool) getShardIndex(addr common.Address) uint16 {
 }
 
 func (tp *TransactionPool) CountTransactions() int {
-	return int(atomic.LoadInt64(&tp.count))
+	tp.capacityMu.Lock()
+	defer tp.capacityMu.Unlock()
+	return int(tp.count)
 }
 
 func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
+	return tp.EvictLowestGasPriceThan(countToEvict, nil)
+}
+
+func (tp *TransactionPool) EvictLowestGasPriceThan(countToEvict int, minNewGas *big.Int) int {
 	if countToEvict <= 0 {
 		return 0
 	}
@@ -168,6 +274,9 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 			if gas == nil {
 				gas = new(big.Int).SetUint64(tx.MaxGasPrice())
 			}
+			if minNewGas != nil && gas.Cmp(minNewGas) >= 0 {
+				continue // pays >= minNewGas: never an eviction candidate
+			}
 			allInfos = append(allInfos, txInfo{
 				shardIdx: i,
 				index:    idx,
@@ -179,20 +288,8 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 		shard.mu.RUnlock()
 	}
 
-	if len(allInfos) <= countToEvict {
-		// Evict all
-		var totalEvicted int
-		for i := 0; i < NumShards; i++ {
-			shard := tp.shards[i]
-			shard.mu.Lock()
-			totalEvicted += len(shard.transactions)
-			shard.transactions = make([]types.Transaction, 0)
-			shard.transactionKeys = make(map[txPoolKey]bool)
-			shard.txHashMap = make(map[common.Hash]types.Transaction)
-			shard.mu.Unlock()
-		}
-		atomic.StoreInt64(&tp.count, 0)
-		return totalEvicted
+	if len(allInfos) == 0 {
+		return 0
 	}
 
 	// Sort by GasPrice ascending, so eviction still respects the fee market as
@@ -221,6 +318,10 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 		}
 		return allInfos[i].nonce > allInfos[j].nonce
 	})
+
+	if countToEvict > len(allInfos) {
+		countToEvict = len(allInfos)
+	}
 
 	// Group removals by shard
 	toRemoveByShard := make(map[int]map[common.Hash]bool)
@@ -269,6 +370,17 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 			for _, tx := range shard.transactions {
 				h := tx.Hash()
 				if hashesToRemove[h] {
+					// Confirm candidate still qualifies for eviction (has not been replaced with higher gas)
+					if minNewGas != nil {
+						g := tx.GasPriceCap()
+						if g == nil {
+							g = new(big.Int).SetUint64(tx.MaxGasPrice())
+						}
+						if g.Cmp(minNewGas) >= 0 {
+							newTxs = append(newTxs, tx)
+							continue
+						}
+					}
 					key := txPoolKey{addr: tx.FromAddress(), nonce: tx.GetNonce()}
 					delete(shard.transactionKeys, key)
 					delete(shard.txHashMap, h)
@@ -281,7 +393,14 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 		}()
 	}
 
-	atomic.AddInt64(&tp.count, int64(-totalEvicted))
+	if totalEvicted > 0 {
+		tp.capacityMu.Lock()
+		tp.count -= int64(totalEvicted)
+		if tp.count < 0 {
+			tp.count = 0
+		}
+		tp.capacityMu.Unlock()
+	}
 	return totalEvicted
 }
 
@@ -303,15 +422,75 @@ func checkPriceBump(oldPrice, newPrice *big.Int) bool {
 	return newPrice.Cmp(threshold) >= 0
 }
 
-func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
+// TxAddStatus indicates whether a transaction is new, an in-place replacement, duplicate, or underpriced.
+type TxAddStatus int
+
+const (
+	TxAddStatusNew TxAddStatus = iota
+	TxAddStatusReplace
+	TxAddStatusDuplicate
+	TxAddStatusUnderpriced
+)
+
+// CheckAddStatus inspects whether tx would be a net-new addition, an in-place replacement,
+// a duplicate, or an underpriced replacement. It does not modify pool state.
+func (tp *TransactionPool) CheckAddStatus(tx types.Transaction) (TxAddStatus, error) {
+	if tx == nil {
+		return TxAddStatusNew, fmt.Errorf("tx nil")
+	}
 	from := tx.FromAddress()
 	shardIdx := tp.getShardIndex(from)
 	shard := tp.shards[shardIdx]
 
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+
+	h := tx.Hash()
+	if h != (common.Hash{}) {
+		tp.capacityMu.Lock()
+		_, inFlight := tp.inFlightTxs[h]
+		tp.capacityMu.Unlock()
+		if inFlight {
+			return TxAddStatusDuplicate, transaction.ErrAlreadyKnown
+		}
+	}
 
 	key := txPoolKey{addr: from, nonce: tx.GetNonce()}
+	if !shard.transactionKeys[key] {
+		return TxAddStatusNew, nil
+	}
+
+	for _, t := range shard.transactions {
+		if t.FromAddress() == key.addr && t.GetNonce() == key.nonce {
+			if t.Hash() == tx.Hash() {
+				return TxAddStatusDuplicate, transaction.ErrAlreadyKnown
+			}
+			if !checkPriceBump(t.EffectiveGasPrice(), tx.EffectiveGasPrice()) {
+				return TxAddStatusUnderpriced, transaction.ErrReplacementUnderpriced
+			}
+			return TxAddStatusReplace, nil
+		}
+	}
+	return TxAddStatusDuplicate, transaction.ErrAlreadyKnown
+}
+
+func (tp *TransactionPool) addTxToShardLocked(shard *poolShard, shardIdx uint16, tx types.Transaction) (bool, error) {
+	from := tx.FromAddress()
+	nonce := tx.GetNonce()
+	key := txPoolKey{addr: from, nonce: nonce}
+
+	// 0. In-flight dedup: if transaction is currently in-flight, reject as already known
+	h := tx.Hash()
+	if h != (common.Hash{}) {
+		tp.capacityMu.Lock()
+		_, inFlight := tp.inFlightTxs[h]
+		tp.capacityMu.Unlock()
+		if inFlight {
+			logger.Info("Transaction is currently in-flight, skipping key addr=%s nonce=%d hash=%s", key.addr.Hex(), key.nonce, h.Hex())
+			return false, fmt.Errorf("%w: transaction is currently in-flight", transaction.ErrAlreadyKnown)
+		}
+	}
+
 	if shard.transactionKeys[key] {
 		// Look up existing transaction with the same key
 		var oldTx types.Transaction
@@ -331,7 +510,7 @@ func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 				if txTraceEnabled {
 					traceTx("REJECT-DUP", from, key.nonce, fmt.Sprintf("shard=%d", shardIdx))
 				}
-				return fmt.Errorf("%w: transaction already exists in pool, skipping", transaction.ErrAlreadyKnown)
+				return false, fmt.Errorf("%w: transaction already exists in pool, skipping", transaction.ErrAlreadyKnown)
 			}
 
 			// 2. Replacement transaction: check price bump (standard >= 10%)
@@ -343,7 +522,7 @@ func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 				if txTraceEnabled {
 					traceTx("REJECT-UNDERPRICED", from, key.nonce, fmt.Sprintf("old=%v new=%v", oldPrice, newPrice))
 				}
-				return fmt.Errorf("%w: replacement transaction underpriced", transaction.ErrReplacementUnderpriced)
+				return false, fmt.Errorf("%w: replacement transaction underpriced", transaction.ErrReplacementUnderpriced)
 			}
 
 			// 3. Price bump satisfied: replace old transaction in place
@@ -360,23 +539,35 @@ func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 				traceTx("REPLACE", from, key.nonce, fmt.Sprintf("oldHash=%s newHash=%s oldPrice=%v newPrice=%v",
 					oldHash.Hex(), newHash.Hex(), oldPrice, newPrice))
 			}
-			tp.notifyWork()
-			return nil
+			return false, nil // replaced in place, did not increase count
 		}
 
-		return fmt.Errorf("%w: transaction already exists in pool, skipping", transaction.ErrAlreadyKnown)
+		return false, fmt.Errorf("%w: transaction already exists in pool, skipping", transaction.ErrAlreadyKnown)
 	}
+
+	// Net-new transaction: enforce capacity and reserve slot under capacityMu
+	tp.capacityMu.Lock()
+	maxCap := tp.maxCapacity
+	if maxCap <= 0 {
+		maxCap = 200000
+	}
+	if tp.count+int64(len(tp.inFlightTxs)) >= maxCap {
+		tp.capacityMu.Unlock()
+		return false, fmt.Errorf("%w (limit=%d) and transactions underpriced to evict", transaction.ErrPoolFull, maxCap)
+	}
+	tp.count++
+	curCount := tp.count
+	tp.capacityMu.Unlock()
 
 	// CROSS-CHAIN DEBUG logic (unchanged)
 	if tx.ToAddress() == common.HexToAddress("0x00000000000000000000000000000000B429C0B2") {
 		logger.Info("📥 [POOL-ARRIVE] Cross-chain TX entered mempool: hash=%s from=%s nonce=%d pool_size=%d",
-			tx.Hash().Hex()[:16], from.Hex()[:10], key.nonce, atomic.LoadInt64(&tp.count)+1)
+			tx.Hash().Hex()[:16], from.Hex()[:10], key.nonce, curCount)
 	}
 
 	shard.transactions = append(shard.transactions, tx)
 	shard.transactionKeys[key] = true
-
-	h := tx.Hash()
+	h = tx.Hash()
 	if h != (common.Hash{}) {
 		shard.txHashMap[h] = tx
 	}
@@ -384,23 +575,59 @@ func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 	if txTraceEnabled {
 		traceTx("ADD", from, key.nonce, fmt.Sprintf("shard=%d newCount=%d", shardIdx, len(shard.transactions)))
 	}
-	atomic.AddInt64(&tp.count, 1)
+	return true, nil // added net-new
+}
+
+func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
+	return tp.AddTransactionCap(tx, true)
+}
+
+func (tp *TransactionPool) AddTransactionCap(tx types.Transaction, enforceCap bool) error {
+	if tx == nil {
+		return fmt.Errorf("tx nil")
+	}
+	from := tx.FromAddress()
+	shardIdx := tp.getShardIndex(from)
+	shard := tp.shards[shardIdx]
+
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	_, err := tp.addTxToShardLocked(shard, shardIdx, tx)
+	if err != nil {
+		return err
+	}
 	tp.notifyWork()
 	return nil
 }
 
-func (tp *TransactionPool) AddTransactions(txs []types.Transaction) {
+// AddTransactions inserts a batch of transactions sequentially under shard locks,
+// allowing subsequent transactions with the same sender/nonce to see earlier ones,
+// and returns exact insertion errors for each transaction.
+func (tp *TransactionPool) AddTransactions(txs []types.Transaction) []error {
+	return tp.AddTransactionsCap(txs, true)
+}
+
+func (tp *TransactionPool) AddTransactionsCap(txs []types.Transaction, enforceCap bool) []error {
 	if len(txs) == 0 {
-		return
+		return nil
 	}
 
-	addedAny := false
-	var totalAdded int64
+	errorsList := make([]error, len(txs))
 
 	var lockedShard *poolShard
 	var lockedIdx uint16
+	defer func() {
+		if lockedShard != nil {
+			lockedShard.mu.Unlock()
+		}
+	}()
 
-	for _, tx := range txs {
+	for i, tx := range txs {
+		if tx == nil {
+			errorsList[i] = fmt.Errorf("tx nil")
+			continue
+		}
 		from := tx.FromAddress()
 		idx := tp.getShardIndex(from)
 		if lockedShard == nil || idx != lockedIdx {
@@ -412,22 +639,82 @@ func (tp *TransactionPool) AddTransactions(txs []types.Transaction) {
 			lockedShard.mu.Lock()
 		}
 
-		nonce := tx.GetNonce()
-		key := txPoolKey{addr: from, nonce: nonce}
+		_, err := tp.addTxToShardLocked(lockedShard, idx, tx)
+		errorsList[i] = err
+	}
+
+	tp.notifyWork()
+	return errorsList
+}
+
+// RequeueTransactionsWithDrainID re-inserts in-flight transactions back into the pool shards.
+// Enforces:
+// 1. Transaction must hold a valid in-flight reservation matching drainID (or drainID==0 for untokenized).
+// 2. If tx is net-new in shard: transitions slot from inFlightTxs to count (count++).
+// 3. If tx already exists in shard (duplicate or higher-fee replacement): consumes reservation,
+//    updates shard if replacement, but DOES NOT increment count.
+// 4. If tx has no valid reservation: explicitly rejected, never admitted silently.
+func (tp *TransactionPool) RequeueTransactionsWithDrainID(txs []types.Transaction, drainID uint64) int {
+	if len(txs) == 0 || drainID == 0 {
+		return 0
+	}
+
+	var lockedShard *poolShard
+	var lockedIdx uint16
+	defer func() {
+		if lockedShard != nil {
+			lockedShard.mu.Unlock()
+		}
+	}()
+
+	requeued := 0
+	for _, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		from := tx.FromAddress()
+		idx := tp.getShardIndex(from)
+		if lockedShard == nil || idx != lockedIdx {
+			if lockedShard != nil {
+				lockedShard.mu.Unlock()
+			}
+			lockedIdx = idx
+			lockedShard = tp.shards[idx]
+			lockedShard.mu.Lock()
+		}
+
+		h := tx.Hash()
+
+		// Verify and consume reservation under capacityMu
+		tp.capacityMu.Lock()
+		curDrainID, hasReservation := tp.inFlightTxs[h]
+		if !hasReservation || curDrainID != drainID {
+			// No valid in-flight reservation or token mismatch -> reject
+			tp.capacityMu.Unlock()
+			logger.Warn("⚠️ [REQUEUE-REJECTED] Tx has no valid reservation or drainID mismatch: hash=%s drainID=%d curDrainID=%d hasRes=%v",
+				h.Hex(), drainID, curDrainID, hasReservation)
+			continue
+		}
+
+		// Valid reservation: consume token
+		delete(tp.inFlightTxs, h)
+
+		key := txPoolKey{addr: from, nonce: tx.GetNonce()}
 		if !lockedShard.transactionKeys[key] {
+			// Net-new to shard: transition reservation to in-pool slot
+			tp.count++
+			tp.capacityMu.Unlock()
+
 			lockedShard.transactions = append(lockedShard.transactions, tx)
 			lockedShard.transactionKeys[key] = true
-
-			h := tx.Hash()
 			if h != (common.Hash{}) {
 				lockedShard.txHashMap[h] = tx
 			}
-			if txTraceEnabled {
-				traceTx("ADD-BATCH", from, nonce, fmt.Sprintf("shard=%d", idx))
-			}
-			totalAdded++
-			addedAny = true
+			requeued++
 		} else {
+			// Already in shard: do NOT increment count
+			tp.capacityMu.Unlock()
+
 			var oldTx types.Transaction
 			var oldIdx = -1
 			for i, t := range lockedShard.transactions {
@@ -437,33 +724,42 @@ func (tp *TransactionPool) AddTransactions(txs []types.Transaction) {
 					break
 				}
 			}
-			if oldTx != nil && oldTx.Hash() != tx.Hash() && checkPriceBump(oldTx.EffectiveGasPrice(), tx.EffectiveGasPrice()) {
+			if oldTx != nil && oldTx.Hash() != h && checkPriceBump(oldTx.EffectiveGasPrice(), tx.EffectiveGasPrice()) {
+				// Replaced higher-fee tx in place
 				delete(lockedShard.txHashMap, oldTx.Hash())
 				lockedShard.transactions[oldIdx] = tx
-				h := tx.Hash()
 				if h != (common.Hash{}) {
 					lockedShard.txHashMap[h] = tx
 				}
-				addedAny = true
-				if txTraceEnabled {
-					traceTx("REPLACE-BATCH", from, nonce, fmt.Sprintf("shard=%d", idx))
-				}
-			} else {
-				logger.Warn("AddTransactions: dropped duplicate key on re-insert addr=%s nonce=%d", key.addr.Hex(), key.nonce)
-				if txTraceEnabled {
-					traceTx("REJECT-DUP-BATCH", from, nonce, fmt.Sprintf("shard=%d", idx))
-				}
+				logger.Info("🔄 [REQUEUE-REPLACE] Replaced tx addr=%s nonce=%d oldHash=%s newHash=%s",
+					key.addr.Hex(), key.nonce, oldTx.Hash().Hex(), h.Hex())
+			}
+			requeued++
+		}
+	}
+	if requeued < len(txs) {
+		logger.Warn("⚠️ [REQUEUE-PARTIAL] Requeued %d/%d transactions (drainID=%d)", requeued, len(txs), drainID)
+	}
+	if requeued > 0 {
+		tp.notifyWork()
+	}
+	return requeued
+}
+
+// RequeueTransactions re-inserts drained in-flight transactions back into the pool shards (legacy test helper).
+func (tp *TransactionPool) RequeueTransactions(txs []types.Transaction) {
+	tp.capacityMu.Lock()
+	var dID uint64
+	for _, tx := range txs {
+		if tx != nil {
+			if id, ok := tp.inFlightTxs[tx.Hash()]; ok {
+				dID = id
+				break
 			}
 		}
 	}
-	if lockedShard != nil {
-		lockedShard.mu.Unlock()
-	}
-
-	if addedAny {
-		atomic.AddInt64(&tp.count, totalAdded)
-		tp.notifyWork()
-	}
+	tp.capacityMu.Unlock()
+	tp.RequeueTransactionsWithDrainID(txs, dID)
 }
 
 // TransactionsWithAggSign drains up to maxDrain transactions from the pool
@@ -491,20 +787,21 @@ func (tp *TransactionPool) AddTransactions(txs []types.Transaction) {
 // few more ticks to complete one full rotation instead of one, which is
 // the entire point: the rotation's total cost across those extra ticks is
 // still O(backlog) exactly once, not O(backlog) repeated on every tick.
-func (tp *TransactionPool) TransactionsWithAggSign(maxDrain int) ([]types.Transaction, []byte) {
+func (tp *TransactionPool) TransactionsWithDrainID(maxDrain int) ([]types.Transaction, uint64, []byte) {
 	var allTxs []types.Transaction
 	if maxDrain > 0 {
 		initCap := maxDrain
 		if initCap > 16384 {
 			initCap = 16384
 		}
-		if cnt := int(atomic.LoadInt64(&tp.count)); cnt > 0 && cnt < initCap {
+		if cnt := tp.CountTransactions(); cnt > 0 && cnt < initCap {
 			initCap = cnt
 		}
 		if initCap > 0 {
 			allTxs = make([]types.Transaction, 0, initCap)
 		}
 	}
+	var drainID uint64
 	var totalDrained int64
 
 	// FAIRNESS: start from wherever the previous call left off (see the cursor
@@ -532,7 +829,29 @@ func (tp *TransactionPool) TransactionsWithAggSign(maxDrain int) ([]types.Transa
 		shard := tp.shards[i]
 		shard.mu.Lock()
 		if len(shard.transactions) > 0 {
-			totalDrained += int64(len(shard.transactions))
+			numDrained := int64(len(shard.transactions))
+			totalDrained += numDrained
+
+			// Atomically register in-flight reservations under capacityMu before releasing shard.mu
+			tp.capacityMu.Lock()
+			if drainID == 0 {
+				drainID = tp.nextDrainID
+				tp.nextDrainID++
+				if tp.nextDrainID == 0 {
+					tp.nextDrainID = 1
+				}
+			}
+			tp.count -= numDrained
+			if tp.count < 0 {
+				tp.count = 0
+			}
+			for _, tx := range shard.transactions {
+				if tx != nil {
+					tp.inFlightTxs[tx.Hash()] = drainID
+				}
+			}
+			tp.capacityMu.Unlock()
+
 			allTxs = append(allTxs, shard.transactions...)
 			if txTraceEnabled {
 				for _, tx := range shard.transactions {
@@ -565,10 +884,15 @@ func (tp *TransactionPool) TransactionsWithAggSign(maxDrain int) ([]types.Transa
 	}
 	atomic.StoreUint32(&tp.drainCursor, uint32((start+advance)%NumShards))
 
-	atomic.AddInt64(&tp.count, -totalDrained)
-
 	// Preserving original behavior: aggregate sign returns nil
-	return allTxs, nil
+	return allTxs, drainID, nil
+}
+
+// TransactionsWithAggSign drains up to maxDrain transactions from the pool.
+// Preserves original signature for backward compatibility.
+func (tp *TransactionPool) TransactionsWithAggSign(maxDrain int) ([]types.Transaction, []byte) {
+	txs, _, aggSign := tp.TransactionsWithDrainID(maxDrain)
+	return txs, aggSign
 }
 
 func (tp *TransactionPool) GetTransactionByHash(hashToFind common.Hash) (types.Transaction, bool) {
