@@ -71,6 +71,7 @@ type member struct {
 	addr     raft.ServerAddress
 	dir      string
 	fwdAddr  string
+	reserved net.Listener // the listener that picked fwdAddr, kept open until the first start so nothing else can take the port
 	disk     *disk
 	trans    *raft.InmemTransport
 	node     *Node
@@ -104,15 +105,17 @@ func newHarness(t *testing.T, n int) *harness {
 			t.Fatal(err)
 		}
 		fa := ln.Addr().String()
-		ln.Close() // reserve the port; each (re)start re-listens on it
 		h.m = append(h.m, &member{
 			id: fmt.Sprintf("n%d", i), addr: raft.ServerAddress(fmt.Sprintf("n%d", i)),
-			dir: filepath.Join(t.TempDir(), "raft"), fwdAddr: fa, disk: &disk{},
+			dir: filepath.Join(t.TempDir(), "raft"), fwdAddr: fa, reserved: ln, disk: &disk{},
 		})
 	}
 	t.Cleanup(func() {
 		for _, m := range h.m {
 			h.stop(m)
+			if m.reserved != nil {
+				m.reserved.Close()
+			}
 		}
 	})
 	return h
@@ -145,9 +148,10 @@ func (h *harness) start(m *member) {
 	h.t.Helper()
 	_, tr := raft.NewInmemTransport(m.addr)
 	m.trans = tr
-	ln, err := net.Listen("tcp", m.fwdAddr)
-	if err != nil {
-		h.t.Fatal(err)
+	ln := m.reserved // first start: hand over the listener that reserved the port (no window for another process)
+	m.reserved = nil
+	if ln == nil {
+		ln = listenRetry(h.t, m.fwdAddr)
 	}
 	sink := make(chan *pb.ExecutableBlock, 5000)
 	m.stopPipe = make(chan struct{})
@@ -201,8 +205,7 @@ func (h *harness) newMember(id string) *member {
 		h.t.Fatal(err)
 	}
 	fa := ln.Addr().String()
-	ln.Close()
-	m := &member{id: id, addr: raft.ServerAddress(id), dir: filepath.Join(h.t.TempDir(), "raft"), fwdAddr: fa, disk: &disk{}}
+	m := &member{id: id, addr: raft.ServerAddress(id), dir: filepath.Join(h.t.TempDir(), "raft"), fwdAddr: fa, reserved: ln, disk: &disk{}}
 	h.mu.Lock()
 	h.m = append(h.m, m)
 	h.mu.Unlock()
@@ -942,6 +945,23 @@ func TestClusterConfigValidation(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+}
+
+// listenRetry re-listens on a restarted member's fixed address. The kernel can hand that port to another process's outgoing
+// connection (it lies in the ephemeral range) between the member's stop and its restart, so a bounded retry is needed
+// instead of failing the test on the first "address already in use".
+func listenRetry(t *testing.T, addr string) net.Listener {
+	t.Helper()
+	var err error
+	for i := 0; i < 100; i++ {
+		var ln net.Listener
+		if ln, err = net.Listen("tcp", addr); err == nil {
+			return ln
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("listen %s still failing after 5s: %v", addr, err)
+	return nil
 }
 
 func freeAddr(t *testing.T) string {
