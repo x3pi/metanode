@@ -119,6 +119,15 @@ func (db *StakeStateDB) getOrCreateValidatorState(
 			vs := value
 			return vs, nil
 		}
+		// A nil entry is the tombstone DeleteValidator leaves for a validator removed earlier in this same block. The
+		// address is free again (the committed trie loses the key at commit), so a re-registration starts from an empty
+		// state and replaces the tombstone. Falling through to LoadOrStore below would hand back the tombstone itself:
+		// callers then dereferenced a nil ValidatorState and the node panicked in block execution.
+		fresh := state.NewValidatorState(address)
+		if !db.lockedFlag.Load() {
+			db.dirtyValidators.Store(address, fresh)
+		}
+		return fresh, nil
 	}
 
 	trieToUse := db.trie

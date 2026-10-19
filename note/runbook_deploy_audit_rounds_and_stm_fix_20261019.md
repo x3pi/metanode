@@ -20,6 +20,7 @@ Commit đề xuất: **`c96640f4`** (hoặc commit mới hơn trên `dev` đã q
 | `b0fc0528` | Audit round 3: receipt không báo gas chưa trừ, tiêu nonce cho tx barrier hỏng, phân loại đủ địa chỉ barrier (0x1001, 0x1002, 0x1003, 0x72) |
 | `e5e6fc85` | `senderExisted` dùng state thật; miễn phí đăng ký chỉ khi đúng selector `setBlsPublicKey` và khóa 48 byte |
 | `c96640f4` | Block-STM: vô hiệu hóa tx đã đọc khóa mà lần chạy lại không còn ghi (hết nondeterminism, xem STM runbook mục 6) |
+| (commit sau `c96640f4`, xem `git log`) | `StakeStateDB.getOrCreateValidatorState`: `registerValidator` ngay sau `deregisterValidator` của cùng địa chỉ trong một block từng gây **panic nil pointer** khi thực thi block (không có `recover`); nay tạo validator mới thay cho tombstone. Mọi validator chạy block đó đều bị ảnh hưởng, nên phải nâng cấp đồng loạt |
 
 Hệ quả `[ĐỌC CODE]`: node chạy code cũ và node chạy code mới có thể ra kết quả khác nhau cho cùng một block. **Không nâng cấp cuốn chiếu.** Thà pending chứ không fork.
 
