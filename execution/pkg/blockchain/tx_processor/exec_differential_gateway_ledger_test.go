@@ -79,6 +79,11 @@ func ledgerBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transact
 			Target: env.users[r.Intn(len(env.users))], AssetID: big.NewInt(0), Value: big.NewInt(int64(1 + r.Intn(300))),
 			Tip: big.NewInt(0), GasFee: big.NewInt(0),
 		}
+		if dest == reserveChainID && r.Intn(3) == 0 {
+			// 2-hop A -> reserve -> B: the relay marker asks the reserve to forward the value onward instead of settling it here;
+			// an unregistered or self-referential final destination must be refused
+			msg.Payload = cross_chain.EncodeRelayPayload([]uint64{102, 102, 102, 103, 999, reserveChainID}[r.Intn(6)], []byte{0xBE, byte(i)})
+		}
 		root, layers, agg, aggIdx, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
 		if err != nil {
 			t.Fatal(err)
