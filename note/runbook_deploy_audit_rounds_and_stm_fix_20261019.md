@@ -37,7 +37,7 @@ Hệ quả `[ĐỌC CODE]`: node chạy code cũ và node chạy code mới có 
 Khi commit NOMT nền (hoặc ghi changelog) lỗi, ví dụ hết chỗ ghi đĩa, node ghi `crash.log` và thoát mã 1 (`fatal.Exit`) thay vì chạy tiếp. Trước đây node chạy tiếp trên store đã bị poisoned và ghi block với hash lệch `[ĐO]` (`note/evidence/nomt_enospc_20261020/`). Hệ quả vận hành:
 - Cần supervisor tự khởi động lại: các unit trong `deploy/` có `Restart=always` hoặc `Restart=on-failure` `[ĐỌC CODE]`; các unit `on-failure` có `StartLimitBurst=5` trong 300s, nên đĩa hỏng kéo dài sẽ để unit ở trạng thái failed (node nằm chết, không fork).
 - Khi thấy node thoát với `NOMT async persistence failed`, kiểm tra dung lượng và lỗi đĩa trước khi khởi động lại; sau khi có chỗ, node bắt kịp lại từ peer (đo ở cụm local, tmpfs đầy rồi nới, run8).
-- `[CHƯA ĐO]` với đĩa thật hỏng (EIO), và với `stake_db` / `smart_contract_storage` (chỉ `account_state` được ép lỗi thật).
+- Đã đo `[ĐO]` ở cụm local: ENOSPC trên `account_state` và `smart_contract_storage`, EIO (ghi lỗi qua device-mapper) trên `stake_db`; sau lỗi, node khởi động lại (sau fsck nếu cần) và khớp lại 4/4. `[CHƯA ĐO]` với đĩa vật lý hỏng thật, nhiều máy, và lỗi đồng thời trên nhiều node.
 
 ---
 
