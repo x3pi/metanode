@@ -57,3 +57,24 @@ func TestStuckAbortAfterEnv(t *testing.T) {
 		t.Fatalf("garbage must fall back to default, got %v", got)
 	}
 }
+
+// stop() must be final: a watchdog whose timer fires at the same moment it is stopped must not run its warning/abort
+// afterwards (select picks randomly between two ready channels, so without a re-check the in-flight tick could still
+// call abortProcess after stop() returned, which is how TestWatchdogFatalAbortsOnlyWhenStuck flaked on a loaded runner).
+func TestWatchdogStopIsFinal(t *testing.T) {
+	var aborted atomic.Int32
+	orig := abortProcess
+	abortProcess = func(string, time.Duration) { aborted.Add(1) }
+	defer func() { abortProcess = orig }()
+
+	for i := 0; i < 3000; i++ {
+		stop := startWatchdog("T", time.Millisecond, time.Millisecond, func() string { return "ctx" })
+		time.Sleep(time.Duration(900+i%400) * time.Microsecond) // land stop() right around the first timer expiry
+		stop()
+		atStop := aborted.Load()
+		time.Sleep(300 * time.Microsecond)
+		if got := aborted.Load(); got != atStop {
+			t.Fatalf("iteration %d: abortProcess ran %d time(s) after stop() returned", i, got-atStop)
+		}
+	}
+}
