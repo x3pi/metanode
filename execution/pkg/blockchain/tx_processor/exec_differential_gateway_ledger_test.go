@@ -112,8 +112,11 @@ func ledgerBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transact
 	return txs
 }
 
-func TestExecDifferential_GatewayLedgerFlows_OptimisticVsTrueBlockSTMOnly(t *testing.T) {
-	const iterations = 200
+// runGatewayDifferential compares ProcessTransactionsOptimistic and TrueBlockSTM against the one-tx-per-block oracle on
+// blocks from gen, and insists that every method in required returned successfully at least once across the run.
+func runGatewayDifferential(t *testing.T, iterations int64, gen func(*testing.T, *rand.Rand, barrierEnv) []mt_types.Transaction,
+	tweak func(*testing.T, barrierEnv, *blockchain.ChainState), required []string) {
+	t.Helper()
 	gh0, _ := GetGatewayHandler()
 	diverged := 0
 	okRcp := map[string]int{}
@@ -121,7 +124,7 @@ func TestExecDifferential_GatewayLedgerFlows_OptimisticVsTrueBlockSTMOnly(t *tes
 		return strings.Join(o.accounts, "\n") + "|" + strings.Join(o.receipts, "\n") + "|" + o.roots
 	}
 	for seed := int64(1); seed <= iterations; seed++ {
-		oracle, txs := barrierRunWith(t, seed, "seq", ledgerBlock, seedGatewayLedger)
+		oracle, txs := barrierRunWith(t, seed, "seq", gen, tweak)
 		for _, line := range oracle.receipts {
 			var idx int
 			var status string
@@ -136,13 +139,13 @@ func TestExecDifferential_GatewayLedgerFlows_OptimisticVsTrueBlockSTMOnly(t *tes
 			}
 		}
 		want := key(oracle)
-		opt, _ := barrierRunWith(t, seed, "opt", ledgerBlock, seedGatewayLedger)
+		opt, _ := barrierRunWith(t, seed, "opt", gen, tweak)
 		bad := key(opt) != want
 		if bad && diverged < 2 {
 			t.Errorf("seed %d: ProcessTransactionsOptimistic differs from the sequential oracle\n%s oracle: %s\n opt:    %s", seed, describeDiffBlock(txs), oracle.roots, opt.roots)
 		}
 		for rep := 0; rep < 3 && !bad; rep++ {
-			stm, _ := barrierRunWith(t, seed, "stm", ledgerBlock, seedGatewayLedger)
+			stm, _ := barrierRunWith(t, seed, "stm", gen, tweak)
 			if key(stm) != want {
 				bad = true
 				if diverged < 2 {
@@ -155,7 +158,7 @@ func TestExecDifferential_GatewayLedgerFlows_OptimisticVsTrueBlockSTMOnly(t *tes
 		}
 	}
 	if diverged > 0 {
-		t.Errorf("%d of %d gateway-ledger blocks differed from the sequential oracle", diverged, iterations)
+		t.Errorf("%d of %d blocks differed from the sequential oracle", diverged, iterations)
 	}
 	var keys []string
 	for k := range okRcp {
@@ -163,9 +166,14 @@ func TestExecDifferential_GatewayLedgerFlows_OptimisticVsTrueBlockSTMOnly(t *tes
 	}
 	sort.Strings(keys)
 	t.Logf("receipts across all blocks: %v", keys)
-	for _, kind := range []string{"attestCommit", "claimMessage", "creditReserveAllocation", "refundReserveAllocation", "transferAllocationWithCert"} {
+	for _, kind := range required {
 		if okRcp[kind+"/RETURNED"] == 0 {
 			t.Errorf("no successful %s tx in %d blocks: the fixtures no longer exercise the valid path", kind, iterations)
 		}
 	}
+}
+
+func TestExecDifferential_GatewayLedgerFlows_OptimisticVsTrueBlockSTMOnly(t *testing.T) {
+	runGatewayDifferential(t, 200, ledgerBlock, seedGatewayLedger,
+		[]string{"attestCommit", "claimMessage", "creditReserveAllocation", "refundReserveAllocation", "transferAllocationWithCert"})
 }

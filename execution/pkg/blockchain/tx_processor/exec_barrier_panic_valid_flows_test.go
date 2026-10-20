@@ -33,9 +33,14 @@ func TestBarrierHandlers_NoPanicOnMutatedValidFlows(t *testing.T) {
 		r := rand.New(rand.NewSource(seed * 7919))
 		env, cs := barrierSetup(t)
 		gen := barrierBlock
-		if seed%2 == 0 { // every other block: the funded-ledger flows (ceiling attest, claim, credit/refund of the reserve allocation)
+		switch seed % 3 {
+		case 0: // the funded-ledger flows (ceiling attest, claim, credit/refund of the reserve allocation)
 			seedGatewayLedger(t, env, cs)
 			gen = ledgerBlock
+		case 1: // attestations, checkpoints, PoPs, genesis digest, equivocation slash, batched outbound commit
+			seedGatewayLedger(t, env, cs)
+			miscTweak(t, env, cs)
+			gen = miscBlock
 		}
 		txs := gen(t, r, env)
 		for i, tx := range txs {
