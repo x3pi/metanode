@@ -149,7 +149,7 @@ Thao tác chuyên biệt trên các cụm node chain con (Chain ID 991: `chain_a
 
 ### 🔍 Xem trước luồng thực thi mà không chạy thật (`--dry-run`)
 ```bash
-./ci.sh run-now  --child-chain
+./ci.sh run-now --dry-run --child-chain
 ./ci.sh run-now --dry-run --only tps_blast_child_a
 ```
 
