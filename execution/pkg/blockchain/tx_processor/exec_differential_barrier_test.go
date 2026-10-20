@@ -293,12 +293,21 @@ type barrierOutcome struct {
 
 // barrierSetup builds the chain state every barrier test shares: funded native and barrier-sender accounts, the node identity as
 // the committee validator, three pre-registered validators, gateway destination chain 102 and the rollup system handler.
+// barrierContractStorage makes barrierSetup use a chain state whose contract code and storage really persist.
+var barrierContractStorage bool
+
 func barrierSetup(t *testing.T) (barrierEnv, *blockchain.ChainState) {
 	t.Helper()
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "true")
 	t.Setenv("METANODE_DEVNET", "true")
 	env := newBarrierEnv()
-	cs := newTestChainState(t)
+	var cs *blockchain.ChainState
+	if barrierContractStorage {
+		// DummyStorage (newTestChainState) silently drops contract code, so no deployed contract can ever be called afterwards
+		cs, _, _, _ = newPersistentTestChainState(t)
+	} else {
+		cs = newTestChainState(t)
+	}
 	cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(parityChainID)})
 	seedAccount(t, cs, diffLeader, big.NewInt(0), 0)
 	seedAccount(t, cs, barrierFunder, big.NewInt(1_000_000_000_000_000), 0)
@@ -399,6 +408,16 @@ func barrierRunWith(t *testing.T, seed int64, mode string, gen func(*testing.T, 
 		for _, tx := range flat {
 			_, one, _, _ := NewTrueBlockSTM([]mt_types.Transaction{tx}).Process(context.Background(), cs, diffLeader, blankHeader(), 999)
 			rcps = append(rcps, one...)
+			if barrierContractStorage {
+				// contract storage and code written by this block must be committed before the next block reads them, as the
+				// block commit pipeline does between real blocks
+				if err := cs.GetSmartContractDB().LateBindRoots(); err != nil {
+					t.Fatalf("LateBindRoots between oracle blocks: %v", err)
+				}
+				if _, err := cs.GetSmartContractDB().Commit(); err != nil {
+					t.Fatalf("commit contract state between oracle blocks: %v", err)
+				}
+			}
 		}
 	case "stm":
 		_, rcps, _, _ = NewTrueBlockSTM(flat).Process(context.Background(), cs, diffLeader, blankHeader(), 999)

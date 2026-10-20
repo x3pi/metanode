@@ -210,6 +210,13 @@ func (stm *TrueBlockSTM) Process(
 			// state, then run it alone before resuming parallel execution.
 			stm.commitToBase(chainState)
 			stm.runBarrierTx(ctx, chainState, blockTime, i)
+			// Everything the MVCC maps hold has just been written to the base, and the barrier TX may have changed some of
+			// those same keys directly in the base (a custom-asset outbound moving tokens in a token contract, say). Keeping
+			// the maps would let later segments read the stale pre-barrier values and let the final commitToBase write them
+			// back over the barrier's changes (lost update: tokens created, allowances not consumed). Start the next
+			// segment from a clean MVCC state that reads through to the base.
+			stm.accountMap = mvcc.NewMVCCAccountMap()
+			stm.storageMap = mvcc.NewMVCCStorageMap()
 		}
 
 		segStart = i + 1
