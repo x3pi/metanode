@@ -1,0 +1,5 @@
+[INFO][Oct 20 01:17:55]  ✅ [COMMIT STATE] Block #1 persisted to DB and flushed (hash: 0xac6fa87bdbaeeb11, parentHash: 0x78a152d2939a019c, txCount: 0, lastBlockNum_before: 0)
+[INFO][Oct 20 01:17:59]  ✅ [COMMIT STATE] Block #2 persisted to DB and flushed (hash: 0x48c1dac76dde9d45, parentHash: 0xac6fa87bdbaeeb11, txCount: 1100, lastBlockNum_before: 1)
+[nomt_ffi] nomt_commit_payload failed: No space left on device (os error 28)
+[ERROR][Oct 20 01:17:59]  ❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: nomt_ffi: failed to commit payload
+[ERROR][Oct 20 01:17:59] 🚨 [FATAL EXIT] NOMT async persistence failed (namespace=account_state, block=2): nomt_ffi: failed to commit payload

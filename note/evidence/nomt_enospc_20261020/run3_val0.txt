@@ -1,0 +1,19 @@
+[INFO][Oct 20 01:15:12]  ✅ [COMMIT STATE] Block #1 persisted to DB and flushed (hash: 0x31b248a9ad6c69a0, parentHash: 0x78a152d2939a019c, txCount: 0, lastBlockNum_before: 0)
+[INFO][Oct 20 01:15:17]  ✅ [COMMIT STATE] Block #2 persisted to DB and flushed (hash: 0x77eea665e8fd8653, parentHash: 0x31b248a9ad6c69a0, txCount: 3820, lastBlockNum_before: 1)
+[nomt_ffi] nomt_commit_payload failed: No space left on device (os error 28)
+[ERROR][Oct 20 01:15:17]  ❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: nomt_ffi: failed to commit payload
+[INFO][Oct 20 01:15:18]  ✅ [COMMIT STATE] Block #3 persisted to DB and flushed (hash: 0xd4b7329369c81618, parentHash: 0x77eea665e8fd8653, txCount: 20662, lastBlockNum_before: 2)
+[nomt_ffi] nomt_commit_payload failed: No space left on device (os error 28)
+[nomt_ffi] nomt_commit_payload failed: Store is poisoned due to prior error
+[ERROR][Oct 20 01:15:18]  ❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: nomt_ffi: failed to commit payload
+[ERROR][Oct 20 01:15:18]  ❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: nomt_ffi: failed to commit payload
+[INFO][Oct 20 01:15:19]  ✅ [COMMIT STATE] Block #4 persisted to DB and flushed (hash: 0xbd64c814e253ec3c, parentHash: 0xd4b7329369c81618, txCount: 12000, lastBlockNum_before: 3)
+[nomt_ffi] nomt_commit_payload failed: Store is poisoned due to prior error
+[ERROR][Oct 20 01:15:19]  ❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: nomt_ffi: failed to commit payload
+[nomt_ffi] nomt_commit_payload failed: Store is poisoned due to prior error
+[ERROR][Oct 20 01:15:19]  ❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: nomt_ffi: failed to commit payload
+[INFO][Oct 20 01:15:19]  ✅ [COMMIT STATE] Block #5 persisted to DB and flushed (hash: 0x18a7e4a34ccb614d, parentHash: 0xbd64c814e253ec3c, txCount: 13518, lastBlockNum_before: 4)
+[nomt_ffi] nomt_commit_payload failed: Store is poisoned due to prior error
+[ERROR][Oct 20 01:15:20]  ❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: nomt_ffi: failed to commit payload
+[nomt_ffi] nomt_commit_payload failed: Store is poisoned due to prior error
+[ERROR][Oct 20 01:15:20]  ❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: nomt_ffi: failed to commit payload

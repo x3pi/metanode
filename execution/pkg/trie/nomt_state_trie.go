@@ -15,6 +15,7 @@ import (
 
 	e_common "github.com/ethereum/go-ethereum/common"
 
+	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
@@ -1990,6 +1991,11 @@ func (p *NomtPayload) CommitAsync() {
 					p.commitTicket.SetState(NomtPersistenceFailed)
 				}
 				// CRITICAL FAIL-CLOSED FIX: Do NOT clear committing when persistence fails!
+				// Fail-stop as well: the NOMT store is poisoned after the first failed commit, so every later block would be
+				// executed against a store that no longer matches the network and this node would persist blocks with a
+				// different hash (measured: ENOSPC on one validator, hash differs from block 4 on, see CLAIMS_LEDGER #15).
+				// Halting lets the supervisor restart the node and re-sync it from peers instead of forking it.
+				onAsyncPersistenceFailure(string(p.trie.namespace), p.blockNum, commitErr)
 				return
 			}
 
@@ -2004,6 +2010,12 @@ func (p *NomtPayload) CommitAsync() {
 			p.trie.writerMu.Unlock()
 		}()
 	})
+}
+
+// onAsyncPersistenceFailure is called when a background NOMT/changelog commit fails. It must not return in production;
+// tests replace it.
+var onAsyncPersistenceFailure = func(namespace string, blockNum uint64, err error) {
+	fatal.Exit("NOMT async persistence failed (namespace=%s, block=%d): %v", namespace, blockNum, err)
 }
 
 func (n *NomtStateTrie) CommitPayloadAsync() {}
