@@ -42,6 +42,8 @@ var diffBarrierCluster = func() cm.PublicKey {
 
 type barrierEnv struct {
 	nodeKP *bls.KeyPair
+	kp103  *bls.KeyPair     // sole committee member of gateway chain 103 (unregister / bond claims)
+	kpR    *bls.KeyPair     // sole committee member of the reserve chain 104 (supply mint / allocation transfer)
 	users  []common.Address // pool of users the rollup system registers
 	evm    []diffAccount    // validator / gateway senders
 	native []diffAccount
@@ -50,6 +52,9 @@ type barrierEnv struct {
 func newBarrierEnv() barrierEnv {
 	seed := common.FromHex(diffBarrierSeedHex)
 	env := barrierEnv{nodeKP: bls.NewKeyPair(seed[:32])}
+	seed103 := common.FromHex("0x1030103010301030103010301030103010301030103010301030103010301030")
+	seedR := common.FromHex("0x1040104010401040104010401040104010401040104010401040104010401040")
+	env.kp103, env.kpR = bls.NewKeyPair(seed103[:32]), bls.NewKeyPair(seedR[:32])
 	for i := 0; i < 4; i++ {
 		env.users = append(env.users, common.BigToAddress(big.NewInt(int64(0x7000+i))))
 	}
@@ -111,7 +116,7 @@ func barrierBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transac
 		var to common.Address
 		var data []byte
 		amount := big.NewInt(0)
-		switch r.Intn(13) {
+		switch r.Intn(17) {
 		case 6, 7, 8, 9: // the remaining validator methods; targets are the committee node or a sender
 			to = mt_common.VALIDATOR_CONTRACT_ADDRESS
 			target := env.nodeKP.Address()
@@ -128,6 +133,33 @@ func barrierBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transac
 					return vh.abi.Pack("withdrawReward", target)
 				}
 				return vh.abi.Pack("distributeRewards", target, big.NewInt(int64(r.Intn(1_000_000))))
+			})
+		case 13, 14, 15, 16: // cert-authorized gateway calls, signed by the real single-member committees
+			to = mt_common.GATEWAY_CONTRACT_ADDRESS
+			sign := func(kp *bls.KeyPair, digest []byte) ([]byte, []byte) {
+				return bls.Sign(kp.PrivateKey(), digest).Bytes(), []byte{0x01}
+			}
+			data = pack(func() ([]byte, error) {
+				switch r.Intn(5) {
+				case 0: // one-time genesis mint to the reserve chain (the second one in a block is rejected)
+					amt := big.NewInt(1_000_000)
+					sig, bm := sign(env.kpR, cross_chain.ComputeAllocateSupplyMessage(104, amt))
+					return gh.abi.Pack("allocateSupplyWithCert", big.NewInt(104), amt, uint64(1), sig, bm)
+				case 1: // move allocation out of the reserve; nonce 0 or 1, so ordering decides which one lands
+					amt := big.NewInt([]int64{100, 300}[r.Intn(2)])
+					nonce := uint64(r.Intn(2))
+					sig, bm := sign(env.kpR, cross_chain.ComputeTransferAllocationMessage(104, 102, amt, nonce))
+					return gh.abi.Pack("transferAllocationWithCert", big.NewInt(104), big.NewInt(102), amt, nonce, uint64(1), sig, bm)
+				case 2: // transfer signed by the wrong committee
+					amt := big.NewInt(100)
+					sig, bm := sign(env.kp103, cross_chain.ComputeTransferAllocationMessage(104, 102, amt, 0))
+					return gh.abi.Pack("transferAllocationWithCert", big.NewInt(104), big.NewInt(102), amt, uint64(0), uint64(1), sig, bm)
+				case 3: // chain 103 leaves; repeating it (or a stale nonce) is rejected
+					nonce := uint64(r.Intn(2))
+					sig, bm := sign(env.kp103, cross_chain.ComputeUnregisterChainMessage(103, 1, nonce))
+					return gh.abi.Pack("unregisterChainWithCert", big.NewInt(103), nonce, uint64(1), sig, bm)
+				}
+				return gh.abi.Pack("claimUnbondedBond", big.NewInt(103))
 			})
 		case 10, 11, 12: // gateway calls that move real balance through the native mint/burn path
 			to = mt_common.GATEWAY_CONTRACT_ADDRESS
@@ -240,12 +272,20 @@ func barrierSetup(t *testing.T) (barrierEnv, *blockchain.ChainState) {
 	}
 	engine.ChainRegistry[102] = cross_chain.ChainRegistry{ChainID: 102, Epoch: 1,
 		Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: env.nodeKP.BytesPublicKey(), Stake: 1000}}}
+	// chains 103 and 104 (reserve), each with a single known committee key so that tests can sign real certs; chain 103
+	// has a posted bond, and unbonding is immediate, so unregister followed by claimUnbondedBond pays out in one block
+	for id, kp := range map[uint64]*bls.KeyPair{103: env.kp103, 104: env.kpR} {
+		engine.ChainRegistry[id] = cross_chain.ChainRegistry{ChainID: id, Epoch: 1, GenesisWallet: env.users[1],
+			Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000}}}
+	}
+	engine.ReserveChainID = 104
+	engine.UnbondingPeriodSeconds = 0
 	// a relayer tip for every barrier sender and an unbonding request for chain 102 that is already releasable
 	engine.RelayerBalances = map[common.Address]*big.Int{}
 	for _, a := range env.evm {
 		engine.RelayerBalances[a.addr] = big.NewInt(12_345)
 	}
-	engine.SecurityBond = &cross_chain.SecurityBondLedger{Bond: map[uint64]*big.Int{}, UnbondingRequests: map[uint64]*cross_chain.UnbondingRequest{}}
+	engine.SecurityBond = &cross_chain.SecurityBondLedger{Bond: map[uint64]*big.Int{103: big.NewInt(500)}, UnbondingRequests: map[uint64]*cross_chain.UnbondingRequest{}}
 	engine.SecurityBond.UnbondingRequests[102] = &cross_chain.UnbondingRequest{Amount: big.NewInt(777), GenesisWallet: env.users[0], ReleaseAt: 0}
 	if err := saveGatewayEngine(cs, engine); err != nil {
 		t.Fatal(err)
@@ -393,7 +433,7 @@ func TestExecDifferential_ValidBarrierTxs_OptimisticVsTrueBlockSTMOnly(t *testin
 	}
 	t.Logf("barrier receipts across all blocks: %v", okRcp)
 	// the test is only meaningful if each barrier address actually executed successfully somewhere
-	for _, kind := range []string{"validator.registerValidator", "validator.deregisterValidator", "validator.setCommissionRate", "validator.delegate", "validator.undelegate", "validator.updateValidatorInfo", "validator.withdrawReward", "gateway", "gateway.postSecurityBond", "gateway.withdrawRelayerTip", "gateway.claimUnbondedBond", "rollup"} {
+	for _, kind := range []string{"validator.registerValidator", "validator.deregisterValidator", "validator.setCommissionRate", "validator.delegate", "validator.undelegate", "validator.updateValidatorInfo", "validator.withdrawReward", "gateway", "gateway.postSecurityBond", "gateway.withdrawRelayerTip", "gateway.claimUnbondedBond", "gateway.allocateSupplyWithCert", "gateway.transferAllocationWithCert", "gateway.unregisterChainWithCert", "rollup"} {
 		if okRcp[kind+"/RETURNED"] == 0 {
 			t.Errorf("no successful %s barrier tx in %d blocks: the fixtures no longer exercise the valid path", kind, iterations)
 		}
