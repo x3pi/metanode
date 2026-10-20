@@ -24,6 +24,15 @@ type msMember struct {
 	stake uint64
 }
 
+// tenMembers is a committee of ten (so the signer bitmap needs two bytes), 100 stake each.
+func tenMembers(mk func(uint64, int) *bls.KeyPair) []msMember {
+	var out []msMember
+	for i := 0; i < 10; i++ {
+		out = append(out, msMember{mk(107, i), 100})
+	}
+	return out
+}
+
 // multisigCommittees returns the committees of chain 105 (4 members, 1000 each) and 106 (3 members, 1000/2000/3000).
 func multisigCommittees() map[uint64][]msMember {
 	mk := func(chain uint64, i int) *bls.KeyPair {
@@ -32,6 +41,7 @@ func multisigCommittees() map[uint64][]msMember {
 	return map[uint64][]msMember{
 		105: {{mk(105, 0), 1000}, {mk(105, 1), 1000}, {mk(105, 2), 1000}, {mk(105, 3), 1000}},
 		106: {{mk(106, 0), 1000}, {mk(106, 1), 2000}, {mk(106, 2), 3000}},
+		107: tenMembers(mk),
 	}
 }
 
@@ -90,20 +100,21 @@ func multisigBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transa
 	cert := func(chain uint64, digest []byte) (signers [][]byte, aggSig, bitmap []byte) {
 		members := committees[chain]
 		var sigs [][]byte
-		bm := make([]byte, 1)
+		bm := make([]byte, (len(members)+7)/8)
 		for i, m := range members {
 			if r.Intn(4) != 0 || (i == len(members)-1 && len(sigs) == 0) {
 				sigs = append(sigs, bls.Sign(m.kp.PrivateKey(), digest).Bytes())
 				signers = append(signers, m.kp.BytesPublicKey())
-				bm[0] |= 1 << uint(i)
+				bm[i/8] |= 1 << uint(i%8)
 			}
 		}
 		if r.Intn(10) == 0 { // the bitmap claims a member who did not sign
-			bm[0] |= 1 << uint(r.Intn(len(members)))
+			k := r.Intn(len(members))
+			bm[k/8] |= 1 << uint(k%8)
 		}
 		return signers, bls.CreateAggregateSign(sigs), bm
 	}
-	chains := []uint64{105, 106}
+	chains := []uint64{105, 106, 107}
 	for i, n := 0, 3+r.Intn(8); i < n; i++ {
 		from := env.evm[r.Intn(len(env.evm))].addr
 		chain := chains[r.Intn(len(chains))]

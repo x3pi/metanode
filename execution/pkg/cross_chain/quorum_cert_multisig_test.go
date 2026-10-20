@@ -61,3 +61,41 @@ func TestVerifyQuorumCert_UnevenStakesAndCustomThreshold(t *testing.T) {
 	assert.ErrorIs(t, VerifyQuorumCertAgainstRegistry(reg, cert([]int{0, 2}, []int{0, 2}), digest), ErrQuorumNotReached)
 	assert.NoError(t, VerifyQuorumCertAgainstRegistry(reg, cert([]int{1, 2}, []int{1, 2}), digest))
 }
+
+// A ten-member committee needs a two-byte signer bitmap: members 8 and 9 live in the second byte.
+func TestVerifyQuorumCert_TenMembersTwoByteBitmap(t *testing.T) {
+	reg := ChainRegistry{ChainID: 107, Epoch: 1} // 10 x 100 stake, default threshold 2*1000/3 + 1 = 667
+	var kps []*bls.KeyPair
+	for i := 0; i < 10; i++ {
+		kp := bls.NewKeyPair(bytes.Repeat([]byte{0x07, byte(0x40 + i)}, 16))
+		kps = append(kps, kp)
+		reg.Committee = append(reg.Committee, ValidatorEntry{PubkeyBLS: kp.BytesPublicKey(), Stake: 100})
+	}
+	digest := []byte("ten-member-digest")
+	cert := func(signers []int, bitmap []byte) QuorumCert {
+		var sigs [][]byte
+		for _, i := range signers {
+			sigs = append(sigs, bls.Sign(kps[i].PrivateKey(), digest).Bytes())
+		}
+		return QuorumCert{Epoch: 1, AggregateSignature: bls.CreateAggregateSign(sigs), SignerBitmap: bitmap}
+	}
+	bitmapOf := func(signers []int, size int) []byte {
+		bm := make([]byte, size)
+		for _, i := range signers {
+			if i/8 < size {
+				bm[i/8] |= 1 << uint(i%8)
+			}
+		}
+		return bm
+	}
+	seven := []int{0, 1, 2, 3, 7, 8, 9} // 700 >= 667, three of them in the second byte region
+	six := []int{0, 1, 2, 3, 8, 9}      // 600 < 667
+	assert.NoError(t, VerifyQuorumCertAgainstRegistry(reg, cert(seven, bitmapOf(seven, 2)), digest))
+	assert.ErrorIs(t, VerifyQuorumCertAgainstRegistry(reg, cert(six, bitmapOf(six, 2)), digest), ErrQuorumNotReached)
+	// a one-byte bitmap cannot name members 8 and 9: they are not counted, the stake falls short
+	assert.ErrorIs(t, VerifyQuorumCertAgainstRegistry(reg, cert(seven, bitmapOf(seven, 1)), digest), ErrQuorumNotReached)
+	// a longer bitmap with a stray bit beyond the committee does not add stake
+	extra := bitmapOf(seven, 2)
+	extra[1] |= 1 << 6 // member index 14 does not exist
+	assert.NoError(t, VerifyQuorumCertAgainstRegistry(reg, cert(seven, extra), digest))
+}
