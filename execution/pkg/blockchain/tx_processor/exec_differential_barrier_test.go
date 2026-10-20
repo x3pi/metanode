@@ -31,6 +31,9 @@ import (
 // writes, in any trie, has to match.
 
 // sorts before every barrier sender (groups order same-group txs by sender address), so its credits run first
+// the reserve is the chain the node itself runs as: the genesis mint only runs on the reserve chain
+const reserveChainID = uint64(parityChainID)
+
 var barrierFunder = common.BigToAddress(new(big.Int).Add(new(big.Int).Lsh(big.NewInt(0x1111), 128), big.NewInt(0x01)))
 
 const diffBarrierSeedHex = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
@@ -44,7 +47,7 @@ var diffBarrierCluster = func() cm.PublicKey {
 type barrierEnv struct {
 	nodeKP *bls.KeyPair
 	kp103  *bls.KeyPair     // sole committee member of gateway chain 103 (unregister / bond claims)
-	kpR    *bls.KeyPair     // sole committee member of the reserve chain 104 (supply mint / allocation transfer)
+	kpR    *bls.KeyPair     // sole committee member of the reserve chain (the local chain) (supply mint / allocation transfer)
 	users  []common.Address // pool of users the rollup system registers
 	evm    []diffAccount    // validator / gateway senders
 	native []diffAccount
@@ -120,7 +123,7 @@ func barrierBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transac
 			// sorts first; sometimes only the claim, or from another sender, so ordering decides the outcome
 			msg := cross_chain.CrossChainMessage{
 				MessageID:     common.BigToHash(big.NewInt(int64(0xC1A100 + r.Intn(6)))),
-				SourceChainID: 104, DestChainID: parityChainID, Sequence: uint64(1 + r.Intn(3)), HopCount: 1,
+				SourceChainID: reserveChainID, DestChainID: parityChainID, Sequence: uint64(1 + r.Intn(3)), HopCount: 1,
 				Sender: from, Target: env.users[r.Intn(len(env.users))], AssetID: big.NewInt(0),
 				Value: big.NewInt(int64(1 + r.Intn(5000))), Payload: nil, Tip: big.NewInt(0), GasFee: big.NewInt(0),
 			}
@@ -132,7 +135,7 @@ func barrierBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transac
 			aggProof := cross_chain.GetMerkleProof(layers, aggIndex["0"])
 			sig := bls.Sign(env.kpR.PrivateKey(), cross_chain.ComputeCommitRootAttestMessage(root)).Bytes()
 			attest := pack(func() ([]byte, error) {
-				return gh.abi.Pack("attestReserveIssuedCommit", big.NewInt(104), root, aggAmounts["0"], big.NewInt(0),
+				return gh.abi.Pack("attestReserveIssuedCommit", big.NewInt(int64(reserveChainID)), root, aggAmounts["0"], big.NewInt(0),
 					new(big.Int).SetUint64(aggProof.LeafIndex), hashesToBytes32(aggProof.Siblings), uint64(1), sig, []byte{0x01})
 			})
 			claim := pack(func() ([]byte, error) {
@@ -186,7 +189,7 @@ func barrierBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transac
 				homes := []struct {
 					id uint64
 					kp *bls.KeyPair
-				}{{102, env.nodeKP}, {103, env.kp103}, {104, env.kpR}}
+				}{{102, env.nodeKP}, {103, env.kp103}, {reserveChainID, env.kpR}}
 				h := homes[r.Intn(len(homes))]
 				assetID := big.NewInt(int64(1 + r.Intn(4)))
 				canonical := common.BigToAddress(big.NewInt(int64(0xA550 + r.Intn(2))))
@@ -206,17 +209,17 @@ func barrierBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transac
 				switch r.Intn(5) {
 				case 0: // one-time genesis mint to the reserve chain (the second one in a block is rejected)
 					amt := big.NewInt(1_000_000)
-					sig, bm := sign(env.kpR, cross_chain.ComputeAllocateSupplyMessage(104, amt))
-					return gh.abi.Pack("allocateSupplyWithCert", big.NewInt(104), amt, uint64(1), sig, bm)
+					sig, bm := sign(env.kpR, cross_chain.ComputeAllocateSupplyMessage(reserveChainID, amt))
+					return gh.abi.Pack("allocateSupplyWithCert", big.NewInt(int64(reserveChainID)), amt, uint64(1), sig, bm)
 				case 1: // move allocation out of the reserve; nonce 0 or 1, so ordering decides which one lands
 					amt := big.NewInt([]int64{100, 300}[r.Intn(2)])
 					nonce := uint64(r.Intn(2))
-					sig, bm := sign(env.kpR, cross_chain.ComputeTransferAllocationMessage(104, 102, amt, nonce))
-					return gh.abi.Pack("transferAllocationWithCert", big.NewInt(104), big.NewInt(102), amt, nonce, uint64(1), sig, bm)
+					sig, bm := sign(env.kpR, cross_chain.ComputeTransferAllocationMessage(reserveChainID, 102, amt, nonce))
+					return gh.abi.Pack("transferAllocationWithCert", big.NewInt(int64(reserveChainID)), big.NewInt(102), amt, nonce, uint64(1), sig, bm)
 				case 2: // transfer signed by the wrong committee
 					amt := big.NewInt(100)
-					sig, bm := sign(env.kp103, cross_chain.ComputeTransferAllocationMessage(104, 102, amt, 0))
-					return gh.abi.Pack("transferAllocationWithCert", big.NewInt(104), big.NewInt(102), amt, uint64(0), uint64(1), sig, bm)
+					sig, bm := sign(env.kp103, cross_chain.ComputeTransferAllocationMessage(reserveChainID, 102, amt, 0))
+					return gh.abi.Pack("transferAllocationWithCert", big.NewInt(int64(reserveChainID)), big.NewInt(102), amt, uint64(0), uint64(1), sig, bm)
 				case 3: // chain 103 leaves; repeating it (or a stale nonce) is rejected
 					nonce := uint64(r.Intn(2))
 					sig, bm := sign(env.kp103, cross_chain.ComputeUnregisterChainMessage(103, 1, nonce))
@@ -335,13 +338,13 @@ func barrierSetup(t *testing.T) (barrierEnv, *blockchain.ChainState) {
 	}
 	engine.ChainRegistry[102] = cross_chain.ChainRegistry{ChainID: 102, Epoch: 1,
 		Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: env.nodeKP.BytesPublicKey(), Stake: 1000}}}
-	// chains 103 and 104 (reserve), each with a single known committee key so that tests can sign real certs; chain 103
+	// chain 103 and the reserve (the local chain), each with a single known committee key so that tests can sign real certs; chain 103
 	// has a posted bond, and unbonding is immediate, so unregister followed by claimUnbondedBond pays out in one block
-	for id, kp := range map[uint64]*bls.KeyPair{103: env.kp103, 104: env.kpR} {
+	for id, kp := range map[uint64]*bls.KeyPair{103: env.kp103, reserveChainID: env.kpR} {
 		engine.ChainRegistry[id] = cross_chain.ChainRegistry{ChainID: id, Epoch: 1, GenesisWallet: env.users[1],
 			Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000}}}
 	}
-	engine.ReserveChainID = 104
+	engine.ReserveChainID = reserveChainID
 	engine.UnbondingPeriodSeconds = 0
 	engine.MinNativeStakeToRegister = big.NewInt(1000)
 	// a relayer tip for every barrier sender and an unbonding request for chain 102 that is already releasable

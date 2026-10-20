@@ -21,7 +21,7 @@ Commit đề xuất: **`e088671f`** (gồm `9c9caa93` và `c96640f4`; CI xanh �
 | `e5e6fc85` | `senderExisted` dùng state thật; miễn phí đăng ký chỉ khi đúng selector `setBlsPublicKey` và khóa 48 byte |
 | `c96640f4` | Block-STM: vô hiệu hóa tx đã đọc khóa mà lần chạy lại không còn ghi (hết nondeterminism, xem STM runbook mục 6) |
 | `9c9caa93` | `StakeStateDB.getOrCreateValidatorState`: `registerValidator` ngay sau `deregisterValidator` của cùng địa chỉ trong một block từng gây **panic nil pointer** khi thực thi block (không có `recover`); nay tạo validator mới thay cho tombstone. Mọi validator chạy block đó đều bị ảnh hưởng, nên phải nâng cấp đồng loạt |
-| (commit kế tiếp) | `GlobalSupplyLedger.GrantAllocation` / `TransferAllocation`: khi sổ cái đã vỡ bất biến `sum ≤ genesis` (trạng thái bình thường trên chain không phải Reserve sau khi nhận message) thì trả `ErrInvariantViolation` thay vì `panic`. Một block từng làm sập mọi validator nay chỉ làm tx thất bại; xem `note/cross_chain/security_audit_findings.md` mục 9. Phải nâng cấp đồng loạt |
+| (commit kế tiếp) | `GlobalSupplyLedger.GrantAllocation` / `TransferAllocation`: khi sổ cái đã vỡ bất biến `sum ≤ genesis` (trạng thái bình thường trên chain không phải Reserve sau khi nhận message) thì trả `ErrInvariantViolation` thay vì `panic`. Một block từng làm sập mọi validator nay chỉ làm tx thất bại; xem `note/cross_chain/security_audit_findings.md` mục 9. `AllocateSupplyWithCert` nay chỉ chạy khi `LocalChainID == ReserveChainID`: kiểm tra cụm không mint genesis trên chain không phải Reserve. Phải nâng cấp đồng loạt |
 
 Hệ quả `[ĐỌC CODE]`: node chạy code cũ và node chạy code mới có thể ra kết quả khác nhau cho cùng một block. **Không nâng cấp cuốn chiếu.** Thà pending chứ không fork.
 

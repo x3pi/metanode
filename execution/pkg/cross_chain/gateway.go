@@ -879,6 +879,11 @@ func (g *GatewayEngine) AllocateSupplyWithCert(chainID uint64, amount *big.Int, 
 	if chainID != g.ReserveChainID {
 		return fmt.Errorf("AllocateSupplyWithCert: %w (got chain %d, reserve is %d)", ErrOnlyReserveMayMint, chainID, g.ReserveChainID)
 	}
+	// The reserve's cert is public calldata and does not name the chain it is executed on, so without this check anyone could
+	// replay it on a non-reserve chain and mint a genesis supply into that chain's non-authoritative local ledger copy.
+	if g.LocalChainID != g.ReserveChainID {
+		return fmt.Errorf("AllocateSupplyWithCert: %w (this is chain %d, the genesis mint only runs on the reserve chain %d)", ErrOnlyReserveMayMint, g.LocalChainID, g.ReserveChainID)
+	}
 	if g.SupplyLedger.GenesisTotalSupply != nil && g.SupplyLedger.GenesisTotalSupply.Sign() > 0 {
 		return fmt.Errorf("AllocateSupplyWithCert: %w", ErrGenesisAlreadyMinted)
 	}

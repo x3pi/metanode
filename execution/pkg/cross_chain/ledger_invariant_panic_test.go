@@ -32,8 +32,8 @@ func TestLedger_InvariantAlreadyBrokenReturnsErrorInsteadOfPanicking(t *testing.
 }
 
 // Real route to that state: a commit issued by the reserve is attested without a ceiling debit, then claimed on a chain
-// whose ledger copy has no genesis supply. The reserve's genesis-mint cert is public calldata, so replaying it there
-// must be rejected, not crash the node.
+// whose ledger copy has no genesis supply. The reserve's genesis-mint cert is public calldata, so replaying it on that
+// non-reserve chain must be rejected, not crash the node (and not mint a local genesis supply).
 func TestGateway_ClaimThenAllocateSupplyWithCert_DoesNotPanic(t *testing.T) {
 	kp := bls.GenerateKeyPair()
 	ledger, err := NewGlobalSupplyLedger(big.NewInt(0), map[uint64]*big.Int{})
@@ -62,6 +62,12 @@ func TestGateway_ClaimThenAllocateSupplyWithCert_DoesNotPanic(t *testing.T) {
 	mintSig := bls.Sign(kp.PrivateKey(), ComputeAllocateSupplyMessage(101, amount))
 	cert := QuorumCert{Epoch: 1, AggregateSignature: mintSig.Bytes(), SignerBitmap: []byte{0x01}}
 	require.NotPanics(t, func() { err = engine.AllocateSupplyWithCert(101, amount, cert) })
-	assert.ErrorIs(t, err, ErrInvariantViolation)
+	assert.ErrorIs(t, err, ErrOnlyReserveMayMint, "the genesis mint must only run on the reserve chain itself")
 	assert.Equal(t, 0, ledger.GenesisTotalSupply.Sign(), "a rejected mint must leave the genesis supply at 0")
+
+	// and on the reserve chain itself an already-broken ledger is an error, not a panic
+	engine.LocalChainID = 101
+	require.NotPanics(t, func() { err = engine.AllocateSupplyWithCert(101, amount, cert) })
+	assert.ErrorIs(t, err, ErrInvariantViolation)
+	assert.Equal(t, 0, ledger.GenesisTotalSupply.Sign())
 }
