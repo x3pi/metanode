@@ -11,7 +11,7 @@ Nhãn bằng chứng: `[ĐO]` có log hoặc lệnh chạy trong phiên 2026-10-
 
 ## 1. Bản phát hành
 
-Commit đề xuất: **`9c9caa93`** (gồm `c96640f4`) (hoặc commit mới hơn trên `dev` đã qua lại các kiểm tra ở mục 3). Mọi binary của mọi node phải build từ **cùng một commit**; ghi `sha256sum` từng binary vào biên bản triển khai.
+Commit đề xuất: **`7e1c95ef`** (gồm `9c9caa93` và `c96640f4`; CI xanh ở commit này; các commit sau `9c9caa93` là mempool PR #179 và sửa test, không đổi luật consensus `[ĐỌC CODE]`) (hoặc commit mới hơn trên `dev` đã qua lại các kiểm tra ở mục 3). Mọi binary của mọi node phải build từ **cùng một commit**; ghi `sha256sum` từng binary vào biên bản triển khai.
 
 ### 1.1. Thay đổi consensus (kết quả thực thi của một số block thay đổi)
 | Commit | Nội dung |
