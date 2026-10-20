@@ -738,13 +738,20 @@ func (db *SmartContractDB) Commit() (interface{}, error) {
 		}
 		code := value.([]byte)
 		batch = append(batch, [2][]byte{codeHash.Bytes(), code})
-		db.pendingCode.Delete(codeHash)
 	}
 
 	if len(batch) > 0 {
 		if err := db.codeStorage.BatchPut(batch); err != nil {
+			// the code stays in pendingCode: dropping it here would lose it for good and leave accounts whose code hash is
+			// set but whose code reads as empty
 			logger.Error("Error batch putting code:", err)
 			return nil, err
+		}
+		// Only now is the code readable from the store, so only now may it leave pendingCode. Deleting it before the write
+		// left a window in which GetCodeByCodeHash found neither, and a concurrent reader saw an account with a code hash
+		// but no code.
+		for _, kv := range batch {
+			db.pendingCode.Delete(common.BytesToHash(kv[0]))
 		}
 		failpoint.Hit("after-logical-write")
 		// Contract bytecode is referenced by the account state committed with this block, but

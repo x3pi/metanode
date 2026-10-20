@@ -56,6 +56,7 @@ import (
 	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor/mvcc"
@@ -1450,10 +1451,37 @@ func globalStateGetCore(fmvmId, fAddress common.Address) (status int32, balance,
 	var bCode []byte
 	if smartContractState := accountState.SmartContractState(); smartContractState != nil {
 		bCode = mvmApi.smartContractDb.Code(fAddress)
+		warnIfCodeUnreadable(mvmApi.smartContractDb, fAddress, smartContractState.CodeHash(), bCode)
 		logger.Debug("[GLOBAL_STATE_GET] Smart contract code loaded for %s, codeLen=%d, codeHash=%s, code=%s", fAddress.Hex(), len(bCode), smartContractState.CodeHash().Hex(), hex.EncodeToString(bCode))
 	}
 
 	return 1, b32Balance[:], bNonce[:], bCode
+}
+
+// emptyCodeHash is keccak256 of empty code: the code hash of a contract that deployed no runtime code.
+var emptyCodeHash = crypto.Keccak256Hash(nil)
+
+// codeUnreadable reports whether an account has a code hash but the code store returns no code for it. A call to such an
+// account now runs as a call to an address without code (it succeeds with empty output, as on the EVM), so a damaged or
+// incomplete code store on this node would otherwise go unnoticed while its results silently differ from the network's.
+// It re-reads through GetCodeByCodeHash when the database offers it, which also looks at code written earlier in the
+// same block, so only code that is really missing is reported.
+func codeUnreadable(db SmartContractDB, addr common.Address, codeHash common.Hash, code []byte) bool {
+	if len(code) != 0 || codeHash == (common.Hash{}) || codeHash == emptyCodeHash {
+		return false
+	}
+	if byHash, ok := db.(interface {
+		GetCodeByCodeHash(common.Address, common.Hash) []byte
+	}); ok && len(byHash.GetCodeByCodeHash(addr, codeHash)) != 0 {
+		return false
+	}
+	return true
+}
+
+func warnIfCodeUnreadable(db SmartContractDB, addr common.Address, codeHash common.Hash, code []byte) {
+	if codeUnreadable(db, addr, codeHash, code) {
+		logger.Error("🛑 [MVM] code of %s (codeHash %s) is not readable from the code store: calls to it run as calls to an address without code; check this node's code storage", addr.Hex(), codeHash.Hex())
+	}
 }
 
 //export GlobalStateGet
