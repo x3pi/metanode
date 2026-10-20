@@ -77,7 +77,7 @@ fi
 mkdir -p /opt/metanode
 rm -f /opt/metanode/generated_keys.json
 cp -f "$KEYS_FILE" /opt/metanode/generated_keys.json
-chmod 666 /opt/metanode/generated_keys.json 2>/dev/null || true
+chmod 644 /opt/metanode/generated_keys.json 2>/dev/null || true
 
 # 3. Reset Execution Clusters bằng deploy_clusters.sh (tự động nạp toàn bộ spam keys vào genesis của chain con)
 echo "🚀 3. Triển khai & Reset Execution Clusters (chain con) với Genesis chứa 50,000 ví..."
