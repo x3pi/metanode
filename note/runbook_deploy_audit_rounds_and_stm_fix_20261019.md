@@ -53,13 +53,13 @@ Nếu một block cũ từng dính lỗi nondeterministic, code mới replay có
 - `build_check.sh` ở `c96640f4`: ALL BUILDS PASSED 5/5, 40 giây, 0 warning, exit 0 (log `/tmp/claude-1001/build_check_20261019b.log`).
 - `go test ./pkg/blockchain/... ./pkg/grouptxns/` pass; `go test -race -run 'TestTrueBlockSTM|TestExecDifferential'` sạch.
 - Cụm 4 validator BFT local dựng từ binary `dev`: 5 đợt burst × 4000 tx, confirmed 4000/4000, loss 0, `zero_fork_verified=True`, `node_roots_consistent=True` (`/tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad/e2e_out2/b1..b5.json`). 19/19 block dựng lại khớp `stateRoot`.
-- Differential test: native fast path vs Block-STM (300 block ngẫu nhiên) và block lẫn EVM/barrier (120 block) khớp; regression test của lỗi STM fail trên code cũ.
+- Differential test: native fast path vs Block-STM (300 block ngẫu nhiên) và block lẫn EVM/barrier (120 block) khớp; block barrier có calldata hợp lệ: 200 block khớp oracle tuần tự, `-race` sạch (2026-10-20, `go test ./pkg/blockchain/tx_processor/ -run ValidBarrierTxs`); regression test của lỗi STM fail trên code cũ.
 
 **Chưa làm `[CHƯA ĐO]`, phải làm hoặc chấp nhận rủi ro bằng văn bản:**
 1. Chạy trên nhiều máy thật, có độ trễ mạng, và chạy dài (soak).
 2. Replay đối chiếu trên bản sao dữ liệu thật (mục 4, bước 3).
 3. Diễn tập đủ các pha của cutover runbook trên cụm cô lập cùng inventory.
-4. Differential test chưa phủ tx barrier có calldata hợp lệ (đăng ký validator, gateway).
+4. Differential test (`exec_differential_barrier_test.go`) phủ calldata hợp lệ của 8 hàm validator contract (0x1001, riêng `distributeRewards` luôn bị từ chối theo thiết kế), gateway `outbound` (0x1002) và sự kiện rollup (0x72), nhưng **chưa phủ** parent-chain gateway (0x1003) và các hàm gateway khác ngoài `outbound` `[CHƯA ĐO]`.
 
 Điều kiện Go/No-Go trước khi dừng cụm: `git status` sạch; `git rev-parse HEAD` đúng commit đã ghi; hash binary đã ghi; backup đã kiểm (`tar -tzf`) trên mọi host; có người trực.
 

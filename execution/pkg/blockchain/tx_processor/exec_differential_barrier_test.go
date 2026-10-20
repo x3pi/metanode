@@ -111,7 +111,24 @@ func barrierBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transac
 		var to common.Address
 		var data []byte
 		amount := big.NewInt(0)
-		switch r.Intn(6) {
+		switch r.Intn(10) {
+		case 6, 7, 8, 9: // the remaining validator methods; targets are the committee node or a sender
+			to = mt_common.VALIDATOR_CONTRACT_ADDRESS
+			target := env.nodeKP.Address()
+			if r.Intn(2) == 0 {
+				target = env.evm[r.Intn(len(env.evm))].addr
+			}
+			data = pack(func() ([]byte, error) {
+				switch r.Intn(4) {
+				case 0:
+					return vh.abi.Pack("updateValidatorInfo", "n"+from.Hex()[38:], "d", "w", "i")
+				case 1:
+					return vh.abi.Pack("undelegate", target, big.NewInt(int64(1+r.Intn(1_000_000_000))))
+				case 2:
+					return vh.abi.Pack("withdrawReward", target)
+				}
+				return vh.abi.Pack("distributeRewards", target, big.NewInt(int64(r.Intn(1_000_000))))
+			})
 		case 0:
 			to = mt_common.VALIDATOR_CONTRACT_ADDRESS
 			data = pack(func() ([]byte, error) {
@@ -187,6 +204,14 @@ func barrierSetup(t *testing.T) (barrierEnv, *blockchain.ChainState) {
 	for _, a := range env.evm[:3] {
 		if err := cs.GetStakeStateDB().CreateRegisterWithKeys(a.addr, "pre", "", "", "", 5, big.NewInt(0), "p", "w", "n", "", []byte{1}, []byte{2}, "h", []byte{3}); err != nil {
 			t.Fatalf("pre-register validator: %v", err)
+		}
+	}
+	// existing delegations to the committee node, with the matching funds held by the validator contract, so undelegate and
+	// withdrawReward have a successful path
+	seedAccount(t, cs, mt_common.VALIDATOR_CONTRACT_ADDRESS, big.NewInt(6_000_000_000), 0)
+	for _, a := range env.evm[:3] {
+		if err := cs.GetStakeStateDB().Delegate(env.nodeKP.Address(), a.addr, big.NewInt(2_000_000_000)); err != nil {
+			t.Fatalf("pre-delegate: %v", err)
 		}
 	}
 	// make the committee visible to the rollup attestation (committed trie), then unlock the stake DB again the way block
@@ -287,7 +312,7 @@ func barrierRun(t *testing.T, seed int64, mode string) (barrierOutcome, []mt_typ
 }
 
 func TestExecDifferential_ValidBarrierTxs_OptimisticVsTrueBlockSTMOnly(t *testing.T) {
-	const iterations = 80
+	const iterations = 200
 	vh0, _ := GetValidatorHandler()
 	diverged := 0
 	okRcp := map[string]int{}
@@ -342,7 +367,7 @@ func TestExecDifferential_ValidBarrierTxs_OptimisticVsTrueBlockSTMOnly(t *testin
 	}
 	t.Logf("barrier receipts across all blocks: %v", okRcp)
 	// the test is only meaningful if each barrier address actually executed successfully somewhere
-	for _, kind := range []string{"validator.registerValidator", "validator.deregisterValidator", "validator.setCommissionRate", "validator.delegate", "gateway", "rollup"} {
+	for _, kind := range []string{"validator.registerValidator", "validator.deregisterValidator", "validator.setCommissionRate", "validator.delegate", "validator.undelegate", "validator.updateValidatorInfo", "validator.withdrawReward", "gateway", "rollup"} {
 		if okRcp[kind+"/RETURNED"] == 0 {
 			t.Errorf("no successful %s barrier tx in %d blocks: the fixtures no longer exercise the valid path", kind, iterations)
 		}
