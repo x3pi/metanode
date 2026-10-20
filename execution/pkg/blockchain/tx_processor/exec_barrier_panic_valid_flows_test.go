@@ -31,9 +31,10 @@ func TestBarrierHandlers_NoPanicOnMutatedValidFlows(t *testing.T) {
 	mutated := 0
 	for seed := int64(1); seed <= int64(blocks); seed++ {
 		r := rand.New(rand.NewSource(seed * 7919))
+		barrierContractStorage = seed%5 == 3 || seed%5 == 4 // the contract flows need code that really persists
 		env, cs := barrierSetup(t)
 		gen := barrierBlock
-		switch seed % 4 {
+		switch seed % 5 {
 		case 0: // the funded-ledger flows (ceiling attest, claim, credit/refund of the reserve allocation)
 			seedGatewayLedger(t, env, cs)
 			gen = ledgerBlock
@@ -41,6 +42,12 @@ func TestBarrierHandlers_NoPanicOnMutatedValidFlows(t *testing.T) {
 			seedGatewayLedger(t, env, cs)
 			miscTweak(t, env, cs)
 			gen = miscBlock
+		case 3: // custom assets: real token contracts moved through the gateway
+			assetTweak(t, env, cs)
+			gen = assetBlock
+		case 4: // plain EVM token calls mixed with native transfers and barrier txs
+			evmTokenTweak(t, env, cs)
+			gen = evmTokenBlock
 		case 2: // committees of several members: aggregated signatures, bitmaps, uneven stakes, custom threshold
 			multisigTweak(t, env, cs)
 			gen = multisigBlock
@@ -86,6 +93,7 @@ func TestBarrierHandlers_NoPanicOnMutatedValidFlows(t *testing.T) {
 			_, _ = cs.GetStakeStateDB().IntermediateRoot()
 		}()
 	}
+	barrierContractStorage = false
 	t.Logf("%d blocks, %d txs with mangled calldata", blocks, mutated)
 	for _, s := range sites {
 		t.Errorf("PANIC x%d (first at seed %d): %s\n  raised at %s\n  block:\n%s", s.count, s.seed, s.value, s.frame, s.txs)
