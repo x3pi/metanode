@@ -478,7 +478,14 @@ func applyFullMvmResultToStateDB(chainState *blockchain.ChainState, res *mvm.MVM
 	return nil
 }
 
-// isContractCall checks if the target address has code deployed in the state.
+func isDelegationDesignator(code []byte) bool {
+	return len(code) == 23 && code[0] == 0xef && code[1] == 0x01 && code[2] == 0x00
+}
+
+// isContractCall checks if the target address has executable code deployed in the state.
+// If target is delegated via EIP-7702, it resolves exactly ONE hop: if the delegate is also
+// a delegation designator (circular/chained), revoked, or has no code, it returns false
+// (matching EIP-7702 and MVM processor.cpp resolve_delegated_code).
 func isContractCall(chainState *blockchain.ChainState, target common.Address) bool {
 	as, err := chainState.GetAccountStateDB().AccountState(target)
 	if err != nil || as == nil {
@@ -488,7 +495,38 @@ func isContractCall(chainState *blockchain.ChainState, target common.Address) bo
 	if scState == nil {
 		return false
 	}
-	return scState.CodeHash() != (common.Hash{})
+	codeHash := scState.CodeHash()
+	if codeHash == (common.Hash{}) {
+		return false
+	}
+	code := chainState.GetSmartContractDB().GetCodeByCodeHash(target, codeHash)
+	if len(code) == 0 {
+		return false
+	}
+	if !isDelegationDesignator(code) {
+		return true
+	}
+
+	// EIP-7702: exactly ONE hop resolution. Chained delegation (A -> B -> C)
+	// and circular delegation (A -> A, A -> B -> A) are disallowed and resolve to empty code.
+	delegateAddr := common.BytesToAddress(code[3:23])
+	delAs, err := chainState.GetAccountStateDB().AccountState(delegateAddr)
+	if err != nil || delAs == nil {
+		return false
+	}
+	delSc := delAs.SmartContractState()
+	if delSc == nil {
+		return false
+	}
+	delCodeHash := delSc.CodeHash()
+	if delCodeHash == (common.Hash{}) {
+		return false
+	}
+	delCode := chainState.GetSmartContractDB().GetCodeByCodeHash(delegateAddr, delCodeHash)
+	if len(delCode) == 0 || isDelegationDesignator(delCode) {
+		return false
+	}
+	return true
 }
 
 // executeContractCallForGateway returns the real gas consumed by the call (mvmResult.GasUsed)
@@ -867,6 +905,9 @@ func (h *GatewayHandler) handleWrite(
 				// custom-asset outbound path was unconditionally broken against any real
 				// standards-compliant ERC-20, confirmed by a real deployed-contract test
 				// reverting with ERR_EXECUTION_REVERTED before this fix.
+				if !isContractCall(chainState, sourceContract) {
+					return nil, nil, fmt.Errorf("outbound custom asset transferFrom failed: token contract %s has no code deployed", sourceContract.Hex())
+				}
 				if _, err := executeContractCallForGateway(
 					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, sourceContract, callData, big.NewInt(0), tx.MaxGas(), 0,
 				); err != nil {
@@ -1174,7 +1215,10 @@ func (h *GatewayHandler) handleWrite(
 				// vault-unlock branch would try to move the RELAYER's own token balance
 				// (which doesn't hold the locked tokens — the Gateway does), not the vault's;
 				// and any real access-controlled mint() would reject a non-Gateway caller.
-				if _, execErr := executeContractCallForGateway(
+				if !isContractCall(chainState, targetContract) {
+					logger.Warn("⚠️ [GATEWAY] claimMessage custom asset target contract %s has no code deployed -- marking payload as reverted", targetContract.Hex())
+					payloadReverted = true
+				} else if _, execErr := executeContractCallForGateway(
 					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, targetContract, callData, big.NewInt(0), tx.MaxGas(), 0,
 				); execErr != nil {
 					// SECURITY FIX (2026-09-05, finding #1): a business-logic revert of the
@@ -1375,6 +1419,9 @@ func (h *GatewayHandler) handleWrite(
 					// sites in this file): msg.sender must be the Gateway itself, not
 					// tx.FromAddress() — see the outbound() transferFrom fix comment above for the
 					// full reasoning.
+					if !isContractCall(chainState, sourceContract) {
+						return nil, nil, fmt.Errorf("refund custom asset restoration failed: token contract %s has no code deployed", sourceContract.Hex())
+					}
 					if _, err := executeContractCallForGateway(
 						ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, sourceContract, callData, big.NewInt(0), tx.MaxGas(), 0,
 					); err != nil {
@@ -2090,7 +2137,10 @@ func (h *GatewayHandler) handleWrite(
 				// sites in this file): msg.sender must be the Gateway itself, not
 				// tx.FromAddress() — see the outbound() transferFrom fix comment above for the
 				// full reasoning.
-				if _, execErr := executeContractCallForGateway(
+				if !isContractCall(chainState, targetContract) {
+					logger.Warn("⚠️ [GATEWAY] verifyAndExecute custom asset target contract %s has no code deployed -- marking payload as reverted", targetContract.Hex())
+					payloadReverted = true
+				} else if _, execErr := executeContractCallForGateway(
 					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, targetContract, callData, big.NewInt(0), tx.MaxGas(), 0,
 				); execErr != nil {
 					// SECURITY FIX (2026-09-05, finding #1): finalize Failed instead of

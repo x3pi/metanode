@@ -541,3 +541,150 @@ func TestEIP7702_F1_SelfAuthorization_ContractPath(t *testing.T) {
 	require.NotNil(t, sc)
 	assert.Equal(t, expectedCodeHash, sc.CodeHash(), "contract path: sender must be delegated")
 }
+
+// ============================================================================
+// F9: Sponsorship / Relayer Model
+// Verifies that a Relayer (Sender) can pay gas to set authorization for an
+// Authority with 0 native balance. The Authority's balance must remain untouched,
+// while the Relayer pays full gas fees.
+// ============================================================================
+
+func TestEIP7702_Sponsorship_RelayerPaysGas_AuthorityBalanceUntouched(t *testing.T) {
+	const chainID = 991
+	relayerKey, relayerAddr := genTestKey(t)
+	authKey, authAddr := genTestKey(t)
+	delegateAddr := common.HexToAddress("0x1111222233334444555566667777888899990000")
+	expectedCodeHash := crypto.Keccak256Hash(types.AddressToDelegation(delegateAddr))
+
+	chainState := newTestChainState(t)
+	chainState.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(chainID)})
+	initialRelayerBal := big.NewInt(1_000_000_000_000)
+	seedAccount(t, chainState, relayerAddr, initialRelayerBal, 0)
+	seedAccount(t, chainState, authAddr, big.NewInt(0), 0) // Authority has ZERO balance
+
+	auth := signAuthorization(t, authKey, chainID, delegateAddr, 0)
+	tx := buildSetCodeTx(t, relayerKey, chainID, 0, 100_000, common.HexToAddress("0x9999"), 0, []types.SetCodeAuthorization{auth})
+
+	leaderAddr := common.HexToAddress("0xAAAA000000000000000000000000000000000001")
+	stm := NewTrueBlockSTM([]mt_types.Transaction{tx})
+	_, rcps, _, _ := stm.Process(context.Background(), chainState, leaderAddr, blankHeader(), 12345)
+
+	require.Len(t, rcps, 1)
+	require.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcps[0].Status())
+
+	// Authority checks:
+	stAuth, err := chainState.GetAccountStateDB().AccountState(authAddr)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), stAuth.TotalBalance().Int64(), "Authority with zero balance must not be charged any gas")
+	assert.Equal(t, uint64(1), stAuth.Nonce(), "Authority nonce must increment by 1")
+	require.NotNil(t, stAuth.SmartContractState())
+	assert.Equal(t, expectedCodeHash, stAuth.SmartContractState().CodeHash(), "Authority delegation code hash must be set")
+
+	// Relayer checks:
+	stRelayer, err := chainState.GetAccountStateDB().AccountState(relayerAddr)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), stRelayer.Nonce())
+	gasDeducted := new(big.Int).Sub(initialRelayerBal, stRelayer.TotalBalance())
+	assert.Equal(t, int64(rcps[0].GasUsed()), gasDeducted.Int64(), "Relayer must pay all gas fees for the sponsored tx")
+}
+
+// ============================================================================
+// F10: Revocation Clears HasCode and Restores FastPath Transfers
+// Verifies that revoking delegation (to 0x0) properly clears HasCode so that
+// subsequent transfers with standard 21,000 gas limit do not invoke EVM and
+// succeed via fastpath.
+// ============================================================================
+
+func TestEIP7702_Revocation_HasCodeCleared_And_FastPathTransfer(t *testing.T) {
+	const chainID = 991
+	senderKey, senderAddr := genTestKey(t)
+	authKey, authAddr := genTestKey(t)
+	delegateAddr := common.HexToAddress("0x1111222233334444555566667777888899990000")
+	zeroAddr := common.Address{}
+
+	chainState := newTestChainState(t)
+	chainState.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(chainID)})
+	seedAccount(t, chainState, senderAddr, big.NewInt(1_000_000_000_000), 0)
+	seedAccount(t, chainState, authAddr, big.NewInt(100), 0)
+
+	leaderAddr := common.HexToAddress("0xAAAA000000000000000000000000000000000001")
+
+	// 1. Initial state: HasCode is false
+	assert.False(t, chainState.HasCode(authAddr), "Pure EOA must not have code")
+
+	// 2. Delegate to delegateAddr
+	auth1 := signAuthorization(t, authKey, chainID, delegateAddr, 0)
+	tx1 := buildSetCodeTx(t, senderKey, chainID, 0, 100_000, common.HexToAddress("0x9999"), 0, []types.SetCodeAuthorization{auth1})
+	stm1 := NewTrueBlockSTM([]mt_types.Transaction{tx1})
+	_, rcps1, _, _ := stm1.Process(context.Background(), chainState, leaderAddr, blankHeader(), 12345)
+	require.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcps1[0].Status())
+	assert.True(t, chainState.HasCode(authAddr), "Delegated account must be reported as having code")
+
+	// 3. Revoke delegation (delegate to 0x0)
+	auth2 := signAuthorization(t, authKey, chainID, zeroAddr, 1)
+	tx2 := buildSetCodeTx(t, senderKey, chainID, 1, 100_000, common.HexToAddress("0x9999"), 0, []types.SetCodeAuthorization{auth2})
+	stm2 := NewTrueBlockSTM([]mt_types.Transaction{tx2})
+	_, rcps2, _, _ := stm2.Process(context.Background(), chainState, leaderAddr, blankHeader(), 12346)
+	require.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcps2[0].Status())
+
+	// HasCode must be false after revocation
+	assert.False(t, chainState.HasCode(authAddr), "HasCode must return false after revocation")
+	stAuth, _ := chainState.GetAccountStateDB().AccountState(authAddr)
+	assert.Equal(t, common.Hash{}, stAuth.SmartContractState().CodeHash(), "CodeHash must be zeroed out")
+
+	// 4. Send native transfer with 21,000 gas limit to authAddr
+	transferTx := transaction.NewTransaction(
+		senderAddr, authAddr, big.NewInt(500),
+		21_000, 1, 1000,
+		nil, nil, common.Hash{}, common.Hash{},
+		2, chainID,
+	)
+	stm3 := NewTrueBlockSTM([]mt_types.Transaction{transferTx})
+	_, rcps3, _, _ := stm3.Process(context.Background(), chainState, leaderAddr, blankHeader(), 12347)
+	require.Len(t, rcps3, 1)
+	require.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcps3[0].Status(), "Transfer to revoked account with 21k gas must succeed (fastpath)")
+	assert.Equal(t, uint64(20_000), rcps3[0].GasUsed(), "Native transfer gas used must be 20,000")
+
+	stAuthAfter, _ := chainState.GetAccountStateDB().AccountState(authAddr)
+	assert.Equal(t, int64(600), stAuthAfter.TotalBalance().Int64(), "Auth balance must increase by transfer amount (100 + 500 = 600)")
+}
+
+// ============================================================================
+// F11: Execution Against Empty Bytecode Delegate Returns Success (Not Halted)
+// Verifies MVM fix where calling an account delegated to an undeployed/empty
+// address returns ExitReason::returned (Status 1) instead of ExitReason::halted (Status 0).
+// ============================================================================
+
+func TestEIP7702_EmptyBytecode_ExecutionReturnsSuccess(t *testing.T) {
+	const chainID = 991
+	senderKey, senderAddr := genTestKey(t)
+	authKey, authAddr := genTestKey(t)
+	// delegateEmpty has NO code deployed in state
+	delegateEmpty := common.HexToAddress("0xEEEE000000000000000000000000000000000001")
+
+	chainState := newTestChainState(t)
+	chainState.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(chainID)})
+	seedAccount(t, chainState, senderAddr, big.NewInt(1_000_000_000_000), 0)
+	seedAccount(t, chainState, authAddr, big.NewInt(0), 0)
+	seedAccount(t, chainState, delegateEmpty, big.NewInt(0), 0)
+
+	leaderAddr := common.HexToAddress("0xAAAA000000000000000000000000000000000001")
+
+	// Step 1: Delegate authAddr to delegateEmpty
+	auth := signAuthorization(t, authKey, chainID, delegateEmpty, 0)
+	tx1 := buildSetCodeTx(t, senderKey, chainID, 0, 100_000, common.HexToAddress("0x9999"), 0, []types.SetCodeAuthorization{auth})
+	stm1 := NewTrueBlockSTM([]mt_types.Transaction{tx1})
+	_, rcps1, _, _ := stm1.Process(context.Background(), chainState, leaderAddr, blankHeader(), 12345)
+	require.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcps1[0].Status())
+
+	// Step 2: Call authAddr directly via EVM (with calldata)
+	callTx := newStandardCallTx(senderAddr, authAddr, 1, 100_000, []byte{0x01, 0x02, 0x03})
+	stm2 := NewTrueBlockSTM([]mt_types.Transaction{callTx})
+	_, rcps2, _, _ := stm2.Process(context.Background(), chainState, leaderAddr, blankHeader(), 12346)
+	require.Len(t, rcps2, 1)
+
+	// In Ethereum / EVM, calling an empty account or an account whose delegate has no code
+	// must SUCCEED with status 1 (returned), consuming standard call gas, NOT halt/revert!
+	assert.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcps2[0].Status(), "Calling delegated account with empty code must succeed with status 1")
+}
+

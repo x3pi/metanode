@@ -35,7 +35,7 @@ func newTestChainState(t *testing.T) *blockchain.ChainState {
 	t.Cleanup(func() { trie.SetStateBackend(prevBackend) })
 
 	accountStorage := storage.NewDummyStorage("")
-	codeStorage := storage.NewDummyStorage("")
+	codeStorage := storage.NewMemoryDb()
 	scStorage := storage.NewDummyStorage("")
 
 	header := block.NewBlockHeader(

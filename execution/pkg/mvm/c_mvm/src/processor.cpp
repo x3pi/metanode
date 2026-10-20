@@ -305,6 +305,18 @@ public:
       calldata = move(input);
     }
 
+    if (!deploy && exec_code.empty()) {
+      rh({});
+      uint64_t used = gas_tracker.get_gas_used();
+      uint64_t refund = std::min<uint64_t>(
+          gas_tracker.get_refund() > 0
+              ? static_cast<uint64_t>(gas_tracker.get_refund())
+              : 0,
+          used / 5);
+      result.gas_used = used - refund;
+      return result;
+    }
+
     push_context(caller, callee, move(calldata), move(exec_code), call_value,
                  rh, hh, eh, readOnly);
 
