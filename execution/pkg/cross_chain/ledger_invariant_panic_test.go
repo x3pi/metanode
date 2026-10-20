@@ -71,3 +71,21 @@ func TestGateway_ClaimThenAllocateSupplyWithCert_DoesNotPanic(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvariantViolation)
 	assert.Equal(t, 0, ledger.GenesisTotalSupply.Sign())
 }
+
+// A forfeited bond is credited to the reserve's allocation; that must not break sum(allocations) <= genesis, or every later
+// allocation move on the reserve fails (and, before the panic->error fix, crashed the node).
+func TestForfeitBond_KeepsLedgerInvariant(t *testing.T) {
+	ledger, err := NewGlobalSupplyLedger(big.NewInt(10_000), map[uint64]*big.Int{101: big.NewInt(6000), 102: big.NewInt(4000)})
+	require.NoError(t, err)
+	engine := NewGatewayEngine(101, map[uint64]ChainRegistry{102: {ChainID: 102, Epoch: 1}}, ledger)
+	engine.ReserveChainID = 101
+	engine.ensureSecurityBond()
+	engine.SecurityBond.Bond[102] = big.NewInt(500)
+	engine.forfeitBond(102)
+
+	assert.True(t, ledger.VerifyInvariant(), "forfeiting a bond must keep sum(allocations) <= genesis supply")
+	assert.Equal(t, 0, ledger.GetAllocation(101).Cmp(big.NewInt(6500)))
+	assert.Equal(t, 0, ledger.GenesisTotalSupply.Cmp(big.NewInt(10_500)))
+	// and the reserve can still move allocation afterwards
+	require.NoError(t, ledger.TransferAllocation(101, 102, big.NewInt(100)))
+}

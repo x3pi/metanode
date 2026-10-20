@@ -465,6 +465,14 @@ func (g *GatewayEngine) forfeitBond(chainID uint64) {
 	if total.Sign() > 0 && g.SupplyLedger != nil && g.ReserveChainID != 0 {
 		current := g.SupplyLedger.GetAllocation(g.ReserveChainID)
 		g.SupplyLedger.PerChainAllocation[g.ReserveChainID] = new(big.Int).Add(current, total)
+		// The forfeited bond is real coin that was never part of GenesisTotalSupply, so the allocation it now backs must raise
+		// the tracked supply by the same amount, exactly as GrantAllocation does. Without this the ledger invariant
+		// sum(allocations) <= genesis breaks, and every later TransferAllocation / GrantAllocation on the reserve fails
+		// (before the panic->error fix it panicked every validator).
+		if g.SupplyLedger.GenesisTotalSupply == nil {
+			g.SupplyLedger.GenesisTotalSupply = new(big.Int)
+		}
+		g.SupplyLedger.GenesisTotalSupply = new(big.Int).Add(g.SupplyLedger.GenesisTotalSupply, total)
 	}
 	if g.DeadChains == nil {
 		g.DeadChains = make(map[uint64]bool)

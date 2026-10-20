@@ -84,6 +84,13 @@ func ledgerBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transact
 			t.Fatal(err)
 		}
 		mp, ap := cross_chain.GetMerkleProof(layers, 0), cross_chain.GetMerkleProof(layers, aggIdx["0"])
+		if dest == reserveChainID && r.Intn(5) == 0 { // attest + claim in one call, signed by chain 103's committee
+			add(from, pack(gh.abi.Pack("verifyAndExecute", msg.MessageID, big.NewInt(103), big.NewInt(int64(dest)), big.NewInt(int64(msg.Sequence)), msg.HopCount,
+				msg.Sender, msg.Target, msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+				new(big.Int).SetUint64(ap.LeafIndex), hashesToBytes32(ap.Siblings), new(big.Int).SetUint64(mp.LeafIndex), hashesToBytes32(mp.Siblings), root,
+				uint64(1), sign(env.kp103, cross_chain.ComputeCommitRootAttestMessage(root)), []byte{0x01})), i)
+			continue
+		}
 		if r.Intn(6) != 0 { // the attestation (ceiling-checked, debits chain 103), signed by chain 103's committee
 			add(from, pack(gh.abi.Pack("attestCommit", big.NewInt(103), root, agg["0"], big.NewInt(0), new(big.Int).SetUint64(ap.LeafIndex),
 				hashesToBytes32(ap.Siblings), uint64(1), sign(env.kp103, cross_chain.ComputeCommitRootAttestMessage(root)), []byte{0x01})), i)
@@ -175,5 +182,5 @@ func runGatewayDifferential(t *testing.T, iterations int64, gen func(*testing.T,
 
 func TestExecDifferential_GatewayLedgerFlows_OptimisticVsTrueBlockSTMOnly(t *testing.T) {
 	runGatewayDifferential(t, 200, ledgerBlock, seedGatewayLedger,
-		[]string{"attestCommit", "claimMessage", "creditReserveAllocation", "refundReserveAllocation", "transferAllocationWithCert"})
+		[]string{"attestCommit", "claimMessage", "creditReserveAllocation", "refundReserveAllocation", "transferAllocationWithCert", "verifyAndExecute"})
 }
