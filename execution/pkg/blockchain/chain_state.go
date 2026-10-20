@@ -670,7 +670,8 @@ func (cs *ChainState) HasCode(addr common.Address) bool {
 	if err != nil || as == nil {
 		return false
 	}
-	return as.SmartContractState() != nil
+	sc := as.SmartContractState()
+	return sc != nil && sc.CodeHash() != (common.Hash{})
 }
 
 // GetSmartContractDB trả về SmartContractDB.

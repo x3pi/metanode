@@ -561,7 +561,11 @@ func (vmP *VmProcessor) recipientHasCode(addr common.Address) bool {
 		return false
 	}
 	as, err := vmP.accountStateDB.AccountState(addr)
-	return err == nil && as != nil && as.SmartContractState() != nil
+	if err != nil || as == nil {
+		return false
+	}
+	sc := as.SmartContractState()
+	return sc != nil && sc.CodeHash() != (common.Hash{})
 }
 
 func (vmP *VmProcessor) sendNative(

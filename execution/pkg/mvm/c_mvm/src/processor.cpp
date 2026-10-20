@@ -252,7 +252,10 @@ public:
       result.er = ExitReason::returned;
       result.output = move(output_);
     };
-    auto hh = [&result]() { result.er = ExitReason::halted; };
+    auto hh = [&result]() {
+      result.er = ExitReason::returned;
+      result.output.clear();
+    };
     auto eh = [&](const Exception &ex_) {
       journal.revert_to(0);
       result.er = ExitReason::threw;
@@ -303,6 +306,18 @@ public:
       // ErrInvalidCode the moment dispatch() hits the designator's 0xEF byte.
       exec_code = resolve_delegated_code(callee.acc.get_code());
       calldata = move(input);
+    }
+
+    if (!deploy && exec_code.empty()) {
+      rh({});
+      uint64_t used = gas_tracker.get_gas_used();
+      uint64_t refund = std::min<uint64_t>(
+          gas_tracker.get_refund() > 0
+              ? static_cast<uint64_t>(gas_tracker.get_refund())
+              : 0,
+          used / 5);
+      result.gas_used = used - refund;
+      return result;
     }
 
     push_context(caller, callee, move(calldata), move(exec_code), call_value,
