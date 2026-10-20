@@ -283,12 +283,16 @@ def export_tmp_files(info, rpc_nodes_file=None):
                     'chain_id': c_data.get('chain_id', 991),
                     'cluster_name': c_name
                 }
+                c_tmp = None
                 try:
-                    with open(c_file, 'w', encoding='utf-8') as cf:
+                    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir='/tmp', delete=False) as cf:
+                        c_tmp = cf.name
                         json.dump(c_content, cf, indent=2)
-                    os.chmod(c_file, 0o600)
+                    os.chmod(c_tmp, 0o600)
+                    os.replace(c_tmp, c_file)
                 except Exception:
-                    pass
+                    if c_tmp and os.path.exists(c_tmp):
+                        os.unlink(c_tmp)
 
         # Tự động dọn dẹp các file rác exec*.json cũ không có trong inventory hiện tại
         import glob
@@ -308,12 +312,16 @@ def export_tmp_files(info, rpc_nodes_file=None):
                 'rpc_nodes': p_nodes,
                 'parent_nodes': info['parent_nodes']
             }
+            p_tmp = None
             try:
-                with open(p_file, 'w', encoding='utf-8') as pf:
+                with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir='/tmp', delete=False) as pf:
+                    p_tmp = pf.name
                     json.dump(p_content, pf, indent=2)
-                os.chmod(p_file, 0o600)
+                os.chmod(p_tmp, 0o600)
+                os.replace(p_tmp, p_file)
             except Exception:
-                pass
+                if p_tmp and os.path.exists(p_tmp):
+                    os.unlink(p_tmp)
         else:
             p_file = "/tmp/rpc_nodes.parent.json"
             if os.path.exists(p_file):
@@ -441,11 +449,41 @@ if __name__ == '__main__':
         print(resolve_target(parsed, target))
         sys.exit(0)
 
-    custom_target = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith('-') else None
+    custom_target = None
+    if mode in ['export', '--export'] and len(sys.argv) > 3 and not sys.argv[3].startswith('-'):
+        custom_target = sys.argv[3]
     export_tmp_files(parsed, rpc_nodes_file=custom_target)
 
     if mode == 'json':
-        print(json.dumps(parsed, indent=2))
+        ns_filter = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith('-') else None
+        if ns_filter in ('root', 'all'):  # the root monitor namespace means the whole inventory, as `json` with no argument
+            ns_filter = None
+        matched_cluster = None
+        for cid, c_data in parsed.get('clusters', {}).items():
+            if c_data.get('cluster_name', f"exec{cid}") == ns_filter:
+                matched_cluster = c_data
+                break
+        if matched_cluster:
+            c_replicas = matched_cluster.get('replicas', {})
+            c_nodes = {r_k: r_v['rpc_url'] for r_k, r_v in c_replicas.items()}
+            c_content = {
+                'nodes': c_nodes,
+                'rpc_nodes': c_nodes,
+                'ws_nodes': {r_k: r_v['ws_url'] for r_k, r_v in c_replicas.items()},
+                'tcp_nodes': {r_k: f"{r_v['ip']}:{r_v['p2p_port']}" for r_k, r_v in c_replicas.items()},
+                'raft_nodes': {r_k: f"{r_v['ip']}:{r_v['raft_port']}" for r_k, r_v in c_replicas.items()},
+                'chain_id': matched_cluster.get('chain_id', 991),
+                'cluster_name': matched_cluster.get('cluster_name', ns_filter)
+            }
+            print(json.dumps(c_content, indent=2))
+        elif ns_filter in ['parent', 'parent_chain'] and parsed.get('parent_nodes'):
+            p_nodes = {p_k: p_v['rpc_url'] for p_k, p_v in parsed['parent_nodes'].items()}
+            print(json.dumps({'nodes': p_nodes, 'rpc_nodes': p_nodes, 'parent_nodes': parsed['parent_nodes']}, indent=2))
+        elif ns_filter:
+            sys.stderr.write(f"Error: cluster or namespace '{ns_filter}' not found in inventory\n")
+            sys.exit(1)
+        else:
+            print(json.dumps(parsed, indent=2))
     elif mode in ['check', '--check', 'status', '--status']:
         print_summary(parsed)
         print("")

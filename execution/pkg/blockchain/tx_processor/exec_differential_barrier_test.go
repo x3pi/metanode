@@ -2,6 +2,7 @@ package tx_processor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"math/rand"
@@ -30,6 +31,9 @@ import (
 // writes, in any trie, has to match.
 
 // sorts before every barrier sender (groups order same-group txs by sender address), so its credits run first
+// the reserve is the chain the node itself runs as: the genesis mint only runs on the reserve chain
+const reserveChainID = uint64(parityChainID)
+
 var barrierFunder = common.BigToAddress(new(big.Int).Add(new(big.Int).Lsh(big.NewInt(0x1111), 128), big.NewInt(0x01)))
 
 const diffBarrierSeedHex = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
@@ -42,6 +46,8 @@ var diffBarrierCluster = func() cm.PublicKey {
 
 type barrierEnv struct {
 	nodeKP *bls.KeyPair
+	kp103  *bls.KeyPair     // sole committee member of gateway chain 103 (unregister / bond claims)
+	kpR    *bls.KeyPair     // sole committee member of the reserve chain (the local chain) (supply mint / allocation transfer)
 	users  []common.Address // pool of users the rollup system registers
 	evm    []diffAccount    // validator / gateway senders
 	native []diffAccount
@@ -50,6 +56,9 @@ type barrierEnv struct {
 func newBarrierEnv() barrierEnv {
 	seed := common.FromHex(diffBarrierSeedHex)
 	env := barrierEnv{nodeKP: bls.NewKeyPair(seed[:32])}
+	seed103 := common.FromHex("0x1030103010301030103010301030103010301030103010301030103010301030")
+	seedR := common.FromHex("0x1040104010401040104010401040104010401040104010401040104010401040")
+	env.kp103, env.kpR = bls.NewKeyPair(seed103[:32]), bls.NewKeyPair(seedR[:32])
 	for i := 0; i < 4; i++ {
 		env.users = append(env.users, common.BigToAddress(big.NewInt(int64(0x7000+i))))
 	}
@@ -108,10 +117,48 @@ func barrierBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transac
 	for i := 0; i < n; i++ {
 		from := env.evm[r.Intn(len(env.evm))].addr
 		price := prices[r.Intn(len(prices))]
+		if r.Intn(7) == 0 {
+			// inbound cross-chain message from the reserve chain: attestReserveIssuedCommit (cert signed by the reserve
+			// committee) then claimMessage (Merkle proof against that root), usually from the same sender so the attest
+			// sorts first; sometimes only the claim, or from another sender, so ordering decides the outcome
+			msg := cross_chain.CrossChainMessage{
+				MessageID:     common.BigToHash(big.NewInt(int64(0xC1A100 + r.Intn(6)))),
+				SourceChainID: reserveChainID, DestChainID: parityChainID, Sequence: uint64(1 + r.Intn(3)), HopCount: 1,
+				Sender: from, Target: env.users[r.Intn(len(env.users))], AssetID: big.NewInt(0),
+				Value: big.NewInt(int64(1 + r.Intn(5000))), Payload: nil, Tip: big.NewInt(0), GasFee: big.NewInt(0),
+			}
+			root, layers, aggAmounts, aggIndex, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
+			if err != nil {
+				t.Fatal(err)
+			}
+			msgProof := cross_chain.GetMerkleProof(layers, 0)
+			aggProof := cross_chain.GetMerkleProof(layers, aggIndex["0"])
+			sig := bls.Sign(env.kpR.PrivateKey(), cross_chain.ComputeCommitRootAttestMessage(root)).Bytes()
+			attest := pack(func() ([]byte, error) {
+				return gh.abi.Pack("attestReserveIssuedCommit", big.NewInt(int64(reserveChainID)), root, aggAmounts["0"], big.NewInt(0),
+					new(big.Int).SetUint64(aggProof.LeafIndex), hashesToBytes32(aggProof.Siblings), uint64(1), sig, []byte{0x01})
+			})
+			claim := pack(func() ([]byte, error) {
+				return gh.abi.Pack("claimMessage", msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
+					big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target, msg.AssetID, msg.Value, msg.Payload, msg.Tip,
+					msg.GasFee, msg.Ordered, uint64(0), new(big.Int).SetUint64(msgProof.LeafIndex), hashesToBytes32(msgProof.Siblings), root)
+			})
+			claimFrom := from
+			if r.Intn(3) == 0 {
+				claimFrom = env.evm[r.Intn(len(env.evm))].addr
+			}
+			if r.Intn(5) != 0 {
+				txs = append(txs, transaction.NewTransaction(from, mt_common.GATEWAY_CONTRACT_ADDRESS, big.NewInt(0), 400_000, price, uint64(8500+i), attest, nil,
+					common.Hash{}, common.Hash{}, next(from), 991))
+			}
+			txs = append(txs, transaction.NewTransaction(claimFrom, mt_common.GATEWAY_CONTRACT_ADDRESS, big.NewInt(0), 400_000, price, uint64(8600+i), claim, nil,
+				common.Hash{}, common.Hash{}, next(claimFrom), 991))
+			continue
+		}
 		var to common.Address
 		var data []byte
 		amount := big.NewInt(0)
-		switch r.Intn(13) {
+		switch r.Intn(20) {
 		case 6, 7, 8, 9: // the remaining validator methods; targets are the committee node or a sender
 			to = mt_common.VALIDATOR_CONTRACT_ADDRESS
 			target := env.nodeKP.Address()
@@ -128,6 +175,57 @@ func barrierBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transac
 					return vh.abi.Pack("withdrawReward", target)
 				}
 				return vh.abi.Pack("distributeRewards", target, big.NewInt(int64(r.Intn(1_000_000))))
+			})
+		case 17, 18, 19: // asset registration (cert from the home chain's own committee) and stake-funded chain registration
+			to = mt_common.GATEWAY_CONTRACT_ADDRESS
+			data = pack(func() ([]byte, error) {
+				if r.Intn(3) == 0 {
+					payload, err := json.Marshal(cross_chain.ChainRegistry{ChainID: uint64(110 + r.Intn(3)), Epoch: 1})
+					if err != nil {
+						return nil, err
+					}
+					return gh.abi.Pack("registerChainViaStake", payload, big.NewInt([]int64{1000, 5000}[r.Intn(2)]))
+				}
+				homes := []struct {
+					id uint64
+					kp *bls.KeyPair
+				}{{102, env.nodeKP}, {103, env.kp103}, {reserveChainID, env.kpR}}
+				h := homes[r.Intn(len(homes))]
+				assetID := big.NewInt(int64(1 + r.Intn(4)))
+				canonical := common.BigToAddress(big.NewInt(int64(0xA550 + r.Intn(2))))
+				payload, err := json.Marshal(cross_chain.AssetEntry{AssetID: assetID, HomeChainID: h.id, CanonicalContract: canonical})
+				if err != nil {
+					return nil, err
+				}
+				sig := bls.Sign(h.kp.PrivateKey(), cross_chain.ComputeRegisterAssetMessage(assetID, h.id, canonical)).Bytes()
+				return gh.abi.Pack("registerAssetWithCert", payload, big.NewInt(1000), uint64(1), sig, []byte{0x01})
+			})
+		case 13, 14, 15, 16: // cert-authorized gateway calls, signed by the real single-member committees
+			to = mt_common.GATEWAY_CONTRACT_ADDRESS
+			sign := func(kp *bls.KeyPair, digest []byte) ([]byte, []byte) {
+				return bls.Sign(kp.PrivateKey(), digest).Bytes(), []byte{0x01}
+			}
+			data = pack(func() ([]byte, error) {
+				switch r.Intn(5) {
+				case 0: // one-time genesis mint to the reserve chain (the second one in a block is rejected)
+					amt := big.NewInt(1_000_000)
+					sig, bm := sign(env.kpR, cross_chain.ComputeAllocateSupplyMessage(reserveChainID, amt))
+					return gh.abi.Pack("allocateSupplyWithCert", big.NewInt(int64(reserveChainID)), amt, uint64(1), sig, bm)
+				case 1: // move allocation out of the reserve; nonce 0 or 1, so ordering decides which one lands
+					amt := big.NewInt([]int64{100, 300}[r.Intn(2)])
+					nonce := uint64(r.Intn(2))
+					sig, bm := sign(env.kpR, cross_chain.ComputeTransferAllocationMessage(reserveChainID, 102, amt, nonce))
+					return gh.abi.Pack("transferAllocationWithCert", big.NewInt(int64(reserveChainID)), big.NewInt(102), amt, nonce, uint64(1), sig, bm)
+				case 2: // transfer signed by the wrong committee
+					amt := big.NewInt(100)
+					sig, bm := sign(env.kp103, cross_chain.ComputeTransferAllocationMessage(reserveChainID, 102, amt, 0))
+					return gh.abi.Pack("transferAllocationWithCert", big.NewInt(int64(reserveChainID)), big.NewInt(102), amt, uint64(0), uint64(1), sig, bm)
+				case 3: // chain 103 leaves; repeating it (or a stale nonce) is rejected
+					nonce := uint64(r.Intn(2))
+					sig, bm := sign(env.kp103, cross_chain.ComputeUnregisterChainMessage(103, 1, nonce))
+					return gh.abi.Pack("unregisterChainWithCert", big.NewInt(103), nonce, uint64(1), sig, bm)
+				}
+				return gh.abi.Pack("claimUnbondedBond", big.NewInt(103))
 			})
 		case 10, 11, 12: // gateway calls that move real balance through the native mint/burn path
 			to = mt_common.GATEWAY_CONTRACT_ADDRESS
@@ -195,12 +293,21 @@ type barrierOutcome struct {
 
 // barrierSetup builds the chain state every barrier test shares: funded native and barrier-sender accounts, the node identity as
 // the committee validator, three pre-registered validators, gateway destination chain 102 and the rollup system handler.
+// barrierContractStorage makes barrierSetup use a chain state whose contract code and storage really persist.
+var barrierContractStorage bool
+
 func barrierSetup(t *testing.T) (barrierEnv, *blockchain.ChainState) {
 	t.Helper()
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "true")
 	t.Setenv("METANODE_DEVNET", "true")
 	env := newBarrierEnv()
-	cs := newTestChainState(t)
+	var cs *blockchain.ChainState
+	if barrierContractStorage {
+		// DummyStorage (newTestChainState) silently drops contract code, so no deployed contract can ever be called afterwards
+		cs, _, _, _ = newPersistentTestChainState(t)
+	} else {
+		cs = newTestChainState(t)
+	}
 	cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(parityChainID)})
 	seedAccount(t, cs, diffLeader, big.NewInt(0), 0)
 	seedAccount(t, cs, barrierFunder, big.NewInt(1_000_000_000_000_000), 0)
@@ -240,12 +347,21 @@ func barrierSetup(t *testing.T) (barrierEnv, *blockchain.ChainState) {
 	}
 	engine.ChainRegistry[102] = cross_chain.ChainRegistry{ChainID: 102, Epoch: 1,
 		Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: env.nodeKP.BytesPublicKey(), Stake: 1000}}}
+	// chain 103 and the reserve (the local chain), each with a single known committee key so that tests can sign real certs; chain 103
+	// has a posted bond, and unbonding is immediate, so unregister followed by claimUnbondedBond pays out in one block
+	for id, kp := range map[uint64]*bls.KeyPair{103: env.kp103, reserveChainID: env.kpR} {
+		engine.ChainRegistry[id] = cross_chain.ChainRegistry{ChainID: id, Epoch: 1, GenesisWallet: env.users[1],
+			Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000}}}
+	}
+	engine.ReserveChainID = reserveChainID
+	engine.UnbondingPeriodSeconds = 0
+	engine.MinNativeStakeToRegister = big.NewInt(1000)
 	// a relayer tip for every barrier sender and an unbonding request for chain 102 that is already releasable
 	engine.RelayerBalances = map[common.Address]*big.Int{}
 	for _, a := range env.evm {
 		engine.RelayerBalances[a.addr] = big.NewInt(12_345)
 	}
-	engine.SecurityBond = &cross_chain.SecurityBondLedger{Bond: map[uint64]*big.Int{}, UnbondingRequests: map[uint64]*cross_chain.UnbondingRequest{}}
+	engine.SecurityBond = &cross_chain.SecurityBondLedger{Bond: map[uint64]*big.Int{103: big.NewInt(500)}, UnbondingRequests: map[uint64]*cross_chain.UnbondingRequest{}}
 	engine.SecurityBond.UnbondingRequests[102] = &cross_chain.UnbondingRequest{Amount: big.NewInt(777), GenesisWallet: env.users[0], ReleaseAt: 0}
 	if err := saveGatewayEngine(cs, engine); err != nil {
 		t.Fatal(err)
@@ -258,10 +374,20 @@ func barrierSetup(t *testing.T) (barrierEnv, *blockchain.ChainState) {
 }
 
 func barrierRun(t *testing.T, seed int64, mode string) (barrierOutcome, []mt_types.Transaction) {
+	return barrierRunWith(t, seed, mode, barrierBlock, nil)
+}
+
+// barrierRunWith is barrierRun with a custom block generator and an optional tweak of the shared fixture (applied after
+// barrierSetup, e.g. to replace the gateway's supply ledger).
+func barrierRunWith(t *testing.T, seed int64, mode string, gen func(*testing.T, *rand.Rand, barrierEnv) []mt_types.Transaction,
+	tweak func(*testing.T, barrierEnv, *blockchain.ChainState)) (barrierOutcome, []mt_types.Transaction) {
 	t.Helper()
 	env, cs := barrierSetup(t)
+	if tweak != nil {
+		tweak(t, env, cs)
+	}
 
-	txs := barrierBlock(t, rand.New(rand.NewSource(seed)), env)
+	txs := gen(t, rand.New(rand.NewSource(seed)), env)
 	idx := map[common.Hash]int{}
 	items := make([]grouptxns.Item, len(txs))
 	for i, tx := range txs {
@@ -282,6 +408,16 @@ func barrierRun(t *testing.T, seed int64, mode string) (barrierOutcome, []mt_typ
 		for _, tx := range flat {
 			_, one, _, _ := NewTrueBlockSTM([]mt_types.Transaction{tx}).Process(context.Background(), cs, diffLeader, blankHeader(), 999)
 			rcps = append(rcps, one...)
+			if barrierContractStorage {
+				// contract storage and code written by this block must be committed before the next block reads them, as the
+				// block commit pipeline does between real blocks
+				if err := cs.GetSmartContractDB().LateBindRoots(); err != nil {
+					t.Fatalf("LateBindRoots between oracle blocks: %v", err)
+				}
+				if _, err := cs.GetSmartContractDB().Commit(); err != nil {
+					t.Fatalf("commit contract state between oracle blocks: %v", err)
+				}
+			}
 		}
 	case "stm":
 		_, rcps, _, _ = NewTrueBlockSTM(flat).Process(context.Background(), cs, diffLeader, blankHeader(), 999)
@@ -393,7 +529,7 @@ func TestExecDifferential_ValidBarrierTxs_OptimisticVsTrueBlockSTMOnly(t *testin
 	}
 	t.Logf("barrier receipts across all blocks: %v", okRcp)
 	// the test is only meaningful if each barrier address actually executed successfully somewhere
-	for _, kind := range []string{"validator.registerValidator", "validator.deregisterValidator", "validator.setCommissionRate", "validator.delegate", "validator.undelegate", "validator.updateValidatorInfo", "validator.withdrawReward", "gateway", "gateway.postSecurityBond", "gateway.withdrawRelayerTip", "gateway.claimUnbondedBond", "rollup"} {
+	for _, kind := range []string{"validator.registerValidator", "validator.deregisterValidator", "validator.setCommissionRate", "validator.delegate", "validator.undelegate", "validator.updateValidatorInfo", "validator.withdrawReward", "gateway", "gateway.postSecurityBond", "gateway.withdrawRelayerTip", "gateway.claimUnbondedBond", "gateway.allocateSupplyWithCert", "gateway.transferAllocationWithCert", "gateway.unregisterChainWithCert", "gateway.registerAssetWithCert", "gateway.registerChainViaStake", "gateway.attestReserveIssuedCommit", "gateway.claimMessage", "rollup"} {
 		if okRcp[kind+"/RETURNED"] == 0 {
 			t.Errorf("no successful %s barrier tx in %d blocks: the fixtures no longer exercise the valid path", kind, iterations)
 		}

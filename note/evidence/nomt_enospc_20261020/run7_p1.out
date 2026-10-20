@@ -1,0 +1,51 @@
+==================================================================
+🚀 SECP256K1 / EIP-1559 HIGH-PERFORMANCE WORKLOAD BENCHMARK
+   Zero-Fork Compliant (AGENTS.md Part 2.5) | Production SECP Mode
+==================================================================
+🎯 Tracking 4 target simple_chain PIDs: 3515323, 3515653, 3516022, 3516111
+🌐 RPC Pool (4 nodes): http://127.0.0.1:31646, http://127.0.0.1:31647, http://127.0.0.1:31648, http://127.0.0.1:31649
+⚡ TCP Pool (4 nodes): 127.0.0.1:31200, 127.0.0.1:31201, 127.0.0.1:31202, 127.0.0.1:31203
+🆔 Chain ID: 991
+🔑 Loaded 50000 pre-allocated accounts from generated_keys.json
+⚠️ Requested count 400000 > loaded accounts 50000, clamping to 50000
+
+▶️ RUNNING ROUND 1/1
+🏁 Start Block: #1
+
+🔍 Fetching nonces for 50000 accounts across 4 RPC nodes...
+✅ Nonces fetched in 826.906778ms (Errors: 0)
+
+✍️ Pre-signing 50000 1559 transactions...
+✅ Pre-signed 50000 txs in 97.503607ms (512801.54 tx/s signing speed)
+
+🔌 Initializing TCP connection pool (4 endpoints)...
+✅ 4 TCP connections established & registered.
+
+🔥 BLASTING 50000 Transactions across cluster (Mode: tcp)...
+📦 Splitting into 100 TCP batches (batch size: 500)...
+⚡ Wrote 50000 TXs to the transport in 178.591722ms (write speed 279968.18 tx/s — NOT a validator-side number)
+
+⏱️ Tracking Transaction Receipts for Consensus Inclusion & Latency...
+
+📊 BENCHMARK METRICS (Round 1):
+   • Total Submitted:    50000 txs (= bytes_sent_txs: client wrote to transport / got RPC ok; NOT a validator-side number)
+   • received_by_validators: NOT MEASURABLE (a validator's /metrics was unavailable)
+   • committed_ours (counted in blocks): 0 (LOWER BOUND: 1 block(s) not fetched; upper bound 1000) | committed_total_txs in same blocks: 1000
+   • loss_vs_sent: 50000 (100.00%)
+   • TPS end-to-end (committed_ours / (last our-block observed - inject start = 0.651s)): 0.00 tx/s
+   • TPS during injection (ours committed by inject end = 0, over 0.179s): 0.00 tx/s | backlog at inject end: 50000 | drain after injection: 0.472s
+   • TPS active commit window (first..last our-block): 0.00 tx/s | first commit 0.651s after inject start
+   • measurement stop: no new tx-bearing block for 15s (committed_total_seen=1000 expected=50000) | WARNING: could not fetch 1 block(s) (first error: block 2: Post "http://127.0.0.1:31646": dial tcp 127.0.0.1:31646: connect: connection refused); committed_ours is a LOWER BOUND, see committed_ours_upper_bound
+   • parity: INCOMPLETE: http://127.0.0.1:31646 unreachable (Post "http://127.0.0.1:31646": dial tcp 127.0.0.1:31646: connect: connection refused)
+   • [LEGACY ESTIMATE — do not report] extrapolated_confirmed=37000, effective_tps=1697.23 (sample 37/50, denominator = time after injection until the last sampled receipt)
+   • Latency P50:        1.9713914s
+   • Latency P90:        3.332601052s
+   • Latency P95:        3.500476837s
+   • Latency P99:        3.583472889s
+   • Latency Avg:        2.272509842s
+   • Peak CPU (Nodes):   876.0%
+   • Peak RSS (4 Target Nodes): 7276 MB (avg 1819.0 MB/node)
+
+🚨 [PARITY NOT VERIFIED] INCOMPLETE: http://127.0.0.1:31646 unreachable (Post "http://127.0.0.1:31646": dial tcp 127.0.0.1:31646: connect: connection refused)
+📄 JSON Benchmark report saved to: /tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad/ns_acct2/p1.json
+==================================================================

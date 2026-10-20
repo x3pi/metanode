@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -133,6 +134,25 @@ type mixedOutcome struct {
 
 // mixedRun builds the state, pre-deploys one contract, groups the block and executes it either through
 // ProcessTransactionsOptimistic (useSTMOnly=false) or through TrueBlockSTM alone over the same grouped order.
+// mixedRealDispatcher swaps the deterministic stand-in for the production rollup.CrossNodeHandler (float account, transfer
+// fee); supply is then not conserved inside the watched set, so the conservation check is skipped for that run.
+var mixedRealDispatcher bool
+
+// realDispatcherCalls / realDispatcherOK count how often the real dispatcher was reached and how often it accepted.
+var realDispatcherCalls, realDispatcherOK atomic.Int64
+
+type countingDispatcher struct{ inner CrossChainTransferDispatcher }
+
+func (d countingDispatcher) HandleTransfer(store rollup.Store, st AccountStateAccessor, toKey mt_common.PublicKey, sender, target common.Address,
+	value *big.Int, payloadHash common.Hash) (common.Hash, error) {
+	realDispatcherCalls.Add(1)
+	h, err := d.inner.HandleTransfer(store, st, toKey, sender, target, value, payloadHash)
+	if err == nil {
+		realDispatcherOK.Add(1)
+	}
+	return h, err
+}
+
 func mixedRun(t *testing.T, seed int64, useSTMOnly bool) (mixedOutcome, []mt_types.Transaction, *big.Int) {
 	t.Helper()
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "true")
@@ -155,7 +175,13 @@ func mixedRun(t *testing.T, seed int64, useSTMOnly bool) (mixedOutcome, []mt_typ
 	}
 	seedAccount(t, cs, diffEscrow, big.NewInt(0), 0)
 	prevHandler := parentChainGatewayHandlerInstance
-	parentChainGatewayHandlerInstance = &ParentChainGatewayHandler{dispatcher: statefulGatewayDispatcher{}}
+	if mixedRealDispatcher {
+		var fromKey mt_common.PublicKey
+		fromKey[0] = 0x01
+		parentChainGatewayHandlerInstance = &ParentChainGatewayHandler{dispatcher: countingDispatcher{inner: realDispatcher{h: rollup.NewCrossNodeHandler(fromKey)}}}
+	} else {
+		parentChainGatewayHandlerInstance = &ParentChainGatewayHandler{dispatcher: statefulGatewayDispatcher{}}
+	}
 	t.Cleanup(func() { parentChainGatewayHandlerInstance = prevHandler })
 	contract := deployTestWrappedAsset(t, cs, f.deployer, big.NewInt(1000))
 	// the deployer pays gas for the pre-deploy, so the supply baseline is read after it
@@ -249,13 +275,28 @@ func describeMixed(txs []mt_types.Transaction) string {
 }
 
 func TestExecDifferential_MixedBlocks_OptimisticVsTrueBlockSTMOnly(t *testing.T) {
-	const iterations = 120
+	runMixedDifferential(t, 120, true)
+}
+
+func TestExecDifferential_MixedBlocks_RealParentChainDispatcher(t *testing.T) {
+	mixedRealDispatcher = true
+	defer func() { mixedRealDispatcher = false }()
+	realDispatcherCalls.Store(0)
+	realDispatcherOK.Store(0)
+	runMixedDifferential(t, 80, false)
+	t.Logf("real dispatcher reached %d times, accepted %d times", realDispatcherCalls.Load(), realDispatcherOK.Load())
+	if realDispatcherOK.Load() == 0 {
+		t.Error("the real dispatcher never accepted a transfer: the fixtures no longer exercise the valid path")
+	}
+}
+
+func runMixedDifferential(t *testing.T, iterations int64, checkSupply bool) {
 	diverged := 0
 	for seed := int64(1); seed <= iterations; seed++ {
 		opt, txs, before := mixedRun(t, seed, false)
 		ref, _, _ := mixedRun(t, seed, true)
 		for name, o := range map[string]mixedOutcome{"optimistic": opt, "stm-only": ref} {
-			if o.supply.Cmp(before) != 0 {
+			if checkSupply && o.supply.Cmp(before) != 0 {
 				t.Errorf("seed %d %s: supply not conserved, before %s after %s\n%s\naccounts:\n%s\nreceipts:\n%s", seed, name, before, o.supply, describeMixed(txs), strings.Join(o.accounts, "\n"), strings.Join(o.receipts, "\n"))
 			}
 		}

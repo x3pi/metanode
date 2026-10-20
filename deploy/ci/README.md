@@ -51,6 +51,7 @@ Mở file `ci_config.yaml`. Trong mục `tests:`, mỗi bài test được đị
 - **`restart_exec` / `restart_child`**: Khởi động lại service các cụm Execution Clusters mà không xóa database.
 - **`prepare_tps`** (Dành riêng cho test TPS):
   1. Kiểm tra file `generated_keys.json`. Nếu chưa tồn tại hoặc số lượng < 50,000 ví, tự động kích hoạt `main.go` trong `gen_spam_keys` để sinh mới đúng số lượng.
+     Khi triển khai bằng ansible, `generated_keys.json` chỉ được phát lên node khi `metanode_env=devnet` hoặc `node_env=devnet` (mặc định của `deploy_clusters.sh` là devnet; chạy `ansible-playbook` trực tiếp mà không truyền biến thì mặc định `production` và file không được phát), với owner/group là user dịch vụ (`ansible_user`) và quyền `0640`.
   2. Nạp toàn bộ danh sách ví TPS và BLS keys vào `genesis.json.example` qua `manage_genesis.py` (tự động lọc chống trùng lặp địa chỉ 100%).
   3. Xóa `genesis.json` cũ để buộc Ansible tạo cấu hình genesis mới.
   4. Chạy `./ansible_deploy.sh --reset-all --open-ports` để reset cụm node với genesis mới.

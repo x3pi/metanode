@@ -1,0 +1,2 @@
+[nomt_ffi] nomt_commit_payload failed: Input/output error (os error 5)
+[ERROR][Oct 20 02:47:39] 🚨 [FATAL EXIT] NOMT async persistence failed (namespace=stake_db, block=2): nomt_ffi: failed to commit payload

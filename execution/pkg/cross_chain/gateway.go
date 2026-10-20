@@ -465,6 +465,14 @@ func (g *GatewayEngine) forfeitBond(chainID uint64) {
 	if total.Sign() > 0 && g.SupplyLedger != nil && g.ReserveChainID != 0 {
 		current := g.SupplyLedger.GetAllocation(g.ReserveChainID)
 		g.SupplyLedger.PerChainAllocation[g.ReserveChainID] = new(big.Int).Add(current, total)
+		// The forfeited bond is real coin that was never part of GenesisTotalSupply, so the allocation it now backs must raise
+		// the tracked supply by the same amount, exactly as GrantAllocation does. Without this the ledger invariant
+		// sum(allocations) <= genesis breaks, and every later TransferAllocation / GrantAllocation on the reserve fails
+		// (before the panic->error fix it panicked every validator).
+		if g.SupplyLedger.GenesisTotalSupply == nil {
+			g.SupplyLedger.GenesisTotalSupply = new(big.Int)
+		}
+		g.SupplyLedger.GenesisTotalSupply = new(big.Int).Add(g.SupplyLedger.GenesisTotalSupply, total)
 	}
 	if g.DeadChains == nil {
 		g.DeadChains = make(map[uint64]bool)
@@ -878,6 +886,11 @@ func (g *GatewayEngine) AllocateSupplyWithCert(chainID uint64, amount *big.Int, 
 	}
 	if chainID != g.ReserveChainID {
 		return fmt.Errorf("AllocateSupplyWithCert: %w (got chain %d, reserve is %d)", ErrOnlyReserveMayMint, chainID, g.ReserveChainID)
+	}
+	// The reserve's cert is public calldata and does not name the chain it is executed on, so without this check anyone could
+	// replay it on a non-reserve chain and mint a genesis supply into that chain's non-authoritative local ledger copy.
+	if g.LocalChainID != g.ReserveChainID {
+		return fmt.Errorf("AllocateSupplyWithCert: %w (this is chain %d, the genesis mint only runs on the reserve chain %d)", ErrOnlyReserveMayMint, g.LocalChainID, g.ReserveChainID)
 	}
 	if g.SupplyLedger.GenesisTotalSupply != nil && g.SupplyLedger.GenesisTotalSupply.Sign() > 0 {
 		return fmt.Errorf("AllocateSupplyWithCert: %w", ErrGenesisAlreadyMinted)

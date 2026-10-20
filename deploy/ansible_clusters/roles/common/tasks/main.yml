@@ -40,8 +40,13 @@
   ansible.builtin.copy:
     src: "{{ playbook_dir }}/private_dev_keys.json"
     dest: "{{ install_dir }}/private_dev_keys.json"
+    owner: "{{ ansible_user | default('abc') }}"
+    group: "{{ ansible_user | default('abc') }}"
     mode: '0600'
 
+# generated_keys.json holds spam test keys: never ship it outside devnet, and
+# only when the operator actually provides it. Owner and group are the service user
+# (the units run as ansible_user), so 0640 keeps the keys unreadable to other local users.
 - name: Check for optional generated spam keys file
   ansible.builtin.stat:
     path: "{{ playbook_dir }}/../../../metanode-suite/test_tps/gen_spam_keys/generated_keys.json"
@@ -49,11 +54,14 @@
   become: false
   register: generated_spam_keys_stat
 
-- name: Distribute generated spam keys to node
+- name: Distribute generated spam keys to node (devnet only)
   when:
+    - (metanode_env | default('production')) == 'devnet' or (node_env | default('production')) == 'devnet'
     - generated_spam_keys_stat.stat.exists
   ansible.builtin.copy:
     src: "{{ playbook_dir }}/../../../metanode-suite/test_tps/gen_spam_keys/generated_keys.json"
     dest: "{{ install_dir }}/generated_keys.json"
-    mode: '0644'
+    owner: "{{ ansible_user | default('abc') }}"
+    group: "{{ ansible_user | default('abc') }}"
+    mode: '0640'
 

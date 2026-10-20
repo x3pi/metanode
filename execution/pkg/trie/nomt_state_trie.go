@@ -1194,10 +1194,12 @@ func (n *NomtStateTrie) getOrCreateSession() *nomt_ffi.Session {
 
 		if fs != nil {
 			n.handle.LockCommitPayload()
-			err := fs.CommitPayload(n.handle)
+			err := commitFinishedSession(fs, n.handle)
 			n.handle.UnlockCommitPayload()
 			if err != nil {
 				logger.Error("❌ [NOMT-SYNC-DRAIN] Failed to drain pendingFinishedSession (namespace=%s): %v", string(n.namespace), err)
+				// Same fail-stop as CommitAsync: carrying on would clear the committing overlay below as if the data were durable.
+				onAsyncPersistenceFailure(string(n.namespace), blockNum, err)
 			} else if string(n.namespace) == "account_state" && blockNum > 0 {
 				storage.UpdateLastNomtCommittedBlock(blockNum)
 			}
@@ -1206,6 +1208,7 @@ func (n *NomtStateTrie) getOrCreateSession() *nomt_ffi.Session {
 		if n.changelogDB != nil && len(changes) > 0 {
 			if err := n.changelogDB.WriteBlockChanges(blockNum, changes); err != nil {
 				logger.Error("❌ [NOMT-SYNC-DRAIN] Failed to write changelog (namespace=%s): %v", string(n.namespace), err)
+				onAsyncPersistenceFailure(string(n.namespace), blockNum, err)
 			}
 		}
 
@@ -1964,7 +1967,7 @@ func (p *NomtPayload) CommitAsync() {
 			var commitErr error
 			if p.finishedSession != nil {
 				p.trie.handle.LockCommitPayload()
-				err := p.finishedSession.CommitPayload(p.trie.handle)
+				err := commitFinishedSession(p.finishedSession, p.trie.handle)
 				p.trie.handle.UnlockCommitPayload()
 				p.finishedSession = nil
 
@@ -2011,6 +2014,9 @@ func (p *NomtPayload) CommitAsync() {
 		}()
 	})
 }
+
+// commitFinishedSession flushes a finished NOMT session to disk; tests replace it to inject a commit failure.
+var commitFinishedSession = func(fs *nomt_ffi.FinishedSession, h *nomt_ffi.Handle) error { return fs.CommitPayload(h) }
 
 // onAsyncPersistenceFailure is called when a background NOMT/changelog commit fails. It must not return in production;
 // tests replace it.

@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -58,6 +59,12 @@ func StartWatchdogFatal(name string, timeout time.Duration, getContext func() st
 func startWatchdog(name string, timeout, abortAfter time.Duration, getContext func() string) func() {
 	doneChan := make(chan struct{})
 	startTime := time.Now()
+	// stopMu orders stop() against the abort: once stop() has returned, abortProcess can no longer start. Without it a
+	// timer that expires at the same instant as stop() lets the select pick the timer case and abort a healthy process
+	// (it also made the unit test flaky on a loaded CI runner).
+	var stopMu sync.Mutex
+	stopped := false
+	var stopOnce sync.Once
 
 	go func() {
 		timer := time.NewTimer(timeout)
@@ -65,9 +72,18 @@ func startWatchdog(name string, timeout, abortAfter time.Duration, getContext fu
 		for {
 			select {
 			case <-timer.C:
+				select {
+				case <-doneChan: // stopped while the timer was firing
+					return
+				default:
+				}
 				logger.Warn("🆘 [WATCHDOG-%s] TIẾN TRÌNH KẸT QUÁ LÂU (%v)! Ngữ cảnh: %s", name, time.Since(startTime), getContext())
 				if abortAfter > 0 && time.Since(startTime) >= abortAfter {
-					abortProcess(name, time.Since(startTime))
+					stopMu.Lock()
+					if !stopped {
+						abortProcess(name, time.Since(startTime))
+					}
+					stopMu.Unlock()
 				}
 				timer.Reset(timeout)
 			case <-doneChan:
@@ -77,6 +93,11 @@ func startWatchdog(name string, timeout, abortAfter time.Duration, getContext fu
 	}()
 
 	return func() {
-		close(doneChan)
+		stopOnce.Do(func() {
+			stopMu.Lock()
+			stopped = true
+			stopMu.Unlock()
+			close(doneChan)
+		})
 	}
 }
