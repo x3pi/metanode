@@ -365,10 +365,20 @@ func barrierSetup(t *testing.T) (barrierEnv, *blockchain.ChainState) {
 }
 
 func barrierRun(t *testing.T, seed int64, mode string) (barrierOutcome, []mt_types.Transaction) {
+	return barrierRunWith(t, seed, mode, barrierBlock, nil)
+}
+
+// barrierRunWith is barrierRun with a custom block generator and an optional tweak of the shared fixture (applied after
+// barrierSetup, e.g. to replace the gateway's supply ledger).
+func barrierRunWith(t *testing.T, seed int64, mode string, gen func(*testing.T, *rand.Rand, barrierEnv) []mt_types.Transaction,
+	tweak func(*testing.T, barrierEnv, *blockchain.ChainState)) (barrierOutcome, []mt_types.Transaction) {
 	t.Helper()
 	env, cs := barrierSetup(t)
+	if tweak != nil {
+		tweak(t, env, cs)
+	}
 
-	txs := barrierBlock(t, rand.New(rand.NewSource(seed)), env)
+	txs := gen(t, rand.New(rand.NewSource(seed)), env)
 	idx := map[common.Hash]int{}
 	items := make([]grouptxns.Item, len(txs))
 	for i, tx := range txs {
