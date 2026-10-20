@@ -118,9 +118,10 @@ func assetBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transacti
 		default: // wrapped asset 7 coming from chain 103: attest the commit, then claim (mints the wrapped token to the recipient)
 			from := env.evm[1+r.Intn(len(env.evm)-1)].addr
 			recipient := env.users[r.Intn(len(env.users))]
+			dest := []uint64{reserveChainID, reserveChainID, 102}[r.Intn(3)] // 102: a 2-hop message that the reserve has to relay onwards
 			msg := cross_chain.CrossChainMessage{
 				MessageID:     common.BigToHash(big.NewInt(int64(0xA700 + r.Intn(6)))),
-				SourceChainID: 103, DestChainID: reserveChainID, Sequence: uint64(1 + r.Intn(3)), HopCount: 1, Sender: from,
+				SourceChainID: 103, DestChainID: dest, Sequence: uint64(1 + r.Intn(3)), HopCount: 1, Sender: from,
 				Target: assetTokens.wrapped7, AssetID: big.NewInt(wrappedAssetID), Value: big.NewInt(int64(1 + r.Intn(500))),
 				Payload: recipient.Bytes(), Tip: big.NewInt(0), GasFee: big.NewInt(0),
 			}
@@ -134,7 +135,7 @@ func assetBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transacti
 				add(from, mt_common.GATEWAY_CONTRACT_ADDRESS, wrap(gh.abi.Pack("attestCommit", big.NewInt(103), root, agg["7"], big.NewInt(wrappedAssetID),
 					new(big.Int).SetUint64(ap.LeafIndex), hashesToBytes32(ap.Siblings), uint64(1), sig, []byte{0x01})), i)
 			}
-			add(from, mt_common.GATEWAY_CONTRACT_ADDRESS, wrap(gh.abi.Pack("claimMessage", msg.MessageID, big.NewInt(103), big.NewInt(int64(reserveChainID)),
+			add(from, mt_common.GATEWAY_CONTRACT_ADDRESS, wrap(gh.abi.Pack("claimMessage", msg.MessageID, big.NewInt(103), big.NewInt(int64(dest)),
 				big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target, msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered, uint64(0),
 				new(big.Int).SetUint64(mp.LeafIndex), hashesToBytes32(mp.Siblings), root)), i)
 		}
