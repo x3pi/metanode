@@ -252,10 +252,7 @@ public:
       result.er = ExitReason::returned;
       result.output = move(output_);
     };
-    auto hh = [&result]() {
-      result.er = ExitReason::returned;
-      result.output.clear();
-    };
+    auto hh = [&result]() { result.er = ExitReason::halted; };
     auto eh = [&](const Exception &ex_) {
       journal.revert_to(0);
       result.er = ExitReason::threw;

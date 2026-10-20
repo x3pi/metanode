@@ -256,7 +256,7 @@ func TestExecDifferential_MixedBlocks_OptimisticVsTrueBlockSTMOnly(t *testing.T)
 		ref, _, _ := mixedRun(t, seed, true)
 		for name, o := range map[string]mixedOutcome{"optimistic": opt, "stm-only": ref} {
 			if o.supply.Cmp(before) != 0 {
-				t.Errorf("seed %d %s: supply not conserved, before %s after %s\n%s", seed, name, before, o.supply, describeMixed(txs))
+				t.Errorf("seed %d %s: supply not conserved, before %s after %s\n%s\naccounts:\n%s\nreceipts:\n%s", seed, name, before, o.supply, describeMixed(txs), strings.Join(o.accounts, "\n"), strings.Join(o.receipts, "\n"))
 			}
 		}
 		// Block-STM bugs depend on goroutine scheduling: run the reference again and require the identical outcome.
