@@ -2,6 +2,7 @@ package tx_processor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"math/rand"
@@ -116,7 +117,7 @@ func barrierBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transac
 		var to common.Address
 		var data []byte
 		amount := big.NewInt(0)
-		switch r.Intn(17) {
+		switch r.Intn(20) {
 		case 6, 7, 8, 9: // the remaining validator methods; targets are the committee node or a sender
 			to = mt_common.VALIDATOR_CONTRACT_ADDRESS
 			target := env.nodeKP.Address()
@@ -133,6 +134,30 @@ func barrierBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transac
 					return vh.abi.Pack("withdrawReward", target)
 				}
 				return vh.abi.Pack("distributeRewards", target, big.NewInt(int64(r.Intn(1_000_000))))
+			})
+		case 17, 18, 19: // asset registration (cert from the home chain's own committee) and stake-funded chain registration
+			to = mt_common.GATEWAY_CONTRACT_ADDRESS
+			data = pack(func() ([]byte, error) {
+				if r.Intn(3) == 0 {
+					payload, err := json.Marshal(cross_chain.ChainRegistry{ChainID: uint64(110 + r.Intn(3)), Epoch: 1})
+					if err != nil {
+						return nil, err
+					}
+					return gh.abi.Pack("registerChainViaStake", payload, big.NewInt([]int64{1000, 5000}[r.Intn(2)]))
+				}
+				homes := []struct {
+					id uint64
+					kp *bls.KeyPair
+				}{{102, env.nodeKP}, {103, env.kp103}, {104, env.kpR}}
+				h := homes[r.Intn(len(homes))]
+				assetID := big.NewInt(int64(1 + r.Intn(4)))
+				canonical := common.BigToAddress(big.NewInt(int64(0xA550 + r.Intn(2))))
+				payload, err := json.Marshal(cross_chain.AssetEntry{AssetID: assetID, HomeChainID: h.id, CanonicalContract: canonical})
+				if err != nil {
+					return nil, err
+				}
+				sig := bls.Sign(h.kp.PrivateKey(), cross_chain.ComputeRegisterAssetMessage(assetID, h.id, canonical)).Bytes()
+				return gh.abi.Pack("registerAssetWithCert", payload, big.NewInt(1000), uint64(1), sig, []byte{0x01})
 			})
 		case 13, 14, 15, 16: // cert-authorized gateway calls, signed by the real single-member committees
 			to = mt_common.GATEWAY_CONTRACT_ADDRESS
@@ -280,6 +305,7 @@ func barrierSetup(t *testing.T) (barrierEnv, *blockchain.ChainState) {
 	}
 	engine.ReserveChainID = 104
 	engine.UnbondingPeriodSeconds = 0
+	engine.MinNativeStakeToRegister = big.NewInt(1000)
 	// a relayer tip for every barrier sender and an unbonding request for chain 102 that is already releasable
 	engine.RelayerBalances = map[common.Address]*big.Int{}
 	for _, a := range env.evm {
@@ -433,7 +459,7 @@ func TestExecDifferential_ValidBarrierTxs_OptimisticVsTrueBlockSTMOnly(t *testin
 	}
 	t.Logf("barrier receipts across all blocks: %v", okRcp)
 	// the test is only meaningful if each barrier address actually executed successfully somewhere
-	for _, kind := range []string{"validator.registerValidator", "validator.deregisterValidator", "validator.setCommissionRate", "validator.delegate", "validator.undelegate", "validator.updateValidatorInfo", "validator.withdrawReward", "gateway", "gateway.postSecurityBond", "gateway.withdrawRelayerTip", "gateway.claimUnbondedBond", "gateway.allocateSupplyWithCert", "gateway.transferAllocationWithCert", "gateway.unregisterChainWithCert", "rollup"} {
+	for _, kind := range []string{"validator.registerValidator", "validator.deregisterValidator", "validator.setCommissionRate", "validator.delegate", "validator.undelegate", "validator.updateValidatorInfo", "validator.withdrawReward", "gateway", "gateway.postSecurityBond", "gateway.withdrawRelayerTip", "gateway.claimUnbondedBond", "gateway.allocateSupplyWithCert", "gateway.transferAllocationWithCert", "gateway.unregisterChainWithCert", "gateway.registerAssetWithCert", "gateway.registerChainViaStake", "rollup"} {
 		if okRcp[kind+"/RETURNED"] == 0 {
 			t.Errorf("no successful %s barrier tx in %d blocks: the fixtures no longer exercise the valid path", kind, iterations)
 		}
