@@ -456,6 +456,8 @@ if __name__ == '__main__':
 
     if mode == 'json':
         ns_filter = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith('-') else None
+        if ns_filter in ('root', 'all'):  # the root monitor namespace means the whole inventory, as `json` with no argument
+            ns_filter = None
         matched_cluster = None
         for cid, c_data in parsed.get('clusters', {}).items():
             if c_data.get('cluster_name', f"exec{cid}") == ns_filter:

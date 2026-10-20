@@ -75,9 +75,13 @@ fi
 
 # 2. Đồng bộ keys vào /opt/metanode/generated_keys.json
 mkdir -p /opt/metanode
-rm -f /opt/metanode/generated_keys.json
-cp -f "$KEYS_FILE" /opt/metanode/generated_keys.json
-chmod 644 /opt/metanode/generated_keys.json 2>/dev/null || true
+# The file is replaced (not overwritten) so a copy left by another user does not block the update; that needs write
+# permission on /opt/metanode itself, so say so instead of failing with a bare rm/cp error under set -e.
+if ! { rm -f /opt/metanode/generated_keys.json && cp -f "$KEYS_FILE" /opt/metanode/generated_keys.json; }; then
+    echo "❌ Không ghi được /opt/metanode/generated_keys.json: user $(id -un) cần quyền ghi trên /opt/metanode (xem owner/group của thư mục)." >&2
+    exit 1
+fi
+chmod 640 /opt/metanode/generated_keys.json 2>/dev/null || true
 
 # 3. Reset Execution Clusters bằng deploy_clusters.sh (tự động nạp toàn bộ spam keys vào genesis của chain con)
 echo "🚀 3. Triển khai & Reset Execution Clusters (chain con) với Genesis chứa 50,000 ví..."
