@@ -62,6 +62,7 @@ Nếu một block cũ từng dính lỗi nondeterministic, code mới replay có
 - `build_check.sh` ở `c96640f4`: ALL BUILDS PASSED 5/5, 40 giây, 0 warning, exit 0 (log `/tmp/claude-1001/build_check_20261019b.log`).
 - `go test ./pkg/blockchain/... ./pkg/grouptxns/` pass; `go test -race -run 'TestTrueBlockSTM|TestExecDifferential'` sạch.
 - Cụm 4 validator BFT local dựng từ binary `dev`: 5 đợt burst × 4000 tx, confirmed 4000/4000, loss 0, `zero_fork_verified=True`, `node_roots_consistent=True` (`/tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad/e2e_out2/b1..b5.json`). 19/19 block dựng lại khớp `stateRoot`.
+- Cụm 4 validator BFT local dựng từ binary HEAD sau bản vá MVCC (`d5dc2f3c`): triển khai và gọi hợp đồng SSTORE 2×4000 tx, 2×4000 tx `delegate` (barrier validator), rồi 50000 tx chuyển tiền; `loss_vs_sent` 0, parity OK ở #18, hash và stateRoot giống nhau trên cả 4 node (2026-10-20, `scratchpad/live_parity.py`) `[ĐO]`. Không có tx custom asset trong lần chạy này `[CHƯA ĐO]`.
 - Differential test: native fast path vs Block-STM (300 block ngẫu nhiên) và block lẫn EVM/barrier (120 block) khớp; block barrier có calldata hợp lệ: 200 block khớp oracle tuần tự, `-race` sạch (2026-10-20, `go test ./pkg/blockchain/tx_processor/ -run ValidBarrierTxs`); regression test của lỗi STM fail trên code cũ.
 
 **Chưa làm `[CHƯA ĐO]`, phải làm hoặc chấp nhận rủi ro bằng văn bản:**
