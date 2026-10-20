@@ -1,0 +1,2 @@
+[nomt_ffi] nomt_commit_payload failed: No space left on device (os error 28)
+[ERROR][Oct 20 02:23:24] 🚨 [FATAL EXIT] NOMT async persistence failed (namespace=smart_contract_storage_142dd268529af244d5b4a6f9700e2d15c7ac22d6, block=6): nomt_ffi: failed to commit payload
