@@ -111,7 +111,7 @@ func barrierBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transac
 		var to common.Address
 		var data []byte
 		amount := big.NewInt(0)
-		switch r.Intn(10) {
+		switch r.Intn(13) {
 		case 6, 7, 8, 9: // the remaining validator methods; targets are the committee node or a sender
 			to = mt_common.VALIDATOR_CONTRACT_ADDRESS
 			target := env.nodeKP.Address()
@@ -128,6 +128,17 @@ func barrierBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transac
 					return vh.abi.Pack("withdrawReward", target)
 				}
 				return vh.abi.Pack("distributeRewards", target, big.NewInt(int64(r.Intn(1_000_000))))
+			})
+		case 10, 11, 12: // gateway calls that move real balance through the native mint/burn path
+			to = mt_common.GATEWAY_CONTRACT_ADDRESS
+			data = pack(func() ([]byte, error) {
+				switch r.Intn(3) {
+				case 0:
+					return gh.abi.Pack("postSecurityBond", big.NewInt(102), big.NewInt(int64(1+r.Intn(1_000_000))))
+				case 1:
+					return gh.abi.Pack("withdrawRelayerTip")
+				}
+				return gh.abi.Pack("claimUnbondedBond", big.NewInt(102))
 			})
 		case 0:
 			to = mt_common.VALIDATOR_CONTRACT_ADDRESS
@@ -229,6 +240,13 @@ func barrierSetup(t *testing.T) (barrierEnv, *blockchain.ChainState) {
 	}
 	engine.ChainRegistry[102] = cross_chain.ChainRegistry{ChainID: 102, Epoch: 1,
 		Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: env.nodeKP.BytesPublicKey(), Stake: 1000}}}
+	// a relayer tip for every barrier sender and an unbonding request for chain 102 that is already releasable
+	engine.RelayerBalances = map[common.Address]*big.Int{}
+	for _, a := range env.evm {
+		engine.RelayerBalances[a.addr] = big.NewInt(12_345)
+	}
+	engine.SecurityBond = &cross_chain.SecurityBondLedger{Bond: map[uint64]*big.Int{}, UnbondingRequests: map[uint64]*cross_chain.UnbondingRequest{}}
+	engine.SecurityBond.UnbondingRequests[102] = &cross_chain.UnbondingRequest{Amount: big.NewInt(777), GenesisWallet: env.users[0], ReleaseAt: 0}
 	if err := saveGatewayEngine(cs, engine); err != nil {
 		t.Fatal(err)
 	}
@@ -314,6 +332,7 @@ func barrierRun(t *testing.T, seed int64, mode string) (barrierOutcome, []mt_typ
 func TestExecDifferential_ValidBarrierTxs_OptimisticVsTrueBlockSTMOnly(t *testing.T) {
 	const iterations = 200
 	vh0, _ := GetValidatorHandler()
+	gh0, _ := GetGatewayHandler()
 	diverged := 0
 	okRcp := map[string]int{}
 	for seed := int64(1); seed <= iterations; seed++ {
@@ -324,6 +343,13 @@ func TestExecDifferential_ValidBarrierTxs_OptimisticVsTrueBlockSTMOnly(t *testin
 			var status string
 			if _, err := fmt.Sscanf(strings.Replace(line, "status=", "", 1), "tx#%d %s", &idx, &status); err == nil && idx < len(txs) {
 				kind := map[common.Address]string{mt_common.VALIDATOR_CONTRACT_ADDRESS: "validator", mt_common.GATEWAY_CONTRACT_ADDRESS: "gateway", rollup.RollupSystemAddress: "rollup"}[txs[idx].ToAddress()]
+				if kind == "gateway" {
+					if in := txs[idx].CallData().Input(); len(in) >= 4 {
+						if m, err := gh0.abi.MethodById(in[:4]); err == nil && m.Name != "outbound" {
+							kind = "gateway." + m.Name
+						}
+					}
+				}
 				if kind == "validator" {
 					if in := txs[idx].CallData().Input(); len(in) >= 4 {
 						if m, err := vh0.abi.MethodById(in[:4]); err == nil {
@@ -367,7 +393,7 @@ func TestExecDifferential_ValidBarrierTxs_OptimisticVsTrueBlockSTMOnly(t *testin
 	}
 	t.Logf("barrier receipts across all blocks: %v", okRcp)
 	// the test is only meaningful if each barrier address actually executed successfully somewhere
-	for _, kind := range []string{"validator.registerValidator", "validator.deregisterValidator", "validator.setCommissionRate", "validator.delegate", "validator.undelegate", "validator.updateValidatorInfo", "validator.withdrawReward", "gateway", "rollup"} {
+	for _, kind := range []string{"validator.registerValidator", "validator.deregisterValidator", "validator.setCommissionRate", "validator.delegate", "validator.undelegate", "validator.updateValidatorInfo", "validator.withdrawReward", "gateway", "gateway.postSecurityBond", "gateway.withdrawRelayerTip", "gateway.claimUnbondedBond", "rollup"} {
 		if okRcp[kind+"/RETURNED"] == 0 {
 			t.Errorf("no successful %s barrier tx in %d blocks: the fixtures no longer exercise the valid path", kind, iterations)
 		}

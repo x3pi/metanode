@@ -59,7 +59,7 @@ Nếu một block cũ từng dính lỗi nondeterministic, code mới replay có
 1. Chạy trên nhiều máy thật, có độ trễ mạng, và chạy dài (soak).
 2. Replay đối chiếu trên bản sao dữ liệu thật (mục 4, bước 3).
 3. Diễn tập đủ các pha của cutover runbook trên cụm cô lập cùng inventory.
-4. Differential test (`exec_differential_barrier_test.go`) phủ calldata hợp lệ của 8 hàm validator contract (0x1001, riêng `distributeRewards` luôn bị từ chối theo thiết kế), gateway `outbound` (0x1002) và sự kiện rollup (0x72), nhưng **chưa phủ** parent-chain gateway (0x1003) và các hàm gateway khác ngoài `outbound` `[CHƯA ĐO]`.
+4. Differential test phủ: 8 hàm validator contract (0x1001; `distributeRewards` luôn bị từ chối theo thiết kế), gateway `outbound`, `postSecurityBond`, `withdrawRelayerTip`, `claimUnbondedBond` (0x1002), sự kiện rollup (0x72) (`exec_differential_barrier_test.go`), và chuyển tiền qua parent-chain gateway (0x1003, `exec_differential_mixed_test.go`, dispatcher giả định xác định chứ không phải dispatcher thật). **Chưa phủ** `[CHƯA ĐO]`: các hàm gateway cần chứng chỉ/bằng chứng (`claimMessage`, `verifyAndExecute`, `committeeUpdate`, `*WithCert`, `slashOnEquivocation`, `submitCheckpoint`...), `registerChainViaStake`, `refund` và dispatcher 0x1003 thật.
 
 Điều kiện Go/No-Go trước khi dừng cụm: `git status` sạch; `git rev-parse HEAD` đúng commit đã ghi; hash binary đã ghi; backup đã kiểm (`tar -tzf`) trên mọi host; có người trực.
 
