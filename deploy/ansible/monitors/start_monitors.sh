@@ -424,9 +424,10 @@ if [ "${1:-}" == "stop" ] || [ "${1:-}" == "--stop" ]; then
         pkill -9 -f "[v]ote_monitor --daemon --interval 2s$" || true
         pkill -9 -f "go run [m]ain.go.*--no-stop-flag" || true
     else
-        pkill -9 -f "[s]tart_monitors.sh health ${MONITOR_NAMESPACE}" || true
-        pkill -9 -f "[s]tart_monitors.sh resources ${MONITOR_NAMESPACE}" || true
-        pkill -9 -f "[b]lock_hash_checker.*--config.*${MONITOR_NAMESPACE}" || true
+        NS_RE=$(printf '%s' "$MONITOR_NAMESPACE" | sed 's/[.[\*^$]/\\&/g')
+        pkill -9 -f "[s]tart_monitors\.sh (health|resources) ${NS_RE}( |$)" || true
+        pkill -9 -f "[b]lock_hash_checker.*--config [^ ]*rpc_nodes\.${NS_RE}\.json" || true
+        pkill -9 -f "[v]ote_monitor.*--config [^ ]*rpc_nodes\.${NS_RE}\.json" || true
     fi
     echo "✅ Đã dừng monitor namespace ${MONITOR_NAMESPACE}."
     exit 0
@@ -591,7 +592,12 @@ if [ "${1:-}" == "health" ]; then
         INV_PATH=$(get_inv_path)
         PARSE_PY=$(get_parse_py)
 
-        if [ -z "$CUSTOM_RPC_JSON_PATH" ] && [ -n "$PARSE_PY" ] && [ -n "$INV_PATH" ]; then
+        DEFAULT_RPC_JSON_PATH="/tmp/rpc_nodes.${MONITOR_NAMESPACE}.json"
+        if [ "$MONITOR_NAMESPACE" = "root" ]; then
+            DEFAULT_RPC_JSON_PATH="/tmp/rpc_nodes.json"
+        fi
+
+        if { [ -z "$CUSTOM_RPC_JSON_PATH" ] || [ "$CUSTOM_RPC_JSON_PATH" = "$DEFAULT_RPC_JSON_PATH" ]; } && [ -n "$PARSE_PY" ] && [ -n "$INV_PATH" ]; then
             if [ ! -f "$RPC_JSON_PATH" ] || [ "$INV_PATH" -nt "$RPC_JSON_PATH" ]; then
                 (umask 077 && python3 "$PARSE_PY" "$INV_PATH" export >/dev/null 2>&1 || true)
                 chmod 0600 "$RPC_JSON_PATH" 2>/dev/null || true
@@ -1162,7 +1168,12 @@ if [ "${1:-}" == "resources" ]; then
         INV_PATH=$(get_inv_path)
         PARSE_PY=$(get_parse_py)
 
-        if [ -z "$CUSTOM_RPC_JSON_PATH" ] && [ -n "$PARSE_PY" ] && [ -n "$INV_PATH" ]; then
+        DEFAULT_RPC_JSON_PATH="/tmp/rpc_nodes.${MONITOR_NAMESPACE}.json"
+        if [ "$MONITOR_NAMESPACE" = "root" ]; then
+            DEFAULT_RPC_JSON_PATH="/tmp/rpc_nodes.json"
+        fi
+
+        if { [ -z "$CUSTOM_RPC_JSON_PATH" ] || [ "$CUSTOM_RPC_JSON_PATH" = "$DEFAULT_RPC_JSON_PATH" ]; } && [ -n "$PARSE_PY" ] && [ -n "$INV_PATH" ]; then
             if [ ! -f "$RPC_JSON_PATH" ] || [ "$INV_PATH" -nt "$RPC_JSON_PATH" ]; then
                 (umask 077 && python3 "$PARSE_PY" "$INV_PATH" export >/dev/null 2>&1 || true)
                 chmod 0600 "$RPC_JSON_PATH" 2>/dev/null || true
@@ -1251,14 +1262,19 @@ if [ "$MONITOR_NAMESPACE" = "root" ]; then
 fi
 
 # 2. Start Health Monitor in background
-nohup setsid env MONITOR_NAMESPACE="$MONITOR_NAMESPACE" MONITOR_INVENTORY="${INV_PATH:-}" RPC_JSON_PATH="$RPC_JSON_PATH" \
-    /bin/bash "${SCRIPT_DIR}/start_monitors.sh" health "$MONITOR_NAMESPACE" --config "$RPC_JSON_PATH" > /dev/null 2>&1 &
+CHILD_CONFIG_ARG=()
+if [ -n "$CUSTOM_RPC_JSON_PATH" ]; then
+    CHILD_CONFIG_ARG=(--config "$CUSTOM_RPC_JSON_PATH")
+fi
+
+nohup setsid env MONITOR_NAMESPACE="$MONITOR_NAMESPACE" MONITOR_INVENTORY="${INV_PATH:-}" \
+    /bin/bash "${SCRIPT_DIR}/start_monitors.sh" health "$MONITOR_NAMESPACE" ${CHILD_CONFIG_ARG[@]+"${CHILD_CONFIG_ARG[@]}"} > /dev/null 2>&1 &
 echo $! > "$MONITOR_PID_DIR/health.pid"
 echo "✅ Đã bật Health Monitor (kiểm tra node sống/chết)"
 
 # 3. Start Resource Monitor in background
-nohup setsid env MONITOR_NAMESPACE="$MONITOR_NAMESPACE" MONITOR_INVENTORY="${INV_PATH:-}" RPC_JSON_PATH="$RPC_JSON_PATH" \
-    /bin/bash "${SCRIPT_DIR}/start_monitors.sh" resources "$MONITOR_NAMESPACE" --config "$RPC_JSON_PATH" > /dev/null 2>&1 &
+nohup setsid env MONITOR_NAMESPACE="$MONITOR_NAMESPACE" MONITOR_INVENTORY="${INV_PATH:-}" \
+    /bin/bash "${SCRIPT_DIR}/start_monitors.sh" resources "$MONITOR_NAMESPACE" ${CHILD_CONFIG_ARG[@]+"${CHILD_CONFIG_ARG[@]}"} > /dev/null 2>&1 &
 echo $! > "$MONITOR_PID_DIR/resources.pid"
 echo "✅ Đã bật Resource Monitor (kiểm tra RAM/CPU quá tải)"
 

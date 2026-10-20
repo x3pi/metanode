@@ -477,6 +477,9 @@ if __name__ == '__main__':
         elif ns_filter in ['parent', 'parent_chain'] and parsed.get('parent_nodes'):
             p_nodes = {p_k: p_v['rpc_url'] for p_k, p_v in parsed['parent_nodes'].items()}
             print(json.dumps({'nodes': p_nodes, 'rpc_nodes': p_nodes, 'parent_nodes': parsed['parent_nodes']}, indent=2))
+        elif ns_filter:
+            sys.stderr.write(f"Error: cluster or namespace '{ns_filter}' not found in inventory\n")
+            sys.exit(1)
         else:
             print(json.dumps(parsed, indent=2))
     elif mode in ['check', '--check', 'status', '--status']:
