@@ -177,12 +177,15 @@ func (g *GlobalSupplyLedger) GrantAllocation(chainID uint64, amount *big.Int) er
 	if amount == nil || amount.Sign() <= 0 {
 		return ErrNilAmount
 	}
+	// A non-reserve chain's local copy of this ledger is credited by ClaimMessage without matching genesis supply, so the
+	// invariant can already be broken here. Reject (deterministically, without touching the ledger) instead of panicking:
+	// a panic in a barrier handler takes down every validator that executes the block.
+	if !g.VerifyInvariant() {
+		return fmt.Errorf("%w: sum of allocations %s exceeds genesis supply %s", ErrInvariantViolation, g.SumAllocations().String(), g.GenesisTotalSupply.String())
+	}
 	current := g.GetAllocation(chainID)
 	g.PerChainAllocation[chainID] = new(big.Int).Add(current, amount)
 	g.GenesisTotalSupply = new(big.Int).Add(g.GenesisTotalSupply, amount)
-	if !g.VerifyInvariant() {
-		panic("CRITICAL: Invariant violation during GrantAllocation")
-	}
 	return nil
 }
 
@@ -196,6 +199,9 @@ func (g *GlobalSupplyLedger) TransferAllocation(fromChain, toChain uint64, amoun
 	}
 
 	sumBefore := g.SumAllocations()
+	if !g.VerifyInvariant() { // see GrantAllocation: already broken on a non-reserve chain's local copy; reject, do not panic
+		return fmt.Errorf("%w: sum of allocations %s exceeds genesis supply %s", ErrInvariantViolation, sumBefore.String(), g.GenesisTotalSupply.String())
+	}
 
 	fromAlloc := g.GetAllocation(fromChain)
 	if fromAlloc.Cmp(amount) < 0 {
@@ -211,8 +217,10 @@ func (g *GlobalSupplyLedger) TransferAllocation(fromChain, toChain uint64, amoun
 	g.PerChainAllocation[toChain] = newTo
 
 	sumAfter := g.SumAllocations()
-	if sumBefore.Cmp(sumAfter) != 0 || !g.VerifyInvariant() {
-		panic("CRITICAL: Invariant violation during TransferAllocation")
+	if sumBefore.Cmp(sumAfter) != 0 || !g.VerifyInvariant() { // unreachable given the checks above; undo rather than panic
+		g.PerChainAllocation[fromChain] = fromAlloc
+		g.PerChainAllocation[toChain] = toAlloc
+		return fmt.Errorf("%w: transfer %d -> %d of %s changed the allocation sum", ErrInvariantViolation, fromChain, toChain, amount.String())
 	}
 
 	return nil

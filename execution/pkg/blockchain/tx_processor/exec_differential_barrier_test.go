@@ -114,6 +114,44 @@ func barrierBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transac
 	for i := 0; i < n; i++ {
 		from := env.evm[r.Intn(len(env.evm))].addr
 		price := prices[r.Intn(len(prices))]
+		if r.Intn(7) == 0 {
+			// inbound cross-chain message from the reserve chain: attestReserveIssuedCommit (cert signed by the reserve
+			// committee) then claimMessage (Merkle proof against that root), usually from the same sender so the attest
+			// sorts first; sometimes only the claim, or from another sender, so ordering decides the outcome
+			msg := cross_chain.CrossChainMessage{
+				MessageID:     common.BigToHash(big.NewInt(int64(0xC1A100 + r.Intn(6)))),
+				SourceChainID: 104, DestChainID: parityChainID, Sequence: uint64(1 + r.Intn(3)), HopCount: 1,
+				Sender: from, Target: env.users[r.Intn(len(env.users))], AssetID: big.NewInt(0),
+				Value: big.NewInt(int64(1 + r.Intn(5000))), Payload: nil, Tip: big.NewInt(0), GasFee: big.NewInt(0),
+			}
+			root, layers, aggAmounts, aggIndex, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
+			if err != nil {
+				t.Fatal(err)
+			}
+			msgProof := cross_chain.GetMerkleProof(layers, 0)
+			aggProof := cross_chain.GetMerkleProof(layers, aggIndex["0"])
+			sig := bls.Sign(env.kpR.PrivateKey(), cross_chain.ComputeCommitRootAttestMessage(root)).Bytes()
+			attest := pack(func() ([]byte, error) {
+				return gh.abi.Pack("attestReserveIssuedCommit", big.NewInt(104), root, aggAmounts["0"], big.NewInt(0),
+					new(big.Int).SetUint64(aggProof.LeafIndex), hashesToBytes32(aggProof.Siblings), uint64(1), sig, []byte{0x01})
+			})
+			claim := pack(func() ([]byte, error) {
+				return gh.abi.Pack("claimMessage", msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
+					big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target, msg.AssetID, msg.Value, msg.Payload, msg.Tip,
+					msg.GasFee, msg.Ordered, uint64(0), new(big.Int).SetUint64(msgProof.LeafIndex), hashesToBytes32(msgProof.Siblings), root)
+			})
+			claimFrom := from
+			if r.Intn(3) == 0 {
+				claimFrom = env.evm[r.Intn(len(env.evm))].addr
+			}
+			if r.Intn(5) != 0 {
+				txs = append(txs, transaction.NewTransaction(from, mt_common.GATEWAY_CONTRACT_ADDRESS, big.NewInt(0), 400_000, price, uint64(8500+i), attest, nil,
+					common.Hash{}, common.Hash{}, next(from), 991))
+			}
+			txs = append(txs, transaction.NewTransaction(claimFrom, mt_common.GATEWAY_CONTRACT_ADDRESS, big.NewInt(0), 400_000, price, uint64(8600+i), claim, nil,
+				common.Hash{}, common.Hash{}, next(claimFrom), 991))
+			continue
+		}
 		var to common.Address
 		var data []byte
 		amount := big.NewInt(0)
@@ -459,7 +497,7 @@ func TestExecDifferential_ValidBarrierTxs_OptimisticVsTrueBlockSTMOnly(t *testin
 	}
 	t.Logf("barrier receipts across all blocks: %v", okRcp)
 	// the test is only meaningful if each barrier address actually executed successfully somewhere
-	for _, kind := range []string{"validator.registerValidator", "validator.deregisterValidator", "validator.setCommissionRate", "validator.delegate", "validator.undelegate", "validator.updateValidatorInfo", "validator.withdrawReward", "gateway", "gateway.postSecurityBond", "gateway.withdrawRelayerTip", "gateway.claimUnbondedBond", "gateway.allocateSupplyWithCert", "gateway.transferAllocationWithCert", "gateway.unregisterChainWithCert", "gateway.registerAssetWithCert", "gateway.registerChainViaStake", "rollup"} {
+	for _, kind := range []string{"validator.registerValidator", "validator.deregisterValidator", "validator.setCommissionRate", "validator.delegate", "validator.undelegate", "validator.updateValidatorInfo", "validator.withdrawReward", "gateway", "gateway.postSecurityBond", "gateway.withdrawRelayerTip", "gateway.claimUnbondedBond", "gateway.allocateSupplyWithCert", "gateway.transferAllocationWithCert", "gateway.unregisterChainWithCert", "gateway.registerAssetWithCert", "gateway.registerChainViaStake", "gateway.attestReserveIssuedCommit", "gateway.claimMessage", "rollup"} {
 		if okRcp[kind+"/RETURNED"] == 0 {
 			t.Errorf("no successful %s barrier tx in %d blocks: the fixtures no longer exercise the valid path", kind, iterations)
 		}

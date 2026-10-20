@@ -324,3 +324,16 @@ sau khi revert riêng phần patch này.
 (giữ nguyên `BuildCommitTree`/hard-cap/`PerChainAllocation` credit ở Value-only như trước), chỉ giữ
 lại phần vá double-refund (mục 8 ở trên) — độc lập hoàn toàn với phần này, không phụ thuộc gì vào
 nhau.
+
+
+## 9. Panic trong `GrantAllocation` / `TransferAllocation` làm sập mọi validator — ✅ ĐÃ VÁ (2026-10-20, tìm thấy bằng differential test)
+
+**Phát hiện:** khi mở rộng `exec_differential_barrier_test.go` sang `attestReserveIssuedCommit` + `claimMessage`, test dừng với `panic: CRITICAL: Invariant violation during GrantAllocation` ngay trong `TrueBlockSTM.runBarrierTx` → `GatewayHandler.handleWrite` → `AllocateSupplyWithCert` `[ĐO]` (stack trong phiên 2026-10-20). Không có `recover()` nào trên đường này (`grep recover() pkg/blockchain cmd/simple_chain/processor` rỗng `[ĐỌC CODE]`), nên một panic ở đây làm sập tiến trình Go của mọi validator thực thi block đó.
+
+**Cơ chế `[ĐỌC CODE]`:** `ClaimMessage` cộng `message.Value` vào `PerChainAllocation[LocalChainID]` mà không có `GenesisTotalSupply` tương ứng (`gateway.go`, khối "Section 2.3.1 fix"), nên trên bản sao sổ cái cục bộ của một chain không phải Reserve, `sum(PerChainAllocation) > GenesisTotalSupply` là trạng thái bình thường sau khi nhận message. `GlobalSupplyLedger.GrantAllocation` và `TransferAllocation` kiểm tra bất biến `sum ≤ genesis` sau khi đã đổi trạng thái và `panic` nếu sai; ở trạng thái đã vỡ sẵn như trên, mọi lời gọi đều panic.
+
+**Đường kích hoạt:** `allocateSupplyWithCert` (cert của committee Reserve ký trên `ComputeAllocateSupplyMessage(chainID, amount)`, không gắn với chain cục bộ; cert của lần mint genesis thật nằm công khai trong calldata) được phát lại trên một chain đã nhận message; hoặc `transferAllocationWithCert` do committee của chain `from` ký. Chưa xác nhận trên cụm thật có thể phát lại cert giữa các chain `[CHƯA ĐO]`; tái hiện ở mức engine bằng `TestGateway_ClaimThenAllocateSupplyWithCert_DoesNotPanic` và ở mức xử lý block bằng differential test.
+
+**Cách vá:** cả hai hàm kiểm tra bất biến **trước** khi đổi trạng thái và trả `ErrInvariantViolation` (không đổi sổ cái) thay vì `panic`; nhánh kiểm sau khi đổi của `TransferAllocation` nay hoàn tác rồi trả lỗi. Test: `ledger_invariant_panic_test.go` (FAIL trước vá vì panic, PASS sau vá). Thay đổi này đổi kết quả thực thi của block từng làm sập node (panic → tx thất bại): cần deploy đồng loạt, không cuốn chiếu.
+
+**Chưa giải quyết (cần quyết định thiết kế):** `AllocateSupplyWithCert` không kiểm tra `LocalChainID == ReserveChainID`, nên cert mint genesis công khai của Reserve vẫn có thể được phát lại trên chain không phải Reserve khi sổ cái cục bộ chưa vỡ bất biến (genesis = 0, không có allocation) và tạo `GenesisTotalSupply` cục bộ. Hệ quả kinh tế của việc này trên bản sao không có thẩm quyền chưa được đánh giá `[CHƯA ĐO]`.
