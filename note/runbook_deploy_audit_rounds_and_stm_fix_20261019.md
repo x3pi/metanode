@@ -11,7 +11,7 @@ Nhãn bằng chứng: `[ĐO]` có log hoặc lệnh chạy trong phiên 2026-10-
 
 ## 1. Bản phát hành
 
-Commit đề xuất: **`7e1c95ef`** (gồm `9c9caa93` và `c96640f4`; CI xanh ở commit này; các commit sau `9c9caa93` là mempool PR #179 và sửa test, không đổi luật consensus `[ĐỌC CODE]`) (hoặc commit mới hơn trên `dev` đã qua lại các kiểm tra ở mục 3). Mọi binary của mọi node phải build từ **cùng một commit**; ghi `sha256sum` từng binary vào biên bản triển khai.
+Commit đề xuất: **`e088671f`** (gồm `9c9caa93` và `c96640f4`; CI xanh ở `7e1c95ef`, chưa kiểm CI ở `e088671f` — kiểm trước khi deploy; các commit giữa `9c9caa93` và `7e1c95ef` là mempool PR #179 và sửa test, không đổi luật consensus `[ĐỌC CODE]`; `bf1c7380` và `e088671f` thêm fail-stop NOMT, xem mục 1.3) (hoặc commit mới hơn trên `dev` đã qua lại các kiểm tra ở mục 3). Mọi binary của mọi node phải build từ **cùng một commit**; ghi `sha256sum` từng binary vào biên bản triển khai.
 
 ### 1.1. Thay đổi consensus (kết quả thực thi của một số block thay đổi)
 | Commit | Nội dung |
@@ -32,6 +32,12 @@ Hệ quả `[ĐỌC CODE]`: node chạy code cũ và node chạy code mới có 
 | `/pipeline/reset` cần header `X-Admin-Password`, không `Origin` | `pipeline_monitor -reset` cần thêm `-password` |
 | `eth_getProof` block lịch sử: chỉ một lần dựng lại tại một thời điểm; trả lỗi "retry shortly" khi bận; từ chối khi root dựng lại ≠ `stateRoot` | Client cần retry; không phải thay đổi bắt buộc cho node |
 | Mật khẩu admin | Template `exec_config.json.j2` **không** đặt `securepassword`. Đặt qua biến môi trường `META_SECURE_PASSWORD` (ghi đè config, `execution/pkg/config/config.go`), không ghi vào file. Không đặt thì mọi RPC `admin_*` và `/pipeline/reset` trả "chưa cấu hình mật khẩu" (an toàn nhưng không dùng được) |
+
+### 1.3. Hành vi mới: node tự thoát khi commit NOMT nền lỗi (`bf1c7380`)
+Khi commit NOMT nền (hoặc ghi changelog) lỗi, ví dụ hết chỗ ghi đĩa, node ghi `crash.log` và thoát mã 1 (`fatal.Exit`) thay vì chạy tiếp. Trước đây node chạy tiếp trên store đã bị poisoned và ghi block với hash lệch `[ĐO]` (`note/evidence/nomt_enospc_20261020/`). Hệ quả vận hành:
+- Cần supervisor tự khởi động lại: các unit trong `deploy/` có `Restart=always` hoặc `Restart=on-failure` `[ĐỌC CODE]`; các unit `on-failure` có `StartLimitBurst=5` trong 300s, nên đĩa hỏng kéo dài sẽ để unit ở trạng thái failed (node nằm chết, không fork).
+- Khi thấy node thoát với `NOMT async persistence failed`, kiểm tra dung lượng và lỗi đĩa trước khi khởi động lại; sau khi có chỗ, node bắt kịp lại từ peer (đo ở cụm local, tmpfs đầy rồi nới, run8).
+- `[CHƯA ĐO]` với đĩa thật hỏng (EIO), và với `stake_db` / `smart_contract_storage` (chỉ `account_state` được ép lỗi thật).
 
 ---
 
