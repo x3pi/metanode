@@ -33,6 +33,15 @@ func tenMembers(mk func(uint64, int) *bls.KeyPair) []msMember {
 	return out
 }
 
+// twentyMembers is a committee of twenty (the signer bitmap needs three bytes), 100 stake each.
+func twentyMembers(mk func(uint64, int) *bls.KeyPair) []msMember {
+	var out []msMember
+	for i := 0; i < 20; i++ {
+		out = append(out, msMember{mk(108, i), 100})
+	}
+	return out
+}
+
 // multisigCommittees returns the committees of chain 105 (4 members, 1000 each) and 106 (3 members, 1000/2000/3000).
 func multisigCommittees() map[uint64][]msMember {
 	mk := func(chain uint64, i int) *bls.KeyPair {
@@ -42,6 +51,7 @@ func multisigCommittees() map[uint64][]msMember {
 		105: {{mk(105, 0), 1000}, {mk(105, 1), 1000}, {mk(105, 2), 1000}, {mk(105, 3), 1000}},
 		106: {{mk(106, 0), 1000}, {mk(106, 1), 2000}, {mk(106, 2), 3000}},
 		107: tenMembers(mk),
+		108: twentyMembers(mk),
 	}
 }
 
@@ -114,7 +124,7 @@ func multisigBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transa
 		}
 		return signers, bls.CreateAggregateSign(sigs), bm
 	}
-	chains := []uint64{105, 106, 107}
+	chains := []uint64{105, 106, 107, 108}
 	for i, n := 0, 3+r.Intn(8); i < n; i++ {
 		from := env.evm[r.Intn(len(env.evm))].addr
 		chain := chains[r.Intn(len(chains))]
