@@ -125,6 +125,14 @@ func assetBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transacti
 				Target: assetTokens.wrapped7, AssetID: big.NewInt(wrappedAssetID), Value: big.NewInt(int64(1 + r.Intn(500))),
 				Payload: recipient.Bytes(), Tip: big.NewInt(0), GasFee: big.NewInt(0),
 			}
+			// the relay marker (A -> Reserve -> B) is only honoured for the native asset; a custom asset carrying it, or a payload that is
+			// not exactly a 20-byte recipient, must be rejected the same way on both paths
+			switch r.Intn(6) {
+			case 0:
+				msg.Payload = cross_chain.EncodeRelayPayload(102, recipient.Bytes())
+			case 1:
+				msg.Payload = recipient.Bytes()[:19]
+			}
 			root, layers, agg, aggIdx, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
 			if err != nil {
 				t.Fatal(err)
