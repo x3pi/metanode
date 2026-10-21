@@ -9,6 +9,7 @@ Trạng thái: **đã sửa**. Phạm vi: chỉ đường off-chain (eth_call / 
 - [ĐỌC CODE] Bảy callback của phần mở rộng Xapian (`extension.go`: `getOrCreateSimpleDb`, `deleteDb`, `getSimpledb`, `setSimpledb`, `getNextKeys`, `getAllSimpledb`, `searchByValue`) gọi `GetMVMApi` rồi truy cập `mvmApi.accountStateDb` mà không kiểm tra `nil`; các callback chính trong `mvm_api.go` (6 chỗ) đều có kiểm tra. Callback chạy trong cgo nên nil-dereference ở đó làm chết tiến trình.
 - Hệ quả (suy ra, chưa tái hiện end-to-end vì cần tranh chấp thời gian thật): `eth_call` lịch sử đồng thời giống hệt nhau có thể cho kết quả sai/lỗi ngẫu nhiên, và nếu thực thi gọi phần mở rộng Xapian thì có thể làm chết node.
 - [ĐO] Test callback Xapian trên mã cũ FAIL (nil-dereference ở các callback); sau khi sửa PASS.
+- [ĐO] **Không tái hiện được hậu quả quan sát được của việc trùng id.** `TestReadTxExec_ConcurrentIdenticalHistoricalCalls_AllSucceedIdentically` (100 goroutine × 30 lời gọi lịch sử giống hệt nhau) chạy trên mã cũ cho cùng một kết quả mọi lần: 3/3 lần với initcode chỉ ghi bộ nhớ và 5/5 lần với initcode gọi `BALANCE` 300 lần (mỗi lần là một callback Go). Có thể callback đọc state khi mất instance chỉ trả lỗi mà EVM bỏ qua, nên kết quả không đổi. Vì vậy phần "kết quả sai/chết node" chỉ là suy luận từ code; bản sửa vẫn đúng và rẻ, nhưng đừng xem nó là lỗi đã được tái hiện.
 
 ## Sửa
 1. `newOffChainMVMID`: một hàm dùng chung cho cả hai đường (UnixNano + `rand.Int63` + kiểm tra `GetMVMApi == nil`, giữ tiền tố `0xFD`).

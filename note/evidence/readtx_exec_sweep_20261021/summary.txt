@@ -1,0 +1,22 @@
+# eth_call/estimateGas EVM sweep on dev bf955047 (executeAndRespondReadTx, both modes)
+# default: TestReadTxExecSweep_NoPanicOnRandomProgramsAndPrecompileCalls = 250 deploys + 250 precompile/system-address calls, seed 20261021, x2 modes
+
+## READTX_SWEEP_N=5000 READTX_SWEEP_SEED=1 (5000 deploys + 5000 calls, x2 modes)
+--- PASS: TestReadTxExecSweep_NoPanicOnRandomProgramsAndPrecompileCalls (146.69s)
+ok  	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor	146.905s
+exit=0
+READTX-CASE lines (case x mode executions): 20000
+
+## READTX_SWEEP_N=5000 READTX_SWEEP_SEED=2 (5000 deploys + 5000 calls, x2 modes)
+--- PASS: TestReadTxExecSweep_NoPanicOnRandomProgramsAndPrecompileCalls (134.72s)
+ok  	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor	134.921s
+exit=0
+READTX-CASE lines (case x mode executions): 20000
+
+## READTX_SWEEP_N=5000 READTX_SWEEP_SEED=3 (5000 deploys + 5000 calls, x2 modes)
+--- PASS: TestReadTxExecSweep_NoPanicOnRandomProgramsAndPrecompileCalls (147.28s)
+ok  	github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor	147.463s
+exit=0
+READTX-CASE lines (case x mode executions): 20000
+
+## outcome mix of the default 500 cases (ProcessTransactionOffChain): 219 THREW/ERR_OUT_OF_BOUNDS, 132 THREW/ERR_OUT_OF_GAS, 73 THREW/ERR_INVALID_CODE, 49 RETURNED, 19 error before execution, 6 THREW/ERR_EXECUTION_REVERTED, 2 HALTED
