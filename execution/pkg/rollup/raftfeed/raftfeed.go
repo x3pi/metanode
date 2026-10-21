@@ -205,10 +205,13 @@ func SubmitBatchStatus(batch []byte) SubmitStatus {
 	}
 }
 
-// MaxBatchBytes returns the cluster's configured MaxBatchBytes limit.
+// MaxBatchBytes returns the usable batch limit, including the forwarding transport cap.
 func MaxBatchBytes() int {
 	if n := cluster.Load(); n != nil {
 		return n.MaxBatchBytes()
+	}
+	if config.ConfigApp != nil && config.ConfigApp.Raft != nil && config.ConfigApp.Raft.MaxBatchBytes > 0 {
+		return effectiveBatchLimit(config.ConfigApp.Raft.MaxBatchBytes)
 	}
 	return defaultMaxBatchBytes
 }
@@ -275,4 +278,15 @@ func (f *Feeder) run() {
 			}
 		}
 	}
+}
+
+// effectiveBatchLimit keeps admission and forwarding consistent even before cluster startup.
+func effectiveBatchLimit(configured int) int {
+	if configured <= 0 {
+		return defaultMaxBatchBytes
+	}
+	if configured > maxForwardBody {
+		return maxForwardBody
+	}
+	return configured
 }

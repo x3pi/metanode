@@ -14,7 +14,9 @@ import (
 	"github.com/meta-node-blockchain/meta-node/executor"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // batchSubmitter picks where a marshalled batch goes: the raft feed in raft mode, the Rust FFI otherwise. A false
@@ -201,21 +203,25 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 		logger.Debug("📦 [TX FLOW] TxsProcessor2: Retrieved %d transactions from pool (pool_size: %d->%d)",
 			totalTxs, poolSizeBefore, poolSizeAfter)
 
-		// Chia nhỏ thành các batch nhỏ hơn để gửi
-		for batchStart := 0; batchStart < totalTxs; batchStart += maxTransactionsPerBatch {
-			batchEnd := batchStart + maxTransactionsPerBatch
-			if batchEnd > totalTxs {
-				batchEnd = totalTxs
-			}
-
-			batchTxs := txs[batchStart:batchEnd]
-			batchNum := (batchStart / maxTransactionsPerBatch) + 1
-			totalBatches := (totalTxs + maxTransactionsPerBatch - 1) / maxTransactionsPerBatch
+		// Each Raft retry owns one bounded batch, so an accepted prefix is never retried
+		// merely because a later piece encountered backpressure or a commit timeout.
+		maxBytes := 0
+		if raftfeed.Enabled() {
+			maxBytes = raftfeed.MaxBatchBytes()
+		}
+		batches := splitForwardBatches(txs, maxTransactionsPerBatch, maxBytes)
+		batchStart := 0
+		for batchIndex, batchTxs := range batches {
+			batchEnd := batchStart + len(batchTxs)
+			batchNum := batchIndex + 1
+			totalBatches := len(batches)
+			startIndex := batchStart
+			batchStart = batchEnd
 
 			shouldLogBatch := totalTxs > maxTransactionsPerBatch && (batchNum == 1 || batchNum == totalBatches || batchNum%10 == 0)
 			if shouldLogBatch {
 				logger.Debug("   📋 Batch [%d/%d]: Processing %d transactions (indices %d-%d)",
-					batchNum, totalBatches, len(batchTxs), batchStart, batchEnd-1)
+					batchNum, totalBatches, len(batchTxs), startIndex, batchEnd-1)
 			}
 
 			bTransaction, err := transaction.MarshalTransactions(batchTxs)
@@ -338,4 +344,39 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			*/
 		}
 	}
+}
+
+// splitForwardBatches retains order and every input, bounding the encoded protobuf
+// size as well as transaction count. Invalid or individually oversized inputs are
+// isolated so rejecting one cannot discard valid neighbours. Admission normally
+// rejects these before they reach the forwarder.
+func splitForwardBatches(txs []types.Transaction, maxCount, maxBytes int) [][]types.Transaction {
+	var batches [][]types.Transaction
+	start, size := 0, 0
+	for i, tx := range txs {
+		txSize := 0
+		invalid := false
+		if maxBytes > 0 {
+			raw, err := tx.Marshal()
+			invalid = err != nil
+			txSize = 1 + protowire.SizeBytes(len(raw))
+		}
+		if invalid || (maxBytes > 0 && txSize > maxBytes) {
+			if start < i {
+				batches = append(batches, txs[start:i])
+			}
+			batches = append(batches, txs[i:i+1])
+			start, size = i+1, 0
+			continue
+		}
+		if i > start && (i-start >= maxCount || (maxBytes > 0 && size+txSize > maxBytes)) {
+			batches = append(batches, txs[start:i])
+			start, size = i, 0
+		}
+		size += txSize
+	}
+	if start < len(txs) {
+		batches = append(batches, txs[start:])
+	}
+	return batches
 }

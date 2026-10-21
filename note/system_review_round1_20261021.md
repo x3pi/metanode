@@ -1,5 +1,7 @@
 **Rà soát vòng 1 — network, Raft ingestion và commit block**
 
+> Cập nhật sau commit `6d914bac2d503288a6c2cc93e2542d5941e708e8`: nội dung bên dưới là bằng chứng lịch sử trước sửa, không phải danh sách lỗi hiện tại. Xem [đánh giá sau sửa và kế hoạch phần còn lại](system_review_followup_20261021.md).
+
 Commit được rà: `773e62b926b86232ac96fda42fc4b9bd48ff1a1a`.
 Ngày thực hiện: 2026-10-21. Chỉ thêm báo cáo và bằng chứng; không sửa source production, không khởi động lại/deploy node.
 

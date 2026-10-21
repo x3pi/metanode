@@ -134,7 +134,7 @@ func (h *harness) rcfg(m *member) config.RaftConfig {
 	}
 	rc := config.RaftConfig{
 		NodeID: m.id, BindAddress: string(m.addr), DataDir: m.dir, Peers: peers, Bootstrap: m.id == "n0",
-		HeartbeatTimeoutMs: hb, ElectionTimeoutMs: el, LeaderLeaseTimeoutMs: 50, CommitTimeoutMs: 5,
+		HeartbeatTimeoutMs: hb, ElectionTimeoutMs: el, LeaderLeaseTimeoutMs: hb, CommitTimeoutMs: 5,
 		ForwardBindAddress: m.fwdAddr, ForwardSecretFile: "unused-in-tests", SequencerAddress: seqAddr.Hex(),
 	}
 	rc.JoinExistingChain = h.join[m.id]
