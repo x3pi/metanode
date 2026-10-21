@@ -657,9 +657,25 @@ func main() {
 	fmt.Println("📍 SCENARIO A: Co-attestation Quorum Verification (f+1=2)")
 	fmt.Println("════════════════════════════════════════════════════════════════")
 
+	// The account gate refuses value transfers to recipients that are not registered on the parent chain, so every
+	// transfer in this suite goes to this registered account. (An address also cannot be funded before it registers, so
+	// users are funded only after they are CONFIRMED.)
+	rcpt := newUser()
+	r.check("A0", "register the recipient used by every transfer below (CONFIRMED before any user sends)", func() (string, error) {
+		if _, err := r.nodes["val0"].registerAccount(rcpt); err != nil {
+			return "", fmt.Errorf("registerAccount: %w", err)
+		}
+		seen, last, err := r.nodes["val0"].waitStatus(rcpt.addr, "CONFIRMED", 45*time.Second)
+		if err != nil {
+			return "", fmt.Errorf("recipient never CONFIRMED: %w (saw: %v)", err, seen)
+		}
+		confirmedUsers = append(confirmedUsers, rcpt.addr)
+		return fmt.Sprintf("recipient %s %v -> %s", rcpt.addr.Hex()[:10], seen, last.Status), nil
+	})
+
 	uA := newUser()
 	r.check("A1", "unregistered user transfer is refused before registration", func() (string, error) {
-		to := common.HexToAddress("0x00000000000000000000000000000000000c0ffe")
+		to := rcpt.addr
 		tx, err := e_types.SignNewTx(uA.key, e_types.LatestSignerForChainID(big.NewInt(chainID)),
 			&e_types.LegacyTx{Nonce: 0, GasPrice: big.NewInt(gasPrice), Gas: 21000, To: &to, Value: big.NewInt(1000)})
 		if err != nil {
@@ -693,7 +709,7 @@ func main() {
 		if _, err := r.nodes["val0"].transferEth(r.funder.key, uA.addr, amt); err != nil {
 			return "", fmt.Errorf("funding uA: %w", err)
 		}
-		to := common.HexToAddress("0x00000000000000000000000000000000000a0001")
+		to := rcpt.addr
 		tx, err := r.nodes["val0"].transferEth(uA.key, to, big.NewInt(1000000))
 		if err != nil {
 			return "", fmt.Errorf("uA transfer: %w", err)
@@ -741,7 +757,7 @@ func main() {
 		if _, err := r.nodes["val0"].transferEth(r.funder.key, uB.addr, amt); err != nil {
 			return "", fmt.Errorf("funding uB: %w", err)
 		}
-		to := common.HexToAddress("0x00000000000000000000000000000000000b0002")
+		to := rcpt.addr
 		tx, err := r.nodes["val0"].transferEth(uB.key, to, big.NewInt(2000000))
 		if err != nil {
 			return "", fmt.Errorf("uB transfer: %w", err)
@@ -879,7 +895,7 @@ func main() {
 		if _, err := r.nodes["val0"].transferEth(r.funder.key, uC.addr, amt); err != nil {
 			return "", fmt.Errorf("funding uC: %w", err)
 		}
-		to := common.HexToAddress("0x00000000000000000000000000000000000c0003")
+		to := rcpt.addr
 		tx, err := r.nodes["val0"].transferEth(uC.key, to, big.NewInt(3000000))
 		if err != nil {
 			return "", fmt.Errorf("uC transfer: %w", err)
@@ -954,13 +970,9 @@ func main() {
 			}
 		}
 
-		// Fund uD and attempt to transfer ETH
-		amt := new(big.Int).Div(oneEther, big.NewInt(50))
-		if _, err := r.nodes["val0"].transferEth(r.funder.key, uD.addr, amt); err != nil {
-			return "", fmt.Errorf("funding uD: %w", err)
-		}
-
-		to := common.HexToAddress("0x00000000000000000000000000000000000d0004")
+		// uD is not registered, so it cannot be funded either (the gate refuses transfers to unregistered recipients); the
+		// refusal of its own transaction is what this step checks.
+		to := rcpt.addr
 		tx, err := e_types.SignNewTx(uD.key, e_types.LatestSignerForChainID(big.NewInt(chainID)),
 			&e_types.LegacyTx{Nonce: 0, GasPrice: big.NewInt(gasPrice), Gas: 21000, To: &to, Value: big.NewInt(5000)})
 		if err != nil {
@@ -1056,7 +1068,7 @@ func main() {
 		if _, err := r.nodes["val0"].transferEth(r.funder.key, uE.addr, amt); err != nil {
 			return "", fmt.Errorf("funding uE: %w", err)
 		}
-		to := common.HexToAddress("0x00000000000000000000000000000000000e0005")
+		to := rcpt.addr
 		tx, err := r.nodes["val0"].transferEth(uE.key, to, big.NewInt(5000000))
 		if err != nil {
 			return "", fmt.Errorf("uE transfer: %w", err)

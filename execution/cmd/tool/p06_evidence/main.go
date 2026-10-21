@@ -650,6 +650,37 @@ func main() {
 		})
 	}
 
+	// The account gate refuses value transfers to recipients that are not registered on the parent chain, so every
+	// transfer target below is a real, registered account (not an arbitrary address such as 0x...dead). The pool is
+	// registered once, up front; recipients receive funds but never send.
+	recipients := make([]user, 4)
+	for i := range recipients {
+		recipients[i] = newUser()
+	}
+	pool := func(i int) common.Address { return recipients[i%len(recipients)].addr }
+	r.check("P1.4", "register the recipient pool (4 accounts) so transfers to them pass the account gate", func() (string, error) {
+		var wg sync.WaitGroup
+		errs := make([]error, len(recipients))
+		for i := range recipients {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				if _, err := r.nodes["val0"].registerAccount(recipients[i]); err != nil {
+					errs[i] = fmt.Errorf("register recipient %d: %w", i, err)
+					return
+				}
+				errs[i] = r.nodes["val0"].waitConfirmed(recipients[i], 60*time.Second)
+			}(i)
+		}
+		wg.Wait()
+		for _, err := range errs {
+			if err != nil {
+				return "", err
+			}
+		}
+		return fmt.Sprintf("%d recipient accounts CONFIRMED", len(recipients)), nil
+	})
+
 	// =========================================================================
 	// PHASE 2: Mixed Load (Transfers, Contract Deploy, Calls over TCP and RPC)
 	// =========================================================================
@@ -661,7 +692,7 @@ func main() {
 
 	r.check("P2.1", "Native ETH Transfer via RPC (Legacy EIP-155)", func() (string, error) {
 		nonce, _ := r.nodes["val0"].pendingNonce(user1.addr)
-		to := common.HexToAddress("0x0000000000000000000000000000000000010001")
+		to := pool(0)
 		tx, err := e_types.SignNewTx(user1.key, signer, &e_types.LegacyTx{
 			Nonce:    nonce,
 			GasPrice: big.NewInt(gasPrice),
@@ -685,7 +716,7 @@ func main() {
 
 	r.check("P2.2", "Native ETH Transfer via RPC (DynamicFee EIP-1559)", func() (string, error) {
 		nonce, _ := r.nodes["val1"].pendingNonce(user1.addr)
-		to := common.HexToAddress("0x0000000000000000000000000000000000010002")
+		to := pool(1)
 		tx, err := e_types.SignNewTx(user1.key, signer, &e_types.DynamicFeeTx{
 			ChainID:   big.NewInt(chainID),
 			Nonce:     nonce,
@@ -711,7 +742,7 @@ func main() {
 
 	r.check("P2.3", "Native ETH Transfer via Raw TCP (SendRawTransaction)", func() (string, error) {
 		nonce, _ := r.nodes["val2"].pendingNonce(user2.addr)
-		to := common.HexToAddress("0x0000000000000000000000000000000000020001")
+		to := pool(2)
 		tx, err := e_types.SignNewTx(user2.key, signer, &e_types.DynamicFeeTx{
 			ChainID:   big.NewInt(chainID),
 			Nonce:     nonce,
@@ -738,7 +769,7 @@ func main() {
 		startNonce, _ := r.nodes["val3"].pendingNonce(user3.addr)
 		var batch []*e_types.Transaction
 		for i := 0; i < 3; i++ {
-			to := common.HexToAddress(fmt.Sprintf("0x000000000000000000000000000000000003000%d", i+1))
+			to := pool(i)
 			tx, err := e_types.SignNewTx(user3.key, signer, &e_types.DynamicFeeTx{
 				ChainID:   big.NewInt(chainID),
 				Nonce:     startNonce + uint64(i),
@@ -841,7 +872,7 @@ func main() {
 	// Error transaction admission & execution checks
 	r.check("P2.8", "Error Tx 1: Stale Nonce Replay is rejected", func() (string, error) {
 		// Nonce 0 from user1 is already consumed
-		to := common.HexToAddress("0x000000000000000000000000000000000000dead")
+		to := pool(3)
 		tx, _ := e_types.SignNewTx(user1.key, signer, &e_types.LegacyTx{
 			Nonce:    0,
 			GasPrice: big.NewInt(gasPrice),
@@ -858,7 +889,7 @@ func main() {
 
 	r.check("P2.9", "Error Tx 2: Overdraft transaction fails execution (receipt status 0)", func() (string, error) {
 		nonce, _ := r.nodes["val0"].pendingNonce(user1.addr)
-		to := common.HexToAddress("0x000000000000000000000000000000000000dead")
+		to := pool(3)
 		hugeVal := new(big.Int).Mul(big.NewInt(1_000_000), oneEther) // 1,000,000 ETH
 		tx, _ := e_types.SignNewTx(user1.key, signer, &e_types.LegacyTx{
 			Nonce:    nonce,
@@ -885,7 +916,7 @@ func main() {
 	r.check("P2.9b", "Error Tx 2b: Forged Signature on REGISTERED account is rejected", func() (string, error) {
 		// user1 is a registered and funded account!
 		nonce, _ := r.nodes["val0"].pendingNonce(user1.addr)
-		to := common.HexToAddress("0x000000000000000000000000000000000000dead")
+		to := pool(3)
 
 		// Sub-check 1: Raw Ethereum tx claiming user1.addr but signed with corrupted/malleable S
 		realTx, err := e_types.SignNewTx(user1.key, signer, &e_types.LegacyTx{
@@ -950,7 +981,7 @@ func main() {
 
 	r.check("P2.10", "Error Tx 3: Wrong Chain ID replay is rejected", func() (string, error) {
 		nonce, _ := r.nodes["val0"].pendingNonce(user1.addr)
-		to := common.HexToAddress("0x000000000000000000000000000000000000dead")
+		to := pool(3)
 		wrongSigner := e_types.LatestSignerForChainID(big.NewInt(1)) // Ethereum Mainnet ChainID = 1
 		tx, _ := e_types.SignNewTx(user1.key, wrongSigner, &e_types.DynamicFeeTx{
 			ChainID:   big.NewInt(1),
@@ -973,7 +1004,7 @@ func main() {
 		nonceU1, _ := r.nodes["val0"].pendingNonce(user1.addr)
 		var tcpBatch []*e_types.Transaction
 		for i := 0; i < 5; i++ {
-			to := common.HexToAddress(fmt.Sprintf("0x000000000000000000000000000000000005000%d", i+1))
+			to := pool(i)
 			tx, err := e_types.SignNewTx(user1.key, signer, &e_types.DynamicFeeTx{
 				ChainID:   big.NewInt(chainID),
 				Nonce:     nonceU1 + uint64(i),
@@ -996,7 +1027,7 @@ func main() {
 		nonceU2, _ := r.nodes["val1"].pendingNonce(user2.addr)
 		var tcpBatch2 []*e_types.Transaction
 		for i := 0; i < 5; i++ {
-			to := common.HexToAddress(fmt.Sprintf("0x000000000000000000000000000000000005001%d", i+1))
+			to := pool(i + 1)
 			tx, err := e_types.SignNewTx(user2.key, signer, &e_types.DynamicFeeTx{
 				ChainID:   big.NewInt(chainID),
 				Nonce:     nonceU2 + uint64(i),
@@ -1103,7 +1134,7 @@ func main() {
 
 	r.check("P4.1", "Byzantine Validator introduces mutated tx (proto Amount != envelope Amount) directly into consensus via PeerRPC", func() (string, error) {
 		nonce, _ := r.nodes["val0"].pendingNonce(user1.addr)
-		to := common.HexToAddress("0x000000000000000000000000000000000000beef")
+		to := pool(0)
 		realTx, err := e_types.SignNewTx(user1.key, signer, &e_types.LegacyTx{
 			Nonce:    nonce,
 			GasPrice: big.NewInt(gasPrice),
@@ -1165,7 +1196,7 @@ func main() {
 		// 1. Verify receipt is null on all 4 nodes for the Byzantine tx
 		nonce, _ := r.nodes["val0"].pendingNonce(user1.addr)
 		// Derive the real tx hash that was wrapped in RawEnvelope (nonce-1 was the byzantine tx)
-		to := common.HexToAddress("0x000000000000000000000000000000000000beef")
+		to := pool(0)
 		realTx, err := e_types.SignNewTx(user1.key, signer, &e_types.LegacyTx{
 			Nonce:    nonce - 1,
 			GasPrice: big.NewInt(gasPrice),
@@ -1233,7 +1264,7 @@ func main() {
 		for round := 0; round < 4; round++ {
 			for i, nName := range activeNodes {
 				nonce, _ := r.nodes[nName].pendingNonce(user2.addr)
-				to := common.HexToAddress(fmt.Sprintf("0x00000000000000000000000000000000000c%02d%02d", round, i+1))
+				to := pool(i)
 				tx, err := e_types.SignNewTx(user2.key, signer, &e_types.DynamicFeeTx{
 					ChainID:   big.NewInt(chainID),
 					Nonce:     nonce,

@@ -30,10 +30,6 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rpc"
 
-	client "github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp"
-	c_config "github.com/meta-node-blockchain/meta-node/cmd/rpc-client/client-tcp/config"
-	"github.com/meta-node-blockchain/meta-node/pkg/bls"
-	"github.com/meta-node-blockchain/meta-node/types"
 )
 
 const (
@@ -338,37 +334,23 @@ func (c *cluster) execLog() string {
 	return best
 }
 
-func (c *cluster) tcpClient(u user) (*client.Client, error) {
-	// The TCP connection has its own BLS identity (a random valid BLS key); the transactions themselves are secp-signed
-	// with the user's key. (An ECDSA key is NOT a valid BLS private key about half of the time.)
-	connKey := bls.GenerateKeyPair()
-	cfg := &c_config.ClientConfig{
-		Version_: "0.0.1.0", PrivateKey_: hex.EncodeToString(connKey.BytesPrivateKey()),
-		ParentConnectionAddress: c.conn, ParentAddress: c.address, ChainId: chainID, ParentConnectionType: "client",
-	}
-	return client.NewClient(cfg)
-}
-
-// sendProto sends a type-0xFF transaction over TCP and returns its hash (without waiting for a receipt).
-func (c *cluster) sendProto(u user, to common.Address, amount *big.Int) (*client.Client, common.Hash, error) {
-	cl, err := c.tcpClient(u)
+// sendRawTCP signs a plain Ethereum transaction with the user's key and submits it over the node's TCP ingress
+// (SendRawTransaction), the only transaction format the node accepts over TCP. It returns the hash without waiting for a
+// receipt: a transaction the gate refuses is reported only in the node's log.
+func (c *cluster) sendRawTCP(u user, to common.Address, amount *big.Int) (common.Hash, error) {
+	nonce, err := c.pendingNonce(u.addr)
 	if err != nil {
-		return nil, common.Hash{}, err
+		return common.Hash{}, err
 	}
-	// The TCP handshake completes asynchronously; retry only the "connection not ready yet" failure (a client-side
-	// condition, the tx has not been sent) so a slow handshake is not reported as a node failure.
-	var tx types.Transaction
-	for i := 0; i < 20; i++ {
-		time.Sleep(500 * time.Millisecond)
-		tx, err = cl.SendSecpProtoTransactionNoWait(u.key, to, amount, 21000, gasPrice, nil)
-		if err == nil || !strings.Contains(err.Error(), "realConnAddr") {
-			break
-		}
-	}
+	tx, err := signEth(u.key, nonce, to, amount, nil)
 	if err != nil {
-		return nil, common.Hash{}, err
+		return common.Hash{}, err
 	}
-	return cl, tx.Hash(), nil
+	raw, err := tx.MarshalBinary()
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return tx.Hash(), sendRawOverTCP(c.conn, raw)
 }
 
 // runRestartStep supports the kill -9 durability test driven by a shell script: the registration request must survive an
@@ -382,11 +364,8 @@ func runRestartStep(c *cluster, step, keyHex string) int {
 	u := user{k, crypto.PubkeyToAddress(k.PublicKey)}
 	switch step {
 	case "register":
-		f := funder()
-		if _, err := c.transferEth(f.key, u.addr, oneEther); err != nil {
-			fmt.Println("funding:", err)
-			return 1
-		}
+		// No funding here: registration needs no balance, and the gate refuses a transfer to an address that is not yet
+		// registered (a pending registration does not count), so the old fund-then-register order cannot work.
 		info, err := c.register(u)
 		if err != nil {
 			fmt.Println("register:", err)
@@ -416,6 +395,21 @@ func errContains(err error, sub string) error {
 		return fmt.Errorf("error %q does not contain %q (rejected for the wrong reason)", err.Error(), sub)
 	}
 	return nil
+}
+
+// errContainsAny is errContains for a refusal that may be reported under more than one wording: a sender that is not
+// registered on a cluster is "not registered", one the parent has rejected for that cluster is "locked".
+func errContainsAny(err error, subs ...string) error {
+	if err == nil {
+		return fmt.Errorf("expected an error containing one of %q, got success", subs)
+	}
+	low := strings.ToLower(err.Error())
+	for _, sub := range subs {
+		if strings.Contains(low, strings.ToLower(sub)) {
+			return nil
+		}
+	}
+	return fmt.Errorf("error %q contains none of %q (rejected for the wrong reason)", err.Error(), subs)
 }
 
 // ---------------------------------------------------------------- scenarios
@@ -461,24 +455,33 @@ func main() {
 
 	f := funder()
 	u1, u2, u3 := newUser(), newUser(), newUser()
-	to := common.HexToAddress("0x00000000000000000000000000000000000c0ffe")
+	// The gate refuses value transfers to recipients that are not registered on the parent chain, so every transfer below
+	// goes to a real registered account on the cluster it is sent to (rcpt1 on exec1, rcpt2 on exec2). They are registered
+	// in E1. An address cannot be funded before it registers, which is why users are funded after their registration.
+	rcpt1, rcpt2 := newUser(), newUser()
+	toFor := map[*cluster]common.Address{r.exec1: rcpt1.addr, r.exec2: rcpt2.addr}
+	to := rcpt1.addr
 	amt := new(big.Int).Div(oneEther, big.NewInt(100)) // 0.01
 
-	// ---- E1: liveness + genesis account (registered at genesis) can send on both clusters
-	r.check("E1", "liveness: genesis-registered funder funds users on both clusters", func() (string, error) {
+	// ---- E1: liveness + genesis account (registered at genesis) can send on both clusters, to registered recipients
+	r.check("E1", "liveness: genesis-registered funder funds registered recipients on both clusters", func() (string, error) {
 		b0, _ := r.exec1.blockNumber()
-		for _, u := range []user{u1, u2, u3} {
-			for _, c := range []*cluster{r.exec1, r.exec2} {
-				if _, err := c.transferEth(f.key, u.addr, oneEther); err != nil {
-					return "", fmt.Errorf("%s funding %s: %w", c.name, u.addr.Hex(), err)
-				}
+		for c, rc := range map[*cluster]user{r.exec1: rcpt1, r.exec2: rcpt2} {
+			if _, err := c.register(rc); err != nil {
+				return "", fmt.Errorf("%s registering %s: %w", c.name, rc.addr.Hex(), err)
+			}
+			if _, _, err := c.waitStatus(rc.addr, "CONFIRMED", registryPoll); err != nil {
+				return "", fmt.Errorf("%s: recipient %s never CONFIRMED: %w", c.name, rc.addr.Hex(), err)
+			}
+			if _, err := c.transferEth(f.key, rc.addr, oneEther); err != nil {
+				return "", fmt.Errorf("%s funding %s: %w", c.name, rc.addr.Hex(), err)
 			}
 		}
 		b1, _ := r.exec1.blockNumber()
 		if b1 <= b0 {
 			return "", fmt.Errorf("exec1 block number did not advance (%d -> %d)", b0, b1)
 		}
-		return fmt.Sprintf("exec1 block %d -> %d; 3 users funded on both clusters (same addresses, same nonce 0)", b0, b1), nil
+		return fmt.Sprintf("exec1 block %d -> %d; one registered recipient funded on each cluster", b0, b1), nil
 	})
 
 	// ---- E2: unregistered users are refused (ETH over RPC, 0xFF over TCP) with the gate's own error
@@ -495,13 +498,12 @@ func main() {
 		}
 		return "refused: " + err.Error(), nil
 	})
-	r.check("E2b", "unregistered user: 0xFF tx over TCP is refused (node log shows the gate error)", func() (string, error) {
+	r.check("E2b", "unregistered user: raw ETH tx over TCP is refused (node log shows the gate error)", func() (string, error) {
 		mark := logMark(r.exec1.execLog())
-		cl, h, err := r.exec1.sendProto(u1, to, amt)
+		h, err := r.exec1.sendRawTCP(u1, to, amt)
 		if err != nil {
 			return "", err
 		}
-		_ = cl
 		line, err := waitLog(r.exec1.execLog(), mark, "account not registered on parent chain", 20*time.Second)
 		if err != nil {
 			return "", err
@@ -560,6 +562,10 @@ func main() {
 	var replayTx *e_types.Transaction
 	if registered {
 		r.check("E4a", "registered user: ETH tx over RPC succeeds with a receipt", func() (string, error) {
+			// a user can only be funded once registered (the gate refuses transfers to unregistered recipients)
+			if _, err := r.exec1.transferEth(f.key, u1.addr, oneEther); err != nil {
+				return "", fmt.Errorf("funding the registered user: %w", err)
+			}
 			b0, _ := r.exec1.balance(to)
 			tx, err := r.exec1.transferEth(u1.key, to, amt)
 			if err != nil {
@@ -572,16 +578,16 @@ func main() {
 			}
 			return fmt.Sprintf("tx %s nonce %d, recipient +%s", tx.Hash().Hex()[:12], tx.Nonce(), amt), nil
 		})
-		r.check("E4b", "registered user: 0xFF tx over TCP succeeds with a receipt", func() (string, error) {
-			cl, h, err := r.exec1.sendProto(u1, to, amt)
+		r.check("E4b", "registered user: raw ETH tx over TCP succeeds with a receipt", func() (string, error) {
+			h, err := r.exec1.sendRawTCP(u1, to, amt)
 			if err != nil {
 				return "", err
 			}
-			rc, err := cl.WaitForReceipt(h, 60*time.Second)
-			if err != nil || rc == nil {
-				return "", fmt.Errorf("no receipt: %v", err)
+			st, err := r.exec1.waitReceipt(h, 60*time.Second)
+			if err != nil || st != 1 {
+				return "", fmt.Errorf("receipt status %d: %v", st, err)
 			}
-			return fmt.Sprintf("receipt status %v", rc.Status()), nil
+			return fmt.Sprintf("receipt status %d", st), nil
 		})
 	} else {
 		r.skip("E4", "registered user sends", "registration did not complete")
@@ -590,7 +596,7 @@ func main() {
 	// ---- E5: cross-cluster replay (same chain ID, same address funded with the same nonce on both clusters)
 	if replayTx != nil {
 		if r.exec2.gateOn {
-			r.check("E5", "REPLAY on exec2 (same chain ID 991, funded, same nonce) is refused: account not registered there", func() (string, error) {
+			r.check("E5", "REPLAY on exec2 (same chain ID 991, same nonce) is refused: account not registered there", func() (string, error) {
 				b0, _ := r.exec2.balance(u1.addr)
 				_, err := r.exec2.sendRaw(replayTx)
 				if e := errContains(err, "not registered"); e != nil {
@@ -604,6 +610,10 @@ func main() {
 			})
 		} else {
 			r.check("E5-control", "CONTROL (gate off on exec2): the very same signed tx IS replayed and executed", func() (string, error) {
+				// with the gate off the address can be funded on exec2 although it never registered there
+				if _, err := r.exec2.transferEth(f.key, u1.addr, oneEther); err != nil {
+					return "", fmt.Errorf("funding u1 on exec2 (gate off): %w", err)
+				}
 				b0, _ := r.exec2.balance(u1.addr)
 				h, err := r.exec2.sendRaw(replayTx)
 				if err != nil {
@@ -634,9 +644,9 @@ func main() {
 			if strings.ToLower(info.HomeCluster) != r.exec1.key {
 				return "", fmt.Errorf("home cluster %s, want %s", info.HomeCluster, r.exec1.key)
 			}
-			tx, _ := signEth(u1.key, 0, to, amt, nil)
+			tx, _ := signEth(u1.key, 0, rcpt2.addr, amt, nil)
 			_, err = r.exec2.sendRaw(tx)
-			if e := errContains(err, "not registered"); e != nil {
+			if e := errContainsAny(err, "account not registered", "account is locked"); e != nil {
 				return "", e
 			}
 			return "REJECTED, home = exec1, tx refused", nil
@@ -681,11 +691,14 @@ func main() {
 			if s2 == "CONFIRMED" {
 				winner, loser = r.exec2, r.exec1
 			}
-			if _, err := winner.transferEth(u2.key, to, amt); err != nil {
+			if _, err := winner.transferEth(f.key, u2.addr, oneEther); err != nil {
+				return "", fmt.Errorf("funding the winner %s: %w", winner.name, err)
+			}
+			if _, err := winner.transferEth(u2.key, toFor[winner], amt); err != nil {
 				return "", fmt.Errorf("winner %s cannot send: %w", winner.name, err)
 			}
-			tx, _ := signEth(u2.key, 0, to, amt, nil)
-			if _, err := loser.sendRaw(tx); errContains(err, "not registered") != nil {
+			tx, _ := signEth(u2.key, 0, toFor[loser], amt, nil)
+			if _, err := loser.sendRaw(tx); errContainsAny(err, "account not registered", "account is locked") != nil {
 				return "", fmt.Errorf("loser %s should refuse: %v", loser.name, err)
 			}
 			found, key, _ := r.parentAccount(u2.addr)
