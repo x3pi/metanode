@@ -24,7 +24,9 @@ const (
 	hdrMac         = "X-Rollup-Mac"
 	hdrLeader      = "X-Rollup-Leader"
 	maxForwardSkew = 30 * time.Second
-	// the client must outlast the leader's own wait for the commit
+	// the client must outlast the leader's own wait for the commit. That wait restarts after every chunk of a
+	// multi-chunk batch (submitLocal), so this bound only covers a batch that fits in one chunk -- always the case
+	// with the default propose_queue_size; a tiny queue plus very slow storage can outlast it and the caller resends.
 	forwardTimeout = submitCommitTimeout + 3*time.Second
 	maxForwardBody = 64 << 20 // hard cap on what the internal port will read
 )

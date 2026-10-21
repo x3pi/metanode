@@ -459,6 +459,10 @@ func (n *Node) submitLocal(batch []byte) submitStatus {
 	return statusAccepted
 }
 
+// EncodedTxSize is what one marshalled transaction of rawLen bytes adds to a Transactions batch: field tag, length prefix
+// and the body. Admission, the forwarder and the batch splitter all size against this one definition.
+func EncodedTxSize(rawLen int) int { return rawLen + protoTxOverhead(rawLen) }
+
 func protoTxOverhead(rawLen int) int {
 	tagSize := 1 // repeated Transaction Transactions = 1 (tag 1, wire type 2 -> 1 byte)
 	varintSize := 1

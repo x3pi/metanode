@@ -6,6 +6,7 @@ import (
 
 	"github.com/hashicorp/raft"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
@@ -138,6 +139,7 @@ func TestReviewSplitLargerThanQueueMustProgress(t *testing.T) {
 
 func TestReviewForwardBodyLimitMustNotRejectSplittableBatch(t *testing.T) {
 	h := newHarness(t, 3)
+	h.mutate = calmElections
 	h.startAll()
 	leader := h.leader()
 	nonces := make([]uint64, 1024)
@@ -188,9 +190,16 @@ func TestReviewForwardBodyLimitMustNotRejectSplittableBatch(t *testing.T) {
 	}
 }
 
+// calmElections gives the election/heartbeat timers production-like headroom. Tests that push tens of MB through three
+// in-process nodes would otherwise starve heartbeats under the race detector: the leader "fails to contact quorum, stepping
+// down" mid-commit and the submit comes back 504 (leadership lost), which says nothing about batch sizing.
+func calmElections(c *config.RaftConfig) {
+	c.HeartbeatTimeoutMs, c.ElectionTimeoutMs, c.LeaderLeaseTimeoutMs = 3000, 3000, 3000
+}
+
 func TestReviewHighBatchLimitStillRespectsHTTP(t *testing.T) {
 	h := newHarness(t, 3)
-	h.mutate = func(c *config.RaftConfig) { c.MaxBatchBytes = 128 << 20 }
+	h.mutate = func(c *config.RaftConfig) { c.MaxBatchBytes = 128 << 20; calmElections(c) }
 	h.startAll()
 	leader := h.leader()
 	nonces := make([]uint64, 1024)
@@ -263,11 +272,14 @@ func TestReviewChunkRetryMustReachTail(t *testing.T) {
 	h.startAll()
 	l := h.leader()
 	batch := testBatch(t, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-	for i := 0; i < 3; i++ {
-		st := l.node.SubmitStatus(batch)
-		t.Logf("attempt=%d status=%d committedBlocks=%d", i+1, st, len(l.disk.blocks()))
+	// ten single-tx chunks at ~1.1s each take longer than submitCommitTimeout in total, yet every chunk makes progress:
+	// ONE call must finish with every nonce committed exactly once, with no retry and so no duplicated prefix.
+	started := time.Now()
+	st := l.node.SubmitStatus(batch)
+	t.Logf("status=%d after %v (submitCommitTimeout=%v)", st, time.Since(started).Round(100*time.Millisecond), submitCommitTimeout)
+	if st != statusAccepted {
+		t.Fatalf("a batch that keeps making progress must be accepted by one call, got status %d", st)
 	}
-	time.Sleep(1500 * time.Millisecond)
 	counts := map[uint64]int{}
 	for _, b := range l.disk.blocks() {
 		for _, raw := range b.Transactions {
@@ -278,15 +290,16 @@ func TestReviewChunkRetryMustReachTail(t *testing.T) {
 			counts[tx.GetNonce()]++
 		}
 	}
-	t.Logf("committed nonce counts: %v", counts)
-	if counts[10] == 0 {
-		t.Fatal("retries restart from the committed prefix; tail transaction was never proposed")
+	for nonce := uint64(1); nonce <= 10; nonce++ {
+		if counts[nonce] != 1 {
+			t.Fatalf("nonce %d was committed %d times, want exactly once: %v", nonce, counts[nonce], counts)
+		}
 	}
 }
 
 func TestForwardPreservesTransactionAboveDefaultLimit(t *testing.T) {
 	h := newHarness(t, 3)
-	h.mutate = func(c *config.RaftConfig) { c.MaxBatchBytes = 8 << 20 }
+	h.mutate = func(c *config.RaftConfig) { c.MaxBatchBytes = 8 << 20; calmElections(c) }
 	h.startAll()
 	leader := h.leader()
 	var input pb.Transactions
@@ -330,6 +343,15 @@ func TestAdmissionLimitIncludesTransportCap(t *testing.T) {
 		running := (&Node{cfg: config.RaftConfig{MaxBatchBytes: limit}}).MaxBatchBytes()
 		if before != want || running != want {
 			t.Fatalf("limit=%d before=%d running=%d want=%d", limit, before, running, want)
+		}
+	}
+}
+
+// EncodedTxSize must equal what protobuf really adds for a repeated bytes field number 1, at every varint width boundary.
+func TestEncodedTxSizeMatchesProtobufWireFormat(t *testing.T) {
+	for _, n := range []int{0, 1, 126, 127, 128, 129, 16383, 16384, 16385, 2<<20 - 1, 2 << 20, 4 << 20, 64 << 20, 268435455, 268435456} {
+		if got, want := EncodedTxSize(n), 1+protowire.SizeBytes(n); got != want {
+			t.Fatalf("EncodedTxSize(%d)=%d, protobuf encodes %d", n, got, want)
 		}
 	}
 }

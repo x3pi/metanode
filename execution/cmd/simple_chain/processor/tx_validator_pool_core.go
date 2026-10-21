@@ -283,21 +283,13 @@ func (vp *TxValidatorPool) checkRaftTxSizeLimit(tx types.Transaction) (int64, er
 	if !raftfeed.Enabled() {
 		return 0, nil
 	}
-	maxBatch := raftfeed.MaxBatchBytes()
-	if maxBatch <= 0 {
-		return 0, nil
-	}
+	maxBatch := raftfeed.MaxBatchBytes() // always positive: an unset limit falls back to the default
 	raw, err := tx.Marshal()
 	if err != nil {
 		return transaction.InvalidTransaction.Code, fmt.Errorf("failed to marshal transaction for size check: %w", err)
 	}
-	overhead := 1
-	for v := uint64(len(raw)); v >= 128; v >>= 7 {
-		overhead++
-	}
-	overhead++
-	if len(raw)+overhead > maxBatch {
-		return transaction.InvalidTransaction.Code, fmt.Errorf("transaction serialized size %d exceeds max batch limit %d", len(raw)+overhead, maxBatch)
+	if size := raftfeed.EncodedTxSize(len(raw)); size > maxBatch {
+		return transaction.InvalidTransaction.Code, fmt.Errorf("transaction serialized size %d exceeds max batch limit %d", size, maxBatch)
 	}
 	return 0, nil
 }

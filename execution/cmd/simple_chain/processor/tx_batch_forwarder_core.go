@@ -16,7 +16,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
-	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // batchSubmitter picks where a marshalled batch goes: the raft feed in raft mode, the Rust FFI otherwise. A false
@@ -359,7 +358,7 @@ func splitForwardBatches(txs []types.Transaction, maxCount, maxBytes int) [][]ty
 		if maxBytes > 0 {
 			raw, err := tx.Marshal()
 			invalid = err != nil
-			txSize = 1 + protowire.SizeBytes(len(raw))
+			txSize = raftfeed.EncodedTxSize(len(raw))
 		}
 		if invalid || (maxBytes > 0 && txSize > maxBytes) {
 			if start < i {
