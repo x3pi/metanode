@@ -142,22 +142,29 @@ func TestC4_CheckFlagsDifferentSigningKeys(t *testing.T) {
 func TestC4_TransferLeaderUnderLoad(t *testing.T) {
 	h := newHarness(t, 3)
 	h.startAll()
-	old := h.leader()
-	var target *member
-	for _, m := range h.m {
-		if m != old {
-			target = m
-		}
-	}
 	ld := h.startLoad(t, 4, 0)
 	time.Sleep(300 * time.Millisecond)
-	// Under CPU starvation (100 ms election timeout, parallel packages) a re-election can be in flight when the tool asks
-	// for the leader; that is "no leader", not a failure of the transfer. Retry only on that transient refusal.
+	// Under CPU starvation (100 ms election timeout, parallel packages) leadership can move on its own while the load runs,
+	// so the leader and the target are chosen at the moment of the transfer, not once at the start; a refusal that only
+	// says the chosen target already leads, or that an election is in flight, is retried with a fresh pick.
 	var steps []string
 	var err error
+	var old, target *member
 	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		old = h.leader()
+		target = nil
+		for _, m := range h.m {
+			if m != old {
+				target = m
+				break
+			}
+		}
 		steps, err = h.admin().TransferLeader(h.members(), target.id, false)
-		if err == nil || !(strings.Contains(err.Error(), "no leader") || strings.Contains(err.Error(), "no quorum")) {
+		if err == nil {
+			break
+		}
+		msg := err.Error()
+		if !(strings.Contains(msg, "no leader") || strings.Contains(msg, "no quorum") || strings.Contains(msg, "already the leader")) {
 			break
 		}
 	}
