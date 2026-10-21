@@ -117,11 +117,11 @@ func TestSecurityBond_CheckBondCap_EnforcedWhenLeverageSet(t *testing.T) {
 	assert.Equal(t, uint64(0), engine.TransferAllocationNonce[102])
 }
 
-// TestSecurityBond_ForfeitBond_MovesBondToReserveAndKillsChain proves forfeitBond's behavior: the
-// bond moves into Reserve's own circulating PerChainAllocation, and DeadChains is set (already
-// covered independently by TestP8_4). The real production route into forfeitBond is
+// TestSecurityBond_ForfeitBond_RemovesBondAndKillsChain proves forfeitBond's behavior: the bond leaves the
+// active ledger, nothing is credited to any allocation (the supply ledger is untouched), and DeadChains is
+// set (already covered independently by TestP8_4). The real production route into forfeitBond is
 // SlashOnEquivocation, tested end-to-end below.
-func TestSecurityBond_ForfeitBond_MovesBondToReserveAndKillsChain(t *testing.T) {
+func TestSecurityBond_ForfeitBond_RemovesBondAndKillsChain(t *testing.T) {
 	engine, _ := setupTestGatewayEngine()
 	engine.ReserveChainID = 102 // engine IS chain 102
 
@@ -134,7 +134,7 @@ func TestSecurityBond_ForfeitBond_MovesBondToReserveAndKillsChain(t *testing.T) 
 	_, stillHasBond := engine.SecurityBond.Bond[101]
 	assert.False(t, stillHasBond, "bond must be removed from the active ledger once forfeited")
 	reserveAllocAfter := engine.SupplyLedger.GetAllocation(102)
-	assert.Equal(t, new(big.Int).Add(reserveAllocBefore, big.NewInt(300)), reserveAllocAfter)
+	assert.Equal(t, reserveAllocBefore, reserveAllocAfter, "a forfeited bond is not credited to any allocation")
 }
 
 // TestSecurityBond_UnregisterThenClaim_RespectsUnbondingPeriod is the regression test for the
@@ -207,7 +207,7 @@ func TestSecurityBond_SlashOnEquivocation_RealProof_ForfeitsAndKillsChain(t *tes
 	assert.True(t, engine.DeadChains[101])
 	_, stillHasBond := engine.SecurityBond.Bond[101]
 	assert.False(t, stillHasBond)
-	assert.Equal(t, big.NewInt(5700), engine.SupplyLedger.GetAllocation(102), "700 forfeited bond credited on top of chain 102's starting 5000 allocation")
+	assert.Equal(t, big.NewInt(5000), engine.SupplyLedger.GetAllocation(102), "the forfeited 700 bond is not credited: chain 102 keeps its starting 5000 allocation")
 }
 
 func TestSecurityBond_SlashOnEquivocation_RejectsNonContradiction(t *testing.T) {

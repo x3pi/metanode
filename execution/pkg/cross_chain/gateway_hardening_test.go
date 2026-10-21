@@ -106,3 +106,30 @@ func TestGateway_VelocityLimit_CapsOutflowPer24hWindow(t *testing.T) {
 	assert.Equal(t, big.NewInt(800), attested4.FundedAmount)
 	assert.Equal(t, big.NewInt(3200), engine.SupplyLedger.PerChainAllocation[101])
 }
+
+// With VelocityLimitDisabled a chain can move its whole allocation at once and again in the same window: it is bounded only
+// by its own allocation (its balance), like a wallet. The default (flag unset) keeps the 20%/24h cap.
+func TestGateway_VelocityLimitDisabled_BoundedOnlyByAllocation(t *testing.T) {
+	attest := func(engine *GatewayEngine, kp *bls.KeyPair, seq uint64, amount int64) error {
+		msg := CrossChainMessage{MessageID: common.BigToHash(big.NewInt(int64(0xE000) + int64(seq))), SourceChainID: 101, DestChainID: 102, Sequence: seq, HopCount: 1,
+			Sender: common.HexToAddress("0x01"), Target: common.HexToAddress("0x02"), AssetID: big.NewInt(0), Value: big.NewInt(amount), Tip: big.NewInt(0), GasFee: big.NewInt(0)}
+		root, layers, agg, aggIdx, err := BuildCommitTree([]CrossChainMessage{msg})
+		require.NoError(t, err)
+		sig := bls.Sign(kp.PrivateKey(), ComputeCommitRootAttestMessage(root))
+		_, err = engine.AttestCommit(101, root, agg["0"], big.NewInt(0), GetMerkleProof(layers, aggIdx["0"]),
+			QuorumCert{Epoch: 5, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x0F}}, 0)
+		return err
+	}
+
+	// default: 20% of a 5000 allocation is 1000, so 4000 in one go is refused
+	engine, kp := setupTestGatewayEngine()
+	require.ErrorIs(t, attest(engine, kp, 1, 4000), ErrVelocityLimitExceeded)
+
+	// disabled: the same 4000 passes, then the remaining 1000 passes too, and a further 1 is refused because the allocation is spent
+	engine, kp = setupTestGatewayEngine()
+	engine.VelocityLimitDisabled = true
+	require.NoError(t, attest(engine, kp, 1, 4000))
+	require.NoError(t, attest(engine, kp, 2, 1000))
+	require.ErrorIs(t, attest(engine, kp, 3, 1), ErrAllocationExceeded, "out of allocation: nothing more can move")
+	assert.Equal(t, 0, engine.SupplyLedger.GetAllocation(101).Sign())
+}

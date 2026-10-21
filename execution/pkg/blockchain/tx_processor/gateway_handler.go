@@ -308,6 +308,9 @@ func applySecurityBondConfig(engine *cross_chain.GatewayEngine) error {
 	if engine.BondLeverage == 0 && cc.BondLeverage > 0 {
 		engine.BondLeverage = cc.BondLeverage
 	}
+	if !engine.VelocityLimitDisabled && cc.VelocityLimitDisabled {
+		engine.VelocityLimitDisabled = true
+	}
 	if engine.UnbondingPeriodSeconds == 0 && cc.UnbondingPeriodSeconds > 0 {
 		engine.UnbondingPeriodSeconds = cc.UnbondingPeriodSeconds
 	}

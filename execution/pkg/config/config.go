@@ -137,6 +137,12 @@ type CrossChainConfig struct {
 	BondLeverage                 uint64 `json:"bond_leverage,omitempty"`
 	MinSecurityBondToRegisterWei string `json:"min_security_bond_to_register_wei,omitempty"`
 	UnbondingPeriodSeconds       uint64 `json:"unbonding_period_seconds,omitempty"`
+
+	// VelocityLimitDisabled turns off the gateway's rolling-24h/20% outflow cap, so a cluster can move up to its whole
+	// allocation (its balance) at any time. Default false keeps the cap. Set it only on deployments where every cluster is
+	// run by one operator; like the bond settings it must be the same on every validator (it is copied into the engine
+	// state on first load).
+	VelocityLimitDisabled bool `json:"velocity_limit_disabled,omitempty"`
 }
 
 // PruningConfig configures the historical state pruning strategy

@@ -298,6 +298,12 @@ type GatewayEngine struct {
 	MinSecurityBondToRegister *big.Int            `json:"min_security_bond_to_register,omitempty"`
 	UnbondingPeriodSeconds    uint64              `json:"unbonding_period_seconds,omitempty"`
 
+	// VelocityLimitDisabled turns off the rolling-24h/20% outflow cap (checkAndRecordVelocity). Default false keeps the cap.
+	// For a deployment whose clusters all belong to one operator and should move value freely, bounded only by each
+	// cluster's own allocation (its balance), like a wallet. Seeded from config once (see applySecurityBondConfig) and then
+	// carried in the engine state, so it is the same on every validator.
+	VelocityLimitDisabled bool `json:"velocity_limit_disabled,omitempty"`
+
 	// Checkpoints holds each chain's latest self-reported liveness/state signal (Phase B tầng 1,
 	// note/cross_chain/root_anchor_production_security_hardening_plan.md, adapted from
 	// shard_design_ton_real.md mục 5.6's ShardCheckpoint) -- see SubmitCheckpoint's own doc
@@ -442,38 +448,20 @@ func (g *GatewayEngine) checkBondCap(chainID uint64, candidateAlloc *big.Int) er
 	return nil
 }
 
-// forfeitBond moves chainID's entire active Bond (and, if any, its pending UnbondingRequest --
-// closing the "unregister then equivocate during the unbonding window" hit-and-run described in
-// shard_design_ton_real.md mục 5.5.A) into Reserve's own circulating PerChainAllocation, and sets
-// DeadChains[chainID]=true so the existing (Quick Win #0) attestCommitInternal/Outbound guards
-// immediately stop any further outflow -- forfeiting the bond alone does NOT, by itself, stop a
-// captured committee from continuing to spend whatever PerChainAllocation it already holds; the
-// DeadChains flag is what actually does that (see those functions' own doc comments). Purely a
-// bookkeeping reclassification within GATEWAY_CONTRACT_ADDRESS's own already-real balance -- no
-// AccountStateDB movement needed, same reasoning as TransferAllocationWithCert. Callers must
-// already hold g.mu, and must ensureSecurityBond() first.
+// forfeitBond removes chainID's active Bond and any pending UnbondingRequest (closing the "unregister then equivocate
+// during the unbonding window" hit-and-run described in shard_design_ton_real.md mục 5.5.A) and sets DeadChains[chainID]=true
+// so the existing (Quick Win #0) attestCommitInternal/Outbound guards immediately stop any further outflow -- forfeiting the
+// bond alone does NOT, by itself, stop a captured committee from continuing to spend whatever PerChainAllocation it already
+// holds; the DeadChains flag is what actually does that. The forfeited coin stays locked in the gateway account and is not
+// credited to any allocation (see the body for why). Callers must already hold g.mu, and must ensureSecurityBond() first.
 func (g *GatewayEngine) forfeitBond(chainID uint64) {
-	total := big.NewInt(0)
-	if bond := g.SecurityBond.Bond[chainID]; bond != nil {
-		total.Add(total, bond)
-		delete(g.SecurityBond.Bond, chainID)
-	}
-	if req := g.SecurityBond.UnbondingRequests[chainID]; req != nil && req.Amount != nil {
-		total.Add(total, req.Amount)
-		delete(g.SecurityBond.UnbondingRequests, chainID)
-	}
-	if total.Sign() > 0 && g.SupplyLedger != nil && g.ReserveChainID != 0 {
-		current := g.SupplyLedger.GetAllocation(g.ReserveChainID)
-		g.SupplyLedger.PerChainAllocation[g.ReserveChainID] = new(big.Int).Add(current, total)
-		// The forfeited bond is real coin that was never part of GenesisTotalSupply, so the allocation it now backs must raise
-		// the tracked supply by the same amount, exactly as GrantAllocation does. Without this the ledger invariant
-		// sum(allocations) <= genesis breaks, and every later TransferAllocation / GrantAllocation on the reserve fails
-		// (before the panic->error fix it panicked every validator).
-		if g.SupplyLedger.GenesisTotalSupply == nil {
-			g.SupplyLedger.GenesisTotalSupply = new(big.Int)
-		}
-		g.SupplyLedger.GenesisTotalSupply = new(big.Int).Add(g.SupplyLedger.GenesisTotalSupply, total)
-	}
+	// The forfeited bond is NOT credited to any allocation. The coin was deposited into the gateway account and stays locked
+	// there for good. Crediting it to the reserve's allocation broke the ledger invariant (sum(allocations) <= genesis
+	// supply), because the bond was never part of GenesisTotalSupply; raising GenesisTotalSupply instead would contradict
+	// the rule that it only changes at the reserve's one-time genesis mint. Forfeiting therefore has exactly two effects:
+	// the bond and any pending unbonding request disappear, and the chain is declared dead so no more value leaves it.
+	delete(g.SecurityBond.Bond, chainID)
+	delete(g.SecurityBond.UnbondingRequests, chainID)
 	if g.DeadChains == nil {
 		g.DeadChains = make(map[uint64]bool)
 	}
@@ -1701,7 +1689,7 @@ func (g *GatewayEngine) attestCommitInternal(
 		// comment for the full rationale and why this specific location (inside enforceCeiling,
 		// against currentAlloc, which is only ever read here on Reserve) is the only place this
 		// check is meaningful.
-		if aggregateAmount.Sign() > 0 {
+		if aggregateAmount.Sign() > 0 && !g.VelocityLimitDisabled {
 			if err := g.checkAndRecordVelocity(sourceChainID, aggregateAmount, currentAlloc, blockTime); err != nil {
 				return nil, err
 			}
