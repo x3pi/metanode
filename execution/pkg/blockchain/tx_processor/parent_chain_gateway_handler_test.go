@@ -49,7 +49,7 @@ func TestParentChainGatewayHandler_HandleTransaction(t *testing.T) {
 	mockDispatcher := &MockCrossChainDispatcher{
 		MockHash: common.HexToHash("0x1234"),
 	}
-	InitParentChainGatewayHandler(mockDispatcher)
+	installParentChainGatewayHandlerForTest(t, mockDispatcher)
 	handler := GetParentChainGatewayHandler()
 	assert.NotNil(t, handler)
 
@@ -124,7 +124,7 @@ func TestParentChainGatewayHandler_ErrorCases(t *testing.T) {
 	mockDispatcher := &MockCrossChainDispatcher{
 		MockHash: common.HexToHash("0x1234"),
 	}
-	InitParentChainGatewayHandler(mockDispatcher)
+	installParentChainGatewayHandlerForTest(t, mockDispatcher)
 	handler := GetParentChainGatewayHandler()
 	assert.NotNil(t, handler)
 
@@ -213,7 +213,7 @@ func TestParentChainGatewayHandler_SecurityAdversarialInputs(t *testing.T) {
 	mockDispatcher := &MockCrossChainDispatcher{
 		MockHash: common.HexToHash("0x5678"),
 	}
-	InitParentChainGatewayHandler(mockDispatcher)
+	installParentChainGatewayHandlerForTest(t, mockDispatcher)
 	handler := GetParentChainGatewayHandler()
 	assert.NotNil(t, handler)
 

@@ -46,7 +46,7 @@ func newNodeIdentityAccount(db *account_state_db.AccountStateDB, balance *big.In
 
 func TestRollupSystemHandler_HandleTransaction(t *testing.T) {
 	mockDispatcher := &MockRollupSystemDispatcher{}
-	InitRollupSystemHandler(mockDispatcher)
+	installRollupSystemHandlerForTest(t, mockDispatcher, nil)
 	handler := GetRollupSystemHandler()
 	assert.NotNil(t, handler)
 
@@ -94,7 +94,7 @@ func TestRollupSystemHandler_AccountRegistration_Success(t *testing.T) {
 	copy(clusterKey[:], []byte("cluster_pub_key_32_bytes_long!!"))
 	regHandler := rollup.NewAccountRegistryHandler(clusterKey)
 
-	InitRollupSystemHandler(mockDispatcher, regHandler)
+	installRollupSystemHandlerForTest(t, mockDispatcher, regHandler)
 	handler := GetRollupSystemHandler()
 	handler.SetRegistryHandler(regHandler)
 	assert.NotNil(t, handler)
@@ -152,7 +152,7 @@ func TestRollupSystemHandler_AccountRegistration_ErrorConsumesNonce(t *testing.T
 	copy(clusterKey[:], []byte("cluster_pub_key_32_bytes_long!!"))
 	regHandler := rollup.NewAccountRegistryHandler(clusterKey)
 
-	InitRollupSystemHandler(mockDispatcher, regHandler)
+	installRollupSystemHandlerForTest(t, mockDispatcher, regHandler)
 	handler := GetRollupSystemHandler()
 	handler.SetRegistryHandler(regHandler)
 	assert.NotNil(t, handler)
@@ -215,7 +215,7 @@ func TestRollupSystemHandler_FuzzPayload(t *testing.T) {
 	copy(clusterKey[:], []byte("cluster_pub_key_32_bytes_long!!"))
 	regHandler := rollup.NewAccountRegistryHandler(clusterKey)
 
-	InitRollupSystemHandler(mockDispatcher, regHandler)
+	installRollupSystemHandlerForTest(t, mockDispatcher, regHandler)
 	handler := GetRollupSystemHandler()
 	handler.SetRegistryHandler(regHandler)
 	assert.NotNil(t, handler)
