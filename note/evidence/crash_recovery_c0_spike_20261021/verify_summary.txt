@@ -1,0 +1,29 @@
+# C0 spike crash-recovery verify on dev c4bf5606 (includes PR #182: height counter now updated after the block-DB barrier)
+# binary: go build -tags c0spike -o c0spike ./cmd/simple_chain  (sha256 1bb5f1798d61138bb8a1b6619816c8bd785bc277b9a328ca055637f88dafd5a2)
+
+## run 1: C0_LARGE_BLOCK=1 c0spike -config cmd/simple_chain/config.json -tool-c0-spike verify -c0-blocks 3 -c0-rounds 2
+✅ [KILL -9 RECOVERY & N+1 CONTINUATION SUCCESS] (7 kill points)
+   - after mapping barrier (block #2) -> killedAt=2, startBlockNum=2, bypassed=2 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - after contract code barrier (block #2) -> killedAt=2, startBlockNum=1, bypassed=1 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - after receipts barrier (block #2) -> killedAt=2, startBlockNum=2, bypassed=2 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - after transaction-state barrier (block #2) -> killedAt=2, startBlockNum=2, bypassed=2 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - after block barrier (block #2) -> killedAt=2, startBlockNum=2, bypassed=2 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - after event log barrier (block #2) -> killedAt=2, startBlockNum=1, bypassed=1 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - before NOMT payload commit (block #2) -> killedAt=2, startBlockNum=2, bypassed=2 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - Successfully executed & committed Block #4 ($N+1$) with StateRoot=0x427545ae984513...
+🏆 C0 SPIKE VERIFICATION COMPLETED WITH 100% EMPIRICAL ACCURACY!
+exit=0
+
+## run 2: C0_TWO_CONTRACTS=1 C0_LARGE_BLOCK=1 c0spike ... verify -c0-blocks 4 -c0-rounds 2
+✅ [KILL -9 RECOVERY & N+1 CONTINUATION SUCCESS] (8 kill points)
+   - after mapping barrier (block #2) -> killedAt=2, startBlockNum=1, bypassed=1 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - after contract code barrier (block #2) -> killedAt=2, startBlockNum=2, bypassed=2 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - after receipts barrier (block #2) -> killedAt=2, startBlockNum=2, bypassed=2 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - after transaction-state barrier (block #2) -> killedAt=2, startBlockNum=1, bypassed=1 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - after block barrier (block #2) -> killedAt=2, startBlockNum=2, bypassed=2 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - after event log barrier (block #2) -> killedAt=2, startBlockNum=1, bypassed=1 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - before NOMT payload commit (block #2) -> killedAt=2, startBlockNum=2, bypassed=2 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - before done signal (block #3) -> killedAt=3, startBlockNum=3, bypassed=3 (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)
+   - Successfully executed & committed Block #5 ($N+1$) with StateRoot=0x074c1245a49d85...
+🏆 C0 SPIKE VERIFICATION COMPLETED WITH 100% EMPIRICAL ACCURACY!
+exit=0
