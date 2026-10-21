@@ -31,6 +31,23 @@ func evmTimestampSeconds(timestampMs uint64) uint64 {
 	return timestampMs / 1000
 }
 
+// newOffChainMVMID returns an id no running MVM instance owns, for one off-chain execution. Concurrent executions of the
+// same call (same tx hash, and a public node serves many identical eth_call) must never share an id: they would share
+// one MVMApi, overwrite each other's state DBs, and whichever finishes first would clear the instance under the other.
+// The historical-state path used to derive the id from the second plus rand.Intn(1000), so 40 identical concurrent
+// calls already collided with probability ~0.55; both paths now use this.
+func newOffChainMVMID(txHash common.Hash) common.Address {
+	for {
+		combined := sha256.Sum256([]byte(fmt.Sprintf("%x%d%d", txHash, time.Now().UnixNano(), rand.Int63())))
+		b := combined[12:]
+		b[0] = 0xFD // Prevent overlap with real Xapian DB contracts
+		id := common.BytesToAddress(b)
+		if mvm.GetMVMApi(id) == nil {
+			return id
+		}
+	}
+}
+
 func (v *TxVirtualExecutor) ProcessTransactionOffChain(tx types.Transaction) (types.ExecuteSCResult, error) {
 	isSmartContract := false
 	if as, err := v.chainState.GetAccountStateDB().AccountState(tx.ToAddress()); err == nil && as != nil {
@@ -129,13 +146,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	}
 
 	ctx := context.Background()
-	transactionHash := executeTransaction.Hash()
-	currentTime := time.Now().Unix()
-	combinedHash := sha256.Sum256([]byte(fmt.Sprintf("%x%d%d", transactionHash, currentTime, rand.Intn(1000))))
-
-	ethAddressBytes := combinedHash[12:]
-	ethAddressBytes[0] = 0xFD // Prevent overlap with real Xapian DB contracts
-	mvmId := common.BytesToAddress(ethAddressBytes)
+	mvmId := newOffChainMVMID(executeTransaction.Hash())
 
 	accountStateTrie, err := trie.NewStateTrie(stateRoot, v.storageManager.GetStorageAccount(), true)
 	if err != nil {
@@ -311,18 +322,7 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 
 	ctx := context.Background()
 
-	transactionHash := executeTransaction.Hash()
-	var mvmId common.Address
-	for {
-		currentTime := time.Now().UnixNano()
-		combinedHash := sha256.Sum256([]byte(fmt.Sprintf("%x%d%d", transactionHash, currentTime, rand.Int63())))
-		ethAddressBytes := combinedHash[12:]
-		ethAddressBytes[0] = 0xFD // Prevent overlap with real Xapian DB contracts
-		mvmId = common.BytesToAddress(ethAddressBytes)
-		if mvm.GetMVMApi(mvmId) == nil {
-			break
-		}
-	}
+	mvmId := newOffChainMVMID(executeTransaction.Hash())
 	currentHeader := v.chainState.GetcurrentBlockHeader()
 	if currentHeader == nil {
 		return nil, fmt.Errorf("current block header is not available")

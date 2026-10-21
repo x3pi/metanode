@@ -712,9 +712,17 @@ func ExtensionGetOrCreateSimpleDb(
 	}
 }
 
+// errMVMApiNotFound is returned by the Xapian extension callbacks when the MVM instance they were called for is already
+// gone (its execution finished and cleared it). A callback runs inside cgo, so dereferencing nil there would take the
+// whole process down instead of failing the one call.
+var errMVMApiNotFound = errors.New("mvm api instance not found")
+
 func getOrCreateSimpleDb(dbName string, addressMvmId e_common.Address, addressId e_common.Address) (bool, error) {
 	logger.Info("getOrCreateSimpleDb", dbName, addressId)
 	mvmApi := GetMVMApi(addressMvmId)
+	if mvmApi == nil {
+		return false, errMVMApiNotFound
+	}
 	as, err := mvmApi.accountStateDb.AccountState(addressId)
 	if err != nil {
 		return false, errors.New("get AccountState is nil")
@@ -754,6 +762,9 @@ func deleteDb(dbName string, addressMvmId e_common.Address, addressId e_common.A
 	logger.Info("deleteDb")
 
 	mvmApi := GetMVMApi(addressMvmId)
+	if mvmApi == nil {
+		return false, errMVMApiNotFound
+	}
 	as, err := mvmApi.accountStateDb.AccountState(addressId)
 	if err != nil {
 		return false, errors.New("get AccountState is nil")
@@ -780,6 +791,9 @@ func deleteDb(dbName string, addressMvmId e_common.Address, addressId e_common.A
 
 func getSimpledb(dbName string, name string, addressMvmId e_common.Address, addressId e_common.Address) (string, error) {
 	mvmApi := GetMVMApi(addressMvmId)
+	if mvmApi == nil {
+		return "", errMVMApiNotFound
+	}
 	as, err := mvmApi.accountStateDb.AccountState(addressId)
 	if err != nil {
 		return "", errors.New("get AccountState is nil")
@@ -806,6 +820,9 @@ func getSimpledb(dbName string, name string, addressMvmId e_common.Address, addr
 func setSimpledb(dbName string, key string, value string, addressMvmId e_common.Address, addressId e_common.Address) (bool, error) {
 
 	mvmApi := GetMVMApi(addressMvmId)
+	if mvmApi == nil {
+		return false, errMVMApiNotFound
+	}
 	as, _ := mvmApi.accountStateDb.AccountState(addressId)
 	hash := as.SmartContractState().GetTrieDatabaseMapValue(dbName)
 	if hash == nil {
@@ -829,6 +846,9 @@ func setSimpledb(dbName string, key string, value string, addressMvmId e_common.
 func getNextKeys(dbName string, key string, limit int, addressMvmId e_common.Address, addressId e_common.Address) (string, error) {
 
 	mvmApi := GetMVMApi(addressMvmId)
+	if mvmApi == nil {
+		return "", errMVMApiNotFound
+	}
 	as, _ := mvmApi.accountStateDb.AccountState(addressId)
 	hash := as.SmartContractState().GetTrieDatabaseMapValue(dbName)
 	if hash == nil {
@@ -855,6 +875,9 @@ func getNextKeys(dbName string, key string, limit int, addressMvmId e_common.Add
 
 func getAllSimpledb(dbName string, addressMvmId e_common.Address, addressId e_common.Address) (string, error) {
 	mvmApi := GetMVMApi(addressMvmId)
+	if mvmApi == nil {
+		return "", errMVMApiNotFound
+	}
 	as, err := mvmApi.accountStateDb.AccountState(addressId)
 	if err != nil {
 		return "", errors.New("get AccountState is nil")
@@ -885,6 +908,9 @@ func getAllSimpledb(dbName string, addressMvmId e_common.Address, addressId e_co
 
 func searchByValue(dbName string, name string, addressMvmId e_common.Address, addressId e_common.Address) (string, error) {
 	mvmApi := GetMVMApi(addressMvmId)
+	if mvmApi == nil {
+		return "", errMVMApiNotFound
+	}
 	as, err := mvmApi.accountStateDb.AccountState(addressId)
 	if err != nil {
 		return "", errors.New("get AccountState is nil")
