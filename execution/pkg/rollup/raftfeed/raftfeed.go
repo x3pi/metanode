@@ -156,6 +156,18 @@ func (f *Feeder) Dropped() uint64 { return f.dropped.Load() }
 // Failed reports whether the feeder stopped itself because it could not keep numbering safely.
 func (f *Feeder) Failed() bool { return f.failed.Load() }
 
+// SubmitStatus mirrors the internal submitStatus codes for callers that distinguish retry from drop.
+type SubmitStatus int
+
+const (
+	StatusAccepted    SubmitStatus = 200 // committed to raft quorum
+	StatusRedirect    SubmitStatus = 307 // leadership changed, redirecting
+	StatusTooLarge    SubmitStatus = 413 // permanently rejected (oversized, cannot become a block)
+	StatusFull        SubmitStatus = 429 // propose queue full, retry
+	StatusNoLeader    SubmitStatus = 503 // no leader available, retry
+	StatusUncommitted SubmitStatus = 504 // commit timeout, retry
+)
+
 // Submit hands a marshalled transaction batch (transaction.MarshalTransactions) to the feeder.
 //
 // It returns true only once the batch is accepted into the bounded queue. tx_batch_forwarder retries a false
@@ -174,6 +186,31 @@ func Submit(batch []byte) bool {
 	default:
 		return false
 	}
+}
+
+// SubmitBatchStatus hands a marshalled batch to the feeder and returns the detailed SubmitStatus.
+func SubmitBatchStatus(batch []byte) SubmitStatus {
+	if n := cluster.Load(); n != nil {
+		return SubmitStatus(n.SubmitStatus(batch))
+	}
+	f := current.Load()
+	if f == nil || !f.running.Load() {
+		return StatusNoLeader
+	}
+	select {
+	case f.queue <- append([]byte(nil), batch...):
+		return StatusAccepted
+	default:
+		return StatusFull
+	}
+}
+
+// MaxBatchBytes returns the cluster's configured MaxBatchBytes limit.
+func MaxBatchBytes() int {
+	if n := cluster.Load(); n != nil {
+		return n.MaxBatchBytes()
+	}
+	return defaultMaxBatchBytes
 }
 
 // Ready reports whether the node may accept transactions: a feeder is running, has not failed, and its

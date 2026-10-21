@@ -24,6 +24,7 @@ import (
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
@@ -383,6 +384,23 @@ func (vp *TxValidatorPool) addTransactionToPoolInternalCap(tx types.Transaction,
 
 	if code, err := vp.checkSecpProtoIngress(tx); err != nil {
 		return code, err
+	}
+
+	if raftfeed.Enabled() {
+		maxBatch := raftfeed.MaxBatchBytes()
+		if maxBatch > 0 {
+			raw, err := tx.Marshal()
+			if err == nil {
+				overhead := 1
+				for v := uint64(len(raw)); v >= 128; v >>= 7 {
+					overhead++
+				}
+				overhead++
+				if len(raw)+overhead > maxBatch {
+					return transaction.InvalidTransaction.Code, fmt.Errorf("transaction serialized size %d exceeds max batch limit %d", len(raw)+overhead, maxBatch)
+				}
+			}
+		}
 	}
 
 	if storage.GetLastBlockNumberFromMaster() > storage.GetLastBlockNumber()+3 {

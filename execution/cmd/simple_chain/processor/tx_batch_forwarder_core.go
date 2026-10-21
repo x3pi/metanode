@@ -236,10 +236,36 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 					len(batchTxs), time.Now().UnixMilli(), batchNum, totalBatches)
 			}
 
-			// Gửi batch qua FFI (synchronous zero-copy injection)
+			// Gửi batch qua FFI hoặc Raft Feed
+			batchAccepted := false
 			for {
+				if raftfeed.Enabled() {
+					st := raftfeed.SubmitBatchStatus(bTransaction)
+					if st == raftfeed.StatusAccepted {
+						batchAccepted = true
+						if shouldLogSend {
+							logger.Debug("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via Raft",
+								batchNum, totalBatches, len(batchTxs))
+						}
+						break
+					}
+					if st == raftfeed.StatusTooLarge {
+						logger.Error("❌ [TX FLOW] Batch [%d/%d] (%d txs) permanently rejected by Raft (too large). Dropping batch to prevent deadlock.",
+							batchNum, totalBatches, len(batchTxs))
+						if bf.transactionProcessor != nil && bf.transactionProcessor.transactionPool != nil {
+							bf.transactionProcessor.transactionPool.ReleaseInFlightWithDrainID(batchTxs, drainID)
+						}
+						break
+					}
+					logger.Warn("⚠️  [TX FLOW] Failed to inject batch [%d/%d] (%d txs) to Raft (status=%d). Retrying...",
+						batchNum, totalBatches, len(batchTxs), st)
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+
 				success := batchSubmitter()(bTransaction)
 				if success {
+					batchAccepted = true
 					if shouldLogSend {
 						logger.Debug("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
 							batchNum, totalBatches, len(batchTxs))
@@ -249,6 +275,10 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				logger.Warn("⚠️  [TX FLOW] Failed to inject batch [%d/%d] (%d txs) to FFI channel (pool full). Retrying...",
 					batchNum, totalBatches, len(batchTxs))
 				time.Sleep(100 * time.Millisecond)
+			}
+
+			if !batchAccepted {
+				continue
 			}
 
 			// Reached only after the batch was ACCEPTED (the loop above exits solely on success). These steps used to sit

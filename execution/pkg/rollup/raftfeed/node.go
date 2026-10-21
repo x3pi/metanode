@@ -24,6 +24,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	rpb "github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed/pb"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/types"
 )
 
 // submitCommitTimeout is how long Submit waits for its batch to be COMMITTED (replicated to a quorum) before it
@@ -348,13 +349,27 @@ func (n *Node) Stop() {
 // committed within submitCommitTimeout) means "keep the batch and retry": the caller may then send a batch that
 // did commit a second time, which Go's tx dedup absorbs.
 func (n *Node) Submit(batch []byte) bool {
+	return n.SubmitStatus(batch) == statusAccepted
+}
+
+// SubmitStatus returns the detailed submitStatus (statusAccepted, statusTooLarge, statusNoLeader, etc.)
+// for both local proposal (on leader) and forwarded proposal (on follower).
+func (n *Node) SubmitStatus(batch []byte) submitStatus {
 	if n.failed.Load() || n.draining.Load() {
-		return false
+		return statusNoLeader
 	}
 	if n.raft.State() == raft.Leader {
-		return n.submitLocal(batch) == statusAccepted
+		return n.submitLocal(batch)
 	}
 	return n.forwardToLeader(batch)
+}
+
+// MaxBatchBytes returns the configured max_batch_bytes for this node.
+func (n *Node) MaxBatchBytes() int {
+	if n == nil {
+		return defaultMaxBatchBytes
+	}
+	return n.cfg.MaxBatchBytes
 }
 
 // submitLocal validates a batch, splits it if it exceeds max_batch_bytes and queues the pieces for proposal.
@@ -373,8 +388,13 @@ func (n *Node) submitLocal(batch []byte) submitStatus {
 	pieces, err := splitBatch(batch, n.cfg.MaxBatchBytes)
 	if err != nil {
 		n.dropped.Add(1)
-		logger.Error("❌ [RAFT] dropping a batch that cannot become a block: %v", err)
+		logger.Error("❌ [RAFT] dropping malformed batch that cannot be unmarshaled: %v", err)
 		return statusAccepted
+	}
+	if len(pieces) == 0 {
+		n.dropped.Add(1)
+		logger.Warn("❌ [RAFT] dropping batch where all transactions exceed max_batch_bytes %d", n.cfg.MaxBatchBytes)
+		return statusTooLarge
 	}
 	if len(pieces) > 1 {
 		n.metrics.RecordSplit(len(pieces))
@@ -412,8 +432,18 @@ func (n *Node) submitLocal(batch []byte) submitStatus {
 	return statusAccepted
 }
 
+func protoTxOverhead(rawLen int) int {
+	tagSize := 1 // repeated Transaction Transactions = 1 (tag 1, wire type 2 -> 1 byte)
+	varintSize := 1
+	for v := uint64(rawLen); v >= 128; v >>= 7 {
+		varintSize++
+	}
+	return tagSize + varintSize
+}
+
 // splitBatch returns the batch as-is when it fits, else greedily regroups its txs into batches of at most max
-// bytes. A single tx above max is an error (it could never be proposed).
+// bytes. Transactions that individually exceed max are dropped with a warning so a single oversized tx cannot
+// discard valid transactions in the same batch.
 func splitBatch(batch []byte, max int) ([][]byte, error) {
 	txs, err := transaction.UnmarshalTransactions(batch)
 	if err != nil {
@@ -422,39 +452,68 @@ func splitBatch(batch []byte, max int) ([][]byte, error) {
 	if len(txs) == 0 {
 		return nil, errors.New("empty batch")
 	}
-	if len(batch) <= max {
+
+	// Filter out transactions that individually exceed max
+	var validTxs []types.Transaction
+	for i, tx := range txs {
+		raw, err := tx.Marshal()
+		if err != nil {
+			logger.Warn("[RAFT] skipping unmarshalable transaction %d: %v", i, err)
+			continue
+		}
+		if len(raw)+protoTxOverhead(len(raw)) > max {
+			logger.Warn("❌ [RAFT] dropping oversized transaction %d (%d bytes exceeds max_batch_bytes %d)", i, len(raw), max)
+			continue
+		}
+		validTxs = append(validTxs, tx)
+	}
+
+	if len(validTxs) == 0 {
+		return nil, nil // No valid transactions left in batch
+	}
+
+	// If all valid txs were kept and the original batch fits, return it
+	if len(validTxs) == len(txs) && len(batch) <= max {
 		return [][]byte{batch}, nil
 	}
+
 	var out [][]byte
-	start, size := 0, 0
-	flush := func(end int) error {
-		if end == start {
+	var current []types.Transaction
+	currentSize := 0
+
+	flush := func() error {
+		if len(current) == 0 {
 			return nil
 		}
-		b, err := transaction.MarshalTransactions(txs[start:end])
+		b, err := transaction.MarshalTransactions(current)
 		if err != nil {
 			return err
 		}
 		out = append(out, b)
-		start, size = end, 0
+		current = nil
+		currentSize = 0
 		return nil
 	}
-	for i, tx := range txs {
+
+	for _, tx := range validTxs {
 		raw, err := tx.Marshal()
 		if err != nil {
-			return nil, err
+			continue
 		}
-		if len(raw) > max {
-			return nil, fmt.Errorf("tx %d is %d bytes, above max_batch_bytes %d", i, len(raw), max)
-		}
-		if size+len(raw) > max {
-			if err := flush(i); err != nil {
+		txTotal := len(raw) + protoTxOverhead(len(raw))
+		if currentSize+txTotal > max && len(current) > 0 {
+			if err := flush(); err != nil {
 				return nil, err
 			}
 		}
-		size += len(raw)
+		current = append(current, tx)
+		currentSize += txTotal
 	}
-	return out, flush(len(txs))
+
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // proposeLoop is the only caller of raft.Apply on this node.

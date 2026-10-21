@@ -212,11 +212,6 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 		}
 	}
 
-	// ─── 6. Update storage block counter (always) ────────────────────────
-	// This is updated LAST among the mappings/counter block metadata to ensure that
-	// if a concurrent reader detects the height has advanced, all the underlying mapping entries
-	// and DB/cache records are fully queryable and resolved without returning null.
-	storage.UpdateLastBlockNumber(blockNum)
 	// ─── 7. Rebuild or realign state tries from header roots if out of sync ───
 	activeAccountRoot := cs.GetAccountStateDB().GetOriginRootHash()
 	activeStakeRoot := cs.GetStakeStateDB().GetOriginRootHash()
@@ -301,7 +296,9 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 		failpoint.Hit("after-block-barrier")
 	}
 
-	// ─── 9. Auto-update epoch from block header ──────────────────────────
+	// ─── 9. Update storage block counter and auto-update epoch ────────────
+	// Exposed only after block database and dependencies are fully durable.
+	storage.UpdateLastBlockNumber(blockNum)
 	cs.CheckAndUpdateEpochFromBlock(header.Epoch(), header.TimeStamp())
 
 	failpoint.Hit("before-done-signal")
