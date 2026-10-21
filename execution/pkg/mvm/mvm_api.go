@@ -61,6 +61,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor/mvcc"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
+	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -1478,9 +1479,32 @@ func codeUnreadable(db SmartContractDB, addr common.Address, codeHash common.Has
 	return true
 }
 
+// failStopOnUnreadableCodeEnv, when set to 1/true/yes, makes a node halt (fail-stop) instead of only logging when an
+// account's code is unreadable. It is opt-in on purpose: the check is "the code store returns nothing for a code hash this
+// node's own state says exists", and while Commit() now keeps new code in pendingCode until it is written, a false positive
+// would be deterministic, so every validator would stop on the same block. Operators turn it on after watching the log line
+// below stay silent on their cluster. A node that halts here restarts and re-syncs from its peers (halt, not guess).
+const failStopOnUnreadableCodeEnv = "METANODE_FAILSTOP_ON_UNREADABLE_CODE"
+
+func failStopOnUnreadableCode() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(failStopOnUnreadableCodeEnv))) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
+// exitOnUnreadableCode is replaced in tests.
+var exitOnUnreadableCode = func(msg string) { fatal.Exit("%s", msg) }
+
 func warnIfCodeUnreadable(db SmartContractDB, addr common.Address, codeHash common.Hash, code []byte) {
-	if codeUnreadable(db, addr, codeHash, code) {
-		logger.Error("🛑 [MVM] code of %s (codeHash %s) is not readable from the code store: calls to it run as calls to an address without code; check this node's code storage", addr.Hex(), codeHash.Hex())
+	if !codeUnreadable(db, addr, codeHash, code) {
+		return
+	}
+	msg := fmt.Sprintf("[MVM] code of %s (codeHash %s) is not readable from the code store: calls to it run as calls to an address without code; check this node's code storage", addr.Hex(), codeHash.Hex())
+	logger.Error("🛑 " + msg)
+	if failStopOnUnreadableCode() {
+		exitOnUnreadableCode(msg + " (" + failStopOnUnreadableCodeEnv + " is set: halting so the node restarts and re-syncs)")
 	}
 }
 
