@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Analysis for pr182_tps_ab_20261021: reads ONLY the raw per-run JSON reports (measurement block); stats from stats_util.py."""
+import csv, json, math, os, sys
+sys.path.insert(0, "/home/abc/chain-n/metanode/execution/scripts/test/evidence")
+from stats_util import mean, sample_sd, t_two_tailed_p
+
+D = "/home/abc/chain-n/metanode/note/evidence/pr182_tps_ab_20261021/raft_ab_1m"
+order = [l.split() for l in open(f"{D}/order.txt") if l.strip()]
+rows, gate = [], []
+for pair, v in order:
+    m = json.load(open(f"{D}/ab_{v}_p{pair}_run1.json"))["measurement"]
+    rcv = sum((m.get("received_by_validator") or {}).values())
+    ok = (m["loss_vs_sent"] == 0 and m["bytes_sent_txs"] == m["committed_ours"] and str(m["parity_status"]).startswith("OK:"))
+    gate.append((pair, v, ok, m["loss_vs_sent"], m["parity_status"]))
+    rows.append({"pair": int(pair), "variant": v, "bytes_sent_txs": m["bytes_sent_txs"], "committed_ours": m["committed_ours"], "received_sum": rcv,
+                 "loss_vs_sent": m["loss_vs_sent"], "tps_end_to_end": m["tps_end_to_end"], "tps_during_injection": m["tps_during_injection"],
+                 "tps_active_commit_window": m["tps_active_commit_window"], "inject_seconds": m["inject_seconds"],
+                 "end_to_end_seconds": m["end_to_end_seconds"], "parity_status": m["parity_status"]})
+with open(f"{D}/summary.csv", "w", newline="") as f:
+    w = csv.DictWriter(f, fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(sorted(rows, key=lambda r: (r["pair"], r["variant"])))
+
+def paired(metric):
+    by = {(r["pair"], r["variant"]): r[metric] for r in rows}
+    pairs = sorted({r["pair"] for r in rows})
+    prev = [by[(p, "prev")] for p in pairs]; nxt = [by[(p, "next")] for p in pairs]
+    d = [n - p for p, n in zip(prev, nxt)]; pct = [100.0 * (n - p) / p for p, n in zip(prev, nxt)]
+    n = len(d); md, sd = mean(d), sample_sd(d)
+    t = md / (sd / math.sqrt(n)) if sd > 0 else float("inf")
+    return {"n_pairs": n, "mean_prev": mean(prev), "sd_prev": sample_sd(prev), "mean_next": mean(nxt), "sd_next": sample_sd(nxt),
+            "mean_diff": md, "sd_diff": sd, "mean_diff_pct": mean(pct), "sd_diff_pct": sample_sd(pct), "diff_pct_per_pair": pct,
+            "t": t, "df": n - 1, "p_two_tailed": t_two_tailed_p(abs(t), n - 1)}
+
+res = {"integrity_gate_all_pass": all(g[2] for g in gate), "runs": len(rows), "metrics": {k: paired(k) for k in
+       ("tps_end_to_end", "tps_during_injection", "tps_active_commit_window", "end_to_end_seconds")}}
+p = res["metrics"]["tps_end_to_end"]
+res["verdict_rule_applied"] = ("degradation" if p["mean_diff_pct"] <= -3.0 and p["p_two_tailed"] < 0.05 else
+                               "improvement" if p["mean_diff_pct"] >= 3.0 and p["p_two_tailed"] < 0.05 else "no_significant_difference_n6")
+json.dump(res, open(f"{D}/stats_summary.json", "w"), indent=2)
+print(json.dumps({"integrity_gate_all_pass": res["integrity_gate_all_pass"], "runs": res["runs"], "verdict": res["verdict_rule_applied"]}))
+for k, v in res["metrics"].items():
+    print(f"{k}: prev {v['mean_prev']:.2f}±{v['sd_prev']:.2f}  next {v['mean_next']:.2f}±{v['sd_next']:.2f}  diff {v['mean_diff']:+.2f} ({v['mean_diff_pct']:+.2f}%, sd {v['sd_diff_pct']:.2f}%)  t={v['t']:.3f} df={v['df']} p={v['p_two_tailed']:.4f}")
+print("per-pair % (next vs prev, end_to_end):", [round(x, 2) for x in p["diff_pct_per_pair"]])
+for g in gate: print(g)
