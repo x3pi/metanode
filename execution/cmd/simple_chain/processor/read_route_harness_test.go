@@ -38,7 +38,7 @@ func readRouteHarness(t *testing.T) (*BlockProcessor, *StateProcessor) {
 	blockchain.InitBlockChain(100, blockDB, sm)
 
 	bp := &BlockProcessor{
-		chainState: cs, storageManager: sm, config: cfg,
+		chainState: cs, storageManager: sm, config: cfg, messageSender: NewMockMessageSender(),
 		CacheManager: NewCacheManager(), BlockBuffers: NewBlockBuffers(), ReceiptTracker: NewReceiptTracker(), ConsensusContext: NewConsensusContext(),
 	}
 	bp.lastBlock.Store(block.NewBlock(header, nil, nil))
