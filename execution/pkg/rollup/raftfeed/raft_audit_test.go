@@ -1,0 +1,105 @@
+package raftfeed
+
+import (
+	"testing"
+
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/meta-node-blockchain/meta-node/pkg/config"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+)
+
+func TestAuditOversizeTxMustNotAcknowledgeLostBatch(t *testing.T) {
+	small := testBatch(t, 1)
+	txs, err := transaction.UnmarshalTransactions(small)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := txs[0].Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	max := len(raw) + 3
+	h := newHarness(t, 1)
+	h.mutate = func(c *config.RaftConfig) { c.MaxBatchBytes = max }
+	h.startAll()
+	leader := h.leader()
+	var input pb.Transactions
+	if err := proto.Unmarshal(testBatch(t, 1, 2), &input); err != nil {
+		t.Fatal(err)
+	}
+	input.Transactions[1].Data = make([]byte, max+1)
+	batch, err := proto.Marshal(&input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !leader.node.Submit(batch) {
+		t.Fatal("Submit returned false: valid small tx was not accepted")
+	}
+	h.waitBlocks(1, leader)
+	var committedNonces []uint64
+	for _, b := range leader.disk.blocks() {
+		for _, x := range b.Transactions {
+			tx, err := transaction.UnmarshalTransaction(x.Digest)
+			if err == nil {
+				committedNonces = append(committedNonces, tx.GetNonce())
+			}
+		}
+	}
+	if len(committedNonces) != 1 || committedNonces[0] != 1 {
+		t.Fatalf("expected exactly nonce 1 committed in block, got nonces: %v", committedNonces)
+	}
+}
+
+func TestAuditSplitMustRespectSerializedLimit(t *testing.T) {
+	txs, err := transaction.UnmarshalTransactions(testBatch(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := txs[0].Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	max := len(raw) * 2
+	pieces, err := splitBatch(testBatch(t, 1, 1, 1), max)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, p := range pieces {
+		if len(p) > max {
+			t.Errorf("piece %d serialized size %d exceeds max_batch_bytes %d", i, len(p), max)
+		}
+	}
+}
+
+func TestReviewAllOversizeMustNotReturnCommitSuccess(t *testing.T) {
+	h := newHarness(t, 1)
+	h.mutate = func(c *config.RaftConfig) { c.MaxBatchBytes = 1 }
+	h.startAll()
+	l := h.leader()
+	if l.node.Submit(testBatch(t, 1)) {
+		t.Fatalf("Submit=true although all transactions were dropped; dropped=%d blocks=%d", l.node.Dropped(), len(l.disk.blocks()))
+	}
+}
+
+func TestMergeReviewFollowerMustNotAcknowledgeOversizeDrop(t *testing.T) {
+	h := newHarness(t, 3)
+	h.mutate = func(c *config.RaftConfig) { c.MaxBatchBytes = 1 }
+	h.startAll()
+	leader := h.leader()
+	batch := testBatch(t, 1)
+	for i := 0; i < 3; i++ {
+		t.Logf("leader Submit attempt %d = %v", i+1, leader.node.Submit(batch))
+	}
+	for _, m := range h.m {
+		if m == leader {
+			continue
+		}
+		accepted := m.node.Submit(batch)
+		if accepted {
+			t.Fatalf("follower Submit=true for permanently rejected batch; leader blocks=%d follower drops=%d", len(leader.disk.blocks()), m.node.Dropped())
+		}
+		break
+	}
+}

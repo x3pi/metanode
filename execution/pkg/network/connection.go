@@ -232,7 +232,7 @@ func (c *Connection) run() {
 		writeWg.Add(1)
 		readWg.Add(1)
 
-		go c.writeLoop(conn, sendChan, &writeWg)
+		go c.writeLoop(conn, sendChan, errorChan, &writeWg, quitChan)
 		// Truyền quitChan và readWg vào readLoop
 		go c.readLoop(conn, requestChan, errorChan, &readWg, quitChan, idleTimeout)
 	}
@@ -771,12 +771,30 @@ func (c *Connection) String() string {
 
 // --- Vòng lặp đọc/ghi (private), được gọi bởi goroutine quản lý ---
 
-func (c *Connection) writeLoop(tcpConn net.Conn, sendChan chan network.Message, wg *sync.WaitGroup) {
+func (c *Connection) writeLoop(tcpConn net.Conn, sendChan chan network.Message, errorChan chan<- error, wg *sync.WaitGroup, quit <-chan struct{}) {
 	defer wg.Done()
 	writer := bufio.NewWriter(tcpConn)
 	remoteAddr := tcpConn.RemoteAddr().String()
 
 	logger.Info("writeLoop %s: started", remoteAddr)
+
+	handleTerminalWriteError := func(err error) {
+		logger.Error("writeLoop %s: %v. Signaling for disconnect.", remoteAddr, err)
+		c.metaMu.Lock()
+		c.cachedConnected = false
+		c.metaLastUpdate = time.Now()
+		c.metaMu.Unlock()
+
+		select {
+		case errorChan <- err:
+		case <-quit:
+		default:
+		}
+
+		go func() {
+			_ = c.Disconnect()
+		}()
+	}
 
 	for message := range sendChan {
 		b, err := message.Marshal()
@@ -789,16 +807,16 @@ func (c *Connection) writeLoop(tcpConn net.Conn, sendChan chan network.Message, 
 		binary.LittleEndian.PutUint64(length, uint64(len(b)))
 
 		if _, err := writer.Write(length); err != nil {
-			logger.Error("writeLoop %s: write length error: %v", remoteAddr, err)
+			handleTerminalWriteError(fmt.Errorf("write length error: %w", err))
 			return
 		}
 		if _, err := writer.Write(b); err != nil {
-			logger.Error("writeLoop %s: write data error: %v", remoteAddr, err)
+			handleTerminalWriteError(fmt.Errorf("write data error: %w", err))
 			return
 		}
 		if len(sendChan) == 0 {
 			if err := writer.Flush(); err != nil {
-				logger.Error("writeLoop %v: flush error: %v", remoteAddr, err)
+				handleTerminalWriteError(fmt.Errorf("flush error: %w", err))
 				return
 			}
 		}

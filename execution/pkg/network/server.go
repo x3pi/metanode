@@ -88,6 +88,20 @@ func NewSocketServer(
 	return s, nil
 }
 
+type initDoneRequest struct {
+	network.Request
+	resultChan chan error
+}
+
+func (r *initDoneRequest) Done(err error) {
+	if r.resultChan != nil {
+		select {
+		case r.resultChan <- err:
+		default:
+		}
+	}
+}
+
 func (s *SocketServer) startWorkerPool() {
 	workerCount := s.config.HandlerWorkerPoolSize
 
@@ -115,14 +129,23 @@ func (s *SocketServer) startWorkerPool() {
 						defer atomic.AddInt32(&activeWorkers, -1)
 						atomic.AddInt64(&processedRequests, 1)
 
+						var handlerErr error
 						// Ensure request is put back into the pool after handling
 						defer func() {
-							if req, ok := request.(*Request); ok {
+							if d, ok := request.(interface{ Done(error) }); ok {
+								d.Done(handlerErr)
+							}
+							if wrapped, ok := request.(*initDoneRequest); ok {
+								if req, ok := wrapped.Request.(*Request); ok {
+									requestPool.Put(req)
+								}
+							} else if req, ok := request.(*Request); ok {
 								requestPool.Put(req)
 							}
 						}()
 
 						if err := s.handler.HandleRequest(request); err != nil {
+							handlerErr = err
 							logger.Warn(
 								"Worker %d: Error from handler while processing request from %s (Command: %s): %v",
 								workerID,
@@ -194,11 +217,18 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 		cmd := request.Message().Command()
 
 		if cmd == p_common.InitConnection {
+			resultChan := make(chan error, 1)
+			wrapped := &initDoneRequest{
+				Request:    request,
+				resultChan: resultChan,
+			}
 			// ─── InitConnection: BLOCKING send (NEVER drop) ──────────────
 			// Use blocking send with timeout to guarantee InitConnection
 			// reaches the worker pool. This fixes Race 4.
+			queued := false
 			select {
-			case s.requestChan <- request:
+			case s.requestChan <- wrapped:
+				queued = true
 				logger.Info("HandleConnection: InitConnection queued successfully for %s", conn.RemoteAddrSafe())
 			case <-time.After(5 * time.Second):
 				logger.Error(
@@ -207,17 +237,35 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 				)
 				// Still try non-blocking as last resort
 				select {
-				case s.requestChan <- request:
+				case s.requestChan <- wrapped:
+					queued = true
 					logger.Info("HandleConnection: InitConnection queued (retry) for %s", conn.RemoteAddrSafe())
 				default:
 					logger.Error("HandleConnection: FATAL - InitConnection DROPPED for %s", conn.RemoteAddrSafe())
 					if req, ok := request.(*Request); ok {
 						requestPool.Put(req)
 					}
+					return errors.New("InitConnection dropped: queue full")
 				}
 			}
-			// Signal that InitConnection has been queued — unblock other commands
-			initOnce.Do(func() { close(initReady) })
+
+			if queued {
+				// Wait for worker to finish processing InitConnection before unblocking gate or reading next request
+				select {
+				case err := <-resultChan:
+					if err != nil {
+						logger.Error("HandleConnection: InitConnection failed for %s: %v. Terminating connection.", conn.RemoteAddrSafe(), err)
+						return fmt.Errorf("InitConnection failed: %w", err)
+					}
+					initOnce.Do(func() { close(initReady) })
+					return nil
+				case <-s.ctx.Done():
+					return s.ctx.Err()
+				case <-time.After(30 * time.Second):
+					logger.Error("HandleConnection: timeout (30s) waiting for InitConnection to finish for %s", conn.RemoteAddrSafe())
+					return errors.New("timeout processing InitConnection")
+				}
+			}
 			return nil
 		}
 

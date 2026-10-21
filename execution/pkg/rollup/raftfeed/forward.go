@@ -90,16 +90,16 @@ func (n *Node) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// forwardToLeader sends the batch to the current leader. It returns true only when the leader accepted it.
-func (n *Node) forwardToLeader(batch []byte) bool {
+// forwardToLeader sends the batch to the current leader. It returns the submitStatus reported by the leader.
+func (n *Node) forwardToLeader(batch []byte) submitStatus {
 	addr, ok := n.leaderForwardAddr()
 	if !ok {
-		return false
+		return statusNoLeader
 	}
 	ts := n.now().UnixMilli()
 	req, err := http.NewRequest(http.MethodPost, "http://"+addr+submitPath, bytes.NewReader(batch))
 	if err != nil {
-		return false
+		return statusNoLeader
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set(hdrNode, n.cfg.NodeID)
@@ -107,22 +107,28 @@ func (n *Node) forwardToLeader(batch []byte) bool {
 	req.Header.Set(hdrMac, forwardMAC(n.secret, n.cfg.NodeID, ts, submitPath, batch))
 	resp, err := n.client.Do(req)
 	if err != nil {
-		return false // leader unreachable: the caller keeps the batch and retries
+		return statusNoLeader // leader unreachable: the caller keeps the batch and retries
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	switch resp.StatusCode {
 	case http.StatusOK:
-		return true
+		return statusAccepted
 	case http.StatusRequestEntityTooLarge:
-		// Retrying can never succeed and the forwarder retries a false forever: drop loudly instead.
 		n.dropped.Add(1)
 		logger.Error("❌ [RAFT-FWD] leader refused a batch as too large; dropping it")
-		return true
+		return statusTooLarge
+	case http.StatusTooManyRequests:
+		return statusFull
+	case http.StatusTemporaryRedirect:
+		return statusRedirect
+	case http.StatusGatewayTimeout:
+		return statusUncommitted
 	case http.StatusUnauthorized:
 		logger.Error("❌ [RAFT-FWD] leader rejected our MAC/clock (check forward_secret_file and system time)")
+		return statusNoLeader
 	}
-	return false // 307 (leader moved), 429 (queue full), 503 (no leader): backpressure, keep the batch
+	return statusNoLeader
 }
 
 func (n *Node) leaderForwardAddr() (string, bool) {
