@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/block_signer"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 
@@ -108,6 +109,16 @@ func (ac *attestationCollector) addAttestation(att StateAttestation, localHash c
 
 	// Store local hash
 	ac.localAttestations[blockNum] = localHash
+
+	// One validator is one vote per block: a repeated or conflicting attestation from the same identity is dropped (first
+	// wins). Without this a single peer could be counted as many and reach the fork quorum on its own.
+	for _, nodes := range ac.attestations[blockNum] {
+		for _, n := range nodes {
+			if n == att.NodeAddress {
+				return false, ""
+			}
+		}
+	}
 
 	// Store peer attestation
 	ac.attestations[blockNum][att.AttestationHash] = append(
@@ -296,6 +307,32 @@ func (bp *BlockProcessor) broadcastAttestation(attestation StateAttestation) {
 	}
 }
 
+// authenticateAttestation reports whether att was signed by a registered validator and, if so, sets att.NodeAddress to
+// the identity derived from the verified key (the NodeAddress the sender wrote is never trusted). The cheap checks run
+// first: the address derived from the key must belong to a validator before any BLS verification is attempted, so an
+// anonymous client cannot make the node spend pairing work on arbitrary bytes.
+func (bp *BlockProcessor) authenticateAttestation(att *StateAttestation) bool {
+	if len(att.BLSSignature) == 0 || len(att.ValidatorPubKey) == 0 {
+		logger.Debug("🔕 [ATTESTATION] ignoring an unsigned attestation for block #%d", att.BlockNumber)
+		return false
+	}
+	if bp.chainState == nil || bp.chainState.GetStakeStateDB() == nil {
+		return false
+	}
+	addr := bls.GetAddressFromPublicKey(att.ValidatorPubKey)
+	validator, err := bp.chainState.GetStakeStateDB().GetValidator(addr)
+	if err != nil || validator == nil {
+		logger.Debug("🔕 [ATTESTATION] ignoring an attestation signed by %s, which is not a registered validator", addr.Hex())
+		return false
+	}
+	if !block_signer.VerifyBlockSignature(att.AttestationHash, att.BLSSignature, att.ValidatorPubKey) {
+		logger.Error("🚨 [ATTESTATION] INVALID BLS SIGNATURE claiming validator %s for block #%d — ignoring", addr.Hex(), att.BlockNumber)
+		return false
+	}
+	att.NodeAddress = addr.Hex()
+	return true
+}
+
 // ProcessStateAttestation handles incoming attestation messages from peers.
 // This is registered as a P2P handler for StateAttestationTopic.
 func (bp *BlockProcessor) ProcessStateAttestation(request network.Request) error {
@@ -305,18 +342,14 @@ func (bp *BlockProcessor) ProcessStateAttestation(request network.Request) error
 		return nil
 	}
 
+	// This route is reachable by every TCP client and the connection type is self-declared, while a confirmed fork ends
+	// in fatal.Exit(). Only an attestation signed by a registered validator may reach the fork detector.
+	if !bp.authenticateAttestation(&peerAtt) {
+		return nil
+	}
+
 	logger.Info("📥 [ATTESTATION RECV] Block #%d: peer=%s, hash=%s",
 		peerAtt.BlockNumber, peerAtt.NodeAddress, peerAtt.AttestationHash.Hex()[:16]+"...")
-
-	// Verify BLS signature if present
-	if len(peerAtt.BLSSignature) > 0 && len(peerAtt.ValidatorPubKey) > 0 {
-		if !block_signer.VerifyBlockSignature(peerAtt.AttestationHash, peerAtt.BLSSignature, peerAtt.ValidatorPubKey) {
-			logger.Error("🚨 [ATTESTATION] INVALID BLS SIGNATURE from peer %s for block #%d — ignoring",
-				peerAtt.NodeAddress, peerAtt.BlockNumber)
-			return nil // Invalid signature — ignore this attestation
-		}
-		logger.Debug("✅ [ATTESTATION] Valid BLS signature from peer %s", peerAtt.NodeAddress)
-	}
 
 	// Compute local attestation hash for this block
 	headerPtr := bp.chainState.GetcurrentBlockHeader()
