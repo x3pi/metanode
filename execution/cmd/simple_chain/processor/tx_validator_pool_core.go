@@ -277,6 +277,31 @@ func (vp *TxValidatorPool) checkSecpProtoIngress(tx types.Transaction) (int64, e
 	return 0, nil
 }
 
+// checkRaftTxSizeLimit verifies that a transaction's serialized size including Raft protobuf overhead
+// does not exceed the configured MaxBatchBytes limit when Raft consensus mode is enabled.
+func (vp *TxValidatorPool) checkRaftTxSizeLimit(tx types.Transaction) (int64, error) {
+	if !raftfeed.Enabled() {
+		return 0, nil
+	}
+	maxBatch := raftfeed.MaxBatchBytes()
+	if maxBatch <= 0 {
+		return 0, nil
+	}
+	raw, err := tx.Marshal()
+	if err != nil {
+		return transaction.InvalidTransaction.Code, fmt.Errorf("failed to marshal transaction for size check: %w", err)
+	}
+	overhead := 1
+	for v := uint64(len(raw)); v >= 128; v >>= 7 {
+		overhead++
+	}
+	overhead++
+	if len(raw)+overhead > maxBatch {
+		return transaction.InvalidTransaction.Code, fmt.Errorf("transaction serialized size %d exceeds max batch limit %d", len(raw)+overhead, maxBatch)
+	}
+	return 0, nil
+}
+
 // GetTransactionPool returns the underlying mempool transaction pool.
 func (vp *TxValidatorPool) GetTransactionPool() *transaction_pool.TransactionPool {
 	if vp == nil {
@@ -386,21 +411,8 @@ func (vp *TxValidatorPool) addTransactionToPoolInternalCap(tx types.Transaction,
 		return code, err
 	}
 
-	if raftfeed.Enabled() {
-		maxBatch := raftfeed.MaxBatchBytes()
-		if maxBatch > 0 {
-			raw, err := tx.Marshal()
-			if err == nil {
-				overhead := 1
-				for v := uint64(len(raw)); v >= 128; v >>= 7 {
-					overhead++
-				}
-				overhead++
-				if len(raw)+overhead > maxBatch {
-					return transaction.InvalidTransaction.Code, fmt.Errorf("transaction serialized size %d exceeds max batch limit %d", len(raw)+overhead, maxBatch)
-				}
-			}
-		}
+	if code, err := vp.checkRaftTxSizeLimit(tx); err != nil {
+		return code, err
 	}
 
 	if storage.GetLastBlockNumberFromMaster() > storage.GetLastBlockNumber()+3 {
@@ -544,14 +556,19 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternalCap(txs []types.Transact
 		}
 		if code, err := vp.checkSecpProtoIngress(tx); err != nil {
 			errorsList[i] = fmt.Errorf("[code:%d] %s", code, err.Error())
+			continue
+		}
+		if code, err := vp.checkRaftTxSizeLimit(tx); err != nil {
+			errorsList[i] = fmt.Errorf("[code:%d] %s", code, err.Error())
+			continue
 		}
 	}
 
 	// Phase 1.5 (TPS Optimization): Batch Cache Warming
 	// Collect unique addresses to fetch in parallel without blocking muTrie.Lock
 	preloadSet := make(map[common.Address]struct{}, len(txs)*2)
-	for _, tx := range txs {
-		if tx == nil {
+	for i, tx := range txs {
+		if tx == nil || errorsList[i] != nil {
 			continue
 		}
 		preloadSet[tx.FromAddress()] = struct{}{}

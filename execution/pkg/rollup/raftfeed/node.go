@@ -364,12 +364,12 @@ func (n *Node) SubmitStatus(batch []byte) submitStatus {
 	return n.forwardToLeader(batch)
 }
 
-// MaxBatchBytes returns the configured max_batch_bytes for this node.
+// MaxBatchBytes returns the usable limit shared by admission and HTTP forwarding.
 func (n *Node) MaxBatchBytes() int {
 	if n == nil {
 		return defaultMaxBatchBytes
 	}
-	return n.cfg.MaxBatchBytes
+	return effectiveBatchLimit(n.cfg.MaxBatchBytes)
 }
 
 // submitLocal validates a batch, splits it if it exceeds max_batch_bytes and queues the pieces for proposal.
@@ -385,7 +385,7 @@ func (n *Node) submitLocal(batch []byte) submitStatus {
 		}
 		return statusRedirect
 	}
-	pieces, err := splitBatch(batch, n.cfg.MaxBatchBytes)
+	pieces, err := splitBatch(batch, n.MaxBatchBytes())
 	if err != nil {
 		n.dropped.Add(1)
 		logger.Error("❌ [RAFT] dropping malformed batch that cannot be unmarshaled: %v", err)
@@ -399,34 +399,61 @@ func (n *Node) submitLocal(batch []byte) submitStatus {
 	if len(pieces) > 1 {
 		n.metrics.RecordSplit(len(pieces))
 	}
-	if cap(n.proposeQ)-len(n.proposeQ) < len(pieces) {
-		n.metrics.RecordStatusFull()
-		return statusFull
-	}
-	dones := make([]chan error, 0, len(pieces))
-	for _, p := range pieces {
-		pr := proposal{batch: p, done: make(chan error, 1), receivedAt: time.Now()}
-		n.metrics.RecordEnqueue(len(n.proposeQ))
-		select {
-		case n.proposeQ <- pr:
-			dones = append(dones, pr.done)
-		default:
-			n.metrics.RecordStatusFull()
-			return statusFull // pieces already queued still commit; a retry only duplicates them
-		}
-	}
+
 	timer := time.NewTimer(submitCommitTimeout)
 	defer timer.Stop()
-	for _, d := range dones {
-		select {
-		case err := <-d:
-			if err != nil {
-				return statusUncommitted
+
+	chunkSize := cap(n.proposeQ)
+	if chunkSize <= 0 {
+		chunkSize = 1
+	}
+
+	for i := 0; i < len(pieces); i += chunkSize {
+		end := i + chunkSize
+		if end > len(pieces) {
+			end = len(pieces)
+		}
+		chunk := pieces[i:end]
+
+		if cap(n.proposeQ)-len(n.proposeQ) < len(chunk) {
+			n.metrics.RecordStatusFull()
+			return statusFull
+		}
+
+		dones := make([]chan error, 0, len(chunk))
+		for _, p := range chunk {
+			pr := proposal{batch: p, done: make(chan error, 1), receivedAt: time.Now()}
+			n.metrics.RecordEnqueue(len(n.proposeQ))
+			select {
+			case n.proposeQ <- pr:
+				dones = append(dones, pr.done)
+			default:
+				n.metrics.RecordStatusFull()
+				return statusFull // pieces already queued still commit; a retry only duplicates them
 			}
-		case <-timer.C:
-			return statusUncommitted
-		case <-n.stop:
-			return statusNoLeader
+		}
+
+		// Reset the timer for each chunk: as long as each chunk commits within submitCommitTimeout,
+		// multi-chunk batches are actively making progress and must not be aborted prematurely.
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(submitCommitTimeout)
+
+		for _, d := range dones {
+			select {
+			case err := <-d:
+				if err != nil {
+					return statusUncommitted
+				}
+			case <-timer.C:
+				return statusUncommitted
+			case <-n.stop:
+				return statusNoLeader
+			}
 		}
 	}
 	return statusAccepted
@@ -453,6 +480,16 @@ func splitBatch(batch []byte, max int) ([][]byte, error) {
 		return nil, errors.New("empty batch")
 	}
 
+	chunkLimit := defaultMaxBatchBytes
+	if max < chunkLimit {
+		chunkLimit = max
+	}
+
+	// If the entire batch already fits within chunkLimit, no individual transaction can exceed max.
+	if len(batch) <= chunkLimit {
+		return [][]byte{batch}, nil
+	}
+
 	// Filter out transactions that individually exceed max
 	var validTxs []types.Transaction
 	for i, tx := range txs {
@@ -472,8 +509,8 @@ func splitBatch(batch []byte, max int) ([][]byte, error) {
 		return nil, nil // No valid transactions left in batch
 	}
 
-	// If all valid txs were kept and the original batch fits, return it
-	if len(validTxs) == len(txs) && len(batch) <= max {
+	// If all valid txs were kept and the original batch fits within chunkLimit, return it
+	if len(validTxs) == len(txs) && len(batch) <= chunkLimit {
 		return [][]byte{batch}, nil
 	}
 
@@ -501,7 +538,7 @@ func splitBatch(batch []byte, max int) ([][]byte, error) {
 			continue
 		}
 		txTotal := len(raw) + protoTxOverhead(len(raw))
-		if currentSize+txTotal > max && len(current) > 0 {
+		if currentSize+txTotal > chunkLimit && len(current) > 0 {
 			if err := flush(); err != nil {
 				return nil, err
 			}

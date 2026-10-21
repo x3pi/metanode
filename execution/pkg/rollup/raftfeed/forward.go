@@ -92,6 +92,27 @@ func (n *Node) handleSubmit(w http.ResponseWriter, r *http.Request) {
 
 // forwardToLeader sends the batch to the current leader. It returns the submitStatus reported by the leader.
 func (n *Node) forwardToLeader(batch []byte) submitStatus {
+	limit := n.MaxBatchBytes()
+	if len(batch) > maxForwardBody || len(batch) > limit {
+		pieces, err := splitBatch(batch, limit)
+		if err != nil {
+			return statusTooLarge
+		}
+		if len(pieces) == 0 {
+			return statusTooLarge
+		}
+		for _, p := range pieces {
+			st := n.forwardSingleBatch(p)
+			if st != statusAccepted {
+				return st
+			}
+		}
+		return statusAccepted
+	}
+	return n.forwardSingleBatch(batch)
+}
+
+func (n *Node) forwardSingleBatch(batch []byte) submitStatus {
 	addr, ok := n.leaderForwardAddr()
 	if !ok {
 		return statusNoLeader

@@ -1581,3 +1581,27 @@ func TestTxValidatorPool_ClassificationInvariants_NoOrphanInFlightReservations(t
 	assert.Equal(t, 1, pool.CountTransactions())
 }
 
+func TestReviewRaftBatchIngressMustEnforceSameSizeLimit(t *testing.T) {
+	prev := config.ConfigApp
+	config.ConfigApp = &config.SimpleChainConfig{ConsensusMode: "raft"}
+	defer func() { config.ConfigApp = prev }()
+	cs := &blockchain.ChainState{}
+	cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(1)})
+	tp := transaction_pool.NewTransactionPool()
+	vp := &TxValidatorPool{chainState: cs, transactionPool: tp}
+	// Exercise pre-verified admission to isolate size validation from signature checks.
+	tx := makeTestTx(1, 0)
+	tx.Proto().(*pb.Transaction).Data = make([]byte, (4<<20)+1)
+	raw, err := tx.Marshal()
+	require.NoError(t, err)
+	require.Greater(t, len(raw), 4<<20)
+	_, singleErr := vp.addTransactionToPoolInternalCap(tx, true, false)
+	require.ErrorContains(t, singleErr, "exceeds max batch limit")
+	errs := vp.addTransactionsToPoolInternalCap([]types.Transaction{tx}, true, false)
+	require.Len(t, errs, 1)
+	if errs[0] == nil {
+		t.Fatalf("single admission rejects serialized size %d, but batch admission succeeds; pool count=%d", len(raw), tp.CountTransactions())
+	}
+}
+
+
