@@ -779,6 +779,12 @@ func (c *Connection) writeLoop(tcpConn net.Conn, sendChan chan network.Message, 
 	logger.Info("writeLoop %s: started", remoteAddr)
 
 	handleTerminalWriteError := func(err error) {
+		select {
+		case <-quit:
+			// cleanup() closes quit before it closes the socket: this error is the intentional teardown, not a fault.
+			return
+		default:
+		}
 		logger.Error("writeLoop %s: %v. Signaling for disconnect.", remoteAddr, err)
 		c.metaMu.Lock()
 		c.cachedConnected = false

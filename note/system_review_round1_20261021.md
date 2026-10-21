@@ -1,5 +1,11 @@
 **Rà soát vòng 1 — network, Raft ingestion và commit block**
 
+> **Trạng thái xử lý (cập nhật sau khi merge PR #182):** năm phát hiện dưới đây đã được sửa trong PR #182, và năm test bổ sung hiện là file test thường trong cây nguồn
+> (`pkg/network/network_audit_test.go`, `pkg/rollup/raftfeed/raft_audit_test.go`, `pkg/blockchain/durability_audit_test.go`), chạy bằng `go test` bình thường.
+> Phần "Chạy lại bằng chứng" (Go overlay) và các đường dẫn `evidence/system_review_round1_20261021/` bên dưới mô tả bằng chứng gốc trước khi sửa;
+> thư mục bằng chứng đó không nằm trong repo. Các mục "Hướng sửa đề xuất, chưa triển khai" là đề xuất ban đầu, không phải trạng thái hiện tại.
+> Với phát hiện 1, bản sửa dời `UpdateLastBlockNumber` ra sau barrier block DB thay vì tạo watermark riêng; lý do đủ cho Raft nằm trong ghi chú tại `block_state_commit.go` (bước 9).
+
 Commit được rà: `773e62b926b86232ac96fda42fc4b9bd48ff1a1a`.
 Ngày thực hiện: 2026-10-21. Chỉ thêm báo cáo và bằng chứng; không sửa source production, không khởi động lại/deploy node.
 

@@ -61,3 +61,14 @@ func TestBatchSubmitter_RaftModeWithoutFeedRefusesInsteadOfLosingTheBatch(t *tes
 		t.Fatal("no feed is running: the batch must not be reported as accepted")
 	}
 }
+
+// The forwarder's raft branch calls raftfeed.SubmitBatchStatus directly (not batchSubmitter), so guard that path too:
+// with no feed running it must report a retryable status, never StatusAccepted and never StatusTooLarge (which drops).
+func TestSubmitBatchStatus_RaftModeWithoutFeedIsRetryable(t *testing.T) {
+	prev := config.ConfigApp
+	config.ConfigApp = &config.SimpleChainConfig{ConsensusMode: "raft"}
+	t.Cleanup(func() { config.ConfigApp = prev })
+	if st := raftfeed.SubmitBatchStatus([]byte{0x01}); st == raftfeed.StatusAccepted || st == raftfeed.StatusTooLarge {
+		t.Fatalf("no feed is running: status %d would make the forwarder acknowledge or drop the batch", st)
+	}
+}

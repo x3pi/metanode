@@ -13,10 +13,22 @@ import (
 	nt "github.com/meta-node-blockchain/meta-node/types/network"
 )
 
+// waitOrFail fails the test instead of hanging the whole package when a signal never arrives.
+func waitOrFail(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
 func TestAuditInitMustFinishBeforeNextRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseInit := func() { releaseOnce.Do(func() { close(release) }) }
 	started := make(chan struct{})
 	observed := make(chan bool, 1)
 	var initialized atomic.Bool
@@ -35,6 +47,8 @@ func TestAuditInitMustFinishBeforeNextRequest(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); _ = s.HandleConnection(c) }()
 	defer func() {
+		// a failed assertion must not leave the handler blocked, or the cleanup below would hang the package
+		releaseInit()
 		cancel()
 		client.Close()
 		c.Disconnect()
@@ -43,7 +57,7 @@ func TestAuditInitMustFinishBeforeNextRequest(t *testing.T) {
 	}()
 
 	writeCommand(t, client, "InitConnection")
-	<-started
+	waitOrFail(t, started, "InitConnection to start")
 	writeCommand(t, client, "SendRawTransactions")
 
 	// Phase 1: Verify SendRawTransactions does NOT execute while InitConnection is still blocked
@@ -55,7 +69,7 @@ func TestAuditInitMustFinishBeforeNextRequest(t *testing.T) {
 	}
 
 	// Phase 2: Unblock InitConnection and verify SendRawTransactions executes immediately
-	close(release)
+	releaseInit()
 	select {
 	case ready := <-observed:
 		if !ready {
@@ -129,7 +143,7 @@ func TestReviewInitServerShutdown(t *testing.T) {
 	}()
 
 	writeCommand(t, client, "InitConnection")
-	<-started
+	waitOrFail(t, started, "InitConnection to start")
 
 	// Cancel context while init is waiting
 	cancel()
@@ -170,7 +184,7 @@ func TestAuditWriterFailureMustDisconnect(t *testing.T) {
 	if err := c.SendMessage(msg); err != nil {
 		t.Fatal(err)
 	}
-	<-broken.failed
+	waitOrFail(t, broken.failed, "the injected write failure")
 	time.Sleep(30 * time.Millisecond)
 	if c.IsConnect() {
 		if err := c.SendMessage(msg); err == nil {

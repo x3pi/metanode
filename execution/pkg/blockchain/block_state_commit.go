@@ -298,6 +298,9 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 
 	// ─── 9. Update storage block counter and auto-update epoch ────────────
 	// Exposed only after block database and dependencies are fully durable.
+	// The counter doubles as the Raft FSM's Durable() watermark (raftfeed Snapshot/Restore): once Raft compacts its
+	// log the block DB is the only replay source, so "block DB durable" is exactly what that watermark must mean.
+	// NOMT is persisted by the caller after we return and can only lag the block DB (recoverable by replay), never lead it.
 	storage.UpdateLastBlockNumber(blockNum)
 	cs.CheckAndUpdateEpochFromBlock(header.Epoch(), header.TimeStamp())
 
