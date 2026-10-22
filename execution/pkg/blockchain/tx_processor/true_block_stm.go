@@ -1049,6 +1049,19 @@ func (stm *TrueBlockSTM) execOne(
 										canPayBalances = false
 										break
 									}
+								} else if delta.Sign() == 0 {
+									// If delta is 0 and address is present in MapSubBalance, ensure AccountState read doesn't hit ErrEstimateHit
+									if exRs.MapSubBalance() != nil {
+										if _, ok := exRs.MapSubBalance()[addr.Hex()]; ok {
+											_, errSt := mvccDB.AccountState(addr)
+											if errSt != nil && errors.Is(errSt, mvcc.ErrEstimateHit) {
+												atomic.AddInt32(&stm.abortCount, 1)
+												markSuspended()
+												stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
+												return
+											}
+										}
+									}
 								}
 							}
 
@@ -1077,6 +1090,27 @@ func (stm *TrueBlockSTM) execOne(
 												stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
 												return
 											}
+											logger.Error("🚨 [CRITICAL] SubTotalBalance failed after precheck for tx %s, addr %s: %v", tx.Hash().Hex(), addr.Hex(), errSub)
+										}
+									} else {
+										// Delta == 0: preserve legacy pendingBalance folding and WriteSet tracking
+										var hasSubBalance bool
+										if exRs.MapSubBalance() != nil {
+											_, hasSubBalance = exRs.MapSubBalance()[addr.Hex()]
+										}
+										if hasSubBalance {
+											errSub := mvccDB.SubTotalBalance(addr, big.NewInt(0))
+											if errSub != nil {
+												if errors.Is(errSub, mvcc.ErrEstimateHit) {
+													atomic.AddInt32(&stm.abortCount, 1)
+													markSuspended()
+													stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
+													return
+												}
+												logger.Error("🚨 [CRITICAL] SubTotalBalance(0) failed for tx %s, addr %s: %v", tx.Hash().Hex(), addr.Hex(), errSub)
+											}
+										} else {
+											mvccDB.AddBalance(addr, big.NewInt(0))
 										}
 									}
 								}
