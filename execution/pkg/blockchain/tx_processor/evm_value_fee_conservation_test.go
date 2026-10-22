@@ -8,10 +8,10 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	mt_types "github.com/meta-node-blockchain/meta-node/types"
 	"github.com/stretchr/testify/require"
@@ -395,4 +395,71 @@ func TestReviewEVMValueAndFee_PendingBalanceFolding(t *testing.T) {
 	gasFee := new(big.Int).Mul(new(big.Int).SetUint64(rcps[0].GasUsed()), new(big.Int).SetUint64(price))
 	expectedBalance := new(big.Int).Sub(big.NewInt(300_000_000_000), gasFee)
 	require.Equal(t, expectedBalance, accAfter.Balance(), "balance must equal initial total minus gas fee")
+}
+
+// Contract C holds pendingBalance, receives value and forwards part of it: C has both an add and a sub entry with a positive net delta.
+func TestEVMBalanceSettlementKeepsPendingFolding(t *testing.T) {
+	key, _ := crypto.HexToECDSA("4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318")
+	sender := crypto.PubkeyToAddress(key.PublicKey)
+	dest := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	contract := crypto.CreateAddress(sender, 1)
+	// runtime: CALL(gas=0xffff, dest, value=3, 0,0,0,0); POP; STOP  (37 bytes)
+	runtime := common.FromHex("0x60006000600060006003")
+	runtime = append(runtime, 0x73)
+	runtime = append(runtime, dest.Bytes()...)
+	runtime = append(runtime, common.FromHex("0x61fffff15000")...)
+	init := common.FromHex("0x6025600c60003960256000f3")
+	code := append(init, runtime...)
+
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+	t.Setenv("METANODE_DEVNET", "false")
+	cs, _, _, _ := newPersistentTestChainState(t)
+	cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(991)})
+	leader := common.HexToAddress(auditLeader)
+	seedAccount(t, cs, sender, big.NewInt(0).Mul(big.NewInt(1_000_000_000_000), big.NewInt(1000)), 1)
+	seedAccount(t, cs, leader, big.NewInt(0), 0)
+	seedAccount(t, cs, dest, big.NewInt(1), 1)
+	seedAccount(t, cs, contract, big.NewInt(0), 0)
+	cst, _ := cs.GetAccountStateDB().AccountState(contract)
+	cst.AddPendingBalance(big.NewInt(1000))
+
+	price := uint64(mt_common.MINIMUM_BASE_FEE)
+	steps := []struct {
+		to    *common.Address
+		value int64
+		data  []byte
+	}{{nil, 5, code}, {&contract, 7, []byte{1}}}
+	mk := func(i int) mt_types.Transaction {
+		st := steps[i]
+		signed, err := eth_types.SignNewTx(key, eth_types.NewEIP155Signer(big.NewInt(991)), &eth_types.LegacyTx{Nonce: uint64(1 + i), To: st.to, Value: big.NewInt(st.value), Gas: 200000, GasPrice: new(big.Int).SetUint64(price), Data: st.data})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx, err := transaction.NewTransactionFromEth(signed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tx
+	}
+	var rcps []mt_types.Receipt
+	var scrs []mt_types.ExecuteSCResult
+	for i := range steps {
+		tx := mk(i)
+		items := []grouptxns.Item{{ID: 0, Array: grouptxns.BuildDeterministicGroupAddrs(tx), Tx: tx}}
+		groups := grouptxns.GroupTransactionsDeterministic(items, cs.HasCode)
+		_, r, sc, _ := ProcessTransactionsOptimistic(context.Background(), cs, groups, blankHeader(), false, false, 999, leader, false)
+		rcps = append(rcps, r...)
+		scrs = append(scrs, sc...)
+	}
+	root, err := cs.GetAccountStateDB().IntermediateRoot(true)
+	require.NoError(t, err)
+	ca, err := cs.GetAccountStateDB().AccountState(contract)
+	require.NoError(t, err)
+	da, err := cs.GetAccountStateDB().AccountState(dest)
+	require.NoError(t, err)
+
+	require.Equal(t, big.NewInt(0), ca.PendingBalance(), "contract pendingBalance must be folded to 0")
+	require.Equal(t, big.NewInt(1009), ca.Balance(), "contract balance must be 1009")
+	require.Equal(t, big.NewInt(4), da.TotalBalance(), "dest account received 3")
+	require.Equal(t, common.HexToHash("0x85e7c9e409e65147f31230a1d63108a38e730f48c5c0d047291889e773ddf7e1"), root, "state root must match dev baseline")
 }

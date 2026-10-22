@@ -24,8 +24,8 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
-	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
+	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	mt_state "github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -185,9 +185,9 @@ func (stm *TrueBlockSTM) Process(
 	for i, tx := range stm.txs {
 		to := tx.ToAddress()
 		if to == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
-		   to == mt_common.GATEWAY_CONTRACT_ADDRESS ||
-		   to == mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS ||
-		   to == rollup.RollupSystemAddress {
+			to == mt_common.GATEWAY_CONTRACT_ADDRESS ||
+			to == mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS ||
+			to == rollup.RollupSystemAddress {
 			isBarrierTx[i] = true
 		}
 	}
@@ -999,27 +999,41 @@ func (stm *TrueBlockSTM) execOne(
 					if canPayGas {
 						if exRs.ReceiptStatus() == pb.RECEIPT_STATUS_RETURNED {
 							canPayBalances := true
-							// Calculate net balance delta per address across additions and subtractions
-							netDeltas := make(map[common.Address]*big.Int)
+							addBalances := make(map[common.Address]*big.Int)
 							if exRs.MapAddBalance() != nil {
 								for addrHex, addAmtBytes := range exRs.MapAddBalance() {
 									addr := common.HexToAddress(addrHex)
 									addAmt := big.NewInt(0).SetBytes(addAmtBytes)
-									if netDeltas[addr] == nil {
-										netDeltas[addr] = new(big.Int)
+									if addBalances[addr] == nil {
+										addBalances[addr] = new(big.Int)
 									}
-									netDeltas[addr].Add(netDeltas[addr], addAmt)
+									addBalances[addr].Add(addBalances[addr], addAmt)
 								}
 							}
+							subBalances := make(map[common.Address]*big.Int)
 							if exRs.MapSubBalance() != nil {
 								for addrHex, subAmtBytes := range exRs.MapSubBalance() {
 									addr := common.HexToAddress(addrHex)
 									subAmt := big.NewInt(0).SetBytes(subAmtBytes)
-									if netDeltas[addr] == nil {
-										netDeltas[addr] = new(big.Int)
+									if subBalances[addr] == nil {
+										subBalances[addr] = new(big.Int)
 									}
-									netDeltas[addr].Sub(netDeltas[addr], subAmt)
+									subBalances[addr].Add(subBalances[addr], subAmt)
 								}
+							}
+
+							netDeltas := make(map[common.Address]*big.Int)
+							for addr, addAmt := range addBalances {
+								if netDeltas[addr] == nil {
+									netDeltas[addr] = new(big.Int)
+								}
+								netDeltas[addr].Add(netDeltas[addr], addAmt)
+							}
+							for addr, subAmt := range subBalances {
+								if netDeltas[addr] == nil {
+									netDeltas[addr] = new(big.Int)
+								}
+								netDeltas[addr].Sub(netDeltas[addr], subAmt)
 							}
 
 							sortedAddrs := make([]common.Address, 0, len(netDeltas))
@@ -1030,22 +1044,9 @@ func (stm *TrueBlockSTM) execOne(
 								return bytes.Compare(a.Bytes(), b.Bytes())
 							})
 
-							// An address requires SubTotalBalance if delta < 0, or delta == 0 with a MapSubBalance entry (pendingBalance folding).
-							isSubBalance := func(addr common.Address) (bool, *big.Int) {
+							for _, addr := range sortedAddrs {
 								delta := netDeltas[addr]
 								if delta.Sign() < 0 {
-									return true, new(big.Int).Neg(delta)
-								}
-								if delta.Sign() == 0 && exRs.MapSubBalance() != nil {
-									if _, ok := exRs.MapSubBalance()[addr.Hex()]; ok {
-										return true, big.NewInt(0)
-									}
-								}
-								return false, nil
-							}
-
-							for _, addr := range sortedAddrs {
-								if isSub, needSub := isSubBalance(addr); isSub {
 									st, errSt := mvccDB.AccountState(addr)
 									if errSt != nil {
 										if errors.Is(errSt, mvcc.ErrEstimateHit) {
@@ -1057,7 +1058,8 @@ func (stm *TrueBlockSTM) execOne(
 										canPayBalances = false
 										break
 									}
-									if st == nil || needSub.Cmp(st.TotalBalance()) > 0 {
+									needed := new(big.Int).Neg(delta)
+									if st == nil || needed.Cmp(st.TotalBalance()) > 0 {
 										canPayBalances = false
 										break
 									}
@@ -1077,7 +1079,13 @@ func (stm *TrueBlockSTM) execOne(
 								mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 							} else {
 								for _, addr := range sortedAddrs {
-									if isSub, subAmt := isSubBalance(addr); isSub {
+									addAmt := addBalances[addr]
+									subAmt, hasSub := subBalances[addr]
+
+									if hasSub {
+										if addAmt != nil && addAmt.Sign() > 0 {
+											mvccDB.AddBalance(addr, addAmt)
+										}
 										if errSub := mvccDB.SubTotalBalance(addr, subAmt); errSub != nil {
 											if errors.Is(errSub, mvcc.ErrEstimateHit) {
 												atomic.AddInt32(&stm.abortCount, 1)
@@ -1085,10 +1093,11 @@ func (stm *TrueBlockSTM) execOne(
 												stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
 												return
 											}
+											// Safe to continue: precheck verified net delta sufficiency (if netDelta < 0) or addAmt >= subAmt (if netDelta >= 0).
 											logger.Error("🚨 [CRITICAL] SubTotalBalance failed after precheck for tx %s, addr %s: %v", tx.Hash().Hex(), addr.Hex(), errSub)
 										}
-									} else {
-										mvccDB.AddBalance(addr, netDeltas[addr])
+									} else if addAmt != nil && addAmt.Sign() > 0 {
+										mvccDB.AddBalance(addr, addAmt)
 									}
 								}
 								if exRs.MapStorageChange() != nil {
