@@ -168,14 +168,11 @@ func TestReviewEVMValueAndFee_SubsequentTxExecutes(t *testing.T) {
 	cs := newTestChainState(t)
 	cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(991)})
 
-	senderKey, err := crypto.GenerateKey()
+	senderKey, err := crypto.HexToECDSA("4f3edf983ac636a65a342ce7c70d482f693b4f6e6371c6f499dfd5262c4a0342")
 	require.NoError(t, err)
 	sender := crypto.PubkeyToAddress(senderKey.PublicKey)
 
-	recipientKey, err := crypto.GenerateKey()
-	require.NoError(t, err)
-	recipient := crypto.PubkeyToAddress(recipientKey.PublicKey)
-
+	recipient := common.HexToAddress("0x2222222222222222222222222222222222222222")
 	thirdAddr := common.HexToAddress("0x3333333333333333333333333333333333333333")
 	leader := common.HexToAddress(auditLeader)
 
@@ -201,31 +198,17 @@ func TestReviewEVMValueAndFee_SubsequentTxExecutes(t *testing.T) {
 		return res
 	}
 
-	makeRecipientTx := func(nonce uint64, to *common.Address, value *big.Int, gas uint64) mt_types.Transaction {
-		signed, err := eth_types.SignNewTx(recipientKey, eth_types.NewEIP155Signer(big.NewInt(991)), &eth_types.LegacyTx{
-			Nonce:    nonce,
-			To:       to,
-			Value:    value,
-			Gas:      gas,
-			GasPrice: new(big.Int).SetUint64(price),
-		})
-		require.NoError(t, err)
-		res, err := transaction.NewTransactionFromEth(signed)
-		require.NoError(t, err)
-		return res
-	}
-
-	// Tx 1: Sender -> Recipient (100,000,000,000)
+	// Tx 1 (nonce 1): Sender -> Recipient (100,000,000,000) (succeeds)
 	tx1 := makeSenderTx(1, &recipient, big.NewInt(100_000_000_000), 21000, nil)
 
-	// Tx 2: Sender payable deploy with value exhausting remaining funds (fails)
+	// Tx 2 (nonce 2): Sender payable deploy with value exhausting remaining funds (fails)
+	// Remaining funds after tx1: initial - 100B - (21000 * price) = 897,900,000,000.
+	// Payable value 895,000,000,000 + deploy gas fee (53201 * price = 5,320,100,000) > 897,900,000,000.
 	code := common.FromHex("0x6001600c60003960016000f300")
-	amount := new(big.Int).Sub(initial, big.NewInt(100_000_000_000))
-	amount.Sub(amount, new(big.Int).Mul(new(big.Int).SetUint64(mt_common.TRANSFER_GAS_COST), new(big.Int).SetUint64(price)))
-	tx2 := makeSenderTx(2, nil, amount, 100000, code)
+	tx2 := makeSenderTx(2, nil, big.NewInt(895_000_000_000), 100000, code)
 
-	// Tx 3: Recipient -> ThirdAddr (50,000,000,000) (succeeds)
-	tx3 := makeRecipientTx(1, &thirdAddr, big.NewInt(50_000_000_000), 21000)
+	// Tx 3 (nonce 3): Sender -> ThirdAddr (50,000,000,000) (succeeds after tx2 error)
+	tx3 := makeSenderTx(3, &thirdAddr, big.NewInt(50_000_000_000), 21000, nil)
 
 	txs := []mt_types.Transaction{tx1, tx2, tx3}
 	items := make([]grouptxns.Item, len(txs))
@@ -236,15 +219,30 @@ func TestReviewEVMValueAndFee_SubsequentTxExecutes(t *testing.T) {
 	_, rcps, _, _ := ProcessTransactionsOptimistic(context.Background(), cs, groups, blankHeader(), false, false, 999, leader, false)
 	require.Len(t, rcps, 3)
 
-	require.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcps[0].Status(), "tx1 must succeed")
-	require.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, rcps[1].Status(), "tx2 must fail with insufficient balance")
-	require.Equal(t, "insufficient balance", string(rcps[1].Return()))
-	require.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcps[2].Status(), "tx3 must succeed after tx2 failure")
+	rcpMap := make(map[common.Hash]mt_types.Receipt, len(rcps))
+	for _, r := range rcps {
+		rcpMap[r.TransactionHash()] = r
+	}
+
+	require.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcpMap[tx1.Hash()].Status(), "tx1 must succeed")
+	require.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, rcpMap[tx2.Hash()].Status(), "tx2 must fail with insufficient balance")
+	require.Equal(t, "insufficient balance", string(rcpMap[tx2.Hash()].Return()))
+	require.Equal(t, pb.RECEIPT_STATUS_RETURNED, rcpMap[tx3.Hash()].Status(), "tx3 must succeed after tx2 failure in the same block")
 
 	// Third address received its transfer
 	stThird, err := cs.GetAccountStateDB().AccountState(thirdAddr)
 	require.NoError(t, err)
 	require.Equal(t, big.NewInt(50_000_000_000), stThird.TotalBalance())
+
+	// Recipient received its transfer
+	stRecipient, err := cs.GetAccountStateDB().AccountState(recipient)
+	require.NoError(t, err)
+	require.Equal(t, big.NewInt(100_000_000_001), stRecipient.TotalBalance())
+
+	// Sender nonce reached 4
+	stSender, err := cs.GetAccountStateDB().AccountState(sender)
+	require.NoError(t, err)
+	require.Equal(t, uint64(4), stSender.Nonce())
 
 	// Conservation across all 4 accounts
 	sum := new(big.Int)
