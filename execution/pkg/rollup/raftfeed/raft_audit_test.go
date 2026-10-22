@@ -37,21 +37,14 @@ func TestAuditOversizeTxMustNotAcknowledgeLostBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !leader.node.Submit(batch) {
-		t.Fatal("Submit returned false: valid small tx was not accepted")
+	if leader.node.Submit(batch) {
+		t.Fatal("Submit returned true: batch containing oversized transaction must not be accepted")
 	}
-	h.waitBlocks(1, leader)
-	var committedNonces []uint64
-	for _, b := range leader.disk.blocks() {
-		for _, x := range b.Transactions {
-			tx, err := transaction.UnmarshalTransaction(x.Digest)
-			if err == nil {
-				committedNonces = append(committedNonces, tx.GetNonce())
-			}
-		}
+	if st := leader.node.SubmitStatus(batch); st != statusTooLarge {
+		t.Fatalf("expected statusTooLarge, got %d", st)
 	}
-	if len(committedNonces) != 1 || committedNonces[0] != 1 {
-		t.Fatalf("expected exactly nonce 1 committed in block, got nonces: %v", committedNonces)
+	if len(leader.disk.blocks()) != 0 {
+		t.Fatalf("expected 0 blocks committed for rejected batch, got %d", len(leader.disk.blocks()))
 	}
 }
 
@@ -353,5 +346,44 @@ func TestEncodedTxSizeMatchesProtobufWireFormat(t *testing.T) {
 		if got, want := EncodedTxSize(n), 1+protowire.SizeBytes(n); got != want {
 			t.Fatalf("EncodedTxSize(%d)=%d, protobuf encodes %d", n, got, want)
 		}
+	}
+}
+
+func TestReviewDifferentNodeLimitsMustNotAcknowledgeMissingTx(t *testing.T) {
+	h := newHarness(t, 3)
+	h.mutate = func(c *config.RaftConfig) {
+		c.MaxBatchBytes = 8 << 10
+		if c.NodeID == "n0" {
+			c.MaxBatchBytes = 4 << 10
+		}
+		c.HeartbeatTimeoutMs = 2000
+		c.ElectionTimeoutMs = 2000
+		c.LeaderLeaseTimeoutMs = 1000
+	}
+	h.startAll()
+	leader := h.leader()
+	if leader.id != "n0" {
+		t.Skip("fixture requires n0 leader")
+	}
+	var input pb.Transactions
+	if err := proto.Unmarshal(testBatch(t, 1, 2), &input); err != nil {
+		t.Fatal(err)
+	}
+	input.Transactions[1].Data = make([]byte, 5<<10)
+	batch, err := proto.Marshal(&input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := h.m[1].node.SubmitStatus(batch)
+	if st != statusAccepted {
+		return
+	}
+	h.waitBlocks(1, leader)
+	total := 0
+	for _, b := range leader.disk.blocks() {
+		total += len(b.Transactions)
+	}
+	if total != 2 {
+		t.Fatalf("status=200, submitted=2, delivered=%d; follower limit=%d leader limit=%d", total, h.m[1].node.MaxBatchBytes(), leader.node.MaxBatchBytes())
 	}
 }
