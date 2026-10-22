@@ -11,7 +11,7 @@ Nhãn bằng chứng: `[ĐO]` có log hoặc lệnh chạy trong phiên 2026-10-
 
 ## 1. Bản phát hành
 
-Commit đề xuất: **`cf456baf`** (bản cập nhật 2026-10-22; xem mục 1.4 cho phần thêm sau `e088671f`). Bản gốc đề xuất `e088671f`:
+Commit đề xuất: **commit `dev` cuối cùng đã qua CI ở mục 1.4** (bản cập nhật 2026-10-22, trước đó `cf456baf`; xem mục 1.4 cho phần thêm sau `e088671f`). Bản gốc đề xuất `e088671f`:
 
 **`e088671f`** (gồm `9c9caa93` và `c96640f4`; CI xanh ở `7e1c95ef`, chưa kiểm CI ở `e088671f` — kiểm trước khi deploy; các commit giữa `9c9caa93` và `7e1c95ef` là mempool PR #179 và sửa test, không đổi luật consensus `[ĐỌC CODE]`; `bf1c7380` và `e088671f` thêm fail-stop NOMT, xem mục 1.3) (hoặc commit mới hơn trên `dev` đã qua lại các kiểm tra ở mục 3). Mọi binary của mọi node phải build từ **cùng một commit**; ghi `sha256sum` từng binary vào biên bản triển khai.
 
@@ -55,6 +55,7 @@ Khi commit NOMT nền (hoặc ghi changelog) lỗi, ví dụ hết chỗ ghi đ�
 | `eee02a7d` | Attestation trạng thái chỉ nhận từ validator đã đăng ký và ký hợp lệ (`note/state_attestation_unauthenticated_20261021.md`) | Không đổi kết quả block; nút chạy bản cũ vẫn có thể bị kẻ lạ làm dừng, nên nâng cấp mọi node |
 | `ab25f1ae` | `eth_call` đồng thời không dùng chung MVM instance id; callback Xapian không còn nil-deref | Chỉ đường đọc off-chain, không đổi block |
 | `4cdf60b0`, `8c7233ec`, `a167cfad`, `76760421`, `7d8712e8`, `b55f6a17` | Đường nạp tx (PR #182/#183/#184): handshake, giới hạn kích thước batch, chuyển tiếp Raft; batch vượt `raft.max_batch_bytes` bị từ chối toàn bộ (413) | Không đổi luật thực thi. Đặt `raft.max_batch_bytes` như nhau trên các node Raft |
+| `9c82e518` (PR #185) | **Consensus (EVM / Block-STM):** nếu sender có đủ tiền cho gas nhưng không đủ cho value sau khi trừ gas, trước đây contract vẫn được cộng value mà sender không bị trừ (tạo tiền không có đối ứng, receipt `RETURNED`). Nay giao dịch bị `TRANSACTION_ERROR` (`insufficient balance`), vẫn tính gas, nonce tăng, bỏ code/storage/logs. Giao dịch hợp lệ cho cùng state root như trước (kiểm 19 kịch bản dev so với PR, gồm cả tài khoản có `pendingBalance`) | **Phải nâng cấp đồng loạt.** Block cũ từng rơi vào trường hợp này sẽ cho kết quả khác khi replay: chạy `tz_replay_check` đối chiếu (mục 4, bước 3) trước khi giữ dữ liệu |
 | `cf456baf` | P0/P1: fingerprint tham số giao thức (`mtn_protocolFingerprint`), kiểm tra genesis `protocol` (tùy chọn), 3 gauge Rust | Xem bước 8 mục 4 và dòng "Tham số giao thức" mục 5 |
 
 Đo A/B TPS cho PR #182 và #183: không phát hiện khác biệt (`note/evidence/pr182_tps_ab_20261021`, `note/evidence/pr183_tps_ab_20261022`). Không đo cho PR #184 hoặc P0/P1 `[CHƯA ĐO]`.
