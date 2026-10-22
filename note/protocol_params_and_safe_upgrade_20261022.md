@@ -1,10 +1,48 @@
 # Tham số giao thức (protocol parameters) và cách nâng cấp không ảnh hưởng dữ liệu — rà soát và đề xuất, 2026-10-22
 
-Trạng thái: **ĐỀ XUẤT, chưa triển khai.** Tài liệu này (1) rà soát tham số nào đang là cấu hình riêng từng node nhưng thực chất ảnh hưởng tới tính nhất quán giữa các validator, (2) đề xuất đưa chúng thành tham số giao thức có phiên bản, (3) hướng dẫn nâng cấp để dữ liệu không bị ảnh hưởng. Chưa có dòng code nào được đổi. Mọi thay đổi ở đây là **thay đổi consensus** nên cần bạn duyệt hướng và phải triển khai đồng loạt (xem mục 6).
+Trạng thái: **P0 và P1 đã triển khai (2026-10-22); P2 và P3 vẫn là đề xuất.** P0 và P1 không đổi bất kỳ luật thực thi nào: chúng chỉ đo, báo cáo, và từ chối khởi động khi cấu hình lệch với genesis đã khai báo. P2/P3 là thay đổi consensus nên cần bạn duyệt và phải triển khai đồng loạt (xem mục 6).
 
 Nhãn bằng chứng: `[ĐỌC CODE]` kèm vị trí; `[ĐO]` có lệnh chạy; `[CHƯA ĐO]`; `[GIẢ THUYẾT]`. Phần Sui lấy từ mã nguồn `MystenLabs/sui` nhánh `main` đọc qua công cụ tóm tắt trang, nên khi cần dùng làm căn cứ chính thức hãy mở lại file gốc.
 
 ---
+
+## 0. Đã triển khai: P0 và P1
+
+### 0.1. Có gì
+| Thành phần | Vị trí |
+|---|---|
+| Gói lõi: chuẩn hóa các tham số, dấu vân tay từng trường và tổng, kiểm tra với genesis | `execution/pkg/protocolparams/` |
+| Mục `protocol` tùy chọn trong genesis (`config.protocol`), các trường con đều tùy chọn: không khai báo thì không kiểm | `execution/pkg/config/genesis.go` (`ProtocolSection`) |
+| Kiểm tra khi khởi động: genesis có mục `protocol` mà `config.json` lệch thì **node không khởi động**, in ra từng trường lệch; không có mục `protocol` thì chỉ ghi cảnh báo kèm dấu vân tay | `execution/cmd/simple_chain/app_network.go` (`initNetwork`) |
+| RPC chỉ đọc `mtn_protocolFingerprint` | `execution/cmd/simple_chain/mtn_api.go` |
+| Công cụ so sánh cả cụm, tính offline, và sinh đoạn `protocol` cho genesis | `execution/cmd/tool/protocol_fingerprint/` |
+| Rust: metric `consensus_max_transaction_size_bytes`, `consensus_max_transactions_in_block_bytes`, `consensus_max_num_transactions_in_block` (giá trị hiệu lực của node) và cảnh báo `[PROTOCOL]` khi giới hạn bị ghi đè từ cấu hình riêng của node | `consensus/metanode/meta-consensus/core/src/{metrics.rs, authority_node/mod.rs}`, `consensus/metanode/src/node/setup_consensus/mod.rs` |
+| Cảnh báo ở hướng dẫn chỉnh kích thước block | `HOW_TO_TUNE_BLOCK_SIZE.md` |
+
+### 0.2. Khác với đề xuất ban đầu, và vì sao
+- **P1 đặt nguồn chung ở genesis, chưa ở trạng thái on-chain.** Ghi một khóa vào trạng thái làm đổi state root, tức là một thay đổi consensus; P1 phải không đổi kết quả thực thi. Bản sao on-chain chuyển sang P2.
+- **Không nên thêm mục `protocol` vào genesis của chain đã công bố `GenesisDigest`.** `GenesisDigest` là keccak256 của chính nội dung `genesis.json` (`pkg/cross_chain/types.go:84`, `ceremony/digest.go`); sửa file làm file không còn khớp digest đã công bố. Với chain mới, khai báo `protocol` **trước khi** công bố digest thì digest cam kết luôn cả tham số giao thức. Với chain đang chạy, dùng P0 (so sánh dấu vân tay) thay vì sửa genesis.
+- **Không kiểm khi bắt tay peer:** các validator Go không kết nối trực tiếp với nhau (không có chỗ nào trong `cmd/simple_chain` dựng kết nối master/child), nên không có bước bắt tay để gắn kiểm tra. Việc so sánh làm qua RPC bằng công cụ.
+- **Giới hạn block của Rust xuất qua metric, chưa nằm trong dấu vân tay Go.** So sánh chúng bằng Prometheus; công cụ chưa đọc metric.
+- **`verify_device_key`, `state_backend`, `raft.max_batch_bytes`, `attestation_interval`, `epoch_duration_seconds`, `chain_id` chỉ vào dấu vân tay, không vào mục `protocol` của genesis** (chưa xác minh được đường thực thi hoặc đã có nguồn chung). Một giá trị Raft `max_batch_bytes` bỏ trống được chuẩn hóa thành mặc định 4 MiB, nên "bỏ trống" và "đặt tường minh bằng mặc định" cho cùng dấu vân tay.
+
+### 0.3. Cách dùng
+```bash
+# so sánh cả cụm (danh sách nút theo định dạng /tmp/rpc_nodes.json hoặc {"tên":"url"}): exit 0 đồng nhất, 1 lệch, 2 có nút không hỏi được
+protocol_fingerprint -nodes rpc_nodes.json
+
+# trước khi triển khai: chạy kiểm tra khởi động trên file thật, không cần khởi động node
+protocol_fingerprint -config config.json -genesis genesis.json
+
+# chain MỚI: sinh mục protocol để dán vào config của genesis.json TRƯỚC khi công bố digest
+protocol_fingerprint -config config.json -genesis genesis.json -snippet
+```
+Node cũ chưa có RPC này sẽ được báo là lỗi ("node too old"), không bao giờ bị tính là đồng nhất.
+
+### 0.4. Bằng chứng
+- `[ĐO]` Test đơn vị: `execution/pkg/protocolparams` (mỗi trường được dấu vân tay có một test đột biến riêng; test phản xạ buộc mọi trường mới phải vào danh sách; chuẩn hóa địa chỉ free-fee; mọi trường khai báo trong genesis bị bắt khi lệch; tương thích ngược khi đọc genesis cũ và mới) và `execution/cmd/tool/protocol_fingerprint` (so sánh, nút không hỏi được không bao giờ tính là đồng nhất, kết quả ổn định khi hòa, truy vấn HTTP thật). Tôi phá thử ba chỗ trong `protocolparams.go` (bỏ một trường khỏi danh sách, không chuẩn hóa free-fee, bỏ kiểm `account_gate`) và test bắt được cả ba.
+- `[ĐO]` Chạy thật trên cụm Raft 3 node với binary mới (cổng 31xxx, tách khỏi cụm CI): (1) đồng nhất → công cụ báo cả 3 giống nhau, exit 0; (2) đổi `cross_chain.velocity_limit_disabled` trên đúng một node rồi khởi động lại nó → công cụ exit 1 và nêu đúng node `n1` cùng trường lệch; (3) genesis có mục `protocol` khớp → node khởi động và ghi `config.json matches the genesis protocol section`; (4) cùng genesis nhưng cấu hình node lệch → node thoát với mã 1 và thông báo nêu `cross_chain.velocity_limit_disabled: config.json has true, genesis protocol section declares false`. Dấu vân tay tính offline bằng `-config ... -genesis ...` khớp từng ký tự với giá trị node đang chạy báo.
+- `[CHƯA ĐO]` Chưa chạy trên cụm nhiều máy 231/230; chưa chạy toàn bộ CI cục bộ trên binary có thay đổi này; chưa đo tác động hiệu năng (kiểm tra chỉ chạy một lần lúc khởi động).
 
 ## 1. Hiện trạng: luật giao thức đang đọc từ cấu hình riêng từng node
 
@@ -83,8 +121,8 @@ Một bản ghi duy nhất, ví dụ `ProtocolParams`, gồm `version`, các tha
 
 | Pha | Việc | Ảnh hưởng consensus | Dữ liệu |
 |---|---|---|---|
-| P0 | **Dấu vân tay cấu hình:** mỗi node băm các trường loại A/B/D, xuất ra metric/RPC; công cụ so sánh trên cả cụm; kiểm tra khi khởi động và khi bắt tay peer (chỉ cảnh báo). Sửa `HOW_TO_TUNE_BLOCK_SIZE.md` để nói rõ đây là tham số giao thức. | Không | Không đổi |
-| P1 | Thêm `ProtocolParams` vào genesis và trạng thái on-chain, **chỉ đọc và so sánh** với cấu hình cục bộ; lệch thì từ chối khởi động với tham số loại A. | Không đổi kết quả thực thi | Chỉ thêm một khóa trạng thái, trường mới `omitempty` |
+| P0 ✅ | **Dấu vân tay cấu hình:** mỗi node băm các trường loại A/B/D, xuất ra metric/RPC; công cụ so sánh trên cả cụm; kiểm tra khi khởi động và khi bắt tay peer (chỉ cảnh báo). Sửa `HOW_TO_TUNE_BLOCK_SIZE.md` để nói rõ đây là tham số giao thức. | Không | Không đổi |
+| P1 ✅ (chỉ genesis, xem mục 0.2) | Thêm `ProtocolParams` vào genesis và trạng thái on-chain, **chỉ đọc và so sánh** với cấu hình cục bộ; lệch thì từ chối khởi động với tham số loại A. | Không đổi kết quả thực thi | Chỉ thêm một khóa trạng thái, trường mới `omitempty` |
 | P2 | Chuyển luật loại A sang đọc từ `ProtocolParams` (giữ nguyên giá trị hiện hành khi khởi tạo cho chain đang chạy). | **Có** (nguồn đọc đổi); yêu cầu P0 đã chứng minh các node giống nhau | Cần lệnh khởi tạo một lần, idempotent |
 | P3 | Phiên bản có cổng kích hoạt tại ranh giới epoch + phiếu bầu validator (Rust `EpochChangeProposal` mở rộng) + cổng `version >= N` ở Go. | Có, nhưng từ đây trở đi các thay đổi sau có thể nâng cấp cuốn chiếu | Không cần di trú nếu theo mục 5.2 |
 

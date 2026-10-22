@@ -1,5 +1,12 @@
 # Hướng dẫn cấu hình giới hạn Transaction (TX) trong 1 Block
 
+> ⚠️ **Đây là tham số giao thức, không phải cấu hình riêng từng node.** Mỗi validator kiểm tra block nhận được bằng giới hạn *của chính nó* (`block_verifier.rs`), nên hai validator có giới hạn khác nhau sẽ từ chối block của nhau. Vì vậy:
+> - sửa `crates/meta-protocol-config/src/lib.rs` rồi build lại và **thay binary trên mọi validator cùng lúc** (không nâng cấp cuốn chiếu);
+> - **không** dùng `consensus_max_num_transactions_in_block` trong cấu hình TOML của riêng một node (node ghi cảnh báo `[PROTOCOL]` khi bị ghi đè);
+> - sau khi triển khai, so sánh cả cụm: metric `consensus_max_transaction_size_bytes`, `consensus_max_transactions_in_block_bytes`, `consensus_max_num_transactions_in_block` phải bằng nhau trên mọi validator.
+> - Giá trị hiện hành trong mã: 2 MB và 4.000 giao dịch mỗi block (ví dụ 50 MB / 50.000 dưới đây chỉ là minh họa cách sửa).
+> Xem `note/protocol_params_and_safe_upgrade_20261022.md`.
+
 Hệ thống Metanode được thiết kế kết hợp giữa **Go (Thực thi EVM & Mempool)** và **Rust (Đồng thuận DAG)**. Do đó, để thay đổi số lượng TX tối đa trong một block (ví dụ: tăng từ 4,000 lên 50,000 hoặc 100,000), bạn cần điều chỉnh các tham số ở **cả 2 hệ thống**.
 
 Dưới đây là 3 vị trí bạn cần sửa đổi để đảm bảo mạng không bị nghẽn hay cắt cụt block.

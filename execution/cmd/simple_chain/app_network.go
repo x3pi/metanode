@@ -12,6 +12,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/network"
 	"github.com/meta-node-blockchain/meta-node/pkg/node"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/protocolparams"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 )
 
@@ -34,6 +35,19 @@ func (app *App) initNetwork() error {
 	app.config.ChainId = app.genesis.Config.ChainId
 	if err := app.config.ValidateChainBinding(); err != nil {
 		return err
+	}
+	// Every validator must execute by the same rules, and those rules are read from each node's own config.json. If the
+	// genesis declares a protocol section, a node whose config disagrees must not start; otherwise publish the fingerprint
+	// so the operator can compare nodes (cmd/tool/protocol_fingerprint).
+	report, err := protocolparams.VerifyAgainstGenesis(app.config, app.genesis)
+	if err != nil {
+		return err
+	}
+	app.protocolReport = report
+	if report.GenesisSection {
+		logger.Info("🧬 [PROTOCOL] config.json matches the genesis protocol section; fingerprint=%s", report.Fingerprint)
+	} else {
+		logger.Warn("🧬 [PROTOCOL] genesis has no protocol section, so config.json cannot be cross-checked; fingerprint=%s (compare it across validators)", report.Fingerprint)
 	}
 	// One chain ID for the Parent Chain and every execution cluster: parent txs signed here must carry it.
 	if app.config.ChainId != nil && app.config.ChainId.IsUint64() && app.config.ChainId.Sign() > 0 {

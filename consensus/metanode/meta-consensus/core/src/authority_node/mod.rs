@@ -304,6 +304,17 @@ where
             .node_metrics
             .protocol_version
             .set(context.protocol_config.version.as_u64() as i64);
+        // The limits this node actually enforces, so a cluster can be compared from its metrics alone.
+        let node_metrics = &context.metrics.node_metrics;
+        node_metrics
+            .consensus_max_transaction_size_bytes
+            .set(context.protocol_config.max_transaction_size_bytes() as i64);
+        node_metrics
+            .consensus_max_transactions_in_block_bytes
+            .set(context.protocol_config.max_transactions_in_block_bytes() as i64);
+        node_metrics
+            .consensus_max_num_transactions_in_block
+            .set(context.protocol_config.max_num_transactions_in_block() as i64);
 
         let (tx_client, tx_receiver) = TransactionClient::new(context.clone());
         let tx_consumer = TransactionConsumer::new(tx_receiver, context.clone());

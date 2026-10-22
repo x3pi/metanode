@@ -26,6 +26,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mining" // Import mining package
+	"github.com/meta-node-blockchain/meta-node/pkg/protocolparams"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
@@ -73,6 +74,14 @@ func NewMtnAPI(app *App, ethApi *MetaAPI) *MtnAPI {
 // connectAndCreateRemoteStorage establishes a connection to a remote storage service.
 
 // GetExecuteSCResultsHash calculates and returns the hash of smart contract execution results for a given block number.
+
+// ProtocolFingerprint (mtn_protocolFingerprint) returns the fingerprint of the settings that decide how blocks execute,
+// computed once at startup, with the values and a short hash per field. Compare it across validators
+// (cmd/tool/protocol_fingerprint): a difference means the nodes are not running by the same rules. Read-only.
+func (api *MtnAPI) ProtocolFingerprint() protocolparams.Report {
+	return api.App.protocolReport
+}
+
 // Tạm thời public có thể gọi lấy getExecuteSCResultsHash qua rpc
 func (api *MtnAPI) GetExecuteSCResultsHash(ctx context.Context, blockNumber hexutil.Uint64) (common.Hash, error) {
 	logger.Error("blockNumber:", blockNumber)

@@ -36,6 +36,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/network"
 	"github.com/meta-node-blockchain/meta-node/pkg/node"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/protocolparams"
 	"github.com/meta-node-blockchain/meta-node/pkg/pruning"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
@@ -142,6 +143,7 @@ type App struct {
 	// Configuration
 	config                 *config.SimpleChainConfig
 	genesis                *config.GenesisData
+	protocolReport         protocolparams.Report // fingerprint of the consensus-relevant settings, computed once at startup
 	keyPair                *bls.KeyPair
 	chainState             *blockchain.ChainState
 	explorerSearch         *explorer.ExplorerSearchService

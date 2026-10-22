@@ -252,6 +252,11 @@ pub fn test_metrics() -> Arc<Metrics> {
 pub(crate) struct NodeMetrics {
     pub(crate) authority_index: IntGaugeVec,
     pub(crate) protocol_version: IntGauge,
+    // Effective block limits of this node. Every validator must report the same three values: each one verifies
+    // received blocks against its OWN limits, so a difference makes it reject blocks the others accept.
+    pub(crate) consensus_max_transaction_size_bytes: IntGauge,
+    pub(crate) consensus_max_transactions_in_block_bytes: IntGauge,
+    pub(crate) consensus_max_num_transactions_in_block: IntGauge,
     pub(crate) block_commit_latency: Histogram,
     pub(crate) proposed_blocks: IntCounterVec,
     pub(crate) proposed_block_size: Histogram,
@@ -399,6 +404,21 @@ impl NodeMetrics {
             protocol_version: register_or_replace_int_gauge(
                 "protocol_version",
                 "The protocol version used in this epoch",
+                registry,
+            ),
+            consensus_max_transaction_size_bytes: register_or_replace_int_gauge(
+                "consensus_max_transaction_size_bytes",
+                "Effective maximum size of one transaction accepted by consensus on this node; must be identical on every validator",
+                registry,
+            ),
+            consensus_max_transactions_in_block_bytes: register_or_replace_int_gauge(
+                "consensus_max_transactions_in_block_bytes",
+                "Effective maximum total transaction bytes in one block on this node; must be identical on every validator",
+                registry,
+            ),
+            consensus_max_num_transactions_in_block: register_or_replace_int_gauge(
+                "consensus_max_num_transactions_in_block",
+                "Effective maximum number of transactions in one block on this node; must be identical on every validator",
                 registry,
             ),
             block_commit_latency: register_or_replace_histogram(
