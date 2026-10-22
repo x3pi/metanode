@@ -24,8 +24,8 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
-	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
+	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	mt_state "github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -185,9 +185,9 @@ func (stm *TrueBlockSTM) Process(
 	for i, tx := range stm.txs {
 		to := tx.ToAddress()
 		if to == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
-		   to == mt_common.GATEWAY_CONTRACT_ADDRESS ||
-		   to == mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS ||
-		   to == rollup.RollupSystemAddress {
+			to == mt_common.GATEWAY_CONTRACT_ADDRESS ||
+			to == mt_common.PARENT_CHAIN_GATEWAY_CONTRACT_ADDRESS ||
+			to == rollup.RollupSystemAddress {
 			isBarrierTx[i] = true
 		}
 	}
@@ -998,47 +998,136 @@ func (stm *TrueBlockSTM) execOne(
 
 					if canPayGas {
 						if exRs.ReceiptStatus() == pb.RECEIPT_STATUS_RETURNED {
+							canPayBalances := true
+							addBalances := make(map[common.Address]*big.Int)
 							if exRs.MapAddBalance() != nil {
 								for addrHex, addAmtBytes := range exRs.MapAddBalance() {
 									addr := common.HexToAddress(addrHex)
 									addAmt := big.NewInt(0).SetBytes(addAmtBytes)
-									mvccDB.AddBalance(addr, addAmt)
+									if addBalances[addr] == nil {
+										addBalances[addr] = new(big.Int)
+									}
+									addBalances[addr].Add(addBalances[addr], addAmt)
 								}
 							}
+							subBalances := make(map[common.Address]*big.Int)
 							if exRs.MapSubBalance() != nil {
 								for addrHex, subAmtBytes := range exRs.MapSubBalance() {
 									addr := common.HexToAddress(addrHex)
 									subAmt := big.NewInt(0).SetBytes(subAmtBytes)
-									mvccDB.SubTotalBalance(addr, subAmt)
-								}
-							}
-							if exRs.MapStorageChange() != nil {
-								for addrHex, changes := range exRs.MapStorageChange() {
-									addr := common.HexToAddress(addrHex)
-									var keys [][]byte
-									var values [][]byte
-									for keyHex, valueBytes := range changes {
-										keys = append(keys, common.HexToHash(keyHex).Bytes())
-										values = append(values, valueBytes)
+									if subBalances[addr] == nil {
+										subBalances[addr] = new(big.Int)
 									}
-									scDB.BatchSetStorageValues(addr, keys, values)
+									subBalances[addr].Add(subBalances[addr], subAmt)
 								}
 							}
-							if exRs.MapCodeHash() != nil {
-								mapCreator := exRs.MapCreatorPubkey()
-								mapStorage := exRs.MapStorageAddress()
-								for addrHex, newCodeHashBytes := range exRs.MapCodeHash() {
-									addr := common.HexToAddress(addrHex)
-									newCodeHash := common.BytesToHash(newCodeHashBytes)
-									mvccDB.SetCodeHash(addr, newCodeHash)
-									if mapCreator != nil {
-										if creatorBytes, ok := mapCreator[addrHex]; ok {
-											mvccDB.SetCreatorPublicKey(addr, mt_common.PubkeyFromBytes(creatorBytes))
+
+							netDeltas := make(map[common.Address]*big.Int)
+							for addr, addAmt := range addBalances {
+								if netDeltas[addr] == nil {
+									netDeltas[addr] = new(big.Int)
+								}
+								netDeltas[addr].Add(netDeltas[addr], addAmt)
+							}
+							for addr, subAmt := range subBalances {
+								if netDeltas[addr] == nil {
+									netDeltas[addr] = new(big.Int)
+								}
+								netDeltas[addr].Sub(netDeltas[addr], subAmt)
+							}
+
+							sortedAddrs := make([]common.Address, 0, len(netDeltas))
+							for addr := range netDeltas {
+								sortedAddrs = append(sortedAddrs, addr)
+							}
+							slices.SortFunc(sortedAddrs, func(a, b common.Address) int {
+								return bytes.Compare(a.Bytes(), b.Bytes())
+							})
+
+							for _, addr := range sortedAddrs {
+								delta := netDeltas[addr]
+								if delta.Sign() < 0 {
+									st, errSt := mvccDB.AccountState(addr)
+									if errSt != nil {
+										if errors.Is(errSt, mvcc.ErrEstimateHit) {
+											atomic.AddInt32(&stm.abortCount, 1)
+											markSuspended()
+											stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
+											return
 										}
+										canPayBalances = false
+										break
 									}
-									if mapStorage != nil {
-										if storageAddr, ok := mapStorage[addrHex]; ok {
-											mvccDB.SetStorageAddress(addr, storageAddr)
+									needed := new(big.Int).Neg(delta)
+									if st == nil || needed.Cmp(st.TotalBalance()) > 0 {
+										canPayBalances = false
+										break
+									}
+								}
+							}
+
+							if !canPayBalances {
+								receiptStatus = pb.RECEIPT_STATUS_TRANSACTION_ERROR
+								ret = []byte("insufficient balance")
+								exception = pb.EXCEPTION_NONE
+								eventLogs = nil
+								rcp.UpdateExecuteResult(receiptStatus, ret, exception, gasUsed, eventLogs)
+								exRs = smart_contract.NewExecuteSCResult(
+									tx.Hash(), receiptStatus, exception, ret, gasUsed, common.Hash{},
+									nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+								)
+								mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
+							} else {
+								for _, addr := range sortedAddrs {
+									addAmt := addBalances[addr]
+									subAmt, hasSub := subBalances[addr]
+
+									if hasSub {
+										if addAmt != nil && addAmt.Sign() > 0 {
+											mvccDB.AddBalance(addr, addAmt)
+										}
+										if errSub := mvccDB.SubTotalBalance(addr, subAmt); errSub != nil {
+											if errors.Is(errSub, mvcc.ErrEstimateHit) {
+												atomic.AddInt32(&stm.abortCount, 1)
+												markSuspended()
+												stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
+												return
+											}
+											// Safe to continue: precheck verified net delta sufficiency (if netDelta < 0) or addAmt >= subAmt (if netDelta >= 0).
+											logger.Error("🚨 [CRITICAL] SubTotalBalance failed after precheck for tx %s, addr %s: %v", tx.Hash().Hex(), addr.Hex(), errSub)
+										}
+									} else if addAmt != nil && addAmt.Sign() > 0 {
+										mvccDB.AddBalance(addr, addAmt)
+									}
+								}
+								if exRs.MapStorageChange() != nil {
+									for addrHex, changes := range exRs.MapStorageChange() {
+										addr := common.HexToAddress(addrHex)
+										var keys [][]byte
+										var values [][]byte
+										for keyHex, valueBytes := range changes {
+											keys = append(keys, common.HexToHash(keyHex).Bytes())
+											values = append(values, valueBytes)
+										}
+										scDB.BatchSetStorageValues(addr, keys, values)
+									}
+								}
+								if exRs.MapCodeHash() != nil {
+									mapCreator := exRs.MapCreatorPubkey()
+									mapStorage := exRs.MapStorageAddress()
+									for addrHex, newCodeHashBytes := range exRs.MapCodeHash() {
+										addr := common.HexToAddress(addrHex)
+										newCodeHash := common.BytesToHash(newCodeHashBytes)
+										mvccDB.SetCodeHash(addr, newCodeHash)
+										if mapCreator != nil {
+											if creatorBytes, ok := mapCreator[addrHex]; ok {
+												mvccDB.SetCreatorPublicKey(addr, mt_common.PubkeyFromBytes(creatorBytes))
+											}
+										}
+										if mapStorage != nil {
+											if storageAddr, ok := mapStorage[addrHex]; ok {
+												mvccDB.SetStorageAddress(addr, storageAddr)
+											}
 										}
 									}
 								}
