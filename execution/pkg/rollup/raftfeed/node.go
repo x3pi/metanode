@@ -395,11 +395,6 @@ func (n *Node) submitLocal(batch []byte) submitStatus {
 		logger.Error("❌ [RAFT] dropping malformed batch that cannot be unmarshaled: %v", err)
 		return statusAccepted
 	}
-	if len(pieces) == 0 {
-		n.dropped.Add(1)
-		logger.Warn("❌ [RAFT] dropping batch where all transactions exceed max_batch_bytes %d", n.cfg.MaxBatchBytes)
-		return statusTooLarge
-	}
 	if len(pieces) > 1 {
 		n.metrics.RecordSplit(len(pieces))
 	}
@@ -476,9 +471,9 @@ func protoTxOverhead(rawLen int) int {
 	return tagSize + varintSize
 }
 
-// splitBatch returns the batch as-is when it fits, else greedily regroups its txs into batches of at most max
-// bytes. If any individual transaction exceeds max, ErrTxTooLarge is returned so an oversized transaction cannot
-// cause partial acceptance or silent drop.
+// splitBatch returns the batch as-is when it fits one chunk, else greedily regroups its txs into pieces of at most
+// chunkLimit bytes. It is all-or-nothing: a tx above max returns ErrTxTooLarge and a tx that cannot be re-encoded returns
+// an error, so a batch is never accepted with some of its transactions silently dropped.
 func splitBatch(batch []byte, max int) ([][]byte, error) {
 	txs, err := transaction.UnmarshalTransactions(batch)
 	if err != nil {
@@ -493,23 +488,24 @@ func splitBatch(batch []byte, max int) ([][]byte, error) {
 		chunkLimit = max
 	}
 
-	// Verify that no individual transaction exceeds max. An oversized transaction cannot be proposed
-	// as part of a batch without partial acceptance (silently dropping it while acknowledging the batch).
+	// Fast path, the common case on the leader's serial submit path: the whole batch fits one chunk, so no single tx can
+	// exceed max (an encoded tx is never longer than the batch that holds it) and nothing needs sizing or re-encoding.
+	if len(batch) <= chunkLimit {
+		return [][]byte{batch}, nil
+	}
+
+	// Size every tx once. One above max cannot be proposed at all.
+	sizes := make([]int, len(txs))
 	for i, tx := range txs {
 		raw, err := tx.Marshal()
 		if err != nil {
-			logger.Warn("[RAFT] skipping unmarshalable transaction %d: %v", i, err)
-			continue
+			return nil, fmt.Errorf("marshal transaction %d: %w", i, err)
 		}
-		if len(raw)+protoTxOverhead(len(raw)) > max {
+		sizes[i] = EncodedTxSize(len(raw))
+		if sizes[i] > max {
 			logger.Warn("❌ [RAFT] rejecting batch: transaction %d (%d bytes exceeds max_batch_bytes %d)", i, len(raw), max)
 			return nil, ErrTxTooLarge
 		}
-	}
-
-	// If the entire batch already fits within chunkLimit, return it
-	if len(batch) <= chunkLimit {
-		return [][]byte{batch}, nil
 	}
 
 	var out [][]byte
@@ -530,19 +526,14 @@ func splitBatch(batch []byte, max int) ([][]byte, error) {
 		return nil
 	}
 
-	for _, tx := range txs {
-		raw, err := tx.Marshal()
-		if err != nil {
-			continue
-		}
-		txTotal := len(raw) + protoTxOverhead(len(raw))
-		if currentSize+txTotal > chunkLimit && len(current) > 0 {
+	for i, tx := range txs {
+		if currentSize+sizes[i] > chunkLimit && len(current) > 0 {
 			if err := flush(); err != nil {
 				return nil, err
 			}
 		}
 		current = append(current, tx)
-		currentSize += txTotal
+		currentSize += sizes[i]
 	}
 
 	if err := flush(); err != nil {

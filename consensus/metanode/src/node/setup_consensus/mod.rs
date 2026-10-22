@@ -312,6 +312,13 @@ impl ConsensusNode {
         let parameters = Self::build_consensus_parameters(config, storage)?;
         let mut protocol_config = ProtocolConfig::get_for_max_version_UNSAFE();
         if let Some(limit) = config.consensus_max_num_transactions_in_block {
+            // This replaces a protocol limit with a value from THIS node's config. Every validator checks received
+            // blocks against its own limit, so validators with different values reject each other's blocks.
+            warn!(
+                "⚠️ [PROTOCOL] consensus_max_num_transactions_in_block overridden from this node's config: {} \
+                 (must be identical on every validator; compare the consensus_max_* metrics across the cluster)",
+                limit
+            );
             protocol_config.set_consensus_max_num_transactions_in_block_for_testing(limit);
         }
 

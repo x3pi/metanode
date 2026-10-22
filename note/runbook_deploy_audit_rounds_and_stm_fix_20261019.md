@@ -11,7 +11,9 @@ Nhãn bằng chứng: `[ĐO]` có log hoặc lệnh chạy trong phiên 2026-10-
 
 ## 1. Bản phát hành
 
-Commit đề xuất: **`e088671f`** (gồm `9c9caa93` và `c96640f4`; CI xanh ở `7e1c95ef`, chưa kiểm CI ở `e088671f` — kiểm trước khi deploy; các commit giữa `9c9caa93` và `7e1c95ef` là mempool PR #179 và sửa test, không đổi luật consensus `[ĐỌC CODE]`; `bf1c7380` và `e088671f` thêm fail-stop NOMT, xem mục 1.3) (hoặc commit mới hơn trên `dev` đã qua lại các kiểm tra ở mục 3). Mọi binary của mọi node phải build từ **cùng một commit**; ghi `sha256sum` từng binary vào biên bản triển khai.
+Commit đề xuất: **`cf456baf`** (bản cập nhật 2026-10-22; xem mục 1.4 cho phần thêm sau `e088671f`). Bản gốc đề xuất `e088671f`:
+
+**`e088671f`** (gồm `9c9caa93` và `c96640f4`; CI xanh ở `7e1c95ef`, chưa kiểm CI ở `e088671f` — kiểm trước khi deploy; các commit giữa `9c9caa93` và `7e1c95ef` là mempool PR #179 và sửa test, không đổi luật consensus `[ĐỌC CODE]`; `bf1c7380` và `e088671f` thêm fail-stop NOMT, xem mục 1.3) (hoặc commit mới hơn trên `dev` đã qua lại các kiểm tra ở mục 3). Mọi binary của mọi node phải build từ **cùng một commit**; ghi `sha256sum` từng binary vào biên bản triển khai.
 
 ### 1.1. Thay đổi consensus (kết quả thực thi của một số block thay đổi)
 | Commit | Nội dung |
@@ -44,6 +46,18 @@ Khi commit NOMT nền (hoặc ghi changelog) lỗi, ví dụ hết chỗ ghi đ�
 - Cần supervisor tự khởi động lại: các unit trong `deploy/` có `Restart=always` hoặc `Restart=on-failure` `[ĐỌC CODE]`; các unit `on-failure` có `StartLimitBurst=5` trong 300s, nên đĩa hỏng kéo dài sẽ để unit ở trạng thái failed (node nằm chết, không fork).
 - Khi thấy node thoát với `NOMT async persistence failed`, kiểm tra dung lượng và lỗi đĩa trước khi khởi động lại; sau khi có chỗ, node bắt kịp lại từ peer (đo ở cụm local, tmpfs đầy rồi nới, run8).
 - Đã đo `[ĐO]` ở cụm local: ENOSPC trên `account_state` và `smart_contract_storage`, EIO (ghi lỗi qua device-mapper) trên `stake_db`; sau lỗi, node khởi động lại (sau fsck nếu cần) và khớp lại 4/4. `[CHƯA ĐO]` với đĩa vật lý hỏng thật, nhiều máy, và lỗi đồng thời trên nhiều node.
+
+### 1.4. Thay đổi sau `e088671f` tới `cf456baf` (cập nhật 2026-10-22)
+| Commit | Loại | Việc vận hành cần làm |
+|---|---|---|
+| `773e62b9` | Consensus (gateway): bond bị tịch thu không cộng vào allocation; `cross_chain.velocity_limit_disabled` | Đã mô tả ở mục 1.1. Mọi validator cùng giá trị cấu hình |
+| `01e1c84b`, `36cab02e` | `METANODE_FAILSTOP_ON_UNREADABLE_CODE` (tùy chọn, mặc định tắt); `pendingCode` chỉ xóa sau khi ghi | Không cần làm gì; không bật fail-stop trên mọi node cùng lúc |
+| `eee02a7d` | Attestation trạng thái chỉ nhận từ validator đã đăng ký và ký hợp lệ (`note/state_attestation_unauthenticated_20261021.md`) | Không đổi kết quả block; nút chạy bản cũ vẫn có thể bị kẻ lạ làm dừng, nên nâng cấp mọi node |
+| `ab25f1ae` | `eth_call` đồng thời không dùng chung MVM instance id; callback Xapian không còn nil-deref | Chỉ đường đọc off-chain, không đổi block |
+| `4cdf60b0`, `8c7233ec`, `a167cfad`, `76760421`, `7d8712e8`, `b55f6a17` | Đường nạp tx (PR #182/#183/#184): handshake, giới hạn kích thước batch, chuyển tiếp Raft; batch vượt `raft.max_batch_bytes` bị từ chối toàn bộ (413) | Không đổi luật thực thi. Đặt `raft.max_batch_bytes` như nhau trên các node Raft |
+| `cf456baf` | P0/P1: fingerprint tham số giao thức (`mtn_protocolFingerprint`), kiểm tra genesis `protocol` (tùy chọn), 3 gauge Rust | Xem bước 8 mục 4 và dòng "Tham số giao thức" mục 5 |
+
+Đo A/B TPS cho PR #182 và #183: không phát hiện khác biệt (`note/evidence/pr182_tps_ab_20261021`, `note/evidence/pr183_tps_ab_20261022`). Không đo cho PR #184 hoặc P0/P1 `[CHƯA ĐO]`.
 
 ---
 
@@ -103,6 +117,7 @@ Mọi lệnh dưới đây có trong `OPERATIONS_GUIDE.md` và đã đối chi�
 5. **Thay binary** cùng commit trên mọi host, kiểm `sha256sum` khớp biên bản. Cụm ansible: `./deploy_clusters.sh --deploy` (đa cụm) hoặc `./ansible_deploy.sh --start` (cụm đơn, giữ dữ liệu). Đặt `METANODE_ENV=production` (`--env=production`) và `META_SECURE_PASSWORD` qua biến môi trường của unit/vault.
 6. **Khởi động parent trước, exec sau**; đợi độ cao tăng đều.
 7. **Mở cổng** chỉ khi mục 5 đạt.
+8. **So fingerprint cả cụm** trước khi mở cổng: `cd execution && go run ./cmd/tool/protocol_fingerprint -nodes <file>` (exit 0 = mọi node cùng fingerprint; 1 = có node lệch, tool nêu node và trường; 2 = không kết nối được). Lệch thì dừng, sửa `config.json` của node đó, không mở cổng.
 
 ---
 
@@ -115,6 +130,7 @@ Mọi lệnh dưới đây có trong `OPERATIONS_GUIDE.md` và đã đối chi�
 | Smoke tải | `secp_tps_blast ... -verify-parity` với `-count` nhỏ | `loss = 0`, dòng `ZERO-FORK OK: all N validators agree` |
 | RPC mới | `eth_verifyHistoricalRoot` → "does not exist"; `admin_verifyHistoricalRoot` sai mật khẩu → "invalid credentials"; `mtn_sendCrossChainTransfer` → "devnet-only RPC is disabled" (production) | Đúng như bên trái |
 | Dựng lại state | `admin_verifyHistoricalRoot` cho vài block | `match=true` |
+| Tham số giao thức | `protocol_fingerprint -nodes` (mục 4, bước 8) | exit 0, mọi node cùng fingerprint |
 | Cấu hình | `grep devnet_rpc` trong config mọi node production | Không có `true` |
 
 Dừng và giữ trạng thái PENDING (không ép node chạy tiếp) nếu có node lệch hash hoặc không tiến triển; cần ≥ 2f+1 node cùng khớp thì mạng mới tiếp tục.
