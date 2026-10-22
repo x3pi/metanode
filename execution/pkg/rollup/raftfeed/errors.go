@@ -8,7 +8,4 @@ var (
 
 	// ErrEmptyBatch is returned when a batch contains no transactions.
 	ErrEmptyBatch = errors.New("empty batch")
-
-	// errTxTooLarge is an internal alias for backward compatibility within the package.
-	errTxTooLarge = ErrTxTooLarge
 )

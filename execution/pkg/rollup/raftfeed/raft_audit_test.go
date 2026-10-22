@@ -273,16 +273,29 @@ func TestReviewChunkRetryMustReachTail(t *testing.T) {
 	if st != statusAccepted {
 		t.Fatalf("a batch that keeps making progress must be accepted by one call, got status %d", st)
 	}
-	counts := map[uint64]int{}
-	for _, b := range l.disk.blocks() {
-		for _, raw := range b.Transactions {
-			tx, err := transaction.UnmarshalTransaction(raw.Digest)
-			if err != nil {
-				t.Fatal(err)
+	// Submit answers once the last entry is COMMITTED; the FSM applies it and writes its block an instant later, so wait for
+	// all ten before counting, then give any duplicate a moment to show up.
+	count := func() (map[uint64]int, int) {
+		counts, total := map[uint64]int{}, 0
+		for _, b := range l.disk.blocks() {
+			for _, raw := range b.Transactions {
+				tx, err := transaction.UnmarshalTransaction(raw.Digest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				counts[tx.GetNonce()]++
+				total++
 			}
-			counts[tx.GetNonce()]++
+		}
+		return counts, total
+	}
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if _, total := count(); total >= 10 {
+			break
 		}
 	}
+	time.Sleep(500 * time.Millisecond)
+	counts, _ := count()
 	for nonce := uint64(1); nonce <= 10; nonce++ {
 		if counts[nonce] != 1 {
 			t.Fatalf("nonce %d was committed %d times, want exactly once: %v", nonce, counts[nonce], counts)
@@ -374,16 +387,42 @@ func TestReviewDifferentNodeLimitsMustNotAcknowledgeMissingTx(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The follower's own limit (8 KiB) lets the batch through, the leader's (4 KiB) does not: the answer must be an honest
+	// "too large" and NOTHING of the batch may be committed -- neither a 200 with a missing tx nor a half-committed batch.
 	st := h.m[1].node.SubmitStatus(batch)
-	if st != statusAccepted {
-		return
+	if st != statusTooLarge {
+		t.Fatalf("status=%d, want statusTooLarge (follower limit=%d leader limit=%d)", st, h.m[1].node.MaxBatchBytes(), leader.node.MaxBatchBytes())
 	}
-	h.waitBlocks(1, leader)
+	time.Sleep(1500 * time.Millisecond) // anything that was going to be proposed would be committed by now
 	total := 0
 	for _, b := range leader.disk.blocks() {
 		total += len(b.Transactions)
 	}
-	if total != 2 {
-		t.Fatalf("status=200, submitted=2, delivered=%d; follower limit=%d leader limit=%d", total, h.m[1].node.MaxBatchBytes(), leader.node.MaxBatchBytes())
+	if total != 0 {
+		t.Fatalf("rejected batch left %d committed transactions behind", total)
+	}
+}
+
+// The common case must not pay for the all-or-nothing check: a batch that fits one chunk is returned as-is without
+// re-encoding every transaction. (Measured on 1000 txs, re-encoding cost +55% time and +2000 allocations per batch.)
+func TestSplitBatchFastPathDoesNotReencodeTransactions(t *testing.T) {
+	nonces := make([]uint64, 500)
+	for i := range nonces {
+		nonces[i] = uint64(i + 1)
+	}
+	batch := testBatch(t, nonces...)
+	decode := testing.AllocsPerRun(5, func() {
+		if _, err := transaction.UnmarshalTransactions(batch); err != nil {
+			t.Fatal(err)
+		}
+	})
+	split := testing.AllocsPerRun(5, func() {
+		pieces, err := splitBatch(batch, defaultMaxBatchBytes)
+		if err != nil || len(pieces) != 1 {
+			t.Fatalf("pieces=%d err=%v", len(pieces), err)
+		}
+	})
+	if split > decode+16 {
+		t.Fatalf("splitBatch allocates %.0f per call, decoding the batch alone costs %.0f: the fast path is re-encoding transactions", split, decode)
 	}
 }

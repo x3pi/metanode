@@ -100,9 +100,6 @@ func (n *Node) forwardToLeader(batch []byte) submitStatus {
 		if err != nil {
 			return statusTooLarge
 		}
-		if len(pieces) == 0 {
-			return statusTooLarge
-		}
 		for _, p := range pieces {
 			st := n.forwardSingleBatch(p)
 			if st != statusAccepted {
