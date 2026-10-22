@@ -1,0 +1,3 @@
+ 02:05:37 up 27 days, 19:40,  6 users,  load average: 2.99, 3.11, 2.95
+               total        used        free      shared  buff/cache   available
+Mem:             188          13          47           0         129         175

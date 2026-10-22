@@ -1,0 +1,5 @@
+=== RAFT RUN 1/1 sustained ===
+{"run": 1, "wall_s": 79.9, "exit": 0, "alive_at_end": {"n0": true, "n1": true, "n2": true}, "bytes_sent_txs": 1006215, "committed_ours": 1006215, "loss_vs_sent": 0, "tps_end_to_end": 23536.690979798477, "tps_during_injection": 25950.245987132315, "tps_active_commit_window": 23634.212609971364, "inject_seconds": 4.866119576, "end_to_end_seconds": 42.750911794, "parity_status": "OK: all 3 validators agree on hash+stateRoot of #555", "measurement_stop_reason": "reference validator showed 1006215 >= 1006215 txs and was idle for 1.5s", "ingress_metrics_ok": true, "received_sum": 1006215}
+RAFT-ALL-DONE
+
+--STDERR--

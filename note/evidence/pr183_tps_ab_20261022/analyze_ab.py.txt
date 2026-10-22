@@ -34,7 +34,7 @@ res = {"integrity_gate_all_pass": all(g[2] for g in gate), "runs": len(rows), "m
        ("tps_end_to_end", "tps_during_injection", "tps_active_commit_window", "end_to_end_seconds")}}
 p = res["metrics"]["tps_end_to_end"]
 res["verdict_rule_applied"] = ("degradation" if p["mean_diff_pct"] <= -3.0 and p["p_two_tailed"] < 0.05 else
-                               "improvement" if p["mean_diff_pct"] >= 3.0 and p["p_two_tailed"] < 0.05 else "no_significant_difference_n6")
+                               "improvement" if p["mean_diff_pct"] >= 3.0 and p["p_two_tailed"] < 0.05 else "no_significant_difference")
 _m = res["metrics"]["tps_end_to_end"]
 _tc = t_critical(_m["df"]); _half = _tc * _m["sd_diff_pct"] / math.sqrt(_m["n_pairs"])
 res["tps_end_to_end_diff_pct_ci95"] = {"t_critical": _tc, "low": _m["mean_diff_pct"] - _half, "high": _m["mean_diff_pct"] + _half,
