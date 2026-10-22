@@ -1,0 +1,4 @@
+ 00:52:41 up 27 days, 18:27,  6 users,  load average: 6.74, 4.08, 2.59
+               total        used        free      shared  buff/cache   available
+Mem:             188          11          52           0         126         177
+full local CI running at registration time: 3
