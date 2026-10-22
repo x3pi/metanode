@@ -1030,10 +1030,22 @@ func (stm *TrueBlockSTM) execOne(
 								return bytes.Compare(a.Bytes(), b.Bytes())
 							})
 
-							for _, addr := range sortedAddrs {
+							// An address requires SubTotalBalance if delta < 0, or delta == 0 with a MapSubBalance entry (pendingBalance folding).
+							isSubBalance := func(addr common.Address) (bool, *big.Int) {
 								delta := netDeltas[addr]
 								if delta.Sign() < 0 {
-									needSub := new(big.Int).Neg(delta)
+									return true, new(big.Int).Neg(delta)
+								}
+								if delta.Sign() == 0 && exRs.MapSubBalance() != nil {
+									if _, ok := exRs.MapSubBalance()[addr.Hex()]; ok {
+										return true, big.NewInt(0)
+									}
+								}
+								return false, nil
+							}
+
+							for _, addr := range sortedAddrs {
+								if isSub, needSub := isSubBalance(addr); isSub {
 									st, errSt := mvccDB.AccountState(addr)
 									if errSt != nil {
 										if errors.Is(errSt, mvcc.ErrEstimateHit) {
@@ -1048,19 +1060,6 @@ func (stm *TrueBlockSTM) execOne(
 									if st == nil || needSub.Cmp(st.TotalBalance()) > 0 {
 										canPayBalances = false
 										break
-									}
-								} else if delta.Sign() == 0 {
-									// If delta is 0 and address is present in MapSubBalance, ensure AccountState read doesn't hit ErrEstimateHit
-									if exRs.MapSubBalance() != nil {
-										if _, ok := exRs.MapSubBalance()[addr.Hex()]; ok {
-											_, errSt := mvccDB.AccountState(addr)
-											if errSt != nil && errors.Is(errSt, mvcc.ErrEstimateHit) {
-												atomic.AddInt32(&stm.abortCount, 1)
-												markSuspended()
-												stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
-												return
-											}
-										}
 									}
 								}
 							}
@@ -1078,12 +1077,8 @@ func (stm *TrueBlockSTM) execOne(
 								mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 							} else {
 								for _, addr := range sortedAddrs {
-									delta := netDeltas[addr]
-									if delta.Sign() > 0 {
-										mvccDB.AddBalance(addr, delta)
-									} else if delta.Sign() < 0 {
-										errSub := mvccDB.SubTotalBalance(addr, new(big.Int).Neg(delta))
-										if errSub != nil {
+									if isSub, subAmt := isSubBalance(addr); isSub {
+										if errSub := mvccDB.SubTotalBalance(addr, subAmt); errSub != nil {
 											if errors.Is(errSub, mvcc.ErrEstimateHit) {
 												atomic.AddInt32(&stm.abortCount, 1)
 												markSuspended()
@@ -1093,25 +1088,7 @@ func (stm *TrueBlockSTM) execOne(
 											logger.Error("🚨 [CRITICAL] SubTotalBalance failed after precheck for tx %s, addr %s: %v", tx.Hash().Hex(), addr.Hex(), errSub)
 										}
 									} else {
-										// Delta == 0: preserve legacy pendingBalance folding and WriteSet tracking
-										var hasSubBalance bool
-										if exRs.MapSubBalance() != nil {
-											_, hasSubBalance = exRs.MapSubBalance()[addr.Hex()]
-										}
-										if hasSubBalance {
-											errSub := mvccDB.SubTotalBalance(addr, big.NewInt(0))
-											if errSub != nil {
-												if errors.Is(errSub, mvcc.ErrEstimateHit) {
-													atomic.AddInt32(&stm.abortCount, 1)
-													markSuspended()
-													stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
-													return
-												}
-												logger.Error("🚨 [CRITICAL] SubTotalBalance(0) failed for tx %s, addr %s: %v", tx.Hash().Hex(), addr.Hex(), errSub)
-											}
-										} else {
-											mvccDB.AddBalance(addr, big.NewInt(0))
-										}
+										mvccDB.AddBalance(addr, netDeltas[addr])
 									}
 								}
 								if exRs.MapStorageChange() != nil {
