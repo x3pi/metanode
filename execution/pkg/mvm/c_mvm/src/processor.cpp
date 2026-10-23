@@ -340,10 +340,9 @@ public:
             ctxt->step();
           continue;
         } else {
-          // The root/outer context ran off the end of its code without an explicit RETURN or STOP.
-          auto hh = ctxt->hh;
-          pop_context();
-          hh();
+          // The root context ran off the end of its code: also an implicit
+          // STOP (same as an explicit STOP opcode), not a failure.
+          stop();
           break;
         }
       }
@@ -452,6 +451,11 @@ private:
                         Account &fromAcc, Account &toAcc,
                         const uint256_t &amount) {
     if (amount == 0)
+      return;
+    // A transfer to oneself changes nothing. Recording it as a separate
+    // sub + add would make the sub total exceed the balance when the Go side
+    // applies the diffs (subs first), failing a valid transaction.
+    if (fromAddr == toAddr)
       return;
     uint256_t oldFromBalance = fromAcc.get_balance();
     uint256_t oldToBalance = toAcc.get_balance();
@@ -1672,6 +1676,19 @@ private:
     // the correct, current-spec behavior rather than the older
     // "SELFDESTRUCT always deletes the account" semantics.
     if (created_this_tx.count(addr)) {
+      // EIP-6780: a contract created in this transaction that selfdestructs
+      // with ITSELF as beneficiary burns its ether (nothing was paid above).
+      if (recipient.acc.get_address() == addr) {
+        const uint256_t burned = ctxt->acc.get_balance();
+        if (burned > 0) {
+          ctxt->acc.set_balance(0);
+          gs.add_addresses_sub_balance_change(addr, burned);
+          journal.record([this, addr, burned]() {
+            gs.get(addr).acc.set_balance(burned);
+            gs.undo_sub_balance_change(addr, burned);
+          });
+        }
+      }
       Code oldCode = ctxt->acc.get_code();
       bool hadDeployEntry = gs.has_newly_deploy(addr);
       Code oldDeployEntry =
@@ -1711,6 +1728,15 @@ private:
     const auto offset = ctxt->s.pop64();
     const auto size = ctxt->s.pop64();
     auto initCode = copy_from_mem(offset, size);
+    // CREATE overwrites the return data: empty unless the constructor REVERTs
+    // (then it holds the revert data, set in eh below).
+    ctxt->returnData.clear();
+    // Insufficient balance for the endowment: CREATE fails with 0 BEFORE the
+    // creator's nonce is bumped (go-ethereum checks CanTransfer first).
+    if (contractValue > 0 && ctxt->acc.get_balance() < contractValue) {
+      ctxt->s.push(0);
+      return;
+    }
     Address newAddress =
         generate_address(ctxt->acc.get_address(), ctxt->acc.get_nonce());
     // creator's nonce bump: journaled so that if THIS frame reverts, the nonce
@@ -1795,8 +1821,14 @@ private:
       journal.revert_to(journalMark);
       parentContext->s.push(0);
     };
-    auto eh = [parentContext, journalMark, this](const Exception &) {
+    auto eh = [parentContext, journalMark, this](const Exception &e) {
       journal.revert_to(journalMark);
+      if (e.type == ET::ErrExecutionReverted) {
+        // The constructor's REVERT data becomes the creator's return data.
+        const auto revertOffset = ctxt->s.pop64();
+        const auto revertSize = ctxt->s.pop64();
+        parentContext->returnData = copy_from_mem(revertOffset, revertSize);
+      }
       parentContext->s.push(0);
     };
 
@@ -1859,9 +1891,23 @@ private:
     prepare_mem_access(offOut, sizeOut);
     auto input = copy_from_mem(offIn, sizeIn);
 
-    if (ctxt->read_only && value > 0) {
+    // EIP-214: only CALL with a non-zero value is forbidden in a static
+    // context. CALLCODE moves the value to the caller itself (no state
+    // change), so it stays allowed.
+    if (ctxt->read_only && op == CALL && value > 0) {
       MVM_THROW(Exception(ET::ErrWriteProtection,
                           "Cant transfer value from read only call"));
+    }
+
+    // Yellow Paper: a CALL/CALLCODE whose value exceeds the caller's balance
+    // fails only that call (0 is pushed, no state change, empty return
+    // data); it must not abort the whole transaction. The value-transfer gas
+    // is still charged, as on Ethereum.
+    if (value > 0 && ctxt->acc.get_balance() < value) {
+      gas_tracker.add_gas_used(getCallValueCost());
+      ctxt->returnData.clear();
+      ctxt->s.push(0);
+      return;
     }
 
     bool is_precompile_call = is_precompile(addr);
@@ -1948,7 +1994,8 @@ private:
 
       if (success) {
         ctxt->returnData = precompile_output;
-        copy_mem_raw(offOut, 0, sizeOut, ctxt->mem, ctxt->returnData);
+        copy_mem_raw(offOut, 0, std::min<uint64_t>(sizeOut, ctxt->returnData.size()),
+                     ctxt->mem, ctxt->returnData);
         ctxt->s.push(1);
       } else {
         ctxt->returnData = precompile_output;
@@ -1966,8 +2013,12 @@ private:
     size_t journalMark = journal.mark();
     if (value > 0) {
       gas_tracker.add_gas_used(getCallValueCost());
-      journaled_pay_to(ctxt->acc.get_address(), addr, ctxt->acc, callee.acc,
-                       value);
+      // CALLCODE runs the callee's code in the caller's own context: the
+      // "transfer" is from the caller to itself, i.e. no balance change.
+      if (op != CALLCODE) {
+        journaled_pay_to(ctxt->acc.get_address(), addr, ctxt->acc, callee.acc,
+                         value);
+      }
     }
 
     // EIP-7702: if the callee's code is a delegation designator, CALL/
@@ -1987,12 +2038,15 @@ private:
       return;
     }
 
+    // Only min(retSize, len(returnData)) bytes are copied into the return
+    // area; the rest of it keeps its previous content (it is NOT zero-filled).
     auto parentContext = ctxt;
     auto rh = [offOut, sizeOut, parentContext,
                this](const vector<uint8_t> &output) {
       parentContext->returnData = output;
-      copy_mem_raw(offOut, 0, sizeOut, parentContext->mem,
-                   parentContext->returnData);
+      copy_mem_raw(offOut, 0,
+                   std::min<uint64_t>(sizeOut, parentContext->returnData.size()),
+                   parentContext->mem, parentContext->returnData);
       parentContext->s.push(1);
     };
     auto hh = [parentContext]() {
@@ -2007,17 +2061,18 @@ private:
         const auto size = ctxt->s.pop64();
         auto revertData = copy_from_mem(offset, size);
         parentContext->returnData = revertData;
+        // As on Ethereum, the revert data is also copied into the caller's
+        // return area (min(retSize, len) bytes).
+        copy_mem_raw(offOut, 0, std::min<uint64_t>(sizeOut, parentContext->returnData.size()),
+                     parentContext->mem, parentContext->returnData);
         parentContext->s.push(0);
       } else {
-        // ✅ Lưu exception message vào returnData để parent context có thể biết
-        // lỗi ban đầu Lưu message trước để tránh vấn đề khi exception object bị
-        // destruct
-        std::string ex_msg = e.what();
-        parentContext->returnData = mvm::encode_revert_string(ex_msg);
+        // Any other failure (INVALID, out of gas, stack error, write
+        // protection...) leaves EMPTY return data on Ethereum: RETURNDATASIZE
+        // is 0 and nothing is copied. The failure reason is still reported
+        // for the top-level transaction by its own exception handler.
+        parentContext->returnData.clear();
         parentContext->s.push(0);
-        // ⚠️ KHÔNG throw exception trong exception handler để tránh double free
-        // Exception message đã được lưu vào returnData, sẽ được xử lý ở
-        // top-level context
       }
     };
 
@@ -2060,6 +2115,13 @@ private:
     const auto memOffset = ctxt->s.pop64();
     const auto dataOffset = ctxt->s.pop64();
     const auto length = ctxt->s.pop64();
+    // EIP-211: reading past the end of the return data is an exceptional
+    // halt of the current frame (unlike CALLDATACOPY, which zero-pads).
+    const uint64_t available = ctxt->returnData.size();
+    if (dataOffset > available || length > available - dataOffset) {
+      MVM_THROW(Exception(ET::outOfBounds,
+                          "Return data out of bounds"));
+    }
     copy_mem_raw(memOffset, dataOffset, length, ctxt->mem, ctxt->returnData);
   }
 
@@ -2103,14 +2165,19 @@ private:
   }
 
   void opExtCodeHash() {
-    const auto code = gs.get(pop_addr(ctxt->s)).acc.get_code();
-    if (code.size() > 0) {
-      uint8_t h[32];
-      keccak_256(code.data(), code.size(), h);
-      ctxt->s.push(from_big_endian(h, sizeof(h)));
-    } else {
+    decltype(auto) target = gs.get(pop_addr(ctxt->s));
+    const auto code = target.acc.get_code();
+    // EIP-1052: 0 for a non-existent or empty account (EIP-161: no code, zero
+    // nonce, zero balance); keccak256(code) otherwise. An existing account
+    // without code (e.g. a funded EOA) therefore hashes the empty string.
+    if (code.empty() && target.acc.get_nonce() == 0 &&
+        target.acc.get_balance() == 0) {
       ctxt->s.push(0);
+      return;
     }
+    uint8_t h[32];
+    keccak_256(code.data(), code.size(), h);
+    ctxt->s.push(from_big_endian(h, sizeof(h)));
   }
 
   void opChainId() { ctxt->s.push(gs.get_chain_id()); }
@@ -2137,6 +2204,13 @@ private:
 
     auto input = copy_from_mem(offset, size);
     gas_tracker.add_gas_used(getCreate2DataSizeCost(get_word_size(size)));
+    ctxt->returnData.clear(); // see create()
+
+    // See create(): insufficient endowment fails the CREATE2 before the nonce bump.
+    if (endowment > 0 && ctxt->acc.get_balance() < endowment) {
+      ctxt->s.push(0);
+      return;
+    }
 
     Address newAddress =
         generate_contract_address_2(ctxt->acc.get_address(), salt, input);
@@ -2217,8 +2291,14 @@ private:
       journal.revert_to(journalMark);
       parentContext->s.push(0);
     };
-    auto eh = [parentContext, journalMark, this](const Exception &) {
+    auto eh = [parentContext, journalMark, this](const Exception &e) {
       journal.revert_to(journalMark);
+      if (e.type == ET::ErrExecutionReverted) {
+        // The constructor's REVERT data becomes the creator's return data.
+        const auto revertOffset = ctxt->s.pop64();
+        const auto revertSize = ctxt->s.pop64();
+        parentContext->returnData = copy_from_mem(revertOffset, revertSize);
+      }
       parentContext->s.push(0);
     };
 
