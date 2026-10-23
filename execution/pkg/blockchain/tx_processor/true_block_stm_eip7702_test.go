@@ -375,7 +375,7 @@ func runPartialAuthScenario(t *testing.T, mode string) {
 	}
 }
 
-func zzInit(runtime []byte) []byte {
+func deployInitCode(runtime []byte) []byte {
 	return append([]byte{0x60, byte(len(runtime)), 0x60, 0x0c, 0x60, 0x00, 0x39, 0x60, byte(len(runtime)), 0x60, 0x00, 0xf3}, runtime...)
 }
 
@@ -434,7 +434,7 @@ func TestSenderNonceKeepsCreateIncrementOfDelegatedSender(t *testing.T) {
 	callerRuntime = append(callerRuntime, del.Bytes()...)
 	callerRuntime = append(callerRuntime, common.FromHex("0x61fffff15000")...)
 
-	l1 := run(legacy(deployKey, 1, nil, zzInit(common.FromHex("0x600060006000f05000"))), legacy(deployKey, 2, nil, zzInit(callerRuntime)))
+	l1 := run(legacy(deployKey, 1, nil, deployInitCode(common.FromHex("0x600060006000f05000"))), legacy(deployKey, 2, nil, deployInitCode(callerRuntime)))
 	auth, err := types.SignSetCode(delKey, types.SetCodeAuthorization{ChainID: *uint256.MustFromBig(chainID), Address: factory, Nonce: 0})
 	if err != nil {
 		t.Fatal(err)
