@@ -641,3 +641,99 @@ func TestCreate2AddressCollisionRejected(t *testing.T) {
 	}
 }
 
+// TestCreateAndCreate2ConstructorReceivesCallValue kiểm tra chuẩn EVM:
+// Khi factory gọi CREATE hoặc CREATE2 kèm theo endowment (100 wei):
+// Constructor của contract con phải nhận được chính xác msg.value == 100 wei qua opcode CALLVALUE (0x34).
+// Nếu CALLVALUE bị truyền là 0 (lỗi trước khi fix), constructor sẽ REVERT.
+func TestCreateAndCreate2ConstructorReceivesCallValue(t *testing.T) {
+	for _, opcode := range []string{"CREATE", "CREATE2"} {
+		t.Run(opcode, func(t *testing.T) {
+			t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+			t.Setenv("METANODE_DEVNET", "false")
+			cs := newTestChainState(t)
+			cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(991)})
+			key, err := crypto.GenerateKey()
+			require.NoError(t, err)
+			sender := crypto.PubkeyToAddress(key.PublicKey)
+			leader := common.HexToAddress(auditLeader)
+			seedAccount(t, cs, sender, big.NewInt(1_000_000_000_000_000), 1)
+			seedAccount(t, cs, leader, big.NewInt(0), 0)
+
+			execute := func(nonce uint64, to *common.Address, value int64, data []byte) types.Receipt {
+				signed, err := eth.SignNewTx(key, eth.NewEIP155Signer(big.NewInt(991)), &eth.LegacyTx{
+					Nonce:    nonce,
+					To:       to,
+					Value:    big.NewInt(value),
+					Gas:      300000,
+					GasPrice: big.NewInt(mt.MINIMUM_BASE_FEE),
+					Data:     data,
+				})
+				require.NoError(t, err)
+				tx, err := transaction.NewTransactionFromEth(signed)
+				require.NoError(t, err)
+				st, err := cs.GetAccountStateDB().AccountState(sender)
+				require.NoError(t, err)
+				require.Nil(t, VerifyTransaction(tx, cs, st))
+				items := []grouptxns.Item{{ID: 0, Array: grouptxns.BuildDeterministicGroupAddrs(tx), Tx: tx}}
+				_, receipts, _, _ := ProcessTransactionsOptimistic(context.Background(), cs, grouptxns.GroupTransactionsDeterministic(items, cs.HasCode), blankHeader(), false, false, 999, leader, false)
+				require.Len(t, receipts, 1)
+				return receipts[0]
+			}
+			wrap := func(runtime []byte) []byte {
+				init := []byte{0x60, byte(len(runtime)), 0x60, 0x0c, 0x60, 0, 0x39, 0x60, byte(len(runtime)), 0x60, 0, 0xf3}
+				return append(init, runtime...)
+			}
+
+			// childInit (23 bytes):
+			// CALLVALUE (34), PUSH1 100 (6064), EQ (14), PUSH1 12 (600c), JUMPI (57)
+			// PUSH1 0 (6000), PUSH1 0 (6000), REVERT (fd)
+			// JUMPDEST (5b), PUSH1 0 (6000), PUSH1 0 (6000), MSTORE8 (53)
+			// PUSH1 1 (6001), PUSH1 0 (6000), RETURN (f3)
+			childInit := common.FromHex("0x34606414600c5760006000fd5b600060005360016000f3")
+
+			var runtimeFactory []byte
+			if opcode == "CREATE" {
+				// PUSH1 23, PUSH1 22, PUSH1 0, CODECOPY, PUSH1 23, PUSH1 0, PUSH1 100, CREATE, PUSH1 0, MSTORE, PUSH1 32, PUSH1 0, RETURN
+				runtimeFactory = common.FromHex("0x60176016600039601760006064f060005260206000f3")
+			} else {
+				// CREATE2: PUSH1 23, PUSH1 24, PUSH1 0, CODECOPY, PUSH1 0 (salt), PUSH1 23, PUSH1 0, PUSH1 100, CREATE2, PUSH1 0, MSTORE, PUSH1 32, PUSH1 0, RETURN
+				runtimeFactory = common.FromHex("0x601760186000396000601760006064f560005260206000f3")
+			}
+			runtimeFactory = append(runtimeFactory, childInit...)
+
+			// Deploy Factory with balance 1000
+			require.Equal(t, pb.RECEIPT_STATUS_RETURNED, execute(1, nil, 1000, wrap(runtimeFactory)).Status())
+			factory := crypto.CreateAddress(sender, 1)
+
+			var expectedChild common.Address
+			if opcode == "CREATE" {
+				expectedChild = crypto.CreateAddress(factory, 0)
+			} else {
+				expectedChild = crypto.CreateAddress2(factory, [32]byte{}, crypto.Keccak256(childInit))
+			}
+
+			// Call Factory to invoke creation with 100 wei endowment
+			receipt := execute(2, &factory, 0, nil)
+			require.Equal(t, pb.RECEIPT_STATUS_RETURNED, receipt.Status())
+			createdAddr := common.BytesToAddress(receipt.Return())
+
+			stFactory, err := cs.GetAccountStateDB().AccountState(factory)
+			require.NoError(t, err)
+			stChild, err := cs.GetAccountStateDB().AccountState(expectedChild)
+			require.NoError(t, err)
+
+			t.Logf("[%s callvalue] createdAddr=%s expectedChild=%s factory_balance=%s child_balance=%s hasCode=%v",
+				opcode, createdAddr.Hex(), expectedChild.Hex(), stFactory.TotalBalance(), stChild.TotalBalance(), cs.HasCode(expectedChild))
+
+			// 1. Constructor must NOT revert (meaning CALLVALUE == 100 matched!)
+			require.Equal(t, expectedChild, createdAddr, "constructor must see msg.value == 100 and succeed")
+			// 2. Child has code
+			require.True(t, cs.HasCode(expectedChild), "child contract must be deployed")
+			// 3. Balances are correctly transferred
+			require.Equal(t, "900", stFactory.TotalBalance().String(), "factory balance must be 900")
+			require.Equal(t, "100", stChild.TotalBalance().String(), "child balance must be 100")
+		})
+	}
+}
+
+
