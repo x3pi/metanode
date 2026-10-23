@@ -148,7 +148,7 @@ tests:
     # Tự động nạp keys vào genesis, reset cụm sạch để đo Max TPS tuyệt đối
     pre_action: "none"
     cwd: "execution"
-    command: "go run ./cmd/tool/secp_tps_blast -nodes-config /tmp/rpc_nodes.exec1.json -count 25000 -batch 1000 -rounds 1 -verify-parity"
+    command: "go run ./cmd/tool/secp_tps_blast -rpc http://192.168.1.232:10746,http://192.168.1.232:10747,http://192.168.1.232:10748,http://192.168.1.232:10749 -tcp 192.168.1.232:6200,192.168.1.232:6201,192.168.1.232:6202,192.168.1.232:6203 -count 25000 -batch 1000 -rounds 1 -verify-parity -strict"
     timeout_seconds: 900
     continue_on_failure: false
 

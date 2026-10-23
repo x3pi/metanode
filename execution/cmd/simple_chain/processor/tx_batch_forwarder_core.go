@@ -58,8 +58,11 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 	ticker := time.NewTicker(1 * time.Millisecond) // 1ms poll for faster TX processing
 	defer ticker.Stop()
 
-	// LOCALHOST OPTIMIZATION: Max transactions per batch limit
-	const maxTransactionsPerBatch = 2000
+	// Max transactions per forwarded batch. 4000 measured +12.05% end-to-end TPS over 2000 on the Raft path
+	// (note/evidence/batchcap_tps_ab_20261023/REPORT.md); the BFT/Rust path was not measured. The Rust transaction
+	// consumer splits a batch that exceeds its block limits and carries the rest into the next block, so a larger batch
+	// is never dropped.
+	const maxTransactionsPerBatch = 4000
 
 	// Block size capping: Limit total transactions processed per block tick.
 	// Return any excess transactions back to the pool to be processed in the
