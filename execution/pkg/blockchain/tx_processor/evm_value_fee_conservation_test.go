@@ -45,7 +45,7 @@ func runReviewValue(t *testing.T, extra int64) {
 	seedAccount(t, cs, leader, big.NewInt(0), 0)
 
 	// Payable initcode returning a one-byte STOP runtime (0x00).
-	code := common.FromHex("0x6001600c60003960016000f300")
+	code := common.FromHex("0x600060006000f0506001601460003960016000f300")
 	recipient := common.HexToAddress("0x2222222222222222222222222222222222222222")
 	seedAccount(t, cs, recipient, big.NewInt(1), 1)
 	price := uint64(mt_common.MINIMUM_BASE_FEE)
@@ -110,6 +110,8 @@ func runReviewValue(t *testing.T, extra int64) {
 		stContract, err := cs.GetAccountStateDB().AccountState(contractAddr)
 		require.NoError(t, err)
 		require.False(t, contractHasCode(stContract), "contract bytecode must not exist on failure")
+		t.Logf("rejected deploy: contract nonce=%d", stContract.Nonce())
+		require.Zero(t, stContract.Nonce(), "rejected deployment must not persist constructor nonce changes")
 
 		// Contract balance must not exist or be 0
 		if stContract != nil && stContract.TotalBalance() != nil {
@@ -277,9 +279,7 @@ func TestReviewEVMValueAndFee_CallWithValueConservation(t *testing.T) {
 	seedAccount(t, cs, caller, callerInitial, 1)
 	seedAccount(t, cs, leader, big.NewInt(0), 0)
 
-	// Deploy a payable contract: initcode copies runtime (0x60016000f3) which accepts any call
-	// Bytecode: 6005600c60003960056000f3 60016000f300
-	initCode := common.FromHex("0x6006600c60003960066000f360016000f300")
+	initCode := common.FromHex("0x6009600c60003960096000f3600060006000f05000")
 	deployTxSigned, err := eth_types.SignNewTx(deployerKey, eth_types.NewEIP155Signer(big.NewInt(991)), &eth_types.LegacyTx{
 		Nonce:    1,
 		Gas:      100000,
@@ -299,6 +299,7 @@ func TestReviewEVMValueAndFee_CallWithValueConservation(t *testing.T) {
 	stContractDeploy, err := cs.GetAccountStateDB().AccountState(contractAddr)
 	require.NoError(t, err)
 	require.True(t, contractHasCode(stContractDeploy))
+	contractNonceBefore := stContractDeploy.Nonce()
 
 	// In Block 2: Caller has 500,000,000,000.
 	// Tx 1: Transfer 100,000,000,000 to deployer
@@ -324,6 +325,11 @@ func TestReviewEVMValueAndFee_CallWithValueConservation(t *testing.T) {
 
 	cTx1 := makeCallerTx(1, &deployer, big.NewInt(100_000_000_000), 21000, nil)
 	cTx2 := makeCallerTx(2, &contractAddr, callAmt, 100000, nil)
+	callerBefore, err := cs.GetAccountStateDB().AccountState(caller)
+	require.NoError(t, err)
+	require.Nil(t, VerifyTransaction(cTx1, cs, callerBefore))
+	require.Nil(t, VerifyTransaction(cTx2, cs, callerBefore))
+	t.Log("both signed caller transactions pass admission against pre-block state")
 
 	txs2 := []mt_types.Transaction{cTx1, cTx2}
 	items2 := make([]grouptxns.Item, len(txs2))
@@ -341,6 +347,8 @@ func TestReviewEVMValueAndFee_CallWithValueConservation(t *testing.T) {
 	// Contract balance must not have been credited with callAmt
 	stContract, err := cs.GetAccountStateDB().AccountState(contractAddr)
 	require.NoError(t, err)
+	t.Logf("factory nonce before=%d after rejected call=%d", contractNonceBefore, stContract.Nonce())
+	require.Equal(t, contractNonceBefore, stContract.Nonce(), "failed call must not change factory nonce")
 	if stContract != nil && stContract.TotalBalance() != nil {
 		require.Equal(t, 0, stContract.TotalBalance().Sign(), "contract balance must remain 0")
 	}
