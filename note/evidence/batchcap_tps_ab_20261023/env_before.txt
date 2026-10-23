@@ -1,0 +1,13 @@
+Fri Oct 23 01:25:10 AM UTC 2026
+ 01:25:10 up 28 days, 18:59,  5 users,  load average: 3.65, 2.87, 2.62
+               total        used        free      shared  buff/cache   available
+Mem:             188          13          48           0         128         174
+simple_chain/metanode processes before runs (CI cluster left idle under /opt/metanode):
+446688 /opt/metanode/node-0/bin/simple_chain -config=/opt/metanode/node-0/config/execution.json --pp
+446706 /opt/metanode/node-3/bin/simple_chain -config=/opt/metanode/node-3/config/execution.json --pp
+446721 /opt/metanode/node-1/bin/simple_chain -config=/opt/metanode/node-1/config/execution.json --pp
+446735 /opt/metanode/node-2/bin/simple_chain -config=/opt/metanode/node-2/config/execution.json --pp
+446760 /opt/metanode/node-4/bin/simple_chain -config=/opt/metanode/node-4/config/execution.json --pp
+448914 /bin/bash /home/abc/chain-n/metanode/deploy/ansible/monitors/start_monitors.sh health root
+448915 /bin/bash /home/abc/chain-n/metanode/deploy/ansible/monitors/start_monitors.sh resources root
+449293 /home/abc/chain-n/metanode/deploy/ansible/monitors/vote_monitor/vote_monitor --daemon --inter

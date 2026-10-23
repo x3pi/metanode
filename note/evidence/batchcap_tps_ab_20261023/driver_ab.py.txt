@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Sequential driver for batchcap_tps_ab_20261023: 10 interleaved pairs (bins_A cap=2000 vs bins_B cap=4000), Raft counted, 1M tx, seed 2026102301.
+After every run it saves the last RAFT-METRICS line of each replica (cumulative applied entries and txs) for the manipulation check."""
+import glob, os, random, re, subprocess, time
+
+REPO = "/home/abc/chain-n/metanode"
+EXEC = f"{REPO}/execution"
+S = "/tmp/claude-1001/-home-abc-chain-n-metanode/f559d18a-31d9-4c06-80c5-c4f912349eee/scratchpad/abcap"
+BINS = {"A": f"{S}/bins_A", "B": f"{S}/bins_B"}
+OUT = f"{REPO}/note/evidence/batchcap_tps_ab_20261023/raft_ab_1m"
+N_PAIRS, SEED = 10, 2026102301
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def mem_ok():
+    for line in open("/proc/meminfo"):
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) / 1048576 >= 20.0
+    return False
+
+
+os.makedirs(OUT, exist_ok=True)
+rnd = random.Random(SEED)
+order = []
+for i in range(N_PAIRS):
+    p = ["A", "B"]
+    rnd.shuffle(p)
+    order += [(i + 1, v) for v in p]
+open(f"{OUT}/order.txt", "w").write("\n".join(f"{i} {v}" for i, v in order) + "\n")
+
+for i, v in order:
+    tag = f"ab_{v}_p{i}"
+    if os.path.isfile(f"{OUT}/{tag}_run1.json"):
+        print(f"=== SKIP existing {tag} ===", flush=True)
+        continue
+    if not mem_ok():
+        raise SystemExit("MemAvailable < 20 GB, stopping")
+    print(f"=== {tag} (bins={BINS[v]}) {time.strftime('%H:%M:%S')} ===", flush=True)
+    r = subprocess.run(["python3", "-I", "scripts/test/evidence/run_raft_counted.py", "--mode", "sustained", "--runs", "1", "--tag", tag,
+                        "--bins", BINS[v], "--out", OUT, "--duration", "300", "--max-txs", "1000000", "--batch", "1000", "--max-wait-sec", "600"],
+                       cwd=EXEC, capture_output=True, text=True)
+    open(f"{OUT}/{tag}_driver.txt", "w").write(r.stdout + "\n--STDERR--\n" + r.stderr)
+    lines = []
+    for n in ("n0", "n1", "n2"):
+        last = ""
+        for f in sorted(glob.glob(f"/tmp/raft_counted_cluster/{n}/logs/*/execution.log")):
+            for l in open(f, errors="replace"):
+                if "RAFT-METRICS" in l:
+                    last = ANSI.sub("", l).strip()
+        lines.append(f"{n} {last}")
+    open(f"{OUT}/{tag}_metrics.txt", "w").write("\n".join(lines) + "\n")
+    res = [l for l in r.stdout.splitlines() if l.startswith("{")]
+    print(res[-1][:300] if res else f"NO RESULT rc={r.returncode}", flush=True)
+print("AB-ALL-DONE", flush=True)

@@ -1,0 +1,13 @@
+diff --git a/execution/cmd/simple_chain/processor/tx_batch_forwarder_core.go b/execution/cmd/simple_chain/processor/tx_batch_forwarder_core.go
+index aaf27809..48346758 100644
+--- a/execution/cmd/simple_chain/processor/tx_batch_forwarder_core.go
++++ b/execution/cmd/simple_chain/processor/tx_batch_forwarder_core.go
+@@ -59,7 +59,7 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
+ 	defer ticker.Stop()
+ 
+ 	// LOCALHOST OPTIMIZATION: Max transactions per batch limit
+-	const maxTransactionsPerBatch = 2000
++	const maxTransactionsPerBatch = 4000
+ 
+ 	// Block size capping: Limit total transactions processed per block tick.
+ 	// Return any excess transactions back to the pool to be processed in the
