@@ -152,3 +152,79 @@ func TestCreateAndCreate2EdgeCases(t *testing.T) {
 		}
 	}
 }
+
+// TestReviewConstructorFallthrough kiểm tra:
+// Constructor con chạy hết bytecode mà không có STOP/RETURN tường minh (fallthrough):
+// 1. Máy ảo phải coi đó là implicit STOP, hoàn thành frame con với empty code.
+// 2. Trả quyền điều khiển về cho factory để factory thực thi các opcode tiếp theo.
+// 3. Nếu factory có REVERT ở phía sau, factory phải REVERT chính xác (Status = TRANSACTION_ERROR, nonce = 0).
+func TestReviewConstructorFallthrough(t *testing.T) {
+	for _, create2 := range []bool{false, true} {
+		for _, explicitStop := range []bool{true, false} {
+			name := "CREATE"
+			if create2 {
+				name = "CREATE2"
+			}
+			if explicitStop {
+				name += "_STOP_control"
+			} else {
+				name += "_fallthrough"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+				t.Setenv("METANODE_DEVNET", "false")
+				cs := newTestChainState(t)
+				cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(991)})
+				key, err := crypto.GenerateKey()
+				require.NoError(t, err)
+				sender := crypto.PubkeyToAddress(key.PublicKey)
+				leader := common.HexToAddress(auditLeader)
+				seedAccount(t, cs, sender, big.NewInt(1_000_000_000_000_000), 1)
+				seedAccount(t, cs, leader, big.NewInt(0), 0)
+				execute := func(nonce uint64, to *common.Address, value int64, data []byte) types.Receipt {
+					signed, err := eth.SignNewTx(key, eth.NewEIP155Signer(big.NewInt(991)), &eth.LegacyTx{
+						Nonce: nonce, To: to, Value: big.NewInt(value), Gas: 300000,
+						GasPrice: big.NewInt(mt.MINIMUM_BASE_FEE), Data: data,
+					})
+					require.NoError(t, err)
+					tx, err := transaction.NewTransactionFromEth(signed)
+					require.NoError(t, err)
+					st, err := cs.GetAccountStateDB().AccountState(sender)
+					require.NoError(t, err)
+					require.Nil(t, VerifyTransaction(tx, cs, st))
+					items := []grouptxns.Item{{ID: 0, Array: grouptxns.BuildDeterministicGroupAddrs(tx), Tx: tx}}
+					_, receipts, _, _ := ProcessTransactionsOptimistic(context.Background(), cs, grouptxns.GroupTransactionsDeterministic(items, cs.HasCode), blankHeader(), false, false, 999, leader, false)
+					require.Len(t, receipts, 1)
+					return receipts[0]
+				}
+
+				// Both constructors terminate successfully with empty runtime code.
+				childInit := []byte{0x5b} // JUMPDEST, no explicit STOP or RETURN
+				if explicitStop {
+					childInit = []byte{0x00} // STOP
+				}
+				runtime := createFactoryRuntime(create2, childInit, false)
+				// Revert the factory after CREATE, keeping the child offset unchanged.
+				runtime[len(runtime)-len(childInit)-1] = 0xfd
+				init := append([]byte{0x60, byte(len(runtime)), 0x60, 12, 0x60, 0, 0x39, 0x60, byte(len(runtime)), 0x60, 0, 0xf3}, runtime...)
+				require.Equal(t, pb.RECEIPT_STATUS_RETURNED, execute(1, nil, 1000, init).Status())
+				factory := crypto.CreateAddress(sender, 1)
+				receipt := execute(2, &factory, 0, []byte{1})
+				child := crypto.CreateAddress(factory, 0)
+				if create2 {
+					child = crypto.CreateAddress2(factory, [32]byte{}, crypto.Keccak256(childInit))
+				}
+				st, err := cs.GetAccountStateDB().AccountState(child)
+				require.NoError(t, err)
+				fa, err := cs.GetAccountStateDB().AccountState(factory)
+				require.NoError(t, err)
+				t.Logf("explicitStop=%v receipt_status=%v factory_nonce=%d factory_balance=%s child_balance=%s",
+					explicitStop, receipt.Status(), fa.Nonce(), fa.TotalBalance(), st.TotalBalance())
+				require.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, receipt.Status(), "factory REVERT after child execution must run")
+				require.Equal(t, "1000", fa.TotalBalance().String())
+				require.Zero(t, fa.Nonce(), "factory revert must restore CREATE nonce")
+			})
+		}
+	}
+}
+

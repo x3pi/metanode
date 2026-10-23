@@ -329,7 +329,25 @@ public:
     // would double-charge every transaction.
     auto sm_size = ctxt->prog.code.size();
     // run
-    while (ctxt && ctxt->get_pc() < ctxt->prog.code.size()) {
+    while (ctxt) {
+      if (ctxt->get_pc() >= ctxt->prog.code.size()) {
+        if (ctxts.size() > 1) {
+          // A sub-context (e.g. child constructor or callee) ran off the end of its code.
+          // In EVM, running off the end of code is an implicit STOP:
+          // it halts normally with empty return data and returns control to the parent context.
+          stop();
+          if (ctxt)
+            ctxt->step();
+          continue;
+        } else {
+          // The root/outer context ran off the end of its code without an explicit RETURN or STOP.
+          auto hh = ctxt->hh;
+          pop_context();
+          hh();
+          break;
+        }
+      }
+
       // MVM_TRY/MVM_CATCH (mvm/safe_throw.h): was try{...}catch(Exception&){...}.
       MVM_TRY
         dispatch(result);
@@ -1283,6 +1301,10 @@ private:
     ctxt->s.push(value);
   }
   void tStore() {
+    if (ctxt->read_only) {
+      MVM_THROW(Exception(ET::ErrWriteProtection,
+                          "Cant transient store from read only call"));
+    }
     const auto key = ctxt->s.pop();
     const auto value = ctxt->s.pop();
     const Address addr = ctxt->acc.get_address();
@@ -1779,7 +1801,7 @@ private:
     };
 
     push_context(ctxt->acc.get_address(), newAcc, std::move(initCode),
-                 newAcc.acc.get_code(), 0, rh, hh, eh,
+                 newAcc.acc.get_code(), contractValue, rh, hh, eh,
                  ctxt->read_only ? true : false);
   }
 
@@ -1836,6 +1858,11 @@ private:
     auto sizeOut = ctxt->s.pop64();
     prepare_mem_access(offOut, sizeOut);
     auto input = copy_from_mem(offIn, sizeIn);
+
+    if (ctxt->read_only && value > 0) {
+      MVM_THROW(Exception(ET::ErrWriteProtection,
+                          "Cant transfer value from read only call"));
+    }
 
     bool is_precompile_call = is_precompile(addr);
 
@@ -2196,7 +2223,7 @@ private:
     };
 
     push_context(ctxt->acc.get_address(), newAcc, move(input),
-                 newAcc.acc.get_code(), 0, rh, hh, eh,
+                 newAcc.acc.get_code(), endowment, rh, hh, eh,
                  ctxt->read_only ? true : false);
   }
 
