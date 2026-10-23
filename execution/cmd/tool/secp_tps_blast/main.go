@@ -365,6 +365,22 @@ func loadEndpointsFromJSON(path string) ([]string, []string) {
 	return rpcs, tcps
 }
 
+// benchFailures collects why a run must not count as a pass; main turns it into the exit code under -strict.
+var benchFailures []string
+
+// benchVerdict is the single place that decides whether a finished run is a pass: every submitted transaction must be
+// counted in a block (loss 0) and, when parity was requested, all validators must agree.
+func benchVerdict(label string, submitted, confirmed int, parityRequested, parityOk bool) []string {
+	var why []string
+	if confirmed < submitted {
+		why = append(why, fmt.Sprintf("%s: %d of %d submitted transactions were not counted in a block", label, submitted-confirmed, submitted))
+	}
+	if parityRequested && !parityOk {
+		why = append(why, fmt.Sprintf("%s: parity not verified", label))
+	}
+	return why
+}
+
 func main() {
 	var (
 		flagCount        = flag.Int("count", 1000, "Total number of transactions to blast per round")
@@ -379,6 +395,7 @@ func main() {
 		flagChainID      = flag.Int64("chain-id", 0, "Chain ID (default: query from RPC)")
 		flagGasPrice     = flag.Int64("gas-price", 100000, "Gas price in wei")
 		flagVerifyParity = flag.Bool("verify-parity", true, "Verify 100% Zero-Fork parity across all online nodes")
+		flagStrict       = flag.Bool("strict", false, "Exit with code 2 when a run lost transactions or parity was not verified, so a CI step cannot pass on a broken run")
 		flagReport       = flag.String("report", "", "File path to save JSON benchmark report")
 		flagMaxTxs       = flag.Int("max-txs", 0, "Sustained mode: stop injecting after about this many txs (0 = only -duration limits the run; overshoot is at most workers x batch)")
 		flagQuiet        = flag.Int("quiet-sec", 8, "Measurement stops after this many seconds without a tx-bearing block (does not affect the system)")
@@ -580,6 +597,12 @@ func main() {
 			fmt.Printf("\n▶️ RUNNING ROUND %d/%d\n", r, cfg.Rounds)
 			runBenchmarkRound(r, cfg, accounts[:cfg.Count])
 		}
+	}
+	if *flagStrict && len(benchFailures) > 0 {
+		for _, f := range benchFailures {
+			fmt.Printf("❌ [STRICT] %s\n", f)
+		}
+		os.Exit(2)
 	}
 }
 
@@ -1021,6 +1044,7 @@ func runBenchmarkRound(round int, cfg Config, accounts []AccountInfo) {
 			fmt.Printf("📄 JSON Benchmark report saved to: %s\n", cfg.ReportFile)
 		}
 	}
+	benchFailures = append(benchFailures, benchVerdict(fmt.Sprintf("round %d", round), submittedTxs, meas.CommittedOurs, cfg.VerifyParity && len(cfg.RPCUrls) > 1, zeroForkOk)...)
 	fmt.Println("==================================================================")
 }
 
@@ -1493,6 +1517,7 @@ func runSustainedBenchmark(cfg Config, accounts []AccountInfo) {
 			fmt.Printf("📄 JSON Benchmark report saved to: %s\n", cfg.ReportFile)
 		}
 	}
+	benchFailures = append(benchFailures, benchVerdict("sustained", subTxs, meas.CommittedOurs, cfg.VerifyParity && len(cfg.RPCUrls) > 1, zeroForkOk)...)
 	fmt.Println("==================================================================")
 }
 
