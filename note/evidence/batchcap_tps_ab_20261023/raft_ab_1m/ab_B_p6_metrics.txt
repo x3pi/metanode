@@ -1,0 +1,3 @@
+n0 [INFO][Oct 23 01:41:46]  ⏱️ [RAFT-METRICS] applied=250 txs=964255 qDepthMax=0 qWaitAvg=0.17ms applyAvg=69.49ms fsmBuildAvg=14.77ms sinkWaitAvg=0.00ms boltFsyncAvg=15.42ms
+n1 [INFO][Oct 23 01:41:46]  ⏱️ [RAFT-METRICS] applied=250 txs=964255 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=15.49ms sinkWaitAvg=0.00ms boltFsyncAvg=17.99ms
+n2 [INFO][Oct 23 01:41:46]  ⏱️ [RAFT-METRICS] applied=250 txs=964255 qDepthMax=0 qWaitAvg=0.00ms applyAvg=0.00ms fsmBuildAvg=16.15ms sinkWaitAvg=0.00ms boltFsyncAvg=18.47ms
