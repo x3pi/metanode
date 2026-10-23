@@ -142,12 +142,11 @@ func TestCreateAndCreate2RejectedCodeRefundsEndowment(t *testing.T) {
 	}
 }
 
-// TestReviewNestedRevertRestoresCreatorNonce kiểm tra việc rollback nonce của Creator khi frame bị revert:
-// Khi Contract A gọi B, B gọi CREATE làm tăng nonce của B (0 -> 1).
-// Nếu sau đó B bị REVERT:
-// 1. Toàn bộ frame của B bị rollback, bao gồm cả nonce của B (trở về 0).
-// 2. A bắt được lỗi và hoàn thành giao dịch thành công.
-func TestReviewNestedRevertRestoresCreatorNonce(t *testing.T) {
+// TestNestedRevertRestoresCreatorNonceCREATE checks that the creator's nonce is rolled back when its frame reverts.
+// Contract A calls B and B runs CREATE, which bumps B's nonce (0 -> 1). If B then REVERTs:
+// 1. B's whole frame is rolled back, including its nonce (back to 0).
+// 2. A catches the failure and the transaction completes successfully.
+func TestNestedRevertRestoresCreatorNonceCREATE(t *testing.T) {
 	for _, revert := range []bool{false, true} {
 		name := "success_control"
 		if revert {
@@ -221,15 +220,14 @@ func TestReviewNestedRevertRestoresCreatorNonce(t *testing.T) {
 	}
 }
 
-// TestNestedRevertRestoresCreatorNonceCREATE2 kiểm tra việc rollback nonce của Creator khi sử dụng CREATE2:
-// Khi Contract A gọi B, B gọi CREATE2 làm tăng nonce của B (0 -> 1).
-// Nếu B bị REVERT:
-// 1. Toàn bộ frame của B bị rollback, bao gồm cả nonce của B (trở về 0).
-// 2. Contract con tạo bởi CREATE2 không tồn tại trong state (không có code).
-// 3. A bắt được lỗi từ CALL và hoàn thành giao dịch bình thường.
-// Nếu B thành công (success_control):
-// 1. Nonce của B được giữ nguyên mức tăng (0 -> 1).
-// 2. Contract con tồn tại và có code.
+// TestNestedRevertRestoresCreatorNonceCREATE2 is the CREATE2 variant of the test above.
+// Contract A calls B and B runs CREATE2, which bumps B's nonce (0 -> 1). If B REVERTs:
+// 1. B's whole frame is rolled back, including its nonce (back to 0).
+// 2. The child created by CREATE2 is gone from state (no code).
+// 3. A catches the failure from CALL and the transaction completes normally.
+// If B succeeds (success_control):
+// 1. B keeps the nonce bump (0 -> 1).
+// 2. The child exists and has code.
 func TestNestedRevertRestoresCreatorNonceCREATE2(t *testing.T) {
 	for _, revert := range []bool{false, true} {
 		name := "success_control"
@@ -322,12 +320,12 @@ func TestNestedRevertRestoresCreatorNonceCREATE2(t *testing.T) {
 	}
 }
 
-// TestChildConstructorRevertKeepsCreatorNonceIncrement kiểm tra đối chứng quan trọng theo chuẩn EIP-161 / Ethereum Yellow Paper:
-// Khi contract B gọi CREATE hoặc CREATE2 nhưng CONSTRUCTOR CỦA CONTRACT CON BỊ REVERT (0xFD):
-// 1. Lệnh CREATE / CREATE2 trả về 0 (thất bại).
-// 2. Toàn bộ tiền endowment (value) gửi kèm được hoàn lại 100% cho B.
-// 3. Contract con có balance = 0 và không tồn tại mã.
-// 4. ĐẶC BIỆT: Nonce của B VẪN TĂNG (0 -> 1) vì bản thân frame của B KHÔNG bị revert.
+// TestChildConstructorRevertKeepsCreatorNonceIncrement is the EIP-161 control case.
+// When B runs CREATE or CREATE2 and the CHILD constructor REVERTs (0xFD):
+// 1. CREATE / CREATE2 returns 0 (failure).
+// 2. The whole endowment is refunded to B.
+// 3. The child has balance 0 and no code.
+// 4. B's nonce STILL goes up (0 -> 1) because B's own frame is not reverted.
 func TestChildConstructorRevertKeepsCreatorNonceIncrement(t *testing.T) {
 	for _, opcode := range []string{"CREATE", "CREATE2"} {
 		t.Run(opcode, func(t *testing.T) {
@@ -423,19 +421,14 @@ func TestChildConstructorRevertKeepsCreatorNonceIncrement(t *testing.T) {
 	}
 }
 
-// TestDeeplyNestedRevertRestoresAllAncestorsNonces kiểm tra rollback sâu qua nhiều tầng lồng nhau:
-// Chuỗi gọi: Transaction -> Contract A -> Contract B -> Contract C -> CREATE (childC).
-// B cũng tự gọi CREATE tạo childB (B nonce 0 -> 1).
-// C gọi CREATE tạo childC (C nonce 0 -> 1).
-// Khi B bị REVERT:
-// 1. A bắt được lỗi từ CALL(B) và trả về bình thường (status = RETURNED).
-// 2. Toàn bộ thay đổi của B và các contract con (C, childB, childC) bị rollback hoàn toàn:
-//    - B nonce trở về 0.
-//    - C nonce trở về 0.
-//    - childB và childC không tồn tại code.
-// Khi B thành công (success_control):
-// 1. B nonce = 1, childB tồn tại.
-// 2. C nonce = 1, childC tồn tại.
+// TestDeeplyNestedRevertRestoresAllAncestorsNonces checks the rollback across several nested frames.
+// Call chain: Transaction -> A -> B -> C -> CREATE (childC); B also runs CREATE for childB (B nonce 0 -> 1)
+// and C runs CREATE for childC (C nonce 0 -> 1). When B REVERTs:
+// 1. A catches the failure of CALL(B) and returns normally (status = RETURNED).
+// 2. Everything done by B and below is rolled back:
+//    - B's nonce is back to 0, C's nonce is back to 0;
+//    - childB and childC have no code.
+// When B succeeds (success_control): B nonce = 1 with childB present, C nonce = 1 with childC present.
 func TestDeeplyNestedRevertRestoresAllAncestorsNonces(t *testing.T) {
 	for _, revert := range []bool{false, true} {
 		name := "success_control"
@@ -545,9 +538,10 @@ func TestDeeplyNestedRevertRestoresAllAncestorsNonces(t *testing.T) {
 	}
 }
 
-// TestCreate2AddressCollisionRejected kiểm tra EIP-684 / EIP-1014 chống va chạm địa chỉ:
-// 1. Khi địa chỉ đích đã có nonce > 0: CREATE2 phải thất bại (trả về 0), không chuyển endowment.
-// 2. Khi địa chỉ đích đã có code khác rỗng: CREATE2 phải thất bại (trả về 0), không chuyển endowment.
+// TestCreate2AddressCollisionRejected checks the EIP-684 / EIP-1014 address collision rule.
+// CREATE2 must fail (return 0) and move no endowment when the destination
+// 1. already has nonce > 0, or
+// 2. already has non-empty code.
 func TestCreate2AddressCollisionRejected(t *testing.T) {
 	for _, scenario := range []string{"collision_existing_nonce", "collision_existing_code"} {
 		t.Run(scenario, func(t *testing.T) {

@@ -2114,12 +2114,12 @@ private:
     Address newAddress =
         generate_contract_address_2(ctxt->acc.get_address(), salt, input);
 
-    // BUG FIX: unlike create() (CREATE), this never incremented the
-    // creator's own nonce — real Ethereum bumps it for CREATE2 exactly the
-    // same way (EIP-161), and any contract chaining multiple CREATE/CREATE2
-    // calls off its own nonce (or computing its own next CREATE address)
-    // would otherwise see a stale value. Deliberately NOT journaled, same
-    // reasoning as create()'s nonce bump: it's an effect of the CALLER's
+    // The creator's nonce is bumped for CREATE2 exactly as for CREATE
+    // (EIP-161); any contract chaining CREATE/CREATE2 calls off its own nonce
+    // must see the new value. The bump is journaled BEFORE the child's
+    // journalMark below: if the creator's own frame reverts, the bump is
+    // undone with it; if only the child constructor fails, rollback stops at
+    // journalMark and the bump survives (same as create()).
     Address creatorAddr = ctxt->acc.get_address();
     auto prevNonce = ctxt->acc.get_nonce();
     bool hadNonceChange = gs.has_nonce_change(creatorAddr);
