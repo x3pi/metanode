@@ -1688,35 +1688,49 @@ private:
     const auto offset = ctxt->s.pop64();
     const auto size = ctxt->s.pop64();
     auto initCode = copy_from_mem(offset, size);
-    auto nonce = ctxt->acc.get_nonce();
     Address newAddress =
         generate_address(ctxt->acc.get_address(), ctxt->acc.get_nonce());
-    created_this_tx.insert(newAddress);
-
-    // Nonce increment deliberately NOT journaled: on real Ethereum the
     // creator's nonce bump survives even if the constructor below reverts —
     // it's an effect of the CALLER's own frame, not part of the reverted
     // sub-call. See StateJournal's doc comment.
+    auto nonce = ctxt->acc.get_nonce();
     ctxt->acc.increment_nonce();
     gs.set_addresses_nonce_change(ctxt->acc.get_address(), nonce + 1);
 
-    decltype(auto) newAcc = gs.create(newAddress, contractValue, initCode, 0);
+    // EIP-684: destination address must not already have code, nonzero nonce,
+    // or have been created in this execution.
+    decltype(auto) existingAcc = gs.get(newAddress);
+    if (existingAcc.acc.get_nonce() > 0 || !existingAcc.acc.get_code().empty() ||
+        gs.has_newly_deploy(newAddress) || created_this_tx.count(newAddress)) {
+      ctxt->s.push(0);
+      return;
+    }
+
+    size_t journalMark = journal.mark();
+    created_this_tx.insert(newAddress);
+    journal.record([this, newAddress]() {
+      created_this_tx.erase(newAddress);
+      gs.get(newAddress).acc.set_code({});
+    });
+
+    decltype(auto) newAcc = gs.create(newAddress, 0, initCode, 0);
 
     // Mark AFTER the nonce increment (kept regardless) but BEFORE the
     // endowment transfer (undone if this CREATE's constructor reverts).
-    size_t journalMark = journal.mark();
     journaled_pay_to(ctxt->acc.get_address(), newAddress, ctxt->acc,
                      newAcc.acc, contractValue);
 
     auto parentContext = ctxt;
-    auto rh = [newAcc, parentContext, this](vector<uint8_t> output) {
+    auto rh = [newAcc, parentContext, journalMark, this](vector<uint8_t> output) {
       // EIP-3541: deploying code starting with 0xEF is rejected — without
       // this, a plain CREATE could forge a 23-byte EIP-7702 delegation
       // designator (0xef0100 || address) at an address the deployer fully
       // controls, impersonating a real 7702 authorization the account owner
       // never signed. Treated like any other deploy failure: no code is
-      // set, caller sees 0 (failure) instead of the new address.
+      // set, caller sees 0 (failure) instead of the new address, and any
+      // endowment transferred is rolled back.
       if (!output.empty() && output[0] == 0xEF) {
+        journal.revert_to(journalMark);
         parentContext->s.push(0);
         return;
       }
@@ -1742,7 +1756,10 @@ private:
           gs.erase_newly_deploy(newAccAddr);
       });
     };
-    auto hh = [parentContext]() { parentContext->s.push(0); };
+    auto hh = [parentContext, journalMark, this]() {
+      journal.revert_to(journalMark);
+      parentContext->s.push(0);
+    };
     auto eh = [parentContext, journalMark, this](const Exception &) {
       journal.revert_to(journalMark);
       parentContext->s.push(0);
@@ -2083,7 +2100,6 @@ private:
 
     Address newAddress =
         generate_contract_address_2(ctxt->acc.get_address(), salt, input);
-    created_this_tx.insert(newAddress);
 
     // BUG FIX: unlike create() (CREATE), this never incremented the
     // creator's own nonce — real Ethereum bumps it for CREATE2 exactly the
@@ -2097,16 +2113,32 @@ private:
     ctxt->acc.increment_nonce();
     gs.set_addresses_nonce_change(ctxt->acc.get_address(), callerNonce + 1);
 
-    decltype(auto) newAcc = gs.create(newAddress, endowment, input, 0);
+    // EIP-684 / EIP-1014: destination address must not already have code,
+    // nonzero nonce, or have been created in this execution.
+    decltype(auto) existingAcc = gs.get(newAddress);
+    if (existingAcc.acc.get_nonce() > 0 || !existingAcc.acc.get_code().empty() ||
+        gs.has_newly_deploy(newAddress) || created_this_tx.count(newAddress)) {
+      ctxt->s.push(0);
+      return;
+    }
 
     size_t journalMark = journal.mark();
+    created_this_tx.insert(newAddress);
+    journal.record([this, newAddress]() {
+      created_this_tx.erase(newAddress);
+      gs.get(newAddress).acc.set_code({});
+    });
+
+    decltype(auto) newAcc = gs.create(newAddress, 0, input, 0);
+
     journaled_pay_to(ctxt->acc.get_address(), newAddress, ctxt->acc,
                      newAcc.acc, endowment);
 
     auto parentContext = ctxt;
-    auto rh = [newAcc, parentContext, this](vector<uint8_t> output) {
+    auto rh = [newAcc, parentContext, journalMark, this](vector<uint8_t> output) {
       // EIP-3541 — see the identical check in opCreate()'s rh for why.
       if (!output.empty() && output[0] == 0xEF) {
+        journal.revert_to(journalMark);
         parentContext->s.push(0);
         return;
       }
@@ -2131,10 +2163,13 @@ private:
       });
     };
 
-    auto hh = [parentContext]() { parentContext->s.push(0); };
-    auto eh = [parentContext, journalMark, this](const Exception &e) {
+    auto hh = [parentContext, journalMark, this]() {
       journal.revert_to(journalMark);
-      parentContext->eh(e);
+      parentContext->s.push(0);
+    };
+    auto eh = [parentContext, journalMark, this](const Exception &) {
+      journal.revert_to(journalMark);
+      parentContext->s.push(0);
     };
 
     push_context(ctxt->acc.get_address(), newAcc, move(input),

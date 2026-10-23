@@ -263,6 +263,23 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker,
 AccountState MyGlobalState::create(const Address &addr,
                                    const uint256_t &balance, const Code &code,
                                    const uint256_t &nonce) {
+  auto it = accounts.find(addr);
+  if (it != accounts.end()) {
+    it->second.first.set_code(Code(code));
+    it->second.first.set_nonce(static_cast<size_t>(nonce));
+    if (balance > 0) {
+      it->second.first.set_balance(it->second.first.get_balance() + balance);
+    }
+    if (isCache) {
+      auto state = State::getInstance(addr);
+      state->setCode(code);
+      state->setNonce(nonce);
+      if (balance > 0) {
+        state->setBalance(it->second.first.get_balance());
+      }
+    }
+    return it->second;
+  }
   insert({MyAccount(addr, balance, code, nonce),
           MyStorage(addr, blockContext.mvmId, isCache)});
 
