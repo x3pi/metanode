@@ -221,7 +221,11 @@ func compare(results map[string]nodeResult) (string, int) {
 			for _, field := range protocolparams.DiffFields(ref, rep) {
 				rv, _ := ref.Params.Value(field)
 				ov, _ := rep.Params.Value(field)
-				fmt.Fprintf(&b, "    %-48s reference=%v   this node=%v\n", field, rv, ov)
+				note := ""
+				if protocolparams.Operational(field) {
+					note = "   (operational: cannot change a block's result, but a mismatch can drop accepted transactions)"
+				}
+				fmt.Fprintf(&b, "    %-48s reference=%v   this node=%v%s\n", field, rv, ov, note)
 			}
 		}
 	}

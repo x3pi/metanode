@@ -22,8 +22,30 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 )
 
-// defaultRaftMaxBatchBytes must equal the raftfeed default (pinned by a test); protocolparams cannot import raftfeed.
-const defaultRaftMaxBatchBytes = 4 << 20
+// defaultRaftMaxBatchBytes and maxRaftBatchBytes must equal the raftfeed default and forwarding cap (both pinned by a
+// test); protocolparams cannot import raftfeed.
+const (
+	defaultRaftMaxBatchBytes = 4 << 20
+	maxRaftBatchBytes        = 64 << 20
+)
+
+// effectiveRaftMaxBatchBytes is the limit raftfeed really applies: unset means the default and anything above the
+// internal forwarding cap is cut to the cap. Fingerprinting the effective value makes two configurations that behave
+// the same fingerprint the same.
+func effectiveRaftMaxBatchBytes(configured int) int {
+	if configured <= 0 {
+		return defaultRaftMaxBatchBytes
+	}
+	if configured > maxRaftBatchBytes {
+		return maxRaftBatchBytes
+	}
+	return configured
+}
+
+// Operational reports whether a difference in field cannot change a block's result. raft_max_batch_bytes only decides
+// which batches a node accepts and forwards (the Raft FSM never reads it), but a mismatch can drop an accepted
+// transaction, so it is still reported.
+func Operational(field string) bool { return field == "raft_max_batch_bytes" }
 
 // CrossChainParams are the cross_chain settings that the gateway copies into its on-chain state on first use.
 type CrossChainParams struct {
@@ -99,11 +121,7 @@ func FromConfig(cfg *config.SimpleChainConfig, g *config.GenesisConfig) Params {
 		p.VerifyDeviceKey = cfg.VerifyDeviceKey
 		p.StateBackend = strings.ToLower(cfg.StateBackend)
 		if cfg.Raft != nil {
-			// an unset limit means the default, so "unset" and "explicitly the default" are the same setting
-			p.RaftMaxBatchBytes = cfg.Raft.MaxBatchBytes
-			if p.RaftMaxBatchBytes <= 0 {
-				p.RaftMaxBatchBytes = defaultRaftMaxBatchBytes
-			}
+			p.RaftMaxBatchBytes = effectiveRaftMaxBatchBytes(cfg.Raft.MaxBatchBytes)
 		}
 	}
 	if g != nil {

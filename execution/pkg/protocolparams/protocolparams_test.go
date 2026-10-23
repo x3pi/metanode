@@ -216,3 +216,31 @@ func TestUnsetRaftBatchLimitIsTheDefault(t *testing.T) {
 		t.Fatal("unset and explicitly-default max_batch_bytes behave identically and must fingerprint identically")
 	}
 }
+
+// The fingerprint must carry the limit raftfeed really applies, for every kind of configured value.
+func TestRaftBatchLimitIsTheEffectiveOne(t *testing.T) {
+	saved := config.ConfigApp
+	defer func() { config.ConfigApp = saved }()
+	for _, configured := range []int{0, -1, 1, 1 << 20, defaultRaftMaxBatchBytes, maxRaftBatchBytes - 1, maxRaftBatchBytes, maxRaftBatchBytes + 1, 200 << 20} {
+		cfg := baseConfig()
+		cfg.Raft.MaxBatchBytes = configured
+		config.ConfigApp = cfg
+		if got, want := FromConfig(cfg, baseGenesis()).RaftMaxBatchBytes, raftfeed.MaxBatchBytes(); got != want {
+			t.Fatalf("configured %d: fingerprint carries %d but raftfeed applies %d", configured, got, want)
+		}
+	}
+	over, capped := baseConfig(), baseConfig()
+	over.Raft.MaxBatchBytes = 200 << 20
+	capped.Raft.MaxBatchBytes = maxRaftBatchBytes
+	if FromConfig(over, baseGenesis()).Fingerprint() != FromConfig(capped, baseGenesis()).Fingerprint() {
+		t.Fatal("a limit above the forwarding cap behaves like the cap and must fingerprint like it")
+	}
+}
+
+func TestOnlyTheRaftLimitIsOperational(t *testing.T) {
+	for _, f := range baseParams().fields() {
+		if got, want := Operational(f.name), f.name == "raft_max_batch_bytes"; got != want {
+			t.Fatalf("Operational(%q) = %v, want %v", f.name, got, want)
+		}
+	}
+}

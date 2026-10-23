@@ -120,7 +120,7 @@ Mọi lệnh dưới đây có trong `OPERATIONS_GUIDE.md` và đã đối chi�
 5. **Thay binary** cùng commit trên mọi host, kiểm `sha256sum` khớp biên bản. Cụm ansible: `./deploy_clusters.sh --deploy` (đa cụm) hoặc `./ansible_deploy.sh --start` (cụm đơn, giữ dữ liệu). Đặt `METANODE_ENV=production` (`--env=production`) và `META_SECURE_PASSWORD` qua biến môi trường của unit/vault.
 6. **Khởi động parent trước, exec sau**; đợi độ cao tăng đều.
 7. **Mở cổng** chỉ khi mục 5 đạt.
-8. **So fingerprint cả cụm** trước khi mở cổng: `cd execution && go run ./cmd/tool/protocol_fingerprint -nodes <file>` (exit 0 = mọi node cùng fingerprint; 1 = có node lệch, tool nêu node và trường; 2 = không kết nối được). Lệch thì dừng, sửa `config.json` của node đó, không mở cổng.
+8. **So fingerprint cả cụm** trước khi mở cổng: `cd execution && go run ./cmd/tool/protocol_fingerprint -nodes <file>` (exit 0 = mọi node cùng fingerprint; 1 = có node lệch, tool nêu node và trường; 2 = không kết nối được). Lệch thì dừng, sửa `config.json` của node đó, không mở cổng. Trường `raft_max_batch_bytes` được gắn nhãn `operational` (không làm lệch state, nhưng lệch giá trị có thể làm rơi giao dịch đã nhận): vẫn phải đồng nhất trước khi mở cổng.
 
 ---
 

@@ -24,7 +24,7 @@ Nhãn bằng chứng: `[ĐỌC CODE]` kèm vị trí; `[ĐO]` có lệnh chạy;
 - **Không nên thêm mục `protocol` vào genesis của chain đã công bố `GenesisDigest`.** `GenesisDigest` là keccak256 của chính nội dung `genesis.json` (`pkg/cross_chain/types.go:84`, `ceremony/digest.go`); sửa file làm file không còn khớp digest đã công bố. Với chain mới, khai báo `protocol` **trước khi** công bố digest thì digest cam kết luôn cả tham số giao thức. Với chain đang chạy, dùng P0 (so sánh dấu vân tay) thay vì sửa genesis.
 - **Không kiểm khi bắt tay peer:** các validator Go không kết nối trực tiếp với nhau (không có chỗ nào trong `cmd/simple_chain` dựng kết nối master/child), nên không có bước bắt tay để gắn kiểm tra. Việc so sánh làm qua RPC bằng công cụ.
 - **Giới hạn block của Rust xuất qua metric, chưa nằm trong dấu vân tay Go.** So sánh chúng bằng Prometheus; công cụ chưa đọc metric.
-- **`verify_device_key`, `state_backend`, `raft.max_batch_bytes`, `attestation_interval`, `epoch_duration_seconds`, `chain_id` chỉ vào dấu vân tay, không vào mục `protocol` của genesis** (chưa xác minh được đường thực thi hoặc đã có nguồn chung). Một giá trị Raft `max_batch_bytes` bỏ trống được chuẩn hóa thành mặc định 4 MiB, nên "bỏ trống" và "đặt tường minh bằng mặc định" cho cùng dấu vân tay.
+- **`verify_device_key`, `state_backend`, `raft.max_batch_bytes`, `attestation_interval`, `epoch_duration_seconds`, `chain_id` chỉ vào dấu vân tay, không vào mục `protocol` của genesis** (chưa xác minh được đường thực thi hoặc đã có nguồn chung). Giá trị Raft `max_batch_bytes` được chuẩn hóa thành giá trị hiệu lực (bỏ trống = mặc định 4 MiB, trên 64 MiB bị kẹp về 64 MiB), nên các cấu hình cho cùng hành vi cho cùng dấu vân tay.
 
 ### 0.3. Cách dùng
 ```bash
@@ -175,5 +175,5 @@ Dựa trên `runbook_deploy_audit_rounds_and_stm_fix_20261019.md` và `block_stm
 ## 7. Quyết định cần bạn đưa ra
 1. Có làm **P0 (dấu vân tay cấu hình)** và **P1 (bản ghi chỉ đọc)** ngay không? (khuyến nghị: có)
 2. Có muốn đi tới **P3 (nâng cấp cuốn chiếu có phiên bản)**, hay tiếp tục dùng quy trình dừng cả cụm và chỉ cải thiện kiểm tra trước nâng cấp?
-3. Với `raft.max_batch_bytes`: đưa vào `ProtocolParams` (đồng nhất theo giao thức) hay chỉ kiểm tra đồng nhất lúc khởi động?
+3. ~~Với `raft.max_batch_bytes`: đưa vào `ProtocolParams` hay chỉ kiểm tra đồng nhất lúc khởi động?~~ **Đã quyết (2026-10-23): không đưa vào `ProtocolParams`.** `[ĐỌC CODE]` `fsm.Apply` (`pkg/rollup/raftfeed/fsm.go`) không đọc giá trị này; nó chỉ quyết định node nhận, tách và chuyển tiếp batch nào, nên không thể làm lệch state. Thay vào đó: dấu vân tay mang **giá trị hiệu lực** (đặt trống = mặc định 4 MiB, trên 64 MiB bị kẹp về 64 MiB, đúng như `raftfeed` áp dụng; có test ghim với `raftfeed.MaxBatchBytes()`), công cụ `protocol_fingerprint -nodes` gắn nhãn `operational` cho trường này, và node ghi cảnh báo lúc khởi động nếu giá trị cấu hình vượt trần 64 MiB. Lệch giá trị vẫn được báo (exit 1) vì có thể làm rơi giao dịch đã nhận. `[CHƯA ĐO]`: chưa thử trên cụm thật có hai node lệch giá trị.
 4. Cho phép tôi chạy diễn tập `tz_replay_check` cũ/mới trên bản sao dữ liệu cụm cục bộ trước (không đụng cụm 231/230)?

@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
+	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 )
 
 const (
@@ -96,6 +97,9 @@ func effectiveRaftConfig(rc *config.RaftConfig) (config.RaftConfig, error) {
 		if v <= 0 {
 			return c, fmt.Errorf("raft: %s must be > 0", name)
 		}
+	}
+	if c.MaxBatchBytes > maxForwardBody {
+		logger.Warn("⚠️ [RAFT] max_batch_bytes %d exceeds the internal forwarding cap; the effective limit is %d", c.MaxBatchBytes, maxForwardBody)
 	}
 	if !common.IsHexAddress(c.SequencerAddress) {
 		return c, errors.New("raft: sequencer_address must be a 20-byte hex address")

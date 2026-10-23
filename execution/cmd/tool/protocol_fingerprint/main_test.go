@@ -124,3 +124,20 @@ func TestLoadNodesBothShapes(t *testing.T) {
 		t.Fatal("a file with no nodes must be an error")
 	}
 }
+
+func TestCompareLabelsTheRaftLimitAsOperational(t *testing.T) {
+	odd := report(func(c *config.SimpleChainConfig) { c.Raft = &config.RaftConfig{MaxBatchBytes: 1 << 20} })
+	ref := report(func(c *config.SimpleChainConfig) { c.Raft = &config.RaftConfig{MaxBatchBytes: 2 << 20} })
+	odd2 := report(func(c *config.SimpleChainConfig) {
+		c.AccountGate = ""
+		c.Raft = &config.RaftConfig{MaxBatchBytes: 2 << 20}
+	})
+	text, code := compare(map[string]nodeResult{"m0": ok(ref), "m1": ok(ref), "m2": ok(odd)})
+	if code != 1 || !strings.Contains(text, "raft_max_batch_bytes") || !strings.Contains(text, "operational") {
+		t.Fatalf("a differing raft limit must be reported and labelled operational: code=%d\n%s", code, text)
+	}
+	text, _ = compare(map[string]nodeResult{"m0": ok(ref), "m1": ok(ref), "m2": ok(odd2)})
+	if strings.Contains(text, "operational") || !strings.Contains(text, "account_gate") {
+		t.Fatalf("a consensus-relevant setting must not carry the operational label:\n%s", text)
+	}
+}
