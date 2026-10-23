@@ -911,9 +911,7 @@ func (stm *TrueBlockSTM) execOne(
 			}
 
 			if err != nil {
-				if len(tx.AuthorizationList()) > 0 {
-					mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
-				}
+				mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
 				logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
@@ -978,23 +976,10 @@ func (stm *TrueBlockSTM) execOne(
 					rcp.UpdateExecuteResult(receiptStatus, ret, exception, gasUsed, eventLogs)
 
 					// Apply state changes to wrapper DBs so Block-STM tracks Read/Write Sets correctly
-					// Always apply nonce updates even if canPayGas is false to prevent infinite replays
-					if exRs.MapNonce() != nil {
-						for addrHex, newNonceBytes := range exRs.MapNonce() {
-							addr := common.HexToAddress(addrHex)
-							if len(tx.AuthorizationList()) > 0 && addr == tx.FromAddress() {
-								// EIP-7702 (F1): sender nonce is strictly senderFinalNonce
-								// (tx.Nonce + 2 if self-authorized, tx.Nonce + 1 otherwise).
-								// Prevent MVM from double-incrementing.
-								mvccDB.SetNonce(addr, senderFinalNonce)
-								continue
-							}
-							newNonce := big.NewInt(0).SetBytes(newNonceBytes).Uint64()
-							mvccDB.SetNonce(addr, newNonce)
-						}
-					} else if len(tx.AuthorizationList()) > 0 {
-						mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
-					}
+					// Always apply sender nonce update even if canPayGas is false to prevent infinite replays.
+					// Contract nonces from internal execution (e.g. CREATE) are only committed below
+					// when the transaction is accepted and passes balance prechecks.
+					mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
 
 					if canPayGas {
 						if exRs.ReceiptStatus() == pb.RECEIPT_STATUS_RETURNED {
@@ -1078,6 +1063,15 @@ func (stm *TrueBlockSTM) execOne(
 								)
 								mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 							} else {
+								if exRs.MapNonce() != nil {
+									for addrHex, newNonceBytes := range exRs.MapNonce() {
+										addr := common.HexToAddress(addrHex)
+										if addr != tx.FromAddress() {
+											newNonce := big.NewInt(0).SetBytes(newNonceBytes).Uint64()
+											mvccDB.SetNonce(addr, newNonce)
+										}
+									}
+								}
 								for _, addr := range sortedAddrs {
 									addAmt := addBalances[addr]
 									subAmt, hasSub := subBalances[addr]
