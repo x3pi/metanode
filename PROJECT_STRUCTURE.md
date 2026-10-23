@@ -1,554 +1,280 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-10-22 (protocol-parameter fingerprint P0/P1: new `pkg/protocolparams`, RPC `mtn_protocolFingerprint`, optional genesis `config.protocol` section checked at startup, new `cmd/tool/protocol_fingerprint`, Rust `consensus_max_*` gauges; NOMT async-commit failure now fail-stops the node, `pkg/trie/nomt_state_trie.go`; new `cmd/tool/nomt_ns_blast`; docs cleanup: removed stale per-file rows and dead references, `local_devnet` replaces ignored `local_parent_chain`; audit round 3: barrier fee/gas honesty, nonce on malformed barrier txs, FileRequest disabled; execution audit round 2: reward/fee/state-persistence parity, free-fee unification, distributeRewards disabled; execution parity: fast path = Block-STM rules, `fee_floor.go`; RPC rate limiter WS/HTTP batch accounting, mempool eviction after verification; PR #171 & PR #172/#173 sync: added rollup adapters & proposer dedup test in `cmd/simple_chain/`, registration TCP test & virtual executor tests in `cmd/simple_chain/processor/`, synchronized BFT supermajority threshold `(N+f)/2 + 1` in `pkg/parentchain` QuorumClient & Rollup).
-> **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
+
+> Canonical module map. Describes the **current** layout only; history lives in git and `note/`.
+> **Rule:** update this file when a package, entrypoint, FFI/proto interface or cross-layer channel is added, removed or renamed.
+
 ---
 
-## 📐 High-Level Architecture
+## 1. System Topology
+
+```
+                 ┌──────────────────────────────────────────────┐
+                 │ Parent Chain (cmd/parent_chain)              │
+                 │ Rust BFT + HTTP REST · float accounts ·      │
+                 │ chain/account registry · f+1 BLS co-attest   │
+                 └───────▲───────────────────────────▲──────────┘
+        batch anchor /   │                           │  account gate /
+        credit attest    │                           │  credit attest
+        ┌────────────────┴─────────┐       ┌─────────┴────────────────┐
+        │ Execution cluster        │ relay │ Execution cluster        │
+        │ consensus_mode = BFT     │◄─────►│ consensus_mode = "raft"  │
+        │ Mysticeti validators     │       │ raftfeed sequencers      │
+        └──────────────────────────┘       └──────────────────────────┘
+        each box = N × the single-process node described in §2
+```
+
+- Parent chain ID comes from genesis (default `991`).
+- BFT tolerance: `f = ⌊(n-1)/3⌋`; a cluster needs n ≥ 4 to survive one fault (`note/bft_fault_tolerance_node_count.md`).
+
+## 2. Node Layering (one process: `execution/cmd/simple_chain`)
+
+Go is the host process; Rust consensus is linked as `libmetanode` (CGo). Both directions are in-process FFI.
+
+```
+ Clients ── JSON-RPC/WS (eth_*, mtn_*) ──┐     ── Protobuf TCP (batch tx / receipts) ──┐
+                                         ▼                                            ▼
+┌──────────────────────────── Go Execution (execution/) ───────────────────────────────────┐
+│ cmd/simple_chain: main/app/backend, rpc_*, mtn_api, processor/ (block + tx pipelines)    │
+│                                                                                          │
+│  Ingress ─► transaction_pool ─► tx_batch_forwarder ─► FFI (raft mode: raftfeed.Submit)   │
+│  Execute: grouptxns (Union-Find) ─► tx_processor (Block-STM / EVM / MVM / Gateway)       │
+│  State:   account_state_db ─► trie (NOMT) ─► PebbleDB / Xapian (goxapian) / mvm (C++)    │
+│  Side:    sync, snapshot, pruning, rollup, parentchain, cross_chain, keyvault, metrics   │
+│  executor/ffi_bridge.go ◄── execute_block / process_rpc_request / get_state_root ──┐     │
+└────────────────────────────────────────────────────┬───────────────────────────────┼─────┘
+        metanode_submit_transaction_batch (Go→Rust)  │                               │ GoCallbacks (Rust→Go)
+┌────────────────────────────────────────────────────▼───────────────────────────────┴─────┐
+│ Rust Consensus (consensus/metanode, libmetanode)                                         │
+│  ffi.rs ─► node/ (setup_storage → setup_consensus, epoch_monitor, sync, executor_client) │
+│  consensus/commit_processor (ordered commit loop, digest gate, peer attestation, WAL)    │
+│  liveness_watchdog.rs · setup_consensus/fork_guard.rs · epoch_transition · checkpoint    │
+│  ┌──────────── meta-consensus/core (Mysticeti DAG-BFT) ───────────────┐                  │
+│  │ core/proposer · block_manager · synchronizer · linearizer ·        │                  │
+│  │ commit_finalizer · commit_syncer · coordination_hub ·              │                  │
+│  │ commit_vote_monitor · dag_state · storage (RocksDB) · tonic network│                  │
+│  └────────────────────────────────────────────────────────────────────┘                  │
+└────────────────────────────────────────────────────┬─────────────────────────────────────┘
+                                                     │ tonic gRPC (blocks/votes) + peer_rpc (TCP)
+                                                     ▼  other validators
+```
+
+## 3. Commit Data Flow (zero-fork path)
+
+```
+tx ─► mempool ─► batch ─► Rust propose ─► DAG ─► linearizer (deterministic order)
+   ─► commit_vote_monitor: 2f+1 same digest? ──no──► PENDING (never timeout-dispatch)
+                   │yes (or TRUE cold-start)              └► Conflict ⇒ discard, wait CertifiedCommit
+                   ▼
+   commit_processor ─► execute_block (FFI) ─► Go: group ─► Block-STM/EVM ─► NOMT root ─► receipts
+                   ▲                                                       │
+                   └──── GEI / state-root check (gei_validator, fork_guard) ◄┘
+```
+
+Decision matrix (`PeerAttestResult`): no digest data and no votes → `Ok` (true cold start); votes present but < 2f+1 → `Insufficient` (wait); 2f+1 agree → `Ok`; 2f+1 disagree → `Conflict` (discard local). See `AGENTS.md` Part 2.5.
+
+In `consensus_mode="raft"` Rust consensus is not started: `pkg/rollup/raftfeed` builds identical `ExecutableBlock`s on every replica and pushes them to `blockIngestionQueue`.
+
+---
+
+## 4. Repository Layout
 
 ```
 metanode/
-├── README.md               ← Monorepo architecture overview, quick start, and documentation index
-├── ci.sh                   ← Convenient project-root symlink to deploy/ci/ci_watcher.sh
-├── deploy/                 ← Deployment configurations and scripts parent folder
-│   ├── cluster/
-│   │   └── local_devnet/   ← Local single-chain devnet scripts (start_single_chain.sh, stop_single_chain.sh, run_load_test.sh)
-│   ├── ci/                 ← Automated CI/CD Testing Daemon, Git Watcher & Telegram Alerts
-│   │   ├── ci_config.yaml  ← Test matrix configuration (Block-STM, Cross-Chain, Spam, TPS)
-│   │   ├── ci_watcher.sh   ← Remote Git commit listener daemon
-│   │   ├── ci_runner.py    ← Config-driven test runner with pre-actions & timeout control
-│   │   ├── telegram_notify.py ← Telegram notification module
-│   │   └── README.md       ← Comprehensive operations & test guide
-│   ├── ansible/            ← Ansible deployment scripts for Public Chain (Root Anchor)
-│   │   ├── inventory.chain2.yml ← Local ignored profile for isolated second Chain ID 991 network (nodes 5-8, snapshot disabled)
-│   │   ├── parse_inventory.py ← Public endpoint export preserves cluster entries; public-only JSON feeds block hash monitor
-│   │   ├── roles/          ← Modular Ansible roles (node_setup, local_build, systemd_services, start_services, stop_services, restart_services, snapshot_restore, firewall)
-│   │   ├── scripts/manage_snapshot_storage.py ← Managed BTRFS grow/recreate, shared-node checks and size verification
-│   │   ├── scripts/test_manage_snapshot_storage.py ← Non-destructive storage command tests
-│   │   ├── monitors/       ← Decoupled health, consensus vote, and block hash monitors
-│   │   │   ├── vote_monitor/        ← Real-time BFT consensus vote & quorum audit monitor
-│   │   │   ├── block_hash_checker/  ← Real-time multi-node block hash synchronization monitor
-│   │   │   └── start_monitors.sh    ← Background daemon manager for all monitors
-│   │   └── stop_all.sh     ← Script to stop all background deployment processes
-│   ├── ansible_clusters/   ← Ansible automation for Parent Chain & Sharded Execution Clusters with Telegram alerts
-│   │   └── scripts/parse_inventory.py ← Merges public + cluster endpoints into /tmp/rpc_nodes.json; roles/testing reads root_anchor + private_chains URLs
-│   └── systemd/            ← Systemd deployment scripts, key generators (gen_validator_entry.py), and env templates
-├── execution/          ← Go execution engine (EVM-compatible layer, Parent Chain, Rollup/Raft, NOMT FFI)
-│   └── debug_nil/      ← Go standalone tests for nil/slice panic debugging
-├── consensus/          ← Rust consensus engine (Mysticeti BFT/DAG & NOMT FFI workspace)
-│   ├── metanode/       ← Main Rust consensus node & CGo FFI library (libmetanode)
-│   │   ├── src/        ← Node-level consensus code
-│   │   └── meta-consensus/  ← BFT core engine (DAG, committer, syncer)
-│   │       ├── core/   ← Core consensus algorithm implementation
-│   │       ├── config/ ← Consensus configuration types
-│   │       └── types/  ← Shared consensus types
-│   └── vendor/nomt/    ← Vendored NOMT (FFI wrapper: execution/pkg/nomt_ffi/rust_lib → libmtn_nomt)
-├── crates/             ← Shared Rust crates (crypto, metrics, storage, macros)
-├── dashboard/          ← Real-time telemetry & explorer web app
-├── portal/             ← Web3 Portal: Parent Chain Account Gate Onboarding, Rollup transfers, and zero-fork telemetry
-├── docs/               ← Technical deep-dive documentation (Block Processing & TEE-EVM architecture)
-├── note/               ← Engineering designs, A/B benchmark reports, CLAIMS_LEDGER.md & evidence bundles
-├── scripts/            ← Operational scripts
-├── DATABASE_STRUCTURE.md ← Consolidated on-disk storage layout (NOMT, PebbleDB, Xapian) across Validator/RPC/Explorer roles
-└── OPERATIONS_GUIDE.md  ← Complete End-to-End Multi-Cluster & Single-Cluster deployment & Day-2 Operations Runbook
-```
-
-### Layer Interaction
-
-```
-┌─────────────────────────────────────────────────┐
-│              External Clients / RPC              │
-│         (eth_*, mtn_*, web3 compatible)          │
-└───────────────────────┬─────────────────────────┘
-                        │ JSON-RPC / gRPC
-┌───────────────────────▼─────────────────────────┐
-│         Go Execution Engine (execution/)         │
-│  ┌──────────────────────────────────────────┐   │
-│  │  cmd/simple_chain  ← Main node process   │   │
-│  │  ├── processor/    ← Core block logic    │   │
-│  │  ├── main.go       ← Entrypoint          │   │
-│  │  ├── app.go        ← App bootstrap       │   │
-│  │  ├── backend.go    ← Chain backend       │   │
-│  │  └── mtn_api.go    ← MTN RPC API        │   │
-│  └──────────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────────┐   │
-│  │  executor/         ← FFI/IPC boundary    │   │
-│  │  ├── listener.go   ← Block reception     │   │
-│  │  ├── unix_socket*  ← UDS handlers        │   │
-│  │  ├── ffi_bridge.go ← FFI→Rust bridge     │   │
-│  │  └── snapshot_*    ← Snapshot mgmt       │   │
-│  └──────────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────────┐   │
-│  │  pkg/              ← Shared packages     │   │
-│  │  ├── blockchain/   ← Block commit/state  │   │
-│  │  ├── account_state_db/ ← Account state   │   │
-│  │  ├── sync/         ← Peer sync           │   │
-│  │  ├── node/         ← Node orchestration  │   │
-│  │  ├── network/      ← P2P networking      │   │
-│  │  ├── nomt_ffi/     ← FFI → Rust NOMT    │   │
-│  │  ├── trie/         ← State trie          │   │
-│  │  ├── trie_database/← Trie persistence    │   │
-│  │  ├── state/        ← Account state       │   │
-│  │  ├── state_db/     ← State DB layer      │   │
-│  │  ├── mapping_db/   ← Slot→trie mapping   │   │
-│  │  ├── transaction/  ← Tx types            │   │
-│  │  ├── transaction_pool/← Mempool          │   │
-│  │  ├── transaction_grouper/ ← Tx grouping  │   │
-│  │  ├── receipt/      ← Receipt mgmt        │   │
-│  │  ├── snapshot/     ← State snapshots     │   │
-│  │  ├── mvm/          ← Meta VM             │   │
-│  │  ├── smart_contract/← Contract exec      │   │
-│  │  ├── mining/       ← Block production    │   │
-│  │  ├── poh/          ← Proof of History    │   │
-│  │  ├── pruning/      ← State pruning       │   │
-│  │  ├── proto/        ← gRPC protobuf defs  │   │
-│  │  ├── models/       ← Shared data models  │   │
-│  │  ├── config/       ← Node configuration  │   │
-│  │  ├── rollup/       ← Pure Rollup FSM (cross-node state machine) │   │
-│  │  ├── failpoint/    ← Zero-overhead crash injection harness (c0spike) │   │
-│  │  └── metrics/      ← Prometheus metrics  │   │
-│  └──────────────────────────────────────────┘   │
-└──────────────────┬──────────────────────────────┘
-                   │ UDS (Unix Domain Socket)
-                   │ FFI (C ABI via nomt_ffi)
-┌──────────────────▼──────────────────────────────┐
-│      Rust Consensus Engine (consensus/)          │
-│  ┌──────────────────────────────────────────┐   │
-│  │  consensus/metanode/src/                 │   │
-│  │  ├── main.rs          ← Entrypoint       │   │
-│  │  ├── ffi.rs           ← FFI exports→Go   │   │
-│  │  ├── config.rs        ← Node config      │   │
-│  │  ├── lib.rs           ← Lib root         │   │
-│  │  ├── consensus/       ← BFT/DAG engine   │   │
-│  │  │   ├── commit_processor/               │   │
-│  │  │   │   ├── processor.rs ← MAIN LOOP    │   │
-│  │  │   │   ├── executor.rs  ← FFI exec     │   │
-│  │  │   │   ├── gei_validator.rs← GEI check │   │
-│  │  │   │   ├── epoch.rs     ← Epoch detect │   │
-│  │  │   │   ├── lag_monitor.rs← Backpressure│   │
-│  │  │   │   └── wal.rs       ← WAL recovery │   │
-│  │  │   ├── epoch_transition.rs             │   │
-│  │  │   ├── tx_recycler.rs                  │   │
-│  │  │   ├── checkpoint.rs                   │   │
-│  │  │   ├── clock_sync.rs                   │   │
-│  │  │   ├── commit_callbacks.rs← Rust→Go    │   │
-│  │  │   └── state_attestation.rs            │   │
-│  │  ├── node/            ← Node lifecycle   │   │
-│  │  ├── network/         ← P2P networking   │   │
-│  │  └── types/           ← Transaction types│   │
-│  └──────────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────────┐   │
-│  │  meta-consensus/core/src/  ← BFT ENGINE │   │
-│  │  ├── authority_node/      ← Authority node module │   │
-│  │  │   ├── mod.rs          ← Authority node orchestration │   │
-│  │  │   └── tests.rs        ← Authority node unit tests │   │
-│  │  ├── authority_service/   ← Authority service module │   │
-│  │  │   ├── mod.rs          ← Lifecycle coordinator │   │
-│  │  │   ├── handlers.rs     ← RPC server handlers │   │
-│  │  │   └── broadcast.rs    ← Block broadcast stream │   │
-│  │  ├── linearizer/          ← DAG→linear commit ordering │   │
-│  │  │   ├── mod.rs          ← Deterministic commit ordering │   │
-│  │  │   └── tests.rs        ← Linearizer unit tests │   │
-│  │  ├── commit_syncer/      ← Commit sync module │   │
-│  │  │   ├── mod.rs          ← Coord loop         │   │
-│  │  │   ├── fetcher.rs      ← P2P network fetch  │   │
-│  │  │   └── cold_start.rs   ← Sync transition    │   │
-│  │  ├── commit_finalizer/   ← Commit finalization module │   │
-│  │  │   ├── mod.rs          ← Finalizer loop     │   │
-│  │  │   └── types.rs        ← Finalization state structs │   │
-│  │  ├── coordination_hub.rs ← Peer attest   │   │
-│  │  ├── commit_vote_monitor.rs← Digest vote │   │
-│  │  ├── synchronizer/      ← Block sync module  │   │
-│  │  │   ├── mod.rs          ← Event loop         │   │
-│  │  │   ├── fetcher.rs      ← Fetch blocks P2P   │   │
-│  │  │   └── scheduler.rs    ← Scheduled fetches  │   │
-│  │  ├── block_manager/      ← Block manager module │   │
-│  │  │   ├── mod.rs          ← Block validation/acceptance │   │
-│  │  │   └── types.rs        ← Suspended blocks state │   │
-│  │  ├── dag_state/           ← DAG state    │   │
-│  │  ├── core/                ← Proposer     │   │
-│  │  ├── storage/             ← RocksDB      │   │
-│  │  └── network/             ← tonic gRPC   │   │
-│  │  └── ...                  │   │
-│  └──────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────┘
+├── README.md, AGENTS.md, DATABASE_STRUCTURE.md, OPERATIONS_GUIDE.md, HOW_TO_TUNE_BLOCK_SIZE.md, ci.md
+├── ci.sh                ← symlink to deploy/ci/ci_watcher.sh
+├── consensus/           ← Rust workspace
+│   ├── metanode/        ← consensus node + FFI library (src/, proto/, scripts/build_check.sh)
+│   │   └── meta-consensus/{core,config,types}  ← Mysticeti DAG-BFT engine
+│   └── vendor/          ← vendored `nomt`, patched `parking_lot_core`
+├── crates/              ← shared Rust crates (§7)
+├── execution/           ← Go module (execution engine, parent chain, rollup, tools)
+│   ├── cmd/             ← simple_chain, parent_chain, exec_node, tool/*
+│   ├── executor/        ← Go side of the FFI bridge + snapshot manager
+│   ├── pkg/             ← packages (§5.4)
+│   ├── contracts/       ← Solidity system & cross-chain contracts
+│   └── debug_nil/       ← standalone nil/slice panic reproductions
+├── deploy/
+│   ├── ansible/         ← single cluster (4 validators + RPC), monitors/
+│   ├── ansible_clusters/← parent chain + multiple execution clusters
+│   ├── ansible_private_chains/  ← private-chain inventory
+│   ├── ci/              ← self-hosted CI (ci_config.yaml, ci_runner.py, ci_watcher.sh)
+│   ├── cluster/local_devnet/    ← local single-chain devnet scripts
+│   └── systemd/         ← unit templates, genesis examples, key generators
+├── dashboard/           ← cluster/cross-chain monitoring UI (Vite)
+├── portal/              ← web onboarding / rollup / explorer portal (Vite)
+├── docs/                ← Docusaurus site + BLOCK_PROCESSING_ARCHITECTURE.md, tee_evm_architecture.md
+├── note/                ← design docs, reports, CLAIMS_LEDGER.md, evidence/
+└── scripts/             ← operational scripts
 ```
 
 ---
 
-## 📊 Codebase Statistics
+## 5. Go Execution Engine
 
-| Layer | Files | Lines of Code |
-|-------|-------|---------------|
-| Go Execution (`execution/`) | ~835 | ~237K |
-| Rust Consensus (`consensus/metanode/src/`) | ~88 | ~28K |
-| Rust Core Engine (`meta-consensus/core/src/`) | ~83 | ~45K |
-| Shared Crates (`crates/`) | ~81 | ~23K |
-| **Total** | **~1087** | **~333K** |
+### 5.1 Entrypoints (`execution/cmd/`)
+| Path | Role |
+|------|------|
+| `simple_chain/` | Unified node: Validator / SyncOnly / RPC / Explorer roles |
+| `parent_chain/` | Parent settlement & registry chain daemon (own `processor/`, `tx_batcher.go`) |
+| `exec_node/` | Standalone execution node |
+| `tool/*` | Operator, benchmark and verification tools (key/genesis generators, registration, TPS blasters, parity/chaos/e2e checkers, `rollup_cluster`, `protocol_fingerprint`, `encrypt_secret`, …) |
 
----
+### 5.2 `cmd/simple_chain/`
+| File / dir | Role |
+|------------|------|
+| `main.go`, `app*.go` | CLI entry, bootstrap, service wiring |
+| `backend.go`, `rpc_*.go`, `mtn_api.go`, `mtn_registration_api.go`, `admin_api.go`, `debug_api.go`, `routes/` | JSON-RPC / WebSocket surface |
+| `rpc_rate_limiter.go` | Optional global + per-IP limiter (HTTP and WS, per batch item) |
+| `startup_integrity_check.go` | Post-crash integrity check |
+| `rollup_adapters.go` | Bridges node core to the rollup engine |
+| `c0_spike.go` / `c0_spike_stub.go` | Crash/determinism harness (build tag `c0spike`) |
+| `processor/` | Block and transaction pipelines (below) |
 
-## 📦 Go Execution Engine — Key Modules
+### 5.3 `cmd/simple_chain/processor/`
+| Group | Files |
+|-------|-------|
+| Block pipeline | `block_processor_core/commit/processing/state/roots/receipt/broadcast/indexing/epoch/attestation/network/sync.go`, `speculative_executor.go`, `state_processor.go`, `gei_authority.go` |
+| Tx pipeline | `transaction_processor*.go`, `tx_validator_pool_core.go`, `tx_batch_forwarder_core.go`, `tx_virtual_executor_core.go` (off-chain reads), `receipt_tracker.go`, `processors.go` (load monitor + ingress overload gate) |
+| Raft | `raft_state_source.go` (consistent snapshot for new replicas) |
+| Sub-packages | `pipeline/` (block trace/stats), `rpcquery/` (filters, conversion), `syncorder/` |
 
-### `cmd/simple_chain/` — Main Node Process
-| File | Lines | Role |
-|------|-------|------|
-| `main.go` | 94 | CLI entrypoint, node startup |
-| `app.go` | 484 | Application bootstrap, service wiring |
-| `app_blockchain.go` | 1,054 | Blockchain app logic |
-| `app_network.go` | 125 | Network app logic |
-| `backend.go` | 660 | Chain backend (EVM state, DB) |
-| `mtn_api.go` | 671 | MTN-specific JSON-RPC API |
-| `rpc_block.go` | 996 | Block-related RPC handlers (standardized `eth_getBlockByNumber/Hash(fullTx=true)` with `RPCTransaction` + `groupId`) |
-| `rpc_block_fulltx_test.go` | 485 | Unit tests & benchmarks for fullTx standardization across Legacy, EIP-2930, EIP-1559, EIP-7702, and contract creation |
-| `rpc_transaction.go` | 780 | Tx-related RPC handlers |
-| `rpc_state.go` | 334 | State RPC handlers |
-| `debug_api.go` | 870 | Debug/admin endpoints |
-| `startup_integrity_check.go` | 272 | Post-crash integrity verification |
-| `c0_spike.go` | ~1300 | C0 spike harness (`//go:build c0spike`): multi-round determinism, EVM+Gateway workload, per-store durability failpoints with run-scoped markers (`C0_RUN_ID`), `kill -9` recovery, measured Rust-consensus isolation |
-| `c0_spike_stub.go` | 25 | Stub for production binary (`//go:build !c0spike`), exits cleanly if invoked without build tag |
-| `rollup_adapters.go` | 145 | Adapter wrappers bridging simple_chain core to rollup engine (`RollupBlockProcessorAdapter`, `RollupTxValidatorAdapter`, `RollupTxPoolAdapter`, `RollupTxReceiptAdapter`) |
-| `proposer_dedup_test.go` | 131 | Proposer transaction deduplication unit tests |
-| `rpc_rate_limiter.go` / `rpc_rate_limiter_test.go` | — | Global + per-IP RPC rate limiter (off by default, `rpc_rate_limit`). HTTP counts every call of a JSON-RPC batch; `WebsocketMiddleware` wraps the hijacked WS connection and rate-limits each message/batch item (RFC 6455 frame parser; refuses reserved bits, caps a reassembled fragmented message at 8 MB, closes with 1008/1009/1002 without delivering rejected bytes to the decoder). A batch larger than the burst is refused without banning the IP. Middleware order: CORS → rate limiter → eth_sendRawTransaction intercept → RPC server |
+### 5.4 `execution/pkg/`
+| Package | Role | Risk |
+|---------|------|------|
+| `blockchain/` | Chain state, block state commit (`block_state_commit.go`), `vm_processor/` | 🔴 state-root write |
+| `blockchain/tx_processor/` | Tx execution: `block_stm.go`, `true_block_stm.go`, `native_fast_path.go`, `mvcc/`, EVM dispatch, `gateway_handler.go` / `parent_chain_gateway_handler.go`, `rollup_system_handler.go`, signature enforcement, fee floor, attestation workers | 🔴 consensus rules |
+| `account_state_db/` | Account state + commit pipeline | 🔴 trie mutations |
+| `state/`, `state_db/`, `smart_contract_db/`, `transaction_state_db/` | State transitions, stake DB, per-contract storage, tx-scoped state | 🔴 EVM state |
+| `trie/`, `trie_database/` | Merkle trie (flat, NOMT, verkle backends) and persistence | 🟡 |
+| `nomt_ffi/` | CGo bridge to Rust NOMT (`rust_lib` → `libmtn_nomt`) | 🟡 C boundary |
+| `grouptxns/`, `transaction_grouper/` | Union-Find grouping of transactions | 🟡 determinism |
+| `transaction/`, `transaction_pool/`, `receipt/`, `block/`, `block_validator/`, `block_signer/` | Types, mempool, receipts, blocks, validation, BLS block signing | 🟡 |
+| `mvm/`, `goxapian/` | Embedded C++ Meta VM and Xapian full-text index | 🔴 deterministic / CGo |
+| `sync/`, `snapshot/`, `pruning/`, `state_changelog/` | Peer sync data, backup/restore, state pruning, state history | 🔴 sync / 🟡 |
+| `network/`, `quic_network/`, `connection_manager/`, `node/`, `txsender/`, `transfer/` | Protobuf TCP ingress with admission/backpressure, QUIC, P2P hosts, tx client, file transfer | 🟡 |
+| `rollup/` | Deterministic rollup state machine, cross-node transfer workers, account-registry and registration relay, committee co-attestation | 🟢 isolated |
+| `rollup/raftfeed/` | `consensus_mode="raft"`: replicated `hashicorp/raft` sequencer (fsm, forward, attest, membership, state transfer) | 🟡 raft mode only |
+| `parentchain/` | Parent chain state, stores, HTTP RPC, `QuorumClient` | 🟢 |
+| `cross_chain/` | Root Anchor, gateway, asset registry, ceremony, relayer and `relayer_daemon/` | 🟢 |
+| `protocolparams/` | Fingerprint of execution-relevant settings; checked against genesis at startup; RPC `mtn_protocolFingerprint` | 🟢 |
+| `keyvault/` | `enc:v1:` encrypted secrets in `config.json` | 🟢 |
+| `mining/`, `poh/` | Block production service; stake-weighted leader schedule | 🔴 timing |
+| `storage/`, `storagenode/`, `shard_storage/`, `blob_store/` | Storage backends, storage node, sharded block store, EIP-4844 blobs | 🟡 |
+| `explorer/`, `filters/`, `stats/`, `error_tx_manager/` | Explorer index, log filters, stats, failed-tx records | 🟢 |
+| `config/`, `metrics/`, `logger/`, `loggerfile/`, `tracing/`, `monitor_service/`, `fatal/`, `failpoint/` | Config, Prometheus, logging, tracing, fail-stop, crash injection | 🟢 |
+| `proto/` | Protobuf definitions + generated code (+ vtproto) | 🟡 wire format |
+| `bls/`, `common/`, `utils/`, `abi_file/`, `script/`, `pathdetector/`, `proxy_tx/`, `shared_memory/`, `remotestorage/`, `important_data_logger/`, `models/` | Helpers | 🟢 |
 
-*CLI Flags & Config:*
-- `--tool-c0-spike=verify|worker`: Tool mode for C0 multi-process spike verification harness.
-- `-c0-data-dir`, `-c0-out`, `-c0-blocks`, `-c0-rounds` (>= 2), `-c0-restart`, `-c0-report`: Parameters for C0 spike execution (`-c0-report` defaults to a temp file; the spike never writes into the repo; a failed `verify` keeps its temp data directory). Workers read `C0_LARGE_BLOCK`, `C0_RANDOMIZE_TX` and `C0_TX_SHUFFLE_SEED` from the environment.
-- `pkg/blockchain/tx_processor/gateway_harness_hooks.go` (no-op) / `gateway_handler_c0spike.go` (`//go:build c0spike`): test-harness hooks for the Gateway handler; the production build is unchanged.
-- `consensus_mode`: "raft" (Rollup Raft ingestion queue mode) or empty (default Rust BFT consensus).
-
-### `cmd/simple_chain/processor/` — Core Block Processing
+### 5.5 `execution/executor/` — Go side of the FFI bridge
 | File | Role |
 |------|------|
-| `block_processor_core.go` | Main block processor loop |
-| `block_processor_sync.go` | **Peer sync / state recovery** ⚠️ |
-| `block_processor_commit.go` | Block commit pipeline |
-| `block_processor_processing.go` | Tx execution pipeline |
-| `block_processor_network.go` | Network message handling |
-| `block_processor_attestation.go` | BLS attestation logic |
-| `block_processor_epoch.go` | Epoch transition handling |
-| `block_processor_state.go` | State root verification |
-| `tx_batch_forwarder_core.go` | Tx batch → consensus forwarding |
-| `tx_validator_pool_core.go` | Tx validation pool |
-| `tx_virtual_executor_core.go` | Virtual/offchain tx execution |
-| `transaction_processor.go` | Core tx processing (SendRawTransaction/SendRawTransactions, EIP-2718 ingress) |
-| `processors.go` | Processor wiring + system load monitor (`computeSystemLoad` with `ReceiptTracker.InFlightTxCount()`); `overloadGate` turns the overload flag into backpressure for TCP tx submission (`network.SetTxAdmissionGate`) |
-| `receipt_tracker.go` | Tracks client connection mappings (`txHashConnectionMap`) and atomic in-flight tx gauge (`inFlightCount`) for receipt broadcast and ingress backpressure |
-| `ingress_backpressure_test.go` | Unit tests for `ReceiptTracker.InFlightTxCount`, `ReconcileInFlightTxCount`, `computeSystemLoad`, and `resolveIngressWatermarks` |
-| `overload_gate_test.go` | Overload gate tests (blocks while overloaded, released on recovery/cancel) |
-| `raw_eth_ingress_test.go` | EIP-2718 TCP ingress & mode gating tests |
-| `registration_tcp_test.go` | Unit tests for TCP registration handler & account barrier synchronization |
-| `tx_virtual_executor_core_test.go` | Unit tests for off-chain read tx execution (`executeAndRespondReadTx`), EIP-7702 SetCode intrinsic gas validation, and state immutability across virtual execution |
-| `state_processor.go` | State transition processor |
-
-### `pkg/` — Shared Packages (Critical Ones)
-| Package | Role | Concurrency Risk |
-|---------|------|-----------------| 
-| `blockchain/` | Block state commit, `block_state_commit.go` | 🔴 HIGH — state root write |
-| `account_state_db/` | Account state management, CommitPipeline | 🔴 HIGH — trie mutations |
-| `sync/` | Peer sync, anti-entropy | 🔴 HIGH — distributed state |
-| `nomt_ffi/` | FFI bridge to Rust NOMT trie | 🟡 MED — C boundary |
-| `trie/` | Merkle trie operations (Flat + NOMT backends) | 🟡 MED — shared read |
-| `trie_database/` | Trie persistence layer | 🟡 MED — DB write |
-| `mapping_db/` | Slot→trie key mapping | 🟡 MED — DB write |
-| `state/` | Account state transitions | 🔴 HIGH — EVM state |
-| `state_db/` | State database layer (Stake, Smart Contract) | 🟡 MED — DB |
-| `transaction_pool/` | Mempool management (Actor pattern, channel-based) | 🟡 MED — concurrent access |
-| `network/` | P2P connection mgmt | 🟡 MED — async I/O |
-| `mining/` | Block production | 🔴 HIGH — timing sensitive |
-| `poh/` | Proof of History | 🟡 MED — clock sensitive |
-| `snapshot/` | State snapshot/restore | 🟡 MED — large I/O |
-| `mvm/` | Meta VM execution | 🔴 HIGH — deterministic |
-| `pruning/` | State pruning manager | 🟡 MED — async background |
-| `cross_chain/` | Cross-chain types, Root Anchor ledger, GatewayEngine (per-action self-signed cert model; GovernanceEngine propose/vote/execute removed 2026-09-04, RecoveryCommittee + DeclareChainDeadWithCert + UpdateCommitteeWithRecoveryCert removed 2026-09-24 — `UnregisterChainWithCert` is now self-authorized by the leaving chain's own committee with an `UnregisterNonce` replay guard, and `DeadChains` is set only by `SlashOnEquivocation`), AssetRegistryEngine, Ceremony, Root Anchor RPC client, Relayer reference engine, and `relayer_daemon/` automated service (Milestones A-I) | 🟢 LOW |
-| `blockchain/tx_processor/` | Transaction processor, VM dispatch, `GatewayHandler` native bridge contract dispatcher, `CommitteeAttestationWorker`, `CommitAttestationWorker`, signature enforcement and admission gate (`VerifyTransaction`, `checkTxSignature`, `verifySignatures`) **Execution parity (2026-10-18):** the native fast path and TrueBlockSTM apply one rule set — no per-sender skipping after a failed transfer, no node-local `VerifyTransaction` in the fast path (decided only by the nonce check and the balance check in the transfer), a failed transfer whose fee was not debited reports `GasUsed` 0 (no leader-reward minting), and `FilterBelowFeeFloor` (`fee_floor.go`, run beside `FilterInvalidSignatures`) enforces `MINIMUM_BASE_FEE` at execution with admission's exemptions; pinned by `exec_parity_test.go`. Consensus rule change: deploy to all validators together. **Execution audit round 2 (2026-10-18):** a failed/unpaid tx never earns the leader a reward (Block-STM native transfer, `setAccountType`, nonce-0 BLS registration report gas only when a fee was debited); a rejected EVM tx stores no code/storage root/logs; free-fee addresses are charged nothing in both pipelines; a plain transfer to an address with code (state at batch start, same boundary as `grouptxns.HasCodeFunc`) runs through the EVM; only the nonce-0 BLS registration is fee-exempt at nonce 0 (admission + `fee_floor.go`); `ValidatorHandler.distributeRewards` is disabled and `setCommissionRate` is capped at 10000; `HandleOffChainQuery` no longer notifies consensus. Consensus rule change: deploy to all validators together. **Audit round 3 (2026-10-18):** `VmProcessor.UpdateStateDB` reports gas only when the fee was really debited (barrier txs: `noncePlusOne` always says 50000), free = sender OR recipient; malformed barrier/account-setting txs now consume the sender nonce (`HandleRevertedTransaction`); `grouptxns.classifyGroup` routes every barrier address (validator, gateway, parent-chain gateway, `mt_common.ROLLUP_SYSTEM_ADDRESS`) and any non-empty authorization list to the EVM pipeline. TCP `FileRequest` (data-directory dump) is no longer served. | 🔴 HIGH — EVM state |
-| `rollup/` | Pure deterministic Rollup State Machine (Phase B1: `EventRPCSubmitted` shared by both roles gives every RPC call a submit-then-poll-confirm step — "accepted into the queue" is never treated as "applied"), `Store` with indexed `activeIDs` for backpressure + a per-cluster `FloatSeq` counter (Phase B2), `CrossNodeHandler` (user-facing cross-node tx entrypoint) + background `SendWorker`/`ReceiveWorker`/`ReclaimWorker` driving transfers against `pkg/parentchain` over its real HTTP RPC (Phase B4-B8), including the compensating refund Transfer's own confirmation (`ReceiveWorker.processRefundSent`), gated on Raft leadership via `raftfeed.GetNode().IsLeader()`. Standardized all rollup system event payloads, inner envelopes, and committee co-attestations to 100% deterministic Protobuf binary format (`rollup.proto`, `MarshalRollupSystemPayload`, `MarshalRollupSystemAttestedPayload`, `AccountRegistrationPayload.MarshalProto`), completely removing legacy JSON wire formatting and JSON fallbacks. Includes `AccountRegistryHandler` (with $f+1$ committee BLS co-attestation verification on `ACCT_REG_ATTEST_V1` digest), `RegistrationRelay` (durable registration queue with `RegistrationRelayStore` and `KVStore` recovering PENDING requests across restarts), `RegistrationWorker` for polling Parent Chain with $f+1$ QuorumClient and proposing `account_registered` barrier events with stateDB-gated cursor, and `RollupSystemHandler` with $f+1$ committee BLS co-attestation envelope `{inner, attestations}` for cross-chain credit/lock/refund events with tombstone idempotency preventing double-credit. Integrated with simple_chain via `rollup_adapters.go`. | 🟢 LOW — pure logic, isolated workers |
-| `parentchain/` | Parent Chain native state module (ChainID from genesis, default `991`; Float Account, Chain Registry, Account Registry, Claimed Messages) for Raft Sequencers — `MemoryStore` (tests) and `DBStore` (LevelDB-backed, production, with a per-destination inbound-transfer index). Standardized consensus data (wire formats, Header, Receipt, BlockRecord, BlockProgress, CallData, and NOMT state values) to Protobuf (`parent_chain.proto`) with deterministic serialization. Includes `QuorumClient` (verifies Byzantine observation quorum $\ge f+1$ for reads and strong BFT supermajority quorum $\ge (N+f)/2 + 1$ for state-critical verification, along with `nomt_ffi.VerifyProof`). The legacy JSON transaction path is DELETED (no `ParentChainTx`, no `POST /tx`, no unsigned/alternate-digest modes): every state change is a `pb.Transaction` signed (BLS) over its hash with a sequential nonce, submitted as raw proto bytes to `/send_raw_transaction`; `GET /tx?hash=` is lookup only, `GET /nonce?address=` returns the committed sender nonce. `DepositToFloat` always needs a registered source cluster's certificate (no zero-source bypass); who may register as a cluster is set by the genesis (`cluster_policy.go`: `open_cluster_registration` for devnet, `clusters` allow-list for production). Float model: genesis `float_accounts` applied in block 1 (`TreeBlockCommitter.SetGenesisInit`), `METHOD_TRANSFER_BALANCE` for plain account transfers, balance-based cluster registration and `authorized` certifier flag (`cluster_policy.go`, `state.go`); live verification tool `cmd/tool/test_account_model`. Admission filter on `/send_raw_transaction` (unsigned/forged/unknown-sender/stale-nonce txs are rejected with HTTP 400 before reaching consensus) and `GET /float?pubkey=` read RPC. Integrated Prometheus `/metrics` (`parent_chain_last_block`, `parent_chain_state_root`, `parent_chain_fork_detected`, `parent_chain_txs_total`, `parent_chain_blocks_total`). Eliminated `LastDeviceKey` BLS smuggling in favor of `AccountRegistry` lookups. | 🟢 LOW — pure state & client logic |
-| `cmd/parent_chain/` | Parent Chain node binary: wires `pkg/parentchain.DBStore` + `http_rpc.HTTPServer` + Rust consensus-core FFI bridge together. `BlockProcessor.processBlock` decodes and executes transactions deterministically sorted by `(FromAddress ASC, Nonce ASC, TxHash ASC)`; `tx_batcher.go` batches submitted txs to Rust consensus core. Enforced mandatory `-genesis` flag without hard-coded validator fallbacks. Local devnet requires data wipe (`run.sh clean`) between format upgrades due to Protobuf migration. Real-time cluster health and parity monitor in `cmd/tool/parent_chain_monitor`. Live end-to-end full lifecycle verification in `cmd/tool/test_live_e2e`. Genesis float account generator `cmd/tool/gen_float_accounts` for aligning execution alloc with Parent Chain genesis. Automated chaos burn-in test `execution/scripts/chaos_burnin.sh`. Automated multi-node fault tolerance test suite in `cmd/tool/test_cluster_fault_tolerance` verifying T-I1..T-I8 with full report in `note/parent_chain_cluster_test_report.md`. Operational runbook documented in `note/runbook_parent_chain_multinode.md`. | 🟡 MED — cluster-verified, standalone & multi-node BFT |
-| `cmd/tool/security_test_suite/` | Comprehensive Security Test Suite for Metanode Core: automated attack verification across 4 core vectors (RPC Ingress fuzzing & recursion/DOS bombs SEC-RPC-001..010; Cryptographic validation, tamper detection & replay attacks SEC-CRYPTO-001..008; Smart contract & EVM resource exhaustion SEC-EVM-001..005; Multi-node zero-fork determinism & height divergence SEC-NODE-001..004) with audit reports exported to `note/security_test_suite_report.md`. Accompanying unit test in `pkg/blockchain/tx_processor/security_unit_test.go`. | 🟢 LOW — standalone testing & audit tool |
-| `cmd/tool/e2e_cross_chain_coattest/` | E2E cross-chain credit co-attestation test runner (P0-2): automates 6 mandatory validation scenarios (A..F, 26 steps total) against a $\ge 4$-validator Mysticeti destination cluster + Raft source cluster `exec2` on isolated ports 31xxx. Verifies conservation of value, tolerance with 1 node offline, quarantine with 2 nodes offline (zero-fork invariant), Byzantine fake credit event rejection ($f+1$ enforcement), mid-traffic `kill -9` crash recovery with exhaustive block-by-block state parity audit, and stale-state retried dispatch idempotency. | 🟢 LOW — standalone testing & verification tool |
-| `rollup/raftfeed/` | `consensus_mode="raft"` switch (`Enabled()`), `ValidateConfig`, and the block source. **C1** (no `raft{}` config block): single-node `Feeder`. **C2** (`raft{}` block present): replicated `hashicorp/raft` cluster — `node.go` (bolt log/stable stores with fsync, TCP transport, bounded propose queue, re-route on lost leadership), `fsm.go` (`Apply` builds the same `ExecutableBlock` on every replica; `Snapshot` waits for DB durability before Raft may compact; `Restore` fail-closed), `forward.go` (follower→leader HTTP + HMAC), `attest.go` (periodic cross-replica block-hash check, fail-closed on majority mismatch), `admin.go`/`adminclient.go`/`membership.go` (C4: status, leader transfer, add/remove replica over the internal HMAC channel, dynamic membership via `forward_port_offset`), `state_transfer.go` + `processor/raft_state_source.go` (consistent snapshot of a RUNNING node served to a new replica: paused-execution atomic checkpoints, sparse-aware verified transfer), operator tool `cmd/tool/rollup_cluster` (`check`, `transfer-leader`, `add-replica`, `remove-replica`, `prepare-replica`, `fetch-state`, `hold-snapshots`), `stamper.go` (shared block stamping), `proto/batch.proto` → `pb/` (`BatchRecord`, `FsmSnapshotMeta`). `Submit` acknowledges only COMMITTED batches; `attest_fault.go` (tag `rollup_faults`, test binaries only) injects a wrong hash for the live divergence test. Config: `pkg/config/raft_config.go`. Started by the raft branch of `block_processor_network.go`; `tx_batch_forwarder` sends batches here (`batchSubmitter`); default-off guards on Rust-consensus entry points | 🟡 MED — guards on RPC/forwarder paths; only active when `consensus_mode="raft"`; adds direct deps `hashicorp/raft`, `raft-boltdb/v2` |
-| `keyvault/` + `config/secrets.go` | Secrets of `config.json` may be `enc:v1:…` envelopes (scrypt + AES-256-GCM); decrypted once at startup with a password from `META_KEY_PASSWORD` or a 0600 file; wrong/missing password or `require_encrypted_keys` with a clear-text secret ⇒ node refuses to start. Encrypt with `cmd/tool/encrypt_secret` | 🟢 LOW — plain configs load exactly as before |
-| `cmd/tool/test_raw_eth_tcp_live/` | Live cluster end-to-end test suite for Native Ethereum EIP-2718 / EIP-1559 TCP Ingress: connects to actual live cluster over TCP (`SendRawTransaction` and `SendRawTransactions`), executes single and batch EIP-1559 transactions, verifies `TransactionSuccess` with `ethTx.Hash()`, verifies consensus block execution, queries receipts by `ethTx.Hash()` over HTTP JSON-RPC (`eth_getTransactionReceipt`), verifies on-chain balances, and validates rejection security rules (pre-EIP-155, chain ID mismatch, malleable signature `s > N/2`). | 🟢 LOW — standalone testing & verification tool |
-| `cmd/tool/secp_tps_blast/` | High-throughput benchmark tool for pure Secp256k1 / EIP-1559 transactions over TCP (`SendRawTransactions`): generates concurrent transactions signed with genesis private keys, injects high-rate batches into cluster nodes, measures effective TPS, end-to-end latency percentiles (P50/P90/P95/P99), peak CPU/RSS resource utilization, and performs multi-node zero-fork consistency audits (verifying identical block hashes and state roots across all replicas). Supports sustained duration blasting with rate limiting (`-duration`, `-rate-limit`). `measure.go` counts committed txs per block (to==target, from∈wallet set), scrapes per-validator ingress counters, reports bounds when blocks are unfetched, and keeps the legacy extrapolated estimate only as `legacy_estimate_do_not_report` (flags `-quiet-sec -max-wait-sec -parity-wait-sec -poll-ms -max-txs`). Integrated into `deploy/ci/ci_config.yaml` (`secp_tps`). | 🟢 LOW — standalone benchmark & CI verification tool |
-| `cmd/tool/nomt_ns_blast/` | Sends txs that write NOMT namespaces plain transfers never touch: `-mode stake` (`delegate()` → `stake_db`) and `-mode contract` (deploys a 6-byte SSTORE contract and calls it with unique slots → per-contract `smart_contract_storage_<addr>`). Used for the ENOSPC fault-injection runs in `note/evidence/nomt_enospc_20261020/`. | 🟢 LOW — standalone test tool |
-| `protocolparams/` | Collects the node settings that decide how blocks execute (`tx_signature_mode`, `account_gate`, `free_fee_addresses`, `cross_chain.*`, plus chain ID / state backend / attestation / epoch / Raft batch limit), normalizes them, and gives a per-field and overall SHA-256 fingerprint. `VerifyAgainstGenesis` is the startup check: a genesis `config.protocol` section (optional, `config.ProtocolSection`) is compared with the node's own `config.json` and any difference refuses to start. Changes no execution rule; pure function of (config, genesis). RPC `mtn_protocolFingerprint` (`cmd/simple_chain/mtn_api.go`) publishes the report. Design and upgrade guide: `note/protocol_params_and_safe_upgrade_20261022.md` |
-| `cmd/tool/protocol_fingerprint/` | `-nodes FILE` asks every node for `mtn_protocolFingerprint` and names the nodes and settings that differ (exit 0 agree / 1 differ / 2 unreachable); `-config [-genesis]` computes the same report offline and runs the startup check; `-snippet` prints the genesis `protocol` section for a config |
-| `scripts/test/test_crash_recovery_nomt.sh` | Chaos crash recovery test suite for NOMT fsync & commitWg durability under continuous EIP-1559 load: executes $\ge 10$ rounds of random mid-traffic `kill -9` against replicas while thousands of transactions are committing, audits recovery restart, verifies no exit 78 ([INTEGRITY]), no `/tmp/MTN_INTEGRITY_FAILED` sentinel, and audits zero-fork state root & block hash parity across all cluster nodes. | 🟢 LOW — test & audit script |
-| `scripts/test/test_crash_recovery_nomt_expanded.sh` | Expanded NOMT durability test suite: 20 rounds of multi-node kill/restart under 10k txs/round with strict block progression ($H \ge H_{before} + 2$), independent parity checks on latest 2 blocks ($H$ and $H-1$), Quorum Pause verification when 2 nodes are down ($2 < 2f+1$), and negative control verification. | 🟢 LOW — test & audit script |
-| `scripts/test/evidence/` | Anti-Fabrication evidence verification framework: `run_logged.sh` (records raw stdout/stderr, git commit, exit code, SHA256 and bytes to `MANIFEST.json`), `verify_evidence.py` (verifies file integrity, SHA256, git commit, evidence tags, table cells against raw CSVs, text claims with tolerance, and detects forbidden unbacked absolute claims), `verify_evidence_test.py` (15 unit tests covering mutation detections), `fuzz_mutation_check.py` (randomized fuzz mutation coverage audit tool with precision-aware tolerance and statistical catch rate auditing), `fuzz_mutation_check_test.py` (3 unit tests for fuzz harness), `stats_util.py` (Welch's t-test with Welch–Satterthwaite df, Student's t CDF via regularized incomplete beta, sample stats, OLS linear regression, Spearman correlation), `stats_util_test.py` (6 unit tests with negative control), `mutation_check.sh` (fixed regression suite and randomized fuzz mutation runner), `diagnose_rss_drift.py` (RSS drift and lingering process diagnostic tool), `run_ttl_experiment.py` (TTL cache saturation and time-series heap analyzer), `verify_pebble_fallback_rpc.py` (E2E Pebble DB fallback verification on cold cache via JSON-RPC receipts), `summarize_durability.py`, `run_b1_benchmarks.py`, `run_rss_investigation.py`, `run_tps_counted.py` (fresh-cluster counted-TPS runner: `cp -a` template, path rewrite, all-TCP-ports check; `--max-txs`, `--profile-at` pprof/CPU timeline, `--node-env`), `run_raft_counted.py` (same measurement on a fresh 3-replica Raft cluster, ports 317xx-319xx), `make_manifest.py` (computes manifest entries incl. sha/git state), `claims_lint.py` (+`claims_lint_test.py`; report wording lint), and `watchdog_supervisor_experiment.sh` (real systemd --user experiment for the execution watchdog; probe in `cmd/tool/_wd_probe`). | 🟢 LOW — testing & auditing toolchain |
+| `ffi_bridge.go` | Starts Rust consensus, registers `GoCallbacks`, exposes `SubmitTransactionBatch`, serves `execute_block` / `process_rpc_request` / `get_state_root` |
+| `unix_socket_handler*.go` | `RequestHandler`: handles Rust RPC requests (epoch, block, sync, validators). File names are historical; it is reached through FFI, not a socket |
+| `listener.go`, `unix_socket.go`, `socket_abstraction.go` | Legacy socket executor/listener (not part of the FFI path) |
+| `snapshot_*.go` | Snapshot manager / server / verification |
+| `committee_notifier.go`, `interfaces.go`, `mock_executor.go` | Epoch committee notification, interfaces, test double |
 
 ---
 
-## 🦀 Shared Rust Crates (`crates/`)
+## 6. Rust Consensus (`consensus/metanode/`)
 
+### 6.1 `src/` (node)
+| Path | Role | Risk |
+|------|------|------|
+| `main.rs`, `lib.rs`, `config.rs` | Binary entry, library root, config | 🟡 |
+| `ffi.rs` | C-ABI exports (`metanode_start_consensus`, `_register_callbacks`, `_submit_transaction_batch`, `_pause/_resume_consensus`, `_restore_from_snapshot`, `_attest_payload_loss*`, `_get_*_votes`, `_init_rocksdb`, …) and the `GoCallbacks` struct | 🔴 |
+| `liveness_watchdog.rs` | Detects a stalled tokio scheduler from an OS thread and aborts the process (halt rather than guess) | 🟡 |
+| `consensus/commit_processor/` | Ordered commit loop (`processor.rs`), FFI execution (`executor.rs`), `gei_validator.rs`, `epoch.rs`, `lag_monitor.rs`, `wal.rs` | 🔴 critical |
+| `consensus/` | `epoch_transition.rs`, `tx_recycler.rs`, `checkpoint.rs`, `clock_sync.rs`, `commit_callbacks.rs`, `state_attestation.rs` | 🔴 |
+| `node/` | `consensus_node.rs` (orchestrator), `setup_storage/`, `setup_consensus/` (`startup_sync`, `verification`, `fork_guard`, `state_recovery`), `epoch_monitor/`, `epoch_transition_manager.rs`, `epoch_checkpoint.rs`, `committee*.rs`, `sync*.rs`, `recovery.rs`, `catchup.rs`, `rpc_circuit_breaker.rs`, `peer_go_client.rs`, `peer_health.rs`, `tx_submitter.rs`, `block_delivery.rs`, `dual_stream.rs` | 🔴 |
+| `node/executor_client/` | Rust→Go client: `block_sending.rs` (FFI `execute_block`), `rpc_queries*.rs` (FFI `process_rpc_request`), `block_store.rs`, `persistence.rs`, `transition_handoff.rs`. `connection_pool.rs` / `socket_stream.rs` are the legacy socket path (`connect()` is a no-op) | 🔴 FFI boundary |
+| `node/rust_sync_node/` | Sync-only mode: fetch, block queue, epoch recovery | 🔴 |
+| `node/transition/` | Validator ↔ observer mode transitions, demotion, tx recovery | 🔴 |
+| `network/` | `tx_socket_server.rs` (receives Go tx batches from the FFI channel; ordered submit gate), `peer_rpc/` (epoch/sync RPC), `peer_discovery.rs`, `rpc.rs`, `codec.rs` | 🟡 |
+| `types/` | `transaction`, `tx_hash`, `cross_chain`, `gateway`, `governance`, `root_anchor`, `pop`, `relayer`, `epoch_sync` | 🟢 |
+
+### 6.2 `meta-consensus/core/src/` (Mysticeti DAG-BFT)
+| Module | Role | Risk |
+|--------|------|------|
+| `core/` (`proposer`, `commit_manager`, `block_importer`), `core.rs`, `core_thread.rs` | Block proposal and commit decisions | 🔴 |
+| `linearizer/` | DAG → deterministic linear commit order | 🔴 critical |
+| `commit_syncer/` (`fetcher`, `cold_start`) | Commit sync / catch-up | 🔴 critical |
+| `commit_finalizer/`, `commit_observer.rs`, `commit_consumer.rs`, `commit.rs` | Finalization and delivery of commits | 🔴 |
+| `coordination_hub.rs`, `commit_vote_monitor.rs` | Peer attestation and commit-digest vote quorum | 🔴 |
+| `synchronizer/`, `block_manager/`, `authority_service/`, `authority_node/`, `subscriber.rs` | Live block sync, suspended-block tracking, RPC service, node assembly | 🔴 |
+| `dag_state/`, `storage/` (RocksDB, in-memory) | DAG state and persistence | 🔴 |
+| `block.rs`, `block_verifier.rs`, `leader_schedule.rs`, `leader_scoring.rs`, `leader_timeout.rs`, `threshold_clock.rs`, `stake_aggregator.rs`, `round_tracker.rs`, `round_prober.rs`, `adaptive_delay.rs` | Block types/verification, leader election, round progress | 🔴 / 🟡 |
+| `recovery_barrier.rs`, `epoch_change*.rs`, `reconfiguration.rs`, `system_transaction*.rs` | Recovery sync, epoch change and system transactions | 🔴 |
+| `transaction.rs`, `transaction_certifier.rs`, `tx_group_filter.rs` | Tx batching/certification, Union-Find group limit check | 🟡 |
+| `network/` | tonic gRPC transport | 🟡 |
+
+`meta-consensus/config` and `meta-consensus/types` hold shared configuration and types.
+
+---
+
+## 7. Shared Rust Crates (`crates/`)
 | Crate | Role |
 |-------|------|
-| `meta-protocol-config` | Protocol version configuration |
-| `meta-protocol-config-macros` | Procedural macros for protocol config |
-| `meta-macros` | Shared macro utilities |
-| `meta-proc-macros` | Procedural macros |
-| `meta-http` | Shared HTTP client/server utilities |
-| `meta-tls` | TLS configuration |
-| `meta-enum-compat-util` | Compatibility utilities for enums |
-| `mysten-common` | Common utilities (origin: Sui/Mysten Labs) |
-| `mysten-metrics` | Prometheus metrics integration |
-| `mysten-network` | Network types (origin: Sui/Mysten Labs) |
-| `shared-crypto` | Cryptographic primitives (BLS12-381/Ed25519) |
-| `typed-store` | Type-safe RocksDB wrapper |
-| `typed-store-derive` | Derive macros for typed-store |
-| `typed-store-error` | Error types for typed-store |
-| `typed-store-workspace-hack` | Cargo workspace hack utility crate |
-| `telemetry-subscribers` | Tracing/telemetry subscribers |
-| `prometheus-closure-metric` | Prometheus closure helper metrics library |
-| `metanode-keytool` | **Library & CLI tool** — generate BLS12-381/Ed25519/ETH keys for validators. Also integrated as a subcommand under the main `metanode` CLI. |
+| `shared-crypto` | BLS12-381 / Ed25519 primitives |
+| `typed-store` (+ `-derive`, `-error`, `-workspace-hack`) | Typed RocksDB wrapper |
+| `nomt_db` | NOMT database helper crate |
+| `metanode-keytool` | Key generation library + CLI |
+| `metanode-tee-revm` | TEE EVM build helpers |
+| `meta-protocol-config` (+ `-macros`), `meta-macros`, `meta-proc-macros`, `meta-enum-compat-util` | Protocol config and macros |
+| `meta-http`, `meta-tls`, `mysten-network`, `mysten-common` | HTTP, TLS, network types, common utilities |
+| `mysten-metrics`, `prometheus-closure-metric`, `telemetry-subscribers` | Metrics and tracing |
 
 ---
 
-## 🦀 Rust Consensus Engine — Full Module Map
-
-### Root: `consensus/metanode/src/`
-| File | Lines | Role |
-|------|-------|------|
-| `main.rs` | 86 | Binary entrypoint, runtime init |
-| `ffi.rs` | 428 | **C-ABI exports callable from Go** via `nomt_ffi/` — state commits, trie updates, root queries |
-| `config.rs` | 117 | Node configuration parsing |
-| `lib.rs` | 706 | Library root |
-
-### `src/consensus/commit_processor/` — BFT Commit Engine ⚠️ CRITICAL
-| File | Lines | Role | Risk |
-|------|-------|------|------|
-| `processor.rs` | **1,813** | **Main ordered commit loop** — drives all execution, DIGEST-GATE, ZERO-TIMEOUT peer attestation | 🔴 CRITICAL |
-| `executor.rs` | 303 | Calls Go FFI to execute committed blocks | 🔴 HIGH |
-| `gei_validator.rs` | 382 | Validates GEI (Go Execution Interface) responses | 🔴 HIGH |
-| `epoch.rs` | 66 | Epoch boundary detection within commit loop | 🔴 HIGH |
-| `lag_monitor.rs` | 157 | Commit lag monitoring / backpressure | 🟡 MED |
-| `wal.rs` | 124 | Write-ahead log for crash recovery | 🟡 MED |
-
-### `src/consensus/` — Epoch & State Management
-| File | Lines | Role | Risk |
-|------|-------|------|------|
-| `epoch_transition.rs` | 759 | Epoch boundary trigger + tx drainage | 🔴 HIGH |
-| `tx_recycler.rs` | 363 | Recycles uncommitted txs post-epoch | 🟡 MED |
-| `checkpoint.rs` | 71 | Checkpoint save/restore | 🟡 MED |
-| `clock_sync.rs` | 225 | BFT clock synchronization | 🟡 MED |
-| `commit_callbacks.rs` | 65 | **Rust→Go** commit notifications | 🔴 HIGH |
-| `state_attestation.rs` | 144 | State root attestation pre-commit | 🔴 HIGH |
-
-### `src/node/` — Node Orchestration ⚠️ LARGEST MODULE (35 files)
-| File | Lines | Role | Risk |
-|------|-------|------|------|
-| `consensus_node.rs` | **236** | **Central node orchestrator** — delegates setup to sub-modules | 🔴 CRITICAL |
-| `setup_storage/mod.rs` | **838** | **Phase 1: Storage setup** — discovers epoch, builds committee, verifies hash | 🔴 HIGH |
-| `setup_storage/index_sync.rs` | 115 | Helper to determine Go last global execution index | 🟡 MED |
-| `setup_consensus/mod.rs` | **1,066** | **Phase 2: Consensus setup** — orchestrates consensus initialization | 🔴 CRITICAL |
-| `setup_consensus/startup_sync.rs` | 651 | Startup block sync loop implementation | 🔴 HIGH |
-| `setup_consensus/verification.rs` | 231 | Post-gate and background block hash verification | 🔴 HIGH |
-| `setup_consensus/fork_guard.rs` | 149 | Runtime Fork Guard background hash verification | 🔴 HIGH |
-| `epoch_monitor/mod.rs` | **221** | **Unified epoch monitor** — coordinates health checks and delegates transitions | 🔴 HIGH |
-| `epoch_monitor/stall_recovery.rs` | 134 | Validator block stall recovery via active P2P sync | 🔴 HIGH |
-| `epoch_monitor/sync_only_advance.rs` | 113 | SyncOnly sequential epoch advancement | 🔴 HIGH |
-| `epoch_monitor/validator_transition.rs` | 268 | Validator multi-epoch catchup transition | 🔴 HIGH |
-| `epoch_transition_manager.rs` | 570 | Full epoch handoff sequencing | 🔴 HIGH |
-| `epoch_checkpoint.rs` | 321 | Epoch state persistence at boundaries | 🔴 HIGH |
-| `epoch_store.rs` | 206 | Epoch metadata storage | 🟡 MED |
-| `committee.rs` | 271 | Validator committee management | 🔴 HIGH |
-| `committee_source.rs` | 554 | Committee selection logic + hash verification | 🔴 HIGH |
-| `node_methods.rs` | 442 | Node API implementation (shutdown, mode switch) | 🟡 MED |
-| `startup.rs` | 323 | Boot sequence | 🟡 MED |
-| `sync.rs` | 206 | Sync state machine | 🔴 HIGH |
-| `sync_controller.rs` | 317 | Sync session controller | 🔴 HIGH |
-| `sync_metrics.rs` | 221 | Sync performance metrics | 🟢 LOW |
-| `recovery.rs` | 184 | Crash/fork recovery | 🔴 HIGH |
-| `rpc_circuit_breaker.rs` | 447 | Circuit breaker for Go RPC | 🟡 MED |
-| `peer_go_client.rs` | 297 | RPC client to Go execution layer | 🔴 HIGH |
-| `peer_health.rs` | 158 | Peer liveness monitoring | 🟡 MED |
-| `health_check.rs` | 175 | Node health endpoint | 🟢 LOW |
-| `queue.rs` | 283 | Internal task queue | 🟡 MED |
-| `coordinator.rs` | 89 | Cross-module coordinator | 🟡 MED |
-| `block_delivery.rs` | 85 | Block delivery to consumers | 🟡 MED |
-| `tx_submitter.rs` | 176 | Submit txs to consensus | 🟡 MED |
-| `epoch_transition_tests.rs` | 942 | Epoch transition test suite | 🟢 TEST |
-
-### `src/node/executor_client/` — Go Execution Client ⚠️ FFI/RPC BOUNDARY
-| File | Lines | Role |
-|------|-------|------|
-| `mod.rs` | 139 | Main client logic — call routing to Go |
-| `block_sending.rs` | 971 | Send committed blocks to Go execution layer |
-| `block_store.rs` | 158 | Local block cache |
-| `block_sync.rs` | 151 | Block sync coordination with Go |
-| `rpc_queries.rs` | 462 | Query Go execution state via RPC |
-| `rpc_queries_epoch.rs` | 352 | Epoch-specific RPC queries |
-| `connection_pool.rs` | 251 | Connection pool to Go execution |
-| `persistence.rs` | 487 | Persist execution results |
-| `socket_stream.rs` | 259 | Socket stream handling |
-| `traits.rs` | 233 | Abstract executor traits |
-| `transition_handoff.rs` | 272 | Epoch transition handoff to Go |
-
-### `src/node/rust_sync_node/` — Sync-Only Node Mode
-| File | Lines | Role |
-|------|-------|------|
-| `sync_loop.rs` | 767 | Main sync loop — drives block catch-up |
-| `fetch.rs` | 824 | Block fetch logic from peers |
-| `epoch_recovery.rs` | 349 | Epoch crash recovery during sync |
-| `block_queue.rs` | 427 | Incoming block queue |
-| `start.rs` | 112 | Sync node startup sequence |
-| `mod.rs` | 139 | Module root + RustSyncHandle |
-| `sync_loop_tests.rs` | 203 | Sync loop test suite |
-| `fetch_tests.rs` | 174 | Fetch test suite |
-| `epoch_recovery_tests.rs` | 149 | Epoch recovery test suite |
-
-### `src/node/transition/` — Mode Transition Logic
-| File | Lines | Role |
-|------|-------|------|
-| `epoch_transition.rs` | 759 | Full epoch transition orchestration |
-| `mode_transition.rs` | 503 | Node mode changes (validator ↔ observer) |
-| `consensus_setup.rs` | 397 | Consensus re-setup post-transition |
-| `demotion.rs` | 306 | Node demotion logic |
-| `tx_recovery.rs` | 278 | Tx recovery during transition |
-| `verification.rs` | 239 | Post-transition state verification |
-
-### `src/network/` — P2P Consensus Networking
-| File | Lines | Role | Risk |
-|------|-------|------|------|
-| `rpc.rs` | 641 | Main RPC server | 🔴 HIGH |
-| `tx_socket_server.rs` | 382 | Tx reception socket | 🟡 MED |
-| `peer_discovery.rs` | 427 | Peer discovery | 🟡 MED |
-| `codec.rs` | 51 | Message encoding | 🟢 LOW |
-| `peer_rpc/server.rs` | 819 | Peer RPC server | 🔴 HIGH |
-| `peer_rpc/client.rs` | 674 | Peer RPC client | 🔴 HIGH |
-| `peer_rpc/types.rs` | 22 | RPC types | 🟢 LOW |
-
-### `src/types/`
-| File | Role |
-|------|------|
-| `transaction.rs` | Core Tx type |
-| `tx_hash.rs` | Tx hash utilities |
-| `cross_chain.rs` | Root Anchor & Cross-Chain schema types |
-| `governance.rs` | On-chain governance lifecycle & 72h timelock |
-| `pop.rs` | BLS12-381 Proof-of-Possession & rogue key guard |
-| `root_anchor.rs` | Root Anchor founding committee & BFT stake quorum |
-| `gateway.rs` | GatewayPrecompile & cross-chain execution state machine |
-| `epoch_sync.rs` | Epoch transition committee sync & account-level state root checkpoints |
-
-
----
-
-## 🧠 Meta-Consensus Core Engine (`meta-consensus/core/src/`)
-
-> This is the BFT consensus algorithm core — DAG-based Mysticeti variant.
-
-### Key Files (>500 lines)
-| File | Lines | Role | Risk |
-|------|-------|------|------|
-| `commit_syncer/mod.rs` | **2,812** | Commit synchronization main coordination loop | 🔴 CRITICAL |
-| `synchronizer/mod.rs` | **1,471** | Live block synchronization main loop and verification | 🔴 HIGH |
-| `synchronizer/scheduler.rs` | 522 | Scheduled periodic block and own last block fetching | 🟡 MED |
-| `dag_state/tests.rs` | 1,376 | DAG state unit test suite | 🟢 TEST |
-| `network/tonic_network.rs` | 1,433 | tonic gRPC network layer | 🟡 MED |
-| `authority_service/handlers.rs` | 907 | RPC handlers for block subscription and fetching | 🔴 HIGH |
-| `commit_finalizer/mod.rs` | 900 | Commit finalization coordination loop | 🔴 HIGH |
-| `block_manager/mod.rs` | 672 | Suspended/missing blocks tracking and acceptance | 🔴 HIGH |
-| `authority_node/mod.rs` | 724 | Authority node orchestration | 🔴 HIGH |
-| `linearizer/mod.rs` | 571 | DAG → linear commit ordering (deterministic) | 🔴 CRITICAL |
-| `linearizer/tests.rs` | 600 | Linearizer unit tests | 🟢 TEST |
-| `core_tests/commits.rs` | 955 | Core commit and scheduler tests | 🟢 TEST |
-| `core_tests/proposal.rs` | 809 | Core proposal and timeout tests | 🟢 TEST |
-| `core_tests/ancestors.rs` | 512 | Core ancestors and round signals tests | 🟢 TEST |
-| `metrics.rs` | 1,104 | Prometheus metrics definitions | 🟢 LOW |
-| `leader_schedule.rs` | 1,072 | Leader election scheduling (stake-weighted) | 🔴 HIGH |
-| `commit.rs` | 1,051 | Commit types + verification | 🔴 HIGH |
-| `transaction.rs` | 312 | Transaction types and batching | 🟡 MED |
-| `transaction_certifier.rs` | 962 | TX certification pipeline | 🟡 MED |
-| `commit_observer.rs` | 937 | Commit observation + notification | 🟡 MED |
-| `block.rs` | 840 | Block types + serialization | 🟡 MED |
-| `core/proposer.rs` | 826 | Block proposal logic | 🔴 HIGH |
-| `block_verifier.rs` | 811 | Block signature + content verification | 🔴 HIGH |
-| `tx_group_filter.rs` | 182 | Union-Find transaction grouping & limit check | 🟢 LOW |
-
-### Supporting Files (<500 lines)
-| File | Lines | Role |
-|------|-------|------|
-| `authority_node/tests.rs` | 471 | Authority node unit tests |
-| `core_tests/recovery.rs` | 295 | Core consensus crash recovery tests |
-| `core_tests/mod.rs` | 190 | Core tests common helpers and setup |
-| `coordination_hub.rs` | 593 | **Peer attestation hub** — ZERO-TIMEOUT peer commit verification |
-| `core/commit_manager.rs` | 569 | Commit decision management |
-| `subscriber.rs` | 446 | Block subscription |
-| `round_tracker.rs` | 512 | Round advancement tracking |
-| `round_prober.rs` | 471 | Peer round probing |
-| `recovery_barrier.rs` | 411 | Recovery synchronization barrier |
-| `dag_state/write.rs` | 650 | DAG state write operations |
-| `dag_state/read.rs` | 449 | DAG state read operations |
-| `dag_state/dag_state_impl.rs` | 498 | DAG state machine implementation |
-| `core_thread.rs` | 584 | Core consensus thread |
-| `commit_vote_monitor.rs` | 303 | **Digest vote tracking** — commit hash quorum verification |
-| `commit_consumer.rs` | 159 | Commit consumption interface |
-| `system_transaction_provider.rs` | 545 | System TX (epoch change) provider |
-| `adaptive_delay.rs` | 201 | Adaptive round delay |
-| `leader_scoring.rs` | 336 | Leader reputation scoring |
-| `leader_timeout.rs` | 301 | Leader timeout handling |
-| `stake_aggregator.rs` | 154 | Stake aggregation |
-| `threshold_clock.rs` | 215 | Threshold clock |
-| `context.rs` | 187 | Consensus context |
-| `error.rs` | 254 | Error types |
-| `storage/rocksdb_store.rs` | 472 | RocksDB persistent store |
-| `commit_syncer/fetcher.rs` | 495 | P2P block and commit fetch loop |
-| `commit_syncer/cold_start.rs` | 233 | Sync status transition decisions |
-| `synchronizer/fetcher.rs` | 275 | P2P block fetch worker and verifier |
-| `storage/mem_store.rs` | 275 | In-memory store (testing) |
-| `authority_service/mod.rs` | 182 | Authority lifecycle service coordinator |
-| `authority_service/broadcast.rs` | 203 | Block broadcast stream and counters |
-| `commit_finalizer/types.rs` | 88 | State structs for commit finalization |
-| `block_manager/types.rs` | 40 | State structs for block manager |
-
----
-
-## 🔗 Cross-Layer Communication
+## 8. Cross-Layer Communication
 
 | Channel | Direction | Protocol | Files |
 |---------|-----------|----------|-------|
-| Block commit delivery | Rust → Go | UDS socket (send stream) | `block_sending.rs` → `listener.go` |
-| Commit notification | Rust → Go | FFI callback | `commit_callbacks.rs` |
-| Tx batch forwarding | Go → Rust | UDS socket | `tx_batch_forwarder_core.go` → `tx_socket_server.rs` |
-| RPC queries (epoch, block, GEI) | Rust → Go | UDS connection pool | `rpc_queries.rs` → `unix_socket_handler*.go` |
-| State root verification | Go ↔ Rust | FFI (C-ABI) | `nomt_ffi/` ↔ `ffi.rs` |
-| Peer sync (block data) | Go ↔ Go | QUIC + custom TCP P2P | `pkg/network/` |
-| Consensus votes/blocks | Rust ↔ Rust | tonic gRPC | `network/tonic_network.rs` |
-| Peer RPC (epoch boundary, sync) | Rust ↔ Rust | Custom TCP | `peer_rpc/server.rs` ↔ `peer_rpc/client.rs` |
-| Commit digest attestation | Rust ↔ Rust | P2P embedded in DAG blocks | `coordination_hub.rs` ↔ `commit_vote_monitor.rs` |
+| Block commit delivery | Rust → Go | FFI callback `execute_block` → `cgo_execute_block` | `block_sending.rs` → `ffi_bridge.go` |
+| Generic RPC (epoch, block, GEI, sync) | Rust → Go | FFI callback `process_rpc_request` (Protobuf) → `RequestHandler.ProcessProtobufRequest` | `rpc_queries*.rs` → `unix_socket_handler*.go` |
+| State root / tx trace / log | Rust → Go | FFI callbacks `get_state_root`, `update_tx_trace`, `log_message` | `ffi.rs` |
+| Tx batch forwarding | Go → Rust | C ABI `metanode_submit_transaction_batch` (`executor.SubmitTransactionBatch`; also used by `cmd/parent_chain/processor/tx_batcher.go`) | `tx_batch_forwarder_core.go` → `ffi.rs` → `tx_socket_server.rs` |
+| Lifecycle / control | Go → Rust | C ABI `start_consensus`, `register_callbacks`, `pause/resume_consensus`, `restore_from_snapshot`, `attest_payload_loss*`, `get_*_votes` | `ffi_bridge.go` → `ffi.rs` |
+| Trie / proofs | Go → Rust NOMT | C ABI (`libmtn_nomt`) | `pkg/nomt_ffi/` → `pkg/nomt_ffi/rust_lib` |
+| Raft block source | Go internal | `hashicorp/raft` → FSM → `blockIngestionQueue` (no Rust consensus); batches go to `raftfeed.Submit` | `pkg/rollup/raftfeed/` |
+| Peer sync (block data) | Go ↔ Go | QUIC + custom TCP | `pkg/network/`, `pkg/quic_network/` |
+| Consensus blocks / votes | Rust ↔ Rust | tonic gRPC | `meta-consensus/core/src/network/` |
+| Peer RPC (epoch boundary, sync) | Rust ↔ Rust | custom TCP | `peer_rpc/server.rs` ↔ `client.rs` |
+| Commit digest attestation | Rust ↔ Rust | commit votes embedded in DAG blocks | `coordination_hub.rs` ↔ `commit_vote_monitor.rs` |
+| Cross-chain settlement | Execution cluster ↔ Parent chain | HTTP REST + f+1 BLS co-attestation | `pkg/parentchain/`, `pkg/rollup/` |
+
+Protobuf definitions: `execution/pkg/proto/*.proto`, `consensus/metanode/proto/{executor,transaction,validator_rpc}.proto`, `pkg/rollup/raftfeed/proto/`.
 
 ---
 
-## ⚠️ High-Risk Change Zones
+## 9. High-Risk Change Zones
 
-> These areas have the highest blast radius. Always grep callers before modifying.
+Always trace callers before modifying (`codegraph_impact`, fallback `grep -rn`).
 
 | Zone | Location | Risk |
 |------|----------|------|
-| State root commit | `pkg/blockchain/block_state_commit.go` | Fork risk |
-| Account state pipeline | `pkg/account_state_db/account_state_db_commit.go` | Fork risk |
+| State root commit | `pkg/blockchain/block_state_commit.go` | Fork |
+| Account state pipeline | `pkg/account_state_db/account_state_db_commit.go` | Fork |
+| Tx execution rules | `pkg/blockchain/tx_processor/` (Block-STM, fast path, fee/signature filters) | Fork — consensus rule change, deploy all validators together |
 | Peer sync handler | `processor/block_processor_sync.go` | State divergence |
-| FFI boundary (Go→Rust) | `pkg/nomt_ffi/` + `src/ffi.rs` | Crash / memory safety |
-| FFI boundary (Rust→Go) | `executor/unix_socket_handler_epoch.go` + `executor_client/` | IPC failure |
-| Epoch transition | `processor/block_processor_epoch.go` + `src/consensus/epoch_transition.rs` | Data loss |
+| FFI Go↔Rust | `pkg/nomt_ffi/`, `executor/ffi_bridge.go`, `consensus/metanode/src/ffi.rs`, `executor_client/` | Crash / memory safety / deadlock |
+| Epoch transition | `processor/block_processor_epoch.go`, `src/consensus/epoch_transition.rs` | Data loss |
 | Commit processor | `src/consensus/commit_processor/` | Ordering violation |
-| Linearizer | `meta-consensus/core/src/linearizer.rs` | Fork (non-deterministic commit) |
-| CommitSyncer | `meta-consensus/core/src/commit_syncer/mod.rs` | Sync failure / stale data |
+| Linearizer | `meta-consensus/core/src/linearizer/mod.rs` | Fork (non-deterministic order) |
+| Commit syncer | `meta-consensus/core/src/commit_syncer/mod.rs` | Sync failure / stale data |
+| Locks in consensus-core | `GLOBAL_TX_CACHE`, `dag_state` (`parking_lot`) | Runtime freeze |
 | Tx batch forwarder | `processor/tx_batch_forwarder_core.go` | Tx loss |
-| Mining/PoH | `pkg/mining/` + `pkg/poh/` | Timing regression |
-| Snapshot manager | `executor/snapshot_manager.go` | Data corruption during restore |
+| Mining / PoH | `pkg/mining/`, `pkg/poh/` | Timing regression |
+| Snapshot manager | `executor/snapshot_manager.go` | Corruption during restore |
 
 ---
 
-## 📝 Update Protocol
+## 10. Update Protocol
 
-When to update this file:
-- ✅ New package/module added to `pkg/` or `src/`
-- ✅ New entrypoint or command added to `cmd/`
-- ✅ FFI interface changed
-- ✅ gRPC proto definitions changed
-- ✅ Cross-layer communication channel added/removed
-- ✅ File renamed or moved
-- ✅ New crate added to `crates/`
-- ✅ Significant file size changes (>100 lines growth)
-- ❌ Internal implementation changes (no structural change)
+Update this file when:
+- a package/module is added to `pkg/` or `src/`, or a file is renamed or moved;
+- an entrypoint is added to `cmd/`;
+- the FFI interface, a `.proto` definition or a cross-layer channel changes;
+- a crate is added to `crates/`.
+
+Do not record implementation details, benchmark numbers, commit hashes or change history here.
