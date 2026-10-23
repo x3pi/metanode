@@ -153,12 +153,12 @@ func TestCreateAndCreate2EdgeCases(t *testing.T) {
 	}
 }
 
-// TestReviewConstructorFallthrough kiểm tra:
-// Constructor con chạy hết bytecode mà không có STOP/RETURN tường minh (fallthrough):
-// 1. Máy ảo phải coi đó là implicit STOP, hoàn thành frame con với empty code.
-// 2. Trả quyền điều khiển về cho factory để factory thực thi các opcode tiếp theo.
-// 3. Nếu factory có REVERT ở phía sau, factory phải REVERT chính xác (Status = TRANSACTION_ERROR, nonce = 0).
-func TestReviewConstructorFallthrough(t *testing.T) {
+// TestConstructorFallthroughIsImplicitStop checks a child constructor that runs off the end of its
+// bytecode without an explicit STOP/RETURN:
+// 1. The VM must treat it as an implicit STOP and finish the child frame with empty code.
+// 2. Control returns to the factory, which keeps executing its following opcodes.
+// 3. If the factory REVERTs afterwards, it must revert exactly (Status = TRANSACTION_ERROR, nonce = 0).
+func TestConstructorFallthroughIsImplicitStop(t *testing.T) {
 	for _, create2 := range []bool{false, true} {
 		for _, explicitStop := range []bool{true, false} {
 			name := "CREATE"

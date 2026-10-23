@@ -635,10 +635,9 @@ func TestCreate2AddressCollisionRejected(t *testing.T) {
 	}
 }
 
-// TestCreateAndCreate2ConstructorReceivesCallValue kiểm tra chuẩn EVM:
-// Khi factory gọi CREATE hoặc CREATE2 kèm theo endowment (100 wei):
-// Constructor của contract con phải nhận được chính xác msg.value == 100 wei qua opcode CALLVALUE (0x34).
-// Nếu CALLVALUE bị truyền là 0 (lỗi trước khi fix), constructor sẽ REVERT.
+// TestCreateAndCreate2ConstructorReceivesCallValue checks the EVM rule: when a factory runs CREATE or
+// CREATE2 with an endowment of 100 wei, the child constructor must see exactly msg.value == 100 wei
+// through CALLVALUE (0x34). With CALLVALUE wrongly 0 (the bug before the fix) the constructor REVERTs.
 func TestCreateAndCreate2ConstructorReceivesCallValue(t *testing.T) {
 	for _, opcode := range []string{"CREATE", "CREATE2"} {
 		t.Run(opcode, func(t *testing.T) {

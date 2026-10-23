@@ -17,7 +17,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestReviewStaticCallCannotTransferValue(t *testing.T) {
+// TestStaticCallCannotTransferValue checks EIP-214: a CALL with value > 0 inside a STATICCALL frame
+// fails with a write-protection error, so STATICCALL returns 0 and no value moves.
+func TestStaticCallCannotTransferValue(t *testing.T) {
 	for _, static := range []bool{false, true} {
 		name := "CALL_control"
 		if static {
@@ -100,7 +102,9 @@ func TestReviewStaticCallCannotTransferValue(t *testing.T) {
 	}
 }
 
-func TestReviewStaticCallCannotTStore(t *testing.T) {
+// TestStaticCallCannotTStore checks EIP-1153: TSTORE inside a STATICCALL frame fails with a
+// write-protection error, so STATICCALL returns 0.
+func TestStaticCallCannotTStore(t *testing.T) {
 	for _, static := range []bool{false, true} {
 		name := "CALL_control"
 		if static {

@@ -17,10 +17,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestConstructorCallValueStoragePersistence kiểm tra:
-// 1. Constructor đọc CALLVALUE (msg.value) và lưu vào storage slot 0 qua SSTORE.
-// 2. Giao dịch tiếp theo gọi contract con đã triển khai để SLOAD slot 0 và trả về.
-// 3. Khẳng định giá trị trả về khớp chính xác 100 wei của endowment được truyền từ CREATE / CREATE2.
+// TestConstructorCallValueStoragePersistence checks that:
+// 1. The constructor reads CALLVALUE (msg.value) and stores it in storage slot 0 with SSTORE.
+// 2. A later transaction calls the deployed child to SLOAD slot 0 and return it.
+// 3. The returned value equals exactly the 100 wei endowment passed by CREATE / CREATE2.
 func TestConstructorCallValueStoragePersistence(t *testing.T) {
 	for _, opcode := range []string{"CREATE", "CREATE2"} {
 		t.Run(opcode, func(t *testing.T) {
@@ -115,9 +115,8 @@ func TestConstructorCallValueStoragePersistence(t *testing.T) {
 	}
 }
 
-// TestConstructorCallValueZeroEndowment kiểm tra:
-// Khi factory gọi CREATE hoặc CREATE2 với endowment == 0:
-// Constructor nhận đúng msg.value == 0 (không bị rác stack, ISZERO trả về 1).
+// TestConstructorCallValueZeroEndowment checks that when a factory runs CREATE or CREATE2 with
+// endowment == 0, the constructor sees msg.value == 0 (no stack garbage, ISZERO returns 1).
 func TestConstructorCallValueZeroEndowment(t *testing.T) {
 	for _, opcode := range []string{"CREATE", "CREATE2"} {
 		t.Run(opcode, func(t *testing.T) {
@@ -194,12 +193,12 @@ func TestConstructorCallValueZeroEndowment(t *testing.T) {
 	}
 }
 
-// TestConstructorCallValueMismatchRevertsAndRefunds kiểm tra:
-// Khi factory gửi 50 wei nhưng constructor yêu cầu msg.value == 100 wei:
-// 1. Constructor phát hiện sai giá trị và REVERT.
-// 2. Lệnh CREATE / CREATE2 trả về 0.
-// 3. Số tiền 50 wei được hoàn trả 100% cho Factory (không thất thoát).
-// 4. Contract con không có code và số dư bằng 0.
+// TestConstructorCallValueMismatchRevertsAndRefunds checks that when the factory sends 50 wei but
+// the constructor requires msg.value == 100 wei:
+// 1. The constructor detects the wrong value and REVERTs.
+// 2. CREATE / CREATE2 returns 0.
+// 3. The 50 wei are fully refunded to the factory (nothing is lost).
+// 4. The child has no code and a zero balance.
 func TestConstructorCallValueMismatchRevertsAndRefunds(t *testing.T) {
 	for _, opcode := range []string{"CREATE", "CREATE2"} {
 		t.Run(opcode, func(t *testing.T) {
@@ -288,13 +287,11 @@ func TestConstructorCallValueMismatchRevertsAndRefunds(t *testing.T) {
 	}
 }
 
-// TestConstructorForwardsEndowmentToBeneficiary kiểm tra:
-// Constructor nhận 100 wei từ CREATE, trong quá trình chạy constructor,
-// nó thực thi opcode CALL để chuyển tiếp 40 wei sang một tài khoản Beneficiary.
-// Sau khi hoàn thành:
+// TestConstructorForwardsEndowmentToBeneficiary checks a constructor that receives 100 wei from CREATE
+// and, while running, executes CALL to forward 40 wei to a beneficiary. Afterwards:
 // - Factory: 900 wei (1000 - 100).
 // - Beneficiary: 40 wei.
-// - Contract con: 60 wei (100 - 40).
+// - Child contract: 60 wei (100 - 40).
 func TestConstructorForwardsEndowmentToBeneficiary(t *testing.T) {
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
 	t.Setenv("METANODE_DEVNET", "false")
