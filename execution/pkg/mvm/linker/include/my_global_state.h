@@ -135,6 +135,9 @@ namespace mvm
         virtual bool has_newly_deploy(const Address &addr) override;
         virtual Code get_newly_deploy_value(const Address &addr) override;
         virtual void erase_newly_deploy(const Address &addr) override;
+        virtual bool has_nonce_change(const Address &addr) override;
+        virtual uint256_t get_nonce_change_value(const Address &addr) override;
+        virtual void erase_nonce_change(const Address &addr) override;
         virtual std::map<uint256_t, uint256_t> snapshot_storage_change(const Address &addr) override;
         virtual void clear_storage_change(const Address &addr) override;
         virtual void undo_add_balance_change(const Address &addr, const uint256_t &amount) override;

@@ -87,6 +87,10 @@ namespace mvm
     virtual Code get_newly_deploy_value(const Address &addr) = 0;
     virtual void erase_newly_deploy(const Address &addr) = 0;
 
+    virtual bool has_nonce_change(const Address &addr) = 0;
+    virtual uint256_t get_nonce_change_value(const Address &addr) = 0;
+    virtual void erase_nonce_change(const Address &addr) = 0;
+
     // EIP-6780 support (see selfdestruct() in processor.cpp): a SELFDESTRUCT
     // of a contract created earlier in the SAME transaction fully clears its
     // storage diff, not just its balance. snapshot_storage_change captures
