@@ -176,15 +176,16 @@ public:
  * changes the reverted callee (or its own nested calls) had already made
  * were never undone.
  *
- * Deliberately NOT journaled: nonce increments (CREATE's creator-nonce bump
- * survives a failed constructor on real Ethereum — it happens once, as an
- * effect of the CALLER's own frame, not as part of the reverted sub-call —
- * so leaving it unjournaled is the CORRECT behavior, not an oversight), gas
- * consumption (never refunded on revert by design — gas_tracker is a single
- * counter for the whole transaction and already behaves correctly without
- * any change here), and the read-only address/storage-read "warm" tracking
- * (EIP-2929 warmth persists for the rest of the transaction even if the
- * call that first touched an address/slot reverts — matches real Ethereum).
+ * Nonce increments from CREATE/CREATE2 are journaled so that if the CALLER's
+ * own frame reverts in a nested call, the caller's nonce is correctly rolled back.
+ * However, inside create()/opCreate2(), the child constructor's journalMark is
+ * placed AFTER the caller's nonce bump, so a failed child constructor preserves
+ * the caller's nonce increment (per EIP-161).
+ * Deliberately NOT journaled: gas consumption (never refunded on revert by
+ * design — gas_tracker is a single counter for the whole transaction and
+ * already behaves correctly without any change here), and the read-only
+ * address/storage-read "warm" tracking (EIP-2929 warmth persists for the rest
+ * of the transaction even if the call that first touched an address/slot reverts).
  */
 class StateJournal {
   vector<function<void()>> entries;
@@ -1690,12 +1691,24 @@ private:
     auto initCode = copy_from_mem(offset, size);
     Address newAddress =
         generate_address(ctxt->acc.get_address(), ctxt->acc.get_nonce());
-    // creator's nonce bump survives even if the constructor below reverts —
-    // it's an effect of the CALLER's own frame, not part of the reverted
-    // sub-call. See StateJournal's doc comment.
-    auto nonce = ctxt->acc.get_nonce();
+    // creator's nonce bump: journaled so that if THIS frame reverts, the nonce
+    // bump is undone. But child's constructor rollback mark is placed AFTER this,
+    // so a failed constructor does NOT undo this bump.
+    Address creatorAddr = ctxt->acc.get_address();
+    auto prevNonce = ctxt->acc.get_nonce();
+    bool hadNonceChange = gs.has_nonce_change(creatorAddr);
+    uint256_t oldNonceChange = hadNonceChange ? gs.get_nonce_change_value(creatorAddr) : 0;
+
     ctxt->acc.increment_nonce();
-    gs.set_addresses_nonce_change(ctxt->acc.get_address(), nonce + 1);
+    gs.set_addresses_nonce_change(creatorAddr, prevNonce + 1);
+
+    journal.record([this, creatorAddr, prevNonce, hadNonceChange, oldNonceChange]() {
+      gs.get(creatorAddr).acc.set_nonce(prevNonce);
+      if (hadNonceChange)
+        gs.set_addresses_nonce_change(creatorAddr, oldNonceChange);
+      else
+        gs.erase_nonce_change(creatorAddr);
+    });
 
     // EIP-684: destination address must not already have code, nonzero nonce,
     // or have been created in this execution.
@@ -2107,11 +2120,21 @@ private:
     // calls off its own nonce (or computing its own next CREATE address)
     // would otherwise see a stale value. Deliberately NOT journaled, same
     // reasoning as create()'s nonce bump: it's an effect of the CALLER's
-    // own frame that survives even if the spawned contract's constructor
-    // reverts, not part of the reverted sub-call itself.
-    auto callerNonce = ctxt->acc.get_nonce();
+    Address creatorAddr = ctxt->acc.get_address();
+    auto prevNonce = ctxt->acc.get_nonce();
+    bool hadNonceChange = gs.has_nonce_change(creatorAddr);
+    uint256_t oldNonceChange = hadNonceChange ? gs.get_nonce_change_value(creatorAddr) : 0;
+
     ctxt->acc.increment_nonce();
-    gs.set_addresses_nonce_change(ctxt->acc.get_address(), callerNonce + 1);
+    gs.set_addresses_nonce_change(creatorAddr, prevNonce + 1);
+
+    journal.record([this, creatorAddr, prevNonce, hadNonceChange, oldNonceChange]() {
+      gs.get(creatorAddr).acc.set_nonce(prevNonce);
+      if (hadNonceChange)
+        gs.set_addresses_nonce_change(creatorAddr, oldNonceChange);
+      else
+        gs.erase_nonce_change(creatorAddr);
+    });
 
     // EIP-684 / EIP-1014: destination address must not already have code,
     // nonzero nonce, or have been created in this execution.

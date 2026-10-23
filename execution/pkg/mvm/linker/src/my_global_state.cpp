@@ -658,6 +658,19 @@ void MyGlobalState::erase_newly_deploy(const Address &addr) {
     addresses_newly_deploy.erase(addr);
 }
 
+bool MyGlobalState::has_nonce_change(const Address &addr) {
+    return addresses_nonce_change.find(addr) != addresses_nonce_change.end();
+}
+
+uint256_t MyGlobalState::get_nonce_change_value(const Address &addr) {
+    auto it = addresses_nonce_change.find(addr);
+    return it != addresses_nonce_change.end() ? it->second : 0;
+}
+
+void MyGlobalState::erase_nonce_change(const Address &addr) {
+    addresses_nonce_change.erase(addr);
+}
+
 void MyGlobalState::undo_add_balance_change(const Address &addr, const uint256_t &amount) {
     auto it = addresses_add_balance_change.find(addr);
     if (it == addresses_add_balance_change.end()) return;
