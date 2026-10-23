@@ -263,6 +263,11 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker,
 AccountState MyGlobalState::create(const Address &addr,
                                    const uint256_t &balance, const Code &code,
                                    const uint256_t &nonce) {
+  // Contract: if `addr` is already loaded (e.g. CREATE/CREATE2 read it through
+  // get() for the EIP-684 collision check), its code and nonce are OVERWRITTEN
+  // with the arguments and `balance` is ADDED to the existing balance. Callers
+  // must therefore reject colliding addresses (nonce > 0 or code present)
+  // BEFORE calling create(), as opCreate()/opCreate2() do.
   auto it = accounts.find(addr);
   if (it != accounts.end()) {
     it->second.first.set_code(Code(code));

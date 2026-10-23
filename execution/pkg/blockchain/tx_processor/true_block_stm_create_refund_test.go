@@ -17,15 +17,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestCreateAndCreate2RejectedCodeRefundsEndowment kiểm tra toàn diện cả CREATE và CREATE2:
-// Khi contract con trả về mã bắt đầu bằng 0xEF (bị từ chối theo chuẩn EIP-3541):
-// 1. Lệnh CREATE / CREATE2 phải trả về 0 (thất bại).
-// 2. Toàn bộ tiền gửi kèm (endowment / value) phải được hoàn lại 100% cho contract cha.
-// 3. Địa chỉ contract con phải không nhận được tiền (balance = 0).
+// TestCreateAndCreate2RejectedCodeRefundsEndowment covers both CREATE and CREATE2.
+// When the child returns runtime code starting with 0xEF (rejected by EIP-3541):
+// 1. CREATE / CREATE2 must return 0 (failure).
+// 2. The whole endowment must be refunded to the parent contract.
+// 3. The child address must not keep any balance.
+// A second CREATE2 to an address that already holds a contract (EIP-684/1014) must also fail
+// without moving the endowment.
 func TestCreateAndCreate2RejectedCodeRefundsEndowment(t *testing.T) {
 	for _, opcode := range []string{"CREATE", "CREATE2"} {
 		for _, rejected := range []bool{false, true} {
-			name := opcode + "_valid_STOP"
+			name := opcode + "_valid_RETURN"
 			if rejected {
 				name = opcode + "_rejected_EF"
 			}
