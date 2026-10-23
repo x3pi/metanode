@@ -911,7 +911,9 @@ func (stm *TrueBlockSTM) execOne(
 			}
 
 			if err != nil {
-				mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
+				if len(tx.AuthorizationList()) > 0 {
+					mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
+				}
 				logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
@@ -1066,10 +1068,18 @@ func (stm *TrueBlockSTM) execOne(
 								if exRs.MapNonce() != nil {
 									for addrHex, newNonceBytes := range exRs.MapNonce() {
 										addr := common.HexToAddress(addrHex)
-										if addr != tx.FromAddress() {
-											newNonce := big.NewInt(0).SetBytes(newNonceBytes).Uint64()
-											mvccDB.SetNonce(addr, newNonce)
+										if addr == tx.FromAddress() {
+											// For tx with AuthorizationList, sender nonce is strictly senderFinalNonce
+											// (already applied upfront). For regular tx, apply MapNonce so that internal
+											// CREATE operations executed by delegated sender code are preserved.
+											if len(tx.AuthorizationList()) == 0 {
+												newNonce := big.NewInt(0).SetBytes(newNonceBytes).Uint64()
+												mvccDB.SetNonce(addr, newNonce)
+											}
+											continue
 										}
+										newNonce := big.NewInt(0).SetBytes(newNonceBytes).Uint64()
+										mvccDB.SetNonce(addr, newNonce)
 									}
 								}
 								for _, addr := range sortedAddrs {

@@ -3,6 +3,7 @@ package tx_processor
 import (
 	"context"
 	"crypto/ecdsa"
+	"fmt"
 	"math/big"
 	"math/rand"
 	"os"
@@ -15,10 +16,13 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
+	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
+	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	mt_types "github.com/meta-node-blockchain/meta-node/types"
+	"github.com/stretchr/testify/require"
 )
 
 func signAuthorization(t *testing.T, key *ecdsa.PrivateKey, chainID uint64, delegate common.Address, nonce uint64) types.SetCodeAuthorization {
@@ -369,4 +373,85 @@ func runPartialAuthScenario(t *testing.T, mode string) {
 			t.Errorf("iter %d (GOMAXPROCS=%d): %s", it, procs, strings.Join(problems, "; "))
 		}
 	}
+}
+
+func zzInit(runtime []byte) []byte {
+	return append([]byte{0x60, byte(len(runtime)), 0x60, 0x0c, 0x60, 0x00, 0x39, 0x60, byte(len(runtime)), 0x60, 0x00, 0xf3}, runtime...)
+}
+
+// A 7702-delegated EOA is the SENDER of a tx; the tx calls a contract that calls back into the sender, whose delegated code
+// executes CREATE. In the EVM the sender's nonce then ends at tx.nonce+1+1.
+func TestSenderNonceKeepsCreateIncrementOfDelegatedSender(t *testing.T) {
+	deployKey, _ := crypto.HexToECDSA("4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318")
+	deployer := crypto.PubkeyToAddress(deployKey.PublicKey)
+	relayKey, _ := crypto.HexToECDSA("5c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362319")
+	relayer := crypto.PubkeyToAddress(relayKey.PublicKey)
+	delKey, _ := crypto.HexToECDSA("6c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362310")
+	del := crypto.PubkeyToAddress(delKey.PublicKey)
+	factory := crypto.CreateAddress(deployer, 1)
+	caller := crypto.CreateAddress(deployer, 2)
+	chainID := big.NewInt(991)
+	price := uint64(mt_common.MINIMUM_BASE_FEE)
+
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+	t.Setenv("METANODE_DEVNET", "false")
+	cs, _, _, _ := newPersistentTestChainState(t)
+	cs.SetConfig(&config.SimpleChainConfig{ChainId: chainID})
+	leader := common.HexToAddress(auditLeader)
+	big1 := new(big.Int).Mul(big.NewInt(1_000_000_000_000), big.NewInt(1000))
+	seedAccount(t, cs, deployer, big1, 1)
+	seedAccount(t, cs, relayer, big1, 1)
+	seedAccount(t, cs, del, big1, 0)
+	seedAccount(t, cs, leader, big.NewInt(0), 0)
+
+	run := func(txs ...mt_types.Transaction) string {
+		items := make([]grouptxns.Item, len(txs))
+		for i, tx := range txs {
+			items[i] = grouptxns.Item{ID: i, Array: grouptxns.BuildDeterministicGroupAddrs(tx), Tx: tx}
+		}
+		groups := grouptxns.GroupTransactionsDeterministic(items, cs.HasCode)
+		_, r, _, _ := ProcessTransactionsOptimistic(context.Background(), cs, groups, blankHeader(), false, false, 999, leader, false)
+		line := ""
+		for _, x := range r {
+			if x != nil {
+				line += fmt.Sprintf(" [%v gas=%d]", x.Status(), x.GasUsed())
+			}
+		}
+		return line
+	}
+	legacy := func(k *ecdsa.PrivateKey, nonce uint64, to *common.Address, data []byte) mt_types.Transaction {
+		signed, err := types.SignNewTx(k, types.NewEIP155Signer(chainID), &types.LegacyTx{Nonce: nonce, To: to, Value: big.NewInt(0), Gas: 400000, GasPrice: new(big.Int).SetUint64(price), Data: data})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx, err := transaction.NewTransactionFromEth(signed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tx
+	}
+	callerRuntime := common.FromHex("0x6000600060006000" + "6000" + "73")
+	callerRuntime = append(callerRuntime, del.Bytes()...)
+	callerRuntime = append(callerRuntime, common.FromHex("0x61fffff15000")...)
+
+	l1 := run(legacy(deployKey, 1, nil, zzInit(common.FromHex("0x600060006000f05000"))), legacy(deployKey, 2, nil, zzInit(callerRuntime)))
+	auth, err := types.SignSetCode(delKey, types.SetCodeAuthorization{ChainID: *uint256.MustFromBig(chainID), Address: factory, Nonce: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := types.SignNewTx(relayKey, types.NewPragueSigner(chainID), &types.SetCodeTx{ChainID: uint256.MustFromBig(chainID), Nonce: 1, GasTipCap: uint256.NewInt(price), GasFeeCap: uint256.NewInt(price), Gas: 300000, To: relayer, Value: uint256.NewInt(0), AuthList: []types.SetCodeAuthorization{auth}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	atx, err := transaction.NewTransactionFromEth(signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l2 := run(atx)
+	nonce := func(a common.Address) uint64 { st, _ := cs.GetAccountStateDB().AccountState(a); return st.Nonce() }
+	before := nonce(del)
+	l3 := run(legacy(delKey, before, &caller, []byte{1}))
+	root, _ := cs.GetAccountStateDB().IntermediateRoot(true)
+	fmt.Printf("DELNONCE root=%x delegated_sender nonce before=%d after=%d (EVM expects before+2)%s%s%s\n", root, before, nonce(del), l1, l2, l3)
+	require.Equal(t, before+2, nonce(del), "delegated sender executing CREATE must end at before+2")
 }
