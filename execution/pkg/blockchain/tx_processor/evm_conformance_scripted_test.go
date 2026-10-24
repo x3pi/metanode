@@ -1,6 +1,7 @@
 package tx_processor
 
 import (
+	"bytes"
 	"fmt"
 	"math/big"
 	"os"
@@ -14,7 +15,7 @@ import (
 
 // confAsmOps maps the mnemonics used by the scripted conformance scenarios to opcodes.
 var confAsmOps = map[string]byte{
-	"STOP": 0x00, "RETURNDATACOPY": 0x3e, "JUMPI": 0x57, "POP": 0x50, "MLOAD": 0x51, "MSTORE": 0x52, "MSTORE8": 0x53, "SLOAD": 0x54, "SSTORE": 0x55,
+	"STOP": 0x00, "ADD": 0x01, "CALLDATASIZE": 0x36, "CALLDATACOPY": 0x37, "RETURNDATACOPY": 0x3e, "JUMPI": 0x57, "POP": 0x50, "MLOAD": 0x51, "MSTORE": 0x52, "MSTORE8": 0x53, "SLOAD": 0x54, "SSTORE": 0x55,
 	"CALLER": 0x33, "CALLVALUE": 0x34, "ADDRESS": 0x30, "BALANCE": 0x31, "SELFBALANCE": 0x47, "CODECOPY": 0x39,
 	"EXTCODESIZE": 0x3b, "EXTCODEHASH": 0x3f, "RETURNDATASIZE": 0x3d, "GAS": 0x5a, "TLOAD": 0x5c, "TSTORE": 0x5d,
 	"CREATE": 0xf0, "CALL": 0xf1, "CALLCODE": 0xf2, "RETURN": 0xf3, "DELEGATECALL": 0xf4, "CREATE2": 0xf5,
@@ -88,6 +89,7 @@ type confScenario struct {
 	balances [4]int64
 	value    int64
 	calldata []byte
+	gas      uint64 // MVM tx gas limit (default 2M)
 	// knownDivergence, when set, marks an intentional difference from Ethereum (documented in the runbook):
 	// a mismatch is reported as KNOWN instead of failing, and an unexpected match is flagged.
 	knownDivergence string
@@ -249,6 +251,111 @@ func confScenarios() []confScenario {
 			},
 		},
 		{
+			name: "stack_1024_items_ok",
+			build: func(p []common.Address, x common.Address) [4][]byte {
+				return [4][]byte{append(bytes.Repeat([]byte{0x60, 0x00}, 1024), 0x00)}
+			},
+		},
+		{
+			name: "stack_1025_items_overflow",
+			build: func(p []common.Address, x common.Address) [4][]byte {
+				return [4][]byte{append(bytes.Repeat([]byte{0x60, 0x00}, 1025), 0x00)}
+			},
+		},
+		{
+			name: "calldata_and_code_reads_at_huge_offsets_return_zero",
+			build: func(p []common.Address, x common.Address) [4][]byte {
+				huge := new(big.Int).Lsh(big.NewInt(1), 200)
+				hb := make([]byte, 32)
+				huge.FillBytes(hb)
+				push32 := append([]byte{0x7f}, hb...)
+				var c []byte
+				c = append(c, 0x60, 0x07, 0x60, 0x00, 0x52) // mem[0..32) = 7 (to prove it gets overwritten)
+				c = append(c, 0x60, 0x20)                   // size 32
+				c = append(c, push32...)                    // src offset 2^200
+				c = append(c, 0x60, 0x00, 0x37)             // CALLDATACOPY(0, 2^200, 32)
+				c = append(c, push32...)                    // CALLDATALOAD(2^200)
+				c = append(c, 0x35, 0x60, 0x20, 0x52)       // mem[32..64) = result
+				c = append(c, 0x60, 0x20)                   // size 32
+				c = append(c, push32...)                    // src offset 2^200
+				c = append(c, 0x60, 0x40, 0x39)             // CODECOPY(0x40, 2^200, 32)
+				c = append(c, 0x60, 0x60, 0x60, 0x00, 0xf3) // RETURN(0, 96)
+				return [4][]byte{c}
+			},
+			calldata: []byte{1, 2, 3},
+		},
+		{
+			name: "create_runtime_code_24576_bytes_ok",
+			gas:  30_000_000,
+			build: func(p []common.Address, x common.Address) [4][]byte {
+				return confCreateReturningCode(24576)
+			},
+			balances: [4]int64{10, 0, 0, 0},
+		},
+		{
+			name: "create_runtime_code_24577_bytes_fails_eip170",
+			gas:  30_000_000,
+			build: func(p []common.Address, x common.Address) [4][]byte {
+				return confCreateReturningCode(24577)
+			},
+			balances: [4]int64{10, 0, 0, 0},
+		},
+		{
+			name: "create_initcode_49152_bytes_ok",
+			gas:  30_000_000,
+			build: func(p []common.Address, x common.Address) [4][]byte {
+				return [4][]byte{confScript(confJoin([]any{49152, 0, 0, "CREATE"}, confReturnWords(1))...)}
+			},
+		},
+		{
+			name: "create_initcode_49153_bytes_fails_eip3860",
+			gas:  30_000_000,
+			build: func(p []common.Address, x common.Address) [4][]byte {
+				return [4][]byte{confScript(confJoin([]any{49153, 0, 0, "CREATE"}, confReturnWords(1))...)}
+			},
+		},
+		{
+			name: "call_depth_limit_1024_unwinds_cleanly",
+			build: func(p []common.Address, x common.Address) [4][]byte {
+				// P0 calls itself forever; at depth 1024 the CALL fails and every frame returns normally.
+				return [4][]byte{confScript(confJoin(confCallSeq("CALL", p[0], 0, 0), []any{"POP", "STOP"})...)}
+			},
+			gas: 20_000_000,
+		},
+		{
+			name: "zero_length_ranges_ignore_huge_offsets",
+			build: func(p []common.Address, x common.Address) [4][]byte {
+				huge := new(big.Int).Lsh(big.NewInt(1), 200)
+				hb := make([]byte, 32)
+				huge.FillBytes(hb)
+				h := append([]byte{0x7f}, hb...)
+				var c []byte
+				c = append(c, 0x60, 0x00) // KECCAK256(2^200, 0): size first, then offset
+				c = append(c, h...)
+				c = append(c, 0x20, 0x60, 0x00, 0x52) // mem[0] = result
+				c = append(c, 0x60, 0x00)             // LOG0(2^200, 0)
+				c = append(c, h...)
+				c = append(c, 0xa0)
+				c = append(c, 0x60, 0x00) // MCOPY(2^200, 2^200, 0)
+				c = append(c, h...)
+				c = append(c, h...)
+				c = append(c, 0x5e)
+				c = append(c, 0x60, 0x00, 0x60, 0x00) // CALLDATACOPY(2^200, 0, 0)
+				c = append(c, h...)
+				c = append(c, 0x37)
+				c = append(c, 0x60, 0x00)                   // RETURN(2^200, 0)... after proving the result
+				c = append(c, 0x60, 0x20, 0x60, 0x00, 0xf3) // RETURN(0, 32)
+				return [4][]byte{c}
+			},
+		},
+		{
+			name: "blockhash_of_huge_number_is_zero",
+			build: func(p []common.Address, x common.Address) [4][]byte {
+				// 2^32 + 5 must not be truncated into block 5
+				return [4][]byte{confScript(confJoin([]any{[]byte{0x64, 0x01, 0x00, 0x00, 0x00, 0x05, 0x40}}, confReturnWords(1))...)}
+			},
+		},
+		{
 			name: "root_runs_off_end",
 			build: func(p []common.Address, x common.Address) [4][]byte {
 				return [4][]byte{confScript(1)}
@@ -324,6 +431,10 @@ func TestEVMConformanceScripted(t *testing.T) {
 			runtimes[i] = rt[i]
 		}
 		balances := sc.balances[:]
+		confMVMGas = 2_000_000
+		if sc.gas != 0 {
+			confMVMGas = sc.gas
+		}
 		g := confRunGeth(w, runtimes, balances, sc.value, sc.calldata)
 		m := confRunMVMReal(t, w, key, runtimes, balances, sc.value, sc.calldata)
 		diffs := confCompare(w, g, m)
@@ -345,4 +456,11 @@ func TestEVMConformanceScripted(t *testing.T) {
 	if os.Getenv("EVM_CONFORMANCE_REPORT_ONLY") == "" {
 		require.Zero(t, bad, "%d scripted scenarios diverge from go-ethereum", bad)
 	}
+}
+
+// confCreateReturningCode builds a factory that CREATEs a child whose init code returns n zero bytes as its
+// runtime code, and returns the CREATE result.
+func confCreateReturningCode(n int) [4][]byte {
+	init := []byte{0x62, byte(n >> 16), byte(n >> 8), byte(n), 0x60, 0x00, 0xf3} // PUSH3 n, PUSH1 0, RETURN
+	return [4][]byte{confScript(confJoin(confMemWrite(0, init), []any{len(init), 0, 0, "CREATE"}, confReturnWords(1))...)}
 }

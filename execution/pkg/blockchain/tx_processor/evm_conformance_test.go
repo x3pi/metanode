@@ -37,6 +37,9 @@ import (
 // Known, intentional differences are normalised away (see evmConfNormalise) so a mismatch means a real
 // divergence. EVM_CONFORMANCE_N sets the number of programs (default 40), EVM_CONFORMANCE_SEED the first seed.
 
+// confMVMGas is the gas limit of the MVM transactions; scenarios that need to pay for very large code raise it.
+var confMVMGas uint64 = 2_000_000
+
 const (
 	confContracts = 4
 	confMemOut    = 0x100
@@ -292,7 +295,8 @@ func confGenContract(r *rand.Rand, w *confWorld, idx int, seed int64, excl map[[
 }
 
 type confResult struct {
-	gas      uint64 // gas used by the execution (geth: limit - leftover; MVM: receipt gas used)
+	gas      uint64   // gas used by the execution (geth: limit - leftover; MVM: receipt gas used)
+	logs     []string // emitted logs as "address|topic,topic|data" (successful executions only)
 	ok       bool
 	ret      []byte
 	balance  map[common.Address]string
@@ -346,8 +350,18 @@ func confRunGeth(w *confWorld, runtimes [][]byte, balances []int64, entryValue i
 	sdb.AddBalance(w.eoas[0], one(50), tracing.BalanceChangeUnspecified)
 	cfg := &runtime.Config{Origin: w.sender, State: sdb, GasLimit: 1_000_000_000_000_000, Value: big.NewInt(entryValue), BlockNumber: big.NewInt(1)}
 	ret, left, err := runtime.Call(w.p[0], calldata, cfg)
+	var gethLogs []string
+	if err == nil {
+		for _, l := range sdb.Logs() {
+			tp := make([]string, len(l.Topics))
+			for i, x := range l.Topics {
+				tp[i] = x.Hex()
+			}
+			gethLogs = append(gethLogs, fmt.Sprintf("%s|%s|%x", l.Address.Hex(), strings.Join(tp, ","), l.Data))
+		}
+	}
 	sdb.Finalise(true) // end of transaction: EIP-6780 deletions take effect
-	res := confResult{gas: cfg.GasLimit - left, ok: err == nil, ret: ret, balance: map[common.Address]string{}, hasCode: map[common.Address]bool{}}
+	res := confResult{logs: gethLogs, gas: cfg.GasLimit - left, ok: err == nil, ret: ret, balance: map[common.Address]string{}, hasCode: map[common.Address]bool{}}
 	if err != nil {
 		res.failKind = err.Error()
 	}
@@ -479,6 +493,9 @@ func confCompare(w *confWorld, g, m confResult) []string {
 	if g.ok != m.ok {
 		return []string{fmt.Sprintf("status geth=%v mvm=%v", g.ok, m.ok)}
 	}
+	if g.ok && strings.Join(g.logs, ";") != strings.Join(m.logs, ";") {
+		d = append(d, fmt.Sprintf("logs differ geth=%v mvm=%v", g.logs, m.logs))
+	}
 	if g.ok && !bytes.Equal(g.ret, m.ret) {
 		d = append(d, fmt.Sprintf("return-data differs geth=%x mvm=%x", g.ret, m.ret))
 	}
@@ -538,7 +555,7 @@ func confRunMVMReal(t *testing.T, w *confWorld, key *ecdsa.PrivateKey, runtimes 
 	seedAccount(t, cs, leader, big.NewInt(0), 0)
 	seedAccount(t, cs, w.eoas[0], big.NewInt(50), 0)
 	mk := func(nonce uint64, to *common.Address, val int64, data []byte) types.Transaction {
-		s, err := eth.SignNewTx(key, eth.NewEIP155Signer(big.NewInt(991)), &eth.LegacyTx{Nonce: nonce, To: to, Value: big.NewInt(val), Gas: 2_000_000, GasPrice: big.NewInt(mt.MINIMUM_BASE_FEE), Data: data})
+		s, err := eth.SignNewTx(key, eth.NewEIP155Signer(big.NewInt(991)), &eth.LegacyTx{Nonce: nonce, To: to, Value: big.NewInt(val), Gas: confMVMGas, GasPrice: big.NewInt(mt.MINIMUM_BASE_FEE), Data: data})
 		require.NoError(t, err)
 		tx, err := transaction.NewTransactionFromEth(s)
 		require.NoError(t, err)
@@ -553,10 +570,19 @@ func confRunMVMReal(t *testing.T, w *confWorld, key *ecdsa.PrivateKey, runtimes 
 	}
 	for i := 0; i < confContracts; i++ {
 		rc := ex(mk(uint64(1+i), nil, balances[i], confDeployInit(runtimes[i])))
-		require.Equal(t, pb.RECEIPT_STATUS_RETURNED, rc.Status(), "deploy of P%d must succeed", i)
+		require.Equal(t, pb.RECEIPT_STATUS_RETURNED, rc.Status(), "deploy of P%d must succeed (len=%d): %q", i, len(runtimes[i]), rc.Return())
 	}
 	call := ex(mk(uint64(1+confContracts), &w.p[0], entryValue, calldata))
 	res := confResult{gas: call.GasUsed(), ok: call.Status() == pb.RECEIPT_STATUS_RETURNED, ret: call.Return(), balance: map[common.Address]string{}, hasCode: map[common.Address]bool{}}
+	if res.ok {
+		for _, l := range call.EventLogs() {
+			tp := make([]string, len(l.Topics))
+			for i, x := range l.Topics {
+				tp[i] = common.BytesToHash(x).Hex()
+			}
+			res.logs = append(res.logs, fmt.Sprintf("%s|%s|%x", common.BytesToAddress(l.Address).Hex(), strings.Join(tp, ","), l.Data))
+		}
+	}
 	if !res.ok {
 		res.failKind = strings.Map(func(r rune) rune {
 			if r >= 32 && r < 127 {

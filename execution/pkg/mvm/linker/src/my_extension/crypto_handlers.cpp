@@ -49,7 +49,7 @@ mvm::Code MyExtension::Ecrecover(mvm::Code input) {
     // Kiểm tra kích thước input hợp lệ
     if (input.size() < 4) {
       std::cerr << "Error: Input size too small!" << std::endl;
-      return mvm::Code(32, 0);
+      return {}; // failure: empty output, as on Ethereum
     }
 
     // Lấy opcode từ 4 byte đầu tiên
@@ -79,7 +79,7 @@ mvm::Code MyExtension::Ecrecover(mvm::Code input) {
     if (v_uint64 != 27 && v_uint64 != 28) { // Or other valid range if needed
       std::cerr << "Error: Invalid v value decoded from ABI: " << v_uint64
                 << ". Expected 27 or 28." << std::endl;
-      return mvm::Code(32, 0); // Return error immediately
+      return {}; // invalid signature: empty output, as on Ethereum
     }
     uint8_t v_val = static_cast<uint8_t>(
         v_uint64); // This holds the correct v (e.g., 27 or 28)
@@ -90,24 +90,23 @@ mvm::Code MyExtension::Ecrecover(mvm::Code input) {
     auto sbyte = hexString32ToBytes(s);
 
     auto address = ecrecover(hbyte, v_val, rbyte, sbyte);
-    mvm::Code result_code(32, 0);
-    if (!address.empty() && address.size() == 20) {
-      std::copy(address.begin(), address.end(), result_code.begin() + 12);
-    } else if (address.empty()) {
-      std::cerr << "ecrecover returned empty address, check logs." << std::endl;
-    } else {
-      std::cerr << "ecrecover returned address of unexpected size: "
-                << address.size() << std::endl;
+    // A failed recovery returns EMPTY output (success, 0 bytes), not 32 zero
+    // bytes: RETURNDATASIZE and the caller's return area depend on it.
+    if (address.size() != 20) {
+      std::cerr << "ecrecover failed (address size " << address.size() << ")"
+                << std::endl;
+      return {};
     }
-
+    mvm::Code result_code(32, 0);
+    std::copy(address.begin(), address.end(), result_code.begin() + 12);
     return result_code;
   } catch (const std::exception &e) {
     std::cerr << "[Ecrecover] Exception during execution: " << e.what()
               << std::endl;
-    return mvm::Code(32, 0);
+    return {}; // failure: empty output, as on Ethereum
   } catch (...) {
     std::cerr << "[Ecrecover] Unknown exception during execution." << std::endl;
-    return mvm::Code(32, 0);
+    return {}; // failure: empty output, as on Ethereum
   }
 }
 
@@ -401,11 +400,8 @@ mvm::Code MyExtension::EcAdd(mvm::Code input) {
   constexpr size_t COORD_SIZE = 32;
   constexpr size_t OUTPUT_SIZE = 64;
 
-  if (input.size() != EXPECTED_INPUT_SIZE) {
-    std::cerr << "ECADD Error: Invalid input size. Expected "
-              << EXPECTED_INPUT_SIZE << ", got " << input.size() << std::endl;
-    return {}; // Return empty Code on error
-  }
+  // Ethereum right-pads short input with zeros and ignores extra bytes.
+  input.resize(EXPECTED_INPUT_SIZE, 0);
 
   try {
     // 1. Parse Input Coordinates using confirmed function from util.h
@@ -485,11 +481,8 @@ mvm::Code MyExtension::EcMul(mvm::Code input) {
   constexpr size_t SCALAR_OFFSET = 2 * COORD_SIZE; // Scalar starts after x1, y1
   constexpr size_t OUTPUT_SIZE = 64;
 
-  if (input.size() != EXPECTED_INPUT_SIZE) {
-    std::cerr << "ECMUL Error: Invalid input size. Expected "
-              << EXPECTED_INPUT_SIZE << ", got " << input.size() << std::endl;
-    return {}; // Return empty Code on error
-  }
+  // Ethereum right-pads short input with zeros and ignores extra bytes.
+  input.resize(EXPECTED_INPUT_SIZE, 0);
 
   try {
     // 1. Parse Input Coordinates and Scalar

@@ -63,6 +63,8 @@ struct Consts {
   static constexpr auto MAX_CALL_DEPTH = 1024u;
   static constexpr auto WORD_SIZE = 32u;
   static constexpr auto MAX_MEM_SIZE = 1ull << 25; // 32 MB
+  static constexpr uint64_t MAX_INITCODE_SIZE = 49152; // EIP-3860 (2 * 24576)
+  static constexpr uint64_t MAX_CODE_SIZE = 24576;     // EIP-170
 };
 
 inline int get_sign(const uint256_t &v) { return (v >> 255) ? -1 : 1; }
@@ -249,7 +251,17 @@ public:
 
     // create the first context
     ExecResult result;
-    auto rh = [&result](vector<uint8_t> output_) {
+    auto rh = [&result, deploy, this](vector<uint8_t> output_) {
+      // EIP-170: a contract-creation transaction whose init code returns more
+      // than 24576 bytes of runtime code fails (nothing is deployed).
+      if (deploy && output_.size() > Consts::MAX_CODE_SIZE) {
+        journal.revert_to(0);
+        result.er = ExitReason::threw;
+        result.ex = ET::outOfBounds;
+        result.exmsg = "Max code size exceeded";
+        result.output = mvm::encode_revert_string(result.exmsg);
+        return;
+      }
       result.er = ExitReason::returned;
       result.output = move(output_);
     };
@@ -266,8 +278,9 @@ public:
       MVM_TRY
         if (result.ex == ET::ErrExecutionReverted) {
           if (ctxt && ctxt->s.size() >= 2) {
-            const auto offset = ctxt->s.pop64();
+            const auto offsetWord = ctxt->s.pop();
             const auto size = ctxt->s.pop64();
+            const auto offset = mem_offset(offsetWord, size);
             if (size != 0) {
               auto revert_data = copy_from_mem(offset, size);
               result.output = move(revert_data);
@@ -315,6 +328,14 @@ public:
               : 0,
           used / 5);
       result.gas_used = used - refund;
+      return result;
+    }
+
+    // EIP-3860: init code of a contract-creation transaction is limited to
+    // 49152 bytes.
+    if (deploy && exec_code.size() > Consts::MAX_INITCODE_SIZE) {
+      eh(Exception(ET::outOfBounds, "Max initcode size exceeded"));
+      result.gas_used = gas_tracker.get_gas_used();
       return result;
     }
 
@@ -527,9 +548,15 @@ private:
                 const uint8_t pad) {
     uint64_t old_mem_word_size = ctxt->get_used_mem();
     //
-    const auto offDst = ctxt->s.pop64();
-    const auto offSrc = ctxt->s.pop64();
+    const auto offDstWord = ctxt->s.pop();
+    // The source offset is a full 256-bit word: anything at or beyond the end
+    // of the source is simply all padding (zeros), never an error.
+    const auto offSrcWord = ctxt->s.pop();
+    const uint64_t offSrc =
+        offSrcWord > uint256_t(src.size()) ? src.size()
+                                           : static_cast<uint64_t>(offSrcWord);
     const auto size = ctxt->s.pop64();
+    const auto offDst = mem_offset(offDstWord, size);
     copy_mem_raw(offDst, offSrc, size, dst, src, pad);
     //
     uint64_t new_mem_word_size = ctxt->get_used_mem();
@@ -553,8 +580,26 @@ private:
       ctxt->mem.resize(end);
   }
 
+  // The offset of a memory range whose length is zero is irrelevant (the EVM
+  // neither expands memory nor fails for it, even when the offset does not fit
+  // in 64 bits); otherwise the offset must fit in 64 bits (a larger one would
+  // exceed any possible memory anyway).
+  static uint64_t mem_offset(const uint256_t &offsetWord, const uint64_t size) {
+    if (size == 0)
+      return 0;
+    if (offsetWord > uint256_t(std::numeric_limits<uint64_t>::max()))
+      MVM_THROW(Exception(ET::outOfBounds,
+                          "Memory offset (" + to_hex_string(offsetWord) +
+                              ") exceeds uint64_t maximum"));
+    return static_cast<uint64_t>(offsetWord);
+  }
+
   vector<uint8_t> copy_from_mem(const uint64_t offset, const uint64_t size) {
-    if (offset + size > ctxt->mem.size()) {
+    // A zero-length access never touches memory, whatever the offset. Any
+    // other access expands memory (zero-filled) and charges for it, exactly
+    // like the EVM: reading a region that was never written yields zeros, not
+    // an empty buffer (RETURN / REVERT / LOG / CREATE / CALL input depend on it).
+    if (size == 0) {
       return {};
     }
     uint64_t old_mem_word_size = ctxt->get_used_mem();
@@ -1120,14 +1165,16 @@ private:
 
   void exp() {
     const auto b = ctxt->s.pop();
-    const auto e = ctxt->s.pop64();
-    ctxt->s.push(intx::exp(b, uint256_t(e)));
+    const auto e = ctxt->s.pop(); // the full 256-bit exponent
+    ctxt->s.push(intx::exp(b, e));
 
+    // EIP-160: gas is charged per byte of the exponent's minimal big-endian
+    // representation (not per non-zero byte).
     int e_byte_count = 0;
-    for (int i = 0; i < 8; i++) {
-      uint8_t v = uint8_t((e >> 8 * (7 - i)) & 0xFF);
-      if (v > 0) {
-        e_byte_count++;
+    for (int i = 31; i >= 0; i--) {
+      if (static_cast<uint8_t>((e >> (8 * i)) & 0xFF) != 0) {
+        e_byte_count = i + 1;
+        break;
       }
     }
     gas_tracker.add_gas_used(getExpGasCost(e_byte_count));
@@ -1228,13 +1275,13 @@ private:
 
   void byte() {
     const auto idx = ctxt->s.pop();
+    const auto val = ctxt->s.pop(); // consumed even when idx is out of range
     if (idx >= 32) {
       ctxt->s.push(0);
       return;
     }
     const auto shift = 256 - 8 - 8 * shrink<uint8_t>(idx);
     const auto mask = uint256_t(255) << shift;
-    const auto val = ctxt->s.pop();
     ctxt->s.push((val & mask) >> shift);
   }
 
@@ -1264,9 +1311,11 @@ private:
     // same formula EIP-5656 specifies for MCOPY.
     uint64_t old_mem_word_size = ctxt->get_used_mem();
 
-    const auto dest_offset = ctxt->s.pop64();
-    const auto src_offset = ctxt->s.pop64();
+    const auto dest_offset_word = ctxt->s.pop();
+    const auto src_offset_word = ctxt->s.pop();
     const auto length = ctxt->s.pop64();
+    const auto dest_offset = mem_offset(dest_offset_word, length);
+    const auto src_offset = mem_offset(src_offset_word, length);
 
     if (length > 0) {
       // Tự động mở rộng bộ nhớ nếu cần
@@ -1333,8 +1382,12 @@ private:
   }
 
   void blobHash() {
-    const auto index = ctxt->s.pop64();
-    auto hash = blob_hash(index);
+    const auto indexWord = ctxt->s.pop();
+    if (indexWord > uint256_t(std::numeric_limits<uint64_t>::max())) {
+      ctxt->s.push(0);
+      return;
+    }
+    auto hash = blob_hash(static_cast<uint64_t>(indexWord));
     ctxt->s.push(hash);
   }
   void blobBashFee() {
@@ -1514,9 +1567,14 @@ private:
   void codesize() { ctxt->s.push(ctxt->prog.code.size()); }
 
   void calldataload() {
-    const auto offset = ctxt->s.pop64();
-    safeAdd(offset, Consts::WORD_SIZE);
+    const auto offsetWord = ctxt->s.pop(); // full 256-bit offset
     const auto sizeInput = ctxt->input.size();
+    if (offsetWord >= uint256_t(sizeInput)) {
+      ctxt->s.push(0); // reading past the calldata yields zeros
+      return;
+    }
+    const auto offset = static_cast<uint64_t>(offsetWord);
+    safeAdd(offset, Consts::WORD_SIZE);
 
     uint256_t v = 0;
     for (uint8_t i = 0; i < Consts::WORD_SIZE; i++) {
@@ -1583,8 +1641,9 @@ private:
                           "Cant create log from read only call"));
     }
     const uint8_t n = get_op() - LOG0;
-    const auto offset = ctxt->s.pop64();
+    const auto offsetWord = ctxt->s.pop();
     const auto size = ctxt->s.pop64();
+    const auto offset = mem_offset(offsetWord, size);
 
     vector<uint256_t> topics(n);
     for (int i = 0; i < n; i++)
@@ -1598,8 +1657,14 @@ private:
   }
 
   void blockhash() {
-    const auto i = ctxt->s.pop64();
-    const auto dataValue = gs.get_block_hash(i);
+    const auto iWord = ctxt->s.pop();
+    // Anything that is not a plausible block number has no hash (0); never
+    // truncate it into a small number.
+    if (iWord > uint256_t(0x7fffffff)) {
+      ctxt->s.push(0);
+      return;
+    }
+    const auto dataValue = gs.get_block_hash(static_cast<int>(iWord));
     ctxt->s.push(dataValue);
   }
 
@@ -1620,8 +1685,9 @@ private:
   void sha3() {
     uint64_t old_mem_word_size = ctxt->get_used_mem();
 
-    const auto offset = ctxt->s.pop64();
+    const auto offsetWord = ctxt->s.pop();
     const auto size = ctxt->s.pop64();
+    const auto offset = mem_offset(offsetWord, size);
     prepare_mem_access(offset, size);
 
     uint8_t h[32];
@@ -1635,16 +1701,13 @@ private:
   }
 
   void return_() {
-    const auto offset = ctxt->s.pop64();
+    const auto offsetWord = ctxt->s.pop();
     const auto size = ctxt->s.pop64();
+    const auto offset = mem_offset(offsetWord, size);
 
-    vector<uint8_t> output_data;
-    if (size > 0) {
-      if (offset + size > ctxt->mem.size()) {
-      } else {
-        output_data = copy_from_mem(offset, size);
-      }
-    }
+    // copy_from_mem expands memory (zero-filled) as the EVM does, so a RETURN
+    // of a never-written region yields zeros, not an empty buffer.
+    vector<uint8_t> output_data = copy_from_mem(offset, size);
 
     ctxt->rh(output_data);
     pop_context();
@@ -1725,8 +1788,14 @@ private:
                           "Cant create from read only call"));
     }
     const auto contractValue = ctxt->s.pop();
-    const auto offset = ctxt->s.pop64();
+    const auto offsetWord = ctxt->s.pop();
     const auto size = ctxt->s.pop64();
+    const auto offset = mem_offset(offsetWord, size);
+    // EIP-3860: init code larger than 49152 bytes is an exceptional halt of
+    // the creating frame, before any state change.
+    if (size > Consts::MAX_INITCODE_SIZE) {
+      MVM_THROW(Exception(ET::outOfBounds, "Max initcode size exceeded"));
+    }
     auto initCode = copy_from_mem(offset, size);
     // CREATE overwrites the return data: empty unless the constructor REVERTs
     // (then it holds the revert data, set in eh below).
@@ -1790,6 +1859,12 @@ private:
       // never signed. Treated like any other deploy failure: no code is
       // set, caller sees 0 (failure) instead of the new address, and any
       // endowment transferred is rolled back.
+      // EIP-170: deployed code larger than 24576 bytes fails the creation.
+      if (output.size() > Consts::MAX_CODE_SIZE) {
+        journal.revert_to(journalMark);
+        parentContext->s.push(0);
+        return;
+      }
       if (!output.empty() && output[0] == 0xEF) {
         journal.revert_to(journalMark);
         parentContext->s.push(0);
@@ -1825,8 +1900,9 @@ private:
       journal.revert_to(journalMark);
       if (e.type == ET::ErrExecutionReverted) {
         // The constructor's REVERT data becomes the creator's return data.
-        const auto revertOffset = ctxt->s.pop64();
+        const auto revertOffsetWord = ctxt->s.pop();
         const auto revertSize = ctxt->s.pop64();
+        const auto revertOffset = mem_offset(revertOffsetWord, revertSize);
         parentContext->returnData = copy_from_mem(revertOffset, revertSize);
       }
       parentContext->s.push(0);
@@ -1884,10 +1960,12 @@ private:
     gas_tracker.add_gas_used(getTouchedAddressGasCost());
     const auto value =
         (op == DELEGATECALL || op == STATICCALL) ? 0 : ctxt->s.pop();
-    const auto offIn = ctxt->s.pop64();
+    const auto offInWord = ctxt->s.pop();
     const auto sizeIn = ctxt->s.pop64();
-    const auto offOut = ctxt->s.pop64();
+    const auto offOutWord = ctxt->s.pop();
     auto sizeOut = ctxt->s.pop64();
+    const auto offIn = mem_offset(offInWord, sizeIn);
+    const auto offOut = mem_offset(offOutWord, sizeOut);
     prepare_mem_access(offOut, sizeOut);
     auto input = copy_from_mem(offIn, sizeIn);
 
@@ -2057,8 +2135,9 @@ private:
                journalMark](const Exception &e) {
       journal.revert_to(journalMark);
       if (e.type == ET::ErrExecutionReverted) {
-        const auto offset = ctxt->s.pop64();
+        const auto offsetWord = ctxt->s.pop();
         const auto size = ctxt->s.pop64();
+        const auto offset = mem_offset(offsetWord, size);
         auto revertData = copy_from_mem(offset, size);
         parentContext->returnData = revertData;
         // As on Ethereum, the revert data is also copied into the caller's
@@ -2112,9 +2191,15 @@ private:
   void opReturnDataSize() { ctxt->s.push(ctxt->returnData.size()); }
 
   void opReturnDataCopy() {
-    const auto memOffset = ctxt->s.pop64();
-    const auto dataOffset = ctxt->s.pop64();
+    const auto memOffsetWord = ctxt->s.pop();
+    const auto dataOffsetWord = ctxt->s.pop();
     const auto length = ctxt->s.pop64();
+    const auto memOffset = mem_offset(memOffsetWord, length);
+    // A source offset that does not fit in 64 bits is necessarily out of bounds.
+    if (dataOffsetWord > uint256_t(std::numeric_limits<uint64_t>::max())) {
+      MVM_THROW(Exception(ET::outOfBounds, "Return data out of bounds"));
+    }
+    const auto dataOffset = static_cast<uint64_t>(dataOffsetWord);
     // EIP-211: reading past the end of the return data is an exceptional
     // halt of the current frame (unlike CALLDATACOPY, which zero-pads).
     const uint64_t available = ctxt->returnData.size();
@@ -2125,42 +2210,40 @@ private:
     copy_mem_raw(memOffset, dataOffset, length, ctxt->mem, ctxt->returnData);
   }
 
+  // SHL / SHR / SAR take the shift amount as a full 256-bit word: a shift of
+  // 256 or more is well defined (0, or the sign fill for SAR) and must still
+  // push a result.
   void opSHL() {
-    const auto shift = ctxt->s.pop64();
+    const auto shift = ctxt->s.pop();
     const auto value = ctxt->s.pop();
-    if (shift < 256) {
-      ctxt->s.push(value << shift);
-    }
+    ctxt->s.push(shift >= 256 ? uint256_t(0)
+                              : value << static_cast<unsigned>(shift));
   }
 
   void opSHR() {
-    const auto shift = ctxt->s.pop64();
+    const auto shift = ctxt->s.pop();
     const auto value = ctxt->s.pop();
-    if (shift < 256) {
-      ctxt->s.push(value >> shift);
-    }
+    ctxt->s.push(shift >= 256 ? uint256_t(0)
+                              : value >> static_cast<unsigned>(shift));
   }
 
   void opSAR() {
-    const auto shift = static_cast<uint64_t>(ctxt->s.pop());
+    const auto shift = ctxt->s.pop();
     const auto value = ctxt->s.pop();
-
-    int sign = getSignUint256(value);
-    if (shift > 256) {
-      ctxt->s.push(
-          sign < 0 ? to_uint256("0xffffffffffffffffffffffffffffffffffffffff")
-                   : uint256_t(0));
+    const bool negative = getSignUint256(value) < 0;
+    if (shift >= 256) {
+      ctxt->s.push(negative ? ~uint256_t(0) : uint256_t(0));
       return;
     }
-
-    uint256_t shr = value >> shift;
-
-    if (sign < 0) {
-      uint256_t mask = (uint256_t(1) << shift) - 1;
-      mask <<= (256 - shift);
-      shr |= mask;
+    const auto sh = static_cast<unsigned>(shift);
+    if (sh == 0) {
+      ctxt->s.push(value);
+      return;
     }
-
+    uint256_t shr = value >> sh;
+    if (negative) {
+      shr |= (~uint256_t(0)) << (256 - sh); // fill the vacated top bits
+    }
     ctxt->s.push(shr);
   }
 
@@ -2198,10 +2281,14 @@ private:
                           "Cant create from read only call"));
     }
     const auto endowment = ctxt->s.pop();
-    const auto offset = ctxt->s.pop64();
+    const auto offsetWord = ctxt->s.pop();
     const auto size = ctxt->s.pop64();
+    const auto offset = mem_offset(offsetWord, size);
     const auto salt = ctxt->s.pop();
 
+    if (size > Consts::MAX_INITCODE_SIZE) { // EIP-3860, see create()
+      MVM_THROW(Exception(ET::outOfBounds, "Max initcode size exceeded"));
+    }
     auto input = copy_from_mem(offset, size);
     gas_tracker.add_gas_used(getCreate2DataSizeCost(get_word_size(size)));
     ctxt->returnData.clear(); // see create()
@@ -2261,6 +2348,12 @@ private:
     auto parentContext = ctxt;
     auto rh = [newAcc, parentContext, journalMark, this](vector<uint8_t> output) {
       // EIP-3541 — see the identical check in opCreate()'s rh for why.
+      // EIP-170: deployed code larger than 24576 bytes fails the creation.
+      if (output.size() > Consts::MAX_CODE_SIZE) {
+        journal.revert_to(journalMark);
+        parentContext->s.push(0);
+        return;
+      }
       if (!output.empty() && output[0] == 0xEF) {
         journal.revert_to(journalMark);
         parentContext->s.push(0);
@@ -2295,8 +2388,9 @@ private:
       journal.revert_to(journalMark);
       if (e.type == ET::ErrExecutionReverted) {
         // The constructor's REVERT data becomes the creator's return data.
-        const auto revertOffset = ctxt->s.pop64();
+        const auto revertOffsetWord = ctxt->s.pop();
         const auto revertSize = ctxt->s.pop64();
+        const auto revertOffset = mem_offset(revertOffsetWord, revertSize);
         parentContext->returnData = copy_from_mem(revertOffset, revertSize);
       }
       parentContext->s.push(0);
