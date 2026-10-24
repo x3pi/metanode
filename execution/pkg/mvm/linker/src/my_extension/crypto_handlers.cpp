@@ -876,7 +876,7 @@ mvm::Code MyExtension::PointEvaluationVerify(mvm::Code input) {
               << EXPECTED_INPUT_SIZE << ", got " << input.size() << std::endl;
     // Return 64 bytes of 0 on failure as per EIP-4844 spec for failed
     // verification
-    return mvm::Code(OUTPUT_SIZE, 0);
+    return {}; // verification failure: the precompile fails (EIP-4844)
   }
 
   const uint8_t *data_ptr = input.data();
@@ -928,11 +928,12 @@ mvm::Code MyExtension::PointEvaluationVerify(mvm::Code input) {
       std::cerr
           << "PointEvaluation Error: Exception during output serialization: "
           << e.what() << std::endl;
-      // If serialization fails unexpectedly, revert to failure output
-      std::fill(output.begin(), output.end(), 0);
+      return {}; // serialization failure: fail the precompile
     }
   } else {
-    // On failure, the output is already initialized to 64 zeros.
+    // EIP-4844: a failed verification makes the precompile FAIL (the call returns 0); it does not return
+    // success with a zero output.
+    return {};
   }
 
   return output;

@@ -100,8 +100,8 @@ namespace mvm
         // use separated func to calculate
             return 3;
         case EXTCODEHASH:
-        // use separated func to calculate
-            return 5;
+        // account access cost is charged by the opcode (EIP-2929)
+            return 0;
         case BLOCKHASH:
             return 20;
         case COINBASE:
@@ -124,19 +124,19 @@ namespace mvm
             return 2;
         case MLOAD:
         // use separated func to calculate
-            return 0;
+            return 3;
         case MSTORE:
          // use separated func to calculate
-            return 0;
+            return 3;
         case MSTORE8:
          // use separated func to calculate
-            return 0;
+            return 3;
         case SLOAD:
         // use separated func to calculate
             return 0;
         case SSTORE:
-        // use separated func to calculate
-            return 5;
+        // charged by the opcode (EIP-2200 / EIP-2929 / EIP-3529)
+            return 0;
         case JUMP:
             return 8;
         case JUMPI:
@@ -370,7 +370,7 @@ namespace mvm
 
     uint64_t getSha3GasCost(uint64_t data_word_size, uint64_t &last_mem_fee, uint64_t old_mem_word_size, uint64_t new_mem_word_size)
     {   
-        return 3 + 3 * data_word_size + getMemExpansionGasCost(last_mem_fee, old_mem_word_size, new_mem_word_size);
+        return 30 + 6 * data_word_size + getMemExpansionGasCost(last_mem_fee, old_mem_word_size, new_mem_word_size);
     }
     
     uint64_t getTouchedAddressGasCost()
@@ -436,4 +436,81 @@ namespace mvm
     {   
         return 6 * word_size;
     }   
+
+    // ---- standard precompile gas (go-ethereum, Berlin/Cancun pricing) ----
+    static uint64_t words32(uint64_t n) { return (n + 31) / 32; }
+
+    static uint64_t readLen(const std::vector<uint8_t>& in, size_t off, bool& tooBig)
+    {
+        // a 32-byte big-endian length taken from in[off..off+32) (zero padded); anything above 2^64 is "too big"
+        uint8_t buf[32] = {0};
+        for (size_t i = 0; i < 32; i++)
+            if (off + i < in.size()) buf[i] = in[off + i];
+        for (size_t i = 0; i < 24; i++)
+            if (buf[i] != 0) { tooBig = true; return 0; }
+        uint64_t v = 0;
+        for (size_t i = 24; i < 32; i++) v = (v << 8) | buf[i];
+        return v;
+    }
+
+    uint64_t getPrecompileGasCost(uint64_t address, const std::vector<uint8_t>& input)
+    {
+        switch (address)
+        {
+        case 1: return 3000;                                         // ecrecover
+        case 2: return 60 + 12 * words32(input.size());             // sha256
+        case 3: return 600 + 120 * words32(input.size());           // ripemd160
+        case 4: return 15 + 3 * words32(input.size());              // identity
+        case 5: // modexp, EIP-2565
+        {
+            bool big = false;
+            const uint64_t baseLen = readLen(input, 0, big);
+            const uint64_t expLen = readLen(input, 32, big);
+            const uint64_t modLen = readLen(input, 64, big);
+            if (big) return UINT64_MAX;
+            const std::vector<uint8_t> rest = input.size() > 96 ? std::vector<uint8_t>(input.begin() + 96, input.end()) : std::vector<uint8_t>();
+            // head (up to 32 bytes) of the exponent, which starts after the base
+            unsigned msb = 0;
+            if (rest.size() > baseLen)
+            {
+                const uint64_t headLen = expLen > 32 ? 32 : expLen;
+                uint8_t head[32] = {0};
+                for (uint64_t i = 0; i < headLen; i++)
+                {
+                    const uint64_t pos = baseLen + i;
+                    if (pos < rest.size()) head[32 - headLen + i] = rest[pos];
+                }
+                for (int i = 0; i < 32; i++)
+                {
+                    if (head[i] != 0)
+                    {
+                        unsigned bits = 8 - __builtin_clz((unsigned)head[i]) + 24; // bit length of the byte
+                        msb = (unsigned)(31 - i) * 8 + bits - 1;
+                        break;
+                    }
+                }
+            }
+            unsigned __int128 adj = 0;
+            if (expLen > 32) adj = (unsigned __int128)(expLen - 32) * 8;
+            adj += msb;
+            const uint64_t mx = baseLen > modLen ? baseLen : modLen;
+            const unsigned __int128 words = ((unsigned __int128)mx + 7) / 8;
+            unsigned __int128 gas = words * words;
+            if (adj < 1) adj = 1;
+            // saturate instead of overflowing 128 bits
+            if (gas != 0 && adj > ((unsigned __int128)1 << 100) / gas) return UINT64_MAX;
+            gas = gas * adj / 3;
+            if (gas > (unsigned __int128)UINT64_MAX) return UINT64_MAX;
+            return gas < 200 ? 200 : (uint64_t)gas;
+        }
+        case 6: return 150;                                          // bn256Add (Istanbul)
+        case 7: return 6000;                                         // bn256ScalarMul (Istanbul)
+        case 8: return 45000 + 34000 * (input.size() / 192);        // bn256Pairing (Istanbul)
+        case 9:                                                      // blake2F: one gas per round
+            if (input.size() != 213) return 0;
+            return ((uint64_t)input[0] << 24) | ((uint64_t)input[1] << 16) | ((uint64_t)input[2] << 8) | input[3];
+        case 10: return 50000;                                       // KZG point evaluation (EIP-4844)
+        default: return 0;
+        }
+    }
 }

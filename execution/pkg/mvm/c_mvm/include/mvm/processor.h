@@ -30,6 +30,11 @@ namespace mvm
     std::string exmsg = {};
     std::vector<uint8_t> output = {};
     unsigned long long gas_used = 0;
+    // Execution gas before the refund, and the raw refund counter (EIP-3529). gas_used above has the refund applied
+    // with the cap computed on the execution gas alone; the caller, which knows the intrinsic gas, applies the exact
+    // cap (a fifth of the TOTAL gas used) from these two.
+    unsigned long long gas_pre_refund = 0;
+    unsigned long long gas_refund = 0;
   };
 
   /**
