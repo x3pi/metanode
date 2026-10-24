@@ -34,7 +34,15 @@ std::string addressToHex(const uint256_t &address) {
 
 namespace mvm {
 using ET = Exception::Type;
-void MyGlobalState::remove(const Address &addr) { accounts.erase(addr); }
+void MyGlobalState::remove(const Address &addr) {
+  accounts.erase(addr);
+  if (isCache && State::instanceExists(addr)) {
+    auto state = State::getInstance(addr);
+    state->setNonce(0);
+    state->setBalance(0);
+    state->setCode({});
+  }
+}
 
 bool MyGlobalState::is_cache() { return isCache; }
 
