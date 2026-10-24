@@ -166,6 +166,8 @@ ExecuteResult *createSafeErrorResult() noexcept {
     rs->b_logs = nullptr;
     rs->length_logs = 0;
     rs->gas_used = 0;
+    rs->gas_pre_refund = 0;
+    rs->gas_refund = 0;
     return rs;
   } catch (...) {
     // Nếu ngay cả new cũng thất bại (out of memory), trả về nullptr
@@ -610,7 +612,9 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
       length_logs : length_logs,
       b_native_logs : b_native_logs,
       length_native_logs : length_native_logs,
-      gas_used : result.gas_used
+      gas_used : result.gas_used,
+      gas_pre_refund : result.gas_pre_refund,
+      gas_refund : result.gas_refund
     };
 
     return pendingResult;
@@ -709,8 +713,9 @@ ExecuteResult *deploy(
         mvm::generate_address(caller_address, from.acc.get_nonce());
     std::string caller_hex = mvm::to_hex_string(caller_address);
     std::string contract_address_hex = mvm::to_hex_string(contract_address);
-    // EIP-161: Newly created contract's nonce is set to 1 before initcode executes.
-    // The account's code remains empty during construction per EVM spec.
+    // Create contract account with EMPTY code — the constructor will be
+    // executed by the EVM and produce runtime code in result.output
+    // EIP-161: a new contract starts with nonce 1 before initcode executes.
     auto contract = gs.create(contract_address, 0u, {}, 1);
     gs.set_addresses_nonce_change(contract_address, 1);
 
@@ -744,6 +749,7 @@ ExecuteResult *deploy(
       auto code = result.output;
       gs.add_addresses_newly_deploy(contract_address, code);
       contract.acc.set_code(std::move(code));
+      gs.set_addresses_nonce_change(contract_address, contract.acc.get_nonce());
       // update output to contract address
       std::vector<uint8_t> deployed_address(32);
       mvm::to_big_endian(contract_address, deployed_address.data());

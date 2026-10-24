@@ -249,18 +249,47 @@ public:
     // THAY ĐỔI 2: Xóa bộ đệm khi bắt đầu một lần chạy mới
     opcode_trace_buffer.clear();
 
+    // EIP-2929 / EIP-3651: the sender, the transaction target (or the contract being
+    // created), the block's coinbase and the precompiles start warm.
+    warm_addresses.clear();
+    warm_slots.clear();
+    warm_addresses.insert(tx.origin);
+    warm_addresses.insert(caller);
+    warm_addresses.insert(callee.acc.get_address());
+    warm_addresses.insert(gs.get_block_context().coinbase);
+    for (uint64_t pc = 1; pc <= 10; pc++)
+      warm_addresses.insert(Address(pc));
+
     // create the first context
     ExecResult result;
     auto rh = [&result, deploy, this](vector<uint8_t> output_) {
-      // EIP-170: a contract-creation transaction whose init code returns more
-      // than 24576 bytes of runtime code fails (nothing is deployed).
-      if (deploy && output_.size() > Consts::MAX_CODE_SIZE) {
-        journal.revert_to(0);
-        result.er = ExitReason::threw;
-        result.ex = ET::outOfBounds;
-        result.exmsg = "Max code size exceeded";
-        result.output = mvm::encode_revert_string(result.exmsg);
-        return;
+      if (deploy) {
+        // A contract-creation transaction fails (nothing is deployed and all
+        // the gas is consumed) when the init code returns runtime code that
+        // is too large (EIP-170), starts with 0xEF (EIP-3541), or that the
+        // remaining gas cannot pay the 200-gas-per-byte deposit for.
+        const char *failure = nullptr;
+        ET failureType = ET::outOfBounds;
+        const uint64_t depositCost = getCodeDepositCost(output_.size());
+        if (output_.size() > Consts::MAX_CODE_SIZE) {
+          failure = "Max code size exceeded";
+        } else if (!output_.empty() && output_[0] == 0xEF) {
+          failure = "invalid code: must not begin with 0xef (EIP-3541)";
+          failureType = ET::ErrInvalidCode;
+        } else if (gas_tracker.gas_left() < depositCost) {
+          failure = "Out of gas (code deposit)";
+          failureType = ET::ErrOutOfGas;
+        }
+        if (failure != nullptr) {
+          journal.revert_to(0);
+          gas_tracker.burn_frame();
+          result.er = ExitReason::threw;
+          result.ex = failureType;
+          result.exmsg = failure;
+          result.output = mvm::encode_revert_string(result.exmsg);
+          return;
+        }
+        gas_tracker.add_gas_used(depositCost);
       }
       result.er = ExitReason::returned;
       result.output = move(output_);
@@ -268,6 +297,10 @@ public:
     auto hh = [&result]() { result.er = ExitReason::halted; };
     auto eh = [&](const Exception &ex_) {
       journal.revert_to(0);
+      // An exceptional halt (anything but REVERT) consumes all the gas of the
+      // transaction, as on Ethereum; a REVERT keeps the unused gas.
+      if (ex_.type != ET::ErrExecutionReverted)
+        gas_tracker.burn_frame();
       result.er = ExitReason::threw;
       result.ex = ex_.type;
       // MVM_TRY/MVM_CATCH (mvm/safe_throw.h): was try{...}catch(...){...}.
@@ -329,6 +362,10 @@ public:
               : 0,
           used / 5);
       result.gas_used = used - refund;
+      result.gas_pre_refund = used;
+      result.gas_refund = gas_tracker.get_refund() > 0
+                              ? static_cast<uint64_t>(gas_tracker.get_refund())
+                              : 0;
       return result;
     }
 
@@ -337,11 +374,17 @@ public:
     if (deploy && exec_code.size() > Consts::MAX_INITCODE_SIZE) {
       eh(Exception(ET::outOfBounds, "Max initcode size exceeded"));
       result.gas_used = gas_tracker.get_gas_used();
+      result.gas_pre_refund = result.gas_used;
       return result;
     }
 
     push_context(caller, callee, move(calldata), move(exec_code), call_value,
                  rh, hh, eh, readOnly);
+    // A context starts with its "pc changed" flag set because the run loop steps the context that a CALL / CREATE
+    // just pushed once, right after the call instruction was dispatched. The root context is not pushed by any
+    // instruction, so consume that flag here: otherwise its first instruction (unless it is a PUSH or a jump) would
+    // run twice.
+    ctxt->step();
 
     // Intrinsic gas (base 21000/53000, calldata, access-list, EIP-7702
     // auth-tuple cost) is computed and charged on the Go side (see
@@ -422,6 +465,10 @@ public:
             : 0,
         used / 5);
     result.gas_used = used - refund;
+    result.gas_pre_refund = used;
+    result.gas_refund = gas_tracker.get_refund() > 0
+                            ? static_cast<uint64_t>(gas_tracker.get_refund())
+                            : 0;
     return result;
   }
 
@@ -441,7 +488,7 @@ private:
   StateJournal journal;
 
   // EIP-2200/3529 "original value" tracking for the SSTORE gas refund (see
-  // sstore()/compute_sstore_refund_delta): the value a slot held at the
+  // sstore()): the value a slot held at the
   // START of this transaction, captured once on first touch and never
   // updated again afterwards (deliberately NOT journaled/reverted — the
   // "original" value is a fact about transaction start, unaffected by
@@ -463,12 +510,45 @@ private:
   // at the end of the transaction if it succeeds.
   std::unordered_set<Address> destructed_this_tx;
 
+  // EIP-2929 access sets: an address or storage slot is "cold" until its first access in the transaction, which costs
+  // more and then warms it. Warming is journaled like any other state change: a reverted frame un-warms what it touched.
+  std::unordered_set<Address> warm_addresses;
+  std::unordered_map<Address, std::unordered_set<uint256_t>> warm_slots;
+
+  // Returns true if the address was already warm; warms it otherwise.
+  bool touch_address(const Address &a) {
+    if (!warm_addresses.insert(a).second)
+      return true;
+    journal.record([this, a]() { warm_addresses.erase(a); });
+    return false;
+  }
+
+  // Returns true if the slot was already warm; warms it otherwise.
+  bool touch_slot(const Address &a, const uint256_t &k) {
+    if (!warm_slots[a].insert(k).second)
+      return true;
+    journal.record([this, a, k]() { warm_slots[a].erase(k); });
+    return false;
+  }
+
+  // Gas of accessing an account: 100 when warm, 2600 when cold (and warms it).
+  uint64_t account_access_cost(const Address &a) {
+    return touch_address(a) ? 100 : 2600;
+  }
+
+  // EIP-161 "empty": no code, zero nonce and zero balance.
+  bool account_is_empty(const Address &a) {
+    decltype(auto) acc = gs.get(a).acc;
+    return acc.get_nonce() == 0 && acc.get_balance() == 0 &&
+           acc.get_code().empty();
+  }
+
   void push_context(const Address &caller, AccountState as,
                     vector<uint8_t> &&input, Program &&prog,
                     const uint256_t &call_value, Context::ReturnHandler &&rh,
                     Context::HaltHandler &&hh, Context::ExceptionHandler &&eh,
                     bool read_only) {
-    if (get_call_depth() >= Consts::MAX_CALL_DEPTH)
+    if (get_call_depth() > Consts::MAX_CALL_DEPTH)
       MVM_THROW(Exception(ET::ErrDepth, "Reached max call depth (" +
                                             to_string(Consts::MAX_CALL_DEPTH) +
                                             ")"));
@@ -586,7 +666,8 @@ private:
     //
     uint64_t new_mem_word_size = ctxt->get_used_mem();
     gas_tracker.add_gas_used(getCopyOperationGasCost(
-        size, ctxt->last_mem_gas_cost, old_mem_word_size, new_mem_word_size));
+        get_word_size(size), ctxt->last_mem_gas_cost, old_mem_word_size,
+        new_mem_word_size));
   }
 
   void prepare_mem_access(const uint64_t offset, const uint64_t size) {
@@ -603,6 +684,16 @@ private:
 
     if (end > ctxt->mem.size())
       ctxt->mem.resize(end);
+  }
+
+  // Expands memory to cover [offset, offset+size) and charges the expansion (nothing for an empty range).
+  void expand_mem_charged(const uint64_t offset, const uint64_t size) {
+    if (size == 0)
+      return;
+    const uint64_t old_mem_word_size = ctxt->get_used_mem();
+    prepare_mem_access(offset, size);
+    gas_tracker.add_gas_used(getMemExpansionGasCost(
+        ctxt->last_mem_gas_cost, old_mem_word_size, ctxt->get_used_mem()));
   }
 
   // The offset of a memory range whose length is zero is irrelevant (the EVM
@@ -632,9 +723,10 @@ private:
     prepare_mem_access(offset, size);
     //
     uint64_t new_mem_word_size = ctxt->get_used_mem();
-    gas_tracker.add_gas_used(
-        getCopyOperationGasCost(get_word_size(size), ctxt->last_mem_gas_cost,
-                                old_mem_word_size, new_mem_word_size));
+    // Reading a memory range costs only its expansion; the per-word copy fee
+    // belongs to the opcodes that copy (CALLDATACOPY, CODECOPY, ...).
+    gas_tracker.add_gas_used(getMemExpansionGasCost(
+        ctxt->last_mem_gas_cost, old_mem_word_size, new_mem_word_size));
 
     return {ctxt->mem.begin() + offset, ctxt->mem.begin() + offset + size};
   }
@@ -1469,7 +1561,9 @@ private:
 
   void sload() {
     const auto k = ctxt->s.pop();
-    ctxt->s.push(ctxt->st.load(k, &gas_tracker));
+    // EIP-2929: 100 when the slot is warm, 2100 when cold.
+    gas_tracker.add_gas_used(touch_slot(ctxt->acc.get_address(), k) ? 100 : 2100);
+    ctxt->s.push(ctxt->st.load(k, nullptr));
   }
 
   // EIP-3529's reduced clear-refund constant (was 15000 pre-London).
@@ -1489,36 +1583,7 @@ private:
     return currentValue;
   }
 
-  // EIP-2200's refund bookkeeping, restricted to the "clear schedule" case
-  // (SSTORE-ing a slot to zero) — the dominant, EIP-3529-motivating case.
-  // Deliberately omits the "restore to original value" bonus refund
-  // (returning a slot to exactly its transaction-start value after one or
-  // more intermediate writes): that's real, spec-defined gas the user is
-  // technically owed back, but it's a rarer case and skipping it can only
-  // ever under-refund, never over-refund — safe to leave on the table
-  // rather than risk getting the full 3-way comparison subtly wrong in
-  // consensus-critical code.
-  static int64_t compute_sstore_refund_delta(const uint256_t &original,
-                                             const uint256_t &current,
-                                             const uint256_t &newVal) {
-    if (current == newVal)
-      return 0; // no-op write, no refund change
-    if (original == current) {
-      // first change to this slot this transaction
-      if (original != 0 && newVal == 0)
-        return SSTORE_CLEARS_SCHEDULE;
-      return 0;
-    }
-    // slot already changed at least once this transaction
-    int64_t delta = 0;
-    if (original != 0) {
-      if (current == 0)
-        delta -= SSTORE_CLEARS_SCHEDULE; // un-clearing: revoke the earlier refund
-      if (newVal == 0)
-        delta += SSTORE_CLEARS_SCHEDULE; // re-clearing: grant it again
-    }
-    return delta;
-  }
+  // SSTORE gas and refund are computed in sstore() (EIP-2200/2929/3529).
 
   void sstore() {
     if (ctxt->read_only) {
@@ -1542,13 +1607,44 @@ private:
     const uint256_t oldValue = ctxt->st.load(k, nullptr);
     const uint256_t originalValue = original_storage_value(addr, k, oldValue);
 
+    // EIP-2200 + EIP-2929 + EIP-3529 pricing (go-ethereum's gasSStoreEIP3529): the call fails if 2300 gas or less is
+    // left (reentrancy sentry); a cold slot costs 2100 extra; then the cost and refund depend on the current,
+    // original and new values.
+    if (gas_tracker.gas_left() <= 2300)
+      MVM_THROW(Exception(ET::ErrOutOfGas, "Not enough gas for reentrancy sentry"));
+    uint64_t sstoreCost = touch_slot(addr, k) ? 0 : 2100;
+    int64_t refundDelta = 0;
+    if (oldValue == v) {
+      sstoreCost += 100;
+    } else if (originalValue == oldValue) {
+      if (originalValue == 0) {
+        sstoreCost += 20000;
+      } else {
+        sstoreCost += 2900;
+        if (v == 0)
+          refundDelta += SSTORE_CLEARS_SCHEDULE;
+      }
+    } else {
+      sstoreCost += 100;
+      if (originalValue != 0) {
+        if (oldValue == 0)
+          refundDelta -= SSTORE_CLEARS_SCHEDULE; // the slot is re-created
+        else if (v == 0)
+          refundDelta += SSTORE_CLEARS_SCHEDULE; // the slot is cleared
+      }
+      if (originalValue == v) {
+        // back to the original value: part of the cost is refunded
+        refundDelta += originalValue == 0 ? 20000 - 100 : 5000 - 2100 - 100;
+      }
+    }
+    gas_tracker.add_gas_used(sstoreCost);
+
     gs.add_addresses_storage_change(addr, k, v);
     if (!v)
       ctxt->st.remove(k);
     else
-      ctxt->st.store(k, v, &gas_tracker);
+      ctxt->st.store(k, v, nullptr);
 
-    int64_t refundDelta = compute_sstore_refund_delta(originalValue, oldValue, v);
     if (refundDelta != 0)
       gas_tracker.add_refund(refundDelta);
 
@@ -1578,6 +1674,7 @@ private:
 
   void extcodesize() {
     auto addr = pop_addr(ctxt->s);
+    gas_tracker.add_gas_used(account_access_cost(addr));
     if (is_precompile(addr)) {
       ctxt->s.push(1); // Fake size > 0 to bypass Solidity EXTCODESIZE check
     } else {
@@ -1586,7 +1683,9 @@ private:
   }
 
   void extcodecopy() {
-    copy_mem(ctxt->mem, gs.get(pop_addr(ctxt->s)).acc.get_code(), Opcode::STOP);
+    const auto target = pop_addr(ctxt->s);
+    gas_tracker.add_gas_used(account_access_cost(target));
+    copy_mem(ctxt->mem, gs.get(target).acc.get_code(), Opcode::STOP);
   }
 
   void codesize() { ctxt->s.push(ctxt->prog.code.size()); }
@@ -1621,7 +1720,9 @@ private:
   void address() { ctxt->s.push(ctxt->acc.get_address()); }
 
   void balance() {
-    decltype(auto) acc = gs.get(pop_addr(ctxt->s)).acc;
+    const auto target = pop_addr(ctxt->s);
+    gas_tracker.add_gas_used(account_access_cost(target));
+    decltype(auto) acc = gs.get(target).acc;
     std::string log_msg = "__Balance of " +
                           to_checksum_address(acc.get_address()) + " is " +
                           to_string(acc.get_balance());
@@ -1703,7 +1804,8 @@ private:
 
   void prevrandao() { ctxt->s.push(gs.get_block_context().prevrandao); }
 
-  void gas() { ctxt->s.push(tx.gas_limit); }
+  // GAS pushes the gas left in the CURRENT call frame (after the GAS instruction itself was charged).
+  void gas() { ctxt->s.push(gas_tracker.gas_left()); }
 
   void gaslimit() { ctxt->s.push(gs.get_block_context().gas_limit); }
 
@@ -1751,8 +1853,17 @@ private:
     }
 
     const Address addr = ctxt->acc.get_address();
-    auto recipient = gs.get(pop_addr(ctxt->s));
+    const auto beneficiary = pop_addr(ctxt->s);
     auto amount = ctxt->acc.get_balance();
+    // 5000 base, +2600 for a cold beneficiary (EIP-2929), +25000 when value
+    // is sent to an empty account (it gets created).
+    uint64_t selfdestructCost = 5000;
+    if (!touch_address(beneficiary))
+      selfdestructCost += 2600;
+    if (amount > 0 && account_is_empty(beneficiary))
+      selfdestructCost += 25000;
+    gas_tracker.add_gas_used(selfdestructCost);
+    auto recipient = gs.get(beneficiary);
     journaled_pay_to(addr, recipient.acc.get_address(), ctxt->acc,
                      recipient.acc, amount);
 
@@ -1806,15 +1917,21 @@ private:
       MVM_THROW(Exception(ET::outOfBounds, "Max initcode size exceeded"));
     }
     auto initCode = copy_from_mem(offset, size);
+    gas_tracker.add_gas_used(2 * get_word_size(size)); // EIP-3860: 2 gas per init code word
     // CREATE overwrites the return data: empty unless the constructor REVERTs
     // (then it holds the revert data, set in eh below).
     ctxt->returnData.clear();
-    // Insufficient balance for the endowment: CREATE fails with 0 BEFORE the
-    // creator's nonce is bumped (go-ethereum checks CanTransfer first).
-    if (contractValue > 0 && ctxt->acc.get_balance() < contractValue) {
+    // Insufficient balance for the endowment, or the call depth limit: CREATE
+    // fails with 0 BEFORE the creator's nonce is bumped (go-ethereum checks
+    // the depth and CanTransfer first) and nothing is charged for the init frame.
+    if ((contractValue > 0 && ctxt->acc.get_balance() < contractValue) ||
+        get_call_depth() > Consts::MAX_CALL_DEPTH) {
       ctxt->s.push(0);
       return;
     }
+    // EIP-150: the init code may use 63/64 of the gas left.
+    const uint64_t availableGas = gas_tracker.gas_left();
+    const uint64_t allowance = availableGas - availableGas / 64;
     Address newAddress =
         generate_address(ctxt->acc.get_address(), ctxt->acc.get_nonce());
     // creator's nonce bump: journaled so that if THIS frame reverts, the nonce
@@ -1838,9 +1955,11 @@ private:
 
     // EIP-684: destination address must not already have code, nonzero nonce,
     // or have been created in this execution.
+    touch_address(newAddress); // the new address is warm even if the creation fails
     decltype(auto) existingAcc = gs.get(newAddress);
     if (existingAcc.acc.get_nonce() > 0 || !existingAcc.acc.get_code().empty() ||
         gs.has_newly_deploy(newAddress) || created_this_tx.count(newAddress)) {
+      gas_tracker.add_gas_used(allowance); // a collision consumes the gas set aside for the init code
       ctxt->s.push(0);
       return;
     }
@@ -1863,7 +1982,7 @@ private:
         gs.erase_nonce_change(newAddress);
     });
 
-    // EIP-161: Newly created contract's nonce is set to 1 before initcode executes.
+    // EIP-161: a new contract starts with nonce 1 (it already counts for the CREATEs its init code runs).
     // The account's code remains empty during construction per EVM spec.
     decltype(auto) newAcc = gs.create(newAddress, 0, {}, 1);
     gs.set_addresses_nonce_change(newAddress, 1);
@@ -1883,16 +2002,21 @@ private:
       // set, caller sees 0 (failure) instead of the new address, and any
       // endowment transferred is rolled back.
       // EIP-170: deployed code larger than 24576 bytes fails the creation.
-      if (output.size() > Consts::MAX_CODE_SIZE) {
+      // The creation fails (undoing it and consuming the init frame's gas)
+      // when the code is too large, starts with 0xEF, or the init frame cannot
+      // pay the 200-gas-per-byte deposit.
+      const uint64_t depositCost = getCodeDepositCost(output.size());
+      if (output.size() > Consts::MAX_CODE_SIZE ||
+          (!output.empty() && output[0] == 0xEF) ||
+          gas_tracker.gas_left() < depositCost) {
         journal.revert_to(journalMark);
+        gas_tracker.burn_frame();
+        gas_tracker.pop_frame();
         parentContext->s.push(0);
         return;
       }
-      if (!output.empty() && output[0] == 0xEF) {
-        journal.revert_to(journalMark);
-        parentContext->s.push(0);
-        return;
-      }
+      gas_tracker.add_gas_used(depositCost);
+      gas_tracker.pop_frame();
       Address newAccAddr = newAcc.acc.get_address();
       Code oldCode = newAcc.acc.get_code();
       bool hadDeployEntry = gs.has_newly_deploy(newAccAddr);
@@ -1901,7 +2025,6 @@ private:
       newAcc.acc.set_code(move(output));
       parentContext->s.push(newAccAddr);
       gs.add_addresses_newly_deploy(newAccAddr, output);
-      gas_tracker.add_gas_used(getCodeDepositCost(output.size()));
       // Recorded even on this success path: an ANCESTOR frame may still
       // revert later (e.g. this CREATE succeeded but the caller that
       // issued it hits a REVERT afterwards), which must undo this deploy
@@ -1917,10 +2040,15 @@ private:
     };
     auto hh = [parentContext, journalMark, this]() {
       journal.revert_to(journalMark);
+      gas_tracker.pop_frame();
       parentContext->s.push(0);
     };
     auto eh = [parentContext, journalMark, this](const Exception &e) {
       journal.revert_to(journalMark);
+      // Only a REVERT gives the unused init-frame gas back; any other failure consumes it all.
+      if (e.type != ET::ErrExecutionReverted)
+        gas_tracker.burn_frame();
+      gas_tracker.pop_frame();
       if (e.type == ET::ErrExecutionReverted) {
         // The constructor's REVERT data becomes the creator's return data.
         const auto revertOffsetWord = ctxt->s.pop();
@@ -1931,6 +2059,7 @@ private:
       parentContext->s.push(0);
     };
 
+    gas_tracker.push_frame(allowance);
     push_context(ctxt->acc.get_address(), newAcc, {},
                  std::move(initCode), contractValue, rh, hh, eh,
                  ctxt->read_only ? true : false);
@@ -1977,10 +2106,8 @@ private:
 
   void call() {
     const auto op = get_op();
-    ctxt->s.pop(); // gas limit not used
+    const auto requestedGasWord = ctxt->s.pop();
     const auto addr = pop_addr(ctxt->s);
-    // Charge account access gas for CALL opcode
-    gas_tracker.add_gas_used(getTouchedAddressGasCost());
     const auto value =
         (op == DELEGATECALL || op == STATICCALL) ? 0 : ctxt->s.pop();
     const auto offInWord = ctxt->s.pop();
@@ -1989,8 +2116,21 @@ private:
     auto sizeOut = ctxt->s.pop64();
     const auto offIn = mem_offset(offInWord, sizeIn);
     const auto offOut = mem_offset(offOutWord, sizeOut);
-    prepare_mem_access(offOut, sizeOut);
-    auto input = copy_from_mem(offIn, sizeIn);
+
+    // ---- gas charged before the callee runs ----
+    // account access (EIP-2929), memory expansion of the input and output
+    // ranges, and the value rules of CALL / CALLCODE: +9000 for a transfer,
+    // +25000 more when CALL sends value to an empty account.
+    gas_tracker.add_gas_used(account_access_cost(addr));
+    expand_mem_charged(offIn, sizeIn);
+    expand_mem_charged(offOut, sizeOut);
+    const bool carriesValue = value > 0 && (op == CALL || op == CALLCODE);
+    if (carriesValue) {
+      gas_tracker.add_gas_used(getCallValueCost());
+      if (op == CALL && account_is_empty(addr))
+        gas_tracker.add_gas_used(25000);
+    }
+    auto input = copy_from_mem(offIn, sizeIn); // memory is already expanded: free
 
     // EIP-214: only CALL with a non-zero value is forbidden in a static
     // context. CALLCODE moves the value to the caller itself (no state
@@ -2000,12 +2140,23 @@ private:
                           "Cant transfer value from read only call"));
     }
 
-    // Yellow Paper: a CALL/CALLCODE whose value exceeds the caller's balance
-    // fails only that call (0 is pushed, no state change, empty return
-    // data); it must not abort the whole transaction. The value-transfer gas
-    // is still charged, as on Ethereum.
-    if (value > 0 && ctxt->acc.get_balance() < value) {
-      gas_tracker.add_gas_used(getCallValueCost());
+    // EIP-150: the callee may use at most 63/64 of the gas left, and no more
+    // than it asked for; a call that moves value also gets the 2300 stipend,
+    // which is not charged to the caller and is handed back when unused.
+    const uint64_t availableGas = gas_tracker.gas_left();
+    const uint64_t maxAllowance = availableGas - availableGas / 64;
+    const uint64_t allowance =
+        requestedGasWord > uint256_t(maxAllowance)
+            ? maxAllowance
+            : static_cast<uint64_t>(requestedGasWord);
+    const uint64_t stipend = carriesValue ? 2300 : 0;
+
+    // A call that cannot be made (not enough balance for the value, or the call depth limit) fails only the
+    // call: 0 is pushed, nothing moves, the return data is empty and all the gas it was given comes back
+    // (a net credit of the stipend, as on Ethereum).
+    if ((carriesValue && ctxt->acc.get_balance() < value) ||
+        get_call_depth() > Consts::MAX_CALL_DEPTH) {
+      gas_tracker.credit(stipend);
       ctxt->returnData.clear();
       ctxt->s.push(0);
       return;
@@ -2014,6 +2165,17 @@ private:
     bool is_precompile_call = is_precompile(addr);
 
     if (is_precompile_call) {
+      // Standard precompiles (1 to 10) are priced like go-ethereum; any other
+      // precompile of this chain keeps its flat price (0). Running out of the
+      // gas given to the call fails it and consumes that gas, before any work.
+      const uint64_t precompileGas =
+          addr <= 10 ? getPrecompileGasCost(static_cast<uint64_t>(addr), input) : 0;
+      if (precompileGas > allowance + stipend) {
+        gas_tracker.add_gas_used(allowance);
+        ctxt->returnData.clear();
+        ctxt->s.push(0);
+        return;
+      }
       vector<uint8_t> precompile_output;
       bool success = true;
 
@@ -2093,13 +2255,30 @@ private:
         precompile_output = mvm::encode_revert_string(e.what());
       MVM_END_TRY
 
+      // The standard precompiles signal failure with an empty output (apart
+      // from blake2f, handled above), so an empty output is a failure there.
+      if (success && precompile_output.empty() &&
+          (addr == 6 || addr == 7 || addr == 8 || addr == 10)) {
+        success = false;
+      }
       if (success) {
+        if (precompileGas >= stipend)
+          gas_tracker.add_gas_used(precompileGas - stipend);
+        else
+          gas_tracker.credit(stipend - precompileGas);
         ctxt->returnData = precompile_output;
         copy_mem_raw(offOut, 0, std::min<uint64_t>(sizeOut, ctxt->returnData.size()),
                      ctxt->mem, ctxt->returnData);
         ctxt->s.push(1);
       } else {
-        ctxt->returnData = precompile_output;
+        // A failed precompile consumes everything it was given. The standard
+        // ones leave no return data; this chain's own precompiles may
+        // explain the failure in it.
+        gas_tracker.add_gas_used(allowance);
+        if (addr <= 10)
+          ctxt->returnData.clear();
+        else
+          ctxt->returnData = precompile_output;
         ctxt->s.push(0);
       }
       return;
@@ -2112,14 +2291,11 @@ private:
     // comment) — this is the well-known EVM guarantee that a reverted
     // external call never actually moves value.
     size_t journalMark = journal.mark();
-    if (value > 0) {
-      gas_tracker.add_gas_used(getCallValueCost());
-      // CALLCODE runs the callee's code in the caller's own context: the
-      // "transfer" is from the caller to itself, i.e. no balance change.
-      if (op != CALLCODE) {
-        journaled_pay_to(ctxt->acc.get_address(), addr, ctxt->acc, callee.acc,
-                         value);
-      }
+    // CALLCODE runs the callee's code in the caller's own context: the
+    // "transfer" is from the caller to itself, i.e. no balance change.
+    if (carriesValue && op != CALLCODE) {
+      journaled_pay_to(ctxt->acc.get_address(), addr, ctxt->acc, callee.acc,
+                       value);
     }
 
     // EIP-7702: if the callee's code is a delegation designator, CALL/
@@ -2134,29 +2310,46 @@ private:
     Code executableCode = resolve_delegated_code(callee.acc.get_code());
 
     if (executableCode.empty()) {
+      // Nothing to run: the whole allowance and the stipend come back.
+      gas_tracker.credit(stipend);
       ctxt->returnData.clear();
       ctxt->s.push(1);
       return;
     }
 
+    // The callee runs in its own gas frame; when it ends the unused gas goes
+    // back to the caller (and the stipend, which the caller never paid, is
+    // taken off again). An exceptional halt (anything but REVERT) consumes the
+    // whole frame.
+    gas_tracker.push_frame(allowance + stipend);
+    auto endFrame = [this, stipend](bool burn) {
+      if (burn)
+        gas_tracker.burn_frame();
+      gas_tracker.pop_frame();
+      gas_tracker.credit(stipend);
+    };
+
     // Only min(retSize, len(returnData)) bytes are copied into the return
     // area; the rest of it keeps its previous content (it is NOT zero-filled).
     auto parentContext = ctxt;
-    auto rh = [offOut, sizeOut, parentContext,
+    auto rh = [offOut, sizeOut, parentContext, endFrame,
                this](const vector<uint8_t> &output) {
+      endFrame(false);
       parentContext->returnData = output;
       copy_mem_raw(offOut, 0,
                    std::min<uint64_t>(sizeOut, parentContext->returnData.size()),
                    parentContext->mem, parentContext->returnData);
       parentContext->s.push(1);
     };
-    auto hh = [parentContext]() {
+    auto hh = [parentContext, endFrame]() {
+      endFrame(false);
       parentContext->returnData.clear();
       parentContext->s.push(1);
     };
-    auto he = [this, parentContext, offOut, sizeOut,
-               journalMark](const Exception &e) {
+    auto he = [this, parentContext, offOut, sizeOut, journalMark,
+               endFrame](const Exception &e) {
       journal.revert_to(journalMark);
+      endFrame(e.type != ET::ErrExecutionReverted);
       if (e.type == ET::ErrExecutionReverted) {
         const auto offsetWord = ctxt->s.pop();
         const auto size = ctxt->s.pop64();
@@ -2214,6 +2407,7 @@ private:
   void opReturnDataSize() { ctxt->s.push(ctxt->returnData.size()); }
 
   void opReturnDataCopy() {
+    const uint64_t old_mem_word_size = ctxt->get_used_mem();
     const auto memOffsetWord = ctxt->s.pop();
     const auto dataOffsetWord = ctxt->s.pop();
     const auto length = ctxt->s.pop64();
@@ -2231,6 +2425,9 @@ private:
                           "Return data out of bounds"));
     }
     copy_mem_raw(memOffset, dataOffset, length, ctxt->mem, ctxt->returnData);
+    gas_tracker.add_gas_used(getCopyOperationGasCost(
+        get_word_size(length), ctxt->last_mem_gas_cost, old_mem_word_size,
+        ctxt->get_used_mem()));
   }
 
   // SHL / SHR / SAR take the shift amount as a full 256-bit word: a shift of
@@ -2271,7 +2468,9 @@ private:
   }
 
   void opExtCodeHash() {
-    decltype(auto) target = gs.get(pop_addr(ctxt->s));
+    const auto targetAddr = pop_addr(ctxt->s);
+    gas_tracker.add_gas_used(account_access_cost(targetAddr));
+    decltype(auto) target = gs.get(targetAddr);
     const auto code = target.acc.get_code();
     // EIP-1052: 0 for a non-existent or empty account (EIP-161: no code, zero
     // nonce, zero balance); keccak256(code) otherwise. An existing account
@@ -2314,13 +2513,17 @@ private:
     }
     auto input = copy_from_mem(offset, size);
     gas_tracker.add_gas_used(getCreate2DataSizeCost(get_word_size(size)));
+    gas_tracker.add_gas_used(2 * get_word_size(size)); // EIP-3860: 2 gas per init code word
     ctxt->returnData.clear(); // see create()
 
-    // See create(): insufficient endowment fails the CREATE2 before the nonce bump.
-    if (endowment > 0 && ctxt->acc.get_balance() < endowment) {
+    // See create(): insufficient endowment or the depth limit fails the CREATE2 before the nonce bump.
+    if ((endowment > 0 && ctxt->acc.get_balance() < endowment) ||
+        get_call_depth() > Consts::MAX_CALL_DEPTH) {
       ctxt->s.push(0);
       return;
     }
+    const uint64_t availableGas = gas_tracker.gas_left();
+    const uint64_t allowance = availableGas - availableGas / 64;
 
     Address newAddress =
         generate_contract_address_2(ctxt->acc.get_address(), salt, input);
@@ -2349,9 +2552,11 @@ private:
 
     // EIP-684 / EIP-1014: destination address must not already have code,
     // nonzero nonce, or have been created in this execution.
+    touch_address(newAddress); // the new address is warm even if the creation fails
     decltype(auto) existingAcc = gs.get(newAddress);
     if (existingAcc.acc.get_nonce() > 0 || !existingAcc.acc.get_code().empty() ||
         gs.has_newly_deploy(newAddress) || created_this_tx.count(newAddress)) {
+      gas_tracker.add_gas_used(allowance); // a collision consumes the gas set aside for the init code
       ctxt->s.push(0);
       return;
     }
@@ -2374,7 +2579,7 @@ private:
         gs.erase_nonce_change(newAddress);
     });
 
-    // EIP-161: Newly created contract's nonce is set to 1 before initcode executes.
+    // EIP-161: a new contract starts with nonce 1 (see create()).
     // The account's code remains empty during construction per EVM spec.
     decltype(auto) newAcc = gs.create(newAddress, 0, {}, 1);
     gs.set_addresses_nonce_change(newAddress, 1);
@@ -2386,16 +2591,21 @@ private:
     auto rh = [newAcc, parentContext, journalMark, this](vector<uint8_t> output) {
       // EIP-3541 — see the identical check in opCreate()'s rh for why.
       // EIP-170: deployed code larger than 24576 bytes fails the creation.
-      if (output.size() > Consts::MAX_CODE_SIZE) {
+      // The creation fails (undoing it and consuming the init frame's gas)
+      // when the code is too large, starts with 0xEF, or the init frame cannot
+      // pay the 200-gas-per-byte deposit.
+      const uint64_t depositCost = getCodeDepositCost(output.size());
+      if (output.size() > Consts::MAX_CODE_SIZE ||
+          (!output.empty() && output[0] == 0xEF) ||
+          gas_tracker.gas_left() < depositCost) {
         journal.revert_to(journalMark);
+        gas_tracker.burn_frame();
+        gas_tracker.pop_frame();
         parentContext->s.push(0);
         return;
       }
-      if (!output.empty() && output[0] == 0xEF) {
-        journal.revert_to(journalMark);
-        parentContext->s.push(0);
-        return;
-      }
+      gas_tracker.add_gas_used(depositCost);
+      gas_tracker.pop_frame();
       Address newAccAddr = newAcc.acc.get_address();
       Code oldCode = newAcc.acc.get_code();
       bool hadDeployEntry = gs.has_newly_deploy(newAccAddr);
@@ -2404,7 +2614,6 @@ private:
       newAcc.acc.set_code(move(output));
       parentContext->s.push(newAccAddr);
       gs.add_addresses_newly_deploy(newAccAddr, output);
-      gas_tracker.add_gas_used(getCodeDepositCost(output.size()));
       // See the matching comment in create()'s rh: recorded even on this
       // success path since an ancestor frame may still revert later.
       journal.record([this, newAccAddr, oldCode, hadDeployEntry,
@@ -2419,10 +2628,15 @@ private:
 
     auto hh = [parentContext, journalMark, this]() {
       journal.revert_to(journalMark);
+      gas_tracker.pop_frame();
       parentContext->s.push(0);
     };
     auto eh = [parentContext, journalMark, this](const Exception &e) {
       journal.revert_to(journalMark);
+      // Only a REVERT gives the unused init-frame gas back; any other failure consumes it all.
+      if (e.type != ET::ErrExecutionReverted)
+        gas_tracker.burn_frame();
+      gas_tracker.pop_frame();
       if (e.type == ET::ErrExecutionReverted) {
         // The constructor's REVERT data becomes the creator's return data.
         const auto revertOffsetWord = ctxt->s.pop();
@@ -2433,12 +2647,20 @@ private:
       parentContext->s.push(0);
     };
 
+    gas_tracker.push_frame(allowance);
     push_context(ctxt->acc.get_address(), newAcc, {}, move(input),
                  endowment, rh, hh, eh,
                  ctxt->read_only ? true : false);
   }
 
   void opRevert() {
+    // REVERT pays for expanding the memory range of its data inside the reverting frame (the handlers that read the
+    // data afterwards then find the memory already expanded).
+    const auto revertOffsetWord = ctxt->s.pop();
+    const auto revertSize = ctxt->s.pop64();
+    copy_from_mem(mem_offset(revertOffsetWord, revertSize), revertSize);
+    ctxt->s.push(revertSize);
+    ctxt->s.push(revertOffsetWord);
     MVM_THROW(Exception(ET::ErrExecutionReverted, "Execution reverted"));
   }
 };

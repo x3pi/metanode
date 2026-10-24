@@ -69,6 +69,11 @@ struct ExecuteResult {
   int length_native_logs;
 
   unsigned long long gas_used;
+
+  // Execution gas before the refund and the raw EIP-3529 refund counter: the caller applies the exact refund cap
+  // (a fifth of the total gas used, intrinsic gas included).
+  unsigned long long gas_pre_refund;
+  unsigned long long gas_refund;
 };
 
 // TEE-packaging B1 (note/tee_core_packaging_plan.md) context parameters,

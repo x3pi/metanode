@@ -470,5 +470,9 @@ func TestEVMBalanceSettlementKeepsPendingFolding(t *testing.T) {
 	require.Equal(t, big.NewInt(1009), ca.Balance(), "contract balance must be 1009")
 	require.Equal(t, uint64(1), ca.Nonce(), "contract initial nonce per EIP-161")
 	require.Equal(t, big.NewInt(4), da.TotalBalance(), "dest account received 3")
-	require.Equal(t, common.HexToHash("0x684c6898ee9fb886b6f9912956ac203a74e66135a4416cf96fba6ee0d4fa5cf9"), root, "state root must match dev baseline")
+	// The root pins the fees of both transactions, so it moves whenever a gas rule changes. It was re-pinned when the
+	// MVM adopted go-ethereum's gas model (EIP-2929 cold account access, EIP-150 call gas, stipend, EXTCODE/SLOAD costs):
+	// the CALL to the already existing `dest` now pays the 2600 cold access instead of 100; and when new contracts began
+	// at nonce 1 (EIP-161), which the deployed contract's account now records. The balances asserted above are unchanged.
+	require.Equal(t, common.HexToHash("0x1c79bab65e034c330c9411228921fab730db03507dfa181eb532fc0a898cf45f"), root, "state root must match the pinned baseline")
 }

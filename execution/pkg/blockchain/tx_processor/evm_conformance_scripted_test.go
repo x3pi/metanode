@@ -356,6 +356,29 @@ func confScenarios() []confScenario {
 			},
 		},
 		{
+			name: "create2_constructor_stores_callvalue",
+			build: func(p []common.Address, x common.Address) [4][]byte {
+				init := confChildInits(p)[7] // SSTORE(0, CALLVALUE) then returns one byte of runtime code
+				return [4][]byte{confScript(confJoin(confMemWrite(0, init), []any{1, len(init), 0, 3, "CREATE2"}, confReturnWords(1))...)}
+			},
+			balances: [4]int64{50, 0, 0, 0},
+		},
+		{
+			name: "create_constructor_stores_callvalue",
+			build: func(p []common.Address, x common.Address) [4][]byte {
+				init := confChildInits(p)[7]
+				return [4][]byte{confScript(confJoin(confMemWrite(0, init), []any{len(init), 0, 3, "CREATE"}, confReturnWords(1))...)}
+			},
+			balances: [4]int64{50, 0, 0, 0},
+		},
+		{
+			name: "create2_twice_empty_runtime_second_collides_eip161",
+			build: func(p []common.Address, x common.Address) [4][]byte {
+				// The first CREATE2 deploys a contract with no code (its nonce is 1), so the second one collides.
+				return [4][]byte{confScript(confJoin(confMemWrite(0, []byte{0x00}), []any{0, 1, 0, 0, "CREATE2", 0, 1, 0, 0, "CREATE2"}, confReturnWords(2))...)}
+			},
+		},
+		{
 			name: "root_runs_off_end",
 			build: func(p []common.Address, x common.Address) [4][]byte {
 				return [4][]byte{confScript(1)}
@@ -438,6 +461,12 @@ func TestEVMConformanceScripted(t *testing.T) {
 		g := confRunGeth(w, runtimes, balances, sc.value, sc.calldata)
 		m := confRunMVMReal(t, w, key, runtimes, balances, sc.value, sc.calldata)
 		diffs := confCompare(w, g, m)
+		if g.ok && m.ok {
+			// the gas of the whole transaction must also match go-ethereum's
+			if want := confGethTotalGas(g, sc.calldata); want != m.gas {
+				diffs = append(diffs, fmt.Sprintf("gas geth=%d mvm=%d", want, m.gas))
+			}
+		}
 		if len(diffs) == 0 {
 			if sc.knownDivergence != "" {
 				t.Logf("NOW-MATCHES %-45s (was a known divergence: %s) - update the scenario and the runbook", sc.name, sc.knownDivergence)

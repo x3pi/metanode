@@ -85,7 +85,7 @@ func TestConstructorCallValueStoragePersistence(t *testing.T) {
 
 			var expectedChild common.Address
 			if opcode == "CREATE" {
-				expectedChild = crypto.CreateAddress(factory, 0)
+				expectedChild = crypto.CreateAddress(factory, 1)
 			} else {
 				expectedChild = crypto.CreateAddress2(factory, [32]byte{}, crypto.Keccak256(childInit))
 			}
@@ -178,7 +178,7 @@ func TestConstructorCallValueZeroEndowment(t *testing.T) {
 
 			var expectedChild common.Address
 			if opcode == "CREATE" {
-				expectedChild = crypto.CreateAddress(factory, 0)
+				expectedChild = crypto.CreateAddress(factory, 1)
 			} else {
 				expectedChild = crypto.CreateAddress2(factory, [32]byte{}, crypto.Keccak256(childInit))
 			}
@@ -258,7 +258,7 @@ func TestConstructorCallValueMismatchRevertsAndRefunds(t *testing.T) {
 
 			var expectedChild common.Address
 			if opcode == "CREATE" {
-				expectedChild = crypto.CreateAddress(factory, 0)
+				expectedChild = crypto.CreateAddress(factory, 1)
 			} else {
 				expectedChild = crypto.CreateAddress2(factory, [32]byte{}, crypto.Keccak256(childInit))
 			}

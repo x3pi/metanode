@@ -68,7 +68,7 @@ func TestFactoryCreateThatSucceedsKeepsItsNonce(t *testing.T) {
 	call, factoryNonce, senderNonce := runFactoryCall(t, "602a60005260206000f3")
 	require.Equal(t, pb.RECEIPT_STATUS_RETURNED, call.Status())
 	require.Len(t, call.Return(), 32, "execution must continue after CREATE")
-	require.Equal(t, uint64(2), factoryNonce)
+	require.Equal(t, uint64(2), factoryNonce, "a deployed contract starts at nonce 1 (EIP-161) and the CREATE makes it 2")
 	require.Equal(t, uint64(3), senderNonce)
 }
 
@@ -78,6 +78,6 @@ func TestFactoryRevertAfterCreateDoesNotPersistItsNonce(t *testing.T) {
 	call, factoryNonce, senderNonce := runFactoryCall(t, "60006000fd")
 	require.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, call.Status())
 	require.Equal(t, pb.EXCEPTION_ERR_EXECUTION_REVERTED, call.Exception())
-	require.Equal(t, uint64(1), factoryNonce, "a reverted CREATE must restore factory nonce to pre-call value (1)")
+	require.Equal(t, uint64(1), factoryNonce, "a reverted CREATE must not leave the factory nonce incremented (it stays at its initial 1)")
 	require.Equal(t, uint64(3), senderNonce, "the sender nonce is consumed even though the execution reverted")
 }

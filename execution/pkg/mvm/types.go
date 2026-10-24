@@ -45,7 +45,11 @@ type MVMExecuteResult struct {
 	MapFullDbLogs    map[string][]byte // <<--- Kiểu dữ liệu mới
 	SimpleDbHash     []byte
 	GasUsed          uint64
-	NativeLogs       []NativeLogEntry
+	// GasPreRefund is the execution gas before the refund and GasRefund the raw EIP-3529 refund counter. Both are
+	// zero when the VM did not report them (the TEE path), in which case GasUsed is used as is.
+	GasPreRefund uint64
+	GasRefund    uint64
+	NativeLogs   []NativeLogEntry
 }
 
 func (er *MVMExecuteResult) String() string {

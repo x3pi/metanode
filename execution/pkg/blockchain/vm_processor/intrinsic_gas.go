@@ -63,5 +63,15 @@ func applyIntrinsicGas(mvmResult *mvm.MVMExecuteResult, intrinsicGas, maxGas uin
 		mvmResult.GasUsed = maxGas
 		return
 	}
+	if mvmResult.GasPreRefund > 0 {
+		// EIP-3529: the refund is capped at a fifth of the TOTAL gas used, intrinsic gas included.
+		total := mvmResult.GasPreRefund + intrinsicGas
+		refund := mvmResult.GasRefund
+		if cap := total / 5; refund > cap {
+			refund = cap
+		}
+		mvmResult.GasUsed = total - refund
+		return
+	}
 	mvmResult.GasUsed += intrinsicGas
 }

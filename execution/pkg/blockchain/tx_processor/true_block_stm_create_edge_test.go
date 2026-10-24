@@ -97,7 +97,7 @@ func TestCreateAndCreate2EdgeCases(t *testing.T) {
 				if create2 {
 					child = crypto.CreateAddress2(factory, [32]byte{}, crypto.Keccak256(tc.child))
 				} else {
-					child = crypto.CreateAddress(factory, 1)
+					child = crypto.CreateAddress(factory, 1) // EIP-161: a deployed contract starts at nonce 1, so its first CREATE uses nonce 1
 				}
 				if tc.prefund > 0 {
 					seedAccount(t, cs, child, big.NewInt(tc.prefund), tc.prefundNonce)
@@ -145,8 +145,8 @@ func TestCreateAndCreate2EdgeCases(t *testing.T) {
 						require.Zero(t, result.Sign(), "failed create must return 0")
 					}
 				} else {
-					// The tx failed as a whole: the factory nonce bump must not survive either (restored to initial 1).
-					require.Equal(t, uint64(1), fa.Nonce(), "factory nonce after failed tx")
+					// The tx failed as a whole: the factory nonce bump must not survive either.
+					require.Equal(t, uint64(1), fa.Nonce(), "factory nonce after a failed tx stays at its initial 1 (EIP-161)")
 				}
 			})
 		}
@@ -210,7 +210,7 @@ func TestConstructorFallthroughIsImplicitStop(t *testing.T) {
 				require.Equal(t, pb.RECEIPT_STATUS_RETURNED, execute(1, nil, 1000, init).Status())
 				factory := crypto.CreateAddress(sender, 1)
 				receipt := execute(2, &factory, 0, []byte{1})
-				child := crypto.CreateAddress(factory, 1)
+				child := crypto.CreateAddress(factory, 1) // EIP-161: a deployed contract starts at nonce 1, so its first CREATE uses nonce 1
 				if create2 {
 					child = crypto.CreateAddress2(factory, [32]byte{}, crypto.Keccak256(childInit))
 				}
@@ -222,7 +222,7 @@ func TestConstructorFallthroughIsImplicitStop(t *testing.T) {
 					explicitStop, receipt.Status(), fa.Nonce(), fa.TotalBalance(), st.TotalBalance())
 				require.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, receipt.Status(), "factory REVERT after child execution must run")
 				require.Equal(t, "1000", fa.TotalBalance().String())
-				require.Equal(t, uint64(1), fa.Nonce(), "factory revert must restore CREATE nonce")
+				require.Equal(t, uint64(1), fa.Nonce(), "factory revert must restore the nonce to its initial 1")
 			})
 		}
 	}

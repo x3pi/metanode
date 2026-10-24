@@ -43,6 +43,8 @@ func extractExecuteResult(cExecuteResult *C.struct_ExecuteResult) *MVMExecuteRes
 	rt := C.GoBytes(uptrOut, cExecuteResult.length_output)
 
 	gasUsed := uint64(cExecuteResult.gas_used)
+	gasPreRefund := uint64(cExecuteResult.gas_pre_refund)
+	gasRefund := uint64(cExecuteResult.gas_refund)
 
 	// ... (xác định status, exception) ...
 	status := pb.RECEIPT_STATUS(cExecuteResult.b_exitReason)
@@ -75,6 +77,8 @@ func extractExecuteResult(cExecuteResult *C.struct_ExecuteResult) *MVMExecuteRes
 		MapFullDbHash:    MapFullDbHash,
 		MapFullDbLogs:    mapFullDbLogs,
 		GasUsed:          gasUsed,
+		GasPreRefund:     gasPreRefund,
+		GasRefund:        gasRefund,
 		NativeLogs:       nativeLogs,
 	}
 	processDecodedLogs(MVMEx)
