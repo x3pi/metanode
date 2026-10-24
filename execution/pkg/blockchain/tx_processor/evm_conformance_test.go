@@ -40,6 +40,23 @@ import (
 // confMVMGas is the gas limit of the MVM transactions; scenarios that need to pay for very large code raise it.
 var confMVMGas uint64 = 2_000_000
 
+// confAlignGas makes go-ethereum start the execution with exactly the gas the MVM has after the intrinsic gas
+// (the 63/64 rule and out-of-gas behaviour depend on it). On: the MVM now follows go-ethereum's gas rules.
+var confAlignGas = true
+
+// confIntrinsicGas is the intrinsic gas of a call transaction with this calldata (21000 + 16 per non-zero byte, 4 per zero byte).
+func confIntrinsicGas(calldata []byte) uint64 {
+	g := uint64(21000)
+	for _, b := range calldata {
+		if b == 0 {
+			g += 4
+		} else {
+			g += 16
+		}
+	}
+	return g
+}
+
 const (
 	confContracts = 4
 	confMemOut    = 0x100
@@ -295,6 +312,7 @@ func confGenContract(r *rand.Rand, w *confWorld, idx int, seed int64, excl map[[
 }
 
 type confResult struct {
+	refund   uint64   // gas refund counter at the end (geth only)
 	gas      uint64   // gas used by the execution (geth: limit - leftover; MVM: receipt gas used)
 	logs     []string // emitted logs as "address|topic,topic|data" (successful executions only)
 	ok       bool
@@ -345,10 +363,11 @@ func confRunGeth(w *confWorld, runtimes [][]byte, balances []int64, entryValue i
 	sdb.AddBalance(w.sender, one(1_000_000_000_000_000), tracing.BalanceChangeUnspecified)
 	for i, a := range w.p {
 		sdb.SetCode(a, runtimes[i])
+		sdb.SetNonce(a, 1, tracing.NonceChangeUnspecified) // EIP-161: a deployed contract has nonce 1
 		sdb.AddBalance(a, one(uint64(balances[i])), tracing.BalanceChangeUnspecified)
 	}
 	sdb.AddBalance(w.eoas[0], one(50), tracing.BalanceChangeUnspecified)
-	cfg := &runtime.Config{Origin: w.sender, State: sdb, GasLimit: 1_000_000_000_000_000, Value: big.NewInt(entryValue), BlockNumber: big.NewInt(1)}
+	cfg := &runtime.Config{Origin: w.sender, State: sdb, GasLimit: confGethGasLimit(calldata), Value: big.NewInt(entryValue), BlockNumber: big.NewInt(1)}
 	ret, left, err := runtime.Call(w.p[0], calldata, cfg)
 	var gethLogs []string
 	if err == nil {
@@ -360,8 +379,9 @@ func confRunGeth(w *confWorld, runtimes [][]byte, balances []int64, entryValue i
 			gethLogs = append(gethLogs, fmt.Sprintf("%s|%s|%x", l.Address.Hex(), strings.Join(tp, ","), l.Data))
 		}
 	}
-	sdb.Finalise(true) // end of transaction: EIP-6780 deletions take effect
-	res := confResult{logs: gethLogs, gas: cfg.GasLimit - left, ok: err == nil, ret: ret, balance: map[common.Address]string{}, hasCode: map[common.Address]bool{}}
+	refundCounter := sdb.GetRefund() // read before Finalise, which clears it
+	sdb.Finalise(true)               // end of transaction: EIP-6780 deletions take effect
+	res := confResult{refund: refundCounter, logs: gethLogs, gas: cfg.GasLimit - left, ok: err == nil, ret: ret, balance: map[common.Address]string{}, hasCode: map[common.Address]bool{}}
 	if err != nil {
 		res.failKind = err.Error()
 	}
@@ -406,7 +426,6 @@ func TestEVMConformanceAgainstGeth(t *testing.T) {
 		diffs      []string
 		entryValue int64
 		calldata   []byte
-		skipped    bool
 	}
 	eval := func(s int64, excl map[[2]int]bool) evalOut {
 		r := rand.New(rand.NewSource(s))
@@ -424,26 +443,16 @@ func TestEVMConformanceAgainstGeth(t *testing.T) {
 		g := confRunGeth(w, runtimes, balances, entryValue, calldata)
 		m := confRunMVMReal(t, w, key, runtimes, balances, entryValue, calldata)
 		o := evalOut{descs: descs, g: g, m: m, entryValue: entryValue, calldata: calldata}
-		if !g.ok && strings.Contains(g.failKind, "out of gas") && os.Getenv("EVM_CONFORMANCE_KEEP_OOG") == "" {
-			// Known gap: MVM has no per-call gas limit / 63-64 rule, so an out-of-gas callee kills the
-			// whole tx there but only the callee on Ethereum. These programs are counted and skipped.
-			o.skipped = true
-			return o
-		}
 		o.diffs = confCompare(w, g, m)
 		return o
 	}
 	kind := func(d []string) string { return strings.Fields(d[0])[0] }
 
 	mismatches := map[string][]string{}
-	total, mism, skippedOOG := 0, 0, 0
+	total, mism := 0, 0
 	for s := seed0; s < seed0+int64(n); s++ {
 		o := eval(s, nil)
 		total++
-		if o.skipped {
-			skippedOOG++
-			continue
-		}
 		if len(o.diffs) == 0 {
 			continue
 		}
@@ -454,7 +463,7 @@ func TestEVMConformanceAgainstGeth(t *testing.T) {
 			for idx := 0; idx < confContracts; idx++ {
 				for gi := 0; gi < 6; gi++ {
 					excl[[2]int{idx, gi}] = true
-					if e := eval(s, excl); e.skipped || len(e.diffs) == 0 || kind(e.diffs) != kind(o.diffs) {
+					if e := eval(s, excl); len(e.diffs) == 0 || kind(e.diffs) != kind(o.diffs) {
 						delete(excl, [2]int{idx, gi})
 					}
 				}
@@ -482,7 +491,7 @@ func TestEVMConformanceAgainstGeth(t *testing.T) {
 		}
 		t.Logf("CLASS %q count=%d\n  e.g. %s", k, len(mismatches[k]), ex)
 	}
-	t.Logf("SUMMARY programs=%d skipped(geth out-of-gas, gas model)=%d mismatching=%d classes=%d", total, skippedOOG, mism, len(keys))
+	t.Logf("SUMMARY programs=%d mismatching=%d classes=%d", total, mism, len(keys))
 	if os.Getenv("EVM_CONFORMANCE_REPORT_ONLY") == "" {
 		require.Zero(t, mism, "MVM diverges from go-ethereum on %d/%d programs", mism, total)
 	}
@@ -600,4 +609,11 @@ func confRunMVMReal(t *testing.T, w *confWorld, key *ecdsa.PrivateKey, runtimes 
 		res.hasCode[a] = sc != nil && sc.CodeHash() != (common.Hash{}) && sc.CodeHash() != crypto.Keccak256Hash(nil)
 	}
 	return res
+}
+
+func confGethGasLimit(calldata []byte) uint64 {
+	if confAlignGas {
+		return confMVMGas - confIntrinsicGas(calldata)
+	}
+	return 1_000_000_000_000_000
 }

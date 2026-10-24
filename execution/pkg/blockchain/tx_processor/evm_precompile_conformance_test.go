@@ -71,6 +71,19 @@ func TestEVMPrecompileConformanceAgainstGeth(t *testing.T) {
 			jobs = append(jobs, job{f.file + "/" + v.Name, f.addr, in})
 		}
 	}
+	// invalid inputs of the elliptic-curve precompiles must fail the call (0 on the stack, all the gas given is burned)
+	offCurve := make([]byte, 128)
+	offCurve[31], offCurve[63] = 1, 1 // the point (1, 1) is not on alt_bn128
+	jobs = append(jobs,
+		job{"invalid/bn256Add_off_curve", 6, offCurve},
+		job{"invalid/bn256Mul_off_curve", 7, offCurve[:96]},
+		job{"invalid/bn256Pairing_length_191", 8, make([]byte, 191)},
+		job{"invalid/bn256Pairing_off_curve", 8, append(append([]byte{}, offCurve...), make([]byte, 64)...)},
+		job{"invalid/pointEvaluation_random", 10, bytes.Repeat([]byte{0x11}, 192)},
+		job{"invalid/pointEvaluation_short", 10, []byte{1, 2, 3}},
+		job{"invalid/ecrecover_short", 1, []byte{1, 2, 3}},
+		job{"invalid/blake2f_short", 9, []byte{0, 0, 0, 1}},
+	)
 	for _, in := range [][]byte{nil, {1}, bytes.Repeat([]byte{0xab}, 55), bytes.Repeat([]byte{0xcd}, 200)} {
 		for _, a := range []int64{2, 3, 4} {
 			jobs = append(jobs, job{"synthetic/" + string(rune('0'+a)), a, in})
@@ -100,6 +113,9 @@ func TestEVMPrecompileConformanceAgainstGeth(t *testing.T) {
 		if !bytes.Equal(g.ret, m.ret) {
 			bad++
 			t.Logf("MISMATCH %-45s geth=%x mvm=%x", j.name, g.ret, m.ret)
+		} else if want := confGethTotalGas(g, j.input); want != m.gas {
+			bad++
+			t.Logf("MISMATCH %-45s gas geth=%d mvm=%d", j.name, want, m.gas)
 		}
 	}
 	t.Logf("SUMMARY precompile vectors=%d mismatching=%d both-failed=%d", total, bad, skipped)

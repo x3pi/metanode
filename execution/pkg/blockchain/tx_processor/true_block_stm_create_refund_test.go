@@ -385,7 +385,7 @@ func TestChildConstructorRevertKeepsCreatorNonceIncrement(t *testing.T) {
 			stBBefore, err := cs.GetAccountStateDB().AccountState(b)
 			require.NoError(t, err)
 			nonceBefore := stBBefore.Nonce()
-			require.Equal(t, uint64(0), nonceBefore)
+			require.Equal(t, uint64(1), nonceBefore, "a deployed contract starts at nonce 1 (EIP-161)")
 			require.Equal(t, "1000", stBBefore.TotalBalance().String())
 
 			var child common.Address
@@ -506,8 +506,8 @@ func TestDeeplyNestedRevertRestoresAllAncestorsNonces(t *testing.T) {
 			require.Equal(t, pb.RECEIPT_STATUS_RETURNED, execute(3, nil, wrap(runtimeA)).Status())
 			a := crypto.CreateAddress(sender, 3)
 
-			childB := crypto.CreateAddress(b, 0)
-			childC := crypto.CreateAddress(c, 0)
+			childB := crypto.CreateAddress(b, 1) // contracts start at nonce 1 (EIP-161)
+			childC := crypto.CreateAddress(c, 1)
 
 			receipt := execute(4, &a, []byte{1})
 			require.Equal(t, pb.RECEIPT_STATUS_RETURNED, receipt.Status())
@@ -523,14 +523,14 @@ func TestDeeplyNestedRevertRestoresAllAncestorsNonces(t *testing.T) {
 
 			if revert {
 				require.Zero(t, result, "A must catch B's revert")
-				require.Equal(t, uint64(0), stB.Nonce(), "B's nonce must rollback to 0")
-				require.Equal(t, uint64(0), stC.Nonce(), "C's nonce must cascade-rollback to 0")
+				require.Equal(t, uint64(1), stB.Nonce(), "B's nonce must roll back to its initial 1")
+				require.Equal(t, uint64(1), stC.Nonce(), "C's nonce must cascade-roll back to its initial 1")
 				require.False(t, cs.HasCode(childB), "childB must not exist")
 				require.False(t, cs.HasCode(childC), "childC must not exist")
 			} else {
 				require.Equal(t, uint64(1), result)
-				require.Equal(t, uint64(1), stB.Nonce(), "B's nonce must be 1")
-				require.Equal(t, uint64(1), stC.Nonce(), "C's nonce must be 1")
+				require.Equal(t, uint64(2), stB.Nonce(), "B's nonce must be 2 (initial 1 + its CREATE)")
+				require.Equal(t, uint64(2), stC.Nonce(), "C's nonce must be 2 (initial 1 + its CREATE)")
 				require.True(t, cs.HasCode(childB), "childB must exist")
 				require.True(t, cs.HasCode(childC), "childC must exist")
 			}
@@ -630,7 +630,7 @@ func TestCreate2AddressCollisionRejected(t *testing.T) {
 			// 3. Target balance must remain 500 (did not receive the 200)
 			require.Equal(t, "500", stTarget.TotalBalance().String(), "target balance must not be increased")
 			// 4. Factory nonce incremented per EIP-161
-			require.Equal(t, uint64(1), stFactory.Nonce(), "factory nonce must be incremented per EIP-161")
+			require.Equal(t, uint64(2), stFactory.Nonce(), "factory nonce must be incremented per EIP-161 (initial 1, +1 for the failed CREATE2)")
 		})
 	}
 }
@@ -700,7 +700,7 @@ func TestCreateAndCreate2ConstructorReceivesCallValue(t *testing.T) {
 
 			var expectedChild common.Address
 			if opcode == "CREATE" {
-				expectedChild = crypto.CreateAddress(factory, 0)
+				expectedChild = crypto.CreateAddress(factory, 1)
 			} else {
 				expectedChild = crypto.CreateAddress2(factory, [32]byte{}, crypto.Keccak256(childInit))
 			}

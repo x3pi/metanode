@@ -102,7 +102,7 @@ func TestBlockSTMContractCreatedInBlockIsCallableInSameBlock(t *testing.T) {
 		factoryCode := confScript(confJoin(confMemWrite(0, init), []any{len(init), 0, 0, "CREATE"}, confReturnWords(1))...)
 		run(signTx(t, k, 1, nil, confDeployInit(factoryCode))) // its own block
 		factory := crypto.CreateAddress(sender, 1)
-		child := crypto.CreateAddress(factory, 0)
+		child := crypto.CreateAddress(factory, 1)
 		r := run(signTx(t, k, 2, &factory, []byte{1}), signTx(t, k, 3, &child, []byte{1}))
 		require.Len(t, r, 2)
 		require.Equal(t, "000000000000000000000000000000000000000000000000000000000000002a", common.Bytes2Hex(r[1].Return()))
