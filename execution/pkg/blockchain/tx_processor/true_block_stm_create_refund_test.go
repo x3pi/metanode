@@ -506,8 +506,8 @@ func TestDeeplyNestedRevertRestoresAllAncestorsNonces(t *testing.T) {
 			require.Equal(t, pb.RECEIPT_STATUS_RETURNED, execute(3, nil, wrap(runtimeA)).Status())
 			a := crypto.CreateAddress(sender, 3)
 
-			childB := crypto.CreateAddress(b, 0)
-			childC := crypto.CreateAddress(c, 0)
+			childB := crypto.CreateAddress(b, 1)
+			childC := crypto.CreateAddress(c, 1)
 
 			receipt := execute(4, &a, []byte{1})
 			require.Equal(t, pb.RECEIPT_STATUS_RETURNED, receipt.Status())
@@ -629,8 +629,8 @@ func TestCreate2AddressCollisionRejected(t *testing.T) {
 			require.Equal(t, "1000", stFactory.TotalBalance().String(), "factory balance must not be transferred")
 			// 3. Target balance must remain 500 (did not receive the 200)
 			require.Equal(t, "500", stTarget.TotalBalance().String(), "target balance must not be increased")
-			// 4. Factory nonce incremented per EIP-161
-			require.Equal(t, uint64(1), stFactory.Nonce(), "factory nonce must be incremented per EIP-161")
+			// 4. Factory nonce incremented per EIP-161 (from initial nonce 1 to 2)
+			require.Equal(t, uint64(2), stFactory.Nonce(), "factory nonce must be incremented per EIP-161")
 		})
 	}
 }
@@ -700,7 +700,7 @@ func TestCreateAndCreate2ConstructorReceivesCallValue(t *testing.T) {
 
 			var expectedChild common.Address
 			if opcode == "CREATE" {
-				expectedChild = crypto.CreateAddress(factory, 0)
+				expectedChild = crypto.CreateAddress(factory, 1)
 			} else {
 				expectedChild = crypto.CreateAddress2(factory, [32]byte{}, crypto.Keccak256(childInit))
 			}

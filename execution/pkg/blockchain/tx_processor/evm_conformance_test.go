@@ -346,6 +346,7 @@ func confRunGeth(w *confWorld, runtimes [][]byte, balances []int64, entryValue i
 	for i, a := range w.p {
 		sdb.SetCode(a, runtimes[i])
 		sdb.AddBalance(a, one(uint64(balances[i])), tracing.BalanceChangeUnspecified)
+		sdb.SetNonce(a, 1, tracing.NonceChangeUnspecified)
 	}
 	sdb.AddBalance(w.eoas[0], one(50), tracing.BalanceChangeUnspecified)
 	cfg := &runtime.Config{Origin: w.sender, State: sdb, GasLimit: 1_000_000_000_000_000, Value: big.NewInt(entryValue), BlockNumber: big.NewInt(1)}

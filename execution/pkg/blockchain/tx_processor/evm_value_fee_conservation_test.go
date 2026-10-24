@@ -468,6 +468,7 @@ func TestEVMBalanceSettlementKeepsPendingFolding(t *testing.T) {
 
 	require.Equal(t, big.NewInt(0), ca.PendingBalance(), "contract pendingBalance must be folded to 0")
 	require.Equal(t, big.NewInt(1009), ca.Balance(), "contract balance must be 1009")
+	require.Equal(t, uint64(1), ca.Nonce(), "contract initial nonce per EIP-161")
 	require.Equal(t, big.NewInt(4), da.TotalBalance(), "dest account received 3")
-	require.Equal(t, common.HexToHash("0x85e7c9e409e65147f31230a1d63108a38e730f48c5c0d047291889e773ddf7e1"), root, "state root must match dev baseline")
+	require.Equal(t, common.HexToHash("0x684c6898ee9fb886b6f9912956ac203a74e66135a4416cf96fba6ee0d4fa5cf9"), root, "state root must match dev baseline")
 }

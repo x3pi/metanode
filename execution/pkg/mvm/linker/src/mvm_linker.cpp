@@ -699,18 +699,20 @@ ExecuteResult *deploy(
   // call below including this function's own catch blocks — run()'s
   // MyLogger.buffered_logs would otherwise be lost when run() returns.
   std::vector<std::pair<int, std::string>> nativeLogs;
+  mvm::Address contract_address;
 
   try {
     //  init env
     mvm::VectorLogHandler log_handler;
     auto from = gs.get(caller_address, nullptr);
-    const auto contract_address =
+    contract_address =
         mvm::generate_address(caller_address, from.acc.get_nonce());
     std::string caller_hex = mvm::to_hex_string(caller_address);
     std::string contract_address_hex = mvm::to_hex_string(contract_address);
-    // Create contract account with EMPTY code — the constructor will be
-    // executed by the EVM and produce runtime code in result.output
-    auto contract = gs.create(contract_address, 0u, {}, 0);
+    // EIP-161: Newly created contract's nonce is set to 1 before initcode executes.
+    // The account's code remains empty during construction per EVM spec.
+    auto contract = gs.create(contract_address, 0u, {}, 1);
+    gs.set_addresses_nonce_change(contract_address, 1);
 
     // Pass constructor as input — in deploy mode, _Processor::run() uses
     // input as exec_code (the constructor bytecode to execute)
@@ -738,7 +740,7 @@ ExecuteResult *deploy(
       result.exmsg = "invalid code: must not begin with 0xef (EIP-3541)";
       result.output.clear();
     }
-    if (result.er == mvm::ExitReason::returned) {
+    if (result.er == mvm::ExitReason::returned && gs.exists(contract_address)) {
       auto code = result.output;
       gs.add_addresses_newly_deploy(contract_address, code);
       contract.acc.set_code(std::move(code));
@@ -749,6 +751,11 @@ ExecuteResult *deploy(
       memcpy(truncated_address.data(), deployed_address.data() + 12, 20);
 
       result.output = truncated_address;
+    } else if (result.er != mvm::ExitReason::returned) {
+      gs.erase_nonce_change(contract_address);
+      gs.erase_newly_deploy(contract_address);
+      gs.clear_storage_change(contract_address);
+      gs.remove(contract_address);
     }
 
     ExecuteResult *rs = processResult(result, gs, log_handler, is_off_chain, nativeLogs);
@@ -757,6 +764,10 @@ ExecuteResult *deploy(
   } catch (const std::exception &e) {
     try {
       mvm::ExecResult error_result = handleException(e);
+      gs.erase_nonce_change(contract_address);
+      gs.erase_newly_deploy(contract_address);
+      gs.clear_storage_change(contract_address);
+      gs.remove(contract_address);
 
       // Dùng log_handler mới vì có thể log_handler cũ đã bị corrupt
       mvm::VectorLogHandler clean_log_handler;
@@ -770,6 +781,10 @@ ExecuteResult *deploy(
   } catch (...) {
     try {
       mvm::ExecResult error_result = handleUnknownException("deploy");
+      gs.erase_nonce_change(contract_address);
+      gs.erase_newly_deploy(contract_address);
+      gs.clear_storage_change(contract_address);
+      gs.remove(contract_address);
 
       mvm::VectorLogHandler clean_log_handler;
 
