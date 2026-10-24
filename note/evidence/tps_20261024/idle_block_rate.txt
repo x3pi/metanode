@@ -1,0 +1,1 @@
+idle: blocks 1804 -> 1804 in 30.0s = 0.00 blocks/s

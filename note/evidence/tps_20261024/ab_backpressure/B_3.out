@@ -1,0 +1,14 @@
+== run_tps_counted mode=sustained runs=1 tag=B_3 bins=/tmp/ab_B head=44bedbcb
+== uname: 6.8.0-139-generic  cpus=104  loadavg(start)=4.51 12.39 12.69 2/2896 1010924
+
+=== RUN 1/1 ===
+{"run": 1, "paths_rewritten_files": 11, "cluster_start_seconds": 6.6, "baseline_rss_mb": 1606, "template_disk_mb_val0": 1845, "uptime_before": "3.86 11.86 12.52 1/4014 1013308", "blast_wall_seconds": 72.8, "blast_exit": 0, "tcp_connections_used": 4, "tcp_endpoints": 4, "uptime_after": "16.10 15.05 13.65 2/4587 1016845", "peak_rss_mb_tool": 37285, "tool_version": "secp_tps_blast/2 (chain-counted)", "bytes_sent": 848230, "received_sum": 848230, "rejected_sum": 0, "committed_ours": 848230, "committed_total": 848230, "ours_exact": true, "ours_upper_bound": 848230, "tps_end_to_end_upper": 17257.34306247684, "loss": 0, "tps_end_to_end": 17257.34306247684, "tps_during_injection": 7558.147807100725, "tps_active_commit": 17598.080212937908, "drain_seconds": 45.447219107, "backlog_at_inject_end": 820230, "inject_seconds": 3.70461133, "end_to_end_seconds": 49.151830437, "parity": "OK: all 4 validators agree on hash+stateRoot of #123", "legacy_effective_tps": 228961.67085900478, "legacy_confirmed": 848214, "latency_p50_ms": 36190, "node_anomaly_lines": "{\"val0\": 3428, \"val1\": 5435, \"val2\": 3871, \"val3\": 2746}"}
+    stop_reason: reference validator showed 848230 >= 848230 txs and was idle for 1.5s
+
+=== SUMMARY (all numbers read from tool JSON; paired old-vs-new within the SAME run) ===
+tps_end_to_end(new, counted): n=1
+tps_during_injection(new): n=1
+legacy_effective_tps(old estimate): n=1
+loss_vs_sent: n=1
+parity statuses: ['OK: all 4 validators agree on hash+stateRoot of #123']
+runs with errors: 0

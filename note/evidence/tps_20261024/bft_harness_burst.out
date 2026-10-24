@@ -1,0 +1,23 @@
+== run_tps_counted mode=burst runs=3 tag=bft_burst bins=/tmp/ab_A head=44bedbcb
+== uname: 6.8.0-139-generic  cpus=104  loadavg(start)=3.26 9.82 11.88 5/2843 1020249
+
+=== RUN 1/3 ===
+{"run": 1, "paths_rewritten_files": 11, "cluster_start_seconds": 9.7, "baseline_rss_mb": 1629, "template_disk_mb_val0": 1845, "uptime_before": "2.98 9.33 11.67 6/4018 1022785", "blast_wall_seconds": 6.2, "blast_exit": 0, "tcp_connections_used": 4, "tcp_endpoints": 4, "uptime_after": "3.71 9.37 11.67 5/9548 1028659", "peak_rss_mb_tool": 5786, "tool_version": "secp_tps_blast/2 (chain-counted)", "bytes_sent": 25000, "received_sum": 25000, "rejected_sum": 0, "committed_ours": 25000, "committed_total": 25000, "ours_exact": true, "ours_upper_bound": 25000, "tps_end_to_end_upper": 9431.628868491563, "loss": 0, "tps_end_to_end": 9431.628868491563, "tps_during_injection": 0, "tps_active_commit": 16400.616575275926, "drain_seconds": 2.571465622, "backlog_at_inject_end": 25000, "inject_seconds": 0.079189991, "end_to_end_seconds": 2.650655613, "parity": "OK: all 4 validators agree on hash+stateRoot of #5", "legacy_effective_tps": 9495.623683924125, "legacy_confirmed": 25000, "latency_p50_ms": 2553, "node_anomaly_lines": "{\"val0\": 243, \"val1\": 245, \"val2\": 229, \"val3\": 201}"}
+    stop_reason: reference validator showed 25000 >= 25000 txs and was idle for 1.5s
+
+=== RUN 2/3 ===
+{"run": 2, "paths_rewritten_files": 11, "cluster_start_seconds": 6.6, "baseline_rss_mb": 1619, "template_disk_mb_val0": 1845, "uptime_before": "2.85 6.88 10.41 3/4574 1033457", "blast_wall_seconds": 6.8, "blast_exit": 0, "tcp_connections_used": 4, "tcp_endpoints": 4, "uptime_after": "4.86 7.19 10.48 4/11849 1041003", "peak_rss_mb_tool": 6348, "tool_version": "secp_tps_blast/2 (chain-counted)", "bytes_sent": 25000, "received_sum": 25000, "rejected_sum": 0, "committed_ours": 25000, "committed_total": 25000, "ours_exact": true, "ours_upper_bound": 25000, "tps_end_to_end_upper": 8128.52986713346, "loss": 0, "tps_end_to_end": 8128.52986713346, "tps_during_injection": 0, "tps_active_commit": 12993.58038128196, "drain_seconds": 2.989036272, "backlog_at_inject_end": 25000, "inject_seconds": 0.086550631, "end_to_end_seconds": 3.075586903, "parity": "OK: all 4 validators agree on hash+stateRoot of #4", "legacy_effective_tps": 7665.631727887333, "legacy_confirmed": 25000, "latency_p50_ms": 2923, "node_anomaly_lines": "{\"val0\": 221, \"val1\": 229, \"val2\": 217, \"val3\": 199}"}
+    stop_reason: reference validator showed 25000 >= 25000 txs and was idle for 1.5s
+
+=== RUN 3/3 ===
+{"run": 3, "paths_rewritten_files": 11, "cluster_start_seconds": 6.6, "baseline_rss_mb": 1627, "template_disk_mb_val0": 1845, "uptime_before": "2.54 5.38 9.33 1/6688 1046110", "blast_wall_seconds": 6.5, "blast_exit": 0, "tcp_connections_used": 4, "tcp_endpoints": 4, "uptime_after": "5.05 5.84 9.44 3/12683 1052467", "peak_rss_mb_tool": 6368, "tool_version": "secp_tps_blast/2 (chain-counted)", "bytes_sent": 25000, "received_sum": 25000, "rejected_sum": 0, "committed_ours": 25000, "committed_total": 25000, "ours_exact": true, "ours_upper_bound": 25000, "tps_end_to_end_upper": 8768.426475140961, "loss": 0, "tps_end_to_end": 8768.426475140961, "tps_during_injection": 0, "tps_active_commit": 14494.966336519108, "drain_seconds": 2.755197389, "backlog_at_inject_end": 25000, "inject_seconds": 0.095941304, "end_to_end_seconds": 2.8511386930000002, "parity": "OK: all 4 validators agree on hash+stateRoot of #4", "legacy_effective_tps": 7537.157651329144, "legacy_confirmed": 25000, "latency_p50_ms": 2815, "node_anomaly_lines": "{\"val0\": 227, \"val1\": 229, \"val2\": 199, \"val3\": 197}"}
+    stop_reason: reference validator showed 25000 >= 25000 txs and was idle for 1.5s
+
+=== SUMMARY (all numbers read from tool JSON; paired old-vs-new within the SAME run) ===
+tps_end_to_end(new, counted): n=3 mean=8776.20 sd=651.58 min=8128.53 max=9431.63
+tps_during_injection(new): n=3 mean=0.00 sd=0.00 min=0.00 max=0.00
+legacy_effective_tps(old estimate): n=3 mean=8232.80 sd=1095.52 min=7537.16 max=9495.62
+paired (legacy - counted): mean=-543.39 sd=651.37 n=3 t=-1.44 df=2 p=0.2853 CI95=[-2161.49,1074.71]
+loss_vs_sent: n=3 mean=0.00 sd=0.00 min=0.00 max=0.00
+parity statuses: ['OK: all 4 validators agree on hash+stateRoot of #4', 'OK: all 4 validators agree on hash+stateRoot of #5']
+runs with errors: 0

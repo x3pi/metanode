@@ -1,0 +1,140 @@
+{
+  "timestamp": "2026-10-24T12:42:58Z",
+  "chain_id": 991,
+  "mode": "tcp",
+  "tx_type": "1559",
+  "total_submitted": 25000,
+  "total_confirmed": 25000,
+  "total_reverted": 0,
+  "total_dropped": 0,
+  "injection_duration": "85.081698ms",
+  "injection_tps": 293835.22646668385,
+  "commit_duration": "1.626016172s",
+  "effective_tps": 15375.000833632546,
+  "latency_p50": 1068613797,
+  "latency_p90": 1601201506,
+  "latency_p95": 1608261242,
+  "latency_p99": 1765051281,
+  "latency_avg": 1036886948,
+  "start_block": 0,
+  "end_block": 11,
+  "blocks_produced": 11,
+  "zero_fork_verified": true,
+  "node_roots_consistent": true,
+  "max_cpu": "666.0%",
+  "max_rss_mb": 4100,
+  "sample_total": 50,
+  "sample_confirmed": 50,
+  "measurement": {
+    "method": "counted from blocks (to==target \u0026\u0026 from in wallet set); wall-clock = first observation of the block by the reference validator",
+    "bytes_sent_txs": 25000,
+    "committed_ours": 25000,
+    "committed_total_txs": 25000,
+    "committed_ours_exact": true,
+    "committed_ours_upper_bound": 25000,
+    "loss_vs_sent": 0,
+    "loss_pct_vs_sent": 0,
+    "inject_seconds": 0.085081698,
+    "drain_seconds": 1.5409344740000002,
+    "end_to_end_seconds": 1.626016172,
+    "ours_committed_by_inject_end": 0,
+    "backlog_at_inject_end": 25000,
+    "tps_during_injection": 0,
+    "tps_end_to_end": 15375.000833632546,
+    "tps_end_to_end_upper_bound": 15375.000833632546,
+    "tps_active_commit_window": 17250.276610427984,
+    "first_commit_seconds_after_inject_start": 0.176764049,
+    "received_by_validator": {
+      "http://127.0.0.1:31810": 9000,
+      "http://127.0.0.1:31811": 8000,
+      "http://127.0.0.1:31812": 8000
+    },
+    "rejected_by_validator": {
+      "http://127.0.0.1:31810": 0,
+      "http://127.0.0.1:31811": 0,
+      "http://127.0.0.1:31812": 0
+    },
+    "ingress_metrics_ok": true,
+    "validator_heads": {
+      "http://127.0.0.1:31810": 11,
+      "http://127.0.0.1:31811": 11,
+      "http://127.0.0.1:31812": 11
+    },
+    "parity_status": "OK: all 3 validators agree on hash+stateRoot of #11",
+    "measurement_stop_reason": "reference validator showed 25000 \u003e= 25000 txs and was idle for 1.5s",
+    "commit_timeline": [
+      {
+        "block": 1,
+        "ours": 1000,
+        "total": 1000,
+        "ms_since_inject_start": 176.764
+      },
+      {
+        "block": 2,
+        "ours": 1000,
+        "total": 1000,
+        "ms_since_inject_start": 276.494
+      },
+      {
+        "block": 3,
+        "ours": 1000,
+        "total": 1000,
+        "ms_since_inject_start": 350.667
+      },
+      {
+        "block": 4,
+        "ours": 3988,
+        "total": 3988,
+        "ms_since_inject_start": 600.494
+      },
+      {
+        "block": 5,
+        "ours": 3495,
+        "total": 3495,
+        "ms_since_inject_start": 826.21
+      },
+      {
+        "block": 6,
+        "ours": 4000,
+        "total": 4000,
+        "ms_since_inject_start": 1025.484
+      },
+      {
+        "block": 7,
+        "ours": 4000,
+        "total": 4000,
+        "ms_since_inject_start": 1176.318
+      },
+      {
+        "block": 8,
+        "ours": 1602,
+        "total": 1602,
+        "ms_since_inject_start": 1276.244
+      },
+      {
+        "block": 9,
+        "ours": 3505,
+        "total": 3505,
+        "ms_since_inject_start": 1476.188
+      },
+      {
+        "block": 10,
+        "ours": 12,
+        "total": 12,
+        "ms_since_inject_start": 1500.833
+      },
+      {
+        "block": 11,
+        "ours": 1398,
+        "total": 1398,
+        "ms_since_inject_start": 1626.016
+      }
+    ]
+  },
+  "legacy_estimate_do_not_report": {
+    "method": "round: extrapolated from a 50-hash receipt sample; denominator = time from injection end to last sampled receipt",
+    "extrapolated_confirmed": 25000,
+    "effective_tps": 14881.434557148026
+  },
+  "tool_version": "secp_tps_blast/2 (chain-counted)"
+}

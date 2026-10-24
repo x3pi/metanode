@@ -1,0 +1,5 @@
+burst_1 exit=0
+burst_2 exit=0
+burst_3 exit=0
+sustained_60s exit=2
+ALL_DONE
