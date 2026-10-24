@@ -1123,6 +1123,17 @@ func (stm *TrueBlockSTM) execOne(
 										addr := common.HexToAddress(addrHex)
 										newCodeHash := common.BytesToHash(newCodeHashBytes)
 										mvccDB.SetCodeHash(addr, newCodeHash)
+										// Publish the code bytes as well: a later transaction of this block that
+										// reads the account through MVCC sees the new code hash, and its
+										// Code() lookup resolves the hash via the content-addressed pending
+										// code. Without this a contract created earlier in the same block looks
+										// code-less to every later transaction (a call into it is a silent no-op
+										// and the EIP-684 collision check of a second CREATE2 passes).
+										if mapCode := exRs.MapCodeChange(); mapCode != nil {
+											if code, ok := mapCode[addrHex]; ok {
+												chainState.GetSmartContractDB().SetCode(addr, newCodeHash, code)
+											}
+										}
 										if mapCreator != nil {
 											if creatorBytes, ok := mapCreator[addrHex]; ok {
 												mvccDB.SetCreatorPublicKey(addr, mt_common.PubkeyFromBytes(creatorBytes))
