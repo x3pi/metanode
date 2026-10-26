@@ -160,6 +160,9 @@ func FromEthLegacyTx(ethTx *types.Transaction, pTx *pb.Transaction) error {
 	}
 
 	if ethTx.ChainId() != nil {
+		if !ethTx.ChainId().IsUint64() {
+			return errors.New("invalid chain id: overflow uint64")
+		}
 		pTx.ChainID = ethTx.ChainId().Uint64()
 	} else {
 		pTx.ChainID = 0

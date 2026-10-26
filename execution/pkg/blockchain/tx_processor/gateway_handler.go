@@ -25,6 +25,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/vm_processor"
@@ -556,7 +557,11 @@ func executeContractCallForGateway(
 ) (uint64, error) {
 	_, mvmE := createVmProcessorForGateway(ctx, chainState, tx, blockTime)
 	if tx != nil {
-		mvmE.SetAccessList(tx.EthAccessList())
+		var chainID *big.Int
+		if chainState != nil && chainState.GetConfig() != nil {
+			chainID = chainState.GetConfig().ChainId
+		}
+		mvmE.SetAccessList(transaction.EffectiveAccessList(tx, chainID))
 	}
 
 	if sourceChainID != 0 {

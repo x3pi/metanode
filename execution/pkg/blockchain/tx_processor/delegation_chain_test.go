@@ -36,14 +36,14 @@ func seedContract(t *testing.T, cs *blockchain.ChainState, addr common.Address, 
 	cs.GetSmartContractDB().Commit()
 }
 
-// TestReviewDelegationChainMustNotActAsEmptyCode tests edge cases of EIP-7702 delegation resolution:
+// TestEIP7702_DelegationChainMustNotActAsEmptyCode tests edge cases of EIP-7702 delegation resolution:
 // 1. single_hop_control: A -> C (C is an external contract). Single hop succeeds.
 // 2. chained_delegation_2_hops: A -> B -> C. EVM halts exceptionally on B's 0xef designator.
 // 3. chained_delegation_3_hops: A -> B -> C -> D. Must halt exceptionally, rollback value.
 // 4. self_delegation: A -> A. Calling A resolves to A's designator, halts exceptionally.
 // 5. circular_delegation_loop: A -> B and B -> A. Calling A loads B's designator, halts without infinite loop.
 // 6. delegation_to_eoa_empty: A -> EOA (where EOA has empty code). Acts as empty code, value transfer succeeds.
-func TestReviewDelegationChainMustNotActAsEmptyCode(t *testing.T) {
+func TestEIP7702_DelegationChainMustNotActAsEmptyCode(t *testing.T) {
 	testCases := []struct {
 		name        string
 		setupAuth   func(t *testing.T, ka, kb, kc *ecdsa.PrivateKey, a, b, c, d common.Address, chainID uint64) ([]eth.SetCodeAuthorization, common.Address)
@@ -227,7 +227,7 @@ func TestReviewDelegationChainMustNotActAsEmptyCode(t *testing.T) {
 // 2. The 100 wei sent with CALL is NOT transferred to the target; it is refunded to the caller contract.
 // 3. The caller contract does not revert (handles status 0 and stores it in slot 0).
 // 4. MVM and go-ethereum EVM match exactly.
-func TestReviewDelegation_ContractSubcallChainedDelegationRollback(t *testing.T) {
+func TestEIP7702_ContractSubcallChainedDelegationRollback(t *testing.T) {
 	testCases := []struct {
 		name          string
 		chained       bool
@@ -397,7 +397,7 @@ func TestReviewDelegation_ContractSubcallChainedDelegationRollback(t *testing.T)
 
 // TestReviewDelegation_ContractSubcallStaticAndDelegateCall tests that STATICCALL and DELEGATECALL
 // to an account with chained delegation fail gracefully and push 0 onto the stack.
-func TestReviewDelegation_ContractSubcallStaticAndDelegateCall(t *testing.T) {
+func TestEIP7702_ContractSubcallStaticAndDelegateCall(t *testing.T) {
 	testCases := []struct {
 		name   string
 		opcode byte // 0xfa for STATICCALL, 0xf4 for DELEGATECALL
@@ -537,7 +537,7 @@ func TestReviewDelegation_ContractSubcallStaticAndDelegateCall(t *testing.T) {
 // 1. C's code executes in the context of A (ADDRESS opcode is A, NOT C).
 // 2. CALLER is the sender.
 // 3. Storage writes via SSTORE are isolated to A's storage (C's storage remains empty).
-func TestReviewDelegation_StateStorageAndCallerContext(t *testing.T) {
+func TestEIP7702_StateStorageAndCallerContext(t *testing.T) {
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
 	t.Setenv("METANODE_DEVNET", "false")
 	cs := newTestChainState(t)
@@ -654,7 +654,7 @@ func TestReviewDelegation_StateStorageAndCallerContext(t *testing.T) {
 
 // TestReviewDelegation_ExplicitRevertRollback verifies that when a delegate contract explicitly
 // REVERTs, the transaction fails and the transferred value is rolled back.
-func TestReviewDelegation_ExplicitRevertRollback(t *testing.T) {
+func TestEIP7702_ExplicitRevertRollback(t *testing.T) {
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
 	t.Setenv("METANODE_DEVNET", "false")
 	cs := newTestChainState(t)
@@ -753,7 +753,7 @@ func TestReviewDelegation_ExplicitRevertRollback(t *testing.T) {
 // TestReviewDelegation_CrossTxPersistence tests that delegation configuration persists
 // across transactions and subsequent legacy/Type-2 calls to the delegated account
 // still encounter 0xef and rollback appropriately.
-func TestReviewDelegation_CrossTxPersistence(t *testing.T) {
+func TestEIP7702_CrossTxPersistence(t *testing.T) {
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
 	t.Setenv("METANODE_DEVNET", "false")
 	cs := newTestChainState(t)
@@ -873,7 +873,7 @@ func TestReviewDelegation_CrossTxPersistence(t *testing.T) {
 // 1. A newer authorization with higher nonce overrides the previous one.
 // 2. An overwrite from chained -> valid succeeds.
 // 3. An overwrite from chained -> revocation (0x0) succeeds as standard EOA transfer.
-func TestReviewDelegation_MultipleAuthUpdatesInSameTx(t *testing.T) {
+func TestEIP7702_MultipleAuthUpdatesInSameTx(t *testing.T) {
 	testCases := []struct {
 		name       string
 		secondAuth func(t *testing.T, keyA *ecdsa.PrivateKey, validContract, zeroAddr common.Address) eth.SetCodeAuthorization
@@ -1003,83 +1003,98 @@ func TestReviewDelegation_MultipleAuthUpdatesInSameTx(t *testing.T) {
 	}
 }
 
-func TestReviewNestedDelegationTargetColdGas(t *testing.T) {
-	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
-	t.Setenv("METANODE_DEVNET", "false")
-	chainID := big.NewInt(991)
-	cs := newTestChainState(t)
-	cs.SetConfig(&config.SimpleChainConfig{ChainId: chainID})
-	senderKey, err := crypto.GenerateKey()
-	require.NoError(t, err)
-	authKey, err := crypto.GenerateKey()
-	require.NoError(t, err)
-	sender := crypto.PubkeyToAddress(senderKey.PublicKey)
-	authority := crypto.PubkeyToAddress(authKey.PublicKey)
-	delegate := common.HexToAddress("0xdddddddddddddddddddddddddddddddddddddddd")
-	caller := common.HexToAddress("0x1234567890123456789012345678901234567890")
-	leader := common.HexToAddress(auditLeader)
-	// Caller performs CALL(authority) once; delegate runtime is STOP.
-	callerCode := []byte{0x60, 0, 0x60, 0, 0x60, 0, 0x60, 0, 0x60, 0, 0x73}
-	callerCode = append(callerCode, authority.Bytes()...)
-	callerCode = append(callerCode, 0x61, 0xff, 0xff, 0xf1, 0x50, 0x00)
-	seedAccount(t, cs, sender, big.NewInt(1_000_000_000_000_000), 1)
-	seedAccount(t, cs, leader, big.NewInt(0), 0)
-	seedAccount(t, cs, authority, big.NewInt(0), 0)
-	seedContract(t, cs, caller, big.NewInt(0), callerCode)
-	seedContract(t, cs, delegate, big.NewInt(0), []byte{0})
-	auth := signAuthorization(t, authKey, 991, delegate, 0)
-	signer := eth.LatestSignerForChainID(chainID)
-	signed, err := eth.SignNewTx(senderKey, signer, &eth.SetCodeTx{
-		ChainID:   uint256.NewInt(991),
-		Nonce:     1,
-		To:        caller,
-		Gas:       200000,
-		GasFeeCap: uint256.NewInt(mt.MINIMUM_BASE_FEE),
-		GasTipCap: uint256.NewInt(mt.MINIMUM_BASE_FEE),
-		Value:     uint256.NewInt(0),
-		AuthList:  []eth.SetCodeAuthorization{auth},
-	})
-	require.NoError(t, err)
-	tx, err := transaction.NewTransactionFromEth(signed)
-	require.NoError(t, err)
-	st, err := cs.GetAccountStateDB().AccountState(sender)
-	require.NoError(t, err)
-	require.Nil(t, VerifyTransaction(tx, cs, st))
-	items := []grouptxns.Item{{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(tx), caller, authority, delegate), Tx: tx}}
-	_, r, _, _ := ProcessTransactionsOptimistic(context.Background(), cs, grouptxns.GroupTransactionsDeterministic(items, cs.HasCode), blankHeader(), false, false, 999, leader, false)
-	require.Len(t, r, 1)
-	reference, err := state.New(eth.EmptyRootHash, state.NewDatabaseForTesting())
-	require.NoError(t, err)
-	reference.AddBalance(sender, uint256.NewInt(1_000_000_000_000_000), tracing.BalanceChangeUnspecified)
-	reference.SetNonce(sender, 1, tracing.NonceChangeUnspecified)
-	reference.SetCode(caller, callerCode)
-	reference.SetNonce(caller, 1, tracing.NonceChangeUnspecified)
-	reference.SetCode(delegate, []byte{0})
-	reference.SetNonce(delegate, 1, tracing.NonceChangeUnspecified)
-	random := common.Hash{}
-	cfg := *params.AllDevChainProtocolChanges
-	cfg.ChainID = chainID
-	evm := vm.NewEVM(vm.BlockContext{
-		CanTransfer: core.CanTransfer,
-		Transfer:    core.Transfer,
-		GetHash:     func(uint64) common.Hash { return common.Hash{} },
-		GasLimit:    1000000,
-		BlockNumber: big.NewInt(1),
-		Time:        1,
-		Difficulty:  big.NewInt(0),
-		BaseFee:     big.NewInt(0),
-		Random:      &random,
-	}, reference, &cfg, vm.Config{})
-	msg, err := core.TransactionToMessage(signed, signer, big.NewInt(0))
-	require.NoError(t, err)
-	g, err := core.ApplyMessage(evm, msg, new(core.GasPool).AddGas(1000000))
-	require.NoError(t, err)
-	require.NoError(t, g.Err)
-	t.Logf("geth_gas=%d MVM_gas=%d delta=%d status=%v", g.UsedGas, r[0].GasUsed(), int64(r[0].GasUsed())-int64(g.UsedGas), r[0].Status())
-	require.Equal(t, g.UsedGas, r[0].GasUsed(), "cold delegate target must cost 2600, not warm 100")
+func TestEIP7702_NestedDelegationTargetColdGas(t *testing.T) {
+	testCases := []struct {
+		name      string
+		authChain uint64
+		authNonce uint64
+	}{
+		{name: "valid_chain_id", authChain: 991, authNonce: 0},
+		{name: "wrong_chain_id_12345", authChain: 12345, authNonce: 0},
+		{name: "wildcard_chain_id_0", authChain: 0, authNonce: 0},
+		{name: "wrong_nonce", authChain: 991, authNonce: 5},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+			t.Setenv("METANODE_DEVNET", "false")
+			chainID := big.NewInt(991)
+			cs := newTestChainState(t)
+			cs.SetConfig(&config.SimpleChainConfig{ChainId: chainID})
+			senderKey, err := crypto.GenerateKey()
+			require.NoError(t, err)
+			authKey, err := crypto.GenerateKey()
+			require.NoError(t, err)
+			sender := crypto.PubkeyToAddress(senderKey.PublicKey)
+			authority := crypto.PubkeyToAddress(authKey.PublicKey)
+			delegate := common.HexToAddress("0xdddddddddddddddddddddddddddddddddddddddd")
+			caller := common.HexToAddress("0x1234567890123456789012345678901234567890")
+			leader := common.HexToAddress(auditLeader)
+			// Caller performs CALL(authority) once; delegate runtime is STOP.
+			callerCode := []byte{0x60, 0, 0x60, 0, 0x60, 0, 0x60, 0, 0x60, 0, 0x73}
+			callerCode = append(callerCode, authority.Bytes()...)
+			callerCode = append(callerCode, 0x61, 0xff, 0xff, 0xf1, 0x50, 0x00)
+			seedAccount(t, cs, sender, big.NewInt(1_000_000_000_000_000), 1)
+			seedAccount(t, cs, leader, big.NewInt(0), 0)
+			seedAccount(t, cs, authority, big.NewInt(0), 0)
+			seedContract(t, cs, caller, big.NewInt(0), callerCode)
+			seedContract(t, cs, delegate, big.NewInt(0), []byte{0})
+			auth := signAuthorization(t, authKey, tc.authChain, delegate, tc.authNonce)
+			signer := eth.LatestSignerForChainID(chainID)
+			signed, err := eth.SignNewTx(senderKey, signer, &eth.SetCodeTx{
+				ChainID:   uint256.NewInt(991),
+				Nonce:     1,
+				To:        caller,
+				Gas:       200000,
+				GasFeeCap: uint256.NewInt(mt.MINIMUM_BASE_FEE),
+				GasTipCap: uint256.NewInt(mt.MINIMUM_BASE_FEE),
+				Value:     uint256.NewInt(0),
+				AuthList:  []eth.SetCodeAuthorization{auth},
+			})
+			require.NoError(t, err)
+			tx, err := transaction.NewTransactionFromEth(signed)
+			require.NoError(t, err)
+			st, err := cs.GetAccountStateDB().AccountState(sender)
+			require.NoError(t, err)
+			require.Nil(t, VerifyTransaction(tx, cs, st))
+			items := []grouptxns.Item{{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(tx), caller, authority, delegate), Tx: tx}}
+			_, r, _, _ := ProcessTransactionsOptimistic(context.Background(), cs, grouptxns.GroupTransactionsDeterministic(items, cs.HasCode), blankHeader(), false, false, 999, leader, false)
+			require.Len(t, r, 1)
+			reference, err := state.New(eth.EmptyRootHash, state.NewDatabaseForTesting())
+			require.NoError(t, err)
+			reference.AddBalance(sender, uint256.NewInt(1_000_000_000_000_000), tracing.BalanceChangeUnspecified)
+			reference.SetNonce(sender, 1, tracing.NonceChangeUnspecified)
+			reference.SetCode(caller, callerCode)
+			reference.SetNonce(caller, 1, tracing.NonceChangeUnspecified)
+			reference.SetCode(delegate, []byte{0})
+			reference.SetNonce(delegate, 1, tracing.NonceChangeUnspecified)
+			random := common.Hash{}
+			cfg := *params.AllDevChainProtocolChanges
+			cfg.ChainID = chainID
+			evm := vm.NewEVM(vm.BlockContext{
+				CanTransfer: core.CanTransfer,
+				Transfer:    core.Transfer,
+				GetHash:     func(uint64) common.Hash { return common.Hash{} },
+				GasLimit:    1000000,
+				BlockNumber: big.NewInt(1),
+				Time:        1,
+				Difficulty:  big.NewInt(0),
+				BaseFee:     big.NewInt(0),
+				Random:      &random,
+			}, reference, &cfg, vm.Config{})
+			msg, err := core.TransactionToMessage(signed, signer, big.NewInt(0))
+			require.NoError(t, err)
+			g, err := core.ApplyMessage(evm, msg, new(core.GasPool).AddGas(1000000))
+			require.NoError(t, err)
+			require.NoError(t, g.Err)
+			t.Logf("[%s] geth_gas=%d MVM_gas=%d delta=%d status=%v", tc.name, g.UsedGas, r[0].GasUsed(), int64(r[0].GasUsed())-int64(g.UsedGas), r[0].Status())
+			require.Equal(t, g.UsedGas, r[0].GasUsed(), "gas used must match go-ethereum exactly for %s", tc.name)
+		})
+	}
 }
 
-func TestReviewPersistedDelegationTargetColdGas(t *testing.T) {
+func TestEIP7702_PersistedDelegationTargetColdGas(t *testing.T) {
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
 	t.Setenv("METANODE_DEVNET", "false")
 	chainID := big.NewInt(991)

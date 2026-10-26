@@ -99,6 +99,9 @@ func FromEthEIP1559Tx(ethTx *types.Transaction, pTx *pb.Transaction) error {
 	txChainID := ethTx.ChainId() // Capture ChainID for later use
 
 	if txChainID != nil {
+		if !txChainID.IsUint64() {
+			return errors.New("invalid chain id: overflow uint64")
+		}
 		pTx.ChainID = txChainID.Uint64()
 	} else {
 		return errors.New("EIP-1559 transaction from Ethereum is missing ChainID")

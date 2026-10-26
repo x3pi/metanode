@@ -18,6 +18,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"math/big"
@@ -697,17 +698,12 @@ func (vmP *VmProcessor) ProcessMVMResult(
 	return rs, errConvert
 }
 
-// getTxAccessList returns tx.EthAccessList() with any EIP-7702 authorities added to warm them,
-// matching go-ethereum core/state_transition.go:585 (validateAuthorization: st.state.AddAddressToAccessList(authority)).
+// getTxAccessList returns tx.EthAccessList() with any valid EIP-7702 authorities added to warm them,
+// matching go-ethereum core/state_transition.go:578-592 (validateAuthorization: st.state.AddAddressToAccessList(authority)).
 func (vmP *VmProcessor) getTxAccessList(tx types.Transaction) eth_types.AccessList {
-	al := tx.EthAccessList()
-	authList := tx.EthAuthorizationList()
-	if len(authList) > 0 {
-		for i := range authList {
-			if authority, err := authList[i].Authority(); err == nil {
-				al = append(al, eth_types.AccessTuple{Address: authority})
-			}
-		}
+	var chainID *big.Int
+	if vmP != nil && vmP.chainState != nil && vmP.chainState.GetConfig() != nil {
+		chainID = vmP.chainState.GetConfig().ChainId
 	}
-	return al
+	return transaction.EffectiveAccessList(tx, chainID)
 }

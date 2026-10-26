@@ -123,6 +123,9 @@ func FromEthSetCodeTx(ethTx *types.Transaction, pTx *pb.Transaction) error {
 	if txChainID == nil || txChainID.Sign() <= 0 {
 		return errors.New("EIP-7702 transaction is missing ChainID")
 	}
+	if !txChainID.IsUint64() {
+		return errors.New("invalid chain id: overflow uint64")
+	}
 	pTx.ChainID = txChainID.Uint64()
 
 	if ethTx.GasTipCap() != nil {
@@ -212,8 +215,15 @@ func FromEthAuthorizationList(list []types.SetCodeAuthorization) []*pb.SetCodeAu
 func fromEthAuthorizationList(list []types.SetCodeAuthorization) []*pb.SetCodeAuthorization {
 	out := make([]*pb.SetCodeAuthorization, len(list))
 	for i, a := range list {
+		authChainID := uint64(0)
+		if a.ChainID.IsUint64() {
+			authChainID = a.ChainID.Uint64()
+		} else {
+			// Marker that never aliases valid chain ID when overflowing uint64
+			authChainID = ^uint64(0)
+		}
 		out[i] = &pb.SetCodeAuthorization{
-			ChainID: a.ChainID.Uint64(),
+			ChainID: authChainID,
 			Address: a.Address.Bytes(),
 			Nonce:   a.Nonce,
 			YParity: []byte{a.V},

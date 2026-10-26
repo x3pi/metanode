@@ -534,7 +534,7 @@ func (t *Transaction) IsDeployContract() bool {
 		}
 	}
 	if len(t.proto.ToAddress) == 0 {
-		return true
+		return t.FromAddress() != (common.Address{}) && (len(t.Data()) > 0 || t.DeployData() != nil)
 	}
 	return t.FromAddress() != t.ToAddress() && t.ToAddress() == (common.Address{}) && len(t.Data()) > 0
 }
