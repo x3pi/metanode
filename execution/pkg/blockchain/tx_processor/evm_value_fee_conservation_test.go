@@ -468,6 +468,7 @@ func TestEVMBalanceSettlementKeepsPendingFolding(t *testing.T) {
 
 	require.Equal(t, big.NewInt(0), ca.PendingBalance(), "contract pendingBalance must be folded to 0")
 	require.Equal(t, big.NewInt(1009), ca.Balance(), "contract balance must be 1009")
+	require.Equal(t, uint64(1), ca.Nonce(), "contract initial nonce per EIP-161")
 	require.Equal(t, big.NewInt(4), da.TotalBalance(), "dest account received 3")
 	// The root pins the fees of both transactions, so it moves whenever a gas rule changes. It was re-pinned when the
 	// MVM adopted go-ethereum's gas model (EIP-2929 cold account access, EIP-150 call gas, stipend, EXTCODE/SLOAD costs):

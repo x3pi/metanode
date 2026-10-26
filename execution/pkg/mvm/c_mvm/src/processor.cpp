@@ -341,6 +341,7 @@ public:
     if (deploy) {
       exec_code = move(input);
       calldata = vector<uint8_t>();
+      created_this_tx.insert(callee.acc.get_address());
     } else {
       // EIP-7702: this is the top-level entry point for a transaction whose
       // `To` is called directly (as opposed to a CALL/CALLCODE/DELEGATECALL/
@@ -431,6 +432,25 @@ public:
       hh();
     }
 
+    // EIP-6780 finalization: contracts created in THIS transaction that
+    // self-destructed must have their accounts cleaned up (nonce reset/erased,
+    // code/deploy entry erased, storage changes erased, and account removed
+    // from global state) so they do not persist as zombie accounts with nonce > 0.
+    if (result.er != ExitReason::threw) {
+      for (const auto &addr : destructed_this_tx) {
+        auto acc = gs.get(addr);
+        uint256_t remBalance = acc.acc.get_balance();
+        if (remBalance > 0) {
+          acc.acc.set_balance(0);
+          gs.add_addresses_sub_balance_change(addr, remBalance);
+        }
+        gs.erase_nonce_change(addr);
+        gs.erase_newly_deploy(addr);
+        gs.clear_storage_change(addr);
+        gs.remove(addr);
+      }
+    }
+
     // EIP-3529: refund is capped at gasUsed/5 (post-London; this VM has no
     // hardfork-activation mechanism so the pre-London 1/2 cap never
     // applies here — see params.AllDevChainProtocolChanges elsewhere in
@@ -484,6 +504,11 @@ private:
   // rollback of the code-deploy entry), so a later SELFDESTRUCT on it can't
   // do anything harmful either way — same reasoning as CREATE's nonce bump.
   std::unordered_set<Address> created_this_tx;
+
+  // EIP-6780 support: accounts created in THIS transaction that executed SELFDESTRUCT.
+  // These accounts must be deleted (clearing code, storage, and nonce changes)
+  // at the end of the transaction if it succeeds.
+  std::unordered_set<Address> destructed_this_tx;
 
   // EIP-2929 access sets: an address or storage slot is "cold" until its first access in the transaction, which costs
   // more and then warms it. Warming is journaled like any other state change: a reverted frame un-warms what it touched.
@@ -1850,6 +1875,13 @@ private:
     // the correct, current-spec behavior rather than the older
     // "SELFDESTRUCT always deletes the account" semantics.
     if (created_this_tx.count(addr)) {
+      bool newly_destructed = destructed_this_tx.insert(addr).second;
+      if (newly_destructed) {
+        journal.record([this, addr]() {
+          destructed_this_tx.erase(addr);
+        });
+      }
+
       // EIP-6780: a contract created in this transaction that selfdestructs
       // with ITSELF as beneficiary burns its ether (nothing was paid above).
       if (recipient.acc.get_address() == addr) {
@@ -1863,29 +1895,6 @@ private:
           });
         }
       }
-      Code oldCode = ctxt->acc.get_code();
-      bool hadDeployEntry = gs.has_newly_deploy(addr);
-      Code oldDeployEntry =
-          hadDeployEntry ? gs.get_newly_deploy_value(addr) : Code{};
-      auto oldStorageDiff = gs.snapshot_storage_change(addr);
-      auto oldCache = ctxt->st.snapshot_cached();
-
-      ctxt->acc.set_code(Code{});
-      gs.erase_newly_deploy(addr);
-      gs.clear_storage_change(addr);
-      ctxt->st.clear_all_cached();
-
-      journal.record([this, addr, oldCode, hadDeployEntry, oldDeployEntry,
-                      oldStorageDiff, oldCache]() {
-        gs.get(addr).acc.set_code(Code(oldCode));
-        if (hadDeployEntry)
-          gs.add_addresses_newly_deploy(addr, oldDeployEntry);
-        for (const auto &kv : oldStorageDiff)
-          gs.add_addresses_storage_change(addr, kv.first, kv.second);
-        Storage &st = gs.get(addr).st;
-        for (const auto &kv : oldCache)
-          st.set_cached_raw(kv.first, kv.second);
-      });
     }
 
     result.er = ExitReason::returned;
@@ -1955,17 +1964,27 @@ private:
       return;
     }
 
+    auto prevChildNonce = existingAcc.acc.get_nonce();
+    bool childHadNonceChange = gs.has_nonce_change(newAddress);
+    uint256_t childOldNonceChange =
+        childHadNonceChange ? gs.get_nonce_change_value(newAddress) : 0;
+
     size_t journalMark = journal.mark();
     created_this_tx.insert(newAddress);
-    journal.record([this, newAddress]() {
+    journal.record([this, newAddress, prevChildNonce, childHadNonceChange,
+                    childOldNonceChange]() {
       created_this_tx.erase(newAddress);
       gs.get(newAddress).acc.set_code({});
-      gs.get(newAddress).acc.set_nonce(0);
-      gs.erase_nonce_change(newAddress);
+      gs.get(newAddress).acc.set_nonce(prevChildNonce);
+      if (childHadNonceChange)
+        gs.set_addresses_nonce_change(newAddress, childOldNonceChange);
+      else
+        gs.erase_nonce_change(newAddress);
     });
 
     // EIP-161: a new contract starts with nonce 1 (it already counts for the CREATEs its init code runs).
-    decltype(auto) newAcc = gs.create(newAddress, 0, initCode, 1);
+    // The account's code remains empty during construction per EVM spec.
+    decltype(auto) newAcc = gs.create(newAddress, 0, {}, 1);
     gs.set_addresses_nonce_change(newAddress, 1);
 
     // Mark AFTER the nonce increment (kept regardless) but BEFORE the
@@ -2041,8 +2060,8 @@ private:
     };
 
     gas_tracker.push_frame(allowance);
-    push_context(ctxt->acc.get_address(), newAcc, std::move(initCode),
-                 newAcc.acc.get_code(), contractValue, rh, hh, eh,
+    push_context(ctxt->acc.get_address(), newAcc, {},
+                 std::move(initCode), contractValue, rh, hh, eh,
                  ctxt->read_only ? true : false);
   }
 
@@ -2542,17 +2561,27 @@ private:
       return;
     }
 
+    auto prevChildNonce = existingAcc.acc.get_nonce();
+    bool childHadNonceChange = gs.has_nonce_change(newAddress);
+    uint256_t childOldNonceChange =
+        childHadNonceChange ? gs.get_nonce_change_value(newAddress) : 0;
+
     size_t journalMark = journal.mark();
     created_this_tx.insert(newAddress);
-    journal.record([this, newAddress]() {
+    journal.record([this, newAddress, prevChildNonce, childHadNonceChange,
+                    childOldNonceChange]() {
       created_this_tx.erase(newAddress);
       gs.get(newAddress).acc.set_code({});
-      gs.get(newAddress).acc.set_nonce(0);
-      gs.erase_nonce_change(newAddress);
+      gs.get(newAddress).acc.set_nonce(prevChildNonce);
+      if (childHadNonceChange)
+        gs.set_addresses_nonce_change(newAddress, childOldNonceChange);
+      else
+        gs.erase_nonce_change(newAddress);
     });
 
     // EIP-161: a new contract starts with nonce 1 (see create()).
-    decltype(auto) newAcc = gs.create(newAddress, 0, input, 1);
+    // The account's code remains empty during construction per EVM spec.
+    decltype(auto) newAcc = gs.create(newAddress, 0, {}, 1);
     gs.set_addresses_nonce_change(newAddress, 1);
 
     journaled_pay_to(ctxt->acc.get_address(), newAddress, ctxt->acc,
@@ -2619,8 +2648,8 @@ private:
     };
 
     gas_tracker.push_frame(allowance);
-    push_context(ctxt->acc.get_address(), newAcc, move(input),
-                 newAcc.acc.get_code(), endowment, rh, hh, eh,
+    push_context(ctxt->acc.get_address(), newAcc, {}, move(input),
+                 endowment, rh, hh, eh,
                  ctxt->read_only ? true : false);
   }
 
