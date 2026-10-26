@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/holiman/uint256"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -142,7 +143,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		defer mvm.ClearMVMApi(mvmIdReadOnly)
 		mvmROnly.SetRelatedAddresses(tx.RelatedAddresses())
 		mvmROnly.SetBlobContext(tx.BlobVersionedHashes(), vmP.currentBlobBaseFee())
-		mvmROnly.SetAccessList(tx.EthAccessList())
+		mvmROnly.SetAccessList(vmP.getTxAccessList(tx))
 		mvmRs, execErr = vmP.readOnlyCall(execCtx, tx, mvmROnly)
 	} else {
 		if span != nil {
@@ -163,7 +164,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		mvmE := mvm.NewExecutionEngine(vmP.mvmId, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 		mvmE.SetRelatedAddresses(tx.RelatedAddresses())
 		mvmE.SetBlobContext(tx.BlobVersionedHashes(), vmP.currentBlobBaseFee())
-		mvmE.SetAccessList(tx.EthAccessList())
+		mvmE.SetAccessList(vmP.getTxAccessList(tx))
 		if isCache {
 			defer mvm.UnprotectMVMApi(vmP.mvmId)
 		}
@@ -694,4 +695,19 @@ func (vmP *VmProcessor) ProcessMVMResult(
 	}
 	rs, errConvert := vmP.MvmResultToExecuteResult(ctx, tx, mvmResult)
 	return rs, errConvert
+}
+
+// getTxAccessList returns tx.EthAccessList() with any EIP-7702 authorities added to warm them,
+// matching go-ethereum core/state_transition.go:585 (validateAuthorization: st.state.AddAddressToAccessList(authority)).
+func (vmP *VmProcessor) getTxAccessList(tx types.Transaction) eth_types.AccessList {
+	al := tx.EthAccessList()
+	authList := tx.EthAuthorizationList()
+	if len(authList) > 0 {
+		for i := range authList {
+			if authority, err := authList[i].Authority(); err == nil {
+				al = append(al, eth_types.AccessTuple{Address: authority})
+			}
+		}
+	}
+	return al
 }

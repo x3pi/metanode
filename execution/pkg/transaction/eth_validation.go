@@ -310,7 +310,7 @@ func validateDirectEnvelopeBinding(pTx *pb.Transaction, ethTx *e_types.Transacti
 
 	// 9. Data (covers CallData / DeployData)
 	txData := ethTx.Data()
-	if len(txData) == 0 {
+	if len(txData) == 0 && ethTx.To() != nil {
 		if len(pTx.Data) != 0 {
 			return fmt.Errorf("%w: Data mismatch", ErrEnvelopeBindingMismatch)
 		}
