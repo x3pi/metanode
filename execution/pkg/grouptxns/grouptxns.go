@@ -52,10 +52,11 @@ func BuildDeterministicGroupAddrs(tx types.Transaction) []common.Address {
 // AppendDeterministicGroupAddrs extracts grouping addresses and appends them to a provided slice
 // to allow the caller to use a single flat backing array for memory optimization.
 func AppendDeterministicGroupAddrs(tx types.Transaction, out []common.Address) []common.Address {
-	var al e_types.AccessList
-	ethTx := tx.ToEthTransaction()
-	if ethTx != nil {
-		al = ethTx.AccessList()
+	al := tx.EthAccessList()
+	if len(al) == 0 {
+		if ethTx := tx.ToEthTransaction(); ethTx != nil {
+			al = ethTx.AccessList()
+		}
 	}
 	hasAccessList := len(al) > 0
 

@@ -555,6 +555,9 @@ func executeContractCallForGateway(
 	sourceChainID uint64,
 ) (uint64, error) {
 	_, mvmE := createVmProcessorForGateway(ctx, chainState, tx, blockTime)
+	if tx != nil {
+		mvmE.SetAccessList(tx.EthAccessList())
+	}
 
 	if sourceChainID != 0 {
 		mvmE.SetCrossChainContext(sender, sourceChainID)

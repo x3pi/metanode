@@ -218,8 +218,10 @@ mvm::ExecResult run(mvm::MyGlobalState &gs, bool deploy,
                     const mvm::Code &input, unsigned char *mvmId, bool readOnly,
                     const uint256_t &tx_hash, bool is_debug,
                     bool is_off_chain = false,
-                    std::vector<std::pair<int, std::string>> *out_native_logs = nullptr) {
-  mvm::Transaction tx(from, amount, gas_price, gas_limit, tx_hash, is_debug);
+                    std::vector<std::pair<int, std::string>> *out_native_logs = nullptr,
+                    const std::vector<std::pair<mvm::Address, std::vector<uint256_t>>> *access_list = nullptr) {
+  mvm::Transaction tx(from, amount, gas_price, gas_limit, tx_hash, is_debug,
+                      access_list != nullptr ? *access_list : std::vector<std::pair<mvm::Address, std::vector<uint256_t>>>{});
   MyLogger logger = MyLogger();
   MyExtension extension = MyExtension(mvmId, is_off_chain, &tx_hash);
   mvm::Processor p(gs, log_handler, extension, logger);
@@ -324,6 +326,7 @@ struct ParsedTxContext {
   std::vector<uint8_t> cross_chain_sender;
   uint64_t cross_chain_source_id = 0;
   std::vector<uint256_t> block_hashes;
+  std::vector<std::pair<mvm::Address, std::vector<uint256_t>>> access_list;
 };
 
 ParsedTxContext ParseTxContext(unsigned char *b_chain_id,
@@ -333,7 +336,9 @@ ParsedTxContext ParseTxContext(unsigned char *b_chain_id,
                                unsigned char *b_cross_chain_sender,
                                unsigned char *b_cross_chain_source_id,
                                unsigned char *b_block_hashes,
-                               int block_hashes_count) {
+                               int block_hashes_count,
+                               unsigned char *b_access_list,
+                               int access_list_size) {
   ParsedTxContext ctx;
   if (b_chain_id != nullptr) {
     ctx.chain_id = mvm::from_big_endian((uint8_t *)b_chain_id, 32u);
@@ -365,6 +370,30 @@ ParsedTxContext ParseTxContext(unsigned char *b_chain_id,
       v = (v << 8) | b_cross_chain_source_id[i];
     }
     ctx.cross_chain_source_id = v;
+  }
+  if (b_access_list != nullptr && access_list_size >= 4) {
+    size_t offset = 0;
+    uint32_t num_tuples = ((uint32_t)b_access_list[0] << 24) |
+                          ((uint32_t)b_access_list[1] << 16) |
+                          ((uint32_t)b_access_list[2] << 8) |
+                          (uint32_t)b_access_list[3];
+    offset += 4;
+    for (uint32_t i = 0; i < num_tuples && offset + 24 <= (size_t)access_list_size; ++i) {
+      mvm::Address addr = mvm::from_big_endian(b_access_list + offset, 20u);
+      offset += 20;
+      uint32_t num_keys = ((uint32_t)b_access_list[offset] << 24) |
+                          ((uint32_t)b_access_list[offset + 1] << 16) |
+                          ((uint32_t)b_access_list[offset + 2] << 8) |
+                          (uint32_t)b_access_list[offset + 3];
+      offset += 4;
+      std::vector<uint256_t> keys;
+      keys.reserve(num_keys);
+      for (uint32_t j = 0; j < num_keys && offset + 32 <= (size_t)access_list_size; ++j) {
+        keys.push_back(mvm::from_big_endian(b_access_list + offset, 32u));
+        offset += 32;
+      }
+      ctx.access_list.emplace_back(addr, std::move(keys));
+    }
   }
   return ctx;
 }
@@ -669,7 +698,8 @@ ExecuteResult *deploy(
     int blob_versioned_hashes_count, unsigned char *b_blob_base_fee,
     unsigned char *b_cross_chain_sender,
     unsigned char *b_cross_chain_source_id,
-    unsigned char *b_block_hashes, int block_hashes_count) {
+    unsigned char *b_block_hashes, int block_hashes_count,
+    unsigned char *b_access_list, int access_list_size) {
   // format argument to right data type
   uint256_t caller_address =
       mvm::from_big_endian((uint8_t *)b_caller_address, 20u);
@@ -688,7 +718,7 @@ ExecuteResult *deploy(
   ParsedTxContext txContext = ParseTxContext(
       b_chain_id, b_blob_versioned_hashes, blob_versioned_hashes_count,
       b_blob_base_fee, b_cross_chain_sender, b_cross_chain_source_id,
-      b_block_hashes, block_hashes_count);
+      b_block_hashes, block_hashes_count, b_access_list, access_list_size);
 
   mvm::BlockContext blockContext = CreateBlockContext(
       mvmId, block_prevrandao, block_gas_limit, block_time, block_base_fee,
@@ -737,7 +767,8 @@ ExecuteResult *deploy(
               << " gas_price=" << gas_price << std::endl;
     auto result = run(gs, true, caller_address, contract_address, amount,
                       gas_price, gas_limit, log_handler, contract_constructor,
-                      mvmId, false, tx_hash, is_debug, is_off_chain, &nativeLogs);
+                      mvmId, false, tx_hash, is_debug, is_off_chain, &nativeLogs,
+                      &txContext.access_list);
     std::cerr << "[DEPLOY_DEBUG] exit_reason=" << (int)result.er
               << " exception=" << (int)result.ex
               << " gas_used=" << result.gas_used
@@ -822,7 +853,8 @@ ExecuteResult *call(
     int blob_versioned_hashes_count, unsigned char *b_blob_base_fee,
     unsigned char *b_cross_chain_sender,
     unsigned char *b_cross_chain_source_id,
-    unsigned char *b_block_hashes, int block_hashes_count) {
+    unsigned char *b_block_hashes, int block_hashes_count,
+    unsigned char *b_access_list, int access_list_size) {
   // format argument to right data type
   uint256_t caller_address =
       mvm::from_big_endian((uint8_t *)b_caller_address, 20u);
@@ -852,7 +884,7 @@ ExecuteResult *call(
   ParsedTxContext txContext = ParseTxContext(
       b_chain_id, b_blob_versioned_hashes, blob_versioned_hashes_count,
       b_blob_base_fee, b_cross_chain_sender, b_cross_chain_source_id,
-      b_block_hashes, block_hashes_count);
+      b_block_hashes, block_hashes_count, b_access_list, access_list_size);
 
   mvm::BlockContext blockContext = CreateBlockContext(
       mvmId, block_prevrandao, block_gas_limit, block_time, block_base_fee,
@@ -869,7 +901,8 @@ ExecuteResult *call(
   try {
     auto result = run(gs, false, caller_address, contract_address, amount,
                       gas_price, gas_limit, log_handler, input, mvmId, readOnly,
-                      tx_hash, is_debug, is_off_chain, &nativeLogs);
+                      tx_hash, is_debug, is_off_chain, &nativeLogs,
+                      &txContext.access_list);
 
     // processResult có thể throw exception, cần catch
     ExecuteResult *rs = processResult(result, gs, log_handler, is_off_chain, nativeLogs);
@@ -913,7 +946,8 @@ execute(unsigned char *b_caller_address, unsigned char *b_contract_address,
         int blob_versioned_hashes_count, unsigned char *b_blob_base_fee,
         unsigned char *b_cross_chain_sender,
         unsigned char *b_cross_chain_source_id,
-        unsigned char *b_block_hashes, int block_hashes_count
+        unsigned char *b_block_hashes, int block_hashes_count,
+        unsigned char *b_access_list, int access_list_size
 ) {
 
   uint256_t caller_address =
@@ -941,7 +975,7 @@ execute(unsigned char *b_caller_address, unsigned char *b_contract_address,
   ParsedTxContext txContext = ParseTxContext(
       b_chain_id, b_blob_versioned_hashes, blob_versioned_hashes_count,
       b_blob_base_fee, b_cross_chain_sender, b_cross_chain_source_id,
-      b_block_hashes, block_hashes_count);
+      b_block_hashes, block_hashes_count, b_access_list, access_list_size);
 
   mvm::BlockContext blockContext = CreateBlockContext(
       mvmId, block_prevrandao, block_gas_limit, block_time, block_base_fee,
@@ -958,7 +992,7 @@ execute(unsigned char *b_caller_address, unsigned char *b_contract_address,
     auto result =
         run(gs, false, caller_address, contract_address, amount, gas_price,
             gas_limit, log_handler, input, mvmId, false, tx_hash, is_debug,
-            false, &nativeLogs);
+            false, &nativeLogs, &txContext.access_list);
 
     // processResult có thể throw exception, cần catch
     ExecuteResult *rs = processResult(result, gs, log_handler, false, nativeLogs);

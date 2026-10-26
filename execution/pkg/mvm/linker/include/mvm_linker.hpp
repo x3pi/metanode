@@ -105,7 +105,8 @@ struct ExecuteResult {
       int blob_versioned_hashes_count, unsigned char *b_blob_base_fee,       \
       unsigned char *b_cross_chain_sender,                                   \
       unsigned char *b_cross_chain_source_id,                                \
-      unsigned char *b_block_hashes, int block_hashes_count
+      unsigned char *b_block_hashes, int block_hashes_count,                  \
+      unsigned char *b_access_list, int access_list_size
 
 struct ExecuteResult *deploy(
     // transaction data

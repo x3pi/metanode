@@ -9,6 +9,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/holiman/uint256"
 )
 
@@ -73,6 +74,9 @@ func (e *tzLoopbackEngine) AddRelatedAddress(address common.Address) {
 }
 func (e *tzLoopbackEngine) SetBlobContext(blobVersionedHashes [][]byte, blobBaseFee *uint256.Int) {
 	e.real.SetBlobContext(blobVersionedHashes, blobBaseFee)
+}
+func (e *tzLoopbackEngine) SetAccessList(accessList eth_types.AccessList) {
+	e.real.SetAccessList(accessList)
 }
 func (e *tzLoopbackEngine) SetCrossChainContext(sender common.Address, sourceChainId uint64) {
 	e.real.SetCrossChainContext(sender, sourceChainId)
