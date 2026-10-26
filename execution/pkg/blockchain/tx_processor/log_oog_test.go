@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestReviewFailedLogCannotLeakIntoReceipt(t *testing.T) {
+func TestFailedLogCannotLeakIntoReceipt(t *testing.T) {
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
 	t.Setenv("METANODE_DEVNET", "false")
 	key, err := crypto.GenerateKey()
@@ -65,7 +65,7 @@ func TestReviewFailedLogCannotLeakIntoReceipt(t *testing.T) {
 	}
 }
 
-func TestReviewNestedCallLogRollbackOnRevert(t *testing.T) {
+func TestNestedCallLogRollbackOnRevert(t *testing.T) {
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
 	t.Setenv("METANODE_DEVNET", "false")
 	key, err := crypto.GenerateKey()
@@ -111,7 +111,7 @@ func TestReviewNestedCallLogRollbackOnRevert(t *testing.T) {
 	require.Empty(t, confCompare(w, g, m))
 }
 
-func TestReviewStaticCallCannotEmitLog(t *testing.T) {
+func TestStaticCallCannotEmitLog(t *testing.T) {
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
 	t.Setenv("METANODE_DEVNET", "false")
 	key, err := crypto.GenerateKey()

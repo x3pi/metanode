@@ -1,6 +1,7 @@
 #include "mvm_linker.hpp"
 #include "mvm/processor.h"
 #include "my_global_state.h"
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <tuple>
@@ -387,7 +388,8 @@ ParsedTxContext ParseTxContext(unsigned char *b_chain_id,
                           (uint32_t)b_access_list[offset + 3];
       offset += 4;
       std::vector<uint256_t> keys;
-      keys.reserve(num_keys);
+      // Never trust the declared count for allocation: cap it by what the buffer can still hold.
+      keys.reserve(std::min<size_t>(num_keys, ((size_t)access_list_size - offset) / 32));
       for (uint32_t j = 0; j < num_keys && offset + 32 <= (size_t)access_list_size; ++j) {
         keys.push_back(mvm::from_big_endian(b_access_list + offset, 32u));
         offset += 32;

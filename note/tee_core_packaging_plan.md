@@ -284,3 +284,8 @@ nào khác.
 - Xác nhận: TA của OHtee/tzdriver có hỗ trợ C++ với exception/RTTI/multi-threading như
   `libmvm_linker.a` hiện dùng không, hay có giới hạn subset ngôn ngữ cần biết trước để B1-B2
   không code ra thứ không build được cho target thật.
+
+
+## Giới hạn đã biết: EIP-2930 access list chưa đi qua TA (2026-10-26)
+
+`mvm_ta_main.cpp` truyền `nullptr, 0` cho `b_access_list` (giống các trường B1 khác: blob hash, cross-chain, block hash). Giao dịch có access list chạy trong TEE sẽ bị tính gas như chưa làm nóng sẵn → lệch gas so với engine in-process. Cụm trộn node TEE và không-TEE không được chấp nhận giao dịch có access list cho tới khi thêm trường vào `mvm_tz_protocol`. `tzHardwareEngine.SetAccessList` in cảnh báo một lần.
