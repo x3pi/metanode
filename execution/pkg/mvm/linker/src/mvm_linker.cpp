@@ -704,6 +704,16 @@ ExecuteResult *deploy(
   // MyLogger.buffered_logs would otherwise be lost when run() returns.
   std::vector<std::pair<int, std::string>> nativeLogs;
   mvm::Address contract_address;
+  // True only once the contract account exists in gs; cleanup must never touch a default (zero) address.
+  bool contract_created = false;
+  auto discard_contract = [&]() {
+    if (!contract_created)
+      return;
+    gs.erase_nonce_change(contract_address);
+    gs.erase_newly_deploy(contract_address);
+    gs.clear_storage_change(contract_address);
+    gs.remove(contract_address);
+  };
 
   try {
     //  init env
@@ -718,6 +728,7 @@ ExecuteResult *deploy(
     // EIP-161: a new contract starts with nonce 1 before initcode executes.
     auto contract = gs.create(contract_address, 0u, {}, 1);
     gs.set_addresses_nonce_change(contract_address, 1);
+    contract_created = true;
 
     // Pass constructor as input — in deploy mode, _Processor::run() uses
     // input as exec_code (the constructor bytecode to execute)
@@ -758,10 +769,7 @@ ExecuteResult *deploy(
 
       result.output = truncated_address;
     } else if (result.er != mvm::ExitReason::returned) {
-      gs.erase_nonce_change(contract_address);
-      gs.erase_newly_deploy(contract_address);
-      gs.clear_storage_change(contract_address);
-      gs.remove(contract_address);
+      discard_contract();
     }
 
     ExecuteResult *rs = processResult(result, gs, log_handler, is_off_chain, nativeLogs);
@@ -770,10 +778,7 @@ ExecuteResult *deploy(
   } catch (const std::exception &e) {
     try {
       mvm::ExecResult error_result = handleException(e);
-      gs.erase_nonce_change(contract_address);
-      gs.erase_newly_deploy(contract_address);
-      gs.clear_storage_change(contract_address);
-      gs.remove(contract_address);
+      discard_contract();
 
       // Dùng log_handler mới vì có thể log_handler cũ đã bị corrupt
       mvm::VectorLogHandler clean_log_handler;
@@ -787,10 +792,7 @@ ExecuteResult *deploy(
   } catch (...) {
     try {
       mvm::ExecResult error_result = handleUnknownException("deploy");
-      gs.erase_nonce_change(contract_address);
-      gs.erase_newly_deploy(contract_address);
-      gs.clear_storage_change(contract_address);
-      gs.remove(contract_address);
+      discard_contract();
 
       mvm::VectorLogHandler clean_log_handler;
 
