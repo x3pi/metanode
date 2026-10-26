@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   go-build-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Observed full runs: ~12 min warm, ~22 min with a cold Rust cache. Fail a hung run instead of waiting 6 h.
     timeout-minutes: 60
     defaults:
