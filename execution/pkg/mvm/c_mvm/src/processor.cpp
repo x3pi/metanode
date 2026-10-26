@@ -731,11 +731,13 @@ private:
     return {ctxt->mem.begin() + offset, ctxt->mem.begin() + offset + size};
   }
 
-  void jump_to(const uint64_t newPc) {
-    if (ctxt->prog.jump_dests.find(newPc) == ctxt->prog.jump_dests.end())
+  void jump_to(const uint256_t &newPc) {
+    if (newPc > std::numeric_limits<uint64_t>::max() ||
+        ctxt->prog.jump_dests.find(static_cast<uint64_t>(newPc)) ==
+            ctxt->prog.jump_dests.end())
       MVM_THROW(Exception(ET::ErrInvalidCode,
                           to_string(newPc) + " is not a jump destination"));
-    ctxt->set_pc(newPc);
+    ctxt->set_pc(static_cast<uint64_t>(newPc));
   }
 
   template <
@@ -1403,12 +1405,12 @@ private:
   }
 
   void jump() {
-    const auto newPc = ctxt->s.pop64();
+    const auto newPc = ctxt->s.pop();
     jump_to(newPc);
   }
 
   void jumpi() {
-    const auto newPc = ctxt->s.pop64();
+    const auto newPc = ctxt->s.pop();
     const auto cond = ctxt->s.pop();
     if (cond)
       jump_to(newPc);
@@ -1737,23 +1739,20 @@ private:
   void callvalue() { ctxt->s.push(ctxt->call_value); }
 
   void push() {
-    const uint8_t bytes = get_op() - PUSH1 + 1;
-    const auto end = ctxt->get_pc() + bytes;
-    if (end < ctxt->get_pc())
-      MVM_THROW(Exception(ET::outOfBounds, "Integer overflow in push (" +
-                                               to_string(end) + " < " +
-                                               to_string(ctxt->get_pc()) + ")"));
+    const auto op = get_op();
+    const uint8_t bytes = (op == PUSH0) ? 0 : (op - PUSH1 + 1);
+    const auto pc_base = ctxt->get_pc();
+    const auto code_size = ctxt->prog.code.size();
 
-    if (end >= ctxt->prog.code.size())
-      MVM_THROW(Exception(ET::outOfBounds,
-                          "Push immediate exceeds size of program (" +
-                              to_string(end) +
-                              " >= " + to_string(ctxt->prog.code.size()) + ")"));
+    if (pc_base > std::numeric_limits<uint64_t>::max() - 1 - bytes)
+      MVM_THROW(Exception(ET::outOfBounds, "Integer overflow in push"));
 
-    auto pc = ctxt->get_pc() + 1;
+    uint64_t pc = pc_base + 1;
     uint256_t imm = 0;
-    for (int i = 0; i < bytes; i++)
-      imm = (imm << 8) | ctxt->prog.code[pc++];
+    for (uint8_t i = 0; i < bytes; i++, pc++) {
+      const uint8_t b = (pc < code_size) ? ctxt->prog.code[pc] : 0;
+      imm = (imm << 8) | b;
+    }
 
     ctxt->s.push(imm);
     ctxt->set_pc(pc);
