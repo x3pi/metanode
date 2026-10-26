@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestReviewBytecodeTerminationAndUntakenJump(t *testing.T) {
+func TestBytecodeTerminationAndUntakenJump(t *testing.T) {
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
 	t.Setenv("METANODE_DEVNET", "false")
 	key, err := crypto.GenerateKey()
@@ -78,7 +78,7 @@ func TestTakenJumpDestinationHugeParity(t *testing.T) {
 
 	// JUMPI to huge destination (>64-bit) with condition=1 -> must fail on both geth and MVM
 	hugeJUMPI := append([]byte{0x60, 1, 0x7f, 1}, make([]byte, 31)...) // PUSH1 1, PUSH32 0x0100...
-	hugeJUMPI = append(hugeJUMPI, 0x57)                                  // JUMPI
+	hugeJUMPI = append(hugeJUMPI, 0x57)                                // JUMPI
 
 	cases := []struct {
 		name string

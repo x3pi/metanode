@@ -7,6 +7,7 @@ import "C"
 import (
 	"fmt"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -76,9 +77,21 @@ func (e *tzHardwareEngine) AddRelatedAddress(address common.Address) {
 func (e *tzHardwareEngine) SetBlobContext(blobVersionedHashes [][]byte, blobBaseFee *uint256.Int) {
 	e.real.SetBlobContext(blobVersionedHashes, blobBaseFee)
 }
+// SetAccessList records the list on the in-process engine only. The TrustZone request
+// protocol has no access-list field yet (like the other B1 context fields: blob hashes,
+// cross-chain context, block hashes), so a TEE-executed transaction with a non-empty
+// list is billed as if nothing were pre-warmed. Mixed TEE/non-TEE clusters must not
+// accept such transactions until the field is added to mvm_tz_protocol.
 func (e *tzHardwareEngine) SetAccessList(accessList eth_types.AccessList) {
+	if len(accessList) > 0 {
+		tzAccessListNotForwardedOnce.Do(func() {
+			fmt.Println("[tz-hardware] WARNING: EIP-2930 access list is not forwarded to the TA; gas will differ from the in-process engine")
+		})
+	}
 	e.real.SetAccessList(accessList)
 }
+
+var tzAccessListNotForwardedOnce sync.Once
 func (e *tzHardwareEngine) SetCrossChainContext(sender common.Address, sourceChainId uint64) {
 	e.real.SetCrossChainContext(sender, sourceChainId)
 }

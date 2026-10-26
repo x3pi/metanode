@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestReviewAccessListWarmsStorage(t *testing.T) {
+func TestAccessListWarmsStorage(t *testing.T) {
 	for _, limit := range []uint64{50000, 26300} {
 		t.Run(new(big.Int).SetUint64(limit).String(), func(t *testing.T) {
 			t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
