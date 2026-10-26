@@ -46,6 +46,7 @@ mod synchronizer;
 mod system_transaction;
 mod system_transaction_provider;
 mod threshold_clock;
+mod payload_store;
 mod transaction;
 mod transaction_certifier;
 pub(crate) mod tx_group_filter;
@@ -88,7 +89,7 @@ pub use system_transaction_provider::{
     DefaultSystemTransactionProvider, SystemTransactionProvider,
 };
 pub use transaction::{
-    retry_tx_cache_read_for_commit, try_tx_cache_read, try_tx_cache_write, BlockStatus,
+    init_payload_wal, retry_tx_cache_read_for_commit, try_tx_cache_read, try_tx_cache_write, BlockStatus,
     ClientError, TransactionClient, TransactionVerifier, TxCacheReadHandle,
     TxCacheReadHandleForCommit, TxCacheWriteHandle, TxPayloadCache, ValidationError,
     TX_PAYLOAD_DIR,

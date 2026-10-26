@@ -1,0 +1,701 @@
+{
+  "timestamp": "2026-10-26T01:38:30Z",
+  "chain_id": 991,
+  "mode": "tcp",
+  "tx_type": "1559",
+  "total_submitted": 849472,
+  "total_confirmed": 849472,
+  "total_reverted": 0,
+  "total_dropped": 0,
+  "injection_duration": "3.723151317s",
+  "injection_tps": 228159.40789762963,
+  "commit_duration": "47.801214392s",
+  "effective_tps": 17770.92927041133,
+  "latency_p50": 33245937577,
+  "latency_p90": 39146196223,
+  "latency_p95": 40091868384,
+  "latency_p99": 43270697279,
+  "latency_avg": 28127197662,
+  "start_block": 1,
+  "end_block": 78,
+  "blocks_produced": 77,
+  "zero_fork_verified": true,
+  "node_roots_consistent": true,
+  "max_cpu": "3498.0%",
+  "max_rss_mb": 38678,
+  "sample_total": 161,
+  "sample_confirmed": 161,
+  "measurement": {
+    "method": "counted from blocks (to==target \u0026\u0026 from in wallet set); wall-clock = first observation of the block by the reference validator",
+    "bytes_sent_txs": 849472,
+    "committed_ours": 849472,
+    "committed_total_txs": 849472,
+    "committed_ours_exact": true,
+    "committed_ours_upper_bound": 849472,
+    "loss_vs_sent": 0,
+    "loss_pct_vs_sent": 0,
+    "inject_seconds": 3.723151317,
+    "drain_seconds": 44.078063075,
+    "end_to_end_seconds": 47.801214392,
+    "ours_committed_by_inject_end": 27068,
+    "backlog_at_inject_end": 822404,
+    "tps_during_injection": 7270.1853068412365,
+    "tps_end_to_end": 17770.92927041133,
+    "tps_end_to_end_upper_bound": 17770.92927041133,
+    "tps_active_commit_window": 18180.68583671169,
+    "first_commit_seconds_after_inject_start": 1.077344477,
+    "received_by_validator": {
+      "http://127.0.0.1:31646": 210619,
+      "http://127.0.0.1:31647": 212738,
+      "http://127.0.0.1:31648": 212563,
+      "http://127.0.0.1:31649": 213552
+    },
+    "rejected_by_validator": {
+      "http://127.0.0.1:31646": 0,
+      "http://127.0.0.1:31647": 0,
+      "http://127.0.0.1:31648": 0,
+      "http://127.0.0.1:31649": 0
+    },
+    "ingress_metrics_ok": true,
+    "validator_heads": {
+      "http://127.0.0.1:31646": 105,
+      "http://127.0.0.1:31647": 105,
+      "http://127.0.0.1:31648": 105,
+      "http://127.0.0.1:31649": 105
+    },
+    "parity_status": "OK: all 4 validators agree on hash+stateRoot of #105",
+    "measurement_stop_reason": "reference validator showed 849472 \u003e= 849472 txs and was idle for 1.5s",
+    "commit_timeline": [
+      {
+        "block": 2,
+        "ours": 4000,
+        "total": 4000,
+        "ms_since_inject_start": 1077.344
+      },
+      {
+        "block": 3,
+        "ours": 7068,
+        "total": 7068,
+        "ms_since_inject_start": 2126.473
+      },
+      {
+        "block": 4,
+        "ours": 16000,
+        "total": 16000,
+        "ms_since_inject_start": 3351.019
+      },
+      {
+        "block": 5,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 4076.717
+      },
+      {
+        "block": 6,
+        "ours": 16000,
+        "total": 16000,
+        "ms_since_inject_start": 4951.604
+      },
+      {
+        "block": 7,
+        "ours": 16000,
+        "total": 16000,
+        "ms_since_inject_start": 5825.637
+      },
+      {
+        "block": 8,
+        "ours": 15932,
+        "total": 15932,
+        "ms_since_inject_start": 6801.423
+      },
+      {
+        "block": 9,
+        "ours": 20000,
+        "total": 20000,
+        "ms_since_inject_start": 7851.183
+      },
+      {
+        "block": 10,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 8300.57
+      },
+      {
+        "block": 11,
+        "ours": 11000,
+        "total": 11000,
+        "ms_since_inject_start": 8876.126
+      },
+      {
+        "block": 12,
+        "ours": 16000,
+        "total": 16000,
+        "ms_since_inject_start": 9726.183
+      },
+      {
+        "block": 13,
+        "ours": 16000,
+        "total": 16000,
+        "ms_since_inject_start": 10450.932
+      },
+      {
+        "block": 14,
+        "ours": 19000,
+        "total": 19000,
+        "ms_since_inject_start": 11450.971
+      },
+      {
+        "block": 15,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 11926.404
+      },
+      {
+        "block": 16,
+        "ours": 11000,
+        "total": 11000,
+        "ms_since_inject_start": 12500.711
+      },
+      {
+        "block": 17,
+        "ours": 15000,
+        "total": 15000,
+        "ms_since_inject_start": 13376.882
+      },
+      {
+        "block": 18,
+        "ours": 1000,
+        "total": 1000,
+        "ms_since_inject_start": 13450.992
+      },
+      {
+        "block": 19,
+        "ours": 3000,
+        "total": 3000,
+        "ms_since_inject_start": 13651.169
+      },
+      {
+        "block": 20,
+        "ours": 4000,
+        "total": 4000,
+        "ms_since_inject_start": 13901.512
+      },
+      {
+        "block": 21,
+        "ours": 4000,
+        "total": 4000,
+        "ms_since_inject_start": 14150.882
+      },
+      {
+        "block": 22,
+        "ours": 4000,
+        "total": 4000,
+        "ms_since_inject_start": 14401.561
+      },
+      {
+        "block": 23,
+        "ours": 4000,
+        "total": 4000,
+        "ms_since_inject_start": 14626.13
+      },
+      {
+        "block": 24,
+        "ours": 4000,
+        "total": 4000,
+        "ms_since_inject_start": 14950.645
+      },
+      {
+        "block": 25,
+        "ours": 8000,
+        "total": 8000,
+        "ms_since_inject_start": 15475.543
+      },
+      {
+        "block": 26,
+        "ours": 4000,
+        "total": 4000,
+        "ms_since_inject_start": 15626.367
+      },
+      {
+        "block": 27,
+        "ours": 8000,
+        "total": 8000,
+        "ms_since_inject_start": 16125.881
+      },
+      {
+        "block": 28,
+        "ours": 8000,
+        "total": 8000,
+        "ms_since_inject_start": 16850.989
+      },
+      {
+        "block": 29,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 17476.786
+      },
+      {
+        "block": 30,
+        "ours": 16000,
+        "total": 16000,
+        "ms_since_inject_start": 18626.197
+      },
+      {
+        "block": 31,
+        "ours": 28000,
+        "total": 28000,
+        "ms_since_inject_start": 20826.643
+      },
+      {
+        "block": 32,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 21451.555
+      },
+      {
+        "block": 33,
+        "ours": 16000,
+        "total": 16000,
+        "ms_since_inject_start": 22401.877
+      },
+      {
+        "block": 34,
+        "ours": 16000,
+        "total": 16000,
+        "ms_since_inject_start": 23301.328
+      },
+      {
+        "block": 35,
+        "ours": 8000,
+        "total": 8000,
+        "ms_since_inject_start": 23851.372
+      },
+      {
+        "block": 36,
+        "ours": 16000,
+        "total": 16000,
+        "ms_since_inject_start": 24951.655
+      },
+      {
+        "block": 37,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 25501.588
+      },
+      {
+        "block": 38,
+        "ours": 8000,
+        "total": 8000,
+        "ms_since_inject_start": 25850.667
+      },
+      {
+        "block": 39,
+        "ours": 8000,
+        "total": 8000,
+        "ms_since_inject_start": 26326.819
+      },
+      {
+        "block": 40,
+        "ours": 20000,
+        "total": 20000,
+        "ms_since_inject_start": 27351.371
+      },
+      {
+        "block": 41,
+        "ours": 16000,
+        "total": 16000,
+        "ms_since_inject_start": 28126.782
+      },
+      {
+        "block": 42,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 28579.584
+      },
+      {
+        "block": 43,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 29276.186
+      },
+      {
+        "block": 44,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 29951.022
+      },
+      {
+        "block": 45,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 30651.042
+      },
+      {
+        "block": 46,
+        "ours": 8000,
+        "total": 8000,
+        "ms_since_inject_start": 30901.684
+      },
+      {
+        "block": 47,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 31526.602
+      },
+      {
+        "block": 48,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 32151.543
+      },
+      {
+        "block": 49,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 32750.963
+      },
+      {
+        "block": 50,
+        "ours": 16000,
+        "total": 16000,
+        "ms_since_inject_start": 33776.815
+      },
+      {
+        "block": 51,
+        "ours": 16000,
+        "total": 16000,
+        "ms_since_inject_start": 34551.225
+      },
+      {
+        "block": 52,
+        "ours": 16000,
+        "total": 16000,
+        "ms_since_inject_start": 35326.005
+      },
+      {
+        "block": 53,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 35801.891
+      },
+      {
+        "block": 54,
+        "ours": 20000,
+        "total": 20000,
+        "ms_since_inject_start": 36825.751
+      },
+      {
+        "block": 55,
+        "ours": 8000,
+        "total": 8000,
+        "ms_since_inject_start": 37301.129
+      },
+      {
+        "block": 56,
+        "ours": 16000,
+        "total": 16000,
+        "ms_since_inject_start": 38101.032
+      },
+      {
+        "block": 57,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 38476.121
+      },
+      {
+        "block": 58,
+        "ours": 18165,
+        "total": 18165,
+        "ms_since_inject_start": 39451.334
+      },
+      {
+        "block": 59,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 39901.217
+      },
+      {
+        "block": 60,
+        "ours": 8000,
+        "total": 8000,
+        "ms_since_inject_start": 40326.315
+      },
+      {
+        "block": 61,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 40876.658
+      },
+      {
+        "block": 62,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 41476.08
+      },
+      {
+        "block": 63,
+        "ours": 12624,
+        "total": 12624,
+        "ms_since_inject_start": 42051.514
+      },
+      {
+        "block": 64,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 42575.966
+      },
+      {
+        "block": 65,
+        "ours": 8000,
+        "total": 8000,
+        "ms_since_inject_start": 42975.938
+      },
+      {
+        "block": 66,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 43526.078
+      },
+      {
+        "block": 67,
+        "ours": 8000,
+        "total": 8000,
+        "ms_since_inject_start": 43900.93
+      },
+      {
+        "block": 68,
+        "ours": 19218,
+        "total": 19218,
+        "ms_since_inject_start": 44926.381
+      },
+      {
+        "block": 69,
+        "ours": 12000,
+        "total": 12000,
+        "ms_since_inject_start": 45327.012
+      },
+      {
+        "block": 70,
+        "ours": 4000,
+        "total": 4000,
+        "ms_since_inject_start": 45508.423
+      },
+      {
+        "block": 71,
+        "ours": 4000,
+        "total": 4000,
+        "ms_since_inject_start": 45651.161
+      },
+      {
+        "block": 72,
+        "ours": 11972,
+        "total": 11972,
+        "ms_since_inject_start": 46275.934
+      },
+      {
+        "block": 73,
+        "ours": 4000,
+        "total": 4000,
+        "ms_since_inject_start": 46401.653
+      },
+      {
+        "block": 74,
+        "ours": 214,
+        "total": 214,
+        "ms_since_inject_start": 46401.653
+      },
+      {
+        "block": 75,
+        "ours": 2179,
+        "total": 2179,
+        "ms_since_inject_start": 46575.822
+      },
+      {
+        "block": 76,
+        "ours": 590,
+        "total": 590,
+        "ms_since_inject_start": 46600.969
+      },
+      {
+        "block": 77,
+        "ours": 565,
+        "total": 565,
+        "ms_since_inject_start": 46651.401
+      },
+      {
+        "block": 78,
+        "ours": 6,
+        "total": 6,
+        "ms_since_inject_start": 46651.401
+      },
+      {
+        "block": 79,
+        "ours": 627,
+        "total": 627,
+        "ms_since_inject_start": 46726.076
+      },
+      {
+        "block": 80,
+        "ours": 651,
+        "total": 651,
+        "ms_since_inject_start": 46775.917
+      },
+      {
+        "block": 81,
+        "ours": 356,
+        "total": 356,
+        "ms_since_inject_start": 46801.217
+      },
+      {
+        "block": 82,
+        "ours": 168,
+        "total": 168,
+        "ms_since_inject_start": 46826.28
+      },
+      {
+        "block": 83,
+        "ours": 38,
+        "total": 38,
+        "ms_since_inject_start": 46901.173
+      },
+      {
+        "block": 84,
+        "ours": 12,
+        "total": 12,
+        "ms_since_inject_start": 46951.256
+      },
+      {
+        "block": 85,
+        "ours": 315,
+        "total": 315,
+        "ms_since_inject_start": 46976.246
+      },
+      {
+        "block": 86,
+        "ours": 653,
+        "total": 653,
+        "ms_since_inject_start": 47050.739
+      },
+      {
+        "block": 87,
+        "ours": 182,
+        "total": 182,
+        "ms_since_inject_start": 47076.381
+      },
+      {
+        "block": 88,
+        "ours": 36,
+        "total": 36,
+        "ms_since_inject_start": 47076.381
+      },
+      {
+        "block": 89,
+        "ours": 176,
+        "total": 176,
+        "ms_since_inject_start": 47101.232
+      },
+      {
+        "block": 90,
+        "ours": 325,
+        "total": 325,
+        "ms_since_inject_start": 47150.933
+      },
+      {
+        "block": 91,
+        "ours": 8,
+        "total": 8,
+        "ms_since_inject_start": 47150.933
+      },
+      {
+        "block": 92,
+        "ours": 806,
+        "total": 806,
+        "ms_since_inject_start": 47251.259
+      },
+      {
+        "block": 93,
+        "ours": 933,
+        "total": 933,
+        "ms_since_inject_start": 47326.79
+      },
+      {
+        "block": 94,
+        "ours": 598,
+        "total": 598,
+        "ms_since_inject_start": 47351.028
+      },
+      {
+        "block": 95,
+        "ours": 177,
+        "total": 177,
+        "ms_since_inject_start": 47376.419
+      },
+      {
+        "block": 96,
+        "ours": 281,
+        "total": 281,
+        "ms_since_inject_start": 47401.549
+      },
+      {
+        "block": 97,
+        "ours": 211,
+        "total": 211,
+        "ms_since_inject_start": 47426.602
+      },
+      {
+        "block": 98,
+        "ours": 358,
+        "total": 358,
+        "ms_since_inject_start": 47476.785
+      },
+      {
+        "block": 99,
+        "ours": 559,
+        "total": 559,
+        "ms_since_inject_start": 47551.653
+      },
+      {
+        "block": 100,
+        "ours": 592,
+        "total": 592,
+        "ms_since_inject_start": 47601.193
+      },
+      {
+        "block": 101,
+        "ours": 370,
+        "total": 370,
+        "ms_since_inject_start": 47625.805
+      },
+      {
+        "block": 102,
+        "ours": 213,
+        "total": 213,
+        "ms_since_inject_start": 47651.07
+      },
+      {
+        "block": 103,
+        "ours": 208,
+        "total": 208,
+        "ms_since_inject_start": 47776.172
+      },
+      {
+        "block": 104,
+        "ours": 36,
+        "total": 36,
+        "ms_since_inject_start": 47776.172
+      },
+      {
+        "block": 105,
+        "ours": 50,
+        "total": 50,
+        "ms_since_inject_start": 47801.214
+      }
+    ]
+  },
+  "legacy_estimate_do_not_report": {
+    "method": "sustained: all txs in blocks through the drain window divided by injection time only",
+    "extrapolated_confirmed": 840533,
+    "effective_tps": 225758.4847981079
+  },
+  "tool_version": "secp_tps_blast/2 (chain-counted)"
+}

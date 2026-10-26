@@ -54,9 +54,10 @@ impl TxPayloadCache {
         }
     }
 
-    pub fn insert(&mut self, digest: TxDigest, tx: Transaction) {
+    /// Returns true if the payload was newly inserted (false if already cached).
+    pub fn insert(&mut self, digest: TxDigest, tx: Transaction) -> bool {
         if self.map.contains_key(&digest) {
-            return;
+            return false;
         }
         if self.queue.len() >= self.capacity {
             if let Some(oldest) = self.queue.pop_front() {
@@ -77,6 +78,7 @@ impl TxPayloadCache {
         // trade-off this accepts.
 
         self.map.insert(digest, tx);
+        true
     }
 
     pub fn get(&self, digest: &TxDigest) -> Option<Transaction> {
@@ -413,7 +415,14 @@ impl TxCacheWriteHandle {
         match shard.lock.try_write_for(TX_CACHE_LOCK_TIMEOUT) {
             Some(mut guard) => {
                 let _marker = WriteHolderMarker::new(shard, self.site);
-                guard.insert(digest, tx);
+                let wal_copy = crate::payload_store::is_enabled().then(|| tx.clone());
+                let fresh = guard.insert(digest, tx);
+                drop(guard);
+                if fresh {
+                    if let Some(tx) = wal_copy {
+                        crate::payload_store::enqueue(digest, tx);
+                    }
+                }
             }
             None => {
                 // WARN, not error! -- see the identical comment in TxCacheReadHandle::get above.
@@ -467,8 +476,19 @@ impl TxCacheWriteHandle {
             match shard.lock.try_write_for(TX_CACHE_LOCK_TIMEOUT) {
                 Some(mut guard) => {
                     let _marker = WriteHolderMarker::new(shard, self.site);
+                    let wal_on = crate::payload_store::is_enabled();
+                    let mut fresh_items = Vec::new();
                     for (digest, tx) in batch {
-                        guard.insert(digest, tx);
+                        let wal_copy = wal_on.then(|| tx.clone());
+                        if guard.insert(digest, tx) {
+                            if let Some(t) = wal_copy {
+                                fresh_items.push((digest, t));
+                            }
+                        }
+                    }
+                    drop(guard);
+                    for (digest, tx) in fresh_items {
+                        crate::payload_store::enqueue(digest, tx);
                     }
                 }
                 None => {
@@ -488,6 +508,16 @@ impl TxCacheWriteHandle {
             }
         }
     }
+}
+
+/// Opens the durable payload log in `dir`, replays it into the cache and starts the
+/// background writer (see `payload_store`). Idempotent; startup-only (replay is
+/// synchronous and must finish before any block delivery needs the payloads).
+pub fn init_payload_wal(dir: &std::path::Path) -> std::io::Result<()> {
+    crate::payload_store::init(dir, |digest, tx| {
+        // Direct shard insert: replayed payloads are already on disk, never re-enqueued.
+        shard_for(&digest).lock.write().insert(digest, tx);
+    })
 }
 
 /// Bounded write acquisition of the global TX cache. See [`try_tx_cache_read`] for why

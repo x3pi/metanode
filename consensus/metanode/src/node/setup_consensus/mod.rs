@@ -565,6 +565,9 @@ impl ConsensusNode {
         std::fs::create_dir_all(&db_path)?;
         parameters.db_path = db_path;
 
+        // Durable payload log (survives full-cluster restart); replays into the cache.
+        consensus_core::init_payload_wal(&config.storage_path.join("payload_wal"))?;
+
         Ok(parameters)
     }
 
