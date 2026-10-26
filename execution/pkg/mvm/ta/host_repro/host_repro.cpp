@@ -107,7 +107,7 @@ static ExecuteResult *do_execute(const char *label,
         true /*is_debug*/,
         related_flat, 2,
         false /*is_cache*/,
-        nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, 0
+        nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, 0, nullptr, 0
     );
 
     printf("[host_repro] execute() RETURNED (%s, no crash) exitReason=%d exception=%d gas_used=%llu\n",

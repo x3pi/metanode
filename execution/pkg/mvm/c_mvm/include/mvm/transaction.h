@@ -20,6 +20,7 @@ namespace mvm
     const uint64_t gas_limit;
     const uint256_t tx_hash;
     const bool is_debug;
+    const std::vector<std::pair<Address, std::vector<uint256_t>>> access_list;
 
     Transaction(
         const Address origin,
@@ -27,14 +28,15 @@ namespace mvm
         const uint64_t gas_price,
         const uint64_t gas_limit,
         const uint256_t tx_hash,
-        const bool is_debug
-
+        const bool is_debug,
+        const std::vector<std::pair<Address, std::vector<uint256_t>>> &access_list = {}
         ) : origin(origin),
             value(value),
             gas_price(gas_price),
             gas_limit(gas_limit),
             tx_hash(tx_hash),
-            is_debug(is_debug)
+            is_debug(is_debug),
+            access_list(access_list)
     {
     }
   };

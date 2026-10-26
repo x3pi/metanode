@@ -56,6 +56,7 @@ import (
 	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
+	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -129,6 +130,10 @@ type MVMApi struct {
 	// valid to call in any Cancun+ context.
 	blobVersionedHashes [][]byte
 	blobBaseFee         *uint256.Int
+
+	// EIP-2930 access list context. Set once per tx execution alongside
+	// SetRelatedAddresses — see VmProcessor.ExecuteTransactionWithMvmId.
+	accessList eth_types.AccessList
 }
 
 func CallReplayFullDbLogs(logs map[string][]byte) int {
@@ -500,6 +505,36 @@ func (a *MVMApi) blobHashAt(index uint64) (hash []byte, ok bool) {
 	return a.blobVersionedHashes[index], true
 }
 
+// SetAccessList sets the EIP-2930 access list for the transaction,
+// enabling pre-warming of declared addresses and storage keys.
+func (a *MVMApi) SetAccessList(accessList eth_types.AccessList) {
+	a.accessList = accessList
+}
+
+func serializeAccessList(al eth_types.AccessList) []byte {
+	if len(al) == 0 {
+		return nil
+	}
+	totalSize := 4
+	for _, tuple := range al {
+		totalSize += 20 + 4 + len(tuple.StorageKeys)*32
+	}
+	buf := make([]byte, totalSize)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(len(al)))
+	offset := 4
+	for _, tuple := range al {
+		copy(buf[offset:offset+20], tuple.Address.Bytes())
+		offset += 20
+		binary.BigEndian.PutUint32(buf[offset:offset+4], uint32(len(tuple.StorageKeys)))
+		offset += 4
+		for _, key := range tuple.StorageKeys {
+			copy(buf[offset:offset+32], key.Bytes())
+			offset += 32
+		}
+	}
+	return buf
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // TEE-PACKAGING B1 CONTEXT (see note/tee_core_packaging_plan.md)
 //
@@ -521,6 +556,8 @@ type b1Context struct {
 	crossChainSource unsafe.Pointer // 8 bytes big-endian uint64, or nil
 	blockHashes      unsafe.Pointer // flat array of 32-byte hashes, or nil
 	blockHashCount   C.int
+	accessList       unsafe.Pointer // serialized access list buffer, or nil
+	accessListSize   C.int
 }
 
 // maxBlockhashLookback matches BLOCKHASH's own EVM-spec window — a query
@@ -703,6 +740,14 @@ func (a *MVMApi) buildB1Context(code []byte, blockNumber uint64) b1Context {
 		}
 	}
 
+	if len(a.accessList) > 0 {
+		b := serializeAccessList(a.accessList)
+		if len(b) > 0 {
+			ctx.accessList = C.CBytes(b)
+			ctx.accessListSize = C.int(len(b))
+		}
+	}
+
 	return ctx
 }
 
@@ -724,6 +769,9 @@ func (c *b1Context) free() {
 	}
 	if c.blockHashes != nil {
 		C.free(c.blockHashes)
+	}
+	if c.accessList != nil {
+		C.free(c.accessList)
 	}
 }
 
@@ -872,6 +920,8 @@ func (a *MVMApi) Call(
 		(*C.uchar)(b1ctx.crossChainSource),
 		(*C.uchar)(b1ctx.blockHashes),
 		b1ctx.blockHashCount,
+		(*C.uchar)(b1ctx.accessList),
+		b1ctx.accessListSize,
 	)
 	callDur := time.Since(callStart)
 	totalDur := time.Since(b1ctxStart)
@@ -973,6 +1023,8 @@ func (a *MVMApi) Execute(
 		(*C.uchar)(b1ctx.crossChainSource),
 		(*C.uchar)(b1ctx.blockHashes),
 		b1ctx.blockHashCount,
+		(*C.uchar)(b1ctx.accessList),
+		b1ctx.accessListSize,
 	)
 	execDur := time.Since(execStart)
 	totalDur := time.Since(b1ctxStart)
@@ -1355,6 +1407,8 @@ func (a *MVMApi) Deploy(
 		(*C.uchar)(b1ctx.crossChainSource),
 		(*C.uchar)(b1ctx.blockHashes),
 		b1ctx.blockHashCount,
+		(*C.uchar)(b1ctx.accessList),
+		b1ctx.accessListSize,
 	)
 	a.rs = extractExecuteResult(cRs)
 	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2

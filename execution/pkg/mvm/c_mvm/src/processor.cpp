@@ -251,6 +251,7 @@ public:
 
     // EIP-2929 / EIP-3651: the sender, the transaction target (or the contract being
     // created), the block's coinbase and the precompiles start warm.
+    // EIP-2930: addresses and storage keys declared in the transaction's access list start warm.
     warm_addresses.clear();
     warm_slots.clear();
     warm_addresses.insert(tx.origin);
@@ -259,6 +260,12 @@ public:
     warm_addresses.insert(gs.get_block_context().coinbase);
     for (uint64_t pc = 1; pc <= 10; pc++)
       warm_addresses.insert(Address(pc));
+    for (const auto &item : tx.access_list) {
+      warm_addresses.insert(item.first);
+      for (const auto &slot : item.second) {
+        warm_slots[item.first].insert(slot);
+      }
+    }
 
     // create the first context
     ExecResult result;
@@ -1774,10 +1781,12 @@ private:
     for (int i = 0; i < n; i++)
       topics[i] = ctxt->s.pop();
 
+    auto log_data = copy_from_mem(offset, size);
+    gas_tracker.add_gas_used(getLogGasCost(n, size));
+
     size_t logMark = log_handler.checkpoint();
     log_handler.handle(
-        {ctxt->acc.get_address(), copy_from_mem(offset, size), topics});
-    gas_tracker.add_gas_used(getLogGasCost(n, size));
+        {ctxt->acc.get_address(), move(log_data), topics});
     journal.record([this, logMark]() { log_handler.rollback(logMark); });
   }
 

@@ -142,6 +142,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		defer mvm.ClearMVMApi(mvmIdReadOnly)
 		mvmROnly.SetRelatedAddresses(tx.RelatedAddresses())
 		mvmROnly.SetBlobContext(tx.BlobVersionedHashes(), vmP.currentBlobBaseFee())
+		mvmROnly.SetAccessList(tx.EthAccessList())
 		mvmRs, execErr = vmP.readOnlyCall(execCtx, tx, mvmROnly)
 	} else {
 		if span != nil {
@@ -162,6 +163,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		mvmE := mvm.NewExecutionEngine(vmP.mvmId, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 		mvmE.SetRelatedAddresses(tx.RelatedAddresses())
 		mvmE.SetBlobContext(tx.BlobVersionedHashes(), vmP.currentBlobBaseFee())
+		mvmE.SetAccessList(tx.EthAccessList())
 		if isCache {
 			defer mvm.UnprotectMVMApi(vmP.mvmId)
 		}

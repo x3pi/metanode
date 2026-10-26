@@ -31,6 +31,13 @@
       environment:
         PATH: "{{ lookup('env', 'HOME') }}/.cargo/bin:{{ ansible_env.PATH | default('/usr/local/bin:/usr/bin:/bin') }}"
 
+    - name: Build MVM C++ and linker libraries
+      when: not (skip_build | default(false)) or not parent_bin_stat.stat.exists or not simple_bin_stat.stat.exists
+      ansible.builtin.shell: |
+        bash build.sh
+      args:
+        chdir: "{{ playbook_dir }}/../../execution/pkg/mvm"
+
     - name: Build parent_chain binary
       when: not (skip_build | default(false)) or not parent_bin_stat.stat.exists
       ansible.builtin.command:

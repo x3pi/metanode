@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/holiman/uint256"
 )
 
@@ -74,6 +75,9 @@ func (e *tzHardwareEngine) AddRelatedAddress(address common.Address) {
 }
 func (e *tzHardwareEngine) SetBlobContext(blobVersionedHashes [][]byte, blobBaseFee *uint256.Int) {
 	e.real.SetBlobContext(blobVersionedHashes, blobBaseFee)
+}
+func (e *tzHardwareEngine) SetAccessList(accessList eth_types.AccessList) {
+	e.real.SetAccessList(accessList)
 }
 func (e *tzHardwareEngine) SetCrossChainContext(sender common.Address, sourceChainId uint64) {
 	e.real.SetCrossChainContext(sender, sourceChainId)

@@ -1064,7 +1064,7 @@ static void mvm_dispatch_call(const uint8_t *req_header, uint32_t req_header_len
         req.is_debug != 0,
         related_flat, (int)req.related_addresses_count,
         req.is_off_chain != 0,
-        nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, 0
+        nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, 0, nullptr, 0
     );
 
     mvm_encode_execute_result(rs, resp_hdr_out, resp_blob_writer);
@@ -1146,7 +1146,7 @@ static void mvm_dispatch_execute(const uint8_t *req_header, uint32_t req_header_
         req.is_debug != 0,
         related_flat, (int)req.related_addresses_count,
         req.is_cache != 0,
-        nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, 0
+        nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, 0, nullptr, 0
     );
     fprintf(stderr, "[mvm_ta][DIAG] execute() RETURNED rs=%p exitReason=%d exception=%d gas_used=%llu\n",
         (void *)rs, rs ? rs->b_exitReason : -1, rs ? rs->b_exception : -1, rs ? rs->gas_used : 0ULL);
@@ -1201,7 +1201,7 @@ static void mvm_dispatch_deploy(const uint8_t *req_header, uint32_t req_header_l
         b_block_number, (unsigned char *)req.block_coinbase,
         (unsigned char *)req.mvm_id, (unsigned char *)b_tx_hash,
         req.is_debug != 0, req.is_cache != 0, req.is_off_chain != 0,
-        nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, 0
+        nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, 0, nullptr, 0
     );
 
     mvm_encode_execute_result(rs, resp_hdr_out, resp_blob_writer);

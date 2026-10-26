@@ -4,6 +4,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/holiman/uint256"
 )
 
@@ -35,6 +36,7 @@ type ExecutionEngine interface {
 	InRelatedAddress(address common.Address) bool
 	AddRelatedAddress(address common.Address)
 	SetBlobContext(blobVersionedHashes [][]byte, blobBaseFee *uint256.Int)
+	SetAccessList(accessList eth_types.AccessList)
 	SetCrossChainContext(sender common.Address, sourceChainId uint64)
 	ClearCrossChainContext()
 
