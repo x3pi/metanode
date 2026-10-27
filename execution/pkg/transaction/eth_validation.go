@@ -54,6 +54,9 @@ func ValidateEthTxEnvelope(ethTx *e_types.Transaction, expectedChainId *big.Int)
 	if chainID == nil || chainID.Sign() <= 0 {
 		return fmt.Errorf("%w: transaction missing chain ID", InvalidChainId)
 	}
+	if !chainID.IsUint64() {
+		return fmt.Errorf("%w: invalid chain ID: chain ID exceeds uint64", InvalidChainId)
+	}
 
 	// 2. Verify chain ID matches expected
 	if expectedChainId != nil && expectedChainId.Sign() > 0 {
@@ -310,7 +313,7 @@ func validateDirectEnvelopeBinding(pTx *pb.Transaction, ethTx *e_types.Transacti
 
 	// 9. Data (covers CallData / DeployData)
 	txData := ethTx.Data()
-	if len(txData) == 0 {
+	if len(txData) == 0 && ethTx.To() != nil {
 		if len(pTx.Data) != 0 {
 			return fmt.Errorf("%w: Data mismatch", ErrEnvelopeBindingMismatch)
 		}
@@ -336,6 +339,9 @@ func validateDirectEnvelopeBinding(pTx *pb.Transaction, ethTx *e_types.Transacti
 	// 11. ChainID
 	var expectedChainID uint64
 	if ethTx.ChainId() != nil {
+		if !ethTx.ChainId().IsUint64() {
+			return fmt.Errorf("%w: ChainID exceeds uint64", ErrEnvelopeBindingMismatch)
+		}
 		expectedChainID = ethTx.ChainId().Uint64()
 	}
 	if pTx.ChainID != expectedChainID {

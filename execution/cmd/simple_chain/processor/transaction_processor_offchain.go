@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"math/big"
 	"math/rand"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -177,7 +179,11 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	}()
 	// logger.Debug("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
 	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
-	mvmOffChain.SetAccessList(executeTransaction.EthAccessList())
+	var chainID *big.Int
+	if v.chainState != nil && v.chainState.GetConfig() != nil {
+		chainID = v.chainState.GetConfig().ChainId
+	}
+	mvmOffChain.SetAccessList(transaction.EffectiveAccessList(executeTransaction, chainID))
 	var mvmResult *mvm.MVMExecuteResult
 
 	// FORK-SAFETY: Acquire shared read lock before MVM execution via cgo.
@@ -360,7 +366,11 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 	}()
 	// logger.Debug("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
 	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
-	mvmOffChain.SetAccessList(executeTransaction.EthAccessList())
+	var chainIDWithState *big.Int
+	if v.chainState != nil && v.chainState.GetConfig() != nil {
+		chainIDWithState = v.chainState.GetConfig().ChainId
+	}
+	mvmOffChain.SetAccessList(transaction.EffectiveAccessList(executeTransaction, chainIDWithState))
 	var mvmResult *mvm.MVMExecuteResult
 
 	// FORK-SAFETY: Acquire shared read lock before MVM execution via cgo.

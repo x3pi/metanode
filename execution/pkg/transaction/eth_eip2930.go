@@ -114,6 +114,9 @@ func FromEthEIP2930Tx(ethTx *types.Transaction, pTx *pb.Transaction) error {
 	txChainID := ethTx.ChainId() // Capture ChainID for later use with signer
 
 	if txChainID != nil {
+		if !txChainID.IsUint64() {
+			return errors.New("invalid chain id: overflow uint64")
+		}
 		pTx.ChainID = txChainID.Uint64()
 	} else {
 		// Giao dịch EIP-2930 hợp lệ PHẢI có ChainId.

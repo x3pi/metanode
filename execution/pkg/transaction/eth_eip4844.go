@@ -143,6 +143,9 @@ func FromEthBlobTx(ethTx *types.Transaction, pTx *pb.Transaction) error {
 	if txChainID == nil || txChainID.Sign() <= 0 {
 		return errors.New("EIP-4844 transaction is missing ChainID")
 	}
+	if !txChainID.IsUint64() {
+		return errors.New("invalid chain id: overflow uint64")
+	}
 	pTx.ChainID = txChainID.Uint64()
 
 	if ethTx.GasTipCap() != nil {

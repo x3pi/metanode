@@ -153,9 +153,10 @@ func (bp *BlockProcessor) convertReceiptToRpcReceipt(
 		if err == nil {
 			tx, err := txDB.GetTransaction(rcp.TransactionHash())
 			if err == nil {
-				if rcp.ToAddress() == (common.Address{}) {
+				if tx.IsDeployContract() {
 					contractAddr := crypto.CreateAddress(rcp.FromAddress(), tx.GetNonce())
 					rpcReceipt.ContractAddress = contractAddr.Hex()
+					rpcReceipt.To = ""
 				}
 			}
 		}

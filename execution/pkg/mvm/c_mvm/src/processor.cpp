@@ -266,6 +266,11 @@ public:
         warm_slots[item.first].insert(slot);
       }
     }
+    // EIP-7702: If the transaction target is a delegation designator, add its
+    // delegated account to warm_addresses (matches go-ethereum core/state_transition.go:504).
+    if (!deploy && is_delegation_designator(callee.acc.get_code())) {
+      warm_addresses.insert(delegation_designator_address(callee.acc.get_code()));
+    }
 
     // create the first context
     ExecResult result;
@@ -2095,21 +2100,19 @@ private:
   }
 
   // Resolves `code` for CALL-family dispatch: if it's a delegation
-  // designator, returns the delegate's code (one hop only — a delegate whose
-  // own code is ALSO a designator resolves to empty, matching EIP-7702's "no
-  // chained delegation" rule). Otherwise returns `code` unchanged.
+  // designator, returns the delegate's code (one hop only — if the delegate's
+  // own code is ALSO a delegation designator, it is NOT resolved further;
+  // instead its raw 23-byte designator starting with 0xEF is executed in EVM,
+  // which throws ErrInvalidCode and halts exceptionally per EIP-7702). Otherwise returns `code` unchanged.
   Code resolve_delegated_code(const Code &code) {
     if (!is_delegation_designator(code)) {
       return code;
     }
-    // EIP-7702: Charge warm account access gas for resolving delegation designator
-    gas_tracker.add_gas_used(getTouchedAddressGasCost());
+    // EIP-7702: Charge account access gas for resolving delegation designator
+    // (warm 100 gas if already warmed, cold 2600 gas if accessed for the first time).
     const Address delegate = delegation_designator_address(code);
-    Code delegateCode = gs.get(delegate).acc.get_code();
-    if (is_delegation_designator(delegateCode)) {
-      return {};
-    }
-    return delegateCode;
+    gas_tracker.add_gas_used(account_access_cost(delegate));
+    return gs.get(delegate).acc.get_code();
   }
 
   void call() {

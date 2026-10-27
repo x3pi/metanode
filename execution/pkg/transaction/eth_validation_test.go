@@ -155,4 +155,35 @@ func packSig(r, s, v *big.Int) []byte {
 	return sig
 }
 
+func TestValidateEthTxEnvelope_ChainIDOverflow(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	require.NoError(t, err)
+
+	// ChainID = 2^64 + 991 (18446744073709552607)
+	overflowChainID := new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 64), big.NewInt(991))
+	signer := e_types.LatestSignerForChainID(overflowChainID)
+
+	eip1559Tx := e_types.NewTx(&e_types.DynamicFeeTx{
+		ChainID:   overflowChainID,
+		Nonce:     1,
+		GasTipCap: big.NewInt(10000),
+		GasFeeCap: big.NewInt(200000),
+		Gas:       21000,
+		To:        &common.Address{0x01},
+		Value:     big.NewInt(100),
+	})
+	signed, err := e_types.SignTx(eip1559Tx, signer, key)
+	require.NoError(t, err)
+
+	// 1. ValidateEthTxEnvelope must reject overflow chain ID
+	err = ValidateEthTxEnvelope(signed, overflowChainID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "chain ID exceeds uint64")
+
+	// 2. NewTransactionFromEth must reject overflow chain ID
+	_, err = NewTransactionFromEth(signed)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid chain id: overflow uint64")
+}
+
 var _ *ecdsa.PrivateKey

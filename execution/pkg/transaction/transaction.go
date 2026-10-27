@@ -234,7 +234,7 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 	switch tx.Type {
 	case e_types.LegacyTxType:
 		var toAddress *common.Address
-		if len(tx.ToAddress) > 0 {
+		if len(tx.ToAddress) > 0 && !t.IsDeployContract() {
 			addr := common.BytesToAddress(tx.ToAddress)
 			toAddress = new(common.Address)
 			*toAddress = addr
@@ -270,7 +270,7 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 
 	case e_types.AccessListTxType: // EIP-2930
 		var toAddress *common.Address
-		if len(tx.ToAddress) > 0 {
+		if len(tx.ToAddress) > 0 && !t.IsDeployContract() {
 			addr := common.BytesToAddress(tx.ToAddress)
 			toAddress = new(common.Address)
 			*toAddress = addr
@@ -317,7 +317,7 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 
 	case e_types.DynamicFeeTxType: // EIP-1559
 		var toAddress *common.Address
-		if len(tx.ToAddress) > 0 {
+		if len(tx.ToAddress) > 0 && !t.IsDeployContract() {
 			addr := common.BytesToAddress(tx.ToAddress)
 			toAddress = new(common.Address)
 			*toAddress = addr
@@ -525,16 +525,43 @@ func (t *Transaction) Unmarshal(b []byte) error {
 
 // Kiểm tra giao dịch có phải là Deploy Contract không
 func (t *Transaction) IsDeployContract() bool {
+	if t == nil || t.proto == nil {
+		return false
+	}
+	if len(t.proto.RawEnvelope) > 0 {
+		if ethTx, err := t.envelopeEthTx(); err == nil {
+			return ethTx.To() == nil
+		}
+	}
+	if len(t.proto.ToAddress) == 0 {
+		return t.FromAddress() != (common.Address{}) && (len(t.Data()) > 0 || t.DeployData() != nil)
+	}
 	return t.FromAddress() != t.ToAddress() && t.ToAddress() == (common.Address{}) && len(t.Data()) > 0
 }
 
 // Kiểm tra giao dịch có phải là Call Contract không
 func (t *Transaction) IsCallContract() bool {
+	if t == nil || t.proto == nil {
+		return false
+	}
+	if len(t.proto.RawEnvelope) > 0 {
+		if ethTx, err := t.envelopeEthTx(); err == nil {
+			return ethTx.To() != nil && len(ethTx.Data()) > 0
+		}
+	}
 	return t.ToAddress() != (common.Address{}) && len(t.Data()) > 0
 }
 
 // Kiểm tra giao dịch có phải là chuyển tiền thông thường không
 func (t *Transaction) IsRegularTransaction() bool {
+	if t == nil || t.proto == nil {
+		return false
+	}
+	if len(t.proto.RawEnvelope) > 0 {
+		if ethTx, err := t.envelopeEthTx(); err == nil {
+			return ethTx.To() != nil && len(ethTx.Data()) == 0
+		}
+	}
 	return t.ToAddress() != (common.Address{}) && len(t.Data()) == 0
 }
 
@@ -1130,6 +1157,14 @@ func (t *Transaction) CallData() types.CallData {
 }
 
 func (t *Transaction) GetData() []byte {
+	if t == nil || t.proto == nil {
+		return nil
+	}
+	if len(t.proto.RawEnvelope) > 0 {
+		if ethTx, err := t.envelopeEthTx(); err == nil {
+			return ethTx.Data()
+		}
+	}
 	if t.IsCallContract() {
 		return t.CallData().Input()
 	}
@@ -1655,7 +1690,7 @@ func (t *Transaction) ValidPendingUse(fromAccountState types.AccountState) bool 
 
 func (t *Transaction) ValidDeployData() bool {
 	if t.IsDeployContract() {
-		if t.DeployData() == nil || len(t.DeployData().Code()) == 0 {
+		if t.DeployData() == nil {
 			logger.Warn("Deploy data is nil")
 			return false
 		}
@@ -1770,8 +1805,8 @@ func prepareTransactionSpecificData(
 	txData := ethTx.Data()
 	ethRecipient := ethTx.To() // This is *common.Address
 
-	if len(txData) > 0 && ethRecipient == nil {
-		// Case 1: Contract Deployment
+	if ethRecipient == nil {
+		// Case 1: Contract Deployment (including empty initcode)
 		// For contract creation, 'toAddress' is conventionally the zero address,
 		// but your NewTransaction might expect common.Address{} which is fine.
 		// The actual contract address is computed later from sender and nonce.
@@ -1785,7 +1820,7 @@ func prepareTransactionSpecificData(
 			return nil, fmt.Errorf("error marshalling DeployData: %w", err)
 		}
 
-	} else if len(txData) > 0 && ethRecipient != nil {
+	} else if len(txData) > 0 {
 		// Case 2: Contract Call
 
 		// Using NewCallData from the current 'transaction' package
@@ -1796,13 +1831,9 @@ func prepareTransactionSpecificData(
 			return nil, fmt.Errorf("error marshalling CallData: %w", err)
 		}
 
-	} else if len(txData) == 0 && ethRecipient != nil {
+	} else {
 		// Case 3: Simple Transfer (or transaction with no data to a specific account)
 		bData = nil // No specific data (DeployData/CallData) to marshal
-
-	} else if len(txData) == 0 && ethRecipient == nil {
-
-		bData = nil
 	}
 
 	return bData, nil

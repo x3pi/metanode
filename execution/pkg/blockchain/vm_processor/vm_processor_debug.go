@@ -102,7 +102,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdDebug(
 
 	mvmDebug := mvm.GetOrCreateMVMApi(mvmIdDebug, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 	mvmDebug.SetRelatedAddresses(tx.RelatedAddresses())
-	mvmDebug.SetAccessList(tx.EthAccessList())
+	mvmDebug.SetAccessList(vmP.getTxAccessList(tx))
 
 	result := vmP.callDebug(debugCtx, tx, mvmDebug) // Truyền debugCtx
 	if span != nil {                                // GUARD
@@ -306,7 +306,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdSub(
 
 	mvmSub := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 	mvmSub.SetRelatedAddresses(tx.RelatedAddresses())
-	mvmSub.SetAccessList(tx.EthAccessList())
+	mvmSub.SetAccessList(vmP.getTxAccessList(tx))
 	rs, status := vmP.onlyCall(subCtx, tx, mvmSub) // Truyền subCtx
 	if span != nil {                               // GUARD
 		span.AddEvent("SubCallResult", map[string]interface{}{
@@ -501,7 +501,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdSubDeploy(
 
 	mvmSubDeploy := mvm.GetOrCreateMVMApi(mvmId, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 	mvmSubDeploy.SetRelatedAddresses(tx.RelatedAddresses())
-	mvmSubDeploy.SetAccessList(tx.EthAccessList())
+	mvmSubDeploy.SetAccessList(vmP.getTxAccessList(tx))
 
 	rs, status := vmP.onlyDeploy(subDeployCtx, tx, mvmSubDeploy) // Truyền subDeployCtx
 
@@ -645,7 +645,7 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 	// Lấy hoặc tạo MVM API instance
 	mvmE := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.smartContractDB, vmP.accountStateDB, false)
 	mvmE.SetRelatedAddresses(tx.RelatedAddresses()) // Đặt các địa chỉ liên quan cho tính nhất quán
-	mvmE.SetAccessList(tx.EthAccessList())
+	mvmE.SetAccessList(vmP.getTxAccessList(tx))
 	if isCache {
 		defer mvm.UnprotectMVMApi(vmP.mvmId)
 	}
