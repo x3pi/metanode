@@ -1256,9 +1256,10 @@ func (t *Transaction) GasPriceCap() *big.Int {
 // EXECUTION gas (never blob gas, which is priced/charged separately — see
 // MaxFeePerBlobGas).
 // Under ADR D2 (flat fee model v1):
-// - Legacy/EIP-2930/Type 0xFF: flat MaxGasPrice
-// - EIP-1559, EIP-4844, EIP-7702: min(maxFeePerGas, F + maxPriorityFeePerGas)
-//   where F = MINIMUM_BASE_FEE (100,000 wei).
+//   - Legacy/EIP-2930/Type 0xFF: flat MaxGasPrice
+//   - EIP-1559, EIP-4844, EIP-7702: min(maxFeePerGas, F + maxPriorityFeePerGas)
+//     where F = MINIMUM_BASE_FEE (100,000 wei).
+//
 // Used for fee charging, receipt effectiveGasPrice, and eth_getTransactionByHash.gasPrice.
 func (t *Transaction) EffectiveGasPrice() *big.Int {
 	switch t.proto.Type {

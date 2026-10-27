@@ -279,15 +279,15 @@ func TestEIP7702_ContractSubcallChainedDelegationRollback(t *testing.T) {
 				0x60, 0x00, // PUSH1 0 (argsLength)
 				0x60, 0x00, // PUSH1 0 (argsOffset)
 				0x60, 0x64, // PUSH1 100 (value = 100 wei)
-				0x73,       // PUSH20
+				0x73, // PUSH20
 			}
 			callerCode = append(callerCode, addrA.Bytes()...)
 			callerCode = append(callerCode,
 				0x61, 0xff, 0xff, // PUSH2 0xffff (gas)
-				0xf1,             // CALL
-				0x60, 0x00,       // PUSH1 0 (slot 0)
-				0x55,             // SSTORE
-				0x00,             // STOP
+				0xf1,       // CALL
+				0x60, 0x00, // PUSH1 0 (slot 0)
+				0x55, // SSTORE
+				0x00, // STOP
 			)
 
 			// Seed accounts in MVM
@@ -442,15 +442,15 @@ func TestEIP7702_ContractSubcallStaticAndDelegateCall(t *testing.T) {
 				0x60, 0x00, // PUSH1 0 (out_offset)
 				0x60, 0x00, // PUSH1 0 (in_size)
 				0x60, 0x00, // PUSH1 0 (in_offset)
-				0x73,       // PUSH20
+				0x73, // PUSH20
 			}
 			callerCode = append(callerCode, addrA.Bytes()...)
 			callerCode = append(callerCode,
 				0x61, 0xff, 0xff, // PUSH2 0xffff (gas)
-				tc.opcode,        // STATICCALL or DELEGATECALL
-				0x60, 0x00,       // PUSH1 0 (slot 0)
-				0x55,             // SSTORE
-				0x00,             // STOP
+				tc.opcode,  // STATICCALL or DELEGATECALL
+				0x60, 0x00, // PUSH1 0 (slot 0)
+				0x55, // SSTORE
+				0x00, // STOP
 			)
 
 			seedAccount(t, cs, sender, big.NewInt(1_000_000_000_000_000), 1)
@@ -564,8 +564,8 @@ func TestEIP7702_StateStorageAndCallerContext(t *testing.T) {
 		0x55,       // SSTORE
 		0x30,       // ADDRESS
 		0x60, 0x01, // PUSH1 1
-		0x55,       // SSTORE
-		0x00,       // STOP
+		0x55, // SSTORE
+		0x00, // STOP
 	}
 
 	seedAccount(t, cs, sender, big.NewInt(1_000_000_000_000_000), 1)
@@ -675,7 +675,7 @@ func TestEIP7702_ExplicitRevertRollback(t *testing.T) {
 	codeC := []byte{
 		0x60, 0x00, // PUSH1 0
 		0x60, 0x00, // PUSH1 0
-		0xfd,       // REVERT
+		0xfd, // REVERT
 	}
 
 	seedAccount(t, cs, sender, big.NewInt(1_000_000_000_000_000), 1)
