@@ -47,3 +47,19 @@ func EffectiveAccessList(tx types.Transaction, chainID *big.Int) e_types.AccessL
 	}
 	return al
 }
+
+// EffectiveGasPriceUint64 returns the execution gas price paid by the sender as uint64,
+// dispatching per tx type (flat MaxGasPrice for Legacy/EIP-2930/Type 0xFF,
+// min(GasFeeCap, MINIMUM_BASE_FEE + GasTipCap) for EIP-1559/EIP-4844/EIP-7702).
+func EffectiveGasPriceUint64(tx types.Transaction) uint64 {
+	if tx == nil {
+		return 0
+	}
+	if eff := tx.EffectiveGasPrice(); eff != nil {
+		if !eff.IsUint64() {
+			return ^uint64(0)
+		}
+		return eff.Uint64()
+	}
+	return tx.MaxGasPrice()
+}

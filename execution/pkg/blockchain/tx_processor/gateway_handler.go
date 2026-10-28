@@ -580,7 +580,7 @@ func executeContractCallForGateway(
 		target.Bytes(),
 		payload,
 		amount,
-		tx.MaxGasPrice(),
+		transaction.EffectiveGasPriceUint64(tx),
 		gasLimit,
 		lastBlockHeader.TimeStamp(),
 		mt_common.BLOCK_GAS_LIMIT,

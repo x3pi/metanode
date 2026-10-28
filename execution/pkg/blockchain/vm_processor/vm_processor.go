@@ -95,7 +95,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 			"to":           tx.ToAddress().Hex(),
 			"value":        tx.Amount().String(),
 			"gasLimit":     tx.MaxGas(),
-			"gasPrice":     tx.MaxGasPrice(),
+			"gasPrice":     vmP.getTxEffectiveGasPrice(tx),
 			"nonce":        tx.GetNonce(),
 			"isReadOnly":   tx.GetReadOnly(),
 			"isDeploy":     tx.IsDeployContract(),
@@ -237,7 +237,7 @@ func (vmP *VmProcessor) deploySmartContract(
 			"from":          tx.FromAddress().Hex(),
 			"value":         tx.Amount().String(),
 			"gasLimit":      tx.MaxGas(),
-			"gasPrice":      tx.MaxGasPrice(),
+			"gasPrice":      vmP.getTxEffectiveGasPrice(tx),
 			"nonce":         tx.GetNonce(),
 			"codeSizeBytes": len(tx.DeployData().Code()),
 		})
@@ -268,7 +268,7 @@ func (vmP *VmProcessor) deploySmartContract(
 		return nil, fmt.Errorf("computing intrinsic gas: %w", err)
 	}
 	mvmResult := mvmE.Deploy( // Luôn gọi MVM
-		tx.FromAddress().Bytes(), tx.DeployData().Code(), tx.Amount(), tx.MaxGasPrice(), vmGasBudget(intrinsicGas, maxGas),
+		tx.FromAddress().Bytes(), tx.DeployData().Code(), tx.Amount(), vmP.getTxEffectiveGasPrice(tx), vmGasBudget(intrinsicGas, maxGas),
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmId, tx.Hash().Bytes(), tx.GetIsDebug(), isCache, false,
 	)
@@ -313,7 +313,7 @@ func (vmP *VmProcessor) readOnlyCall(
 			"to":          tx.ToAddress().Hex(),
 			"value":       tx.Amount().String(),
 			"gasLimit":    tx.MaxGas(),
-			"gasPrice":    tx.MaxGasPrice(),
+			"gasPrice":    vmP.getTxEffectiveGasPrice(tx),
 			"inputLen":    len(tx.CallData().Input()),
 			"inputHex":    hex.EncodeToString(tx.CallData().Input()),
 			"blockNumber": lastBlockHeader.BlockNumber() + 1,
@@ -345,7 +345,7 @@ func (vmP *VmProcessor) readOnlyCall(
 		return nil, fmt.Errorf("computing intrinsic gas: %w", err)
 	}
 	mvmResult := mvmE.Call( // Luôn gọi MVM
-		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), vmGasBudget(intrinsicGas, maxGas),
+		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), vmP.getTxEffectiveGasPrice(tx), vmGasBudget(intrinsicGas, maxGas),
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), true, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
 	)
@@ -393,7 +393,7 @@ func (vmP *VmProcessor) executeSmartContract(
 			"to":          tx.ToAddress().Hex(),
 			"value":       tx.Amount().String(),
 			"gasLimit":    tx.MaxGas(),
-			"gasPrice":    tx.MaxGasPrice(),
+			"gasPrice":    vmP.getTxEffectiveGasPrice(tx),
 			"nonce":       hex.EncodeToString(tx.GetNonce32Bytes()),
 			"inputLen":    len(tx.CallData().Input()),
 			"inputHex":    hex.EncodeToString(tx.CallData().Input()),
@@ -428,7 +428,7 @@ func (vmP *VmProcessor) executeSmartContract(
 
 	if isCache {
 		mvmResult = mvmE.Execute( // Luôn gọi MVM
-			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), vmGas,
+			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), vmP.getTxEffectiveGasPrice(tx), vmGas,
 			lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 			lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(),
 			isCache,
@@ -436,7 +436,7 @@ func (vmP *VmProcessor) executeSmartContract(
 
 	} else {
 		mvmResult = mvmE.Call( // Luôn gọi MVM
-			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), vmGas,
+			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), vmP.getTxEffectiveGasPrice(tx), vmGas,
 			lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 			lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), false, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), false,
 		)
@@ -487,7 +487,7 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(
 			"to":            to.Hex(),
 			"value":         amount.String(),
 			"gasLimit":      tx.MaxGas(),
-			"gasPrice":      tx.MaxGasPrice(),
+			"gasPrice":      vmP.getTxEffectiveGasPrice(tx),
 			"operationType": operationType, // 0: mint, 1: burn
 			"blockNumber":   lastBlockHeader.BlockNumber() + 1,
 			"blockTs":       vmP.blockTime,
@@ -526,7 +526,7 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(
 	}
 
 	mvmResult := mvmE.ProcessNativeMintBurn( // Call MVM ProcessNativeMintBurn
-		bFrom, bTo, amount, operationType, tx.MaxGasPrice(), maxGas,
+		bFrom, bTo, amount, operationType, vmP.getTxEffectiveGasPrice(tx), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(),
 		false,
@@ -589,7 +589,7 @@ func (vmP *VmProcessor) sendNative(
 			"to":          tx.ToAddress().Hex(),
 			"value":       tx.Amount().String(),
 			"gasLimit":    tx.MaxGas(),
-			"gasPrice":    tx.MaxGasPrice(),
+			"gasPrice":    vmP.getTxEffectiveGasPrice(tx),
 			"nonce":       hex.EncodeToString(tx.GetNonce32Bytes()),
 			"inputLen":    len(tx.CallData().Input()),
 			"inputHex":    hex.EncodeToString(tx.CallData().Input()),
@@ -616,7 +616,7 @@ func (vmP *VmProcessor) sendNative(
 		maxGas = uint64(mt_common.MAX_GASS_FEE)
 	}
 	mvmResult := mvmE.SendNative( // Luôn gọi MVM
-		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.Amount(), tx.MaxGasPrice(), maxGas,
+		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.Amount(), vmP.getTxEffectiveGasPrice(tx), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(),
 		isCache,
@@ -706,4 +706,11 @@ func (vmP *VmProcessor) getTxAccessList(tx types.Transaction) eth_types.AccessLi
 		chainID = vmP.chainState.GetConfig().ChainId
 	}
 	return transaction.EffectiveAccessList(tx, chainID)
+}
+
+// getTxEffectiveGasPrice returns the execution gas price paid by the sender as uint64,
+// dispatching per tx type (flat MaxGasPrice for Legacy/EIP-2930/Type 0xFF,
+// min(GasFeeCap, MINIMUM_BASE_FEE + GasTipCap) for EIP-1559/EIP-4844/EIP-7702).
+func (vmP *VmProcessor) getTxEffectiveGasPrice(tx types.Transaction) uint64 {
+	return transaction.EffectiveGasPriceUint64(tx)
 }
