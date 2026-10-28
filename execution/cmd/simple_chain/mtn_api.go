@@ -778,9 +778,18 @@ func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, am
 	if err != nil {
 		return "", fmt.Errorf("failed to query account registry: %w", err)
 	}
+	if !found && blsKeyHex != nil && strings.TrimSpace(*blsKeyHex) != "" {
+		rawKey := common.FromHex(strings.TrimSpace(*blsKeyHex))
+		if len(rawKey) == len(destPubKey) {
+			copy(destPubKey[:], rawKey)
+			found = true
+		}
+	}
 	if !found {
-		// FALLBACK FOR DEVNET TEST: If not found, just use local node's pubkey
-		destPubKey = api.App.keyPair.PublicKey()
+		return "", fmt.Errorf("recipient %s not found in parent chain registry and no destination cluster BLS key provided", targetAddr.Hex())
+	}
+	if destPubKey == api.App.keyPair.PublicKey() {
+		return "", fmt.Errorf("cannot send cross-chain transfer to the same cluster (recipient %s resolves to local cluster)", targetAddr.Hex())
 	}
 
 	// Sender is the devnet-only test account funded in run_devnet.sh's genesis (see
@@ -801,9 +810,15 @@ func (api *MtnAPI) SendCrossChainTransfer(ctx context.Context, target string, am
 		return "", fmt.Errorf("failed to load sender account state: %w", err)
 	}
 
-	nonce := uint64(0)
+	var stateNonce uint64
 	if accountState != nil {
-		nonce = accountState.Nonce()
+		stateNonce = accountState.Nonce()
+	}
+	nonce := stateNonce
+	if api.App != nil && api.App.transactionProcessor != nil {
+		if pool := api.App.transactionProcessor.GetTransactionPool(); pool != nil {
+			nonce = pool.GetPendingNonce(senderAddr, stateNonce)
+		}
 	}
 
 	// data = destPubKey (48 bytes) || payloadHash (32 bytes) || targetAddr (20 bytes), matching

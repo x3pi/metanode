@@ -72,7 +72,8 @@ func (w *SendWorker) Start() {
 			log.Printf("SendWorker: syncing FloatSeq forward. Local=%d, Remote=%d", localSeq, remoteSeq)
 			_ = w.store.SetFloatSeq(remoteSeq)
 		} else if localSeq > remoteSeq {
-			log.Printf("ERROR: SendWorker: local FloatSeq (%d) is greater than remote (%d). This is abnormal! Refusing to auto-fix to prevent forks.", localSeq, remoteSeq)
+			log.Printf("SendWorker: local FloatSeq (%d) is ahead of Parent Chain remote (%d). Aligning FloatSeq with Parent Chain to recover.", localSeq, remoteSeq)
+			_ = w.store.SetFloatSeq(remoteSeq)
 		}
 	} else {
 		log.Printf("SendWorker: failed to GetFloatSeq on start: %v", err)
@@ -172,8 +173,12 @@ func (w *SendWorker) processPending() bool {
 				continue
 			}
 			if !found {
-				log.Printf("SendWorker: account %s not found in registry, cannot route", rec.Target.Hex())
-				continue
+				if rec.DestPubKey != (cm.PublicKey{}) {
+					destPubKey = rec.DestPubKey
+				} else {
+					log.Printf("SendWorker: account %s not found in registry, cannot route", rec.Target.Hex())
+					continue
+				}
 			}
 
 			// Prepare message digest to sign
@@ -211,7 +216,13 @@ func (w *SendWorker) processPending() bool {
 					if _, recFound, checkErr := w.client.GetTransferRecord(rec.MessageID); checkErr == nil && recFound {
 						log.Printf("SendWorker: msgID %x returned '%v' but record exists on parent chain, advancing to check confirmation", rec.MessageID, err)
 					} else {
-						log.Printf("SendWorker: msgID %x returned 'wrong nonce' (seq %d) and not found on parent chain, pausing to let nonce settle", rec.MessageID, rec.SourceSeq)
+						log.Printf("SendWorker: msgID %x returned 'wrong nonce' (seq %d) and not found on parent chain, aligning with parent chain", rec.MessageID, rec.SourceSeq)
+						if remoteSeq, sErr := w.client.GetFloatSeq(w.blsKeyPair.PublicKey()); sErr == nil && rec.SourceSeq != remoteSeq {
+							log.Printf("SendWorker: aligning local FloatSeq (%d -> %d) with Parent Chain to recover", rec.SourceSeq, remoteSeq)
+							_ = w.store.SetFloatSeq(remoteSeq)
+							rec.SourceSeq = remoteSeq
+							_ = w.store.Put(rec)
+						}
 						break
 					}
 				} else {

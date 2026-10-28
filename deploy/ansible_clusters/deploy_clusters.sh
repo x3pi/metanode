@@ -329,11 +329,11 @@ resolve_target_host() {
 
 # ── Early Exit for Export Config ─────────────────────────────────────────────
 if [ "$EXPORT_CONFIG_ONLY" = "true" ]; then
-    echo "📢 Exporting configuration to /tmp..."
+    echo "📢 Exporting configuration to ${RPC_NODES_FILE}..."
     if [ -f "$INVENTORY" ] && [ -f "${SCRIPT_DIR}/scripts/parse_inventory.py" ]; then
-        python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" export
+        python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" export "$RPC_NODES_FILE"
         echo "✅ Successfully exported configuration to:"
-        echo "   • /tmp/rpc_nodes.json"
+        echo "   • ${RPC_NODES_FILE}"
         exit 0
     else
         echo "❌ Inventory ($INVENTORY) or parse_inventory.py not found"

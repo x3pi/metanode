@@ -25,8 +25,13 @@
     ).stdout.decode(errors="replace")
     pid_match = re.search(r"pid=(\d+)", listener)
 
-    if not expected_match or not pid_match:
+    if not pid_match:
         print("restart-required")
+        raise SystemExit(0)
+
+    if not expected_match:
+        # If no token is configured in security.env and listener is active, node is already in-sync
+        print("in-sync")
         raise SystemExit(0)
 
     pid = pid_match.group(1)
@@ -55,7 +60,9 @@
   no_log: true
 
 - name: Restart Parent Chain when its RPC token is stale
-  when: parent_chain_security_env.changed or parent_chain_token_state.stdout == 'restart-required'
+  when:
+    - deploy_action not in ['test', 'test_only']
+    - parent_chain_security_env.changed or parent_chain_token_state.stdout == 'restart-required'
   block:
     - name: Restart Parent Chain via systemd
       ansible.builtin.systemd:

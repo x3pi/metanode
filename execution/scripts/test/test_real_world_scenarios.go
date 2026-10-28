@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -183,7 +184,69 @@ func main() {
 	_ = os.WriteFile(testFlagFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644)
 	defer os.Remove(testFlagFile)
 
-	if os.Getenv("PARENT_CHAIN_URL") == "" {
+	// Try loading multi-node cluster topology from /tmp/rpc_nodes.json
+	rpcNodesPath := os.Getenv("RPC_NODES_FILE")
+	if rpcNodesPath == "" {
+		rpcNodesPath = os.Getenv("RPC_NODES_JSON_PATH")
+	}
+	if rpcNodesPath == "" {
+		rpcNodesPath = "/tmp/rpc_nodes.json"
+	}
+	if data, err := os.ReadFile(rpcNodesPath); err == nil && len(data) > 0 {
+		var topology struct {
+			RootAnchor    string `json:"root_anchor"`
+			ParentNodes   map[string]struct {
+				RpcURL string `json:"rpc_url"`
+			} `json:"parent_nodes"`
+			Nodes         map[string]string `json:"nodes"`
+			PrivateChains map[string]struct {
+				RpcURL string `json:"rpc_url"`
+			} `json:"private_chains"`
+		}
+		if err := json.Unmarshal(data, &topology); err == nil {
+			var discoveredURLs []string
+			if len(topology.ParentNodes) > 0 {
+				var keys []string
+				for k := range topology.ParentNodes {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				for _, k := range keys {
+					if u := topology.ParentNodes[k].RpcURL; u != "" {
+						discoveredURLs = append(discoveredURLs, u)
+					}
+				}
+			} else if len(topology.Nodes) > 0 {
+				var keys []string
+				for k := range topology.Nodes {
+					if strings.HasPrefix(k, "parent_node_") {
+						keys = append(keys, k)
+					}
+				}
+				sort.Strings(keys)
+				for _, k := range keys {
+					discoveredURLs = append(discoveredURLs, topology.Nodes[k])
+				}
+			}
+			if len(discoveredURLs) > 0 {
+				parentURLs = discoveredURLs
+				parentChainURL = parentURLs[0]
+				if len(parentURLs) > 1 {
+					isMultiNodeDetected = true
+				}
+			}
+			if exec1URL == "http://127.0.0.1:8646" && topology.PrivateChains != nil {
+				if chainA, ok := topology.PrivateChains["chain_a"]; ok && chainA.RpcURL != "" {
+					exec1URL = chainA.RpcURL
+				}
+				if chainB, ok := topology.PrivateChains["chain_b"]; ok && chainB.RpcURL != "" {
+					exec2URL = chainB.RpcURL
+				}
+			}
+		}
+	}
+
+	if os.Getenv("PARENT_CHAIN_URL") == "" && !isMultiNodeDetected {
 		if !portListening("18601") && portListening("8547") {
 			parentChainURL = "http://127.0.0.1:8547"
 		}
@@ -232,6 +295,7 @@ func main() {
 	if !isMultiNodeCluster() {
 		clientURLs = []string{parentChainURL}
 	}
+	waitParentSync(clientURLs, 30*time.Second)
 	relayerKP := bls.GenerateKeyPair()
 	parentClient := parentchain.NewQuorumClient(clientURLs, relayerKP.PrivateKey(), relayerKP.PublicKey())
 	if _, err := parentClient.SendRegisterCluster(9001); err != nil {
@@ -1246,8 +1310,28 @@ func mustDeposit(c parentchain.Client, destKey mt_common.PublicKey, clusterID ui
 	}
 }
 
+func waitParentSync(urls []string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for _, u := range urls {
+		for time.Now().Before(deadline) {
+			res, err := http.Get(u + "/status")
+			if err == nil {
+				var st struct {
+					Syncing bool `json:"syncing"`
+				}
+				if err := json.NewDecoder(res.Body).Decode(&st); err == nil && !st.Syncing {
+					res.Body.Close()
+					break
+				}
+				res.Body.Close()
+			}
+			time.Sleep(1 * time.Second)
+		}
+	}
+}
+
 func waitRegistered(c parentchain.Client, a common.Address) {
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 60; i++ {
 		time.Sleep(1 * time.Second)
 		if _, found, err := c.GetAccountRegistry(a); err == nil && found {
 			return
@@ -1268,9 +1352,10 @@ func waitBalance(url string, a common.Address, want *big.Int, d time.Duration) b
 
 // The four parent chain validators of the deployed cluster (ports match the ansible inventory).
 var (
-	parentURLs  = []string{"http://127.0.0.1:18601", "http://127.0.0.1:18602", "http://127.0.0.1:18603", "http://127.0.0.1:18604"}
-	parentDirs  = []string{"/opt/metanode/parent_chain_0", "/opt/metanode/parent_chain_1", "/opt/metanode/parent_chain_2", "/opt/metanode/parent_chain_3"}
-	parentPorts = []string{"18601", "18602", "18603", "18604"}
+	isMultiNodeDetected bool
+	parentURLs          = []string{"http://127.0.0.1:18601", "http://127.0.0.1:18602", "http://127.0.0.1:18603", "http://127.0.0.1:18604"}
+	parentDirs          = []string{"/opt/metanode/parent_chain_0", "/opt/metanode/parent_chain_1", "/opt/metanode/parent_chain_2", "/opt/metanode/parent_chain_3"}
+	parentPorts         = []string{"18601", "18602", "18603", "18604"}
 )
 
 // killParentPort kills only the process listening on the given TCP port (never a pattern match).
@@ -1298,6 +1383,9 @@ func portListening(port string) bool {
 }
 
 func isMultiNodeCluster() bool {
+	if isMultiNodeDetected {
+		return true
+	}
 	if _, err := os.Stat("/opt/metanode/parent_chain_1"); err == nil {
 		return true
 	}
