@@ -723,7 +723,6 @@ func (stm *TrueBlockSTM) execOne(
 		// calling processAuthorizationList, which no-ops on an empty list
 		// anyway) so the overwhelming majority of non-SetCode txs skip
 		// touching chainState.GetConfig() entirely on this hot path.
-		var selfAuthorized bool
 		var authGasRefund uint64
 		var senderFinalNonce uint64 = tx.GetNonce() + 1
 		if len(tx.AuthorizationList()) > 0 {
@@ -731,7 +730,7 @@ func (stm *TrueBlockSTM) execOne(
 			// self-authorization validates against tx.Nonce + 1 per spec.
 			_ = mvccDB.PlusOneNonce(tx.FromAddress())
 
-			authGasRefund, selfAuthorized = processAuthorizationList(tx, chainState.GetConfig().ChainId.Uint64(), mvccDB, chainState.GetSmartContractDB())
+			authGasRefund, _ = processAuthorizationList(tx, chainState.GetConfig().ChainId.Uint64(), mvccDB, chainState.GetSmartContractDB())
 			// processAuthorizationList reads each authority through mvccDB; an ESTIMATE hit there makes it skip that
 			// authority silently (the tx would still succeed with the authorization dropped), so wait for the
 			// blocking tx and re-execute instead. Pass mvccDB/scDB: their Set* calls already wrote earlier
@@ -743,10 +742,12 @@ func (stm *TrueBlockSTM) execOne(
 				stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
 				return
 			}
-			if selfAuthorized {
-				senderFinalNonce = tx.GetNonce() + 2
-			} else {
-				senderFinalNonce = tx.GetNonce() + 1
+			// EIP-7702: sender nonce is incremented once for the transaction itself (tx.Nonce + 1)
+			// plus once for each valid self-authorization tuple in the list (auth.Nonce + 1).
+			// processAuthorizationList already updated mvccDB with each valid tuple, so sender's
+			// current nonce in mvccDB reflects the exact final nonce across single or multiple self-authorizations.
+			if senderAcc, err := mvccDB.AccountState(tx.FromAddress()); err == nil && senderAcc != nil {
+				senderFinalNonce = senderAcc.Nonce()
 			}
 		}
 
