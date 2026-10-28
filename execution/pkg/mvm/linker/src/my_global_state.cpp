@@ -126,6 +126,10 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker) {
                               accountQueryData.code_p +
                                   accountQueryData.code_length);
     uint256_t nonce = from_big_endian(accountQueryData.nonce, 32u);
+    auto itNonce = addresses_nonce_change.find(addr);
+    if (itNonce != addresses_nonce_change.end()) {
+      nonce = itNonce->second;
+    }
 
     insert({MyAccount(addr, balance, code, nonce),
             MyStorage(addr, blockContext.mvmId, isCache)});
@@ -458,6 +462,13 @@ void MyGlobalState::add_addresses_add_balance_change(const Address &addr,
 void MyGlobalState::set_addresses_nonce_change(const Address &addr,
                                                const uint256_t &nonce) {
   addresses_nonce_change[addr] = nonce;
+  auto it = accounts.find(addr);
+  if (it != accounts.end()) {
+    it->second.first.set_nonce(static_cast<size_t>(nonce));
+  }
+  if (isCache && State::instanceExists(addr)) {
+    State::getInstance(addr)->setNonce(nonce);
+  }
 };
 
 void MyGlobalState::add_addresses_sub_balance_change(const Address &addr,

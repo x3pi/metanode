@@ -33,6 +33,7 @@ type VmProcessor struct {
 	tracingEnabled  bool
 	blockTime       uint64
 	leaderAddr      common.Address
+	authGasRefund   uint64
 }
 
 // NewVmProcessor tạo một thực thể VmProcessor mới và thiết lập trạng thái trace.
@@ -54,6 +55,10 @@ func (vmP *VmProcessor) SetAccountStateDB(db types.AccountStateDB) {
 
 func (vmP *VmProcessor) SetSmartContractDB(db types.SmartContractDB) {
 	vmP.smartContractDB = db
+}
+
+func (vmP *VmProcessor) SetAuthGasRefund(refund uint64) {
+	vmP.authGasRefund = refund
 }
 
 func (vmP *VmProcessor) getLeaderAddress(lastBlockHeader types.BlockHeader) common.Address {
@@ -272,7 +277,7 @@ func (vmP *VmProcessor) deploySmartContract(
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmId, tx.Hash().Bytes(), tx.GetIsDebug(), isCache, false,
 	)
-	applyIntrinsicGas(mvmResult, intrinsicGas, maxGas)
+	applyIntrinsicGas(mvmResult, intrinsicGas, maxGas, vmP.authGasRefund)
 	if span != nil { // GUARD
 		span.AddEvent("MvmDeployFinished", map[string]interface{}{
 			"status":        mvmResult.Status.String(),
@@ -349,7 +354,7 @@ func (vmP *VmProcessor) readOnlyCall(
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), true, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
 	)
-	applyIntrinsicGas(mvmResult, intrinsicGas, maxGas)
+	applyIntrinsicGas(mvmResult, intrinsicGas, maxGas, vmP.authGasRefund)
 
 	if span != nil { // GUARD
 		span.AddEvent("MvmCallReadOnlyFinished", map[string]interface{}{
@@ -442,7 +447,7 @@ func (vmP *VmProcessor) executeSmartContract(
 		)
 
 	}
-	applyIntrinsicGas(mvmResult, intrinsicGas, maxGas)
+	applyIntrinsicGas(mvmResult, intrinsicGas, maxGas, vmP.authGasRefund)
 
 	if span != nil { // GUARD
 		span.AddEvent("MvmExecuteFinished", map[string]interface{}{

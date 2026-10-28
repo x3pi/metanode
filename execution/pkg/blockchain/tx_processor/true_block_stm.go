@@ -724,13 +724,18 @@ func (stm *TrueBlockSTM) execOne(
 		// anyway) so the overwhelming majority of non-SetCode txs skip
 		// touching chainState.GetConfig() entirely on this hot path.
 		var authGasRefund uint64
+		isCall := !tx.IsDeployContract()
+		if isCall {
+			// Standard Ethereum execution order (Yellow Paper Section 6 / go-ethereum TransitionDb):
+			// For non-deploy transactions (calls), sender nonce is incremented by 1 BEFORE EVM execution starts.
+			// This ensures that if the sender executes CREATE (e.g. via an EIP-7702 delegation), the EVM
+			// creates the contract using the post-transaction nonce (tx.Nonce + 1), matching go-ethereum.
+			_ = mvccDB.PlusOneNonce(tx.FromAddress())
+		}
 		var senderFinalNonce uint64 = tx.GetNonce() + 1
 		if len(tx.AuthorizationList()) > 0 {
-			// EIP-7702 (F1): increment sender nonce before processing authorizations so
-			// self-authorization validates against tx.Nonce + 1 per spec.
-			_ = mvccDB.PlusOneNonce(tx.FromAddress())
-
 			authGasRefund, _ = processAuthorizationList(tx, chainState.GetConfig().ChainId.Uint64(), mvccDB, chainState.GetSmartContractDB())
+			vmP.SetAuthGasRefund(authGasRefund)
 			// processAuthorizationList reads each authority through mvccDB; an ESTIMATE hit there makes it skip that
 			// authority silently (the tx would still succeed with the authorization dropped), so wait for the
 			// blocking tx and re-execute instead. Pass mvccDB/scDB: their Set* calls already wrote earlier
@@ -840,11 +845,7 @@ func (stm *TrueBlockSTM) execOne(
 			}
 
 			// Always update nonce and state hashes even if balance deduction fails (prevents infinite replay)
-			if len(tx.AuthorizationList()) == 0 {
-				mvccDB.PlusOneNonce(tx.FromAddress())
-			} else {
-				mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
-			}
+			mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
 			mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
 			mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 			commitDeviceKeyIfPending(chainState, tx.Hash())
@@ -912,7 +913,7 @@ func (stm *TrueBlockSTM) execOne(
 			}
 
 			if err != nil {
-				if len(tx.AuthorizationList()) > 0 {
+				if isCall {
 					mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
 				}
 				logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
@@ -1070,12 +1071,20 @@ func (stm *TrueBlockSTM) execOne(
 									for addrHex, newNonceBytes := range exRs.MapNonce() {
 										addr := common.HexToAddress(addrHex)
 										if addr == tx.FromAddress() {
-											// For tx with AuthorizationList, sender nonce is strictly senderFinalNonce
-											// (already applied upfront). For regular tx, apply MapNonce so that internal
-											// CREATE operations executed by delegated sender code are preserved.
-											if len(tx.AuthorizationList()) == 0 {
-												newNonce := big.NewInt(0).SetBytes(newNonceBytes).Uint64()
+											newNonce := big.NewInt(0).SetBytes(newNonceBytes).Uint64()
+											if !isCall {
 												mvccDB.SetNonce(addr, newNonce)
+											} else {
+												// Calls / EIP-7702: MVM starts with senderFinalNonce (which already includes tx nonce +1
+												// and any self-authorization nonces). Inside MVM, each internal CREATE by sender bumps
+												// nonce by +1, and MVM's run() adds another +1 for the top-level tx.
+												// Therefore: numCreates = newNonce - senderFinalNonce - 1.
+												// If numCreates > 0 (newNonce > senderFinalNonce + 1), preserve the CREATE bumps.
+												if newNonce > senderFinalNonce+1 {
+													mvccDB.SetNonce(addr, newNonce-1)
+												} else {
+													mvccDB.SetNonce(addr, senderFinalNonce)
+												}
 											}
 											continue
 										}
