@@ -709,7 +709,7 @@ func deployTestWrappedAssetDirect(cs *blockchain.ChainState, deployer common.Add
 
 	res := mvmE.Deploy(
 		deployer.Bytes(), constructorPayload, big.NewInt(0),
-		deployTx.MaxGasPrice(), deployTx.MaxGas(),
+		transaction.EffectiveGasPriceUint64(deployTx), deployTx.MaxGas(),
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, uint64(0), mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, leaderAddr, mvmE.GetKey(), deployTx.Hash().Bytes(),
 		false, false, false,
@@ -752,7 +752,7 @@ func readTokenBalanceDirect(cs *blockchain.ChainState, contractAddr, account com
 
 	res := mvmE.Execute(
 		caller.Bytes(), contractAddr.Bytes(), calldata, big.NewInt(0),
-		callTx.MaxGasPrice(), callTx.MaxGas(),
+		transaction.EffectiveGasPriceUint64(callTx), callTx.MaxGas(),
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, uint64(0), mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, leaderAddr, mvmE.GetKey(), callTx.Hash().Bytes(),
 		[]common.Address{}, false, false,

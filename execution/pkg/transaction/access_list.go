@@ -56,6 +56,7 @@ func EffectiveGasPriceUint64(tx types.Transaction) uint64 {
 		return 0
 	}
 	if eff := tx.EffectiveGasPrice(); eff != nil {
+		// Saturate instead of wrapping: the MVM takes a uint64, so an out-of-range price must not truncate.
 		if !eff.IsUint64() {
 			return ^uint64(0)
 		}

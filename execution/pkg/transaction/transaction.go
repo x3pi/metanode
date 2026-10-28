@@ -1262,6 +1262,9 @@ func (t *Transaction) GasPriceCap() *big.Int {
 //
 // Used for fee charging, receipt effectiveGasPrice, and eth_getTransactionByHash.gasPrice.
 func (t *Transaction) EffectiveGasPrice() *big.Int {
+	if t == nil || t.proto == nil {
+		return big.NewInt(0)
+	}
 	switch t.proto.Type {
 	case 0, 1, 0xFF: // Legacy, EIP-2930, Type 0xFF (SecpProto)
 		return big.NewInt(0).SetUint64(t.proto.MaxGasPrice)
