@@ -76,4 +76,3 @@ func applyIntrinsicGas(mvmResult *mvm.MVMExecuteResult, intrinsicGas, maxGas, au
 	}
 	mvmResult.GasUsed = total - refund
 }
-

@@ -36,7 +36,7 @@ func TestReviewDeployCallbackCreatesFromDelegatedSender(t *testing.T) {
 	require.NoError(t, err)
 	sender := crypto.PubkeyToAddress(senderKey.PublicKey)
 	authority := crypto.PubkeyToAddress(authKey.PublicKey)
- authority = sender
+	authority = sender
 	delegate := common.HexToAddress("0xdddddddddddddddddddddddddddddddddddddddd")
 	caller := common.HexToAddress("0x1234567890123456789012345678901234567890")
 	leader := common.HexToAddress(auditLeader)
@@ -46,7 +46,7 @@ func TestReviewDeployCallbackCreatesFromDelegatedSender(t *testing.T) {
 	callerCode = append(callerCode, 0x61, 0xff, 0xff, 0xf1, 0x50, 0x00)
 	seedAccount(t, cs, sender, big.NewInt(1_000_000_000_000_000), 1)
 	seedAccount(t, cs, leader, big.NewInt(0), 0)
-	
+
 	seedContract(t, cs, caller, big.NewInt(0), callerCode)
 	seedContract(t, cs, delegate, big.NewInt(0), []byte{0x60, 0, 0x60, 0, 0x60, 0, 0xf0, 0x50, 0x00})
 	seedContract(t, cs, sender, big.NewInt(1_000_000_000_000_000), eth.AddressToDelegation(delegate))
@@ -55,12 +55,11 @@ func TestReviewDeployCallbackCreatesFromDelegatedSender(t *testing.T) {
 		ChainID:   chainID,
 		Nonce:     1,
 		To:        nil,
- Data: callerCode,
+		Data:      callerCode,
 		Gas:       200000,
 		GasFeeCap: big.NewInt(mt.MINIMUM_BASE_FEE),
 		GasTipCap: big.NewInt(mt.MINIMUM_BASE_FEE),
 		Value:     big.NewInt(0),
-		
 	})
 	require.NoError(t, err)
 	tx, err := transaction.NewTransactionFromEth(signed)
@@ -75,9 +74,9 @@ func TestReviewDeployCallbackCreatesFromDelegatedSender(t *testing.T) {
 	require.NoError(t, err)
 	reference.AddBalance(sender, uint256.NewInt(1_000_000_000_000_000), tracing.BalanceChangeUnspecified)
 	reference.SetNonce(sender, 1, tracing.NonceChangeUnspecified)
- reference.SetNonce(authority, 1, tracing.NonceChangeUnspecified)
+	reference.SetNonce(authority, 1, tracing.NonceChangeUnspecified)
 	reference.SetCode(sender, eth.AddressToDelegation(delegate))
- reference.SetCode(caller, callerCode)
+	reference.SetCode(caller, callerCode)
 	reference.SetNonce(caller, 1, tracing.NonceChangeUnspecified)
 	reference.SetCode(delegate, []byte{0x60, 0, 0x60, 0, 0x60, 0, 0xf0, 0x50, 0x00})
 	reference.SetNonce(delegate, 1, tracing.NonceChangeUnspecified)
@@ -102,15 +101,15 @@ func TestReviewDeployCallbackCreatesFromDelegatedSender(t *testing.T) {
 	require.NoError(t, g.Err)
 	t.Logf("geth_gas=%d MVM_gas=%d delta=%d status=%v", g.UsedGas, r[0].GasUsed(), int64(r[0].GasUsed())-int64(g.UsedGas), r[0].Status())
 	actual, err := cs.GetAccountStateDB().AccountState(sender)
- require.NoError(t, err)
- t.Logf("sender_balance_geth=%s sender_balance_mvm=%s", reference.GetBalance(sender), actual.Balance())
- t.Logf("sender_nonce_geth=%d sender_nonce_mvm=%d", reference.GetNonce(sender), actual.Nonce())
- require.Equal(t, reference.GetNonce(sender), actual.Nonce(), "internal CREATE must persist sender nonce")
- expectedChild := crypto.CreateAddress(sender, 2)
- wrongChild := crypto.CreateAddress(sender, 1)
- child, err := cs.GetAccountStateDB().AccountState(expectedChild)
- require.NoError(t, err)
- wrong, err := cs.GetAccountStateDB().AccountState(wrongChild)
+	require.NoError(t, err)
+	t.Logf("sender_balance_geth=%s sender_balance_mvm=%s", reference.GetBalance(sender), actual.Balance())
+	t.Logf("sender_nonce_geth=%d sender_nonce_mvm=%d", reference.GetNonce(sender), actual.Nonce())
+	require.Equal(t, reference.GetNonce(sender), actual.Nonce(), "internal CREATE must persist sender nonce")
+	expectedChild := crypto.CreateAddress(sender, 2)
+	wrongChild := crypto.CreateAddress(sender, 1)
+	child, err := cs.GetAccountStateDB().AccountState(expectedChild)
+	require.NoError(t, err)
+	wrong, err := cs.GetAccountStateDB().AccountState(wrongChild)
 	t.Logf("expected_child=%s geth_nonce=%d mvm_nonce=%d prior_nonce_child=%s mvm_nonce=%d", expectedChild, reference.GetNonce(expectedChild), child.Nonce(), wrongChild, wrong.Nonce())
 	require.Equal(t, reference.GetNonce(expectedChild), child.Nonce(), "CREATE must use sender nonce after transaction increment")
 }
@@ -202,5 +201,3 @@ func TestReviewDeployCallbackCreatesFromDelegatedSender_RevertRollback(t *testin
 	childAcc, _ := cs.GetAccountStateDB().AccountState(childContract)
 	require.True(t, childAcc == nil || childAcc.Nonce() == 0, "child contract must not exist on revert")
 }
-
-

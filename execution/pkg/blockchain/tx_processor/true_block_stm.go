@@ -725,15 +725,11 @@ func (stm *TrueBlockSTM) execOne(
 		// touching chainState.GetConfig() entirely on this hot path.
 		var authGasRefund uint64
 		isCall := !tx.IsDeployContract()
-		if isCall {
-			// Standard Ethereum execution order (Yellow Paper Section 6 / go-ethereum TransitionDb):
-			// For non-deploy transactions (calls), sender nonce is incremented by 1 BEFORE EVM execution starts.
-			// This ensures that if the sender executes CREATE (e.g. via an EIP-7702 delegation), the EVM
-			// creates the contract using the post-transaction nonce (tx.Nonce + 1), matching go-ethereum.
-			_ = mvccDB.PlusOneNonce(tx.FromAddress())
-		}
 		var senderFinalNonce uint64 = tx.GetNonce() + 1
 		if len(tx.AuthorizationList()) > 0 {
+			// EIP-7702 (F1): increment sender nonce before processing authorizations so
+			// self-authorization validates against tx.Nonce + 1 per spec.
+			_ = mvccDB.PlusOneNonce(tx.FromAddress())
 			authGasRefund, _ = processAuthorizationList(tx, chainState.GetConfig().ChainId.Uint64(), mvccDB, chainState.GetSmartContractDB())
 			vmP.SetAuthGasRefund(authGasRefund)
 			// processAuthorizationList reads each authority through mvccDB; an ESTIMATE hit there makes it skip that
@@ -845,7 +841,11 @@ func (stm *TrueBlockSTM) execOne(
 			}
 
 			// Always update nonce and state hashes even if balance deduction fails (prevents infinite replay)
-			mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
+			if len(tx.AuthorizationList()) == 0 {
+				mvccDB.PlusOneNonce(tx.FromAddress())
+			} else {
+				mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
+			}
 			mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
 			mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 			commitDeviceKeyIfPending(chainState, tx.Hash())
@@ -893,6 +893,13 @@ func (stm *TrueBlockSTM) execOne(
 			// Smart Contract
 			var err error
 			mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
+			if isCall && len(tx.AuthorizationList()) == 0 {
+				// Standard Ethereum execution order (Yellow Paper Section 6 / go-ethereum TransitionDb):
+				// For non-deploy transactions (calls), sender nonce is incremented by 1 BEFORE EVM execution starts.
+				// This ensures that if the sender executes CREATE (e.g. via an EIP-7702 delegation), the EVM
+				// creates the contract using the post-transaction nonce (tx.Nonce + 1), matching go-ethereum.
+				_ = mvccDB.PlusOneNonce(tx.FromAddress())
+			}
 			txExecStart := time.Now()
 			exRs, err = vmP.ExecuteTransactionWithMvmId(ctx, tx, false, false)
 			txExecDuration := time.Since(txExecStart)

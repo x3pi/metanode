@@ -15,8 +15,8 @@ func TestApplyIntrinsicGas_NilResult(t *testing.T) {
 
 func TestApplyIntrinsicGas_MaxGasLessThanIntrinsic(t *testing.T) {
 	res := &mvm.MVMExecuteResult{
-		Status:    pb.RECEIPT_STATUS_RETURNED,
-		GasUsed:   1000,
+		Status:  pb.RECEIPT_STATUS_RETURNED,
+		GasUsed: 1000,
 	}
 	applyIntrinsicGas(res, 50000, 40000, 12500)
 	assert.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, res.Status)

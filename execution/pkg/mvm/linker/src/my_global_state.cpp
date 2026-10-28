@@ -466,9 +466,6 @@ void MyGlobalState::set_addresses_nonce_change(const Address &addr,
   if (it != accounts.end()) {
     it->second.first.set_nonce(static_cast<size_t>(nonce));
   }
-  if (isCache && State::instanceExists(addr)) {
-    State::getInstance(addr)->setNonce(nonce);
-  }
 };
 
 void MyGlobalState::add_addresses_sub_balance_change(const Address &addr,

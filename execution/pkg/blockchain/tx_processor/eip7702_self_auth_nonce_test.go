@@ -597,4 +597,3 @@ func TestEIP7702_InternalCreate_OuterCallRevert_RollsBackCreateNonce_GethParity(
 	require.Equal(t, reference.GetNonce(senderAddr), actual.Nonce(), "reverted CREATE sender nonce must match geth (3)")
 	assert.Equal(t, uint64(3), actual.Nonce())
 }
-
