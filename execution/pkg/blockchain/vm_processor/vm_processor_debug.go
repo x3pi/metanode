@@ -71,7 +71,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdDebug(
 			"to":           tx.ToAddress().Hex(),
 			"value":        tx.Amount().String(),
 			"gasLimit":     tx.MaxGas(),
-			"gasPrice":     tx.MaxGasPrice(),
+			"gasPrice":     vmP.getTxEffectiveGasPrice(tx),
 			"nonce":        tx.GetNonce(),
 			"extendedMode": extendedMode,
 			"blockNumber":  lastBlockHeader.BlockNumber() + 1,
@@ -162,7 +162,7 @@ func (vmP *VmProcessor) callDebug(
 		maxGas = uint64(mt_common.MAX_GASS_FEE)
 	}
 	mvmResult := mvmE.Call( // Luôn gọi MVM
-		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
+		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), vmP.getTxEffectiveGasPrice(tx), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), tx.GetReadOnly(), tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
 	)
@@ -358,7 +358,7 @@ func (vmP *VmProcessor) onlyCall(
 		maxGas = uint64(mt_common.MAX_GASS_FEE)
 	}
 	mvmResult := mvmE.Call( // Luôn gọi MVM
-		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
+		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), vmP.getTxEffectiveGasPrice(tx), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), tx.GetReadOnly(), tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
 	)
@@ -557,7 +557,7 @@ func (vmP *VmProcessor) onlyDeploy(
 		maxGas = uint64(mt_common.MAX_GASS_FEE)
 	}
 	mvmResult := mvmE.Deploy( // Luôn gọi MVM
-		tx.FromAddress().Bytes(), tx.DeployData().Code(), tx.Amount(), tx.MaxGasPrice(), maxGas,
+		tx.FromAddress().Bytes(), tx.DeployData().Code(), tx.Amount(), vmP.getTxEffectiveGasPrice(tx), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), tx.Hash().Bytes(), tx.GetIsDebug(), false, true,
 	)
@@ -619,7 +619,7 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 			"txHash":   tx.Hash().Hex(),
 			"from":     tx.FromAddress().Hex(),
 			"gasLimit": tx.MaxGas(),
-			"gasPrice": tx.MaxGasPrice(),
+			"gasPrice": vmP.getTxEffectiveGasPrice(tx),
 			"nonce":    tx.GetNonce(),
 			"isCache":  isCache,
 			"mvmId":    vmP.mvmId.Hex(),
@@ -668,7 +668,7 @@ func (vmP *VmProcessor) ExecuteNonceOnly(
 	// Gọi hàm NoncePlusOne từ MVM
 	mvmResult := mvmE.NoncePlusOne(
 		tx.FromAddress().Bytes(),
-		tx.MaxGasPrice(),
+		vmP.getTxEffectiveGasPrice(tx),
 		tx.MaxGas(),
 		lastBlockHeader.TimeStamp(), // Sử dụng blockPrevrandao nhất quán với các cuộc gọi MVM khác
 		mt_common.BLOCK_GAS_LIMIT,
