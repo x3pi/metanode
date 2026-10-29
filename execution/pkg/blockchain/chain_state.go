@@ -76,6 +76,7 @@ type ChainState struct {
 	freeFeeAddress     map[common.Address]struct{}
 	changelogDB        *state_changelog.StateChangelogDB
 	stakeChangelogDB   *state_changelog.StateChangelogDB
+	scChangelogDB      *state_changelog.StateChangelogDB
 	blobStore          *blob_store.BlobStore
 
 	// commitMutex serializes all block state mutations in CommitBlockState
@@ -261,6 +262,7 @@ func NewChainStateWithGenesis(
 		maxCachedEpochs:       maxCached,
 		changelogDB:           changelogDB,
 		stakeChangelogDB:      stakeChangelogDB,
+		scChangelogDB:         scChangelogDB,
 		blobStore:             blobStore,
 		currentEpoch:          0, // Start with epoch 0 (genesis)
 		epochStartTimestampMs: 0, // Will be set on first epoch advance
@@ -417,6 +419,9 @@ func (cs *ChainState) updateStateForNewHeader(newHeader types.BlockHeader) error
 	}
 
 	if trie.GetStateBackend() == trie.BackendNOMT {
+		// Invalidate in-memory caches across all state DBs to guarantee subsequent reads
+		// fetch fresh data from the realigned NOMT storage and changelog, preventing stale state leaks.
+		cs.InvalidateAllState()
 		return nil
 	}
 
@@ -647,6 +652,11 @@ func (cs *ChainState) GetStakeChangelogDB() *state_changelog.StateChangelogDB {
 	return cs.stakeChangelogDB
 }
 
+// GetScChangelogDB returns the state changelog database instance for smart contract storage tracking.
+func (cs *ChainState) GetScChangelogDB() *state_changelog.StateChangelogDB {
+	return cs.scChangelogDB
+}
+
 // GetBlobStore returns the EIP-4844 blob sidecar store, or nil if this node
 // wasn't set up with a backup path (e.g. in-memory/test chains).
 func (cs *ChainState) GetBlobStore() *blob_store.BlobStore {
@@ -781,6 +791,7 @@ func (cs *ChainState) CloneSpeculative(header types.BlockHeader) (*ChainState, e
 		freeFeeAddress:        cs.freeFeeAddress,
 		changelogDB:           cs.changelogDB,
 		stakeChangelogDB:      cs.stakeChangelogDB,
+		scChangelogDB:         cs.scChangelogDB,
 		blobStore:             cs.blobStore,
 		currentEpoch:          cs.currentEpoch,
 		epochStartTimestampMs: cs.epochStartTimestampMs,
@@ -1158,6 +1169,11 @@ func (cs *ChainState) advanceEpochLocked(newEpoch uint64, epochStartTimestampMs 
 				if cs.stakeChangelogDB != nil {
 					if err := cs.stakeChangelogDB.PruneBeforeBlock(block); err != nil {
 						logger.Error("❌ [CHANGELOG PRUNER] Failed to prune stake changelog: %v", err)
+					}
+				}
+				if cs.scChangelogDB != nil {
+					if err := cs.scChangelogDB.PruneBeforeBlock(block); err != nil {
+						logger.Error("❌ [CHANGELOG PRUNER] Failed to prune smart contract changelog: %v", err)
 					}
 				}
 				if cs.blobStore != nil {
@@ -1694,6 +1710,9 @@ func (cs *ChainState) Close() {
 	}
 	if cs.stakeChangelogDB != nil {
 		cs.stakeChangelogDB.Close()
+	}
+	if cs.scChangelogDB != nil {
+		cs.scChangelogDB.Close()
 	}
 	if cs.blobStore != nil {
 		cs.blobStore.Close()
