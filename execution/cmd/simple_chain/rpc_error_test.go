@@ -103,7 +103,7 @@ func TestFormatGethError_StandardErrors(t *testing.T) {
 			name:        "typed ErrMaxInitCodeSizeExceeded",
 			inputErr:    transaction.ErrMaxInitCodeSizeExceeded,
 			expectedCode: -32000,
-			expectedMsg:  "max initcode size exceeded",
+			expectedMsg:  "max initcode size exceeded (limit: 1048576 bytes / 1 MB)",
 		},
 		{
 			name:        "typed ErrGasLimitReached",

@@ -298,7 +298,8 @@ func confScenarios() []confScenario {
 			build: func(p []common.Address, x common.Address) [4][]byte {
 				return confCreateReturningCode(24577)
 			},
-			balances: [4]int64{10, 0, 0, 0},
+			balances:        [4]int64{10, 0, 0, 0},
+			knownDivergence: "appchain supports up to 512KB runtime code (EIP-170 limit increased)",
 		},
 		{
 			name: "create_initcode_49152_bytes_ok",
@@ -313,6 +314,7 @@ func confScenarios() []confScenario {
 			build: func(p []common.Address, x common.Address) [4][]byte {
 				return [4][]byte{confScript(confJoin([]any{49153, 0, 0, "CREATE"}, confReturnWords(1))...)}
 			},
+			knownDivergence: "appchain supports up to 1MB initcode (EIP-3860 limit increased)",
 		},
 		{
 			name: "call_depth_limit_1024_unwinds_cleanly",
