@@ -395,7 +395,19 @@ func confRunGeth(w *confWorld, runtimes [][]byte, balances []int64, entryValue i
 
 func confDeployInit(runtime []byte) []byte {
 	l := len(runtime)
-	init := []byte{0x61, byte(l >> 8), byte(l), 0x60, 0x0e, 0x60, 0, 0x39, 0x61, byte(l >> 8), byte(l), 0x60, 0, 0xf3}
+	if l <= 0xffff {
+		init := []byte{0x61, byte(l >> 8), byte(l), 0x60, 0x0e, 0x60, 0, 0x39, 0x61, byte(l >> 8), byte(l), 0x60, 0, 0xf3}
+		return append(init, runtime...)
+	}
+	init := []byte{
+		0x62, byte(l >> 16), byte(l >> 8), byte(l),
+		0x60, 0x10,
+		0x60, 0x00,
+		0x39,
+		0x62, byte(l >> 16), byte(l >> 8), byte(l),
+		0x60, 0x00,
+		0xf3,
+	}
 	return append(init, runtime...)
 }
 

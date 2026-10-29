@@ -17,14 +17,16 @@ import (
 )
 
 const (
-	// MaxStandardTxEnvelopeSize is the maximum allowed size for standard (non-blob) EIP-2718 envelopes (768 KB).
-	MaxStandardTxEnvelopeSize = 768 * 1024
-	// MaxRawEthTxEnvelopeSize is the maximum envelope size for EIP-4844 blob transactions with KZG sidecars (1 MB).
-	MaxRawEthTxEnvelopeSize = 1024 * 1024
+	// MaxStandardTxEnvelopeSize is the maximum allowed size for standard (non-blob) EIP-2718 envelopes (2 MB).
+	MaxStandardTxEnvelopeSize = 2048 * 1024
+	// MaxRawEthTxEnvelopeSize is the maximum envelope size for EIP-4844 blob transactions with KZG sidecars (3 MB).
+	MaxRawEthTxEnvelopeSize = 3072 * 1024
 	// MaxBatchTxCount is the maximum number of transactions allowed in a single TCP batch.
 	MaxBatchTxCount = 1000
-	// MaxInitCodeSize is the maximum allowed size for contract creation bytecode (512 KB for appchain contracts).
-	MaxInitCodeSize = 512 * 1024
+	// MaxInitCodeSize is the maximum allowed size for contract creation bytecode (1 MB for appchain contracts).
+	MaxInitCodeSize = 1024 * 1024
+	// MaxCodeSize is the maximum allowed size for deployed runtime bytecode (512 KB for appchain contracts).
+	MaxCodeSize = 512 * 1024
 	// MaxAccessListTuples is the maximum allowed number of access list tuples to prevent DoS.
 	MaxAccessListTuples = 1024
 )
@@ -108,9 +110,9 @@ func ValidateEthTxEnvelope(ethTx *e_types.Transaction, expectedChainId *big.Int)
 		return fmt.Errorf("%w: recovered sender address cannot be zero", ErrInvalidSender)
 	}
 
-	// 5. Reject initcode exceeding MaxInitCodeSize (512 KB)
+	// 5. Reject initcode exceeding MaxInitCodeSize (1 MB)
 	if ethTx.To() == nil && len(ethTx.Data()) > MaxInitCodeSize {
-		return fmt.Errorf("%w: initcode size %d exceeds max allowed %d", ErrMaxInitCodeSizeExceeded, len(ethTx.Data()), MaxInitCodeSize)
+		return fmt.Errorf("%w: initcode size %d exceeds max allowed %d (1 MB)", ErrMaxInitCodeSizeExceeded, len(ethTx.Data()), MaxInitCodeSize)
 	}
 
 	// 6. Reject oversized access lists to prevent CPU/memory exhaustion DoS
@@ -759,10 +761,11 @@ func GethStandardRPCError(err error) (int, string) {
 		return -32000, "exceeds block gas limit"
 	case ErrInvalidSender.Code, InvalidSign.Code, InvalidSignSecp.Code, ErrSenderRecovery.Code:
 		return -32000, "invalid sender"
-	case ErrTxTypeNotSupported.Code:
-		return -32000, "transaction type not supported"
 	case ErrMaxInitCodeSizeExceeded.Code:
-		return -32000, "max initcode size exceeded"
+		if err != nil && strings.Contains(err.Error(), "exceeds max allowed") {
+			return -32000, err.Error()
+		}
+		return -32000, "max initcode size exceeded (limit: 1048576 bytes / 1 MB)"
 	case ErrGasLimitReached.Code:
 		return -32000, "gas limit reached"
 	case InvalidMaxGasPrice.Code:
@@ -774,7 +777,10 @@ func GethStandardRPCError(err error) (int, string) {
 	case ErrMalleableSignature.Code:
 		return -32000, "malleable signature: s exceeds curve order / 2 (EIP-2)"
 	case ErrExceedsMaxEnvelopeSize.Code:
-		return -32000, "transaction envelope exceeds maximum allowed size"
+		if err != nil && strings.Contains(err.Error(), "exceeds max allowed") {
+			return -32000, err.Error()
+		}
+		return -32000, "transaction envelope exceeds maximum allowed size (limit: 2097152 bytes / 2 MB)"
 	case ErrDecodeRawEth.Code:
 		return -32000, "failed to decode raw Ethereum transaction envelope"
 	case ErrEnvelopeBindingMismatch.Code:

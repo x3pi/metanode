@@ -125,8 +125,8 @@ func (s *ChannelBasedSender) createWorker(id int) (*ChannelWorker, error) {
 		tcpConn.SetNoDelay(true)
 		tcpConn.SetKeepAlive(true)
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
-		tcpConn.SetReadBuffer(512 * 1024)
-		tcpConn.SetWriteBuffer(512 * 1024)
+		tcpConn.SetReadBuffer(4 * 1024 * 1024)
+		tcpConn.SetWriteBuffer(4 * 1024 * 1024)
 	}
 
 	// Tối ưu cho UDS: set buffers lên 32MB để tránh nghẽn khi gửi batch lớn
@@ -309,8 +309,8 @@ func (w *ChannelWorker) reconnect() (net.Conn, error) {
 		tcpConn.SetNoDelay(true)
 		tcpConn.SetKeepAlive(true)
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
-		tcpConn.SetReadBuffer(512 * 1024)
-		tcpConn.SetWriteBuffer(512 * 1024)
+		tcpConn.SetReadBuffer(4 * 1024 * 1024)
+		tcpConn.SetWriteBuffer(4 * 1024 * 1024)
 	}
 
 	// Tối ưu cho UDS: set buffers lên 32MB để tránh nghẽn khi gửi batch lớn

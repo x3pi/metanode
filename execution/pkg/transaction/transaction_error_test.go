@@ -322,8 +322,8 @@ func TestGethStandardRPCError_Table(t *testing.T) {
 		{"string tx type not supported", errors.New("transaction type not supported"), -32000, "transaction type not supported"},
 
 		// 10. Max initcode size exceeded
-		{"typed ErrMaxInitCodeSizeExceeded", ErrMaxInitCodeSizeExceeded, -32000, "max initcode size exceeded"},
-		{"string max initcode size exceeded", errors.New("max initcode size exceeded"), -32000, "max initcode size exceeded"},
+		{"typed ErrMaxInitCodeSizeExceeded", ErrMaxInitCodeSizeExceeded, -32000, "max initcode size exceeded (limit: 1048576 bytes / 1 MB)"},
+		{"string max initcode size exceeded", errors.New("max initcode size exceeded"), -32000, "max initcode size exceeded (limit: 1048576 bytes / 1 MB)"},
 
 		// 11. Gas limit reached
 		{"typed ErrGasLimitReached", ErrGasLimitReached, -32000, "gas limit reached"},
@@ -342,8 +342,8 @@ func TestGethStandardRPCError_Table(t *testing.T) {
 		{"string malleable signature", errors.New("malleable signature: s exceeds curve order / 2"), -32000, "malleable signature: s exceeds curve order / 2 (EIP-2)"},
 
 		// 15. Max envelope size
-		{"typed ErrExceedsMaxEnvelopeSize", ErrExceedsMaxEnvelopeSize, -32000, "transaction envelope exceeds maximum allowed size"},
-		{"string envelope size", errors.New("transaction envelope size 200000 exceeds max allowed 131072"), -32000, "transaction envelope exceeds maximum allowed size"},
+		{"typed ErrExceedsMaxEnvelopeSize", ErrExceedsMaxEnvelopeSize, -32000, "transaction envelope exceeds maximum allowed size (limit: 2097152 bytes / 2 MB)"},
+		{"string envelope size", errors.New("transaction envelope size 200000 exceeds max allowed 131072"), -32000, "transaction envelope size 200000 exceeds max allowed 131072"},
 
 		// 16. Decode error
 		{"typed ErrDecodeRawEth", ErrDecodeRawEth, -32000, "failed to decode raw Ethereum transaction envelope"},

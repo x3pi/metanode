@@ -30,7 +30,7 @@ func (app *App) ConvertRawEthTxToMetaTx(rawEth []byte) (mt_types.Transaction, *e
 		return nil, nil, fmt.Errorf("%w: empty raw transaction body", mt_transaction.ErrDecodeRawEth)
 	}
 	if len(rawEth) > mt_transaction.MaxRawEthTxEnvelopeSize {
-		return nil, nil, fmt.Errorf("%w: transaction envelope size %d exceeds max allowed %d", mt_transaction.ErrExceedsMaxEnvelopeSize, len(rawEth), mt_transaction.MaxRawEthTxEnvelopeSize)
+		return nil, nil, fmt.Errorf("%w: transaction envelope size %d exceeds max allowed %d (3 MB)", mt_transaction.ErrExceedsMaxEnvelopeSize, len(rawEth), mt_transaction.MaxRawEthTxEnvelopeSize)
 	}
 
 	ethTx := new(types.Transaction)
@@ -39,7 +39,7 @@ func (app *App) ConvertRawEthTxToMetaTx(rawEth []byte) (mt_types.Transaction, *e
 	}
 
 	if ethTx.Type() != types.BlobTxType && len(rawEth) > mt_transaction.MaxStandardTxEnvelopeSize {
-		return nil, nil, fmt.Errorf("%w: standard transaction envelope size %d exceeds max allowed %d", mt_transaction.ErrExceedsMaxEnvelopeSize, len(rawEth), mt_transaction.MaxStandardTxEnvelopeSize)
+		return nil, nil, fmt.Errorf("%w: standard transaction envelope size %d exceeds max allowed %d (2 MB)", mt_transaction.ErrExceedsMaxEnvelopeSize, len(rawEth), mt_transaction.MaxStandardTxEnvelopeSize)
 	}
 
 	if err := mt_transaction.ValidateEthTxEnvelope(ethTx, app.config.ChainId); err != nil {

@@ -88,8 +88,8 @@ func (c *Client) monitorConnections() {
 							tcpConn.SetNoDelay(true)
 							tcpConn.SetKeepAlive(true)
 							tcpConn.SetKeepAlivePeriod(30 * time.Second)
-							tcpConn.SetReadBuffer(512 * 1024)
-							tcpConn.SetWriteBuffer(512 * 1024)
+							tcpConn.SetReadBuffer(4 * 1024 * 1024)
+							tcpConn.SetWriteBuffer(4 * 1024 * 1024)
 						}
 
 						// Non-blocking send, nếu pool đã đầy thì bỏ qua
@@ -239,8 +239,8 @@ func (c *Client) SendTransaction(transactionPayload []byte) error {
 				tcpConn.SetNoDelay(true)
 				tcpConn.SetKeepAlive(true)
 				tcpConn.SetKeepAlivePeriod(30 * time.Second)
-				tcpConn.SetReadBuffer(512 * 1024)
-				tcpConn.SetWriteBuffer(512 * 1024)
+				tcpConn.SetReadBuffer(4 * 1024 * 1024)
+				tcpConn.SetWriteBuffer(4 * 1024 * 1024)
 			}
 
 			// Trả kết nối mới về bể
