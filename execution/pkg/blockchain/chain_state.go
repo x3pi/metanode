@@ -145,9 +145,11 @@ func NewChainStateWithGenesis(
 	//   - account_state → user balances, nonces, BLS keys
 	//   - stake_db      → validator stake amounts
 	// They CANNOT be merged into one DB.
-	initChangelog := func(nomtTrie *trie.NomtStateTrie, dirName, namespace string) *state_changelog.StateChangelogDB {
+	initChangelog := func(nomtTrie *trie.NomtStateTrie, dirName, namespace string, forceEnable ...bool) *state_changelog.StateChangelogDB {
 		isRPC := false
-		if config != nil {
+		if len(forceEnable) > 0 && forceEnable[0] {
+			isRPC = true
+		} else if config != nil {
 			if config.IsRPCNode || os.Getenv("NODE_TYPE") == "synconly" {
 				isRPC = true
 			}
@@ -228,7 +230,7 @@ func NewChainStateWithGenesis(
 	// handle only because initChangelog needs one.
 	if scHandle, _ := nomtContractStorageHandle(); scHandle != nil {
 		scTrie := trie.NewNomtStateTrie(scHandle, true, trie.SharedContractStorageNamespace)
-		scChangelogDB = initChangelog(scTrie, "changelog_db_sc", trie.SharedContractStorageNamespace)
+		scChangelogDB = initChangelog(scTrie, "changelog_db_sc", trie.SharedContractStorageNamespace, true)
 
 		// A crash can leave the shared contract storage ahead of the canonical block (its data is written
 		// while the block executes, before the block is durable). Roll it back before anything reads it.

@@ -1823,6 +1823,16 @@ func (n *NomtStateTrie) CommitPayload() error {
 	if fs == nil && len(changes) == 0 {
 		view := n.loadReadView()
 		if view != nil && len(view.committing) > 0 {
+			if view.commitTicket != nil && view.commitTicket.State() != NomtPersistenceFailed {
+				// Sibling trie in a shared batch commit whose session is held by the primary trie.
+				// If the shared ticket is already durable, clear the committing overlay.
+				if view.commitTicket.State() == NomtPersistenceDurable {
+					n.writerMu.Lock()
+					n.publishReadView(view.dirty, nil, view.rootHash, view.commitTicket)
+					n.writerMu.Unlock()
+				}
+				return nil
+			}
 			if ticket != nil {
 				ticket.SetState(NomtPersistenceFailed)
 			}
@@ -1977,6 +1987,9 @@ func (p *NomtPayload) CommitAsync() {
 					logger.Error("❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: %v", err)
 				} else {
 					logger.Debug("[NOMT-ASYNC-COMMIT] Successfully committed NOMT payload asynchronously")
+					if string(p.trie.namespace) == "account_state" && p.blockNum > 0 {
+						storage.UpdateLastNomtCommittedBlock(p.blockNum)
+					}
 				}
 			}
 
@@ -2013,6 +2026,13 @@ func (p *NomtPayload) CommitAsync() {
 			p.trie.writerMu.Unlock()
 		}()
 	})
+}
+
+func (p *NomtPayload) Wait() error {
+	if p == nil || p.trie == nil {
+		return nil
+	}
+	return p.trie.WaitCommitPayload()
 }
 
 // commitFinishedSession flushes a finished NOMT session to disk; tests replace it to inject a commit failure.
