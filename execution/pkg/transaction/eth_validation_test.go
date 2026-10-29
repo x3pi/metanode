@@ -186,4 +186,44 @@ func TestValidateEthTxEnvelope_ChainIDOverflow(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid chain id: overflow uint64")
 }
 
+func TestValidateEthTxEnvelope_LargeInitCodeAndEnvelopeLimits(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	require.NoError(t, err)
+
+	chainID := big.NewInt(991)
+	signer := e_types.LatestSignerForChainID(chainID)
+
+	t.Run("initcode_1MB_allowed", func(t *testing.T) {
+		deployTx := e_types.NewTx(&e_types.LegacyTx{
+			Nonce:    1,
+			GasPrice: big.NewInt(100000),
+			Gas:      100_000_000,
+			To:       nil, // contract deployment
+			Value:    big.NewInt(0),
+			Data:     make([]byte, MaxInitCodeSize), // exactly 1 MB
+		})
+		signed, err := e_types.SignTx(deployTx, signer, key)
+		require.NoError(t, err)
+		require.NoError(t, ValidateEthTxEnvelope(signed, chainID))
+	})
+
+	t.Run("initcode_over_1MB_rejected", func(t *testing.T) {
+		deployTx := e_types.NewTx(&e_types.LegacyTx{
+			Nonce:    1,
+			GasPrice: big.NewInt(100000),
+			Gas:      100_000_000,
+			To:       nil, // contract deployment
+			Value:    big.NewInt(0),
+			Data:     make([]byte, MaxInitCodeSize+1), // 1 MB + 1 byte
+		})
+		signed, err := e_types.SignTx(deployTx, signer, key)
+		require.NoError(t, err)
+		err = ValidateEthTxEnvelope(signed, chainID)
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrMaxInitCodeSizeExceeded)
+		require.Contains(t, err.Error(), "limit: 1048576 bytes / 1 MB")
+	})
+}
+
 var _ *ecdsa.PrivateKey
+

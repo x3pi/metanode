@@ -1904,4 +1904,56 @@ mod tests {
             )
         );
     }
+
+    #[tokio::test]
+    async fn test_2mb_transaction_included_in_4mb_block_without_blocking() {
+        let (context, _keys) = Context::new_for_test(4);
+        // Verify default block limit is 4 MB
+        assert_eq!(
+            context.protocol_config.max_transactions_in_block_bytes(),
+            4 * 1024 * 1024
+        );
+
+        let context = Arc::new(context);
+        let (client, tx_receiver) = TransactionClient::new(context.clone());
+        let mut consumer = TransactionConsumer::new(tx_receiver, context.clone());
+
+        // 1. Submit a 2 MB transaction (~2,097,152 bytes)
+        let large_tx = vec![0x42u8; 2 * 1024 * 1024];
+        let _large_ack = client
+            .submit_no_wait(vec![large_tx])
+            .await
+            .expect("Submit 2 MB transaction should succeed");
+
+        // 2. Submit three smaller subsequent transactions (10 KB each)
+        let small_tx1 = vec![0x11u8; 10 * 1024];
+        let small_tx2 = vec![0x22u8; 10 * 1024];
+        let small_tx3 = vec![0x33u8; 10 * 1024];
+        let _small_acks = client
+            .submit_no_wait(vec![small_tx1, small_tx2, small_tx3])
+            .await
+            .expect("Submit small transactions should succeed");
+
+        // 3. Consume transactions into block proposal
+        let (transactions, _ack_transactions, _limit) = consumer.next();
+        let batch: Vec<_> = transactions.iter().map(|t| t.data()).collect();
+        let total_block_bytes: u64 = batch.iter().map(|t| t.len() as u64).sum();
+
+        // 4. Assert: The 2 MB tx is INCLUDED, AND the smaller txs are ALSO INCLUDED!
+        assert_eq!(
+            transactions.len(),
+            4,
+            "All 4 transactions (large + 3 small) must be included in the block"
+        );
+        assert!(total_block_bytes >= 2 * 1024 * 1024);
+        assert!(total_block_bytes <= 4 * 1024 * 1024);
+
+        // 5. Verify the block passes block verification
+        let block_verifier =
+            SignedBlockVerifier::new(context.clone(), Arc::new(NoopTransactionVerifier {}));
+        assert!(
+            block_verifier.check_transactions(&batch).is_ok(),
+            "Block containing 2 MB transaction must pass SignedBlockVerifier"
+        );
+    }
 }
