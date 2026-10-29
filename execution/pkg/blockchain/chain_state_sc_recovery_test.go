@@ -1,11 +1,13 @@
 package blockchain
 
 import (
+	"encoding/hex"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 )
 
 func newScChangelog(t *testing.T) *state_changelog.StateChangelogDB {
@@ -53,5 +55,78 @@ func TestAlignSmartContractStorage_FailsClosedWithoutRecordedRoot(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "no root recorded") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// When contract storage is ahead of the canonical block and recorded roots exist,
+// alignSmartContractStorage must roll back contract storage to the canonical block and verify the root.
+func TestAlignSmartContractStorage_RollbackSuccess(t *testing.T) {
+	tempDir := t.TempDir()
+	_ = trie.InitNomtDB(tempDir, 1, 16, 16)
+	t.Cleanup(trie.CloseNomtDB)
+
+	handle, err := trie.GetOrInitNomtHandle(trie.SharedContractStorageNamespace)
+	if err != nil {
+		t.Fatalf("GetOrInitNomtHandle: %v", err)
+	}
+
+	cl := newScChangelog(t)
+
+	slotKey := func(b byte) []byte {
+		k := make([]byte, 32)
+		k[31] = b
+		return k
+	}
+
+	addr1 := [20]byte{0x01}
+	tr1 := trie.NewNomtStateTrie(handle, true, "smart_contract_storage_"+hex.EncodeToString(addr1[:]))
+	if err := tr1.Update(slotKey(1), []byte{10}); err != nil {
+		t.Fatal(err)
+	}
+	st1 := tr1.ExportDirty()
+	st1.Prefix = addr1[:]
+	root1, fs1, _, err := trie.CommitBatchRaw(handle, []trie.NomtDirtyState{st1}, cl, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr1.ClearDirty(root1)
+	if err := fs1.CommitPayload(handle); err != nil {
+		t.Fatal(err)
+	}
+
+	// Block 2 writes (dirty forward state)
+	addr2 := [20]byte{0x02}
+	tr2 := trie.NewNomtStateTrie(handle, true, "smart_contract_storage_"+hex.EncodeToString(addr2[:]))
+	if err := tr2.Update(slotKey(2), []byte{20}); err != nil {
+		t.Fatal(err)
+	}
+	st2 := tr2.ExportDirty()
+	st2.Prefix = addr2[:]
+	root2, fs2, _, err := trie.CommitBatchRaw(handle, []trie.NomtDirtyState{st2}, cl, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr2.ClearDirty(root2)
+	if err := fs2.CommitPayload(handle); err != nil {
+		t.Fatal(err)
+	}
+
+	// Confirm highest block is 2
+	if cl.GetHighestBlock() != 2 {
+		t.Fatalf("expected highestBlock=2, got %d", cl.GetHighestBlock())
+	}
+
+	// Simulate crash: canonical block is 1, but smart_contract_storage has block 2
+	if err := alignSmartContractStorage(cl, 1); err != nil {
+		t.Fatalf("alignSmartContractStorage(cl, 1) failed: %v", err)
+	}
+
+	// Verify root after rollback is back to root1
+	curRoot, err := handle.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if curRoot != root1 {
+		t.Fatalf("handle root after rollback = %x, want root1 %x", curRoot, root1)
 	}
 }

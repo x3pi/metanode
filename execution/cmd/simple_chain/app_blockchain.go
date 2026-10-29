@@ -654,6 +654,14 @@ func (app *App) initBlockchain() error {
 				if saveErr := blockDatabase.SaveLastBlockSync(app.startLastBlock); saveErr != nil {
 					logger.Error("❌ [STARTUP] Failed to SaveLastBlockSync during tip rollback: %v", saveErr)
 				}
+
+				// Reset in-memory ChainState and EVM caches to startLastBlock
+				app.chainState.InvalidateAllState()
+				mvm.ClearAllMVMApi()
+				mvm.ClearAllProtectedMVMApi()
+				mvm.CallClearAllStateInstances()
+				trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
+				_ = app.chainState.UpdateStateForNewHeader(app.startLastBlock.Header())
 			}
 		}
 
@@ -1583,21 +1591,78 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 			return fmt.Errorf("failed to execute transactions for block #%d during NOMT catch-up: %v", bn, execErr)
 		}
 
-		// 5. Commit state changes synchronously (updates both MPT/NOMT tries and swaps pointers)
-		if scPayload, err := app.chainState.GetSmartContractDB().Commit(); err != nil {
+		// 5. Commit state changes and verify against header BEFORE persisting to disk
+		scPayload, err := app.chainState.GetSmartContractDB().Commit()
+		if err != nil {
 			return fmt.Errorf("failed to commit SmartContractDB for block #%d: %v", bn, err)
-		} else if scPayload != nil {
-			if payload, ok := scPayload.(interface{ CommitAsync() }); ok {
-				payload.CommitAsync()
+		}
+
+		accountRes, err := app.chainState.GetAccountStateDB().CommitPipeline()
+		if err != nil {
+			if scPayload != nil {
+				if disc, ok := scPayload.(interface{ Discard() }); ok {
+					disc.Discard()
+				}
 			}
+			return fmt.Errorf("failed to commit AccountStateDB pipeline for block #%d: %v", bn, err)
 		}
-		newAccountRoot, err := app.chainState.GetAccountStateDB().Commit()
+
+		stakeRes, err := app.chainState.GetStakeStateDB().CommitPipeline()
 		if err != nil {
-			return fmt.Errorf("failed to commit AccountStateDB for block #%d: %v", bn, err)
+			if scPayload != nil {
+				if disc, ok := scPayload.(interface{ Discard() }); ok {
+					disc.Discard()
+				}
+			}
+			if accountRes != nil && accountRes.NomtPayload != nil {
+				if disc, ok := accountRes.NomtPayload.(interface{ Discard() }); ok {
+					disc.Discard()
+				}
+			}
+			return fmt.Errorf("failed to commit StakeStateDB pipeline for block #%d: %v", bn, err)
 		}
-		newStakeRoot, err := app.chainState.GetStakeStateDB().Commit()
-		if err != nil {
-			return fmt.Errorf("failed to commit StakeStateDB for block #%d: %v", bn, err)
+
+		expectedAccountRoot := blk.Header().AccountStatesRoot()
+		expectedStakeRoot := e_common.Hash(blk.Header().StakeStatesRoot())
+
+		accountPersist := func() error {
+			return app.chainState.GetAccountStateDB().PersistAsync(accountRes)
+		}
+		stakePersist := func() error {
+			return app.chainState.GetStakeStateDB().PersistAsync(stakeRes)
+		}
+		accountWait := func() error {
+			if accDB := app.chainState.GetAccountStateDB(); accDB != nil {
+				if nomtTrie, ok := accDB.Trie().(*trie.NomtStateTrie); ok {
+					return nomtTrie.WaitCommitPayload()
+				}
+			}
+			return nil
+		}
+		stakeWait := func() error {
+			if stakeDB := app.chainState.GetStakeStateDB(); stakeDB != nil {
+				if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
+					return nomtTrie.WaitCommitPayload()
+				}
+			}
+			return nil
+		}
+
+		if err := commitVerifiedCatchupBlock(
+			bn,
+			expectedAccountRoot,
+			expectedStakeRoot,
+			scPayload,
+			accountRes.NomtPayload,
+			accountRes.FinalHash,
+			stakeRes.NomtPayload,
+			stakeRes.FinalHash,
+			accountPersist,
+			stakePersist,
+			accountWait,
+			stakeWait,
+		); err != nil {
+			return err
 		}
 
 		// 6. Invalidate state caches to ensure next block reads fresh data
@@ -1618,7 +1683,144 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 		app.chainState.SetcurrentBlockHeader(&headerCopy)
 		app.startLastBlock = blk
 
-		logger.Info("🛡️ [STARTUP] ✅ Successfully re-executed block #%d: accountRoot=%s, stakeRoot=%s", bn, newAccountRoot.Hex()[:18], newStakeRoot.Hex()[:18])
+		logger.Info("🛡️ [STARTUP] ✅ Successfully re-executed block #%d: accountRoot=%s, stakeRoot=%s", bn, accountRes.FinalHash.Hex()[:18], stakeRes.FinalHash.Hex()[:18])
 	}
+	return nil
+}
+
+// commitVerifiedCatchupBlock verifies that the freshly computed account and stake state roots
+// match the block header before persisting to disk.
+// If roots match: writes changelogs, initiates async NOMT commits, persists database batches,
+// waits for NOMT disk writes to settle, and updates lastNomtCommittedBlock.
+// If any check or write fails: calls Discard() on all payloads (fail-closed) and returns an error.
+func commitVerifiedCatchupBlock(
+	bn uint64,
+	expectedAccountRoot e_common.Hash,
+	expectedStakeRoot e_common.Hash,
+	scPayload interface{},
+	accountNomtPayload interface{},
+	accountFinalHash e_common.Hash,
+	stakeNomtPayload interface{},
+	stakeFinalHash e_common.Hash,
+	accountPersist func() error,
+	stakePersist func() error,
+	accountWait func() error,
+	stakeWait func() error,
+) error {
+	discardAll := func() {
+		if scPayload != nil {
+			if disc, ok := scPayload.(interface{ Discard() }); ok {
+				disc.Discard()
+			}
+		}
+		if accountNomtPayload != nil {
+			if disc, ok := accountNomtPayload.(interface{ Discard() }); ok {
+				disc.Discard()
+			}
+		}
+		if stakeNomtPayload != nil {
+			if disc, ok := stakeNomtPayload.(interface{ Discard() }); ok {
+				disc.Discard()
+			}
+		}
+	}
+
+	if accountFinalHash != expectedAccountRoot {
+		discardAll()
+		return fmt.Errorf("NOMT account root mismatch during catch-up for block #%d: computed=%s, header=%s",
+			bn, accountFinalHash.Hex(), expectedAccountRoot.Hex())
+	}
+
+	if stakeFinalHash != expectedStakeRoot {
+		discardAll()
+		return fmt.Errorf("NOMT stake root mismatch during catch-up for block #%d: computed=%s, header=%s",
+			bn, stakeFinalHash.Hex(), expectedStakeRoot.Hex())
+	}
+
+	// Verified! Synchronously persist to disk now
+	if scPayload != nil {
+		if payload, ok := scPayload.(interface{ SetBlockNumber(uint64) }); ok {
+			payload.SetBlockNumber(bn)
+		}
+		if payload, ok := scPayload.(interface{ WriteChangelog() error }); ok {
+			if err := payload.WriteChangelog(); err != nil {
+				discardAll()
+				return fmt.Errorf("failed to write SC changelog for block #%d: %v", bn, err)
+			}
+		}
+		if payload, ok := scPayload.(interface{ CommitAsync() }); ok {
+			payload.CommitAsync()
+		}
+	}
+
+	if accountNomtPayload != nil {
+		if payload, ok := accountNomtPayload.(interface{ SetBlockNumber(uint64) }); ok {
+			payload.SetBlockNumber(bn)
+		}
+		if payload, ok := accountNomtPayload.(interface{ WriteChangelog() error }); ok {
+			if err := payload.WriteChangelog(); err != nil {
+				discardAll()
+				return fmt.Errorf("failed to write account changelog for block #%d: %v", bn, err)
+			}
+		}
+		if payload, ok := accountNomtPayload.(interface{ CommitAsync() }); ok {
+			payload.CommitAsync()
+		}
+	}
+
+	if stakeNomtPayload != nil {
+		if payload, ok := stakeNomtPayload.(interface{ SetBlockNumber(uint64) }); ok {
+			payload.SetBlockNumber(bn)
+		}
+		if payload, ok := stakeNomtPayload.(interface{ WriteChangelog() error }); ok {
+			if err := payload.WriteChangelog(); err != nil {
+				discardAll()
+				return fmt.Errorf("failed to write stake changelog for block #%d: %v", bn, err)
+			}
+		}
+		if payload, ok := stakeNomtPayload.(interface{ CommitAsync() }); ok {
+			payload.CommitAsync()
+		}
+	}
+
+	if accountPersist != nil {
+		if err := accountPersist(); err != nil {
+			discardAll()
+			return fmt.Errorf("failed to persist AccountStateDB for block #%d: %v", bn, err)
+		}
+	}
+	if stakePersist != nil {
+		if err := stakePersist(); err != nil {
+			discardAll()
+			return fmt.Errorf("failed to persist StakeStateDB for block #%d: %v", bn, err)
+		}
+	}
+
+	// Wait for all NOMT async commits to flush to disk before continuing
+	if waiter, ok := scPayload.(interface{ Wait() error }); ok {
+		if err := waiter.Wait(); err != nil {
+			return fmt.Errorf("SC WaitCommitPayload failed for block #%d: %w", bn, err)
+		}
+	}
+	if waiter, ok := accountNomtPayload.(interface{ Wait() error }); ok {
+		if err := waiter.Wait(); err != nil {
+			return fmt.Errorf("AccountStateDB WaitCommitPayload failed for block #%d: %w", bn, err)
+		}
+	} else if accountWait != nil {
+		if err := accountWait(); err != nil {
+			return fmt.Errorf("AccountStateDB WaitCommitPayload failed for block #%d: %w", bn, err)
+		}
+	}
+	if waiter, ok := stakeNomtPayload.(interface{ Wait() error }); ok {
+		if err := waiter.Wait(); err != nil {
+			return fmt.Errorf("StakeStateDB WaitCommitPayload failed for block #%d: %w", bn, err)
+		}
+	} else if stakeWait != nil {
+		if err := stakeWait(); err != nil {
+			return fmt.Errorf("StakeStateDB WaitCommitPayload failed for block #%d: %w", bn, err)
+		}
+	}
+
+	storage.UpdateLastNomtCommittedBlock(bn)
 	return nil
 }
