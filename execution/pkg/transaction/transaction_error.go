@@ -1,6 +1,8 @@
 package transaction
 
 import (
+	"fmt"
+
 	"github.com/ethereum/go-ethereum/common"
 	"google.golang.org/protobuf/proto"
 
@@ -82,7 +84,7 @@ var (
 	ErrInsufficientBalance      = &TransactionError{48, "insufficient balance"}       // EXCEPTION_ERR_INSUFFICIENT_BALANCE = 3
 	ErrContractAddressCollision = &TransactionError{49, "contract address collision"} // EXCEPTION_ERR_CONTRACT_ADDRESS_COLLISION = 4
 	ErrExecutionReverted        = &TransactionError{50, "execution reverted"}         // EXCEPTION_ERR_EXECUTION_REVERTED = 5
-	ErrMaxCodeSizeExceeded      = &TransactionError{51, "max code size exceeded"}     // EXCEPTION_ERR_MAX_CODE_SIZE_EXCEEDED = 6
+	ErrMaxCodeSizeExceeded      = &TransactionError{51, fmt.Sprintf("max code size exceeded (limit: %d bytes / %d KB)", MaxCodeSize, MaxCodeSize/1024)}     // EXCEPTION_ERR_MAX_CODE_SIZE_EXCEEDED = 6
 	ErrInvalidJump              = &TransactionError{52, "invalid jump"}               // EXCEPTION_ERR_INVALID_JUMP = 7
 	ErrWriteProtection          = &TransactionError{53, "write protection"}           // EXCEPTION_ERR_WRITE_PROTECTION = 8
 	ErrReturnDataOutOfBounds    = &TransactionError{54, "return data out of bounds"}  // EXCEPTION_ERR_RETURN_DATA_OUT_OF_BOUNDS = 9
@@ -108,7 +110,7 @@ var (
 	ErrPreEIP155              = &TransactionError{72, "pre-EIP-155 unprotected transactions are not allowed"}
 	ErrMalleableSignature     = &TransactionError{73, "malleable signature: s exceeds curve order / 2 (EIP-2)"}
 	ErrSenderRecovery         = &TransactionError{74, "failed to recover sender address from signature"}
-	ErrExceedsMaxEnvelopeSize = &TransactionError{75, "transaction envelope exceeds maximum allowed size"}
+	ErrExceedsMaxEnvelopeSize = &TransactionError{75, fmt.Sprintf("transaction envelope exceeds maximum allowed size (limit: %d bytes / %d MB)", MaxStandardTxEnvelopeSize, MaxStandardTxEnvelopeSize/(1024*1024))}
 	ErrExceedsMaxBatchSize    = &TransactionError{76, "batch contains too many transactions"}
 	ErrAlreadyKnown           = &TransactionError{77, "transaction already known in mempool or blockchain"}
 	ErrNonceTooLow            = &TransactionError{78, "nonce too low"}
@@ -119,7 +121,7 @@ var (
 	ErrExceedsBlockGasLimit   = &TransactionError{83, "exceeds block gas limit"}
 	ErrInvalidSender          = &TransactionError{84, "invalid sender"}
 	ErrTxTypeNotSupported     = &TransactionError{85, "transaction type not supported"}
-	ErrMaxInitCodeSizeExceeded = &TransactionError{86, "max initcode size exceeded"}
+	ErrMaxInitCodeSizeExceeded = &TransactionError{86, fmt.Sprintf("max initcode size exceeded (limit: %d bytes / %d MB)", MaxInitCodeSize, MaxInitCodeSize/(1024*1024))}
 	ErrGasLimitReached        = &TransactionError{87, "gas limit reached"}
 	ErrEnvelopeBindingMismatch = &TransactionError{88, "transaction fields do not match raw envelope"}
 	ErrInvalidEnvelope         = &TransactionError{89, "invalid raw envelope bytes"}

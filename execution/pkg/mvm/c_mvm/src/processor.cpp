@@ -63,8 +63,8 @@ struct Consts {
   static constexpr auto MAX_CALL_DEPTH = 1024u;
   static constexpr auto WORD_SIZE = 32u;
   static constexpr auto MAX_MEM_SIZE = 1ull << 25; // 32 MB
-  static constexpr uint64_t MAX_INITCODE_SIZE = 49152; // EIP-3860 (2 * 24576)
-  static constexpr uint64_t MAX_CODE_SIZE = 24576;     // EIP-170
+  static constexpr uint64_t MAX_INITCODE_SIZE = 1024 * 1024; // 1 MB (allows deploying 512 KB runtime code)
+  static constexpr uint64_t MAX_CODE_SIZE = 512 * 1024;      // 512 KB runtime code
 };
 
 inline int get_sign(const uint256_t &v) { return (v >> 255) ? -1 : 1; }
@@ -284,7 +284,8 @@ public:
         ET failureType = ET::outOfBounds;
         const uint64_t depositCost = getCodeDepositCost(output_.size());
         if (output_.size() > Consts::MAX_CODE_SIZE) {
-          failure = "Max code size exceeded";
+          failure = "Max code size exceeded (limit: 524288 bytes / 512 KB)";
+          failureType = ET::ErrMaxCodeSizeExceeded;
         } else if (!output_.empty() && output_[0] == 0xEF) {
           failure = "invalid code: must not begin with 0xef (EIP-3541)";
           failureType = ET::ErrInvalidCode;
@@ -382,9 +383,9 @@ public:
     }
 
     // EIP-3860: init code of a contract-creation transaction is limited to
-    // 49152 bytes.
+    // 1048576 bytes (1 MB).
     if (deploy && exec_code.size() > Consts::MAX_INITCODE_SIZE) {
-      eh(Exception(ET::outOfBounds, "Max initcode size exceeded"));
+      eh(Exception(ET::outOfBounds, "Max initcode size exceeded (limit: 1048576 bytes / 1 MB)"));
       result.gas_used = gas_tracker.get_gas_used();
       result.gas_pre_refund = result.gas_used;
       return result;
@@ -1927,7 +1928,7 @@ private:
     // EIP-3860: init code larger than 49152 bytes is an exceptional halt of
     // the creating frame, before any state change.
     if (size > Consts::MAX_INITCODE_SIZE) {
-      MVM_THROW(Exception(ET::outOfBounds, "Max initcode size exceeded"));
+      MVM_THROW(Exception(ET::outOfBounds, "Max initcode size exceeded (limit: 1048576 bytes / 1 MB)"));
     }
     auto initCode = copy_from_mem(offset, size);
     gas_tracker.add_gas_used(2 * get_word_size(size)); // EIP-3860: 2 gas per init code word
@@ -2520,7 +2521,7 @@ private:
     const auto salt = ctxt->s.pop();
 
     if (size > Consts::MAX_INITCODE_SIZE) { // EIP-3860, see create()
-      MVM_THROW(Exception(ET::outOfBounds, "Max initcode size exceeded"));
+      MVM_THROW(Exception(ET::outOfBounds, "Max initcode size exceeded (limit: 1048576 bytes / 1 MB)"));
     }
     auto input = copy_from_mem(offset, size);
     gas_tracker.add_gas_used(getCreate2DataSizeCost(get_word_size(size)));

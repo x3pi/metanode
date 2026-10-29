@@ -54,37 +54,40 @@ func confDeployReceipt(t *testing.T, key *ecdsa.PrivateKey, init []byte, gas uin
 }
 
 // TestTopLevelDeployCodeSizeLimits pins the code-size limits of a contract-creation transaction: runtime code
-// of at most 24576 bytes (EIP-170) and init code of at most 49152 bytes (EIP-3860).
+// of at most 512KB and init code of at most 1MB.
 func TestTopLevelDeployCodeSizeLimits(t *testing.T) {
 	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
 	t.Setenv("METANODE_DEVNET", "false")
 	key, err := crypto.GenerateKey()
 	require.NoError(t, err)
 
+	const maxCodeSize = 512 * 1024
+	const maxInitCodeSize = 1024 * 1024
+
 	for _, tc := range []struct {
 		name    string
 		runtime int
 		wantOK  bool
 	}{
-		{"runtime_24576_ok", 24576, true},
-		{"runtime_24577_rejected", 24577, false},
+		{"runtime_512KB_ok", maxCodeSize, true},
+		{"runtime_512KB_rejected", maxCodeSize + 1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt := append([]byte{0x5b}, bytes.Repeat([]byte{0x00}, tc.runtime-1)...)
-			st, ret := confDeployStatus(t, key, confDeployInit(rt), 30_000_000)
+			st, ret := confDeployStatus(t, key, confDeployInit(rt), 200_000_000)
 			require.Equal(t, tc.wantOK, st == pb.RECEIPT_STATUS_RETURNED, "status %v return %q", st, ret)
 		})
 	}
-	t.Run("initcode_49153_rejected", func(t *testing.T) {
-		init := append(confDeployInit([]byte{0x5b, 0x00}), bytes.Repeat([]byte{0x00}, 49153-len(confDeployInit([]byte{0x5b, 0x00})))...)
-		require.Len(t, init, 49153)
-		st, ret := confDeployStatus(t, key, init, 30_000_000)
-		require.NotEqual(t, pb.RECEIPT_STATUS_RETURNED, st, "init code over 49152 bytes must be rejected, got return %q", ret)
+	t.Run("initcode_1MB_rejected", func(t *testing.T) {
+		init := append(confDeployInit([]byte{0x5b, 0x00}), bytes.Repeat([]byte{0x00}, (maxInitCodeSize+1)-len(confDeployInit([]byte{0x5b, 0x00})))...)
+		require.Len(t, init, maxInitCodeSize+1)
+		st, ret := confDeployStatus(t, key, init, 100_000_000)
+		require.NotEqual(t, pb.RECEIPT_STATUS_RETURNED, st, "init code over 1MB must be rejected, got return %q", ret)
 	})
-	t.Run("initcode_49152_ok", func(t *testing.T) {
-		init := append(confDeployInit([]byte{0x5b, 0x00}), bytes.Repeat([]byte{0x00}, 49152-len(confDeployInit([]byte{0x5b, 0x00})))...)
-		require.Len(t, init, 49152)
-		st, ret := confDeployStatus(t, key, init, 30_000_000)
+	t.Run("initcode_1MB_ok", func(t *testing.T) {
+		init := append(confDeployInit([]byte{0x5b, 0x00}), bytes.Repeat([]byte{0x00}, maxInitCodeSize-len(confDeployInit([]byte{0x5b, 0x00})))...)
+		require.Len(t, init, maxInitCodeSize)
+		st, ret := confDeployStatus(t, key, init, 100_000_000)
 		require.Equal(t, pb.RECEIPT_STATUS_RETURNED, st, "return %q", ret)
 	})
 }
