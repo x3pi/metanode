@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
+	mt "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
@@ -420,4 +421,179 @@ func TestReviewMultipleSelfAuthorizationNonce_RevocationInChain(t *testing.T) {
 	if senderState.SmartContractState() != nil {
 		assert.Equal(t, common.Hash{}, senderState.SmartContractState().CodeHash(), "CodeHash must be cleared to empty hash")
 	}
+}
+
+// TestEIP7702_InternalCreate_SenderNonce_Success_GethParity verifies that when a self-authorized
+// sender executes CREATE during transaction execution, the creator's nonce bump is preserved,
+// resulting in nonce = start(1) + tx(1) + self-auth(1) + CREATE(1) = 4, matching go-ethereum.
+func TestEIP7702_InternalCreate_SenderNonce_Success_GethParity(t *testing.T) {
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+	t.Setenv("METANODE_DEVNET", "false")
+	chainID := big.NewInt(991)
+	cs := newTestChainState(t)
+	cs.SetConfig(&config.SimpleChainConfig{ChainId: chainID})
+
+	senderKey, senderAddr := genTestKey(t)
+	delegate := common.HexToAddress("0xdddddddddddddddddddddddddddddddddddddddd")
+	caller := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	leader := common.HexToAddress(auditLeader)
+
+	// Caller performs CALL(sender) once.
+	callerCode := []byte{0x60, 0, 0x60, 0, 0x60, 0, 0x60, 0, 0x60, 0, 0x73}
+	callerCode = append(callerCode, senderAddr.Bytes()...)
+	callerCode = append(callerCode, 0x61, 0xff, 0xff, 0xf1, 0x50, 0x00)
+
+	// Delegate executes CREATE: PUSH1 0, PUSH1 0, PUSH1 0, CREATE, POP, STOP
+	delegateCode := []byte{0x60, 0, 0x60, 0, 0x60, 0, 0xf0, 0x50, 0x00}
+
+	seedAccount(t, cs, senderAddr, big.NewInt(1_000_000_000_000_000), 1)
+	seedAccount(t, cs, leader, big.NewInt(0), 0)
+	seedContract(t, cs, caller, big.NewInt(0), callerCode)
+	seedContract(t, cs, delegate, big.NewInt(0), delegateCode)
+
+	auth := signAuthorization(t, senderKey, 991, delegate, 2)
+	signer := eth.LatestSignerForChainID(chainID)
+	signed, err := eth.SignNewTx(senderKey, signer, &eth.SetCodeTx{
+		ChainID:   uint256.NewInt(991),
+		Nonce:     1,
+		To:        caller,
+		Gas:       200000,
+		GasFeeCap: uint256.NewInt(mt.MINIMUM_BASE_FEE),
+		GasTipCap: uint256.NewInt(mt.MINIMUM_BASE_FEE),
+		Value:     uint256.NewInt(0),
+		AuthList:  []eth.SetCodeAuthorization{auth},
+	})
+	require.NoError(t, err)
+
+	tx, err := transaction.NewTransactionFromEth(signed)
+	require.NoError(t, err)
+
+	items := []grouptxns.Item{{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(tx), caller, delegate), Tx: tx}}
+	_, r, _, _ := ProcessTransactionsOptimistic(context.Background(), cs, grouptxns.GroupTransactionsDeterministic(items, cs.HasCode), blankHeader(), false, false, 999, leader, false)
+	require.Len(t, r, 1)
+	require.Equal(t, pb.RECEIPT_STATUS_RETURNED, r[0].Status())
+
+	// Geth reference
+	reference, err := state.New(eth.EmptyRootHash, state.NewDatabaseForTesting())
+	require.NoError(t, err)
+	reference.AddBalance(senderAddr, uint256.NewInt(1_000_000_000_000_000), tracing.BalanceChangeUnspecified)
+	reference.SetNonce(senderAddr, 1, tracing.NonceChangeUnspecified)
+	reference.SetCode(caller, callerCode)
+	reference.SetNonce(caller, 1, tracing.NonceChangeUnspecified)
+	reference.SetCode(delegate, delegateCode)
+	reference.SetNonce(delegate, 1, tracing.NonceChangeUnspecified)
+
+	random := common.Hash{}
+	cfg := *params.AllDevChainProtocolChanges
+	cfg.ChainID = chainID
+	evm := vm.NewEVM(vm.BlockContext{
+		CanTransfer: core.CanTransfer,
+		Transfer:    core.Transfer,
+		GetHash:     func(uint64) common.Hash { return common.Hash{} },
+		GasLimit:    1000000,
+		BlockNumber: big.NewInt(1),
+		Time:        1,
+		Difficulty:  big.NewInt(0),
+		BaseFee:     big.NewInt(0),
+		Random:      &random,
+	}, reference, &cfg, vm.Config{})
+
+	msg, err := core.TransactionToMessage(signed, signer, big.NewInt(0))
+	require.NoError(t, err)
+	g, err := core.ApplyMessage(evm, msg, new(core.GasPool).AddGas(1000000))
+	require.NoError(t, err)
+	require.NoError(t, g.Err)
+
+	require.Equal(t, g.UsedGas, r[0].GasUsed(), "gas used must match go-ethereum")
+	actual, err := cs.GetAccountStateDB().AccountState(senderAddr)
+	require.NoError(t, err)
+	require.Equal(t, reference.GetNonce(senderAddr), actual.Nonce(), "internal CREATE sender nonce must match geth (4)")
+	assert.Equal(t, uint64(4), actual.Nonce())
+}
+
+// TestEIP7702_InternalCreate_OuterCallRevert_RollsBackCreateNonce_GethParity verifies that when
+// the outer call reverts, the internal CREATE nonce bump is rolled back, preserving only
+// tx(1) + self-auth(1) = 3 on the sender, matching go-ethereum.
+func TestEIP7702_InternalCreate_OuterCallRevert_RollsBackCreateNonce_GethParity(t *testing.T) {
+	t.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
+	t.Setenv("METANODE_DEVNET", "false")
+	chainID := big.NewInt(991)
+	cs := newTestChainState(t)
+	cs.SetConfig(&config.SimpleChainConfig{ChainId: chainID})
+
+	senderKey, senderAddr := genTestKey(t)
+	delegate := common.HexToAddress("0xdddddddddddddddddddddddddddddddddddddddd")
+	caller := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	leader := common.HexToAddress(auditLeader)
+
+	// Caller performs CALL(sender), then immediately REVERTs (PUSH1 0, PUSH1 0, REVERT).
+	callerCode := []byte{0x60, 0, 0x60, 0, 0x60, 0, 0x60, 0, 0x60, 0, 0x73}
+	callerCode = append(callerCode, senderAddr.Bytes()...)
+	callerCode = append(callerCode, 0x61, 0xff, 0xff, 0xf1, 0x50, 0x60, 0x00, 0x60, 0x00, 0xfd)
+
+	// Delegate executes CREATE: PUSH1 0, PUSH1 0, PUSH1 0, CREATE, POP, STOP
+	delegateCode := []byte{0x60, 0, 0x60, 0, 0x60, 0, 0xf0, 0x50, 0x00}
+
+	seedAccount(t, cs, senderAddr, big.NewInt(1_000_000_000_000_000), 1)
+	seedAccount(t, cs, leader, big.NewInt(0), 0)
+	seedContract(t, cs, caller, big.NewInt(0), callerCode)
+	seedContract(t, cs, delegate, big.NewInt(0), delegateCode)
+
+	auth := signAuthorization(t, senderKey, 991, delegate, 2)
+	signer := eth.LatestSignerForChainID(chainID)
+	signed, err := eth.SignNewTx(senderKey, signer, &eth.SetCodeTx{
+		ChainID:   uint256.NewInt(991),
+		Nonce:     1,
+		To:        caller,
+		Gas:       200000,
+		GasFeeCap: uint256.NewInt(mt.MINIMUM_BASE_FEE),
+		GasTipCap: uint256.NewInt(mt.MINIMUM_BASE_FEE),
+		Value:     uint256.NewInt(0),
+		AuthList:  []eth.SetCodeAuthorization{auth},
+	})
+	require.NoError(t, err)
+
+	tx, err := transaction.NewTransactionFromEth(signed)
+	require.NoError(t, err)
+
+	items := []grouptxns.Item{{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(tx), caller, delegate), Tx: tx}}
+	_, r, _, _ := ProcessTransactionsOptimistic(context.Background(), cs, grouptxns.GroupTransactionsDeterministic(items, cs.HasCode), blankHeader(), false, false, 999, leader, false)
+	require.Len(t, r, 1)
+
+	// Geth reference
+	reference, err := state.New(eth.EmptyRootHash, state.NewDatabaseForTesting())
+	require.NoError(t, err)
+	reference.AddBalance(senderAddr, uint256.NewInt(1_000_000_000_000_000), tracing.BalanceChangeUnspecified)
+	reference.SetNonce(senderAddr, 1, tracing.NonceChangeUnspecified)
+	reference.SetCode(caller, callerCode)
+	reference.SetNonce(caller, 1, tracing.NonceChangeUnspecified)
+	reference.SetCode(delegate, delegateCode)
+	reference.SetNonce(delegate, 1, tracing.NonceChangeUnspecified)
+
+	random := common.Hash{}
+	cfg := *params.AllDevChainProtocolChanges
+	cfg.ChainID = chainID
+	evm := vm.NewEVM(vm.BlockContext{
+		CanTransfer: core.CanTransfer,
+		Transfer:    core.Transfer,
+		GetHash:     func(uint64) common.Hash { return common.Hash{} },
+		GasLimit:    1000000,
+		BlockNumber: big.NewInt(1),
+		Time:        1,
+		Difficulty:  big.NewInt(0),
+		BaseFee:     big.NewInt(0),
+		Random:      &random,
+	}, reference, &cfg, vm.Config{})
+
+	msg, err := core.TransactionToMessage(signed, signer, big.NewInt(0))
+	require.NoError(t, err)
+	g, err := core.ApplyMessage(evm, msg, new(core.GasPool).AddGas(1000000))
+	require.NoError(t, err)
+	require.Error(t, g.Err, "outer call must revert")
+
+	actual, err := cs.GetAccountStateDB().AccountState(senderAddr)
+	require.NoError(t, err)
+	// On outer revert: CREATE is rolled back, sender nonce stays at senderFinalNonce = 3
+	require.Equal(t, reference.GetNonce(senderAddr), actual.Nonce(), "reverted CREATE sender nonce must match geth (3)")
+	assert.Equal(t, uint64(3), actual.Nonce())
 }

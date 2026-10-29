@@ -51,7 +51,7 @@ func vmGasBudget(intrinsicGas, maxGas uint64) uint64 {
 // Otherwise, the intrinsic cost — never charged inside the VM's own
 // gas-tracked budget, since vmGasBudget already subtracted it — is added
 // back so gasUsed correctly reflects the tx's true total cost.
-func applyIntrinsicGas(mvmResult *mvm.MVMExecuteResult, intrinsicGas, maxGas uint64) {
+func applyIntrinsicGas(mvmResult *mvm.MVMExecuteResult, intrinsicGas, maxGas, authGasRefund uint64) {
 	if mvmResult == nil {
 		return
 	}
@@ -63,15 +63,16 @@ func applyIntrinsicGas(mvmResult *mvm.MVMExecuteResult, intrinsicGas, maxGas uin
 		mvmResult.GasUsed = maxGas
 		return
 	}
-	if mvmResult.GasPreRefund > 0 {
-		// EIP-3529: the refund is capped at a fifth of the TOTAL gas used, intrinsic gas included.
-		total := mvmResult.GasPreRefund + intrinsicGas
-		refund := mvmResult.GasRefund
-		if cap := total / 5; refund > cap {
-			refund = cap
-		}
-		mvmResult.GasUsed = total - refund
-		return
+	total := mvmResult.GasPreRefund + intrinsicGas
+	if mvmResult.GasPreRefund == 0 {
+		total = mvmResult.GasUsed + intrinsicGas
 	}
-	mvmResult.GasUsed += intrinsicGas
+	// EIP-3529: the refund is capped at a fifth of the TOTAL gas used, intrinsic gas included.
+	// EIP-7702: authorization refund for existing authority accounts is pooled with EVM gas refund
+	// before applying the 20% cap.
+	refund := mvmResult.GasRefund + authGasRefund
+	if cap := total / 5; refund > cap {
+		refund = cap
+	}
+	mvmResult.GasUsed = total - refund
 }

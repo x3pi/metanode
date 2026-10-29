@@ -241,12 +241,12 @@ mvm::ExecResult run(mvm::MyGlobalState &gs, bool deploy,
     const auto exec_result = p.run(tx, deploy, from, gs.get(to, nullptr), input,
                                    amount, nullptr, readOnly);
 
-    // 🔒 NONCE-FIX: Always increment nonce here (for both deploy and
-    // non-deploy). CREATE opcode does NOT call gs.set_addresses_nonce_change()
-    // — it only modifies MyAccount locally. The nonce change must be reported
-    // from here. State cache sync is handled by set_addresses_nonce_change() in
-    // my_global_state.cpp.
-    incrementSenderNonce(gs, from, fromAc);
+    // 🔒 NONCE-FIX: Top-level deploy increments sender nonce before running
+    // initcode (Yellow Paper Section 7 / evm.create), so for deploy it is already
+    // incremented. For non-deploy calls, increment here.
+    if (!deploy) {
+      incrementSenderNonce(gs, from, fromAc);
+    }
 
     if (out_native_logs != nullptr) {
       *out_native_logs = std::move(logger.buffered_logs);
@@ -256,10 +256,12 @@ mvm::ExecResult run(mvm::MyGlobalState &gs, bool deploy,
     mvm::ExecResult error_result = handleException(e);
 
     // Increment nonce even on error (EVM behavior)
-    try {
-      auto fromAc = gs.get(from, nullptr);
-      incrementSenderNonce(gs, from, fromAc);
-    } catch (...) {
+    if (!deploy) {
+      try {
+        auto fromAc = gs.get(from, nullptr);
+        incrementSenderNonce(gs, from, fromAc);
+      } catch (...) {
+      }
     }
     if (out_native_logs != nullptr) {
       *out_native_logs = std::move(logger.buffered_logs);
@@ -269,10 +271,12 @@ mvm::ExecResult run(mvm::MyGlobalState &gs, bool deploy,
     mvm::ExecResult error_result = handleUnknownException("run");
 
     // Increment nonce even on error (EVM behavior)
-    try {
-      auto fromAc = gs.get(from, nullptr);
-      incrementSenderNonce(gs, from, fromAc);
-    } catch (...) {
+    if (!deploy) {
+      try {
+        auto fromAc = gs.get(from, nullptr);
+        incrementSenderNonce(gs, from, fromAc);
+      } catch (...) {
+      }
     }
     if (out_native_logs != nullptr) {
       *out_native_logs = std::move(logger.buffered_logs);
@@ -761,21 +765,18 @@ ExecuteResult *deploy(
     auto contract = gs.create(contract_address, 0u, {}, 1);
     gs.set_addresses_nonce_change(contract_address, 1);
     contract_created = true;
+    // Standard Ethereum execution order (Yellow Paper Section 7 / evm.create):
+    // The deployer's nonce is incremented before constructor code executes.
+    // If the constructor calls back to the deployer, any nested CREATE uses
+    // the post-increment nonce, preventing address collision with this contract.
+    incrementSenderNonce(gs, caller_address, from);
 
     // Pass constructor as input — in deploy mode, _Processor::run() uses
     // input as exec_code (the constructor bytecode to execute)
-    std::cerr << "[DEPLOY_DEBUG] constructor_size="
-              << contract_constructor.size() << " gas_limit=" << gas_limit
-              << " gas_price=" << gas_price << std::endl;
     auto result = run(gs, true, caller_address, contract_address, amount,
                       gas_price, gas_limit, log_handler, contract_constructor,
                       mvmId, false, tx_hash, is_debug, is_off_chain, &nativeLogs,
                       &txContext.access_list);
-    std::cerr << "[DEPLOY_DEBUG] exit_reason=" << (int)result.er
-              << " exception=" << (int)result.ex
-              << " gas_used=" << result.gas_used
-              << " output_size=" << result.output.size()
-              << " exmsg=" << result.exmsg << std::endl;
     // EIP-3541: reject deploying code starting with 0xEF, same rule as the
     // nested CREATE/CREATE2 opcodes (see create()/create2() in
     // processor.cpp) — without this, a top-level deploy transaction could
