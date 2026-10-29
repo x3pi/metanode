@@ -137,6 +137,7 @@ public:
   // lock với việc erase khỏi map) trước khi hủy, để tránh race giữa lúc
   // caller khác quyết định huỷ và lúc thực sự huỷ (TOCTOU).
   static bool destroyInstance(const std::string &db_path, bool onlyIfIdle = false); // Hàm hủy tức thì
+  static void destroyAllInstances();
   bool saveAllAndCommit();
   bool revertUncommittedChanges();
   bool mvmCommitTransaction();

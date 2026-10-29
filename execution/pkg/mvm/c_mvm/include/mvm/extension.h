@@ -38,5 +38,11 @@ struct Extension {
   virtual Code Blake2f(mvm::Code input) = 0;
   virtual Code PointEvaluationVerify(mvm::Code input) = 0;
   virtual Code PublicKeyFromPrivateKey(mvm::Code input) = 0;
+
+  // Journal support for Xapian writes in sub-calls:
+  // xapian_checkpoint() takes a snapshot of buffered Xapian operations before a call,
+  // xapian_rollback() restores that snapshot if the sub-call reverts.
+  virtual size_t xapian_checkpoint() { return 0; }
+  virtual void xapian_rollback(size_t mark) {}
 };
 } // namespace mvm

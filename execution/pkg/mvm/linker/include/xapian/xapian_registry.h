@@ -92,6 +92,16 @@ public:
      */
     void clearBufferForTxHash(const uint256_t* txHash);
     void commitBufferForTxHash(const uint256_t* txHash);
+
+    struct XapianManagerSnapshot {
+        std::shared_ptr<XapianManager> manager;
+        size_t log_count;
+    };
+    using XapianSnapshot = std::vector<XapianManagerSnapshot>;
+
+    static XapianSnapshot takeSnapshotForTxHash(const uint256_t* txHash);
+    static void revertToSnapshotForTxHash(const uint256_t* txHash, const XapianSnapshot& snapshot);
+
     std::map<mvm::Address, std::array<uint8_t, 32u>> getGroupHashForMvmId(unsigned char *mvmId) const;
 
     /**

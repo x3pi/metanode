@@ -458,4 +458,121 @@ TEST_SUITE("XapianManager") {
             XapianManager::destroyInstance(mvm::createFullPath(addr, db_name).string());
         }
     }
+
+    TEST_CASE("SNAPSHOT & ROLLBACK: Subcall revert discards writes and preserves prior writes") {
+        init_xapian_test_env();
+        mvm::Address addr = 980000001;
+        std::string db_name = "snap_revert_db";
+        auto manager = create_test_manager(db_name, addr, true);
+        REQUIRE(manager != nullptr);
+
+        uint256_t txHash = next_fake_tx_hash();
+
+        // 1. Parent writes doc 1
+        std::string doc1 = manager->new_document("{\"name\":\"parent_doc_1\"}", 1, nullptr, &txHash);
+        REQUIRE(!doc1.empty());
+
+        // 2. Child frame begins: take snapshot
+        auto snap1 = registry.takeSnapshotForTxHash(&txHash);
+
+        // 3. Child writes doc 2
+        std::string doc2 = manager->new_document("{\"name\":\"child_doc_2_reverted\"}", 1, nullptr, &txHash);
+        REQUIRE(!doc2.empty());
+        REQUIRE(doc2 != doc1);
+
+        // 4. Child reverts: rollback to snap1
+        registry.revertToSnapshotForTxHash(&txHash, snap1);
+
+        // 5. Parent continues and writes doc 3
+        std::string doc3 = manager->new_document("{\"name\":\"parent_doc_3\"}", 1, nullptr, &txHash);
+        REQUIRE(!doc3.empty());
+        REQUIRE(doc3 != doc2);
+
+        // 6. Commit transaction
+        registry.commitBufferForTxHash(&txHash);
+        manager->commit_changes();
+
+        // 7. Verify DB content: doc1 and doc3 must exist, doc2 must NOT exist
+        std::string data1 = manager->get_data(doc1, 1);
+        CHECK(data1 == "{\"name\":\"parent_doc_1\"}");
+
+        std::string data3 = manager->get_data(doc3, 1);
+        CHECK(data3 == "{\"name\":\"parent_doc_3\"}");
+
+        std::string data2 = manager->get_data(doc2, 1);
+        CHECK(data2.empty());
+
+        XapianManager::destroyInstance(mvm::createFullPath(addr, db_name).string());
+    }
+
+    TEST_CASE("SNAPSHOT & ROLLBACK: Revert to empty snapshot clears all subcall writes") {
+        init_xapian_test_env();
+        mvm::Address addr = 980000002;
+        std::string db_name = "snap_empty_db";
+        auto manager = create_test_manager(db_name, addr, true);
+        REQUIRE(manager != nullptr);
+
+        uint256_t txHash = next_fake_tx_hash();
+
+        // Snapshot taken when 0 operations have occurred
+        auto snap0 = registry.takeSnapshotForTxHash(&txHash);
+
+        // Subcall writes documents
+        std::string docA = manager->new_document("{\"name\":\"docA\"}", 1, nullptr, &txHash);
+        std::string docB = manager->new_document("{\"name\":\"docB\"}", 1, nullptr, &txHash);
+        REQUIRE(!docA.empty());
+        REQUIRE(!docB.empty());
+
+        // Subcall reverts
+        registry.revertToSnapshotForTxHash(&txHash, snap0);
+
+        // Transaction ends with commit
+        registry.commitBufferForTxHash(&txHash);
+        manager->commit_changes();
+
+        // Verify neither docA nor docB was committed
+        CHECK(manager->get_data(docA, 1).empty());
+        CHECK(manager->get_data(docB, 1).empty());
+
+        XapianManager::destroyInstance(mvm::createFullPath(addr, db_name).string());
+    }
+
+    TEST_CASE("SNAPSHOT & ROLLBACK: Multi-DB rollback across subcalls") {
+        init_xapian_test_env();
+        mvm::Address addr = 980000003;
+        std::string db1_name = "snap_multidb_1";
+        std::string db2_name = "snap_multidb_2";
+        auto mgr1 = create_test_manager(db1_name, addr, true);
+        auto mgr2 = create_test_manager(db2_name, addr, true);
+        REQUIRE(mgr1 != nullptr);
+        REQUIRE(mgr2 != nullptr);
+
+        uint256_t txHash = next_fake_tx_hash();
+
+        // Parent writes to DB1
+        std::string doc1_parent = mgr1->new_document("{\"db\":\"1\",\"type\":\"parent\"}", 1, nullptr, &txHash);
+
+        // Snapshot at subcall start
+        auto snap = registry.takeSnapshotForTxHash(&txHash);
+
+        // Subcall writes to DB1 and DB2
+        std::string doc1_child = mgr1->new_document("{\"db\":\"1\",\"type\":\"child\"}", 1, nullptr, &txHash);
+        std::string doc2_child = mgr2->new_document("{\"db\":\"2\",\"type\":\"child\"}", 1, nullptr, &txHash);
+
+        // Subcall reverts
+        registry.revertToSnapshotForTxHash(&txHash, snap);
+
+        // Commit transaction
+        registry.commitBufferForTxHash(&txHash);
+        mgr1->commit_changes();
+        mgr2->commit_changes();
+
+        // Verify: parent doc in DB1 exists, child docs in DB1 and DB2 do NOT exist
+        CHECK(mgr1->get_data(doc1_parent, 1) == "{\"db\":\"1\",\"type\":\"parent\"}");
+        CHECK(mgr1->get_data(doc1_child, 1).empty());
+        CHECK(mgr2->get_data(doc2_child, 1).empty());
+
+        XapianManager::destroyInstance(mvm::createFullPath(addr, db1_name).string());
+        XapianManager::destroyInstance(mvm::createFullPath(addr, db2_name).string());
+    }
 }

@@ -36,6 +36,7 @@ extern void commit_xapian_tx_buffer(unsigned char *b_tx_hash);
 extern void clear_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int count);
 extern void commit_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int count);
 extern void MVM_commitAllXapian();
+extern void MVM_destroyAllXapianInstances();
 */
 import "C"
 import (
@@ -1899,6 +1900,11 @@ func ClearAllStateInstances() {
 // CommitAllXapian forces all XapianManager instances in C++ to commit their data to disk
 func CommitAllXapian() {
 	C.MVM_commitAllXapian()
+}
+
+// DestroyAllXapianInstances cleanly closes and removes all XapianManager instances in C++
+func DestroyAllXapianInstances() {
+	C.MVM_destroyAllXapianInstances()
 }
 func ClearXapianTxBuffer(txHash []byte) {
 	if len(txHash) == 0 {

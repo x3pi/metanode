@@ -1755,6 +1755,19 @@ bool XapianManager::destroyInstance(const std::string &db_path_str, bool onlyIfI
     return false; // Không tìm thấy instance để hủy
 }
 
+void XapianManager::destroyAllInstances() {
+    std::vector<std::string> keys;
+    {
+        std::shared_lock<std::shared_mutex> lock(instances_mutex);
+        for (const auto &pair : instances) {
+            keys.push_back(pair.first);
+        }
+    }
+    for (const auto &key : keys) {
+        destroyInstance(key, false);
+    }
+}
+
 // Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged VÀ XÓA CHÚNG KHỎI MANAGER
 XapianLog::ComprehensiveLog XapianManager::extractComprehensiveChangeLogs()
 {

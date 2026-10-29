@@ -2247,13 +2247,31 @@ private:
           precompile_output =
               extension.SimpleDatabase(input, ctxt->as.acc.get_address());
         } else if (addr == FULL_DATABASE_ADDRESS) {
-          precompile_output =
-              extension.FullDatabase(input, ctxt->as.acc.get_address(), false,
-                                     gs.get_block_context().number, &gs);
-        } else if (addr == FULL_DATABASE_ADDRESS_V1) {
-          precompile_output =
-              extension.FullDatabaseV1(input, ctxt->as.acc.get_address(), false,
+          size_t xapianMark = extension.xapian_checkpoint();
+          try {
+            precompile_output =
+                extension.FullDatabase(input, ctxt->as.acc.get_address(), false,
                                        gs.get_block_context().number, &gs);
+            journal.record([this, xapianMark]() {
+              extension.xapian_rollback(xapianMark);
+            });
+          } catch (...) {
+            extension.xapian_rollback(xapianMark);
+            throw;
+          }
+        } else if (addr == FULL_DATABASE_ADDRESS_V1) {
+          size_t xapianMark = extension.xapian_checkpoint();
+          try {
+            precompile_output =
+                extension.FullDatabaseV1(input, ctxt->as.acc.get_address(), false,
+                                         gs.get_block_context().number, &gs);
+            journal.record([this, xapianMark]() {
+              extension.xapian_rollback(xapianMark);
+            });
+          } catch (...) {
+            extension.xapian_rollback(xapianMark);
+            throw;
+          }
         } else if (addr == CROSS_CHAIN_ADDRESS) {
           success = handle_cross_chain_precompile(
               gs, input, precompile_output, ctxt->as, value, log_handler,
