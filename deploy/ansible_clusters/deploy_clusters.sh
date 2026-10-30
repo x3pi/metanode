@@ -23,6 +23,8 @@ PARENT_ONLY="false"
 TARGET_NODE=""
 EXPORT_CONFIG_ONLY="false"
 ENABLE_MONITOR="true"
+PARENT_KEYS_DIR="${SCRIPT_DIR}/parent_keys"
+OVERWRITE_KEYS="false"
 EXTRA_ANSIBLE_ARGS=()
 
 # ── Load environment (.env) ──────────────────────────────────────────────────
@@ -53,6 +55,8 @@ usage() {
     echo "  --stop              Dừng dịch vụ (toàn bộ hoặc lọc theo --node/--exec-only)"
     echo "  --clean             Dọn dẹp database & log (giữ nguyên config và key)"
     echo "  --reset             Reset toàn bộ, xóa database và khởi chạy lại từ block 0"
+    echo "  --gen-keys          Sinh bộ key Parent Chain (và validator public keys) cục bộ"
+    echo "  --overwrite-keys    Buộc sinh lại bộ key Parent Chain kể cả khi đã có sẵn"
     echo "  --status            Kiểm tra trạng thái RPC và block height các cụm node"
     echo "  --open-ports        Tự động cấu hình mở cổng tường lửa (UFW) trên các server"
     echo "  --export-config     Xuất cấu hình mạng ra /tmp/rpc_nodes.json"
@@ -78,6 +82,7 @@ usage() {
     echo ""
     echo "⚙️ Tùy Chọn Khác:"
     echo "  --env=ENV           Môi trường triển khai: devnet (mặc định cho test cluster) hoặc production"
+    echo "  --parent-keys-dir=DIR Thư mục lưu key Parent Chain (mặc định: parent_keys/)"
     echo "  --systemd           Sử dụng systemd service thay vì background daemon"
     echo "  --inventory=FILE    Đường dẫn inventory tùy chỉnh (mặc định: inventory.yml)"
     echo "  --rpc-nodes-file=FILE Đường dẫn file cấu hình RPC JSON (mặc định: /tmp/rpc_nodes.json)"
@@ -121,6 +126,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --reset|--reset-all|reset)
             ACTION="reset"
+            shift
+            ;;
+        --gen-keys|gen-keys|gen_keys)
+            ACTION="gen_keys"
+            shift
+            ;;
+        --overwrite-keys|--overwrite)
+            OVERWRITE_KEYS="true"
             shift
             ;;
         --status|status)
@@ -208,6 +221,14 @@ while [[ $# -gt 0 ]]; do
             INVENTORY="$2"
             shift 2
             ;;
+        --parent-keys-dir=*|--keys-dir=*)
+            PARENT_KEYS_DIR="${1#*=}"
+            shift
+            ;;
+        --parent-keys-dir|--keys-dir)
+            PARENT_KEYS_DIR="$2"
+            shift 2
+            ;;
         --rpc-nodes-file=*|--rpc-json=*)
             RPC_NODES_FILE="${1#*=}"
             shift
@@ -235,6 +256,14 @@ if [ -z "$ACTION" ]; then
         ACTION="open_ports"
     else
         ACTION="setup"
+    fi
+fi
+
+# Detect environment from inventory if not explicitly passed via CLI
+if [ -z "${METANODE_ENV:-}" ] && [ -f "$INVENTORY" ]; then
+    INV_ENV=$(grep -E '^\s*metanode_env:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
+    if [ -n "$INV_ENV" ]; then
+        METANODE_ENV="$INV_ENV"
     fi
 fi
 
@@ -813,13 +842,35 @@ tn.notify_action_start(action='${ACTION}', scope='${TARGET_SCOPE_DESC}', target_
 " 2>/dev/null || true
 fi
 
+# 2.8. Xử lý riêng cho lệnh --gen-keys (chỉ sinh key Parent Chain cục bộ mà không deploy)
+if [ "$ACTION" = "gen_keys" ]; then
+    echo "🔑 [GEN-KEYS] Bắt đầu sinh bộ Key Parent Chain cục bộ..."
+    python3 "${SCRIPT_DIR}/scripts/gen_parent_keys.py" \
+        --inventory "$INVENTORY" \
+        --keys-dir "$PARENT_KEYS_DIR" \
+        --overwrite
+    echo "✅ [GEN-KEYS] Đã sinh xong bộ key Parent Chain tại: ${PARENT_KEYS_DIR}"
+    exit 0
+fi
+
+# 2.9. Đảm bảo bộ key Parent Chain luôn sẵn sàng:
+# - Nếu chưa có (fresh setup hoặc reset): tự động sinh key mới
+# - Nếu đã có: giữ nguyên đọc như cũ (không sinh đè trừ khi có cờ --overwrite-keys)
+if [ "$EXEC_ONLY" != "true" ]; then
+    GEN_KEY_CMD=(python3 "${SCRIPT_DIR}/scripts/gen_parent_keys.py" --inventory "$INVENTORY" --keys-dir "$PARENT_KEYS_DIR")
+    if [ "$OVERWRITE_KEYS" = "true" ]; then
+        GEN_KEY_CMD+=(--overwrite)
+    fi
+    "${GEN_KEY_CMD[@]}"
+fi
+
 # 3. Execute Ansible Playbook
 echo "⚙️ Executing Ansible Playbook (${ACTION}, Environment: ${METANODE_ENV})..."
 set +e
 ansible-playbook \
     -i "$INVENTORY" \
     "$PLAYBOOK" \
-    --extra-vars "deploy_action=${ACTION} open_ports=${OPEN_PORTS_FLAG} run_integration_tests=false metanode_env=${METANODE_ENV} node_env=${NODE_ENV}" \
+    --extra-vars "deploy_action=${ACTION} open_ports=${OPEN_PORTS_FLAG} run_integration_tests=false metanode_env=${METANODE_ENV} node_env=${NODE_ENV} parent_keys_dir=${PARENT_KEYS_DIR}" \
     "${VAULT_CLUSTER_ARGS[@]}" \
     "${EXTRA_ANSIBLE_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
 ANSIBLE_RC=${PIPESTATUS[0]}

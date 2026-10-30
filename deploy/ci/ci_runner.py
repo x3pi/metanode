@@ -18,6 +18,8 @@ import yaml
 import json
 
 SAFE_GIT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+os.environ.setdefault("METANODE_ENV", "devnet")
+os.environ.setdefault("NODE_ENV", "devnet")
 
 # Import Telegram notifier from current directory
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))

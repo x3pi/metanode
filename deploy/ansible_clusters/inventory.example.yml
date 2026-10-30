@@ -1,5 +1,9 @@
 all:
   vars:
+    # Môi trường mẫu mặc định: devnet (dùng cho testnet / phát triển nội bộ)
+    metanode_env: "devnet"
+    node_env: "devnet"
+    metanode_devnet: true
     ansible_user: "abc"
     # Installation and base directories (standardized across all machines)
     install_dir: "/opt/metanode"
@@ -17,6 +21,7 @@ all:
     raft_secret_file: "/opt/metanode/raft_secret.key"
 
     # ── Parent Chain Configuration (Điểm neo bảo chứng cho Child Chain) ──
+    parent_keys_dir: "{{ playbook_dir }}/parent_keys"
     parent_chain_rpc_port: 10751
     parent_chain_host: "192.168.1.234"
     # EVM Chain ID cho Child Chain (Execution Clusters)

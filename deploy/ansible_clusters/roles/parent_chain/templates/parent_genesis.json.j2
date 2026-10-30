@@ -29,13 +29,16 @@
   "validators": [
 {% for host in groups['parent_chain_nodes'] %}
 {% set v_idx = hostvars[host]['parent_node_id'] | default(loop.index0) | int %}
+{% set k_dir = parent_keys_dir | default(playbook_dir ~ '/parent_keys') %}
+{% set s_file = k_dir ~ '/node_' ~ v_idx ~ '_summary.json' %}
+{% set s_data = (lookup('file', s_file, errors='ignore') | default('{}', true)) | from_json %}
     {
       "name": "node-{{ v_idx }}",
-      "address": "{{ hostvars[host]['parent_validator_address'] | default(default_addrs[v_idx % default_addrs|length]) }}",
+      "address": "{{ hostvars[host]['parent_validator_address'] | default(s_data.get('eth_address', default_addrs[v_idx % default_addrs|length])) }}",
       "stake": "{{ hostvars[host]['stake'] | default('1000000000000000000') }}",
-      "authority_key": "{{ hostvars[host]['authority_key'] | default(default_authorities[v_idx % default_authorities|length]) }}",
-      "protocol_key": "{{ hostvars[host]['protocol_key'] | default(default_protocols[v_idx % default_protocols|length]) }}",
-      "network_key": "{{ hostvars[host]['network_key'] | default(default_networks[v_idx % default_networks|length]) }}",
+      "authority_key": "{{ hostvars[host]['authority_key'] | default(s_data.get('authority_key', default_authorities[v_idx % default_authorities|length])) }}",
+      "protocol_key": "{{ hostvars[host]['protocol_key'] | default(s_data.get('protocol_key', default_protocols[v_idx % default_protocols|length])) }}",
+      "network_key": "{{ hostvars[host]['network_key'] | default(s_data.get('network_key', default_networks[v_idx % default_networks|length])) }}",
       "p2p_address": "/ip4/{{ hostvars[host]['ansible_host'] | default('127.0.0.1') }}/tcp/{{ hostvars[host]['parent_p2p_port'] | default(19001 + v_idx) }}"
     }{% if not loop.last %},{% endif %}
 {% endfor %}
