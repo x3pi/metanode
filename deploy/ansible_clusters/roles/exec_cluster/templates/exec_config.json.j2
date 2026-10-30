@@ -1,6 +1,7 @@
 {
-  "debug": true,
+  "debug": {{ 'true' if (metanode_env | default('production')) == 'devnet' else 'false' }},
   "devnet_rpc": {{ 'true' if (metanode_env | default('production')) == 'devnet' else 'false' }},
+  "require_encrypted_keys": {{ 'false' if (metanode_env | default('production')) == 'devnet' else (require_encrypted_keys | default(true) | lower) }},
   "cluster_id": {{ cluster_id }},
   "master_password": "{{ master_password | default('devnet-test-password') }}",
   "app_pepper": "{{ app_pepper | default('devnet-test-pepper') }}",

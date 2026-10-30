@@ -7,6 +7,8 @@ realtime logging, pre-test actions (e.g. reset_chain for TPS), and Telegram aler
 
 import sys
 import os
+import re
+import shlex
 import time
 import argparse
 import subprocess
@@ -14,6 +16,8 @@ import socket
 from datetime import datetime
 import yaml
 import json
+
+SAFE_GIT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 
 # Import Telegram notifier from current directory
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -59,12 +63,11 @@ def get_git_info(repo_path):
     except Exception as e:
         return {"hash": "unknown", "author": "unknown", "message": f"error: {e}"}
 
-def run_shell_cmd(cmd, cwd=None, timeout=None, log_file=None):
+def run_argv_cmd(argv, cwd=None, timeout=None, log_file=None):
     """
-    Run a shell command, stream output to log_file (and terminal), with timeout.
+    Run an argument list with shell=False, streaming output to log_file and terminal.
     Returns (exit_code, full_output).
     """
-    start_time = time.time()
     log_fp = None
     if log_file:
         os.makedirs(os.path.dirname(os.path.abspath(log_file)), exist_ok=True)
@@ -72,9 +75,9 @@ def run_shell_cmd(cmd, cwd=None, timeout=None, log_file=None):
 
     try:
         proc = subprocess.Popen(
-            cmd,
+            list(argv),
             cwd=cwd,
-            shell=True,
+            shell=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -109,6 +112,21 @@ def run_shell_cmd(cmd, cwd=None, timeout=None, log_file=None):
         if log_fp:
             log_fp.close()
         return 1, f"Execution failed: {e}"
+
+def run_shell_cmd(cmd, cwd=None, timeout=None, log_file=None):
+    """
+    Run a command, streaming output to log_file (and terminal), with timeout.
+    Prefers shell=False via shlex.split when the command has no compound shell operators.
+    Returns (exit_code, full_output).
+    """
+    if isinstance(cmd, (list, tuple)):
+        return run_argv_cmd(cmd, cwd=cwd, timeout=timeout, log_file=log_file)
+    if isinstance(cmd, str) and not any(op in cmd for op in ["&&", "||", "|", ";", ">", "<", "$("]):
+        try:
+            return run_argv_cmd(shlex.split(cmd), cwd=cwd, timeout=timeout, log_file=log_file)
+        except ValueError:
+            pass
+    return run_argv_cmd(["/bin/bash", "-c", cmd], cwd=cwd, timeout=timeout, log_file=log_file)
 
 def tail_file(filepath, n_lines=20):
     """Return last N lines of a file."""
@@ -183,8 +201,11 @@ def main():
             return text
         return text.replace("{METANODE_DIR}", repo_path).replace("{SUITE_DIR}", suite_path)
 
-    branch = git_cfg.get("branch", "main")
-    remote = git_cfg.get("remote", "origin")
+    branch = str(git_cfg.get("branch", "main")).strip()
+    remote = str(git_cfg.get("remote", "origin")).strip()
+    if not SAFE_GIT_REF_RE.match(branch) or not SAFE_GIT_REF_RE.match(remote):
+        print(f"❌ Invalid git remote/branch configuration: remote={remote!r}, branch={branch!r}")
+        sys.exit(1)
 
     tele_cfg = config.get("telegram", {})
     tele_enabled = tele_cfg.get("enabled", True)
@@ -204,10 +225,19 @@ def main():
         print(f"\n📥 [GIT PULL] Đang kéo mã nguồn mới nhất từ {remote}/{branch}...")
         if not args.dry_run:
             # Khôi phục genesis.json.example về trạng thái sạch của git trước khi pull để tránh merge conflict
-            run_shell_cmd("git checkout -- deploy/systemd/genesis.json.example 2>/dev/null || true", cwd=repo_path)
-            pull_res, pull_out = run_shell_cmd(f"git checkout {branch} && git pull {remote} {branch}", cwd=repo_path)
+            run_argv_cmd(["git", "checkout", "--", "deploy/systemd/genesis.json.example"], cwd=repo_path)
+            co_res, co_out = run_argv_cmd(["git", "checkout", branch], cwd=repo_path)
+            if co_res != 0:
+                print("❌ Git checkout thất bại!")
+                sys.exit(co_res)
+            verify_sigs = git_cfg.get("verify_signatures", True) and os.environ.get("CI_ALLOW_UNSIGNED_GIT_PULL") != "true"
+            pull_argv = ["git", "pull", "--ff-only"]
+            if verify_sigs:
+                pull_argv.append("--verify-signatures")
+            pull_argv.extend([remote, branch])
+            pull_res, pull_out = run_argv_cmd(pull_argv, cwd=repo_path)
             if pull_res != 0:
-                print("❌ Git pull thất bại!")
+                print("❌ Git pull thất bại (hoặc chữ ký commit không hợp lệ)!")
                 if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
                     fail_msg = telegram_notify.build_failure_message(
                         {"hash": "unknown", "author": "git", "message": "git pull error"},
@@ -216,7 +246,13 @@ def main():
                     telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
                 sys.exit(pull_res)
             if os.path.isdir(os.path.join(suite_path, ".git")):
-                run_shell_cmd("git pull", cwd=suite_path)
+                suite_pull_argv = ["git", "pull", "--ff-only"]
+                if verify_sigs:
+                    suite_pull_argv.append("--verify-signatures")
+                suite_res, _ = run_argv_cmd(suite_pull_argv, cwd=suite_path)
+                if suite_res != 0:
+                    print("❌ Git pull metanode-suite thất bại!")
+                    sys.exit(suite_res)
 
     commit_info = get_git_info(repo_path)
     print("=" * 70)
@@ -260,8 +296,10 @@ def main():
                     print(f"✅ genesis.json đã có đủ {active_alloc_count} ví (genesis.json.example trên Git vẫn giữ nguyên bản sạch)!")
 
             if need_update:
-                add_cmd = f"python3 {manage_genesis} add {genesis_example} {keys_file} {genesis_active}"
-                r_c, r_out = run_shell_cmd(add_cmd, cwd=repo_path)
+                r_c, r_out = run_argv_cmd(
+                    ["python3", manage_genesis, "add", genesis_example, keys_file, genesis_active],
+                    cwd=repo_path
+                )
                 if r_c == 0:
                     with open(genesis_active, "r", encoding="utf-8") as gaf:
                         ga_data = json.load(gaf)
@@ -284,7 +322,10 @@ def main():
         parser_script = os.path.join(repo_path, "deploy", "ansible", "parse_inventory.py")
         if os.path.isfile(inv_file) and os.path.isfile(parser_script):
             print(f"\n🔍 [PRE-FLIGHT] Đang kiểm tra kết nối mạng (SSH port) tới các máy chủ trong cụm...")
-            c_code, c_out = run_shell_cmd(f"python3 {parser_script} {inv_file} check_reachability all", cwd=repo_path)
+            c_code, c_out = run_argv_cmd(
+                ["python3", parser_script, inv_file, "check_reachability", "all"],
+                cwd=repo_path
+            )
             if c_code != 0:
                 print(f"\n❌ [LỖI KẾT NỐI SERVER] Phát hiện máy chủ cụm node bị timeout kết nối hoặc không phản hồi SSH!")
                 print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi server đích gặp lỗi kết nối.")

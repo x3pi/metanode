@@ -77,8 +77,12 @@ func (c *tzChannel) readMessage() (cmd C.mvm_tz_cmd_t, direction C.mvm_tz_direct
 
 	cmd = c.ptr.cmd
 	direction = c.ptr.direction
-	hlen := int(c.ptr.header_len)
-	blen := int(c.ptr.blob_len)
+	hlen := uint64(c.ptr.header_len)
+	blen := uint64(c.ptr.blob_len)
+	maxSize := uint64(C.MVM_TZ_BLOB_REGION_SIZE)
+	if hlen > maxSize || blen > maxSize || hlen+blen > maxSize {
+		return cmd, direction, nil, nil
+	}
 	if hlen > 0 {
 		header = C.GoBytes(unsafe.Pointer(&c.ptr.blob_region[0]), C.int(hlen))
 	}

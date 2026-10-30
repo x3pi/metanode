@@ -30,6 +30,7 @@ type TrieDatabase struct {
 	originRootHash common.Hash
 	db             storage.Storage
 	dirtyData      sync.Map
+	committedDirty map[string]string
 	mu             sync.Mutex
 	address        common.Address
 	mvmId          common.Address
@@ -92,6 +93,8 @@ func NewTrieDatabase(
 
 // GetStatus trả về trạng thái của TrieDatabase.
 func (t *TrieDatabase) GetStatus() TrieDatabaseStatus {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	return t.status
 }
 
@@ -102,7 +105,49 @@ func (t *TrieDatabase) GetSubPath() string {
 
 // SetStatus đặt trạng thái của TrieDatabase.
 func (t *TrieDatabase) SetStatus(status TrieDatabaseStatus) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.status = status
+}
+
+// BindMvmID rebinds the TrieDatabase to the currently executing transaction's mvmId,
+// discarding any prior uncommitted reverted state and snapshotting prior committed dirty writes
+// so that a subsequent revert only rolls back the reverting transaction's writes.
+func (t *TrieDatabase) BindMvmID(mvmId common.Address) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.status == Reverted {
+		_ = t.discardLocked()
+		t.status = Committed
+	} else if t.mvmId != (common.Address{}) && t.mvmId != mvmId && t.status == Committed {
+		snap := make(map[string]string)
+		t.dirtyData.Range(func(k, v interface{}) bool {
+			snap[k.(string)] = v.(string)
+			return true
+		})
+		t.committedDirty = snap
+	}
+	t.mvmId = mvmId
+}
+
+// RevertMvmID rolls back uncommitted dirty writes belonging to mvmId while preserving
+// any prior committed dirty writes from earlier transactions in the same block.
+func (t *TrieDatabase) RevertMvmID(mvmId common.Address) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.mvmId != mvmId {
+		return
+	}
+	t.dirtyData.Clear()
+	if len(t.committedDirty) > 0 {
+		for k, v := range t.committedDirty {
+			t.dirtyData.Store(k, v)
+		}
+		t.status = Committed
+	} else {
+		_ = t.discardLocked()
+		t.status = Reverted
+	}
 }
 
 func (trieDatabae *TrieDatabase) Commit() (common.Hash, error) {
@@ -154,6 +199,7 @@ func (trieDatabae *TrieDatabase) Commit() (common.Hash, error) {
 	}
 	trieDatabae.trieR = newTrie
 	trieDatabae.originRootHash = root
+	trieDatabae.committedDirty = nil
 
 	return root, nil
 }
@@ -224,6 +270,7 @@ func (trieDatabae *TrieDatabase) IntermediateRoot() (common.Hash, error) {
 		rootHash = trieDatabae.trieR.Hash()
 	}
 	trieDatabae.dirtyData.Clear()
+	trieDatabae.committedDirty = nil
 
 	return rootHash, nil
 }
@@ -297,7 +344,10 @@ func (trieDatabae *TrieDatabase) GetAllKeyValues() (map[string]string, error) {
 func (trieDatabae *TrieDatabase) Discard() error {
 	trieDatabae.mu.Lock()
 	defer trieDatabae.mu.Unlock()
+	return trieDatabae.discardLocked()
+}
 
+func (trieDatabae *TrieDatabase) discardLocked() error {
 	newTrie, err := trieDatabae.RestoreTrieFromRootHash(trieDatabae.originRootHash)
 	if err != nil {
 		return err
@@ -310,6 +360,7 @@ func (trieDatabae *TrieDatabase) Discard() error {
 	}
 	trieDatabae.trieR = newTrie
 	trieDatabae.dirtyData.Clear()
+	trieDatabae.committedDirty = nil
 	return nil
 }
 

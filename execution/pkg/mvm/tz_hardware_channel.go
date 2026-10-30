@@ -191,8 +191,13 @@ func (c *tzHardwareChannel) readMessage() (cmd C.mvm_tz_cmd_t, direction C.mvm_t
 	defer C.mvm_tz_spinlock_unlock(&c.ptr.lock)
 	cmd = c.ptr.cmd
 	direction = c.ptr.direction
-	hlen := c.ptr.header_len
-	blen := c.ptr.blob_len
+	hlen := uint64(c.ptr.header_len)
+	blen := uint64(c.ptr.blob_len)
+	maxSize := uint64(C.MVM_TZ_BLOB_REGION_SIZE)
+	if hlen > maxSize || blen > maxSize || hlen+blen > maxSize {
+		logger.Error("[TZ_HW] tzHardwareChannel.readMessage: invalid header_len=%d blob_len=%d (max=%d)", hlen, blen, maxSize)
+		return cmd, direction, nil, nil
+	}
 	if hlen > 0 {
 		header = C.GoBytes(unsafe.Pointer(&c.ptr.blob_region[0]), C.int(hlen))
 	}

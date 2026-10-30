@@ -34,6 +34,10 @@ func (api *AdminApi) authenticate(ctx context.Context, password string) error {
 	if api == nil || api.App == nil || strings.TrimSpace(api.App.config.Securepassword) == "" {
 		return errPasswordNotConfigured
 	}
+	configuredPw := strings.TrimSpace(api.App.config.Securepassword)
+	if configuredPw == "mysecretpassword" || configuredPw == "securepassword" || configuredPw == "devnet-test-password" {
+		return errPasswordNotConfigured
+	}
 	if subtle.ConstantTimeCompare([]byte(password), []byte(api.App.config.Securepassword)) != 1 {
 		return errInvalidCredentials
 	}

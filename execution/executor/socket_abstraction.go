@@ -102,6 +102,12 @@ func (sc *SocketConfig) Listen() (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot listen on %s socket %s: %w", network, address, err)
 	}
+	if network == "unix" {
+		if err := os.Chmod(address, 0600); err != nil {
+			_ = listener.Close()
+			return nil, fmt.Errorf("cannot set 0600 permissions on Unix socket %s: %w", address, err)
+		}
+	}
 
 	return listener, nil
 }

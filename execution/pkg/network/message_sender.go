@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types/network"
@@ -226,6 +228,46 @@ func SendMessage(
 		}
 	}
 	errS := SendBytes(connection, command, body, version)
+	return errS
+}
+
+// SendSignedMessage marshals pbMessage, signs the body with keyPair (BLS), and sends it with Header.Pubkey and Header.Sign populated.
+func SendSignedMessage(
+	connection network.Connection,
+	command string,
+	pbMessage proto.Message,
+	version string,
+	keyPair *bls.KeyPair,
+) error {
+	if connection == nil {
+		return errors.New("SendSignedMessage: connection is nil")
+	}
+	if keyPair == nil {
+		return SendMessage(connection, command, pbMessage, version)
+	}
+	var body []byte
+	var err error
+	if pbMessage != nil {
+		body, err = proto.MarshalOptions{Deterministic: true}.Marshal(pbMessage)
+		if err != nil {
+			return err
+		}
+	}
+	hdr := getHeaderForCommand(command, connection.Address(), version)
+	hdr.Pubkey = keyPair.BytesPublicKey()
+	sig := bls.Sign(keyPair.PrivateKey(), crypto.Keccak256(body))
+	hdr.Sign = sig.Bytes()
+	msg := NewMessage(&pb.Message{
+		Header: hdr,
+		Body:   body,
+	})
+	var errS error
+	for i := 0; i < 3; i++ {
+		if errS = connection.SendMessage(msg); errS == nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	return errS
 }
 

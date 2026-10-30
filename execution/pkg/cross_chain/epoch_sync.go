@@ -43,11 +43,29 @@ var CommitteeUpdateDomainTag = []byte("COMMITTEE_UPDATE_V1:")
 // in gateway.go.
 var CommitRootAttestDomainTag = []byte("COMMIT_ROOT_ATTEST_V1:")
 
+// ScopedCommitRootAttestDomainTag domain-separates the chain- and epoch-bound commit root
+// attestation digest verified by SlashOnEquivocation so neither cross-chain/cross-epoch certs nor
+// ordinary per-batch BatchOutboundCommit certs can be replayed to falsely slash an honest chain.
+var ScopedCommitRootAttestDomainTag = []byte("COMMIT_ROOT_SCOPED_ATTEST_V1:")
+
 // ComputeCommitRootAttestMessage computes the domain-separated message payload every validator of
 // the committee signs to attest to a commit root.
 func ComputeCommitRootAttestMessage(commitRoot common.Hash) []byte {
 	var buf []byte
 	buf = append(buf, CommitRootAttestDomainTag...)
+	buf = append(buf, commitRoot.Bytes()...)
+	return buf
+}
+
+// ComputeScopedCommitRootAttestMessage computes a chainID- and epoch-bound commit-root digest
+// for equivocation verification, preventing cross-chain, cross-epoch, and multi-batch replay.
+func ComputeScopedCommitRootAttestMessage(chainID, epoch uint64, commitRoot common.Hash) []byte {
+	var header [16]byte
+	binary.BigEndian.PutUint64(header[0:8], chainID)
+	binary.BigEndian.PutUint64(header[8:16], epoch)
+	buf := make([]byte, 0, len(ScopedCommitRootAttestDomainTag)+len(header)+len(commitRoot.Bytes()))
+	buf = append(buf, ScopedCommitRootAttestDomainTag...)
+	buf = append(buf, header[:]...)
 	buf = append(buf, commitRoot.Bytes()...)
 	return buf
 }

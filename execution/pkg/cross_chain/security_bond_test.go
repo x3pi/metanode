@@ -197,8 +197,8 @@ func TestSecurityBond_SlashOnEquivocation_RealProof_ForfeitsAndKillsChain(t *tes
 	const epoch = uint64(5) // matches setupTestGatewayEngine's chain 101 Epoch
 	rootA := common.HexToHash("0xAAAA000000000000000000000000000000000000000000000000000000000000")
 	rootB := common.HexToHash("0xBBBB000000000000000000000000000000000000000000000000000000000000")
-	sigA := bls.Sign(kp.PrivateKey(), ComputeCommitRootAttestMessage(rootA))
-	sigB := bls.Sign(kp.PrivateKey(), ComputeCommitRootAttestMessage(rootB))
+	sigA := bls.Sign(kp.PrivateKey(), ComputeScopedCommitRootAttestMessage(101, epoch, rootA))
+	sigB := bls.Sign(kp.PrivateKey(), ComputeScopedCommitRootAttestMessage(101, epoch, rootB))
 	certA := QuorumCert{Epoch: epoch, AggregateSignature: sigA.Bytes(), SignerBitmap: []byte{0x01}}
 	certB := QuorumCert{Epoch: epoch, AggregateSignature: sigB.Bytes(), SignerBitmap: []byte{0x01}}
 
@@ -214,7 +214,7 @@ func TestSecurityBond_SlashOnEquivocation_RejectsNonContradiction(t *testing.T) 
 	engine, kp := setupTestGatewayEngine()
 	const epoch = uint64(5)
 	root := common.HexToHash("0xCCCC000000000000000000000000000000000000000000000000000000000000")
-	sig := bls.Sign(kp.PrivateKey(), ComputeCommitRootAttestMessage(root))
+	sig := bls.Sign(kp.PrivateKey(), ComputeScopedCommitRootAttestMessage(101, epoch, root))
 	cert := QuorumCert{Epoch: epoch, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x01}}
 
 	err := engine.SlashOnEquivocation(101, epoch, root, root, cert, cert)
@@ -227,8 +227,8 @@ func TestSecurityBond_SlashOnEquivocation_RejectsForgedSignature(t *testing.T) {
 	const epoch = uint64(5)
 	rootA := common.HexToHash("0xDDDD000000000000000000000000000000000000000000000000000000000000")
 	rootB := common.HexToHash("0xEEEE000000000000000000000000000000000000000000000000000000000000")
-	sigA := bls.Sign(attacker.PrivateKey(), ComputeCommitRootAttestMessage(rootA))
-	sigB := bls.Sign(attacker.PrivateKey(), ComputeCommitRootAttestMessage(rootB))
+	sigA := bls.Sign(attacker.PrivateKey(), ComputeScopedCommitRootAttestMessage(101, epoch, rootA))
+	sigB := bls.Sign(attacker.PrivateKey(), ComputeScopedCommitRootAttestMessage(101, epoch, rootB))
 	certA := QuorumCert{Epoch: epoch, AggregateSignature: sigA.Bytes(), SignerBitmap: []byte{0x01}}
 	certB := QuorumCert{Epoch: epoch, AggregateSignature: sigB.Bytes(), SignerBitmap: []byte{0x01}}
 
@@ -258,8 +258,8 @@ func TestSecurityBond_SlashOnEquivocation_WorksDuringUnbonding(t *testing.T) {
 	const epoch = uint64(5) // the epoch chain 101 had at unregister time (setupTestGatewayEngine)
 	rootA := common.HexToHash("0x1111000000000000000000000000000000000000000000000000000000000000")
 	rootB := common.HexToHash("0x2222000000000000000000000000000000000000000000000000000000000000")
-	sigA := bls.Sign(kp.PrivateKey(), ComputeCommitRootAttestMessage(rootA))
-	sigB := bls.Sign(kp.PrivateKey(), ComputeCommitRootAttestMessage(rootB))
+	sigA := bls.Sign(kp.PrivateKey(), ComputeScopedCommitRootAttestMessage(101, epoch, rootA))
+	sigB := bls.Sign(kp.PrivateKey(), ComputeScopedCommitRootAttestMessage(101, epoch, rootB))
 	certA := QuorumCert{Epoch: epoch, AggregateSignature: sigA.Bytes(), SignerBitmap: []byte{0x01}}
 	certB := QuorumCert{Epoch: epoch, AggregateSignature: sigB.Bytes(), SignerBitmap: []byte{0x01}}
 

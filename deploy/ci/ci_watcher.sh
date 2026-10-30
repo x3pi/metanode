@@ -31,19 +31,18 @@ fi
 
 # Lấy các thông số cơ bản từ file ci_config.yaml bằng python
 get_config_val() {
-    python3 -c "
+    python3 -c '
 import yaml, sys
 try:
-    with open('${CONFIG_FILE}', 'r') as f:
-        c = yaml.safe_load(f)
-    keys = '$1'.split('.')
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        c = yaml.safe_load(f) or {}
     val = c
-    for k in keys:
-        val = val.get(k, {})
-    print(val if isinstance(val, (str, int, bool)) else '')
+    for k in sys.argv[2].split("."):
+        val = val.get(k, {}) if isinstance(val, dict) else {}
+    print(val if isinstance(val, (str, int, bool)) else "")
 except Exception:
-    print('')
-"
+    print("")
+' "${CONFIG_FILE}" "$1"
 }
 
 DEFAULT_REPO_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"

@@ -504,8 +504,34 @@ func (s *ExplorerSearchService) doIndexTransactionsBatch(jobs []indexJob) {
 	}
 }
 
+const (
+	maxExplorerSearchOffset = 10000
+	maxExplorerSearchLimit  = 100
+	maxTPSRangeBlocks       = 1000
+	maxTPSRangeSearchDocs   = 5000
+)
+
 // SearchTransactions thực hiện tìm kiếm trên tất cả các shard và tổng hợp kết quả.
 func (s *ExplorerSearchService) SearchTransactions(queryStr string, offset, limit int) ([]string, uint, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > maxExplorerSearchOffset {
+		offset = maxExplorerSearchOffset
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > maxExplorerSearchLimit {
+		limit = maxExplorerSearchLimit
+	}
+	return s.searchTransactionsBounded(queryStr, offset, limit)
+}
+
+func (s *ExplorerSearchService) searchTransactionsBounded(queryStr string, offset, limit int) ([]string, uint, error) {
+	if len(queryStr) > 65536 {
+		return nil, 0, fmt.Errorf("search query length %d exceeds maximum allowed (65536)", len(queryStr))
+	}
 	var totalResults uint
 	var allDocs []string
 	var mu sync.Mutex
@@ -572,12 +598,18 @@ func (s *ExplorerSearchService) SearchTransactions(queryStr string, offset, limi
 
 	searchWg.Wait()
 
-	end := offset + limit
-	if end > len(allDocs) {
-		end = len(allDocs)
+	if offset < 0 {
+		offset = 0
 	}
 	if offset > len(allDocs) {
 		offset = len(allDocs)
+	}
+	end := offset + limit
+	if end < offset {
+		end = offset
+	}
+	if end > len(allDocs) {
+		end = len(allDocs)
 	}
 
 	return allDocs[offset:end], totalResults, nil
@@ -685,6 +717,9 @@ func (s *ExplorerSearchService) GetTransactionsAndTPSInRange(startBlock, endBloc
 	if startBlock > endBlock {
 		return 0, 0, fmt.Errorf("block bắt đầu %d không thể lớn hơn block kết thúc %d", startBlock, endBlock)
 	}
+	if endBlock-startBlock > maxTPSRangeBlocks {
+		return 0, 0, fmt.Errorf("block range %d exceeds maximum allowed (%d)", endBlock-startBlock, maxTPSRangeBlocks)
+	}
 
 	var queryParts []string
 	for i := startBlock; i <= endBlock; i++ {
@@ -695,7 +730,7 @@ func (s *ExplorerSearchService) GetTransactionsAndTPSInRange(startBlock, endBloc
 	}
 	queryString := strings.Join(queryParts, " OR ")
 
-	results, total, err := s.SearchTransactions(queryString, 0, 1000000)
+	results, total, err := s.searchTransactionsBounded(queryString, 0, maxTPSRangeSearchDocs)
 	if err != nil {
 		return 0, 0, err
 	}

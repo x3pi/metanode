@@ -24,6 +24,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -40,6 +42,25 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract/argument_encode"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 )
+
+func isDisallowedSSRFIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		ip = ip4
+		// Block 0.0.0.0/8, 100.64.0.0/10 (CGNAT), 169.254.0.0/16 (cloud metadata)
+		if ip[0] == 0 || (ip[0] == 100 && ip[1]&0xC0 == 64) || (ip[0] == 169 && ip[1] == 254) {
+			return true
+		}
+	}
+	return ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsUnspecified() ||
+		ip.IsMulticast() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast()
+}
 
 // extensionCallGetApiCallCount counts every real invocation of
 // extensionCallGetApiCore (ModeCgo/ModeTrustzone only — see that core's own
@@ -76,42 +97,66 @@ func ExtensionCallGetApiCallCount() uint64 {
 // precompile behaves differently under ModeTrustzoneHardware (always
 // "no data") than under ModeCgo/ModeTrustzone (real HTTP) — a known,
 // accepted gap, not a bug to fix.
-func extensionCallGetApiCore(bCallData []byte) []byte {
+func extensionCallGetApiCore(bCallData []byte) (out []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("Recovered panic in extensionCallGetApiCore: %v", r)
+			out = nil
+		}
+	}()
 	extensionCallGetApiCallCount.Add(1)
+	if len(bCallData) < 4 {
+		return nil
+	}
+	if os.Getenv("METANODE_ALLOW_OFFCHAIN_GET_API") != "true" {
+		logger.Warn("extensionCallGetApiCore: outbound HTTP disabled during consensus execution for determinism and SSRF protection")
+		return nil
+	}
 	logger.Debug("Calling get api data ", hex.EncodeToString(bCallData))
-	url := argument_encode.DecodeStringInput(bCallData[4:], 0)
-	// Add safe HTTP client with SSRF protection and timeout
+	rawURL := argument_encode.DecodeStringInput(bCallData[4:], 0)
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
+		logger.Warn("extensionCallGetApiCore: rejected invalid URL ", rawURL)
+		return nil
+	}
+	// Safe HTTP client with DNS-pinned SSRF protection, redirect blocking, and timeout
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	safeHTTPClient := &http.Client{
 		Timeout: 5 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				host, _, err := net.SplitHostPort(addr)
-				if err != nil {
-					host = addr
-				}
-				ips, err := net.LookupIP(host)
+				host, port, err := net.SplitHostPort(addr)
 				if err != nil {
 					return nil, err
 				}
-				for _, ip := range ips {
-					if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() {
-						return nil, fmt.Errorf("SSRF blocked: access to private/local IP %s is not allowed", ip.String())
+				ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+				if err != nil || len(ips) == 0 {
+					return nil, fmt.Errorf("DNS lookup failed for %s: %w", host, err)
+				}
+				for _, ipAddr := range ips {
+					if isDisallowedSSRFIP(ipAddr.IP) {
+						return nil, fmt.Errorf("SSRF blocked: access to private/local IP %s is not allowed", ipAddr.IP.String())
 					}
 				}
-				return net.DialTimeout(network, addr, 5*time.Second)
+				// Dial the validated IP directly to prevent DNS rebinding (TOCTOU)
+				pinnedAddr := net.JoinHostPort(ips[0].IP.String(), port)
+				return dialer.DialContext(ctx, network, pinnedAddr)
 			},
 		},
 	}
 
-	response, err := safeHTTPClient.Get(url)
+	response, err := safeHTTPClient.Get(rawURL)
 	if err != nil {
-		logger.Warn("Error when call get api to ", url, err)
+		logger.Warn("Error when call get api to ", rawURL, err)
 		return nil
 	}
 	defer response.Body.Close()
-	responseData, err := io.ReadAll(io.LimitReader(response.Body, 10*1024*1024)) // 10MB limit limit
+	responseData, err := io.ReadAll(io.LimitReader(response.Body, 10*1024*1024)) // 10MB limit
 	if err != nil {
-		logger.Warn("Error when call get api to ", url, err)
+		logger.Warn("Error when call get api to ", rawURL, err)
 		return nil
 	}
 	encodedRespone := argument_encode.EncodeSingleString(string(responseData))
@@ -123,7 +168,16 @@ func extensionCallGetApiCore(bCallData []byte) []byte {
 func ExtensionCallGetApi(
 	bytes *C.uchar,
 	size C.int,
-) C.struct_Extension_return {
+) (ret C.struct_Extension_return) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("Recovered panic in ExtensionCallGetApi: %v", r)
+			ret = C.struct_Extension_return{data_p: nil, data_size: 0}
+		}
+	}()
+	if size <= 0 || bytes == nil {
+		return C.struct_Extension_return{data_p: nil, data_size: 0}
+	}
 	bCallData := C.GoBytes(unsafe.Pointer(bytes), size)
 	out := extensionCallGetApiCore(bCallData)
 	if out == nil {
@@ -139,7 +193,16 @@ func ExtensionCallGetApi(
 // ExtensionExtractJsonField, extracted 2026-08-20 (plan §9's "Giai đoạn
 // 3b") — mechanical, zero behavior change. nil return means the
 // Extension_return{nullptr,0} failure case.
-func extensionExtractJsonFieldCore(bCallData []byte) []byte {
+func extensionExtractJsonFieldCore(bCallData []byte) (out []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("Recovered panic in extensionExtractJsonFieldCore: %v", r)
+			out = nil
+		}
+	}()
+	if len(bCallData) < 4 {
+		return nil
+	}
 	logger.Debug("Extension extract json field ", hex.EncodeToString(bCallData))
 	jsonMap := make(map[string]interface{})
 	jsonStr := argument_encode.DecodeStringInput(bCallData[4:], 0)
@@ -159,14 +222,18 @@ func extensionExtractJsonFieldCore(bCallData []byte) []byte {
 			return nil
 		}
 		intField, err := strconv.Atoi(field)
-		if err != nil {
+		if err != nil || intField < 0 || intField >= len(jsonArr) {
 			logger.Warn("Error when extract json field ", jsonStr, field, err)
 			return nil
 		}
 		fieldData = jsonArr[intField]
 	}
 
-	if reflect.ValueOf(fieldData).Kind() == reflect.Map || reflect.ValueOf(fieldData).Kind() == reflect.Array {
+	if fieldData == nil {
+		return nil
+	}
+	kind := reflect.ValueOf(fieldData).Kind()
+	if kind == reflect.Map || kind == reflect.Array || kind == reflect.Slice {
 		bData, _ := json.Marshal(fieldData)
 		data = string(bData)
 	} else {
@@ -187,7 +254,16 @@ func extensionExtractJsonFieldCore(bCallData []byte) []byte {
 func ExtensionExtractJsonField(
 	bytes *C.uchar,
 	size C.int,
-) C.struct_Extension_return {
+) (ret C.struct_Extension_return) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("Recovered panic in ExtensionExtractJsonField: %v", r)
+			ret = C.struct_Extension_return{data_p: nil, data_size: 0}
+		}
+	}()
+	if size <= 0 || bytes == nil {
+		return C.struct_Extension_return{data_p: nil, data_size: 0}
+	}
 	bCallData := C.GoBytes(unsafe.Pointer(bytes), size)
 	out := extensionExtractJsonFieldCore(bCallData)
 	if out == nil {
@@ -202,7 +278,16 @@ func ExtensionExtractJsonField(
 // extensionBlstCore is the pure-Go core of ExtensionBlst, extracted
 // 2026-08-20 (plan §9's "Giai đoạn 3b") — mechanical, zero behavior
 // change. nil return means the Extension_return{nullptr,0} failure case.
-func extensionBlstCore(bCallData []byte) []byte {
+func extensionBlstCore(bCallData []byte) (out []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("Recovered panic in extensionBlstCore: %v", r)
+			out = nil
+		}
+	}()
+	if len(bCallData) < 4 {
+		return nil
+	}
 	blstAbiStr := strings.NewReader(`
 [
 	{
@@ -280,16 +365,30 @@ func extensionBlstCore(bCallData []byte) []byte {
 
 	if method.RawName == "verifySign" {
 		mapInput := make(map[string]interface{})
-		method.Inputs.UnpackIntoMap(mapInput, bCallData[4:])
+		if err := method.Inputs.UnpackIntoMap(mapInput, bCallData[4:]); err != nil {
+			logger.Warn("Error unpacking verifySign input", err)
+			return nil
+		}
+		pubBytes, ok1 := mapInput["publicKey"].([]byte)
+		sigBytes, ok2 := mapInput["sign"].([]byte)
+		msgBytes, ok3 := mapInput["message"].([]byte)
+		if !ok1 || !ok2 || !ok3 || len(pubBytes) != 48 || len(sigBytes) != 96 {
+			outputs, err := method.Outputs.Pack(false)
+			if err != nil {
+				return nil
+			}
+			return outputs
+		}
 		outputs, err := method.Outputs.Pack(
 			bls.VerifySign(
-				common.PubkeyFromBytes(mapInput["publicKey"].([]byte)),
-				common.SignFromBytes(mapInput["sign"].([]byte)),
-				mapInput["message"].([]byte),
+				common.PubkeyFromBytes(pubBytes),
+				common.SignFromBytes(sigBytes),
+				msgBytes,
 			),
 		)
 		if err != nil {
 			logger.Warn("Error when pack output", err)
+			return nil
 		}
 		return outputs
 	}
@@ -297,16 +396,39 @@ func extensionBlstCore(bCallData []byte) []byte {
 	if method.RawName == "verifyAggregateSign" {
 		// VerifyAggregateSign(bPubs [][]byte, bSig []byte, bMsgs [][]byte) bool
 		mapInput := make(map[string]interface{})
-		method.Inputs.UnpackIntoMap(mapInput, bCallData[4:])
+		if err := method.Inputs.UnpackIntoMap(mapInput, bCallData[4:]); err != nil {
+			logger.Warn("Error unpacking verifyAggregateSign input", err)
+			return nil
+		}
+		pubs, ok1 := mapInput["publicKey"].([][]byte)
+		sigBytes, ok2 := mapInput["sign"].([]byte)
+		msgs, ok3 := mapInput["message"].([][]byte)
+		validInputs := ok1 && ok2 && ok3 && len(pubs) > 0 && len(pubs) == len(msgs) && len(sigBytes) == 96
+		if validInputs {
+			for i := range pubs {
+				if len(pubs[i]) != 48 || len(msgs[i]) == 0 {
+					validInputs = false
+					break
+				}
+			}
+		}
+		if !validInputs {
+			outputs, err := method.Outputs.Pack(false)
+			if err != nil {
+				return nil
+			}
+			return outputs
+		}
 		outputs, err := method.Outputs.Pack(
 			bls.VerifyAggregateSign(
-				mapInput["publicKey"].([][]byte),
-				mapInput["sign"].([]byte),
-				mapInput["message"].([][]byte),
+				pubs,
+				sigBytes,
+				msgs,
 			),
 		)
 		if err != nil {
 			logger.Warn("Error when pack output", err)
+			return nil
 		}
 		logger.Debug("Extension blst result ", hex.EncodeToString(outputs))
 		return outputs
@@ -318,7 +440,16 @@ func extensionBlstCore(bCallData []byte) []byte {
 func ExtensionBlst(
 	bytes *C.uchar,
 	size C.int,
-) C.struct_Extension_return {
+) (ret C.struct_Extension_return) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("Recovered panic in ExtensionBlst: %v", r)
+			ret = C.struct_Extension_return{data_p: nil, data_size: 0}
+		}
+	}()
+	if size <= 0 || bytes == nil {
+		return C.struct_Extension_return{data_p: nil, data_size: 0}
+	}
 	bCallData := C.GoBytes(unsafe.Pointer(bytes), size)
 	out := extensionBlstCore(bCallData)
 	if out == nil {
@@ -345,7 +476,16 @@ func WrapExtensionBlst(
 // already plain Go (unlike getOrCreateSimpleDb/getSimpledb/setSimpledb/
 // getNextKeys/getAllSimpledb/searchByValue below, which always were).
 // nil return means the Extension_return{nullptr,0} failure case.
-func extensionGetOrCreateSimpleDbCore(bCallData []byte, addressId, addressMvmId e_common.Address) []byte {
+func extensionGetOrCreateSimpleDbCore(bCallData []byte, addressId, addressMvmId e_common.Address) (out []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("Recovered panic in extensionGetOrCreateSimpleDbCore: %v", r)
+			out = nil
+		}
+	}()
+	if len(bCallData) < 4 {
+		return nil
+	}
 	logger.Error("Calling ExtensionGetOrCreateSimpleDb with data: ", hex.EncodeToString(bCallData))
 
 	// ABI của hàm getOrCreateSimpleDb (bạn cần lấy từ hợp đồng Solidity)
@@ -695,7 +835,16 @@ func ExtensionGetOrCreateSimpleDb(
 	size C.int,
 	address *C.uchar,
 	mvmId *C.uchar,
-) C.struct_Extension_return {
+) (ret C.struct_Extension_return) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("Recovered panic in ExtensionGetOrCreateSimpleDb: %v", r)
+			ret = C.struct_Extension_return{data_p: nil, data_size: 0}
+		}
+	}()
+	if size <= 0 || bytes == nil || address == nil || mvmId == nil {
+		return C.struct_Extension_return{data_p: nil, data_size: 0}
+	}
 	bCallData := C.GoBytes(unsafe.Pointer(bytes), size)
 	baddressId := C.GoBytes(unsafe.Pointer(address), 20)
 	addressId := e_common.BytesToAddress(baddressId)
@@ -720,12 +869,12 @@ var errMVMApiNotFound = errors.New("mvm api instance not found")
 func getOrCreateSimpleDb(dbName string, addressMvmId e_common.Address, addressId e_common.Address) (bool, error) {
 	logger.Info("getOrCreateSimpleDb", dbName, addressId)
 	mvmApi := GetMVMApi(addressMvmId)
-	if mvmApi == nil {
+	if mvmApi == nil || mvmApi.accountStateDb == nil {
 		return false, errMVMApiNotFound
 	}
 	as, err := mvmApi.accountStateDb.AccountState(addressId)
-	if err != nil {
-		return false, errors.New("get AccountState is nil")
+	if err != nil || as == nil || as.SmartContractState() == nil {
+		return false, errors.New("get AccountState or SmartContractState is nil")
 	}
 	hash := as.SmartContractState().GetTrieDatabaseMapValue(dbName)
 	logger.Info("getOrCreateSimpleDb hash: ", hash)
@@ -733,6 +882,9 @@ func getOrCreateSimpleDb(dbName string, addressMvmId e_common.Address, addressId
 		trieMap := as.SmartContractState().TrieDatabaseMap()
 		logger.Info("trieMap", trieMap)
 		trieDBManager := trie_database.GetTrieDatabaseManager()
+		if trieDBManager == nil {
+			return false, errors.New("trieDBManager is nil")
+		}
 		logger.Info("trieDB: ", trieDBManager)
 
 		key := crypto.Keccak256([]byte(dbName + addressId.String()))
@@ -762,23 +914,26 @@ func deleteDb(dbName string, addressMvmId e_common.Address, addressId e_common.A
 	logger.Info("deleteDb")
 
 	mvmApi := GetMVMApi(addressMvmId)
-	if mvmApi == nil {
+	if mvmApi == nil || mvmApi.accountStateDb == nil {
 		return false, errMVMApiNotFound
 	}
 	as, err := mvmApi.accountStateDb.AccountState(addressId)
-	if err != nil {
-		return false, errors.New("get AccountState is nil")
+	if err != nil || as == nil || as.SmartContractState() == nil {
+		return false, errors.New("get AccountState or SmartContractState is nil")
 	}
 	hash := as.SmartContractState().GetTrieDatabaseMapValue(dbName)
 	if hash == nil {
 		return false, errors.New("db is nil")
 	}
 	trieDBManager := trie_database.GetTrieDatabaseManager()
+	if trieDBManager == nil {
+		return false, errors.New("trieDBManager is nil")
+	}
 	key := crypto.Keccak256([]byte(dbName + addressId.String()))
 	logger.Info("key: ", key)
 
 	nTrie, ok := trieDBManager.GetOrCrateTrieDatabase(e_common.BytesToHash(key), e_common.BytesToHash(hash), addressMvmId, addressId, dbName)
-	if !ok {
+	if !ok || nTrie == nil {
 		return false, errors.New("nTrie is nil ok")
 	}
 	nTrie.SetStatus(trie_database.Deleted)
@@ -791,23 +946,26 @@ func deleteDb(dbName string, addressMvmId e_common.Address, addressId e_common.A
 
 func getSimpledb(dbName string, name string, addressMvmId e_common.Address, addressId e_common.Address) (string, error) {
 	mvmApi := GetMVMApi(addressMvmId)
-	if mvmApi == nil {
+	if mvmApi == nil || mvmApi.accountStateDb == nil {
 		return "", errMVMApiNotFound
 	}
 	as, err := mvmApi.accountStateDb.AccountState(addressId)
-	if err != nil {
-		return "", errors.New("get AccountState is nil")
+	if err != nil || as == nil || as.SmartContractState() == nil {
+		return "", errors.New("get AccountState or SmartContractState is nil")
 	}
 	hash := as.SmartContractState().GetTrieDatabaseMapValue(dbName)
 	if hash == nil {
 		return "", errors.New("db is nil")
 	}
 	trieDBManager := trie_database.GetTrieDatabaseManager()
+	if trieDBManager == nil {
+		return "", errors.New("trieDBManager is nil")
+	}
 	key := crypto.Keccak256([]byte(dbName + addressId.String()))
 	logger.Info("key: ", key)
 
 	nTrie, ok := trieDBManager.GetOrCrateTrieDatabase(e_common.BytesToHash(key), e_common.BytesToHash(hash), addressMvmId, addressId, dbName)
-	if !ok {
+	if !ok || nTrie == nil {
 		return "", errors.New("nTrie is nil ok")
 	}
 	value, nErr := nTrie.Get(name)
@@ -820,20 +978,26 @@ func getSimpledb(dbName string, name string, addressMvmId e_common.Address, addr
 func setSimpledb(dbName string, key string, value string, addressMvmId e_common.Address, addressId e_common.Address) (bool, error) {
 
 	mvmApi := GetMVMApi(addressMvmId)
-	if mvmApi == nil {
+	if mvmApi == nil || mvmApi.accountStateDb == nil {
 		return false, errMVMApiNotFound
 	}
-	as, _ := mvmApi.accountStateDb.AccountState(addressId)
+	as, err := mvmApi.accountStateDb.AccountState(addressId)
+	if err != nil || as == nil || as.SmartContractState() == nil {
+		return false, errors.New("get AccountState or SmartContractState is nil")
+	}
 	hash := as.SmartContractState().GetTrieDatabaseMapValue(dbName)
 	if hash == nil {
 		return false, errors.New("db is nil")
 	}
 	trieDBManager := trie_database.GetTrieDatabaseManager()
+	if trieDBManager == nil {
+		return false, errors.New("trieDBManager is nil")
+	}
 
 	keyTrie := crypto.Keccak256([]byte(dbName + addressId.String()))
 
 	nTrie, ok := trieDBManager.GetOrCrateTrieDatabase(e_common.BytesToHash(keyTrie), e_common.BytesToHash(hash), addressMvmId, addressId, dbName)
-	if !ok {
+	if !ok || nTrie == nil {
 		return false, errors.New("nTrie is nil ok")
 	}
 	nErr := nTrie.Put(key, value)
@@ -846,20 +1010,26 @@ func setSimpledb(dbName string, key string, value string, addressMvmId e_common.
 func getNextKeys(dbName string, key string, limit int, addressMvmId e_common.Address, addressId e_common.Address) (string, error) {
 
 	mvmApi := GetMVMApi(addressMvmId)
-	if mvmApi == nil {
+	if mvmApi == nil || mvmApi.accountStateDb == nil {
 		return "", errMVMApiNotFound
 	}
-	as, _ := mvmApi.accountStateDb.AccountState(addressId)
+	as, err := mvmApi.accountStateDb.AccountState(addressId)
+	if err != nil || as == nil || as.SmartContractState() == nil {
+		return "", errors.New("get AccountState or SmartContractState is nil")
+	}
 	hash := as.SmartContractState().GetTrieDatabaseMapValue(dbName)
 	if hash == nil {
 		return "", errors.New("db is nil")
 	}
 	trieDBManager := trie_database.GetTrieDatabaseManager()
+	if trieDBManager == nil {
+		return "", errors.New("trieDBManager is nil")
+	}
 
 	keyTrie := crypto.Keccak256([]byte(dbName + addressId.String()))
 
 	nTrie, ok := trieDBManager.GetOrCrateTrieDatabase(e_common.BytesToHash(keyTrie), e_common.BytesToHash(hash), addressMvmId, addressId, dbName)
-	if !ok {
+	if !ok || nTrie == nil {
 		return "", errors.New("nTrie is nil ok")
 	}
 	data, err := nTrie.GetNextKeys(key, limit)
@@ -875,23 +1045,26 @@ func getNextKeys(dbName string, key string, limit int, addressMvmId e_common.Add
 
 func getAllSimpledb(dbName string, addressMvmId e_common.Address, addressId e_common.Address) (string, error) {
 	mvmApi := GetMVMApi(addressMvmId)
-	if mvmApi == nil {
+	if mvmApi == nil || mvmApi.accountStateDb == nil {
 		return "", errMVMApiNotFound
 	}
 	as, err := mvmApi.accountStateDb.AccountState(addressId)
-	if err != nil {
-		return "", errors.New("get AccountState is nil")
+	if err != nil || as == nil || as.SmartContractState() == nil {
+		return "", errors.New("get AccountState or SmartContractState is nil")
 	}
 	hash := as.SmartContractState().GetTrieDatabaseMapValue(dbName)
 	if hash == nil {
 		return "", errors.New("db is nil")
 	}
 	trieDBManager := trie_database.GetTrieDatabaseManager()
+	if trieDBManager == nil {
+		return "", errors.New("trieDBManager is nil")
+	}
 	key := crypto.Keccak256([]byte(dbName + addressId.String()))
 	logger.Info("key: ", key)
 
 	nTrie, ok := trieDBManager.GetOrCrateTrieDatabase(e_common.BytesToHash(key), e_common.BytesToHash(hash), addressMvmId, addressId, dbName)
-	if !ok {
+	if !ok || nTrie == nil {
 		return "", errors.New("nTrie is nil ok")
 	}
 	value, nErr := nTrie.GetAllKeyValues()
@@ -908,23 +1081,26 @@ func getAllSimpledb(dbName string, addressMvmId e_common.Address, addressId e_co
 
 func searchByValue(dbName string, name string, addressMvmId e_common.Address, addressId e_common.Address) (string, error) {
 	mvmApi := GetMVMApi(addressMvmId)
-	if mvmApi == nil {
+	if mvmApi == nil || mvmApi.accountStateDb == nil {
 		return "", errMVMApiNotFound
 	}
 	as, err := mvmApi.accountStateDb.AccountState(addressId)
-	if err != nil {
-		return "", errors.New("get AccountState is nil")
+	if err != nil || as == nil || as.SmartContractState() == nil {
+		return "", errors.New("get AccountState or SmartContractState is nil")
 	}
 	hash := as.SmartContractState().GetTrieDatabaseMapValue(dbName)
 	if hash == nil {
 		return "", errors.New("db is nil")
 	}
 	trieDBManager := trie_database.GetTrieDatabaseManager()
+	if trieDBManager == nil {
+		return "", errors.New("trieDBManager is nil")
+	}
 	key := crypto.Keccak256([]byte(dbName + addressId.String()))
 	logger.Info("key: ", key)
 
 	nTrie, ok := trieDBManager.GetOrCrateTrieDatabase(e_common.BytesToHash(key), e_common.BytesToHash(hash), addressMvmId, addressId, dbName)
-	if !ok {
+	if !ok || nTrie == nil {
 		return "", errors.New("nTrie is nil ok")
 	}
 	value, nErr := nTrie.SearchByValue(name)

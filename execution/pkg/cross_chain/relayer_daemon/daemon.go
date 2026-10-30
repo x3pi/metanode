@@ -554,14 +554,19 @@ func (d *RelayerDaemon) RelayBatch(
 			if reserveReceipt.Status != 1 {
 				unresolved = true
 				logger.Info("ℹ️ [RELAYER DAEMON] reserve attestCommit for chain %d asset %s reverted: %s", sourceChainID, assetIDStr, DecodeRevertReason(reserveReceipt.Return))
+				continue
 			}
 
 			// 2. If destination is a private chain (not the Reserve itself), submit attestReserveIssuedCommit to destination
 			if destChainID != d.config.ReserveChainID {
+				reserveCert, err := d.pollAndAggregateCommitCert(ctx, d.config.ReserveChainID, cert.Epoch, commitRoot)
+				if err != nil {
+					return fmt.Errorf("poll and aggregate Reserve QuorumCert (%d): %w", d.config.ReserveChainID, err)
+				}
 				destCalldata, err := d.abi.Pack("attestReserveIssuedCommit",
-					new(big.Int).SetUint64(sourceChainID), commitRoot, aggAmounts[assetIDStr], assetIDBig,
+					new(big.Int).SetUint64(d.config.ReserveChainID), commitRoot, aggAmounts[assetIDStr], assetIDBig,
 					new(big.Int).SetUint64(aggProof.LeafIndex), toBytes32Slice(aggProof.Siblings),
-					cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap),
+					reserveCert.Epoch, []byte(reserveCert.AggregateSignature), []byte(reserveCert.SignerBitmap),
 				)
 				if err != nil {
 					return fmt.Errorf("pack attestReserveIssuedCommit for assetId %s: %w", assetIDStr, err)
