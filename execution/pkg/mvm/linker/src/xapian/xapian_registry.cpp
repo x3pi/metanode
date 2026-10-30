@@ -15,6 +15,7 @@
 #include <stdexcept> // Vẫn có thể cần nếu XapianManager ném std::exception
 #include <iterator>  // Cần cho std::make_move_iterator
 #include <utility>   // Cần cho std::pair, std::make_pair, std::move
+#include <unordered_set>
 
 // Biến registry toàn cục.
 XapianRegistry registry;
@@ -83,6 +84,7 @@ void XapianRegistry::clearBufferForTxHash(const uint256_t* txHash) {
             std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
             manager_ptr->tx_buffers.erase(txHashStr);
             manager_ptr->tx_counters.erase(txHashStr);
+            manager_ptr->clear_writer_predecessors_for_tx(txHashStr);
         }
     }
     XapianManager::instances_mutex.unlock_shared();
@@ -117,22 +119,70 @@ void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
                 // Replay logs into the actual Xapian DB for this manager (replay_log will lock changes_mutex internally)
                 manager_ptr->replay_log(buffer_logs);
                 
-
-                
                 // Append them to comprehensive_log so they can be extracted
                 manager_ptr->comprehensive_log.xapian_doc_logs.insert(
                     manager_ptr->comprehensive_log.xapian_doc_logs.end(),
                     std::make_move_iterator(buffer_logs.begin()),
                     std::make_move_iterator(buffer_logs.end())
                 );
-                
-                // XÓA BUFFER (Sau khi dữ liệu đã nằm an toàn trong Xapian DB)
-                // Lúc này, các transaction khác có thể đọc trực tiếp từ DB qua `read_db`,
-                // nên việc xóa dữ liệu tạm trong `tx_buffers` là an toàn và không gây race condition.
-                {
-                    std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
-                    manager_ptr->tx_buffers.erase(txHashStr);
-                    manager_ptr->tx_counters.erase(txHashStr);
+            }
+            // Always clean up tx_buffers and tx_counters for this txHash
+            {
+                std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
+                manager_ptr->tx_buffers.erase(txHashStr);
+                manager_ptr->tx_counters.erase(txHashStr);
+                manager_ptr->clear_writer_predecessors_for_tx(txHashStr);
+            }
+        }
+    }
+}
+
+XapianRegistry::XapianSnapshot XapianRegistry::takeSnapshotForTxHash(const uint256_t* txHash) {
+    if (!txHash) return {};
+    std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
+    XapianSnapshot snap;
+    
+    std::shared_lock<std::shared_mutex> inst_lock(XapianManager::instances_mutex);
+    for (auto& pair : XapianManager::instances) {
+        if (auto mgr = pair.second) {
+            std::lock_guard<std::mutex> buf_lock(mgr->tx_buffers_mutex);
+            size_t log_count = 0;
+            auto it = mgr->tx_buffers.find(txHashStr);
+            if (it != mgr->tx_buffers.end()) {
+                log_count = it->second.xapian_doc_logs.size();
+            }
+            snap.push_back({mgr, log_count});
+        }
+    }
+    return snap;
+}
+
+void XapianRegistry::revertToSnapshotForTxHash(const uint256_t* txHash, const XapianSnapshot& snap) {
+    if (!txHash) return;
+    std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
+    
+    std::unordered_set<XapianManager*> snap_managers;
+    for (const auto& item : snap) {
+        if (auto mgr = item.manager.lock()) {
+            snap_managers.insert(mgr.get());
+            std::lock_guard<std::mutex> buf_lock(mgr->tx_buffers_mutex);
+            auto it = mgr->tx_buffers.find(txHashStr);
+            if (it != mgr->tx_buffers.end()) {
+                if (it->second.xapian_doc_logs.size() > item.log_count) {
+                    it->second.xapian_doc_logs.resize(item.log_count);
+                }
+            }
+        }
+    }
+    
+    std::shared_lock<std::shared_mutex> inst_lock(XapianManager::instances_mutex);
+    for (auto& pair : XapianManager::instances) {
+        if (auto mgr = pair.second) {
+            if (snap_managers.find(mgr.get()) == snap_managers.end()) {
+                std::lock_guard<std::mutex> buf_lock(mgr->tx_buffers_mutex);
+                auto it = mgr->tx_buffers.find(txHashStr);
+                if (it != mgr->tx_buffers.end()) {
+                    it->second.xapian_doc_logs.clear();
                 }
             }
         }

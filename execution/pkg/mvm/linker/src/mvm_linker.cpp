@@ -1631,6 +1631,10 @@ extern "C" void MVM_commitAllXapian() {
   XapianManager::commitAllInstances();
 }
 
+extern "C" void MVM_destroyAllXapianInstances() {
+  XapianManager::destroyAllInstances();
+}
+
 
 extern "C" void clear_xapian_tx_buffer(unsigned char *b_tx_hash) {
     uint256_t txHash = mvm::from_big_endian((uint8_t *)b_tx_hash, 32u);

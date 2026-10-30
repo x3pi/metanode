@@ -48,6 +48,7 @@
 #include "xapian/xapian_manager.h"
 #include "xapian/xapian_registry.h"
 #include "my_extension/utils.h"
+#include "my_extension/constants.h"
 #include <mvm/util.h>
 #include <filesystem>
 #include <atomic>
@@ -458,4 +459,233 @@ TEST_SUITE("XapianManager") {
             XapianManager::destroyInstance(mvm::createFullPath(addr, db_name).string());
         }
     }
+
+    TEST_CASE("SNAPSHOT & ROLLBACK: Subcall revert discards writes and preserves prior writes") {
+        init_xapian_test_env();
+        mvm::Address addr = 980000001;
+        std::string db_name = "snap_revert_db";
+        auto manager = create_test_manager(db_name, addr, true);
+        REQUIRE(manager != nullptr);
+
+        uint256_t txHash = next_fake_tx_hash();
+
+        // 1. Parent writes doc 1
+        std::string doc1 = manager->new_document("{\"name\":\"parent_doc_1\"}", 1, nullptr, &txHash);
+        REQUIRE(!doc1.empty());
+
+        // 2. Child frame begins: take snapshot
+        auto snap1 = registry.takeSnapshotForTxHash(&txHash);
+
+        // 3. Child writes doc 2
+        std::string doc2 = manager->new_document("{\"name\":\"child_doc_2_reverted\"}", 1, nullptr, &txHash);
+        REQUIRE(!doc2.empty());
+        REQUIRE(doc2 != doc1);
+
+        // 4. Child reverts: rollback to snap1
+        registry.revertToSnapshotForTxHash(&txHash, snap1);
+
+        // 5. Parent continues and writes doc 3
+        std::string doc3 = manager->new_document("{\"name\":\"parent_doc_3\"}", 1, nullptr, &txHash);
+        REQUIRE(!doc3.empty());
+        REQUIRE(doc3 != doc2);
+
+        // 6. Commit transaction
+        registry.commitBufferForTxHash(&txHash);
+        manager->commit_changes();
+
+        // 7. Verify DB content: doc1 and doc3 must exist, doc2 must NOT exist
+        std::string data1 = manager->get_data(doc1, 1);
+        CHECK(data1 == "{\"name\":\"parent_doc_1\"}");
+
+        std::string data3 = manager->get_data(doc3, 1);
+        CHECK(data3 == "{\"name\":\"parent_doc_3\"}");
+
+        std::string data2 = manager->get_data(doc2, 1);
+        CHECK(data2.empty());
+
+        XapianManager::destroyInstance(mvm::createFullPath(addr, db_name).string());
+    }
+
+    TEST_CASE("SNAPSHOT & ROLLBACK: Revert to empty snapshot clears all subcall writes") {
+        init_xapian_test_env();
+        mvm::Address addr = 980000002;
+        std::string db_name = "snap_empty_db";
+        auto manager = create_test_manager(db_name, addr, true);
+        REQUIRE(manager != nullptr);
+
+        uint256_t txHash = next_fake_tx_hash();
+
+        // Snapshot taken when 0 operations have occurred
+        auto snap0 = registry.takeSnapshotForTxHash(&txHash);
+
+        // Subcall writes documents
+        std::string docA = manager->new_document("{\"name\":\"docA\"}", 1, nullptr, &txHash);
+        std::string docB = manager->new_document("{\"name\":\"docB\"}", 1, nullptr, &txHash);
+        REQUIRE(!docA.empty());
+        REQUIRE(!docB.empty());
+
+        // Subcall reverts
+        registry.revertToSnapshotForTxHash(&txHash, snap0);
+
+        // Transaction ends with commit
+        registry.commitBufferForTxHash(&txHash);
+        manager->commit_changes();
+
+        // Verify neither docA nor docB was committed
+        CHECK(manager->get_data(docA, 1).empty());
+        CHECK(manager->get_data(docB, 1).empty());
+
+        XapianManager::destroyInstance(mvm::createFullPath(addr, db_name).string());
+    }
+
+    TEST_CASE("SNAPSHOT & ROLLBACK: Multi-DB rollback across subcalls") {
+        init_xapian_test_env();
+        mvm::Address addr = 980000003;
+        std::string db1_name = "snap_multidb_1";
+        std::string db2_name = "snap_multidb_2";
+        auto mgr1 = create_test_manager(db1_name, addr, true);
+        auto mgr2 = create_test_manager(db2_name, addr, true);
+        REQUIRE(mgr1 != nullptr);
+        REQUIRE(mgr2 != nullptr);
+
+        uint256_t txHash = next_fake_tx_hash();
+
+        // Parent writes to DB1
+        std::string doc1_parent = mgr1->new_document("{\"db\":\"1\",\"type\":\"parent\"}", 1, nullptr, &txHash);
+
+        // Snapshot at subcall start
+        auto snap = registry.takeSnapshotForTxHash(&txHash);
+
+        // Subcall writes to DB1 and DB2
+        std::string doc1_child = mgr1->new_document("{\"db\":\"1\",\"type\":\"child\"}", 1, nullptr, &txHash);
+        std::string doc2_child = mgr2->new_document("{\"db\":\"2\",\"type\":\"child\"}", 1, nullptr, &txHash);
+
+        // Subcall reverts
+        registry.revertToSnapshotForTxHash(&txHash, snap);
+
+        // Commit transaction
+        registry.commitBufferForTxHash(&txHash);
+        mgr1->commit_changes();
+        mgr2->commit_changes();
+
+        // Verify: parent doc in DB1 exists, child docs in DB1 and DB2 do NOT exist
+        CHECK(mgr1->get_data(doc1_parent, 1) == "{\"db\":\"1\",\"type\":\"parent\"}");
+        CHECK(mgr1->get_data(doc1_child, 1).empty());
+        CHECK(mgr2->get_data(doc2_child, 1).empty());
+
+        XapianManager::destroyInstance(mvm::createFullPath(addr, db1_name).string());
+        XapianManager::destroyInstance(mvm::createFullPath(addr, db2_name).string());
+    }
+
+    TEST_CASE("SNAPSHOT & OPTIMIZATION: Write vs read-only opcode classification") {
+        // Write opcodes must return true
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_NEW_DOCUMENT));
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_DELETE_DOCUMENT));
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_ADD_TERM_DOCUMENT));
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_INDEX_TEXT_DOCUMENT));
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_SET_DATA_DOCUMENT));
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_ADD_VALUE_DOCUMENT));
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_V1_NEW_DOCUMENT));
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_V1_DELETE_DOCUMENT));
+
+        // Read-only opcodes must return false
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_SEARCH));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_GET_DATA_DOCUMENT));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_GET_VALUE_DOCUMENT));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_GET_TERMS_DOCUMENT));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_GET_DOCUMENT));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_GET_OR_CREATE_DB));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_QUERY_SEARCH));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_V1_GET_DATA_DOCUMENT));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_V1_GET_OR_CREATE_DB));
+    }
+
+    TEST_CASE("SNAPSHOT & ROLLBACK: Weak pointer in snapshot allows cleanup") {
+        init_xapian_test_env();
+        mvm::Address addr = 980000004;
+        std::string db_name = "weak_ptr_test_db";
+        auto manager = create_test_manager(db_name, addr, true);
+        REQUIRE(manager != nullptr);
+
+        uint256_t txHash = next_fake_tx_hash();
+        manager->new_document("{\"doc\":\"1\"}", 1, nullptr, &txHash);
+
+        // Snapshot holds weak_ptr
+        auto snap = registry.takeSnapshotForTxHash(&txHash);
+        REQUIRE(snap.size() >= 1);
+
+        // Weak ptr in snapshot does NOT keep strong reference
+        // Even if an instance is destroyed, revertToSnapshotForTxHash does not crash
+        XapianManager::destroyInstance(mvm::createFullPath(addr, db_name).string());
+
+        // Reverting with expired weak_ptr must be completely safe
+        CHECK_NOTHROW(registry.revertToSnapshotForTxHash(&txHash, snap));
+    }
+
+    TEST_CASE("MULTI-WRITER OVERLAY: Intra-block version chaining across multiple transactions") {
+        try {
+            init_xapian_test_env();
+            mvm::Address addr = 980000005;
+            std::string db_name = "multi_writer_chain_db";
+            auto manager = create_test_manager(db_name, addr, true);
+            REQUIRE(manager != nullptr);
+
+            // 1. Existing document on disk (from earlier block)
+            uint256_t txDisk = next_fake_tx_hash();
+            std::string docId = commit_write(txDisk, [&]() {
+                return manager->new_document("old_disk_data", 1, nullptr, &txDisk);
+            });
+            REQUIRE(!docId.empty());
+            manager->commit_changes();
+
+            // Verify disk state
+            CHECK(manager->get_data(docId, 1) == "old_disk_data");
+
+            // 2. Intra-block multi-writers
+            // Tx A: updates data to "new_data"
+            uint256_t txA = next_fake_tx_hash();
+            manager->set_data(docId, "new_data", 2, nullptr, &txA);
+
+            // Tx B: adds term "multi_tag" and links predecessor to Tx A
+            uint256_t txB = next_fake_tx_hash();
+            manager->add_term(docId, "multi_tag", 2, nullptr, &txB);
+            manager->record_doc_writer_predecessor(docId, txB, txA);
+
+            // 3. Tx C reads: must see Tx A's data ("new_data") AND Tx B's term ("multi_tag")
+            uint256_t txC = next_fake_tx_hash();
+            std::string readData = manager->get_data(docId, 2, &txC, &txB);
+            CHECK(readData == "new_data");
+
+            std::vector<std::string> readTerms = manager->get_terms(docId, 2, &txC, &txB);
+            bool hasTerm = false;
+            for (const auto& t : readTerms) {
+                if (t == "multi_tag") hasTerm = true;
+            }
+            CHECK(hasTerm);
+
+            // 4. Tx D deletes document in same block, linked to Tx B
+            uint256_t txD = next_fake_tx_hash();
+            manager->delete_document(docId, 2, nullptr, &txD);
+            manager->record_doc_writer_predecessor(docId, txD, txB);
+
+            // 5. Tx E reads after deletion: get_data must return empty (DocNotFoundError caught)
+            uint256_t txE = next_fake_tx_hash();
+            CHECK(manager->get_data(docId, 2, &txE, &txD).empty());
+
+            // 6. Cleanup
+            registry.clearBufferForTxHash(&txA);
+            registry.clearBufferForTxHash(&txB);
+            registry.clearBufferForTxHash(&txD);
+        } catch (const Xapian::Error& e) {
+            std::cerr << "Caught Xapian::Error: " << e.get_description() << std::endl;
+            FAIL(e.get_description());
+        } catch (const std::exception& e) {
+            std::cerr << "Caught std::exception: " << e.what() << std::endl;
+            FAIL(e.what());
+        } catch (...) {
+            std::cerr << "Caught unknown exception" << std::endl;
+            FAIL("unknown error");
+        }
+    }
 }
+
