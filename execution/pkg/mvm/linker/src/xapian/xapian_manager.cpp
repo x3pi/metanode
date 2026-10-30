@@ -672,9 +672,9 @@ void XapianManager::record_doc_writer_predecessor(const std::string& virtualDocI
 
     std::lock_guard<std::mutex> lock(tx_buffers_mutex);
     if (doc_writer_predecessors.find(key) == doc_writer_predecessors.end()) {
-        doc_writer_predecessors[key] = prevTxStr;
         tx_to_predecessor_keys[curTxStr].push_back(key);
     }
+    doc_writer_predecessors[key] = prevTxStr;
 }
 
 void XapianManager::clear_writer_predecessors_for_tx(const std::string& txHashStr) {
