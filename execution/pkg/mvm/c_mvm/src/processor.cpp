@@ -2249,6 +2249,11 @@ private:
         } else if (addr == FULL_DATABASE_ADDRESS) {
           size_t xapianMark = extension.xapian_checkpoint(input);
           if (xapianMark != (size_t)-1) {
+            if (ctxt->read_only) {
+              extension.xapian_rollback(xapianMark);
+              MVM_THROW(Exception(ET::ErrWriteProtection,
+                                  "Xapian write protection in read-only call"));
+            }
             try {
               precompile_output =
                   extension.FullDatabase(input, ctxt->as.acc.get_address(), false,
@@ -2268,6 +2273,11 @@ private:
         } else if (addr == FULL_DATABASE_ADDRESS_V1) {
           size_t xapianMark = extension.xapian_checkpoint(input);
           if (xapianMark != (size_t)-1) {
+            if (ctxt->read_only) {
+              extension.xapian_rollback(xapianMark);
+              MVM_THROW(Exception(ET::ErrWriteProtection,
+                                  "Xapian write protection in read-only call"));
+            }
             try {
               precompile_output =
                   extension.FullDatabaseV1(input, ctxt->as.acc.get_address(), false,

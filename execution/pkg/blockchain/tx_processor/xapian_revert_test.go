@@ -385,3 +385,52 @@ func TestXapianNestedRevert_ReadOnlyOpInterleavedWithWrites(t *testing.T) {
 	require.Contains(t, logs, outer.Hex(), "outer writes must be committed")
 	require.NotContains(t, logs, child.Hex(), "child writes must be discarded on revert")
 }
+
+// 8. STATICCALL write protection:
+// A contract called via STATICCALL must be prevented from executing any Xapian write operation
+// (e.g. newDocument), raising ErrWriteProtection, while read operations remain allowed.
+func TestXapianStaticCallWriteProtection(t *testing.T) {
+	cs, key, _, leader := setupXapianChainEnv(t)
+
+	outer := common.HexToAddress("0x1000000000000000000000000000000000000071")
+	childWrite := common.HexToAddress("0x1000000000000000000000000000000000000072")
+	childRead := common.HexToAddress("0x1000000000000000000000000000000000000073")
+
+	newDocData := makeXapianNewDocData(t, "static_db", "must_not_persist")
+	roData := makeXapianGetOrCreateDbData(t, "static_db")
+
+	// childWrite attempts to call 0x106 with newDocument
+	childWriteCode := confScript(confJoin(
+		confMemWrite(0, newDocData),
+		[]any{32, 512, len(newDocData), 0, 0, common.HexToAddress("0x106"), 60000, "CALL"},
+		confReturnWords(1),
+	)...)
+
+	// childRead calls 0x106 with read-only getOrCreateDb
+	childReadCode := confScript(confJoin(
+		confMemWrite(0, roData),
+		[]any{32, 512, len(roData), 0, 0, common.HexToAddress("0x106"), 60000, "CALL"},
+		confReturnWords(1),
+	)...)
+
+	// Outer executes STATICCALL to childWrite (which must fail), then STATICCALL to childRead (which must succeed)
+	outerCode := confScript(confJoin(
+		// 1. STATICCALL childWrite -> should return 0 (failure due to ErrWriteProtection)
+		[]any{32, 512, 0, 0, childWrite, 60000, "STATICCALL"},
+		// 2. STATICCALL childRead -> should return 1 (success)
+		[]any{32, 544, 0, 0, childRead, 60000, "STATICCALL", "POP"},
+		[]any{0, 0, "RETURN"},
+	)...)
+
+	seedContract(t, cs, outer, big.NewInt(0), outerCode)
+	seedContract(t, cs, childWrite, big.NewInt(0), childWriteCode)
+	seedContract(t, cs, childRead, big.NewInt(0), childReadCode)
+
+	tx, r := executeTestTx(t, cs, key, outer, []common.Address{childWrite, childRead}, leader)
+	require.Len(t, r, 1)
+	require.Equal(t, 0, int(r[0].Status()), "outer tx must succeed")
+
+	mvm.CommitXapianTxBuffer(tx.Hash().Bytes())
+	logs := mvm.ExportAllXapianLogs()
+	require.Empty(t, logs, "STATICCALL must not commit any Xapian writes")
+}
