@@ -512,6 +512,18 @@ func (api *MetaAPI) GetProof(ctx context.Context, address common.Address, blockN
 
 	// If direct access fails (e.g. historical block in NOMT), fallback to reconstruction
 	if mt_trie.GetStateBackend() == mt_trie.BackendNOMT {
+		if os.Getenv("METANODE_ENABLE_HISTORICAL_PROOF_REBUILD") != "true" {
+			return nil, errors.New("historical NOMT state reconstruction for mtn_getProof is disabled by default; set METANODE_ENABLE_HISTORICAL_PROOF_REBUILD=true to enable")
+		}
+		if blockNr, ok := blockNrOrHash.Number(); ok && blockNr >= 0 {
+			if lastBlock := api.App.blockProcessor.GetLastBlock(); lastBlock != nil {
+				headNum := lastBlock.Header().BlockNumber()
+				targetNum := uint64(blockNr.Int64())
+				if headNum > targetNum && headNum-targetNum > maxHistoricalProofBlockDistance {
+					return nil, fmt.Errorf("historical block %d exceeds maximum proof reconstruction distance (%d) from head %d", targetNum, maxHistoricalProofBlockDistance, headNum)
+				}
+			}
+		}
 		logger.Info("🔍 [GetProof] Direct trie access failed, falling back to reconstructHistoricalTrie for block %v", blockNrOrHash)
 		// Rebuilding a historical trie is O(all accounts) and serialized by verifyCacheMu. Public callers must not queue
 		// behind it without bound, so refuse instead of blocking when a rebuild is already running.
@@ -538,6 +550,8 @@ func (api *MetaAPI) GetProof(ctx context.Context, address common.Address, blockN
 
 	return nil, fmt.Errorf("failed to get proof: direct access error=%v", err)
 }
+
+const maxHistoricalProofBlockDistance = 128
 
 var (
 	verifyCacheMu      sync.Mutex

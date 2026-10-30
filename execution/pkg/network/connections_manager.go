@@ -2,6 +2,7 @@ package network
 
 import (
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -15,9 +16,21 @@ import (
 )
 
 const (
-	MaxConnectionTypes  = 20
-	numConnectionShards = 32 // Base shards, có thể tăng động nếu cần
+	MaxConnectionTypes     = 20
+	numConnectionShards    = 32 // Base shards, có thể tăng động nếu cần
+	maxClientConnsPerShard = 4096
 )
+
+func extractRemoteHost(remoteAddr string) string {
+	if remoteAddr == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
 
 // calculateDynamicShards tính số shards động dựa trên số connections
 // Giúp scale tốt hơn với hàng trăm ngàn connections
@@ -334,8 +347,20 @@ func (cm *ConnectionsManager) AddConnectionWithAddress(conn network.Connection, 
 	if replace && exists && existingVal != nil {
 		existingRecord := existingVal.(connectionRecord)
 		if existingRecord.conn != nil && existingRecord.conn != conn {
-			// Luôn disconnect connection cũ khi replace, bất kể IsConnect() trả về gì
-			// Tránh stale connection tồn tại với Connected=true nhưng không có TCP socket
+			existingConnected := existingRecord.conn.IsConnect()
+			existingHost := extractRemoteHost(existingRecord.conn.RemoteAddrSafe())
+			newHost := extractRemoteHost(conn.RemoteAddrSafe())
+			if existingConnected && existingHost != "" && newHost != "" && existingHost != newHost {
+				logger.Warn(
+					"🚨 [CONN-SECURITY] Refusing to replace active connection for %v (%v) from %s with different remote IP %s",
+					address.Hex(),
+					cTypeStr,
+					existingHost,
+					newHost,
+				)
+				return
+			}
+			// Luôn disconnect connection cũ khi replace từ cùng host hoặc khi connection cũ đã ngắt
 			logger.Info(
 				"AddConnectionWithAddress: Replacing old connection for %v (%v)",
 				address.Hex(),
@@ -344,6 +369,18 @@ func (cm *ConnectionsManager) AddConnectionWithAddress(conn network.Connection, 
 			go func(oldConn network.Connection) {
 				_ = oldConn.Disconnect()
 			}(existingRecord.conn)
+		}
+	}
+
+	if !exists && cTypeStr == p_common.CLIENT_CONNECTION_TYPE {
+		shardCount := 0
+		shard.connections.Range(func(_, _ interface{}) bool {
+			shardCount++
+			return shardCount < maxClientConnsPerShard
+		})
+		if shardCount >= maxClientConnsPerShard {
+			logger.Warn("🚨 [CONN-SECURITY] Shard client connection cap (%d) reached; rejecting %s", maxClientConnsPerShard, address.Hex())
+			return
 		}
 	}
 

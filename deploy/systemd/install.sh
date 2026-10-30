@@ -278,6 +278,7 @@ log_step "Step 3: Preparing configuration files & Keys"
 # Copy pre-generated configs and keys directly
 cp "$CONFIG_DIR/execution.json" "$INSTALL_DIR/config/execution.json"
 cp "$CONFIG_DIR/consensus.toml" "$INSTALL_DIR/config/consensus.toml"
+chmod 600 "$INSTALL_DIR/config/execution.json" "$INSTALL_DIR/config/consensus.toml" 2>/dev/null || true
 
 if [ -f "$CONFIG_DIR/genesis.json" ]; then
     cp "$CONFIG_DIR/genesis.json" "$INSTALL_DIR/config/genesis.json"

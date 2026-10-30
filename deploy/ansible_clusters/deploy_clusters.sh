@@ -238,7 +238,7 @@ if [ -z "$ACTION" ]; then
     fi
 fi
 
-export METANODE_ENV="${METANODE_ENV:-devnet}"
+export METANODE_ENV="${METANODE_ENV:-production}"
 export NODE_ENV="${NODE_ENV:-$METANODE_ENV}"
 
 # inventory.yml is untracked (it holds real hosts / vault-encrypted credentials): on a fresh clone seed it

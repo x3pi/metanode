@@ -25,6 +25,7 @@ type TrieDatabaseSnapshot struct {
 
 // TrieDatabaseManager quản lý nhiều TrieDatabase
 type TrieDatabaseManager struct {
+	mu               sync.RWMutex
 	trieDatabases    map[common.Hash]*TrieDatabase
 	accountStateDB   *account_state_db.AccountStateDB
 	collectedBatches map[string][]byte
@@ -62,8 +63,10 @@ func (manager *TrieDatabaseManager) CommitSnapshots(snapshots map[common.Hash]*T
 
 	for _, id := range trieIDs {
 		snapshot := snapshots[id]
+		manager.mu.RLock()
 		trieDB, exists := manager.trieDatabases[id]
-		if !exists {
+		manager.mu.RUnlock()
+		if !exists || trieDB == nil {
 			continue // Should not happen in normal flow, but safety check
 		}
 
@@ -162,6 +165,11 @@ func (manager *TrieDatabaseManager) ResetCollectedBatches() {
 }
 
 func (manager *TrieDatabaseManager) SnapshotAllTrieDatabases() map[common.Hash]*TrieDatabaseSnapshot {
+	if manager == nil {
+		return nil
+	}
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
 	snapshots := make(map[common.Hash]*TrieDatabaseSnapshot)
 	for id, trieDB := range manager.trieDatabases {
 		var trieCopy p_trie.StateTrie
@@ -179,7 +187,7 @@ func (manager *TrieDatabaseManager) SnapshotAllTrieDatabases() map[common.Hash]*
 			TrieCopy: trieCopy,
 			BackUpDb: backUpDb,
 			SubPath:  trieDB.subPath,
-			Status:   trieDB.status,
+			Status:   trieDB.GetStatus(),
 		}
 	}
 	return snapshots
@@ -200,7 +208,12 @@ func (manager *TrieDatabaseManager) IntermediateRoot() error {
 	var jobs []updateJob
 
 	for _, id := range trieIDs {
+		manager.mu.RLock()
 		trieDB := manager.trieDatabases[id]
+		manager.mu.RUnlock()
+		if trieDB == nil {
+			continue
+		}
 		switch trieDB.GetStatus() {
 		case Deleted:
 			as, err := manager.accountStateDB.AccountState(trieDB.address)
@@ -294,8 +307,10 @@ func (manager *TrieDatabaseManager) IntermediateRoot() error {
 
 	// Xóa các ID Deleted
 	for _, id := range trieIDs {
+		manager.mu.RLock()
 		trieDB := manager.trieDatabases[id]
-		if trieDB.GetStatus() == Deleted {
+		manager.mu.RUnlock()
+		if trieDB != nil && trieDB.GetStatus() == Deleted {
 			manager.RemoveTrieDatabase(id)
 		}
 	}
@@ -303,18 +318,37 @@ func (manager *TrieDatabaseManager) IntermediateRoot() error {
 }
 
 func (manager *TrieDatabaseManager) FindTrieDatabasesByMvmID(mvmId common.Address) []*TrieDatabase {
+	if manager == nil {
+		return nil
+	}
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
 	var result []*TrieDatabase
 	for _, trieDB := range manager.trieDatabases {
-		if trieDB.mvmId == mvmId {
+		trieDB.mu.Lock()
+		match := trieDB.mvmId == mvmId
+		trieDB.mu.Unlock()
+		if match {
 			result = append(result, trieDB)
 		}
 	}
 	return result
 }
 func (manager *TrieDatabaseManager) FindAndSetTrieDatabasesByMvmID(mvmId common.Address, status TrieDatabaseStatus) {
+	if manager == nil {
+		return
+	}
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
 	for _, trieDB := range manager.trieDatabases {
-		if trieDB.mvmId == mvmId {
-			trieDB.SetStatus(status)
+		if status == Reverted {
+			trieDB.RevertMvmID(mvmId)
+		} else {
+			trieDB.mu.Lock()
+			if trieDB.mvmId == mvmId {
+				trieDB.status = status
+			}
+			trieDB.mu.Unlock()
 		}
 	}
 }
@@ -324,6 +358,8 @@ func (manager *TrieDatabaseManager) DiscardAllTrieDatabases() {
 	if manager == nil {
 		return
 	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
 	for id, trieDB := range manager.trieDatabases {
 		trieDB.Discard()
 		logger.Info("Discarded TrieDatabase", "id", id)
@@ -336,6 +372,8 @@ func (manager *TrieDatabaseManager) ClearAllTrieDatabases() {
 	if manager == nil {
 		return
 	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
 	for id, trieDB := range manager.trieDatabases {
 		if trieDB.trieR != nil {
 			if closer, ok := trieDB.trieR.(interface{ Close() }); ok {
@@ -349,6 +387,11 @@ func (manager *TrieDatabaseManager) ClearAllTrieDatabases() {
 }
 
 func (manager *TrieDatabaseManager) CloseAllTrieDatabases() error {
+	if manager == nil {
+		return nil
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
 	for id, trieDB := range manager.trieDatabases {
 		err := trieDB.db.Close()
 		if err != nil {
@@ -362,6 +405,11 @@ func (manager *TrieDatabaseManager) CloseAllTrieDatabases() error {
 }
 
 func (manager *TrieDatabaseManager) DeleteTrieDatabase(id common.Hash) error {
+	if manager == nil {
+		return nil
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
 	trieDB, exists := manager.trieDatabases[id]
 	if !exists {
 		return nil // Không có gì để xóa nếu không tồn tại
@@ -390,6 +438,11 @@ func (manager *TrieDatabaseManager) DeleteTrieDatabase(id common.Hash) error {
 
 // GetOrCrateTrieDatabase lấy một TrieDatabase theo ID của nó.
 func (manager *TrieDatabaseManager) GetOrCrateTrieDatabase(id common.Hash, hash common.Hash, mvmId common.Address, address common.Address, dbName string) (*TrieDatabase, bool) {
+	if manager == nil {
+		return nil, false
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
 	trieDB, exists := manager.trieDatabases[id]
 	if !exists {
 		dbNameHash := crypto.Keccak256Hash([]byte(dbName)).Hex()
@@ -403,12 +456,19 @@ func (manager *TrieDatabaseManager) GetOrCrateTrieDatabase(id common.Hash, hash 
 			return nil, false
 		}
 		manager.trieDatabases[id] = trieDB
+	} else {
+		trieDB.BindMvmID(mvmId)
 	}
 	return trieDB, true // trả về true nếu nó đã tồn tại, false nếu nó vừa được tạo
 }
 
 // RemoveTrieDatabase xóa một TrieDatabase khỏi danh sách quản lý
 func (manager *TrieDatabaseManager) RemoveTrieDatabase(id common.Hash) {
+	if manager == nil {
+		return
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
 	if trieDB, exists := manager.trieDatabases[id]; exists {
 		if trieDB.trieR != nil {
 			if closer, ok := trieDB.trieR.(interface{ Close() }); ok {
@@ -421,6 +481,11 @@ func (manager *TrieDatabaseManager) RemoveTrieDatabase(id common.Hash) {
 
 // ListAllIDs lấy danh sách tất cả các ID của TrieDatabase
 func (manager *TrieDatabaseManager) ListAllIDs() []common.Hash {
+	if manager == nil {
+		return nil
+	}
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
 	ids := make([]common.Hash, 0, len(manager.trieDatabases))
 	for id := range manager.trieDatabases {
 		ids = append(ids, id)

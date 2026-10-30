@@ -1480,7 +1480,8 @@ func TestRelayerDaemon_ClaimMessageFails_PursuesRefund_TwoHop(t *testing.T) {
 	reserveEngine.ReserveChainID = reserveChainID
 
 	destEngine := cross_chain.NewGatewayEngine(destChainID, map[uint64]cross_chain.ChainRegistry{
-		sourceChainID: {ChainID: sourceChainID, Committee: []cross_chain.ValidatorEntry{validatorA}, Epoch: epoch, QuorumThreshold: 6667},
+		sourceChainID:  {ChainID: sourceChainID, Committee: []cross_chain.ValidatorEntry{validatorA}, Epoch: epoch, QuorumThreshold: 6667},
+		reserveChainID: {ChainID: reserveChainID, Committee: []cross_chain.ValidatorEntry{validatorA}, Epoch: epoch, QuorumThreshold: 6667},
 	}, nil)
 	destEngine.ReserveChainID = reserveChainID
 

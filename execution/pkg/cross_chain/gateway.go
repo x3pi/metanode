@@ -564,10 +564,10 @@ func (g *GatewayEngine) SlashOnEquivocation(
 		registry = ChainRegistry{ChainID: chainID, Committee: req.Committee, Epoch: req.Epoch}
 	}
 
-	if err := VerifyQuorumCertAgainstRegistry(registry, certA, ComputeCommitRootAttestMessage(commitRootA)); err != nil {
+	if err := VerifyQuorumCertAgainstRegistry(registry, certA, ComputeScopedCommitRootAttestMessage(chainID, epoch, commitRootA)); err != nil {
 		return fmt.Errorf("SlashOnEquivocation: certA: %w", err)
 	}
-	if err := VerifyQuorumCertAgainstRegistry(registry, certB, ComputeCommitRootAttestMessage(commitRootB)); err != nil {
+	if err := VerifyQuorumCertAgainstRegistry(registry, certB, ComputeScopedCommitRootAttestMessage(chainID, epoch, commitRootB)); err != nil {
 		return fmt.Errorf("SlashOnEquivocation: certB: %w", err)
 	}
 
@@ -1514,6 +1514,12 @@ func (g *GatewayEngine) AttestReserveIssuedCommit(
 	aggregateProof MerkleProof,
 	cert QuorumCert,
 ) (*AttestedCommit, error) {
+	if g.ReserveChainID == 0 {
+		return nil, ErrReserveChainNotConfigured
+	}
+	if reserveChainID != g.ReserveChainID {
+		return nil, fmt.Errorf("%w: got %d, expected configured Reserve %d", ErrNonReserveCeilingAttestation, reserveChainID, g.ReserveChainID)
+	}
 	return g.attestCommitInternal(reserveChainID, commitRoot, aggregateAmount, assetId, aggregateProof, cert, false, 0)
 }
 
@@ -1743,16 +1749,14 @@ func (g *GatewayEngine) ClaimMessage(
 	}
 	key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), assetIdStr)
 	attested, exists := g.AttestedCommits[key]
-	if !exists {
-		// 2-hop routed transfers via Reserve / Hub Chain (Section 2.2(b))
-		for chainID := range g.ChainRegistry {
-			k := fmt.Sprintf("%d:%s:%s", chainID, commitRoot.Hex(), assetIdStr)
-			if a, ok := g.AttestedCommits[k]; ok {
-				attested = a
-				exists = true
-				key = k
-				break
-			}
+	if !exists && g.ReserveChainID != 0 {
+		// 2-hop routed transfers via Reserve / Hub Chain (Section 2.2(b)): only fallback to the
+		// configured ReserveChainID, never an arbitrary registered private chain.
+		k := fmt.Sprintf("%d:%s:%s", g.ReserveChainID, commitRoot.Hex(), assetIdStr)
+		if a, ok := g.AttestedCommits[k]; ok {
+			attested = a
+			exists = true
+			key = k
 		}
 	}
 	if !exists {
@@ -1909,15 +1913,12 @@ func (g *GatewayEngine) FinalizeFailedAfterExecutionRevert(
 	}
 	key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), assetIdStr)
 	attested, exists := g.AttestedCommits[key]
-	if !exists {
-		for chainID := range g.ChainRegistry {
-			k := fmt.Sprintf("%d:%s:%s", chainID, commitRoot.Hex(), assetIdStr)
-			if a, ok := g.AttestedCommits[k]; ok {
-				attested = a
-				exists = true
-				key = k
-				break
-			}
+	if !exists && g.ReserveChainID != 0 {
+		k := fmt.Sprintf("%d:%s:%s", g.ReserveChainID, commitRoot.Hex(), assetIdStr)
+		if a, ok := g.AttestedCommits[k]; ok {
+			attested = a
+			exists = true
+			key = k
 		}
 	}
 	if exists && message.Value != nil && message.Value.Sign() > 0 && attested.ClaimedAmount != nil {

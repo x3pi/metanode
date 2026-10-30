@@ -175,7 +175,7 @@
       ansible.builtin.template:
         src: parentchain_config.json.j2
         dest: "{{ node_data_dir }}/config.json"
-        mode: '0644'
+        mode: '0600'
         owner: "{{ ansible_user | default('abc') }}"
         group: "{{ ansible_user | default('abc') }}"
 
@@ -187,9 +187,18 @@
         owner: "{{ ansible_user | default('abc') }}"
         group: "{{ ansible_user | default('abc') }}"
 
+    - name: Require explicit per-deployment Parent Chain validator keys in production
+      ansible.builtin.assert:
+        that:
+          - parent_keys_dir is defined and (parent_keys_dir | length) > 0
+        fail_msg: >-
+          FATAL: In production environment, parent_keys_dir must be explicitly configured to a directory containing
+          unique per-deployment Parent Chain validator keys (refusing to use static repository devnet keys).
+      when: "(metanode_env | default('production')) != 'devnet' and (node_env | default('production')) != 'devnet' and not (metanode_devnet | default(false) | bool)"
+
     - name: Copy Parent Chain consensus keys
       ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../../consensus/metanode/config/{{ item }}"
+        src: "{{ (parent_keys_dir | default(playbook_dir ~ '/../../consensus/metanode/config')) }}/{{ item }}"
         dest: "{{ node_data_dir }}/{{ item }}"
         mode: '0600'
         owner: "{{ ansible_user | default('abc') }}"
@@ -202,7 +211,7 @@
       ansible.builtin.template:
         src: node_parent.toml.j2
         dest: "{{ node_data_dir }}/node_parent.toml"
-        mode: '0644'
+        mode: '0600'
         owner: "{{ ansible_user | default('abc') }}"
         group: "{{ ansible_user | default('abc') }}"
 

@@ -152,8 +152,8 @@ func multisigBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transa
 			add(from, pack(gh.abi.Pack("unregisterChainWithCert", big.NewInt(int64(chain)), nonce, uint64(1), sig, bm)), i)
 		case 3: // equivocation: two certs over different roots, each from its own subset of the committee
 			a, b := common.BigToHash(big.NewInt(0xA1)), common.BigToHash(big.NewInt(0xB2))
-			_, sigA, bmA := cert(chain, cross_chain.ComputeCommitRootAttestMessage(a))
-			_, sigB, bmB := cert(chain, cross_chain.ComputeCommitRootAttestMessage(b))
+			_, sigA, bmA := cert(chain, cross_chain.ComputeScopedCommitRootAttestMessage(chain, 1, a))
+			_, sigB, bmB := cert(chain, cross_chain.ComputeScopedCommitRootAttestMessage(chain, 1, b))
 			add(from, pack(gh.abi.Pack("slashOnEquivocation", big.NewInt(int64(chain)), uint64(1), a, b, uint64(1), sigA, bmA, uint64(1), sigB, bmB)), i)
 		case 4: // allocation move signed by the chain's committee
 			amt := big.NewInt(int64(1 + r.Intn(1000)))

@@ -133,8 +133,8 @@ func miscBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transactio
 		case 7: // two certs over different roots at the same epoch: the committee equivocated, the chain is declared dead
 			a, b := common.BigToHash(big.NewInt(0xA1)), common.BigToHash(big.NewInt(0xB2+int64(r.Intn(2))))
 			data = pack(gh.abi.Pack("slashOnEquivocation", big.NewInt(int64(m.chain)), uint64(1), a, b,
-				uint64(1), sign(signer, cross_chain.ComputeCommitRootAttestMessage(a)), []byte{0x01},
-				uint64(1), sign(signer, cross_chain.ComputeCommitRootAttestMessage(b)), []byte{0x01}))
+				uint64(1), sign(signer, cross_chain.ComputeScopedCommitRootAttestMessage(m.chain, 1, a)), []byte{0x01},
+				uint64(1), sign(signer, cross_chain.ComputeScopedCommitRootAttestMessage(m.chain, 1, b)), []byte{0x01}))
 		case 8: // rotate chain 103's committee to a fresh key: its PoP is registered first (same sender), the old committee signs
 			seedNew := common.FromHex("0x2020202020202020202020202020202020202020202020202020202020202020")
 			kpNew := bls.NewKeyPair(seedNew[:32])
@@ -155,8 +155,8 @@ func miscBlock(t *testing.T, r *rand.Rand, env barrierEnv) []mt_types.Transactio
 			if r.Intn(2) == 0 { // kill chain 103 first (two certs over different roots at one epoch), same sender so it sorts first
 				a, b := common.BigToHash(big.NewInt(0xA1)), common.BigToHash(big.NewInt(0xB2))
 				slash := pack(gh.abi.Pack("slashOnEquivocation", big.NewInt(103), uint64(1), a, b,
-					uint64(1), sign(env.kp103, cross_chain.ComputeCommitRootAttestMessage(a)), []byte{0x01},
-					uint64(1), sign(env.kp103, cross_chain.ComputeCommitRootAttestMessage(b)), []byte{0x01}))
+					uint64(1), sign(env.kp103, cross_chain.ComputeScopedCommitRootAttestMessage(103, 1, a)), []byte{0x01},
+					uint64(1), sign(env.kp103, cross_chain.ComputeScopedCommitRootAttestMessage(103, 1, b)), []byte{0x01}))
 				txs = append(txs, transaction.NewTransaction(from, mt_common.GATEWAY_CONTRACT_ADDRESS, big.NewInt(0), 400_000, 1, uint64(9200+i), slash, nil,
 					common.Hash{}, common.Hash{}, next(from), 991))
 			}

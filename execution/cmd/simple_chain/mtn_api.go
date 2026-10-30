@@ -417,7 +417,12 @@ func (api *MtnAPI) CompleteJob(ctx context.Context, address common.Address, jobI
 	// 3. Xử lý logic hoàn thành job dựa trên loại job
 	if job.JobType == mining.JobTypeVideoAds {
 		logger.Info("Completing a 'video_ads' job: %s", jobID)
-		// Với job video, chỉ cần gọi hoàn thành là được
+		expectedVideoHash := mining.ExpectedVideoJobHash(job)
+		if hashExecute == (common.Hash{}) || hashExecute != expectedVideoHash {
+			err := fmt.Errorf("invalid execution proof hash for video_ads job %s", jobID)
+			logger.Error(err.Error())
+			return false, err
+		}
 		_, err := miniService.CompleteJob(jobID, address.String())
 		if err != nil {
 			logger.Error("Error from service on completing video_ads job %s: %v", jobID, err)
