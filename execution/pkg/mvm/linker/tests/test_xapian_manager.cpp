@@ -48,6 +48,7 @@
 #include "xapian/xapian_manager.h"
 #include "xapian/xapian_registry.h"
 #include "my_extension/utils.h"
+#include "my_extension/constants.h"
 #include <mvm/util.h>
 #include <filesystem>
 #include <atomic>
@@ -575,4 +576,50 @@ TEST_SUITE("XapianManager") {
         XapianManager::destroyInstance(mvm::createFullPath(addr, db1_name).string());
         XapianManager::destroyInstance(mvm::createFullPath(addr, db2_name).string());
     }
+
+    TEST_CASE("SNAPSHOT & OPTIMIZATION: Write vs read-only opcode classification") {
+        // Write opcodes must return true
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_NEW_DOCUMENT));
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_DELETE_DOCUMENT));
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_ADD_TERM_DOCUMENT));
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_INDEX_TEXT_DOCUMENT));
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_SET_DATA_DOCUMENT));
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_ADD_VALUE_DOCUMENT));
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_V1_NEW_DOCUMENT));
+        CHECK(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_V1_DELETE_DOCUMENT));
+
+        // Read-only opcodes must return false
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_SEARCH));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_GET_DATA_DOCUMENT));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_GET_VALUE_DOCUMENT));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_GET_TERMS_DOCUMENT));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_GET_DOCUMENT));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_GET_OR_CREATE_DB));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_QUERY_SEARCH));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_V1_GET_DATA_DOCUMENT));
+        CHECK_FALSE(mvm::FunctionSelector::isXapianWriteOpcode(mvm::FunctionSelector::XAPIAN_V1_GET_OR_CREATE_DB));
+    }
+
+    TEST_CASE("SNAPSHOT & ROLLBACK: Weak pointer in snapshot allows cleanup") {
+        init_xapian_test_env();
+        mvm::Address addr = 980000004;
+        std::string db_name = "weak_ptr_test_db";
+        auto manager = create_test_manager(db_name, addr, true);
+        REQUIRE(manager != nullptr);
+
+        uint256_t txHash = next_fake_tx_hash();
+        manager->new_document("{\"doc\":\"1\"}", 1, nullptr, &txHash);
+
+        // Snapshot holds weak_ptr
+        auto snap = registry.takeSnapshotForTxHash(&txHash);
+        REQUIRE(snap.size() >= 1);
+
+        // Weak ptr in snapshot does NOT keep strong reference
+        // Even if an instance is destroyed, revertToSnapshotForTxHash does not crash
+        XapianManager::destroyInstance(mvm::createFullPath(addr, db_name).string());
+
+        // Reverting with expired weak_ptr must be completely safe
+        CHECK_NOTHROW(registry.revertToSnapshotForTxHash(&txHash, snap));
+    }
 }
+

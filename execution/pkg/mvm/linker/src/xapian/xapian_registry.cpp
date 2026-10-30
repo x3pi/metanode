@@ -161,7 +161,7 @@ void XapianRegistry::revertToSnapshotForTxHash(const uint256_t* txHash, const Xa
     
     std::unordered_set<XapianManager*> snap_managers;
     for (const auto& item : snap) {
-        if (auto mgr = item.manager) {
+        if (auto mgr = item.manager.lock()) {
             snap_managers.insert(mgr.get());
             std::lock_guard<std::mutex> buf_lock(mgr->tx_buffers_mutex);
             auto it = mgr->tx_buffers.find(txHashStr);

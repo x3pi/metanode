@@ -268,4 +268,40 @@ const uint32_t FunctionSelector::XAPIAN_V1_SET_CONFIG_FILED =
 const uint32_t FunctionSelector::XAPIAN_V1_UPDATE_FIELD =
     getFunctionSelectorFromString(
         "updateField(string,string,uint16,uint8,bool,bool,uint8)");
+
+bool FunctionSelector::isXapianWriteOpcode(uint32_t opCode) {
+  return (
+      opCode == XAPIAN_NEW_DOCUMENT ||
+      opCode == XAPIAN_DELETE_DOCUMENT ||
+      opCode == XAPIAN_ADD_TERM_DOCUMENT ||
+      opCode == XAPIAN_INDEX_TEXT_DOCUMENT ||
+      opCode == XAPIAN_SET_DATA_DOCUMENT ||
+      opCode == XAPIAN_ADD_VALUE_DOCUMENT ||
+      opCode == XAPIAN_ADD_FIELD_TO_DOCUMENT ||
+      opCode == XAPIAN_SET_CONFIG_FILED ||
+      opCode == XAPIAN_INDEX_DOCUMENT ||
+      opCode == XAPIAN_ADD_FIELD ||
+      opCode == XAPIAN_REMOVE_FIELD ||
+      opCode == XAPIAN_UPDATE_FIELD ||
+      opCode == XAPIAN_ADD_TAG ||
+      opCode == XAPIAN_REMOVE_TAG ||
+      opCode == XAPIAN_UPDATE_TAG ||
+      opCode == XAPIAN_COMMIT ||
+      opCode == XAPIAN_V1_NEW_DOCUMENT ||
+      opCode == XAPIAN_V1_DELETE_DOCUMENT ||
+      opCode == XAPIAN_V1_ADD_TERM_DOCUMENT ||
+      opCode == XAPIAN_V1_INDEX_TEXT_DOCUMENT ||
+      opCode == XAPIAN_V1_SET_DATA_DOCUMENT ||
+      opCode == XAPIAN_V1_ADD_VALUE_DOCUMENT ||
+      opCode == XAPIAN_V1_ADD_FIELD_TO_DOCUMENT ||
+      opCode == XAPIAN_V1_SET_CONFIG_FILED ||
+      opCode == XAPIAN_V1_INDEX_DOCUMENT ||
+      opCode == XAPIAN_V1_ADD_FIELD ||
+      opCode == XAPIAN_V1_REMOVE_FIELD ||
+      opCode == XAPIAN_V1_UPDATE_FIELD ||
+      opCode == XAPIAN_V1_ADD_TAG ||
+      opCode == XAPIAN_V1_REMOVE_TAG ||
+      opCode == XAPIAN_V1_UPDATE_TAG ||
+      opCode == XAPIAN_V1_COMMIT);
+}
 } // namespace mvm

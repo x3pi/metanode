@@ -40,9 +40,10 @@ struct Extension {
   virtual Code PublicKeyFromPrivateKey(mvm::Code input) = 0;
 
   // Journal support for Xapian writes in sub-calls:
-  // xapian_checkpoint() takes a snapshot of buffered Xapian operations before a call,
+  // xapian_checkpoint() takes a snapshot of buffered Xapian operations before a write op,
+  // returning (size_t)-1 if the operation is read-only (skipping snapshot overhead).
   // xapian_rollback() restores that snapshot if the sub-call reverts.
-  virtual size_t xapian_checkpoint() { return 0; }
+  virtual size_t xapian_checkpoint(const mvm::Code &input = {}) { return (size_t)-1; }
   virtual void xapian_rollback(size_t mark) {}
 };
 } // namespace mvm

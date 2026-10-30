@@ -39,7 +39,14 @@ public:
                            uint256_t blockNumber, mvm::GlobalState* gs = nullptr) override;
   mvm::Code PublicKeyFromPrivateKey(mvm::Code input);
 
-  size_t xapian_checkpoint() override {
+  size_t xapian_checkpoint(const mvm::Code& input = {}) override {
+    if (input.size() >= 4) {
+      uint32_t opCode =
+          (input[0] << 24) | (input[1] << 16) | (input[2] << 8) | input[3];
+      if (!mvm::FunctionSelector::isXapianWriteOpcode(opCode)) {
+        return (size_t)-1;
+      }
+    }
     size_t mark = xapian_checkpoints.size();
     xapian_checkpoints.push_back(XapianRegistry::takeSnapshotForTxHash(txHash));
     return mark;

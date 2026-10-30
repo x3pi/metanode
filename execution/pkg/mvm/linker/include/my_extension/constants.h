@@ -127,6 +127,8 @@ public:
   static const uint32_t XAPIAN_V1_SEARCH;
   static const uint32_t XAPIAN_V1_INDEX_DOCUMENT;
 
+  static bool isXapianWriteOpcode(uint32_t opCode);
+
 private:
   static std::unordered_map<std::string, uint32_t> functionSelectorCache;
 };

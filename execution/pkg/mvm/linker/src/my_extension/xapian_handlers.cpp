@@ -122,23 +122,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
     addressBytes[19 - i] = static_cast<uint8_t>(addr >> (i * 8));
   }
   if (this->isOffChain) {
-    bool isWriteOp =
-        (opCode == mvm::FunctionSelector::XAPIAN_NEW_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_DELETE_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_ADD_TERM_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_INDEX_TEXT_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_SET_DATA_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_ADD_VALUE_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_ADD_FIELD_TO_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_SET_CONFIG_FILED ||
-         opCode == mvm::FunctionSelector::XAPIAN_INDEX_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_ADD_FIELD ||
-         opCode == mvm::FunctionSelector::XAPIAN_REMOVE_FIELD ||
-         opCode == mvm::FunctionSelector::XAPIAN_UPDATE_FIELD ||
-         opCode == mvm::FunctionSelector::XAPIAN_ADD_TAG ||
-         opCode == mvm::FunctionSelector::XAPIAN_REMOVE_TAG ||
-         opCode == mvm::FunctionSelector::XAPIAN_UPDATE_TAG ||
-         opCode == mvm::FunctionSelector::XAPIAN_COMMIT);
+    bool isWriteOp = mvm::FunctionSelector::isXapianWriteOpcode(opCode);
     if (isWriteOp) {
       // Off-chain: trả về success giả (0x1) mà không thực sự ghi
       // Giúp smart contract không revert, nhưng data không bị ghi xuống DB
@@ -1135,23 +1119,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
   // [GUARD] Block write operations khi chạy off-chain (eth_call)
   // Giống Ethereum block SSTORE trong STATICCALL
   if (this->isOffChain) {
-    bool isWriteOp =
-        (opCode == mvm::FunctionSelector::XAPIAN_V1_NEW_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_DELETE_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_ADD_TERM_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_INDEX_TEXT_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_SET_DATA_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_ADD_VALUE_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_ADD_FIELD_TO_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_SET_CONFIG_FILED ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_INDEX_DOCUMENT ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_ADD_FIELD ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_REMOVE_FIELD ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_UPDATE_FIELD ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_ADD_TAG ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_REMOVE_TAG ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_UPDATE_TAG ||
-         opCode == mvm::FunctionSelector::XAPIAN_V1_COMMIT);
+    bool isWriteOp = mvm::FunctionSelector::isXapianWriteOpcode(opCode);
     if (isWriteOp) {
       // Off-chain: trả về success giả (0x1) mà không thực sự ghi
       // Giúp smart contract không revert, nhưng data không bị ghi xuống DB

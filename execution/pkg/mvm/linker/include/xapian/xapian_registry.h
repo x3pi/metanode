@@ -94,7 +94,7 @@ public:
     void commitBufferForTxHash(const uint256_t* txHash);
 
     struct XapianManagerSnapshot {
-        std::shared_ptr<XapianManager> manager;
+        std::weak_ptr<XapianManager> manager;
         size_t log_count;
     };
     using XapianSnapshot = std::vector<XapianManagerSnapshot>;

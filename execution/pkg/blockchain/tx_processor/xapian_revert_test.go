@@ -28,6 +28,14 @@ func makeXapianNewDocData(t *testing.T, dbname, docContent string) []byte {
 	return data
 }
 
+func makeXapianGetOrCreateDbData(t *testing.T, dbname string) []byte {
+	a, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"getOrCreateDb","inputs":[{"name":"dbname","type":"string"}],"outputs":[{"type":"bool"}]}]`))
+	require.NoError(t, err)
+	data, err := a.Pack("getOrCreateDb", dbname)
+	require.NoError(t, err)
+	return data
+}
+
 func callXapianOp(memOffset int, data []byte) []any {
 	return confJoin(
 		confMemWrite(memOffset, data),
@@ -323,4 +331,57 @@ func TestXapianNestedRevert_TopLevelTxRevertClearsAll(t *testing.T) {
 	mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 	logs := mvm.ExportAllXapianLogs()
 	require.Empty(t, logs, "failed top-level transaction must not leave any Xapian writes")
+}
+
+// 7. Read-only Xapian operations interleaved with write operations and sub-call reverts:
+// Read-only calls must not take snapshots, must not record rollbacks, and must not disrupt
+// rollback ordering or state preservation for successful writes.
+func TestXapianNestedRevert_ReadOnlyOpInterleavedWithWrites(t *testing.T) {
+	cs, key, _, leader := setupXapianChainEnv(t)
+
+	outer := common.HexToAddress("0x1000000000000000000000000000000000000061")
+	child := common.HexToAddress("0x1000000000000000000000000000000000000062")
+
+	roData := makeXapianGetOrCreateDbData(t, "ro_db")
+	parentDoc1 := makeXapianNewDocData(t, "ro_db", "parent_ro_interleaved_1")
+	parentDoc2 := makeXapianNewDocData(t, "ro_db", "parent_ro_interleaved_2")
+	childDocRevert := makeXapianNewDocData(t, "ro_db", "child_ro_reverted")
+
+	// Child writes doc, does read-only op, then reverts
+	childCode := confScript(confJoin(
+		callXapianOp(0, childDocRevert),
+		callXapianOp(0, roData),
+		[]any{32, 512, "REVERT"},
+	)...)
+
+	// Parent does:
+	// 1. read-only op
+	// 2. write parentDoc1
+	// 3. read-only op
+	// 4. CALL child (child reverts)
+	// 5. read-only op
+	// 6. write parentDoc2
+	// 7. RETURN success
+	outerCode := confScript(confJoin(
+		callXapianOp(0, roData),
+		callXapianOp(0, parentDoc1),
+		callXapianOp(0, roData),
+		[]any{32, 512, 0, 0, 0, child, 60000, "CALL", "POP"},
+		callXapianOp(0, roData),
+		callXapianOp(0, parentDoc2),
+		[]any{0, 0, "RETURN"},
+	)...)
+
+	seedContract(t, cs, outer, big.NewInt(0), outerCode)
+	seedContract(t, cs, child, big.NewInt(0), childCode)
+
+	tx, r := executeTestTx(t, cs, key, outer, []common.Address{child}, leader)
+	require.Len(t, r, 1)
+	require.Equal(t, 0, int(r[0].Status()), "outer transaction must succeed")
+
+	mvm.CommitXapianTxBuffer(tx.Hash().Bytes())
+	logs := mvm.ExportAllXapianLogs()
+	require.NotEmpty(t, logs)
+	require.Contains(t, logs, outer.Hex(), "outer writes must be committed")
+	require.NotContains(t, logs, child.Hex(), "child writes must be discarded on revert")
 }
