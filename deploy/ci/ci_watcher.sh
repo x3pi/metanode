@@ -13,6 +13,10 @@
 
 set -u
 
+# Mặc định môi trường chạy CI là devnet (trừ khi được cấu hình rõ từ bên ngoài)
+export METANODE_ENV="${METANODE_ENV:-devnet}"
+export NODE_ENV="${NODE_ENV:-devnet}"
+
 REAL_SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd "$(dirname "${REAL_SCRIPT_PATH}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/ci_config.yaml"

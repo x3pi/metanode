@@ -198,7 +198,7 @@
 
     - name: Copy Parent Chain consensus keys
       ansible.builtin.copy:
-        src: "{{ (parent_keys_dir | default(playbook_dir ~ '/../../consensus/metanode/config')) }}/{{ item }}"
+        src: "{{ (parent_keys_dir | default(playbook_dir ~ '/parent_keys')) }}/{{ item }}"
         dest: "{{ node_data_dir }}/{{ item }}"
         mode: '0600'
         owner: "{{ ansible_user | default('abc') }}"
