@@ -84,6 +84,7 @@ void XapianRegistry::clearBufferForTxHash(const uint256_t* txHash) {
             std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
             manager_ptr->tx_buffers.erase(txHashStr);
             manager_ptr->tx_counters.erase(txHashStr);
+            manager_ptr->clear_writer_predecessors_for_tx(txHashStr);
         }
     }
     XapianManager::instances_mutex.unlock_shared();
@@ -130,6 +131,7 @@ void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
                 std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
                 manager_ptr->tx_buffers.erase(txHashStr);
                 manager_ptr->tx_counters.erase(txHashStr);
+                manager_ptr->clear_writer_predecessors_for_tx(txHashStr);
             }
         }
     }

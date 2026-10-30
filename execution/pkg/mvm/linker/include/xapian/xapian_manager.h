@@ -9,6 +9,7 @@
 #include <tbb/concurrent_hash_map.h>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <shared_mutex>
 #include <sstream>
 #include <condition_variable>
@@ -121,6 +122,9 @@ public:
   std::vector<std::string> get_terms(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash = nullptr, const uint256_t *writerHash = nullptr);
   DocumentInfo get_document(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash = nullptr, const uint256_t *writerHash = nullptr);
   Xapian::Document get_overlayed_document(const std::string& virtualDocIdStr, const uint256_t* txHash, const uint256_t* writerHash = nullptr, Xapian::Database* search_db = nullptr);
+  static std::string normalize_docid(const std::string& id);
+  void record_doc_writer_predecessor(const std::string& virtualDocId, const uint256_t& currentTxHash, const uint256_t& prevWriterHash);
+  void clear_writer_predecessors_for_tx(const std::string& txHashStr);
 
   // --- Commit and Change Tracking ---
   bool commit_changes();
@@ -222,6 +226,8 @@ private:
   std::unordered_map<std::string, XapianLog::ComprehensiveLog> tx_buffers;
   std::mutex tx_buffers_mutex;
   std::unordered_map<std::string, int> tx_counters; // Để sinh UUID tuần tự trong 1 giao dịch
+  std::unordered_map<std::string, std::string> doc_writer_predecessors;
+  std::unordered_map<std::string, std::vector<std::string>> tx_to_predecessor_keys;
   
   // Resolves a virtual docId (e.g. 256-bit UUID) to native Xapian uint32 docid
   Xapian::docid resolveVirtualDocId(const std::string& virtualDocIdStr, Xapian::Database* search_db = nullptr);

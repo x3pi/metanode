@@ -36,6 +36,38 @@ func makeXapianGetOrCreateDbData(t *testing.T, dbname string) []byte {
 	return data
 }
 
+func makeXapianSetDataData(t *testing.T, dbname string, docId *big.Int, dataStr string) []byte {
+	a, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"setDataDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"},{"name":"data","type":"string"}],"outputs":[{"type":"uint256"}]}]`))
+	require.NoError(t, err)
+	data, err := a.Pack("setDataDocument", dbname, docId, dataStr)
+	require.NoError(t, err)
+	return data
+}
+
+func makeXapianAddTermData(t *testing.T, dbname string, docId *big.Int, term string) []byte {
+	a, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"addTermDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"},{"name":"term","type":"string"}],"outputs":[{"type":"uint256"}]}]`))
+	require.NoError(t, err)
+	data, err := a.Pack("addTermDocument", dbname, docId, term)
+	require.NoError(t, err)
+	return data
+}
+
+func makeXapianGetDataData(t *testing.T, dbname string, docId *big.Int) []byte {
+	a, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"getDataDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"}],"outputs":[{"type":"string"}]}]`))
+	require.NoError(t, err)
+	data, err := a.Pack("getDataDocument", dbname, docId)
+	require.NoError(t, err)
+	return data
+}
+
+func makeXapianGetTermsData(t *testing.T, dbname string, docId *big.Int) []byte {
+	a, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"getTermsDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"}],"outputs":[{"type":"string[]"}]}]`))
+	require.NoError(t, err)
+	data, err := a.Pack("getTermsDocument", dbname, docId)
+	require.NoError(t, err)
+	return data
+}
+
 func callXapianOp(memOffset int, data []byte) []any {
 	return confJoin(
 		confMemWrite(memOffset, data),
@@ -323,12 +355,11 @@ func TestXapianNestedRevert_TopLevelTxRevertClearsAll(t *testing.T) {
 	seedContract(t, cs, outer, big.NewInt(0), outerCode)
 	seedContract(t, cs, child, big.NewInt(0), childCode)
 
-	tx, r := executeTestTx(t, cs, key, outer, []common.Address{child}, leader)
+	_, r := executeTestTx(t, cs, key, outer, []common.Address{child}, leader)
 	require.Len(t, r, 1)
 	require.NotEqual(t, 0, int(r[0].Status()), "top-level transaction must fail/revert")
 
-	// Since top-level tx failed, runtime calls ClearXapianTxBuffer
-	mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
+	// Top-level tx failed; runtime must have automatically cleared the buffer
 	logs := mvm.ExportAllXapianLogs()
 	require.Empty(t, logs, "failed top-level transaction must not leave any Xapian writes")
 }
@@ -433,4 +464,320 @@ func TestXapianStaticCallWriteProtection(t *testing.T) {
 	mvm.CommitXapianTxBuffer(tx.Hash().Bytes())
 	logs := mvm.ExportAllXapianLogs()
 	require.Empty(t, logs, "STATICCALL must not commit any Xapian writes")
+}
+
+// 9. Multiple writers in the same block modifying the same document:
+// Given a document created in a prior block containing "old_content",
+// within the SAME block:
+// - Tx A (nonce 2) updates document data to "new_content" via setDataDocument.
+// - Tx B (nonce 3) adds a term "tag_multi_writer" to the same document via addTermDocument.
+// - Tx C (nonce 4) reads the document data via getDataDocument.
+//
+// In-Memory Version Chaining ensures Tx C observes "new_content" (not stale "old_content" from disk).
+// After committing the block, disk persistence must contain both "new_content" and "tag_multi_writer".
+func TestXapianNestedRevert_MultipleWritersSameBlock(t *testing.T) {
+	cs, key, _, leader := setupXapianChainEnv(t)
+
+	sharedContract := common.HexToAddress("0x1000000000000000000000000000000000000088")
+	forwardCode := confScript(
+		"CALLDATASIZE", 0, 0, "CALLDATACOPY",
+		512, 1024, "CALLDATASIZE", 0, 0, common.HexToAddress("0x106"), 100000, "CALL", "POP",
+		"RETURNDATASIZE", 1024, "RETURN",
+	)
+	seedContract(t, cs, sharedContract, big.NewInt(0), forwardCode)
+
+	// Block 1: Setup document with "old_content"
+	newDocData := makeXapianNewDocData(t, "multi_writer_db", "old_content")
+	signer := eth.LatestSignerForChainID(big.NewInt(991))
+	signed0, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce:    1,
+		To:       &sharedContract,
+		Gas:      3000000,
+		GasPrice: big.NewInt(100000),
+		Value:    big.NewInt(0),
+		Data:     newDocData,
+	})
+	require.NoError(t, err)
+	tx0, err := transaction.NewTransactionFromEth(signed0)
+	require.NoError(t, err)
+
+	items0 := []grouptxns.Item{{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(tx0), sharedContract), Tx: tx0}}
+	_, r0, _, _ := ProcessTransactionsOptimistic(
+		context.Background(),
+		cs,
+		grouptxns.GroupTransactionsDeterministic(items0, cs.HasCode),
+		blankHeader(),
+		false,
+		false,
+		999,
+		leader,
+		false,
+	)
+	require.Len(t, r0, 1)
+	require.Equal(t, 0, int(r0[0].Status()))
+	require.Len(t, r0[0].Return(), 32, "setup transaction must return 32-byte docId")
+	docId := new(big.Int).SetBytes(r0[0].Return())
+	require.False(t, docId.Sign() == 0, "docId must be non-zero")
+
+	// Commit Block 1 to disk
+	mvm.CommitXapianTxBuffer(tx0.Hash().Bytes())
+	// Destroy in-memory instances to force fresh disk reload
+	mvm.DestroyAllXapianInstances()
+
+	// Block 2: Intra-block multi-writer scenario
+	setDataData := makeXapianSetDataData(t, "multi_writer_db", docId, "new_content")
+	addTermData := makeXapianAddTermData(t, "multi_writer_db", docId, "tag_multi_writer")
+	getDataData := makeXapianGetDataData(t, "multi_writer_db", docId)
+
+	signedA, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce:    2,
+		To:       &sharedContract,
+		Gas:      3000000,
+		GasPrice: big.NewInt(100000),
+		Value:    big.NewInt(0),
+		Data:     setDataData,
+	})
+	require.NoError(t, err)
+	txA, err := transaction.NewTransactionFromEth(signedA)
+	require.NoError(t, err)
+
+	signedB, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce:    3,
+		To:       &sharedContract,
+		Gas:      3000000,
+		GasPrice: big.NewInt(100000),
+		Value:    big.NewInt(0),
+		Data:     addTermData,
+	})
+	require.NoError(t, err)
+	txB, err := transaction.NewTransactionFromEth(signedB)
+	require.NoError(t, err)
+
+	signedC, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce:    4,
+		To:       &sharedContract,
+		Gas:      3000000,
+		GasPrice: big.NewInt(100000),
+		Value:    big.NewInt(0),
+		Data:     getDataData,
+	})
+	require.NoError(t, err)
+	txC, err := transaction.NewTransactionFromEth(signedC)
+	require.NoError(t, err)
+
+	items2 := []grouptxns.Item{
+		{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(txA), sharedContract), Tx: txA},
+		{ID: 1, Array: append(grouptxns.BuildDeterministicGroupAddrs(txB), sharedContract), Tx: txB},
+		{ID: 2, Array: append(grouptxns.BuildDeterministicGroupAddrs(txC), sharedContract), Tx: txC},
+	}
+
+	_, r2, _, _ := ProcessTransactionsOptimistic(
+		context.Background(),
+		cs,
+		grouptxns.GroupTransactionsDeterministic(items2, cs.HasCode),
+		blankHeader(),
+		false,
+		false,
+		999,
+		leader,
+		false,
+	)
+	require.Len(t, r2, 3)
+	require.Equal(t, 0, int(r2[0].Status()), "Tx A must succeed")
+	require.Equal(t, 0, int(r2[1].Status()), "Tx B must succeed")
+	require.Equal(t, 0, int(r2[2].Status()), "Tx C must succeed")
+
+	// Tx C must return "new_content", proving intra-block version chaining from Tx B back to Tx A!
+	getDataAbi, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"getDataDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"}],"outputs":[{"type":"string"}]}]`))
+	require.NoError(t, err)
+	var returnedContent string
+	err = getDataAbi.UnpackIntoInterface(&returnedContent, "getDataDocument", r2[2].Return())
+	require.NoError(t, err)
+	require.Equal(t, "new_content", returnedContent, "Tx C must observe latest writer's content ('new_content') instead of stale disk content ('old_content')")
+
+	// Commit Block 2
+	mvm.CommitXapianTxBufferBatch([][]byte{
+		txA.Hash().Bytes(),
+		txB.Hash().Bytes(),
+		txC.Hash().Bytes(),
+	})
+
+	// Destroy in-memory instances to force fresh reload from disk
+	mvm.DestroyAllXapianInstances()
+
+	// Block 3: Verify disk persistence (both data and term were written)
+	signedD, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce:    5,
+		To:       &sharedContract,
+		Gas:      3000000,
+		GasPrice: big.NewInt(100000),
+		Value:    big.NewInt(0),
+		Data:     getDataData,
+	})
+	require.NoError(t, err)
+	txD, err := transaction.NewTransactionFromEth(signedD)
+	require.NoError(t, err)
+
+	items3 := []grouptxns.Item{
+		{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(txD), sharedContract), Tx: txD},
+	}
+	_, r3, _, _ := ProcessTransactionsOptimistic(
+		context.Background(),
+		cs,
+		grouptxns.GroupTransactionsDeterministic(items3, cs.HasCode),
+		blankHeader(),
+		false,
+		false,
+		999,
+		leader,
+		false,
+	)
+	require.Len(t, r3, 1)
+	require.Equal(t, 0, int(r3[0].Status()))
+
+	var diskContent string
+	err = getDataAbi.UnpackIntoInterface(&diskContent, "getDataDocument", r3[0].Return())
+	require.NoError(t, err)
+	require.Equal(t, "new_content", diskContent, "Disk content after commit must be 'new_content'")
+
+	mvm.CommitXapianTxBuffer(txD.Hash().Bytes())
+}
+
+// 10. Multi-writer intra-block with an intermediate reverting transaction:
+// Given doc with "initial_val", Tx A writes "content_A" (succeeds), Tx B writes "content_B" (reverts),
+// Tx C reads doc (succeeds).
+// Tx C must read "content_A" (since Tx B's write was reverted).
+func TestXapianNestedRevert_MultiWriterWithInterleavedRevert(t *testing.T) {
+	cs, key, _, leader := setupXapianChainEnv(t)
+
+	sharedContract := common.HexToAddress("0x1000000000000000000000000000000000000098")
+	forwardCode := confScript(
+		"CALLDATASIZE", 0, 0, "CALLDATACOPY",
+		512, 1024, "CALLDATASIZE", 0, 0, common.HexToAddress("0x106"), 100000, "CALL", "POP",
+		"RETURNDATASIZE", 1024, "RETURN",
+	)
+	seedContract(t, cs, sharedContract, big.NewInt(0), forwardCode)
+
+	revertCaller := common.HexToAddress("0x1000000000000000000000000000000000000099")
+	revertCallerCode := confScript(
+		"CALLDATASIZE", 0, 0, "CALLDATACOPY",
+		512, 1024, "CALLDATASIZE", 0, 0, sharedContract, 100000, "CALL", "POP",
+		32, 1024, "REVERT",
+	)
+	seedContract(t, cs, revertCaller, big.NewInt(0), revertCallerCode)
+
+	// Block 1: Initial document
+	newDocData := makeXapianNewDocData(t, "revert_multi_db", "initial_val")
+	signer := eth.LatestSignerForChainID(big.NewInt(991))
+	signed0, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce:    1,
+		To:       &sharedContract,
+		Gas:      3000000,
+		GasPrice: big.NewInt(100000),
+		Value:    big.NewInt(0),
+		Data:     newDocData,
+	})
+	require.NoError(t, err)
+	tx0, err := transaction.NewTransactionFromEth(signed0)
+	require.NoError(t, err)
+
+	items0 := []grouptxns.Item{{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(tx0), sharedContract), Tx: tx0}}
+	_, r0, _, _ := ProcessTransactionsOptimistic(
+		context.Background(),
+		cs,
+		grouptxns.GroupTransactionsDeterministic(items0, cs.HasCode),
+		blankHeader(),
+		false,
+		false,
+		999,
+		leader,
+		false,
+	)
+	require.Len(t, r0, 1)
+	require.Equal(t, 0, int(r0[0].Status()))
+	docId := new(big.Int).SetBytes(r0[0].Return())
+	require.False(t, docId.Sign() == 0)
+
+	mvm.CommitXapianTxBuffer(tx0.Hash().Bytes())
+	mvm.DestroyAllXapianInstances()
+
+	// Block 2: Tx A writes "content_A", Tx B writes "content_B" and reverts via caller, Tx C reads
+	setDataA := makeXapianSetDataData(t, "revert_multi_db", docId, "content_A")
+	setDataB := makeXapianSetDataData(t, "revert_multi_db", docId, "content_B")
+	getDataData := makeXapianGetDataData(t, "revert_multi_db", docId)
+
+	signedA, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce:    2,
+		To:       &sharedContract,
+		Gas:      3000000,
+		GasPrice: big.NewInt(100000),
+		Value:    big.NewInt(0),
+		Data:     setDataA,
+	})
+	require.NoError(t, err)
+	txA, err := transaction.NewTransactionFromEth(signedA)
+	require.NoError(t, err)
+
+	signedB, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce:    3,
+		To:       &revertCaller,
+		Gas:      3000000,
+		GasPrice: big.NewInt(100000),
+		Value:    big.NewInt(0),
+		Data:     setDataB,
+	})
+	require.NoError(t, err)
+	txB, err := transaction.NewTransactionFromEth(signedB)
+	require.NoError(t, err)
+
+	signedC, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce:    4,
+		To:       &sharedContract,
+		Gas:      3000000,
+		GasPrice: big.NewInt(100000),
+		Value:    big.NewInt(0),
+		Data:     getDataData,
+	})
+	require.NoError(t, err)
+	txC, err := transaction.NewTransactionFromEth(signedC)
+	require.NoError(t, err)
+
+	items2 := []grouptxns.Item{
+		{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(txA), sharedContract), Tx: txA},
+		{ID: 1, Array: append(grouptxns.BuildDeterministicGroupAddrs(txB), revertCaller, sharedContract), Tx: txB},
+		{ID: 2, Array: append(grouptxns.BuildDeterministicGroupAddrs(txC), sharedContract), Tx: txC},
+	}
+
+	_, r2, _, _ := ProcessTransactionsOptimistic(
+		context.Background(),
+		cs,
+		grouptxns.GroupTransactionsDeterministic(items2, cs.HasCode),
+		blankHeader(),
+		false,
+		false,
+		999,
+		leader,
+		false,
+	)
+	require.Len(t, r2, 3)
+	require.Equal(t, 0, int(r2[0].Status()), "Tx A must succeed")
+	require.NotEqual(t, 0, int(r2[1].Status()), "Tx B must revert")
+	require.Equal(t, 0, int(r2[2].Status()), "Tx C must succeed")
+
+	// Tx C must read "content_A" because Tx B reverted
+	getDataAbi, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"getDataDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"}],"outputs":[{"type":"string"}]}]`))
+	require.NoError(t, err)
+	var returnedContent string
+	err = getDataAbi.UnpackIntoInterface(&returnedContent, "getDataDocument", r2[2].Return())
+	require.NoError(t, err)
+	require.Equal(t, "content_A", returnedContent, "Tx C must observe 'content_A' since Tx B reverted")
+
+	// Commit Tx A & Tx C, Clear Tx B
+	mvm.CommitXapianTxBufferBatch([][]byte{
+		txA.Hash().Bytes(),
+		txC.Hash().Bytes(),
+	})
+	mvm.ClearXapianTxBuffer(txB.Hash().Bytes())
+
+	mvm.DestroyAllXapianInstances()
 }

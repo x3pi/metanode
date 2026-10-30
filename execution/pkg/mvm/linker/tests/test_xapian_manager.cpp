@@ -621,5 +621,71 @@ TEST_SUITE("XapianManager") {
         // Reverting with expired weak_ptr must be completely safe
         CHECK_NOTHROW(registry.revertToSnapshotForTxHash(&txHash, snap));
     }
+
+    TEST_CASE("MULTI-WRITER OVERLAY: Intra-block version chaining across multiple transactions") {
+        try {
+            init_xapian_test_env();
+            mvm::Address addr = 980000005;
+            std::string db_name = "multi_writer_chain_db";
+            auto manager = create_test_manager(db_name, addr, true);
+            REQUIRE(manager != nullptr);
+
+            // 1. Existing document on disk (from earlier block)
+            uint256_t txDisk = next_fake_tx_hash();
+            std::string docId = commit_write(txDisk, [&]() {
+                return manager->new_document("old_disk_data", 1, nullptr, &txDisk);
+            });
+            REQUIRE(!docId.empty());
+            manager->commit_changes();
+
+            // Verify disk state
+            CHECK(manager->get_data(docId, 1) == "old_disk_data");
+
+            // 2. Intra-block multi-writers
+            // Tx A: updates data to "new_data"
+            uint256_t txA = next_fake_tx_hash();
+            manager->set_data(docId, "new_data", 2, nullptr, &txA);
+
+            // Tx B: adds term "multi_tag" and links predecessor to Tx A
+            uint256_t txB = next_fake_tx_hash();
+            manager->add_term(docId, "multi_tag", 2, nullptr, &txB);
+            manager->record_doc_writer_predecessor(docId, txB, txA);
+
+            // 3. Tx C reads: must see Tx A's data ("new_data") AND Tx B's term ("multi_tag")
+            uint256_t txC = next_fake_tx_hash();
+            std::string readData = manager->get_data(docId, 2, &txC, &txB);
+            CHECK(readData == "new_data");
+
+            std::vector<std::string> readTerms = manager->get_terms(docId, 2, &txC, &txB);
+            bool hasTerm = false;
+            for (const auto& t : readTerms) {
+                if (t == "multi_tag") hasTerm = true;
+            }
+            CHECK(hasTerm);
+
+            // 4. Tx D deletes document in same block, linked to Tx B
+            uint256_t txD = next_fake_tx_hash();
+            manager->delete_document(docId, 2, nullptr, &txD);
+            manager->record_doc_writer_predecessor(docId, txD, txB);
+
+            // 5. Tx E reads after deletion: get_data must return empty (DocNotFoundError caught)
+            uint256_t txE = next_fake_tx_hash();
+            CHECK(manager->get_data(docId, 2, &txE, &txD).empty());
+
+            // 6. Cleanup
+            registry.clearBufferForTxHash(&txA);
+            registry.clearBufferForTxHash(&txB);
+            registry.clearBufferForTxHash(&txD);
+        } catch (const Xapian::Error& e) {
+            std::cerr << "Caught Xapian::Error: " << e.get_description() << std::endl;
+            FAIL(e.get_description());
+        } catch (const std::exception& e) {
+            std::cerr << "Caught std::exception: " << e.what() << std::endl;
+            FAIL(e.what());
+        } catch (...) {
+            std::cerr << "Caught unknown exception" << std::endl;
+            FAIL("unknown error");
+        }
+    }
 }
 
