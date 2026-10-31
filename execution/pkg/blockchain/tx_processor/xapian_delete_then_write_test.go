@@ -1,7 +1,8 @@
 package tx_processor
+
 import (
 	"context"
-	
+
 	"math/big"
 	"strings"
 	"testing"
@@ -9,13 +10,11 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	eth "github.com/ethereum/go-ethereum/core/types"
-	
-	
-	
+
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
-	
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -69,23 +68,22 @@ func TestReviewV1DeleteThenAddTermSameTxPersistence(t *testing.T) {
 
 	// Block 2: Intra-block multi-writer scenario on 0x107
 	deleteABI, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"deleteDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"}],"outputs":[{"type":"uint256"}]}]`))
- require.NoError(t, err)
- setDataData, err := deleteABI.Pack("deleteDocument", "v1_multi_db", docId)
- require.NoError(t, err)
+	require.NoError(t, err)
+	setDataData, err := deleteABI.Pack("deleteDocument", "v1_multi_db", docId)
+	require.NoError(t, err)
 	addTermData := makeXapianV1AddTermData(t, "v1_multi_db", docId, "v1_tag_chain")
 	getDataData := makeXapianV1GetDataData(t, "v1_multi_db", docId)
- normal := confScript("CALLDATASIZE", 0, 0, "CALLDATACOPY", 512, 1024, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP", "RETURNDATASIZE", 1024, "RETURN")
- prefix := confScript("CALLDATASIZE", []byte{0x15}, 0, "JUMPI")
- prefix = confScript("CALLDATASIZE", []byte{0x15}, len(prefix)+len(normal), "JUMPI")
- special := confScript([]byte{0x5b})
- special = append(special, confScript(confMemWrite(0, setDataData)...)...)
- special = append(special, confScript(32, 1024, len(setDataData), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP")...)
- special = append(special, confScript(confMemWrite(0, addTermData)...)...)
- special = append(special, confScript(32, 1024, len(addTermData), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP", "STOP")...)
- runtime := append(prefix, normal...)
- runtime = append(runtime, special...)
- seedContract(t, cs, sharedContractV1, big.NewInt(0), runtime)
-
+	normal := confScript("CALLDATASIZE", 0, 0, "CALLDATACOPY", 512, 1024, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP", "RETURNDATASIZE", 1024, "RETURN")
+	prefix := confScript("CALLDATASIZE", []byte{0x15}, 0, "JUMPI")
+	prefix = confScript("CALLDATASIZE", []byte{0x15}, len(prefix)+len(normal), "JUMPI")
+	special := confScript([]byte{0x5b})
+	special = append(special, confScript(confMemWrite(0, setDataData)...)...)
+	special = append(special, confScript(32, 1024, len(setDataData), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP")...)
+	special = append(special, confScript(confMemWrite(0, addTermData)...)...)
+	special = append(special, confScript(32, 1024, len(addTermData), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP", "STOP")...)
+	runtime := append(prefix, normal...)
+	runtime = append(runtime, special...)
+	seedContract(t, cs, sharedContractV1, big.NewInt(0), runtime)
 
 	signedA, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
 		Nonce:    2,
@@ -145,14 +143,13 @@ func TestReviewV1DeleteThenAddTermSameTxPersistence(t *testing.T) {
 	require.Equal(t, 0, int(r2[1].Status()), "Tx B must succeed")
 	require.Equal(t, 0, int(r2[2].Status()), "Tx C must succeed")
 
-	// Tx C must return []byte("v1_new_bytes")
+	// Tx C must return empty bytes as document was deleted
 	getDataAbi, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"getDataDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"}],"outputs":[{"type":"bytes"}]}]`))
 	require.NoError(t, err)
 	var returnedBytes []byte
 	err = getDataAbi.UnpackIntoInterface(&returnedBytes, "getDataDocument", r2[2].Return())
 	require.NoError(t, err)
 	require.Empty(t, returnedBytes, "Deleted content must not survive in overlay")
- t.Logf("before commit content=%q", returnedBytes)
 
 	// Commit Block 2
 	mvm.CommitXapianTxBufferBatch([][]byte{
@@ -197,7 +194,6 @@ func TestReviewV1DeleteThenAddTermSameTxPersistence(t *testing.T) {
 	var diskBytes []byte
 	err = getDataAbi.UnpackIntoInterface(&diskBytes, "getDataDocument", r3[0].Return())
 	require.NoError(t, err)
-	t.Logf("after commit content=%q", diskBytes)
 	require.Equal(t, returnedBytes, diskBytes, "Commit must preserve the content observed during execution")
 
 	mvm.CommitXapianTxBuffer(txD.Hash().Bytes())
@@ -448,4 +444,3 @@ func TestReviewV1DeleteThenAddTermThenDeleteSameTxPersistence(t *testing.T) {
 
 	mvm.CommitXapianTxBuffer(txC.Hash().Bytes())
 }
-
