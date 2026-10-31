@@ -589,10 +589,11 @@ bool XapianManager::delete_document(const std::string& virtualDocId, uint256_t b
 std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::valueno slot, const std::string &value, bool isSerialise, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
-        XapianLog::AddValueData logData;
+        XapianLog::AddValueData logData{};
         logData.docid = virtualDocId;
         logData.slot = slot;
         logData.value = value;
+        logData.is_serialised = isSerialise;
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::ADD_VALUE;
         entry.data = logData;

@@ -790,5 +790,68 @@ TEST_SUITE("XapianManager") {
             FAIL(e.what());
         }
     }
+
+    TEST_CASE("AddValue - is_serialised flag preservation and serialization") {
+        try {
+            init_xapian_test_env();
+            auto manager = create_test_manager("val_flag_test", 554433, true);
+            REQUIRE(manager != nullptr);
+
+            uint256_t tx1 = next_fake_tx_hash();
+            std::string docId = commit_write(tx1, [&]() {
+                return manager->new_document("doc_for_val", 1, nullptr, &tx1);
+            });
+            REQUIRE(!docId.empty());
+            manager->commit_changes();
+
+            // 1. Call add_value with isSerialise = false
+            uint256_t txFalse = next_fake_tx_hash();
+            commit_write(txFalse, [&]() {
+                return manager->add_value(docId, 1, "raw_val", false, 2, nullptr, &txFalse);
+            });
+
+            auto logsFalse = manager->getChangeLogs();
+            REQUIRE(logsFalse.size() == 1);
+            REQUIRE(logsFalse[0].op == XapianLog::Operation::ADD_VALUE);
+            auto dataFalse = std::get<XapianLog::AddValueData>(logsFalse[0].data);
+            CHECK(dataFalse.is_serialised == false);
+
+            // Serialize and deserialize to verify no uninitialized memory
+            std::vector<uint8_t> serFalse = manager->comprehensive_log.serialize();
+            auto deserFalse = XapianLog::ComprehensiveLog::deserialize(serFalse);
+            REQUIRE(deserFalse.has_value());
+            REQUIRE(deserFalse->xapian_doc_logs.size() == 1);
+            auto deserDataFalse = std::get<XapianLog::AddValueData>(deserFalse->xapian_doc_logs[0].data);
+            CHECK(deserDataFalse.is_serialised == false);
+
+            manager->commit_changes();
+
+            // 2. Call add_value with isSerialise = true
+            uint256_t txTrue = next_fake_tx_hash();
+            commit_write(txTrue, [&]() {
+                return manager->add_value(docId, 2, "serialised_val", true, 3, nullptr, &txTrue);
+            });
+
+            auto logsTrue = manager->getChangeLogs();
+            REQUIRE(logsTrue.size() == 1);
+            REQUIRE(logsTrue[0].op == XapianLog::Operation::ADD_VALUE);
+            auto dataTrue = std::get<XapianLog::AddValueData>(logsTrue[0].data);
+            CHECK(dataTrue.is_serialised == true);
+
+            // Serialize and deserialize
+            std::vector<uint8_t> serTrue = manager->comprehensive_log.serialize();
+            auto deserTrue = XapianLog::ComprehensiveLog::deserialize(serTrue);
+            REQUIRE(deserTrue.has_value());
+            REQUIRE(deserTrue->xapian_doc_logs.size() == 1);
+            auto deserDataTrue = std::get<XapianLog::AddValueData>(deserTrue->xapian_doc_logs[0].data);
+            CHECK(deserDataTrue.is_serialised == true);
+
+            manager->commit_changes();
+        } catch (const Xapian::Error& e) {
+            FAIL(e.get_description());
+        } catch (const std::exception& e) {
+            FAIL(e.what());
+        }
+    }
 }
 
