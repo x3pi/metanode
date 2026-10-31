@@ -2,7 +2,7 @@ package tx_processor
 
 import (
 	"context"
-
+	"crypto/ecdsa"
 	"math/big"
 	"strings"
 	"testing"
@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	eth "github.com/ethereum/go-ethereum/core/types"
 
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
@@ -18,23 +19,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestReviewV1DeleteThenAddTermSameTxPersistence(t *testing.T) {
-	cs, key, _, leader := setupXapianChainEnv(t)
-
-	sharedContractV1 := common.HexToAddress("0x1000000000000000000000000000000000000188")
+func setupXapianV1ForwarderAndDocument(
+	t *testing.T,
+	cs *blockchain.ChainState,
+	key *ecdsa.PrivateKey,
+	leader common.Address,
+	sharedContract common.Address,
+	dbname string,
+	initialData []byte,
+) *big.Int {
 	forwardCodeV1 := confScript(
 		"CALLDATASIZE", 0, 0, "CALLDATACOPY",
 		512, 1024, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 100000, "CALL", "POP",
 		"RETURNDATASIZE", 1024, "RETURN",
 	)
-	seedContract(t, cs, sharedContractV1, big.NewInt(0), forwardCodeV1)
+	seedContract(t, cs, sharedContract, big.NewInt(0), forwardCodeV1)
 
-	// Block 1: Setup document with "v1_old_bytes"
-	newDocData := makeXapianV1NewDocData(t, "v1_multi_db", []byte("v1_old_bytes"))
+	newDocData := makeXapianV1NewDocData(t, dbname, initialData)
 	signer := eth.LatestSignerForChainID(big.NewInt(991))
 	signed0, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
 		Nonce:    1,
-		To:       &sharedContractV1,
+		To:       &sharedContract,
 		Gas:      3000000,
 		GasPrice: big.NewInt(100000),
 		Value:    big.NewInt(0),
@@ -44,7 +49,7 @@ func TestReviewV1DeleteThenAddTermSameTxPersistence(t *testing.T) {
 	tx0, err := transaction.NewTransactionFromEth(signed0)
 	require.NoError(t, err)
 
-	items0 := []grouptxns.Item{{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(tx0), sharedContractV1), Tx: tx0}}
+	items0 := []grouptxns.Item{{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(tx0), sharedContract), Tx: tx0}}
 	_, r0, _, _ := ProcessTransactionsOptimistic(
 		context.Background(),
 		cs,
@@ -62,23 +67,40 @@ func TestReviewV1DeleteThenAddTermSameTxPersistence(t *testing.T) {
 	docId := new(big.Int).SetBytes(r0[0].Return())
 	require.False(t, docId.Sign() == 0, "docId must be non-zero")
 
-	// Commit Block 1 to disk
+	// Commit Block 1 to disk and clear instances
 	mvm.CommitXapianTxBuffer(tx0.Hash().Bytes())
 	mvm.DestroyAllXapianInstances()
 
-	// Block 2: Intra-block multi-writer scenario on 0x107
+	return docId
+}
+
+func makeXapianV1DeleteDocData(t *testing.T, dbname string, docId *big.Int) []byte {
 	deleteABI, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"deleteDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"}],"outputs":[{"type":"uint256"}]}]`))
 	require.NoError(t, err)
-	setDataData, err := deleteABI.Pack("deleteDocument", "v1_multi_db", docId)
+	delData, err := deleteABI.Pack("deleteDocument", dbname, docId)
 	require.NoError(t, err)
+	return delData
+}
+
+func TestXapianV1_DeleteThenAddTermSameTxPersistence(t *testing.T) {
+	cs, key, _, leader := setupXapianChainEnv(t)
+	sharedContractV1 := common.HexToAddress("0x1000000000000000000000000000000000000188")
+	signer := eth.LatestSignerForChainID(big.NewInt(991))
+
+	// Block 1: Setup document with "v1_old_bytes"
+	docId := setupXapianV1ForwarderAndDocument(t, cs, key, leader, sharedContractV1, "v1_multi_db", []byte("v1_old_bytes"))
+
+	// Block 2: Intra-block multi-writer scenario on 0x107: deleteDocument then addTermDocument
+	delDocData := makeXapianV1DeleteDocData(t, "v1_multi_db", docId)
 	addTermData := makeXapianV1AddTermData(t, "v1_multi_db", docId, "v1_tag_chain")
 	getDataData := makeXapianV1GetDataData(t, "v1_multi_db", docId)
+
 	normal := confScript("CALLDATASIZE", 0, 0, "CALLDATACOPY", 512, 1024, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP", "RETURNDATASIZE", 1024, "RETURN")
 	prefix := confScript("CALLDATASIZE", []byte{0x15}, 0, "JUMPI")
 	prefix = confScript("CALLDATASIZE", []byte{0x15}, len(prefix)+len(normal), "JUMPI")
 	special := confScript([]byte{0x5b})
-	special = append(special, confScript(confMemWrite(0, setDataData)...)...)
-	special = append(special, confScript(32, 1024, len(setDataData), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP")...)
+	special = append(special, confScript(confMemWrite(0, delDocData)...)...)
+	special = append(special, confScript(32, 1024, len(delDocData), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP")...)
 	special = append(special, confScript(confMemWrite(0, addTermData)...)...)
 	special = append(special, confScript(32, 1024, len(addTermData), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP", "STOP")...)
 	runtime := append(prefix, normal...)
@@ -199,56 +221,16 @@ func TestReviewV1DeleteThenAddTermSameTxPersistence(t *testing.T) {
 	mvm.CommitXapianTxBuffer(txD.Hash().Bytes())
 }
 
-func TestReviewV1DeleteThenSetDataSameTxPersistence(t *testing.T) {
+func TestXapianV1_DeleteThenSetDataSameTxPersistence(t *testing.T) {
 	cs, key, _, leader := setupXapianChainEnv(t)
-
 	sharedContractV1 := common.HexToAddress("0x1000000000000000000000000000000000000188")
-	forwardCodeV1 := confScript(
-		"CALLDATASIZE", 0, 0, "CALLDATACOPY",
-		512, 1024, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 100000, "CALL", "POP",
-		"RETURNDATASIZE", 1024, "RETURN",
-	)
-	seedContract(t, cs, sharedContractV1, big.NewInt(0), forwardCodeV1)
+	signer := eth.LatestSignerForChainID(big.NewInt(991))
 
 	// Block 1: Setup document with "v1_old_bytes"
-	newDocData := makeXapianV1NewDocData(t, "v1_multi_db", []byte("v1_old_bytes"))
-	signer := eth.LatestSignerForChainID(big.NewInt(991))
-	signed0, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
-		Nonce:    1,
-		To:       &sharedContractV1,
-		Gas:      3000000,
-		GasPrice: big.NewInt(100000),
-		Value:    big.NewInt(0),
-		Data:     newDocData,
-	})
-	require.NoError(t, err)
-	tx0, err := transaction.NewTransactionFromEth(signed0)
-	require.NoError(t, err)
-
-	items0 := []grouptxns.Item{{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(tx0), sharedContractV1), Tx: tx0}}
-	_, r0, _, _ := ProcessTransactionsOptimistic(
-		context.Background(),
-		cs,
-		grouptxns.GroupTransactionsDeterministic(items0, cs.HasCode),
-		blankHeader(),
-		false,
-		false,
-		999,
-		leader,
-		false,
-	)
-	require.Len(t, r0, 1)
-	require.Equal(t, 0, int(r0[0].Status()))
-	docId := new(big.Int).SetBytes(r0[0].Return())
-
-	mvm.CommitXapianTxBuffer(tx0.Hash().Bytes())
-	mvm.DestroyAllXapianInstances()
+	docId := setupXapianV1ForwarderAndDocument(t, cs, key, leader, sharedContractV1, "v1_multi_db", []byte("v1_old_bytes"))
 
 	// Block 2: Same tx executes deleteDocument then setDataDocument("v1_brand_new_bytes")
-	deleteABI, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"deleteDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"}],"outputs":[{"type":"uint256"}]}]`))
-	require.NoError(t, err)
-	delData, err := deleteABI.Pack("deleteDocument", "v1_multi_db", docId)
-	require.NoError(t, err)
+	delDocData := makeXapianV1DeleteDocData(t, "v1_multi_db", docId)
 	setDataBytes := makeXapianV1SetDataData(t, "v1_multi_db", docId, []byte("v1_brand_new_bytes"))
 	getDataData := makeXapianV1GetDataData(t, "v1_multi_db", docId)
 
@@ -256,8 +238,8 @@ func TestReviewV1DeleteThenSetDataSameTxPersistence(t *testing.T) {
 	prefix := confScript("CALLDATASIZE", []byte{0x15}, 0, "JUMPI")
 	prefix = confScript("CALLDATASIZE", []byte{0x15}, len(prefix)+len(normal), "JUMPI")
 	special := confScript([]byte{0x5b})
-	special = append(special, confScript(confMemWrite(0, delData)...)...)
-	special = append(special, confScript(32, 1024, len(delData), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP")...)
+	special = append(special, confScript(confMemWrite(0, delDocData)...)...)
+	special = append(special, confScript(32, 1024, len(delDocData), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP")...)
 	special = append(special, confScript(confMemWrite(0, setDataBytes)...)...)
 	special = append(special, confScript(32, 1024, len(setDataBytes), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP", "STOP")...)
 	runtime := append(prefix, normal...)
@@ -327,44 +309,16 @@ func TestReviewV1DeleteThenSetDataSameTxPersistence(t *testing.T) {
 	mvm.CommitXapianTxBuffer(txC.Hash().Bytes())
 }
 
-func TestReviewV1DeleteThenAddTermThenDeleteSameTxPersistence(t *testing.T) {
+func TestXapianV1_DeleteThenAddTermThenDeleteSameTxPersistence(t *testing.T) {
 	cs, key, _, leader := setupXapianChainEnv(t)
-
 	sharedContractV1 := common.HexToAddress("0x1000000000000000000000000000000000000188")
-	forwardCodeV1 := confScript(
-		"CALLDATASIZE", 0, 0, "CALLDATACOPY",
-		512, 1024, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 100000, "CALL", "POP",
-		"RETURNDATASIZE", 1024, "RETURN",
-	)
-	seedContract(t, cs, sharedContractV1, big.NewInt(0), forwardCodeV1)
+	signer := eth.LatestSignerForChainID(big.NewInt(991))
 
 	// Block 1: Setup document with "v1_old_bytes"
-	newDocData := makeXapianV1NewDocData(t, "v1_multi_db", []byte("v1_old_bytes"))
-	signer := eth.LatestSignerForChainID(big.NewInt(991))
-	signed0, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
-		Nonce: 1, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: newDocData,
-	})
-	require.NoError(t, err)
-	tx0, err := transaction.NewTransactionFromEth(signed0)
-	require.NoError(t, err)
-
-	items0 := []grouptxns.Item{{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(tx0), sharedContractV1), Tx: tx0}}
-	_, r0, _, _ := ProcessTransactionsOptimistic(
-		context.Background(), cs, grouptxns.GroupTransactionsDeterministic(items0, cs.HasCode),
-		blankHeader(), false, false, 999, leader, false,
-	)
-	require.Len(t, r0, 1)
-	require.Equal(t, 0, int(r0[0].Status()))
-	docId := new(big.Int).SetBytes(r0[0].Return())
-
-	mvm.CommitXapianTxBuffer(tx0.Hash().Bytes())
-	mvm.DestroyAllXapianInstances()
+	docId := setupXapianV1ForwarderAndDocument(t, cs, key, leader, sharedContractV1, "v1_multi_db", []byte("v1_old_bytes"))
 
 	// Block 2: Same tx executes deleteDocument -> addTermDocument -> deleteDocument
-	deleteABI, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"deleteDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"}],"outputs":[{"type":"uint256"}]}]`))
-	require.NoError(t, err)
-	delData, err := deleteABI.Pack("deleteDocument", "v1_multi_db", docId)
-	require.NoError(t, err)
+	delDocData := makeXapianV1DeleteDocData(t, "v1_multi_db", docId)
 	addTermData := makeXapianV1AddTermData(t, "v1_multi_db", docId, "v1_temp_tag")
 	getDataData := makeXapianV1GetDataData(t, "v1_multi_db", docId)
 
@@ -372,12 +326,12 @@ func TestReviewV1DeleteThenAddTermThenDeleteSameTxPersistence(t *testing.T) {
 	prefix := confScript("CALLDATASIZE", []byte{0x15}, 0, "JUMPI")
 	prefix = confScript("CALLDATASIZE", []byte{0x15}, len(prefix)+len(normal), "JUMPI")
 	special := confScript([]byte{0x5b})
-	special = append(special, confScript(confMemWrite(0, delData)...)...)
-	special = append(special, confScript(32, 1024, len(delData), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP")...)
+	special = append(special, confScript(confMemWrite(0, delDocData)...)...)
+	special = append(special, confScript(32, 1024, len(delDocData), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP")...)
 	special = append(special, confScript(confMemWrite(0, addTermData)...)...)
 	special = append(special, confScript(32, 1024, len(addTermData), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP")...)
-	special = append(special, confScript(confMemWrite(0, delData)...)...)
-	special = append(special, confScript(32, 1024, len(delData), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP", "STOP")...)
+	special = append(special, confScript(confMemWrite(0, delDocData)...)...)
+	special = append(special, confScript(32, 1024, len(delDocData), 0, 0, common.HexToAddress("0x107"), 60000, "CALL", "POP", "STOP")...)
 	runtime := append(prefix, normal...)
 	runtime = append(runtime, special...)
 	seedContract(t, cs, sharedContractV1, big.NewInt(0), runtime)
