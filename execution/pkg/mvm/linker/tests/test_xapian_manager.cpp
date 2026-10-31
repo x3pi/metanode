@@ -687,5 +687,171 @@ TEST_SUITE("XapianManager") {
             FAIL("unknown error");
         }
     }
+
+    TEST_CASE("Delete then write operations in same transaction - No resurrection") {
+        try {
+            init_xapian_test_env();
+            auto manager = create_test_manager("del_write_test", 112233, true);
+            REQUIRE(manager != nullptr);
+
+            // 1. Setup document with initial data, term, and value
+            uint256_t tx1 = next_fake_tx_hash();
+            std::string docId = commit_write(tx1, [&]() {
+                return manager->new_document("v1_old_bytes", 1, nullptr, &tx1);
+            });
+            REQUIRE(!docId.empty());
+
+            uint256_t txSetup = next_fake_tx_hash();
+            commit_write(txSetup, [&]() {
+                manager->add_term(docId, "old_tag", 1, nullptr, &txSetup);
+                return manager->add_value(docId, 5, "old_val", false, 1, nullptr, &txSetup);
+            });
+            manager->commit_changes();
+
+            // Verify disk state
+            CHECK(manager->get_data(docId, 1) == "v1_old_bytes");
+            CHECK(manager->get_value(docId, 5, false, 1) == "old_val");
+
+            // 2. Scenario A: Same tx does delete_document THEN add_term
+            uint256_t txSame = next_fake_tx_hash();
+            manager->delete_document(docId, 2, nullptr, &txSame);
+            manager->add_term(docId, "new_tag", 2, nullptr, &txSame);
+
+            // Pre-commit read: data must be empty!
+            CHECK(manager->get_data(docId, 2, &txSame).empty());
+
+            // Commit transaction to disk
+            registry.commitBufferForTxHash(&txSame);
+            manager->commit_changes();
+
+            // Post-commit read from disk: data must STILL be empty, old terms/values wiped, new term present!
+            CHECK(manager->get_data(docId, 2).empty());
+            std::vector<std::string> terms = manager->get_terms(docId, 2);
+            bool has_new_tag = false;
+            bool has_old_tag = false;
+            for (const auto& t : terms) {
+                if (t == "new_tag") has_new_tag = true;
+                if (t == "old_tag") has_old_tag = true;
+            }
+            CHECK(has_new_tag == true);
+            CHECK(has_old_tag == false);
+
+            // 3. Scenario B: Same tx does delete_document THEN add_value
+            uint256_t txVal = next_fake_tx_hash();
+            manager->delete_document(docId, 3, nullptr, &txVal);
+            manager->add_value(docId, 7, "new_val_7", false, 3, nullptr, &txVal);
+
+            // Pre-commit
+            CHECK(manager->get_value(docId, 7, false, 3, &txVal) == "new_val_7");
+            CHECK(manager->get_data(docId, 3, &txVal).empty());
+
+            // Commit
+            registry.commitBufferForTxHash(&txVal);
+            manager->commit_changes();
+
+            // Post-commit
+            CHECK(manager->get_value(docId, 7, false, 3) == "new_val_7");
+            CHECK(manager->get_value(docId, 5, false, 3).empty()); // old_val gone
+            CHECK(manager->get_data(docId, 3).empty());
+
+            // 4. Scenario C: Same tx does delete_document THEN set_data
+            uint256_t txSet = next_fake_tx_hash();
+            manager->delete_document(docId, 4, nullptr, &txSet);
+            manager->set_data(docId, "brand_new_data", 4, nullptr, &txSet);
+
+            // Pre-commit
+            CHECK(manager->get_data(docId, 4, &txSet) == "brand_new_data");
+
+            // Commit
+            registry.commitBufferForTxHash(&txSet);
+            manager->commit_changes();
+
+            // Post-commit
+            CHECK(manager->get_data(docId, 4) == "brand_new_data");
+
+            // 5. Scenario D: Delete then AddTerm then Delete in same tx -> stays deleted!
+            uint256_t txDelAgain = next_fake_tx_hash();
+            manager->delete_document(docId, 5, nullptr, &txDelAgain);
+            manager->add_term(docId, "temp_tag", 5, nullptr, &txDelAgain);
+            manager->delete_document(docId, 5, nullptr, &txDelAgain);
+
+            // Pre-commit: must be deleted
+            CHECK(manager->get_data(docId, 5, &txDelAgain).empty());
+
+            // Commit
+            registry.commitBufferForTxHash(&txDelAgain);
+            manager->commit_changes();
+
+            // Post-commit: must remain deleted
+            CHECK(manager->get_data(docId, 5).empty());
+        } catch (const Xapian::Error& e) {
+            FAIL(e.get_description());
+        } catch (const std::exception& e) {
+            FAIL(e.what());
+        }
+    }
+
+    TEST_CASE("AddValue - is_serialised flag preservation and serialization") {
+        try {
+            init_xapian_test_env();
+            auto manager = create_test_manager("val_flag_test", 554433, true);
+            REQUIRE(manager != nullptr);
+
+            uint256_t tx1 = next_fake_tx_hash();
+            std::string docId = commit_write(tx1, [&]() {
+                return manager->new_document("doc_for_val", 1, nullptr, &tx1);
+            });
+            REQUIRE(!docId.empty());
+            manager->commit_changes();
+
+            // 1. Call add_value with isSerialise = false
+            uint256_t txFalse = next_fake_tx_hash();
+            commit_write(txFalse, [&]() {
+                return manager->add_value(docId, 1, "raw_val", false, 2, nullptr, &txFalse);
+            });
+
+            auto logsFalse = manager->getChangeLogs();
+            REQUIRE(logsFalse.size() == 1);
+            REQUIRE(logsFalse[0].op == XapianLog::Operation::ADD_VALUE);
+            auto dataFalse = std::get<XapianLog::AddValueData>(logsFalse[0].data);
+            CHECK(dataFalse.is_serialised == false);
+
+            // Serialize and deserialize to verify no uninitialized memory
+            std::vector<uint8_t> serFalse = manager->comprehensive_log.serialize();
+            auto deserFalse = XapianLog::ComprehensiveLog::deserialize(serFalse);
+            REQUIRE(deserFalse.has_value());
+            REQUIRE(deserFalse->xapian_doc_logs.size() == 1);
+            auto deserDataFalse = std::get<XapianLog::AddValueData>(deserFalse->xapian_doc_logs[0].data);
+            CHECK(deserDataFalse.is_serialised == false);
+
+            manager->commit_changes();
+
+            // 2. Call add_value with isSerialise = true
+            uint256_t txTrue = next_fake_tx_hash();
+            commit_write(txTrue, [&]() {
+                return manager->add_value(docId, 2, "serialised_val", true, 3, nullptr, &txTrue);
+            });
+
+            auto logsTrue = manager->getChangeLogs();
+            REQUIRE(logsTrue.size() == 1);
+            REQUIRE(logsTrue[0].op == XapianLog::Operation::ADD_VALUE);
+            auto dataTrue = std::get<XapianLog::AddValueData>(logsTrue[0].data);
+            CHECK(dataTrue.is_serialised == true);
+
+            // Serialize and deserialize
+            std::vector<uint8_t> serTrue = manager->comprehensive_log.serialize();
+            auto deserTrue = XapianLog::ComprehensiveLog::deserialize(serTrue);
+            REQUIRE(deserTrue.has_value());
+            REQUIRE(deserTrue->xapian_doc_logs.size() == 1);
+            auto deserDataTrue = std::get<XapianLog::AddValueData>(deserTrue->xapian_doc_logs[0].data);
+            CHECK(deserDataTrue.is_serialised == true);
+
+            manager->commit_changes();
+        } catch (const Xapian::Error& e) {
+            FAIL(e.get_description());
+        } catch (const std::exception& e) {
+            FAIL(e.what());
+        }
+    }
 }
 
