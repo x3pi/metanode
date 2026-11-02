@@ -28,6 +28,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/explorer"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
+	"github.com/meta-node-blockchain/meta-node/pkg/helppay"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
@@ -207,6 +208,9 @@ type App struct {
 	committeeKeyStatusMu sync.RWMutex
 	committeeKeyStatus   string // "ok", "mismatch", "not_validator", "unknown"
 	committeeKeyWarn     string
+
+	// HelpPay sponsor wallet manager
+	helpPayManager *helppay.Manager
 }
 
 // CommitteeKeyStatus returns the current validator committee key status ("ok", "mismatch", "not_validator", "unknown") and any warning message.
@@ -895,6 +899,25 @@ func (app *App) initProcessors() {
 	tx_processor.InitRollupSystemHandler(rollupSystemEventDispatcherFunc(func(store rollup.Store, stateDB tx_processor.AccountStateAccessor, data []byte) error {
 		return handleRollupSystemEvent(app, store, stateDB, data)
 	}), app.accountRegistryHandler)
+
+	// Initialize and wire HelpPay Sponsor Wallet Manager
+	hpCfg := app.config.HelpPay
+	if hpCfg.ConfigFile == "" {
+		hpCfg.ConfigFile = config.JoinPathIfNotURL(app.config.Databases.RootPath, "helppay_wallets.json")
+	}
+	app.helpPayManager = helppay.NewManager(
+		hpCfg,
+		app.chainState,
+		app.transactionProcessor,
+		app.config.ChainId,
+		app.config.Databases.RootPath,
+	)
+	app.transactionProcessor.SetHelpPayManager(app.helpPayManager)
+	app.helpPayManager.SetSyncBroadcaster(raftfeed.BroadcastHelpPaySync)
+	app.helpPayManager.SetStateFetcher(raftfeed.FetchHelpPayClusterState)
+	raftfeed.RegisterHelpPaySyncHandler(app.helpPayManager.ApplySync)
+	raftfeed.RegisterHelpPayStateHandler(app.helpPayManager.GetState)
+	app.helpPayManager.Start()
 }
 
 // handleRollupSystemEvent applies a system event deterministically.
@@ -1229,6 +1252,10 @@ func (app *App) Stop() {
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	// Phase 1: Stop non-critical services that don't need the context
+
+	if app.helpPayManager != nil {
+		app.helpPayManager.Stop()
+	}
 
 	if app.pruningManager != nil {
 		app.pruningManager.Stop()

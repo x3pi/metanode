@@ -138,7 +138,17 @@ type TransactionProcessor struct {
 	// Buffered channel queue for processing incoming TXs from clients.
 	// Decouples network handler from slow virtual execution/pool addition.
 	injectionQueue chan injectionRequest
+
+	// HelpPay sponsor wallet manager
+	helpPayManager IHelpPayManager
 }
+
+// IHelpPayManager allows transaction processors to invoke free gas top-ups before pool admission.
+type IHelpPayManager interface {
+	IsEnabled() bool
+	CheckAndTopUp(recipient common.Address) error
+}
+
 
 // NewTransactionProcessor creates a new TransactionProcessor
 func NewTransactionProcessor(
@@ -245,6 +255,12 @@ func (tp *TransactionProcessor) SetRawEthConverter(converter RawEthTxConverter) 
 	tp.rawEthConverter = converter
 }
 
+// SetHelpPayManager configures the sponsor wallet manager.
+func (tp *TransactionProcessor) SetHelpPayManager(h IHelpPayManager) {
+	tp.helpPayManager = h
+}
+
+
 // defaultRawEthConverter is used as fallback when no custom converter is injected.
 func (tp *TransactionProcessor) defaultRawEthConverter(rawEth []byte) (types.Transaction, *e_types.Transaction, error) {
 	ethTx := new(e_types.Transaction)
@@ -303,6 +319,20 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 	if tx == nil {
 		logger.Error("executeAndAddTx: tx is nil and no rawBody")
 		return
+	}
+
+	// HelpPay sponsor top-up check before admitting tx to pool:
+	if tp.helpPayManager != nil && tp.helpPayManager.IsEnabled() {
+		fromAddr := tx.FromAddress()
+		if err := tp.helpPayManager.CheckAndTopUp(fromAddr); err != nil {
+			logger.Warn("executeAndAddTx: topUpFunc failed for %s: %v", fromAddr.Hex(), err)
+			errHash := tx.Hash()
+			if ethTxHash != (common.Hash{}) {
+				errHash = ethTxHash
+			}
+			tp.sendTransactionError(req.conn, errHash, -32603, fmt.Sprintf("topUpFunc failed: %v", err), nil, req.msgID)
+			return
+		}
 	}
 
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_UNMARSHALED", "Transaction successfully unmarshaled from client request")

@@ -335,6 +335,14 @@ func NewServer(app *App) *http.ServeMux {
 		logger.SyncFileLog()
 		os.Exit(1)
 	}
+
+	// HelpPay sponsor wallet management API
+	helppayAPI := NewHelpPayAPI(app)
+	if err := server.RegisterName("helppay", helppayAPI); err != nil {
+		logger.Error("[FATAL] Không thể đăng ký API helppay: %v", err)
+		logger.SyncFileLog()
+		os.Exit(1)
+	}
 	// CORS middleware — allows wildcard origin on browser-facing public RPC and
 	// health endpoints. Admin, debug, and pipeline endpoints do NOT get CORS headers to prevent
 	// cross-site attacks (e.g. browser-based admin API abuse via CSRF).

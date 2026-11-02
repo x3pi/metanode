@@ -392,6 +392,13 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 		return common.Hash{}, formatGethError(err)
 	}
 
+	fromAddr := metaTx.FromAddress()
+	if api.App.helpPayManager != nil && api.App.helpPayManager.IsEnabled() {
+		if err := api.App.helpPayManager.CheckAndTopUp(fromAddr); err != nil {
+			return common.Hash{}, formatGethError(fmt.Errorf("topUpFunc failed: %w", err))
+		}
+	}
+
 	ethTxHash := ethTx.Hash()
 	metaTxHash := metaTx.Hash()
 

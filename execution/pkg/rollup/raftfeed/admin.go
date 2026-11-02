@@ -1,6 +1,7 @@
 package raftfeed
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -9,21 +10,61 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/raft"
+	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 )
 
 // Operator surface of a replica (plan C4): status and membership/leadership operations over the same internal,
 // HMAC-authenticated endpoint as the submit channel. The `rollup-cluster` tool drives it; every operation
 // re-checks its own safety conditions here, so a client that skips its pre-checks still cannot break the cluster.
 const (
-	adminStatusPath   = "/raft/v1/admin/status"
-	adminTransferPath = "/raft/v1/admin/transfer"
-	adminAddPath      = "/raft/v1/admin/add"
-	adminRemovePath   = "/raft/v1/admin/remove"
-	adminSnapHoldPath = "/raft/v1/admin/snapshots"
+	adminStatusPath      = "/raft/v1/admin/status"
+	adminTransferPath    = "/raft/v1/admin/transfer"
+	adminAddPath         = "/raft/v1/admin/add"
+	adminRemovePath      = "/raft/v1/admin/remove"
+	adminSnapHoldPath    = "/raft/v1/admin/snapshots"
+	adminHelpPaySyncPath = "/raft/v1/admin/helppay_sync"
+)
 
+// HelpPaySyncHandler is called when a helppay sync message is received from a peer.
+type HelpPaySyncHandler func(body []byte) error
+
+// HelpPayStateHandler is called when a peer queries the current helppay state.
+type HelpPayStateHandler func() ([]byte, error)
+
+var (
+	globalHelpPaySyncHandler  atomic.Pointer[HelpPaySyncHandler]
+	globalHelpPayStateHandler atomic.Pointer[HelpPayStateHandler]
+)
+
+// RegisterHelpPaySyncHandler registers the handler for incoming helppay sync messages.
+func RegisterHelpPaySyncHandler(h HelpPaySyncHandler) {
+	globalHelpPaySyncHandler.Store(&h)
+}
+
+// RegisterHelpPayStateHandler registers the handler for incoming helppay state queries.
+func RegisterHelpPayStateHandler(h HelpPayStateHandler) {
+	globalHelpPayStateHandler.Store(&h)
+}
+
+func getHelpPaySyncHandler() HelpPaySyncHandler {
+	if p := globalHelpPaySyncHandler.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+func getHelpPayStateHandler() HelpPayStateHandler {
+	if p := globalHelpPayStateHandler.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+const (
 	// promoteMaxLag: a non-voter may become a voter only when its applied index is within this many entries of the
 	// leader's commit index ("counts toward the majority only after it caught up").
 	promoteMaxLag = 64
@@ -129,6 +170,7 @@ func (n *Node) adminHandler(op func(w http.ResponseWriter, r *http.Request)) htt
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		op(w, r)
 	}
 }
@@ -190,6 +232,39 @@ func (n *Node) registerAdmin(mux *http.ServeMux) {
 			return
 		}
 		respond(w, n.RemoveMember(r.URL.Query().Get("id")))
+	}))
+	mux.HandleFunc(adminHelpPaySyncPath, n.adminHandler(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			if h := getHelpPayStateHandler(); h != nil {
+				data, err := h()
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, adminResult{Error: err.Error()})
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(data)
+				return
+			}
+			writeJSON(w, http.StatusOK, adminResult{OK: true})
+			return
+		}
+		if r.Method == http.MethodPost {
+			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, adminResult{Error: err.Error()})
+				return
+			}
+			if h := getHelpPaySyncHandler(); h != nil {
+				if err := h(body); err != nil {
+					writeJSON(w, http.StatusInternalServerError, adminResult{Error: err.Error()})
+					return
+				}
+			}
+			writeJSON(w, http.StatusOK, adminResult{OK: true})
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}))
 }
 
@@ -407,3 +482,88 @@ func (n *Node) HoldSnapshots(on bool) error {
 	}
 	return nil
 }
+
+// BroadcastHelpPaySync sends a helppay sync message to all peers in the Raft cluster.
+func (n *Node) BroadcastHelpPaySync(payload []byte) error {
+	if n == nil {
+		return nil
+	}
+	var lastErr error
+	for _, peer := range n.cfg.Peers {
+		if peer.ID == n.cfg.NodeID {
+			continue
+		}
+		addr := peer.ForwardAddress
+		if addr == "" {
+			addr = peer.Address
+		}
+		if addr == "" {
+			continue
+		}
+		c := &AdminClient{
+			Secret:   n.secret,
+			SenderID: n.cfg.NodeID,
+			HTTP:     n.client,
+			Now:      n.now,
+		}
+		code, _, respBody, err := c.do(http.MethodPost, addr, adminHelpPaySyncPath, "", payload)
+		if err != nil {
+			logger.Warn("⚠️ [RAFT] HelpPay sync to peer %s (%s) failed: %v", peer.ID, addr, err)
+			lastErr = err
+		} else if code != http.StatusOK {
+			logger.Warn("⚠️ [RAFT] HelpPay sync to peer %s (%s) returned HTTP %d: %s", peer.ID, addr, code, string(respBody))
+			lastErr = fmt.Errorf("peer %s returned HTTP %d", peer.ID, code)
+		} else {
+			logger.Info("✅ [RAFT] HelpPay sync to peer %s (%s) succeeded", peer.ID, addr)
+		}
+	}
+	return lastErr
+}
+
+// BroadcastHelpPaySync broadcasts a helppay sync message via the global Node instance if running.
+func BroadcastHelpPaySync(payload []byte) error {
+	if n := GetNode(); n != nil {
+		return n.BroadcastHelpPaySync(payload)
+	}
+	return nil
+}
+
+// FetchHelpPayClusterState queries available peers in the Raft cluster to retrieve the current HelpPay state.
+func (n *Node) FetchHelpPayClusterState() ([]byte, error) {
+	if n == nil {
+		return nil, errors.New("raft node is nil")
+	}
+	for _, peer := range n.cfg.Peers {
+		if peer.ID == n.cfg.NodeID {
+			continue
+		}
+		addr := peer.ForwardAddress
+		if addr == "" {
+			addr = peer.Address
+		}
+		if addr == "" {
+			continue
+		}
+		c := &AdminClient{
+			Secret:   n.secret,
+			SenderID: n.cfg.NodeID,
+			HTTP:     n.client,
+			Now:      n.now,
+		}
+		code, _, respBody, err := c.do(http.MethodGet, addr, adminHelpPaySyncPath, "", nil)
+		if err == nil && code == http.StatusOK && len(respBody) > 0 {
+			logger.Info("📥 [RAFT] Successfully fetched HelpPay state from peer %s (%s)", peer.ID, addr)
+			return respBody, nil
+		}
+	}
+	return nil, errors.New("no peer responded with HelpPay state")
+}
+
+// FetchHelpPayClusterState queries available peers in the Raft cluster using the global node instance.
+func FetchHelpPayClusterState() ([]byte, error) {
+	if n := GetNode(); n != nil {
+		return n.FetchHelpPayClusterState()
+	}
+	return nil, errors.New("raft cluster node not initialized")
+}
+
