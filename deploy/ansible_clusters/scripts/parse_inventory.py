@@ -178,7 +178,8 @@ def parse_inventory(file_path):
         'tcp_nodes': all_tcp_nodes,
         'raft_nodes': all_raft_nodes,
         'forward_nodes': all_fwd_nodes,
-        'clusters': clusters_data
+        'clusters': clusters_data,
+        'parent_public_host': p_host
     }
 
 def export_tmp_files(info, rpc_nodes_file=None):
@@ -334,8 +335,15 @@ def export_tmp_files(info, rpc_nodes_file=None):
 
 def print_summary(info):
     print("⚙️ RPC Endpoints (IP & Port):")
+    p_pub = info.get('parent_public_host', '')
     for k, v in info['rpc_nodes'].items():
-        print(f"  • {k}: {v}")
+        note = ""
+        if 'parent' in k and p_pub and p_pub not in ('127.0.0.1', 'localhost'):
+            p_node = info.get('parent_nodes', {}).get(k, {})
+            port = p_node.get('rpc_port', '')
+            if port and p_pub != p_node.get('ip'):
+                note = f" (🌐 WAN: http://{p_pub}:{port})"
+        print(f"  • {k}: {v}{note}")
 
     if info['ws_nodes']:
         print("\n🔌 WebSocket Endpoints (WS URL):")

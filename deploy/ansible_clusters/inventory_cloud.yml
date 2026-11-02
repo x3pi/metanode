@@ -1,0 +1,143 @@
+all:
+  vars:
+    ansible_user: "abc"
+    # Installation and base directories
+    install_dir: "/opt/metanode"
+    ansible_become_pass: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          65613662306161623262323261666634383463643634316435323130393161353365626264366439
+          6531343563633934653737326666326236646264333633310a663166656463623130636166636430
+          31643730663637366266643538303731306162353865333134613239396462613630326634653230
+          3766376562613538380a656162396132383334383439376366363837303361343630346466393038
+          3331
+    ansible_ssh_pass: "{{ ansible_become_pass }}"
+    parent_chain_rpc_token: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          61343163633535393364663836396636303434626538393236613932396635616335333337313331
+          3634636163323462333436356435623631636365353861630a656565653634366436656134393930
+          32633339653339303638346565643235353364356466666138636464316266663764356434626461
+          3466396165383037370a343435623535633739386437313533376531343836376339393735353939
+          31346238616636343064356562353538343831616131653934663032366262613139613262316262
+          30643132393436386438353363376563653230336266623035303038336636313038303365656234
+          39363631316535383230393466623131646632613665353062633931383462363663306638366231
+          39373238353564376536
+
+    # EVM Chain IDs
+    chain_id: 991
+    parent_chain_id: 991
+
+    # New Parent Chain RPC Port & Host (Wan IP 27.74.204.118)
+    parent_chain_rpc_port: 28601
+    parent_chain_host: "27.74.204.118"
+
+    # Raft shared configuration
+    raft_secret_file: "/opt/metanode/raft_secret_cloud.key"
+
+    # Devnet settings
+    devnet_sender_bls_pubkey: "0xb518c65d0f5f23858fd28f0473cb1fbaccc8aaa960880aee841585861f245abc0c4e4dce5b3693cfe60da4902d9484bc"
+    parent_open_cluster_registration: true
+    parent_allowed_clusters: []
+    parent_allow_deposit_to_float: true
+    bls_conservation_mode: "warn"
+    bls_conservation_interval_seconds: 300
+    telegram_bot_token: "8869403115:AAH3sXCSIraKvS-9NGwKZeW4bAVZNGoRDUI"
+    telegram_chat_id: "-1004439274978"
+    # Tự động mở firewall (UFW) cho các port mới khi deploy
+    open_ports: true
+    metanode_env: "devnet"
+
+  children:
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ── Parent Chain MỚI (Chạy trên máy LAN nội bộ, dải cổng mới 28601..28604)
+    # ═══════════════════════════════════════════════════════════════════════════
+    parent_chain_nodes:
+      hosts:
+        parent_prod_0:
+          ansible_host: 192.168.1.234
+          ansible_connection: local
+          parent_node_id: 0
+          parent_http_port: 28601
+          parent_p2p_port: 29001
+          peer_rpc_port: 29501
+          metrics_port: 29601
+          node_data_dir: "/opt/metanode/parent_prod_0"
+
+        parent_prod_1:
+          ansible_host: 192.168.1.231
+          parent_node_id: 1
+          parent_http_port: 28602
+          parent_p2p_port: 29002
+          peer_rpc_port: 29502
+          metrics_port: 29602
+          node_data_dir: "/opt/metanode/parent_prod_1"
+
+        parent_prod_2:
+          ansible_host: 192.168.1.230
+          parent_node_id: 2
+          parent_http_port: 28603
+          parent_p2p_port: 29003
+          peer_rpc_port: 29503
+          metrics_port: 29603
+          node_data_dir: "/opt/metanode/parent_prod_2"
+
+        parent_prod_3:
+          ansible_host: 192.168.1.231
+          parent_node_id: 3
+          parent_http_port: 28604
+          parent_p2p_port: 29004
+          peer_rpc_port: 29504
+          metrics_port: 29604
+          node_data_dir: "/opt/metanode/parent_prod_3"
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ── Private Chain MỚI (Chạy trên 3 máy chủ Cloud, kết nối về Parent LAN)
+    # ═══════════════════════════════════════════════════════════════════════════
+    exec_clusters:
+      children:
+        cluster_cloud:
+          vars:
+            cluster_id: 1
+            cluster_name: "pri_cloud"
+            consensus_mode: "raft"
+            ansible_user: "stackops"
+            ansible_port: 234
+            ansible_become_pass: !vault |
+                  $ANSIBLE_VAULT;1.1;AES256
+                  64373738613262613533383830383737633732356530636630633831643131643739386238363866
+                  3264653465663335396338366630383835373234646264310a306466313162373266663130376138
+                  31306565326565663863393063353662373965336264636338353330316139303732356666313035
+                  3138343437323937640a653962613737653261316531313033343764363265326263386339636637
+                  3432
+            ansible_ssh_pass: "{{ ansible_become_pass }}"
+            # Kết nối tới 4 node của Parent Chain mới qua IP Public văn phòng
+            standalone_chain: false
+            account_gate: "parent_registered"
+            parent_chain_url: "http://27.74.204.118:28601"
+            parent_chain_urls: "http://27.74.204.118:28601,http://27.74.204.118:28602,http://27.74.204.118:28603,http://27.74.204.118:28604"
+            # Cấu hình mạng Cloud (NAT 0.0.0.0)
+            raft_bind_address: "0.0.0.0:7110"
+            forward_bind_address: "0.0.0.0:7210"
+            rpc_port: 8750
+            p2p_port: 4200
+            raft_port: 7110
+            forward_port: 7210
+            raft_secret_source: "pri_1a"
+            node_data_dir: "/opt/metanode/pri_cloud"
+            # Khóa Sequencer của Private Chain Cloud
+            private_key: "3c89b21f980145be702a0b7713d298ea547849b291a8e97f480371db68e64c23"
+            address: "0x5a075aC7e35CD05E331eaD878d52CbfBE5f8d732"
+            bls_priv: "3c89b21f980145be702a0b7713d298ea547849b291a8e97f480371db68e64c23"
+            bls_pubkey: "0x8235afcbc534265b024e8fdbf74807b2444d3e32f8fc1c9067c6146f26add2b6b7b7641fe48c27d2a6dbc63a4ed25e17"
+          hosts:
+            pri_1a:
+              ansible_host: 61.28.233.146
+              node_id: "pri_r1"
+              raft_bootstrap: true
+            pri_1b:
+              ansible_host: 116.118.92.254
+              node_id: "pri_r2"
+              raft_bootstrap: false
+            pri_1c:
+              ansible_host: 49.213.71.191
+              node_id: "pri_r3"
+              raft_bootstrap: false

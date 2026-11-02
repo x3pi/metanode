@@ -156,7 +156,7 @@ export async function checkNodeStatus(target) {
     const start = performance.now();
 
     // Parent Chain uses HTTP REST endpoint /status
-    if (isParent || rpcUrl.includes('18601') || rpcUrl.includes('31601') || rpcUrl.includes('8547')) {
+    if (isParent || rpcUrl.includes('18601') || rpcUrl.includes('31601') || rpcUrl.includes('8547') || rpcUrl.includes('28601')) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 3500);
       const res = await fetch(`${rpcUrl}/status`, { signal: controller.signal });

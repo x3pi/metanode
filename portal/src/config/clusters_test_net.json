@@ -1,0 +1,33 @@
+{
+  "defaultHost": "192.168.1.234",
+  "defaultClusterId": "exec1_replica1",
+  "clusters": [
+    {
+      "id": "exec1_replica1",
+      "name": "Exec 1 - Replica 1 (192.168.1.234:8747)",
+      "chainId": 991,
+      "rpcUrl": "http://192.168.1.234:8747",
+      "clusterKey": "0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128",
+      "isExec": true,
+      "accountGate": true
+    },
+    {
+      "id": "exec1_replica2",
+      "name": "Exec 1 - Replica 2 (192.168.1.231:8748)",
+      "chainId": 991,
+      "rpcUrl": "http://192.168.1.231:8748",
+      "clusterKey": "0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128",
+      "isExec": true,
+      "accountGate": true
+    },
+    {
+      "id": "exec1_replica3",
+      "name": "Exec 1 - Replica 3 (192.168.1.230:8749)",
+      "chainId": 991,
+      "rpcUrl": "http://192.168.1.230:8749",
+      "clusterKey": "0x944488b425d29336c7913a3b45946adee6b9bfbd0838c6c8f422f4b4277066f26b3da0530c9f9865e6e534a05ae6c128",
+      "isExec": true,
+      "accountGate": true
+    }
+  ]
+}
