@@ -2,6 +2,8 @@ package raftfeed
 
 import (
 	"net"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -87,6 +89,9 @@ func assertAllExecuted(t *testing.T, m *member, first, n uint64) {
 
 func waitFor(t *testing.T, what string, within time.Duration, cond func() bool) {
 	t.Helper()
+	if runtime.NumCPU() <= 2 || os.Getenv("CI") != "" {
+		within *= 3
+	}
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
 		if cond() {

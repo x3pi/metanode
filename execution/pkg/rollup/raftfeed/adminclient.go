@@ -332,7 +332,11 @@ func (c *AdminClient) TransferLeader(members []Member, to string, dryRun bool) (
 		return steps, err
 	}
 	tm, _ := memberByID(members, to)
-	deadline := time.Now().Add(10 * time.Second)
+	waitTransfer := 10 * time.Second
+	if c.CatchUpWait >= 60*time.Second {
+		waitTransfer = 30 * time.Second
+	}
+	deadline := time.Now().Add(waitTransfer)
 	for time.Now().Before(deadline) {
 		if s, err := c.Status(tm.AdminAddr); err == nil && s.State == "Leader" {
 			return steps, nil
@@ -349,7 +353,11 @@ func (c *AdminClient) AddReplica(members []Member, nm Member, dryRun bool) ([]st
 	all := append(append([]Member(nil), members...), nm)
 	rep := c.Check(members)
 	if rep.Leader == "" || !rep.QuorumOK {
-		deadline := time.Now().Add(5 * time.Second)
+		waitQuorum := 5 * time.Second
+		if c.CatchUpWait >= 60*time.Second {
+			waitQuorum = 15 * time.Second
+		}
+		deadline := time.Now().Add(waitQuorum)
 		for time.Now().Before(deadline) {
 			time.Sleep(50 * time.Millisecond)
 			rep = c.Check(members)
@@ -466,7 +474,11 @@ func (c *AdminClient) sameChainAt(all []Member, lm, nm Member, ns Status) error 
 func (c *AdminClient) RemoveReplica(members []Member, id string, transferFirst, dryRun bool) ([]string, error) {
 	rep := c.Check(members)
 	if rep.Leader == "" {
-		deadline := time.Now().Add(5 * time.Second)
+		waitLeader := 5 * time.Second
+		if c.CatchUpWait >= 60*time.Second {
+			waitLeader = 15 * time.Second
+		}
+		deadline := time.Now().Add(waitLeader)
 		for time.Now().Before(deadline) {
 			time.Sleep(50 * time.Millisecond)
 			rep = c.Check(members)
