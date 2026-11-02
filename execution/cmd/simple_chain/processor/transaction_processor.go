@@ -149,7 +149,6 @@ type IHelpPayManager interface {
 	CheckAndTopUp(recipient common.Address) error
 }
 
-
 // NewTransactionProcessor creates a new TransactionProcessor
 func NewTransactionProcessor(
 	messageSender network.MessageSender,
@@ -259,7 +258,6 @@ func (tp *TransactionProcessor) SetRawEthConverter(converter RawEthTxConverter) 
 func (tp *TransactionProcessor) SetHelpPayManager(h IHelpPayManager) {
 	tp.helpPayManager = h
 }
-
 
 // defaultRawEthConverter is used as fallback when no custom converter is injected.
 func (tp *TransactionProcessor) defaultRawEthConverter(rawEth []byte) (types.Transaction, *e_types.Transaction, error) {

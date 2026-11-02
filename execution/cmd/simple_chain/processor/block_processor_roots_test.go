@@ -217,4 +217,3 @@ func TestPrecomputeRoots_FallbackOnError(t *testing.T) {
 	assert.Equal(t, fallbackTxsRoot, cleanPrecomputed.TxsRoot)
 	assert.Equal(t, fallbackReceiptsRoot, cleanPrecomputed.ReceiptsRoot)
 }
-

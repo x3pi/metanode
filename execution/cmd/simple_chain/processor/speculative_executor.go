@@ -183,7 +183,6 @@ type inFlightSession struct {
 	cancel context.CancelFunc
 }
 
-
 // NewSpeculativeExecutor creates a new SpeculativeExecutor
 func NewSpeculativeExecutor(bp *BlockProcessor) *SpeculativeExecutor {
 	return &SpeculativeExecutor{

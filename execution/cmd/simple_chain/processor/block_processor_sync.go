@@ -4,11 +4,12 @@ package processor
 
 // Go build cache invalidation comment: Force relink of Rust FFI library
 import (
-	runtime_debug "runtime/debug"
 	"fmt"
+	runtime_debug "runtime/debug"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
@@ -21,7 +22,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
-	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 )
 
@@ -1100,11 +1100,11 @@ PROCESS_BLOCK:
 		if commitUs > goSendBatchTimeUs {
 			rustMempoolProposeUs = commitUs - goSendBatchTimeUs
 		}
-		
+
 		currentDispatchMs := epochData.GetRustDispatchTimestampMs()
 		prevDispatchMs := pipeline.LastRustDispatchTimestampMs.Swap(currentDispatchMs)
 		var rustDagConsensusUs uint64
-		if prevDispatchMs > 0 && currentDispatchMs > prevDispatchMs && (currentDispatchMs - prevDispatchMs) < 5000 {
+		if prevDispatchMs > 0 && currentDispatchMs > prevDispatchMs && (currentDispatchMs-prevDispatchMs) < 5000 {
 			rustDagConsensusUs = (currentDispatchMs - prevDispatchMs) * 1000
 		} else {
 			// Fallback: estimate consensus as time from first batch sent to dispatch (prevents inter-round idle time pollution)
@@ -1112,15 +1112,15 @@ PROCESS_BLOCK:
 				rustDagConsensusUs = dispatchUs - goSendBatchTimeUs
 			}
 		}
-		
+
 		goReceiveUs := uint64(time.Now().UnixMicro())
 		var rustDeliveryFFIUs uint64
 		if goReceiveUs > dispatchUs {
 			rustDeliveryFFIUs = goReceiveUs - dispatchUs
 		}
-		
+
 		pipeline.GlobalBlockTraceStore.SetRustConsensusDetailedTime(*currentBlockNumber, int64(rustMempoolProposeUs), int64(rustDagConsensusUs), int64(rustDeliveryFFIUs))
-		
+
 		clientBatchUs := pipeline.LastClientBatchProcessingMs.Swap(0) * 1000 // Convert ms to us and reset
 		pipeline.GlobalBlockTraceStore.SetClientBatchProcessingTime(*currentBlockNumber, clientBatchUs)
 	}

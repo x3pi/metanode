@@ -31,7 +31,7 @@ func TestManager_AddRemoveWallet(t *testing.T) {
 	cfg := config.HelpPayConfig{
 		Enabled:     true,
 		MinBalance:  "10000000000000000",
-		ExtraAmount: "50000000000000000",
+		ExtraAmount: "100000000000000000",
 		ConfigFile:  filepath.Join(tmpDir, "helppay_test.json"),
 	}
 
@@ -150,7 +150,7 @@ func TestManager_AdminAndToggle(t *testing.T) {
 	cfg := config.HelpPayConfig{
 		Enabled:        false,
 		MinBalance:     "10000000000000000",
-		ExtraAmount:    "50000000000000000",
+		ExtraAmount:    "100000000000000000",
 		AdminAddresses: []string{adminAddr1.Hex()},
 		AdminAddress:   adminAddr2.Hex(),
 		ConfigFile:     filepath.Join(tmpDir, "helppay_admin_test.json"),
@@ -257,4 +257,3 @@ func TestManager_StartupCatchUpSync(t *testing.T) {
 	assert.Equal(t, "25000000000000000", mgr2.MinBalance().String())
 	assert.Equal(t, "65000000000000000", mgr2.ExtraAmount().String())
 }
-

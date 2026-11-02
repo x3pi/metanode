@@ -482,4 +482,3 @@ func TestMarshalBlockToMapWithGas_Performance_5000Txs(t *testing.T) {
 	t.Logf("MarshalBlockToMapWithGas for %d full txs took %v (average %v/tx)", n, elapsed, elapsed/time.Duration(n))
 	assert.Less(t, elapsed, 500*time.Millisecond, "marshaling 5000 in-memory transactions must be fast (<500ms)")
 }
-

@@ -2,13 +2,13 @@ package main
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
-	"crypto/subtle"
 	"net/http"
 	"os"
 	"regexp"
@@ -111,8 +111,8 @@ type BlockGasInfo struct {
 
 // MetaAPI xử lý các RPC calls của Ethereum
 type MetaAPI struct {
-	App                  *App // Export field Client
-	events               *filters.EventSystem
+	App    *App // Export field Client
+	events *filters.EventSystem
 
 	// ── Cached results (avoid allocations on hot path) ──
 	cachedChainId        hexutil.Big  // Never changes — set once at init

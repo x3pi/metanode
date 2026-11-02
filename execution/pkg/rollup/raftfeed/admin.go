@@ -83,21 +83,21 @@ type ServerInfo struct {
 
 // Status is what a replica reports about itself (SEQUENCER schema 1.10, `check`).
 type Status struct {
-	NodeID            string       `json:"node_id"`
-	State             string       `json:"state"`
-	LeaderID          string       `json:"leader_id"`
-	Term              uint64       `json:"term"`
-	LastLogIndex      uint64       `json:"last_log_index"`
-	CommitIndex       uint64       `json:"commit_index"`
-	AppliedIndex      uint64       `json:"applied_index"`
-	FirstLogIndex     uint64       `json:"first_log_index"`
-	LastSnapshotIndex uint64       `json:"last_snapshot_index"`
-	SnapshotBlock     uint64       `json:"snapshot_block"`
-	LastBlock         uint64       `json:"last_block"`
-	Servers           []ServerInfo `json:"servers"`
-	Draining          bool         `json:"draining"`
-	SnapshotsHeld     bool         `json:"snapshots_held"`
-	Failed            bool         `json:"failed"`
+	NodeID            string          `json:"node_id"`
+	State             string          `json:"state"`
+	LeaderID          string          `json:"leader_id"`
+	Term              uint64          `json:"term"`
+	LastLogIndex      uint64          `json:"last_log_index"`
+	CommitIndex       uint64          `json:"commit_index"`
+	AppliedIndex      uint64          `json:"applied_index"`
+	FirstLogIndex     uint64          `json:"first_log_index"`
+	LastSnapshotIndex uint64          `json:"last_snapshot_index"`
+	SnapshotBlock     uint64          `json:"snapshot_block"`
+	LastBlock         uint64          `json:"last_block"`
+	Servers           []ServerInfo    `json:"servers"`
+	Draining          bool            `json:"draining"`
+	SnapshotsHeld     bool            `json:"snapshots_held"`
+	Failed            bool            `json:"failed"`
 	SequencerAddress  string          `json:"sequencer_address"`
 	Attested          uint64          `json:"attested"`
 	Mismatches        uint64          `json:"mismatches"`
@@ -566,4 +566,3 @@ func FetchHelpPayClusterState() ([]byte, error) {
 	}
 	return nil, errors.New("raft cluster node not initialized")
 }
-

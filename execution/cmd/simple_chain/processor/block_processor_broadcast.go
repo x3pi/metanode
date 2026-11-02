@@ -82,7 +82,6 @@ func (bp *BlockProcessor) broadcastEventsAndReceipts(lastBlock types.Block, allR
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-
 	// Check if context is cancelled
 	select {
 	case <-ctx.Done():

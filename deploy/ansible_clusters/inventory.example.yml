@@ -38,6 +38,14 @@ all:
     bls_conservation_mode: "warn"         # devnet: warn, production: enforce
     bls_conservation_interval_seconds: 300
 
+    # ── HelpPay (Gas Sponsorship / Chuyển Tiền Hộ) Configuration ───────────────
+    help_pay:
+      enabled: true
+      min_balance: "10000000000000000"   # Ngưỡng kích hoạt nạp gas (0.01 ETH / 10^16 wei)
+      extra_amount: "100000000000000000" # Lượng coin nạp mỗi lần (0.1 ETH / 10^17 wei)
+      admin_addresses:
+        - "0x550a2b00511883F2042171E9f8C1C73d420E775d" # Địa chỉ ví Admin ký quyền EIP-191
+
   children:
     # ── Parent Chain Committee (100% Rust BFT Consensus Engine, Chain ID: 991) ──
     # ⚠️ LƯU Ý: Nếu CHỈ TRIỂN KHAI CHILD CHAIN (Execution Cluster), hãy ĐỂ COMMENT nhóm này.

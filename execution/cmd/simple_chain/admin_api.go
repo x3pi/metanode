@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
 	"github.com/meta-node-blockchain/meta-node/executor"
-	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
+	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/helppay"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 	"github.com/meta-node-blockchain/meta-node/pkg/snapshot"
@@ -154,7 +155,19 @@ func (api *AdminApi) AddHelpPayWallet(ctx context.Context, password string, priv
 	if err := api.authenticate(ctx, password); err != nil {
 		return nil, err
 	}
-	return NewHelpPayAPI(api.App).AddWallet(ctx, privateKeyHex)
+	if api.App == nil || api.App.helpPayManager == nil {
+		return nil, fmt.Errorf("helppay manager not initialized")
+	}
+	cleanKey := strings.TrimSpace(privateKeyHex)
+	addr, err := api.App.helpPayManager.AddWallet(cleanKey, true)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"address": addr.Hex(),
+		"status":  "added",
+		"synced":  true,
+	}, nil
 }
 
 // RemoveHelpPayWallet (admin_removeHelpPayWallet) removes a sponsor wallet by address and syncs across the cluster.
@@ -162,7 +175,18 @@ func (api *AdminApi) RemoveHelpPayWallet(ctx context.Context, password string, a
 	if err := api.authenticate(ctx, password); err != nil {
 		return nil, err
 	}
-	return NewHelpPayAPI(api.App).RemoveWallet(ctx, addressHex)
+	if api.App == nil || api.App.helpPayManager == nil {
+		return nil, fmt.Errorf("helppay manager not initialized")
+	}
+	addr := common.HexToAddress(addressHex)
+	if err := api.App.helpPayManager.RemoveWallet(addr, true); err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"address": addr.Hex(),
+		"status":  "removed",
+		"synced":  true,
+	}, nil
 }
 
 // GetHelpPayWallets (admin_getHelpPayWallets) lists all sponsor wallets.
@@ -170,7 +194,10 @@ func (api *AdminApi) GetHelpPayWallets(ctx context.Context, password string) ([]
 	if err := api.authenticate(ctx, password); err != nil {
 		return nil, err
 	}
-	return NewHelpPayAPI(api.App).GetWallets(ctx)
+	if api.App == nil || api.App.helpPayManager == nil {
+		return nil, fmt.Errorf("helppay manager not initialized")
+	}
+	return api.App.helpPayManager.GetWallets(), nil
 }
 
 // SetHelpPayConfig (admin_setHelpPayConfig) updates help-pay configuration and syncs across the cluster.
@@ -221,6 +248,8 @@ func (api *AdminApi) GetHelpPayConfig(ctx context.Context, password string) (con
 	if err := api.authenticate(ctx, password); err != nil {
 		return config.HelpPayConfig{}, err
 	}
-	return NewHelpPayAPI(api.App).GetConfig(ctx)
+	if api.App == nil || api.App.helpPayManager == nil {
+		return config.HelpPayConfig{}, fmt.Errorf("helppay manager not initialized")
+	}
+	return api.App.helpPayManager.GetConfig(), nil
 }
-

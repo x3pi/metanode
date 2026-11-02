@@ -78,8 +78,6 @@ func InitRoutes(
 	routes[command.GetTransactionByHash] = blockProcessor.GetTransactionByHash
 	routes[command.GetChainId] = blockProcessor.GetChainId
 
-
-
 	// State attestation: all nodes receive attestations from peers for fork detection
 	routes[common.StateAttestationTopic] = blockProcessor.ProcessStateAttestation
 

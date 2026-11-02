@@ -26,7 +26,7 @@ import (
 
 const (
 	defaultMinBalance  = "10000000000000000"  // 0.01 ETH (10^16 wei)
-	defaultExtraAmount = "50000000000000000"  // 0.05 ETH (5*10^16 wei)
+	defaultExtraAmount = "100000000000000000" // 0.1 ETH (10^17 wei)
 	queueCapacity      = 1000
 	defaultTimeout     = 15 * time.Second
 )
@@ -49,8 +49,8 @@ type Manager struct {
 
 	wallets         map[common.Address]*WalletWorker
 	staticWallets   map[common.Address]struct{} // ví được khai báo từ static config (không bị xóa bởi cluster sync)
-	sponsorJobQueue chan *SponsorGasTask // Hàng đợi công việc nạp gas phân phối tới các worker ví chuyển hộ rảnh rỗi
-	inflightMu      sync.Map            // map[common.Address]*sync.Mutex
+	sponsorJobQueue chan *SponsorGasTask        // Hàng đợi công việc nạp gas phân phối tới các worker ví chuyển hộ rảnh rỗi
+	inflightMu      sync.Map                    // map[common.Address]*sync.Mutex
 
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -112,20 +112,20 @@ func NewManager(
 	}
 
 	m := &Manager{
-		enabled:        cfg.Enabled,
-		minBalance:     minBal,
-		extraAmount:    extraAmt,
-		chainID:        cid,
-		configPath:     configPath,
-		maxTimeout:     defaultTimeout,
-		adminAddresses: admins,
-		chainState:     chainState,
-		txPoolAdder:    txPoolAdder,
+		enabled:         cfg.Enabled,
+		minBalance:      minBal,
+		extraAmount:     extraAmt,
+		chainID:         cid,
+		configPath:      configPath,
+		maxTimeout:      defaultTimeout,
+		adminAddresses:  admins,
+		chainState:      chainState,
+		txPoolAdder:     txPoolAdder,
 		wallets:         make(map[common.Address]*WalletWorker),
 		staticWallets:   make(map[common.Address]struct{}),
 		sponsorJobQueue: make(chan *SponsorGasTask, queueCapacity),
 		ctx:             ctx,
-		cancel:         cancel,
+		cancel:          cancel,
 	}
 
 	// Pre-load wallets from static config if specified
@@ -436,7 +436,7 @@ func (m *Manager) TopUp(recipient common.Address) error {
 		ResultCh:  resultCh,
 	}
 
-select {
+	select {
 	case m.sponsorJobQueue <- req:
 	case <-time.After(5 * time.Second):
 		return errors.New("helppay sponsor job queue is full or timed out")

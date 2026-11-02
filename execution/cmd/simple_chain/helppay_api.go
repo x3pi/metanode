@@ -21,10 +21,39 @@ func NewHelpPayAPI(app *App) *HelpPayAPI {
 	return &HelpPayAPI{App: app}
 }
 
-// AddWallet adds a sponsor wallet by private key (hex string) and synchronizes across the Raft cluster.
-func (api *HelpPayAPI) AddWallet(ctx context.Context, privateKeyHex string) (map[string]interface{}, error) {
+// verifyAdminAuth verifies admin signature and ensures admin addresses are configured (fail-closed).
+func (api *HelpPayAPI) verifyAdminAuth(adminAddress string, signature string, timestamp int64, expectedAction string) (common.Address, error) {
 	if api.App == nil || api.App.helpPayManager == nil {
-		return nil, fmt.Errorf("helppay manager not initialized")
+		return common.Address{}, fmt.Errorf("helppay manager not initialized")
+	}
+	if !api.App.helpPayManager.HasAdminsConfigured() {
+		return common.Address{}, fmt.Errorf("no admin addresses configured on this node; operation refused (fail-closed)")
+	}
+	cleanAddr := strings.TrimSpace(adminAddress)
+	if !common.IsHexAddress(cleanAddr) {
+		return common.Address{}, fmt.Errorf("invalid admin address: %s", adminAddress)
+	}
+	adminAddr := common.HexToAddress(cleanAddr)
+
+	now := time.Now().Unix()
+	diff := now - timestamp
+	if diff < -300 || diff > 300 {
+		return common.Address{}, fmt.Errorf("timestamp out of range: server time is %d, diff is %ds (max allowed 300s)", now, diff)
+	}
+
+	if err := api.App.helpPayManager.VerifyAdminSignature(expectedAction, signature, adminAddr); err != nil {
+		return common.Address{}, fmt.Errorf("admin authorization failed: %w", err)
+	}
+	return adminAddr, nil
+}
+
+// AddWallet adds a sponsor wallet by private key (hex string) with admin ECDSA signature verification.
+// Message format for signing: "helppay:add_wallet:<timestamp>"
+func (api *HelpPayAPI) AddWallet(ctx context.Context, adminAddress string, signature string, timestamp int64, privateKeyHex string) (map[string]interface{}, error) {
+	expectedMsg := fmt.Sprintf("helppay:add_wallet:%d", timestamp)
+	adminAddr, err := api.verifyAdminAuth(adminAddress, signature, timestamp, expectedMsg)
+	if err != nil {
+		return nil, err
 	}
 	cleanKey := strings.TrimSpace(privateKeyHex)
 	addr, err := api.App.helpPayManager.AddWallet(cleanKey, true)
@@ -34,62 +63,48 @@ func (api *HelpPayAPI) AddWallet(ctx context.Context, privateKeyHex string) (map
 	return map[string]interface{}{
 		"address": addr.Hex(),
 		"status":  "added",
+		"admin":   adminAddr.Hex(),
 		"synced":  true,
 	}, nil
 }
 
-// RemoveWallet removes a sponsor wallet by address and synchronizes across the Raft cluster.
-func (api *HelpPayAPI) RemoveWallet(ctx context.Context, addressHex string) (map[string]interface{}, error) {
-	if api.App == nil || api.App.helpPayManager == nil {
-		return nil, fmt.Errorf("helppay manager not initialized")
+// RemoveWallet removes a sponsor wallet by address with admin ECDSA signature verification.
+// Message format for signing: "helppay:remove_wallet:<addressHex>:<timestamp>"
+func (api *HelpPayAPI) RemoveWallet(ctx context.Context, adminAddress string, signature string, timestamp int64, addressHex string) (map[string]interface{}, error) {
+	targetAddr := common.HexToAddress(addressHex)
+	expectedMsg := fmt.Sprintf("helppay:remove_wallet:%s:%d", targetAddr.Hex(), timestamp)
+	adminAddr, err := api.verifyAdminAuth(adminAddress, signature, timestamp, expectedMsg)
+	if err != nil {
+		return nil, err
 	}
-	addr := common.HexToAddress(addressHex)
-	if err := api.App.helpPayManager.RemoveWallet(addr, true); err != nil {
+	if err := api.App.helpPayManager.RemoveWallet(targetAddr, true); err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
-		"address": addr.Hex(),
+		"address": targetAddr.Hex(),
 		"status":  "removed",
+		"admin":   adminAddr.Hex(),
 		"synced":  true,
 	}, nil
 }
 
-// GetWallets returns all sponsor wallets and their current balances and statuses.
-func (api *HelpPayAPI) GetWallets(ctx context.Context) ([]helppay.WalletStatus, error) {
-	if api.App == nil || api.App.helpPayManager == nil {
-		return nil, fmt.Errorf("helppay manager not initialized")
+// GetWallets returns all sponsor wallets and their current balances and statuses with admin ECDSA signature verification.
+// Message format for signing: "helppay:get_wallets:<timestamp>"
+func (api *HelpPayAPI) GetWallets(ctx context.Context, adminAddress string, signature string, timestamp int64) ([]helppay.WalletStatus, error) {
+	expectedMsg := fmt.Sprintf("helppay:get_wallets:%d", timestamp)
+	if _, err := api.verifyAdminAuth(adminAddress, signature, timestamp, expectedMsg); err != nil {
+		return nil, err
 	}
 	return api.App.helpPayManager.GetWallets(), nil
 }
 
-// Toggle enables or disables help-pay. If admin addresses are configured in the node's
-// config, it requires a valid signature from an authorized admin.
+// Toggle enables or disables help-pay with authorized admin signature.
 // Message format for signing: "helppay:toggle:<enabled>:<timestamp>"
 func (api *HelpPayAPI) Toggle(ctx context.Context, adminAddress string, signature string, timestamp int64, enabled bool) (map[string]interface{}, error) {
-	if api.App == nil || api.App.helpPayManager == nil {
-		return nil, fmt.Errorf("helppay manager not initialized")
-	}
-
-	adminAddr := common.Address{}
-	if api.App.helpPayManager.HasAdminsConfigured() {
-		cleanAddr := strings.TrimSpace(adminAddress)
-		if !common.IsHexAddress(cleanAddr) {
-			return nil, fmt.Errorf("invalid admin address: %s", adminAddress)
-		}
-		adminAddr = common.HexToAddress(cleanAddr)
-
-		now := time.Now().Unix()
-		diff := now - timestamp
-		if diff < -300 || diff > 300 {
-			return nil, fmt.Errorf("timestamp out of range: server time is %d, diff is %ds (max allowed 300s)", now, diff)
-		}
-
-		expectedMsg := fmt.Sprintf("helppay:toggle:%t:%d", enabled, timestamp)
-		if err := api.App.helpPayManager.VerifyAdminSignature(expectedMsg, signature, adminAddr); err != nil {
-			return nil, fmt.Errorf("admin authorization failed: %w", err)
-		}
-	} else if strings.TrimSpace(adminAddress) != "" && common.IsHexAddress(adminAddress) {
-		adminAddr = common.HexToAddress(adminAddress)
+	expectedMsg := fmt.Sprintf("helppay:toggle:%t:%d", enabled, timestamp)
+	adminAddr, err := api.verifyAdminAuth(adminAddress, signature, timestamp, expectedMsg)
+	if err != nil {
+		return nil, err
 	}
 
 	if err := api.App.helpPayManager.SetEnabled(enabled, true); err != nil {
@@ -117,51 +132,18 @@ func (api *HelpPayAPI) GetAdmins(ctx context.Context) ([]string, error) {
 	return api.App.helpPayManager.GetAdmins(), nil
 }
 
-// SetConfig updates help-pay configuration and synchronizes across the Raft cluster.
-// If admin addresses are configured on the node, use SetConfigWithAdmin or admin_setHelpPayConfig.
-func (api *HelpPayAPI) SetConfig(ctx context.Context, enabled bool, minBalance string, extraAmount string) (map[string]interface{}, error) {
-	if api.App == nil || api.App.helpPayManager == nil {
-		return nil, fmt.Errorf("helppay manager not initialized")
-	}
-	if api.App.helpPayManager.HasAdminsConfigured() {
-		return nil, fmt.Errorf("admin addresses are configured on this node; please use helppay_toggle or admin_setHelpPayConfig")
-	}
-	if err := api.App.helpPayManager.SetConfig(enabled, minBalance, extraAmount, true); err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{
-		"status":       "updated",
-		"enabled":      enabled,
-		"min_balance":  minBalance,
-		"extra_amount": extraAmount,
-		"synced":       true,
-	}, nil
+// SetConfig updates help-pay configuration with admin ECDSA signature verification.
+func (api *HelpPayAPI) SetConfig(ctx context.Context, adminAddress string, signature string, timestamp int64, enabled bool, minBalance string, extraAmount string) (map[string]interface{}, error) {
+	return api.SetConfigWithAdmin(ctx, adminAddress, signature, timestamp, enabled, minBalance, extraAmount)
 }
 
 // SetConfigWithAdmin updates help-pay configuration with admin ECDSA signature verification.
 // Message format for signing: "helppay:set_config:<enabled>:<minBalance>:<extraAmount>:<timestamp>"
 func (api *HelpPayAPI) SetConfigWithAdmin(ctx context.Context, adminAddress string, signature string, timestamp int64, enabled bool, minBalance string, extraAmount string) (map[string]interface{}, error) {
-	if api.App == nil || api.App.helpPayManager == nil {
-		return nil, fmt.Errorf("helppay manager not initialized")
-	}
-
-	cleanAddr := strings.TrimSpace(adminAddress)
-	if !common.IsHexAddress(cleanAddr) {
-		return nil, fmt.Errorf("invalid admin address: %s", adminAddress)
-	}
-	adminAddr := common.HexToAddress(cleanAddr)
-
-	if api.App.helpPayManager.HasAdminsConfigured() {
-		now := time.Now().Unix()
-		diff := now - timestamp
-		if diff < -300 || diff > 300 {
-			return nil, fmt.Errorf("timestamp out of range: server time is %d, diff is %ds (max allowed 300s)", now, diff)
-		}
-
-		expectedMsg := fmt.Sprintf("helppay:set_config:%t:%s:%s:%d", enabled, minBalance, extraAmount, timestamp)
-		if err := api.App.helpPayManager.VerifyAdminSignature(expectedMsg, signature, adminAddr); err != nil {
-			return nil, fmt.Errorf("admin authorization failed: %w", err)
-		}
+	expectedMsg := fmt.Sprintf("helppay:set_config:%t:%s:%s:%d", enabled, minBalance, extraAmount, timestamp)
+	adminAddr, err := api.verifyAdminAuth(adminAddress, signature, timestamp, expectedMsg)
+	if err != nil {
+		return nil, err
 	}
 
 	if err := api.App.helpPayManager.SetConfig(enabled, minBalance, extraAmount, true); err != nil {
@@ -177,7 +159,7 @@ func (api *HelpPayAPI) SetConfigWithAdmin(ctx context.Context, adminAddress stri
 	}, nil
 }
 
-// GetConfig returns the current help-pay configuration.
+// GetConfig returns the current help-pay configuration (public metadata).
 func (api *HelpPayAPI) GetConfig(ctx context.Context) (config.HelpPayConfig, error) {
 	if api.App == nil || api.App.helpPayManager == nil {
 		return config.HelpPayConfig{}, fmt.Errorf("helppay manager not initialized")

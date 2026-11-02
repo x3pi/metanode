@@ -20,10 +20,17 @@ Khi người dùng mới, ví đối tác hoặc ví con trong hệ sinh thái t
   3. **Khử trùng lặp tại cùng một thời điểm (In-flight Deduplication)**: Khi một tài khoản gửi liên tiếp 10 giao dịch cùng lúc, hệ thống chỉ kích hoạt đúng 1 lần nạp tiền duy nhất.
   4. **Tự động chuyển tiếp (Failover Re-queue)**: Khi một ví bảo trợ cạn tiền, hệ thống tự động đẩy việc sang ví khác còn tiền. Nếu toàn bộ ví cạn tiền, hệ thống báo lỗi chi tiết địa chỉ ví và số dư để nạp thêm.
   5. **Đồng bộ cụm Raft (Realtime Cluster Sync)**: Thêm/xóa ví hoặc bật/tắt trên 1 node bất kỳ sẽ tự động phát sóng đồng bộ tức thì sang tất cả các node còn lại trong cụm Raft.
-  6. **Bảo mật đa Admin (Multi-Admin Authentication)**: Bật/tắt hoặc cấu hình hệ thống yêu cầu chữ ký số ECDSA (EIP-191) của ví Admin được khai báo trong cấu hình node.
+  6. **Bảo mật đa Admin (Multi-Admin Authentication - Fail-Closed)**: Toàn bộ các thao tác thêm ví, xóa ví, xem danh sách ví, bật/tắt hoặc cập nhật cấu hình đều bắt buộc có chữ ký số ECDSA (EIP-191) của ví Admin hoặc mật khẩu quản trị `admin_password`. Nếu node chưa cấu hình Admin thì từ chối (Fail-Closed).
   7. **Tự phục hồi & Kéo bù cấu hình khi node sống lại (Startup Catch-up Sync & Atomic Persistence)**:
      - Ghi file đĩa nguyên tử (Atomic Write qua Temp File + `os.Rename`) chống hỏng file JSON khi sập nguồn hoặc crash đột ngột.
      - Khi node chết sống lại, ngoài việc nạp file cục bộ, node tự động gọi `FetchHelpPayClusterState()` (HTTP GET `/raft/v1/admin/helppay_sync`) sang các peer đang sống với cơ chế retry backoff để kéo bù mọi ví và cấu hình đã thay đổi trong lúc nó offline.
+
+### 1.3. Chính sách Private Chain & Quyết định Nghiệp vụ (Đã được Leader phê duyệt)
+> [!NOTE]
+> **Quy định đối với mạng Private Chain nội bộ**:
+> * Hệ thống consensus-chain này được thiết kế và triển khai phục vụ **mạng riêng tư (Private Chain / Consortium)** trong hệ sinh thái nội bộ, không mở công khai ra Internet công cộng cho người lạ tương tác.
+> * **Cơ chế nạp tự động cho mọi ví mới**: Nhằm mục tiêu tối ưu hóa trải nghiệm người dùng nội bộ và tự động kích hoạt ví cho các dApp/microservices của đối tác mà không cần thủ tục cấp phát faucet thủ công, **bất kỳ địa chỉ mới nào gửi giao dịch hợp lệ đều được tài trợ 0.1 ETH**.
+> * **Quyết định nghiệp vụ**: Thiết kế này đã được **Leader phê duyệt chính thức**. Các AI Agent và kỹ sư phát triển tiếp theo cần ghi nhớ thiết kế này là có chủ đích và không được tự ý chặn hoặc áp đặt các rào cản faucet làm gián đoạn trải nghiệm của mạng nội bộ.
 
 ---
 
@@ -88,6 +95,7 @@ Khi người dùng mới, ví đối tác hoặc ví con trong hệ sinh thái t
 | **Cluster Sync** | [admin.go](file:///home/abc/nhat/consensus-chain/metanode/execution/pkg/rollup/raftfeed/admin.go) | Kênh HTTP nội bộ `/raft/v1/admin/helppay_sync` có xác thực HMAC giữa các node |
 | **Configuration** | [config.go](file:///home/abc/nhat/consensus-chain/metanode/execution/pkg/config/config.go) | Định nghĩa cấu hình `HelpPayConfig`, `AdminAddresses` trong node |
 | **Management Tool**| [manage_help_pay](file:///home/abc/nhat/consensus-chain/metanode-suite/private-chain/manage_help_pay) | CLI script hỗ trợ quản lý pool ví, bật/tắt qua chữ ký và test tự động |
+| **Ansible Deployment**| [inventory.yml](file:///home/abc/nhat/consensus-chain/metanode/deploy/ansible_clusters/inventory.yml) & [exec_config.json.j2](file:///home/abc/nhat/consensus-chain/metanode/deploy/ansible_clusters/roles/exec_cluster/templates/exec_config.json.j2) | Tự động sinh cấu hình `help_pay` và `admin_addresses` cho toàn bộ cụm node khi triển khai |
 
 ---
 
@@ -172,9 +180,9 @@ Khi cụm blockchain chạy nhiều node (ví dụ: Node 0, Node 1, Node 2...):
 
 ---
 
-### 3.4. Cơ Chế Xác Thực Ví Admin (Admin Authentication)
+### 3.4. Cơ Chế Xác Thực Ví Admin (Admin Authentication - Fail-Closed)
 
-Để tránh trường hợp kẻ gian bên ngoài mạng gọi RPC bật/tắt trái phép:
+Để đảm bảo an toàn tuyệt đối cho hệ thống và quỹ bảo trợ:
 1. **Cấu hình ví Admin trong `config.json`**:
    ```json
    "help_pay": {
@@ -184,16 +192,24 @@ Khi cụm blockchain chạy nhiều node (ví dụ: Node 0, Node 1, Node 2...):
      ]
    }
    ```
-2. **Ký số EIP-191 & Chống Replay Attack**:
-   * Khi gọi RPC `helppay_toggle(adminAddress, signature, timestamp, enabled)`:
-   * Client lấy Unix timestamp hiện tại (giây).
-   * Chuỗi thông điệp cần ký: `helppay:toggle:<enabled>:<timestamp>` (ví dụ: `"helppay:toggle:true:1710000000"`).
-   * Client dùng Private Key của ví Admin ký thông điệp theo chuẩn Ethereum personal_sign.
-3. **Node xác minh**:
+2. **Nguyên tắc Fail-Closed**:
+   * Nếu node **chưa cấu hình ví Admin** trong `admin_addresses`, toàn bộ các lệnh thay đổi cấu hình, thêm ví, xóa ví hoặc truy vấn danh sách ví qua public RPC `helppay_*` sẽ **bị từ chối ngay lập tức** (`operation refused (fail-closed)`).
+3. **Ký số EIP-191 & Chống Replay Attack**:
+   * Mọi hàm quản trị trên `helppay_*` đều nhận cặp tham số: `(adminAddress, signature, timestamp, ...)`.
+   * Định dạng message cần ký:
+     - `helppay:add_wallet:<timestamp>`
+     - `helppay:remove_wallet:<targetAddress>:<timestamp>`
+     - `helppay:get_wallets:<timestamp>`
+     - `helppay:toggle:<enabled>:<timestamp>`
+     - `helppay:set_config:<enabled>:<minBal>:<extraAmt>:<timestamp>`
+   * Client lấy Unix timestamp hiện tại và dùng Private Key của ví Admin ký thông điệp theo chuẩn Ethereum personal_sign.
+4. **Node xác minh**:
    * Kiểm tra độ lệch thời gian: `|now - timestamp| <= 300 giây` (nếu quá 5 phút thì từ chối để chống replay attack).
    * Dùng hàm `crypto.SigToPub` phục hồi địa chỉ người ký từ chữ ký và thông điệp.
    * Kiểm tra địa chỉ phục hồi có nằm trong danh sách `admin_addresses` hay không.
    * Nếu hợp lệ: Cập nhật trạng thái và broadcast sang toàn cụm Raft.
+5. **Kênh Admin nội bộ (`admin_*`)**:
+   * Dành cho Operator thông qua CLI/Curl cục bộ có xác thực `admin_password` (Constant-Time Compare) và chặn Origin từ trình duyệt (chống CSWSH/CSRF).
 
 ---
 
@@ -216,7 +232,7 @@ Khi cụm blockchain chạy nhiều node (ví dụ: Node 0, Node 1, Node 2...):
   {
     "enabled": true,
     "min_balance": "10000000000000000",
-    "extra_amount": "50000000000000000",
+    "extra_amount": "100000000000000000",
     "wallets": [
       {
         "address": "0x550a2b00511883F2042171E9f8C1C73d420E775d",
@@ -257,7 +273,7 @@ go run main.go remove <wallet_address>
 go run main.go config
 
 # 7. Cập nhật cấu hình ngưỡng nạp (min_balance) và số tiền nạp (extra_amount)
-go run main.go set-config true 10000000000000000 50000000000000000
+go run main.go set-config true 10000000000000000 100000000000000000
 
 # 8. Chạy test tự động quy trình nạp tiền hộ (End-to-End Test)
 go run main.go test-topup
@@ -269,16 +285,18 @@ go run main.go test-topup
 
 | Namespace & Phương thức | Tham số | Ý nghĩa |
 | :--- | :--- | :--- |
-| `helppay_toggle` | `adminAddr, sig, timestamp, enabled` | Bật/tắt chuyển tiền hộ (yêu cầu chữ ký Admin nếu có admin cấu hình) |
+| `helppay_toggle` | `adminAddr, sig, timestamp, enabled` | Bật/tắt chuyển tiền hộ (bắt buộc chữ ký Admin EIP-191) |
 | `helppay_setEnabled` | `adminAddr, sig, timestamp, enabled` | Alias của `helppay_toggle` |
 | `helppay_getAdmins` | Không có | Lấy danh sách ví Admin được phân quyền |
-| `helppay_getWallets` | Không có | Lấy danh sách các ví trong pool, số dư và trạng thái |
-| `helppay_addWallet` | `privateKeyHex` | Thêm ví bảo trợ mới và đồng bộ Raft |
-| `helppay_removeWallet` | `addressHex` | Xóa ví bảo trợ khỏi pool và đồng bộ Raft |
-| `helppay_getConfig` | Không có | Lấy cấu hình `HelpPayConfig` hiện tại |
-| `helppay_setConfig` | `enabled, minBalance, extraAmount` | Cập nhật cấu hình (chỉ dùng khi node chưa cấu hình Admin) |
+| `helppay_getWallets` | `adminAddr, sig, timestamp` | Lấy danh sách các ví trong pool (bắt buộc chữ ký Admin) |
+| `helppay_addWallet` | `adminAddr, sig, timestamp, privateKeyHex` | Thêm ví bảo trợ mới và đồng bộ Raft (bắt buộc chữ ký Admin) |
+| `helppay_removeWallet` | `adminAddr, sig, timestamp, addressHex` | Xóa ví bảo trợ khỏi pool và đồng bộ Raft (bắt buộc chữ ký Admin) |
+| `helppay_getConfig` | Không có | Lấy cấu hình `HelpPayConfig` hiện tại (metadata công khai) |
+| `helppay_setConfig` | `adminAddr, sig, timestamp, enabled, minBal, extraAmt` | Cập nhật cấu hình có xác thực chữ ký Admin |
 | `helppay_setConfigWithAdmin`| `adminAddr, sig, timestamp, enabled, minBal, extraAmt` | Cập nhật cấu hình có xác thực chữ ký Admin |
 | `admin_toggleHelpPay` | `password, enabled` | Bật/tắt chuyển tiền hộ bằng mật khẩu Admin node |
 | `admin_setHelpPayConfig` | `password, enabled, minBal, extraAmt` | Cập nhật cấu hình bằng mật khẩu Admin node |
 | `admin_addHelpPayWallet` | `password, privateKeyHex` | Thêm ví bảo trợ bằng mật khẩu Admin node |
 | `admin_removeHelpPayWallet`| `password, addressHex` | Xóa ví bảo trợ bằng mật khẩu Admin node |
+| `admin_getHelpPayWallets` | `password` | Lấy danh sách ví bảo trợ bằng mật khẩu Admin node |
+| `admin_getHelpPayConfig` | `password` | Lấy cấu hình HelpPay bằng mật khẩu Admin node |

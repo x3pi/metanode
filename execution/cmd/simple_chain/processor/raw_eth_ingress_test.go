@@ -301,5 +301,3 @@ func TestP0_3_RejectedTx_NoStorageOrCachePollution(t *testing.T) {
 	_, ok = bc.GetTxFromCache(ethHash)
 	assert.False(t, ok, "Rejected batch transaction must NOT have entry in txsCache")
 }
-
-
