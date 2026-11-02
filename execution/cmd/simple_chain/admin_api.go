@@ -159,18 +159,18 @@ func (api *AdminApi) AddHelpPayWallet(ctx context.Context, password string, priv
 		return nil, fmt.Errorf("helppay manager not initialized")
 	}
 	cleanKey := strings.TrimSpace(privateKeyHex)
-	addr, err := api.App.helpPayManager.AddWallet(cleanKey, true)
+	addr, err := api.App.helpPayManager.AddWallet(cleanKey, false)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
 		"address": addr.Hex(),
 		"status":  "added",
-		"synced":  true,
+		"local":   true,
 	}, nil
 }
 
-// RemoveHelpPayWallet (admin_removeHelpPayWallet) removes a sponsor wallet by address and syncs across the cluster.
+// RemoveHelpPayWallet (admin_removeHelpPayWallet) removes a sponsor wallet by address locally on this node.
 func (api *AdminApi) RemoveHelpPayWallet(ctx context.Context, password string, addressHex string) (map[string]interface{}, error) {
 	if err := api.authenticate(ctx, password); err != nil {
 		return nil, err
@@ -179,13 +179,13 @@ func (api *AdminApi) RemoveHelpPayWallet(ctx context.Context, password string, a
 		return nil, fmt.Errorf("helppay manager not initialized")
 	}
 	addr := common.HexToAddress(addressHex)
-	if err := api.App.helpPayManager.RemoveWallet(addr, true); err != nil {
+	if err := api.App.helpPayManager.RemoveWallet(addr, false); err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
 		"address": addr.Hex(),
 		"status":  "removed",
-		"synced":  true,
+		"local":   true,
 	}, nil
 }
 

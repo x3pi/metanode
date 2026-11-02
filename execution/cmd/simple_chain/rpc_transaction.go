@@ -394,7 +394,11 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 
 	fromAddr := metaTx.FromAddress()
 	if api.App.helpPayManager != nil && api.App.helpPayManager.IsEnabled() {
-		if err := api.App.helpPayManager.CheckAndTopUp(fromAddr); err != nil {
+		clientIP := ""
+		if pi := rpc.PeerInfoFromContext(ctx); pi.RemoteAddr != "" {
+			clientIP = extractIP(pi.RemoteAddr)
+		}
+		if err := api.App.helpPayManager.CheckAndTopUpWithClient(fromAddr, clientIP); err != nil {
 			return common.Hash{}, formatGethError(fmt.Errorf("topUpFunc failed: %w", err))
 		}
 	}

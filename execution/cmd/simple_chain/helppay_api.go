@@ -85,7 +85,7 @@ func (api *HelpPayAPI) AddWallet(ctx context.Context, adminAddress string, signa
 	if err != nil {
 		return nil, err
 	}
-	addr, err := api.App.helpPayManager.AddWallet(cleanKey, true)
+	addr, err := api.App.helpPayManager.AddWallet(cleanKey, false)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,7 @@ func (api *HelpPayAPI) AddWallet(ctx context.Context, adminAddress string, signa
 		"address": addr.Hex(),
 		"status":  "added",
 		"admin":   adminAddr.Hex(),
-		"synced":  true,
+		"local":   true,
 	}, nil
 }
 
@@ -106,14 +106,14 @@ func (api *HelpPayAPI) RemoveWallet(ctx context.Context, adminAddress string, si
 	if err != nil {
 		return nil, err
 	}
-	if err := api.App.helpPayManager.RemoveWallet(targetAddr, true); err != nil {
+	if err := api.App.helpPayManager.RemoveWallet(targetAddr, false); err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
 		"address": targetAddr.Hex(),
 		"status":  "removed",
 		"admin":   adminAddr.Hex(),
-		"synced":  true,
+		"local":   true,
 	}, nil
 }
 

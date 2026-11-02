@@ -14,8 +14,11 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	mt_types "github.com/meta-node-blockchain/meta-node/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sync"
 )
 
 func generateTestKey(t *testing.T) (*ecdsa.PrivateKey, string, common.Address) {
@@ -122,7 +125,7 @@ func TestManager_ClusterSync(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	assert.True(t, mgr1.IsSponsorWallet(addr))
-	assert.True(t, mgr2.IsSponsorWallet(addr), "wallet should have been synced to mgr2")
+	assert.False(t, mgr2.IsSponsorWallet(addr), "wallets are isolated per node to avoid Nonce collisions and key leakage")
 
 	// Set config on mgr1 with broadcast=true
 	err = mgr1.SetConfig(true, "30000000000000000", "70000000000000000", true)
@@ -132,13 +135,11 @@ func TestManager_ClusterSync(t *testing.T) {
 	assert.Equal(t, "30000000000000000", mgr2.MinBalance().String())
 	assert.Equal(t, "70000000000000000", mgr2.ExtraAmount().String())
 
-	// Remove wallet on mgr1 with broadcast=true
-	err = mgr1.RemoveWallet(addr, true)
+	// Remove wallet on mgr1
+	err = mgr1.RemoveWallet(addr, false)
 	require.NoError(t, err)
 
-	time.Sleep(100 * time.Millisecond)
 	assert.False(t, mgr1.IsSponsorWallet(addr))
-	assert.False(t, mgr2.IsSponsorWallet(addr), "wallet removal should have been synced to mgr2")
 }
 
 func TestManager_AdminAndToggle(t *testing.T) {
@@ -231,11 +232,14 @@ func TestManager_StartupCatchUpSync(t *testing.T) {
 
 	assert.Equal(t, 2, mgr1.ActiveWalletCount())
 
-	// Node 2 starts with 0 wallets, but has stateFetcher wired to mgr1.GetState()
+	// Node 2 starts with its own isolated wallet, and stateFetcher wired to mgr1.GetState()
+	_, keyHex3, addr3 := generateTestKey(t)
 	mgr2 := NewManager(config.HelpPayConfig{
 		Enabled:    false,
 		ConfigFile: filepath.Join(tmpDir2, "node2.json"),
 	}, nil, nil, big.NewInt(991), tmpDir2)
+	_, err = mgr2.AddWallet(keyHex3, false)
+	require.NoError(t, err)
 
 	mgr2.SetStateFetcher(func() ([]byte, error) {
 		return mgr1.GetState()
@@ -244,18 +248,72 @@ func TestManager_StartupCatchUpSync(t *testing.T) {
 	mgr2.Start()
 	defer mgr2.Stop()
 
-	// CatchUpFromCluster triggers catch-up
-	added, err := mgr2.CatchUpFromCluster()
+	// CatchUpFromCluster triggers catch-up of cluster configs
+	_, err = mgr2.CatchUpFromCluster()
 	require.NoError(t, err)
-	assert.Equal(t, 2, added)
 
-	// Verify mgr2 caught up completely
-	assert.Equal(t, 2, mgr2.ActiveWalletCount())
-	assert.True(t, mgr2.IsSponsorWallet(addr1))
-	assert.True(t, mgr2.IsSponsorWallet(addr2))
+	// Verify mgr2 caught up configuration (enabled, min_balance, extra_amount)
+	// while preserving its own isolated local wallet (addr3) and never receiving mgr1's private keys
+	assert.Equal(t, 1, mgr2.ActiveWalletCount())
+	assert.True(t, mgr2.IsSponsorWallet(addr3))
+	assert.False(t, mgr2.IsSponsorWallet(addr1), "mgr2 should not hold mgr1 wallets")
+	assert.False(t, mgr2.IsSponsorWallet(addr2), "mgr2 should not hold mgr1 wallets")
 	assert.True(t, mgr2.IsEnabled())
 	assert.Equal(t, "25000000000000000", mgr2.MinBalance().String())
 	assert.Equal(t, "65000000000000000", mgr2.ExtraAmount().String())
+}
+
+func TestManager_IPRateLimiting(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.HelpPayConfig{
+		Enabled:     true,
+		MinBalance:  "10000000000000000",
+		ExtraAmount: "100000000000000000", // 0.1 ETH
+		ConfigFile:  filepath.Join(tmpDir, "helppay_rate_limit.json"),
+	}
+
+	mgr := NewManager(cfg, nil, nil, big.NewInt(991), tmpDir)
+	mgr.Start()
+	defer mgr.Stop()
+
+	// Add 1 sponsor wallet so IsEnabled is true
+	_, keyHex, _ := generateTestKey(t)
+	_, err := mgr.AddWallet(keyHex, false)
+	require.NoError(t, err)
+
+	clientIP := "203.0.113.42"
+	now := time.Now()
+	today := uint64(now.Unix() / 86400)
+
+	// Set daily limit to 0.2 ETH (2 * 10^17 wei)
+	mgr.SetMaxDailyPerIP(big.NewInt(200000000000000000))
+
+	// Pre-fill ipUsage to 0.2 ETH (already at max limit)
+	mgr.rateMu.Lock()
+	mgr.ipUsage[clientIP] = &IPRateLimitRecord{
+		DayNumber:  today,
+		TotalTopUp: big.NewInt(200000000000000000),
+	}
+	mgr.rateMu.Unlock()
+
+	rec := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	// Since clientIP has reached limit, CheckAndTopUpWithClient should reject with rate limit error
+	err = mgr.CheckAndTopUpWithClient(rec, clientIP)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "daily rate limit exceeded for client IP")
+
+	// Test cooldown: recipient with recent top-up within 30s
+	mgr.rateMu.Lock()
+	mgr.recipientUsage[rec] = &RecipientRateLimitRecord{
+		DayNumber:     today,
+		LastTopUpUnix: now.Unix() - 5, // 5 seconds ago (< 30s cooldown)
+	}
+	mgr.rateMu.Unlock()
+
+	otherIP := "203.0.113.99"
+	err = mgr.CheckAndTopUpWithClient(rec, otherIP)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is under cooldown")
 }
 
 func TestManager_CheckAndTopUp_ZeroFrictionOnboarding(t *testing.T) {
@@ -285,5 +343,54 @@ func TestManager_CheckAndTopUp_ZeroFrictionOnboarding(t *testing.T) {
 	// Top-up on sponsor wallet itself is ignored
 	err = mgr.CheckAndTopUp(sponsorAddr)
 	assert.NoError(t, err)
+}
+
+func TestManager_IsNonceError(t *testing.T) {
+	assert.False(t, isNonceError(nil))
+	assert.True(t, isNonceError(transaction.InvalidNonce))
+	assert.True(t, isNonceError(transaction.ErrNonceTooLow))
+	assert.True(t, isNonceError(transaction.ErrNonceTooHigh))
+	assert.True(t, isNonceError(transaction.NonceConflictError))
+	assert.True(t, isNonceError(transaction.ErrAlreadyKnown))
+	assert.True(t, isNonceError(transaction.ErrReplacementUnderpriced))
+	assert.True(t, isNonceError(fmt.Errorf("tx rejected: invalid nonce gap")))
+	assert.True(t, isNonceError(fmt.Errorf("already exists in pool")))
+	assert.False(t, isNonceError(fmt.Errorf("insufficient balance")))
+}
+
+type mockTxPoolAdderWithNonce struct {
+	attempts int
+	mu       sync.Mutex
+	nonces   []uint64
+}
+
+func (m *mockTxPoolAdderWithNonce) AddTransactionToPool(tx mt_types.Transaction) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.attempts++
+	m.nonces = append(m.nonces, tx.GetNonce())
+	if m.attempts == 1 {
+		return int64(transaction.InvalidNonce.Code), transaction.InvalidNonce
+	}
+	return 0, nil
+}
+
+func (m *mockTxPoolAdderWithNonce) GetPendingNonce(addr common.Address, stateNonce uint64) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.attempts >= 1 {
+		return stateNonce + 1
+	}
+	return stateNonce
+}
+
+func TestManager_GetPendingNonceInterface(t *testing.T) {
+	mockPool := &mockTxPoolAdderWithNonce{}
+	var adder TxPoolAdder = mockPool
+	png, ok := adder.(PendingNonceGetter)
+	require.True(t, ok)
+
+	addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	assert.Equal(t, uint64(0), png.GetPendingNonce(addr, 0))
 }
 

@@ -25,10 +25,12 @@ import (
 )
 
 const (
-	defaultMinBalance  = "10000000000000000"  // 0.01 ETH (10^16 wei)
-	defaultExtraAmount = "100000000000000000" // 0.1 ETH (10^17 wei)
-	queueCapacity      = 1000
-	defaultTimeout     = 15 * time.Second
+	defaultMinBalance        = "10000000000000000"    // 0.01 ETH (10^16 wei)
+	defaultExtraAmount       = "100000000000000000"   // 0.1 ETH (10^17 wei)
+	defaultMaxDailyPerIP     = "10000000000000000000" // 10 ETH per IP per day (10 * 10^18 wei)
+	defaultRecipientCooldown = 30 * time.Second
+	queueCapacity            = 1000
+	defaultTimeout           = 5 * time.Second
 )
 
 // Manager manages a pool of sponsor wallets (ví chuyển tiền hộ).
@@ -43,6 +45,12 @@ type Manager struct {
 	configPath     string
 	maxTimeout     time.Duration
 	adminAddresses map[common.Address]struct{}
+
+	// Rate limiting & anti-drain protection
+	rateMu         sync.Mutex
+	maxDailyPerIP  *big.Int
+	ipUsage        map[string]*IPRateLimitRecord
+	recipientUsage map[common.Address]*RecipientRateLimitRecord
 
 	chainState  *blockchain.ChainState
 	txPoolAdder TxPoolAdder
@@ -111,6 +119,11 @@ func NewManager(
 		}
 	}
 
+	maxDailyIP, ok := new(big.Int).SetString(defaultMaxDailyPerIP, 10)
+	if !ok {
+		maxDailyIP = new(big.Int).Mul(big.NewInt(10), big.NewInt(1000000000000000000))
+	}
+
 	m := &Manager{
 		enabled:         cfg.Enabled,
 		minBalance:      minBal,
@@ -119,6 +132,9 @@ func NewManager(
 		configPath:      configPath,
 		maxTimeout:      defaultTimeout,
 		adminAddresses:  admins,
+		maxDailyPerIP:   maxDailyIP,
+		ipUsage:         make(map[string]*IPRateLimitRecord),
+		recipientUsage:  make(map[common.Address]*RecipientRateLimitRecord),
 		chainState:      chainState,
 		txPoolAdder:     txPoolAdder,
 		wallets:         make(map[common.Address]*WalletWorker),
@@ -257,6 +273,20 @@ func (m *Manager) ExtraAmount() *big.Int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return new(big.Int).Set(m.extraAmount)
+}
+
+// MaxDailyPerIP returns the maximum daily HelpPay allocation allowed per client IP.
+func (m *Manager) MaxDailyPerIP() *big.Int {
+	m.rateMu.Lock()
+	defer m.rateMu.Unlock()
+	return new(big.Int).Set(m.maxDailyPerIP)
+}
+
+// SetMaxDailyPerIP sets the maximum daily HelpPay allocation allowed per client IP.
+func (m *Manager) SetMaxDailyPerIP(limit *big.Int) {
+	m.rateMu.Lock()
+	defer m.rateMu.Unlock()
+	m.maxDailyPerIP = new(big.Int).Set(limit)
 }
 
 // IsSponsorWallet checks if an address belongs to the sponsor wallet pool.
@@ -403,19 +433,82 @@ func (m *Manager) GetBalance(address common.Address) *big.Int {
 	return bal
 }
 
-// CheckAndTopUp inspects recipient balance and triggers automated gas top-up if below threshold.
-// Provides zero-friction onboarding for app-chain users and microservices.
-func (m *Manager) CheckAndTopUp(recipient common.Address) error {
+// NeedsTopUp checks if recipient's balance is below threshold and eligible for sponsor gas.
+func (m *Manager) NeedsTopUp(recipient common.Address) bool {
 	if !m.IsEnabled() || m.IsSponsorWallet(recipient) {
+		return false
+	}
+	return m.GetBalance(recipient).Cmp(m.MinBalance()) < 0
+}
+
+// CheckAndTopUp inspects recipient balance and triggers automated gas top-up if below threshold.
+func (m *Manager) CheckAndTopUp(recipient common.Address) error {
+	return m.CheckAndTopUpWithClient(recipient, "")
+}
+
+// CheckAndTopUpWithClient inspects recipient balance, validates client IP rate limits (max 10 ETH/day),
+// enforces recipient cooldowns, and performs automated top-up.
+func (m *Manager) CheckAndTopUpWithClient(recipient common.Address, clientIP string) error {
+	if !m.NeedsTopUp(recipient) {
 		return nil
 	}
 
-	balance := m.GetBalance(recipient)
-	if balance.Cmp(m.MinBalance()) >= 0 {
-		return nil // Sufficient balance, no top-up needed
+	cleanIP := strings.TrimSpace(clientIP)
+	now := time.Now()
+	today := uint64(now.Unix() / 86400)
+
+	m.rateMu.Lock()
+	// 1. IP Rate Limiting: enforce maximum 10 ETH per IP per day (configurable via maxDailyPerIP)
+	if cleanIP != "" && cleanIP != "127.0.0.1" && cleanIP != "::1" && cleanIP != "localhost" {
+		rec, exists := m.ipUsage[cleanIP]
+		if !exists || rec.DayNumber != today {
+			rec = &IPRateLimitRecord{
+				DayNumber:  today,
+				TotalTopUp: big.NewInt(0),
+			}
+			m.ipUsage[cleanIP] = rec
+		}
+		newTotal := new(big.Int).Add(rec.TotalTopUp, m.ExtraAmount())
+		if newTotal.Cmp(m.maxDailyPerIP) > 0 {
+			m.rateMu.Unlock()
+			return fmt.Errorf("helppay: daily rate limit exceeded for client IP %s (allocated %s wei today, max %s wei/day)",
+				cleanIP, rec.TotalTopUp.String(), m.maxDailyPerIP.String())
+		}
 	}
 
-	return m.TopUp(recipient)
+	// 2. Recipient Cooldown: prevent repeated top-up draining on the same address within cooldown period
+	if rRec, exists := m.recipientUsage[recipient]; exists && rRec.DayNumber == today {
+		if now.Unix()-rRec.LastTopUpUnix < int64(defaultRecipientCooldown/time.Second) {
+			m.rateMu.Unlock()
+			return fmt.Errorf("helppay: recipient %s is under cooldown (last top-up %ds ago, please wait %v)",
+				recipient.Hex(), now.Unix()-rRec.LastTopUpUnix, defaultRecipientCooldown)
+		}
+	}
+	m.rateMu.Unlock()
+
+	// Execute top-up
+	err := m.TopUp(recipient)
+	if err != nil {
+		return err
+	}
+
+	// Record allocation on success
+	m.rateMu.Lock()
+	if cleanIP != "" && cleanIP != "127.0.0.1" && cleanIP != "::1" && cleanIP != "localhost" {
+		if rec, exists := m.ipUsage[cleanIP]; exists && rec.DayNumber == today {
+			rec.TotalTopUp.Add(rec.TotalTopUp, m.ExtraAmount())
+		}
+	}
+	rRec, exists := m.recipientUsage[recipient]
+	if !exists || rRec.DayNumber != today {
+		rRec = &RecipientRateLimitRecord{DayNumber: today}
+		m.recipientUsage[recipient] = rRec
+	}
+	rRec.LastTopUpUnix = now.Unix()
+	rRec.CountToday++
+	m.rateMu.Unlock()
+
+	return nil
 }
 
 // TopUp enqueues a top-up request to the wallet worker pool and waits for block confirmation.
@@ -474,17 +567,53 @@ func (m *Manager) workerLoop(ctx context.Context, w *WalletWorker) {
 	}
 }
 
+func isNonceError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, transaction.InvalidNonce) ||
+		errors.Is(err, transaction.ErrNonceTooLow) ||
+		errors.Is(err, transaction.ErrNonceTooHigh) ||
+		errors.Is(err, transaction.NonceConflictError) ||
+		errors.Is(err, transaction.ErrAlreadyKnown) ||
+		errors.Is(err, transaction.ErrReplacementUnderpriced) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "nonce") ||
+		strings.Contains(msg, "already known") ||
+		strings.Contains(msg, "already exists") ||
+		strings.Contains(msg, "replacement underpriced")
+}
+
+func (m *Manager) getSponsorWalletNonce(addr common.Address) (uint64, error) {
+	if m.chainState == nil || m.chainState.GetAccountStateDB() == nil {
+		return 0, errors.New("chain state account database not available")
+	}
+	as, err := m.chainState.GetAccountStateDB().AccountState(addr)
+	if err != nil || as == nil {
+		return 0, fmt.Errorf("sponsor wallet %s state not found: %v", addr.Hex(), err)
+	}
+	nonce := as.Nonce()
+
+	// Query next available pending nonce from mempool to avoid collisions with in-flight transactions
+	if png, ok := m.txPoolAdder.(PendingNonceGetter); ok {
+		nonce = png.GetPendingNonce(addr, nonce)
+	}
+	return nonce, nil
+}
+
 // processTopUpRequest processes a top-up request on worker w.
-// If worker w has insufficient funds, it attempts to re-queue the job to another idle sponsor wallet.
+// If worker w has insufficient funds or encounters persistent nonce failures, it attempts to re-queue the job to another idle sponsor wallet.
 // If all wallets in the pool lack funds, it returns a detailed diagnostic error listing all wallets and their balances.
 func (m *Manager) processTopUpRequest(w *WalletWorker, req *SponsorGasTask) {
 	err := m.executeTransfer(w, req)
 	if err != nil {
-		// If balance is low and there are other sponsor wallets to try, re-queue
-		if strings.Contains(err.Error(), "insufficient balance") && req.attempts < m.ActiveWalletCount()-1 {
+		// If balance is low or nonce error persisted on this wallet, and there are other sponsor wallets to try, re-queue
+		if (strings.Contains(err.Error(), "insufficient balance") || isNonceError(err) || strings.Contains(err.Error(), "timed out")) && req.attempts < m.ActiveWalletCount()-1 {
 			req.attempts++
-			logger.Warn("⚠️ [HelpPay] Sponsor wallet %s balance low, re-queueing to another wallet (attempt %d/%d)",
-				w.address.Hex(), req.attempts, m.ActiveWalletCount())
+			logger.Warn("⚠️ [HelpPay] Sponsor wallet %s failed with %v, re-queueing to another wallet in pool (attempt %d/%d)",
+				w.address.Hex(), err, req.attempts, m.ActiveWalletCount())
 			select {
 			case m.sponsorJobQueue <- req:
 				return // Re-queued successfully, do not return to req.ResultCh yet!
@@ -515,97 +644,130 @@ func (m *Manager) processTopUpRequest(w *WalletWorker, req *SponsorGasTask) {
 }
 
 // executeTransfer constructs, signs, submits and awaits receipt for a top-up transaction.
+// When a nonce collision or mismatch is detected, it reloads the freshest nonce from state & mempool and retries.
 func (m *Manager) executeTransfer(w *WalletWorker, req *SponsorGasTask) error {
 	toAddr := req.Recipient
 	amount := req.Amount
 
-	// 1. Verify sponsor wallet balance
-	if m.chainState == nil || m.chainState.GetAccountStateDB() == nil {
-		return errors.New("chain state account database not available")
-	}
-	as, err := m.chainState.GetAccountStateDB().AccountState(w.address)
-	if err != nil || as == nil {
-		return fmt.Errorf("sponsor wallet %s state not found: %v", w.address.Hex(), err)
-	}
-	if as.Balance().Cmp(amount) < 0 {
-		return fmt.Errorf("sponsor wallet %s has insufficient balance (has %s wei, needed %s wei)",
-			w.address.Hex(), as.Balance().String(), amount.String())
-	}
+	const maxNonceRetries = 3
 
-	// 2. Build and sign Ethereum transaction with sequential nonce
-	nonce := as.Nonce()
-	gasLimit := uint64(21000)
-	gasPrice := big.NewInt(1000000000) // 1 Gwei
-	signer := types.LatestSignerForChainID(m.chainID)
-	ethTx := types.NewTransaction(nonce, toAddr, amount, gasLimit, gasPrice, nil)
-	signedTx, err := types.SignTx(ethTx, signer, w.privKey)
-	if err != nil {
-		return fmt.Errorf("failed to sign transfer tx from %s: %w", w.address.Hex(), err)
-	}
+	for attempt := 0; attempt < maxNonceRetries; attempt++ {
+		// 1. Verify sponsor wallet balance
+		if m.chainState == nil || m.chainState.GetAccountStateDB() == nil {
+			return errors.New("chain state account database not available")
+		}
+		as, err := m.chainState.GetAccountStateDB().AccountState(w.address)
+		if err != nil || as == nil {
+			return fmt.Errorf("sponsor wallet %s state not found: %v", w.address.Hex(), err)
+		}
+		if as.Balance().Cmp(amount) < 0 {
+			return fmt.Errorf("sponsor wallet %s has insufficient balance (has %s wei, needed %s wei)",
+				w.address.Hex(), as.Balance().String(), amount.String())
+		}
 
-	metaTxIface, err := transaction.NewTransactionFromEth(signedTx)
-	if err != nil {
-		return fmt.Errorf("failed to convert ethTx to metaTx: %w", err)
-	}
-	metaTx, ok := metaTxIface.(*transaction.Transaction)
-	if !ok {
-		return fmt.Errorf("unexpected metaTx type: %T", metaTxIface)
-	}
-
-	ethTxHash := signedTx.Hash()
-	metaTxHash := metaTx.Hash()
-
-	// 3. Submit to pool
-	if m.txPoolAdder != nil {
-		_, err = m.txPoolAdder.AddTransactionToPool(metaTx)
+		// 2. Load freshest nonce (chain state + pending mempool txs)
+		nonce, err := m.getSponsorWalletNonce(w.address)
 		if err != nil {
-			return fmt.Errorf("failed to add transfer tx to pool: %w", err)
+			return err
 		}
-	}
 
-	if bc := blockchain.GetBlockChainInstance(); bc != nil {
-		rawEth, _ := signedTx.MarshalBinary()
-		bc.AddTxToCache(ethTxHash, rawEth)
-		_ = bc.SetEthHashMapblsHash(ethTxHash, metaTxHash)
-	}
-
-	logger.Info("💸 [HelpPay] Top-up tx submitted: from=%s to=%s amount=%s ethHash=%s nonce=%d",
-		w.address.Hex(), toAddr.Hex(), amount.String(), ethTxHash.Hex(), nonce)
-
-	// 4. Await block commitment
-	deadline := time.Now().Add(m.maxTimeout)
-	searchHash := ethTxHash
-
-	for time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-		bc := blockchain.GetBlockChainInstance()
-		if bc == nil {
-			continue
+		// 3. Build and sign Ethereum transaction with sequential nonce
+		gasLimit := uint64(21000)
+		gasPrice := big.NewInt(1000000000) // 1 Gwei
+		signer := types.LatestSignerForChainID(m.chainID)
+		ethTx := types.NewTransaction(nonce, toAddr, amount, gasLimit, gasPrice, nil)
+		signedTx, err := types.SignTx(ethTx, signer, w.privKey)
+		if err != nil {
+			return fmt.Errorf("failed to sign transfer tx from %s: %w", w.address.Hex(), err)
 		}
-		blsHash, isEth := bc.GetEthHashMapblsHash(ethTxHash)
-		if isEth {
-			searchHash = blsHash
+
+		metaTxIface, err := transaction.NewTransactionFromEth(signedTx)
+		if err != nil {
+			return fmt.Errorf("failed to convert ethTx to metaTx: %w", err)
 		}
-		blockNum, ok := bc.GetBlockNumberByTxHashFast(searchHash)
-		if ok && blockNum <= storage.GetLastBlockNumber() {
-			w.totalSent.Add(1)
-			w.lastUsed.Store(time.Now().Unix())
-			logger.Info("✅ [HelpPay] Top-up tx confirmed in block %d: from=%s to=%s amount=%s (hash=%s)",
-				blockNum, w.address.Hex(), toAddr.Hex(), amount.String(), ethTxHash.Hex())
+		metaTx, ok := metaTxIface.(*transaction.Transaction)
+		if !ok {
+			return fmt.Errorf("unexpected metaTx type: %T", metaTxIface)
+		}
+
+		ethTxHash := signedTx.Hash()
+		metaTxHash := metaTx.Hash()
+
+		// 4. Submit to pool with automatic nonce-reload retry
+		if m.txPoolAdder != nil {
+			_, err = m.txPoolAdder.AddTransactionToPool(metaTx)
+			if err != nil {
+				if isNonceError(err) && attempt < maxNonceRetries-1 {
+					logger.Warn("⚠️ [HelpPay] Nonce error for sponsor wallet %s (used nonce=%d, err=%v). Reloading nonce and retrying (attempt %d/%d)...",
+						w.address.Hex(), nonce, err, attempt+1, maxNonceRetries)
+					time.Sleep(50 * time.Millisecond)
+					continue
+				}
+				return fmt.Errorf("failed to add transfer tx to pool: %w", err)
+			}
+		}
+
+		if bc := blockchain.GetBlockChainInstance(); bc != nil {
+			rawEth, _ := signedTx.MarshalBinary()
+			bc.AddTxToCache(ethTxHash, rawEth)
+			_ = bc.SetEthHashMapblsHash(ethTxHash, metaTxHash)
+		}
+
+		logger.Info("💸 [HelpPay] Top-up tx submitted: from=%s to=%s amount=%s ethHash=%s nonce=%d",
+			w.address.Hex(), toAddr.Hex(), amount.String(), ethTxHash.Hex(), nonce)
+
+		// 5. Await block commitment
+		deadline := time.Now().Add(m.maxTimeout)
+		searchHash := ethTxHash
+		confirmed := false
+
+		for time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+			bc := blockchain.GetBlockChainInstance()
+			if bc == nil {
+				continue
+			}
+			blsHash, isEth := bc.GetEthHashMapblsHash(ethTxHash)
+			if isEth {
+				searchHash = blsHash
+			}
+			blockNum, ok := bc.GetBlockNumberByTxHashFast(searchHash)
+			if ok && blockNum <= storage.GetLastBlockNumber() {
+				w.totalSent.Add(1)
+				w.lastUsed.Store(time.Now().Unix())
+				logger.Info("✅ [HelpPay] Top-up tx confirmed in block %d: from=%s to=%s amount=%s (hash=%s)",
+					blockNum, w.address.Hex(), toAddr.Hex(), amount.String(), ethTxHash.Hex())
+				confirmed = true
+				break
+			}
+		}
+
+		if confirmed {
 			return nil
 		}
+
+		// If timed out waiting for confirmation, reload state and retry with fresh nonce if attempts remain
+		if attempt < maxNonceRetries-1 {
+			logger.Warn("⚠️ [HelpPay] Top-up tx %s confirmation timed out (nonce=%d). Reloading nonce and retrying...", ethTxHash.Hex(), nonce)
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+
+		return fmt.Errorf("timed out waiting for top-up tx %s block confirmation", ethTxHash.Hex())
 	}
 
-	return fmt.Errorf("timed out waiting for top-up tx %s block confirmation", ethTxHash.Hex())
+	return fmt.Errorf("failed to execute transfer from %s after %d attempts", w.address.Hex(), maxNonceRetries)
 }
 
-// AddWallet adds a new sponsor wallet using an ECDSA private key.
-// If broadcast is true and a sync broadcaster is configured, it syncs to other Raft peers.
+
+// AddWallet adds a new sponsor wallet using an ECDSA private key to this local node.
+// Wallets are managed locally per-node for Nonce isolation and security (never broadcasted across peers).
 func (m *Manager) AddWallet(privKeyHex string, broadcast bool) (common.Address, error) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	addr, err := m.addWalletInternal(privKeyHex)
 	if err != nil {
-		m.mu.Unlock()
 		return common.Address{}, err
 	}
 
@@ -615,23 +777,7 @@ func (m *Manager) AddWallet(privKeyHex string, broadcast bool) (common.Address, 
 		logger.Warn("⚠️ [HelpPay] Failed to save state to disk: %v", err)
 	}
 
-	var broadcaster func(payload []byte) error
-	if broadcast {
-		broadcaster = m.syncBroadcaster
-	}
-	m.mu.Unlock()
-
-	if broadcaster != nil {
-		payload, _ := json.Marshal(SyncPayload{
-			Action:     ActionAddWallet,
-			PrivateKey: privKeyHex,
-			Address:    addr.Hex(),
-		})
-		go func() {
-			_ = broadcaster(payload)
-		}()
-	}
-
+	logger.Info("🔑 [HelpPay] Added local sponsor wallet %s", addr.Hex())
 	return addr, nil
 }
 
@@ -672,12 +818,14 @@ func (m *Manager) addWalletInternal(privKeyHex string) (common.Address, error) {
 	return addr, nil
 }
 
-// RemoveWallet removes a sponsor wallet by address.
+// RemoveWallet removes a sponsor wallet by address from this local node.
+// Wallets are managed locally per-node: removal is strictly local and never broadcasted across peers.
 func (m *Manager) RemoveWallet(addr common.Address, broadcast bool) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	worker, exists := m.wallets[addr]
 	if !exists {
-		m.mu.Unlock()
 		return fmt.Errorf("wallet %s not found", addr.Hex())
 	}
 
@@ -690,24 +838,7 @@ func (m *Manager) RemoveWallet(addr common.Address, broadcast bool) error {
 		logger.Warn("⚠️ [HelpPay] Failed to save state to disk: %v", err)
 	}
 
-	var broadcaster func(payload []byte) error
-	if broadcast {
-		broadcaster = m.syncBroadcaster
-	}
-	m.mu.Unlock()
-
-	logger.Info("🗑️ [HelpPay] Removed sponsor wallet %s", addr.Hex())
-
-	if broadcaster != nil {
-		payload, _ := json.Marshal(SyncPayload{
-			Action:  ActionRemoveWallet,
-			Address: addr.Hex(),
-		})
-		go func() {
-			_ = broadcaster(payload)
-		}()
-	}
-
+	logger.Info("🗑️ [HelpPay] Removed local sponsor wallet %s", addr.Hex())
 	return nil
 }
 
@@ -816,17 +947,15 @@ func (m *Manager) ApplySync(payload []byte) error {
 	logger.Info("🔄 [HelpPay] Received cluster sync action: %s from %s", sp.Action, sp.SenderNodeID)
 
 	switch sp.Action {
-	case ActionAddWallet:
-		if sp.PrivateKey != "" {
-			_, err := m.AddWallet(sp.PrivateKey, false)
-			return err
-		}
-	case ActionRemoveWallet:
-		if sp.Address != "" {
-			return m.RemoveWallet(common.HexToAddress(sp.Address), false)
-		}
+	case ActionAddWallet, ActionRemoveWallet:
+		// Security & Nonce isolation: Wallets are managed locally per-node from local configuration.
+		// Wallet add/remove actions are never synchronized across the Raft cluster.
+		logger.Debug("ℹ️ [HelpPay] %s ignored over Raft sync: wallets are managed locally per-node", sp.Action)
+		return nil
 	case ActionSetConfig:
+		m.mu.RLock()
 		en := m.enabled
+		m.mu.RUnlock()
 		if sp.Enabled != nil {
 			en = *sp.Enabled
 		}
@@ -834,30 +963,27 @@ func (m *Manager) ApplySync(payload []byte) error {
 	default:
 		return fmt.Errorf("unknown helppay sync action: %s", sp.Action)
 	}
-	return nil
 }
 
-// GetState returns the full state serialized as JSON for synchronization queries.
+// GetState returns cluster state serialized as JSON for synchronization queries without private keys.
 func (m *Manager) GetState() ([]byte, error) {
+	wallets := m.GetWallets()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	items := make([]PersistedWalletItem, 0, len(m.wallets))
-	for addr, w := range m.wallets {
-		items = append(items, PersistedWalletItem{
-			Address:    addr.Hex(),
-			PrivateKey: w.privKeyHex,
-			TotalSent:  w.totalSent.Load(),
-		})
+	maxDailyStr := defaultMaxDailyPerIP
+	if m.maxDailyPerIP != nil {
+		maxDailyStr = m.maxDailyPerIP.String()
 	}
 
-	cfg := PersistedConfig{
-		Enabled:     m.enabled,
-		MinBalance:  m.minBalance.String(),
-		ExtraAmount: m.extraAmount.String(),
-		Wallets:     items,
+	resp := ClusterStateResponse{
+		Enabled:       m.enabled,
+		MinBalance:    m.minBalance.String(),
+		ExtraAmount:   m.extraAmount.String(),
+		MaxDailyPerIP: maxDailyStr,
+		Wallets:       wallets,
 	}
-	return json.Marshal(cfg)
+	return json.Marshal(resp)
 }
 
 func (m *Manager) saveToDiskLocked() error {
@@ -919,97 +1045,48 @@ func (m *Manager) CatchUpFromCluster() (int, error) {
 	return m.ApplyClusterState(data)
 }
 
-// ApplyClusterState merges full cluster state into local manager state and persists it atomically.
-// Returns the number of newly added wallets.
+// ApplyClusterState merges cluster configuration state into local manager state and persists it atomically.
+// Wallets remain managed locally per-node for Nonce isolation and security (no private keys over the wire).
 func (m *Manager) ApplyClusterState(data []byte) (int, error) {
-	var cfg PersistedConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return 0, fmt.Errorf("failed to unmarshal helppay cluster state: %w", err)
+	var resp ClusterStateResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		var cfg PersistedConfig
+		if err2 := json.Unmarshal(data, &cfg); err2 != nil {
+			return 0, fmt.Errorf("failed to unmarshal helppay cluster state: %w", err)
+		}
+		resp.Enabled = cfg.Enabled
+		resp.MinBalance = cfg.MinBalance
+		resp.ExtraAmount = cfg.ExtraAmount
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if cfg.MinBalance != "" {
-		if b, ok := new(big.Int).SetString(cfg.MinBalance, 10); ok {
+	if resp.MinBalance != "" {
+		if b, ok := new(big.Int).SetString(resp.MinBalance, 10); ok {
 			m.minBalance = b
 		}
 	}
-	if cfg.ExtraAmount != "" {
-		if b, ok := new(big.Int).SetString(cfg.ExtraAmount, 10); ok {
+	if resp.ExtraAmount != "" {
+		if b, ok := new(big.Int).SetString(resp.ExtraAmount, 10); ok {
 			m.extraAmount = b
 		}
 	}
-	m.enabled = cfg.Enabled
-
-	clusterAddrs := make(map[common.Address]struct{})
-	addedCount := 0
-
-	for _, item := range cfg.Wallets {
-		if strings.TrimSpace(item.PrivateKey) == "" {
-			continue
-		}
-		cleanKey := strings.TrimPrefix(strings.TrimSpace(item.PrivateKey), "0x")
-		privKey, err := crypto.HexToECDSA(cleanKey)
-		if err != nil {
-			continue
-		}
-		addr := crypto.PubkeyToAddress(privKey.PublicKey)
-		clusterAddrs[addr] = struct{}{}
-
-		if existing, exists := m.wallets[addr]; exists {
-			if item.TotalSent > existing.totalSent.Load() {
-				existing.totalSent.Store(item.TotalSent)
-			}
-			if m.started && existing.cancel == nil {
-				wCtx, wCancel := context.WithCancel(m.ctx)
-				existing.cancel = wCancel
-				go m.workerLoop(wCtx, existing)
-			}
-		} else {
-			worker := &WalletWorker{
-				address:    addr,
-				privKey:    privKey,
-				privKeyHex: cleanKey,
-			}
-			worker.totalSent.Store(item.TotalSent)
-			m.wallets[addr] = worker
-			if m.started {
-				wCtx, wCancel := context.WithCancel(m.ctx)
-				worker.cancel = wCancel
-				go m.workerLoop(wCtx, worker)
-			}
-			addedCount++
-			logger.Info("🔑 [HelpPay] Synchronized new sponsor wallet %s from cluster", addr.Hex())
+	if resp.MaxDailyPerIP != "" {
+		if b, ok := new(big.Int).SetString(resp.MaxDailyPerIP, 10); ok {
+			m.maxDailyPerIP = b
 		}
 	}
+	m.enabled = resp.Enabled
 
-	// Remove dynamic wallets that no longer exist in the cluster (preserve static config wallets)
-	removedCount := 0
-	for addr, worker := range m.wallets {
-		if _, isStatic := m.staticWallets[addr]; isStatic {
-			continue
-		}
-		if _, inCluster := clusterAddrs[addr]; !inCluster && len(clusterAddrs) > 0 {
-			if worker.cancel != nil {
-				worker.cancel()
-				worker.cancel = nil
-			}
-			delete(m.wallets, addr)
-			removedCount++
-			logger.Info("🗑️ [HelpPay] Removed sponsor wallet %s (not in cluster state)", addr.Hex())
-		}
+	if err := m.saveToDiskLocked(); err != nil {
+		logger.Warn("⚠️ [HelpPay] Failed to save state to disk: %v", err)
 	}
 
-	if addedCount > 0 || removedCount > 0 {
-		if err := m.saveToDiskLocked(); err != nil {
-			logger.Warn("⚠️ [HelpPay] Failed to save state to disk: %v", err)
-		}
-		logger.Info("✅ [HelpPay] Cluster catch-up sync applied: +%d added, -%d removed, total active: %d",
-			addedCount, removedCount, len(m.wallets))
-	}
+	logger.Info("✅ [HelpPay] Cluster configuration applied (enabled: %t, min_balance: %s, extra_amount: %s, active local wallets: %d)",
+		m.enabled, m.minBalance.String(), m.extraAmount.String(), len(m.wallets))
 
-	return addedCount, nil
+	return 0, nil
 }
 
 func (m *Manager) loadFromDiskLocked() error {

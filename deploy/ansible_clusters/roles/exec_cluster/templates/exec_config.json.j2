@@ -40,7 +40,9 @@
 {% elif help_pay.admin_address is defined %}
     "admin_address": "{{ help_pay.admin_address }}",
 {% endif %}
-{% if help_pay.wallets is defined %}
+{% if help_pay_wallets is defined %}
+    "wallets": {{ help_pay_wallets | to_json }},
+{% elif help_pay.wallets is defined %}
     "wallets": {{ help_pay.wallets | to_json }},
 {% endif %}
     "config_file": "{{ help_pay.config_file | default(node_data_dir ~ '/data/helppay_wallets.json') }}"
