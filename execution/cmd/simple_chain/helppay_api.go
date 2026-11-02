@@ -4,16 +4,19 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/helppay"
 )
 
 // HelpPayAPI exposes JSON-RPC methods for managing the sponsor wallet pool.
 type HelpPayAPI struct {
-	App *App
+	App            *App
+	usedSignatures sync.Map // map[string]int64: sigHash -> timestamp (anti-replay cache within ±120s / 2 minutes)
 }
 
 // NewHelpPayAPI creates a new HelpPayAPI instance.
@@ -21,7 +24,8 @@ func NewHelpPayAPI(app *App) *HelpPayAPI {
 	return &HelpPayAPI{App: app}
 }
 
-// verifyAdminAuth verifies admin signature and ensures admin addresses are configured (fail-closed).
+// verifyAdminAuth verifies admin signature, ensures admin addresses are configured (fail-closed),
+// and provides anti-replay protection.
 func (api *HelpPayAPI) verifyAdminAuth(adminAddress string, signature string, timestamp int64, expectedAction string) (common.Address, error) {
 	if api.App == nil || api.App.helpPayManager == nil {
 		return common.Address{}, fmt.Errorf("helppay manager not initialized")
@@ -37,8 +41,24 @@ func (api *HelpPayAPI) verifyAdminAuth(adminAddress string, signature string, ti
 
 	now := time.Now().Unix()
 	diff := now - timestamp
-	if diff < -300 || diff > 300 {
-		return common.Address{}, fmt.Errorf("timestamp out of range: server time is %d, diff is %ds (max allowed 300s)", now, diff)
+	if diff < -120 || diff > 120 {
+		return common.Address{}, fmt.Errorf("timestamp out of range: server time is %d, diff is %ds (max allowed 120s / 2 minutes)", now, diff)
+	}
+
+	// Anti-replay protection: each signature can only be consumed once
+	sigHash := crypto.Keccak256Hash([]byte(signature)).Hex()
+	if _, loaded := api.usedSignatures.LoadOrStore(sigHash, timestamp); loaded {
+		return common.Address{}, fmt.Errorf("signature already consumed (replay attack detected)")
+	}
+
+	// Opportunistic pruning of signatures older than 4 minutes (240s)
+	if now%10 == 0 {
+		api.usedSignatures.Range(func(key, val interface{}) bool {
+			if ts, ok := val.(int64); ok && now-ts > 240 {
+				api.usedSignatures.Delete(key)
+			}
+			return true
+		})
 	}
 
 	if err := api.App.helpPayManager.VerifyAdminSignature(expectedAction, signature, adminAddr); err != nil {
@@ -48,14 +68,23 @@ func (api *HelpPayAPI) verifyAdminAuth(adminAddress string, signature string, ti
 }
 
 // AddWallet adds a sponsor wallet by private key (hex string) with admin ECDSA signature verification.
-// Message format for signing: "helppay:add_wallet:<timestamp>"
+// Message format for signing: "helppay:add_wallet:<targetAddress>:<timestamp>"
 func (api *HelpPayAPI) AddWallet(ctx context.Context, adminAddress string, signature string, timestamp int64, privateKeyHex string) (map[string]interface{}, error) {
-	expectedMsg := fmt.Sprintf("helppay:add_wallet:%d", timestamp)
+	cleanKey := strings.TrimSpace(privateKeyHex)
+	cleanKey = strings.TrimPrefix(cleanKey, "0x")
+	cleanKey = strings.TrimPrefix(cleanKey, "0X")
+
+	privKey, err := crypto.HexToECDSA(cleanKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid ECDSA private key: %w", err)
+	}
+	targetAddr := crypto.PubkeyToAddress(privKey.PublicKey)
+
+	expectedMsg := fmt.Sprintf("helppay:add_wallet:%s:%d", targetAddr.Hex(), timestamp)
 	adminAddr, err := api.verifyAdminAuth(adminAddress, signature, timestamp, expectedMsg)
 	if err != nil {
 		return nil, err
 	}
-	cleanKey := strings.TrimSpace(privateKeyHex)
 	addr, err := api.App.helpPayManager.AddWallet(cleanKey, true)
 	if err != nil {
 		return nil, err
@@ -117,11 +146,6 @@ func (api *HelpPayAPI) Toggle(ctx context.Context, adminAddress string, signatur
 		"admin":   adminAddr.Hex(),
 		"synced":  true,
 	}, nil
-}
-
-// SetEnabled is an alias for Toggle to provide intuitive RPC naming.
-func (api *HelpPayAPI) SetEnabled(ctx context.Context, adminAddress string, signature string, timestamp int64, enabled bool) (map[string]interface{}, error) {
-	return api.Toggle(ctx, adminAddress, signature, timestamp, enabled)
 }
 
 // GetAdmins returns all authorized admin addresses configured for this node.

@@ -238,11 +238,6 @@ func (api *AdminApi) ToggleHelpPay(ctx context.Context, password string, enabled
 	}, nil
 }
 
-// SetHelpPayEnabled (admin_setHelpPayEnabled) is an alias for admin_toggleHelpPay.
-func (api *AdminApi) SetHelpPayEnabled(ctx context.Context, password string, enabled bool) (map[string]interface{}, error) {
-	return api.ToggleHelpPay(ctx, password, enabled)
-}
-
 // GetHelpPayConfig (admin_getHelpPayConfig) returns the current help-pay configuration.
 func (api *AdminApi) GetHelpPayConfig(ctx context.Context, password string) (config.HelpPayConfig, error) {
 	if err := api.authenticate(ctx, password); err != nil {

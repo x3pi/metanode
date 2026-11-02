@@ -257,3 +257,33 @@ func TestManager_StartupCatchUpSync(t *testing.T) {
 	assert.Equal(t, "25000000000000000", mgr2.MinBalance().String())
 	assert.Equal(t, "65000000000000000", mgr2.ExtraAmount().String())
 }
+
+func TestManager_CheckAndTopUp_ZeroFrictionOnboarding(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.HelpPayConfig{
+		Enabled:     true,
+		MinBalance:  "10000000000000000",
+		ExtraAmount: "100000000000000000",
+		ConfigFile:  filepath.Join(tmpDir, "helppay_test.json"),
+	}
+
+	mgr := NewManager(cfg, nil, nil, big.NewInt(991), tmpDir)
+	mgr.Start()
+	defer mgr.Stop()
+
+	// 0 active wallets -> IsEnabled() is false -> CheckAndTopUp should return nil
+	recipient := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	err := mgr.CheckAndTopUp(recipient)
+	assert.NoError(t, err)
+
+	// Add a sponsor wallet
+	_, keyHex, sponsorAddr := generateTestKey(t)
+	_, err = mgr.AddWallet(keyHex, false)
+	require.NoError(t, err)
+	assert.True(t, mgr.IsEnabled())
+
+	// Top-up on sponsor wallet itself is ignored
+	err = mgr.CheckAndTopUp(sponsorAddr)
+	assert.NoError(t, err)
+}
+

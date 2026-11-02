@@ -50,7 +50,7 @@ type Manager struct {
 	wallets         map[common.Address]*WalletWorker
 	staticWallets   map[common.Address]struct{} // ví được khai báo từ static config (không bị xóa bởi cluster sync)
 	sponsorJobQueue chan *SponsorGasTask        // Hàng đợi công việc nạp gas phân phối tới các worker ví chuyển hộ rảnh rỗi
-	inflightMu      sync.Map                    // map[common.Address]*sync.Mutex
+	inflightMu      sync.Map                    // map[common.Address]*sync.Mutex (chống nạp trùng lặp đồng thời)
 
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -232,7 +232,9 @@ func (m *Manager) Stop() {
 			w.cancel = nil
 		}
 	}
-	_ = m.saveToDiskLocked()
+	if err := m.saveToDiskLocked(); err != nil {
+		logger.Warn("⚠️ [HelpPay] Failed to save state to disk: %v", err)
+	}
 	logger.Info("🛑 [HelpPay] Manager stopped")
 }
 
@@ -357,7 +359,9 @@ func (m *Manager) VerifyAdminSignature(expectedMsg string, sigHex string, claime
 func (m *Manager) SetEnabled(enabled bool, broadcast bool) error {
 	m.mu.Lock()
 	m.enabled = enabled
-	_ = m.saveToDiskLocked()
+	if err := m.saveToDiskLocked(); err != nil {
+		logger.Warn("⚠️ [HelpPay] Failed to save state to disk: %v", err)
+	}
 
 	var broadcaster func(payload []byte) error
 	if broadcast {
@@ -399,7 +403,8 @@ func (m *Manager) GetBalance(address common.Address) *big.Int {
 	return bal
 }
 
-// CheckAndTopUp inspects recipient balance and triggers a non-blocking top-up if below threshold.
+// CheckAndTopUp inspects recipient balance and triggers automated gas top-up if below threshold.
+// Provides zero-friction onboarding for app-chain users and microservices.
 func (m *Manager) CheckAndTopUp(recipient common.Address) error {
 	if !m.IsEnabled() || m.IsSponsorWallet(recipient) {
 		return nil
@@ -448,6 +453,8 @@ func (m *Manager) TopUp(recipient common.Address) error {
 		return err
 	case <-time.After(m.maxTimeout):
 		return fmt.Errorf("helppay topUp timed out waiting for transaction receipt (%v)", m.maxTimeout)
+	case <-m.ctx.Done():
+		return errors.New("helppay manager stopped while waiting for topUp")
 	}
 }
 
@@ -604,7 +611,9 @@ func (m *Manager) AddWallet(privKeyHex string, broadcast bool) (common.Address, 
 
 	// Auto-enable if it was disabled and a wallet is added
 	m.enabled = true
-	_ = m.saveToDiskLocked()
+	if err := m.saveToDiskLocked(); err != nil {
+		logger.Warn("⚠️ [HelpPay] Failed to save state to disk: %v", err)
+	}
 
 	var broadcaster func(payload []byte) error
 	if broadcast {
@@ -677,7 +686,9 @@ func (m *Manager) RemoveWallet(addr common.Address, broadcast bool) error {
 		worker.cancel = nil
 	}
 	delete(m.wallets, addr)
-	_ = m.saveToDiskLocked()
+	if err := m.saveToDiskLocked(); err != nil {
+		logger.Warn("⚠️ [HelpPay] Failed to save state to disk: %v", err)
+	}
 
 	var broadcaster func(payload []byte) error
 	if broadcast {
@@ -740,7 +751,9 @@ func (m *Manager) SetConfig(enabled bool, minBalance string, extraAmount string,
 		}
 	}
 
-	_ = m.saveToDiskLocked()
+	if err := m.saveToDiskLocked(); err != nil {
+		logger.Warn("⚠️ [HelpPay] Failed to save state to disk: %v", err)
+	}
 
 	var broadcaster func(payload []byte) error
 	if broadcast {
@@ -989,7 +1002,9 @@ func (m *Manager) ApplyClusterState(data []byte) (int, error) {
 	}
 
 	if addedCount > 0 || removedCount > 0 {
-		_ = m.saveToDiskLocked()
+		if err := m.saveToDiskLocked(); err != nil {
+			logger.Warn("⚠️ [HelpPay] Failed to save state to disk: %v", err)
+		}
 		logger.Info("✅ [HelpPay] Cluster catch-up sync applied: +%d added, -%d removed, total active: %d",
 			addedCount, removedCount, len(m.wallets))
 	}

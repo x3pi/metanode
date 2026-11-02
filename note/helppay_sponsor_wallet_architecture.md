@@ -183,12 +183,12 @@ Khi cụm blockchain chạy nhiều node (ví dụ: Node 0, Node 1, Node 2...):
 ### 3.4. Cơ Chế Xác Thực Ví Admin (Admin Authentication - Fail-Closed)
 
 Để đảm bảo an toàn tuyệt đối cho hệ thống và quỹ bảo trợ:
-1. **Cấu hình ví Admin trong `config.json`**:
+1. **Cấu hình ví Admin trong `config.json` (Ví dụ minh họa)**:
    ```json
    "help_pay": {
      "enabled": true,
      "admin_addresses": [
-       "0x550a2b00511883F2042171E9f8C1C73d420E775d"
+       "0x0000000000000000000000000000000000000000"
      ]
    }
    ```
@@ -196,18 +196,19 @@ Khi cụm blockchain chạy nhiều node (ví dụ: Node 0, Node 1, Node 2...):
    * Nếu node **chưa cấu hình ví Admin** trong `admin_addresses`, toàn bộ các lệnh thay đổi cấu hình, thêm ví, xóa ví hoặc truy vấn danh sách ví qua public RPC `helppay_*` sẽ **bị từ chối ngay lập tức** (`operation refused (fail-closed)`).
 3. **Ký số EIP-191 & Chống Replay Attack**:
    * Mọi hàm quản trị trên `helppay_*` đều nhận cặp tham số: `(adminAddress, signature, timestamp, ...)`.
-   * Định dạng message cần ký:
-     - `helppay:add_wallet:<timestamp>`
+   * Định dạng message cần ký (toàn bộ tham số hành động đều được bind chặt vào chuỗi ký):
+     - `helppay:add_wallet:<targetAddress>:<timestamp>` (bind địa chỉ ví cần thêm để chống giả mạo key)
      - `helppay:remove_wallet:<targetAddress>:<timestamp>`
      - `helppay:get_wallets:<timestamp>`
      - `helppay:toggle:<enabled>:<timestamp>`
      - `helppay:set_config:<enabled>:<minBal>:<extraAmt>:<timestamp>`
    * Client lấy Unix timestamp hiện tại và dùng Private Key của ví Admin ký thông điệp theo chuẩn Ethereum personal_sign.
 4. **Node xác minh**:
-   * Kiểm tra độ lệch thời gian: `|now - timestamp| <= 300 giây` (nếu quá 5 phút thì từ chối để chống replay attack).
+   * Kiểm tra độ lệch thời gian: `|now - timestamp| <= 120 giây` (nếu lệch quá 2 phút thì từ chối).
+   * **Chống Replay (One-Time Execution)**: Lưu vết hash của chữ ký vào cache bộ nhớ (thời gian sống 2 phút); từ chối ngay lập tức nếu một chữ ký bị tái sử dụng (`signature already consumed`).
    * Dùng hàm `crypto.SigToPub` phục hồi địa chỉ người ký từ chữ ký và thông điệp.
    * Kiểm tra địa chỉ phục hồi có nằm trong danh sách `admin_addresses` hay không.
-   * Nếu hợp lệ: Cập nhật trạng thái và broadcast sang toàn cụm Raft.
+   * **Bảo vệ chống trùng lặp đồng thời (`inflightMu`)**: Thiết kế chuyên biệt cho App-Chain tối ưu trải nghiệm Zero-Gas Onboarding. Cơ chế khóa deduplication per-recipient (`inflightMu`) đảm bảo nếu client gửi nhiều transaction đồng thời thì chỉ có duy nhất 1 lệnh nạp 0.1 ETH được thực thi, tự động dừng khi số dư ví đã đạt ngưỡng `>= min_balance`.
 5. **Kênh Admin nội bộ (`admin_*`)**:
    * Dành cho Operator thông qua CLI/Curl cục bộ có xác thực `admin_password` (Constant-Time Compare) và chặn Origin từ trình duyệt (chống CSWSH/CSRF).
 
@@ -227,7 +228,8 @@ Khi cụm blockchain chạy nhiều node (ví dụ: Node 0, Node 1, Node 2...):
   - Khi một node bị gián đoạn (chết/offline), các node khác trong cụm vẫn tiếp tục hoạt động và có thể nhận thêm ví mới qua RPC/CLI.
   - Khi node offline khởi động lại, hàm `Start()` của `Manager` sẽ khởi tạo worker từ file đĩa cục bộ, đồng thời khởi chạy tiến trình nền `startStartupCatchUp()` gửi yêu cầu HTTP GET tới `/raft/v1/admin/helppay_sync` của các peer đang hoạt động trong cụm.
   - Node tự động gộp (merge) danh sách ví mới, đồng bộ trạng thái `enabled`, `min_balance`, `extra_amount`, kích hoạt worker mới và ghi đè nguyên tử lại file `helppay_wallets.json` trên đĩa.
-* **Cấu trúc dữ liệu**:
+* **Cấu trúc dữ liệu minh họa (Example JSON)**:
+  > *Lưu ý: Các ví và khóa dưới đây chỉ là dữ liệu ví dụ minh họa.*
   ```json
   {
     "enabled": true,
@@ -235,9 +237,12 @@ Khi cụm blockchain chạy nhiều node (ví dụ: Node 0, Node 1, Node 2...):
     "extra_amount": "100000000000000000",
     "wallets": [
       {
-        "address": "0x550a2b00511883F2042171E9f8C1C73d420E775d",
-        "private_key": "4f3edf983ac636a65a842ce7c78d9aa706d3b113bce9c46f30d7d21715b23b1d",
-        "total_sent": 25
+        "address": "0x0000000000000000000000000000000000000001",
+        "private_key": "0000000000000000000000000000000000000000000000000000000000000001"
+      },
+      {
+        "address": "0x0000000000000000000000000000000000000002",
+        "private_key": "0000000000000000000000000000000000000000000000000000000000000002"
       }
     ]
   }
