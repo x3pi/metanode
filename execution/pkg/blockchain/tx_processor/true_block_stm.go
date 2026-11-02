@@ -27,6 +27,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	mt_state "github.com/meta-node-blockchain/meta-node/pkg/state"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -1073,6 +1074,9 @@ func (stm *TrueBlockSTM) execOne(
 									nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 								)
 								mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
+								if tm := trie_database.GetTrieDatabaseManager(); tm != nil {
+									tm.FindAndSetTrieDatabasesByMvmID(mvmId, trie_database.Reverted)
+								}
 							} else {
 								if exRs.MapNonce() != nil {
 									for addrHex, newNonceBytes := range exRs.MapNonce() {
@@ -1167,6 +1171,9 @@ func (stm *TrueBlockSTM) execOne(
 						}
 					} // end of canPayGas
 					if !canPayGas {
+						if tm := trie_database.GetTrieDatabaseManager(); tm != nil {
+							tm.FindAndSetTrieDatabasesByMvmID(mvmId, trie_database.Reverted)
+						}
 						// The receipt says "failed, nothing charged": the stored EVM result must say the same. The raw
 						// result still carries the successful run's deployed bytecode / code hash / storage root /
 						// BLS key / account type / event logs, and the end-of-block merge (applyCodeAndStorageRootOnly,

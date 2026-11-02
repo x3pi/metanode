@@ -410,7 +410,8 @@
           - (master_password | default('devnet-test-password')) != 'devnet-test-password'
           - (app_pepper | default('devnet-test-pepper')) != 'devnet-test-pepper'
           - (pk_admin_file_storage | default('87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623')) != '87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623'
-        fail_msg: "FATAL: In production environment (metanode_env=production), master_password, app_pepper, and pk_admin_file_storage must be explicitly configured via Ansible Vault and cannot use devnet defaults!"
+          - (bls_admin_storage | default('2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b')) != '2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b'
+        fail_msg: "FATAL: In production environment (metanode_env=production), master_password, app_pepper, pk_admin_file_storage, and bls_admin_storage must be explicitly configured via Ansible Vault and cannot use devnet defaults!"
       when: "(metanode_env | default('production')) != 'devnet' and (node_env | default('production')) != 'devnet' and not (metanode_devnet | default(false) | bool)"
 
     - name: Deploy Execution Node config.json
@@ -419,7 +420,7 @@
         dest: "{{ node_data_dir }}/config.json"
         owner: "{{ ansible_user | default('abc') }}"
         group: "{{ ansible_user | default('abc') }}"
-        mode: '0644'
+        mode: '0600'
 
     - name: Write security environment file (tokens / pins from vault vars, 0600)
       ansible.builtin.template:

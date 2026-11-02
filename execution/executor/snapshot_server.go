@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,13 +33,40 @@ func bearerMatches(r *http.Request, token string) bool {
 	return token != "" && subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
 }
 
-func (ss *SnapshotServer) requireToken(next http.Handler) http.Handler {
-	if ss.authToken == "" {
-		return next
+func isLoopbackRemoteAddr(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
 	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isValidSnapshotName(name string) bool {
+	if name == "" || len(name) > 128 || name == "." || name == ".." {
+		return false
+	}
+	if filepath.Base(name) != name || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.') {
+			return false
+		}
+	}
+	return true
+}
+
+func (ss *SnapshotServer) requireToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !bearerMatches(r, ss.authToken) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if ss.authToken != "" {
+			if !bearerMatches(r, ss.authToken) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		} else if !isLoopbackRemoteAddr(r.RemoteAddr) {
+			http.Error(w, "unauthorized: SNAPSHOT_SERVER_TOKEN is required for non-loopback requests", http.StatusUnauthorized)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -50,14 +78,19 @@ func NewSnapshotServer(snapshotDir string, port int, bindAddr string, manager *S
 	if port <= 0 {
 		port = 8700
 	}
+	token := strings.TrimSpace(os.Getenv("SNAPSHOT_SERVER_TOKEN"))
 	if bindAddr == "" {
-		bindAddr = "0.0.0.0"
+		if token == "" {
+			bindAddr = "127.0.0.1"
+		} else {
+			bindAddr = "0.0.0.0"
+		}
 	}
 	if v := strings.TrimSpace(os.Getenv("SNAPSHOT_SERVER_BIND")); v != "" {
 		bindAddr = v
 	}
 	return &SnapshotServer{
-		authToken:   strings.TrimSpace(os.Getenv("SNAPSHOT_SERVER_TOKEN")),
+		authToken:   token,
 		snapshotDir: snapshotDir,
 		port:        port,
 		bindAddr:    bindAddr,
@@ -184,20 +217,40 @@ func (ss *SnapshotServer) handleAPISnapshots(w http.ResponseWriter, r *http.Requ
 
 // handleAPISnapshotVerify verifies a snapshot by name and returns JSON
 func (ss *SnapshotServer) handleAPISnapshotVerify(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	snapshotName := r.URL.Query().Get("name")
 	if snapshotName == "" {
-		http.Error(w, `{"error":"Missing 'name' query parameter"}`, http.StatusBadRequest)
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Missing 'name' query parameter"})
+		return
+	}
+	if !isValidSnapshotName(snapshotName) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid snapshot name"})
 		return
 	}
 
-	snapshotPath := filepath.Join(ss.snapshotDir, snapshotName)
-	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
-		http.Error(w, fmt.Sprintf(`{"error":"Snapshot not found: %s"}`, snapshotName), http.StatusNotFound)
+	absBase, err := filepath.Abs(ss.snapshotDir)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid snapshot base directory"})
+		return
+	}
+	snapshotPath := filepath.Join(absBase, snapshotName)
+	absTarget, err := filepath.Abs(snapshotPath)
+	if err != nil || !strings.HasPrefix(absTarget, absBase+string(os.PathSeparator)) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid snapshot path"})
 		return
 	}
 
-	metadata, err := VerifySnapshotIntegrity(snapshotPath)
-	w.Header().Set("Content-Type", "application/json")
+	if _, err := os.Stat(absTarget); os.IsNotExist(err) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Snapshot not found"})
+		return
+	}
+
+	metadata, err := VerifySnapshotIntegrity(absTarget)
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)

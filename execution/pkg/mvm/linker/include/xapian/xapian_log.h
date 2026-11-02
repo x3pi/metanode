@@ -45,9 +45,9 @@ namespace XapianLog
     struct AddValueData
     {
         std::string docid;
-        uint32_t slot;
+        uint32_t slot{0};
         std::string value;
-        bool is_serialised;
+        bool is_serialised{false};
     };
 
     struct AddTermData
@@ -66,7 +66,7 @@ namespace XapianLog
     {
         std::string docid;
         std::string text;
-        uint32_t wdf_inc;
+        uint32_t wdf_inc{1};
         std::string prefix;
     };
 

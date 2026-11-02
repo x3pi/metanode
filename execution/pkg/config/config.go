@@ -169,9 +169,27 @@ type LogConfig struct {
 	FileOutput    bool   `json:"file_output"`    // output to file
 }
 
+// HelpPayWalletConfig định nghĩa cấu hình cho một ví chuyển tiền hộ
+type HelpPayWalletConfig struct {
+	Address    string `json:"address,omitempty"`
+	PrivateKey string `json:"private_key"`
+}
+
+// HelpPayConfig định nghĩa cấu hình cho tính năng chuyển tiền hộ (gas sponsor / free gas top-up)
+type HelpPayConfig struct {
+	Enabled        bool                  `json:"enabled"`
+	MinBalance     string                `json:"min_balance,omitempty"`     // Ngưỡng số dư (wei) cần chuyển tiền hộ, mặc định 10^16 (0.01 ETH)
+	ExtraAmount    string                `json:"extra_amount,omitempty"`    // Số tiền chuyển mỗi lần (wei), mặc định 10^17 (0.1 ETH)
+	AdminAddresses []string              `json:"admin_addresses,omitempty"` // Danh sách các địa chỉ ví admin có quyền bật/tắt và quản lý HelpPay
+	AdminAddress   string                `json:"admin_address,omitempty"`   // Cấu hình 1 địa chỉ ví admin đơn lẻ (tiện dụng)
+	Wallets        []HelpPayWalletConfig `json:"wallets,omitempty"`
+	ConfigFile     string                `json:"config_file,omitempty"` // Đường dẫn file lưu cấu hình ví động (nếu có)
+}
+
 // SimpleChainConfig là struct chính, đại diện cho toàn bộ file config JSON.
 type SimpleChainConfig struct {
-	Debug                   bool   `json:"debug"`
+	HelpPay HelpPayConfig `json:"help_pay,omitempty"`
+	Debug   bool          `json:"debug"`
 	// DevnetRPC enables devnet-only test RPCs (mtn_sendCrossChainTransfer: node-side signing with a public devnet key and
 	// a node-key destination fallback). Must stay false on any network that holds real value.
 	DevnetRPC               bool   `json:"devnet_rpc"`
@@ -251,7 +269,7 @@ type SimpleChainConfig struct {
 	MasterPassword       string `json:"master_password,omitempty"`
 	AppPepper            string `json:"app_pepper,omitempty"`
 
-	VerifyDeviceKey      bool   `json:"verify_device_key"`      // Bật/tắt kiểm tra DeviceKey khi xác thực giao dịch (mặc định: false)
+	VerifyDeviceKey bool `json:"verify_device_key"` // Bật/tắt kiểm tra DeviceKey khi xác thực giao dịch (mặc định: false)
 
 	// Snapshot configuration
 	SnapshotEnabled         bool   `json:"snapshot_enabled"`                    // Bật/tắt tự động snapshot

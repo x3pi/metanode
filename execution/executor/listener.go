@@ -7,12 +7,15 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 
 	// Protobuf generated types for IPC protocol
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
+
+const maxIPCBlockBytes = 64 * 1024 * 1024 // 64 MiB upper bound on a single IPC ExecutableBlock frame
 
 var bufferPool = sync.Pool{
 	New: func() interface{} {
@@ -142,8 +145,16 @@ func (l *Listener) handleConnection(conn net.Conn) {
 
 	log.Printf("🔌 [LISTENER] Accepted new connection from %s (active: %d)", conn.RemoteAddr(), len(l.sem))
 
-	// Optimize connection buffers
+	// Optimize connection buffers and restrict TCP fallback to loopback/private cluster peers unless explicitly overridden
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		if os.Getenv("METANODE_ALLOW_WAN_EXECUTOR_IPC") != "true" {
+			if tcpAddr, ok := tcpConn.RemoteAddr().(*net.TCPAddr); ok && tcpAddr.IP != nil {
+				if !tcpAddr.IP.IsLoopback() && !tcpAddr.IP.IsPrivate() {
+					log.Printf("🚨 [LISTENER] Rejecting non-local TCP IPC connection from %s", conn.RemoteAddr())
+					return
+				}
+			}
+		}
 		tcpConn.SetNoDelay(true)
 		tcpConn.SetKeepAlive(true)
 		_ = tcpConn.SetReadBuffer(32 * 1024 * 1024)
@@ -183,6 +194,10 @@ func (l *Listener) handleConnection(conn net.Conn) {
 				log.Printf("🔌 [LISTENER] Connection closed by client (EOF)")
 			}
 			return // End this goroutine on error or client disconnect
+		}
+		if msgLen == 0 || msgLen > maxIPCBlockBytes {
+			log.Printf("🚨 [LISTENER] Rejecting invalid/oversized IPC frame length (%d bytes, max=%d) from %s", msgLen, maxIPCBlockBytes, conn.RemoteAddr())
+			return
 		}
 
 		// Reset deadline for body read

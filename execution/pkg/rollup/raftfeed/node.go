@@ -2,12 +2,18 @@ package raftfeed
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -231,10 +237,11 @@ func (n *Node) start(cc ClusterConfig) error {
 		if err != nil {
 			return fmt.Errorf("raft advertise_address: %w", err)
 		}
-		trans, err = raft.NewTCPTransportWithLogger(rc.BindAddress, adv, 3, 10*time.Second, hcl)
+		streamLayer, err := newAuthTCPStreamLayer(rc.BindAddress, adv, n.secret, rc.Peers)
 		if err != nil {
 			return fmt.Errorf("raft transport: %w", err)
 		}
+		trans = raft.NewNetworkTransportWithLogger(streamLayer, 3, 10*time.Second, hcl)
 	}
 
 	// One fail-closed exit for everything that must take this replica out: an entry the FSM cannot apply, or a
@@ -310,6 +317,10 @@ func (n *Node) start(cc ClusterConfig) error {
 	mux.HandleFunc(submitPath, n.handleSubmit)
 	mux.HandleFunc(hashPath, n.handleBlockHash)
 	mux.HandleFunc("/raft/v1/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if !n.verifyForwardAuth(r, nil) && !isRaftLoopbackAddr(r.RemoteAddr) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		writeJSON(w, http.StatusOK, n.metrics.Snapshot())
 	})
 	n.registerAdmin(mux)
@@ -689,4 +700,174 @@ func (f *failClosedLogStore) StoreLogs(ls []*raft.Log) error {
 		f.once.Do(func() { f.onFatal(fmt.Errorf("raft log store write failed: %w", err)) })
 	}
 	return err
+}
+
+func isRaftLoopbackAddr(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func (n *Node) verifyForwardAuth(r *http.Request, body []byte) bool {
+	if n == nil || len(n.secret) == 0 {
+		return false
+	}
+	sender := r.Header.Get(hdrNode)
+	ts, err := strconv.ParseInt(r.Header.Get(hdrTs), 10, 64)
+	if err != nil || !n.knownNode(sender) {
+		return false
+	}
+	skew := n.now().Sub(time.UnixMilli(ts))
+	if skew > maxForwardSkew || skew < -maxForwardSkew {
+		return false
+	}
+	mac, err := hex.DecodeString(r.Header.Get(hdrMac))
+	if err != nil {
+		return false
+	}
+	want, _ := hex.DecodeString(forwardMAC(n.secret, sender, ts, r.URL.Path, body))
+	return hmac.Equal(mac, want)
+}
+
+type authTCPStreamLayer struct {
+	ln           net.Listener
+	advertise    net.Addr
+	secret       []byte
+	allowedHosts map[string]bool
+}
+
+func newAuthTCPStreamLayer(bindAddr string, advertise net.Addr, secret []byte, peers []config.RaftPeer) (*authTCPStreamLayer, error) {
+	ln, err := net.Listen("tcp", bindAddr)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[string]bool)
+	for _, p := range peers {
+		if h, _, err := net.SplitHostPort(p.Address); err == nil && h != "" {
+			allowed[h] = true
+		}
+		if h, _, err := net.SplitHostPort(p.ForwardAddress); err == nil && h != "" {
+			allowed[h] = true
+		}
+	}
+	if advertise != nil {
+		if h, _, err := net.SplitHostPort(advertise.String()); err == nil && h != "" {
+			allowed[h] = true
+		}
+	}
+	return &authTCPStreamLayer{
+		ln:           ln,
+		advertise:    advertise,
+		secret:       secret,
+		allowedHosts: allowed,
+	}, nil
+}
+
+func (s *authTCPStreamLayer) isAllowedPeer(remoteAddr net.Addr) bool {
+	if remoteAddr == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(remoteAddr.String())
+	if err != nil {
+		host = remoteAddr.String()
+	}
+	if s.allowedHosts[host] {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func computeRaftStreamMAC(secret []byte, role string, nonce []byte) []byte {
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte(role))
+	_, _ = mac.Write(nonce)
+	return mac.Sum(nil)
+}
+
+func (s *authTCPStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	conn, err := net.DialTimeout("tcp", string(address), timeout)
+	if err != nil {
+		return nil, err
+	}
+	if len(s.secret) > 0 {
+		_ = conn.SetDeadline(time.Now().Add(timeout))
+		var nonce [32]byte
+		if _, err := io.ReadFull(rand.Reader, nonce[:]); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		clientMAC := computeRaftStreamMAC(s.secret, "raft-tcp-client-v1:", nonce[:])
+		var handshake [64]byte
+		copy(handshake[:32], nonce[:])
+		copy(handshake[32:], clientMAC)
+		if _, err := conn.Write(handshake[:]); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		var serverMAC [32]byte
+		if _, err := io.ReadFull(conn, serverMAC[:]); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("raft tcp auth response failed: %w", err)
+		}
+		expectedServerMAC := computeRaftStreamMAC(s.secret, "raft-tcp-server-v1:", nonce[:])
+		if !hmac.Equal(serverMAC[:], expectedServerMAC) {
+			_ = conn.Close()
+			return nil, errors.New("raft tcp server authentication failed")
+		}
+		_ = conn.SetDeadline(time.Time{})
+	}
+	return conn, nil
+}
+
+func (s *authTCPStreamLayer) Accept() (net.Conn, error) {
+	for {
+		conn, err := s.ln.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if len(s.allowedHosts) > 0 && !s.isAllowedPeer(conn.RemoteAddr()) {
+			logger.Warn("🚨 [RAFT-TCP] Rejected unallowed peer IP %v", conn.RemoteAddr())
+			_ = conn.Close()
+			continue
+		}
+		if len(s.secret) > 0 {
+			_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+			var handshake [64]byte
+			if _, err := io.ReadFull(conn, handshake[:]); err != nil {
+				_ = conn.Close()
+				continue
+			}
+			nonce := handshake[:32]
+			gotMAC := handshake[32:]
+			expectedClientMAC := computeRaftStreamMAC(s.secret, "raft-tcp-client-v1:", nonce)
+			if !hmac.Equal(gotMAC, expectedClientMAC) {
+				logger.Warn("🚨 [RAFT-TCP] Rejected unauthenticated connection from %v", conn.RemoteAddr())
+				_ = conn.Close()
+				continue
+			}
+			serverMAC := computeRaftStreamMAC(s.secret, "raft-tcp-server-v1:", nonce)
+			if _, err := conn.Write(serverMAC); err != nil {
+				_ = conn.Close()
+				continue
+			}
+			_ = conn.SetDeadline(time.Time{})
+		}
+		return conn, nil
+	}
+}
+
+func (s *authTCPStreamLayer) Close() error { return s.ln.Close() }
+
+func (s *authTCPStreamLayer) Addr() net.Addr {
+	if s.advertise != nil {
+		return s.advertise
+	}
+	return s.ln.Addr()
 }

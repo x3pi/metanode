@@ -541,19 +541,72 @@ func (q *QuorumClient) GetReceipt(txHash common.Hash) (*Receipt, bool, error) {
 	return nil, false, nil
 }
 
+func encodeTransferEventForQuorum(ev *TransferEvent) []byte {
+	if ev == nil {
+		return nil
+	}
+	buf := make([]byte, 0, 32+48+48+8+20+20+32+32+8+1)
+	buf = append(buf, ev.MsgID.Bytes()...)
+	buf = append(buf, ev.SourcePubKey[:]...)
+	buf = append(buf, ev.DestPubKey[:]...)
+	buf = appendUint64BE(buf, ev.SourceSeq)
+	buf = append(buf, ev.Sender.Bytes()...)
+	buf = append(buf, ev.Target.Bytes()...)
+	buf = append(buf, padTo32(ev.Amount)...)
+	buf = append(buf, ev.PayloadHash.Bytes()...)
+	buf = appendUint64BE(buf, ev.BlockTime)
+	if ev.IsRefund {
+		buf = append(buf, 1)
+	} else {
+		buf = append(buf, 0)
+	}
+	return buf
+}
+
 func (q *QuorumClient) GetInboundTransfers(pubKey cm.PublicKey, cursor uint64) ([]*TransferEvent, uint64, error) {
 	if len(q.clients) == 0 {
 		return nil, 0, ErrNoNodesConfigured
 	}
-	var lastErr error
-	for _, c := range q.clients {
-		evts, nextCur, err := c.GetInboundTransfers(pubKey, cursor)
-		if err == nil {
-			return evts, nextCur, nil
-		}
-		lastErr = err
+	type respItem struct {
+		events []*TransferEvent
+		cursor uint64
+		err    error
 	}
-	return nil, 0, lastErr
+	ch := make(chan respItem, len(q.clients))
+	for _, c := range q.clients {
+		go func(cl *httpClient) {
+			evts, nextCur, err := cl.GetInboundTransfers(pubKey, cursor)
+			ch <- respItem{events: evts, cursor: nextCur, err: err}
+		}(c)
+	}
+
+	type groupKey string
+	counts := make(map[groupKey]int)
+	threshold := q.quorumThreshold()
+	var lastErr error
+
+	for i := 0; i < len(q.clients); i++ {
+		res := <-ch
+		if res.err != nil {
+			lastErr = res.err
+			continue
+		}
+		b := make([]byte, 8)
+		binary.BigEndian.PutUint64(b, res.cursor)
+		for _, ev := range res.events {
+			b = append(b, encodeTransferEventForQuorum(ev)...)
+		}
+		k := groupKey(crypto.Keccak256Hash(b).Hex())
+		counts[k]++
+		if counts[k] >= threshold {
+			return res.events, res.cursor, nil
+		}
+	}
+
+	if lastErr != nil {
+		return nil, cursor, fmt.Errorf("%w: %v", ErrQuorumNotReached, lastErr)
+	}
+	return nil, cursor, ErrQuorumNotReached
 }
 
 func (q *QuorumClient) GetInboundAccountRegistrations(pubKey cm.PublicKey, cursor uint64) ([]*AccountRegisteredEvent, uint64, error) {

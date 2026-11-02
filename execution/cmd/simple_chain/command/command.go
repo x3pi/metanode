@@ -14,9 +14,9 @@ const (
 	SendRawTransaction              = "SendRawTransaction"
 	SendRawTransactions             = "SendRawTransactions"
 	SendProcessedVirtualTransaction = "SendProcessedVirtualTransaction"
-	TxWithDeviceKeyFromMainMaster = "TxWithDeviceKeyFromMainMaster"
-	BlockFromMainMaster           = "BlockFromMainMaster"
-	BlockDataFromMainMaster       = "BlockDataFromMainMaster"
+	TxWithDeviceKeyFromMainMaster   = "TxWithDeviceKeyFromMainMaster"
+	BlockFromMainMaster             = "BlockFromMainMaster"
+	BlockDataFromMainMaster         = "BlockDataFromMainMaster"
 
 	EventLogs = "EventLogs"
 

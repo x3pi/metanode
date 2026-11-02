@@ -1,6 +1,7 @@
 {
-  "debug": true,
+  "debug": {{ 'true' if (metanode_env | default('production')) == 'devnet' else 'false' }},
   "devnet_rpc": {{ 'true' if (metanode_env | default('production')) == 'devnet' else 'false' }},
+  "require_encrypted_keys": {{ 'false' if (metanode_env | default('production')) == 'devnet' else (require_encrypted_keys | default(true) | lower) }},
   "cluster_id": {{ cluster_id }},
   "master_password": "{{ master_password | default('devnet-test-password') }}",
   "app_pepper": "{{ app_pepper | default('devnet-test-pepper') }}",
@@ -29,6 +30,24 @@
   "is_rpc_node": true,
   "account_gate": "{{ account_gate | default('parent_registered') }}",
   "consensus_mode": "{{ consensus_mode | default('raft') }}",
+{% if help_pay is defined %}
+  "help_pay": {
+    "enabled": {{ help_pay.enabled | default(true) | lower }},
+    "min_balance": "{{ help_pay.min_balance | default('10000000000000000') }}",
+    "extra_amount": "{{ help_pay.extra_amount | default('100000000000000000') }}",
+{% if help_pay.admin_addresses is defined %}
+    "admin_addresses": {{ help_pay.admin_addresses | to_json }},
+{% elif help_pay.admin_address is defined %}
+    "admin_address": "{{ help_pay.admin_address }}",
+{% endif %}
+{% if help_pay_wallets is defined %}
+    "wallets": {{ help_pay_wallets | to_json }},
+{% elif help_pay.wallets is defined %}
+    "wallets": {{ help_pay.wallets | to_json }},
+{% endif %}
+    "config_file": "{{ help_pay.config_file | default(node_data_dir ~ '/data/helppay_wallets.json') }}"
+  },
+{% endif %}
 {% if (consensus_mode | default('raft')) == 'raft' %}
   "snapshot_enabled": false,
   "raft": {

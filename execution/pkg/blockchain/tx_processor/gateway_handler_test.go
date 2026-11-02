@@ -1751,6 +1751,7 @@ func TestGatewayHandler_ClaimMessageRelay_FullTwoHopContractCall(t *testing.T) {
 	engineB := cross_chain.NewGatewayEngine(103, map[uint64]cross_chain.ChainRegistry{
 		102: {ChainID: 102, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kpReserve.BytesPublicKey(), Stake: 1000}}, Epoch: 0, QuorumThreshold: 6667},
 	}, nil)
+	engineB.ReserveChainID = 102
 	require.NoError(t, saveGatewayEngine(csB, engineB))
 
 	parsedABI := testWrappedAssetABI(t)

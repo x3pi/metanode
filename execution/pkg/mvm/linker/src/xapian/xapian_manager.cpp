@@ -589,10 +589,11 @@ bool XapianManager::delete_document(const std::string& virtualDocId, uint256_t b
 std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::valueno slot, const std::string &value, bool isSerialise, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
-        XapianLog::AddValueData logData;
+        XapianLog::AddValueData logData{};
         logData.docid = virtualDocId;
         logData.slot = slot;
         logData.value = value;
+        logData.is_serialised = isSerialise;
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::ADD_VALUE;
         entry.data = logData;
@@ -652,9 +653,47 @@ std::string XapianManager::set_data(const std::string& virtualDocId, const std::
     }
     return virtualDocId;
 }
+std::string XapianManager::normalize_docid(const std::string& id) {
+    if (id.empty()) return id;
+    std::string s = id;
+    if (s.length() >= 2 && (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))) {
+        s = s.substr(2);
+    }
+    for (char &c : s) c = std::tolower(c);
+    return "0x" + s;
+}
+
+void XapianManager::record_doc_writer_predecessor(const std::string& virtualDocId, const uint256_t& currentTxHash, const uint256_t& prevWriterHash) {
+    std::string curTxStr = mvm::to_hex_string_fixed(currentTxHash, 64);
+    std::string prevTxStr = mvm::to_hex_string_fixed(prevWriterHash, 64);
+    if (curTxStr == prevTxStr || prevTxStr.empty() || prevWriterHash == 0) return;
+
+    std::string nid = normalize_docid(virtualDocId);
+    std::string key = nid + "_" + curTxStr;
+
+    std::lock_guard<std::mutex> lock(tx_buffers_mutex);
+    if (doc_writer_predecessors.find(key) == doc_writer_predecessors.end()) {
+        tx_to_predecessor_keys[curTxStr].push_back(key);
+    }
+    doc_writer_predecessors[key] = prevTxStr;
+}
+
+void XapianManager::clear_writer_predecessors_for_tx(const std::string& txHashStr) {
+    // Note: tx_buffers_mutex must be held by caller (e.g. registry) or taken here
+    auto it = tx_to_predecessor_keys.find(txHashStr);
+    if (it != tx_to_predecessor_keys.end()) {
+        for (const auto& k : it->second) {
+            doc_writer_predecessors.erase(k);
+        }
+        tx_to_predecessor_keys.erase(it);
+    }
+}
+
 Xapian::Document XapianManager::get_overlayed_document(const std::string& virtualDocId, const uint256_t *txHash, const uint256_t *writerHash, Xapian::Database* search_db) {
     Xapian::Document doc;
     bool found = false;
+    bool is_deleted = false;
+    std::string nid = normalize_docid(virtualDocId);
     
     try {
         ensure_db_open();
@@ -675,83 +714,96 @@ Xapian::Document XapianManager::get_overlayed_document(const std::string& virtua
     
     std::lock_guard<std::mutex> buffer_lock(tx_buffers_mutex);
 
-    // 1. Try to find in the writer transaction's buffer (provided by Block-STM dependency)
+    // 1. Trace the writer predecessor chain in chronological order
+    std::vector<std::string> writer_chain;
+    std::unordered_set<std::string> visited;
+
     if (writerHash != nullptr) {
-        std::string writerHashStr = mvm::to_hex_string_fixed(*writerHash, 64);
-        auto it = tx_buffers.find(writerHashStr);
-        if (it != tx_buffers.end()) {
-            const auto& entries = it->second.xapian_doc_logs;
-            for (size_t i = 0; i < entries.size(); ++i) {
-                const auto& entry = entries[i];
-                if (entry.op == XapianLog::Operation::NEW_DOC) {
-                    auto data = std::get<XapianLog::NewDocData>(entry.data);
-                    if (data.docid == virtualDocId) {
-                        found = true;
-                        doc = Xapian::Document();
-                        doc.set_data(data.data);
-                    }
-                } else if (entry.op == XapianLog::Operation::SET_DATA) {
-                    auto data = std::get<XapianLog::SetDataData>(entry.data);
-                    if (data.docid == virtualDocId) {
-                        found = true;
-                        doc.set_data(data.data);
-                    }
-                } else if (entry.op == XapianLog::Operation::ADD_VALUE) {
-                    auto data = std::get<XapianLog::AddValueData>(entry.data);
-                    if (data.docid == virtualDocId) {
-                        found = true;
-                        doc.add_value(data.slot, data.value);
-                    }
+        std::string current_writer = mvm::to_hex_string_fixed(*writerHash, 64);
+        while (!current_writer.empty() && visited.find(current_writer) == visited.end()) {
+            visited.insert(current_writer);
+            writer_chain.push_back(current_writer);
+            auto it = doc_writer_predecessors.find(nid + "_" + current_writer);
+            if (it != doc_writer_predecessors.end()) {
+                current_writer = it->second;
+            } else {
+                break;
+            }
+        }
+        std::reverse(writer_chain.begin(), writer_chain.end());
+    }
+
+    // 2. Append current transaction if it also wrote to buffer and not already in chain
+    if (txHash != nullptr) {
+        std::string currentTxStr = mvm::to_hex_string_fixed(*txHash, 64);
+        if (visited.find(currentTxStr) == visited.end()) {
+            writer_chain.push_back(currentTxStr);
+        }
+    }
+
+    // 3. Replay all buffered operations from the writer chain in chronological order
+    for (const auto& txHashStr : writer_chain) {
+        auto it = tx_buffers.find(txHashStr);
+        if (it == tx_buffers.end()) continue;
+
+        const auto& entries = it->second.xapian_doc_logs;
+        for (size_t i = 0; i < entries.size(); ++i) {
+            const auto& entry = entries[i];
+            if (entry.op == XapianLog::Operation::NEW_DOC) {
+                auto data = std::get<XapianLog::NewDocData>(entry.data);
+                if (normalize_docid(data.docid) == nid) {
+                    found = true;
+                    is_deleted = false;
+                    doc = Xapian::Document();
+                    doc.set_data(data.data);
+                }
+            } else if (entry.op == XapianLog::Operation::DEL_DOC) {
+                auto data = std::get<XapianLog::DelDocData>(entry.data);
+                if (normalize_docid(data.docid) == nid) {
+                    found = false;
+                    is_deleted = true;
+                    doc = Xapian::Document();
+                }
+            } else if (entry.op == XapianLog::Operation::SET_DATA) {
+                auto data = std::get<XapianLog::SetDataData>(entry.data);
+                if (normalize_docid(data.docid) == nid) {
+                    found = true;
+                    is_deleted = false;
+                    doc.set_data(data.data);
+                }
+            } else if (entry.op == XapianLog::Operation::ADD_VALUE) {
+                auto data = std::get<XapianLog::AddValueData>(entry.data);
+                if (normalize_docid(data.docid) == nid) {
+                    found = true;
+                    is_deleted = false;
+                    doc.add_value(data.slot, data.value);
+                }
+            } else if (entry.op == XapianLog::Operation::ADD_TERM) {
+                auto data = std::get<XapianLog::AddTermData>(entry.data);
+                if (normalize_docid(data.docid) == nid) {
+                    found = true;
+                    is_deleted = false;
+                    doc.add_term(data.term);
+                }
+            } else if (entry.op == XapianLog::Operation::INDEX_TEXT) {
+                auto data = std::get<XapianLog::IndexTextData>(entry.data);
+                if (normalize_docid(data.docid) == nid) {
+                    found = true;
+                    is_deleted = false;
+                    Xapian::TermGenerator termgenerator;
+                    termgenerator.set_stemmer(Xapian::Stem("english"));
+                    termgenerator.set_stemming_strategy(Xapian::TermGenerator::STEM_SOME);
+                    termgenerator.set_document(doc);
+                    termgenerator.index_text(data.text, data.wdf_inc, data.prefix);
                 }
             }
         }
     }
 
-    // 2. Try to find in current transaction's buffer (can overwrite writer's changes)
-    if (txHash != nullptr) {
-        std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
-        auto it = tx_buffers.find(txHashStr);
-        if (it != tx_buffers.end()) {
-            const auto& entries = it->second.xapian_doc_logs;
-            for (size_t i = 0; i < entries.size(); ++i) {
-                const auto& entry = entries[i];
-                if (entry.op == XapianLog::Operation::NEW_DOC) {
-                    auto data = std::get<XapianLog::NewDocData>(entry.data);
-                    if (data.docid == virtualDocId) {
-                        found = true;
-                        doc = Xapian::Document();
-                        doc.set_data(data.data);
-                    }
-                } else if (entry.op == XapianLog::Operation::DEL_DOC) {
-                    auto data = std::get<XapianLog::DelDocData>(entry.data);
-                    if (data.docid == virtualDocId) {
-                        found = false;
-                        throw Xapian::DocNotFoundError("Document deleted in buffer");
-                    }
-                } else if (entry.op == XapianLog::Operation::ADD_VALUE) {
-                    auto data = std::get<XapianLog::AddValueData>(entry.data);
-                    if (data.docid == virtualDocId) {
-                        doc.add_value(data.slot, data.value);
-                    }
-                } else if (entry.op == XapianLog::Operation::ADD_TERM) {
-                    auto data = std::get<XapianLog::AddTermData>(entry.data);
-                    if (data.docid == virtualDocId) {
-                        doc.add_term(data.term);
-                    }
-                } else if (entry.op == XapianLog::Operation::SET_DATA) {
-                    auto data = std::get<XapianLog::SetDataData>(entry.data);
-                    if (data.docid == virtualDocId) {
-                        doc.set_data(data.data);
-                    }
-                }
-            }
-        }
-    }
-    
-    if (!found) {
+    if (is_deleted || !found) {
         throw Xapian::DocNotFoundError("Document not found");
     }
-    
+
     return doc;
 }
 
@@ -1466,17 +1518,20 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
         }
 
         Xapian::Document doc;
-        Xapian::docid did = resolveVirtualDocId(nid);
+        bool was_deleted = (deleted_docs.find(nid) != deleted_docs.end());
         bool loaded = false;
-        if (did > 0) {
-            try {
-                doc = db.get_document(did);
-                loaded = true;
-            } catch (const Xapian::DocNotFoundError&) {
-                loaded = false;
-            } catch (const std::exception& e) {
-                std::cerr << "[Xapian Replay WARN] get_document(" << did << ") error: " << e.what() << std::endl;
-                loaded = false;
+        if (!was_deleted) {
+            Xapian::docid did = resolveVirtualDocId(nid);
+            if (did > 0) {
+                try {
+                    doc = db.get_document(did);
+                    loaded = true;
+                } catch (const Xapian::DocNotFoundError&) {
+                    loaded = false;
+                } catch (const std::exception& e) {
+                    std::cerr << "[Xapian Replay WARN] get_document(" << did << ") error: " << e.what() << std::endl;
+                    loaded = false;
+                }
             }
         }
 
@@ -1484,7 +1539,11 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
             std::string clean_id = nid;
             if (clean_id.length() >= 2 && clean_id.substr(0, 2) == "0x") clean_id = clean_id.substr(2);
             doc.add_term("Q" + clean_id);
-            std::cerr << "[Xapian Replay INFO] docid '" << nid << "' not present in local DB (did=0). Initializing in memory with term Q" << clean_id << std::endl;
+            if (was_deleted) {
+                std::cerr << "[Xapian Replay INFO] docid '" << nid << "' was marked deleted in current replay. Initializing fresh in memory with term Q" << clean_id << std::endl;
+            } else {
+                std::cerr << "[Xapian Replay INFO] docid '" << nid << "' not present in local DB (did=0). Initializing in memory with term Q" << clean_id << std::endl;
+            }
         }
 
         auto inserted = modified_docs.emplace(nid, std::move(doc));
@@ -1753,6 +1812,19 @@ bool XapianManager::destroyInstance(const std::string &db_path_str, bool onlyIfI
     }
 
     return false; // Không tìm thấy instance để hủy
+}
+
+void XapianManager::destroyAllInstances() {
+    std::vector<std::string> keys;
+    {
+        std::shared_lock<std::shared_mutex> lock(instances_mutex);
+        for (const auto &pair : instances) {
+            keys.push_back(pair.first);
+        }
+    }
+    for (const auto &key : keys) {
+        destroyInstance(key, false);
+    }
 }
 
 // Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged VÀ XÓA CHÚNG KHỎI MANAGER

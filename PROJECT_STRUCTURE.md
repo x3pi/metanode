@@ -162,6 +162,7 @@ metanode/
 | `storage/`, `storagenode/`, `shard_storage/`, `blob_store/` | Storage backends, storage node, sharded block store, EIP-4844 blobs | 🟡 |
 | `explorer/`, `filters/`, `stats/`, `error_tx_manager/` | Explorer index, log filters, stats, failed-tx records | 🟢 |
 | `config/`, `metrics/`, `logger/`, `loggerfile/`, `tracing/`, `monitor_service/`, `fatal/`, `failpoint/` | Config, Prometheus, logging, tracing, fail-stop, crash injection | 🟢 |
+| `helppay/` | Sponsor wallet pool management and automated gas top-up service | 🟢 isolated / 🟡 ingress |
 | `proto/` | Protobuf definitions + generated code (+ vtproto) | 🟡 wire format |
 | `bls/`, `common/`, `utils/`, `abi_file/`, `script/`, `pathdetector/`, `proxy_tx/`, `shared_memory/`, `remotestorage/`, `important_data_logger/`, `models/` | Helpers | 🟢 |
 

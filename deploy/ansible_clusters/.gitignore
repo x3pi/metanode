@@ -3,4 +3,7 @@
 *.retry
 .env
 !scripts/*.py
-inventory.yml
+inventory*.yml
+!inventory.example.yml
+parent_keys/
+*key*.json

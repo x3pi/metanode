@@ -148,8 +148,8 @@ func TestAddressesSuspectedStaleCache_Basic(t *testing.T) {
 	now := time.Now()
 	threshold := 2 * time.Second
 
-	stuckTx := makeTestTx(0x10, 44)   // stuck well past threshold
-	freshTx := makeTestTx(0x11, 5)    // future, but only just now
+	stuckTx := makeTestTx(0x10, 44)    // stuck well past threshold
+	freshTx := makeTestTx(0x11, 5)     // future, but only just now
 	untrackedTx := makeTestTx(0x12, 0) // no futureTxTimeMap entry at all
 
 	futureTxTimeMap := map[common.Hash]time.Time{
@@ -267,7 +267,6 @@ func TestTxValidatorPool_Type0xFF_IngressValidation(t *testing.T) {
 	assert.Equal(t, transaction.InvalidSign.Code, code)
 	assert.ErrorContains(t, err, "must not contain Sign bytes")
 }
-
 
 // The single and batch ingress paths share checkSecpProtoIngress; non-0xFF txs must be untouched.
 func TestTxValidatorPool_checkSecpProtoIngress(t *testing.T) {
@@ -445,8 +444,6 @@ func TestTxValidatorPool_BatchEviction_DoesNotEvictOnInvalidBatch(t *testing.T) 
 	// 3. Existing legitimate transaction must STILL be in the pool!
 	assert.Equal(t, 1, tp.CountTransactions(), "Existing pool transactions must not be evicted by invalid batch")
 }
-
-
 
 // When the pool is saturated AND an eviction pass is already running, a caller would only be rejected after paying for
 // signature verification. It must be rejected before any verification (cheap early rejection), while eviction itself
@@ -1603,5 +1600,3 @@ func TestReviewRaftBatchIngressMustEnforceSameSizeLimit(t *testing.T) {
 		t.Fatalf("single admission rejects serialized size %d, but batch admission succeeds; pool count=%d", len(raw), tp.CountTransactions())
 	}
 }
-
-

@@ -85,6 +85,13 @@ func NewRelayerEngine(config RelayerConfig, chains map[uint64]*GatewayEngine) *R
 	if config.PollInterval <= 0 {
 		config.PollInterval = 100 * time.Millisecond
 	}
+	if config.ReserveChainID != 0 {
+		for _, ch := range chains {
+			if ch != nil && ch.ReserveChainID == 0 {
+				ch.ReserveChainID = config.ReserveChainID
+			}
+		}
+	}
 	return &RelayerEngine{
 		Config:           config,
 		Chains:           chains,

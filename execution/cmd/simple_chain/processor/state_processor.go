@@ -456,8 +456,22 @@ func (sp *StateProcessor) ProcessCompleteJob(request network.Request) error {
 		return err
 	}
 
+	if connAddr := request.Connection().Address(); connAddr != (common.Address{}) && connAddr != address {
+		err := fmt.Errorf("connection address %s does not match requested job assignee %s", connAddr.Hex(), address.Hex())
+		logger.Error(err.Error())
+		sp.sendFailureResponse(request.Connection())
+		return err
+	}
+
 	if job.JobType == mining.JobTypeVideoAds {
 		logger.Info("Completing a 'video_ads' job: %s", jobID)
+		expectedVideoHash := mining.ExpectedVideoJobHash(job)
+		if hashExecute == (common.Hash{}) || hashExecute != expectedVideoHash {
+			err := fmt.Errorf("invalid execution proof hash for video_ads job %s", jobID)
+			logger.Error(err.Error())
+			sp.sendFailureResponse(request.Connection())
+			return err
+		}
 		_, err := miningService.CompleteJob(jobID, address.String())
 		if err != nil {
 			logger.Error("Error from service on completing video_ads job %s: %v", jobID, err)

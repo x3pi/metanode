@@ -2,10 +2,12 @@
 package mining
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
+	mrand "math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -15,6 +17,12 @@ import (
 	"github.com/ethereum/go-ethereum/crypto" // Import crypto for PubkeyToAddress in NewMiningService
 	"github.com/meta-node-blockchain/meta-node/pkg/goxapian"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+)
+
+const (
+	minJobCompletionIntervalSec = 15
+	maxMiningSearchLimit        = 100
+	maxMiningSearchOffset       = 10000
 )
 
 // Khai báo các hằng số cho JobStatus và JobType
@@ -59,15 +67,38 @@ type TransactionRecord struct {
 
 // MiningService quản lý việc đánh chỉ mục và tìm kiếm dữ liệu công việc (jobs).
 type MiningService struct {
-	db        *goxapian.Database
-	qp        *goxapian.QueryParser
-	mu        sync.Mutex
-	nextJobID uint64
+	db              *goxapian.Database
+	qp              *goxapian.QueryParser
+	mu              sync.Mutex
+	nextJobID       uint64
+	lastCompletedAt map[string]int64
 
 	// Thêm các biến để quản lý việc gửi giao dịch
 	rewardSenderPrivateKey string
 	rewardSenderAddress    common.Address
 	txBroadcaster          TransactionBroadcaster // Interface để gửi giao dịch
+}
+
+// ExpectedVideoJobHash computes the deterministic execution proof hash required to complete a video_ads job.
+func ExpectedVideoJobHash(job *Job) common.Hash {
+	if job == nil {
+		return common.Hash{}
+	}
+	payload := fmt.Sprintf("%s:%s:%s", job.JobID, job.Data, strings.ToLower(job.Assignee))
+	return crypto.Keccak256Hash([]byte(payload))
+}
+
+func isSafeIdentifier(s string) bool {
+	if len(s) == 0 || len(s) > 128 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // TransactionBroadcaster là một interface để trừu tượng hóa việc gửi giao dịch
@@ -100,7 +131,7 @@ func NewMiningService(dbPath string, senderPrivateKey string, txBroadcaster Tran
 	qp.AddPrefix("recipient", "P")        // Thêm tiền tố cho recipient (Paid)
 
 	// Khởi tạo seed cho số ngẫu nhiên
-	rand.Seed(time.Now().UnixNano())
+	mrand.Seed(time.Now().UnixNano())
 
 	// Lấy địa chỉ từ private key
 	// Dùng go-ethereum/crypto để derive địa chỉ từ private key
@@ -115,6 +146,7 @@ func NewMiningService(dbPath string, senderPrivateKey string, txBroadcaster Tran
 		qp: qp,
 		// Khởi tạo ID tiếp theo dựa trên số lượng tài liệu đã có trong DB
 		nextJobID:              uint64(db.GetDocCount() + 1),
+		lastCompletedAt:        make(map[string]int64),
 		rewardSenderPrivateKey: senderPrivateKey,
 		rewardSenderAddress:    rewardSenderAddr,
 		txBroadcaster:          txBroadcaster,
@@ -125,10 +157,20 @@ func NewMiningService(dbPath string, senderPrivateKey string, txBroadcaster Tran
 
 // GetOrAssignJob lấy job có sẵn hoặc gán job mới cho một địa chỉ.
 func (s *MiningService) GetOrAssignJob(address common.Address, lastBlockNumber uint64) (*Job, error) {
+	if address == (common.Address{}) {
+		return nil, errors.New("invalid zero assignee address")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	addrLower := strings.ToLower(address.String())
+
+	if lastTs, ok := s.lastCompletedAt[addrLower]; ok {
+		if time.Now().Unix()-lastTs < minJobCompletionIntervalSec {
+			return nil, fmt.Errorf("job assignment rate limit exceeded for %s, please wait before requesting a new job", address.Hex())
+		}
+	}
 
 	// 1. Tìm kiếm job có sẵn với trạng thái "new" của địa chỉ này
 	queryStr := fmt.Sprintf("assignee:%s AND status:%s", addrLower, JobStatusNew)
@@ -147,9 +189,15 @@ func (s *MiningService) GetOrAssignJob(address common.Address, lastBlockNumber u
 	jobID := s.nextJobID
 	s.nextJobID++
 
+	randBytes := make([]byte, 16)
+	if _, err := rand.Read(randBytes); err != nil {
+		s.nextJobID--
+		return nil, fmt.Errorf("failed to generate random job ID: %w", err)
+	}
+
 	newJob := &Job{
 		DocID:     jobID,
-		JobID:     fmt.Sprintf("job%d", jobID),
+		JobID:     fmt.Sprintf("job_%s", hex.EncodeToString(randBytes)),
 		Creator:   "system",
 		Assignee:  addrLower,
 		Status:    JobStatusNew,
@@ -158,7 +206,7 @@ func (s *MiningService) GetOrAssignJob(address common.Address, lastBlockNumber u
 	}
 
 	// Gán loại công việc và dữ liệu ngẫu nhiên
-	if rand.Intn(2) == 0 { // 50% là validate_block
+	if mrand.Intn(2) == 0 { // 50% là validate_block
 		newJob.JobType = JobTypeValidateBlock
 		// Sửa đổi ở đây: Lưu lastBlockNumber dưới dạng hex string
 		newJob.Data = fmt.Sprintf("0x%x", lastBlockNumber)
@@ -170,7 +218,7 @@ func (s *MiningService) GetOrAssignJob(address common.Address, lastBlockNumber u
 			"https://www.youtube.com/watch?v=3JZ_D3ELwOQ",
 			"https://www.youtube.com/watch?v=L_LUpnjgPso",
 		}
-		newJob.Data = videoLinks[rand.Intn(len(videoLinks))]
+		newJob.Data = videoLinks[mrand.Intn(len(videoLinks))]
 	}
 
 	// 3. Lưu job mới vào database
@@ -188,9 +236,9 @@ func (s *MiningService) CompleteJob(jobID string, assigneeAddress string) (*Job,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	job, err := s.GetJobByID(jobID)
+	job, err := s.getJobByIDLocked(jobID)
 	if err != nil {
-		return nil, err // GetJobByID đã bao gồm thông báo lỗi "not found"
+		return nil, err // getJobByIDLocked đã bao gồm thông báo lỗi "not found"
 	}
 
 	// 2. Xác thực
@@ -202,8 +250,19 @@ func (s *MiningService) CompleteJob(jobID string, assigneeAddress string) (*Job,
 		return nil, fmt.Errorf("job %s is not in '%s' status (current: %s)", jobID, JobStatusNew, job.Status)
 	}
 
+	now := time.Now().Unix()
+	if s.lastCompletedAt == nil {
+		s.lastCompletedAt = make(map[string]int64)
+	}
+	if lastTs, ok := s.lastCompletedAt[lowerAssignee]; ok && now-lastTs < minJobCompletionIntervalSec {
+		return nil, fmt.Errorf("job completion cooldown active for %s", assigneeAddress)
+	}
+
 	// 3. Xử lý chuyển tiền thưởng
 	recipientAddr := common.HexToAddress(job.Assignee) // Địa chỉ người nhận là người được gán job
+	if recipientAddr == (common.Address{}) {
+		return nil, errors.New("invalid zero recipient address")
+	}
 	rewardAmount := job.Reward
 
 	if s.txBroadcaster == nil {
@@ -219,18 +278,15 @@ func (s *MiningService) CompleteJob(jobID string, assigneeAddress string) (*Job,
 	)
 
 	if txErr != nil {
-		// Log lỗi nhưng không chặn việc đánh dấu job là completed nếu muốn xử lý lại sau
 		logger.Warn("Warning: Failed to send reward transaction for job %s to %s: %v", jobID, recipientAddr.Hex(), txErr)
-		// Quyết định: Bạn có thể chọn trả về lỗi ở đây HOẶC tiếp tục đánh dấu job là completed
-		// và để hệ thống khác (ví dụ: một worker background) thử lại việc chuyển tiền.
-		// Trong ví dụ này, chúng ta sẽ trả về lỗi để đảm bảo tiền được chuyển thành công trước khi job được đánh dấu hoàn thành.
 		return nil, fmt.Errorf("failed to send reward for job %s: %w", jobID, txErr)
 	}
 
 	// 4. Cập nhật trạng thái Job và lưu hash giao dịch
 	job.Status = JobStatusCompleted
-	job.CompletedAt = time.Now().Unix()
+	job.CompletedAt = now
 	job.TxHash = txHash.Hex() // Lưu hash giao dịch
+	s.lastCompletedAt[lowerAssignee] = now
 
 	// 5. Lưu lại job đã cập nhật
 	if err := s._indexJob(job); err != nil {
@@ -246,7 +302,7 @@ func (s *MiningService) CompleteJob(jobID string, assigneeAddress string) (*Job,
 		Sender:    s.rewardSenderAddress.Hex(),
 		Recipient: recipientAddr.Hex(),
 		Amount:    rewardAmount,
-		Timestamp: time.Now().Unix(),
+		Timestamp: now,
 		Status:    "confirmed", // Hoặc "pending" nếu bạn muốn chờ xác nhận on-chain
 	}
 	if err := s._indexTransactionRecord(txRecord); err != nil {
@@ -260,7 +316,15 @@ func (s *MiningService) CompleteJob(jobID string, assigneeAddress string) (*Job,
 
 // GetJobByID tìm và trả về thông tin của một job dựa vào ID.
 func (s *MiningService) GetJobByID(jobID string) (*Job, error) {
-	// Không cần lock/unlock ở đây vì các hàm gọi nó (public) đã có lock
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getJobByIDLocked(jobID)
+}
+
+func (s *MiningService) getJobByIDLocked(jobID string) (*Job, error) {
+	if !isSafeIdentifier(jobID) {
+		return nil, fmt.Errorf("invalid job ID format")
+	}
 	queryStr := fmt.Sprintf("jobid:%s", jobID)
 	jobs, _, err := s._searchAndParseJobs(queryStr, 1)
 	if err != nil {
@@ -274,6 +338,11 @@ func (s *MiningService) GetJobByID(jobID string) (*Job, error) {
 
 // GetTransactionRecordByTxID tìm và trả về lịch sử giao dịch dựa vào TxID.
 func (s *MiningService) GetTransactionRecordByTxID(txID string) (*TransactionRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !isSafeIdentifier(txID) {
+		return nil, fmt.Errorf("invalid transaction ID format")
+	}
 	queryStr := fmt.Sprintf("txid:%s", txID)
 	records, _, err := s._searchAndParseTransactionRecords(queryStr, 1)
 	if err != nil {
@@ -290,8 +359,30 @@ func (s *MiningService) GetTransactionRecordByTxID(txID string) (*TransactionRec
 func (s *MiningService) SearchTransactionHistory(queryStr string, offset, limit int) ([]*TransactionRecord, uint, error) {
 	s.mu.Lock() // Bảo vệ truy cập database
 	defer s.mu.Unlock()
-	// Gọi hàm nội bộ để thực hiện tìm kiếm và parse
-	return s._searchAndParseTransactionRecords(queryStr, limit)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > maxMiningSearchOffset {
+		offset = maxMiningSearchOffset
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > maxMiningSearchLimit {
+		limit = maxMiningSearchLimit
+	}
+	records, total, err := s._searchAndParseTransactionRecords(queryStr, offset+limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	if offset > len(records) {
+		offset = len(records)
+	}
+	end := offset + limit
+	if end > len(records) {
+		end = len(records)
+	}
+	return records[offset:end], total, nil
 }
 
 // _indexJob là hàm nội bộ để đánh chỉ mục (hoặc cập nhật) một công việc.

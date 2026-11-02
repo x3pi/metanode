@@ -35,14 +35,14 @@ var (
 	pprofAddr         = flag.String("pprof-addr", "localhost:6060", "Địa chỉ bind pprof (để trống để tắt)")
 
 	// Tool flags
-	toolGetAddress        = flag.String("tool-get-address", "", "Hex private key to calculate address. If set, prints address and exits.")
-	toolC0Spike           = flag.String("tool-c0-spike", "", "Run C0 spike: 'worker', 'verify'")
-	c0DataDir             = flag.String("c0-data-dir", "", "Data directory for C0 worker")
-	c0OutPath             = flag.String("c0-out", "", "Output path for C0 worker results JSON")
-	c0Blocks              = flag.Int("c0-blocks", 5, "Number of blocks to execute in C0 spike")
-	c0Rounds              = flag.Int("c0-rounds", 2, "Number of verification rounds for C0 spike")
-	c0Restart             = flag.Bool("c0-restart", false, "Test restart bypass behavior in C0 spike")
-	c0ReportPath          = flag.String("c0-report", "", "Optional path to write C0 verification markdown report (default: write to tmp file)")
+	toolGetAddress = flag.String("tool-get-address", "", "Hex private key to calculate address. If set, prints address and exits.")
+	toolC0Spike    = flag.String("tool-c0-spike", "", "Run C0 spike: 'worker', 'verify'")
+	c0DataDir      = flag.String("c0-data-dir", "", "Data directory for C0 worker")
+	c0OutPath      = flag.String("c0-out", "", "Output path for C0 worker results JSON")
+	c0Blocks       = flag.Int("c0-blocks", 5, "Number of blocks to execute in C0 spike")
+	c0Rounds       = flag.Int("c0-rounds", 2, "Number of verification rounds for C0 spike")
+	c0Restart      = flag.Bool("c0-restart", false, "Test restart bypass behavior in C0 spike")
+	c0ReportPath   = flag.String("c0-report", "", "Optional path to write C0 verification markdown report (default: write to tmp file)")
 )
 
 var logCleaner *loggerfile.LogCleaner

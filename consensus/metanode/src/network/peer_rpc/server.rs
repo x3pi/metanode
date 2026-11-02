@@ -24,6 +24,10 @@ use once_cell::sync::Lazy;
 use sha3::Digest;
 
 const MAX_TX_CACHE_SIZE: usize = 200_000;
+const MAX_PEER_RPC_BODY_BYTES: usize = 10 * 1024 * 1024;
+const MAX_PEER_RPC_HEADER_BYTES: usize = 8192;
+const MAX_CONCURRENT_PEER_RPC_CONNS: usize = 256;
+const MAX_SINGLE_TX_BYTES: usize = 128 * 1024;
 
 static RECENT_TXS: Lazy<Mutex<(VecDeque<[u8; 32]>, HashSet<[u8; 32]>)>> = Lazy::new(|| {
     Mutex::new((VecDeque::with_capacity(MAX_TX_CACHE_SIZE), HashSet::with_capacity(MAX_TX_CACHE_SIZE)))
@@ -184,6 +188,7 @@ impl PeerRpcServer {
         let node_id = self.node_id;
         let network_address = self.network_address.clone();
         let shared_index_arc = self.shared_last_global_exec_index.clone();
+        let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PEER_RPC_CONNS));
 
         loop {
             let (mut stream, peer_addr) = match listener.accept().await {
@@ -194,13 +199,22 @@ impl PeerRpcServer {
                 }
             };
 
+            let permit = match conn_semaphore.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    warn!("🌐 [PEER RPC] Connection limit ({}) reached; dropping {}", MAX_CONCURRENT_PEER_RPC_CONNS, peer_addr);
+                    continue;
+                }
+            };
+
             let executor = Arc::clone(&executor_client);
             let node = node_opt.clone();
             let net_addr = network_address.clone();
             let shared_exec_index = shared_index_arc.clone();
 
             tokio::spawn(async move {
-                // Read HTTP request (handle full POST bodies)
+                let _permit = permit;
+                // Read HTTP request (handle full POST bodies with bounded size)
                 let mut request_bytes = Vec::new();
                 let mut buffer = [0u8; 8192];
                 let mut expected_len = None;
@@ -215,6 +229,14 @@ impl PeerRpcServer {
                     match read_result {
                         Ok(Ok(0)) => break, // EOF
                         Ok(Ok(n)) => {
+                            if request_bytes.len().saturating_add(n)
+                                > MAX_PEER_RPC_BODY_BYTES + MAX_PEER_RPC_HEADER_BYTES
+                            {
+                                warn!("🌐 [PEER RPC] Rejecting oversized payload from {}", peer_addr);
+                                let resp = "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Payload Too Large\"}";
+                                let _ = stream.write_all(resp.as_bytes()).await;
+                                return;
+                            }
                             request_bytes.extend_from_slice(&buffer[..n]);
 
                             if expected_len.is_none() {
@@ -222,20 +244,37 @@ impl PeerRpcServer {
                                     .windows(4)
                                     .position(|window| window == b"\r\n\r\n")
                                 {
+                                    if headers_end > MAX_PEER_RPC_HEADER_BYTES {
+                                        let resp = "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Headers Too Large\"}";
+                                        let _ = stream.write_all(resp.as_bytes()).await;
+                                        return;
+                                    }
                                     let headers_str =
                                         String::from_utf8_lossy(&request_bytes[..headers_end]);
                                     let mut cl_len = 0;
                                     for line in headers_str.lines() {
                                         if line.to_lowercase().starts_with("content-length:") {
                                             if let Some(val) = line.split(':').nth(1) {
-                                                if let Ok(len) = val.trim().parse::<usize>() {
-                                                    cl_len = len;
-                                                    break;
+                                                match val.trim().parse::<usize>() {
+                                                    Ok(len) if len <= MAX_PEER_RPC_BODY_BYTES => {
+                                                        cl_len = len;
+                                                        break;
+                                                    }
+                                                    _ => {
+                                                        warn!("🌐 [PEER RPC] Rejecting invalid/oversized Content-Length from {}", peer_addr);
+                                                        let resp = "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Payload Too Large\"}";
+                                                        let _ = stream.write_all(resp.as_bytes()).await;
+                                                        return;
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                     expected_len = Some(headers_end + 4 + cl_len);
+                                } else if request_bytes.len() > MAX_PEER_RPC_HEADER_BYTES {
+                                    let resp = "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Headers Too Large\"}";
+                                    let _ = stream.write_all(resp.as_bytes()).await;
+                                    return;
                                 }
                             }
 
@@ -819,7 +858,38 @@ impl PeerRpcServer {
             .or_else(|| request.find("\n\n").map(|i| i + 2))
             .unwrap_or(0);
 
+        let headers_part = &request[..body_start];
         let body = &request[body_start..];
+
+        // Authenticate peer request via X-Peer-Rpc-Auth header
+        let provided_auth = headers_part
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("x-peer-rpc-auth:"))
+            .and_then(|line| line.split_once(':').map(|(_, v)| v.trim()))
+            .unwrap_or("");
+        let expected_auth = super::client::compute_peer_rpc_auth_tag(body.as_bytes());
+        let auth_valid = provided_auth.len() == expected_auth.len()
+            && provided_auth
+                .as_bytes()
+                .iter()
+                .zip(expected_auth.as_bytes().iter())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0;
+        if !auth_valid {
+            warn!("🚫 [PEER RPC] Rejecting unauthenticated POST /submit_transaction");
+            let response = SubmitTransactionResponse {
+                success: false,
+                count: 0,
+                error: Some("Unauthorized peer request".to_string()),
+            };
+            let json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+            let http_response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{}",
+                json
+            );
+            let _ = stream.write_all(http_response.as_bytes()).await;
+            return;
+        }
 
         // Parse JSON request (validate format)
         let submit_req: SubmitTransactionRequest = match serde_json::from_str(body.trim()) {
@@ -861,9 +931,13 @@ impl PeerRpcServer {
                 .transactions_hex
                 .iter()
                 .filter_map(|tx_hex| match hex::decode(tx_hex) {
-                    Ok(tx_bytes) => {
+                    Ok(tx_bytes) if tx_bytes.len() <= MAX_SINGLE_TX_BYTES && !tx_bytes.is_empty() => {
                         let tx = consensus_core::Transaction::new(tx_bytes);
                         Some((tx.digest(), tx))
+                    }
+                    Ok(_) => {
+                        decode_errors.push("Invalid transaction size".to_string());
+                        None
                     }
                     Err(e) => {
                         decode_errors.push(format!("Hex decode error: {}", e));

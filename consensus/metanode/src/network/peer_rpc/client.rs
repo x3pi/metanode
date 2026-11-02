@@ -752,6 +752,20 @@ pub async fn forward_transactions_to_peer(
     forward_serialized_transactions_to_peer(peer_address, std::sync::Arc::new(body)).await
 }
 
+/// Compute the keyed peer RPC authentication tag for `/submit_transaction` requests.
+pub fn compute_peer_rpc_auth_tag(body: &[u8]) -> String {
+    use sha3::{Digest, Keccak256};
+    let secret = std::env::var("METANODE_PEER_RPC_SECRET")
+        .or_else(|_| std::fs::read_to_string("config/jwt.hex").map(|s| s.trim().to_string()))
+        .unwrap_or_else(|_| "metanode-peer-rpc-internal-v1-auth-key".to_string());
+    let mut hasher = Keccak256::new();
+    hasher.update(b"PEER_RPC_SUBMIT_TX_V1:");
+    hasher.update(secret.as_bytes());
+    hasher.update(b":");
+    hasher.update(body);
+    hex::encode(hasher.finalize())
+}
+
 /// Forward a pre-serialized batch of transactions to a validator node via /submit_transaction HTTP POST endpoint.
 pub async fn forward_serialized_transactions_to_peer(
     peer_address: &str,
@@ -769,10 +783,13 @@ pub async fn forward_serialized_transactions_to_peer(
     .map_err(|_| anyhow::anyhow!("Connection timeout to validator {}", peer_address))?
     .map_err(|e| anyhow::anyhow!("Failed to connect to validator {}: {}", peer_address, e))?;
 
+    let auth_tag = compute_peer_rpc_auth_tag(serialized_body.as_bytes());
+
     // Send HTTP POST request
     let request = format!(
-        "POST /submit_transaction HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /submit_transaction HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nX-Peer-Rpc-Auth: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         peer_address,
+        auth_tag,
         serialized_body.len(),
         *serialized_body
     );

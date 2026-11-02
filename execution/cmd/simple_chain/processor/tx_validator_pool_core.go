@@ -57,7 +57,7 @@ type TxValidatorPool struct {
 	// admitMu synchronizes status checks, capacity reservations, evictions, and pool insertions
 	// across both single and batch paths, preventing concurrent capacity overshoots.
 	admitMu sync.Mutex
-	
+
 	// RollupInterceptor allows simple_chain/app.go to intercept System Events (like CreditObserved)
 	// before they are sent to the EVM processor, ensuring Zero State Drift across the cluster.
 	RollupInterceptor func(tx types.Transaction) bool
@@ -1333,4 +1333,3 @@ func SortTxsByFromAndNonce(allTxs []types.Transaction) {
 		allTxs[i] = sortItems[i].tx
 	}
 }
-

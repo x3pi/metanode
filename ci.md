@@ -138,7 +138,7 @@ Xóa toàn bộ database cũ của Public Chain, nạp genesis mới và đồng
 Thao tác chuyên biệt trên các cụm node chain con (Chain ID 991: `chain_a`, `chain_b`):
 ```bash
 # Restart nhanh các tiến trình của Execution Clusters:
-./ci.sh run-now --child-chain --restart-exec
+./ci.sh run-now --child-chain --restart-exec 
 
 # Reset sạch sẽ cụm Execution Clusters về Genesis (nạp sẵn 50,000 ví TPS):
 ./ci.sh run-now --child-chain --reset-exec

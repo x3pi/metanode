@@ -53,6 +53,12 @@ const (
 // dev-only tools like ca_test/mvm_ca_test.cpp; this runs inside a real
 // node.)
 func dispatchReverseCall(cmd C.mvm_tz_cmd_t, header, blob []byte) (respHeader, respBlob []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("[TZ_HW] dispatchReverseCall: recovered panic on cmd=%d: %v", int(cmd), r)
+			respHeader, respBlob = nil, nil
+		}
+	}()
 	switch cmd {
 	case C.MVM_TZ_RCMD_GLOBAL_STATE_GET:
 		mvmId, address, err := decodeGlobalStateGetReq(header)

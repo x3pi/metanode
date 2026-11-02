@@ -36,6 +36,7 @@ extern void commit_xapian_tx_buffer(unsigned char *b_tx_hash);
 extern void clear_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int count);
 extern void commit_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int count);
 extern void MVM_commitAllXapian();
+extern void MVM_destroyAllXapianInstances();
 */
 import "C"
 import (
@@ -149,7 +150,7 @@ func CallReplayFullDbLogs(logs map[string][]byte) int {
 			C.free(ptr)
 		}
 	}()
-	
+
 	// Sắp xếp các địa chỉ (keys) để đảm bảo tính tuần tự (determinism)
 	var addrs []string
 	for addrHex := range logs {
@@ -251,24 +252,24 @@ func ExportAllXapianLogs() map[string][]byte {
 	}
 
 	result := make(map[string][]byte, count)
-	
+
 	// Create a Go slice backed by the C array
 	cDataSlice := unsafe.Slice(cArray.data, count)
-	
+
 	for i := 0; i < count; i++ {
 		cEntry := cDataSlice[i]
-		
+
 		// Parse address (20 bytes)
 		addressBytes := C.GoBytes(unsafe.Pointer(&cEntry.address[0]), 20)
 		addressHex := common.BytesToAddress(addressBytes).Hex()
-		
+
 		// Parse serialized logs
 		if cEntry.logs != nil && cEntry.logs_length > 0 {
 			logData := C.GoBytes(unsafe.Pointer(cEntry.logs), cEntry.logs_length)
 			result[addressHex] = logData
 		}
 	}
-	
+
 	return result
 }
 
@@ -1430,7 +1431,6 @@ func (a *MVMApi) GetExecuteResult() *MVMExecuteResult {
 	return a.rs
 }
 
-
 // globalStateGetCore is the pure-Go core of GlobalStateGet, extracted
 // 2026-08-20 (plan §9's "Giai đoạn 3b") so the real-hardware reverse-call
 // dispatcher can call it directly and encode the result over the wire
@@ -1720,6 +1720,7 @@ func GetBlockHash(blockNumber C.int) C.struct_Value_return {
 // cleaner_thread, không có transaction/BlockContext đang active để đọc, nên
 // không thể tái dùng cơ chế BlockContext của deploy/call/execute — cần
 // callback mid-flight kiểu tiền-B1, giống GetChainId ngay dưới đây).
+//
 //export GetXapianPruneRetentionBlocks
 func GetXapianPruneRetentionBlocks() C.struct_Value_return {
 	// Defensive nil guard (same reasoning as buildB1Context's config.ConfigApp
@@ -1896,9 +1897,15 @@ func GetBlobBaseFee(mvmId *C.uchar) C.struct_Value_return {
 func ClearAllStateInstances() {
 	C.clearAllStateInstances()
 }
+
 // CommitAllXapian forces all XapianManager instances in C++ to commit their data to disk
 func CommitAllXapian() {
 	C.MVM_commitAllXapian()
+}
+
+// DestroyAllXapianInstances cleanly closes and removes all XapianManager instances in C++
+func DestroyAllXapianInstances() {
+	C.MVM_destroyAllXapianInstances()
 }
 func ClearXapianTxBuffer(txHash []byte) {
 	if len(txHash) == 0 {
@@ -1959,5 +1966,3 @@ func CommitXapianTxBufferBatch(txHashes [][]byte) {
 	defer C.free(cTxHashes)
 	C.commit_xapian_tx_buffer_batch((*C.uchar)(cTxHashes), C.int(len(flattened)/32))
 }
-
-

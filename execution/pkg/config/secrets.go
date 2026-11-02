@@ -41,19 +41,22 @@ func resolveSecrets(c *SimpleChainConfig) error {
 	if c.RequireEncryptedKeys && len(plain) > 0 {
 		return fmt.Errorf("require_encrypted_keys is set but these secrets are in clear text: %s (encrypt them with cmd/tool/encrypt_secret)", strings.Join(sortedStrings(plain), ", "))
 	}
-	if len(enc) == 0 {
-		return nil
-	}
-	pw, err := keyvault.LoadPassword(c.KeyPasswordFile)
-	if err != nil {
-		return fmt.Errorf("encrypted secrets present (%s): %w", strings.Join(sortedStrings(enc), ", "), err)
-	}
-	for _, name := range enc {
-		v, err := keyvault.Decrypt(*fields[name], pw)
+	if len(enc) > 0 {
+		pw, err := keyvault.LoadPassword(c.KeyPasswordFile)
 		if err != nil {
-			return fmt.Errorf("secret %s: %w", name, err)
+			return fmt.Errorf("encrypted secrets present (%s): %w", strings.Join(sortedStrings(enc), ", "), err)
 		}
-		*fields[name] = v
+		for _, name := range enc {
+			v, err := keyvault.Decrypt(*fields[name], pw)
+			if err != nil {
+				return fmt.Errorf("secret %s: %w", name, err)
+			}
+			*fields[name] = v
+		}
+	}
+	trimmedPw := strings.TrimSpace(c.Securepassword)
+	if trimmedPw == "mysecretpassword" || trimmedPw == "securepassword" || (!c.DevnetRPC && trimmedPw == "devnet-test-password") {
+		return fmt.Errorf("config: insecure default securepassword is not permitted")
 	}
 	return nil
 }

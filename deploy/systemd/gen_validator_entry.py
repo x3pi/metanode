@@ -46,6 +46,7 @@ Options:
 import json
 import sys
 import os
+import secrets
 import subprocess
 import argparse
 import shutil
@@ -159,6 +160,8 @@ def generate_keys_via_keytool(metanode_bin: str, keys_dir: str) -> tuple:
 
     rewrite_key_as_base64(proto_data, proto_file)
     rewrite_key_as_base64(net_data, net_file)
+    for fpath in [auth_file, proto_file, net_file, eth_file]:
+        os.chmod(fpath, 0o600)
 
     bls = {
         "authority_key": auth_data["public_key_base64"],
@@ -424,7 +427,8 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "list_type_service": "SUB-WRITE || MASTER || SUB-READ",
         "service_type": "MASTER",
         "rpc_port": rpc_port,
-        "securepassword": "mysecretpassword",
+        "securepassword": os.environ.get("METANODE_ADMIN_PASSWORD") or secrets.token_hex(32),
+        "require_encrypted_keys": os.environ.get("METANODE_REQUIRE_ENCRYPTED_KEYS", "false").lower() == "true",
         "peer_rpc_port": peer_rpc_port,
         "db_type": 2,
         "genesis_file_path": f"{install_dir}/config/genesis.json",
@@ -475,6 +479,7 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
     exec_file = os.path.join(keys_dir, "execution.json")
     with open(exec_file, "w") as f:
         json.dump(exec_json, f, indent=4)
+    os.chmod(exec_file, 0o600)
 
     consensus_toml = f"""node_id = {node_id}
 network_address = "0.0.0.0:{consensus_port}"
@@ -523,6 +528,7 @@ file_output = false
     cons_file = os.path.join(keys_dir, "consensus.toml")
     with open(cons_file, "w") as f:
         f.write(consensus_toml)
+    os.chmod(cons_file, 0o600)
 
     # Write open_ports.sh
     open_ports_sh = f"""#!/bin/bash

@@ -2,14 +2,32 @@ package processor
 
 import (
 	"fmt"
+	"net"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
+
+func isTrustedClusterPeerAddr(remoteAddr string) bool {
+	if remoteAddr == "" {
+		return true // In-process / mock test connections without a TCP socket
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return true
+	}
+	return ip.IsLoopback() || ip.IsPrivate()
+}
 
 type ConnectionProcessor struct {
 	connectionsManager network.ConnectionsManager
@@ -60,6 +78,29 @@ func (p *ConnectionProcessor) ProcessInitConnection(
 
 	address := common.BytesToAddress(initData.Address)
 	cType := initData.Type
+	if address == (common.Address{}) {
+		return fmt.Errorf("ProcessInitConnection: rejected zero address from %s", conn.RemoteAddrSafe())
+	}
+
+	msg := request.Message()
+	pub := msg.Pubkey()
+	hasVerifiedSig := false
+	if pub != (p_common.PublicKey{}) {
+		derivedAddr := bls.GetAddressFromPublicKey(pub.Bytes())
+		if derivedAddr != address || !bls.VerifySign(pub, msg.Sign(), crypto.Keccak256(msg.Body())) {
+			logger.Warn("🚨 [PROCESS_INIT] Rejected InitConnection with invalid BLS signature from %s claiming %s (type=%s)",
+				conn.RemoteAddrSafe(), address.Hex(), cType)
+			return fmt.Errorf("ProcessInitConnection: invalid BLS signature for %s", address.Hex())
+		}
+		hasVerifiedSig = true
+	}
+
+	// Non-client (privileged node/validator/parent/storage) connections from public/non-private IPs MUST carry a valid BLS signature
+	if cType != "" && cType != p_common.CLIENT_CONNECTION_TYPE && !hasVerifiedSig && !isTrustedClusterPeerAddr(conn.RemoteAddrSafe()) {
+		logger.Warn("🚨 [PROCESS_INIT] Rejected unauthenticated privileged InitConnection (type=%s, addr=%s) from untrusted remote %s",
+			cType, address.Hex(), conn.RemoteAddrSafe())
+		return fmt.Errorf("ProcessInitConnection: privileged connection type %s requires cryptographic signature", cType)
+	}
 
 	// Init connection TRƯỚC khi add vào manager để đảm bảo connection có address và type
 	conn.Init(address, cType)

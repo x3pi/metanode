@@ -490,6 +490,10 @@ func verifySignatures(accountDB *account_state_db.AccountStateDB, txs []types.Tr
 			valid[i] = false
 			return
 		}
+		if pol.secpProtoError(txs[i]) != nil {
+			valid[i] = false
+			return
+		}
 		as := loadState(i)
 		if pol.senderRegisteredError(txs[i], as) != nil {
 			valid[i] = false

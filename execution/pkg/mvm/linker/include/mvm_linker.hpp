@@ -307,6 +307,7 @@ void updateStateNonce(unsigned char *b_address, unsigned long long nonce);
 void updateStateBalance(unsigned char *b_address, unsigned char *b_balance);
 extern void MVM_cancelTransaction(unsigned char *mvmId);
 extern void MVM_commitAllXapian();
+extern void MVM_destroyAllXapianInstances();
 
 struct ExportedXapianLog {
   unsigned char address[20];
@@ -321,6 +322,10 @@ struct ExportedXapianLogArray {
 
 extern struct ExportedXapianLogArray MVM_exportAllXapianLogs();
 extern void MVM_freeExportedXapianLogs(struct ExportedXapianLogArray array);
+extern void clear_xapian_tx_buffer(unsigned char *b_tx_hash);
+extern void commit_xapian_tx_buffer(unsigned char *b_tx_hash);
+extern void clear_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int count);
+extern void commit_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int count);
 
 #ifdef __cplusplus
 }

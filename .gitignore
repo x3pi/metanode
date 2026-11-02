@@ -250,8 +250,10 @@ metanode/check.err
 # metanode/config/committee_*.json
 # metanode/config-copy
 # metanode/config/epoch_timestamp.txt
-# metanode/config/node_*_network_key.json
-# metanode/config/node_*_protocol_key.json
+metanode/config/node_*_network_key.json
+metanode/config/node_*_protocol_key.json
+consensus/metanode/config/*_key.json
+consensus/metanode/config/**/*_key.json
 # metanode/config/node_*.toml
 metanode/config/storage/
 metanode/*.err

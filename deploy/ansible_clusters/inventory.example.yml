@@ -1,5 +1,9 @@
 all:
   vars:
+    # Môi trường mẫu mặc định: devnet (dùng cho testnet / phát triển nội bộ)
+    metanode_env: "devnet"
+    node_env: "devnet"
+    metanode_devnet: true
     ansible_user: "abc"
     # Installation and base directories (standardized across all machines)
     install_dir: "/opt/metanode"
@@ -17,6 +21,7 @@ all:
     raft_secret_file: "/opt/metanode/raft_secret.key"
 
     # ── Parent Chain Configuration (Điểm neo bảo chứng cho Child Chain) ──
+    parent_keys_dir: "{{ playbook_dir }}/parent_keys"
     parent_chain_rpc_port: 10751
     parent_chain_host: "192.168.1.234"
     # EVM Chain ID cho Child Chain (Execution Clusters)
@@ -32,6 +37,27 @@ all:
     parent_allow_deposit_to_float: true   # devnet: true, production: false
     bls_conservation_mode: "warn"         # devnet: warn, production: enforce
     bls_conservation_interval_seconds: 300
+
+    # ── HelpPay (Gas Sponsorship / Chuyển Tiền Hộ) Configuration ───────────────
+    # ⚠️ LƯU Ý: Đây là file mẫu (example template). Các địa chỉ và private key dưới đây
+    # CHỈ LÀ DỮ LIỆU VÍ DỤ MINH HỌA (Example / Placeholder).
+    # - Nếu không cấu hình admin_addresses, API helppay_* sẽ từ chối quản trị (fail-closed).
+    # - Operator cần thay thế bằng địa chỉ và private key thực tế của cụm mình trong inventory.yml.
+    help_pay:
+      enabled: false                      # Mặc định tắt trong template; bật 'true' khi đã cấu hình ví
+      min_balance: "10000000000000000"   # Ngưỡng kích hoạt nạp gas ví dụ (0.01 ETH / 10^16 wei)
+      extra_amount: "100000000000000000" # Lượng coin nạp mỗi lần ví dụ (0.1 ETH / 10^17 wei)
+      admin_addresses:
+        # Ví dụ địa chỉ ví Admin ký quyền EIP-191 (để trống = tắt xác thực admin RPC)
+        # - "0x0000000000000000000000000000000000000000"
+      wallets:
+        # Danh sách ví bảo trợ ví dụ minh họa (Operator cần tạo và thay bằng ví thực tế):
+        - address: "0x0000000000000000000000000000000000000001"
+          private_key: "0000000000000000000000000000000000000000000000000000000000000001"
+        - address: "0x0000000000000000000000000000000000000002"
+          private_key: "0000000000000000000000000000000000000000000000000000000000000002"
+
+
 
   children:
     # ── Parent Chain Committee (100% Rust BFT Consensus Engine, Chain ID: 991) ──

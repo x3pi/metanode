@@ -87,11 +87,11 @@ metanode/config/storage/
 # metanode/config/epoch_timestamp.txt
 
 # Cryptographic keys (NEVER COMMIT - Contains private keys!)
-# metanode/config/node_*_protocol_key.json
-# metanode/config/node_*_network_key.json
+metanode/config/node_*_protocol_key.json
+metanode/config/node_*_network_key.json
 **/private_key.pem
 **/secret_key.pem
-# **/*_key.json
+**/*_key.json
 
 # Environment files (may contain secrets)
 **/.env

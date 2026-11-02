@@ -506,7 +506,7 @@ func (s *SocketServer) OnConnect(conn network.Connection) {
 		Type:    "unified",
 		Replace: true,
 	}
-	err := SendMessage(conn, p_common.InitConnection, initMsg, s.version)
+	err := SendSignedMessage(conn, p_common.InitConnection, initMsg, s.version, s.keyPair)
 	if err != nil {
 		logger.Warn("OnConnect: Error sending INIT message to %s: %v", conn.RemoteAddrSafe(), err)
 	}

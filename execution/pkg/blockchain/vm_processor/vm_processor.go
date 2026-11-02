@@ -19,6 +19,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"math/big"
@@ -212,6 +213,11 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 	}
 
 	if mvmRs != nil {
+		if !tx.GetReadOnly() && (mvmRs.Status == pb.RECEIPT_STATUS_THREW || mvmRs.Status == pb.RECEIPT_STATUS_HALTED) {
+			if tm := trie_database.GetTrieDatabaseManager(); tm != nil {
+				tm.FindAndSetTrieDatabasesByMvmID(vmP.mvmId, trie_database.Reverted)
+			}
+		}
 		rs, _ := vmP.MvmResultToExecuteResult(execCtx, tx, mvmRs)
 		if span != nil {
 			span.SetAttribute("executeResultStatus", rs.ReceiptStatus().String())

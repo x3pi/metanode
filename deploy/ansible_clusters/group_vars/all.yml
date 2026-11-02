@@ -15,6 +15,7 @@ base_log_dir: "/var/log/metanode"
 
 # Parent Chain settings
 parent_chain_rpc_url: "http://{{ hostvars[groups['parent_chain_nodes'][0]]['ansible_host'] | default('127.0.0.1') }}:{{ hostvars[groups['parent_chain_nodes'][0]]['parent_http_port'] | default(8547) }}"
+parent_keys_dir: "{{ playbook_dir }}/parent_keys"
 
 # Integration test settings
 run_integration_tests: false
