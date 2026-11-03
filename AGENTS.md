@@ -20,6 +20,26 @@ while strictly avoiding over-engineering.
 
 ---
 
+## 📌 CORE GUIDELINES & SYNCHRONIZATION RULES
+
+### 1. Output Formatting Rule
+- Khi trình bày các công thức toán học, ký hiệu kỹ thuật hoặc phương trình, **TUYỆT ĐỐI KHÔNG** dùng cú pháp LaTeX hoặc dấu bao bọc dollar (`$`, `$$`).
+- Luôn sử dụng văn bản thuần (plain text) hoặc ký tự Unicode chuẩn để hiển thị rõ ràng.
+
+### 2. HelpPay (Gas Sponsorship) Documentation Synchronization Rule
+Bất kỳ khi nào AI hoặc lập trình viên thực hiện thay đổi, sửa đổi, tái cấu trúc (refactor) hoặc thêm tính năng liên quan đến hệ thống chuyển tiền hộ / nạp gas bảo trợ:
+- **Phạm vi code liên quan**:
+  + `execution/pkg/helppay/*`
+  + `execution/cmd/simple_chain/helppay_api.go` & `admin_api.go`
+  + `execution/cmd/simple_chain/processor/transaction_processor.go` & `rpc_transaction.go`
+  + `execution/pkg/rollup/raftfeed/admin.go`
+  + `execution/pkg/config/config.go` (`HelpPayConfig`)
+- **Yêu cầu bắt buộc**:
+  Phải kiểm tra và cập nhật lại đồng bộ tài liệu kiến trúc tương ứng tại:
+  `note/helppay_sponsor_wallet_architecture.md`: Tài liệu kiến trúc toàn diện, luồng dữ liệu, worker pool, đồng bộ Raft và cơ chế bảo mật Admin.
+
+---
+
 ## 🔴 PART 1: ANTI-OVER-ENGINEERING GUARDRAILS (STRICT)
 
 - **Strict KISS & YAGNI:** Write the absolute minimum, most direct code required

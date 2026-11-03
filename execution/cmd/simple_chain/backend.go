@@ -2,13 +2,13 @@ package main
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
-	"crypto/subtle"
 	"net/http"
 	"os"
 	"regexp"
@@ -111,8 +111,8 @@ type BlockGasInfo struct {
 
 // MetaAPI xử lý các RPC calls của Ethereum
 type MetaAPI struct {
-	App                  *App // Export field Client
-	events               *filters.EventSystem
+	App    *App // Export field Client
+	events *filters.EventSystem
 
 	// ── Cached results (avoid allocations on hot path) ──
 	cachedChainId        hexutil.Big  // Never changes — set once at init
@@ -332,6 +332,14 @@ func NewServer(app *App) *http.ServeMux {
 	mtnAPI := NewMtnAPI(app, customAPI) // Sử dụng hàm NewMtnAPI để tạo instance
 	if err := server.RegisterName("mtn", mtnAPI); err != nil {
 		logger.Error("[FATAL] Không thể đăng ký API MtnAPI: %v", err)
+		logger.SyncFileLog()
+		os.Exit(1)
+	}
+
+	// HelpPay sponsor wallet management API
+	helppayAPI := NewHelpPayAPI(app)
+	if err := server.RegisterName("helppay", helppayAPI); err != nil {
+		logger.Error("[FATAL] Không thể đăng ký API helppay: %v", err)
 		logger.SyncFileLog()
 		os.Exit(1)
 	}

@@ -196,8 +196,6 @@ func (api *MtnAPI) GetExecuteSCResultsHash(ctx context.Context, blockNumber hexu
 	return resultsHash, nil
 }
 
-
-
 func (api *MtnAPI) GetAccountState(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (result map[string]interface{}, retErr error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -575,8 +573,6 @@ func (api *MtnAPI) GetTransactionsAndTPSInRange(ctx context.Context, startBlock 
 		"tps":               tps,
 	}, nil
 }
-
-
 
 // GetPerformanceMetrics returns the current system performance metrics, including average latencies based on recent transaction traces.
 func (api *MtnAPI) GetPerformanceMetrics(ctx context.Context, limit int) (map[string]interface{}, error) {

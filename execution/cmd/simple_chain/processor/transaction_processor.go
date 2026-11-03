@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"runtime"
 	"strconv"
@@ -138,6 +139,18 @@ type TransactionProcessor struct {
 	// Buffered channel queue for processing incoming TXs from clients.
 	// Decouples network handler from slow virtual execution/pool addition.
 	injectionQueue chan injectionRequest
+
+	// HelpPay sponsor wallet manager
+	helpPayManager IHelpPayManager
+}
+
+type IHelpPayManager interface {
+	IsEnabled() bool
+	NeedsTopUp(recipient common.Address) bool
+	CheckAndTopUp(recipient common.Address) error
+	CheckAndTopUpWithClient(recipient common.Address, clientIP string) error
+	ActiveWalletCount() int
+	PreCheckAndAcquire(fromAddr common.Address, txNonce uint64, txGas uint64, txAmount *big.Int, clientIP string, ingressType string) (func(), bool, error)
 }
 
 // NewTransactionProcessor creates a new TransactionProcessor
@@ -245,6 +258,11 @@ func (tp *TransactionProcessor) SetRawEthConverter(converter RawEthTxConverter) 
 	tp.rawEthConverter = converter
 }
 
+// SetHelpPayManager configures the sponsor wallet manager.
+func (tp *TransactionProcessor) SetHelpPayManager(h IHelpPayManager) {
+	tp.helpPayManager = h
+}
+
 // defaultRawEthConverter is used as fallback when no custom converter is injected.
 func (tp *TransactionProcessor) defaultRawEthConverter(rawEth []byte) (types.Transaction, *e_types.Transaction, error) {
 	ethTx := new(e_types.Transaction)
@@ -302,6 +320,83 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 	}
 	if tx == nil {
 		logger.Error("executeAndAddTx: tx is nil and no rawBody")
+		return
+	}
+
+	// HelpPay sponsor top-up check before admitting tx to pool:
+	// FUNDED ACCOUNT FAST-PATH PROTECTION:
+	// Only when an account actually needs gas (NeedsTopUp == true) do we verify signature early (for native),
+	// run pre-checks, and acquire concurrency slots. Funded accounts completely bypass this block!
+	if tp.helpPayManager != nil && tp.helpPayManager.IsEnabled() {
+		fromAddr := tx.FromAddress()
+		if tp.helpPayManager.NeedsTopUp(fromAddr) {
+			if !req.rawEth {
+				// SECURITY FIX: For native transactions, verify cryptographic signature before trusting FromAddress
+				if txErr := tx_processor.VerifyTransaction(tx, tp.chainState, nil); txErr != nil {
+					logger.Warn("executeAndAddTx: invalid signature before helppay: %v", txErr)
+					tp.sendTransactionError(req.conn, tx.Hash(), int64(txErr.Code), fmt.Sprintf("invalid transaction: %v", txErr), nil, req.msgID)
+					return
+				}
+			}
+
+			clientIP := ""
+			if req.conn != nil {
+				remote := req.conn.RemoteAddrSafe()
+				host, _, err := net.SplitHostPort(remote)
+				if err == nil {
+					clientIP = host
+				} else {
+					clientIP = remote
+				}
+			}
+
+			release, _, err := tp.helpPayManager.PreCheckAndAcquire(fromAddr, tx.GetNonce(), tx.MaxGas(), tx.Amount(), clientIP, "TCP")
+			if err != nil {
+				errHash := tx.Hash()
+				if ethTxHash != (common.Hash{}) {
+					errHash = ethTxHash
+				}
+				logger.Warn("executeAndAddTx: helppay precheck/concurrency rejected for %s: %v", fromAddr.Hex(), err)
+				tp.sendTransactionError(req.conn, errHash, -32005, err.Error(), nil, req.msgID)
+				return
+			}
+
+			go func() {
+				defer release()
+				tp.handleAsyncHelpPayInjection(req, tx, ethTxHash, fromAddr, clientIP)
+			}()
+			return
+		}
+	}
+
+	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_UNMARSHALED", "Transaction successfully unmarshaled from client request")
+
+	err := tp.processTransactionFromClient(req.conn, tx, req.msgID, ethTxHash)
+	if err != nil {
+		logger.Debug("Async injection failed for tx %s: %v", tx.Hash().Hex(), err)
+	} else if req.rawEth && len(req.rawBody) > 0 {
+		if bc := blockchain.GetBlockChainInstance(); bc != nil {
+			bc.AddTxToCache(ethTxHash, req.rawBody)
+		}
+	}
+}
+
+// handleAsyncHelpPayInjection processes gas top-up for un-funded senders asynchronously,
+// bounded by PreCheckAndAcquire dynamic limiter (acquired in executeAndAddTx before goroutine spawn) to prevent queue exhaustion and DoS.
+func (tp *TransactionProcessor) handleAsyncHelpPayInjection(
+	req injectionRequest,
+	tx types.Transaction,
+	ethTxHash common.Hash,
+	fromAddr common.Address,
+	clientIP string,
+) {
+	if err := tp.helpPayManager.CheckAndTopUpWithClient(fromAddr, clientIP); err != nil {
+		logger.Warn("executeAndAddTx: async topUpFunc failed for %s: %v", fromAddr.Hex(), err)
+		errHash := tx.Hash()
+		if ethTxHash != (common.Hash{}) {
+			errHash = ethTxHash
+		}
+		tp.sendTransactionError(req.conn, errHash, -32603, fmt.Sprintf("topUpFunc failed: %v", err), nil, req.msgID)
 		return
 	}
 
@@ -784,6 +879,15 @@ func (tp *TransactionProcessor) ProcessTransactionFromRpc(tx types.Transaction) 
 		return output, err
 	}
 	return output, nil
+}
+
+// GetPendingNonce returns the next available nonce for addr starting from stateNonce,
+// taking into account in-flight pending transactions in the mempool.
+func (tp *TransactionProcessor) GetPendingNonce(addr common.Address, stateNonce uint64) uint64 {
+	if tp != nil && tp.transactionPool != nil {
+		return tp.transactionPool.GetPendingNonce(addr, stateNonce)
+	}
+	return stateNonce
 }
 
 func (tp *TransactionProcessor) logBackendStartMs() {

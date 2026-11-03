@@ -38,6 +38,25 @@ all:
     bls_conservation_mode: "warn"         # devnet: warn, production: enforce
     bls_conservation_interval_seconds: 300
 
+    # ── HelpPay (Gas Sponsorship / Chuyển Tiền Hộ) Configuration ───────────────
+    # ⚠️ LƯU Ý: Đây là file mẫu (example template). Các địa chỉ và private key dưới đây
+    # CHỈ LÀ DỮ LIỆU VÍ DỤ MINH HỌA (Example / Placeholder).
+    # - Nếu không cấu hình admin_addresses, API helppay_* sẽ từ chối quản trị (fail-closed).
+    # - Operator cần thay thế bằng địa chỉ và private key thực tế của cụm mình trong inventory.yml.
+    help_pay:
+      enabled: false                      # Mặc định tắt trong template; bật 'true' khi đã cấu hình ví
+      min_balance: "10000000000000000"   # Ngưỡng kích hoạt nạp gas ví dụ (0.01 ETH / 10^16 wei)
+      extra_amount: "100000000000000000" # Lượng coin nạp mỗi lần ví dụ (0.1 ETH / 10^17 wei)
+      admin_addresses:
+        # Ví dụ địa chỉ ví Admin ký quyền EIP-191 (để trống = tắt xác thực admin RPC)
+        # - "0x0000000000000000000000000000000000000000"
+      # wallets:
+        # Danh sách ví bảo trợ (để trống hoặc khai báo trong inventory.yml thực tế bằng Ansible Vault):
+        # - address: "0x..."
+        #   private_key: "..."
+
+
+
   children:
     # ── Parent Chain Committee (100% Rust BFT Consensus Engine, Chain ID: 991) ──
     # ⚠️ LƯU Ý: Nếu CHỈ TRIỂN KHAI CHILD CHAIN (Execution Cluster), hãy ĐỂ COMMENT nhóm này.

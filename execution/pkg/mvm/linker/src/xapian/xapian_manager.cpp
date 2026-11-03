@@ -589,10 +589,11 @@ bool XapianManager::delete_document(const std::string& virtualDocId, uint256_t b
 std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::valueno slot, const std::string &value, bool isSerialise, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
-        XapianLog::AddValueData logData;
+        XapianLog::AddValueData logData{};
         logData.docid = virtualDocId;
         logData.slot = slot;
         logData.value = value;
+        logData.is_serialised = isSerialise;
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::ADD_VALUE;
         entry.data = logData;
@@ -1517,17 +1518,20 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
         }
 
         Xapian::Document doc;
-        Xapian::docid did = resolveVirtualDocId(nid);
+        bool was_deleted = (deleted_docs.find(nid) != deleted_docs.end());
         bool loaded = false;
-        if (did > 0) {
-            try {
-                doc = db.get_document(did);
-                loaded = true;
-            } catch (const Xapian::DocNotFoundError&) {
-                loaded = false;
-            } catch (const std::exception& e) {
-                std::cerr << "[Xapian Replay WARN] get_document(" << did << ") error: " << e.what() << std::endl;
-                loaded = false;
+        if (!was_deleted) {
+            Xapian::docid did = resolveVirtualDocId(nid);
+            if (did > 0) {
+                try {
+                    doc = db.get_document(did);
+                    loaded = true;
+                } catch (const Xapian::DocNotFoundError&) {
+                    loaded = false;
+                } catch (const std::exception& e) {
+                    std::cerr << "[Xapian Replay WARN] get_document(" << did << ") error: " << e.what() << std::endl;
+                    loaded = false;
+                }
             }
         }
 
@@ -1535,7 +1539,11 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
             std::string clean_id = nid;
             if (clean_id.length() >= 2 && clean_id.substr(0, 2) == "0x") clean_id = clean_id.substr(2);
             doc.add_term("Q" + clean_id);
-            std::cerr << "[Xapian Replay INFO] docid '" << nid << "' not present in local DB (did=0). Initializing in memory with term Q" << clean_id << std::endl;
+            if (was_deleted) {
+                std::cerr << "[Xapian Replay INFO] docid '" << nid << "' was marked deleted in current replay. Initializing fresh in memory with term Q" << clean_id << std::endl;
+            } else {
+                std::cerr << "[Xapian Replay INFO] docid '" << nid << "' not present in local DB (did=0). Initializing in memory with term Q" << clean_id << std::endl;
+            }
         }
 
         auto inserted = modified_docs.emplace(nid, std::move(doc));
