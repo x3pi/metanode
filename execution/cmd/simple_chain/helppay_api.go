@@ -93,13 +93,8 @@ func (api *HelpPayAPI) verifyAdminAuth(clientIP string, adminAddress string, sig
 
 	// 1. SECURITY FIX: Verify admin signature BEFORE touching anti-replay cache!
 	// Prevents unauthenticated memory bloat / cache stuffing attacks.
-	// Supports both chain-bound message ("helppay:<chainID>:<action>...") and legacy format ("helppay:<action>...")
-	err := api.App.helpPayManager.VerifyAdminSignature(expectedAction, signature, adminAddr)
-	if err != nil && api.App != nil && api.App.config != nil && api.App.config.ChainId != nil {
-		chainBoundMsg := strings.Replace(expectedAction, "helppay:", fmt.Sprintf("helppay:%s:", api.App.config.ChainId.String()), 1)
-		err = api.App.helpPayManager.VerifyAdminSignature(chainBoundMsg, signature, adminAddr)
-	}
-	if err != nil {
+	// Strictly enforces chain-bound message format ("helppay:<chainID>:<action>...") with NO fallback.
+	if err := api.App.helpPayManager.VerifyAdminSignature(expectedAction, signature, adminAddr); err != nil {
 		api.recordFailedAuth(clientIP)
 		return common.Address{}, fmt.Errorf("admin authorization failed: %w", err)
 	}
@@ -134,6 +129,13 @@ func (api *HelpPayAPI) verifyAdminAuth(clientIP string, adminAddress string, sig
 	return adminAddr, nil
 }
 
+func (api *HelpPayAPI) chainIDStr() string {
+	if api.App != nil && api.App.config != nil && api.App.config.ChainId != nil {
+		return api.App.config.ChainId.String()
+	}
+	return "0"
+}
+
 func getClientIPFromContext(ctx context.Context) string {
 	if pi := rpc.PeerInfoFromContext(ctx); pi.RemoteAddr != "" {
 		return extractIP(pi.RemoteAddr)
@@ -142,7 +144,7 @@ func getClientIPFromContext(ctx context.Context) string {
 }
 
 // AddWallet adds a sponsor wallet by private key (hex string) with admin ECDSA signature verification.
-// Message format for signing: "helppay:add_wallet:<targetAddress>:<timestamp>"
+// Message format for signing: "helppay:<chainID>:add_wallet:<targetAddress>:<timestamp>"
 func (api *HelpPayAPI) AddWallet(ctx context.Context, adminAddress string, signature string, timestamp int64, privateKeyHex string) (map[string]interface{}, error) {
 	cleanKey := strings.TrimSpace(privateKeyHex)
 	cleanKey = strings.TrimPrefix(cleanKey, "0x")
@@ -154,7 +156,7 @@ func (api *HelpPayAPI) AddWallet(ctx context.Context, adminAddress string, signa
 	}
 	targetAddr := crypto.PubkeyToAddress(privKey.PublicKey)
 
-	expectedMsg := fmt.Sprintf("helppay:add_wallet:%s:%d", targetAddr.Hex(), timestamp)
+	expectedMsg := fmt.Sprintf("helppay:%s:add_wallet:%s:%d", api.chainIDStr(), targetAddr.Hex(), timestamp)
 	adminAddr, err := api.verifyAdminAuth(getClientIPFromContext(ctx), adminAddress, signature, timestamp, expectedMsg)
 	if err != nil {
 		return nil, err
@@ -172,10 +174,10 @@ func (api *HelpPayAPI) AddWallet(ctx context.Context, adminAddress string, signa
 }
 
 // RemoveWallet removes a sponsor wallet by address with admin ECDSA signature verification.
-// Message format for signing: "helppay:remove_wallet:<addressHex>:<timestamp>"
+// Message format for signing: "helppay:<chainID>:remove_wallet:<addressHex>:<timestamp>"
 func (api *HelpPayAPI) RemoveWallet(ctx context.Context, adminAddress string, signature string, timestamp int64, addressHex string) (map[string]interface{}, error) {
 	targetAddr := common.HexToAddress(addressHex)
-	expectedMsg := fmt.Sprintf("helppay:remove_wallet:%s:%d", targetAddr.Hex(), timestamp)
+	expectedMsg := fmt.Sprintf("helppay:%s:remove_wallet:%s:%d", api.chainIDStr(), targetAddr.Hex(), timestamp)
 	adminAddr, err := api.verifyAdminAuth(getClientIPFromContext(ctx), adminAddress, signature, timestamp, expectedMsg)
 	if err != nil {
 		return nil, err
@@ -192,9 +194,9 @@ func (api *HelpPayAPI) RemoveWallet(ctx context.Context, adminAddress string, si
 }
 
 // GetWallets returns all sponsor wallets and their current balances and statuses with admin ECDSA signature verification.
-// Message format for signing: "helppay:get_wallets:<timestamp>"
+// Message format for signing: "helppay:<chainID>:get_wallets:<timestamp>"
 func (api *HelpPayAPI) GetWallets(ctx context.Context, adminAddress string, signature string, timestamp int64) ([]helppay.WalletStatus, error) {
-	expectedMsg := fmt.Sprintf("helppay:get_wallets:%d", timestamp)
+	expectedMsg := fmt.Sprintf("helppay:%s:get_wallets:%d", api.chainIDStr(), timestamp)
 	if _, err := api.verifyAdminAuth(getClientIPFromContext(ctx), adminAddress, signature, timestamp, expectedMsg); err != nil {
 		return nil, err
 	}
@@ -202,9 +204,9 @@ func (api *HelpPayAPI) GetWallets(ctx context.Context, adminAddress string, sign
 }
 
 // Toggle enables or disables help-pay with authorized admin signature.
-// Message format for signing: "helppay:toggle:<enabled>:<timestamp>"
+// Message format for signing: "helppay:<chainID>:toggle:<enabled>:<timestamp>"
 func (api *HelpPayAPI) Toggle(ctx context.Context, adminAddress string, signature string, timestamp int64, enabled bool) (map[string]interface{}, error) {
-	expectedMsg := fmt.Sprintf("helppay:toggle:%t:%d", enabled, timestamp)
+	expectedMsg := fmt.Sprintf("helppay:%s:toggle:%t:%d", api.chainIDStr(), enabled, timestamp)
 	adminAddr, err := api.verifyAdminAuth(getClientIPFromContext(ctx), adminAddress, signature, timestamp, expectedMsg)
 	if err != nil {
 		return nil, err
@@ -236,9 +238,9 @@ func (api *HelpPayAPI) SetConfig(ctx context.Context, adminAddress string, signa
 }
 
 // SetConfigWithAdmin updates help-pay configuration with admin ECDSA signature verification.
-// Message format for signing: "helppay:set_config:<enabled>:<minBalance>:<extraAmount>:<timestamp>"
+// Message format for signing: "helppay:<chainID>:set_config:<enabled>:<minBalance>:<extraAmount>:<timestamp>"
 func (api *HelpPayAPI) SetConfigWithAdmin(ctx context.Context, adminAddress string, signature string, timestamp int64, enabled bool, minBalance string, extraAmount string) (map[string]interface{}, error) {
-	expectedMsg := fmt.Sprintf("helppay:set_config:%t:%s:%s:%d", enabled, minBalance, extraAmount, timestamp)
+	expectedMsg := fmt.Sprintf("helppay:%s:set_config:%t:%s:%s:%d", api.chainIDStr(), enabled, minBalance, extraAmount, timestamp)
 	adminAddr, err := api.verifyAdminAuth(getClientIPFromContext(ctx), adminAddress, signature, timestamp, expectedMsg)
 	if err != nil {
 		return nil, err

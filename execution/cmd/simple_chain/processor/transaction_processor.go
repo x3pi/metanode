@@ -142,7 +142,6 @@ type TransactionProcessor struct {
 
 	// HelpPay sponsor wallet manager
 	helpPayManager IHelpPayManager
-	helpPaySem     chan struct{}
 }
 
 type IHelpPayManager interface {
@@ -193,8 +192,6 @@ func NewTransactionProcessor(
 		deviceKeyGoroutineDuration:  0,
 		// TX injection queue: buffered channel (from constants) + workers
 		injectionQueue: make(chan injectionRequest, InjectionQueueSize),
-		// Bounded semaphore for asynchronous HelpPay gas top-ups (prevents queue starvation & DoS)
-		helpPaySem: make(chan struct{}, 32),
 	}
 
 	// FORK-SAFETY: Shared RWMutex between virtual execution (RLock) and real
@@ -385,7 +382,7 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 }
 
 // handleAsyncHelpPayInjection processes gas top-up for un-funded senders asynchronously,
-// bounded by helpPaySem (acquired in executeAndAddTx before goroutine spawn) to prevent queue exhaustion and DoS.
+// bounded by PreCheckAndAcquire dynamic limiter (acquired in executeAndAddTx before goroutine spawn) to prevent queue exhaustion and DoS.
 func (tp *TransactionProcessor) handleAsyncHelpPayInjection(
 	req injectionRequest,
 	tx types.Transaction,
