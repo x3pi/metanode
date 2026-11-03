@@ -1137,6 +1137,7 @@ func (m *Manager) CatchUpFromCluster() (int, error) {
 
 // ApplyClusterState merges cluster configuration state into local manager state and persists it atomically.
 // Wallets remain managed locally per-node for Nonce isolation and security (no private keys over the wire).
+// Enforces safe ceilings to prevent malicious or misconfigured peers from draining sponsor wallets.
 func (m *Manager) ApplyClusterState(data []byte) (int, error) {
 	var resp ClusterStateResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -1152,22 +1153,45 @@ func (m *Manager) ApplyClusterState(data []byte) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	updatedCount := 0
+	ceilingExtra, _ := new(big.Int).SetString("5000000000000000000", 10)  // 5 ETH ceiling
+	ceilingMin, _ := new(big.Int).SetString("10000000000000000000", 10)   // 10 ETH ceiling
+	ceilingDaily, _ := new(big.Int).SetString("100000000000000000000", 10) // 100 ETH ceiling
+
 	if resp.MinBalance != "" {
-		if b, ok := new(big.Int).SetString(resp.MinBalance, 10); ok {
+		if b, ok := new(big.Int).SetString(resp.MinBalance, 10); ok && b.Sign() >= 0 {
+			if ceilingMin != nil && b.Cmp(ceilingMin) > 0 {
+				logger.Warn("⚠️ [HelpPay] Cluster min_balance %s exceeds safe ceiling %s, capped", b.String(), ceilingMin.String())
+				b = ceilingMin
+			}
 			m.minBalance = b
+			updatedCount++
 		}
 	}
 	if resp.ExtraAmount != "" {
-		if b, ok := new(big.Int).SetString(resp.ExtraAmount, 10); ok {
+		if b, ok := new(big.Int).SetString(resp.ExtraAmount, 10); ok && b.Sign() >= 0 {
+			if ceilingExtra != nil && b.Cmp(ceilingExtra) > 0 {
+				logger.Warn("⚠️ [HelpPay] Cluster extra_amount %s exceeds safe ceiling %s, capped", b.String(), ceilingExtra.String())
+				b = ceilingExtra
+			}
 			m.extraAmount = b
+			updatedCount++
 		}
 	}
 	if resp.MaxDailyPerIP != "" {
-		if b, ok := new(big.Int).SetString(resp.MaxDailyPerIP, 10); ok {
+		if b, ok := new(big.Int).SetString(resp.MaxDailyPerIP, 10); ok && b.Sign() >= 0 {
+			if ceilingDaily != nil && b.Cmp(ceilingDaily) > 0 {
+				logger.Warn("⚠️ [HelpPay] Cluster max_daily_per_IP %s exceeds safe ceiling %s, capped", b.String(), ceilingDaily.String())
+				b = ceilingDaily
+			}
 			m.maxDailyPerIP = b
+			updatedCount++
 		}
 	}
-	m.enabled = resp.Enabled
+	if m.enabled != resp.Enabled {
+		m.enabled = resp.Enabled
+		updatedCount++
+	}
 
 	if err := m.saveToDiskLocked(); err != nil {
 		logger.Warn("⚠️ [HelpPay] Failed to save state to disk: %v", err)
@@ -1176,7 +1200,7 @@ func (m *Manager) ApplyClusterState(data []byte) (int, error) {
 	logger.Info("✅ [HelpPay] Cluster configuration applied (enabled: %t, min_balance: %s, extra_amount: %s, active local wallets: %d)",
 		m.enabled, m.minBalance.String(), m.extraAmount.String(), len(m.wallets))
 
-	return 0, nil
+	return updatedCount, nil
 }
 
 func (m *Manager) loadFromDiskLocked() error {
