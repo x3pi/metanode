@@ -14,6 +14,7 @@ func TestLogToFile(t *testing.T) {
 func TestLogErrWithTelegram(t *testing.T) {
 	config.TelegramChatId = -4102931211
 	config.TelegramToken = "6301510657:AAG6llK5jeEzLKg-ZUD87pD_dc2IP1m16Ls"
+	config.TelegramNotifyError = true
 	Error("Test Log Error With Telegram", 123, "oke")
 }
 

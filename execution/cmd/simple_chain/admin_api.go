@@ -6,14 +6,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
 	"github.com/meta-node-blockchain/meta-node/executor"
-	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
-	"github.com/meta-node-blockchain/meta-node/pkg/helppay"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 	"github.com/meta-node-blockchain/meta-node/pkg/snapshot"
 )
@@ -150,101 +147,3 @@ func (api *AdminApi) VerifyHistoricalRoot(ctx context.Context, password string, 
 	return api.meta.verifyHistoricalRoot(ctx, blockNrOrHash)
 }
 
-// AddHelpPayWallet (admin_addHelpPayWallet) adds a sponsor wallet by private key and syncs across the cluster.
-func (api *AdminApi) AddHelpPayWallet(ctx context.Context, password string, privateKeyHex string) (map[string]interface{}, error) {
-	if err := api.authenticate(ctx, password); err != nil {
-		return nil, err
-	}
-	if api.App == nil || api.App.helpPayManager == nil {
-		return nil, fmt.Errorf("helppay manager not initialized")
-	}
-	cleanKey := strings.TrimSpace(privateKeyHex)
-	addr, err := api.App.helpPayManager.AddWallet(cleanKey, false)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{
-		"address": addr.Hex(),
-		"status":  "added",
-		"local":   true,
-	}, nil
-}
-
-// RemoveHelpPayWallet (admin_removeHelpPayWallet) removes a sponsor wallet by address locally on this node.
-func (api *AdminApi) RemoveHelpPayWallet(ctx context.Context, password string, addressHex string) (map[string]interface{}, error) {
-	if err := api.authenticate(ctx, password); err != nil {
-		return nil, err
-	}
-	if api.App == nil || api.App.helpPayManager == nil {
-		return nil, fmt.Errorf("helppay manager not initialized")
-	}
-	addr := common.HexToAddress(addressHex)
-	if err := api.App.helpPayManager.RemoveWallet(addr, false); err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{
-		"address": addr.Hex(),
-		"status":  "removed",
-		"local":   true,
-	}, nil
-}
-
-// GetHelpPayWallets (admin_getHelpPayWallets) lists all sponsor wallets.
-func (api *AdminApi) GetHelpPayWallets(ctx context.Context, password string) ([]helppay.WalletStatus, error) {
-	if err := api.authenticate(ctx, password); err != nil {
-		return nil, err
-	}
-	if api.App == nil || api.App.helpPayManager == nil {
-		return nil, fmt.Errorf("helppay manager not initialized")
-	}
-	return api.App.helpPayManager.GetWallets(), nil
-}
-
-// SetHelpPayConfig (admin_setHelpPayConfig) updates help-pay configuration and syncs across the cluster.
-func (api *AdminApi) SetHelpPayConfig(ctx context.Context, password string, enabled bool, minBalance string, extraAmount string) (map[string]interface{}, error) {
-	if err := api.authenticate(ctx, password); err != nil {
-		return nil, err
-	}
-	if api.App == nil || api.App.helpPayManager == nil {
-		return nil, fmt.Errorf("helppay manager not initialized")
-	}
-	if err := api.App.helpPayManager.SetConfig(enabled, minBalance, extraAmount, true); err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{
-		"status":       "updated",
-		"enabled":      enabled,
-		"min_balance":  minBalance,
-		"extra_amount": extraAmount,
-		"synced":       true,
-	}, nil
-}
-
-// ToggleHelpPay (admin_toggleHelpPay) enables or disables help-pay and syncs across the cluster.
-func (api *AdminApi) ToggleHelpPay(ctx context.Context, password string, enabled bool) (map[string]interface{}, error) {
-	if err := api.authenticate(ctx, password); err != nil {
-		return nil, err
-	}
-	if api.App == nil || api.App.helpPayManager == nil {
-		return nil, fmt.Errorf("helppay manager not initialized")
-	}
-	if err := api.App.helpPayManager.SetEnabled(enabled, true); err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{
-		"status":  "success",
-		"enabled": enabled,
-		"synced":  true,
-	}, nil
-}
-
-// GetHelpPayConfig (admin_getHelpPayConfig) returns the current help-pay configuration.
-func (api *AdminApi) GetHelpPayConfig(ctx context.Context, password string) (config.HelpPayConfig, error) {
-	if err := api.authenticate(ctx, password); err != nil {
-		return config.HelpPayConfig{}, err
-	}
-	if api.App == nil || api.App.helpPayManager == nil {
-		return config.HelpPayConfig{}, fmt.Errorf("helppay manager not initialized")
-	}
-	return api.App.helpPayManager.GetConfig(), nil
-}

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts"
@@ -59,6 +60,8 @@ type Manager struct {
 	staticWallets   map[common.Address]struct{} // ví được khai báo từ static config (không bị xóa bởi cluster sync)
 	sponsorJobQueue chan *SponsorGasTask        // Hàng đợi công việc nạp gas phân phối tới các worker ví chuyển hộ rảnh rỗi
 	inflightMu      sync.Map                    // map[common.Address]*sync.Mutex (chống nạp trùng lặp đồng thời)
+	inflightTopUps  atomic.Int64                // Đếm số lượng yêu cầu nạp gas đang xử lý trên toàn node (RPC + TCP)
+	lastOverloadedAlertAt atomic.Int64          // Unix timestamp lần cuối bắn cảnh báo Telegram khi hàng đợi quá tải
 
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -439,6 +442,93 @@ func (m *Manager) NeedsTopUp(recipient common.Address) bool {
 		return false
 	}
 	return m.GetBalance(recipient).Cmp(m.MinBalance()) < 0
+}
+
+// PreCheckAndAcquire thực hiện kiểm tra các điều kiện an toàn rẻ tiền (Gas limit, Nonce hợp lệ)
+// và cấp phát slot giới hạn đồng thời (ActiveWalletCount * 20) dùng chung cho cả RPC và TCP.
+//
+// QUY TẮC BẢO VỆ VÍ ĐÃ ĐỦ TIỀN:
+// Nếu số dư của ví >= minBalance (needsTopUp = false), hàm trả về ngay lập tức (nil, false, nil)
+// mà KHÔNG tốn tài nguyên kiểm tra, KHÔNG chiếm slot in-flight, KHÔNG làm nghẽn giao dịch ví có tiền.
+//
+// Nếu ví thiếu tiền (needsTopUp = true):
+// - Kiểm tra Gas limit [21.000, 30.000.000]
+// - Kiểm tra Nonce [expectedNonce, expectedNonce + 5]
+// - Kiểm tra giới hạn concurrency (ActiveWalletCount * 20)
+// - Trả về hàm release() để giải phóng slot khi xử lý xong (caller BẮT BUỘC defer release())
+func (m *Manager) PreCheckAndAcquire(
+	fromAddr common.Address,
+	txNonce uint64,
+	txGas uint64,
+	txAmount *big.Int,
+	clientIP string,
+	ingressType string,
+) (func(), bool, error) {
+	if !m.IsEnabled() || !m.NeedsTopUp(fromAddr) {
+		return nil, false, nil
+	}
+
+	// 1. Kiểm tra Gas limit rẻ tiền: Intrinsic gas tối thiểu 21.000; tối đa theo block gas limit 30.000.000.
+	if txGas < 21000 || txGas > 30000000 {
+		return nil, true, fmt.Errorf("transaction gas limit %d invalid (must be between 21000 and 30000000)", txGas)
+	}
+
+	// 2. HelpPay CHỈ tài trợ phí gas (extraAmount), TUYỆT ĐỐI KHÔNG tài trợ giá trị chuyển amount/value!
+	// Nếu giao dịch đòi chuyển tiền (txAmount > 0) mà số dư của ví (kể cả sau khi nhận gas extraAmount)
+	// vẫn không đủ để trang trải txAmount, từ chối ngay lập tức để tránh kẻ gian rút tỉa gas sponsor.
+	if txAmount != nil && txAmount.Sign() > 0 {
+		currentBal := m.GetBalance(fromAddr)
+		projectedBal := new(big.Int).Add(currentBal, m.ExtraAmount())
+		if projectedBal.Cmp(txAmount) < 0 {
+			return nil, true, fmt.Errorf("insufficient funds for transfer amount: tx wants to transfer %s wei, but account has %s wei (HelpPay only sponsors gas, not transfer amount)",
+				txAmount.String(), currentBal.String())
+		}
+	}
+
+	// 3. Kiểm tra Nonce rẻ tiền: từ chối nếu nonce cũ (< expectedNonce) hoặc quá xa (> expectedNonce + 5).
+	var expectedNonce uint64
+	if m.chainState != nil {
+		if asDB := m.chainState.GetAccountStateDB(); asDB != nil {
+			if as, err := asDB.AccountStateReadOnly(fromAddr); err == nil && as != nil {
+				expectedNonce = as.Nonce()
+			}
+		}
+	}
+	if txNonce < expectedNonce {
+		return nil, true, fmt.Errorf("nonce too low: address %s has nonce %d, tx has nonce %d", fromAddr.Hex(), expectedNonce, txNonce)
+	}
+	if txNonce > expectedNonce+5 {
+		return nil, true, fmt.Errorf("nonce too high for unfunded account: address %s has nonce %d, tx has nonce %d (max ahead is +5)", fromAddr.Hex(), expectedNonce, txNonce)
+	}
+
+	// 3. Dynamic Bounded Concurrency: ActiveWalletCount * 20
+	walletCount := m.ActiveWalletCount()
+	if walletCount <= 0 {
+		walletCount = 1
+	}
+	maxConcurrent := int64(walletCount * 20)
+
+	currentInflight := m.inflightTopUps.Add(1)
+	if currentInflight > maxConcurrent {
+		m.inflightTopUps.Add(-1)
+		m.sendOverloadedTeleAlert(ingressType, clientIP, walletCount, maxConcurrent)
+		return nil, true, fmt.Errorf("helppay concurrency limit reached (%d in flight for %d wallets), please retry", maxConcurrent, walletCount)
+	}
+
+	release := func() {
+		m.inflightTopUps.Add(-1)
+	}
+	return release, true, nil
+}
+
+func (m *Manager) sendOverloadedTeleAlert(ingressType, clientIP string, walletCount int, maxConcurrent int64) {
+	now := time.Now().Unix()
+	last := m.lastOverloadedAlertAt.Load()
+	if now-last > 60 { // Rate limit: at most once every 60s
+		if m.lastOverloadedAlertAt.CompareAndSwap(last, now) {
+			logger.Telegram(fmt.Sprintf("⚠️ [HelpPay Alert][%s] Hàng đợi top-up đầy (%d/%d in-flight, %d ví sponsor)! Các ví sponsor đang quá tải hoặc không đủ số lượng ví trả hộ (IP: %s).", ingressType, maxConcurrent, maxConcurrent, walletCount, clientIP))
+		}
+	}
 }
 
 // CheckAndTopUp inspects recipient balance and triggers automated gas top-up if below threshold.

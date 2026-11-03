@@ -39,13 +39,14 @@ const (
 )
 
 type LoggerConfig struct {
-	Flag             int
-	Identifier       string
-	TelegramToken    string
-	TelegramChatId   int
-	TelegramThreadId uint
-	Outputs          []*os.File
-	Format           string // "text" hoặc "json"
+	Flag                int
+	Identifier          string
+	TelegramToken       string
+	TelegramChatId      int
+	TelegramThreadId    uint
+	TelegramNotifyError bool // Tùy chọn: gửi cả log Error() lên Telegram. Mặc định false (chỉ gửi Telegram() alert và Fatal()).
+	Outputs             []*os.File
+	Format              string // "text" hoặc "json"
 }
 
 type Logger struct {
@@ -111,18 +112,135 @@ var (
 	consoleOutputEnabled    = true
 )
 
+func shouldNotifyTelegramError() bool {
+	cfgMu.RLock()
+	defer cfgMu.RUnlock()
+	return config.TelegramNotifyError
+}
+
+func init() {
+	loadTelegramEnv()
+}
+
+func loadTelegramEnv() {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	if tok := os.Getenv("TELEGRAM_BOT_TOKEN"); tok != "" {
+		config.TelegramToken = tok
+	}
+	if cid := os.Getenv("TELEGRAM_CHAT_ID"); cid != "" {
+		if id, err := strconv.Atoi(cid); err == nil {
+			config.TelegramChatId = id
+		}
+	}
+	if tid := os.Getenv("TELEGRAM_THREAD_ID"); tid != "" {
+		if id, err := strconv.ParseUint(tid, 10, 32); err == nil {
+			config.TelegramThreadId = uint(id)
+		}
+	}
+	if os.Getenv("TELEGRAM_NOTIFY_ERROR") == "true" {
+		config.TelegramNotifyError = true
+	}
+
+	// Nếu được chỉ định đường dẫn file cấu hình cụ thể qua TELEGRAM_CONFIG_FILE thì chỉ đọc duy nhất file đó
+	if config.TelegramToken == "" || config.TelegramChatId == 0 {
+		if cfgPath := os.Getenv("TELEGRAM_CONFIG_FILE"); cfgPath != "" {
+			loadTelegramFromFileLocked(cfgPath)
+		}
+	}
+}
+
+func loadTelegramFromFileLocked(filePath string) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		if config.TelegramToken == "" {
+			if strings.HasPrefix(trimmed, "telegram_bot_token:") || strings.HasPrefix(trimmed, "TELEGRAM_BOT_TOKEN=") || strings.HasPrefix(trimmed, "bot_token:") {
+				val := extractVal(trimmed)
+				if val != "" && !strings.Contains(val, "YOUR_") {
+					config.TelegramToken = val
+				}
+			}
+		}
+
+		if config.TelegramChatId == 0 {
+			if strings.HasPrefix(trimmed, "telegram_chat_id:") || strings.HasPrefix(trimmed, "TELEGRAM_CHAT_ID=") || strings.HasPrefix(trimmed, "chat_id:") {
+				val := extractVal(trimmed)
+				if id, parseErr := strconv.Atoi(val); parseErr == nil && id != 0 {
+					config.TelegramChatId = id
+				}
+			}
+		}
+
+		if config.TelegramThreadId == 0 {
+			if strings.HasPrefix(trimmed, "telegram_thread_id:") || strings.HasPrefix(trimmed, "TELEGRAM_THREAD_ID=") || strings.HasPrefix(trimmed, "thread_id:") {
+				val := extractVal(trimmed)
+				if tid, parseErr := strconv.ParseUint(val, 10, 32); parseErr == nil && tid != 0 {
+					config.TelegramThreadId = uint(tid)
+				}
+			}
+		}
+	}
+}
+
+func extractVal(line string) string {
+	sep := ":"
+	if strings.Contains(line, "=") && !strings.Contains(line, ":") {
+		sep = "="
+	}
+	parts := strings.SplitN(line, sep, 2)
+	if len(parts) == 2 {
+		return strings.Trim(strings.TrimSpace(parts[1]), `"' `)
+	}
+	return ""
+}
+
 func SetConfig(newConfig *LoggerConfig) {
 	if newConfig == nil {
 		return
 	}
 
 	cfgMu.Lock()
+	if newConfig.TelegramToken == "" && newConfig.TelegramChatId == 0 {
+		if config.TelegramToken != "" {
+			newConfig.TelegramToken = config.TelegramToken
+			newConfig.TelegramChatId = config.TelegramChatId
+			newConfig.TelegramThreadId = config.TelegramThreadId
+			newConfig.TelegramNotifyError = config.TelegramNotifyError
+		} else {
+			if tok := os.Getenv("TELEGRAM_BOT_TOKEN"); tok != "" {
+				newConfig.TelegramToken = tok
+			}
+			if cid := os.Getenv("TELEGRAM_CHAT_ID"); cid != "" {
+				if id, err := strconv.Atoi(cid); err == nil {
+					newConfig.TelegramChatId = id
+				}
+			}
+			if tid := os.Getenv("TELEGRAM_THREAD_ID"); tid != "" {
+				if id, err := strconv.ParseUint(tid, 10, 32); err == nil {
+					newConfig.TelegramThreadId = uint(id)
+				}
+			}
+			if os.Getenv("TELEGRAM_NOTIFY_ERROR") == "true" {
+				newConfig.TelegramNotifyError = true
+			}
+		}
+	}
 	config = newConfig
 	logger.Config.Flag = config.Flag
 	logger.Config.Identifier = config.Identifier
 	logger.Config.TelegramChatId = config.TelegramChatId
 	logger.Config.TelegramToken = config.TelegramToken
 	logger.Config.TelegramThreadId = config.TelegramThreadId
+	logger.Config.TelegramNotifyError = config.TelegramNotifyError
 	logger.Config.Format = config.Format
 	outs := config.Outputs
 	cfgMu.Unlock()
@@ -246,11 +364,12 @@ func Error(message interface{}, a ...interface{}) {
 	if getFlag() < FLAG_ERROR {
 		return
 	}
-	_, plain := getLogBuffers("", "ERROR", message, a)
-	if tok, chat, _ := getTelegram(); tok != "" && chat != 0 {
-		sendToTelegram(plain)
+	colored, plain := getLogBuffers(Red, "ERROR", message, a)
+	if shouldNotifyTelegramError() {
+		if tok, chat, _ := getTelegram(); tok != "" && chat != 0 {
+			sendToTelegram(plain)
+		}
 	}
-	colored, _ := getLogBuffers(Red, "ERROR", message, a)
 	logger.writeToOutputsSplit(colored, plain)
 	// NOTE (2026-09-02): syncFileOutputs() — a real fsync(2), not just a
 	// write() — used to run on every single Error() call. write() already
@@ -291,15 +410,19 @@ func Fatal(message interface{}, a ...interface{}) {
 }
 
 func Telegram(message interface{}, a ...interface{}) {
-	if getFlag() < FLAG_TELEGRAM {
-		return
-	}
 	_, plain := getLogBuffers("", "TELE", message, a)
-	sendToTelegram(plain) // Gửi plain text, không ANSI codes
+	if tok, chat, _ := getTelegram(); tok != "" && chat != 0 {
+		sendToTelegram(plain)
+	}
+	colored, _ := getLogBuffers(Yellow, "TELE", message, a)
+	logger.writeToOutputsSplit(colored, plain)
 }
 
 func sendToTelegram(messageContent []byte) {
 	telegramToken, telegramChatID, telegramThreadID := getTelegram()
+	if telegramToken == "" || telegramChatID == 0 {
+		return
+	}
 	var jsonPayload bytes.Buffer
 	jsonPayload.WriteString(`{"chat_id": "`)
 	jsonPayload.WriteString(strconv.Itoa(telegramChatID))
