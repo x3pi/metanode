@@ -400,11 +400,11 @@ func Error(message interface{}, a ...interface{}) {
 func Fatal(message interface{}, a ...interface{}) {
 	_, plain := getLogBuffers("", "FATAL", message, a)
 	if tok, chat, _ := getTelegram(); tok != "" && chat != 0 {
-		sendToTelegram(plain)
+		sendToTelegramDirect(plain)
 	}
 	colored, _ := getLogBuffers(Red, "FATAL", message, a)
 	logger.writeToOutputsSplit(colored, plain)
-	// Force sync to disk — đảm bảo Fatal logs không bị mất
+	// Force sync to disk — ensure Fatal logs are not lost
 	syncFileOutputs()
 	os.Exit(1)
 }
@@ -418,7 +418,36 @@ func Telegram(message interface{}, a ...interface{}) {
 	logger.writeToOutputsSplit(colored, plain)
 }
 
+var (
+	telegramClient = &http.Client{
+		Timeout: 5 * time.Second,
+	}
+	telegramQueue = make(chan []byte, 100)
+	telegramOnce  sync.Once
+)
+
+func initTelegramWorker() {
+	telegramOnce.Do(func() {
+		go func() {
+			for messageContent := range telegramQueue {
+				sendToTelegramDirect(messageContent)
+			}
+		}()
+	})
+}
+
 func sendToTelegram(messageContent []byte) {
+	initTelegramWorker()
+	msgCopy := append([]byte(nil), messageContent...)
+	select {
+	case telegramQueue <- msgCopy:
+	default:
+		// Queue full: drop non-blocking to prevent memory leak and never block RPC or consensus routines
+		fmt.Println("⚠️ [LOGGER] Telegram alert queue full (100 messages), dropping alert to prevent blocking")
+	}
+}
+
+func sendToTelegramDirect(messageContent []byte) {
 	telegramToken, telegramChatID, telegramThreadID := getTelegram()
 	if telegramToken == "" || telegramChatID == 0 {
 		return
@@ -439,12 +468,9 @@ func sendToTelegram(messageContent []byte) {
 	// This will also add the surrounding quotes to the message string.
 	escapedMessage, err := json.Marshal(string(messageContent))
 	if err != nil {
-		// Fallback or log error if marshalling fails, though unlikely for a string.
-		// For simplicity, writing the raw string (less safe for complex content).
-		// A more robust solution would log this marshalling error.
 		fmt.Printf("Error marshalling telegram message content: %v. Sending raw.\n", err)
 		jsonPayload.WriteString(`"`)
-		jsonPayload.Write(messageContent) // Might be problematic if content has unescaped quotes
+		jsonPayload.Write(messageContent)
 		jsonPayload.WriteString(`"`)
 	} else {
 		jsonPayload.Write(escapedMessage)
@@ -453,15 +479,13 @@ func sendToTelegram(messageContent []byte) {
 	jsonPayload.WriteString(`}`)
 
 	apiUrl := "https://api.telegram.org/bot" + telegramToken + "/sendMessage"
-	resp, err := http.Post(
+	resp, err := telegramClient.Post(
 		apiUrl,
 		"application/json",
 		bytes.NewBuffer(jsonPayload.Bytes()),
 	)
 
 	if err != nil {
-		// Use your logger here if it's safe and won't cause a loop,
-		// otherwise fmt.Println for critical network errors.
 		fmt.Printf("Error sending message to Telegram: %v\n", err)
 		if resp != nil {
 			resp.Body.Close()
@@ -477,7 +501,6 @@ func sendToTelegram(messageContent []byte) {
 		if readErr != nil {
 			responseText = "could not read error response body"
 		}
-		// Use your logger here if safe.
 		fmt.Printf("Error response from Telegram API: %s, Body: %s\n", resp.Status, responseText)
 	}
 }
