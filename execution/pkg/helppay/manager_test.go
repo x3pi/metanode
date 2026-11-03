@@ -475,5 +475,3 @@ func TestManager_PreCheckAndAcquire(t *testing.T) {
 	assert.False(t, needsDisabled)
 	assert.Nil(t, relDisabled)
 }
-
-
