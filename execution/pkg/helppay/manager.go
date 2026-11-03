@@ -861,8 +861,6 @@ func (m *Manager) AddWallet(privKeyHex string, broadcast bool) (common.Address, 
 		return common.Address{}, err
 	}
 
-	// Auto-enable if it was disabled and a wallet is added
-	m.enabled = true
 	if err := m.saveToDiskLocked(); err != nil {
 		logger.Warn("⚠️ [HelpPay] Failed to save state to disk: %v", err)
 	}

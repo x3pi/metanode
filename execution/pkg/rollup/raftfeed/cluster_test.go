@@ -95,8 +95,12 @@ type harness struct {
 
 func newHarness(t *testing.T, n int) *harness {
 	t.Helper()
-	if runtime.NumCPU() < 2 {
-		t.Skipf("raftfeed cluster tests need at least 2 CPUs (have %d)", runtime.NumCPU())
+	cpus := runtime.NumCPU()
+	if max := runtime.GOMAXPROCS(0); max > 0 && max < cpus {
+		cpus = max
+	}
+	if cpus < 2 || (os.Getenv("CI") != "" && cpus <= 2) {
+		t.Skipf("raftfeed cluster tests need at least 4 CPUs on CI or >= 2 CPUs locally to avoid timer starvation (have %d CPUs)", cpus)
 	}
 	h := &harness{t: t, secret: bytes.Repeat([]byte("k"), 32), fatals: map[string]error{}}
 	for i := 0; i < n; i++ {
