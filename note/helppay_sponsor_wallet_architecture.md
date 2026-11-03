@@ -301,7 +301,6 @@ go run main.go test-topup
 | `helppay_removeWallet` | `adminAddr, sig, timestamp, addressHex` | Xóa ví bảo trợ khỏi pool và đồng bộ Raft (bắt buộc chữ ký Admin) |
 | `helppay_getConfig` | Không có | Lấy cấu hình `HelpPayConfig` hiện tại (metadata công khai) |
 | `helppay_setConfig` | `adminAddr, sig, timestamp, enabled, minBal, extraAmt` | Cập nhật cấu hình có xác thực chữ ký Admin |
-| `helppay_setConfigWithAdmin`| `adminAddr, sig, timestamp, enabled, minBal, extraAmt` | Cập nhật cấu hình có xác thực chữ ký Admin |
 
 > [!NOTE]
 > Các phương thức `admin_*` dùng mật khẩu text thuần cũ đã được loại bỏ hoàn toàn để chuẩn hóa 100% sang chuẩn chữ ký mật mã ECDSA (EIP-191) qua namespace `helppay_*`.
@@ -328,7 +327,8 @@ Trước khi phân bổ slot ví sponsor và spawn goroutine nạp gas, hệ th�
 
 ### 7.4. Chống Tấn Công Memory Bloat & Brute-Force Admin API
 - Trong `helppay_api.go`, chữ ký Admin `VerifyAdminSignature` được kiểm tra tính hợp lệ **TRƯỚC** khi lưu vào cache chống replay `usedSignatures`. Kẻ tấn công gửi chữ ký rác sẽ bị từ chối ngay ở bước verify mà không thể làm phình bộ nhớ RAM.
-- **Rate limiting brute-force**: Nếu 1 IP gửi sai chữ ký quá 5 lần trong 60 giây, IP đó bị tạm khóa 5 phút và gửi cảnh báo khẩn qua Telegram.
+- **Rate limiting brute-force**: Nếu 1 IP gửi sai chữ ký quá 5 lần trong 60 giây, IP đó bị tạm khóa 5 phút và gửi cảnh báo khẩn qua Telegram. Bộ nhớ cache được dọn định kỳ tối đa 10s một lần dùng `atomic.Int64` để tránh nghẽn luồng.
+- **Lưu ý kiến trúc Reverse Proxy**: `recordFailedAuth` trích xuất IP client từ `RemoteAddr` của kết nối TCP. Nếu cụm node đặt sau Reverse Proxy (như Nginx, Cloudflare) mà không bóc tách header hoặc trỏ chung IP proxy, việc thử sai chữ ký từ một nguồn có thể tạm khóa toàn bộ proxy IP đó trong 5 phút. Khuyến nghị trong môi trường production nên whitelist IP admin ở tầng firewall/reverse proxy hoặc chỉ mở cổng RPC Admin trên mạng VPN nội bộ.
 
 ### 7.5. Cấu Hình Telegram Chuẩn Hóa Qua Biến Môi Trường (Không Quét Fallback)
 - Xóa bỏ cơ chế quét fallback nhiều thư mục để tránh đọc nhầm file rác / file cũ.

@@ -395,10 +395,10 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 	}
 
 	fromAddr := metaTx.FromAddress()
-	// QUY TẮC BẢO VỆ VÍ ĐÃ ĐỦ TIỀN:
-	// Chỉ khi ví thực sự thiếu gas (NeedsTopUp == true) mới thực hiện pre-check,
-	// cấp phát slot in-flight limiter và tiến hành nạp gas. Các ví đã đủ tiền
-	// sẽ hoàn toàn bỏ qua khối này, đi thẳng tới AddTransactionToPool!
+	// FUNDED ACCOUNT FAST-PATH PROTECTION:
+	// Only when an account actually needs gas (NeedsTopUp == true) do we run pre-checks,
+	// acquire in-flight concurrency slots, and trigger top-up. Funded accounts
+	// completely bypass this block and proceed directly to AddTransactionToPool!
 	if api.App.helpPayManager != nil && api.App.helpPayManager.IsEnabled() && api.App.helpPayManager.NeedsTopUp(fromAddr) {
 		clientIP := ""
 		if pi := rpc.PeerInfoFromContext(ctx); pi.RemoteAddr != "" {

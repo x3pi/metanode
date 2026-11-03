@@ -146,4 +146,3 @@ func (api *AdminApi) VerifyHistoricalRoot(ctx context.Context, password string, 
 	}
 	return api.meta.verifyHistoricalRoot(ctx, blockNrOrHash)
 }
-

@@ -324,9 +324,9 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 	}
 
 	// HelpPay sponsor top-up check before admitting tx to pool:
-	// QUY TẮC BẢO VỆ VÍ ĐÃ ĐỦ TIỀN:
-	// Chỉ khi ví thực sự thiếu gas (NeedsTopUp == true) mới thực hiện xác thực chữ ký sớm (cho native),
-	// kiểm tra pre-check và chiếm slot concurrency. Các ví đã đủ tiền sẽ bỏ qua toàn bộ khối này!
+	// FUNDED ACCOUNT FAST-PATH PROTECTION:
+	// Only when an account actually needs gas (NeedsTopUp == true) do we verify signature early (for native),
+	// run pre-checks, and acquire concurrency slots. Funded accounts completely bypass this block!
 	if tp.helpPayManager != nil && tp.helpPayManager.IsEnabled() {
 		fromAddr := tx.FromAddress()
 		if tp.helpPayManager.NeedsTopUp(fromAddr) {
@@ -889,7 +889,6 @@ func (tp *TransactionProcessor) GetPendingNonce(addr common.Address, stateNonce 
 	}
 	return stateNonce
 }
-
 
 func (tp *TransactionProcessor) logBackendStartMs() {
 	if atomic.CompareAndSwapInt32(&firstUdsMetricLogged, 0, 1) {

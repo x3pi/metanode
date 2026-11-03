@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -25,8 +26,9 @@ type failedAuthRecord struct {
 // HelpPayAPI exposes JSON-RPC methods for managing the sponsor wallet pool.
 type HelpPayAPI struct {
 	App            *App
-	usedSignatures sync.Map // map[string]int64: sigHash -> timestamp (anti-replay cache within ±120s / 2 minutes)
-	failedAuths    sync.Map // map[string]*failedAuthRecord: clientIP -> tracking failed attempts
+	usedSignatures sync.Map     // map[string]int64: sigHash -> timestamp (anti-replay cache within ±120s / 2 minutes)
+	failedAuths    sync.Map     // map[string]*failedAuthRecord: clientIP -> tracking failed attempts
+	lastPruneAt    atomic.Int64 // timestamp of last cache pruning (rate-limits pruning to once every 10s)
 }
 
 // NewHelpPayAPI creates a new HelpPayAPI instance.
@@ -52,7 +54,7 @@ func (api *HelpPayAPI) recordFailedAuth(clientIP string) {
 		if rec.count >= 5 {
 			rec.blockedUntil = now + 300 // block for 5 minutes (300s)
 			logger.Warn("⚠️ [HelpPay API] IP %s blocked for 5 minutes due to %d failed admin auth attempts", clientIP, rec.count)
-			logger.Telegram(fmt.Sprintf("⚠️ [HelpPay Security] IP %s bị tạm khóa 5 phút do thử sai chữ ký Admin %d lần!", clientIP, rec.count))
+			logger.Telegram(fmt.Sprintf("⚠️ [HelpPay Security] IP %s temporarily blocked for 5 minutes after %d failed admin auth attempts!", clientIP, rec.count))
 		}
 	}
 }
@@ -106,7 +108,9 @@ func (api *HelpPayAPI) verifyAdminAuth(clientIP string, adminAddress string, sig
 	}
 
 	// 3. Opportunistic pruning of consumed signatures (>4m) and expired failed auth records (>10m)
-	if now%10 == 0 {
+	// Rate-limited via atomic timestamp to prune at most once every 10 seconds across all concurrent requests
+	lastPrune := api.lastPruneAt.Load()
+	if now-lastPrune >= 10 && api.lastPruneAt.CompareAndSwap(lastPrune, now) {
 		api.usedSignatures.Range(func(key, val interface{}) bool {
 			if ts, ok := val.(int64); ok && now-ts > 240 {
 				api.usedSignatures.Delete(key)
@@ -233,13 +237,8 @@ func (api *HelpPayAPI) GetAdmins(ctx context.Context) ([]string, error) {
 }
 
 // SetConfig updates help-pay configuration with admin ECDSA signature verification.
-func (api *HelpPayAPI) SetConfig(ctx context.Context, adminAddress string, signature string, timestamp int64, enabled bool, minBalance string, extraAmount string) (map[string]interface{}, error) {
-	return api.SetConfigWithAdmin(ctx, adminAddress, signature, timestamp, enabled, minBalance, extraAmount)
-}
-
-// SetConfigWithAdmin updates help-pay configuration with admin ECDSA signature verification.
 // Message format for signing: "helppay:<chainID>:set_config:<enabled>:<minBalance>:<extraAmount>:<timestamp>"
-func (api *HelpPayAPI) SetConfigWithAdmin(ctx context.Context, adminAddress string, signature string, timestamp int64, enabled bool, minBalance string, extraAmount string) (map[string]interface{}, error) {
+func (api *HelpPayAPI) SetConfig(ctx context.Context, adminAddress string, signature string, timestamp int64, enabled bool, minBalance string, extraAmount string) (map[string]interface{}, error) {
 	expectedMsg := fmt.Sprintf("helppay:%s:set_config:%t:%s:%s:%d", api.chainIDStr(), enabled, minBalance, extraAmount, timestamp)
 	adminAddr, err := api.verifyAdminAuth(getClientIPFromContext(ctx), adminAddress, signature, timestamp, expectedMsg)
 	if err != nil {

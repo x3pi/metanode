@@ -171,9 +171,11 @@ type MockHelpPayManagerForTest struct {
 	releaseCalled  atomic.Int32
 }
 
-func (m *MockHelpPayManagerForTest) IsEnabled() bool                                  { return m.enabled }
-func (m *MockHelpPayManagerForTest) NeedsTopUp(recipient e_common.Address) bool        { return m.needsTopUp }
-func (m *MockHelpPayManagerForTest) CheckAndTopUp(recipient e_common.Address) error   { return m.topUpErr }
+func (m *MockHelpPayManagerForTest) IsEnabled() bool                            { return m.enabled }
+func (m *MockHelpPayManagerForTest) NeedsTopUp(recipient e_common.Address) bool { return m.needsTopUp }
+func (m *MockHelpPayManagerForTest) CheckAndTopUp(recipient e_common.Address) error {
+	return m.topUpErr
+}
 func (m *MockHelpPayManagerForTest) CheckAndTopUpWithClient(recipient e_common.Address, clientIP string) error {
 	m.topUpCalled.Add(1)
 	return m.topUpErr
