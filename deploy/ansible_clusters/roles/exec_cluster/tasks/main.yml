@@ -421,6 +421,7 @@
         owner: "{{ ansible_user | default('abc') }}"
         group: "{{ ansible_user | default('abc') }}"
         mode: '0600'
+      no_log: true
 
     - name: Write security environment file (tokens / pins from vault vars, 0600)
       ansible.builtin.template:

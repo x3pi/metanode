@@ -50,12 +50,10 @@ all:
       admin_addresses:
         # Ví dụ địa chỉ ví Admin ký quyền EIP-191 (để trống = tắt xác thực admin RPC)
         # - "0x0000000000000000000000000000000000000000"
-      wallets:
-        # Danh sách ví bảo trợ ví dụ minh họa (Operator cần tạo và thay bằng ví thực tế):
-        - address: "0x0000000000000000000000000000000000000001"
-          private_key: "0000000000000000000000000000000000000000000000000000000000000001"
-        - address: "0x0000000000000000000000000000000000000002"
-          private_key: "0000000000000000000000000000000000000000000000000000000000000002"
+      # wallets:
+        # Danh sách ví bảo trợ (để trống hoặc khai báo trong inventory.yml thực tế bằng Ansible Vault):
+        # - address: "0x..."
+        #   private_key: "..."
 
 
 

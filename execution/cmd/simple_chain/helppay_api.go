@@ -93,7 +93,13 @@ func (api *HelpPayAPI) verifyAdminAuth(clientIP string, adminAddress string, sig
 
 	// 1. SECURITY FIX: Verify admin signature BEFORE touching anti-replay cache!
 	// Prevents unauthenticated memory bloat / cache stuffing attacks.
-	if err := api.App.helpPayManager.VerifyAdminSignature(expectedAction, signature, adminAddr); err != nil {
+	// Supports both chain-bound message ("helppay:<chainID>:<action>...") and legacy format ("helppay:<action>...")
+	err := api.App.helpPayManager.VerifyAdminSignature(expectedAction, signature, adminAddr)
+	if err != nil && api.App != nil && api.App.config != nil && api.App.config.ChainId != nil {
+		chainBoundMsg := strings.Replace(expectedAction, "helppay:", fmt.Sprintf("helppay:%s:", api.App.config.ChainId.String()), 1)
+		err = api.App.helpPayManager.VerifyAdminSignature(chainBoundMsg, signature, adminAddr)
+	}
+	if err != nil {
 		api.recordFailedAuth(clientIP)
 		return common.Address{}, fmt.Errorf("admin authorization failed: %w", err)
 	}
@@ -104,11 +110,22 @@ func (api *HelpPayAPI) verifyAdminAuth(clientIP string, adminAddress string, sig
 		return common.Address{}, fmt.Errorf("signature already consumed (replay attack detected)")
 	}
 
-	// 3. Opportunistic pruning of consumed signatures older than 4 minutes (240s)
+	// 3. Opportunistic pruning of consumed signatures (>4m) and expired failed auth records (>10m)
 	if now%10 == 0 {
 		api.usedSignatures.Range(func(key, val interface{}) bool {
 			if ts, ok := val.(int64); ok && now-ts > 240 {
 				api.usedSignatures.Delete(key)
+			}
+			return true
+		})
+		api.failedAuths.Range(func(key, val interface{}) bool {
+			if rec, ok := val.(*failedAuthRecord); ok {
+				rec.mu.Lock()
+				expired := now-rec.firstFailed > 600 && now > rec.blockedUntil
+				rec.mu.Unlock()
+				if expired {
+					api.failedAuths.Delete(key)
+				}
 			}
 			return true
 		})
