@@ -878,7 +878,7 @@ set +e
 ansible-playbook \
     -i "$INVENTORY" \
     "$PLAYBOOK" \
-    --extra-vars "deploy_action=${ACTION} open_ports=${OPEN_PORTS_FLAG} run_integration_tests=false metanode_env=${METANODE_ENV} node_env=${NODE_ENV} parent_keys_dir=${PARENT_KEYS_DIR}" \
+    --extra-vars "deploy_action=${ACTION} open_ports=${OPEN_PORTS_FLAG} run_integration_tests=false metanode_env=${METANODE_ENV} node_env=${NODE_ENV} parent_keys_dir=${PARENT_KEYS_DIR} overwrite_keys=${OVERWRITE_KEYS:-false}" \
     "${VAULT_CLUSTER_ARGS[@]}" \
     "${EXTRA_ANSIBLE_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
 ANSIBLE_RC=${PIPESTATUS[0]}

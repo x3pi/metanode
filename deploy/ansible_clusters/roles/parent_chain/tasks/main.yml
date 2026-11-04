@@ -193,17 +193,22 @@
         has_existing_parent_chain_data: >-
           {{ parent_chain_data_stats.results | selectattr('stat.exists', 'defined') | selectattr('stat.exists', 'equalto', true) | list | length > 0 }}
 
+    - name: Check if existing protocol_key exists on remote host
+      ansible.builtin.stat:
+        path: "{{ node_data_dir }}/node_{{ parent_node_id | default(0) }}_protocol_key.json"
+      register: existing_protocol_key_stat
+
+    - name: Check if existing genesis file exists on remote host
+      ansible.builtin.stat:
+        path: "{{ node_data_dir }}/parent_genesis.json"
+      register: existing_genesis_stat
+
     - name: Verify existing genesis and keys before overwriting on non-reset action
       when:
         - has_existing_parent_chain_data
         - deploy_action in ['setup', 'deploy', 'restart']
         - not (allow_inconsistent_key_overwrite | default(false) | bool)
       block:
-        - name: Check if existing protocol_key exists on remote host
-          ansible.builtin.stat:
-            path: "{{ node_data_dir }}/node_{{ parent_node_id | default(0) }}_protocol_key.json"
-          register: existing_protocol_key_stat
-
         - name: Compute sha256 checksum of incoming local protocol key
           ansible.builtin.stat:
             path: "{{ (parent_keys_dir | default(playbook_dir ~ '/parent_keys')) }}/node_{{ parent_node_id | default(0) }}_protocol_key.json"
@@ -231,6 +236,11 @@
         mode: '0644'
         owner: "{{ ansible_user | default('abc') }}"
         group: "{{ ansible_user | default('abc') }}"
+      when: >-
+        deploy_action == 'reset' or
+        (overwrite_keys | default(false) | bool) or
+        (allow_key_replacement | default(false) | bool) or
+        not (existing_genesis_stat.stat.exists | default(false))
 
     - name: Record deployed genesis checksum in hostvars
       ansible.builtin.stat:
@@ -260,6 +270,11 @@
       loop:
         - "node_{{ parent_node_id | default(0) }}_protocol_key.json"
         - "node_{{ parent_node_id | default(0) }}_network_key.json"
+      when: >-
+        deploy_action == 'reset' or
+        (overwrite_keys | default(false) | bool) or
+        (allow_key_replacement | default(false) | bool) or
+        not (existing_protocol_key_stat.stat.exists | default(false))
 
     - name: Deploy Parent Chain Rust consensus node_parent.toml
       ansible.builtin.template:
