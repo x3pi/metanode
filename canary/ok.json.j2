@@ -1,0 +1,4 @@
+{
+  "name": "{{ canary_name | default('canary') }}"{% if extra is defined %},
+  "extra": "{{ extra }}"{% endif %}
+}
