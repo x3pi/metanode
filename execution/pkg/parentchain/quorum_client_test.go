@@ -228,9 +228,7 @@ func TestQuorumClient_NonceResetsAfterFailedTx(t *testing.T) {
 
 	n, _ := qc.getNextNonce()
 	assert.Equal(t, uint64(5), n)
-	qc.nonceMu.Lock()
-	qc.lastTxHash = common.HexToHash("0x01")
-	qc.nonceMu.Unlock()
+	qc.RecordSentTx(5, common.HexToHash("0x01"))
 	n, _ = qc.getNextNonce()
 	assert.Equal(t, uint64(5), n, "last tx failed on chain: must restart from the committed nonce, not 6")
 }
@@ -308,6 +306,55 @@ func TestQuorumClient_NonceGapRecovery_MiddleTxRejected(t *testing.T) {
 	n4, err := qc.getNextNonce()
 	require.NoError(t, err)
 	assert.Equal(t, uint64(11), n4, "Tx 11 failed in-flight: next nonce must reset to committed nonce 11, not advance to 13")
+}
+
+func TestQuorumClient_ReportTxFailure_SelectivePurge(t *testing.T) {
+	kp := bls.GenerateKeyPair()
+	var mu sync.Mutex
+	committedNonce := uint64(10)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]interface{}{"nonce": committedNonce})
+	}))
+	defer ts.Close()
+
+	qc := NewQuorumClient([]string{ts.URL}, kp.PrivateKey(), kp.PublicKey())
+
+	// Step 1: Send tx 10, 11, 12
+	n1, err := qc.getNextNonce()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(10), n1)
+	tx1 := common.HexToHash("0x1010")
+	qc.RecordSentTx(n1, tx1)
+
+	n2, err := qc.getNextNonce()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(11), n2)
+	tx2 := common.HexToHash("0x1111")
+	qc.RecordSentTx(n2, tx2)
+
+	n3, err := qc.getNextNonce()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(12), n3)
+	tx3 := common.HexToHash("0x1212")
+	qc.RecordSentTx(n3, tx3)
+
+	// Report failure of tx2 (nonce 11)
+	qc.ReportTxFailure(tx2)
+
+	// In-flight list must retain tx 10, but purge tx 11 and tx 12
+	qc.nonceMu.Lock()
+	assert.Len(t, qc.inFlight, 1)
+	assert.Equal(t, uint64(10), qc.inFlight[0].nonce)
+	assert.Equal(t, uint64(10), qc.lastSent)
+	qc.nonceMu.Unlock()
+
+	// Next nonce should be 11 (re-filling the gap)
+	nNext, err := qc.getNextNonce()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(11), nNext)
 }
 
 // One lying node reporting a huge nonce must not inflate the result (f=1 of 4: use the (f+1)-th largest).

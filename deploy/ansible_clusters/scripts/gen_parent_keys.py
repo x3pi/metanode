@@ -228,9 +228,10 @@ def main():
     parser.add_argument("--inventory", default="", help="Path to inventory.yml")
     parser.add_argument("--keys-dir", default="", help="Path to output parent_keys directory")
     parser.add_argument("--metanode-bin", default="", help="Explicit path to metanode binary")
-    parser.add_argument("--overwrite", action="store_true", help="Force regenerate keys even if they exist")
-    parser.add_argument("--i-understand-this-wipes-chain-data", action="store_true", dest="force_confirm",
-                        help="Explicit confirmation that regenerating keys invalidates existing chain data and requires a full --reset")
+    parser.add_argument("--change-keys", "--change-key", "--overwrite", action="store_true", dest="change_keys",
+                        help="Change/regenerate Parent Chain validator keys (forces key rotation)")
+    parser.add_argument("--force", "-f", "--wipe-data", "--i-understand-this-wipes-chain-data", action="store_true", dest="force",
+                        help="Force confirmation required when changing keys on existing data")
     parser.add_argument("--check-only", action="store_true", help="Exit 0 if keys exist, 1 if missing")
     args = parser.parse_args()
 
@@ -257,29 +258,32 @@ def main():
     if args.check_only:
         sys.exit(0 if keys_exist else 1)
 
-    if keys_exist and not args.overwrite:
+    if keys_exist and not args.change_keys:
         print(cyan(f"🔑 [PARENT-KEYS] All {len(nodes)} Parent Chain validator keys exist in {keys_dir}."))
         print(cyan("   Reusing existing keys (no regeneration)."))
         sys.exit(0)
 
-    if has_any and args.overwrite:
-        if not args.force_confirm:
-            print(red("\n❌ [ERROR] Refusing to overwrite existing Parent Chain validator keys!"))
-            print(yellow(f"   Existing keys found in: {keys_dir}"))
-            print(yellow("   Regenerating keys for an existing chain invalidates all blocks and causes consensus deadlock ('Invalid signature')."))
-            print(yellow("   To proceed, you must provide explicit confirmation:"))
-            print(cyan("     --i-understand-this-wipes-chain-data"))
-            print(yellow("   AND you must reset all 4 nodes simultaneously: ./deploy_clusters.sh --reset\n"))
+    if has_any and args.change_keys:
+        if not args.force:
+            print(red("\n❌ [ERROR] Từ chối đổi khóa khi chưa có cờ ép buộc (--force)!"))
+            print(yellow(f"   Đã tìm thấy khóa cũ trong: {keys_dir}"))
+            print(yellow("   Việc đổi khóa trên chuỗi đang chạy sẽ làm vô hiệu hóa các block cũ và gây kẹt đồng thuận ('Invalid signature')."))
+            print(yellow("   Để xác nhận đổi khóa, bạn cần thêm cờ ép buộc:"))
+            print(cyan("     --force (hoặc -f)"))
+            print(yellow("   VÀ bạn phải reset chuỗi cùng lúc: ./deploy_clusters.sh --reset --force\n"))
             sys.exit(1)
 
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_dir = keys_dir.parent / f"{keys_dir.name}.previous_{timestamp}"
+        if backup_dir.exists():
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            backup_dir = keys_dir.parent / f"{keys_dir.name}.previous_{timestamp}"
         print(cyan(f"📦 [BACKUP] Automatically backing up previous keys to: {backup_dir}"))
-        shutil.copytree(keys_dir, backup_dir)
+        shutil.copytree(keys_dir, backup_dir, dirs_exist_ok=True)
 
     # Need generation
-    action_desc = "Forced regenerating" if args.overwrite else "Auto-generating missing"
+    action_desc = "Forced regenerating" if args.change_keys else "Auto-generating missing"
     print(yellow(f"\n🔑 [PARENT-KEYS] {action_desc} Parent Chain validator keys in: {keys_dir}"))
 
     metanode_bin = build_metanode_binary_if_needed(repo_root)
@@ -293,7 +297,7 @@ def main():
         summary_file = keys_dir / f"node_{nid}_summary.json"
 
         # If not overwrite, and this specific node has keys, keep it
-        if not args.overwrite and proto_file.is_file() and net_file.is_file() and summary_file.is_file():
+        if not args.change_keys and proto_file.is_file() and net_file.is_file() and summary_file.is_file():
             print(cyan(f"  ⏭️  node_{nid} keys already exist. Keeping."))
             try:
                 with open(summary_file, 'r', encoding='utf-8') as sf:

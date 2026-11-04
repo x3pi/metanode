@@ -43,11 +43,10 @@ type QuorumClient struct {
 
 	// Nonce tracking. The next nonce is derived from the COMMITTED sender nonce on the parent chain (never from
 	// FloatSeq, which is an unrelated counter). Transactions still in flight are accounted for via lastSent.
-	nonceMu    sync.Mutex
-	haveSent   bool
-	lastSent   uint64
-	lastTxHash common.Hash
-	inFlight   []inFlightTx
+	nonceMu  sync.Mutex
+	haveSent bool
+	lastSent uint64
+	inFlight []inFlightTx
 }
 
 // maxNonceWindow bounds how many nonces we may run ahead of the committed nonce. If the chain has not caught up
@@ -180,18 +179,6 @@ func (q *QuorumClient) getNextNonce() (uint64, error) {
 		}
 	}
 
-	// Also check legacy lastTxHash if not covered in inFlight
-	if !failed && q.lastTxHash != (common.Hash{}) {
-		for _, c := range q.clients {
-			if r, found, rerr := c.GetReceipt(q.lastTxHash); rerr == nil && found {
-				if r.Status != 1 {
-					failed = true
-					break
-				}
-			}
-		}
-	}
-
 	if failed {
 		// An in-flight transaction failed or was rejected on the parent chain.
 		// Fall back to the committed chain nonce and discard uncommitted pipeline state.
@@ -207,7 +194,6 @@ func (q *QuorumClient) getNextNonce() (uint64, error) {
 	q.lastSent = next
 	q.haveSent = true
 	q.inFlight = append(q.inFlight, inFlightTx{nonce: next})
-	q.lastTxHash = common.Hash{}
 	return next, nil
 }
 
@@ -215,7 +201,6 @@ func (q *QuorumClient) getNextNonce() (uint64, error) {
 func (q *QuorumClient) RecordSentTx(nonce uint64, txHash common.Hash) {
 	q.nonceMu.Lock()
 	defer q.nonceMu.Unlock()
-	q.lastTxHash = txHash
 	for i := range q.inFlight {
 		if q.inFlight[i].nonce == nonce {
 			q.inFlight[i].hash = txHash
@@ -231,16 +216,40 @@ func (q *QuorumClient) ResetNonce() {
 	defer q.nonceMu.Unlock()
 	q.haveSent = false
 	q.inFlight = nil
-	q.lastTxHash = common.Hash{}
 }
 
-// ReportTxFailure reports a failed transaction hash, resetting nonce pipeline immediately.
+// ReportTxFailure reports a failed transaction hash, resetting pipeline nonces at and after the failed transaction.
 func (q *QuorumClient) ReportTxFailure(txHash common.Hash) {
+	if txHash == (common.Hash{}) {
+		return
+	}
 	q.nonceMu.Lock()
 	defer q.nonceMu.Unlock()
-	q.haveSent = false
-	q.inFlight = nil
-	q.lastTxHash = common.Hash{}
+
+	failedIdx := -1
+	for i, inf := range q.inFlight {
+		if inf.hash == txHash {
+			failedIdx = i
+			break
+		}
+	}
+
+	if failedIdx == -1 {
+		// txHash not found in in-flight list (e.g. race or already purged).
+		// Safely fallback to full reset so next send reads the true on-chain committed nonce.
+		q.haveSent = false
+		q.inFlight = nil
+		return
+	}
+
+	// Remove the failed transaction and all subsequent transactions (which are invalidated by the nonce gap)
+	q.inFlight = q.inFlight[:failedIdx]
+	if len(q.inFlight) > 0 {
+		q.lastSent = q.inFlight[len(q.inFlight)-1].nonce
+		q.haveSent = true
+	} else {
+		q.haveSent = false
+	}
 }
 
 // ─── TRANSACTION SUBMISSION (FAILOVER ACROSS NODES) ─────────────────────────
@@ -324,6 +333,7 @@ func (q *QuorumClient) SendDepositToFloat(
 	callData := EncodeDepositToFloatCallData(q.pubKey, pubKey, destClusterID, sender, target, amount, msgID, cert)
 	tx, err := BuildAndSignBLSTx(q.privKey, q.pubKey, ParentChainGatewayAddress, nonce, callData)
 	if err != nil {
+		q.ResetNonce()
 		return common.Hash{}, err
 	}
 	return q.sendRawTxFailover(tx)
@@ -349,6 +359,7 @@ func (q *QuorumClient) SendTransferFloat(
 	callData := EncodeTransferFloatCallData(destPubKey, destClusterID, sender, target, amount, gasFee, seq, cm.SignFromBytes(cert), isRefund, nil)
 	tx, err := BuildAndSignBLSTx(q.privKey, q.pubKey, ParentChainGatewayAddress, nonce, callData)
 	if err != nil {
+		q.ResetNonce()
 		return common.Hash{}, err
 	}
 	return q.sendRawTxFailover(tx)
@@ -366,6 +377,7 @@ func (q *QuorumClient) SendMarkClaimed(msgID common.Hash, outcome FloatOutcome, 
 	callData := EncodeMarkClaimedCallData(msgID, outcome, cm.SignFromBytes(cert))
 	tx, err := BuildAndSignBLSTx(q.privKey, q.pubKey, ParentChainGatewayAddress, nonce, callData)
 	if err != nil {
+		q.ResetNonce()
 		return common.Hash{}, err
 	}
 	return q.sendRawTxFailover(tx)
@@ -383,6 +395,7 @@ func (q *QuorumClient) SendReclaimFloat(msgID common.Hash, cert []byte) (common.
 	callData := EncodeReclaimFloatCallData(msgID, cm.SignFromBytes(cert))
 	tx, err := BuildAndSignBLSTx(q.privKey, q.pubKey, ParentChainGatewayAddress, nonce, callData)
 	if err != nil {
+		q.ResetNonce()
 		return common.Hash{}, err
 	}
 	return q.sendRawTxFailover(tx)
@@ -401,6 +414,7 @@ func (q *QuorumClient) SendRegisterCluster(clusterID uint64) (common.Hash, error
 	}
 	tx, err := BuildAndSignBLSTx(q.privKey, q.pubKey, ParentChainGatewayAddress, nonce, EncodeRegisterClusterCallData(q.pubKey, clusterID))
 	if err != nil {
+		q.ResetNonce()
 		return common.Hash{}, err
 	}
 	return q.sendRawTxFailover(tx)
@@ -418,6 +432,7 @@ func (q *QuorumClient) SendRegisterAccount(userAddress common.Address, floatIden
 	callData := EncodeRegisterAccountCallData(userAddress, floatIdentityKey, userSig, clusterSig)
 	tx, err := BuildAndSignBLSTx(q.privKey, q.pubKey, ParentChainGatewayAddress, nonce, callData)
 	if err != nil {
+		q.ResetNonce()
 		return common.Hash{}, err
 	}
 	return q.sendRawTxFailover(tx)
@@ -435,6 +450,7 @@ func (q *QuorumClient) SendSubmitStateRoot(clusterPubKey cm.PublicKey, epoch uin
 	callData := EncodeSubmitStateRootCallData(clusterPubKey, epoch, stateRoot, cert)
 	tx, err := BuildAndSignBLSTx(q.privKey, q.pubKey, ParentChainGatewayAddress, nonce, callData)
 	if err != nil {
+		q.ResetNonce()
 		return common.Hash{}, err
 	}
 	return q.sendRawTxFailover(tx)

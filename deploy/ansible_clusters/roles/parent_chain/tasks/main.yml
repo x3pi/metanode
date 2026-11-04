@@ -239,6 +239,7 @@
         group: "{{ ansible_user | default('abc') }}"
       when: >-
         deploy_action == 'reset' or
+        (change_keys | default(false) | bool) or
         (overwrite_keys | default(false) | bool) or
         (allow_key_replacement | default(false) | bool) or
         not (existing_genesis_stat.stat.exists | default(false))
@@ -273,6 +274,7 @@
         - "node_{{ parent_node_id | default(0) }}_network_key.json"
       when: >-
         deploy_action == 'reset' or
+        (change_keys | default(false) | bool) or
         (overwrite_keys | default(false) | bool) or
         (allow_key_replacement | default(false) | bool) or
         not (existing_protocol_key_stat.stat.exists | default(false))

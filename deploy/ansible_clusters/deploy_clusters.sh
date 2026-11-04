@@ -24,7 +24,8 @@ TARGET_NODE=""
 EXPORT_CONFIG_ONLY="false"
 ENABLE_MONITOR="true"
 PARENT_KEYS_DIR="${SCRIPT_DIR}/parent_keys"
-OVERWRITE_KEYS="false"
+CHANGE_KEYS="false"
+CONFIRM_FORCE="false"
 EXTRA_ANSIBLE_ARGS=()
 
 # ── Load environment (.env) ──────────────────────────────────────────────────
@@ -56,7 +57,8 @@ usage() {
     echo "  --clean             Dọn dẹp database & log (giữ nguyên config và key)"
     echo "  --reset             Reset toàn bộ, xóa database và khởi chạy lại từ block 0"
     echo "  --gen-keys          Sinh bộ key Parent Chain (và validator public keys) cục bộ"
-    echo "  --overwrite-keys    Buộc sinh lại bộ key Parent Chain kể cả khi đã có sẵn"
+    echo "  --change-keys       Đổi bộ key Parent Chain mới (xoay khóa, alias: --overwrite-keys)"
+    echo "  --force, -f         Cờ ép buộc xác nhận (bắt buộc khi đổi key hoặc reset để bảo vệ dữ liệu)"
     echo "  --status            Kiểm tra trạng thái RPC và block height các cụm node"
     echo "  --open-ports        Tự động cấu hình mở cổng tường lửa (UFW) trên các server"
     echo "  --export-config     Xuất cấu hình mạng ra /tmp/rpc_nodes.json"
@@ -132,12 +134,12 @@ while [[ $# -gt 0 ]]; do
             ACTION="gen_keys"
             shift
             ;;
-        --overwrite-keys|--overwrite)
-            OVERWRITE_KEYS="true"
+        --change-keys|--change-key|--overwrite-keys|--overwrite)
+            CHANGE_KEYS="true"
             shift
             ;;
-        --i-understand-this-wipes-chain-data)
-            CONFIRM_WIPE_DATA="true"
+        --force|-f|--wipe-data|--i-understand-this-wipes-chain-data)
+            CONFIRM_FORCE="true"
             shift
             ;;
         --status|status)
@@ -849,9 +851,9 @@ fi
 # 2.8. Xử lý riêng cho lệnh --gen-keys (chỉ sinh key Parent Chain cục bộ mà không deploy)
 if [ "$ACTION" = "gen_keys" ]; then
     echo "🔑 [GEN-KEYS] Bắt đầu sinh bộ Key Parent Chain cục bộ..."
-    GEN_ARGS=(python3 "${SCRIPT_DIR}/scripts/gen_parent_keys.py" --inventory "$INVENTORY" --keys-dir "$PARENT_KEYS_DIR" --overwrite)
-    if [ "$CONFIRM_WIPE_DATA" = "true" ]; then
-        GEN_ARGS+=(--i-understand-this-wipes-chain-data)
+    GEN_ARGS=(python3 "${SCRIPT_DIR}/scripts/gen_parent_keys.py" --inventory "$INVENTORY" --keys-dir "$PARENT_KEYS_DIR" --change-keys)
+    if [ "$CONFIRM_FORCE" = "true" ]; then
+        GEN_ARGS+=(--force)
     fi
     "${GEN_ARGS[@]}"
     echo "✅ [GEN-KEYS] Đã sinh xong bộ key Parent Chain tại: ${PARENT_KEYS_DIR}"
@@ -860,13 +862,13 @@ fi
 
 # 2.9. Đảm bảo bộ key Parent Chain luôn sẵn sàng:
 # - Nếu chưa có (fresh setup hoặc reset): tự động sinh key mới
-# - Nếu đã có: giữ nguyên đọc như cũ (không sinh đè trừ khi có cờ --overwrite-keys)
+# - Nếu đã có: giữ nguyên đọc như cũ (không sinh đè trừ khi có cờ --change-keys)
 if [ "$EXEC_ONLY" != "true" ]; then
     GEN_KEY_CMD=(python3 "${SCRIPT_DIR}/scripts/gen_parent_keys.py" --inventory "$INVENTORY" --keys-dir "$PARENT_KEYS_DIR")
-    if [ "$OVERWRITE_KEYS" = "true" ]; then
-        GEN_KEY_CMD+=(--overwrite)
-        if [ "$CONFIRM_WIPE_DATA" = "true" ]; then
-            GEN_KEY_CMD+=(--i-understand-this-wipes-chain-data)
+    if [ "$CHANGE_KEYS" = "true" ]; then
+        GEN_KEY_CMD+=(--change-keys)
+        if [ "$CONFIRM_FORCE" = "true" ]; then
+            GEN_KEY_CMD+=(--force)
         fi
     fi
     "${GEN_KEY_CMD[@]}"
@@ -878,7 +880,7 @@ set +e
 ansible-playbook \
     -i "$INVENTORY" \
     "$PLAYBOOK" \
-    --extra-vars "deploy_action=${ACTION} open_ports=${OPEN_PORTS_FLAG} run_integration_tests=false metanode_env=${METANODE_ENV} node_env=${NODE_ENV} parent_keys_dir=${PARENT_KEYS_DIR} overwrite_keys=${OVERWRITE_KEYS:-false}" \
+    --extra-vars "deploy_action=${ACTION} open_ports=${OPEN_PORTS_FLAG} run_integration_tests=false metanode_env=${METANODE_ENV} node_env=${NODE_ENV} parent_keys_dir=${PARENT_KEYS_DIR} change_keys=${CHANGE_KEYS:-false}" \
     "${VAULT_CLUSTER_ARGS[@]}" \
     "${EXTRA_ANSIBLE_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
 ANSIBLE_RC=${PIPESTATUS[0]}

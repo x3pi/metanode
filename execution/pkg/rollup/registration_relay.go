@@ -54,6 +54,7 @@ type RegistrationParent interface {
 	SendRegisterAccount(userAddress common.Address, floatIdentityKey cm.PublicKey, userSig []byte, clusterSig cm.Sign) (common.Hash, error)
 	GetAccountRegistry(userAddress common.Address) (cm.PublicKey, bool, error)
 	GetReceipt(txHash common.Hash) (*parentchain.Receipt, bool, error)
+	ReportTxFailure(txHash common.Hash)
 }
 
 // RegistrationResult is a status plus optional detail (the winning cluster for REJECTED, the reason for FAILED).
@@ -831,17 +832,17 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 	}
 	r.markProvisionalIfApplied(user)
 
-	// Check if parent chain rejected the submitted transaction (e.g. sender nonce mismatch)
+	// Check if parent chain rejected the submitted transaction (e.g. sender nonce mismatch or other revert)
 	if e.txHash != (common.Hash{}) && r.parent != nil {
 		if rcpt, found, rerr := r.parent.GetReceipt(e.txHash); rerr == nil && found {
 			if rcpt.Status != 1 {
 				reason := fmt.Sprintf("parent chain rejected registration tx (errCode=%d)", rcpt.ErrorCode)
 				if rcpt.ErrorCode == 103 {
 					reason = "parent chain rejected registration tx: sender nonce mismatch (errCode=103)"
-					if qc, ok := r.parent.(*parentchain.QuorumClient); ok {
-						qc.ReportTxFailure(e.txHash)
-					}
 				}
+				// Always report transaction failure to reset the nonce pipeline on any non-success status,
+				// avoiding cascade nonce gaps on subsequent attempts.
+				r.parent.ReportTxFailure(e.txHash)
 				r.retryOrFail(user, reason)
 				return
 			}
@@ -867,6 +868,10 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 	r.update(user, func(e *relayEntry) {
 		e.verifies++
 		if e.verifies >= r.maxVerifies {
+			if e.txHash != (common.Hash{}) && r.parent != nil {
+				r.parent.ReportTxFailure(e.txHash)
+				e.txHash = common.Hash{}
+			}
 			if e.status == RegStatusProvisional || isProvOnChain {
 				e.status = RegStatusProvisional
 				e.submitted = false

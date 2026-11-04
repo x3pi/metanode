@@ -170,9 +170,7 @@ def query_node_status(url, timeout=3):
             "error": str(e)
         }
 
-# Thresholds based on COUNT (Số lần), strictly deterministic per AGENTS.md
-COMMIT_STALLED_COUNT_THRESHOLD = 12   # Cảnh báo khi commit/block không tăng sau 12 lần kiểm tra liên tiếp
-SYNCING_STUCK_COUNT_THRESHOLD = 10    # Cảnh báo khi node kẹt ở phase syncing/CatchingUp sau 10 lần kiểm tra liên tiếp
+# Operational Incident Detectors (Count-based Thresholds in Logs)
 INVALID_SIG_COUNT_THRESHOLD = 5       # Cảnh báo khi phát hiện >= 5 lỗi 'Invalid signature' mới trong log
 NONCE_MISMATCH_COUNT_THRESHOLD = 3    # Cảnh báo khi phát hiện >= 3 lỗi 'sender nonce mismatch' mới trong log
 
@@ -185,10 +183,7 @@ class AlertThrottle:
         self.hash_mismatch_active = False
         self.last_hash_alert_time = 0
 
-        # Extended counters for operational monitoring (threshold by count)
-        self.node_syncing_counts = {}   # name -> count of consecutive syncing checks
-        self.node_last_block = {}       # name -> last observed block number
-        self.node_stalled_counts = {}   # name -> count of consecutive checks with no block increase
+        # Log scanner tracking
         self.log_scan_positions = {}    # filepath -> last read offset
         self.last_log_alert_time = {}   # alert_key -> timestamp
 
@@ -342,49 +337,7 @@ def run_monitor_loop(inventory_path=None, interval=5):
             # 2. Hash Consistency & Fork Check (among online nodes)
             online_nodes = {name: res for name, res in results.items() if res["online"]}
 
-            # 2.1 Syncing / CatchingUp stuck check
-            for name, res in online_nodes.items():
-                if res.get("syncing"):
-                    throttler.node_syncing_counts[name] = throttler.node_syncing_counts.get(name, 0) + 1
-                    if throttler.node_syncing_counts[name] >= SYNCING_STUCK_COUNT_THRESHOLD:
-                        if not test_mode and throttler.should_alert_key(f"syncing_{name}"):
-                            msg = (
-                                f"⚠️ <b>[PARENT CHAIN ALERT] Node kẹt ở phase syncing / CatchingUp!</b>\n"
-                                f"━━━━━━━━━━━━━━━━━━\n"
-                                f"<b>Node:</b> <code>{name}</code>\n"
-                                f"<b>Số lần kiểm tra:</b> {throttler.node_syncing_counts[name]} lần\n"
-                                f"<b>Block hiện tại:</b> #{res.get('last_block')}\n"
-                                f"<b>Thời gian:</b> <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
-                                f"⚠️ Node kẹt trong CatchingUp mà không chuyển sang Healthy. Kiểm tra DAG và kết nối peer!"
-                            )
-                            print(f"⚠️ {name} STUCK IN SYNCING ({throttler.node_syncing_counts[name]} checks)")
-                            send_telegram(bot_token, chat_id, msg)
-                else:
-                    throttler.node_syncing_counts[name] = 0
-
-            # 2.2 Commit stalled check
-            for name, res in online_nodes.items():
-                blk = res.get("last_block", 0)
-                last_blk = throttler.node_last_block.get(name)
-                if last_blk is not None and blk <= last_blk:
-                    throttler.node_stalled_counts[name] = throttler.node_stalled_counts.get(name, 0) + 1
-                    if throttler.node_stalled_counts[name] >= COMMIT_STALLED_COUNT_THRESHOLD:
-                        if not test_mode and throttler.should_alert_key(f"stalled_{name}"):
-                            msg = (
-                                f"⚠️ <b>[PARENT CHAIN ALERT] Commit Parent Chain không tăng!</b>\n"
-                                f"━━━━━━━━━━━━━━━━━━\n"
-                                f"<b>Node:</b> <code>{name}</code>\n"
-                                f"<b>Block dừng:</b> #{blk} ({throttler.node_stalled_counts[name]} lần kiểm tra liên tiếp)\n"
-                                f"<b>Thời gian:</b> <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
-                                f"⚠️ Commit không tiến triển. Có thể mạng BFT đang thiếu quorum hoặc kẹt đồng thuận!"
-                            )
-                            print(f"⚠️ {name} COMMIT STALLED at #{blk} ({throttler.node_stalled_counts[name]} checks)")
-                            send_telegram(bot_token, chat_id, msg)
-                else:
-                    throttler.node_last_block[name] = blk
-                    throttler.node_stalled_counts[name] = 0
-
-            # 2.3 Local Log Scanner: Invalid signature & sender nonce mismatch
+            # 2.1 Local Log Scanner: Invalid signature & sender nonce mismatch
             log_anomalies = scan_parent_logs_for_anomalies(throttler)
             for anomaly in log_anomalies:
                 if not test_mode and throttler.should_alert_key(anomaly["key"]):
