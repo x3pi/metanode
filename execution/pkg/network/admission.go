@@ -34,3 +34,11 @@ func loadTxAdmissionGate() TxAdmissionGate {
 func isTxSubmissionCommand(cmd string) bool {
 	return cmd == "SendRawTransaction" || cmd == "SendRawTransactions"
 }
+
+// requiresInitGate reports whether a command requires the connection to complete InitConnection
+// before being processed. Transaction submissions and subscription commands require connection mapping
+// in ConnectionsManager so receipts and events can be delivered back to the client.
+// Read-only queries (e.g. GetChainId, GetAccountState, GetNonce, GetBlockNumber) bypass this gate.
+func requiresInitGate(cmd string) bool {
+	return isTxSubmissionCommand(cmd) || cmd == "SubscribeToAddress"
+}
