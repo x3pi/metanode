@@ -314,16 +314,21 @@
 - name: Start Parent Chain
   when: "deploy_action in ['setup', 'deploy', 'start', 'restart', 'reset']"
   block:
-    - name: Verify genesis checksum is identical across all Parent Chain nodes before starting
+    - name: Verify genesis checksum matches cluster leader before starting
       ansible.builtin.assert:
         that:
-          - (groups['parent_chain_nodes'] | default([inventory_hostname]) | map('extract', hostvars, 'deployed_parent_genesis_sha256') | select('defined') | unique | length) <= 1
+          - deployed_parent_genesis_sha256 == hostvars[first_parent_host]['deployed_parent_genesis_sha256']
         fail_msg: >-
-          FATAL: Genesis checksum mismatch across Parent Chain nodes!
-          Nodes have inconsistent parent_genesis.json fingerprints:
-          {{ groups['parent_chain_nodes'] | default([inventory_hostname]) | map('extract', hostvars, 'deployed_parent_genesis_sha256') | list }}
+          FATAL: Genesis checksum mismatch on {{ inventory_hostname }}!
+          Node {{ inventory_hostname }} has fingerprint {{ deployed_parent_genesis_sha256 }},
+          which does not match {{ first_parent_host }} ({{ hostvars[first_parent_host]['deployed_parent_genesis_sha256'] | default('none') }}).
           All Parent Chain nodes must have identical genesis files.
-      run_once: true
+      vars:
+        first_parent_host: "{{ (groups['parent_chain_nodes'] | default([])) | first | default(inventory_hostname) }}"
+      when:
+        - deployed_parent_genesis_sha256 is defined
+        - first_parent_host in hostvars
+        - hostvars[first_parent_host].get('deployed_parent_genesis_sha256') is defined
 
     - name: Start service via systemd
       ansible.builtin.systemd:
