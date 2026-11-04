@@ -1,0 +1,7 @@
+name: canary
+items:
+  - one
+  - two
+secret: !vault |
+  $ANSIBLE_VAULT;1.1;AES256
+  deadbeef
