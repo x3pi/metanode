@@ -13,6 +13,7 @@
       ansible.builtin.systemd:
         name: "metanode-{{ inventory_hostname }}"
         state: stopped
+        enabled: "{{ 'no' if deploy_action == 'stop' else omit }}"
       ignore_errors: true
 
     - name: Terminate lingering process for this exact execution node

@@ -19,6 +19,7 @@
       ansible.builtin.systemd:
         name: "metanode-{{ inventory_hostname }}"
         state: stopped
+        enabled: "{{ 'no' if deploy_action == 'stop' else omit }}"
       ignore_errors: true
 
     - name: Stop and disable legacy metanode-parentchain via systemd if present
