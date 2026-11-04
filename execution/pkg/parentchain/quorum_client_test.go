@@ -235,6 +235,81 @@ func TestQuorumClient_NonceResetsAfterFailedTx(t *testing.T) {
 	assert.Equal(t, uint64(5), n, "last tx failed on chain: must restart from the committed nonce, not 6")
 }
 
+// TestQuorumClient_NonceGapRecovery_MiddleTxRejected reproduces the nonce gap bug:
+// Client sends N, N+1, N+2. N commits, N+1 fails/rejected in block with errCode=103,
+// but N+2 is already sent. Client must NOT advance to N+3, but must recover and reset to N+1.
+func TestQuorumClient_NonceGapRecovery_MiddleTxRejected(t *testing.T) {
+	kp := bls.GenerateKeyPair()
+	receipts := map[common.Hash]*Receipt{}
+	var mu sync.Mutex
+	committedNonce := uint64(10)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/nonce", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]interface{}{"nonce": committedNonce})
+	})
+	mux.HandleFunc("/receipt", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		txHashStr := r.URL.Query().Get("hash")
+		if txHashStr == "" {
+			txHashStr = r.URL.Query().Get("tx_hash")
+		}
+		h := common.HexToHash(txHashStr)
+		if rcpt, ok := receipts[h]; ok {
+			json.NewEncoder(w).Encode(map[string]interface{}{"found": true, "receipt": rcpt})
+		} else {
+			json.NewEncoder(w).Encode(map[string]interface{}{"found": false})
+		}
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	qc := NewQuorumClient([]string{ts.URL}, kp.PrivateKey(), kp.PublicKey())
+
+	// Step 1: Send Tx N (10)
+	n1, err := qc.getNextNonce()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(10), n1)
+	tx1Hash := common.HexToHash("0x1010")
+	qc.RecordSentTx(n1, tx1Hash)
+
+	// Tx 10 commits on parent -> committedNonce becomes 11
+	mu.Lock()
+	committedNonce = 11
+	receipts[tx1Hash] = &Receipt{TxHash: tx1Hash, Status: 1}
+	mu.Unlock()
+
+	// Step 2: Send Tx N+1 (11)
+	n2, err := qc.getNextNonce()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(11), n2)
+	tx2Hash := common.HexToHash("0x1111")
+	qc.RecordSentTx(n2, tx2Hash)
+
+	// Step 3: Send Tx N+2 (12) while Tx 11 is in-flight
+	n3, err := qc.getNextNonce()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(12), n3)
+	tx3Hash := common.HexToHash("0x1212")
+	qc.RecordSentTx(n3, tx3Hash)
+
+	// Now: Tx 11 is rejected on parent! (Status: 0, ErrorCode: 103)
+	// Tx 12 is still pending, committedNonce remains 11
+	mu.Lock()
+	receipts[tx2Hash] = &Receipt{TxHash: tx2Hash, Status: 0, ErrorCode: 103}
+	mu.Unlock()
+
+	// Step 4: getNextNonce() must NOT continue to 13!
+	// It MUST detect that in-flight Tx 11 failed and reset to committedNonce 11!
+	n4, err := qc.getNextNonce()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(11), n4, "Tx 11 failed in-flight: next nonce must reset to committed nonce 11, not advance to 13")
+}
+
 // One lying node reporting a huge nonce must not inflate the result (f=1 of 4: use the (f+1)-th largest).
 func TestQuorumClient_NonceIgnoresLyingNode(t *testing.T) {
 	kp := bls.GenerateKeyPair()

@@ -170,6 +170,12 @@ def query_node_status(url, timeout=3):
             "error": str(e)
         }
 
+# Thresholds based on COUNT (Số lần), strictly deterministic per AGENTS.md
+COMMIT_STALLED_COUNT_THRESHOLD = 12   # Cảnh báo khi commit/block không tăng sau 12 lần kiểm tra liên tiếp
+SYNCING_STUCK_COUNT_THRESHOLD = 10    # Cảnh báo khi node kẹt ở phase syncing/CatchingUp sau 10 lần kiểm tra liên tiếp
+INVALID_SIG_COUNT_THRESHOLD = 5       # Cảnh báo khi phát hiện >= 5 lỗi 'Invalid signature' mới trong log
+NONCE_MISMATCH_COUNT_THRESHOLD = 3    # Cảnh báo khi phát hiện >= 3 lỗi 'sender nonce mismatch' mới trong log
+
 class AlertThrottle:
     """Manages cooldowns and state transitions to prevent alert spam."""
     def __init__(self, reminder_interval=300):
@@ -178,6 +184,13 @@ class AlertThrottle:
         self.node_last_alert = {}    # name -> float (timestamp)
         self.hash_mismatch_active = False
         self.last_hash_alert_time = 0
+
+        # Extended counters for operational monitoring (threshold by count)
+        self.node_syncing_counts = {}   # name -> count of consecutive syncing checks
+        self.node_last_block = {}       # name -> last observed block number
+        self.node_stalled_counts = {}   # name -> count of consecutive checks with no block increase
+        self.log_scan_positions = {}    # filepath -> last read offset
+        self.last_log_alert_time = {}   # alert_key -> timestamp
 
     def should_alert_node_down(self, name):
         now = time.time()
@@ -211,6 +224,68 @@ class AlertThrottle:
             self.last_hash_alert_time = 0
             return True
         return False
+
+    def should_alert_key(self, key):
+        now = time.time()
+        last = self.last_log_alert_time.get(key, 0)
+        if now - last > self.reminder_interval:
+            self.last_log_alert_time[key] = now
+            return True
+        return False
+
+def scan_parent_logs_for_anomalies(throttler):
+    """Scan local Parent Chain log files for Invalid signature or sender nonce mismatch loops."""
+    import glob
+    candidates = glob.glob("/var/log/metanode/parent_chain*.log") + \
+                 glob.glob("/opt/metanode/parent_chain_*/logs/parent_chain.log")
+    anomalies = []
+    for log_path in set(candidates):
+        if not os.path.isfile(log_path):
+            continue
+        try:
+            file_size = os.path.getsize(log_path)
+            last_pos = throttler.log_scan_positions.get(log_path, 0)
+            if file_size < last_pos:
+                last_pos = 0  # log rotated
+            if file_size == last_pos:
+                continue
+
+            invalid_sig_count = 0
+            nonce_mismatch_count = 0
+            with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                f.seek(last_pos)
+                # Read at most 5000 lines or 2MB to keep check lightweight
+                for _ in range(5000):
+                    line = f.readline()
+                    if not line:
+                        break
+                    if "Invalid signature" in line or "Failed to verify the block's signature" in line:
+                        invalid_sig_count += 1
+                    if "sender nonce mismatch" in line:
+                        nonce_mismatch_count += 1
+                throttler.log_scan_positions[log_path] = f.tell()
+
+            if invalid_sig_count >= INVALID_SIG_COUNT_THRESHOLD:
+                anomalies.append({
+                    "key": f"inv_sig_{log_path}",
+                    "icon": "🚨",
+                    "title": "[PARENT CHAIN CRITICAL] Phát hiện vòng lặp Invalid signature!",
+                    "file": log_path,
+                    "count": invalid_sig_count,
+                    "desc": "Khối bị từ chối chữ ký liên tục. Khóa validator hoặc genesis có thể đã bị đổi trên DAG cũ mà không reset!"
+                })
+            if nonce_mismatch_count >= NONCE_MISMATCH_COUNT_THRESHOLD:
+                anomalies.append({
+                    "key": f"nonce_mismatch_{log_path}",
+                    "icon": "⚠️",
+                    "title": "[PARENT CHAIN ALERT] Phát hiện sender nonce mismatch lặp!",
+                    "file": log_path,
+                    "count": nonce_mismatch_count,
+                    "desc": "Giao dịch bị từ chối do hổng nonce trên Parent Chain. Cần kiểm tra pipeline nonce của cụm execution!"
+                })
+        except Exception:
+            pass
+    return anomalies
 
 def run_monitor_loop(inventory_path=None, interval=5):
     nodes, bot_token, chat_id, inv_file = load_config(inventory_path)
@@ -266,6 +341,64 @@ def run_monitor_loop(inventory_path=None, interval=5):
 
             # 2. Hash Consistency & Fork Check (among online nodes)
             online_nodes = {name: res for name, res in results.items() if res["online"]}
+
+            # 2.1 Syncing / CatchingUp stuck check
+            for name, res in online_nodes.items():
+                if res.get("syncing"):
+                    throttler.node_syncing_counts[name] = throttler.node_syncing_counts.get(name, 0) + 1
+                    if throttler.node_syncing_counts[name] >= SYNCING_STUCK_COUNT_THRESHOLD:
+                        if not test_mode and throttler.should_alert_key(f"syncing_{name}"):
+                            msg = (
+                                f"⚠️ <b>[PARENT CHAIN ALERT] Node kẹt ở phase syncing / CatchingUp!</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━\n"
+                                f"<b>Node:</b> <code>{name}</code>\n"
+                                f"<b>Số lần kiểm tra:</b> {throttler.node_syncing_counts[name]} lần\n"
+                                f"<b>Block hiện tại:</b> #{res.get('last_block')}\n"
+                                f"<b>Thời gian:</b> <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
+                                f"⚠️ Node kẹt trong CatchingUp mà không chuyển sang Healthy. Kiểm tra DAG và kết nối peer!"
+                            )
+                            print(f"⚠️ {name} STUCK IN SYNCING ({throttler.node_syncing_counts[name]} checks)")
+                            send_telegram(bot_token, chat_id, msg)
+                else:
+                    throttler.node_syncing_counts[name] = 0
+
+            # 2.2 Commit stalled check
+            for name, res in online_nodes.items():
+                blk = res.get("last_block", 0)
+                last_blk = throttler.node_last_block.get(name)
+                if last_blk is not None and blk <= last_blk:
+                    throttler.node_stalled_counts[name] = throttler.node_stalled_counts.get(name, 0) + 1
+                    if throttler.node_stalled_counts[name] >= COMMIT_STALLED_COUNT_THRESHOLD:
+                        if not test_mode and throttler.should_alert_key(f"stalled_{name}"):
+                            msg = (
+                                f"⚠️ <b>[PARENT CHAIN ALERT] Commit Parent Chain không tăng!</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━\n"
+                                f"<b>Node:</b> <code>{name}</code>\n"
+                                f"<b>Block dừng:</b> #{blk} ({throttler.node_stalled_counts[name]} lần kiểm tra liên tiếp)\n"
+                                f"<b>Thời gian:</b> <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
+                                f"⚠️ Commit không tiến triển. Có thể mạng BFT đang thiếu quorum hoặc kẹt đồng thuận!"
+                            )
+                            print(f"⚠️ {name} COMMIT STALLED at #{blk} ({throttler.node_stalled_counts[name]} checks)")
+                            send_telegram(bot_token, chat_id, msg)
+                else:
+                    throttler.node_last_block[name] = blk
+                    throttler.node_stalled_counts[name] = 0
+
+            # 2.3 Local Log Scanner: Invalid signature & sender nonce mismatch
+            log_anomalies = scan_parent_logs_for_anomalies(throttler)
+            for anomaly in log_anomalies:
+                if not test_mode and throttler.should_alert_key(anomaly["key"]):
+                    msg = (
+                        f"{anomaly['icon']} <b>{anomaly['title']}</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"<b>Log file:</b> <code>{anomaly['file']}</code>\n"
+                        f"<b>Số lần xuất hiện:</b> {anomaly['count']} lần mới\n"
+                        f"<b>Chi tiết:</b> {anomaly['desc']}\n"
+                        f"<b>Thời gian:</b> <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>"
+                    )
+                    print(f"🚨 {anomaly['title']}: {anomaly['desc']} ({anomaly['count']} times in {anomaly['file']})")
+                    send_telegram(bot_token, chat_id, msg)
+
             fork_detected_nodes = [name for name, res in online_nodes.items() if res.get("fork_detected")]
 
             if fork_detected_nodes:

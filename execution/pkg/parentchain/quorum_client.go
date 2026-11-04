@@ -27,6 +27,11 @@ var (
 
 var _ Client = (*QuorumClient)(nil)
 
+type inFlightTx struct {
+	hash  common.Hash
+	nonce uint64
+}
+
 // QuorumClient implements Client by querying a quorum of Parent Chain nodes
 // and verifying cryptographic Merkle proofs to prevent trusting a single malicious or out-of-sync node.
 type QuorumClient struct {
@@ -42,6 +47,7 @@ type QuorumClient struct {
 	haveSent   bool
 	lastSent   uint64
 	lastTxHash common.Hash
+	inFlight   []inFlightTx
 }
 
 // maxNonceWindow bounds how many nonces we may run ahead of the committed nonce. If the chain has not caught up
@@ -141,29 +147,82 @@ func (q *QuorumClient) getNextNonce() (uint64, error) {
 	chain, err := q.committedNonce()
 	if err != nil {
 		q.haveSent = false
+		q.inFlight = nil
 		return 0, err
 	}
+
+	// Purge in-flight transactions that have already been committed on chain
+	var pending []inFlightTx
+	for _, inf := range q.inFlight {
+		if inf.nonce >= chain {
+			pending = append(pending, inf)
+		}
+	}
+	q.inFlight = pending
+
 	next := chain
-	if q.haveSent && q.lastSent+1 > chain {
-		// Our previous transaction(s) are not committed yet. Keep pipelining unless the last one is known to
-		// have failed (its receipt exists with a non-success status) or we ran too far ahead of the chain.
-		failed := false
-		if q.lastTxHash != (common.Hash{}) {
+	failed := false
+
+	// Check receipts of all transactions currently in flight
+	for _, inf := range q.inFlight {
+		if inf.hash != (common.Hash{}) {
 			for _, c := range q.clients {
-				if r, found, rerr := c.GetReceipt(q.lastTxHash); rerr == nil && found {
-					failed = r.Status != 1
+				if r, found, rerr := c.GetReceipt(inf.hash); rerr == nil && found {
+					if r.Status != 1 {
+						failed = true
+						break
+					}
+				}
+			}
+			if failed {
+				break
+			}
+		}
+	}
+
+	// Also check legacy lastTxHash if not covered in inFlight
+	if !failed && q.lastTxHash != (common.Hash{}) {
+		for _, c := range q.clients {
+			if r, found, rerr := c.GetReceipt(q.lastTxHash); rerr == nil && found {
+				if r.Status != 1 {
+					failed = true
 					break
 				}
 			}
 		}
-		if !failed && q.lastSent+1-chain <= maxNonceWindow {
-			next = q.lastSent + 1
-		}
 	}
+
+	if failed {
+		// An in-flight transaction failed or was rejected on the parent chain.
+		// Fall back to the committed chain nonce and discard uncommitted pipeline state.
+		q.haveSent = false
+		q.inFlight = nil
+		next = chain
+	} else if q.haveSent && q.lastSent+1 > chain && q.lastSent+1-chain <= maxNonceWindow {
+		next = q.lastSent + 1
+	} else {
+		next = chain
+	}
+
 	q.lastSent = next
 	q.haveSent = true
+	q.inFlight = append(q.inFlight, inFlightTx{nonce: next})
 	q.lastTxHash = common.Hash{}
 	return next, nil
+}
+
+// RecordSentTx associates a transaction hash with an in-flight nonce.
+func (q *QuorumClient) RecordSentTx(nonce uint64, txHash common.Hash) {
+	q.nonceMu.Lock()
+	defer q.nonceMu.Unlock()
+	q.lastTxHash = txHash
+	for i := range q.inFlight {
+		if q.inFlight[i].nonce == nonce {
+			q.inFlight[i].hash = txHash
+			return
+		}
+	}
+	q.inFlight = append(q.inFlight, inFlightTx{nonce: nonce, hash: txHash})
 }
 
 // ResetNonce forces the next send to re-read the committed nonce from the chain.
@@ -171,6 +230,17 @@ func (q *QuorumClient) ResetNonce() {
 	q.nonceMu.Lock()
 	defer q.nonceMu.Unlock()
 	q.haveSent = false
+	q.inFlight = nil
+	q.lastTxHash = common.Hash{}
+}
+
+// ReportTxFailure reports a failed transaction hash, resetting nonce pipeline immediately.
+func (q *QuorumClient) ReportTxFailure(txHash common.Hash) {
+	q.nonceMu.Lock()
+	defer q.nonceMu.Unlock()
+	q.haveSent = false
+	q.inFlight = nil
+	q.lastTxHash = common.Hash{}
 }
 
 // ─── TRANSACTION SUBMISSION (FAILOVER ACROSS NODES) ─────────────────────────
@@ -188,9 +258,7 @@ func (q *QuorumClient) sendRawTxFailover(tx *pb.Transaction) (common.Hash, error
 	for _, c := range q.clients {
 		txHash, err := c.SendRawTransaction(rawBytes)
 		if err == nil {
-			q.nonceMu.Lock()
-			q.lastTxHash = txHash
-			q.nonceMu.Unlock()
+			q.RecordSentTx(TxNonceValue(tx), txHash)
 			return txHash, nil
 		}
 		lastErr = err

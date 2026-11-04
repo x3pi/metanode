@@ -1,0 +1,11 @@
+{{ node_data_dir }}/logs/*.log {{ base_log_dir }}/exec_*.log {
+    daily
+    rotate 7
+    size 500M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/cmd/parent_chain/processor"
@@ -53,7 +55,22 @@ func NewApp(configPath, rustConfigPath, dataDir, httpAddr, genesisPath string) (
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse genesis validators: %w", err)
 	}
-	log.Printf("Loaded genesis from %s: chain_id=%d, validators=%d", genesisPath, gen.ChainID, len(gen.Validators))
+	currentFp := gen.CommitteeFingerprint()
+	fpFile := filepath.Join(dataDir, "genesis_committee_fingerprint")
+	if data, err := os.ReadFile(fpFile); err == nil {
+		storedFp := strings.TrimSpace(string(data))
+		if storedFp != "" && storedFp != currentFp {
+			return nil, fmt.Errorf("FATAL: committee in %s does not match existing consensus data at %s! stored fingerprint=%s, incoming genesis fingerprint=%s. Khóa hoặc genesis đã bị thay đổi trên dữ liệu cũ! Khởi động sẽ gây ra 'Invalid signature' consensus deadlock. Hãy dùng --reset để khởi tạo lại toàn bộ 4 node hoặc khôi phục đúng bộ khóa gốc", genesisPath, dataDir, storedFp, currentFp)
+		}
+	} else if os.IsNotExist(err) {
+		if err := os.WriteFile(fpFile, []byte(currentFp+"\n"), 0644); err != nil {
+			log.Printf("⚠️ Warning: failed to write committee fingerprint to %s: %v", fpFile, err)
+		} else {
+			log.Printf("Recorded genesis committee fingerprint to %s: %s", fpFile, currentFp)
+		}
+	}
+
+	log.Printf("Loaded genesis from %s: chain_id=%d, validators=%d, committee_fingerprint=%s", genesisPath, gen.ChainID, len(gen.Validators), currentFp)
 
 	policy, err := gen.ClusterPolicy()
 	if err != nil {

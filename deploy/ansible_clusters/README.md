@@ -102,6 +102,57 @@ Lệnh trên sẽ:
 
 ---
 
+## ⚠️ CẢNH BÁO NGUY HIỂM: `--restart` vs `--reset` VÀ XOAY KHÓA
+
+> 🚨 **QUAN TRỌNG:**
+> - `./deploy_clusters.sh --restart` **KHÔNG** xóa dữ liệu đĩa (`consensus/` và `parentchain_db/`), nhưng **RENDER LẠI** file cấu hình `node.toml`, `parent_genesis.json` và phân phối lại khóa từ `parent_keys/`.
+> - Nếu ai đó đã sinh lại khóa trong `parent_keys/` mà chạy `./deploy_clusters.sh --restart`, cụm sẽ rơi vào tình trạng **KẸT ĐỒNG THUẬN VĨNH VIỄN** (`Invalid signature` loop) do node dùng khóa mới để xác thực DAG lịch sử cũ.
+> - **Khi muốn đổi/xoay khóa hoặc khởi tạo lại chain:** Bắt buộc dùng `./deploy_clusters.sh --reset --i-understand-this-wipes-chain-data`. Không bao giờ được sinh khóa mới rồi dùng `--restart`.
+> - Hệ thống đã tích hợp chốt chặn an toàn (Safety Guard): Playbook và binary sẽ từ chối khởi động nếu phát hiện fingerprint của ủy ban genesis không khớp với DAG hiện hữu. Xem chi tiết tại [Runbook phục hồi Parent Chain](../../note/parent_chain_recovery_runbook.md).
+
+---
+
+## 🔍 Phân Biệt Cấu Hình: `parent_chain_*` vs `parent_prod_*`
+
+- **`parent_chain_*` (trong `inventory.yml`):**
+  + Cụm Parent Chain 4 validator chuyên dụng cho hệ thống Sharded Execution Clusters (Rollup Architecture).
+  + Đảm nhiệm việc đăng ký cụm (`Cluster Registry`), quản lý tài khoản người dùng (`Account Registry`), và ký quỹ cọc (`Float Accounts`).
+  + Các Execution Clusters (`exec1`, `exec2`) kết nối trực tiếp đến các endpoint này qua `QuorumClient` và `RegistrationRelay`.
+- **`parent_prod_*` (trong `inventory.production.yml`):**
+  + Cấu hình Parent Chain độc lập dùng cho môi trường Production thực tế.
+  + Đóng quyền đăng ký tự do (`parent_open_cluster_registration: false`), chế độ bảo tồn float nghiêm ngặt (`bls_conservation_mode: "enforce"`), yêu cầu mã hóa secrets và cấu hình tường lửa IP chặt chẽ.
+
+---
+
+## 📊 Giám Sát Cụm Parent Chain (`parent_chain_monitor.py`)
+
+Công cụ `scripts/parent_chain_monitor.py` tự động đọc thông tin node và cấu hình Telegram từ `inventory.yml` để giám sát độ sống còn, tính toàn vẹn trạng thái và quét log phát hiện bất thường:
+
+### Cách chạy:
+```bash
+# Kiểm tra nhanh 1 lần (dùng cho CI/CD hoặc kiểm tra sau deploy):
+python3 scripts/parent_chain_monitor.py --once
+
+# Khởi chạy chế độ daemon chạy ngầm liên tục:
+python3 scripts/parent_chain_monitor.py --daemon
+
+# Dừng tiến trình daemon:
+python3 scripts/parent_chain_monitor.py --stop
+
+# Xem log giám sát thời gian thực:
+tail -f /tmp/parent_chain_monitor.log
+```
+
+### Các ngưỡng cảnh báo (Count-based Thresholds):
+Để đảm bảo tính tất định và phù hợp với chu kỳ thăm dò linh hoạt, toàn bộ cơ chế phát hiện bất thường sử dụng ngưỡng đếm số lần (count-based) thay vì cửa sổ thời gian cứng (sliding window cứng):
+- **Commit Stalled (`COMMIT_STALLED_COUNT_THRESHOLD = 12`):** Cảnh báo khi block height của node không tăng sau 12 lần kiểm tra liên tiếp.
+- **Syncing Stuck (`SYNCING_STUCK_COUNT_THRESHOLD = 10`):** Cảnh báo khi node bị kẹt ở trạng thái `syncing: true` / pha `CatchingUp` sau 10 lần kiểm tra liên tiếp mà không chuyển sang `Healthy`.
+- **Invalid Signature (`INVALID_SIG_COUNT_THRESHOLD = 5`):** Quét log cục bộ và cảnh báo ngay khi phát hiện từ 5 lỗi `Invalid signature` / `Failed to verify the block's signature` mới (dấu hiệu lệch khóa consensus).
+- **Nonce Mismatch (`NONCE_MISMATCH_COUNT_THRESHOLD = 3`):** Quét log cục bộ và cảnh báo khi phát hiện từ 3 lỗi `sender nonce mismatch` mới (dấu hiệu hổng nonce trong client pipelining).
+- **Fork Detection & Hash Mismatch:** Cảnh báo tức thời nếu cờ `fork_detected` trên node chuyển sang `true`, hoặc nếu phát hiện `last_hash` / `state_root` khác nhau giữa các node tại cùng độ cao block.
+
+---
+
 ## 🛠️ Danh Sách Các Lệnh Vận Hành
 
 | Lệnh | Ý nghĩa |

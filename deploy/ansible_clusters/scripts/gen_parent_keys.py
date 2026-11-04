@@ -153,6 +153,17 @@ def are_keys_present(keys_dir: Path, nodes: list) -> bool:
     return True
 
 
+def any_keys_present(keys_dir: Path, nodes: list) -> bool:
+    """Checks whether any protocol or network key files exist."""
+    for node in nodes:
+        nid = node['node_id']
+        proto_file = keys_dir / f"node_{nid}_protocol_key.json"
+        net_file = keys_dir / f"node_{nid}_network_key.json"
+        if proto_file.is_file() or net_file.is_file():
+            return True
+    return False
+
+
 def to_base64_64byte(key_json_path: Path) -> str:
     """Extracts priv + pub from keytool JSON and encodes as 64-byte raw base64 string."""
     with open(key_json_path, 'r', encoding='utf-8') as f:
@@ -218,6 +229,8 @@ def main():
     parser.add_argument("--keys-dir", default="", help="Path to output parent_keys directory")
     parser.add_argument("--metanode-bin", default="", help="Explicit path to metanode binary")
     parser.add_argument("--overwrite", action="store_true", help="Force regenerate keys even if they exist")
+    parser.add_argument("--i-understand-this-wipes-chain-data", action="store_true", dest="force_confirm",
+                        help="Explicit confirmation that regenerating keys invalidates existing chain data and requires a full --reset")
     parser.add_argument("--check-only", action="store_true", help="Exit 0 if keys exist, 1 if missing")
     args = parser.parse_args()
 
@@ -239,6 +252,7 @@ def main():
     keys_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     keys_exist = are_keys_present(keys_dir, nodes)
+    has_any = any_keys_present(keys_dir, nodes)
 
     if args.check_only:
         sys.exit(0 if keys_exist else 1)
@@ -247,6 +261,22 @@ def main():
         print(cyan(f"🔑 [PARENT-KEYS] All {len(nodes)} Parent Chain validator keys exist in {keys_dir}."))
         print(cyan("   Reusing existing keys (no regeneration)."))
         sys.exit(0)
+
+    if has_any and args.overwrite:
+        if not args.force_confirm:
+            print(red("\n❌ [ERROR] Refusing to overwrite existing Parent Chain validator keys!"))
+            print(yellow(f"   Existing keys found in: {keys_dir}"))
+            print(yellow("   Regenerating keys for an existing chain invalidates all blocks and causes consensus deadlock ('Invalid signature')."))
+            print(yellow("   To proceed, you must provide explicit confirmation:"))
+            print(cyan("     --i-understand-this-wipes-chain-data"))
+            print(yellow("   AND you must reset all 4 nodes simultaneously: ./deploy_clusters.sh --reset\n"))
+            sys.exit(1)
+
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = keys_dir.parent / f"{keys_dir.name}.previous_{timestamp}"
+        print(cyan(f"📦 [BACKUP] Automatically backing up previous keys to: {backup_dir}"))
+        shutil.copytree(keys_dir, backup_dir)
 
     # Need generation
     action_desc = "Forced regenerating" if args.overwrite else "Auto-generating missing"

@@ -2,15 +2,18 @@ package parentchain
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
@@ -248,4 +251,29 @@ func (g *Genesis) ToProtoValidators() ([]*pb.ValidatorInfo, error) {
 		}
 	}
 	return validators, nil
+}
+
+// CommitteeFingerprint computes a deterministic hex Keccak256 fingerprint of the genesis committee.
+func (g *Genesis) CommitteeFingerprint() string {
+	h := crypto.NewKeccakState()
+	var chainIDBytes [8]byte
+	binary.BigEndian.PutUint64(chainIDBytes[:], g.ChainID)
+	h.Write(chainIDBytes[:])
+
+	sortedVals := make([]GenesisValidator, len(g.Validators))
+	copy(sortedVals, g.Validators)
+	sort.Slice(sortedVals, func(i, j int) bool {
+		return sortedVals[i].ProtocolKey < sortedVals[j].ProtocolKey
+	})
+
+	for _, v := range sortedVals {
+		h.Write([]byte(v.ProtocolKey))
+		h.Write([]byte(v.NetworkKey))
+		h.Write([]byte(v.AuthorityKey))
+		h.Write([]byte(v.Address))
+		h.Write([]byte(v.Stake))
+	}
+	var out [32]byte
+	h.Read(out[:])
+	return hex.EncodeToString(out[:])
 }

@@ -136,6 +136,10 @@ while [[ $# -gt 0 ]]; do
             OVERWRITE_KEYS="true"
             shift
             ;;
+        --i-understand-this-wipes-chain-data)
+            CONFIRM_WIPE_DATA="true"
+            shift
+            ;;
         --status|status)
             ACTION="status"
             shift
@@ -845,10 +849,11 @@ fi
 # 2.8. Xử lý riêng cho lệnh --gen-keys (chỉ sinh key Parent Chain cục bộ mà không deploy)
 if [ "$ACTION" = "gen_keys" ]; then
     echo "🔑 [GEN-KEYS] Bắt đầu sinh bộ Key Parent Chain cục bộ..."
-    python3 "${SCRIPT_DIR}/scripts/gen_parent_keys.py" \
-        --inventory "$INVENTORY" \
-        --keys-dir "$PARENT_KEYS_DIR" \
-        --overwrite
+    GEN_ARGS=(python3 "${SCRIPT_DIR}/scripts/gen_parent_keys.py" --inventory "$INVENTORY" --keys-dir "$PARENT_KEYS_DIR" --overwrite)
+    if [ "$CONFIRM_WIPE_DATA" = "true" ]; then
+        GEN_ARGS+=(--i-understand-this-wipes-chain-data)
+    fi
+    "${GEN_ARGS[@]}"
     echo "✅ [GEN-KEYS] Đã sinh xong bộ key Parent Chain tại: ${PARENT_KEYS_DIR}"
     exit 0
 fi
@@ -860,6 +865,9 @@ if [ "$EXEC_ONLY" != "true" ]; then
     GEN_KEY_CMD=(python3 "${SCRIPT_DIR}/scripts/gen_parent_keys.py" --inventory "$INVENTORY" --keys-dir "$PARENT_KEYS_DIR")
     if [ "$OVERWRITE_KEYS" = "true" ]; then
         GEN_KEY_CMD+=(--overwrite)
+        if [ "$CONFIRM_WIPE_DATA" = "true" ]; then
+            GEN_KEY_CMD+=(--i-understand-this-wipes-chain-data)
+        fi
     fi
     "${GEN_KEY_CMD[@]}"
 fi

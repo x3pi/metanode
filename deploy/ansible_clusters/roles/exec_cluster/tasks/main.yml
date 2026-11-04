@@ -454,6 +454,12 @@
         mode: '0644'
       notify: Reload systemd
 
+    - name: Deploy logrotate configuration for Execution Node
+      ansible.builtin.template:
+        src: exec_cluster.logrotate.j2
+        dest: "/etc/logrotate.d/metanode-exec-{{ inventory_hostname }}"
+        mode: '0644'
+
 # ── Start / Restart Service ──────────────────────────────────────────────────
 - name: Start Execution Node {{ inventory_hostname }}
   when: "deploy_action in ['setup', 'deploy', 'start', 'restart', 'reset']"
