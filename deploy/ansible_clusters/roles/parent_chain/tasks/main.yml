@@ -86,6 +86,8 @@
         - "{{ node_data_dir }}/backup"
         - "{{ node_data_dir }}/logs"
         - "{{ node_data_dir }}/genesis_committee_fingerprint"
+        - "{{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log.old"
+        - "{{ base_log_dir }}/parent_chain.log"
 
 # ── Firewall (UFW) Configuration ───────────────────────────────────────────
 # OPT-IN only (`--open-ports` => deploy_action=open_ports). The HTTP RPC is client-facing; the peer RPC and the metrics
@@ -159,11 +161,20 @@
         path: "{{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log"
       register: legacy_parent_log_stat
 
-    - name: Archive legacy parent chain log if it is a regular file
-      ansible.builtin.command:
-        cmd: "mv {{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log {{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log.old"
+    - name: Remove legacy parent chain regular log file if not a symlink
+      ansible.builtin.file:
+        path: "{{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log"
+        state: absent
       when: legacy_parent_log_stat.stat.exists and not legacy_parent_log_stat.stat.islnk
-      failed_when: false
+
+    - name: Cleanup obsolete unmanaged legacy logs and .old files from base_log_dir
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log.old"
+        - "{{ base_log_dir }}/parent_chain.log"
+      ignore_errors: true
 
     - name: Create convenience symlink in base_log_dir pointing to node logs
       ansible.builtin.file:

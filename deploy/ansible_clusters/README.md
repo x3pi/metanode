@@ -148,7 +148,6 @@ tail -f /tmp/parent_chain_monitor.log
 - **Commit Stalled (`COMMIT_STALLED_COUNT_THRESHOLD = 12`):** Cảnh báo khi block height của node không tăng sau 12 lần kiểm tra liên tiếp.
 - **Syncing Stuck (`SYNCING_STUCK_COUNT_THRESHOLD = 10`):** Cảnh báo khi node bị kẹt ở trạng thái `syncing: true` / pha `CatchingUp` sau 10 lần kiểm tra liên tiếp mà không chuyển sang `Healthy`.
 - **Invalid Signature (`INVALID_SIG_COUNT_THRESHOLD = 5`):** Quét log cục bộ và cảnh báo ngay khi phát hiện từ 5 lỗi `Invalid signature` / `Failed to verify the block's signature` mới (dấu hiệu lệch khóa consensus).
-- **Nonce Mismatch (`NONCE_MISMATCH_COUNT_THRESHOLD = 3`):** Quét log cục bộ và cảnh báo khi phát hiện từ 3 lỗi `sender nonce mismatch` mới (dấu hiệu hổng nonce trong client pipelining).
 - **Fork Detection & Hash Mismatch:** Cảnh báo tức thời nếu cờ `fork_detected` trên node chuyển sang `true`, hoặc nếu phát hiện `last_hash` / `state_root` khác nhau giữa các node tại cùng độ cao block.
 
 ---

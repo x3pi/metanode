@@ -172,7 +172,6 @@ def query_node_status(url, timeout=3):
 
 # Operational Incident Detectors (Count-based Thresholds in Logs)
 INVALID_SIG_COUNT_THRESHOLD = 5       # Cảnh báo khi phát hiện >= 5 lỗi 'Invalid signature' mới trong log
-NONCE_MISMATCH_COUNT_THRESHOLD = 3    # Cảnh báo khi phát hiện >= 3 lỗi 'sender nonce mismatch' mới trong log
 
 class AlertThrottle:
     """Manages cooldowns and state transitions to prevent alert spam."""
@@ -231,23 +230,35 @@ class AlertThrottle:
 def scan_parent_logs_for_anomalies(throttler):
     """Scan local Parent Chain log files for Invalid signature or sender nonce mismatch loops."""
     import glob
-    candidates = glob.glob("/var/log/metanode/parent_chain*.log") + \
-                 glob.glob("/var/log/metanode/parent_chain_*.log") + \
-                 glob.glob("/opt/metanode/parent_chain_*/logs/*.log")
+    raw_candidates = glob.glob("/var/log/metanode/parent_chain*.log") + \
+                     glob.glob("/var/log/metanode/parent_chain_*.log") + \
+                     glob.glob("/opt/metanode/parent_chain_*/logs/*.log")
+    # Resolve symlinks to avoid scanning both the symlink and the real target log file twice
+    candidates = set()
+    for p in raw_candidates:
+        if os.path.isfile(p):
+            try:
+                candidates.add(os.path.realpath(p))
+            except Exception:
+                candidates.add(p)
+
     anomalies = []
-    for log_path in set(candidates):
+    for log_path in candidates:
         if not os.path.isfile(log_path):
             continue
         try:
             file_size = os.path.getsize(log_path)
-            last_pos = throttler.log_scan_positions.get(log_path, 0)
+            last_pos = throttler.log_scan_positions.get(log_path)
+            # On first scan after monitor startup, seek to current EOF to avoid false alerts on past events
+            if last_pos is None:
+                throttler.log_scan_positions[log_path] = file_size
+                continue
             if file_size < last_pos:
                 last_pos = 0  # log rotated
             if file_size == last_pos:
                 continue
 
             invalid_sig_count = 0
-            nonce_mismatch_count = 0
             with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
                 f.seek(last_pos)
                 # Read at most 5000 lines or 2MB to keep check lightweight
@@ -257,8 +268,6 @@ def scan_parent_logs_for_anomalies(throttler):
                         break
                     if "Invalid signature" in line or "Failed to verify the block's signature" in line:
                         invalid_sig_count += 1
-                    if "sender nonce mismatch" in line:
-                        nonce_mismatch_count += 1
                 throttler.log_scan_positions[log_path] = f.tell()
 
             if invalid_sig_count >= INVALID_SIG_COUNT_THRESHOLD:
@@ -269,15 +278,6 @@ def scan_parent_logs_for_anomalies(throttler):
                     "file": log_path,
                     "count": invalid_sig_count,
                     "desc": "Khối bị từ chối chữ ký liên tục. Khóa validator hoặc genesis có thể đã bị đổi trên DAG cũ mà không reset!"
-                })
-            if nonce_mismatch_count >= NONCE_MISMATCH_COUNT_THRESHOLD:
-                anomalies.append({
-                    "key": f"nonce_mismatch_{log_path}",
-                    "icon": "⚠️",
-                    "title": "[PARENT CHAIN ALERT] Phát hiện sender nonce mismatch lặp!",
-                    "file": log_path,
-                    "count": nonce_mismatch_count,
-                    "desc": "Giao dịch bị từ chối do hổng nonce trên Parent Chain. Cần kiểm tra pipeline nonce của cụm execution!"
                 })
         except Exception:
             pass
