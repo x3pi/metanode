@@ -14,6 +14,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/command"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/types/network"
@@ -34,6 +35,12 @@ func (p *testFakeParent) GetAccountRegistry(a common.Address) (cm.PublicKey, boo
 	k, ok := p.registry[a]
 	return k, ok, nil
 }
+
+func (p *testFakeParent) GetReceipt(txHash common.Hash) (*parentchain.Receipt, bool, error) {
+	return &parentchain.Receipt{TxHash: txHash, Status: 1}, true, nil
+}
+
+func (p *testFakeParent) ReportTxFailure(common.Hash) {}
 
 type recordingConn struct {
 	*MockConnection

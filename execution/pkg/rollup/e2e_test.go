@@ -283,6 +283,8 @@ func (a *ParentChainClientAdapter) GetReceipt(txHash common.Hash) (*parentchain.
 	return nil, false, nil
 }
 
+func (a *ParentChainClientAdapter) ReportTxFailure(common.Hash) {}
+
 func (a *ParentChainClientAdapter) GetStatus() (parentchain.ChainStatus, error) {
 	return parentchain.ChainStatus{}, nil
 }

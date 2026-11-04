@@ -46,6 +46,12 @@ func (p *localParent) GetAccountRegistry(user common.Address) (cm.PublicKey, boo
 	return p.store.GetAccountRegistry(user)
 }
 
+func (p *localParent) GetReceipt(txHash common.Hash) (*parentchain.Receipt, bool, error) {
+	return &parentchain.Receipt{TxHash: txHash, Status: 1}, true, nil
+}
+
+func (p *localParent) ReportTxFailure(common.Hash) {}
+
 func (p *localParent) GetInboundAccountRegistrations(key cm.PublicKey, cursor uint64) ([]*parentchain.AccountRegisteredEvent, uint64, error) {
 	return p.store.GetAccountRegistrations(crypto.Keccak256Hash(key.Bytes()), cursor)
 }

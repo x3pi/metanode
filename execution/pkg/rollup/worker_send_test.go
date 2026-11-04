@@ -155,6 +155,8 @@ func (m *mockParentChainClient) GetReceipt(txHash common.Hash) (*parentchain.Rec
 	return nil, false, nil
 }
 
+func (m *mockParentChainClient) ReportTxFailure(common.Hash) {}
+
 func (m *mockParentChainClient) GetStatus() (parentchain.ChainStatus, error) {
 	return parentchain.ChainStatus{}, nil
 }

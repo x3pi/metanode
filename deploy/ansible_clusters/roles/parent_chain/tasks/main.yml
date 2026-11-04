@@ -85,6 +85,7 @@
         - "{{ node_data_dir }}/rocksdb_dummy_init"
         - "{{ node_data_dir }}/backup"
         - "{{ node_data_dir }}/logs"
+        - "{{ node_data_dir }}/genesis_committee_fingerprint"
 
 # ── Firewall (UFW) Configuration ───────────────────────────────────────────
 # OPT-IN only (`--open-ports` => deploy_action=open_ports). The HTTP RPC is client-facing; the peer RPC and the metrics
@@ -323,18 +324,6 @@
           {{ groups['parent_chain_nodes'] | default([inventory_hostname]) | map('extract', hostvars, 'deployed_parent_genesis_sha256') | list }}
           All Parent Chain nodes must have identical genesis files.
       run_once: true
-
-    - name: Disable and stop any legacy or obsolete parent node units on this host
-      ansible.builtin.shell: |
-        for unit in $(systemctl list-unit-files 'metanode-parent_node_*.service' --no-legend 2>/dev/null | awk '{print $1}'); do
-          if [ "$unit" != "metanode-{{ inventory_hostname }}.service" ]; then
-            systemctl stop "$unit" 2>/dev/null || true
-            systemctl disable "$unit" 2>/dev/null || true
-            rm -f "/etc/systemd/system/$unit" 2>/dev/null || true
-          fi
-        done
-      failed_when: false
-      changed_when: false
 
     - name: Start service via systemd
       ansible.builtin.systemd:

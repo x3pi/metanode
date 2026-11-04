@@ -36,7 +36,12 @@ python3 "${SCRIPT_DIR}/gen_parent_keys.py" \
     --keys-dir "${KEYS_DIR}" \
     --change-keys \
     --force 2>&1 | tee "${TEMP_TEST_DIR}/backup.log"
+RC=${PIPESTATUS[0]}
 set -e
+if [ $RC -ne 0 ]; then
+    echo "❌ FAILED: gen_parent_keys.py with --force should succeed, got $RC"
+    exit 1
+fi
 
 BACKUP_DIRS=$(find "${TEMP_TEST_DIR}" -maxdepth 1 -name "parent_keys.previous_*" -type d)
 if [ -z "${BACKUP_DIRS}" ]; then
@@ -51,8 +56,24 @@ python3 "${SCRIPT_DIR}/gen_parent_keys.py" \
     --keys-dir "${KEYS_DIR}" \
     --change-keys \
     -f 2>&1 | tee "${TEMP_TEST_DIR}/backup2.log"
+RC=${PIPESTATUS[0]}
 set -e
+if [ $RC -ne 0 ]; then
+    echo "❌ FAILED: gen_parent_keys.py with -f should succeed, got $RC"
+    exit 1
+fi
 echo "  ✅ PASS: Shorthand -f accepted"
+
+echo "  Test 4: deploy_clusters.sh refuses --reset without --force"
+set +e
+"${SCRIPT_DIR}/../deploy_clusters.sh" --reset 2>"${TEMP_TEST_DIR}/reset_err.log"
+RESET_RC=$?
+set -e
+if [ $RESET_RC -ne 1 ]; then
+    echo "❌ FAILED: deploy_clusters.sh --reset without --force should have exited with code 1, got $RESET_RC"
+    exit 1
+fi
+echo "  ✅ PASS: deploy_clusters.sh correctly required --force for --reset"
 
 echo "🎉 All Parent Chain Deploy Tooling Guard Tests Passed Successfully!"
 

@@ -232,7 +232,8 @@ def scan_parent_logs_for_anomalies(throttler):
     """Scan local Parent Chain log files for Invalid signature or sender nonce mismatch loops."""
     import glob
     candidates = glob.glob("/var/log/metanode/parent_chain*.log") + \
-                 glob.glob("/opt/metanode/parent_chain_*/logs/parent_chain.log")
+                 glob.glob("/var/log/metanode/parent_chain_*.log") + \
+                 glob.glob("/opt/metanode/parent_chain_*/logs/*.log")
     anomalies = []
     for log_path in set(candidates):
         if not os.path.isfile(log_path):

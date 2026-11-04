@@ -276,6 +276,14 @@ fi
 export METANODE_ENV="${METANODE_ENV:-production}"
 export NODE_ENV="${NODE_ENV:-$METANODE_ENV}"
 
+# Safety guard: Action reset wipes all blockchain data, strictly requiring --force
+if [ "$ACTION" = "reset" ] && [ "$CONFIRM_FORCE" != "true" ]; then
+    echo "❌ [ERROR] Lệnh --reset sẽ xóa sạch toàn bộ cơ sở dữ liệu blockchain!"
+    echo "   Bắt buộc phải kèm cờ ép buộc xác nhận: --force (hoặc -f)"
+    echo "   Ví dụ: ./deploy_clusters.sh --reset --force"
+    exit 1
+fi
+
 # inventory.yml is untracked (it holds real hosts / vault-encrypted credentials): on a fresh clone seed it
 # from the example so the default invocation works, then remind the operator to edit it.
 if [ ! -f "$INVENTORY" ] && [ "$INVENTORY" = "${SCRIPT_DIR}/inventory.yml" ] && [ -f "${SCRIPT_DIR}/inventory.example.yml" ]; then
