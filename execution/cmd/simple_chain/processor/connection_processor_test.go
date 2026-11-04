@@ -99,4 +99,3 @@ func (m *mockInitMessage) Unmarshal(pm proto.Message) error {
 	}
 	return m.MockMessage.Unmarshal(pm)
 }
-

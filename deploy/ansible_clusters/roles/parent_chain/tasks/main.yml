@@ -238,8 +238,8 @@
               but the incoming protocol key (checksum: {{ incoming_protocol_key_stat.stat.checksum | default('unknown') }})
               does not match the existing key on the node (checksum: {{ existing_protocol_key_stat.stat.checksum | default('unknown') }}).
               Overwriting keys on existing DAG data causes consensus deadlock ('Invalid signature' loop)!
-              If you intended a fresh deployment with new keys, run with `--reset`:
-                ./deploy_clusters.sh --reset
+              If you intended a fresh deployment with new keys, run with `--reset --force`:
+                ./deploy_clusters.sh --reset --force
               Or pass extra var -e "allow_inconsistent_key_overwrite=true" if this is deliberate maintenance.
 
     - name: Deploy Parent Chain genesis file

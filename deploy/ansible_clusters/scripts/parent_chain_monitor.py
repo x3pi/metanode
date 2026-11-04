@@ -228,7 +228,7 @@ class AlertThrottle:
         return False
 
 def scan_parent_logs_for_anomalies(throttler):
-    """Scan local Parent Chain log files for Invalid signature or sender nonce mismatch loops."""
+    """Scan local Parent Chain log files for Invalid signature loops."""
     import glob
     raw_candidates = glob.glob("/var/log/metanode/parent_chain*.log") + \
                      glob.glob("/var/log/metanode/parent_chain_*.log") + \
@@ -338,7 +338,7 @@ def run_monitor_loop(inventory_path=None, interval=5):
             # 2. Hash Consistency & Fork Check (among online nodes)
             online_nodes = {name: res for name, res in results.items() if res["online"]}
 
-            # 2.1 Local Log Scanner: Invalid signature & sender nonce mismatch
+            # 2.1 Local Log Scanner: Invalid signature loops
             log_anomalies = scan_parent_logs_for_anomalies(throttler)
             for anomaly in log_anomalies:
                 if not test_mode and throttler.should_alert_key(anomaly["key"]):

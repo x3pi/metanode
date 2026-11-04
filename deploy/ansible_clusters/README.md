@@ -107,7 +107,7 @@ Lệnh trên sẽ:
 > 🚨 **QUAN TRỌNG:**
 > - `./deploy_clusters.sh --restart` **KHÔNG** xóa dữ liệu đĩa (`consensus/` và `parentchain_db/`), nhưng **RENDER LẠI** file cấu hình `node.toml`, `parent_genesis.json` và phân phối lại khóa từ `parent_keys/`.
 > - Nếu ai đó đã sinh lại khóa trong `parent_keys/` mà chạy `./deploy_clusters.sh --restart`, cụm sẽ rơi vào tình trạng **KẸT ĐỒNG THUẬN VĨNH VIỄN** (`Invalid signature` loop) do node dùng khóa mới để xác thực DAG lịch sử cũ.
-> - **Khi muốn đổi/xoay khóa hoặc khởi tạo lại chain:** Bắt buộc dùng `./deploy_clusters.sh --reset --i-understand-this-wipes-chain-data`. Không bao giờ được sinh khóa mới rồi dùng `--restart`.
+> - **Khi muốn đổi/xoay khóa hoặc khởi tạo lại chain:** Bắt buộc dùng `./deploy_clusters.sh --reset --force`. Không bao giờ được sinh khóa mới rồi dùng `--restart`.
 > - Hệ thống đã tích hợp chốt chặn an toàn (Safety Guard): Playbook và binary sẽ từ chối khởi động nếu phát hiện fingerprint của ủy ban genesis không khớp với DAG hiện hữu. Xem chi tiết tại [Runbook phục hồi Parent Chain](../../note/parent_chain_recovery_runbook.md).
 
 ---
@@ -143,12 +143,10 @@ python3 scripts/parent_chain_monitor.py --stop
 tail -f /tmp/parent_chain_monitor.log
 ```
 
-### Các ngưỡng cảnh báo (Count-based Thresholds):
-Để đảm bảo tính tất định và phù hợp với chu kỳ thăm dò linh hoạt, toàn bộ cơ chế phát hiện bất thường sử dụng ngưỡng đếm số lần (count-based) thay vì cửa sổ thời gian cứng (sliding window cứng):
-- **Commit Stalled (`COMMIT_STALLED_COUNT_THRESHOLD = 12`):** Cảnh báo khi block height của node không tăng sau 12 lần kiểm tra liên tiếp.
-- **Syncing Stuck (`SYNCING_STUCK_COUNT_THRESHOLD = 10`):** Cảnh báo khi node bị kẹt ở trạng thái `syncing: true` / pha `CatchingUp` sau 10 lần kiểm tra liên tiếp mà không chuyển sang `Healthy`.
-- **Invalid Signature (`INVALID_SIG_COUNT_THRESHOLD = 5`):** Quét log cục bộ và cảnh báo ngay khi phát hiện từ 5 lỗi `Invalid signature` / `Failed to verify the block's signature` mới (dấu hiệu lệch khóa consensus).
+### Các cơ chế cảnh báo:
+- **Node Down / Offline:** Cảnh báo tức thời qua Telegram khi phát hiện node không phản hồi HTTP RPC. Tự động gửi thông báo phục hồi khi node hoạt động trở lại.
 - **Fork Detection & Hash Mismatch:** Cảnh báo tức thời nếu cờ `fork_detected` trên node chuyển sang `true`, hoặc nếu phát hiện `last_hash` / `state_root` khác nhau giữa các node tại cùng độ cao block.
+- **Invalid Signature (`INVALID_SIG_COUNT_THRESHOLD = 5`):** Quét log cục bộ và cảnh báo ngay khi phát hiện từ 5 lỗi `Invalid signature` / `Failed to verify the block's signature` mới (dấu hiệu lệch khóa consensus).
 
 ---
 
