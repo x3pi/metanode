@@ -123,6 +123,10 @@ func (p *ConnectionProcessor) ProcessInitConnection(
 	logger.Info("[PROCESS_INIT] Adding connection: addr=%s type=%s remote=%s connected=%v replace=%v",
 		address.Hex(), cType, conn.RemoteAddrSafe(), conn.IsConnect(), initData.Replace)
 
+	// Trước khi add vào manager — kiểm tra lần cuối
+	if !conn.IsConnect() {
+		return fmt.Errorf("ProcessInitConnection: connection đã disconnect trước khi add vào manager (addr=%s)", address.Hex())
+	}
 	p.connectionsManager.AddConnectionWithAddress(conn, address, initData.Replace, initData.Type)
 
 	logger.Info("[PROCESS_INIT] ✅ Connection added successfully: addr=%s type=%s remote=%s",
