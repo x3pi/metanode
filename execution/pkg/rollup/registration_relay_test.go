@@ -20,11 +20,13 @@ import (
 
 // fakeRegParent is a scripted Parent Chain: registry lookups and submissions are recorded and can fail or be redirected.
 type fakeRegParent struct {
-	mu        sync.Mutex
-	registry  map[common.Address]cm.PublicKey
-	sends     []fakeSend
-	sendErr   error
-	lookupErr error
+	mu            sync.Mutex
+	registry      map[common.Address]cm.PublicKey
+	receipts      map[common.Hash]*parentchain.Receipt
+	sends         []fakeSend
+	sendErr       error
+	lookupErr     error
+	failedReports []common.Hash
 	// onSend, if set, runs inside SendRegisterAccount (e.g. to make another cluster win the race).
 	onSend func(user common.Address)
 }
@@ -37,7 +39,10 @@ type fakeSend struct {
 }
 
 func newFakeRegParent() *fakeRegParent {
-	return &fakeRegParent{registry: map[common.Address]cm.PublicKey{}}
+	return &fakeRegParent{
+		registry: map[common.Address]cm.PublicKey{},
+		receipts: map[common.Hash]*parentchain.Receipt{},
+	}
 }
 
 func (f *fakeRegParent) SendRegisterAccount(user common.Address, key cm.PublicKey, userSig []byte, clusterSig cm.Sign) (common.Hash, error) {
@@ -53,6 +58,17 @@ func (f *fakeRegParent) SendRegisterAccount(user common.Address, key cm.PublicKe
 	return common.HexToHash("0x01"), nil
 }
 
+func (f *fakeRegParent) GetReceipt(txHash common.Hash) (*parentchain.Receipt, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.receipts != nil {
+		if r, ok := f.receipts[txHash]; ok {
+			return r, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
 func (f *fakeRegParent) GetAccountRegistry(user common.Address) (cm.PublicKey, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -61,6 +77,12 @@ func (f *fakeRegParent) GetAccountRegistry(user common.Address) (cm.PublicKey, b
 	}
 	k, ok := f.registry[user]
 	return k, ok, nil
+}
+
+func (f *fakeRegParent) ReportTxFailure(txHash common.Hash) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failedReports = append(f.failedReports, txHash)
 }
 
 func (f *fakeRegParent) sendCount() int {
@@ -868,4 +890,117 @@ func TestReview5_RetryOrFail_NonProvisionalFailsEvenWithProposerConfigured(t *te
 	entry, ok := h.relay.snapshot(user)
 	require.True(t, ok)
 	assert.Equal(t, RegStatusFailed, entry.status, "Non-provisional request must reach FAILED once maxAttempts exhausted")
+}
+
+func TestRegistrationRelay_ParentRejectionNonceMismatch_FailsOrRetriesWithReason(t *testing.T) {
+	h := newRelayHarness()
+	user, sig := h.userSig(t)
+
+	// User submits registration
+	res, err := h.relay.Submit(user, sig)
+	require.NoError(t, err)
+	assert.Equal(t, RegStatusPending, res.Status)
+
+	// relayOne runs and sends transaction to parent
+	h.relay.relayOne(user)
+	entry, ok := h.relay.snapshot(user)
+	require.True(t, ok)
+	assert.True(t, entry.submitted)
+	txHash := entry.txHash
+	assert.NotEqual(t, common.Hash{}, txHash)
+
+	// Parent node executed block and rejected transaction with errCode 103 (nonce mismatch)
+	h.parent.mu.Lock()
+	h.parent.receipts[txHash] = &parentchain.Receipt{
+		TxHash:    txHash,
+		Status:    0,
+		ErrorCode: 103,
+	}
+	h.parent.mu.Unlock()
+
+	// verifyOne polls
+	notifiedCh := make(chan RegistrationResult, 1)
+	h.relay.SetOnStatusChanged(func(u common.Address, r RegistrationResult) {
+		if u == user {
+			select {
+			case notifiedCh <- r:
+			default:
+			}
+		}
+	})
+
+	h.relay.verifyOne(user)
+
+	var notifiedResult RegistrationResult
+	select {
+	case notifiedResult = <-notifiedCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for onStatusChanged callback")
+	}
+
+	// Immediately verifies that reason is set to sender nonce mismatch and status changed
+	entryAfter, ok := h.relay.snapshot(user)
+	require.True(t, ok)
+	assert.False(t, entryAfter.submitted, "After parent rejection, submitted must be reset to false so it can re-relay")
+	assert.Contains(t, entryAfter.reason, "nonce mismatch (errCode=103)")
+	assert.Contains(t, notifiedResult.Reason, "nonce mismatch (errCode=103)")
+
+	// Status query via Status() returns meaningful reason immediately
+	st := h.relay.Status(user)
+	assert.Equal(t, RegStatusPending, st.Status)
+	assert.Contains(t, st.Reason, "nonce mismatch (errCode=103)")
+
+	// ReportTxFailure was called on parent to reset nonce pipeline
+	h.parent.mu.Lock()
+	assert.Contains(t, h.parent.failedReports, txHash)
+	h.parent.mu.Unlock()
+}
+
+func TestRegistrationRelay_GeneralParentRejection_ReportsFailureAndRetries(t *testing.T) {
+	h := newRelayHarness()
+	user, sig := h.userSig(t)
+
+	// User submits registration
+	_, err := h.relay.Submit(user, sig)
+	require.NoError(t, err)
+
+	// relayOne runs and sends transaction to parent
+	h.relay.relayOne(user)
+	entry, ok := h.relay.snapshot(user)
+	require.True(t, ok)
+	txHash := entry.txHash
+	assert.NotEqual(t, common.Hash{}, txHash)
+
+	// Parent node executed block and rejected transaction with general error (e.g. errCode 101: invalid sig)
+	h.parent.mu.Lock()
+	h.parent.receipts[txHash] = &parentchain.Receipt{
+		TxHash:    txHash,
+		Status:    0,
+		ErrorCode: 101,
+	}
+	h.parent.mu.Unlock()
+
+	notifiedCh := make(chan RegistrationResult, 1)
+	h.relay.SetOnStatusChanged(func(u common.Address, r RegistrationResult) {
+		if u == user {
+			select {
+			case notifiedCh <- r:
+			default:
+			}
+		}
+	})
+
+	h.relay.verifyOne(user)
+
+	var notifiedResult RegistrationResult
+	select {
+	case notifiedResult = <-notifiedCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for onStatusChanged callback")
+	}
+
+	assert.Contains(t, notifiedResult.Reason, "errCode=101")
+	h.parent.mu.Lock()
+	assert.Contains(t, h.parent.failedReports, txHash, "ReportTxFailure must be called for ALL rejected transactions, not just errCode=103")
+	h.parent.mu.Unlock()
 }

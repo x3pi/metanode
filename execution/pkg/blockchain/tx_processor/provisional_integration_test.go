@@ -128,6 +128,17 @@ func (p *scriptableParent) GetInboundAccountRegistrations(key cm.PublicKey, curs
 	return out, nextCursor, nil
 }
 
+func (p *scriptableParent) GetReceipt(txHash common.Hash) (*parentchain.Receipt, bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.offline {
+		return nil, false, assert.AnError
+	}
+	return &parentchain.Receipt{TxHash: txHash, Status: 1}, true, nil
+}
+
+func (p *scriptableParent) ReportTxFailure(common.Hash) {}
+
 // provisionalTestCluster wraps a gateCluster with full provisional/lock proposal dispatching.
 type provisionalTestCluster struct {
 	*gateCluster

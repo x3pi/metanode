@@ -13,6 +13,7 @@
       ansible.builtin.systemd:
         name: "metanode-{{ inventory_hostname }}"
         state: stopped
+        enabled: "{{ 'no' if deploy_action == 'stop' else omit }}"
       ignore_errors: true
 
     - name: Terminate lingering process for this exact execution node
@@ -453,6 +454,12 @@
         dest: "/etc/systemd/system/metanode-{{ inventory_hostname }}.service"
         mode: '0644'
       notify: Reload systemd
+
+    - name: Deploy logrotate configuration for Execution Node
+      ansible.builtin.template:
+        src: exec_cluster.logrotate.j2
+        dest: "/etc/logrotate.d/metanode-exec-{{ inventory_hostname }}"
+        mode: '0644'
 
 # ── Start / Restart Service ──────────────────────────────────────────────────
 - name: Start Execution Node {{ inventory_hostname }}

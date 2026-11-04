@@ -64,6 +64,7 @@ type Client interface {
 	GetBlockByHash(hash common.Hash) (BlockRecord, bool, error)
 	GetTransaction(txHash common.Hash) (uint64, uint32, bool, error)
 	GetReceipt(txHash common.Hash) (*Receipt, bool, error)
+	ReportTxFailure(txHash common.Hash)
 	GetStatus() (ChainStatus, error)
 	GetProof(key [32]byte) (ProofResult, error)
 	SendRawTransaction(rawTx []byte) (common.Hash, error)

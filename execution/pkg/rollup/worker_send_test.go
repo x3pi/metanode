@@ -155,6 +155,8 @@ func (m *mockParentChainClient) GetReceipt(txHash common.Hash) (*parentchain.Rec
 	return nil, false, nil
 }
 
+func (m *mockParentChainClient) ReportTxFailure(common.Hash) {}
+
 func (m *mockParentChainClient) GetStatus() (parentchain.ChainStatus, error) {
 	return parentchain.ChainStatus{}, nil
 }
@@ -166,8 +168,6 @@ func (m *mockParentChainClient) GetProof(key [32]byte) (parentchain.ProofResult,
 func (m *mockParentChainClient) SendRawTransaction(rawTx []byte) (common.Hash, error) {
 	return common.Hash{}, nil
 }
-
-
 
 func TestSendWorker(t *testing.T) {
 	scDB := &mockDB{data: make(map[common.Address]map[common.Hash][]byte)}
@@ -195,7 +195,7 @@ func TestSendWorker(t *testing.T) {
 	// Test 1: Transient error doesn't advance state
 	client.failNext = true
 	worker.processPending()
-	
+
 	rec, _, _ := store.Get(msgID)
 	if rec.State != StateLocalAppliedPendingSend {
 		t.Errorf("Expected state to remain pending, got %v", rec.State)
@@ -419,4 +419,3 @@ func TestSendWorker_ProgressDrivenPolling(t *testing.T) {
 		t.Errorf("Expected false on wrong nonce settling pause, got true")
 	}
 }
-

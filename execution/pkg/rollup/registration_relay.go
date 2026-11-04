@@ -53,6 +53,8 @@ const (
 type RegistrationParent interface {
 	SendRegisterAccount(userAddress common.Address, floatIdentityKey cm.PublicKey, userSig []byte, clusterSig cm.Sign) (common.Hash, error)
 	GetAccountRegistry(userAddress common.Address) (cm.PublicKey, bool, error)
+	GetReceipt(txHash common.Hash) (*parentchain.Receipt, bool, error)
+	ReportTxFailure(txHash common.Hash)
 }
 
 // RegistrationResult is a status plus optional detail (the winning cluster for REJECTED, the reason for FAILED).
@@ -72,6 +74,7 @@ type relayEntry struct {
 	home      *cm.PublicKey
 	reason    string
 	createdAt time.Time
+	txHash    common.Hash
 }
 
 // KVStore is a minimal key-value storage interface compatible with storage.Storage and leveldb/pebbledb/memory stores.
@@ -93,6 +96,7 @@ type RelayRecord struct {
 	Home      *cm.PublicKey      `json:"home,omitempty"`
 	Reason    string             `json:"reason,omitempty"`
 	CreatedAt int64              `json:"createdAt,omitempty"`
+	TxHash    common.Hash        `json:"txHash,omitempty"`
 }
 
 // RegistrationRelayStore defines persistent operations for registration entries.
@@ -518,6 +522,7 @@ func (r *RegistrationRelay) Status(user common.Address) RegistrationResult {
 				home:      rec.Home,
 				reason:    rec.Reason,
 				createdAt: created,
+				txHash:    rec.TxHash,
 			}
 			r.entries[user] = entry
 			return r.resultLocked(entry)
@@ -690,6 +695,7 @@ func (r *RegistrationRelay) saveLocked(e *relayEntry) error {
 		Home:      e.home,
 		Reason:    e.reason,
 		CreatedAt: created,
+		TxHash:    e.txHash,
 	}
 	if err := r.store.Put(rec); err != nil {
 		log.Printf("RegistrationRelay: failed to persist entry %s: %v", e.user.Hex(), err)
@@ -713,6 +719,8 @@ func (r *RegistrationRelay) retryOrFail(user common.Address, reason string) {
 		isProv = isProvOnChain || e.status == RegStatusProvisional
 		e.attempts++
 		e.reason = reason
+		e.submitted = false
+		e.txHash = common.Hash{}
 		if !isProv && e.attempts >= r.maxAttempts {
 			e.status = RegStatusFailed
 			failed = true
@@ -723,6 +731,7 @@ func (r *RegistrationRelay) retryOrFail(user common.Address, reason string) {
 		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusFailed, Reason: reason})
 		return
 	}
+	r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusPending, Reason: reason})
 	select {
 	case r.queue <- user:
 	default:
@@ -766,12 +775,13 @@ func (r *RegistrationRelay) relayOne(user common.Address) {
 	}
 
 	digest := r.RegistrationDigest(user)
-	if _, err := r.parent.SendRegisterAccount(user, r.clusterKey, e.userSig, r.sign(digest)); err != nil {
+	txHash, err := r.parent.SendRegisterAccount(user, r.clusterKey, e.userSig, r.sign(digest))
+	if err != nil {
 		r.retryOrFail(user, fmt.Sprintf("parent registration submit failed: %v", err))
 		r.maybeProposeProvisional(user, e.userSig, err)
 		return
 	}
-	r.update(user, func(e *relayEntry) { e.submitted = true; e.verifies = 0; e.reason = "" })
+	r.update(user, func(e *relayEntry) { e.submitted = true; e.verifies = 0; e.reason = ""; e.txHash = txHash })
 }
 
 func isLocalConfigError(err error) bool {
@@ -821,6 +831,24 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 		return
 	}
 	r.markProvisionalIfApplied(user)
+
+	// Check if parent chain rejected the submitted transaction (e.g. sender nonce mismatch or other revert)
+	if e.txHash != (common.Hash{}) && r.parent != nil {
+		if rcpt, found, rerr := r.parent.GetReceipt(e.txHash); rerr == nil && found {
+			if rcpt.Status != 1 {
+				reason := fmt.Sprintf("parent chain rejected registration tx (errCode=%d)", rcpt.ErrorCode)
+				if rcpt.ErrorCode == 103 {
+					reason = "parent chain rejected registration tx: sender nonce mismatch (errCode=103)"
+				}
+				// Always report transaction failure to reset the nonce pipeline on any non-success status,
+				// avoiding cascade nonce gaps on subsequent attempts.
+				r.parent.ReportTxFailure(e.txHash)
+				r.retryOrFail(user, reason)
+				return
+			}
+		}
+	}
+
 	home, found, err := r.parent.GetAccountRegistry(user)
 	if err != nil {
 		// Transient network or quorum error: log warning and retry on next poll without burning an attempt.
@@ -840,6 +868,10 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 	r.update(user, func(e *relayEntry) {
 		e.verifies++
 		if e.verifies >= r.maxVerifies {
+			if e.txHash != (common.Hash{}) && r.parent != nil {
+				r.parent.ReportTxFailure(e.txHash)
+				e.txHash = common.Hash{}
+			}
 			if e.status == RegStatusProvisional || isProvOnChain {
 				e.status = RegStatusProvisional
 				e.submitted = false

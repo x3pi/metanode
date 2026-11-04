@@ -8,6 +8,7 @@ EnvironmentFile=-{{ node_data_dir }}/security.env
 Type=simple
 User={{ ansible_user | default('abc') }}
 WorkingDirectory={{ node_data_dir }}
+ExecStartPre=/bin/mkdir -p {{ node_data_dir }}/logs
 ExecStart={{ bin_dir }}/parent_chain -data-dir {{ node_data_dir }} -http :{{ parent_http_port | default(8547) }} -rust-config {{ node_data_dir }}/node_parent.toml -genesis {{ node_data_dir }}/parent_genesis.json
 ExecStop=/bin/kill -SIGTERM $MAINPID
 Restart=always
