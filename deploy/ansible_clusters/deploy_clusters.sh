@@ -61,6 +61,7 @@ usage() {
     echo "  --force, -f         Cờ ép buộc xác nhận (bắt buộc khi đổi key hoặc reset để bảo vệ dữ liệu)"
     echo "  --status            Kiểm tra trạng thái RPC và block height các cụm node"
     echo "  --open-ports        Tự động cấu hình mở cổng tường lửa (UFW) trên các server"
+    echo "  --nginx, --tls      Chỉ cài đặt/cập nhật và reload Nginx TLS reverse proxy (HTTPS/WSS 443)"
     echo "  --export-config     Xuất cấu hình mạng ra /tmp/rpc_nodes.json"
     echo ""
     echo "🎯 Phạm vi áp dụng (Target & Scope):"
@@ -148,6 +149,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --open-ports|open-ports|open_ports)
             OPEN_PORTS_FLAG="true"
+            shift
+            ;;
+        --nginx|--nginx-only|--tls|--tls-only|nginx|tls)
+            ACTION="nginx"
             shift
             ;;
         --export-config|--export-config-only)
@@ -807,7 +812,13 @@ if [ -n "$TARGET_NODE" ]; then
     fi
     if [ "$ACTION" = "open_ports" ]; then
         EXTRA_ANSIBLE_ARGS+=(--tags "open_ports")
+    elif [ "$ACTION" = "nginx" ]; then
+        EXTRA_ANSIBLE_ARGS+=(--tags "nginx")
     fi
+elif [ "$ACTION" = "nginx" ]; then
+    echo "🔒 Targeting Nginx TLS Reverse Proxy (HTTPS/WSS 443)..."
+    TARGET_SCOPE_DESC="Nginx TLS Reverse Proxy (HTTPS/WSS 443)"
+    EXTRA_ANSIBLE_ARGS+=(--tags "nginx")
 elif [ "$ACTION" = "open_ports" ]; then
     echo "🛡️  Targeting Firewall (UFW) port opening..."
     TARGET_SCOPE_DESC="Cổng tường lửa (UFW) toàn hệ thống"
@@ -871,7 +882,7 @@ fi
 # 2.9. Đảm bảo bộ key Parent Chain luôn sẵn sàng:
 # - Nếu chưa có (fresh setup hoặc reset): tự động sinh key mới
 # - Nếu đã có: giữ nguyên đọc như cũ (không sinh đè trừ khi có cờ --change-keys)
-if [ "$EXEC_ONLY" != "true" ]; then
+if [ "$EXEC_ONLY" != "true" ] && [ "$ACTION" != "nginx" ]; then
     GEN_KEY_CMD=(python3 "${SCRIPT_DIR}/scripts/gen_parent_keys.py" --inventory "$INVENTORY" --keys-dir "$PARENT_KEYS_DIR")
     if [ "$CHANGE_KEYS" = "true" ]; then
         GEN_KEY_CMD+=(--change-keys)
@@ -961,6 +972,25 @@ import telegram_notify as tn
 tn.notify_action_complete(action='open_ports', scope='${TARGET_SCOPE_DESC}', duration_secs=${TOTAL_DEPLOY_DURATION})
 " 2>/dev/null || true
     fi
+    exit 0
+fi
+
+if [ "$ACTION" = "nginx" ]; then
+    python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" export "$RPC_NODES_FILE"
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "🔒 ĐÃ CẤU HÌNH VÀ KHỞI CHẠY NGINX TLS (HTTPS/WSS 443) THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
+    echo "═══════════════════════════════════════════════════════════════"
+    if [ "$NOTIFY" = "true" ]; then
+        python3 -c "
+import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
+import parse_inventory as pi
+import telegram_notify as tn
+info = pi.parse_inventory('${INVENTORY}')
+tn.notify_action_complete(action='nginx', scope='${TARGET_SCOPE_DESC}', info_or_parent=info, duration_secs=${TOTAL_DEPLOY_DURATION}, rpc_nodes_path='${RPC_NODES_FILE}')
+" 2>/dev/null || true
+    fi
+    check_status
     exit 0
 fi
 

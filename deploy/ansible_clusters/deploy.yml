@@ -63,11 +63,14 @@
   gather_facts: false
   become: true
   any_errors_fatal: true
-  tags: ["exec_clusters", "shards", "open_ports"]
+  tags: ["exec_clusters", "shards", "open_ports", "nginx", "tls"]
   roles:
     - role: common
-      when: deploy_action != 'open_ports'
+      when: deploy_action not in ['open_ports', 'nginx']
     - role: exec_cluster
+      when: deploy_action != 'nginx'
+    - role: nginx_tls
+      tags: ["exec_clusters", "shards", "open_ports", "nginx", "tls"]
 
 # ── Test authentication preflight ────────────────────────────────────────────
 # Test-only runs must use the same deposit credential as the already-running

@@ -1,0 +1,208 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+#  NGINX TLS REVERSE PROXY ROLE FOR METANODE RPC / WEBSOCKET
+#  Terminates HTTPS/WSS on port 443 and proxies to plain HTTP RPC backends.
+#  Only runs on hosts where `tls_domain` is explicitly defined in inventory.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+- name: Configure and run Nginx TLS reverse proxy for {{ inventory_hostname }} ({{ tls_domain | default('') }})
+  when:
+    - tls_domain is defined
+    - (tls_domain | string | trim | length) > 0
+    - tls_enabled | default(true) | bool
+  block:
+    # ── 1. Firewall (UFW) Port 443 Allowance ──────────────────────────────────
+    - name: Allow HTTPS port ({{ tls_port | default(443) }}/tcp) in UFW if active
+      when: "deploy_action in ['open_ports', 'setup', 'deploy', 'nginx'] or (open_ports | default(false) | bool)"
+      become: true
+      block:
+        - name: Check UFW status on {{ inventory_hostname }} for Nginx TLS
+          ansible.builtin.command: ufw status
+          register: ufw_status_tls
+          changed_when: false
+          failed_when: false
+
+        - name: Open port {{ tls_port | default(443) }}/tcp in UFW for Nginx TLS
+          when:
+            - ufw_status_tls.rc == 0
+            - "'Status: active' in ufw_status_tls.stdout"
+          ansible.builtin.command: "ufw allow {{ tls_port | default(443) }}/tcp comment 'Metanode RPC TLS (nginx)'"
+          register: ufw_tls_rule
+          changed_when: "'Rule added' in ufw_tls_rule.stdout or 'Rule updated' in ufw_tls_rule.stdout"
+
+    # ── 2. Install & Configure Nginx TLS ──────────────────────────────────────
+    - name: Setup and start Nginx TLS reverse proxy on {{ inventory_hostname }}
+      when: "deploy_action in ['setup', 'deploy', 'start', 'restart', 'reset', 'nginx']"
+      become: true
+      block:
+        - name: Check if nginx is already installed
+          ansible.builtin.command: which nginx
+          register: nginx_bin_check
+          changed_when: false
+          failed_when: false
+
+        - name: Install nginx package if missing
+          when: nginx_bin_check.rc != 0
+          ansible.builtin.apt:
+            name: nginx
+            state: present
+            update_cache: true
+
+        - name: Ensure /etc/nginx/tls directory exists
+          ansible.builtin.file:
+            path: /etc/nginx/tls
+            state: directory
+            owner: root
+            group: root
+            mode: '0755'
+
+        - name: Prepare local TLS certificate bundle from iqnb.com.zip on controller if present
+          delegate_to: localhost
+          become: false
+          run_once: true
+          ansible.builtin.shell: |
+            set -e
+            TLS_DIR="{{ playbook_dir }}/tls"
+            ZIP_FILE="{{ tls_zip_src | default(playbook_dir ~ '/../../iqnb.com.zip') }}"
+            if [ ! -f "$TLS_DIR/fullchain.pem" ] || [ ! -f "$TLS_DIR/privkey.pem" ]; then
+              if [ -f "$ZIP_FILE" ]; then
+                mkdir -p "$TLS_DIR"
+                TMP_EXTRACT=$(mktemp -d)
+                trap 'rm -rf "$TMP_EXTRACT"' EXIT
+                unzip -q -o "$ZIP_FILE" -d "$TMP_EXTRACT"
+                LEAF_CRT=$(find "$TMP_EXTRACT" -name "STAR_*.crt" -not -path "*/__MACOSX/*" | head -n 1)
+                INTER_CRT=$(find "$TMP_EXTRACT" -name "*AlphaSSL*CA*.crt" -not -path "*/__MACOSX/*" | head -n 1)
+                PRIV_KEY=$(find "$TMP_EXTRACT" -name "*.key" -not -path "*/__MACOSX/*" | head -n 1)
+                if [ -n "$LEAF_CRT" ] && [ -n "$INTER_CRT" ] && [ -n "$PRIV_KEY" ]; then
+                  cat "$LEAF_CRT" "$INTER_CRT" > "$TLS_DIR/fullchain.pem"
+                  cp "$PRIV_KEY" "$TLS_DIR/privkey.pem"
+                  chmod 0644 "$TLS_DIR/fullchain.pem"
+                  chmod 0600 "$TLS_DIR/privkey.pem"
+                fi
+              fi
+            fi
+          changed_when: false
+          failed_when: false
+
+        - name: Check if local TLS fullchain.pem exists on controller
+          delegate_to: localhost
+          become: false
+          ansible.builtin.stat:
+            path: "{{ tls_cert_src | default(playbook_dir ~ '/tls/fullchain.pem') }}"
+          register: local_tls_cert_stat
+
+        - name: Check if local TLS privkey.pem exists on controller
+          delegate_to: localhost
+          become: false
+          ansible.builtin.stat:
+            path: "{{ tls_key_src | default(playbook_dir ~ '/tls/privkey.pem') }}"
+          register: local_tls_key_stat
+
+        - name: Distribute TLS fullchain.pem to target host
+          when: local_tls_cert_stat.stat.exists
+          ansible.builtin.copy:
+            src: "{{ tls_cert_src | default(playbook_dir ~ '/tls/fullchain.pem') }}"
+            dest: "{{ tls_cert_dest | default('/etc/nginx/tls/fullchain.pem') }}"
+            owner: root
+            group: root
+            mode: '0644'
+          register: tls_cert_copied
+
+        - name: Distribute TLS privkey.pem to target host (mode 0600)
+          when: local_tls_key_stat.stat.exists
+          ansible.builtin.copy:
+            src: "{{ tls_key_src | default(playbook_dir ~ '/tls/privkey.pem') }}"
+            dest: "{{ tls_key_dest | default('/etc/nginx/tls/privkey.pem') }}"
+            owner: root
+            group: root
+            mode: '0600'
+          no_log: true
+          register: tls_key_copied
+
+        - name: Verify TLS certificate and private key exist on {{ inventory_hostname }}
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "{{ tls_cert_dest | default('/etc/nginx/tls/fullchain.pem') }}"
+            - "{{ tls_key_dest | default('/etc/nginx/tls/privkey.pem') }}"
+          register: remote_tls_files
+
+        - name: Assert TLS certificate and key are present on {{ inventory_hostname }}
+          ansible.builtin.assert:
+            that:
+              - remote_tls_files.results[0].stat.exists
+              - remote_tls_files.results[1].stat.exists
+            fail_msg: >-
+              TLS certificate or private key is missing on {{ inventory_hostname }}
+              ({{ tls_cert_dest | default('/etc/nginx/tls/fullchain.pem') }} /
+              {{ tls_key_dest | default('/etc/nginx/tls/privkey.pem') }}).
+              Place fullchain.pem and privkey.pem in {{ playbook_dir }}/tls/ on the controller before deploying.
+
+        - name: Deploy WebSocket upgrade mapping (/etc/nginx/conf.d/ws_upgrade.conf)
+          ansible.builtin.template:
+            src: ws_upgrade.conf.j2
+            dest: /etc/nginx/conf.d/ws_upgrade.conf
+            owner: root
+            group: root
+            mode: '0644'
+          register: ws_conf_deployed
+
+        - name: Deploy Metanode RPC TLS server configuration (/etc/nginx/conf.d/metanode_rpc_tls.conf)
+          ansible.builtin.template:
+            src: metanode_rpc_tls.conf.j2
+            dest: /etc/nginx/conf.d/metanode_rpc_tls.conf
+            owner: root
+            group: root
+            mode: '0644'
+          register: rpc_tls_conf_deployed
+
+        - name: Remove default nginx site if enabled
+          when: tls_remove_default_site | default(true) | bool
+          ansible.builtin.file:
+            path: /etc/nginx/sites-enabled/default
+            state: absent
+          register: default_site_removed
+
+        - name: Validate nginx configuration syntax (nginx -t)
+          ansible.builtin.command: nginx -t
+          changed_when: false
+
+        - name: Ensure nginx service is enabled and started
+          ansible.builtin.systemd:
+            name: nginx
+            state: started
+            enabled: true
+
+        - name: Reload nginx if TLS configuration or certificates changed
+          when: >-
+            (tls_cert_copied is defined and tls_cert_copied.changed) or
+            (tls_key_copied is defined and tls_key_copied.changed) or
+            (ws_conf_deployed is defined and ws_conf_deployed.changed) or
+            (rpc_tls_conf_deployed is defined and rpc_tls_conf_deployed.changed) or
+            (default_site_removed is defined and default_site_removed.changed)
+          ansible.builtin.systemd:
+            name: nginx
+            state: reloaded
+
+        - name: Verify local HTTPS JSON-RPC endpoint via Nginx ({{ tls_domain }})
+          ansible.builtin.command:
+            argv:
+              - curl
+              - -sS
+              - --max-time
+              - "8"
+              - --resolve
+              - "{{ tls_domain }}:{{ tls_port | default(443) }}:127.0.0.1"
+              - -X
+              - POST
+              - -H
+              - "Content-Type: application/json"
+              - --data
+              - '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}'
+              - "https://{{ tls_domain }}:{{ tls_port | default(443) }}/"
+          register: https_rpc_verify
+          changed_when: false
+          retries: 3
+          delay: 2
+          until: https_rpc_verify.rc == 0 and '"result"' in https_rpc_verify.stdout
+

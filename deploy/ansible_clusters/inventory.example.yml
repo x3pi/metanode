@@ -140,6 +140,18 @@ all:
               raft_bootstrap: true          # Node duy nhất nhận cờ khởi tạo cụm Raft
               rpc_port: 8747
               node_data_dir: "/opt/metanode/exec1_r1"
+              # [TÙY CHỌN] Bật Nginx TLS reverse proxy (HTTPS/WSS cổng 443) trên máy này:
+              # - Với node độc lập (như Cloud pri_1a/1b/1c): chỉ cần đặt tls_domain: "lan-pri-1a.iqnb.com"
+              # - Với máy Gateway LAN (như 192.168.1.234): đặt tls_domain + tls_extra_locations để định tuyến đa cụm
+              # tls_domain: "lan1.iqnb.com"
+              # tls_extra_locations:
+              #   - { path: "/exec2/", upstream: "http://127.0.0.1:8750/", comment: "exec2 JSON-RPC" }
+              #   - { path: "/r2/exec1/", upstream: "http://192.168.1.231:8748/", comment: "exec1_r2 (host 231)" }
+              #   - { path: "/r2/exec2/", upstream: "http://192.168.1.231:8751/", comment: "exec2_r2 (host 231)" }
+              #   - { path: "/r3/exec1/", upstream: "http://192.168.1.230:8749/", comment: "exec1_r3 (host 230)" }
+              #   - { path: "/r3/exec2/", upstream: "http://192.168.1.230:8752/", comment: "exec2_r3 (host 230)" }
+              #   - { path: "/parent/", upstream: "http://127.0.0.1:18601/", comment: "parent chain HTTP API" }
+              #   - { path: "/parent_prod/", upstream: "http://127.0.0.1:28601/", comment: "parent_prod HTTP API" }
 
             # Replica 2: Follower node (chạy trên Server 2 qua kết nối SSH)
             exec1_replica2:
@@ -148,6 +160,7 @@ all:
               raft_bootstrap: false
               rpc_port: 8748
               node_data_dir: "/opt/metanode/exec1_r2"
+              # https_url: "https://lan1.iqnb.com/r2/exec1/"
 
             # Replica 3: Follower node thứ 2 (cùng nằm trên Server 2)
             # Vì chung IP với Replica 2 nên các cổng phải được cấu hình tăng dần tránh xung đột:
@@ -160,6 +173,7 @@ all:
               raft_port: 7111
               forward_port: 7211
               node_data_dir: "/opt/metanode/exec1_r3"
+              # https_url: "https://lan1.iqnb.com/r3/exec1/"
 
         # Cluster 2 (Tùy chọn): Cụm Shard con thứ 2 (Exec Cluster 2) nếu cần chạy đa cụm
         # cluster_2:

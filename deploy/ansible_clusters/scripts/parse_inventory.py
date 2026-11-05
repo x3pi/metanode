@@ -90,6 +90,8 @@ def parse_inventory(file_path):
     clusters_data = {}
     all_nodes_rpc = {}
     all_ws_nodes = {}
+    all_https_nodes = {}
+    all_wss_nodes = {}
     all_tcp_nodes = {}
     all_raft_nodes = {}
     all_fwd_nodes = {}
@@ -132,6 +134,16 @@ def parse_inventory(file_path):
             raft_ep = f"{r_ip}:{r_raft}"
             fwd_ep = f"{r_ip}:{r_fwd}"
 
+            r_tls_domain = str(r_val.get('tls_domain', '') or '').strip()
+            r_tls_port = int(r_val.get('tls_port', 443) or 443)
+            port_suffix = f":{r_tls_port}" if r_tls_port != 443 else ""
+            default_https = f"https://{r_tls_domain}{port_suffix}/" if r_tls_domain else ""
+            https_url = str(r_val.get('https_url', default_https) or '').strip()
+            wss_url = str(r_val.get('wss_url', '') or '').strip()
+            if not wss_url and https_url:
+                wss_base = https_url.rstrip('/')
+                wss_url = wss_base.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws'
+
             if not lead_rpc or r_boot:
                 lead_rpc = rpc_url
                 lead_addr = r_addr
@@ -139,6 +151,10 @@ def parse_inventory(file_path):
 
             all_nodes_rpc[r_key] = rpc_url
             all_ws_nodes[r_key] = ws_url
+            if https_url:
+                all_https_nodes[r_key] = https_url
+            if wss_url:
+                all_wss_nodes[r_key] = wss_url
             all_tcp_nodes[r_key] = tcp_ep
             all_raft_nodes[r_key] = raft_ep
             all_fwd_nodes[r_key] = fwd_ep
@@ -149,6 +165,9 @@ def parse_inventory(file_path):
                 'rpc_port': r_rpc,
                 'rpc_url': rpc_url,
                 'ws_url': ws_url,
+                'https_url': https_url,
+                'wss_url': wss_url,
+                'tls_domain': r_tls_domain,
                 'p2p_port': r_p2p,
                 'raft_port': r_raft,
                 'forward_port': r_fwd,
@@ -175,6 +194,8 @@ def parse_inventory(file_path):
         'nodes': all_nodes_rpc,
         'rpc_nodes': all_nodes_rpc,
         'ws_nodes': all_ws_nodes,
+        'https_nodes': all_https_nodes,
+        'wss_nodes': all_wss_nodes,
         'tcp_nodes': all_tcp_nodes,
         'raft_nodes': all_raft_nodes,
         'forward_nodes': all_fwd_nodes,
@@ -240,7 +261,7 @@ def export_tmp_files(info, rpc_nodes_file=None):
                 except Exception:
                     existing = {}
             out = dict(existing)
-            for map_name in ('nodes', 'rpc_nodes', 'ws_nodes', 'tcp_nodes', 'raft_nodes', 'forward_nodes'):
+            for map_name in ('nodes', 'rpc_nodes', 'ws_nodes', 'https_nodes', 'wss_nodes', 'tcp_nodes', 'raft_nodes', 'forward_nodes'):
                 merged = {k: v for k, v in existing.get(map_name, {}).items() if is_clean_key(k)}
                 merged.update(info.get(map_name, {}))
                 out[map_name] = merged
@@ -342,6 +363,16 @@ def print_summary(info):
         for k, v in info['ws_nodes'].items():
             print(f"  • {k}: {v}")
 
+    if info.get('https_nodes'):
+        print("\n🔒 HTTPS RPC Endpoints (Nginx TLS):")
+        for k, v in info['https_nodes'].items():
+            print(f"  • {k}: {v}")
+
+    if info.get('wss_nodes'):
+        print("\n🔐 Secure WebSocket Endpoints (WSS URL):")
+        for k, v in info['wss_nodes'].items():
+            print(f"  • {k}: {v}")
+
     print("\n🌐 TCP Endpoints (P2P / Consensus):")
     for k, v in info['tcp_nodes'].items():
         print(f"  • {k}: {v}")
@@ -355,6 +386,8 @@ def print_summary(info):
 
 def check_live_status(info):
     import urllib.request
+    import subprocess
+    from urllib.parse import urlparse
     print("🔍 Live Service Health Status (Live RPC Check):")
     for name, rpc_url in info['rpc_nodes'].items():
         if 'parent' in name:
@@ -378,6 +411,41 @@ def check_live_status(info):
                         print(f"  • {name} ({rpc_url}): ⚠️ WARNING (Invalid payload)")
             except Exception:
                 print(f"  • {name} ({rpc_url}): ❌ OFFLINE (Unreachable)")
+
+    if info.get('https_nodes'):
+        print("\n🔒 Live HTTPS Health Status (Nginx TLS Reverse Proxy Check):")
+        for name, https_url in info['https_nodes'].items():
+            payload = '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+            out = ""
+            try:
+                proc = subprocess.run(
+                    ["curl", "-sS", "-m", "3", "-H", "Content-Type: application/json", "-d", payload, https_url],
+                    capture_output=True, text=True
+                )
+                if proc.returncode == 0 and '"result"' in proc.stdout:
+                    out = proc.stdout
+                else:
+                    parsed_u = urlparse(https_url)
+                    host = parsed_u.hostname or ""
+                    if host:
+                        proc_local = subprocess.run(
+                            ["curl", "-sS", "-m", "3", "--resolve", f"{host}:443:127.0.0.1", "-H", "Content-Type: application/json", "-d", payload, https_url],
+                            capture_output=True, text=True
+                        )
+                        if proc_local.returncode == 0 and '"result"' in proc_local.stdout:
+                            out = proc_local.stdout
+                if out:
+                    res = json.loads(out)
+                    b_hex = res.get('result', '')
+                    if b_hex:
+                        b_num = int(b_hex, 16)
+                        print(f"  • {name} ({https_url}): ✅ ONLINE TLS (Block: {b_num} / {b_hex})")
+                    else:
+                        print(f"  • {name} ({https_url}): ⚠️ WARNING (Invalid payload)")
+                else:
+                    print(f"  • {name} ({https_url}): ❌ OFFLINE (Unreachable)")
+            except Exception:
+                print(f"  • {name} ({https_url}): ❌ OFFLINE (Unreachable)")
 
 def resolve_target(info, target):
     if not target:
