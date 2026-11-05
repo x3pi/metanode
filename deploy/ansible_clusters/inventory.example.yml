@@ -23,6 +23,8 @@ all:
     # ── Parent Chain Configuration (Điểm neo bảo chứng cho Child Chain) ──
     parent_keys_dir: "{{ playbook_dir }}/parent_keys"
     parent_chain_rpc_port: 10751
+    # Use a DNS name (e.g. a CNAME to the router DDNS) instead of a raw WAN IP, so a public IP change needs no redeploy.
+    # Build per-node URLs from it: parent_chain_urls: "http://{{ parent_chain_host }}:28601,..."
     parent_chain_host: "192.168.1.234"
     # EVM Chain ID cho Child Chain (Execution Clusters)
     chain_id: 991
