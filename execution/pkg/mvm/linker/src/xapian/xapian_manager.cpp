@@ -606,6 +606,10 @@ std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::va
 
 // Thêm một term vào document, có xử lý versioning theo blockNumber
 std::string XapianManager::add_term(const std::string& virtualDocId, const std::string &term, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
+    if (isReservedSystemDocIdTerm(term)) {
+        std::cerr << "[ERROR] XapianManager::add_term: Term collides with reserved system document identifier: " << term << std::endl;
+        return "";
+    }
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
         XapianLog::AddTermData logData;
@@ -622,6 +626,10 @@ std::string XapianManager::add_term(const std::string& virtualDocId, const std::
 
 // Index một đoạn text vào document (thêm các term được tạo ra từ text)
 std::string XapianManager::index_text(const std::string& virtualDocId, const std::string &text_to_index, Xapian::termcount wdf_inc, const std::string prefix, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
+    if (isReservedSystemPrefix(prefix)) {
+        std::cerr << "[ERROR] XapianManager::index_text: Prefix collides with reserved system document identifier: " << prefix << std::endl;
+        return "";
+    }
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
         XapianLog::IndexTextData logData;
@@ -795,6 +803,24 @@ Xapian::Document XapianManager::get_overlayed_document(const std::string& virtua
                     termgenerator.set_stemming_strategy(Xapian::TermGenerator::STEM_SOME);
                     termgenerator.set_document(doc);
                     termgenerator.index_text(data.text, data.wdf_inc, data.prefix);
+
+                    // Sanitize generated terms: prevent term collision with internal docid of another document
+                    std::string own_clean_id = nid;
+                    if (own_clean_id.length() >= 2 && own_clean_id.substr(0, 2) == "0x") {
+                        own_clean_id = own_clean_id.substr(2);
+                    }
+                    std::string own_system_term = "Q" + own_clean_id;
+                    std::vector<std::string> colliding_terms;
+                    for (auto it = doc.termlist_begin(); it != doc.termlist_end(); ++it) {
+                        std::string t = *it;
+                        if (isReservedSystemDocIdTerm(t) && t != own_system_term) {
+                            colliding_terms.push_back(t);
+                        }
+                    }
+                    for (const auto& t : colliding_terms) {
+                        std::cerr << "[ERROR] XapianManager: removing colliding reserved system docid term: " << t << " from doc " << nid << std::endl;
+                        doc.remove_term(t);
+                    }
                 }
             }
         }
@@ -1588,6 +1614,24 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
                 termgenerator.set_stemming_strategy(Xapian::TermGenerator::STEM_SOME);
                 termgenerator.set_document(doc);
                 termgenerator.index_text(data.text, data.wdf_inc, data.prefix);
+
+                // Sanitize generated terms: prevent term collision with internal docid of another document
+                std::string own_clean_id = nid;
+                if (own_clean_id.length() >= 2 && own_clean_id.substr(0, 2) == "0x") {
+                    own_clean_id = own_clean_id.substr(2);
+                }
+                std::string own_system_term = "Q" + own_clean_id;
+                std::vector<std::string> colliding_terms;
+                for (auto it = doc.termlist_begin(); it != doc.termlist_end(); ++it) {
+                    std::string t = *it;
+                    if (isReservedSystemDocIdTerm(t) && t != own_system_term) {
+                        colliding_terms.push_back(t);
+                    }
+                }
+                for (const auto& t : colliding_terms) {
+                    std::cerr << "[ERROR] XapianManager: removing colliding reserved system docid term: " << t << " from doc " << nid << std::endl;
+                    doc.remove_term(t);
+                }
             }
         }
 

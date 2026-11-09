@@ -28,6 +28,7 @@ package tx_processor
 import (
 	"context"
 	"crypto/ecdsa"
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -41,6 +42,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/stretchr/testify/require"
 )
@@ -135,6 +137,14 @@ func makeXapianV1AddTermData(t *testing.T, dbname string, docId *big.Int, term s
 	a, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"addTermDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"},{"name":"term","type":"string"}],"outputs":[{"type":"uint256"}]}]`))
 	require.NoError(t, err)
 	data, err := a.Pack("addTermDocument", dbname, docId, term)
+	require.NoError(t, err)
+	return data
+}
+
+func makeXapianV1IndexTextData(t *testing.T, dbname string, docId *big.Int, text string, weight uint8, prefix string) []byte {
+	a, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"indexTextForDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"},{"name":"text","type":"string"},{"name":"weight","type":"uint8"},{"name":"prefix","type":"string"}],"outputs":[{"type":"uint256"}]}]`))
+	require.NoError(t, err)
+	data, err := a.Pack("indexTextForDocument", dbname, docId, text, weight, prefix)
 	require.NoError(t, err)
 	return data
 }
@@ -1229,8 +1239,9 @@ func TestXapianV1_MultipleWritersSameBlock(t *testing.T) {
 	sharedContractV1 := common.HexToAddress("0x1000000000000000000000000000000000000188")
 	forwardCodeV1 := confScript(
 		"CALLDATASIZE", 0, 0, "CALLDATACOPY",
-		512, 1024, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 100000, "CALL", "POP",
-		"RETURNDATASIZE", 1024, "RETURN",
+		0, 0, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 100000, "CALL", "POP",
+		"RETURNDATASIZE", 0, 0, "RETURNDATACOPY",
+		"RETURNDATASIZE", 0, "RETURN",
 	)
 	seedContract(t, cs, sharedContractV1, big.NewInt(0), forwardCodeV1)
 
@@ -1400,8 +1411,9 @@ func TestXapianV1_MultiWriterWithInterleavedRevert(t *testing.T) {
 	sharedContractV1 := common.HexToAddress("0x1000000000000000000000000000000000000198")
 	forwardCodeV1 := confScript(
 		"CALLDATASIZE", 0, 0, "CALLDATACOPY",
-		512, 1024, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 100000, "CALL", "POP",
-		"RETURNDATASIZE", 1024, "RETURN",
+		0, 0, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 100000, "CALL", "POP",
+		"RETURNDATASIZE", 0, 0, "RETURNDATACOPY",
+		"RETURNDATASIZE", 0, "RETURN",
 	)
 	seedContract(t, cs, sharedContractV1, big.NewInt(0), forwardCodeV1)
 
@@ -1537,8 +1549,9 @@ func TestXapianV1_MalformedAndTruncatedABIRegression(t *testing.T) {
 	// Forwarder contract to precompile 0x107
 	forwardCodeV1 := confScript(
 		"CALLDATASIZE", 0, 0, "CALLDATACOPY",
-		512, 1024, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 100000, "CALL", "POP",
-		"RETURNDATASIZE", 1024, "RETURN",
+		0, 0, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 100000, "CALL", "POP",
+		"RETURNDATASIZE", 0, 0, "RETURNDATACOPY",
+		"RETURNDATASIZE", 0, "RETURN",
 	)
 	seedContract(t, cs, sharedContractV1, big.NewInt(0), forwardCodeV1)
 
@@ -1607,5 +1620,143 @@ func TestXapianV1_MalformedAndTruncatedABIRegression(t *testing.T) {
 	require.True(t, validDocId.Sign() > 0, "Valid newDocument must return non-zero docId")
 
 	mvm.CommitXapianTxBuffer(txValid.Hash().Bytes())
+	mvm.DestroyAllXapianInstances()
+}
+
+func TestXapianV1_ReservedDocIdTermCollisionPrevention(t *testing.T) {
+	cs, key, _, leader := setupXapianChainEnv(t)
+	sharedContractV1 := common.HexToAddress("0x100000000000000000000000000000000000019A")
+	signer := eth.LatestSignerForChainID(big.NewInt(991))
+
+	// Forwarder contract to precompile 0x107
+	forwardCodeV1 := confScript(
+		"CALLDATASIZE", 0, 0, "CALLDATACOPY",
+		0, 0, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 100000, "CALL", "POP",
+		"RETURNDATASIZE", 0, 0, "RETURNDATACOPY",
+		"RETURNDATASIZE", 0, "RETURN",
+	)
+	seedContract(t, cs, sharedContractV1, big.NewInt(0), forwardCodeV1)
+
+	dbName := "test_db_q_collision"
+
+	// 1. Create Document A
+	newDocAData := makeXapianV1NewDocData(t, dbName, []byte("payload_of_doc_A"))
+	signedTxA, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 1, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: newDocAData,
+	})
+	require.NoError(t, err)
+	txA, err := transaction.NewTransactionFromEth(signedTxA)
+	require.NoError(t, err)
+
+	// 2. Create Document B
+	newDocBData := makeXapianV1NewDocData(t, dbName, []byte("payload_of_doc_B"))
+	signedTxB, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 2, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: newDocBData,
+	})
+	require.NoError(t, err)
+	txB, err := transaction.NewTransactionFromEth(signedTxB)
+	require.NoError(t, err)
+
+	items1 := []grouptxns.Item{
+		{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(txA), sharedContractV1), Tx: txA},
+		{ID: 1, Array: append(grouptxns.BuildDeterministicGroupAddrs(txB), sharedContractV1), Tx: txB},
+	}
+
+	_, receipts1, _, _ := ProcessTransactionsOptimistic(
+		context.Background(), cs, grouptxns.GroupTransactionsDeterministic(items1, cs.HasCode),
+		blankHeader(), false, false, 999, leader, false,
+	)
+	require.Len(t, receipts1, 2)
+	require.Equal(t, 0, int(receipts1[0].Status()))
+	require.Equal(t, 0, int(receipts1[1].Status()))
+
+	docIdA := new(big.Int).SetBytes(receipts1[0].Return())
+	docIdB := new(big.Int).SetBytes(receipts1[1].Return())
+	require.True(t, docIdA.Sign() > 0)
+	require.True(t, docIdB.Sign() > 0)
+
+	mvm.CommitXapianTxBufferBatch([][]byte{
+		txA.Hash().Bytes(),
+		txB.Hash().Bytes(),
+	})
+	mvm.DestroyAllXapianInstances()
+
+	// 3. Attack attempt: Try adding reserved system docId term (33 chars, within max term len 64)
+	attackTerm := "Q1234567890abcdef1234567890abcdef"
+	attackTermData := makeXapianV1AddTermData(t, dbName, docIdA, attackTerm)
+	signedTxAttack, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 3, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: attackTermData,
+	})
+	require.NoError(t, err)
+	txAttack, err := transaction.NewTransactionFromEth(signedTxAttack)
+	require.NoError(t, err)
+
+	// 3b. Partial prefix attack: Try indexTextForDocument with prefix "Q" + first hex of docB
+	hexDocB := fmt.Sprintf("%064x", docIdB)
+	attackPrefix := "Q" + hexDocB[0:1]
+	attackPrefixData := makeXapianV1IndexTextData(t, dbName, docIdA, hexDocB[1:], 1, attackPrefix)
+	signedTxAttackPrefix, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 4, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: attackPrefixData,
+	})
+	require.NoError(t, err)
+	txAttackPrefix, err := transaction.NewTransactionFromEth(signedTxAttackPrefix)
+	require.NoError(t, err)
+
+	// 4. Legitimate term: Add standard term starting with 'Q' (e.g. "QUANTUM") to doc A
+	legitTermData := makeXapianV1AddTermData(t, dbName, docIdA, "QUANTUM")
+	signedTxLegit, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 5, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: legitTermData,
+	})
+	require.NoError(t, err)
+	txLegit, err := transaction.NewTransactionFromEth(signedTxLegit)
+	require.NoError(t, err)
+
+	// 5. Read back Document B data
+	readDocBData := makeXapianV1GetDataData(t, dbName, docIdB)
+	signedTxReadB, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 6, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: readDocBData,
+	})
+	require.NoError(t, err)
+	txReadB, err := transaction.NewTransactionFromEth(signedTxReadB)
+	require.NoError(t, err)
+
+	items2 := []grouptxns.Item{
+		{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(txAttack), sharedContractV1), Tx: txAttack},
+		{ID: 1, Array: append(grouptxns.BuildDeterministicGroupAddrs(txAttackPrefix), sharedContractV1), Tx: txAttackPrefix},
+		{ID: 2, Array: append(grouptxns.BuildDeterministicGroupAddrs(txLegit), sharedContractV1), Tx: txLegit},
+		{ID: 3, Array: append(grouptxns.BuildDeterministicGroupAddrs(txReadB), sharedContractV1), Tx: txReadB},
+	}
+
+	_, receipts2, _, _ := ProcessTransactionsOptimistic(
+		context.Background(), cs, grouptxns.GroupTransactionsDeterministic(items2, cs.HasCode),
+		blankHeader(), false, false, 999, leader, false,
+	)
+	require.Len(t, receipts2, 4)
+
+	// txAttack must be rejected with error return ("Xapian: reserved term")
+	expectedRevert := utils.EncodeRevertReason("Xapian: reserved term")
+	require.Equal(t, expectedRevert, receipts2[0].Return(), "Attack term colliding with system docId must revert with 'Xapian: reserved term'")
+
+	// txAttackPrefix must be rejected with error return ("Xapian: reserved prefix")
+	expectedPrefixRevert := utils.EncodeRevertReason("Xapian: reserved prefix")
+	require.Equal(t, expectedPrefixRevert, receipts2[1].Return(), "Attack prefix colliding with system docId prefix must revert with 'Xapian: reserved prefix'")
+
+	// txLegit ("QUANTUM") must succeed with non-zero return
+	legitRet := new(big.Int).SetBytes(receipts2[2].Return())
+	require.True(t, legitRet.Sign() > 0, "Legitimate term 'QUANTUM' starting with Q must succeed")
+
+	// txReadB must return payload_of_doc_B, NOT payload_of_doc_A!
+	getDataAbi, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"getDataDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"}],"outputs":[{"type":"bytes"}]}]`))
+	require.NoError(t, err)
+	var returnedBytes []byte
+	err = getDataAbi.UnpackIntoInterface(&returnedBytes, "getDataDocument", receipts2[3].Return())
+	require.NoError(t, err)
+	require.Equal(t, []byte("payload_of_doc_B"), returnedBytes, "Document B must NOT be hijacked by Document A")
+
+	mvm.CommitXapianTxBufferBatch([][]byte{
+		txLegit.Hash().Bytes(),
+	})
+	mvm.ClearXapianTxBuffer(txAttack.Hash().Bytes())
+	mvm.ClearXapianTxBuffer(txAttackPrefix.Hash().Bytes())
 	mvm.DestroyAllXapianInstances()
 }

@@ -853,5 +853,103 @@ TEST_SUITE("XapianManager") {
             FAIL(e.what());
         }
     }
+
+    TEST_CASE("Fix regression: Document identity hijacking via term collision with internal docid (Q prefix)") {
+        // 1. Regular words starting with 'Q' are NOT considered reserved
+        CHECK(XapianManager::isReservedSystemDocIdTerm("Q") == false);
+        CHECK(XapianManager::isReservedSystemDocIdTerm("QUERY") == false);
+        CHECK(XapianManager::isReservedSystemDocIdTerm("QUANTUM") == false);
+        CHECK(XapianManager::isReservedSystemDocIdTerm("QUICK_SORT") == false);
+        CHECK(XapianManager::isReservedSystemDocIdTerm("Q1_REPORT_2026") == false);
+        CHECK(XapianManager::isReservedSystemDocIdTerm("Question_About_Blockchain") == false);
+
+        // 2. Exact 'Q' + 64 hex chars is recognized as reserved system docid term
+        std::string mockDocId = "70c172244bf70760fab30c8baa4cf06c9ec8a3c18ebd1bbff58736243f80c04c";
+        CHECK(XapianManager::isReservedSystemDocIdTerm("Q" + mockDocId) == true);
+
+        // 2b. Reusable prefix validation: partial prefixes of Q+hex must be blocked
+        CHECK(XapianManager::isReservedSystemPrefix("Q") == true);
+        CHECK(XapianManager::isReservedSystemPrefix("q") == true);
+        CHECK(XapianManager::isReservedSystemPrefix("Qe") == true);
+        CHECK(XapianManager::isReservedSystemPrefix("Q1") == true);
+        CHECK(XapianManager::isReservedSystemPrefix("Qab") == true);
+        CHECK(XapianManager::isReservedSystemPrefix("qf") == true);
+        CHECK(XapianManager::isReservedSystemPrefix("Q" + mockDocId) == true);
+        CHECK(XapianManager::isReservedSystemPrefix("TAG") == false);
+        CHECK(XapianManager::isReservedSystemPrefix("author") == false);
+        CHECK(XapianManager::isReservedSystemPrefix("QUANTUM") == false);
+        CHECK(XapianManager::isReservedSystemPrefix("QUERY") == false);
+        CHECK(XapianManager::isReservedSystemPrefix("QUICK") == false);
+        CHECK(XapianManager::isReservedSystemPrefix("Q_TAG") == false);
+
+        // 3. Functional test: adding Q+ID_B to doc A must be rejected and not hijack doc B
+        std::string dbName = "test_q_hijack_prevention_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+        mvm::Address addr(999);
+        auto manager = XapianManager::getInstance(dbName, addr, true);
+        REQUIRE(manager != nullptr);
+
+        uint256_t txA = next_fake_tx_hash();
+        std::string docA;
+        commit_write(txA, [&]() {
+            docA = manager->new_document("payload_doc_A", 1, nullptr, &txA);
+            return docA;
+        });
+
+        uint256_t txB = next_fake_tx_hash();
+        std::string docB;
+        commit_write(txB, [&]() {
+            docB = manager->new_document("payload_doc_B", 1, nullptr, &txB);
+            return docB;
+        });
+
+        manager->commit_changes();
+
+        std::string beforeB = manager->get_data(docB, 1);
+        CHECK(beforeB == "payload_doc_B");
+
+        // Attempt to hijack docB by attaching Q+docB to docA
+        std::string cleanB = docB.substr(0, 2) == "0x" ? docB.substr(2) : docB;
+        uint256_t txAttack = next_fake_tx_hash();
+        std::string resAttack;
+        commit_write(txAttack, [&]() {
+            resAttack = manager->add_term(docA, "Q" + cleanB, 2, nullptr, &txAttack);
+            return resAttack;
+        });
+        // add_term returns empty string on collision
+        CHECK(resAttack.empty());
+
+        // Regular term like "QUANTUM" must succeed
+        uint256_t txLegit = next_fake_tx_hash();
+        std::string resLegit;
+        commit_write(txLegit, [&]() {
+            resLegit = manager->add_term(docA, "QUANTUM", 2, nullptr, &txLegit);
+            return resLegit;
+        });
+        CHECK(!resLegit.empty());
+
+        manager->commit_changes();
+
+        // Reading docB MUST still return payload_doc_B, not hijacked by docA
+        std::string afterB = manager->get_data(docB, 2);
+        CHECK(afterB == "payload_doc_B");
+
+        // 4. Functional test: index_text with partial prefix (e.g. "Qe") + remainder of docB
+        // must also be rejected and must NOT hijack docB after commit
+        uint256_t txAttackPrefix = next_fake_tx_hash();
+        std::string resAttackPrefix;
+        std::string partialPrefix = "Q" + cleanB.substr(0, 1);
+        std::string textRemainder = cleanB.substr(1);
+        commit_write(txAttackPrefix, [&]() {
+            resAttackPrefix = manager->index_text(docA, textRemainder, 1, partialPrefix, 2, nullptr, &txAttackPrefix);
+            return resAttackPrefix;
+        });
+        CHECK(resAttackPrefix.empty());
+
+        manager->commit_changes();
+
+        // Reading docB after commit MUST still return payload_doc_B
+        std::string afterPrefixB = manager->get_data(docB, 2);
+        CHECK(afterPrefixB == "payload_doc_B");
+    }
 }
 

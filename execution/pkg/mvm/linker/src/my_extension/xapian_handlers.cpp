@@ -34,6 +34,24 @@ using std::vector;
 #define DBNAME_MAX_LEN 128
 #define TERM_MAX_LEN 64
 
+namespace {
+inline void validateTermNotReserved(const std::string &term, const char *opName) {
+  if (XapianManager::isReservedSystemDocIdTerm(term)) {
+    std::cerr << "[Error] FullDatabase (" << opName << "): term " << term
+              << " collides with reserved system document identifier." << std::endl;
+    MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: reserved term"));
+  }
+}
+
+inline void validatePrefixNotReserved(const std::string &prefix, const char *opName) {
+  if (XapianManager::isReservedSystemPrefix(prefix)) {
+    std::cerr << "[Error] FullDatabase (" << opName << "): prefix " << prefix
+              << " collides with reserved system document identifier." << std::endl;
+    MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: reserved prefix"));
+  }
+}
+} // namespace
+
 // Forward declarations for helpers defined in my_extension.cpp
 extern bool parseABI(const std::vector<uint8_t> &, std::string &,
                      std::string &);
@@ -444,6 +462,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
             << " characters." << std::endl;
         return mvm::Code(32, 0);
       }
+      validateTermNotReserved(term, "XAPIAN_ADD_TERM_DOCUMENT");
 
       std::string hex_str = "0x" + input_argument["docId"].get<std::string>();
       intx::uint256 number = intx::from_string<intx::uint256>(hex_str);
@@ -517,6 +536,9 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                   << (DBNAME_MAX_LEN - 1) << " characters." << std::endl;
         return mvm::Code(32, 0);
       }
+
+      std::string prefix = input_argument["prefix"].get<std::string>();
+      validatePrefixNotReserved(prefix, "XAPIAN_INDEX_TEXT_DOCUMENT");
 
       std::string hex_str = "0x" + input_argument["docId"].get<std::string>();
       intx::uint256 docId = intx::from_string<intx::uint256>(hex_str);
@@ -1120,6 +1142,19 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         std::cerr << "[FATAL] On-chain Xapian operation failed: " << e.get_description() << ". Aborting to prevent state fork!" << std::endl;
         std::abort();
     }
+  } catch (const mvm::Exception &e) {
+    if (e.type == mvm::Exception::Type::ErrExecutionReverted) {
+        throw;
+    }
+    std::string errMsg = e.what();
+    if (errMsg.find("Block-STM: Estimate Hit (Suspend)") != std::string::npos || errMsg.find("Suspend") != std::string::npos) {
+        throw;
+    }
+    std::cerr << "MVM Exception in operation: " << errMsg << std::endl;
+    if (!this->isOffChain) {
+        std::cerr << "[FATAL] On-chain Xapian operation failed: " << errMsg << ". Aborting to prevent state fork!" << std::endl;
+        std::abort();
+    }
   } catch (const std::exception &e) {
     std::string errMsg = e.what();
     if (errMsg.find("Block-STM: Estimate Hit (Suspend)") != std::string::npos || errMsg.find("Suspend") != std::string::npos) {
@@ -1422,20 +1457,21 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0);
       }
 
-      // *** Kiểm tra dbname ***
+      // *** Kiểm tra term ***
       if (term.empty()) {
-        std::cerr << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname "
+        std::cerr << "[Error] FullDatabase (XAPIAN_V1_ADD_TERM_DOCUMENT): term "
                      "cannot be empty."
                   << std::endl;
         return mvm::Code(32, 0);
       }
       if (term.length() >= TERM_MAX_LEN) {
         std::cerr
-            << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname length ("
-            << dbname.length() << ") exceeds maximum of " << (TERM_MAX_LEN - 1)
+            << "[Error] FullDatabase (XAPIAN_V1_ADD_TERM_DOCUMENT): term length ("
+            << term.length() << ") exceeds maximum of " << (TERM_MAX_LEN - 1)
             << " characters." << std::endl;
         return mvm::Code(32, 0);
       }
+      validateTermNotReserved(term, "XAPIAN_V1_ADD_TERM_DOCUMENT");
 
       std::string hex_str = "0x" + input_argument["docId"].get<std::string>();
       intx::uint256 number = intx::from_string<intx::uint256>(hex_str);
@@ -1497,6 +1533,9 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
             << (DBNAME_MAX_LEN - 1) << " characters." << std::endl;
         return mvm::Code(32, 0);
       }
+
+      std::string prefix = input_argument["prefix"].get<std::string>();
+      validatePrefixNotReserved(prefix, "XAPIAN_V1_INDEX_TEXT_DOCUMENT");
 
       std::string hex_str = "0x" + input_argument["docId"].get<std::string>();
       intx::uint256 docId = intx::from_string<intx::uint256>(hex_str);
@@ -2084,6 +2123,19 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
               << std::endl;
     if (!this->isOffChain) {
         std::cerr << "[FATAL] On-chain Xapian operation failed: " << e.get_description() << ". Aborting to prevent state fork!" << std::endl;
+        std::abort();
+    }
+  } catch (const mvm::Exception &e) {
+    if (e.type == mvm::Exception::Type::ErrExecutionReverted) {
+        throw;
+    }
+    std::string errMsg = e.what();
+    if (errMsg.find("Block-STM: Estimate Hit (Suspend)") != std::string::npos || errMsg.find("Suspend") != std::string::npos) {
+        throw;
+    }
+    std::cerr << "MVM Exception in operation: " << errMsg << std::endl;
+    if (!this->isOffChain) {
+        std::cerr << "[FATAL] On-chain Xapian operation failed: " << errMsg << ". Aborting to prevent state fork!" << std::endl;
         std::abort();
     }
   } catch (const std::exception &e) {
