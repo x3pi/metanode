@@ -184,7 +184,7 @@
             name: nginx
             state: reloaded
 
-        - name: Verify local HTTPS JSON-RPC endpoint via Nginx ({{ tls_domain }})
+        - name: Verify local HTTPS JSON-RPC endpoint via Nginx ({{ (tls_domain | string).split()[0] }})
           ansible.builtin.command:
             argv:
               - curl
@@ -192,14 +192,14 @@
               - --max-time
               - "8"
               - --resolve
-              - "{{ tls_domain }}:{{ tls_port | default(443) }}:127.0.0.1"
+              - "{{ (tls_domain | string).split()[0] }}:{{ tls_port | default(443) }}:127.0.0.1"
               - -X
               - POST
               - -H
               - "Content-Type: application/json"
               - --data
               - '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}'
-              - "https://{{ tls_domain }}:{{ tls_port | default(443) }}/"
+              - "https://{{ (tls_domain | string).split()[0] }}:{{ tls_port | default(443) }}/"
           register: https_rpc_verify
           changed_when: false
           retries: 3

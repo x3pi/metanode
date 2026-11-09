@@ -17,6 +17,7 @@
 #include "mvm/crypto/sha256.hpp"
 #include <cstddef>
 #include "xapian/xapian_search.h"
+#include "abi/encoding_utils.h"
 #include <arpa/inet.h>
 #include <filesystem>
 #include <iostream>
@@ -1230,28 +1231,15 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
                   << std::endl;
         return mvm::Code(32, 0);
       }
-      uint32_t dbname_offset =
-          (input_without_opcode[28] << 24) | (input_without_opcode[29] << 16) |
-          (input_without_opcode[30] << 8) | input_without_opcode[31];
-      uint32_t data_offset =
-          (input_without_opcode[60] << 24) | (input_without_opcode[61] << 16) |
-          (input_without_opcode[62] << 8) | input_without_opcode[63];
 
-      uint32_t dbname_len = (input_without_opcode[dbname_offset + 28] << 24) |
-                            (input_without_opcode[dbname_offset + 29] << 16) |
-                            (input_without_opcode[dbname_offset + 30] << 8) |
-                            input_without_opcode[dbname_offset + 31];
-
-      dbname = std::string(input_without_opcode.begin() + dbname_offset + 32,
-                           input_without_opcode.begin() + dbname_offset + 32 +
-                               dbname_len);
-      uint32_t data_len = (input_without_opcode[data_offset + 28] << 24) |
-                          (input_without_opcode[data_offset + 29] << 16) |
-                          (input_without_opcode[data_offset + 30] << 8) |
-                          input_without_opcode[data_offset + 31];
-      rawData = std::string(input_without_opcode.begin() + data_offset + 32,
-                            input_without_opcode.begin() + data_offset + 32 +
-                                data_len);
+      try {
+        dbname = encoding::readStringDynamic(input_without_opcode, 0);
+        rawData = encoding::readStringDynamic(input_without_opcode, 32);
+      } catch (const std::exception &e) {
+        std::cerr << "Error: Invalid ABI data for version 1 NEW_DOCUMENT: "
+                  << e.what() << std::endl;
+        return mvm::Code(32, 0);
+      }
 
       // *** Kiểm tra dbname ***
       if (dbname.empty()) {
@@ -1555,9 +1543,16 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
             << std::endl;
         return mvm::Code(32, 0);
       }
-      uint32_t dbname_offset =
-          (input_without_opcode[28] << 24) | (input_without_opcode[29] << 16) |
-          (input_without_opcode[30] << 8) | input_without_opcode[31];
+
+      try {
+        dbname = encoding::readStringDynamic(input_without_opcode, 0);
+        rawData = encoding::readStringDynamic(input_without_opcode, 64);
+      } catch (const std::exception &e) {
+        std::cerr
+            << "Error: Invalid ABI data for version 1 SET_DATA_DOCUMENT: "
+            << e.what() << std::endl;
+        return mvm::Code(32, 0);
+      }
 
       std::stringstream docid_ss;
       docid_ss << "0x";
@@ -1567,36 +1562,16 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       }
       number = intx::from_string<intx::uint256>(docid_ss.str());
 
-      uint32_t data_offset =
-          (input_without_opcode[92] << 24) | (input_without_opcode[93] << 16) |
-          (input_without_opcode[94] << 8) | input_without_opcode[95];
-
-      uint32_t dbname_len = (input_without_opcode[dbname_offset + 28] << 24) |
-                            (input_without_opcode[dbname_offset + 29] << 16) |
-                            (input_without_opcode[dbname_offset + 30] << 8) |
-                            input_without_opcode[dbname_offset + 31];
-
-      dbname = std::string(input_without_opcode.begin() + dbname_offset + 32,
-                           input_without_opcode.begin() + dbname_offset + 32 +
-                               dbname_len);
-      uint32_t data_len = (input_without_opcode[data_offset + 28] << 24) |
-                          (input_without_opcode[data_offset + 29] << 16) |
-                          (input_without_opcode[data_offset + 30] << 8) |
-                          input_without_opcode[data_offset + 31];
-      rawData = std::string(input_without_opcode.begin() + data_offset + 32,
-                            input_without_opcode.begin() + data_offset + 32 +
-                                data_len);
-
       // *** Kiểm tra dbname ***
       if (dbname.empty()) {
-        std::cerr << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname "
+        std::cerr << "[Error] FullDatabase (XAPIAN_V1_SET_DATA_DOCUMENT): dbname "
                      "cannot be empty."
                   << std::endl;
         return mvm::Code(32, 0);
       }
       if (dbname.length() >= DBNAME_MAX_LEN) {
         std::cerr
-            << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname length ("
+            << "[Error] FullDatabase (XAPIAN_V1_SET_DATA_DOCUMENT): dbname length ("
             << dbname.length() << ") exceeds maximum of "
             << (DBNAME_MAX_LEN - 1) << " characters." << std::endl;
         return mvm::Code(32, 0);
