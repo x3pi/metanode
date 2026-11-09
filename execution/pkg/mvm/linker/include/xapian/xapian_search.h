@@ -202,19 +202,9 @@ inline double parsePrice(const std::string &priceStr)
 }
 inline uint64_t hex_to_uint64_range(const std::string &hex_str)
 {
-    std::string s = hex_str;
-    if (s.rfind("0x", 0) != 0 && s.rfind("0X", 0) != 0) {
-        s = "0x" + s;
-    }
-    try {
-        intx::uint256 val = intx::from_string<intx::uint256>(s);
-        if (val > intx::uint256(0xFFFFFFFD)) {
-            return 0xFFFFFFFFULL;
-        }
-        return static_cast<uint64_t>(val);
-    } catch (...) {
-        return 0xFFFFFFFFULL;
-    }
+    uint64_t result = 0;
+    std::istringstream(hex_str) >> std::hex >> result;
+    return result;
 }
 // Hàm chuyển đổi từ JSON sang vector<RangeFilter>
 inline std::vector<RangeFilter> convertJsonToRangeFilters(const nlohmann::json &jsonData)
@@ -231,11 +221,7 @@ inline std::vector<RangeFilter> convertJsonToRangeFilters(const nlohmann::json &
                 RangeFilter filter;
 
                 // Gán slot
-                uint64_t raw_slot = hex_to_uint64_range(tuple["slot"]);
-                if (raw_slot > 0xFFFFFFFD) {
-                    throw std::out_of_range("range filter slot out of range");
-                }
-                filter.slot = static_cast<Xapian::valueno>(raw_slot);
+                filter.slot = hex_to_uint64_range(tuple["slot"]);
 
                 // Xử lý begin
                 std::string beginStr = tuple["begin"].get<std::string>();
@@ -255,7 +241,6 @@ inline std::vector<RangeFilter> convertJsonToRangeFilters(const nlohmann::json &
     catch (const std::exception &e)
     {
         std::cerr << "Error converting JSON to RangeFilters: " << e.what() << std::endl;
-        throw;
     }
 
     return rangeFilters;

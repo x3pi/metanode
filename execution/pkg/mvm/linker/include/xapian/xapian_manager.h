@@ -43,8 +43,6 @@ public:
                                                     bool isReset);
   static constexpr const char *LOGICAL_ID_GENERATED_PREFIX = "uuid:";
   static std::string generateUuidLogicalId();
-  static bool isReservedSystemDocIdTerm(const std::string& term);
-  static bool isReservedSystemPrefix(const std::string& prefix);
   static void commitAllInstances();
   // --- Member Variables ---
   Xapian::WritableDatabase db;

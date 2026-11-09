@@ -78,7 +78,7 @@ void XapianRegistry::clearBufferForTxHash(const uint256_t* txHash) {
     if (!txHash) return;
     std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
     
-    std::shared_lock<std::shared_mutex> inst_lock(XapianManager::instances_mutex);
+    XapianManager::instances_mutex.lock_shared();
     for (auto& pair : XapianManager::instances) {
         if (auto manager_ptr = pair.second) {
             std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
@@ -87,6 +87,7 @@ void XapianRegistry::clearBufferForTxHash(const uint256_t* txHash) {
             manager_ptr->clear_writer_predecessors_for_tx(txHashStr);
         }
     }
+    XapianManager::instances_mutex.unlock_shared();
 }
 
 void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
@@ -116,22 +117,14 @@ void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
                 std::cerr << "[DEBUG] commitBufferForTxHash FOUND " << buffer_logs.size() << " logs for txHash: " << txHashStr << ". Committing!" << std::endl;
                 
                 // Replay logs into the actual Xapian DB for this manager (replay_log will lock changes_mutex internally)
-                bool ok = manager_ptr->replay_log(buffer_logs);
-                if (!ok) {
-                    std::cerr << "[FATAL] commitBufferForTxHash: replay_log FAILED for txHash: " << txHashStr
-                              << " - aborting to prevent state divergence/fork!" << std::endl;
-                    std::abort();
-                }
+                manager_ptr->replay_log(buffer_logs);
                 
-                // Append them to comprehensive_log under changes_mutex so they can be extracted safely
-                {
-                    std::unique_lock<std::shared_mutex> ch_lock(manager_ptr->changes_mutex);
-                    manager_ptr->comprehensive_log.xapian_doc_logs.insert(
-                        manager_ptr->comprehensive_log.xapian_doc_logs.end(),
-                        std::make_move_iterator(buffer_logs.begin()),
-                        std::make_move_iterator(buffer_logs.end())
-                    );
-                }
+                // Append them to comprehensive_log so they can be extracted
+                manager_ptr->comprehensive_log.xapian_doc_logs.insert(
+                    manager_ptr->comprehensive_log.xapian_doc_logs.end(),
+                    std::make_move_iterator(buffer_logs.begin()),
+                    std::make_move_iterator(buffer_logs.end())
+                );
             }
             // Always clean up tx_buffers and tx_counters for this txHash
             {

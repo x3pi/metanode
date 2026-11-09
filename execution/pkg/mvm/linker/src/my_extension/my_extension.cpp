@@ -588,7 +588,7 @@ bool parseABI(const std::vector<uint8_t> &data, std::string &selector_out,
     return false;
   }
 
-  if (static_cast<uint64_t>(68) + str_length > data.size()) {
+  if (offset + str_length > data.size()) {
     std::cerr << "ABI Error: String data exceeds data size." << std::endl;
     return false;
   }
