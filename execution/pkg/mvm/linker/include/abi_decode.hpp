@@ -346,7 +346,7 @@ json decodeElement(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLen
     if (t == StringTy) {
         result = decodeString(bytes, i, abi, totalLength);
     }
-    if (t == IntTy) {
+    if (t == IntTy || t == UintTy) {
         result = decodeInt(bytes, i, abi, totalLength);
     }
     if (t == BoolTy) {

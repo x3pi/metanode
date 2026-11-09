@@ -1007,5 +1007,75 @@ TEST_SUITE("XapianManager") {
         });
         CHECK_NOTHROW(manager->commit_changes());
     }
+
+    TEST_CASE("acquireSearchDb and acquireSimpleReadDb pool lifecycle & generation sync") {
+        std::string dbName = "test_pool_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+        mvm::Address addr(999);
+        auto manager = XapianManager::getInstance(dbName, addr, true);
+        REQUIRE(manager != nullptr);
+
+        // 1. Acquire single search DB, verify non-null, release
+        Xapian::Database* sdb = manager->acquireSearchDb();
+        REQUIRE(sdb != nullptr);
+        CHECK_NOTHROW(manager->releaseSearchDb(sdb));
+
+        // 2. Acquire single simple read DB, verify non-null, release
+        Xapian::Database* rdb = manager->acquireSimpleReadDb();
+        REQUIRE(rdb != nullptr);
+        CHECK_NOTHROW(manager->releaseSimpleReadDb(rdb));
+
+        // 3. Multi-acquire from search pool (up to MAX_CONCURRENT_SEARCHES = 4)
+        std::vector<Xapian::Database*> searchDbs;
+        for (int i = 0; i < 4; ++i) {
+            Xapian::Database* db = manager->acquireSearchDb();
+            REQUIRE(db != nullptr);
+            searchDbs.push_back(db);
+        }
+        for (size_t i = 0; i < searchDbs.size(); ++i) {
+            for (size_t j = i + 1; j < searchDbs.size(); ++j) {
+                CHECK(searchDbs[i] != searchDbs[j]);
+            }
+        }
+        for (auto db : searchDbs) {
+            CHECK_NOTHROW(manager->releaseSearchDb(db));
+        }
+
+        // 4. Multi-acquire from simple read pool (up to MAX_CONCURRENT_READS = 4)
+        std::vector<Xapian::Database*> readDbs;
+        for (int i = 0; i < 4; ++i) {
+            Xapian::Database* db = manager->acquireSimpleReadDb();
+            REQUIRE(db != nullptr);
+            readDbs.push_back(db);
+        }
+        for (size_t i = 0; i < readDbs.size(); ++i) {
+            for (size_t j = i + 1; j < readDbs.size(); ++j) {
+                CHECK(readDbs[i] != readDbs[j]);
+            }
+        }
+        for (auto db : readDbs) {
+            CHECK_NOTHROW(manager->releaseSimpleReadDb(db));
+        }
+
+        // 5. Test generation sync across commit:
+        Xapian::Database* dbBefore = manager->acquireSearchDb();
+        REQUIRE(dbBefore != nullptr);
+        CHECK(dbBefore->get_doccount() == 0);
+        manager->releaseSearchDb(dbBefore);
+
+        // Write a document and commit
+        uint256_t tx = next_fake_tx_hash();
+        std::string docId;
+        commit_write(tx, [&]() {
+            docId = manager->new_document("pool_sync_test_payload", 1, nullptr, &tx);
+            return docId;
+        });
+        manager->commit_changes();
+
+        // Acquire again: manager should reopen the slot to match new db_generation
+        Xapian::Database* dbAfter = manager->acquireSearchDb();
+        REQUIRE(dbAfter != nullptr);
+        CHECK(dbAfter->get_doccount() > 0);
+        manager->releaseSearchDb(dbAfter);
+    }
 }
 

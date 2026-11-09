@@ -280,6 +280,13 @@ Xapian::Database* XapianManager::acquireSearchDb()
                     search_pool.pool[i] = new Xapian::Database(
                         mvm::createFullPath(address, db_name).string());
                     search_pool.last_gen[i] = current_gen;
+                } catch (const Xapian::Error& e) {
+                    std::cerr << "[FATAL] acquireSearchDb: failed to init slot " << i
+                              << ": " << e.get_description() << std::endl;
+                    lock.lock();
+                    search_pool.in_use[i] = false;
+                    search_pool.pool_cv.notify_one();
+                    return nullptr;
                 } catch (const std::exception& e) {
                     std::cerr << "[FATAL] acquireSearchDb: failed to init slot " << i
                               << ": " << e.what() << std::endl;
@@ -293,6 +300,30 @@ Xapian::Database* XapianManager::acquireSearchDb()
                 try {
                     search_pool.pool[i]->reopen();
                     search_pool.last_gen[i] = current_gen;
+                } catch (const Xapian::Error& e) {
+                    std::cerr << "[ERROR] acquireSearchDb: reopen() failed for slot " << i
+                              << ": " << e.get_description() << ", recreating..." << std::endl;
+                    delete search_pool.pool[i];
+                    search_pool.pool[i] = nullptr;
+                    try {
+                        search_pool.pool[i] = new Xapian::Database(
+                            mvm::createFullPath(address, db_name).string());
+                        search_pool.last_gen[i] = current_gen;
+                    } catch (const Xapian::Error& e2) {
+                        std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
+                                  << ": " << e2.get_description() << std::endl;
+                        lock.lock();
+                        search_pool.in_use[i] = false;
+                        search_pool.pool_cv.notify_one();
+                        return nullptr;
+                    } catch (const std::exception& e2) {
+                        std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
+                                  << ": " << e2.what() << std::endl;
+                        lock.lock();
+                        search_pool.in_use[i] = false;
+                        search_pool.pool_cv.notify_one();
+                        return nullptr;
+                    }
                 } catch (const std::exception& e) {
                     std::cerr << "[ERROR] acquireSearchDb: reopen() failed for slot " << i
                               << ": " << e.what() << ", recreating..." << std::endl;
@@ -302,6 +333,13 @@ Xapian::Database* XapianManager::acquireSearchDb()
                         search_pool.pool[i] = new Xapian::Database(
                             mvm::createFullPath(address, db_name).string());
                         search_pool.last_gen[i] = current_gen;
+                    } catch (const Xapian::Error& e2) {
+                        std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
+                                  << ": " << e2.get_description() << std::endl;
+                        lock.lock();
+                        search_pool.in_use[i] = false;
+                        search_pool.pool_cv.notify_one();
+                        return nullptr;
                     } catch (const std::exception& e2) {
                         std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
                                   << ": " << e2.what() << std::endl;
@@ -368,6 +406,13 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
                     simple_read_pool.pool[i] = new Xapian::Database(
                         mvm::createFullPath(address, db_name).string());
                     simple_read_pool.last_gen[i] = current_gen;
+                } catch (const Xapian::Error& e) {
+                    std::cerr << "[FATAL] acquireSimpleReadDb: failed to init slot " << i
+                              << ": " << e.get_description() << std::endl;
+                    lock.lock();
+                    simple_read_pool.in_use[i] = false;
+                    simple_read_pool.pool_cv.notify_one();
+                    return nullptr;
                 } catch (const std::exception& e) {
                     std::cerr << "[FATAL] acquireSimpleReadDb: failed to init slot " << i
                               << ": " << e.what() << std::endl;
@@ -381,6 +426,30 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
                 try {
                     simple_read_pool.pool[i]->reopen();
                     simple_read_pool.last_gen[i] = current_gen;
+                } catch (const Xapian::Error& e) {
+                    std::cerr << "[ERROR] acquireSimpleReadDb: reopen() failed for slot " << i
+                              << ": " << e.get_description() << ", recreating..." << std::endl;
+                    delete simple_read_pool.pool[i];
+                    simple_read_pool.pool[i] = nullptr;
+                    try {
+                        simple_read_pool.pool[i] = new Xapian::Database(
+                            mvm::createFullPath(address, db_name).string());
+                        simple_read_pool.last_gen[i] = current_gen;
+                    } catch (const Xapian::Error& e2) {
+                        std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
+                                  << ": " << e2.get_description() << std::endl;
+                        lock.lock();
+                        simple_read_pool.in_use[i] = false;
+                        simple_read_pool.pool_cv.notify_one();
+                        return nullptr;
+                    } catch (const std::exception& e2) {
+                        std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
+                                  << ": " << e2.what() << std::endl;
+                        lock.lock();
+                        simple_read_pool.in_use[i] = false;
+                        simple_read_pool.pool_cv.notify_one();
+                        return nullptr;
+                    }
                 } catch (const std::exception& e) {
                     std::cerr << "[ERROR] acquireSimpleReadDb: reopen() failed for slot " << i
                               << ": " << e.what() << ", recreating..." << std::endl;
@@ -390,6 +459,13 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
                         simple_read_pool.pool[i] = new Xapian::Database(
                             mvm::createFullPath(address, db_name).string());
                         simple_read_pool.last_gen[i] = current_gen;
+                    } catch (const Xapian::Error& e2) {
+                        std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
+                                  << ": " << e2.get_description() << std::endl;
+                        lock.lock();
+                        simple_read_pool.in_use[i] = false;
+                        simple_read_pool.pool_cv.notify_one();
+                        return nullptr;
                     } catch (const std::exception& e2) {
                         std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
                                   << ": " << e2.what() << std::endl;
