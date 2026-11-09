@@ -55,8 +55,7 @@ vector<uint8_t> encodeInt(
         if (originBytes.size() - firstNonZero <= 32) {
             originBytes = vector<uint8_t>(originBytes.begin() + firstNonZero, originBytes.end());
         } else {
-            // Truncate to the last 32 bytes
-            originBytes = vector<uint8_t>(originBytes.end() - 32, originBytes.end());
+            throw std::invalid_argument("encodeInt: integer value exceeds 32 bytes (256 bits)");
         }
     }
 
@@ -198,7 +197,16 @@ vector<uint8_t> encodeAddress(
         return result;
     }
     if (originBytes.size() > 20) {
-        originBytes = vector<uint8_t>(originBytes.end() - 20, originBytes.end());
+        // Drop leading zeros if padded (e.g. 32-byte EVM word)
+        size_t firstNonZero = 0;
+        while (firstNonZero < originBytes.size() && originBytes[firstNonZero] == 0) {
+            firstNonZero++;
+        }
+        if (originBytes.size() - firstNonZero <= 20) {
+            originBytes = vector<uint8_t>(originBytes.end() - 20, originBytes.end());
+        } else {
+            throw std::invalid_argument("encodeAddress: address exceeds 20 bytes");
+        }
     }
     size_t start = 32 - originBytes.size();
     for (size_t i = 0; i < originBytes.size(); i++) {

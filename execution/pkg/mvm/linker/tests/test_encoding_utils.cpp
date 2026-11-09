@@ -725,14 +725,10 @@ TEST_SUITE("abi_encode_int") {
         }
     }
 
-    TEST_CASE("oversized integer (> 32 bytes) without leading zeros clamps without underflow") {
+    TEST_CASE("oversized integer (> 32 bytes) without leading zeros throws invalid_argument") {
         // 35 bytes of 0x55 (70 hex chars)
         std::string hexStr = "0x" + std::string(70, '5');
-        auto res = encodeInt(hexStr, false);
-        REQUIRE(res.size() == 32);
-        for (size_t i = 0; i < 32; ++i) {
-            CHECK(res[i] == 0x55);
-        }
+        CHECK_THROWS_AS(encodeInt(hexStr, false), std::invalid_argument);
     }
 
     TEST_CASE("odd-length hex strings") {
@@ -790,14 +786,9 @@ TEST_SUITE("abi_encode_address") {
             CHECK(res[12 + i] == static_cast<uint8_t>(i + 1));
         }
 
-        // 32-byte EVM word with non-zero prefix: should still safely truncate to last 20 bytes
+        // 32-byte EVM word with non-zero prefix (> 20 non-zero bytes) throws invalid_argument
         std::string prefixAddrHex = "0xffffffffffffffffffffffff0102030405060708090a0b0c0d0e0f1011121314";
-        auto resPrefix = encodeAddress(prefixAddrHex);
-        REQUIRE(resPrefix.size() == 32);
-        for (size_t i = 0; i < 12; ++i) CHECK(resPrefix[i] == 0);
-        for (size_t i = 0; i < 20; ++i) {
-            CHECK(resPrefix[12 + i] == static_cast<uint8_t>(i + 1));
-        }
+        CHECK_THROWS_AS(encodeAddress(prefixAddrHex), std::invalid_argument);
     }
 }
 
