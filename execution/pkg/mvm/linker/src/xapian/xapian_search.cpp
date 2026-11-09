@@ -26,7 +26,7 @@ void printHexTest(const std::vector<uint8_t> &bytes) {
 std::string getDbNameFromABI(const std::vector<uint8_t> &call_data) {
   const size_t MIN_CALLDATA_SIZE_FOR_DBNAME_OFFSET = 0 + 32;
   if (call_data.size() < MIN_CALLDATA_SIZE_FOR_DBNAME_OFFSET) {
-    throw std::runtime_error(
+    throw std::invalid_argument(
         "Invalid call data: too short to contain dbname offset.");
   }
 
@@ -36,11 +36,11 @@ std::string getDbNameFromABI(const std::vector<uint8_t> &call_data) {
   try {
     return encoding::readStringDynamic(call_data, dbname_offset_ptr);
   } catch (const std::out_of_range &e) {
-    throw std::runtime_error(
+    throw std::invalid_argument(
         std::string("Failed to get dbname from ABI (out_of_range): ") +
         e.what());
   } catch (const std::exception &e) {
-    throw std::runtime_error(std::string("Failed to get dbname from ABI: ") +
+    throw std::invalid_argument(std::string("Failed to get dbname from ABI: ") +
                              e.what());
   }
 }
@@ -48,7 +48,7 @@ std::string getDbNameFromABI(const std::vector<uint8_t> &call_data) {
 DecodedQuerySearchArgs
 decodeQuerySearchCallData(const std::vector<uint8_t> &call_data) {
   if (call_data.size() < 0 + 32 + 32) { // Selector + 2 offsets
-    throw std::runtime_error(
+    throw std::invalid_argument(
         "Invalid call data: too short for selector and offsets.");
   }
 
@@ -124,7 +124,7 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
     std::unique_ptr<Xapian::SimpleStopper> stopper_ptr;
     if (stemmer_lang) {
       try {
-        std::cerr << "Cảnh báo: stemmer_lang " << std::endl;
+        std::cerr << "Warning: stemmer_lang " << std::endl;
         Xapian::Stem stemmer(*stemmer_lang);
         qp.set_stemmer(stemmer);
         if (stop_words && !stop_words->empty()) {
@@ -134,13 +134,17 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
           qp.set_stopper(stopper_ptr.get());
         }
       } catch (const Xapian::Error &e) {
-        std::cerr << "Cảnh báo: Không thể tạo stemmer/stopper: " << e.get_msg()
+        std::cerr << "Warning: Failed to create stemmer/stopper: " << e.get_msg()
                   << std::endl;
       }
     }
 
     for (const auto &pair : prefix_map) {
-      qp.add_prefix(pair.first, pair.second);
+      try {
+        qp.add_prefix(pair.first, pair.second);
+      } catch (const Xapian::Error &e) {
+        std::cerr << "Warning: add_prefix failed: " << e.get_msg() << std::endl;
+      }
     }
 
     std::vector<Xapian::Query> parsed_queries;
@@ -149,7 +153,13 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
         try {
           parsed_queries.push_back(qp.parse_query(q_str, flags));
         } catch (const Xapian::QueryParserError &e) {
-          std::cerr << "Lỗi phân tích query '" << q_str << "': " << e.get_msg()
+          std::cerr << "Error parsing query '" << q_str << "': " << e.get_msg()
+                    << std::endl;
+        } catch (const Xapian::InvalidArgumentError &e) {
+          std::cerr << "Invalid query argument for '" << q_str << "': " << e.get_msg()
+                    << std::endl;
+        } catch (const Xapian::RangeError &e) {
+          std::cerr << "Query range error for '" << q_str << "': " << e.get_msg()
                     << std::endl;
         }
       }
@@ -216,7 +226,7 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
         enquire.set_sort_by_value_then_relevance(*sort_by_value_slot,
                                                  sort_ascending);
       } catch (const Xapian::InvalidArgumentError &e) {
-        std::cerr << "Lỗi sắp xếp: " << e.get_msg() << std::endl;
+        std::cerr << "Sort error: " << e.get_msg() << std::endl;
       }
     }
 
@@ -241,7 +251,7 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
             val254 = Xapian::sortable_unserialise(val254_str);
           }
         } catch (const Xapian::Error &e) {
-          std::cerr << "Cảnh báo unserialise slot 253/254: " << e.get_msg()
+          std::cerr << "Warning: unserialise slot 253/254 failed: " << e.get_msg()
                     << std::endl;
         }
 
@@ -249,7 +259,7 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
 
         results.push_back({*i, i.get_rank(), i.get_percent(), doc.get_data()});
       } catch (const Xapian::Error &e) {
-        std::cerr << "Lỗi lấy document ID " << *i << ": " << e.get_msg()
+        std::cerr << "Error retrieving document ID " << *i << ": " << e.get_msg()
                   << std::endl;
       }
     }
@@ -279,7 +289,7 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
         throw std::runtime_error("XapianSearcher: reopen failed after DatabaseModifiedError (unknown error)");
       }
     } catch (const Xapian::Error &e) {
-    std::cerr << "Lỗi Xapian trong quá trình search: " << e.get_msg()
+    std::cerr << "Xapian error during search: " << e.get_msg()
               << std::endl;
     // Ném tiếp thay vì trả kết quả rỗng: kết quả rỗng do lỗi I/O cục bộ là
     // không tất định (node lỗi thấy rỗng, node khác thấy dữ liệu) → fork.
@@ -287,10 +297,10 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
     // (on-chain: std::abort fail-stop, offchain: Code(32,0)) — không qua CGO.
     throw;
   } catch (const std::exception &e) {
-    std::cerr << "C++ Exception trong quá trình search: " << e.what() << std::endl;
+    std::cerr << "C++ exception during search: " << e.what() << std::endl;
     throw;
   } catch (...) {
-    std::cerr << "Unknown C++ Exception trong quá trình search." << std::endl;
+    std::cerr << "Unknown C++ exception during search." << std::endl;
     throw;
   }
   if (!need_retry) break; // success, exit retry loop
@@ -446,17 +456,17 @@ void XapianSearcher::dumpIndex() {
     std::cerr << "\n========== [DUMP XAPIAN INDEX] ==========" << std::endl;
 
     // 1. In toàn bộ từ khóa đang có trong CSDL
-    std::cerr << "--- TẤT CẢ TỪ KHÓA (TERMS) ---" << std::endl;
+    std::cerr << "--- ALL TERMS ---" << std::endl;
     for (Xapian::TermIterator it = db_ptr->allterms_begin(); it != db_ptr->allterms_end();
          ++it) {
-      std::cerr << "Term: " << *it << " | Tần suất: " << it.get_termfreq()
+      std::cerr << "Term: " << *it << " | Frequency: " << it.get_termfreq()
                 << std::endl;
     }
 
     // 2. In toàn bộ chi tiết của từng Document
-    std::cerr << "\n--- TẤT CẢ TÀI LIỆU (DOCUMENTS) ---" << std::endl;
+    std::cerr << "\n--- ALL DOCUMENTS ---" << std::endl;
     Xapian::doccount last_docid = db_ptr->get_lastdocid();
-    std::cerr << "Tong so Document (last_docid): " << last_docid << std::endl;
+    std::cerr << "Total documents (last_docid): " << last_docid << std::endl;
 
     for (Xapian::docid i = 1; i <= last_docid; ++i) {
       try {
@@ -478,11 +488,11 @@ void XapianSearcher::dumpIndex() {
           std::cerr << "      - " << *tit << " (wdf: " << tit.get_wdf() << ")" << std::endl;
         }
       } catch (const Xapian::DocNotFoundError &e) {
-        std::cerr << "Lỗi khi doc get: " << e.get_msg() << std::endl;
+        std::cerr << "Error getting document: " << e.get_msg() << std::endl;
       }
     }
   } catch (const Xapian::Error &e) {
-    std::cerr << "Lỗi khi dump Index: " << e.get_msg() << std::endl;
+    std::cerr << "Error dumping index: " << e.get_msg() << std::endl;
   }
 }
 
@@ -548,8 +558,8 @@ XapianSearcher::searchABI(const std::vector<uint8_t> &abi_encoded_params) {
   // *** Hàm search gốc không nhận dbname. Cần điều chỉnh nếu logic
   // XapianSearcher ***
   // *** phụ thuộc vào dbname (ví dụ: mở DB khác nhau dựa trên tên) ***
-  std::cout << "Thông tin: Đang tìm kiếm trên DB (tên '" << decoded_args.dbname
-            << "' từ ABI chưa được dùng trực tiếp trong hàm search này)"
+  std::cout << "Info: Searching on DB (name '" << decoded_args.dbname
+            << "' from ABI not directly used in this search function)"
             << std::endl;
 
   return this->search(search_queries, search_combine_op, search_default_op,

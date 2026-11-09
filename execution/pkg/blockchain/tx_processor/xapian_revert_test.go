@@ -1557,6 +1557,9 @@ func TestXapianV1_MalformedAndTruncatedABIRegression(t *testing.T) {
 
 	newDocSel := crypto.Keccak256([]byte("newDocument(string,bytes)"))[:4]
 	setDataSel := crypto.Keccak256([]byte("setDataDocument(string,uint256,bytes)"))[:4]
+	addTermSel := crypto.Keccak256([]byte("addTermDocument(string,uint256,string)"))[:4]
+	querySearchSel := crypto.Keccak256([]byte("querySearch(string,(string,(string,string)[],string[],uint64,uint64,int64,bool,(uint256,string,string)[]))"))[:4]
+	getOrCreateDBSel := crypto.Keccak256([]byte("getOrCreateDB(string)"))[:4]
 
 	// 1. Truncated newDocument: 4 bytes selector + 64 bytes (offset 64 pointing to end of buffer, missing lengths/payloads)
 	// In vulnerable code, this triggered ASan / heap buffer overflow reading offset + 28.
@@ -1572,6 +1575,28 @@ func TestXapianV1_MalformedAndTruncatedABIRegression(t *testing.T) {
 	malformedSetDataHead[31] = 96  // dbname_offset = 96
 	malformedSetDataHead[95] = 128 // data_offset = 128
 	malformedSetData = append(malformedSetData, malformedSetDataHead...)
+
+	// 2b. Truncated addTermDocument: 4 bytes selector + truncated head (triggers decode exception)
+	// In vulnerable code, this triggered std::out_of_range -> on-chain abort / SIGABRT!
+	malformedAddTerm := append([]byte{}, addTermSel...)
+	malformedAddTerm = append(malformedAddTerm, make([]byte, 64)...)
+
+	// 2c. Truncated querySearch: 4 bytes selector + 10 bytes (too short to contain dbname offset)
+	// In vulnerable code, this threw std::runtime_error in getDbNameFromABI -> unhandled -> SIGABRT!
+	malformedQuerySearch := append([]byte{}, querySearchSel...)
+	malformedQuerySearch = append(malformedQuerySearch, make([]byte, 10)...)
+
+	// 2d. Truncated getOrCreateDB: 4 bytes selector + 32 bytes (data too short for parseABI, < 68)
+	malformedGetOrCreateDB := append([]byte{}, getOrCreateDBSel...)
+	malformedGetOrCreateDB = append(malformedGetOrCreateDB, make([]byte, 32)...)
+
+	// 2e. Malicious getOrCreateDB: exact 68 bytes with str_length=30 pointing past EOF
+	// In vulnerable code, parseABI checked `offset + str_length > data.size()` (32 + 30 <= 68) -> heap OOB read!
+	oobGetOrCreateDB := append([]byte{}, getOrCreateDBSel...)
+	oobGetOrCreateDBHead := make([]byte, 64)
+	oobGetOrCreateDBHead[31] = 32 // offset = 32
+	oobGetOrCreateDBHead[63] = 30 // str_length = 30 (but 0 payload bytes exist after byte 68)
+	oobGetOrCreateDB = append(oobGetOrCreateDB, oobGetOrCreateDBHead...)
 
 	// 3. Valid newDocument
 	validNewDoc := makeXapianV1NewDocData(t, "v1_sec_db", []byte("safe_initial_data"))
@@ -1590,8 +1615,36 @@ func TestXapianV1_MalformedAndTruncatedABIRegression(t *testing.T) {
 	txM2, err := transaction.NewTransactionFromEth(signedMalformed2)
 	require.NoError(t, err)
 
+	signedMalformed3, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 3, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: malformedAddTerm,
+	})
+	require.NoError(t, err)
+	txM3, err := transaction.NewTransactionFromEth(signedMalformed3)
+	require.NoError(t, err)
+
+	signedMalformed4, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 4, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: malformedQuerySearch,
+	})
+	require.NoError(t, err)
+	txM4, err := transaction.NewTransactionFromEth(signedMalformed4)
+	require.NoError(t, err)
+
+	signedMalformed5, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 5, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: malformedGetOrCreateDB,
+	})
+	require.NoError(t, err)
+	txM5, err := transaction.NewTransactionFromEth(signedMalformed5)
+	require.NoError(t, err)
+
+	signedMalformed6, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 6, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: oobGetOrCreateDB,
+	})
+	require.NoError(t, err)
+	txM6, err := transaction.NewTransactionFromEth(signedMalformed6)
+	require.NoError(t, err)
+
 	signedValid, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
-		Nonce: 3, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: validNewDoc,
+		Nonce: 7, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: validNewDoc,
 	})
 	require.NoError(t, err)
 	txValid, err := transaction.NewTransactionFromEth(signedValid)
@@ -1600,7 +1653,11 @@ func TestXapianV1_MalformedAndTruncatedABIRegression(t *testing.T) {
 	items := []grouptxns.Item{
 		{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(txM1), sharedContractV1), Tx: txM1},
 		{ID: 1, Array: append(grouptxns.BuildDeterministicGroupAddrs(txM2), sharedContractV1), Tx: txM2},
-		{ID: 2, Array: append(grouptxns.BuildDeterministicGroupAddrs(txValid), sharedContractV1), Tx: txValid},
+		{ID: 2, Array: append(grouptxns.BuildDeterministicGroupAddrs(txM3), sharedContractV1), Tx: txM3},
+		{ID: 3, Array: append(grouptxns.BuildDeterministicGroupAddrs(txM4), sharedContractV1), Tx: txM4},
+		{ID: 4, Array: append(grouptxns.BuildDeterministicGroupAddrs(txM5), sharedContractV1), Tx: txM5},
+		{ID: 5, Array: append(grouptxns.BuildDeterministicGroupAddrs(txM6), sharedContractV1), Tx: txM6},
+		{ID: 6, Array: append(grouptxns.BuildDeterministicGroupAddrs(txValid), sharedContractV1), Tx: txValid},
 	}
 
 	// Execution MUST NOT crash or panic when encountering malformed / truncated calldata
@@ -1609,14 +1666,18 @@ func TestXapianV1_MalformedAndTruncatedABIRegression(t *testing.T) {
 		blankHeader(), false, false, 999, leader, false,
 	)
 
-	require.Len(t, receipts, 3)
-	// Malformed calls should return error code (32 zero bytes)
+	require.Len(t, receipts, 7)
+	// Malformed calls should return error code (32 zero bytes) or ABI revert reason
 	require.Equal(t, make([]byte, 32), receipts[0].Return(), "Malformed newDocument must return 32 zero bytes error")
 	require.Equal(t, make([]byte, 32), receipts[1].Return(), "Malformed setDataDocument must return 32 zero bytes error")
+	require.Equal(t, utils.EncodeRevertReason("ABI: malformed input data"), receipts[2].Return(), "Malformed addTermDocument must return ABI revert reason, not crash!")
+	require.Equal(t, utils.EncodeRevertReason("ABI: malformed input data"), receipts[3].Return(), "Malformed querySearch must return ABI revert reason, not crash!")
+	require.Equal(t, make([]byte, 32), receipts[4].Return(), "Malformed getOrCreateDB must return 32 zero bytes error")
+	require.Equal(t, make([]byte, 32), receipts[5].Return(), "OOB getOrCreateDB must return 32 zero bytes error, not crash!")
 
 	// Valid call must succeed with non-zero docId
-	require.Equal(t, 0, int(receipts[2].Status()))
-	validDocId := new(big.Int).SetBytes(receipts[2].Return())
+	require.Equal(t, 0, int(receipts[6].Status()))
+	validDocId := new(big.Int).SetBytes(receipts[6].Return())
 	require.True(t, validDocId.Sign() > 0, "Valid newDocument must return non-zero docId")
 
 	mvm.CommitXapianTxBuffer(txValid.Hash().Bytes())
@@ -1637,7 +1698,7 @@ func TestXapianV1_ReservedDocIdTermCollisionPrevention(t *testing.T) {
 	)
 	seedContract(t, cs, sharedContractV1, big.NewInt(0), forwardCodeV1)
 
-	dbName := "test_db_q_collision"
+	dbName := "test_db_q\"collision"
 
 	// 1. Create Document A
 	newDocAData := makeXapianV1NewDocData(t, dbName, []byte("payload_of_doc_A"))

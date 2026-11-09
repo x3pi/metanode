@@ -143,7 +143,7 @@ std::shared_ptr<XapianManager> XapianManager::getInstance(const std::string &db_
     }
     catch (...)
     {
-        throw std::runtime_error("Lỗi không xác định khi tạo instance XapianManager cho " + db_path_str);
+        throw std::runtime_error("Unknown error creating XapianManager instance for " + db_path_str);
     }
 }
 
@@ -527,9 +527,9 @@ void XapianManager::dump_all_documents(uint256_t blockNumber) {
                  "=========\n"
               << std::endl;
   } catch (const Xapian::Error &e) {
-    std::cerr << "Lỗi Xapian khi dump database: " << e.get_msg() << std::endl;
+    std::cerr << "Xapian error dumping database: " << e.get_msg() << std::endl;
   } catch (const std::exception &e) {
-    std::cerr << "Lỗi khi dump database: " << e.what() << std::endl;
+    std::cerr << "Error dumping database: " << e.what() << std::endl;
   }
 }
 
