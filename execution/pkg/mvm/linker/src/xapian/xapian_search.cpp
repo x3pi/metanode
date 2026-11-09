@@ -237,26 +237,6 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
 
       try {
         Xapian::Document doc = i.get_document();
-        std::string val253_str = doc.get_value(253);
-        std::string val254_str = doc.get_value(254);
-
-        double val253 = -1.0;
-        double val254 = -1.0;
-
-        try {
-          if (!val253_str.empty()) {
-            val253 = Xapian::sortable_unserialise(val253_str);
-          }
-          if (!val254_str.empty()) {
-            val254 = Xapian::sortable_unserialise(val254_str);
-          }
-        } catch (const Xapian::Error &e) {
-          std::cerr << "Warning: unserialise slot 253/254 failed: " << e.get_msg()
-                    << std::endl;
-        }
-
-
-
         results.push_back({*i, i.get_rank(), i.get_percent(), doc.get_data()});
       } catch (const Xapian::DatabaseModifiedError &) {
         throw;

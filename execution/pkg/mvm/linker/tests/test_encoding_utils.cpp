@@ -10,6 +10,7 @@
 #include <doctest/doctest.h>
 
 #include "abi/encoding_utils.h"
+#include "abi_encode.hpp"
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -641,5 +642,196 @@ TEST_SUITE("roundtrip_multi") {
         // Read uint64 after string
         uint64_t val = readUint256(buf, afterString);
         CHECK(val == 7777);
+    }
+}
+
+// =====================================================================
+// abi_encode tests (encodeInt, encodeAddress, encodeArgument)
+// =====================================================================
+TEST_SUITE("abi_encode_int") {
+    TEST_CASE("empty and zero representations") {
+        auto resEmpty = encodeInt("");
+        REQUIRE(resEmpty.size() == 32);
+        for (auto b : resEmpty) CHECK(b == 0);
+
+        auto res0x = encodeInt("0x");
+        REQUIRE(res0x.size() == 32);
+        for (auto b : res0x) CHECK(b == 0);
+
+        auto res0 = encodeInt("0x0");
+        REQUIRE(res0.size() == 32);
+        for (auto b : res0) CHECK(b == 0);
+
+        auto res00 = encodeInt("0x00");
+        REQUIRE(res00.size() == 32);
+        for (auto b : res00) CHECK(b == 0);
+    }
+
+    TEST_CASE("small positive integer") {
+        auto res = encodeInt("0x01", false);
+        REQUIRE(res.size() == 32);
+        CHECK(res[31] == 0x01);
+        for (size_t i = 0; i < 31; ++i) CHECK(res[i] == 0);
+
+        auto resSigned = encodeInt("0x01", true);
+        REQUIRE(resSigned.size() == 32);
+        CHECK(resSigned[31] == 0x01);
+        for (size_t i = 0; i < 31; ++i) CHECK(resSigned[i] == 0);
+    }
+
+    TEST_CASE("unsigned integer with MSB set (isSigned = false) does NOT sign extend") {
+        // 0x80 = 128 (unsigned), MSB of byte is 1. For uint256, it must zero-pad to 32 bytes.
+        auto res = encodeInt("0x80", false);
+        REQUIRE(res.size() == 32);
+        CHECK(res[31] == 0x80);
+        for (size_t i = 0; i < 31; ++i) CHECK(res[i] == 0);
+
+        auto res16 = encodeInt("0x8000", false);
+        REQUIRE(res16.size() == 32);
+        CHECK(res16[30] == 0x80);
+        CHECK(res16[31] == 0x00);
+        for (size_t i = 0; i < 30; ++i) CHECK(res16[i] == 0);
+
+        auto resFF = encodeInt("0xFF", false);
+        REQUIRE(resFF.size() == 32);
+        CHECK(resFF[31] == 0xFF);
+        for (size_t i = 0; i < 31; ++i) CHECK(resFF[i] == 0);
+    }
+
+    TEST_CASE("signed integer with MSB set (isSigned = true) DOES sign extend with 0xFF") {
+        auto res = encodeInt("0x80", true);
+        REQUIRE(res.size() == 32);
+        CHECK(res[31] == 0x80);
+        for (size_t i = 0; i < 31; ++i) CHECK(res[i] == 0xFF);
+
+        auto res16 = encodeInt("0x8000", true);
+        REQUIRE(res16.size() == 32);
+        CHECK(res16[30] == 0x80);
+        CHECK(res16[31] == 0x00);
+        for (size_t i = 0; i < 30; ++i) CHECK(res16[i] == 0xFF);
+
+        auto resFF = encodeInt("0xFF", true);
+        REQUIRE(resFF.size() == 32);
+        for (size_t i = 0; i < 32; ++i) CHECK(resFF[i] == 0xFF);
+    }
+
+    TEST_CASE("oversized integer (> 32 bytes) with leading zeros") {
+        // 8 zero bytes + 32 bytes of 0xAA (total 40 bytes = 80 hex chars)
+        std::string hexStr = "0x" + std::string(16, '0') + std::string(64, 'a');
+        auto res = encodeInt(hexStr, false);
+        REQUIRE(res.size() == 32);
+        for (size_t i = 0; i < 32; ++i) {
+            CHECK(res[i] == 0xaa);
+        }
+    }
+
+    TEST_CASE("oversized integer (> 32 bytes) without leading zeros clamps without underflow") {
+        // 35 bytes of 0x55 (70 hex chars)
+        std::string hexStr = "0x" + std::string(70, '5');
+        auto res = encodeInt(hexStr, false);
+        REQUIRE(res.size() == 32);
+        for (size_t i = 0; i < 32; ++i) {
+            CHECK(res[i] == 0x55);
+        }
+    }
+
+    TEST_CASE("odd-length hex strings") {
+        auto res = encodeInt("0x1", false);
+        REQUIRE(res.size() == 32);
+        CHECK(res[31] == 0x01);
+        for (size_t i = 0; i < 31; ++i) CHECK(res[i] == 0);
+
+        auto res3 = encodeInt("0x123", false);
+        REQUIRE(res3.size() == 32);
+        CHECK(res3[30] == 0x01);
+        CHECK(res3[31] == 0x23);
+        for (size_t i = 0; i < 30; ++i) CHECK(res3[i] == 0);
+    }
+}
+
+TEST_SUITE("abi_encode_address") {
+    TEST_CASE("empty and zero representations") {
+        auto resEmpty = encodeAddress("");
+        REQUIRE(resEmpty.size() == 32);
+        for (auto b : resEmpty) CHECK(b == 0);
+
+        auto res0x = encodeAddress("0x");
+        REQUIRE(res0x.size() == 32);
+        for (auto b : res0x) CHECK(b == 0);
+    }
+
+    TEST_CASE("short address (< 20 bytes) right-aligned in 32-byte slot") {
+        auto res = encodeAddress("0x1234");
+        REQUIRE(res.size() == 32);
+        for (size_t i = 0; i < 30; ++i) CHECK(res[i] == 0);
+        CHECK(res[30] == 0x12);
+        CHECK(res[31] == 0x34);
+    }
+
+    TEST_CASE("standard 20-byte address right-aligned in 32-byte slot (bytes 12-31)") {
+        std::string addrHex = "0x0102030405060708090a0b0c0d0e0f1011121314";
+        auto res = encodeAddress(addrHex);
+        REQUIRE(res.size() == 32);
+        // First 12 bytes must be 0
+        for (size_t i = 0; i < 12; ++i) CHECK(res[i] == 0);
+        // Next 20 bytes must match the address
+        for (size_t i = 0; i < 20; ++i) {
+            CHECK(res[12 + i] == static_cast<uint8_t>(i + 1));
+        }
+    }
+
+    TEST_CASE("oversized address (> 20 bytes) safely takes last 20 bytes without OOB") {
+        // 32-byte EVM word with leading 12 zero bytes
+        std::string paddedAddrHex = "0x0000000000000000000000000102030405060708090a0b0c0d0e0f1011121314";
+        auto res = encodeAddress(paddedAddrHex);
+        REQUIRE(res.size() == 32);
+        for (size_t i = 0; i < 12; ++i) CHECK(res[i] == 0);
+        for (size_t i = 0; i < 20; ++i) {
+            CHECK(res[12 + i] == static_cast<uint8_t>(i + 1));
+        }
+
+        // 32-byte EVM word with non-zero prefix: should still safely truncate to last 20 bytes
+        std::string prefixAddrHex = "0xffffffffffffffffffffffff0102030405060708090a0b0c0d0e0f1011121314";
+        auto resPrefix = encodeAddress(prefixAddrHex);
+        REQUIRE(resPrefix.size() == 32);
+        for (size_t i = 0; i < 12; ++i) CHECK(resPrefix[i] == 0);
+        for (size_t i = 0; i < 20; ++i) {
+            CHECK(resPrefix[12 + i] == static_cast<uint8_t>(i + 1));
+        }
+    }
+}
+
+TEST_SUITE("abi_encode_argument") {
+    TEST_CASE("uint256 routes to unsigned encodeInt") {
+        nlohmann::json abi;
+        abi["type"] = "uint256";
+        auto res = encodeArgument(abi, "0x80");
+        REQUIRE(res.size() == 32);
+        CHECK(res[31] == 0x80);
+        // Must be zero-extended, NOT 0xFF
+        CHECK(res[0] == 0x00);
+        for (size_t i = 0; i < 31; ++i) CHECK(res[i] == 0);
+    }
+
+    TEST_CASE("int256 routes to signed encodeInt") {
+        nlohmann::json abi;
+        abi["type"] = "int256";
+        auto res = encodeArgument(abi, "0x80");
+        REQUIRE(res.size() == 32);
+        CHECK(res[31] == 0x80);
+        // Must be sign-extended with 0xFF
+        CHECK(res[0] == 0xFF);
+        for (size_t i = 0; i < 31; ++i) CHECK(res[i] == 0xFF);
+    }
+
+    TEST_CASE("address routes to encodeAddress") {
+        nlohmann::json abi;
+        abi["type"] = "address";
+        auto res = encodeArgument(abi, "0x0102030405060708090a0b0c0d0e0f1011121314");
+        REQUIRE(res.size() == 32);
+        for (size_t i = 0; i < 12; ++i) CHECK(res[i] == 0);
+        for (size_t i = 0; i < 20; ++i) {
+            CHECK(res[12 + i] == static_cast<uint8_t>(i + 1));
+        }
     }
 }

@@ -107,6 +107,10 @@ SolidityType getType(json element) {
     if (posBytes != string::npos) {
         return FixedBytesTy;
     }
+    size_t posUint = type.rfind("uint");
+    if (posUint != string::npos) {
+        return UintTy;
+    }
     size_t posInt = type.rfind("int");
     if (posInt != string::npos) {
         return IntTy;

@@ -36,18 +36,37 @@ std::string intToHex(int value) {
 
 
 vector<uint8_t> encodeInt(
-    string n
+    string n,
+    bool isSigned = false
 ) {
     // cout << "encodeInt: " << n << endl;
     vector<uint8_t> result(32, 0);
     vector<uint8_t> originBytes = hexStringToUint8Array(n);
-    int start = 32 - originBytes.size();
-    
-    uint8_t signExtension = (originBytes[0] & 0x80) ? 0xFF : 0x00;
-    std::fill(result.begin(), result.begin() + start, signExtension); // Điền mở rộng dấu
+    if (originBytes.empty()) {
+        return result;
+    }
 
+    if (originBytes.size() > 32) {
+        // Drop leading zeros if possible
+        size_t firstNonZero = 0;
+        while (firstNonZero < originBytes.size() && originBytes[firstNonZero] == 0) {
+            firstNonZero++;
+        }
+        if (originBytes.size() - firstNonZero <= 32) {
+            originBytes = vector<uint8_t>(originBytes.begin() + firstNonZero, originBytes.end());
+        } else {
+            // Truncate to the last 32 bytes
+            originBytes = vector<uint8_t>(originBytes.end() - 32, originBytes.end());
+        }
+    }
+
+    int start = 32 - static_cast<int>(originBytes.size());
+    if (start < 0) start = 0;
     
-    for(int i =0; i< originBytes.size(); i ++) {
+    uint8_t signExtension = (isSigned && (originBytes[0] & 0x80)) ? 0xFF : 0x00;
+    std::fill(result.begin(), result.begin() + start, signExtension);
+    
+    for(size_t i = 0; i < originBytes.size(); i++) {
         result[start + i] = originBytes[i];
     }
     return result;
@@ -175,8 +194,15 @@ vector<uint8_t> encodeAddress(
 ) {
     vector<uint8_t> result(32, 0);
     vector<uint8_t> originBytes = hexStringToUint8Array(a);
-    for (int i = 0; i < 20; i++) {
-        result[12+i] = originBytes[i];
+    if (originBytes.empty()) {
+        return result;
+    }
+    if (originBytes.size() > 20) {
+        originBytes = vector<uint8_t>(originBytes.end() - 20, originBytes.end());
+    }
+    size_t start = 32 - originBytes.size();
+    for (size_t i = 0; i < originBytes.size(); i++) {
+        result[start + i] = originBytes[i];
     }
     return result;
 }
@@ -320,9 +346,11 @@ vector<uint8_t> encodeArgument(json abi, string argument)  {
         return encodeBytesSlice(argument);
     }
 
-    if (t == IntTy || t== UintTy) {
-        
-        return encodeInt(argument);
+    if (t == UintTy) {
+        return encodeInt(argument, false);
+    }
+    if (t == IntTy) {
+        return encodeInt(argument, true);
     }
     
     if (t == FixedBytesTy) {
