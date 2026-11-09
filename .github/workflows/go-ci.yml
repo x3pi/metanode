@@ -95,5 +95,7 @@ jobs:
             exit 1
           fi
 
+      # Run packages sequentially (-p 1) on CI to avoid CPU starvation between heavy in-process
+      # multi-node Raft consensus simulations on 2-vCPU runners.
       - name: go test
-        run: go test -p 2 -count=1 ./...
+        run: go test -p 1 -count=1 ./...
