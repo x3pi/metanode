@@ -340,22 +340,14 @@ func (h *harness) addMember(id, addr string, voter bool) error {
 	return h.leaderDo(func(l *member) error { return l.node.AddMember(id, addr, voter) })
 }
 
-// submit hands a batch to the current leader, retrying like the tx forwarder does on false.
+// submit hands a batch to the specified member, retrying like the tx forwarder does on false.
 func (h *harness) submit(from *member, batch []byte) {
 	h.t.Helper()
-	wait := 15 * time.Second
-	if runtime.NumCPU() <= 2 || os.Getenv("CI") != "" {
-		wait = 45 * time.Second
-	}
+	wait := testTimeout(15 * time.Second)
 	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
-		if from != nil && from.node != nil && from.node.Submit(batch) {
+		if from.node.Submit(batch) {
 			return
-		}
-		for _, m := range h.m {
-			if m != from && m.node != nil && m.node.IsLeader() && m.node.Submit(batch) {
-				return
-			}
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
