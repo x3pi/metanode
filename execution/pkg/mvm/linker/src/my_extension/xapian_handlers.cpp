@@ -33,6 +33,7 @@ using std::vector;
 
 #define DBNAME_MAX_LEN 128
 #define TERM_MAX_LEN 64
+#define PREFIX_MAX_LEN 64
 
 namespace {
 inline void validateTermNotReserved(const std::string &term, const char *opName) {
@@ -48,6 +49,52 @@ inline void validatePrefixNotReserved(const std::string &prefix, const char *opN
     std::cerr << "[Error] FullDatabase (" << opName << "): prefix " << prefix
               << " collides with reserved system document identifier." << std::endl;
     MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: reserved prefix"));
+  }
+}
+
+inline void validatePrefix(const std::string &prefix, const char *opName) {
+  if (prefix.length() >= PREFIX_MAX_LEN) {
+    std::cerr << "[Error] FullDatabase (" << opName << "): prefix length ("
+              << prefix.length() << ") exceeds maximum of " << (PREFIX_MAX_LEN - 1)
+              << " characters." << std::endl;
+    MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: prefix too long"));
+  }
+  validatePrefixNotReserved(prefix, opName);
+}
+
+inline bool isReservedSlot(uint64_t slot) {
+  return slot == 253 || slot == 254;
+}
+
+inline void validateWriteSlot(uint64_t slot, const char *opName) {
+  if (slot > 0xFFFFFFFD || isReservedSlot(slot)) {
+    std::cerr << "[Error] FullDatabase (" << opName << "): slot " << slot
+              << " is out of range or reserved." << std::endl;
+    MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: invalid value slot"));
+  }
+}
+
+inline void validateReadSlot(uint64_t slot, const char *opName) {
+  if (slot > 0xFFFFFFFD) {
+    std::cerr << "[Error] FullDatabase (" << opName << "): slot " << slot
+              << " is out of range." << std::endl;
+    MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: invalid value slot"));
+  }
+}
+
+inline uint64_t parseSlotFromHex(const std::string &hexStr) {
+  std::string s = hexStr;
+  if (s.rfind("0x", 0) != 0 && s.rfind("0X", 0) != 0) {
+    s = "0x" + s;
+  }
+  try {
+    intx::uint256 val = intx::from_string<intx::uint256>(s);
+    if (val > intx::uint256(0xFFFFFFFD)) {
+      return 0xFFFFFFFFULL;
+    }
+    return static_cast<uint64_t>(val);
+  } catch (...) {
+    return 0xFFFFFFFFULL;
   }
 }
 } // namespace
@@ -549,7 +596,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       }
 
       std::string prefix = input_argument["prefix"].get<std::string>();
-      validatePrefixNotReserved(prefix, "XAPIAN_INDEX_TEXT_DOCUMENT");
+      validatePrefix(prefix, "XAPIAN_INDEX_TEXT_DOCUMENT");
 
       std::string hex_str = "0x" + input_argument["docId"].get<std::string>();
       intx::uint256 docId = intx::from_string<intx::uint256>(hex_str);
@@ -697,6 +744,9 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0);
       }
 
+      uint64_t slot = parseSlotFromHex(input_argument["slot"].get<std::string>());
+      validateWriteSlot(slot, "XAPIAN_ADD_VALUE_DOCUMENT");
+
       auto manager = XapianManager::getInstance(input_argument["dbname"],
                                                 address, isReset);
       if (manager) {
@@ -717,7 +767,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       }
       auto docInfo = manager->add_value(
           docIdStr,
-          hex_to_uint64(input_argument["slot"]), input_argument["data"],
+          static_cast<Xapian::valueno>(slot), input_argument["data"],
           input_argument["isSerialise"].get<bool>(), blockNumber, this->mvmId, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
@@ -874,6 +924,9 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0);
       }
 
+      uint64_t slot = parseSlotFromHex(input_argument["slot"].get<std::string>());
+      validateReadSlot(slot, "XAPIAN_GET_VALUE_DOCUMENT");
+
       auto manager = XapianManager::getInstance(input_argument["dbname"],
                                                 address, isReset);
       if (!manager) {
@@ -896,7 +949,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       }
       auto docInfo = manager->get_value(
           mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64),
-          hex_to_uint64(input_argument["slot"]),
+          static_cast<Xapian::valueno>(slot),
           input_argument["isSerialise"].get<bool>(), blockNumber, this->txHash, writerHash);
 
       json stringAbi = {{"type", "string"}};
@@ -1050,17 +1103,24 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         limit = 500;
       }
 
-      // Gán sort_by_value_slot với giá trị mặc định là 0
+      // Gán sort_by_value_slot với giá trị mặc định là nullopt
       std::optional<Xapian::valueno> sort_by_value_slot = std::nullopt;
       try {
-
         auto sort_slot =
             hex_to_int64(decodedData["options"]["sortByValueSlot"]);
 
         if (sort_slot.has_value()) {
-          if (sort_slot >= 0)
-            sort_by_value_slot = sort_slot;
+          if (*sort_slot >= 0) {
+            if (static_cast<uint64_t>(*sort_slot) > 0xFFFFFFFD) {
+              std::cerr << "[Error] FullDatabase (XAPIAN_V1_QUERY_SEARCH): sortByValueSlot "
+                        << *sort_slot << " is out of range." << std::endl;
+              MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: invalid value slot"));
+            }
+            sort_by_value_slot = static_cast<Xapian::valueno>(*sort_slot);
+          }
         }
+      } catch (const mvm::Exception &) {
+        throw;
       } catch (...) {
         // Giữ giá trị mặc định nếu có lỗi
       }
@@ -1071,6 +1131,19 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         sort_ascending = decodedData["options"]["sortAscending"].get<bool>();
       } catch (...) {
         // Giữ giá trị mặc định nếu có lỗi
+      }
+
+      if (decodedData["options"].find("rangeFilters") != decodedData["options"].end() && decodedData["options"]["rangeFilters"].is_array()) {
+        for (const auto &rf : decodedData["options"]["rangeFilters"]) {
+          if (rf.find("slot") != rf.end()) {
+            uint64_t rfSlot = parseSlotFromHex(rf["slot"].get<std::string>());
+            if (rfSlot > 0xFFFFFFFD) {
+              std::cerr << "[Error] FullDatabase (XAPIAN_QUERY_SEARCH): range filter slot "
+                        << rf["slot"].get<std::string>() << " is out of range." << std::endl;
+              MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: invalid value slot"));
+            }
+          }
+        }
       }
 
       std::vector<RangeFilter> range_filters =
@@ -1566,7 +1639,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       }
 
       std::string prefix = input_argument["prefix"].get<std::string>();
-      validatePrefixNotReserved(prefix, "XAPIAN_V1_INDEX_TEXT_DOCUMENT");
+      validatePrefix(prefix, "XAPIAN_V1_INDEX_TEXT_DOCUMENT");
 
       std::string hex_str = "0x" + input_argument["docId"].get<std::string>();
       intx::uint256 docId = intx::from_string<intx::uint256>(hex_str);
@@ -1690,18 +1763,21 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
 
       // *** Kiểm tra dbname ***
       if (dbname.empty()) {
-        std::cerr << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname "
+        std::cerr << "[Error] FullDatabase (XAPIAN_V1_ADD_VALUE_DOCUMENT): dbname "
                      "cannot be empty."
                   << std::endl;
         return mvm::Code(32, 0);
       }
       if (dbname.length() >= DBNAME_MAX_LEN) {
         std::cerr
-            << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname length ("
+            << "[Error] FullDatabase (XAPIAN_V1_ADD_VALUE_DOCUMENT): dbname length ("
             << dbname.length() << ") exceeds maximum of "
             << (DBNAME_MAX_LEN - 1) << " characters." << std::endl;
         return mvm::Code(32, 0);
       }
+
+      uint64_t slot = parseSlotFromHex(input_argument["slot"].get<std::string>());
+      validateWriteSlot(slot, "XAPIAN_V1_ADD_VALUE_DOCUMENT");
 
       auto manager = XapianManager::getInstance(input_argument["dbname"],
                                                 address, isReset);
@@ -1723,7 +1799,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       }
       auto docInfo = manager->add_value(
           docIdStr,
-          hex_to_uint64(input_argument["slot"]), input_argument["data"],
+          static_cast<Xapian::valueno>(slot), input_argument["data"],
           input_argument["isSerialise"].get<bool>(), blockNumber, this->mvmId, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
@@ -1876,18 +1952,21 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
 
       // *** Kiểm tra dbname ***
       if (dbname.empty()) {
-        std::cerr << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname "
+        std::cerr << "[Error] FullDatabase (XAPIAN_V1_GET_VALUE_DOCUMENT): dbname "
                      "cannot be empty."
                   << std::endl;
         return mvm::Code(32, 0);
       }
       if (dbname.length() >= DBNAME_MAX_LEN) {
         std::cerr
-            << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname length ("
+            << "[Error] FullDatabase (XAPIAN_V1_GET_VALUE_DOCUMENT): dbname length ("
             << dbname.length() << ") exceeds maximum of "
             << (DBNAME_MAX_LEN - 1) << " characters." << std::endl;
         return mvm::Code(32, 0);
       }
+
+      uint64_t slot = parseSlotFromHex(input_argument["slot"].get<std::string>());
+      validateReadSlot(slot, "XAPIAN_V1_GET_VALUE_DOCUMENT");
 
       auto manager = XapianManager::getInstance(input_argument["dbname"],
                                                 address, isReset);
@@ -1909,7 +1988,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       }
       auto docInfo = manager->get_value(
           mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64),
-          hex_to_uint64(input_argument["slot"]),
+          static_cast<Xapian::valueno>(slot),
           input_argument["isSerialise"].get<bool>(), blockNumber, this->txHash, writerHash);
 
       json stringAbi = {{"type", "string"}};
@@ -2063,17 +2142,24 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         limit = 500;
       }
 
-      // Gán sort_by_value_slot với giá trị mặc định là 0
+      // Gán sort_by_value_slot với giá trị mặc định là nullopt
       std::optional<Xapian::valueno> sort_by_value_slot = std::nullopt;
       try {
-
         auto sort_slot =
             hex_to_int64(decodedData["options"]["sortByValueSlot"]);
 
         if (sort_slot.has_value()) {
-          if (sort_slot >= 0)
-            sort_by_value_slot = sort_slot;
+          if (*sort_slot >= 0) {
+            if (static_cast<uint64_t>(*sort_slot) > 0xFFFFFFFD) {
+              std::cerr << "[Error] FullDatabase (XAPIAN_V1_QUERY_SEARCH): sortByValueSlot "
+                        << *sort_slot << " is out of range." << std::endl;
+              MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: invalid value slot"));
+            }
+            sort_by_value_slot = static_cast<Xapian::valueno>(*sort_slot);
+          }
         }
+      } catch (const mvm::Exception &) {
+        throw;
       } catch (...) {
         // Giữ giá trị mặc định nếu có lỗi
       }
@@ -2084,6 +2170,19 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         sort_ascending = decodedData["options"]["sortAscending"].get<bool>();
       } catch (...) {
         // Giữ giá trị mặc định nếu có lỗi
+      }
+
+      if (decodedData["options"].find("rangeFilters") != decodedData["options"].end() && decodedData["options"]["rangeFilters"].is_array()) {
+        for (const auto &rf : decodedData["options"]["rangeFilters"]) {
+          if (rf.find("slot") != rf.end()) {
+            uint64_t rfSlot = parseSlotFromHex(rf["slot"].get<std::string>());
+            if (rfSlot > 0xFFFFFFFD) {
+              std::cerr << "[Error] FullDatabase (XAPIAN_QUERY_SEARCH): range filter slot "
+                        << rf["slot"].get<std::string>() << " is out of range." << std::endl;
+              MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: invalid value slot"));
+            }
+          }
+        }
       }
 
       std::vector<RangeFilter> range_filters =

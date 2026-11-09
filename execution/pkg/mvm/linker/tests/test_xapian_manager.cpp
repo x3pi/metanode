@@ -951,5 +951,61 @@ TEST_SUITE("XapianManager") {
         std::string afterPrefixB = manager->get_data(docB, 2);
         CHECK(afterPrefixB == "payload_doc_B");
     }
+
+    TEST_CASE("Fix regression: Prefix length limit, slot range validation, and reserved slots") {
+        std::string dbName = "test_limits_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+        mvm::Address addr(888);
+        auto manager = XapianManager::getInstance(dbName, addr, true);
+        REQUIRE(manager != nullptr);
+
+        uint256_t tx1 = next_fake_tx_hash();
+        std::string doc1;
+        commit_write(tx1, [&]() {
+            doc1 = manager->new_document("payload_doc_limits", 1, nullptr, &tx1);
+            return doc1;
+        });
+        manager->commit_changes();
+        REQUIRE(!doc1.empty());
+
+        // 1. Prefix length validation in index_text
+        uint256_t txPrefix = next_fake_tx_hash();
+        // 1a. Prefix >= 64 characters must be rejected
+        std::string resPrefix300 = manager->index_text(doc1, "hello", 1, std::string(300, 'T'), 1, nullptr, &txPrefix);
+        CHECK(resPrefix300.empty());
+        std::string resPrefix64 = manager->index_text(doc1, "hello", 1, std::string(64, 'T'), 1, nullptr, &txPrefix);
+        CHECK(resPrefix64.empty());
+
+        // 1b. Prefix <= 63 characters must succeed
+        std::string resPrefix63 = manager->index_text(doc1, "hello", 1, std::string(63, 'T'), 1, nullptr, &txPrefix);
+        CHECK(!resPrefix63.empty());
+
+        // 2. Slot range and reserved slots validation in add_value
+        uint256_t txSlot = next_fake_tx_hash();
+        // 2a. Out of range slot (> 0xFFFFFFFD)
+        CHECK(manager->add_value(doc1, 0xFFFFFFFF, "val", false, 1, nullptr, &txSlot).empty());
+        CHECK(manager->add_value(doc1, 0xFFFFFFFE, "val", false, 1, nullptr, &txSlot).empty());
+
+        // 2b. Reserved system slots 253 (created_at) and 254 (deleted_at)
+        CHECK(manager->add_value(doc1, 253, "val", false, 1, nullptr, &txSlot).empty());
+        CHECK(manager->add_value(doc1, 254, "val", false, 1, nullptr, &txSlot).empty());
+
+        // 2c. Valid slots succeed
+        CHECK(!manager->add_value(doc1, 1, "valid_slot_1", false, 1, nullptr, &txSlot).empty());
+        CHECK(!manager->add_value(doc1, 252, "valid_slot_252", false, 1, nullptr, &txSlot).empty());
+        CHECK(!manager->add_value(doc1, 255, "valid_slot_255", false, 1, nullptr, &txSlot).empty());
+
+        // 3. Slot validation in get_value
+        CHECK(manager->get_value(doc1, 0xFFFFFFFF, false, 1, &txSlot).empty());
+        CHECK(manager->get_value(doc1, 1, false, 1, &txSlot) == "valid_slot_1");
+
+        // 4. Word length clamping by termgenerator (words > 180 chars do not trigger Xapian Term too long)
+        uint256_t txLongWord = next_fake_tx_hash();
+        commit_write(txLongWord, [&]() {
+            std::string veryLongWord(500, 'z');
+            std::string res = manager->index_text(doc1, veryLongWord, 1, "pref", 1, nullptr, &txLongWord);
+            return res;
+        });
+        CHECK_NOTHROW(manager->commit_changes());
+    }
 }
 

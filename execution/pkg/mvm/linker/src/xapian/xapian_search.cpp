@@ -258,9 +258,12 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
 
 
         results.push_back({*i, i.get_rank(), i.get_percent(), doc.get_data()});
+      } catch (const Xapian::DatabaseModifiedError &) {
+        throw;
       } catch (const Xapian::Error &e) {
         std::cerr << "Error retrieving document ID " << *i << ": " << e.get_msg()
                   << std::endl;
+        throw;
       }
     }
   } catch (const Xapian::DatabaseModifiedError &e) {

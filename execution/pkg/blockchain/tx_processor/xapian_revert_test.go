@@ -149,6 +149,22 @@ func makeXapianV1IndexTextData(t *testing.T, dbname string, docId *big.Int, text
 	return data
 }
 
+func makeXapianV1AddValueData(t *testing.T, dbname string, docId, slot *big.Int, val string, isSerialise bool) []byte {
+	a, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"addValueDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"},{"name":"slot","type":"uint256"},{"name":"data","type":"string"},{"name":"isSerialise","type":"bool"}],"outputs":[{"type":"uint256"}]}]`))
+	require.NoError(t, err)
+	data, err := a.Pack("addValueDocument", dbname, docId, slot, val, isSerialise)
+	require.NoError(t, err)
+	return data
+}
+
+func makeXapianV1GetValueData(t *testing.T, dbname string, docId, slot *big.Int, isSerialise bool) []byte {
+	a, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"getValueDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"},{"name":"slot","type":"uint256"},{"name":"isSerialise","type":"bool"}],"outputs":[{"type":"string"}]}]`))
+	require.NoError(t, err)
+	data, err := a.Pack("getValueDocument", dbname, docId, slot, isSerialise)
+	require.NoError(t, err)
+	return data
+}
+
 func callXapianV1Op(memOffset int, data []byte) []any {
 	return confJoin(
 		confMemWrite(memOffset, data),
@@ -1819,5 +1835,240 @@ func TestXapianV1_ReservedDocIdTermCollisionPrevention(t *testing.T) {
 	})
 	mvm.ClearXapianTxBuffer(txAttack.Hash().Bytes())
 	mvm.ClearXapianTxBuffer(txAttackPrefix.Hash().Bytes())
+	mvm.DestroyAllXapianInstances()
+}
+
+// TestXapianV1_LongPrefixRejectionRegression verifies that an indexTextForDocument call
+// with a prefix >= 64 characters (e.g. 300 characters 'T') is rejected early with
+// "Xapian: prefix too long" and does NOT reach Xapian disk commit to trigger SIGABRT.
+func TestXapianV1_LongPrefixRejectionRegression(t *testing.T) {
+	cs, key, _, leader := setupXapianChainEnv(t)
+	sharedContractV1 := common.HexToAddress("0x100000000000000000000000000000000000019B")
+	signer := eth.LatestSignerForChainID(big.NewInt(991))
+
+	// Forwarder contract to precompile 0x107
+	forwardCodeV1 := confScript(
+		"CALLDATASIZE", 0, 0, "CALLDATACOPY",
+		0, 0, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 100000, "CALL", "POP",
+		"RETURNDATASIZE", 0, 0, "RETURNDATACOPY",
+		"RETURNDATASIZE", 0, "RETURN",
+	)
+	seedContract(t, cs, sharedContractV1, big.NewInt(0), forwardCodeV1)
+
+	dbName := "v1_long_prefix_db"
+
+	// 1. Create initial document
+	newDocData := makeXapianV1NewDocData(t, dbName, []byte("hello world long prefix test"))
+	signedTx1, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 1, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: newDocData,
+	})
+	require.NoError(t, err)
+	tx1, err := transaction.NewTransactionFromEth(signedTx1)
+	require.NoError(t, err)
+
+	items1 := []grouptxns.Item{
+		{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(tx1), sharedContractV1), Tx: tx1},
+	}
+	_, receipts1, _, _ := ProcessTransactionsOptimistic(
+		context.Background(), cs, grouptxns.GroupTransactionsDeterministic(items1, cs.HasCode),
+		blankHeader(), false, false, 999, leader, false,
+	)
+	require.Len(t, receipts1, 1)
+	docId := new(big.Int).SetBytes(receipts1[0].Return())
+	require.True(t, docId.Sign() > 0, "DocID must be non-zero")
+
+	mvm.CommitXapianTxBufferBatch([][]byte{tx1.Hash().Bytes()})
+
+	// 2. Attack: prefix with 300 characters 'T'
+	longPrefix := strings.Repeat("T", 300)
+	attackData := makeXapianV1IndexTextData(t, dbName, docId, "hello", 1, longPrefix)
+	signedTxAttack, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 2, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: attackData,
+	})
+	require.NoError(t, err)
+	txAttack, err := transaction.NewTransactionFromEth(signedTxAttack)
+	require.NoError(t, err)
+
+	// 3. Normal legitimate prefix (e.g. "title:")
+	normalPrefix := "title"
+	legitData := makeXapianV1IndexTextData(t, dbName, docId, "hello", 1, normalPrefix)
+	signedTxLegit, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 3, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: legitData,
+	})
+	require.NoError(t, err)
+	txLegit, err := transaction.NewTransactionFromEth(signedTxLegit)
+	require.NoError(t, err)
+
+	items2 := []grouptxns.Item{
+		{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(txAttack), sharedContractV1), Tx: txAttack},
+		{ID: 1, Array: append(grouptxns.BuildDeterministicGroupAddrs(txLegit), sharedContractV1), Tx: txLegit},
+	}
+	_, receipts2, _, _ := ProcessTransactionsOptimistic(
+		context.Background(), cs, grouptxns.GroupTransactionsDeterministic(items2, cs.HasCode),
+		blankHeader(), false, false, 999, leader, false,
+	)
+	require.Len(t, receipts2, 2)
+
+	// txAttack must revert with "Xapian: prefix too long"
+	expectedRevert := utils.EncodeRevertReason("Xapian: prefix too long")
+	require.Equal(t, expectedRevert, receipts2[0].Return(), "Long prefix (>63 chars) must revert with 'Xapian: prefix too long'")
+
+	// txLegit must succeed
+	legitRet := new(big.Int).SetBytes(receipts2[1].Return())
+	require.True(t, legitRet.Sign() > 0, "Normal prefix index_text must succeed")
+
+	// Commit must not abort
+	mvm.CommitXapianTxBufferBatch([][]byte{txLegit.Hash().Bytes()})
+	mvm.ClearXapianTxBuffer(txAttack.Hash().Bytes())
+	mvm.DestroyAllXapianInstances()
+}
+
+// TestXapianV1_SlotRangeAndReservedSlotProtection verifies that:
+// 1. Large slot 4294967297 (0x100000001) is rejected and does not alias to slot 1.
+// 2. Reserved system slots 253 (created_at) and 254 (deleted_at) cannot be written to.
+// 3. Legitimate slot 1 can be written and read back correctly.
+func TestXapianV1_SlotRangeAndReservedSlotProtection(t *testing.T) {
+	cs, key, _, leader := setupXapianChainEnv(t)
+	sharedContractV1 := common.HexToAddress("0x100000000000000000000000000000000000019C")
+	signer := eth.LatestSignerForChainID(big.NewInt(991))
+
+	// Forwarder contract to precompile 0x107
+	forwardCodeV1 := confScript(
+		"CALLDATASIZE", 0, 0, "CALLDATACOPY",
+		0, 0, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 100000, "CALL", "POP",
+		"RETURNDATASIZE", 0, 0, "RETURNDATACOPY",
+		"RETURNDATASIZE", 0, "RETURN",
+	)
+	seedContract(t, cs, sharedContractV1, big.NewInt(0), forwardCodeV1)
+
+	dbName := "v1_slot_test_db"
+
+	// 1. Create initial document
+	newDocData := makeXapianV1NewDocData(t, dbName, []byte("slot protection test document"))
+	signedTx1, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 1, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: newDocData,
+	})
+	require.NoError(t, err)
+	tx1, err := transaction.NewTransactionFromEth(signedTx1)
+	require.NoError(t, err)
+
+	items1 := []grouptxns.Item{
+		{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(tx1), sharedContractV1), Tx: tx1},
+	}
+	_, receipts1, _, _ := ProcessTransactionsOptimistic(
+		context.Background(), cs, grouptxns.GroupTransactionsDeterministic(items1, cs.HasCode),
+		blankHeader(), false, false, 999, leader, false,
+	)
+	require.Len(t, receipts1, 1)
+	docId := new(big.Int).SetBytes(receipts1[0].Return())
+	require.True(t, docId.Sign() > 0, "DocID must be non-zero")
+	mvm.CommitXapianTxBufferBatch([][]byte{tx1.Hash().Bytes()})
+
+	// 2a. Add value with out-of-range slot: 4294967297 (0x100000001)
+	largeSlot := new(big.Int).SetUint64(4294967297)
+	txLargeSlotData := makeXapianV1AddValueData(t, dbName, docId, largeSlot, "aliased_value", false)
+	signedTxLargeSlot, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 2, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: txLargeSlotData,
+	})
+	require.NoError(t, err)
+	txLargeSlot, err := transaction.NewTransactionFromEth(signedTxLargeSlot)
+	require.NoError(t, err)
+
+	// 2b. Add value with reserved slot 254 (deleted_at)
+	reservedSlot254 := big.NewInt(254)
+	txReserved254Data := makeXapianV1AddValueData(t, dbName, docId, reservedSlot254, "tampered_deleted_at", false)
+	signedTxReserved254, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 3, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: txReserved254Data,
+	})
+	require.NoError(t, err)
+	txReserved254, err := transaction.NewTransactionFromEth(signedTxReserved254)
+	require.NoError(t, err)
+
+	// 2c. Add value with reserved slot 253 (created_at)
+	reservedSlot253 := big.NewInt(253)
+	txReserved253Data := makeXapianV1AddValueData(t, dbName, docId, reservedSlot253, "tampered_created_at", false)
+	signedTxReserved253, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 4, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: txReserved253Data,
+	})
+	require.NoError(t, err)
+	txReserved253, err := transaction.NewTransactionFromEth(signedTxReserved253)
+	require.NoError(t, err)
+
+	// 2d. Get value with out-of-range slot: 4294967297
+	txGetLargeSlotData := makeXapianV1GetValueData(t, dbName, docId, largeSlot, false)
+	signedTxGetLargeSlot, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 5, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: txGetLargeSlotData,
+	})
+	require.NoError(t, err)
+	txGetLargeSlot, err := transaction.NewTransactionFromEth(signedTxGetLargeSlot)
+	require.NoError(t, err)
+
+	// 2e. Legitimate add value to slot 1
+	validSlot1 := big.NewInt(1)
+	txValidAddData := makeXapianV1AddValueData(t, dbName, docId, validSlot1, "legit_slot_1_data", false)
+	signedTxValidAdd, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 6, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: txValidAddData,
+	})
+	require.NoError(t, err)
+	txValidAdd, err := transaction.NewTransactionFromEth(signedTxValidAdd)
+	require.NoError(t, err)
+
+	// 2f. Legitimate get value from slot 1
+	txValidGetData := makeXapianV1GetValueData(t, dbName, docId, validSlot1, false)
+	signedTxValidGet, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 7, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: txValidGetData,
+	})
+	require.NoError(t, err)
+	txValidGet, err := transaction.NewTransactionFromEth(signedTxValidGet)
+	require.NoError(t, err)
+
+	items2 := []grouptxns.Item{
+		{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(txLargeSlot), sharedContractV1), Tx: txLargeSlot},
+		{ID: 1, Array: append(grouptxns.BuildDeterministicGroupAddrs(txReserved254), sharedContractV1), Tx: txReserved254},
+		{ID: 2, Array: append(grouptxns.BuildDeterministicGroupAddrs(txReserved253), sharedContractV1), Tx: txReserved253},
+		{ID: 3, Array: append(grouptxns.BuildDeterministicGroupAddrs(txGetLargeSlot), sharedContractV1), Tx: txGetLargeSlot},
+		{ID: 4, Array: append(grouptxns.BuildDeterministicGroupAddrs(txValidAdd), sharedContractV1), Tx: txValidAdd},
+		{ID: 5, Array: append(grouptxns.BuildDeterministicGroupAddrs(txValidGet), sharedContractV1), Tx: txValidGet},
+	}
+
+	_, receipts2, _, _ := ProcessTransactionsOptimistic(
+		context.Background(), cs, grouptxns.GroupTransactionsDeterministic(items2, cs.HasCode),
+		blankHeader(), false, false, 999, leader, false,
+	)
+	require.Len(t, receipts2, 6)
+
+	expectedSlotRevert := utils.EncodeRevertReason("Xapian: invalid value slot")
+
+	// 2a must revert with "Xapian: invalid value slot"
+	require.Equal(t, expectedSlotRevert, receipts2[0].Return(), "Add value with slot 4294967297 must revert with 'Xapian: invalid value slot'")
+
+	// 2b must revert with "Xapian: invalid value slot"
+	require.Equal(t, expectedSlotRevert, receipts2[1].Return(), "Add value with reserved slot 254 must revert with 'Xapian: invalid value slot'")
+
+	// 2c must revert with "Xapian: invalid value slot"
+	require.Equal(t, expectedSlotRevert, receipts2[2].Return(), "Add value with reserved slot 253 must revert with 'Xapian: invalid value slot'")
+
+	// 2d must revert with "Xapian: invalid value slot"
+	require.Equal(t, expectedSlotRevert, receipts2[3].Return(), "Get value with slot 4294967297 must revert with 'Xapian: invalid value slot'")
+
+	// 2e must succeed
+	validAddRet := new(big.Int).SetBytes(receipts2[4].Return())
+	require.True(t, validAddRet.Sign() > 0, "Legitimate add_value to slot 1 must succeed")
+
+	// 2f must return "legit_slot_1_data"
+	getValueAbi, err := abi.JSON(strings.NewReader(`[{"type":"function","name":"getValueDocument","inputs":[{"name":"dbname","type":"string"},{"name":"docId","type":"uint256"},{"name":"slot","type":"uint256"},{"name":"isSerialise","type":"bool"}],"outputs":[{"type":"string"}]}]`))
+	require.NoError(t, err)
+	var returnedVal string
+	err = getValueAbi.UnpackIntoInterface(&returnedVal, "getValueDocument", receipts2[5].Return())
+	require.NoError(t, err)
+	require.Equal(t, "legit_slot_1_data", returnedVal, "Slot 1 must contain 'legit_slot_1_data'")
+
+	mvm.CommitXapianTxBufferBatch([][]byte{
+		txValidAdd.Hash().Bytes(),
+	})
+	mvm.ClearXapianTxBuffer(txLargeSlot.Hash().Bytes())
+	mvm.ClearXapianTxBuffer(txReserved254.Hash().Bytes())
+	mvm.ClearXapianTxBuffer(txReserved253.Hash().Bytes())
+	mvm.ClearXapianTxBuffer(txGetLargeSlot.Hash().Bytes())
 	mvm.DestroyAllXapianInstances()
 }
