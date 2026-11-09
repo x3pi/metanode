@@ -143,7 +143,7 @@ std::shared_ptr<XapianManager> XapianManager::getInstance(const std::string &db_
     }
     catch (...)
     {
-        throw std::runtime_error("Lỗi không xác định khi tạo instance XapianManager cho " + db_path_str);
+        throw std::runtime_error("Unknown error creating XapianManager instance for " + db_path_str);
     }
 }
 
@@ -527,9 +527,9 @@ void XapianManager::dump_all_documents(uint256_t blockNumber) {
                  "=========\n"
               << std::endl;
   } catch (const Xapian::Error &e) {
-    std::cerr << "Lỗi Xapian khi dump database: " << e.get_msg() << std::endl;
+    std::cerr << "Xapian error dumping database: " << e.get_msg() << std::endl;
   } catch (const std::exception &e) {
-    std::cerr << "Lỗi khi dump database: " << e.what() << std::endl;
+    std::cerr << "Error dumping database: " << e.what() << std::endl;
   }
 }
 
@@ -587,6 +587,10 @@ bool XapianManager::delete_document(const std::string& virtualDocId, uint256_t b
 
 // Thêm một value vào một slot của document, có xử lý versioning theo blockNumber
 std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::valueno slot, const std::string &value, bool isSerialise, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
+    if (slot > 0xFFFFFFFD || slot == 253 || slot == 254) {
+        std::cerr << "[ERROR] XapianManager::add_value: Slot " << slot << " is out of range or reserved." << std::endl;
+        return "";
+    }
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
         XapianLog::AddValueData logData{};
@@ -606,6 +610,10 @@ std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::va
 
 // Thêm một term vào document, có xử lý versioning theo blockNumber
 std::string XapianManager::add_term(const std::string& virtualDocId, const std::string &term, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
+    if (isReservedSystemDocIdTerm(term)) {
+        std::cerr << "[ERROR] XapianManager::add_term: Term collides with reserved system document identifier: " << term << std::endl;
+        return "";
+    }
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
         XapianLog::AddTermData logData;
@@ -622,6 +630,14 @@ std::string XapianManager::add_term(const std::string& virtualDocId, const std::
 
 // Index một đoạn text vào document (thêm các term được tạo ra từ text)
 std::string XapianManager::index_text(const std::string& virtualDocId, const std::string &text_to_index, Xapian::termcount wdf_inc, const std::string prefix, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
+    if (prefix.length() >= 64) {
+        std::cerr << "[ERROR] XapianManager::index_text: Prefix length exceeds maximum: " << prefix.length() << std::endl;
+        return "";
+    }
+    if (isReservedSystemPrefix(prefix)) {
+        std::cerr << "[ERROR] XapianManager::index_text: Prefix collides with reserved system document identifier: " << prefix << std::endl;
+        return "";
+    }
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
         XapianLog::IndexTextData logData;
@@ -793,8 +809,27 @@ Xapian::Document XapianManager::get_overlayed_document(const std::string& virtua
                     Xapian::TermGenerator termgenerator;
                     termgenerator.set_stemmer(Xapian::Stem("english"));
                     termgenerator.set_stemming_strategy(Xapian::TermGenerator::STEM_SOME);
+                    termgenerator.set_max_word_length(180);
                     termgenerator.set_document(doc);
                     termgenerator.index_text(data.text, data.wdf_inc, data.prefix);
+
+                    // Sanitize generated terms: prevent term collision with internal docid of another document
+                    std::string own_clean_id = nid;
+                    if (own_clean_id.length() >= 2 && own_clean_id.substr(0, 2) == "0x") {
+                        own_clean_id = own_clean_id.substr(2);
+                    }
+                    std::string own_system_term = "Q" + own_clean_id;
+                    std::vector<std::string> colliding_terms;
+                    for (auto it = doc.termlist_begin(); it != doc.termlist_end(); ++it) {
+                        std::string t = *it;
+                        if (isReservedSystemDocIdTerm(t) && t != own_system_term) {
+                            colliding_terms.push_back(t);
+                        }
+                    }
+                    for (const auto& t : colliding_terms) {
+                        std::cerr << "[ERROR] XapianManager: removing colliding reserved system docid term: " << t << " from doc " << nid << std::endl;
+                        doc.remove_term(t);
+                    }
                 }
             }
         }
@@ -850,6 +885,10 @@ std::string XapianManager::get_data(const std::string& virtualDocId, uint256_t b
 // Lấy giá trị từ một slot của document tại một block number, có tùy chọn
 // unserialize
 std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::valueno slot, bool isSerialise, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
+    if (slot > 0xFFFFFFFD) {
+        std::cerr << "[ERROR] XapianManager::get_value: Slot " << slot << " is out of range." << std::endl;
+        return "";
+    }
     ScopedSimpleReadDb scopedDb(this);
     if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_value");
     std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
@@ -1586,8 +1625,27 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
                 Xapian::TermGenerator termgenerator;
                 termgenerator.set_stemmer(Xapian::Stem("english"));
                 termgenerator.set_stemming_strategy(Xapian::TermGenerator::STEM_SOME);
+                termgenerator.set_max_word_length(180);
                 termgenerator.set_document(doc);
                 termgenerator.index_text(data.text, data.wdf_inc, data.prefix);
+
+                // Sanitize generated terms: prevent term collision with internal docid of another document
+                std::string own_clean_id = nid;
+                if (own_clean_id.length() >= 2 && own_clean_id.substr(0, 2) == "0x") {
+                    own_clean_id = own_clean_id.substr(2);
+                }
+                std::string own_system_term = "Q" + own_clean_id;
+                std::vector<std::string> colliding_terms;
+                for (auto it = doc.termlist_begin(); it != doc.termlist_end(); ++it) {
+                    std::string t = *it;
+                    if (isReservedSystemDocIdTerm(t) && t != own_system_term) {
+                        colliding_terms.push_back(t);
+                    }
+                }
+                for (const auto& t : colliding_terms) {
+                    std::cerr << "[ERROR] XapianManager: removing colliding reserved system docid term: " << t << " from doc " << nid << std::endl;
+                    doc.remove_term(t);
+                }
             }
         }
 
