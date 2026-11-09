@@ -87,11 +87,16 @@ func assertAllExecuted(t *testing.T, m *member, first, n uint64) {
 	}
 }
 
+func testTimeout(d time.Duration) time.Duration {
+	if runtime.NumCPU() <= 2 || os.Getenv("CI") != "" {
+		return d * 3
+	}
+	return d
+}
+
 func waitFor(t *testing.T, what string, within time.Duration, cond func() bool) {
 	t.Helper()
-	if runtime.NumCPU() <= 2 || os.Getenv("CI") != "" {
-		within *= 3
-	}
+	within = testTimeout(within)
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
 		if cond() {
@@ -155,7 +160,7 @@ func TestC4_TransferLeaderUnderLoad(t *testing.T) {
 	var steps []string
 	var err error
 	var old, target *member
-	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+	for deadline := time.Now().Add(testTimeout(20 * time.Second)); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
 		old = h.leader()
 		target = nil
 		for _, m := range h.m {
@@ -317,22 +322,19 @@ func TestC4_AddReplicaWithCopiedState(t *testing.T) {
 	}
 	h.waitBlocks(50, h.m...)
 	h.assertIdentical(h.m...)
-	voter := false
 	// Promotion to voter is a separate, asynchronous Raft config change: poll instead of reading it once.
-	for deadline := time.Now().Add(20 * time.Second); !voter && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+	waitFor(t, "n3 promotion to voter", 20*time.Second, func() bool {
 		for _, s := range l.node.Status().Servers {
 			if s.ID == "n3" && s.Voter {
-				voter = true
+				return true
 			}
 		}
-	}
-	if !voter {
-		t.Fatal("n3 was not promoted to voter")
-	}
+		return false
+	})
 	// it counts: with two of the four voters gone... a 4-voter cluster needs 3; stop one old replica, still fine
 	h.stop(src)
 	for i := 50; i < 60; i++ {
-		h.submit(l, testBatch(t, uint64(i)))
+		h.submit(h.leader(), testBatch(t, uint64(i)))
 	}
 	h.waitBlocks(60, l, n3)
 }
@@ -385,7 +387,7 @@ func TestC4_EmptyReplicaRefusedWhenLogCompacted(t *testing.T) {
 	}
 	waitFor(t, "the empty replica to stop itself", 15*time.Second, func() bool { return n3.node.Failed() })
 	for i := 40; i < 50; i++ {
-		h.submit(l, testBatch(t, uint64(i)))
+		h.submit(h.leader(), testBatch(t, uint64(i)))
 	}
 	h.waitBlocks(50, h.m[:3]...)
 	h.assertIdentical(h.m[:3]...)

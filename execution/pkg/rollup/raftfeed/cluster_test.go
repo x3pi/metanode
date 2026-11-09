@@ -349,8 +349,13 @@ func (h *harness) submit(from *member, batch []byte) {
 	}
 	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
-		if from.node.Submit(batch) {
+		if from != nil && from.node != nil && from.node.Submit(batch) {
 			return
+		}
+		for _, m := range h.m {
+			if m != from && m.node != nil && m.node.IsLeader() && m.node.Submit(batch) {
+				return
+			}
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -725,7 +730,7 @@ func TestCluster_LeaderWithoutQuorumExecutesNothing(t *testing.T) {
 		}
 	}
 	h.connect()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(testTimeout(20 * time.Second))
 	for time.Now().Before(deadline) {
 		if d, _ := distinctNonces(t, l); d == 10 {
 			break
@@ -912,13 +917,9 @@ func TestCluster_FailedReplicaStopsWhileQuorumContinues(t *testing.T) {
 	h.submit(l, testBatch(t, 0))
 	h.waitBlocks(1, h.m...)
 	victim.node.fsm.fatal(fmt.Errorf("injected divergence"))
-	deadline := time.Now().Add(5 * time.Second)
-	for !victim.node.Failed() && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !victim.node.Failed() || victim.node.Ready() {
-		t.Fatal("victim did not stop accepting work")
-	}
+	waitFor(t, "victim to stop accepting work", 10*time.Second, func() bool {
+		return victim.node.Failed() && !victim.node.Ready()
+	})
 	for i := 1; i < 6; i++ {
 		h.submit(l, testBatch(t, uint64(i)))
 	}
@@ -1028,25 +1029,17 @@ func TestStartCluster_SingleNodeEndToEnd(t *testing.T) {
 	if _, err := StartCluster(ClusterConfig{Raft: rc, Sink: sink, Durable: d.last.Load}); err == nil {
 		t.Fatal("a second cluster node was started in the same process")
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for !Ready() && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !Ready() {
-		t.Fatal("node never became ready")
-	}
+	waitFor(t, "singleton node to become ready", 10*time.Second, func() bool {
+		return Ready()
+	})
 	for i := 0; i < 5; i++ {
 		for !Submit(testBatch(t, uint64(i))) {
 			time.Sleep(2 * time.Millisecond)
 		}
 	}
-	dl := time.Now().Add(10 * time.Second)
-	for len(d.blocks()) < 5 && time.Now().Before(dl) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if got := len(d.blocks()); got != 5 {
-		t.Fatalf("%d blocks, want 5", got)
-	}
+	waitFor(t, "singleton node to receive 5 blocks", 10*time.Second, func() bool {
+		return len(d.blocks()) >= 5
+	})
 	n.Stop()
 	if Ready() || Submit(testBatch(t, 9)) {
 		t.Fatal("Ready/Submit must be false after Stop")
@@ -1189,13 +1182,9 @@ func TestCluster_ReplicaWithDifferentStateStopsAndOthersContinue(t *testing.T) {
 	for i := 40; i < 60; i++ { // new blocks => new checkpoints, which the victim answers with a wrong hash
 		h.submit(l, testBatch(t, uint64(i)))
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for !victim.node.Failed() && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	if !victim.node.Failed() || victim.node.Mismatches() == 0 {
-		t.Fatal("the replica with a different state was not stopped")
-	}
+	waitFor(t, "victim replica with different state to stop", 10*time.Second, func() bool {
+		return victim.node.Failed() && victim.node.Mismatches() > 0
+	})
 	h.fatalMu.Lock()
 	_, reported := h.fatals[victim.id]
 	h.fatalMu.Unlock()
