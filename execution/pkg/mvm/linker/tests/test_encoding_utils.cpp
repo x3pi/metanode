@@ -540,6 +540,36 @@ TEST_SUITE("integer_overflow_bounds_checks") {
         }
         CHECK_THROWS_AS(readStringDynamic(buf, 0), std::out_of_range);
     }
+
+    TEST_CASE("readStringDynamic: offset points to or past end of buffer throws (xapian V1 ABI regression)") {
+        // Scenario 1: buffer has 64 bytes (enough for 2 offset slots in newDocument),
+        // but offset points to byte 64 (past end of buffer, so no 32-byte length word exists).
+        // In vulnerable code, accessing buf[offset + 28] caused out-of-bounds heap read.
+        std::vector<uint8_t> buf(64, 0);
+        buf[31] = 64; // offset_ptr 0 points to offset 64
+        CHECK_THROWS_AS(readStringDynamic(buf, 0), std::out_of_range);
+
+        // Scenario 2: offset points way past end of buffer
+        buf[31] = 200;
+        CHECK_THROWS_AS(readStringDynamic(buf, 0), std::out_of_range);
+    }
+
+    TEST_CASE("readStringDynamic: length word present but payload data truncated throws") {
+        // Buffer has 96 bytes: slot 0 (offset=64), slot 1 (other data), slot 2 (length=100).
+        // Payload has only 0 bytes remaining, but length claims 100.
+        std::vector<uint8_t> buf(96, 0);
+        buf[31] = 64;  // offset = 64
+        buf[95] = 100; // length = 100
+        CHECK_THROWS_AS(readStringDynamic(buf, 0), std::out_of_range);
+    }
+
+    TEST_CASE("readStringDynamic: valid dynamic string roundtrip") {
+        std::vector<uint8_t> buf;
+        appendUint256(buf, 32); // offset at slot 0 points to slot 1 (32)
+        appendString(buf, "secure_xapian_document");
+        std::string s = readStringDynamic(buf, 0);
+        CHECK(s == "secure_xapian_document");
+    }
 }
 
 // =====================================================================

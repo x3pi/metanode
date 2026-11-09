@@ -1217,9 +1217,9 @@ func TestXapianV1_StaticCallWriteProtection(t *testing.T) {
 // Validates FullDatabaseV1 (0x107) with native binary bytes.
 // - Tx 0: creates doc with []byte("v1_old_bytes") on disk and commits.
 // - In Block 2:
-//   * Tx A: sets data to []byte("v1_new_bytes") via setDataDocument on 0x107.
-//   * Tx B: adds term "v1_tag_chain" via addTermDocument on 0x107.
-//   * Tx C: reads data via getDataDocument on 0x107.
+//   - Tx A: sets data to []byte("v1_new_bytes") via setDataDocument on 0x107.
+//   - Tx B: adds term "v1_tag_chain" via addTermDocument on 0x107.
+//   - Tx C: reads data via getDataDocument on 0x107.
 //
 // In-Memory Version Chaining ensures Tx C observes []byte("v1_new_bytes").
 // After committing Block 2, disk persistence must contain both "v1_new_bytes" and "v1_tag_chain".
@@ -1529,3 +1529,83 @@ func TestXapianV1_MultiWriterWithInterleavedRevert(t *testing.T) {
 	mvm.DestroyAllXapianInstances()
 }
 
+func TestXapianV1_MalformedAndTruncatedABIRegression(t *testing.T) {
+	cs, key, _, leader := setupXapianChainEnv(t)
+	sharedContractV1 := common.HexToAddress("0x1000000000000000000000000000000000000199")
+	signer := eth.LatestSignerForChainID(big.NewInt(991))
+
+	// Forwarder contract to precompile 0x107
+	forwardCodeV1 := confScript(
+		"CALLDATASIZE", 0, 0, "CALLDATACOPY",
+		512, 1024, "CALLDATASIZE", 0, 0, common.HexToAddress("0x107"), 100000, "CALL", "POP",
+		"RETURNDATASIZE", 1024, "RETURN",
+	)
+	seedContract(t, cs, sharedContractV1, big.NewInt(0), forwardCodeV1)
+
+	newDocSel := crypto.Keccak256([]byte("newDocument(string,bytes)"))[:4]
+	setDataSel := crypto.Keccak256([]byte("setDataDocument(string,uint256,bytes)"))[:4]
+
+	// 1. Truncated newDocument: 4 bytes selector + 64 bytes (offset 64 pointing to end of buffer, missing lengths/payloads)
+	// In vulnerable code, this triggered ASan / heap buffer overflow reading offset + 28.
+	malformedNewDoc := append([]byte{}, newDocSel...)
+	malformedNewDocHead := make([]byte, 64)
+	malformedNewDocHead[31] = 64 // dbname_offset = 64
+	malformedNewDocHead[63] = 96 // data_offset = 96
+	malformedNewDoc = append(malformedNewDoc, malformedNewDocHead...)
+
+	// 2. Truncated setDataDocument: 4 bytes selector + 96 bytes (offset 96 pointing to end of buffer)
+	malformedSetData := append([]byte{}, setDataSel...)
+	malformedSetDataHead := make([]byte, 96)
+	malformedSetDataHead[31] = 96  // dbname_offset = 96
+	malformedSetDataHead[95] = 128 // data_offset = 128
+	malformedSetData = append(malformedSetData, malformedSetDataHead...)
+
+	// 3. Valid newDocument
+	validNewDoc := makeXapianV1NewDocData(t, "v1_sec_db", []byte("safe_initial_data"))
+
+	signedMalformed1, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 1, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: malformedNewDoc,
+	})
+	require.NoError(t, err)
+	txM1, err := transaction.NewTransactionFromEth(signedMalformed1)
+	require.NoError(t, err)
+
+	signedMalformed2, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 2, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: malformedSetData,
+	})
+	require.NoError(t, err)
+	txM2, err := transaction.NewTransactionFromEth(signedMalformed2)
+	require.NoError(t, err)
+
+	signedValid, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+		Nonce: 3, To: &sharedContractV1, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0), Data: validNewDoc,
+	})
+	require.NoError(t, err)
+	txValid, err := transaction.NewTransactionFromEth(signedValid)
+	require.NoError(t, err)
+
+	items := []grouptxns.Item{
+		{ID: 0, Array: append(grouptxns.BuildDeterministicGroupAddrs(txM1), sharedContractV1), Tx: txM1},
+		{ID: 1, Array: append(grouptxns.BuildDeterministicGroupAddrs(txM2), sharedContractV1), Tx: txM2},
+		{ID: 2, Array: append(grouptxns.BuildDeterministicGroupAddrs(txValid), sharedContractV1), Tx: txValid},
+	}
+
+	// Execution MUST NOT crash or panic when encountering malformed / truncated calldata
+	_, receipts, _, _ := ProcessTransactionsOptimistic(
+		context.Background(), cs, grouptxns.GroupTransactionsDeterministic(items, cs.HasCode),
+		blankHeader(), false, false, 999, leader, false,
+	)
+
+	require.Len(t, receipts, 3)
+	// Malformed calls should return error code (32 zero bytes)
+	require.Equal(t, make([]byte, 32), receipts[0].Return(), "Malformed newDocument must return 32 zero bytes error")
+	require.Equal(t, make([]byte, 32), receipts[1].Return(), "Malformed setDataDocument must return 32 zero bytes error")
+
+	// Valid call must succeed with non-zero docId
+	require.Equal(t, 0, int(receipts[2].Status()))
+	validDocId := new(big.Int).SetBytes(receipts[2].Return())
+	require.True(t, validDocId.Sign() > 0, "Valid newDocument must return non-zero docId")
+
+	mvm.CommitXapianTxBuffer(txValid.Hash().Bytes())
+	mvm.DestroyAllXapianInstances()
+}
