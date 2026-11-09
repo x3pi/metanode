@@ -59,10 +59,14 @@ vector<uint8_t> encodeInt(
         }
     }
 
+    if (originBytes.empty()) {
+        return result;
+    }
+
     int start = 32 - static_cast<int>(originBytes.size());
     if (start < 0) start = 0;
     
-    uint8_t signExtension = (isSigned && (originBytes[0] & 0x80)) ? 0xFF : 0x00;
+    uint8_t signExtension = (isSigned && !originBytes.empty() && (originBytes[0] & 0x80)) ? 0xFF : 0x00;
     std::fill(result.begin(), result.begin() + start, signExtension);
     
     for(size_t i = 0; i < originBytes.size(); i++) {

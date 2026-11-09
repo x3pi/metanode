@@ -1243,12 +1243,23 @@ bool XapianManager::compactInPlace(size_t minSizeBytes, std::chrono::minutes min
   // restore the pre-compact backup so the instance never ends up unusable.
   try {
     db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+  } catch (const Xapian::Error &e) {
+    std::cerr << "[XapianCompact ERROR] reopen of compacted db failed for " << db_name
+               << ": " << e.get_msg() << " -- restoring pre-compact backup." << std::endl;
+    std::filesystem::remove_all(full_path, ec);
+    std::filesystem::rename(backup_path, full_path, ec);
+    try {
+      db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+    } catch (...) {}
+    return false;
   } catch (const std::exception &e) {
     std::cerr << "[XapianCompact ERROR] reopen of compacted db failed for " << db_name
                << ": " << e.what() << " -- restoring pre-compact backup." << std::endl;
     std::filesystem::remove_all(full_path, ec);
     std::filesystem::rename(backup_path, full_path, ec);
-    db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+    try {
+      db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+    } catch (...) {}
     return false;
   }
 

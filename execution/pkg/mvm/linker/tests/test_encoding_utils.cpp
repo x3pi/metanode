@@ -11,6 +11,7 @@
 
 #include "abi/encoding_utils.h"
 #include "abi_encode.hpp"
+#include "abi_decode.hpp"
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -731,6 +732,24 @@ TEST_SUITE("abi_encode_int") {
         CHECK_THROWS_AS(encodeInt(hexStr, false), std::invalid_argument);
     }
 
+    TEST_CASE("33 zero bytes with isSigned=true does not abort on empty originBytes") {
+        // 33 bytes of all zeros = 66 hex '0' characters
+        std::string zeros33 = "0x" + std::string(66, '0');
+        auto resSigned = encodeInt(zeros33, true);
+        REQUIRE(resSigned.size() == 32);
+        for (auto b : resSigned) CHECK(b == 0);
+
+        auto resUnsigned = encodeInt(zeros33, false);
+        REQUIRE(resUnsigned.size() == 32);
+        for (auto b : resUnsigned) CHECK(b == 0);
+
+        // 40 zero bytes
+        std::string zeros40 = "0x" + std::string(80, '0');
+        auto res40 = encodeInt(zeros40, true);
+        REQUIRE(res40.size() == 32);
+        for (auto b : res40) CHECK(b == 0);
+    }
+
     TEST_CASE("odd-length hex strings") {
         auto res = encodeInt("0x1", false);
         REQUIRE(res.size() == 32);
@@ -824,5 +843,136 @@ TEST_SUITE("abi_encode_argument") {
         for (size_t i = 0; i < 20; ++i) {
             CHECK(res[12 + i] == static_cast<uint8_t>(i + 1));
         }
+    }
+}
+
+TEST_SUITE("abi_decode_boundary_check") {
+    TEST_CASE("decodeString rejects oversized offset (> 32-bit)") {
+        // Normal string calldata structure:
+        // Slot 0 (bytes 0..31): offset to string data
+        // Slot 1 (bytes 32..63): length of string
+        // Slot 2 (bytes 64..95): string data
+        std::vector<uint8_t> calldata(96, 0);
+
+        // Offset = 2^32 + 32: byte 27 is 1, byte 31 is 0x20
+        calldata[27] = 1;
+        calldata[31] = 0x20;
+        // Length = 1: byte 63 is 1
+        calldata[63] = 1;
+        // Data = 'A' at byte 64
+        calldata[64] = 'A';
+
+        nlohmann::json abi;
+        abi["type"] = "string";
+
+        // Must throw out_of_range instead of truncating offset to 32 and returning "A"
+        CHECK_THROWS_AS(decodeString(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("decodeString rejects oversized length (> 32-bit)") {
+        std::vector<uint8_t> calldata(96, 0);
+
+        // Offset = 32: byte 31 is 0x20
+        calldata[31] = 0x20;
+        // Length = 2^32 + 1: byte 32 + 27 = 59 is 1, byte 32 + 31 = 63 is 1
+        calldata[59] = 1;
+        calldata[63] = 1;
+        calldata[64] = 'A';
+
+        nlohmann::json abi;
+        abi["type"] = "string";
+
+        // Must throw out_of_range instead of truncating length to 1 and returning "A"
+        CHECK_THROWS_AS(decodeString(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("decodeBytes rejects oversized offset (> 32-bit)") {
+        std::vector<uint8_t> calldata(96, 0);
+        calldata[27] = 1;
+        calldata[31] = 0x20;
+        calldata[63] = 1;
+        calldata[64] = 0xAA;
+
+        nlohmann::json abi;
+        abi["type"] = "bytes";
+
+        CHECK_THROWS_AS(decodeBytes(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("decodeBytes rejects oversized length (> 32-bit)") {
+        std::vector<uint8_t> calldata(96, 0);
+        calldata[31] = 0x20;
+        calldata[59] = 1;
+        calldata[63] = 1;
+        calldata[64] = 0xAA;
+
+        nlohmann::json abi;
+        abi["type"] = "bytes";
+
+        CHECK_THROWS_AS(decodeBytes(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("decodeString accepts valid standard string") {
+        std::vector<uint8_t> calldata(96, 0);
+        // Offset = 32
+        calldata[31] = 0x20;
+        // Length = 5
+        calldata[63] = 5;
+        // "hello"
+        std::memcpy(calldata.data() + 64, "hello", 5);
+
+        nlohmann::json abi;
+        abi["type"] = "string";
+
+        auto res = decodeString(calldata.data(), 0, abi, calldata.size());
+        CHECK(res == "hello");
+    }
+
+    TEST_CASE("decodeTuple rejects oversized offset (> 32-bit)") {
+        std::vector<uint8_t> calldata(64, 0);
+        calldata[27] = 1; // offset > 2^32
+        calldata[31] = 0x20;
+
+        nlohmann::json abi;
+        abi["type"] = "tuple";
+        abi["components"] = nlohmann::json::array({
+            {{"name", "a"}, {"type", "string"}}
+        });
+
+        CHECK_THROWS_AS(decodeTuple(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("decodeArray rejects oversized offset (> 32-bit)") {
+        std::vector<uint8_t> calldata(64, 0);
+        calldata[27] = 1;
+        calldata[31] = 0x20;
+
+        nlohmann::json abi;
+        abi["type"] = "string[1]";
+
+        CHECK_THROWS_AS(decodeArray(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("decodeSlice rejects oversized offset (> 32-bit)") {
+        std::vector<uint8_t> calldata(64, 0);
+        calldata[27] = 1;
+        calldata[31] = 0x20;
+
+        nlohmann::json abi;
+        abi["type"] = "string[]";
+
+        CHECK_THROWS_AS(decodeSlice(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("decodeSlice rejects oversized length (> 32-bit)") {
+        std::vector<uint8_t> calldata(96, 0);
+        calldata[31] = 0x20; // offset = 32
+        calldata[59] = 1;    // array_len > 2^32
+        calldata[63] = 1;
+
+        nlohmann::json abi;
+        abi["type"] = "string[]";
+
+        CHECK_THROWS_AS(decodeSlice(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
     }
 }

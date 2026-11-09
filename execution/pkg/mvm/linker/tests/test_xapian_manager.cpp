@@ -1077,5 +1077,37 @@ TEST_SUITE("XapianManager") {
         CHECK(dbAfter->get_doccount() > 0);
         manager->releaseSearchDb(dbAfter);
     }
+
+    TEST_CASE("compactInPlace lifecycle and data preservation") {
+        std::string dbName = "test_compact_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+        mvm::Address addr(12345);
+        auto manager = XapianManager::getInstance(dbName, addr, true);
+        REQUIRE(manager != nullptr);
+
+        // Write documents
+        uint256_t tx1 = next_fake_tx_hash();
+        std::string docId1;
+        commit_write(tx1, [&]() {
+            docId1 = manager->new_document("compact_payload_1", 1, nullptr, &tx1);
+            return docId1;
+        });
+        uint256_t tx2 = next_fake_tx_hash();
+        std::string docId2;
+        commit_write(tx2, [&]() {
+            docId2 = manager->new_document("compact_payload_2", 1, nullptr, &tx2);
+            return docId2;
+        });
+        manager->commit_changes();
+
+        // Run compactInPlace with 0 minSizeBytes and 0 minInterval
+        bool compacted = manager->compactInPlace(0, std::chrono::minutes(0));
+        CHECK(compacted == true);
+
+        // Verify data is preserved after compaction
+        std::string data1 = manager->get_data(docId1, 1);
+        CHECK(data1 == "compact_payload_1");
+        std::string data2 = manager->get_data(docId2, 1);
+        CHECK(data2 == "compact_payload_2");
+    }
 }
 
