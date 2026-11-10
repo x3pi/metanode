@@ -271,7 +271,7 @@ check_existing_target_data_upfront() {
                { [ -d '${target_dir}/raft' ] && [ -n \"\$(ls -A '${target_dir}/raft' 2>/dev/null)\" ]; }; then
                 du -sh '${target_dir}/data' '${target_dir}/raft' 2>/dev/null | tr '\n' ' '
             fi
-        ")
+        ") || { echo "❌ Lỗi kết nối SSH tới ${user}@${host}:${port} khi kiểm tra dữ liệu cũ!" >&2; exit 1; }
         if [ -n "$info" ]; then
             echo ""
             echo "⚠️  [CẢNH BÁO DỮ LIỆU CŨ] Node mới '${anode}' trên máy ${host} đã có sẵn dữ liệu tại:"
@@ -297,8 +297,14 @@ check_existing_target_data_upfront() {
 # ── Hàm làm sạch thư mục đích sau khi tiến trình node mới đã dừng ────────────
 clean_target_dir_safe() {
     local user="$1" host="$2" port="$3" pass="$4" anode="$5" target_dir="$6"
+    if [ -z "$target_dir" ] || [ "$target_dir" = "/" ]; then
+        echo "❌ [AN TOÀN] target_dir không hợp lệ ('${target_dir}')! Hủy thao tác." >&2
+        exit 1
+    fi
     local running_pid
-    running_pid=$(run_ssh "$user" "$host" "$port" "$pass" "pgrep -f '${target_dir}/config.json' 2>/dev/null || true")
+    # Dùng '[c]onfig.json' để regex pgrep -f chỉ khớp với tiến trình simple_chain thật,
+    # không tự khớp với tiến trình shell `bash -c` của phiên SSH.
+    running_pid=$(run_ssh "$user" "$host" "$port" "$pass" "pgrep -f '${target_dir}/[c]onfig.json' 2>/dev/null || true")
     if [ -n "$running_pid" ]; then
         echo "❌ [AN TOÀN] Tiến trình của node '${anode}' (${target_dir}) vẫn đang chạy trên ${host} (PID: ${running_pid})! Hủy thao tác." >&2
         exit 1
