@@ -249,14 +249,13 @@ inline std::vector<RangeFilter> convertJsonToRangeFilters(const nlohmann::json &
                     const char *last = first + beginStr.size();
                     auto [ptr, ec] = std::from_chars(first, last, beginVal, std::chars_format::general);
                     if (ec == std::errc::result_out_of_range) {
-                        throw std::out_of_range("range filter begin out of range");
+                        throw std::out_of_range("range filter begin out of range: " + beginStr);
                     }
                     if (ec != std::errc() || ptr != last || !std::isfinite(beginVal)) {
-                        throw std::invalid_argument("invalid range filter begin");
+                        throw std::invalid_argument("invalid range filter begin: " + beginStr);
                     }
                     filter.start_serialised = Xapian::sortable_serialise(beginVal);
                 }
-                std::cerr << "beginStr " << beginStr << std::endl;
 
                 // Xử lý end
                 std::string endStr = tuple["end"].get<std::string>();
@@ -268,14 +267,13 @@ inline std::vector<RangeFilter> convertJsonToRangeFilters(const nlohmann::json &
                     const char *last = first + endStr.size();
                     auto [ptr, ec] = std::from_chars(first, last, endVal, std::chars_format::general);
                     if (ec == std::errc::result_out_of_range) {
-                        throw std::out_of_range("range filter end out of range");
+                        throw std::out_of_range("range filter end out of range: " + endStr);
                     }
                     if (ec != std::errc() || ptr != last || !std::isfinite(endVal)) {
-                        throw std::invalid_argument("invalid range filter end");
+                        throw std::invalid_argument("invalid range filter end: " + endStr);
                     }
                     filter.end_serialised = Xapian::sortable_serialise(endVal);
                 }
-                std::cerr << "endStr " << endStr << std::endl;
 
                 // Thêm vào vector
                 rangeFilters.push_back(filter);

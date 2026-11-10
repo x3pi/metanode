@@ -675,12 +675,12 @@ std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::va
         const char *first = value.data();
         const char *last = first + value.size();
         auto [ptr, ec] = std::from_chars(first, last, num, std::chars_format::general);
-        if (ec == std::errc::result_out_of_range || !std::isfinite(num)) {
-            std::cerr << "[ERROR] XapianManager::add_value: Number out of range or non-finite for sortable_serialise: " << value << std::endl;
+        if (ec == std::errc::result_out_of_range) {
+            std::cerr << "[ERROR] XapianManager::add_value: Number out of range: " << value << std::endl;
             return "";
         }
-        if (ec != std::errc() || ptr != last) {
-            std::cerr << "[ERROR] XapianManager::add_value: Invalid number format for sortable_serialise: " << value << std::endl;
+        if (ec != std::errc() || ptr != last || !std::isfinite(num)) {
+            std::cerr << "[ERROR] XapianManager::add_value: Invalid number: " << value << std::endl;
             return "";
         }
         value_to_add = Xapian::sortable_serialise(num);
@@ -998,8 +998,8 @@ std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::va
                 if (value == 0.0) {
                     return "0";
                 }
-                char buf[32];
-                auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), value);
+                char buf[1152];
+                auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), value, std::chars_format::fixed);
                 if (ec == std::errc()) {
                     return std::string(buf, ptr);
                 }
