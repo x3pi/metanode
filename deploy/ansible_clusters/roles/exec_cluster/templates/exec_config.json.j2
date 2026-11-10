@@ -56,6 +56,7 @@
     "advertise_address": "{{ raft_advertise_address | default((ansible_host | default('127.0.0.1')) ~ ':' ~ (raft_port | default(7110))) }}",
     "data_dir": "{{ node_data_dir }}/raft",
     "bootstrap": {{ raft_bootstrap | default(false) | lower }},
+    "join_existing_chain": {{ raft_join_existing_chain | default(false) | lower }},
     "forward_bind_address": "{{ forward_bind_address | default((ansible_host | default('127.0.0.1')) ~ ':' ~ (forward_port | default(7210))) }}",
     "forward_secret_file": "{{ raft_secret_file | default(install_dir ~ '/raft_secret.key') }}",
     "sequencer_address": "{{ address }}",

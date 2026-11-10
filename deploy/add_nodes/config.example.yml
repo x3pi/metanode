@@ -1,0 +1,33 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CẤU HÌNH ĐỒNG BỘ DB & THÊM NODE MỚI VÀO CỤM RAFT (add_nodes.sh)
+#  File mẫu (tracked trên Git). Khi chạy thực tế, copy thành config.yml
+#  (file config.yml đã được cấu hình trong .gitignore để không bị push lên Git).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Đường dẫn tới file Ansible Inventory (tính từ thư mục deploy/ hoặc đường dẫn tuyệt đối)
+inventory: "ansible_clusters/inventory.yml"
+
+# Tên cụm Execution trong inventory cần thêm node
+cluster: "cluster_1"
+
+# Tên node Follower nguồn (Donor) dùng để dừng tạm thời và lấy bản sao DB sạch
+donor_node: "exec1_replica3"
+
+# Danh sách các node cũ đang chạy trong cụm (nếu để trống sẽ tự động suy ra từ cluster)
+existing_nodes:
+  - "exec1_replica1"
+  - "exec1_replica2"
+  - "exec1_replica3"
+
+# Danh sách các node mới vừa khai báo thêm trong inventory cần đồng bộ DB & kết nạp Raft
+new_nodes:
+  - "exec1_replica4"
+  - "exec1_replica5"
+
+# Đặt true nếu muốn build & khởi động lại cả Parent Chain (tương đương --restart toàn bộ)
+# Đặt false nếu chỉ muốn thao tác trên Execution Cluster (--exec-only)
+restart_parent_chain: false
+
+# Thời gian tối đa chờ node mới đồng bộ kịp Leader trước khi nâng lên Voter
+catch_up_wait: "300s"
+
