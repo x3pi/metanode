@@ -193,6 +193,13 @@ ACTION_META = {
         'ongoing': 'Đang cấu hình quy tắc tường lửa UFW...',
         'completed': 'Đã cấu hình và mở cổng tường lửa thành công!',
     },
+    'nginx': {
+        'icon': '🔒',
+        'title': 'CẤU HÌNH NGINX TLS (HTTPS/WSS 443)',
+        'desc': 'Cài đặt, đồng bộ chứng chỉ TLS và reload Nginx reverse proxy',
+        'ongoing': 'Đang cấu hình Nginx TLS và kiểm tra kết nối HTTPS/WSS...',
+        'completed': 'Nginx TLS reverse proxy đã sẵn sàng phục vụ HTTPS/WSS trên cổng 443!',
+    },
 }
 
 def get_action_meta(action):
@@ -377,6 +384,8 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
 
     rpc_lines = []
     ws_lines = []
+    https_lines = []
+    wss_lines = []
     tcp_lines = []
     raft_lines = []
 
@@ -401,6 +410,8 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
         info = info_or_parent
         rpc_nodes = info.get('rpc_nodes') or info.get('nodes', {})
         ws_nodes = info.get('ws_nodes', {})
+        https_nodes = info.get('https_nodes', {})
+        wss_nodes = info.get('wss_nodes', {})
         tcp_nodes = info.get('tcp_nodes', {})
         raft_nodes = info.get('raft_nodes', {})
         fwd_nodes = info.get('forward_nodes', {})
@@ -411,6 +422,10 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
         for k, v in ws_nodes.items():
             ep = normalize_endpoint(v, server_ip)
             ws_lines.append(f"  • {k}: {ep}")
+        for k, v in https_nodes.items():
+            https_lines.append(f"  • {k}: {v}")
+        for k, v in wss_nodes.items():
+            wss_lines.append(f"  • {k}: {v}")
         for k, v in tcp_nodes.items():
             ep = normalize_endpoint(v, server_ip)
             tcp_lines.append(f"  • {k}: {ep}")
@@ -494,6 +509,14 @@ def notify_services_ready(info_or_parent=None, exec_clusters_info=None, duration
     if ws_lines:
         msg_parts.append("🔌 <b>Danh sách Node WebSocket (WS URL):</b>")
         msg_parts.append("<pre>\n" + "\n".join(ws_lines) + "\n</pre>\n")
+
+    if https_lines:
+        msg_parts.append("🔒 <b>Danh sách Node HTTPS RPC (Nginx TLS):</b>")
+        msg_parts.append("<pre>\n" + "\n".join(https_lines) + "\n</pre>\n")
+
+    if wss_lines:
+        msg_parts.append("🔐 <b>Danh sách Node WebSocket Bảo Mật (WSS URL):</b>")
+        msg_parts.append("<pre>\n" + "\n".join(wss_lines) + "\n</pre>\n")
 
     if tcp_lines:
         msg_parts.append("🌐 <b>Danh sách Node TCP (P2P / Consensus):</b>")
