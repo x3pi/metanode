@@ -2,6 +2,13 @@
 #  CẤU HÌNH ĐỒNG BỘ DB & THÊM NODE MỚI VÀO CỤM RAFT (add_nodes.sh)
 #  File mẫu (tracked trên Git). Khi chạy thực tế, copy thành config.yml
 #  (file config.yml đã được cấu hình trong .gitignore để không bị push lên Git).
+#
+#  YÊU CẦU QUAN TRỌNG TRONG INVENTORY:
+#  Mỗi node trong `new_nodes` khai báo ở inventory.yml BẮT BUỘC phải có:
+#    raft_bootstrap: false
+#    raft_join_existing_chain: true
+#  (Nếu thiếu `raft_join_existing_chain: true`, script add_nodes.sh sẽ từ chối
+#   chạy ngay từ bước kiểm tra đầu tiên để tránh lỗi raftfeed/node.go:227).
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Đường dẫn tới file Ansible Inventory (tính từ thư mục deploy/ hoặc đường dẫn tuyệt đối)
@@ -11,6 +18,7 @@ inventory: "ansible_clusters/inventory.yml"
 cluster: "cluster_1"
 
 # Tên node Follower nguồn (Donor) dùng để dừng tạm thời và lấy bản sao DB sạch
+# (Không được trùng với bất kỳ node nào trong new_nodes)
 donor_node: "exec1_replica3"
 
 # Danh sách các node cũ đang chạy trong cụm (nếu để trống sẽ tự động suy ra từ cluster)
@@ -20,14 +28,20 @@ existing_nodes:
   - "exec1_replica3"
 
 # Danh sách các node mới vừa khai báo thêm trong inventory cần đồng bộ DB & kết nạp Raft
+# Lưu ý: Các node này phải có (ansible_host, node_data_dir) hoàn toàn tách biệt với existing_nodes
 new_nodes:
   - "exec1_replica4"
   - "exec1_replica5"
 
+# Tùy chọn khởi động lại ở Bước 4 & 5:
+# - restart_all_exec_nodes: true  -> Chạy --restart --exec-only để cập nhật danh sách raft.peers
+#   trong config.json cho toàn bộ các node trong cụm (Lưu ý: sẽ khởi động lại nhanh cả cụm Exec).
+# - restart_all_exec_nodes: false -> Chỉ khởi động lại donor_node và các new_nodes (--node=...),
+#   không chạm vào Leader đang chạy (chỉ dùng khi các node cũ đã có sẵn peers hoặc forward_port_offset).
+restart_all_exec_nodes: true
+
 # Đặt true nếu muốn build & khởi động lại cả Parent Chain (tương đương --restart toàn bộ)
-# Đặt false nếu chỉ muốn thao tác trên Execution Cluster (--exec-only)
 restart_parent_chain: false
 
 # Thời gian tối đa chờ node mới đồng bộ kịp Leader trước khi nâng lên Voter
 catch_up_wait: "300s"
-
