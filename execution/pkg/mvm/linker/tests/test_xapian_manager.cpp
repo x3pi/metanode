@@ -906,10 +906,26 @@ TEST_SUITE("XapianManager") {
                 CHECK(rLe[0].data == "item_price_9");
                 CHECK(rLe[1].data == "item_price_20");
 
-                // NaN rejection in add_value and convertJsonToRangeFilters
+                // NaN, inf, hex, and trailing garbage rejection in add_value and convertJsonToRangeFilters
                 CHECK(rangeMgr->add_value(priceDocIds[0], 5, "NaN", true, 1, nullptr, &txTrue).empty());
-                nlohmann::json optNan = {{"rangeFilters", {{{"slot", "05"}, {"begin", "NaN"}, {"end", "100"}}}}};
-                CHECK_THROWS_AS(convertJsonToRangeFilters(optNan), std::invalid_argument);
+                CHECK(rangeMgr->add_value(priceDocIds[0], 5, "inf", true, 1, nullptr, &txTrue).empty());
+                CHECK(rangeMgr->add_value(priceDocIds[0], 5, "-inf", true, 1, nullptr, &txTrue).empty());
+                CHECK(rangeMgr->add_value(priceDocIds[0], 5, "12abc", true, 1, nullptr, &txTrue).empty());
+                CHECK(rangeMgr->add_value(priceDocIds[0], 5, "0x10", true, 1, nullptr, &txTrue).empty());
+                for (const char* badVal : {"NaN", "inf", "-inf", "12abc", "0x10"}) {
+                    nlohmann::json optBad = {{"rangeFilters", {{{"slot", "05"}, {"begin", badVal}, {"end", "100"}}}}};
+                    CHECK_THROWS_AS(convertJsonToRangeFilters(optBad), std::invalid_argument);
+                }
+
+                // High-precision roundtrip and empty/nil slot clearing with isSerialise = true
+                uint256_t txPrec = 12352;
+                CHECK(!rangeMgr->add_value(priceDocIds[0], 8, "0.123456789012", true, 1, nullptr, &txPrec).empty());
+                CHECK(!rangeMgr->add_value(priceDocIds[0], 9, "3.14159265358979", true, 1, nullptr, &txPrec).empty());
+                CHECK(rangeMgr->get_value(priceDocIds[0], 8, true, 1, &txPrec) == "0.123456789012");
+                CHECK(rangeMgr->get_value(priceDocIds[0], 9, true, 1, &txPrec) == "3.14159265358979");
+                // Clear slot 8 with empty string ("")
+                CHECK(!rangeMgr->add_value(priceDocIds[0], 8, "", true, 1, nullptr, &txPrec).empty());
+                CHECK(rangeMgr->get_value(priceDocIds[0], 8, true, 1, &txPrec).empty());
 
                 // sort_ascending = true -> ascending (9, 20, 100)
                 auto [rAsc, totalAsc] = searcher.search(

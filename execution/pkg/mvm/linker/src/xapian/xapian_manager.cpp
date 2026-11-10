@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <atomic>
+#include <charconv>
+#include <cmath>
 #include <cstdio>
 #include "xapian/xapian_manager.h"
 #include "my_extension/utils.h"
@@ -668,21 +670,20 @@ std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::va
         return "";
     }
     std::string value_to_add = value;
-    if (isSerialise) {
-        try {
-            double num = std::stod(value);
-            if (std::isnan(num)) {
-                std::cerr << "[ERROR] XapianManager::add_value: NaN is not allowed for sortable_serialise: " << value << std::endl;
-                return "";
-            }
-            value_to_add = Xapian::sortable_serialise(num);
-        } catch (const std::invalid_argument &) {
-            std::cerr << "[ERROR] XapianManager::add_value: Invalid number format for sortable_serialise: " << value << std::endl;
-            return "";
-        } catch (const std::out_of_range &) {
-            std::cerr << "[ERROR] XapianManager::add_value: Number out of range for sortable_serialise: " << value << std::endl;
+    if (isSerialise && !value.empty()) {
+        double num = 0.0;
+        const char *first = value.data();
+        const char *last = first + value.size();
+        auto [ptr, ec] = std::from_chars(first, last, num, std::chars_format::general);
+        if (ec == std::errc::result_out_of_range || !std::isfinite(num)) {
+            std::cerr << "[ERROR] XapianManager::add_value: Number out of range or non-finite for sortable_serialise: " << value << std::endl;
             return "";
         }
+        if (ec != std::errc() || ptr != last) {
+            std::cerr << "[ERROR] XapianManager::add_value: Invalid number format for sortable_serialise: " << value << std::endl;
+            return "";
+        }
+        value_to_add = Xapian::sortable_serialise(num);
     }
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
@@ -991,17 +992,18 @@ std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::va
         if (isSerialise && !data.empty()) {
             try {
                 double value = Xapian::sortable_unserialise(data);
-                std::ostringstream oss;
-                oss << std::fixed << std::setprecision(10) << value;
-                std::string str_val = oss.str();
-                str_val.erase(str_val.find_last_not_of('0') + 1, std::string::npos);
-                if (!str_val.empty() && str_val.back() == '.') {
-                    str_val.pop_back();
+                if (!std::isfinite(value)) {
+                    return "";
                 }
-                if (str_val == "-0") {
-                    str_val = "0";
+                if (value == 0.0) {
+                    return "0";
                 }
-                return str_val;
+                char buf[32];
+                auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), value);
+                if (ec == std::errc()) {
+                    return std::string(buf, ptr);
+                }
+                return "";
             } catch (const Xapian::Error &) {
                 return "";
             }
