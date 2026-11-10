@@ -471,12 +471,20 @@ for (( i=0; i<NEW_COUNT; i++ )); do
     NRPORT="${!nrport_var}"; NAPORT="${!naport_var}"
 
     echo "   ➕ Đang kết nạp ${NID} (${NHOST}:${NRPORT}, admin: ${NHOST}:${NAPORT})..."
-    go run ./cmd/tool/rollup_cluster -config /tmp/cluster_full.json add-replica \
+    add_out=""
+    if add_out=$(go run ./cmd/tool/rollup_cluster -config /tmp/cluster_full.json add-replica \
         --id "${NID}" \
         --raft-addr "${NHOST}:${NRPORT}" \
         --admin-addr "${NHOST}:${NAPORT}" \
-        --catch-up-wait "${CATCH_UP_WAIT}"
-    echo "   ✅ ${NID} đã đối chiếu khớp BlockHash 100% với Leader và trở thành Voter!"
+        --catch-up-wait "${CATCH_UP_WAIT}" 2>&1); then
+        echo "${add_out}"
+        echo "   ✅ ${NID} đã đối chiếu khớp BlockHash 100% với Leader và trở thành Voter!"
+    elif [[ "${add_out}" == *"is already a voter"* ]]; then
+        echo "   ℹ️  ${NID} đã là Voter chính thức trong cụm Raft (bỏ qua bước thêm lại)."
+    else
+        echo "${add_out}" >&2
+        exit 1
+    fi
 done
 
 echo ""
