@@ -517,6 +517,9 @@ func (stm *TrueBlockSTM) execOne(
 	}
 
 	if err != nil || fromAccount == nil || fromAccount.Nonce() != tx.GetNonce() {
+		if inc > 0 || !tx.IsRegularTransaction() || chainState.HasCode(tx.ToAddress()) {
+			mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
+		}
 		if errors.Is(err, mvcc.ErrEstimateHit) {
 			atomic.AddInt32(&stm.abortCount, 1)
 			markSuspended()
@@ -913,6 +916,7 @@ func (stm *TrueBlockSTM) execOne(
 				blockingVer = scDB.BlockingVersion
 			}
 			if blockingVer != mvcc.BaseVersion {
+				mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 				atomic.AddInt32(&stm.abortCount, 1)
 				markSuspended()
 				// The tx may already have written authorities (EIP-7702) into the shared MVCC map.
@@ -921,6 +925,7 @@ func (stm *TrueBlockSTM) execOne(
 			}
 
 			if err != nil {
+				mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 				if isCall {
 					mvccDB.SetNonce(tx.FromAddress(), senderFinalNonce)
 				}
@@ -1047,6 +1052,7 @@ func (stm *TrueBlockSTM) execOne(
 									st, errSt := mvccDB.AccountState(addr)
 									if errSt != nil {
 										if errors.Is(errSt, mvcc.ErrEstimateHit) {
+											mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 											atomic.AddInt32(&stm.abortCount, 1)
 											markSuspended()
 											stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
@@ -1113,6 +1119,7 @@ func (stm *TrueBlockSTM) execOne(
 										}
 										if errSub := mvccDB.SubTotalBalance(addr, subAmt); errSub != nil {
 											if errors.Is(errSub, mvcc.ErrEstimateHit) {
+												mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 												atomic.AddInt32(&stm.abortCount, 1)
 												markSuspended()
 												stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
@@ -1168,9 +1175,12 @@ func (stm *TrueBlockSTM) execOne(
 									}
 								}
 							}
+						} else {
+							mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 						}
 					} // end of canPayGas
 					if !canPayGas {
+						mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 						if tm := trie_database.GetTrieDatabaseManager(); tm != nil {
 							tm.FindAndSetTrieDatabasesByMvmID(mvmId, trie_database.Reverted)
 						}
@@ -1195,6 +1205,7 @@ func (stm *TrueBlockSTM) execOne(
 					blockingVer = scDB.BlockingVersion
 				}
 				if blockingVer != mvcc.BaseVersion {
+					mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 					atomic.AddInt32(&stm.abortCount, 1)
 					markSuspended()
 					// suspendOnEstimate saves the UNION of the previous and this incarnation's write sets, so the
