@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <atomic>
+#include <charconv>
+#include <cmath>
 #include <cstdio>
 #include "xapian/xapian_manager.h"
 #include "my_extension/utils.h"
@@ -667,12 +669,28 @@ std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::va
         std::cerr << "[ERROR] XapianManager::add_value: Slot " << slot << " is out of range or reserved." << std::endl;
         return "";
     }
+    std::string value_to_add = value;
+    if (isSerialise && !value.empty()) {
+        double num = 0.0;
+        const char *first = value.data();
+        const char *last = first + value.size();
+        auto [ptr, ec] = std::from_chars(first, last, num, std::chars_format::general);
+        if (ec == std::errc::result_out_of_range) {
+            std::cerr << "[ERROR] XapianManager::add_value: Number out of range: " << value << std::endl;
+            return "";
+        }
+        if (ec != std::errc() || ptr != last || !std::isfinite(num)) {
+            std::cerr << "[ERROR] XapianManager::add_value: Invalid number: " << value << std::endl;
+            return "";
+        }
+        value_to_add = Xapian::sortable_serialise(num);
+    }
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
         XapianLog::AddValueData logData{};
         logData.docid = virtualDocId;
         logData.slot = slot;
-        logData.value = value;
+        logData.value = value_to_add;
         logData.is_serialised = isSerialise;
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::ADD_VALUE;
@@ -970,7 +988,27 @@ std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::va
     std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
     try {
         Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
-        return doc.get_value(slot);
+        std::string data = doc.get_value(slot);
+        if (isSerialise && !data.empty()) {
+            try {
+                double value = Xapian::sortable_unserialise(data);
+                if (!std::isfinite(value)) {
+                    return "";
+                }
+                if (value == 0.0) {
+                    return "0";
+                }
+                char buf[1152];
+                auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), value, std::chars_format::fixed);
+                if (ec == std::errc()) {
+                    return std::string(buf, ptr);
+                }
+                return "";
+            } catch (const Xapian::Error &) {
+                return "";
+            }
+        }
+        return data;
     } catch (const Xapian::DocNotFoundError&) {
         // Normal, ignore
     } catch (...) {
@@ -1243,12 +1281,23 @@ bool XapianManager::compactInPlace(size_t minSizeBytes, std::chrono::minutes min
   // restore the pre-compact backup so the instance never ends up unusable.
   try {
     db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+  } catch (const Xapian::Error &e) {
+    std::cerr << "[XapianCompact ERROR] reopen of compacted db failed for " << db_name
+               << ": " << e.get_msg() << " -- restoring pre-compact backup." << std::endl;
+    std::filesystem::remove_all(full_path, ec);
+    std::filesystem::rename(backup_path, full_path, ec);
+    try {
+      db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+    } catch (...) {}
+    return false;
   } catch (const std::exception &e) {
     std::cerr << "[XapianCompact ERROR] reopen of compacted db failed for " << db_name
                << ": " << e.what() << " -- restoring pre-compact backup." << std::endl;
     std::filesystem::remove_all(full_path, ec);
     std::filesystem::rename(backup_path, full_path, ec);
-    db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+    try {
+      db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+    } catch (...) {}
     return false;
   }
 
@@ -1593,11 +1642,6 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
     // Document staging cache for batch coalescing (tối ưu hóa gom các thao tác trên cùng 1 docid trong 1 block)
     std::map<std::string, Xapian::Document> modified_docs;
     std::set<std::string> deleted_docs;
-
-    auto normalize_docid = [](const std::string& id) -> std::string {
-        if (id.length() >= 2 && (id[0] == '0' && (id[1] == 'x' || id[1] == 'X'))) return id;
-        return "0x" + id;
-    };
 
     // 2026-08-20 (plan §9.29): InMemory-mode-only pre-image capture for
     // revertUncommittedChanges() -- see undo_snapshot_'s own doc comment

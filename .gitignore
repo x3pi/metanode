@@ -546,6 +546,7 @@ execution/cmd/tool/tx_sender/data_deploy.json
 # Local testing databases and crash logs
 xdb/
 xdb_large/
+**/.test_db_xapian/
 crash_bt*.txt
 *.patch
 

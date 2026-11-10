@@ -47,6 +47,7 @@
 
 #include "xapian/xapian_manager.h"
 #include "xapian/xapian_registry.h"
+#include "xapian/xapian_search.h"
 #include "my_extension/utils.h"
 #include "my_extension/constants.h"
 #include <mvm/util.h>
@@ -829,7 +830,7 @@ TEST_SUITE("XapianManager") {
             // 2. Call add_value with isSerialise = true
             uint256_t txTrue = next_fake_tx_hash();
             commit_write(txTrue, [&]() {
-                return manager->add_value(docId, 2, "serialised_val", true, 3, nullptr, &txTrue);
+                return manager->add_value(docId, 2, "100", true, 3, nullptr, &txTrue);
             });
 
             auto logsTrue = manager->getChangeLogs();
@@ -837,6 +838,7 @@ TEST_SUITE("XapianManager") {
             REQUIRE(logsTrue[0].op == XapianLog::Operation::ADD_VALUE);
             auto dataTrue = std::get<XapianLog::AddValueData>(logsTrue[0].data);
             CHECK(dataTrue.is_serialised == true);
+            CHECK(dataTrue.value == Xapian::sortable_serialise(100.0));
 
             // Serialize and deserialize
             std::vector<uint8_t> serTrue = manager->comprehensive_log.serialize();
@@ -845,8 +847,105 @@ TEST_SUITE("XapianManager") {
             REQUIRE(deserTrue->xapian_doc_logs.size() == 1);
             auto deserDataTrue = std::get<XapianLog::AddValueData>(deserTrue->xapian_doc_logs[0].data);
             CHECK(deserDataTrue.is_serialised == true);
+            CHECK(deserDataTrue.value == Xapian::sortable_serialise(100.0));
 
             manager->commit_changes();
+            CHECK(manager->get_value(docId, 2, true, 3) == "100");
+            CHECK(manager->get_value(docId, 2, false, 3) == Xapian::sortable_serialise(100.0));
+            CHECK(manager->add_value(docId, 2, "not_a_number", true, 3, nullptr, &txTrue).empty());
+
+            // 3. Verify RangeFilter and numeric sorting with isSerialise = true and sortReverse
+            auto rangeMgr = create_test_manager("val_range_sort_test", 554434, true);
+            REQUIRE(rangeMgr != nullptr);
+            const char* prices[] = {"100", "9", "20"};
+            std::vector<std::string> priceDocIds;
+            for (int i = 0; i < 3; ++i) {
+                uint256_t txP = next_fake_tx_hash();
+                std::string pid = commit_write(txP, [&]() {
+                    std::string id = rangeMgr->new_document(std::string("item_price_") + prices[i], 1, nullptr, &txP);
+                    rangeMgr->add_term(id, "item", 1, nullptr, &txP);
+                    rangeMgr->add_value(id, 5, prices[i], /*isSerialise=*/true, 1, nullptr, &txP);
+                    return id;
+                });
+                priceDocIds.push_back(pid);
+            }
+            rangeMgr->commit_changes();
+
+            CHECK(rangeMgr->get_value(priceDocIds[0], 5, true, 1) == "100");
+            CHECK(rangeMgr->get_value(priceDocIds[1], 5, true, 1) == "9");
+            CHECK(rangeMgr->get_value(priceDocIds[2], 5, true, 1) == "20");
+
+            Xapian::Database* sdb = rangeMgr->acquireSearchDb();
+            REQUIRE(sdb != nullptr);
+            {
+                XapianSearcher searcher(sdb);
+                nlohmann::json opt = {{"rangeFilters", {{{"slot", "05"}, {"begin", "50"}, {"end", "150"}}}}};
+                auto rf = convertJsonToRangeFilters(opt);
+                auto [rRange, totalRange] = searcher.search(
+                    {"item"}, Xapian::Query::OP_AND, Xapian::Query::OP_AND, {},
+                    std::nullopt, std::nullopt, 0, 10, std::nullopt, /*sort_reverse=*/false, rf, 1);
+                REQUIRE(rRange.size() == 1);
+                CHECK(rRange[0].data == "item_price_100");
+
+                // Open-ended range filter: begin = "50", end = "" (>= 50 -> 100)
+                nlohmann::json optGe = {{"rangeFilters", {{{"slot", "05"}, {"begin", "50"}, {"end", ""}}}}};
+                auto rfGe = convertJsonToRangeFilters(optGe);
+                auto [rGe, totalGe] = searcher.search(
+                    {"item"}, Xapian::Query::OP_AND, Xapian::Query::OP_AND, {},
+                    std::nullopt, std::nullopt, 0, 10, std::nullopt, /*sort_ascending=*/true, rfGe, 1);
+                REQUIRE(rGe.size() == 1);
+                CHECK(rGe[0].data == "item_price_100");
+
+                // Open-ended range filter: begin = "", end = "50" (<= 50 -> 9, 20)
+                nlohmann::json optLe = {{"rangeFilters", {{{"slot", "05"}, {"begin", ""}, {"end", "50"}}}}};
+                auto rfLe = convertJsonToRangeFilters(optLe);
+                auto [rLe, totalLe] = searcher.search(
+                    {"item"}, Xapian::Query::OP_AND, Xapian::Query::OP_AND, {},
+                    std::nullopt, std::nullopt, 0, 10, Xapian::valueno(5), /*sort_ascending=*/true, rfLe, 1);
+                REQUIRE(rLe.size() == 2);
+                CHECK(rLe[0].data == "item_price_9");
+                CHECK(rLe[1].data == "item_price_20");
+
+                // NaN, inf, hex, leading '+', leading space, and trailing garbage rejection
+                for (const char* badVal : {"NaN", "inf", "-inf", "12abc", "0x10", "+5", " 5", "5 "}) {
+                    CHECK(rangeMgr->add_value(priceDocIds[0], 5, badVal, true, 1, nullptr, &txTrue).empty());
+                    nlohmann::json optBad = {{"rangeFilters", {{{"slot", "05"}, {"begin", badVal}, {"end", "100"}}}}};
+                    CHECK_THROWS_AS(convertJsonToRangeFilters(optBad), std::invalid_argument);
+                }
+
+                // High-precision roundtrip (plain decimal, no scientific notation like 1e+05) and empty/nil slot clearing
+                uint256_t txPrec = 12352;
+                CHECK(!rangeMgr->add_value(priceDocIds[0], 8, "0.123456789012", true, 1, nullptr, &txPrec).empty());
+                CHECK(!rangeMgr->add_value(priceDocIds[0], 9, "3.14159265358979", true, 1, nullptr, &txPrec).empty());
+                CHECK(!rangeMgr->add_value(priceDocIds[0], 10, "100000", true, 1, nullptr, &txPrec).empty());
+                CHECK(!rangeMgr->add_value(priceDocIds[0], 11, "0.00000000001", true, 1, nullptr, &txPrec).empty());
+                CHECK(rangeMgr->get_value(priceDocIds[0], 8, true, 1, &txPrec) == "0.123456789012");
+                CHECK(rangeMgr->get_value(priceDocIds[0], 9, true, 1, &txPrec) == "3.14159265358979");
+                CHECK(rangeMgr->get_value(priceDocIds[0], 10, true, 1, &txPrec) == "100000");
+                CHECK(rangeMgr->get_value(priceDocIds[0], 11, true, 1, &txPrec) == "0.00000000001");
+                // Clear slot 8 with empty string ("")
+                CHECK(!rangeMgr->add_value(priceDocIds[0], 8, "", true, 1, nullptr, &txPrec).empty());
+                CHECK(rangeMgr->get_value(priceDocIds[0], 8, true, 1, &txPrec).empty());
+
+                // sort_ascending = true -> ascending (9, 20, 100)
+                auto [rAsc, totalAsc] = searcher.search(
+                    {"item"}, Xapian::Query::OP_AND, Xapian::Query::OP_AND, {},
+                    std::nullopt, std::nullopt, 0, 10, Xapian::valueno(5), /*sort_ascending=*/true, {}, 1);
+                REQUIRE(rAsc.size() == 3);
+                CHECK(rAsc[0].data == "item_price_9");
+                CHECK(rAsc[1].data == "item_price_20");
+                CHECK(rAsc[2].data == "item_price_100");
+
+                // sort_ascending = false -> descending (100, 20, 9)
+                auto [rDesc, totalDesc] = searcher.search(
+                    {"item"}, Xapian::Query::OP_AND, Xapian::Query::OP_AND, {},
+                    std::nullopt, std::nullopt, 0, 10, Xapian::valueno(5), /*sort_ascending=*/false, {}, 1);
+                REQUIRE(rDesc.size() == 3);
+                CHECK(rDesc[0].data == "item_price_100");
+                CHECK(rDesc[1].data == "item_price_20");
+                CHECK(rDesc[2].data == "item_price_9");
+            }
+            rangeMgr->releaseSearchDb(sdb);
         } catch (const Xapian::Error& e) {
             FAIL(e.get_description());
         } catch (const std::exception& e) {
@@ -1076,6 +1175,38 @@ TEST_SUITE("XapianManager") {
         REQUIRE(dbAfter != nullptr);
         CHECK(dbAfter->get_doccount() > 0);
         manager->releaseSearchDb(dbAfter);
+    }
+
+    TEST_CASE("compactInPlace lifecycle and data preservation") {
+        std::string dbName = "test_compact_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+        mvm::Address addr(12345);
+        auto manager = XapianManager::getInstance(dbName, addr, true);
+        REQUIRE(manager != nullptr);
+
+        // Write documents
+        uint256_t tx1 = next_fake_tx_hash();
+        std::string docId1;
+        commit_write(tx1, [&]() {
+            docId1 = manager->new_document("compact_payload_1", 1, nullptr, &tx1);
+            return docId1;
+        });
+        uint256_t tx2 = next_fake_tx_hash();
+        std::string docId2;
+        commit_write(tx2, [&]() {
+            docId2 = manager->new_document("compact_payload_2", 1, nullptr, &tx2);
+            return docId2;
+        });
+        manager->commit_changes();
+
+        // Run compactInPlace with 0 minSizeBytes and 0 minInterval
+        bool compacted = manager->compactInPlace(0, std::chrono::minutes(0));
+        CHECK(compacted == true);
+
+        // Verify data is preserved after compaction
+        std::string data1 = manager->get_data(docId1, 1);
+        CHECK(data1 == "compact_payload_1");
+        std::string data2 = manager->get_data(docId2, 1);
+        CHECK(data2 == "compact_payload_2");
     }
 }
 

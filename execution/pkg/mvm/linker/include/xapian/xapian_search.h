@@ -8,6 +8,8 @@
 #include <optional>
 #include <utility>
 #include <cstdint>
+#include <charconv>
+#include <cmath>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <sstream> // Thêm dòng này
@@ -239,13 +241,39 @@ inline std::vector<RangeFilter> convertJsonToRangeFilters(const nlohmann::json &
 
                 // Xử lý begin
                 std::string beginStr = tuple["begin"].get<std::string>();
-                filter.start_serialised = (beginStr.empty() || beginStr == "") ? "" : Xapian::sortable_serialise(std::stod(beginStr));
-                std::cerr << "beginStr " << beginStr << std::endl;
+                if (beginStr.empty()) {
+                    filter.start_serialised = "";
+                } else {
+                    double beginVal = 0.0;
+                    const char *first = beginStr.data();
+                    const char *last = first + beginStr.size();
+                    auto [ptr, ec] = std::from_chars(first, last, beginVal, std::chars_format::general);
+                    if (ec == std::errc::result_out_of_range) {
+                        throw std::out_of_range("range filter begin out of range: " + beginStr);
+                    }
+                    if (ec != std::errc() || ptr != last || !std::isfinite(beginVal)) {
+                        throw std::invalid_argument("invalid range filter begin: " + beginStr);
+                    }
+                    filter.start_serialised = Xapian::sortable_serialise(beginVal);
+                }
 
                 // Xử lý end
                 std::string endStr = tuple["end"].get<std::string>();
-                filter.end_serialised = (endStr.empty() || endStr == "") ? "" : Xapian::sortable_serialise(std::stod(endStr));
-                std::cerr << "endStr " << endStr << std::endl;
+                if (endStr.empty()) {
+                    filter.end_serialised = "";
+                } else {
+                    double endVal = 0.0;
+                    const char *first = endStr.data();
+                    const char *last = first + endStr.size();
+                    auto [ptr, ec] = std::from_chars(first, last, endVal, std::chars_format::general);
+                    if (ec == std::errc::result_out_of_range) {
+                        throw std::out_of_range("range filter end out of range: " + endStr);
+                    }
+                    if (ec != std::errc() || ptr != last || !std::isfinite(endVal)) {
+                        throw std::invalid_argument("invalid range filter end: " + endStr);
+                    }
+                    filter.end_serialised = Xapian::sortable_serialise(endVal);
+                }
 
                 // Thêm vào vector
                 rangeFilters.push_back(filter);
