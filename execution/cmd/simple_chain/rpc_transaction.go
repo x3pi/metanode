@@ -334,7 +334,9 @@ func (api *MetaAPI) SendRawTransaction(ctx context.Context, input hexutil.Bytes)
 // be actively executing pool addition at the same time.
 const rpcTxConcurrencyLimit = 1000
 
-var rpcTxConcurrencyLimiter = make(chan struct{}, rpcTxConcurrencyLimit)
+var (
+	rpcTxConcurrencyLimiter = make(chan struct{}, rpcTxConcurrencyLimit)
+)
 
 // jsonrpcError implements the standard rpc.Error interface so that go-ethereum
 // JSON-RPC returns error objects with code -32000.
@@ -393,11 +395,22 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 	}
 
 	fromAddr := metaTx.FromAddress()
-	if api.App.helpPayManager != nil && api.App.helpPayManager.IsEnabled() {
+	// FUNDED ACCOUNT FAST-PATH PROTECTION:
+	// Only when an account actually needs gas (NeedsTopUp == true) do we run pre-checks,
+	// acquire in-flight concurrency slots, and trigger top-up. Funded accounts
+	// completely bypass this block and proceed directly to AddTransactionToPool!
+	if api.App.helpPayManager != nil && api.App.helpPayManager.IsEnabled() && api.App.helpPayManager.NeedsTopUp(fromAddr) {
 		clientIP := ""
 		if pi := rpc.PeerInfoFromContext(ctx); pi.RemoteAddr != "" {
 			clientIP = extractIP(pi.RemoteAddr)
 		}
+
+		release, _, err := api.App.helpPayManager.PreCheckAndAcquire(fromAddr, ethTx.Nonce(), ethTx.Gas(), ethTx.Value(), clientIP, "RPC")
+		if err != nil {
+			return common.Hash{}, formatGethError(err)
+		}
+		defer release()
+
 		if err := api.App.helpPayManager.CheckAndTopUpWithClient(fromAddr, clientIP); err != nil {
 			return common.Hash{}, formatGethError(fmt.Errorf("topUpFunc failed: %w", err))
 		}

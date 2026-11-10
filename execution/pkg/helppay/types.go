@@ -33,10 +33,10 @@ type WalletWorker struct {
 
 // SponsorGasTask represents an in-flight gas sponsorship job assigned to a sponsor wallet worker.
 type SponsorGasTask struct {
-	Recipient common.Address // Địa chỉ ví người dùng nhận bảo trợ gas
-	Amount    *big.Int       // Số lượng coin bảo trợ
-	ResultCh  chan error     // Channel nhận kết quả sau khi giao dịch commit vào block
-	attempts  int            // Số lần đã thử qua các ví bảo trợ khác nhau trong pool
+	Recipient common.Address // User wallet address receiving sponsored gas top-up
+	Amount    *big.Int       // Amount of sponsored gas coin to transfer
+	ResultCh  chan error     // Channel to receive confirmation error once committed in block
+	attempts  int            // Number of attempts across different sponsor wallets in the pool
 }
 
 // WalletStatus is the JSON representation returned to RPC callers.

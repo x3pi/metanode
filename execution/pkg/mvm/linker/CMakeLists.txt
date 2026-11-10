@@ -25,7 +25,7 @@ else()
     if(CMAKE_CROSSCOMPILING)
       set(MVM_LINKER_ARCH_FLAGS "-march=armv8-a -mtune=generic")
     else()
-      set(MVM_LINKER_ARCH_FLAGS "-march=native -mtune=native")
+      set(MVM_LINKER_ARCH_FLAGS "-march=x86-64-v3 -mtune=generic")
     endif()
     # Release mode flags
     # NOTE: We keep `-g` combined with `-O3` here to preserve debug symbols.

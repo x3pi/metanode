@@ -3,3 +3,4 @@
   ansible.builtin.shell: |
     nginx -t && systemctl reload nginx
   become: true
+

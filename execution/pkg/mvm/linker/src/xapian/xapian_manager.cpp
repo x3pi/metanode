@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <atomic>
+#include <charconv>
+#include <cmath>
 #include <cstdio>
 #include "xapian/xapian_manager.h"
 #include "my_extension/utils.h"
@@ -143,7 +145,7 @@ std::shared_ptr<XapianManager> XapianManager::getInstance(const std::string &db_
     }
     catch (...)
     {
-        throw std::runtime_error("Lỗi không xác định khi tạo instance XapianManager cho " + db_path_str);
+        throw std::runtime_error("Unknown error creating XapianManager instance for " + db_path_str);
     }
 }
 
@@ -280,6 +282,13 @@ Xapian::Database* XapianManager::acquireSearchDb()
                     search_pool.pool[i] = new Xapian::Database(
                         mvm::createFullPath(address, db_name).string());
                     search_pool.last_gen[i] = current_gen;
+                } catch (const Xapian::Error& e) {
+                    std::cerr << "[FATAL] acquireSearchDb: failed to init slot " << i
+                              << ": " << e.get_description() << std::endl;
+                    lock.lock();
+                    search_pool.in_use[i] = false;
+                    search_pool.pool_cv.notify_one();
+                    return nullptr;
                 } catch (const std::exception& e) {
                     std::cerr << "[FATAL] acquireSearchDb: failed to init slot " << i
                               << ": " << e.what() << std::endl;
@@ -293,6 +302,30 @@ Xapian::Database* XapianManager::acquireSearchDb()
                 try {
                     search_pool.pool[i]->reopen();
                     search_pool.last_gen[i] = current_gen;
+                } catch (const Xapian::Error& e) {
+                    std::cerr << "[ERROR] acquireSearchDb: reopen() failed for slot " << i
+                              << ": " << e.get_description() << ", recreating..." << std::endl;
+                    delete search_pool.pool[i];
+                    search_pool.pool[i] = nullptr;
+                    try {
+                        search_pool.pool[i] = new Xapian::Database(
+                            mvm::createFullPath(address, db_name).string());
+                        search_pool.last_gen[i] = current_gen;
+                    } catch (const Xapian::Error& e2) {
+                        std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
+                                  << ": " << e2.get_description() << std::endl;
+                        lock.lock();
+                        search_pool.in_use[i] = false;
+                        search_pool.pool_cv.notify_one();
+                        return nullptr;
+                    } catch (const std::exception& e2) {
+                        std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
+                                  << ": " << e2.what() << std::endl;
+                        lock.lock();
+                        search_pool.in_use[i] = false;
+                        search_pool.pool_cv.notify_one();
+                        return nullptr;
+                    }
                 } catch (const std::exception& e) {
                     std::cerr << "[ERROR] acquireSearchDb: reopen() failed for slot " << i
                               << ": " << e.what() << ", recreating..." << std::endl;
@@ -302,6 +335,13 @@ Xapian::Database* XapianManager::acquireSearchDb()
                         search_pool.pool[i] = new Xapian::Database(
                             mvm::createFullPath(address, db_name).string());
                         search_pool.last_gen[i] = current_gen;
+                    } catch (const Xapian::Error& e2) {
+                        std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
+                                  << ": " << e2.get_description() << std::endl;
+                        lock.lock();
+                        search_pool.in_use[i] = false;
+                        search_pool.pool_cv.notify_one();
+                        return nullptr;
                     } catch (const std::exception& e2) {
                         std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
                                   << ": " << e2.what() << std::endl;
@@ -368,6 +408,13 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
                     simple_read_pool.pool[i] = new Xapian::Database(
                         mvm::createFullPath(address, db_name).string());
                     simple_read_pool.last_gen[i] = current_gen;
+                } catch (const Xapian::Error& e) {
+                    std::cerr << "[FATAL] acquireSimpleReadDb: failed to init slot " << i
+                              << ": " << e.get_description() << std::endl;
+                    lock.lock();
+                    simple_read_pool.in_use[i] = false;
+                    simple_read_pool.pool_cv.notify_one();
+                    return nullptr;
                 } catch (const std::exception& e) {
                     std::cerr << "[FATAL] acquireSimpleReadDb: failed to init slot " << i
                               << ": " << e.what() << std::endl;
@@ -381,6 +428,30 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
                 try {
                     simple_read_pool.pool[i]->reopen();
                     simple_read_pool.last_gen[i] = current_gen;
+                } catch (const Xapian::Error& e) {
+                    std::cerr << "[ERROR] acquireSimpleReadDb: reopen() failed for slot " << i
+                              << ": " << e.get_description() << ", recreating..." << std::endl;
+                    delete simple_read_pool.pool[i];
+                    simple_read_pool.pool[i] = nullptr;
+                    try {
+                        simple_read_pool.pool[i] = new Xapian::Database(
+                            mvm::createFullPath(address, db_name).string());
+                        simple_read_pool.last_gen[i] = current_gen;
+                    } catch (const Xapian::Error& e2) {
+                        std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
+                                  << ": " << e2.get_description() << std::endl;
+                        lock.lock();
+                        simple_read_pool.in_use[i] = false;
+                        simple_read_pool.pool_cv.notify_one();
+                        return nullptr;
+                    } catch (const std::exception& e2) {
+                        std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
+                                  << ": " << e2.what() << std::endl;
+                        lock.lock();
+                        simple_read_pool.in_use[i] = false;
+                        simple_read_pool.pool_cv.notify_one();
+                        return nullptr;
+                    }
                 } catch (const std::exception& e) {
                     std::cerr << "[ERROR] acquireSimpleReadDb: reopen() failed for slot " << i
                               << ": " << e.what() << ", recreating..." << std::endl;
@@ -390,6 +461,13 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
                         simple_read_pool.pool[i] = new Xapian::Database(
                             mvm::createFullPath(address, db_name).string());
                         simple_read_pool.last_gen[i] = current_gen;
+                    } catch (const Xapian::Error& e2) {
+                        std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
+                                  << ": " << e2.get_description() << std::endl;
+                        lock.lock();
+                        simple_read_pool.in_use[i] = false;
+                        simple_read_pool.pool_cv.notify_one();
+                        return nullptr;
                     } catch (const std::exception& e2) {
                         std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
                                   << ": " << e2.what() << std::endl;
@@ -527,9 +605,9 @@ void XapianManager::dump_all_documents(uint256_t blockNumber) {
                  "=========\n"
               << std::endl;
   } catch (const Xapian::Error &e) {
-    std::cerr << "Lỗi Xapian khi dump database: " << e.get_msg() << std::endl;
+    std::cerr << "Xapian error dumping database: " << e.get_msg() << std::endl;
   } catch (const std::exception &e) {
-    std::cerr << "Lỗi khi dump database: " << e.what() << std::endl;
+    std::cerr << "Error dumping database: " << e.what() << std::endl;
   }
 }
 
@@ -587,12 +665,32 @@ bool XapianManager::delete_document(const std::string& virtualDocId, uint256_t b
 
 // Thêm một value vào một slot của document, có xử lý versioning theo blockNumber
 std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::valueno slot, const std::string &value, bool isSerialise, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
+    if (slot > 0xFFFFFFFD || slot == 253 || slot == 254) {
+        std::cerr << "[ERROR] XapianManager::add_value: Slot " << slot << " is out of range or reserved." << std::endl;
+        return "";
+    }
+    std::string value_to_add = value;
+    if (isSerialise && !value.empty()) {
+        double num = 0.0;
+        const char *first = value.data();
+        const char *last = first + value.size();
+        auto [ptr, ec] = std::from_chars(first, last, num, std::chars_format::general);
+        if (ec == std::errc::result_out_of_range) {
+            std::cerr << "[ERROR] XapianManager::add_value: Number out of range: " << value << std::endl;
+            return "";
+        }
+        if (ec != std::errc() || ptr != last || !std::isfinite(num)) {
+            std::cerr << "[ERROR] XapianManager::add_value: Invalid number: " << value << std::endl;
+            return "";
+        }
+        value_to_add = Xapian::sortable_serialise(num);
+    }
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
         XapianLog::AddValueData logData{};
         logData.docid = virtualDocId;
         logData.slot = slot;
-        logData.value = value;
+        logData.value = value_to_add;
         logData.is_serialised = isSerialise;
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::ADD_VALUE;
@@ -606,6 +704,10 @@ std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::va
 
 // Thêm một term vào document, có xử lý versioning theo blockNumber
 std::string XapianManager::add_term(const std::string& virtualDocId, const std::string &term, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
+    if (isReservedSystemDocIdTerm(term)) {
+        std::cerr << "[ERROR] XapianManager::add_term: Term collides with reserved system document identifier: " << term << std::endl;
+        return "";
+    }
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
         XapianLog::AddTermData logData;
@@ -622,6 +724,14 @@ std::string XapianManager::add_term(const std::string& virtualDocId, const std::
 
 // Index một đoạn text vào document (thêm các term được tạo ra từ text)
 std::string XapianManager::index_text(const std::string& virtualDocId, const std::string &text_to_index, Xapian::termcount wdf_inc, const std::string prefix, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
+    if (prefix.length() >= 64) {
+        std::cerr << "[ERROR] XapianManager::index_text: Prefix length exceeds maximum: " << prefix.length() << std::endl;
+        return "";
+    }
+    if (isReservedSystemPrefix(prefix)) {
+        std::cerr << "[ERROR] XapianManager::index_text: Prefix collides with reserved system document identifier: " << prefix << std::endl;
+        return "";
+    }
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
         XapianLog::IndexTextData logData;
@@ -793,8 +903,27 @@ Xapian::Document XapianManager::get_overlayed_document(const std::string& virtua
                     Xapian::TermGenerator termgenerator;
                     termgenerator.set_stemmer(Xapian::Stem("english"));
                     termgenerator.set_stemming_strategy(Xapian::TermGenerator::STEM_SOME);
+                    termgenerator.set_max_word_length(180);
                     termgenerator.set_document(doc);
                     termgenerator.index_text(data.text, data.wdf_inc, data.prefix);
+
+                    // Sanitize generated terms: prevent term collision with internal docid of another document
+                    std::string own_clean_id = nid;
+                    if (own_clean_id.length() >= 2 && own_clean_id.substr(0, 2) == "0x") {
+                        own_clean_id = own_clean_id.substr(2);
+                    }
+                    std::string own_system_term = "Q" + own_clean_id;
+                    std::vector<std::string> colliding_terms;
+                    for (auto it = doc.termlist_begin(); it != doc.termlist_end(); ++it) {
+                        std::string t = *it;
+                        if (isReservedSystemDocIdTerm(t) && t != own_system_term) {
+                            colliding_terms.push_back(t);
+                        }
+                    }
+                    for (const auto& t : colliding_terms) {
+                        std::cerr << "[ERROR] XapianManager: removing colliding reserved system docid term: " << t << " from doc " << nid << std::endl;
+                        doc.remove_term(t);
+                    }
                 }
             }
         }
@@ -850,12 +979,36 @@ std::string XapianManager::get_data(const std::string& virtualDocId, uint256_t b
 // Lấy giá trị từ một slot của document tại một block number, có tùy chọn
 // unserialize
 std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::valueno slot, bool isSerialise, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
+    if (slot > 0xFFFFFFFD) {
+        std::cerr << "[ERROR] XapianManager::get_value: Slot " << slot << " is out of range." << std::endl;
+        return "";
+    }
     ScopedSimpleReadDb scopedDb(this);
     if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_value");
     std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
     try {
         Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
-        return doc.get_value(slot);
+        std::string data = doc.get_value(slot);
+        if (isSerialise && !data.empty()) {
+            try {
+                double value = Xapian::sortable_unserialise(data);
+                if (!std::isfinite(value)) {
+                    return "";
+                }
+                if (value == 0.0) {
+                    return "0";
+                }
+                char buf[1152];
+                auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), value, std::chars_format::fixed);
+                if (ec == std::errc()) {
+                    return std::string(buf, ptr);
+                }
+                return "";
+            } catch (const Xapian::Error &) {
+                return "";
+            }
+        }
+        return data;
     } catch (const Xapian::DocNotFoundError&) {
         // Normal, ignore
     } catch (...) {
@@ -1128,12 +1281,23 @@ bool XapianManager::compactInPlace(size_t minSizeBytes, std::chrono::minutes min
   // restore the pre-compact backup so the instance never ends up unusable.
   try {
     db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+  } catch (const Xapian::Error &e) {
+    std::cerr << "[XapianCompact ERROR] reopen of compacted db failed for " << db_name
+               << ": " << e.get_msg() << " -- restoring pre-compact backup." << std::endl;
+    std::filesystem::remove_all(full_path, ec);
+    std::filesystem::rename(backup_path, full_path, ec);
+    try {
+      db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+    } catch (...) {}
+    return false;
   } catch (const std::exception &e) {
     std::cerr << "[XapianCompact ERROR] reopen of compacted db failed for " << db_name
                << ": " << e.what() << " -- restoring pre-compact backup." << std::endl;
     std::filesystem::remove_all(full_path, ec);
     std::filesystem::rename(backup_path, full_path, ec);
-    db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+    try {
+      db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+    } catch (...) {}
     return false;
   }
 
@@ -1479,11 +1643,6 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
     std::map<std::string, Xapian::Document> modified_docs;
     std::set<std::string> deleted_docs;
 
-    auto normalize_docid = [](const std::string& id) -> std::string {
-        if (id.length() >= 2 && (id[0] == '0' && (id[1] == 'x' || id[1] == 'X'))) return id;
-        return "0x" + id;
-    };
-
     // 2026-08-20 (plan §9.29): InMemory-mode-only pre-image capture for
     // revertUncommittedChanges() -- see undo_snapshot_'s own doc comment
     // (xapian_manager.h) for the full design. Cheap early-return in
@@ -1586,8 +1745,27 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
                 Xapian::TermGenerator termgenerator;
                 termgenerator.set_stemmer(Xapian::Stem("english"));
                 termgenerator.set_stemming_strategy(Xapian::TermGenerator::STEM_SOME);
+                termgenerator.set_max_word_length(180);
                 termgenerator.set_document(doc);
                 termgenerator.index_text(data.text, data.wdf_inc, data.prefix);
+
+                // Sanitize generated terms: prevent term collision with internal docid of another document
+                std::string own_clean_id = nid;
+                if (own_clean_id.length() >= 2 && own_clean_id.substr(0, 2) == "0x") {
+                    own_clean_id = own_clean_id.substr(2);
+                }
+                std::string own_system_term = "Q" + own_clean_id;
+                std::vector<std::string> colliding_terms;
+                for (auto it = doc.termlist_begin(); it != doc.termlist_end(); ++it) {
+                    std::string t = *it;
+                    if (isReservedSystemDocIdTerm(t) && t != own_system_term) {
+                        colliding_terms.push_back(t);
+                    }
+                }
+                for (const auto& t : colliding_terms) {
+                    std::cerr << "[ERROR] XapianManager: removing colliding reserved system docid term: " << t << " from doc " << nid << std::endl;
+                    doc.remove_term(t);
+                }
             }
         }
 

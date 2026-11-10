@@ -2,6 +2,42 @@
 #include <xapian.h>
 #include <string>
 
+bool XapianManager::isReservedSystemDocIdTerm(const std::string& term) {
+    if (term.empty() || term[0] != 'Q') {
+        return false;
+    }
+    // Reserved format is 'Q' + hex_encoded_id (between 16 and 64 hex characters)
+    size_t hex_len = term.length() - 1;
+    if (hex_len < 16 || hex_len > 64) {
+        return false;
+    }
+    for (size_t i = 1; i < term.length(); ++i) {
+        char c = term[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool XapianManager::isReservedSystemPrefix(const std::string& prefix) {
+    if (prefix.empty()) {
+        return false;
+    }
+    if (prefix[0] != 'Q' && prefix[0] != 'q') {
+        return false;
+    }
+    // Any prefix starting with 'Q' or 'q' where all remaining characters are hex digits
+    // is a potential prefix or partial prefix of a system document identifier.
+    for (size_t i = 1; i < prefix.length(); ++i) {
+        char c = prefix[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Helper function to insert into xapian_manager.cpp
 Xapian::docid XapianManager::resolveVirtualDocId(const std::string& virtualDocIdStr, Xapian::Database* search_db) {
     if (virtualDocIdStr.empty()) return 0;

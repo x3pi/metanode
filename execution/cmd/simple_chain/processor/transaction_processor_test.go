@@ -1,10 +1,15 @@
 package processor
 
 import (
+	"errors"
+	"math/big"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	e_common "github.com/ethereum/go-ethereum/common"
+	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -151,4 +156,159 @@ func TestSendTransactionError_MultipleCalls(t *testing.T) {
 	}
 
 	assert.Equal(t, 5, conn.SentCount(), "should have sent 5 error messages")
+}
+
+// ============================================================================
+// MockHelpPayManager for executeAndAddTx ingress hot path tests
+// ============================================================================
+type MockHelpPayManagerForTest struct {
+	enabled        bool
+	needsTopUp     bool
+	preCheckErr    error
+	topUpErr       error
+	preCheckCalled atomic.Int32
+	topUpCalled    atomic.Int32
+	releaseCalled  atomic.Int32
+}
+
+func (m *MockHelpPayManagerForTest) IsEnabled() bool                            { return m.enabled }
+func (m *MockHelpPayManagerForTest) NeedsTopUp(recipient e_common.Address) bool { return m.needsTopUp }
+func (m *MockHelpPayManagerForTest) CheckAndTopUp(recipient e_common.Address) error {
+	return m.topUpErr
+}
+func (m *MockHelpPayManagerForTest) CheckAndTopUpWithClient(recipient e_common.Address, clientIP string) error {
+	m.topUpCalled.Add(1)
+	return m.topUpErr
+}
+func (m *MockHelpPayManagerForTest) ActiveWalletCount() int { return 1 }
+func (m *MockHelpPayManagerForTest) PreCheckAndAcquire(
+	fromAddr e_common.Address,
+	txNonce uint64,
+	txGas uint64,
+	txAmount *big.Int,
+	clientIP string,
+	ingressType string,
+) (func(), bool, error) {
+	m.preCheckCalled.Add(1)
+	if m.preCheckErr != nil {
+		return nil, false, m.preCheckErr
+	}
+	release := func() {
+		m.releaseCalled.Add(1)
+	}
+	return release, true, nil
+}
+
+// ============================================================================
+// TestExecuteAndAddTx_Funded_BypassesHelpPay
+// Tests that a funded account (NeedsTopUp == false) bypasses PreCheck and async goroutines.
+// ============================================================================
+func TestExecuteAndAddTx_Funded_BypassesHelpPay(t *testing.T) {
+	chainID := big.NewInt(991)
+	cs := createTestChainState(true, 991)
+	sender := NewMockMessageSender()
+	tp := newTestTransactionProcessor(cs, sender)
+
+	mockHp := &MockHelpPayManagerForTest{
+		enabled:    true,
+		needsTopUp: false, // Funded
+	}
+	tp.helpPayManager = mockHp
+
+	mockConn := NewMockConnection(e_common.HexToAddress("0x1234"))
+	rawTx := signTestTx(t, e_types.NewTx(&e_types.LegacyTx{
+		Nonce:    1,
+		GasPrice: big.NewInt(100000),
+		Gas:      21000,
+		To:       &e_common.Address{0x01},
+		Value:    big.NewInt(100),
+	}), chainID)
+
+	tp.executeAndAddTx(injectionRequest{
+		conn:    mockConn,
+		rawBody: rawTx,
+		rawEth:  true,
+		msgID:   "funded-msg",
+	})
+
+	assert.Equal(t, int32(0), mockHp.preCheckCalled.Load(), "Funded account must NOT call PreCheckAndAcquire")
+	assert.Equal(t, int32(0), mockHp.topUpCalled.Load(), "Funded account must NOT call CheckAndTopUpWithClient")
+}
+
+// ============================================================================
+// TestExecuteAndAddTx_Unfunded_PreCheckRejected
+// Tests that when PreCheckAndAcquire rejects an unfunded tx, error is sent and no topup runs.
+// ============================================================================
+func TestExecuteAndAddTx_Unfunded_PreCheckRejected(t *testing.T) {
+	chainID := big.NewInt(991)
+	cs := createTestChainState(true, 991)
+	sender := NewMockMessageSender()
+	tp := newTestTransactionProcessor(cs, sender)
+
+	mockHp := &MockHelpPayManagerForTest{
+		enabled:     true,
+		needsTopUp:  true, // Unfunded
+		preCheckErr: errors.New("helppay concurrency limit reached"),
+	}
+	tp.helpPayManager = mockHp
+
+	mockConn := NewMockConnection(e_common.HexToAddress("0x1234"))
+	rawTx := signTestTx(t, e_types.NewTx(&e_types.LegacyTx{
+		Nonce:    1,
+		GasPrice: big.NewInt(100000),
+		Gas:      21000,
+		To:       &e_common.Address{0x01},
+		Value:    big.NewInt(100),
+	}), chainID)
+
+	tp.executeAndAddTx(injectionRequest{
+		conn:    mockConn,
+		rawBody: rawTx,
+		rawEth:  true,
+		msgID:   "precheck-reject-msg",
+	})
+
+	assert.Equal(t, int32(1), mockHp.preCheckCalled.Load(), "Unfunded account must call PreCheckAndAcquire")
+	assert.Equal(t, int32(0), mockHp.topUpCalled.Load(), "Rejected precheck must NOT invoke CheckAndTopUpWithClient")
+	assert.Equal(t, 1, mockConn.SentCount(), "Error message must be returned to client connection")
+}
+
+// ============================================================================
+// TestExecuteAndAddTx_Unfunded_PreCheckAndTopUpSuccess
+// Tests that when PreCheck succeeds, topup is triggered asynchronously and slot is released.
+// ============================================================================
+func TestExecuteAndAddTx_Unfunded_PreCheckAndTopUpSuccess(t *testing.T) {
+	chainID := big.NewInt(991)
+	cs := createTestChainState(true, 991)
+	sender := NewMockMessageSender()
+	tp := newTestTransactionProcessor(cs, sender)
+
+	mockHp := &MockHelpPayManagerForTest{
+		enabled:    true,
+		needsTopUp: true, // Unfunded
+	}
+	tp.helpPayManager = mockHp
+
+	mockConn := NewMockConnection(e_common.HexToAddress("0x1234"))
+	rawTx := signTestTx(t, e_types.NewTx(&e_types.LegacyTx{
+		Nonce:    1,
+		GasPrice: big.NewInt(100000),
+		Gas:      21000,
+		To:       &e_common.Address{0x01},
+		Value:    big.NewInt(100),
+	}), chainID)
+
+	tp.executeAndAddTx(injectionRequest{
+		conn:    mockConn,
+		rawBody: rawTx,
+		rawEth:  true,
+		msgID:   "topup-success-msg",
+	})
+
+	assert.Equal(t, int32(1), mockHp.preCheckCalled.Load(), "Unfunded account must call PreCheckAndAcquire")
+
+	// Wait briefly for asynchronous goroutine
+	require.Eventually(t, func() bool {
+		return mockHp.topUpCalled.Load() == 1 && mockHp.releaseCalled.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond, "Async goroutine must call top-up and release slot")
 }

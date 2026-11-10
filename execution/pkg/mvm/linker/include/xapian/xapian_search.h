@@ -8,6 +8,8 @@
 #include <optional>
 #include <utility>
 #include <cstdint>
+#include <charconv>
+#include <cmath>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <sstream> // Thêm dòng này
@@ -202,9 +204,19 @@ inline double parsePrice(const std::string &priceStr)
 }
 inline uint64_t hex_to_uint64_range(const std::string &hex_str)
 {
-    uint64_t result = 0;
-    std::istringstream(hex_str) >> std::hex >> result;
-    return result;
+    std::string s = hex_str;
+    if (s.rfind("0x", 0) != 0 && s.rfind("0X", 0) != 0) {
+        s = "0x" + s;
+    }
+    try {
+        intx::uint256 val = intx::from_string<intx::uint256>(s);
+        if (val > intx::uint256(0xFFFFFFFD)) {
+            return 0xFFFFFFFFULL;
+        }
+        return static_cast<uint64_t>(val);
+    } catch (...) {
+        return 0xFFFFFFFFULL;
+    }
 }
 // Hàm chuyển đổi từ JSON sang vector<RangeFilter>
 inline std::vector<RangeFilter> convertJsonToRangeFilters(const nlohmann::json &jsonData)
@@ -221,17 +233,47 @@ inline std::vector<RangeFilter> convertJsonToRangeFilters(const nlohmann::json &
                 RangeFilter filter;
 
                 // Gán slot
-                filter.slot = hex_to_uint64_range(tuple["slot"]);
+                uint64_t raw_slot = hex_to_uint64_range(tuple["slot"]);
+                if (raw_slot > 0xFFFFFFFD) {
+                    throw std::out_of_range("range filter slot out of range");
+                }
+                filter.slot = static_cast<Xapian::valueno>(raw_slot);
 
                 // Xử lý begin
                 std::string beginStr = tuple["begin"].get<std::string>();
-                filter.start_serialised = (beginStr.empty() || beginStr == "") ? "" : Xapian::sortable_serialise(std::stod(beginStr));
-                std::cerr << "beginStr " << beginStr << std::endl;
+                if (beginStr.empty()) {
+                    filter.start_serialised = "";
+                } else {
+                    double beginVal = 0.0;
+                    const char *first = beginStr.data();
+                    const char *last = first + beginStr.size();
+                    auto [ptr, ec] = std::from_chars(first, last, beginVal, std::chars_format::general);
+                    if (ec == std::errc::result_out_of_range) {
+                        throw std::out_of_range("range filter begin out of range: " + beginStr);
+                    }
+                    if (ec != std::errc() || ptr != last || !std::isfinite(beginVal)) {
+                        throw std::invalid_argument("invalid range filter begin: " + beginStr);
+                    }
+                    filter.start_serialised = Xapian::sortable_serialise(beginVal);
+                }
 
                 // Xử lý end
                 std::string endStr = tuple["end"].get<std::string>();
-                filter.end_serialised = (endStr.empty() || endStr == "") ? "" : Xapian::sortable_serialise(std::stod(endStr));
-                std::cerr << "endStr " << endStr << std::endl;
+                if (endStr.empty()) {
+                    filter.end_serialised = "";
+                } else {
+                    double endVal = 0.0;
+                    const char *first = endStr.data();
+                    const char *last = first + endStr.size();
+                    auto [ptr, ec] = std::from_chars(first, last, endVal, std::chars_format::general);
+                    if (ec == std::errc::result_out_of_range) {
+                        throw std::out_of_range("range filter end out of range: " + endStr);
+                    }
+                    if (ec != std::errc() || ptr != last || !std::isfinite(endVal)) {
+                        throw std::invalid_argument("invalid range filter end: " + endStr);
+                    }
+                    filter.end_serialised = Xapian::sortable_serialise(endVal);
+                }
 
                 // Thêm vào vector
                 rangeFilters.push_back(filter);
@@ -241,6 +283,7 @@ inline std::vector<RangeFilter> convertJsonToRangeFilters(const nlohmann::json &
     catch (const std::exception &e)
     {
         std::cerr << "Error converting JSON to RangeFilters: " << e.what() << std::endl;
+        throw;
     }
 
     return rangeFilters;

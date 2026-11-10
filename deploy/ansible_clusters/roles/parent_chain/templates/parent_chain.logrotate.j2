@@ -1,0 +1,11 @@
+{{ node_data_dir }}/logs/*.log {
+    daily
+    rotate 7
+    maxsize 500M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+

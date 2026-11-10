@@ -86,7 +86,7 @@ chmod 640 /opt/metanode/generated_keys.json 2>/dev/null || true
 # 3. Reset Execution Clusters bằng deploy_clusters.sh (tự động nạp toàn bộ spam keys vào genesis của chain con)
 echo "🚀 3. Triển khai & Reset Execution Clusters (chain con) với Genesis chứa 50,000 ví..."
 cd "${METANODE_DIR}/deploy/ansible_clusters"
-./deploy_clusters.sh --reset --exec-only
+./deploy_clusters.sh --reset --exec-only --force
 
 # 4. Cập nhật IP & RPC Endpoints vào metanode-suite
 echo "⚙️  4. Cập nhật cấu hình IP & RPC endpoints cho chain_a..."

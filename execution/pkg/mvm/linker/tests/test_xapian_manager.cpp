@@ -47,6 +47,7 @@
 
 #include "xapian/xapian_manager.h"
 #include "xapian/xapian_registry.h"
+#include "xapian/xapian_search.h"
 #include "my_extension/utils.h"
 #include "my_extension/constants.h"
 #include <mvm/util.h>
@@ -829,7 +830,7 @@ TEST_SUITE("XapianManager") {
             // 2. Call add_value with isSerialise = true
             uint256_t txTrue = next_fake_tx_hash();
             commit_write(txTrue, [&]() {
-                return manager->add_value(docId, 2, "serialised_val", true, 3, nullptr, &txTrue);
+                return manager->add_value(docId, 2, "100", true, 3, nullptr, &txTrue);
             });
 
             auto logsTrue = manager->getChangeLogs();
@@ -837,6 +838,7 @@ TEST_SUITE("XapianManager") {
             REQUIRE(logsTrue[0].op == XapianLog::Operation::ADD_VALUE);
             auto dataTrue = std::get<XapianLog::AddValueData>(logsTrue[0].data);
             CHECK(dataTrue.is_serialised == true);
+            CHECK(dataTrue.value == Xapian::sortable_serialise(100.0));
 
             // Serialize and deserialize
             std::vector<uint8_t> serTrue = manager->comprehensive_log.serialize();
@@ -845,13 +847,366 @@ TEST_SUITE("XapianManager") {
             REQUIRE(deserTrue->xapian_doc_logs.size() == 1);
             auto deserDataTrue = std::get<XapianLog::AddValueData>(deserTrue->xapian_doc_logs[0].data);
             CHECK(deserDataTrue.is_serialised == true);
+            CHECK(deserDataTrue.value == Xapian::sortable_serialise(100.0));
 
             manager->commit_changes();
+            CHECK(manager->get_value(docId, 2, true, 3) == "100");
+            CHECK(manager->get_value(docId, 2, false, 3) == Xapian::sortable_serialise(100.0));
+            CHECK(manager->add_value(docId, 2, "not_a_number", true, 3, nullptr, &txTrue).empty());
+
+            // 3. Verify RangeFilter and numeric sorting with isSerialise = true and sortReverse
+            auto rangeMgr = create_test_manager("val_range_sort_test", 554434, true);
+            REQUIRE(rangeMgr != nullptr);
+            const char* prices[] = {"100", "9", "20"};
+            std::vector<std::string> priceDocIds;
+            for (int i = 0; i < 3; ++i) {
+                uint256_t txP = next_fake_tx_hash();
+                std::string pid = commit_write(txP, [&]() {
+                    std::string id = rangeMgr->new_document(std::string("item_price_") + prices[i], 1, nullptr, &txP);
+                    rangeMgr->add_term(id, "item", 1, nullptr, &txP);
+                    rangeMgr->add_value(id, 5, prices[i], /*isSerialise=*/true, 1, nullptr, &txP);
+                    return id;
+                });
+                priceDocIds.push_back(pid);
+            }
+            rangeMgr->commit_changes();
+
+            CHECK(rangeMgr->get_value(priceDocIds[0], 5, true, 1) == "100");
+            CHECK(rangeMgr->get_value(priceDocIds[1], 5, true, 1) == "9");
+            CHECK(rangeMgr->get_value(priceDocIds[2], 5, true, 1) == "20");
+
+            Xapian::Database* sdb = rangeMgr->acquireSearchDb();
+            REQUIRE(sdb != nullptr);
+            {
+                XapianSearcher searcher(sdb);
+                nlohmann::json opt = {{"rangeFilters", {{{"slot", "05"}, {"begin", "50"}, {"end", "150"}}}}};
+                auto rf = convertJsonToRangeFilters(opt);
+                auto [rRange, totalRange] = searcher.search(
+                    {"item"}, Xapian::Query::OP_AND, Xapian::Query::OP_AND, {},
+                    std::nullopt, std::nullopt, 0, 10, std::nullopt, /*sort_reverse=*/false, rf, 1);
+                REQUIRE(rRange.size() == 1);
+                CHECK(rRange[0].data == "item_price_100");
+
+                // Open-ended range filter: begin = "50", end = "" (>= 50 -> 100)
+                nlohmann::json optGe = {{"rangeFilters", {{{"slot", "05"}, {"begin", "50"}, {"end", ""}}}}};
+                auto rfGe = convertJsonToRangeFilters(optGe);
+                auto [rGe, totalGe] = searcher.search(
+                    {"item"}, Xapian::Query::OP_AND, Xapian::Query::OP_AND, {},
+                    std::nullopt, std::nullopt, 0, 10, std::nullopt, /*sort_ascending=*/true, rfGe, 1);
+                REQUIRE(rGe.size() == 1);
+                CHECK(rGe[0].data == "item_price_100");
+
+                // Open-ended range filter: begin = "", end = "50" (<= 50 -> 9, 20)
+                nlohmann::json optLe = {{"rangeFilters", {{{"slot", "05"}, {"begin", ""}, {"end", "50"}}}}};
+                auto rfLe = convertJsonToRangeFilters(optLe);
+                auto [rLe, totalLe] = searcher.search(
+                    {"item"}, Xapian::Query::OP_AND, Xapian::Query::OP_AND, {},
+                    std::nullopt, std::nullopt, 0, 10, Xapian::valueno(5), /*sort_ascending=*/true, rfLe, 1);
+                REQUIRE(rLe.size() == 2);
+                CHECK(rLe[0].data == "item_price_9");
+                CHECK(rLe[1].data == "item_price_20");
+
+                // NaN, inf, hex, leading '+', leading space, and trailing garbage rejection
+                for (const char* badVal : {"NaN", "inf", "-inf", "12abc", "0x10", "+5", " 5", "5 "}) {
+                    CHECK(rangeMgr->add_value(priceDocIds[0], 5, badVal, true, 1, nullptr, &txTrue).empty());
+                    nlohmann::json optBad = {{"rangeFilters", {{{"slot", "05"}, {"begin", badVal}, {"end", "100"}}}}};
+                    CHECK_THROWS_AS(convertJsonToRangeFilters(optBad), std::invalid_argument);
+                }
+
+                // High-precision roundtrip (plain decimal, no scientific notation like 1e+05) and empty/nil slot clearing
+                uint256_t txPrec = 12352;
+                CHECK(!rangeMgr->add_value(priceDocIds[0], 8, "0.123456789012", true, 1, nullptr, &txPrec).empty());
+                CHECK(!rangeMgr->add_value(priceDocIds[0], 9, "3.14159265358979", true, 1, nullptr, &txPrec).empty());
+                CHECK(!rangeMgr->add_value(priceDocIds[0], 10, "100000", true, 1, nullptr, &txPrec).empty());
+                CHECK(!rangeMgr->add_value(priceDocIds[0], 11, "0.00000000001", true, 1, nullptr, &txPrec).empty());
+                CHECK(rangeMgr->get_value(priceDocIds[0], 8, true, 1, &txPrec) == "0.123456789012");
+                CHECK(rangeMgr->get_value(priceDocIds[0], 9, true, 1, &txPrec) == "3.14159265358979");
+                CHECK(rangeMgr->get_value(priceDocIds[0], 10, true, 1, &txPrec) == "100000");
+                CHECK(rangeMgr->get_value(priceDocIds[0], 11, true, 1, &txPrec) == "0.00000000001");
+                // Clear slot 8 with empty string ("")
+                CHECK(!rangeMgr->add_value(priceDocIds[0], 8, "", true, 1, nullptr, &txPrec).empty());
+                CHECK(rangeMgr->get_value(priceDocIds[0], 8, true, 1, &txPrec).empty());
+
+                // sort_ascending = true -> ascending (9, 20, 100)
+                auto [rAsc, totalAsc] = searcher.search(
+                    {"item"}, Xapian::Query::OP_AND, Xapian::Query::OP_AND, {},
+                    std::nullopt, std::nullopt, 0, 10, Xapian::valueno(5), /*sort_ascending=*/true, {}, 1);
+                REQUIRE(rAsc.size() == 3);
+                CHECK(rAsc[0].data == "item_price_9");
+                CHECK(rAsc[1].data == "item_price_20");
+                CHECK(rAsc[2].data == "item_price_100");
+
+                // sort_ascending = false -> descending (100, 20, 9)
+                auto [rDesc, totalDesc] = searcher.search(
+                    {"item"}, Xapian::Query::OP_AND, Xapian::Query::OP_AND, {},
+                    std::nullopt, std::nullopt, 0, 10, Xapian::valueno(5), /*sort_ascending=*/false, {}, 1);
+                REQUIRE(rDesc.size() == 3);
+                CHECK(rDesc[0].data == "item_price_100");
+                CHECK(rDesc[1].data == "item_price_20");
+                CHECK(rDesc[2].data == "item_price_9");
+            }
+            rangeMgr->releaseSearchDb(sdb);
         } catch (const Xapian::Error& e) {
             FAIL(e.get_description());
         } catch (const std::exception& e) {
             FAIL(e.what());
         }
+    }
+
+    TEST_CASE("Fix regression: Document identity hijacking via term collision with internal docid (Q prefix)") {
+        // 1. Regular words starting with 'Q' are NOT considered reserved
+        CHECK(XapianManager::isReservedSystemDocIdTerm("Q") == false);
+        CHECK(XapianManager::isReservedSystemDocIdTerm("QUERY") == false);
+        CHECK(XapianManager::isReservedSystemDocIdTerm("QUANTUM") == false);
+        CHECK(XapianManager::isReservedSystemDocIdTerm("QUICK_SORT") == false);
+        CHECK(XapianManager::isReservedSystemDocIdTerm("Q1_REPORT_2026") == false);
+        CHECK(XapianManager::isReservedSystemDocIdTerm("Question_About_Blockchain") == false);
+
+        // 2. Exact 'Q' + 64 hex chars is recognized as reserved system docid term
+        std::string mockDocId = "70c172244bf70760fab30c8baa4cf06c9ec8a3c18ebd1bbff58736243f80c04c";
+        CHECK(XapianManager::isReservedSystemDocIdTerm("Q" + mockDocId) == true);
+
+        // 2b. Reusable prefix validation: partial prefixes of Q+hex must be blocked
+        CHECK(XapianManager::isReservedSystemPrefix("Q") == true);
+        CHECK(XapianManager::isReservedSystemPrefix("q") == true);
+        CHECK(XapianManager::isReservedSystemPrefix("Qe") == true);
+        CHECK(XapianManager::isReservedSystemPrefix("Q1") == true);
+        CHECK(XapianManager::isReservedSystemPrefix("Qab") == true);
+        CHECK(XapianManager::isReservedSystemPrefix("qf") == true);
+        CHECK(XapianManager::isReservedSystemPrefix("Q" + mockDocId) == true);
+        CHECK(XapianManager::isReservedSystemPrefix("TAG") == false);
+        CHECK(XapianManager::isReservedSystemPrefix("author") == false);
+        CHECK(XapianManager::isReservedSystemPrefix("QUANTUM") == false);
+        CHECK(XapianManager::isReservedSystemPrefix("QUERY") == false);
+        CHECK(XapianManager::isReservedSystemPrefix("QUICK") == false);
+        CHECK(XapianManager::isReservedSystemPrefix("Q_TAG") == false);
+
+        // 3. Functional test: adding Q+ID_B to doc A must be rejected and not hijack doc B
+        std::string dbName = "test_q_hijack_prevention_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+        mvm::Address addr(999);
+        auto manager = XapianManager::getInstance(dbName, addr, true);
+        REQUIRE(manager != nullptr);
+
+        uint256_t txA = next_fake_tx_hash();
+        std::string docA;
+        commit_write(txA, [&]() {
+            docA = manager->new_document("payload_doc_A", 1, nullptr, &txA);
+            return docA;
+        });
+
+        uint256_t txB = next_fake_tx_hash();
+        std::string docB;
+        commit_write(txB, [&]() {
+            docB = manager->new_document("payload_doc_B", 1, nullptr, &txB);
+            return docB;
+        });
+
+        manager->commit_changes();
+
+        std::string beforeB = manager->get_data(docB, 1);
+        CHECK(beforeB == "payload_doc_B");
+
+        // Attempt to hijack docB by attaching Q+docB to docA
+        std::string cleanB = docB.substr(0, 2) == "0x" ? docB.substr(2) : docB;
+        uint256_t txAttack = next_fake_tx_hash();
+        std::string resAttack;
+        commit_write(txAttack, [&]() {
+            resAttack = manager->add_term(docA, "Q" + cleanB, 2, nullptr, &txAttack);
+            return resAttack;
+        });
+        // add_term returns empty string on collision
+        CHECK(resAttack.empty());
+
+        // Regular term like "QUANTUM" must succeed
+        uint256_t txLegit = next_fake_tx_hash();
+        std::string resLegit;
+        commit_write(txLegit, [&]() {
+            resLegit = manager->add_term(docA, "QUANTUM", 2, nullptr, &txLegit);
+            return resLegit;
+        });
+        CHECK(!resLegit.empty());
+
+        manager->commit_changes();
+
+        // Reading docB MUST still return payload_doc_B, not hijacked by docA
+        std::string afterB = manager->get_data(docB, 2);
+        CHECK(afterB == "payload_doc_B");
+
+        // 4. Functional test: index_text with partial prefix (e.g. "Qe") + remainder of docB
+        // must also be rejected and must NOT hijack docB after commit
+        uint256_t txAttackPrefix = next_fake_tx_hash();
+        std::string resAttackPrefix;
+        std::string partialPrefix = "Q" + cleanB.substr(0, 1);
+        std::string textRemainder = cleanB.substr(1);
+        commit_write(txAttackPrefix, [&]() {
+            resAttackPrefix = manager->index_text(docA, textRemainder, 1, partialPrefix, 2, nullptr, &txAttackPrefix);
+            return resAttackPrefix;
+        });
+        CHECK(resAttackPrefix.empty());
+
+        manager->commit_changes();
+
+        // Reading docB after commit MUST still return payload_doc_B
+        std::string afterPrefixB = manager->get_data(docB, 2);
+        CHECK(afterPrefixB == "payload_doc_B");
+    }
+
+    TEST_CASE("Fix regression: Prefix length limit, slot range validation, and reserved slots") {
+        std::string dbName = "test_limits_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+        mvm::Address addr(888);
+        auto manager = XapianManager::getInstance(dbName, addr, true);
+        REQUIRE(manager != nullptr);
+
+        uint256_t tx1 = next_fake_tx_hash();
+        std::string doc1;
+        commit_write(tx1, [&]() {
+            doc1 = manager->new_document("payload_doc_limits", 1, nullptr, &tx1);
+            return doc1;
+        });
+        manager->commit_changes();
+        REQUIRE(!doc1.empty());
+
+        // 1. Prefix length validation in index_text
+        uint256_t txPrefix = next_fake_tx_hash();
+        // 1a. Prefix >= 64 characters must be rejected
+        std::string resPrefix300 = manager->index_text(doc1, "hello", 1, std::string(300, 'T'), 1, nullptr, &txPrefix);
+        CHECK(resPrefix300.empty());
+        std::string resPrefix64 = manager->index_text(doc1, "hello", 1, std::string(64, 'T'), 1, nullptr, &txPrefix);
+        CHECK(resPrefix64.empty());
+
+        // 1b. Prefix <= 63 characters must succeed
+        std::string resPrefix63 = manager->index_text(doc1, "hello", 1, std::string(63, 'T'), 1, nullptr, &txPrefix);
+        CHECK(!resPrefix63.empty());
+
+        // 2. Slot range and reserved slots validation in add_value
+        uint256_t txSlot = next_fake_tx_hash();
+        // 2a. Out of range slot (> 0xFFFFFFFD)
+        CHECK(manager->add_value(doc1, 0xFFFFFFFF, "val", false, 1, nullptr, &txSlot).empty());
+        CHECK(manager->add_value(doc1, 0xFFFFFFFE, "val", false, 1, nullptr, &txSlot).empty());
+
+        // 2b. Reserved system slots 253 (created_at) and 254 (deleted_at)
+        CHECK(manager->add_value(doc1, 253, "val", false, 1, nullptr, &txSlot).empty());
+        CHECK(manager->add_value(doc1, 254, "val", false, 1, nullptr, &txSlot).empty());
+
+        // 2c. Valid slots succeed
+        CHECK(!manager->add_value(doc1, 1, "valid_slot_1", false, 1, nullptr, &txSlot).empty());
+        CHECK(!manager->add_value(doc1, 252, "valid_slot_252", false, 1, nullptr, &txSlot).empty());
+        CHECK(!manager->add_value(doc1, 255, "valid_slot_255", false, 1, nullptr, &txSlot).empty());
+
+        // 3. Slot validation in get_value
+        CHECK(manager->get_value(doc1, 0xFFFFFFFF, false, 1, &txSlot).empty());
+        CHECK(manager->get_value(doc1, 1, false, 1, &txSlot) == "valid_slot_1");
+
+        // 4. Word length clamping by termgenerator (words > 180 chars do not trigger Xapian Term too long)
+        uint256_t txLongWord = next_fake_tx_hash();
+        commit_write(txLongWord, [&]() {
+            std::string veryLongWord(500, 'z');
+            std::string res = manager->index_text(doc1, veryLongWord, 1, "pref", 1, nullptr, &txLongWord);
+            return res;
+        });
+        CHECK_NOTHROW(manager->commit_changes());
+    }
+
+    TEST_CASE("acquireSearchDb and acquireSimpleReadDb pool lifecycle & generation sync") {
+        std::string dbName = "test_pool_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+        mvm::Address addr(999);
+        auto manager = XapianManager::getInstance(dbName, addr, true);
+        REQUIRE(manager != nullptr);
+
+        // 1. Acquire single search DB, verify non-null, release
+        Xapian::Database* sdb = manager->acquireSearchDb();
+        REQUIRE(sdb != nullptr);
+        CHECK_NOTHROW(manager->releaseSearchDb(sdb));
+
+        // 2. Acquire single simple read DB, verify non-null, release
+        Xapian::Database* rdb = manager->acquireSimpleReadDb();
+        REQUIRE(rdb != nullptr);
+        CHECK_NOTHROW(manager->releaseSimpleReadDb(rdb));
+
+        // 3. Multi-acquire from search pool (up to MAX_CONCURRENT_SEARCHES = 4)
+        std::vector<Xapian::Database*> searchDbs;
+        for (int i = 0; i < 4; ++i) {
+            Xapian::Database* db = manager->acquireSearchDb();
+            REQUIRE(db != nullptr);
+            searchDbs.push_back(db);
+        }
+        for (size_t i = 0; i < searchDbs.size(); ++i) {
+            for (size_t j = i + 1; j < searchDbs.size(); ++j) {
+                CHECK(searchDbs[i] != searchDbs[j]);
+            }
+        }
+        for (auto db : searchDbs) {
+            CHECK_NOTHROW(manager->releaseSearchDb(db));
+        }
+
+        // 4. Multi-acquire from simple read pool (up to MAX_CONCURRENT_READS = 4)
+        std::vector<Xapian::Database*> readDbs;
+        for (int i = 0; i < 4; ++i) {
+            Xapian::Database* db = manager->acquireSimpleReadDb();
+            REQUIRE(db != nullptr);
+            readDbs.push_back(db);
+        }
+        for (size_t i = 0; i < readDbs.size(); ++i) {
+            for (size_t j = i + 1; j < readDbs.size(); ++j) {
+                CHECK(readDbs[i] != readDbs[j]);
+            }
+        }
+        for (auto db : readDbs) {
+            CHECK_NOTHROW(manager->releaseSimpleReadDb(db));
+        }
+
+        // 5. Test generation sync across commit:
+        Xapian::Database* dbBefore = manager->acquireSearchDb();
+        REQUIRE(dbBefore != nullptr);
+        CHECK(dbBefore->get_doccount() == 0);
+        manager->releaseSearchDb(dbBefore);
+
+        // Write a document and commit
+        uint256_t tx = next_fake_tx_hash();
+        std::string docId;
+        commit_write(tx, [&]() {
+            docId = manager->new_document("pool_sync_test_payload", 1, nullptr, &tx);
+            return docId;
+        });
+        manager->commit_changes();
+
+        // Acquire again: manager should reopen the slot to match new db_generation
+        Xapian::Database* dbAfter = manager->acquireSearchDb();
+        REQUIRE(dbAfter != nullptr);
+        CHECK(dbAfter->get_doccount() > 0);
+        manager->releaseSearchDb(dbAfter);
+    }
+
+    TEST_CASE("compactInPlace lifecycle and data preservation") {
+        std::string dbName = "test_compact_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+        mvm::Address addr(12345);
+        auto manager = XapianManager::getInstance(dbName, addr, true);
+        REQUIRE(manager != nullptr);
+
+        // Write documents
+        uint256_t tx1 = next_fake_tx_hash();
+        std::string docId1;
+        commit_write(tx1, [&]() {
+            docId1 = manager->new_document("compact_payload_1", 1, nullptr, &tx1);
+            return docId1;
+        });
+        uint256_t tx2 = next_fake_tx_hash();
+        std::string docId2;
+        commit_write(tx2, [&]() {
+            docId2 = manager->new_document("compact_payload_2", 1, nullptr, &tx2);
+            return docId2;
+        });
+        manager->commit_changes();
+
+        // Run compactInPlace with 0 minSizeBytes and 0 minInterval
+        bool compacted = manager->compactInPlace(0, std::chrono::minutes(0));
+        CHECK(compacted == true);
+
+        // Verify data is preserved after compaction
+        std::string data1 = manager->get_data(docId1, 1);
+        CHECK(data1 == "compact_payload_1");
+        std::string data2 = manager->get_data(docId2, 1);
+        CHECK(data2 == "compact_payload_2");
     }
 }
 

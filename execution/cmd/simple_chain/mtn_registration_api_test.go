@@ -38,6 +38,12 @@ func (p *apiFakeParent) GetAccountRegistry(a common.Address) (cm.PublicKey, bool
 	return k, ok, nil
 }
 
+func (p *apiFakeParent) GetReceipt(txHash common.Hash) (*parentchain.Receipt, bool, error) {
+	return &parentchain.Receipt{TxHash: txHash, Status: 1}, true, nil
+}
+
+func (p *apiFakeParent) ReportTxFailure(common.Hash) {}
+
 type regAPIHarness struct {
 	api    *MtnAPI
 	parent *apiFakeParent

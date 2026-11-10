@@ -35,6 +35,8 @@ type SocketServer struct {
 	onConnectedCallBack    []func(connection network.Connection)
 	onDisconnectedCallBack []func(connection network.Connection)
 	requestChan            chan network.Request
+	initChan               chan network.Request // dedicated channel cho InitConnection
+	closeMu                sync.RWMutex         // protects sends against channel close in Stop()
 	wg                     sync.WaitGroup
 	closeOnce              sync.Once      // GO-H3: ensure requestChan closed exactly once
 	connSem                chan struct{}  // GO-M2: max concurrent connections semaphore
@@ -52,6 +54,10 @@ func NewSocketServer(
 ) (network.SocketServer, error) {
 	if cfg == nil {
 		cfg = DefaultConfig()
+	} else {
+		// Copy để không mutate object của caller
+		cfgCopy := *cfg
+		cfg = &cfgCopy
 	}
 	if keyPair == nil {
 		return nil, errors.New("NewSocketServer: keyPair cannot be nil")
@@ -72,6 +78,15 @@ func NewSocketServer(
 	if maxConnsPerIP <= 0 {
 		maxConnsPerIP = 100
 	}
+	if cfg.InitWorkerPoolSize <= 0 {
+		cfg.InitWorkerPoolSize = 2
+	}
+	if cfg.InitChanSize <= 0 {
+		cfg.InitChanSize = 256
+	}
+	if cfg.RequestChanSize <= 0 {
+		cfg.RequestChanSize = 500000
+	}
 	s := &SocketServer{
 		config:             cfg,
 		keyPair:            keyPair,
@@ -81,6 +96,7 @@ func NewSocketServer(
 		ctx:                ctx,
 		cancelFunc:         cancelFunc,
 		requestChan:        make(chan network.Request, cfg.RequestChanSize),
+		initChan:           make(chan network.Request, cfg.InitChanSize),
 		connSem:            make(chan struct{}, maxConns),
 		maxConnsPerIP:      maxConnsPerIP,
 		ipConns:            make(map[string]int),
@@ -164,6 +180,60 @@ func (s *SocketServer) startWorkerPool() {
 	go s.logStats(&activeWorkers, &processedRequests, workerCount)
 }
 
+func (s *SocketServer) startInitWorkerPool() {
+	workerCount := 2
+	if s.config != nil && s.config.InitWorkerPoolSize > 0 {
+		workerCount = s.config.InitWorkerPoolSize
+	}
+	s.wg.Add(workerCount)
+
+	for i := 0; i < workerCount; i++ {
+		go func(workerID int) {
+			defer s.wg.Done()
+			for {
+				select {
+				case <-s.ctx.Done():
+					return
+				case request, ok := <-s.initChan:
+					if !ok {
+						return
+					}
+					if request == nil {
+						continue
+					}
+					// Bọc trong func() để defer chạy sau MỖI request,
+					// không phải khi goroutine return.
+					func() {
+						var handlerErr error
+						defer func() {
+							if d, ok := request.(interface{ Done(error) }); ok {
+								d.Done(handlerErr)
+							}
+							// Trả *Request về pool — unwrap initDoneRequest nếu cần
+							if wrapped, ok := request.(*initDoneRequest); ok {
+								if req, ok := wrapped.Request.(*Request); ok {
+									requestPool.Put(req)
+								}
+							} else if req, ok := request.(*Request); ok {
+								requestPool.Put(req)
+							}
+						}()
+						if err := s.handler.HandleRequest(request); err != nil {
+							handlerErr = err
+							logger.Warn(
+								"InitWorker %d: Error from handler while processing InitConnection from %s: %v",
+								workerID,
+								request.Connection().RemoteAddrSafe(),
+								err,
+							)
+						}
+					}()
+				}
+			}
+		}(i)
+	}
+}
+
 // HandleConnection processes commands from a single connection.
 // RACE CONDITION FIXES:
 //  1. InitConnection uses BLOCKING send (never dropped even when requestChan is full)
@@ -217,40 +287,54 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 		cmd := request.Message().Command()
 
 		if cmd == p_common.InitConnection {
+			if s.ctx.Err() != nil {
+				return s.ctx.Err()
+			}
 			resultChan := make(chan error, 1)
 			wrapped := &initDoneRequest{
 				Request:    request,
 				resultChan: resultChan,
 			}
-			// ─── InitConnection: BLOCKING send (NEVER drop) ──────────────
-			// Use blocking send with timeout to guarantee InitConnection
-			// reaches the worker pool. This fixes Race 4.
+
+			// ── Push vào initChan (có ctx.Done() để thoát an toàn khi shutdown) ──
 			queued := false
+			s.closeMu.RLock()
+			if s.ctx.Err() != nil {
+				s.closeMu.RUnlock()
+				return s.ctx.Err()
+			}
 			select {
-			case s.requestChan <- wrapped:
+			case s.initChan <- wrapped:
+				s.closeMu.RUnlock()
 				queued = true
-				logger.Info("HandleConnection: InitConnection queued successfully for %s", conn.RemoteAddrSafe())
-			case <-time.After(5 * time.Second):
-				logger.Error(
-					"HandleConnection: CRITICAL - InitConnection timed out (5s) waiting for queue space! remote=%s",
-					conn.RemoteAddrSafe(),
-				)
-				// Still try non-blocking as last resort
+			case <-s.ctx.Done():
+				s.closeMu.RUnlock()
+				return s.ctx.Err() // server đang shutdown, không panic
+			case <-time.After(2 * time.Second):
+				s.closeMu.RUnlock()
+				logger.Error("HandleConnection: InitConnection push timeout (2s) for %s", conn.RemoteAddrSafe())
+				// last-resort non-blocking retry
+				s.closeMu.RLock()
+				if s.ctx.Err() != nil {
+					s.closeMu.RUnlock()
+					return s.ctx.Err()
+				}
 				select {
-				case s.requestChan <- wrapped:
+				case s.initChan <- wrapped:
+					s.closeMu.RUnlock()
 					queued = true
-					logger.Info("HandleConnection: InitConnection queued (retry) for %s", conn.RemoteAddrSafe())
 				default:
-					logger.Error("HandleConnection: FATAL - InitConnection DROPPED for %s", conn.RemoteAddrSafe())
+					s.closeMu.RUnlock()
+					logger.Error("HandleConnection: InitConnection DROPPED for %s", conn.RemoteAddrSafe())
 					if req, ok := request.(*Request); ok {
 						requestPool.Put(req)
 					}
-					return errors.New("InitConnection dropped: queue full")
+					return errors.New("InitConnection dropped: initChan full")
 				}
 			}
 
 			if queued {
-				// Wait for worker to finish processing InitConnection before unblocking gate or reading next request
+				// ── Chờ worker xử lý xong ──
 				select {
 				case err := <-resultChan:
 					if err != nil {
@@ -269,14 +353,19 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 			return nil
 		}
 
-		// ─── All other commands: WAIT for InitConnection first ────────
-		// This fixes Race 1: ensures ProcessInitConnection runs before
-		// SendTransaction/GetAccountState for the same client connection.
-		select {
-		case <-initReady:
-			// InitConnection already queued, proceed
-		case <-s.ctx.Done():
-			return s.ctx.Err()
+		// ─── Commands requiring connection mapping (transactions, subscriptions) ────────
+		// MUST wait until InitConnection has completed. This ensures ProcessInitConnection
+		// runs before SendTransaction/Subscribe for the same client connection so receipts
+		// and pushed events can be delivered.
+		// Read-only queries (GetChainId, GetAccountState, GetNonce, GetBlockNumber, etc.)
+		// do not require InitConnection and bypass this gate immediately.
+		if requiresInitGate(cmd) {
+			select {
+			case <-initReady:
+				// InitConnection already queued/completed, proceed
+			case <-s.ctx.Done():
+				return s.ctx.Err()
+			}
 		}
 
 		// Transaction submissions are delivered losslessly: raw-tx clients are fire-and-forget, so a dropped or
@@ -295,22 +384,37 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 					}
 				}
 			}
+			s.closeMu.RLock()
+			if s.ctx.Err() != nil {
+				s.closeMu.RUnlock()
+				return s.ctx.Err()
+			}
 			select {
 			case <-s.ctx.Done():
+				s.closeMu.RUnlock()
 				return s.ctx.Err()
 			case s.requestChan <- request:
+				s.closeMu.RUnlock()
 			}
 			return nil
 		}
 
 		// Normal dispatch: non-blocking send to worker pool
+		s.closeMu.RLock()
+		if s.ctx.Err() != nil {
+			s.closeMu.RUnlock()
+			return s.ctx.Err()
+		}
 		select {
 		case <-s.ctx.Done():
+			s.closeMu.RUnlock()
 			return s.ctx.Err()
 		case s.requestChan <- request:
+			s.closeMu.RUnlock()
 			// logger.Info("⚠️  [SERVER DEBUG] Command queued to requestChan: %s", cmd)
 			// Success
 		default:
+			s.closeMu.RUnlock()
 			logger.Warn(
 				"HandleConnection: Server's central request channel is full. Dropping request from %s (Command: %s)",
 				conn.RemoteAddrSafe(),
@@ -373,6 +477,7 @@ func (s *SocketServer) HandleConnection(conn network.Connection) error {
 
 func (s *SocketServer) Listen(listenAddress string) error {
 	s.startWorkerPool()
+	s.startInitWorkerPool()
 
 	var err error
 	s.listener, err = net.Listen("tcp", listenAddress)
@@ -477,8 +582,13 @@ func (s *SocketServer) Stop() {
 	// even if Stop() is called concurrently. Workers drain via ctx.Done(),
 	// so closing the channel after cancellation is safe.
 	s.closeOnce.Do(func() {
+		s.closeMu.Lock()
+		defer s.closeMu.Unlock()
 		if s.requestChan != nil {
 			close(s.requestChan)
+		}
+		if s.initChan != nil {
+			close(s.initChan)
 		}
 	})
 	// Wait for worker pool to finish processing remaining requests

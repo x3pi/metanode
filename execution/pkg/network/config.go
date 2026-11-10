@@ -11,6 +11,7 @@ import (
 type Config struct {
 	MaxMessageLength              uint64
 	RequestChanSize               int
+	InitChanSize                  int // buffer của initChan (mặc định: 256)
 	ErrorChanSize                 int
 	WriteTimeout                  time.Duration
 	AcceptedConnectionIdleTimeout time.Duration // Maximum interval without a complete valid inbound message from an accepted peer.
@@ -18,6 +19,7 @@ type Config struct {
 	DialTimeout                   time.Duration
 	RetryParentInterval           time.Duration
 	HandlerWorkerPoolSize         int
+	InitWorkerPoolSize            int // số worker riêng xử lý InitConnection (mặc định: 2)
 	SendChanSize                  int // <-- THÊM DÒNG NÀY
 	MaxConnections                int // GO-M2: max concurrent TCP connections (0 = default 1000)
 	MaxConnectionsPerIP           int // NET-02: max concurrent TCP connections per remote IP (0 = default 100)
@@ -57,7 +59,9 @@ func DefaultConfig() *Config {
 	return &Config{
 		MaxMessageLength:              256 * 1024 * 1024, // 256MB (genesis state sync can be 170MB+ with many accounts and full trie data)
 		HandlerWorkerPoolSize:         numWorkers,
+		InitWorkerPoolSize:            2,
 		RequestChanSize:               requestQueueSize,
+		InitChanSize:                  256,
 		SendChanSize:                  500000, // Kích thước buffer cho kênh gửi (500K — hỗ trợ burst 200K+ TX)
 		ErrorChanSize:                 2000,
 		WriteTimeout:                  10 * time.Second,

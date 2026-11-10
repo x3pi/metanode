@@ -107,6 +107,10 @@ SolidityType getType(json element) {
     if (posBytes != string::npos) {
         return FixedBytesTy;
     }
+    size_t posUint = type.rfind("uint");
+    if (posUint != string::npos) {
+        return UintTy;
+    }
     size_t posInt = type.rfind("int");
     if (posInt != string::npos) {
         return IntTy;
@@ -226,28 +230,36 @@ std::vector<std::string> splitStringArgument(const std::string& input) {
     }
     std::string processedInput= input.substr(1, input.length() - 2);
     int trackVar = 0;
-    int from = 0;
+    std::string current;
 
     for (std::size_t i = 0; i < processedInput.length(); ++i) {
         char c = processedInput[i];
-//        cout << "CCC = : " << c << endl;
+        if (c == '\\' && i + 1 < processedInput.length()) {
+            char next = processedInput[i + 1];
+            if (next == ',' || next == '[' || next == ']' || next == '\\') {
+                if (trackVar > 0) {
+                    current.push_back('\\');
+                }
+                current.push_back(next);
+                ++i;
+                continue;
+            }
+        }
         if (c == '[') {
             trackVar++;
+            current.push_back(c);
         } else if (c == ']') {
             trackVar--;
+            current.push_back(c);
         } else if (c == ',' && trackVar == 0) {
-            if (i > 0) {
-                char pre = processedInput[i-1];
-                if (pre == '\\') {
-                    continue;
-                }
-            }
-            result.push_back(processedInput.substr(from, i - from));
-            from = i + 1;
+            result.push_back(current);
+            current.clear();
+        } else {
+            current.push_back(c);
         }
     }
 
-    result.push_back(processedInput.substr(from));
+    result.push_back(current);
 
     return result;
 }
@@ -255,17 +267,19 @@ std::string joinStringArgument(const std::vector<std::string>& parts) {
     std::string result = "[";
     
     for (std::size_t i = 0; i < parts.size(); ++i) {
-        std::string part = parts[i];
+        const std::string& part = parts[i];
+        std::string escaped;
+        escaped.reserve(part.length());
 
-        // Xử lý các ký tự escape nếu cần
-        for (std::size_t j = 0; j < part.length(); ++j) {
-            if (part[j] == ',') {
-                part.insert(j, "\\"); // Thêm ký tự escape trước dấu phẩy
-                ++j; // Nhảy qua ký tự vừa thêm để tránh vòng lặp vô hạn
+        // Escape các ký tự đặc biệt (\, ,, [, ]) để splitStringArgument khôi phục chính xác
+        for (char c : part) {
+            if (c == '\\' || c == ',' || c == '[' || c == ']') {
+                escaped.push_back('\\');
             }
+            escaped.push_back(c);
         }
 
-        result += part;
+        result += escaped;
         if (i < parts.size() - 1) {
             result += ",";
         }

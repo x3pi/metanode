@@ -15,6 +15,15 @@ func TestIsTxSubmissionCommand(t *testing.T) {
 	}
 }
 
+func TestRequiresInitGate(t *testing.T) {
+	require.True(t, requiresInitGate("SendRawTransaction"))
+	require.True(t, requiresInitGate("SendRawTransactions"))
+	require.True(t, requiresInitGate("SubscribeToAddress"))
+	for _, c := range []string{"InitConnection", "GetChainId", "GetAccountState", "GetNonce", "GetBlockNumber", "Ping", "ReadTransaction", ""} {
+		require.False(t, requiresInitGate(c), c)
+	}
+}
+
 func TestTxAdmissionGate_SetAndClear(t *testing.T) {
 	t.Cleanup(func() { SetTxAdmissionGate(nil) })
 	require.Nil(t, loadTxAdmissionGate())

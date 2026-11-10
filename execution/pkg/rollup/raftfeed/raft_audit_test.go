@@ -289,11 +289,10 @@ func TestReviewChunkRetryMustReachTail(t *testing.T) {
 		}
 		return counts, total
 	}
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		if _, total := count(); total >= 10 {
-			break
-		}
-	}
+	waitFor(t, "10 transactions to be committed", 10*time.Second, func() bool {
+		_, total := count()
+		return total >= 10
+	})
 	time.Sleep(500 * time.Millisecond)
 	counts, _ := count()
 	for nonce := uint64(1); nonce <= 10; nonce++ {

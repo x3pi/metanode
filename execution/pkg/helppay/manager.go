@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts"
@@ -55,10 +56,12 @@ type Manager struct {
 	chainState  *blockchain.ChainState
 	txPoolAdder TxPoolAdder
 
-	wallets         map[common.Address]*WalletWorker
-	staticWallets   map[common.Address]struct{} // ví được khai báo từ static config (không bị xóa bởi cluster sync)
-	sponsorJobQueue chan *SponsorGasTask        // Hàng đợi công việc nạp gas phân phối tới các worker ví chuyển hộ rảnh rỗi
-	inflightMu      sync.Map                    // map[common.Address]*sync.Mutex (chống nạp trùng lặp đồng thời)
+	wallets               map[common.Address]*WalletWorker
+	staticWallets         map[common.Address]struct{} // Wallets declared from static config (not removed by cluster sync)
+	sponsorJobQueue       chan *SponsorGasTask        // Top-up job queue distributed to available idle sponsor wallet workers
+	inflightMu            sync.Map                    // map[common.Address]*sync.Mutex (prevents concurrent duplicate top-ups)
+	inflightTopUps        atomic.Int64                // Tracks in-flight top-up requests across the entire node (RPC + TCP)
+	lastOverloadedAlertAt atomic.Int64                // Unix timestamp of the last Telegram alert sent when top-up queue is overloaded
 
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -441,6 +444,94 @@ func (m *Manager) NeedsTopUp(recipient common.Address) bool {
 	return m.GetBalance(recipient).Cmp(m.MinBalance()) < 0
 }
 
+// PreCheckAndAcquire performs cheap security pre-checks (valid Gas limit, bounded Nonce)
+// and dynamically allocates a bounded concurrency slot (ActiveWalletCount * 20) shared between RPC and TCP.
+//
+// FUNDED ACCOUNT FAST-PATH PROTECTION:
+// If the account balance >= minBalance (needsTopUp = false), the function returns immediately (nil, false, nil)
+// consuming zero resources, acquiring no in-flight slot, and never delaying funded transactions.
+//
+// If the account is unfunded (needsTopUp = true):
+// - Validates Gas limit [21,000, 30,000,000]
+// - Enforces transfer anti-drain (HelpPay only sponsors gas, not value transfer)
+// - Validates Nonce [expectedNonce, expectedNonce + 5]
+// - Acquires dynamic concurrency slot (ActiveWalletCount * 20)
+// - Returns a release() function to free the concurrency slot when finished (caller MUST defer release())
+func (m *Manager) PreCheckAndAcquire(
+	fromAddr common.Address,
+	txNonce uint64,
+	txGas uint64,
+	txAmount *big.Int,
+	clientIP string,
+	ingressType string,
+) (func(), bool, error) {
+	if !m.IsEnabled() || !m.NeedsTopUp(fromAddr) {
+		return nil, false, nil
+	}
+
+	// 1. Cheap gas limit pre-check: intrinsic gas minimum 21,000; maximum bounded by block gas limit 30,000,000.
+	if txGas < 21000 || txGas > 30000000 {
+		return nil, true, fmt.Errorf("transaction gas limit %d invalid (must be between 21000 and 30000000)", txGas)
+	}
+
+	// 2. Anti-drain protection: HelpPay ONLY sponsors gas (extraAmount), NEVER sponsors transfer amount/value!
+	// If the transaction attempts to transfer funds (txAmount > 0) and the account balance (even after receiving extraAmount)
+	// cannot cover txAmount, reject immediately to prevent malicious actors from draining sponsor gas.
+	if txAmount != nil && txAmount.Sign() > 0 {
+		currentBal := m.GetBalance(fromAddr)
+		projectedBal := new(big.Int).Add(currentBal, m.ExtraAmount())
+		if projectedBal.Cmp(txAmount) < 0 {
+			return nil, true, fmt.Errorf("insufficient funds for transfer amount: tx wants to transfer %s wei, but account has %s wei (HelpPay only sponsors gas, not transfer amount)",
+				txAmount.String(), currentBal.String())
+		}
+	}
+
+	// 3. Cheap nonce pre-check: reject stale nonces (< expectedNonce) or nonces too far ahead (> expectedNonce + 5).
+	var expectedNonce uint64
+	if m.chainState != nil {
+		if asDB := m.chainState.GetAccountStateDB(); asDB != nil {
+			if as, err := asDB.AccountStateReadOnly(fromAddr); err == nil && as != nil {
+				expectedNonce = as.Nonce()
+			}
+		}
+	}
+	if txNonce < expectedNonce {
+		return nil, true, fmt.Errorf("nonce too low: address %s has nonce %d, tx has nonce %d", fromAddr.Hex(), expectedNonce, txNonce)
+	}
+	if txNonce > expectedNonce+5 {
+		return nil, true, fmt.Errorf("nonce too high for unfunded account: address %s has nonce %d, tx has nonce %d (max ahead is +5)", fromAddr.Hex(), expectedNonce, txNonce)
+	}
+
+	// 4. Dynamic Bounded Concurrency: ActiveWalletCount * 20
+	walletCount := m.ActiveWalletCount()
+	if walletCount <= 0 {
+		walletCount = 1
+	}
+	maxConcurrent := int64(walletCount * 20)
+
+	currentInflight := m.inflightTopUps.Add(1)
+	if currentInflight > maxConcurrent {
+		m.inflightTopUps.Add(-1)
+		m.sendOverloadedTeleAlert(ingressType, clientIP, walletCount, maxConcurrent)
+		return nil, true, fmt.Errorf("helppay concurrency limit reached (%d in flight for %d wallets), please retry", maxConcurrent, walletCount)
+	}
+
+	release := func() {
+		m.inflightTopUps.Add(-1)
+	}
+	return release, true, nil
+}
+
+func (m *Manager) sendOverloadedTeleAlert(ingressType, clientIP string, walletCount int, maxConcurrent int64) {
+	now := time.Now().Unix()
+	last := m.lastOverloadedAlertAt.Load()
+	if now-last > 60 { // Rate limit: at most once every 60s
+		if m.lastOverloadedAlertAt.CompareAndSwap(last, now) {
+			logger.Telegram(fmt.Sprintf("⚠️ [HelpPay Alert][%s] Top-up queue full (%d/%d in-flight, %d sponsor wallets)! Sponsor pool is overloaded or insufficient wallets configured (IP: %s).", ingressType, maxConcurrent, maxConcurrent, walletCount, clientIP))
+		}
+	}
+}
+
 // CheckAndTopUp inspects recipient balance and triggers automated gas top-up if below threshold.
 func (m *Manager) CheckAndTopUp(recipient common.Address) error {
 	return m.CheckAndTopUpWithClient(recipient, "")
@@ -759,7 +850,6 @@ func (m *Manager) executeTransfer(w *WalletWorker, req *SponsorGasTask) error {
 	return fmt.Errorf("failed to execute transfer from %s after %d attempts", w.address.Hex(), maxNonceRetries)
 }
 
-
 // AddWallet adds a new sponsor wallet using an ECDSA private key to this local node.
 // Wallets are managed locally per-node for Nonce isolation and security (never broadcasted across peers).
 func (m *Manager) AddWallet(privKeyHex string, broadcast bool) (common.Address, error) {
@@ -771,8 +861,6 @@ func (m *Manager) AddWallet(privKeyHex string, broadcast bool) (common.Address, 
 		return common.Address{}, err
 	}
 
-	// Auto-enable if it was disabled and a wallet is added
-	m.enabled = true
 	if err := m.saveToDiskLocked(); err != nil {
 		logger.Warn("⚠️ [HelpPay] Failed to save state to disk: %v", err)
 	}
@@ -1047,6 +1135,7 @@ func (m *Manager) CatchUpFromCluster() (int, error) {
 
 // ApplyClusterState merges cluster configuration state into local manager state and persists it atomically.
 // Wallets remain managed locally per-node for Nonce isolation and security (no private keys over the wire).
+// Enforces safe ceilings to prevent malicious or misconfigured peers from draining sponsor wallets.
 func (m *Manager) ApplyClusterState(data []byte) (int, error) {
 	var resp ClusterStateResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -1062,22 +1151,45 @@ func (m *Manager) ApplyClusterState(data []byte) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	updatedCount := 0
+	ceilingExtra, _ := new(big.Int).SetString("5000000000000000000", 10)   // 5 ETH ceiling
+	ceilingMin, _ := new(big.Int).SetString("10000000000000000000", 10)    // 10 ETH ceiling
+	ceilingDaily, _ := new(big.Int).SetString("100000000000000000000", 10) // 100 ETH ceiling
+
 	if resp.MinBalance != "" {
-		if b, ok := new(big.Int).SetString(resp.MinBalance, 10); ok {
+		if b, ok := new(big.Int).SetString(resp.MinBalance, 10); ok && b.Sign() >= 0 {
+			if ceilingMin != nil && b.Cmp(ceilingMin) > 0 {
+				logger.Warn("⚠️ [HelpPay] Cluster min_balance %s exceeds safe ceiling %s, capped", b.String(), ceilingMin.String())
+				b = ceilingMin
+			}
 			m.minBalance = b
+			updatedCount++
 		}
 	}
 	if resp.ExtraAmount != "" {
-		if b, ok := new(big.Int).SetString(resp.ExtraAmount, 10); ok {
+		if b, ok := new(big.Int).SetString(resp.ExtraAmount, 10); ok && b.Sign() >= 0 {
+			if ceilingExtra != nil && b.Cmp(ceilingExtra) > 0 {
+				logger.Warn("⚠️ [HelpPay] Cluster extra_amount %s exceeds safe ceiling %s, capped", b.String(), ceilingExtra.String())
+				b = ceilingExtra
+			}
 			m.extraAmount = b
+			updatedCount++
 		}
 	}
 	if resp.MaxDailyPerIP != "" {
-		if b, ok := new(big.Int).SetString(resp.MaxDailyPerIP, 10); ok {
+		if b, ok := new(big.Int).SetString(resp.MaxDailyPerIP, 10); ok && b.Sign() >= 0 {
+			if ceilingDaily != nil && b.Cmp(ceilingDaily) > 0 {
+				logger.Warn("⚠️ [HelpPay] Cluster max_daily_per_IP %s exceeds safe ceiling %s, capped", b.String(), ceilingDaily.String())
+				b = ceilingDaily
+			}
 			m.maxDailyPerIP = b
+			updatedCount++
 		}
 	}
-	m.enabled = resp.Enabled
+	if m.enabled != resp.Enabled {
+		m.enabled = resp.Enabled
+		updatedCount++
+	}
 
 	if err := m.saveToDiskLocked(); err != nil {
 		logger.Warn("⚠️ [HelpPay] Failed to save state to disk: %v", err)
@@ -1086,7 +1198,7 @@ func (m *Manager) ApplyClusterState(data []byte) (int, error) {
 	logger.Info("✅ [HelpPay] Cluster configuration applied (enabled: %t, min_balance: %s, extra_amount: %s, active local wallets: %d)",
 		m.enabled, m.minBalance.String(), m.extraAmount.String(), len(m.wallets))
 
-	return 0, nil
+	return updatedCount, nil
 }
 
 func (m *Manager) loadFromDiskLocked() error {

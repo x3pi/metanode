@@ -10,6 +10,8 @@
 #include <doctest/doctest.h>
 
 #include "abi/encoding_utils.h"
+#include "abi_encode.hpp"
+#include "abi_decode.hpp"
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -540,6 +542,36 @@ TEST_SUITE("integer_overflow_bounds_checks") {
         }
         CHECK_THROWS_AS(readStringDynamic(buf, 0), std::out_of_range);
     }
+
+    TEST_CASE("readStringDynamic: offset points to or past end of buffer throws (xapian V1 ABI regression)") {
+        // Scenario 1: buffer has 64 bytes (enough for 2 offset slots in newDocument),
+        // but offset points to byte 64 (past end of buffer, so no 32-byte length word exists).
+        // In vulnerable code, accessing buf[offset + 28] caused out-of-bounds heap read.
+        std::vector<uint8_t> buf(64, 0);
+        buf[31] = 64; // offset_ptr 0 points to offset 64
+        CHECK_THROWS_AS(readStringDynamic(buf, 0), std::out_of_range);
+
+        // Scenario 2: offset points way past end of buffer
+        buf[31] = 200;
+        CHECK_THROWS_AS(readStringDynamic(buf, 0), std::out_of_range);
+    }
+
+    TEST_CASE("readStringDynamic: length word present but payload data truncated throws") {
+        // Buffer has 96 bytes: slot 0 (offset=64), slot 1 (other data), slot 2 (length=100).
+        // Payload has only 0 bytes remaining, but length claims 100.
+        std::vector<uint8_t> buf(96, 0);
+        buf[31] = 64;  // offset = 64
+        buf[95] = 100; // length = 100
+        CHECK_THROWS_AS(readStringDynamic(buf, 0), std::out_of_range);
+    }
+
+    TEST_CASE("readStringDynamic: valid dynamic string roundtrip") {
+        std::vector<uint8_t> buf;
+        appendUint256(buf, 32); // offset at slot 0 points to slot 1 (32)
+        appendString(buf, "secure_xapian_document");
+        std::string s = readStringDynamic(buf, 0);
+        CHECK(s == "secure_xapian_document");
+    }
 }
 
 // =====================================================================
@@ -611,5 +643,353 @@ TEST_SUITE("roundtrip_multi") {
         // Read uint64 after string
         uint64_t val = readUint256(buf, afterString);
         CHECK(val == 7777);
+    }
+}
+
+// =====================================================================
+// abi_encode tests (encodeInt, encodeAddress, encodeArgument)
+// =====================================================================
+TEST_SUITE("abi_encode_int") {
+    TEST_CASE("empty and zero representations") {
+        auto resEmpty = encodeInt("");
+        REQUIRE(resEmpty.size() == 32);
+        for (auto b : resEmpty) CHECK(b == 0);
+
+        auto res0x = encodeInt("0x");
+        REQUIRE(res0x.size() == 32);
+        for (auto b : res0x) CHECK(b == 0);
+
+        auto res0 = encodeInt("0x0");
+        REQUIRE(res0.size() == 32);
+        for (auto b : res0) CHECK(b == 0);
+
+        auto res00 = encodeInt("0x00");
+        REQUIRE(res00.size() == 32);
+        for (auto b : res00) CHECK(b == 0);
+    }
+
+    TEST_CASE("small positive integer") {
+        auto res = encodeInt("0x01", false);
+        REQUIRE(res.size() == 32);
+        CHECK(res[31] == 0x01);
+        for (size_t i = 0; i < 31; ++i) CHECK(res[i] == 0);
+
+        auto resSigned = encodeInt("0x01", true);
+        REQUIRE(resSigned.size() == 32);
+        CHECK(resSigned[31] == 0x01);
+        for (size_t i = 0; i < 31; ++i) CHECK(resSigned[i] == 0);
+    }
+
+    TEST_CASE("unsigned integer with MSB set (isSigned = false) does NOT sign extend") {
+        // 0x80 = 128 (unsigned), MSB of byte is 1. For uint256, it must zero-pad to 32 bytes.
+        auto res = encodeInt("0x80", false);
+        REQUIRE(res.size() == 32);
+        CHECK(res[31] == 0x80);
+        for (size_t i = 0; i < 31; ++i) CHECK(res[i] == 0);
+
+        auto res16 = encodeInt("0x8000", false);
+        REQUIRE(res16.size() == 32);
+        CHECK(res16[30] == 0x80);
+        CHECK(res16[31] == 0x00);
+        for (size_t i = 0; i < 30; ++i) CHECK(res16[i] == 0);
+
+        auto resFF = encodeInt("0xFF", false);
+        REQUIRE(resFF.size() == 32);
+        CHECK(resFF[31] == 0xFF);
+        for (size_t i = 0; i < 31; ++i) CHECK(resFF[i] == 0);
+    }
+
+    TEST_CASE("signed integer with MSB set (isSigned = true) DOES sign extend with 0xFF") {
+        auto res = encodeInt("0x80", true);
+        REQUIRE(res.size() == 32);
+        CHECK(res[31] == 0x80);
+        for (size_t i = 0; i < 31; ++i) CHECK(res[i] == 0xFF);
+
+        auto res16 = encodeInt("0x8000", true);
+        REQUIRE(res16.size() == 32);
+        CHECK(res16[30] == 0x80);
+        CHECK(res16[31] == 0x00);
+        for (size_t i = 0; i < 30; ++i) CHECK(res16[i] == 0xFF);
+
+        auto resFF = encodeInt("0xFF", true);
+        REQUIRE(resFF.size() == 32);
+        for (size_t i = 0; i < 32; ++i) CHECK(resFF[i] == 0xFF);
+    }
+
+    TEST_CASE("oversized integer (> 32 bytes) with leading zeros") {
+        // 8 zero bytes + 32 bytes of 0xAA (total 40 bytes = 80 hex chars)
+        std::string hexStr = "0x" + std::string(16, '0') + std::string(64, 'a');
+        auto res = encodeInt(hexStr, false);
+        REQUIRE(res.size() == 32);
+        for (size_t i = 0; i < 32; ++i) {
+            CHECK(res[i] == 0xaa);
+        }
+    }
+
+    TEST_CASE("oversized integer (> 32 bytes) without leading zeros throws invalid_argument") {
+        // 35 bytes of 0x55 (70 hex chars)
+        std::string hexStr = "0x" + std::string(70, '5');
+        CHECK_THROWS_AS(encodeInt(hexStr, false), std::invalid_argument);
+    }
+
+    TEST_CASE("33 zero bytes with isSigned=true does not abort on empty originBytes") {
+        // 33 bytes of all zeros = 66 hex '0' characters
+        std::string zeros33 = "0x" + std::string(66, '0');
+        auto resSigned = encodeInt(zeros33, true);
+        REQUIRE(resSigned.size() == 32);
+        for (auto b : resSigned) CHECK(b == 0);
+
+        auto resUnsigned = encodeInt(zeros33, false);
+        REQUIRE(resUnsigned.size() == 32);
+        for (auto b : resUnsigned) CHECK(b == 0);
+
+        // 40 zero bytes
+        std::string zeros40 = "0x" + std::string(80, '0');
+        auto res40 = encodeInt(zeros40, true);
+        REQUIRE(res40.size() == 32);
+        for (auto b : res40) CHECK(b == 0);
+    }
+
+    TEST_CASE("odd-length hex strings") {
+        auto res = encodeInt("0x1", false);
+        REQUIRE(res.size() == 32);
+        CHECK(res[31] == 0x01);
+        for (size_t i = 0; i < 31; ++i) CHECK(res[i] == 0);
+
+        auto res3 = encodeInt("0x123", false);
+        REQUIRE(res3.size() == 32);
+        CHECK(res3[30] == 0x01);
+        CHECK(res3[31] == 0x23);
+        for (size_t i = 0; i < 30; ++i) CHECK(res3[i] == 0);
+    }
+}
+
+TEST_SUITE("abi_encode_address") {
+    TEST_CASE("empty and zero representations") {
+        auto resEmpty = encodeAddress("");
+        REQUIRE(resEmpty.size() == 32);
+        for (auto b : resEmpty) CHECK(b == 0);
+
+        auto res0x = encodeAddress("0x");
+        REQUIRE(res0x.size() == 32);
+        for (auto b : res0x) CHECK(b == 0);
+    }
+
+    TEST_CASE("short address (< 20 bytes) right-aligned in 32-byte slot") {
+        auto res = encodeAddress("0x1234");
+        REQUIRE(res.size() == 32);
+        for (size_t i = 0; i < 30; ++i) CHECK(res[i] == 0);
+        CHECK(res[30] == 0x12);
+        CHECK(res[31] == 0x34);
+    }
+
+    TEST_CASE("standard 20-byte address right-aligned in 32-byte slot (bytes 12-31)") {
+        std::string addrHex = "0x0102030405060708090a0b0c0d0e0f1011121314";
+        auto res = encodeAddress(addrHex);
+        REQUIRE(res.size() == 32);
+        // First 12 bytes must be 0
+        for (size_t i = 0; i < 12; ++i) CHECK(res[i] == 0);
+        // Next 20 bytes must match the address
+        for (size_t i = 0; i < 20; ++i) {
+            CHECK(res[12 + i] == static_cast<uint8_t>(i + 1));
+        }
+    }
+
+    TEST_CASE("oversized address (> 20 bytes) safely takes last 20 bytes without OOB") {
+        // 32-byte EVM word with leading 12 zero bytes
+        std::string paddedAddrHex = "0x0000000000000000000000000102030405060708090a0b0c0d0e0f1011121314";
+        auto res = encodeAddress(paddedAddrHex);
+        REQUIRE(res.size() == 32);
+        for (size_t i = 0; i < 12; ++i) CHECK(res[i] == 0);
+        for (size_t i = 0; i < 20; ++i) {
+            CHECK(res[12 + i] == static_cast<uint8_t>(i + 1));
+        }
+
+        // 32-byte EVM word with non-zero prefix (> 20 non-zero bytes) throws invalid_argument
+        std::string prefixAddrHex = "0xffffffffffffffffffffffff0102030405060708090a0b0c0d0e0f1011121314";
+        CHECK_THROWS_AS(encodeAddress(prefixAddrHex), std::invalid_argument);
+    }
+}
+
+TEST_SUITE("abi_encode_argument") {
+    TEST_CASE("uint256 routes to unsigned encodeInt") {
+        nlohmann::json abi;
+        abi["type"] = "uint256";
+        auto res = encodeArgument(abi, "0x80");
+        REQUIRE(res.size() == 32);
+        CHECK(res[31] == 0x80);
+        // Must be zero-extended, NOT 0xFF
+        CHECK(res[0] == 0x00);
+        for (size_t i = 0; i < 31; ++i) CHECK(res[i] == 0);
+    }
+
+    TEST_CASE("int256 routes to signed encodeInt") {
+        nlohmann::json abi;
+        abi["type"] = "int256";
+        auto res = encodeArgument(abi, "0x80");
+        REQUIRE(res.size() == 32);
+        CHECK(res[31] == 0x80);
+        // Must be sign-extended with 0xFF
+        CHECK(res[0] == 0xFF);
+        for (size_t i = 0; i < 31; ++i) CHECK(res[i] == 0xFF);
+    }
+
+    TEST_CASE("address routes to encodeAddress") {
+        nlohmann::json abi;
+        abi["type"] = "address";
+        auto res = encodeArgument(abi, "0x0102030405060708090a0b0c0d0e0f1011121314");
+        REQUIRE(res.size() == 32);
+        for (size_t i = 0; i < 12; ++i) CHECK(res[i] == 0);
+        for (size_t i = 0; i < 20; ++i) {
+            CHECK(res[12 + i] == static_cast<uint8_t>(i + 1));
+        }
+    }
+}
+
+TEST_SUITE("abi_decode_boundary_check") {
+    TEST_CASE("decodeString rejects oversized offset (> 32-bit)") {
+        // Normal string calldata structure:
+        // Slot 0 (bytes 0..31): offset to string data
+        // Slot 1 (bytes 32..63): length of string
+        // Slot 2 (bytes 64..95): string data
+        std::vector<uint8_t> calldata(96, 0);
+
+        // Offset = 2^32 + 32: byte 27 is 1, byte 31 is 0x20
+        calldata[27] = 1;
+        calldata[31] = 0x20;
+        // Length = 1: byte 63 is 1
+        calldata[63] = 1;
+        // Data = 'A' at byte 64
+        calldata[64] = 'A';
+
+        nlohmann::json abi;
+        abi["type"] = "string";
+
+        // Must throw out_of_range instead of truncating offset to 32 and returning "A"
+        CHECK_THROWS_AS(decodeString(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("decodeString rejects oversized length (> 32-bit)") {
+        std::vector<uint8_t> calldata(96, 0);
+
+        // Offset = 32: byte 31 is 0x20
+        calldata[31] = 0x20;
+        // Length = 2^32 + 1: byte 32 + 27 = 59 is 1, byte 32 + 31 = 63 is 1
+        calldata[59] = 1;
+        calldata[63] = 1;
+        calldata[64] = 'A';
+
+        nlohmann::json abi;
+        abi["type"] = "string";
+
+        // Must throw out_of_range instead of truncating length to 1 and returning "A"
+        CHECK_THROWS_AS(decodeString(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("decodeBytes rejects oversized offset (> 32-bit)") {
+        std::vector<uint8_t> calldata(96, 0);
+        calldata[27] = 1;
+        calldata[31] = 0x20;
+        calldata[63] = 1;
+        calldata[64] = 0xAA;
+
+        nlohmann::json abi;
+        abi["type"] = "bytes";
+
+        CHECK_THROWS_AS(decodeBytes(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("decodeBytes rejects oversized length (> 32-bit)") {
+        std::vector<uint8_t> calldata(96, 0);
+        calldata[31] = 0x20;
+        calldata[59] = 1;
+        calldata[63] = 1;
+        calldata[64] = 0xAA;
+
+        nlohmann::json abi;
+        abi["type"] = "bytes";
+
+        CHECK_THROWS_AS(decodeBytes(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("decodeString accepts valid standard string") {
+        std::vector<uint8_t> calldata(96, 0);
+        // Offset = 32
+        calldata[31] = 0x20;
+        // Length = 5
+        calldata[63] = 5;
+        // "hello"
+        std::memcpy(calldata.data() + 64, "hello", 5);
+
+        nlohmann::json abi;
+        abi["type"] = "string";
+
+        auto res = decodeString(calldata.data(), 0, abi, calldata.size());
+        CHECK(res == "hello");
+    }
+
+    TEST_CASE("decodeTuple rejects oversized offset (> 32-bit)") {
+        std::vector<uint8_t> calldata(64, 0);
+        calldata[27] = 1; // offset > 2^32
+        calldata[31] = 0x20;
+
+        nlohmann::json abi;
+        abi["type"] = "tuple";
+        abi["components"] = nlohmann::json::array({
+            {{"name", "a"}, {"type", "string"}}
+        });
+
+        CHECK_THROWS_AS(decodeTuple(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("decodeArray rejects oversized offset (> 32-bit)") {
+        std::vector<uint8_t> calldata(64, 0);
+        calldata[27] = 1;
+        calldata[31] = 0x20;
+
+        nlohmann::json abi;
+        abi["type"] = "string[1]";
+
+        CHECK_THROWS_AS(decodeArray(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("decodeSlice rejects oversized offset (> 32-bit)") {
+        std::vector<uint8_t> calldata(64, 0);
+        calldata[27] = 1;
+        calldata[31] = 0x20;
+
+        nlohmann::json abi;
+        abi["type"] = "string[]";
+
+        CHECK_THROWS_AS(decodeSlice(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("decodeSlice rejects oversized length (> 32-bit)") {
+        std::vector<uint8_t> calldata(96, 0);
+        calldata[31] = 0x20; // offset = 32
+        calldata[59] = 1;    // array_len > 2^32
+        calldata[63] = 1;
+
+        nlohmann::json abi;
+        abi["type"] = "string[]";
+
+        CHECK_THROWS_AS(decodeSlice(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
+    }
+
+    TEST_CASE("string[] encode/decode roundtrip with special characters in terms") {
+        auto checkRoundtrip = [](const std::vector<std::string>& terms) {
+            nlohmann::json abi = {{"type", "string[]"}};
+            auto enc = encodeArgument(abi, joinStringArgument(terms));
+            auto withOffset = addOffsetPrefix(enc);
+            nlohmann::json out = decode(withOffset, R"([{"name":"r","type":"string[]"}])")["r"];
+            CHECK(out == nlohmann::json(terms));
+        };
+
+        checkRoundtrip({"apple", "banana"});
+        checkRoundtrip({"a,b", "c"});
+        checkRoundtrip({"x[", "y", "z"});
+        checkRoundtrip({"x]", "y[z]", "w"});
+        checkRoundtrip({"end\\", "next"});
+        checkRoundtrip({"a\\,b", "]\\[", "\\"});
     }
 }

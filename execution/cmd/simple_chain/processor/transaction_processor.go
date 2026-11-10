@@ -142,15 +142,15 @@ type TransactionProcessor struct {
 
 	// HelpPay sponsor wallet manager
 	helpPayManager IHelpPayManager
-	helpPaySem     chan struct{}
 }
 
-// IHelpPayManager allows transaction processors to invoke free gas top-ups before pool admission.
 type IHelpPayManager interface {
 	IsEnabled() bool
 	NeedsTopUp(recipient common.Address) bool
 	CheckAndTopUp(recipient common.Address) error
 	CheckAndTopUpWithClient(recipient common.Address, clientIP string) error
+	ActiveWalletCount() int
+	PreCheckAndAcquire(fromAddr common.Address, txNonce uint64, txGas uint64, txAmount *big.Int, clientIP string, ingressType string) (func(), bool, error)
 }
 
 // NewTransactionProcessor creates a new TransactionProcessor
@@ -192,8 +192,6 @@ func NewTransactionProcessor(
 		deviceKeyGoroutineDuration:  0,
 		// TX injection queue: buffered channel (from constants) + workers
 		injectionQueue: make(chan injectionRequest, InjectionQueueSize),
-		// Bounded semaphore for asynchronous HelpPay gas top-ups (prevents queue starvation & DoS)
-		helpPaySem: make(chan struct{}, 32),
 	}
 
 	// FORK-SAFETY: Shared RWMutex between virtual execution (RLock) and real
@@ -326,18 +324,21 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 	}
 
 	// HelpPay sponsor top-up check before admitting tx to pool:
+	// FUNDED ACCOUNT FAST-PATH PROTECTION:
+	// Only when an account actually needs gas (NeedsTopUp == true) do we verify signature early (for native),
+	// run pre-checks, and acquire concurrency slots. Funded accounts completely bypass this block!
 	if tp.helpPayManager != nil && tp.helpPayManager.IsEnabled() {
-		if !req.rawEth {
-			// SECURITY FIX: For native transactions, verify cryptographic signature before trusting FromAddress
-			if txErr := tx_processor.VerifyTransaction(tx, tp.chainState, nil); txErr != nil {
-				logger.Warn("executeAndAddTx: invalid signature before helppay: %v", txErr)
-				tp.sendTransactionError(req.conn, tx.Hash(), int64(txErr.Code), fmt.Sprintf("invalid transaction: %v", txErr), nil, req.msgID)
-				return
-			}
-		}
-
 		fromAddr := tx.FromAddress()
 		if tp.helpPayManager.NeedsTopUp(fromAddr) {
+			if !req.rawEth {
+				// SECURITY FIX: For native transactions, verify cryptographic signature before trusting FromAddress
+				if txErr := tx_processor.VerifyTransaction(tx, tp.chainState, nil); txErr != nil {
+					logger.Warn("executeAndAddTx: invalid signature before helppay: %v", txErr)
+					tp.sendTransactionError(req.conn, tx.Hash(), int64(txErr.Code), fmt.Sprintf("invalid transaction: %v", txErr), nil, req.msgID)
+					return
+				}
+			}
+
 			clientIP := ""
 			if req.conn != nil {
 				remote := req.conn.RemoteAddrSafe()
@@ -349,9 +350,21 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 				}
 			}
 
-			// DoS INGESTION QUEUE FIX: Process HelpPay top-up in a bounded background goroutine
-			// so the main injection workers never stall on the 5s confirmation wait!
-			go tp.handleAsyncHelpPayInjection(req, tx, ethTxHash, fromAddr, clientIP)
+			release, _, err := tp.helpPayManager.PreCheckAndAcquire(fromAddr, tx.GetNonce(), tx.MaxGas(), tx.Amount(), clientIP, "TCP")
+			if err != nil {
+				errHash := tx.Hash()
+				if ethTxHash != (common.Hash{}) {
+					errHash = ethTxHash
+				}
+				logger.Warn("executeAndAddTx: helppay precheck/concurrency rejected for %s: %v", fromAddr.Hex(), err)
+				tp.sendTransactionError(req.conn, errHash, -32005, err.Error(), nil, req.msgID)
+				return
+			}
+
+			go func() {
+				defer release()
+				tp.handleAsyncHelpPayInjection(req, tx, ethTxHash, fromAddr, clientIP)
+			}()
 			return
 		}
 	}
@@ -369,7 +382,7 @@ func (tp *TransactionProcessor) executeAndAddTx(req injectionRequest) {
 }
 
 // handleAsyncHelpPayInjection processes gas top-up for un-funded senders asynchronously,
-// bounded by helpPaySem to prevent queue exhaustion and DoS.
+// bounded by PreCheckAndAcquire dynamic limiter (acquired in executeAndAddTx before goroutine spawn) to prevent queue exhaustion and DoS.
 func (tp *TransactionProcessor) handleAsyncHelpPayInjection(
 	req injectionRequest,
 	tx types.Transaction,
@@ -377,19 +390,6 @@ func (tp *TransactionProcessor) handleAsyncHelpPayInjection(
 	fromAddr common.Address,
 	clientIP string,
 ) {
-	select {
-	case tp.helpPaySem <- struct{}{}:
-		defer func() { <-tp.helpPaySem }()
-	default:
-		logger.Warn("executeAndAddTx: helppay concurrency limit reached, rejecting top-up request for %s", fromAddr.Hex())
-		errHash := tx.Hash()
-		if ethTxHash != (common.Hash{}) {
-			errHash = ethTxHash
-		}
-		tp.sendTransactionError(req.conn, errHash, -32005, "helppay concurrency limit reached, please retry", nil, req.msgID)
-		return
-	}
-
 	if err := tp.helpPayManager.CheckAndTopUpWithClient(fromAddr, clientIP); err != nil {
 		logger.Warn("executeAndAddTx: async topUpFunc failed for %s: %v", fromAddr.Hex(), err)
 		errHash := tx.Hash()
@@ -889,7 +889,6 @@ func (tp *TransactionProcessor) GetPendingNonce(addr common.Address, stateNonce 
 	}
 	return stateNonce
 }
-
 
 func (tp *TransactionProcessor) logBackendStartMs() {
 	if atomic.CompareAndSwapInt32(&firstUdsMetricLogged, 0, 1) {

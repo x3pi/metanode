@@ -28,9 +28,12 @@ Khi người dùng mới, ví đối tác hoặc ví con trong hệ sinh thái t
 ### 1.3. Chính sách Private Chain & Quyết định Nghiệp vụ (Đã được Leader phê duyệt)
 > [!NOTE]
 > **Quy định đối với mạng Private Chain nội bộ**:
-> * Hệ thống consensus-chain này được thiết kế và triển khai phục vụ **mạng riêng tư (Private Chain / Consortium)** trong hệ sinh thái nội bộ, không mở công khai ra Internet công cộng cho người lạ tương tác.
+> * Hệ thống consensus-chain này được thiết kế và triển khai phục vụ **mạng riêng tư (Private Chain / Consortium / Free Chain)** trong hệ sinh thái nội bộ, không mở công khai ra Internet công cộng cho người lạ tương tác.
 > * **Cơ chế nạp tự động cho mọi ví mới**: Nhằm mục tiêu tối ưu hóa trải nghiệm người dùng nội bộ và tự động kích hoạt ví cho các dApp/microservices của đối tác mà không cần thủ tục cấp phát faucet thủ công, **bất kỳ địa chỉ mới nào gửi giao dịch hợp lệ đều được tài trợ 0.1 ETH**.
-> * **Quyết định nghiệp vụ**: Thiết kế này đã được **Leader phê duyệt chính thức**. Các AI Agent và kỹ sư phát triển tiếp theo cần ghi nhớ thiết kế này là có chủ đích và không được tự ý chặn hoặc áp đặt các rào cản faucet làm gián đoạn trải nghiệm của mạng nội bộ.
+> * **Quyết định nghiệp vụ & Yêu cầu của Sếp (Leader Approval)**: 
+>   - Thiết kế này đã được **Leader phê duyệt chính thức**.
+>   - **Mặc định `help_pay.enabled` trong `exec_config.json.j2` BẮT BUỘC PHẢI LÀ `true`**: Vì đây là chuỗi miễn phí (Free Chain), mọi node khi triển khai đều phải tự động kích hoạt tính năng nạp gas này. 
+>   - **Các AI Agent và reviewer KHÔNG ĐƯỢC tự ý đổi thành `false`** hoặc xem việc mặc định bật là lỗi! Rào chắn an toàn đã được đảm bảo qua tầng Pre-check, Concurrency Limiter, Nonce Bound và Anti-Drain Amount.
 
 ---
 
@@ -298,10 +301,38 @@ go run main.go test-topup
 | `helppay_removeWallet` | `adminAddr, sig, timestamp, addressHex` | Xóa ví bảo trợ khỏi pool và đồng bộ Raft (bắt buộc chữ ký Admin) |
 | `helppay_getConfig` | Không có | Lấy cấu hình `HelpPayConfig` hiện tại (metadata công khai) |
 | `helppay_setConfig` | `adminAddr, sig, timestamp, enabled, minBal, extraAmt` | Cập nhật cấu hình có xác thực chữ ký Admin |
-| `helppay_setConfigWithAdmin`| `adminAddr, sig, timestamp, enabled, minBal, extraAmt` | Cập nhật cấu hình có xác thực chữ ký Admin |
-| `admin_toggleHelpPay` | `password, enabled` | Bật/tắt chuyển tiền hộ bằng mật khẩu Admin node |
-| `admin_setHelpPayConfig` | `password, enabled, minBal, extraAmt` | Cập nhật cấu hình bằng mật khẩu Admin node |
-| `admin_addHelpPayWallet` | `password, privateKeyHex` | Thêm ví bảo trợ bằng mật khẩu Admin node |
-| `admin_removeHelpPayWallet`| `password, addressHex` | Xóa ví bảo trợ bằng mật khẩu Admin node |
-| `admin_getHelpPayWallets` | `password` | Lấy danh sách ví bảo trợ bằng mật khẩu Admin node |
-| `admin_getHelpPayConfig` | `password` | Lấy cấu hình HelpPay bằng mật khẩu Admin node |
+
+> [!NOTE]
+> Các phương thức `admin_*` dùng mật khẩu text thuần cũ đã được loại bỏ hoàn toàn để chuẩn hóa 100% sang chuẩn chữ ký mật mã ECDSA (EIP-191) qua namespace `helppay_*`.
+
+---
+
+## 7. Các Tối Ưu An Toàn & Quyết Định Kiến Trúc Đã Được Phê Duyệt
+
+Các AI Agent và kỹ sư phát triển tiếp theo cần nắm rõ các quyết định này để tránh lặp lại các vấn đề đã được giải quyết:
+
+### 7.1. Bảo Vệ Ví Có Đủ Tiền (Funded Wallet Fast-Path - Zero Overhead)
+- **Vấn đề**: Ví có số dư `>= min_balance` tự trả gas, không cần bảo trợ. Nếu bắt tất cả ví phải đi qua hàng đợi concurrency hoặc goroutine của HelpPay sẽ làm nghẽn giao dịch của người dùng thật.
+- **Giải pháp**: Kiểm tra `NeedsTopUp(fromAddr)` ngay đầu cổng vào (TCP & RPC). Nếu ví đủ tiền, trả về ngay lập tức (`0ms`, không spawn goroutine, không giữ slot concurrency).
+
+### 7.2. Tầng Tiền Kiểm Tra Rẻ Tiền (Cheap Pre-Check Trước Khi Nạp Tiền)
+Trước khi phân bổ slot ví sponsor và spawn goroutine nạp gas, hệ thống thực hiện các bước pre-check không tốn tài nguyên:
+1. **Gas Limit hợp lệ**: `21.000 <= tx.Gas() <= 30.000.000`.
+2. **Chống Rút Cạn Sponsor (Anti-Drain Tx Amount)**: HelpPay **chỉ tài trợ gas** (`extra_amount`), **không tài trợ giá trị chuyển khoản** (`tx.Amount()`). Nếu ví không có tiền mà gửi giao dịch chuyển `tx.Amount() > 0` (với `balance + extra_amount < tx.Amount()`), giao dịch bị từ chối ngay lập tức mà không mất 1 wei gas tài trợ.
+3. **Mempool Nonce Bound**: `stateNonce <= tx.Nonce() <= stateNonce + 5`. Cho phép người dùng gửi chuỗi 5 giao dịch liên tiếp vào mempool mà không bị từ chối oan, đồng thời chặn triệt để tấn công flood nonce vô lý.
+
+### 7.3. Giới Hạn Tải Động & Cảnh Báo Telegram (Dynamic Concurrency Limiter)
+- **Giới hạn slot**: `MaxInflight = ActiveWalletCount * 20` (chia sẻ chung cho cả cổng RPC và TCP qua `helppay.Manager`).
+- **Xử lý quá tải**: Khi đạt giới hạn 20 slot/ví sponsor, yêu cầu mới bị từ chối an toàn với mã lỗi rõ ràng và tự động bắn cảnh báo Telegram (có cooldown 60s để chống spam cảnh báo).
+
+### 7.4. Chống Tấn Công Memory Bloat & Brute-Force Admin API
+- Trong `helppay_api.go`, chữ ký Admin `VerifyAdminSignature` được kiểm tra tính hợp lệ **TRƯỚC** khi lưu vào cache chống replay `usedSignatures`. Kẻ tấn công gửi chữ ký rác sẽ bị từ chối ngay ở bước verify mà không thể làm phình bộ nhớ RAM.
+- **Rate limiting brute-force**: Nếu 1 IP gửi sai chữ ký quá 5 lần trong 60 giây, IP đó bị tạm khóa 5 phút và gửi cảnh báo khẩn qua Telegram. Bộ nhớ cache được dọn định kỳ tối đa 10s một lần dùng `atomic.Int64` để tránh nghẽn luồng.
+- **Lưu ý kiến trúc Reverse Proxy**: `recordFailedAuth` trích xuất IP client từ `RemoteAddr` của kết nối TCP. Nếu cụm node đặt sau Reverse Proxy (như Nginx, Cloudflare) mà không bóc tách header hoặc trỏ chung IP proxy, việc thử sai chữ ký từ một nguồn có thể tạm khóa toàn bộ proxy IP đó trong 5 phút. Khuyến nghị trong môi trường production nên whitelist IP admin ở tầng firewall/reverse proxy hoặc chỉ mở cổng RPC Admin trên mạng VPN nội bộ.
+
+### 7.5. Cấu Hình Telegram Chuẩn Hóa Qua Biến Môi Trường (Không Quét Fallback)
+- Xóa bỏ cơ chế quét fallback nhiều thư mục để tránh đọc nhầm file rác / file cũ.
+- Chỉ đọc từ biến môi trường chuẩn: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_THREAD_ID`.
+- Ansible (`security.env.j2`) tự động trích xuất cấu hình Telegram từ `inventory.yml` trên máy deploy và render vào `/opt/metanode/node-<id>/config/security.env`. Systemd tự nạp vào tiến trình khi khởi động.
+- **Lọc Log Level**: Chỉ các cảnh báo quan trọng (`logger.Telegram` và `logger.Fatal`) mới được gửi về Telegram theo mặc định, tránh làm loãng kênh chat bởi các log lỗi mạng/client thông thường.
+

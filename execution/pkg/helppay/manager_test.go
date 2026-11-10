@@ -394,3 +394,84 @@ func TestManager_GetPendingNonceInterface(t *testing.T) {
 	assert.Equal(t, uint64(0), png.GetPendingNonce(addr, 0))
 }
 
+func TestManager_PreCheckAndAcquire(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cfg := config.HelpPayConfig{
+		Enabled:     true,
+		MinBalance:  "10000000000000000",  // 0.01 ETH
+		ExtraAmount: "100000000000000000", // 0.1 ETH
+		ConfigFile:  filepath.Join(tmpDir, "helppay_precheck.json"),
+	}
+
+	mgr := NewManager(cfg, nil, nil, big.NewInt(991), tmpDir)
+	mgr.Start()
+	defer mgr.Stop()
+
+	// 1. Thêm 1 ví sponsor để maxConcurrent = 1 * 20 = 20
+	_, keyHex, _ := generateTestKey(t)
+	_, err := mgr.AddWallet(keyHex, false)
+	require.NoError(t, err)
+	require.Equal(t, 1, mgr.ActiveWalletCount())
+
+	fundedAddr := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	unfundedAddr := common.HexToAddress("0x8888888888888888888888888888888888888888")
+
+	// 2. Test gas < 21000
+	_, needsTopUp, err := mgr.PreCheckAndAcquire(unfundedAddr, 0, 20999, nil, "1.2.3.4", "RPC")
+	assert.True(t, needsTopUp)
+	assert.ErrorContains(t, err, "gas limit 20999 invalid")
+
+	// 3. Test gas > 30000000
+	_, needsTopUp, err = mgr.PreCheckAndAcquire(unfundedAddr, 0, 30000001, nil, "1.2.3.4", "RPC")
+	assert.True(t, needsTopUp)
+	assert.ErrorContains(t, err, "gas limit 30000001 invalid")
+
+	// 4. Test txAmount > 0 (Ví 0 đồng đòi chuyển 10 ETH -> HelpPay chỉ tài trợ gas chứ không tài trợ amount -> từ chối ngay)
+	tenETH, _ := new(big.Int).SetString("10000000000000000000", 10)
+	_, needsTopUp, err = mgr.PreCheckAndAcquire(unfundedAddr, 0, 50000, tenETH, "1.2.3.4", "RPC")
+	assert.True(t, needsTopUp)
+	assert.ErrorContains(t, err, "insufficient funds for transfer amount")
+
+	// 5. Test nonce > expectedNonce + 5 (expectedNonce = 0 vì chainState = nil)
+	_, needsTopUp, err = mgr.PreCheckAndAcquire(unfundedAddr, 6, 50000, nil, "1.2.3.4", "TCP")
+	assert.True(t, needsTopUp)
+	assert.ErrorContains(t, err, "nonce too high")
+
+	// 6. Test dynamic concurrency limiter (1 ví = max 20 slots)
+	var releases []func()
+	for i := 0; i < 20; i++ {
+		rel, needs, errAcq := mgr.PreCheckAndAcquire(unfundedAddr, 0, 50000, nil, "1.2.3.4", "RPC")
+		require.NoError(t, errAcq)
+		require.True(t, needs)
+		require.NotNil(t, rel)
+		releases = append(releases, rel)
+	}
+
+	// Yêu cầu thứ 21 phải bị từ chối do quá tải
+	_, _, errOverflow := mgr.PreCheckAndAcquire(unfundedAddr, 0, 50000, nil, "1.2.3.4", "RPC")
+	assert.ErrorContains(t, errOverflow, "helppay concurrency limit reached")
+
+	// Giải phóng 1 slot
+	releases[0]()
+	releases = releases[1:]
+
+	// Sau khi giải phóng, yêu cầu mới lại được chấp thuận
+	relAfter, needsAfter, errAfter := mgr.PreCheckAndAcquire(unfundedAddr, 0, 50000, nil, "1.2.3.4", "TCP")
+	require.NoError(t, errAfter)
+	require.True(t, needsAfter)
+	require.NotNil(t, relAfter)
+	releases = append(releases, relAfter)
+
+	// Dọn dẹp các release còn lại
+	for _, r := range releases {
+		r()
+	}
+
+	// Tắt tính năng -> needsTopUp phải là false
+	mgr.SetEnabled(false, false)
+	relDisabled, needsDisabled, errDisabled := mgr.PreCheckAndAcquire(fundedAddr, 0, 50000, nil, "1.2.3.4", "RPC")
+	assert.NoError(t, errDisabled)
+	assert.False(t, needsDisabled)
+	assert.Nil(t, relDisabled)
+}

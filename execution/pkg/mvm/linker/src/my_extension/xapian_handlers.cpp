@@ -17,6 +17,7 @@
 #include "mvm/crypto/sha256.hpp"
 #include <cstddef>
 #include "xapian/xapian_search.h"
+#include "abi/encoding_utils.h"
 #include <arpa/inet.h>
 #include <filesystem>
 #include <iostream>
@@ -32,6 +33,71 @@ using std::vector;
 
 #define DBNAME_MAX_LEN 128
 #define TERM_MAX_LEN 64
+#define PREFIX_MAX_LEN 64
+
+namespace {
+inline void validateTermNotReserved(const std::string &term, const char *opName) {
+  if (XapianManager::isReservedSystemDocIdTerm(term)) {
+    std::cerr << "[Error] FullDatabase (" << opName << "): term " << term
+              << " collides with reserved system document identifier." << std::endl;
+    MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: reserved term"));
+  }
+}
+
+inline void validatePrefixNotReserved(const std::string &prefix, const char *opName) {
+  if (XapianManager::isReservedSystemPrefix(prefix)) {
+    std::cerr << "[Error] FullDatabase (" << opName << "): prefix " << prefix
+              << " collides with reserved system document identifier." << std::endl;
+    MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: reserved prefix"));
+  }
+}
+
+inline void validatePrefix(const std::string &prefix, const char *opName) {
+  if (prefix.length() >= PREFIX_MAX_LEN) {
+    std::cerr << "[Error] FullDatabase (" << opName << "): prefix length ("
+              << prefix.length() << ") exceeds maximum of " << (PREFIX_MAX_LEN - 1)
+              << " characters." << std::endl;
+    MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: prefix too long"));
+  }
+  validatePrefixNotReserved(prefix, opName);
+}
+
+inline bool isReservedSlot(uint64_t slot) {
+  return slot == 253 || slot == 254;
+}
+
+inline void validateWriteSlot(uint64_t slot, const char *opName) {
+  if (slot > 0xFFFFFFFD || isReservedSlot(slot)) {
+    std::cerr << "[Error] FullDatabase (" << opName << "): slot " << slot
+              << " is out of range or reserved." << std::endl;
+    MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: invalid value slot"));
+  }
+}
+
+inline void validateReadSlot(uint64_t slot, const char *opName) {
+  if (slot > 0xFFFFFFFD) {
+    std::cerr << "[Error] FullDatabase (" << opName << "): slot " << slot
+              << " is out of range." << std::endl;
+    MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: invalid value slot"));
+  }
+}
+
+inline uint64_t parseSlotFromHex(const std::string &hexStr) {
+  std::string s = hexStr;
+  if (s.rfind("0x", 0) != 0 && s.rfind("0X", 0) != 0) {
+    s = "0x" + s;
+  }
+  try {
+    intx::uint256 val = intx::from_string<intx::uint256>(s);
+    if (val > intx::uint256(0xFFFFFFFD)) {
+      return 0xFFFFFFFFULL;
+    }
+    return static_cast<uint64_t>(val);
+  } catch (...) {
+    return 0xFFFFFFFFULL;
+  }
+}
+} // namespace
 
 // Forward declarations for helpers defined in my_extension.cpp
 extern bool parseABI(const std::vector<uint8_t> &, std::string &,
@@ -51,6 +117,17 @@ extern std::vector<uint8_t> encodeArgument(nlohmann::json abi,
                                            std::string argument);
 extern std::vector<uint8_t> addOffsetPrefix(const std::vector<uint8_t> &input);
 extern std::string joinStringArgument(const std::vector<std::string> &parts);
+
+namespace {
+inline nlohmann::json safeDecode(const std::vector<uint8_t> &bytes, const std::string &strAbi, const char *opName = "XAPIAN") {
+  try {
+    return decode(bytes, strAbi);
+  } catch (const std::exception &e) {
+    std::cerr << "[Error] FullDatabase (" << opName << ") ABI decode failed: " << e.what() << std::endl;
+    MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "ABI: malformed input data"));
+  }
+}
+} // namespace
 
 // Main function
 
@@ -232,7 +309,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                   {"internalType": "string", "name": "data", "type": "string"}
               ])";
 
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
       dbname = input_argument["dbname"].get<std::string>();
       rawData = input_argument["data"].get<std::string>();
 
@@ -295,7 +372,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
@@ -323,7 +400,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         // FORK-SAFETY: Read-only operation — do NOT register with registry.
         // Registering would include this manager's (potentially stale)
         // comprehensive_log in the hash computation for this transaction.
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -349,7 +426,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
@@ -376,7 +453,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -409,7 +486,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
       std::string term = input_argument["term"].get<std::string>();
@@ -443,6 +520,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
             << " characters." << std::endl;
         return mvm::Code(32, 0);
       }
+      validateTermNotReserved(term, "XAPIAN_ADD_TERM_DOCUMENT");
 
       std::string hex_str = "0x" + input_argument["docId"].get<std::string>();
       intx::uint256 number = intx::from_string<intx::uint256>(hex_str);
@@ -453,7 +531,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -498,7 +576,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
@@ -517,6 +595,9 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0);
       }
 
+      std::string prefix = input_argument["prefix"].get<std::string>();
+      validatePrefix(prefix, "XAPIAN_INDEX_TEXT_DOCUMENT");
+
       std::string hex_str = "0x" + input_argument["docId"].get<std::string>();
       intx::uint256 docId = intx::from_string<intx::uint256>(hex_str);
       auto manager = XapianManager::getInstance(input_argument["dbname"],
@@ -525,7 +606,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -575,7 +656,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                   {"internalType": "string", "name": "data", "type": "string"}
               ])";
 
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
       dbname = input_argument["dbname"].get<std::string>();
       std::string hex_str = "0x" + input_argument["docId"].get<std::string>();
       number = intx::from_string<intx::uint256>(hex_str);
@@ -600,7 +681,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << dbname
+        std::cerr << "Error: Could not get/create XapianManager for " << dbname
                   << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << dbname << ". Aborting to prevent fork." << std::endl;
@@ -644,7 +725,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
@@ -663,13 +744,16 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0);
       }
 
+      uint64_t slot = parseSlotFromHex(input_argument["slot"].get<std::string>());
+      validateWriteSlot(slot, "XAPIAN_ADD_VALUE_DOCUMENT");
+
       auto manager = XapianManager::getInstance(input_argument["dbname"],
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -683,7 +767,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       }
       auto docInfo = manager->add_value(
           docIdStr,
-          hex_to_uint64(input_argument["slot"]), input_argument["data"],
+          static_cast<Xapian::valueno>(slot), input_argument["data"],
           input_argument["isSerialise"].get<bool>(), blockNumber, this->mvmId, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
@@ -703,7 +787,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
@@ -730,8 +814,8 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         // FORK-SAFETY: Read-only operation — do NOT register with registry.
         // Registering would include this manager's (potentially stale)
         // comprehensive_log in the hash computation for this transaction.
-        std::cerr << "Lỗi[XAPIAN_GET_DATA_DOCUMENT]: Không thể lấy/tạo "
-                     "XapianManager cho "
+        std::cerr << "Error [XAPIAN_GET_DATA_DOCUMENT]: Could not get/create "
+                     "XapianManager for "
                   << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
@@ -759,7 +843,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
@@ -786,8 +870,8 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         // FORK-SAFETY: Read-only operation — do NOT register with registry.
         // Registering would include this manager's (potentially stale)
         // comprehensive_log in the hash computation for this transaction.
-        std::cerr << "Lỗi[XAPIAN_GET_TERMS_DOCUMENT]: Không thể lấy/tạo "
-                     "XapianManager cho "
+        std::cerr << "Error [XAPIAN_GET_TERMS_DOCUMENT]: Could not get/create "
+                     "XapianManager for "
                   << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
@@ -821,7 +905,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
@@ -840,14 +924,17 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0);
       }
 
+      uint64_t slot = parseSlotFromHex(input_argument["slot"].get<std::string>());
+      validateReadSlot(slot, "XAPIAN_GET_VALUE_DOCUMENT");
+
       auto manager = XapianManager::getInstance(input_argument["dbname"],
                                                 address, isReset);
       if (!manager) {
         // FORK-SAFETY: Read-only operation — do NOT register with registry.
         // Registering would include this manager's (potentially stale)
         // comprehensive_log in the hash computation for this transaction.
-        std::cerr << "Lỗi[XAPIAN_GET_VALUE_DOCUMENT]: Không thể lấy/tạo "
-                     "XapianManager cho "
+        std::cerr << "Error [XAPIAN_GET_VALUE_DOCUMENT]: Could not get/create "
+                     "XapianManager for "
                   << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
@@ -862,7 +949,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       }
       auto docInfo = manager->get_value(
           mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64),
-          hex_to_uint64(input_argument["slot"]),
+          static_cast<Xapian::valueno>(slot),
           input_argument["isSerialise"].get<bool>(), blockNumber, this->txHash, writerHash);
 
       json stringAbi = {{"type", "string"}};
@@ -942,9 +1029,8 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
     ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      std::string dbName = getDbNameFromABI(input_without_opcode);
-      // Giải mã dữ liệu
-      json decodedData = decode(input_without_opcode, abi_string);
+      json decodedData = safeDecode(input_without_opcode, abi_string);
+      std::string dbName = decodedData["dbName"].get<std::string>();
 
       // *** Kiểm tra dbname ***
       if (dbName.empty()) {
@@ -964,7 +1050,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
 
       auto manager = XapianManager::getInstance(dbName, address, isReset);
       if (!manager) {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << dbName << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << dbName << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << dbName << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -1013,18 +1099,28 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       } catch (...) {
         // Giữ giá trị mặc định nếu có lỗi
       }
+      if (limit > 500) {
+        limit = 500;
+      }
 
-      // Gán sort_by_value_slot với giá trị mặc định là 0
+      // Gán sort_by_value_slot với giá trị mặc định là nullopt
       std::optional<Xapian::valueno> sort_by_value_slot = std::nullopt;
       try {
-
         auto sort_slot =
             hex_to_int64(decodedData["options"]["sortByValueSlot"]);
 
         if (sort_slot.has_value()) {
-          if (sort_slot >= 0)
-            sort_by_value_slot = sort_slot;
+          if (*sort_slot >= 0) {
+            if (static_cast<uint64_t>(*sort_slot) > 0xFFFFFFFD) {
+              std::cerr << "[Error] FullDatabase (XAPIAN_V1_QUERY_SEARCH): sortByValueSlot "
+                        << *sort_slot << " is out of range." << std::endl;
+              MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: invalid value slot"));
+            }
+            sort_by_value_slot = static_cast<Xapian::valueno>(*sort_slot);
+          }
         }
+      } catch (const mvm::Exception &) {
+        throw;
       } catch (...) {
         // Giữ giá trị mặc định nếu có lỗi
       }
@@ -1035,6 +1131,19 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         sort_ascending = decodedData["options"]["sortAscending"].get<bool>();
       } catch (...) {
         // Giữ giá trị mặc định nếu có lỗi
+      }
+
+      if (decodedData["options"].find("rangeFilters") != decodedData["options"].end() && decodedData["options"]["rangeFilters"].is_array()) {
+        for (const auto &rf : decodedData["options"]["rangeFilters"]) {
+          if (rf.find("slot") != rf.end()) {
+            uint64_t rfSlot = parseSlotFromHex(rf["slot"].get<std::string>());
+            if (rfSlot > 0xFFFFFFFD) {
+              std::cerr << "[Error] FullDatabase (XAPIAN_QUERY_SEARCH): range filter slot "
+                        << rf["slot"].get<std::string>() << " is out of range." << std::endl;
+              MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: invalid value slot"));
+            }
+          }
+        }
       }
 
       std::vector<RangeFilter> range_filters =
@@ -1069,7 +1178,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
@@ -1093,7 +1202,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -1119,10 +1228,41 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         std::cerr << "[FATAL] On-chain Xapian operation failed: " << e.get_description() << ". Aborting to prevent state fork!" << std::endl;
         std::abort();
     }
+  } catch (const mvm::Exception &e) {
+    if (e.type == mvm::Exception::Type::ErrExecutionReverted) {
+        throw;
+    }
+    std::string errMsg = e.what();
+    if (errMsg.find("Block-STM: Estimate Hit (Suspend)") != std::string::npos || errMsg.find("Suspend") != std::string::npos) {
+        throw;
+    }
+    std::cerr << "MVM Exception in operation: " << errMsg << std::endl;
+    if (!this->isOffChain) {
+        std::cerr << "[FATAL] On-chain Xapian operation failed: " << errMsg << ". Aborting to prevent state fork!" << std::endl;
+        std::abort();
+    }
   } catch (const std::exception &e) {
     std::string errMsg = e.what();
     if (errMsg.find("Block-STM: Estimate Hit (Suspend)") != std::string::npos || errMsg.find("Suspend") != std::string::npos) {
         throw;
+    }
+    // Transaction input errors / malformed calldata must revert, NEVER abort the node!
+    if (dynamic_cast<const std::out_of_range*>(&e) != nullptr ||
+        dynamic_cast<const std::invalid_argument*>(&e) != nullptr ||
+        dynamic_cast<const std::overflow_error*>(&e) != nullptr ||
+        dynamic_cast<const nlohmann::json::exception*>(&e) != nullptr ||
+        errMsg.find("Not enough bytes") != std::string::npos ||
+        errMsg.find("out of range") != std::string::npos ||
+        errMsg.find("out_of_range") != std::string::npos ||
+        errMsg.find("invalid_argument") != std::string::npos ||
+        errMsg.find("Invalid ABI") != std::string::npos ||
+        errMsg.find("Invalid call data") != std::string::npos ||
+        errMsg.find("Failed to get dbname") != std::string::npos ||
+        errMsg.find("Buffer overflow") != std::string::npos ||
+        errMsg.find("too short") != std::string::npos ||
+        errMsg.find("String length exceeds") != std::string::npos) {
+        std::cerr << "[Error] FullDatabase malformed calldata or ABI decode error: " << errMsg << std::endl;
+        MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "ABI: malformed input data"));
     }
     std::cerr << "Error in operation: " << errMsg << std::endl;
     if (!this->isOffChain) {
@@ -1206,7 +1346,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
+        std::cerr << "Error: Could not get/create XapianManager for "
                   << fullPath.string() << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << fullPath.string() << ". Aborting to prevent fork." << std::endl;
@@ -1230,28 +1370,15 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
                   << std::endl;
         return mvm::Code(32, 0);
       }
-      uint32_t dbname_offset =
-          (input_without_opcode[28] << 24) | (input_without_opcode[29] << 16) |
-          (input_without_opcode[30] << 8) | input_without_opcode[31];
-      uint32_t data_offset =
-          (input_without_opcode[60] << 24) | (input_without_opcode[61] << 16) |
-          (input_without_opcode[62] << 8) | input_without_opcode[63];
 
-      uint32_t dbname_len = (input_without_opcode[dbname_offset + 28] << 24) |
-                            (input_without_opcode[dbname_offset + 29] << 16) |
-                            (input_without_opcode[dbname_offset + 30] << 8) |
-                            input_without_opcode[dbname_offset + 31];
-
-      dbname = std::string(input_without_opcode.begin() + dbname_offset + 32,
-                           input_without_opcode.begin() + dbname_offset + 32 +
-                               dbname_len);
-      uint32_t data_len = (input_without_opcode[data_offset + 28] << 24) |
-                          (input_without_opcode[data_offset + 29] << 16) |
-                          (input_without_opcode[data_offset + 30] << 8) |
-                          input_without_opcode[data_offset + 31];
-      rawData = std::string(input_without_opcode.begin() + data_offset + 32,
-                            input_without_opcode.begin() + data_offset + 32 +
-                                data_len);
+      try {
+        dbname = encoding::readStringDynamic(input_without_opcode, 0);
+        rawData = encoding::readStringDynamic(input_without_opcode, 32);
+      } catch (const std::exception &e) {
+        std::cerr << "Error: Invalid ABI data for version 1 NEW_DOCUMENT: "
+                  << e.what() << std::endl;
+        return mvm::Code(32, 0);
+      }
 
       // *** Kiểm tra dbname ***
       if (dbname.empty()) {
@@ -1300,7 +1427,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
@@ -1328,7 +1455,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -1354,7 +1481,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
@@ -1381,7 +1508,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -1414,7 +1541,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
       std::string term = input_argument["term"].get<std::string>();
@@ -1434,20 +1561,21 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0);
       }
 
-      // *** Kiểm tra dbname ***
+      // *** Kiểm tra term ***
       if (term.empty()) {
-        std::cerr << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname "
+        std::cerr << "[Error] FullDatabase (XAPIAN_V1_ADD_TERM_DOCUMENT): term "
                      "cannot be empty."
                   << std::endl;
         return mvm::Code(32, 0);
       }
       if (term.length() >= TERM_MAX_LEN) {
         std::cerr
-            << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname length ("
-            << dbname.length() << ") exceeds maximum of " << (TERM_MAX_LEN - 1)
+            << "[Error] FullDatabase (XAPIAN_V1_ADD_TERM_DOCUMENT): term length ("
+            << term.length() << ") exceeds maximum of " << (TERM_MAX_LEN - 1)
             << " characters." << std::endl;
         return mvm::Code(32, 0);
       }
+      validateTermNotReserved(term, "XAPIAN_V1_ADD_TERM_DOCUMENT");
 
       std::string hex_str = "0x" + input_argument["docId"].get<std::string>();
       intx::uint256 number = intx::from_string<intx::uint256>(hex_str);
@@ -1458,7 +1586,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -1491,7 +1619,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
@@ -1510,6 +1638,9 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0);
       }
 
+      std::string prefix = input_argument["prefix"].get<std::string>();
+      validatePrefix(prefix, "XAPIAN_V1_INDEX_TEXT_DOCUMENT");
+
       std::string hex_str = "0x" + input_argument["docId"].get<std::string>();
       intx::uint256 docId = intx::from_string<intx::uint256>(hex_str);
       auto manager = XapianManager::getInstance(input_argument["dbname"],
@@ -1518,7 +1649,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -1555,9 +1686,16 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
             << std::endl;
         return mvm::Code(32, 0);
       }
-      uint32_t dbname_offset =
-          (input_without_opcode[28] << 24) | (input_without_opcode[29] << 16) |
-          (input_without_opcode[30] << 8) | input_without_opcode[31];
+
+      try {
+        dbname = encoding::readStringDynamic(input_without_opcode, 0);
+        rawData = encoding::readStringDynamic(input_without_opcode, 64);
+      } catch (const std::exception &e) {
+        std::cerr
+            << "Error: Invalid ABI data for version 1 SET_DATA_DOCUMENT: "
+            << e.what() << std::endl;
+        return mvm::Code(32, 0);
+      }
 
       std::stringstream docid_ss;
       docid_ss << "0x";
@@ -1567,36 +1705,16 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       }
       number = intx::from_string<intx::uint256>(docid_ss.str());
 
-      uint32_t data_offset =
-          (input_without_opcode[92] << 24) | (input_without_opcode[93] << 16) |
-          (input_without_opcode[94] << 8) | input_without_opcode[95];
-
-      uint32_t dbname_len = (input_without_opcode[dbname_offset + 28] << 24) |
-                            (input_without_opcode[dbname_offset + 29] << 16) |
-                            (input_without_opcode[dbname_offset + 30] << 8) |
-                            input_without_opcode[dbname_offset + 31];
-
-      dbname = std::string(input_without_opcode.begin() + dbname_offset + 32,
-                           input_without_opcode.begin() + dbname_offset + 32 +
-                               dbname_len);
-      uint32_t data_len = (input_without_opcode[data_offset + 28] << 24) |
-                          (input_without_opcode[data_offset + 29] << 16) |
-                          (input_without_opcode[data_offset + 30] << 8) |
-                          input_without_opcode[data_offset + 31];
-      rawData = std::string(input_without_opcode.begin() + data_offset + 32,
-                            input_without_opcode.begin() + data_offset + 32 +
-                                data_len);
-
       // *** Kiểm tra dbname ***
       if (dbname.empty()) {
-        std::cerr << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname "
+        std::cerr << "[Error] FullDatabase (XAPIAN_V1_SET_DATA_DOCUMENT): dbname "
                      "cannot be empty."
                   << std::endl;
         return mvm::Code(32, 0);
       }
       if (dbname.length() >= DBNAME_MAX_LEN) {
         std::cerr
-            << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname length ("
+            << "[Error] FullDatabase (XAPIAN_V1_SET_DATA_DOCUMENT): dbname length ("
             << dbname.length() << ") exceeds maximum of "
             << (DBNAME_MAX_LEN - 1) << " characters." << std::endl;
         return mvm::Code(32, 0);
@@ -1607,7 +1725,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << dbname
+        std::cerr << "Error: Could not get/create XapianManager for " << dbname
                   << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << dbname << ". Aborting to prevent fork." << std::endl;
@@ -1639,24 +1757,27 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
       // *** Kiểm tra dbname ***
       if (dbname.empty()) {
-        std::cerr << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname "
+        std::cerr << "[Error] FullDatabase (XAPIAN_V1_ADD_VALUE_DOCUMENT): dbname "
                      "cannot be empty."
                   << std::endl;
         return mvm::Code(32, 0);
       }
       if (dbname.length() >= DBNAME_MAX_LEN) {
         std::cerr
-            << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname length ("
+            << "[Error] FullDatabase (XAPIAN_V1_ADD_VALUE_DOCUMENT): dbname length ("
             << dbname.length() << ") exceeds maximum of "
             << (DBNAME_MAX_LEN - 1) << " characters." << std::endl;
         return mvm::Code(32, 0);
       }
+
+      uint64_t slot = parseSlotFromHex(input_argument["slot"].get<std::string>());
+      validateWriteSlot(slot, "XAPIAN_V1_ADD_VALUE_DOCUMENT");
 
       auto manager = XapianManager::getInstance(input_argument["dbname"],
                                                 address, isReset);
@@ -1664,7 +1785,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -1678,7 +1799,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       }
       auto docInfo = manager->add_value(
           docIdStr,
-          hex_to_uint64(input_argument["slot"]), input_argument["data"],
+          static_cast<Xapian::valueno>(slot), input_argument["data"],
           input_argument["isSerialise"].get<bool>(), blockNumber, this->mvmId, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
@@ -1698,7 +1819,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
@@ -1725,7 +1846,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -1765,7 +1886,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
@@ -1792,7 +1913,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -1825,24 +1946,27 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
       // *** Kiểm tra dbname ***
       if (dbname.empty()) {
-        std::cerr << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname "
+        std::cerr << "[Error] FullDatabase (XAPIAN_V1_GET_VALUE_DOCUMENT): dbname "
                      "cannot be empty."
                   << std::endl;
         return mvm::Code(32, 0);
       }
       if (dbname.length() >= DBNAME_MAX_LEN) {
         std::cerr
-            << "[Error] FullDatabase (XAPIAN_V1_NEW_DOCUMENT): dbname length ("
+            << "[Error] FullDatabase (XAPIAN_V1_GET_VALUE_DOCUMENT): dbname length ("
             << dbname.length() << ") exceeds maximum of "
             << (DBNAME_MAX_LEN - 1) << " characters." << std::endl;
         return mvm::Code(32, 0);
       }
+
+      uint64_t slot = parseSlotFromHex(input_argument["slot"].get<std::string>());
+      validateReadSlot(slot, "XAPIAN_V1_GET_VALUE_DOCUMENT");
 
       auto manager = XapianManager::getInstance(input_argument["dbname"],
                                                 address, isReset);
@@ -1850,7 +1974,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -1864,7 +1988,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       }
       auto docInfo = manager->get_value(
           mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64),
-          hex_to_uint64(input_argument["slot"]),
+          static_cast<Xapian::valueno>(slot),
           input_argument["isSerialise"].get<bool>(), blockNumber, this->txHash, writerHash);
 
       json stringAbi = {{"type", "string"}};
@@ -1944,9 +2068,8 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
     ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      std::string dbName = getDbNameFromABI(input_without_opcode);
-      // Giải mã dữ liệu
-      json decodedData = decode(input_without_opcode, abi_string);
+      json decodedData = safeDecode(input_without_opcode, abi_string);
+      std::string dbName = decodedData["dbName"].get<std::string>();
 
       // *** Kiểm tra dbname ***
       if (dbName.empty()) {
@@ -1966,7 +2089,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
 
       auto manager = XapianManager::getInstance(dbName, address, isReset);
       if (!manager) {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << dbName << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << dbName << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << dbName << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -2015,18 +2138,28 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       } catch (...) {
         // Giữ giá trị mặc định nếu có lỗi
       }
+      if (limit > 500) {
+        limit = 500;
+      }
 
-      // Gán sort_by_value_slot với giá trị mặc định là 0
+      // Gán sort_by_value_slot với giá trị mặc định là nullopt
       std::optional<Xapian::valueno> sort_by_value_slot = std::nullopt;
       try {
-
         auto sort_slot =
             hex_to_int64(decodedData["options"]["sortByValueSlot"]);
 
         if (sort_slot.has_value()) {
-          if (sort_slot >= 0)
-            sort_by_value_slot = sort_slot;
+          if (*sort_slot >= 0) {
+            if (static_cast<uint64_t>(*sort_slot) > 0xFFFFFFFD) {
+              std::cerr << "[Error] FullDatabase (XAPIAN_V1_QUERY_SEARCH): sortByValueSlot "
+                        << *sort_slot << " is out of range." << std::endl;
+              MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: invalid value slot"));
+            }
+            sort_by_value_slot = static_cast<Xapian::valueno>(*sort_slot);
+          }
         }
+      } catch (const mvm::Exception &) {
+        throw;
       } catch (...) {
         // Giữ giá trị mặc định nếu có lỗi
       }
@@ -2037,6 +2170,19 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         sort_ascending = decodedData["options"]["sortAscending"].get<bool>();
       } catch (...) {
         // Giữ giá trị mặc định nếu có lỗi
+      }
+
+      if (decodedData["options"].find("rangeFilters") != decodedData["options"].end() && decodedData["options"]["rangeFilters"].is_array()) {
+        for (const auto &rf : decodedData["options"]["rangeFilters"]) {
+          if (rf.find("slot") != rf.end()) {
+            uint64_t rfSlot = parseSlotFromHex(rf["slot"].get<std::string>());
+            if (rfSlot > 0xFFFFFFFD) {
+              std::cerr << "[Error] FullDatabase (XAPIAN_QUERY_SEARCH): range filter slot "
+                        << rf["slot"].get<std::string>() << " is out of range." << std::endl;
+              MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "Xapian: invalid value slot"));
+            }
+          }
+        }
       }
 
       std::vector<RangeFilter> range_filters =
@@ -2063,7 +2209,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
             ])";
 
       auto input_without_opcode = getInputWithoutOpcode(input);
-      nlohmann::json input_argument = decode(input_without_opcode, inputABI);
+      nlohmann::json input_argument = safeDecode(input_without_opcode, inputABI);
 
       std::string dbname = input_argument["dbname"].get<std::string>();
 
@@ -2088,7 +2234,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        std::cerr << "Error: Could not get/create XapianManager for " << input_argument["dbname"] << std::endl;
         if (!this->isOffChain) {
             std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
             std::abort();
@@ -2111,10 +2257,41 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         std::cerr << "[FATAL] On-chain Xapian operation failed: " << e.get_description() << ". Aborting to prevent state fork!" << std::endl;
         std::abort();
     }
+  } catch (const mvm::Exception &e) {
+    if (e.type == mvm::Exception::Type::ErrExecutionReverted) {
+        throw;
+    }
+    std::string errMsg = e.what();
+    if (errMsg.find("Block-STM: Estimate Hit (Suspend)") != std::string::npos || errMsg.find("Suspend") != std::string::npos) {
+        throw;
+    }
+    std::cerr << "MVM Exception in operation: " << errMsg << std::endl;
+    if (!this->isOffChain) {
+        std::cerr << "[FATAL] On-chain Xapian operation failed: " << errMsg << ". Aborting to prevent state fork!" << std::endl;
+        std::abort();
+    }
   } catch (const std::exception &e) {
     std::string errMsg = e.what();
     if (errMsg.find("Block-STM: Estimate Hit (Suspend)") != std::string::npos || errMsg.find("Suspend") != std::string::npos) {
         throw;
+    }
+    // Transaction input errors / malformed calldata must revert, NEVER abort the node!
+    if (dynamic_cast<const std::out_of_range*>(&e) != nullptr ||
+        dynamic_cast<const std::invalid_argument*>(&e) != nullptr ||
+        dynamic_cast<const std::overflow_error*>(&e) != nullptr ||
+        dynamic_cast<const nlohmann::json::exception*>(&e) != nullptr ||
+        errMsg.find("Not enough bytes") != std::string::npos ||
+        errMsg.find("out of range") != std::string::npos ||
+        errMsg.find("out_of_range") != std::string::npos ||
+        errMsg.find("invalid_argument") != std::string::npos ||
+        errMsg.find("Invalid ABI") != std::string::npos ||
+        errMsg.find("Invalid call data") != std::string::npos ||
+        errMsg.find("Failed to get dbname") != std::string::npos ||
+        errMsg.find("Buffer overflow") != std::string::npos ||
+        errMsg.find("too short") != std::string::npos ||
+        errMsg.find("String length exceeds") != std::string::npos) {
+        std::cerr << "[Error] FullDatabase malformed calldata or ABI decode error: " << errMsg << std::endl;
+        MVM_THROW(mvm::Exception(mvm::Exception::Type::ErrExecutionReverted, "ABI: malformed input data"));
     }
     std::cerr << "Error in operation: " << errMsg << std::endl;
     if (!this->isOffChain) {

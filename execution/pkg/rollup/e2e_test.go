@@ -17,9 +17,9 @@ import (
 
 // InMemoryParentChain acts as the Parent Chain network for E2E testing.
 type InMemoryParentChain struct {
-	mu        sync.Mutex
-	store     parentchain.Store
-	transfers map[uint64][]*parentchain.TransferEvent // destClusterID -> transfers
+	mu         sync.Mutex
+	store      parentchain.Store
+	transfers  map[uint64][]*parentchain.TransferEvent // destClusterID -> transfers
 	nodeKeys   map[uint64]*bls.KeyPair
 	accounts   map[common.Address]cm.PublicKey
 	onTransfer func(destID uint64)
@@ -128,7 +128,7 @@ func (a *ParentChainClientAdapter) SendTransferFloat(
 
 	var sig cm.Sign
 	copy(sig[:], cert)
-	
+
 	blockTime := uint64(time.Now().Unix())
 
 	msgID, err := parentchain.TransferFloat(
@@ -151,16 +151,16 @@ func (a *ParentChainClientAdapter) SendTransferFloat(
 	}
 
 	event := &parentchain.TransferEvent{
-		MsgID:       msgID,
+		MsgID:        msgID,
 		SourcePubKey: pubKey,
 		DestPubKey:   destPubKey,
-		SourceSeq:   nonce,
-		Sender:      sender,
-		Target:      target,
-		Amount:      amount,
-		PayloadHash: crypto.Keccak256Hash(nil),
-		BlockTime:   blockTime,
-		IsRefund:    isRefund,
+		SourceSeq:    nonce,
+		Sender:       sender,
+		Target:       target,
+		Amount:       amount,
+		PayloadHash:  crypto.Keccak256Hash(nil),
+		BlockTime:    blockTime,
+		IsRefund:     isRefund,
 	}
 
 	var destID uint64
@@ -199,7 +199,7 @@ func (a *ParentChainClientAdapter) SendReclaimFloat(msgID common.Hash, cert []by
 
 	var sig cm.Sign
 	copy(sig[:], cert)
-	
+
 	// Mock time to be +100s so it's guaranteed to be eligible
 	blockTime := uint64(time.Now().Unix()) + 100
 	err := parentchain.ReclaimFloat(a.chain.store, msgID, sig, blockTime, 60)
@@ -283,6 +283,8 @@ func (a *ParentChainClientAdapter) GetReceipt(txHash common.Hash) (*parentchain.
 	return nil, false, nil
 }
 
+func (a *ParentChainClientAdapter) ReportTxFailure(common.Hash) {}
+
 func (a *ParentChainClientAdapter) GetStatus() (parentchain.ChainStatus, error) {
 	return parentchain.ChainStatus{}, nil
 }
@@ -300,7 +302,7 @@ type RollupNode struct {
 	ChainID uint64
 	StateDB AccountStateDB
 	Store   Store
-	
+
 	sendWorker    *SendWorker
 	receiveWorker *ReceiveWorker
 	reclaimWorker *ReclaimWorker
@@ -311,13 +313,13 @@ func NewRollupNode(chainID uint64, parentChain *InMemoryParentChain, kp *bls.Key
 	stateDB := newMockAccountStateDB()
 	scDB := &mockDB{data: make(map[common.Address]map[common.Hash][]byte)}
 	store := NewDBStore(scDB)
-	
+
 	client := &ParentChainClientAdapter{chain: parentChain, chainID: chainID}
-	
+
 	sendW := NewSendWorker(store, client, kp, destPubKey, destClusterID)
 	recW := NewReceiveWorker(store, stateDB, client, kp)
 	reclaimW := NewReclaimWorker(store, stateDB, client, kp)
-	
+
 	return &RollupNode{
 		ChainID:       chainID,
 		StateDB:       stateDB,
@@ -330,7 +332,7 @@ func NewRollupNode(chainID uint64, parentChain *InMemoryParentChain, kp *bls.Key
 }
 
 func (n *RollupNode) Start() {}
-func (n *RollupNode) Stop() {}
+func (n *RollupNode) Stop()  {}
 
 func setupClusterFloatBalance(t *testing.T, parentChain *InMemoryParentChain, kp *bls.KeyPair, chainID uint64, amount *big.Int) {
 	msgID := common.BytesToHash([]byte(fmt.Sprintf("deposit_init_%d", chainID)))
@@ -352,33 +354,33 @@ func setupClusterFloatBalance(t *testing.T, parentChain *InMemoryParentChain, kp
 
 func TestE2E_HappyPathTransfer(t *testing.T) {
 	parentChain := NewInMemoryParentChain()
-	
+
 	kp1 := bls.GenerateKeyPair()
 	kp2 := bls.GenerateKeyPair()
 	parentChain.nodeKeys[1] = kp1
 	parentChain.nodeKeys[2] = kp2
-	
+
 	sender := common.HexToAddress("0xaaa")
 	target := common.HexToAddress("0xbbb")
-	
+
 	parentChain.accounts[sender] = kp1.PublicKey()
 	parentChain.accounts[target] = kp2.PublicKey()
-	
+
 	setupClusterFloatBalance(t, parentChain, kp1, 1, big.NewInt(10000))
 	setupClusterFloatBalance(t, parentChain, kp2, 2, big.NewInt(10000))
 
 	node1 := NewRollupNode(1, parentChain, kp1, kp2.PublicKey(), 2)
 	node2 := NewRollupNode(2, parentChain, kp2, kp1.PublicKey(), 1)
-	
+
 	// Fund node 1 sender
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
-	
+
 	handler := NewCrossNodeHandler(node1.blsKeyPair.PublicKey())
 	msgID, err := handler.HandleTransfer(node1.Store, node1.StateDB, node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
 	if err != nil {
 		t.Fatalf("Failed to handle transfer: %v", err)
 	}
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -390,14 +392,14 @@ func TestE2E_HappyPathTransfer(t *testing.T) {
 		case <-time.After(50 * time.Millisecond):
 			node1.sendWorker.processPending()
 			node2.receiveWorker.pollAndProcess()
-			
+
 			bal1 := node1.StateDB.GetBalance(sender)
 			bal2 := node2.StateDB.GetBalance(target)
 			rec2, f2, _ := node2.Store.Get(msgID)
-			
+
 			// DEBUG LOGGING
 			// t.Logf("bal1: %v, bal2: %v, f2: %v, rec2.State: %v", bal1, bal2, f2, rec2.State)
-			
+
 			// 1000 - 500 value - 100 fee = 400; refunds return the value only (the fee is burned): 1000 - 600 + 500 = 900.
 			if bal1.Cmp(big.NewInt(400)) == 0 && bal2.Cmp(big.NewInt(500)) == 0 {
 				if f2 && rec2.State == StateCredited {
@@ -417,31 +419,31 @@ func TestE2E_TransferRefund(t *testing.T) {
 	kp2 := bls.GenerateKeyPair()
 	parentChain.nodeKeys[1] = kp1
 	parentChain.nodeKeys[2] = kp2
-	
+
 	setupClusterFloatBalance(t, parentChain, kp1, 1, big.NewInt(10000))
 	setupClusterFloatBalance(t, parentChain, kp2, 2, big.NewInt(10000))
-	
+
 	sender := common.HexToAddress("0xaaa")
 	target := common.HexToAddress("0xbbb")
-	
+
 	parentChain.accounts[sender] = kp1.PublicKey()
 	parentChain.accounts[target] = kp2.PublicKey()
-	
+
 	node1 := NewRollupNode(1, parentChain, kp1, kp2.PublicKey(), 2)
 	node2 := NewRollupNode(2, parentChain, kp2, kp1.PublicKey(), 1)
-	
+
 	node2.receiveWorker.Validator = func(addr common.Address) bool {
 		return false
 	}
-	
+
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
-	
+
 	handler := NewCrossNodeHandler(node1.blsKeyPair.PublicKey())
 	_, err := handler.HandleTransfer(node1.Store, node1.StateDB, node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
 	if err != nil {
 		t.Fatalf("HandleTransfer failed: %v", err)
 	}
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -454,7 +456,7 @@ func TestE2E_TransferRefund(t *testing.T) {
 			node1.sendWorker.processPending()
 			node2.receiveWorker.pollAndProcess()
 			node1.receiveWorker.pollAndProcess()
-			
+
 			bal1 := node1.StateDB.GetBalance(sender)
 			if bal1.Cmp(big.NewInt(900)) == 0 {
 				success = true
@@ -472,26 +474,26 @@ func TestE2E_TransferReclaimWon(t *testing.T) {
 	kp2 := bls.GenerateKeyPair()
 	parentChain.nodeKeys[1] = kp1
 	parentChain.nodeKeys[2] = kp2
-	
+
 	setupClusterFloatBalance(t, parentChain, kp1, 1, big.NewInt(10000))
 	setupClusterFloatBalance(t, parentChain, kp2, 2, big.NewInt(10000))
 
 	sender := common.HexToAddress("0xaaa")
 	target := common.HexToAddress("0xbbb")
-	
+
 	parentChain.accounts[sender] = kp1.PublicKey()
 	parentChain.accounts[target] = kp2.PublicKey()
 
 	node1 := NewRollupNode(1, parentChain, kp1, kp2.PublicKey(), 2)
 	node2 := NewRollupNode(2, parentChain, kp2, kp1.PublicKey(), 1)
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
-	
+
 	handler := NewCrossNodeHandler(node1.blsKeyPair.PublicKey())
 	msgID, err := handler.HandleTransfer(node1.Store, node1.StateDB, node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
 	if err != nil {
 		t.Fatalf("Failed to handle transfer: %v", err)
 	}
-	
+
 	node1.sendWorker.processPending() // step 1: submit
 	node1.sendWorker.processPending() // step 2: poll-confirm (StateSendSubmitted -> StateSentConfirmed)
 	// Deliberately DO NOT process node2 receive worker. It "ignores" the transfer.
@@ -545,29 +547,29 @@ func TestE2E_TransferReclaimLost_DoubleCreditPrevention(t *testing.T) {
 	kp2 := bls.GenerateKeyPair()
 	parentChain.nodeKeys[1] = kp1
 	parentChain.nodeKeys[2] = kp2
-	
+
 	setupClusterFloatBalance(t, parentChain, kp1, 1, big.NewInt(10000))
 	setupClusterFloatBalance(t, parentChain, kp2, 2, big.NewInt(10000))
 	sender := common.HexToAddress("0xaaa")
 	target := common.HexToAddress("0xbbb")
-	
+
 	parentChain.accounts[sender] = kp1.PublicKey()
 	parentChain.accounts[target] = kp2.PublicKey()
 
 	node1 := NewRollupNode(1, parentChain, kp1, kp2.PublicKey(), 2)
 	node2 := NewRollupNode(2, parentChain, kp2, kp1.PublicKey(), 1)
-	
+
 	// Node 2 rejects destination
 	node2.receiveWorker.Validator = func(addr common.Address) bool { return false }
-	
+
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
-	
+
 	handler := NewCrossNodeHandler(node1.blsKeyPair.PublicKey())
 	msgID, err := handler.HandleTransfer(node1.Store, node1.StateDB, node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
 	if err != nil {
 		t.Fatalf("Failed to handle transfer: %v", err)
 	}
-	
+
 	node1.sendWorker.processPending() // step 1: submit
 	node1.sendWorker.processPending() // step 2: poll-confirm (StateSendSubmitted -> StateSentConfirmed)
 
@@ -610,7 +612,7 @@ func TestE2E_TransferReclaimLost_DoubleCreditPrevention(t *testing.T) {
 
 			bal1 := node1.StateDB.GetBalance(sender)
 			rec1, _, _ := node1.Store.Get(msgID)
-			
+
 			// Balance must NOT exceed 1000 (No double credit)
 			if bal1.Cmp(big.NewInt(900)) > 0 {
 				t.Fatalf("Double credit detected! Balance is %v", bal1)
@@ -631,30 +633,30 @@ func TestE2E_Refund_DoubleCreditPrevention(t *testing.T) {
 	kp2 := bls.GenerateKeyPair()
 	parentChain.nodeKeys[1] = kp1
 	parentChain.nodeKeys[2] = kp2
-	
+
 	setupClusterFloatBalance(t, parentChain, kp1, 1, big.NewInt(10000))
 	setupClusterFloatBalance(t, parentChain, kp2, 2, big.NewInt(10000))
 
 	sender := common.HexToAddress("0xaaa")
 	target := common.HexToAddress("0xbbb")
-	
+
 	parentChain.accounts[sender] = kp1.PublicKey()
 	parentChain.accounts[target] = kp2.PublicKey()
 
 	node1 := NewRollupNode(1, parentChain, kp1, kp2.PublicKey(), 2)
 	node2 := NewRollupNode(2, parentChain, kp2, kp1.PublicKey(), 1)
-	
+
 	// Node 2 rejects destination
 	node2.receiveWorker.Validator = func(addr common.Address) bool { return false }
-	
+
 	node1.StateDB.(*mockAccountStateDB).balances[sender] = big.NewInt(1000)
-	
+
 	handler := NewCrossNodeHandler(node1.blsKeyPair.PublicKey())
 	msgID, err := handler.HandleTransfer(node1.Store, node1.StateDB, node2.blsKeyPair.PublicKey(), sender, target, big.NewInt(500), crypto.Keccak256Hash(nil))
 	if err != nil {
 		t.Fatalf("Failed to handle transfer: %v", err)
 	}
-	
+
 	node1.sendWorker.processPending() // step 1: submit
 	node1.sendWorker.processPending() // step 2: poll-confirm (StateSendSubmitted -> StateSentConfirmed)
 
@@ -693,11 +695,11 @@ func TestE2E_Refund_DoubleCreditPrevention(t *testing.T) {
 		case <-time.After(50 * time.Millisecond):
 			// Call processReclaims to simulate the bug scenario
 			// Prior to the fix, this would double credit!
-			node1.reclaimWorker.processReclaims() 
-			
+			node1.reclaimWorker.processReclaims()
+
 			bal1 := node1.StateDB.GetBalance(sender)
 			rec1, _, _ := node1.Store.Get(msgID)
-			
+
 			// Balance must NOT exceed 1000 (No double credit)
 			if bal1.Cmp(big.NewInt(900)) > 0 {
 				t.Fatalf("Double credit detected! Balance is %v", bal1)
@@ -820,4 +822,3 @@ func TestE2E_10ConcurrentTransfers_LatencyBenchmark(t *testing.T) {
 		}
 	}
 }
-
