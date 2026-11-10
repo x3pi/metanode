@@ -975,4 +975,21 @@ TEST_SUITE("abi_decode_boundary_check") {
 
         CHECK_THROWS_AS(decodeSlice(calldata.data(), 0, abi, calldata.size()), std::out_of_range);
     }
+
+    TEST_CASE("string[] encode/decode roundtrip with special characters in terms") {
+        auto checkRoundtrip = [](const std::vector<std::string>& terms) {
+            nlohmann::json abi = {{"type", "string[]"}};
+            auto enc = encodeArgument(abi, joinStringArgument(terms));
+            auto withOffset = addOffsetPrefix(enc);
+            nlohmann::json out = decode(withOffset, R"([{"name":"r","type":"string[]"}])")["r"];
+            CHECK(out == nlohmann::json(terms));
+        };
+
+        checkRoundtrip({"apple", "banana"});
+        checkRoundtrip({"a,b", "c"});
+        checkRoundtrip({"x[", "y", "z"});
+        checkRoundtrip({"x]", "y[z]", "w"});
+        checkRoundtrip({"end\\", "next"});
+        checkRoundtrip({"a\\,b", "]\\[", "\\"});
+    }
 }

@@ -667,12 +667,29 @@ std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::va
         std::cerr << "[ERROR] XapianManager::add_value: Slot " << slot << " is out of range or reserved." << std::endl;
         return "";
     }
+    std::string value_to_add = value;
+    if (isSerialise) {
+        try {
+            double num = std::stod(value);
+            if (std::isnan(num)) {
+                std::cerr << "[ERROR] XapianManager::add_value: NaN is not allowed for sortable_serialise: " << value << std::endl;
+                return "";
+            }
+            value_to_add = Xapian::sortable_serialise(num);
+        } catch (const std::invalid_argument &) {
+            std::cerr << "[ERROR] XapianManager::add_value: Invalid number format for sortable_serialise: " << value << std::endl;
+            return "";
+        } catch (const std::out_of_range &) {
+            std::cerr << "[ERROR] XapianManager::add_value: Number out of range for sortable_serialise: " << value << std::endl;
+            return "";
+        }
+    }
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
         XapianLog::AddValueData logData{};
         logData.docid = virtualDocId;
         logData.slot = slot;
-        logData.value = value;
+        logData.value = value_to_add;
         logData.is_serialised = isSerialise;
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::ADD_VALUE;
@@ -970,7 +987,26 @@ std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::va
     std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
     try {
         Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
-        return doc.get_value(slot);
+        std::string data = doc.get_value(slot);
+        if (isSerialise && !data.empty()) {
+            try {
+                double value = Xapian::sortable_unserialise(data);
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(10) << value;
+                std::string str_val = oss.str();
+                str_val.erase(str_val.find_last_not_of('0') + 1, std::string::npos);
+                if (!str_val.empty() && str_val.back() == '.') {
+                    str_val.pop_back();
+                }
+                if (str_val == "-0") {
+                    str_val = "0";
+                }
+                return str_val;
+            } catch (const Xapian::Error &) {
+                return "";
+            }
+        }
+        return data;
     } catch (const Xapian::DocNotFoundError&) {
         // Normal, ignore
     } catch (...) {
@@ -1604,11 +1640,6 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
     // Document staging cache for batch coalescing (tối ưu hóa gom các thao tác trên cùng 1 docid trong 1 block)
     std::map<std::string, Xapian::Document> modified_docs;
     std::set<std::string> deleted_docs;
-
-    auto normalize_docid = [](const std::string& id) -> std::string {
-        if (id.length() >= 2 && (id[0] == '0' && (id[1] == 'x' || id[1] == 'X'))) return id;
-        return "0x" + id;
-    };
 
     // 2026-08-20 (plan §9.29): InMemory-mode-only pre-image capture for
     // revertUncommittedChanges() -- see undo_snapshot_'s own doc comment

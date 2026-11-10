@@ -182,9 +182,17 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
 
     // Các range filter bình thường
     for (const auto &filter : range_filters) {
-      value_range_queries.emplace_back(Xapian::Query::OP_VALUE_RANGE,
-                                       filter.slot, filter.start_serialised,
-                                       filter.end_serialised);
+      if (!filter.start_serialised.empty() && !filter.end_serialised.empty()) {
+        value_range_queries.emplace_back(Xapian::Query::OP_VALUE_RANGE,
+                                         filter.slot, filter.start_serialised,
+                                         filter.end_serialised);
+      } else if (!filter.start_serialised.empty()) {
+        value_range_queries.emplace_back(Xapian::Query::OP_VALUE_GE,
+                                         filter.slot, filter.start_serialised);
+      } else if (!filter.end_serialised.empty()) {
+        value_range_queries.emplace_back(Xapian::Query::OP_VALUE_LE,
+                                         filter.slot, filter.end_serialised);
+      }
     }
 
     // Tạo điều kiện lọc slot 254 >= blockNumber hoặc không tồn tại
@@ -224,7 +232,7 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
     if (sort_by_value_slot) {
       try {
         enquire.set_sort_by_value_then_relevance(*sort_by_value_slot,
-                                                 sort_ascending);
+                                                 !sort_ascending);
       } catch (const Xapian::InvalidArgumentError &e) {
         std::cerr << "Sort error: " << e.get_msg() << std::endl;
       }

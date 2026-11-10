@@ -239,12 +239,28 @@ inline std::vector<RangeFilter> convertJsonToRangeFilters(const nlohmann::json &
 
                 // Xử lý begin
                 std::string beginStr = tuple["begin"].get<std::string>();
-                filter.start_serialised = (beginStr.empty() || beginStr == "") ? "" : Xapian::sortable_serialise(std::stod(beginStr));
+                if (beginStr.empty()) {
+                    filter.start_serialised = "";
+                } else {
+                    double beginVal = std::stod(beginStr);
+                    if (std::isnan(beginVal)) {
+                        throw std::invalid_argument("range filter begin cannot be NaN");
+                    }
+                    filter.start_serialised = Xapian::sortable_serialise(beginVal);
+                }
                 std::cerr << "beginStr " << beginStr << std::endl;
 
                 // Xử lý end
                 std::string endStr = tuple["end"].get<std::string>();
-                filter.end_serialised = (endStr.empty() || endStr == "") ? "" : Xapian::sortable_serialise(std::stod(endStr));
+                if (endStr.empty()) {
+                    filter.end_serialised = "";
+                } else {
+                    double endVal = std::stod(endStr);
+                    if (std::isnan(endVal)) {
+                        throw std::invalid_argument("range filter end cannot be NaN");
+                    }
+                    filter.end_serialised = Xapian::sortable_serialise(endVal);
+                }
                 std::cerr << "endStr " << endStr << std::endl;
 
                 // Thêm vào vector
