@@ -175,6 +175,23 @@ all:
               node_data_dir: "/opt/metanode/exec1_r3"
               # https_url: "https://lan1.iqnb.com/r3/exec1/"
 
+            # [TÙY CHỌN MỞ RỘNG CỤM] Khi thêm node mới (vd: exec1_replica4, exec1_replica5) vào cụm Raft
+            # đang chạy sẵn có dữ liệu (dùng kèm deploy/add_nodes/add_nodes.sh):
+            # BẮT BUỘC đặt `raft_join_existing_chain: true` và `raft_bootstrap: false` để node mới
+            # khởi động với DB đã copy từ peer mà không bị từ chối ở raftfeed/node.go:227.
+            # exec1_replica4:
+            #   ansible_host: 192.168.1.231
+            #   ansible_port: 22
+            #   ansible_user: "abc"
+            #   node_id: "exec1_r4"
+            #   raft_bootstrap: false
+            #   raft_join_existing_chain: true
+            #   rpc_port: 8747
+            #   p2p_port: 4200
+            #   raft_port: 7110
+            #   forward_port: 7210
+            #   node_data_dir: "/opt/metanode/exec1_r4"
+
         # Cluster 2 (Tùy chọn): Cụm Shard con thứ 2 (Exec Cluster 2) nếu cần chạy đa cụm
         # cluster_2:
         #   vars:

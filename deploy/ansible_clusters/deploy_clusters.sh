@@ -700,26 +700,37 @@ if [ -f "$CHECK_SEC_SCRIPT" ] && [ -f "$INVENTORY" ]; then
     fi
 fi
 
-# Detect become password from inventory for localhost become tasks (devnet only)
-INVENTORY_BECOME_PASS=$(grep -E '^\s*ansible_become_pass:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
-if [ -n "$INVENTORY_BECOME_PASS" ] && [ "$INVENTORY_BECOME_PASS" != "!vault" ] && [[ "$INVENTORY_BECOME_PASS" != \{\{* ]]; then
-    export ANSIBLE_BECOME_PASS="${ANSIBLE_BECOME_PASS:-$INVENTORY_BECOME_PASS}"
-fi
+# Do NOT export ANSIBLE_BECOME_PASS globally: exporting it as an environment variable
+# would override per-host `ansible_become_pass` when an inventory mixes Cloud/LAN hosts
+# with remote hosts that have different sudo passwords (e.g. Tiệm Net / FRP servers).
+LOCAL_BECOME_PASS=$(grep -E '^\s{4}ansible_become_pass:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
 
-# Pre-flight Sudo Validation to prevent indefinite hang on wrong become password
-SUDO_CHECK_OUTPUT=$(python3 - "$INVENTORY" "${SCRIPT_DIR}/.vault_pass" << 'EOF' 2>/dev/null || echo "CHECK_FAILED"
+# Pre-flight Sudo Validation (only when inventory contains a local host on this machine)
+SUDO_CHECK_OUTPUT=$(python3 - "$INVENTORY" "${SCRIPT_DIR}/.vault_pass" "$LOCAL_BECOME_PASS" << 'EOF' 2>/dev/null || echo "CHECK_FAILED"
 import sys, os, re, subprocess
 from ansible.parsing.vault import VaultLib, VaultSecret
 from ansible.constants import DEFAULT_VAULT_ID_MATCH
 
 inv_path = sys.argv[1]
 vault_file = sys.argv[2]
+local_pass_arg = sys.argv[3] if len(sys.argv) > 3 else ''
+
+if os.path.exists(inv_path):
+    with open(inv_path) as f:
+        inv_text = f.read()
+    # Skip local sudo check if no host in this inventory runs locally on this machine
+    if 'ansible_connection: local' not in inv_text and 'ansible_connection: "local"' not in inv_text:
+        print('OK')
+        sys.exit(0)
 
 if subprocess.run(['sudo', '-n', 'true'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
     print('OK')
     sys.exit(0)
 
-pwd = os.environ.get('ANSIBLE_BECOME_PASS', '')
+pwd = os.environ.get('ANSIBLE_BECOME_PASS', '') or local_pass_arg
+if pwd in ('!vault', '') or pwd.startswith('{{'):
+    pwd = ''
+
 if not pwd and os.path.exists(vault_file) and os.path.exists(inv_path):
     try:
         with open(vault_file, 'rb') as f:
@@ -734,15 +745,6 @@ if not pwd and os.path.exists(vault_file) and os.path.exists(inv_path):
     except Exception as e:
         print(f'VAULT_ERROR:{e}')
         sys.exit(0)
-
-if not pwd and os.path.exists(inv_path):
-    with open(inv_path) as f:
-        for line in f:
-            if 'ansible_become_pass:' in line and '!vault' not in line:
-                val = line.split('ansible_become_pass:', 1)[1].strip().strip('"\'')
-                if val and not val.startswith('{{'):
-                    pwd = val
-                    break
 
 if not pwd:
     print('NO_PASS')
