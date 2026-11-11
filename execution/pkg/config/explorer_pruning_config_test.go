@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,13 +11,8 @@ import (
 
 func loadConfigFreshForTest(t *testing.T, rawJSON string) *SimpleChainConfig {
 	t.Helper()
-	prevOnce := loadConfig
-	prevApp := ConfigApp
-	loadConfig = sync.Once{}
-	t.Cleanup(func() {
-		loadConfig = prevOnce
-		ConfigApp = prevApp
-	})
+	ResetConfigForTesting()
+	t.Cleanup(ResetConfigForTesting)
 
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
 	require.NoError(t, os.WriteFile(cfgPath, []byte(rawJSON), 0o600))

@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 EnvironmentFile=-{{ node_data_dir }}/security.env
 Type=simple
-User={{ ansible_user | default('metanode') }}
+User={{ ansible_user | default('abc') }}
 WorkingDirectory={{ node_data_dir }}
 ExecStart={{ bin_dir }}/simple_chain -config={{ node_data_dir }}/config.json
 ExecStop=/bin/kill -SIGTERM $MAINPID

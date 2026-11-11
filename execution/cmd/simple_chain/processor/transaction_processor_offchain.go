@@ -19,8 +19,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
-	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
-	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
@@ -434,36 +432,6 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 	exRsE, err := vmP.MvmResultToExecuteResultOffChain(ctx, executeTransaction, mvmResult)
 	if err != nil {
 		return nil, err
-	}
-
-	if explorerService := v.storageManager.GetExplorerSearchServiceReadOnly(); explorerService != nil {
-		rcp := receipt.NewReceipt(
-			executeTransaction.Hash(),
-			executeTransaction.FromAddress(),
-			executeTransaction.ToAddress(),
-			executeTransaction.Amount(),
-			exRsE.ReceiptStatus(),
-			exRsE.Return(),
-			exRsE.Exception(),
-			executeTransaction.EffectiveGasPrice().Uint64(),
-			exRsE.GasUsed(),
-			exRsE.EventLogs(),
-			uint64(0),
-			common.Hash{},
-			0,
-		)
-		logger.Info("Off-chain transaction %v executed, preparing to index", executeTransaction)
-		executeTransaction.SetReadOnly(true)
-		executeTransaction.SetNonce(storage.GetIncrementingCounter())
-		executeTransaction.ClearCacheHash()
-		rcp.SetRHash(executeTransaction.RHash())
-
-		if err := explorerService.IndexTransaction(executeTransaction, rcp, lastBlockHeader); err != nil {
-			// NOTE: With non-blocking drop policy, this error is expected when queue is full.
-			// Off-chain (read-only) TX indexing is best-effort — do NOT Fatal.
-			logger.Error("Cannot index off-chain transaction %s in block #%d: %v", executeTransaction.Hash().Hex(), lastBlockHeader.BlockNumber(), err)
-		}
-		logger.Info("Off-chain transaction %v  processed and indexed successfully", executeTransaction)
 	}
 	return exRsE, nil
 }

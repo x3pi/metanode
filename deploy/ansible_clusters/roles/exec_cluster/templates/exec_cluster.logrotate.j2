@@ -1,5 +1,5 @@
 {{ base_log_dir }}/{{ inventory_hostname }}.log {
-    su {{ ansible_user | default('metanode') }} {{ ansible_user | default('metanode') }}
+    su {{ ansible_user | default('abc') }} {{ ansible_user | default('abc') }}
     daily
     rotate 3
     maxsize 100M

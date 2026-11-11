@@ -245,7 +245,7 @@ func (p *PebbleDB) BatchPut(kvs [][2][]byte) error {
 	}
 
 	// Sync for WAL durability — prevents data loss on SIGKILL while avoiding full SST compaction
-	// OPTIMIZATION: Disabled pebble.Sync (using pebble.NoSync instead). This removes blocking fsyncs 
+	// OPTIMIZATION: Disabled pebble.Sync (using pebble.NoSync instead). This removes blocking fsyncs
 	// for every component during BatchPut, significantly reducing RealExec bottleneck from ~660ms to <50ms.
 	return batch.Commit(pebble.NoSync)
 }
