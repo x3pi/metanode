@@ -14,7 +14,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/command"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	p_network "github.com/meta-node-blockchain/meta-node/pkg/network"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
@@ -27,7 +26,6 @@ import (
 
 func (tp *TransactionProcessor) MonitorCacheSize() {
 	go func() {
-		fileLogger, _ := loggerfile.NewFileLogger("cache_debug.log")
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
@@ -37,8 +35,6 @@ func (tp *TransactionProcessor) MonitorCacheSize() {
 				readTxCount++
 				return true
 			})
-
-			fileLogger.Info("readTxHashes cache size: %d entries", readTxCount)
 
 			if readTxCount > 10000 {
 				logger.Error("⚠️  ALERT: readTxHashes cache > 10000 entries! (current: %d)", readTxCount)

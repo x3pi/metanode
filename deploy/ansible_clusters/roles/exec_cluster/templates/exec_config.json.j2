@@ -8,10 +8,33 @@
   "private_key": "{{ private_key }}",
   "address": "{{ address }}",
   "log_path": "{{ node_data_dir }}/logs",
+{% if epochs_to_keep is defined %}
+  "epochs_to_keep": {{ epochs_to_keep }},
+{% endif %}
+  "log": {
+    "level": "{{ log_level | default('info') }}",
+    "format": "{{ log_format | default('text') }}",
+    "console_output": {{ (log_console_output | default(true)) | bool | lower }},
+    "file_output": {{ (log_file_output | default(true)) | bool | lower }}
+  },
+  "pruning": {
+    "mode": "{{ pruning_mode | default('archive') }}",
+    "epochs_to_keep": {{ pruning_epochs_to_keep | default(128) }},
+    "prune_interval_blocks": {{ pruning_interval_blocks | default(100) }}
+  },
+  "state_backend": "{{ state_backend | default('nomt') }}",
   "backup_path": "{{ node_data_dir }}/backup",
   "explorer_db_path": "{{ node_data_dir }}/explorer",
   "explorer_read_only_db_path": "{{ node_data_dir }}/explorer-ro",
-  "is_explorer": true,
+  "is_explorer": {{ (is_explorer | default(true)) | bool | lower }},
+  "is_explorer_read_only": {{ (is_explorer_read_only | default(false)) | bool | lower }},
+  "explorer_queue_size": {{ explorer_queue_size | default(65536) }},
+  "explorer_worker_count": {{ explorer_worker_count | default(32) }},
+  "go_mem_limit_gb": {{ go_mem_limit_gb | default(8) }},
+  "go_gc_percent": {{ go_gc_percent | default(800) }},
+  "nomt_commit_concurrency": {{ nomt_commit_concurrency | default(4) }},
+  "nomt_page_cache_mb": {{ nomt_page_cache_mb | default(128) }},
+  "nomt_leaf_cache_mb": {{ nomt_leaf_cache_mb | default(128) }},
   "connection_address": "0.0.0.0:{{ p2p_port | default(4200) }}",
   "version": "0.0.1.0",
   "rpc_port": ":{{ rpc_port }}",
@@ -25,7 +48,10 @@
     "DBEngine": "sharded",
     "Version": "0.0.1.0",
     "BLSPrivateKey": "{{ bls_priv }}",
-    "SnapshotPath": "{{ node_data_dir }}/snapshot"
+    "SnapshotPath": "{{ node_data_dir }}/snapshot",
+    "pebble_cache_size_mb": {{ pebble_cache_size_mb | default(4096) }},
+    "pebble_mem_table_size_mb": {{ pebble_mem_table_size_mb | default(256) }},
+    "parallelism": {{ db_parallelism | default(2) }}
   },
   "is_rpc_node": true,
   "account_gate": "{{ account_gate | default('parent_registered') }}",

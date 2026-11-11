@@ -62,6 +62,14 @@ func SetSharedPebbleMemTableSize(sizeMB int) {
 	}
 }
 
+func GetSharedPebbleCacheSizeMB() int {
+	return sharedCacheSizeMB
+}
+
+func GetSharedPebbleMemTableSizeMB() int {
+	return sharedMemTableSizeMB
+}
+
 func GetSharedPebbleCache() *pebble.Cache {
 	sharedPebbleCacheOnce.Do(func() {
 		sharedPebbleCache = pebble.NewCache(int64(sharedCacheSizeMB) << 20)
@@ -237,7 +245,7 @@ func (p *PebbleDB) BatchPut(kvs [][2][]byte) error {
 	}
 
 	// Sync for WAL durability — prevents data loss on SIGKILL while avoiding full SST compaction
-	// OPTIMIZATION: Disabled pebble.Sync (using pebble.NoSync instead). This removes blocking fsyncs 
+	// OPTIMIZATION: Disabled pebble.Sync (using pebble.NoSync instead). This removes blocking fsyncs
 	// for every component during BatchPut, significantly reducing RealExec bottleneck from ~660ms to <50ms.
 	return batch.Commit(pebble.NoSync)
 }

@@ -331,20 +331,8 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 
 	app.storageManager = storage.NewStorageManager()
 
-	// Backup database
-	backupDB, err := storage.NewShardelDB(
-		config.JoinPathIfNotURL(app.config.BackupPath, config.PathBackup),
-		1, 2,
-		app.config.DBType,
-		config.JoinPathIfNotURL(app.config.BackupPath, config.PathBackup),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create backup DB: %v", err)
-	}
-	if err := backupDB.Open(); err != nil {
-		return nil, fmt.Errorf("failed to open backup DB: %v", err)
-	}
-	if err := app.storageManager.AddStorageBackupDb(backupDB); err != nil {
+	// Set shared Pebble block cache and memtable sizes BEFORE any DB (including backupDB) opens
+	if err := app.initBackupDB(); err != nil {
 		return nil, err
 	}
 
@@ -369,25 +357,8 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	// (including LevelDB → metadata consistency checks).
 	storage.SetBlockchainInitDone()
 
-	if app.config.IsExplorer {
-		dbPath := app.config.ExplorereDbPath
-		explorerSearch, err := explorer.NewExplorerSearchService(dbPath, app.config.ExplorerQueueSize, app.config.ExplorerWorkerCount)
-		if err != nil {
-			return nil, fmt.Errorf("không thể khởi tạo ExplorerSearchService: %v", err)
-		}
-		app.explorerSearch = explorerSearch
-		app.storageManager.SetExplorerSearchService(explorerSearch)
-
-		dbPathReadOnly := app.config.ExplorereReadOnlyDbPath
-		explorerReadOnlySearch, err := explorer.NewExplorerSearchService(dbPathReadOnly, app.config.ExplorerQueueSize, app.config.ExplorerWorkerCount)
-		if err != nil {
-			return nil, fmt.Errorf("không thể khởi tạo ExplorerSearchService: %v", err)
-		}
-		app.explorerReadOnlySearch = explorerReadOnlySearch
-
-		// Store the read-only explorer service separately so callers that
-		// expect the read-only instance don't get a nil receiver.
-		app.storageManager.SetExplorerSearchServiceReadOnly(explorerReadOnlySearch)
+	if err := app.initExplorer(); err != nil {
+		return nil, err
 	}
 
 	// Initialize Rollup Components
@@ -1358,8 +1329,67 @@ func (app *App) Stop() {
 	if app.explorerSearch != nil {
 		app.explorerSearch.Close()
 	}
+	if app.explorerReadOnlySearch != nil {
+		app.explorerReadOnlySearch.Close()
+	}
 
 	logger.Info("App stopped.")
+}
+
+// initBackupDB configures shared Pebble cache/memtable sizes BEFORE any PebbleDB opens,
+// then opens and registers backupDB.
+func (app *App) initBackupDB() error {
+	storage.SetSharedPebbleCacheSize(app.config.Databases.PebbleCacheSizeMB)
+	storage.SetSharedPebbleMemTableSize(app.config.Databases.PebbleMemTableSizeMB)
+
+	backupDB, err := storage.NewShardelDB(
+		config.JoinPathIfNotURL(app.config.BackupPath, config.PathBackup),
+		1, 2,
+		app.config.DBType,
+		config.JoinPathIfNotURL(app.config.BackupPath, config.PathBackup),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create backup DB: %v", err)
+	}
+	if err := backupDB.Open(); err != nil {
+		return fmt.Errorf("failed to open backup DB: %v", err)
+	}
+	return app.storageManager.AddStorageBackupDb(backupDB)
+}
+
+// initExplorer initializes the primary Xapian explorer search service and, when enabled,
+// the secondary read-only Xapian explorer search service.
+func (app *App) initExplorer() error {
+	if !app.config.IsExplorer {
+		return nil
+	}
+
+	dbPath := app.config.ExplorereDbPath
+	explorerSearch, err := explorer.NewExplorerSearchService(dbPath, app.config.ExplorerQueueSize, app.config.ExplorerWorkerCount)
+	if err != nil {
+		return fmt.Errorf("không thể khởi tạo ExplorerSearchService: %v", err)
+	}
+	app.explorerSearch = explorerSearch
+	app.storageManager.SetExplorerSearchService(explorerSearch)
+
+	if app.config.ExplorerReadOnlyEnabled() {
+		dbPathReadOnly := app.config.ExplorereReadOnlyDbPath
+		explorerReadOnlySearch, err := explorer.NewExplorerSearchService(dbPathReadOnly, app.config.ExplorerQueueSize, app.config.ExplorerWorkerCount)
+		if err != nil {
+			explorerSearch.Close()
+			app.explorerSearch = nil
+			app.storageManager.SetExplorerSearchService(nil)
+			return fmt.Errorf("không thể khởi tạo ExplorerSearchService: %v", err)
+		}
+		app.explorerReadOnlySearch = explorerReadOnlySearch
+
+		// Store the read-only explorer service separately so callers that
+		// expect the read-only instance don't get a nil receiver.
+		app.storageManager.SetExplorerSearchServiceReadOnly(explorerReadOnlySearch)
+	} else {
+		logger.Info("ℹ️ [EXPLORER] Read-only ExplorerSearchService disabled (is_explorer_read_only=false)")
+	}
+	return nil
 }
 
 // ConvertAddressMapToStringSlice converts a map of addresses to a slice of hex strings

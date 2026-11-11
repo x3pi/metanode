@@ -196,10 +196,11 @@ type SimpleChainConfig struct {
 	ExplorereDbPath         string `json:"explorer_db_path"`
 	ExplorereReadOnlyDbPath string `json:"explorer_read_only_db_path"`
 
-	IsExplorer          bool `json:"is_explorer"`
-	IsRPCNode           bool `json:"is_rpc_node"`
-	ExplorerQueueSize   int  `json:"explorer_queue_size"`
-	ExplorerWorkerCount int  `json:"explorer_worker_count"`
+	IsExplorer          bool  `json:"is_explorer"`
+	IsExplorerReadOnly  *bool `json:"is_explorer_read_only,omitempty"`
+	IsRPCNode           bool  `json:"is_rpc_node"`
+	ExplorerQueueSize   int   `json:"explorer_queue_size"`
+	ExplorerWorkerCount int   `json:"explorer_worker_count"`
 
 	MiningDbPath           string `json:"mining_db_path"`
 	IsMining               bool   `json:"is_mining"`
@@ -380,6 +381,16 @@ func (c *SimpleChainConfig) ValidateChainBinding() error {
 // AccountGateParentRegistered reports whether the parent-registered account gate is enabled.
 func (c *SimpleChainConfig) AccountGateParentRegistered() bool {
 	return c != nil && c.AccountGate == AccountGateParentRegistered
+}
+
+// ExplorerReadOnlyEnabled reports whether the secondary read-only Xapian explorer index should be opened.
+// Defaults to false when IsExplorerReadOnly is nil (omitted in config.json) so nodes do not open
+// 32 redundant Xapian shards or index eth_call queries to disk unless explicitly enabled.
+func (c *SimpleChainConfig) ExplorerReadOnlyEnabled() bool {
+	if c == nil || !c.IsExplorer {
+		return false
+	}
+	return c.IsExplorerReadOnly != nil && *c.IsExplorerReadOnly
 }
 
 // validateAccountGate rejects unknown values and enforces that parent_registered requires secp mode.

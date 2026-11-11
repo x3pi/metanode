@@ -6,6 +6,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	mt_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 )
 
 // initStorage initializes all storage-related components
@@ -52,7 +53,7 @@ func (app *App) initStorageDatabases() error {
 		var db storage.Storage
 		var err error
 
-		if app.config.StateBackend == "nomt" && (storageName == "account" || storageName == "stake" || storageName == "trie") {
+		if mt_trie.GetStateBackend() == mt_trie.BackendNOMT && (storageName == "account" || storageName == "stake" || storageName == "trie") {
 			logger.Info("Using DummyStorage for %s because state_backend is nomt", storageName)
 			db = storage.NewDummyStorage(fullBackupPath)
 		} else {

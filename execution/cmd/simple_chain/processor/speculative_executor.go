@@ -833,8 +833,6 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 	// Everything below nextExpectedGEI is already committed: let speculative executions waiting on it proceed.
 	bp.speculativeExecutor.MarkCommitted(nextExpectedGEI - 1)
 
-	epochFileLogger, _ := loggerfile.NewFileLogger("runSocketExecutor_committer.log")
-
 	for range bp.speculativeExecutor.ResultChan() {
 		// Vòng lặp kiểm tra và xử lý tuần tự các GEI liên tục đã hoàn thành
 		for {
@@ -855,7 +853,7 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 
 			// BATCH-DRAIN OPTIMIZATION REMOVED: Every empty commit is now sequentially processed to prevent gaps.
 
-			err := bp.commitSpeculativeResult(specRes, epochFileLogger)
+			err := bp.commitSpeculativeResult(specRes, nil)
 			if err != nil {
 				logger.Error("❌ [COMMITTER] Failed to commit speculative result for GEI=%d: %v", nextExpectedGEI, err)
 				break

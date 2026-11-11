@@ -1,11 +1,10 @@
-{{ base_log_dir }}/{{ inventory_hostname }}.log {{ node_data_dir }}/logs/*.log {
+{{ base_log_dir }}/{{ inventory_hostname }}.log {
+    su {{ ansible_user | default('abc') }} {{ ansible_user | default('abc') }}
     daily
-    rotate 7
-    maxsize 500M
+    rotate 3
+    maxsize 100M
     missingok
     notifempty
-    compress
-    delaycompress
     copytruncate
 }
 
