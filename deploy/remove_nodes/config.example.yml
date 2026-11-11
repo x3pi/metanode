@@ -1,0 +1,43 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CẤU HÌNH GỠ NODE KHỎI CỤM RAFT & DỌN DẸP DỊCH VỤ (remove_nodes.sh)
+#  File mẫu (tracked trên Git). Khi chạy thực tế, copy thành config.yml
+#  (file config.yml đã được cấu hình trong .gitignore để không bị push lên Git).
+#
+#  QUY TRÌNH TỰ ĐỘNG CỦA remove_nodes.sh:
+#    1. Gỡ lần lượt từng node khỏi nhóm đồng thuận Raft (remove-replica --transfer-first,
+#       tự động nhường quyền Leader nếu node bị gỡ đang là Leader, và kiểm tra Quorum an toàn).
+#    2. Dừng và vô hiệu hóa systemd service (metanode-<node>) trên máy đích.
+#       Nếu bật clean_removed_data: true thì xóa sạch thư mục data/ & raft/ của node đó.
+#    3. Tự động comment (#) khối cấu hình của node bị gỡ trong inventory.yml (nếu update_inventory: true).
+#    4. Cập nhật lại danh sách raft.peers, /tmp/rpc_nodes.json và Monitor ngầm cho các node còn lại.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Đường dẫn tới file Ansible Inventory (tính từ thư mục deploy/ hoặc đường dẫn tuyệt đối)
+inventory: "ansible_clusters/inventory.yml"
+
+# Tên cụm Execution trong inventory cần gỡ node
+cluster: "cluster_1"
+
+# Danh sách tên host trong inventory cần gỡ khỏi cụm Raft
+# Lưu ý: Không được gỡ node giữ vai trò raft_bootstrap: true / raft_secret_source
+remove_nodes:
+  - "exec1_replica4"
+  - "exec1_replica5"
+
+# Đặt true nếu muốn XÓA SẠCH thư mục dữ liệu (data/, raft/, logs/, snapshot/) trên máy của node bị gỡ.
+# Đặt false (mặc định, an toàn) để chỉ dừng service mà vẫn giữ nguyên dữ liệu trên ổ cứng.
+clean_removed_data: false
+
+# Đặt true để tự động comment (#) các node trong remove_nodes khỏi file inventory.yml sau khi dừng service
+update_inventory: true
+
+# Tùy chọn cập nhật cấu hình cho các node còn lại sau khi gỡ:
+# - restart_remaining_nodes: true  -> Chạy --restart --exec-only để cập nhật lại danh sách raft.peers
+#   trong config.json, /tmp/rpc_nodes.json và khởi động lại Monitor ngầm theo danh sách node mới.
+# - restart_remaining_nodes: false -> Giữ nguyên các node đang chạy không bị gián đoạn (vì Raft đã
+#   gỡ động thành viên trực tuyến), chỉ xuất lại /tmp/rpc_nodes.json.
+restart_remaining_nodes: true
+
+# Đặt true nếu muốn build & khởi động lại cả Parent Chain (tương đương --restart toàn bộ)
+restart_parent_chain: false
+
