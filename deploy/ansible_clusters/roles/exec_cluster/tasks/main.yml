@@ -139,6 +139,39 @@
 - name: Setup Execution Node {{ inventory_hostname }}
   when: "deploy_action in ['setup', 'deploy', 'restart', 'reset']"
   block:
+    - name: Provision swap file on low-RAM nodes when swap_size_gb is configured
+      when: "(swap_size_gb | default(0) | int) > 0"
+      throttle: 1
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          fs_type=$(df -T / | awk 'NR==2 {print $2}')
+          if [ "$fs_type" = "btrfs" ]; then
+            echo "Skipping swapfile creation on btrfs root filesystem"
+            exit 0
+          fi
+          total_swap_bytes=$(free -b | awk '/^Swap:/ {print $2}')
+          target_swap_bytes=$(( {{ swap_size_gb | int }} * 1024 * 1024 * 1024 ))
+          if [ "${total_swap_bytes:-0}" -ge "$target_swap_bytes" ]; then
+            echo "Host already has sufficient swap (${total_swap_bytes} bytes >= ${target_swap_bytes} bytes)"
+            exit 0
+          fi
+          if ! swapon --show | grep -q '/swapfile'; then
+            if [ ! -f /swapfile ]; then
+              fallocate -l {{ swap_size_gb | int }}G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count={{ (swap_size_gb | int) * 1024 }}
+            fi
+            chmod 0600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+          fi
+          if ! grep -q '^/swapfile ' /etc/fstab; then
+            echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          fi
+          echo 'vm.swappiness=10' > /etc/sysctl.d/99-metanode-swap.conf
+          sysctl -p /etc/sysctl.d/99-metanode-swap.conf || true
+      changed_when: false
+
     - name: Ensure Execution Node directories exist
       ansible.builtin.file:
         path: "{{ item }}"
@@ -155,8 +188,16 @@
         - "{{ node_data_dir }}/raft"
         - "{{ node_data_dir }}/backup"
         - "{{ node_data_dir }}/explorer"
-        - "{{ node_data_dir }}/explorer-ro"
         - "{{ base_log_dir }}"
+
+    - name: Create explorer-ro directory only when is_explorer_read_only is enabled
+      when: "(is_explorer_read_only | default(false) | bool)"
+      ansible.builtin.file:
+        path: "{{ node_data_dir }}/explorer-ro"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user | default('abc') }}"
+        group: "{{ ansible_user | default('abc') }}"
 
     - name: Ensure the Raft HMAC secret exists on this cluster's bootstrap source
       when: "(consensus_mode | default('raft')) == 'raft'"

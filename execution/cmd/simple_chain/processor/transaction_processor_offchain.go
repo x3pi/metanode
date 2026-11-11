@@ -436,46 +436,35 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 		return nil, err
 	}
 
-	rcp := receipt.NewReceipt(
-		executeTransaction.Hash(),
-		executeTransaction.FromAddress(),
-		executeTransaction.ToAddress(),
-		executeTransaction.Amount(),
-		exRsE.ReceiptStatus(),
-		exRsE.Return(),
-		exRsE.Exception(),
-		executeTransaction.EffectiveGasPrice().Uint64(),
-		exRsE.GasUsed(),
-		exRsE.EventLogs(),
-		uint64(0),
-		common.Hash{},
-		0,
-	)
-	// --- KẾT THÚC KIỂM TRA ---
-	logger.Info("Off-chain transaction %v executed, preparing to index", executeTransaction)
-	// Nếu không trùng lặp, tiếp tục xử lý giao dịch
-	executeTransaction.SetReadOnly(true)
-	executeTransaction.SetNonce(storage.GetIncrementingCounter())
-	executeTransaction.ClearCacheHash()
-
-	// txHash := executeTransaction.Hash()
-
-	// // --- KIỂM TRA GIAO DỊCH TRÙNG LẶP ---
-	// if _, loaded := v.readTxHashes.LoadOrStore(txHash, time.Now()); loaded {
-	// 	errMsg := fmt.Sprintf("duplicate read transaction: %s : nonce : %v", txHash.Hex(), executeTransaction.GetNonce())
-	// 	logger.Error("Duplicate read transaction detected: %s", errMsg)
-	// 	panic("duplicate read transaction")
-	// }
-	rcp.SetRHash(executeTransaction.RHash())
-
 	if explorerService := v.storageManager.GetExplorerSearchServiceReadOnly(); explorerService != nil {
+		rcp := receipt.NewReceipt(
+			executeTransaction.Hash(),
+			executeTransaction.FromAddress(),
+			executeTransaction.ToAddress(),
+			executeTransaction.Amount(),
+			exRsE.ReceiptStatus(),
+			exRsE.Return(),
+			exRsE.Exception(),
+			executeTransaction.EffectiveGasPrice().Uint64(),
+			exRsE.GasUsed(),
+			exRsE.EventLogs(),
+			uint64(0),
+			common.Hash{},
+			0,
+		)
+		logger.Info("Off-chain transaction %v executed, preparing to index", executeTransaction)
+		executeTransaction.SetReadOnly(true)
+		executeTransaction.SetNonce(storage.GetIncrementingCounter())
+		executeTransaction.ClearCacheHash()
+		rcp.SetRHash(executeTransaction.RHash())
+
 		if err := explorerService.IndexTransaction(executeTransaction, rcp, lastBlockHeader); err != nil {
 			// NOTE: With non-blocking drop policy, this error is expected when queue is full.
 			// Off-chain (read-only) TX indexing is best-effort — do NOT Fatal.
 			logger.Error("Cannot index off-chain transaction %s in block #%d: %v", executeTransaction.Hash().Hex(), lastBlockHeader.BlockNumber(), err)
 		}
+		logger.Info("Off-chain transaction %v  processed and indexed successfully", executeTransaction)
 	}
-	logger.Info("Off-chain transaction %v  processed and indexed successfully", executeTransaction)
 	return exRsE, nil
 }
 

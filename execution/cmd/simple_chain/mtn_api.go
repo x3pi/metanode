@@ -346,10 +346,14 @@ func (api *MtnAPI) SearchTransactions(ctx context.Context, query string, offset,
 // SearchTransactions trả về mảng JSON các giao dịch theo query, có phân trang
 func (api *MtnAPI) SearchTransactionsReadOnly(ctx context.Context, query string, offset, limit int) (map[string]interface{}, error) {
 	// Lấy service explorer từ app (giả sử app có trường ExplorerService)
-	if !api.App.storageManager.IsExplorer() {
+	if api == nil || api.App == nil || api.App.storageManager == nil || !api.App.storageManager.IsExplorer() {
 		return nil, fmt.Errorf("ExplorerService chưa được khởi tạo")
 	}
-	results, total, err := api.App.storageManager.GetExplorerSearchServiceReadOnly().SearchTransactions(query, offset, limit)
+	roService := api.App.storageManager.GetExplorerSearchServiceReadOnly()
+	if roService == nil {
+		return nil, fmt.Errorf("ExplorerReadOnlyService đã tắt (is_explorer_read_only=false)")
+	}
+	results, total, err := roService.SearchTransactions(query, offset, limit)
 	if err != nil {
 		return nil, err
 	}

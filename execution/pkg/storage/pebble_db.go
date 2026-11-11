@@ -62,6 +62,14 @@ func SetSharedPebbleMemTableSize(sizeMB int) {
 	}
 }
 
+func GetSharedPebbleCacheSizeMB() int {
+	return sharedCacheSizeMB
+}
+
+func GetSharedPebbleMemTableSizeMB() int {
+	return sharedMemTableSizeMB
+}
+
 func GetSharedPebbleCache() *pebble.Cache {
 	sharedPebbleCacheOnce.Do(func() {
 		sharedPebbleCache = pebble.NewCache(int64(sharedCacheSizeMB) << 20)

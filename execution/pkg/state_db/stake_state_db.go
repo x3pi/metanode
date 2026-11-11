@@ -14,7 +14,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -575,8 +574,6 @@ func (db *StakeStateDB) GetStorage() storage.Storage {
 // IntermediateRoot applies dirty validator states to the in-memory trie and returns the new root hash.
 // This function is crucial for the commit process.
 func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, error) {
-	fileLogger, _ := loggerfile.NewFileLogger(fmt.Sprintf("IntermediateRoot_" + ".log"))
-
 	var lockProcess bool
 	if len(isLockProcess) > 0 {
 		lockProcess = isLockProcess[0]
@@ -656,7 +653,6 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		var bytesToStore []byte
 		if value != nil {
 			vs, ok2 := value.(state.ValidatorState)
-			fileLogger.Info("IntermediateRoot: vs", vs)
 			if !ok2 {
 				updateErr = fmt.Errorf("invalid value type for address %s", address.Hex())
 				break
@@ -758,7 +754,6 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		}
 
 		logger.Debug("Calculated new intermediate hash for stake state", "newHash", newHash)
-		fileLogger.Info("IntermediateRoot: hasChanges", newHash)
 
 		// FORK-SAFETY DIAGNOSTIC: Detect NOMT handle returning zero hash
 		if newHash == (common.Hash{}) {
@@ -770,7 +765,6 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 		return newHash, nil
 	} else {
 		nHash := db.trie.Hash()
-		fileLogger.Info("IntermediateRoot: nHash", nHash)
 
 		// FORK-SAFETY DIAGNOSTIC: Detect NOMT handle returning zero hash
 		if nHash == (common.Hash{}) {
@@ -783,8 +777,6 @@ func (db *StakeStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, er
 }
 
 func (db *StakeStateDB) Commit() (common.Hash, error) {
-	fileLogger, _ := loggerfile.NewFileLogger(fmt.Sprintf("Commit" + ".log"))
-
 	db.muCommit.Lock()
 	defer db.muCommit.Unlock()
 
@@ -805,13 +797,11 @@ func (db *StakeStateDB) Commit() (common.Hash, error) {
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("trie IntermediateRoot calculation failed: %w", err)
 	}
-	fileLogger.Info("IntermediateRoot: intermediateHash", intermediateHash)
 
 	committedHash, nodeSet, _, err := db.trie.Commit(true)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("trie Commit calculation failed: %w", err)
 	}
-	fileLogger.Info("Commit: committedHash", committedHash)
 
 	// Commit NOMT payload sequentially
 	if nomtTrie, isNomt := db.trie.(*p_trie.NomtStateTrie); isNomt {

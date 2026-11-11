@@ -15,6 +15,12 @@ RestartSec=3s
 TimeoutStopSec=30
 LimitNOFILE=65536
 LimitCORE=infinity
+{% if systemd_memory_high is defined %}
+MemoryHigh={{ systemd_memory_high }}
+{% endif %}
+{% if systemd_memory_max is defined %}
+MemoryMax={{ systemd_memory_max }}
+{% endif %}
 Environment="PARENT_CHAIN_URL=http://{{ parent_chain_host | default('127.0.0.1') }}:{{ parent_chain_rpc_port | default(8547) }}"
 Environment="PARENT_CHAIN_URLS={{ parent_chain_urls_csv | default('') }}"
 Environment="BLS_CONSERVATION_MODE={{ bls_conservation_mode | default('enforce') }}"
