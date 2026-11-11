@@ -35,6 +35,8 @@ update_inventory: true
 # - restart_remaining_nodes: false (Khuyên dùng khi Production - Zero Downtime):
 #   Giữ nguyên các node đang chạy 100% không gián đoạn bất kỳ giây nào (vì Bước 1 đã gỡ
 #   node trực tuyến qua Raft API rồi), tự động xuất lại /tmp/rpc_nodes.json và nạp lại Monitor (--monitor-only).
+#   Lưu ý: Raft state đã lưu danh sách thành viên mới trong raft/logs.db nên khi restart node vẫn dùng cụm mới.
+#   Tuy nhiên, config.json trên đĩa chưa cập nhật raft.peers cho đến lần bảo trì chạy ./deploy_clusters.sh --restart tiếp theo.
 # - restart_remaining_nodes: true  -> Khởi động lại nhanh các node còn lại (--restart --exec-only)
 #   để ghi mới lại file config.json (cập nhật trường raft.peers trên đĩa cứng). Sẽ gián đoạn mạng vài giây để bầu lại Leader.
 restart_remaining_nodes: false
