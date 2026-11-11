@@ -149,7 +149,7 @@
           changed=0
           fs_type=$(df -T / | awk 'NR==2 {print $2}')
           if [ "$fs_type" = "btrfs" ]; then
-            echo "Skipping swapfile creation on btrfs root filesystem"
+            echo "WARNING: Skipping swapfile creation on btrfs root filesystem"
             exit 0
           fi
           total_swap_bytes=$(free -b | awk '/^Swap:/ {print $2}')
@@ -163,8 +163,8 @@
               avail_bytes=$(df -B1 / | awk 'NR==2 {print $4}')
               min_free_bytes=$(( ({{ swap_size_gb | int }} + 2) * 1024 * 1024 * 1024 ))
               if [ "${avail_bytes:-0}" -lt "$min_free_bytes" ]; then
-                echo "WARNING: Skipping /swapfile creation due to insufficient free disk space (${avail_bytes} bytes < ${min_free_bytes} bytes required)"
-                exit 0
+                echo "ERROR: Insufficient free disk space to create {{ swap_size_gb | int }}G /swapfile (${avail_bytes} bytes available < ${min_free_bytes} bytes required)" >&2
+                exit 1
               fi
               fallocate -l {{ swap_size_gb | int }}G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count={{ (swap_size_gb | int) * 1024 }}
             fi
@@ -187,6 +187,14 @@
           fi
       register: swap_provision_res
       changed_when: "'SWAP_CHANGED' in swap_provision_res.stdout"
+
+    - name: Surface swap provisioning warning to operator
+      when:
+        - "(swap_size_gb | default(0) | int) > 0"
+        - "swap_provision_res is defined"
+        - "'WARNING:' in (swap_provision_res.stdout | default(''))"
+      ansible.builtin.debug:
+        msg: "{{ swap_provision_res.stdout_lines | select('search', '^WARNING:') | list }}"
 
     - name: Ensure Execution Node directories exist
       ansible.builtin.file:
