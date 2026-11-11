@@ -126,6 +126,13 @@ func TestPartB_AnsibleTemplates_LowRamVPSAndHighRamServer_ValidAndSafe(t *testin
 			"epochs_to_keep":           3,
 			"pruning_mode":             "archive",
 			"systemd_memory_high":      "3200M",
+			"standalone_chain":         false,
+			"parent_chain_host":        "lan1.iqnb.com",
+			"parent_chain_rpc_port":    28601,
+			"parent_chain_url":         "http://lan1.iqnb.com:28601",
+			"parent_chain_urls":        "http://lan1.iqnb.com:28601,http://lan1.iqnb.com:28602,http://lan1.iqnb.com:28603,http://lan1.iqnb.com:28604",
+			"parent_chain_urls_csv":    "http://192.168.1.234:28601,http://192.168.1.231:28602",
+			"bls_conservation_mode":    "warn",
 		}
 
 		renderedJSON := renderAnsibleJinjaTemplate(t, execConfigTpl, vars)
@@ -155,8 +162,25 @@ func TestPartB_AnsibleTemplates_LowRamVPSAndHighRamServer_ValidAndSafe(t *testin
 		assert.Equal(t, "archive", cfg.Pruning.Mode, "DB pruning must be disabled (archive mode)")
 
 		renderedService := renderAnsibleJinjaTemplate(t, systemdTpl, vars)
+		assert.Contains(t, renderedService, "LimitMEMLOCK=infinity")
 		assert.Contains(t, renderedService, "MemoryHigh=3200M")
-		assert.NotContains(t, renderedService, "MemoryMax=", "MemoryMax must be omitted so systemd does not prematurely OOM-kill before Swap")
+		assert.NotContains(t, renderedService, "MemoryMax=", "MemoryMax must be omitted so systemd does not prematurely OOM-kill")
+		assert.Contains(t, renderedService, `Environment="PARENT_CHAIN_URL=http://lan1.iqnb.com:28601"`)
+		assert.Contains(t, renderedService, `Environment="PARENT_CHAIN_URLS=http://lan1.iqnb.com:28601,http://lan1.iqnb.com:28602,http://lan1.iqnb.com:28603,http://lan1.iqnb.com:28604"`)
+		assert.NotContains(t, renderedService, "192.168.1.234", "explicit parent_chain_urls must override LAN parent_chain_urls_csv")
+		assert.Contains(t, renderedService, `Environment="BLS_CONSERVATION_MODE=warn"`)
+
+		// Verify standalone_chain=true omits parent chain environment variables
+		standaloneVars := make(map[string]interface{}, len(vars))
+		for k, v := range vars {
+			standaloneVars[k] = v
+		}
+		standaloneVars["standalone_chain"] = true
+		renderedStandaloneService := renderAnsibleJinjaTemplate(t, systemdTpl, standaloneVars)
+		assert.Contains(t, renderedStandaloneService, "LimitMEMLOCK=infinity")
+		assert.NotContains(t, renderedStandaloneService, "PARENT_CHAIN_URL=")
+		assert.NotContains(t, renderedStandaloneService, "PARENT_CHAIN_URLS=")
+		assert.NotContains(t, renderedStandaloneService, "BLS_CONSERVATION_MODE=")
 
 		renderedLogrotate := renderAnsibleJinjaTemplate(t, logrotateTpl, vars)
 		assert.Contains(t, renderedLogrotate, "su stackops stackops")
