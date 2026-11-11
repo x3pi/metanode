@@ -32,11 +32,12 @@ clean_removed_data: false
 update_inventory: true
 
 # Tùy chọn cập nhật cấu hình cho các node còn lại sau khi gỡ:
-# - restart_remaining_nodes: true  -> Chạy --restart --exec-only để cập nhật lại danh sách raft.peers
-#   trong config.json, /tmp/rpc_nodes.json và khởi động lại Monitor ngầm theo danh sách node mới.
-# - restart_remaining_nodes: false -> Giữ nguyên các node đang chạy không bị gián đoạn (vì Raft đã
-#   gỡ động thành viên trực tuyến), chỉ xuất lại /tmp/rpc_nodes.json.
-restart_remaining_nodes: true
+# - restart_remaining_nodes: false (Khuyên dùng khi Production - Zero Downtime):
+#   Giữ nguyên các node đang chạy 100% không gián đoạn bất kỳ giây nào (vì Bước 1 đã gỡ
+#   node trực tuyến qua Raft API rồi), tự động xuất lại /tmp/rpc_nodes.json và nạp lại Monitor (--monitor-only).
+# - restart_remaining_nodes: true  -> Khởi động lại nhanh các node còn lại (--restart --exec-only)
+#   để ghi mới lại file config.json (cập nhật trường raft.peers trên đĩa cứng). Sẽ gián đoạn mạng vài giây để bầu lại Leader.
+restart_remaining_nodes: false
 
 # Đặt true nếu muốn build & khởi động lại cả Parent Chain (tương đương --restart toàn bộ)
 restart_parent_chain: false

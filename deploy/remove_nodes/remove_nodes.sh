@@ -297,22 +297,30 @@ for rn in remove_nodes:
         )
         sys.exit(1)
 
-# ── Safety Guard 3: Không cho phép trùng (ansible_host, node_data_dir) ─────────
+# ── Safety Guard 3: Không cho phép trùng hoặc là tiền tố đường dẫn của nhau trên cùng host ──
 combined_check = [(h, active_hosts_map[h]) for h in remaining_nodes] + [(rn, remove_hosts_map[rn]) for rn in remove_nodes]
-seen_host_dirs = {}
+seen_host_dirs = []
 for hname, h in combined_check:
     hip = str(h.get('ansible_host', '127.0.0.1')).strip()
     nid = str(h.get('node_id', hname))
     ddir = os.path.normpath(str(h.get('node_data_dir', f"/opt/metanode/{nid}")))
-    key = (hip, ddir)
-    if key in seen_host_dirs and seen_host_dirs[key] != hname:
-        other = seen_host_dirs[key]
-        sys.stderr.write(
-            f"FATAL SAFETY ERROR: Nodes '{other}' and '{hname}' share the exact same (ansible_host={hip}, "
-            f"node_data_dir={ddir})! Refusing to run to protect active node data.\n"
-        )
-        sys.exit(1)
-    seen_host_dirs[key] = hname
+    # Đảm bảo đường dẫn chuẩn có đuôi separator để so khớp tiền tố
+    norm_slash = ddir if ddir.endswith('/') else ddir + '/'
+    for other_name, other_ip, other_dir, other_slash in seen_host_dirs:
+        if hip == other_ip:
+            if ddir == other_dir:
+                sys.stderr.write(
+                    f"FATAL SAFETY ERROR: Nodes '{other_name}' and '{hname}' share the exact same (ansible_host={hip}, "
+                    f"node_data_dir={ddir})! Refusing to run to protect active node data.\n"
+                )
+                sys.exit(1)
+            if norm_slash.startswith(other_slash) or other_slash.startswith(norm_slash):
+                sys.stderr.write(
+                    f"FATAL SAFETY ERROR: Nodes '{other_name}' ({other_dir}) and '{hname}' ({ddir}) have nested/prefix "
+                    f"directories on host {hip}! Refusing to run to prevent accidental process termination or data loss.\n"
+                )
+                sys.exit(1)
+    seen_host_dirs.append((hname, hip, ddir, norm_slash))
 
 def emit_host(prefix, hname, h, in_inv=True):
     host_ip = str(h.get('ansible_host', '127.0.0.1')).strip()
@@ -474,7 +482,7 @@ systemctl stop 'metanode-${anode}' 2>/dev/null || true
 systemctl disable 'metanode-${anode}' 2>/dev/null || true
 if [ -f '${target_dir}/cluster.pid' ]; then
     pid=\$(cat '${target_dir}/cluster.pid' 2>/dev/null || true)
-    if [ -n "\$pid" ] && [ -d "/proc/\$pid" ] && tr '\0' ' ' < "/proc/\$pid/cmdline" 2>/dev/null | grep -q -F '${target_dir}'; then
+    if [ -n "\$pid" ] && [ -d "/proc/\$pid" ] && tr '\0' ' ' < "/proc/\$pid/cmdline" 2>/dev/null | grep -q -F '${target_dir}/'; then
         kill -15 "\$pid" 2>/dev/null || true
         sleep 0.5
         kill -9 "\$pid" 2>/dev/null || true
@@ -482,7 +490,7 @@ if [ -f '${target_dir}/cluster.pid' ]; then
     rm -f '${target_dir}/cluster.pid'
 fi
 for pid in \$(pgrep -x simple_chain 2>/dev/null || true); do
-    if tr '\0' ' ' < "/proc/\$pid/cmdline" 2>/dev/null | grep -q -F '${target_dir}'; then
+    if tr '\0' ' ' < "/proc/\$pid/cmdline" 2>/dev/null | grep -q -F '${target_dir}/'; then
         kill -15 "\$pid" 2>/dev/null || true
         sleep 0.5
         kill -9 "\$pid" 2>/dev/null || true
@@ -895,8 +903,11 @@ elif [ "${RESTART_REMAINING}" = "true" ]; then
     echo "👉 [Bước 4/5] Cập nhật config.json (raft.peers), /tmp/rpc_nodes.json, Monitor và khởi động lại Execution Clusters (--exec-only)..."
     ./deploy_clusters.sh --inventory="${INVENTORY_PATH}" --restart --exec-only
 else
-    echo "👉 [Bước 4/5] Giữ nguyên các node đang chạy (restart_remaining_nodes=false), chỉ xuất lại /tmp/rpc_nodes.json..."
+    echo "👉 [Bước 4/5] Giữ nguyên cụm trực tuyến 100% không gián đoạn (restart_remaining_nodes=false)..."
+    echo "   • Xuất lại cấu hình /tmp/rpc_nodes.json theo inventory mới..."
     ./deploy_clusters.sh --inventory="${INVENTORY_PATH}" --export-config
+    echo "   • Đồng bộ và nạp lại Monitor ngầm theo danh sách node mới (không dừng bất kỳ node nào)..."
+    ./deploy_clusters.sh --inventory="${INVENTORY_PATH}" --monitor-only
 fi
 
 # ── BƯỚC 5/5: Kiểm tra sức khỏe cụm Raft & trạng thái RPC sau khi gỡ ──────────
