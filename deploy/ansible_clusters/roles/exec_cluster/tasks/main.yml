@@ -146,10 +146,9 @@
       ansible.builtin.shell:
         cmd: |
           set -e
-          changed=0
           fs_type=$(df -T / | awk 'NR==2 {print $2}')
           if [ "$fs_type" = "btrfs" ]; then
-            echo "WARNING: Skipping swapfile creation on btrfs root filesystem"
+            echo "Skipping swapfile creation on btrfs root filesystem"
             exit 0
           fi
           total_swap_bytes=$(free -b | awk '/^Swap:/ {print $2}')
@@ -160,41 +159,18 @@
           fi
           if ! swapon --show | grep -q '/swapfile'; then
             if [ ! -f /swapfile ]; then
-              avail_bytes=$(df -B1 / | awk 'NR==2 {print $4}')
-              min_free_bytes=$(( ({{ swap_size_gb | int }} + 2) * 1024 * 1024 * 1024 ))
-              if [ "${avail_bytes:-0}" -lt "$min_free_bytes" ]; then
-                echo "ERROR: Insufficient free disk space to create {{ swap_size_gb | int }}G /swapfile (${avail_bytes} bytes available < ${min_free_bytes} bytes required)" >&2
-                exit 1
-              fi
               fallocate -l {{ swap_size_gb | int }}G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count={{ (swap_size_gb | int) * 1024 }}
             fi
             chmod 0600 /swapfile
             mkswap /swapfile
             swapon /swapfile
-            changed=1
           fi
           if ! grep -q '^/swapfile ' /etc/fstab; then
             echo '/swapfile none swap sw 0 0' >> /etc/fstab
-            changed=1
           fi
-          if [ ! -f /etc/sysctl.d/99-metanode-swap.conf ] || ! grep -qx 'vm.swappiness=10' /etc/sysctl.d/99-metanode-swap.conf; then
-            echo 'vm.swappiness=10' > /etc/sysctl.d/99-metanode-swap.conf
-            sysctl -p /etc/sysctl.d/99-metanode-swap.conf || true
-            changed=1
-          fi
-          if [ "$changed" -eq 1 ]; then
-            echo "SWAP_CHANGED"
-          fi
-      register: swap_provision_res
-      changed_when: "'SWAP_CHANGED' in swap_provision_res.stdout"
-
-    - name: Surface swap provisioning warning to operator
-      when:
-        - "(swap_size_gb | default(0) | int) > 0"
-        - "swap_provision_res is defined"
-        - "'WARNING:' in (swap_provision_res.stdout | default(''))"
-      ansible.builtin.debug:
-        msg: "{{ swap_provision_res.stdout_lines | select('search', '^WARNING:') | list }}"
+          echo 'vm.swappiness=10' > /etc/sysctl.d/99-metanode-swap.conf
+          sysctl -p /etc/sysctl.d/99-metanode-swap.conf || true
+      changed_when: false
 
     - name: Ensure Execution Node directories exist
       ansible.builtin.file:
