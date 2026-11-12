@@ -41,6 +41,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -2072,3 +2073,180 @@ func TestXapianV1_SlotRangeAndReservedSlotProtection(t *testing.T) {
 	mvm.ClearXapianTxBuffer(txGetLargeSlot.Hash().Bytes())
 	mvm.DestroyAllXapianInstances()
 }
+
+func TestXapian_GasRejectedAndNonceSkippedBufferClear(t *testing.T) {
+	runGasCase := func(t *testing.T, balance *big.Int) (pb.RECEIPT_STATUS, string, uint64, int) {
+		mvm.DestroyAllXapianInstances()
+		mvm.ConfigureXapianBasePath(t.TempDir())
+		t.Cleanup(mvm.DestroyAllXapianInstances)
+
+		cs := newTestChainState(t)
+		cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(991)})
+		key, err := crypto.GenerateKey()
+		require.NoError(t, err)
+		sender := crypto.PubkeyToAddress(key.PublicKey)
+		leader := common.HexToAddress(auditLeader)
+		seedAccount(t, cs, sender, balance, 1)
+		seedAccount(t, cs, leader, big.NewInt(0), 0)
+
+		target := common.HexToAddress("0x1000000000000000000000000000000000000091")
+		code := confScript(confJoin(
+			callXapianOp(0, makeXapianNewDocData(t, "gasreject_db", "doc_payload")),
+			[]any{0, 0, "RETURN"},
+		)...)
+		seedContract(t, cs, target, big.NewInt(0), code)
+
+		signed, err := eth.SignNewTx(key, eth.LatestSignerForChainID(big.NewInt(991)), &eth.LegacyTx{
+			Nonce: 1, To: &target, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0),
+		})
+		require.NoError(t, err)
+		tx, err := transaction.NewTransactionFromEth(signed)
+		require.NoError(t, err)
+		items := []grouptxns.Item{{ID: 0, Array: grouptxns.BuildDeterministicGroupAddrs(tx), Tx: tx}}
+		_, r, _, _ := ProcessTransactionsOptimistic(context.Background(), cs,
+			grouptxns.GroupTransactionsDeterministic(items, cs.HasCode), blankHeader(), false, false, 999, leader, false)
+		require.Len(t, r, 1)
+
+		// Even if CommitXapianTxBufferBatch is invoked unconditionally, TrueBlockSTM must have
+		// already cleared the buffer for a gas-rejected transaction.
+		mvm.CommitXapianTxBufferBatch([][]byte{tx.Hash().Bytes()})
+		logs := mvm.ExportAllXapianLogs()
+		return r[0].Status(), string(r[0].Return()), r[0].GasUsed(), len(logs)
+	}
+
+	t.Run("SufficientGas_CommitsXapianBuffer", func(t *testing.T) {
+		status, _, gasUsed, logLen := runGasCase(t, big.NewInt(1000000000000000))
+		require.Equal(t, pb.RECEIPT_STATUS_RETURNED, status)
+		require.Greater(t, gasUsed, uint64(0))
+		require.Greater(t, logLen, 0, "accepted tx must commit Xapian logs")
+	})
+
+	t.Run("InsufficientGas_ClearsXapianBuffer", func(t *testing.T) {
+		status, retStr, gasUsed, logLen := runGasCase(t, big.NewInt(1000))
+		require.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, status)
+		require.Equal(t, "insufficient balance for gas", retStr)
+		require.Equal(t, uint64(0), gasUsed)
+		require.Equal(t, 0, logLen, "gas-rejected tx must not leave Xapian writes")
+	})
+
+	t.Run("DrainByPriorTransferInSameBlock_ClearsXapianBuffer", func(t *testing.T) {
+		mvm.DestroyAllXapianInstances()
+		mvm.ConfigureXapianBasePath(t.TempDir())
+		t.Cleanup(mvm.DestroyAllXapianInstances)
+
+		cs := newTestChainState(t)
+		cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(991)})
+		key, err := crypto.GenerateKey()
+		require.NoError(t, err)
+		sender := crypto.PubkeyToAddress(key.PublicKey)
+		recipient := common.HexToAddress("0x2000000000000000000000000000000000000092")
+		leader := common.HexToAddress(auditLeader)
+
+		// Give sender enough for tx1 (native transfer + 21000 gas), leaving only 500 wei for tx2 (not enough for gas)
+		transferGasFee := int64(21000 * 100000)
+		transferValue := int64(1000000)
+		seedAccount(t, cs, sender, big.NewInt(transferGasFee+transferValue+500), 1)
+		seedAccount(t, cs, recipient, big.NewInt(1), 1)
+		seedAccount(t, cs, leader, big.NewInt(0), 0)
+
+		target := common.HexToAddress("0x1000000000000000000000000000000000000093")
+		code := confScript(confJoin(
+			callXapianOp(0, makeXapianNewDocData(t, "drain_db", "unpaid_doc")),
+			[]any{0, 0, "RETURN"},
+		)...)
+		seedContract(t, cs, target, big.NewInt(0), code)
+
+		signer := eth.LatestSignerForChainID(big.NewInt(991))
+		signed1, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+			Nonce: 1, To: &recipient, Gas: 21000, GasPrice: big.NewInt(100000), Value: big.NewInt(transferValue),
+		})
+		require.NoError(t, err)
+		tx1, err := transaction.NewTransactionFromEth(signed1)
+		require.NoError(t, err)
+
+		signed2, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+			Nonce: 2, To: &target, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0),
+		})
+		require.NoError(t, err)
+		tx2, err := transaction.NewTransactionFromEth(signed2)
+		require.NoError(t, err)
+
+		items := []grouptxns.Item{
+			{ID: 0, Array: grouptxns.BuildDeterministicGroupAddrs(tx1), Tx: tx1},
+			{ID: 1, Array: grouptxns.BuildDeterministicGroupAddrs(tx2), Tx: tx2},
+		}
+		_, r, _, _ := ProcessTransactionsOptimistic(context.Background(), cs,
+			grouptxns.GroupTransactionsDeterministic(items, cs.HasCode), blankHeader(), false, false, 999, leader, false)
+		require.Len(t, r, 2)
+		require.Equal(t, pb.RECEIPT_STATUS_RETURNED, r[0].Status())
+		require.Equal(t, pb.RECEIPT_STATUS_TRANSACTION_ERROR, r[1].Status())
+		require.Equal(t, "insufficient balance for gas", string(r[1].Return()))
+
+		mvm.CommitXapianTxBufferBatch([][]byte{tx2.Hash().Bytes()})
+		logs := mvm.ExportAllXapianLogs()
+		require.Equal(t, 0, len(logs), "tx2 drained by prior tx1 in same block must not commit Xapian writes")
+	})
+
+	t.Run("DuplicateNonceInSameBlock_ClearsSpeculativeXapianBuffer", func(t *testing.T) {
+		mvm.DestroyAllXapianInstances()
+		mvm.ConfigureXapianBasePath(t.TempDir())
+		t.Cleanup(mvm.DestroyAllXapianInstances)
+
+		cs := newTestChainState(t)
+		cs.SetConfig(&config.SimpleChainConfig{ChainId: big.NewInt(991)})
+		key, err := crypto.GenerateKey()
+		require.NoError(t, err)
+		sender := crypto.PubkeyToAddress(key.PublicKey)
+		recipient := common.HexToAddress("0x2000000000000000000000000000000000000094")
+		leader := common.HexToAddress(auditLeader)
+
+		seedAccount(t, cs, sender, big.NewInt(1000000000000000), 1)
+		seedAccount(t, cs, recipient, big.NewInt(1), 1)
+		seedAccount(t, cs, leader, big.NewInt(0), 0)
+
+		noopTarget := common.HexToAddress("0x1000000000000000000000000000000000000094")
+		seedContract(t, cs, noopTarget, big.NewInt(0), confScript([]any{0, 0, "RETURN"}...))
+
+		target := common.HexToAddress("0x1000000000000000000000000000000000000095")
+		code := confScript(confJoin(
+			callXapianOp(0, makeXapianNewDocData(t, "dupnonce_db", "dup_nonce_doc")),
+			[]any{0, 0, "RETURN"},
+		)...)
+		seedContract(t, cs, target, big.NewInt(0), code)
+
+		signer := eth.LatestSignerForChainID(big.NewInt(991))
+		// tx1: contract call with nonce 1 (at index 0)
+		signed1, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+			Nonce: 1, To: &noopTarget, Gas: 100000, GasPrice: big.NewInt(100000), Value: big.NewInt(0),
+		})
+		require.NoError(t, err)
+		tx1, err := transaction.NewTransactionFromEth(signed1)
+		require.NoError(t, err)
+
+		// tx2: Xapian contract call with DUPLICATE nonce 1 (at index 1; may execute speculatively in incarnation 1, then fail nonce check in incarnation 2)
+		signed2, err := eth.SignNewTx(key, signer, &eth.LegacyTx{
+			Nonce: 1, To: &target, Gas: 3000000, GasPrice: big.NewInt(100000), Value: big.NewInt(0),
+		})
+		require.NoError(t, err)
+		tx2, err := transaction.NewTransactionFromEth(signed2)
+		require.NoError(t, err)
+
+		groups := []grouptxns.RelativeGroup{{
+			Kind: grouptxns.GroupKindContractOnly,
+			Items: []grouptxns.Item{
+				{ID: 0, Tx: tx1},
+				{ID: 1, Tx: tx2},
+			},
+		}}
+		_, r, _, _ := ProcessTransactionsOptimistic(context.Background(), cs,
+			groups, blankHeader(), false, false, 999, leader, false)
+		require.Len(t, r, 1, "only tx1 should produce a receipt; duplicate-nonce tx2 is skipped")
+		require.Equal(t, tx1.Hash(), r[0].TransactionHash())
+		require.Equal(t, pb.RECEIPT_STATUS_RETURNED, r[0].Status())
+
+		mvm.CommitXapianTxBufferBatch([][]byte{tx2.Hash().Bytes()})
+		logs := mvm.ExportAllXapianLogs()
+		require.Equal(t, 0, len(logs), "duplicate-nonce tx2 must not leave speculative Xapian buffer entries")
+	})
+}
+

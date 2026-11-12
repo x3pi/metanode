@@ -366,9 +366,9 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 			var clearHashes [][]byte
 
 			for i, tx := range processResults.Transactions {
-				isContractInteraction := tx.IsDeployContract() || tx.IsCallContract()
+				isContractInteraction := tx.IsDeployContract() || tx.IsCallContract() || (bp.chainState != nil && bp.chainState.HasCode(tx.ToAddress()))
 				if isContractInteraction {
-					if i < len(processResults.Receipts) && processResults.Receipts[i].Status() != pb.RECEIPT_STATUS_THREW {
+					if i < len(processResults.Receipts) && processResults.Receipts[i] != nil && processResults.Receipts[i].Status() == pb.RECEIPT_STATUS_RETURNED {
 						commitHashes = append(commitHashes, tx.Hash().Bytes())
 						hasContractInteraction = true
 					} else {
