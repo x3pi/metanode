@@ -604,3 +604,5 @@ execution/scripts/chaos_crash_reports/
 execution/parent_chain
 execution/scripts/test/bls_pubkey
 *.data
+deploy/add_nodes/config.yml
+deploy/remove_nodes/config.yml
