@@ -389,11 +389,100 @@ if [ "$EXPORT_CONFIG_ONLY" = "true" ]; then
     fi
 fi
 
-# ── Monitor Helpers (Tái sử dụng start_monitors.sh & block_hash_checker) ─────
+# ── Monitor Helpers (Systemd-managed supervisor + start_monitors.sh & parent_chain_monitor.py) ──
 MONITOR_SCRIPT="${METANODE_ROOT}/deploy/ansible/monitors/start_monitors.sh"
+MONITOR_SUPERVISOR_SCRIPT="${SCRIPT_DIR}/scripts/cluster_monitor_supervisor.sh"
+
+ABS_INVENTORY="$(readlink -f "$INVENTORY" 2>/dev/null || realpath "$INVENTORY" 2>/dev/null || echo "$INVENTORY")"
+
+get_monitor_slug() {
+    local base
+    base=$(basename "$ABS_INVENTORY")
+    base="${base%.yaml}"
+    base="${base%.yml}"
+    base=$(printf '%s' "$base" | tr -cs 'A-Za-z0-9_-' '-' | sed 's/^-*//;s/-*$//')
+    echo "${base:-inventory}"
+}
+
+MONITOR_SLUG="$(get_monitor_slug)"
+MONITOR_UNIT="metanode-cluster-monitor-${MONITOR_SLUG}.service"
+MONITOR_STATE_DIR="/opt/metanode/monitors/${MONITOR_SLUG}"
+
+run_local_sudo() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+        return $?
+    fi
+    if sudo -n true >/dev/null 2>&1; then
+        sudo "$@"
+        return $?
+    fi
+    python3 - "$ABS_INVENTORY" "${SCRIPT_DIR}/inventory.yml" "${SCRIPT_DIR}/.vault_pass" "${METANODE_ROOT}/deploy/ansible/.vault_pass" "$HOME/.vault_pass" "--" "$@" <<'PY'
+import os, re, subprocess, sys
+
+sep_idx = sys.argv.index("--")
+inv_candidates = [p for p in sys.argv[1:3] if p and os.path.isfile(p)]
+vault_candidates = [p for p in sys.argv[3:sep_idx] if p and os.path.isfile(p)]
+cmd = sys.argv[sep_idx + 1:]
+
+passwords = []
+env_pwd = os.environ.get("ANSIBLE_BECOME_PASS", "").strip()
+if env_pwd and env_pwd != "!vault" and not env_pwd.startswith("{{"):
+    passwords.append(env_pwd)
+
+vpass = None
+for vf in vault_candidates:
+    try:
+        with open(vf, "rb") as f:
+            vpass = f.read().strip()
+        if vpass:
+            break
+    except Exception:
+        pass
+
+for inv in inv_candidates:
+    try:
+        with open(inv, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+        for line in text.splitlines():
+            m_plain = re.match(r"^\s{4}ansible_become_pass:\s*['\"]?([^'\"!\s]+)['\"]?\s*$", line)
+            if m_plain and not m_plain.group(1).startswith("{{"):
+                passwords.append(m_plain.group(1))
+        if vpass:
+            from ansible.parsing.vault import VaultLib, VaultSecret
+            from ansible.constants import DEFAULT_VAULT_ID_MATCH
+            vault = VaultLib([(DEFAULT_VAULT_ID_MATCH, VaultSecret(vpass))])
+            m = re.search(r"^\s{4}ansible_become_pass:\s*!vault\s*\|\s*\n([\s\S]+?)(?=\n\s*[a-zA-Z_#]|\Z)", text, re.MULTILINE)
+            if m:
+                lines = [line.strip() for line in m.group(1).splitlines() if line.strip()]
+                pwd = vault.decrypt("\n".join(lines)).decode("utf-8").strip()
+                if pwd:
+                    passwords.append(pwd)
+    except Exception:
+        pass
+
+seen = set()
+for pwd in passwords:
+    if pwd in seen:
+        continue
+    seen.add(pwd)
+    check = subprocess.run(["sudo", "-S", "-p", "", "true"], input=(pwd + "\n").encode("utf-8"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if check.returncode == 0:
+        res = subprocess.run(["sudo", "-S", "-p", ""] + cmd, input=(pwd + "\n").encode("utf-8"))
+        sys.exit(res.returncode)
+
+# Fallback to interactive sudo if no vault password matched
+res = subprocess.run(["sudo"] + cmd)
+sys.exit(res.returncode)
+PY
+}
+
+has_local_systemd() {
+    [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1
+}
 
 get_exec_monitor_names() {
-    python3 - "$INVENTORY" "${SCRIPT_DIR}/scripts" <<'PY'
+    python3 - "$ABS_INVENTORY" "${SCRIPT_DIR}/scripts" <<'PY'
 import sys
 
 inventory, scripts_dir = sys.argv[1:]
@@ -407,7 +496,18 @@ PY
 }
 
 print_monitor_status() {
-    echo "🔍 Trạng thái tiến trình Monitor ngầm:"
+    echo "🔍 Trạng thái tiến trình Monitor ngầm (${MONITOR_UNIT}):"
+    if has_local_systemd && systemctl list-unit-files "$MONITOR_UNIT" >/dev/null 2>&1; then
+        local active_state enabled_state
+        active_state=$(systemctl is-active "$MONITOR_UNIT" 2>/dev/null || true)
+        enabled_state=$(systemctl is-enabled "$MONITOR_UNIT" 2>/dev/null || true)
+        if [ "$active_state" = "active" ]; then
+            echo "  • [systemd] ${MONITOR_UNIT}: ▶️ ACTIVE (boot auto-start: ${enabled_state})"
+        elif [ -n "$active_state" ] && [ "$active_state" != "unknown" ]; then
+            echo "  • [systemd] ${MONITOR_UNIT}: ⏹️ ${active_state^^} (boot auto-start: ${enabled_state:-disabled})"
+        fi
+    fi
+
     local found=0
     local ns
     while IFS= read -r ns; do
@@ -427,7 +527,20 @@ print_monitor_status() {
         fi
     done < <(get_exec_monitor_names 2>/dev/null || true)
 
-    if pgrep -f "[p]arent_chain_monitor.py" >/dev/null 2>&1; then
+    local parent_pid=""
+    for p_file in "${MONITOR_STATE_DIR}/parent_chain_monitor.pid" "/tmp/parent_chain_monitor.${MONITOR_SLUG}.pid" "/tmp/parent_chain_monitor.pid"; do
+        if [ -f "$p_file" ]; then
+            parent_pid=$(cat "$p_file" 2>/dev/null || echo "")
+            if [ -n "$parent_pid" ] && kill -0 "$parent_pid" 2>/dev/null; then
+                break
+            fi
+            parent_pid=""
+        fi
+    done
+    if [ -n "$parent_pid" ]; then
+        echo "  • [parent] liveness/hash monitor: ▶️ RUNNING (PID ${parent_pid})"
+        found=1
+    elif pgrep -f "[p]arent_chain_monitor\.py.*${ABS_INVENTORY}" >/dev/null 2>&1; then
         echo "  • [parent] liveness/hash monitor: ▶️ RUNNING"
         found=1
     fi
@@ -438,24 +551,44 @@ print_monitor_status() {
 }
 
 stop_cluster_monitors() {
-    echo "⏸️  Tạm dừng monitor ngầm của tất cả execution cluster và parent chain để tránh báo động giả..."
+    local disable_boot="false"
+    if [ "${1:-}" = "--disable" ]; then
+        disable_boot="true"
+        echo "🛑 Dừng hẳn Monitor và tắt tự khởi động cùng hệ thống (${MONITOR_UNIT})..."
+    else
+        echo "⏸️  Tạm dừng monitor ngầm (${MONITOR_UNIT}) để tránh báo động giả..."
+    fi
+
+    if has_local_systemd; then
+        if [ "$disable_boot" = "true" ]; then
+            run_local_sudo systemctl disable --now "$MONITOR_UNIT" >/dev/null 2>&1 || true
+        else
+            run_local_sudo systemctl stop "$MONITOR_UNIT" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # Dọn dẹp cả các tiến trình legacy chưa qua systemd (chỉ trong phạm vi inventory này)
     if [ -f "$MONITOR_SCRIPT" ]; then
-        for pid_dir in /tmp/metanode-monitors-*; do
-            if [ -d "$pid_dir" ]; then
-                ns="${pid_dir##*-}"
-                [ "$ns" = "root" ] && continue
-                bash "$MONITOR_SCRIPT" --stop --namespace "$ns" >/dev/null 2>&1 || true
-            fi
-        done
         while IFS= read -r ns; do
             [ -n "$ns" ] || continue
             bash "$MONITOR_SCRIPT" --stop --namespace "$ns" >/dev/null 2>&1 || true
         done < <(get_exec_monitor_names 2>/dev/null || true)
     fi
-    if [ -f "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" ]; then
+
+    local p_file p_pid
+    for p_file in "${MONITOR_STATE_DIR}/parent_chain_monitor.pid" "/tmp/parent_chain_monitor.${MONITOR_SLUG}.pid"; do
+        if [ -f "$p_file" ]; then
+            p_pid=$(cat "$p_file" 2>/dev/null || echo "")
+            if [ -n "$p_pid" ] && kill -0 "$p_pid" 2>/dev/null; then
+                kill -15 "$p_pid" 2>/dev/null || true
+            fi
+            rm -f "$p_file" 2>/dev/null || true
+        fi
+    done
+    if [ "$MONITOR_SLUG" = "inventory" ] && [ -f "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" ]; then
         python3 "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" --stop >/dev/null 2>&1 || true
     fi
-    pkill -f "parent_chain_monitor.py" >/dev/null 2>&1 || true
+    pkill -f "[p]arent_chain_monitor\.py.*${ABS_INVENTORY}" >/dev/null 2>&1 || true
 }
 
 clean_monitor_state() {
@@ -471,47 +604,136 @@ start_cluster_monitors() {
         return 0
     fi
     echo "▶️  Kích hoạt hệ thống Monitor ngầm..."
-    
-    # 1. Kích hoạt monitor cho các Exec Clusters trong Inventory (Child Chains chạy Raft Consensus, bỏ qua Validator Vote Monitor)
+
+    if has_local_systemd && [ -f "$MONITOR_SUPERVISOR_SCRIPT" ]; then
+        local run_user run_group run_home unit_tmp
+        run_user="${SUDO_USER:-$(id -un)}"
+        run_group="$(id -gn "$run_user" 2>/dev/null || echo "$run_user")"
+        run_home="$(getent passwd "$run_user" 2>/dev/null | cut -d: -f6 || echo "$HOME")"
+        [ -n "$run_home" ] || run_home="$HOME"
+
+        chmod +x "$MONITOR_SUPERVISOR_SCRIPT" 2>/dev/null || true
+        run_local_sudo mkdir -p "$MONITOR_STATE_DIR"
+        run_local_sudo chown -R "${run_user}:${run_group}" "$MONITOR_STATE_DIR"
+        run_local_sudo chmod 0700 "$MONITOR_STATE_DIR"
+
+        unit_tmp=$(mktemp)
+        cat > "$unit_tmp" <<EOF
+[Unit]
+Description=MetaNode Cluster & Parent Chain Monitor (${MONITOR_SLUG})
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${run_user}
+Group=${run_group}
+WorkingDirectory=${SCRIPT_DIR}
+Environment="HOME=${run_home}"
+Environment="PATH=/usr/local/go/bin:${run_home}/go/bin:${run_home}/.cargo/bin:${run_home}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="MONITOR_INVENTORY=${ABS_INVENTORY}"
+Environment="MONITOR_SLUG=${MONITOR_SLUG}"
+Environment="MONITOR_STATE_DIR=${MONITOR_STATE_DIR}"
+Environment="MONITOR_EXEC_ONLY=${EXEC_ONLY}"
+Environment="MONITOR_PARENT_ONLY=${PARENT_ONLY}"
+ExecStart=/bin/bash ${MONITOR_SUPERVISOR_SCRIPT}
+Restart=always
+RestartSec=5s
+KillMode=control-group
+TimeoutStopSec=20
+StandardOutput=append:${MONITOR_STATE_DIR}/supervisor.log
+StandardError=append:${MONITOR_STATE_DIR}/supervisor.log
+SyslogIdentifier=metanode-monitor-${MONITOR_SLUG}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        run_local_sudo install -m 0644 "$unit_tmp" "/etc/systemd/system/${MONITOR_UNIT}"
+        rm -f "$unit_tmp"
+
+        if [ -d /etc/logrotate.d ]; then
+            local lr_tmp lr_paths ns_item
+            lr_paths=("${MONITOR_STATE_DIR}/*.log")
+            while IFS= read -r ns_item; do
+                [ -n "$ns_item" ] || continue
+                lr_paths+=("/tmp/metanode-monitors-${ns_item}/block_hash_checker/*.log")
+            done < <(get_exec_monitor_names 2>/dev/null || true)
+
+            lr_tmp=$(mktemp)
+            {
+                printf '%s\n' "${lr_paths[@]}"
+                cat <<EOF
+{
+    su ${run_user} ${run_group}
+    daily
+    rotate 3
+    maxsize 20M
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+            } > "$lr_tmp"
+            run_local_sudo install -m 0644 "$lr_tmp" "/etc/logrotate.d/metanode-cluster-monitor-${MONITOR_SLUG}"
+            rm -f "$lr_tmp"
+        fi
+
+        run_local_sudo rm -f "${MONITOR_STATE_DIR}/supervisor.ready" 2>/dev/null || true
+        run_local_sudo systemctl daemon-reload
+        run_local_sudo systemctl enable "$MONITOR_UNIT" >/dev/null
+        run_local_sudo systemctl restart "$MONITOR_UNIT"
+
+        # Chờ tối đa 10s để supervisor khởi tạo đầy đủ toàn bộ các tiến trình con trước khi in trạng thái
+        local wait_i
+        for wait_i in 1 2 3 4 5 6 7 8 9 10; do
+            sleep 1
+            if systemctl is-active --quiet "$MONITOR_UNIT" && [ -f "${MONITOR_STATE_DIR}/supervisor.ready" ]; then
+                break
+            fi
+        done
+        echo "✅ Đã bật và đăng ký tự khởi động cùng OS cho ${MONITOR_UNIT} (lưu cấu hình tại ${MONITOR_STATE_DIR})."
+        print_monitor_status
+        return 0
+    fi
+
+    # Fallback khi môi trường không có systemd (ví dụ container tối giản)
     if [ "$PARENT_ONLY" != "true" ] && [ -f "$MONITOR_SCRIPT" ]; then
         CLUSTER_NAMES=$(get_exec_monitor_names 2>/dev/null || true)
-
         for ns in $CLUSTER_NAMES; do
             c_file="/tmp/rpc_nodes.${ns}.json"
             if [ -s "$c_file" ]; then
                 echo "   • Kích hoạt Health Monitor & Block Hash Checker cho $ns (Namespace: $ns, Raft - no vote)..."
                 bash "$MONITOR_SCRIPT" --stop --namespace "$ns" >/dev/null 2>&1 || true
-                MONITOR_NAMESPACE="$ns" MONITOR_INVENTORY="$INVENTORY" \
+                MONITOR_NAMESPACE="$ns" MONITOR_INVENTORY="$ABS_INVENTORY" \
                     bash "$MONITOR_SCRIPT" --namespace "$ns" --config "$c_file" --no-vote
             elif [ -s "$RPC_NODES_FILE" ]; then
                 echo "   • Kích hoạt Health Monitor & Block Hash Checker cho child chain (Config: $RPC_NODES_FILE, Raft - no vote)..."
                 bash "$MONITOR_SCRIPT" --stop --namespace "$ns" >/dev/null 2>&1 || true
-                MONITOR_NAMESPACE="$ns" MONITOR_INVENTORY="$INVENTORY" \
+                MONITOR_NAMESPACE="$ns" MONITOR_INVENTORY="$ABS_INVENTORY" \
                     bash "$MONITOR_SCRIPT" --namespace "$ns" --config "$RPC_NODES_FILE" --no-vote
             fi
         done
     fi
 
-    # 2. Kích hoạt Monitor cho Parent Chain (Liveness + Hash Consistency, inventory-driven, không dùng Vote Monitor cũ)
     if [ "$EXEC_ONLY" != "true" ] && [ -f "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" ]; then
         HAS_PARENT=$(python3 -c "
 import sys; sys.path.insert(0, '${SCRIPT_DIR}/scripts')
 import parse_inventory as pi
-info = pi.parse_inventory('${INVENTORY}')
+info = pi.parse_inventory('${ABS_INVENTORY}')
 print('true' if info.get('parent_nodes') else 'false')
 " 2>/dev/null || echo "false")
 
         if [ "$HAS_PARENT" = "true" ]; then
-            echo "   • Kích hoạt Monitor cho Parent Chain (Liveness + Hash Consistency, config: ${INVENTORY})..."
+            echo "   • Kích hoạt Monitor cho Parent Chain (Liveness + Hash Consistency, config: ${ABS_INVENTORY})..."
             python3 "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" --stop >/dev/null 2>&1 || true
-            python3 "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" --daemon --inventory="${INVENTORY}" --interval=5
+            python3 "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" --daemon --inventory="${ABS_INVENTORY}" --interval=5
         fi
     fi
 }
 
 if [ "$ACTION" = "stop_monitor" ]; then
-    stop_cluster_monitors
-    echo "✅ Đã dừng các tiến trình monitor ngầm của toàn bộ cluster và parent chain."
+    stop_cluster_monitors --disable
+    echo "✅ Đã dừng hẳn các tiến trình monitor ngầm và tắt tự khởi động lại."
     exit 0
 fi
 
@@ -851,9 +1073,13 @@ elif [ "$PARENT_ONLY" = "true" ]; then
     fi
 fi
 
-# 2.5. Tạm dừng monitors và dọn dẹp state nếu đang thực hiện thao tác làm gián đoạn node
+# 2.5. Tạm dừng monitors (hoặc tắt hẳn nếu là stop/clean/--no-monitor) và dọn dẹp state
 if [[ "$ACTION" =~ ^(setup|deploy|restart|reset|clean|stop)$ ]]; then
-    stop_cluster_monitors
+    if [[ "$ACTION" =~ ^(clean|stop)$ ]] || [ "$ENABLE_MONITOR" != "true" ]; then
+        stop_cluster_monitors --disable
+    else
+        stop_cluster_monitors
+    fi
     if [[ "$ACTION" =~ ^(reset|clean)$ ]]; then
         clean_monitor_state
     fi
@@ -931,7 +1157,7 @@ TOTAL_DEPLOY_DURATION=$((DEPLOY_END_TIME - DEPLOY_START_TIME))
 
 # Nếu là action stop hoặc clean: kết thúc ngay và gửi thông báo hoàn tất tương ứng
 if [ "$ACTION" = "stop" ]; then
-    stop_cluster_monitors
+    stop_cluster_monitors --disable
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
     echo "🛑 ĐÃ DỪNG TOÀN BỘ TIẾN TRÌNH CỤM METANODE THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
@@ -947,7 +1173,7 @@ tn.notify_action_complete(action='stop', scope='${TARGET_SCOPE_DESC}', duration_
 fi
 
 if [ "$ACTION" = "clean" ]; then
-    stop_cluster_monitors
+    stop_cluster_monitors --disable
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
     echo "🧹 ĐÃ DỌN DẸP DỮ LIỆU CỤM METANODE THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"

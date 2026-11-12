@@ -95,7 +95,30 @@ jobs:
             exit 1
           fi
 
-      # Run packages sequentially (-p 1) on CI to avoid CPU starvation between heavy in-process
-      # multi-node Raft consensus simulations on 2-vCPU runners.
-      - name: go test
-        run: go test -p 1 -count=1 ./...
+      # Run non-raftfeed packages first, then reclaim memory/cache and run the harsh multi-node
+      # raftfeed anti-fork & consensus suite in an isolated priority step.
+      - name: go test (core packages)
+        run: |
+          set -euo pipefail
+          PKGS=$(go list ./... | grep -v '/pkg/rollup/raftfeed$')
+          if ! go test -p 1 -count=1 $PKGS 2>&1 | tee /tmp/core-test.log; then
+            echo ""
+            echo "❌ === CORE FAILED TESTS SUMMARY ==="
+            grep -E "^(--- FAIL:|FAIL[[:space:]])" /tmp/core-test.log || true
+            exit 1
+          fi
+
+      - name: go test (raftfeed anti-fork & consensus suite - isolated priority)
+        run: |
+          set -euo pipefail
+          echo "🧹 Reclaiming memory and OS page cache before raftfeed consensus suite..."
+          go clean -testcache || true
+          sync
+          sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' || true
+          free -m || true
+          if ! go test -v -p 1 -count=1 -timeout 15m ./pkg/rollup/raftfeed 2>&1 | tee /tmp/raftfeed-test.log; then
+            echo ""
+            echo "❌ === RAFTFEED FAILED TESTS SUMMARY ==="
+            grep -E "^(--- FAIL:|FAIL[[:space:]])" /tmp/raftfeed-test.log || true
+            exit 1
+          fi
