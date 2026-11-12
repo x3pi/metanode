@@ -250,13 +250,12 @@ if [ "$PARENT_ONLY" != "true" ] && [ -f "$MONITOR_SCRIPT" ]; then
 
         EXPECTED_PID_FILES+=("/tmp/metanode-monitors-${ns}/health.pid")
         EXPECTED_PID_FILES+=("/tmp/metanode-monitors-${ns}/resources.pid")
-        if [ -f "/tmp/metanode-monitors-${ns}/block_hash_checker.pid" ]; then
-            EXPECTED_PID_FILES+=("/tmp/metanode-monitors-${ns}/block_hash_checker.pid")
-        elif [ -x "${METANODE_ROOT}/deploy/ansible/monitors/block_hash_checker/block_hash_checker" ]; then
-            echo "⚠️  [Monitor Supervisor] block_hash_checker.pid missing for '${ns}' despite binary existing; registering for watchdog recovery."
-            EXPECTED_PID_FILES+=("/tmp/metanode-monitors-${ns}/block_hash_checker.pid")
+        bhc_pid_file="/tmp/metanode-monitors-${ns}/block_hash_checker.pid"
+        bhc_pid="$(cat "$bhc_pid_file" 2>/dev/null || echo "")"
+        if [ -f "$bhc_pid_file" ] && [ -n "$bhc_pid" ] && kill -0 "$bhc_pid" 2>/dev/null; then
+            EXPECTED_PID_FILES+=("$bhc_pid_file")
         else
-            echo "⚠️  [Monitor Supervisor] block_hash_checker.pid not present for '${ns}' (binary not built); skipping hash-checker watchdog."
+            echo "⚠️  [Monitor Supervisor] block_hash_checker not active at startup for '${ns}'; skipping hash-checker watchdog to avoid restarting healthy monitors."
         fi
     done
 fi
