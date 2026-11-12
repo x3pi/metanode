@@ -99,8 +99,8 @@ func newHarness(t *testing.T, n int) *harness {
 	if max := runtime.GOMAXPROCS(0); max > 0 && max < cpus {
 		cpus = max
 	}
-	if cpus < 2 || (os.Getenv("CI") != "" && cpus <= 2) {
-		t.Skipf("raftfeed cluster tests need at least 4 CPUs on CI or >= 2 CPUs locally to avoid timer starvation (have %d CPUs)", cpus)
+	if cpus < 2 {
+		t.Skipf("raftfeed cluster tests need at least 2 CPUs to avoid timer starvation (have %d CPUs)", cpus)
 	}
 	h := &harness{t: t, secret: bytes.Repeat([]byte("k"), 32), fatals: map[string]error{}}
 	for i := 0; i < n; i++ {
@@ -120,7 +120,11 @@ func newHarness(t *testing.T, n int) *harness {
 			if m.reserved != nil {
 				m.reserved.Close()
 			}
+			m.disk.mu.Lock()
+			m.disk.received = nil
+			m.disk.mu.Unlock()
 		}
+		runtime.GC()
 	})
 	return h
 }
@@ -130,15 +134,18 @@ func (h *harness) rcfg(m *member) config.RaftConfig {
 	for _, p := range h.m {
 		peers = append(peers, config.RaftPeer{ID: p.id, Address: string(p.addr), ForwardAddress: p.fwdAddr})
 	}
-	hb := 100
-	el := 100
-	if runtime.NumCPU() <= 2 || os.Getenv("CI") != "" {
-		hb = 200
-		el = 200
+	lease := 80
+	hb := 150
+	el := 150
+	if runtime.NumCPU() <= 2 || runtime.GOMAXPROCS(0) <= 2 || os.Getenv("CI") != "" {
+		// Match production defaults (raftconfig.go: 500ms lease / 1000ms heartbeat & election) on CI.
+		lease = 500
+		hb = 1000
+		el = 1000
 	}
 	rc := config.RaftConfig{
 		NodeID: m.id, BindAddress: string(m.addr), DataDir: m.dir, Peers: peers, Bootstrap: m.id == "n0",
-		HeartbeatTimeoutMs: hb, ElectionTimeoutMs: el, LeaderLeaseTimeoutMs: hb, CommitTimeoutMs: 5,
+		HeartbeatTimeoutMs: hb, ElectionTimeoutMs: el, LeaderLeaseTimeoutMs: lease, CommitTimeoutMs: 5,
 		ForwardBindAddress: m.fwdAddr, ForwardSecretFile: "unused-in-tests", SequencerAddress: seqAddr.Hex(),
 	}
 	rc.JoinExistingChain = h.join[m.id]
