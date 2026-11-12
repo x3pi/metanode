@@ -133,8 +133,9 @@ prune_monitor_logs() {
         [ -d "$d" ] || continue
         find "$d" -maxdepth 3 -type f \( -name "*.log.*" -o -name "*.csv" \) -mtime +"$LOG_RETENTION_DAYS" -delete 2>/dev/null || true
     done
-    if [ -d "${METANODE_ROOT}/deploy/ansible/monitors/logs_crash" ]; then
-        find "${METANODE_ROOT}/deploy/ansible/monitors/logs_crash" -mindepth 1 -maxdepth 1 -mtime +"$LOG_RETENTION_DAYS" -exec rm -rf {} + 2>/dev/null || true
+    local crash_root="${METANODE_ROOT}/deploy/ansible/monitors/logs_crash"
+    if [ -n "$METANODE_ROOT" ] && [ -f "$MONITOR_SCRIPT" ] && [ -d "$crash_root" ]; then
+        find "$crash_root" -mindepth 1 -maxdepth 1 -type d \( -name "node_*_crash_*" -o -name "server_*_reboot_*" \) -mtime +"$LOG_RETENTION_DAYS" -exec rm -rf {} + 2>/dev/null || true
     fi
 
     # 2. Giới hạn dung lượng tối đa (mặc định 20MB/file) cho các file .log đang ghi trực tiếp
@@ -251,6 +252,11 @@ if [ "$PARENT_ONLY" != "true" ] && [ -f "$MONITOR_SCRIPT" ]; then
         EXPECTED_PID_FILES+=("/tmp/metanode-monitors-${ns}/resources.pid")
         if [ -f "/tmp/metanode-monitors-${ns}/block_hash_checker.pid" ]; then
             EXPECTED_PID_FILES+=("/tmp/metanode-monitors-${ns}/block_hash_checker.pid")
+        elif [ -x "${METANODE_ROOT}/deploy/ansible/monitors/block_hash_checker/block_hash_checker" ]; then
+            echo "⚠️  [Monitor Supervisor] block_hash_checker.pid missing for '${ns}' despite binary existing; registering for watchdog recovery."
+            EXPECTED_PID_FILES+=("/tmp/metanode-monitors-${ns}/block_hash_checker.pid")
+        else
+            echo "⚠️  [Monitor Supervisor] block_hash_checker.pid not present for '${ns}' (binary not built); skipping hash-checker watchdog."
         fi
     done
 fi
