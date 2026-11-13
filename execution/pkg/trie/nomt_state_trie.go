@@ -267,6 +267,13 @@ var (
 	registryCache   = make(map[string]*sharedRegistry) // key: dbPath + ":" + namespace
 )
 
+// clearAllNomtRegistryCache clears all cached NOMT key registries when handles are closed.
+func clearAllNomtRegistryCache() {
+	registryCacheMu.Lock()
+	defer registryCacheMu.Unlock()
+	registryCache = make(map[string]*sharedRegistry)
+}
+
 // getSharedRegistry loads the sharedRegistry from a file or checks the memory cache first.
 // It returns a pointer to the globally shared registry to prevent memory leaks from cloning.
 func getSharedRegistry(handlePath string, namespace string) *sharedRegistry {
@@ -399,8 +406,19 @@ func (n *NomtStateTrie) persistRegistryToFile() {
 // snapshot/handle reset), where an incremental append would be incomplete.
 func (n *NomtStateTrie) persistRegistryFullRewrite() {
 	n.registry.mu.Lock()
-	if len(n.registry.keys) == 0 {
+	if n.registry.keys == nil || len(n.registry.keys) == 0 {
+		n.registry.pendingNew = nil
 		n.registry.mu.Unlock()
+		dbPath := n.handle.GetPath()
+		namespace := string(n.namespace)
+		filePath := registryFilePath(dbPath, namespace)
+		n.commitWg.Add(1)
+		go func(path string, reg *sharedRegistry) {
+			defer n.commitWg.Done()
+			reg.persistMu.Lock()
+			defer reg.persistMu.Unlock()
+			_ = os.Remove(path)
+		}(filePath, n.registry)
 		return
 	}
 	cloned := make(map[string][]byte, len(n.registry.keys))
@@ -1273,14 +1291,20 @@ func (n *NomtStateTrie) RealignRoot(expectedRoot e_common.Hash) {
 // If it does not match, it resets the database, reads all keys/values from storage/changelog,
 // inserts them, and commits the state to align the C++ engine root with the consensus root.
 func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedRoot e_common.Hash, blockNumber uint64) error {
+	rootMatches := func(r, expected e_common.Hash) bool {
+		return r == expected ||
+			(expected == EmptyRootHash && r == (e_common.Hash{})) ||
+			(expected == (e_common.Hash{}) && r == EmptyRootHash)
+	}
+
 	nomtRootBytes, err := n.handle.Root()
 	var currentRoot e_common.Hash
 	if err == nil {
 		currentRoot = e_common.BytesToHash(nomtRootBytes[:])
 	}
 
-	if currentRoot == expectedRoot {
-		// Roots are already aligned. Just ensure Go's readView matches.
+	if rootMatches(currentRoot, expectedRoot) {
+		// Roots are already aligned. Just ensure Go's readView matches expectedRoot.
 		n.RealignRoot(expectedRoot)
 		return nil
 	}
@@ -1288,51 +1312,36 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 	logger.Warn("🔧 [NOMT-ALIGN-REBUILD] NOMT C++ root %s != expected %s. Rebuilding NOMT trie from storage for namespace %s...",
 		currentRoot.Hex()[:18], expectedRoot.Hex()[:18], string(n.namespace))
 
-	// 1. Retrieve all keys/values.
-	// We attempt to fetch the state from historical changelogDB first to get the absolute source of truth.
-	var kvs [][2][]byte
-	var retrievedFromChangelog bool
+	// Detach changelogDB during alignment so recovery commits never write back into block 0 history.
+	savedChangelog := n.changelogDB
+	savedCommitBlock := n.currentCommitBlock
+	n.changelogDB = nil
+	n.currentCommitBlock = 0
+	defer func() {
+		n.changelogDB = savedChangelog
+		n.currentCommitBlock = savedCommitBlock
+	}()
 
-	if n.changelogDB != nil {
-		addresses, err := n.changelogDB.GetAllUniqueAddresses()
-		if err == nil && len(addresses) > 0 {
-			for _, addr := range addresses {
-				val, err := n.changelogDB.GetStateAt(addr, blockNumber)
-				if err == nil {
-					kvs = append(kvs, [2][]byte{addr, val})
-				} else {
-					// The key did not exist at or before blockNumber.
-					// Since we skipped ResetNomtHandle, we MUST explicitly delete it from the C++ trie.
-					kvs = append(kvs, [2][]byte{addr, nil})
-				}
-			}
-			if len(kvs) > 0 {
-				retrievedFromChangelog = true
-				logger.Info("🔧 [NOMT-ALIGN-REBUILD] Retrieved %d keys/values from StateChangelogDB for block #%d to align namespace %s", len(kvs), blockNumber, string(n.namespace))
-			}
-		}
+	// Snapshot knownKeys before any session/reset so untouched Genesis/Snapshot keys can be preserved.
+	reg := getSharedRegistry(n.handle.GetPath(), string(n.namespace))
+	reg.mu.RLock()
+	knownKeys := make(map[string][]byte, len(reg.keys))
+	for hexKey, origKey := range reg.keys {
+		knownKeys[hexKey] = origKey
 	}
+	reg.mu.RUnlock()
 
-	if !retrievedFromChangelog {
-		// Fallback to legacy retrieval from registry + storage/handle (if changelog is disabled or empty)
-		reg := getSharedRegistry(n.handle.GetPath(), string(n.namespace))
-		reg.mu.RLock()
-		knownKeys := make(map[string][]byte, len(reg.keys))
-		for hexKey, origKey := range reg.keys {
-			knownKeys[hexKey] = origKey
-		}
-		reg.mu.RUnlock()
+	n.registry.mu.RLock()
+	for hexKey, origKey := range n.registry.keys {
+		knownKeys[hexKey] = origKey
+	}
+	n.registry.mu.RUnlock()
 
-		n.registry.mu.RLock()
-		for hexKey, origKey := range n.registry.keys {
-			knownKeys[hexKey] = origKey
-		}
-		n.registry.mu.RUnlock()
-
-		var readFromStorageCount, readFromHandleCount int
-		for _, origKey := range knownKeys {
-			// First attempt to read the key-value from the persistent flat DB (storage)
-			// as it represents the true committed state, bypassing any C++ handle corruption.
+	readUntouchedKeys := func(skip map[string]struct{}) (extra [][2][]byte, fromStorage int, fromHandle int) {
+		for hexKey, origKey := range knownKeys {
+			if _, seen := skip[hexKey]; seen {
+				continue
+			}
 			var val []byte
 			var readErr error
 			if storage != nil {
@@ -1343,23 +1352,164 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 			}
 
 			if readErr == nil && len(val) > 0 {
-				kvs = append(kvs, [2][]byte{origKey, val})
-				readFromStorageCount++
+				extra = append(extra, [2][]byte{origKey, val})
+				fromStorage++
 			} else {
-				// Fallback to reading from the old C++ handle if not found in storage
 				keyPath := addressToKeyPathWithNamespace(n.namespace, origKey)
 				val, found, handleErr := n.handle.StateDbGet(keyPath)
 				if handleErr == nil && found && len(val) > 0 {
-					kvs = append(kvs, [2][]byte{origKey, val})
-					readFromHandleCount++
+					extra = append(extra, [2][]byte{origKey, val})
+					fromHandle++
 				}
 			}
 		}
+		return extra, fromStorage, fromHandle
+	}
 
-		// Fallback to prefix scan from shared storage if no keys retrieved from registry
+	abortAndClearSessions := func() {
+		// Lock session creation to prevent concurrent BeginSession FFI calls during reset/rollback,
+		// and abort any active/pending sessions bound to the handle.
+		n.sessionInitMu.Lock()
+		n.sessionMu.Lock()
+		if n.activeSession != nil {
+			logger.Warn("⚠️ [NomtStateTrie] Aborting active session before align rebuild for namespace=%s", string(n.namespace))
+			n.activeSession.Abort()
+			n.activeSession = nil
+		}
+
+		fsToAbort := n.pendingFinishedSession
+		n.pendingFinishedSession = nil
+		n.sessionMu.Unlock()
+
+		if fsToAbort != nil {
+			logger.Warn("⚠️ [NomtStateTrie] Aborting finished session before align rebuild for namespace=%s", string(n.namespace))
+			// CRITICAL DOUBLE FREE FIX: Acquire LockCommitPayload before aborting finished session.
+			n.handle.LockCommitPayload()
+			fsToAbort.Abort()
+			n.handle.UnlockCommitPayload()
+		}
+		n.sessionInitMu.Unlock()
+	}
+
+	clearWriterState := func(publishEmpty bool) {
+		n.writerMu.Lock()
+		n.wDirty = make(map[string]*nomtDirtyEntry)
+		n.wOldValues = make(map[string][]byte)
+		n.wOldLoaded = make(map[string]bool)
+		n.pendingChangelog = nil
+		n.pendingChangelogBlock = 0
+		n.pendingCommittingMap = nil
+		if publishEmpty {
+			n.readView.Store(&nomtReadView{
+				dirty:      make(map[string]*nomtDirtyEntry),
+				committing: nil,
+				rootHash:   e_common.Hash{},
+			})
+		}
+		n.writerMu.Unlock()
+	}
+
+	// 1. Retrieve keys/values from historical changelogDB first when available.
+	var kvs [][2][]byte
+	var retrievedFromChangelog bool
+	changelogSeen := make(map[string]struct{})
+
+	if savedChangelog != nil {
+		addresses, err := savedChangelog.GetAllUniqueAddresses()
+		if err == nil && len(addresses) > 0 {
+			for _, addr := range addresses {
+				changelogSeen[hex.EncodeToString(addr)] = struct{}{}
+				val, err := savedChangelog.GetStateAt(addr, blockNumber)
+				if err == nil {
+					kvs = append(kvs, [2][]byte{addr, val})
+				} else {
+					kvs = append(kvs, [2][]byte{addr, nil})
+				}
+			}
+			if len(kvs) > 0 {
+				retrievedFromChangelog = true
+				logger.Info("🔧 [NOMT-ALIGN-REBUILD] Retrieved %d keys/values from StateChangelogDB for block #%d to align namespace %s", len(kvs), blockNumber, string(n.namespace))
+			}
+		}
+	}
+
+	// 1b. If retrieved from changelog, try IN-PLACE rollback FIRST so untouched Genesis/Snapshot keys survive!
+	if retrievedFromChangelog {
+		abortAndClearSessions()
+		clearWriterState(false)
+
+		keys := make([][]byte, len(kvs))
+		values := make([][]byte, len(kvs))
+		for i, kv := range kvs {
+			keys[i] = kv[0]
+			values[i] = kv[1]
+		}
+		if err := n.BatchUpdate(keys, values); err != nil {
+			return fmt.Errorf("failed to batch update in-place rollback: %w", err)
+		}
+		newRoot, _, _, err := n.Commit(true)
+		if err != nil {
+			return fmt.Errorf("failed to commit in-place rollback: %w", err)
+		}
+		if err := n.CommitPayload(); err != nil {
+			return fmt.Errorf("failed to commit payload for in-place rollback: %w", err)
+		}
+
+		if rootMatches(newRoot, expectedRoot) {
+			n.registry.mu.Lock()
+			if n.registry.keys == nil {
+				n.registry.keys = make(map[string][]byte)
+			}
+			for _, kv := range kvs {
+				hexKey := hex.EncodeToString(kv[0])
+				if len(kv[1]) == 0 {
+					delete(n.registry.keys, hexKey)
+				} else {
+					keyCopy := make([]byte, len(kv[0]))
+					copy(keyCopy, kv[0])
+					n.registry.keys[hexKey] = keyCopy
+				}
+			}
+			n.registry.mu.Unlock()
+			n.registryChanged = true
+			n.persistRegistryFullRewrite()
+			n.commitWg.Wait()
+
+			if newRoot != expectedRoot {
+				n.RealignRoot(expectedRoot)
+			}
+			logger.Info("✅ [NOMT-ALIGN-REBUILD] In-place changelog rollback aligned namespace %s to root %s",
+				string(n.namespace), expectedRoot.Hex()[:18])
+			return nil
+		}
+
+		if string(n.namespace) == SharedContractStorageNamespace {
+			logger.Error("🚨 [NOMT-ALIGN-REBUILD] CRITICAL: In-place SC root %s differs from expected root %s!",
+				newRoot.Hex()[:18], expectedRoot.Hex()[:18])
+			return fmt.Errorf("rebuilt root mismatch: got %s, expected %s", newRoot.Hex(), expectedRoot.Hex())
+		}
+
+		logger.Warn("⚠️ [NOMT-ALIGN-REBUILD] In-place rollback root %s != expected %s for namespace %s; falling back to reset rebuild...",
+			newRoot.Hex()[:18], expectedRoot.Hex()[:18], string(n.namespace))
+	}
+
+	// Snapshot untouched pre-changelog keys before ResetNomtHandle wipes the handle,
+	// so Pass 3 can apply them if pure-changelog Pass 2 still does not match expectedRoot.
+	var extra [][2][]byte
+	if retrievedFromChangelog {
+		var fromStorage, fromHandle int
+		extra, fromStorage, fromHandle = readUntouchedKeys(changelogSeen)
+		if len(extra) > 0 {
+			logger.Info("🔧 [NOMT-ALIGN-REBUILD] Snapshotted %d untouched pre-changelog keys (storage=%d, handle=%d) before ResetNomtHandle",
+				len(extra), fromStorage, fromHandle)
+		}
+	} else {
+		// Fallback to legacy retrieval from registry + storage/handle (when changelog is disabled or empty)
+		var readFromStorageCount, readFromHandleCount int
+		kvs, readFromStorageCount, readFromHandleCount = readUntouchedKeys(nil)
+
 		if len(kvs) == 0 && storage != nil {
 			var scanErr error
-			// Scan only 'nomt:' prefixed keys which yields exact key-value pairs with 'nomt:' prefix stripped.
 			kvs, scanErr = storage.PrefixScan([]byte("nomt:"))
 			if scanErr != nil {
 				return fmt.Errorf("failed to scan keys from storage: %w", scanErr)
@@ -1373,38 +1523,17 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		}
 	}
 
-	// Lock session creation to prevent concurrent BeginSession FFI calls during reset,
-	// and abort any active/pending sessions that were bound to the old handle.
-	n.sessionInitMu.Lock()
-	defer n.sessionInitMu.Unlock()
-	n.sessionMu.Lock()
-	if n.activeSession != nil {
-		logger.Warn("⚠️ [NomtStateTrie] Aborting active session before ResetNomtHandle for namespace=%s", string(n.namespace))
-		n.activeSession.Abort()
-		n.activeSession = nil
+	// Keep only non-empty entries when rebuilding a freshly wiped NOMT instance.
+	nonEmptyKvs := make([][2][]byte, 0, len(kvs))
+	for _, kv := range kvs {
+		if len(kv[1]) > 0 {
+			nonEmptyKvs = append(nonEmptyKvs, kv)
+		}
 	}
 
-	fsToAbort := n.pendingFinishedSession
-	n.pendingFinishedSession = nil
-	n.sessionMu.Unlock()
+	abortAndClearSessions()
 
-	if fsToAbort != nil {
-		logger.Warn("⚠️ [NomtStateTrie] Aborting finished session before ResetNomtHandle for namespace=%s", string(n.namespace))
-		// ═══════════════════════════════════════════════════════════════════════════
-		// CRITICAL DOUBLE FREE FIX:
-		// We MUST acquire LockCommitPayload before aborting the pending finished session.
-		// If PersistAsync() spawned a CommitAsync() goroutine, it holds LockCommitPayload()
-		// while executing C.nomt_commit_payload. If we call fs.Abort() concurrently, it
-		// will execute C.nomt_finished_session_abort on the exact same session pointer!
-		// This concurrent C++ access caused the "double free or corruption (out)" crash.
-		// ═══════════════════════════════════════════════════════════════════════════
-		n.handle.LockCommitPayload()
-		fsToAbort.Abort()
-		n.handle.UnlockCommitPayload()
-	}
-
-	// 2. Reset the NOMT handle (closes, wipes, and reopens). The shared contract storage is rolled back in
-	// place instead (see SharedContractStorageNamespace); its result is verified against expectedRoot below.
+	// 2. Reset the NOMT handle (closes, wipes, and reopens). Shared contract storage cannot be wiped here.
 	if string(n.namespace) != SharedContractStorageNamespace {
 		newHandle, err := ResetNomtHandle(string(n.namespace))
 		if err != nil {
@@ -1413,46 +1542,73 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		n.handle = newHandle
 	}
 
-	// 3. Update handle and reset internal trie state under writerMu
-	n.writerMu.Lock()
-	n.wDirty = make(map[string]*nomtDirtyEntry)
-	n.wOldValues = make(map[string][]byte)
-	n.wOldLoaded = make(map[string]bool)
+	// 3. Reset internal trie state and rebuild registry solely from non-empty Pass 2 keys.
+	clearWriterState(true)
 	n.registry.mu.Lock()
-	n.registry.keys = make(map[string][]byte)
-	for _, kv := range kvs {
+	n.registry.keys = make(map[string][]byte, len(nonEmptyKvs))
+	for _, kv := range nonEmptyKvs {
 		keyCopy := make([]byte, len(kv[0]))
 		copy(keyCopy, kv[0])
 		n.registry.keys[hex.EncodeToString(kv[0])] = keyCopy
 	}
 	n.registry.mu.Unlock()
 	n.registryChanged = true
-	n.pendingChangelog = nil
-	n.pendingChangelogBlock = 0
-	n.pendingCommittingMap = nil
 
-	// Reset readView to empty state
-	n.readView.Store(&nomtReadView{
-		dirty:      make(map[string]*nomtDirtyEntry),
-		committing: nil,
-		rootHash:   e_common.Hash{},
-	})
-	n.writerMu.Unlock()
-
-	// 4. Save registry to file (full rewrite: the whole map was just rebuilt,
-	// so there is no meaningful "pending" delta to append incrementally).
+	// 4. Save registry to file (removes stale file if empty).
 	n.persistRegistryFullRewrite()
+	n.commitWg.Wait()
 
-	// 5. Populate keys/values into NOMT
-	if len(kvs) > 0 {
-		keys := make([][]byte, len(kvs))
-		values := make([][]byte, len(kvs))
-		for i, kv := range kvs {
+	applyExtraPass3 := func() (e_common.Hash, bool, error) {
+		nonEmptyExtra := make([][2][]byte, 0, len(extra))
+		for _, kv := range extra {
+			if len(kv[1]) > 0 {
+				nonEmptyExtra = append(nonEmptyExtra, kv)
+			}
+		}
+		if len(nonEmptyExtra) == 0 {
+			return e_common.Hash{}, false, nil
+		}
+		n.registry.mu.Lock()
+		for _, kv := range nonEmptyExtra {
+			keyCopy := make([]byte, len(kv[0]))
+			copy(keyCopy, kv[0])
+			n.registry.keys[hex.EncodeToString(kv[0])] = keyCopy
+		}
+		n.registry.mu.Unlock()
+		n.registryChanged = true
+		n.persistRegistryFullRewrite()
+		n.commitWg.Wait()
+
+		keys := make([][]byte, len(nonEmptyExtra))
+		values := make([][]byte, len(nonEmptyExtra))
+		for i, kv := range nonEmptyExtra {
+			keys[i] = kv[0]
+			values[i] = kv[1]
+		}
+		if err := n.BatchUpdate(keys, values); err != nil {
+			return e_common.Hash{}, true, fmt.Errorf("failed to batch update untouched keys in rebuilt trie: %w", err)
+		}
+		extraRoot, _, _, err := n.Commit(true)
+		if err != nil {
+			return e_common.Hash{}, true, fmt.Errorf("failed to commit untouched keys in rebuilt trie: %w", err)
+		}
+		if err := n.CommitPayload(); err != nil {
+			return e_common.Hash{}, true, fmt.Errorf("failed to commit payload for untouched keys in rebuilt trie: %w", err)
+		}
+		return extraRoot, true, nil
+	}
+
+	// 5. Pass 2: Populate non-empty keys/values (pure changelog when retrievedFromChangelog=true) into NOMT.
+	var rebuiltRoot e_common.Hash
+	hasRebuiltKeys := false
+	if len(nonEmptyKvs) > 0 {
+		keys := make([][]byte, len(nonEmptyKvs))
+		values := make([][]byte, len(nonEmptyKvs))
+		for i, kv := range nonEmptyKvs {
 			keys[i] = kv[0]
 			values[i] = kv[1]
 		}
 
-		// BatchUpdate will acquire n.writerMu
 		if err := n.BatchUpdate(keys, values); err != nil {
 			return fmt.Errorf("failed to batch update in rebuilt trie: %w", err)
 		}
@@ -1465,21 +1621,37 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		if err := n.CommitPayload(); err != nil {
 			return fmt.Errorf("failed to commit payload for rebuilt trie: %w", err)
 		}
+		rebuiltRoot = newRoot
+		hasRebuiltKeys = true
+	}
 
-		if newRoot != expectedRoot {
+	if !rootMatches(rebuiltRoot, expectedRoot) && retrievedFromChangelog && len(extra) > 0 {
+		extraRoot, applied, err := applyExtraPass3()
+		if err != nil {
+			return err
+		}
+		if applied {
+			rebuiltRoot = extraRoot
+			hasRebuiltKeys = true
+		}
+	}
+
+	if hasRebuiltKeys {
+		if !rootMatches(rebuiltRoot, expectedRoot) {
 			logger.Error("🚨 [NOMT-ALIGN-REBUILD] CRITICAL: Rebuilt NOMT root %s still differs from expected root %s!",
-				newRoot.Hex()[:18], expectedRoot.Hex()[:18])
-			return fmt.Errorf("rebuilt root mismatch: got %s, expected %s", newRoot.Hex(), expectedRoot.Hex())
+				rebuiltRoot.Hex()[:18], expectedRoot.Hex()[:18])
+			return fmt.Errorf("rebuilt root mismatch: got %s, expected %s", rebuiltRoot.Hex(), expectedRoot.Hex())
+		}
+		if rebuiltRoot != expectedRoot {
+			n.RealignRoot(expectedRoot)
 		}
 		logger.Info("✅ [NOMT-ALIGN-REBUILD] Rebuilt NOMT successfully aligned to expected root: %s", expectedRoot.Hex()[:18])
 	} else {
 		// Empty database
-		n.writerMu.Lock()
-		n.publishReadView(make(map[string]*nomtDirtyEntry), nil, e_common.Hash{})
-		n.writerMu.Unlock()
-		if expectedRoot != (e_common.Hash{}) && expectedRoot != EmptyRootHash {
+		if !rootMatches(e_common.Hash{}, expectedRoot) {
 			return fmt.Errorf("expected non-empty root %s but storage has 0 keys", expectedRoot.Hex())
 		}
+		n.RealignRoot(expectedRoot)
 		logger.Info("✅ [NOMT-ALIGN-REBUILD] Wiped NOMT successfully aligned to empty root")
 	}
 
@@ -1638,8 +1810,8 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 			})
 		}
 		n.pendingChangelog = changes
-		n.pendingChangelogBlock = n.currentCommitBlock
 	}
+	n.pendingChangelogBlock = n.currentCommitBlock
 	n.sessionMu.Unlock()
 
 	n.writerMu.Lock()
@@ -1862,22 +2034,37 @@ func (n *NomtStateTrie) CommitPayload() error {
 	}
 
 	var commitErr error
-	if fs != nil {
-		n.handle.LockCommitPayload()
-		err := fs.CommitPayload(n.handle)
-		n.handle.UnlockCommitPayload()
-
-		if err != nil {
-			commitErr = err
-		} else if string(n.namespace) == "account_state" && blockNum > 0 {
-			storage.UpdateLastNomtCommittedBlock(blockNum)
-		}
-	}
-
-	if commitErr == nil && n.changelogDB != nil && len(changes) > 0 {
+	if n.changelogDB != nil && len(changes) > 0 {
 		if err := n.changelogDB.WriteBlockChanges(blockNum, changes); err != nil {
 			logger.Error("❌ [CommitPayload] Failed to write changelog (namespace=%s): %v", string(n.namespace), err)
 			commitErr = err
+		}
+	}
+
+	if fs != nil {
+		n.handle.LockCommitPayload()
+		if commitErr != nil {
+			fs.Abort()
+			n.handle.UnlockCommitPayload()
+			if n.changelogDB != nil && blockNum > 0 {
+				if err := n.changelogDB.RollbackAboveBlock(blockNum - 1); err != nil {
+					logger.Warn("⚠️ [CommitPayload] Failed to rollback changelog after abort: %v", err)
+				}
+			}
+		} else {
+			err := fs.CommitPayload(n.handle)
+			n.handle.UnlockCommitPayload()
+
+			if err != nil {
+				commitErr = err
+				if n.changelogDB != nil && len(changes) > 0 && blockNum > 0 {
+					if rbErr := n.changelogDB.RollbackAboveBlock(blockNum - 1); rbErr != nil {
+						logger.Warn("⚠️ [CommitPayload] Failed to rollback changelog after fs.CommitPayload error: %v", rbErr)
+					}
+				}
+			} else if string(n.namespace) == "account_state" && blockNum > 0 {
+				storage.UpdateLastNomtCommittedBlock(blockNum)
+			}
 		}
 	}
 
@@ -2337,8 +2524,12 @@ func ApplyNomtReplicationBatchesWithRollback(
 
 				if scChangelogDB != nil && blockNumber > 0 && scChangelogDB.GetHighestBlock() == 0 && scChangelogDB.GetStartBlock() == 0 {
 					if _, _, found, _ := scChangelogDB.GetRootAtOrBefore(blockNumber - 1); !found {
-						if preRoot, rErr := handle.Root(); rErr == nil && preRoot == ([32]byte{}) {
-							_ = scChangelogDB.SetBlockRoot(0, preRoot[:])
+						if preRoot, rErr := handle.Root(); rErr == nil {
+							if preRoot == ([32]byte{}) {
+								_ = scChangelogDB.SetBlockRoot(0, preRoot[:])
+							} else {
+								_ = scChangelogDB.SetBlockRoot(blockNumber-1, preRoot[:])
+							}
 						}
 					}
 				}
@@ -2637,8 +2828,12 @@ func CommitBatchRaw(handle *nomt_ffi.Handle, dirtyStates []NomtDirtyState, chang
 	if changelogDB != nil && len(changes) > 0 {
 		if blockNumber > 0 && changelogDB.GetHighestBlock() == 0 && changelogDB.GetStartBlock() == 0 {
 			if _, _, found, _ := changelogDB.GetRootAtOrBefore(blockNumber - 1); !found {
-				if preRoot, rErr := handle.Root(); rErr == nil && preRoot == ([32]byte{}) {
-					_ = changelogDB.SetBlockRoot(0, preRoot[:])
+				if preRoot, rErr := handle.Root(); rErr == nil {
+					if preRoot == ([32]byte{}) {
+						_ = changelogDB.SetBlockRoot(0, preRoot[:])
+					} else {
+						_ = changelogDB.SetBlockRoot(blockNumber-1, preRoot[:])
+					}
 				}
 			}
 		}
@@ -2713,4 +2908,44 @@ func (n *NomtStateTrie) SetPendingCommitTicket(ticket *NomtPersistenceTicket) {
 	n.sessionMu.Lock()
 	defer n.sessionMu.Unlock()
 	n.pendingCommitTicket = ticket
+}
+
+// RollbackNomtNamespaceKeys updates or deletes specific raw keys in a NOMT namespace handle
+// without wiping unrelated pre-existing keys (used e.g. by validator fork rollback via BackupDb).
+func RollbackNomtNamespaceKeys(namespace string, keys [][]byte, values [][]byte) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if len(keys) != len(values) {
+		return fmt.Errorf("RollbackNomtNamespaceKeys: mismatched keys (%d) and values (%d) lengths", len(keys), len(values))
+	}
+	handle, err := GetOrInitNomtHandle(namespace)
+	if err != nil {
+		return fmt.Errorf("RollbackNomtNamespaceKeys: GetOrInitNomtHandle(%s): %w", namespace, err)
+	}
+	t := NewNomtStateTrie(handle, false, namespace)
+	if err := t.BatchUpdate(keys, values); err != nil {
+		return fmt.Errorf("RollbackNomtNamespaceKeys: BatchUpdate(%s): %w", namespace, err)
+	}
+	if _, _, _, err := t.Commit(true); err != nil {
+		return fmt.Errorf("RollbackNomtNamespaceKeys: Commit(%s): %w", namespace, err)
+	}
+	if err := t.CommitPayload(); err != nil {
+		return fmt.Errorf("RollbackNomtNamespaceKeys: CommitPayload(%s): %w", namespace, err)
+	}
+	t.registry.mu.Lock()
+	for i, k := range keys {
+		hexKey := hex.EncodeToString(k)
+		if len(values[i]) == 0 {
+			delete(t.registry.keys, hexKey)
+		} else {
+			keyCopy := make([]byte, len(k))
+			copy(keyCopy, k)
+			t.registry.keys[hexKey] = keyCopy
+		}
+	}
+	t.registry.mu.Unlock()
+	t.persistRegistryFullRewrite()
+	t.commitWg.Wait()
+	return nil
 }

@@ -1889,3 +1889,1113 @@ func TestAdv25_SyncBlocks_NomtBackendRollsBackHandlesChangelogsChainKVAndXapianT
 	require.Error(t, errForkBlock, "blk2Fork phải bị xóa khỏi BlockDB")
 }
 
+// ADV-26: Validator node (IsRPCNode=false) dùng NOMT backend có changelogDB==nil và stakeChangelogDB==nil
+// (chain_state.go:154-200). Khi gặp fork (forkOverwrite=true), rollbackLocalChainToBlock:
+//   1. Rollback Xapian trước (line 409)
+//   2. Gọi UpdateStateForNewHeader(block #1) -> AlignWithExpectedRoot() gọi ResetNomtHandle (xóa trắng NOMT),
+//      không có changelog & không có "nomt:" flat key nên fail ("storage has 0 keys" / "rebuilt root mismatch")
+//   -> NOMT bị xóa trắng về 0x0000..., Xapian đã lùi về Block #1 trong khi BlockDB/LastBlockNumber kẹt ở Fork Block #2!
+func TestAdv26_SyncBlocks_ValidatorNodeNomtForkRollbackFailsWipesNomtAndDivergesXapian(t *testing.T) {
+	t.Cleanup(func() { mvm.DestroyAllXapianInstances() })
+	t.Setenv("NODE_TYPE", "")
+
+	acct1 := common.HexToAddress("0x1000000000000000000000000000000000002601").Bytes()
+	acct2 := common.HexToAddress("0x2000000000000000000000000000000000002602").Bytes()
+	stake1 := common.HexToAddress("0x3000000000000000000000000000000000002601").Bytes()
+	scAddrA := common.HexToAddress("0xA000000000000000000000000000000000002601")
+
+	prevBackend := trie.GetStateBackend()
+	prevBackupDb := storage.GetBackupDbInstance()
+	prevBlockNum := storage.GetLastBlockNumber()
+	prevGEI := storage.GetLastGlobalExecIndex()
+	prevCommitIdx := storage.GetLastHandledCommitIndex()
+	prevCommitEpoch := storage.GetLastHandledCommitEpoch()
+	prevNomtBlock := storage.GetLastNomtCommittedBlock()
+	t.Cleanup(func() {
+		storage.SetBackupDbInstance(prevBackupDb)
+		trie.SetStateBackend(prevBackend)
+		storage.ResetAllBlockCounters(prevBlockNum)
+		storage.ForceSetLastGlobalExecIndex(prevGEI)
+		storage.ForceSetLastHandledCommitIndex(prevCommitIdx)
+		storage.UpdateLastHandledCommitEpoch(prevCommitEpoch)
+		storage.ForceSetLastNomtCommittedBlock(prevNomtBlock)
+		trie.CloseNomtDB()
+	})
+
+	computeNomtSequence := func(steps []struct {
+		bn    uint64
+		acc   [][2][]byte
+		stake [][2][]byte
+		sc    [][2][]byte
+	}) (accRoots, stakeRoots, scRoots []common.Hash) {
+		trie.CloseNomtDB()
+		trie.SetStateBackend(trie.BackendNOMT)
+		require.NoError(t, trie.InitNomtDB(filepath.Join(t.TempDir(), "scratch_nomt"), 1, 16, 16))
+		storage.ForceSetLastNomtCommittedBlock(0)
+		for _, st := range steps {
+			agg := map[string][][2][]byte{
+				"Account":    st.acc,
+				"StakeState": st.stake,
+				"SC Storage": st.sc,
+			}
+			_, err := trie.ApplyNomtReplicationBatches(agg, nil, nil, st.bn)
+			require.NoError(t, err)
+			aR, _ := trie.GetNomtHandleRoot("account_state")
+			sR, _ := trie.GetNomtHandleRoot("stake_db")
+			cR, _ := trie.GetNomtHandleRoot("smart_contract_storage")
+			accRoots = append(accRoots, aR)
+			stakeRoots = append(stakeRoots, sR)
+			scRoots = append(scRoots, cR)
+		}
+		trie.CloseNomtDB()
+		return accRoots, stakeRoots, scRoots
+	}
+
+	b1Acc := [][2][]byte{{makeNomtTestKey(acct1), []byte("val_acc_b1")}}
+	b1Stake := [][2][]byte{{makeNomtTestKey(stake1), []byte("val_stake_b1")}}
+	b1SC := [][2][]byte{{makeNomtTestSCKey(scAddrA, 1), []byte("val_sc_b1")}}
+
+	b2ForkAcc := [][2][]byte{
+		{makeNomtTestKey(acct1), []byte("val_acc_fork_b2")},
+		{makeNomtTestKey(acct2), []byte("val_acc2_fork_b2")},
+	}
+	b2ForkStake := [][2][]byte{{makeNomtTestKey(stake1), []byte("val_stake_fork_b2")}}
+	b2ForkSC := [][2][]byte{{makeNomtTestSCKey(scAddrA, 1), []byte("val_sc_fork_b2")}}
+
+	b2CanonAcc := [][2][]byte{{makeNomtTestKey(acct1), []byte("val_acc_canon_b2")}}
+	b2CanonStake := [][2][]byte{{makeNomtTestKey(stake1), []byte("val_stake_canon_b2")}}
+	b2CanonSC := [][2][]byte{{makeNomtTestSCKey(scAddrA, 1), []byte("val_sc_canon_b2")}}
+
+	forkAccR, forkStakeR, forkScR := computeNomtSequence([]struct {
+		bn    uint64
+		acc   [][2][]byte
+		stake [][2][]byte
+		sc    [][2][]byte
+	}{
+		{1, b1Acc, b1Stake, b1SC},
+		{2, b2ForkAcc, b2ForkStake, b2ForkSC},
+	})
+	canonAccR, canonStakeR, canonScR := computeNomtSequence([]struct {
+		bn    uint64
+		acc   [][2][]byte
+		stake [][2][]byte
+		sc    [][2][]byte
+	}{
+		{1, b1Acc, b1Stake, b1SC},
+		{2, b2CanonAcc, b2CanonStake, b2CanonSC},
+	})
+
+	accRoot1, stakeRoot1, scRoot1 := canonAccR[0], canonStakeR[0], canonScR[0]
+	accRoot2Fork, stakeRoot2Fork, scRoot2Fork := forkAccR[1], forkStakeR[1], forkScR[1]
+	accRoot2Canon, stakeRoot2Canon, scRoot2Canon := canonAccR[1], canonStakeR[1], canonScR[1]
+
+	// Khởi tạo VALIDATOR node (IsRPCNode: false, NODE_TYPE="") trên NOMT backend
+	rootDir := t.TempDir()
+	trie.SetStateBackend(trie.BackendNOMT)
+	require.NoError(t, trie.InitNomtDB(filepath.Join(rootDir, "nomt"), 1, 16, 16))
+	storage.ForceSetLastNomtCommittedBlock(0)
+
+	sm := storage.NewStorageManager()
+	openPebble := func(name, nsBackup string, add func(storage.Storage) error) {
+		require.NoError(t, add(openPebbleStorageForTest(t, filepath.Join(rootDir, "pebble_"+name), nsBackup)))
+	}
+	openPebble("account", "account_state", sm.AddStorageAccount)
+	openPebble("tx", "transaction_state", sm.AddStorageTransaction)
+	openPebble("device", "", sm.AddStorageBackupDeviceKey)
+	openPebble("receipt", "receipts", sm.AddStorageReceipt)
+	openPebble("sc", "smart_contract_storage", sm.AddStorageSmartContract)
+	openPebble("code", "", sm.AddStorageCode)
+	openPebble("triedb", "", sm.AddStorageDatabaseTrie)
+	openPebble("block", "", sm.AddStorageBlock)
+	openPebble("backup", "", sm.AddStorageBackupDb)
+	openPebble("mapping", "", sm.AddStorageMapping)
+	openPebble("stake", "stake_db", sm.AddStorageStake)
+
+	blockDB := block.NewBlockDatabase(sm.GetStorageBlock())
+	genHeader := block.NewBlockHeader(common.Hash{}, 0, common.Hash{}, common.Hash{}, common.Hash{}, common.Address{}, 0, common.Hash{}, 0)
+	genBlock := block.NewBlock(genHeader, nil, nil)
+	genHash := genBlock.Header().Hash()
+
+	cfg := &config.SimpleChainConfig{
+		ChainId:   big.NewInt(991),
+		IsRPCNode: false, // REAL VALIDATOR NODE
+		Databases: config.DatabasesConfig{RootPath: rootDir},
+	}
+	cs, err := blockchain.NewChainStateWithGenesis(sm, blockDB, genHeader, cfg, map[common.Address]struct{}{}, &config.GenesisConfig{}, filepath.Join(rootDir, "backup"))
+	require.NoError(t, err)
+	t.Cleanup(func() { cs.Close() })
+	// Chứng minh Validator node không bật changelog cho account_state & stake_db
+	require.Nil(t, cs.GetChangelogDB())
+	require.Nil(t, cs.GetStakeChangelogDB())
+
+	require.NoError(t, blockDB.SaveLastBlockSync(genBlock))
+	restoreBC := blockchain.SwapBlockChainForTest(blockDB, sm)
+	t.Cleanup(restoreBC)
+	bc := blockchain.GetBlockChainInstance()
+	require.NoError(t, bc.SetBlockNumberToHash(0, genHash))
+	require.NoError(t, bc.Commit())
+
+	storage.ResetAllBlockCounters(0)
+	storage.ForceSetLastGlobalExecIndex(0)
+	storage.ForceSetLastHandledCommitIndex(0)
+	storage.UpdateLastHandledCommitEpoch(0)
+	storage.ForceSetLastNomtCommittedBlock(0)
+
+	mvm.DestroyAllXapianInstances()
+	mvm.ConfigureXapianBasePath(t.TempDir())
+	rh := NewRequestHandler(sm, cs, "")
+
+	cloneKVs := func(in [][2][]byte) [][2][]byte {
+		out := make([][2][]byte, len(in))
+		for i, kv := range in {
+			out[i] = [2][]byte{bytes.Clone(kv[0]), bytes.Clone(kv[1])}
+		}
+		return out
+	}
+	_ = scRoot1
+	_ = scRoot2Fork
+
+	// 1. Sync Block #1
+	tx1 := common.HexToHash("0x1111000000000000000000000000000000000000000000000000000000002601")
+	blk1 := block.NewBlock(block.NewBlockHeader(genHash, 1, accRoot1, stakeRoot1, common.HexToHash("0x101"), common.Address{}, 1000, common.Hash{}, 0, 1), []common.Hash{tx1}, nil)
+	raw1, err := blk1.Marshal()
+	require.NoError(t, err)
+	ab1, _ := storage.SerializeBatch(cloneKVs(b1Acc))
+	sb1, _ := storage.SerializeBatch(cloneKVs(b1Stake))
+	scb1, _ := storage.SerializeBatch(cloneKVs(b1SC))
+	rcptB1, _ := storage.SerializeBatch([][2][]byte{{tx1.Bytes(), []byte("rcpt_1")}})
+	txB1, _ := storage.SerializeBatch([][2][]byte{{tx1.Bytes(), []byte("tx_1")}})
+	log1 := buildMinimalXapianCompLog("db_adv26", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "val_b1")
+	backup1, err := storage.SerializeBackupDb(storage.BackUpDb{
+		BockNumber:                1,
+		AccountBatch:              ab1,
+		StakeState:                sb1,
+		SmartContractStorageBatch: scb1,
+		ReceiptBatchPut:           rcptB1,
+		TxBatchPut:                txB1,
+		FullDbLogs:                []map[string][]byte{{scAddrA.Hex()[2:]: log1}},
+	})
+	require.NoError(t, err)
+	resp1, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+		ExecuteMode: true,
+		Blocks:      []*pb.BlockData{{BlockNumber: 1, RawBlockBytes: raw1, BackupData: backup1}},
+	})
+	require.NoError(t, err)
+	require.Empty(t, resp1.GetError())
+	require.Equal(t, uint64(1), storage.GetLastBlockNumber())
+
+	// 2. Sync Fork Block #2
+	tx2Fork := common.HexToHash("0x2222000000000000000000000000000000000000000000000000000000002602")
+	blk2Fork := block.NewBlock(block.NewBlockHeader(blk1.Header().Hash(), 2, accRoot2Fork, stakeRoot2Fork, common.HexToHash("0x202"), common.Address{}, 2000, common.Hash{}, 0, 2), []common.Hash{tx2Fork}, nil)
+	raw2Fork, err := blk2Fork.Marshal()
+	require.NoError(t, err)
+	ab2F, _ := storage.SerializeBatch(cloneKVs(b2ForkAcc))
+	sb2F, _ := storage.SerializeBatch(cloneKVs(b2ForkStake))
+	scb2F, _ := storage.SerializeBatch(cloneKVs(b2ForkSC))
+	rcptB2F, _ := storage.SerializeBatch([][2][]byte{{tx2Fork.Bytes(), []byte("rcpt_2f")}})
+	txB2F, _ := storage.SerializeBatch([][2][]byte{{tx2Fork.Bytes(), []byte("tx_2f")}})
+	log2F := buildMinimalXapianCompLog("db_adv26", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "val_fork_b2")
+	backup2F, err := storage.SerializeBackupDb(storage.BackUpDb{
+		BockNumber:                2,
+		AccountBatch:              ab2F,
+		StakeState:                sb2F,
+		SmartContractStorageBatch: scb2F,
+		ReceiptBatchPut:           rcptB2F,
+		TxBatchPut:                txB2F,
+		FullDbLogs:                []map[string][]byte{{scAddrA.Hex()[2:]: log2F}},
+	})
+	require.NoError(t, err)
+	resp2Fork, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+		ExecuteMode: true,
+		Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2Fork, BackupData: backup2F}},
+	})
+	require.NoError(t, err)
+	require.Empty(t, resp2Fork.GetError())
+	require.Equal(t, uint64(2), storage.GetLastBlockNumber())
+
+	// 3. Canonical Block #2 kích hoạt forkOverwrite -> rollback về Block #1 trên Validator node
+	tx2Canon := common.HexToHash("0x2222000000000000000000000000000000000000000000000000000000002603")
+	blk2Canon := block.NewBlock(block.NewBlockHeader(blk1.Header().Hash(), 2, accRoot2Canon, stakeRoot2Canon, common.HexToHash("0x203"), common.Address{}, 2500, common.Hash{}, 0, 2), []common.Hash{tx2Canon}, nil)
+	raw2Canon, err := blk2Canon.Marshal()
+	require.NoError(t, err)
+	ab2C, _ := storage.SerializeBatch(cloneKVs(b2CanonAcc))
+	sb2C, _ := storage.SerializeBatch(cloneKVs(b2CanonStake))
+	scb2C, _ := storage.SerializeBatch(cloneKVs(b2CanonSC))
+	rcptB2C, _ := storage.SerializeBatch([][2][]byte{{tx2Canon.Bytes(), []byte("rcpt_2c")}})
+	txB2C, _ := storage.SerializeBatch([][2][]byte{{tx2Canon.Bytes(), []byte("tx_2c")}})
+	log2C := buildMinimalXapianCompLog("db_adv26", "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "val_canon_b2")
+	backup2C, err := storage.SerializeBackupDb(storage.BackUpDb{
+		BockNumber:                2,
+		AccountBatch:              ab2C,
+		StakeState:                sb2C,
+		SmartContractStorageBatch: scb2C,
+		ReceiptBatchPut:           rcptB2C,
+		TxBatchPut:                txB2C,
+		FullDbLogs:                []map[string][]byte{{scAddrA.Hex()[2:]: log2C}},
+	})
+	require.NoError(t, err)
+
+	resp2Canon, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+		ExecuteMode: true,
+		Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2Canon, BackupData: backup2C}},
+	})
+	require.NoError(t, err)
+
+	nomtAccAfter, _ := trie.GetNomtHandleRoot("account_state")
+	nomtScAfter, _ := trie.GetNomtHandleRoot("smart_contract_storage")
+	rolledRemaining, _ := mvm.RollbackXapianAboveBlock(1)
+	t.Logf("ADV-26 observe: resp2Canon.Error=%q, SyncedCount=%d, LastBlockNumber=%d, nomtAccAfter=%s, nomtScAfter=%s, xapianRemainingAbove1=%d",
+		resp2Canon.GetError(), resp2Canon.GetSyncedCount(), storage.GetLastBlockNumber(), nomtAccAfter.Hex(), nomtScAfter.Hex(), rolledRemaining)
+
+	require.Empty(t, resp2Canon.GetError(), "EVIDENCE ADV-26: Validator node (IsRPCNode=false) trên NOMT không thể rollback fork vì changelogDB==nil, AlignWithExpectedRoot đọc nhầm Fork #2 rồi fail rebuilt root mismatch trong khi Xapian đã lùi về Block #1 và BlockDB kẹt ở Fork #2")
+	require.Equal(t, uint64(1), resp2Canon.GetSyncedCount())
+	require.Equal(t, uint64(2), storage.GetLastBlockNumber())
+	require.Equal(t, accRoot2Canon, nomtAccAfter)
+	require.Equal(t, stakeRoot2Canon, func() common.Hash { r, _ := trie.GetNomtHandleRoot("stake_db"); return r }())
+	require.Equal(t, scRoot2Canon, nomtScAfter)
+	require.Equal(t, 1, rolledRemaining)
+}
+
+// ADV-27: Ngay cả khi IsRPCNode=true (StateChangelogDB bật), NomtStateTrie.AlignWithExpectedRoot
+// (nomt_state_trie.go:1275-1486) vẫn có 2 lỗi nghiêm trọng:
+//   - SubcaseA: Vẫn gọi ResetNomtHandle xóa sạch toàn bộ C++ NOMT DB rồi chỉ ghi lại các key có trong
+//     changelogDB -> MỌI account/validator có từ Genesis hoặc Snapshot chưa bị sửa sau khi mở changelog đều BỊ XÓA SẠCH!
+//   - SubcaseB: Khi rollback từ Fork Block #2 (có thêm key mới vào trie) về Block #1 có EmptyRootHash (0x56e81f...),
+//     changelogDB trả về kvs=[[key, nil]] (len(kvs)>0), AlignWithExpectedRoot commit được newRoot=0x0000... nhưng fail ở
+//     line 1469 (`newRoot != expectedRoot`) vì không xử lý EmptyRootHash khi len(kvs)>0.
+func TestAdv27_SyncBlocks_NomtAlignWithExpectedRootWipesPreExistingStateAndFailsEmptyRootHash(t *testing.T) {
+	t.Run("SubcaseA_UntrackedGenesisOrSnapshotAccountWipedOnForkRollback", func(t *testing.T) {
+		t.Cleanup(func() { mvm.DestroyAllXapianInstances() })
+
+		genesisAcct := common.HexToAddress("0x9999000000000000000000000000000000002701").Bytes()
+		genesisStake := common.HexToAddress("0x8888000000000000000000000000000000002701").Bytes()
+		acct1 := common.HexToAddress("0x1000000000000000000000000000000000002701").Bytes()
+		stake1 := common.HexToAddress("0x3000000000000000000000000000000000002701").Bytes()
+		scAddrA := common.HexToAddress("0xA000000000000000000000000000000000002701")
+
+		prevBackend := trie.GetStateBackend()
+		prevBackupDb := storage.GetBackupDbInstance()
+		prevBlockNum := storage.GetLastBlockNumber()
+		prevGEI := storage.GetLastGlobalExecIndex()
+		prevCommitIdx := storage.GetLastHandledCommitIndex()
+		prevCommitEpoch := storage.GetLastHandledCommitEpoch()
+		prevNomtBlock := storage.GetLastNomtCommittedBlock()
+		t.Cleanup(func() {
+			storage.SetBackupDbInstance(prevBackupDb)
+			trie.SetStateBackend(prevBackend)
+			storage.ResetAllBlockCounters(prevBlockNum)
+			storage.ForceSetLastGlobalExecIndex(prevGEI)
+			storage.ForceSetLastHandledCommitIndex(prevCommitIdx)
+			storage.UpdateLastHandledCommitEpoch(prevCommitEpoch)
+			storage.ForceSetLastNomtCommittedBlock(prevNomtBlock)
+			trie.CloseNomtDB()
+		})
+
+		genAccKVs := [][2][]byte{{makeNomtTestKey(genesisAcct), []byte("genesis_bal_1000")}}
+		genStakeKVs := [][2][]byte{{makeNomtTestKey(genesisStake), []byte("genesis_stake_500")}}
+		b1Acc := [][2][]byte{{makeNomtTestKey(acct1), []byte("b1_acc")}}
+		b1Stake := [][2][]byte{{makeNomtTestKey(stake1), []byte("b1_stake")}}
+		b1SC := [][2][]byte{{makeNomtTestSCKey(scAddrA, 1), []byte("b1_sc")}}
+
+		b2ForkAcc := [][2][]byte{{makeNomtTestKey(acct1), []byte("b2_fork_acc")}}
+		b2ForkStake := [][2][]byte{{makeNomtTestKey(stake1), []byte("b2_fork_stake")}}
+		b2ForkSC := [][2][]byte{{makeNomtTestSCKey(scAddrA, 1), []byte("b2_fork_sc")}}
+
+		b2CanonAcc := [][2][]byte{{makeNomtTestKey(acct1), []byte("b2_canon_acc")}}
+		b2CanonStake := [][2][]byte{{makeNomtTestKey(stake1), []byte("b2_canon_stake")}}
+		b2CanonSC := [][2][]byte{{makeNomtTestSCKey(scAddrA, 1), []byte("b2_canon_sc")}}
+
+		cloneKVs := func(in [][2][]byte) [][2][]byte {
+			out := make([][2][]byte, len(in))
+			for i, kv := range in {
+				out[i] = [2][]byte{bytes.Clone(kv[0]), bytes.Clone(kv[1])}
+			}
+			return out
+		}
+
+		computeNomtSeq := func(steps []struct {
+			bn    uint64
+			acc   [][2][]byte
+			stake [][2][]byte
+			sc    [][2][]byte
+		}) (accR, stakeR, scR []common.Hash) {
+			trie.CloseNomtDB()
+			trie.SetStateBackend(trie.BackendNOMT)
+			require.NoError(t, trie.InitNomtDB(filepath.Join(t.TempDir(), "scratch_27a"), 1, 16, 16))
+			storage.ForceSetLastNomtCommittedBlock(0)
+			for _, st := range steps {
+				agg := map[string][][2][]byte{
+					"Account":    cloneKVs(st.acc),
+					"StakeState": cloneKVs(st.stake),
+					"SC Storage": cloneKVs(st.sc),
+				}
+				_, err := trie.ApplyNomtReplicationBatches(agg, nil, nil, st.bn)
+				require.NoError(t, err)
+				a, _ := trie.GetNomtHandleRoot("account_state")
+				s, _ := trie.GetNomtHandleRoot("stake_db")
+				c, _ := trie.GetNomtHandleRoot("smart_contract_storage")
+				accR = append(accR, a)
+				stakeR = append(stakeR, s)
+				scR = append(scR, c)
+			}
+			trie.CloseNomtDB()
+			return accR, stakeR, scR
+		}
+
+		canonA, canonS, canonC := computeNomtSeq([]struct {
+			bn    uint64
+			acc   [][2][]byte
+			stake [][2][]byte
+			sc    [][2][]byte
+		}{
+			{0, genAccKVs, genStakeKVs, nil},
+			{1, b1Acc, b1Stake, b1SC},
+			{2, b2CanonAcc, b2CanonStake, b2CanonSC},
+		})
+		forkA, forkS, forkC := computeNomtSeq([]struct {
+			bn    uint64
+			acc   [][2][]byte
+			stake [][2][]byte
+			sc    [][2][]byte
+		}{
+			{0, genAccKVs, genStakeKVs, nil},
+			{1, b1Acc, b1Stake, b1SC},
+			{2, b2ForkAcc, b2ForkStake, b2ForkSC},
+		})
+		_ = forkC
+		_ = canonC
+
+		genAccRoot, genStakeRoot := canonA[0], canonS[0]
+		accRoot1, stakeRoot1 := canonA[1], canonS[1]
+		accRoot2Fork, stakeRoot2Fork := forkA[2], forkS[2]
+		accRoot2Canon, stakeRoot2Canon := canonA[2], canonS[2]
+
+		// Khởi tạo node thật với Genesis/Snapshot đã tồn tại trong NOMT trước khi changelog được gắn (thực tế genesis/snapshot restore)
+		rootDir := t.TempDir()
+		trie.SetStateBackend(trie.BackendNOMT)
+		require.NoError(t, trie.InitNomtDB(filepath.Join(rootDir, "nomt"), 1, 16, 16))
+		storage.ForceSetLastNomtCommittedBlock(0)
+		_, err := trie.ApplyNomtReplicationBatches(map[string][][2][]byte{
+			"Account":    cloneKVs(genAccKVs),
+			"StakeState": cloneKVs(genStakeKVs),
+		}, nil, nil, 0)
+		require.NoError(t, err)
+
+		sm := storage.NewStorageManager()
+		openPebble := func(name, nsBackup string, add func(storage.Storage) error) {
+			require.NoError(t, add(openPebbleStorageForTest(t, filepath.Join(rootDir, "pebble_"+name), nsBackup)))
+		}
+		openPebble("account", "account_state", sm.AddStorageAccount)
+		openPebble("tx", "transaction_state", sm.AddStorageTransaction)
+		openPebble("device", "", sm.AddStorageBackupDeviceKey)
+		openPebble("receipt", "receipts", sm.AddStorageReceipt)
+		openPebble("sc", "smart_contract_storage", sm.AddStorageSmartContract)
+		openPebble("code", "", sm.AddStorageCode)
+		openPebble("triedb", "", sm.AddStorageDatabaseTrie)
+		openPebble("block", "", sm.AddStorageBlock)
+		openPebble("backup", "", sm.AddStorageBackupDb)
+		openPebble("mapping", "", sm.AddStorageMapping)
+		openPebble("stake", "stake_db", sm.AddStorageStake)
+
+		blockDB := block.NewBlockDatabase(sm.GetStorageBlock())
+		genHeader := block.NewBlockHeader(common.Hash{}, 0, genAccRoot, genStakeRoot, common.Hash{}, common.Address{}, 0, common.Hash{}, 0)
+		genBlock := block.NewBlock(genHeader, nil, nil)
+		genHash := genBlock.Header().Hash()
+
+		cfg := &config.SimpleChainConfig{
+			ChainId:   big.NewInt(991),
+			IsRPCNode: true, // StateChangelogDB BẬT
+			Databases: config.DatabasesConfig{RootPath: rootDir},
+		}
+		cs, err := blockchain.NewChainStateWithGenesis(sm, blockDB, genHeader, cfg, map[common.Address]struct{}{}, &config.GenesisConfig{}, filepath.Join(rootDir, "backup"))
+		require.NoError(t, err)
+		t.Cleanup(func() { cs.Close() })
+		require.NotNil(t, cs.GetChangelogDB())
+
+		require.NoError(t, blockDB.SaveLastBlockSync(genBlock))
+		restoreBC := blockchain.SwapBlockChainForTest(blockDB, sm)
+		t.Cleanup(restoreBC)
+		bc := blockchain.GetBlockChainInstance()
+		require.NoError(t, bc.SetBlockNumberToHash(0, genHash))
+		require.NoError(t, bc.Commit())
+
+		storage.ResetAllBlockCounters(0)
+		storage.ForceSetLastGlobalExecIndex(0)
+		storage.ForceSetLastHandledCommitIndex(0)
+		storage.UpdateLastHandledCommitEpoch(0)
+		storage.ForceSetLastNomtCommittedBlock(0)
+
+		mvm.DestroyAllXapianInstances()
+		mvm.ConfigureXapianBasePath(t.TempDir())
+		rh := NewRequestHandler(sm, cs, "")
+
+		// Sync Block #1
+		tx1 := common.HexToHash("0x1111000000000000000000000000000000000000000000000000000000002711")
+		blk1 := block.NewBlock(block.NewBlockHeader(genHash, 1, accRoot1, stakeRoot1, common.HexToHash("0x101"), common.Address{}, 1000, common.Hash{}, 0, 1), []common.Hash{tx1}, nil)
+		raw1, _ := blk1.Marshal()
+		ab1, _ := storage.SerializeBatch(cloneKVs(b1Acc))
+		sb1, _ := storage.SerializeBatch(cloneKVs(b1Stake))
+		scb1, _ := storage.SerializeBatch(cloneKVs(b1SC))
+		rcptB1, _ := storage.SerializeBatch([][2][]byte{{tx1.Bytes(), []byte("rcpt_1")}})
+		txB1, _ := storage.SerializeBatch([][2][]byte{{tx1.Bytes(), []byte("tx_1")}})
+		backup1, _ := storage.SerializeBackupDb(storage.BackUpDb{
+			BockNumber:                1,
+			AccountBatch:              ab1,
+			StakeState:                sb1,
+			SmartContractStorageBatch: scb1,
+			ReceiptBatchPut:           rcptB1,
+			TxBatchPut:                txB1,
+		})
+		resp1, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 1, RawBlockBytes: raw1, BackupData: backup1}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp1.GetError())
+
+		// Sync Fork Block #2
+		tx2F := common.HexToHash("0x2222000000000000000000000000000000000000000000000000000000002712")
+		blk2F := block.NewBlock(block.NewBlockHeader(blk1.Header().Hash(), 2, accRoot2Fork, stakeRoot2Fork, common.HexToHash("0x202"), common.Address{}, 2000, common.Hash{}, 0, 2), []common.Hash{tx2F}, nil)
+		raw2F, _ := blk2F.Marshal()
+		ab2F, _ := storage.SerializeBatch(cloneKVs(b2ForkAcc))
+		sb2F, _ := storage.SerializeBatch(cloneKVs(b2ForkStake))
+		scb2F, _ := storage.SerializeBatch(cloneKVs(b2ForkSC))
+		rcptB2F, _ := storage.SerializeBatch([][2][]byte{{tx2F.Bytes(), []byte("rcpt_2f")}})
+		txB2F, _ := storage.SerializeBatch([][2][]byte{{tx2F.Bytes(), []byte("tx_2f")}})
+		backup2F, _ := storage.SerializeBackupDb(storage.BackUpDb{
+			BockNumber:                2,
+			AccountBatch:              ab2F,
+			StakeState:                sb2F,
+			SmartContractStorageBatch: scb2F,
+			ReceiptBatchPut:           rcptB2F,
+			TxBatchPut:                txB2F,
+		})
+		resp2F, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2F, BackupData: backup2F}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp2F.GetError())
+
+		// Sync Canonical Block #2 -> AlignWithExpectedRoot gọi ResetNomtHandle và xóa mất genesisAcct!
+		tx2C := common.HexToHash("0x2222000000000000000000000000000000000000000000000000000000002713")
+		blk2C := block.NewBlock(block.NewBlockHeader(blk1.Header().Hash(), 2, accRoot2Canon, stakeRoot2Canon, common.HexToHash("0x203"), common.Address{}, 2500, common.Hash{}, 0, 2), []common.Hash{tx2C}, nil)
+		raw2C, _ := blk2C.Marshal()
+		ab2C, _ := storage.SerializeBatch(cloneKVs(b2CanonAcc))
+		sb2C, _ := storage.SerializeBatch(cloneKVs(b2CanonStake))
+		scb2C, _ := storage.SerializeBatch(cloneKVs(b2CanonSC))
+		rcptB2C, _ := storage.SerializeBatch([][2][]byte{{tx2C.Bytes(), []byte("rcpt_2c")}})
+		txB2C, _ := storage.SerializeBatch([][2][]byte{{tx2C.Bytes(), []byte("tx_2c")}})
+		backup2C, _ := storage.SerializeBackupDb(storage.BackUpDb{
+			BockNumber:                2,
+			AccountBatch:              ab2C,
+			StakeState:                sb2C,
+			SmartContractStorageBatch: scb2C,
+			ReceiptBatchPut:           rcptB2C,
+			TxBatchPut:                txB2C,
+		})
+		resp2C, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2C, BackupData: backup2C}},
+		})
+		require.NoError(t, err)
+
+		wipedRoot, _ := trie.GetNomtHandleRoot("account_state")
+		t.Logf("ADV-27A observe: resp2C.Error=%q, SyncedCount=%d, wipedNomtAccRoot=%s (expected %s)",
+			resp2C.GetError(), resp2C.GetSyncedCount(), wipedRoot.Hex(), accRoot2Canon.Hex())
+
+		require.Empty(t, resp2C.GetError(), "EVIDENCE ADV-27A: AlignWithExpectedRoot gọi ResetNomtHandle khi retrievedFromChangelog=true đã xóa sạch tài khoản Genesis/Snapshot không nằm trong changelog và fail rebuilt root mismatch")
+		require.Equal(t, uint64(1), resp2C.GetSyncedCount())
+		require.Equal(t, accRoot2Canon, wipedRoot)
+	})
+
+	t.Run("SubcaseB_EmptyRootHashRollbackFailsWhenChangelogHasDeletedKey", func(t *testing.T) {
+		t.Cleanup(func() { mvm.DestroyAllXapianInstances() })
+
+		acct1 := common.HexToAddress("0x1000000000000000000000000000000000002721").Bytes()
+		stake1 := common.HexToAddress("0x3000000000000000000000000000000000002721").Bytes()
+
+		prevBackend := trie.GetStateBackend()
+		t.Cleanup(func() {
+			trie.CloseNomtDB()
+			trie.SetStateBackend(prevBackend)
+		})
+
+		trie.CloseNomtDB()
+		trie.SetStateBackend(trie.BackendNOMT)
+		require.NoError(t, trie.InitNomtDB(filepath.Join(t.TempDir(), "scratch_27b"), 1, 16, 16))
+		storage.ForceSetLastNomtCommittedBlock(0)
+
+		b1Acc := [][2][]byte{{makeNomtTestKey(acct1), []byte("b1_acc_only")}}
+		_, err := trie.ApplyNomtReplicationBatches(map[string][][2][]byte{"Account": b1Acc}, nil, nil, 1)
+		require.NoError(t, err)
+		accRoot1, _ := trie.GetNomtHandleRoot("account_state")
+
+		b2ForkAcc := [][2][]byte{{makeNomtTestKey(acct1), []byte("b2_fork_acc")}}
+		b2ForkStake := [][2][]byte{{makeNomtTestKey(stake1), []byte("b2_fork_stake_inserted")}}
+		_, err = trie.ApplyNomtReplicationBatches(map[string][][2][]byte{
+			"Account":    b2ForkAcc,
+			"StakeState": b2ForkStake,
+		}, nil, nil, 2)
+		require.NoError(t, err)
+		accRoot2Fork, _ := trie.GetNomtHandleRoot("account_state")
+		stakeRoot2Fork, _ := trie.GetNomtHandleRoot("stake_db")
+		trie.CloseNomtDB()
+
+		// Khởi tạo node RPC trên NOMT với Block #1 có StakeStatesRoot = EmptyRootHash (giống Genesis/chain chưa stake)
+		rh, sm, cs, _, genHash := setupPebbleAdvSyncHarness(t, trie.BackendNOMT)
+		_ = sm
+		require.NotNil(t, cs.GetStakeChangelogDB())
+		mvm.DestroyAllXapianInstances()
+		mvm.ConfigureXapianBasePath(t.TempDir())
+
+		cloneKVs := func(in [][2][]byte) [][2][]byte {
+			out := make([][2][]byte, len(in))
+			for i, kv := range in {
+				out[i] = [2][]byte{bytes.Clone(kv[0]), bytes.Clone(kv[1])}
+			}
+			return out
+		}
+
+		// Sync Block #1 (StakeStatesRoot = trie.EmptyRootHash)
+		tx1 := common.HexToHash("0x1111000000000000000000000000000000000000000000000000000000002721")
+		blk1 := block.NewBlock(block.NewBlockHeader(genHash, 1, accRoot1, trie.EmptyRootHash, common.HexToHash("0x101"), common.Address{}, 1000, common.Hash{}, 0, 1), []common.Hash{tx1}, nil)
+		raw1, _ := blk1.Marshal()
+		ab1, _ := storage.SerializeBatch(cloneKVs(b1Acc))
+		rcptB1, _ := storage.SerializeBatch([][2][]byte{{tx1.Bytes(), []byte("rcpt_1")}})
+		txB1, _ := storage.SerializeBatch([][2][]byte{{tx1.Bytes(), []byte("tx_1")}})
+		backup1, _ := storage.SerializeBackupDb(storage.BackUpDb{
+			BockNumber:      1,
+			AccountBatch:    ab1,
+			ReceiptBatchPut: rcptB1,
+			TxBatchPut:      txB1,
+		})
+		resp1, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 1, RawBlockBytes: raw1, BackupData: backup1}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp1.GetError())
+
+		// Sync Fork Block #2 (thêm stake1 vào stake_db -> stakeChangelogDB giờ có [stake1])
+		tx2F := common.HexToHash("0x2222000000000000000000000000000000000000000000000000000000002722")
+		blk2F := block.NewBlock(block.NewBlockHeader(blk1.Header().Hash(), 2, accRoot2Fork, stakeRoot2Fork, common.HexToHash("0x202"), common.Address{}, 2000, common.Hash{}, 0, 2), []common.Hash{tx2F}, nil)
+		raw2F, _ := blk2F.Marshal()
+		ab2F, _ := storage.SerializeBatch(cloneKVs(b2ForkAcc))
+		sb2F, _ := storage.SerializeBatch(cloneKVs(b2ForkStake))
+		rcptB2F, _ := storage.SerializeBatch([][2][]byte{{tx2F.Bytes(), []byte("rcpt_2f")}})
+		txB2F, _ := storage.SerializeBatch([][2][]byte{{tx2F.Bytes(), []byte("tx_2f")}})
+		backup2F, _ := storage.SerializeBackupDb(storage.BackUpDb{
+			BockNumber:      2,
+			AccountBatch:    ab2F,
+			StakeState:      sb2F,
+			ReceiptBatchPut: rcptB2F,
+			TxBatchPut:      txB2F,
+		})
+		resp2F, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2F, BackupData: backup2F}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp2F.GetError())
+
+		// Sync Canonical Block #2 -> rollback StakeDB về Block #1 (expectedRoot = trie.EmptyRootHash)
+		tx2C := common.HexToHash("0x2222000000000000000000000000000000000000000000000000000000002723")
+		blk2C := block.NewBlock(block.NewBlockHeader(blk1.Header().Hash(), 2, accRoot2Fork, trie.EmptyRootHash, common.HexToHash("0x203"), common.Address{}, 2500, common.Hash{}, 0, 2), []common.Hash{tx2C}, nil)
+		raw2C, _ := blk2C.Marshal()
+		rcptB2C, _ := storage.SerializeBatch([][2][]byte{{tx2C.Bytes(), []byte("rcpt_2c")}})
+		txB2C, _ := storage.SerializeBatch([][2][]byte{{tx2C.Bytes(), []byte("tx_2c")}})
+		backup2C, _ := storage.SerializeBackupDb(storage.BackUpDb{
+			BockNumber:      2,
+			AccountBatch:    ab2F,
+			ReceiptBatchPut: rcptB2C,
+			TxBatchPut:      txB2C,
+		})
+		resp2C, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2C, BackupData: backup2C}},
+		})
+		require.NoError(t, err)
+
+		stakeRootAfter, _ := trie.GetNomtHandleRoot("stake_db")
+		t.Logf("ADV-27B observe: resp2C.Error=%q, SyncedCount=%d, stakeRootAfter=%s",
+			resp2C.GetError(), resp2C.GetSyncedCount(), stakeRootAfter.Hex())
+		require.Empty(t, resp2C.GetError(), "EVIDENCE ADV-27B: AlignWithExpectedRoot fail khi rollback về header có EmptyRootHash nếu changelog có bản ghi key bị xóa (newRoot=0x0000... != EmptyRootHash=0x56e81f...)")
+		require.Equal(t, uint64(1), resp2C.GetSyncedCount())
+		require.Equal(t, common.Hash{}, stakeRootAfter)
+	})
+}
+
+// ADV-28: NOMT-SYNC-VERIFY trong HandleSyncBlocksRequest (unix_socket_handler_sync.go:901-928) có 2 lỗ hổng bypass:
+//   - SubcaseA: Bỏ qua verify khi header đặt StakeStatesRoot=EmptyRootHash (line 920) -> batch độc hại chèn validator giả
+//     vào NOMT stake_db vẫn vượt qua pre-commit check, commit Block #2 + Xapian, rồi mới fail ở finalizeSyncedPrefix!
+//   - SubcaseB: Khi NOMT handle đã bị drift trước đó (preAccHandleRoot != expectedPreAccRoot), line 907 kiểm tra
+//     nomtMatchesExpected(preAccHandleRoot, expectedPreAccRoot) == false nên BỎ QUA post-apply NOMT-SYNC-VERIFY ->
+//     Block #2 có AccountBatch SAI vẫn bị CommitBlockState ghi xuống BlockDB + LastBlockNumber=2 + Xapian before fail ở finalizeSyncedPrefix!
+func TestAdv28_SyncBlocks_NomtSyncVerifyBypassedOnEmptyRootHeaderAndPreRootDivergence(t *testing.T) {
+	t.Run("SubcaseA_PoisonedBatchAgainstEmptyRootHeaderCommitsBeforeFailingFinalize", func(t *testing.T) {
+		t.Cleanup(func() { mvm.DestroyAllXapianInstances() })
+
+		acct1 := common.HexToAddress("0x1000000000000000000000000000000000002801").Bytes()
+		evilValidator := common.HexToAddress("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee").Bytes()
+		scAddr := common.HexToAddress("0xA000000000000000000000000000000000002801")
+
+		prevBackend := trie.GetStateBackend()
+		t.Cleanup(func() {
+			trie.CloseNomtDB()
+			trie.SetStateBackend(prevBackend)
+		})
+
+		trie.CloseNomtDB()
+		trie.SetStateBackend(trie.BackendNOMT)
+		require.NoError(t, trie.InitNomtDB(filepath.Join(t.TempDir(), "scratch_28a"), 1, 16, 16))
+		storage.ForceSetLastNomtCommittedBlock(0)
+		b1Acc := [][2][]byte{{makeNomtTestKey(acct1), []byte("acc_28a_b1")}}
+		_, err := trie.ApplyNomtReplicationBatches(map[string][][2][]byte{"Account": b1Acc}, nil, nil, 1)
+		require.NoError(t, err)
+		accRoot1, _ := trie.GetNomtHandleRoot("account_state")
+		trie.CloseNomtDB()
+
+		rh, _, _, _, genHash := setupPebbleAdvSyncHarness(t, trie.BackendNOMT)
+		mvm.DestroyAllXapianInstances()
+		mvm.ConfigureXapianBasePath(t.TempDir())
+
+		cloneKVs := func(in [][2][]byte) [][2][]byte {
+			out := make([][2][]byte, len(in))
+			for i, kv := range in {
+				out[i] = [2][]byte{bytes.Clone(kv[0]), bytes.Clone(kv[1])}
+			}
+			return out
+		}
+
+		// Block #1 hợp lệ (StakeStatesRoot = common.Hash{})
+		tx1 := common.HexToHash("0x1111000000000000000000000000000000000000000000000000000000002801")
+		blk1 := block.NewBlock(block.NewBlockHeader(genHash, 1, accRoot1, common.Hash{}, common.HexToHash("0x101"), common.Address{}, 1000, common.Hash{}, 0, 1), []common.Hash{tx1}, nil)
+		raw1, _ := blk1.Marshal()
+		ab1, _ := storage.SerializeBatch(cloneKVs(b1Acc))
+		rcptB1, _ := storage.SerializeBatch([][2][]byte{{tx1.Bytes(), []byte("rcpt_28a_1")}})
+		txB1, _ := storage.SerializeBatch([][2][]byte{{tx1.Bytes(), []byte("tx_28a_1")}})
+		backup1, _ := storage.SerializeBackupDb(storage.BackUpDb{
+			BockNumber:      1,
+			AccountBatch:    ab1,
+			ReceiptBatchPut: rcptB1,
+			TxBatchPut:      txB1,
+		})
+		resp1, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 1, RawBlockBytes: raw1, BackupData: backup1}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp1.GetError())
+
+		// Block #2 header khai StakeStatesRoot = EmptyRootHash nhưng StakeState chèn evilValidator!
+		tx2 := common.HexToHash("0x2222000000000000000000000000000000000000000000000000000000002802")
+		blk2 := block.NewBlock(block.NewBlockHeader(blk1.Header().Hash(), 2, accRoot1, trie.EmptyRootHash, common.HexToHash("0x202"), common.Address{}, 2000, common.Hash{}, 0, 2), []common.Hash{tx2}, nil)
+		raw2, _ := blk2.Marshal()
+		sb2Evil, _ := storage.SerializeBatch([][2][]byte{{makeNomtTestKey(evilValidator), []byte("stake_99999999")}})
+		rcptB2, _ := storage.SerializeBatch([][2][]byte{{tx2.Bytes(), []byte("rcpt_28a_2")}})
+		txB2, _ := storage.SerializeBatch([][2][]byte{{tx2.Bytes(), []byte("tx_28a_2")}})
+		log2 := buildMinimalXapianCompLog("db_adv28a", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "doc_28a_2")
+		backup2, _ := storage.SerializeBackupDb(storage.BackUpDb{
+			BockNumber:      2,
+			StakeState:      sb2Evil,
+			ReceiptBatchPut: rcptB2,
+			TxBatchPut:      txB2,
+			FullDbLogs:      []map[string][]byte{{scAddr.Hex()[2:]: log2}},
+		})
+
+		resp2, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2, BackupData: backup2}},
+		})
+		require.NoError(t, err)
+
+		evilStakeRoot, _ := trie.GetNomtHandleRoot("stake_db")
+		rolledAbove1, _ := mvm.RollbackXapianAboveBlock(1)
+		t.Logf("ADV-28A observe: resp2.Error=%q, SyncedCount=%d, LastBlockNumber=%d, evilStakeRoot=%s, xapianAbove1=%d",
+			resp2.GetError(), resp2.GetSyncedCount(), storage.GetLastBlockNumber(), evilStakeRoot.Hex(), rolledAbove1)
+
+		require.NotEmpty(t, resp2.GetError())
+		require.Equal(t, uint64(0), resp2.GetSyncedCount())
+		require.Equal(t, common.Hash{}, evilStakeRoot)
+		require.Equal(t, uint64(1), storage.GetLastBlockNumber(), "EVIDENCE ADV-28A: NOMT-SYNC-VERIFY bỏ qua kiểm tra khi expected=EmptyRootHash khiến Block #2 có StakeState giả mạo bị commit xuống BlockDB, NOMT stake_db và Xapian")
+		require.Equal(t, 0, rolledAbove1)
+	})
+
+	t.Run("SubcaseB_PreRootDivergenceSkipsPostApplyVerifyAndCommitsBadBlock", func(t *testing.T) {
+		t.Cleanup(func() { mvm.DestroyAllXapianInstances() })
+
+		acct1 := common.HexToAddress("0x1000000000000000000000000000000000002811").Bytes()
+		acct2 := common.HexToAddress("0x2000000000000000000000000000000000002812").Bytes()
+		driftAcct := common.HexToAddress("0x3000000000000000000000000000000000002813").Bytes()
+		scAddr := common.HexToAddress("0xA000000000000000000000000000000000002811")
+
+		prevBackend := trie.GetStateBackend()
+		t.Cleanup(func() {
+			trie.CloseNomtDB()
+			trie.SetStateBackend(prevBackend)
+		})
+
+		cloneKVs := func(in [][2][]byte) [][2][]byte {
+			out := make([][2][]byte, len(in))
+			for i, kv := range in {
+				out[i] = [2][]byte{bytes.Clone(kv[0]), bytes.Clone(kv[1])}
+			}
+			return out
+		}
+
+		trie.CloseNomtDB()
+		trie.SetStateBackend(trie.BackendNOMT)
+		require.NoError(t, trie.InitNomtDB(filepath.Join(t.TempDir(), "scratch_28b"), 1, 16, 16))
+		storage.ForceSetLastNomtCommittedBlock(0)
+		b1Acc := [][2][]byte{{makeNomtTestKey(acct1), []byte("acc_28b_b1")}}
+		b2GoodAcc := [][2][]byte{{makeNomtTestKey(acct2), []byte("acc_28b_good_b2")}}
+		_, err := trie.ApplyNomtReplicationBatches(map[string][][2][]byte{"Account": cloneKVs(b1Acc)}, nil, nil, 1)
+		require.NoError(t, err)
+		accRoot1, _ := trie.GetNomtHandleRoot("account_state")
+		_, err = trie.ApplyNomtReplicationBatches(map[string][][2][]byte{"Account": cloneKVs(b2GoodAcc)}, nil, nil, 2)
+		require.NoError(t, err)
+		accRoot2Good, _ := trie.GetNomtHandleRoot("account_state")
+		trie.CloseNomtDB()
+
+		rh, _, _, _, genHash := setupPebbleAdvSyncHarness(t, trie.BackendNOMT)
+		mvm.DestroyAllXapianInstances()
+		mvm.ConfigureXapianBasePath(t.TempDir())
+
+		// 1. Sync Block #1 hợp lệ
+		tx1 := common.HexToHash("0x1111000000000000000000000000000000000000000000000000000000002811")
+		blk1 := block.NewBlock(block.NewBlockHeader(genHash, 1, accRoot1, common.Hash{}, common.HexToHash("0x101"), common.Address{}, 1000, common.Hash{}, 0, 1), []common.Hash{tx1}, nil)
+		raw1, _ := blk1.Marshal()
+		ab1, _ := storage.SerializeBatch(cloneKVs(b1Acc))
+		rcptB1, _ := storage.SerializeBatch([][2][]byte{{tx1.Bytes(), []byte("rcpt_28b_1")}})
+		txB1, _ := storage.SerializeBatch([][2][]byte{{tx1.Bytes(), []byte("tx_28b_1")}})
+		backup1, _ := storage.SerializeBackupDb(storage.BackUpDb{
+			BockNumber:      1,
+			AccountBatch:    ab1,
+			ReceiptBatchPut: rcptB1,
+			TxBatchPut:      txB1,
+		})
+		resp1, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 1, RawBlockBytes: raw1, BackupData: backup1}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp1.GetError())
+
+		// 2. Tạo pre-root drift trên NOMT handle (preAccHandleRoot != accRoot1) trước khi sync Block #2
+		_, err = trie.ApplyNomtReplicationBatches(map[string][][2][]byte{
+			"Account": {{makeNomtTestKey(driftAcct), []byte("drifted_pre_state")}},
+		}, nil, nil, 0)
+		require.NoError(t, err)
+		storage.ForceSetLastNomtCommittedBlock(1)
+
+		// 3. Sync Block #2 với AccountBatch SAI (accRoot2Wrong != accRoot2Good) -> line 907 bỏ qua post-apply check
+		tx2 := common.HexToHash("0x2222000000000000000000000000000000000000000000000000000000002812")
+		blk2 := block.NewBlock(block.NewBlockHeader(blk1.Header().Hash(), 2, accRoot2Good, common.Hash{}, common.HexToHash("0x202"), common.Address{}, 2000, common.Hash{}, 0, 2), []common.Hash{tx2}, nil)
+		raw2, _ := blk2.Marshal()
+		b2WrongAcc := [][2][]byte{{makeNomtTestKey(acct2), []byte("acc_28b_CORRUPT_b2")}}
+		ab2Wrong, _ := storage.SerializeBatch(cloneKVs(b2WrongAcc))
+		rcptB2, _ := storage.SerializeBatch([][2][]byte{{tx2.Bytes(), []byte("rcpt_28b_2")}})
+		txB2, _ := storage.SerializeBatch([][2][]byte{{tx2.Bytes(), []byte("tx_28b_2")}})
+		log2 := buildMinimalXapianCompLog("db_adv28b", "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "doc_28b_2")
+		backup2Wrong, _ := storage.SerializeBackupDb(storage.BackUpDb{
+			BockNumber:      2,
+			AccountBatch:    ab2Wrong,
+			ReceiptBatchPut: rcptB2,
+			TxBatchPut:      txB2,
+			FullDbLogs:      []map[string][]byte{{scAddr.Hex()[2:]: log2}},
+		})
+
+		resp2, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2, BackupData: backup2Wrong}},
+		})
+		require.NoError(t, err)
+
+		postAccRoot, _ := trie.GetNomtHandleRoot("account_state")
+		rolledAbove1, _ := mvm.RollbackXapianAboveBlock(1)
+		t.Logf("ADV-28B observe: resp2.Error=%q, SyncedCount=%d, LastBlockNumber=%d, postAccRoot=%s, xapianAbove1=%d",
+			resp2.GetError(), resp2.GetSyncedCount(), storage.GetLastBlockNumber(), postAccRoot.Hex(), rolledAbove1)
+
+		require.Contains(t, resp2.GetError(), "NOMT accountStatesRoot mismatch at block 2")
+		require.Equal(t, uint64(0), resp2.GetSyncedCount())
+		require.Equal(t, accRoot1, postAccRoot)
+		require.Equal(t, uint64(1), storage.GetLastBlockNumber(), "EVIDENCE ADV-28B: Khi preAccHandleRoot != expectedPreAccRoot, NOMT-SYNC-VERIFY (line 907) bỏ qua kiểm tra khiến Block #2 có AccountBatch sai bị commit xuống BlockDB + Xapian")
+		require.Equal(t, 0, rolledAbove1)
+	})
+}
+
+// ADV-29: NOMT-SYNC-RECOVERY (unix_socket_handler_sync.go:621-636) bị vô hiệu hóa hoàn toàn bởi STRICT BLOCK NUMBER GUARD!
+//   - Line 621 đặt isFullyExecuted=false khi blockNum <= LastBlockNumber nhưng blockNum > LastNomtCommittedBlock
+//     ("NOMT-SYNC-RECOVERY: Forcing re-execution on NOMT").
+//   - Ngay dòng 628-634, STRICT BLOCK NUMBER GUARD kiểm tra `if !isFullyExecuted && !forkOverwrite && blockNum <= lastBlockNum`
+//     và ĐẶT LẠI `isFullyExecuted = true` ("Skipping execution")!
+//   - Hệ quả: Ngay cả khi peer gửi Block #2 HỢP LỆ 100%, batch không bao giờ được apply vào NOMT hay StateChangelogDB,
+//     khiến finalizeSyncedPrefix fail với `rebuilt root mismatch` và LastNomtCommittedBlock vĩnh viễn kẹt ở #1!
+func TestAdv29_SyncBlocks_NomtSyncRecoveryCancelledByStrictBlockNumberGuard(t *testing.T) {
+	t.Cleanup(func() { mvm.DestroyAllXapianInstances() })
+
+	acct1 := common.HexToAddress("0x1000000000000000000000000000000000002911").Bytes()
+	acct2 := common.HexToAddress("0x2000000000000000000000000000000000002912").Bytes()
+	scAddr := common.HexToAddress("0xA000000000000000000000000000000000002911")
+
+	prevBackend := trie.GetStateBackend()
+	t.Cleanup(func() {
+		trie.CloseNomtDB()
+		trie.SetStateBackend(prevBackend)
+	})
+
+	cloneKVs := func(in [][2][]byte) [][2][]byte {
+		out := make([][2][]byte, len(in))
+		for i, kv := range in {
+			out[i] = [2][]byte{bytes.Clone(kv[0]), bytes.Clone(kv[1])}
+		}
+		return out
+	}
+
+	trie.CloseNomtDB()
+	trie.SetStateBackend(trie.BackendNOMT)
+	require.NoError(t, trie.InitNomtDB(filepath.Join(t.TempDir(), "scratch_29"), 1, 16, 16))
+	storage.ForceSetLastNomtCommittedBlock(0)
+	b1Acc := [][2][]byte{{makeNomtTestKey(acct1), []byte("acc_29_b1")}}
+	b2GoodAcc := [][2][]byte{{makeNomtTestKey(acct2), []byte("acc_29_good_b2")}}
+	_, err := trie.ApplyNomtReplicationBatches(map[string][][2][]byte{"Account": cloneKVs(b1Acc)}, nil, nil, 1)
+	require.NoError(t, err)
+	accRoot1, _ := trie.GetNomtHandleRoot("account_state")
+	_, err = trie.ApplyNomtReplicationBatches(map[string][][2][]byte{"Account": cloneKVs(b2GoodAcc)}, nil, nil, 2)
+	require.NoError(t, err)
+	accRoot2Good, _ := trie.GetNomtHandleRoot("account_state")
+	trie.CloseNomtDB()
+
+	rh, _, cs, blockDB, genHash := setupPebbleAdvSyncHarness(t, trie.BackendNOMT)
+	bc := blockchain.GetBlockChainInstance()
+	mvm.DestroyAllXapianInstances()
+	mvm.ConfigureXapianBasePath(t.TempDir())
+
+	// 1. Sync Block #1
+	tx1 := common.HexToHash("0x1111000000000000000000000000000000000000000000000000000000002911")
+	blk1 := block.NewBlock(block.NewBlockHeader(genHash, 1, accRoot1, common.Hash{}, common.HexToHash("0x101"), common.Address{}, 1000, common.Hash{}, 0, 1), []common.Hash{tx1}, nil)
+	raw1, _ := blk1.Marshal()
+	ab1, _ := storage.SerializeBatch(cloneKVs(b1Acc))
+	rcptB1, _ := storage.SerializeBatch([][2][]byte{{tx1.Bytes(), []byte("rcpt_29_1")}})
+	txB1, _ := storage.SerializeBatch([][2][]byte{{tx1.Bytes(), []byte("tx_29_1")}})
+	backup1, _ := storage.SerializeBackupDb(storage.BackUpDb{
+		BockNumber:      1,
+		AccountBatch:    ab1,
+		ReceiptBatchPut: rcptB1,
+		TxBatchPut:      txB1,
+	})
+	resp1, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+		ExecuteMode: true,
+		Blocks:      []*pb.BlockData{{BlockNumber: 1, RawBlockBytes: raw1, BackupData: backup1}},
+	})
+	require.NoError(t, err)
+	require.Empty(t, resp1.GetError())
+
+	// 2. Giả lập crash sau PebbleDB commit Block #2: LastBlockNumber=2, nhưng LastNomtCommittedBlock=1
+	tx2 := common.HexToHash("0x2222000000000000000000000000000000000000000000000000000000002912")
+	blk2 := block.NewBlock(block.NewBlockHeader(blk1.Header().Hash(), 2, accRoot2Good, common.Hash{}, common.HexToHash("0x202"), common.Address{}, 2000, common.Hash{}, 0, 2), []common.Hash{tx2}, nil)
+	raw2, _ := blk2.Marshal()
+	require.NoError(t, blockDB.SaveBlockByHash(blk2))
+	require.NoError(t, blockDB.SaveLastBlockSync(blk2))
+	require.NoError(t, bc.SetBlockNumberToHash(2, blk2.Header().Hash()))
+	require.NoError(t, bc.Commit())
+	storage.UpdateLastBlockNumber(2)
+	storage.UpdateLastGlobalExecIndex(2)
+	require.Equal(t, uint64(2), storage.GetLastBlockNumber())
+	require.Equal(t, uint64(1), storage.GetLastNomtCommittedBlock())
+
+	// 3. Peer gửi Block #2 HỢP LỆ 100% để NOMT-SYNC-RECOVERY khôi phục Block #2
+	ab2Good, _ := storage.SerializeBatch(cloneKVs(b2GoodAcc))
+	rcptB2, _ := storage.SerializeBatch([][2][]byte{{tx2.Bytes(), []byte("rcpt_29_2")}})
+	txB2, _ := storage.SerializeBatch([][2][]byte{{tx2.Bytes(), []byte("tx_29_2")}})
+	log2 := buildMinimalXapianCompLog("db_adv29", "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "doc_29_2")
+	backup2Good, _ := storage.SerializeBackupDb(storage.BackUpDb{
+		BockNumber:      2,
+		AccountBatch:    ab2Good,
+		ReceiptBatchPut: rcptB2,
+		TxBatchPut:      txB2,
+		FullDbLogs:      []map[string][]byte{{scAddr.Hex()[2:]: log2}},
+	})
+
+	resp2, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+		ExecuteMode: true,
+		Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2, BackupData: backup2Good}},
+	})
+	require.NoError(t, err)
+
+	postAccRoot, _ := trie.GetNomtHandleRoot("account_state")
+	t.Logf("ADV-29 observe: resp2.Error=%q, LastNomtCommittedBlock=%d, changelogHighest=%d, postAccRoot=%s (expected %s)",
+		resp2.GetError(), storage.GetLastNomtCommittedBlock(), cs.GetChangelogDB().GetHighestBlock(), postAccRoot.Hex(), accRoot2Good.Hex())
+
+	require.Empty(t, resp2.GetError(), "EVIDENCE ADV-29: NOMT-SYNC-RECOVERY (line 621) bị STRICT BLOCK NUMBER GUARD (line 628-634) ghi đè đặt lại isFullyExecuted=true -> bỏ qua batch hợp lệ của Block #2 khiến NOMT không bao giờ recover được")
+	require.Equal(t, uint64(2), storage.GetLastNomtCommittedBlock())
+	require.Equal(t, accRoot2Good, postAccRoot)
+}
+
+// ADV-30: Fork rollback trong HandleSyncBlocksRequest phải dọn sạch stale EventLog keys trong
+// StorageSmartContract và khôi phục/xóa FullDbLogsLatestKey trong StorageBackupDb thay vì để
+// dữ liệu của nhánh fork bị bỏ sót vĩnh viễn trên đĩa.
+func TestAdv30_SyncBlocks_ForkRollbackCleansEventLogsAndRestoresLatestFullDbLogsIndex(t *testing.T) {
+	t.Cleanup(func() { mvm.DestroyAllXapianInstances() })
+
+	acct1 := common.HexToAddress("0x1000000000000000000000000000000000003001").Bytes()
+	acct2F := common.HexToAddress("0x2000000000000000000000000000000000003002").Bytes()
+	acct2C := common.HexToAddress("0x3000000000000000000000000000000000003003").Bytes()
+
+	scAddr1 := common.HexToAddress("0xA000000000000000000000000000000000003001")
+	scAddr2ForkOnly := common.HexToAddress("0xA000000000000000000000000000000000003002")
+
+	evKey1 := common.HexToHash("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0001").Bytes()
+	evKey2Fork := common.HexToHash("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0002").Bytes()
+	evVal1 := []byte("event_log_b1")
+	evVal1Fork := []byte("event_log_b1_overwritten_by_fork")
+	evVal2Fork := []byte("event_log_b2_fork_only")
+
+	prevBackend := trie.GetStateBackend()
+	t.Cleanup(func() {
+		trie.CloseNomtDB()
+		trie.SetStateBackend(prevBackend)
+	})
+
+	cloneKVs := func(in [][2][]byte) [][2][]byte {
+		out := make([][2][]byte, len(in))
+		for i, kv := range in {
+			out[i] = [2][]byte{bytes.Clone(kv[0]), bytes.Clone(kv[1])}
+		}
+		return out
+	}
+
+	// Precompute expected NOMT state roots for Block #1, Fork #2, and Canon #2.
+	trie.CloseNomtDB()
+	trie.SetStateBackend(trie.BackendNOMT)
+	require.NoError(t, trie.InitNomtDB(filepath.Join(t.TempDir(), "scratch_30"), 1, 16, 16))
+	storage.ForceSetLastNomtCommittedBlock(0)
+
+	b1Acc := [][2][]byte{{makeNomtTestKey(acct1), []byte("acc_30_b1")}}
+	b2ForkAcc := [][2][]byte{{makeNomtTestKey(acct2F), []byte("acc_30_b2_fork")}}
+	b2CanonAcc := [][2][]byte{{makeNomtTestKey(acct2C), []byte("acc_30_b2_canon")}}
+
+	_, err := trie.ApplyNomtReplicationBatches(map[string][][2][]byte{"Account": cloneKVs(b1Acc)}, nil, nil, 1)
+	require.NoError(t, err)
+	accRoot1, _ := trie.GetNomtHandleRoot("account_state")
+
+	_, rollbackFork2, err := trie.ApplyNomtReplicationBatchesWithRollback(map[string][][2][]byte{"Account": cloneKVs(b2ForkAcc)}, nil, nil, nil, 2)
+	require.NoError(t, err)
+	accRoot2Fork, _ := trie.GetNomtHandleRoot("account_state")
+	require.NoError(t, rollbackFork2())
+
+	_, err = trie.ApplyNomtReplicationBatches(map[string][][2][]byte{"Account": cloneKVs(b2CanonAcc)}, nil, nil, 2)
+	require.NoError(t, err)
+	accRoot2Canon, _ := trie.GetNomtHandleRoot("account_state")
+	trie.CloseNomtDB()
+
+	rh, sm, _, _, genHash := setupPebbleAdvSyncHarness(t, trie.BackendNOMT)
+	mvm.DestroyAllXapianInstances()
+	mvm.ConfigureXapianBasePath(t.TempDir())
+
+	scStore := sm.GetStorageSmartContract()
+	backupStore := sm.GetStorageBackupDb()
+	sc1Hex := storage.NormalizeAddressHexKey(scAddr1.Hex())
+	sc2Hex := storage.NormalizeAddressHexKey(scAddr2ForkOnly.Hex())
+
+	// 1. Sync Block #1 (common ancestor)
+	tx1 := common.HexToHash("0x1111000000000000000000000000000000000000000000000000000000003001")
+	blk1 := block.NewBlock(block.NewBlockHeader(genHash, 1, accRoot1, common.Hash{}, common.HexToHash("0x101"), common.Address{}, 1000, common.Hash{}, 0, 1), []common.Hash{tx1}, nil)
+	raw1, _ := blk1.Marshal()
+	ab1, _ := storage.SerializeBatch(cloneKVs(b1Acc))
+	evB1, _ := storage.SerializeBatch([][2][]byte{{evKey1, evVal1}})
+	rcptB1, _ := storage.SerializeBatch([][2][]byte{{tx1.Bytes(), []byte("rcpt_30_1")}})
+	txB1, _ := storage.SerializeBatch([][2][]byte{{tx1.Bytes(), []byte("tx_30_1")}})
+	log1 := buildMinimalXapianCompLog("db_adv30_sc1", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "doc_b1")
+	backup1, _ := storage.SerializeBackupDb(storage.BackUpDb{
+		BockNumber:         1,
+		AccountBatch:       ab1,
+		SmartContractBatch: evB1,
+		ReceiptBatchPut:    rcptB1,
+		TxBatchPut:         txB1,
+		FullDbLogs:         []map[string][]byte{{scAddr1.Hex()[2:]: log1}},
+	})
+	resp1, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+		ExecuteMode: true,
+		Blocks:      []*pb.BlockData{{BlockNumber: 1, RawBlockBytes: raw1, BackupData: backup1}},
+	})
+	require.NoError(t, err)
+	require.Empty(t, resp1.GetError())
+
+	gotEv1, err := scStore.Get(evKey1)
+	require.NoError(t, err)
+	require.Equal(t, evVal1, gotEv1)
+	gotLog1, err := backupStore.Get(storage.FullDbLogsLatestKey(sc1Hex))
+	require.NoError(t, err)
+	require.Equal(t, log1, gotLog1)
+
+	// 2. Sync Fork Block #2 (overwrites evKey1 & scAddr1 FullDbLogs, inserts evKey2Fork & scAddr2ForkOnly)
+	tx2F := common.HexToHash("0x2222000000000000000000000000000000000000000000000000000000003002")
+	blk2Fork := block.NewBlock(block.NewBlockHeader(blk1.Header().Hash(), 2, accRoot2Fork, common.Hash{}, common.HexToHash("0x202"), common.Address{}, 2000, common.Hash{}, 0, 2), []common.Hash{tx2F}, nil)
+	raw2Fork, _ := blk2Fork.Marshal()
+	ab2F, _ := storage.SerializeBatch(cloneKVs(b2ForkAcc))
+	evB2F, _ := storage.SerializeBatch([][2][]byte{{evKey1, evVal1Fork}, {evKey2Fork, evVal2Fork}})
+	rcptB2F, _ := storage.SerializeBatch([][2][]byte{{tx2F.Bytes(), []byte("rcpt_30_2f")}})
+	txB2F, _ := storage.SerializeBatch([][2][]byte{{tx2F.Bytes(), []byte("tx_30_2f")}})
+	log1Fork := buildMinimalXapianCompLog("db_adv30_sc1", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "doc_b2_fork")
+	log2ForkOnly := buildMinimalXapianCompLog("db_adv30_sc2", "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "doc_b2_fork_only")
+	backup2F, _ := storage.SerializeBackupDb(storage.BackUpDb{
+		BockNumber:         2,
+		AccountBatch:       ab2F,
+		SmartContractBatch: evB2F,
+		ReceiptBatchPut:    rcptB2F,
+		TxBatchPut:         txB2F,
+		FullDbLogs:         []map[string][]byte{{scAddr1.Hex()[2:]: log1Fork, scAddr2ForkOnly.Hex()[2:]: log2ForkOnly}},
+	})
+	resp2F, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+		ExecuteMode: true,
+		Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2Fork, BackupData: backup2F}},
+	})
+	require.NoError(t, err)
+	require.Empty(t, resp2F.GetError())
+
+	gotEv2, err := scStore.Get(evKey2Fork)
+	require.NoError(t, err)
+	require.Equal(t, evVal2Fork, gotEv2)
+	gotLog2F, err := backupStore.Get(storage.FullDbLogsLatestKey(sc2Hex))
+	require.NoError(t, err)
+	require.Equal(t, log2ForkOnly, gotLog2F)
+
+	// 3. Sync Canonical Block #2 (competing hash at block #2 -> triggers fork rollback to #1 then applies Canon #2)
+	tx2C := common.HexToHash("0x3333000000000000000000000000000000000000000000000000000000003003")
+	blk2Canon := block.NewBlock(block.NewBlockHeader(blk1.Header().Hash(), 2, accRoot2Canon, common.Hash{}, common.HexToHash("0x303"), common.Address{}, 2001, common.Hash{}, 0, 2), []common.Hash{tx2C}, nil)
+	raw2Canon, _ := blk2Canon.Marshal()
+	ab2C, _ := storage.SerializeBatch(cloneKVs(b2CanonAcc))
+	rcptB2C, _ := storage.SerializeBatch([][2][]byte{{tx2C.Bytes(), []byte("rcpt_30_2c")}})
+	txB2C, _ := storage.SerializeBatch([][2][]byte{{tx2C.Bytes(), []byte("tx_30_2c")}})
+	backup2C, _ := storage.SerializeBackupDb(storage.BackUpDb{
+		BockNumber:      2,
+		AccountBatch:    ab2C,
+		ReceiptBatchPut: rcptB2C,
+		TxBatchPut:      txB2C,
+	})
+	resp2C, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+		ExecuteMode: true,
+		Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2Canon, BackupData: backup2C}},
+	})
+	require.NoError(t, err)
+	require.Empty(t, resp2C.GetError())
+
+	// Verify fork-only EventLog was deleted and overwritten EventLog was restored to Block #1 value.
+	_, err = scStore.Get(evKey2Fork)
+	require.Error(t, err, "stale EventLog from abandoned fork Block #2 must be deleted")
+	restoredEv1, err := scStore.Get(evKey1)
+	require.NoError(t, err)
+	require.Equal(t, evVal1, restoredEv1, "EventLog overwritten in abandoned fork must be restored to Block #1 payload")
+
+	// Verify FullDbLogsLatestKey for scAddr2ForkOnly was deleted and scAddr1 was restored to Block #1 log.
+	_, err = backupStore.Get(storage.FullDbLogsLatestKey(sc2Hex))
+	require.Error(t, err, "FullDbLogsLatestKey introduced only in abandoned fork must be deleted")
+	restoredLog1, err := backupStore.Get(storage.FullDbLogsLatestKey(sc1Hex))
+	require.NoError(t, err)
+	require.Equal(t, log1, restoredLog1, "FullDbLogsLatestKey modified in abandoned fork must be restored to Block #1 log")
+}
+
+
+
