@@ -3,6 +3,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include "xapian/xapian_manager.h"
 #include "my_extension/utils.h"
 #include "xapian/xapian_log.h" // Giả định chứa định nghĩa XapianLog::LogEntry
@@ -43,29 +44,335 @@ std::string XapianManager::generateUuidLogicalId() {
   return uuid_str; // Chỉ trả về chuỗi UUID
 }
 
-// Tạo một bản sao (clone) của một Xapian::Document
-Xapian::Document
-XapianManager::clone_document(const Xapian::Document &source_doc) {
-  Xapian::Document new_doc;
-  // Sao chép dữ liệu thô
-  new_doc.set_data(source_doc.get_data());
+namespace {
+constexpr const char *kMetaHeadBlock   = "__mtn_meta_head_block";
+constexpr const char *kMetaUndoIndex   = "__mtn_meta_undo_index";
+constexpr const char *kMetaNextDid     = "__mtn_meta_next_did";
+constexpr const char *kMetaPrunedFloor = "__mtn_meta_pruned_floor_block";
+constexpr const char *kMetaUndoPrefix  = "__mtn_undo_";
+constexpr const char  kUndoMagic[4]    = {'X', 'U', 'J', '1'};
+constexpr size_t      kMaxUndoNidLen   = 1024;
+constexpr uint32_t    kMaxUndoEntries  = 16 * 1024 * 1024;
 
-  // Sao chép tất cả các term và trọng số (wdf) của chúng
-  for (auto term = source_doc.termlist_begin();
-       term != source_doc.termlist_end(); ++term) {
-    new_doc.add_term(*term, term.get_wdf());
+std::string encodeU64BE(uint64_t v) {
+  std::string out(8, '\0');
+  for (int i = 0; i < 8; ++i) {
+    out[7 - i] = static_cast<char>((v >> (i * 8)) & 0xFF);
   }
+  return out;
+}
 
-  // Sao chép tất cả các value trong các slot hợp lệ (0-254)
-  constexpr int MAX_SLOT = 255;
-  for (int slot = 0; slot < MAX_SLOT; ++slot) {
-    std::string val = source_doc.get_value(slot);
-    if (!val.empty()) {
-      new_doc.add_value(slot, val);
+bool decodeU64BE(const std::string &s, uint64_t &out) {
+  if (s.size() != 8) return false;
+  uint64_t v = 0;
+  for (int i = 0; i < 8; ++i) {
+    v = (v << 8) | static_cast<uint8_t>(s[i]);
+  }
+  out = v;
+  return true;
+}
+
+std::string encodeU32BE(uint32_t v) {
+  std::string out(4, '\0');
+  for (int i = 0; i < 4; ++i) {
+    out[3 - i] = static_cast<char>((v >> (i * 8)) & 0xFF);
+  }
+  return out;
+}
+
+bool decodeU32BE(const std::string &s, uint32_t &out) {
+  if (s.size() != 4) return false;
+  uint32_t v = 0;
+  for (int i = 0; i < 4; ++i) {
+    v = (v << 8) | static_cast<uint8_t>(s[i]);
+  }
+  out = v;
+  return true;
+}
+
+void appendU32BE(std::string &dst, uint32_t v) {
+  char buf[4];
+  for (int i = 0; i < 4; ++i) {
+    buf[3 - i] = static_cast<char>((v >> (i * 8)) & 0xFF);
+  }
+  dst.append(buf, 4);
+}
+
+void appendU64BE(std::string &dst, uint64_t v) {
+  char buf[8];
+  for (int i = 0; i < 8; ++i) {
+    buf[7 - i] = static_cast<char>((v >> (i * 8)) & 0xFF);
+  }
+  dst.append(buf, 8);
+}
+
+bool readU32BE(const std::string &src, size_t &off, uint32_t &out) {
+  if (off + 4 > src.size()) return false;
+  uint32_t v = 0;
+  for (int i = 0; i < 4; ++i) {
+    v = (v << 8) | static_cast<uint8_t>(src[off + i]);
+  }
+  off += 4;
+  out = v;
+  return true;
+}
+
+bool readU64BE(const std::string &src, size_t &off, uint64_t &out) {
+  if (off + 8 > src.size()) return false;
+  uint64_t v = 0;
+  for (int i = 0; i < 8; ++i) {
+    v = (v << 8) | static_cast<uint8_t>(src[off + i]);
+  }
+  off += 8;
+  out = v;
+  return true;
+}
+
+std::string encodeUndoIndex(const std::vector<uint64_t> &blocks) {
+  std::string out;
+  out.reserve(blocks.size() * 8);
+  for (uint64_t bn : blocks) {
+    appendU64BE(out, bn);
+  }
+  return out;
+}
+
+bool decodeUndoIndex(const std::string &raw, std::vector<uint64_t> &blocks) {
+  blocks.clear();
+  if (raw.empty()) return true;
+  if (raw.size() % 8 != 0) return false;
+  size_t count = raw.size() / 8;
+  blocks.reserve(count);
+  size_t off = 0;
+  for (size_t i = 0; i < count; ++i) {
+    uint64_t bn = 0;
+    if (!readU64BE(raw, off, bn)) return false;
+    blocks.push_back(bn);
+  }
+  return true;
+}
+
+struct SerializedUndoEntry {
+  std::string nid;
+  bool existed = false;
+  Xapian::docid original_did = 0;
+  std::string serialized_doc;
+};
+
+struct SerializedUndoRecord {
+  uint64_t block_number = 0;
+  Xapian::docid prev_next_did = 1;
+  std::map<std::string, SerializedUndoEntry> entries;
+};
+
+std::string serializeUndoRecord(const SerializedUndoRecord &rec) {
+  std::string out;
+  out.append(kUndoMagic, 4);
+  appendU64BE(out, rec.block_number);
+  appendU32BE(out, static_cast<uint32_t>(rec.prev_next_did));
+  appendU32BE(out, static_cast<uint32_t>(rec.entries.size()));
+  for (const auto &kv : rec.entries) {
+    const SerializedUndoEntry &e = kv.second;
+    appendU32BE(out, static_cast<uint32_t>(e.nid.size()));
+    out.append(e.nid);
+    out.push_back(e.existed ? '\x01' : '\x00');
+    appendU32BE(out, static_cast<uint32_t>(e.original_did));
+    if (e.existed) {
+      appendU32BE(out, static_cast<uint32_t>(e.serialized_doc.size()));
+      out.append(e.serialized_doc);
     }
   }
-  // Metadata khác (ngoài data, term, value) không được Xapian hỗ trợ chính thức
-  return new_doc;
+  return out;
+}
+
+bool deserializeUndoRecord(const std::string &raw, SerializedUndoRecord &out) {
+  out = SerializedUndoRecord{};
+  if (raw.size() < 20) return false;
+  if (std::memcmp(raw.data(), kUndoMagic, 4) != 0) return false;
+  size_t off = 4;
+  uint32_t prev_did = 0;
+  uint32_t count = 0;
+  if (!readU64BE(raw, off, out.block_number)) return false;
+  if (!readU32BE(raw, off, prev_did)) return false;
+  if (!readU32BE(raw, off, count)) return false;
+  if (count > kMaxUndoEntries) return false;
+  out.prev_next_did = static_cast<Xapian::docid>(prev_did);
+  for (uint32_t i = 0; i < count; ++i) {
+    uint32_t nid_len = 0;
+    if (!readU32BE(raw, off, nid_len)) return false;
+    if (nid_len == 0 || nid_len > kMaxUndoNidLen || off + nid_len + 5 > raw.size()) {
+      return false;
+    }
+    SerializedUndoEntry e;
+    e.nid.assign(raw.data() + off, nid_len);
+    off += nid_len;
+    uint8_t ex = static_cast<uint8_t>(raw[off++]);
+    if (ex > 1) return false;
+    e.existed = (ex == 1);
+    uint32_t orig_did = 0;
+    if (!readU32BE(raw, off, orig_did)) return false;
+    e.original_did = static_cast<Xapian::docid>(orig_did);
+    if (e.existed) {
+      uint32_t doc_len = 0;
+      if (!readU32BE(raw, off, doc_len)) return false;
+      if (off + doc_len > raw.size()) return false;
+      e.serialized_doc.assign(raw.data() + off, doc_len);
+      off += doc_len;
+    }
+    out.entries.emplace(e.nid, std::move(e));
+  }
+  return off == raw.size();
+}
+
+Xapian::docid resolveDocIdInDb(const Xapian::Database &target_db, const std::string &virtualDocIdStr) {
+  if (virtualDocIdStr.empty()) return 0;
+  try {
+    std::string clean_id = XapianManager::normalize_docid(virtualDocIdStr);
+    if (clean_id.length() >= 2 && clean_id.substr(0, 2) == "0x") {
+      clean_id = clean_id.substr(2);
+    }
+    if (clean_id.empty()) return 0;
+    std::string term = "Q" + clean_id;
+    Xapian::PostingIterator it = target_db.postlist_begin(term);
+    if (it != target_db.postlist_end(term)) {
+      return *it;
+    }
+    return 0;
+  } catch (...) {
+    return 0;
+  }
+}
+
+bool endsWithStr(const std::string &s, const std::string &suffix) {
+  return s.size() >= suffix.size() &&
+         s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+template <typename ReadMetaFn, typename WriteMetaFn>
+bool rollbackWritableDbAboveBlock(Xapian::WritableDatabase &target_db,
+                                  uint64_t targetBlock,
+                                  ReadMetaFn readMetaFn,
+                                  WriteMetaFn writeMetaFn,
+                                  Xapian::docid &inout_next_did,
+                                  bool &did_mutate) {
+  did_mutate = false;
+
+  uint64_t head_block = 0;
+  std::string head_raw = readMetaFn(kMetaHeadBlock);
+  if (!head_raw.empty() && !decodeU64BE(head_raw, head_block)) {
+    std::cerr << "[Xapian Undo FATAL] Corrupt __mtn_meta_head_block metadata" << std::endl;
+    return false;
+  }
+
+  std::vector<uint64_t> undo_index;
+  std::string index_raw = readMetaFn(kMetaUndoIndex);
+  if (!decodeUndoIndex(index_raw, undo_index)) {
+    std::cerr << "[Xapian Undo FATAL] Corrupt __mtn_meta_undo_index metadata" << std::endl;
+    return false;
+  }
+
+  std::vector<uint64_t> to_undo;
+  for (uint64_t bn : undo_index) {
+    if (bn > targetBlock) {
+      to_undo.push_back(bn);
+    }
+  }
+
+  if (head_block <= targetBlock && to_undo.empty()) {
+    return true;
+  }
+
+  uint64_t pruned_floor = 0;
+  std::string floor_raw = readMetaFn(kMetaPrunedFloor);
+  if (!floor_raw.empty() && !decodeU64BE(floor_raw, pruned_floor)) {
+    std::cerr << "[Xapian Undo FATAL] Corrupt __mtn_meta_pruned_floor_block metadata" << std::endl;
+    return false;
+  }
+
+  if (targetBlock < pruned_floor) {
+    std::cerr << "[Xapian Undo FATAL] Cannot roll back to block " << targetBlock
+              << ": undo history was pruned up to block " << pruned_floor << std::endl;
+    return false;
+  }
+
+  if (head_block > targetBlock && to_undo.empty()) {
+    std::cerr << "[Xapian Undo FATAL] Inconsistent metadata: head_block=" << head_block
+              << " > targetBlock=" << targetBlock << " but undo_index has no entries" << std::endl;
+    return false;
+  }
+
+  std::sort(to_undo.begin(), to_undo.end(), std::greater<uint64_t>());
+
+  for (uint64_t bn : to_undo) {
+    std::string ukey = std::string(kMetaUndoPrefix) + std::to_string(bn);
+    std::string uraw = readMetaFn(ukey);
+    SerializedUndoRecord rec;
+    if (uraw.empty() || !deserializeUndoRecord(uraw, rec) || rec.block_number != bn) {
+      std::cerr << "[Xapian Undo FATAL] Missing or corrupt undo journal entry for block " << bn << std::endl;
+      return false;
+    }
+
+    for (const auto &kv : rec.entries) {
+      const SerializedUndoEntry &ue = kv.second;
+      Xapian::docid cur_did = resolveDocIdInDb(target_db, ue.nid);
+      if (ue.existed) {
+        Xapian::Document restored = Xapian::Document::unserialise(ue.serialized_doc);
+        Xapian::docid restore_did = (ue.original_did > 0) ? ue.original_did : cur_did;
+        if (cur_did > 0 && cur_did != restore_did) {
+          try {
+            target_db.delete_document(cur_did);
+          } catch (const Xapian::DocNotFoundError &) {}
+        }
+        if (restore_did > 0) {
+          target_db.replace_document(restore_did, restored);
+        } else {
+          target_db.add_document(restored);
+        }
+      } else {
+        if (cur_did > 0) {
+          try {
+            target_db.delete_document(cur_did);
+          } catch (const Xapian::DocNotFoundError &) {}
+        }
+        if (ue.original_did > 0 && ue.original_did != cur_did) {
+          try {
+            target_db.delete_document(ue.original_did);
+          } catch (const Xapian::DocNotFoundError &) {}
+        }
+      }
+    }
+
+    inout_next_did = (rec.prev_next_did > 0) ? rec.prev_next_did : 1;
+    writeMetaFn(ukey, "");
+  }
+
+  std::vector<uint64_t> remaining_index;
+  remaining_index.reserve(undo_index.size());
+  for (uint64_t bn : undo_index) {
+    if (bn <= targetBlock) {
+      remaining_index.push_back(bn);
+    }
+  }
+  std::sort(remaining_index.begin(), remaining_index.end());
+
+  uint64_t new_head = remaining_index.empty() ? 0 : remaining_index.back();
+  if (new_head == 0 && pruned_floor > 0) {
+    new_head = std::min(head_block, targetBlock);
+  }
+
+  writeMetaFn(kMetaNextDid, encodeU32BE(static_cast<uint32_t>(inout_next_did)));
+  writeMetaFn(kMetaUndoIndex, encodeUndoIndex(remaining_index));
+  writeMetaFn(kMetaHeadBlock, new_head > 0 ? encodeU64BE(new_head) : "");
+  target_db.commit();
+  did_mutate = true;
+  return true;
+}
+} // namespace
+
+// Tạo một bản sao đầy đủ (deep clone: data + mọi slot 32-bit + terms + wdf + term positions)
+Xapian::Document
+XapianManager::clone_document(const Xapian::Document &source_doc) {
+  return Xapian::Document::unserialise(source_doc.serialise());
 }
 // Lấy hoặc tạo một instance XapianManager cho một database cụ thể
 std::shared_ptr<XapianManager> XapianManager::getInstance(const std::string &db_name, const mvm::Address &addr, bool isReset)
@@ -210,6 +517,51 @@ XapianManager::XapianManager(const std::string &db_name,
     simple_read_pool.pool.resize(MAX_CONCURRENT_SIMPLE_READS, nullptr);
     simple_read_pool.in_use.resize(MAX_CONCURRENT_SIMPLE_READS, false);
     simple_read_pool.last_gen.resize(MAX_CONCURRENT_SIMPLE_READS, 0);
+
+    reloadNextDidLocked();
+}
+
+std::string XapianManager::readMetaLocked(const std::string &key) const {
+    if (mvm::IsXapianBasePathEmpty()) {
+        auto it = in_memory_meta_.find(key);
+        return it != in_memory_meta_.end() ? it->second : std::string();
+    }
+    return db.get_metadata(key);
+}
+
+void XapianManager::writeMetaLocked(const std::string &key, const std::string &val) {
+    if (mvm::IsXapianBasePathEmpty()) {
+        if (val.empty()) {
+            in_memory_meta_.erase(key);
+        } else {
+            in_memory_meta_[key] = val;
+        }
+        return;
+    }
+    db.set_metadata(key, val);
+}
+
+void XapianManager::reloadNextDidLocked() {
+    try {
+        std::string raw = readMetaLocked(kMetaNextDid);
+        uint32_t stored = 0;
+        if (!raw.empty() && decodeU32BE(raw, stored) && stored >= 1) {
+            next_did_ = static_cast<Xapian::docid>(stored);
+            return;
+        }
+        next_did_ = db.get_lastdocid() + 1;
+        if (next_did_ == 0) next_did_ = 1;
+    } catch (...) {
+        next_did_ = 1;
+    }
+}
+
+void XapianManager::clearAllTxBuffers() {
+    std::lock_guard<std::mutex> buffer_lock(tx_buffers_mutex);
+    tx_buffers.clear();
+    tx_counters.clear();
+    doc_writer_predecessors.clear();
+    tx_to_predecessor_keys.clear();
 }
 
 XapianManager::~XapianManager() {
@@ -275,13 +627,14 @@ Xapian::Database* XapianManager::acquireSearchDb()
     for (size_t i = 0; i < search_pool.pool.size(); ++i) {
         if (!search_pool.in_use[i]) {
             search_pool.in_use[i] = true;
+            Xapian::Database* slot_db = search_pool.pool[i];
+            uint64_t slot_gen = search_pool.last_gen[i];
             lock.unlock(); // Release lock before disk I/O
-            if (search_pool.pool[i] == nullptr) {
+            if (slot_db == nullptr) {
                 // Lazy init
                 try {
-                    search_pool.pool[i] = new Xapian::Database(
+                    slot_db = new Xapian::Database(
                         mvm::createFullPath(address, db_name).string());
-                    search_pool.last_gen[i] = current_gen;
                 } catch (const Xapian::Error& e) {
                     std::cerr << "[FATAL] acquireSearchDb: failed to init slot " << i
                               << ": " << e.get_description() << std::endl;
@@ -297,24 +650,28 @@ Xapian::Database* XapianManager::acquireSearchDb()
                     search_pool.pool_cv.notify_one();
                     return nullptr;
                 }
-            } else if (search_pool.last_gen[i] < current_gen) {
+                lock.lock();
+                search_pool.pool[i] = slot_db;
+                search_pool.last_gen[i] = current_gen;
+                return slot_db;
+            } else if (slot_gen < current_gen) {
                 // Reopen existing
                 try {
-                    search_pool.pool[i]->reopen();
-                    search_pool.last_gen[i] = current_gen;
+                    slot_db->reopen();
                 } catch (const Xapian::Error& e) {
                     std::cerr << "[ERROR] acquireSearchDb: reopen() failed for slot " << i
                               << ": " << e.get_description() << ", recreating..." << std::endl;
-                    delete search_pool.pool[i];
-                    search_pool.pool[i] = nullptr;
+                    delete slot_db;
+                    slot_db = nullptr;
                     try {
-                        search_pool.pool[i] = new Xapian::Database(
+                        slot_db = new Xapian::Database(
                             mvm::createFullPath(address, db_name).string());
-                        search_pool.last_gen[i] = current_gen;
                     } catch (const Xapian::Error& e2) {
                         std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
                                   << ": " << e2.get_description() << std::endl;
                         lock.lock();
+                        search_pool.pool[i] = nullptr;
+                        search_pool.last_gen[i] = 0;
                         search_pool.in_use[i] = false;
                         search_pool.pool_cv.notify_one();
                         return nullptr;
@@ -322,6 +679,8 @@ Xapian::Database* XapianManager::acquireSearchDb()
                         std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
                                   << ": " << e2.what() << std::endl;
                         lock.lock();
+                        search_pool.pool[i] = nullptr;
+                        search_pool.last_gen[i] = 0;
                         search_pool.in_use[i] = false;
                         search_pool.pool_cv.notify_one();
                         return nullptr;
@@ -329,16 +688,17 @@ Xapian::Database* XapianManager::acquireSearchDb()
                 } catch (const std::exception& e) {
                     std::cerr << "[ERROR] acquireSearchDb: reopen() failed for slot " << i
                               << ": " << e.what() << ", recreating..." << std::endl;
-                    delete search_pool.pool[i];
-                    search_pool.pool[i] = nullptr;
+                    delete slot_db;
+                    slot_db = nullptr;
                     try {
-                        search_pool.pool[i] = new Xapian::Database(
+                        slot_db = new Xapian::Database(
                             mvm::createFullPath(address, db_name).string());
-                        search_pool.last_gen[i] = current_gen;
                     } catch (const Xapian::Error& e2) {
                         std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
                                   << ": " << e2.get_description() << std::endl;
                         lock.lock();
+                        search_pool.pool[i] = nullptr;
+                        search_pool.last_gen[i] = 0;
                         search_pool.in_use[i] = false;
                         search_pool.pool_cv.notify_one();
                         return nullptr;
@@ -346,13 +706,19 @@ Xapian::Database* XapianManager::acquireSearchDb()
                         std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
                                   << ": " << e2.what() << std::endl;
                         lock.lock();
+                        search_pool.pool[i] = nullptr;
+                        search_pool.last_gen[i] = 0;
                         search_pool.in_use[i] = false;
                         search_pool.pool_cv.notify_one();
                         return nullptr;
                     }
                 }
+                lock.lock();
+                search_pool.pool[i] = slot_db;
+                search_pool.last_gen[i] = current_gen;
+                return slot_db;
             }
-            return search_pool.pool[i];
+            return slot_db;
         }
     }
     return nullptr;
@@ -401,13 +767,14 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
     for (size_t i = 0; i < simple_read_pool.pool.size(); ++i) {
         if (!simple_read_pool.in_use[i]) {
             simple_read_pool.in_use[i] = true;
+            Xapian::Database* slot_db = simple_read_pool.pool[i];
+            uint64_t slot_gen = simple_read_pool.last_gen[i];
             lock.unlock(); // Release lock before disk I/O
-            if (simple_read_pool.pool[i] == nullptr) {
+            if (slot_db == nullptr) {
                 // Lazy init
                 try {
-                    simple_read_pool.pool[i] = new Xapian::Database(
+                    slot_db = new Xapian::Database(
                         mvm::createFullPath(address, db_name).string());
-                    simple_read_pool.last_gen[i] = current_gen;
                 } catch (const Xapian::Error& e) {
                     std::cerr << "[FATAL] acquireSimpleReadDb: failed to init slot " << i
                               << ": " << e.get_description() << std::endl;
@@ -423,24 +790,28 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
                     simple_read_pool.pool_cv.notify_one();
                     return nullptr;
                 }
-            } else if (simple_read_pool.last_gen[i] < current_gen) {
+                lock.lock();
+                simple_read_pool.pool[i] = slot_db;
+                simple_read_pool.last_gen[i] = current_gen;
+                return slot_db;
+            } else if (slot_gen < current_gen) {
                 // Reopen existing
                 try {
-                    simple_read_pool.pool[i]->reopen();
-                    simple_read_pool.last_gen[i] = current_gen;
+                    slot_db->reopen();
                 } catch (const Xapian::Error& e) {
                     std::cerr << "[ERROR] acquireSimpleReadDb: reopen() failed for slot " << i
                               << ": " << e.get_description() << ", recreating..." << std::endl;
-                    delete simple_read_pool.pool[i];
-                    simple_read_pool.pool[i] = nullptr;
+                    delete slot_db;
+                    slot_db = nullptr;
                     try {
-                        simple_read_pool.pool[i] = new Xapian::Database(
+                        slot_db = new Xapian::Database(
                             mvm::createFullPath(address, db_name).string());
-                        simple_read_pool.last_gen[i] = current_gen;
                     } catch (const Xapian::Error& e2) {
                         std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
                                   << ": " << e2.get_description() << std::endl;
                         lock.lock();
+                        simple_read_pool.pool[i] = nullptr;
+                        simple_read_pool.last_gen[i] = 0;
                         simple_read_pool.in_use[i] = false;
                         simple_read_pool.pool_cv.notify_one();
                         return nullptr;
@@ -448,6 +819,8 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
                         std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
                                   << ": " << e2.what() << std::endl;
                         lock.lock();
+                        simple_read_pool.pool[i] = nullptr;
+                        simple_read_pool.last_gen[i] = 0;
                         simple_read_pool.in_use[i] = false;
                         simple_read_pool.pool_cv.notify_one();
                         return nullptr;
@@ -455,16 +828,17 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
                 } catch (const std::exception& e) {
                     std::cerr << "[ERROR] acquireSimpleReadDb: reopen() failed for slot " << i
                               << ": " << e.what() << ", recreating..." << std::endl;
-                    delete simple_read_pool.pool[i];
-                    simple_read_pool.pool[i] = nullptr;
+                    delete slot_db;
+                    slot_db = nullptr;
                     try {
-                        simple_read_pool.pool[i] = new Xapian::Database(
+                        slot_db = new Xapian::Database(
                             mvm::createFullPath(address, db_name).string());
-                        simple_read_pool.last_gen[i] = current_gen;
                     } catch (const Xapian::Error& e2) {
                         std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
                                   << ": " << e2.get_description() << std::endl;
                         lock.lock();
+                        simple_read_pool.pool[i] = nullptr;
+                        simple_read_pool.last_gen[i] = 0;
                         simple_read_pool.in_use[i] = false;
                         simple_read_pool.pool_cv.notify_one();
                         return nullptr;
@@ -472,13 +846,19 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
                         std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
                                   << ": " << e2.what() << std::endl;
                         lock.lock();
+                        simple_read_pool.pool[i] = nullptr;
+                        simple_read_pool.last_gen[i] = 0;
                         simple_read_pool.in_use[i] = false;
                         simple_read_pool.pool_cv.notify_one();
                         return nullptr;
                     }
                 }
+                lock.lock();
+                simple_read_pool.pool[i] = slot_db;
+                simple_read_pool.last_gen[i] = current_gen;
+                return slot_db;
             }
-            return simple_read_pool.pool[i];
+            return slot_db;
         }
     }
     return nullptr;
@@ -517,8 +897,13 @@ bool XapianManager::is_idle_for(std::chrono::minutes duration) {
 }
 
 bool XapianManager::is_evictable() const {
+  if (has_uncommitted_writes.load(std::memory_order_acquire)) {
+    return false;
+  }
+  std::shared_lock<ChangesMutex> ch_lock(changes_mutex);
   std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(tx_buffers_mutex));
-  return tx_buffers.empty() && comprehensive_log.xapian_doc_logs.empty() && !has_uncommitted_writes.load();
+  return tx_buffers.empty() && comprehensive_log.xapian_doc_logs.empty() &&
+         !has_uncommitted_writes.load(std::memory_order_acquire);
 }
 
 // Dump tất cả tài liệu trong database với đầy đủ thông tin để debug
@@ -769,7 +1154,9 @@ std::string XapianManager::normalize_docid(const std::string& id) {
     if (s.length() >= 2 && (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))) {
         s = s.substr(2);
     }
-    for (char &c : s) c = std::tolower(c);
+    for (char &c : s) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
     return "0x" + s;
 }
 
@@ -958,9 +1345,9 @@ struct ScopedSimpleReadDb {
 
 std::string XapianManager::get_data(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
   auto start = std::chrono::steady_clock::now();
+  std::shared_lock<ChangesMutex> read_lock(changes_mutex);
   ScopedSimpleReadDb scopedDb(this);
   if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_data");
-  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   try {
     Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
     auto dur_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
@@ -983,9 +1370,9 @@ std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::va
         std::cerr << "[ERROR] XapianManager::get_value: Slot " << slot << " is out of range." << std::endl;
         return "";
     }
+    std::shared_lock<ChangesMutex> read_lock(changes_mutex);
     ScopedSimpleReadDb scopedDb(this);
     if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_value");
-    std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
     try {
         Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
         std::string data = doc.get_value(slot);
@@ -1019,10 +1406,10 @@ std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::va
 
 // Lấy thông tin (data, value slot 1, value slot 2) của document tại một block number
 DocumentInfo XapianManager::get_document(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
+  std::shared_lock<ChangesMutex> read_lock(changes_mutex);
   ScopedSimpleReadDb scopedDb(this);
   DocumentInfo info;
   if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_document");
-  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   try {
     Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
     info.data = doc.get_data();
@@ -1037,10 +1424,10 @@ DocumentInfo XapianManager::get_document(const std::string& virtualDocId, uint25
 // Lấy danh sách các term của document tại một block number
 std::vector<std::string> XapianManager::get_terms(const std::string& virtualDocId,
                                                   uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
+  std::shared_lock<ChangesMutex> read_lock(changes_mutex);
   ScopedSimpleReadDb scopedDb(this);
   std::vector<std::string> terms;
   if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_terms");
-  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   try {
     Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
     for (auto term_it = doc.termlist_begin(); term_it != doc.termlist_end(); ++term_it) {
@@ -1055,9 +1442,9 @@ std::vector<std::string> XapianManager::get_terms(const std::string& virtualDocI
 }
 
 // Commit các thay đổi đã được staged vào database Xapian
-bool XapianManager::commit_changes() {
+bool XapianManager::commit_changes(uint64_t blockNumber) {
   touch(); // Cập nhật thời gian truy cập
-  std::lock_guard<std::shared_mutex> lock_changes(changes_mutex);
+  std::lock_guard<ChangesMutex> lock_changes(changes_mutex);
   bool has_writes = has_uncommitted_writes.load(std::memory_order_acquire);
   if (!has_writes && comprehensive_log.xapian_doc_logs.empty()) {
     return true; // Không có thay đổi nào cần commit -> Thoát ngay lập tức (zero-cost)
@@ -1074,14 +1461,112 @@ bool XapianManager::commit_changes() {
   ensure_db_open();
   std::lock_guard<std::mutex> lock(db_mutex);
   try {
-    db.commit(); // Thực hiện commit Xapian (áp dụng cả comprehensive_log và replay_log)
+    uint64_t prev_head = 0;
+    std::string head_raw = readMetaLocked(kMetaHeadBlock);
+    if (!head_raw.empty() && !decodeU64BE(head_raw, prev_head)) {
+      std::cerr << "[Xapian Undo FATAL] Corrupt __mtn_meta_head_block metadata in commit_changes" << std::endl;
+      return false;
+    }
+
+    if (blockNumber == 0 && prev_head > 0) {
+      std::cerr << "[Xapian Undo FATAL] Refusing unjournaled commit_changes(0) on block-tracked DB '"
+                << db_name << "' (head_block=" << prev_head << ")" << std::endl;
+      return false;
+    }
+
+    if (blockNumber > 0) {
+      std::vector<uint64_t> undo_index;
+      std::string index_raw = readMetaLocked(kMetaUndoIndex);
+      if (!decodeUndoIndex(index_raw, undo_index)) {
+        std::cerr << "[Xapian Undo FATAL] Corrupt __mtn_meta_undo_index metadata in commit_changes" << std::endl;
+        return false;
+      }
+
+      uint64_t pruned_floor = 0;
+      std::string floor_raw = readMetaLocked(kMetaPrunedFloor);
+      if (!floor_raw.empty() && !decodeU64BE(floor_raw, pruned_floor)) {
+        std::cerr << "[Xapian Undo FATAL] Corrupt __mtn_meta_pruned_floor_block metadata in commit_changes" << std::endl;
+        return false;
+      }
+
+      writeMetaLocked(kMetaNextDid, encodeU32BE(static_cast<uint32_t>(next_did_)));
+
+      std::string ukey = std::string(kMetaUndoPrefix) + std::to_string(blockNumber);
+      std::string existing_uraw = readMetaLocked(ukey);
+      SerializedUndoRecord rec;
+      if (!existing_uraw.empty() && deserializeUndoRecord(existing_uraw, rec) &&
+          rec.block_number == blockNumber) {
+        // Merge multiple commits within the same blockNumber: keep the earliest
+        // pre-image (and earliest prev_next_did) observed at the start of this block.
+        for (const auto &kv : undo_snapshot_) {
+          if (rec.entries.find(kv.first) == rec.entries.end()) {
+            SerializedUndoEntry se;
+            se.nid = kv.first;
+            se.existed = kv.second.existed;
+            se.original_did = kv.second.original_did;
+            if (se.existed) {
+              se.serialized_doc = kv.second.serialized_doc;
+            }
+            rec.entries.emplace(se.nid, std::move(se));
+          }
+        }
+        writeMetaLocked(ukey, serializeUndoRecord(rec));
+      } else {
+        // Fast single-allocation serialization directly from undo_snapshot_ (common hot path)
+        Xapian::docid prev_did_val = has_uncommitted_prev_next_did_ ? uncommitted_prev_next_did_ : next_did_;
+        size_t total_bytes = 20;
+        for (const auto &kv : undo_snapshot_) {
+          total_bytes += 9 + kv.first.size() + (kv.second.existed ? 4 + kv.second.serialized_doc.size() : 0);
+        }
+        std::string fast_uraw;
+        fast_uraw.reserve(total_bytes);
+        fast_uraw.append(kUndoMagic, 4);
+        appendU64BE(fast_uraw, blockNumber);
+        appendU32BE(fast_uraw, static_cast<uint32_t>(prev_did_val));
+        appendU32BE(fast_uraw, static_cast<uint32_t>(undo_snapshot_.size()));
+        for (const auto &kv : undo_snapshot_) {
+          appendU32BE(fast_uraw, static_cast<uint32_t>(kv.first.size()));
+          fast_uraw.append(kv.first);
+          fast_uraw.push_back(kv.second.existed ? '\x01' : '\x00');
+          appendU32BE(fast_uraw, static_cast<uint32_t>(kv.second.original_did));
+          if (kv.second.existed) {
+            appendU32BE(fast_uraw, static_cast<uint32_t>(kv.second.serialized_doc.size()));
+            fast_uraw.append(kv.second.serialized_doc);
+          }
+        }
+        writeMetaLocked(ukey, fast_uraw);
+      }
+
+      if (std::find(undo_index.begin(), undo_index.end(), blockNumber) == undo_index.end()) {
+        undo_index.push_back(blockNumber);
+        std::sort(undo_index.begin(), undo_index.end());
+      }
+
+      while (undo_index.size() > MAX_UNDO_BLOCKS) {
+        uint64_t oldest_bn = undo_index.front();
+        undo_index.erase(undo_index.begin());
+        writeMetaLocked(std::string(kMetaUndoPrefix) + std::to_string(oldest_bn), "");
+        if (oldest_bn > pruned_floor) {
+          pruned_floor = oldest_bn;
+        }
+      }
+      if (pruned_floor > 0) {
+        writeMetaLocked(kMetaPrunedFloor, encodeU64BE(pruned_floor));
+      }
+      writeMetaLocked(kMetaUndoIndex, encodeUndoIndex(undo_index));
+
+      uint64_t new_head = std::max(prev_head, blockNumber);
+      writeMetaLocked(kMetaHeadBlock, encodeU64BE(new_head));
+    } else {
+      writeMetaLocked(kMetaNextDid, encodeU32BE(static_cast<uint32_t>(next_did_)));
+    }
+
+    db.commit(); // Thực hiện commit Xapian nguyên tử (cả documents + undo journal metadata)
     comprehensive_log.xapian_doc_logs.clear(); // Xóa các log đã staged sau khi commit thành công
     has_uncommitted_writes.store(false, std::memory_order_release);
-    // 2026-08-20 (plan §9.29): these writes are now permanent (db.commit()
-    // succeeded) -- the InMemory-mode undo snapshot for them is no longer
-    // needed. No-op (empty map) in cgo/disk mode. See
-    // revertUncommittedChanges()'s own doc comment for the full picture.
     undo_snapshot_.clear();
+    undo_captured_dids_.clear();
+    has_uncommitted_prev_next_did_ = false;
   } catch (const Xapian::Error &e) {
     std::cerr << "[Xapian Commit ERROR] Xapian::Error in commit_changes: " << e.get_msg() << std::endl;
     return false;
@@ -1092,34 +1577,75 @@ bool XapianManager::commit_changes() {
     std::cerr << "[Xapian Commit ERROR] Unknown exception in commit_changes" << std::endl;
     return false;
   }
-  // Đánh dấu có 1 generation mới
+  // Đánh dấu có 1 generation mới: acquireSearchDb() / acquireSimpleReadDb()
+  // sẽ tự reopen() lazy bên ngoài pool_mutex khi thực sự có reader mượn slot.
   db_generation.fetch_add(1, std::memory_order_acq_rel);
-  uint64_t current_gen = db_generation.load(std::memory_order_acquire);
+  return true;
+}
 
-  // Best-effort: reopen ngay các slot đang rảnh trong search_pool
+uint64_t XapianManager::getCommittedHeadBlock() {
+  std::shared_lock<ChangesMutex> lock_changes(changes_mutex);
+  ensure_db_open();
+  std::lock_guard<std::mutex> lock(db_mutex);
+  try {
+    std::string raw = readMetaLocked(kMetaHeadBlock);
+    uint64_t head = 0;
+    if (!raw.empty() && decodeU64BE(raw, head)) {
+      return head;
+    }
+  } catch (...) {}
+  return 0;
+}
+
+bool XapianManager::rollbackAboveBlock(uint64_t targetBlock) {
+  touch();
+  clearAllTxBuffers();
+
+  // First discard any uncommitted in-memory mutations safely.
+  bool need_revert_uncommitted = false;
   {
-    std::lock_guard<std::mutex> pool_lock(search_pool.pool_mutex);
-    for (size_t i = 0; i < search_pool.pool.size(); ++i) {
-      if (search_pool.pool[i] && !search_pool.in_use[i]) {
-        try {
-          search_pool.pool[i]->reopen();
-          search_pool.last_gen[i] = current_gen;
-        } catch (...) {}
-      }
+    std::shared_lock<ChangesMutex> check_lock(changes_mutex);
+    need_revert_uncommitted = has_uncommitted_writes.load(std::memory_order_acquire) ||
+                              !comprehensive_log.xapian_doc_logs.empty();
+  }
+  if (need_revert_uncommitted) {
+    if (!revertUncommittedChanges()) {
+      return false;
     }
   }
 
-  // Best-effort: reopen ngay các slot đang rảnh trong simple_read_pool
+  std::unique_lock<ChangesMutex> lock_changes(changes_mutex);
+  ensure_db_open();
+
+  bool did_mutate = false;
   {
-    std::lock_guard<std::mutex> pool_lock(simple_read_pool.pool_mutex);
-    for (size_t i = 0; i < simple_read_pool.pool.size(); ++i) {
-      if (simple_read_pool.pool[i] && !simple_read_pool.in_use[i]) {
-        try {
-          simple_read_pool.pool[i]->reopen();
-          simple_read_pool.last_gen[i] = current_gen;
-        } catch (...) {}
+    std::lock_guard<std::mutex> lock_db(db_mutex);
+    try {
+      auto readFn = [this](const std::string &k) { return this->readMetaLocked(k); };
+      auto writeFn = [this](const std::string &k, const std::string &v) { this->writeMetaLocked(k, v); };
+      if (!rollbackWritableDbAboveBlock(db, targetBlock, readFn, writeFn, next_did_, did_mutate)) {
+        return false;
       }
+      undo_snapshot_.clear();
+      undo_captured_dids_.clear();
+      has_uncommitted_prev_next_did_ = false;
+    } catch (const Xapian::Error &e) {
+      std::cerr << "[Xapian Undo ERROR] Xapian::Error in rollbackAboveBlock(" << targetBlock
+                << ") for " << db_name << ": " << e.get_msg() << std::endl;
+      return false;
+    } catch (const std::exception &e) {
+      std::cerr << "[Xapian Undo ERROR] std::exception in rollbackAboveBlock(" << targetBlock
+                << ") for " << db_name << ": " << e.what() << std::endl;
+      return false;
+    } catch (...) {
+      std::cerr << "[Xapian Undo ERROR] Unknown exception in rollbackAboveBlock(" << targetBlock
+                << ") for " << db_name << std::endl;
+      return false;
     }
+  }
+
+  if (did_mutate) {
+    db_generation.fetch_add(1, std::memory_order_acq_rel);
   }
   return true;
 }
@@ -1166,7 +1692,7 @@ bool XapianManager::compactInPlace(size_t minSizeBytes, std::chrono::minutes min
   }
 
   touch();
-  std::unique_lock<std::shared_mutex> lock(changes_mutex);
+  std::unique_lock<ChangesMutex> lock(changes_mutex);
 
   // Never compact mid-transaction: replay_log()/commit_changes() must be
   // able to find the db exactly where they left it. has_started mirrors the
@@ -1337,7 +1863,7 @@ size_t XapianManager::pruneOldVersions(uint64_t currentBlockHeight, uint64_t ret
   uint64_t cutoff = currentBlockHeight - retentionBlocks;
 
   touch();
-  std::unique_lock<std::shared_mutex> lock(changes_mutex);
+  std::unique_lock<ChangesMutex> lock(changes_mutex);
 
   // Never prune mid-transaction -- same guard as compactInPlace(): a
   // transaction in flight means replay_log()/commit_changes() still expect
@@ -1427,20 +1953,186 @@ size_t XapianManager::pruneOldVersions(uint64_t currentBlockHeight, uint64_t ret
   return deleted_count;
 }
 
-void XapianManager::commitAllInstances() {
+void XapianManager::commitAllInstances(uint64_t blockNumber) {
+  if (blockNumber == 0) {
+    std::cerr << "[Xapian Undo ERROR] commitAllInstances(0) refused: blockNumber > 0 is required for undo journal safety" << std::endl;
+    return;
+  }
   std::unique_lock<std::shared_mutex> lock(instances_mutex);
   for (auto &pair : instances) {
     auto manager = pair.second;
     if (manager && !manager->has_started) {
-      manager->commit_changes();
+      manager->commit_changes(blockNumber);
     }
   }
+}
+
+int XapianManager::rollbackAllAboveBlock(uint64_t targetBlock) {
+  std::unique_lock<std::shared_mutex> lock(instances_mutex);
+  int rolled_back_count = 0;
+  std::unordered_set<std::string> live_canonical_paths;
+  std::vector<std::shared_ptr<XapianManager>> live_managers;
+
+  for (const auto &pair : instances) {
+    if (pair.second) {
+      live_managers.push_back(pair.second);
+      std::error_code ec;
+      auto canon = std::filesystem::weakly_canonical(std::filesystem::path(pair.first), ec);
+      if (!ec) {
+        live_canonical_paths.insert(canon.string());
+      } else {
+        live_canonical_paths.insert(pair.first);
+      }
+    }
+  }
+
+  for (auto &mgr : live_managers) {
+    uint64_t before_head = mgr->getCommittedHeadBlock();
+    bool had_uncommitted = false;
+    {
+      std::shared_lock<ChangesMutex> check_lock(mgr->changes_mutex);
+      had_uncommitted = mgr->has_uncommitted_writes.load(std::memory_order_acquire) ||
+                        !mgr->comprehensive_log.xapian_doc_logs.empty();
+    }
+    if (!mgr->rollbackAboveBlock(targetBlock)) {
+      return -1;
+    }
+    uint64_t after_head = mgr->getCommittedHeadBlock();
+    if ((before_head > targetBlock && after_head <= targetBlock) || had_uncommitted) {
+      rolled_back_count++;
+    }
+  }
+
+  if (mvm::IsXapianBasePathEmpty()) {
+    return rolled_back_count;
+  }
+
+  std::error_code ec;
+  std::filesystem::path base_dir(mvm::GetXapianBasePath());
+  if (!std::filesystem::exists(base_dir, ec) || ec || !std::filesystem::is_directory(base_dir, ec)) {
+    return rolled_back_count;
+  }
+
+  for (auto addr_it = std::filesystem::directory_iterator(base_dir, ec);
+       !ec && addr_it != std::filesystem::directory_iterator(); addr_it.increment(ec)) {
+    std::error_code sub_ec;
+    if (addr_it->is_symlink(sub_ec) || !addr_it->is_directory(sub_ec) || sub_ec) {
+      continue;
+    }
+    for (auto db_it = std::filesystem::directory_iterator(addr_it->path(), sub_ec);
+         !sub_ec && db_it != std::filesystem::directory_iterator(); db_it.increment(sub_ec)) {
+      std::error_code leaf_ec;
+      if (db_it->is_symlink(leaf_ec) || !db_it->is_directory(leaf_ec) || leaf_ec) {
+        continue;
+      }
+      std::filesystem::path db_dir = db_it->path();
+      std::string fname = db_dir.filename().string();
+      if (endsWithStr(fname, ".compact_tmp") || endsWithStr(fname, ".pre_compact_backup")) {
+        continue;
+      }
+      if (!std::filesystem::exists(db_dir / "iamglass", leaf_ec) || leaf_ec) {
+        continue;
+      }
+
+      auto canon = std::filesystem::weakly_canonical(db_dir, leaf_ec);
+      std::string canon_str = (!leaf_ec) ? canon.string() : db_dir.string();
+      if (live_canonical_paths.find(canon_str) != live_canonical_paths.end()) {
+        continue;
+      }
+
+      // Fast read-only probe: skip opening WritableDatabase if head_block <= targetBlock
+      bool needs_rollback = false;
+      uint64_t head_block = 0;
+      uint64_t pruned_floor = 0;
+      try {
+        Xapian::Database ro_db(db_dir.string());
+        std::string head_raw = ro_db.get_metadata(kMetaHeadBlock);
+        if (!head_raw.empty()) {
+          if (!decodeU64BE(head_raw, head_block)) {
+            std::cerr << "[Xapian Undo FATAL] Corrupt head_block metadata in " << db_dir << std::endl;
+            return -1;
+          }
+        }
+        std::string index_raw = ro_db.get_metadata(kMetaUndoIndex);
+        std::vector<uint64_t> idx;
+        if (!decodeUndoIndex(index_raw, idx)) {
+          std::cerr << "[Xapian Undo FATAL] Corrupt undo_index metadata in " << db_dir << std::endl;
+          return -1;
+        }
+        if (head_block > targetBlock) {
+          needs_rollback = true;
+        } else {
+          for (uint64_t bn : idx) {
+            if (bn > targetBlock) {
+              needs_rollback = true;
+              break;
+            }
+          }
+        }
+        if (needs_rollback) {
+          std::string floor_raw = ro_db.get_metadata(kMetaPrunedFloor);
+          if (!floor_raw.empty() && !decodeU64BE(floor_raw, pruned_floor)) {
+            std::cerr << "[Xapian Undo FATAL] Corrupt pruned_floor metadata in " << db_dir << std::endl;
+            return -1;
+          }
+        }
+        ro_db.close();
+      } catch (const Xapian::Error &e) {
+        std::cerr << "[Xapian Undo FATAL] Failed probing Xapian DB at " << db_dir
+                  << ": " << e.get_msg() << std::endl;
+        return -1;
+      } catch (const std::exception &e) {
+        std::cerr << "[Xapian Undo FATAL] Exception probing Xapian DB at " << db_dir
+                  << ": " << e.what() << std::endl;
+        return -1;
+      }
+
+      if (!needs_rollback) {
+        continue;
+      }
+
+      try {
+        Xapian::WritableDatabase rw_db(db_dir.string(), Xapian::DB_OPEN);
+        Xapian::docid next_did = 1;
+        uint32_t stored_did = 0;
+        std::string did_raw = rw_db.get_metadata(kMetaNextDid);
+        if (!did_raw.empty() && decodeU32BE(did_raw, stored_did) && stored_did >= 1) {
+          next_did = static_cast<Xapian::docid>(stored_did);
+        } else {
+          next_did = rw_db.get_lastdocid() + 1;
+          if (next_did == 0) next_did = 1;
+        }
+
+        bool did_mutate = false;
+        auto readFn = [&rw_db](const std::string &k) { return rw_db.get_metadata(k); };
+        auto writeFn = [&rw_db](const std::string &k, const std::string &v) { rw_db.set_metadata(k, v); };
+        if (!rollbackWritableDbAboveBlock(rw_db, targetBlock, readFn, writeFn, next_did, did_mutate)) {
+          rw_db.close();
+          return -1;
+        }
+        rw_db.close();
+        if (did_mutate) {
+          rolled_back_count++;
+        }
+      } catch (const Xapian::Error &e) {
+        std::cerr << "[Xapian Undo FATAL] Failed rolling back Xapian DB at " << db_dir
+                  << " to block " << targetBlock << ": " << e.get_msg() << std::endl;
+        return -1;
+      } catch (const std::exception &e) {
+        std::cerr << "[Xapian Undo FATAL] Exception rolling back Xapian DB at " << db_dir
+                  << " to block " << targetBlock << ": " << e.what() << std::endl;
+        return -1;
+      }
+    }
+  }
+
+  return rolled_back_count;
 }
 
 
 // Tính toán hash của các thay đổi đã được staged
 std::array<uint8_t, 32u> XapianManager::getChangeHash() {
-  std::lock_guard<std::shared_mutex> lock(
+  std::lock_guard<ChangesMutex> lock(
       changes_mutex); // Khóa để truy cập staged_changes_log
   if (comprehensive_log.xapian_doc_logs.empty()) {
     return {0}; // Trả về hash 0 nếu không có thay đổi
@@ -1476,7 +2168,7 @@ std::array<uint8_t, 32u> XapianManager::getChangeHash() {
 
 // Lấy danh sách các log entry đã được staged
 std::vector<XapianLog::LogEntry> XapianManager::getChangeLogs() {
-  std::lock_guard<std::shared_mutex> lock(
+  std::lock_guard<ChangesMutex> lock(
       changes_mutex); // Khóa để truy cập staged_changes_log
   return comprehensive_log.xapian_doc_logs; // Trả về bản sao của vector log
 }
@@ -1512,8 +2204,8 @@ std::array<uint8_t, 32u> XapianManager::getComprehensiveStateHash() {
 }
 
 // Lưu và commit tất cả thay đổi (trong context này, chỉ commit Xapian)
-bool XapianManager::saveAllAndCommit() {
-  return this->commit_changes(); // Gọi hàm commit Xapian
+bool XapianManager::saveAllAndCommit(uint64_t blockNumber) {
+  return this->commit_changes(blockNumber); // Gọi hàm commit Xapian
 }
 
 // Namespace ẩn danh cho luồng dọn dẹp và các chức năng liên quan
@@ -1533,17 +2225,19 @@ std::thread cleaner_thread([] {
     // lâu)
     {
                 std::unique_lock<std::shared_mutex> read_lock(XapianManager::instances_mutex);
-                for (auto it = XapianManager::instances.begin(); it != XapianManager::instances.end(); ++it)
-                {
-                    // Kiểm tra con trỏ hợp lệ và trạng thái idle
-                    if (it->second && it->second->is_idle_for(std::chrono::minutes(1))) // Ngưỡng idle là 1 phút
+                if (!mvm::IsXapianBasePathEmpty()) {
+                    for (auto it = XapianManager::instances.begin(); it != XapianManager::instances.end(); ++it)
                     {
-                        // Kiểm tra use_count để xem có tham chiếu nào khác ngoài map không
-                        std::shared_ptr<XapianManager> temp_ptr = it->second;
-                        // <= 2 nghĩa là chỉ có map và temp_ptr đang giữ tham chiếu
-                        if (temp_ptr.use_count() <= 2)
+                        // Kiểm tra con trỏ hợp lệ, trạng thái idle và không còn dữ liệu chưa commit
+                        if (it->second && it->second->is_idle_for(std::chrono::minutes(1)) &&
+                            it->second->is_evictable())
                         {
-                            keys_to_erase.push_back(it->first); // Thêm key vào danh sách xóa
+                            std::shared_ptr<XapianManager> temp_ptr = it->second;
+                            // <= 2 nghĩa là chỉ có map và temp_ptr đang giữ tham chiếu
+                            if (temp_ptr.use_count() <= 2)
+                            {
+                                keys_to_erase.push_back(it->first);
+                            }
                         }
                     }
                 }
@@ -1636,41 +2330,94 @@ struct CleanerStopper {
 // Áp dụng lại một danh sách các log entry vào database hiện tại với Doc Coalescing
 bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_replay) {
     if (log_to_replay.empty()) return true;
-    std::unique_lock<std::shared_mutex> db_lock(changes_mutex);
+    std::unique_lock<ChangesMutex> db_lock(changes_mutex);
+    ensure_db_open();
     has_uncommitted_writes.store(true, std::memory_order_release);
+    if (!has_uncommitted_prev_next_did_) {
+        uncommitted_prev_next_did_ = next_did_;
+        has_uncommitted_prev_next_did_ = true;
+    }
 
-    // Document staging cache for batch coalescing (tối ưu hóa gom các thao tác trên cùng 1 docid trong 1 block)
+    const bool db_initially_empty = (db.get_lastdocid() == 0);
+
+    // Document staging cache for batch coalescing (tối ưu hóa gom các thao tác trên cùng 1 docid trong 1 block).
+    // std::map keeps modified_docs sorted lexicographically by normalized docid (nid),
+    // ensuring newly allocated physical Xapian::docids match legacy replay_log / FullDbLogs order.
     std::map<std::string, Xapian::Document> modified_docs;
     std::set<std::string> deleted_docs;
+    std::unordered_map<std::string, Xapian::docid> resolved_dids;
 
-    // 2026-08-20 (plan §9.29): InMemory-mode-only pre-image capture for
-    // revertUncommittedChanges() -- see undo_snapshot_'s own doc comment
-    // (xapian_manager.h) for the full design. Cheap early-return in
-    // cgo/disk mode (the common case), so zero added cost there.
-    const bool undo_tracking_needed = mvm::IsXapianBasePathEmpty();
-    auto capture_undo_if_needed = [&](const std::string& nid) {
-        if (!undo_tracking_needed) return;
-        if (undo_snapshot_.find(nid) != undo_snapshot_.end()) return; // already captured this batch
-        Xapian::docid did = resolveVirtualDocId(nid);
-        if (did > 0) {
-            try {
-                undo_snapshot_[nid] = clone_document(db.get_document(did));
-                return;
-            } catch (const Xapian::DocNotFoundError&) {
-                // fall through -- treat as "did not exist"
-            } catch (const std::exception&) {
-                // fall through -- best-effort: treat as "did not exist"
-                // rather than skip tracking it entirely (leaving a gap
-                // revert couldn't undo would be worse)
-            }
+    auto resolve_cached_did = [&](const std::string& nid) -> Xapian::docid {
+        auto it = resolved_dids.find(nid);
+        if (it != resolved_dids.end()) {
+            return it->second;
         }
-        undo_snapshot_[nid] = std::nullopt; // did not exist before this batch
+        if (db_initially_empty) {
+            resolved_dids.emplace(nid, 0);
+            return 0;
+        }
+        Xapian::docid did = resolveVirtualDocId(nid);
+        resolved_dids.emplace(nid, did);
+        return did;
     };
 
-    ensure_db_open();
+    auto alloc_next_did = [&]() -> Xapian::docid {
+        if (next_did_ == 0) {
+            next_did_ = db.get_lastdocid() + 1;
+            if (next_did_ == 0) next_did_ = 1;
+        }
+        return next_did_++;
+    };
+
+    // Single-lookup, single-load, single-serialise pre-image capture & document loader.
+    // Avoids calling resolveVirtualDocId / get_document / serialise multiple times per doc
+    // and never calls Document::unserialise on the normal commit hot path.
+    auto capture_undo_and_optionally_load = [&](const std::string& nid, bool want_doc, Xapian::Document* out_doc) -> bool {
+        Xapian::docid did = resolve_cached_did(nid);
+        bool need_undo = (undo_snapshot_.find(nid) == undo_snapshot_.end());
+        if (did == 0 || db_initially_empty) {
+            if (need_undo) {
+                undo_snapshot_.emplace(nid, UndoEntry{false, 0, {}});
+            }
+            return false;
+        }
+        if (need_undo && undo_captured_dids_.find(did) != undo_captured_dids_.end()) {
+            need_undo = false;
+        }
+        if (!need_undo && !want_doc) {
+            return false;
+        }
+        try {
+            Xapian::Document existing_doc = db.get_document(did);
+            if (need_undo) {
+                undo_captured_dids_.insert(did);
+                undo_snapshot_.emplace(nid, UndoEntry{true, did, existing_doc.serialise()});
+            }
+            if (want_doc && out_doc != nullptr) {
+                *out_doc = std::move(existing_doc);
+                return true;
+            }
+            return false;
+        } catch (const Xapian::DocNotFoundError&) {
+            if (need_undo) {
+                undo_snapshot_.emplace(nid, UndoEntry{false, 0, {}});
+            }
+            return false;
+        } catch (const Xapian::Error&) {
+            if (need_undo) {
+                undo_snapshot_.emplace(nid, UndoEntry{false, 0, {}});
+            }
+            return false;
+        } catch (const std::exception&) {
+            if (need_undo) {
+                undo_snapshot_.emplace(nid, UndoEntry{false, 0, {}});
+            }
+            return false;
+        }
+    };
+
     auto get_or_load_doc = [&](const std::string& v_docid) -> Xapian::Document& {
         std::string nid = normalize_docid(v_docid);
-        capture_undo_if_needed(nid);
         auto it = modified_docs.find(nid);
         if (it != modified_docs.end()) {
             return it->second;
@@ -1679,30 +2426,16 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
         Xapian::Document doc;
         bool was_deleted = (deleted_docs.find(nid) != deleted_docs.end());
         bool loaded = false;
-        if (!was_deleted) {
-            Xapian::docid did = resolveVirtualDocId(nid);
-            if (did > 0) {
-                try {
-                    doc = db.get_document(did);
-                    loaded = true;
-                } catch (const Xapian::DocNotFoundError&) {
-                    loaded = false;
-                } catch (const std::exception& e) {
-                    std::cerr << "[Xapian Replay WARN] get_document(" << did << ") error: " << e.what() << std::endl;
-                    loaded = false;
-                }
-            }
+        if (was_deleted) {
+            capture_undo_and_optionally_load(nid, false, nullptr);
+        } else {
+            loaded = capture_undo_and_optionally_load(nid, true, &doc);
         }
 
         if (!loaded) {
             std::string clean_id = nid;
             if (clean_id.length() >= 2 && clean_id.substr(0, 2) == "0x") clean_id = clean_id.substr(2);
             doc.add_term("Q" + clean_id);
-            if (was_deleted) {
-                std::cerr << "[Xapian Replay INFO] docid '" << nid << "' was marked deleted in current replay. Initializing fresh in memory with term Q" << clean_id << std::endl;
-            } else {
-                std::cerr << "[Xapian Replay INFO] docid '" << nid << "' not present in local DB (did=0). Initializing in memory with term Q" << clean_id << std::endl;
-            }
         }
 
         auto inserted = modified_docs.emplace(nid, std::move(doc));
@@ -1715,28 +2448,36 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
             if (entry.op == XapianLog::Operation::NEW_DOC) {
                 auto data = std::get<XapianLog::NewDocData>(entry.data);
                 std::string nid = normalize_docid(data.docid);
-                Xapian::Document& doc = get_or_load_doc(nid);
-                doc.set_data(data.data);
+                if (modified_docs.find(nid) == modified_docs.end()) {
+                    capture_undo_and_optionally_load(nid, false, nullptr);
+                }
+                // IDEMPOTENCY FIX: NEW_DOC always initializes a brand-new clean document
+                // with only its Q<clean_id> system term and raw data, never inheriting
+                // stale terms/wdf/positions/values from any prior document with the same nid.
+                Xapian::Document fresh_doc;
+                std::string clean_id = nid;
+                if (clean_id.length() >= 2 && clean_id.substr(0, 2) == "0x") clean_id = clean_id.substr(2);
+                fresh_doc.add_term("Q" + clean_id);
+                fresh_doc.set_data(data.data);
+                modified_docs[nid] = std::move(fresh_doc);
+                deleted_docs.erase(nid);
             } else if (entry.op == XapianLog::Operation::DEL_DOC) {
                 auto data = std::get<XapianLog::DelDocData>(entry.data);
                 std::string nid = normalize_docid(data.docid);
-                capture_undo_if_needed(nid); // doesn't go through get_or_load_doc
+                capture_undo_and_optionally_load(nid, false, nullptr);
                 modified_docs.erase(nid);
                 deleted_docs.insert(nid);
             } else if (entry.op == XapianLog::Operation::ADD_VALUE) {
                 auto data = std::get<XapianLog::AddValueData>(entry.data);
-                std::string nid = normalize_docid(data.docid);
-                Xapian::Document& doc = get_or_load_doc(nid);
+                Xapian::Document& doc = get_or_load_doc(data.docid);
                 doc.add_value(data.slot, data.value);
             } else if (entry.op == XapianLog::Operation::ADD_TERM) {
                 auto data = std::get<XapianLog::AddTermData>(entry.data);
-                std::string nid = normalize_docid(data.docid);
-                Xapian::Document& doc = get_or_load_doc(nid);
+                Xapian::Document& doc = get_or_load_doc(data.docid);
                 doc.add_term(data.term);
             } else if (entry.op == XapianLog::Operation::SET_DATA) {
                 auto data = std::get<XapianLog::SetDataData>(entry.data);
-                std::string nid = normalize_docid(data.docid);
-                Xapian::Document& doc = get_or_load_doc(nid);
+                Xapian::Document& doc = get_or_load_doc(data.docid);
                 doc.set_data(data.data);
             } else if (entry.op == XapianLog::Operation::INDEX_TEXT) {
                 auto data = std::get<XapianLog::IndexTextData>(entry.data);
@@ -1769,28 +2510,37 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
             }
         }
 
-        // Apply deletions
+        // Deduplicate all physical docids slated for deletion and catch Xapian::DocNotFoundError
+        // (Xapian::Error does NOT inherit from std::exception; uncaught DocNotFoundError on a
+        // non-existent docid would otherwise abort replay_log and crash the node!)
+        std::set<Xapian::docid> final_dids_to_delete;
         for (const auto& v_docid : deleted_docs) {
-            Xapian::docid did = resolveVirtualDocId(v_docid);
+            Xapian::docid did = resolve_cached_did(v_docid);
             if (did > 0) {
-                try {
-                    db.delete_document(did);
-                } catch (const std::exception& e) {
-                    std::cerr << "[Xapian Replay WARN] delete_document(" << did << ") error: " << e.what() << std::endl;
-                }
+                final_dids_to_delete.insert(did);
+            }
+        }
+        for (Xapian::docid did : final_dids_to_delete) {
+            try {
+                db.delete_document(did);
+            } catch (const Xapian::DocNotFoundError&) {
+                // Idempotent no-op when deleting a non-existent document
+            } catch (const Xapian::Error& e) {
+                std::cerr << "[Xapian Replay WARN] delete_document(" << did << ") Xapian::Error: " << e.get_msg() << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "[Xapian Replay WARN] delete_document(" << did << ") error: " << e.what() << std::endl;
             }
         }
 
-        // Apply coalesced modified documents (1 write per docid, avoiding B-Tree saturation)
+        // Apply coalesced modified documents (1 write per docid, deterministic did in sorted nid order)
         for (auto& pair : modified_docs) {
             const std::string& v_docid = pair.first;
             Xapian::Document& doc = pair.second;
-            Xapian::docid did = resolveVirtualDocId(v_docid);
+            Xapian::docid did = resolve_cached_did(v_docid);
             if (did > 0) {
                 db.replace_document(did, doc);
             } else {
-                Xapian::docid new_did = db.add_document(doc);
-                std::cerr << "[Xapian Replay INFO] Persisted new document on disk for '" << v_docid << "' -> assigned internal did=" << new_did << std::endl;
+                db.replace_document(alloc_next_did(), doc);
             }
         }
         return true;
@@ -1809,110 +2559,65 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
 // Khôi phục trạng thái về lần commit cuối cùng bằng cách xóa log staged và mở
 // lại DB
 bool XapianManager::revertUncommittedChanges() {
-  std::unique_lock<std::shared_mutex> lock_changes(changes_mutex); // Khóa để thao tác an toàn
-  std::lock_guard<std::mutex> lock(db_mutex);
+  std::unique_lock<ChangesMutex> lock_changes(changes_mutex); // Khóa để thao tác an toàn
   bool has_writes = has_uncommitted_writes.load(std::memory_order_acquire);
   
   // FORK-SAFETY: Return immediately if there are no uncommitted changes
   if (!has_writes && comprehensive_log.xapian_doc_logs.empty()) {
       return true;
   }
+
+  ensure_db_open();
+  std::lock_guard<std::mutex> lock(db_mutex);
   
   try {
     // 1. Xóa các thay đổi đang chờ trong log và reset cờ dirty
     comprehensive_log.xapian_doc_logs.clear();
     has_uncommitted_writes.store(false, std::memory_order_release);
 
-    if (mvm::IsXapianBasePathEmpty()) {
-      // 2026-08-20 (plan §9.29): Xapian::InMemory's commit()/cancel() are
-      // BOTH hard no-ops -- confirmed by reading Xapian's own source
-      // (backends/inmemory/inmemory_database.cc: "We implicitly commit
-      // each modification right away, so nothing to do here" for both).
-      // So the close()+reopen-from-disk trick below isn't just
-      // inconvenient for InMemory, it's architecturally impossible:
-      // InMemoryDatabase::close() destroys ALL data unconditionally
-      // (there is no "disk" underneath to reload from -- close() clears
-      // every internal map and marks the db closed for good). Manually
-      // replay the pre-image snapshot captured by replay_log()'s
-      // capture_undo_if_needed() instead: restore what existed before
-      // this uncommitted batch, delete what didn't exist before it. See
-      // undo_snapshot_'s own doc comment (xapian_manager.h) for the full
-      // design and how/when it's populated.
-      // 2026-08-20 (plan §9.29 follow-up): granular per-call bracketing --
-      // a hardware run of this exact loop threw an uncaught
-      // Xapian::DocNotFoundError that escaped ALL THREE surrounding
-      // try/catch layers (this function's own, the caller's, main()'s) and
-      // crashed the whole TA (chcore/musl's std::terminate() path itself
-      // isn't fully implemented -- "Unsupported syscall 130" -- so an
-      // uncaught exception is unrecoverable here, not just noisy). Each
-      // individual Xapian call gets its own try/catch here so the NEXT
-      // hardware run pinpoints exactly which one throws, instead of
-      // needing a second round to add this.
-      for (auto &entry : undo_snapshot_) {
-        const std::string &nid = entry.first;
-        std::optional<Xapian::Document> &pre_image = entry.second;
-        fprintf(stderr, "[xapian_manager][DIAG] revert: resolving nid=%s\n", nid.c_str());
-        fflush(stderr);
-        Xapian::docid did = resolveVirtualDocId(nid);
-        fprintf(stderr, "[xapian_manager][DIAG] revert: did=%u has_pre_image=%d\n",
-            (unsigned)did, (int)pre_image.has_value());
-        fflush(stderr);
-        try {
-          if (pre_image.has_value()) {
-            if (did > 0) {
-              fprintf(stderr, "[xapian_manager][DIAG] revert: about to replace_document(%u)\n", (unsigned)did);
-              fflush(stderr);
-              db.replace_document(did, *pre_image);
-              fprintf(stderr, "[xapian_manager][DIAG] revert: replace_document OK\n");
-              fflush(stderr);
-            } else {
-              // Existed before this batch, but resolveVirtualDocId can't
-              // find it now -- shouldn't happen (nothing removes a doc's
-              // own "Q<id>" term without also deleting the doc itself), but
-              // re-add rather than silently drop real pre-existing data if
-              // it ever does.
-              fprintf(stderr, "[xapian_manager][DIAG] revert: about to add_document (re-add)\n");
-              fflush(stderr);
-              db.add_document(*pre_image);
-              fprintf(stderr, "[xapian_manager][DIAG] revert: add_document OK\n");
-              fflush(stderr);
-            }
-          } else if (did > 0) {
-            fprintf(stderr, "[xapian_manager][DIAG] revert: about to delete_document(%u)\n", (unsigned)did);
-            fflush(stderr);
-            db.delete_document(did); // did not exist before this batch
-            fprintf(stderr, "[xapian_manager][DIAG] revert: delete_document OK\n");
-            fflush(stderr);
+    // 2. Khôi phục từ undo_snapshot_ cho cả InMemory và on-disk WritableDatabase.
+    // LƯU Ý QUAN TRỌNG: Xapian::WritableDatabase::close() tự động flush/commit các thay đổi
+    // đang buffer xuống đĩa (nếu không dùng begin_transaction), nên KHÔNG ĐƯỢC dùng db.close()
+    // để hủy thay đổi chưa commit! Phải áp ngược undo_snapshot_ trực tiếp lên db.
+    for (auto &entry : undo_snapshot_) {
+      const std::string &nid = entry.first;
+      UndoEntry &ue = entry.second;
+      Xapian::docid did = resolveDocIdInDb(db, nid);
+      try {
+        if (ue.existed && !ue.serialized_doc.empty()) {
+          Xapian::Document restored = Xapian::Document::unserialise(ue.serialized_doc);
+          Xapian::docid restore_did = (ue.original_did > 0) ? ue.original_did : did;
+          if (did > 0 && did != restore_did) {
+            try { db.delete_document(did); } catch (const Xapian::DocNotFoundError &) {}
           }
-        } catch (const Xapian::Error &e) {
-          fprintf(stderr, "[xapian_manager][DIAG] revert: Xapian::Error on nid=%s: %s (type=%s)\n",
-              nid.c_str(), e.get_msg().c_str(), e.get_type());
-          fflush(stderr);
-          // Best-effort: this one entry's undo failed, but don't let it
-          // take down the whole revert (or the TA) -- continue with the
-          // rest of the snapshot.
-        } catch (const std::exception &e) {
-          fprintf(stderr, "[xapian_manager][DIAG] revert: std::exception on nid=%s: %s\n", nid.c_str(), e.what());
-          fflush(stderr);
-        } catch (...) {
-          fprintf(stderr, "[xapian_manager][DIAG] revert: unknown exception on nid=%s\n", nid.c_str());
-          fflush(stderr);
+          if (restore_did > 0) {
+            db.replace_document(restore_did, restored);
+          } else {
+            db.add_document(restored);
+          }
+        } else {
+          if (did > 0) {
+            try { db.delete_document(did); } catch (const Xapian::DocNotFoundError &) {}
+          }
+          if (ue.original_did > 0 && ue.original_did != did) {
+            try { db.delete_document(ue.original_did); } catch (const Xapian::DocNotFoundError &) {}
+          }
         }
+      } catch (const Xapian::Error &) {
+      } catch (const std::exception &) {
+      } catch (...) {
       }
-      undo_snapshot_.clear();
-      fprintf(stderr, "[xapian_manager][DIAG] revert: InMemory branch RETURN true\n");
-      fflush(stderr);
-      return true;
     }
-
-    // 2. cgo/disk mode (unchanged): đóng và mở lại database để hủy các
-    // thay đổi chưa commit trong bộ nhớ Xapian
-    db.close();                      // Đóng kết nối hiện tại
-    db = Xapian::WritableDatabase(); // Gán bằng đối tượng rỗng để giải phóng
-                                     // tài nguyên cũ
-    // Mở lại database từ đường dẫn đã lưu
-    db = Xapian::WritableDatabase(
-        mvm::createFullPath(address, db_name).string(), Xapian::DB_OPEN);
+    if (has_uncommitted_prev_next_did_) {
+      next_did_ = uncommitted_prev_next_did_;
+    }
+    undo_snapshot_.clear();
+    undo_captured_dids_.clear();
+    has_uncommitted_prev_next_did_ = false;
+    if (!mvm::IsXapianBasePathEmpty()) {
+      db.commit();
+      db_generation.fetch_add(1, std::memory_order_acq_rel);
+    }
     return true; // Revert thành công
   } catch (const Xapian::Error &) {
     return false; /* Lỗi Xapian khi đóng/mở lại DB */
@@ -1926,70 +2631,53 @@ bool XapianManager::revertUncommittedChanges() {
 // Hủy một instance XapianManager và xóa nó khỏi map quản lý
 bool XapianManager::destroyInstance(const std::string &db_path_str, bool onlyIfIdle)
 {
-    std::shared_ptr<XapianManager> instance_ptr;
-
+    std::unique_lock<std::shared_mutex> write_lock(instances_mutex);
+    auto it = instances.find(db_path_str);
+    if (it == instances.end())
     {
-        std::unique_lock<std::shared_mutex> write_lock(instances_mutex);
-        auto it = instances.find(db_path_str);
-        if (it != instances.end())
+        return false; // Không tìm thấy instance để hủy
+    }
+
+    if (onlyIfIdle)
+    {
+        // Re-kiểm tra atomic dưới cùng lock với erase: không bao giờ hủy trong chế độ
+        // InMemory hoặc khi còn tx_buffers / has_uncommitted_writes chưa commit!
+        if (mvm::IsXapianBasePathEmpty() || !it->second ||
+            !it->second->is_idle_for(std::chrono::minutes(1)) ||
+            it->second.use_count() > 1 || !it->second->is_evictable())
         {
-            if (onlyIfIdle)
-            {
-                // Re-kiểm tra atomic dưới cùng lock với erase: nếu có thread khác
-                // vừa lấy một tham chiếu mới (getInstance) hoặc vẫn đang giữ tham
-                // chiếu từ trước kể từ lần kiểm tra sơ bộ (Giai đoạn 1 ở cleaner
-                // thread), use_count() ở đây sẽ > 1 (chỉ map giữ tham chiếu là
-                // baseline = 1) và ta bỏ qua việc hủy để tránh đóng `db` trong
-                // lúc đang được sử dụng.
-                if (!it->second || !it->second->is_idle_for(std::chrono::minutes(1)) ||
-                    it->second.use_count() > 1)
-                {
-                    return false;
-                }
-            }
-            instance_ptr = it->second; // Giữ một tham chiếu tạm thời
-            instances.erase(it);
+            return false;
         }
     }
 
+    std::shared_ptr<XapianManager> instance_ptr = it->second;
     if (instance_ptr)
     {
-        try
+        bool need_revert = false;
         {
-            // Khóa changes_mutex trước khi đóng db, cùng quy ước với mọi thao
-            // tác khác ghi vào `db` (add_document/replace_document/commit/
-            // revertUncommittedChanges), để tránh race đóng db trong lúc một
-            // thread khác đang ghi vào nó.
-            std::unique_lock<std::shared_mutex> changes_lock(instance_ptr->changes_mutex);
-
-            // Bước 1: Đóng database Xapian tường minh
-            try
-            {
-                instance_ptr->db.close();
-            }
-            catch (const Xapian::Error &)
-            { /* Bỏ qua lỗi đóng DB */
-            }
-            catch (const std::exception &)
-            { /* Bỏ qua lỗi đóng DB */
-            }
-            catch (...)
-            { /* Bỏ qua lỗi đóng DB */
-            }
-
-            return true; // Trả về true nếu xóa thành công
+            std::shared_lock<ChangesMutex> check_lock(instance_ptr->changes_mutex);
+            need_revert = instance_ptr->has_uncommitted_writes.load(std::memory_order_acquire) ||
+                          !instance_ptr->comprehensive_log.xapian_doc_logs.empty();
         }
-        catch (const std::exception &)
+        if (need_revert)
         {
-            return false;
+            instance_ptr->revertUncommittedChanges();
         }
-        catch (...)
-        {
-            return false;
+        // Khóa changes_mutex và đóng db TRƯỚC KHI nhả instances_mutex (tuân thủ đúng thứ tự
+        // khóa toàn cục instances_mutex -> changes_mutex như getInstance/commitAllInstances),
+        // triệt tiêu hoàn toàn cửa sổ race flintlock DatabaseLockError khi thread khác mở lại DB.
+        std::unique_lock<ChangesMutex> changes_lock(instance_ptr->changes_mutex);
+        try {
+            instance_ptr->db.close();
+        } catch (const Xapian::Error &) {
+        } catch (const std::exception &) {
+        } catch (...) {
         }
+        instance_ptr->is_db_open = false;
     }
 
-    return false; // Không tìm thấy instance để hủy
+    instances.erase(it);
+    return instance_ptr != nullptr;
 }
 
 void XapianManager::destroyAllInstances() {
@@ -2008,7 +2696,7 @@ void XapianManager::destroyAllInstances() {
 // Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged VÀ XÓA CHÚNG KHỎI MANAGER
 XapianLog::ComprehensiveLog XapianManager::extractComprehensiveChangeLogs()
 {
-    std::lock_guard<std::shared_mutex> lock(changes_mutex);
+    std::lock_guard<ChangesMutex> lock(changes_mutex);
     XapianLog::ComprehensiveLog log_copy = std::move(comprehensive_log);
     comprehensive_log.xapian_doc_logs.clear();
     comprehensive_log.db_name = this->db_name; // Restore db_name after std::move
@@ -2018,7 +2706,7 @@ XapianLog::ComprehensiveLog XapianManager::extractComprehensiveChangeLogs()
 // Lấy một bản ghi log tổng hợp chứa tất cả các thay đổi đã staged
 XapianLog::ComprehensiveLog XapianManager::removeLogsUntilNearestEndCommand()
 {
-    std::lock_guard<std::shared_mutex> lock(changes_mutex);
+    std::lock_guard<ChangesMutex> lock(changes_mutex);
     comprehensive_log.removeLogsUntilNearestEndCommand();
     return comprehensive_log;
 }
@@ -2035,7 +2723,7 @@ void XapianManager::ensure_db_open() {
 
 void XapianManager::evict_handles() {
     if (mvm::IsXapianBasePathEmpty()) return;
-    std::unique_lock<std::shared_mutex> ch_lock(changes_mutex);
+    std::unique_lock<ChangesMutex> ch_lock(changes_mutex);
     std::lock_guard<std::mutex> lock(db_mutex);
     if (is_db_open) {
         try { db.close(); } catch (...) {}

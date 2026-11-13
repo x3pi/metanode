@@ -340,6 +340,15 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	var tTrie, tAccount, tContract, tStake, tDispatch time.Duration
 
+	// Wait for mapping generation to complete BEFORE committing Xapian to disk, so a
+	// mapping error never flushes Xapian ahead of a reverted draft block.
+	mappingWg.Wait()
+	if mappingErr != nil {
+		logger.Error("🚨 [COMMIT-MEMORY] mapping generation error for block #%d: %v — reverting draft block to prevent fork", currentBlockNumber, mappingErr)
+		bp.revertDraftBlock(txDB, currentBlockNumber)
+		return nil
+	}
+
 	if isStateChanging {
 		startTrie := time.Now()
 		trieBatchSnapshot = trie_database.GetTrieDatabaseManager().GetCollectedBatches()
@@ -399,17 +408,9 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 					processResults.FullDbLogs = append(processResults.FullDbLogs, xapianLogs)
 				}
 
-				mvm.CommitAllXapian()
+				mvm.CommitAllXapianAtBlock(currentBlockNumber)
 			}
 		}
-	}
-
-	// Wait for mapping generation to complete before constructing CommitJob
-	mappingWg.Wait()
-	if mappingErr != nil {
-		logger.Error("🚨 [COMMIT-MEMORY] mapping generation error for block #%d: %v — reverting draft block to prevent fork", currentBlockNumber, mappingErr)
-		bp.revertDraftBlock(txDB, currentBlockNumber)
-		return nil
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -729,7 +730,19 @@ func (bp *BlockProcessor) revertDraftBlock(txDB *transaction_state_db.Transactio
 	}
 
 	// 3. Reset lastBlock pointer to the parent (the block BEFORE the failed one)
-	parentBlockNumber := failedBlockNumber - 1
+	var parentBlockNumber uint64
+	if failedBlockNumber > 0 {
+		parentBlockNumber = failedBlockNumber - 1
+	}
+
+	// Clear any buffered Xapian tx writes for the aborted draft block and roll back
+	// any Xapian DB state committed above parentBlockNumber so re-execution stays idempotent.
+	mvm.ClearAllXapianTxBuffers()
+	if rolledBack, rbErr := mvm.RollbackXapianAboveBlock(parentBlockNumber); rbErr != nil {
+		logger.Error("❌ [REVERT] Failed to roll back Xapian above block #%d: %v", parentBlockNumber, rbErr)
+	} else if rolledBack > 0 {
+		logger.Warn("🛡️ [REVERT] Rolled back %d Xapian database(s) to parent block #%d", rolledBack, parentBlockNumber)
+	}
 	var parentBlock types.Block
 	if bc := blockchain.GetBlockChainInstance(); bc != nil {
 		parentBlock = bc.GetBlockByNumber(parentBlockNumber)

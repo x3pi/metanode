@@ -28,6 +28,7 @@ extern "C" void SetXapianBasePath(const char *path) {
 namespace mvm {
 
 bool IsXapianBasePathEmpty() { return g_xapian_base_path.empty(); }
+std::string GetXapianBasePath() { return g_xapian_base_path; }
 
 // Hàm băm chuỗi sử dụng Keccak-256
 std::string keccak256(const std::string &input) {

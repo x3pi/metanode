@@ -38,19 +38,20 @@ bool XapianManager::isReservedSystemPrefix(const std::string& prefix) {
     return true;
 }
 
-// Helper function to insert into xapian_manager.cpp
+// Helper function to resolve a virtual document ID solely via its 'Q' + clean_id term.
+// Never treats short strings (< 16 chars) as raw physical Xapian::docids, preventing
+// short docid strings (e.g. "0x2") from aliasing or overwriting unrelated documents.
 Xapian::docid XapianManager::resolveVirtualDocId(const std::string& virtualDocIdStr, Xapian::Database* search_db) {
     if (virtualDocIdStr.empty()) return 0;
     try {
-        if (virtualDocIdStr.length() < 16) {
-            return static_cast<Xapian::docid>(std::stoul(virtualDocIdStr, nullptr, 16));
+        std::string clean_id = normalize_docid(virtualDocIdStr);
+        if (clean_id.length() >= 2 && clean_id.substr(0, 2) == "0x") {
+            clean_id = clean_id.substr(2);
         }
-        
-        std::string clean_id = virtualDocIdStr;
-        if (clean_id.substr(0, 2) == "0x") clean_id = clean_id.substr(2);
-        
+        if (clean_id.empty()) return 0;
+
         std::string term = "Q" + clean_id;
-        
+
         if (search_db != nullptr) {
             Xapian::PostingIterator it = search_db->postlist_begin(term);
             if (it != search_db->postlist_end(term)) {

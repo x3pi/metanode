@@ -2249,4 +2249,3 @@ func TestXapian_GasRejectedAndNonceSkippedBufferClear(t *testing.T) {
 		require.Equal(t, 0, len(logs), "duplicate-nonce tx2 must not leave speculative Xapian buffer entries")
 	})
 }
-
