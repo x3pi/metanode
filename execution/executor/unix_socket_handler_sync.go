@@ -119,6 +119,37 @@ func (rh *RequestHandler) HandleWaitForSyncToBlockRequest(request *pb.WaitForSyn
 	}, nil
 }
 
+func hasAnyBackupDbPayload(b *storage.BackUpDb) bool {
+	if b == nil {
+		return false
+	}
+	if len(b.AccountBatch) > 0 ||
+		len(b.CodeBatchPut) > 0 ||
+		len(b.SmartContractBatch) > 0 ||
+		len(b.SmartContractStorageBatch) > 0 ||
+		len(b.ReceiptBatchPut) > 0 ||
+		len(b.TxBatchPut) > 0 ||
+		len(b.MapppingBatch) > 0 ||
+		len(b.StakeState) > 0 ||
+		len(b.DevicePut) > 0 ||
+		len(b.DeviceDelete) > 0 {
+		return true
+	}
+	for _, v := range b.TrieDatabaseBatchPut {
+		if len(v) > 0 {
+			return true
+		}
+	}
+	for _, m := range b.FullDbLogs {
+		for _, v := range m {
+			if len(v) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // HandleSyncBlocksRequest processes a SyncBlocksRequest and syncs blocks to local storage
 // This is used by nodes to receive blocks fetched from peers via Rust orchestration
 func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest) (*pb.SyncBlocksResponse, error) {
@@ -284,6 +315,23 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// ═══════════════════════════════════════════════════════════════════════════
 		currentGEI := storage.GetLastGlobalExecIndex()
 		isFullyExecuted := false
+		forkOverwrite := false
+		resetLocalForkBeforeBlock := func(forkBlockNum uint64) error {
+			forkOverwrite = true
+			isFullyExecuted = false
+			if forkBlockNum > 0 {
+				targetBlock := forkBlockNum - 1
+				if _, rbErr := mvm.RollbackXapianAboveBlock(targetBlock); rbErr != nil {
+					logger.Error("🚨 [SYNC-FORK-ROLLBACK] RollbackXapianAboveBlock(%d) failed before overwriting block #%d: %v — ABORTING sync to prevent Xapian/BlockDB divergence!", targetBlock, forkBlockNum, rbErr)
+					return fmt.Errorf("RollbackXapianAboveBlock(%d) failed before overwriting fork block %d: %w", targetBlock, forkBlockNum, rbErr)
+				}
+				storage.ResetAllBlockCounters(targetBlock)
+				storage.ForceSetLastGlobalExecIndex(targetBlock)
+				currentGEI = targetBlock
+			}
+			return nil
+		}
+
 		if blockGEI > 0 && blockGEI <= currentGEI {
 			if localHash, ok := bc.GetBlockHashByNumber(blockNum); ok {
 				if localHash == blockHash {
@@ -301,7 +349,13 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 						logger.Warn("⚠️ [STARTUP-SYNC-FORK] Local block #%d hash (%s) != leader hash (%s) during startup sync. "+
 							"FORCING execution/overwrite of this block to resolve local fork.",
 							blockNum, localHash.Hex()[:18], blockHash.Hex()[:18])
-						isFullyExecuted = false
+						if rbErr := resetLocalForkBeforeBlock(blockNum); rbErr != nil {
+							return &pb.SyncBlocksResponse{
+								SyncedCount:     executedCount,
+								LastSyncedBlock: lastExecutedBlock,
+								Error:           rbErr.Error(),
+							}, nil
+						}
 					} else {
 						// ═══════════════════════════════════════════════════════════
 						// FORK-SAFE (June 2026): Force execution on hash mismatch!
@@ -318,7 +372,13 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 						logger.Warn("⚠️ [SYNC-HASH-MISMATCH] Local block #%d hash (%x) != leader hash (%x) during sync. "+
 							"FORCING execution/overwrite of this block to resolve local fork.",
 							blockNum, localHash[:8], blockHash[:8])
-						isFullyExecuted = false // Overwrite local stale block
+						if rbErr := resetLocalForkBeforeBlock(blockNum); rbErr != nil {
+							return &pb.SyncBlocksResponse{
+								SyncedCount:     executedCount,
+								LastSyncedBlock: lastExecutedBlock,
+								Error:           rbErr.Error(),
+							}, nil
+						}
 					}
 				}
 			}
@@ -333,15 +393,28 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 		// STRICT BLOCK NUMBER GUARD: If the block number is already committed and there is no hash mismatch,
 		// it is fully executed. This prevents executing state batches for duplicate blocks.
-		if !isFullyExecuted && blockNum > 0 {
+		if !isFullyExecuted && !forkOverwrite && blockNum > 0 {
 			lastBlockNum := storage.GetLastBlockNumber()
-			if blockNum < lastBlockNum {
-				isFullyExecuted = true
-				logger.Info("🔄 [SYNC-DEDUPLICATE] Block #%d is strictly older than last committed #%d. Skipping execution.", blockNum, lastBlockNum)
-			} else if blockNum == lastBlockNum {
-				if localHash, ok := bc.GetBlockHashByNumber(blockNum); ok && localHash == blockHash {
+			if blockNum <= lastBlockNum {
+				if localHash, ok := bc.GetBlockHashByNumber(blockNum); ok {
+					if localHash == blockHash {
+						isFullyExecuted = true
+						logger.Info("🔄 [SYNC-DEDUPLICATE] Block #%d matches committed hash (tip=#%d). Skipping execution.", blockNum, lastBlockNum)
+					} else {
+						logger.Warn("⚠️ [SYNC-HASH-MISMATCH] Local block #%d hash (%x) != leader hash (%x) below/at tip #%d. "+
+							"FORCING execution/overwrite of this block to resolve local fork.",
+							blockNum, localHash[:8], blockHash[:8], lastBlockNum)
+						if rbErr := resetLocalForkBeforeBlock(blockNum); rbErr != nil {
+							return &pb.SyncBlocksResponse{
+								SyncedCount:     executedCount,
+								LastSyncedBlock: lastExecutedBlock,
+								Error:           rbErr.Error(),
+							}, nil
+						}
+					}
+				} else if blockNum < lastBlockNum {
 					isFullyExecuted = true
-					logger.Info("🔄 [SYNC-DEDUPLICATE] Block #%d is duplicate of last committed tip. Skipping execution.", blockNum)
+					logger.Info("🔄 [SYNC-DEDUPLICATE] Block #%d is strictly older than last committed #%d (no hash entry). Skipping execution.", blockNum, lastBlockNum)
 				}
 			}
 		}
@@ -453,8 +526,16 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 						"Rolling back block counters to %d to force resync of the mismatched block.",
 						blockNum, actualParentHash.Hex(), prevBlockNum, expectedParentHash.Hex(), prevBlockNum-1)
 
-					// Force rollback of Go's block counters to prevBlockNum-1 so the next sync request
+					// Force rollback of Go's block counters (and Xapian) to prevBlockNum-1 so the next sync request
 					// starts from prevBlockNum, allowing Go to fetch and overwrite the stale local block.
+					if _, rbErr := mvm.RollbackXapianAboveBlock(prevBlockNum - 1); rbErr != nil {
+						logger.Error("🚨 [SYNC-FORK-GUARD] RollbackXapianAboveBlock(%d) failed on parent-hash mismatch: %v", prevBlockNum-1, rbErr)
+						return &pb.SyncBlocksResponse{
+							SyncedCount:     executedCount,
+							LastSyncedBlock: lastExecutedBlock,
+							Error:           fmt.Sprintf("parent-hash mismatch at block %d and RollbackXapianAboveBlock(%d) failed: %v", blockNum, prevBlockNum-1, rbErr),
+						}, nil
+					}
 					storage.ResetAllBlockCounters(prevBlockNum - 1)
 					storage.ForceSetLastGlobalExecIndex(prevBlockNum - 1)
 
@@ -478,6 +559,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 							"Rolling back block counters to %d to force resync of the mismatched block.",
 							blockNum, header.ExcessBlobGas(), expectedExcessBlobGas, prevBlockNum-1)
 
+						if _, rbErr := mvm.RollbackXapianAboveBlock(prevBlockNum - 1); rbErr != nil {
+							logger.Error("🚨 [SYNC-FORK-GUARD] RollbackXapianAboveBlock(%d) failed on excessBlobGas mismatch: %v", prevBlockNum-1, rbErr)
+							return &pb.SyncBlocksResponse{
+								SyncedCount:     executedCount,
+								LastSyncedBlock: lastExecutedBlock,
+								Error:           fmt.Sprintf("excessBlobGas mismatch at block %d and RollbackXapianAboveBlock(%d) failed: %v", blockNum, prevBlockNum-1, rbErr),
+							}, nil
+						}
 						storage.ResetAllBlockCounters(prevBlockNum - 1)
 						storage.ForceSetLastGlobalExecIndex(prevBlockNum - 1)
 
@@ -521,7 +610,19 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 			backupDb, deserErr := storage.DeserializeBackupDb(backupBytes)
 			if deserErr != nil {
-				logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to deserialize BackUpDb for block #%d: %v", blockNum, deserErr)
+				logger.Error("🚨 [SYNC-FATAL] Failed to deserialize BackUpDb for block #%d: %v — ABORTING to prevent State Drift!", blockNum, deserErr)
+				return &pb.SyncBlocksResponse{
+					SyncedCount:     executedCount,
+					LastSyncedBlock: lastExecutedBlock,
+					Error:           fmt.Sprintf("deserialize BackupDb failed for block %d: %v", blockNum, deserErr),
+				}, nil
+			} else if len(txs) > 0 && !hasAnyBackupDbPayload(&backupDb) {
+				logger.Error("🚨 [SYNC-FATAL] Empty BackupDb state payload for non-empty block #%d (%d txs) — ABORTING to prevent State Drift!", blockNum, len(txs))
+				return &pb.SyncBlocksResponse{
+					SyncedCount:     executedCount,
+					LastSyncedBlock: lastExecutedBlock,
+					Error:           fmt.Sprintf("empty BackupDb state payload for non-empty block %d (%d txs)", blockNum, len(txs)),
+				}, nil
 			} else {
 				// DEBUG: Log field sizes after deserialize — tells us if AccountBatch is missing
 				logger.Debug("🔍 [NOMT-DEBUG] Block #%d deserialized: AccountBatch=%d bytes, TrieDB=%d bytes, FullDbLogs=%d entries",
@@ -610,6 +711,23 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 						}
 					}
 				}
+			}
+		} else if len(txs) > 0 {
+			logger.Error("🚨 [SYNC-FATAL] Missing BackupData for non-empty block #%d (%d txs) — ABORTING to prevent State Drift!", blockNum, len(txs))
+			return &pb.SyncBlocksResponse{
+				SyncedCount:     executedCount,
+				LastSyncedBlock: lastExecutedBlock,
+				Error:           fmt.Sprintf("missing BackupData for non-empty block %d (%d txs)", blockNum, len(txs)),
+			}, nil
+		} else if blockNum > 0 {
+			if _, rbErr := mvm.RollbackXapianAboveBlock(blockNum - 1); rbErr != nil {
+				logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) failed while syncing empty block #%d without BackupData: %v",
+					blockNum-1, blockNum, rbErr)
+				return &pb.SyncBlocksResponse{
+					SyncedCount:     executedCount,
+					LastSyncedBlock: lastExecutedBlock,
+					Error:           fmt.Sprintf("RollbackXapianAboveBlock(%d) failed for block %d: %v", blockNum-1, blockNum, rbErr),
+				}, nil
 			}
 		}
 
@@ -1106,6 +1224,19 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]tr
 		}
 		logger.Info("📥 [BLOCK SYNC] ✅ Replayed %d FullDbLogs entries for block %d", len(backupDb.FullDbLogs), backupDb.BockNumber)
 		mvm.CommitAllXapianAtBlock(backupDb.BockNumber)
+		if backupStorage := rh.storageManager.GetStorageBackupDb(); backupStorage != nil {
+			if errPut := storage.PersistLatestFullDbLogsBatch(backupStorage, backupDb.FullDbLogs); errPut != nil {
+				logger.Error("❌ [BLOCK SYNC] Failed to persist latest full_db_logs index for block #%d: %v", backupDb.BockNumber, errPut)
+			}
+		}
+	} else if backupDb.BockNumber > 0 {
+		// Even when canonical block has no Xapian logs, roll back any local stale fork Xapian DBs
+		// committed at >= backupDb.BockNumber so untouched contracts cannot retain phantom fork state.
+		if _, rbErr := mvm.RollbackXapianAboveBlock(backupDb.BockNumber - 1); rbErr != nil {
+			logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) failed while syncing block #%d with empty FullDbLogs: %v",
+				backupDb.BockNumber-1, backupDb.BockNumber, rbErr)
+			return nil, fmt.Errorf("RollbackXapianAboveBlock(%d) failed for block #%d: %w", backupDb.BockNumber-1, backupDb.BockNumber, rbErr)
+		}
 	}
 
 	// Apply mapping batch

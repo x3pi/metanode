@@ -147,7 +147,7 @@ func CallReplayFullDbLogs(logs map[string][]byte) int {
 }
 
 func CallReplayFullDbLogsAtBlock(logs map[string][]byte, blockNumber uint64) int {
-	if len(logs) == 0 {
+	if len(logs) == 0 && blockNumber == 0 {
 		return 1
 	}
 	return CallReplayFullDbLogsBatchAtBlock([]map[string][]byte{logs}, blockNumber)
@@ -159,6 +159,12 @@ func CallReplayFullDbLogsBatchAtBlock(logBatches []map[string][]byte, blockNumbe
 		totalEntries += len(m)
 	}
 	if totalEntries == 0 {
+		if blockNumber > 0 {
+			if _, err := RollbackXapianAboveBlock(blockNumber - 1); err != nil {
+				fmt.Printf("[Go CallReplay] LỖI: RollbackXapianAboveBlock(%d) thất bại cho batch rỗng: %v\n", blockNumber-1, err)
+				return 0
+			}
+		}
 		return 1
 	}
 	fmt.Printf("[Go CallReplay] Chuẩn bị %d entry log từ %d batch (block=%d) để gọi C++ ReplayFullDbLogsAtBlock...\n", totalEntries, len(logBatches), blockNumber)
@@ -185,18 +191,21 @@ func CallReplayFullDbLogsBatchAtBlock(logBatches []map[string][]byte, blockNumbe
 		for _, addrHex := range addrs {
 			logData := logs[addrHex]
 			fmt.Printf("  - Xử lý log cho địa chỉ hex: %s\n", addrHex)
-			processedAddrHex := strings.TrimPrefix(addrHex, "0x")
+			processedAddrHex := strings.TrimSpace(addrHex)
+			if strings.HasPrefix(processedAddrHex, "0x") || strings.HasPrefix(processedAddrHex, "0X") {
+				processedAddrHex = processedAddrHex[2:]
+			}
 			if len(processedAddrHex)%2 != 0 {
 				processedAddrHex = "0" + processedAddrHex
 			}
 			if len(processedAddrHex) != 40 {
-				fmt.Printf("    - LỖI: Độ dài địa chỉ hex không hợp lệ (%d chars) cho '%s'. Bỏ qua.\n", len(processedAddrHex), addrHex)
-				continue
+				fmt.Printf("    - LỖI: Độ dài địa chỉ hex không hợp lệ (%d chars) cho '%s'. Dừng xử lý (fail-closed).\n", len(processedAddrHex), addrHex)
+				return 0
 			}
 			addrBytes, err := hex.DecodeString(processedAddrHex)
 			if err != nil {
-				fmt.Printf("    - LỖI: Không thể decode địa chỉ hex '%s': %v. Bỏ qua.\n", addrHex, err)
-				continue
+				fmt.Printf("    - LỖI: Không thể decode địa chỉ hex '%s': %v. Dừng xử lý (fail-closed).\n", addrHex, err)
+				return 0
 			}
 			if len(logData) == 0 {
 				fmt.Printf("    - CẢNH BÁO: Dữ liệu log rỗng cho địa chỉ '%s'. Bỏ qua.\n", addrHex)
@@ -229,6 +238,12 @@ func CallReplayFullDbLogsBatchAtBlock(logBatches []map[string][]byte, blockNumbe
 	}
 	numValidEntries := len(cEntries)
 	if numValidEntries == 0 {
+		if blockNumber > 0 {
+			if _, err := RollbackXapianAboveBlock(blockNumber - 1); err != nil {
+				fmt.Printf("[Go CallReplay] LỖI: RollbackXapianAboveBlock(%d) thất bại khi không có entry log khác rỗng: %v\n", blockNumber-1, err)
+				return 0
+			}
+		}
 		fmt.Println("[Go CallReplay] Không có entry hợp lệ nào được chuẩn bị sau khi lọc. Không gọi C++.")
 		return 1
 	}
@@ -288,10 +303,17 @@ func ExportAllXapianLogs() map[string][]byte {
 		addressBytes := C.GoBytes(unsafe.Pointer(&cEntry.address[0]), 20)
 		addressHex := common.BytesToAddress(addressBytes).Hex()
 
-		// Parse serialized logs
+		// Parse serialized logs. Multiple self-delimiting ComprehensiveLog frames
+		// for the same contract address (when one contract writes >= 2 dbName
+		// instances in the same block, sorted deterministically by (address, db_name)
+		// in C++) are concatenated under addressHex so no DB is ever overwritten.
 		if cEntry.logs != nil && cEntry.logs_length > 0 {
 			logData := C.GoBytes(unsafe.Pointer(cEntry.logs), cEntry.logs_length)
-			result[addressHex] = logData
+			if existing, exists := result[addressHex]; exists {
+				result[addressHex] = append(existing, logData...)
+			} else {
+				result[addressHex] = logData
+			}
 		}
 	}
 

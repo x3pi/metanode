@@ -18,6 +18,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
+	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
@@ -491,6 +492,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 
 		if ctx.Err() != nil {
 			logger.Warn("⚠️ [SPECULATIVE] GEI=%d (block #%d) execution was cancelled (aborted by Sync/Consensus). Discarding state.", gei, blockNum)
+			clearXapianBuffersForTxs(allTransactions)
 			if csCopy != nil {
 				csCopy.AbortSpeculative()
 			}
@@ -542,6 +544,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		lastCommittedGEI = storage.GetLastGlobalExecIndex()
 		if gei <= lastCommittedGEI {
 			logger.Warn("⚠️ [SPECULATIVE] Execution finished for GEI=%d (block #%d) but block is already committed to DB (lastGEI=%d). Discarding obsolete speculative state immediately.", gei, blockNum, lastCommittedGEI)
+			clearXapianBuffersForTxs(allTransactions)
 			res.AbortClonedState()
 			authCh := res.AuthResponseChannel()
 			if authCh != nil {
@@ -581,6 +584,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		// it — discard the speculative clone and never push to resultChan.
 		if _, exists := se.activeSessions.Load(gei); !exists {
 			logger.Warn("⚠️ [SPECULATIVE] Execution finished for GEI=%d but session was aborted by CleanGEI", gei)
+			clearXapianBuffersForTxs(allTransactions)
 			res.AbortClonedState()
 			authCh := res.AuthResponseChannel()
 			if authCh != nil {
@@ -718,6 +722,25 @@ func (se *SpeculativeExecutor) AbortAllSpeculative() {
 		se.inFlight.Delete(gei)
 		return true
 	})
+	mvm.ClearAllXapianTxBuffers()
+}
+
+// clearXapianBuffersForTxs discards uncommitted per-transaction Xapian buffers for a batch
+// of transactions so aborted/swept/conflicted speculative sessions never leak tx_buffers
+// or permanently pin XapianManager::is_evictable() == false.
+func clearXapianBuffersForTxs(txs []types.Transaction) {
+	if len(txs) == 0 {
+		return
+	}
+	hashes := make([][]byte, 0, len(txs))
+	for _, tx := range txs {
+		if tx != nil {
+			hashes = append(hashes, tx.Hash().Bytes())
+		}
+	}
+	if len(hashes) > 0 {
+		mvm.ClearXapianTxBufferBatch(hashes)
+	}
 }
 
 // CleanGEI cleans speculative results older than or equal to a target GEI.
@@ -742,6 +765,9 @@ func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 		k := key.(uint64)
 		if k <= gei {
 			if res, ok := value.(*SpeculativeResult); ok && res != nil {
+				if res.IsFinished && len(res.Txs) > 0 {
+					clearXapianBuffersForTxs(res.Txs)
+				}
 				res.AbortClonedState()
 				authCh := res.AuthResponseChannel()
 				if authCh != nil {
@@ -891,6 +917,7 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 	if res.GEI <= lastGEI {
 		logger.Warn("⚠️ [COMMITTER] Committer received GEI=%d (block #%d) but block is already committed to DB (lastGEI=%d). Discarding obsolete speculative state immediately.",
 			res.GEI, res.BlockNum, lastGEI)
+		clearXapianBuffersForTxs(res.Txs)
 		if clonedState != nil {
 			clonedState.AbortSpeculative()
 			clonedState = nil
@@ -1017,6 +1044,10 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		reExecuted = true
 		logger.Info("🔄 [COMMITTER] Re-executing GEI=%d sequentially...", res.GEI)
 
+		// Discard speculative Xapian per-tx buffers before re-execution so txs that drop out
+		// (e.g., nonce mismatch) or switch to native transfer cannot leak speculative Xapian writes.
+		clearXapianBuffersForTxs(res.Txs)
+
 		// The speculative state is discarded. Its trie may hold a NOMT session that IntermediateRoot already
 		// finished but nobody will ever persist; it keeps the handle's activeCount > 0, so the re-execution's own
 		// IntermediateRoot -> BeginSession would wait for it forever (observed live). Abort it, do NOT persist it.
@@ -1051,6 +1082,7 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 
 		accumulatedResults, commitErr = tx_processor.ProcessTransactions(context.Background(), csCopy, groupedGroups, false, true, blockTimeSec, res.LeaderAddr, res.BlockNum, true)
 		if commitErr != nil {
+			clearXapianBuffersForTxs(res.Txs)
 			if csCopy != nil {
 				csCopy.AbortSpeculative()
 			}

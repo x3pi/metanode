@@ -794,11 +794,9 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 	// xapian_full_db_logs_index.go's doc comment for why the block-indexed
 	// store alone isn't enough for a TA's point lookup after a restart.
 	// Same pass, same data, just also written under a per-address key.
-	for _, logMap := range fullDbLogs {
-		for addrHex, logBytes := range logMap {
-			if errPut := storage.PutLatestFullDbLogsForAddress(bp.storageManager.GetStorageBackupDb(), addrHex, logBytes); errPut != nil {
-				logger.Error("❌ [BACKUP] Failed to persist latest full_db_logs for address %s (block #%d): %v", addrHex, blockNum, errPut)
-			}
+	if len(fullDbLogs) > 0 {
+		if errPut := storage.PersistLatestFullDbLogsBatch(bp.storageManager.GetStorageBackupDb(), fullDbLogs); errPut != nil {
+			logger.Error("❌ [BACKUP] Failed to persist latest full_db_logs batch (block #%d): %v", blockNum, errPut)
 		}
 	}
 

@@ -21,6 +21,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain/rootanchor"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	p_network "github.com/meta-node-blockchain/meta-node/pkg/network"
 	"github.com/meta-node-blockchain/meta-node/pkg/node"
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
@@ -687,10 +688,13 @@ func NewBlockProcessor(
 			return nil
 		})
 
-		// Wrap the force flush callback
+		// Wrap the force flush callback (preserve Xapian flush alongside PebbleDB flush)
 		if storageMgr := bp.chainState.GetStorageManager(); storageMgr != nil {
 			snapshotManager.SetForceFlushCallback(func() error {
-				logger.Info("💾 [SNAPSHOT] Flushing memory tables to disk...")
+				logger.Info("💾 [SNAPSHOT] Flushing Xapian and memory tables to disk...")
+				if lastBlk := storage.GetLastBlockNumber(); lastBlk > 0 {
+					mvm.CommitAllXapianAtBlock(lastBlk)
+				}
 				return storageMgr.FlushAll()
 			})
 

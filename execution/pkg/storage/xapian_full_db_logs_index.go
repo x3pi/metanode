@@ -1,5 +1,10 @@
 package storage
 
+import (
+	"sort"
+	"strings"
+)
+
 // Address-indexed store for the most recently persisted full_db_logs bytes
 // per address — see note/tee_dual_mode_execution_plan.md §5b (2026-08-16).
 //
@@ -27,14 +32,74 @@ package storage
 
 const fullDbLogsLatestKeyPrefix = "full_db_logs_latest-"
 
+// NormalizeAddressHexKey canonicalizes an Ethereum address string (with or
+// without "0x"/"0X" prefix, EIP-55 mixed-case or lowercase) to lowercase hex
+// without prefix so writers (ExportAllXapianLogs / MapFullDbLogs) and readers
+// (GetLatestFullDbLogsForAddress) always compute the exact same storage key.
+func NormalizeAddressHexKey(addressHex string) string {
+	s := strings.TrimSpace(addressHex)
+	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
+		s = s[2:]
+	}
+	return strings.ToLower(s)
+}
+
 // FullDbLogsLatestKey returns the storage key under which the most
-// recently persisted full_db_logs bytes for addressHex (lowercase hex, no
-// 0x prefix — same convention MapFullDbLogs/MapAddBalance etc. already use
-// throughout pkg/mvm) are kept. Shared by the writer
-// (block_processor_commit.go) and the reader (GetLatestFullDbLogsForAddress)
-// so the two can never drift apart.
+// recently persisted full_db_logs bytes for addressHex (normalized to
+// lowercase hex without 0x prefix) are kept. Shared by the writer
+// (block_processor_commit.go / unix_socket_handler_sync.go) and the reader
+// (GetLatestFullDbLogsForAddress) so the two can never drift apart.
 func FullDbLogsLatestKey(addressHex string) []byte {
-	return []byte(fullDbLogsLatestKeyPrefix + addressHex)
+	return []byte(fullDbLogsLatestKeyPrefix + NormalizeAddressHexKey(addressHex))
+}
+
+// PersistLatestFullDbLogsBatch merges serialized ComprehensiveLog frames per
+// normalized contract address across all maps in fullDbLogs in deterministic
+// order and writes each address's combined payload via PutLatestFullDbLogsForAddress.
+func PersistLatestFullDbLogsBatch(db Storage, fullDbLogs []map[string][]byte) error {
+	if db == nil || len(fullDbLogs) == 0 {
+		return nil
+	}
+	mergedByAddr := make(map[string][]byte)
+	for _, logMap := range fullDbLogs {
+		if len(logMap) == 0 {
+			continue
+		}
+		rawKeys := make([]string, 0, len(logMap))
+		for k := range logMap {
+			rawKeys = append(rawKeys, k)
+		}
+		sort.Strings(rawKeys)
+		for _, rawKey := range rawKeys {
+			logBytes := logMap[rawKey]
+			if len(logBytes) == 0 {
+				continue
+			}
+			normAddr := NormalizeAddressHexKey(rawKey)
+			if existing, exists := mergedByAddr[normAddr]; exists {
+				mergedByAddr[normAddr] = append(existing, logBytes...)
+			} else {
+				copied := make([]byte, len(logBytes))
+				copy(copied, logBytes)
+				mergedByAddr[normAddr] = copied
+			}
+		}
+	}
+	if len(mergedByAddr) == 0 {
+		return nil
+	}
+	normAddrs := make([]string, 0, len(mergedByAddr))
+	for addr := range mergedByAddr {
+		normAddrs = append(normAddrs, addr)
+	}
+	sort.Strings(normAddrs)
+	var firstErr error
+	for _, addr := range normAddrs {
+		if err := PutLatestFullDbLogsForAddress(db, addr, mergedByAddr[addr]); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // PutLatestFullDbLogsForAddress records logBytes as the latest known

@@ -69,6 +69,7 @@ func setupXapianV1ForwarderAndDocument(
 
 	// Commit Block 1 to disk and clear instances
 	mvm.CommitXapianTxBuffer(tx0.Hash().Bytes())
+	mvm.CommitAllXapianAtBlock(1)
 	mvm.DestroyAllXapianInstances()
 
 	return docId
@@ -179,6 +180,7 @@ func TestXapianV1_DeleteThenAddTermSameTxPersistence(t *testing.T) {
 		txB.Hash().Bytes(),
 		txC.Hash().Bytes(),
 	})
+	mvm.CommitAllXapianAtBlock(2)
 
 	// Destroy in-memory instances to force fresh reload from disk
 	mvm.DestroyAllXapianInstances()
@@ -281,6 +283,7 @@ func TestXapianV1_DeleteThenSetDataSameTxPersistence(t *testing.T) {
 
 	// Commit Block 2 & Destroy instances
 	mvm.CommitXapianTxBufferBatch([][]byte{txA.Hash().Bytes(), txB.Hash().Bytes()})
+	mvm.CommitAllXapianAtBlock(2)
 	mvm.DestroyAllXapianInstances()
 
 	// Block 3: Verify disk persistence
@@ -371,6 +374,7 @@ func TestXapianV1_DeleteThenAddTermThenDeleteSameTxPersistence(t *testing.T) {
 
 	// Commit Block 2 & Destroy instances
 	mvm.CommitXapianTxBufferBatch([][]byte{txA.Hash().Bytes(), txB.Hash().Bytes()})
+	mvm.CommitAllXapianAtBlock(2)
 	mvm.DestroyAllXapianInstances()
 
 	// Block 3: Verify disk persistence (document must remain deleted)

@@ -101,6 +101,7 @@ namespace XapianLog
         std::vector<XapianLog::LogEntry> xapian_doc_logs;
         std::vector<uint8_t> serialize() const;
         static std::optional<ComprehensiveLog> deserialize(const std::vector<uint8_t> &data);
+        static std::optional<ComprehensiveLog> deserialize_from_offset(const std::vector<uint8_t> &data, size_t &current_pos);
         void removeLogsUntilNearestEndCommand();
         void push_back(const LogEntry& entry);
     };

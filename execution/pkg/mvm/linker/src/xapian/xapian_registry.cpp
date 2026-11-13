@@ -312,20 +312,47 @@ extern "C" int ReplayFullDbLogsAtBlock(LogReplayEntryC *entries, int num_entries
         return 0;
     }
 
+    if (block_number > 0) {
+        uint64_t target_rb = static_cast<uint64_t>(block_number - 1);
+        if (XapianManager::rollbackAllAboveBlock(target_rb) < 0) {
+            std::cerr << "[C++ Replay FATAL] Global rollbackAllAboveBlock(" << target_rb
+                      << ") FAILED before replaying block " << block_number
+                      << " — Aborting batch." << std::endl;
+            return 0;
+        }
+    }
+
     std::unordered_set<std::string> rolled_back_in_batch;
     std::vector<std::shared_ptr<XapianManager>> managers_to_commit;
     std::unordered_set<XapianManager*> seen_managers;
+    bool any_committed = false;
+
+    auto abort_replay_batch = [&](const std::shared_ptr<XapianManager> &extra_mgr = nullptr) -> int {
+        if (extra_mgr) {
+            extra_mgr->revertUncommittedChanges();
+        }
+        for (const auto &mgr : managers_to_commit) {
+            if (mgr) {
+                mgr->revertUncommittedChanges();
+            }
+        }
+        if (any_committed && block_number > 0) {
+            uint64_t target_rb = static_cast<uint64_t>(block_number - 1);
+            XapianManager::rollbackAllAboveBlock(target_rb);
+        }
+        return 0;
+    };
 
     for (int i = 0; i < num_entries; ++i) {
         LogReplayEntryC &current_entry = entries[i];
 
         if (current_entry.address_ptr == nullptr ||
             current_entry.address_len != 20) {
-            return 0;
+            return abort_replay_batch();
         }
         if (current_entry.log_data_ptr == nullptr ||
             current_entry.log_data_len <= 0) {
-            return 0;
+            return abort_replay_batch();
         }
 
         mvm::Address address = mvm::from_big_endian(current_entry.address_ptr,
@@ -335,102 +362,108 @@ extern "C" int ReplayFullDbLogsAtBlock(LogReplayEntryC *entries, int num_entries
         std::vector<uint8_t> serialized_log_data(current_entry.log_data_ptr,
                                                  current_entry.log_data_ptr +
                                                      current_entry.log_data_len);
-
-        std::optional<XapianLog::ComprehensiveLog> deserialized_log_opt =
-            XapianLog::ComprehensiveLog::deserialize(serialized_log_data);
-
-        if (!deserialized_log_opt) {
-            return 0;
-        }
-        XapianLog::ComprehensiveLog &comp_log = *deserialized_log_opt;
-
-        if (comp_log.db_name.empty()) {
-            std::cerr << "[C++ Replay Error] DB db_name in log is empty for address "
-                      << addr_hex << ". Cannot determine target manager."
-                      << std::endl;
-            return 0;
+        if (serialized_log_data.empty()) {
+            return abort_replay_batch();
         }
 
-        std::shared_ptr<XapianManager> target_manager = nullptr;
-        std::filesystem::path replay_db_path = mvm::createFullPath(address, comp_log.db_name);
+        size_t log_offset = 0;
+        while (log_offset < serialized_log_data.size()) {
+            std::optional<XapianLog::ComprehensiveLog> deserialized_log_opt =
+                XapianLog::ComprehensiveLog::deserialize_from_offset(serialized_log_data, log_offset);
 
-        if (!mvm::IsXapianBasePathEmpty() && !std::filesystem::exists(replay_db_path)) {
-            std::error_code ec;
-            std::filesystem::create_directories(replay_db_path, ec);
-            if (ec) {
-                std::cerr << "[C++ Replay FATAL] Cannot create directory for db_name='"
-                          << comp_log.db_name << "' path=" << replay_db_path.string()
-                          << " error=" << ec.message() << std::endl;
-                return 0;
+            if (!deserialized_log_opt) {
+                return abort_replay_batch();
             }
-        }
+            XapianLog::ComprehensiveLog &comp_log = *deserialized_log_opt;
 
-        try {
-            target_manager =
-                XapianManager::getInstance(comp_log.db_name, address, false);
-        } catch (const Xapian::DatabaseLockError &e) {
-            std::cerr << "[C++ Replay FATAL] DatabaseLockError for db_name '"
-                      << comp_log.db_name << "' addr=" << addr_hex
-                      << " path=" << replay_db_path.string()
-                      << ": " << e.get_msg() << " — Aborting batch immediately (Zero-Fork Invariant)." << std::endl;
-            return 0;
-        } catch (const Xapian::Error &e) {
-            std::cerr << "[C++ Replay FATAL] Xapian::Error for db_name '"
-                      << comp_log.db_name << "' addr=" << addr_hex
-                      << " path=" << replay_db_path.string()
-                      << " type=" << e.get_type()
-                      << " msg=" << e.get_msg()
-                      << " context=" << e.get_context() << " — Aborting batch." << std::endl;
-            return 0;
-        } catch (const std::exception &e) {
-            std::cerr << "[C++ Replay FATAL] std::exception for db_name '"
-                      << comp_log.db_name << "' addr=" << addr_hex
-                      << " path=" << replay_db_path.string()
-                      << ": " << e.what() << " — Aborting batch." << std::endl;
-            return 0;
-        } catch (...) {
-            std::cerr << "[C++ Replay FATAL] Unknown exception for db_name '"
-                      << comp_log.db_name << "' addr=" << addr_hex
-                      << " path=" << replay_db_path.string() << " — Aborting batch." << std::endl;
-            return 0;
-        }
+            if (comp_log.db_name.empty()) {
+                std::cerr << "[C++ Replay Error] DB db_name in log is empty for address "
+                          << addr_hex << ". Cannot determine target manager."
+                          << std::endl;
+                return abort_replay_batch();
+            }
 
-        if (!target_manager) {
-            std::cerr << "[C++ Replay FATAL] Failed to get/create XapianManager for db_name '"
-                      << comp_log.db_name << "' and address " << addr_hex
-                      << ". Aborting replay for entire batch." << std::endl;
-            return 0;
-        }
+            std::shared_ptr<XapianManager> target_manager = nullptr;
+            std::filesystem::path replay_db_path = mvm::createFullPath(address, comp_log.db_name);
 
-        if (block_number > 0) {
-            std::string mgr_key = replay_db_path.string();
-            if (rolled_back_in_batch.find(mgr_key) == rolled_back_in_batch.end()) {
-                rolled_back_in_batch.insert(mgr_key);
-                uint64_t committed_head = target_manager->getCommittedHeadBlock();
-                if (committed_head >= static_cast<uint64_t>(block_number)) {
-                    uint64_t target_rb = static_cast<uint64_t>(block_number - 1);
-                    if (!target_manager->rollbackAboveBlock(target_rb)) {
-                        std::cerr << "[C++ Replay FATAL] rollbackAboveBlock(" << target_rb
-                                  << ") FAILED for addr=" << addr_hex
-                                  << " db_name='" << comp_log.db_name << "' — Aborting batch." << std::endl;
-                        return 0;
+            if (!mvm::IsXapianBasePathEmpty() && !std::filesystem::exists(replay_db_path)) {
+                std::error_code ec;
+                std::filesystem::create_directories(replay_db_path, ec);
+                if (ec) {
+                    std::cerr << "[C++ Replay FATAL] Cannot create directory for db_name='"
+                              << comp_log.db_name << "' path=" << replay_db_path.string()
+                              << " error=" << ec.message() << std::endl;
+                    return abort_replay_batch();
+                }
+            }
+
+            try {
+                target_manager =
+                    XapianManager::getInstance(comp_log.db_name, address, false);
+            } catch (const Xapian::DatabaseLockError &e) {
+                std::cerr << "[C++ Replay FATAL] DatabaseLockError for db_name '"
+                          << comp_log.db_name << "' addr=" << addr_hex
+                          << " path=" << replay_db_path.string()
+                          << ": " << e.get_msg() << " — Aborting batch immediately (Zero-Fork Invariant)." << std::endl;
+                return abort_replay_batch();
+            } catch (const Xapian::Error &e) {
+                std::cerr << "[C++ Replay FATAL] Xapian::Error for db_name '"
+                          << comp_log.db_name << "' addr=" << addr_hex
+                          << " path=" << replay_db_path.string()
+                          << " type=" << e.get_type()
+                          << " msg=" << e.get_msg()
+                          << " context=" << e.get_context() << " — Aborting batch." << std::endl;
+                return abort_replay_batch();
+            } catch (const std::exception &e) {
+                std::cerr << "[C++ Replay FATAL] std::exception for db_name '"
+                          << comp_log.db_name << "' addr=" << addr_hex
+                          << " path=" << replay_db_path.string()
+                          << ": " << e.what() << " — Aborting batch." << std::endl;
+                return abort_replay_batch();
+            } catch (...) {
+                std::cerr << "[C++ Replay FATAL] Unknown exception for db_name '"
+                          << comp_log.db_name << "' addr=" << addr_hex
+                          << " path=" << replay_db_path.string() << " — Aborting batch." << std::endl;
+                return abort_replay_batch();
+            }
+
+            if (!target_manager) {
+                std::cerr << "[C++ Replay FATAL] Failed to get/create XapianManager for db_name '"
+                          << comp_log.db_name << "' and address " << addr_hex
+                          << ". Aborting replay for entire batch." << std::endl;
+                return abort_replay_batch();
+            }
+
+            if (block_number > 0) {
+                std::string mgr_key = replay_db_path.string();
+                if (rolled_back_in_batch.find(mgr_key) == rolled_back_in_batch.end()) {
+                    rolled_back_in_batch.insert(mgr_key);
+                    uint64_t committed_head = target_manager->getCommittedHeadBlock();
+                    if (committed_head >= static_cast<uint64_t>(block_number)) {
+                        uint64_t target_rb = static_cast<uint64_t>(block_number - 1);
+                        if (!target_manager->rollbackAboveBlock(target_rb)) {
+                            std::cerr << "[C++ Replay FATAL] rollbackAboveBlock(" << target_rb
+                                      << ") FAILED for addr=" << addr_hex
+                                      << " db_name='" << comp_log.db_name << "' — Aborting batch." << std::endl;
+                            return abort_replay_batch(target_manager);
+                        }
                     }
                 }
             }
-        }
 
-        if (!comp_log.xapian_doc_logs.empty()) {
-            if (!target_manager->replay_log(comp_log.xapian_doc_logs)) {
-                std::cerr << "[C++ Replay FATAL] replay_log FAILED for entry " << i
-                          << " addr=" << addr_hex
-                          << " db_name='" << comp_log.db_name << "'"
-                          << " ops=" << comp_log.xapian_doc_logs.size() << " — Aborting batch." << std::endl;
-                return 0;
+            if (!comp_log.xapian_doc_logs.empty()) {
+                if (!target_manager->replay_log(comp_log.xapian_doc_logs)) {
+                    std::cerr << "[C++ Replay FATAL] replay_log FAILED for entry " << i
+                              << " addr=" << addr_hex
+                              << " db_name='" << comp_log.db_name << "'"
+                              << " ops=" << comp_log.xapian_doc_logs.size() << " — Aborting batch." << std::endl;
+                    return abort_replay_batch(target_manager);
+                }
             }
-        }
 
-        if (seen_managers.insert(target_manager.get()).second) {
-            managers_to_commit.push_back(target_manager);
+            if (seen_managers.insert(target_manager.get()).second) {
+                managers_to_commit.push_back(target_manager);
+            }
         }
     }
 
@@ -439,21 +472,22 @@ extern "C" int ReplayFullDbLogsAtBlock(LogReplayEntryC *entries, int num_entries
             if (!mgr->saveAllAndCommit(static_cast<uint64_t>(block_number))) {
                 std::cerr << "[C++ Replay FATAL] saveAllAndCommit returned false for db_name='"
                           << mgr->getDbName() << "' — Aborting batch." << std::endl;
-                return 0;
+                return abort_replay_batch();
             }
+            any_committed = true;
         } catch (const Xapian::Error &e) {
             std::cerr << "[C++ Replay FATAL] Xapian::Error during saveAllAndCommit for db_name='"
                       << mgr->getDbName() << "' type=" << e.get_type()
                       << " msg=" << e.get_msg() << " — Aborting batch." << std::endl;
-            return 0;
+            return abort_replay_batch();
         } catch (const std::exception &e) {
             std::cerr << "[C++ Replay FATAL] Exception during saveAllAndCommit for db_name='"
                       << mgr->getDbName() << "': " << e.what() << " — Aborting batch." << std::endl;
-            return 0;
+            return abort_replay_batch();
         } catch (...) {
             std::cerr << "[C++ Replay FATAL] Unknown exception during saveAllAndCommit for db_name='"
                       << mgr->getDbName() << "' — Aborting batch." << std::endl;
-            return 0;
+            return abort_replay_batch();
         }
     }
     return 1;
@@ -504,7 +538,12 @@ extern "C" struct ExportedXapianLogArray MVM_exportAllXapianLogs() {
     result.data = nullptr;
     result.count = 0;
 
-    std::vector<ExportedXapianLog> logs_vec;
+    struct SortableExportedLog {
+        std::array<uint8_t, 20> addr_be;
+        std::string db_name;
+        ExportedXapianLog entry;
+    };
+    std::vector<SortableExportedLog> sortable_vec;
     std::shared_lock<std::shared_mutex> inst_lock(XapianManager::instances_mutex);
 
     for (auto& pair : XapianManager::instances) {
@@ -515,14 +554,16 @@ extern "C" struct ExportedXapianLogArray MVM_exportAllXapianLogs() {
                 try {
                     std::vector<uint8_t> serialized = manager->comprehensive_log.serialize();
                     if (!serialized.empty()) {
-                        ExportedXapianLog log_entry;
+                        SortableExportedLog item;
                         uint8_t temp_addr[32];
                         mvm::to_big_endian(manager->address, temp_addr);
-                        memcpy(log_entry.address, temp_addr + 12, 20);
-                        log_entry.logs_length = serialized.size();
-                        log_entry.logs = new char[log_entry.logs_length];
-                        memcpy(log_entry.logs, serialized.data(), log_entry.logs_length);
-                        logs_vec.push_back(log_entry);
+                        memcpy(item.addr_be.data(), temp_addr + 12, 20);
+                        item.db_name = manager->getDbName();
+                        memcpy(item.entry.address, temp_addr + 12, 20);
+                        item.entry.logs_length = serialized.size();
+                        item.entry.logs = new char[item.entry.logs_length];
+                        memcpy(item.entry.logs, serialized.data(), item.entry.logs_length);
+                        sortable_vec.push_back(std::move(item));
                     }
                 } catch (const std::exception& e) {
                     std::cerr << "[ERROR] MVM_exportAllXapianLogs: Failed to serialize logs for " << manager->getDbName() << ": " << e.what() << std::endl;
@@ -531,11 +572,18 @@ extern "C" struct ExportedXapianLogArray MVM_exportAllXapianLogs() {
         }
     }
 
-    if (!logs_vec.empty()) {
-        result.count = logs_vec.size();
+    if (!sortable_vec.empty()) {
+        std::sort(sortable_vec.begin(), sortable_vec.end(),
+                  [](const SortableExportedLog& a, const SortableExportedLog& b) {
+                      if (a.addr_be != b.addr_be) {
+                          return a.addr_be < b.addr_be;
+                      }
+                      return a.db_name < b.db_name;
+                  });
+        result.count = sortable_vec.size();
         result.data = new ExportedXapianLog[result.count];
         for (int i = 0; i < result.count; i++) {
-            result.data[i] = logs_vec[i];
+            result.data[i] = sortable_vec[i].entry;
         }
     }
 

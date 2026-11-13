@@ -369,6 +369,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		alreadyCommitted := globalExecIndex > 0 && globalExecIndex <= storage.GetLastGlobalExecIndex()
 		if alreadyCommitted {
 			logger.Warn("🚨 [ZERO-FORK-GUARD] Skipping Xapian commit for GEI=%d: already committed (lastGEI=%d) — redundant execution detected", globalExecIndex, storage.GetLastGlobalExecIndex())
+			clearXapianBuffersForTxs(processResults.Transactions)
 		} else {
 			hasContractInteraction := false
 			var commitHashes [][]byte
@@ -623,22 +624,6 @@ func (bp *BlockProcessor) postProcessBlock(lastBlock types.Block, txHashes []com
 			logger.Warn("⚠️ [EXPLORER] Block #%d had %d/%d index drops — NOT marking as indexed. Periodic re-indexer will retry.",
 				blockNumber, indexDroppedCount, len(txHashes))
 		}
-	}
-}
-
-// handleBlockGenerationError handles block generation errors
-func (bp *BlockProcessor) handleBlockGenerationError(txDB *transaction_state_db.TransactionStateDB, lastBlockNumber uint64) {
-	logger.Error("❌ [BLOCK GEN] Block generation failed at block #%d — discarding trie state and rolling back", lastBlockNumber)
-	trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
-	bp.chainState.GetAccountStateDB().Discard()
-	bp.chainState.GetSmartContractDB().Discard()
-	bp.chainState.GetStakeStateDB().Discard()
-	blockchain.GetBlockChainInstance().DiscardBlockMappings(lastBlockNumber)
-	lastBl := blockchain.GetBlockChainInstance().GetBlockByNumber(lastBlockNumber)
-	bp.SetLastBlock(lastBl)
-	bp.chainState.GetBlockDatabase().SaveLastBlock(lastBl)
-	if txDB != nil {
-		txDB.Discard()
 	}
 }
 

@@ -99,7 +99,9 @@ func (s *raftStateSource) capture(tmp string) (raftfeed.StateMeta, error) {
 		return raftfeed.StateMeta{}, errors.New("no storage manager")
 	}
 	num := storage.GetLastBlockNumber()
-	mvm.CommitAllXapianAtBlock(num)
+	if num > 0 {
+		mvm.CommitAllXapianAtBlock(num)
+	}
 	if err := sm.FlushAll(); err != nil {
 		return raftfeed.StateMeta{}, fmt.Errorf("flush: %w", err)
 	}

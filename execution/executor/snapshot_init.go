@@ -130,7 +130,9 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 		// Register synchronous storage flush callback
 		if storageMgr := chainState.GetStorageManager(); storageMgr != nil {
 			sm.SetForceFlushCallback(func() error {
-				mvm.CommitAllXapianAtBlock(storage.GetLastBlockNumber())
+				if lastBlk := storage.GetLastBlockNumber(); lastBlk > 0 {
+					mvm.CommitAllXapianAtBlock(lastBlk)
+				}
 				return storageMgr.FlushAll()
 			})
 			logger.Info("📸 [SNAPSHOT] Registered synchronous storage flush callback")
