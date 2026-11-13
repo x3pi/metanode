@@ -18,7 +18,7 @@ package mvm
 #cgo linux,amd64 CXXFLAGS: -march=native -mtune=native
 #cgo linux,arm64 CXXFLAGS: -march=armv8-a -mtune=generic
 #cgo LDFLAGS: -lgmp -lmpfr -lm -ltbb -lxapian -L./linker/build/lib/static -lleveldb -lmvm_linker -L./c_mvm/build/lib/static -lmvm -lstdc++ -luuid
-#cgo CPPFLAGS: -I./linker/build/include
+#cgo CPPFLAGS: -I./linker/include -I./linker/build/include
 #include "mvm_linker.hpp"
 #include <stdlib.h>
 #include <math.h>
@@ -35,6 +35,8 @@ extern void clear_xapian_tx_buffer(unsigned char *b_tx_hash);
 extern void commit_xapian_tx_buffer(unsigned char *b_tx_hash);
 extern void clear_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int count);
 extern void commit_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int count);
+extern int ReplayFullDbLogs(LogReplayEntryC *entries, int num_entries);
+extern int ReplayFullDbLogsAtBlock(LogReplayEntryC *entries, int num_entries, unsigned long long block_number);
 extern void MVM_commitAllXapian();
 extern void MVM_commitAllXapianAtBlock(unsigned long long block_number);
 extern int MVM_rollbackXapianAboveBlock(unsigned long long target_block);

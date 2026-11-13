@@ -1092,10 +1092,16 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]tr
 	if len(backupDb.FullDbLogs) > 0 {
 		result := mvm.CallReplayFullDbLogsBatchAtBlock(backupDb.FullDbLogs, backupDb.BockNumber)
 		if result == 0 {
+			var rbErr error
 			if backupDb.BockNumber > 0 {
-				_, _ = mvm.RollbackXapianAboveBlock(backupDb.BockNumber - 1)
+				if _, rbErr = mvm.RollbackXapianAboveBlock(backupDb.BockNumber - 1); rbErr != nil {
+					logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) also FAILED after ReplayFullDbLogs error at block #%d: %v", backupDb.BockNumber-1, backupDb.BockNumber, rbErr)
+				}
 			}
 			logger.Error("🚨 [FORK-RISK] ReplayFullDbLogsBatchAtBlock (epoch sync) FAILED for %d batches at block #%d — Xapian DB may be OUT OF SYNC!", len(backupDb.FullDbLogs), backupDb.BockNumber)
+			if rbErr != nil {
+				return nil, fmt.Errorf("ReplayFullDbLogs failed for block #%d (%d batches) and rollback to #%d failed: %w", backupDb.BockNumber, len(backupDb.FullDbLogs), backupDb.BockNumber-1, rbErr)
+			}
 			return nil, fmt.Errorf("ReplayFullDbLogs failed for block #%d (%d batches)", backupDb.BockNumber, len(backupDb.FullDbLogs))
 		}
 		logger.Info("📥 [BLOCK SYNC] ✅ Replayed %d FullDbLogs entries for block %d", len(backupDb.FullDbLogs), backupDb.BockNumber)
@@ -1109,14 +1115,18 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]tr
 			deserialized, err := storage.DeserializeBatch(backupDb.MapppingBatch)
 			if err != nil {
 				if len(backupDb.FullDbLogs) > 0 && backupDb.BockNumber > 0 {
-					_, _ = mvm.RollbackXapianAboveBlock(backupDb.BockNumber - 1)
+					if _, rbErr := mvm.RollbackXapianAboveBlock(backupDb.BockNumber - 1); rbErr != nil {
+						logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) FAILED after mapping deserialize error at block #%d: %v", backupDb.BockNumber-1, backupDb.BockNumber, rbErr)
+					}
 				}
 				return nil, fmt.Errorf("error deserializing mapping batch for block %d: %w", backupDb.BockNumber, err)
 			}
 			if len(deserialized) > 0 {
 				if err := mappingStorage.BatchPut(deserialized); err != nil {
 					if len(backupDb.FullDbLogs) > 0 && backupDb.BockNumber > 0 {
-						_, _ = mvm.RollbackXapianAboveBlock(backupDb.BockNumber - 1)
+						if _, rbErr := mvm.RollbackXapianAboveBlock(backupDb.BockNumber - 1); rbErr != nil {
+							logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) FAILED after mapping BatchPut error at block #%d: %v", backupDb.BockNumber-1, backupDb.BockNumber, rbErr)
+						}
 					}
 					return nil, fmt.Errorf("error writing mapping batch for block %d: %w", backupDb.BockNumber, err)
 				}

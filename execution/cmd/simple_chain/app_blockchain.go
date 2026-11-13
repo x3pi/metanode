@@ -948,9 +948,20 @@ SKIP_GENESIS:
 	// CommitAllXapianAtBlock() runs synchronously during block processing before
 	// commitWorker persists CommitBlockState / NOMT asynchronously. If the node
 	// crashed in that window, on-disk Xapian databases may hold committed blocks
-	// ahead of app.startLastBlock. Roll them back atomically via their Xapian
-	// undo journal now so EVM re-execution starts from clean parent Xapian state
-	// (preventing dirty future reads, duplicate wdf/positions, and docid drift).
+	// ahead of app.startLastBlock.
+	//
+	// Ordering note vs. reexecuteBlocksToCatchUp():
+	//   1. When NOMT lags behind BlockDB (NOMT at M < N), alignStartupTipToBlock()
+	//      sets app.startLastBlock = M, and reexecuteBlocksToCatchUp(M, N) (line 635)
+	//      FIRST calls RollbackXapianAboveBlock(M) (line 1544) before re-executing
+	//      blocks M+1..N, advancing both NOMT and app.startLastBlock to N (or to the
+	//      last valid block if catch-up truncates).
+	//   2. This final RollbackXapianAboveBlock(app.startLastBlock) acts as a post-condition
+	//      guard for all other startup paths that do not enter reexecuteBlocksToCatchUp
+	//      (e.g. changelog trie rebuild at line 567, snapshot fallback alignment at
+	//      lines 864-885, or normal startup where NOMT and BlockDB are both at M while
+	//      Xapian committed M+1 right before crash). If reexecuteBlocksToCatchUp already
+	//      ran, Xapian is already at app.startLastBlock so this call is a no-op.
 	// ═══════════════════════════════════════════════════════════════════════════
 	targetXapianBlock := uint64(0)
 	if app.startLastBlock != nil {
