@@ -619,6 +619,7 @@ func TestXapianNestedRevert_MultipleWritersSameBlock(t *testing.T) {
 
 	// Commit Block 1 to disk
 	mvm.CommitXapianTxBuffer(tx0.Hash().Bytes())
+	mvm.CommitAllXapianAtBlock(1)
 	// Destroy in-memory instances to force fresh disk reload
 	mvm.DestroyAllXapianInstances()
 
@@ -699,6 +700,7 @@ func TestXapianNestedRevert_MultipleWritersSameBlock(t *testing.T) {
 		txB.Hash().Bytes(),
 		txC.Hash().Bytes(),
 	})
+	mvm.CommitAllXapianAtBlock(2)
 
 	// Destroy in-memory instances to force fresh reload from disk
 	mvm.DestroyAllXapianInstances()
@@ -797,6 +799,7 @@ func TestXapianNestedRevert_MultiWriterWithInterleavedRevert(t *testing.T) {
 	require.False(t, docId.Sign() == 0)
 
 	mvm.CommitXapianTxBuffer(tx0.Hash().Bytes())
+	mvm.CommitAllXapianAtBlock(1)
 	mvm.DestroyAllXapianInstances()
 
 	// Block 2: Tx A writes "content_A", Tx B writes "content_B" and reverts via caller, Tx C reads
@@ -876,6 +879,7 @@ func TestXapianNestedRevert_MultiWriterWithInterleavedRevert(t *testing.T) {
 		txC.Hash().Bytes(),
 	})
 	mvm.ClearXapianTxBuffer(txB.Hash().Bytes())
+	mvm.CommitAllXapianAtBlock(2)
 
 	mvm.DestroyAllXapianInstances()
 }
@@ -1297,6 +1301,7 @@ func TestXapianV1_MultipleWritersSameBlock(t *testing.T) {
 
 	// Commit Block 1 to disk
 	mvm.CommitXapianTxBuffer(tx0.Hash().Bytes())
+	mvm.CommitAllXapianAtBlock(1)
 	mvm.DestroyAllXapianInstances()
 
 	// Block 2: Intra-block multi-writer scenario on 0x107
@@ -1376,6 +1381,7 @@ func TestXapianV1_MultipleWritersSameBlock(t *testing.T) {
 		txB.Hash().Bytes(),
 		txC.Hash().Bytes(),
 	})
+	mvm.CommitAllXapianAtBlock(2)
 
 	// Destroy in-memory instances to force fresh reload from disk
 	mvm.DestroyAllXapianInstances()
@@ -1475,6 +1481,7 @@ func TestXapianV1_MultiWriterWithInterleavedRevert(t *testing.T) {
 	require.False(t, docId.Sign() == 0)
 
 	mvm.CommitXapianTxBuffer(tx0.Hash().Bytes())
+	mvm.CommitAllXapianAtBlock(1)
 	mvm.DestroyAllXapianInstances()
 
 	// Block 2: Tx A writes "v1_payload_A", Tx B writes "v1_payload_B" and reverts via caller, Tx C reads
@@ -1554,6 +1561,7 @@ func TestXapianV1_MultiWriterWithInterleavedRevert(t *testing.T) {
 		txC.Hash().Bytes(),
 	})
 	mvm.ClearXapianTxBuffer(txB.Hash().Bytes())
+	mvm.CommitAllXapianAtBlock(2)
 
 	mvm.DestroyAllXapianInstances()
 }
@@ -1698,6 +1706,7 @@ func TestXapianV1_MalformedAndTruncatedABIRegression(t *testing.T) {
 	require.True(t, validDocId.Sign() > 0, "Valid newDocument must return non-zero docId")
 
 	mvm.CommitXapianTxBuffer(txValid.Hash().Bytes())
+	mvm.CommitAllXapianAtBlock(1)
 	mvm.DestroyAllXapianInstances()
 }
 
@@ -1757,6 +1766,7 @@ func TestXapianV1_ReservedDocIdTermCollisionPrevention(t *testing.T) {
 		txA.Hash().Bytes(),
 		txB.Hash().Bytes(),
 	})
+	mvm.CommitAllXapianAtBlock(1)
 	mvm.DestroyAllXapianInstances()
 
 	// 3. Attack attempt: Try adding reserved system docId term (33 chars, within max term len 64)
@@ -1836,6 +1846,7 @@ func TestXapianV1_ReservedDocIdTermCollisionPrevention(t *testing.T) {
 	})
 	mvm.ClearXapianTxBuffer(txAttack.Hash().Bytes())
 	mvm.ClearXapianTxBuffer(txAttackPrefix.Hash().Bytes())
+	mvm.CommitAllXapianAtBlock(2)
 	mvm.DestroyAllXapianInstances()
 }
 
@@ -1921,6 +1932,7 @@ func TestXapianV1_LongPrefixRejectionRegression(t *testing.T) {
 	// Commit must not abort
 	mvm.CommitXapianTxBufferBatch([][]byte{txLegit.Hash().Bytes()})
 	mvm.ClearXapianTxBuffer(txAttack.Hash().Bytes())
+	mvm.CommitAllXapianAtBlock(2)
 	mvm.DestroyAllXapianInstances()
 }
 
@@ -2249,4 +2261,3 @@ func TestXapian_GasRejectedAndNonceSkippedBufferClear(t *testing.T) {
 		require.Equal(t, 0, len(logs), "duplicate-nonce tx2 must not leave speculative Xapian buffer entries")
 	})
 }
-

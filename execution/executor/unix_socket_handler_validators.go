@@ -352,6 +352,9 @@ func (rh *RequestHandler) HandleGetValidatorsAtBlockRequest(request *pb.GetValid
 			return nil, fmt.Errorf("cannot find block hash for block number %d", blockNumber)
 		}
 	} else {
+		if rh.chainState == nil || rh.chainState.GetBlockDatabase() == nil {
+			return nil, fmt.Errorf("chainState or blockDatabase is nil while reading block %d (%s)", blockNumber, blockHash.Hex())
+		}
 		blockData, err = rh.chainState.GetBlockDatabase().GetBlockByHash(blockHash)
 		if err != nil {
 			return nil, fmt.Errorf("could not get block data by hash %s: %w", blockHash, err)

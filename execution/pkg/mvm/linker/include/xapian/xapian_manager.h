@@ -21,9 +21,163 @@
 #include <vector>     // Needed for std::vector
 #include <functional> // Needed for std::hash
 #include <optional>   // Needed for undo_snapshot_ (InMemory-mode revert, see plan §9.29)
+#include <cerrno>
+#include <system_error>
+#if defined(__linux__) && defined(__GLIBC__)
+#include <pthread.h>
+#endif
 #include <mvm/address.h>
 #include "xapian_log.h" // <-- Include file định nghĩa LogEntry
 class XapianRegistry; // Forward declaration
+
+// Writer-preferring reader-writer lock with per-thread reader reentrancy safety:
+// glibc's default std::shared_mutex uses PTHREAD_RWLOCK_PREFER_READER_NP, which
+// allows continuous parallel RPC eth_call readers to starve block-commit writers
+// (replay_log / commit_changes / compactInPlace). Using writer preference ensures
+// consensus block commits never stall behind continuous read spam, while the
+// thread_local reader depth table prevents nested shared_lock acquisitions on the
+// same thread from deadlocking when a writer is queued.
+class WriterPreferredSharedMutex {
+#if defined(__linux__) && defined(__GLIBC__)
+  pthread_rwlock_t rwlock_;
+
+  struct ReaderSlot {
+    const WriterPreferredSharedMutex* mtx = nullptr;
+    uint32_t depth = 0;
+  };
+  struct ThreadReaderState {
+    static constexpr size_t kInlineSlots = 8;
+    ReaderSlot inline_slots[kInlineSlots]{};
+    std::vector<ReaderSlot> overflow_slots;
+
+    uint32_t* find(const WriterPreferredSharedMutex* m) noexcept {
+      for (size_t i = 0; i < kInlineSlots; ++i) {
+        if (inline_slots[i].mtx == m) return &inline_slots[i].depth;
+      }
+      for (auto& s : overflow_slots) {
+        if (s.mtx == m) return &s.depth;
+      }
+      return nullptr;
+    }
+
+    void insert_new(const WriterPreferredSharedMutex* m) {
+      for (size_t i = 0; i < kInlineSlots; ++i) {
+        if (inline_slots[i].mtx == nullptr) {
+          inline_slots[i].mtx = m;
+          inline_slots[i].depth = 1;
+          return;
+        }
+      }
+      overflow_slots.push_back(ReaderSlot{m, 1});
+    }
+
+    bool decrement_and_check_zero(const WriterPreferredSharedMutex* m) noexcept {
+      for (size_t i = 0; i < kInlineSlots; ++i) {
+        if (inline_slots[i].mtx == m) {
+          if (--inline_slots[i].depth == 0) {
+            inline_slots[i].mtx = nullptr;
+            return true;
+          }
+          return false;
+        }
+      }
+      for (size_t i = 0; i < overflow_slots.size(); ++i) {
+        if (overflow_slots[i].mtx == m) {
+          if (--overflow_slots[i].depth == 0) {
+            overflow_slots[i] = overflow_slots.back();
+            overflow_slots.pop_back();
+            return true;
+          }
+          return false;
+        }
+      }
+      return true;
+    }
+  };
+
+  static ThreadReaderState& tls_state() {
+    thread_local ThreadReaderState state;
+    return state;
+  }
+
+public:
+  WriterPreferredSharedMutex() {
+    pthread_rwlockattr_t attr;
+    pthread_rwlockattr_init(&attr);
+    pthread_rwlockattr_setkind_np(&attr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
+    pthread_rwlock_init(&rwlock_, &attr);
+    pthread_rwlockattr_destroy(&attr);
+  }
+  ~WriterPreferredSharedMutex() { pthread_rwlock_destroy(&rwlock_); }
+  WriterPreferredSharedMutex(const WriterPreferredSharedMutex&) = delete;
+  WriterPreferredSharedMutex& operator=(const WriterPreferredSharedMutex&) = delete;
+
+  void lock() {
+    int rc = pthread_rwlock_wrlock(&rwlock_);
+    if (rc != 0) {
+      throw std::system_error(rc, std::system_category(), "pthread_rwlock_wrlock");
+    }
+  }
+  bool try_lock() { return pthread_rwlock_trywrlock(&rwlock_) == 0; }
+  void unlock() { pthread_rwlock_unlock(&rwlock_); }
+
+  void lock_shared() {
+    auto& st = tls_state();
+    if (uint32_t* d = st.find(this)) {
+      ++(*d);
+      return;
+    }
+    int rc = 0;
+    do {
+      rc = pthread_rwlock_rdlock(&rwlock_);
+    } while (rc == EAGAIN);
+    if (rc != 0) {
+      throw std::system_error(rc, std::system_category(), "pthread_rwlock_rdlock");
+    }
+    try {
+      st.insert_new(this);
+    } catch (...) {
+      pthread_rwlock_unlock(&rwlock_);
+      throw;
+    }
+  }
+
+  bool try_lock_shared() {
+    auto& st = tls_state();
+    if (uint32_t* d = st.find(this)) {
+      ++(*d);
+      return true;
+    }
+    if (pthread_rwlock_tryrdlock(&rwlock_) == 0) {
+      try {
+        st.insert_new(this);
+      } catch (...) {
+        pthread_rwlock_unlock(&rwlock_);
+        throw;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  void unlock_shared() {
+    auto& st = tls_state();
+    if (st.decrement_and_check_zero(this)) {
+      pthread_rwlock_unlock(&rwlock_);
+    }
+  }
+#else
+  std::shared_mutex fallback_;
+public:
+  void lock() { fallback_.lock(); }
+  bool try_lock() { return fallback_.try_lock(); }
+  void unlock() { fallback_.unlock(); }
+  void lock_shared() { fallback_.lock_shared(); }
+  bool try_lock_shared() { return fallback_.try_lock_shared(); }
+  void unlock_shared() { fallback_.unlock_shared(); }
+#endif
+};
+
 struct DocumentInfo {
   std::string data;
   std::string author;
@@ -45,13 +199,19 @@ public:
   static std::string generateUuidLogicalId();
   static bool isReservedSystemDocIdTerm(const std::string& term);
   static bool isReservedSystemPrefix(const std::string& prefix);
-  static void commitAllInstances();
+  static void commitAllInstances(uint64_t blockNumber);
+  // Rolls back all live XapianManager instances and any uncached on-disk Xapian
+  // databases under g_xapian_base_path whose committed head block exceeds
+  // targetBlock. Returns >= 0 (number of databases rolled back) on success, or
+  // < 0 on unrecoverable error (e.g. corrupt undo metadata or pruned history).
+  static int rollbackAllAboveBlock(uint64_t targetBlock);
   // --- Member Variables ---
   Xapian::WritableDatabase db;
   bool is_db_open = true; // Theo dõi trạng thái của file descriptor db
   void ensure_db_open();
   void evict_handles();
-  mutable std::shared_mutex changes_mutex; // shared_mutex: cho phép nhiều reader song song, exclusive khi write/commit
+  using ChangesMutex = WriterPreferredSharedMutex;
+  mutable ChangesMutex changes_mutex; // Writer-preferred rwlock: cho phép nhiều reader song song, ưu tiên writer khi commit/replay
 
   // --- Search Database Pool ---
   // Mỗi goroutine search cần Xapian::Database riêng (không thread-safe).
@@ -129,7 +289,10 @@ public:
   void clear_writer_predecessors_for_tx(const std::string& txHashStr);
 
   // --- Commit and Change Tracking ---
-  bool commit_changes();
+  bool commit_changes(uint64_t blockNumber = 0);
+  bool rollbackAboveBlock(uint64_t targetBlock);
+  uint64_t getCommittedHeadBlock();
+  void clearAllTxBuffers();
   std::array<uint8_t, 32u> getChangeHash();
   std::vector<XapianLog::LogEntry> getChangeLogs(); // <-- Kiểu mới
   std::array<uint8_t, 32u> getCombinedTagsChangeHash();
@@ -144,7 +307,7 @@ public:
   // caller khác quyết định huỷ và lúc thực sự huỷ (TOCTOU).
   static bool destroyInstance(const std::string &db_path, bool onlyIfIdle = false); // Hàm hủy tức thì
   static void destroyAllInstances();
-  bool saveAllAndCommit();
+  bool saveAllAndCommit(uint64_t blockNumber = 0);
   bool revertUncommittedChanges();
   bool mvmCommitTransaction();
   void mvmCancelTransaction();
@@ -239,20 +402,28 @@ private:
 
   bool commitTransaction(unsigned char *txHashes, int numHashes);
 
-  // 2026-08-20 (plan §9.29): InMemory-mode-only undo tracking for
-  // revertUncommittedChanges() -- see that function's own doc comment for
-  // why this exists (Xapian::InMemory's commit()/cancel() are BOTH hard
-  // no-ops, confirmed via Xapian's own backends/inmemory/
-  // inmemory_database.cc source, so the disk-mode close()+reopen trick
-  // cannot apply there at all). Keyed by normalized virtual docid string
-  // (matching replay_log()'s own normalize_docid); std::nullopt means "did
-  // not exist before this uncommitted batch" (so revert must delete it,
-  // not restore it). Populated lazily, once per docid, on first touch
-  // since the last commit/revert (see replay_log()'s get_or_load_doc
-  // lambda); cleared on both commit and revert. Never populated (and
-  // never consulted) in cgo/disk mode -- zero behavior/overhead change
-  // there.
-  std::map<std::string, std::optional<Xapian::Document>> undo_snapshot_;
+  // Pre-image undo tracking for both InMemory revertUncommittedChanges() and
+  // on-disk crash-recovery undo journaling (committed atomically with db.commit()
+  // via Xapian database metadata). Keyed by normalized virtual docid string;
+  // existed=false means "did not exist before this uncommitted batch" (undo must
+  // delete it and restore next_did_). Populated lazily on first touch per docid
+  // and per physical docid since the last commit/revert; cleared on commit/revert.
+  struct UndoEntry {
+    bool existed = false;
+    Xapian::docid original_did = 0;
+    std::string serialized_doc;
+  };
+  static constexpr size_t MAX_UNDO_BLOCKS = 64;
+  std::map<std::string, UndoEntry> undo_snapshot_;
+  std::unordered_set<Xapian::docid> undo_captured_dids_;
+  Xapian::docid next_did_{1};
+  bool has_uncommitted_prev_next_did_{false};
+  Xapian::docid uncommitted_prev_next_did_{1};
+  std::map<std::string, std::string> in_memory_meta_;
+
+  void reloadNextDidLocked();
+  std::string readMetaLocked(const std::string& key) const;
+  void writeMetaLocked(const std::string& key, const std::string& val);
 
   // --- compactInPlace() self-throttling (see that method's doc comment) ---
   std::chrono::steady_clock::time_point last_compact_attempt_{}; // epoch value -> first call is never throttled

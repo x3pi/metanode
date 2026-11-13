@@ -22,6 +22,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
@@ -942,6 +943,38 @@ SKIP_GENESIS:
 		}
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// STARTUP XAPIAN CRASH-RECOVERY ALIGNMENT:
+	// CommitAllXapianAtBlock() runs synchronously during block processing before
+	// commitWorker persists CommitBlockState / NOMT asynchronously. If the node
+	// crashed in that window, on-disk Xapian databases may hold committed blocks
+	// ahead of app.startLastBlock.
+	//
+	// Ordering note vs. reexecuteBlocksToCatchUp():
+	//   1. When NOMT lags behind BlockDB (NOMT at M < N), alignStartupTipToBlock()
+	//      sets app.startLastBlock = M, and reexecuteBlocksToCatchUp(M, N) (line 635)
+	//      FIRST calls RollbackXapianAboveBlock(M) (line 1544) before re-executing
+	//      blocks M+1..N, advancing both NOMT and app.startLastBlock to N (or to the
+	//      last valid block if catch-up truncates).
+	//   2. This final RollbackXapianAboveBlock(app.startLastBlock) acts as a post-condition
+	//      guard for all other startup paths that do not enter reexecuteBlocksToCatchUp
+	//      (e.g. changelog trie rebuild at line 567, snapshot fallback alignment at
+	//      lines 864-885, or normal startup where NOMT and BlockDB are both at M while
+	//      Xapian committed M+1 right before crash). If reexecuteBlocksToCatchUp already
+	//      ran, Xapian is already at app.startLastBlock so this call is a no-op.
+	// ═══════════════════════════════════════════════════════════════════════════
+	targetXapianBlock := uint64(0)
+	if app.startLastBlock != nil {
+		targetXapianBlock = uint64(app.startLastBlock.Header().BlockNumber())
+	}
+	rolledBackXapian, xapianRbErr := mvm.RollbackXapianAboveBlock(targetXapianBlock)
+	if xapianRbErr != nil {
+		return fmt.Errorf("[STARTUP FATAL] Xapian crash-recovery rollback to block #%d failed: %w", targetXapianBlock, xapianRbErr)
+	}
+	if rolledBackXapian > 0 {
+		logger.Warn("🛡️ [XAPIAN-RECOVERY] Rolled back %d Xapian database(s) to block #%d after unclean shutdown", rolledBackXapian, targetXapianBlock)
+	}
+
 	return nil
 }
 
@@ -1517,6 +1550,13 @@ func (app *App) repopulateGenesisState() error {
 // reexecuteBlocksToCatchUp catches up NOMT trie state by re-executing transactions from startBlockNum+1 to targetBlockNum.
 func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, startBlockNum uint64, targetBlockNum uint64) error {
 	logger.Info("🛡️ [STARTUP] Starting NOMT forward catch-up re-execution from block %d to %d...", startBlockNum+1, targetBlockNum)
+	// Align on-disk Xapian databases to startBlockNum BEFORE re-executing startBlockNum+1..targetBlockNum,
+	// preventing dirty future Xapian reads and duplicate wdf/docid drift during catch-up re-execution.
+	if rolledBack, rbErr := mvm.RollbackXapianAboveBlock(startBlockNum); rbErr != nil {
+		return fmt.Errorf("failed to align Xapian to block #%d before NOMT catch-up: %w", startBlockNum, rbErr)
+	} else if rolledBack > 0 {
+		logger.Warn("🛡️ [STARTUP] Rolled back %d Xapian database(s) to block #%d prior to NOMT catch-up", rolledBack, startBlockNum)
+	}
 	for bn := startBlockNum + 1; bn <= targetBlockNum; bn++ {
 		key := []byte(fmt.Sprintf("blockNumber_%d", bn))
 		data, err := app.storageManager.GetStorageMapping().Get(key)
@@ -1586,19 +1626,22 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 		leaderAddr := blk.Header().LeaderAddress()
 
 		// Run execution
-		_, execErr := tx_processor.ProcessTransactions(context.Background(), app.chainState, groupedGroups, false, true, blockTimeSec, leaderAddr, bn, false)
+		catchupResults, execErr := tx_processor.ProcessTransactions(context.Background(), app.chainState, groupedGroups, false, true, blockTimeSec, leaderAddr, bn, false)
 		if execErr != nil {
+			mvm.ClearAllXapianTxBuffers()
 			return fmt.Errorf("failed to execute transactions for block #%d during NOMT catch-up: %v", bn, execErr)
 		}
 
 		// 5. Commit state changes and verify against header BEFORE persisting to disk
 		scPayload, err := app.chainState.GetSmartContractDB().Commit()
 		if err != nil {
+			mvm.ClearAllXapianTxBuffers()
 			return fmt.Errorf("failed to commit SmartContractDB for block #%d: %v", bn, err)
 		}
 
 		accountRes, err := app.chainState.GetAccountStateDB().CommitPipeline()
 		if err != nil {
+			mvm.ClearAllXapianTxBuffers()
 			if scPayload != nil {
 				if disc, ok := scPayload.(interface{ Discard() }); ok {
 					disc.Discard()
@@ -1609,6 +1652,7 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 
 		stakeRes, err := app.chainState.GetStakeStateDB().CommitPipeline()
 		if err != nil {
+			mvm.ClearAllXapianTxBuffers()
 			if scPayload != nil {
 				if disc, ok := scPayload.(interface{ Discard() }); ok {
 					disc.Discard()
@@ -1662,7 +1706,35 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 			accountWait,
 			stakeWait,
 		); err != nil {
+			mvm.ClearAllXapianTxBuffers()
 			return err
+		}
+
+		// Commit Xapian buffered writes for verified catch-up block bn
+		if len(catchupResults.Transactions) > 0 {
+			var commitHashes [][]byte
+			var clearHashes [][]byte
+			hasContractInteraction := false
+			for i, tx := range catchupResults.Transactions {
+				isContractInteraction := tx.IsDeployContract() || tx.IsCallContract() || (app.chainState != nil && app.chainState.HasCode(tx.ToAddress()))
+				if isContractInteraction {
+					if i < len(catchupResults.Receipts) && catchupResults.Receipts[i] != nil && catchupResults.Receipts[i].Status() == pb.RECEIPT_STATUS_RETURNED {
+						commitHashes = append(commitHashes, tx.Hash().Bytes())
+						hasContractInteraction = true
+					} else {
+						clearHashes = append(clearHashes, tx.Hash().Bytes())
+					}
+				}
+			}
+			if len(commitHashes) > 0 {
+				mvm.CommitXapianTxBufferBatch(commitHashes)
+			}
+			if len(clearHashes) > 0 {
+				mvm.ClearXapianTxBufferBatch(clearHashes)
+			}
+			if hasContractInteraction {
+				mvm.CommitAllXapianAtBlock(bn)
+			}
 		}
 
 		// 6. Invalidate state caches to ensure next block reads fresh data

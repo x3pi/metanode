@@ -98,11 +98,13 @@ func (s *raftStateSource) capture(tmp string) (raftfeed.StateMeta, error) {
 	if sm == nil {
 		return raftfeed.StateMeta{}, errors.New("no storage manager")
 	}
-	mvm.CommitAllXapian()
+	num := storage.GetLastBlockNumber()
+	if num > 0 {
+		mvm.CommitAllXapianAtBlock(num)
+	}
 	if err := sm.FlushAll(); err != nil {
 		return raftfeed.StateMeta{}, fmt.Errorf("flush: %w", err)
 	}
-	num := storage.GetLastBlockNumber()
 	meta := raftfeed.StateMeta{LastBlock: num, GEI: storage.GetLastGlobalExecIndex()}
 	if h, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(num); ok {
 		meta.BlockHash = h.Hex()

@@ -19,11 +19,8 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 
 	// "github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
-	"github.com/meta-node-blockchain/meta-node/pkg/trie"
-	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -322,88 +319,4 @@ PROCESS_LOOP:
 	// Rust will continue fetching blocks via RustSyncNode.fetch_from_peers()
 	// No action needed here - just log and return
 	logger.Info("🦀 [RUST P2P] Go network sync disabled - Rust handles block sync for SyncOnly nodes")
-}
-
-// syncLocalStateWithDB synchronizes Go's internal state (nextExpectedGlobalExecIndex and currentBlockNumber)
-// with the database. This is critical when P2P Sync or Rust writes blocks to DB directly,
-// bypassing the Go Master consensus processor loop (e.g. during dynamic catch-up sync).
-func (bp *BlockProcessor) syncLocalStateWithDB(nextExpectedGlobalExecIndex *uint64, currentBlockNumber *uint64) {
-	if storage.IsPreConsensusSyncActive() {
-		return
-	}
-	actualLastGEI := storage.GetLastGlobalExecIndex()
-
-	// CRITICAL FIX: Actually advance local state when DB is ahead
-	if actualLastGEI > 0 && actualLastGEI >= *nextExpectedGlobalExecIndex {
-		bp.chainState.LockCommit()
-		defer bp.chainState.UnlockCommit()
-
-		oldNextExpected := *nextExpectedGlobalExecIndex
-		*nextExpectedGlobalExecIndex = actualLastGEI + 1
-
-		// WE MUST ALSO ADVANCE currentBlockNumber !!!
-		actualLastBlockDB := storage.GetLastBlockNumber()
-		if actualLastBlockDB > 0 && actualLastBlockDB > *currentBlockNumber {
-			oldBlockNumber := *currentBlockNumber
-			*currentBlockNumber = actualLastBlockDB
-			logger.Info("🔄 [TRANSITION SYNC] Advanced block number from DB: %d → %d",
-				oldBlockNumber, *currentBlockNumber)
-
-			// Fetch the fresh block from DB matching the new tip block number to update in-memory tip block
-			bc := blockchain.GetBlockChainInstance()
-			if bc != nil {
-				if blockHash, ok := bc.GetBlockHashByNumber(actualLastBlockDB); ok {
-					if freshBlock, err := bp.chainState.GetBlockDatabase().GetBlockByHash(blockHash); err == nil && freshBlock != nil {
-						// Atomically update bp.lastBlock and header in memory
-						bp.SetLastBlock(freshBlock)
-						bp.nextBlockNumber.Store(actualLastBlockDB + 1)
-						headerCopy := freshBlock.Header()
-						bp.chainState.SetcurrentBlockHeader(&headerCopy)
-
-						logger.Info("🔄 [TRANSITION SYNC] Updated bp.lastBlock in memory to #%d", actualLastBlockDB)
-
-						// ═══════════════════════════════════════════════════════════
-						// NOMT TRIE RE-ALIGNMENT: Since the DB fast-forwarded via
-						// SyncBlocksRequest, the in-memory NomtStateTrie may still
-						// hold the old state root. We MUST re-align it to the new
-						// block's header before processing the next consensus block.
-						// ═══════════════════════════════════════════════════════════
-						if trie.GetStateBackend() == trie.BackendNOMT {
-							logger.Info("🔧 [TRANSITION SYNC] Forcing NOMT trie re-alignment to block #%d (GEI=%d)",
-								actualLastBlockDB, actualLastGEI)
-							if err := bp.chainState.UpdateStateForNewHeaderUnlocked(freshBlock.Header()); err != nil {
-								logger.Error("❌ [TRANSITION SYNC] Failed to re-align NOMT trie: %v", err)
-							}
-						}
-
-						// CRITICAL C++ EVM CACHE INVALIDATION:
-						// Since sync directly updated the LevelDB/NOMT database, we must clear/reset internal memory caches.
-						bp.chainState.InvalidateAllState()
-						mvm.ClearAllMVMApi()
-						mvm.ClearAllProtectedMVMApi()
-						mvm.CallClearAllStateInstances()
-						trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
-					} else {
-						logger.Error("❌ [TRANSITION SYNC] Failed to load fresh block #%d from DB: %v", actualLastBlockDB, err)
-					}
-				} else {
-					logger.Error("❌ [TRANSITION SYNC] Failed to get block hash for block #%d from DB", actualLastBlockDB)
-				}
-			}
-		}
-
-		if oldNextExpected != *nextExpectedGlobalExecIndex {
-			logger.Info("🔄 [TRANSITION SYNC] Advanced local state from DB: nextExpected %d → %d",
-				oldNextExpected, *nextExpectedGlobalExecIndex)
-		}
-	}
-}
-
-// monitorBlockReceiveTimeout monitors for block receive timeouts
-// monitorBlockReceiveTimeout removed per user request
-
-// handleShutdown handles safe shutdown of the listener
-func handleShutdown(listener *executor.Listener) {
-	// This function is kept for backward compatibility
-	// The actual shutdown handling should be implemented in the main application
 }

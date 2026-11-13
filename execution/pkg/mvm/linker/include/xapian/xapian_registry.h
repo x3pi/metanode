@@ -91,7 +91,10 @@ public:
      * nếu không tìm thấy trình quản lý nào hoặc nếu xảy ra lỗi.
      */
     void clearBufferForTxHash(const uint256_t* txHash);
+    void clearBuffersForTxHashBatch(const unsigned char* b_tx_hashes, int count);
+    void clearAllBuffers();
     void commitBufferForTxHash(const uint256_t* txHash);
+    void commitBuffersForTxHashBatch(const unsigned char* b_tx_hashes, int count);
 
     struct XapianManagerSnapshot {
         std::weak_ptr<XapianManager> manager;

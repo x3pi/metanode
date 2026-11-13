@@ -227,12 +227,43 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 			if getErr == nil && len(data) > 0 {
 				backupData = data
 			} else {
-				// Backup not ready — broadcastWorker may be lagging.
-				// STOP serving here immediately. Requester will retry this range later.
-				// Removing the 10x 50ms sleep polling to prevent cascading delays on large batch syncs.
-				// logger.Warn("📦 [BLOCK SYNC] Block #%d backup NOT ready (broadcastWorker lagging). Stopping at block #%d (served %d blocks)",
-				// 	blockNum, blockNum-1, len(blocks))
-				break
+				// Check whether a subsequent committed block already has persisted BackupDb.
+				// If a higher block's backup exists, the sequential async backupDbWorker has
+				// already advanced past blockNum (e.g., node crashed before persisting
+				// block_data_topic-N, then restarted and committed N+1). Breaking unconditionally
+				// here would permanently stall GetBlocksRange at 0 blocks forever (ADV-7).
+				workerMovedPast := false
+				maxProbe := lastBlockNumber
+				if maxProbe > blockNum+64 {
+					maxProbe = blockNum + 64
+				}
+				for probeNum := blockNum + 1; probeNum <= maxProbe; probeNum++ {
+					probePrimary := []byte(fmt.Sprintf("block_data_topic-%d", probeNum))
+					if pData, pErr := backupStorage.Get(probePrimary); pErr == nil && len(pData) > 0 {
+						workerMovedPast = true
+						break
+					}
+					probeLegacy := []byte(fmt.Sprintf("backup_%d", probeNum))
+					if pData, pErr := backupStorage.Get(probeLegacy); pErr == nil && len(pData) > 0 {
+						workerMovedPast = true
+						break
+					}
+				}
+				if workerMovedPast {
+					synthBackup, synthErr := storage.SerializeBackupDb(storage.BackUpDb{BockNumber: blockNum})
+					if synthErr == nil && len(synthBackup) > 0 {
+						logger.Warn("📦 [BLOCK SYNC] Missing BackupDb for historical block #%d (txs=%d) while higher block backup exists — synthesized fallback BackupDb", blockNum, len(blk.Transactions()))
+						if len(blk.Transactions()) == 0 {
+							_ = backupStorage.Put(primaryKey, synthBackup)
+						}
+						backupData = synthBackup
+					} else {
+						break
+					}
+				} else {
+					// Backup not ready — broadcastWorker/backupDbWorker may still be in flight for tip.
+					break
+				}
 			}
 		}
 		blockData.BackupData = backupData

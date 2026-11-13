@@ -210,6 +210,7 @@ extern int revert_full_db(unsigned char *mvmId);
 extern void clear_xapian_tx_buffer(unsigned char *b_tx_hash);
 extern void commit_xapian_tx_buffer(unsigned char *b_tx_hash);
 extern int ReplayFullDbLogs(LogReplayEntryC *entries, int num_entries);
+extern int ReplayFullDbLogsAtBlock(LogReplayEntryC *entries, int num_entries, unsigned long long block_number);
 
 struct Extension_return {
   unsigned char *data_p;
@@ -307,6 +308,9 @@ void updateStateNonce(unsigned char *b_address, unsigned long long nonce);
 void updateStateBalance(unsigned char *b_address, unsigned char *b_balance);
 extern void MVM_cancelTransaction(unsigned char *mvmId);
 extern void MVM_commitAllXapian();
+extern void MVM_commitAllXapianAtBlock(unsigned long long block_number);
+extern int MVM_rollbackXapianAboveBlock(unsigned long long target_block);
+extern void MVM_clearAllXapianTxBuffers();
 extern void MVM_destroyAllXapianInstances();
 
 struct ExportedXapianLog {

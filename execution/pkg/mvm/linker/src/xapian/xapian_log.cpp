@@ -322,8 +322,13 @@ namespace XapianLog
     // Chuyển đổi một vector byte trở lại thành ComprehensiveLog (nếu có thể)
     std::optional<ComprehensiveLog> ComprehensiveLog::deserialize(const std::vector<uint8_t> &data)
     {
-        ComprehensiveLog logs;  // Tạo đối tượng để chứa kết quả
-        size_t current_pos = 0; // Vị trí đọc hiện tại
+        size_t current_pos = 0;
+        return deserialize_from_offset(data, current_pos);
+    }
+
+    std::optional<ComprehensiveLog> ComprehensiveLog::deserialize_from_offset(const std::vector<uint8_t> &data, size_t &current_pos)
+    {
+        ComprehensiveLog logs; // Tạo đối tượng để chứa kết quả
 
         try
         {

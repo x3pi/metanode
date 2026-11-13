@@ -1058,7 +1058,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
-      std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
+      std::shared_lock<XapianManager::ChangesMutex> search_lock(manager->changes_mutex);
       Xapian::Database* pooled_db = manager->acquireSearchDb();
       struct DbPoolGuard {
           std::shared_ptr<XapianManager> m;
@@ -2097,7 +2097,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
-      std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
+      std::shared_lock<XapianManager::ChangesMutex> search_lock(manager->changes_mutex);
       Xapian::Database* pooled_db = manager->acquireSearchDb();
       struct DbPoolGuard {
           std::shared_ptr<XapianManager> m;

@@ -364,10 +364,14 @@ func extractFullDbLogs(
 		// Trích xuất dữ liệu log đã serialize (từ byte 32 đến hết)
 		logDataBytes := goBytes[32:]
 
-		// Thêm vào map Go (copy logDataBytes để đảm bảo an toàn)
-		logValueCopy := make([]byte, len(logDataBytes))
-		copy(logValueCopy, logDataBytes)
-		mapFullDbLogs[addressHex] = logValueCopy
+		// Thêm vào map Go (copy hoặc nối tiếp nếu cùng địa chỉ có nhiều frame DB)
+		if existing, exists := mapFullDbLogs[addressHex]; exists {
+			mapFullDbLogs[addressHex] = append(existing, logDataBytes...)
+		} else {
+			logValueCopy := make([]byte, len(logDataBytes))
+			copy(logValueCopy, logDataBytes)
+			mapFullDbLogs[addressHex] = logValueCopy
+		}
 	}
 
 	return

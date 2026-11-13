@@ -87,3 +87,66 @@ func TestPutLatestFullDbLogsForAddress_LastWriteWins(t *testing.T) {
 		t.Errorf("expected the second (latest) write to win, got %q", got)
 	}
 }
+
+func TestFullDbLogsLatestKey_NormalizesEIP55AndLowercaseHex(t *testing.T) {
+	db := newTestMemStorage()
+	eip55Addr := "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01"
+	lowerNoPrefix := "abcdef0123456789abcdef0123456789abcdef01"
+	upperWithPrefix := "0XABCDEF0123456789ABCDEF0123456789ABCDEF01"
+
+	if !bytes.Equal(FullDbLogsLatestKey(eip55Addr), FullDbLogsLatestKey(lowerNoPrefix)) {
+		t.Fatalf("EIP-55 key %q != lowercase key %q", FullDbLogsLatestKey(eip55Addr), FullDbLogsLatestKey(lowerNoPrefix))
+	}
+	if !bytes.Equal(FullDbLogsLatestKey(upperWithPrefix), FullDbLogsLatestKey(lowerNoPrefix)) {
+		t.Fatalf("0X uppercase key %q != lowercase key %q", FullDbLogsLatestKey(upperWithPrefix), FullDbLogsLatestKey(lowerNoPrefix))
+	}
+
+	payload := []byte("eip55-exported-xapian-frame")
+	if err := PutLatestFullDbLogsForAddress(db, eip55Addr, payload); err != nil {
+		t.Fatalf("PutLatestFullDbLogsForAddress: %v", err)
+	}
+
+	got, ok := GetLatestFullDbLogsForAddress(db, lowerNoPrefix)
+	if !ok || !bytes.Equal(got, payload) {
+		t.Fatalf("GetLatestFullDbLogsForAddress(lowerNoPrefix) = (%q, %v), want (%q, true)", got, ok, payload)
+	}
+	gotUpper, okUpper := GetLatestFullDbLogsForAddress(db, upperWithPrefix)
+	if !okUpper || !bytes.Equal(gotUpper, payload) {
+		t.Fatalf("GetLatestFullDbLogsForAddress(upperWithPrefix) = (%q, %v), want (%q, true)", gotUpper, okUpper, payload)
+	}
+}
+
+func TestPersistLatestFullDbLogsBatch_MergesMixedCaseAndMultiBatchDeterministically(t *testing.T) {
+	db := newTestMemStorage()
+	addr1EIP55 := "0xAaBbCcDdEe0011223344556677889900AaBbCc01"
+	addr1Lower := "aabbccddee0011223344556677889900aabbcc01"
+	addr2EIP55 := "0xFfEeDdCcBbAa99887766554433221100FfEeDd02"
+	addr2Lower := "ffeeddccbbaa99887766554433221100ffeedd02"
+
+	batches := []map[string][]byte{
+		{
+			addr1Lower: []byte("frameA|"),
+			addr2EIP55: []byte("contract2_only"),
+		},
+		{
+			addr1EIP55: []byte("frameB"),
+		},
+		{
+			addr1Lower: nil, // empty slice must be ignored, not overwrite
+		},
+	}
+
+	if err := PersistLatestFullDbLogsBatch(db, batches); err != nil {
+		t.Fatalf("PersistLatestFullDbLogsBatch: %v", err)
+	}
+
+	got1, ok1 := GetLatestFullDbLogsForAddress(db, addr1Lower)
+	if !ok1 || !bytes.Equal(got1, []byte("frameA|frameB")) {
+		t.Fatalf("addr1 merged logs = (%q, %v), want (%q, true)", got1, ok1, "frameA|frameB")
+	}
+
+	got2, ok2 := GetLatestFullDbLogsForAddress(db, addr2Lower)
+	if !ok2 || !bytes.Equal(got2, []byte("contract2_only")) {
+		t.Fatalf("addr2 logs = (%q, %v), want (%q, true)", got2, ok2, "contract2_only")
+	}
+}

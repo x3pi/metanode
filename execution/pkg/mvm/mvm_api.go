@@ -18,7 +18,7 @@ package mvm
 #cgo linux,amd64 CXXFLAGS: -march=native -mtune=native
 #cgo linux,arm64 CXXFLAGS: -march=armv8-a -mtune=generic
 #cgo LDFLAGS: -lgmp -lmpfr -lm -ltbb -lxapian -L./linker/build/lib/static -lleveldb -lmvm_linker -L./c_mvm/build/lib/static -lmvm -lstdc++ -luuid
-#cgo CPPFLAGS: -I./linker/build/include
+#cgo CPPFLAGS: -I./linker/include -I./linker/build/include
 #include "mvm_linker.hpp"
 #include <stdlib.h>
 #include <math.h>
@@ -35,7 +35,12 @@ extern void clear_xapian_tx_buffer(unsigned char *b_tx_hash);
 extern void commit_xapian_tx_buffer(unsigned char *b_tx_hash);
 extern void clear_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int count);
 extern void commit_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int count);
+extern int ReplayFullDbLogs(LogReplayEntryC *entries, int num_entries);
+extern int ReplayFullDbLogsAtBlock(LogReplayEntryC *entries, int num_entries, unsigned long long block_number);
 extern void MVM_commitAllXapian();
+extern void MVM_commitAllXapianAtBlock(unsigned long long block_number);
+extern int MVM_rollbackXapianAboveBlock(unsigned long long target_block);
+extern void MVM_clearAllXapianTxBuffers();
 extern void MVM_destroyAllXapianInstances();
 */
 import "C"
@@ -138,12 +143,33 @@ type MVMApi struct {
 }
 
 func CallReplayFullDbLogs(logs map[string][]byte) int {
-	if len(logs) == 0 {
+	return CallReplayFullDbLogsAtBlock(logs, 0)
+}
+
+func CallReplayFullDbLogsAtBlock(logs map[string][]byte, blockNumber uint64) int {
+	if len(logs) == 0 && blockNumber == 0 {
 		return 1
 	}
-	fmt.Printf("[Go CallReplay] Chuẩn bị %d entry log từ map để gọi C++ ReplayFullDbLogs...\n", len(logs))
-	cEntries := make([]C.LogReplayEntryC, 0, len(logs))
-	tempAllocs := make([]unsafe.Pointer, 0, len(logs)*2)
+	return CallReplayFullDbLogsBatchAtBlock([]map[string][]byte{logs}, blockNumber)
+}
+
+func CallReplayFullDbLogsBatchAtBlock(logBatches []map[string][]byte, blockNumber uint64) int {
+	totalEntries := 0
+	for _, m := range logBatches {
+		totalEntries += len(m)
+	}
+	if totalEntries == 0 {
+		if blockNumber > 0 {
+			if _, err := RollbackXapianAboveBlock(blockNumber - 1); err != nil {
+				fmt.Printf("[Go CallReplay] LỖI: RollbackXapianAboveBlock(%d) thất bại cho batch rỗng: %v\n", blockNumber-1, err)
+				return 0
+			}
+		}
+		return 1
+	}
+	fmt.Printf("[Go CallReplay] Chuẩn bị %d entry log từ %d batch (block=%d) để gọi C++ ReplayFullDbLogsAtBlock...\n", totalEntries, len(logBatches), blockNumber)
+	cEntries := make([]C.LogReplayEntryC, 0, totalEntries)
+	tempAllocs := make([]unsafe.Pointer, 0, totalEntries*2)
 	defer func() {
 		fmt.Printf("[Go CallReplay] Giải phóng %d vùng nhớ C tạm thời đã cấp phát.\n", len(tempAllocs))
 		for _, ptr := range tempAllocs {
@@ -151,66 +177,80 @@ func CallReplayFullDbLogs(logs map[string][]byte) int {
 		}
 	}()
 
-	// Sắp xếp các địa chỉ (keys) để đảm bảo tính tuần tự (determinism)
-	var addrs []string
-	for addrHex := range logs {
-		addrs = append(addrs, addrHex)
-	}
-	sort.Strings(addrs)
+	for _, logs := range logBatches {
+		if len(logs) == 0 {
+			continue
+		}
+		// Sắp xếp các địa chỉ (keys) để đảm bảo tính tuần tự (determinism)
+		var addrs []string
+		for addrHex := range logs {
+			addrs = append(addrs, addrHex)
+		}
+		sort.Strings(addrs)
 
-	for _, addrHex := range addrs {
-		logData := logs[addrHex]
-		fmt.Printf("  - Xử lý log cho địa chỉ hex: %s\n", addrHex)
-		processedAddrHex := strings.TrimPrefix(addrHex, "0x")
-		if len(processedAddrHex)%2 != 0 {
-			processedAddrHex = "0" + processedAddrHex
+		for _, addrHex := range addrs {
+			logData := logs[addrHex]
+			fmt.Printf("  - Xử lý log cho địa chỉ hex: %s\n", addrHex)
+			processedAddrHex := strings.TrimSpace(addrHex)
+			if strings.HasPrefix(processedAddrHex, "0x") || strings.HasPrefix(processedAddrHex, "0X") {
+				processedAddrHex = processedAddrHex[2:]
+			}
+			if len(processedAddrHex)%2 != 0 {
+				processedAddrHex = "0" + processedAddrHex
+			}
+			if len(processedAddrHex) != 40 {
+				fmt.Printf("    - LỖI: Độ dài địa chỉ hex không hợp lệ (%d chars) cho '%s'. Dừng xử lý (fail-closed).\n", len(processedAddrHex), addrHex)
+				return 0
+			}
+			addrBytes, err := hex.DecodeString(processedAddrHex)
+			if err != nil {
+				fmt.Printf("    - LỖI: Không thể decode địa chỉ hex '%s': %v. Dừng xử lý (fail-closed).\n", addrHex, err)
+				return 0
+			}
+			if len(logData) == 0 {
+				fmt.Printf("    - CẢNH BÁO: Dữ liệu log rỗng cho địa chỉ '%s'. Bỏ qua.\n", addrHex)
+				continue
+			}
+			cAddrDataPtr := C.malloc(20)
+			if cAddrDataPtr == nil {
+				fmt.Printf("    - LỖI: Không thể cấp phát bộ nhớ C cho địa chỉ '%s'. Dừng xử lý.\n", addrHex)
+				return 0
+			}
+			tempAllocs = append(tempAllocs, cAddrDataPtr)
+			C.memcpy(cAddrDataPtr, unsafe.Pointer(&addrBytes[0]), 20)
+			logDataLen := len(logData)
+			cLogDataPtr := C.malloc(C.size_t(logDataLen))
+			if cLogDataPtr == nil {
+				fmt.Printf("    - LỖI: Không thể cấp phát bộ nhớ C cho dữ liệu log (len %d) của địa chỉ '%s'. Dừng xử lý.\n", logDataLen, addrHex)
+				return 0
+			}
+			tempAllocs = append(tempAllocs, cLogDataPtr)
+			C.memcpy(cLogDataPtr, unsafe.Pointer(&logData[0]), C.size_t(logDataLen))
+			entry := C.LogReplayEntryC{
+				address_ptr:  (*C.uchar)(cAddrDataPtr),
+				address_len:  20,
+				log_data_ptr: (*C.uchar)(cLogDataPtr),
+				log_data_len: C.int(logDataLen),
+			}
+			cEntries = append(cEntries, entry)
+			fmt.Printf("    - Đã chuẩn bị entry (AddrLen: 20, LogDataLen: %d)\n", logDataLen)
 		}
-		if len(processedAddrHex) != 40 {
-			fmt.Printf("    - LỖI: Độ dài địa chỉ hex không hợp lệ (%d chars) cho '%s'. Bỏ qua.\n", len(processedAddrHex), addrHex)
-			continue
-		}
-		addrBytes, err := hex.DecodeString(processedAddrHex)
-		if err != nil {
-			fmt.Printf("    - LỖI: Không thể decode địa chỉ hex '%s': %v. Bỏ qua.\n", addrHex, err)
-			continue
-		}
-		if len(logData) == 0 {
-			fmt.Printf("    - CẢNH BÁO: Dữ liệu log rỗng cho địa chỉ '%s'. Bỏ qua.\n", addrHex)
-			continue
-		}
-		cAddrDataPtr := C.malloc(20)
-		if cAddrDataPtr == nil {
-			fmt.Printf("    - LỖI: Không thể cấp phát bộ nhớ C cho địa chỉ '%s'. Dừng xử lý.\n", addrHex)
-			return 0
-		}
-		tempAllocs = append(tempAllocs, cAddrDataPtr)
-		C.memcpy(cAddrDataPtr, unsafe.Pointer(&addrBytes[0]), 20)
-		logDataLen := len(logData)
-		cLogDataPtr := C.malloc(C.size_t(logDataLen))
-		if cLogDataPtr == nil {
-			fmt.Printf("    - LỖI: Không thể cấp phát bộ nhớ C cho dữ liệu log (len %d) của địa chỉ '%s'. Dừng xử lý.\n", logDataLen, addrHex)
-			return 0
-		}
-		tempAllocs = append(tempAllocs, cLogDataPtr)
-		C.memcpy(cLogDataPtr, unsafe.Pointer(&logData[0]), C.size_t(logDataLen))
-		entry := C.LogReplayEntryC{
-			address_ptr:  (*C.uchar)(cAddrDataPtr),
-			address_len:  20,
-			log_data_ptr: (*C.uchar)(cLogDataPtr),
-			log_data_len: C.int(logDataLen),
-		}
-		cEntries = append(cEntries, entry)
-		fmt.Printf("    - Đã chuẩn bị entry (AddrLen: 20, LogDataLen: %d)\n", logDataLen)
 	}
 	numValidEntries := len(cEntries)
 	if numValidEntries == 0 {
+		if blockNumber > 0 {
+			if _, err := RollbackXapianAboveBlock(blockNumber - 1); err != nil {
+				fmt.Printf("[Go CallReplay] LỖI: RollbackXapianAboveBlock(%d) thất bại khi không có entry log khác rỗng: %v\n", blockNumber-1, err)
+				return 0
+			}
+		}
 		fmt.Println("[Go CallReplay] Không có entry hợp lệ nào được chuẩn bị sau khi lọc. Không gọi C++.")
 		return 1
 	}
 	cEntriesPtr := (*C.LogReplayEntryC)(unsafe.Pointer(&cEntries[0]))
-	fmt.Printf("[Go CallReplay] Gọi hàm C.ReplayFullDbLogs với %d entries...\n", numValidEntries)
-	result := C.ReplayFullDbLogs(cEntriesPtr, C.int(numValidEntries))
-	fmt.Printf("[Go CallReplay] Hàm C.ReplayFullDbLogs trả về: %d\n", result)
+	fmt.Printf("[Go CallReplay] Gọi hàm C.ReplayFullDbLogsAtBlock với %d entries (block=%d)...\n", numValidEntries, blockNumber)
+	result := C.ReplayFullDbLogsAtBlock(cEntriesPtr, C.int(numValidEntries), C.ulonglong(blockNumber))
+	fmt.Printf("[Go CallReplay] Hàm C.ReplayFullDbLogsAtBlock trả về: %d\n", result)
 	return int(result)
 }
 
@@ -263,10 +303,17 @@ func ExportAllXapianLogs() map[string][]byte {
 		addressBytes := C.GoBytes(unsafe.Pointer(&cEntry.address[0]), 20)
 		addressHex := common.BytesToAddress(addressBytes).Hex()
 
-		// Parse serialized logs
+		// Parse serialized logs. Multiple self-delimiting ComprehensiveLog frames
+		// for the same contract address (when one contract writes >= 2 dbName
+		// instances in the same block, sorted deterministically by (address, db_name)
+		// in C++) are concatenated under addressHex so no DB is ever overwritten.
 		if cEntry.logs != nil && cEntry.logs_length > 0 {
 			logData := C.GoBytes(unsafe.Pointer(cEntry.logs), cEntry.logs_length)
-			result[addressHex] = logData
+			if existing, exists := result[addressHex]; exists {
+				result[addressHex] = append(existing, logData...)
+			} else {
+				result[addressHex] = logData
+			}
 		}
 	}
 
@@ -1898,9 +1945,32 @@ func ClearAllStateInstances() {
 	C.clearAllStateInstances()
 }
 
-// CommitAllXapian forces all XapianManager instances in C++ to commit their data to disk
+// Deprecated: CommitAllXapian is a legacy entry point without a block number.
+// Uncommitted writes are refused when blockNumber == 0 to preserve undo journal integrity;
+// always use CommitAllXapianAtBlock(blockNumber) with blockNumber > 0.
 func CommitAllXapian() {
 	C.MVM_commitAllXapian()
+}
+
+// CommitAllXapianAtBlock commits all XapianManager instances atomically along with
+// a per-block crash-recovery undo journal entry for blockNumber.
+func CommitAllXapianAtBlock(blockNumber uint64) {
+	C.MVM_commitAllXapianAtBlock(C.ulonglong(blockNumber))
+}
+
+// RollbackXapianAboveBlock rolls back all live and on-disk Xapian databases whose
+// committed head block exceeds targetBlock. Returns the number of databases rolled back.
+func RollbackXapianAboveBlock(targetBlock uint64) (int, error) {
+	rc := int(C.MVM_rollbackXapianAboveBlock(C.ulonglong(targetBlock)))
+	if rc < 0 {
+		return 0, fmt.Errorf("xapian rollback above block #%d failed (rc=%d)", targetBlock, rc)
+	}
+	return rc, nil
+}
+
+// ClearAllXapianTxBuffers clears all uncommitted per-transaction Xapian buffers in C++.
+func ClearAllXapianTxBuffers() {
+	C.MVM_clearAllXapianTxBuffers()
 }
 
 // DestroyAllXapianInstances cleanly closes and removes all XapianManager instances in C++

@@ -195,6 +195,27 @@ func GetBlockChainInstance() *BlockChain {
 	return blockChainInstance
 }
 
+// SwapBlockChainForTest replaces the singleton BlockChain instance with an isolated
+// instance bound to (blockDatabase, storageManager) and returns a restore callback.
+func SwapBlockChainForTest(blockDatabase *block.BlockDatabase, storageManager *storage.StorageManager) func() {
+	prev := blockChainInstance
+	blockChainInstance = &BlockChain{
+		blockCache:             newBlockCacheMap(),
+		receiptsCache:          new(sync.Map),
+		txsCache:               newTxCacheMap(),
+		blockNumberToHashCache: new(sync.Map),
+		txHashToBlockNumber:    newTxHashToBlockNumberMap(),
+		ethHashMapBlsHash:      newEthHashMapBlsHashMap(),
+		dirtyStorage:           newDirtyStorageMap(),
+		blockDatabase:          blockDatabase,
+		storageManager:         storageManager,
+		stopCleanup:            make(chan struct{}),
+	}
+	return func() {
+		blockChainInstance = prev
+	}
+}
+
 // ============================================================================
 // BACKGROUND WORKER (KEY PERFORMANCE IMPROVEMENT)
 // ============================================================================

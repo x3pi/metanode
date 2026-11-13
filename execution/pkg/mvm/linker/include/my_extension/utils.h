@@ -24,6 +24,7 @@ std::filesystem::path createFullPath(const mvm::Address &address,
 // stays false there for the whole process lifetime -- zero behavior
 // change on that path.
 bool IsXapianBasePathEmpty();
+std::string GetXapianBasePath();
 } // namespace mvm
 
 // Called from Go via CGo to set the Xapian base path from config file.
