@@ -812,4 +812,21 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 	} else {
 		logger.Error("❌ [BACKUP] Failed to serialize BackupDb for block #%d: %v", blockNum, err)
 	}
+
+	if backupStore := bp.storageManager.GetStorageBackupDb(); backupStore != nil && blockNum > 0 {
+		if bp.chainState == nil || bp.chainState.GetChangelogDB() == nil {
+			if p, ok := job.AccountNomtPayload.(interface{ PreImageBatch() [][2][]byte }); ok && p != nil {
+				if uErr := storage.PersistNomtUndoBatch(backupStore, storage.NomtUndoKindAccount, blockNum, p.PreImageBatch()); uErr != nil {
+					logger.Warn("⚠️ [BACKUP] Failed to persist account NOMT undo batch for block #%d: %v", blockNum, uErr)
+				}
+			}
+		}
+		if bp.chainState == nil || bp.chainState.GetStakeChangelogDB() == nil {
+			if p, ok := job.StakeNomtPayload.(interface{ PreImageBatch() [][2][]byte }); ok && p != nil {
+				if uErr := storage.PersistNomtUndoBatch(backupStore, storage.NomtUndoKindStake, blockNum, p.PreImageBatch()); uErr != nil {
+					logger.Warn("⚠️ [BACKUP] Failed to persist stake NOMT undo batch for block #%d: %v", blockNum, uErr)
+				}
+			}
+		}
+	}
 }

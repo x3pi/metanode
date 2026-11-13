@@ -12,7 +12,9 @@
 package blockchain
 
 import (
+	"encoding/binary"
 	"fmt"
+	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/failpoint"
@@ -219,15 +221,21 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 
 	// Capture pre-mutation state so any failure in persistence or durability barriers rolls back cleanly.
 	var (
-		prevLastBlock     types.Block
-		hadPrevLastBlock  bool
-		existedInBlockDB  bool
-		savedToBlockDB    bool
-		prevMappedHash    common.Hash
-		hadPrevMappedHash bool
-		updatedBlockMap   bool
-		updatedTxMap      bool
-		addedBlockCache   bool
+		prevLastBlock        types.Block
+		hadPrevLastBlock     bool
+		existedInBlockDB     bool
+		savedToBlockDB       bool
+		prevMappedHash       common.Hash
+		hadPrevMappedHash    bool
+		hadPrevDirtyBlockMap bool
+		updatedBlockMap      bool
+		updatedTxMap         bool
+		attemptedCommitMaps  bool
+		addedBlockCache      bool
+		prevTxMappedBlocks   map[common.Hash]uint64
+		prevDirtyTxMaps      map[common.Hash]bool
+		mapDBToRestore       [][2][]byte
+		mapDBToDelete        [][]byte
 	)
 	if cfg.persistToDB && cs.blockDatabase != nil {
 		if lb, lbErr := cs.blockDatabase.GetLastBlock(); lbErr == nil && lb != nil {
@@ -238,8 +246,60 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 			existedInBlockDB = true
 		}
 	}
+	blockMapKeyStr := blockNumberPrefix + strconv.FormatUint(blockNum, 10)
 	if bc != nil {
 		prevMappedHash, hadPrevMappedHash = bc.GetBlockHashByNumberFast(blockNum)
+		bc.dirtyLock.RLock()
+		if bc.dirtyStorage != nil {
+			_, hadPrevDirtyBlockMap = bc.dirtyStorage.Load(blockMapKeyStr)
+		}
+		bc.dirtyLock.RUnlock()
+
+		txs := blk.Transactions()
+		if cfg.saveTxMapping && len(txs) > 0 {
+			prevTxMappedBlocks = make(map[common.Hash]uint64, len(txs))
+			prevDirtyTxMaps = make(map[common.Hash]bool, len(txs))
+			seenTx := make(map[common.Hash]struct{}, len(txs))
+			for _, txH := range txs {
+				if _, dup := seenTx[txH]; dup {
+					continue
+				}
+				seenTx[txH] = struct{}{}
+				if prevBn, found := bc.GetBlockNumberByTxHashFast(txH); found {
+					prevTxMappedBlocks[txH] = prevBn
+				}
+				bc.dirtyLock.RLock()
+				if bc.dirtyStorage != nil {
+					if _, inDirty := bc.dirtyStorage.Load(txHashPrefix + txH.Hex()); inDirty {
+						prevDirtyTxMaps[txH] = true
+					}
+				}
+				bc.dirtyLock.RUnlock()
+			}
+		}
+
+		if cfg.commitMaps && bc.storageManager != nil && bc.storageManager.GetStorageMapping() != nil {
+			mapStore := bc.storageManager.GetStorageMapping()
+			captureMapKey := func(k []byte) {
+				kCopy := append([]byte(nil), k...)
+				if oldVal, getErr := mapStore.Get(k); getErr == nil && oldVal != nil {
+					mapDBToRestore = append(mapDBToRestore, [2][]byte{kCopy, append([]byte(nil), oldVal...)})
+				} else {
+					mapDBToDelete = append(mapDBToDelete, kCopy)
+				}
+			}
+			captureMapKey([]byte(blockMapKeyStr))
+			if cfg.saveTxMapping && len(txs) > 0 {
+				seenTx := make(map[common.Hash]struct{}, len(txs))
+				for _, txH := range txs {
+					if _, dup := seenTx[txH]; dup {
+						continue
+					}
+					seenTx[txH] = struct{}{}
+					captureMapKey([]byte(txHashPrefix + txH.Hex()))
+				}
+			}
+		}
 	}
 
 	rollbackOnErr := func() {
@@ -259,12 +319,32 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 			}
 		}
 		if bc != nil {
+			if attemptedCommitMaps && bc.storageManager != nil && bc.storageManager.GetStorageMapping() != nil {
+				mapStore := bc.storageManager.GetStorageMapping()
+				if len(mapDBToRestore) > 0 {
+					_ = mapStore.BatchPut(mapDBToRestore)
+				}
+				if len(mapDBToDelete) > 0 {
+					_ = mapStore.BatchDelete(mapDBToDelete)
+				}
+			}
 			if updatedTxMap {
 				bc.DiscardTxMappings(blk.Transactions())
+				for txH, prevBn := range prevTxMappedBlocks {
+					bc.txHashToBlockNumber.Store(txH, cachedUint64{value: prevBn})
+					if !attemptedCommitMaps || prevDirtyTxMaps[txH] {
+						bnBytes := make([]byte, 8)
+						binary.BigEndian.PutUint64(bnBytes, prevBn)
+						bc.storeToDirty(txHashPrefix+txH.Hex(), bnBytes)
+					}
+				}
 			}
 			if updatedBlockMap {
 				if hadPrevMappedHash {
 					_ = bc.SetBlockNumberToHash(blockNum, prevMappedHash)
+					if attemptedCommitMaps && !hadPrevDirtyBlockMap {
+						bc.removeFromDirty(blockMapKeyStr)
+					}
 				} else {
 					bc.DiscardBlockMappings(blockNum)
 				}
@@ -328,13 +408,18 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 	if bc != nil && cfg.saveTxMapping {
 		txs := blk.Transactions()
 		if len(txs) > 0 {
-			_ = bc.SetTxHashMapBlockNumberBatch(txs, blockNum)
 			updatedTxMap = true
+			if err := bc.SetTxHashMapBlockNumberBatch(txs, blockNum); err != nil {
+				logger.Error("❌ [COMMIT STATE] Failed to set tx→block mappings for block #%d: %v", blockNum, err)
+				rollbackOnErr()
+				return blockNum, err
+			}
 		}
 	}
 
 	// ─── 7. Commit mappings to LevelDB (optional) ────────────────────────
 	if bc != nil && cfg.commitMaps {
+		attemptedCommitMaps = true
 		if err := bc.Commit(); err != nil {
 			logger.Error("❌ [COMMIT STATE] Failed to commit mappings for block #%d: %v", blockNum, err)
 			rollbackOnErr()

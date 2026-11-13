@@ -235,6 +235,7 @@ func CloseNomtDB() {
 		handle.Close() // Properly flush and close via FFI nomt_close()
 	}
 	globalNomtHandles = make(map[string]*nomt_ffi.Handle)
+	clearAllNomtRegistryCache()
 	logger.Info("[TRIE] All NOMT handles closed")
 }
 

@@ -406,15 +406,25 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	// and persistent counters) back to targetBlock. Fail-closed if Xapian or ChainState
 	// alignment fails so Xapian and ChainDB never diverge.
 	rollbackLocalChainToBlock := func(targetBlock uint64, incomingHashToKeep common.Hash) error {
-		if _, rbErr := mvm.RollbackXapianAboveBlock(targetBlock); rbErr != nil {
-			logger.Error("🚨 [SYNC-FORK-ROLLBACK] RollbackXapianAboveBlock(%d) failed: %v — ABORTING sync to prevent Xapian/ChainDB divergence!", targetBlock, rbErr)
-			return fmt.Errorf("RollbackXapianAboveBlock(%d) failed: %w", targetBlock, rbErr)
-		}
-
 		maxTip := storage.GetLastBlockNumber()
 		if lastBlk, err := blockDatabase.GetLastBlock(); err == nil && lastBlk != nil && lastBlk.Header() != nil {
 			if lastBlk.Header().BlockNumber() > maxTip {
 				maxTip = lastBlk.Header().BlockNumber()
+			}
+		}
+		if rh.chainState != nil {
+			for _, cl := range []*state_changelog.StateChangelogDB{
+				rh.chainState.GetChangelogDB(),
+				rh.chainState.GetStakeChangelogDB(),
+			} {
+				if cl != nil && cl.GetHighestBlock() > maxTip {
+					maxTip = cl.GetHighestBlock()
+				}
+			}
+			if scDB := rh.chainState.GetSmartContractDB(); scDB != nil {
+				if scCl := scDB.GetChangelogDB(); scCl != nil && scCl.GetHighestBlock() > maxTip {
+					maxTip = scCl.GetHighestBlock()
+				}
 			}
 		}
 
@@ -427,11 +437,442 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			}
 		}
 
+		// Inspect BackupDb BEFORE deleting fork backup records or mutating Xapian so we can
+		// reconstruct validator NOMT pre-images (when changelogDB == nil), stale EventLogs,
+		// and latest FullDbLogs index entries.
+		var backupStorage storage.Storage
+		if rh.storageManager != nil {
+			backupStorage = rh.storageManager.GetStorageBackupDb()
+		}
+		loadBackupAt := func(bn uint64) (*storage.BackUpDb, bool) {
+			if backupStorage == nil {
+				return nil, false
+			}
+			raw, gErr := backupStorage.Get([]byte(fmt.Sprintf("block_data_topic-%d", bn)))
+			if gErr != nil || len(raw) == 0 {
+				raw, gErr = backupStorage.Get([]byte(fmt.Sprintf("backup_%d", bn)))
+			}
+			if gErr != nil || len(raw) == 0 {
+				return nil, false
+			}
+			bkp, dErr := storage.DeserializeBackupDb(raw)
+			if dErr != nil {
+				return nil, false
+			}
+			return &bkp, true
+		}
+
+		needValidatorNomtAcc := trie.GetStateBackend() == trie.BackendNOMT &&
+			(rh.chainState == nil || rh.chainState.GetChangelogDB() == nil)
+		needValidatorNomtStake := trie.GetStateBackend() == trie.BackendNOMT &&
+			(rh.chainState == nil || rh.chainState.GetStakeChangelogDB() == nil)
+
+		staleNomtAccKeys := make(map[string][]byte)
+		accSeenAbove := make(map[string]bool)
+		accHasResolved := make(map[string]bool)
+		restoredNomtAcc := make(map[string][]byte)
+
+		staleNomtStakeKeys := make(map[string][]byte)
+		stakeSeenAbove := make(map[string]bool)
+		stakeHasResolved := make(map[string]bool)
+		restoredNomtStake := make(map[string][]byte)
+
+		staleEventLogKeys := make(map[string][]byte)
+		staleFullDbLogAddrs := make(map[string]struct{})
+
+		// Pass A: Walk rolled-back blocks forward (targetBlock+1 -> maxTip) so the FIRST
+		// block above targetBlock touching each key yields its exact pre-fork pre-image.
+		for bn := targetBlock + 1; bn <= maxTip; bn++ {
+			if needValidatorNomtAcc {
+				if undoEntries, ok := storage.LoadNomtUndoBatch(backupStorage, storage.NomtUndoKindAccount, bn); ok {
+					for _, kv := range undoEntries {
+						ks := string(kv[0])
+						staleNomtAccKeys[ks] = append([]byte(nil), kv[0]...)
+						if !accSeenAbove[ks] {
+							accSeenAbove[ks] = true
+							accHasResolved[ks] = true
+							if len(kv[1]) > 0 {
+								restoredNomtAcc[ks] = append([]byte(nil), kv[1]...)
+							} else {
+								// Explicitly newly inserted at block bn -> delete on rollback.
+								restoredNomtAcc[ks] = nil
+							}
+						}
+					}
+				}
+			}
+			if needValidatorNomtStake {
+				if undoEntries, ok := storage.LoadNomtUndoBatch(backupStorage, storage.NomtUndoKindStake, bn); ok {
+					for _, kv := range undoEntries {
+						ks := string(kv[0])
+						staleNomtStakeKeys[ks] = append([]byte(nil), kv[0]...)
+						if !stakeSeenAbove[ks] {
+							stakeSeenAbove[ks] = true
+							stakeHasResolved[ks] = true
+							if len(kv[1]) > 0 {
+								restoredNomtStake[ks] = append([]byte(nil), kv[1]...)
+							} else {
+								restoredNomtStake[ks] = nil
+							}
+						}
+					}
+				}
+			}
+
+			bkp, ok := loadBackupAt(bn)
+			if !ok {
+				continue
+			}
+			if needValidatorNomtAcc && len(bkp.AccountBatch) > 0 {
+				if batch, err := storage.DeserializeBatch(bkp.AccountBatch); err == nil {
+					for _, kv := range batch {
+						if len(kv[0]) >= 5 && string(kv[0][:5]) == "nomt:" {
+							rawKey := append([]byte(nil), kv[0][5:]...)
+							ks := string(rawKey)
+							if _, exists := staleNomtAccKeys[ks]; !exists {
+								staleNomtAccKeys[ks] = rawKey
+							}
+							if !accSeenAbove[ks] {
+								accSeenAbove[ks] = true
+							}
+						}
+					}
+				}
+			}
+			if needValidatorNomtStake && len(bkp.StakeState) > 0 {
+				if batch, err := storage.DeserializeBatch(bkp.StakeState); err == nil {
+					for _, kv := range batch {
+						if len(kv[0]) >= 5 && string(kv[0][:5]) == "nomt:" {
+							rawKey := append([]byte(nil), kv[0][5:]...)
+							ks := string(rawKey)
+							if _, exists := staleNomtStakeKeys[ks]; !exists {
+								staleNomtStakeKeys[ks] = rawKey
+							}
+							if !stakeSeenAbove[ks] {
+								stakeSeenAbove[ks] = true
+							}
+						}
+					}
+				}
+			}
+			if len(bkp.SmartContractBatch) > 0 {
+				if batch, err := storage.DeserializeBatch(bkp.SmartContractBatch); err == nil {
+					for _, kv := range batch {
+						if len(kv[0]) > 0 {
+							staleEventLogKeys[string(kv[0])] = append([]byte(nil), kv[0]...)
+						}
+					}
+				}
+			}
+			for _, logs := range bkp.FullDbLogs {
+				for addrHex := range logs {
+					if normHex := storage.NormalizeAddressHexKey(addrHex); normHex != "" {
+						staleFullDbLogAddrs[normHex] = struct{}{}
+					}
+				}
+			}
+		}
+
+		unresolvedAccTotal := 0
+		for ks := range staleNomtAccKeys {
+			if !accHasResolved[ks] {
+				unresolvedAccTotal++
+			}
+		}
+		unresolvedStakeTotal := 0
+		for ks := range staleNomtStakeKeys {
+			if !stakeHasResolved[ks] {
+				unresolvedStakeTotal++
+			}
+		}
+
+		staleEventLogs := make(map[string][]byte, len(staleEventLogKeys))
+		restoredEventLogs := staleEventLogs
+		restoredFullDbLogs := make(map[string][]byte, len(staleFullDbLogAddrs))
+
+		// Pass B: Legacy / unindexed fallback — resolve remaining keys from BackupDb <= targetBlock,
+		// then from flat "nomt:" store if present.
+		accResolvedInBackup := make(map[string]struct{}, unresolvedAccTotal)
+		stakeResolvedInBackup := make(map[string]struct{}, unresolvedStakeTotal)
+
+		if backupStorage != nil &&
+			(unresolvedAccTotal > 0 || unresolvedStakeTotal > 0 || len(staleEventLogKeys) > 0 || len(staleFullDbLogAddrs) > 0) {
+			for b := targetBlock; ; b-- {
+				allResolved := len(accResolvedInBackup) == unresolvedAccTotal &&
+					len(stakeResolvedInBackup) == unresolvedStakeTotal &&
+					len(restoredEventLogs) == len(staleEventLogKeys) &&
+					len(restoredFullDbLogs) == len(staleFullDbLogAddrs)
+				if allResolved {
+					break
+				}
+				if bkp, ok := loadBackupAt(b); ok {
+					if len(accResolvedInBackup) < unresolvedAccTotal && len(bkp.AccountBatch) > 0 {
+						if batch, err := storage.DeserializeBatch(bkp.AccountBatch); err == nil {
+							inBlock := make(map[string][]byte)
+							for _, kv := range batch {
+								if len(kv[0]) >= 5 && string(kv[0][:5]) == "nomt:" {
+									ks := string(kv[0][5:])
+									if _, wanted := staleNomtAccKeys[ks]; wanted && !accHasResolved[ks] {
+										inBlock[ks] = append([]byte(nil), kv[1]...)
+									}
+								}
+							}
+							for ks, v := range inBlock {
+								if !accHasResolved[ks] {
+									restoredNomtAcc[ks] = v
+									accHasResolved[ks] = true
+									accResolvedInBackup[ks] = struct{}{}
+								}
+							}
+						}
+					}
+					if len(stakeResolvedInBackup) < unresolvedStakeTotal && len(bkp.StakeState) > 0 {
+						if batch, err := storage.DeserializeBatch(bkp.StakeState); err == nil {
+							inBlock := make(map[string][]byte)
+							for _, kv := range batch {
+								if len(kv[0]) >= 5 && string(kv[0][:5]) == "nomt:" {
+									ks := string(kv[0][5:])
+									if _, wanted := staleNomtStakeKeys[ks]; wanted && !stakeHasResolved[ks] {
+										inBlock[ks] = append([]byte(nil), kv[1]...)
+									}
+								}
+							}
+							for ks, v := range inBlock {
+								if !stakeHasResolved[ks] {
+									restoredNomtStake[ks] = v
+									stakeHasResolved[ks] = true
+									stakeResolvedInBackup[ks] = struct{}{}
+								}
+							}
+						}
+					}
+					if len(restoredEventLogs) < len(staleEventLogKeys) && len(bkp.SmartContractBatch) > 0 {
+						if batch, err := storage.DeserializeBatch(bkp.SmartContractBatch); err == nil {
+							inBlock := make(map[string][]byte)
+							for _, kv := range batch {
+								ks := string(kv[0])
+								if _, wanted := staleEventLogKeys[ks]; wanted {
+									inBlock[ks] = append([]byte(nil), kv[1]...)
+								}
+							}
+							for ks, v := range inBlock {
+								if _, seen := restoredEventLogs[ks]; !seen {
+									restoredEventLogs[ks] = v
+								}
+							}
+						}
+					}
+					if len(restoredFullDbLogs) < len(staleFullDbLogAddrs) && len(bkp.FullDbLogs) > 0 {
+						inBlock := make(map[string][]byte)
+						for _, logs := range bkp.FullDbLogs {
+							for addrHex, logBytes := range logs {
+								normHex := storage.NormalizeAddressHexKey(addrHex)
+								if normHex == "" {
+									continue
+								}
+								if _, wanted := staleFullDbLogAddrs[normHex]; wanted {
+									inBlock[normHex] = append([]byte(nil), logBytes...)
+								}
+							}
+						}
+						for normHex, logBytes := range inBlock {
+							if _, seen := restoredFullDbLogs[normHex]; !seen {
+								restoredFullDbLogs[normHex] = logBytes
+							}
+						}
+					}
+				}
+				if b == 0 {
+					break
+				}
+			}
+		}
+
+		if rh.storageManager != nil {
+			if accStore := rh.storageManager.GetStorageAccount(); accStore != nil && len(accResolvedInBackup) < unresolvedAccTotal {
+				for ks, rawKey := range staleNomtAccKeys {
+					if accHasResolved[ks] {
+						continue
+					}
+					if val, gErr := accStore.Get(append([]byte("nomt:"), rawKey...)); gErr == nil && len(val) > 0 {
+						restoredNomtAcc[ks] = append([]byte(nil), val...)
+						accHasResolved[ks] = true
+					}
+				}
+			}
+			if stakeStore := rh.storageManager.GetStorageStake(); stakeStore != nil && len(stakeResolvedInBackup) < unresolvedStakeTotal {
+				for ks, rawKey := range staleNomtStakeKeys {
+					if stakeHasResolved[ks] {
+						continue
+					}
+					if val, gErr := stakeStore.Get(append([]byte("nomt:"), rawKey...)); gErr == nil && len(val) > 0 {
+						restoredNomtStake[ks] = append([]byte(nil), val...)
+						stakeHasResolved[ks] = true
+					}
+				}
+			}
+		}
+
+		// Pass C: Fail-closed NOMT rollback with pre-rollback snapshot undo and root verification.
+		nomtRootEq := func(r, exp common.Hash) bool {
+			return r == exp ||
+				(exp == trie.EmptyRootHash && r == (common.Hash{})) ||
+				(exp == (common.Hash{}) && r == trie.EmptyRootHash)
+		}
+		var (
+			hasExpectedRoots bool
+			expAccRoot       common.Hash
+			expStakeRoot     common.Hash
+		)
+		if targetBlk != nil && targetBlk.Header() != nil {
+			hasExpectedRoots = true
+			expAccRoot = targetBlk.Header().AccountStatesRoot()
+			expStakeRoot = common.Hash(targetBlk.Header().StakeStatesRoot())
+		} else if targetBlock == 0 {
+			hasExpectedRoots = true
+		}
+
+		unresolvedAccRemaining := 0
+		for ks := range staleNomtAccKeys {
+			if !accHasResolved[ks] {
+				unresolvedAccRemaining++
+			}
+		}
+		unresolvedStakeRemaining := 0
+		for ks := range staleNomtStakeKeys {
+			if !stakeHasResolved[ks] {
+				unresolvedStakeRemaining++
+			}
+		}
+		if (unresolvedAccRemaining > 0 || unresolvedStakeRemaining > 0) && !hasExpectedRoots {
+			return fmt.Errorf("validator NOMT rollback to #%d aborted fail-closed: %d account and %d stake keys lack pre-image and target block header is missing",
+				targetBlock, unresolvedAccRemaining, unresolvedStakeRemaining)
+		}
+
+		if rh.chainState != nil && trie.GetStateBackend() == trie.BackendNOMT && (needValidatorNomtAcc || needValidatorNomtStake) {
+			var liveTries []trie.StateTrie
+			if asDB := rh.chainState.GetAccountStateDB(); asDB != nil {
+				liveTries = append(liveTries, asDB.Trie())
+			}
+			if stakeDB := rh.chainState.GetStakeStateDB(); stakeDB != nil {
+				liveTries = append(liveTries, stakeDB.Trie())
+			}
+			for _, lt := range liveTries {
+				if nomtTrie, ok := lt.(*trie.NomtStateTrie); ok && nomtTrie != nil {
+					_ = nomtTrie.WaitCommitPayload()
+					nomtTrie.AbortPending()
+				}
+			}
+		}
+
+		var nomtRollbackUndos []func()
+		undoNomtRollbacks := func() {
+			for i := len(nomtRollbackUndos) - 1; i >= 0; i-- {
+				nomtRollbackUndos[i]()
+			}
+		}
+
+		applyValidatedNomtRollback := func(namespace string, staleKeys map[string][]byte, resolved map[string][]byte, expRoot common.Hash) error {
+			if len(staleKeys) == 0 {
+				return nil
+			}
+			sortedKS := make([]string, 0, len(staleKeys))
+			for ks := range staleKeys {
+				sortedKS = append(sortedKS, ks)
+			}
+			slices.Sort(sortedKS)
+
+			keys := make([][]byte, len(sortedKS))
+			vals := make([][]byte, len(sortedKS))
+			for idx, ks := range sortedKS {
+				keys[idx] = staleKeys[ks]
+				vals[idx] = resolved[ks] // nil only if newly inserted above targetBlock or unproven new key
+			}
+
+			prevVals, snapErr := trie.GetNomtKeyValues(namespace, keys)
+			if snapErr != nil {
+				return fmt.Errorf("GetNomtKeyValues(%s, %d) failed: %w", namespace, targetBlock, snapErr)
+			}
+			if rbErr := trie.RollbackNomtNamespaceKeys(namespace, keys, vals); rbErr != nil {
+				return fmt.Errorf("RollbackNomtNamespaceKeys(%s, %d) failed: %w", namespace, targetBlock, rbErr)
+			}
+			nomtRollbackUndos = append(nomtRollbackUndos, func() {
+				_ = trie.RollbackNomtNamespaceKeys(namespace, keys, prevVals)
+			})
+
+			if hasExpectedRoots {
+				postRoot, ok := trie.GetNomtHandleRoot(namespace)
+				if !ok || !nomtRootEq(postRoot, expRoot) {
+					return fmt.Errorf("validator NOMT rollback root mismatch on %s at #%d: got=%s expected=%s",
+						namespace, targetBlock, postRoot.Hex(), expRoot.Hex())
+				}
+			}
+			return nil
+		}
+
+		if err := applyValidatedNomtRollback("account_state", staleNomtAccKeys, restoredNomtAcc, expAccRoot); err != nil {
+			undoNomtRollbacks()
+			logger.Error("🚨 [SYNC-FORK-ROLLBACK] %v — restored NOMT to pre-rollback state (fail-closed)", err)
+			return err
+		}
+		if err := applyValidatedNomtRollback("stake_db", staleNomtStakeKeys, restoredNomtStake, expStakeRoot); err != nil {
+			undoNomtRollbacks()
+			logger.Error("🚨 [SYNC-FORK-ROLLBACK] %v — restored NOMT to pre-rollback state (fail-closed)", err)
+			return err
+		}
+
+		// Align ChainState BEFORE rolling back Xapian so a NOMT failure aborts fail-closed without leaving Xapian behind.
 		if targetBlk != nil && rh.chainState != nil {
 			if alignErr := rh.chainState.UpdateStateForNewHeader(targetBlk.Header()); alignErr != nil {
+				undoNomtRollbacks()
 				logger.Error("🚨 [SYNC-FORK-ROLLBACK] UpdateStateForNewHeader(#%d) failed during rollback: %v", targetBlock, alignErr)
 				return fmt.Errorf("UpdateStateForNewHeader(%d) failed during rollback: %w", targetBlock, alignErr)
 			}
+		} else if targetBlock == 0 && targetBlk == nil && rh.chainState != nil && trie.GetStateBackend() == trie.BackendNOMT {
+			if asDB := rh.chainState.GetAccountStateDB(); asDB != nil {
+				if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
+					if alignErr := nomtTrie.AlignWithExpectedRoot(asDB.Storage(), common.Hash{}, 0); alignErr != nil {
+						undoNomtRollbacks()
+						return fmt.Errorf("AlignWithExpectedRoot(account_state, 0) failed during rollback: %w", alignErr)
+					}
+					asDB.SetOriginRootHash(trie.EmptyRootHash)
+				}
+			}
+			if stakeDB := rh.chainState.GetStakeStateDB(); stakeDB != nil {
+				if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
+					if alignErr := nomtTrie.AlignWithExpectedRoot(stakeDB.GetStorage(), common.Hash{}, 0); alignErr != nil {
+						undoNomtRollbacks()
+						return fmt.Errorf("AlignWithExpectedRoot(stake_db, 0) failed during rollback: %w", alignErr)
+					}
+					stakeDB.SetOriginRootHash(trie.EmptyRootHash)
+				}
+			}
+			if scDB := rh.chainState.GetSmartContractDB(); scDB != nil {
+				if scCl := scDB.GetChangelogDB(); scCl != nil && scCl.GetHighestBlock() > 0 {
+					expectedScRoot, _, foundSc, scErr := scCl.GetRootAtOrBefore(0)
+					if scErr != nil || !foundSc {
+						undoNomtRollbacks()
+						return fmt.Errorf("AlignWithExpectedRoot(smart_contract_storage, 0) missing recorded root: %v", scErr)
+					}
+					scHandle, hErr := trie.GetOrInitNomtHandle(trie.SharedContractStorageNamespace)
+					if hErr != nil {
+						undoNomtRollbacks()
+						return fmt.Errorf("AlignWithExpectedRoot(smart_contract_storage, 0): %w", hErr)
+					}
+					scTrie := trie.NewNomtStateTrie(scHandle, true, trie.SharedContractStorageNamespace)
+					scTrie.SetChangelogDB(scCl)
+					if alignErr := scTrie.AlignWithExpectedRoot(nil, common.BytesToHash(expectedScRoot), 0); alignErr != nil {
+						undoNomtRollbacks()
+						return fmt.Errorf("AlignWithExpectedRoot(smart_contract_storage, 0) failed during rollback: %w", alignErr)
+					}
+				}
+			}
+			rh.chainState.InvalidateAllState()
+		}
+
+		if _, rbErr := mvm.RollbackXapianAboveBlock(targetBlock); rbErr != nil {
+			logger.Error("🚨 [SYNC-FORK-ROLLBACK] RollbackXapianAboveBlock(%d) failed: %v — ABORTING sync to prevent Xapian/ChainDB divergence!", targetBlock, rbErr)
+			return fmt.Errorf("RollbackXapianAboveBlock(%d) failed: %w", targetBlock, rbErr)
 		}
 
 		keepTxs := make(map[common.Hash]struct{})
@@ -473,10 +914,34 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			}
 			bc.DiscardBlockMappings(bn)
 			_ = bc.DeleteBlockHashMapping(bn)
-			if rh.storageManager != nil {
-				if backupStorage := rh.storageManager.GetStorageBackupDb(); backupStorage != nil {
-					_ = backupStorage.Delete([]byte(fmt.Sprintf("block_data_topic-%d", bn)))
-					_ = backupStorage.Delete([]byte(fmt.Sprintf("backup_%d", bn)))
+			if backupStorage != nil {
+				_ = backupStorage.Delete([]byte(fmt.Sprintf("block_data_topic-%d", bn)))
+				_ = backupStorage.Delete([]byte(fmt.Sprintf("backup_%d", bn)))
+				storage.DeleteNomtUndoForBlock(backupStorage, bn)
+			}
+		}
+
+		// Clean up or restore stale EventLog entries from abandoned fork blocks.
+		if len(staleEventLogKeys) > 0 && rh.storageManager != nil {
+			if scStore := rh.storageManager.GetStorageSmartContract(); scStore != nil {
+				for ks, rawKey := range staleEventLogKeys {
+					if prevVal, existsAtTarget := restoredEventLogs[ks]; existsAtTarget {
+						_ = scStore.Put(rawKey, prevVal)
+					} else {
+						_ = scStore.Delete(rawKey)
+					}
+				}
+			}
+		}
+
+		// Clean up or restore latest FullDbLogs pointers touched in abandoned fork blocks.
+		if len(staleFullDbLogAddrs) > 0 && backupStorage != nil {
+			for normHex := range staleFullDbLogAddrs {
+				latestKey := storage.FullDbLogsLatestKey(normHex)
+				if prevLog, existsAtTarget := restoredFullDbLogs[normHex]; existsAtTarget {
+					_ = backupStorage.Put(latestKey, prevLog)
+				} else {
+					_ = backupStorage.Delete(latestKey)
 				}
 			}
 		}
@@ -493,21 +958,37 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		}
 
 		if rh.chainState != nil {
-			// On NOMT backend, sync flat "nomt:" mirror keys in StorageAccount/StorageStake back to targetBlock
-			// before truncating StateChangelogDB entries above targetBlock.
+			// On NOMT backend, sync flat "nomt:" mirror keys in StorageAccount/StorageStake back to targetBlock.
+			// Use ChangelogDB when present, or the BackupDb pre-images recovered above on validator nodes.
 			if trie.GetStateBackend() == trie.BackendNOMT && rh.storageManager != nil {
-				syncNomtFlatMirror := func(cl *state_changelog.StateChangelogDB, flatStore storage.Storage) {
-					if cl == nil || flatStore == nil || cl.GetHighestBlock() <= targetBlock {
+				syncNomtFlatMirror := func(cl *state_changelog.StateChangelogDB, flatStore storage.Storage, staleKeys map[string][]byte, restored map[string][]byte) {
+					if flatStore == nil {
 						return
 					}
-					addrs, err := cl.GetAllUniqueAddresses()
-					if err != nil {
+					if cl != nil {
+						if cl.GetHighestBlock() <= targetBlock {
+							return
+						}
+						addrs, err := cl.GetAllUniqueAddresses()
+						if err != nil {
+							return
+						}
+						for _, addr := range addrs {
+							nomtKey := append([]byte("nomt:"), addr...)
+							valAtTarget, errAt := cl.GetStateAt(addr, targetBlock)
+							if errAt == nil && len(valAtTarget) > 0 {
+								if _, getErr := flatStore.Get(nomtKey); getErr == nil {
+									_ = flatStore.Put(nomtKey, valAtTarget)
+								}
+							} else {
+								_ = flatStore.Delete(nomtKey)
+							}
+						}
 						return
 					}
-					for _, addr := range addrs {
-						nomtKey := append([]byte("nomt:"), addr...)
-						valAtTarget, errAt := cl.GetStateAt(addr, targetBlock)
-						if errAt == nil && len(valAtTarget) > 0 {
+					for ks, rawKey := range staleKeys {
+						nomtKey := append([]byte("nomt:"), rawKey...)
+						if valAtTarget, ok := restored[ks]; ok && len(valAtTarget) > 0 {
 							if _, getErr := flatStore.Get(nomtKey); getErr == nil {
 								_ = flatStore.Put(nomtKey, valAtTarget)
 							}
@@ -516,8 +997,8 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 						}
 					}
 				}
-				syncNomtFlatMirror(rh.chainState.GetChangelogDB(), rh.storageManager.GetStorageAccount())
-				syncNomtFlatMirror(rh.chainState.GetStakeChangelogDB(), rh.storageManager.GetStorageStake())
+				syncNomtFlatMirror(rh.chainState.GetChangelogDB(), rh.storageManager.GetStorageAccount(), staleNomtAccKeys, restoredNomtAcc)
+				syncNomtFlatMirror(rh.chainState.GetStakeChangelogDB(), rh.storageManager.GetStorageStake(), staleNomtStakeKeys, restoredNomtStake)
 			}
 
 			var scCl *state_changelog.StateChangelogDB
@@ -538,6 +1019,9 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		}
 
 		storage.ResetAllBlockCounters(targetBlock)
+		if trie.GetStateBackend() == trie.BackendNOMT {
+			storage.ForceSetLastNomtCommittedBlock(targetBlock)
+		}
 		targetGEI := targetBlock
 		if targetBlk != nil && targetBlk.Header() != nil && (targetBlock == 0 || targetBlk.Header().GlobalExecIndex() > 0) {
 			targetGEI = targetBlk.Header().GlobalExecIndex()
@@ -616,13 +1100,6 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			}
 		}
 
-		// Anti-drift check: Even if the block was found in LevelDB, if the state backend is NOMT
-		// and the block is not committed to NOMT, we must force execution on NOMT.
-		if isFullyExecuted && trie.GetStateBackend() == trie.BackendNOMT && blockNum > storage.GetLastNomtCommittedBlock() {
-			isFullyExecuted = false
-			logger.Info("🔄 [NOMT-SYNC-RECOVERY] Block #%d exists in LevelDB but is NOT committed to NOMT (lastNomt=%d). Forcing re-execution on NOMT.", blockNum, storage.GetLastNomtCommittedBlock())
-		}
-
 		// STRICT BLOCK NUMBER GUARD: If the block number is already committed and there is no hash mismatch,
 		// it is fully executed. This prevents executing state batches for duplicate blocks.
 		if !isFullyExecuted && !forkOverwrite && blockNum > 0 {
@@ -643,6 +1120,27 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 					isFullyExecuted = true
 					logger.Info("🔄 [SYNC-DEDUPLICATE] Block #%d is strictly older than last committed #%d (no hash entry). Skipping execution.", blockNum, lastBlockNum)
 				}
+			}
+		}
+
+		// Anti-drift check (MUST run AFTER both GEI deduplication and STRICT BLOCK NUMBER GUARD):
+		// Even if the block was found in BlockDB/mappings, if the state backend is NOMT and
+		// blockNum > LastNomtCommittedBlock, force re-execution on NOMT unless NOMT handle roots
+		// already match this header and no BackupData was supplied.
+		if isFullyExecuted && !forkOverwrite && trie.GetStateBackend() == trie.BackendNOMT && blockNum > 0 && blockNum > storage.GetLastNomtCommittedBlock() {
+			nomtEq := func(r, exp common.Hash) bool {
+				return r == exp || (exp == trie.EmptyRootHash && r == (common.Hash{})) || (exp == (common.Hash{}) && r == trie.EmptyRootHash)
+			}
+			accR, accOK := trie.GetNomtHandleRoot("account_state")
+			stakeR, stakeOK := trie.GetNomtHandleRoot("stake_db")
+			if len(backupBytes) == 0 && accOK && stakeOK &&
+				nomtEq(accR, header.AccountStatesRoot()) &&
+				nomtEq(stakeR, common.Hash(header.StakeStatesRoot())) {
+				storage.UpdateLastNomtCommittedBlock(blockNum)
+			} else {
+				isFullyExecuted = false
+				logger.Info("🔄 [NOMT-SYNC-RECOVERY] Block #%d exists in LevelDB (tip=#%d) but is NOT committed to NOMT (lastNomt=%d). Forcing re-execution on NOMT.",
+					blockNum, storage.GetLastBlockNumber(), storage.GetLastNomtCommittedBlock())
 			}
 		}
 
@@ -821,23 +1319,66 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// STEP 1: Apply BackupDb state batches with full reversible undo log
 		// ═══════════════════════════════════════════════════════════════════════════
 		var pendingBlockSessions []trie.NomtSessionToFlush
+		var blockNomtPreImages map[string][][2][]byte
 		rollbackBlockMutations := func() {}
 
 		var expectedPreAccRoot, expectedPreStakeRoot common.Hash
 		var hasExpectedPreRoots bool
 		var preAccHandleRoot, preStakeHandleRoot common.Hash
+		var prevBlockForAlign types.Block
+		nomtMatchesExpected := func(handleRoot, expected common.Hash) bool {
+			return handleRoot == expected ||
+				(expected == trie.EmptyRootHash && handleRoot == (common.Hash{})) ||
+				(expected == (common.Hash{}) && handleRoot == trie.EmptyRootHash)
+		}
+		readNomtRoot := func(ns string) common.Hash {
+			if r, ok := trie.GetNomtHandleRoot(ns); ok {
+				return r
+			}
+			if h, err := trie.GetOrInitNomtHandle(ns); err == nil && h != nil {
+				if rb, rErr := h.Root(); rErr == nil {
+					return common.BytesToHash(rb[:])
+				}
+			}
+			return common.Hash{}
+		}
 		if trie.GetStateBackend() == trie.BackendNOMT {
-			preAccHandleRoot, _ = trie.GetNomtHandleRoot("account_state")
-			preStakeHandleRoot, _ = trie.GetNomtHandleRoot("stake_db")
+			preAccHandleRoot = readNomtRoot("account_state")
+			preStakeHandleRoot = readNomtRoot("stake_db")
 			prevNum := uint64(0)
 			if blockNum > 1 {
 				prevNum = blockNum - 1
 			}
 			if prevHash, ok := bc.GetBlockHashByNumber(prevNum); ok && prevHash != (common.Hash{}) {
 				if prevBlock, err := blockDatabase.GetBlockByHash(prevHash); err == nil && prevBlock != nil {
+					prevBlockForAlign = prevBlock
 					expectedPreAccRoot = prevBlock.Header().AccountStatesRoot()
 					expectedPreStakeRoot = common.Hash(prevBlock.Header().StakeStatesRoot())
 					hasExpectedPreRoots = true
+				}
+			} else if blockNum <= 1 && rh.chainState != nil {
+				if curHdrPtr := rh.chainState.GetcurrentBlockHeader(); curHdrPtr != nil && *curHdrPtr != nil {
+					curHdr := *curHdrPtr
+					if curHdr.BlockNumber() == 0 {
+						expectedPreAccRoot = curHdr.AccountStatesRoot()
+						expectedPreStakeRoot = common.Hash(curHdr.StakeStatesRoot())
+						hasExpectedPreRoots = true
+					}
+				}
+			}
+
+			if hasExpectedPreRoots &&
+				(!nomtMatchesExpected(preAccHandleRoot, expectedPreAccRoot) ||
+					!nomtMatchesExpected(preStakeHandleRoot, expectedPreStakeRoot)) {
+				logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: PRE-execution state root MISMATCH before block #%d! "+
+					"acc=%s (expected %s), stake=%s (expected %s). Attempting self-heal before applying block...",
+					blockNum, preAccHandleRoot.Hex(), expectedPreAccRoot.Hex(), preStakeHandleRoot.Hex(), expectedPreStakeRoot.Hex())
+				if prevBlockForAlign != nil && rh.chainState != nil {
+					if alignErr := rh.chainState.UpdateStateForNewHeader(prevBlockForAlign.Header()); alignErr != nil {
+						return abortSyncBatch(fmt.Sprintf("pre-execution NOMT state alignment failed before block %d: %v", blockNum, alignErr))
+					}
+					preAccHandleRoot = readNomtRoot("account_state")
+					preStakeHandleRoot = readNomtRoot("stake_db")
 				}
 			}
 		}
@@ -852,7 +1393,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 			if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT && i == 0 && hasExpectedPreRoots {
 				if expectedPreAccRoot != (common.Hash{}) && expectedPreAccRoot != trie.EmptyRootHash {
-					if preAccHandleRoot != expectedPreAccRoot {
+					if !nomtMatchesExpected(preAccHandleRoot, expectedPreAccRoot) {
 						logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: PRE-execution state root MISMATCH! "+
 							"localRoot=%s, expectedPreRoot=%s, block=#%d. "+
 							"This node's state has diverged BEFORE this block was applied!",
@@ -863,12 +1404,13 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				}
 			}
 
-			sessions, undoFn, applyErr := rh.applyParsedBackupDbBatches(parsedBackupDb, preParsedBatches, blockHash, blockNum, txs)
+			sessions, preImages, undoFn, applyErr := rh.applyParsedBackupDbBatches(parsedBackupDb, preParsedBatches, blockHash, blockNum, txs)
 			if applyErr != nil {
 				logger.Error("🚨 [SYNC-FATAL] Failed to apply backup batches for block #%d: %v — ABORTING to prevent State Drift!", blockNum, applyErr)
 				return abortSyncBatch(fmt.Sprintf("apply backup batches failed for block %d: %v", blockNum, applyErr))
 			}
 			pendingBlockSessions = sessions
+			blockNomtPreImages = preImages
 			rollbackBlockMutations = undoFn
 
 			if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT && i == 0 {
@@ -894,19 +1436,13 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			continue
 		}
 
-		// On NOMT backend, CommitBlockState skips WithRebuildTries(). When the pre-block NOMT handle
-		// matched the parent block's expected root, verify that post-apply NOMT handle roots match
-		// the incoming block header BEFORE calling CommitBlockState so a missing/corrupt NOMT batch
-		// rolls back cleanly without persisting the block!
-		if trie.GetStateBackend() == trie.BackendNOMT && hasExpectedPreRoots && blockNum > storage.GetLastBlockNumber() {
-			nomtMatchesExpected := func(handleRoot, expected common.Hash) bool {
-				return handleRoot == expected || (expected == trie.EmptyRootHash && handleRoot == (common.Hash{}))
-			}
+		// On NOMT backend, CommitBlockState skips WithRebuildTries(). Unconditionally verify that
+		// post-apply NOMT handle roots match the incoming block header BEFORE calling CommitBlockState
+		// so any missing, corrupt, or drifted NOMT state rolls back cleanly without persisting the block.
+		if trie.GetStateBackend() == trie.BackendNOMT {
 			expectedAcc := header.AccountStatesRoot()
-			postAccRoot, _ := trie.GetNomtHandleRoot("account_state")
-			if nomtMatchesExpected(preAccHandleRoot, expectedPreAccRoot) &&
-				expectedAcc != (common.Hash{}) && expectedAcc != trie.EmptyRootHash &&
-				postAccRoot != expectedAcc {
+			postAccRoot := readNomtRoot("account_state")
+			if !nomtMatchesExpected(postAccRoot, expectedAcc) {
 				logger.Error("🚨 [NOMT-SYNC-VERIFY] Post-apply NOMT account_state root mismatch for block #%d: got=%s expected=%s — rolling back all block mutations!",
 					blockNum, postAccRoot.Hex(), expectedAcc.Hex())
 				rollbackBlockMutations()
@@ -915,10 +1451,8 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			}
 
 			expectedStake := common.Hash(header.StakeStatesRoot())
-			postStakeRoot, _ := trie.GetNomtHandleRoot("stake_db")
-			if nomtMatchesExpected(preStakeHandleRoot, expectedPreStakeRoot) &&
-				expectedStake != (common.Hash{}) && expectedStake != trie.EmptyRootHash &&
-				postStakeRoot != expectedStake {
+			postStakeRoot := readNomtRoot("stake_db")
+			if !nomtMatchesExpected(postStakeRoot, expectedStake) {
 				logger.Error("🚨 [NOMT-SYNC-VERIFY] Post-apply NOMT stake_db root mismatch for block #%d: got=%s expected=%s — rolling back all block mutations!",
 					blockNum, postStakeRoot.Hex(), expectedStake.Hex())
 				rollbackBlockMutations()
@@ -1067,9 +1601,12 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				hasNomtRoot)
 		}
 
-		// Update persistent counters (GEI + optional peer commit index) AFTER CommitBlockState succeeds.
+		// Update persistent counters (GEI, NOMT committed block, + optional peer commit index) AFTER CommitBlockState succeeds.
 		if blockGEI > 0 {
 			storage.UpdateLastGlobalExecIndex(blockGEI)
+		}
+		if trie.GetStateBackend() == trie.BackendNOMT && blockNum > 0 {
+			storage.UpdateLastNomtCommittedBlock(blockNum)
 		}
 
 		if shouldImportPeerCommitIndex(request.PreserveOwnCommitIndex, header.CommitIndex()) {
@@ -1098,6 +1635,24 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		// ═══════════════════════════════════════════════════════════════════════════
 		if len(backupBytes) > 0 {
 			rh.persistBackupForSub(backupBytes, blockNum)
+		}
+		if rh.storageManager != nil && blockNum > 0 && len(blockNomtPreImages) > 0 {
+			if backupStorage := rh.storageManager.GetStorageBackupDb(); backupStorage != nil {
+				if rh.chainState == nil || rh.chainState.GetChangelogDB() == nil {
+					if pre := blockNomtPreImages["account_state"]; len(pre) > 0 {
+						if uErr := storage.PersistNomtUndoBatch(backupStorage, storage.NomtUndoKindAccount, blockNum, pre); uErr != nil {
+							logger.Warn("⚠️ [EXECUTE SYNC] Failed to persist account NOMT undo for block #%d: %v", blockNum, uErr)
+						}
+					}
+				}
+				if rh.chainState == nil || rh.chainState.GetStakeChangelogDB() == nil {
+					if pre := blockNomtPreImages["stake_db"]; len(pre) > 0 {
+						if uErr := storage.PersistNomtUndoBatch(backupStorage, storage.NomtUndoKindStake, blockNum, pre); uErr != nil {
+							logger.Warn("⚠️ [EXECUTE SYNC] Failed to persist stake NOMT undo for block #%d: %v", blockNum, uErr)
+						}
+					}
+				}
+			}
 		}
 
 		logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ Executed block #%d: hash=%s, epoch=%d, gei=%d, txs=%d",
@@ -1328,7 +1883,7 @@ func (rh *RequestHandler) applyParsedBackupDbBatches(
 	blockHash common.Hash,
 	blockNum uint64,
 	txs []common.Hash,
-) ([]trie.NomtSessionToFlush, func(), error) {
+) ([]trie.NomtSessionToFlush, map[string][][2][]byte, func(), error) {
 	effectiveBlockNum := backupDb.BockNumber
 	if effectiveBlockNum == 0 {
 		effectiveBlockNum = blockNum
@@ -1344,7 +1899,7 @@ func (rh *RequestHandler) applyParsedBackupDbBatches(
 		for idx := len(undoFns) - 1; idx >= 0; idx-- {
 			undoFns[idx]()
 		}
-		if bc := blockchain.GetBlockChainInstance(); bc != nil {
+		if bc := blockchain.GetBlockChainInstance(); bc != nil && effectiveBlockNum > storage.GetLastBlockNumber() {
 			if blockHash != (common.Hash{}) {
 				bc.DeleteBlockFromCache(blockHash)
 			}
@@ -1373,7 +1928,7 @@ func (rh *RequestHandler) applyParsedBackupDbBatches(
 		stakeChangelog = rh.chainState.GetStakeChangelogDB()
 	}
 
-	sessions, rollbackNomt, err := trie.ApplyNomtReplicationBatchesWithRollback(
+	sessions, nomtPreImages, rollbackNomt, err := trie.ApplyNomtReplicationBatchesWithPreImages(
 		parsed.aggregatedBatches,
 		accChangelog,
 		stakeChangelog,
@@ -1381,7 +1936,7 @@ func (rh *RequestHandler) applyParsedBackupDbBatches(
 		effectiveBlockNum,
 	)
 	if err != nil {
-		return nil, func() {}, fmt.Errorf("error replicating NOMT batches in applyBackupDbBatches: %w", err)
+		return nil, nil, func() {}, fmt.Errorf("error replicating NOMT batches in applyBackupDbBatches: %w", err)
 	}
 	undoFns = append(undoFns, func() {
 		if rbErr := rollbackNomt(); rbErr != nil {
@@ -1395,7 +1950,7 @@ func (rh *RequestHandler) applyParsedBackupDbBatches(
 			undoKV, writeErr := applyStorageBatchWithUndo(entry.storage, batch, true)
 			if writeErr != nil {
 				rollbackAll()
-				return nil, func() {}, fmt.Errorf("error writing batch '%s' for block %d: %w", entry.name, effectiveBlockNum, writeErr)
+				return nil, nil, func() {}, fmt.Errorf("error writing batch '%s' for block %d: %w", entry.name, effectiveBlockNum, writeErr)
 			}
 			undoFns = append(undoFns, undoKV)
 		}
@@ -1409,7 +1964,7 @@ func (rh *RequestHandler) applyParsedBackupDbBatches(
 			undoTrieKV, writeErr := applyStorageBatchWithUndo(prefixedDB, tb.batch, false)
 			if writeErr != nil {
 				rollbackAll()
-				return nil, func() {}, fmt.Errorf("error writing TrieDB batch '%s' for block %d: %w", tb.key, effectiveBlockNum, writeErr)
+				return nil, nil, func() {}, fmt.Errorf("error writing TrieDB batch '%s' for block %d: %w", tb.key, effectiveBlockNum, writeErr)
 			}
 			undoFns = append(undoFns, undoTrieKV)
 		}
@@ -1428,9 +1983,9 @@ func (rh *RequestHandler) applyParsedBackupDbBatches(
 			rollbackAll()
 			logger.Error("🚨 [FORK-RISK] ReplayFullDbLogsBatchAtBlock (epoch sync) FAILED for %d batches at block #%d — rolled back Chain KV + NOMT + Xapian!", len(backupDb.FullDbLogs), effectiveBlockNum)
 			if rbErr != nil {
-				return nil, func() {}, fmt.Errorf("ReplayFullDbLogs failed for block #%d (%d batches) and rollback to #%d failed: %w", effectiveBlockNum, len(backupDb.FullDbLogs), effectiveBlockNum-1, rbErr)
+				return nil, nil, func() {}, fmt.Errorf("ReplayFullDbLogs failed for block #%d (%d batches) and rollback to #%d failed: %w", effectiveBlockNum, len(backupDb.FullDbLogs), effectiveBlockNum-1, rbErr)
 			}
-			return nil, func() {}, fmt.Errorf("ReplayFullDbLogs failed for block #%d (%d batches)", effectiveBlockNum, len(backupDb.FullDbLogs))
+			return nil, nil, func() {}, fmt.Errorf("ReplayFullDbLogs failed for block #%d (%d batches)", effectiveBlockNum, len(backupDb.FullDbLogs))
 		}
 		logger.Info("📥 [BLOCK SYNC] ✅ Replayed %d FullDbLogs entries for block %d", len(backupDb.FullDbLogs), effectiveBlockNum)
 		mvm.CommitAllXapianAtBlock(effectiveBlockNum)
@@ -1446,11 +2001,11 @@ func (rh *RequestHandler) applyParsedBackupDbBatches(
 			rollbackAll()
 			logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) failed while syncing block #%d with empty FullDbLogs: %v",
 				effectiveBlockNum-1, effectiveBlockNum, rbErr)
-			return nil, func() {}, fmt.Errorf("RollbackXapianAboveBlock(%d) failed for block #%d: %w", effectiveBlockNum-1, effectiveBlockNum, rbErr)
+			return nil, nil, func() {}, fmt.Errorf("RollbackXapianAboveBlock(%d) failed for block #%d: %w", effectiveBlockNum-1, effectiveBlockNum, rbErr)
 		}
 	}
 
-	return sessions, rollbackAll, nil
+	return sessions, nomtPreImages, rollbackAll, nil
 }
 
 // applyBackupDbBatches applies all state batch data from a BackUpDb to local storages.
@@ -1459,6 +2014,6 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]tr
 	if err != nil {
 		return nil, err
 	}
-	sessions, _, err := rh.applyParsedBackupDbBatches(backupDb, parsed, common.Hash{}, backupDb.BockNumber, nil)
+	sessions, _, _, err := rh.applyParsedBackupDbBatches(backupDb, parsed, common.Hash{}, backupDb.BockNumber, nil)
 	return sessions, err
 }

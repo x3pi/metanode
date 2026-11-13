@@ -373,3 +373,91 @@ func TestSharedContractStorage_FirstContractBlockRollbackToEmptyBaseline(t *test
 		}
 	})
 }
+
+// TestSharedContractStorage_NonEmptySnapshotBaselineRecordedBeforeFirstChangelogWrite verifies that
+// when a node boots from a non-empty snapshot (empty SC changelog) and later commits block #5 as the
+// first block recorded in scChangelogDB, the pre-block non-empty snapshot root is recorded at block #4
+// so AlignWithExpectedRoot back to block #4 succeeds and preserves the non-empty snapshot root.
+func TestSharedContractStorage_NonEmptySnapshotBaselineRecordedBeforeFirstChangelogWrite(t *testing.T) {
+	t.Run("CommitBatchRaw", func(t *testing.T) {
+		h := openTestNomtHandle(t)
+
+		// Snapshot baseline written at block 2 without changelogDB.
+		snapRoot, _ := commitBlockBatched(t, h, nil, 2, []contractWrite{
+			{addr: [20]byte{0xA1}, slots: map[byte]byte{1: 0x11}},
+		})
+		if snapRoot == (e_common.Hash{}) {
+			t.Fatal("expected non-zero snapshot root")
+		}
+
+		// Boot with a fresh empty changelogDB, then write block 5.
+		cl := newContractChangelog(t)
+		root5, _ := commitBlockBatched(t, h, cl, 5, []contractWrite{
+			{addr: [20]byte{0xB2}, slots: map[byte]byte{2: 0x22}},
+		})
+		if root5 == snapRoot {
+			t.Fatal("expected block 5 root to differ from snapshot root")
+		}
+
+		baseRoot, blk, found, err := cl.GetRootAtOrBefore(4)
+		if err != nil || !found || blk != 4 || e_common.BytesToHash(baseRoot) != snapRoot {
+			t.Fatalf("GetRootAtOrBefore(4) = (%x, %d, %v, %v), want (%x, 4, true, nil)",
+				baseRoot, blk, found, err, snapRoot[:])
+		}
+
+		rbTrie := NewNomtStateTrie(h, true, SharedContractStorageNamespace)
+		rbTrie.SetChangelogDB(cl)
+		if err := rbTrie.AlignWithExpectedRoot(nil, snapRoot, 4); err != nil {
+			t.Fatalf("AlignWithExpectedRoot to snapshot block 4 failed: %v", err)
+		}
+		curRoot, err := h.Root()
+		if err != nil || e_common.BytesToHash(curRoot[:]) != snapRoot {
+			t.Fatalf("handle root after rollback = %x (%v), want %x", curRoot, err, snapRoot[:])
+		}
+	})
+
+	t.Run("ApplyNomtReplicationBatchesWithRollback", func(t *testing.T) {
+		setupIsolatedNomtBackend(t)
+
+		addrA1 := [20]byte{0xA1}
+		snapBatches := map[string][][2][]byte{
+			"SC Storage": {{makeNomtSCKey(addrA1, 1), []byte{0x11}}},
+		}
+		if _, _, err := ApplyNomtReplicationBatchesWithRollback(snapBatches, nil, nil, nil, 2); err != nil {
+			t.Fatalf("ApplyNomtReplicationBatchesWithRollback(snapshot block 2): %v", err)
+		}
+		snapRoot, ok := GetNomtHandleRoot(SharedContractStorageNamespace)
+		if !ok || snapRoot == (e_common.Hash{}) {
+			t.Fatalf("expected non-zero snapshot root, got (%x, %v)", snapRoot, ok)
+		}
+
+		cl := newContractChangelog(t)
+		addrB2 := [20]byte{0xB2}
+		b5Batches := map[string][][2][]byte{
+			"SC Storage": {{makeNomtSCKey(addrB2, 2), []byte{0x22}}},
+		}
+		if _, _, err := ApplyNomtReplicationBatchesWithRollback(b5Batches, nil, nil, cl, 5); err != nil {
+			t.Fatalf("ApplyNomtReplicationBatchesWithRollback(block 5): %v", err)
+		}
+
+		baseRoot, blk, found, err := cl.GetRootAtOrBefore(4)
+		if err != nil || !found || blk != 4 || e_common.BytesToHash(baseRoot) != snapRoot {
+			t.Fatalf("GetRootAtOrBefore(4) = (%x, %d, %v, %v), want (%x, 4, true, nil)",
+				baseRoot, blk, found, err, snapRoot[:])
+		}
+
+		h, err := GetOrInitNomtHandle(SharedContractStorageNamespace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rbTrie := NewNomtStateTrie(h, true, SharedContractStorageNamespace)
+		rbTrie.SetChangelogDB(cl)
+		if err := rbTrie.AlignWithExpectedRoot(nil, snapRoot, 4); err != nil {
+			t.Fatalf("AlignWithExpectedRoot to snapshot block 4 failed: %v", err)
+		}
+		curRoot, err := h.Root()
+		if err != nil || e_common.BytesToHash(curRoot[:]) != snapRoot {
+			t.Fatalf("handle root after rollback = %x (%v), want %x", curRoot, err, snapRoot[:])
+		}
+	})
+}
