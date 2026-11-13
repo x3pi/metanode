@@ -761,6 +761,17 @@ func (bc *BlockChain) Commit() error {
 		// where mapping writes can be lost if the process crashes shortly after block commit.
 		if bc.storageManager != nil && bc.storageManager.GetStorageMapping() != nil {
 			if err := bc.storageManager.GetStorageMapping().BatchPut(batch); err != nil {
+				bc.dirtyLock.RLock()
+				targetDirty := bc.dirtyStorage
+				targetDirty.mu.Lock()
+				for _, kv := range batch {
+					ks := string(kv[0])
+					if _, exists := targetDirty.data[ks]; !exists {
+						targetDirty.data[ks] = kv[1]
+					}
+				}
+				targetDirty.mu.Unlock()
+				bc.dirtyLock.RUnlock()
 				logger.Error("❌ [BLOCKCHAIN MAPPING] Storage BatchPut failed: %v", err)
 				return err
 			}
@@ -1334,4 +1345,3 @@ func (m *blockCacheMap) Prune(expireBefore time.Time) {
 		}
 	}
 }
-

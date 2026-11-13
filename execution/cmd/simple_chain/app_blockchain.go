@@ -1692,6 +1692,14 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 			return nil
 		}
 
+		var accPreImages, stakePreImages [][2][]byte
+		if p, ok := accountRes.NomtPayload.(interface{ PreImageBatch() [][2][]byte }); ok && p != nil {
+			accPreImages = p.PreImageBatch()
+		}
+		if p, ok := stakeRes.NomtPayload.(interface{ PreImageBatch() [][2][]byte }); ok && p != nil {
+			stakePreImages = p.PreImageBatch()
+		}
+
 		if err := commitVerifiedCatchupBlock(
 			bn,
 			expectedAccountRoot,
@@ -1708,6 +1716,16 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 		); err != nil {
 			mvm.ClearAllXapianTxBuffers()
 			return err
+		}
+
+		if app.storageManager != nil && app.storageManager.GetStorageBackupDb() != nil && bn > 0 {
+			backupDB := app.storageManager.GetStorageBackupDb()
+			if (app.chainState == nil || app.chainState.GetChangelogDB() == nil) && len(accPreImages) > 0 {
+				_ = storage.PersistNomtUndoBatch(backupDB, storage.NomtUndoKindAccount, bn, accPreImages)
+			}
+			if (app.chainState == nil || app.chainState.GetStakeChangelogDB() == nil) && len(stakePreImages) > 0 {
+				_ = storage.PersistNomtUndoBatch(backupDB, storage.NomtUndoKindStake, bn, stakePreImages)
+			}
 		}
 
 		// Commit Xapian buffered writes for verified catch-up block bn

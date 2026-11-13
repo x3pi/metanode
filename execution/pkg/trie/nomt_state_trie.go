@@ -142,8 +142,11 @@ type NomtStateTrie struct {
 	pendingCommitTicket    *NomtPersistenceTicket
 
 	// pendingChangelog holds changelog entries generated during Commit
-	// to be asynchronously flushed to disk during CommitPayload
+	// to be asynchronously flushed to disk during CommitPayload.
+	// pendingPreImages captures [rawKey, oldVal] undo entries when changelogDB is nil
+	// (validator nodes) so fork rollback can restore Genesis/Snapshot keys exactly.
 	pendingChangelog      []state_changelog.StateChange
+	pendingPreImages      [][2][]byte
 	pendingChangelogBlock uint64
 	pendingCommittingMap  map[string]*nomtDirtyEntry
 
@@ -1202,6 +1205,7 @@ func (n *NomtStateTrie) getOrCreateSession() *nomt_ffi.Session {
 	changes := n.pendingChangelog
 	blockNum := n.pendingChangelogBlock
 	n.pendingChangelog = nil
+	n.pendingPreImages = nil
 	n.pendingChangelogBlock = 0
 	n.sessionMu.Unlock()
 
@@ -1379,6 +1383,9 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 
 		fsToAbort := n.pendingFinishedSession
 		n.pendingFinishedSession = nil
+		n.pendingChangelog = nil
+		n.pendingPreImages = nil
+		n.pendingChangelogBlock = 0
 		n.sessionMu.Unlock()
 
 		if fsToAbort != nil {
@@ -1810,6 +1817,31 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 			})
 		}
 		n.pendingChangelog = changes
+	} else if string(n.namespace) == "account_state" || string(n.namespace) == "stake_db" {
+		preImages := make([][2][]byte, 0, len(sortedDirtyKeys))
+		for _, hexKey := range sortedDirtyKeys {
+			entry := committingSnapshot[hexKey]
+			origKeyCopy := append([]byte(nil), entry.originalKey...)
+			var oldValCopy []byte
+			if oldVal, ok := oldValuesSnapshot[hexKey]; ok && len(oldVal) > 0 {
+				oldValCopy = append([]byte(nil), oldVal...)
+			}
+			preImages = append(preImages, [2][]byte{origKeyCopy, oldValCopy})
+		}
+		if len(n.pendingPreImages) == 0 {
+			n.pendingPreImages = preImages
+		} else {
+			seen := make(map[string]struct{}, len(n.pendingPreImages))
+			for _, kv := range n.pendingPreImages {
+				seen[string(kv[0])] = struct{}{}
+			}
+			for _, kv := range preImages {
+				if _, ok := seen[string(kv[0])]; !ok {
+					seen[string(kv[0])] = struct{}{}
+					n.pendingPreImages = append(n.pendingPreImages, kv)
+				}
+			}
+		}
 	}
 	n.pendingChangelogBlock = n.currentCommitBlock
 	n.sessionMu.Unlock()
@@ -1866,6 +1898,7 @@ func (n *NomtStateTrie) Close() {
 		n.activeSession = nil
 	}
 	n.pendingChangelog = nil
+	n.pendingPreImages = nil
 	n.pendingCommittingMap = nil
 }
 
@@ -1884,6 +1917,7 @@ func (n *NomtStateTrie) AbortPending() {
 	fs := n.pendingFinishedSession
 	n.pendingFinishedSession = nil
 	n.pendingChangelog = nil
+	n.pendingPreImages = nil
 	n.pendingChangelogBlock = 0
 	n.pendingCommittingMap = nil
 	ticket := n.pendingCommitTicket
@@ -1987,6 +2021,7 @@ func (n *NomtStateTrie) CommitPayload() error {
 	changes := n.pendingChangelog
 	blockNum := n.pendingChangelogBlock
 	n.pendingChangelog = nil
+	n.pendingPreImages = nil
 	n.pendingChangelogBlock = 0
 	ticket := n.pendingCommitTicket
 	n.pendingCommitTicket = nil
@@ -2093,8 +2128,18 @@ type NomtPayload struct {
 	finishedSession *nomt_ffi.FinishedSession
 	doneOnce        sync.Once
 	changes         []state_changelog.StateChange
+	preImages       [][2][]byte
 	blockNum        uint64
 	commitTicket    *NomtPersistenceTicket
+}
+
+// PreImageBatch returns captured [rawKey, oldVal] undo pairs for validator nodes
+// without a StateChangelogDB so backupDbWorker can persist compact undo records.
+func (p *NomtPayload) PreImageBatch() [][2][]byte {
+	if p == nil {
+		return nil
+	}
+	return p.preImages
 }
 
 func (p *NomtPayload) SetBlockNumber(blockNum uint64) {
@@ -2113,6 +2158,7 @@ func (p *NomtPayload) Discard() {
 				p.finishedSession = nil
 			}
 			p.changes = nil
+			p.preImages = nil
 			if p.commitTicket != nil {
 				p.commitTicket.SetState(NomtPersistenceFailed)
 			}
@@ -2126,14 +2172,16 @@ func (n *NomtStateTrie) ExtractPendingPayload() *NomtPayload {
 	fs := n.pendingFinishedSession
 	n.pendingFinishedSession = nil
 	changes := n.pendingChangelog
+	preImages := n.pendingPreImages
 	blockNum := n.pendingChangelogBlock
 	n.pendingChangelog = nil
+	n.pendingPreImages = nil
 	n.pendingChangelogBlock = 0
 	ticket := n.pendingCommitTicket
 	n.pendingCommitTicket = nil
 	n.sessionMu.Unlock()
 
-	if fs == nil && len(changes) == 0 {
+	if fs == nil && len(changes) == 0 && len(preImages) == 0 {
 		view := n.loadReadView()
 		if view != nil && len(view.committing) > 0 {
 			if ticket != nil {
@@ -2152,6 +2200,7 @@ func (n *NomtStateTrie) ExtractPendingPayload() *NomtPayload {
 		trie:            n,
 		finishedSession: fs,
 		changes:         changes,
+		preImages:       preImages,
 		blockNum:        blockNum,
 		commitTicket:    ticket,
 	}
@@ -2318,11 +2367,32 @@ func ApplyNomtReplicationBatchesWithRollback(
 	scChangelogDB *state_changelog.StateChangelogDB,
 	blockNumber uint64,
 ) ([]NomtSessionToFlush, func() error, error) {
+	sessions, _, rollbackNomt, err := ApplyNomtReplicationBatchesWithPreImages(
+		aggregatedBatches,
+		changelogDB,
+		stakeChangelogDB,
+		scChangelogDB,
+		blockNumber,
+	)
+	return sessions, rollbackNomt, err
+}
+
+// ApplyNomtReplicationBatchesWithPreImages behaves like ApplyNomtReplicationBatchesWithRollback
+// and additionally returns pre-image undo pairs ([rawKey, oldVal]) for validator namespaces that
+// do not have a StateChangelogDB enabled (account_state, stake_db).
+func ApplyNomtReplicationBatchesWithPreImages(
+	aggregatedBatches map[string][][2][]byte,
+	changelogDB *state_changelog.StateChangelogDB,
+	stakeChangelogDB *state_changelog.StateChangelogDB,
+	scChangelogDB *state_changelog.StateChangelogDB,
+	blockNumber uint64,
+) ([]NomtSessionToFlush, map[string][][2][]byte, func() error, error) {
 	var sessionsToFlush []NomtSessionToFlush
 	noopRollback := func() error { return nil }
+	preImagesByNamespace := make(map[string][][2][]byte)
 
 	if globalStateBackend != BackendNOMT {
-		return sessionsToFlush, noopRollback, nil
+		return sessionsToFlush, preImagesByNamespace, noopRollback, nil
 	}
 
 	prevNomtCommittedBlock := storage.GetLastNomtCommittedBlock()
@@ -2490,7 +2560,7 @@ func ApplyNomtReplicationBatchesWithRollback(
 			handle, err := GetOrInitNomtHandle(namespace)
 			if err != nil {
 				_ = rollbackNomt()
-				return sessionsToFlush, noopRollback, fmt.Errorf("failed to init NOMT handle for sync: %w", err)
+				return sessionsToFlush, nil, noopRollback, fmt.Errorf("failed to init NOMT handle for sync: %w", err)
 			}
 
 			if batchName == "SC Storage" {
@@ -2563,11 +2633,11 @@ func ApplyNomtReplicationBatchesWithRollback(
 					}
 					if err := t.BatchUpdate(group.keys, group.values); err != nil {
 						_ = rollbackNomt()
-						return sessionsToFlush, noopRollback, fmt.Errorf("failed to apply nomt sync batch for contract %s: %w", addrHex, err)
+						return sessionsToFlush, nil, noopRollback, fmt.Errorf("failed to apply nomt sync batch for contract %s: %w", addrHex, err)
 					}
 					if _, _, _, err := t.Commit(true); err != nil {
 						_ = rollbackNomt()
-						return sessionsToFlush, noopRollback, fmt.Errorf("failed to commit nomt sync batch for contract %s: %w", addrHex, err)
+						return sessionsToFlush, nil, noopRollback, fmt.Errorf("failed to commit nomt sync batch for contract %s: %w", addrHex, err)
 					}
 					undoSteps = append(undoSteps, nomtUndoStep{
 						handleNamespace: namespace,
@@ -2579,23 +2649,23 @@ func ApplyNomtReplicationBatchesWithRollback(
 					})
 					if err := t.CommitPayload(); err != nil {
 						_ = rollbackNomt()
-						return sessionsToFlush, noopRollback, fmt.Errorf("failed to flush nomt sync batch for contract %s: %w", addrHex, err)
+						return sessionsToFlush, nil, noopRollback, fmt.Errorf("failed to flush nomt sync batch for contract %s: %w", addrHex, err)
 					}
 					totalKeys += len(group.keys)
 				}
 				if scChangelogDB != nil && blockNumber > 0 && len(scChanges) > 0 {
 					if err := scChangelogDB.WriteBlockChanges(blockNumber, scChanges); err != nil {
 						_ = rollbackNomt()
-						return sessionsToFlush, noopRollback, fmt.Errorf("failed to write SC changelog for block %d: %w", blockNumber, err)
+						return sessionsToFlush, nil, noopRollback, fmt.Errorf("failed to write SC changelog for block %d: %w", blockNumber, err)
 					}
 					postRoot, rErr := handle.Root()
 					if rErr != nil {
 						_ = rollbackNomt()
-						return sessionsToFlush, noopRollback, fmt.Errorf("failed to read SC NOMT root after block %d: %w", blockNumber, rErr)
+						return sessionsToFlush, nil, noopRollback, fmt.Errorf("failed to read SC NOMT root after block %d: %w", blockNumber, rErr)
 					}
 					if err := scChangelogDB.SetBlockRoot(blockNumber, postRoot[:]); err != nil {
 						_ = rollbackNomt()
-						return sessionsToFlush, noopRollback, fmt.Errorf("failed to record SC NOMT root for block %d: %w", blockNumber, err)
+						return sessionsToFlush, nil, noopRollback, fmt.Errorf("failed to record SC NOMT root for block %d: %w", blockNumber, err)
 					}
 				}
 				logger.Info("🔧 [NOMT-SYNC] Node rebuilt %d keys across %d contracts to NOMT for %s",
@@ -2624,11 +2694,11 @@ func ApplyNomtReplicationBatchesWithRollback(
 				uKeys, uVals := capturePreImages(trie, nomtKeys)
 				if err := trie.BatchUpdate(nomtKeys, nomtValues); err != nil {
 					_ = rollbackNomt()
-					return sessionsToFlush, noopRollback, fmt.Errorf("failed to apply nomt sync batch: %w", err)
+					return sessionsToFlush, nil, noopRollback, fmt.Errorf("failed to apply nomt sync batch: %w", err)
 				}
 				if _, _, _, err := trie.Commit(true); err != nil {
 					_ = rollbackNomt()
-					return sessionsToFlush, noopRollback, fmt.Errorf("failed to commit nomt sync batch: %w", err)
+					return sessionsToFlush, nil, noopRollback, fmt.Errorf("failed to commit nomt sync batch: %w", err)
 				}
 				undoSteps = append(undoSteps, nomtUndoStep{
 					handleNamespace: namespace,
@@ -2638,9 +2708,16 @@ func ApplyNomtReplicationBatchesWithRollback(
 					keys:            uKeys,
 					oldValues:       uVals,
 				})
+				if (namespace == "account_state" && changelogDB == nil) || (namespace == "stake_db" && stakeChangelogDB == nil) {
+					pairs := make([][2][]byte, len(uKeys))
+					for j := range uKeys {
+						pairs[j] = [2][]byte{uKeys[j], uVals[j]}
+					}
+					preImagesByNamespace[namespace] = pairs
+				}
 				if err := trie.CommitPayload(); err != nil {
 					_ = rollbackNomt()
-					return sessionsToFlush, noopRollback, fmt.Errorf("failed to flush nomt sync batch: %w", err)
+					return sessionsToFlush, nil, noopRollback, fmt.Errorf("failed to flush nomt sync batch: %w", err)
 				}
 
 				postRoot, _ := handle.Root()
@@ -2675,7 +2752,7 @@ func ApplyNomtReplicationBatchesWithRollback(
 		}
 	}
 
-	return sessionsToFlush, rollbackNomt, nil
+	return sessionsToFlush, preImagesByNamespace, rollbackNomt, nil
 }
 
 // GenerateProof generates a Merkle proof for a specific key
@@ -2910,6 +2987,31 @@ func (n *NomtStateTrie) SetPendingCommitTicket(ticket *NomtPersistenceTicket) {
 	n.pendingCommitTicket = ticket
 }
 
+// GetNomtKeyValues reads the current persisted values for the given raw keys directly from the
+// NOMT namespace handle. Missing keys yield nil entries in the returned slice.
+func GetNomtKeyValues(namespace string, keys [][]byte) ([][]byte, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	handle, err := GetOrInitNomtHandle(namespace)
+	if err != nil {
+		return nil, fmt.Errorf("GetNomtKeyValues: GetOrInitNomtHandle(%s): %w", namespace, err)
+	}
+	nsBytes := []byte(namespace)
+	out := make([][]byte, len(keys))
+	for i, k := range keys {
+		keyPath := addressToKeyPathWithNamespace(nsBytes, k)
+		val, found, readErr := handle.StateDbGet(keyPath)
+		if readErr != nil {
+			return nil, fmt.Errorf("GetNomtKeyValues: StateDbGet(%s): %w", namespace, readErr)
+		}
+		if found && len(val) > 0 {
+			out[i] = append([]byte(nil), val...)
+		}
+	}
+	return out, nil
+}
+
 // RollbackNomtNamespaceKeys updates or deletes specific raw keys in a NOMT namespace handle
 // without wiping unrelated pre-existing keys (used e.g. by validator fork rollback via BackupDb).
 func RollbackNomtNamespaceKeys(namespace string, keys [][]byte, values [][]byte) error {
@@ -2944,6 +3046,7 @@ func RollbackNomtNamespaceKeys(namespace string, keys [][]byte, values [][]byte)
 			t.registry.keys[hexKey] = keyCopy
 		}
 	}
+	t.registry.pendingNew = nil
 	t.registry.mu.Unlock()
 	t.persistRegistryFullRewrite()
 	t.commitWg.Wait()

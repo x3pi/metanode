@@ -1,6 +1,7 @@
 package blockchain
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -85,16 +86,21 @@ func TestCommitConfig_RequiresBlockChain(t *testing.T) {
 }
 
 func setupFullCommitTestEnv(t *testing.T) (*ChainState, *storage.StorageManager) {
+	return setupFullCommitTestEnvWithMapping(t, storage.NewMemoryDb())
+}
+
+func setupFullCommitTestEnvWithMapping(t *testing.T, mappingStorage storage.Storage) (*ChainState, *storage.StorageManager) {
 	t.Helper()
 	cs, _ := newCommitTestState(t)
 	sm := storage.NewStorageManager()
 	for _, add := range []func(storage.Storage) error{
 		sm.AddStorageAccount, sm.AddStorageTransaction, sm.AddStorageBackupDeviceKey, sm.AddStorageReceipt,
 		sm.AddStorageSmartContract, sm.AddStorageCode, sm.AddStorageDatabaseTrie, sm.AddStorageBlock,
-		sm.AddStorageBackupDb, sm.AddStorageMapping, sm.AddStorageStake,
+		sm.AddStorageBackupDb, sm.AddStorageStake,
 	} {
 		require.NoError(t, add(storage.NewMemoryDb()))
 	}
+	require.NoError(t, sm.AddStorageMapping(mappingStorage))
 	cs.storageManager = sm
 	cs.SetStakeStateDB(state_db.NewStakeStateDB(cs.GetAccountStateDB().Trie(), sm.GetStorageStake()))
 	cs.blockDatabase = block.NewBlockDatabase(sm.GetStorageBlock())
@@ -211,4 +217,194 @@ func TestCommitBlockState_DurabilityBarrierFailureRollsBackBlockDBAndMappings(t 
 	curHdr := cs.GetcurrentBlockHeader()
 	require.NotNil(t, curHdr)
 	assert.Equal(t, uint64(1), (*curHdr).BlockNumber(), "currentBlockHeader must roll back to block #1")
+}
+
+type mockFaultySyncMappingStorage struct {
+	storage.Storage
+	batchPutErr    error
+	syncDurableErr error
+}
+
+func (m *mockFaultySyncMappingStorage) BatchPut(pairs [][2][]byte) error {
+	if m.batchPutErr != nil {
+		return m.batchPutErr
+	}
+	return m.Storage.BatchPut(pairs)
+}
+
+func (m *mockFaultySyncMappingStorage) SyncDurable() error {
+	if m.syncDurableErr != nil {
+		return m.syncDurableErr
+	}
+	return nil
+}
+
+func TestCommitBlockState_WithCommitMappings_RollsBackFlushedMappingsOnLaterBarrierFailure(t *testing.T) {
+	cs, sm := setupFullCommitTestEnv(t)
+	prevBC := blockChainInstance
+	prevHeight := storage.GetLastBlockNumber()
+	defer func() {
+		blockChainInstance = prevBC
+		storage.ResetAllBlockCounters(prevHeight)
+	}()
+
+	accRoot := cs.GetAccountStateDB().GetOriginRootHash()
+	stakeRoot := cs.GetStakeStateDB().GetOriginRootHash()
+
+	baseBlockDB := sm.GetStorageBlock()
+	cs.blockDatabase = block.NewBlockDatabase(baseBlockDB)
+	bc := newTestBlockChain()
+	bc.storageManager = sm
+	bc.blockDatabase = cs.blockDatabase
+	blockChainInstance = bc
+
+	storage.ResetAllBlockCounters(0)
+	tx1 := common.HexToHash("0x1111000000000000000000000000000000000000000000000000000000000001")
+	hdr1 := block.NewBlockHeader(common.Hash{}, 1, accRoot, stakeRoot, common.Hash{}, common.Address{}, 100, common.Hash{}, 0)
+	blk1 := block.NewBlock(hdr1, []common.Hash{tx1}, nil)
+	_, err := cs.CommitBlockState(blk1, WithPersistToDB(), WithSaveTxMapping(), WithCommitMappings())
+	require.NoError(t, err)
+
+	// Fail Step 8b SyncDurable AFTER Step 7 bc.Commit() already flushed block #2 and tx2 to StorageMapping.
+	failingBlockDB := &auditFailedDurableStorage{Storage: baseBlockDB}
+	cs.blockDatabase = block.NewBlockDatabase(failingBlockDB)
+	bc.blockDatabase = cs.blockDatabase
+
+	tx2 := common.HexToHash("0x2222000000000000000000000000000000000000000000000000000000000002")
+	hdr2 := block.NewBlockHeader(blk1.Header().Hash(), 2, accRoot, stakeRoot, common.Hash{}, common.Address{}, 200, common.Hash{}, 0)
+	blk2 := block.NewBlock(hdr2, []common.Hash{tx2}, nil)
+
+	_, err = cs.CommitBlockState(blk2, WithPersistToDB(), WithSaveTxMapping(), WithCommitMappings())
+	require.Error(t, err)
+
+	assert.Equal(t, uint64(1), storage.GetLastBlockNumber())
+	_, hasMap2 := bc.GetBlockHashByNumberFast(2)
+	assert.False(t, hasMap2, "blockNumber_2 cache/DB mapping must be rolled back")
+	_, hasTx2 := bc.GetBlockNumberByTxHashFast(tx2)
+	assert.False(t, hasTx2, "tx2 cache/DB mapping must be rolled back")
+
+	mapStore := sm.GetStorageMapping()
+	_, errMap2 := mapStore.Get([]byte(blockNumberPrefix + "2"))
+	assert.Error(t, errMap2, "flushed blockNumber_2 entry must be deleted from StorageMapping")
+	_, errTx2 := mapStore.Get([]byte(txHashPrefix + tx2.Hex()))
+	assert.Error(t, errTx2, "flushed tx2 entry must be deleted from StorageMapping")
+
+	// Block #1 and tx1 must remain intact.
+	gotHash1, hasMap1 := bc.GetBlockHashByNumberFast(1)
+	assert.True(t, hasMap1)
+	assert.Equal(t, blk1.Header().Hash(), gotHash1)
+	gotBn1, hasTx1 := bc.GetBlockNumberByTxHashFast(tx1)
+	assert.True(t, hasTx1)
+	assert.Equal(t, uint64(1), gotBn1)
+}
+
+func TestCommitBlockState_MappingSyncDurableFailure_RollsBackPartiallyFlushedMappings(t *testing.T) {
+	baseMappingDB := storage.NewMemoryDb()
+	faultyMapping := &mockFaultySyncMappingStorage{Storage: baseMappingDB}
+	cs, sm := setupFullCommitTestEnvWithMapping(t, faultyMapping)
+	prevBC := blockChainInstance
+	prevHeight := storage.GetLastBlockNumber()
+	defer func() {
+		blockChainInstance = prevBC
+		storage.ResetAllBlockCounters(prevHeight)
+	}()
+
+	accRoot := cs.GetAccountStateDB().GetOriginRootHash()
+	stakeRoot := cs.GetStakeStateDB().GetOriginRootHash()
+
+	bc := newTestBlockChain()
+	bc.storageManager = sm
+	bc.blockDatabase = cs.blockDatabase
+	blockChainInstance = bc
+
+	storage.ResetAllBlockCounters(0)
+	tx1 := common.HexToHash("0x1111000000000000000000000000000000000000000000000000000000000001")
+	hdr1 := block.NewBlockHeader(common.Hash{}, 1, accRoot, stakeRoot, common.Hash{}, common.Address{}, 100, common.Hash{}, 0)
+	blk1 := block.NewBlock(hdr1, []common.Hash{tx1}, nil)
+	_, err := cs.CommitBlockState(blk1, WithPersistToDB(), WithSaveTxMapping(), WithCommitMappings())
+	require.NoError(t, err)
+
+	// Inject SyncDurable error on StorageMapping so BatchPut writes to baseMappingDB then SyncDurable fails.
+	faultyMapping.syncDurableErr = errors.New("injected mapping SyncDurable failure")
+	tx2 := common.HexToHash("0x3333000000000000000000000000000000000000000000000000000000000003")
+	hdr2 := block.NewBlockHeader(blk1.Header().Hash(), 2, accRoot, stakeRoot, common.Hash{}, common.Address{}, 200, common.Hash{}, 0)
+	blk2 := block.NewBlock(hdr2, []common.Hash{tx2}, nil)
+
+	_, err = cs.CommitBlockState(blk2, WithPersistToDB(), WithSaveTxMapping(), WithCommitMappings())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "injected mapping SyncDurable failure")
+
+	_, hasMap2 := bc.GetBlockHashByNumberFast(2)
+	assert.False(t, hasMap2, "blockNumber_2 must be rolled back")
+	_, hasTx2 := bc.GetBlockNumberByTxHashFast(tx2)
+	assert.False(t, hasTx2, "tx2 must be rolled back")
+
+	_, errMap2 := baseMappingDB.Get([]byte(blockNumberPrefix + "2"))
+	assert.Error(t, errMap2, "partially flushed blockNumber_2 must be deleted from StorageMapping")
+	_, errTx2 := baseMappingDB.Get([]byte(txHashPrefix + tx2.Hex()))
+	assert.Error(t, errTx2, "partially flushed tx2 must be deleted from StorageMapping")
+
+	lastBlk, lbErr := cs.blockDatabase.GetLastBlock()
+	require.NoError(t, lbErr)
+	require.NotNil(t, lastBlk)
+	assert.Equal(t, uint64(1), lastBlk.Header().BlockNumber(), "BlockDatabase must roll back to block #1")
+}
+
+func TestCommitBlockState_MappingBatchPutFailure_PreservesPriorDirtyMappings(t *testing.T) {
+	baseMappingDB := storage.NewMemoryDb()
+	faultyMapping := &mockFaultySyncMappingStorage{Storage: baseMappingDB}
+	cs, sm := setupFullCommitTestEnvWithMapping(t, faultyMapping)
+	prevBC := blockChainInstance
+	prevHeight := storage.GetLastBlockNumber()
+	defer func() {
+		blockChainInstance = prevBC
+		storage.ResetAllBlockCounters(prevHeight)
+	}()
+
+	accRoot := cs.GetAccountStateDB().GetOriginRootHash()
+	stakeRoot := cs.GetStakeStateDB().GetOriginRootHash()
+
+	bc := newTestBlockChain()
+	bc.storageManager = sm
+	bc.blockDatabase = cs.blockDatabase
+	blockChainInstance = bc
+
+	storage.ResetAllBlockCounters(0)
+	hdr1 := block.NewBlockHeader(common.Hash{}, 1, accRoot, stakeRoot, common.Hash{}, common.Address{}, 100, common.Hash{}, 0)
+	blk1 := block.NewBlock(hdr1, nil, nil)
+	_, err := cs.CommitBlockState(blk1, WithPersistToDB(), WithSaveTxMapping(), WithCommitMappings())
+	require.NoError(t, err)
+
+	// Commit block #2 WITHOUT WithCommitMappings so its mappings remain in bc.dirtyStorage.
+	tx2 := common.HexToHash("0x4444000000000000000000000000000000000000000000000000000000000004")
+	hdr2 := block.NewBlockHeader(blk1.Header().Hash(), 2, accRoot, stakeRoot, common.Hash{}, common.Address{}, 200, common.Hash{}, 0)
+	blk2 := block.NewBlock(hdr2, []common.Hash{tx2}, nil)
+	_, err = cs.CommitBlockState(blk2, WithPersistToDB(), WithSaveTxMapping())
+	require.NoError(t, err)
+
+	// Fail BatchPut on block #3 WITH WithCommitMappings.
+	faultyMapping.batchPutErr = errors.New("injected mapping BatchPut failure")
+	tx3 := common.HexToHash("0x5555000000000000000000000000000000000000000000000000000000000005")
+	hdr3 := block.NewBlockHeader(blk2.Header().Hash(), 3, accRoot, stakeRoot, common.Hash{}, common.Address{}, 300, common.Hash{}, 0)
+	blk3 := block.NewBlock(hdr3, []common.Hash{tx3}, nil)
+
+	_, err = cs.CommitBlockState(blk3, WithPersistToDB(), WithSaveTxMapping(), WithCommitMappings())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "injected mapping BatchPut failure")
+
+	// Block #3 mappings must be rolled back, while block #2's dirty mappings must survive in dirtyStorage.
+	_, hasMap3 := bc.GetBlockHashByNumberFast(3)
+	assert.False(t, hasMap3)
+	_, hasTx3 := bc.GetBlockNumberByTxHashFast(tx3)
+	assert.False(t, hasTx3)
+
+	// Recover BatchPut and flush dirtyStorage — block #2's mappings must now persist to baseMappingDB.
+	faultyMapping.batchPutErr = nil
+	require.NoError(t, bc.Commit())
+
+	gotMap2, errMap2 := baseMappingDB.Get([]byte(blockNumberPrefix + "2"))
+	require.NoError(t, errMap2)
+	assert.Equal(t, blk2.Header().Hash().Bytes(), gotMap2)
+	_, errTx2 := baseMappingDB.Get([]byte(txHashPrefix + tx2.Hex()))
+	require.NoError(t, errTx2)
 }
