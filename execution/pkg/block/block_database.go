@@ -207,6 +207,12 @@ func (blockDatabase *BlockDatabase) DeleteBlockByHash(blockHash common.Hash) err
 	return blockDatabase.db.Delete(blockHash.Bytes())
 }
 
+// DeleteLastBlockKey removes the master lastBlockHashKey pointer (used when rolling back
+// a failed first-block commit where no previous last block existed).
+func (blockDatabase *BlockDatabase) DeleteLastBlockKey() error {
+	return blockDatabase.db.Delete(lastBlockHashKey.Bytes())
+}
+
 func (blockDatabase *BlockDatabase) GetBlockByHash(blockHash common.Hash) (types.Block, error) {
 	// Try to load the block from the database
 	blockBytes, err := blockDatabase.db.Get(blockHash.Bytes())

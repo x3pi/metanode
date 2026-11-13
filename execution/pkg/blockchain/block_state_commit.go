@@ -164,59 +164,22 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 
 	bc := GetBlockChainInstance()
 
-	// ─── 1. Update in-memory header pointer (always) ──────────────────────
-	headerCopy := header
-	cs.SetcurrentBlockHeader(&headerCopy)
-
-	// ─── 2. Add block to in-memory block cache immediately (always) ──────
-	// Doing this early satisfies concurrent read requests (e.g. from block hash checker)
-	// without waiting for disk database persistence or block mapping updates.
-	if bc != nil {
-		bc.AddBlockToCache(blk)
+	// ─── 1. Rebuild or realign state tries FIRST (fail-closed before mutating DB/mappings) ───
+	// Verifying/rebuilding tries from header roots BEFORE SaveLastBlock and SetBlockNumberToHash
+	// guarantees that a missing state batch / missing trie node returns an error without leaving
+	// orphaned blocks or mappings in BlockDatabase / BlockChain dirtyStorage.
+	var activeAccountRoot common.Hash
+	if asDB := cs.GetAccountStateDB(); asDB != nil {
+		activeAccountRoot = asDB.GetOriginRootHash()
 	}
-
-	// ─── 3. Persist block to DB (optional) ───────────────────────────────
-	// CRITICAL CONCURRENCY FIX: This MUST run BEFORE SetBlockNumberToHash and UpdateLastBlockNumber
-	// to prevent race conditions where concurrent queries find mapping/block counter updated
-	// but block database lookup fails with null.
-	if cfg.persistToDB {
-		if err := cs.blockDatabase.SaveLastBlock(blk); err != nil {
-			logger.Error("❌ [COMMIT STATE] Failed to save block #%d to DB: %v", blockNum, err)
-			return blockNum, err
-		}
-		// PebbleDB handles durability via write ahead logging (WAL).
-		// Forced memtable flushes are removed to prevent I/O bottlenecks.
-		logger.Info("✅ [COMMIT STATE] Block #%d persisted to DB and flushed (hash: %s, parentHash: %s, txCount: %d, lastBlockNum_before: %d)",
-			blockNum, blockHash.Hex()[:18], header.LastBlockHash().Hex()[:18], len(blk.Transactions()), lastBlockNum)
+	var activeStakeRoot common.Hash
+	if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
+		activeStakeRoot = stakeDB.GetOriginRootHash()
 	}
-
-	// ─── 4. Update block number → hash mapping (always) ──────────────────
-	if bc != nil {
-		if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
-			logger.Error("❌ [COMMIT STATE] Failed to set block→hash mapping for block #%d: %v", blockNum, err)
-			return blockNum, err
-		}
-	}
-
-	// ─── 5. Save tx hash → block number mappings (optional) ──────────────
-	if bc != nil && cfg.saveTxMapping {
-		txs := blk.Transactions()
-		if len(txs) > 0 {
-			bc.SetTxHashMapBlockNumberBatch(txs, blockNum)
-		}
-	}
-
-	if cs.storageManager != nil {
-		for _, txHash := range blk.Transactions() {
-			_ = cs.storageManager.CommitDeviceKey(txHash)
-		}
-	}
-
-	// ─── 7. Rebuild or realign state tries from header roots if out of sync ───
-	activeAccountRoot := cs.GetAccountStateDB().GetOriginRootHash()
-	activeStakeRoot := cs.GetStakeStateDB().GetOriginRootHash()
 	headerAccountRoot := header.AccountStatesRoot()
 	headerStakeRoot := common.Hash(header.StakeStatesRoot())
+	prevHeaderPtr := cs.currentBlockHeader.Load()
+	didLightweightNomtRealign := false
 
 	if trie.GetStateBackend() == trie.BackendNOMT {
 		if cfg.rebuildTries {
@@ -239,6 +202,7 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 					nomtTrie.RealignRoot(headerStakeRoot)
 				}
 			}
+			didLightweightNomtRealign = true
 			logger.Debug("🔧 [COMMIT STATE] Lightweight root realignment for block #%d (account=%s, stake=%s)",
 				blockNum, headerAccountRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
 		}
@@ -253,10 +217,127 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 		}
 	}
 
-	// ─── 8. Commit mappings to LevelDB (optional) ────────────────────────
+	// Capture pre-mutation state so any failure in persistence or durability barriers rolls back cleanly.
+	var (
+		prevLastBlock     types.Block
+		hadPrevLastBlock  bool
+		existedInBlockDB  bool
+		savedToBlockDB    bool
+		prevMappedHash    common.Hash
+		hadPrevMappedHash bool
+		updatedBlockMap   bool
+		updatedTxMap      bool
+		addedBlockCache   bool
+	)
+	if cfg.persistToDB && cs.blockDatabase != nil {
+		if lb, lbErr := cs.blockDatabase.GetLastBlock(); lbErr == nil && lb != nil {
+			prevLastBlock = lb
+			hadPrevLastBlock = true
+		}
+		if _, existErr := cs.blockDatabase.GetBlockByHash(blockHash); existErr == nil {
+			existedInBlockDB = true
+		}
+	}
+	if bc != nil {
+		prevMappedHash, hadPrevMappedHash = bc.GetBlockHashByNumberFast(blockNum)
+	}
+
+	rollbackOnErr := func() {
+		cs.currentBlockHeader.Store(prevHeaderPtr)
+		if didLightweightNomtRealign {
+			if asDB := cs.GetAccountStateDB(); asDB != nil {
+				asDB.SetOriginRootHash(activeAccountRoot)
+				if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
+					nomtTrie.RealignRoot(activeAccountRoot)
+				}
+			}
+			if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
+				stakeDB.SetOriginRootHash(activeStakeRoot)
+				if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
+					nomtTrie.RealignRoot(activeStakeRoot)
+				}
+			}
+		}
+		if bc != nil {
+			if updatedTxMap {
+				bc.DiscardTxMappings(blk.Transactions())
+			}
+			if updatedBlockMap {
+				if hadPrevMappedHash {
+					_ = bc.SetBlockNumberToHash(blockNum, prevMappedHash)
+				} else {
+					bc.DiscardBlockMappings(blockNum)
+				}
+			}
+			if addedBlockCache && !existedInBlockDB {
+				bc.DeleteBlockFromCache(blockHash)
+			}
+		}
+		if savedToBlockDB && cs.blockDatabase != nil {
+			if !existedInBlockDB {
+				_ = cs.blockDatabase.DeleteBlockByHash(blockHash)
+			}
+			if hadPrevLastBlock && prevLastBlock != nil {
+				_ = cs.blockDatabase.SaveLastBlock(prevLastBlock)
+			} else {
+				_ = cs.blockDatabase.DeleteLastBlockKey()
+			}
+		}
+	}
+
+	// ─── 2. Update in-memory header pointer (always) ──────────────────────
+	headerCopy := header
+	cs.SetcurrentBlockHeader(&headerCopy)
+
+	// ─── 3. Add block to in-memory block cache immediately (always) ──────
+	// Doing this early satisfies concurrent read requests (e.g. from block hash checker)
+	// without waiting for disk database persistence or block mapping updates.
+	if bc != nil {
+		bc.AddBlockToCache(blk)
+		addedBlockCache = true
+	}
+
+	// ─── 4. Persist block to DB (optional) ───────────────────────────────
+	// CRITICAL CONCURRENCY FIX: This MUST run BEFORE SetBlockNumberToHash and UpdateLastBlockNumber
+	// to prevent race conditions where concurrent queries find mapping/block counter updated
+	// but block database lookup fails with null.
+	if cfg.persistToDB {
+		if err := cs.blockDatabase.SaveLastBlock(blk); err != nil {
+			logger.Error("❌ [COMMIT STATE] Failed to save block #%d to DB: %v", blockNum, err)
+			rollbackOnErr()
+			return blockNum, err
+		}
+		savedToBlockDB = true
+		// PebbleDB handles durability via write ahead logging (WAL).
+		// Forced memtable flushes are removed to prevent I/O bottlenecks.
+		logger.Info("✅ [COMMIT STATE] Block #%d persisted to DB and flushed (hash: %s, parentHash: %s, txCount: %d, lastBlockNum_before: %d)",
+			blockNum, blockHash.Hex()[:18], header.LastBlockHash().Hex()[:18], len(blk.Transactions()), lastBlockNum)
+	}
+
+	// ─── 5. Update block number → hash mapping (always) ──────────────────
+	if bc != nil {
+		if err := bc.SetBlockNumberToHash(blockNum, blockHash); err != nil {
+			logger.Error("❌ [COMMIT STATE] Failed to set block→hash mapping for block #%d: %v", blockNum, err)
+			rollbackOnErr()
+			return blockNum, err
+		}
+		updatedBlockMap = true
+	}
+
+	// ─── 6. Save tx hash → block number mappings (optional) ──────────────
+	if bc != nil && cfg.saveTxMapping {
+		txs := blk.Transactions()
+		if len(txs) > 0 {
+			_ = bc.SetTxHashMapBlockNumberBatch(txs, blockNum)
+			updatedTxMap = true
+		}
+	}
+
+	// ─── 7. Commit mappings to LevelDB (optional) ────────────────────────
 	if bc != nil && cfg.commitMaps {
 		if err := bc.Commit(); err != nil {
 			logger.Error("❌ [COMMIT STATE] Failed to commit mappings for block #%d: %v", blockNum, err)
+			rollbackOnErr()
 			return blockNum, err
 		}
 	}
@@ -268,12 +349,14 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 	if cfg.persistToDB && cs.storageManager != nil {
 		failpoint.Hit("before-receipts-barrier")
 		if err := storage.SyncDurable(cs.storageManager.GetStorageReceipt()); err != nil {
+			rollbackOnErr()
 			return blockNum, err
 		}
 		failpoint.Hit("after-receipts-barrier")
 
 		failpoint.Hit("before-transaction-state-barrier")
 		if err := storage.SyncDurable(cs.storageManager.GetStorageTransaction()); err != nil {
+			rollbackOnErr()
 			return blockNum, err
 		}
 		failpoint.Hit("after-transaction-state-barrier")
@@ -291,9 +374,16 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 		failpoint.Hit("before-block-barrier")
 		if err := storage.SyncDurable(cs.blockDatabase.GetDB()); err != nil {
 			logger.Error("❌ [COMMIT STATE] Failed to make block #%d durable before NOMT commit: %v", blockNum, err)
+			rollbackOnErr()
 			return blockNum, err
 		}
 		failpoint.Hit("after-block-barrier")
+	}
+
+	if cs.storageManager != nil {
+		for _, txHash := range blk.Transactions() {
+			_ = cs.storageManager.CommitDeviceKey(txHash)
+		}
 	}
 
 	// ─── 9. Update storage block counter and auto-update epoch ────────────

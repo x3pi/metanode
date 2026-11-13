@@ -1,7 +1,9 @@
 package executor
 
 import (
+	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
+	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
@@ -232,6 +235,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	var executedCount uint64 = 0
 	var lastExecutedBlock uint64 = 0
 	var lastExecutedGEI uint64 = 0
+	var lastExecutedBlk types.Block
 	// ═══════════════════════════════════════════════════════════════════════════
 	// NOMT TRIE REBUILD DECISION:
 	// When execute_mode=true, the caller is either:
@@ -271,6 +275,280 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 	var allNomtSessions []trie.NomtSessionToFlush
 
+	// finalizeSyncedPrefix flushes deferred NOMT sessions, aligns final tries, commits & flushes
+	// BlockChain mappings, force-syncs the last committed block, and invokes state/GEI/nonce
+	// callbacks for any committed prefix (executedCount > 0). Calling this on both normal loop
+	// completion and mid-batch aborts prevents ADV-18 (lost mappings & stale GEIAuthority).
+	finalizeSyncedPrefix := func() error {
+		if executedCount == 0 {
+			return nil
+		}
+
+		if len(allNomtSessions) > 0 {
+			logger.Info("🔧 [NOMT-SYNC] Flushing %d deferred NOMT sessions to disk after chunk completion", len(allNomtSessions))
+			if err := trie.FlushNomtSessions(allNomtSessions); err != nil {
+				logger.Error("❌ [NOMT-SYNC] Failed to flush deferred NOMT sessions: %v", err)
+				return fmt.Errorf("failed to flush deferred NOMT sessions: %w", err)
+			}
+			allNomtSessions = nil
+		}
+
+		targetBlk := lastExecutedBlk
+		if targetBlk == nil && lastExecutedBlock > 0 {
+			if hash, ok := bc.GetBlockHashByNumber(lastExecutedBlock); ok {
+				if blkLoaded, err := blockDatabase.GetBlockByHash(hash); err == nil && blkLoaded != nil {
+					targetBlk = blkLoaded
+				}
+			}
+		}
+
+		if isPreConsensusSync && targetBlk != nil {
+			goTipBlock := storage.GetLastBlockNumber()
+			if trie.GetStateBackend() == trie.BackendNOMT {
+				if lastExecutedBlock >= goTipBlock {
+					logger.Info("🔧 [STARTUP-SYNC] Forcing final NOMT trie alignment for last synced block #%d (Go tip is #%d)", lastExecutedBlock, goTipBlock)
+					if err := rh.chainState.UpdateStateForNewHeader(targetBlk.Header()); err != nil {
+						logger.Error("❌ [STARTUP-SYNC] Failed to align final NOMT trie for block #%d: %v", lastExecutedBlock, err)
+						return fmt.Errorf("failed to align final NOMT trie for block %d: %w", lastExecutedBlock, err)
+					}
+					rh.chainState.InvalidateAllState()
+					finalTrieRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
+					logger.Info("✅ [STARTUP-SYNC] Final NOMT trie aligned: trieRoot=%s (block=#%d). Ready.",
+						finalTrieRoot.Hex()[:18]+"...", lastExecutedBlock)
+				} else {
+					logger.Info("🔧 [STARTUP-SYNC] Skipping final NOMT trie alignment for block #%d because Go tip is ahead (#%d)", lastExecutedBlock, goTipBlock)
+				}
+			} else {
+				expectedAcc := targetBlk.Header().AccountStatesRoot()
+				expectedStake := common.Hash(targetBlk.Header().StakeStatesRoot())
+				if rh.chainState.GetAccountStateDB().Trie().Hash() != expectedAcc ||
+					rh.chainState.GetStakeStateDB().Trie().Hash() != expectedStake {
+					if err := rh.chainState.UpdateStateForNewHeader(targetBlk.Header()); err != nil {
+						logger.Error("❌ [STARTUP-SYNC] Failed to align final MPT trie for block #%d: %v", lastExecutedBlock, err)
+						return fmt.Errorf("failed to align final MPT trie for block %d: %w", lastExecutedBlock, err)
+					}
+				}
+			}
+		}
+
+		if err := bc.Commit(); err != nil {
+			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to commit block number mappings: %v", err)
+			return fmt.Errorf("failed to commit block mappings: %w", err)
+		}
+		if rh.storageManager != nil && rh.storageManager.GetStorageMapping() != nil {
+			if flushErr := rh.storageManager.GetStorageMapping().Flush(); flushErr != nil {
+				logger.Error("❌ [SNAPSHOT-RESUME] Failed to flush mapping DB: %v", flushErr)
+				return fmt.Errorf("failed to flush mapping DB: %w", flushErr)
+			}
+			logger.Info("💾 [SNAPSHOT-RESUME] Successfully flushed mapping DB to disk after batch sync")
+		}
+
+		if targetBlk != nil {
+			logger.Info("💾 [STARTUP-SYNC] Forcing synchronous flush of last synced block #%d to disk", lastExecutedBlock)
+			if syncErr := blockDatabase.SaveLastBlockSync(targetBlk); syncErr != nil {
+				logger.Error("❌ [STARTUP-SYNC] Failed to force-sync last block #%d: %v", lastExecutedBlock, syncErr)
+			}
+			if rh.updateLastBlockCallback != nil {
+				rh.updateLastBlockCallback(targetBlk)
+			}
+		}
+
+		if lastExecutedGEI > 0 && rh.pushAsyncGEIUpdateCallback != nil {
+			var lastCommitIdx uint32 = 0
+			var lastEpoch uint64 = 0
+			if targetBlk != nil {
+				lastEpoch = targetBlk.Header().Epoch()
+				if shouldImportPeerCommitIndex(request.PreserveOwnCommitIndex, targetBlk.Header().CommitIndex()) {
+					lastCommitIdx = uint32(targetBlk.Header().CommitIndex())
+				}
+			}
+			rh.pushAsyncGEIUpdateCallback(lastExecutedGEI, nil, lastCommitIdx, lastEpoch)
+			logger.Info("🔄 [STARTUP-SYNC] Synchronized GEIAuthority to %d (commitIndex: %d, epoch: %d)", lastExecutedGEI, lastCommitIdx, lastEpoch)
+
+			if lastCommitIdx > 0 {
+				currentEpoch := rh.chainState.GetCurrentEpoch()
+				storage.UpdateLastHandledCommitIndex(lastCommitIdx)
+				storage.UpdateLastHandledCommitEpoch(currentEpoch)
+
+				if rh.storageManager != nil && rh.storageManager.GetStorageBackupDb() != nil {
+					var batch [][2][]byte
+					batch = append(batch, [2][]byte{storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(lastCommitIdx)})
+					batch = append(batch, [2][]byte{storage.LastHandledCommitEpochHashKey.Bytes(), utils.Uint64ToBytes(currentEpoch)})
+					if err := rh.storageManager.GetStorageBackupDb().BatchPut(batch); err != nil {
+						logger.Error("❌ [STARTUP-SYNC] Failed to persist LastHandledCommitIndex to BackupDb: %v", err)
+					} else {
+						logger.Info("✅ [STARTUP-SYNC] Synchronously persisted LastHandledCommitIndex=%d, Epoch=%d for immediate Rust consensus initialization", lastCommitIdx, currentEpoch)
+					}
+				}
+			}
+		}
+
+		if rh.clearNoncesCacheCallback != nil {
+			rh.clearNoncesCacheCallback()
+		}
+		return nil
+	}
+
+	abortSyncBatch := func(errMsg string) (*pb.SyncBlocksResponse, error) {
+		if finErr := finalizeSyncedPrefix(); finErr != nil {
+			errMsg = fmt.Sprintf("%s (prefix finalization error: %v)", errMsg, finErr)
+		}
+		return &pb.SyncBlocksResponse{
+			SyncedCount:     executedCount,
+			LastSyncedBlock: lastExecutedBlock,
+			LastExecutedGei: lastExecutedGEI,
+			Error:           errMsg,
+		}, nil
+	}
+
+	// rollbackLocalChainToBlock atomically rewinds Xapian AND local chain state/storages
+	// (ChainState tries, StateChangelogDBs, BlockDatabase, BlockChain mappings, BackupDb,
+	// and persistent counters) back to targetBlock. Fail-closed if Xapian or ChainState
+	// alignment fails so Xapian and ChainDB never diverge.
+	rollbackLocalChainToBlock := func(targetBlock uint64, incomingHashToKeep common.Hash) error {
+		if _, rbErr := mvm.RollbackXapianAboveBlock(targetBlock); rbErr != nil {
+			logger.Error("🚨 [SYNC-FORK-ROLLBACK] RollbackXapianAboveBlock(%d) failed: %v — ABORTING sync to prevent Xapian/ChainDB divergence!", targetBlock, rbErr)
+			return fmt.Errorf("RollbackXapianAboveBlock(%d) failed: %w", targetBlock, rbErr)
+		}
+
+		maxTip := storage.GetLastBlockNumber()
+		if lastBlk, err := blockDatabase.GetLastBlock(); err == nil && lastBlk != nil && lastBlk.Header() != nil {
+			if lastBlk.Header().BlockNumber() > maxTip {
+				maxTip = lastBlk.Header().BlockNumber()
+			}
+		}
+
+		var targetBlk types.Block
+		var targetHash common.Hash
+		if th, ok := bc.GetBlockHashByNumber(targetBlock); ok && th != (common.Hash{}) {
+			targetHash = th
+			if bLoaded, err := blockDatabase.GetBlockByHash(th); err == nil && bLoaded != nil {
+				targetBlk = bLoaded
+			}
+		}
+
+		if targetBlk != nil && rh.chainState != nil {
+			if alignErr := rh.chainState.UpdateStateForNewHeader(targetBlk.Header()); alignErr != nil {
+				logger.Error("🚨 [SYNC-FORK-ROLLBACK] UpdateStateForNewHeader(#%d) failed during rollback: %v", targetBlock, alignErr)
+				return fmt.Errorf("UpdateStateForNewHeader(%d) failed during rollback: %w", targetBlock, alignErr)
+			}
+		}
+
+		keepTxs := make(map[common.Hash]struct{})
+		if targetBlk != nil {
+			for _, txH := range targetBlk.Transactions() {
+				keepTxs[txH] = struct{}{}
+			}
+		}
+
+		for bn := maxTip; bn > targetBlock; bn-- {
+			if staleHash, ok := bc.GetBlockHashByNumber(bn); ok && staleHash != (common.Hash{}) {
+				if staleBlk, err := blockDatabase.GetBlockByHash(staleHash); err == nil && staleBlk != nil {
+					staleTxs := staleBlk.Transactions()
+					for _, txHash := range staleTxs {
+						if _, keep := keepTxs[txHash]; keep {
+							continue
+						}
+						existingBn, foundMap := bc.GetBlockNumberByTxHash(txHash)
+						if !foundMap || existingBn > targetBlock {
+							if rh.storageManager != nil {
+								if mapStore := rh.storageManager.GetStorageMapping(); mapStore != nil {
+									_ = mapStore.Delete([]byte("txHashPrefix" + txHash.Hex()))
+								}
+								if txStore := rh.storageManager.GetStorageTransaction(); txStore != nil {
+									_ = txStore.Delete(txHash.Bytes())
+								}
+								if rcptStore := rh.storageManager.GetStorageReceipt(); rcptStore != nil {
+									_ = rcptStore.Delete(txHash.Bytes())
+								}
+							}
+							bc.DiscardTxMappings([]common.Hash{txHash})
+						}
+					}
+				}
+				bc.DeleteBlockFromCache(staleHash)
+				if staleHash != incomingHashToKeep && staleHash != targetHash {
+					_ = blockDatabase.DeleteBlockByHash(staleHash)
+				}
+			}
+			bc.DiscardBlockMappings(bn)
+			_ = bc.DeleteBlockHashMapping(bn)
+			if rh.storageManager != nil {
+				if backupStorage := rh.storageManager.GetStorageBackupDb(); backupStorage != nil {
+					_ = backupStorage.Delete([]byte(fmt.Sprintf("block_data_topic-%d", bn)))
+					_ = backupStorage.Delete([]byte(fmt.Sprintf("backup_%d", bn)))
+				}
+			}
+		}
+
+		_ = bc.Commit()
+
+		if targetBlk != nil {
+			_ = blockDatabase.SaveLastBlockSync(targetBlk)
+			if rh.updateLastBlockCallback != nil {
+				rh.updateLastBlockCallback(targetBlk)
+			}
+		} else if targetBlock == 0 {
+			_ = blockDatabase.DeleteLastBlockKey()
+		}
+
+		if rh.chainState != nil {
+			// On NOMT backend, sync flat "nomt:" mirror keys in StorageAccount/StorageStake back to targetBlock
+			// before truncating StateChangelogDB entries above targetBlock.
+			if trie.GetStateBackend() == trie.BackendNOMT && rh.storageManager != nil {
+				syncNomtFlatMirror := func(cl *state_changelog.StateChangelogDB, flatStore storage.Storage) {
+					if cl == nil || flatStore == nil || cl.GetHighestBlock() <= targetBlock {
+						return
+					}
+					addrs, err := cl.GetAllUniqueAddresses()
+					if err != nil {
+						return
+					}
+					for _, addr := range addrs {
+						nomtKey := append([]byte("nomt:"), addr...)
+						valAtTarget, errAt := cl.GetStateAt(addr, targetBlock)
+						if errAt == nil && len(valAtTarget) > 0 {
+							if _, getErr := flatStore.Get(nomtKey); getErr == nil {
+								_ = flatStore.Put(nomtKey, valAtTarget)
+							}
+						} else {
+							_ = flatStore.Delete(nomtKey)
+						}
+					}
+				}
+				syncNomtFlatMirror(rh.chainState.GetChangelogDB(), rh.storageManager.GetStorageAccount())
+				syncNomtFlatMirror(rh.chainState.GetStakeChangelogDB(), rh.storageManager.GetStorageStake())
+			}
+
+			var scCl *state_changelog.StateChangelogDB
+			if scDB := rh.chainState.GetSmartContractDB(); scDB != nil {
+				scCl = scDB.GetChangelogDB()
+			}
+			for _, cl := range []*state_changelog.StateChangelogDB{
+				rh.chainState.GetChangelogDB(),
+				rh.chainState.GetStakeChangelogDB(),
+				scCl,
+			} {
+				if cl != nil {
+					if err := cl.RollbackAboveBlock(targetBlock); err != nil {
+						logger.Warn("⚠️ [SYNC-FORK-ROLLBACK] StateChangelogDB.RollbackAboveBlock(%d) warning: %v", targetBlock, err)
+					}
+				}
+			}
+		}
+
+		storage.ResetAllBlockCounters(targetBlock)
+		targetGEI := targetBlock
+		if targetBlk != nil && targetBlk.Header() != nil && (targetBlock == 0 || targetBlk.Header().GlobalExecIndex() > 0) {
+			targetGEI = targetBlk.Header().GlobalExecIndex()
+		}
+		storage.ForceSetLastGlobalExecIndex(targetGEI)
+		if rh.clearNoncesCacheCallback != nil {
+			rh.clearNoncesCacheCallback()
+		}
+		return nil
+	}
+
 	for i, blockData := range blocks {
 		isLastBlock := i == len(blocks)-1
 		shouldCommitState := isLastBlock || (i > 0 && i%100 == 0)
@@ -287,7 +565,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		blk := &block.Block{}
 		if err := blk.Unmarshal(rawBytes); err != nil {
 			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to unmarshal block (wire_num=%d): %v", blockData.GetBlockNumber(), err)
-			continue
+			return abortSyncBatch(fmt.Sprintf("unmarshal block %d failed: %v", blockData.GetBlockNumber(), err))
 		}
 
 		header := blk.Header()
@@ -309,28 +587,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 		// ═══════════════════════════════════════════════════════════════════════════
 		// DEDUPLICATION: Skip blocks already executed (GEI-based)
-		// CRITICAL FIX: We MUST read GEI freshly in the loop. Caching it outside
-		// the loop causes this sync to blindly overwrite blocks that were concurrently
-		// processed by the live consensus goroutine (processRustEpochData).
+		// NOTE: When a fork hash mismatch is detected, we ONLY mark forkOverwrite=true
+		// here and defer destructive rollback until AFTER parent-hash, excessBlobGas,
+		// and BackupDb validation pass, so a corrupt/garbage peer block cannot clobber
+		// a healthy local block!
 		// ═══════════════════════════════════════════════════════════════════════════
 		currentGEI := storage.GetLastGlobalExecIndex()
 		isFullyExecuted := false
 		forkOverwrite := false
-		resetLocalForkBeforeBlock := func(forkBlockNum uint64) error {
-			forkOverwrite = true
-			isFullyExecuted = false
-			if forkBlockNum > 0 {
-				targetBlock := forkBlockNum - 1
-				if _, rbErr := mvm.RollbackXapianAboveBlock(targetBlock); rbErr != nil {
-					logger.Error("🚨 [SYNC-FORK-ROLLBACK] RollbackXapianAboveBlock(%d) failed before overwriting block #%d: %v — ABORTING sync to prevent Xapian/BlockDB divergence!", targetBlock, forkBlockNum, rbErr)
-					return fmt.Errorf("RollbackXapianAboveBlock(%d) failed before overwriting fork block %d: %w", targetBlock, forkBlockNum, rbErr)
-				}
-				storage.ResetAllBlockCounters(targetBlock)
-				storage.ForceSetLastGlobalExecIndex(targetBlock)
-				currentGEI = targetBlock
-			}
-			return nil
-		}
 
 		if blockGEI > 0 && blockGEI <= currentGEI {
 			if localHash, ok := bc.GetBlockHashByNumber(blockNum); ok {
@@ -338,48 +602,16 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 					isFullyExecuted = true
 				} else {
 					if isPreConsensusSync {
-						// ═══════════════════════════════════════════════════════════
-						// STARTUP-SYNC FORK RESOLUTION (May 2026):
-						// During startup pre-consensus sync, if the local block has a different
-						// hash than the verified block fetched from peers, this indicates a local
-						// stale fork. We must FORCE execution and overwrite of this block so the local
-						// node is fully re-aligned with the peer consensus, allowing subsequent parent-hash
-						// checks to pass correctly.
-						// ═══════════════════════════════════════════════════════════
 						logger.Warn("⚠️ [STARTUP-SYNC-FORK] Local block #%d hash (%s) != leader hash (%s) during startup sync. "+
-							"FORCING execution/overwrite of this block to resolve local fork.",
+							"FORCING execution/overwrite of this block after validation to resolve local fork.",
 							blockNum, localHash.Hex()[:18], blockHash.Hex()[:18])
-						if rbErr := resetLocalForkBeforeBlock(blockNum); rbErr != nil {
-							return &pb.SyncBlocksResponse{
-								SyncedCount:     executedCount,
-								LastSyncedBlock: lastExecutedBlock,
-								Error:           rbErr.Error(),
-							}, nil
-						}
 					} else {
-						// ═══════════════════════════════════════════════════════════
-						// FORK-SAFE (June 2026): Force execution on hash mismatch!
-						//
-						// If we `continue` (skip) here, the local database retains the WRONG block.
-						// Then, the NEXT block in the sync batch will immediately fail the
-						// `parent-hash mismatch` check because its parent is the correct block,
-						// but our local DB has the wrong block. This causes a permanent sync stall!
-						//
-						// By setting `isFullyExecuted = false`, we FORCE execution of the peer's
-						// block, overwriting our local stale block. This allows the node to
-						// correctly align with the consensus chain.
-						// ═══════════════════════════════════════════════════════════
 						logger.Warn("⚠️ [SYNC-HASH-MISMATCH] Local block #%d hash (%x) != leader hash (%x) during sync. "+
-							"FORCING execution/overwrite of this block to resolve local fork.",
+							"FORCING execution/overwrite of this block after validation to resolve local fork.",
 							blockNum, localHash[:8], blockHash[:8])
-						if rbErr := resetLocalForkBeforeBlock(blockNum); rbErr != nil {
-							return &pb.SyncBlocksResponse{
-								SyncedCount:     executedCount,
-								LastSyncedBlock: lastExecutedBlock,
-								Error:           rbErr.Error(),
-							}, nil
-						}
 					}
+					forkOverwrite = true
+					isFullyExecuted = false
 				}
 			}
 		}
@@ -402,15 +634,10 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 						logger.Info("🔄 [SYNC-DEDUPLICATE] Block #%d matches committed hash (tip=#%d). Skipping execution.", blockNum, lastBlockNum)
 					} else {
 						logger.Warn("⚠️ [SYNC-HASH-MISMATCH] Local block #%d hash (%x) != leader hash (%x) below/at tip #%d. "+
-							"FORCING execution/overwrite of this block to resolve local fork.",
+							"FORCING execution/overwrite of this block after validation to resolve local fork.",
 							blockNum, localHash[:8], blockHash[:8], lastBlockNum)
-						if rbErr := resetLocalForkBeforeBlock(blockNum); rbErr != nil {
-							return &pb.SyncBlocksResponse{
-								SyncedCount:     executedCount,
-								LastSyncedBlock: lastExecutedBlock,
-								Error:           rbErr.Error(),
-							}, nil
-						}
+						forkOverwrite = true
+						isFullyExecuted = false
 					}
 				} else if blockNum < lastBlockNum {
 					isFullyExecuted = true
@@ -423,8 +650,9 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Block #%d (GEI=%d) already executed (current_gei=%d), skipping",
 				blockNum, blockGEI, currentGEI)
 			executedCount++
-			if blockNum > lastExecutedBlock {
+			if blockNum >= lastExecutedBlock {
 				lastExecutedBlock = blockNum
+				lastExecutedBlk = blk
 			}
 			if blockGEI > lastExecutedGEI {
 				lastExecutedGEI = blockGEI
@@ -451,28 +679,11 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				}
 			}
 
-			// CRITICAL FIX: Even if the block was fully executed previously (from LevelDB),
-			// we MUST update the in-memory pointers so that Rust's initialize_from_go()
-			// query reads the correct last_block_number. Otherwise, Rust will use a stale
-			// block_number for the next consensus commit, overwriting this block.
 			storage.UpdateLastBlockNumber(blockNum)
 			if blockGEI > 0 {
 				storage.UpdateLastGlobalExecIndex(blockGEI)
 			}
 
-			// CRITICAL FIX: Restore lastHandledCommitIndex even for skipped blocks!
-			// If a node crashes or is restored from a corrupted rsync backup, lastHandledCommitIndex
-			// might be out of sync. We must restore it from the highest synced block header.
-			//
-			// ARCHITECTURE FIX (2026-09-12, note/startup_sync_commit_index_import_fork_design_2026-09.md):
-			// header.CommitIndex() is the SENDING peer's own node-local DAG round counter, not
-			// a value safe to adopt as this node's own (fork_guard.rs documents that two honest
-			// validators can legitimately use different local commit-round numbers for the
-			// identical GEI/state). Only trust it when the caller has no DAG of its own
-			// (PreserveOwnCommitIndex=false, e.g. a genuine SyncOnly node) -- a Validator sets
-			// PreserveOwnCommitIndex=true and owns this bookkeeping itself via its own
-			// CommitProcessor, which already knows how to safely resume from its last trusted
-			// local index and fast-skip already-executed GEI ranges (see executor.rs's GEI GUARD).
 			if shouldImportPeerCommitIndex(request.PreserveOwnCommitIndex, header.CommitIndex()) {
 				commitIdx32 := uint32(header.CommitIndex())
 				currentEpoch := header.Epoch()
@@ -490,30 +701,11 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				rh.persistBackupForSub(backupBytes, blockNum)
 			}
 
-			// CRITICAL FIX: If this is the last block of a STARTUP-SYNC batch,
-			// we MUST trigger the trie rebuild even if the block was already in LevelDB.
-			// Otherwise, NOMT memory state stays stale and subsequent blocks will fork.
-			if isLastBlock && isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT {
-				lastBlockNum := storage.GetLastBlockNumber()
-				if blockNum >= lastBlockNum {
-					logger.Info("🔧 [STARTUP-SYNC] Forcing NOMT trie rebuild on fully-executed last block #%d (tip is #%d)", blockNum, lastBlockNum)
-					if err := rh.chainState.UpdateStateForNewHeader(header); err != nil {
-						logger.Error("❌ [STARTUP-SYNC] Failed to force rebuild NOMT tries for fully-executed block #%d: %v", blockNum, err)
-					}
-				} else {
-					logger.Info("🔧 [STARTUP-SYNC] Skipping NOMT trie rebuild on intermediate skipped block #%d because Go tip is ahead (#%d)", blockNum, lastBlockNum)
-				}
-			}
 			continue
 		}
 
-		// Update cached GEI so next blocks in the loop don't dedup on stale value
-		if blockGEI > currentGEI {
-			currentGEI = blockGEI
-		}
-
 		// ═══════════════════════════════════════════════════════════════════════════
-		// PARENT-HASH CONSISTENCY CHECK: Reject synced block if it breaks continuity
+		// PARENT-HASH & BLOB-GAS CONSISTENCY CHECKS
 		// ═══════════════════════════════════════════════════════════════════════════
 		if blockNum > 1 {
 			prevBlockNum := blockNum - 1
@@ -521,73 +713,366 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				expectedParentHash := prevHash
 				actualParentHash := header.LastBlockHash()
 				if actualParentHash != expectedParentHash {
+					mismatchMsg := fmt.Sprintf("parent-hash mismatch at block %d: parentHash=%s but local block %d hash=%s",
+						blockNum, actualParentHash.Hex(), prevBlockNum, expectedParentHash.Hex())
+					if executedCount > 0 {
+						logger.Error("🚨 [SYNC-FORK-GUARD] %s after committing %d block(s) in current batch — finalizing synced prefix up to #%d and aborting batch.",
+							mismatchMsg, executedCount, lastExecutedBlock)
+						return abortSyncBatch(mismatchMsg)
+					}
+
 					logger.Error("🚨 [SYNC-FORK-GUARD] parent-hash mismatch at block #%d! "+
 						"Synced block has parentHash=%s, but local block #%d hash is %s. "+
-						"Rolling back block counters to %d to force resync of the mismatched block.",
+						"Rolling back local chain + Xapian to %d to force resync of the mismatched block.",
 						blockNum, actualParentHash.Hex(), prevBlockNum, expectedParentHash.Hex(), prevBlockNum-1)
 
-					// Force rollback of Go's block counters (and Xapian) to prevBlockNum-1 so the next sync request
-					// starts from prevBlockNum, allowing Go to fetch and overwrite the stale local block.
-					if _, rbErr := mvm.RollbackXapianAboveBlock(prevBlockNum - 1); rbErr != nil {
-						logger.Error("🚨 [SYNC-FORK-GUARD] RollbackXapianAboveBlock(%d) failed on parent-hash mismatch: %v", prevBlockNum-1, rbErr)
+					if rbErr := rollbackLocalChainToBlock(prevBlockNum-1, common.Hash{}); rbErr != nil {
 						return &pb.SyncBlocksResponse{
-							SyncedCount:     executedCount,
-							LastSyncedBlock: lastExecutedBlock,
-							Error:           fmt.Sprintf("parent-hash mismatch at block %d and RollbackXapianAboveBlock(%d) failed: %v", blockNum, prevBlockNum-1, rbErr),
+							SyncedCount:     0,
+							LastSyncedBlock: 0,
+							Error:           fmt.Sprintf("parent-hash mismatch at block %d and rollback to %d failed: %v", blockNum, prevBlockNum-1, rbErr),
 						}, nil
 					}
-					storage.ResetAllBlockCounters(prevBlockNum - 1)
-					storage.ForceSetLastGlobalExecIndex(prevBlockNum - 1)
 
 					return &pb.SyncBlocksResponse{
-						SyncedCount:     executedCount,
-						LastSyncedBlock: lastExecutedBlock,
-						Error:           fmt.Sprintf("parent-hash mismatch at block %d: parentHash=%s but local block %d hash=%s", blockNum, actualParentHash.Hex(), prevBlockNum, expectedParentHash.Hex()),
+						SyncedCount:     0,
+						LastSyncedBlock: 0,
+						Error:           mismatchMsg,
 					}, nil
 				}
 
-				// EIP-4844 BLOB-GAS-MARKET CONSISTENCY CHECK: a peer-supplied block whose
-				// ExcessBlobGas doesn't match what we independently derive from our own
-				// parent header is just as much a fork signal as a parent-hash mismatch —
-				// every node must compute this field identically. Same remediation as
-				// above: roll back and force a resync of the mismatched block.
 				if parentBlock := bc.GetBlockByNumber(prevBlockNum); parentBlock != nil {
 					expectedExcessBlobGas := block.NextExcessBlobGas(parentBlock.Header(), header.TimeStamp())
 					if header.ExcessBlobGas() != expectedExcessBlobGas {
+						mismatchMsg := fmt.Sprintf("excessBlobGas mismatch at block %d: got=%d want=%d",
+							blockNum, header.ExcessBlobGas(), expectedExcessBlobGas)
+						if executedCount > 0 {
+							logger.Error("🚨 [SYNC-FORK-GUARD] %s after committing %d block(s) in current batch — finalizing synced prefix up to #%d and aborting batch.",
+								mismatchMsg, executedCount, lastExecutedBlock)
+							return abortSyncBatch(mismatchMsg)
+						}
+
 						logger.Error("🚨 [SYNC-FORK-GUARD] ExcessBlobGas mismatch at block #%d! "+
 							"Synced block has ExcessBlobGas=%d, but expected %d from parent. "+
-							"Rolling back block counters to %d to force resync of the mismatched block.",
+							"Rolling back local chain + Xapian to %d to force resync of the mismatched block.",
 							blockNum, header.ExcessBlobGas(), expectedExcessBlobGas, prevBlockNum-1)
 
-						if _, rbErr := mvm.RollbackXapianAboveBlock(prevBlockNum - 1); rbErr != nil {
-							logger.Error("🚨 [SYNC-FORK-GUARD] RollbackXapianAboveBlock(%d) failed on excessBlobGas mismatch: %v", prevBlockNum-1, rbErr)
+						if rbErr := rollbackLocalChainToBlock(prevBlockNum-1, common.Hash{}); rbErr != nil {
 							return &pb.SyncBlocksResponse{
-								SyncedCount:     executedCount,
-								LastSyncedBlock: lastExecutedBlock,
-								Error:           fmt.Sprintf("excessBlobGas mismatch at block %d and RollbackXapianAboveBlock(%d) failed: %v", blockNum, prevBlockNum-1, rbErr),
+								SyncedCount:     0,
+								LastSyncedBlock: 0,
+								Error:           fmt.Sprintf("excessBlobGas mismatch at block %d and rollback to %d failed: %v", blockNum, prevBlockNum-1, rbErr),
 							}, nil
 						}
-						storage.ResetAllBlockCounters(prevBlockNum - 1)
-						storage.ForceSetLastGlobalExecIndex(prevBlockNum - 1)
 
 						return &pb.SyncBlocksResponse{
-							SyncedCount:     executedCount,
-							LastSyncedBlock: lastExecutedBlock,
-							Error:           fmt.Sprintf("excessBlobGas mismatch at block %d: got=%d want=%d", blockNum, header.ExcessBlobGas(), expectedExcessBlobGas),
+							SyncedCount:     0,
+							LastSyncedBlock: 0,
+							Error:           mismatchMsg,
 						}, nil
 					}
 				}
 			}
 		}
 
-		// CRITICAL FIX: Restore lastHandledCommitIndex from the synced block!
-		// This prevents Go from double-executing these commits when Rust resumes consensus.
-		//
-		// ARCHITECTURE FIX (2026-09-12, note/startup_sync_commit_index_import_fork_design_2026-09.md):
-		// see the identical guard + full explanation above (skipped-block branch) -- same
-		// reasoning applies here: only import a peer's CommitIndex when the caller has no
-		// DAG of its own to protect.
-		if !request.PreserveOwnCommitIndex && header.CommitIndex() > 0 {
+		// ═══════════════════════════════════════════════════════════════════════════
+		// PRE-VALIDATE BACKUP DATA IN MEMORY BEFORE ANY FORK ROLLBACK OR DB WRITES
+		// ═══════════════════════════════════════════════════════════════════════════
+		var parsedBackupDb *storage.BackUpDb
+		var preParsedBatches *parsedBackupDbBatches
+
+		if len(backupBytes) > 0 {
+			logger.Debug("🔍 [NOMT-DEBUG] Block #%d: raw backupBytes=%d bytes. About to deserialize+validate.",
+				blockNum, len(backupBytes))
+
+			backupDb, deserErr := storage.DeserializeBackupDb(backupBytes)
+			if deserErr != nil {
+				logger.Error("🚨 [SYNC-FATAL] Failed to deserialize BackUpDb for block #%d: %v — ABORTING to prevent State Drift!", blockNum, deserErr)
+				return abortSyncBatch(fmt.Sprintf("deserialize BackupDb failed for block %d: %v", blockNum, deserErr))
+			}
+			if len(txs) > 0 && !hasAnyBackupDbPayload(&backupDb) {
+				logger.Error("🚨 [SYNC-FATAL] Empty BackupDb state payload for non-empty block #%d (%d txs) — ABORTING to prevent State Drift!", blockNum, len(txs))
+				return abortSyncBatch(fmt.Sprintf("empty BackupDb state payload for non-empty block %d (%d txs)", blockNum, len(txs)))
+			}
+			validated, valErr := rh.parseAndValidateBackupDb(&backupDb)
+			if valErr != nil {
+				logger.Error("🚨 [SYNC-FATAL] Invalid BackupDb sub-batches for block #%d: %v — ABORTING to prevent State Drift!", blockNum, valErr)
+				return abortSyncBatch(fmt.Sprintf("invalid BackupDb batches for block %d: %v", blockNum, valErr))
+			}
+			parsedBackupDb = &backupDb
+			preParsedBatches = validated
+		} else if len(txs) > 0 {
+			logger.Error("🚨 [SYNC-FATAL] Missing BackupData for non-empty block #%d (%d txs) — ABORTING to prevent State Drift!", blockNum, len(txs))
+			return abortSyncBatch(fmt.Sprintf("missing BackupData for non-empty block %d (%d txs)", blockNum, len(txs)))
+		}
+
+		// Execute deferred local fork rollback ONLY AFTER header continuity and BackupDb validation passed!
+		if forkOverwrite && blockNum > 0 {
+			if rbErr := rollbackLocalChainToBlock(blockNum-1, blockHash); rbErr != nil {
+				return abortSyncBatch(fmt.Sprintf("fork rollback before block %d failed: %v", blockNum, rbErr))
+			}
+			currentGEI = storage.GetLastGlobalExecIndex()
+		}
+		if blockGEI > currentGEI {
+			currentGEI = blockGEI
+		}
+
+		// ═══════════════════════════════════════════════════════════════════════════
+		// STEP 1: Apply BackupDb state batches with full reversible undo log
+		// ═══════════════════════════════════════════════════════════════════════════
+		var pendingBlockSessions []trie.NomtSessionToFlush
+		rollbackBlockMutations := func() {}
+
+		var expectedPreAccRoot, expectedPreStakeRoot common.Hash
+		var hasExpectedPreRoots bool
+		var preAccHandleRoot, preStakeHandleRoot common.Hash
+		if trie.GetStateBackend() == trie.BackendNOMT {
+			preAccHandleRoot, _ = trie.GetNomtHandleRoot("account_state")
+			preStakeHandleRoot, _ = trie.GetNomtHandleRoot("stake_db")
+			prevNum := uint64(0)
+			if blockNum > 1 {
+				prevNum = blockNum - 1
+			}
+			if prevHash, ok := bc.GetBlockHashByNumber(prevNum); ok && prevHash != (common.Hash{}) {
+				if prevBlock, err := blockDatabase.GetBlockByHash(prevHash); err == nil && prevBlock != nil {
+					expectedPreAccRoot = prevBlock.Header().AccountStatesRoot()
+					expectedPreStakeRoot = common.Hash(prevBlock.Header().StakeStatesRoot())
+					hasExpectedPreRoots = true
+				}
+			}
+		}
+
+		if parsedBackupDb != nil && preParsedBatches != nil {
+			logger.Debug("🔍 [NOMT-DEBUG] Block #%d deserialized: AccountBatch=%d bytes, TrieDB=%d bytes, FullDbLogs=%d entries",
+				blockNum,
+				len(parsedBackupDb.AccountBatch),
+				len(parsedBackupDb.TrieDatabaseBatchPut),
+				len(parsedBackupDb.FullDbLogs),
+			)
+
+			if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT && i == 0 && hasExpectedPreRoots {
+				if expectedPreAccRoot != (common.Hash{}) && expectedPreAccRoot != trie.EmptyRootHash {
+					if preAccHandleRoot != expectedPreAccRoot {
+						logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: PRE-execution state root MISMATCH! "+
+							"localRoot=%s, expectedPreRoot=%s, block=#%d. "+
+							"This node's state has diverged BEFORE this block was applied!",
+							preAccHandleRoot.Hex(), expectedPreAccRoot.Hex(), blockNum)
+					} else {
+						logger.Debug("✅ [NOMT-SYNC-VERIFY] PRE-execution root matches: %s", preAccHandleRoot.Hex()[:18]+"...")
+					}
+				}
+			}
+
+			sessions, undoFn, applyErr := rh.applyParsedBackupDbBatches(parsedBackupDb, preParsedBatches, blockHash, blockNum, txs)
+			if applyErr != nil {
+				logger.Error("🚨 [SYNC-FATAL] Failed to apply backup batches for block #%d: %v — ABORTING to prevent State Drift!", blockNum, applyErr)
+				return abortSyncBatch(fmt.Sprintf("apply backup batches failed for block %d: %v", blockNum, applyErr))
+			}
+			pendingBlockSessions = sessions
+			rollbackBlockMutations = undoFn
+
+			if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT && i == 0 {
+				if nomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
+					expectedAccountRoot := header.AccountStatesRoot()
+					logger.Debug("[FORK-DIAG][NOMT-PER-BLOCK] Block #%d (GEI=%d): beforeApply=%s → afterApply=%s, headerExpected=%s",
+						blockNum, blockGEI,
+						preAccHandleRoot.Hex()[:18]+"...",
+						nomtRoot.Hex()[:18]+"...",
+						expectedAccountRoot.Hex()[:18]+"...")
+				}
+			}
+		} else if blockNum > 0 {
+			if _, rbErr := mvm.RollbackXapianAboveBlock(blockNum - 1); rbErr != nil {
+				logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) failed while syncing empty block #%d without BackupData: %v",
+					blockNum-1, blockNum, rbErr)
+				return abortSyncBatch(fmt.Sprintf("RollbackXapianAboveBlock(%d) failed for block %d: %v", blockNum-1, blockNum, rbErr))
+			}
+		}
+
+		if blockNum == 0 {
+			logger.Debug("🚀 [SNAPSHOT-RESUME] Skipping empty block (GEI=%d), state already advanced", blockGEI)
+			continue
+		}
+
+		// On NOMT backend, CommitBlockState skips WithRebuildTries(). When the pre-block NOMT handle
+		// matched the parent block's expected root, verify that post-apply NOMT handle roots match
+		// the incoming block header BEFORE calling CommitBlockState so a missing/corrupt NOMT batch
+		// rolls back cleanly without persisting the block!
+		if trie.GetStateBackend() == trie.BackendNOMT && hasExpectedPreRoots && blockNum > storage.GetLastBlockNumber() {
+			nomtMatchesExpected := func(handleRoot, expected common.Hash) bool {
+				return handleRoot == expected || (expected == trie.EmptyRootHash && handleRoot == (common.Hash{}))
+			}
+			expectedAcc := header.AccountStatesRoot()
+			postAccRoot, _ := trie.GetNomtHandleRoot("account_state")
+			if nomtMatchesExpected(preAccHandleRoot, expectedPreAccRoot) &&
+				expectedAcc != (common.Hash{}) && expectedAcc != trie.EmptyRootHash &&
+				postAccRoot != expectedAcc {
+				logger.Error("🚨 [NOMT-SYNC-VERIFY] Post-apply NOMT account_state root mismatch for block #%d: got=%s expected=%s — rolling back all block mutations!",
+					blockNum, postAccRoot.Hex(), expectedAcc.Hex())
+				rollbackBlockMutations()
+				return abortSyncBatch(fmt.Sprintf("NOMT accountStatesRoot mismatch at block %d: got=%s expected=%s",
+					blockNum, postAccRoot.Hex()[:18], expectedAcc.Hex()[:18]))
+			}
+
+			expectedStake := common.Hash(header.StakeStatesRoot())
+			postStakeRoot, _ := trie.GetNomtHandleRoot("stake_db")
+			if nomtMatchesExpected(preStakeHandleRoot, expectedPreStakeRoot) &&
+				expectedStake != (common.Hash{}) && expectedStake != trie.EmptyRootHash &&
+				postStakeRoot != expectedStake {
+				logger.Error("🚨 [NOMT-SYNC-VERIFY] Post-apply NOMT stake_db root mismatch for block #%d: got=%s expected=%s — rolling back all block mutations!",
+					blockNum, postStakeRoot.Hex(), expectedStake.Hex())
+				rollbackBlockMutations()
+				return abortSyncBatch(fmt.Sprintf("NOMT stakeStatesRoot mismatch at block %d: got=%s expected=%s",
+					blockNum, postStakeRoot.Hex()[:18], expectedStake.Hex()[:18]))
+			}
+		}
+
+		// ═══════════════════════════════════════════════════════════════════════════
+		// STEP 2 & 3: CommitBlockState (protected by commitMutex and SEQUENTIAL GUARD)
+		// ═══════════════════════════════════════════════════════════════════════════
+		var commitOpts []blockchain.CommitOption
+		commitOpts = append(commitOpts, blockchain.WithPersistToDB())
+		commitOpts = append(commitOpts, blockchain.WithSaveTxMapping()) // ALWAYS track/save tx mappings in memory batch
+
+		if shouldCommitState {
+			if trie.GetStateBackend() != trie.BackendNOMT {
+				commitOpts = append(commitOpts, blockchain.WithRebuildTries())
+			} else {
+				logger.Debug("🛡️ [NOMT-SAFETY] Skipping WithRebuildTries() for NOMT backend (block #%d). "+
+					"NOMT only keeps latest state — rebuilding from P2P block header would corrupt active trie. "+
+					"Re-alignment deferred to finalizeSyncedPrefix.", blockNum)
+			}
+			// Ensure mapping batches from memory are flushed to DB periodically as well as on batch exit.
+			commitOpts = append(commitOpts, blockchain.WithCommitMappings())
+		}
+
+		if _, err := rh.chainState.CommitBlockState(blk, commitOpts...); err != nil {
+			logger.Error("🚨 [SYNC-FATAL] [EXECUTE SYNC] Failed to CommitBlockState for block #%d: %v — rolling back all block mutations (Chain KV + NOMT + Xapian) and aborting sync batch!", blockNum, err)
+			errMsg := fmt.Sprintf("CommitBlockState failed for block %d: %v", blockNum, err)
+			rollbackBlockMutations()
+			if blockNum > 0 {
+				if _, rbErr := mvm.RollbackXapianAboveBlock(blockNum - 1); rbErr != nil {
+					logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) also FAILED after CommitBlockState error at block #%d: %v", blockNum-1, blockNum, rbErr)
+					errMsg = fmt.Sprintf("%s (RollbackXapianAboveBlock(%d) also failed: %v)", errMsg, blockNum-1, rbErr)
+				}
+			}
+			return abortSyncBatch(errMsg)
+		}
+
+		if shouldCommitState && trie.GetStateBackend() != trie.BackendNOMT {
+			localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
+			expectedRoot := header.AccountStatesRoot()
+			if localRoot != expectedRoot && expectedRoot != (common.Hash{}) && expectedRoot != trie.EmptyRootHash {
+				logger.Error("🚨 [STATE VERIFY] Batch stateRoot MISMATCH! block=#%d local=%s expected=%s. Rolling back block and HALTING sync.",
+					blockNum, localRoot.Hex(), expectedRoot.Hex())
+				rollbackBlockMutations()
+				if blockNum > 0 {
+					_ = rollbackLocalChainToBlock(blockNum-1, common.Hash{})
+				}
+				return abortSyncBatch(fmt.Sprintf("stateRoot mismatch at block %d: local=%s expected=%s",
+					blockNum, localRoot.Hex()[:18], expectedRoot.Hex()[:18]))
+			}
+			logger.Info("✅ [STATE VERIFY] Batch stateRoot VERIFIED: block=#%d root=%s", blockNum, localRoot.Hex()[:18]+"...")
+		}
+
+		executedCount++
+		if blockNum >= lastExecutedBlock {
+			lastExecutedBlock = blockNum
+			lastExecutedBlk = blk
+		}
+		if blockGEI > lastExecutedGEI {
+			lastExecutedGEI = blockGEI
+		}
+		if len(pendingBlockSessions) > 0 {
+			allNomtSessions = append(allNomtSessions, pendingBlockSessions...)
+		}
+
+		// ═══════════════════════════════════════════════════════════════
+		// BLOCK-BY-BLOCK REALIGNMENT (May 2026):
+		// Realignment of Go's active in-memory trie state must happen block-by-block
+		// immediately after each block is committed to PebbleDB.
+		// ═══════════════════════════════════════════════════════════════
+		if trie.GetStateBackend() == trie.BackendNOMT {
+			newAccountRoot := header.AccountStatesRoot()
+			newStakeRoot := common.Hash(header.StakeStatesRoot())
+
+			// Realign account state trie block-by-block via Go cache pointers (lightweight)
+			if asDB := rh.chainState.GetAccountStateDB(); asDB != nil {
+				asDB.SetOriginRootHash(newAccountRoot)
+				if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
+					nomtTrie.RealignRoot(newAccountRoot)
+				}
+			}
+			// Realign stake state trie block-by-block via Go cache pointers (lightweight)
+			if stakeDB := rh.chainState.GetStakeStateDB(); stakeDB != nil {
+				stakeDB.SetOriginRootHash(newStakeRoot)
+				if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
+					nomtTrie.RealignRoot(newStakeRoot)
+				}
+			}
+			logger.Debug("🔧 [NOMT-SYNC-REALIGN] Block #%d: Go cache pointers realigned: account=%s, stake=%s",
+				blockNum, newAccountRoot.Hex()[:18]+"...", newStakeRoot.Hex()[:18]+"...")
+		}
+
+		// Broadcast transaction receipts for SyncOnly nodes if callback is configured and receipts are present
+		if rh.broadcastEventsAndReceiptsCallback != nil && parsedBackupDb != nil && len(parsedBackupDb.ReceiptBatchPut) > 0 {
+			deserializedBatch, err := storage.DeserializeBatch(parsedBackupDb.ReceiptBatchPut)
+			if err == nil && len(deserializedBatch) > 0 {
+				var syncReceipts []types.Receipt
+				var syncEventLogs []types.EventLog
+
+				for _, kv := range deserializedBatch {
+					serializedReceipt := kv[1]
+					if len(serializedReceipt) > 0 {
+						pbReceipt := &pb.Receipt{}
+						if err := proto.Unmarshal(serializedReceipt, pbReceipt); err == nil {
+							typesReceipt := receipt.ReceiptFromProto(pbReceipt)
+							syncReceipts = append(syncReceipts, typesReceipt)
+
+							for _, pbLog := range pbReceipt.EventLogs {
+								typesLog := smart_contract.NewEventLogFromProto(pbLog)
+								syncEventLogs = append(syncEventLogs, typesLog)
+							}
+						}
+					}
+				}
+
+				if len(syncReceipts) > 0 {
+					logger.Info("📤 [SYNC BROADCAST] Calling broadcastEventsAndReceiptsCallback for synced block #%d with %d receipts and %d event logs",
+						blockNum, len(syncReceipts), len(syncEventLogs))
+					rh.broadcastEventsAndReceiptsCallback(blk, syncReceipts, syncEventLogs)
+				}
+			}
+		}
+
+		if shouldCommitState && trie.GetStateBackend() == trie.BackendNOMT {
+			localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
+			expectedRoot := header.AccountStatesRoot()
+			var nomtHandleRoot common.Hash
+			var hasNomtRoot bool
+			if i == 0 {
+				nomtHandleRoot, hasNomtRoot = trie.GetNomtHandleRoot("account_state")
+			}
+
+			logger.Info("🔍 [NOMT-SYNC-VERIFY] Block #%d: trieRoot=%s, handleRoot=%s, expectedRoot=%s, handleOK=%v",
+				blockNum,
+				localRoot.Hex()[:18]+"...",
+				func() string {
+					if hasNomtRoot {
+						return nomtHandleRoot.Hex()[:18] + "..."
+					}
+					return "N/A"
+				}(),
+				expectedRoot.Hex()[:18]+"...",
+				hasNomtRoot)
+		}
+
+		// Update persistent counters (GEI + optional peer commit index) AFTER CommitBlockState succeeds.
+		if blockGEI > 0 {
+			storage.UpdateLastGlobalExecIndex(blockGEI)
+		}
+
+		if shouldImportPeerCommitIndex(request.PreserveOwnCommitIndex, header.CommitIndex()) {
 			commitIdx32 := uint32(header.CommitIndex())
 			currentEpoch := header.Epoch()
 			lastEpoch := storage.GetLastHandledCommitEpoch()
@@ -599,364 +1084,20 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			}
 		}
 
-		// ═══════════════════════════════════════════════════════════════════════════
-		// STEP 1: Apply BackupDb state batches to LevelDB (Account, Code, SC, etc.)
-		// This writes the pre-computed state diffs so NOMT can rebuild from them.
-		// ═══════════════════════════════════════════════════════════════════════════
-		if len(backupBytes) > 0 {
-			// DEBUG: Log raw backup size BEFORE deserialize — detects truncated snapshots early
-			logger.Debug("🔍 [NOMT-DEBUG] Block #%d: raw backupBytes=%d bytes. About to deserialize+apply.",
-				blockNum, len(backupBytes))
-
-			backupDb, deserErr := storage.DeserializeBackupDb(backupBytes)
-			if deserErr != nil {
-				logger.Error("🚨 [SYNC-FATAL] Failed to deserialize BackUpDb for block #%d: %v — ABORTING to prevent State Drift!", blockNum, deserErr)
-				return &pb.SyncBlocksResponse{
-					SyncedCount:     executedCount,
-					LastSyncedBlock: lastExecutedBlock,
-					Error:           fmt.Sprintf("deserialize BackupDb failed for block %d: %v", blockNum, deserErr),
-				}, nil
-			} else if len(txs) > 0 && !hasAnyBackupDbPayload(&backupDb) {
-				logger.Error("🚨 [SYNC-FATAL] Empty BackupDb state payload for non-empty block #%d (%d txs) — ABORTING to prevent State Drift!", blockNum, len(txs))
-				return &pb.SyncBlocksResponse{
-					SyncedCount:     executedCount,
-					LastSyncedBlock: lastExecutedBlock,
-					Error:           fmt.Sprintf("empty BackupDb state payload for non-empty block %d (%d txs)", blockNum, len(txs)),
-				}, nil
-			} else {
-				// DEBUG: Log field sizes after deserialize — tells us if AccountBatch is missing
-				logger.Debug("🔍 [NOMT-DEBUG] Block #%d deserialized: AccountBatch=%d bytes, TrieDB=%d bytes, FullDbLogs=%d entries",
-					blockNum,
-					len(backupDb.AccountBatch),
-					len(backupDb.TrieDatabaseBatchPut),
-					len(backupDb.FullDbLogs),
-				)
-
-				// Capture NOMT root BEFORE apply to compute delta
-				var rootBeforeApply common.Hash
-				var hasRootBefore bool
-				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT && i == 0 {
-					rootBeforeApply, hasRootBefore = trie.GetNomtHandleRoot("account_state")
-
-					// ═══════════════════════════════════════════════════════════════
-					// PRE-EXECUTION VERIFICATION:
-					// Metanode block headers store the POST-EXECUTION state root.
-					// To verify the state before applying block N, we must verify it against
-					// the POST-EXECUTION root of block N-1 (parent block).
-					// ═══════════════════════════════════════════════════════════════
-					var expectedPreRoot common.Hash
-					var hasExpectedPreRoot bool
-					if blockNum > 1 {
-						prevBlockNum := blockNum - 1
-						if prevHash, ok := bc.GetBlockHashByNumber(prevBlockNum); ok && prevHash != (common.Hash{}) {
-							if prevBlock, err := blockDatabase.GetBlockByHash(prevHash); err == nil && prevBlock != nil {
-								expectedPreRoot = prevBlock.Header().AccountStatesRoot()
-								hasExpectedPreRoot = true
-							}
-						}
-					} else {
-						// For block #1, the parent is block #0 (genesis)
-						if prevHash, ok := bc.GetBlockHashByNumber(0); ok && prevHash != (common.Hash{}) {
-							if prevBlock, err := blockDatabase.GetBlockByHash(prevHash); err == nil && prevBlock != nil {
-								expectedPreRoot = prevBlock.Header().AccountStatesRoot()
-								hasExpectedPreRoot = true
-							}
-						}
-					}
-
-					if hasRootBefore && hasExpectedPreRoot && expectedPreRoot != (common.Hash{}) && expectedPreRoot != trie.EmptyRootHash {
-						if rootBeforeApply != expectedPreRoot {
-							logger.Error("🚨 [NOMT-SYNC-VERIFY] CRITICAL: PRE-execution state root MISMATCH! "+
-								"localRoot=%s, expectedPreRoot=%s, block=#%d. "+
-								"This node's state has diverged BEFORE this block was applied!",
-								rootBeforeApply.Hex(), expectedPreRoot.Hex(), blockNum)
-						} else {
-							logger.Debug("✅ [NOMT-SYNC-VERIFY] PRE-execution root matches: %s", rootBeforeApply.Hex()[:18]+"...")
-						}
-					}
+		// Persist latest FullDbLogs index ONLY after CommitBlockState succeeded.
+		if parsedBackupDb != nil && len(parsedBackupDb.FullDbLogs) > 0 {
+			if backupStorage := rh.storageManager.GetStorageBackupDb(); backupStorage != nil {
+				if errPut := storage.PersistLatestFullDbLogsBatch(backupStorage, parsedBackupDb.FullDbLogs); errPut != nil {
+					logger.Error("❌ [BLOCK SYNC] Failed to persist latest full_db_logs index for block #%d: %v", blockNum, errPut)
 				}
-
-				sessions, applyErr := rh.applyBackupDbBatches(&backupDb)
-				if applyErr != nil {
-					logger.Error("🚨 [SYNC-FATAL] Failed to apply backup batches for block #%d: %v — ABORTING to prevent State Drift!", blockNum, applyErr)
-					return &pb.SyncBlocksResponse{
-						SyncedCount:     executedCount,
-						LastSyncedBlock: lastExecutedBlock,
-						Error:           fmt.Sprintf("apply backup batches failed for block %d: %v", blockNum, applyErr),
-					}, nil
-				}
-				allNomtSessions = append(allNomtSessions, sessions...)
-
-				// ═══════════════════════════════════════════════════════════════
-				// FORK-DIAG (May 2026): Log NOMT handle root after EACH block's
-				// batch apply during STARTUP-SYNC. This pinpoints the exact block
-				// where state drift begins (if any batch is incomplete/corrupted).
-				// ═══════════════════════════════════════════════════════════════
-				if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT && i == 0 {
-					if nomtRoot, ok := trie.GetNomtHandleRoot("account_state"); ok {
-						expectedAccountRoot := header.AccountStatesRoot()
-
-						// Show before→after delta when available
-						if hasRootBefore {
-							logger.Debug("[FORK-DIAG][NOMT-PER-BLOCK] Block #%d (GEI=%d): beforeApply=%s → afterApply=%s, headerExpected(pre)=%s",
-								blockNum, blockGEI,
-								rootBeforeApply.Hex()[:18]+"...",
-								nomtRoot.Hex()[:18]+"...",
-								expectedAccountRoot.Hex()[:18]+"...")
-						} else {
-							logger.Debug("[FORK-DIAG][NOMT-PER-BLOCK] Block #%d (GEI=%d): nomtRoot=%s, headerExpected(pre)=%s",
-								blockNum, blockGEI,
-								nomtRoot.Hex()[:18]+"...",
-								expectedAccountRoot.Hex()[:18]+"...")
-						}
-					}
-				}
-			}
-		} else if len(txs) > 0 {
-			logger.Error("🚨 [SYNC-FATAL] Missing BackupData for non-empty block #%d (%d txs) — ABORTING to prevent State Drift!", blockNum, len(txs))
-			return &pb.SyncBlocksResponse{
-				SyncedCount:     executedCount,
-				LastSyncedBlock: lastExecutedBlock,
-				Error:           fmt.Sprintf("missing BackupData for non-empty block %d (%d txs)", blockNum, len(txs)),
-			}, nil
-		} else if blockNum > 0 {
-			if _, rbErr := mvm.RollbackXapianAboveBlock(blockNum - 1); rbErr != nil {
-				logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) failed while syncing empty block #%d without BackupData: %v",
-					blockNum-1, blockNum, rbErr)
-				return &pb.SyncBlocksResponse{
-					SyncedCount:     executedCount,
-					LastSyncedBlock: lastExecutedBlock,
-					Error:           fmt.Sprintf("RollbackXapianAboveBlock(%d) failed for block %d: %v", blockNum-1, blockNum, rbErr),
-				}, nil
-			}
-		}
-
-		if blockNum == 0 {
-			logger.Debug("🚀 [SNAPSHOT-RESUME] Skipping empty block (GEI=%d), state already advanced", blockGEI)
-			continue
-		}
-
-		// ═══════════════════════════════════════════════════════════════════════════
-		// STEP 2: Block Saving and Mappings are now deferred to CommitBlockState
-		// to guarantee they are protected by commitMutex and SEQUENTIAL GUARD.
-		// ═══════════════════════════════════════════════════════════════════════════
-
-		// STEP 3: REBUILD TRIES (conditionally) — sync memory state with DB.
-		//
-		// CRITICAL FIX (Apr 2026): On NOMT backend, WithRebuildTries() MUST NOT
-		// be used here. NOMT keeps ONLY the latest state root. When this handler
-		// runs concurrently with consensus execution (e.g., via LAG-RECOVERY or
-		// STARTUP-SYNC), calling UpdateStateForNewHeader() overwrites the current
-		// NOMT trie root with the P2P-synced block's root. Since NOMT cannot look
-		// up historical state, this irreversibly corrupts the trie — subsequent
-		// consensus blocks are created from the wrong state root, causing a fork.
-		//
-		// On MPT/legacy backends, WithRebuildTries() is safe because they maintain
-		// a full historical trie in LevelDB.
-		// ═══════════════════════════════════════════════════════════════════════════
-		var commitOpts []blockchain.CommitOption
-		commitOpts = append(commitOpts, blockchain.WithPersistToDB())
-		commitOpts = append(commitOpts, blockchain.WithSaveTxMapping()) // ALWAYS track/save tx mappings in memory batch
-
-		if shouldCommitState {
-			// ═══════════════════════════════════════════════════════════════
-			// CRITICAL FIX (May 2026): NOMT trie rebuild decision.
-			//
-			// During pre-consensus sync (execute_mode=true):
-			//   SAFE to rebuild — no concurrent consensus execution exists.
-			//   WITHOUT this, NOMT stays at stale root and subsequent
-			//   consensus blocks will have wrong state_root → permanent fork.
-			//
-			// Non-execute-mode (store-only sync):
-			//   No trie rebuild needed — blocks are stored, not executed.
-			// ═══════════════════════════════════════════════════════════════
-			if trie.GetStateBackend() != trie.BackendNOMT {
-				commitOpts = append(commitOpts, blockchain.WithRebuildTries())
-			} else {
-				logger.Debug("🛡️ [NOMT-SAFETY] Skipping WithRebuildTries() for NOMT backend (block #%d). "+
-					"NOMT only keeps latest state — rebuilding from P2P block header would corrupt active trie. "+
-					"Re-alignment deferred to processRustEpochData.", blockNum)
-			}
-			// CRITICAL FIX: Ensure mapping batches from memory are flushed to DB!
-			// Without this, synced blocks mapping (block number -> hash) remain in volatile
-			// cache and are lost if the node crashes/restarts before the next normal block.
-			commitOpts = append(commitOpts, blockchain.WithCommitMappings())
-		}
-
-		if _, err := rh.chainState.CommitBlockState(blk, commitOpts...); err != nil {
-			logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to CommitBlockState for block #%d: %v", blockNum, err)
-			// Continue anyway — partial state is better than no state
-		} else {
-			executedCount++
-			if blockNum > lastExecutedBlock {
-				lastExecutedBlock = blockNum
-			}
-			if blockGEI > lastExecutedGEI {
-				lastExecutedGEI = blockGEI
-			}
-
-			// ═══════════════════════════════════════════════════════════════
-			// BLOCK-BY-BLOCK REALIGNMENT (May 2026):
-			// Realignment of Go's active in-memory trie state must happen block-by-block
-			// immediately after each block is committed to PebbleDB.
-			// ═══════════════════════════════════════════════════════════════
-			if trie.GetStateBackend() == trie.BackendNOMT {
-				newAccountRoot := header.AccountStatesRoot()
-				newStakeRoot := common.Hash(header.StakeStatesRoot())
-
-				// Realign account state trie block-by-block via Go cache pointers (lightweight)
-				if asDB := rh.chainState.GetAccountStateDB(); asDB != nil {
-					asDB.SetOriginRootHash(newAccountRoot)
-					if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
-						nomtTrie.RealignRoot(newAccountRoot)
-					}
-				}
-				// Realign stake state trie block-by-block via Go cache pointers (lightweight)
-				if stakeDB := rh.chainState.GetStakeStateDB(); stakeDB != nil {
-					stakeDB.SetOriginRootHash(newStakeRoot)
-					if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
-						nomtTrie.RealignRoot(newStakeRoot)
-					}
-				}
-				logger.Debug("🔧 [NOMT-SYNC-REALIGN] Block #%d: Go cache pointers realigned: account=%s, stake=%s",
-					blockNum, newAccountRoot.Hex()[:18]+"...", newStakeRoot.Hex()[:18]+"...")
-			}
-
-			// Broadcast transaction receipts for SyncOnly nodes if callback is configured and backupBytes/receipts are present
-			if rh.broadcastEventsAndReceiptsCallback != nil && len(backupBytes) > 0 {
-				backupDb, deserErr := storage.DeserializeBackupDb(backupBytes)
-				if deserErr == nil && len(backupDb.ReceiptBatchPut) > 0 {
-					deserializedBatch, err := storage.DeserializeBatch(backupDb.ReceiptBatchPut)
-					if err == nil && len(deserializedBatch) > 0 {
-						var syncReceipts []types.Receipt
-						var syncEventLogs []types.EventLog
-
-						for _, kv := range deserializedBatch {
-							// Each entry is a flat key-value pair of [txHash, serializedReceipt]
-							serializedReceipt := kv[1]
-							if len(serializedReceipt) > 0 {
-								pbReceipt := &pb.Receipt{}
-								if err := proto.Unmarshal(serializedReceipt, pbReceipt); err == nil {
-									typesReceipt := receipt.ReceiptFromProto(pbReceipt)
-									syncReceipts = append(syncReceipts, typesReceipt)
-
-									// Extract event logs
-									for _, pbLog := range pbReceipt.EventLogs {
-										typesLog := smart_contract.NewEventLogFromProto(pbLog)
-										syncEventLogs = append(syncEventLogs, typesLog)
-									}
-								}
-							}
-						}
-
-						if len(syncReceipts) > 0 {
-							logger.Info("📤 [SYNC BROADCAST] Calling broadcastEventsAndReceiptsCallback for synced block #%d with %d receipts and %d event logs",
-								blockNum, len(syncReceipts), len(syncEventLogs))
-							// Call the callback safely
-							rh.broadcastEventsAndReceiptsCallback(blk, syncReceipts, syncEventLogs)
-						}
-					}
-				}
-			}
-
-			if shouldCommitState {
-				// ═══════════════════════════════════════════════════════════════
-				// STATE ROOT VERIFICATION (May 2026):
-				// After applying all backup batches + WithRebuildTries(), verify
-				// that the NOMT state actually matches what the block header expects.
-				//
-				// CRITICAL FIX: The previous code BYPASSED this check entirely for
-				// NOMT backend with the false claim that "NOMT headers store PRE-COMMIT
-				// state root". In reality, block headers store POST-EXECUTION roots
-				// (state AFTER the block's transactions). The bypass was masking real
-				// state drift, causing silent permanent forks after restart (see
-				// debug_report_20260501_201046.md — STATE_ROOT divergence at block #582).
-				// ═══════════════════════════════════════════════════════════════
-				localRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
-				expectedRoot := header.AccountStatesRoot()
-
-				if trie.GetStateBackend() == trie.BackendNOMT {
-					// Cross-check: Query the NOMT handle root directly to verify
-					// it matches both the trie's cached root and the block header.
-					var nomtHandleRoot common.Hash
-					var hasNomtRoot bool
-					if i == 0 {
-						nomtHandleRoot, hasNomtRoot = trie.GetNomtHandleRoot("account_state")
-					}
-
-					logger.Info("🔍 [NOMT-SYNC-VERIFY] Block #%d: trieRoot=%s, handleRoot=%s, expectedRoot=%s, handleOK=%v",
-						blockNum,
-						localRoot.Hex()[:18]+"...",
-						func() string {
-							if hasNomtRoot {
-								return nomtHandleRoot.Hex()[:18] + "..."
-							}
-							return "N/A"
-						}(),
-						expectedRoot.Hex()[:18]+"...",
-						hasNomtRoot)
-
-					// ═══════════════════════════════════════════════════════════════
-					// FORK-PREVENTION (May 2026): Force trie re-alignment from NOMT
-					// handle BEFORE returning to Rust for consensus.
-					//
-					// ROOT CAUSE: After batch-applying blocks during STARTUP-SYNC,
-					// the in-memory NomtStateTrie may hold a cached root that is
-					// stale relative to the NOMT handle's committed root. When
-					// consensus immediately sends the first new block, Go reads
-					// from this stale trie, producing a different AccountStatesRoot
-					// → different block hash → FORK (see block #2149 incident).
-					//
-					// FIX: Explicitly re-create the trie from the NOMT handle's
-					// actual root. This guarantees that ProcessTransactions on
-					// the first consensus block reads from the correct state.
-					// ═══════════════════════════════════════════════════════════════
-					// ═══════════════════════════════════════════════════════════════
-					// NOTE (June 2026): Trie re-alignment from NOMT handle root is
-					// DEFERRED to the end of SyncBlocks (after sessions are flushed).
-					// Calling UpdateStateForNewHeader block-by-block here is unsafe
-					// because sessions are not flushed, causing stale root mismatches
-					// and triggering destructive rebuilds on NOMT backend.
-					// ═══════════════════════════════════════════════════════════════
-				} else {
-					// Non-NOMT backend: strict verification with halt on mismatch
-					if localRoot != expectedRoot && expectedRoot != (common.Hash{}) && expectedRoot != trie.EmptyRootHash {
-						logger.Error("🚨 [STATE VERIFY] Batch stateRoot MISMATCH! block=#%d local=%s expected=%s. HALTING sync.",
-							blockNum, localRoot.Hex(), expectedRoot.Hex())
-						return &pb.SyncBlocksResponse{
-							Error: fmt.Sprintf("stateRoot mismatch at block %d: local=%s expected=%s",
-								blockNum, localRoot.Hex()[:18], expectedRoot.Hex()[:18]),
-						}, fmt.Errorf("stateRoot mismatch at block %d", blockNum)
-					}
-					logger.Info("✅ [STATE VERIFY] Batch stateRoot VERIFIED: block=#%d root=%s", blockNum, localRoot.Hex()[:18]+"...")
-				}
-			}
-
-			// Update persistent counters (block number + GEI)
-			// These must advance AFTER CommitBlockState so that any query to Go's GEI
-			// returns a value that reflects actually-executed NOMT state.
-			// (Note: SetcurrentBlockHeader, CheckAndUpdateEpochFromBlock, SaveLastBlock,
-			// SetBlockNumberToHash, SetTxHashMapBlockNumber, and UpdateLastBlockNumber
-			// are all fully handled inside cs.CommitBlockState).
-			if blockGEI > 0 {
-				storage.UpdateLastGlobalExecIndex(blockGEI)
 			}
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════════
-		// STEP 6: Persist backup data for Sub nodes
-		// Backup persisted to PebbleDB so Sub can read via 3-tier recovery.
-		// FORK-SAFETY (R6/Apr 2026): Master node MUST NOT broadcast blocks to Sub nodes
-		// while it is actively catching up (syncing). It should only broadcast blocks
-		// constructed during active Validator mode consensus.
-		// Sub nodes will pull the missing blocks via DataSync (3-tier recovery).
+		// STEP 6: Persist backup data for Sub nodes (ONLY after CommitBlockState succeeded)
 		// ═══════════════════════════════════════════════════════════════════════════
 		if len(backupBytes) > 0 {
 			rh.persistBackupForSub(backupBytes, blockNum)
-
-			// if rh.broadcastCallback != nil {
-			// 	rh.broadcastCallback(blk, backupBytes, blockNum, len(blk.Transactions()))
-			// }
 		}
 
 		logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ Executed block #%d: hash=%s, epoch=%d, gei=%d, txs=%d",
@@ -967,137 +1108,17 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		}
 	}
 
-	// Flush all accumulated NOMT sessions for the chunk
-	if len(allNomtSessions) > 0 {
-		logger.Info("🔧 [NOMT-SYNC] Flushing %d deferred NOMT sessions to disk after chunk completion", len(allNomtSessions))
-		if err := trie.FlushNomtSessions(allNomtSessions); err != nil {
-			logger.Error("❌ [NOMT-SYNC] Failed to flush deferred NOMT sessions: %v", err)
-		}
-	}
-
-	// Force final NOMT trie alignment for the last block of the batch after all sessions are flushed to disk
-	if isPreConsensusSync && trie.GetStateBackend() == trie.BackendNOMT && len(blocks) > 0 {
-		lastBlockData := blocks[len(blocks)-1]
-		lastBlockNum := lastBlockData.GetBlockNumber()
-		goTipBlock := storage.GetLastBlockNumber()
-		if lastBlockNum >= goTipBlock {
-			if lastHash, ok := bc.GetBlockHashByNumber(lastBlockNum); ok {
-				lastBlk, err := blockDatabase.GetBlockByHash(lastHash)
-				if err == nil && lastBlk != nil {
-					logger.Info("🔧 [STARTUP-SYNC] Forcing final NOMT trie alignment for last batch block #%d (Go tip is #%d)", lastBlockNum, goTipBlock)
-					if err := rh.chainState.UpdateStateForNewHeader(lastBlk.Header()); err != nil {
-						logger.Error("❌ [STARTUP-SYNC] Failed to align final NOMT trie for block #%d: %v", lastBlockNum, err)
-					} else {
-						rh.chainState.InvalidateAllState()
-						finalTrieRoot := rh.chainState.GetAccountStateDB().Trie().Hash()
-						logger.Info("✅ [STARTUP-SYNC] Final NOMT trie aligned: trieRoot=%s (block=#%d). Ready.",
-							finalTrieRoot.Hex()[:18]+"...", lastBlockNum)
-					}
-				}
-			}
-		} else {
-			logger.Info("🔧 [STARTUP-SYNC] Skipping final NOMT trie alignment for block #%d because Go tip is ahead (#%d)", lastBlockNum, goTipBlock)
-		}
-	}
-
-	// Commit block number→hash mappings
-	if err := bc.Commit(); err != nil {
-		logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to commit block number mappings: %v", err)
-	} else if rh.storageManager != nil {
-		if flushErr := rh.storageManager.GetStorageMapping().Flush(); flushErr != nil {
-			logger.Error("❌ [SNAPSHOT-RESUME] Failed to flush mapping DB: %v", flushErr)
-		} else {
-			logger.Info("💾 [SNAPSHOT-RESUME] Successfully flushed mapping DB to disk after batch sync")
-		}
-	}
-
-	// ═══════════════════════════════════════════════════════════════════════════
-	// CRITICAL FIX: Synchronous persistence of the last synced block.
-	// If the node crashes/restarts immediately after STARTUP-SYNC finishes, we MUST
-	// guarantee that the last block hash (lastBlockHashKey) is fully flushed to disk.
-	// Without this, the node falls back to the pre-sync block or Genesis.
-	// ═══════════════════════════════════════════════════════════════════════════
-	if executedCount > 0 {
-		hash, ok := bc.GetBlockHashByNumber(lastExecutedBlock)
-		if ok {
-			lastBlk, err := blockDatabase.GetBlockByHash(hash)
-			if err == nil && lastBlk != nil {
-				logger.Info("💾 [STARTUP-SYNC] Forcing synchronous flush of last synced block #%d to disk", lastExecutedBlock)
-				if syncErr := blockDatabase.SaveLastBlockSync(lastBlk); syncErr != nil {
-					logger.Error("❌ [STARTUP-SYNC] Failed to force-sync last block #%d: %v", lastExecutedBlock, syncErr)
-				}
-			}
-		}
-	}
-
-	// ═══════════════════════════════════════════════════════════════════════════
-	// RUST CONTROL (Apr 2026 Architectural Fix):
-	// Instead of autonomous Go polling via `syncStateFromDBRefresher`, Rust via
-	// this EXECUTE command explicitly governs memory state advancement.
-	// ═══════════════════════════════════════════════════════════════════════════
-	if executedCount > 0 {
-		if rh.updateLastBlockCallback != nil {
-			if hash, ok := bc.GetBlockHashByNumber(lastExecutedBlock); ok {
-				if lastBlk, err := blockDatabase.GetBlockByHash(hash); err == nil && lastBlk != nil {
-					rh.updateLastBlockCallback(lastBlk)
-				}
-			}
-		}
-
-		// CRITICAL FIX: Push an async GEI update so that Go's Authoritative GEI
-		// counter advances. Without this, GEIAuthority stays at the pre-sync value
-		// (e.g. 76) while the database advances to 113. When consensus resumes,
-		// it would assign 77 to the next block instead of 114, causing a fork.
-		if lastExecutedGEI > 0 && rh.pushAsyncGEIUpdateCallback != nil {
-			// Find the last commit index to sync that as well
-			var lastCommitIdx uint32 = 0
-			var lastEpoch uint64 = 0
-			if len(blocks) > 0 {
-				lastBlockBytes := blocks[len(blocks)-1].GetRawBlockBytes()
-				if len(lastBlockBytes) > 0 {
-					lastBlk := &block.Block{}
-					if err := lastBlk.Unmarshal(lastBlockBytes); err == nil {
-						lastCommitIdx = uint32(lastBlk.Header().CommitIndex())
-						lastEpoch = lastBlk.Header().Epoch()
-					}
-				}
-			}
-			rh.pushAsyncGEIUpdateCallback(lastExecutedGEI, nil, lastCommitIdx, lastEpoch)
-			logger.Info("🔄 [STARTUP-SYNC] Synchronized GEIAuthority to %d (commitIndex: %d, epoch: %d)", lastExecutedGEI, lastCommitIdx, lastEpoch)
-
-			// ═══════════════════════════════════════════════════════════════════════════
-			// CRITICAL FIX: SYNCHRONOUSLY PERSIST LAST HANDLED COMMIT INDEX AND EPOCH
-			// Rust will immediately query HandleGetLastHandledCommitIndexRequest after sync.
-			// Since PushAsyncGEIUpdate is asynchronous, it races with Rust's query.
-			// We MUST synchronously update the storage and BackupDb here to prevent Rust
-			// from starting at commitIndex=0 and causing an epoch mismatch fork.
-			// ═══════════════════════════════════════════════════════════════════════════
-			if lastCommitIdx > 0 {
-				currentEpoch := rh.chainState.GetCurrentEpoch()
-				storage.UpdateLastHandledCommitIndex(lastCommitIdx)
-				storage.UpdateLastHandledCommitEpoch(currentEpoch)
-
-				if rh.storageManager != nil && rh.storageManager.GetStorageBackupDb() != nil {
-					var batch [][2][]byte
-					batch = append(batch, [2][]byte{storage.LastHandledCommitIndexHashKey.Bytes(), utils.Uint32ToBytes(lastCommitIdx)})
-					batch = append(batch, [2][]byte{storage.LastHandledCommitEpochHashKey.Bytes(), utils.Uint64ToBytes(currentEpoch)})
-					if err := rh.storageManager.GetStorageBackupDb().BatchPut(batch); err != nil {
-						logger.Error("❌ [STARTUP-SYNC] Failed to persist LastHandledCommitIndex to BackupDb: %v", err)
-					} else {
-						logger.Info("✅ [STARTUP-SYNC] Synchronously persisted LastHandledCommitIndex=%d, Epoch=%d for immediate Rust consensus initialization", lastCommitIdx, currentEpoch)
-					}
-				}
-			}
-		}
+	if finErr := finalizeSyncedPrefix(); finErr != nil {
+		return &pb.SyncBlocksResponse{
+			SyncedCount:     executedCount,
+			LastSyncedBlock: lastExecutedBlock,
+			LastExecutedGei: lastExecutedGEI,
+			Error:           finErr.Error(),
+		}, nil
 	}
 
 	logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ Completed: executed %d/%d blocks, last_block=#%d, last_gei=%d",
 		executedCount, blockCount, lastExecutedBlock, lastExecutedGEI)
-
-	// Invalidate nonce cache after syncing new blocks to ensure mempool validation uses updated nonces
-	if executedCount > 0 && rh.clearNoncesCacheCallback != nil {
-		rh.clearNoncesCacheCallback()
-	}
 
 	// Cache invalidation is handled by the defer block at the start of the function
 
@@ -1123,18 +1144,26 @@ func (rh *RequestHandler) persistBackupForSub(backupBytes []byte, blockNum uint6
 	_ = backupStorage.Put(legacyKey, backupBytes)
 }
 
-// applyBackupDbBatches applies all state batch data from a BackUpDb to local LevelDB storages.
-// This mirrors applyBlockBatch from BlockProcessor but is adapted for the executor package.
-// It writes Account, Block, Code, SmartContract, Receipt, Transaction, StakeState, and TrieDB batches.
-func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]trie.NomtSessionToFlush, error) {
-	// Map batch data fields to their corresponding storages
-	type batchEntry struct {
-		name    string
-		data    []byte
-		storage storage.Storage
-	}
+type syncBatchEntry struct {
+	name    string
+	data    []byte
+	storage storage.Storage
+}
 
-	entries := []batchEntry{
+type parsedTrieDbBatch struct {
+	key    string
+	prefix string
+	batch  [][2][]byte
+}
+
+type parsedBackupDbBatches struct {
+	entries           []syncBatchEntry
+	aggregatedBatches map[string][][2][]byte
+	trieBatches       []parsedTrieDbBatch
+}
+
+func (rh *RequestHandler) buildSyncBatchEntries(backupDb *storage.BackUpDb) []syncBatchEntry {
+	return []syncBatchEntry{
 		{"Block", backupDb.BockBatch, rh.storageManager.GetStorageBlock()},
 		{"Account", backupDb.AccountBatch, rh.storageManager.GetStorageAccount()},
 		{"Code", backupDb.CodeBatchPut, rh.storageManager.GetStorageCode()},
@@ -1145,7 +1174,12 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]tr
 		{"StakeState", backupDb.StakeState, rh.storageManager.GetStorageStake()},
 		{"Mapping", backupDb.MapppingBatch, rh.storageManager.GetStorageMapping()},
 	}
+}
 
+// parseAndValidateBackupDb deserializes and validates all KV batches, TrieDB batches, and FullDbLogs
+// hex addresses in memory BEFORE any local fork rollback or database mutation occurs.
+func (rh *RequestHandler) parseAndValidateBackupDb(backupDb *storage.BackUpDb) (*parsedBackupDbBatches, error) {
+	entries := rh.buildSyncBatchEntries(backupDb)
 	aggregatedBatches := make(map[string][][2][]byte)
 
 	for _, entry := range entries {
@@ -1156,156 +1190,275 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]tr
 			}
 			if len(deserialized) > 0 {
 				aggregatedBatches[entry.name] = deserialized
-				// DEBUG: Log per-namespace key count so we know exactly what was in the snapshot batch
 				logger.Debug("[NOMT-DEBUG][APPLY-BATCH] Block #%d: namespace=%s keys=%d (raw=%d bytes)",
 					backupDb.BockNumber, entry.name, len(deserialized), len(entry.data))
 			}
 		} else if entry.name == "Account" {
-			// AccountBatch is empty — this is the most common cause of NOMT root mismatch!
 			logger.Error("[NOMT-DEBUG][APPLY-BATCH] Block #%d: AccountBatch is EMPTY — NOMT cannot rebuild account_state root! Snapshot may be missing AccountBatch data.",
 				backupDb.BockNumber)
 		}
 	}
 
-	// ═══════════════════════════════════════════════════════════════════════════
-	// PERFORMANCE & CORRECTNESS OPTIMIZATION (Apr 2026):
-	// Intercept NOMT batches BEFORE they hit PebbleDB so they are processed
-	// natively by the C++ NOMT engine. If we bypass this, the NOMT database
-	// becomes completely unaware of the state updates, leading to stale
-	// 'nomt_read' queries later (fixing persistent nonce mismatches on restart!!).
-	// ═══════════════════════════════════════════════════════════════════════════
-	sessions, err := trie.ApplyNomtReplicationBatches(
-		aggregatedBatches,
-		rh.chainState.GetChangelogDB(),
-		rh.chainState.GetStakeChangelogDB(),
-		backupDb.BockNumber,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("error replicating NOMT batches in applyBackupDbBatches: %w", err)
-	}
-
-	// Now apply the remaining batches (where 'nomt:' prefixed keys were stripped)
-	for _, entry := range entries {
-		if batch, ok := aggregatedBatches[entry.name]; ok && len(batch) > 0 && entry.storage != nil {
-			trie.UpdateBucketCacheFromBatch(entry.storage, batch)
-			if err := entry.storage.BatchPut(batch); err != nil {
-				return nil, fmt.Errorf("error writing batch '%s' for block %d: %w", entry.name, backupDb.BockNumber, err)
-			}
-		}
-	}
-
-	// Apply TrieDB batches
+	var trieBatches []parsedTrieDbBatch
 	if len(backupDb.TrieDatabaseBatchPut) > 0 {
-		if err := rh.applyTrieDbBatches(backupDb.TrieDatabaseBatchPut, backupDb.BockNumber); err != nil {
-			return nil, fmt.Errorf("error writing TrieDB batches for block %d: %w", backupDb.BockNumber, err)
+		if rh.storageManager.GetStorageDatabaseTrie() == nil {
+			return nil, fmt.Errorf("shared database trie is nil")
 		}
-	}
-
-	// ═══════════════════════════════════════════════════════════════════════════════
-	// CRITICAL FIX: Replay MVM FullDbLogs to ensure C++ VM database is consistent
-	// Without this, smart contract storage reads return wrong values after sync,
-	// causing accountStatesRoot divergence (fork) on the first locally-executed block.
-	// This matches the behavior of applyBlockBatch() in block_processor_batch.go.
-	// ═══════════════════════════════════════════════════════════════════════════════
-	if len(backupDb.FullDbLogs) > 0 {
-		result := mvm.CallReplayFullDbLogsBatchAtBlock(backupDb.FullDbLogs, backupDb.BockNumber)
-		if result == 0 {
-			var rbErr error
-			if backupDb.BockNumber > 0 {
-				if _, rbErr = mvm.RollbackXapianAboveBlock(backupDb.BockNumber - 1); rbErr != nil {
-					logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) also FAILED after ReplayFullDbLogs error at block #%d: %v", backupDb.BockNumber-1, backupDb.BockNumber, rbErr)
-				}
+		var keys []string
+		for k := range backupDb.TrieDatabaseBatchPut {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		for _, key := range keys {
+			value := backupDb.TrieDatabaseBatchPut[key]
+			if len(value) == 0 {
+				continue
 			}
-			logger.Error("🚨 [FORK-RISK] ReplayFullDbLogsBatchAtBlock (epoch sync) FAILED for %d batches at block #%d — Xapian DB may be OUT OF SYNC!", len(backupDb.FullDbLogs), backupDb.BockNumber)
-			if rbErr != nil {
-				return nil, fmt.Errorf("ReplayFullDbLogs failed for block #%d (%d batches) and rollback to #%d failed: %w", backupDb.BockNumber, len(backupDb.FullDbLogs), backupDb.BockNumber-1, rbErr)
-			}
-			return nil, fmt.Errorf("ReplayFullDbLogs failed for block #%d (%d batches)", backupDb.BockNumber, len(backupDb.FullDbLogs))
-		}
-		logger.Info("📥 [BLOCK SYNC] ✅ Replayed %d FullDbLogs entries for block %d", len(backupDb.FullDbLogs), backupDb.BockNumber)
-		mvm.CommitAllXapianAtBlock(backupDb.BockNumber)
-		if backupStorage := rh.storageManager.GetStorageBackupDb(); backupStorage != nil {
-			if errPut := storage.PersistLatestFullDbLogsBatch(backupStorage, backupDb.FullDbLogs); errPut != nil {
-				logger.Error("❌ [BLOCK SYNC] Failed to persist latest full_db_logs index for block #%d: %v", backupDb.BockNumber, errPut)
-			}
-		}
-	} else if backupDb.BockNumber > 0 {
-		// Even when canonical block has no Xapian logs, roll back any local stale fork Xapian DBs
-		// committed at >= backupDb.BockNumber so untouched contracts cannot retain phantom fork state.
-		if _, rbErr := mvm.RollbackXapianAboveBlock(backupDb.BockNumber - 1); rbErr != nil {
-			logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) failed while syncing block #%d with empty FullDbLogs: %v",
-				backupDb.BockNumber-1, backupDb.BockNumber, rbErr)
-			return nil, fmt.Errorf("RollbackXapianAboveBlock(%d) failed for block #%d: %w", backupDb.BockNumber-1, backupDb.BockNumber, rbErr)
-		}
-	}
-
-	// Apply mapping batch
-	if len(backupDb.MapppingBatch) > 0 {
-		mappingStorage := rh.storageManager.GetStorageMapping()
-		if mappingStorage != nil {
-			deserialized, err := storage.DeserializeBatch(backupDb.MapppingBatch)
+			deserialized, err := storage.DeserializeBatch(value)
 			if err != nil {
-				if len(backupDb.FullDbLogs) > 0 && backupDb.BockNumber > 0 {
-					if _, rbErr := mvm.RollbackXapianAboveBlock(backupDb.BockNumber - 1); rbErr != nil {
-						logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) FAILED after mapping deserialize error at block #%d: %v", backupDb.BockNumber-1, backupDb.BockNumber, rbErr)
-					}
-				}
-				return nil, fmt.Errorf("error deserializing mapping batch for block %d: %w", backupDb.BockNumber, err)
+				return nil, fmt.Errorf("error deserializing TrieDB batch '%s' for block %d: %w", key, backupDb.BockNumber, err)
 			}
-			if len(deserialized) > 0 {
-				if err := mappingStorage.BatchPut(deserialized); err != nil {
-					if len(backupDb.FullDbLogs) > 0 && backupDb.BockNumber > 0 {
-						if _, rbErr := mvm.RollbackXapianAboveBlock(backupDb.BockNumber - 1); rbErr != nil {
-							logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) FAILED after mapping BatchPut error at block #%d: %v", backupDb.BockNumber-1, backupDb.BockNumber, rbErr)
-						}
-					}
-					return nil, fmt.Errorf("error writing mapping batch for block %d: %w", backupDb.BockNumber, err)
-				}
+			if len(deserialized) == 0 {
+				continue
+			}
+			parts := strings.Split(key, "/")
+			if len(parts) != 2 {
+				logger.Warn("⚠️ Ignored invalid TrieDB batch key format: %s", key)
+				continue
+			}
+			addressHex := parts[0]
+			dbName := parts[1]
+			dbNameHash := crypto.Keccak256([]byte(dbName))
+			prefix := fmt.Sprintf("%x:%s:", dbNameHash, addressHex)
+			trieBatches = append(trieBatches, parsedTrieDbBatch{
+				key:    key,
+				prefix: prefix,
+				batch:  deserialized,
+			})
+		}
+	}
+
+	for _, logs := range backupDb.FullDbLogs {
+		for addrHex := range logs {
+			processed := strings.TrimSpace(addrHex)
+			if strings.HasPrefix(processed, "0x") || strings.HasPrefix(processed, "0X") {
+				processed = processed[2:]
+			}
+			if len(processed)%2 != 0 {
+				processed = "0" + processed
+			}
+			if len(processed) != 40 {
+				return nil, fmt.Errorf("invalid FullDbLogs address length (%d) for '%s'", len(processed), addrHex)
+			}
+			if _, err := hex.DecodeString(processed); err != nil {
+				return nil, fmt.Errorf("invalid FullDbLogs hex address '%s': %w", addrHex, err)
 			}
 		}
 	}
 
-	return sessions, nil
+	return &parsedBackupDbBatches{
+		entries:           entries,
+		aggregatedBatches: aggregatedBatches,
+		trieBatches:       trieBatches,
+	}, nil
 }
 
-// applyTrieDbBatches applies TrieDB batch data from a BackUpDb to the local TrieDB LevelDB storages.
-// Each key in the map corresponds to a sub-database path under the Trie root.
-func (rh *RequestHandler) applyTrieDbBatches(trieDbBatches map[string][]byte, blockNum uint64) error {
-	sharedDB := rh.storageManager.GetStorageDatabaseTrie()
-	if sharedDB == nil {
-		return fmt.Errorf("shared database trie is nil")
+// applyStorageBatchWithUndo captures pre-image values for every unique key in batch before
+// calling store.BatchPut(batch), returning an undo closure that restores overwritten keys
+// and deletes newly-inserted keys on failure.
+func applyStorageBatchWithUndo(store storage.Storage, batch [][2][]byte, updateBucketCache bool) (func(), error) {
+	seen := make(map[string]struct{}, len(batch))
+	var toRestore [][2][]byte
+	var toDelete [][]byte
+	var bucketUndo [][2][]byte
+
+	for _, kv := range batch {
+		k := kv[0]
+		ks := string(k)
+		if _, dup := seen[ks]; dup {
+			continue
+		}
+		seen[ks] = struct{}{}
+		kCopy := append([]byte(nil), k...)
+		oldVal, getErr := store.Get(k)
+		if getErr == nil {
+			vCopy := append([]byte(nil), oldVal...)
+			toRestore = append(toRestore, [2][]byte{kCopy, vCopy})
+			if updateBucketCache {
+				bucketUndo = append(bucketUndo, [2][]byte{kCopy, vCopy})
+			}
+		} else {
+			toDelete = append(toDelete, kCopy)
+			if updateBucketCache {
+				bucketUndo = append(bucketUndo, [2][]byte{kCopy, nil})
+			}
+		}
 	}
 
-	for key, value := range trieDbBatches {
-		if len(value) == 0 {
-			continue
+	if updateBucketCache {
+		trie.UpdateBucketCacheFromBatch(store, batch)
+	}
+	if err := store.BatchPut(batch); err != nil {
+		if updateBucketCache && len(bucketUndo) > 0 {
+			trie.UpdateBucketCacheFromBatch(store, bucketUndo)
 		}
-		deserialized, err := storage.DeserializeBatch(value)
-		if err != nil {
-			return fmt.Errorf("error deserializing TrieDB batch '%s' for block %d: %w", key, blockNum, err)
+		return nil, err
+	}
+
+	undo := func() {
+		if len(toRestore) > 0 {
+			_ = store.BatchPut(toRestore)
 		}
-		if len(deserialized) == 0 {
-			continue
+		if len(toDelete) > 0 {
+			_ = store.BatchDelete(toDelete)
 		}
-
-		// Key format expected: "addressHex/dbName"
-		parts := strings.Split(key, "/")
-		if len(parts) != 2 {
-			logger.Warn("⚠️ Ignored invalid TrieDB batch key format: %s", key)
-			continue
-		}
-
-		addressHex := parts[0]
-		dbName := parts[1]
-
-		dbNameHash := crypto.Keccak256([]byte(dbName))
-		prefix := fmt.Sprintf("%x:%s:", dbNameHash, addressHex)
-
-		prefixedDB := storage.NewPrefixStorage(sharedDB, prefix)
-
-		if err := prefixedDB.BatchPut(deserialized); err != nil {
-			return fmt.Errorf("error writing TrieDB batch '%s' for block %d: %w", key, blockNum, err)
+		if updateBucketCache && len(bucketUndo) > 0 {
+			trie.UpdateBucketCacheFromBatch(store, bucketUndo)
 		}
 	}
-	return nil
+	return undo, nil
+}
+
+// applyParsedBackupDbBatches applies NOMT, KV, TrieDB, and Xapian FullDbLogs batches while
+// building a complete LIFO undo stack so any failure here OR later in CommitBlockState
+// rolls back all chain data symmetrically alongside Xapian.
+func (rh *RequestHandler) applyParsedBackupDbBatches(
+	backupDb *storage.BackUpDb,
+	parsed *parsedBackupDbBatches,
+	blockHash common.Hash,
+	blockNum uint64,
+	txs []common.Hash,
+) ([]trie.NomtSessionToFlush, func(), error) {
+	effectiveBlockNum := backupDb.BockNumber
+	if effectiveBlockNum == 0 {
+		effectiveBlockNum = blockNum
+	}
+
+	var undoFns []func()
+	rolledBack := false
+	rollbackAll := func() {
+		if rolledBack {
+			return
+		}
+		rolledBack = true
+		for idx := len(undoFns) - 1; idx >= 0; idx-- {
+			undoFns[idx]()
+		}
+		if bc := blockchain.GetBlockChainInstance(); bc != nil {
+			if blockHash != (common.Hash{}) {
+				bc.DeleteBlockFromCache(blockHash)
+			}
+			if effectiveBlockNum > 0 {
+				bc.DiscardBlockMappings(effectiveBlockNum)
+			}
+			if len(txs) > 0 {
+				bc.DiscardTxMappings(txs)
+			}
+		}
+		if rh.chainState != nil {
+			rh.chainState.InvalidateAllState()
+		}
+	}
+
+	var scChangelogDB *state_changelog.StateChangelogDB
+	if rh.chainState != nil {
+		if scDB := rh.chainState.GetSmartContractDB(); scDB != nil {
+			scChangelogDB = scDB.GetChangelogDB()
+		}
+	}
+
+	var accChangelog, stakeChangelog *state_changelog.StateChangelogDB
+	if rh.chainState != nil {
+		accChangelog = rh.chainState.GetChangelogDB()
+		stakeChangelog = rh.chainState.GetStakeChangelogDB()
+	}
+
+	sessions, rollbackNomt, err := trie.ApplyNomtReplicationBatchesWithRollback(
+		parsed.aggregatedBatches,
+		accChangelog,
+		stakeChangelog,
+		scChangelogDB,
+		effectiveBlockNum,
+	)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("error replicating NOMT batches in applyBackupDbBatches: %w", err)
+	}
+	undoFns = append(undoFns, func() {
+		if rbErr := rollbackNomt(); rbErr != nil {
+			logger.Error("🚨 [SYNC-ROLLBACK] rollbackNomt failed for block #%d: %v", effectiveBlockNum, rbErr)
+		}
+	})
+
+	// Apply remaining KV batches (where 'nomt:' prefixed keys were stripped on NOMT backend)
+	for _, entry := range parsed.entries {
+		if batch, ok := parsed.aggregatedBatches[entry.name]; ok && len(batch) > 0 && entry.storage != nil {
+			undoKV, writeErr := applyStorageBatchWithUndo(entry.storage, batch, true)
+			if writeErr != nil {
+				rollbackAll()
+				return nil, func() {}, fmt.Errorf("error writing batch '%s' for block %d: %w", entry.name, effectiveBlockNum, writeErr)
+			}
+			undoFns = append(undoFns, undoKV)
+		}
+	}
+
+	// Apply TrieDB batches with pre-image capture
+	if len(parsed.trieBatches) > 0 {
+		sharedDB := rh.storageManager.GetStorageDatabaseTrie()
+		for _, tb := range parsed.trieBatches {
+			prefixedDB := storage.NewPrefixStorage(sharedDB, tb.prefix)
+			undoTrieKV, writeErr := applyStorageBatchWithUndo(prefixedDB, tb.batch, false)
+			if writeErr != nil {
+				rollbackAll()
+				return nil, func() {}, fmt.Errorf("error writing TrieDB batch '%s' for block %d: %w", tb.key, effectiveBlockNum, writeErr)
+			}
+			undoFns = append(undoFns, undoTrieKV)
+		}
+	}
+
+	// Replay MVM FullDbLogs to keep C++ Xapian DBs consistent with chain state
+	if len(backupDb.FullDbLogs) > 0 {
+		result := mvm.CallReplayFullDbLogsBatchAtBlock(backupDb.FullDbLogs, effectiveBlockNum)
+		if result == 0 {
+			var rbErr error
+			if effectiveBlockNum > 0 {
+				if _, rbErr = mvm.RollbackXapianAboveBlock(effectiveBlockNum - 1); rbErr != nil {
+					logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) also FAILED after ReplayFullDbLogs error at block #%d: %v", effectiveBlockNum-1, effectiveBlockNum, rbErr)
+				}
+			}
+			rollbackAll()
+			logger.Error("🚨 [FORK-RISK] ReplayFullDbLogsBatchAtBlock (epoch sync) FAILED for %d batches at block #%d — rolled back Chain KV + NOMT + Xapian!", len(backupDb.FullDbLogs), effectiveBlockNum)
+			if rbErr != nil {
+				return nil, func() {}, fmt.Errorf("ReplayFullDbLogs failed for block #%d (%d batches) and rollback to #%d failed: %w", effectiveBlockNum, len(backupDb.FullDbLogs), effectiveBlockNum-1, rbErr)
+			}
+			return nil, func() {}, fmt.Errorf("ReplayFullDbLogs failed for block #%d (%d batches)", effectiveBlockNum, len(backupDb.FullDbLogs))
+		}
+		logger.Info("📥 [BLOCK SYNC] ✅ Replayed %d FullDbLogs entries for block %d", len(backupDb.FullDbLogs), effectiveBlockNum)
+		mvm.CommitAllXapianAtBlock(effectiveBlockNum)
+		if effectiveBlockNum > 0 {
+			undoFns = append(undoFns, func() {
+				if _, rbErr := mvm.RollbackXapianAboveBlock(effectiveBlockNum - 1); rbErr != nil {
+					logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) failed while rolling back block #%d: %v", effectiveBlockNum-1, effectiveBlockNum, rbErr)
+				}
+			})
+		}
+	} else if effectiveBlockNum > 0 {
+		if _, rbErr := mvm.RollbackXapianAboveBlock(effectiveBlockNum - 1); rbErr != nil {
+			rollbackAll()
+			logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) failed while syncing block #%d with empty FullDbLogs: %v",
+				effectiveBlockNum-1, effectiveBlockNum, rbErr)
+			return nil, func() {}, fmt.Errorf("RollbackXapianAboveBlock(%d) failed for block #%d: %w", effectiveBlockNum-1, effectiveBlockNum, rbErr)
+		}
+	}
+
+	return sessions, rollbackAll, nil
+}
+
+// applyBackupDbBatches applies all state batch data from a BackUpDb to local storages.
+func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]trie.NomtSessionToFlush, error) {
+	parsed, err := rh.parseAndValidateBackupDb(backupDb)
+	if err != nil {
+		return nil, err
+	}
+	sessions, _, err := rh.applyParsedBackupDbBatches(backupDb, parsed, common.Hash{}, backupDb.BockNumber, nil)
+	return sessions, err
 }

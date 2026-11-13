@@ -211,3 +211,122 @@ func TestHighestBlock_PersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("highest after reopen = %d, want 7", got)
 	}
 }
+
+func TestStateChangelogDB_RollbackAboveBlock(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "changelog_rb")
+	db, err := NewStateChangelogDB(dir, "account_state")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keyA := []byte("acct_alpha_000000001")
+	keyB := []byte("acct_bravo_000000002")
+	keyC := []byte("acct_charlie_0000003")
+
+	// Block 1: create keyA = "a1"
+	if err := db.WriteBlockChanges(1, []StateChange{
+		{Key: keyA, OldValue: nil, NewValue: []byte("a1")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBlockRoot(1, []byte{0xB1}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Block 2: update keyA = "a2", create keyB = "b2"
+	if err := db.WriteBlockChanges(2, []StateChange{
+		{Key: keyA, OldValue: []byte("a1"), NewValue: []byte("a2")},
+		{Key: keyB, OldValue: nil, NewValue: []byte("b2")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBlockRoot(2, []byte{0xB2}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Block 3: update keyA = "a3", update keyB = "b3", create keyC = "c3"
+	if err := db.WriteBlockChanges(3, []StateChange{
+		{Key: keyA, OldValue: []byte("a2"), NewValue: []byte("a3")},
+		{Key: keyB, OldValue: []byte("b2"), NewValue: []byte("b3")},
+		{Key: keyC, OldValue: nil, NewValue: []byte("c3")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBlockRoot(3, []byte{0xB3}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Roll back above block 2
+	if err := db.RollbackAboveBlock(2); err != nil {
+		t.Fatalf("RollbackAboveBlock(2): %v", err)
+	}
+	if got := db.GetHighestBlock(); got != 2 {
+		t.Fatalf("highestBlock after RollbackAboveBlock(2) = %d, want 2", got)
+	}
+	if got, err := db.GetStateAt(keyA, 10); err != nil || string(got) != "a2" {
+		t.Fatalf("keyA after rollback to 2 = (%q, %v), want \"a2\"", got, err)
+	}
+	if got, err := db.GetStateAt(keyB, 10); err != nil || string(got) != "b2" {
+		t.Fatalf("keyB after rollback to 2 = (%q, %v), want \"b2\"", got, err)
+	}
+	if _, err := db.GetStateAt(keyC, 10); err == nil {
+		t.Fatal("keyC created at block 3 must not exist after RollbackAboveBlock(2)")
+	}
+	addrs, err := db.GetAllUniqueAddresses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addrs) != 2 {
+		t.Fatalf("unique addresses after rollback to 2 = %d, want 2 (keyC orphan DEL must be cleaned)", len(addrs))
+	}
+	if root, blk, found, err := db.GetRootAtOrBefore(10); err != nil || !found || blk != 2 || len(root) != 1 || root[0] != 0xB2 {
+		t.Fatalf("root after rollback to 2 = (%x, %d, %v, %v), want (b2, 2, true, nil)", root, blk, found, err)
+	}
+
+	// Roll back further above block 1: keyB (created at block 2) must still know it did NOT exist at block 1
+	// and have its genesis DEL marker purged cleanly.
+	if err := db.RollbackAboveBlock(1); err != nil {
+		t.Fatalf("RollbackAboveBlock(1): %v", err)
+	}
+	if got := db.GetHighestBlock(); got != 1 {
+		t.Fatalf("highestBlock after RollbackAboveBlock(1) = %d, want 1", got)
+	}
+	if got, err := db.GetStateAt(keyA, 10); err != nil || string(got) != "a1" {
+		t.Fatalf("keyA after rollback to 1 = (%q, %v), want \"a1\"", got, err)
+	}
+	if _, err := db.GetStateAt(keyB, 10); err == nil {
+		t.Fatal("keyB created at block 2 must not exist after RollbackAboveBlock(1)")
+	}
+	addrs, err = db.GetAllUniqueAddresses()
+	if err != nil || len(addrs) != 1 || string(addrs[0]) != string(keyA) {
+		t.Fatalf("unique addresses after rollback to 1 = %q (%v), want only keyA", addrs, err)
+	}
+
+	// Verify persistence across reopen
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dbReopened, err := NewStateChangelogDB(dir, "account_state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbReopened.Close()
+	if got := dbReopened.GetHighestBlock(); got != 1 {
+		t.Fatalf("highestBlock after reopen = %d, want 1", got)
+	}
+	if root, blk, found, err := dbReopened.GetRootAtOrBefore(10); err != nil || !found || blk != 1 || root[0] != 0xB1 {
+		t.Fatalf("root after reopen = (%x, %d, %v, %v), want (b1, 1, true, nil)", root, blk, found, err)
+	}
+
+	// Roll back above block 0: completely empty state
+	if err := dbReopened.RollbackAboveBlock(0); err != nil {
+		t.Fatalf("RollbackAboveBlock(0): %v", err)
+	}
+	if dbReopened.GetHighestBlock() != 0 || dbReopened.GetStartBlock() != 0 {
+		t.Fatalf("after RollbackAboveBlock(0): highest=%d start=%d, want 0, 0", dbReopened.GetHighestBlock(), dbReopened.GetStartBlock())
+	}
+	addrs, err = dbReopened.GetAllUniqueAddresses()
+	if err != nil || len(addrs) != 0 {
+		t.Fatalf("after RollbackAboveBlock(0): unique addresses = %q (%v), want empty", addrs, err)
+	}
+}

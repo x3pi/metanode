@@ -247,7 +247,7 @@ func ForceSetLastBlockNumber(blockNumber uint64) {
 func ResetAllBlockCounters(blockNumber uint64) {
 	atomic.StoreUint64(&lastBlockNumber, blockNumber)
 	atomic.StoreUint64(&lastBlockNumberFromMaster, blockNumber)
-	atomic.StoreUint64(&lastNomtCommittedBlock, blockNumber)
+	ForceSetLastNomtCommittedBlock(blockNumber)
 	atomic.StoreUint64(&lastAssignedBlockNumber, blockNumber)
 	logger.Info("🛡️ [SNAPSHOT FIX] ResetAllBlockCounters: forced all block counters to %d", blockNumber)
 }
@@ -382,6 +382,21 @@ func UpdateLastNomtCommittedBlock(blockNumber uint64) {
 				}
 			}
 			return
+		}
+	}
+}
+
+func ForceSetLastNomtCommittedBlock(blockNumber uint64) {
+	atomic.StoreUint64(&lastNomtCommittedBlock, blockNumber)
+	if db := GetBackupDbInstance(); db != nil {
+		if blockNumber == 0 {
+			_ = db.Delete(LastNomtCommittedBlockHashKey.Bytes())
+		} else {
+			blockNumberBytes := make([]byte, 8)
+			binary.BigEndian.PutUint64(blockNumberBytes, blockNumber)
+			if err := db.Put(LastNomtCommittedBlockHashKey.Bytes(), blockNumberBytes); err != nil {
+				logger.Error("Failed to force-persist lastNomtCommittedBlock in PebbleDB: %v", err)
+			}
 		}
 	}
 }

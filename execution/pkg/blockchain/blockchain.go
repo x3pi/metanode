@@ -338,6 +338,13 @@ func (bc *BlockChain) AddBlockToCache(block mtn_types.Block) {
 	})
 }
 
+func (bc *BlockChain) DeleteBlockFromCache(blockHash common.Hash) {
+	if bc.blockCache == nil || blockHash == (common.Hash{}) {
+		return
+	}
+	bc.blockCache.DeleteBlock(blockHash)
+}
+
 func (bc *BlockChain) GetBlock(hash common.Hash) mtn_types.Block {
 	// 1. Check Cache
 	if cached, ok := bc.blockCache.LoadBlock(hash); ok {
@@ -662,6 +669,10 @@ func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bo
 		}
 	}
 
+	if bc.storageManager == nil || bc.storageManager.GetStorageMapping() == nil {
+		return 0, false
+	}
+
 	key := []byte(txHashPrefix + txHash.Hex())
 	data, err := bc.storageManager.GetStorageMapping().Get(key)
 	if err == nil && data != nil && len(data) == 8 {
@@ -784,6 +795,17 @@ func (bc *BlockChain) DiscardBlockMappings(blockNumber uint64) {
 	key := blockNumberPrefix + strconv.FormatUint(blockNumber, 10)
 	bc.removeFromDirty(key)
 	bc.blockNumberToHashCache.Delete(blockNumber)
+}
+
+// DiscardTxMappings safely removes uncommitted tx hash → block number mappings from dirty storage and cache.
+func (bc *BlockChain) DiscardTxMappings(txHashes []common.Hash) {
+	for _, txHash := range txHashes {
+		key := txHashPrefix + txHash.Hex()
+		bc.removeFromDirty(key)
+		if bc.txHashToBlockNumber != nil {
+			bc.txHashToBlockNumber.Delete(txHash)
+		}
+	}
 }
 
 // DeleteBlockHashMapping permanently removes the mapping from the database for pruning

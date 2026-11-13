@@ -1084,6 +1084,8 @@ func UpdateBucketCacheFromBatch(db FlatStateDB, batch [][2][]byte) {
 				bucketIdx := key[3]
 				if len(kv[1]) == 32 {
 					copy(buckets[bucketIdx][:], kv[1])
+				} else if len(kv[1]) == 0 {
+					buckets[bucketIdx] = e_common.Hash{}
 				}
 			}
 		}
