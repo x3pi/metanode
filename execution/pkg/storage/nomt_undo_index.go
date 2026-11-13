@@ -94,18 +94,25 @@ func DecodeNomtUndoBatch(raw []byte) ([][2][]byte, error) {
 
 		entries[i] = [2][]byte{keyCopy, valCopy}
 	}
+	if offset != len(raw) {
+		return nil, fmt.Errorf("trailing %d bytes in nomt undo payload", len(raw)-offset)
+	}
 	return entries, nil
 }
 
 // PersistNomtUndoBatch stores a compact pre-image batch for blockNum and prunes any
 // entry older than NomtUndoRetentionBlocks to bound disk overhead.
 func PersistNomtUndoBatch(backupDB Storage, kind string, blockNum uint64, entries [][2][]byte) error {
-	if backupDB == nil || blockNum == 0 || len(entries) == 0 {
+	if backupDB == nil || blockNum == 0 {
 		return nil
 	}
-	encoded := EncodeNomtUndoBatch(entries)
-	if err := backupDB.Put(NomtUndoKey(kind, blockNum), encoded); err != nil {
-		return err
+	if len(entries) == 0 {
+		_ = backupDB.Delete(NomtUndoKey(kind, blockNum))
+	} else {
+		encoded := EncodeNomtUndoBatch(entries)
+		if err := backupDB.Put(NomtUndoKey(kind, blockNum), encoded); err != nil {
+			return err
+		}
 	}
 	if blockNum > NomtUndoRetentionBlocks {
 		_ = backupDB.Delete(NomtUndoKey(kind, blockNum-NomtUndoRetentionBlocks))

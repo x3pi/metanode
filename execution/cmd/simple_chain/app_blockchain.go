@@ -1720,11 +1720,17 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 
 		if app.storageManager != nil && app.storageManager.GetStorageBackupDb() != nil && bn > 0 {
 			backupDB := app.storageManager.GetStorageBackupDb()
-			if (app.chainState == nil || app.chainState.GetChangelogDB() == nil) && len(accPreImages) > 0 {
-				_ = storage.PersistNomtUndoBatch(backupDB, storage.NomtUndoKindAccount, bn, accPreImages)
+			if (app.chainState == nil || app.chainState.GetChangelogDB() == nil) &&
+				(trie.GetStateBackend() == trie.BackendNOMT || accountRes.NomtPayload != nil) {
+				if uErr := storage.PersistNomtUndoBatch(backupDB, storage.NomtUndoKindAccount, bn, accPreImages); uErr != nil {
+					logger.Warn("⚠️ [CATCHUP] Failed to persist account NOMT undo for block #%d: %v", bn, uErr)
+				}
 			}
-			if (app.chainState == nil || app.chainState.GetStakeChangelogDB() == nil) && len(stakePreImages) > 0 {
-				_ = storage.PersistNomtUndoBatch(backupDB, storage.NomtUndoKindStake, bn, stakePreImages)
+			if (app.chainState == nil || app.chainState.GetStakeChangelogDB() == nil) &&
+				(trie.GetStateBackend() == trie.BackendNOMT || stakeRes.NomtPayload != nil) {
+				if uErr := storage.PersistNomtUndoBatch(backupDB, storage.NomtUndoKindStake, bn, stakePreImages); uErr != nil {
+					logger.Warn("⚠️ [CATCHUP] Failed to persist stake NOMT undo for block #%d: %v", bn, uErr)
+				}
 			}
 		}
 

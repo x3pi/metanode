@@ -1938,6 +1938,22 @@ func (n *NomtStateTrie) AbortPending() {
 		fs.Abort()
 		n.handle.UnlockCommitPayload()
 	}
+
+	var handleRoot e_common.Hash
+	if n.handle != nil {
+		if rb, err := n.handle.Root(); err == nil {
+			handleRoot = e_common.BytesToHash(rb[:])
+		}
+	}
+	n.writerMu.Lock()
+	n.wDirty = make(map[string]*nomtDirtyEntry)
+	n.wOldValues = make(map[string][]byte)
+	n.wOldLoaded = make(map[string]bool)
+	n.lastCommitBatch = nil
+	n.pendingCommittingMap = nil
+	n.registryChanged = false
+	n.publishReadView(make(map[string]*nomtDirtyEntry), nil, handleRoot)
+	n.writerMu.Unlock()
 }
 
 // HasUnbatchedChanges reports whether the trie has writes that have not yet been handed to a NOMT session
@@ -3035,6 +3051,9 @@ func RollbackNomtNamespaceKeys(namespace string, keys [][]byte, values [][]byte)
 	if err := t.CommitPayload(); err != nil {
 		return fmt.Errorf("RollbackNomtNamespaceKeys: CommitPayload(%s): %w", namespace, err)
 	}
+	// Drain async incremental registry append goroutine launched by Commit(true) before
+	// rewriting the full registry file so deleted fork keys cannot be re-appended on disk.
+	t.commitWg.Wait()
 	t.registry.mu.Lock()
 	for i, k := range keys {
 		hexKey := hex.EncodeToString(k)

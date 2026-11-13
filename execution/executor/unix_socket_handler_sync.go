@@ -720,16 +720,29 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				(exp == (common.Hash{}) && r == trie.EmptyRootHash)
 		}
 		var (
-			hasExpectedRoots bool
-			expAccRoot       common.Hash
-			expStakeRoot     common.Hash
+			hasExpectedAccRoot   bool
+			hasExpectedStakeRoot bool
+			expAccRoot           common.Hash
+			expStakeRoot         common.Hash
 		)
 		if targetBlk != nil && targetBlk.Header() != nil {
-			hasExpectedRoots = true
+			hasExpectedAccRoot = true
+			hasExpectedStakeRoot = true
 			expAccRoot = targetBlk.Header().AccountStatesRoot()
 			expStakeRoot = common.Hash(targetBlk.Header().StakeStatesRoot())
-		} else if targetBlock == 0 {
-			hasExpectedRoots = true
+		} else if targetBlock == 0 && rh.chainState != nil {
+			if cl := rh.chainState.GetChangelogDB(); cl != nil {
+				hasExpectedAccRoot = true
+				if rootBytes, _, found, rErr := cl.GetRootAtOrBefore(0); rErr == nil && found {
+					expAccRoot = common.BytesToHash(rootBytes)
+				}
+			}
+			if scl := rh.chainState.GetStakeChangelogDB(); scl != nil {
+				hasExpectedStakeRoot = true
+				if rootBytes, _, found, rErr := scl.GetRootAtOrBefore(0); rErr == nil && found {
+					expStakeRoot = common.BytesToHash(rootBytes)
+				}
+			}
 		}
 
 		unresolvedAccRemaining := 0
@@ -744,7 +757,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				unresolvedStakeRemaining++
 			}
 		}
-		if (unresolvedAccRemaining > 0 || unresolvedStakeRemaining > 0) && !hasExpectedRoots {
+		if (unresolvedAccRemaining > 0 && !hasExpectedAccRoot) || (unresolvedStakeRemaining > 0 && !hasExpectedStakeRoot) {
 			return fmt.Errorf("validator NOMT rollback to #%d aborted fail-closed: %d account and %d stake keys lack pre-image and target block header is missing",
 				targetBlock, unresolvedAccRemaining, unresolvedStakeRemaining)
 		}
@@ -772,7 +785,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			}
 		}
 
-		applyValidatedNomtRollback := func(namespace string, staleKeys map[string][]byte, resolved map[string][]byte, expRoot common.Hash) error {
+		applyValidatedNomtRollback := func(namespace string, staleKeys map[string][]byte, resolved map[string][]byte, hasExpRoot bool, expRoot common.Hash) error {
 			if len(staleKeys) == 0 {
 				return nil
 			}
@@ -800,7 +813,7 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 				_ = trie.RollbackNomtNamespaceKeys(namespace, keys, prevVals)
 			})
 
-			if hasExpectedRoots {
+			if hasExpRoot {
 				postRoot, ok := trie.GetNomtHandleRoot(namespace)
 				if !ok || !nomtRootEq(postRoot, expRoot) {
 					return fmt.Errorf("validator NOMT rollback root mismatch on %s at #%d: got=%s expected=%s",
@@ -810,12 +823,12 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			return nil
 		}
 
-		if err := applyValidatedNomtRollback("account_state", staleNomtAccKeys, restoredNomtAcc, expAccRoot); err != nil {
+		if err := applyValidatedNomtRollback("account_state", staleNomtAccKeys, restoredNomtAcc, hasExpectedAccRoot, expAccRoot); err != nil {
 			undoNomtRollbacks()
 			logger.Error("🚨 [SYNC-FORK-ROLLBACK] %v — restored NOMT to pre-rollback state (fail-closed)", err)
 			return err
 		}
-		if err := applyValidatedNomtRollback("stake_db", staleNomtStakeKeys, restoredNomtStake, expStakeRoot); err != nil {
+		if err := applyValidatedNomtRollback("stake_db", staleNomtStakeKeys, restoredNomtStake, hasExpectedStakeRoot, expStakeRoot); err != nil {
 			undoNomtRollbacks()
 			logger.Error("🚨 [SYNC-FORK-ROLLBACK] %v — restored NOMT to pre-rollback state (fail-closed)", err)
 			return err
@@ -831,20 +844,48 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		} else if targetBlock == 0 && targetBlk == nil && rh.chainState != nil && trie.GetStateBackend() == trie.BackendNOMT {
 			if asDB := rh.chainState.GetAccountStateDB(); asDB != nil {
 				if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
-					if alignErr := nomtTrie.AlignWithExpectedRoot(asDB.Storage(), common.Hash{}, 0); alignErr != nil {
-						undoNomtRollbacks()
-						return fmt.Errorf("AlignWithExpectedRoot(account_state, 0) failed during rollback: %w", alignErr)
+					if rh.chainState.GetChangelogDB() != nil {
+						if alignErr := nomtTrie.AlignWithExpectedRoot(asDB.Storage(), expAccRoot, 0); alignErr != nil {
+							undoNomtRollbacks()
+							return fmt.Errorf("AlignWithExpectedRoot(account_state, 0) failed during rollback: %w", alignErr)
+						}
+						originAcc := expAccRoot
+						if originAcc == (common.Hash{}) {
+							originAcc = trie.EmptyRootHash
+						}
+						asDB.SetOriginRootHash(originAcc)
+					} else {
+						postAccRoot, _ := trie.GetNomtHandleRoot("account_state")
+						nomtTrie.RealignRoot(postAccRoot)
+						originAcc := postAccRoot
+						if originAcc == (common.Hash{}) {
+							originAcc = trie.EmptyRootHash
+						}
+						asDB.SetOriginRootHash(originAcc)
 					}
-					asDB.SetOriginRootHash(trie.EmptyRootHash)
 				}
 			}
 			if stakeDB := rh.chainState.GetStakeStateDB(); stakeDB != nil {
 				if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
-					if alignErr := nomtTrie.AlignWithExpectedRoot(stakeDB.GetStorage(), common.Hash{}, 0); alignErr != nil {
-						undoNomtRollbacks()
-						return fmt.Errorf("AlignWithExpectedRoot(stake_db, 0) failed during rollback: %w", alignErr)
+					if rh.chainState.GetStakeChangelogDB() != nil {
+						if alignErr := nomtTrie.AlignWithExpectedRoot(stakeDB.GetStorage(), expStakeRoot, 0); alignErr != nil {
+							undoNomtRollbacks()
+							return fmt.Errorf("AlignWithExpectedRoot(stake_db, 0) failed during rollback: %w", alignErr)
+						}
+						originStake := expStakeRoot
+						if originStake == (common.Hash{}) {
+							originStake = trie.EmptyRootHash
+						}
+						stakeDB.SetOriginRootHash(originStake)
+					} else {
+						postStakeRoot, _ := trie.GetNomtHandleRoot("stake_db")
+						nomtTrie.RealignRoot(postStakeRoot)
+						originStake := postStakeRoot
+						if originStake == (common.Hash{}) {
+							originStake = trie.EmptyRootHash
+						}
+						stakeDB.SetOriginRootHash(originStake)
 					}
-					stakeDB.SetOriginRootHash(trie.EmptyRootHash)
 				}
 			}
 			if scDB := rh.chainState.GetSmartContractDB(); scDB != nil {
@@ -1636,20 +1677,16 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		if len(backupBytes) > 0 {
 			rh.persistBackupForSub(backupBytes, blockNum)
 		}
-		if rh.storageManager != nil && blockNum > 0 && len(blockNomtPreImages) > 0 {
+		if rh.storageManager != nil && trie.GetStateBackend() == trie.BackendNOMT && blockNum > 0 {
 			if backupStorage := rh.storageManager.GetStorageBackupDb(); backupStorage != nil {
 				if rh.chainState == nil || rh.chainState.GetChangelogDB() == nil {
-					if pre := blockNomtPreImages["account_state"]; len(pre) > 0 {
-						if uErr := storage.PersistNomtUndoBatch(backupStorage, storage.NomtUndoKindAccount, blockNum, pre); uErr != nil {
-							logger.Warn("⚠️ [EXECUTE SYNC] Failed to persist account NOMT undo for block #%d: %v", blockNum, uErr)
-						}
+					if uErr := storage.PersistNomtUndoBatch(backupStorage, storage.NomtUndoKindAccount, blockNum, blockNomtPreImages["account_state"]); uErr != nil {
+						logger.Warn("⚠️ [EXECUTE SYNC] Failed to persist account NOMT undo for block #%d: %v", blockNum, uErr)
 					}
 				}
 				if rh.chainState == nil || rh.chainState.GetStakeChangelogDB() == nil {
-					if pre := blockNomtPreImages["stake_db"]; len(pre) > 0 {
-						if uErr := storage.PersistNomtUndoBatch(backupStorage, storage.NomtUndoKindStake, blockNum, pre); uErr != nil {
-							logger.Warn("⚠️ [EXECUTE SYNC] Failed to persist stake NOMT undo for block #%d: %v", blockNum, uErr)
-						}
+					if uErr := storage.PersistNomtUndoBatch(backupStorage, storage.NomtUndoKindStake, blockNum, blockNomtPreImages["stake_db"]); uErr != nil {
+						logger.Warn("⚠️ [EXECUTE SYNC] Failed to persist stake NOMT undo for block #%d: %v", blockNum, uErr)
 					}
 				}
 			}
