@@ -2110,25 +2110,166 @@ func ApplyNomtReplicationBatches(
 	stakeChangelogDB *state_changelog.StateChangelogDB,
 	blockNumber uint64,
 ) ([]NomtSessionToFlush, error) {
+	sessions, _, err := ApplyNomtReplicationBatchesWithRollback(
+		aggregatedBatches,
+		changelogDB,
+		stakeChangelogDB,
+		nil,
+		blockNumber,
+	)
+	return sessions, err
+}
+
+// ApplyNomtReplicationBatchesWithRollback applies NOMT replication batches while recording
+// pre-image values for every touched NOMT keyPath so the caller can atomically roll back
+// C++ NOMT handles, StateChangelogDBs, and lastNomtCommittedBlock if a subsequent step
+// (such as KV BatchPut, Xapian FullDbLogs replay, or CommitBlockState) fails.
+func ApplyNomtReplicationBatchesWithRollback(
+	aggregatedBatches map[string][][2][]byte,
+	changelogDB *state_changelog.StateChangelogDB,
+	stakeChangelogDB *state_changelog.StateChangelogDB,
+	scChangelogDB *state_changelog.StateChangelogDB,
+	blockNumber uint64,
+) ([]NomtSessionToFlush, func() error, error) {
 	var sessionsToFlush []NomtSessionToFlush
+	noopRollback := func() error { return nil }
 
 	if globalStateBackend != BackendNOMT {
-		return sessionsToFlush, nil
+		return sessionsToFlush, noopRollback, nil
 	}
 
-	// We apply NOMT batches for BOTH Master and Sub nodes.
-	// We also REMOVE the 'nomt:' prefixed keys from aggregatedBatches so that
-	// they do NOT get written to PebbleDB again.
+	prevNomtCommittedBlock := storage.GetLastNomtCommittedBlock()
 
-	namespaces := map[string]string{
-		"Account":     "account_state",
-		"SC Storage":  "smart_contract_storage",
-		"StakeState":  "stake_db",
-		"Receipt":     "receipts",
-		"Transaction": "transaction_state",
+	type nomtUndoStep struct {
+		handleNamespace string
+		keyPrefix       string
+		isStakeDB       bool
+		forwardTrie     *NomtStateTrie
+		keys            [][]byte
+		oldValues       [][]byte
+	}
+	var undoSteps []nomtUndoStep
+
+	capturePreImages := func(t *NomtStateTrie, keys [][]byte) ([][]byte, [][]byte) {
+		seen := make(map[string]struct{}, len(keys))
+		var uKeys, uVals [][]byte
+		for _, k := range keys {
+			ks := string(k)
+			if _, exists := seen[ks]; exists {
+				continue
+			}
+			seen[ks] = struct{}{}
+			kCopy := append([]byte(nil), k...)
+			oldVal, err := t.Get(k)
+			var vCopy []byte
+			if err == nil && len(oldVal) > 0 {
+				vCopy = append([]byte(nil), oldVal...)
+			}
+			uKeys = append(uKeys, kCopy)
+			uVals = append(uVals, vCopy)
+		}
+		return uKeys, uVals
 	}
 
-	for batchName, namespace := range namespaces {
+	rollbackNomt := func() error {
+		var firstErr error
+		for i := len(undoSteps) - 1; i >= 0; i-- {
+			step := undoSteps[i]
+			if step.forwardTrie != nil {
+				_ = step.forwardTrie.WaitCommitPayload()
+			}
+			if len(step.keys) == 0 || step.handleNamespace == "" {
+				continue
+			}
+			h, hErr := GetOrInitNomtHandle(step.handleNamespace)
+			if hErr != nil || h == nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("rollback NOMT GetOrInitNomtHandle (%s): %w", step.handleNamespace, hErr)
+				}
+				continue
+			}
+			ut := NewNomtStateTrie(h, false, step.keyPrefix)
+			if !step.isStakeDB {
+				ut.SetReplicationSync(true)
+			}
+			if err := ut.BatchUpdate(step.keys, step.oldValues); err != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("rollback NOMT BatchUpdate (%s): %w", step.keyPrefix, err)
+				}
+				continue
+			}
+			if _, _, _, err := ut.Commit(true); err != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("rollback NOMT Commit (%s): %w", step.keyPrefix, err)
+				}
+				continue
+			}
+			if err := ut.CommitPayload(); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("rollback NOMT CommitPayload (%s): %w", step.keyPrefix, err)
+			}
+			_ = ut.WaitCommitPayload()
+
+			// Clean up file-backed registry entries for keys newly inserted by the failed block
+			skipReg := strings.HasPrefix(step.keyPrefix, "smart_contract_storage") || step.keyPrefix == "transaction_state" || step.keyPrefix == "receipts"
+			if !skipReg && ut.registry != nil {
+				removedAny := false
+				ut.registry.mu.Lock()
+				for j, k := range step.keys {
+					if len(step.oldValues[j]) == 0 {
+						hk := hex.EncodeToString(k)
+						if _, existed := ut.registry.keys[hk]; existed {
+							delete(ut.registry.keys, hk)
+							removedAny = true
+						}
+					}
+				}
+				emptyAfterRemove := len(ut.registry.keys) == 0
+				ut.registry.pendingNew = nil
+				ut.registry.mu.Unlock()
+
+				if removedAny {
+					if emptyAfterRemove {
+						ut.registry.persistMu.Lock()
+						_ = os.Remove(registryFilePath(h.GetPath(), step.keyPrefix))
+						ut.registry.persistMu.Unlock()
+					} else {
+						ut.persistRegistryFullRewrite()
+						_ = ut.WaitCommitPayload()
+					}
+				}
+			}
+		}
+
+		targetBlock := uint64(0)
+		if blockNumber > 0 {
+			targetBlock = blockNumber - 1
+		}
+		for _, cl := range []*state_changelog.StateChangelogDB{changelogDB, stakeChangelogDB, scChangelogDB} {
+			if cl != nil {
+				if err := cl.RollbackAboveBlock(targetBlock); err != nil && firstErr == nil {
+					firstErr = fmt.Errorf("rollback StateChangelogDB above %d: %w", targetBlock, err)
+				}
+			}
+		}
+		storage.ForceSetLastNomtCommittedBlock(prevNomtCommittedBlock)
+		return firstErr
+	}
+
+	// Deterministic order across namespaces
+	namespaceOrder := []struct {
+		batchName string
+		namespace string
+	}{
+		{"Account", "account_state"},
+		{"SC Storage", "smart_contract_storage"},
+		{"StakeState", "stake_db"},
+		{"Receipt", "receipts"},
+		{"Transaction", "transaction_state"},
+	}
+
+	for _, nsEntry := range namespaceOrder {
+		batchName := nsEntry.batchName
+		namespace := nsEntry.namespace
 		batch, ok := aggregatedBatches[batchName]
 		if !ok || len(batch) == 0 {
 			continue
@@ -2161,21 +2302,11 @@ func ApplyNomtReplicationBatches(
 		if len(nomtKeys) > 0 {
 			handle, err := GetOrInitNomtHandle(namespace)
 			if err != nil {
-				return sessionsToFlush, fmt.Errorf("failed to init NOMT handle for sync: %w", err)
+				_ = rollbackNomt()
+				return sessionsToFlush, noopRollback, fmt.Errorf("failed to init NOMT handle for sync: %w", err)
 			}
 
 			if batchName == "SC Storage" {
-				// ═══════════════════════════════════════════════════════════════════
-				// CRITICAL FIX: SC Storage keys are structured as:
-				//   address(20 bytes) + slotKey
-				// The READ path creates per-contract NomtStateTries with keyPrefix:
-				//   "smart_contract_storage_<hexAddress>"
-				// which means keyPath = Keccak256(keyPrefix + slotKey).
-				//
-				// We MUST group keys by contract address and create per-address
-				// NomtStateTries with the same keyPrefix, otherwise the write path
-				// would compute a different Keccak256 than the read path.
-				// ═══════════════════════════════════════════════════════════════════
 				type perContractData struct {
 					keys   [][]byte
 					values [][]byte
@@ -2198,47 +2329,93 @@ func ApplyNomtReplicationBatches(
 					group.values = append(group.values, nomtValues[i])
 				}
 
-				// FIX: Map iteration is random. Sort addresses to ensure deterministic
-				// commit sequences, reproducing the exact state transitions as the master node.
 				var sortedAddrs []string
 				for addrHex := range groupedByAddr {
 					sortedAddrs = append(sortedAddrs, addrHex)
 				}
 				slices.Sort(sortedAddrs)
 
+				if scChangelogDB != nil && blockNumber > 0 && scChangelogDB.GetHighestBlock() == 0 && scChangelogDB.GetStartBlock() == 0 {
+					if _, _, found, _ := scChangelogDB.GetRootAtOrBefore(blockNumber - 1); !found {
+						if preRoot, rErr := handle.Root(); rErr == nil && preRoot == ([32]byte{}) {
+							_ = scChangelogDB.SetBlockRoot(0, preRoot[:])
+						}
+					}
+				}
+
+				var scChanges []state_changelog.StateChange
 				totalKeys := 0
 				for _, addrHex := range sortedAddrs {
 					group := groupedByAddr[addrHex]
-					// Match the keyPrefix format used in trie_factory.go line 111:
-					//   keyPrefix = namespace + "_" + hex.EncodeToString(pg.GetPrefix())
 					keyPrefix := namespace + "_" + addrHex
 					t := NewNomtStateTrie(handle, false, keyPrefix)
 					t.SetReplicationSync(true)
+					uKeys, uVals := capturePreImages(t, group.keys)
+					if scChangelogDB != nil && blockNumber > 0 {
+						addrBytes, decErr := hex.DecodeString(addrHex)
+						if decErr == nil && len(addrBytes) == 20 {
+							latestValBySlot := make(map[string][]byte, len(group.keys))
+							for idx, sk := range group.keys {
+								latestValBySlot[string(sk)] = group.values[idx]
+							}
+							for idx, sk := range uKeys {
+								changeKey := make([]byte, 20+len(sk))
+								copy(changeKey, addrBytes)
+								copy(changeKey[20:], sk)
+								scChanges = append(scChanges, state_changelog.StateChange{
+									Key:      changeKey,
+									OldValue: uVals[idx],
+									NewValue: latestValBySlot[string(sk)],
+								})
+							}
+						}
+					}
 					if err := t.BatchUpdate(group.keys, group.values); err != nil {
-						return sessionsToFlush, fmt.Errorf("failed to apply nomt sync batch for contract %s: %w", addrHex, err)
+						_ = rollbackNomt()
+						return sessionsToFlush, noopRollback, fmt.Errorf("failed to apply nomt sync batch for contract %s: %w", addrHex, err)
 					}
 					if _, _, _, err := t.Commit(true); err != nil {
-						return sessionsToFlush, fmt.Errorf("failed to commit nomt sync batch for contract %s: %w", addrHex, err)
+						_ = rollbackNomt()
+						return sessionsToFlush, noopRollback, fmt.Errorf("failed to commit nomt sync batch for contract %s: %w", addrHex, err)
 					}
+					undoSteps = append(undoSteps, nomtUndoStep{
+						handleNamespace: namespace,
+						keyPrefix:       keyPrefix,
+						isStakeDB:       false,
+						forwardTrie:     t,
+						keys:            uKeys,
+						oldValues:       uVals,
+					})
 					if err := t.CommitPayload(); err != nil {
-						return sessionsToFlush, fmt.Errorf("failed to flush nomt sync batch for contract %s: %w", addrHex, err)
+						_ = rollbackNomt()
+						return sessionsToFlush, noopRollback, fmt.Errorf("failed to flush nomt sync batch for contract %s: %w", addrHex, err)
 					}
 					totalKeys += len(group.keys)
+				}
+				if scChangelogDB != nil && blockNumber > 0 && len(scChanges) > 0 {
+					if err := scChangelogDB.WriteBlockChanges(blockNumber, scChanges); err != nil {
+						_ = rollbackNomt()
+						return sessionsToFlush, noopRollback, fmt.Errorf("failed to write SC changelog for block %d: %w", blockNumber, err)
+					}
+					postRoot, rErr := handle.Root()
+					if rErr != nil {
+						_ = rollbackNomt()
+						return sessionsToFlush, noopRollback, fmt.Errorf("failed to read SC NOMT root after block %d: %w", blockNumber, rErr)
+					}
+					if err := scChangelogDB.SetBlockRoot(blockNumber, postRoot[:]); err != nil {
+						_ = rollbackNomt()
+						return sessionsToFlush, noopRollback, fmt.Errorf("failed to record SC NOMT root for block %d: %w", blockNumber, err)
+					}
 				}
 				logger.Info("🔧 [NOMT-SYNC] Node rebuilt %d keys across %d contracts to NOMT for %s",
 					totalKeys, len(groupedByAddr), namespace)
 			} else {
-				// Account, StakeState: single namespace, no address prefix in keys
-				// ═══════════════════════════════════════════════════════════════════
-				// FORK-DIAG: Log handle root BEFORE sync to detect stale NOMT state
-				// ═══════════════════════════════════════════════════════════════════
 				preRoot, _ := handle.Root()
 				logger.Info("[FORK-DIAG][NOMT-SYNC-PRE] namespace=%s, keys=%d, handleRoot=%x",
 					namespace, len(nomtKeys), preRoot[:8])
 
 				trie := NewNomtStateTrie(handle, false, namespace)
 
-				// Set changelogDB based on namespace
 				if namespace == "account_state" {
 					trie.SetChangelogDB(changelogDB)
 				} else if namespace == "stake_db" {
@@ -2249,25 +2426,32 @@ func ApplyNomtReplicationBatches(
 					trie.SetCurrentCommitBlock(blockNumber)
 				}
 
-				// CRITICAL FIX: For stake_db, we MUST NOT set isReplicationSync to true.
-				// If we do, the knownKeys registry is bypassed, and subsequent calls
-				// to GetAllValidators() will return 0 validators, causing consensus forks
-				// (each node falls back to electing itself as leader).
 				if namespace != "stake_db" {
 					trie.SetReplicationSync(true)
 				}
 
+				uKeys, uVals := capturePreImages(trie, nomtKeys)
 				if err := trie.BatchUpdate(nomtKeys, nomtValues); err != nil {
-					return sessionsToFlush, fmt.Errorf("failed to apply nomt sync batch: %w", err)
+					_ = rollbackNomt()
+					return sessionsToFlush, noopRollback, fmt.Errorf("failed to apply nomt sync batch: %w", err)
 				}
 				if _, _, _, err := trie.Commit(true); err != nil {
-					return sessionsToFlush, fmt.Errorf("failed to commit nomt sync batch: %w", err)
+					_ = rollbackNomt()
+					return sessionsToFlush, noopRollback, fmt.Errorf("failed to commit nomt sync batch: %w", err)
 				}
+				undoSteps = append(undoSteps, nomtUndoStep{
+					handleNamespace: namespace,
+					keyPrefix:       namespace,
+					isStakeDB:       namespace == "stake_db",
+					forwardTrie:     trie,
+					keys:            uKeys,
+					oldValues:       uVals,
+				})
 				if err := trie.CommitPayload(); err != nil {
-					return sessionsToFlush, fmt.Errorf("failed to flush nomt sync batch: %w", err)
+					_ = rollbackNomt()
+					return sessionsToFlush, noopRollback, fmt.Errorf("failed to flush nomt sync batch: %w", err)
 				}
 
-				// FORK-DIAG: Log handle root AFTER sync
 				postRoot, _ := handle.Root()
 				logger.Info("[FORK-DIAG][NOMT-SYNC-POST] namespace=%s, keys=%d, handleRoot=%x",
 					namespace, len(nomtKeys), postRoot[:8])
@@ -2275,23 +2459,21 @@ func ApplyNomtReplicationBatches(
 			}
 		}
 
-		// Save back only the elements that are NOT meant for NOMT
 		if len(nonNomtBatch) > 0 {
 			aggregatedBatches[batchName] = nonNomtBatch
 		} else {
-			delete(aggregatedBatches, batchName) // No entries left for PebbleDB
+			delete(aggregatedBatches, batchName)
 		}
 	}
 
-	// For any other batch (like Receipt, Transaction), just ensure no 'nomt:' prefix sneaks into PebbleDB
 	for batchName, batch := range aggregatedBatches {
 		if batchName == "Account" || batchName == "SC Storage" || batchName == "StakeState" {
-			continue // Already processed
+			continue
 		}
 		var nonNomtBatch [][2][]byte
 		for _, kv := range batch {
 			if len(kv[0]) >= 5 && string(kv[0][:5]) == "nomt:" {
-				continue // discard mistakenly prefixed keys
+				continue
 			}
 			nonNomtBatch = append(nonNomtBatch, kv)
 		}
@@ -2302,7 +2484,7 @@ func ApplyNomtReplicationBatches(
 		}
 	}
 
-	return sessionsToFlush, nil
+	return sessionsToFlush, rollbackNomt, nil
 }
 
 // GenerateProof generates a Merkle proof for a specific key
@@ -2453,6 +2635,13 @@ func CommitBatchRaw(handle *nomt_ffi.Handle, dirtyStates []NomtDirtyState, chang
 
 	// Synchronous changelog write to guarantee crash safety BEFORE modifying mmap
 	if changelogDB != nil && len(changes) > 0 {
+		if blockNumber > 0 && changelogDB.GetHighestBlock() == 0 && changelogDB.GetStartBlock() == 0 {
+			if _, _, found, _ := changelogDB.GetRootAtOrBefore(blockNumber - 1); !found {
+				if preRoot, rErr := handle.Root(); rErr == nil && preRoot == ([32]byte{}) {
+					_ = changelogDB.SetBlockRoot(0, preRoot[:])
+				}
+			}
+		}
 		if err := changelogDB.WriteBlockChanges(blockNumber, changes); err != nil {
 			return e_common.Hash{}, nil, nil, fmt.Errorf("failed to sync changelog: %v", err)
 		}

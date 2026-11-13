@@ -649,3 +649,185 @@ func (c *StateChangelogDB) PruneBeforeBlock(targetBlock uint64) error {
 	logger.Info("🧹 [CHANGELOG] Compacted-to-floor history before block %d for %d unique addresses in namespace %s", targetBlock, count, c.namespace)
 	return nil
 }
+
+// RollbackAboveBlock removes all state changelog entries and recorded root metadata strictly
+// above targetBlock (block > targetBlock), restoring highestBlock/startBlock metadata so failed
+// sync batches or local fork rollbacks leave zero phantom future history in StateChangelogDB.
+func (c *StateChangelogDB) RollbackAboveBlock(targetBlock uint64) error {
+	if c == nil || targetBlock == ^uint64(0) {
+		return nil
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.db == nil {
+		return nil
+	}
+
+	rootPrefix := c.blockRootMetaPrefix()
+	hasFutureRoot := false
+	{
+		rIter, err := c.db.NewIter(&pebble.IterOptions{LowerBound: rootPrefix})
+		if err != nil {
+			return err
+		}
+		seekRoot := binary.BigEndian.AppendUint64(append([]byte(nil), rootPrefix...), targetBlock+1)
+		if rIter.SeekGE(seekRoot) && bytes.HasPrefix(rIter.Key(), rootPrefix) {
+			hasFutureRoot = true
+		}
+		if err := rIter.Close(); err != nil {
+			return err
+		}
+	}
+
+	curHighest := c.highestBlock.Load()
+	curStart := c.startBlock.Load()
+	if curHighest <= targetBlock && (curStart == 0 || curStart <= targetBlock) && !hasFutureRoot {
+		return nil
+	}
+
+	batch := c.db.NewBatch()
+	defer batch.Close()
+
+	prefix := []byte(fmt.Sprintf("%s:", c.namespace))
+	iter, err := c.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
+	if err != nil {
+		return err
+	}
+
+	var (
+		curAddr             []byte
+		hasCurAddr          bool
+		addrGenesisDelKey   []byte
+		addrNonZeroLeqCount int
+		addrDeletedAbove    int
+		maxRemainingBlock   uint64
+		deletedEntries      int
+	)
+
+	flushCurAddr := func() error {
+		if !hasCurAddr {
+			return nil
+		}
+		if addrDeletedAbove > 0 && addrNonZeroLeqCount == 0 && len(addrGenesisDelKey) > 0 {
+			if err := batch.Delete(addrGenesisDelKey, nil); err != nil {
+				return err
+			}
+			c.hasEntryCache.Delete(string(curAddr))
+		}
+		return nil
+	}
+
+	for iter.SeekGE(prefix); iter.Valid(); iter.Next() {
+		key := iter.Key()
+		if !bytes.HasPrefix(key, prefix) {
+			break
+		}
+		if len(key) < len(prefix)+9 || key[len(key)-9] != ':' {
+			continue
+		}
+		addr := key[len(prefix) : len(key)-9]
+		keyBlock := binary.BigEndian.Uint64(key[len(key)-8:])
+
+		if !hasCurAddr || !bytes.Equal(curAddr, addr) {
+			if err := flushCurAddr(); err != nil {
+				_ = iter.Close()
+				return err
+			}
+			curAddr = append(curAddr[:0], addr...)
+			hasCurAddr = true
+			addrGenesisDelKey = nil
+			addrNonZeroLeqCount = 0
+			addrDeletedAbove = 0
+		}
+
+		if keyBlock > targetBlock {
+			if err := batch.Delete(append([]byte(nil), key...), nil); err != nil {
+				_ = iter.Close()
+				return err
+			}
+			addrDeletedAbove++
+			deletedEntries++
+		} else {
+			if keyBlock == 0 && bytes.Equal(iter.Value(), []byte("DEL")) {
+				addrGenesisDelKey = append([]byte(nil), key...)
+			} else {
+				addrNonZeroLeqCount++
+				if keyBlock > maxRemainingBlock {
+					maxRemainingBlock = keyBlock
+				}
+			}
+		}
+	}
+
+	if err := iter.Error(); err != nil {
+		_ = iter.Close()
+		return err
+	}
+	if err := iter.Close(); err != nil {
+		return err
+	}
+	if err := flushCurAddr(); err != nil {
+		return err
+	}
+
+	if hasFutureRoot {
+		rIter, err := c.db.NewIter(&pebble.IterOptions{LowerBound: rootPrefix})
+		if err != nil {
+			return err
+		}
+		seekRoot := binary.BigEndian.AppendUint64(append([]byte(nil), rootPrefix...), targetBlock+1)
+		for rIter.SeekGE(seekRoot); rIter.Valid(); rIter.Next() {
+			key := rIter.Key()
+			if !bytes.HasPrefix(key, rootPrefix) {
+				break
+			}
+			if len(key) == len(rootPrefix)+8 {
+				if err := batch.Delete(append([]byte(nil), key...), nil); err != nil {
+					_ = rIter.Close()
+					return err
+				}
+			}
+		}
+		if err := rIter.Error(); err != nil {
+			_ = rIter.Close()
+			return err
+		}
+		if err := rIter.Close(); err != nil {
+			return err
+		}
+	}
+
+	highestMetaKey := []byte("__meta__:" + c.namespace + ":highest_block")
+	startMetaKey := []byte("__meta__:" + c.namespace + ":start_block")
+	newStart := curStart
+
+	if maxRemainingBlock == 0 && (newStart > targetBlock || targetBlock == 0) {
+		if err := batch.Delete(highestMetaKey, nil); err != nil {
+			return err
+		}
+		if newStart > targetBlock {
+			if err := batch.Delete(startMetaKey, nil); err != nil {
+				return err
+			}
+			newStart = 0
+		}
+	} else {
+		hb := make([]byte, 8)
+		binary.BigEndian.PutUint64(hb, maxRemainingBlock)
+		if err := batch.Set(highestMetaKey, hb, pebble.NoSync); err != nil {
+			return err
+		}
+	}
+
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return fmt.Errorf("failed to commit changelog rollback above block %d: %w", targetBlock, err)
+	}
+
+	c.highestBlock.Store(maxRemainingBlock)
+	c.startBlock.Store(newStart)
+	logger.Info("⏪ [CHANGELOG] Rolled back %d entries above block %d in namespace %s (highestBlock=%d, startBlock=%d)",
+		deletedEntries, targetBlock, c.namespace, maxRemainingBlock, newStart)
+	return nil
+}

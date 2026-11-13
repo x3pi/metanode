@@ -226,44 +226,34 @@ func (rh *RequestHandler) HandleGetBlocksRangeRequest(request *pb.GetBlocksRange
 			}
 			if getErr == nil && len(data) > 0 {
 				backupData = data
-			} else {
-				// Check whether a subsequent committed block already has persisted BackupDb.
-				// If a higher block's backup exists, the sequential async backupDbWorker has
-				// already advanced past blockNum (e.g., node crashed before persisting
-				// block_data_topic-N, then restarted and committed N+1). Breaking unconditionally
-				// here would permanently stall GetBlocksRange at 0 blocks forever (ADV-7).
-				workerMovedPast := false
-				maxProbe := lastBlockNumber
-				if maxProbe > blockNum+64 {
-					maxProbe = blockNum + 64
-				}
-				for probeNum := blockNum + 1; probeNum <= maxProbe; probeNum++ {
-					probePrimary := []byte(fmt.Sprintf("block_data_topic-%d", probeNum))
-					if pData, pErr := backupStorage.Get(probePrimary); pErr == nil && len(pData) > 0 {
-						workerMovedPast = true
-						break
-					}
-					probeLegacy := []byte(fmt.Sprintf("backup_%d", probeNum))
-					if pData, pErr := backupStorage.Get(probeLegacy); pErr == nil && len(pData) > 0 {
-						workerMovedPast = true
-						break
-					}
-				}
-				if workerMovedPast {
-					synthBackup, synthErr := storage.SerializeBackupDb(storage.BackUpDb{BockNumber: blockNum})
-					if synthErr == nil && len(synthBackup) > 0 {
-						logger.Warn("📦 [BLOCK SYNC] Missing BackupDb for historical block #%d (txs=%d) while higher block backup exists — synthesized fallback BackupDb", blockNum, len(blk.Transactions()))
-						if len(blk.Transactions()) == 0 {
-							_ = backupStorage.Put(primaryKey, synthBackup)
-						}
-						backupData = synthBackup
-					} else {
-						break
-					}
-				} else {
-					// Backup not ready — broadcastWorker/backupDbWorker may still be in flight for tip.
+			} else if len(blk.Transactions()) == 0 {
+				// Empty blocks (0 transactions) carry zero Account/Stake/SC state deltas,
+				// zero receipts, and zero Xapian FullDbLogs — RawBlockBytes already holds
+				// the complete canonical block. After catch-up recovery (reexecuteBlocksToCatchUp)
+				// or an async BackupDb lag/crash, >64 consecutive empty blocks may lack
+				// block_data_topic-N (ADV-19). Synthesize a minimal BackUpDb in O(1) so
+				// GetBlocksRange never stalls at Count=0 on empty blocks.
+				synthBackup, synthErr := storage.SerializeBackupDb(storage.BackUpDb{BockNumber: blockNum})
+				if synthErr != nil || len(synthBackup) == 0 {
 					break
 				}
+				if blockNum < lastBlockNumber {
+					_ = backupStorage.Put(primaryKey, synthBackup)
+				}
+				backupData = synthBackup
+			} else {
+				// Non-empty block (len(txs) > 0) missing BackupDb:
+				// NEVER synthesize an empty BackUpDb for a transaction block — doing so
+				// either poisons multi-peer select_ok races (winning with an incomplete
+				// state-less payload that aborts SyncBlocks on the receiver) or risks state drift.
+				// Break so GetBlocksRange returns fewer than expected blocks (allowing retry if
+				// backupDbWorker is still in flight at tip, or allowing select_ok to pick a
+				// healthy peer that has full BackupDb).
+				if blockNum < lastBlockNumber {
+					logger.Warn("📦 [BLOCK SYNC] Missing BackupDb for non-empty block #%d (txs=%d, tip=#%d) — stopping range at #%d so caller can retry or select a healthy peer",
+						blockNum, len(blk.Transactions()), lastBlockNumber, blockNum-1)
+				}
+				break
 			}
 		}
 		blockData.BackupData = backupData
