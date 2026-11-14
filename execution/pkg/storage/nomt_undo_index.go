@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 )
 
 const (
@@ -107,7 +108,9 @@ func PersistNomtUndoBatch(backupDB Storage, kind string, blockNum uint64, entrie
 		return nil
 	}
 	if len(entries) == 0 {
-		_ = backupDB.Delete(NomtUndoKey(kind, blockNum))
+		if err := backupDB.Delete(NomtUndoKey(kind, blockNum)); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return err
+		}
 	} else {
 		encoded := EncodeNomtUndoBatch(entries)
 		if err := backupDB.Put(NomtUndoKey(kind, blockNum), encoded); err != nil {
@@ -116,6 +119,30 @@ func PersistNomtUndoBatch(backupDB Storage, kind string, blockNum uint64, entrie
 	}
 	if blockNum > NomtUndoRetentionBlocks {
 		_ = backupDB.Delete(NomtUndoKey(kind, blockNum-NomtUndoRetentionBlocks))
+	}
+	return nil
+}
+
+// PersistNomtUndoForBlock is the write-ahead step for a block's validator NOMT undo: it persists the
+// account and/or stake pre-image batches for blockNum and must be called BEFORE the block's NOMT state is
+// committed. If either write fails, both records for blockNum are removed (so no half-written pair or stale
+// record from an earlier block at this height survives) and the error is returned; the caller must then
+// abort the block without committing its state.
+func PersistNomtUndoForBlock(backupDB Storage, blockNum uint64, writeAccount bool, accountPreImages [][2][]byte, writeStake bool, stakePreImages [][2][]byte) error {
+	if backupDB == nil || blockNum == 0 {
+		return nil
+	}
+	if writeAccount {
+		if err := PersistNomtUndoBatch(backupDB, NomtUndoKindAccount, blockNum, accountPreImages); err != nil {
+			DeleteNomtUndoForBlock(backupDB, blockNum)
+			return fmt.Errorf("persist account NOMT undo for block #%d: %w", blockNum, err)
+		}
+	}
+	if writeStake {
+		if err := PersistNomtUndoBatch(backupDB, NomtUndoKindStake, blockNum, stakePreImages); err != nil {
+			DeleteNomtUndoForBlock(backupDB, blockNum)
+			return fmt.Errorf("persist stake NOMT undo for block #%d: %w", blockNum, err)
+		}
 	}
 	return nil
 }

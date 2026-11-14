@@ -1502,6 +1502,29 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			}
 		}
 
+		// Write-ahead validator NOMT undo BEFORE CommitBlockState (same ordering as commitWorker): a block
+		// whose undo is not durable must not be committed, or a later fork rollback across it fails closed.
+		// On CommitBlockState failure below the record is kept on purpose: it is harmless (pre-images equal
+		// the blockNum-1 values) and the next execution of this height overwrites it.
+		if rh.storageManager != nil && trie.GetStateBackend() == trie.BackendNOMT {
+			if backupStorage := rh.storageManager.GetStorageBackupDb(); backupStorage != nil {
+				writeAccUndo := rh.chainState == nil || rh.chainState.GetChangelogDB() == nil
+				writeStakeUndo := rh.chainState == nil || rh.chainState.GetStakeChangelogDB() == nil
+				if uErr := storage.PersistNomtUndoForBlock(backupStorage, blockNum,
+					writeAccUndo, blockNomtPreImages["account_state"],
+					writeStakeUndo, blockNomtPreImages["stake_db"]); uErr != nil {
+					logger.Error("🚨 [SYNC-FATAL] [EXECUTE SYNC] NOMT undo durability failed for block #%d: %v — rolling back block mutations and aborting sync batch!", blockNum, uErr)
+					errMsg := fmt.Sprintf("NOMT undo durability failed for block %d: %v", blockNum, uErr)
+					rollbackBlockMutations()
+					if _, rbErr := mvm.RollbackXapianAboveBlock(blockNum - 1); rbErr != nil {
+						logger.Error("🚨 [FORK-RISK] RollbackXapianAboveBlock(%d) also FAILED after NOMT undo error at block #%d: %v", blockNum-1, blockNum, rbErr)
+						errMsg = fmt.Sprintf("%s (RollbackXapianAboveBlock(%d) also failed: %v)", errMsg, blockNum-1, rbErr)
+					}
+					return abortSyncBatch(errMsg)
+				}
+			}
+		}
+
 		// ═══════════════════════════════════════════════════════════════════════════
 		// STEP 2 & 3: CommitBlockState (protected by commitMutex and SEQUENTIAL GUARD)
 		// ═══════════════════════════════════════════════════════════════════════════
@@ -1677,21 +1700,6 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 		if len(backupBytes) > 0 {
 			rh.persistBackupForSub(backupBytes, blockNum)
 		}
-		if rh.storageManager != nil && trie.GetStateBackend() == trie.BackendNOMT && blockNum > 0 {
-			if backupStorage := rh.storageManager.GetStorageBackupDb(); backupStorage != nil {
-				if rh.chainState == nil || rh.chainState.GetChangelogDB() == nil {
-					if uErr := storage.PersistNomtUndoBatch(backupStorage, storage.NomtUndoKindAccount, blockNum, blockNomtPreImages["account_state"]); uErr != nil {
-						logger.Warn("⚠️ [EXECUTE SYNC] Failed to persist account NOMT undo for block #%d: %v", blockNum, uErr)
-					}
-				}
-				if rh.chainState == nil || rh.chainState.GetStakeChangelogDB() == nil {
-					if uErr := storage.PersistNomtUndoBatch(backupStorage, storage.NomtUndoKindStake, blockNum, blockNomtPreImages["stake_db"]); uErr != nil {
-						logger.Warn("⚠️ [EXECUTE SYNC] Failed to persist stake NOMT undo for block #%d: %v", blockNum, uErr)
-					}
-				}
-			}
-		}
-
 		logger.Debug("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ Executed block #%d: hash=%s, epoch=%d, gei=%d, txs=%d",
 			blockNum, blockHash.Hex()[:18]+"...", header.Epoch(), blockGEI, len(blk.Transactions()))
 
