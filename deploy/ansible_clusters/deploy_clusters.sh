@@ -318,6 +318,18 @@ if [ "$ACTION" = "rollback" ] && [ -n "$TARGET_NODE" ]; then
     exit 1
 fi
 
+# One-sided rollback is allowed (each side is a whole chain, so D9 holds), but parent and exec may then run
+# different cross-chain protocol versions.
+if [ "$ACTION" = "rollback" ] && { [ "${EXEC_ONLY:-false}" = "true" ] || [ "${PARENT_ONLY:-false}" = "true" ]; }; then
+    if [ "${EXEC_ONLY:-false}" = "true" ]; then
+        ROLLBACK_SIDE="Execution Clusters"; ROLLBACK_OTHER="Parent Chain"
+    else
+        ROLLBACK_SIDE="Parent Chain"; ROLLBACK_OTHER="Execution Clusters"
+    fi
+    echo "ℹ️  Rollback chỉ áp dụng cho ${ROLLBACK_SIDE} (toàn bộ chain, đúng nguyên tắc D9)."
+    echo "   ${ROLLBACK_OTHER} vẫn giữ phiên bản hiện tại — hãy chắc chắn hai phiên bản tương thích giao thức cross-chain."
+fi
+
 if [[ "$ACTION" =~ ^(deploy|restart)$ ]] && [ -n "$TARGET_NODE" ] && [ "${SKIP_BUILD:-false}" != "true" ]; then
     echo "⚠️  CẢNH BÁO: Bạn đang chạy ${ACTION} có build binary mới nhưng lại nhắm vào node cụ thể: ${TARGET_NODE}."
     echo "   Lưu ý: Nếu máy chủ có nhiều node dùng chung binary (/opt/metanode/bin), việc đổi binary trên đĩa"
