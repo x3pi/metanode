@@ -5,41 +5,119 @@
   when: groups['parent_chain_nodes'] is defined and (groups['parent_chain_nodes'] | length) > 0
 
 
+# ── Pre-stop Height Capture ──────────────────────────────────────────────────
+- name: Query current eth_blockNumber before stopping
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ rpc_port }}"
+    method: POST
+    body_format: json
+    body:
+      jsonrpc: "2.0"
+      method: "eth_blockNumber"
+      params: []
+      id: 1
+    status_code: 200
+    timeout: 5
+  register: exec_pre_stop_block
+  failed_when: false
+  when: deploy_action in ['deploy', 'restart', 'rollback']
+
+- name: Record pre-stop height for Execution Node
+  ansible.builtin.set_fact:
+    exec_pre_stop_height: "{{ ((exec_pre_stop_block.json.result | default('0x0')) | int(base=16)) if (exec_pre_stop_block.status | default(0) == 200 and exec_pre_stop_block.json is defined and exec_pre_stop_block.json.result is defined) else 0 }}"
+  when: deploy_action in ['deploy', 'restart', 'rollback']
+
+# Warn instead of fail: a hung RPC is a common reason to restart, and a fresh chain is legitimately at 0.
+- name: Warn that Gate G3 regression check is disabled (pre-stop height unknown)
+  ansible.builtin.debug:
+    msg: >-
+      ⚠️ {{ inventory_hostname }}: could not read pre-stop height (RPC down/not responding, or chain at block 0).
+      Gate G3 'height >= pre-stop height' cannot detect a chain regression for this node.
+  when:
+    - deploy_action in ['deploy', 'restart', 'rollback']
+    - (exec_pre_stop_height | default(0) | int) == 0
+
 # ── Stop Service ─────────────────────────────────────────────────────────────
 - name: Stop Execution Node {{ inventory_hostname }}
-  when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy', 'setup']"
+  when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy', 'setup', 'rollback']"
   block:
+    - name: Check systemd ActiveState before stopping Execution Node
+      ansible.builtin.command:
+        cmd: "systemctl show -p ActiveState --value metanode-{{ inventory_hostname }}"
+      register: exec_pre_stop_active_state
+      changed_when: false
+      when: deploy_action in ['deploy', 'restart', 'rollback']
+
     - name: Stop via systemd
       ansible.builtin.systemd:
         name: "metanode-{{ inventory_hostname }}"
         state: stopped
         enabled: "{{ 'no' if deploy_action == 'stop' else omit }}"
       ignore_errors: true
+      register: exec_systemd_stop
+
+    - name: Check systemd stop Result for Execution Node
+      ansible.builtin.command:
+        cmd: "systemctl show -p Result --value metanode-{{ inventory_hostname }}"
+      register: exec_stop_result
+      changed_when: false
+      when: deploy_action in ['deploy', 'restart', 'rollback']
+
+    - name: Assert Execution Node stopped cleanly
+      ansible.builtin.assert:
+        that:
+          - exec_stop_result.stdout == 'success'
+        fail_msg: >-
+          FATAL: Execution Node {{ inventory_hostname }} failed to stop cleanly via systemd!
+          Result was: '{{ exec_stop_result.stdout }}'. Possible timeout (>{{ systemd_timeout_stop_sec | default(30) }}s) or crash during DB flush.
+          Aborting fast-swap upgrade to protect state database!
+      when:
+        - deploy_action in ['deploy', 'restart', 'rollback']
+        - (exec_pre_stop_active_state.stdout | default('')) == 'active'
+
+    - name: Warn if Execution Node was not active prior to stop
+      ansible.builtin.debug:
+        msg: "⚠️ WARNING: Execution Node {{ inventory_hostname }} was in '{{ exec_pre_stop_active_state.stdout | default('unknown') }}' state prior to stop (previous crash or offline). Proceeding with restart."
+      when:
+        - deploy_action in ['deploy', 'restart', 'rollback']
+        - (exec_pre_stop_active_state.stdout | default('')) != 'active'
 
     - name: Terminate lingering process for this exact execution node
+      when: (exec_stop_result.stdout | default('')) != 'success'
       ansible.builtin.shell:
         cmd: |
+          grace={{ systemd_timeout_stop_sec | default(30) }}
+          kill_process() {
+            local pid="$1"
+            if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+              kill -15 "$pid" 2>/dev/null || true
+              local elapsed=0
+              while [ -d "/proc/$pid" ] && [ $elapsed -lt $grace ]; do
+                sleep 1
+                elapsed=$((elapsed + 1))
+              done
+              if [ -d "/proc/$pid" ]; then
+                echo "⚠️ WARNING: Process $pid did not exit cleanly within ${grace}s grace period! Forcing SIGKILL..."
+                kill -9 "$pid" 2>/dev/null || true
+              fi
+            fi
+          }
+
           # 1. Kill via PID file if valid for this node data directory
           if [ -f "{{ node_data_dir }}/cluster.pid" ]; then
             pid=$(cat "{{ node_data_dir }}/cluster.pid" 2>/dev/null || true)
             if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
               if grep -q -F "{{ node_data_dir }}" "/proc/$pid/cmdline" 2>/dev/null; then
-                kill -15 "$pid" 2>/dev/null || true
-                sleep 0.5
-                kill -9 "$pid" 2>/dev/null || true
+                kill_process "$pid"
               fi
             fi
             rm -f "{{ node_data_dir }}/cluster.pid"
           fi
 
           # 2. Kill only simple_chain processes started for THIS node (exact process name + this node's config/data dir).
-          #    Match on the process name (pgrep -x), NOT on the command line: this script's own `sh -c` command line
-          #    contains the same strings and would otherwise terminate itself.
           for pid in $(pgrep -x simple_chain 2>/dev/null || true); do
             if tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q -F "{{ node_data_dir }}"; then
-              kill -15 "$pid" 2>/dev/null || true
-              sleep 0.5
-              kill -9 "$pid" 2>/dev/null || true
+              kill_process "$pid"
             fi
           done
 
@@ -47,12 +125,53 @@
           target_port="{{ rpc_port }}"
           for pid in $(ss -ltnpH "sport = :$target_port" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p'); do
             if grep -q -F "simple_chain" "/proc/$pid/cmdline" 2>/dev/null; then
-              kill -15 "$pid" 2>/dev/null || true
-              sleep 0.5
-              kill -9 "$pid" 2>/dev/null || true
+              kill_process "$pid"
             fi
           done
       failed_when: false
+
+# ── Fast-Swap Binary Step (Host-level atomic swap) ───────────────────────────
+- name: Fast-swap Execution Node binary on host
+  when:
+    - deploy_action in ['deploy', 'restart', 'rollback']
+    - inventory_hostname == (groups['machine_' ~ (ansible_host | replace('.', '_')) ~ '_' ~ (ansible_port | default(22) | string)] | intersect(ansible_play_hosts) | first)
+  block:
+    - name: Swap new binary into place (deploy/restart)
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          if [ -f "{{ bin_dir }}/simple_chain.new" ]; then
+            if [ -f "{{ bin_dir }}/simple_chain" ]; then
+              current_sha=$(sha256sum "{{ bin_dir }}/simple_chain" | awk '{print $1}')
+              new_sha=$(sha256sum "{{ bin_dir }}/simple_chain.new" | awk '{print $1}')
+              if [ "$current_sha" = "$new_sha" ]; then
+                echo "Binary simple_chain is already up-to-date ($current_sha). Keeping existing .prev intact."
+                rm -f "{{ bin_dir }}/simple_chain.new"
+                exit 0
+              fi
+            fi
+            mv -f "{{ bin_dir }}/simple_chain" "{{ bin_dir }}/simple_chain.prev" 2>/dev/null || true
+            mv -f "{{ bin_dir }}/simple_chain.new" "{{ bin_dir }}/simple_chain"
+            chmod 0755 "{{ bin_dir }}/simple_chain"
+          fi
+      when:
+        - deploy_action in ['deploy', 'restart']
+        - not (skip_build | default(false) | bool)
+
+    - name: Rollback binary to previous version (rollback)
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          if [ -f "{{ bin_dir }}/simple_chain.prev" ]; then
+            mv -f "{{ bin_dir }}/simple_chain" "{{ bin_dir }}/simple_chain.bad" 2>/dev/null || true
+            mv -f "{{ bin_dir }}/simple_chain.prev" "{{ bin_dir }}/simple_chain"
+            chmod 0755 "{{ bin_dir }}/simple_chain"
+          else
+            # Never start the current binary and report a successful rollback.
+            echo "FATAL: rollback requested but {{ bin_dir }}/simple_chain.prev is missing on {{ inventory_hostname }}" >&2
+            exit 1
+          fi
+      when: deploy_action == 'rollback'
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────
 - name: Clean Execution Node {{ inventory_hostname }} data directories
@@ -137,7 +256,7 @@
 
 # ── Setup Configuration, Genesis & Service Unit ──────────────────────────────
 - name: Setup Execution Node {{ inventory_hostname }}
-  when: "deploy_action in ['setup', 'deploy', 'restart', 'reset']"
+  when: "deploy_action in ['setup', 'deploy', 'restart', 'reset', 'rollback']"
   block:
     - name: Provision swap file on low-RAM nodes when swap_size_gb is configured
       when: "(swap_size_gb | default(0) | int) > 0"
@@ -526,9 +645,9 @@
         dest: "/etc/logrotate.d/metanode-exec-{{ inventory_hostname }}"
         mode: '0644'
 
-# ── Start / Restart Service ──────────────────────────────────────────────────
-- name: Start Execution Node {{ inventory_hostname }}
-  when: "deploy_action in ['setup', 'deploy', 'start', 'restart', 'reset']"
+# ── Start / Restart Service & Healthcheck Gates ──────────────────────────────
+- name: Start Execution Node and Verify Health Gates
+  when: "deploy_action in ['setup', 'deploy', 'start', 'restart', 'reset', 'rollback']"
   block:
     - name: Start service via systemd
       ansible.builtin.systemd:
@@ -537,14 +656,25 @@
         enabled: yes
         daemon_reload: yes
 
-    - name: Wait for Cluster RPC port to respond
+    # ── Gate G1: Process active ──
+    - name: "Gate G1: Verify Execution Node service is active"
+      ansible.builtin.command:
+        cmd: "systemctl is-active metanode-{{ inventory_hostname }}"
+      register: g1_exec_status
+      changed_when: false
+      retries: 5
+      delay: 2
+      until: g1_exec_status.stdout == 'active'
+
+    # ── Gate G2: RPC port responds ──
+    - name: "Gate G2: Wait for Cluster RPC port to respond"
       ansible.builtin.wait_for:
         port: "{{ rpc_port }}"
         host: "127.0.0.1"
-        delay: 2
+        delay: 1
         timeout: 30
 
-    - name: Query eth_blockNumber from cluster RPC
+    - name: "Gate G2: Query eth_blockNumber from cluster RPC"
       ansible.builtin.uri:
         url: "http://127.0.0.1:{{ rpc_port }}"
         method: POST
@@ -555,7 +685,145 @@
           params: []
           id: 1
         status_code: 200
-      register: block_check
+      register: g2_block_check
       retries: 5
       delay: 2
-      until: block_check.status == 200
+      until: g2_block_check.status == 200
+
+    # ── Gate G3: Consensus Ready & Height >= pre_stop_height ──
+    - name: "Gate G3: Poll eth_consensusReady until consensus is ready"
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ rpc_port }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method: "eth_consensusReady"
+          params: []
+          id: 1
+        status_code: 200
+      register: g3_consensus_check
+      retries: "{{ gate_ready_retries | default(25) }}"
+      delay: "{{ gate_ready_delay | default(2) }}"
+      until:
+        - g3_consensus_check.status == 200
+        - g3_consensus_check.json is defined
+        - g3_consensus_check.json.result is defined
+        - (g3_consensus_check.json.result.ready | default(false) | bool) == true
+
+    - name: "Gate G3: Record post-start block height"
+      ansible.builtin.set_fact:
+        exec_post_start_height: "{{ ((g3_consensus_check.json.result.blockNumber | default('0x0')) | int(base=16)) }}"
+
+    - name: "Gate G3: Assert block height >= pre_stop_height"
+      ansible.builtin.assert:
+        that:
+          - (exec_post_start_height | int) >= (exec_pre_stop_height | default(0) | int)
+        fail_msg: >-
+          Gate G3 failed on {{ inventory_hostname }}: post-start height ({{ exec_post_start_height }})
+          is lower than pre-stop height ({{ exec_pre_stop_height | default(0) }})! Chain regressed!
+
+    # ── Gate G4: Anti-fork verification across cluster nodes ──
+    - name: "Gate G4: Find all peers in the same cluster"
+      ansible.builtin.set_fact:
+        cluster_peer_hosts: "{{ ansible_play_hosts | map('extract', hostvars) | selectattr('cluster_id', 'defined') | selectattr('cluster_id', 'equalto', cluster_id) | map(attribute='inventory_hostname') | list }}"
+
+    # Compare play peers against the INVENTORY (not the play): a partial play would otherwise compare only part of the cluster.
+    - name: "Gate G4: Count cluster nodes declared in inventory"
+      ansible.builtin.set_fact:
+        cluster_inventory_peer_count: "{{ groups['exec_clusters'] | default([]) | map('extract', hostvars) | selectattr('cluster_id', 'defined') | selectattr('cluster_id', 'equalto', cluster_id) | list | length }}"
+
+    - name: "Gate G4: Sanity check cluster peer discovery"
+      ansible.builtin.assert:
+        that:
+          - (cluster_peer_hosts | length) == (cluster_inventory_peer_count | int)
+        fail_msg: >-
+          Gate G4 cannot verify the whole cluster on {{ inventory_hostname }}: only {{ cluster_peer_hosts | length }} of
+          {{ cluster_inventory_peer_count }} nodes of cluster_id {{ cluster_id }} are in this play ({{ cluster_peer_hosts }}).
+      when: not (partial_target | default(false) | bool)
+
+    - name: "Gate G4: Warn that fork check covers only part of the cluster (--node/--host)"
+      ansible.builtin.debug:
+        msg: >-
+          ⚠️ G4 partial: only {{ cluster_peer_hosts | length }} of {{ cluster_inventory_peer_count }} nodes of
+          cluster_id {{ cluster_id }} are in this play; fork check does not cover the whole cluster.
+      when:
+        - partial_target | default(false) | bool
+        - (cluster_peer_hosts | length) < (cluster_inventory_peer_count | int)
+
+    - name: "Gate G4: Compute minimum block height in cluster"
+      ansible.builtin.set_fact:
+        cluster_min_height: "{{ cluster_peer_hosts | map('extract', hostvars, 'exec_post_start_height') | map('int') | min }}"
+
+    - name: "Gate G4: Query block hash at min_height from cluster RPC"
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ rpc_port }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method: "eth_getBlockByNumber"
+          params: ["{{ '0x%x' | format(cluster_min_height | int) if (cluster_min_height | int > 0) else '0x0' }}", false]
+          id: 1
+        status_code: 200
+      register: g4_block_res
+      retries: "{{ gate_hash_retries | default(15) }}"
+      delay: "{{ gate_hash_delay | default(2) }}"
+      until:
+        - g4_block_res.status == 200
+        - g4_block_res.json is defined
+        - g4_block_res.json.result is defined
+        - g4_block_res.json.result.hash is defined
+
+    - name: "Gate G4: Record canonical block hash at min_height"
+      ansible.builtin.set_fact:
+        cluster_block_hash_at_min: "{{ g4_block_res.json.result.hash }}"
+
+    - name: "Gate G4: Assert canonical block hash matches cluster leader"
+      ansible.builtin.assert:
+        that:
+          - cluster_block_hash_at_min == hostvars[cluster_leader_host]['cluster_block_hash_at_min']
+        fail_msg: >-
+          FORK DETECTED! Gate G4 failed on {{ inventory_hostname }} (Cluster {{ cluster_id }}):
+          Block hash at height {{ cluster_min_height }} is {{ cluster_block_hash_at_min }},
+          which does NOT match cluster leader {{ cluster_leader_host }} ({{ hostvars[cluster_leader_host]['cluster_block_hash_at_min'] | default('unknown') }}).
+          Chain has forked! Halting immediately to preserve state.
+      vars:
+        cluster_leader_host: "{{ cluster_peer_hosts | first }}"
+      when: (cluster_peer_hosts | length) > 1
+
+    # ── Gate G5: Installed binary sha256 ──
+    - name: "Gate G5: Verify installed simple_chain binary checksum"
+      ansible.builtin.stat:
+        path: "{{ bin_dir }}/simple_chain"
+        checksum_algorithm: sha256
+      register: exec_running_bin_stat
+      when: not (skip_build | default(false) | bool) and (deploy_action in ['deploy', 'restart'])
+
+    - name: "Gate G5: Assert binary checksum matches expected build"
+      ansible.builtin.assert:
+        that:
+          - exec_running_bin_stat.stat.checksum == hostvars['localhost']['expected_sha_exec']
+        fail_msg: >-
+          Gate G5 failed on {{ inventory_hostname }}: running simple_chain binary sha256
+          ({{ exec_running_bin_stat.stat.checksum }}) != expected ({{ hostvars['localhost']['expected_sha_exec'] }}).
+      when: not (skip_build | default(false) | bool) and (deploy_action in ['deploy', 'restart']) and (hostvars['localhost']['expected_sha_exec'] | default('') | length > 0)
+
+  rescue:
+    - name: "FAIL-STOP: Retrieve last 50 lines of journal logs for {{ inventory_hostname }}"
+      ansible.builtin.command:
+        cmd: "journalctl -u metanode-{{ inventory_hostname }} -n 50 --no-pager"
+      register: failed_journal_logs_exec
+      changed_when: false
+      ignore_errors: true
+
+    - name: "FAIL-STOP: Output Execution Node journal logs"
+      ansible.builtin.debug:
+        msg: "{{ failed_journal_logs_exec.stdout_lines | default(['No journal logs available']) }}"
+
+    - name: "FAIL-STOP: Abort deployment to preserve failure scene"
+      ansible.builtin.fail:
+        msg: >-
+          FATAL: Healthcheck gates failed on Execution Node {{ inventory_hostname }}!
+          Deployment halted immediately (Fail-Stop) to preserve diagnostic state.
+          Review the journalctl output above. Do NOT restart single nodes.

@@ -156,14 +156,33 @@ tail -f /tmp/parent_chain_monitor.log
 | :--- | :--- |
 | `./deploy_clusters.sh --status` | Xem trạng thái RPC và Block Height hiện tại của tất cả cụm node |
 | `./deploy_clusters.sh --test-only` | Chỉ chạy bộ kiểm thử kịch bản thực tế (không deploy lại) |
-| `./deploy_clusters.sh --deploy` | Cập nhật mã nguồn/binary mới và restart các cụm |
-| `./deploy_clusters.sh --restart` | Khởi động lại toàn bộ Parent Chain và các Execution Clusters |
-| `./deploy_clusters.sh --stop` | Dừng an toàn toàn bộ tiến trình cụm node |
+| `./deploy_clusters.sh --deploy` | Fast-swap: Cập nhật binary mới (.new), pre-stage trước khi dừng, restart đồng loạt và kiểm tra Gate G1-G5 |
+| `./deploy_clusters.sh --restart` | Fast-swap: Build lại binary, pre-stage và khởi động lại toàn bộ cụm node |
+| `./deploy_clusters.sh --restart --skip-build` | Chỉ restart với binary hiện có trên node, không build lại và không stage binary |
+| `./deploy_clusters.sh --rollback` | Rollback toàn bộ cụm về binary trước đó (.prev), có Fail-Stop bảo vệ trạng thái |
+| `./deploy_clusters.sh --stop` | Dừng an toàn toàn bộ tiến trình cụm node (tự chờ flush DB qua TimeoutStopSec) |
 | `./deploy_clusters.sh --clean` | Xóa database và logs, giữ lại cấu hình và keys |
 | `./deploy_clusters.sh --reset` | Reset toàn bộ hệ sinh thái về Block 0 và khởi chạy lại |
 | `./deploy_clusters.sh --systemd` | Sử dụng `systemd` service thay vì background daemon |
 | `./deploy_clusters.sh --env=production` | Đặt môi trường deploy (`devnet` hoặc `production`). Mặc định là `devnet` cho test cluster. |
 | `./deploy_clusters.sh --vault-password-file FILE` | Chỉ định file mật khẩu Ansible Vault để giải mã credentials |
+
+---
+
+## ⚡ Cơ Chế Fast-Swap & Fail-Stop Nâng Cấp Không Downtime Kéo Dài
+
+Khi nâng cấp mạng bằng `--deploy` hoặc `--restart`:
+1. **Pre-stage Binary (Zero-downtime staging):** Binary mới được biên dịch và copy lên toàn bộ server đích thành `{{ bin_dir }}/<name>.new` trong khi mạng vẫn đang hoạt động 100%. Checksum sha256 được xác thực khớp tuyệt đối trước khi bất kỳ service nào bị dừng.
+2. **Coordinated Halt & Atomic Swap:** Dừng dịch vụ qua systemd (tự flush state sạch sẽ vào disk), kiểm tra `Result == success`, sau đó thực hiện rename nguyên tử:
+   `mv <name> <name>.prev && mv <name>.new <name>` (được thực thi đúng 1 lần trên mỗi máy chủ vật lý).
+3. **Healthcheck Gates (G1 - G5):**
+   - **G1 (Process):** `systemctl is-active` = `active`.
+   - **G2 (RPC):** Cổng RPC phản hồi HTTP 200.
+   - **G3 (Sẵn sàng & Tiến trình):** Exec RPC `eth_consensusReady` trả về `ready == true` và `blockNumber >= pre_stop_height`. Parent Chain `fork_detected == false` và `last_block >= pre_stop_height`.
+   - **G4 (Chống Fork):** Kiểm tra block hash tại `min_height` giữa toàn bộ node trong cùng cluster. Nếu phát hiện hash lệch nhau, lập tức kích hoạt FAIL-STOP.
+   - **G5 (Checksum Binary):** Xác thực sha256 của file binary đang chạy khớp với bản build controller.
+4. **Fail-Stop Principle:** Nếu bất kỳ Gate nào thất bại, playbook dừng lại ngay lập tức, tự động trích xuất 50 dòng log `journalctl` của node bị lỗi để giữ nguyên hiện trường phục vụ debug, **không bao giờ tự động rollback riêng rẽ một node** (chống chạy lệch phiên bản).
+5. **Rollback An Toàn Toàn Cụm (`--rollback`):** Đưa toàn bộ các validator trong chain trở về file `.prev` đồng loạt. Phải có xác nhận `--force` trên production.
 
 ---
 

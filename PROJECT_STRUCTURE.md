@@ -171,7 +171,9 @@ metanode/
 > also fall back to NOMT; deploy template `exec_config.json.j2` defaults to `nomt`). MPT/flat/verkle code
 > remains only for unit tests and the archive-state tool `cmd/tool/tool-test-chain/test-rpc/test-history`.
 > Never set `mpt` on a real node. NOMT keeps only the latest state; trie realignment happens only via
-> `WithRebuildTries()` (startup/snapshot) or the per-block realign in P2P sync — never in the pipelined commitWorker.
+> `WithRebuildTries()` (startup/snapshot) or the per-block `RealignRoot` that the P2P sync handler does itself right
+> after each `CommitBlockState` (`executor/unix_socket_handler_sync.go`, "BLOCK-BY-BLOCK REALIGNMENT") — never inside
+> `CommitBlockState` and never in the pipelined commitWorker.
 
 ### 5.5 `execution/executor/` — Go side of the FFI bridge
 | File | Role |

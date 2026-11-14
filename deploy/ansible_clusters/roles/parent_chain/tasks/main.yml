@@ -11,16 +11,76 @@
       parent_allowed_clusters (founding clusters) or parent_float_accounts (genesis balances; any key reaching parent_min_float_to_register may register) for production, or
       parent_open_cluster_registration: true (devnet only).
 
+# ── Pre-stop Height Capture ──────────────────────────────────────────────────
+- name: Query current Parent Chain status before stopping
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ parent_http_port | default(8547) }}/status"
+    method: GET
+    status_code: [200, 404]
+    timeout: 5
+  register: parent_pre_stop_status
+  failed_when: false
+  when: deploy_action in ['deploy', 'restart', 'rollback']
+
+- name: Record pre-stop height for Parent Chain
+  ansible.builtin.set_fact:
+    parent_pre_stop_height: "{{ (parent_pre_stop_status.json.last_block | default(0)) | int if (parent_pre_stop_status.status | default(0) == 200 and parent_pre_stop_status.json is defined and parent_pre_stop_status.json.last_block is defined) else 0 }}"
+  when: deploy_action in ['deploy', 'restart', 'rollback']
+
+# Warn instead of fail: a hung RPC is a common reason to restart, and a fresh chain is legitimately at 0.
+- name: Warn that Gate G3 regression check is disabled (pre-stop height unknown)
+  ansible.builtin.debug:
+    msg: >-
+      ⚠️ {{ inventory_hostname }}: could not read pre-stop height (RPC down/not responding, or chain at block 0).
+      Gate G3 'height >= pre-stop height' cannot detect a chain regression for this node.
+  when:
+    - deploy_action in ['deploy', 'restart', 'rollback']
+    - (parent_pre_stop_height | default(0) | int) == 0
+
 # ── Stop Service ─────────────────────────────────────────────────────────────
 - name: Stop Parent Chain service {{ inventory_hostname }}
-  when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy', 'setup']"
+  when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy', 'setup', 'rollback']"
   block:
+    - name: Check systemd ActiveState before stopping Parent Chain
+      ansible.builtin.command:
+        cmd: "systemctl show -p ActiveState --value metanode-{{ inventory_hostname }}"
+      register: parent_pre_stop_active_state
+      changed_when: false
+      when: deploy_action in ['deploy', 'restart', 'rollback']
+
     - name: Stop Parent Chain via systemd
       ansible.builtin.systemd:
         name: "metanode-{{ inventory_hostname }}"
         state: stopped
         enabled: "{{ 'no' if deploy_action == 'stop' else omit }}"
       ignore_errors: true
+      register: parent_systemd_stop
+
+    - name: Check systemd stop Result for Parent Chain
+      ansible.builtin.command:
+        cmd: "systemctl show -p Result --value metanode-{{ inventory_hostname }}"
+      register: parent_stop_result
+      changed_when: false
+      when: deploy_action in ['deploy', 'restart', 'rollback']
+
+    - name: Assert Parent Chain stopped cleanly
+      ansible.builtin.assert:
+        that:
+          - parent_stop_result.stdout == 'success'
+        fail_msg: >-
+          FATAL: Node {{ inventory_hostname }} failed to stop cleanly via systemd!
+          Result was: '{{ parent_stop_result.stdout }}'. Possible timeout (>{{ systemd_timeout_stop_sec | default(30) }}s) or crash during DB flush.
+          Aborting fast-swap upgrade to protect state database!
+      when:
+        - deploy_action in ['deploy', 'restart', 'rollback']
+        - (parent_pre_stop_active_state.stdout | default('')) == 'active'
+
+    - name: Warn if Parent Chain was not active prior to stop
+      ansible.builtin.debug:
+        msg: "⚠️ WARNING: Parent Chain {{ inventory_hostname }} was in '{{ parent_pre_stop_active_state.stdout | default('unknown') }}' state prior to stop (previous crash or offline). Proceeding with restart."
+      when:
+        - deploy_action in ['deploy', 'restart', 'rollback']
+        - (parent_pre_stop_active_state.stdout | default('')) != 'active'
 
     - name: Stop and disable legacy metanode-parentchain via systemd if present
       ansible.builtin.systemd:
@@ -31,29 +91,41 @@
       ignore_errors: true
 
     - name: Terminate lingering process for this exact parent node
+      when: (parent_stop_result.stdout | default('')) != 'success'
       ansible.builtin.shell:
         cmd: |
+          grace={{ systemd_timeout_stop_sec | default(30) }}
+          kill_process() {
+            local pid="$1"
+            if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+              kill -15 "$pid" 2>/dev/null || true
+              local elapsed=0
+              while [ -d "/proc/$pid" ] && [ $elapsed -lt $grace ]; do
+                sleep 1
+                elapsed=$((elapsed + 1))
+              done
+              if [ -d "/proc/$pid" ]; then
+                echo "⚠️ WARNING: Process $pid did not exit cleanly within ${grace}s grace period! Forcing SIGKILL..."
+                kill -9 "$pid" 2>/dev/null || true
+              fi
+            fi
+          }
+
           # 1. Kill via PID file if valid for this node data directory
           if [ -f "{{ node_data_dir }}/parent_chain.pid" ]; then
             pid=$(cat "{{ node_data_dir }}/parent_chain.pid" 2>/dev/null || true)
             if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
               if grep -q -F "{{ node_data_dir }}" "/proc/$pid/cmdline" 2>/dev/null; then
-                kill -15 "$pid" 2>/dev/null || true
-                sleep 0.5
-                kill -9 "$pid" 2>/dev/null || true
+                kill_process "$pid"
               fi
             fi
             rm -f "{{ node_data_dir }}/parent_chain.pid"
           fi
 
           # 2. Kill only parent_chain processes started for THIS node (exact process name + this node's config/data dir).
-          #    Match on the process name (pgrep -x), NOT on the command line: this script's own `sh -c` command line
-          #    contains the same strings and would otherwise terminate itself.
           for pid in $(pgrep -x parent_chain 2>/dev/null || true); do
             if tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q -F "{{ node_data_dir }}"; then
-              kill -15 "$pid" 2>/dev/null || true
-              sleep 0.5
-              kill -9 "$pid" 2>/dev/null || true
+              kill_process "$pid"
             fi
           done
 
@@ -61,12 +133,53 @@
           target_port="{{ parent_http_port | default(8547) }}"
           for pid in $(ss -ltnpH "sport = :$target_port" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p'); do
             if grep -q -F "parent_chain" "/proc/$pid/cmdline" 2>/dev/null; then
-              kill -15 "$pid" 2>/dev/null || true
-              sleep 0.5
-              kill -9 "$pid" 2>/dev/null || true
+              kill_process "$pid"
             fi
           done
       failed_when: false
+
+# ── Fast-Swap Binary Step (Host-level atomic swap) ───────────────────────────
+- name: Fast-swap Parent Chain binary on host
+  when:
+    - deploy_action in ['deploy', 'restart', 'rollback']
+    - inventory_hostname == (groups['machine_' ~ (ansible_host | replace('.', '_')) ~ '_' ~ (ansible_port | default(22) | string)] | intersect(ansible_play_hosts) | first)
+  block:
+    - name: Swap new binary into place (deploy/restart)
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          if [ -f "{{ bin_dir }}/parent_chain.new" ]; then
+            if [ -f "{{ bin_dir }}/parent_chain" ]; then
+              current_sha=$(sha256sum "{{ bin_dir }}/parent_chain" | awk '{print $1}')
+              new_sha=$(sha256sum "{{ bin_dir }}/parent_chain.new" | awk '{print $1}')
+              if [ "$current_sha" = "$new_sha" ]; then
+                echo "Binary parent_chain is already up-to-date ($current_sha). Keeping existing .prev intact."
+                rm -f "{{ bin_dir }}/parent_chain.new"
+                exit 0
+              fi
+            fi
+            mv -f "{{ bin_dir }}/parent_chain" "{{ bin_dir }}/parent_chain.prev" 2>/dev/null || true
+            mv -f "{{ bin_dir }}/parent_chain.new" "{{ bin_dir }}/parent_chain"
+            chmod 0755 "{{ bin_dir }}/parent_chain"
+          fi
+      when:
+        - deploy_action in ['deploy', 'restart']
+        - not (skip_build | default(false) | bool)
+
+    - name: Rollback binary to previous version (rollback)
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          if [ -f "{{ bin_dir }}/parent_chain.prev" ]; then
+            mv -f "{{ bin_dir }}/parent_chain" "{{ bin_dir }}/parent_chain.bad" 2>/dev/null || true
+            mv -f "{{ bin_dir }}/parent_chain.prev" "{{ bin_dir }}/parent_chain"
+            chmod 0755 "{{ bin_dir }}/parent_chain"
+          else
+            # Never start the current binary and report a successful rollback.
+            echo "FATAL: rollback requested but {{ bin_dir }}/parent_chain.prev is missing on {{ inventory_hostname }}" >&2
+            exit 1
+          fi
+      when: deploy_action == 'rollback'
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────
 - name: Clean Parent Chain data directories
@@ -141,7 +254,7 @@
 
 # ── Setup Configuration & Service Unit ───────────────────────────────────────
 - name: Setup Parent Chain configuration
-  when: "deploy_action in ['setup', 'deploy', 'restart', 'reset']"
+  when: "deploy_action in ['setup', 'deploy', 'restart', 'reset', 'rollback']"
   block:
     - name: Ensure Parent Chain data and log directories exist
       ansible.builtin.file:
@@ -321,9 +434,9 @@
         dest: "/etc/logrotate.d/metanode-parentchain-{{ inventory_hostname }}"
         mode: '0644'
 
-# ── Start / Restart Service ──────────────────────────────────────────────────
-- name: Start Parent Chain
-  when: "deploy_action in ['setup', 'deploy', 'start', 'restart', 'reset']"
+# ── Start / Restart Service & Healthcheck Gates ──────────────────────────────
+- name: Start Parent Chain and Verify Health Gates
+  when: "deploy_action in ['setup', 'deploy', 'start', 'restart', 'reset', 'rollback']"
   block:
     - name: Verify genesis checksum matches cluster leader before starting
       ansible.builtin.assert:
@@ -348,19 +461,169 @@
         enabled: yes
         daemon_reload: yes
 
-    - name: Wait for Parent Chain HTTP RPC port to respond
-      ansible.builtin.wait_for:
-        port: "{{ parent_http_port | default(8547) }}"
-        host: "{{ ansible_host | default('127.0.0.1') }}"
-        delay: 2
-        timeout: 25
-
-    - name: Verify Parent Chain HTTP RPC endpoint
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ parent_http_port | default(8547) }}/inbound?cluster_id=1"
-        method: GET
-        status_code: [200, 404]
-      register: rpc_check
+    # ── Gate G1: Process active ──
+    - name: "Gate G1: Verify Parent Chain service is active"
+      ansible.builtin.command:
+        cmd: "systemctl is-active metanode-{{ inventory_hostname }}"
+      register: g1_parent_status
+      changed_when: false
       retries: 5
       delay: 2
-      until: rpc_check.status in [200, 404]
+      until: g1_parent_status.stdout == 'active'
+
+    # ── Gate G2: RPC port responds ──
+    - name: "Gate G2: Wait for Parent Chain HTTP RPC port to respond"
+      ansible.builtin.wait_for:
+        port: "{{ parent_http_port | default(8547) }}"
+        host: "127.0.0.1"
+        delay: 1
+        timeout: 30
+
+    - name: "Gate G2: Verify Parent Chain status RPC endpoint"
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ parent_http_port | default(8547) }}/status"
+        method: GET
+        status_code: 200
+      register: parent_gate_status
+      retries: "{{ gate_ready_retries | default(15) }}"
+      delay: "{{ gate_ready_delay | default(2) }}"
+      until: parent_gate_status.status == 200
+
+    # ── Gate G3: Ready & Height >= pre_stop_height ──
+    - name: "Gate G3: Record post-start height"
+      ansible.builtin.set_fact:
+        parent_post_start_height: "{{ (parent_gate_status.json.last_block | default(0)) | int }}"
+
+    - name: "Gate G3: Assert Parent Chain is ready without fork"
+      ansible.builtin.assert:
+        that:
+          - not (parent_gate_status.json.fork_detected | default(false))
+          - (parent_post_start_height | int) >= (parent_pre_stop_height | default(0) | int)
+        fail_msg: >-
+          Gate G3 failed on {{ inventory_hostname }}:
+          fork_detected={{ parent_gate_status.json.fork_detected | default(false) }},
+          post_start_height={{ parent_post_start_height }},
+          pre_stop_height={{ parent_pre_stop_height | default(0) }}.
+
+    # ── Gate G4: Anti-fork verification across parent nodes ──
+    # Compare the block hash at the lowest post-start height of all parent nodes in the play (every node has that block),
+    # instead of comparing last_hash only when heights happen to be equal (which silently skipped the check).
+    # setup/reset run this play with serial: 1, so the other parent nodes have not started yet and there is
+    # nothing to compare against; G4 parent applies only to the all-at-once actions.
+    - name: "Gate G4: Find Parent Chain peers in this play"
+      ansible.builtin.set_fact:
+        parent_peer_hosts: "{{ [] if deploy_action in ['setup', 'reset'] else (groups['parent_chain_nodes'] | default([]) | intersect(ansible_play_hosts)) }}"
+
+    - name: "Gate G4: Report Parent Chain fork check skipped (serial setup/reset)"
+      ansible.builtin.debug:
+        msg: "ℹ️ G4 parent skipped for '{{ deploy_action }}': nodes start one by one (serial: 1), no cross-node comparison possible."
+      when: deploy_action in ['setup', 'reset']
+
+    - name: "Gate G4: Sanity check Parent Chain peer discovery"
+      ansible.builtin.assert:
+        that:
+          - (parent_peer_hosts | length) == (groups['parent_chain_nodes'] | default([]) | length)
+        fail_msg: >-
+          Gate G4 cannot verify the whole Parent Chain on {{ inventory_hostname }}: only {{ parent_peer_hosts | length }} of
+          {{ groups['parent_chain_nodes'] | default([]) | length }} parent nodes are in this play ({{ parent_peer_hosts }}).
+      when:
+        - deploy_action not in ['setup', 'reset']
+        - not (partial_target | default(false) | bool)
+
+    - name: "Gate G4: Warn that Parent Chain fork check covers only part of the chain (--node/--host)"
+      ansible.builtin.debug:
+        msg: >-
+          ⚠️ G4 partial: only {{ parent_peer_hosts | length }} of {{ groups['parent_chain_nodes'] | default([]) | length }}
+          parent nodes are in this play; fork check does not cover the whole Parent Chain.
+      when:
+        - deploy_action not in ['setup', 'reset']
+        - partial_target | default(false) | bool
+        - (parent_peer_hosts | length) < (groups['parent_chain_nodes'] | default([]) | length)
+
+    - name: "Gate G4: Compute minimum Parent Chain height in play"
+      ansible.builtin.set_fact:
+        parent_min_height: "{{ parent_peer_hosts | map('extract', hostvars, 'parent_post_start_height') | map('int') | min }}"
+      when: (parent_peer_hosts | length) > 1
+
+    - name: "Gate G4: Report Parent Chain fork check skipped (no committed block yet)"
+      ansible.builtin.debug:
+        msg: "⚠️ G4 parent skipped: min height is 0 (no committed block to compare yet)."
+      when:
+        - (parent_peer_hosts | length) > 1
+        - (parent_min_height | int) == 0
+
+    - name: "Gate G4: Query Parent Chain block hash at min height"
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ parent_http_port | default(8547) }}/block?number={{ parent_min_height }}"
+        method: GET
+        status_code: 200
+      register: parent_g4_block_res
+      retries: "{{ gate_hash_retries | default(15) }}"
+      delay: "{{ gate_hash_delay | default(2) }}"
+      until:
+        - parent_g4_block_res.status == 200
+        - parent_g4_block_res.json is defined
+        - (parent_g4_block_res.json.found | default(false) | bool)
+        - parent_g4_block_res.json.record is defined
+        - parent_g4_block_res.json.record.BlockHash is defined
+      when:
+        - (parent_peer_hosts | length) > 1
+        - (parent_min_height | int) > 0
+
+    - name: "Gate G4: Record Parent Chain block hash at min height"
+      ansible.builtin.set_fact:
+        parent_block_hash_at_min: "{{ parent_g4_block_res.json.record.BlockHash }}"
+      when:
+        - (parent_peer_hosts | length) > 1
+        - (parent_min_height | int) > 0
+
+    - name: "Gate G4: Assert Parent Chain block hash matches parent leader"
+      ansible.builtin.assert:
+        that:
+          - parent_block_hash_at_min == hostvars[parent_leader_host]['parent_block_hash_at_min']
+        fail_msg: >-
+          FORK DETECTED! Gate G4 failed on Parent Chain {{ inventory_hostname }}:
+          block hash at height {{ parent_min_height }} is {{ parent_block_hash_at_min }},
+          which does NOT match parent leader {{ parent_leader_host }} ({{ hostvars[parent_leader_host]['parent_block_hash_at_min'] | default('unknown') }}).
+          Chain has forked! Halting immediately to preserve state.
+      vars:
+        parent_leader_host: "{{ parent_peer_hosts | first }}"
+      when:
+        - (parent_peer_hosts | length) > 1
+        - (parent_min_height | int) > 0
+
+    # ── Gate G5: Installed binary sha256 ──
+    - name: "Gate G5: Verify installed parent_chain binary checksum"
+      ansible.builtin.stat:
+        path: "{{ bin_dir }}/parent_chain"
+        checksum_algorithm: sha256
+      register: parent_running_bin_stat
+      when: not (skip_build | default(false) | bool) and (deploy_action in ['deploy', 'restart'])
+
+    - name: "Gate G5: Assert binary checksum matches expected build"
+      ansible.builtin.assert:
+        that:
+          - parent_running_bin_stat.stat.checksum == hostvars['localhost']['expected_sha_parent']
+        fail_msg: >-
+          Gate G5 failed on {{ inventory_hostname }}: running parent_chain binary sha256
+          ({{ parent_running_bin_stat.stat.checksum }}) != expected ({{ hostvars['localhost']['expected_sha_parent'] }}).
+      when: not (skip_build | default(false) | bool) and (deploy_action in ['deploy', 'restart']) and (hostvars['localhost']['expected_sha_parent'] | default('') | length > 0)
+
+  rescue:
+    - name: "FAIL-STOP: Retrieve last 50 lines of journal logs for {{ inventory_hostname }}"
+      ansible.builtin.command:
+        cmd: "journalctl -u metanode-{{ inventory_hostname }} -n 50 --no-pager"
+      register: failed_journal_logs_parent
+      changed_when: false
+      ignore_errors: true
+
+    - name: "FAIL-STOP: Output Parent Chain journal logs"
+      ansible.builtin.debug:
+        msg: "{{ failed_journal_logs_parent.stdout_lines | default(['No journal logs available']) }}"
+
+    - name: "FAIL-STOP: Abort deployment to preserve failure scene"
+      ansible.builtin.fail:
+        msg: >-
+          FATAL: Healthcheck gates failed on Parent Chain node {{ inventory_hostname }}!
+          Deployment halted immediately (Fail-Stop) to preserve diagnostic state.
+          Review the journalctl output above. Do NOT restart single nodes.
