@@ -123,7 +123,8 @@ func TestC4_CheckHealthyCluster(t *testing.T) {
 	if rep.Leader != l.id || !rep.QuorumOK || !rep.KeyConsistent || len(rep.Problems) != 0 {
 		t.Fatalf("unexpected report: %+v", rep)
 	}
-	if rep.StateRootConsistent == nil || !*rep.StateRootConsistent || rep.CheckpointBlock != 20 {
+	// The checkpoint is the lowest replica tip rounded down to attestStride (25 here, every replica holds 25).
+	if rep.StateRootConsistent == nil || !*rep.StateRootConsistent || rep.CheckpointBlock != 25/attestStride*attestStride {
 		t.Fatalf("state consistency at the checkpoint not confirmed: %+v", rep)
 	}
 	for _, r := range rep.Replicas {

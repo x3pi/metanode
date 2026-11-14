@@ -20,7 +20,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/failpoint"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
-	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -166,57 +165,24 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 
 	bc := GetBlockChainInstance()
 
-	// ─── 1. Rebuild or realign state tries FIRST (fail-closed before mutating DB/mappings) ───
-	// Verifying/rebuilding tries from header roots BEFORE SaveLastBlock and SetBlockNumberToHash
+	// ─── 1. Rebuild state tries FIRST (fail-closed before mutating DB/mappings) ───
+	// Rebuilding tries from header roots BEFORE SaveLastBlock and SetBlockNumberToHash
 	// guarantees that a missing state batch / missing trie node returns an error without leaving
 	// orphaned blocks or mappings in BlockDatabase / BlockChain dirtyStorage.
-	var activeAccountRoot common.Hash
-	if asDB := cs.GetAccountStateDB(); asDB != nil {
-		activeAccountRoot = asDB.GetOriginRootHash()
-	}
-	var activeStakeRoot common.Hash
-	if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
-		activeStakeRoot = stakeDB.GetOriginRootHash()
-	}
-	headerAccountRoot := header.AccountStatesRoot()
-	headerStakeRoot := common.Hash(header.StakeStatesRoot())
+	//
+	// FORK-SAFETY: NEVER realign/rebuild tries when cfg.rebuildTries == false.
+	// commitWorker persists block N asynchronously while execution has already advanced the
+	// in-memory roots to N+1..N+k (commitChannel pipeline). Realigning to header N here would
+	// revert the live root, so the next block (e.g. one with no account/stake changes, which
+	// reuses originRootHash) would carry a stale root → timing-dependent FORK.
+	// P2P sync realigns block-by-block itself (executor/unix_socket_handler_sync.go).
 	prevHeaderPtr := cs.currentBlockHeader.Load()
-	didLightweightNomtRealign := false
-
-	if trie.GetStateBackend() == trie.BackendNOMT {
-		if cfg.rebuildTries {
-			if err := cs.updateStateForNewHeader(header); err != nil {
-				logger.Error("❌ [COMMIT STATE] Failed to align/rebuild tries for block #%d: %v", blockNum, err)
-				return blockNum, err
-			}
-			logger.Info("🔄 [COMMIT STATE] Aligned/rebuilt tries from block #%d header roots", blockNum)
-		} else if activeAccountRoot != headerAccountRoot || activeStakeRoot != headerStakeRoot {
-			// Lightweight realignment: update Go's root pointers without touching C++ handle
-			if asDB := cs.GetAccountStateDB(); asDB != nil {
-				asDB.SetOriginRootHash(headerAccountRoot)
-				if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
-					nomtTrie.RealignRoot(headerAccountRoot)
-				}
-			}
-			if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
-				stakeDB.SetOriginRootHash(headerStakeRoot)
-				if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
-					nomtTrie.RealignRoot(headerStakeRoot)
-				}
-			}
-			didLightweightNomtRealign = true
-			logger.Debug("🔧 [COMMIT STATE] Lightweight root realignment for block #%d (account=%s, stake=%s)",
-				blockNum, headerAccountRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
+	if cfg.rebuildTries {
+		if err := cs.updateStateForNewHeader(header); err != nil {
+			logger.Error("❌ [COMMIT STATE] Failed to align/rebuild tries for block #%d: %v", blockNum, err)
+			return blockNum, err
 		}
-	} else {
-		// Legacy MPT/LevelDB backend behavior
-		if cfg.rebuildTries || activeAccountRoot != headerAccountRoot || activeStakeRoot != headerStakeRoot {
-			if err := cs.updateStateForNewHeader(header); err != nil {
-				logger.Error("❌ [COMMIT STATE] Failed to align/rebuild MPT tries for block #%d: %v", blockNum, err)
-				return blockNum, err
-			}
-			logger.Info("🔄 [COMMIT STATE] Aligned/rebuilt MPT tries from block #%d header roots", blockNum)
-		}
+		logger.Info("🔄 [COMMIT STATE] Aligned/rebuilt tries from block #%d header roots", blockNum)
 	}
 
 	// Capture pre-mutation state so any failure in persistence or durability barriers rolls back cleanly.
@@ -304,20 +270,6 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 
 	rollbackOnErr := func() {
 		cs.currentBlockHeader.Store(prevHeaderPtr)
-		if didLightweightNomtRealign {
-			if asDB := cs.GetAccountStateDB(); asDB != nil {
-				asDB.SetOriginRootHash(activeAccountRoot)
-				if nomtTrie, ok := asDB.Trie().(*trie.NomtStateTrie); ok {
-					nomtTrie.RealignRoot(activeAccountRoot)
-				}
-			}
-			if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
-				stakeDB.SetOriginRootHash(activeStakeRoot)
-				if nomtTrie, ok := stakeDB.Trie().(*trie.NomtStateTrie); ok {
-					nomtTrie.RealignRoot(activeStakeRoot)
-				}
-			}
-		}
 		if bc != nil {
 			if attemptedCommitMaps && bc.storageManager != nil && bc.storageManager.GetStorageMapping() != nil {
 				mapStore := bc.storageManager.GetStorageMapping()

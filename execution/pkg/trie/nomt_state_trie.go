@@ -1924,6 +1924,11 @@ func (n *NomtStateTrie) AbortPending() {
 	n.pendingCommitTicket = nil
 	n.sessionMu.Unlock()
 
+	if ticket == nil {
+		if cur := n.loadReadView(); cur != nil && cur.commitTicket != nil {
+			ticket = cur.commitTicket
+		}
+	}
 	if ticket != nil {
 		ticket.SetState(NomtPersistenceFailed)
 	}
@@ -1952,7 +1957,7 @@ func (n *NomtStateTrie) AbortPending() {
 	n.lastCommitBatch = nil
 	n.pendingCommittingMap = nil
 	n.registryChanged = false
-	n.publishReadView(make(map[string]*nomtDirtyEntry), nil, handleRoot)
+	n.publishReadView(make(map[string]*nomtDirtyEntry), nil, handleRoot, ticket)
 	n.writerMu.Unlock()
 }
 
@@ -2045,6 +2050,9 @@ func (n *NomtStateTrie) CommitPayload() error {
 
 	if fs == nil && len(changes) == 0 {
 		view := n.loadReadView()
+		if view != nil && view.commitTicket != nil && view.commitTicket.State() == NomtPersistenceFailed {
+			return fmt.Errorf("cannot commit payload: session was aborted/failed")
+		}
 		if view != nil && len(view.committing) > 0 {
 			if view.commitTicket != nil && view.commitTicket.State() != NomtPersistenceFailed {
 				// Sibling trie in a shared batch commit whose session is held by the primary trie.

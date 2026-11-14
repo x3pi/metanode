@@ -1,5 +1,8 @@
 # Kế hoạch các việc tiếp theo (bàn giao cho agent/developer)
 
+> ⚠️ **ĐÃ LỖI THỜI (2026-11-14):** đây là kế hoạch cũ, **KHÔNG còn là nguồn việc cần làm** — agent/developer không thực hiện theo các mục bên dưới.
+> Chỉ giữ lại để tra cứu bằng chứng và lịch sử (số đo, test đã chạy, giới hạn đã ghi nhận).
+
 > **Cập nhật:** 2026-09-25. **Cơ sở:** `origin/dev` tại `a52d28f2` (đã gồm PR #128, #129, #130).
 > Đọc trước: `README.md` (mục lục thư mục này), `SEQUENCER_STEP_BY_STEP_PLAN.md` (mục 0.1, 0.6, 2, 3), `SEQUENCER_SCHEMAS_AND_TEST_PLAN.md`.
 > Tài liệu này **không thay** kế hoạch chính; nó xếp thứ tự và đặt tiêu chí nghiệm thu cho các việc kế tiếp. ID `N1..N9` ở đây khác ID `A/B/C/F` của kế hoạch chính (mỗi việc ghi rõ bước tương ứng).

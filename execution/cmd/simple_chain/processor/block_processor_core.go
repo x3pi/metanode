@@ -19,6 +19,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain/rootanchor"
+	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
@@ -156,6 +157,11 @@ type BlockProcessor struct {
 	// P1: Track first commit error in pipeline for fail-closed behavior
 	lastCommitErrMu sync.RWMutex
 	lastCommitErr   error
+	// onCommitFatal, when set, is called once with the first commit error. In consensus_mode="raft" it
+	// terminates the replica: a replica that cannot persist a committed block must not keep running (and
+	// serving RPC) while silently skipping every later block. The restart replays the non-durable Raft
+	// entries and the startup recovery realigns NOMT to the canonical block.
+	onCommitFatal func(error)
 
 	indexingChannel        chan uint64
 	indexingLocks          sync.Map
@@ -561,6 +567,7 @@ func NewBlockProcessor(
 		lastRateCheckTime:   time.Now(),
 		lastLazyRefreshTime: time.Now(),
 	}
+	bp.onCommitFatal = commitFatalHandlerFor(config)
 
 	// Initialize snapshot gate (must be done before any goroutine starts)
 	bp.initSnapshotGate()
@@ -1094,10 +1101,29 @@ func (bp *BlockProcessor) GetLeaderAddress(leaderAddress []byte, leaderAuthorInd
 // Thread-safe and fail-closed: once set to non-nil, subsequent errors will not overwrite the root error.
 func (bp *BlockProcessor) SetLastCommitErr(err error) {
 	bp.lastCommitErrMu.Lock()
-	defer bp.lastCommitErrMu.Unlock()
-	if bp.lastCommitErr == nil && err != nil {
+	first := bp.lastCommitErr == nil && err != nil
+	if first {
 		bp.lastCommitErr = err
 	}
+	onFatal := bp.onCommitFatal
+	bp.lastCommitErrMu.Unlock()
+	if first && onFatal != nil {
+		onFatal(err)
+	}
+}
+
+// commitFatalHandlerFor returns the onCommitFatal handler for a node config: raftCommitFatal in
+// consensus_mode="raft", nil otherwise (the Rust-consensus path keeps its existing fail-closed pipeline).
+func commitFatalHandlerFor(cfg *config.SimpleChainConfig) func(error) {
+	if cfg != nil && cfg.ConsensusMode == "raft" {
+		return raftCommitFatal
+	}
+	return nil
+}
+
+// raftCommitFatal is the onCommitFatal handler used in consensus_mode="raft".
+func raftCommitFatal(err error) {
+	fatal.Exit("raft replica cannot persist a committed block (fail closed, restart replays it): %v", err)
 }
 
 // GetLastCommitErr returns the recorded commit error, if any.
