@@ -228,7 +228,7 @@ while [[ $# -gt 0 ]]; do
             INVENTORY="${1#*=}"
             shift
             ;;
-        -i)
+        -i|--inventory)
             INVENTORY="$2"
             shift 2
             ;;

@@ -3,6 +3,8 @@
 Tool này kiểm tra xem Node có thể truy xuất chính xác dữ liệu lịch sử (Archive State) hay không. Nó so sánh số dư (Balance) và Nonce của cùng 1 ví tại 2 block khác nhau.
 **Lưu ý**: Chỉ chạy đúng với cấu hình `"state_backend": "mpt"`. Với `"nomt"`, Node sẽ luôn trả về state hiện tại.
 
+> ⚠️ **Chỉ dành cho node test cục bộ.** Chain thật (production, mọi config trong `execution/cmd/simple_chain/` và template deploy) **chỉ dùng `nomt`**. KHÔNG đổi `state_backend` sang `mpt` trên node thật. Xem `PROJECT_STRUCTURE.md` mục 5.4.
+
 ## Lệnh Chạy
 
 ### 1. Test Nhanh (Mặc định)

@@ -20,6 +20,7 @@ import (
 	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -123,9 +124,55 @@ func (bp *BlockProcessor) commitWorker() {
 		// AFTER it is populated, rather than asynchronously via commitToMemoryParallel.
 		// Write changelog synchronously in commitWorker BEFORE CommitBlockState to guarantee sequential progression
 		// and visibility of historical states when block counter is advanced.
+		var backupStore storage.Storage
+		if bp.storageManager != nil {
+			backupStore = bp.storageManager.GetStorageBackupDb()
+		}
+		wroteValidatorUndo := false
+		if backupStore != nil && blockNum > 0 {
+			if (bp.chainState == nil || bp.chainState.GetChangelogDB() == nil) &&
+				(trie.GetStateBackend() == trie.BackendNOMT || job.AccountNomtPayload != nil) {
+				var pre [][2][]byte
+				if p, ok := job.AccountNomtPayload.(interface{ PreImageBatch() [][2][]byte }); ok && p != nil {
+					pre = p.PreImageBatch()
+				}
+				if err := storage.PersistNomtUndoBatch(backupStore, storage.NomtUndoKindAccount, blockNum, pre); err != nil {
+					commitErr := fmt.Errorf("block #%d account NOMT undo durability failed: %w", blockNum, err)
+					bp.SetLastCommitErr(commitErr)
+					discardJobPayloads(&job)
+					if job.ErrChan != nil {
+						job.ErrChan <- commitErr
+					}
+					continue
+				}
+				wroteValidatorUndo = true
+			}
+			if (bp.chainState == nil || bp.chainState.GetStakeChangelogDB() == nil) &&
+				(trie.GetStateBackend() == trie.BackendNOMT || job.StakeNomtPayload != nil) {
+				var pre [][2][]byte
+				if p, ok := job.StakeNomtPayload.(interface{ PreImageBatch() [][2][]byte }); ok && p != nil {
+					pre = p.PreImageBatch()
+				}
+				if err := storage.PersistNomtUndoBatch(backupStore, storage.NomtUndoKindStake, blockNum, pre); err != nil {
+					storage.DeleteNomtUndoForBlock(backupStore, blockNum)
+					commitErr := fmt.Errorf("block #%d stake NOMT undo durability failed: %w", blockNum, err)
+					bp.SetLastCommitErr(commitErr)
+					discardJobPayloads(&job)
+					if job.ErrChan != nil {
+						job.ErrChan <- commitErr
+					}
+					continue
+				}
+				wroteValidatorUndo = true
+			}
+		}
+
 		if job.AccountNomtPayload != nil {
 			if payload, ok := job.AccountNomtPayload.(interface{ WriteChangelog() error }); ok {
 				if err := payload.WriteChangelog(); err != nil {
+					if wroteValidatorUndo && backupStore != nil {
+						storage.DeleteNomtUndoForBlock(backupStore, blockNum)
+					}
 					commitErr := fmt.Errorf("block #%d account changelog durability failed: %w", blockNum, err)
 					bp.SetLastCommitErr(commitErr)
 					discardJobPayloads(&job)
@@ -139,6 +186,9 @@ func (bp *BlockProcessor) commitWorker() {
 		if job.StakeNomtPayload != nil {
 			if payload, ok := job.StakeNomtPayload.(interface{ WriteChangelog() error }); ok {
 				if err := payload.WriteChangelog(); err != nil {
+					if wroteValidatorUndo && backupStore != nil {
+						storage.DeleteNomtUndoForBlock(backupStore, blockNum)
+					}
 					commitErr := fmt.Errorf("block #%d stake changelog durability failed: %w", blockNum, err)
 					bp.SetLastCommitErr(commitErr)
 					discardJobPayloads(&job)
@@ -152,6 +202,9 @@ func (bp *BlockProcessor) commitWorker() {
 		if job.SmartContractNomtPayload != nil {
 			if payload, ok := job.SmartContractNomtPayload.(interface{ WriteChangelog() error }); ok {
 				if err := payload.WriteChangelog(); err != nil {
+					if wroteValidatorUndo && backupStore != nil {
+						storage.DeleteNomtUndoForBlock(backupStore, blockNum)
+					}
 					commitErr := fmt.Errorf("block #%d smart contract changelog durability failed: %w", blockNum, err)
 					bp.SetLastCommitErr(commitErr)
 					discardJobPayloads(&job)
@@ -167,6 +220,9 @@ func (bp *BlockProcessor) commitWorker() {
 		logger.Debug("📋 [COMMIT-WORKER] CommitBlockState for block #%d (txs=%d, lastBlockNum_before=%d, commitChannelLen=%d/%d)",
 			blockNum, txCount, lastBlockBeforeCommit, len(bp.commitChannel), cap(bp.commitChannel))
 		if _, err := bp.chainState.CommitBlockState(job.Block, blockchain.WithPersistToDB(), blockchain.WithSaveTxMapping(), blockchain.WithCommitMappings()); err != nil {
+			if wroteValidatorUndo && backupStore != nil {
+				storage.DeleteNomtUndoForBlock(backupStore, blockNum)
+			}
 			logger.Error("🚨 [COMMIT-WORKER] CommitBlockState failed for block #%d: %v — aborting post-commit processing", blockNum, err)
 			bp.SetLastCommitErr(fmt.Errorf("block #%d CommitBlockState failed: %w", blockNum, err))
 			discardJobPayloads(&job)
@@ -811,22 +867,5 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		}
 	} else {
 		logger.Error("❌ [BACKUP] Failed to serialize BackupDb for block #%d: %v", blockNum, err)
-	}
-
-	if backupStore := bp.storageManager.GetStorageBackupDb(); backupStore != nil && blockNum > 0 {
-		if bp.chainState == nil || bp.chainState.GetChangelogDB() == nil {
-			if p, ok := job.AccountNomtPayload.(interface{ PreImageBatch() [][2][]byte }); ok && p != nil {
-				if uErr := storage.PersistNomtUndoBatch(backupStore, storage.NomtUndoKindAccount, blockNum, p.PreImageBatch()); uErr != nil {
-					logger.Warn("⚠️ [BACKUP] Failed to persist account NOMT undo batch for block #%d: %v", blockNum, uErr)
-				}
-			}
-		}
-		if bp.chainState == nil || bp.chainState.GetStakeChangelogDB() == nil {
-			if p, ok := job.StakeNomtPayload.(interface{ PreImageBatch() [][2][]byte }); ok && p != nil {
-				if uErr := storage.PersistNomtUndoBatch(backupStore, storage.NomtUndoKindStake, blockNum, p.PreImageBatch()); uErr != nil {
-					logger.Warn("⚠️ [BACKUP] Failed to persist stake NOMT undo batch for block #%d: %v", blockNum, uErr)
-				}
-			}
-		}
 	}
 }

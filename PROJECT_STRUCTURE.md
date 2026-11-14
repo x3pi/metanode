@@ -145,7 +145,7 @@ metanode/
 | `blockchain/tx_processor/` | Tx execution: `block_stm.go`, `true_block_stm.go`, `native_fast_path.go`, `mvcc/`, EVM dispatch, `gateway_handler.go` / `parent_chain_gateway_handler.go`, `rollup_system_handler.go`, signature enforcement, fee floor, attestation workers | 🔴 consensus rules |
 | `account_state_db/` | Account state + commit pipeline | 🔴 trie mutations |
 | `state/`, `state_db/`, `smart_contract_db/`, `transaction_state_db/` | State transitions, stake DB, per-contract storage, tx-scoped state | 🔴 EVM state |
-| `trie/`, `trie_database/` | Merkle trie (flat, NOMT, verkle backends) and persistence | 🟡 |
+| `trie/`, `trie_database/` | Merkle trie (NOMT in production; MPT/flat/verkle kept for tests only) and persistence | 🟡 |
 | `nomt_ffi/` | CGo bridge to Rust NOMT (`rust_lib` → `libmtn_nomt`) | 🟡 C boundary |
 | `grouptxns/`, `transaction_grouper/` | Union-Find grouping of transactions | 🟡 determinism |
 | `transaction/`, `transaction_pool/`, `receipt/`, `block/`, `block_validator/`, `block_signer/` | Types, mempool, receipts, blocks, validation, BLS block signing | 🟡 |
@@ -165,6 +165,13 @@ metanode/
 | `helppay/` | Sponsor wallet pool management and automated gas top-up service | 🟢 isolated / 🟡 ingress |
 | `proto/` | Protobuf definitions + generated code (+ vtproto) | 🟡 wire format |
 | `bls/`, `common/`, `utils/`, `abi_file/`, `script/`, `pathdetector/`, `proxy_tx/`, `shared_memory/`, `remotestorage/`, `important_data_logger/`, `models/` | Helpers | 🟢 |
+
+> **State backend: NOMT only.** Production and every shipped config run `state_backend = "nomt"`
+> (code default `globalStateBackend = BackendNOMT` in `pkg/trie/trie_factory.go`; unknown/empty values
+> also fall back to NOMT; deploy template `exec_config.json.j2` defaults to `nomt`). MPT/flat/verkle code
+> remains only for unit tests and the archive-state tool `cmd/tool/tool-test-chain/test-rpc/test-history`.
+> Never set `mpt` on a real node. NOMT keeps only the latest state; trie realignment happens only via
+> `WithRebuildTries()` (startup/snapshot) or the per-block realign in P2P sync — never in the pipelined commitWorker.
 
 ### 5.5 `execution/executor/` — Go side of the FFI bridge
 | File | Role |

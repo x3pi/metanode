@@ -408,3 +408,71 @@ func TestCommitBlockState_MappingBatchPutFailure_PreservesPriorDirtyMappings(t *
 	_, errTx2 := baseMappingDB.Get([]byte(txHashPrefix + tx2.Hex()))
 	require.NoError(t, errTx2)
 }
+
+// Regression (pipelined commit fork): commitWorker persists block N while execution has already
+// advanced the live account/stake roots to N+k. A commit WITHOUT WithRebuildTries must never pull
+// the live roots back to block N's header roots — the next block would reuse the stale origin root
+// (blocks with no account/stake changes) and nodes would diverge depending on commit timing.
+func TestCommitBlockState_PipelinedCommitDoesNotRevertLiveRoots(t *testing.T) {
+	for _, backend := range []string{trie.BackendMPT, trie.BackendNOMT} {
+		t.Run(backend, func(t *testing.T) {
+			cs, sm := setupFullCommitTestEnv(t)
+			prevBC := blockChainInstance
+			prevHeight := storage.GetLastBlockNumber()
+			defer func() {
+				blockChainInstance = prevBC
+				storage.ResetAllBlockCounters(prevHeight)
+			}()
+			bc := newTestBlockChain()
+			bc.storageManager = sm
+			bc.blockDatabase = cs.blockDatabase
+			blockChainInstance = bc
+			storage.ResetAllBlockCounters(0)
+
+			// Tries were built with MPT; switch the backend so the NOMT branch of CommitBlockState is exercised.
+			trie.SetStateBackend(backend)
+
+			headerAccRoot := cs.GetAccountStateDB().GetOriginRootHash()
+			headerStakeRoot := cs.GetStakeStateDB().GetOriginRootHash()
+
+			// Execution is ahead: live roots already belong to block N+k.
+			aheadAcc := common.HexToHash("0xa1a1000000000000000000000000000000000000000000000000000000000001")
+			aheadStake := common.HexToHash("0xb2b2000000000000000000000000000000000000000000000000000000000001")
+			cs.GetAccountStateDB().SetOriginRootHash(aheadAcc)
+			cs.GetStakeStateDB().SetOriginRootHash(aheadStake)
+
+			hdr1 := block.NewBlockHeader(common.Hash{}, 1, headerAccRoot, headerStakeRoot, common.Hash{}, common.Address{}, 100, common.Hash{}, 0)
+			_, err := cs.CommitBlockState(block.NewBlock(hdr1, nil, nil), WithPersistToDB(), WithSaveTxMapping(), WithCommitMappings())
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), storage.GetLastBlockNumber())
+
+			assert.Equal(t, aheadAcc, cs.GetAccountStateDB().GetOriginRootHash(), "pipelined commit must not revert live account root")
+			assert.Equal(t, aheadStake, cs.GetStakeStateDB().GetOriginRootHash(), "pipelined commit must not revert live stake root")
+		})
+	}
+}
+
+// Explicit recovery (WithRebuildTries) must still realign the live roots to the header roots.
+func TestCommitBlockState_RebuildTriesStillRealignsToHeader(t *testing.T) {
+	cs, sm := setupFullCommitTestEnv(t)
+	prevBC := blockChainInstance
+	prevHeight := storage.GetLastBlockNumber()
+	defer func() {
+		blockChainInstance = prevBC
+		storage.ResetAllBlockCounters(prevHeight)
+	}()
+	bc := newTestBlockChain()
+	bc.storageManager = sm
+	bc.blockDatabase = cs.blockDatabase
+	blockChainInstance = bc
+	storage.ResetAllBlockCounters(0)
+
+	headerAccRoot := cs.GetAccountStateDB().GetOriginRootHash()
+	headerStakeRoot := cs.GetStakeStateDB().GetOriginRootHash()
+	cs.GetAccountStateDB().SetOriginRootHash(common.HexToHash("0xa1a1000000000000000000000000000000000000000000000000000000000002"))
+
+	hdr1 := block.NewBlockHeader(common.Hash{}, 1, headerAccRoot, headerStakeRoot, common.Hash{}, common.Address{}, 100, common.Hash{}, 0)
+	_, err := cs.CommitBlockState(block.NewBlock(hdr1, nil, nil), WithPersistToDB(), WithRebuildTries())
+	require.NoError(t, err)
+	assert.Equal(t, headerAccRoot, cs.GetAccountStateDB().GetOriginRootHash(), "WithRebuildTries must realign to header root")
+}

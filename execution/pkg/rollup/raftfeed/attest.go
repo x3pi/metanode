@@ -19,8 +19,10 @@ import (
 // replica whose hash differs from a value held by a majority of the cluster stops (fail closed); with no majority
 // (peers down, lagging or split) it decides nothing and stays pending — it never guesses.
 const (
-	hashPath     = "/raft/v1/blockhash"
-	attestStride = 10 // checkpoints are multiples of this block number
+	hashPath = "/raft/v1/blockhash"
+	// attestStride 1: the newest durable block is checked. Its header hash chains LastBlockHash, so a match
+	// covers every earlier block too; a coarser stride only delays detection.
+	attestStride = 1
 )
 
 // attestInterval only paces the periodic check; it never decides a dispatch (a variable so tests can speed it up).
@@ -44,6 +46,13 @@ func (n *Node) handleBlockHash(w http.ResponseWriter, r *http.Request) {
 	}
 	if n.blockHash == nil {
 		http.Error(w, "unavailable", http.StatusNotFound)
+		return
+	}
+	// Vote only with blocks this replica has made durable: the block-number→hash mapping is published inside
+	// CommitBlockState BEFORE the block DB is synced and the durable counter advances, so a hash read above
+	// durable() belongs to a commit that can still fail. The asker keeps such a block pending and retries.
+	if n.durable != nil && num > n.durable() {
+		http.Error(w, "block not durable yet", http.StatusNotFound)
 		return
 	}
 	h, ok := n.blockHash(num)
@@ -82,19 +91,32 @@ func (n *Node) fetchPeerHash(addr string, num uint64) (string, bool) {
 func (n *Node) attestLoop() {
 	t := time.NewTicker(attestInterval)
 	defer t.Stop()
-	var last uint64
+	var last, pending uint64
 	for {
 		select {
 		case <-n.stop:
 			return
 		case <-t.C:
-			if num := n.attestCheckpoint(); num != 0 && num != last {
-				if n.attestOnce(num) {
-					last = num
-				}
-			}
+			last, pending = attestStep(last, pending, n.attestCheckpoint, n.attestOnce)
 		}
 	}
+}
+
+// attestStep advances the attestation cursor by one tick. A block that has not reached a verdict (peers have
+// not applied it yet, or no majority value) stays pending and is retried on the next tick instead of being
+// abandoned for a newer block: under steady load the newest block is almost never on a majority yet, so
+// always chasing it would starve the check. Every replica applies the same Raft log, so a pending block
+// reaches a verdict once a majority has applied it; with no majority alive it stays pending (never guessed).
+func attestStep(last, pending uint64, checkpoint func() uint64, once func(uint64) bool) (uint64, uint64) {
+	if pending == 0 {
+		if num := checkpoint(); num != 0 && num != last {
+			pending = num
+		}
+	}
+	if pending != 0 && once(pending) {
+		return pending, 0
+	}
+	return last, pending
 }
 
 func (n *Node) attestCheckpoint() uint64 {

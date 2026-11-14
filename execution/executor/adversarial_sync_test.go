@@ -3568,3 +3568,547 @@ func TestAdv31_ValidatorGenesisAndSnapshotPreImageForkRollback(t *testing.T) {
 		require.Greater(t, rolledXapian, 0, "Xapian must NOT be rolled back before NOMT rollback validation succeeds")
 	})
 }
+
+func TestAdv32_ValidatorEdgeCases_LiveDirtyOverlaysDeletionsBlockZeroAndCrossNamespaceAtomicity(t *testing.T) {
+	cloneKVs := func(in [][2][]byte) [][2][]byte {
+		out := make([][2][]byte, len(in))
+		for i, kv := range in {
+			out[i] = [2][]byte{bytes.Clone(kv[0]), bytes.Clone(kv[1])}
+		}
+		return out
+	}
+
+	type nomtStep32 struct {
+		bn    uint64
+		acc   [][2][]byte
+		stake [][2][]byte
+		sc    [][2][]byte
+	}
+
+	computeNomtSequence := func(t *testing.T, steps []nomtStep32) (accRoots, stakeRoots, scRoots []common.Hash) {
+		t.Helper()
+		trie.CloseNomtDB()
+		trie.SetStateBackend(trie.BackendNOMT)
+		require.NoError(t, trie.InitNomtDB(filepath.Join(t.TempDir(), "scratch_nomt_32"), 1, 16, 16))
+		storage.ForceSetLastNomtCommittedBlock(0)
+		for _, st := range steps {
+			agg := map[string][][2][]byte{
+				"Account":    cloneKVs(st.acc),
+				"StakeState": cloneKVs(st.stake),
+				"SC Storage": cloneKVs(st.sc),
+			}
+			_, err := trie.ApplyNomtReplicationBatches(agg, nil, nil, st.bn)
+			require.NoError(t, err)
+			aR, _ := trie.GetNomtHandleRoot("account_state")
+			sR, _ := trie.GetNomtHandleRoot("stake_db")
+			cR, _ := trie.GetNomtHandleRoot("smart_contract_storage")
+			accRoots = append(accRoots, aR)
+			stakeRoots = append(stakeRoots, sR)
+			scRoots = append(scRoots, cR)
+		}
+		trie.CloseNomtDB()
+		return accRoots, stakeRoots, scRoots
+	}
+
+	setupValidatorNomt32 := func(
+		t *testing.T,
+		genAccKVs [][2][]byte,
+		genStakeKVs [][2][]byte,
+		genAccRoot common.Hash,
+		genStakeRoot common.Hash,
+	) (*RequestHandler, *storage.StorageManager, *blockchain.ChainState, *block.BlockDatabase, *blockchain.BlockChain, common.Hash) {
+		t.Helper()
+		t.Setenv("NODE_TYPE", "")
+
+		prevBackend := trie.GetStateBackend()
+		prevBackupDb := storage.GetBackupDbInstance()
+		prevBlockNum := storage.GetLastBlockNumber()
+		prevGEI := storage.GetLastGlobalExecIndex()
+		prevCommitIdx := storage.GetLastHandledCommitIndex()
+		prevCommitEpoch := storage.GetLastHandledCommitEpoch()
+		prevNomtBlock := storage.GetLastNomtCommittedBlock()
+		t.Cleanup(func() {
+			mvm.DestroyAllXapianInstances()
+			storage.SetBackupDbInstance(prevBackupDb)
+			trie.SetStateBackend(prevBackend)
+			storage.ResetAllBlockCounters(prevBlockNum)
+			storage.ForceSetLastGlobalExecIndex(prevGEI)
+			storage.ForceSetLastHandledCommitIndex(prevCommitIdx)
+			storage.UpdateLastHandledCommitEpoch(prevCommitEpoch)
+			storage.ForceSetLastNomtCommittedBlock(prevNomtBlock)
+			trie.CloseNomtDB()
+		})
+
+		rootDir := t.TempDir()
+		trie.CloseNomtDB()
+		trie.SetStateBackend(trie.BackendNOMT)
+		require.NoError(t, trie.InitNomtDB(filepath.Join(rootDir, "nomt"), 1, 16, 16))
+		storage.ForceSetLastNomtCommittedBlock(0)
+
+		if len(genAccKVs) > 0 || len(genStakeKVs) > 0 {
+			_, err := trie.ApplyNomtReplicationBatches(map[string][][2][]byte{
+				"Account":    cloneKVs(genAccKVs),
+				"StakeState": cloneKVs(genStakeKVs),
+			}, nil, nil, 0)
+			require.NoError(t, err)
+		}
+
+		sm := storage.NewStorageManager()
+		openPebble := func(name, nsBackup string, add func(storage.Storage) error) {
+			require.NoError(t, add(openPebbleStorageForTest(t, filepath.Join(rootDir, "pebble_"+name), nsBackup)))
+		}
+		openPebble("account", "account_state", sm.AddStorageAccount)
+		openPebble("tx", "transaction_state", sm.AddStorageTransaction)
+		openPebble("device", "", sm.AddStorageBackupDeviceKey)
+		openPebble("receipt", "receipts", sm.AddStorageReceipt)
+		openPebble("sc", "smart_contract_storage", sm.AddStorageSmartContract)
+		openPebble("code", "", sm.AddStorageCode)
+		openPebble("triedb", "", sm.AddStorageDatabaseTrie)
+		openPebble("block", "", sm.AddStorageBlock)
+		openPebble("backup", "", sm.AddStorageBackupDb)
+		openPebble("mapping", "", sm.AddStorageMapping)
+		openPebble("stake", "stake_db", sm.AddStorageStake)
+
+		blockDB := block.NewBlockDatabase(sm.GetStorageBlock())
+		genHeader := block.NewBlockHeader(common.Hash{}, 0, genAccRoot, genStakeRoot, common.Hash{}, common.Address{}, 0, common.Hash{}, 0)
+		genBlock := block.NewBlock(genHeader, nil, nil)
+		genHash := genBlock.Header().Hash()
+
+		cfg := &config.SimpleChainConfig{
+			ChainId:   big.NewInt(991),
+			IsRPCNode: false,
+			Databases: config.DatabasesConfig{RootPath: rootDir},
+		}
+		cs, err := blockchain.NewChainStateWithGenesis(sm, blockDB, genHeader, cfg, map[common.Address]struct{}{}, &config.GenesisConfig{}, filepath.Join(rootDir, "backup"))
+		require.NoError(t, err)
+		t.Cleanup(func() { cs.Close() })
+		require.Nil(t, cs.GetChangelogDB())
+		require.Nil(t, cs.GetStakeChangelogDB())
+
+		require.NoError(t, blockDB.SaveLastBlockSync(genBlock))
+		restoreBC := blockchain.SwapBlockChainForTest(blockDB, sm)
+		t.Cleanup(restoreBC)
+		bc := blockchain.GetBlockChainInstance()
+		require.NoError(t, bc.SetBlockNumberToHash(0, genHash))
+		require.NoError(t, bc.Commit())
+
+		storage.ResetAllBlockCounters(0)
+		storage.ForceSetLastGlobalExecIndex(0)
+		storage.ForceSetLastHandledCommitIndex(0)
+		storage.UpdateLastHandledCommitEpoch(0)
+		storage.ForceSetLastNomtCommittedBlock(0)
+
+		mvm.DestroyAllXapianInstances()
+		mvm.ConfigureXapianBasePath(t.TempDir())
+		rh := NewRequestHandler(sm, cs, "")
+		return rh, sm, cs, blockDB, bc, genHash
+	}
+
+	makeSyncBlock32 := func(
+		t *testing.T,
+		parentHash common.Hash,
+		bn uint64,
+		accRoot common.Hash,
+		stakeRoot common.Hash,
+		txHex string,
+		timeOffset uint64,
+		acc [][2][]byte,
+		stake [][2][]byte,
+		sc [][2][]byte,
+		logPrefix string,
+		scAddr common.Address,
+		logTag string,
+	) (types.Block, []byte, []byte) {
+		t.Helper()
+		txHash := common.HexToHash(txHex)
+		blk := block.NewBlock(
+			block.NewBlockHeader(parentHash, bn, accRoot, stakeRoot, common.HexToHash(fmt.Sprintf("0x32%02d", bn)), common.Address{}, 1000+timeOffset, common.Hash{}, 0, bn),
+			[]common.Hash{txHash},
+			nil,
+		)
+		rawBlk, err := blk.Marshal()
+		require.NoError(t, err)
+
+		var ab, sb, scb []byte
+		if len(acc) > 0 {
+			ab, _ = storage.SerializeBatch(cloneKVs(acc))
+		}
+		if len(stake) > 0 {
+			sb, _ = storage.SerializeBatch(cloneKVs(stake))
+		}
+		if len(sc) > 0 {
+			scb, _ = storage.SerializeBatch(cloneKVs(sc))
+		}
+		rcptB, _ := storage.SerializeBatch([][2][]byte{{txHash.Bytes(), []byte("rcpt_" + logTag)}})
+		txB, _ := storage.SerializeBatch([][2][]byte{{txHash.Bytes(), []byte("tx_" + logTag)}})
+
+		var fullDbLogs []map[string][]byte
+		if logPrefix != "" {
+			logBytes := buildMinimalXapianCompLog(logPrefix, fmt.Sprintf("0x%064x", timeOffset+bn), logTag)
+			fullDbLogs = []map[string][]byte{{scAddr.Hex()[2:]: logBytes}}
+		}
+		backupBytes, err := storage.SerializeBackupDb(storage.BackUpDb{
+			BockNumber:                bn,
+			AccountBatch:              ab,
+			StakeState:                sb,
+			SmartContractStorageBatch: scb,
+			ReceiptBatchPut:           rcptB,
+			TxBatchPut:                txB,
+			FullDbLogs:                fullDbLogs,
+		})
+		require.NoError(t, err)
+		return blk, rawBlk, backupBytes
+	}
+
+	t.Run("SubcaseA_LiveDirtyAndCommittingOverlaysInChainStateClearedOnForkRollback", func(t *testing.T) {
+		genAcctA := common.HexToAddress("0x1000000000000000000000000000000000003201").Bytes()
+		acctB1 := common.HexToAddress("0x2000000000000000000000000000000000003201").Bytes()
+		specNewAcct := common.HexToAddress("0x2000000000000000000000000000000000003209").Bytes()
+		acctB3 := common.HexToAddress("0x2000000000000000000000000000000000003203").Bytes()
+
+		genStakeV1 := common.HexToAddress("0x3000000000000000000000000000000000003201").Bytes()
+		stakeB1 := common.HexToAddress("0x4000000000000000000000000000000000003201").Bytes()
+		specNewStake := common.HexToAddress("0x4000000000000000000000000000000000003209").Bytes()
+		scDummy := common.HexToAddress("0xA000000000000000000000000000000000003201")
+
+		genAccKVs := [][2][]byte{{makeNomtTestKey(genAcctA), []byte("genesis_A_3201")}}
+		genStakeKVs := [][2][]byte{{makeNomtTestKey(genStakeV1), []byte("genesis_V1_3201")}}
+		b1Acc := [][2][]byte{{makeNomtTestKey(acctB1), []byte("b1_acc")}}
+		b1Stake := [][2][]byte{{makeNomtTestKey(stakeB1), []byte("b1_stake")}}
+		b2ForkAcc := [][2][]byte{{makeNomtTestKey(genAcctA), []byte("fork_b2_genA")}}
+		b2ForkStake := [][2][]byte{{makeNomtTestKey(genStakeV1), []byte("fork_b2_genV1")}}
+		b2CanonAcc := [][2][]byte{{makeNomtTestKey(genAcctA), []byte("canon_b2_genA")}}
+		b2CanonStake := [][2][]byte{{makeNomtTestKey(genStakeV1), []byte("canon_b2_genV1")}}
+		b3CanonAcc := [][2][]byte{{makeNomtTestKey(acctB3), []byte("b3_val")}}
+
+		forkAccR, forkStakeR, _ := computeNomtSequence(t, []nomtStep32{
+			{0, genAccKVs, genStakeKVs, nil},
+			{1, b1Acc, b1Stake, nil},
+			{2, b2ForkAcc, b2ForkStake, nil},
+		})
+		canonAccR, canonStakeR, _ := computeNomtSequence(t, []nomtStep32{
+			{0, genAccKVs, genStakeKVs, nil},
+			{1, b1Acc, b1Stake, nil},
+			{2, b2CanonAcc, b2CanonStake, nil},
+			{3, b3CanonAcc, nil, nil},
+		})
+
+		rh, _, cs, _, _, genHash := setupValidatorNomt32(t, genAccKVs, genStakeKVs, canonAccR[0], canonStakeR[0])
+
+		blk1, raw1, bkp1 := makeSyncBlock32(t, genHash, 1, canonAccR[1], canonStakeR[1],
+			"0x320a000000000000000000000000000000000000000000000000000000000001", 10,
+			b1Acc, b1Stake, nil, "", scDummy, "b1")
+		resp1, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 1, RawBlockBytes: raw1, BackupData: bkp1}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp1.GetError())
+
+		_, raw2F, bkp2F := makeSyncBlock32(t, blk1.Header().Hash(), 2, forkAccR[2], forkStakeR[2],
+			"0x320a000000000000000000000000000000000000000000000000000000000002", 20,
+			b2ForkAcc, b2ForkStake, nil, "", scDummy, "f2")
+		resp2F, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2F, BackupData: bkp2F}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp2F.GetError())
+
+		// Stage uncommitted speculative block #3 writes on live ChainState tries:
+		//  - account_state has a staged FinishedSession + view.committing
+		//  - stake_db has uncommitted wDirty entries
+		accTrie := cs.GetAccountStateDB().Trie().(*trie.NomtStateTrie)
+		require.NoError(t, accTrie.Update(genAcctA, []byte("spec_fork_b3_acc")))
+		require.NoError(t, accTrie.Update(specNewAcct, []byte("spec_fork_b3_new")))
+		_, _, _, err = accTrie.Commit(true)
+		require.NoError(t, err)
+
+		stakeTrie := cs.GetStakeStateDB().Trie().(*trie.NomtStateTrie)
+		require.NoError(t, stakeTrie.Update(genStakeV1, []byte("spec_fork_b3_stake")))
+		require.NoError(t, stakeTrie.Update(specNewStake, []byte("spec_fork_b3_stake_new")))
+
+		_, raw2C, bkp2C := makeSyncBlock32(t, blk1.Header().Hash(), 2, canonAccR[2], canonStakeR[2],
+			"0x320a000000000000000000000000000000000000000000000000000000000102", 30,
+			b2CanonAcc, b2CanonStake, nil, "", scDummy, "c2")
+		resp2Canon, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2C, BackupData: bkp2C}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp2Canon.GetError(), "fork rollback must release pendingFinishedSession and clear speculative overlays")
+
+		require.False(t, accTrie.HasUncommittedChanges())
+		require.False(t, stakeTrie.HasUncommittedChanges())
+
+		gotSpecAcc, _ := accTrie.Get(specNewAcct)
+		require.Empty(t, gotSpecAcc, "speculative account key must not leak in readView after fork rollback")
+		gotCanonGenA, _ := accTrie.Get(genAcctA)
+		require.Equal(t, []byte("canon_b2_genA"), gotCanonGenA)
+
+		gotSpecStake, _ := stakeTrie.Get(specNewStake)
+		require.Empty(t, gotSpecStake, "speculative stake wDirty key must be cleared on fork rollback")
+		gotCanonGenV1, _ := stakeTrie.Get(genStakeV1)
+		require.Equal(t, []byte("canon_b2_genV1"), gotCanonGenV1)
+
+		// Continuing local execution on ChainState trie must produce the exact clean root for block #3.
+		accTrie.SetCurrentCommitBlock(3)
+		require.NoError(t, accTrie.Update(acctB3, []byte("b3_val")))
+		b3Root, _, _, err := accTrie.Commit(true)
+		require.NoError(t, err)
+		require.Equal(t, canonAccR[3], b3Root, "post-rollback local commit root must match clean [Gen, B1, CanonB2, B3]")
+		p3 := accTrie.ExtractPendingPayload()
+		if p3 != nil {
+			p3.CommitAsync()
+			require.NoError(t, p3.Wait())
+		}
+	})
+
+	t.Run("SubcaseB_GenesisKeyDeletedInForkAndRollbackToEmptyRootHash", func(t *testing.T) {
+		genAcctA := common.HexToAddress("0x1000000000000000000000000000000000003211").Bytes()
+		acctB1 := common.HexToAddress("0x2000000000000000000000000000000000003211").Bytes()
+		forkStake1 := common.HexToAddress("0x4000000000000000000000000000000000003211").Bytes()
+		scDummy := common.HexToAddress("0xA000000000000000000000000000000000003211")
+
+		genAccKVs := [][2][]byte{{makeNomtTestKey(genAcctA), []byte("gen_1000")}}
+		b1Acc := [][2][]byte{{makeNomtTestKey(acctB1), []byte("b1_val")}}
+		b2ForkAcc := [][2][]byte{{makeNomtTestKey(genAcctA), nil}} // Deletes Genesis key!
+		b2ForkStake := [][2][]byte{{makeNomtTestKey(forkStake1), []byte("stake_500")}}
+		b2CanonAcc := [][2][]byte{{makeNomtTestKey(acctB1), []byte("canon_b2")}}
+
+		forkAccR, forkStakeR, _ := computeNomtSequence(t, []nomtStep32{
+			{0, genAccKVs, nil, nil},
+			{1, b1Acc, nil, nil},
+			{2, b2ForkAcc, b2ForkStake, nil},
+		})
+		canonAccR, _, _ := computeNomtSequence(t, []nomtStep32{
+			{0, genAccKVs, nil, nil},
+			{1, b1Acc, nil, nil},
+			{2, b2CanonAcc, nil, nil},
+		})
+
+		rh, _, _, _, _, genHash := setupValidatorNomt32(t, genAccKVs, nil, canonAccR[0], trie.EmptyRootHash)
+
+		blk1, raw1, bkp1 := makeSyncBlock32(t, genHash, 1, canonAccR[1], trie.EmptyRootHash,
+			"0x320b000000000000000000000000000000000000000000000000000000000001", 10,
+			b1Acc, nil, nil, "", scDummy, "b1")
+		resp1, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 1, RawBlockBytes: raw1, BackupData: bkp1}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp1.GetError())
+
+		_, raw2F, bkp2F := makeSyncBlock32(t, blk1.Header().Hash(), 2, forkAccR[2], forkStakeR[2],
+			"0x320b000000000000000000000000000000000000000000000000000000000002", 20,
+			b2ForkAcc, b2ForkStake, nil, "", scDummy, "f2")
+		resp2F, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2F, BackupData: bkp2F}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp2F.GetError())
+
+		accDeletedInFork, err := trie.GetNomtKeyValues("account_state", [][]byte{genAcctA})
+		require.NoError(t, err)
+		require.Nil(t, accDeletedInFork[0], "genAcctA must have been deleted in fork #2")
+
+		_, raw2C, bkp2C := makeSyncBlock32(t, blk1.Header().Hash(), 2, canonAccR[2], trie.EmptyRootHash,
+			"0x320b000000000000000000000000000000000000000000000000000000000102", 30,
+			b2CanonAcc, nil, nil, "", scDummy, "c2")
+		resp2Canon, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2C, BackupData: bkp2C}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp2Canon.GetError(), "rolling back deleted Genesis key and returning stake_db to EmptyRootHash must succeed")
+
+		finalA, _ := trie.GetNomtHandleRoot("account_state")
+		finalS, _ := trie.GetNomtHandleRoot("stake_db")
+		require.Equal(t, canonAccR[2], finalA)
+		require.True(t, finalS == (common.Hash{}) || finalS == trie.EmptyRootHash, "stake_db handle must be empty root, got %s", finalS.Hex())
+
+		restoredAcc, err := trie.GetNomtKeyValues("account_state", [][]byte{genAcctA, acctB1})
+		require.NoError(t, err)
+		require.Equal(t, []byte("gen_1000"), restoredAcc[0], "deleted Genesis key must be restored to pre-fork value")
+		require.Equal(t, []byte("canon_b2"), restoredAcc[1])
+
+		restoredStake, err := trie.GetNomtKeyValues("stake_db", [][]byte{forkStake1})
+		require.NoError(t, err)
+		require.Nil(t, restoredStake[0], "forkStake1 must be deleted when rolling back to EmptyRootHash")
+	})
+
+	t.Run("SubcaseC_RollbackToBlockZeroWithoutBlockZeroInChainIndex_PreservesGenesisState", func(t *testing.T) {
+		genAcctA := common.HexToAddress("0x1000000000000000000000000000000000003221").Bytes()
+		genAcctUntouched := common.HexToAddress("0x1000000000000000000000000000000000003222").Bytes()
+		forkOnly1 := common.HexToAddress("0x2000000000000000000000000000000000003223").Bytes()
+		canonB1Acc := common.HexToAddress("0x2000000000000000000000000000000000003224").Bytes()
+
+		genStakeV1 := common.HexToAddress("0x3000000000000000000000000000000000003221").Bytes()
+		genStakeUntouched := common.HexToAddress("0x3000000000000000000000000000000000003222").Bytes()
+		canonB1Stake := common.HexToAddress("0x4000000000000000000000000000000000003224").Bytes()
+		scDummy := common.HexToAddress("0xA000000000000000000000000000000000003221")
+
+		genAccKVs := [][2][]byte{
+			{makeNomtTestKey(genAcctA), []byte("gen_A_zero")},
+			{makeNomtTestKey(genAcctUntouched), []byte("gen_B_untouched_zero")},
+		}
+		genStakeKVs := [][2][]byte{
+			{makeNomtTestKey(genStakeV1), []byte("gen_V1_zero")},
+			{makeNomtTestKey(genStakeUntouched), []byte("gen_V2_untouched_zero")},
+		}
+		b1ForkAcc := [][2][]byte{
+			{makeNomtTestKey(genAcctA), []byte("fork_b1_genA")},
+			{makeNomtTestKey(forkOnly1), []byte("fork_b1_only")},
+		}
+		b1ForkStake := [][2][]byte{
+			{makeNomtTestKey(genStakeV1), []byte("fork_b1_genV1")},
+		}
+		b1CanonAcc := [][2][]byte{
+			{makeNomtTestKey(canonB1Acc), []byte("canon_b1_acc")},
+		}
+		b1CanonStake := [][2][]byte{
+			{makeNomtTestKey(canonB1Stake), []byte("canon_b1_stake")},
+		}
+
+		forkAccR, forkStakeR, _ := computeNomtSequence(t, []nomtStep32{
+			{0, genAccKVs, genStakeKVs, nil},
+			{1, b1ForkAcc, b1ForkStake, nil},
+		})
+		canonAccR, canonStakeR, _ := computeNomtSequence(t, []nomtStep32{
+			{0, genAccKVs, genStakeKVs, nil},
+			{1, b1CanonAcc, b1CanonStake, nil},
+		})
+
+		rh, _, _, _, bc, genHash := setupValidatorNomt32(t, genAccKVs, genStakeKVs, canonAccR[0], canonStakeR[0])
+
+		// Remove block #0 from BlockChain number->hash index so targetBlk == nil when rolling back to block #0.
+		require.NoError(t, bc.DeleteBlockHashMapping(0))
+		require.NoError(t, bc.Commit())
+
+		_, raw1F, bkp1F := makeSyncBlock32(t, genHash, 1, forkAccR[1], forkStakeR[1],
+			"0x320c000000000000000000000000000000000000000000000000000000000001", 10,
+			b1ForkAcc, b1ForkStake, nil, "", scDummy, "f1")
+		resp1F, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 1, RawBlockBytes: raw1F, BackupData: bkp1F}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp1F.GetError())
+
+		_, raw1C, bkp1C := makeSyncBlock32(t, genHash, 1, canonAccR[1], canonStakeR[1],
+			"0x320c000000000000000000000000000000000000000000000000000000000101", 20,
+			b1CanonAcc, b1CanonStake, nil, "", scDummy, "c1")
+		resp1Canon, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 1, RawBlockBytes: raw1C, BackupData: bkp1C}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp1Canon.GetError(), "validator rollback to targetBlock=0 without block #0 header must preserve Genesis state")
+
+		finalA, _ := trie.GetNomtHandleRoot("account_state")
+		finalS, _ := trie.GetNomtHandleRoot("stake_db")
+		require.Equal(t, canonAccR[1], finalA)
+		require.Equal(t, canonStakeR[1], finalS)
+
+		accVals, err := trie.GetNomtKeyValues("account_state", [][]byte{genAcctA, genAcctUntouched, forkOnly1, canonB1Acc})
+		require.NoError(t, err)
+		require.Equal(t, []byte("gen_A_zero"), accVals[0])
+		require.Equal(t, []byte("gen_B_untouched_zero"), accVals[1])
+		require.Nil(t, accVals[2])
+		require.Equal(t, []byte("canon_b1_acc"), accVals[3])
+
+		stakeVals, err := trie.GetNomtKeyValues("stake_db", [][]byte{genStakeV1, genStakeUntouched, canonB1Stake})
+		require.NoError(t, err)
+		require.Equal(t, []byte("gen_V1_zero"), stakeVals[0])
+		require.Equal(t, []byte("gen_V2_untouched_zero"), stakeVals[1])
+		require.Equal(t, []byte("canon_b1_stake"), stakeVals[2])
+	})
+
+	t.Run("SubcaseD_CorruptedStakeUndoRevertsAccountRollbackAtomically", func(t *testing.T) {
+		genAcctA := common.HexToAddress("0x1000000000000000000000000000000000003231").Bytes()
+		acctB1 := common.HexToAddress("0x2000000000000000000000000000000000003231").Bytes()
+		genStakeV1 := common.HexToAddress("0x3000000000000000000000000000000000003231").Bytes()
+		stakeB1 := common.HexToAddress("0x4000000000000000000000000000000000003231").Bytes()
+		scAddrA := common.HexToAddress("0xA000000000000000000000000000000000003231")
+
+		genAccKVs := [][2][]byte{{makeNomtTestKey(genAcctA), []byte("gen_A_atomic")}}
+		genStakeKVs := [][2][]byte{{makeNomtTestKey(genStakeV1), []byte("gen_V1_atomic")}}
+		b1Acc := [][2][]byte{{makeNomtTestKey(acctB1), []byte("b1_acc_atomic")}}
+		b1Stake := [][2][]byte{{makeNomtTestKey(stakeB1), []byte("b1_stake_atomic")}}
+		b1SC := [][2][]byte{{makeNomtTestSCKey(scAddrA, 1), []byte("b1_sc_atomic")}}
+
+		b2ForkAcc := [][2][]byte{{makeNomtTestKey(genAcctA), []byte("fork_b2_genA")}}
+		b2ForkStake := [][2][]byte{{makeNomtTestKey(genStakeV1), []byte("fork_b2_genV1")}}
+		b2ForkSC := [][2][]byte{{makeNomtTestSCKey(scAddrA, 1), []byte("fork_b2_sc_atomic")}}
+
+		b2CanonAcc := [][2][]byte{{makeNomtTestKey(acctB1), []byte("canon_b2_acc_atomic")}}
+		b2CanonStake := [][2][]byte{{makeNomtTestKey(stakeB1), []byte("canon_b2_stake_atomic")}}
+		b2CanonSC := [][2][]byte{{makeNomtTestSCKey(scAddrA, 1), []byte("canon_b2_sc_atomic")}}
+
+		forkAccR, forkStakeR, _ := computeNomtSequence(t, []nomtStep32{
+			{0, genAccKVs, genStakeKVs, nil},
+			{1, b1Acc, b1Stake, b1SC},
+			{2, b2ForkAcc, b2ForkStake, b2ForkSC},
+		})
+		canonAccR, canonStakeR, _ := computeNomtSequence(t, []nomtStep32{
+			{0, genAccKVs, genStakeKVs, nil},
+			{1, b1Acc, b1Stake, b1SC},
+			{2, b2CanonAcc, b2CanonStake, b2CanonSC},
+		})
+
+		rh, sm, _, _, _, genHash := setupValidatorNomt32(t, genAccKVs, genStakeKVs, canonAccR[0], canonStakeR[0])
+
+		blk1, raw1, bkp1 := makeSyncBlock32(t, genHash, 1, canonAccR[1], canonStakeR[1],
+			"0x320d000000000000000000000000000000000000000000000000000000000001", 10,
+			b1Acc, b1Stake, b1SC, "db_adv32d", scAddrA, "b1")
+		resp1, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 1, RawBlockBytes: raw1, BackupData: bkp1}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp1.GetError())
+
+		_, raw2F, bkp2F := makeSyncBlock32(t, blk1.Header().Hash(), 2, forkAccR[2], forkStakeR[2],
+			"0x320d000000000000000000000000000000000000000000000000000000000002", 20,
+			b2ForkAcc, b2ForkStake, b2ForkSC, "db_adv32d", scAddrA, "f2")
+		resp2F, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2F, BackupData: bkp2F}},
+		})
+		require.NoError(t, err)
+		require.Empty(t, resp2F.GetError())
+		require.Equal(t, uint64(2), storage.GetLastBlockNumber())
+
+		// Delete ONLY the stake undo record ("us") for block 2 while keeping account undo ("ua") intact.
+		require.NoError(t, sm.GetStorageBackupDb().Delete(storage.NomtUndoKey(storage.NomtUndoKindStake, 2)))
+		nomtAccBefore, _ := trie.GetNomtHandleRoot("account_state")
+		nomtStakeBefore, _ := trie.GetNomtHandleRoot("stake_db")
+
+		_, raw2C, bkp2C := makeSyncBlock32(t, blk1.Header().Hash(), 2, canonAccR[2], canonStakeR[2],
+			"0x320d000000000000000000000000000000000000000000000000000000000102", 30,
+			b2CanonAcc, b2CanonStake, b2CanonSC, "db_adv32d", scAddrA, "c2")
+		resp2Canon, err := rh.HandleSyncBlocksRequest(&pb.SyncBlocksRequest{
+			ExecuteMode: true,
+			Blocks:      []*pb.BlockData{{BlockNumber: 2, RawBlockBytes: raw2C, BackupData: bkp2C}},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, resp2Canon.GetError())
+		require.Contains(t, resp2Canon.GetError(), "validator NOMT rollback root mismatch on stake_db")
+		require.Equal(t, uint64(2), storage.GetLastBlockNumber())
+
+		// account_state rolled back first must be atomically undone back to Fork #2 when stake_db failed.
+		nomtAccAfter, _ := trie.GetNomtHandleRoot("account_state")
+		nomtStakeAfter, _ := trie.GetNomtHandleRoot("stake_db")
+		require.Equal(t, nomtAccBefore, nomtAccAfter, "account_state must be atomically reverted via undoNomtRollbacks() when stake_db rollback fails")
+		require.Equal(t, nomtStakeBefore, nomtStakeAfter, "stake_db must remain at pre-rollback Fork #2 root")
+
+		accVals, err := trie.GetNomtKeyValues("account_state", [][]byte{genAcctA})
+		require.NoError(t, err)
+		require.Equal(t, []byte("fork_b2_genA"), accVals[0])
+
+		rolledXapian, rbErr := mvm.RollbackXapianAboveBlock(1)
+		require.NoError(t, rbErr)
+		require.Greater(t, rolledXapian, 0, "Xapian must NOT be rolled back when stake_db rollback fails closed")
+	})
+}

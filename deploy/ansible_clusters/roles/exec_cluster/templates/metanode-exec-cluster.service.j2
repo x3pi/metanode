@@ -2,6 +2,10 @@
 Description=MetaNode Execution Service - {{ inventory_hostname }} (Cluster {{ cluster_id }}, ChainID {{ chain_id | default(991) }})
 After=network.target network-online.target
 Wants=network-online.target
+# Stop restarting after repeated crashes (e.g. disk full): a replica that fails closed again and again must
+# stay down for the operator instead of crash-looping every few seconds and flooding the log/crash.log.
+StartLimitIntervalSec={{ systemd_start_limit_interval_sec | default(600) }}
+StartLimitBurst={{ systemd_start_limit_burst | default(5) }}
 
 [Service]
 EnvironmentFile=-{{ node_data_dir }}/security.env

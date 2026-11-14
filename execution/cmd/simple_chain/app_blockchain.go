@@ -1700,32 +1700,39 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 			stakePreImages = p.PreImageBatch()
 		}
 
-		if err := commitVerifiedCatchupBlock(
-			bn,
-			expectedAccountRoot,
-			expectedStakeRoot,
-			scPayload,
-			accountRes.NomtPayload,
-			accountRes.FinalHash,
-			stakeRes.NomtPayload,
-			stakeRes.FinalHash,
-			accountPersist,
-			stakePersist,
-			accountWait,
-			stakeWait,
+		var backupDB storage.Storage
+		if app.storageManager != nil {
+			backupDB = app.storageManager.GetStorageBackupDb()
+		}
+		writeAccUndo := (app.chainState == nil || app.chainState.GetChangelogDB() == nil) &&
+			(trie.GetStateBackend() == trie.BackendNOMT || accountRes.NomtPayload != nil)
+		writeStakeUndo := (app.chainState == nil || app.chainState.GetStakeChangelogDB() == nil) &&
+			(trie.GetStateBackend() == trie.BackendNOMT || stakeRes.NomtPayload != nil)
+
+		if err := commitCatchupBlockWithUndo(
+			backupDB, bn,
+			writeAccUndo, accPreImages,
+			writeStakeUndo, stakePreImages,
+			func() { discardPayloads(scPayload, accountRes.NomtPayload, stakeRes.NomtPayload) },
+			func() error {
+				return commitVerifiedCatchupBlock(
+					bn,
+					expectedAccountRoot,
+					expectedStakeRoot,
+					scPayload,
+					accountRes.NomtPayload,
+					accountRes.FinalHash,
+					stakeRes.NomtPayload,
+					stakeRes.FinalHash,
+					accountPersist,
+					stakePersist,
+					accountWait,
+					stakeWait,
+				)
+			},
 		); err != nil {
 			mvm.ClearAllXapianTxBuffers()
 			return err
-		}
-
-		if app.storageManager != nil && app.storageManager.GetStorageBackupDb() != nil && bn > 0 {
-			backupDB := app.storageManager.GetStorageBackupDb()
-			if (app.chainState == nil || app.chainState.GetChangelogDB() == nil) && len(accPreImages) > 0 {
-				_ = storage.PersistNomtUndoBatch(backupDB, storage.NomtUndoKindAccount, bn, accPreImages)
-			}
-			if (app.chainState == nil || app.chainState.GetStakeChangelogDB() == nil) && len(stakePreImages) > 0 {
-				_ = storage.PersistNomtUndoBatch(backupDB, storage.NomtUndoKindStake, bn, stakePreImages)
-			}
 		}
 
 		// Commit Xapian buffered writes for verified catch-up block bn
@@ -1776,6 +1783,42 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 		logger.Info("🛡️ [STARTUP] ✅ Successfully re-executed block #%d: accountRoot=%s, stakeRoot=%s", bn, accountRes.FinalHash.Hex()[:18], stakeRes.FinalHash.Hex()[:18])
 	}
 	return nil
+}
+
+// commitCatchupBlockWithUndo enforces write-ahead ordering for a catch-up block: the validator NOMT undo
+// for bn is persisted BEFORE commit touches NOMT on disk. If the undo write fails, the payloads are
+// discarded, commit is never called and the error is returned, so NOMT stays at bn-1 and matches the block
+// DB after the caller truncates to the last committed block.
+//
+// If commit itself fails, the undo record for bn is intentionally KEPT: commit may already have flushed
+// part of bn to NOMT, and that record is then the only way to roll bn back. A record for a block that never
+// reached NOMT is harmless: its pre-images equal the bn-1 values, and the next execution of height bn
+// overwrites it.
+func commitCatchupBlockWithUndo(
+	backupDB storage.Storage,
+	bn uint64,
+	writeAccUndo bool, accPreImages [][2][]byte,
+	writeStakeUndo bool, stakePreImages [][2][]byte,
+	discardAll func(),
+	commit func() error,
+) error {
+	if err := storage.PersistNomtUndoForBlock(backupDB, bn, writeAccUndo, accPreImages, writeStakeUndo, stakePreImages); err != nil {
+		discardAll()
+		return fmt.Errorf("NOMT undo durability failed during catch-up for block #%d: %w", bn, err)
+	}
+	return commit()
+}
+
+// discardPayloads calls Discard() on every payload that supports it.
+func discardPayloads(payloads ...interface{}) {
+	for _, p := range payloads {
+		if p == nil {
+			continue
+		}
+		if disc, ok := p.(interface{ Discard() }); ok {
+			disc.Discard()
+		}
+	}
 }
 
 // commitVerifiedCatchupBlock verifies that the freshly computed account and stake state roots
