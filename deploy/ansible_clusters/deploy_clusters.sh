@@ -53,6 +53,8 @@ usage() {
     echo "  --deploy            Cập nhật binary mới và khởi động lại toàn bộ dịch vụ"
     echo "  --start             Bật lại các node (toàn bộ hoặc lọc theo --node/--exec-only)"
     echo "  --restart           Khởi động lại toàn bộ cụm node (Parent Chain + Exec Clusters)"
+    echo "  --rollback          Rollback toàn bộ cluster về bản binary trước (.prev)"
+    echo "  --skip-build        (Chỉ đi kèm với --restart) Bỏ qua bước build, chạy lại binary cũ đang có trên node"
     echo "  --stop              Dừng dịch vụ (toàn bộ hoặc lọc theo --node/--exec-only)"
     echo "  --clean             Dọn dẹp database & log (giữ nguyên config và key)"
     echo "  --reset             Reset toàn bộ, xóa database và khởi chạy lại từ block 0"
@@ -117,6 +119,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --restart|restart)
             ACTION="restart"
+            shift
+            ;;
+        --rollback|rollback)
+            ACTION="rollback"
+            shift
+            ;;
+        --skip-build)
+            SKIP_BUILD="true"
             shift
             ;;
         --stop|stop)
@@ -270,6 +280,18 @@ if [ -z "$ACTION" ]; then
     fi
 fi
 
+if [ "${SKIP_BUILD:-false}" = "true" ]; then
+    if [ "$ACTION" != "restart" ]; then
+        echo "❌ Lỗi: Cờ --skip-build chỉ hợp lệ khi đi kèm với --restart (hiện tại: ${ACTION})!"
+        exit 1
+    fi
+    EXTRA_ANSIBLE_ARGS+=(-e "skip_build=true")
+fi
+
+if [ "$ACTION" = "rollback" ]; then
+    EXTRA_ANSIBLE_ARGS+=(-e "skip_build=true")
+fi
+
 # Detect environment from inventory if not explicitly passed via CLI
 if [ -z "${METANODE_ENV:-}" ] && [ -f "$INVENTORY" ]; then
     INV_ENV=$(grep -E '^\s*metanode_env:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
@@ -280,6 +302,27 @@ fi
 
 export METANODE_ENV="${METANODE_ENV:-production}"
 export NODE_ENV="${NODE_ENV:-$METANODE_ENV}"
+
+# Issue 6 Fix: Validate rollback on production strictly requiring --force AFTER environment is resolved
+if [ "$ACTION" = "rollback" ]; then
+    if [ "${METANODE_ENV:-}" = "production" ] && [ "${CONFIRM_FORCE:-false}" != "true" ]; then
+        echo "❌ Lỗi: Thao tác --rollback trên môi trường production yêu cầu xác nhận bằng cờ --force!"
+        exit 1
+    fi
+fi
+
+# Issue 5 Fix: Block --rollback when --node or --host is set (D9: Rollback must cover the entire chain)
+if [ "$ACTION" = "rollback" ] && [ -n "$TARGET_NODE" ]; then
+    echo "❌ Lỗi: Thao tác --rollback không được phép áp dụng riêng lẻ cho 1 node (--node) hoặc 1 máy (--host)!"
+    echo "   Nguyên tắc D9: Rollback bắt buộc phải thực thi đồng loạt trên toàn bộ chain để chống fork."
+    exit 1
+fi
+
+if [[ "$ACTION" =~ ^(deploy|restart)$ ]] && [ -n "$TARGET_NODE" ] && [ "${SKIP_BUILD:-false}" != "true" ]; then
+    echo "⚠️  CẢNH BÁO: Bạn đang chạy ${ACTION} có build binary mới nhưng lại nhắm vào node cụ thể: ${TARGET_NODE}."
+    echo "   Lưu ý: Nếu máy chủ có nhiều node dùng chung binary (/opt/metanode/bin), việc đổi binary trên đĩa"
+    echo "   sẽ khiến các node khác trên cùng máy chạy lẫn version cũ/mới trong RAM cho đến lần restart sau!"
+fi
 
 # Safety guard: Action reset wipes all blockchain data, strictly requiring --force
 if [ "$ACTION" = "reset" ] && [ "$CONFIRM_FORCE" != "true" ]; then
@@ -1026,6 +1069,8 @@ fi
 # 2. Scope & Target Node Resolution
 TARGET_SCOPE_DESC="Toàn bộ hệ thống (Parent Chain + Exec Clusters)"
 if [ -n "$TARGET_NODE" ]; then
+    # Tells the G4 gates that the play intentionally covers only part of a chain (warn instead of fail).
+    EXTRA_ANSIBLE_ARGS+=(-e "partial_target=true")
     RESOLVED_HOST=$(resolve_target_host "$TARGET_NODE")
     echo "🎯 Targeting specific node: ${RESOLVED_HOST} (from parameter: ${TARGET_NODE})"
     TARGET_SCOPE_DESC="Node/Máy: ${TARGET_NODE} (${RESOLVED_HOST})"
@@ -1059,6 +1104,11 @@ elif [ "$EXEC_ONLY" = "true" ]; then
     echo "⛓️  Targeting Execution Clusters only (Child Chains - EVM Chain ID 991)"
     TARGET_SCOPE_DESC="Chỉ Execution Clusters (Child Chains - ID 991)"
     if [[ "$ACTION" =~ ^(setup|deploy|restart|reset)$ ]]; then
+        EXTRA_ANSIBLE_ARGS+=(--limit "localhost,exec_clusters")
+    else
+        EXTRA_ANSIBLE_ARGS+=(--limit "exec_clusters")
+    fi
+    if [[ "$ACTION" =~ ^(setup|deploy|restart|reset)$ ]] && [ "${SKIP_BUILD:-false}" != "true" ]; then
         EXTRA_ANSIBLE_ARGS+=(--tags "build,exec_clusters")
     else
         EXTRA_ANSIBLE_ARGS+=(--tags "exec_clusters")
@@ -1067,6 +1117,11 @@ elif [ "$PARENT_ONLY" = "true" ]; then
     echo "🏛️  Targeting Parent Chain only"
     TARGET_SCOPE_DESC="Chỉ Parent Chain (Root Anchor)"
     if [[ "$ACTION" =~ ^(setup|deploy|restart|reset)$ ]]; then
+        EXTRA_ANSIBLE_ARGS+=(--limit "localhost,parent_chain_nodes")
+    else
+        EXTRA_ANSIBLE_ARGS+=(--limit "parent_chain_nodes")
+    fi
+    if [[ "$ACTION" =~ ^(setup|deploy|restart|reset)$ ]] && [ "${SKIP_BUILD:-false}" != "true" ]; then
         EXTRA_ANSIBLE_ARGS+=(--tags "build,parent_chain")
     else
         EXTRA_ANSIBLE_ARGS+=(--tags "parent_chain")
@@ -1074,7 +1129,7 @@ elif [ "$PARENT_ONLY" = "true" ]; then
 fi
 
 # 2.5. Tạm dừng monitors (hoặc tắt hẳn nếu là stop/clean/--no-monitor) và dọn dẹp state
-if [[ "$ACTION" =~ ^(setup|deploy|restart|reset|clean|stop)$ ]]; then
+if [[ "$ACTION" =~ ^(setup|deploy|restart|reset|clean|stop|rollback)$ ]]; then
     if [[ "$ACTION" =~ ^(clean|stop)$ ]] || [ "$ENABLE_MONITOR" != "true" ]; then
         stop_cluster_monitors --disable
     else

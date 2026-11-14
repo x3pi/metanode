@@ -62,6 +62,8 @@
 | **Test chịu lỗi Raft (Auto-Failover)** | `go run execution/scripts/test/test_raft_fault_tolerance.go` | Giả lập kill leader, đo thời gian bầu cử (~200ms) & zero-fork |
 | **Chạy test E2E trực tiếp bằng Go** | `go run execution/scripts/test/test_real_world_scenarios.go` | Debug luồng giao dịch thực tế chi tiết từng bước |
 | **Khởi động lại toàn bộ cụm** | `./deploy_clusters.sh --restart` | Khởi động lại Parent Chain và tất cả Exec Clusters |
+| **Restart không build lại binary** | `./deploy_clusters.sh --restart --skip-build` | Khởi động lại cụm giữ nguyên binary cũ đang có trên node |
+| **Rollback cụm về binary trước** | `./deploy_clusters.sh --rollback` | Rollback toàn bộ node về file binary .prev (Fail-Stop) |
 | **Dừng an toàn toàn bộ cụm** | `./deploy_clusters.sh --stop` | Tắt an toàn các tiến trình, không làm hỏng dữ liệu LevelDB |
 | **Cập nhật mã nguồn & restart** | `./deploy_clusters.sh --deploy` | Rebuild code mới, reload cấu hình và restart |
 | **Reset toàn bộ về Genesis (Block 0)** | `./deploy_clusters.sh --reset` | Xóa sạch DB cũ, sinh lại genesis từ đầu |
@@ -91,6 +93,7 @@ File thực thi: `deploy/ansible_clusters/deploy_clusters.sh`
 | | `--start` | Bật lại các node đã cấu hình sẵn (toàn bộ hoặc lọc theo `--exec-only` / `--node`) |
 | | `--stop` | Dừng an toàn các tiến trình (toàn bộ hoặc lọc theo `--exec-only` / `--node`) |
 | | `--restart` | Khởi động lại các node (toàn bộ hoặc lọc theo `--exec-only` / `--node`) |
+| | `--rollback` | Rollback toàn bộ node trong chain về phiên bản binary trước (.prev) |
 | | `--status` | Kiểm tra tình trạng kết nối RPC, lấy block number, in bảng toàn bộ port mạng |
 | | `--export-config` | Xuất file cấu hình thống nhất `/tmp/rpc_nodes.json` |
 | | `--test-only` | Chỉ chạy bộ kiểm thử tích hợp (không tác động trạng thái node) |
@@ -99,7 +102,8 @@ File thực thi: `deploy/ansible_clusters/deploy_clusters.sh`
 | **Phạm vi (Target & Scope)** | `--exec-only` | **Chỉ thao tác trên các Chain con (Execution Clusters)** (bỏ qua Parent Chain) |
 | | `--parent-only` | Chỉ thao tác riêng trên Parent Chain (bỏ qua Chain con) |
 | | `--node=NAME`, `-n` | **Chỉ thao tác trên 1 node cụ thể** (vd: `exec1_r1`, `exec1_r2`, `exec1_r3`, `parent`) |
-| **Bổ trợ (Modifier)** | `--test` | Tự động kích hoạt test tích hợp ngay sau khi setup/deploy hoàn tất |
+| **Bổ trợ (Modifier)** | `--skip-build` | (Chỉ dùng với `--restart`) Bỏ qua bước build, chạy lại binary cũ trên node |
+| | `--test` | Tự động kích hoạt test tích hợp ngay sau khi setup/deploy hoàn tất |
 | | `--systemd` | Chạy dưới dạng Systemd service thay vì Background daemon |
 | | `--notify` | Bật thông báo Telegram (mặc định bật nếu có file `.env`) |
 | | `--no-notify` | Tắt hoàn toàn thông báo Telegram |

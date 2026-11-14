@@ -17,44 +17,53 @@
     - role: build
       when: deploy_action in ['setup', 'deploy', 'restart', 'reset']
 
-# ── Play 1.5: Pre-stop all Nodes on reset/clean/restart ────────────────────────
-- name: "Phase 1.5: Stop all Parent Chain Nodes simultaneously on reset/clean/restart"
+# ── Play 1.2: Pre-stage Binaries & Base Environment ──────────────────────────
+- name: "Phase 1.2: Pre-stage Binaries to Cluster Hosts"
+  hosts: parent_chain_nodes:exec_clusters
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tags: ["build", "prepare", "common", "parent_chain", "exec_clusters", "core", "shards"]
+  roles:
+    - role: common
+      when: deploy_action not in ['open_ports', 'nginx', 'stop', 'clean']
+
+# ── Play 1.5: Pre-stop all Nodes on reset/clean ──────────────────────────────
+- name: "Phase 1.5: Stop all Parent Chain Nodes simultaneously on reset/clean"
   hosts: parent_chain_nodes
   gather_facts: false
   become: true
   tags: ["parent_chain", "core"]
   tasks:
-    - name: Stop Parent Chain service to prevent ghost quorum gossip during reset/restart
+    - name: Stop Parent Chain service to prevent ghost quorum gossip during reset
       ansible.builtin.systemd:
         name: "metanode-{{ inventory_hostname }}"
         state: stopped
-      when: deploy_action in ['reset', 'clean', 'restart', 'deploy']
+      when: deploy_action in ['reset', 'clean']
       ignore_errors: true
 
-- name: "Phase 1.6: Stop all Execution Nodes simultaneously on reset/clean/restart"
+- name: "Phase 1.6: Stop all Execution Nodes simultaneously on reset/clean"
   hosts: exec_clusters
   gather_facts: false
   become: true
   tags: ["exec_clusters", "shards"]
   tasks:
-    - name: Stop Execution Cluster services before reset/clean/restart
+    - name: Stop Execution Cluster services before reset/clean
       ansible.builtin.systemd:
         name: "metanode-{{ inventory_hostname }}"
         state: stopped
-      when: deploy_action in ['reset', 'clean', 'restart', 'deploy']
+      when: deploy_action in ['reset', 'clean']
       ignore_errors: true
 
 # ── Play 2: Deploy Parent Chain ──────────────────────────────────────────────
 - name: "Phase 2: Deploy Parent Chain Node"
   hosts: parent_chain_nodes
-  serial: 1
+  serial: "{{ 1 if ((deploy_action | default('setup')) in ['setup', 'reset']) else '100%' }}"
   gather_facts: false
   become: true
   any_errors_fatal: true
   tags: ["parent_chain", "core", "open_ports"]
   roles:
-    - role: common
-      when: deploy_action != 'open_ports'
     - role: parent_chain
 
 # ── Play 3: Deploy Execution Clusters ────────────────────────────────────────
@@ -65,8 +74,6 @@
   any_errors_fatal: true
   tags: ["exec_clusters", "shards", "open_ports", "nginx", "tls"]
   roles:
-    - role: common
-      when: deploy_action not in ['open_ports', 'nginx']
     - role: exec_cluster
       when: deploy_action != 'nginx'
     - role: nginx_tls

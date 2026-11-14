@@ -1108,6 +1108,10 @@ func (bp *BlockProcessor) SetLastCommitErr(err error) {
 	onFatal := bp.onCommitFatal
 	bp.lastCommitErrMu.Unlock()
 	if first && onFatal != nil {
+		// Runs synchronously on the caller (commitWorker). In raft mode it exits the process, so the caller's
+		// follow-up steps (discardJobPayloads, sending on ErrChan) never run. That is intended: nothing of the
+		// failed block was published, in-memory payloads die with the process, and the restart replays the
+		// non-durable Raft entries from a state recovered to the last durable block.
 		onFatal(err)
 	}
 }

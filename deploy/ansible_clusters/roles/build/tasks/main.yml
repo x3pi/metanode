@@ -2,6 +2,7 @@
 - name: Build and verify binaries locally
   delegate_to: localhost
   run_once: true
+  when: not (skip_build | default(false) | bool)
   block:
     - name: Ensure target local bin directory exists
       ansible.builtin.file:
@@ -69,3 +70,45 @@
         - "{{ local_bin_dir }}/parent_chain"
         - "{{ local_bin_dir }}/simple_chain"
         - "{{ local_bin_dir }}/bls_pubkey"
+
+    - name: Compute checksum of parent_chain binary
+      ansible.builtin.stat:
+        path: "{{ local_bin_dir }}/parent_chain"
+        checksum_algorithm: sha256
+      register: parent_sha_stat
+
+    - name: Compute checksum of simple_chain binary
+      ansible.builtin.stat:
+        path: "{{ local_bin_dir }}/simple_chain"
+        checksum_algorithm: sha256
+      register: simple_sha_stat
+
+    - name: Set expected binary checksums for cluster deployment
+      ansible.builtin.set_fact:
+        expected_sha_parent: "{{ parent_sha_stat.stat.checksum }}"
+        expected_sha_exec: "{{ simple_sha_stat.stat.checksum }}"
+      delegate_to: localhost
+      delegate_facts: true
+
+    - name: Record git version and dirty working tree status
+      ansible.builtin.shell: |
+        commit=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+        status=$(git status --porcelain 2>/dev/null || echo "")
+        echo "Git Commit: $commit"
+        if [ -n "$status" ]; then
+          echo "⚠️ Git working tree is dirty:"
+          echo "$status"
+        else
+          echo "Git working tree is clean."
+        fi
+      register: git_info
+      args:
+        chdir: "{{ playbook_dir }}/../../"
+      changed_when: false
+
+    - name: Display build verification summary
+      ansible.builtin.debug:
+        msg:
+          - "Parent Chain SHA256: {{ parent_sha_stat.stat.checksum }}"
+          - "Simple Chain SHA256: {{ simple_sha_stat.stat.checksum }}"
+          - "{{ git_info.stdout_lines | default([]) }}"

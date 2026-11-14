@@ -1,4 +1,8 @@
 ---
+- name: Group hosts by machine IP and SSH port
+  ansible.builtin.group_by:
+    key: "machine_{{ ansible_host | replace('.', '_') }}_{{ ansible_port | default(22) }}"
+
 - name: Ensure target directory tree exists on host
   ansible.builtin.file:
     path: "{{ item }}"
@@ -11,18 +15,117 @@
     - "{{ bin_dir }}"
     - "{{ base_data_dir }}"
     - "{{ base_log_dir }}"
+  when: inventory_hostname == (groups['machine_' ~ (ansible_host | replace('.', '_')) ~ '_' ~ (ansible_port | default(22) | string)] | intersect(ansible_play_hosts) | first)
 
 
-- name: Distribute built binaries and base assets to node
-  when: deploy_action in ['setup', 'deploy', 'restart', 'reset']
+# ── Rollback Pre-flight: Verify .prev binaries exist BEFORE stopping any services ──
+- name: Verify .prev binaries exist for rollback on all cluster machines
+  when:
+    - deploy_action == 'rollback'
+    - inventory_hostname == (groups['machine_' ~ (ansible_host | replace('.', '_')) ~ '_' ~ (ansible_port | default(22) | string)] | intersect(ansible_play_hosts) | first)
+  block:
+    - name: Check parent_chain.prev exists on machines hosting Parent Chain
+      ansible.builtin.stat:
+        path: "{{ bin_dir }}/parent_chain.prev"
+      register: rollback_parent_prev_stat
+      when: (groups['machine_' ~ (ansible_host | replace('.', '_')) ~ '_' ~ (ansible_port | default(22) | string)] | intersect(groups['parent_chain_nodes'] | default([])) | length) > 0
+
+    - name: Assert parent_chain.prev exists
+      ansible.builtin.assert:
+        that:
+          - rollback_parent_prev_stat.stat.exists
+        fail_msg: "FATAL [ROLLBACK PRE-FLIGHT]: {{ bin_dir }}/parent_chain.prev does not exist on {{ inventory_hostname }} (machine {{ ansible_host }}:{{ ansible_port | default(22) }})! Aborting rollback BEFORE stopping any service."
+      when: (groups['machine_' ~ (ansible_host | replace('.', '_')) ~ '_' ~ (ansible_port | default(22) | string)] | intersect(groups['parent_chain_nodes'] | default([])) | length) > 0
+
+    - name: Check simple_chain.prev exists on machines hosting Execution Clusters
+      ansible.builtin.stat:
+        path: "{{ bin_dir }}/simple_chain.prev"
+      register: rollback_exec_prev_stat
+      when: (groups['machine_' ~ (ansible_host | replace('.', '_')) ~ '_' ~ (ansible_port | default(22) | string)] | intersect(groups['exec_clusters'] | default([])) | length) > 0
+
+    - name: Assert simple_chain.prev exists
+      ansible.builtin.assert:
+        that:
+          - rollback_exec_prev_stat.stat.exists
+        fail_msg: "FATAL [ROLLBACK PRE-FLIGHT]: {{ bin_dir }}/simple_chain.prev does not exist on {{ inventory_hostname }} (machine {{ ansible_host }}:{{ ansible_port | default(22) }})! Aborting rollback BEFORE stopping any service."
+      when: (groups['machine_' ~ (ansible_host | replace('.', '_')) ~ '_' ~ (ansible_port | default(22) | string)] | intersect(groups['exec_clusters'] | default([])) | length) > 0
+
+
+# ── Fresh Setup / Reset: Copy binaries directly to bin_dir ───────────────────
+- name: Distribute binaries directly (setup/reset)
+  when:
+    - deploy_action in ['setup', 'reset']
+    - inventory_hostname == (groups['machine_' ~ (ansible_host | replace('.', '_')) ~ '_' ~ (ansible_port | default(22) | string)] | intersect(ansible_play_hosts) | first)
+  block:
+    - name: Copy binaries to bin_dir
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: '0755'
+      loop:
+        - { src: "{{ local_bin_dir }}/parent_chain", dest: "{{ bin_dir }}/parent_chain" }
+        - { src: "{{ local_bin_dir }}/simple_chain", dest: "{{ bin_dir }}/simple_chain" }
+
+    - name: Verify checksum of installed binaries (setup/reset)
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+        checksum_algorithm: sha256
+      register: installed_bin_stats
+      loop:
+        - { name: "parent_chain", path: "{{ bin_dir }}/parent_chain", expected: "{{ hostvars['localhost']['expected_sha_parent'] | default('') }}" }
+        - { name: "simple_chain", path: "{{ bin_dir }}/simple_chain", expected: "{{ hostvars['localhost']['expected_sha_exec'] | default('') }}" }
+
+    - name: Assert installed binary checksums match (setup/reset)
+      ansible.builtin.assert:
+        # Fail closed: without an expected checksum from the controller build we cannot prove the binary is correct.
+        that:
+          - item.item.expected | length > 0
+          - item.stat.checksum == item.item.expected
+        fail_msg: "Installed binary {{ item.item.name }} checksum check failed on {{ inventory_hostname }}: got {{ item.stat.checksum }}, expected '{{ item.item.expected }}' (empty = controller build checksum missing; was the build role skipped by --tags?)"
+      loop: "{{ installed_bin_stats.results }}"
+
+# ── Upgrade / Restart: Pre-stage binaries to bin_dir/<name>.new ─────────────
+- name: Pre-stage built binaries (.new) for fast-swap (deploy/restart)
+  when:
+    - deploy_action in ['deploy', 'restart']
+    - not (skip_build | default(false) | bool)
+    - inventory_hostname == (groups['machine_' ~ (ansible_host | replace('.', '_')) ~ '_' ~ (ansible_port | default(22) | string)] | intersect(ansible_play_hosts) | first)
+  block:
+    - name: Copy binaries to bin_dir/<name>.new
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: '0755'
+      loop:
+        - { src: "{{ local_bin_dir }}/parent_chain", dest: "{{ bin_dir }}/parent_chain.new" }
+        - { src: "{{ local_bin_dir }}/simple_chain", dest: "{{ bin_dir }}/simple_chain.new" }
+
+    - name: Verify checksum of staged (.new) binaries
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+        checksum_algorithm: sha256
+      register: staged_bin_stats
+      loop:
+        - { name: "parent_chain", path: "{{ bin_dir }}/parent_chain.new", expected: "{{ hostvars['localhost']['expected_sha_parent'] | default('') }}" }
+        - { name: "simple_chain", path: "{{ bin_dir }}/simple_chain.new", expected: "{{ hostvars['localhost']['expected_sha_exec'] | default('') }}" }
+
+    - name: Assert staged (.new) binary checksums match controller build
+      ansible.builtin.assert:
+        # Fail closed: without an expected checksum from the controller build we cannot prove the binary is correct.
+        that:
+          - item.item.expected | length > 0
+          - item.stat.checksum == item.item.expected
+        fail_msg: "Staged binary {{ item.item.name }}.new checksum check failed on {{ inventory_hostname }}: got {{ item.stat.checksum }}, expected '{{ item.item.expected }}' (empty = controller build checksum missing; was the build role skipped by --tags?). Aborting before stopping services."
+      loop: "{{ staged_bin_stats.results }}"
+
+- name: Distribute base genesis template
+  when:
+    - deploy_action in ['setup', 'deploy', 'restart', 'reset']
+    - inventory_hostname == (groups['machine_' ~ (ansible_host | replace('.', '_')) ~ '_' ~ (ansible_port | default(22) | string)] | intersect(ansible_play_hosts) | first)
   ansible.builtin.copy:
-    src: "{{ item.src }}"
-    dest: "{{ item.dest }}"
-    mode: '0755'
-  loop:
-    - { src: "{{ local_bin_dir }}/parent_chain", dest: "{{ bin_dir }}/parent_chain" }
-    - { src: "{{ local_bin_dir }}/simple_chain", dest: "{{ bin_dir }}/simple_chain" }
-    - { src: "{{ playbook_dir }}/../../deploy/systemd/genesis.json.example", dest: "{{ install_dir }}/genesis_base.json" }
+    src: "{{ playbook_dir }}/../../deploy/systemd/genesis.json.example"
+    dest: "{{ install_dir }}/genesis_base.json"
+    mode: '0644'
 
 # private_dev_keys.json holds devnet-only keys: never ship it outside devnet, and
 # only when the operator actually provides it (it is not tracked in the repo).
