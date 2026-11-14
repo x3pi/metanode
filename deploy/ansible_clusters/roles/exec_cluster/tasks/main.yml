@@ -27,6 +27,16 @@
     exec_pre_stop_height: "{{ ((exec_pre_stop_block.json.result | default('0x0')) | int(base=16)) if (exec_pre_stop_block.status | default(0) == 200 and exec_pre_stop_block.json is defined and exec_pre_stop_block.json.result is defined) else 0 }}"
   when: deploy_action in ['deploy', 'restart', 'rollback']
 
+# Warn instead of fail: a hung RPC is a common reason to restart, and a fresh chain is legitimately at 0.
+- name: Warn that Gate G3 regression check is disabled (pre-stop height unknown)
+  ansible.builtin.debug:
+    msg: >-
+      ⚠️ {{ inventory_hostname }}: could not read pre-stop height (RPC down/not responding, or chain at block 0).
+      Gate G3 'height >= pre-stop height' cannot detect a chain regression for this node.
+  when:
+    - deploy_action in ['deploy', 'restart', 'rollback']
+    - (exec_pre_stop_height | default(0) | int) == 0
+
 # ── Stop Service ─────────────────────────────────────────────────────────────
 - name: Stop Execution Node {{ inventory_hostname }}
   when: "deploy_action in ['stop', 'restart', 'reset', 'clean', 'deploy', 'setup', 'rollback']"
@@ -156,6 +166,10 @@
             mv -f "{{ bin_dir }}/simple_chain" "{{ bin_dir }}/simple_chain.bad" 2>/dev/null || true
             mv -f "{{ bin_dir }}/simple_chain.prev" "{{ bin_dir }}/simple_chain"
             chmod 0755 "{{ bin_dir }}/simple_chain"
+          else
+            # Never start the current binary and report a successful rollback.
+            echo "FATAL: rollback requested but {{ bin_dir }}/simple_chain.prev is missing on {{ inventory_hostname }}" >&2
+            exit 1
           fi
       when: deploy_action == 'rollback'
 
