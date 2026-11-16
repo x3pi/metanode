@@ -280,6 +280,20 @@ func (s *HTTPServer) SetValidators(vals []*pb.ValidatorInfo) {
 }
 
 func (s *HTTPServer) Start(addr string) error {
+	// I/O timeouts only bound slow or stalled clients (slowloris); they never influence consensus or dispatch.
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	return srv.ListenAndServe()
+}
+
+// Handler returns the HTTP routes of this node's API (used by Start; exposed for in-process tests).
+func (s *HTTPServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/tx", s.handleTxLookup)
 	mux.HandleFunc("/block", s.handleBlock)
@@ -299,19 +313,15 @@ func (s *HTTPServer) Start(addr string) error {
 	mux.HandleFunc("/state_root", s.handleStateRoot)
 	mux.HandleFunc("/float", s.handleFloat)
 	mux.Handle("/metrics", promhttp.Handler())
-	// I/O timeouts only bound slow or stalled clients (slowloris); they never influence consensus or dispatch.
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-	return srv.ListenAndServe()
+	return mux
 }
 
 func (s *HTTPServer) handleInbound(w http.ResponseWriter, r *http.Request) {
+	if s.syncing.Load() {
+		http.Error(w, "node is syncing, inbound transfers rejected", http.StatusServiceUnavailable)
+		return
+	}
+
 	pubKeyHex := r.URL.Query().Get("pubkey")
 	cursorStr := r.URL.Query().Get("cursor")
 	cursor, _ := strconv.ParseUint(cursorStr, 10, 64)
@@ -334,6 +344,11 @@ func (s *HTTPServer) handleInbound(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *HTTPServer) handleInboundRegistrations(w http.ResponseWriter, r *http.Request) {
+	if s.syncing.Load() {
+		http.Error(w, "node is syncing, registrations rejected", http.StatusServiceUnavailable)
+		return
+	}
+
 	pubKeyHex := r.URL.Query().Get("pubkey")
 	cursorStr := r.URL.Query().Get("cursor")
 	cursor, _ := strconv.ParseUint(cursorStr, 10, 64)

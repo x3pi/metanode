@@ -434,7 +434,7 @@ func (s *TreeStore) GetAccountRegistrations(clusterKeyHash common.Hash, cursor u
 	}
 
 	if cursor >= total {
-		return nil, cursor, nil
+		return nil, total, nil
 	}
 
 	limit := total

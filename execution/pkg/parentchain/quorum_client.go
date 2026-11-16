@@ -438,6 +438,29 @@ func (q *QuorumClient) SendRegisterAccount(userAddress common.Address, floatIden
 	return q.sendRawTxFailover(tx)
 }
 
+// SendRegisterAccountsBatch sends up to MaxRegisterAccountsBatch registrations to this client's own cluster in ONE
+// transaction (one nonce). Requires Parent Chain nodes that know METHOD_REGISTER_ACCOUNTS_BATCH.
+func (q *QuorumClient) SendRegisterAccountsBatch(entries []RegisterAccountEntry) (common.Hash, error) {
+	if q.privKey == (cm.PrivateKey{}) {
+		return common.Hash{}, errors.New("cannot SendRegisterAccountsBatch: private key not configured")
+	}
+	if len(entries) == 0 || len(entries) > MaxRegisterAccountsBatch {
+		return common.Hash{}, fmt.Errorf("cannot SendRegisterAccountsBatch: batch size %d out of range [1, %d]", len(entries), MaxRegisterAccountsBatch)
+	}
+	nonce, err := q.getNextNonce()
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	callData := EncodeRegisterAccountsBatchCallData(entries)
+	tx, err := BuildAndSignBLSTx(q.privKey, q.pubKey, ParentChainGatewayAddress, nonce, callData)
+	if err != nil {
+		q.ResetNonce()
+		return common.Hash{}, err
+	}
+	return q.sendRawTxFailover(tx)
+}
+
 func (q *QuorumClient) SendSubmitStateRoot(clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash, cert cm.Sign) (common.Hash, error) {
 	if q.privKey == (cm.PrivateKey{}) {
 		return common.Hash{}, errors.New("cannot SendSubmitStateRoot: private key not configured")

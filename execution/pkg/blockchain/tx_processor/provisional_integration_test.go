@@ -612,11 +612,15 @@ func TestProvisional_P09_PriorTransactionsPreserved(t *testing.T) {
 }
 
 // P10: Committee co-attestation quorum required: 1 validator attestation stays pending; 2nd completes activation.
+// P10: provisional activation needs ONE committee attestation (only the validator that received the user's request
+// knows about it, so f+1 could never be reached on a 4-key committee), but a non-committee or forged attestation is
+// still rejected. account_registered keeps the f+1 rule (every validator polls the parent itself).
 func TestProvisional_P10_CommitteeAttestation_QuorumEnforced(t *testing.T) {
 	val1 := bls.GenerateKeyPair()
 	val2 := bls.GenerateKeyPair()
 	val3 := bls.GenerateKeyPair()
 	val4 := bls.GenerateKeyPair()
+	outsider := bls.GenerateKeyPair()
 
 	committee := []cm.PublicKey{val1.PublicKey(), val2.PublicKey(), val3.PublicKey(), val4.PublicKey()}
 	cp := &mockCommitteeProvider{validators: committee}
@@ -631,34 +635,52 @@ func TestProvisional_P10_CommitteeAttestation_QuorumEnforced(t *testing.T) {
 	user := newTestUser(t)
 	sig, err := crypto.Sign(crypto.Keccak256(parentchain.ComputeRegisterAccountMessage(user.addr, val1.PublicKey())), user.key)
 	require.NoError(t, err)
-
 	digest := rollup.ComputeAccountProvisionalAttestDigest(1, user.addr, val1.PublicKey(), sig)
 
-	// 1. Submit payload with only Val1 attestation (required = 2)
-	payload1 := &rollup.AccountRegistrationPayload{
-		Kind:         rollup.SystemPayloadKindAccountProvisional,
-		User:         user.addr,
-		ClusterKey:   val1.PublicKey(),
-		UserSig:      sig,
-		Attestations: []rollup.RegistrationAttestation{{ValidatorPubkey: val1.PublicKey(), Signature: bls.Sign(val1.PrivateKey(), digest)}},
+	provisional := func(kp *bls.KeyPair, signDigest []byte) []byte {
+		p := &rollup.AccountRegistrationPayload{
+			Kind:         rollup.SystemPayloadKindAccountProvisional,
+			User:         user.addr,
+			ClusterKey:   val1.PublicKey(),
+			UserSig:      sig,
+			Attestations: []rollup.RegistrationAttestation{{ValidatorPubkey: kp.PublicKey(), Signature: bls.Sign(kp.PrivateKey(), signDigest)}},
+		}
+		b, err := p.MarshalProto()
+		require.NoError(t, err)
+		return b
 	}
-	data1, _ := payload1.MarshalProto()
-	err1 := h.ApplyAttested(db, store, cp, data1)
-	require.NoError(t, err1)
-	assert.False(t, db.GetProvisional(user.addr), "Single attestation must remain pending (not activated)")
 
-	// 2. Submit payload with Val2 attestation -> quorum reached (2 >= 2)
-	payload2 := &rollup.AccountRegistrationPayload{
-		Kind:         rollup.SystemPayloadKindAccountProvisional,
-		User:         user.addr,
-		ClusterKey:   val1.PublicKey(),
-		UserSig:      sig,
-		Attestations: []rollup.RegistrationAttestation{{ValidatorPubkey: val2.PublicKey(), Signature: bls.Sign(val2.PrivateKey(), digest)}},
+	// 1. Non-committee attestation is rejected.
+	require.Error(t, h.ApplyAttested(db, store, cp, provisional(outsider, digest)))
+	assert.False(t, db.GetProvisional(user.addr))
+
+	// 2. Committee key signing the wrong digest is rejected.
+	require.Error(t, h.ApplyAttested(db, store, cp, provisional(val2, []byte("wrong digest"))))
+	assert.False(t, db.GetProvisional(user.addr))
+
+	// 3. One valid committee attestation activates (4-key committee, f+1 would be 2).
+	require.NoError(t, h.ApplyAttested(db, store, cp, provisional(val2, digest)))
+	assert.True(t, db.GetProvisional(user.addr), "one committee attestation must activate a provisional account")
+
+	// 4. account_registered still needs f+1 = 2 distinct committee attestations.
+	regDigest := rollup.ComputeAccountRegistrationAttestDigest(1, user.addr, val1.PublicKey(), 7)
+	registered := func(kp *bls.KeyPair) []byte {
+		p := &rollup.AccountRegistrationPayload{
+			Kind:         rollup.SystemPayloadKindAccountRegistered,
+			User:         user.addr,
+			ClusterKey:   val1.PublicKey(),
+			ParentSeq:    7,
+			Attestations: []rollup.RegistrationAttestation{{ValidatorPubkey: kp.PublicKey(), Signature: bls.Sign(kp.PrivateKey(), regDigest)}},
+		}
+		b, err := p.MarshalProto()
+		require.NoError(t, err)
+		return b
 	}
-	data2, _ := payload2.MarshalProto()
-	err2 := h.ApplyAttested(db, store, cp, data2)
-	require.NoError(t, err2)
-	assert.True(t, db.GetProvisional(user.addr), "Quorum reached: account must be provisional")
+	require.NoError(t, h.ApplyAttested(db, store, cp, registered(val1)))
+	assert.False(t, db.GetParentRegistered(user.addr), "registration must wait for f+1 attestations")
+	require.NoError(t, h.ApplyAttested(db, store, cp, registered(val3)))
+	assert.True(t, db.GetParentRegistered(user.addr))
+	assert.False(t, db.GetProvisional(user.addr), "confirmation clears the provisional flag")
 }
 
 // inMemAttestStore is an in-memory attestation store for testing.

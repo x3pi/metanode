@@ -31,7 +31,12 @@ Environment="PARENT_CHAIN_URL={{ parent_chain_url | default('http://' ~ (parent_
 Environment="PARENT_CHAIN_URLS={{ parent_chain_urls | default(parent_chain_urls_csv | default('')) }}"
 Environment="BLS_CONSERVATION_MODE={{ bls_conservation_mode | default('enforce') }}"
 Environment="BLS_CONSERVATION_INTERVAL_SECONDS={{ bls_conservation_interval_seconds | default('300') }}"
+{# Batch registrations to the Parent Chain (>1 enables). Enable only after EVERY parent node runs a build with
+   METHOD_REGISTER_ACCOUNTS_BATCH. #}
+Environment="PARENT_REGISTRATION_BATCH_SIZE={{ parent_registration_batch_size | default('0') }}"
 {% endif %}
+{# Per-client-IP limit of mtn_registerAccount calls per minute (0 disables). #}
+Environment="REGISTRATION_RATE_PER_MIN={{ registration_rate_per_min | default('20') }}"
 Environment="METANODE_ENV={{ metanode_env | default('production') }}"
 Environment="NODE_ENV={{ node_env | default('production') }}"
 

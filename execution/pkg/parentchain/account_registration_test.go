@@ -160,6 +160,12 @@ func TestParentStores_AccountRegistrations(t *testing.T) {
 			require.NoError(t, err)
 			assert.Empty(t, page3)
 			assert.Equal(t, uint64(57), p3Next)
+
+			// Page 4: cursor exceeds total (e.g. cursor=100 > total=57). Must return nextCursor=57 (total) for reset detection
+			page4, p4Next, err := store.GetAccountRegistrations(cluster1Hash, 100)
+			require.NoError(t, err)
+			assert.Empty(t, page4)
+			assert.Equal(t, uint64(57), p4Next, "when cursor > total, nextCursor must be total for reset detection")
 		})
 	}
 }

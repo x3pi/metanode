@@ -444,6 +444,16 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	app.regRelay = rollup.NewRegistrationRelay(parentClient, app.keyPair.PublicKey(),
 		func(digest []byte) cm.Sign { return bls.Sign(app.keyPair.PrivateKey(), digest) },
 		stateDBAdapter.GetParentRegistered)
+	// PARENT_REGISTRATION_BATCH_SIZE > 1 sends registrations in batch transactions (one parent nonce per batch). Off by
+	// default: enable only after EVERY Parent Chain node runs a version with METHOD_REGISTER_ACCOUNTS_BATCH.
+	if v := os.Getenv("PARENT_REGISTRATION_BATCH_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err != nil || n < 0 {
+			logger.Warn("Ignoring invalid PARENT_REGISTRATION_BATCH_SIZE=%q (want an integer; 0 or 1 disables batching)", v)
+		} else if n > 1 {
+			app.regRelay.SetBatchSize(n)
+			logger.Info("Registration relay: batching up to %d registrations per Parent Chain transaction", n)
+		}
+	}
 	app.regRelay.SetProvisionalChecker(stateDBAdapter.GetProvisional)
 	app.regRelay.SetLockedChecker(stateDBAdapter.GetLocked)
 	app.regRelay.SetLockedHomeClusterChecker(stateDBAdapter.GetLockedHomeCluster)

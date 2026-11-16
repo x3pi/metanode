@@ -34,3 +34,36 @@ func TestLogTopicTelegram(t *testing.T) {
 	config.TelegramToken = "1445784583:AAGIJpLzxGsB7csutW2fj7MVIOQlvQNa1XY"
 	Telegram("Test Log Telegram", "xxx", "oke")
 }
+
+func TestGetTelegramConfig(t *testing.T) {
+	cfgMu.Lock()
+	origTok := config.TelegramToken
+	origChat := config.TelegramChatId
+	cfgMu.Unlock()
+	defer func() {
+		cfgMu.Lock()
+		config.TelegramToken = origTok
+		config.TelegramChatId = origChat
+		cfgMu.Unlock()
+	}()
+
+	cfgMu.Lock()
+	config.TelegramToken = "1234567890:AAFAKE_TOKEN_FOR_TESTS_ONLY"
+	config.TelegramChatId = -1001234567890
+	cfgMu.Unlock()
+
+	tok, cid, ok := GetTelegramConfig()
+	if !ok || cid != -1001234567890 || tok != "1234...ONLY" {
+		t.Fatalf("unexpected GetTelegramConfig result: ok=%v, cid=%d, tok=%s", ok, cid, tok)
+	}
+
+	cfgMu.Lock()
+	config.TelegramToken = ""
+	config.TelegramChatId = 0
+	cfgMu.Unlock()
+
+	tok, cid, ok = GetTelegramConfig()
+	if ok || cid != 0 || tok != "" {
+		t.Fatalf("expected unconfigured, got: ok=%v, cid=%d, tok=%s", ok, cid, tok)
+	}
+}

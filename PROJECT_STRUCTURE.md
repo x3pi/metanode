@@ -154,7 +154,7 @@ metanode/
 | `network/`, `quic_network/`, `connection_manager/`, `node/`, `txsender/`, `transfer/` | Protobuf TCP ingress with admission/backpressure, QUIC, P2P hosts, tx client, file transfer | 🟡 |
 | `rollup/` | Deterministic rollup state machine, cross-node transfer workers, account-registry and registration relay, committee co-attestation | 🟢 isolated |
 | `rollup/raftfeed/` | `consensus_mode="raft"`: replicated `hashicorp/raft` sequencer (fsm, forward, attest, membership, state transfer) | 🟡 raft mode only |
-| `parentchain/` | Parent chain state, stores, HTTP RPC, `QuorumClient` | 🟢 |
+| `parentchain/` | Parent chain state, stores, HTTP RPC, `QuorumClient` (incl. `METHOD_REGISTER_ACCOUNTS_BATCH`: one tx registers up to 64 accounts to the sender cluster) | 🟢 |
 | `cross_chain/` | Root Anchor, gateway, asset registry, ceremony, relayer and `relayer_daemon/` | 🟢 |
 | `protocolparams/` | Fingerprint of execution-relevant settings; checked against genesis at startup; RPC `mtn_protocolFingerprint` | 🟢 |
 | `keyvault/` | `enc:v1:` encrypted secrets in `config.json` | 🟢 |
@@ -252,6 +252,7 @@ metanode/
 | Peer RPC (epoch boundary, sync) | Rust ↔ Rust | custom TCP | `peer_rpc/server.rs` ↔ `client.rs` |
 | Commit digest attestation | Rust ↔ Rust | commit votes embedded in DAG blocks | `coordination_hub.rs` ↔ `commit_vote_monitor.rs` |
 | Cross-chain settlement | Execution cluster ↔ Parent chain | HTTP REST + f+1 BLS co-attestation | `pkg/parentchain/`, `pkg/rollup/` |
+| Account registration | User → execution node (`mtn_registerAccount`) → Parent chain | RegistrationRelay: single or batch `RegisterAccount` tx (`PARENT_REGISTRATION_BATCH_SIZE`); `account_provisional` (1 committee attestation) / `account_registered` (f+1) system txs | `pkg/rollup/registration_relay.go`, `pkg/parentchain/tx.go`; e2e: `cmd/tool/e2e_registration_cluster` |
 
 Protobuf definitions: `execution/pkg/proto/*.proto`, `consensus/metanode/proto/{executor,transaction,validator_rpc}.proto`, `pkg/rollup/raftfeed/proto/`.
 

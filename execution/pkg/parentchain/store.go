@@ -79,14 +79,14 @@ type Store interface {
 
 // MemoryStore is an in-memory implementation for testing
 type MemoryStore struct {
-	mu              sync.RWMutex
-	chains          map[common.Hash]ChainRegistryEntry
-	floats          map[common.Hash]*big.Int
-	claimed         map[common.Hash]FloatOutcome
-	transferRecords map[common.Hash]FloatTransferRecord
-	seqs            map[common.Hash]uint64
-	velocities      map[common.Hash]FloatVelocityState
-	accounts        map[common.Address]cm.PublicKey
+	mu                   sync.RWMutex
+	chains               map[common.Hash]ChainRegistryEntry
+	floats               map[common.Hash]*big.Int
+	claimed              map[common.Hash]FloatOutcome
+	transferRecords      map[common.Hash]FloatTransferRecord
+	seqs                 map[common.Hash]uint64
+	velocities           map[common.Hash]FloatVelocityState
+	accounts             map[common.Address]cm.PublicKey
 	inbound              map[common.Hash][]*TransferEvent
 	accountRegistrations map[common.Hash][]*AccountRegisteredEvent
 	stateRoots           map[common.Hash]map[uint64]common.Hash
@@ -377,13 +377,13 @@ func (m *MemoryStore) GetAllChainRegistryKeys() ([]common.Hash, error) {
 func (m *MemoryStore) AppendInboundTransfer(destKeyHash common.Hash, event *TransferEvent) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	// Create a safe copy to store
 	evCopy := *event
 	if event.Amount != nil {
 		evCopy.Amount = new(big.Int).Set(event.Amount)
 	}
-	
+
 	m.inbound[destKeyHash] = append(m.inbound[destKeyHash], &evCopy)
 	return nil
 }
@@ -391,17 +391,17 @@ func (m *MemoryStore) AppendInboundTransfer(destKeyHash common.Hash, event *Tran
 func (m *MemoryStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64) ([]*TransferEvent, uint64, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	events := m.inbound[destKeyHash]
 	if cursor >= uint64(len(events)) {
 		return nil, cursor, nil
 	}
-	
+
 	count := uint64(len(events)) - cursor
 	if count > 50 {
 		count = 50 // paginate 50 at a time
 	}
-	
+
 	res := make([]*TransferEvent, count)
 	for i := uint64(0); i < count; i++ {
 		ev := events[cursor+i]
@@ -411,7 +411,7 @@ func (m *MemoryStore) GetInboundTransfers(destKeyHash common.Hash, cursor uint64
 		}
 		res[i] = &evCopy
 	}
-	
+
 	return res, cursor + count, nil
 }
 
@@ -451,11 +451,12 @@ func (m *MemoryStore) GetAccountRegistrations(clusterKeyHash common.Hash, cursor
 	defer m.mu.RUnlock()
 
 	events := m.accountRegistrations[clusterKeyHash]
-	if cursor >= uint64(len(events)) {
-		return nil, cursor, nil
+	total := uint64(len(events))
+	if cursor >= total {
+		return nil, total, nil
 	}
 
-	count := uint64(len(events)) - cursor
+	count := total - cursor
 	if count > 50 {
 		count = 50 // paginate 50 at a time
 	}
@@ -482,4 +483,3 @@ func (m *MemoryStore) SetNonce(sender common.Address, nonce uint64) error {
 	m.nonces[sender] = nonce
 	return nil
 }
-

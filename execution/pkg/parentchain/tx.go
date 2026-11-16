@@ -237,6 +237,62 @@ func DecodeRegisterAccountCallData(data []byte) (userAddress common.Address, flo
 	return common.BytesToAddress(args.UserAddress), floatIdentityKey, args.UserSig, clusterSig, nil
 }
 
+// MaxRegisterAccountsBatch bounds the work one batch transaction can make a Parent Chain block do.
+const MaxRegisterAccountsBatch = 64
+
+// RegisterAccountEntry is one registration inside a RegisterAccountsBatch transaction.
+type RegisterAccountEntry struct {
+	UserAddress      common.Address
+	FloatIdentityKey cm.PublicKey
+	UserSig          []byte
+	ClusterSig       cm.Sign
+}
+
+func EncodeRegisterAccountsBatchCallData(entries []RegisterAccountEntry) []byte {
+	args := &pb.RegisterAccountsBatchArgs{Entries: make([]*pb.RegisterAccountArgs, 0, len(entries))}
+	for _, e := range entries {
+		args.Entries = append(args.Entries, &pb.RegisterAccountArgs{
+			UserAddress:      e.UserAddress.Bytes(),
+			FloatIdentityKey: e.FloatIdentityKey[:],
+			UserSig:          e.UserSig,
+			ClusterSig:       e.ClusterSig.Bytes(),
+		})
+	}
+	cd := &pb.ParentChainCallData{
+		Method: pb.ParentChainMethod_METHOD_REGISTER_ACCOUNTS_BATCH,
+		Args:   &pb.ParentChainCallData_RegisterAccountsBatch{RegisterAccountsBatch: args},
+	}
+	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(cd)
+	return b
+}
+
+// DecodeRegisterAccountsBatchCallData decodes a batch; it rejects an empty or oversized batch and malformed entries.
+func DecodeRegisterAccountsBatchCallData(data []byte) ([]RegisterAccountEntry, error) {
+	var cd pb.ParentChainCallData
+	if err := proto.Unmarshal(data, &cd); err != nil {
+		return nil, ErrMalformedCallData
+	}
+	args := cd.GetRegisterAccountsBatch()
+	if args == nil || len(args.Entries) == 0 || len(args.Entries) > MaxRegisterAccountsBatch {
+		return nil, ErrMalformedCallData
+	}
+	out := make([]RegisterAccountEntry, 0, len(args.Entries))
+	for _, a := range args.Entries {
+		if a == nil || len(a.UserAddress) != 20 || len(a.FloatIdentityKey) != 48 {
+			return nil, ErrMalformedCallData
+		}
+		var e RegisterAccountEntry
+		e.UserAddress = common.BytesToAddress(a.UserAddress)
+		copy(e.FloatIdentityKey[:], a.FloatIdentityKey)
+		e.UserSig = a.UserSig
+		if len(a.ClusterSig) == 96 {
+			e.ClusterSig = cm.SignFromBytes(a.ClusterSig)
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
 func EncodeSubmitStateRootCallData(clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash, cert cm.Sign) []byte {
 	cd := &pb.ParentChainCallData{
 		Method: pb.ParentChainMethod_METHOD_SUBMIT_STATE_ROOT,
@@ -420,6 +476,14 @@ func VerifyTxSignature(tx *pb.Transaction, store Store) (cm.PublicKey, error) {
 					if args := cd.GetRegisterAccount(); args != nil && len(args.FloatIdentityKey) == 48 &&
 						common.BytesToAddress(crypto.Keccak256(args.FloatIdentityKey)[12:]) == sender {
 						copy(senderKey[:], args.FloatIdentityKey)
+					}
+				case pb.ParentChainMethod_METHOD_REGISTER_ACCOUNTS_BATCH:
+					// Same bootstrap as a single registration: the cluster key of the (first) entry, if it is the
+					// sender's own key. Execution then requires every entry to name that same key.
+					if args := cd.GetRegisterAccountsBatch(); args != nil && len(args.Entries) > 0 && args.Entries[0] != nil &&
+						len(args.Entries[0].FloatIdentityKey) == 48 &&
+						common.BytesToAddress(crypto.Keccak256(args.Entries[0].FloatIdentityKey)[12:]) == sender {
+						copy(senderKey[:], args.Entries[0].FloatIdentityKey)
 					}
 				}
 			}
@@ -614,6 +678,37 @@ func dispatchTxMethod(store Store, tx *pb.Transaction, senderKey cm.PublicKey, t
 		events = append(events, userAddress.Bytes())
 		if err := RegisterAccount(store, userAddress, floatIdentityKey, userSig, clusterSig); err != nil {
 			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 215, Events: events}, err
+		}
+
+	case pb.ParentChainMethod_METHOD_REGISTER_ACCOUNTS_BATCH:
+		entries, err := DecodeRegisterAccountsBatchCallData(tx.Data)
+		if err != nil {
+			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 225}, err
+		}
+		// A cluster may only batch registrations to ITSELF.
+		for _, e := range entries {
+			if senderKey == (cm.PublicKey{}) || e.FloatIdentityKey != senderKey {
+				return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 226}, ErrUnauthorizedSender
+			}
+		}
+		// Each entry is isolated: a failing entry (already registered, bad signature) is reverted and skipped; the
+		// others still apply. The outcome per address is visible in the AccountRegistry, which is what relays poll.
+		snap, isSnapshotter := store.(Snapshotter)
+		for _, e := range entries {
+			if isSnapshotter {
+				snap.Push()
+			}
+			if err := RegisterAccount(store, e.UserAddress, e.FloatIdentityKey, e.UserSig, e.ClusterSig); err != nil {
+				if isSnapshotter {
+					snap.Drop()
+				}
+				continue
+			}
+			if isSnapshotter {
+				snap.Merge()
+			}
+			events = append(events, crypto.Keccak256(ComputeRegisterAccountMessage(e.UserAddress, e.FloatIdentityKey)))
+			events = append(events, e.UserAddress.Bytes())
 		}
 
 	case pb.ParentChainMethod_METHOD_SUBMIT_STATE_ROOT:

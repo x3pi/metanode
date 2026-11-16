@@ -46,6 +46,28 @@ for p in [
 ]:
     load_env_file(p)
 
+def load_inventory_telegram():
+    """Load telegram credentials from target inventory YAML (takes priority over fallback .env)."""
+    inv_path = os.environ.get("INVENTORY", os.path.join(ANSIBLE_CLUSTER_DIR, "inventory.yml"))
+    if not os.path.isfile(inv_path):
+        return
+    try:
+        with open(inv_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("telegram_bot_token:") or line.startswith("bot_token:"):
+                    val = line.split(":", 1)[1].strip().strip("'\"")
+                    if val and not val.startswith("YOUR_"):
+                        os.environ["TELEGRAM_BOT_TOKEN"] = val
+                elif line.startswith("telegram_chat_id:") or line.startswith("chat_id:"):
+                    val = line.split(":", 1)[1].strip().strip("'\"")
+                    if val and not val.startswith("YOUR_"):
+                        os.environ["TELEGRAM_CHAT_ID"] = val
+    except Exception as e:
+        sys.stderr.write(f"Warning loading telegram config from {inv_path}: {e}\n")
+
+load_inventory_telegram()
+
 def send_telegram_message(token=None, chat_id=None, html_message=""):
     """Send an HTML message via Telegram Bot API with retries and timeout."""
     token = token or os.environ.get("TELEGRAM_BOT_TOKEN")
