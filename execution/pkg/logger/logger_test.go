@@ -48,12 +48,12 @@ func TestGetTelegramConfig(t *testing.T) {
 	}()
 
 	cfgMu.Lock()
-	config.TelegramToken = "8230176859:AAG2MuF6RI3hRPm9H8_TctSSANkwwrEEdIc"
-	config.TelegramChatId = -1003867050625
+	config.TelegramToken = "1234567890:AAFAKE_TOKEN_FOR_TESTS_ONLY"
+	config.TelegramChatId = -1001234567890
 	cfgMu.Unlock()
 
 	tok, cid, ok := GetTelegramConfig()
-	if !ok || cid != -1003867050625 || tok != "8230...EdIc" {
+	if !ok || cid != -1001234567890 || tok != "1234...ONLY" {
 		t.Fatalf("unexpected GetTelegramConfig result: ok=%v, cid=%d, tok=%s", ok, cid, tok)
 	}
 

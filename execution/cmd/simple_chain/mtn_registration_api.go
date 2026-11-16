@@ -128,19 +128,37 @@ func newRegistrationIPLimiter() *registrationIPLimiter {
 	return &registrationIPLimiter{perMin: perMin, byIP: make(map[string]*rate.Limiter)}
 }
 
-func (l *registrationIPLimiter) allow(ip string) bool {
-	if l == nil || l.perMin <= 0 || ip == "" {
+func isLoopbackAddr(ip string) bool {
+	return ip == "" || ip == "127.0.0.1" || ip == "::1" || ip == "localhost"
+}
+
+func (l *registrationIPLimiter) allow(key string) bool {
+	if l == nil || l.perMin <= 0 || key == "" {
 		return true
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	lim, ok := l.byIP[ip]
+	lim, ok := l.byIP[key]
 	if !ok {
 		if len(l.byIP) >= maxRegistrationLimiterIPs {
-			l.byIP = make(map[string]*rate.Limiter) // bounded memory: start a fresh window
+			// Evict idle limiters whose tokens have completely replenished
+			for k, v := range l.byIP {
+				if v.Tokens() >= float64(l.perMin) {
+					delete(l.byIP, k)
+				}
+			}
+			// If still full, prune entries down to 3/4 capacity to maintain bounds
+			if len(l.byIP) >= maxRegistrationLimiterIPs {
+				for k := range l.byIP {
+					delete(l.byIP, k)
+					if len(l.byIP) < maxRegistrationLimiterIPs*3/4 {
+						break
+					}
+				}
+			}
 		}
 		lim = rate.NewLimiter(rate.Limit(float64(l.perMin)/60), l.perMin)
-		l.byIP[ip] = lim
+		l.byIP[key] = lim
 	}
 	return lim.Allow()
 }
@@ -155,7 +173,14 @@ func (api *MtnAPI) RegisterAccount(ctx context.Context, address common.Address, 
 	if err != nil {
 		return nil, err
 	}
-	if !registrationLimiter.allow(getClientIPFromContext(ctx)) {
+	clientIP := getClientIPFromContext(ctx)
+	limiterKey := "ip:" + clientIP
+	if isLoopbackAddr(clientIP) {
+		// When behind a reverse proxy (nginx_tls on loopback), rate limit per user address to avoid
+		// pooling all clients into a single loopback IP budget.
+		limiterKey = "addr:" + address.Hex()
+	}
+	if !registrationLimiter.allow(limiterKey) {
 		return nil, errRegistrationRateLimited
 	}
 	res, err := relay.Submit(address, userSig)

@@ -38,3 +38,12 @@ func TestRegistrationIPLimiter_BoundedMemory(t *testing.T) {
 	}
 	assert.LessOrEqual(t, len(l.byIP), maxRegistrationLimiterIPs)
 }
+
+func TestRegistrationIPLimiter_LoopbackAddr(t *testing.T) {
+	assert.True(t, isLoopbackAddr(""))
+	assert.True(t, isLoopbackAddr("127.0.0.1"))
+	assert.True(t, isLoopbackAddr("::1"))
+	assert.True(t, isLoopbackAddr("localhost"))
+	assert.False(t, isLoopbackAddr("192.168.1.100"))
+	assert.False(t, isLoopbackAddr("203.0.113.1"))
+}
