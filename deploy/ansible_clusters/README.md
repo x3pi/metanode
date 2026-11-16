@@ -108,7 +108,8 @@ Lệnh trên sẽ:
 > - `./deploy_clusters.sh --restart` **KHÔNG** xóa dữ liệu đĩa (`consensus/` và `parentchain_db/`), nhưng **RENDER LẠI** file cấu hình `node.toml`, `parent_genesis.json` và phân phối lại khóa từ `parent_keys/`.
 > - Nếu ai đó đã sinh lại khóa trong `parent_keys/` mà chạy `./deploy_clusters.sh --restart`, cụm sẽ rơi vào tình trạng **KẸT ĐỒNG THUẬN VĨNH VIỄN** (`Invalid signature` loop) do node dùng khóa mới để xác thực DAG lịch sử cũ.
 > - **Khi muốn đổi/xoay khóa hoặc khởi tạo lại chain:** Bắt buộc dùng `./deploy_clusters.sh --reset`. Không bao giờ được sinh khóa mới rồi dùng `--restart`.
-> - `--reset` và `--clean` **không xóa dữ liệu**: dữ liệu cũ được chuyển vào `<install_dir>/backups/<host>_<timestamp>/` (mặc định `/opt/metanode/backups/`). Lệnh luôn hỏi và phải gõ `y` trên terminal mới chạy; `--force` không bỏ qua được bước này, chạy không tương tác (CI, cron, pipe) sẽ bị từ chối. Backup cũ phải tự xóa tay khi không cần nữa.
+> - `--reset` và `--clean` **chuyển** dữ liệu chain vào `<install_dir>/backups/<host>_<timestamp>/` (mặc định `/opt/metanode/backups/`). **Chỉ giữ 1 backup mỗi host**: khi lần này có dữ liệu để chuyển, backup cũ của host đó bị **xóa vĩnh viễn**; lần reset/clean không có dữ liệu thì giữ nguyên backup cũ. Backup quá **7 ngày** bị cron hằng ngày `/etc/cron.d/metanode-backups-prune` tự xóa (tính theo thời điểm tạo backup). Lệnh luôn hiện cảnh báo đỏ (nói rõ backup cũ sẽ bị xóa) và phải gõ `y` trên terminal mới chạy; chạy không tương tác (CI, cron, pipe) sẽ bị từ chối. Cần giữ backup lâu hơn thì tự copy ra chỗ khác.
+> - **Không còn cờ `--force` / `-f` / `--wipe-data`** (truyền vào sẽ báo lỗi). Mọi thao tác xóa dữ liệu (`--reset`, `--clean`), ghi đè key (`--change-keys`, `--gen-keys` khi đã có key) và `--rollback` trên production đều hiện cảnh báo đỏ và bắt gõ `y`.
 > - Hệ thống đã tích hợp chốt chặn an toàn (Safety Guard): Playbook và binary sẽ từ chối khởi động nếu phát hiện fingerprint của ủy ban genesis không khớp với DAG hiện hữu. Xem chi tiết tại [Runbook phục hồi Parent Chain](../../note/parent_chain_recovery_runbook.md).
 
 ---
@@ -162,8 +163,8 @@ tail -f /tmp/parent_chain_monitor.log
 | `./deploy_clusters.sh --restart --skip-build` | Chỉ restart với binary hiện có trên node, không build lại và không stage binary |
 | `./deploy_clusters.sh --rollback` | Rollback toàn bộ cụm về binary trước đó (.prev), có Fail-Stop bảo vệ trạng thái |
 | `./deploy_clusters.sh --stop` | Dừng an toàn toàn bộ tiến trình cụm node (tự chờ flush DB qua TimeoutStopSec) |
-| `./deploy_clusters.sh --clean` | Chuyển database và logs vào `/opt/metanode/backups/`, giữ lại cấu hình và keys (phải gõ `y`) |
-| `./deploy_clusters.sh --reset` | Reset về Block 0: chuyển dữ liệu cũ vào `/opt/metanode/backups/` rồi khởi chạy lại (phải gõ `y`) |
+| `./deploy_clusters.sh --clean` | Chuyển database và logs vào `/opt/metanode/backups/` (giữ 1 bản/host, xóa backup cũ, tự xóa sau 7 ngày), giữ lại cấu hình và keys (phải gõ `y`) |
+| `./deploy_clusters.sh --reset` | Reset về Block 0: chuyển dữ liệu cũ vào `/opt/metanode/backups/` như `--clean` rồi khởi chạy lại (phải gõ `y`) |
 | `./deploy_clusters.sh --systemd` | Sử dụng `systemd` service thay vì background daemon |
 | `./deploy_clusters.sh --env=production` | Đặt môi trường deploy (`devnet` hoặc `production`). Mặc định là `devnet` cho test cluster. |
 | `./deploy_clusters.sh --vault-password-file FILE` | Chỉ định file mật khẩu Ansible Vault để giải mã credentials |
@@ -183,7 +184,7 @@ Khi nâng cấp mạng bằng `--deploy` hoặc `--restart`:
    - **G4 (Chống Fork):** Kiểm tra block hash tại `min_height` giữa toàn bộ node trong cùng cluster. Nếu phát hiện hash lệch nhau, lập tức kích hoạt FAIL-STOP.
    - **G5 (Checksum Binary):** Xác thực sha256 của file binary đang chạy khớp với bản build controller.
 4. **Fail-Stop Principle:** Nếu bất kỳ Gate nào thất bại, playbook dừng lại ngay lập tức, tự động trích xuất 50 dòng log `journalctl` của node bị lỗi để giữ nguyên hiện trường phục vụ debug, **không bao giờ tự động rollback riêng rẽ một node** (chống chạy lệch phiên bản).
-5. **Rollback An Toàn Toàn Cụm (`--rollback`):** Đưa toàn bộ các validator trong chain trở về file `.prev` đồng loạt. Phải có xác nhận `--force` trên production.
+5. **Rollback An Toàn Toàn Cụm (`--rollback`):** Đưa toàn bộ các validator trong chain trở về file `.prev` đồng loạt. Trên production phải gõ `y` sau cảnh báo đỏ.
 
 ---
 
