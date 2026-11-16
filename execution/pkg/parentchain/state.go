@@ -598,6 +598,30 @@ func ApplyGenesisFloat(store Store, allocs []FloatAllocation) error {
 	return store.SetFloat(floatTotalSupplyKey, total)
 }
 
+// ApplyGenesisAccountRegistry restores account registrations at genesis. Every validator runs it with the same genesis
+// file inside block 1, in file order, so the registry and the per-cluster registration log are deterministic. An
+// address already registered (e.g. by ApplyGenesisFloat) is left untouched.
+func ApplyGenesisAccountRegistry(store Store, regs []AccountRegistration) error {
+	for _, r := range regs {
+		if _, found, err := store.GetAccountRegistry(r.User); err != nil {
+			return err
+		} else if found {
+			continue
+		}
+		if err := store.SetAccountRegistry(r.User, r.ClusterKey); err != nil {
+			return err
+		}
+		clusterHash := crypto.Keccak256Hash(r.ClusterKey.Bytes())
+		if err := store.AppendAccountRegistration(clusterHash, &AccountRegisteredEvent{
+			UserAddress: r.User,
+			ClusterKey:  r.ClusterKey,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // CheckFloatSupplyInvariant verifies that the sum of all NodeFloatAccounts equals the total deposited.
 func CheckFloatSupplyInvariant(store Store) error {
 	keys, err := store.GetAllChainRegistryKeys()

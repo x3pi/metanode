@@ -87,9 +87,25 @@ func NewApp(configPath, rustConfigPath, dataDir, httpAddr, genesisPath string) (
 	if err != nil {
 		return nil, err
 	}
+	regs, err := gen.AccountRegistrations()
+	if err != nil {
+		return nil, err
+	}
+	if len(allocs) > 0 || len(regs) > 0 {
+		dbStore.SetGenesisInit(func(st parentchain.Store) error {
+			if len(allocs) > 0 {
+				if err := parentchain.ApplyGenesisFloat(st, allocs); err != nil {
+					return err
+				}
+			}
+			return parentchain.ApplyGenesisAccountRegistry(st, regs)
+		})
+	}
 	if len(allocs) > 0 {
-		dbStore.SetGenesisInit(func(st parentchain.Store) error { return parentchain.ApplyGenesisFloat(st, allocs) })
 		log.Printf("Genesis float: %d account(s) will be created in block 1", len(allocs))
+	}
+	if len(regs) > 0 {
+		log.Printf("Genesis account registry: %d account(s) will be registered in block 1", len(regs))
 	}
 	if policy.AllowDeposit {
 		log.Printf("⚠️ allow_deposit_to_float=true: clusters can MINT float (devnet only)")

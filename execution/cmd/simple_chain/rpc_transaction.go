@@ -16,6 +16,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	sharedmemory "github.com/meta-node-blockchain/meta-node/pkg/shared_memory"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
@@ -126,6 +127,13 @@ func newCommittedRPCTransactionWithGroup(
 
 	txIndexHex := hexutil.Uint64(txIndex)
 
+	// Rollup system transactions carry a raw protobuf payload, not CallData: decoding it as CallData would return only
+	// its first field (the payload kind) and drop the rest.
+	input := hexutil.Bytes(tx.CallData().Input())
+	if tx.ToAddress() == rollup.RollupSystemAddress {
+		input = tx.Data()
+	}
+
 	return &RPCTransaction{
 		BlockHash:           &blockHash,
 		BlockNumber:         (*hexutil.Big)(new(big.Int).SetUint64(blockNumber)),
@@ -136,7 +144,7 @@ func newCommittedRPCTransactionWithGroup(
 		GasTipCap:           gasTipCap,
 		MaxFeePerBlobGas:    maxFeePerBlobGas,
 		Hash:                ethHash,
-		Input:               tx.CallData().Input(),
+		Input:               input,
 		Nonce:               hexutil.Uint64(tx.GetNonce()),
 		To:                  to,
 		TransactionIndex:    &txIndexHex,

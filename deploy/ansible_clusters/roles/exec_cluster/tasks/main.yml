@@ -174,22 +174,68 @@
       when: deploy_action == 'rollback'
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────
-- name: Clean Execution Node {{ inventory_hostname }} data directories
+# Data is MOVED to {{ install_dir }}/backups/<host>_<timestamp>/. Retention: one backup per host. The previous backups
+# of this host are deleted only once the new backup actually holds data (moved > 0), so a reset of an empty chain never
+# wipes the last real backup; deploy_clusters.sh states this in its red warning before the operator types "y".
+# Backups older than 7 days are removed by a daily cron job (/etc/cron.d/metanode-backups-prune), judged by the age of
+# the backup directory itself (= when it was made), not by the files inside it.
+- name: Back up Execution Node {{ inventory_hostname }} data directories (move; keep 1 backup per host, 7 days max)
   when: "deploy_action in ['clean', 'reset']"
   block:
-    - name: Remove cluster database, raft WAL, and snapshot folders
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - "{{ node_data_dir }}/data"
-        - "{{ node_data_dir }}/snapshot"
-        - "{{ node_data_dir }}/logs"
-        - "{{ node_data_dir }}/explorer"
-        - "{{ node_data_dir }}/explorer-ro"
-        - "{{ node_data_dir }}/raft"
-        - "{{ node_data_dir }}/backup"
-        - "{{ node_data_dir }}/genesis.json"
+    - name: Compute backup directory
+      ansible.builtin.set_fact:
+        data_backup_dir: "{{ install_dir | default('/opt/metanode') }}/backups/{{ inventory_hostname }}_{{ data_backup_ts | default(lookup('pipe', 'date +%Y%m%d_%H%M%S')) }}"
+
+    - name: Move cluster database, raft WAL, and snapshot folders to the backup directory
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          dest="{{ data_backup_dir }}"
+          mkdir -p "$dest"
+          moved=0
+          for p in \
+            "{{ node_data_dir }}/data" \
+            "{{ node_data_dir }}/snapshot" \
+            "{{ node_data_dir }}/logs" \
+            "{{ node_data_dir }}/explorer" \
+            "{{ node_data_dir }}/explorer-ro" \
+            "{{ node_data_dir }}/raft" \
+            "{{ node_data_dir }}/backup" \
+            "{{ node_data_dir }}/genesis.json"; do
+            if [ -e "$p" ] || [ -L "$p" ]; then
+              mv "$p" "$dest/"
+              moved=$((moved + 1))
+            fi
+          done
+          if [ "$moved" -eq 0 ]; then rmdir "$dest" 2>/dev/null || true; fi
+          echo "moved=$moved dest=$dest"
+      register: exec_data_backup
+      changed_when: "'moved=0 ' not in exec_data_backup.stdout"
+
+    - name: Show where the Execution Node data was backed up
+      ansible.builtin.debug:
+        msg: "{{ exec_data_backup.stdout }}"
+
+    - name: Delete the previous Execution Node backups of this host (only when the new backup holds data)
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          find "{{ install_dir | default('/opt/metanode') }}/backups" -mindepth 1 -maxdepth 1 -type d \
+            -name "{{ inventory_hostname }}_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]" ! -path "{{ data_backup_dir }}" -print -exec rm -rf {} +
+      register: exec_data_backup_prune
+      changed_when: "exec_data_backup_prune.stdout | length > 0"
+      when: "'moved=0 ' not in exec_data_backup.stdout"
+
+    - name: Install daily cron job that removes backups older than 7 days
+      ansible.builtin.cron:
+        name: "metanode: remove data backups older than 7 days"
+        cron_file: metanode-backups-prune
+        user: root
+        special_time: daily
+        job: >-
+          find {{ install_dir | default('/opt/metanode') }}/backups -mindepth 1 -maxdepth 1 -type d -mtime +7
+          -exec rm -rf {} + 2>/dev/null
+      become: true
 
     - name: Remove temporary integrity sentinel
       ansible.builtin.file:

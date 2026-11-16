@@ -58,6 +58,51 @@ type Genesis struct {
 	MinFloatToRegister string `json:"min_float_to_register,omitempty"`
 	// AllowDepositToFloat enables depositToFloat (the only mint path). Devnet / tests only.
 	AllowDepositToFloat bool `json:"allow_deposit_to_float"`
+
+	// AccountRegistry restores user-account registrations at genesis (e.g. after a Parent Chain data loss). Each entry
+	// is applied in block 1, in file order, exactly like a RegisterAccount: registry entry + inbound registration event,
+	// so the execution clusters' RegistrationWorker sees it. No user signature is checked: the genesis file is trusted.
+	AccountRegistry []GenesisAccountRegistration `json:"account_registry,omitempty"`
+}
+
+// GenesisAccountRegistration is one account registration restored at genesis.
+type GenesisAccountRegistration struct {
+	Address    string `json:"address"`     // 20-byte hex address
+	ClusterKey string `json:"cluster_key"` // 48-byte BLS public key of the home cluster, hex or base64
+}
+
+// AccountRegistration is a validated genesis account registration.
+type AccountRegistration struct {
+	User       common.Address
+	ClusterKey cm.PublicKey
+}
+
+// AccountRegistrations validates and returns the genesis account registrations in file order.
+func (g *Genesis) AccountRegistrations() ([]AccountRegistration, error) {
+	seen := map[common.Address]bool{}
+	out := make([]AccountRegistration, 0, len(g.AccountRegistry))
+	for i, r := range g.AccountRegistry {
+		addr := strings.TrimSpace(r.Address)
+		if !common.IsHexAddress(addr) {
+			return nil, fmt.Errorf("%w: account_registry[%d] invalid address %q", ErrGenesisInvalid, i, r.Address)
+		}
+		user := common.HexToAddress(addr)
+		if user == (common.Address{}) {
+			return nil, fmt.Errorf("%w: account_registry[%d] zero address", ErrGenesisInvalid, i)
+		}
+		if seen[user] {
+			return nil, fmt.Errorf("%w: account_registry[%d] duplicate address %s", ErrGenesisInvalid, i, user.Hex())
+		}
+		seen[user] = true
+		raw, err := decodeKey(r.ClusterKey)
+		if err != nil || len(raw) != 48 {
+			return nil, fmt.Errorf("%w: account_registry[%d] cluster_key is not a 48-byte BLS public key", ErrGenesisInvalid, i)
+		}
+		var k cm.PublicKey
+		copy(k[:], raw)
+		out = append(out, AccountRegistration{User: user, ClusterKey: k})
+	}
+	return out, nil
 }
 
 // GenesisFloatAccount is one genesis float allocation.
@@ -196,6 +241,9 @@ func LoadGenesis(path string) (*Genesis, error) {
 		return nil, err
 	}
 	if _, err := g.FloatAllocations(); err != nil {
+		return nil, err
+	}
+	if _, err := g.AccountRegistrations(); err != nil {
 		return nil, err
 	}
 

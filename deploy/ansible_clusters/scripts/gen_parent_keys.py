@@ -28,6 +28,31 @@ def red(s): return f"\033[31m{s}\033[0m"
 def cyan(s): return f"\033[36m{s}\033[0m"
 
 
+def confirm_destructive(title, details):
+    """Red warning, then the operator must type "y" on the terminal. No flag skips it; non-interactive runs exit 1."""
+    bold_red = lambda s: f"\033[1;31m{s}\033[0m"
+    try:
+        # Separate handles: a tty is not seekable, so a single text-mode "r+" handle cannot be opened.
+        tty_in = open("/dev/tty", "r")
+        tty_out = open("/dev/tty", "w")
+    except OSError:
+        print(bold_red(f"❌ [ERROR] {title}: cần xác nhận trực tiếp trên terminal (gõ y). "
+                       "Không chạy được ở chế độ không tương tác (CI, cron, pipe)."), file=sys.stderr)
+        sys.exit(1)
+    with tty_in, tty_out:
+        tty_out.write(bold_red("═" * 63) + "\n")
+        tty_out.write(bold_red(f"🔥 CẢNH BÁO: {title}") + "\n")
+        for line in details:
+            tty_out.write(bold_red(f"   {line}") + "\n")
+        tty_out.write(bold_red("═" * 63) + "\n")
+        tty_out.write(bold_red("Gõ y để tiếp tục, phím khác để hủy [y/N]: "))
+        tty_out.flush()
+        answer = tty_in.readline().strip()
+    if answer not in ("y", "Y"):
+        print("🛑 Đã hủy. Không có key nào bị thay đổi.")
+        sys.exit(1)
+
+
 def parse_inventory_parent_nodes(inventory_path: str):
     """Parses parent_chain_nodes from inventory.yml safely handling !vault tags."""
     try:
@@ -230,8 +255,6 @@ def main():
     parser.add_argument("--metanode-bin", default="", help="Explicit path to metanode binary")
     parser.add_argument("--change-keys", "--change-key", "--overwrite", action="store_true", dest="change_keys",
                         help="Change/regenerate Parent Chain validator keys (forces key rotation)")
-    parser.add_argument("--force", "-f", "--wipe-data", "--i-understand-this-wipes-chain-data", action="store_true", dest="force",
-                        help="Force confirmation required when changing keys on existing data")
     parser.add_argument("--check-only", action="store_true", help="Exit 0 if keys exist, 1 if missing")
     args = parser.parse_args()
 
@@ -264,14 +287,11 @@ def main():
         sys.exit(0)
 
     if has_any and args.change_keys:
-        if not args.force:
-            print(red("\n❌ [ERROR] Từ chối đổi khóa khi chưa có cờ ép buộc (--force)!"))
-            print(yellow(f"   Đã tìm thấy khóa cũ trong: {keys_dir}"))
-            print(yellow("   Việc đổi khóa trên chuỗi đang chạy sẽ làm vô hiệu hóa các block cũ và gây kẹt đồng thuận ('Invalid signature')."))
-            print(yellow("   Để xác nhận đổi khóa, bạn cần thêm cờ ép buộc:"))
-            print(cyan("     --force (hoặc -f)"))
-            print(yellow("   VÀ bạn phải reset chuỗi cùng lúc: ./deploy_clusters.sh --reset --force\n"))
-            sys.exit(1)
+        confirm_destructive(
+            "Đổi khóa sẽ GHI ĐÈ bộ key Parent Chain hiện có",
+            [f"Thư mục key: {keys_dir}",
+             "Đổi khóa trên chuỗi đang chạy làm vô hiệu block cũ và gây kẹt đồng thuận ('Invalid signature').",
+             "Phải reset chuỗi cùng lúc: ./deploy_clusters.sh --reset --change-keys"])
 
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
