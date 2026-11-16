@@ -218,7 +218,7 @@
               moved=$((moved + 1))
             fi
           done
-          if [ "$moved" -eq 0 ]; then rmdir "$dest"; fi
+          if [ "$moved" -eq 0 ]; then rmdir "$dest" 2>/dev/null || true; fi
           echo "moved=$moved dest=$dest"
       register: parent_data_backup
       changed_when: "'moved=0 ' not in parent_data_backup.stdout"
@@ -232,7 +232,7 @@
         cmd: |
           set -e
           find "{{ install_dir | default('/opt/metanode') }}/backups" -mindepth 1 -maxdepth 1 -type d \
-            -name "{{ inventory_hostname }}_*" ! -path "{{ data_backup_dir }}" -print -exec rm -rf {} +
+            -name "{{ inventory_hostname }}_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]" ! -path "{{ data_backup_dir }}" -print -exec rm -rf {} +
       register: parent_data_backup_prune
       changed_when: "parent_data_backup_prune.stdout | length > 0"
       when: "'moved=0 ' not in parent_data_backup.stdout"
