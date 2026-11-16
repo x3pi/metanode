@@ -182,9 +182,12 @@
       when: deploy_action == 'rollback'
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────
-# Data is moved to {{ install_dir }}/backups/<host>_<timestamp>/ (never deleted directly).
-# Retention policy: keeps at most 1 latest backup per host; older backups and any backup older than 7 days are pruned automatically.
-- name: Back up Parent Chain data directories (move, auto-prune to 1 backup, max 7 days)
+# Data is MOVED to {{ install_dir }}/backups/<host>_<timestamp>/. Retention: one backup per host. The previous backups
+# of this host are deleted only once the new backup actually holds data (moved > 0), so a reset of an empty chain never
+# wipes the last real backup; deploy_clusters.sh states this in its red warning before the operator types "y".
+# Backups older than 7 days are removed by a daily cron job (/etc/cron.d/metanode-backups-prune), judged by the age of
+# the backup directory itself (= when it was made), not by the files inside it.
+- name: Back up Parent Chain data directories (move; keep 1 backup per host, 7 days max)
   when: "deploy_action in ['clean', 'reset']"
   block:
     - name: Compute backup directory
@@ -224,18 +227,26 @@
       ansible.builtin.debug:
         msg: "{{ parent_data_backup.stdout }}"
 
-    - name: Prune old Parent Chain backups (keep at most 1, remove older than 7 days)
+    - name: Delete the previous Parent Chain backups of this host (only when the new backup holds data)
       ansible.builtin.shell:
         cmd: |
-          backup_base="{{ install_dir | default('/opt/metanode') }}/backups"
-          if [ -d "$backup_base" ]; then
-            # 1. Remove backups older than 7 days
-            find "$backup_base" -maxdepth 1 -name "{{ inventory_hostname }}_*" -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+          set -e
+          find "{{ install_dir | default('/opt/metanode') }}/backups" -mindepth 1 -maxdepth 1 -type d \
+            -name "{{ inventory_hostname }}_*" ! -path "{{ data_backup_dir }}" -print -exec rm -rf {} +
+      register: parent_data_backup_prune
+      changed_when: "parent_data_backup_prune.stdout | length > 0"
+      when: "'moved=0 ' not in parent_data_backup.stdout"
 
-            # 2. Keep only the latest 1 backup for this host, remove older ones
-            ls -dt "$backup_base"/{{ inventory_hostname }}_* 2>/dev/null | tail -n +2 | xargs -r rm -rf 2>/dev/null || true
-          fi
-      changed_when: false
+    - name: Install daily cron job that removes backups older than 7 days
+      ansible.builtin.cron:
+        name: "metanode: remove data backups older than 7 days"
+        cron_file: metanode-backups-prune
+        user: root
+        special_time: daily
+        job: >-
+          find {{ install_dir | default('/opt/metanode') }}/backups -mindepth 1 -maxdepth 1 -type d -mtime +7
+          -exec rm -rf {} + 2>/dev/null
+      become: true
 
 # ── Firewall (UFW) Configuration ───────────────────────────────────────────
 # OPT-IN only (`--open-ports` => deploy_action=open_ports). The HTTP RPC is client-facing; the peer RPC and the metrics

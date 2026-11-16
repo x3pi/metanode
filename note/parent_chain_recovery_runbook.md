@@ -89,22 +89,20 @@ cd deploy/ansible_clusters
 ./deploy_clusters.sh --stop
 ```
 
-### Bước 2: Sinh bộ khóa mới an toàn với cờ xác nhận
-Script `gen_parent_keys.py` yêu cầu bắt buộc phải có cờ `--i-understand-this-wipes-chain-data` để ngăn ngừa việc vô tình ghi đè:
+### Bước 2: Sinh bộ khóa mới (phải gõ `y` xác nhận)
+Khi đã có key cũ, `gen_parent_keys.py --change-keys` hiện cảnh báo đỏ và bắt gõ `y` trên terminal (không còn cờ `--force` / `--i-understand-this-wipes-chain-data`; chạy không tương tác sẽ bị từ chối):
 ```bash
-python3 deploy/ansible_clusters/scripts/gen_parent_keys.py \
-    --num-nodes 4 \
-    --out-dir deploy/ansible_clusters/parent_keys \
-    --overwrite \
-    --i-understand-this-wipes-chain-data
+cd deploy/ansible_clusters
+./deploy_clusters.sh --gen-keys
 ```
 Script sẽ tự động tạo một thư mục backup `parent_keys.previous_<YYYYMMDD_HHMMSS>` phòng trường hợp cần hoàn tác.
 
 ### Bước 3: Thực hiện Reset đồng bộ toàn mạng bằng `--reset`
 **LƯU Ý:** Tuyệt đối KHÔNG dùng `--restart`. Bắt buộc phải dùng `--reset`:
 ```bash
-./deploy_clusters.sh --reset --i-understand-this-wipes-chain-data
+./deploy_clusters.sh --reset
 ```
+Lệnh hiện cảnh báo đỏ và phải gõ `y` mới chạy. Dữ liệu cũ được chuyển vào `/opt/metanode/backups/<host>_<timestamp>/` (chỉ giữ 1 bản mỗi host, backup cũ bị xóa, tự xóa sau 7 ngày).
 Lệnh này sẽ:
 1. Xóa sạch thư mục Rust consensus (`wipe_safe_rust_consensus`).
 2. Xóa sạch thư mục LevelDB / NOMT Go state (`parentchain_db/`).

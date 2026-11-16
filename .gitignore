@@ -606,3 +606,6 @@ execution/scripts/test/bls_pubkey
 *.data
 deploy/add_nodes/config.yml
 deploy/remove_nodes/config.yml
+
+# Local git worktrees (Claude Code / manual): never commit them as gitlinks
+.claude/worktrees/

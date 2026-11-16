@@ -25,8 +25,31 @@ EXPORT_CONFIG_ONLY="false"
 ENABLE_MONITOR="true"
 PARENT_KEYS_DIR="${SCRIPT_DIR}/parent_keys"
 CHANGE_KEYS="false"
-CONFIRM_FORCE="false"
 EXTRA_ANSIBLE_ARGS=()
+
+# confirm_destructive TITLE [DETAIL...]: red warning, then the operator must type "y" on the terminal. There is no flag
+# to skip it, and non-interactive runs (CI, cron, pipe) are refused. Exits 1 unless the answer is y/Y.
+confirm_destructive() {
+    local title="$1"
+    shift
+    local red='\033[1;31m' nc='\033[0m' line answer=""
+    if ! { : </dev/tty; } 2>/dev/null; then
+        printf '%b\n' "${red}❌ [ERROR] ${title}: cần xác nhận trực tiếp trên terminal (gõ y). Không chạy được ở chế độ không tương tác (CI, cron, pipe).${nc}" >&2
+        exit 1
+    fi
+    printf '%b\n' "${red}═══════════════════════════════════════════════════════════════${nc}"
+    printf '%b\n' "${red}🔥 CẢNH BÁO: ${title}${nc}"
+    for line in "$@"; do
+        printf '%b\n' "${red}   ${line}${nc}"
+    done
+    printf '%b\n' "${red}═══════════════════════════════════════════════════════════════${nc}"
+    printf '%b' "${red}Gõ y để tiếp tục, phím khác để hủy [y/N]: ${nc}" >/dev/tty
+    read -r answer </dev/tty || answer=""
+    if [ "$answer" != "y" ] && [ "$answer" != "Y" ]; then
+        echo "🛑 Đã hủy. Không có dữ liệu nào bị thay đổi."
+        exit 1
+    fi
+}
 
 # ── Load environment (.env) ──────────────────────────────────────────────────
 for env_file in "${SCRIPT_DIR}/.env" "${METANODE_ROOT}/deploy/ansible/.env" "${METANODE_ROOT}/.env"; do
@@ -56,11 +79,11 @@ usage() {
     echo "  --rollback          Rollback toàn bộ cluster về bản binary trước (.prev)"
     echo "  --skip-build        (Chỉ đi kèm với --restart) Bỏ qua bước build, chạy lại binary cũ đang có trên node"
     echo "  --stop              Dừng dịch vụ (toàn bộ hoặc lọc theo --node/--exec-only)"
-    echo "  --clean             Chuyển database & log vào /opt/metanode/backups (giữ config và key). Phải gõ y để xác nhận"
-    echo "  --reset             Reset về block 0: chuyển database cũ vào /opt/metanode/backups rồi khởi chạy lại. Phải gõ y để xác nhận"
+    echo "  --clean             Chuyển database & log vào /opt/metanode/backups (giữ 1 bản/host, backup cũ bị xóa, tự xóa sau 7 ngày). Phải gõ y"
+    echo "  --reset             Reset về block 0: chuyển database cũ vào /opt/metanode/backups (như --clean) rồi khởi chạy lại. Phải gõ y"
     echo "  --gen-keys          Sinh bộ key Parent Chain (và validator public keys) cục bộ"
-    echo "  --change-keys       Đổi bộ key Parent Chain mới (xoay khóa, alias: --overwrite-keys)"
-    echo "  --force, -f         Cờ xác nhận khi đổi key / rollback production. KHÔNG bỏ qua bước gõ y của --reset/--clean"
+    echo "  --change-keys       Đổi bộ key Parent Chain mới (xoay khóa, alias: --overwrite-keys). Phải gõ y để xác nhận"
+    echo "  (Không còn cờ --force: mọi thao tác xóa dữ liệu / ghi đè key / rollback production đều hiện cảnh báo đỏ và phải gõ y)"
     echo "  --status            Kiểm tra trạng thái RPC và block height các cụm node"
     echo "  --open-ports        Tự động cấu hình mở cổng tường lửa (UFW) trên các server"
     echo "  --nginx, --tls      Chỉ cài đặt/cập nhật và reload Nginx TLS reverse proxy (HTTPS/WSS 443)"
@@ -150,8 +173,8 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --force|-f|--wipe-data|--i-understand-this-wipes-chain-data)
-            CONFIRM_FORCE="true"
-            shift
+            echo "❌ Cờ $1 đã bị bỏ. Thao tác xóa dữ liệu / đổi key / rollback production sẽ tự hỏi và bắt gõ y."
+            exit 1
             ;;
         --status|status)
             ACTION="status"
@@ -303,12 +326,10 @@ fi
 export METANODE_ENV="${METANODE_ENV:-production}"
 export NODE_ENV="${NODE_ENV:-$METANODE_ENV}"
 
-# Issue 6 Fix: Validate rollback on production strictly requiring --force AFTER environment is resolved
-if [ "$ACTION" = "rollback" ]; then
-    if [ "${METANODE_ENV:-}" = "production" ] && [ "${CONFIRM_FORCE:-false}" != "true" ]; then
-        echo "❌ Lỗi: Thao tác --rollback trên môi trường production yêu cầu xác nhận bằng cờ --force!"
-        exit 1
-    fi
+# Issue 6 Fix: rollback on production needs an explicit confirmation AFTER the environment is resolved
+if [ "$ACTION" = "rollback" ] && [ "${METANODE_ENV:-}" = "production" ]; then
+    confirm_destructive "--rollback trên PRODUCTION sẽ thay binary của toàn bộ chain bằng bản .prev" \
+        "Inventory : ${INVENTORY}"
 fi
 
 # Issue 5 Fix: Block --rollback when --node or --host is set (D9: Rollback must cover the entire chain)
@@ -336,17 +357,11 @@ if [[ "$ACTION" =~ ^(deploy|restart)$ ]] && [ -n "$TARGET_NODE" ] && [ "${SKIP_B
     echo "   sẽ khiến các node khác trên cùng máy chạy lẫn version cũ/mới trong RAM cho đến lần restart sau!"
 fi
 
-# Safety guard: reset/clean take the chain data offline (it is MOVED to a backup directory, never deleted). This needs
-# an interactive "y" typed by the operator on a terminal; --force does NOT skip it and non-interactive runs are refused.
+# Safety guard: reset/clean take the chain data off the node. It is MOVED to <install_dir>/backups/<host>_<ts>/; only
+# one backup per host is kept, so the PREVIOUS backup of each host is deleted once the new one holds data. Backups
+# older than 7 days are removed by systemd-tmpfiles. The operator must type "y" (confirm_destructive); nothing skips it.
 DATA_BACKUP_TS="$(date +%Y%m%d_%H%M%S)"
 if [[ "$ACTION" =~ ^(reset|clean)$ ]]; then
-    if [ "$CONFIRM_FORCE" = "true" ]; then
-        echo "ℹ️  --force không còn bỏ qua bước xác nhận của --${ACTION}: bạn vẫn phải gõ y."
-    fi
-    if ! { : </dev/tty; } 2>/dev/null; then
-        echo "❌ [ERROR] --${ACTION} cần xác nhận trực tiếp trên terminal (gõ y). Không chạy được ở chế độ không tương tác (CI, cron, pipe)."
-        exit 1
-    fi
     if [ "$EXEC_ONLY" = "true" ]; then
         SCOPE_CONFIRM="Execution Clusters"
     elif [ "$PARENT_ONLY" = "true" ]; then
@@ -354,20 +369,14 @@ if [[ "$ACTION" =~ ^(reset|clean)$ ]]; then
     else
         SCOPE_CONFIRM="Parent Chain + Execution Clusters"
     fi
-    echo "═══════════════════════════════════════════════════════════════"
-    echo "⚠️  CẢNH BÁO: --${ACTION} sẽ dừng node và đưa dữ liệu chain ra khỏi node"
-    echo "   Môi trường : ${METANODE_ENV}"
-    echo "   Inventory  : ${INVENTORY}"
-    echo "   Phạm vi    : ${SCOPE_CONFIRM}${TARGET_NODE:+ (node: ${TARGET_NODE})}"
-    echo "   Dữ liệu cũ được CHUYỂN (không xóa) vào: <install_dir>/backups/<host>_${DATA_BACKUP_TS}/"
-    echo "═══════════════════════════════════════════════════════════════"
-    printf "Gõ y để tiếp tục, phím khác để hủy [y/N]: " >/dev/tty
-    CONFIRM_ANSWER=""
-    read -r CONFIRM_ANSWER </dev/tty || CONFIRM_ANSWER=""
-    if [ "$CONFIRM_ANSWER" != "y" ] && [ "$CONFIRM_ANSWER" != "Y" ]; then
-        echo "🛑 Đã hủy --${ACTION}. Không có dữ liệu nào bị thay đổi."
-        exit 1
-    fi
+    confirm_destructive "--${ACTION} sẽ đưa dữ liệu chain ra khỏi node (database, raft WAL, logs)" \
+        "Dữ liệu được CHUYỂN vào: <install_dir>/backups/<host>_${DATA_BACKUP_TS}/" \
+        "Chỉ giữ 1 backup mỗi host: BACKUP CŨ của mỗi host (<install_dir>/backups/<host>_*) sẽ bị XÓA VĨNH VIỄN" \
+        "  (trừ khi lần này không có dữ liệu để chuyển, khi đó giữ nguyên backup cũ)." \
+        "Backup quá 7 ngày được hệ thống tự xóa (systemd-tmpfiles)." \
+        "Môi trường : ${METANODE_ENV}" \
+        "Inventory  : ${INVENTORY}" \
+        "Phạm vi    : ${SCOPE_CONFIRM}${TARGET_NODE:+ (node: ${TARGET_NODE})}"
 fi
 
 # inventory.yml is untracked (it holds real hosts / vault-encrypted credentials): on a fresh clone seed it
@@ -1191,11 +1200,8 @@ fi
 # 2.8. Xử lý riêng cho lệnh --gen-keys (chỉ sinh key Parent Chain cục bộ mà không deploy)
 if [ "$ACTION" = "gen_keys" ]; then
     echo "🔑 [GEN-KEYS] Bắt đầu sinh bộ Key Parent Chain cục bộ..."
-    GEN_ARGS=(python3 "${SCRIPT_DIR}/scripts/gen_parent_keys.py" --inventory "$INVENTORY" --keys-dir "$PARENT_KEYS_DIR" --change-keys)
-    if [ "$CONFIRM_FORCE" = "true" ]; then
-        GEN_ARGS+=(--force)
-    fi
-    "${GEN_ARGS[@]}"
+    # gen_parent_keys.py asks for its own red "y" confirmation before overwriting existing keys.
+    python3 "${SCRIPT_DIR}/scripts/gen_parent_keys.py" --inventory "$INVENTORY" --keys-dir "$PARENT_KEYS_DIR" --change-keys
     echo "✅ [GEN-KEYS] Đã sinh xong bộ key Parent Chain tại: ${PARENT_KEYS_DIR}"
     exit 0
 fi
@@ -1207,9 +1213,6 @@ if [ "$EXEC_ONLY" != "true" ] && [ "$ACTION" != "nginx" ]; then
     GEN_KEY_CMD=(python3 "${SCRIPT_DIR}/scripts/gen_parent_keys.py" --inventory "$INVENTORY" --keys-dir "$PARENT_KEYS_DIR")
     if [ "$CHANGE_KEYS" = "true" ]; then
         GEN_KEY_CMD+=(--change-keys)
-        if [ "$CONFIRM_FORCE" = "true" ]; then
-            GEN_KEY_CMD+=(--force)
-        fi
     fi
     "${GEN_KEY_CMD[@]}"
 fi
