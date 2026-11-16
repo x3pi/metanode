@@ -1,6 +1,7 @@
 package rollup
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -10,12 +11,18 @@ import (
 
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 )
 
 const (
 	defaultRegistrationPollInterval = 1 * time.Second
 	maxRegistrationBatchSize        = 256
+	// registrationShrinkConfirmPolls is how many CONSECUTIVE polls must report fewer parent events than the cursor
+	// before the worker treats it as a parent reset. A parent node that is restarting/replaying commits briefly serves
+	// a shorter log; it catches up long before this many polls, so it never causes a reset or a false alert. A history
+	// mismatch (different user at the fingerprint seq) is proof, not lag, and still resets immediately.
+	registrationShrinkConfirmPolls = 30
 )
 
 // RegistrationEventProposer proposes an account registration system transaction to consensus.
@@ -39,6 +46,19 @@ type RegistrationWorker struct {
 	// chain; the worker then waits for the other validators instead of re-submitting.
 	AlreadyAttested func(user common.Address, parentSeq uint64) bool
 
+	// Fingerprint tracking for event at cursor-1
+	lastKnownMu   sync.Mutex
+	lastKnownUser common.Address
+	lastKnownSeq  uint64
+	hasLastKnown  bool
+
+	alertSink func(msg string)
+
+	// shrinkStreak counts consecutive polls whose parent log was shorter than the cursor (only touched by the polling
+	// goroutine); shrinkConfirmPolls is the threshold (registrationShrinkConfirmPolls, lowered in tests).
+	shrinkStreak       int
+	shrinkConfirmPolls int
+
 	interval time.Duration
 	wakeCh   chan struct{}
 	quitCh   chan struct{}
@@ -53,7 +73,7 @@ func NewRegistrationWorker(
 	blsKeyPair *bls.KeyPair,
 	clusterPubKey cm.PublicKey,
 ) *RegistrationWorker {
-	return &RegistrationWorker{
+	w := &RegistrationWorker{
 		stateDB:       stateDB,
 		client:        client,
 		blsKeyPair:    blsKeyPair,
@@ -62,6 +82,21 @@ func NewRegistrationWorker(
 		wakeCh:        make(chan struct{}, 1),
 		quitCh:        make(chan struct{}),
 	}
+	w.alertSink = func(msg string) { logger.Telegram(msg) }
+	w.shrinkConfirmPolls = registrationShrinkConfirmPolls
+	return w
+}
+
+// SetAlertSink configures the callback sink for operator alerts (Telegram).
+func (w *RegistrationWorker) SetAlertSink(sink func(msg string)) {
+	w.alertSink = sink
+}
+
+// LastKnownFingerprint returns the recorded user and sequence for cursor-1.
+func (w *RegistrationWorker) LastKnownFingerprint() (common.Address, uint64, bool) {
+	w.lastKnownMu.Lock()
+	defer w.lastKnownMu.Unlock()
+	return w.lastKnownUser, w.lastKnownSeq, w.hasLastKnown
 }
 
 // SetAttestationKey sets the validator committee key used to sign registration attestations.
@@ -148,20 +183,85 @@ func (w *RegistrationWorker) PollAndProcess() bool {
 	return w.pollAndProcess()
 }
 
+func (w *RegistrationWorker) triggerReset(workerCursor, parentNextCursor uint64, reason string) {
+	log.Printf("RegistrationWorker: %s (workerCursor=%d, parentCursor=%d); resetting cursor to 0", reason, workerCursor, parentNextCursor)
+	w.setCursor(0)
+	w.shrinkStreak = 0
+	w.lastKnownMu.Lock()
+	w.hasLastKnown = false
+	w.lastKnownUser = common.Address{}
+	w.lastKnownSeq = 0
+	w.lastKnownMu.Unlock()
+
+	if w.alertSink != nil {
+		msg := fmt.Sprintf("🚨 [Registration Sync] Parent chain sequence anomaly: %s (workerCursor=%d, parentCursor=%d). Local cursor reset to 0 to resync all registrations.", reason, workerCursor, parentNextCursor)
+		w.alertSink(msg)
+	}
+}
+
 func (w *RegistrationWorker) pollAndProcess() bool {
 	if w.client == nil {
 		return false
 	}
 
 	cursor := w.getCursor()
-	events, _, err := w.client.GetInboundAccountRegistrations(w.clusterPubKey, cursor)
+	queryCursor := cursor
+	checkFingerprint := false
+
+	if cursor > 0 {
+		w.lastKnownMu.Lock()
+		if w.hasLastKnown && w.lastKnownSeq == cursor-1 {
+			queryCursor = cursor - 1
+			checkFingerprint = true
+		}
+		w.lastKnownMu.Unlock()
+	}
+
+	events, nextCursor, err := w.client.GetInboundAccountRegistrations(w.clusterPubKey, queryCursor)
 	if err != nil {
 		log.Printf("RegistrationWorker: failed to fetch account registrations: %v", err)
 		return false
 	}
 
 	if len(events) == 0 {
+		if nextCursor < cursor {
+			// Shorter parent log: a lagging (restarting) parent quorum or a real reset. Only a persistent shortfall
+			// over shrinkConfirmPolls consecutive polls is treated as a reset.
+			w.shrinkStreak++
+			if w.shrinkStreak < w.shrinkConfirmPolls {
+				if w.shrinkStreak == 1 {
+					log.Printf("RegistrationWorker: parent reports %d registrations, below cursor %d; waiting for %d consecutive polls before treating it as a reset",
+						nextCursor, cursor, w.shrinkConfirmPolls)
+				}
+				return false
+			}
+			w.triggerReset(cursor, nextCursor, fmt.Sprintf("parent chain sequence rolled back or wiped (seen on %d consecutive polls)", w.shrinkConfirmPolls))
+			return true
+		}
+		w.shrinkStreak = 0
 		return false
+	}
+	w.shrinkStreak = 0
+
+	if checkFingerprint {
+		w.lastKnownMu.Lock()
+		expectedSeq := w.lastKnownSeq
+		expectedUser := w.lastKnownUser
+		w.lastKnownMu.Unlock()
+
+		if events[0].Seq != expectedSeq || events[0].UserAddress != expectedUser {
+			w.triggerReset(cursor, nextCursor, fmt.Sprintf(
+				"parent chain history mismatch at seq %d (expected user %s, got user %s at seq %d)",
+				expectedSeq, expectedUser.Hex(), events[0].UserAddress.Hex(), events[0].Seq,
+			))
+			return true
+		}
+		// Fingerprint verified: drop the cursor-1 overlap event
+		events = events[1:]
+		if len(events) == 0 {
+			// No new events beyond cursor
+			return false
+		}
 	}
 
 	// Bounded processing to avoid memory spikes under high load
@@ -211,6 +311,10 @@ func (w *RegistrationWorker) pollAndProcess() bool {
 
 	// Advance cursor strictly up to the consecutive sequence of events verified in stateDB
 	advancedCursor := cursor
+	var lastConfirmedUser common.Address
+	var lastConfirmedSeq uint64
+	hasNewConfirmed := false
+
 	for _, ev := range events {
 		if w.stateDB != nil && !w.stateDB.GetParentRegistered(ev.UserAddress) {
 			// Not yet confirmed in stateDB, halt cursor advance here
@@ -218,12 +322,22 @@ func (w *RegistrationWorker) pollAndProcess() bool {
 		}
 		if ev.Seq >= advancedCursor {
 			advancedCursor = ev.Seq + 1
+			lastConfirmedUser = ev.UserAddress
+			lastConfirmedSeq = ev.Seq
+			hasNewConfirmed = true
 			hasProgress = true
 		}
 	}
 
 	if advancedCursor > cursor {
 		w.setCursor(advancedCursor)
+		if hasNewConfirmed {
+			w.lastKnownMu.Lock()
+			w.lastKnownUser = lastConfirmedUser
+			w.lastKnownSeq = lastConfirmedSeq
+			w.hasLastKnown = true
+			w.lastKnownMu.Unlock()
+		}
 	}
 
 	return hasProgress

@@ -106,6 +106,11 @@ func main() {
 	logger.Info("[MAIN] PID: %d", os.Getpid())
 	logger.Info("[MAIN] UID: %d, GID: %d", os.Getuid(), os.Getgid())
 	logger.Info("[MAIN] PPID (Parent PID): %d", os.Getppid())
+	if tok, cid, ok := logger.GetTelegramConfig(); ok {
+		logger.Info("[TELEGRAM] ✅ Cấu hình Telegram đã nạp thành công (Bot Token: %s, Chat ID: %d)", tok, cid)
+	} else {
+		logger.Warn("[TELEGRAM] ⚠️ Chưa cấu hình Telegram (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID trống). Thông báo khẩn cấp sẽ bị tắt.")
+	}
 
 	// PERFORMANCE OPTIMIZATION: Increase GOMAXPROCS for better CPU utilization
 	// Use more CPU cores for concurrent processing

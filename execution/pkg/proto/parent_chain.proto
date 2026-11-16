@@ -14,6 +14,7 @@ enum ParentChainMethod {
   METHOD_SUBMIT_STATE_ROOT = 6;
   METHOD_REGISTER_CLUSTER = 7;
   METHOD_TRANSFER_BALANCE = 8;
+  METHOD_REGISTER_ACCOUNTS_BATCH = 9;
 }
 
 message DepositToFloatArgs {
@@ -64,6 +65,12 @@ message RegisterAccountArgs {
   bytes cluster_sig = 4;         // cluster signature bytes (96B BLS)
 }
 
+// RegisterAccountsBatchArgs registers several accounts to the SENDER's cluster in one transaction. Every entry is
+// applied independently (an entry that fails, e.g. already registered, is skipped without reverting the others).
+message RegisterAccountsBatchArgs {
+  repeated RegisterAccountArgs entries = 1;
+}
+
 message SubmitStateRootArgs {
   bytes cluster_key = 1;      // 48 bytes BLS public key of cluster
   uint64 epoch = 2;           // epoch number
@@ -89,6 +96,7 @@ message ParentChainCallData {
     SubmitStateRootArgs submit_state_root = 7;
     RegisterClusterArgs register_cluster = 8;
     TransferBalanceArgs transfer_balance = 9;
+    RegisterAccountsBatchArgs register_accounts_batch = 10;
   }
 }
 

@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
+	"os"
+	"strconv"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -11,6 +15,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup"
 	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
+	"golang.org/x/time/rate"
 )
 
 // Account registration RPC (namespace "mtn"). With the account gate on, an address may only send transactions once the
@@ -95,12 +100,63 @@ func (api *MtnAPI) GetRegistrationMessage(address common.Address) (*Registration
 	}, nil
 }
 
+// errRegistrationRateLimited is returned when one client IP submits registrations faster than allowed.
+var errRegistrationRateLimited = errors.New("too many registration requests from this address, retry later")
+
+const (
+	defaultRegistrationRatePerMin = 20
+	maxRegistrationLimiterIPs     = 10000
+)
+
+// registrationIPLimiter bounds mtn_registerAccount calls per client IP. Every accepted request costs an fsync, a slot in
+// the relay's bounded table, a Parent Chain transaction and possibly a provisional flag on-chain, while new keys are
+// free to generate; this keeps one client from filling the table and starving real users.
+type registrationIPLimiter struct {
+	mu     sync.Mutex
+	perMin int
+	byIP   map[string]*rate.Limiter
+}
+
+// newRegistrationIPLimiter reads REGISTRATION_RATE_PER_MIN (default 20; 0 disables the limit).
+func newRegistrationIPLimiter() *registrationIPLimiter {
+	perMin := defaultRegistrationRatePerMin
+	if v := os.Getenv("REGISTRATION_RATE_PER_MIN"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			perMin = n
+		}
+	}
+	return &registrationIPLimiter{perMin: perMin, byIP: make(map[string]*rate.Limiter)}
+}
+
+func (l *registrationIPLimiter) allow(ip string) bool {
+	if l == nil || l.perMin <= 0 || ip == "" {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	lim, ok := l.byIP[ip]
+	if !ok {
+		if len(l.byIP) >= maxRegistrationLimiterIPs {
+			l.byIP = make(map[string]*rate.Limiter) // bounded memory: start a fresh window
+		}
+		lim = rate.NewLimiter(rate.Limit(float64(l.perMin)/60), l.perMin)
+		l.byIP[ip] = lim
+	}
+	return lim.Allow()
+}
+
+var registrationLimiter = newRegistrationIPLimiter()
+
 // RegisterAccount accepts a registration request. It returns immediately with PENDING (or the current state if the
-// address is already known); the relay and the Parent Chain finish the job automatically.
-func (api *MtnAPI) RegisterAccount(address common.Address, userSig hexutil.Bytes) (*RegistrationInfo, error) {
+// address is already known); the relay and the Parent Chain finish the job automatically. The account is usable only
+// once mtn_getRegistrationStatus reports PROVISIONAL (provisional flag committed on-chain) or CONFIRMED.
+func (api *MtnAPI) RegisterAccount(ctx context.Context, address common.Address, userSig hexutil.Bytes) (*RegistrationInfo, error) {
 	relay, err := api.registrationRelay()
 	if err != nil {
 		return nil, err
+	}
+	if !registrationLimiter.allow(getClientIPFromContext(ctx)) {
+		return nil, errRegistrationRateLimited
 	}
 	res, err := relay.Submit(address, userSig)
 	if err != nil {

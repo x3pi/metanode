@@ -87,6 +87,22 @@ func getTelegram() (token string, chatID int, threadID uint) {
 	return config.TelegramToken, config.TelegramChatId, config.TelegramThreadId
 }
 
+// GetTelegramConfig returns the current Telegram bot token (partially masked), chat ID, and whether it is configured.
+func GetTelegramConfig() (tokenMasked string, chatID int, configured bool) {
+	cfgMu.RLock()
+	defer cfgMu.RUnlock()
+	tok := config.TelegramToken
+	cid := config.TelegramChatId
+	if tok == "" || cid == 0 {
+		return "", 0, false
+	}
+	masked := tok
+	if len(tok) > 8 {
+		masked = tok[:4] + "..." + tok[len(tok)-4:]
+	}
+	return masked, cid, true
+}
+
 var config = &LoggerConfig{
 	Flag:             FLAG_INFO,
 	Outputs:          []*os.File{os.Stdout},

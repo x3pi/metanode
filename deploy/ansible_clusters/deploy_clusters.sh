@@ -387,13 +387,31 @@ elif [ -f "$HOME/.vault_pass" ]; then
     VAULT_CLUSTER_ARGS=(--vault-password-file "$HOME/.vault_pass")
 fi
 
+# ── Load Telegram configuration from inventory if available ───────────────────
+load_inventory_telegram() {
+    local inv="${1:-$INVENTORY}"
+    if [ -f "$inv" ]; then
+        local token
+        local chat_id
+        token=$(grep -E '^\s*(telegram_bot_token|bot_token):' "$inv" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
+        chat_id=$(grep -E '^\s*(telegram_chat_id|chat_id):' "$inv" 2>/dev/null | head -n 1 | awk '{gsub(/["\047]/, ""); print $2}' || true)
+        if [ -n "$token" ]; then
+            export TELEGRAM_BOT_TOKEN="$token"
+        fi
+        if [ -n "$chat_id" ]; then
+            export TELEGRAM_CHAT_ID="$chat_id"
+        fi
+    fi
+}
+load_inventory_telegram "$INVENTORY"
+
 print_banner
 
 # Helper to send telegram notification safely
 send_tele() {
     local fn_call="$1"
     if [ "$NOTIFY" = "true" ] && [ -f "$TELE_SCRIPT" ]; then
-        SCRIPT_DIR="$SCRIPT_DIR" python3 -c 'import sys, os; sys.path.insert(0, os.path.join(os.environ.get("SCRIPT_DIR", ""), "scripts")); import telegram_notify as tn; '"${fn_call}" || true
+        INVENTORY="$INVENTORY" SCRIPT_DIR="$SCRIPT_DIR" python3 -c 'import sys, os; sys.path.insert(0, os.path.join(os.environ.get("SCRIPT_DIR", ""), "scripts")); import telegram_notify as tn; '"${fn_call}" || true
     fi
 }
 

@@ -85,6 +85,8 @@ func TestHTTPRPC_FullChainEndpoints(t *testing.T) {
 	mux.HandleFunc("/status", server.handleStatus)
 	mux.HandleFunc("/validators", server.handleValidators)
 	mux.HandleFunc("/send_raw_transaction", server.handleSendRawTransaction)
+	mux.HandleFunc("/inbound", server.handleInbound)
+	mux.HandleFunc("/inbound_registrations", server.handleInboundRegistrations)
 
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
@@ -134,7 +136,7 @@ func TestHTTPRPC_FullChainEndpoints(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, proofRes.Verified)
 
-	// 7. SendRawTransaction when syncing => 503 rejected
+	// 7. SendRawTransaction, GetInboundTransfers, GetInboundAccountRegistrations when syncing => 503 rejected
 	server.SetSyncing(true)
 	tx2, _ := BuildAndSignBLSTx(priv, pub, ParentChainGatewayAddress, 2, callData) // nonce 1 is already committed
 	tx2Bytes, _ := proto.Marshal(tx2)
@@ -142,11 +144,25 @@ func TestHTTPRPC_FullChainEndpoints(t *testing.T) {
 	assert.Error(t, errSync)
 	assert.Contains(t, errSync.Error(), "503")
 
-	// 8. SendRawTransaction when not syncing => accepted
+	_, _, errInboundSync := client.GetInboundTransfers(pub, 0)
+	assert.Error(t, errInboundSync)
+	assert.Contains(t, errInboundSync.Error(), "503")
+
+	_, _, errRegSync := client.GetInboundAccountRegistrations(pub, 0)
+	assert.Error(t, errRegSync)
+	assert.Contains(t, errRegSync.Error(), "503")
+
+	// 8. SendRawTransaction & queries when not syncing => accepted
 	server.SetSyncing(false)
 	sentHash, errSent := client.SendRawTransaction(tx2Bytes)
 	assert.NoError(t, errSent)
 	assert.Equal(t, ComputeTxHash(tx2), sentHash)
+
+	_, _, errInboundOk := client.GetInboundTransfers(pub, 0)
+	assert.NoError(t, errInboundOk)
+
+	_, _, errRegOk := client.GetInboundAccountRegistrations(pub, 0)
+	assert.NoError(t, errRegOk)
 }
 
 // The JSON transaction path no longer exists: POST /tx is rejected and /send_raw_transaction accepts only raw

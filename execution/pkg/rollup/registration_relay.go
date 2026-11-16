@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
 )
 
@@ -47,6 +48,13 @@ const (
 	registrationSigLength   = 65
 	registrationSigVIndex   = 64
 	ethRecoveryIDOffset     = 27 // Ethereum signers add 27 to the recovery id
+	// Operator alerts are aggregated into at most one Telegram message per interval (never per tick/account).
+	defaultRelayAlertInterval = 1 * time.Minute
+	relayAlertSamplesPerKind  = 3
+	// relayProvisionalRetryTicks is how many relay attempts a request waits after proposing provisional activation
+	// before proposing it again (only happens if the first proposal did not apply).
+	relayProvisionalRetryTicks = 30
+	relayReportedTxCap         = 1024
 )
 
 // RegistrationParent is the part of the Parent Chain client the relay needs.
@@ -75,6 +83,17 @@ type relayEntry struct {
 	reason    string
 	createdAt time.Time
 	txHash    common.Hash
+	alerted   bool // a sync-error alert was recorded for the current trouble episode (in-memory only)
+	queued    bool // the address is currently in r.queue (prevents double enqueue by the stall sweep)
+	provWait  int  // relay attempts to skip before proposing provisional activation again
+	batched   bool // txHash is a batch registration tx
+	noBatch   bool // the parent rejected a batch carrying this request: send it alone from now on
+}
+
+// alertBucket aggregates operator alerts of one kind between two Telegram flushes.
+type alertBucket struct {
+	count   int
+	samples []string
 }
 
 // KVStore is a minimal key-value storage interface compatible with storage.Storage and leveldb/pebbledb/memory stores.
@@ -260,12 +279,26 @@ type RegistrationRelay struct {
 	once   sync.Once
 
 	onStatusChanged func(user common.Address, res RegistrationResult)
+
+	// storeHasMore is set when persisted requests did not fit in memory (maxTracked); the stall sweep loads them
+	// once room frees up, so no persisted request is forgotten after a crash/restart.
+	storeHasMore bool
+
+	batchSize  int                      // > 1: registrations are sent in batch transactions (SetBatchSize)
+	reportedTx map[common.Hash]struct{} // failed tx hashes already reported to the parent client
+
+	alertSink      func(msg string) // operator alerts (Telegram); replaceable in tests
+	alertInterval  time.Duration
+	alertMu        sync.Mutex
+	alertBuckets   map[string]*alertBucket
+	alertOrder     []string
+	lastAlertFlush time.Time
 }
 
 // NewRegistrationRelay builds a relay. sign must sign the registration digest with the cluster BLS key; registered reads
 // the on-chain ParentRegistered flag of an address.
 func NewRegistrationRelay(parent RegistrationParent, clusterKey cm.PublicKey, sign func(digest []byte) cm.Sign, registered func(common.Address) bool) *RegistrationRelay {
-	return &RegistrationRelay{
+	r := &RegistrationRelay{
 		parent:      parent,
 		clusterKey:  clusterKey,
 		sign:        sign,
@@ -279,6 +312,10 @@ func NewRegistrationRelay(parent RegistrationParent, clusterKey cm.PublicKey, si
 		wakeCh:      make(chan struct{}, 1),
 		quitCh:      make(chan struct{}),
 	}
+	r.alertSink = func(msg string) { logger.Telegram(msg) }
+	r.alertInterval = defaultRelayAlertInterval
+	r.alertBuckets = make(map[string]*alertBucket)
+	return r
 }
 
 // SetProvisionalChecker configures the predicate to check if an address has provisional status on-chain.
@@ -340,34 +377,18 @@ func (r *RegistrationRelay) SetStore(store RegistrationRelayStore) error {
 			_ = store.Delete(rec.User)
 			continue
 		}
-		// Bounded memory: records beyond maxTracked stay in the store and are loaded lazily by Status().
+		// Bounded memory: records beyond maxTracked stay in the store; the stall sweep loads them once room frees up.
 		if len(r.entries) >= r.maxTracked {
+			r.storeHasMore = true
 			continue
 		}
-		created := time.Now()
-		if rec.CreatedAt > 0 {
-			created = time.Unix(rec.CreatedAt, 0)
-		}
-		entry := &relayEntry{
-			user:      rec.User,
-			userSig:   append([]byte(nil), rec.UserSig...),
-			status:    rec.Status,
-			submitted: rec.Submitted,
-			attempts:  rec.Attempts,
-			verifies:  rec.Verifies,
-			home:      rec.Home,
-			reason:    rec.Reason,
-			createdAt: created,
-		}
+		entry := entryFromRecord(rec)
 		r.entries[rec.User] = entry
 
-		// Re-enqueue pending or provisional requests so they resume reconciliation with parent
-		if (entry.status == RegStatusPending || entry.status == RegStatusProvisional) && !entry.submitted {
-			select {
-			case r.queue <- entry.user:
-			default:
-				// queue is full, will be picked up on later replay or submit
-			}
+		// Re-enqueue pending or provisional requests so they resume reconciliation with parent. If the queue is
+		// full the stall sweep in ProcessBatch enqueues them later.
+		if entry.status == RegStatusPending || entry.status == RegStatusProvisional {
+			r.enqueueLocked(entry)
 		}
 	}
 	log.Printf("RegistrationRelay: restored %d persisted registration request(s) (%d tracked in memory)", len(records), len(r.entries))
@@ -459,17 +480,26 @@ func (r *RegistrationRelay) Submit(user common.Address, userSig []byte) (Registr
 		}
 		// FAILED: allow a fresh attempt below
 	} else if len(r.entries) >= r.maxTracked {
-		return RegistrationResult{}, ErrRegistrationBusy
+		r.evictTerminalLocked()
+		if len(r.entries) >= r.maxTracked {
+			return RegistrationResult{}, ErrRegistrationBusy
+		}
 	}
 
+	// Persist (fsync) BEFORE acknowledging: a crash after this point cannot lose the request, it is reloaded and
+	// relayed by SetStore on restart.
 	e := &relayEntry{user: user, userSig: append([]byte(nil), userSig...), status: RegStatusPending, createdAt: time.Now()}
 	if err := r.saveLocked(e); err != nil {
 		return RegistrationResult{}, fmt.Errorf("failed to persist registration request: %w", err)
 	}
 
-	select {
-	case r.queue <- user:
-	default:
+	if !r.enqueueLocked(e) {
+		// Not accepted: drop the record again so a busy answer leaves no orphan behind.
+		if r.store != nil {
+			if err := r.store.Delete(user); err != nil {
+				log.Printf("RegistrationRelay: failed to drop busy request %s: %v", user.Hex(), err)
+			}
+		}
 		return RegistrationResult{}, ErrRegistrationBusy
 	}
 	r.entries[user] = e
@@ -508,22 +538,7 @@ func (r *RegistrationRelay) Status(user common.Address) RegistrationResult {
 	}
 	if r.store != nil {
 		if rec, found, err := r.store.Get(user); err == nil && found && rec != nil {
-			created := time.Now()
-			if rec.CreatedAt > 0 {
-				created = time.Unix(rec.CreatedAt, 0)
-			}
-			entry := &relayEntry{
-				user:      rec.User,
-				userSig:   rec.UserSig,
-				status:    rec.Status,
-				submitted: rec.Submitted,
-				attempts:  rec.Attempts,
-				verifies:  rec.Verifies,
-				home:      rec.Home,
-				reason:    rec.Reason,
-				createdAt: created,
-				txHash:    rec.TxHash,
-			}
+			entry := entryFromRecord(rec)
 			r.entries[user] = entry
 			return r.resultLocked(entry)
 		}
@@ -579,6 +594,7 @@ func (r *RegistrationRelay) Start() {
 func (r *RegistrationRelay) Stop() {
 	r.once.Do(func() { close(r.quitCh) })
 	r.wg.Wait()
+	r.flushAlerts(true)
 }
 
 func (r *RegistrationRelay) loop() {
@@ -608,17 +624,129 @@ func (r *RegistrationRelay) ProcessBatch() {
 	if n > relayBatchPerTick {
 		n = relayBatchPerTick
 	}
+	var toSend []common.Address
 	for i := 0; i < n; i++ {
 		select {
 		case user := <-r.queue:
-			r.relayOne(user)
+			r.mu.Lock()
+			if e, ok := r.entries[user]; ok {
+				e.queued = false
+			}
+			r.mu.Unlock()
+			if r.prepareRelay(user) {
+				toSend = append(toSend, user)
+			}
 		default:
 			i = n // queue drained by someone else
 		}
 	}
+	// Requests the parent does not know yet go out together: one batch tx (one parent nonce) when enabled.
+	r.sendRegistrations(toSend)
 	// 2. submitted requests still waiting for the parent's answer
 	for _, user := range r.submittedUsers(relayBatchPerTick) {
 		r.verifyOne(user)
+	}
+	// 3. requests that are persisted/tracked but not in the queue (queue was full at restart or on retry, or they did
+	// not fit in memory) are enqueued again, so nothing waits for a user action to be retried.
+	r.requeueStalled()
+	r.flushAlerts(false)
+}
+
+// requeueStalled enqueues unsubmitted PENDING/PROVISIONAL requests that are not in the queue, and loads persisted
+// requests that did not fit in memory once there is room.
+func (r *RegistrationRelay) requeueStalled() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.storeHasMore && r.store != nil && len(r.entries) < r.maxTracked {
+		r.loadMoreFromStoreLocked()
+	}
+	budget := relayBatchPerTick
+	for _, e := range r.entries {
+		if budget == 0 {
+			return
+		}
+		if (e.status == RegStatusPending || e.status == RegStatusProvisional) && !e.submitted && !e.queued {
+			if !r.enqueueLocked(e) {
+				return // queue full: try again next tick
+			}
+			budget--
+		}
+	}
+}
+
+func (r *RegistrationRelay) loadMoreFromStoreLocked() {
+	records, err := r.store.ScanAll()
+	if err != nil {
+		log.Printf("RegistrationRelay: failed to scan registration store: %v", err)
+		return
+	}
+	more := false
+	for _, rec := range records {
+		if rec == nil || rec.User == (common.Address{}) {
+			continue
+		}
+		if _, ok := r.entries[rec.User]; ok {
+			continue
+		}
+		if len(r.entries) >= r.maxTracked {
+			more = true
+			break
+		}
+		r.entries[rec.User] = entryFromRecord(rec)
+	}
+	r.storeHasMore = more
+}
+
+// enqueueLocked puts an unsubmitted request on the relay queue unless it is already there. Caller holds r.mu.
+func (r *RegistrationRelay) enqueueLocked(e *relayEntry) bool {
+	if e.queued {
+		return true
+	}
+	if e.submitted {
+		return false
+	}
+	select {
+	case r.queue <- e.user:
+		e.queued = true
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *RegistrationRelay) enqueue(user common.Address) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[user]
+	return ok && r.enqueueLocked(e)
+}
+
+// evictTerminalLocked frees memory held by FAILED/REJECTED requests. Their records stay in the store, so Status()
+// still answers them (lazy load) and a FAILED user can resubmit. Caller holds r.mu.
+func (r *RegistrationRelay) evictTerminalLocked() {
+	for u, e := range r.entries {
+		if e.status == RegStatusFailed || e.status == RegStatusRejected {
+			delete(r.entries, u)
+		}
+	}
+}
+
+func entryFromRecord(rec *RelayRecord) *relayEntry {
+	created := time.Now()
+	if rec.CreatedAt > 0 {
+		created = time.Unix(rec.CreatedAt, 0)
+	}
+	return &relayEntry{
+		user:      rec.User,
+		userSig:   append([]byte(nil), rec.UserSig...),
+		status:    rec.Status,
+		submitted: rec.Submitted,
+		attempts:  rec.Attempts,
+		verifies:  rec.Verifies,
+		home:      rec.Home,
+		reason:    rec.Reason,
+		createdAt: created,
+		txHash:    rec.TxHash,
 	}
 }
 
@@ -728,13 +856,13 @@ func (r *RegistrationRelay) retryOrFail(user common.Address, reason string) {
 	})
 	if failed {
 		log.Printf("RegistrationRelay: giving up on %s: %s", user.Hex(), reason)
+		r.alert(user, "❌ registration FAILED (attempts exhausted)", reason)
 		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusFailed, Reason: reason})
 		return
 	}
+	r.alertOnce(user, reason)
 	r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusPending, Reason: reason})
-	select {
-	case r.queue <- user:
-	default:
+	if !r.enqueue(user) {
 		r.update(user, func(e *relayEntry) {
 			if !isProv {
 				e.status = RegStatusFailed
@@ -744,6 +872,7 @@ func (r *RegistrationRelay) retryOrFail(user common.Address, reason string) {
 			}
 			e.reason = "queue full while retrying"
 		})
+		r.alert(user, "⚠️ relay retry queue full", "queue full while retrying")
 		if !isProv {
 			r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusFailed, Reason: "queue full while retrying"})
 		}
@@ -752,14 +881,21 @@ func (r *RegistrationRelay) retryOrFail(user common.Address, reason string) {
 
 // relayOne asks the parent who owns the address, and if nobody does, sends the cluster-signed registration.
 func (r *RegistrationRelay) relayOne(user common.Address) {
+	if r.prepareRelay(user) {
+		r.sendRegistrations([]common.Address{user})
+	}
+}
+
+// prepareRelay asks the parent who owns the address. It returns true only when nobody does yet, i.e. the cluster-signed
+// registration must be sent; every other outcome (confirmed, owned, lookup error) is handled here.
+func (r *RegistrationRelay) prepareRelay(user common.Address) bool {
 	e, ok := r.snapshot(user)
 	if !ok || (e.status != RegStatusPending && e.status != RegStatusProvisional) {
-		return
+		return false
 	}
 	if r.registered != nil && r.registered(user) {
-		r.update(user, func(e *relayEntry) { e.status = RegStatusConfirmed })
-		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusConfirmed})
-		return
+		r.markConfirmed(user)
+		return false
 	}
 	r.markProvisionalIfApplied(user)
 
@@ -767,21 +903,148 @@ func (r *RegistrationRelay) relayOne(user common.Address) {
 	if err != nil {
 		r.retryOrFail(user, fmt.Sprintf("parent registry lookup failed: %v", err))
 		r.maybeProposeProvisional(user, e.userSig, err)
-		return
+		return false
 	}
 	if found {
 		r.resolveFound(user, home)
+		return false
+	}
+	return true
+}
+
+// SetBatchSize enables sending up to n registrations in ONE Parent Chain transaction (one nonce) when the parent
+// client supports it. n <= 1 keeps one transaction per registration. Only enable it once every Parent Chain node
+// runs a version that knows METHOD_REGISTER_ACCOUNTS_BATCH.
+func (r *RegistrationRelay) SetBatchSize(n int) {
+	if n > parentchain.MaxRegisterAccountsBatch {
+		n = parentchain.MaxRegisterAccountsBatch
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.batchSize = n
+}
+
+// batchRegistrationParent is implemented by parent clients that can send a registration batch (parentchain.QuorumClient).
+type batchRegistrationParent interface {
+	SendRegisterAccountsBatch(entries []parentchain.RegisterAccountEntry) (common.Hash, error)
+}
+
+// sendRegistrations sends the cluster-signed registrations of users: in batches when enabled, otherwise (or for a
+// request whose batch was rejected by the parent before) one transaction each.
+func (r *RegistrationRelay) sendRegistrations(users []common.Address) {
+	if len(users) == 0 {
 		return
 	}
+	r.mu.Lock()
+	size := r.batchSize
+	var batchable, single []common.Address
+	for _, u := range users {
+		if e, ok := r.entries[u]; ok && e.noBatch {
+			single = append(single, u)
+		} else {
+			batchable = append(batchable, u)
+		}
+	}
+	r.mu.Unlock()
+	bp, canBatch := r.parent.(batchRegistrationParent)
+	if !canBatch || size <= 1 || len(batchable) < 2 {
+		single = append(single, batchable...)
+		batchable = nil
+	}
+	for len(batchable) > 0 {
+		n := size
+		if n > len(batchable) {
+			n = len(batchable)
+		}
+		r.sendBatch(bp, batchable[:n])
+		batchable = batchable[n:]
+	}
+	for _, u := range single {
+		r.sendSingle(u)
+	}
+}
 
+func (r *RegistrationRelay) sendSingle(user common.Address) {
+	e, ok := r.snapshot(user)
+	if !ok {
+		return
+	}
 	digest := r.RegistrationDigest(user)
 	txHash, err := r.parent.SendRegisterAccount(user, r.clusterKey, e.userSig, r.sign(digest))
-	if err != nil {
-		r.retryOrFail(user, fmt.Sprintf("parent registration submit failed: %v", err))
-		r.maybeProposeProvisional(user, e.userSig, err)
+	r.afterSend(user, e.userSig, txHash, false, err)
+}
+
+func (r *RegistrationRelay) sendBatch(bp batchRegistrationParent, users []common.Address) {
+	entries := make([]parentchain.RegisterAccountEntry, 0, len(users))
+	sigs := make([][]byte, 0, len(users))
+	sent := make([]common.Address, 0, len(users))
+	for _, u := range users {
+		e, ok := r.snapshot(u)
+		if !ok {
+			continue
+		}
+		entries = append(entries, parentchain.RegisterAccountEntry{
+			UserAddress:      u,
+			FloatIdentityKey: r.clusterKey,
+			UserSig:          e.userSig,
+			ClusterSig:       r.sign(r.RegistrationDigest(u)),
+		})
+		sigs = append(sigs, e.userSig)
+		sent = append(sent, u)
+	}
+	if len(entries) == 0 {
 		return
 	}
-	r.update(user, func(e *relayEntry) { e.submitted = true; e.verifies = 0; e.reason = ""; e.txHash = txHash })
+	txHash, err := bp.SendRegisterAccountsBatch(entries)
+	if err != nil {
+		// The parent refused the batch itself (e.g. a node without batch support): send these one by one, now.
+		log.Printf("RegistrationRelay: batch of %d registrations refused, falling back to single transactions: %v", len(sent), err)
+		for _, u := range sent {
+			r.update(u, func(e *relayEntry) { e.noBatch = true })
+			r.sendSingle(u)
+		}
+		return
+	}
+	for i, u := range sent {
+		r.afterSend(u, sigs[i], txHash, true, nil)
+	}
+}
+
+// afterSend records the outcome of sending a registration and proposes provisional activation when appropriate.
+func (r *RegistrationRelay) afterSend(user common.Address, userSig []byte, txHash common.Hash, batched bool, err error) {
+	if err != nil {
+		r.retryOrFail(user, fmt.Sprintf("parent registration submit failed: %v", err))
+		r.maybeProposeProvisional(user, userSig, err)
+		return
+	}
+	r.update(user, func(e *relayEntry) {
+		e.submitted = true
+		e.verifies = 0
+		e.reason = ""
+		e.txHash = txHash
+		e.batched = batched
+	})
+	// Nobody owns the address and the parent accepted our registration: activate it provisionally on this cluster
+	// right away instead of making the user wait for the Parent Chain to execute and confirm it.
+	r.maybeProposeProvisional(user, userSig, nil)
+}
+
+// reportTxFailureOnce resets the parent nonce pipeline once per failed tx hash: the members of a failed batch share one
+// hash, and repeated reports of a hash already purged would force needless full nonce resets.
+func (r *RegistrationRelay) reportTxFailureOnce(txHash common.Hash) {
+	if txHash == (common.Hash{}) || r.parent == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.reportedTx == nil || len(r.reportedTx) >= relayReportedTxCap {
+		r.reportedTx = make(map[common.Hash]struct{})
+	}
+	_, done := r.reportedTx[txHash]
+	r.reportedTx[txHash] = struct{}{}
+	r.mu.Unlock()
+	if !done {
+		r.parent.ReportTxFailure(txHash)
+	}
 }
 
 func isLocalConfigError(err error) bool {
@@ -801,11 +1064,20 @@ func (r *RegistrationRelay) maybeProposeProvisional(user common.Address, userSig
 	if isLocalConfigError(parentErr) {
 		return
 	}
-	entry, ok := r.snapshot(user)
-	if !ok || entry.attempts < 2 || entry.status == RegStatusProvisional {
+	r.mu.Lock()
+	e, ok := r.entries[user]
+	if !ok || e.status != RegStatusPending {
+		r.mu.Unlock()
 		return
 	}
-	r.mu.Lock()
+	// One proposal per request, then wait relayProvisionalRetryTicks attempts before proposing again: the proposal
+	// needs one committee attestation, so it applies at its first commit and the on-chain flag stops further ones.
+	// Re-proposing on every tick would put one system tx per waiting user into every block during a parent outage.
+	if e.provWait > 0 {
+		e.provWait--
+		r.mu.Unlock()
+		return
+	}
 	isProv := r.isProvisional
 	prop := r.provisionalProposer
 	r.mu.Unlock()
@@ -813,9 +1085,134 @@ func (r *RegistrationRelay) maybeProposeProvisional(user common.Address, userSig
 	if isProv != nil && isProv(user) {
 		return
 	}
-	if prop != nil {
-		_ = prop(user, userSig)
+	if prop == nil {
+		return
 	}
+	if err := prop(user, userSig); err != nil {
+		log.Printf("RegistrationRelay: failed to propose provisional activation for %s (will retry): %v", user.Hex(), err)
+		return // retry on the next attempt
+	}
+	r.mu.Lock()
+	if e, ok := r.entries[user]; ok {
+		e.provWait = relayProvisionalRetryTicks
+	}
+	r.mu.Unlock()
+}
+
+// markConfirmed handles the on-chain CONFIRMED state: the request is finished, so it is dropped from memory and from
+// the store (Status() answers CONFIRMED from the on-chain flag). A recovery is reported if a sync error was alerted.
+func (r *RegistrationRelay) markConfirmed(user common.Address) {
+	wasAlerted := false
+	r.mu.Lock()
+	if e, ok := r.entries[user]; ok {
+		wasAlerted = e.alerted
+		delete(r.entries, user)
+	}
+	if r.store != nil {
+		if err := r.store.Delete(user); err != nil {
+			log.Printf("RegistrationRelay: failed to drop confirmed request %s: %v", user.Hex(), err)
+		}
+	}
+	r.mu.Unlock()
+	if wasAlerted {
+		r.alert(user, "✅ CONFIRMED after sync error", "")
+	}
+	r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusConfirmed})
+}
+
+// alertOnce records at most one sync-error alert per trouble episode of a request (re-armed on confirmation), so the
+// alert counts affected accounts rather than retry ticks.
+func (r *RegistrationRelay) alertOnce(user common.Address, reason string) {
+	first := false
+	r.mu.Lock()
+	if e, ok := r.entries[user]; ok && !e.alerted {
+		e.alerted = true
+		first = true
+	}
+	r.mu.Unlock()
+	if first {
+		r.alert(user, "⚠️ Parent Chain sync error", reason)
+	}
+}
+
+// alert records an operator alert of kind `title`. Alerts are not sent one by one: flushAlerts aggregates them into a
+// single Telegram message per alertInterval (count per kind + a few sample accounts), so a Parent Chain outage
+// affecting thousands of registrations produces one message per interval instead of a flood.
+func (r *RegistrationRelay) alert(user common.Address, title, reason string) {
+	sample := user.Hex()
+	if reason != "" {
+		sample += ": " + reason
+	}
+	r.alertMu.Lock()
+	defer r.alertMu.Unlock()
+	if r.alertBuckets == nil {
+		r.alertBuckets = make(map[string]*alertBucket)
+	}
+	b, ok := r.alertBuckets[title]
+	if !ok {
+		b = &alertBucket{}
+		r.alertBuckets[title] = b
+		r.alertOrder = append(r.alertOrder, title)
+	}
+	b.count++
+	if len(b.samples) < relayAlertSamplesPerKind {
+		b.samples = append(b.samples, sample)
+	}
+}
+
+// flushAlerts sends the aggregated alerts as one Telegram message once alertInterval has elapsed since the previous
+// message (force sends immediately). The first problem after a quiet period is therefore reported at once, later ones
+// at most once per interval. Wall-clock here only paces operator notifications; it decides nothing on-chain.
+func (r *RegistrationRelay) flushAlerts(force bool) {
+	r.alertMu.Lock()
+	if len(r.alertOrder) == 0 || (!force && time.Since(r.lastAlertFlush) < r.alertInterval) {
+		r.alertMu.Unlock()
+		return
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "[Registration Sync] cluster=%s", r.clusterTag())
+	for _, title := range r.alertOrder {
+		b := r.alertBuckets[title]
+		fmt.Fprintf(&sb, "\n%s ×%d", title, b.count)
+		for _, s := range b.samples {
+			sb.WriteString("\n  - " + s)
+		}
+		if b.count > len(b.samples) {
+			fmt.Fprintf(&sb, "\n  - ... and %d more", b.count-len(b.samples))
+		}
+	}
+	r.alertBuckets = make(map[string]*alertBucket)
+	r.alertOrder = nil
+	r.lastAlertFlush = time.Now()
+	r.alertMu.Unlock()
+
+	pending, provisional, failed := r.trackedCounts()
+	fmt.Fprintf(&sb, "\nTracked now: pending=%d provisional=%d failed=%d", pending, provisional, failed)
+	r.alertSink(sb.String())
+}
+
+func (r *RegistrationRelay) trackedCounts() (pending, provisional, failed int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.entries {
+		switch e.status {
+		case RegStatusPending:
+			pending++
+		case RegStatusProvisional:
+			provisional++
+		case RegStatusFailed:
+			failed++
+		}
+	}
+	return
+}
+
+func (r *RegistrationRelay) clusterTag() string {
+	s := r.clusterKey.String()
+	if len(s) > 16 {
+		s = s[:16]
+	}
+	return s
 }
 
 // verifyOne polls the parent registry for a submitted request: the parent executes the registration after accepting the
@@ -826,8 +1223,7 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 		return
 	}
 	if r.registered != nil && r.registered(user) {
-		r.update(user, func(e *relayEntry) { e.status = RegStatusConfirmed })
-		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusConfirmed})
+		r.markConfirmed(user)
 		return
 	}
 	r.markProvisionalIfApplied(user)
@@ -841,8 +1237,12 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 					reason = "parent chain rejected registration tx: sender nonce mismatch (errCode=103)"
 				}
 				// Always report transaction failure to reset the nonce pipeline on any non-success status,
-				// avoiding cascade nonce gaps on subsequent attempts.
-				r.parent.ReportTxFailure(e.txHash)
+				// avoiding cascade nonce gaps on subsequent attempts (once per hash: batch members share it).
+				r.reportTxFailureOnce(e.txHash)
+				if e.batched {
+					// A failed batch tx (e.g. a parent without batch support) is not retried as a batch.
+					r.update(user, func(e *relayEntry) { e.noBatch = true })
+				}
 				r.retryOrFail(user, reason)
 				return
 			}
@@ -853,6 +1253,7 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 	if err != nil {
 		// Transient network or quorum error: log warning and retry on next poll without burning an attempt.
 		log.Printf("RegistrationRelay: transient lookup error for %s (will retry): %v", user.Hex(), err)
+		r.alertOnce(user, fmt.Sprintf("parent registry lookup failed while confirming: %v", err))
 		return
 	}
 	if found {
@@ -865,13 +1266,12 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 	isProvOnChain := r.isProvisional != nil && r.isProvisional(user)
 	r.mu.Unlock()
 
+	var staleTx common.Hash
 	r.update(user, func(e *relayEntry) {
 		e.verifies++
 		if e.verifies >= r.maxVerifies {
-			if e.txHash != (common.Hash{}) && r.parent != nil {
-				r.parent.ReportTxFailure(e.txHash)
-				e.txHash = common.Hash{}
-			}
+			staleTx = e.txHash
+			e.txHash = common.Hash{}
 			if e.status == RegStatusProvisional || isProvOnChain {
 				e.status = RegStatusProvisional
 				e.submitted = false
@@ -885,14 +1285,16 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 			}
 		}
 	})
+	r.reportTxFailureOnce(staleTx)
 	if failed {
+		r.alert(user, "❌ registration FAILED (parent confirmation timeout)", "the parent chain did not register the account")
 		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusFailed, Reason: "the parent chain did not register the account"})
 	}
 	if resubmit {
-		select {
-		case r.queue <- user:
+		r.alert(user, "⏱️ Parent Chain confirmation timeout, resubmitting", "parent did not confirm registration within limit")
+		if r.enqueue(user) {
 			r.wake()
-		default:
+		} else {
 			r.update(user, func(e *relayEntry) {
 				e.submitted = true
 				e.verifies = r.maxVerifies
@@ -947,6 +1349,7 @@ func (r *RegistrationRelay) resolveFound(user common.Address, home cm.PublicKey)
 		rejected = true
 	})
 	if rejected {
+		r.alert(user, "🚨 registration CONFLICT (address owned by another cluster)", "home="+home.String())
 		h := home
 		r.notifyStatusChanged(user, RegistrationResult{Status: RegStatusRejected, HomeCluster: &h, Reason: "address is registered to another cluster on the parent chain"})
 	}

@@ -706,8 +706,8 @@ func TestReview3_S3_LocalConfigErrorsAndThreshold(t *testing.T) {
 		assert.Equal(t, 0, calls, "private key not configured must never trigger provisionalProposer")
 	})
 
-	// Subtest 3: Network outage requires >= 2 consecutive failures
-	t.Run("ConsecutiveFailuresThreshold", func(t *testing.T) {
+	// Subtest 3: a network outage proposes provisional activation on the first failure (no waiting for more failures)
+	t.Run("ProposesOnFirstFailure", func(t *testing.T) {
 		h := newRelayHarness()
 		user, sig := h.userSig(t)
 		h.parent.lookupErr = errors.New("network timeout")
@@ -719,14 +719,42 @@ func TestReview3_S3_LocalConfigErrorsAndThreshold(t *testing.T) {
 		_, err := h.relay.Submit(user, sig)
 		require.NoError(t, err)
 
-		// Tick 1: 1st failure (attempts becomes 1). Must not trigger yet.
 		h.relay.ProcessBatch()
-		assert.Equal(t, 0, calls, "Must not propose provisional after only 1 failure")
-
-		// Tick 2: 2nd failure (attempts becomes 2). Must trigger!
-		h.relay.ProcessBatch()
-		assert.Equal(t, 1, calls, "Must propose provisional on 2nd consecutive failure")
+		assert.Equal(t, 1, calls, "Must propose provisional on the first parent failure")
 	})
+}
+
+func TestRegistrationRelay_ProposesProvisionalImmediatelyWhenParentIsUp(t *testing.T) {
+	h := newRelayHarness()
+	user, sig := h.userSig(t)
+	calls := 0
+	h.relay.SetProvisionalProposer(func(u common.Address, us []byte) error {
+		require.Equal(t, user, u)
+		calls++
+		return nil
+	})
+	_, err := h.relay.Submit(user, sig)
+	require.NoError(t, err)
+
+	h.relay.ProcessBatch()
+	assert.Equal(t, 1, calls, "provisional activation must be proposed on the first tick even when the parent is healthy")
+	assert.Equal(t, 1, h.parent.sendCount(), "registration must still be relayed to the parent")
+}
+
+func TestRegistrationRelay_SyncAlertIsSentOncePerEpisode(t *testing.T) {
+	h := newRelayHarness()
+	user, sig := h.userSig(t)
+	h.parent.lookupErr = errors.New("parent chain offline")
+	_, err := h.relay.Submit(user, sig)
+	require.NoError(t, err)
+
+	h.relay.ProcessBatch()
+	entry, _ := h.relay.snapshot(user)
+	require.True(t, entry.alerted, "first sync failure must raise an alert")
+
+	h.relay.markConfirmed(user)
+	_, tracked := h.relay.snapshot(user)
+	assert.False(t, tracked, "a confirmed request is dropped from memory (re-arming its alert)")
 }
 
 func TestRegistrationRelay_FullQueue_VerifyOneRetriesWhenQueueDrains(t *testing.T) {
@@ -845,6 +873,10 @@ func TestRegistrationRelay_FullQueue_RetryOrFailKeepsProvisionalAlive(t *testing
 	require.NoError(t, err)
 
 	isProv = true
+
+	// The relay loop has taken the request off the queue (as ProcessBatch does before relayOne).
+	<-h.relay.queue
+	h.relay.update(user, func(e *relayEntry) { e.queued = false })
 
 	// Fill queue to capacity
 	for {

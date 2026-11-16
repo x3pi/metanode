@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"math/big"
 	"sync"
 	"testing"
@@ -86,7 +87,7 @@ func TestRegistrationAPI_DisabledWhenGateOff(t *testing.T) {
 	assert.ErrorIs(t, err, errRegistrationDisabled)
 	_, err = h.api.GetRegistrationMessage(common.Address{1})
 	assert.ErrorIs(t, err, errRegistrationDisabled)
-	_, err = h.api.RegisterAccount(common.Address{1}, make([]byte, 65))
+	_, err = h.api.RegisterAccount(context.Background(), common.Address{1}, make([]byte, 65))
 	assert.ErrorIs(t, err, errRegistrationDisabled)
 	_, err = h.api.GetRegistrationStatus(common.Address{1})
 	assert.ErrorIs(t, err, errRegistrationDisabled)
@@ -95,7 +96,7 @@ func TestRegistrationAPI_DisabledWhenGateOff(t *testing.T) {
 	none := &MtnAPI{App: &App{config: &config.SimpleChainConfig{ChainId: big.NewInt(1), TxSignatureMode: config.TxSignatureModeSecp, AccountGate: config.AccountGateParentRegistered}}}
 	_, err = none.GetClusterIdentity()
 	assert.ErrorIs(t, err, errRegistrationDisabled)
-	_, err = (&MtnAPI{}).RegisterAccount(common.Address{1}, nil)
+	_, err = (&MtnAPI{}).RegisterAccount(context.Background(), common.Address{1}, nil)
 	assert.ErrorIs(t, err, errRegistrationDisabled)
 }
 
@@ -124,7 +125,7 @@ func TestRegistrationAPI_RegisterThenStatusFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "NONE", st.Status)
 
-	info, err := h.api.RegisterAccount(addr, sig)
+	info, err := h.api.RegisterAccount(context.Background(), addr, sig)
 	require.NoError(t, err)
 	assert.Equal(t, "PENDING", info.Status)
 
@@ -141,7 +142,7 @@ func TestRegistrationAPI_RegisterThenStatusFlow(t *testing.T) {
 	h.flags.Store(addr, true) // the ordered registration event sets the on-chain flag
 	st, _ = h.api.GetRegistrationStatus(addr)
 	assert.Equal(t, "CONFIRMED", st.Status)
-	again, err := h.api.RegisterAccount(addr, sig)
+	again, err := h.api.RegisterAccount(context.Background(), addr, sig)
 	require.NoError(t, err)
 	assert.Equal(t, "CONFIRMED", again.Status, "resubmitting a confirmed account is a harmless no-op")
 }
@@ -152,14 +153,14 @@ func TestRegistrationAPI_RejectsInvalidSignatureAndReportsLoser(t *testing.T) {
 
 	bad := append(hexutil.Bytes(nil), sig...)
 	bad[10] ^= 0xFF
-	_, err := h.api.RegisterAccount(addr, bad)
+	_, err := h.api.RegisterAccount(context.Background(), addr, bad)
 	assert.Error(t, err)
-	_, err = h.api.RegisterAccount(addr, sig[:60])
+	_, err = h.api.RegisterAccount(context.Background(), addr, sig[:60])
 	assert.Error(t, err)
 
 	winner := bls.GenerateKeyPair().PublicKey()
 	h.parent.registry[addr] = winner
-	_, err = h.api.RegisterAccount(addr, sig)
+	_, err = h.api.RegisterAccount(context.Background(), addr, sig)
 	require.NoError(t, err)
 	h.api.App.regRelay.ProcessBatch()
 	st, err := h.api.GetRegistrationStatus(addr)

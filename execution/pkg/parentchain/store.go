@@ -451,11 +451,12 @@ func (m *MemoryStore) GetAccountRegistrations(clusterKeyHash common.Hash, cursor
 	defer m.mu.RUnlock()
 
 	events := m.accountRegistrations[clusterKeyHash]
-	if cursor >= uint64(len(events)) {
-		return nil, cursor, nil
+	total := uint64(len(events))
+	if cursor >= total {
+		return nil, total, nil
 	}
 
-	count := uint64(len(events)) - cursor
+	count := total - cursor
 	if count > 50 {
 		count = 50 // paginate 50 at a time
 	}

@@ -226,11 +226,10 @@ type lockedHomeClusterStateDB interface {
 	SetLockedHomeCluster(addr common.Address, homeCluster cm.PublicKey)
 }
 
-// NOTE: Committee enforcement is currently in transition: no CommitteeProvider is wired in simple_chain yet,
-// so RegistrationWorker and LockProposer attach their own node attestation. Until full committee co-attestation
-// and signature exchange is enabled in production, the network operates under the Trusted Validator assumption.
-// For destructive actions (SystemPayloadKindAccountLocked), at least one valid attestation is strictly enforced
-// even when committee is nil to prevent unauthenticated freeze attacks.
+// NOTE: In production RollupSystemHandler passes a live CommitteeProvider (non-jailed, staked validators' distinct BLS
+// keys), so account_registered and account_locked need f+1 co-attestations, each validator submitting its own; an
+// account_provisional needs one committee attestation (see ApplyAttested). With committee == nil (tests / tools) only
+// the attached signatures are checked; a lock still requires at least one trusted attestation.
 type CommitteeProvider interface {
 	GetActiveCommitteeBLSKeys() ([]cm.PublicKey, error)
 }
@@ -349,11 +348,13 @@ type AttestationStore interface {
 // signatures simply stays PENDING. With committee == nil (tests / non-enforcing use) any attached signatures are only
 // checked for validity. The call is idempotent (already registered and repeated attestations are no-op successes).
 // verifyAttestations validates committee co-attestations or individual BLS signatures against digest.
+// minRequired > 0 overrides the f+1 committee threshold (used by provisional activation, see ApplyAttested).
 func (h *AccountRegistryHandler) verifyAttestations(
 	store AttestationStore,
 	committee CommitteeProvider,
 	digest []byte,
 	attestations []RegistrationAttestation,
+	minRequired int,
 ) (bool, error) {
 	if committee == nil {
 		seen := make(map[cm.PublicKey]bool)
@@ -383,6 +384,9 @@ func (h *AccountRegistryHandler) verifyAttestations(
 	}
 	// Quorum threshold: f = (N - 1) / 3, required = f + 1
 	required := (len(keys)-1)/3 + 1
+	if minRequired > 0 && minRequired < required {
+		required = minRequired
+	}
 
 	if len(attestations) == 0 {
 		return false, errors.New("account registry: no attestation in payload")
@@ -464,7 +468,7 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 		}
 
 		digest := ComputeAccountRegistrationAttestDigest(h.attestChainID(), payload.User, payload.ClusterKey, payload.ParentSeq)
-		ok, err := h.verifyAttestations(store, committee, digest, payload.Attestations)
+		ok, err := h.verifyAttestations(store, committee, digest, payload.Attestations, 0)
 		if err != nil {
 			return err
 		}
@@ -491,8 +495,14 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 			return fmt.Errorf("account registry: invalid user signature for provisional registration")
 		}
 
+		// Provisional activation needs ONE committee attestation, not f+1. Only the validator that received the
+		// user's mtn_registerAccount call knows about the request, so f+1 could never be reached on a committee of 4+
+		// distinct keys. Everything an extra signer could check here is already checked deterministically by every
+		// replica (user signature bound to this cluster key, not locked, not registered); the attestation only proves
+		// a committee member submitted it. Accepted risk (offline-provisional policy): the address may meanwhile be
+		// owned by another cluster on the Parent Chain; it is locked here once the parent's answer arrives.
 		digest := ComputeAccountProvisionalAttestDigest(h.attestChainID(), payload.User, payload.ClusterKey, payload.UserSig)
-		ok, err := h.verifyAttestations(store, committee, digest, payload.Attestations)
+		ok, err := h.verifyAttestations(store, committee, digest, payload.Attestations, 1)
 		if err != nil {
 			return err
 		}
@@ -526,7 +536,7 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 		}
 
 		digest := ComputeAccountLockedAttestDigest(h.attestChainID(), payload.User, payload.HomeCluster, payload.ParentSeq)
-		ok, err := h.verifyAttestations(store, committee, digest, payload.Attestations)
+		ok, err := h.verifyAttestations(store, committee, digest, payload.Attestations, 0)
 		if err != nil {
 			return err
 		}
