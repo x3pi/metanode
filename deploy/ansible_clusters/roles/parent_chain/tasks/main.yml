@@ -182,25 +182,60 @@
       when: deploy_action == 'rollback'
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────
-- name: Clean Parent Chain data directories
+# Data is moved to {{ install_dir }}/backups/<host>_<timestamp>/ (never deleted directly).
+# Retention policy: keeps at most 1 latest backup per host; older backups and any backup older than 7 days are pruned automatically.
+- name: Back up Parent Chain data directories (move, auto-prune to 1 backup, max 7 days)
   when: "deploy_action in ['clean', 'reset']"
   block:
-    - name: Remove database files
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - "{{ node_data_dir }}/chain_data"
-        - "{{ node_data_dir }}/storage"
-        - "{{ node_data_dir }}/parentchain_db"
-        - "{{ node_data_dir }}/consensus"
-        - "{{ node_data_dir }}/consensus_storage"
-        - "{{ node_data_dir }}/rocksdb_dummy_init"
-        - "{{ node_data_dir }}/backup"
-        - "{{ node_data_dir }}/logs"
-        - "{{ node_data_dir }}/genesis_committee_fingerprint"
-        - "{{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log.old"
-        - "{{ base_log_dir }}/parent_chain.log"
+    - name: Compute backup directory
+      ansible.builtin.set_fact:
+        data_backup_dir: "{{ install_dir | default('/opt/metanode') }}/backups/{{ inventory_hostname }}_{{ data_backup_ts | default(lookup('pipe', 'date +%Y%m%d_%H%M%S')) }}"
+
+    - name: Move database files to the backup directory
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          dest="{{ data_backup_dir }}"
+          mkdir -p "$dest"
+          moved=0
+          for p in \
+            "{{ node_data_dir }}/chain_data" \
+            "{{ node_data_dir }}/storage" \
+            "{{ node_data_dir }}/parentchain_db" \
+            "{{ node_data_dir }}/consensus" \
+            "{{ node_data_dir }}/consensus_storage" \
+            "{{ node_data_dir }}/rocksdb_dummy_init" \
+            "{{ node_data_dir }}/backup" \
+            "{{ node_data_dir }}/logs" \
+            "{{ node_data_dir }}/genesis_committee_fingerprint" \
+            "{{ base_log_dir }}/parent_chain_{{ parent_node_id | default(0) }}.log.old" \
+            "{{ base_log_dir }}/parent_chain.log"; do
+            if [ -e "$p" ] || [ -L "$p" ]; then
+              mv "$p" "$dest/"
+              moved=$((moved + 1))
+            fi
+          done
+          if [ "$moved" -eq 0 ]; then rmdir "$dest"; fi
+          echo "moved=$moved dest=$dest"
+      register: parent_data_backup
+      changed_when: "'moved=0 ' not in parent_data_backup.stdout"
+
+    - name: Show where the Parent Chain data was backed up
+      ansible.builtin.debug:
+        msg: "{{ parent_data_backup.stdout }}"
+
+    - name: Prune old Parent Chain backups (keep at most 1, remove older than 7 days)
+      ansible.builtin.shell:
+        cmd: |
+          backup_base="{{ install_dir | default('/opt/metanode') }}/backups"
+          if [ -d "$backup_base" ]; then
+            # 1. Remove backups older than 7 days
+            find "$backup_base" -maxdepth 1 -name "{{ inventory_hostname }}_*" -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+
+            # 2. Keep only the latest 1 backup for this host, remove older ones
+            ls -dt "$backup_base"/{{ inventory_hostname }}_* 2>/dev/null | tail -n +2 | xargs -r rm -rf 2>/dev/null || true
+          fi
+      changed_when: false
 
 # ── Firewall (UFW) Configuration ───────────────────────────────────────────
 # OPT-IN only (`--open-ports` => deploy_action=open_ports). The HTTP RPC is client-facing; the peer RPC and the metrics
@@ -351,8 +386,8 @@
               but the incoming protocol key (checksum: {{ incoming_protocol_key_stat.stat.checksum | default('unknown') }})
               does not match the existing key on the node (checksum: {{ existing_protocol_key_stat.stat.checksum | default('unknown') }}).
               Overwriting keys on existing DAG data causes consensus deadlock ('Invalid signature' loop)!
-              If you intended a fresh deployment with new keys, run with `--reset --force`:
-                ./deploy_clusters.sh --reset --force
+              If you intended a fresh deployment with new keys, run `--reset` (old data is moved to a backup, confirm with y):
+                ./deploy_clusters.sh --reset
               Or pass extra var -e "allow_inconsistent_key_overwrite=true" if this is deliberate maintenance.
 
     - name: Deploy Parent Chain genesis file

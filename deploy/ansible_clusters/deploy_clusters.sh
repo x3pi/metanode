@@ -56,11 +56,11 @@ usage() {
     echo "  --rollback          Rollback toàn bộ cluster về bản binary trước (.prev)"
     echo "  --skip-build        (Chỉ đi kèm với --restart) Bỏ qua bước build, chạy lại binary cũ đang có trên node"
     echo "  --stop              Dừng dịch vụ (toàn bộ hoặc lọc theo --node/--exec-only)"
-    echo "  --clean             Dọn dẹp database & log (giữ nguyên config và key)"
-    echo "  --reset             Reset toàn bộ, xóa database và khởi chạy lại từ block 0"
+    echo "  --clean             Chuyển database & log vào /opt/metanode/backups (giữ config và key). Phải gõ y để xác nhận"
+    echo "  --reset             Reset về block 0: chuyển database cũ vào /opt/metanode/backups rồi khởi chạy lại. Phải gõ y để xác nhận"
     echo "  --gen-keys          Sinh bộ key Parent Chain (và validator public keys) cục bộ"
     echo "  --change-keys       Đổi bộ key Parent Chain mới (xoay khóa, alias: --overwrite-keys)"
-    echo "  --force, -f         Cờ ép buộc xác nhận (bắt buộc khi đổi key hoặc reset để bảo vệ dữ liệu)"
+    echo "  --force, -f         Cờ xác nhận khi đổi key / rollback production. KHÔNG bỏ qua bước gõ y của --reset/--clean"
     echo "  --status            Kiểm tra trạng thái RPC và block height các cụm node"
     echo "  --open-ports        Tự động cấu hình mở cổng tường lửa (UFW) trên các server"
     echo "  --nginx, --tls      Chỉ cài đặt/cập nhật và reload Nginx TLS reverse proxy (HTTPS/WSS 443)"
@@ -336,12 +336,38 @@ if [[ "$ACTION" =~ ^(deploy|restart)$ ]] && [ -n "$TARGET_NODE" ] && [ "${SKIP_B
     echo "   sẽ khiến các node khác trên cùng máy chạy lẫn version cũ/mới trong RAM cho đến lần restart sau!"
 fi
 
-# Safety guard: Action reset wipes all blockchain data, strictly requiring --force
-if [ "$ACTION" = "reset" ] && [ "$CONFIRM_FORCE" != "true" ]; then
-    echo "❌ [ERROR] Lệnh --reset sẽ xóa sạch toàn bộ cơ sở dữ liệu blockchain!"
-    echo "   Bắt buộc phải kèm cờ ép buộc xác nhận: --force (hoặc -f)"
-    echo "   Ví dụ: ./deploy_clusters.sh --reset --force"
-    exit 1
+# Safety guard: reset/clean take the chain data offline (it is MOVED to a backup directory, never deleted). This needs
+# an interactive "y" typed by the operator on a terminal; --force does NOT skip it and non-interactive runs are refused.
+DATA_BACKUP_TS="$(date +%Y%m%d_%H%M%S)"
+if [[ "$ACTION" =~ ^(reset|clean)$ ]]; then
+    if [ "$CONFIRM_FORCE" = "true" ]; then
+        echo "ℹ️  --force không còn bỏ qua bước xác nhận của --${ACTION}: bạn vẫn phải gõ y."
+    fi
+    if ! { : </dev/tty; } 2>/dev/null; then
+        echo "❌ [ERROR] --${ACTION} cần xác nhận trực tiếp trên terminal (gõ y). Không chạy được ở chế độ không tương tác (CI, cron, pipe)."
+        exit 1
+    fi
+    if [ "$EXEC_ONLY" = "true" ]; then
+        SCOPE_CONFIRM="Execution Clusters"
+    elif [ "$PARENT_ONLY" = "true" ]; then
+        SCOPE_CONFIRM="Parent Chain"
+    else
+        SCOPE_CONFIRM="Parent Chain + Execution Clusters"
+    fi
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "⚠️  CẢNH BÁO: --${ACTION} sẽ dừng node và đưa dữ liệu chain ra khỏi node"
+    echo "   Môi trường : ${METANODE_ENV}"
+    echo "   Inventory  : ${INVENTORY}"
+    echo "   Phạm vi    : ${SCOPE_CONFIRM}${TARGET_NODE:+ (node: ${TARGET_NODE})}"
+    echo "   Dữ liệu cũ được CHUYỂN (không xóa) vào: <install_dir>/backups/<host>_${DATA_BACKUP_TS}/"
+    echo "═══════════════════════════════════════════════════════════════"
+    printf "Gõ y để tiếp tục, phím khác để hủy [y/N]: " >/dev/tty
+    CONFIRM_ANSWER=""
+    read -r CONFIRM_ANSWER </dev/tty || CONFIRM_ANSWER=""
+    if [ "$CONFIRM_ANSWER" != "y" ] && [ "$CONFIRM_ANSWER" != "Y" ]; then
+        echo "🛑 Đã hủy --${ACTION}. Không có dữ liệu nào bị thay đổi."
+        exit 1
+    fi
 fi
 
 # inventory.yml is untracked (it holds real hosts / vault-encrypted credentials): on a fresh clone seed it
@@ -1194,7 +1220,7 @@ set +e
 ansible-playbook \
     -i "$INVENTORY" \
     "$PLAYBOOK" \
-    --extra-vars "deploy_action=${ACTION} open_ports=${OPEN_PORTS_FLAG} run_integration_tests=false metanode_env=${METANODE_ENV} node_env=${NODE_ENV} parent_keys_dir=${PARENT_KEYS_DIR} change_keys=${CHANGE_KEYS:-false}" \
+    --extra-vars "deploy_action=${ACTION} open_ports=${OPEN_PORTS_FLAG} run_integration_tests=false metanode_env=${METANODE_ENV} node_env=${NODE_ENV} parent_keys_dir=${PARENT_KEYS_DIR} change_keys=${CHANGE_KEYS:-false} data_backup_ts=${DATA_BACKUP_TS}" \
     "${VAULT_CLUSTER_ARGS[@]}" \
     "${EXTRA_ANSIBLE_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
 ANSIBLE_RC=${PIPESTATUS[0]}

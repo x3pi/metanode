@@ -117,7 +117,7 @@ metanode/
 | `simple_chain/` | Unified node: Validator / SyncOnly / RPC / Explorer roles |
 | `parent_chain/` | Parent settlement & registry chain daemon (own `processor/`, `tx_batcher.go`) |
 | `exec_node/` | Standalone execution node |
-| `tool/*` | Operator, benchmark and verification tools (key/genesis generators, registration, TPS blasters, parity/chaos/e2e checkers, `rollup_cluster`, `protocol_fingerprint`, `encrypt_secret`, …) |
+| `tool/*` | Operator, benchmark and verification tools (key/genesis generators, registration, TPS blasters, parity/chaos/e2e checkers, `rollup_cluster`, `protocol_fingerprint`, `encrypt_secret`, `sync_accounts_to_parent` (rebuilds the Parent Chain account registry as a genesis `account_registry` after a parent data loss), …) |
 
 ### 5.2 `cmd/simple_chain/`
 | File / dir | Role |

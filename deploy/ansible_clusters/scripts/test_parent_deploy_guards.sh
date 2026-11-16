@@ -64,16 +64,17 @@ if [ $RC -ne 0 ]; then
 fi
 echo "  ✅ PASS: Shorthand -f accepted"
 
-echo "  Test 4: deploy_clusters.sh refuses --reset without --force"
+echo "  Test 4: deploy_clusters.sh refuses --reset without an interactive y, even with --force"
 set +e
-"${SCRIPT_DIR}/../deploy_clusters.sh" --reset 2>"${TEMP_TEST_DIR}/reset_err.log"
+# setsid drops the controlling terminal, so /dev/tty cannot be opened: the guard must refuse.
+setsid -w "${SCRIPT_DIR}/../deploy_clusters.sh" --reset --force </dev/null 2>"${TEMP_TEST_DIR}/reset_err.log" >"${TEMP_TEST_DIR}/reset_out.log"
 RESET_RC=$?
 set -e
 if [ $RESET_RC -ne 1 ]; then
-    echo "❌ FAILED: deploy_clusters.sh --reset without --force should have exited with code 1, got $RESET_RC"
+    echo "❌ FAILED: deploy_clusters.sh --reset --force without a terminal should have exited with code 1, got $RESET_RC"
     exit 1
 fi
-echo "  ✅ PASS: deploy_clusters.sh correctly required --force for --reset"
+echo "  ✅ PASS: deploy_clusters.sh refused non-interactive --reset (--force does not bypass the y prompt)"
 
 echo "🎉 All Parent Chain Deploy Tooling Guard Tests Passed Successfully!"
 

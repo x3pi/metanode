@@ -107,7 +107,8 @@ Lệnh trên sẽ:
 > 🚨 **QUAN TRỌNG:**
 > - `./deploy_clusters.sh --restart` **KHÔNG** xóa dữ liệu đĩa (`consensus/` và `parentchain_db/`), nhưng **RENDER LẠI** file cấu hình `node.toml`, `parent_genesis.json` và phân phối lại khóa từ `parent_keys/`.
 > - Nếu ai đó đã sinh lại khóa trong `parent_keys/` mà chạy `./deploy_clusters.sh --restart`, cụm sẽ rơi vào tình trạng **KẸT ĐỒNG THUẬN VĨNH VIỄN** (`Invalid signature` loop) do node dùng khóa mới để xác thực DAG lịch sử cũ.
-> - **Khi muốn đổi/xoay khóa hoặc khởi tạo lại chain:** Bắt buộc dùng `./deploy_clusters.sh --reset --force`. Không bao giờ được sinh khóa mới rồi dùng `--restart`.
+> - **Khi muốn đổi/xoay khóa hoặc khởi tạo lại chain:** Bắt buộc dùng `./deploy_clusters.sh --reset`. Không bao giờ được sinh khóa mới rồi dùng `--restart`.
+> - `--reset` và `--clean` **không xóa dữ liệu**: dữ liệu cũ được chuyển vào `<install_dir>/backups/<host>_<timestamp>/` (mặc định `/opt/metanode/backups/`). Lệnh luôn hỏi và phải gõ `y` trên terminal mới chạy; `--force` không bỏ qua được bước này, chạy không tương tác (CI, cron, pipe) sẽ bị từ chối. Backup cũ phải tự xóa tay khi không cần nữa.
 > - Hệ thống đã tích hợp chốt chặn an toàn (Safety Guard): Playbook và binary sẽ từ chối khởi động nếu phát hiện fingerprint của ủy ban genesis không khớp với DAG hiện hữu. Xem chi tiết tại [Runbook phục hồi Parent Chain](../../note/parent_chain_recovery_runbook.md).
 
 ---
@@ -161,8 +162,8 @@ tail -f /tmp/parent_chain_monitor.log
 | `./deploy_clusters.sh --restart --skip-build` | Chỉ restart với binary hiện có trên node, không build lại và không stage binary |
 | `./deploy_clusters.sh --rollback` | Rollback toàn bộ cụm về binary trước đó (.prev), có Fail-Stop bảo vệ trạng thái |
 | `./deploy_clusters.sh --stop` | Dừng an toàn toàn bộ tiến trình cụm node (tự chờ flush DB qua TimeoutStopSec) |
-| `./deploy_clusters.sh --clean` | Xóa database và logs, giữ lại cấu hình và keys |
-| `./deploy_clusters.sh --reset` | Reset toàn bộ hệ sinh thái về Block 0 và khởi chạy lại |
+| `./deploy_clusters.sh --clean` | Chuyển database và logs vào `/opt/metanode/backups/`, giữ lại cấu hình và keys (phải gõ `y`) |
+| `./deploy_clusters.sh --reset` | Reset về Block 0: chuyển dữ liệu cũ vào `/opt/metanode/backups/` rồi khởi chạy lại (phải gõ `y`) |
 | `./deploy_clusters.sh --systemd` | Sử dụng `systemd` service thay vì background daemon |
 | `./deploy_clusters.sh --env=production` | Đặt môi trường deploy (`devnet` hoặc `production`). Mặc định là `devnet` cho test cluster. |
 | `./deploy_clusters.sh --vault-password-file FILE` | Chỉ định file mật khẩu Ansible Vault để giải mã credentials |
@@ -234,3 +235,18 @@ Triển khai bình thường (`setup`, `deploy`, `restart`, `reset`) **không** 
   (ví dụ máy giám sát lấy metrics). Raft và Forward là kênh nội bộ giữa các node, không nên mở ra toàn mạng.
 
 Ví dụ thêm máy giám sát: `-e '{"ufw_extra_sources":["10.0.0.5"]}'`.
+
+## Khôi phục account registry của Parent Chain sau khi mất dữ liệu
+
+1. Dựng danh sách ví từ execution chain (chỉ đọc):
+   ```bash
+   cd execution
+   go run ./cmd/tool/sync_accounts_to_parent \
+     -rpc http://<pri-node>:8750 -parent http://<parent-node>:28601 \
+     [-wallets wallets.txt] -out registry_seed.json
+   ```
+   Xem `registry_seed.json.report.json` trước khi dùng (exit code 2 = thiếu block hoặc lỗi RPC).
+2. Reset Parent Chain với registry đó trong genesis (block 1):
+   ```bash
+   ./deploy_clusters.sh --reset --parent-only -e parent_account_registry_file=/abs/path/registry_seed.json
+   ```

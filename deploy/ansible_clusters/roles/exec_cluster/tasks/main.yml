@@ -174,22 +174,57 @@
       when: deploy_action == 'rollback'
 
 # ── Clean / Reset Data ───────────────────────────────────────────────────────
-- name: Clean Execution Node {{ inventory_hostname }} data directories
+# Data is moved to {{ install_dir }}/backups/<host>_<timestamp>/ (never deleted directly).
+# Retention policy: keeps at most 1 latest backup per host; older backups and any backup older than 7 days are pruned automatically.
+- name: Back up Execution Node {{ inventory_hostname }} data directories (move, auto-prune to 1 backup, max 7 days)
   when: "deploy_action in ['clean', 'reset']"
   block:
-    - name: Remove cluster database, raft WAL, and snapshot folders
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - "{{ node_data_dir }}/data"
-        - "{{ node_data_dir }}/snapshot"
-        - "{{ node_data_dir }}/logs"
-        - "{{ node_data_dir }}/explorer"
-        - "{{ node_data_dir }}/explorer-ro"
-        - "{{ node_data_dir }}/raft"
-        - "{{ node_data_dir }}/backup"
-        - "{{ node_data_dir }}/genesis.json"
+    - name: Compute backup directory
+      ansible.builtin.set_fact:
+        data_backup_dir: "{{ install_dir | default('/opt/metanode') }}/backups/{{ inventory_hostname }}_{{ data_backup_ts | default(lookup('pipe', 'date +%Y%m%d_%H%M%S')) }}"
+
+    - name: Move cluster database, raft WAL, and snapshot folders to the backup directory
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          dest="{{ data_backup_dir }}"
+          mkdir -p "$dest"
+          moved=0
+          for p in \
+            "{{ node_data_dir }}/data" \
+            "{{ node_data_dir }}/snapshot" \
+            "{{ node_data_dir }}/logs" \
+            "{{ node_data_dir }}/explorer" \
+            "{{ node_data_dir }}/explorer-ro" \
+            "{{ node_data_dir }}/raft" \
+            "{{ node_data_dir }}/backup" \
+            "{{ node_data_dir }}/genesis.json"; do
+            if [ -e "$p" ] || [ -L "$p" ]; then
+              mv "$p" "$dest/"
+              moved=$((moved + 1))
+            fi
+          done
+          if [ "$moved" -eq 0 ]; then rmdir "$dest"; fi
+          echo "moved=$moved dest=$dest"
+      register: exec_data_backup
+      changed_when: "'moved=0 ' not in exec_data_backup.stdout"
+
+    - name: Show where the Execution Node data was backed up
+      ansible.builtin.debug:
+        msg: "{{ exec_data_backup.stdout }}"
+
+    - name: Prune old Execution Node backups (keep at most 1, remove older than 7 days)
+      ansible.builtin.shell:
+        cmd: |
+          backup_base="{{ install_dir | default('/opt/metanode') }}/backups"
+          if [ -d "$backup_base" ]; then
+            # 1. Remove backups older than 7 days
+            find "$backup_base" -maxdepth 1 -name "{{ inventory_hostname }}_*" -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+
+            # 2. Keep only the latest 1 backup for this host, remove older ones
+            ls -dt "$backup_base"/{{ inventory_hostname }}_* 2>/dev/null | tail -n +2 | xargs -r rm -rf 2>/dev/null || true
+          fi
+      changed_when: false
 
     - name: Remove temporary integrity sentinel
       ansible.builtin.file:
