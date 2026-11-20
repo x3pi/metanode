@@ -240,6 +240,11 @@ func DecodeRegisterAccountCallData(data []byte) (userAddress common.Address, flo
 // MaxRegisterAccountsBatch bounds the work one batch transaction can make a Parent Chain block do.
 const MaxRegisterAccountsBatch = 64
 
+// MaxBlockCheckpointsBatch bounds the number of block checkpoints that can be anchored in one transaction.
+const MaxBlockCheckpointsBatch = 64
+
+const BlockCheckpointDomainTag = "MTN_BLOCK_CHECKPOINTS_V1"
+
 // RegisterAccountEntry is one registration inside a RegisterAccountsBatch transaction.
 type RegisterAccountEntry struct {
 	UserAddress      common.Address
@@ -320,6 +325,63 @@ func DecodeSubmitStateRootCallData(data []byte) (clusterPubKey cm.PublicKey, epo
 	}
 	copy(clusterPubKey[:], args.ClusterKey)
 	return clusterPubKey, args.Epoch, common.BytesToHash(args.StateRoot), cm.SignFromBytes(args.Cert), nil
+}
+
+func ComputeBlockCheckpointsMessage(clusterKey cm.PublicKey, checkpoints []*pb.BlockCheckpoint) []byte {
+	totalLen := len(BlockCheckpointDomainTag) + 48 + 4 + len(checkpoints)*72
+	buf := make([]byte, totalLen)
+	offset := 0
+	copy(buf[offset:], BlockCheckpointDomainTag)
+	offset += len(BlockCheckpointDomainTag)
+	copy(buf[offset:], clusterKey[:])
+	offset += 48
+	binary.BigEndian.PutUint32(buf[offset:], uint32(len(checkpoints)))
+	offset += 4
+	for _, cp := range checkpoints {
+		binary.BigEndian.PutUint64(buf[offset:], cp.BlockNumber)
+		offset += 8
+		copy(buf[offset:], cp.BlockHash)
+		offset += 32
+		copy(buf[offset:], cp.StateRoot)
+		offset += 32
+	}
+	return buf
+}
+
+func EncodeSubmitBlockCheckpointsCallData(clusterPubKey cm.PublicKey, checkpoints []*pb.BlockCheckpoint, cert cm.Sign) []byte {
+	cd := &pb.ParentChainCallData{
+		Method: pb.ParentChainMethod_METHOD_SUBMIT_BLOCK_CHECKPOINTS,
+		Args: &pb.ParentChainCallData_SubmitBlockCheckpoints{
+			SubmitBlockCheckpoints: &pb.SubmitBlockCheckpointsArgs{
+				ClusterKey:  clusterPubKey[:],
+				Checkpoints: checkpoints,
+				Cert:        cert.Bytes(),
+			},
+		},
+	}
+	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(cd)
+	return b
+}
+
+func DecodeSubmitBlockCheckpointsCallData(data []byte) (clusterPubKey cm.PublicKey, checkpoints []*pb.BlockCheckpoint, cert cm.Sign, err error) {
+	var cd pb.ParentChainCallData
+	if err := proto.Unmarshal(data, &cd); err != nil {
+		return clusterPubKey, nil, cert, ErrMalformedCallData
+	}
+	args := cd.GetSubmitBlockCheckpoints()
+	if args == nil || len(args.ClusterKey) != 48 || len(args.Cert) != 96 {
+		return clusterPubKey, nil, cert, ErrMalformedCallData
+	}
+	if len(args.Checkpoints) == 0 || len(args.Checkpoints) > MaxBlockCheckpointsBatch {
+		return clusterPubKey, nil, cert, ErrMalformedCallData
+	}
+	for _, cp := range args.Checkpoints {
+		if cp == nil || cp.BlockNumber == 0 || len(cp.BlockHash) != 32 || len(cp.StateRoot) != 32 {
+			return clusterPubKey, nil, cert, ErrMalformedCallData
+		}
+	}
+	copy(clusterPubKey[:], args.ClusterKey)
+	return clusterPubKey, args.Checkpoints, cm.SignFromBytes(args.Cert), nil
 }
 
 func EncodeRegisterClusterCallData(clusterPubKey cm.PublicKey, clusterID uint64) []byte {
@@ -725,6 +787,24 @@ func dispatchTxMethod(store Store, tx *pb.Transaction, senderKey cm.PublicKey, t
 		subDigest := ComputeSubmitStateRootMessage(clusterPubKey, epoch, stateRoot)
 		events = append(events, crypto.Keccak256(append(subDigest, cert.Bytes()...)))
 		events = append(events, stateRoot.Bytes())
+
+	case pb.ParentChainMethod_METHOD_SUBMIT_BLOCK_CHECKPOINTS:
+		clusterPubKey, checkpoints, cert, err := DecodeSubmitBlockCheckpointsCallData(tx.Data)
+		if err != nil {
+			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 228}, err
+		}
+		if senderKey != clusterPubKey {
+			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 229}, ErrUnauthorizedSender
+		}
+		if err := SubmitBlockCheckpoints(store, clusterPubKey, checkpoints, cert); err != nil {
+			return &Receipt{TxHash: txHash, Status: 0, ErrorCode: 230}, err
+		}
+		msg := ComputeBlockCheckpointsMessage(clusterPubKey, checkpoints)
+		events = append(events, crypto.Keccak256(append(msg, cert.Bytes()...)))
+		firstLast := make([]byte, 16)
+		binary.BigEndian.PutUint64(firstLast[:8], checkpoints[0].BlockNumber)
+		binary.BigEndian.PutUint64(firstLast[8:], checkpoints[len(checkpoints)-1].BlockNumber)
+		events = append(events, firstLast)
 
 	case pb.ParentChainMethod_METHOD_REGISTER_CLUSTER:
 		clusterPubKey, clusterID, err := DecodeRegisterClusterCallData(tx.Data)

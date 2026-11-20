@@ -235,6 +235,14 @@ func IsLeader() bool {
 	return false
 }
 
+// AttestedBlock reports the highest block number whose header hash has been confirmed by a majority of replicas.
+func AttestedBlock() uint64 {
+	if n := cluster.Load(); n != nil {
+		return n.LastAttested()
+	}
+	return 0
+}
+
 // Role reports the current node role in Raft mode: "leader", "follower", "candidate", etc.
 func Role() string {
 	if n := cluster.Load(); n != nil {

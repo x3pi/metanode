@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
 var (
@@ -25,6 +26,8 @@ var (
 	ErrFloatWrongNonce          = errors.New("float account: wrong nonce")
 	ErrInvalidSignature         = errors.New("float account: invalid signature")
 	ErrAccountAlreadyRegistered = errors.New("float account: account already registered")
+	ErrCheckpointConflict       = errors.New("parentchain: block checkpoint conflict")
+	ErrCheckpointBatchInvalid   = errors.New("parentchain: invalid checkpoint batch")
 )
 
 var (
@@ -690,4 +693,96 @@ func SubmitStateRoot(store Store, clusterPubKey cm.PublicKey, epoch uint64, stat
 	}
 
 	return store.SetStateRoot(clusterHash, epoch, stateRoot)
+}
+
+// SubmitBlockCheckpoints applies a batch of block checkpoints for a cluster following idempotent rules.
+func SubmitBlockCheckpoints(store Store, clusterPubKey cm.PublicKey, checkpoints []*pb.BlockCheckpoint, cert cm.Sign) error {
+	clusterHash := crypto.Keccak256Hash(clusterPubKey[:])
+
+	// 1. Cluster authorization check
+	entry, found, err := store.GetChainRegistry(clusterHash)
+	if err != nil {
+		return err
+	}
+	if !found || !entry.Authorized {
+		return fmt.Errorf("SubmitBlockCheckpoints: unknown cluster")
+	}
+
+	// 2. Batch bounds check
+	if len(checkpoints) == 0 || len(checkpoints) > MaxBlockCheckpointsBatch {
+		return fmt.Errorf("%w: batch size %d out of range [1, %d]", ErrCheckpointBatchInvalid, len(checkpoints), MaxBlockCheckpointsBatch)
+	}
+
+	// 3. Validate entries: strictly increasing block_number > 0, hash & root 32 bytes
+	var prevBlock uint64
+	for i, cp := range checkpoints {
+		if cp == nil {
+			return fmt.Errorf("%w: nil checkpoint at index %d", ErrCheckpointBatchInvalid, i)
+		}
+		if cp.BlockNumber == 0 {
+			return fmt.Errorf("%w: block_number must be > 0 at index %d", ErrCheckpointBatchInvalid, i)
+		}
+		if i > 0 && cp.BlockNumber <= prevBlock {
+			return fmt.Errorf("%w: block_number not strictly increasing (%d <= %d) at index %d", ErrCheckpointBatchInvalid, cp.BlockNumber, prevBlock, i)
+		}
+		if len(cp.BlockHash) != 32 {
+			return fmt.Errorf("%w: invalid block_hash length %d at index %d", ErrCheckpointBatchInvalid, len(cp.BlockHash), i)
+		}
+		if len(cp.StateRoot) != 32 {
+			return fmt.Errorf("%w: invalid state_root length %d at index %d", ErrCheckpointBatchInvalid, len(cp.StateRoot), i)
+		}
+		prevBlock = cp.BlockNumber
+	}
+
+	// 4. Verify BLS cert
+	msg := ComputeBlockCheckpointsMessage(clusterPubKey, checkpoints)
+	if !bls.VerifySign(clusterPubKey, cert, msg) {
+		return fmt.Errorf("SubmitBlockCheckpoints: %w", ErrInvalidSignature)
+	}
+
+	// 5. Read latest checkpoint from store
+	latestBlock, _, _, latestFound, err := store.GetLatestBlockCheckpoint(clusterHash)
+	if err != nil {
+		return err
+	}
+
+	newLatestBlock := latestBlock
+	var newLatestHash, newLatestRoot common.Hash
+	advanced := false
+
+	for _, cp := range checkpoints {
+		cpHash := common.BytesToHash(cp.BlockHash)
+		cpRoot := common.BytesToHash(cp.StateRoot)
+
+		if latestFound && cp.BlockNumber <= latestBlock {
+			// Check existing entry
+			exHash, exRoot, exFound, err := store.GetBlockCheckpoint(clusterHash, cp.BlockNumber)
+			if err != nil {
+				return err
+			}
+			if !exFound || exHash != cpHash || exRoot != cpRoot {
+				// Fork detected or gap before bootstrap point
+				return fmt.Errorf("%w: block %d differs from parent store (found=%v)", ErrCheckpointConflict, cp.BlockNumber, exFound)
+			}
+			// Idempotent duplicate: exact match, skip
+			continue
+		}
+
+		// New checkpoint (either cp.BlockNumber > latestBlock or !latestFound)
+		if err := store.SetBlockCheckpoint(clusterHash, cp.BlockNumber, cpHash, cpRoot); err != nil {
+			return err
+		}
+		newLatestBlock = cp.BlockNumber
+		newLatestHash = cpHash
+		newLatestRoot = cpRoot
+		advanced = true
+	}
+
+	if advanced {
+		if err := store.SetLatestBlockCheckpoint(clusterHash, newLatestBlock, newLatestHash, newLatestRoot); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

@@ -160,6 +160,12 @@ func (n *Node) attestOnce(num uint64) bool {
 			n.fatal(fmt.Errorf("block %d hash %s differs from the value %s held by %d of %d replicas: this replica executed a different state", num, mine.Hex(), h, c, len(voters)))
 		}
 		n.attested.Add(1)
+		for {
+			cur := n.lastAttested.Load()
+			if num <= cur || n.lastAttested.CompareAndSwap(cur, num) {
+				break
+			}
+		}
 		logger.Info("✅ [RAFT-ATTEST] block %d hash %s matches the majority (%d of %d replicas)", num, h[:12], c, len(voters))
 		return true
 	}

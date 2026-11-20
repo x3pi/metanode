@@ -52,4 +52,15 @@ type RaftConfig struct {
 	// SequencerAddress is the fixed leader_address stamped in every block on every replica (so block hashes do not
 	// depend on which node is the Raft leader). 20-byte hex.
 	SequencerAddress string `json:"sequencer_address"`
+
+	// CheckpointIntervalBlocks configures how often Raft checkpoints are anchored to Parent Chain (default 100, 0 disables).
+	CheckpointIntervalBlocks *uint64 `json:"checkpoint_interval_blocks,omitempty"`
+}
+
+// GetCheckpointIntervalBlocks returns the configured checkpoint interval in blocks, defaulting to 100 if omitted.
+func (r *RaftConfig) GetCheckpointIntervalBlocks() uint64 {
+	if r == nil || r.CheckpointIntervalBlocks == nil {
+		return 100
+	}
+	return *r.CheckpointIntervalBlocks
 }

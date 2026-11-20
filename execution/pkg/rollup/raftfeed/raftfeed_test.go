@@ -325,10 +325,20 @@ func TestRaftFeed_LeaderTelemetry_Defaults(t *testing.T) {
 	if lid := LeaderID(); lid != "" {
 		t.Errorf("LeaderID() = %q, want empty when disabled", lid)
 	}
+	if ab := AttestedBlock(); ab != 0 {
+		t.Errorf("AttestedBlock() = %d, want 0 when disabled", ab)
+	}
 
 	n := &Node{}
 	if n.IsLeader() {
 		t.Errorf("Node.IsLeader() = true, want false with nil raft")
+	}
+	if n.LastAttested() != 0 {
+		t.Errorf("Node.LastAttested() = %d, want 0 initially", n.LastAttested())
+	}
+	n.lastAttested.Store(100)
+	if n.LastAttested() != 100 {
+		t.Errorf("Node.LastAttested() = %d, want 100", n.LastAttested())
 	}
 	if state := n.State(); state != "unknown" {
 		t.Errorf("Node.State() = %q, want %q with nil raft", state, "unknown")

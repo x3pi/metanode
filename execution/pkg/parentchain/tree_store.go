@@ -479,3 +479,43 @@ func (s *TreeStore) SetNonce(sender common.Address, nonce uint64) error {
 	k := TreeKey(NamespaceSenderNonce, sender.Bytes())
 	return s.kv.Put(k, EncodeUint64(nonce))
 }
+
+func (s *TreeStore) GetBlockCheckpoint(clusterKeyHash common.Hash, blockNumber uint64) (common.Hash, common.Hash, bool, error) {
+	bKey := append(clusterKeyHash.Bytes(), EncodeUint64(blockNumber)...)
+	k := TreeKey(NamespaceBlockCheckpoint, bKey)
+	data, found, err := s.kv.Get(k)
+	if err != nil || !found {
+		return common.Hash{}, common.Hash{}, false, err
+	}
+	hash, stateRoot, err := DecodeBlockCheckpointValue(data)
+	if err != nil {
+		return common.Hash{}, common.Hash{}, false, err
+	}
+	return hash, stateRoot, true, nil
+}
+
+func (s *TreeStore) SetBlockCheckpoint(clusterKeyHash common.Hash, blockNumber uint64, hash, stateRoot common.Hash) error {
+	bKey := append(clusterKeyHash.Bytes(), EncodeUint64(blockNumber)...)
+	k := TreeKey(NamespaceBlockCheckpoint, bKey)
+	val := EncodeBlockCheckpointValue(hash, stateRoot)
+	return s.kv.Put(k, val)
+}
+
+func (s *TreeStore) GetLatestBlockCheckpoint(clusterKeyHash common.Hash) (uint64, common.Hash, common.Hash, bool, error) {
+	k := TreeKey(NamespaceBlockCheckpointLatest, clusterKeyHash.Bytes())
+	data, found, err := s.kv.Get(k)
+	if err != nil || !found {
+		return 0, common.Hash{}, common.Hash{}, false, err
+	}
+	blockNumber, hash, stateRoot, err := DecodeBlockCheckpointLatestValue(data)
+	if err != nil {
+		return 0, common.Hash{}, common.Hash{}, false, err
+	}
+	return blockNumber, hash, stateRoot, true, nil
+}
+
+func (s *TreeStore) SetLatestBlockCheckpoint(clusterKeyHash common.Hash, blockNumber uint64, hash, stateRoot common.Hash) error {
+	k := TreeKey(NamespaceBlockCheckpointLatest, clusterKeyHash.Bytes())
+	val := EncodeBlockCheckpointLatestValue(blockNumber, hash, stateRoot)
+	return s.kv.Put(k, val)
+}
