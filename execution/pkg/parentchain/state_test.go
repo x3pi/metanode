@@ -10,6 +10,9 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func generateBLSKey() (cm.PrivateKey, cm.PublicKey) {
@@ -351,6 +354,132 @@ func TestParentChainState(t *testing.T) {
 		if err == nil || !errors.Is(err, ErrInvalidSignature) {
 			t.Errorf("Expected ErrInvalidSignature, got %v", err)
 		}
+	})
+
+	t.Run("SubmitBlockCheckpoints comprehensive tests", func(t *testing.T) {
+		priv, pub := generateBLSKey()
+		hash := crypto.Keccak256Hash(pub[:])
+		_ = registerAuthorizedCluster(store, hash, pub, 202)
+
+		h100 := common.HexToHash("0x100")
+		r100 := common.HexToHash("0xa100")
+		h200 := common.HexToHash("0x200")
+		r200 := common.HexToHash("0xa200")
+
+		// 1. Bootstrap: Submit batch [100, 200]
+		batch1 := []*pb.BlockCheckpoint{
+			{BlockNumber: 100, BlockHash: h100.Bytes(), StateRoot: r100.Bytes()},
+			{BlockNumber: 200, BlockHash: h200.Bytes(), StateRoot: r200.Bytes()},
+		}
+		msg1 := ComputeBlockCheckpointsMessage(pub, batch1)
+		cert1 := bls.Sign(priv, msg1)
+		err := SubmitBlockCheckpoints(store, pub, batch1, cert1)
+		require.NoError(t, err)
+
+		// Verify stored entries
+		latestBlock, latestHash, latestRoot, found, err := store.GetLatestBlockCheckpoint(hash)
+		require.NoError(t, err)
+		assert.True(t, found)
+		assert.Equal(t, uint64(200), latestBlock)
+		assert.Equal(t, h200, latestHash)
+		assert.Equal(t, r200, latestRoot)
+
+		savedH100, savedR100, found100, err := store.GetBlockCheckpoint(hash, 100)
+		require.NoError(t, err)
+		assert.True(t, found100)
+		assert.Equal(t, h100, savedH100)
+		assert.Equal(t, r100, savedR100)
+
+		// 2. Idempotent re-submission (identical batch) -> status success, no state change
+		err = SubmitBlockCheckpoints(store, pub, batch1, cert1)
+		assert.NoError(t, err, "identical batch re-submission must be idempotent and return nil")
+
+		// 3. Append: Batch [200, 300] (200 is idempotent duplicate, 300 is new)
+		h300 := common.HexToHash("0x300")
+		r300 := common.HexToHash("0xa300")
+		batch2 := []*pb.BlockCheckpoint{
+			{BlockNumber: 200, BlockHash: h200.Bytes(), StateRoot: r200.Bytes()},
+			{BlockNumber: 300, BlockHash: h300.Bytes(), StateRoot: r300.Bytes()},
+		}
+		msg2 := ComputeBlockCheckpointsMessage(pub, batch2)
+		cert2 := bls.Sign(priv, msg2)
+		err = SubmitBlockCheckpoints(store, pub, batch2, cert2)
+		require.NoError(t, err)
+
+		latestBlock, latestHash, _, found, _ = store.GetLatestBlockCheckpoint(hash)
+		assert.True(t, found)
+		assert.Equal(t, uint64(300), latestBlock)
+		assert.Equal(t, h300, latestHash)
+
+		// 4. Conflict: Conflicting hash at block 100 -> ErrCheckpointConflict
+		badH100 := common.HexToHash("0xbad100")
+		conflictBatch := []*pb.BlockCheckpoint{
+			{BlockNumber: 100, BlockHash: badH100.Bytes(), StateRoot: r100.Bytes()},
+		}
+		msgConflict := ComputeBlockCheckpointsMessage(pub, conflictBatch)
+		certConflict := bls.Sign(priv, msgConflict)
+		err = SubmitBlockCheckpoints(store, pub, conflictBatch, certConflict)
+		assert.ErrorIs(t, err, ErrCheckpointConflict)
+
+		// 5. Conflict: Missing block prior to bootstrap (e.g. block 50) -> ErrCheckpointConflict
+		gapBatch := []*pb.BlockCheckpoint{
+			{BlockNumber: 50, BlockHash: h100.Bytes(), StateRoot: r100.Bytes()},
+		}
+		msgGap := ComputeBlockCheckpointsMessage(pub, gapBatch)
+		certGap := bls.Sign(priv, msgGap)
+		err = SubmitBlockCheckpoints(store, pub, gapBatch, certGap)
+		assert.ErrorIs(t, err, ErrCheckpointConflict)
+
+		// 6. Invalid batch: Empty batch
+		err = SubmitBlockCheckpoints(store, pub, []*pb.BlockCheckpoint{}, cert1)
+		assert.ErrorIs(t, err, ErrCheckpointBatchInvalid)
+
+		// 7. Invalid batch: > 64 elements
+		oversized := make([]*pb.BlockCheckpoint, 65)
+		for i := 0; i < 65; i++ {
+			oversized[i] = &pb.BlockCheckpoint{
+				BlockNumber: uint64(400 + i*10),
+				BlockHash:   h100.Bytes(),
+				StateRoot:   r100.Bytes(),
+			}
+		}
+		msgOver := ComputeBlockCheckpointsMessage(pub, oversized)
+		certOver := bls.Sign(priv, msgOver)
+		err = SubmitBlockCheckpoints(store, pub, oversized, certOver)
+		assert.ErrorIs(t, err, ErrCheckpointBatchInvalid)
+
+		// 8. Invalid batch: Non-strictly increasing (equal or decreasing numbers)
+		nonIncreasing := []*pb.BlockCheckpoint{
+			{BlockNumber: 400, BlockHash: h100.Bytes(), StateRoot: r100.Bytes()},
+			{BlockNumber: 400, BlockHash: h200.Bytes(), StateRoot: r200.Bytes()},
+		}
+		msgNI := ComputeBlockCheckpointsMessage(pub, nonIncreasing)
+		certNI := bls.Sign(priv, msgNI)
+		err = SubmitBlockCheckpoints(store, pub, nonIncreasing, certNI)
+		assert.ErrorIs(t, err, ErrCheckpointBatchInvalid)
+
+		// 9. Invalid batch: block_number == 0
+		zeroBlock := []*pb.BlockCheckpoint{
+			{BlockNumber: 0, BlockHash: h100.Bytes(), StateRoot: r100.Bytes()},
+		}
+		msgZero := ComputeBlockCheckpointsMessage(pub, zeroBlock)
+		certZero := bls.Sign(priv, msgZero)
+		err = SubmitBlockCheckpoints(store, pub, zeroBlock, certZero)
+		assert.ErrorIs(t, err, ErrCheckpointBatchInvalid)
+
+		// 10. Wrong signature
+		privWrong, _ := generateBLSKey()
+		certWrong := bls.Sign(privWrong, msg2)
+		err = SubmitBlockCheckpoints(store, pub, batch2, certWrong)
+		assert.ErrorIs(t, err, ErrInvalidSignature)
+
+		// 11. Unauthorized cluster
+		_, unauthPub := generateBLSKey()
+		unauthPriv, _ := generateBLSKey()
+		certUnauth := bls.Sign(unauthPriv, msg1)
+		err = SubmitBlockCheckpoints(store, unauthPub, batch1, certUnauth)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown cluster")
 	})
 }
 

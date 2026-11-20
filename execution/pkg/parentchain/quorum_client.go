@@ -479,6 +479,24 @@ func (q *QuorumClient) SendSubmitStateRoot(clusterPubKey cm.PublicKey, epoch uin
 	return q.sendRawTxFailover(tx)
 }
 
+func (q *QuorumClient) SendSubmitBlockCheckpoints(clusterPubKey cm.PublicKey, checkpoints []*pb.BlockCheckpoint, cert cm.Sign) (common.Hash, error) {
+	if q.privKey == (cm.PrivateKey{}) {
+		return common.Hash{}, errors.New("cannot SendSubmitBlockCheckpoints: private key not configured")
+	}
+	nonce, err := q.getNextNonce()
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	callData := EncodeSubmitBlockCheckpointsCallData(clusterPubKey, checkpoints, cert)
+	tx, err := BuildAndSignBLSTx(q.privKey, q.pubKey, ParentChainGatewayAddress, nonce, callData)
+	if err != nil {
+		q.ResetNonce()
+		return common.Hash{}, err
+	}
+	return q.sendRawTxFailover(tx)
+}
+
 // ─── QUORUM READ QUERIES (VERIFIED ACROSS NODES) ────────────────────────────
 
 func (q *QuorumClient) GetStatus() (ChainStatus, error) {
@@ -925,4 +943,96 @@ func (q *QuorumClient) GetStateRoot(clusterPubKey cm.PublicKey, epoch uint64) (c
 		return common.Hash{}, false, fmt.Errorf("%w: state root quorum not reached for epoch %d: %v", ErrQuorumNotReached, epoch, lastErr)
 	}
 	return common.Hash{}, false, fmt.Errorf("%w: state root quorum not reached for epoch %d", ErrQuorumNotReached, epoch)
+}
+
+func (q *QuorumClient) GetBlockCheckpoint(clusterPubKey cm.PublicKey, blockNumber uint64) (common.Hash, common.Hash, bool, error) {
+	if len(q.clients) == 0 {
+		return common.Hash{}, common.Hash{}, false, ErrNoNodesConfigured
+	}
+	type cpItem struct {
+		hash      common.Hash
+		stateRoot common.Hash
+		found     bool
+		err       error
+	}
+	ch := make(chan cpItem, len(q.clients))
+	for _, c := range q.clients {
+		go func(cl *httpClient) {
+			h, r, f, err := cl.GetBlockCheckpoint(clusterPubKey, blockNumber)
+			ch <- cpItem{hash: h, stateRoot: r, found: f, err: err}
+		}(c)
+	}
+
+	type cpKey struct {
+		found     bool
+		hash      common.Hash
+		stateRoot common.Hash
+	}
+	counts := make(map[cpKey]int)
+	threshold := q.strongQuorumThreshold()
+	var lastErr error
+
+	for i := 0; i < len(q.clients); i++ {
+		item := <-ch
+		if item.err != nil {
+			lastErr = item.err
+			continue
+		}
+		k := cpKey{found: item.found, hash: item.hash, stateRoot: item.stateRoot}
+		counts[k]++
+		if counts[k] >= threshold {
+			return item.hash, item.stateRoot, item.found, nil
+		}
+	}
+	if lastErr != nil {
+		return common.Hash{}, common.Hash{}, false, fmt.Errorf("%w: block checkpoint quorum not reached for block %d: %v", ErrQuorumNotReached, blockNumber, lastErr)
+	}
+	return common.Hash{}, common.Hash{}, false, fmt.Errorf("%w: block checkpoint quorum not reached for block %d", ErrQuorumNotReached, blockNumber)
+}
+
+func (q *QuorumClient) GetLatestBlockCheckpoint(clusterPubKey cm.PublicKey) (uint64, common.Hash, common.Hash, bool, error) {
+	if len(q.clients) == 0 {
+		return 0, common.Hash{}, common.Hash{}, false, ErrNoNodesConfigured
+	}
+	type latestItem struct {
+		blockNumber uint64
+		hash        common.Hash
+		stateRoot   common.Hash
+		found       bool
+		err         error
+	}
+	ch := make(chan latestItem, len(q.clients))
+	for _, c := range q.clients {
+		go func(cl *httpClient) {
+			bn, h, r, f, err := cl.GetLatestBlockCheckpoint(clusterPubKey)
+			ch <- latestItem{blockNumber: bn, hash: h, stateRoot: r, found: f, err: err}
+		}(c)
+	}
+
+	type latestKey struct {
+		found       bool
+		blockNumber uint64
+		hash        common.Hash
+		stateRoot   common.Hash
+	}
+	counts := make(map[latestKey]int)
+	threshold := q.strongQuorumThreshold()
+	var lastErr error
+
+	for i := 0; i < len(q.clients); i++ {
+		item := <-ch
+		if item.err != nil {
+			lastErr = item.err
+			continue
+		}
+		k := latestKey{found: item.found, blockNumber: item.blockNumber, hash: item.hash, stateRoot: item.stateRoot}
+		counts[k]++
+		if counts[k] >= threshold {
+			return item.blockNumber, item.hash, item.stateRoot, item.found, nil
+		}
+	}
+	if lastErr != nil {
+		return 0, common.Hash{}, common.Hash{}, false, fmt.Errorf("%w: latest block checkpoint quorum not reached: %v", ErrQuorumNotReached, lastErr)
+	}
+	return 0, common.Hash{}, common.Hash{}, false, fmt.Errorf("%w: latest block checkpoint quorum not reached", ErrQuorumNotReached)
 }

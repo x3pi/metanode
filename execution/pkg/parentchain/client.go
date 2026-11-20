@@ -5,6 +5,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
 // TransferEvent represents an observed incoming transfer on the Parent Chain.
@@ -59,6 +60,10 @@ type Client interface {
 
 	SendSubmitStateRoot(clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash, cert cm.Sign) (common.Hash, error)
 	GetStateRoot(clusterPubKey cm.PublicKey, epoch uint64) (common.Hash, bool, error)
+
+	SendSubmitBlockCheckpoints(clusterPubKey cm.PublicKey, checkpoints []*pb.BlockCheckpoint, cert cm.Sign) (common.Hash, error)
+	GetBlockCheckpoint(clusterPubKey cm.PublicKey, blockNumber uint64) (common.Hash, common.Hash, bool, error)
+	GetLatestBlockCheckpoint(clusterPubKey cm.PublicKey) (uint64, common.Hash, common.Hash, bool, error)
 
 	GetBlockByNumber(number uint64) (BlockRecord, bool, error)
 	GetBlockByHash(hash common.Hash) (BlockRecord, bool, error)

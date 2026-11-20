@@ -15,6 +15,7 @@ enum ParentChainMethod {
   METHOD_REGISTER_CLUSTER = 7;
   METHOD_TRANSFER_BALANCE = 8;
   METHOD_REGISTER_ACCOUNTS_BATCH = 9;
+  METHOD_SUBMIT_BLOCK_CHECKPOINTS = 10;
 }
 
 message DepositToFloatArgs {
@@ -85,6 +86,18 @@ message RegisterClusterArgs {
   bytes cert = 4;             // 96 bytes BLS signature cert
 }
 
+message BlockCheckpoint {
+  uint64 block_number = 1;    // checkpoint block number (multiple of interval)
+  bytes block_hash = 2;       // 32 bytes block header hash
+  bytes state_root = 3;       // 32 bytes account states root
+}
+
+message SubmitBlockCheckpointsArgs {
+  bytes cluster_key = 1;                    // 48 bytes BLS public key of cluster
+  repeated BlockCheckpoint checkpoints = 2; // 1..64 checkpoints, strictly increasing
+  bytes cert = 3;                           // 96 bytes BLS signature cert over batch message
+}
+
 message ParentChainCallData {
   ParentChainMethod method = 1;
   oneof args {
@@ -97,6 +110,7 @@ message ParentChainCallData {
     RegisterClusterArgs register_cluster = 8;
     TransferBalanceArgs transfer_balance = 9;
     RegisterAccountsBatchArgs register_accounts_batch = 10;
+    SubmitBlockCheckpointsArgs submit_block_checkpoints = 11;
   }
 }
 

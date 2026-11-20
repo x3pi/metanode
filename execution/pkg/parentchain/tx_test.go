@@ -1,6 +1,7 @@
 package parentchain
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"math/big"
@@ -431,4 +432,67 @@ func TestDeposit_AlwaysRequiresRegisteredCertifyingSource(t *testing.T) {
 	// (4) the legitimate deposit works.
 	err = DepositToFloat(store, pub, pub, 101, common.Address{}, common.Address{}, amount, msgID, bls.Sign(priv, digest), 1)
 	assert.NoError(t, err)
+}
+
+func TestTx_SubmitBlockCheckpoints_ExecuteTx(t *testing.T) {
+	store := NewMemoryStore()
+	priv, pub, _ := setupCluster(t, store, 101)
+	clusterHash := crypto.Keccak256Hash(pub[:])
+
+	h100 := common.HexToHash("0x100")
+	r100 := common.HexToHash("0xa100")
+	h200 := common.HexToHash("0x200")
+	r200 := common.HexToHash("0xa200")
+
+	batch := []*pb.BlockCheckpoint{
+		{BlockNumber: 100, BlockHash: h100.Bytes(), StateRoot: r100.Bytes()},
+		{BlockNumber: 200, BlockHash: h200.Bytes(), StateRoot: r200.Bytes()},
+	}
+
+	msg := ComputeBlockCheckpointsMessage(pub, batch)
+	cert := bls.Sign(priv, msg)
+	callData := EncodeSubmitBlockCheckpointsCallData(pub, batch, cert)
+
+	tx, err := BuildAndSignBLSTx(priv, pub, ParentChainGatewayAddress, 0, callData)
+	require.NoError(t, err)
+
+	rcpt, err := ExecuteTx(store, tx, 1000)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(1), rcpt.Status)
+	assert.Equal(t, uint32(0), rcpt.ErrorCode)
+	require.Len(t, rcpt.Events, 2)
+
+	// Event 0: keccak256(msg || cert)
+	expectedEvent0 := crypto.Keccak256(append(msg, cert.Bytes()...))
+	assert.Equal(t, expectedEvent0, rcpt.Events[0])
+
+	// Event 1: be64(100) || be64(200)
+	expectedEvent1 := make([]byte, 16)
+	binary.BigEndian.PutUint64(expectedEvent1[:8], 100)
+	binary.BigEndian.PutUint64(expectedEvent1[8:], 200)
+	assert.Equal(t, expectedEvent1, rcpt.Events[1])
+
+	// Verify store state
+	latestBlock, latestHash, latestRoot, found, err := store.GetLatestBlockCheckpoint(clusterHash)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, uint64(200), latestBlock)
+	assert.Equal(t, h200, latestHash)
+	assert.Equal(t, r200, latestRoot)
+
+	// Idempotent duplicate re-submission via a new tx (nonce 1)
+	txDup, err := BuildAndSignBLSTx(priv, pub, ParentChainGatewayAddress, 1, callData)
+	require.NoError(t, err)
+	rcptDup, err := ExecuteTx(store, txDup, 1001)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(1), rcptDup.Status, "duplicate checkpoint batch must succeed with status 1")
+
+	// Unauthorized sender: cluster 102 tries to send checkpoints for cluster 101
+	priv102, pub102, _ := setupCluster(t, store, 102)
+	txUnauth, err := BuildAndSignBLSTx(priv102, pub102, ParentChainGatewayAddress, 0, callData)
+	require.NoError(t, err)
+	rcptUnauth, err := ExecuteTx(store, txUnauth, 1002)
+	assert.ErrorIs(t, err, ErrUnauthorizedSender)
+	assert.Equal(t, uint8(0), rcptUnauth.Status)
+	assert.Equal(t, uint32(229), rcptUnauth.ErrorCode)
 }

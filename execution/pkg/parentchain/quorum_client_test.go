@@ -638,6 +638,78 @@ func TestQuorumClient_GetStateRoot_Quorum(t *testing.T) {
 	})
 }
 
+func TestQuorumClient_GetLatestBlockCheckpoint_Quorum(t *testing.T) {
+	clusterKp := bls.GenerateKeyPair()
+	h200 := common.HexToHash("0x200")
+	r200 := common.HexToHash("0xa200")
+	lyingH := common.HexToHash("0xbad")
+	lyingR := common.HexToHash("0xdead")
+
+	createMockLatestServer := func(bn uint64, hash, root common.Hash, found bool) *httptest.Server {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/block_checkpoint_latest", func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"block_number": bn,
+				"block_hash":   hash,
+				"state_root":   root,
+				"found":        found,
+			})
+		})
+		return httptest.NewServer(mux)
+	}
+
+	t.Run("4 nodes, 3 agree, 1 lies -> strong quorum returned", func(t *testing.T) {
+		s0 := createMockLatestServer(200, h200, r200, true)
+		defer s0.Close()
+		s1 := createMockLatestServer(200, h200, r200, true)
+		defer s1.Close()
+		s2 := createMockLatestServer(200, h200, r200, true)
+		defer s2.Close()
+		s3 := createMockLatestServer(100, lyingH, lyingR, true)
+		defer s3.Close()
+
+		qc := NewQuorumClient([]string{s0.URL, s1.URL, s2.URL, s3.URL}, cm.PrivateKey{}, cm.PublicKey{})
+		gotBN, gotHash, gotRoot, found, err := qc.GetLatestBlockCheckpoint(clusterKp.PublicKey())
+		require.NoError(t, err)
+		assert.True(t, found)
+		assert.Equal(t, uint64(200), gotBN)
+		assert.Equal(t, h200, gotHash)
+		assert.Equal(t, r200, gotRoot)
+	})
+
+	t.Run("4 nodes, 3 agree not found -> bootstrap quorum returned", func(t *testing.T) {
+		s0 := createMockLatestServer(0, common.Hash{}, common.Hash{}, false)
+		defer s0.Close()
+		s1 := createMockLatestServer(0, common.Hash{}, common.Hash{}, false)
+		defer s1.Close()
+		s2 := createMockLatestServer(0, common.Hash{}, common.Hash{}, false)
+		defer s2.Close()
+		s3 := createMockLatestServer(200, h200, r200, true)
+		defer s3.Close()
+
+		qc := NewQuorumClient([]string{s0.URL, s1.URL, s2.URL, s3.URL}, cm.PrivateKey{}, cm.PublicKey{})
+		gotBN, _, _, found, err := qc.GetLatestBlockCheckpoint(clusterKp.PublicKey())
+		require.NoError(t, err)
+		assert.False(t, found)
+		assert.Equal(t, uint64(0), gotBN)
+	})
+
+	t.Run("4 nodes, split vote 2 vs 2 -> ErrQuorumNotReached", func(t *testing.T) {
+		s0 := createMockLatestServer(200, h200, r200, true)
+		defer s0.Close()
+		s1 := createMockLatestServer(200, h200, r200, true)
+		defer s1.Close()
+		s2 := createMockLatestServer(100, lyingH, lyingR, true)
+		defer s2.Close()
+		s3 := createMockLatestServer(100, lyingH, lyingR, true)
+		defer s3.Close()
+
+		qc := NewQuorumClient([]string{s0.URL, s1.URL, s2.URL, s3.URL}, cm.PrivateKey{}, cm.PublicKey{})
+		_, _, _, _, err := qc.GetLatestBlockCheckpoint(clusterKp.PublicKey())
+		assert.ErrorIs(t, err, ErrQuorumNotReached)
+	})
+}
+
 func TestQuorumClient_ThresholdFormulas(t *testing.T) {
 	testCases := []struct {
 		n              int

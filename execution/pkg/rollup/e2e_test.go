@@ -13,6 +13,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
 // InMemoryParentChain acts as the Parent Chain network for E2E testing.
@@ -22,6 +23,7 @@ type InMemoryParentChain struct {
 	transfers  map[uint64][]*parentchain.TransferEvent // destClusterID -> transfers
 	nodeKeys   map[uint64]*bls.KeyPair
 	accounts   map[common.Address]cm.PublicKey
+	receipts   map[common.Hash]*parentchain.Receipt
 	onTransfer func(destID uint64)
 }
 
@@ -31,6 +33,7 @@ func NewInMemoryParentChain() *InMemoryParentChain {
 		transfers: make(map[uint64][]*parentchain.TransferEvent),
 		nodeKeys:  make(map[uint64]*bls.KeyPair),
 		accounts:  make(map[common.Address]cm.PublicKey),
+		receipts:  make(map[common.Hash]*parentchain.Receipt),
 	}
 }
 
@@ -267,6 +270,45 @@ func (a *ParentChainClientAdapter) GetStateRoot(clusterPubKey cm.PublicKey, epoc
 	return common.Hash{}, false, nil
 }
 
+func (a *ParentChainClientAdapter) SendSubmitBlockCheckpoints(clusterPubKey cm.PublicKey, checkpoints []*pb.BlockCheckpoint, cert cm.Sign) (common.Hash, error) {
+	if a.delay > 0 {
+		time.Sleep(a.delay)
+	}
+	a.chain.mu.Lock()
+	defer a.chain.mu.Unlock()
+	txHash := common.BytesToHash(crypto.Keccak256(append(clusterPubKey[:], cert[:]...)))
+	err := parentchain.SubmitBlockCheckpoints(a.chain.store, clusterPubKey, checkpoints, cert)
+	if err != nil {
+		if a.chain.receipts != nil {
+			a.chain.receipts[txHash] = &parentchain.Receipt{
+				TxHash:    txHash,
+				Status:    0,
+				ErrorCode: 230,
+			}
+		}
+		return txHash, err
+	}
+	if a.chain.receipts != nil {
+		a.chain.receipts[txHash] = &parentchain.Receipt{
+			TxHash: txHash,
+			Status: 1,
+		}
+	}
+	return txHash, nil
+}
+
+func (a *ParentChainClientAdapter) GetBlockCheckpoint(clusterPubKey cm.PublicKey, blockNumber uint64) (common.Hash, common.Hash, bool, error) {
+	a.chain.mu.Lock()
+	defer a.chain.mu.Unlock()
+	return a.chain.store.GetBlockCheckpoint(crypto.Keccak256Hash(clusterPubKey[:]), blockNumber)
+}
+
+func (a *ParentChainClientAdapter) GetLatestBlockCheckpoint(clusterPubKey cm.PublicKey) (uint64, common.Hash, common.Hash, bool, error) {
+	a.chain.mu.Lock()
+	defer a.chain.mu.Unlock()
+	return a.chain.store.GetLatestBlockCheckpoint(crypto.Keccak256Hash(clusterPubKey[:]))
+}
+
 func (a *ParentChainClientAdapter) GetBlockByNumber(number uint64) (parentchain.BlockRecord, bool, error) {
 	return parentchain.BlockRecord{}, false, nil
 }
@@ -280,6 +322,14 @@ func (a *ParentChainClientAdapter) GetTransaction(txHash common.Hash) (uint64, u
 }
 
 func (a *ParentChainClientAdapter) GetReceipt(txHash common.Hash) (*parentchain.Receipt, bool, error) {
+	a.chain.mu.Lock()
+	defer a.chain.mu.Unlock()
+	if a.chain.receipts != nil {
+		rcpt, ok := a.chain.receipts[txHash]
+		if ok {
+			return rcpt, true, nil
+		}
+	}
 	return nil, false, nil
 }
 
