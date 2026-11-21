@@ -198,13 +198,22 @@ for cid, c_data in sorted(info.get("clusters", {}).items()):
     c_replicas = c_data.get("replicas", {})
     if not c_replicas:
         continue
-    c_nodes = {r_k: r_v["rpc_url"] for r_k, r_v in c_replicas.items()}
+    active_replicas = {}
+    for r_k, r_v in c_replicas.items():
+        flag1 = os.path.join(state_dir, f"node.{r_k}.disabled")
+        flag2 = os.path.join("/tmp", f"node.{r_k}.disabled")
+        if os.path.exists(flag1) or os.path.exists(flag2):
+            continue
+        active_replicas[r_k] = r_v
+    if not active_replicas:
+        continue
+    c_nodes = {r_k: r_v["rpc_url"] for r_k, r_v in active_replicas.items()}
     c_content = {
         "nodes": c_nodes,
         "rpc_nodes": c_nodes,
-        "ws_nodes": {r_k: r_v["ws_url"] for r_k, r_v in c_replicas.items()},
-        "tcp_nodes": {r_k: f"{r_v['ip']}:{r_v['p2p_port']}" for r_k, r_v in c_replicas.items()},
-        "raft_nodes": {r_k: f"{r_v['ip']}:{r_v['raft_port']}" for r_k, r_v in c_replicas.items()},
+        "ws_nodes": {r_k: r_v["ws_url"] for r_k, r_v in active_replicas.items()},
+        "tcp_nodes": {r_k: f"{r_v['ip']}:{r_v['p2p_port']}" for r_k, r_v in active_replicas.items()},
+        "raft_nodes": {r_k: f"{r_v['ip']}:{r_v['raft_port']}" for r_k, r_v in active_replicas.items()},
         "chain_id": c_data.get("chain_id", 991),
         "cluster_name": c_name,
     }
@@ -213,7 +222,13 @@ for cid, c_data in sorted(info.get("clusters", {}).items()):
     write_atomic_json(f"/tmp/rpc_nodes.{c_name}.json", c_content)
     clusters_out.append(c_name)
 
-has_parent = "true" if info.get("parent_nodes") else "false"
+active_parent = {}
+for p_k, p_v in (info.get("parent_nodes") or {}).items():
+    flag1 = os.path.join(state_dir, f"node.{p_k}.disabled")
+    flag2 = os.path.join("/tmp", f"node.{p_k}.disabled")
+    if not (os.path.exists(flag1) or os.path.exists(flag2)):
+        active_parent[p_k] = p_v
+has_parent = "true" if active_parent else "false"
 print(f"HAS_PARENT={has_parent}")
 for name in clusters_out:
     print(f"CLUSTER={name}")
@@ -238,7 +253,9 @@ done <<< "$CLUSTER_LIST_RAW"
 EXPECTED_PID_FILES=()
 
 # ── 3. Launch Execution Cluster Monitors ─────────────────────────────────────
-if [ "$PARENT_ONLY" != "true" ] && [ -f "$MONITOR_SCRIPT" ]; then
+if [ -f "${STATE_DIR}/exec_monitors.disabled" ]; then
+    echo "⏸️  [Monitor Supervisor] Execution Cluster Monitors are disabled (${STATE_DIR}/exec_monitors.disabled); skipping."
+elif [ "$PARENT_ONLY" != "true" ] && [ -f "$MONITOR_SCRIPT" ]; then
     for ns in "${ACTIVE_NAMESPACES[@]+"${ACTIVE_NAMESPACES[@]}"}"; do
         [ -n "$ns" ] || continue
         cfg_file="${STATE_DIR}/rpc_nodes.${ns}.json"
@@ -261,7 +278,9 @@ if [ "$PARENT_ONLY" != "true" ] && [ -f "$MONITOR_SCRIPT" ]; then
 fi
 
 # ── 4. Launch Parent Chain Monitor ───────────────────────────────────────────
-if [ "$EXEC_ONLY" != "true" ] && [ "$HAS_PARENT" = "true" ] && [ -f "$PARENT_MONITOR_PY" ]; then
+if [ -f "${STATE_DIR}/parent_monitor.disabled" ]; then
+    echo "⏸️  [Monitor Supervisor] Parent Chain Monitor is disabled (${STATE_DIR}/parent_monitor.disabled); skipping."
+elif [ "$EXEC_ONLY" != "true" ] && [ "$HAS_PARENT" = "true" ] && [ -f "$PARENT_MONITOR_PY" ]; then
     PARENT_LOG="${STATE_DIR}/parent_chain_monitor.log"
     echo "▶️  [Monitor Supervisor] Starting Parent Chain Monitor (inventory: ${INVENTORY}, log: ${PARENT_LOG})..."
     pkill -f "[p]arent_chain_monitor\.py.*${INVENTORY}" >/dev/null 2>&1 || true
@@ -306,7 +325,43 @@ while true; do
         LAST_PRUNE_TS="$NOW_TS"
     fi
 
+    # Dynamic parent monitor lifecycle
+    if [ -f "${STATE_DIR}/parent_monitor.disabled" ]; then
+        if [ -n "$PARENT_PID" ] && kill -0 "$PARENT_PID" 2>/dev/null; then
+            echo "🛑 [Monitor Supervisor] Stopping Parent Chain Monitor per ${STATE_DIR}/parent_monitor.disabled..."
+            kill -15 "$PARENT_PID" 2>/dev/null || true
+            PARENT_PID=""
+            rm -f "${STATE_DIR}/parent_chain_monitor.pid" "/tmp/parent_chain_monitor.${INV_SLUG}.pid" 2>/dev/null || true
+        fi
+    elif [ "$EXEC_ONLY" != "true" ] && [ "$HAS_PARENT" = "true" ] && [ -f "$PARENT_MONITOR_PY" ]; then
+        if [ -z "$PARENT_PID" ] || ! kill -0 "$PARENT_PID" 2>/dev/null; then
+            echo "▶️  [Monitor Supervisor] Parent Chain Monitor re-enabled; starting..."
+            PARENT_LOG="${STATE_DIR}/parent_chain_monitor.log"
+            pkill -f "[p]arent_chain_monitor\.py.*${INVENTORY}" >/dev/null 2>&1 || true
+            python3 -u "$PARENT_MONITOR_PY" --inventory="$INVENTORY" --interval=5 >> "$PARENT_LOG" 2>&1 &
+            PARENT_PID=$!
+            echo "$PARENT_PID" > "${STATE_DIR}/parent_chain_monitor.pid"
+            echo "$PARENT_PID" > "/tmp/parent_chain_monitor.${INV_SLUG}.pid"
+            if [ "$INV_SLUG" = "inventory" ]; then
+                echo "$PARENT_PID" > "/tmp/parent_chain_monitor.pid"
+            fi
+            ln -sf "$PARENT_LOG" "/tmp/parent_chain_monitor.${INV_SLUG}.log" 2>/dev/null || true
+            if [ "$INV_SLUG" = "inventory" ]; then
+                ln -sf "$PARENT_LOG" "/tmp/parent_chain_monitor.log" 2>/dev/null || true
+            fi
+        fi
+    fi
+
     for pid_file in "${EXPECTED_PID_FILES[@]}"; do
+        # Skip checking parent monitor if explicitly disabled
+        if [ "$pid_file" = "${STATE_DIR}/parent_chain_monitor.pid" ] && [ -f "${STATE_DIR}/parent_monitor.disabled" ]; then
+            continue
+        fi
+        # Skip checking exec monitors if explicitly disabled
+        if [[ "$pid_file" == /tmp/metanode-monitors-* ]] && [ -f "${STATE_DIR}/exec_monitors.disabled" ]; then
+            continue
+        fi
+
         if [ ! -f "$pid_file" ]; then
             echo "❌ [Monitor Supervisor] PID file disappeared: ${pid_file}. Exiting to trigger systemd restart..." >&2
             cleanup

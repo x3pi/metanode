@@ -786,15 +786,15 @@
         fail_msg: >-
           Gate G4 cannot verify the whole cluster on {{ inventory_hostname }}: only {{ cluster_peer_hosts | length }} of
           {{ cluster_inventory_peer_count }} nodes of cluster_id {{ cluster_id }} are in this play ({{ cluster_peer_hosts }}).
-      when: not (partial_target | default(false) | bool)
+      when: not ((partial_target | default(false) | bool) or (rolling_exec | default(false) | bool))
 
-    - name: "Gate G4: Warn that fork check covers only part of the cluster (--node/--host)"
+    - name: "Gate G4: Warn that fork check covers only part of the cluster (--node/--host/--rolling)"
       ansible.builtin.debug:
         msg: >-
           ⚠️ G4 partial: only {{ cluster_peer_hosts | length }} of {{ cluster_inventory_peer_count }} nodes of
           cluster_id {{ cluster_id }} are in this play; fork check does not cover the whole cluster.
       when:
-        - partial_target | default(false) | bool
+        - (partial_target | default(false) | bool) or (rolling_exec | default(false) | bool)
         - (cluster_peer_hosts | length) < (cluster_inventory_peer_count | int)
 
     - name: "Gate G4: Compute minimum block height in cluster"
@@ -824,6 +824,45 @@
     - name: "Gate G4: Record canonical block hash at min_height"
       ansible.builtin.set_fact:
         cluster_block_hash_at_min: "{{ g4_block_res.json.result.hash }}"
+
+    # --rolling: a batch holds one node, so compare it against the replicas outside the play (still running).
+    - name: "Gate G4 (rolling): Query block hash at min_height on the other cluster replicas"
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ hostvars[item]['rpc_port'] }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method: "eth_getBlockByNumber"
+          params: ["{{ '0x%x' | format(cluster_min_height | int) if (cluster_min_height | int > 0) else '0x0' }}", false]
+          id: 1
+        status_code: 200
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['exec_clusters'] | default([]) | map('extract', hostvars) | selectattr('cluster_id', 'defined') | selectattr('cluster_id', 'equalto', cluster_id) | map(attribute='inventory_hostname') | difference(cluster_peer_hosts) }}"
+      register: g4_rolling_peer_res
+      retries: "{{ gate_hash_retries | default(15) }}"
+      delay: "{{ gate_hash_delay | default(2) }}"
+      until:
+        - g4_rolling_peer_res.status == 200
+        - g4_rolling_peer_res.json is defined
+        - g4_rolling_peer_res.json.result is defined
+        - g4_rolling_peer_res.json.result.hash is defined
+      when: rolling_exec | default(false) | bool
+
+    - name: "Gate G4 (rolling): Assert block hash matches every other cluster replica"
+      ansible.builtin.assert:
+        that:
+          - item.json.result.hash == cluster_block_hash_at_min
+        fail_msg: >-
+          FORK DETECTED! Gate G4 (rolling) failed on {{ inventory_hostname }} (Cluster {{ cluster_id }}):
+          block hash at height {{ cluster_min_height }} is {{ cluster_block_hash_at_min }}, but replica {{ item.item }}
+          has {{ item.json.result.hash }}. Halting the rolling restart; the other replicas keep running.
+      loop: "{{ g4_rolling_peer_res.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - rolling_exec | default(false) | bool
+        - item is not skipped
 
     - name: "Gate G4: Assert canonical block hash matches cluster leader"
       ansible.builtin.assert:
