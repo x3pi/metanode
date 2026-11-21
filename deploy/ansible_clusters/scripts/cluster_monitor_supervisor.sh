@@ -200,9 +200,8 @@ for cid, c_data in sorted(info.get("clusters", {}).items()):
         continue
     active_replicas = {}
     for r_k, r_v in c_replicas.items():
-        flag1 = os.path.join(state_dir, f"node.{r_k}.disabled")
-        flag2 = os.path.join("/tmp", f"node.{r_k}.disabled")
-        if os.path.exists(flag1) or os.path.exists(flag2):
+        flag = os.path.join(state_dir, f"node.{r_k}.disabled")
+        if os.path.exists(flag):
             continue
         active_replicas[r_k] = r_v
     if not active_replicas:
@@ -224,9 +223,8 @@ for cid, c_data in sorted(info.get("clusters", {}).items()):
 
 active_parent = {}
 for p_k, p_v in (info.get("parent_nodes") or {}).items():
-    flag1 = os.path.join(state_dir, f"node.{p_k}.disabled")
-    flag2 = os.path.join("/tmp", f"node.{p_k}.disabled")
-    if not (os.path.exists(flag1) or os.path.exists(flag2)):
+    flag = os.path.join(state_dir, f"node.{p_k}.disabled")
+    if not os.path.exists(flag):
         active_parent[p_k] = p_v
 has_parent = "true" if active_parent else "false"
 print(f"HAS_PARENT={has_parent}")

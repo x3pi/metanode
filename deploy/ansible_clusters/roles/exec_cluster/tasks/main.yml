@@ -772,7 +772,7 @@
     # ── Gate G4: Anti-fork verification across cluster nodes ──
     - name: "Gate G4: Find all peers in the same cluster"
       ansible.builtin.set_fact:
-        cluster_peer_hosts: "{{ ansible_play_hosts | map('extract', hostvars) | selectattr('cluster_id', 'defined') | selectattr('cluster_id', 'equalto', cluster_id) | map(attribute='inventory_hostname') | list }}"
+        cluster_peer_hosts: "{{ ansible_play_batch | map('extract', hostvars) | selectattr('cluster_id', 'defined') | selectattr('cluster_id', 'equalto', cluster_id) | map(attribute='inventory_hostname') | list }}"
 
     # Compare play peers against the INVENTORY (not the play): a partial play would otherwise compare only part of the cluster.
     - name: "Gate G4: Count cluster nodes declared in inventory"
@@ -788,18 +788,25 @@
           {{ cluster_inventory_peer_count }} nodes of cluster_id {{ cluster_id }} are in this play ({{ cluster_peer_hosts }}).
       when: not ((partial_target | default(false) | bool) or (rolling_exec | default(false) | bool))
 
-    - name: "Gate G4: Warn that fork check covers only part of the cluster (--node/--host/--rolling)"
+    - name: "Gate G4: Warn that fork check covers only part of the cluster (--node/--host)"
       ansible.builtin.debug:
         msg: >-
           ⚠️ G4 partial: only {{ cluster_peer_hosts | length }} of {{ cluster_inventory_peer_count }} nodes of
           cluster_id {{ cluster_id }} are in this play; fork check does not cover the whole cluster.
       when:
-        - (partial_target | default(false) | bool) or (rolling_exec | default(false) | bool)
+        - partial_target | default(false) | bool
+        - not (rolling_exec | default(false) | bool)
         - (cluster_peer_hosts | length) < (cluster_inventory_peer_count | int)
+
+    - name: "Gate G4: Note that fork check runs in rolling mode (--rolling)"
+      ansible.builtin.debug:
+        msg: >-
+          ℹ️ G4 rolling: verifying replica {{ inventory_hostname }} against running cluster peers.
+      when: rolling_exec | default(false) | bool
 
     - name: "Gate G4: Compute minimum block height in cluster"
       ansible.builtin.set_fact:
-        cluster_min_height: "{{ cluster_peer_hosts | map('extract', hostvars, 'exec_post_start_height') | map('int') | min }}"
+        cluster_min_height: "{{ (cluster_peer_hosts | map('extract', hostvars, 'exec_post_start_height') | map('int') | min) if (cluster_peer_hosts | length > 1) else (exec_post_start_height | default(0) | int) }}"
 
     - name: "Gate G4: Query block hash at min_height from cluster RPC"
       ansible.builtin.uri:
@@ -875,7 +882,9 @@
           Chain has forked! Halting immediately to preserve state.
       vars:
         cluster_leader_host: "{{ cluster_peer_hosts | first }}"
-      when: (cluster_peer_hosts | length) > 1
+      when:
+        - (cluster_peer_hosts | length) > 1
+        - not (rolling_exec | default(false) | bool)
 
     # ── Gate G5: Installed binary sha256 ──
     - name: "Gate G5: Verify installed simple_chain binary checksum"
