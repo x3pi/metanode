@@ -69,7 +69,7 @@
           - exec_stop_result.stdout == 'success'
         fail_msg: >-
           FATAL: Execution Node {{ inventory_hostname }} failed to stop cleanly via systemd!
-          Result was: '{{ exec_stop_result.stdout }}'. Possible timeout (>{{ systemd_timeout_stop_sec | default(30) }}s) or crash during DB flush.
+          Result was: '{{ exec_stop_result.stdout }}'. Possible timeout (>{{ systemd_timeout_stop_sec | default(60) }}s) or crash during DB flush.
           Aborting fast-swap upgrade to protect state database!
       when:
         - deploy_action in ['deploy', 'restart', 'rollback']
@@ -86,7 +86,7 @@
       when: (exec_stop_result.stdout | default('')) != 'success'
       ansible.builtin.shell:
         cmd: |
-          grace={{ systemd_timeout_stop_sec | default(30) }}
+          grace={{ systemd_timeout_stop_sec | default(60) }}
           kill_process() {
             local pid="$1"
             if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
