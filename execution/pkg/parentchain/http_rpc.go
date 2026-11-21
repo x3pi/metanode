@@ -500,9 +500,21 @@ func (s *HTTPServer) handleStateRoot(w http.ResponseWriter, r *http.Request) {
 func (s *HTTPServer) handleBlockCheckpoint(w http.ResponseWriter, r *http.Request) {
 	pubKeyHex := r.URL.Query().Get("pubkey")
 	pubKeyBytes := common.FromHex(pubKeyHex)
+	if len(pubKeyBytes) != 48 {
+		http.Error(w, "pubkey must be a 48-byte BLS public key (hex)", http.StatusBadRequest)
+		return
+	}
 
 	numStr := r.URL.Query().Get("number")
-	num, _ := strconv.ParseUint(numStr, 10, 64)
+	if numStr == "" {
+		http.Error(w, "missing number parameter", http.StatusBadRequest)
+		return
+	}
+	num, err := strconv.ParseUint(numStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid number parameter: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	hash, root, found, err := s.store.GetBlockCheckpoint(crypto.Keccak256Hash(pubKeyBytes), num)
 	if err != nil {
@@ -520,6 +532,10 @@ func (s *HTTPServer) handleBlockCheckpoint(w http.ResponseWriter, r *http.Reques
 func (s *HTTPServer) handleBlockCheckpointLatest(w http.ResponseWriter, r *http.Request) {
 	pubKeyHex := r.URL.Query().Get("pubkey")
 	pubKeyBytes := common.FromHex(pubKeyHex)
+	if len(pubKeyBytes) != 48 {
+		http.Error(w, "pubkey must be a 48-byte BLS public key (hex)", http.StatusBadRequest)
+		return
+	}
 
 	num, hash, root, found, err := s.store.GetLatestBlockCheckpoint(crypto.Keccak256Hash(pubKeyBytes))
 	if err != nil {

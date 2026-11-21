@@ -258,4 +258,3 @@ func (s *DBStore) GetLatestBlockCheckpoint(clusterKeyHash common.Hash) (uint64, 
 func (s *DBStore) SetLatestBlockCheckpoint(clusterKeyHash common.Hash, blockNumber uint64, hash, stateRoot common.Hash) error {
 	return s.committer.Store().SetLatestBlockCheckpoint(clusterKeyHash, blockNumber, hash, stateRoot)
 }
-

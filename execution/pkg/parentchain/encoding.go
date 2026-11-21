@@ -15,18 +15,18 @@ import (
 
 // Namespace byte constants (Section 5.2 of plan)
 const (
-	NamespaceChainRegistry    byte = 0x01
-	NamespaceFloat            byte = 0x02
-	NamespaceClaimed          byte = 0x03
-	NamespaceTransferRecord   byte = 0x04
-	NamespaceSeq              byte = 0x05
-	NamespaceVelocity         byte = 0x06
-	NamespaceAccountRegistry  byte = 0x07
-	NamespaceClusterStateRoot byte = 0x08
-	NamespaceInboundLog       byte = 0x09
-	NamespaceInboundSeq       byte = 0x0A
-	NamespaceSenderNonce      byte = 0x0B
-	NamespaceConfigSystem     byte = 0x0C
+	NamespaceChainRegistry          byte = 0x01
+	NamespaceFloat                  byte = 0x02
+	NamespaceClaimed                byte = 0x03
+	NamespaceTransferRecord         byte = 0x04
+	NamespaceSeq                    byte = 0x05
+	NamespaceVelocity               byte = 0x06
+	NamespaceAccountRegistry        byte = 0x07
+	NamespaceClusterStateRoot       byte = 0x08
+	NamespaceInboundLog             byte = 0x09
+	NamespaceInboundSeq             byte = 0x0A
+	NamespaceSenderNonce            byte = 0x0B
+	NamespaceConfigSystem           byte = 0x0C
 	NamespaceAccountRegistrationLog byte = 0x0D
 	NamespaceAccountRegistrationSeq byte = 0x0E
 	NamespaceBlockCheckpoint        byte = 0x0F
@@ -432,4 +432,3 @@ func DecodeBlockCheckpointLatestValue(data []byte) (blockNumber uint64, blockHas
 	}
 	return binary.BigEndian.Uint64(data[:8]), common.BytesToHash(data[8:40]), common.BytesToHash(data[40:72]), nil
 }
-
