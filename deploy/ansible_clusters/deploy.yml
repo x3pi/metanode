@@ -69,6 +69,7 @@
 # ── Play 3: Deploy Execution Clusters ────────────────────────────────────────
 - name: "Phase 3: Deploy Sharded Execution Clusters (EVM Chain ID 991)"
   hosts: exec_clusters
+  serial: "{{ 1 if (rolling_exec | default(false) | bool) else '100%' }}"
   gather_facts: false
   become: true
   any_errors_fatal: true

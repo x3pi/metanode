@@ -25,6 +25,7 @@ EXPORT_CONFIG_ONLY="false"
 ENABLE_MONITOR="true"
 PARENT_KEYS_DIR="${SCRIPT_DIR}/parent_keys"
 CHANGE_KEYS="false"
+ROLLING_EXEC="false"
 EXTRA_ANSIBLE_ARGS=()
 
 # confirm_destructive TITLE [DETAIL...]: red warning, then the operator must type "y" on the terminal. There is no flag
@@ -76,6 +77,7 @@ usage() {
     echo "  --deploy            Cập nhật binary mới và khởi động lại toàn bộ dịch vụ"
     echo "  --start             Bật lại các node (toàn bộ hoặc lọc theo --node/--exec-only)"
     echo "  --restart           Khởi động lại toàn bộ cụm node (Parent Chain + Exec Clusters)"
+    echo "  --rolling           (Đi kèm với --restart/--deploy) Rolling restart từng node 1 cho Execution Clusters (Zero Downtime, chống sập cụm)"
     echo "  --rollback          Rollback toàn bộ cluster về bản binary trước (.prev)"
     echo "  --skip-build        (Chỉ đi kèm với --restart) Bỏ qua bước build, chạy lại binary cũ đang có trên node"
     echo "  --stop              Dừng dịch vụ (toàn bộ hoặc lọc theo --node/--exec-only)"
@@ -146,6 +148,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --rollback|rollback)
             ACTION="rollback"
+            shift
+            ;;
+        --rolling|--rolling-restart)
+            ROLLING_EXEC="true"
             shift
             ;;
         --skip-build)
@@ -309,6 +315,15 @@ if [ "${SKIP_BUILD:-false}" = "true" ]; then
         exit 1
     fi
     EXTRA_ANSIBLE_ARGS+=(-e "skip_build=true")
+fi
+
+if [ "${ROLLING_EXEC:-false}" = "true" ]; then
+    if [[ ! "$ACTION" =~ ^(restart|deploy)$ ]]; then
+        echo "❌ Lỗi: Cờ --rolling chỉ hợp lệ khi đi kèm với --restart hoặc --deploy (hiện tại: ${ACTION})!"
+        echo "   (Lưu ý: Không dùng --rolling với --setup vì cụm Raft mới cần khởi động đồng thời để bầu leader)"
+        exit 1
+    fi
+    EXTRA_ANSIBLE_ARGS+=(-e "rolling_exec=true")
 fi
 
 if [ "$ACTION" = "rollback" ]; then
@@ -603,6 +618,29 @@ for cluster_id, cluster in pi.parse_inventory(inventory).get("clusters", {}).ite
 PY
 }
 
+get_exec_node_names() {
+    python3 - "$ABS_INVENTORY" "${SCRIPT_DIR}/scripts" <<'PY'
+import sys
+inventory, scripts_dir = sys.argv[1:]
+sys.path.insert(0, scripts_dir)
+import parse_inventory as pi
+for cluster_id, cluster in pi.parse_inventory(inventory).get("clusters", {}).items():
+    for r_k in cluster.get("replicas", {}).keys():
+        print(r_k)
+PY
+}
+
+get_parent_node_names() {
+    python3 - "$ABS_INVENTORY" "${SCRIPT_DIR}/scripts" <<'PY'
+import sys
+inventory, scripts_dir = sys.argv[1:]
+sys.path.insert(0, scripts_dir)
+import parse_inventory as pi
+for p_k in (pi.parse_inventory(inventory).get("parent_nodes") or {}).keys():
+    print(p_k)
+PY
+}
+
 print_monitor_status() {
     echo "🔍 Trạng thái tiến trình Monitor ngầm (${MONITOR_UNIT}):"
     if has_local_systemd && systemctl list-unit-files "$MONITOR_UNIT" >/dev/null 2>&1; then
@@ -658,11 +696,131 @@ print_monitor_status() {
     fi
 }
 
+stop_single_node_monitor() {
+    local target="$1"
+    local resolved
+    resolved=$(resolve_target_host "$target")
+    echo "⏸️  Đánh dấu tắt monitor cho node: ${resolved} (${target})..."
+    mkdir -p "$MONITOR_STATE_DIR" 2>/dev/null || true
+
+    IFS=',' read -ra HOSTS <<< "$resolved"
+    for h in "${HOSTS[@]}"; do
+        [ -n "$h" ] || continue
+        touch "${MONITOR_STATE_DIR}/node.${h}.disabled" 2>/dev/null || true
+        touch "/tmp/node.${h}.disabled" 2>/dev/null || true
+    done
+    if [ "$target" != "$resolved" ]; then
+        touch "${MONITOR_STATE_DIR}/node.${target}.disabled" 2>/dev/null || true
+        touch "/tmp/node.${target}.disabled" 2>/dev/null || true
+    fi
+
+    if has_local_systemd && systemctl is-active --quiet "$MONITOR_UNIT" 2>/dev/null; then
+        echo "🔄 Nạp lại Monitor Supervisor (loại trừ node ${resolved} khỏi danh sách theo dõi)..."
+        run_local_sudo systemctl restart "$MONITOR_UNIT" >/dev/null 2>&1 || true
+    fi
+}
+
+start_single_node_monitor() {
+    local target="$1"
+    local resolved
+    resolved=$(resolve_target_host "$target")
+    echo "▶️  Kích hoạt lại monitor cho node: ${resolved} (${target})..."
+
+    IFS=',' read -ra HOSTS <<< "$resolved"
+    for h in "${HOSTS[@]}"; do
+        [ -n "$h" ] || continue
+        rm -f "${MONITOR_STATE_DIR}/node.${h}.disabled" "/tmp/node.${h}.disabled" 2>/dev/null || true
+    done
+    rm -f "${MONITOR_STATE_DIR}/node.${target}.disabled" "/tmp/node.${target}.disabled" 2>/dev/null || true
+
+    # Nếu cụm trước đó bị tắt toàn bộ (.disabled), việc start 1 node cũng gỡ bỏ cờ disabled của cụm
+    rm -f "${MONITOR_STATE_DIR}/exec_monitors.disabled" "${MONITOR_STATE_DIR}/parent_monitor.disabled" 2>/dev/null || true
+}
+
+stop_parent_monitor_only() {
+    local disable_boot="${1:-false}"
+    echo "⏸️  Tạm dừng riêng monitor của Parent Chain..."
+    # Group flag is needed for pause too: without it the supervisor loop relaunches the parent monitor right away.
+    mkdir -p "$MONITOR_STATE_DIR" 2>/dev/null || true
+    touch "${MONITOR_STATE_DIR}/parent_monitor.disabled" 2>/dev/null || true
+    if [ "$disable_boot" = "true" ]; then
+        while IFS= read -r p_node; do
+            [ -n "$p_node" ] || continue
+            touch "${MONITOR_STATE_DIR}/node.${p_node}.disabled" "/tmp/node.${p_node}.disabled" 2>/dev/null || true
+        done < <(get_parent_node_names 2>/dev/null || true)
+    fi
+
+    local p_file p_pid
+    for p_file in "${MONITOR_STATE_DIR}/parent_chain_monitor.pid" "/tmp/parent_chain_monitor.${MONITOR_SLUG}.pid" "/tmp/parent_chain_monitor.pid"; do
+        if [ -f "$p_file" ]; then
+            p_pid=$(cat "$p_file" 2>/dev/null || echo "")
+            if [ -n "$p_pid" ] && kill -0 "$p_pid" 2>/dev/null; then
+                kill -15 "$p_pid" 2>/dev/null || true
+            fi
+            rm -f "$p_file" 2>/dev/null || true
+        fi
+    done
+    if [ "$MONITOR_SLUG" = "inventory" ] && [ -f "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" ]; then
+        python3 "${SCRIPT_DIR}/scripts/parent_chain_monitor.py" --stop >/dev/null 2>&1 || true
+    fi
+    pkill -f "[p]arent_chain_monitor\.py.*${ABS_INVENTORY}" >/dev/null 2>&1 || true
+    echo "✅ Đã dừng riêng Parent Chain monitor, các monitor của Execution Clusters vẫn hoạt động."
+}
+
+stop_exec_monitors_only() {
+    local disable_boot="${1:-false}"
+    echo "⏸️  Tạm dừng riêng monitor của Execution Clusters..."
+    # Group flag is needed for pause too: without it the supervisor watchdog sees the PID files vanish and restarts them.
+    mkdir -p "$MONITOR_STATE_DIR" 2>/dev/null || true
+    touch "${MONITOR_STATE_DIR}/exec_monitors.disabled" 2>/dev/null || true
+    if [ "$disable_boot" = "true" ]; then
+        while IFS= read -r e_node; do
+            [ -n "$e_node" ] || continue
+            touch "${MONITOR_STATE_DIR}/node.${e_node}.disabled" "/tmp/node.${e_node}.disabled" 2>/dev/null || true
+        done < <(get_exec_node_names 2>/dev/null || true)
+    fi
+
+    if [ -f "$MONITOR_SCRIPT" ]; then
+        while IFS= read -r ns; do
+            [ -n "$ns" ] || continue
+            bash "$MONITOR_SCRIPT" --stop --namespace "$ns" >/dev/null 2>&1 || true
+        done < <(get_exec_monitor_names 2>/dev/null || true)
+    fi
+    echo "✅ Đã dừng riêng Execution Cluster monitors, Parent Chain monitor vẫn hoạt động."
+}
+
 stop_cluster_monitors() {
     local disable_boot="false"
     if [ "${1:-}" = "--disable" ]; then
         disable_boot="true"
+    fi
+
+    # Khi thao tác trên 1 node riêng lẻ
+    if [ -n "${TARGET_NODE:-}" ]; then
+        stop_single_node_monitor "$TARGET_NODE"
+        if [ "$disable_boot" != "true" ]; then
+            # Temporary pause (restart/deploy): if the script dies before start_cluster_monitors, re-enable this
+            # node's monitor so a node left broken by a failed deploy still raises alerts.
+            trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "⚠️  Thao tác lỗi (exit ${rc}): bật lại monitor cho node ${TARGET_NODE}..."; start_single_node_monitor "$TARGET_NODE" || true; if has_local_systemd && systemctl is-active --quiet "$MONITOR_UNIT" 2>/dev/null; then run_local_sudo systemctl restart "$MONITOR_UNIT" >/dev/null 2>&1 || true; fi; fi' EXIT
+        fi
+        return 0
+    fi
+
+    # Khi chỉ thao tác Parent Chain: chỉ dừng riêng monitor của Parent Chain, không dừng monitor toàn cụm
+    if [ "${PARENT_ONLY:-false}" = "true" ]; then
+        stop_parent_monitor_only "$disable_boot"
+        return 0
+    fi
+
+    # Khi chỉ thao tác Execution Clusters: chỉ dừng riêng monitor của Execution Clusters
+    if [ "${EXEC_ONLY:-false}" = "true" ]; then
+        stop_exec_monitors_only "$disable_boot"
+        return 0
+    fi
+
+    if [ "$disable_boot" = "true" ]; then
         echo "🛑 Dừng hẳn Monitor và tắt tự khởi động cùng hệ thống (${MONITOR_UNIT})..."
+        rm -f "${MONITOR_STATE_DIR}/node."*.disabled "/tmp/node."*.disabled 2>/dev/null || true
     else
         echo "⏸️  Tạm dừng monitor ngầm (${MONITOR_UNIT}) để tránh báo động giả..."
     fi
@@ -712,6 +870,25 @@ start_cluster_monitors() {
         return 0
     fi
     echo "▶️  Kích hoạt hệ thống Monitor ngầm..."
+
+    if [ -n "$TARGET_NODE" ]; then
+        start_single_node_monitor "$TARGET_NODE"
+    elif [ "$PARENT_ONLY" = "true" ]; then
+        rm -f "${MONITOR_STATE_DIR}/parent_monitor.disabled" 2>/dev/null || true
+        while IFS= read -r node_name; do
+            [ -n "$node_name" ] || continue
+            rm -f "${MONITOR_STATE_DIR}/node.${node_name}.disabled" "/tmp/node.${node_name}.disabled" 2>/dev/null || true
+        done < <(get_parent_node_names 2>/dev/null || true)
+    elif [ "$EXEC_ONLY" = "true" ]; then
+        rm -f "${MONITOR_STATE_DIR}/exec_monitors.disabled" 2>/dev/null || true
+        while IFS= read -r node_name; do
+            [ -n "$node_name" ] || continue
+            rm -f "${MONITOR_STATE_DIR}/node.${node_name}.disabled" "/tmp/node.${node_name}.disabled" 2>/dev/null || true
+        done < <(get_exec_node_names 2>/dev/null || true)
+    else
+        rm -f "${MONITOR_STATE_DIR}/parent_monitor.disabled" "${MONITOR_STATE_DIR}/exec_monitors.disabled" 2>/dev/null || true
+        rm -f "${MONITOR_STATE_DIR}/node."*.disabled "/tmp/node."*.disabled 2>/dev/null || true
+    fi
 
     if has_local_systemd && [ -f "$MONITOR_SUPERVISOR_SCRIPT" ]; then
         local run_user run_group run_home unit_tmp
@@ -1133,6 +1310,9 @@ fi
 
 # 2. Scope & Target Node Resolution
 TARGET_SCOPE_DESC="Toàn bộ hệ thống (Parent Chain + Exec Clusters)"
+if [ "$ROLLING_EXEC" = "true" ]; then
+    TARGET_SCOPE_DESC="${TARGET_SCOPE_DESC} (Rolling Exec Clusters)"
+fi
 if [ -n "$TARGET_NODE" ]; then
     # Tells the G4 gates that the play intentionally covers only part of a chain (warn instead of fail).
     EXTRA_ANSIBLE_ARGS+=(-e "partial_target=true")
@@ -1274,7 +1454,15 @@ if [ "$ACTION" = "stop" ]; then
     stop_cluster_monitors --disable
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
-    echo "🛑 ĐÃ DỪNG TOÀN BỘ TIẾN TRÌNH CỤM METANODE THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
+    if [ -n "$TARGET_NODE" ]; then
+        echo "🛑 ĐÃ DỪNG TIẾN TRÌNH NODE ${TARGET_NODE} THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
+    elif [ "$PARENT_ONLY" = "true" ]; then
+        echo "🛑 ĐÃ DỪNG TIẾN TRÌNH PARENT CHAIN THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
+    elif [ "$EXEC_ONLY" = "true" ]; then
+        echo "🛑 ĐÃ DỪNG TIẾN TRÌNH EXECUTION CLUSTERS THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
+    else
+        echo "🛑 ĐÃ DỪNG TOÀN BỘ TIẾN TRÌNH CỤM METANODE THÀNH CÔNG (${TOTAL_DEPLOY_DURATION}s)!"
+    fi
     echo "═══════════════════════════════════════════════════════════════"
     if [ "$NOTIFY" = "true" ]; then
         python3 -c "
