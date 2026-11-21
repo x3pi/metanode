@@ -120,11 +120,11 @@ type Node struct {
 	stores   []interface{ Close() error }
 	failed   atomic.Bool
 
-	blockHash  BlockHashFunc
-	durable    func() uint64
-	fatal      func(error) // fail-closed exit for this replica (set in start)
-	mismatches atomic.Uint64
-	attested   atomic.Uint64
+	blockHash    BlockHashFunc
+	durable      func() uint64
+	fatal        func(error) // fail-closed exit for this replica (set in start)
+	mismatches   atomic.Uint64
+	attested     atomic.Uint64
 	lastAttested atomic.Uint64
 
 	dropped atomic.Uint64 // batches that can never become a block (malformed / oversize)

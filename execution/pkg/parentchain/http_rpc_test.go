@@ -2,6 +2,7 @@ package parentchain
 
 import (
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -291,4 +292,58 @@ func TestHTTPRPC_FloatEndpoint(t *testing.T) {
 	assert.NoError(t, err)
 	defer bad.Body.Close()
 	assert.Equal(t, http.StatusBadRequest, bad.StatusCode)
+}
+
+func TestHTTPRPC_BlockCheckpointEndpoint_Validation(t *testing.T) {
+	store := NewMemoryStore()
+	server := NewHTTPServer(store)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/block_checkpoint", server.handleBlockCheckpoint)
+	mux.HandleFunc("/block_checkpoint_latest", server.handleBlockCheckpointLatest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	kp := bls.GenerateKeyPair()
+	pk := kp.PublicKey()
+	clusterHash := crypto.Keccak256Hash(pk[:])
+	h := common.HexToHash("0x1234")
+	r := common.HexToHash("0x5678")
+	assert.NoError(t, store.SetBlockCheckpoint(clusterHash, 100, h, r))
+	assert.NoError(t, store.SetLatestBlockCheckpoint(clusterHash, 100, h, r))
+
+	// 1. Valid request to /block_checkpoint
+	resp, err := http.Get(fmt.Sprintf("%s/block_checkpoint?pubkey=%s&number=100", ts.URL, common.Bytes2Hex(pk[:])))
+	assert.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// 2. Invalid pubkey length
+	badPk, err := http.Get(ts.URL + "/block_checkpoint?pubkey=1234&number=100")
+	assert.NoError(t, err)
+	defer badPk.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, badPk.StatusCode)
+
+	// 3. Missing number
+	noNum, err := http.Get(fmt.Sprintf("%s/block_checkpoint?pubkey=%s", ts.URL, common.Bytes2Hex(pk[:])))
+	assert.NoError(t, err)
+	defer noNum.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, noNum.StatusCode)
+
+	// 4. Invalid number
+	badNum, err := http.Get(fmt.Sprintf("%s/block_checkpoint?pubkey=%s&number=abc", ts.URL, common.Bytes2Hex(pk[:])))
+	assert.NoError(t, err)
+	defer badNum.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, badNum.StatusCode)
+
+	// 5. Valid request to /block_checkpoint_latest
+	respLatest, err := http.Get(fmt.Sprintf("%s/block_checkpoint_latest?pubkey=%s", ts.URL, common.Bytes2Hex(pk[:])))
+	assert.NoError(t, err)
+	defer respLatest.Body.Close()
+	assert.Equal(t, http.StatusOK, respLatest.StatusCode)
+
+	// 6. Invalid pubkey to /block_checkpoint_latest
+	badPkLatest, err := http.Get(ts.URL + "/block_checkpoint_latest?pubkey=invalid")
+	assert.NoError(t, err)
+	defer badPkLatest.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, badPkLatest.StatusCode)
 }

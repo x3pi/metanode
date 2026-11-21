@@ -195,7 +195,7 @@ func DepositToFloat(store Store, sourceKey, destKey cm.PublicKey, destClusterIDD
 	if err != nil {
 		return err
 	}
-	
+
 	return store.AppendInboundTransfer(destHash, &TransferEvent{
 		MsgID:      messageID,
 		DestPubKey: destKey,
@@ -249,7 +249,7 @@ func TransferFloat(
 
 	payloadHash := crypto.Keccak256Hash(payload)
 	digest := ComputeTransferFloatMessage(fromKey, toKey, sender, target, value, fee, payloadHash, nonce)
-	
+
 	if !bls.VerifySign(fromKey, cert, digest) {
 		return common.Hash{}, fmt.Errorf("TransferFloat: %w", ErrInvalidSignature)
 	}
@@ -258,7 +258,7 @@ func TransferFloat(
 	if err != nil {
 		return common.Hash{}, err
 	}
-	
+
 	totalDeduction := new(big.Int).Set(value)
 	if fee != nil && fee.Sign() > 0 {
 		totalDeduction.Add(totalDeduction, fee)
@@ -307,7 +307,7 @@ func TransferFloat(
 	if err := store.SetFloat(toHash, newTo); err != nil {
 		return common.Hash{}, err
 	}
-	
+
 	if fee != nil && fee.Sign() > 0 {
 		total, err := store.GetFloat(floatTotalSupplyKey)
 		if err != nil {
@@ -318,7 +318,7 @@ func TransferFloat(
 			return common.Hash{}, err
 		}
 	}
-	
+
 	if !isRefund {
 		if err := store.SetVelocity(fromHash, newVelocity); err != nil {
 			return common.Hash{}, err
@@ -333,7 +333,7 @@ func TransferFloat(
 	}); err != nil {
 		return common.Hash{}, err
 	}
-	
+
 	if err := store.AppendInboundTransfer(toHash, &TransferEvent{
 		MsgID:        messageID,
 		SourcePubKey: fromKey,
@@ -348,7 +348,7 @@ func TransferFloat(
 	}); err != nil {
 		return common.Hash{}, err
 	}
-	
+
 	if err := store.SetFloatSeq(fromHash, nonce+1); err != nil {
 		return common.Hash{}, err
 	}
@@ -402,7 +402,7 @@ func MarkClaimed(store Store, messageID common.Hash, outcome FloatOutcome, cert 
 	if cur != FloatOutcomeNone {
 		return fmt.Errorf("MarkClaimed: %w: %s", ErrFloatAlreadyResolved, messageID.Hex())
 	}
-	
+
 	digest := ComputeMarkClaimedMessage(messageID, outcome)
 	if !bls.VerifySign(rec.DestKey, cert, digest) {
 		return fmt.Errorf("MarkClaimed: %w", ErrInvalidSignature)
@@ -432,7 +432,7 @@ func ReclaimFloat(store Store, messageID common.Hash, cert cm.Sign, blockTime, r
 	if reclaimTimeoutSeconds == 0 || blockTime < rec.ConfirmedAtBlockTime || blockTime-rec.ConfirmedAtBlockTime < reclaimTimeoutSeconds {
 		return ErrFloatReclaimTooEarly
 	}
-	
+
 	digest := ComputeReclaimFloatMessage(messageID, *rec.SourceKey)
 	if !bls.VerifySign(*rec.SourceKey, cert, digest) {
 		return fmt.Errorf("ReclaimFloat: %w", ErrInvalidSignature)
@@ -485,7 +485,7 @@ func RegisterAccount(store Store, userAddress common.Address, floatIdentityKey c
 	// The Exec Node's address is derived directly from its BLS public key.
 	hash := crypto.Keccak256(floatIdentityKey.Bytes())
 	blsDerivedAddress := common.BytesToAddress(hash[12:])
-	
+
 	if userAddress == blsDerivedAddress {
 		// It's a self-registration, the cluster BLS signature is sufficient.
 	} else {
@@ -631,7 +631,7 @@ func CheckFloatSupplyInvariant(store Store) error {
 	if err != nil {
 		return err
 	}
-	
+
 	sum := big.NewInt(0)
 	for _, keyHash := range keys {
 		bal, err := store.GetFloat(keyHash)
@@ -643,7 +643,7 @@ func CheckFloatSupplyInvariant(store Store) error {
 		}
 		sum.Add(sum, bal)
 	}
-	
+
 	total, err := store.GetFloat(floatTotalSupplyKey)
 	if err != nil {
 		return err
@@ -664,7 +664,7 @@ func ComputeSubmitStateRootMessage(clusterPubKey cm.PublicKey, epoch uint64, sta
 
 func SubmitStateRoot(store Store, clusterPubKey cm.PublicKey, epoch uint64, stateRoot common.Hash, cert cm.Sign) error {
 	clusterHash := crypto.Keccak256Hash(clusterPubKey[:])
-	
+
 	// Check if cluster exists
 	entry, found, err := store.GetChainRegistry(clusterHash)
 	if err != nil {
@@ -683,7 +683,7 @@ func SubmitStateRoot(store Store, clusterPubKey cm.PublicKey, epoch uint64, stat
 	// The implementation can just accept whatever epoch as long as it's signed.
 	// But it might be good to prevent overwriting with older roots.
 	// We just overwrite the epoch's state root.
-	
+
 	_, found, err = store.GetStateRoot(clusterHash, epoch)
 	if err != nil {
 		return err
