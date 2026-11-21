@@ -125,6 +125,7 @@ type Node struct {
 	fatal      func(error) // fail-closed exit for this replica (set in start)
 	mismatches atomic.Uint64
 	attested   atomic.Uint64
+	lastAttested atomic.Uint64
 
 	dropped atomic.Uint64 // batches that can never become a block (malformed / oversize)
 }
@@ -635,6 +636,14 @@ func (n *Node) IsLeader() bool {
 		return false
 	}
 	return n.raft.State() == raft.Leader
+}
+
+// LastAttested returns the highest block number verified by majority attestation.
+func (n *Node) LastAttested() uint64 {
+	if n == nil {
+		return 0
+	}
+	return n.lastAttested.Load()
 }
 
 // State returns the current Raft state string ("Leader", "Follower", "Candidate", etc.).

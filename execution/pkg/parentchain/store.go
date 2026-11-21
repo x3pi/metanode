@@ -65,6 +65,12 @@ type Store interface {
 	GetStateRoot(clusterKeyHash common.Hash, epoch uint64) (common.Hash, bool, error)
 	SetStateRoot(clusterKeyHash common.Hash, epoch uint64, root common.Hash) error
 
+	GetBlockCheckpoint(clusterKeyHash common.Hash, blockNumber uint64) (hash, stateRoot common.Hash, found bool, err error)
+	SetBlockCheckpoint(clusterKeyHash common.Hash, blockNumber uint64, hash, stateRoot common.Hash) error
+
+	GetLatestBlockCheckpoint(clusterKeyHash common.Hash) (blockNumber uint64, hash, stateRoot common.Hash, found bool, err error)
+	SetLatestBlockCheckpoint(clusterKeyHash common.Hash, blockNumber uint64, hash, stateRoot common.Hash) error
+
 	GetAllChainRegistryKeys() ([]common.Hash, error)
 
 	AppendInboundTransfer(destKeyHash common.Hash, event *TransferEvent) error
@@ -75,6 +81,17 @@ type Store interface {
 
 	GetNonce(sender common.Address) (uint64, error)
 	SetNonce(sender common.Address, nonce uint64) error
+}
+
+type blockCheckpointRecord struct {
+	hash      common.Hash
+	stateRoot common.Hash
+}
+
+type blockCheckpointLatestRecord struct {
+	blockNumber uint64
+	hash        common.Hash
+	stateRoot   common.Hash
 }
 
 // MemoryStore is an in-memory implementation for testing
@@ -90,6 +107,8 @@ type MemoryStore struct {
 	inbound              map[common.Hash][]*TransferEvent
 	accountRegistrations map[common.Hash][]*AccountRegisteredEvent
 	stateRoots           map[common.Hash]map[uint64]common.Hash
+	checkpoints          map[common.Hash]map[uint64]blockCheckpointRecord
+	latestCheckpoints    map[common.Hash]blockCheckpointLatestRecord
 	nonces               map[common.Address]uint64
 	snapshots            []*MemoryStore
 }
@@ -106,6 +125,8 @@ func NewMemoryStore() *MemoryStore {
 		inbound:              make(map[common.Hash][]*TransferEvent),
 		accountRegistrations: make(map[common.Hash][]*AccountRegisteredEvent),
 		stateRoots:           make(map[common.Hash]map[uint64]common.Hash),
+		checkpoints:          make(map[common.Hash]map[uint64]blockCheckpointRecord),
+		latestCheckpoints:    make(map[common.Hash]blockCheckpointLatestRecord),
 		nonces:               make(map[common.Address]uint64),
 	}
 }
@@ -166,6 +187,23 @@ func (m *MemoryStore) cloneInternal() *MemoryStore {
 		}
 		clone.accountRegistrations[k] = events
 	}
+	for k, v := range m.stateRoots {
+		sub := make(map[uint64]common.Hash, len(v))
+		for e, r := range v {
+			sub[e] = r
+		}
+		clone.stateRoots[k] = sub
+	}
+	for k, v := range m.checkpoints {
+		sub := make(map[uint64]blockCheckpointRecord, len(v))
+		for bn, rec := range v {
+			sub[bn] = rec
+		}
+		clone.checkpoints[k] = sub
+	}
+	for k, v := range m.latestCheckpoints {
+		clone.latestCheckpoints[k] = v
+	}
 	for k, v := range m.nonces {
 		clone.nonces[k] = v
 	}
@@ -202,7 +240,10 @@ func (m *MemoryStore) Drop() {
 	m.velocities = prev.velocities
 	m.accounts = prev.accounts
 	m.inbound = prev.inbound
+	m.accountRegistrations = prev.accountRegistrations
 	m.stateRoots = prev.stateRoots
+	m.checkpoints = prev.checkpoints
+	m.latestCheckpoints = prev.latestCheckpoints
 	m.nonces = prev.nonces
 }
 
@@ -481,5 +522,52 @@ func (m *MemoryStore) SetNonce(sender common.Address, nonce uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.nonces[sender] = nonce
+	return nil
+}
+
+func (m *MemoryStore) GetBlockCheckpoint(clusterKeyHash common.Hash, blockNumber uint64) (common.Hash, common.Hash, bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	sub, ok := m.checkpoints[clusterKeyHash]
+	if !ok {
+		return common.Hash{}, common.Hash{}, false, nil
+	}
+	rec, found := sub[blockNumber]
+	if !found {
+		return common.Hash{}, common.Hash{}, false, nil
+	}
+	return rec.hash, rec.stateRoot, true, nil
+}
+
+func (m *MemoryStore) SetBlockCheckpoint(clusterKeyHash common.Hash, blockNumber uint64, hash, stateRoot common.Hash) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sub, ok := m.checkpoints[clusterKeyHash]
+	if !ok {
+		sub = make(map[uint64]blockCheckpointRecord)
+		m.checkpoints[clusterKeyHash] = sub
+	}
+	sub[blockNumber] = blockCheckpointRecord{hash: hash, stateRoot: stateRoot}
+	return nil
+}
+
+func (m *MemoryStore) GetLatestBlockCheckpoint(clusterKeyHash common.Hash) (uint64, common.Hash, common.Hash, bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rec, ok := m.latestCheckpoints[clusterKeyHash]
+	if !ok {
+		return 0, common.Hash{}, common.Hash{}, false, nil
+	}
+	return rec.blockNumber, rec.hash, rec.stateRoot, true, nil
+}
+
+func (m *MemoryStore) SetLatestBlockCheckpoint(clusterKeyHash common.Hash, blockNumber uint64, hash, stateRoot common.Hash) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.latestCheckpoints[clusterKeyHash] = blockCheckpointLatestRecord{
+		blockNumber: blockNumber,
+		hash:        hash,
+		stateRoot:   stateRoot,
+	}
 	return nil
 }

@@ -29,6 +29,8 @@ const (
 	NamespaceConfigSystem     byte = 0x0C
 	NamespaceAccountRegistrationLog byte = 0x0D
 	NamespaceAccountRegistrationSeq byte = 0x0E
+	NamespaceBlockCheckpoint        byte = 0x0F
+	NamespaceBlockCheckpointLatest  byte = 0x10
 )
 
 var (
@@ -394,5 +396,40 @@ func DecodeAccountRegisteredEvent(data []byte) (*AccountRegisteredEvent, error) 
 		ClusterKey:  clusterKey,
 		ParentBlock: protoEv.ParentBlock,
 	}, nil
+}
+
+// ─── BLOCK CHECKPOINT ENCODING ──────────────────────────────────────────────
+
+// EncodeBlockCheckpointValue encodes a block checkpoint value (64 bytes: block_hash || state_root).
+func EncodeBlockCheckpointValue(blockHash, stateRoot common.Hash) []byte {
+	buf := make([]byte, 64)
+	copy(buf[:32], blockHash.Bytes())
+	copy(buf[32:], stateRoot.Bytes())
+	return buf
+}
+
+// DecodeBlockCheckpointValue decodes a block checkpoint value.
+func DecodeBlockCheckpointValue(data []byte) (blockHash, stateRoot common.Hash, err error) {
+	if len(data) != 64 {
+		return common.Hash{}, common.Hash{}, fmt.Errorf("%w: invalid checkpoint value len %d (want 64)", ErrEncodingCorrupt, len(data))
+	}
+	return common.BytesToHash(data[:32]), common.BytesToHash(data[32:]), nil
+}
+
+// EncodeBlockCheckpointLatestValue encodes the latest checkpoint value (72 bytes: be64(block_number) || block_hash || state_root).
+func EncodeBlockCheckpointLatestValue(blockNumber uint64, blockHash, stateRoot common.Hash) []byte {
+	buf := make([]byte, 72)
+	binary.BigEndian.PutUint64(buf[:8], blockNumber)
+	copy(buf[8:40], blockHash.Bytes())
+	copy(buf[40:72], stateRoot.Bytes())
+	return buf
+}
+
+// DecodeBlockCheckpointLatestValue decodes the latest checkpoint value.
+func DecodeBlockCheckpointLatestValue(data []byte) (blockNumber uint64, blockHash, stateRoot common.Hash, err error) {
+	if len(data) != 72 {
+		return 0, common.Hash{}, common.Hash{}, fmt.Errorf("%w: invalid latest checkpoint value len %d (want 72)", ErrEncodingCorrupt, len(data))
+	}
+	return binary.BigEndian.Uint64(data[:8]), common.BytesToHash(data[8:40]), common.BytesToHash(data[40:72]), nil
 }
 

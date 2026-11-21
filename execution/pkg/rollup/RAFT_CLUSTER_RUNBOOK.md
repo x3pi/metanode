@@ -50,3 +50,28 @@ Mọi replica dùng **cùng** khoá (`private_key`, địa chỉ = `raft.sequenc
 ## Giới hạn
 - Một máy thử: chưa chạy trên nhiều máy thật. Đường reflink (btrfs qua loopback) **đã chạy thật** (2026-09-27): dừng thực thi 1,37s, cây 77 GB logic → 283 MB thật; cần `raft.forward_port_offset` đặt trên các node cũ để leader tự suy ra địa chỉ nội bộ của replica thêm sau (thiếu thì `add-replica` từ chối lúc nâng voter với lỗi "no internal endpoint known"). Kênh nội bộ là HTTP thường có HMAC (xác thực, không mã hoá): dùng trong mạng tin cậy.
 - `state_root_consistent` là so hash header (đã gồm các state root) tại block checkpoint chung, không so từng state root riêng.
+
+## Neo Checkpoint lên Parent Chain (`CheckpointWorker`)
+- **Cơ chế:** Cứ mỗi $N$ block (mặc định 100 block), Raft leader thu thập các checkpoint gồm `{block_number, block_hash, state_root}` đã được đa số replica attest (`AttestedBlock()`) và gửi batch lên Parent Chain thông qua transaction `METHOD_SUBMIT_BLOCK_CHECKPOINTS = 10`.
+- **Cấu hình:** Trong cấu hình `raft` của `config.json`:
+  - `"checkpoint_interval_blocks": 100` (mặc định 100; đặt 0 để tắt worker).
+- **Cảnh báo Telegram & Chống Spam (Circuit Breaker):**
+  - Worker có state machine cảnh báo Telegram chống spam khi mạng lỗi hoặc Parent Chain ngừng hoạt động:
+    - Lỗi 1-4 vòng: Jitter mạng tạm thời, chỉ log console `logger.Warn`.
+    - Lỗi 5 vòng liên tiếp: Cảnh báo ban đầu `⚠️ [ParentChain] Mất kết nối 5 lần liên tiếp...`.
+    - Lỗi 15 vòng liên tiếp (~30s): Xác định Parent Chain bị treo/ngừng hoạt động, gửi 1 cảnh báo chốt hạ `🚨 [ParentChain] Chain ngừng hoạt động (15 lần lỗi)... Dừng thông báo tránh spam...` và hoàn toàn im lặng trên Telegram trong suốt thời gian chain chết.
+    - Khi Parent Chain phục hồi: Gửi đúng 1 thông báo xanh `🟢 [ParentChain] Chain đã phục hồi sau X lần lỗi! Tiếp tục gửi checkpoint.` và gom batch (tối đa 64 checkpoints) gửi bù.
+- **Backoff chống spam gửi & chống phá vỡ pipeline nonce:**
+  - Nếu tx bị Parent Chain từ chối (`Receipt.Status == 0` do conflict hoặc lỗi decode/auth), worker tự động lùi bước `rejectBackoffRounds = 150` vòng (~5 phút). Việc này ngăn chặn worker gửi lại liên tục mỗi vài giây, triệt tiêu nguy cơ reset pipeline nonce dùng chung với `SendWorker`.
+  - **Chống spam cảnh báo từ chối tx:** Sử dụng cờ `isTxRejected` (tương tự `isForkDetected`). Khi bị từ chối lần đầu, bắn đúng 1 tin cảnh báo đỏ `🚨 [ParentChain] Giao dịch checkpoint bị từ chối (ErrorCode=230)...`. Các lần thử lại sau 5 phút nếu vẫn bị từ chối sẽ âm thầm ghi log console, hoàn toàn không spam Telegram (tránh 12 tin/giờ). Khi tx thành công hoặc checkpoint được xác nhận, gửi đúng 1 thông báo phục hồi `🟢 [ParentChain] Giao dịch checkpoint đã thành công trở lại! Tiếp tục neo checkpoint.`.
+  - Nếu phát hiện **LỆCH HASH / FORK** (checkpoint trên parent khác block hash của local): Worker dừng gửi ngay lập tức, bật backoff `rejectBackoffRounds = 150` vòng, và phát cảnh báo đỏ chuyên biệt `🚨 [ParentChain] PHÁT HIỆN LỆCH HASH / FORK: ...` (không gộp nhầm vào cảnh báo mất kết nối mạng).
+- **Kiểm tra trạng thái neo:**
+  - Tra cứu checkpoint mới nhất của cluster trên Parent Chain:
+    `curl "http://<parent_ip>:<parent_rpc_port>/block_checkpoint_latest?pubkey=<cluster_bls_pubkey>"`
+    Trả về: `{"block_number": N, "block_hash": "0x...", "state_root": "0x...", "found": true}`.
+- **Quy trình nâng cấp:**
+  1. Phải nâng cấp và deploy toàn bộ các node Parent Chain trước (để Parent Chain nhận diện `METHOD_SUBMIT_BLOCK_CHECKPOINTS`).
+  2. Sau đó mới khởi động lại các node Shard Raft với worker được kích hoạt.
+- **Lưu ý khi Reset Devnet:**
+  - Nếu reset Shard Raft về block 0 mà giữ nguyên cluster key, Parent Chain vẫn lưu checkpoint cũ và sẽ từ chối block mới bằng `ErrCheckpointConflict`.
+  - Khi reset Shard Raft trên devnet, hãy reset cả Parent Chain (`./deploy_clusters.sh reset`) hoặc tạo bộ khóa cluster mới.

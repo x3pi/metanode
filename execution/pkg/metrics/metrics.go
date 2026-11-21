@@ -52,6 +52,30 @@ var (
 		Help: "Total epoch transitions completed",
 	})
 
+	// CheckpointGapTotal counts the number of times the checkpoint worker skipped pruned blocks.
+	CheckpointGapTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "checkpoint_gap_total",
+		Help: "Total number of times checkpoint worker skipped pruned blocks",
+	})
+
+	// CheckpointForkDetectedTotal counts the number of times a fork or devnet reset was detected against Parent Chain.
+	CheckpointForkDetectedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "checkpoint_fork_detected_total",
+		Help: "Total number of times checkpoint hash mismatch with parent was detected",
+	})
+
+	// CheckpointTxRejectedTotal counts the number of times a checkpoint submission was rejected on parent chain (status 0).
+	CheckpointTxRejectedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "checkpoint_tx_rejected_total",
+		Help: "Total number of checkpoint transactions rejected by parent chain",
+	})
+
+	// CheckpointBlockUnavailableTotal counts the number of times BlockAt(n) was unavailable when constructing a checkpoint batch.
+	CheckpointBlockUnavailableTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "checkpoint_block_unavailable_total",
+		Help: "Total number of times local block data was unavailable for checkpoint batching",
+	})
+
 	// BlockStmConflictsTotal counts transactions/groups aborted during Block-STM parallel execution.
 	BlockStmConflictsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "master_block_stm_conflicts_total",

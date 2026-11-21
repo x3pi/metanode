@@ -146,6 +146,29 @@ func (c *httpClient) GetStateRoot(clusterPubKey cm.PublicKey, epoch uint64) (com
 	return resp.Root, resp.Found, err
 }
 
+func (c *httpClient) GetBlockCheckpoint(clusterPubKey cm.PublicKey, blockNumber uint64) (common.Hash, common.Hash, bool, error) {
+	pubKeyHex := hexEncode(clusterPubKey[:])
+	var resp struct {
+		BlockHash common.Hash `json:"block_hash"`
+		StateRoot common.Hash `json:"state_root"`
+		Found     bool        `json:"found"`
+	}
+	err := c.get(fmt.Sprintf("/block_checkpoint?pubkey=%s&number=%d", pubKeyHex, blockNumber), &resp)
+	return resp.BlockHash, resp.StateRoot, resp.Found, err
+}
+
+func (c *httpClient) GetLatestBlockCheckpoint(clusterPubKey cm.PublicKey) (uint64, common.Hash, common.Hash, bool, error) {
+	pubKeyHex := hexEncode(clusterPubKey[:])
+	var resp struct {
+		BlockNumber uint64      `json:"block_number"`
+		BlockHash   common.Hash `json:"block_hash"`
+		StateRoot   common.Hash `json:"state_root"`
+		Found       bool        `json:"found"`
+	}
+	err := c.get(fmt.Sprintf("/block_checkpoint_latest?pubkey=%s", pubKeyHex), &resp)
+	return resp.BlockNumber, resp.BlockHash, resp.StateRoot, resp.Found, err
+}
+
 func (c *httpClient) GetBlockByNumber(number uint64) (BlockRecord, bool, error) {
 	var resp struct {
 		Record BlockRecord `json:"record"`
@@ -311,6 +334,8 @@ func (s *HTTPServer) Handler() http.Handler {
 	mux.HandleFunc("/nonce", s.handleNonce)
 	mux.HandleFunc("/account", s.handleAccount)
 	mux.HandleFunc("/state_root", s.handleStateRoot)
+	mux.HandleFunc("/block_checkpoint", s.handleBlockCheckpoint)
+	mux.HandleFunc("/block_checkpoint_latest", s.handleBlockCheckpointLatest)
 	mux.HandleFunc("/float", s.handleFloat)
 	mux.Handle("/metrics", promhttp.Handler())
 	return mux
@@ -469,6 +494,43 @@ func (s *HTTPServer) handleStateRoot(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"root":  root,
 		"found": found,
+	})
+}
+
+func (s *HTTPServer) handleBlockCheckpoint(w http.ResponseWriter, r *http.Request) {
+	pubKeyHex := r.URL.Query().Get("pubkey")
+	pubKeyBytes := common.FromHex(pubKeyHex)
+
+	numStr := r.URL.Query().Get("number")
+	num, _ := strconv.ParseUint(numStr, 10, 64)
+
+	hash, root, found, err := s.store.GetBlockCheckpoint(crypto.Keccak256Hash(pubKeyBytes), num)
+	if err != nil {
+		http.Error(w, "store error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"block_number": num,
+		"block_hash":   hash,
+		"state_root":   root,
+		"found":        found,
+	})
+}
+
+func (s *HTTPServer) handleBlockCheckpointLatest(w http.ResponseWriter, r *http.Request) {
+	pubKeyHex := r.URL.Query().Get("pubkey")
+	pubKeyBytes := common.FromHex(pubKeyHex)
+
+	num, hash, root, found, err := s.store.GetLatestBlockCheckpoint(crypto.Keccak256Hash(pubKeyBytes))
+	if err != nil {
+		http.Error(w, "store error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"block_number": num,
+		"block_hash":   hash,
+		"state_root":   root,
+		"found":        found,
 	})
 }
 

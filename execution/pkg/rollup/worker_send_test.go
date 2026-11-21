@@ -11,6 +11,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/parentchain"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
 type mockParentChainClient struct {
@@ -137,6 +138,18 @@ func (m *mockParentChainClient) SendSubmitStateRoot(clusterPubKey cm.PublicKey, 
 
 func (m *mockParentChainClient) GetStateRoot(clusterPubKey cm.PublicKey, epoch uint64) (common.Hash, bool, error) {
 	return common.Hash{}, false, nil
+}
+
+func (m *mockParentChainClient) SendSubmitBlockCheckpoints(clusterPubKey cm.PublicKey, checkpoints []*pb.BlockCheckpoint, cert cm.Sign) (common.Hash, error) {
+	return common.Hash{}, nil
+}
+
+func (m *mockParentChainClient) GetBlockCheckpoint(clusterPubKey cm.PublicKey, blockNumber uint64) (common.Hash, common.Hash, bool, error) {
+	return common.Hash{}, common.Hash{}, false, nil
+}
+
+func (m *mockParentChainClient) GetLatestBlockCheckpoint(clusterPubKey cm.PublicKey) (uint64, common.Hash, common.Hash, bool, error) {
+	return 0, common.Hash{}, common.Hash{}, false, nil
 }
 
 func (m *mockParentChainClient) GetBlockByNumber(number uint64) (parentchain.BlockRecord, bool, error) {

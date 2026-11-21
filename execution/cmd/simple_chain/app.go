@@ -195,6 +195,7 @@ type App struct {
 	regWorker              *rollup.RegistrationWorker
 	regRelay               *rollup.RegistrationRelay
 	regTracker             *processor.RegistrationTracker
+	checkpointWorker       *rollup.CheckpointWorker
 	parentClient           parentchain.Client
 	rollupEnabled          bool // true only when PARENT_CHAIN_URL is set: rollup workers + parent-chain registration
 
@@ -439,6 +440,13 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	app.recvWorker = rollup.NewReceiveWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 	app.reclaimWorker = rollup.NewReclaimWorker(rollupStore, stateDBAdapter, parentClient, app.keyPair)
 	app.regWorker = rollup.NewRegistrationWorker(stateDBAdapter, parentClient, app.keyPair, app.keyPair.PublicKey())
+	if app.config.Raft != nil && app.rollupEnabled {
+		interval := app.config.Raft.GetCheckpointIntervalBlocks()
+		if interval > 0 {
+			srcAdapter := &raftCheckpointSourceAdapter{}
+			app.checkpointWorker = rollup.NewCheckpointWorker(parentClient, srcAdapter, app.keyPair, interval, 2*time.Second)
+		}
+	}
 	// Users register ONLY with this node (mtn_registerAccount); the relay forwards the cluster-signed registration to the
 	// Parent Chain automatically and tracks the outcome. Same key the node already uses to self-register on the parent.
 	app.regRelay = rollup.NewRegistrationRelay(parentClient, app.keyPair.PublicKey(),
@@ -1118,6 +1126,9 @@ func (app *App) Run() error {
 		if app.regRelay != nil && app.config.AccountGateParentRegistered() {
 			app.regRelay.Start()
 		}
+		if app.checkpointWorker != nil {
+			app.checkpointWorker.Start()
+		}
 		if app.conservationRun != nil {
 			go app.conservationRun()
 		}
@@ -1256,6 +1267,9 @@ func (app *App) Stop() {
 	}
 	if app.regRelay != nil {
 		app.regRelay.Stop()
+	}
+	if app.checkpointWorker != nil {
+		app.checkpointWorker.Stop()
 	}
 	if app.regTracker != nil {
 		app.regTracker.Stop()
@@ -1592,4 +1606,35 @@ func (d durableKV) Delete(key []byte) error {
 		return err
 	}
 	return storage.SyncDurable(d.Storage)
+}
+
+// raftCheckpointSourceAdapter adapts app state and blockchain for CheckpointWorker.
+type raftCheckpointSourceAdapter struct{}
+
+func (a *raftCheckpointSourceAdapter) IsLeader() bool {
+	return raftfeed.IsLeader()
+}
+
+func (a *raftCheckpointSourceAdapter) AttestedBlock() uint64 {
+	return raftfeed.AttestedBlock()
+}
+
+func (a *raftCheckpointSourceAdapter) BlockAt(n uint64) (e_common.Hash, e_common.Hash, bool) {
+	bc := blockchain.GetBlockChainInstance()
+	if bc == nil {
+		return e_common.Hash{}, e_common.Hash{}, false
+	}
+	blk := bc.GetBlockByNumber(n)
+	if blk == nil || blk.Header() == nil {
+		return e_common.Hash{}, e_common.Hash{}, false
+	}
+	return blk.Header().Hash(), blk.Header().AccountStatesRoot(), true
+}
+
+func (a *raftCheckpointSourceAdapter) LastPrunedBlock() uint64 {
+	bc := blockchain.GetBlockChainInstance()
+	if bc == nil {
+		return 0
+	}
+	return bc.GetLastPrunedBlockNumber()
 }

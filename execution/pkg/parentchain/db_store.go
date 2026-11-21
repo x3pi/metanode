@@ -243,3 +243,19 @@ func (s *DBStore) SetNonce(sender common.Address, nonce uint64) error {
 	return s.committer.Store().SetNonce(sender, nonce)
 }
 
+func (s *DBStore) GetBlockCheckpoint(clusterKeyHash common.Hash, blockNumber uint64) (common.Hash, common.Hash, bool, error) {
+	return s.committer.Store().GetBlockCheckpoint(clusterKeyHash, blockNumber)
+}
+
+func (s *DBStore) SetBlockCheckpoint(clusterKeyHash common.Hash, blockNumber uint64, hash, stateRoot common.Hash) error {
+	return s.committer.Store().SetBlockCheckpoint(clusterKeyHash, blockNumber, hash, stateRoot)
+}
+
+func (s *DBStore) GetLatestBlockCheckpoint(clusterKeyHash common.Hash) (uint64, common.Hash, common.Hash, bool, error) {
+	return s.committer.Store().GetLatestBlockCheckpoint(clusterKeyHash)
+}
+
+func (s *DBStore) SetLatestBlockCheckpoint(clusterKeyHash common.Hash, blockNumber uint64, hash, stateRoot common.Hash) error {
+	return s.committer.Store().SetLatestBlockCheckpoint(clusterKeyHash, blockNumber, hash, stateRoot)
+}
+
