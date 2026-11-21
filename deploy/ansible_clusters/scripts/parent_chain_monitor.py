@@ -24,6 +24,7 @@ Sends alerts to Telegram channel when anomalies are detected.
 
 import sys
 import os
+import re
 import time
 import json
 import html
@@ -51,18 +52,20 @@ TEST_FLAG_FILES = [
     "/tmp/metanode_ignore_nodes",
 ]
 
-def is_node_disabled(node_name):
+def is_node_disabled(node_name, inventory_path=None):
     """
     Check if a parent chain node is marked as intentionally disabled/stopped.
-    Markers can be in /tmp or in MONITOR_STATE_DIR.
+    Markers are scoped strictly within the namespaced MONITOR_STATE_DIR.
     """
-    state_dir = os.environ.get("MONITOR_STATE_DIR", "")
-    candidates = [
-        f"/tmp/node.{node_name}.disabled",
-    ]
-    if state_dir:
-        candidates.append(os.path.join(state_dir, f"node.{node_name}.disabled"))
-    return any(os.path.exists(p) for p in candidates)
+    state_dir = os.environ.get("MONITOR_STATE_DIR")
+    if not state_dir:
+        inv = inventory_path or DEFAULT_INVENTORY
+        base = os.path.basename(inv)
+        base = re.sub(r'\.ya?ml$', '', base)
+        slug = re.sub(r'[^A-Za-z0-9_-]+', '-', base).strip('-') or "inventory"
+        state_dir = f"/opt/metanode/monitors/{slug}"
+    flag_file = os.path.join(state_dir, f"node.{node_name}.disabled")
+    return os.path.exists(flag_file)
 
 def is_test_in_progress():
     """
@@ -74,7 +77,7 @@ def is_test_in_progress():
         return True
     return any(os.path.exists(f) for f in TEST_FLAG_FILES)
 
-def load_config(inventory_path=None, include_disabled=False):
+def load_config(inventory_path=None):
     """
     Parse inventory.yml directly without hardcoding any nodes or telegram credentials.
     Reads:
@@ -111,16 +114,14 @@ def load_config(inventory_path=None, include_disabled=False):
     nodes = {}
     for name, data in p_nodes.items():
         if isinstance(data, dict):
-            if not include_disabled and is_node_disabled(name):
-                continue
             host = data.get('ansible_host')
             if not host:
                 continue
             port = data.get('parent_http_port', default_rpc_port)
             nodes[name] = f"http://{host}:{port}"
 
-    if not nodes and include_disabled:
-        sys.exit(f"❌ Không tìm thấy node nào trong 'parent_chain_nodes.hosts' của {inv_file}")
+    if not nodes:
+        sys.exit(f"❌ Không tìm thấy node hợp lệ nào trong 'parent_chain_nodes.hosts' của {inv_file}")
 
     return nodes, bot_token, chat_id, inv_file
 
@@ -312,7 +313,7 @@ def run_monitor_loop(inventory_path=None, interval=5):
         try:
             results = {}
             for name, url in nodes.items():
-                if is_node_disabled(name):
+                if is_node_disabled(name, inv_file):
                     continue
                 results[name] = query_node_status(url)
 
@@ -437,7 +438,7 @@ def run_monitor_loop(inventory_path=None, interval=5):
 
 def check_status_once(inventory_path=None):
     """Run single inspection and print summary table."""
-    nodes, _, _, inv_file = load_config(inventory_path, include_disabled=True)
+    nodes, _, _, inv_file = load_config(inventory_path)
     print("═══════════════════════════════════════════════════════════════════")
     print("🔍 PARENT CHAIN LIVE HEALTH & HASH CONSISTENCY CHECK")
     print(f"📄 Nguồn cấu hình: {inv_file}")
@@ -446,7 +447,7 @@ def check_status_once(inventory_path=None):
     by_block = {}
 
     for name, url in nodes.items():
-        if is_node_disabled(name):
+        if is_node_disabled(name, inv_file):
             print(f"• {name} ({url}): ⏸️ DISABLED (Bảo trì theo kế hoạch)")
             continue
         res = query_node_status(url)

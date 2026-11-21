@@ -707,11 +707,9 @@ stop_single_node_monitor() {
     for h in "${HOSTS[@]}"; do
         [ -n "$h" ] || continue
         touch "${MONITOR_STATE_DIR}/node.${h}.disabled" 2>/dev/null || true
-        touch "/tmp/node.${h}.disabled" 2>/dev/null || true
     done
     if [ "$target" != "$resolved" ]; then
         touch "${MONITOR_STATE_DIR}/node.${target}.disabled" 2>/dev/null || true
-        touch "/tmp/node.${target}.disabled" 2>/dev/null || true
     fi
 
     if has_local_systemd && systemctl is-active --quiet "$MONITOR_UNIT" 2>/dev/null; then
@@ -729,9 +727,9 @@ start_single_node_monitor() {
     IFS=',' read -ra HOSTS <<< "$resolved"
     for h in "${HOSTS[@]}"; do
         [ -n "$h" ] || continue
-        rm -f "${MONITOR_STATE_DIR}/node.${h}.disabled" "/tmp/node.${h}.disabled" 2>/dev/null || true
+        rm -f "${MONITOR_STATE_DIR}/node.${h}.disabled" 2>/dev/null || true
     done
-    rm -f "${MONITOR_STATE_DIR}/node.${target}.disabled" "/tmp/node.${target}.disabled" 2>/dev/null || true
+    rm -f "${MONITOR_STATE_DIR}/node.${target}.disabled" 2>/dev/null || true
 
     # Nếu cụm trước đó bị tắt toàn bộ (.disabled), việc start 1 node cũng gỡ bỏ cờ disabled của cụm
     rm -f "${MONITOR_STATE_DIR}/exec_monitors.disabled" "${MONITOR_STATE_DIR}/parent_monitor.disabled" 2>/dev/null || true
@@ -746,7 +744,7 @@ stop_parent_monitor_only() {
     if [ "$disable_boot" = "true" ]; then
         while IFS= read -r p_node; do
             [ -n "$p_node" ] || continue
-            touch "${MONITOR_STATE_DIR}/node.${p_node}.disabled" "/tmp/node.${p_node}.disabled" 2>/dev/null || true
+            touch "${MONITOR_STATE_DIR}/node.${p_node}.disabled" 2>/dev/null || true
         done < <(get_parent_node_names 2>/dev/null || true)
     fi
 
@@ -776,7 +774,7 @@ stop_exec_monitors_only() {
     if [ "$disable_boot" = "true" ]; then
         while IFS= read -r e_node; do
             [ -n "$e_node" ] || continue
-            touch "${MONITOR_STATE_DIR}/node.${e_node}.disabled" "/tmp/node.${e_node}.disabled" 2>/dev/null || true
+            touch "${MONITOR_STATE_DIR}/node.${e_node}.disabled" 2>/dev/null || true
         done < <(get_exec_node_names 2>/dev/null || true)
     fi
 
@@ -820,7 +818,7 @@ stop_cluster_monitors() {
 
     if [ "$disable_boot" = "true" ]; then
         echo "🛑 Dừng hẳn Monitor và tắt tự khởi động cùng hệ thống (${MONITOR_UNIT})..."
-        rm -f "${MONITOR_STATE_DIR}/node."*.disabled "/tmp/node."*.disabled 2>/dev/null || true
+        rm -f "${MONITOR_STATE_DIR}/node."*.disabled 2>/dev/null || true
     else
         echo "⏸️  Tạm dừng monitor ngầm (${MONITOR_UNIT}) để tránh báo động giả..."
     fi
@@ -877,17 +875,17 @@ start_cluster_monitors() {
         rm -f "${MONITOR_STATE_DIR}/parent_monitor.disabled" 2>/dev/null || true
         while IFS= read -r node_name; do
             [ -n "$node_name" ] || continue
-            rm -f "${MONITOR_STATE_DIR}/node.${node_name}.disabled" "/tmp/node.${node_name}.disabled" 2>/dev/null || true
+            rm -f "${MONITOR_STATE_DIR}/node.${node_name}.disabled" 2>/dev/null || true
         done < <(get_parent_node_names 2>/dev/null || true)
     elif [ "$EXEC_ONLY" = "true" ]; then
         rm -f "${MONITOR_STATE_DIR}/exec_monitors.disabled" 2>/dev/null || true
         while IFS= read -r node_name; do
             [ -n "$node_name" ] || continue
-            rm -f "${MONITOR_STATE_DIR}/node.${node_name}.disabled" "/tmp/node.${node_name}.disabled" 2>/dev/null || true
+            rm -f "${MONITOR_STATE_DIR}/node.${node_name}.disabled" 2>/dev/null || true
         done < <(get_exec_node_names 2>/dev/null || true)
     else
         rm -f "${MONITOR_STATE_DIR}/parent_monitor.disabled" "${MONITOR_STATE_DIR}/exec_monitors.disabled" 2>/dev/null || true
-        rm -f "${MONITOR_STATE_DIR}/node."*.disabled "/tmp/node."*.disabled 2>/dev/null || true
+        rm -f "${MONITOR_STATE_DIR}/node."*.disabled 2>/dev/null || true
     fi
 
     if has_local_systemd && [ -f "$MONITOR_SUPERVISOR_SCRIPT" ]; then
