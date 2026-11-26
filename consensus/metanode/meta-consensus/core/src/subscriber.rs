@@ -85,13 +85,11 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
         self.unsubscribe_locked(peer, &mut subscriptions[peer.value()]);
 
         let coordination_hub = self.coordination_hub.clone();
-        let dag_state = self.dag_state.clone();
 
         subscriptions[peer.value()] = Some(tokio::spawn(Self::subscription_loop(
             context,
             network_client,
             authority_service,
-            dag_state,
             coordination_hub,
             peer,
             last_received,
@@ -120,10 +118,9 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
         context: Arc<Context>,
         network_client: Arc<C>,
         authority_service: Arc<S>,
-        dag_state: Arc<RwLock<DagState>>,
         coordination_hub: Option<crate::coordination_hub::ConsensusCoordinationHub>,
         peer: AuthorityIndex,
-        mut last_received: Round,
+        last_received: Round,
     ) {
         const IMMEDIATE_RETRIES: i64 = 3;
         const MIN_TIMEOUT: Duration = Duration::from_millis(500);
@@ -160,17 +157,6 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                 tokio::task::yield_now().await;
             }
             retries += 1;
-
-            // Refresh the resume point on every (re)connect. `last_received` computed once at
-            // subscribe() time goes stale on long-running nodes: when the peer restarts, the old
-            // value makes it replay its whole in-memory history before any new block, so its
-            // fresh proposals never reach us and its leader slots are all skipped.
-            {
-                let dag_state = dag_state.read();
-                last_received = last_received
-                    .max(dag_state.get_last_block_for_authority(peer).round())
-                    .max(dag_state.gc_round());
-            }
 
             // Use longer timeout when retry delay is long, to adapt to slow network.
             let request_timeout = MIN_TIMEOUT.max(delay);
@@ -315,21 +301,15 @@ mod test {
         commit::CommitRange,
         error::ConsensusResult,
         network::{test_network::TestService, BlockStream, ExtendedSerializedBlock},
-        block::TestBlock,
         storage::mem_store::MemStore,
         VerifiedBlock,
     };
 
-    struct SubscriberTestClient {
-        /// `last_received` of every subscribe_blocks() call, in order.
-        last_received_seen: Mutex<Vec<Round>>,
-    }
+    struct SubscriberTestClient {}
 
     impl SubscriberTestClient {
         fn new() -> Self {
-            Self {
-                last_received_seen: Mutex::new(Vec::new()),
-            }
+            Self {}
         }
     }
 
@@ -347,10 +327,9 @@ mod test {
         async fn subscribe_blocks(
             &self,
             _peer: AuthorityIndex,
-            last_received: Round,
+            _last_received: Round,
             _timeout: Duration,
         ) -> ConsensusResult<BlockStream> {
-            self.last_received_seen.lock().push(last_received);
             let block_stream = stream::unfold((), |_| async {
                 sleep(Duration::from_millis(1)).await;
                 let block = ExtendedSerializedBlock {
@@ -471,39 +450,5 @@ mod test {
                 }
             );
         }
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn subscriber_refreshes_last_received_on_reconnect() {
-        let (context, _keys) = Context::new_for_test(4);
-        let context = Arc::new(context);
-        let authority_service = Arc::new(Mutex::new(TestService::new()));
-        let network_client = Arc::new(SubscriberTestClient::new());
-        let store = Arc::new(MemStore::new());
-        let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
-        let subscriber = Subscriber::new(
-            context.clone(),
-            network_client.clone(),
-            authority_service,
-            dag_state.clone(),
-            None,
-        );
-
-        let peer = context.committee.to_authority_index(2).unwrap();
-        subscriber.subscribe(peer);
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        assert_eq!(network_client.last_received_seen.lock().first(), Some(&0));
-
-        // A block from the peer is accepted while subscribed (e.g. via synchronizer).
-        dag_state
-            .write()
-            .accept_block(VerifiedBlock::new_for_test(TestBlock::new(10, 2).build()));
-
-        // The test stream ends after 10 blocks, forcing reconnects. A reconnect must resume
-        // after the block we already have, not from the round computed at subscribe() time.
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        let seen = network_client.last_received_seen.lock().clone();
-        assert!(seen.len() >= 2, "expected reconnects, got {seen:?}");
-        assert_eq!(seen.last(), Some(&10));
     }
 }
