@@ -240,6 +240,10 @@ type AccountRegistryHandler struct {
 	chainID           uint64
 	committeeProvider CommitteeProvider
 	trustedValidators map[cm.PublicKey]bool
+	// OnProvisionalApplied (optional) is invoked when an account transitions to provisional while txHash (the
+	// account_provisional tx, zero when unknown) executes. Execution may be speculative and not yet committed.
+	// Must be non-blocking and must not touch state: it runs inside deterministic transaction execution.
+	OnProvisionalApplied func(user common.Address, txHash common.Hash)
 }
 
 // NewAccountRegistryHandler creates a new handler bound to the cluster's public key.
@@ -442,6 +446,11 @@ func (h *AccountRegistryHandler) verifyAttestations(
 
 // ApplyAttested executes an account registration, provisional activation, or lock payload against stateDB.
 func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, store AttestationStore, committee CommitteeProvider, data []byte) error {
+	return h.ApplyAttestedTx(stateDB, store, committee, data, common.Hash{})
+}
+
+// ApplyAttestedTx is ApplyAttested for the system tx txHash; txHash is only reported to OnProvisionalApplied.
+func (h *AccountRegistryHandler) ApplyAttestedTx(stateDB AccountStateRegistryDB, store AttestationStore, committee CommitteeProvider, data []byte, txHash common.Hash) error {
 	if stateDB == nil {
 		return errors.New("account registry: stateDB is nil")
 	}
@@ -499,7 +508,7 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 		// user's mtn_registerAccount call knows about the request, so f+1 could never be reached on a committee of 4+
 		// distinct keys. Everything an extra signer could check here is already checked deterministically by every
 		// replica (user signature bound to this cluster key, not locked, not registered); the attestation only proves
-		// a committee member submitted it. Accepted risk (offline-provisional policy): the address may meanwhile be
+		// a committee member submitted it. Accepted risk (always-provisional policy): the address may meanwhile be
 		// owned by another cluster on the Parent Chain; it is locked here once the parent's answer arrives.
 		digest := ComputeAccountProvisionalAttestDigest(h.attestChainID(), payload.User, payload.ClusterKey, payload.UserSig)
 		ok, err := h.verifyAttestations(store, committee, digest, payload.Attestations, 1)
@@ -508,6 +517,9 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 		}
 		if ok {
 			stateDB.SetProvisional(payload.User, true)
+			if h.OnProvisionalApplied != nil {
+				h.OnProvisionalApplied(payload.User, txHash)
+			}
 		}
 		return nil
 
@@ -559,16 +571,26 @@ func attestationPendingKey(digest []byte) common.Hash {
 	return common.BytesToHash(crypto.Keccak256([]byte("ACCT_REG_PENDING_V1"), digest))
 }
 
-// HasPendingAttestation reports whether validator's attestation for this event is already recorded on chain (waiting
-// for the remaining validators), so its worker does not keep re-submitting it.
-func HasPendingAttestation(db SmartContractDB, chainID uint64, user common.Address, clusterKey cm.PublicKey, parentSeq uint64, validator cm.PublicKey) bool {
-	key := attestationPendingKey(ComputeAccountRegistrationAttestDigest(chainID, user, clusterKey, parentSeq))
+func hasPendingDigestAttestation(db SmartContractDB, digest []byte, validator cm.PublicKey) bool {
+	key := attestationPendingKey(digest)
 	for _, a := range NewDBAttestationStore(db).Load(key) {
 		if a.ValidatorPubkey == validator {
 			return true
 		}
 	}
 	return false
+}
+
+// HasPendingAttestation reports whether validator's attestation for this event is already recorded on chain (waiting
+// for the remaining validators), so its worker does not keep re-submitting it.
+func HasPendingAttestation(db SmartContractDB, chainID uint64, user common.Address, clusterKey cm.PublicKey, parentSeq uint64, validator cm.PublicKey) bool {
+	return hasPendingDigestAttestation(db, ComputeAccountRegistrationAttestDigest(chainID, user, clusterKey, parentSeq), validator)
+}
+
+// HasPendingLockAttestation reports whether validator's lock attestation for (user, homeCluster) is already recorded
+// on chain (waiting for the remaining validators to reach f+1), so it does not keep re-submitting it.
+func HasPendingLockAttestation(db SmartContractDB, chainID uint64, user common.Address, homeCluster cm.PublicKey, validator cm.PublicKey) bool {
+	return hasPendingDigestAttestation(db, ComputeAccountLockedAttestDigest(chainID, user, homeCluster, 0), validator)
 }
 
 const attestEntrySize = len(cm.PublicKey{}) + len(cm.Sign{})

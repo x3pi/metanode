@@ -752,60 +752,92 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		return proposeRegPayload(payload, rollup.SystemPayloadKindAccountRegistered)
 	}
 
-	app.regRelay.SetProvisionalProposer(func(user e_common.Address, userSig []byte) error {
-		payload := rollup.AccountRegistrationPayload{
-			Kind:       rollup.SystemPayloadKindAccountProvisional,
-			User:       user,
-			ClusterKey: app.keyPair.PublicKey(),
-			UserSig:    userSig,
-		}
-		if ak := attestKey; ak != nil {
-			chainID := app.config.ChainId.Uint64()
-			if app.accountRegistryHandler != nil {
-				chainID = app.accountRegistryHandler.AttestChainID()
+	if app.rollupEnabled {
+		app.regRelay.SetProvisionalProposer(func(user e_common.Address, userSig []byte) error {
+			payload := rollup.AccountRegistrationPayload{
+				Kind:       rollup.SystemPayloadKindAccountProvisional,
+				User:       user,
+				ClusterKey: app.keyPair.PublicKey(),
+				UserSig:    userSig,
 			}
-			digest := rollup.ComputeAccountProvisionalAttestDigest(chainID, user, app.keyPair.PublicKey(), userSig)
-			payload.Attestations = []rollup.RegistrationAttestation{{
-				ValidatorPubkey: ak.PublicKey(),
-				Signature:       bls.Sign(ak.PrivateKey(), digest),
-			}}
-		}
-		data, err := payload.MarshalProto()
-		if err != nil {
-			return err
-		}
-		return proposeRegPayload(data, rollup.SystemPayloadKindAccountProvisional)
-	})
+			if ak := attestKey; ak != nil {
+				chainID := app.config.ChainId.Uint64()
+				if app.accountRegistryHandler != nil {
+					chainID = app.accountRegistryHandler.AttestChainID()
+				}
+				digest := rollup.ComputeAccountProvisionalAttestDigest(chainID, user, app.keyPair.PublicKey(), userSig)
+				payload.Attestations = []rollup.RegistrationAttestation{{
+					ValidatorPubkey: ak.PublicKey(),
+					Signature:       bls.Sign(ak.PrivateKey(), digest),
+				}}
+			}
+			data, err := payload.MarshalProto()
+			if err != nil {
+				return err
+			}
+			return proposeRegPayload(data, rollup.SystemPayloadKindAccountProvisional)
+		})
 
-	app.regRelay.SetLockProposer(func(user e_common.Address, homeCluster cm.PublicKey) error {
-		payload := rollup.AccountRegistrationPayload{
-			Kind:        rollup.SystemPayloadKindAccountLocked,
-			User:        user,
-			HomeCluster: homeCluster,
-		}
-		// Same signer preference as the other proposers (attestKey falls back to app.keyPair when no separate
-		// committee key is configured), so verifyAttestations sees the key registered in the committee.
-		signer := attestKey
-		if signer == nil {
-			signer = app.keyPair
-		}
-		if signer != nil {
+		app.regRelay.SetLockProposer(func(user e_common.Address, homeCluster cm.PublicKey) error {
+			payload := rollup.AccountRegistrationPayload{
+				Kind:        rollup.SystemPayloadKindAccountLocked,
+				User:        user,
+				HomeCluster: homeCluster,
+			}
+			// Same signer preference as the other proposers (attestKey falls back to app.keyPair when no separate
+			// committee key is configured), so verifyAttestations sees the key registered in the committee.
+			signer := attestKey
+			if signer == nil {
+				signer = app.keyPair
+			}
+			if signer != nil {
+				chainID := app.config.ChainId.Uint64()
+				if app.accountRegistryHandler != nil {
+					chainID = app.accountRegistryHandler.AttestChainID()
+				}
+				digest := rollup.ComputeAccountLockedAttestDigest(chainID, user, homeCluster, 0)
+				payload.Attestations = []rollup.RegistrationAttestation{{
+					ValidatorPubkey: signer.PublicKey(),
+					Signature:       bls.Sign(signer.PrivateKey(), digest),
+				}}
+			}
+			data, err := payload.MarshalProto()
+			if err != nil {
+				return err
+			}
+			return proposeRegPayload(data, rollup.SystemPayloadKindAccountLocked)
+		})
+
+		app.regRelay.SetLockAlreadyAttested(func(user e_common.Address, homeCluster cm.PublicKey) bool {
+			signer := attestKey
+			if signer == nil {
+				signer = app.keyPair
+			}
+			if signer == nil {
+				return false
+			}
 			chainID := app.config.ChainId.Uint64()
 			if app.accountRegistryHandler != nil {
 				chainID = app.accountRegistryHandler.AttestChainID()
 			}
-			digest := rollup.ComputeAccountLockedAttestDigest(chainID, user, homeCluster, 0)
-			payload.Attestations = []rollup.RegistrationAttestation{{
-				ValidatorPubkey: signer.PublicKey(),
-				Signature:       bls.Sign(signer.PrivateKey(), digest),
-			}}
+			return rollup.HasPendingLockAttestation(&smartContractDBAdapter{chainState: app.chainState},
+				chainID, user, homeCluster, signer.PublicKey())
+		})
+
+		if app.accountRegistryHandler != nil && app.config.AccountGateParentRegistered() {
+			app.accountRegistryHandler.OnProvisionalApplied = app.regRelay.EnqueueWatch
+			// A tx->block mapping is written only by the block commit (after the executed state is adopted), so it
+			// tells a watcher that an account_provisional tx is committed and an absent flag is final.
+			app.regRelay.SetTxCommittedChecker(func(txHash e_common.Hash) bool {
+				bc := blockchain.GetBlockChainInstance()
+				if bc == nil {
+					return false
+				}
+				_, ok := bc.GetBlockNumberByTxHashFast(txHash)
+				return ok
+			})
 		}
-		data, err := payload.MarshalProto()
-		if err != nil {
-			return err
-		}
-		return proposeRegPayload(data, rollup.SystemPayloadKindAccountLocked)
-	})
+	}
 
 	if app.config.IsMining {
 		// 1. Khởi tạo EthTransactionBroadcaster

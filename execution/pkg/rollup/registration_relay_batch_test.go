@@ -192,8 +192,8 @@ func TestRegistrationBatch_PartialSuccessResolvedPerUser(t *testing.T) {
 	assert.Equal(t, other, *res.HomeCluster)
 }
 
-// During a parent outage the provisional proposal is not repeated every tick: once proposed it waits
-// relayProvisionalRetryTicks attempts (the proposal applies at its first commit with one committee attestation).
+// During a parent outage the provisional proposal is not repeated every tick: once proposed at Submit it waits
+// relayProvisionalRetryTicks attempts before re-proposing (the proposal applies at its first commit with one committee attestation).
 func TestRegistrationRelay_ProvisionalProposalIsThrottled(t *testing.T) {
 	h := newRelayHarness()
 	h.relay.alertSink = func(string) {}
@@ -204,11 +204,21 @@ func TestRegistrationRelay_ProvisionalProposalIsThrottled(t *testing.T) {
 	h.relay.SetProvisionalProposer(func(common.Address, []byte) error { calls++; return nil }) // never applies
 	_, err := h.relay.Submit(user, sig)
 	require.NoError(t, err)
+	assert.Equal(t, 1, calls, "initial proposal happens at Submit")
 
-	const ticks = 100
-	for i := 0; i < ticks; i++ {
+	// Check boundary: ticks 1..relayProvisionalRetryTicks only count down cooldown; tick 31 proposes a 2nd time.
+	for i := 0; i < relayProvisionalRetryTicks; i++ {
 		h.relay.ProcessBatch()
 	}
-	want := 1 + (ticks-1)/(relayProvisionalRetryTicks+1)
+	assert.Equal(t, 1, calls, "cooldown must hold for %d ticks", relayProvisionalRetryTicks)
+
+	h.relay.ProcessBatch()
+	assert.Equal(t, 2, calls, "tick %d must re-propose", relayProvisionalRetryTicks+1)
+
+	const totalTicks = 100
+	for i := relayProvisionalRetryTicks + 1; i < totalTicks; i++ {
+		h.relay.ProcessBatch()
+	}
+	want := 1 + totalTicks/(relayProvisionalRetryTicks+1)
 	assert.Equal(t, want, calls, "one proposal per %d attempts, not one per tick", relayProvisionalRetryTicks+1)
 }
