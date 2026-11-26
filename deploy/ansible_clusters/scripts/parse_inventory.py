@@ -452,15 +452,23 @@ def resolve_target(info, target):
         return ""
     target_clean = target.strip()
 
-    # 1. Parent chain aliases
-    parent_map = {
-        'p0': 'parent_node_0', 'parent0': 'parent_node_0', 'parent_0': 'parent_node_0',
-        'p1': 'parent_node_1', 'parent1': 'parent_node_1', 'parent_1': 'parent_node_1',
-        'p2': 'parent_node_2', 'parent2': 'parent_node_2', 'parent_2': 'parent_node_2',
-        'p3': 'parent_node_3', 'parent3': 'parent_node_3', 'parent_3': 'parent_node_3',
+    # 1. Parent chain aliases (resolve dynamically by parent_node_id or order in inventory)
+    parent_alias_idx = {
+        'p0': 0, 'parent0': 0, 'parent_0': 0,
+        'p1': 1, 'parent1': 1, 'parent_1': 1,
+        'p2': 2, 'parent2': 2, 'parent_2': 2,
+        'p3': 3, 'parent3': 3, 'parent_3': 3,
     }
-    if target_clean in parent_map:
-        return parent_map[target_clean]
+    if target_clean in parent_alias_idx:
+        idx = parent_alias_idx[target_clean]
+        p_nodes = info.get('parent_nodes', {})
+        matched_by_id = [p_name for p_name, p_data in p_nodes.items() if p_data.get('node_id') == idx]
+        if len(matched_by_id) == 1:
+            return matched_by_id[0]
+        p_keys = list(p_nodes.keys())
+        if idx < len(p_keys):
+            return p_keys[idx]
+        return f"parent_node_{idx}"
 
     if target_clean in ['parent', 'parent_chain', 'parents', 'parent_node', 'parent_nodes']:
         all_p = list(info.get('parent_nodes', {}).keys())
@@ -520,7 +528,8 @@ if __name__ == '__main__':
     custom_target = None
     if mode in ['export', '--export'] and len(sys.argv) > 3 and not sys.argv[3].startswith('-'):
         custom_target = sys.argv[3]
-    export_tmp_files(parsed, rpc_nodes_file=custom_target)
+    if mode not in ['blocks', '--blocks', 'check_blocks', '--check-blocks']:
+        export_tmp_files(parsed, rpc_nodes_file=custom_target)
 
     if mode == 'json':
         ns_filter = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith('-') else None
@@ -555,6 +564,8 @@ if __name__ == '__main__':
     elif mode in ['check', '--check', 'status', '--status']:
         print_summary(parsed)
         print("")
+        check_live_status(parsed)
+    elif mode in ['blocks', '--blocks', 'check_blocks', '--check-blocks']:
         check_live_status(parsed)
     elif mode in ['summary', 'display', '--summary', '-s']:
         print_summary(parsed)

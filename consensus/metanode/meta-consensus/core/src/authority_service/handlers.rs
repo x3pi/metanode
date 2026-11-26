@@ -364,9 +364,18 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
         // Find recent own blocks that have not been received by the peer.
         // If last_received is a valid and more blocks have been proposed since then, this call is
         // guaranteed to return at least some recent blocks, which will help with liveness.
+        //
+        // Replay at most the last `dag_state_cached_rounds` rounds. After a recovery the
+        // in-memory DAG can hold millions of own blocks; replaying them all to a peer with a
+        // stale `last_received` delays every new block by hours. Older blocks the peer still
+        // needs are fetched as missing ancestors by its synchronizer.
+        let last_own_round = dag_state.get_last_proposed_block().round();
+        let replay_from = (last_received + 1).max(
+            last_own_round.saturating_sub(self.context.parameters.dag_state_cached_rounds),
+        );
         let missed_blocks = stream::iter(
             dag_state
-                .get_cached_blocks(self.context.own_index, last_received + 1)
+                .get_cached_blocks(self.context.own_index, replay_from)
                 .into_iter()
                 .map(|block| ExtendedSerializedBlock {
                     block: block.serialized().clone(),
