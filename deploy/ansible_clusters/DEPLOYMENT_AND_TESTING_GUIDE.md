@@ -15,35 +15,40 @@ Mọi lệnh đều thực thi tại thư mục: `deploy/ansible_clusters`
 ### 🚩 Bảng Cờ Bổ Trợ Phổ Biến (Flags):
 | Cờ (Flag) | Ý Nghĩa Kỹ Thuật | Ví Dụ |
 | :--- | :--- | :--- |
-| **`-i <file>` / `--inventory=<file>`** | **Chỉ định file inventory khác** (mặc định dùng `inventory.yml`) | `-i inventory.prod.yml` |
+| **`-i <file>` / `--inventory=<file>`** | **Chỉ định file inventory khác** (mặc định dùng `inventory.yml`) | `-i inventory_cloud.yml` |
 | **`--rolling`** | **Rolling restart từng node 1** cho Child Chain (Zero-Downtime, giữ Raft quorum) | `--restart --rolling` |
 | **`--skip-build`** | Bỏ qua bước cargo/go build, chỉ restart dịch vụ với binary hiện có | `--restart --skip-build` |
 | **`--exec-only`** | Chỉ thao tác trên các Chain con (Execution Clusters), bỏ qua Parent Chain | `--restart --exec-only` |
 | **`--parent-only`** | Chỉ thao tác trên Parent Chain (chỉ dừng/bật/restart Parent Chain & monitor của nó) | `--stop --parent-only` |
-| **`-n <node>` / `--node=<node>`** | Chỉ thao tác trên đúng 1 node cụ thể (vd: `exec1_r1`, `p0`, `exec2_r1`) | `--restart -n exec1_r1` |
+| **`-n <node>` / `--node=<node>`** | Chỉ thao tác trên đúng 1 node cụ thể (vd: `pri_1a`, `exec1_r1`, `p0`) | `--restart -n pri_1a -i inventory_cloud.yml` |
+| **`--check-blocks` / `--blocks`** | **Kiểm tra nhanh Block Height** tất cả các node Parent và Child Chain | `--check-blocks -i inventory_cloud.yml` |
 | **`--test`** | Tự động kích hoạt bộ 11 kịch bản kiểm thử E2E ngay sau khi xong | `--restart --test` |
 
 ---
 
 ### 📋 Bảng Lệnh Thực Dụng Thường Dùng:
 
-| Thao Tác | Lệnh Mặc Định (`inventory.yml`) | Lệnh Với Inventory Khác (`-i`) |
+| Thao Tác | Lệnh Mặc Định (`inventory.yml`) | Lệnh Cụm Cloud (`-i inventory_cloud.yml`) |
 | :--- | :--- | :--- |
-| **Cài đặt & chạy từ đầu** | `./deploy_clusters.sh --setup` | `./deploy_clusters.sh --setup -i inventory.prod.yml` |
-| **Cài đặt & chạy kèm Test** | `./deploy_clusters.sh --setup --test` | `./deploy_clusters.sh --setup --test -i inventory.prod.yml` |
-| **Khởi động lại toàn bộ** | `./deploy_clusters.sh --restart` | `./deploy_clusters.sh --restart -i inventory.prod.yml` |
-| **🔄 Rolling Restart Child Chain** | `./deploy_clusters.sh --restart --rolling` | `./deploy_clusters.sh --restart --rolling -i inventory.prod.yml` |
-| **Restart nhanh (không build)** | `./deploy_clusters.sh --restart --skip-build` | `./deploy_clusters.sh --restart --skip-build -i inventory.prod.yml` |
-| **Rolling Restart nhanh (không build)** | `./deploy_clusters.sh --restart --rolling --skip-build` | `./deploy_clusters.sh --restart --rolling --skip-build -i inventory.prod.yml` |
-| **Chỉ restart Chain con** | `./deploy_clusters.sh --restart --exec-only` | `./deploy_clusters.sh --restart --exec-only -i inventory.prod.yml` |
-| **Chỉ restart Parent Chain** | `./deploy_clusters.sh --restart --parent-only` | `./deploy_clusters.sh --restart --parent-only -i inventory.prod.yml` |
-| **Dừng riêng Parent Chain** | `./deploy_clusters.sh --stop --parent-only` | `./deploy_clusters.sh --stop --parent-only -i inventory.prod.yml` |
-| **Dừng riêng Chain con** | `./deploy_clusters.sh --stop --exec-only` | `./deploy_clusters.sh --stop --exec-only -i inventory.prod.yml` |
-| **Kiểm tra trạng thái cụm** | `./deploy_clusters.sh --status` | `./deploy_clusters.sh --status -i inventory.prod.yml` |
-| **Chỉ chạy bộ kiểm thử E2E** | `./deploy_clusters.sh --test-only` | `./deploy_clusters.sh --test-only -i inventory.prod.yml` |
-| **Dừng an toàn toàn bộ cụm** | `./deploy_clusters.sh --stop` | `./deploy_clusters.sh --stop -i inventory.prod.yml` |
-| **Reset về Block 0 (Clean DB)** | `./deploy_clusters.sh --reset` | `./deploy_clusters.sh --reset -i inventory.prod.yml` |
-| **Rollback binary trước đó** | `./deploy_clusters.sh --rollback` | `./deploy_clusters.sh --rollback -i inventory.prod.yml` |
+| **Kiểm tra nhanh Block Height** | `./deploy_clusters.sh --check-blocks` | `./deploy_clusters.sh --check-blocks -i inventory_cloud.yml` |
+| **Kiểm tra trạng thái cụm toàn diện** | `./deploy_clusters.sh --status` | `./deploy_clusters.sh --status -i inventory_cloud.yml` |
+| **🔄 Rolling Restart Child Chain (Zero-Downtime)** | `./deploy_clusters.sh --restart --rolling` | `./deploy_clusters.sh --restart --rolling -i inventory_cloud.yml` |
+| **Khởi động lại riêng 1 node** | `./deploy_clusters.sh --restart -n exec1_r1` | `./deploy_clusters.sh --restart -n pri_1a -i inventory_cloud.yml` |
+| **Dừng riêng 1 node** | `./deploy_clusters.sh --stop -n exec1_r1` | `./deploy_clusters.sh --stop -n pri_1a -i inventory_cloud.yml` |
+| **Bật lại riêng 1 node** | `./deploy_clusters.sh --start -n exec1_r1` | `./deploy_clusters.sh --start -n pri_1a -i inventory_cloud.yml` |
+| **Cài đặt & chạy từ đầu** | `./deploy_clusters.sh --setup` | `./deploy_clusters.sh --setup -i inventory_cloud.yml` |
+| **Cài đặt & chạy kèm Test** | `./deploy_clusters.sh --setup --test` | `./deploy_clusters.sh --setup --test -i inventory_cloud.yml` |
+| **Khởi động lại toàn bộ cụm** | `./deploy_clusters.sh --restart` | `./deploy_clusters.sh --restart -i inventory_cloud.yml` |
+| **Restart nhanh (không build lại)** | `./deploy_clusters.sh --restart --skip-build` | `./deploy_clusters.sh --restart --skip-build -i inventory_cloud.yml` |
+| **Rolling Restart nhanh (không build)** | `./deploy_clusters.sh --restart --rolling --skip-build` | `./deploy_clusters.sh --restart --rolling --skip-build -i inventory_cloud.yml` |
+| **Chỉ restart Chain con (Child Chain)** | `./deploy_clusters.sh --restart --exec-only` | `./deploy_clusters.sh --restart --exec-only -i inventory_cloud.yml` |
+| **Chỉ restart Parent Chain** | `./deploy_clusters.sh --restart --parent-only` | `./deploy_clusters.sh --restart --parent-only -i inventory_cloud.yml` |
+| **Dừng riêng Parent Chain** | `./deploy_clusters.sh --stop --parent-only` | `./deploy_clusters.sh --stop --parent-only -i inventory_cloud.yml` |
+| **Dừng riêng Chain con** | `./deploy_clusters.sh --stop --exec-only` | `./deploy_clusters.sh --stop --exec-only -i inventory_cloud.yml` |
+| **Chỉ chạy bộ kiểm thử E2E** | `./deploy_clusters.sh --test-only` | `./deploy_clusters.sh --test-only -i inventory_cloud.yml` |
+| **Dừng an toàn toàn bộ cụm** | `./deploy_clusters.sh --stop` | `./deploy_clusters.sh --stop -i inventory_cloud.yml` |
+| **Reset về Block 0 (Clean DB)** | `./deploy_clusters.sh --reset` | `./deploy_clusters.sh --reset -i inventory_cloud.yml` |
+| **Rollback binary trước đó** | `./deploy_clusters.sh --rollback` | `./deploy_clusters.sh --rollback -i inventory_cloud.yml` |
 
 ---
 
@@ -76,9 +81,13 @@ Khi bạn muốn triển khai trên server thật (Production), mạng thử ngh
 Khi bạn muốn kiểm tra khả năng chịu lỗi (failover), bảo trì, hoặc bật/tắt riêng một node cụ thể mà không ảnh hưởng tới toàn bộ mạng:
 
 ### 📌 Danh sách tên node (Aliases) được hỗ trợ:
-- **Child Chain 1 (Exec 1):** `exec1_r1`, `exec1_r2`, `exec1_r3` (hoặc viết tắt: `r1`, `r2`, `r3`). Cả cụm: `exec1`.
-- **Child Chain 2 (Exec 2):** `exec2_r1`, `exec2_r2`, `exec2_r3` (hoặc viết tắt: `r4`, `r5`, `r6`). Cả cụm: `exec2`.
-- **Parent Chain:** `p0`, `p1`, `p2`, `p3` (hoặc `parent_node_0` .. `parent_node_3`). Cả cụm: `parent`.
+- **Cụm Local (`inventory.yml`):**
+  - **Child Chain 1 (Exec 1):** `exec1_r1`, `exec1_r2`, `exec1_r3` (hoặc viết tắt: `r1`, `r2`, `r3`). Cả cụm: `exec1`.
+  - **Child Chain 2 (Exec 2):** `exec2_r1`, `exec2_r2`, `exec2_r3` (hoặc viết tắt: `r4`, `r5`, `r6`). Cả cụm: `exec2`.
+  - **Parent Chain:** `p0`, `p1`, `p2`, `p3` (hoặc `parent_node_0` .. `parent_node_3`). Cả cụm: `parent`.
+- **Cụm Cloud Server (`inventory_cloud.yml`):**
+  - **Child Chain (`cluster_cloud`):** `pri_1a`, `pri_1b`, `pri_1c`, `pri_1d`, `pri_1e` (hoặc theo IP: `61.28.233.146`, `116.118.92.254`, `49.213.71.191`, `61.28.238.209`).
+  - **Parent Chain:** `parent_prod_0`, `parent_prod_1`, `parent_prod_2`, `parent_prod_3` (hoặc `p0` .. `p3`).
 
 ---
 
@@ -86,17 +95,11 @@ Khi bạn muốn kiểm tra khả năng chịu lỗi (failover), bảo trì, ho�
 
 #### 1. Dừng riêng 1 node (Stop Single Node):
 ```bash
-# Dừng replica 1 của Chain con 1:
+# Dừng replica 1 của Chain con (inventory.yml):
 ./deploy_clusters.sh --stop -n exec1_r1
 
-# Dừng replica 3 của Chain con 1:
-./deploy_clusters.sh --stop -n exec1_r3
-
-# Dừng 1 validator của Parent Chain:
-./deploy_clusters.sh --stop -n p0
-
-# Dừng 1 node trên inventory Production:
-./deploy_clusters.sh --stop -n exec1_r1 -i inventory.prod.yml
+# Dừng node pri_1a trên cụm Cloud (inventory_cloud.yml):
+./deploy_clusters.sh --stop -n pri_1a -i inventory_cloud.yml
 ```
 > *(Hệ thống tự động đánh dấu tắt monitor cho node bị dừng để không spam cảnh báo Telegram, trong khi các node còn lại vẫn được giám sát bình thường).*
 
@@ -105,20 +108,17 @@ Khi bạn muốn kiểm tra khả năng chịu lỗi (failover), bảo trì, ho�
 # Bật lại replica 1 của Chain con:
 ./deploy_clusters.sh --start -n exec1_r1
 
-# Bật lại validator Parent Chain:
-./deploy_clusters.sh --start -n p0
-
-# Bật lại trên inventory khác:
-./deploy_clusters.sh --start -n exec1_r1 -i inventory.prod.yml
+# Bật lại node pri_1a trên cụm Cloud:
+./deploy_clusters.sh --start -n pri_1a -i inventory_cloud.yml
 ```
 
 #### 3. Khởi động lại riêng 1 node (Restart Single Node):
 ```bash
-# Khởi động lại 1 replica (kèm --skip-build để không build lại):
+# Khởi động lại 1 replica Chain con (kèm --skip-build để không build lại):
 ./deploy_clusters.sh --restart -n exec1_r1 --skip-build
 
-# Khởi động lại 1 validator Parent Chain:
-./deploy_clusters.sh --restart -n p0 --skip-build
+# Khởi động lại riêng node pri_1a trên cụm Cloud (bỏ qua build):
+./deploy_clusters.sh --restart -n pri_1a -i inventory_cloud.yml --skip-build
 ```
 
 ---
@@ -204,4 +204,89 @@ journalctl -u metanode-parent_node_0.service -f
 
 # Khởi động lại riêng 1 node qua systemd:
 sudo systemctl restart metanode-exec1_replica1
+```
+
+---
+
+## ☁️ 9. HƯỚNG DẪN QUẢN TRỊ & KIỂM TRA BLOCK CỤM CLOUD (`inventory_cloud.yml`)
+
+File cấu hình [inventory_cloud.yml](file:///home/abc/nhat/con-chain-v2/metanode/deploy/ansible_clusters/inventory_cloud.yml) quản lý cụm mạng hỗn hợp gồm:
+- **Parent Chain (4 node LAN):** `parent_prod_0` .. `parent_prod_3` (IP `192.168.1.234`, `192.168.1.231`, `192.168.1.230`).
+- **Child Chain (`cluster_cloud` - 5 node Raft HA):**
+  - `pri_1a`: `http://61.28.233.146:8750` (Node 1 - Leader/Sequencer)
+  - `pri_1b`: `http://116.118.92.254:8750` (Node 2)
+  - `pri_1c`: `http://49.213.71.191:8750` (Node 3)
+  - `pri_1d`: `http://61.28.238.209:8750` (Node 4 - Tiệm net qua FRP)
+  - `pri_1e`: `http://61.28.238.209:8751` (Node 5 - Tiệm net qua FRP)
+
+---
+
+### 🔍 Các lệnh kiểm tra Block Height các Node Child Chain:
+
+#### Cách 1: Dùng lệnh chính thức của Ansible CLI (Khuyên dùng)
+```bash
+# Kiểm tra nhanh Block Height của toàn bộ node (Parent & Child Chain):
+./deploy_clusters.sh --check-blocks -i inventory_cloud.yml
+
+# Hoặc dùng alias ngắn gọn:
+./deploy_clusters.sh --blocks -i inventory_cloud.yml
+
+# Kiểm tra trạng thái toàn diện (Block, Endpoint RPC/WS/TLS, và Monitor ngầm):
+./deploy_clusters.sh --status -i inventory_cloud.yml
+```
+*Kết quả mẫu hiển thị:*
+```text
+🔍 Live Service Health Status (Live RPC Check):
+  • parent_prod_0 (http://192.168.1.234:28601): ✅ ONLINE (HTTP RPC OK)
+  • parent_prod_1 (http://192.168.1.231:28602): ✅ ONLINE (HTTP RPC OK)
+  • parent_prod_2 (http://192.168.1.230:28603): ✅ ONLINE (HTTP RPC OK)
+  • parent_prod_3 (http://192.168.1.231:28604): ✅ ONLINE (HTTP RPC OK)
+  • pri_1a (http://61.28.233.146:8750): ✅ ONLINE (Block: 71250 / 0x11652)
+  • pri_1b (http://116.118.92.254:8750): ✅ ONLINE (Block: 71250 / 0x11652)
+  • pri_1c (http://49.213.71.191:8750): ✅ ONLINE (Block: 71250 / 0x11652)
+  • pri_1d (http://61.28.238.209:8750): ✅ ONLINE (Block: 71250 / 0x11652)
+  • pri_1e (http://61.28.238.209:8751): ✅ ONLINE (Block: 71250 / 0x11652)
+```
+
+#### Cách 2: Lệnh curl loop nhanh (Chạy ngay, không phụ thuộc Ansible)
+Lệnh quét trực tiếp cổng RPC của cả 5 node Child Chain:
+```bash
+for node in "pri_1a:http://61.28.233.146:8750" "pri_1b:http://116.118.92.254:8750" "pri_1c:http://49.213.71.191:8750" "pri_1d:http://61.28.238.209:8750" "pri_1e:http://61.28.238.209:8751"; do
+    name="${node%%:*}"
+    url="${node#*:}"
+    res=$(curl -s -m 2 -X POST "$url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}')
+    hex=$(echo "$res" | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
+    if [ -n "$hex" ]; then
+        printf "  • %-7s (%s): Block %d (%s)\n" "$name" "$url" "$((16#${hex#0x}))" "$hex"
+    else
+        printf "  • %-7s (%s): ❌ OFFLINE\n" "$name" "$url"
+    fi
+done
+```
+
+#### Cách 3: Theo dõi Block nhảy theo thời gian thực (Live Watch)
+Cập nhật block height mỗi 1 giây:
+```bash
+watch -n 1 'for u in "http://61.28.233.146:8750" "http://116.118.92.254:8750" "http://49.213.71.191:8750" "http://61.28.238.209:8750" "http://61.28.238.209:8751"; do printf "%-28s : Block %d\n" "$u" "$((16#$(curl -s -m 2 -X POST "$u" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}" | grep -o "\"result\":\"[^\"]*\"" | cut -d"\"" -f4 | sed "s/0x//")))" 2>/dev/null; done'
+```
+
+---
+
+### 🛠️ Các lệnh vận hành thường dùng cho `inventory_cloud.yml`:
+
+```bash
+# 1. Rolling Restart từng node Child Chain (Zero-Downtime, không dừng mạng):
+./deploy_clusters.sh --restart --rolling -i inventory_cloud.yml
+
+# 2. Khởi động lại riêng node pri_1a (nhanh, bỏ qua build):
+./deploy_clusters.sh --restart -n pri_1a -i inventory_cloud.yml --skip-build
+
+# 3. Dừng an toàn node pri_1a để bảo trì:
+./deploy_clusters.sh --stop -n pri_1a -i inventory_cloud.yml
+
+# 4. Bật lại node pri_1a:
+./deploy_clusters.sh --start -n pri_1a -i inventory_cloud.yml
+
+# 5. Khởi động lại riêng toàn bộ Child Chain (bỏ qua Parent Chain):
+./deploy_clusters.sh --restart --exec-only -i inventory_cloud.yml --skip-build
 ```

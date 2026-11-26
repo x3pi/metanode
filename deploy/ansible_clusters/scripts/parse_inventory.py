@@ -556,6 +556,8 @@ if __name__ == '__main__':
         print_summary(parsed)
         print("")
         check_live_status(parsed)
+    elif mode in ['blocks', '--blocks', 'check_blocks', '--check-blocks']:
+        check_live_status(parsed)
     elif mode in ['summary', 'display', '--summary', '-s']:
         print_summary(parsed)
     elif mode in ['export', '--export']:

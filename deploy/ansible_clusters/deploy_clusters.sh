@@ -87,6 +87,7 @@ usage() {
     echo "  --change-keys       Đổi bộ key Parent Chain mới (xoay khóa, alias: --overwrite-keys). Phải gõ y để xác nhận"
     echo "  (Không còn cờ --force: mọi thao tác xóa dữ liệu / ghi đè key / rollback production đều hiện cảnh báo đỏ và phải gõ y)"
     echo "  --status            Kiểm tra trạng thái RPC và block height các cụm node"
+    echo "  --check-blocks      (alias: --blocks) Kiểm tra nhanh block height tất cả các node"
     echo "  --open-ports        Tự động cấu hình mở cổng tường lửa (UFW) trên các server"
     echo "  --nginx, --tls      Chỉ cài đặt/cập nhật và reload Nginx TLS reverse proxy (HTTPS/WSS 443)"
     echo "  --export-config     Xuất cấu hình mạng ra /tmp/rpc_nodes.json"
@@ -184,6 +185,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --status|status)
             ACTION="status"
+            shift
+            ;;
+        --check-blocks|--checkblocks|--blocks|check-blocks|checkblocks|blocks)
+            ACTION="check_blocks"
             shift
             ;;
         --open-ports|open-ports|open_ports)
@@ -1045,6 +1050,18 @@ check_status() {
 
 if [ "$ACTION" = "status" ]; then
     check_status
+    exit 0
+fi
+
+# ── Check Blocks Action ──────────────────────────────────────────────────────
+check_blocks() {
+    if [ -f "$INVENTORY" ] && [ -f "${SCRIPT_DIR}/scripts/parse_inventory.py" ]; then
+        python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" blocks
+    fi
+}
+
+if [ "$ACTION" = "check_blocks" ]; then
+    check_blocks
     exit 0
 fi
 
