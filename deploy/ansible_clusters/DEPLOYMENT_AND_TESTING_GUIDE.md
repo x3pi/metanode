@@ -21,7 +21,7 @@ Mọi lệnh đều thực thi tại thư mục: `deploy/ansible_clusters`
 | **`--exec-only`** | Chỉ thao tác trên các Chain con (Execution Clusters), bỏ qua Parent Chain | `--restart --exec-only` |
 | **`--parent-only`** | Chỉ thao tác trên Parent Chain (chỉ dừng/bật/restart Parent Chain & monitor của nó) | `--stop --parent-only` |
 | **`-n <node>` / `--node=<node>`** | Chỉ thao tác trên đúng 1 node cụ thể (vd: `pri_1a`, `exec1_r1`, `p0`) | `--restart -n pri_1a -i inventory_cloud.yml` |
-| **`--check-blocks` / `--blocks`** | **Kiểm tra nhanh Block Height** tất cả các node Parent và Child Chain | `--check-blocks -i inventory_cloud.yml` |
+| **`--check-blocks` / `--blocks`** | **Kiểm tra nhanh trạng thái online (Parent) & Block Height (Child Chain)** | `--check-blocks -i inventory_cloud.yml` |
 | **`--test`** | Tự động kích hoạt bộ 11 kịch bản kiểm thử E2E ngay sau khi xong | `--restart --test` |
 
 ---
@@ -30,7 +30,7 @@ Mọi lệnh đều thực thi tại thư mục: `deploy/ansible_clusters`
 
 | Thao Tác | Lệnh Mặc Định (`inventory.yml`) | Lệnh Cụm Cloud (`-i inventory_cloud.yml`) |
 | :--- | :--- | :--- |
-| **Kiểm tra nhanh Block Height** | `./deploy_clusters.sh --check-blocks` | `./deploy_clusters.sh --check-blocks -i inventory_cloud.yml` |
+| **Kiểm tra nhanh Block Height (Child) & Online (Parent)** | `./deploy_clusters.sh --check-blocks` | `./deploy_clusters.sh --check-blocks -i inventory_cloud.yml` |
 | **Kiểm tra trạng thái cụm toàn diện** | `./deploy_clusters.sh --status` | `./deploy_clusters.sh --status -i inventory_cloud.yml` |
 | **🔄 Rolling Restart Child Chain (Zero-Downtime)** | `./deploy_clusters.sh --restart --rolling` | `./deploy_clusters.sh --restart --rolling -i inventory_cloud.yml` |
 | **Khởi động lại riêng 1 node** | `./deploy_clusters.sh --restart -n exec1_r1` | `./deploy_clusters.sh --restart -n pri_1a -i inventory_cloud.yml` |
@@ -225,7 +225,7 @@ File cấu hình [inventory_cloud.yml](file:///home/abc/nhat/con-chain-v2/metano
 
 #### Cách 1: Dùng lệnh chính thức của Ansible CLI (Khuyên dùng)
 ```bash
-# Kiểm tra nhanh Block Height của toàn bộ node (Parent & Child Chain):
+# Kiểm tra nhanh trạng thái online (Parent) & Block Height (Child Chain):
 ./deploy_clusters.sh --check-blocks -i inventory_cloud.yml
 
 # Hoặc dùng alias ngắn gọn:
@@ -265,9 +265,13 @@ done
 ```
 
 #### Cách 3: Theo dõi Block nhảy theo thời gian thực (Live Watch)
-Cập nhật block height mỗi 1 giây:
+Cập nhật trạng thái & block height mỗi 1 giây:
 ```bash
-watch -n 1 'for u in "http://61.28.233.146:8750" "http://116.118.92.254:8750" "http://49.213.71.191:8750" "http://61.28.238.209:8750" "http://61.28.238.209:8751"; do printf "%-28s : Block %d\n" "$u" "$((16#$(curl -s -m 2 -X POST "$u" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}" | grep -o "\"result\":\"[^\"]*\"" | cut -d"\"" -f4 | sed "s/0x//")))" 2>/dev/null; done'
+watch -n 1 ./deploy_clusters.sh --check-blocks -i inventory_cloud.yml
+```
+*(Hoặc nếu dùng vòng lặp `curl` trực tiếp với `watch`, hãy dùng cờ `-x` để chạy qua `bash -c` thay vì `sh -c` (`dash`), vì `dash` không hỗ trợ cú pháp `$((16#...))` của Bash:)*
+```bash
+watch -n 1 -x bash -c 'for u in "http://61.28.233.146:8750" "http://116.118.92.254:8750" "http://49.213.71.191:8750" "http://61.28.238.209:8750" "http://61.28.238.209:8751"; do hex=$(curl -s -m 2 -X POST "$u" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}" | grep -o "\"result\":\"[^\"]*\"" | cut -d"\"" -f4); if [ -n "$hex" ]; then printf "%-28s : Block %d\n" "$u" "$((hex))"; else printf "%-28s : OFFLINE\n" "$u"; fi; done'
 ```
 
 ---

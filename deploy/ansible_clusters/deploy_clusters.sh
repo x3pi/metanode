@@ -87,7 +87,7 @@ usage() {
     echo "  --change-keys       Đổi bộ key Parent Chain mới (xoay khóa, alias: --overwrite-keys). Phải gõ y để xác nhận"
     echo "  (Không còn cờ --force: mọi thao tác xóa dữ liệu / ghi đè key / rollback production đều hiện cảnh báo đỏ và phải gõ y)"
     echo "  --status            Kiểm tra trạng thái RPC và block height các cụm node"
-    echo "  --check-blocks      (alias: --blocks) Kiểm tra nhanh block height tất cả các node"
+    echo "  --check-blocks      (alias: --blocks) Kiểm tra nhanh trạng thái online (Parent) & block height (Child Chain)"
     echo "  --open-ports        Tự động cấu hình mở cổng tường lửa (UFW) trên các server"
     echo "  --nginx, --tls      Chỉ cài đặt/cập nhật và reload Nginx TLS reverse proxy (HTTPS/WSS 443)"
     echo "  --export-config     Xuất cấu hình mạng ra /tmp/rpc_nodes.json"
@@ -1055,14 +1055,21 @@ fi
 
 # ── Check Blocks Action ──────────────────────────────────────────────────────
 check_blocks() {
-    if [ -f "$INVENTORY" ] && [ -f "${SCRIPT_DIR}/scripts/parse_inventory.py" ]; then
-        python3 "${SCRIPT_DIR}/scripts/parse_inventory.py" "$INVENTORY" blocks
+    local parser="${SCRIPT_DIR}/scripts/parse_inventory.py"
+    if [ ! -f "$INVENTORY" ]; then
+        echo "❌ Không tìm thấy file inventory: $INVENTORY" >&2
+        return 1
     fi
+    if [ ! -f "$parser" ]; then
+        echo "❌ Không tìm thấy parser script: $parser" >&2
+        return 1
+    fi
+    python3 "$parser" "$INVENTORY" blocks
 }
 
 if [ "$ACTION" = "check_blocks" ]; then
     check_blocks
-    exit 0
+    exit $?
 fi
 
 # ── Test Only Action ─────────────────────────────────────────────────────────
