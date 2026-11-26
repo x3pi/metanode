@@ -1487,18 +1487,23 @@ func (r *RegistrationRelay) verifyOne(user common.Address) bool {
 		return false
 	}
 
-	if e.watchOnly && provChecker != nil && !provChecker(user) {
+	if e.watchOnly && provChecker != nil {
 		// The watch callback fires while the account_provisional tx executes (possibly speculatively), before its
 		// block is committed, so an absent flag only proves the activation did not apply once that tx is in a
 		// committed block. Until then wait, without querying the Parent Chain. Never decided by ticks or time.
+		// Read the commit signal BEFORE the flag: the tx→block mapping is written after the block state is
+		// adopted, so committed==true guarantees the flag read below sees that block's state (no TOCTOU drop).
 		r.mu.Lock()
 		committed := r.txCommitted
 		r.mu.Unlock()
-		if e.watchTx != (common.Hash{}) && committed != nil && committed(e.watchTx) {
-			log.Printf("RegistrationRelay: provisional tx %s for %s committed without activation, dropping watch", e.watchTx.Hex(), user.Hex())
-			r.deleteEntry(user)
+		txDone := e.watchTx != (common.Hash{}) && committed != nil && committed(e.watchTx)
+		if !provChecker(user) {
+			if txDone {
+				log.Printf("RegistrationRelay: provisional tx %s for %s committed without activation, dropping watch", e.watchTx.Hex(), user.Hex())
+				r.deleteEntry(user)
+			}
+			return false
 		}
-		return false
 	}
 
 	r.markProvisionalIfApplied(user)

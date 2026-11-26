@@ -1390,3 +1390,49 @@ func TestWatchOnly_OverflowIsPersistedAndLoadedWhenSlotFrees(t *testing.T) {
 	assert.True(t, e.watchOnly)
 	assert.Equal(t, 0, h.parent.sendCount(), "loaded watch must never send a registration")
 }
+
+// Reviewer repro (TOCTOU): the block commits (state adopted, then tx→block mapping written) between the relay's
+// flag read and its commit-signal read. The watch must survive and the lock must still be co-signed. The commit is
+// injected right after the first of the two reads, whichever order verifyOne uses.
+func TestWatchOnly_CommitBetweenFlagAndCommitReadsKeepsWatch(t *testing.T) {
+	h := newProvHarness()
+	h.deferLock = true
+	store := NewKVRelayStore(NewMemoryKVStore())
+	require.NoError(t, h.relay.SetStore(store))
+	var committed committedTxs
+	user, _ := h.userSig(t)
+	tx := provTxOf(user)
+
+	var armed atomic.Bool
+	commitNow := func() {
+		if armed.CompareAndSwap(true, false) {
+			h.prov.Store(user, true) // state adopted first ...
+			committed.commit(tx)     // ... then the tx→block mapping is written
+		}
+	}
+	h.relay.SetProvisionalChecker(func(a common.Address) bool {
+		v, ok := h.prov.Load(a)
+		commitNow()
+		return ok && v.(bool)
+	})
+	h.relay.SetTxCommittedChecker(func(x common.Hash) bool {
+		v := committed.has(x)
+		commitNow()
+		return v
+	})
+
+	h.relay.Watch(user, tx)
+	armed.Store(true)
+	h.ticks(1)
+	require.False(t, armed.Load(), "the commit must have been injected during verifyOne")
+	_, tracked := h.relay.snapshot(user)
+	require.True(t, tracked, "watch dropped although the flag was committed (TOCTOU)")
+	_, found, _ := store.Get(user)
+	require.True(t, found, "persisted watch must survive")
+
+	h.parent.mu.Lock()
+	h.parent.registry[user] = bls.GenerateKeyPair().PublicKey()
+	h.parent.mu.Unlock()
+	h.ticks(1)
+	assert.Equal(t, 1, h.lockProposalCount(), "this validator must still co-sign the lock")
+}
