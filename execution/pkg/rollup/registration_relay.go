@@ -74,23 +74,23 @@ type RegistrationResult struct {
 }
 
 type relayEntry struct {
-	user        common.Address
-	userSig     []byte
-	status      RegistrationStatus
-	submitted   bool // SendRegisterAccount accepted by the parent (the parent executes it later)
-	watchOnly   bool // validator-side watcher for provisional accounts: only checks Parent and co-signs lock if needed
-	staleChecks int  // consecutive verifyOne checks where watchOnly saw no provisional/locked/registered flag
-	attempts    int  // failed relay steps so far
-	verifies    int  // registry lookups since submitted without an answer
-	home        *cm.PublicKey
-	reason      string
-	createdAt   time.Time
-	txHash      common.Hash
-	alerted     bool // a sync-error alert was recorded for the current trouble episode (in-memory only)
-	queued      bool // the address is currently in r.queue (prevents double enqueue by the stall sweep)
-	provWait    int  // relay attempts to skip before proposing provisional activation again
-	batched     bool // txHash is a batch registration tx
-	noBatch     bool // the parent rejected a batch carrying this request: send it alone from now on
+	user      common.Address
+	userSig   []byte
+	status    RegistrationStatus
+	submitted bool        // SendRegisterAccount accepted by the parent (the parent executes it later)
+	watchOnly bool        // validator-side watcher for provisional accounts: only checks Parent and co-signs lock if needed
+	watchTx   common.Hash // watchOnly: hash of the account_provisional tx that triggered the watch
+	attempts  int         // failed relay steps so far
+	verifies  int         // registry lookups since submitted without an answer
+	home      *cm.PublicKey
+	reason    string
+	createdAt time.Time
+	txHash    common.Hash
+	alerted   bool // a sync-error alert was recorded for the current trouble episode (in-memory only)
+	queued    bool // the address is currently in r.queue (prevents double enqueue by the stall sweep)
+	provWait  int  // relay attempts to skip before proposing provisional activation again
+	batched   bool // txHash is a batch registration tx
+	noBatch   bool // the parent rejected a batch carrying this request: send it alone from now on
 }
 
 // alertBucket aggregates operator alerts of one kind between two Telegram flushes.
@@ -120,6 +120,7 @@ type RelayRecord struct {
 	Reason    string             `json:"reason,omitempty"`
 	CreatedAt int64              `json:"createdAt,omitempty"`
 	TxHash    common.Hash        `json:"txHash,omitempty"`
+	WatchTx   common.Hash        `json:"watchTx,omitempty"`
 }
 
 // RegistrationRelayStore defines persistent operations for registration entries.
@@ -266,6 +267,9 @@ type RegistrationRelay struct {
 	provisionalProposer func(user common.Address, userSig []byte) error
 	lockProposer        func(user common.Address, homeCluster cm.PublicKey) error
 	lockAlreadyAttested func(user common.Address, homeCluster cm.PublicKey) bool
+	// txCommitted reports whether a child-chain tx is in a committed block (its tx->block mapping exists). Watch-only
+	// entries are dropped only when their account_provisional tx is committed yet the flag is absent.
+	txCommitted func(txHash common.Hash) bool
 
 	maxTracked  int
 	maxWatched  int
@@ -278,7 +282,7 @@ type RegistrationRelay struct {
 	mu      sync.Mutex
 	entries map[common.Address]*relayEntry
 	queue   chan common.Address
-	watchCh chan common.Address
+	watchCh chan watchEvent
 
 	wakeCh chan struct{}
 	quitCh chan struct{}
@@ -317,7 +321,7 @@ func NewRegistrationRelay(parent RegistrationParent, clusterKey cm.PublicKey, si
 		interval:    defaultRelayInterval,
 		entries:     make(map[common.Address]*relayEntry),
 		queue:       make(chan common.Address, defaultRelayQueueSize),
-		watchCh:     make(chan common.Address, defaultRelayMaxTracked),
+		watchCh:     make(chan watchEvent, defaultRelayMaxTracked),
 		wakeCh:      make(chan struct{}, 1),
 		quitCh:      make(chan struct{}),
 	}
@@ -372,14 +376,30 @@ func (r *RegistrationRelay) SetLockAlreadyAttested(fn func(user common.Address, 
 	r.lockAlreadyAttested = fn
 }
 
+// SetTxCommittedChecker configures how the relay learns that a child-chain tx is in a committed block. Watch-only
+// entries whose provisional flag is not visible are kept until their account_provisional tx is committed: the
+// callback fires during (possibly speculative) execution, before the flag is visible in committed state.
+func (r *RegistrationRelay) SetTxCommittedChecker(fn func(txHash common.Hash) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.txCommitted = fn
+}
+
+// watchEvent is one provisional activation reported by execution: the account and the account_provisional tx.
+type watchEvent struct {
+	user common.Address
+	tx   common.Hash
+}
+
 // EnqueueWatch non-blockingly queues an address that became provisional on-chain so this validator reconciles it
-// with the Parent Chain and co-signs an account lock if another cluster owns it. Safe to call during tx execution.
-func (r *RegistrationRelay) EnqueueWatch(user common.Address) {
+// with the Parent Chain and co-signs an account lock if another cluster owns it. txHash is the account_provisional
+// tx being executed. Safe to call during tx execution.
+func (r *RegistrationRelay) EnqueueWatch(user common.Address, txHash common.Hash) {
 	if user == (common.Address{}) {
 		return
 	}
 	select {
-	case r.watchCh <- user:
+	case r.watchCh <- watchEvent{user: user, tx: txHash}:
 	default:
 		log.Printf("RegistrationRelay: watch channel full (%d), dropping provisional watch for %s", cap(r.watchCh), user.Hex())
 	}
@@ -398,8 +418,9 @@ func (r *RegistrationRelay) countTrackedLocked() (owned, watched int) {
 
 // Watch records a watch-only entry for a provisionally-activated address if this relay does not already track it.
 // Watch-only entries never submit SendRegisterAccount; they have their own maxWatched budget so watching
-// cluster-wide provisional accounts cannot starve Submit()'s maxTracked capacity.
-func (r *RegistrationRelay) Watch(user common.Address) {
+// cluster-wide provisional accounts cannot starve Submit()'s maxTracked capacity. txHash is the account_provisional
+// tx; a later activation of an already-watched address replaces it.
+func (r *RegistrationRelay) Watch(user common.Address, txHash common.Hash) {
 	if user == (common.Address{}) {
 		return
 	}
@@ -411,7 +432,11 @@ func (r *RegistrationRelay) Watch(user common.Address) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.entries[user]; exists {
+	if cur, exists := r.entries[user]; exists {
+		if cur.watchOnly && txHash != (common.Hash{}) && cur.watchTx != txHash {
+			cur.watchTx = txHash
+			_ = r.saveLocked(cur)
+		}
 		return
 	}
 	e := &relayEntry{
@@ -419,6 +444,7 @@ func (r *RegistrationRelay) Watch(user common.Address) {
 		status:    RegStatusProvisional,
 		submitted: true,
 		watchOnly: true,
+		watchTx:   txHash,
 		createdAt: time.Now(),
 	}
 	_, watched := r.countTrackedLocked()
@@ -448,8 +474,8 @@ func (r *RegistrationRelay) drainWatch() {
 	}
 	for i := 0; i < limit; i++ {
 		select {
-		case user := <-r.watchCh:
-			r.Watch(user)
+		case ev := <-r.watchCh:
+			r.Watch(ev.user, ev.tx)
 		default:
 			return
 		}
@@ -741,10 +767,11 @@ func (r *RegistrationRelay) loop() {
 			r.ProcessBatch()
 		case <-r.wakeCh:
 			r.ProcessBatch()
-		case user := <-r.watchCh:
-			r.Watch(user)
+		case ev := <-r.watchCh:
+			// Record the watch only: verification runs on the regular ticker, so a burst of provisional activations
+			// does not trigger a ProcessBatch (and Parent lookups) per event.
+			r.Watch(ev.user, ev.tx)
 			r.drainWatch()
-			r.wake()
 		}
 	}
 }
@@ -909,6 +936,7 @@ func entryFromRecord(rec *RelayRecord) *relayEntry {
 		reason:    rec.Reason,
 		createdAt: created,
 		txHash:    rec.TxHash,
+		watchTx:   rec.WatchTx,
 	}
 }
 
@@ -987,6 +1015,7 @@ func (r *RegistrationRelay) saveLocked(e *relayEntry) error {
 		Reason:    e.reason,
 		CreatedAt: created,
 		TxHash:    e.txHash,
+		WatchTx:   e.watchTx,
 	}
 	if err := r.store.Put(rec); err != nil {
 		log.Printf("RegistrationRelay: failed to persist entry %s: %v", e.user.Hex(), err)
@@ -1459,23 +1488,17 @@ func (r *RegistrationRelay) verifyOne(user common.Address) bool {
 	}
 
 	if e.watchOnly && provChecker != nil && !provChecker(user) {
-		// Callback may have fired from an uncommitted/rolled-back execution; drop after a few checks without
-		// querying Parent Chain.
-		const maxWatchStaleChecks = 3
-		drop := false
-		r.update(user, func(ent *relayEntry) {
-			ent.staleChecks++
-			if ent.staleChecks >= maxWatchStaleChecks {
-				drop = true
-			}
-		})
-		if drop {
+		// The watch callback fires while the account_provisional tx executes (possibly speculatively), before its
+		// block is committed, so an absent flag only proves the activation did not apply once that tx is in a
+		// committed block. Until then wait, without querying the Parent Chain. Never decided by ticks or time.
+		r.mu.Lock()
+		committed := r.txCommitted
+		r.mu.Unlock()
+		if e.watchTx != (common.Hash{}) && committed != nil && committed(e.watchTx) {
+			log.Printf("RegistrationRelay: provisional tx %s for %s committed without activation, dropping watch", e.watchTx.Hex(), user.Hex())
 			r.deleteEntry(user)
 		}
 		return false
-	}
-	if e.watchOnly && e.staleChecks > 0 {
-		r.update(user, func(ent *relayEntry) { ent.staleChecks = 0 })
 	}
 
 	r.markProvisionalIfApplied(user)

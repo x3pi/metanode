@@ -826,6 +826,16 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 
 		if app.accountRegistryHandler != nil && app.config.AccountGateParentRegistered() {
 			app.accountRegistryHandler.OnProvisionalApplied = app.regRelay.EnqueueWatch
+			// A tx->block mapping is written only by the block commit (after the executed state is adopted), so it
+			// tells a watcher that an account_provisional tx is committed and an absent flag is final.
+			app.regRelay.SetTxCommittedChecker(func(txHash e_common.Hash) bool {
+				bc := blockchain.GetBlockChainInstance()
+				if bc == nil {
+					return false
+				}
+				_, ok := bc.GetBlockNumberByTxHashFast(txHash)
+				return ok
+			})
 		}
 	}
 

@@ -858,7 +858,7 @@ func TestWatchOnly_NeverSendsRegisterAccount(t *testing.T) {
 	user, _ := h.userSig(t)
 	h.prov.Store(user, true)
 
-	h.relay.EnqueueWatch(user)
+	h.relay.EnqueueWatch(user, provTxOf(user))
 	for i := 0; i < 10; i++ {
 		h.ticks(1)
 	}
@@ -897,7 +897,7 @@ func TestWatchOnly_OwnedByOtherCluster_CoAttestsOnceAndCleansUpOnLock(t *testing
 		return cm.PublicKey{}
 	})
 
-	h.relay.EnqueueWatch(user)
+	h.relay.EnqueueWatch(user, provTxOf(user))
 	// Tick 1: calls lockProposer once and marks attested=true.
 	h.ticks(1)
 	assert.Equal(t, 1, h.lockProposalCount())
@@ -927,7 +927,7 @@ func TestWatchOnly_OwnedByThisCluster_CleanedUpOnConfirmed(t *testing.T) {
 	h.prov.Store(user, true)
 	h.parent.registry[user] = h.clusterKP.PublicKey()
 
-	h.relay.EnqueueWatch(user)
+	h.relay.EnqueueWatch(user, provTxOf(user))
 	// First tick sees home == clusterKey; ticks 2..5 must NOT query Parent again while waiting for RegistrationWorker.
 	h.ticks(5)
 	assert.Equal(t, 0, h.parent.sendCount())
@@ -958,7 +958,7 @@ func TestWatchOnly_PersistedAndReloadedAcrossRestart(t *testing.T) {
 		func(common.Address) bool { return false })
 	relay1.SetProvisionalChecker(func(a common.Address) bool { return a == user })
 	require.NoError(t, relay1.SetStore(store))
-	relay1.Watch(user)
+	relay1.Watch(user, provTxOf(user))
 
 	rec, found, err := store.Get(user)
 	require.NoError(t, err)
@@ -994,25 +994,222 @@ func TestWatchOnly_PersistedAndReloadedAcrossRestart(t *testing.T) {
 	assert.False(t, foundAfter)
 }
 
-func TestWatchOnly_OrphanCleanedUpWhenNotProvisionalOnChain(t *testing.T) {
+// provTxOf is a deterministic stand-in for the account_provisional tx hash that activated user.
+func provTxOf(u common.Address) common.Hash {
+	return common.BytesToHash(append([]byte("prov-tx:"), u.Bytes()...))
+}
+
+// committedTxs is a test tx->block mapping: a hash is "committed" once stored.
+type committedTxs struct{ m sync.Map }
+
+func (c *committedTxs) commit(h common.Hash)         { c.m.Store(h, true) }
+func (c *committedTxs) has(h common.Hash) bool       { _, ok := c.m.Load(h); return ok }
+func (c *committedTxs) install(r *RegistrationRelay) { r.SetTxCommittedChecker(c.has) }
+
+// An activation callback from an execution whose tx later commits WITHOUT the flag (rolled back / failed on
+// re-execution) is dropped, but only once that tx is in a committed block: never by tick count.
+func TestWatchOnly_OrphanDroppedOnlyAfterProvisionalTxCommitted(t *testing.T) {
 	h := newProvHarness()
 	store := NewKVRelayStore(NewMemoryKVStore())
 	require.NoError(t, h.relay.SetStore(store))
+	var committed committedTxs
+	committed.install(h.relay)
 	user, _ := h.userSig(t)
-	// h.prov does NOT have user (simulating callback from rolled-back execution).
+	// h.prov does NOT have user: the flag is not visible in committed state.
 
-	h.relay.EnqueueWatch(user)
-	h.ticks(2)
+	h.relay.EnqueueWatch(user, provTxOf(user))
+	h.ticks(50)
 	_, tracked := h.relay.snapshot(user)
-	assert.True(t, tracked, "kept briefly in case state commit lags by a tick")
-	assert.Equal(t, 0, h.parent.getLookupCount(), "must not query Parent while provisional flag is absent")
-
-	h.ticks(1) // 3rd stale check drops it
-	_, tracked = h.relay.snapshot(user)
-	assert.False(t, tracked, "orphan watchOnly entry must be cleaned up")
+	assert.True(t, tracked, "must wait while the provisional tx is not committed, however many ticks run")
 	_, found, _ := store.Get(user)
+	assert.True(t, found, "the persisted watch must not be deleted before commit")
+	assert.Equal(t, 0, h.parent.getLookupCount(), "must not query Parent while the flag is absent")
+
+	committed.commit(provTxOf(user)) // the block is committed and the flag is still absent: activation did not apply
+	h.ticks(1)
+	_, tracked = h.relay.snapshot(user)
+	assert.False(t, tracked, "orphan watch must be dropped once its tx is committed without the flag")
+	_, found, _ = store.Get(user)
 	assert.False(t, found)
 	assert.Equal(t, 0, h.parent.getLookupCount())
+}
+
+// Without a commit signal (checker not wired, or a watch without a tx hash) an absent flag is never final.
+func TestWatchOnly_NoCommitSignalNeverDrops(t *testing.T) {
+	h := newProvHarness()
+	u1, _ := h.userSig(t)
+	u2, _ := h.userSig(t)
+	h.relay.EnqueueWatch(u1, provTxOf(u1)) // no checker installed
+	h.ticks(30)
+	_, tracked := h.relay.snapshot(u1)
+	assert.True(t, tracked)
+
+	var committed committedTxs
+	committed.install(h.relay)
+	h.relay.EnqueueWatch(u2, common.Hash{}) // unknown tx
+	committed.commit(provTxOf(u1))
+	h.ticks(30)
+	_, tracked = h.relay.snapshot(u2)
+	assert.True(t, tracked, "a watch without tx hash cannot be proven orphan")
+	_, tracked = h.relay.snapshot(u1)
+	assert.False(t, tracked, "u1's tx is committed without flag: dropped")
+}
+
+// Reviewer repro (ProcessBatch form): several activations in one block are reported during speculative execution,
+// many ProcessBatch runs happen before the block commits; no watch may be lost, and after commit the conflicting
+// account is co-signed.
+func TestWatchOnly_BurstBeforeCommitKeepsWatchesAndCoSignsLock(t *testing.T) {
+	h := newProvHarness()
+	h.deferLock = true
+	store := NewKVRelayStore(NewMemoryKVStore())
+	require.NoError(t, h.relay.SetStore(store))
+	var committed committedTxs
+	committed.install(h.relay)
+	otherCluster := bls.GenerateKeyPair().PublicKey()
+
+	users := make([]common.Address, 4)
+	for i := range users {
+		users[i], _ = h.userSig(t)
+		h.relay.EnqueueWatch(users[i], provTxOf(users[i]))
+		h.ticks(10) // many batches per event, flag still invisible (block not committed)
+	}
+	for _, u := range users {
+		_, tracked := h.relay.snapshot(u)
+		require.True(t, tracked, "watch for %s lost before commit", u.Hex())
+	}
+	assert.Equal(t, 0, h.parent.getLookupCount())
+	assert.Equal(t, 0, h.lockProposalCount())
+
+	// Block commits: flags visible, txs mapped; Parent says users[0] belongs to another cluster.
+	for _, u := range users {
+		h.prov.Store(u, true)
+		committed.commit(provTxOf(u))
+	}
+	h.parent.mu.Lock()
+	h.parent.registry[users[0]] = otherCluster
+	h.parent.mu.Unlock()
+
+	h.ticks(1)
+	assert.Equal(t, 1, h.lockProposalCount(), "this validator must co-sign the lock of the conflicting account")
+	assert.Equal(t, 0, h.parent.sendCount())
+	for _, u := range users {
+		_, tracked := h.relay.snapshot(u)
+		assert.True(t, tracked, "flag now visible: %s must stay watched until confirmed/locked", u.Hex())
+	}
+}
+
+// Reviewer repro (loop form): EnqueueWatch events 5ms apart with a very fast ticker (many ProcessBatch runs) must not
+// drop any watch before the flag shows; once it shows, the lock is co-signed.
+func TestWatchOnly_LoopFastTickerBurstDoesNotDropBeforeCommit(t *testing.T) {
+	h := newProvHarness()
+	h.deferLock = true
+	h.relay.interval = time.Millisecond
+	var committed committedTxs
+	committed.install(h.relay)
+	otherCluster := bls.GenerateKeyPair().PublicKey()
+	users := make([]common.Address, 4)
+	for i := range users {
+		users[i], _ = h.userSig(t)
+	}
+
+	h.relay.Start()
+	defer h.relay.Stop()
+	for _, u := range users {
+		h.relay.EnqueueWatch(u, provTxOf(u))
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond) // ~100 ticks with the flags still invisible
+	for _, u := range users {
+		_, tracked := h.relay.snapshot(u)
+		require.True(t, tracked, "watch for %s dropped before commit", u.Hex())
+	}
+
+	h.parent.mu.Lock()
+	h.parent.registry[users[0]] = otherCluster
+	h.parent.mu.Unlock()
+	for _, u := range users {
+		h.prov.Store(u, true)
+		committed.commit(provTxOf(u))
+	}
+	require.Eventually(t, func() bool { return h.lockProposalCount() >= 1 }, 2*time.Second, 5*time.Millisecond,
+		"lock must be co-signed after the flag shows")
+	assert.Equal(t, 0, h.parent.sendCount())
+}
+
+// A watch event only records the watch: it must not trigger a ProcessBatch (and Parent lookups) per event.
+func TestWatchOnly_LoopEventDoesNotTriggerBatch(t *testing.T) {
+	h := newProvHarness()
+	h.relay.interval = time.Hour
+	users := make([]common.Address, 4)
+	for i := range users {
+		users[i], _ = h.userSig(t)
+		h.prov.Store(users[i], true)
+	}
+
+	h.relay.Start()
+	defer h.relay.Stop()
+	for _, u := range users {
+		h.relay.EnqueueWatch(u, provTxOf(u))
+	}
+	require.Eventually(t, func() bool {
+		for _, u := range users {
+			if _, ok := h.relay.snapshot(u); !ok {
+				return false
+			}
+		}
+		return true
+	}, 2*time.Second, 5*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, 0, h.parent.getLookupCount(), "watch events must not run a batch")
+}
+
+// A later activation of an already-watched address (e.g. the first account_provisional tx failed) replaces its tx:
+// only the latest tx decides whether the watch is an orphan. The tx survives a restart.
+func TestWatchOnly_WatchTxReplacedAndPersisted(t *testing.T) {
+	store := NewKVRelayStore(NewMemoryKVStore())
+	kp := bls.GenerateKeyPair()
+	user := common.HexToAddress("0x5555555555555555555555555555555555555555")
+	tx1 := common.HexToHash("0x01")
+	tx2 := common.HexToHash("0x02")
+
+	relay1 := NewRegistrationRelay(newFakeRegParent(), kp.PublicKey(),
+		func(d []byte) cm.Sign { return bls.Sign(kp.PrivateKey(), d) },
+		func(common.Address) bool { return false })
+	require.NoError(t, relay1.SetStore(store))
+	relay1.Watch(user, tx1)
+	relay1.Watch(user, tx2)
+	e, ok := relay1.snapshot(user)
+	require.True(t, ok)
+	assert.Equal(t, tx2, e.watchTx)
+	rec, found, err := store.Get(user)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, tx2, rec.WatchTx)
+
+	// Restart: the watch tx is reloaded; tx1 committed does not drop it, tx2 committed (flag absent) does.
+	relay2 := NewRegistrationRelay(newFakeRegParent(), kp.PublicKey(),
+		func(d []byte) cm.Sign { return bls.Sign(kp.PrivateKey(), d) },
+		func(common.Address) bool { return false })
+	relay2.alertSink = func(string) {}
+	relay2.SetProvisionalChecker(func(common.Address) bool { return false })
+	var committed committedTxs
+	committed.install(relay2)
+	require.NoError(t, relay2.SetStore(store))
+	e, ok = relay2.snapshot(user)
+	require.True(t, ok)
+	assert.Equal(t, tx2, e.watchTx)
+
+	committed.commit(tx1)
+	relay2.ProcessBatch()
+	_, ok = relay2.snapshot(user)
+	assert.True(t, ok, "a superseded tx must not decide the watch")
+
+	committed.commit(tx2)
+	relay2.ProcessBatch()
+	_, ok = relay2.snapshot(user)
+	assert.False(t, ok)
+	_, found, _ = store.Get(user)
+	assert.False(t, found)
 }
 
 func TestWatchOnly_DoesNotOverwriteRealEntry(t *testing.T) {
@@ -1021,7 +1218,7 @@ func TestWatchOnly_DoesNotOverwriteRealEntry(t *testing.T) {
 	_, err := h.relay.Submit(user, sig)
 	require.NoError(t, err)
 
-	h.relay.Watch(user)
+	h.relay.Watch(user, provTxOf(user))
 	entry, ok := h.relay.snapshot(user)
 	require.True(t, ok)
 	assert.False(t, entry.watchOnly, "Watch must not overwrite an existing RPC-submitted entry")
@@ -1035,7 +1232,7 @@ func TestWatchOnly_LockProposerErrorRetriesWithoutEnteringQueue(t *testing.T) {
 	h.parent.registry[user] = otherCluster
 	h.lockErr = errors.New("tx pool busy")
 
-	h.relay.EnqueueWatch(user)
+	h.relay.EnqueueWatch(user, provTxOf(user))
 	h.ticks(1)
 	assert.Equal(t, 1, h.lockProposalCount())
 	entry, ok := h.relay.snapshot(user)
@@ -1062,7 +1259,7 @@ func TestWatchOnly_ParentOfflineRetriesAndRecovers(t *testing.T) {
 	h.prov.Store(user, true)
 	h.parent.lookupErr = errors.New("parent timeout")
 
-	h.relay.EnqueueWatch(user)
+	h.relay.EnqueueWatch(user, provTxOf(user))
 	h.ticks(25)
 	entry, ok := h.relay.snapshot(user)
 	require.True(t, ok)
@@ -1094,7 +1291,7 @@ func TestWatchOnly_StartLoopReactsToEnqueueWatch(t *testing.T) {
 	h.relay.Start()
 	defer h.relay.Stop()
 
-	h.relay.EnqueueWatch(user)
+	h.relay.EnqueueWatch(user, provTxOf(user))
 	require.Eventually(t, func() bool {
 		return h.relay.Status(user).Status == RegStatusRejected && h.lockProposalCount() >= 1
 	}, 2*time.Second, 10*time.Millisecond)
@@ -1113,7 +1310,7 @@ func TestWatchOnly_SeparateCapacityDoesNotBlockSubmit(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		w, _ := h.userSig(t)
 		h.prov.Store(w, true)
-		h.relay.Watch(w)
+		h.relay.Watch(w, provTxOf(w))
 		watchedUsers = append(watchedUsers, w)
 	}
 	_, watchedCount := func() (int, int) {
@@ -1154,10 +1351,10 @@ func TestWatchOnly_SeparateCapacityDoesNotBlockSubmit(t *testing.T) {
 
 func TestWatchOnly_FullChannelDoesNotBlock(t *testing.T) {
 	h := newProvHarness()
-	h.relay.watchCh = make(chan common.Address, 2)
+	h.relay.watchCh = make(chan watchEvent, 2)
 	for i := 0; i < 5; i++ {
 		u, _ := h.userSig(t)
-		h.relay.EnqueueWatch(u) // must return immediately without blocking even when watchCh is full
+		h.relay.EnqueueWatch(u, provTxOf(u)) // must return immediately without blocking even when watchCh is full
 	}
 	assert.Equal(t, 2, len(h.relay.watchCh))
 }
@@ -1174,8 +1371,8 @@ func TestWatchOnly_OverflowIsPersistedAndLoadedWhenSlotFrees(t *testing.T) {
 	second, _ := h.userSig(t)
 	h.prov.Store(first, true)
 	h.prov.Store(second, true)
-	h.relay.Watch(first)
-	h.relay.Watch(second) // table full
+	h.relay.Watch(first, provTxOf(first))
+	h.relay.Watch(second, provTxOf(second)) // table full
 
 	_, inMemory := h.relay.snapshot(second)
 	assert.False(t, inMemory, "overflow watch must not exceed maxWatched in memory")
@@ -1183,6 +1380,7 @@ func TestWatchOnly_OverflowIsPersistedAndLoadedWhenSlotFrees(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found, "overflow watch must be persisted")
 	assert.True(t, rec.WatchOnly)
+	assert.Equal(t, provTxOf(second), rec.WatchTx, "the deferred watch keeps its provisional tx")
 
 	// First watch finishes (e.g. locked or confirmed) and frees its slot; the next tick loads the deferred one.
 	h.relay.deleteEntry(first)

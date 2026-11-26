@@ -421,7 +421,15 @@ func TestRegistrationE2E_TwoClustersRace_MultiValidatorLockCoAttestation(t *test
 
 	r0 := wireValidatorRelay(0, true)
 	r1 := wireValidatorRelay(1, false)
-	regHandlerB.OnProvisionalApplied = r1.EnqueueWatch
+	// Execution reports the account_provisional tx hash; in this harness a tx executes directly on the committed
+	// state, so a reported tx counts as committed (production: tx->block mapping written at block commit).
+	var provTxs sync.Map
+	r1.SetTxCommittedChecker(func(h common.Hash) bool { _, ok := provTxs.Load(h); return ok })
+	regHandlerB.OnProvisionalApplied = func(user common.Address, txHash common.Hash) {
+		provTxs.Store(txHash, user)
+		r1.EnqueueWatch(user, txHash)
+	}
+	defer func() { regHandlerB.OnProvisionalApplied = nil }()
 
 	// Cluster A wins first on Parent.
 	u := newTestUser(t)
@@ -438,6 +446,14 @@ func TestRegistrationE2E_TwoClustersRace_MultiValidatorLockCoAttestation(t *test
 	_, err = r0.Submit(u.addr, sigB)
 	require.NoError(t, err)
 	require.True(t, b.onChain(t, u.addr).IsProvisional())
+	reported := 0
+	provTxs.Range(func(k, v any) bool {
+		reported++
+		assert.NotEqual(t, common.Hash{}, k.(common.Hash), "RollupSystemHandler must report the real tx hash")
+		assert.Equal(t, u.addr, v.(common.Address))
+		return true
+	})
+	assert.Equal(t, 1, reported, "exactly one provisional activation reported")
 
 	// Validator 0 alone submits 1st lock attestation (insufficient for 2-of-4).
 	r0.ProcessBatch()

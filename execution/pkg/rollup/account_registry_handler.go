@@ -240,9 +240,10 @@ type AccountRegistryHandler struct {
 	chainID           uint64
 	committeeProvider CommitteeProvider
 	trustedValidators map[cm.PublicKey]bool
-	// OnProvisionalApplied (optional) is invoked when an account transitions to provisional on-chain.
-	// Must be non-blocking because it runs inside deterministic transaction execution.
-	OnProvisionalApplied func(user common.Address)
+	// OnProvisionalApplied (optional) is invoked when an account transitions to provisional while txHash (the
+	// account_provisional tx, zero when unknown) executes. Execution may be speculative and not yet committed.
+	// Must be non-blocking and must not touch state: it runs inside deterministic transaction execution.
+	OnProvisionalApplied func(user common.Address, txHash common.Hash)
 }
 
 // NewAccountRegistryHandler creates a new handler bound to the cluster's public key.
@@ -445,6 +446,11 @@ func (h *AccountRegistryHandler) verifyAttestations(
 
 // ApplyAttested executes an account registration, provisional activation, or lock payload against stateDB.
 func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, store AttestationStore, committee CommitteeProvider, data []byte) error {
+	return h.ApplyAttestedTx(stateDB, store, committee, data, common.Hash{})
+}
+
+// ApplyAttestedTx is ApplyAttested for the system tx txHash; txHash is only reported to OnProvisionalApplied.
+func (h *AccountRegistryHandler) ApplyAttestedTx(stateDB AccountStateRegistryDB, store AttestationStore, committee CommitteeProvider, data []byte, txHash common.Hash) error {
 	if stateDB == nil {
 		return errors.New("account registry: stateDB is nil")
 	}
@@ -512,7 +518,7 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 		if ok {
 			stateDB.SetProvisional(payload.User, true)
 			if h.OnProvisionalApplied != nil {
-				h.OnProvisionalApplied(payload.User)
+				h.OnProvisionalApplied(payload.User, txHash)
 			}
 		}
 		return nil

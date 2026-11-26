@@ -445,8 +445,10 @@ func TestAccountRegistryHandler_OnProvisionalAppliedCallback(t *testing.T) {
 	handler.SetChainID(991)
 
 	var triggered []common.Address
-	handler.OnProvisionalApplied = func(u common.Address) {
+	var triggeredTx []common.Hash
+	handler.OnProvisionalApplied = func(u common.Address, txHash common.Hash) {
 		triggered = append(triggered, u)
+		triggeredTx = append(triggeredTx, txHash)
 	}
 
 	h := newRelayHarness()
@@ -474,11 +476,53 @@ func TestAccountRegistryHandler_OnProvisionalAppliedCallback(t *testing.T) {
 	cp := &mockCommitteeProvider{validators: []cm.PublicKey{clusterKP.PublicKey()}}
 	attStore := NewDBAttestationStore(newMemSCDB())
 
-	// First application triggers callback once.
-	require.NoError(t, handler.ApplyAttested(db, attStore, cp, data))
+	// First application triggers callback once, carrying the system tx hash.
+	txHash := common.HexToHash("0xabc1")
+	require.NoError(t, handler.ApplyAttestedTx(db, attStore, cp, data, txHash))
 	assert.Equal(t, []common.Address{user}, triggered)
+	assert.Equal(t, []common.Hash{txHash}, triggeredTx)
 
-	// Idempotent repeat does not re-trigger.
+	// Idempotent repeat does not re-trigger (neither through ApplyAttested nor ApplyAttestedTx).
 	require.NoError(t, handler.ApplyAttested(db, attStore, cp, data))
+	require.NoError(t, handler.ApplyAttestedTx(db, attStore, cp, data, common.HexToHash("0xabc2")))
 	assert.Len(t, triggered, 1)
+
+	// ApplyAttested (no tx context) reports a zero hash.
+	other, otherSig := h.userSig(t)
+	d2 := ComputeAccountProvisionalAttestDigest(991, other, clusterKP.PublicKey(), otherSig)
+	p2 := AccountRegistrationPayload{
+		Kind:       SystemPayloadKindAccountProvisional,
+		User:       other,
+		ClusterKey: clusterKP.PublicKey(),
+		UserSig:    otherSig,
+		Attestations: []RegistrationAttestation{{
+			ValidatorPubkey: clusterKP.PublicKey(),
+			Signature:       bls.Sign(clusterKP.PrivateKey(), d2),
+		}},
+	}
+	data2, err := p2.MarshalProto()
+	require.NoError(t, err)
+	require.NoError(t, handler.ApplyAttested(db, attStore, cp, data2))
+	require.Len(t, triggeredTx, 2)
+	assert.Equal(t, other, triggered[1])
+	assert.Equal(t, common.Hash{}, triggeredTx[1])
+
+	// A locked account is rejected and never reported.
+	locked, lockedSig := h.userSig(t)
+	db.SetLocked(locked, true)
+	d3 := ComputeAccountProvisionalAttestDigest(991, locked, clusterKP.PublicKey(), lockedSig)
+	p3 := AccountRegistrationPayload{
+		Kind:       SystemPayloadKindAccountProvisional,
+		User:       locked,
+		ClusterKey: clusterKP.PublicKey(),
+		UserSig:    lockedSig,
+		Attestations: []RegistrationAttestation{{
+			ValidatorPubkey: clusterKP.PublicKey(),
+			Signature:       bls.Sign(clusterKP.PrivateKey(), d3),
+		}},
+	}
+	data3, err := p3.MarshalProto()
+	require.NoError(t, err)
+	assert.Error(t, handler.ApplyAttestedTx(db, attStore, cp, data3, common.HexToHash("0xabc3")))
+	assert.Len(t, triggered, 2)
 }
