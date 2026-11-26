@@ -360,3 +360,107 @@ func TestRegistrationE2E_TwoClustersRace(t *testing.T) {
 	a.relay.ProcessBatch()
 	assert.Equal(t, rollup.RegStatusConfirmed, a.relay.Status(u.addr).Status)
 }
+
+// E2E-5: Multi-validator lock co-attestation on a 4-key committee (f+1 = 2).
+// Cluster B's RPC node (validator 0) proposes PROVISIONAL at Submit while the address already belongs to A on Parent.
+// OnProvisionalApplied notifies validator 1 (watchOnly), and each validator signs ONLY its own 1 account_locked
+// attestation with HasPendingLockAttestation deduplication until the 2-of-4 threshold locks the account.
+func TestRegistrationE2E_TwoClustersRace_MultiValidatorLockCoAttestation(t *testing.T) {
+	parent := newE2EParent(t)
+	a := newE2ECluster(t, parent.srv.URL)
+	b := newE2ECluster(t, parent.srv.URL)
+
+	regHandlerB := b.h.registryHandler.(*rollup.AccountRegistryHandler)
+	chainID := regHandlerB.AttestChainID()
+	accessorB := newLiveAccountStateAccessor(b.cs).(*liveAccountStateAccessor)
+	scdbB := &liveSmartContractDB{db: b.cs.GetSmartContractDB()}
+
+	var lockTxCounts [2]atomic.Int32
+	wireValidatorRelay := func(idx int, isPrimary bool) *rollup.RegistrationRelay {
+		v := b.validators[idx]
+		var r *rollup.RegistrationRelay
+		if isPrimary {
+			r = b.relay
+		} else {
+			r = rollup.NewRegistrationRelay(b.client, b.kp.PublicKey(),
+				func(digest []byte) cm.Sign { return bls.Sign(b.kp.PrivateKey(), digest) },
+				accessorB.GetParentRegistered)
+			r.SetProvisionalChecker(accessorB.GetProvisional)
+		}
+		r.SetLockedChecker(accessorB.GetLocked)
+		r.SetLockedHomeClusterChecker(func(addr common.Address) cm.PublicKey {
+			as, err := b.cs.GetAccountStateDB().AccountState(addr)
+			if err != nil || as == nil {
+				return cm.PublicKey{}
+			}
+			return as.LockedHomeCluster()
+		})
+		r.SetLockAlreadyAttested(func(user common.Address, home cm.PublicKey) bool {
+			return rollup.HasPendingLockAttestation(scdbB, chainID, user, home, v.PublicKey())
+		})
+		r.SetLockProposer(func(user common.Address, home cm.PublicKey) error {
+			lockTxCounts[idx].Add(1)
+			digest := rollup.ComputeAccountLockedAttestDigest(chainID, user, home, 0)
+			p := rollup.AccountRegistrationPayload{
+				Kind:        rollup.SystemPayloadKindAccountLocked,
+				User:        user,
+				HomeCluster: home,
+				Attestations: []rollup.RegistrationAttestation{{
+					ValidatorPubkey: v.PublicKey(),
+					Signature:       bls.Sign(v.PrivateKey(), digest),
+				}},
+			}
+			bz, err := p.MarshalProto()
+			if err != nil {
+				return err
+			}
+			return b.execSystemTx(bz)
+		})
+		return r
+	}
+
+	r0 := wireValidatorRelay(0, true)
+	r1 := wireValidatorRelay(1, false)
+	regHandlerB.OnProvisionalApplied = r1.EnqueueWatch
+
+	// Cluster A wins first on Parent.
+	u := newTestUser(t)
+	sigA, err := crypto.Sign(crypto.Keccak256(a.relay.RegistrationDigest(u.addr)), u.key)
+	require.NoError(t, err)
+	_, err = a.relay.Submit(u.addr, sigA)
+	require.NoError(t, err)
+	a.relay.ProcessBatch()
+	waitFor(t, "A's registration executed on Parent", func() bool { _, f := parent.owner(t, u.addr); return f })
+
+	// User submits to Cluster B's validator 0 -> immediately becomes PROVISIONAL, notifying validator 1.
+	sigB, err := crypto.Sign(crypto.Keccak256(r0.RegistrationDigest(u.addr)), u.key)
+	require.NoError(t, err)
+	_, err = r0.Submit(u.addr, sigB)
+	require.NoError(t, err)
+	require.True(t, b.onChain(t, u.addr).IsProvisional())
+
+	// Validator 0 alone submits 1st lock attestation (insufficient for 2-of-4).
+	r0.ProcessBatch()
+	assert.False(t, b.onChain(t, u.addr).IsLocked(), "1 lock attestation must not lock on 4-key committee")
+	assert.True(t, rollup.HasPendingLockAttestation(scdbB, chainID, u.addr, a.kp.PublicKey(), b.validators[0].PublicKey()))
+
+	// Extra ticks on validator 0 must NOT re-submit because HasPendingLockAttestation is true.
+	r0.ProcessBatch()
+	assert.Equal(t, int32(1), lockTxCounts[0].Load(), "validator 0 must submit lock only once")
+
+	// Validator 1 (watchOnly) runs ProcessBatch -> adds 2nd lock attestation -> account locks!
+	r1.ProcessBatch()
+	assert.Equal(t, int32(1), lockTxCounts[1].Load(), "validator 1 must submit lock only once")
+	assert.True(t, b.onChain(t, u.addr).IsLocked(), "2nd attestation locks account on 4-key committee")
+	assert.False(t, b.onChain(t, u.addr).IsProvisional(), "locking clears provisional flag")
+
+	r0.ProcessBatch()
+	r1.ProcessBatch()
+	res := r0.Status(u.addr)
+	assert.Equal(t, rollup.RegStatusRejected, res.Status)
+	require.NotNil(t, res.HomeCluster)
+	assert.Equal(t, a.kp.PublicKey(), *res.HomeCluster)
+	assert.Equal(t, rollup.RegStatusRejected, r1.Status(u.addr).Status)
+	assert.Equal(t, int32(1), lockTxCounts[0].Load())
+	assert.Equal(t, int32(1), lockTxCounts[1].Load())
+}

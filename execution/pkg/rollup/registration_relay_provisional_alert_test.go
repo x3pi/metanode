@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -826,4 +827,368 @@ func TestProvisionalFirst_AfterSendDoesNotDoubleDecrementProvWait(t *testing.T) 
 	assert.Equal(t, relayProvisionalRetryTicks-1, entry.provWait)
 	assert.Equal(t, 1, h.parent.sendCount())
 	assert.Equal(t, 1, calls)
+}
+
+// When rollup is disabled in app.go (no provisionalProposer/lockProposer wired), Submit and ProcessBatch
+// must not propose anything on-chain even if parentClient has a fallback URL.
+func TestProvisionalFirst_NoProposerWhenRollupDisabled(t *testing.T) {
+	h := newRelayHarness() // neither provisionalProposer nor lockProposer is set
+	h.relay.alertSink = func(string) {}
+	h.parent.lookupErr = errors.New("connection refused")
+	user, sig := h.userSig(t)
+
+	res, err := h.relay.Submit(user, sig)
+	require.NoError(t, err)
+	assert.Equal(t, RegStatusPending, res.Status)
+
+	h.relay.ProcessBatch()
+	entry, ok := h.relay.snapshot(user)
+	require.True(t, ok)
+	assert.Equal(t, 0, entry.provWait, "provWait must stay 0 when no provisionalProposer is wired")
+	assert.Equal(t, RegStatusPending, h.relay.Status(user).Status)
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Watch-only reconciliation (multi-validator lock co-attestation)
+// ---------------------------------------------------------------------------------------------------------------
+
+func TestWatchOnly_NeverSendsRegisterAccount(t *testing.T) {
+	h := newProvHarness()
+	h.relay.maxVerifies = 3
+	user, _ := h.userSig(t)
+	h.prov.Store(user, true)
+
+	h.relay.EnqueueWatch(user)
+	for i := 0; i < 10; i++ {
+		h.ticks(1)
+	}
+	assert.Equal(t, 0, h.parent.sendCount(), "watchOnly must never send SendRegisterAccount")
+	assert.GreaterOrEqual(t, h.parent.getLookupCount(), 10)
+	entry, ok := h.relay.snapshot(user)
+	require.True(t, ok)
+	assert.True(t, entry.watchOnly)
+	assert.True(t, entry.submitted)
+	assert.Empty(t, h.relay.queue, "watchOnly must never enter r.queue")
+}
+
+func TestWatchOnly_OwnedByOtherCluster_CoAttestsOnceAndCleansUpOnLock(t *testing.T) {
+	h := newProvHarness()
+	h.deferLock = true
+	otherCluster := bls.GenerateKeyPair().PublicKey()
+	user, _ := h.userSig(t)
+	h.prov.Store(user, true)
+	h.parent.registry[user] = otherCluster
+
+	var attested atomic.Bool
+	h.relay.SetLockAlreadyAttested(func(u common.Address, home cm.PublicKey) bool {
+		return u == user && home == otherCluster && attested.Load()
+	})
+	h.relay.SetLockProposer(func(u common.Address, home cm.PublicKey) error {
+		h.mu.Lock()
+		h.lockCalls++
+		h.mu.Unlock()
+		attested.Store(true)
+		return nil
+	})
+	h.relay.SetLockedHomeClusterChecker(func(u common.Address) cm.PublicKey {
+		if v, ok := h.locked.Load(u); ok && v.(bool) {
+			return otherCluster
+		}
+		return cm.PublicKey{}
+	})
+
+	h.relay.EnqueueWatch(user)
+	// Tick 1: calls lockProposer once and marks attested=true.
+	h.ticks(1)
+	assert.Equal(t, 1, h.lockProposalCount())
+	assert.Equal(t, 0, h.parent.sendCount())
+
+	// Ticks 2..4: HasPendingLockAttestation returns true -> must NOT call lockProposer again.
+	h.ticks(3)
+	assert.Equal(t, 1, h.lockProposalCount(), "already-attested validator must not spam lock txs")
+
+	// Remaining validators co-attest and on-chain lock commits.
+	h.locked.Store(user, true)
+	h.prov.Store(user, false)
+	h.ticks(1)
+
+	_, tracked := h.relay.snapshot(user)
+	assert.False(t, tracked, "watchOnly entry must be deleted once locked on-chain")
+	res := h.relay.Status(user)
+	assert.Equal(t, RegStatusRejected, res.Status)
+	require.NotNil(t, res.HomeCluster)
+	assert.Equal(t, otherCluster, *res.HomeCluster)
+}
+
+func TestWatchOnly_OwnedByThisCluster_CleanedUpOnConfirmed(t *testing.T) {
+	h := newProvHarness()
+	h.relay.maxVerifies = 2
+	user, _ := h.userSig(t)
+	h.prov.Store(user, true)
+	h.parent.registry[user] = h.clusterKP.PublicKey()
+
+	h.relay.EnqueueWatch(user)
+	// First tick sees home == clusterKey; ticks 2..5 must NOT query Parent again while waiting for RegistrationWorker.
+	h.ticks(5)
+	assert.Equal(t, 0, h.parent.sendCount())
+	assert.Equal(t, 1, h.parent.getLookupCount(), "watchOnly must stop polling Parent once home == clusterKey is confirmed")
+	entry, ok := h.relay.snapshot(user)
+	require.True(t, ok)
+	assert.True(t, entry.submitted)
+
+	// RegistrationWorker confirms on-chain.
+	h.flags.Store(user, true)
+	h.prov.Store(user, false)
+	h.ticks(1)
+
+	_, tracked := h.relay.snapshot(user)
+	assert.False(t, tracked, "watchOnly entry must be deleted once confirmed on-chain")
+	assert.Equal(t, RegStatusConfirmed, h.relay.Status(user).Status)
+}
+
+func TestWatchOnly_PersistedAndReloadedAcrossRestart(t *testing.T) {
+	store := NewKVRelayStore(NewMemoryKVStore())
+	kp := bls.GenerateKeyPair()
+	otherCluster := bls.GenerateKeyPair().PublicKey()
+	user := common.HexToAddress("0x4444444444444444444444444444444444444444")
+
+	parent1 := newFakeRegParent()
+	relay1 := NewRegistrationRelay(parent1, kp.PublicKey(),
+		func(d []byte) cm.Sign { return bls.Sign(kp.PrivateKey(), d) },
+		func(common.Address) bool { return false })
+	relay1.SetProvisionalChecker(func(a common.Address) bool { return a == user })
+	require.NoError(t, relay1.SetStore(store))
+	relay1.Watch(user)
+
+	rec, found, err := store.Get(user)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.True(t, rec.WatchOnly)
+	assert.True(t, rec.Submitted)
+
+	// Restart into relay2 over the same store.
+	parent2 := newFakeRegParent()
+	parent2.registry[user] = otherCluster
+	relay2 := NewRegistrationRelay(parent2, kp.PublicKey(),
+		func(d []byte) cm.Sign { return bls.Sign(kp.PrivateKey(), d) },
+		func(common.Address) bool { return false })
+	relay2.alertSink = func(string) {}
+	var locked atomic.Bool
+	relay2.SetProvisionalChecker(func(a common.Address) bool { return a == user && !locked.Load() })
+	relay2.SetLockedChecker(func(a common.Address) bool { return a == user && locked.Load() })
+	lockCalls := 0
+	relay2.SetLockProposer(func(u common.Address, home cm.PublicKey) error {
+		lockCalls++
+		locked.Store(true)
+		return nil
+	})
+	require.NoError(t, relay2.SetStore(store))
+
+	assert.Empty(t, relay2.queue, "reloaded watchOnly entry must not enter r.queue")
+	relay2.ProcessBatch()
+	assert.Equal(t, 0, parent2.sendCount(), "reloaded watchOnly entry must never call SendRegisterAccount")
+	assert.Equal(t, 1, lockCalls)
+	_, tracked := relay2.snapshot(user)
+	assert.False(t, tracked)
+	_, foundAfter, _ := store.Get(user)
+	assert.False(t, foundAfter)
+}
+
+func TestWatchOnly_OrphanCleanedUpWhenNotProvisionalOnChain(t *testing.T) {
+	h := newProvHarness()
+	store := NewKVRelayStore(NewMemoryKVStore())
+	require.NoError(t, h.relay.SetStore(store))
+	user, _ := h.userSig(t)
+	// h.prov does NOT have user (simulating callback from rolled-back execution).
+
+	h.relay.EnqueueWatch(user)
+	h.ticks(2)
+	_, tracked := h.relay.snapshot(user)
+	assert.True(t, tracked, "kept briefly in case state commit lags by a tick")
+	assert.Equal(t, 0, h.parent.getLookupCount(), "must not query Parent while provisional flag is absent")
+
+	h.ticks(1) // 3rd stale check drops it
+	_, tracked = h.relay.snapshot(user)
+	assert.False(t, tracked, "orphan watchOnly entry must be cleaned up")
+	_, found, _ := store.Get(user)
+	assert.False(t, found)
+	assert.Equal(t, 0, h.parent.getLookupCount())
+}
+
+func TestWatchOnly_DoesNotOverwriteRealEntry(t *testing.T) {
+	h := newProvHarness()
+	user, sig := h.userSig(t)
+	_, err := h.relay.Submit(user, sig)
+	require.NoError(t, err)
+
+	h.relay.Watch(user)
+	entry, ok := h.relay.snapshot(user)
+	require.True(t, ok)
+	assert.False(t, entry.watchOnly, "Watch must not overwrite an existing RPC-submitted entry")
+}
+
+func TestWatchOnly_LockProposerErrorRetriesWithoutEnteringQueue(t *testing.T) {
+	h := newProvHarness()
+	otherCluster := bls.GenerateKeyPair().PublicKey()
+	user, _ := h.userSig(t)
+	h.prov.Store(user, true)
+	h.parent.registry[user] = otherCluster
+	h.lockErr = errors.New("tx pool busy")
+
+	h.relay.EnqueueWatch(user)
+	h.ticks(1)
+	assert.Equal(t, 1, h.lockProposalCount())
+	entry, ok := h.relay.snapshot(user)
+	require.True(t, ok)
+	assert.True(t, entry.submitted)
+	assert.Equal(t, 0, entry.attempts, "watchOnly lock error must not burn attempts")
+	assert.Empty(t, h.relay.queue, "watchOnly must never enter r.queue")
+
+	// Clear lock error -> next tick retries lock and succeeds.
+	h.mu.Lock()
+	h.lockErr = nil
+	h.mu.Unlock()
+	h.ticks(1)
+	assert.Equal(t, 2, h.lockProposalCount())
+	_, tracked := h.relay.snapshot(user)
+	assert.False(t, tracked)
+	assert.Equal(t, RegStatusRejected, h.relay.Status(user).Status)
+}
+
+func TestWatchOnly_ParentOfflineRetriesAndRecovers(t *testing.T) {
+	h := newProvHarness()
+	otherCluster := bls.GenerateKeyPair().PublicKey()
+	user, _ := h.userSig(t)
+	h.prov.Store(user, true)
+	h.parent.lookupErr = errors.New("parent timeout")
+
+	h.relay.EnqueueWatch(user)
+	h.ticks(25)
+	entry, ok := h.relay.snapshot(user)
+	require.True(t, ok)
+	assert.True(t, entry.watchOnly)
+	assert.True(t, entry.submitted)
+	assert.Equal(t, 0, entry.attempts)
+	assert.Equal(t, 0, h.parent.sendCount())
+
+	// Parent recovers and reveals another cluster owns user.
+	h.parent.mu.Lock()
+	h.parent.lookupErr = nil
+	h.parent.registry[user] = otherCluster
+	h.parent.mu.Unlock()
+
+	h.ticks(1)
+	assert.Equal(t, 1, h.lockProposalCount())
+	assert.Equal(t, 0, h.parent.sendCount())
+	assert.Equal(t, RegStatusRejected, h.relay.Status(user).Status)
+}
+
+func TestWatchOnly_StartLoopReactsToEnqueueWatch(t *testing.T) {
+	h := newProvHarness()
+	h.relay.interval = 50 * time.Millisecond
+	otherCluster := bls.GenerateKeyPair().PublicKey()
+	user, _ := h.userSig(t)
+	h.prov.Store(user, true)
+	h.parent.registry[user] = otherCluster
+
+	h.relay.Start()
+	defer h.relay.Stop()
+
+	h.relay.EnqueueWatch(user)
+	require.Eventually(t, func() bool {
+		return h.relay.Status(user).Status == RegStatusRejected && h.lockProposalCount() >= 1
+	}, 2*time.Second, 10*time.Millisecond)
+	assert.Equal(t, 0, h.parent.sendCount())
+}
+
+func TestWatchOnly_SeparateCapacityDoesNotBlockSubmit(t *testing.T) {
+	h := newProvHarness()
+	h.relay.maxTracked = 2
+	h.relay.maxWatched = 3
+	store := NewKVRelayStore(NewMemoryKVStore())
+	require.NoError(t, h.relay.SetStore(store))
+
+	// Fill all 3 watch slots (plus a 4th overflow Watch that must be dropped without failing).
+	var watchedUsers []common.Address
+	for i := 0; i < 4; i++ {
+		w, _ := h.userSig(t)
+		h.prov.Store(w, true)
+		h.relay.Watch(w)
+		watchedUsers = append(watchedUsers, w)
+	}
+	_, watchedCount := func() (int, int) {
+		h.relay.mu.Lock()
+		defer h.relay.mu.Unlock()
+		return h.relay.countTrackedLocked()
+	}()
+	assert.Equal(t, 3, watchedCount, "watch table must enforce maxWatched=3")
+	_, overflowTracked := h.relay.snapshot(watchedUsers[3])
+	assert.False(t, overflowTracked)
+
+	// Real Submit() still has its own maxTracked=2 budget completely unaffected by watchOnly entries.
+	u1, s1 := h.userSig(t)
+	_, err := h.relay.Submit(u1, s1)
+	require.NoError(t, err, "full watch table must not cause ErrRegistrationBusy for Submit")
+	u2, s2 := h.userSig(t)
+	_, err = h.relay.Submit(u2, s2)
+	require.NoError(t, err)
+
+	// 3rd real Submit exceeds maxTracked=2 -> ErrRegistrationBusy.
+	u3, s3 := h.userSig(t)
+	_, err = h.relay.Submit(u3, s3)
+	assert.ErrorIs(t, err, ErrRegistrationBusy)
+
+	// Verify SetStore reload also keeps maxTracked and maxWatched budgets separate.
+	reloaded := NewRegistrationRelay(h.parent, h.clusterKP.PublicKey(),
+		func(d []byte) cm.Sign { return bls.Sign(h.clusterKP.PrivateKey(), d) },
+		func(common.Address) bool { return false })
+	reloaded.maxTracked = 2
+	reloaded.maxWatched = 3
+	require.NoError(t, reloaded.SetStore(store))
+	reloaded.mu.Lock()
+	ownedAfter, watchedAfter := reloaded.countTrackedLocked()
+	reloaded.mu.Unlock()
+	assert.Equal(t, 2, ownedAfter)
+	assert.Equal(t, 3, watchedAfter)
+}
+
+func TestWatchOnly_FullChannelDoesNotBlock(t *testing.T) {
+	h := newProvHarness()
+	h.relay.watchCh = make(chan common.Address, 2)
+	for i := 0; i < 5; i++ {
+		u, _ := h.userSig(t)
+		h.relay.EnqueueWatch(u) // must return immediately without blocking even when watchCh is full
+	}
+	assert.Equal(t, 2, len(h.relay.watchCh))
+}
+
+// A watch that arrives while the watch table is full is persisted, not lost: the provisional callback fires only once,
+// so the stall sweep must load it once a slot frees up and this validator can still co-sign the lock.
+func TestWatchOnly_OverflowIsPersistedAndLoadedWhenSlotFrees(t *testing.T) {
+	h := newProvHarness()
+	h.relay.maxWatched = 1
+	store := NewKVRelayStore(NewMemoryKVStore())
+	require.NoError(t, h.relay.SetStore(store))
+
+	first, _ := h.userSig(t)
+	second, _ := h.userSig(t)
+	h.prov.Store(first, true)
+	h.prov.Store(second, true)
+	h.relay.Watch(first)
+	h.relay.Watch(second) // table full
+
+	_, inMemory := h.relay.snapshot(second)
+	assert.False(t, inMemory, "overflow watch must not exceed maxWatched in memory")
+	rec, found, err := store.Get(second)
+	require.NoError(t, err)
+	require.True(t, found, "overflow watch must be persisted")
+	assert.True(t, rec.WatchOnly)
+
+	// First watch finishes (e.g. locked or confirmed) and frees its slot; the next tick loads the deferred one.
+	h.relay.deleteEntry(first)
+	h.relay.ProcessBatch()
+	e, ok := h.relay.snapshot(second)
+	require.True(t, ok, "deferred watch must be loaded once a slot frees up")
+	assert.True(t, e.watchOnly)
+	assert.Equal(t, 0, h.parent.sendCount(), "loaded watch must never send a registration")
 }

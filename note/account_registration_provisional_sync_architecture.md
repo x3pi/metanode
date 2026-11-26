@@ -60,23 +60,25 @@ User ──mtn_registerAccount(addr, sig)──▶ rate limit theo IP ──▶ 
    1. addr locked → REJECTED;  registered → CONFIRMED;  provisional → PROVISIONAL   (idempotent)
    2. verify chữ ký secp256k1 trên RegistrationDigest(addr, clusterKey)  (sai → lỗi)
    3. ghi RelayRecord xuống DB + fsync        ◀── TRƯỚC KHI trả lời user
-   4. đưa vào hàng đợi (queued=true) → trả PENDING
+   4. đưa vào hàng đợi (queued=true)
+   5. nếu parent != nil và IsConfigured(): đề xuất PROVISIONAL ngay (không chờ Parent) → wake() → trả PENDING
             │
             ▼  vòng relay: mỗi 1s hoặc khi Wake()
 ProcessBatch()
    (1) lấy tối đa 64 request từ hàng đợi → prepareRelay() từng cái:
          ├─ on-chain registered → markConfirmed (xoá khỏi bộ nhớ và DB)
+         ├─ markProvisionalIfApplied + maybeProposeProvisional (cho request nạp lại sau restart hoặc đề xuất lỗi trước đó)
          ├─ GetAccountRegistry(addr) trên parent
-         │    ├─ lỗi mạng/timeout → retryOrFail + đề xuất PROVISIONAL (trừ lỗi cấu hình cục bộ)
+         │    ├─ lỗi mạng/timeout → retryOrFail + DỪNG vòng prepareRelay của tick này (tránh N × 45s)
          │    ├─ đã thuộc cluster MÌNH → không gửi lại, chờ cờ on-chain
-         │    └─ đã thuộc cluster KHÁC → đề xuất lock → REJECTED + cảnh báo CONFLICT
+         │    └─ đã thuộc cluster KHÁC → đề xuất lock → chờ on-chain Locked → REJECTED + cảnh báo CONFLICT
          └─ chưa ai sở hữu → đưa vào danh sách cần gửi
        sendRegistrations(danh sách):
          ├─ batch bật và ≥ 2 request → mỗi nhóm ≤ batchSize = 1 tx METHOD_REGISTER_ACCOUNTS_BATCH
          │    └─ parent từ chối batch ngay khi gửi → gửi lẻ từng cái ngay trong tick đó, đánh dấu noBatch
          └─ ngược lại → mỗi request 1 tx SendRegisterAccount
-       gửi OK → submitted=true, lưu txHash → đề xuất PROVISIONAL
-   (2) tối đa 64 request đã gửi, đang chờ parent → verifyOne()
+       gửi OK → submitted=true, lưu txHash
+   (2) tối đa 64 request đã gửi, đang chờ parent → verifyOne() (lỗi mạng ở GetReceipt hoặc GetAccountRegistry → dừng vòng verify của tick này)
    (3) requeueStalled(): đưa request bị kẹt vào lại hàng đợi, nạp thêm từ DB nếu còn
    (4) flushAlerts(false): gửi Telegram đã gom nếu đủ khoảng thời gian
 
@@ -99,19 +101,21 @@ verifyOne(addr)   (với request đã gửi)
 
 | Tình huống | Đề xuất? | Lý do |
 |---|---|---|
-| Parent sống, chưa ai sở hữu, gửi tx lên parent thành công | **Có, ngay tick đó** | Đã gửi lên parent, chỉ chờ parent thực thi |
-| Parent lỗi mạng hoặc timeout (lookup hay send) | **Có, ngay lần lỗi đầu** | Không bắt user đợi parent sống lại |
-| Parent báo địa chỉ thuộc cluster khác | **Không** | Đã biết chắc là xung đột |
-| Lỗi cấu hình cục bộ (không có node parent, thiếu private key) | **Không** | Node này không bao giờ đồng bộ được |
-| Đề xuất bị lỗi (ví dụ tx pool bận) | Thử lại ở lượt sau | Có ghi log |
+| `Submit()` với `parent != nil` và `IsConfigured() == true` | **Có, ngay tại `Submit()`** | Mở tạm trên child chain trước, không đợi Parent chậm/timeout |
+| Request nạp lại sau restart (`SetStore`) hoặc đề xuất trước đó lỗi | **Có, ở đầu `prepareRelay()` trước khi hỏi Parent** | Đảm bảo kích hoạt tạm không bị chặn nếu Parent đang treo |
+| Rollup tắt (`!app.rollupEnabled`) hoặc `IsConfigured() == false` (thiếu node/privKey) | **Không** | Node không có đường đồng bộ với Parent Chain |
+| Đề xuất bị lỗi (ví dụ tx pool bận) | Reset `provWait = 0`, thử lại ở lượt sau | Không chặn `Submit()`, có ghi log |
 
-### 5.2 Ngưỡng chữ ký: 1 chữ ký committee (hướng A)
+### 5.2 Ngưỡng chữ ký: 1 chữ ký committee (hướng A) và đồng ký `account_locked`
 
-- `account_registered` và `account_locked`: cần **f+1** chữ ký committee, với `required = (N-1)/3 + 1` và N là số khóa BLS phân biệt. Mọi validator đều tự poll parent và tự ký, nên luôn đạt được.
+- `account_registered` và `account_locked`: cần **f+1** chữ ký committee, với `required = (N-1)/3 + 1` và N là số khóa BLS phân biệt.
+  - Với `account_registered`: mọi validator đều tự poll parent (`RegistrationWorker`) và tự ký, tích lũy trong `AttestationStore`.
+  - Với `account_locked`: khi tx `account_provisional` được thực thi trên bất kỳ block nào, `AccountRegistryHandler.OnProvisionalApplied` đẩy địa chỉ ví (non-blocking qua channel giới hạn) vào `RegistrationRelay.Watch(user)` ở chế độ `watchOnly`. Các validator còn lại tự kiểm tra Parent (không gửi `SendRegisterAccount`), nếu thấy ví đã thuộc cluster khác thì mỗi validator ký `account_locked` đúng 1 lần (chống lặp bằng `HasPendingLockAttestation`) cho tới khi đủ `f+1` chữ ký để khóa ví và gỡ `PROVISIONAL`.
+  - Entry `watchOnly` có giới hạn riêng `maxWatched` (mặc định 4096), không chiếm chỗ của `Submit()` (`maxTracked`). Khi bảng watch đầy, địa chỉ mới vẫn được lưu vào store và được `requeueStalled` nạp lại khi có chỗ trống (callback chỉ bắn 1 lần nên không được bỏ). Chỉ khi channel callback đầy (`EnqueueWatch`) hoặc node không có store thì watch mới bị bỏ (có log); lock vẫn an toàn nếu còn ≥ `f+1` validator ký được.
 - `account_provisional`: cần **1** chữ ký hợp lệ của **một thành viên committee** (`verifyAttestations(..., minRequired=1)`).
   - Lý do: chỉ node nhận RPC của user biết về request, nên trên committee từ 4 khóa trở lên thì f+1 (≥ 2) **không bao giờ đạt được**, và tài khoản tạm sẽ kẹt mãi. Mọi điều một người ký thêm có thể kiểm tra thì mọi replica **đã kiểm tra tất định** trong handler: chữ ký user gắn với đúng cluster key, chưa locked, chưa registered. Chữ ký validator chỉ chứng minh tx do một thành viên committee gửi.
   - Chữ ký từ ngoài committee, hoặc ký sai digest, vẫn bị từ chối.
-  - Rủi ro chấp nhận (giống chính sách offline-provisional): trong lúc chờ parent, địa chỉ có thể đã thuộc cluster khác. Khi parent trả lời thì địa chỉ bị khóa ở đây.
+  - Rủi ro chấp nhận: trong khoảng thời gian giữa lúc `PROVISIONAL` commit và lúc `account_locked` gom đủ `f+1` chữ ký (khi trùng cluster), ví vẫn giao dịch nội bộ được (rút cross-chain đã bị gateway chặn). Tiền nhận vào trong khoảng này sẽ bị kẹt khi ví bị khóa.
 
 | Số khóa BLS phân biệt (N) | provisional cần | registered/locked cần |
 |---|---|---|
@@ -241,7 +245,7 @@ Parent **thật** (`ExecuteTx` trên `MemoryStore`, `HTTPServer.Handler()` thậ
 | `TestRegistrationE2E_BatchProvisionalAndConfirmation` | 5 user, đúng **1 tx parent** (nonce +1); cả 5 PROVISIONAL với 1 chữ ký và giao dịch được; 1 worker chưa đủ để CONFIRMED, 2 worker thì đủ |
 | `TestRegistrationE2E_ParentOutageThenRecovery` | Parent sập (HTTP 503): PROVISIONAL và giao dịch được; 50 tick không bị FAILED; parent sống lại thì CONFIRMED |
 | `TestRegistrationE2E_CrashRestartDurability` | Crash sau khi đã nhận 3 request lúc parent sập; relay mới trên cùng DB gửi đủ cả 3; DB rỗng sau khi CONFIRMED |
-| `TestRegistrationE2E_TwoClustersRace` | Hai cluster cùng một địa chỉ: A thắng và CONFIRMED; B khóa địa chỉ, báo REJECTED với home = A, không bao giờ mở tạm |
+| `TestRegistrationE2E_TwoClustersRace` | Hai cluster cùng một địa chỉ: A thắng và CONFIRMED; B khóa địa chỉ (xóa cờ provisional nếu đã bật), báo REJECTED với home = A |
 
 Phép thử đột biến: trả ngưỡng provisional về f+1 thì `BatchProvisionalAndConfirmation` FAIL ("provisional with a single committee attestation on a 4-key committee"). Vậy test thực sự kiểm tra hướng A.
 

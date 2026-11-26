@@ -662,11 +662,21 @@ func (q *QuorumClient) GetReceipt(txHash common.Hash) (*Receipt, bool, error) {
 	if len(q.clients) == 0 {
 		return nil, false, ErrNoNodesConfigured
 	}
+	var lastErr error
+	var anyOK bool
 	for _, c := range q.clients {
 		rcpt, found, err := c.GetReceipt(txHash)
-		if err == nil && found {
-			return rcpt, true, nil
+		if err == nil {
+			anyOK = true
+			if found {
+				return rcpt, true, nil
+			}
+			continue
 		}
+		lastErr = err
+	}
+	if !anyOK && lastErr != nil {
+		return nil, false, lastErr
 	}
 	return nil, false, nil
 }
