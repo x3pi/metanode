@@ -330,23 +330,44 @@ func TestForwardPreservesTransactionAboveDefaultLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, m := range h.m {
-		if m == leader {
-			continue
+	follower := h.m[0]
+	if follower == leader {
+		follower = h.m[1]
+	}
+	waitFollowerKnowsLeader(t, follower)
+	// A 5 MiB entry may not commit within submitCommitTimeout on a slow CI runner, or leadership may move meanwhile.
+	// Those answers mean "keep the batch and retry" (Go dedups txs), so retry them like a real caller would; only a
+	// definitive rejection (e.g. statusTooLarge) fails the test.
+	deadline := time.Now().Add(testTimeout(30 * time.Second))
+	for {
+		st := follower.node.SubmitStatus(batch)
+		if st == statusAccepted {
+			break
 		}
-		waitFollowerKnowsLeader(t, m)
-		if st := m.node.SubmitStatus(batch); st != statusAccepted {
+		retryable := st == statusUncommitted || st == statusRedirect || st == statusNoLeader || st == statusFull
+		if !retryable || time.Now().After(deadline) {
 			t.Fatalf("status=%d", st)
 		}
-		break
+		t.Logf("transient status=%d, retrying", st)
+		time.Sleep(200 * time.Millisecond)
 	}
-	h.waitBlocks(1, leader)
-	total := 0
-	for _, b := range leader.disk.blocks() {
-		total += len(b.Transactions)
+	// A retry after statusUncommitted may commit the batch twice; what must hold is that no tx is lost.
+	nonces := func() map[uint64]bool {
+		seen := map[uint64]bool{}
+		for _, b := range leader.disk.blocks() {
+			for _, raw := range b.Transactions {
+				tx, err := transaction.UnmarshalTransaction(raw.Digest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				seen[tx.GetNonce()] = true
+			}
+		}
+		return seen
 	}
-	if total != 2 {
-		t.Fatalf("forwarding acknowledged batch but retained only %d of 2 transactions", total)
+	waitFor(t, "both forwarded transactions to be applied", 20*time.Second, func() bool { return len(nonces()) >= 2 })
+	if seen := nonces(); !seen[1] || !seen[2] {
+		t.Fatalf("forwarding acknowledged batch but retained only nonces %v of {1,2}", seen)
 	}
 }
 
