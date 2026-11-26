@@ -293,4 +293,6 @@ watch -n 1 -x bash -c 'for u in "http://61.28.233.146:8750" "http://116.118.92.2
 
 # 5. Khởi động lại riêng toàn bộ Child Chain (bỏ qua Parent Chain):
 ./deploy_clusters.sh --restart --exec-only -i inventory_cloud.yml --skip-build
+
+./deploy_clusters.sh --restart --parent-only  -i inventory_cloud.yml 
 ```
