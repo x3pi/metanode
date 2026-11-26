@@ -79,6 +79,11 @@ func NewQuorumClient(urls []string, privKey cm.PrivateKey, pubKey cm.PublicKey) 
 	}
 }
 
+// IsConfigured reports whether this client has at least one Parent Chain node endpoint and a signing key configured.
+func (q *QuorumClient) IsConfigured() bool {
+	return q != nil && len(q.clients) > 0 && q.privKey != (cm.PrivateKey{})
+}
+
 func (q *QuorumClient) quorumThreshold() int {
 	n := len(q.clients)
 	if n <= 1 {

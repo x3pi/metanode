@@ -499,7 +499,7 @@ func (h *AccountRegistryHandler) ApplyAttested(stateDB AccountStateRegistryDB, s
 		// user's mtn_registerAccount call knows about the request, so f+1 could never be reached on a committee of 4+
 		// distinct keys. Everything an extra signer could check here is already checked deterministically by every
 		// replica (user signature bound to this cluster key, not locked, not registered); the attestation only proves
-		// a committee member submitted it. Accepted risk (offline-provisional policy): the address may meanwhile be
+		// a committee member submitted it. Accepted risk (always-provisional policy): the address may meanwhile be
 		// owned by another cluster on the Parent Chain; it is locked here once the parent's answer arrives.
 		digest := ComputeAccountProvisionalAttestDigest(h.attestChainID(), payload.User, payload.ClusterKey, payload.UserSig)
 		ok, err := h.verifyAttestations(store, committee, digest, payload.Attestations, 1)

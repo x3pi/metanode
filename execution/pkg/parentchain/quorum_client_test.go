@@ -771,3 +771,18 @@ func TestQuorumClient_5Nodes_EquivocationPrevention(t *testing.T) {
 	assert.True(t, found)
 	assert.Equal(t, kpA.PublicKey(), gotKey)
 }
+
+func TestQuorumClient_IsConfigured(t *testing.T) {
+	kp := bls.GenerateKeyPair()
+	var nilQC *QuorumClient
+	assert.False(t, nilQC.IsConfigured())
+
+	noNodes := NewQuorumClient(nil, kp.PrivateKey(), kp.PublicKey())
+	assert.False(t, noNodes.IsConfigured())
+
+	noKey := NewQuorumClient([]string{"http://127.0.0.1:18601"}, cm.PrivateKey{}, kp.PublicKey())
+	assert.False(t, noKey.IsConfigured())
+
+	configured := NewQuorumClient([]string{"http://127.0.0.1:18601"}, kp.PrivateKey(), kp.PublicKey())
+	assert.True(t, configured.IsConfigured())
+}

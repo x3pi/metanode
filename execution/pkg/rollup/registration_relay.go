@@ -340,7 +340,8 @@ func (r *RegistrationRelay) SetLockedHomeClusterChecker(fn func(common.Address) 
 	r.lockedHome = fn
 }
 
-// SetProvisionalProposer configures the proposer callback triggered when Parent Chain is offline.
+// SetProvisionalProposer configures the proposer callback to activate accounts provisionally on-chain right away
+// while Parent Chain reconciliation catches up in the background.
 func (r *RegistrationRelay) SetProvisionalProposer(fn func(user common.Address, userSig []byte) error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -470,6 +471,18 @@ func (r *RegistrationRelay) Submit(user common.Address, userSig []byte) (Registr
 		return RegistrationResult{}, ErrInvalidRegistrationSig
 	}
 
+	res, err := r.submitLocked(user, userSig)
+	if err != nil {
+		return RegistrationResult{}, err
+	}
+	if r.parent != nil && res.Status == RegStatusPending {
+		r.maybeProposeProvisional(user, userSig, nil)
+	}
+	r.wake()
+	return res, nil
+}
+
+func (r *RegistrationRelay) submitLocked(user common.Address, userSig []byte) (RegistrationResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -503,7 +516,6 @@ func (r *RegistrationRelay) Submit(user common.Address, userSig []byte) (Registr
 		return RegistrationResult{}, ErrRegistrationBusy
 	}
 	r.entries[user] = e
-	r.wake()
 	return r.resultLocked(e), nil
 }
 
@@ -633,8 +645,14 @@ func (r *RegistrationRelay) ProcessBatch() {
 				e.queued = false
 			}
 			r.mu.Unlock()
-			if r.prepareRelay(user) {
+			shouldSend, netErr := r.prepareRelay(user)
+			if shouldSend {
 				toSend = append(toSend, user)
+			}
+			if netErr {
+				// Parent Chain is unreachable/timing out: leave remaining queued entries in r.queue for the next
+				// tick rather than stalling this tick for N × HTTP timeout.
+				i = n
 			}
 		default:
 			i = n // queue drained by someone else
@@ -644,7 +662,9 @@ func (r *RegistrationRelay) ProcessBatch() {
 	r.sendRegistrations(toSend)
 	// 2. submitted requests still waiting for the parent's answer
 	for _, user := range r.submittedUsers(relayBatchPerTick) {
-		r.verifyOne(user)
+		if r.verifyOne(user) {
+			break
+		}
 	}
 	// 3. requests that are persisted/tracked but not in the queue (queue was full at restart or on retry, or they did
 	// not fit in memory) are enqueued again, so nothing waits for a user action to be retried.
@@ -881,35 +901,38 @@ func (r *RegistrationRelay) retryOrFail(user common.Address, reason string) {
 
 // relayOne asks the parent who owns the address, and if nobody does, sends the cluster-signed registration.
 func (r *RegistrationRelay) relayOne(user common.Address) {
-	if r.prepareRelay(user) {
+	if send, _ := r.prepareRelay(user); send {
 		r.sendRegistrations([]common.Address{user})
 	}
 }
 
-// prepareRelay asks the parent who owns the address. It returns true only when nobody does yet, i.e. the cluster-signed
-// registration must be sent; every other outcome (confirmed, owned, lookup error) is handled here.
-func (r *RegistrationRelay) prepareRelay(user common.Address) bool {
+// prepareRelay proposes provisional activation first (if needed), then asks the parent who owns the address.
+// shouldSend is true only when nobody owns it yet; netErr is true when the parent lookup failed with a transient
+// network/quorum error (so ProcessBatch stops polling further accounts in the same tick).
+func (r *RegistrationRelay) prepareRelay(user common.Address) (shouldSend bool, netErr bool) {
 	e, ok := r.snapshot(user)
 	if !ok || (e.status != RegStatusPending && e.status != RegStatusProvisional) {
-		return false
+		return false, false
 	}
 	if r.registered != nil && r.registered(user) {
 		r.markConfirmed(user)
-		return false
+		return false, false
 	}
 	r.markProvisionalIfApplied(user)
+	// Propose provisional activation BEFORE querying Parent Chain so restarted/retried requests also activate
+	// promptly on the child chain even if the parent is slow or offline.
+	r.maybeProposeProvisional(user, e.userSig, nil)
 
 	home, found, err := r.parent.GetAccountRegistry(user)
 	if err != nil {
 		r.retryOrFail(user, fmt.Sprintf("parent registry lookup failed: %v", err))
-		r.maybeProposeProvisional(user, e.userSig, err)
-		return false
+		return false, !isLocalConfigError(err)
 	}
 	if found {
 		r.resolveFound(user, home)
-		return false
+		return false, false
 	}
-	return true
+	return true, false
 }
 
 // SetBatchSize enables sending up to n registrations in ONE Parent Chain transaction (one nonce) when the parent
@@ -1010,11 +1033,10 @@ func (r *RegistrationRelay) sendBatch(bp batchRegistrationParent, users []common
 	}
 }
 
-// afterSend records the outcome of sending a registration and proposes provisional activation when appropriate.
+// afterSend records the outcome of sending a registration.
 func (r *RegistrationRelay) afterSend(user common.Address, userSig []byte, txHash common.Hash, batched bool, err error) {
 	if err != nil {
 		r.retryOrFail(user, fmt.Sprintf("parent registration submit failed: %v", err))
-		r.maybeProposeProvisional(user, userSig, err)
 		return
 	}
 	r.update(user, func(e *relayEntry) {
@@ -1024,9 +1046,6 @@ func (r *RegistrationRelay) afterSend(user common.Address, userSig []byte, txHas
 		e.txHash = txHash
 		e.batched = batched
 	})
-	// Nobody owns the address and the parent accepted our registration: activate it provisionally on this cluster
-	// right away instead of making the user wait for the Parent Chain to execute and confirm it.
-	r.maybeProposeProvisional(user, userSig, nil)
 }
 
 // reportTxFailureOnce resets the parent nonce pipeline once per failed tx hash: the members of a failed batch share one
@@ -1060,8 +1079,22 @@ func isLocalConfigError(err error) bool {
 		strings.Contains(msg, "private key is nil")
 }
 
+type parentConfigChecker interface {
+	IsConfigured() bool
+}
+
+func (r *RegistrationRelay) isParentConfigured() bool {
+	if r.parent == nil {
+		return false
+	}
+	if cfg, ok := r.parent.(parentConfigChecker); ok {
+		return cfg.IsConfigured()
+	}
+	return true
+}
+
 func (r *RegistrationRelay) maybeProposeProvisional(user common.Address, userSig []byte, parentErr error) {
-	if isLocalConfigError(parentErr) {
+	if !r.isParentConfigured() || isLocalConfigError(parentErr) {
 		return
 	}
 	r.mu.Lock()
@@ -1078,25 +1111,29 @@ func (r *RegistrationRelay) maybeProposeProvisional(user common.Address, userSig
 		r.mu.Unlock()
 		return
 	}
+	// Claim the cooldown slot before releasing r.mu so a concurrent Submit() and ProcessBatch() cannot both propose.
+	e.provWait = relayProvisionalRetryTicks
 	isProv := r.isProvisional
 	prop := r.provisionalProposer
 	r.mu.Unlock()
 
-	if isProv != nil && isProv(user) {
-		return
+	resetWait := func() {
+		r.mu.Lock()
+		if e, ok := r.entries[user]; ok {
+			e.provWait = 0
+		}
+		r.mu.Unlock()
 	}
-	if prop == nil {
+
+	if (isProv != nil && isProv(user)) || prop == nil {
+		resetWait()
 		return
 	}
 	if err := prop(user, userSig); err != nil {
 		log.Printf("RegistrationRelay: failed to propose provisional activation for %s (will retry): %v", user.Hex(), err)
+		resetWait()
 		return // retry on the next attempt
 	}
-	r.mu.Lock()
-	if e, ok := r.entries[user]; ok {
-		e.provWait = relayProvisionalRetryTicks
-	}
-	r.mu.Unlock()
 }
 
 // markConfirmed handles the on-chain CONFIRMED state: the request is finished, so it is dropped from memory and from
@@ -1217,20 +1254,25 @@ func (r *RegistrationRelay) clusterTag() string {
 
 // verifyOne polls the parent registry for a submitted request: the parent executes the registration after accepting the
 // transaction, and a duplicate (the address already belongs to another cluster) only shows up in its registry.
-func (r *RegistrationRelay) verifyOne(user common.Address) {
+// Returns true when a parent network/quorum error occurred (so ProcessBatch stops polling further accounts this tick).
+func (r *RegistrationRelay) verifyOne(user common.Address) bool {
 	e, ok := r.snapshot(user)
 	if !ok || (e.status != RegStatusPending && e.status != RegStatusProvisional) || !e.submitted {
-		return
+		return false
 	}
 	if r.registered != nil && r.registered(user) {
 		r.markConfirmed(user)
-		return
+		return false
 	}
 	r.markProvisionalIfApplied(user)
 
 	// Check if parent chain rejected the submitted transaction (e.g. sender nonce mismatch or other revert)
 	if e.txHash != (common.Hash{}) && r.parent != nil {
-		if rcpt, found, rerr := r.parent.GetReceipt(e.txHash); rerr == nil && found {
+		if rcpt, found, rerr := r.parent.GetReceipt(e.txHash); rerr != nil {
+			log.Printf("RegistrationRelay: transient receipt lookup error for %s (will retry): %v", user.Hex(), rerr)
+			r.alertOnce(user, fmt.Sprintf("parent receipt lookup failed while confirming: %v", rerr))
+			return !isLocalConfigError(rerr)
+		} else if found {
 			if rcpt.Status != 1 {
 				reason := fmt.Sprintf("parent chain rejected registration tx (errCode=%d)", rcpt.ErrorCode)
 				if rcpt.ErrorCode == 103 {
@@ -1244,7 +1286,7 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 					r.update(user, func(e *relayEntry) { e.noBatch = true })
 				}
 				r.retryOrFail(user, reason)
-				return
+				return false
 			}
 		}
 	}
@@ -1254,11 +1296,11 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 		// Transient network or quorum error: log warning and retry on next poll without burning an attempt.
 		log.Printf("RegistrationRelay: transient lookup error for %s (will retry): %v", user.Hex(), err)
 		r.alertOnce(user, fmt.Sprintf("parent registry lookup failed while confirming: %v", err))
-		return
+		return !isLocalConfigError(err)
 	}
 	if found {
 		r.resolveFound(user, home)
-		return
+		return false
 	}
 	failed := false
 	resubmit := false
@@ -1302,6 +1344,7 @@ func (r *RegistrationRelay) verifyOne(user common.Address) {
 			})
 		}
 	}
+	return false
 }
 
 // resolveFound applies the parent's answer: ours ⇒ stay PENDING until the on-chain flag is applied by the

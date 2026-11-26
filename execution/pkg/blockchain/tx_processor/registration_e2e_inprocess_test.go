@@ -354,7 +354,7 @@ func TestRegistrationE2E_TwoClustersRace(t *testing.T) {
 	require.NotNil(t, res.HomeCluster)
 	assert.Equal(t, a.kp.PublicKey(), *res.HomeCluster)
 	assert.True(t, b.onChain(t, u.addr).IsLocked())
-	assert.False(t, b.onChain(t, u.addr).IsProvisional(), "B never activated an address the parent already gave to A")
+	assert.False(t, b.onChain(t, u.addr).IsProvisional(), "locking clears provisional activation once parent gives the address to A")
 
 	a.pollWorkers(2)
 	a.relay.ProcessBatch()
