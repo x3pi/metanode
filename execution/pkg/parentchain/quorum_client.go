@@ -79,6 +79,11 @@ func NewQuorumClient(urls []string, privKey cm.PrivateKey, pubKey cm.PublicKey) 
 	}
 }
 
+// IsConfigured reports whether this client has at least one Parent Chain node endpoint and a signing key configured.
+func (q *QuorumClient) IsConfigured() bool {
+	return q != nil && len(q.clients) > 0 && q.privKey != (cm.PrivateKey{})
+}
+
 func (q *QuorumClient) quorumThreshold() int {
 	n := len(q.clients)
 	if n <= 1 {
@@ -657,11 +662,21 @@ func (q *QuorumClient) GetReceipt(txHash common.Hash) (*Receipt, bool, error) {
 	if len(q.clients) == 0 {
 		return nil, false, ErrNoNodesConfigured
 	}
+	var lastErr error
+	var anyOK bool
 	for _, c := range q.clients {
 		rcpt, found, err := c.GetReceipt(txHash)
-		if err == nil && found {
-			return rcpt, true, nil
+		if err == nil {
+			anyOK = true
+			if found {
+				return rcpt, true, nil
+			}
+			continue
 		}
+		lastErr = err
+	}
+	if !anyOK && lastErr != nil {
+		return nil, false, lastErr
 	}
 	return nil, false, nil
 }

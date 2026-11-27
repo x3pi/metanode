@@ -39,6 +39,12 @@ type AttestedRegistryApplier interface {
 	ApplyAttested(stateDB rollup.AccountStateRegistryDB, store rollup.AttestationStore, committee rollup.CommitteeProvider, data []byte) error
 }
 
+// txAttestedRegistryApplier is an AttestedRegistryApplier that also takes the system tx hash (reported to its
+// provisional-activation callback so watchers can tell when that tx is committed).
+type txAttestedRegistryApplier interface {
+	ApplyAttestedTx(stateDB rollup.AccountStateRegistryDB, store rollup.AttestationStore, committee rollup.CommitteeProvider, data []byte, txHash common.Hash) error
+}
+
 // RollupSystemHandler handles transactions sent to rollup.RollupSystemAddress.
 type RollupSystemHandler struct {
 	dispatcher      RollupSystemEventDispatcher
@@ -156,7 +162,10 @@ func (h *RollupSystemHandler) HandleTransaction(
 			return h.errorReceipt(tx, "registryHandler not initialized"), nil, nil
 		}
 		var applyErr error
-		if att, ok := h.registryHandler.(AttestedRegistryApplier); ok {
+		if att, ok := h.registryHandler.(txAttestedRegistryApplier); ok {
+			applyErr = att.ApplyAttestedTx(stateDB, rollup.NewDBAttestationStore(&liveSmartContractDB{db: chainState.GetSmartContractDB()}),
+				newLiveCommitteeProvider(chainState), data, tx.Hash())
+		} else if att, ok := h.registryHandler.(AttestedRegistryApplier); ok {
 			applyErr = att.ApplyAttested(stateDB, rollup.NewDBAttestationStore(&liveSmartContractDB{db: chainState.GetSmartContractDB()}),
 				newLiveCommitteeProvider(chainState), data)
 		} else {

@@ -26,9 +26,15 @@ type fakeRegParent struct {
 	sends         []fakeSend
 	sendErr       error
 	lookupErr     error
+	receiptErr    error
+	unconfigured  bool
+	lookupCount   int
+	receiptCount  int
 	failedReports []common.Hash
 	// onSend, if set, runs inside SendRegisterAccount (e.g. to make another cluster win the race).
 	onSend func(user common.Address)
+	// onLookup, if set, runs inside GetAccountRegistry before checking lookupErr.
+	onLookup func(user common.Address)
 }
 
 type fakeSend struct {
@@ -61,6 +67,10 @@ func (f *fakeRegParent) SendRegisterAccount(user common.Address, key cm.PublicKe
 func (f *fakeRegParent) GetReceipt(txHash common.Hash) (*parentchain.Receipt, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.receiptCount++
+	if f.receiptErr != nil {
+		return nil, false, f.receiptErr
+	}
 	if f.receipts != nil {
 		if r, ok := f.receipts[txHash]; ok {
 			return r, true, nil
@@ -72,11 +82,33 @@ func (f *fakeRegParent) GetReceipt(txHash common.Hash) (*parentchain.Receipt, bo
 func (f *fakeRegParent) GetAccountRegistry(user common.Address) (cm.PublicKey, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lookupCount++
+	if f.onLookup != nil {
+		f.onLookup(user)
+	}
 	if f.lookupErr != nil {
 		return cm.PublicKey{}, false, f.lookupErr
 	}
 	k, ok := f.registry[user]
 	return k, ok, nil
+}
+
+func (f *fakeRegParent) IsConfigured() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.unconfigured
+}
+
+func (f *fakeRegParent) getLookupCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lookupCount
+}
+
+func (f *fakeRegParent) getReceiptCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.receiptCount
 }
 
 func (f *fakeRegParent) ReportTxFailure(txHash common.Hash) {
@@ -674,6 +706,7 @@ func TestReview3_S3_LocalConfigErrorsAndThreshold(t *testing.T) {
 	t.Run("NoNodesConfigured", func(t *testing.T) {
 		h := newRelayHarness()
 		user, sig := h.userSig(t)
+		h.parent.unconfigured = true
 		h.parent.lookupErr = parentchain.ErrNoNodesConfigured
 		calls := 0
 		h.relay.SetProvisionalProposer(func(u common.Address, us []byte) error {
@@ -692,6 +725,7 @@ func TestReview3_S3_LocalConfigErrorsAndThreshold(t *testing.T) {
 	t.Run("PrivateKeyNotConfigured", func(t *testing.T) {
 		h := newRelayHarness()
 		user, sig := h.userSig(t)
+		h.parent.unconfigured = true
 		h.parent.sendErr = errors.New("cannot SendRegisterAccount: private key not configured")
 		calls := 0
 		h.relay.SetProvisionalProposer(func(u common.Address, us []byte) error {
@@ -706,7 +740,7 @@ func TestReview3_S3_LocalConfigErrorsAndThreshold(t *testing.T) {
 		assert.Equal(t, 0, calls, "private key not configured must never trigger provisionalProposer")
 	})
 
-	// Subtest 3: a network outage proposes provisional activation on the first failure (no waiting for more failures)
+	// Subtest 3: a network outage proposes provisional activation on Submit (no waiting for more failures)
 	t.Run("ProposesOnFirstFailure", func(t *testing.T) {
 		h := newRelayHarness()
 		user, sig := h.userSig(t)
@@ -718,9 +752,10 @@ func TestReview3_S3_LocalConfigErrorsAndThreshold(t *testing.T) {
 		})
 		_, err := h.relay.Submit(user, sig)
 		require.NoError(t, err)
+		assert.Equal(t, 1, calls, "Must propose provisional immediately at Submit")
 
 		h.relay.ProcessBatch()
-		assert.Equal(t, 1, calls, "Must propose provisional on the first parent failure")
+		assert.Equal(t, 1, calls, "Cooldown must avoid re-proposing on the immediate next tick")
 	})
 }
 
@@ -735,9 +770,10 @@ func TestRegistrationRelay_ProposesProvisionalImmediatelyWhenParentIsUp(t *testi
 	})
 	_, err := h.relay.Submit(user, sig)
 	require.NoError(t, err)
+	assert.Equal(t, 1, calls, "provisional activation must be proposed right at Submit")
 
 	h.relay.ProcessBatch()
-	assert.Equal(t, 1, calls, "provisional activation must be proposed on the first tick even when the parent is healthy")
+	assert.Equal(t, 1, calls, "provisional activation must not duplicate on the first tick")
 	assert.Equal(t, 1, h.parent.sendCount(), "registration must still be relayed to the parent")
 }
 

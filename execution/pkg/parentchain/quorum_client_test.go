@@ -771,3 +771,46 @@ func TestQuorumClient_5Nodes_EquivocationPrevention(t *testing.T) {
 	assert.True(t, found)
 	assert.Equal(t, kpA.PublicKey(), gotKey)
 }
+
+func TestQuorumClient_IsConfigured(t *testing.T) {
+	kp := bls.GenerateKeyPair()
+	var nilQC *QuorumClient
+	assert.False(t, nilQC.IsConfigured())
+
+	noNodes := NewQuorumClient(nil, kp.PrivateKey(), kp.PublicKey())
+	assert.False(t, noNodes.IsConfigured())
+
+	noKey := NewQuorumClient([]string{"http://127.0.0.1:18601"}, cm.PrivateKey{}, kp.PublicKey())
+	assert.False(t, noKey.IsConfigured())
+
+	configured := NewQuorumClient([]string{"http://127.0.0.1:18601"}, kp.PrivateKey(), kp.PublicKey())
+	assert.True(t, configured.IsConfigured())
+}
+
+func TestQuorumClient_GetReceipt_AllNodesFailReturnsError(t *testing.T) {
+	txHash := common.HexToHash("0xdeadbeef")
+
+	// All nodes error (unreachable or HTTP 500) -> returns error so callers can fail fast.
+	errSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "node error", http.StatusInternalServerError)
+	}))
+	defer errSrv.Close()
+
+	qcAllFail := NewQuorumClient([]string{errSrv.URL, "http://127.0.0.1:1"}, cm.PrivateKey{}, cm.PublicKey{})
+	rcpt, found, err := qcAllFail.GetReceipt(txHash)
+	assert.Error(t, err)
+	assert.False(t, found)
+	assert.Nil(t, rcpt)
+
+	// At least one node responds cleanly with found=false -> returns (nil, false, nil).
+	notFoundSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"found": false})
+	}))
+	defer notFoundSrv.Close()
+
+	qcPartial := NewQuorumClient([]string{errSrv.URL, notFoundSrv.URL}, cm.PrivateKey{}, cm.PublicKey{})
+	rcpt, found, err = qcPartial.GetReceipt(txHash)
+	assert.NoError(t, err)
+	assert.False(t, found)
+	assert.Nil(t, rcpt)
+}

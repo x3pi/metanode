@@ -386,3 +386,143 @@ func TestAccountRegistryHandler_CoAttestation_LockedAccountCannotBeRegistered(t 
 	assert.False(t, db.GetParentRegistered(user))
 	assert.True(t, db.GetLocked(user))
 }
+
+func TestAccountRegistryHandler_LockCoAttestationAccumulatesAcross4Keys(t *testing.T) {
+	bls.Init()
+
+	v1 := bls.GenerateKeyPair()
+	v2 := bls.GenerateKeyPair()
+	v3 := bls.GenerateKeyPair()
+	v4 := bls.GenerateKeyPair()
+	committee := []cm.PublicKey{v1.PublicKey(), v2.PublicKey(), v3.PublicKey(), v4.PublicKey()}
+	winningCluster := bls.GenerateKeyPair().PublicKey()
+	user := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	chainID := uint64(991)
+
+	handler := NewAccountRegistryHandler(v1.PublicKey())
+	handler.SetChainID(chainID)
+
+	db := newCoattestMockStateDB()
+	db.SetProvisional(user, true)
+	scdb := newMemSCDB()
+	attStore := NewDBAttestationStore(scdb)
+	cp := &mockCommitteeProvider{validators: committee}
+
+	digest := ComputeAccountLockedAttestDigest(chainID, user, winningCluster, 0)
+	makeLockPayload := func(v *bls.KeyPair) []byte {
+		p := AccountRegistrationPayload{
+			Kind:        SystemPayloadKindAccountLocked,
+			User:        user,
+			HomeCluster: winningCluster,
+			Attestations: []RegistrationAttestation{{
+				ValidatorPubkey: v.PublicKey(),
+				Signature:       bls.Sign(v.PrivateKey(), digest),
+			}},
+		}
+		b, err := p.MarshalProto()
+		require.NoError(t, err)
+		return b
+	}
+
+	// 1st validator attestation: stored in pending, account stays provisional and unlocked.
+	require.NoError(t, handler.ApplyAttested(db, attStore, cp, makeLockPayload(v1)))
+	assert.False(t, db.GetLocked(user))
+	assert.True(t, db.GetProvisional(user))
+	assert.True(t, HasPendingLockAttestation(scdb, chainID, user, winningCluster, v1.PublicKey()))
+	assert.False(t, HasPendingLockAttestation(scdb, chainID, user, winningCluster, v2.PublicKey()))
+
+	// 2nd distinct validator attestation reaches f+1=2: locks account, clears provisional and pending store.
+	require.NoError(t, handler.ApplyAttested(db, attStore, cp, makeLockPayload(v2)))
+	assert.True(t, db.GetLocked(user))
+	assert.False(t, db.GetProvisional(user))
+	assert.False(t, HasPendingLockAttestation(scdb, chainID, user, winningCluster, v1.PublicKey()))
+}
+
+func TestAccountRegistryHandler_OnProvisionalAppliedCallback(t *testing.T) {
+	bls.Init()
+	clusterKP := bls.GenerateKeyPair()
+	handler := NewAccountRegistryHandler(clusterKP.PublicKey())
+	handler.SetChainID(991)
+
+	var triggered []common.Address
+	var triggeredTx []common.Hash
+	handler.OnProvisionalApplied = func(u common.Address, txHash common.Hash) {
+		triggered = append(triggered, u)
+		triggeredTx = append(triggeredTx, txHash)
+	}
+
+	h := newRelayHarness()
+	h.clusterKP = clusterKP
+	h.relay = NewRegistrationRelay(h.parent, clusterKP.PublicKey(),
+		func(d []byte) cm.Sign { return bls.Sign(clusterKP.PrivateKey(), d) },
+		func(common.Address) bool { return false })
+	user, sig := h.userSig(t)
+
+	digest := ComputeAccountProvisionalAttestDigest(991, user, clusterKP.PublicKey(), sig)
+	p := AccountRegistrationPayload{
+		Kind:       SystemPayloadKindAccountProvisional,
+		User:       user,
+		ClusterKey: clusterKP.PublicKey(),
+		UserSig:    sig,
+		Attestations: []RegistrationAttestation{{
+			ValidatorPubkey: clusterKP.PublicKey(),
+			Signature:       bls.Sign(clusterKP.PrivateKey(), digest),
+		}},
+	}
+	data, err := p.MarshalProto()
+	require.NoError(t, err)
+
+	db := newCoattestMockStateDB()
+	cp := &mockCommitteeProvider{validators: []cm.PublicKey{clusterKP.PublicKey()}}
+	attStore := NewDBAttestationStore(newMemSCDB())
+
+	// First application triggers callback once, carrying the system tx hash.
+	txHash := common.HexToHash("0xabc1")
+	require.NoError(t, handler.ApplyAttestedTx(db, attStore, cp, data, txHash))
+	assert.Equal(t, []common.Address{user}, triggered)
+	assert.Equal(t, []common.Hash{txHash}, triggeredTx)
+
+	// Idempotent repeat does not re-trigger (neither through ApplyAttested nor ApplyAttestedTx).
+	require.NoError(t, handler.ApplyAttested(db, attStore, cp, data))
+	require.NoError(t, handler.ApplyAttestedTx(db, attStore, cp, data, common.HexToHash("0xabc2")))
+	assert.Len(t, triggered, 1)
+
+	// ApplyAttested (no tx context) reports a zero hash.
+	other, otherSig := h.userSig(t)
+	d2 := ComputeAccountProvisionalAttestDigest(991, other, clusterKP.PublicKey(), otherSig)
+	p2 := AccountRegistrationPayload{
+		Kind:       SystemPayloadKindAccountProvisional,
+		User:       other,
+		ClusterKey: clusterKP.PublicKey(),
+		UserSig:    otherSig,
+		Attestations: []RegistrationAttestation{{
+			ValidatorPubkey: clusterKP.PublicKey(),
+			Signature:       bls.Sign(clusterKP.PrivateKey(), d2),
+		}},
+	}
+	data2, err := p2.MarshalProto()
+	require.NoError(t, err)
+	require.NoError(t, handler.ApplyAttested(db, attStore, cp, data2))
+	require.Len(t, triggeredTx, 2)
+	assert.Equal(t, other, triggered[1])
+	assert.Equal(t, common.Hash{}, triggeredTx[1])
+
+	// A locked account is rejected and never reported.
+	locked, lockedSig := h.userSig(t)
+	db.SetLocked(locked, true)
+	d3 := ComputeAccountProvisionalAttestDigest(991, locked, clusterKP.PublicKey(), lockedSig)
+	p3 := AccountRegistrationPayload{
+		Kind:       SystemPayloadKindAccountProvisional,
+		User:       locked,
+		ClusterKey: clusterKP.PublicKey(),
+		UserSig:    lockedSig,
+		Attestations: []RegistrationAttestation{{
+			ValidatorPubkey: clusterKP.PublicKey(),
+			Signature:       bls.Sign(clusterKP.PrivateKey(), d3),
+		}},
+	}
+	data3, err := p3.MarshalProto()
+	require.NoError(t, err)
+	assert.Error(t, handler.ApplyAttestedTx(db, attStore, cp, data3, common.HexToHash("0xabc3")))
+	assert.Len(t, triggered, 2)
+}
