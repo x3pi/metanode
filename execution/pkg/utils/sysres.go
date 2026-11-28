@@ -23,9 +23,19 @@ const (
 	ProfileLarge  ResourceProfileName = "large"
 
 	smallHostThresholdMB = 8 * 1024
-	tinyMaxMemMB         = 6 * 1024
-	smallMaxMemMB        = 16 * 1024
-	mediumMaxMemMB       = 64 * 1024
+	// Tier boundaries leave headroom below the nominal size: MemTotal of a 64 GB / 16 GB / 6 GB
+	// machine is reported 1-4% lower (kernel/firmware reservations), which must not demote it a tier.
+	tinyMaxMemMB   = 5632      // < 5.5 GiB  -> tiny   (4 GB VPS, or a service capped by MemoryMax)
+	smallMaxMemMB  = 15 * 1024 // < 15 GiB   -> small  (8 GB class)
+	mediumMaxMemMB = 60 * 1024 // < 60 GiB   -> medium (16-32 GB class); >= 60 GiB -> large
+
+	// Upper bounds so an explicit tiny/small override on a big host never yields a larger
+	// Go heap limit than the medium/large tiers.
+	tinyMaxGoMemLimitMB  = 2048
+	smallMaxGoMemLimitMB = 4096
+
+	// legacyLargeEthCallConcurrency keeps the pre-profile off-chain limiter size on large hosts.
+	legacyLargeEthCallConcurrency = 100
 )
 
 // ResourceDefaults holds resolved memory and cache defaults for a single node.
@@ -168,12 +178,17 @@ func ResolveResourceDefaults(memMB uint64, numCPU int, override string) Resource
 			calcMemMB = 4 * 1024
 		}
 		goMemMB := int(calcMemMB * 25 / 100)
+		if goMemMB > tinyMaxGoMemLimitMB {
+			goMemMB = tinyMaxGoMemLimitMB
+		}
 		if goMemMB < 1024 {
 			goMemMB = 1024
 		}
-		expWorkers := numCPU
-		if expWorkers > 2 {
-			expWorkers = 2
+		// Explorer indexing is mostly Xapian I/O; 2 workers per CPU (max 4) keeps the 2048-slot
+		// queue draining so index jobs are not dropped after the 50ms enqueue wait.
+		expWorkers := 2 * numCPU
+		if expWorkers > 4 {
+			expWorkers = 4
 		}
 		d.GoMemLimitMB = goMemMB
 		d.GoMemLimitGB = maxInt(1, goMemMB/1024)
@@ -192,6 +207,9 @@ func ResolveResourceDefaults(memMB uint64, numCPU int, override string) Resource
 			calcMemMB = 8 * 1024
 		}
 		goMemMB := int(calcMemMB * 30 / 100)
+		if goMemMB > smallMaxGoMemLimitMB {
+			goMemMB = smallMaxGoMemLimitMB
+		}
 		if goMemMB < 1536 {
 			goMemMB = 1536
 		}
@@ -243,6 +261,7 @@ func ResolveResourceDefaults(memMB uint64, numCPU int, override string) Resource
 		d.SignatureCacheEntries = 2_500_000
 		d.ExplorerQueueSize = 65536
 		d.ExplorerWorkerCount = 32
+		d.EthCallConcurrency = legacyLargeEthCallConcurrency
 	}
 
 	return d

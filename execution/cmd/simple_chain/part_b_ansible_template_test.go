@@ -282,7 +282,7 @@ func TestPartB_AnsibleTemplates_LowRamVPSAndHighRamServer_ValidAndSafe(t *testin
 		assert.Equal(t, 64, cfgTiny.NomtPageCacheMB)
 		assert.Equal(t, 64, cfgTiny.NomtLeafCacheMB)
 		assert.Equal(t, 2048, cfgTiny.ExplorerQueueSize)
-		assert.LessOrEqual(t, cfgTiny.ExplorerWorkerCount, 2)
+		assert.LessOrEqual(t, cfgTiny.ExplorerWorkerCount, 4)
 
 		renderedService := renderAnsibleJinjaTemplate(t, systemdTpl, baseVars)
 		assert.Contains(t, renderedService, "User=abc")

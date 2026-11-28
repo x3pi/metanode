@@ -229,7 +229,7 @@ func main() {
 		app.config.NomtLeafCacheMB,
 		app.config.ExplorerQueueSize,
 		app.config.ExplorerWorkerCount,
-		resolvedRes.EthCallConcurrency,
+		mvm.DefaultEthCallConcurrency(), // actual limiter size (honors META_MAX_CONCURRENT_ETH_CALL)
 	)
 
 	// Thêm panic recovery cho goroutine app.Run

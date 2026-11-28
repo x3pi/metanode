@@ -54,7 +54,6 @@ import (
 	"log"
 	"math/big"
 	"os"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,27 +71,32 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
 // DefaultEthCallConcurrency returns the bounded concurrency limit for off-chain
-// EVM calls (eth_call / estimateGas), defaulting to 2*NumCPU clamped to [4, 64]
-// unless overridden by META_MAX_CONCURRENT_ETH_CALL. Keeping this small prevents
-// transient Go state + C++ MVM allocations from spiking memory on low-RAM nodes.
+// EVM calls (eth_call / estimateGas): the active resource profile's value
+// (large = legacy 100, others 2*NumCPU clamped to [4, 64]) unless overridden by
+// META_MAX_CONCURRENT_ETH_CALL. Keeping this small prevents transient Go state +
+// C++ MVM allocations from spiking memory on low-RAM nodes.
 func DefaultEthCallConcurrency() int {
 	if raw := os.Getenv("META_MAX_CONCURRENT_ETH_CALL"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 			return n
 		}
 	}
-	n := 2 * runtime.NumCPU()
-	if n < 4 {
-		return 4
-	}
-	if n > 64 {
-		return 64
-	}
-	return n
+	return utils.ActiveResourceDefaults().EthCallConcurrency
+}
+
+// ethCallSem is sized on first use (after config load) so it honors resource_profile,
+// and always matches the processor's off-chain limiter instead of becoming a second,
+// smaller gate that would hold already-built state while waiting.
+func ethCallSem() chan struct{} {
+	ethCallSemaphoreOnce.Do(func() {
+		ethCallSemaphore = make(chan struct{}, DefaultEthCallConcurrency())
+	})
+	return ethCallSemaphore
 }
 
 var (
@@ -100,7 +104,8 @@ var (
 	protectedApiInstances sync.Map
 	apiInstanceCount      atomic.Int32
 	offChainCounter       uint64
-	ethCallSemaphore      = make(chan struct{}, DefaultEthCallConcurrency())
+	ethCallSemaphore      chan struct{}
+	ethCallSemaphoreOnce  sync.Once
 )
 
 type AccountStateDB interface {
@@ -893,8 +898,9 @@ func (a *MVMApi) Call(
 	}()
 
 	if isOffChain {
-		ethCallSemaphore <- struct{}{}
-		defer func() { <-ethCallSemaphore }()
+		sem := ethCallSem()
+		sem <- struct{}{}
+		defer func() { <-sem }()
 	}
 
 	bAmount := [32]byte{}

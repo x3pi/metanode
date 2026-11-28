@@ -618,9 +618,19 @@ func (c *Connection) Address() common.Address {
 
 func (c *Connection) RequestChan() (chan network.Request, chan error) {
 	req := getChannelsRequest{resp: make(chan getChannelsResponse, 1)}
-	c.cmdChan <- req
-	resp := <-req.resp
-	return resp.reqChan, resp.errChan
+	// run() exits via disconnectCh without draining cmdChan, so both the send and the
+	// reply wait must also watch disconnectCh or this caller blocks forever.
+	select {
+	case c.cmdChan <- req:
+	case <-c.disconnectCh:
+		return nil, nil
+	}
+	select {
+	case resp := <-req.resp:
+		return resp.reqChan, resp.errChan
+	case <-c.disconnectCh:
+		return nil, nil
+	}
 }
 
 func (c *Connection) RemoteAddrSafe() string {

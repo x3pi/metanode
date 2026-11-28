@@ -75,8 +75,8 @@ func TestLoadConfig_ResourceProfilePrecedenceAndDefaults(t *testing.T) {
 		assert.Equal(t, 64, cfg.NomtPageCacheMB)
 		assert.Equal(t, 64, cfg.NomtLeafCacheMB)
 		assert.Equal(t, 2048, cfg.ExplorerQueueSize)
-		assert.GreaterOrEqual(t, cfg.ExplorerWorkerCount, 1)
-		assert.LessOrEqual(t, cfg.ExplorerWorkerCount, 2)
+		assert.GreaterOrEqual(t, cfg.ExplorerWorkerCount, 2)
+		assert.LessOrEqual(t, cfg.ExplorerWorkerCount, 4)
 		assert.Equal(t, 100_000, utils.ActiveResourceDefaults().TrieNodeCacheEntries)
 		assert.Equal(t, 200_000, utils.ActiveResourceDefaults().SignatureCacheEntries)
 	})
@@ -89,6 +89,19 @@ func TestLoadConfig_ResourceProfilePrecedenceAndDefaults(t *testing.T) {
 		}`)
 		assert.Equal(t, 2400, cfg.EffectiveGoMemLimitMB())
 		assert.Equal(t, 2, cfg.GoMemLimitGB)
+	})
+
+	t.Run("MetaGoMemLimitEnvIsWrittenIntoConfig", func(t *testing.T) {
+		// The env override must reach the config so RESOURCE_MONITOR and the mempool
+		// evictor use the same limit as the Go runtime.
+		t.Setenv("META_RESOURCE_PROFILE", "")
+		t.Setenv("META_GOMEMLIMIT", "32")
+		cfg := loadConfigFreshForTest(t, `{
+			"resource_profile": "tiny",
+			"go_mem_limit_gb": 1
+		}`)
+		assert.Equal(t, 32, cfg.GoMemLimitGB)
+		assert.Equal(t, 32*1024, cfg.EffectiveGoMemLimitMB())
 	})
 
 	t.Run("InvalidResourceProfileFailsClosed", func(t *testing.T) {
