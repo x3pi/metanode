@@ -1066,6 +1066,18 @@ func (app *App) initRoutes() {
 		}
 	}
 	socketCfg.ConnSendChanSize = connSendChanSize
+	// Optional caps on concurrent client connections (unset keeps the server defaults: 1000 total, 100 per IP). They bound
+	// the per-connection memory on small nodes by construction instead of relying on how many clients happen to connect.
+	if raw := os.Getenv("META_MAX_CONNECTIONS"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			socketCfg.MaxConnections = v
+		}
+	}
+	if raw := os.Getenv("META_MAX_CONNECTIONS_PER_IP"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			socketCfg.MaxConnectionsPerIP = v
+		}
+	}
 	app.socketServer, _ = network.NewSocketServer(
 		socketCfg,
 		app.keyPair,
