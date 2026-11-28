@@ -27,6 +27,11 @@ type Config struct {
 	// is what turns "the handler is slow" into TCP flow control: once it is full readLoop stops reading the socket and
 	// the sender blocks. A huge buffer just moves the backlog into this process's memory.
 	ConnRequestChanSize int
+	// ConnSendChanSize is the outbound buffer of each ACCEPTED connection (0 = SendChanSize). The channel's backing array is
+	// allocated up front, so SendChanSize (500K interface slots = ~7.6 MiB) is paid per client connection whether or not
+	// anything is ever sent. A small value keeps RAM proportional to real traffic; a client that cannot drain its socket
+	// then gets back-pressure and, after WriteTimeout, a disconnect, instead of an ever-growing queue.
+	ConnSendChanSize int
 }
 
 // DefaultConfig tự động tạo ra một cấu hình mặc định hợp lý

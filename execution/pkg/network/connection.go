@@ -215,14 +215,14 @@ func (c *Connection) run() {
 		}
 	}
 
-	startIO := func(conn net.Conn, idleTimeout time.Duration) {
+	startIO := func(conn net.Conn, idleTimeout time.Duration, sendBuf int) {
 		reqBuf := c.config.RequestChanSize
 		if c.config.ConnRequestChanSize > 0 {
 			reqBuf = c.config.ConnRequestChanSize
 		}
 		requestChan = make(chan network.Request, reqBuf)
 		errorChan = make(chan error, c.config.ErrorChanSize)
-		sendChan = make(chan network.Message, c.config.SendChanSize)
+		sendChan = make(chan network.Message, sendBuf)
 		quitChan = make(chan struct{}) // Kênh tín hiệu để dừng
 
 		// Expose sendChan để SendMessage() có thể gửi trực tiếp
@@ -274,7 +274,11 @@ func (c *Connection) run() {
 			c.cachedTcpLocalAddr = tcpConn.LocalAddr()
 			c.metaLastUpdate = time.Now()
 			c.metaMu.Unlock()
-			startIO(tcpConn, c.config.AcceptedConnectionIdleTimeout)
+			acceptedSendBuf := c.config.SendChanSize
+			if c.config.ConnSendChanSize > 0 {
+				acceptedSendBuf = c.config.ConnSendChanSize
+			}
+			startIO(tcpConn, c.config.AcceptedConnectionIdleTimeout, acceptedSendBuf)
 
 			// Signal rằng cmdAccept đã được xử lý xong và sendChan đã được khởi tạo
 			if v.resp != nil {
@@ -302,7 +306,7 @@ func (c *Connection) run() {
 			c.cachedTcpLocalAddr = tcpConn.LocalAddr()
 			c.metaLastUpdate = time.Now()
 			c.metaMu.Unlock()
-			startIO(tcpConn, 0)
+			startIO(tcpConn, 0, c.config.SendChanSize)
 			v.resp <- nil
 
 		case cmdSendMessage:

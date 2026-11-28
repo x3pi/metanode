@@ -1055,6 +1055,17 @@ func (app *App) initRoutes() {
 		}
 	}
 	socketCfg.ConnRequestChanSize = connReqChanSize
+	// Small per-connection outbound buffer. The default SendChanSize (500K slots, ~7.6 MiB) is allocated up front for every
+	// accepted client connection; on a small node (pri-1a: 3.9 GB, no swap) a dozen reconnecting clients cost ~92 MiB of heap
+	// plus allocation churn. 32768 slots (512 KiB) still absorbs a full block of receipts for one client; overridable via
+	// META_CONN_SEND_CHAN_SIZE.
+	connSendChanSize := 32768
+	if raw := os.Getenv("META_CONN_SEND_CHAN_SIZE"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			connSendChanSize = v
+		}
+	}
+	socketCfg.ConnSendChanSize = connSendChanSize
 	app.socketServer, _ = network.NewSocketServer(
 		socketCfg,
 		app.keyPair,
