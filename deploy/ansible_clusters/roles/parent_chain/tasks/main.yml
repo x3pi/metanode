@@ -523,7 +523,7 @@
         port: "{{ parent_http_port | default(8547) }}"
         host: "127.0.0.1"
         delay: 1
-        timeout: 30
+        timeout: "{{ gate_rpc_timeout | default(180) }}"
 
     - name: "Gate G2: Verify Parent Chain status RPC endpoint"
       ansible.builtin.uri:
