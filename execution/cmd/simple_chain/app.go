@@ -48,6 +48,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	mt_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 	t_network "github.com/meta-node-blockchain/meta-node/types/network"
 )
@@ -316,14 +317,11 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		}
 		pageCacheMB := app.config.NomtPageCacheMB
 		if pageCacheMB <= 0 {
-			// TUNED (June 2026): Reduced from 256 to 128 MB.
-			// Saves 640 MB across 5 nodes. NOMT relies on mmap for cold reads.
-			pageCacheMB = 128
+			pageCacheMB = utils.ActiveResourceDefaults().NomtPageCacheMB
 		}
 		leafCacheMB := app.config.NomtLeafCacheMB
 		if leafCacheMB <= 0 {
-			// TUNED (June 2026): Reduced from 256 to 128 MB.
-			leafCacheMB = 128
+			leafCacheMB = utils.ActiveResourceDefaults().NomtLeafCacheMB
 		}
 		if err := mt_trie.InitNomtDB(nomtPath, commitConcurrency, pageCacheMB, leafCacheMB); err != nil {
 			return nil, fmt.Errorf("failed to initialize NOMT database: %v", err)
@@ -1085,6 +1083,9 @@ func (app *App) initRoutes() {
 		handler,
 		app.config.Version,
 	)
+	if app.socketServer != nil && app.subscribeProcessor != nil {
+		app.socketServer.AddOnDisconnectedCallBack(app.subscribeProcessor.RemoveSubcriber)
+	}
 }
 
 // Run starts the application and its components

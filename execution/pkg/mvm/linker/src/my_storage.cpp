@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cstdlib>
 #include "my_storage.h"
 #include "mvm/util.h"
 #include "mvm/gas.h"
@@ -65,12 +66,23 @@ namespace mvm
         }
 
         auto get_rs = GetStorageValue(this->mvmId, b_address + 12, b_key);
+        // GetStorageValue allocates get_rs.value with malloc (C.CBytes) when non-nil;
+        // every branch (including MVM_THROW / NOT_FOUND) must free it.
+        auto free_rs_value = [&]() {
+            if (get_rs.value != nullptr)
+            {
+                free(get_rs.value);
+                get_rs.value = nullptr;
+            }
+        };
         if (get_rs.status == STORAGE_SUSPEND)
         {
+            free_rs_value();
             MVM_THROW(Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)"));
         }
-        if (get_rs.status == STORAGE_NOT_FOUND)
+        if (get_rs.status == STORAGE_NOT_FOUND || get_rs.value == nullptr)
         {
+            free_rs_value();
             // [QUAN TRỌNG - BLOCK-STM FIX] 
             // KHÔNG ĐƯỢC throw Exception ở đây! 
             // get_rs.status = 1 xảy ra khi:
@@ -80,6 +92,7 @@ namespace mvm
             return 0;
         }
         uint256_t value = mvm::from_big_endian(get_rs.value, 32u);
+        free_rs_value();
         cache[key] = value;
 
         if (isCache && State::instanceExists(address))

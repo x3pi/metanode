@@ -12,6 +12,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	p_network "github.com/meta-node-blockchain/meta-node/pkg/network"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
@@ -22,7 +23,6 @@ import (
 )
 
 const maxConcurrentReadTx = 1000
-const maxConcurrentOffChainExecution = 100
 
 // TxVirtualExecutor encapsulates logic for processing read-only and off-chain transactions.
 // It leverages Struct Embedding to be seamlessly integrated into TransactionProcessor.
@@ -60,7 +60,7 @@ func NewTxVirtualExecutor(
 		readTxRequestChan:        make(chan readTxRequest, 10000),
 		readOnlyResultChan:       make(chan tx_processor.ProcessResult, 1000),
 		readTxLimiter:            make(chan struct{}, maxConcurrentReadTx),
-		offChainExecutionLimiter: make(chan struct{}, maxConcurrentOffChainExecution),
+		offChainExecutionLimiter: make(chan struct{}, mvm.DefaultEthCallConcurrency()),
 		blockProcessingLock:      blockProcessingLock,
 	}
 	return v

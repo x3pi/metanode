@@ -475,3 +475,38 @@ func TestManager_PreCheckAndAcquire(t *testing.T) {
 	assert.False(t, needsDisabled)
 	assert.Nil(t, relDisabled)
 }
+
+func TestManager_PruneExpiredRateLimits(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.HelpPayConfig{
+		Enabled:     true,
+		MinBalance:  "10000000000000000",
+		ExtraAmount: "100000000000000000",
+		ConfigFile:  filepath.Join(tmpDir, "helppay_prune.json"),
+	}
+	mgr := NewManager(cfg, nil, nil, big.NewInt(991), tmpDir)
+	today := uint64(time.Now().Unix() / 86400)
+	yesterday := today - 1
+
+	oldAddr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	todayAddr := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	mgr.rateMu.Lock()
+	mgr.ipUsage["10.0.0.1"] = &IPRateLimitRecord{DayNumber: yesterday, TotalTopUp: big.NewInt(1)}
+	mgr.ipUsage["10.0.0.2"] = &IPRateLimitRecord{DayNumber: today, TotalTopUp: big.NewInt(2)}
+	mgr.recipientUsage[oldAddr] = &RecipientRateLimitRecord{DayNumber: yesterday, CountToday: 1}
+	mgr.recipientUsage[todayAddr] = &RecipientRateLimitRecord{DayNumber: today, CountToday: 1}
+
+	mgr.pruneExpiredRateLimitsLocked(today)
+
+	_, hasOldIP := mgr.ipUsage["10.0.0.1"]
+	_, hasTodayIP := mgr.ipUsage["10.0.0.2"]
+	_, hasOldAddr := mgr.recipientUsage[oldAddr]
+	_, hasTodayAddr := mgr.recipientUsage[todayAddr]
+	mgr.rateMu.Unlock()
+
+	assert.False(t, hasOldIP, "yesterday IP record should be pruned")
+	assert.True(t, hasTodayIP, "today IP record should remain")
+	assert.False(t, hasOldAddr, "yesterday recipient record should be pruned")
+	assert.True(t, hasTodayAddr, "today recipient record should remain")
+}

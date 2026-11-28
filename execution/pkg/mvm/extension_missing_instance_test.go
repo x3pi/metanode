@@ -37,3 +37,30 @@ func TestXapianExtensionCallbacks_MissingInstanceIsAnErrorNotAPanic(t *testing.T
 		}()
 	}
 }
+
+func TestWrapExtensionBlst_DoesNotPanicOnEmptyOrShortInput(t *testing.T) {
+	if got := WrapExtensionBlst(nil); got != nil {
+		t.Fatalf("expected nil for nil input, got len=%d", len(got))
+	}
+	if got := WrapExtensionBlst([]byte{1, 2}); got != nil {
+		t.Fatalf("expected nil for invalid short input, got len=%d", len(got))
+	}
+}
+
+func TestDefaultEthCallConcurrency_BoundedAndOverridable(t *testing.T) {
+	t.Setenv("META_MAX_CONCURRENT_ETH_CALL", "")
+	def := DefaultEthCallConcurrency()
+	if def < 4 || def > 64 {
+		t.Fatalf("expected DefaultEthCallConcurrency in [4, 64], got %d", def)
+	}
+
+	t.Setenv("META_MAX_CONCURRENT_ETH_CALL", "12")
+	if got := DefaultEthCallConcurrency(); got != 12 {
+		t.Fatalf("expected env override 12, got %d", got)
+	}
+
+	t.Setenv("META_MAX_CONCURRENT_ETH_CALL", "invalid")
+	if got := DefaultEthCallConcurrency(); got != def {
+		t.Fatalf("expected fallback to %d on invalid env, got %d", def, got)
+	}
+}

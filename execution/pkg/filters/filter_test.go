@@ -3,6 +3,7 @@ package filters
 import (
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -132,4 +133,46 @@ func TestFilterLogs_NoMatch(t *testing.T) {
 	if len(result) != 0 {
 		t.Fatalf("expected 0 logs for non-matching address, got %d", len(result))
 	}
+}
+
+func TestEventSystem_SubscribeStatusLifecycle(t *testing.T) {
+	es := NewEventSystem()
+
+	// Must not block when no status subscribers exist
+	es.SendStatus("no-sub-update")
+
+	ch1, unsub1 := es.SubscribeStatus()
+	ch2, unsub2 := es.SubscribeStatus()
+
+	es.SendStatus("sync-1")
+
+	for i, ch := range []<-chan interface{}{ch1, ch2} {
+		select {
+		case v := <-ch:
+			if v != "sync-1" {
+				t.Fatalf("sub %d got %v, want sync-1", i+1, v)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("sub %d did not receive status update", i+1)
+		}
+	}
+
+	// Unsubscribing closes the subscriber channel and removes it cleanly
+	unsub1()
+	unsub1() // idempotent
+	if _, ok := <-ch1; ok {
+		t.Fatal("expected ch1 to be closed after unsubscribe")
+	}
+
+	// Remaining subscriber still receives updates cleanly
+	es.SendStatus("sync-2")
+	select {
+	case v := <-ch2:
+		if v != "sync-2" {
+			t.Fatalf("sub 2 got %v, want sync-2", v)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sub 2 did not receive second status update")
+	}
+	unsub2()
 }

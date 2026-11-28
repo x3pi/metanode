@@ -6,6 +6,7 @@
 #include "mvm_linker.hpp"
 #include "state.h"
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 
 struct GlobalStateGet_return {
@@ -445,12 +446,18 @@ std::pair<bool, uint256_t> MyGlobalState::add_addresses_storage_read(const Addre
   
   auto ret = GetStorageValue(blockContext.mvmId, b_address + 12, b_key);
   if (ret.status == STORAGE_SUSPEND) {
+      if (ret.value != nullptr) {
+          free(ret.value);
+      }
       MVM_THROW(Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)"));
   }
   if (ret.status == STORAGE_SUCCESS && ret.value != nullptr) {
       uint256_t uncommitted_val = mvm::from_big_endian(ret.value, 32u);
       free(ret.value);
       return {true, uncommitted_val};
+  }
+  if (ret.value != nullptr) {
+      free(ret.value);
   }
   return {false, 0};
 };

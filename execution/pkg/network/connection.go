@@ -68,9 +68,11 @@ type (
 
 // Connection - Quản lý trạng thái bằng một goroutine duy nhất, không dùng Mutex.
 type Connection struct {
-	config  *Config
-	cmdChan chan interface{} // Kênh lệnh đa năng (chỉ cho Connect/Disconnect và metadata updates)
-	runOnce sync.Once
+	config         *Config
+	cmdChan        chan interface{} // Kênh lệnh đa năng (chỉ cho Connect/Disconnect và metadata updates)
+	disconnectCh   chan struct{}    // Closed once by Disconnect() so teardown cannot be dropped when cmdChan is full
+	disconnectOnce sync.Once
+	runOnce        sync.Once
 
 	// sendChan được expose để SendMessage() có thể gửi trực tiếp, không cần qua cmdChan
 	sendChanMu sync.RWMutex
@@ -118,6 +120,7 @@ func newConnectionBase(config *Config) *Connection {
 	return &Connection{
 		config:         config,
 		cmdChan:        make(chan interface{}, 1000), // Tăng buffer từ 10 lên 1000 để xử lý hàng ngàn request
+		disconnectCh:   make(chan struct{}),
 		metaLastUpdate: time.Now(),
 	}
 }
@@ -188,6 +191,9 @@ func (c *Connection) run() {
 			return
 		}
 		connect = false
+		c.metaMu.Lock()
+		c.clearConnectionCacheLocked()
+		c.metaMu.Unlock()
 
 		// BƯỚC 1: Gửi tín hiệu dừng cho các goroutine con.
 		if quitChan != nil {
@@ -237,8 +243,51 @@ func (c *Connection) run() {
 		go c.readLoop(conn, requestChan, errorChan, &readWg, quitChan, idleTimeout)
 	}
 
+	performDisconnect := func() {
+		// Update cache ngay lập tức khi disconnect
+		// Đảm bảo IsConnect() sẽ return false và TcpRemoteAddr()/TcpLocalAddr() sẽ return nil ngay sau khi disconnect
+		c.metaMu.Lock()
+		c.clearConnectionCacheLocked()
+		c.metaMu.Unlock()
+
+		// Clear sendChan reference TRƯỚC khi cleanup để SendMessage() không gửi vào channel đã close
+		c.sendChanMu.Lock()
+		c.sendChan = nil
+		c.sendChanMu.Unlock()
+
+		// Chờ tối đa 5 giây để writeLoop gửi hết các message còn lại trong sendChan
+		if sendChan != nil {
+			start := time.Now()
+			for len(sendChan) > 0 && time.Since(start) < 5*time.Second {
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+
+		cleanup()
+	}
+
 	for {
-		cmd, ok := <-c.cmdChan
+		if c.disconnectCh != nil {
+			select {
+			case <-c.disconnectCh:
+				performDisconnect()
+				return
+			default:
+			}
+		}
+
+		var cmd interface{}
+		var ok bool
+		if c.disconnectCh != nil {
+			select {
+			case <-c.disconnectCh:
+				performDisconnect()
+				return
+			case cmd, ok = <-c.cmdChan:
+			}
+		} else {
+			cmd, ok = <-c.cmdChan
+		}
 		if !ok {
 			return
 		}
@@ -327,27 +376,7 @@ func (c *Connection) run() {
 			}
 
 		case cmdDisconnect:
-			// Update cache ngay lập tức khi disconnect
-			// Đảm bảo IsConnect() sẽ return false ngay sau khi disconnect
-			c.metaMu.Lock()
-			c.cachedConnected = false
-			c.metaLastUpdate = time.Now() // Update timestamp để invalidate cache
-			c.metaMu.Unlock()
-
-			// Clear sendChan reference TRƯỚC khi cleanup để SendMessage() không gửi vào channel đã close
-			c.sendChanMu.Lock()
-			c.sendChan = nil
-			c.sendChanMu.Unlock()
-
-			// Chờ tối đa 5 giây để writeLoop gửi hết các message còn lại trong sendChan
-			if sendChan != nil {
-				start := time.Now()
-				for len(sendChan) > 0 && time.Since(start) < 5*time.Second {
-					time.Sleep(10 * time.Millisecond)
-				}
-			}
-
-			cleanup()
+			performDisconnect()
 			return // Exit run() immediately!
 
 		case cmdClone:
@@ -408,6 +437,14 @@ func (c *Connection) Connect() error {
 }
 
 func (c *Connection) Disconnect() error {
+	c.metaMu.Lock()
+	c.clearConnectionCacheLocked()
+	c.metaMu.Unlock()
+	if c.disconnectCh != nil {
+		c.disconnectOnce.Do(func() {
+			close(c.disconnectCh)
+		})
+	}
 	select {
 	case c.cmdChan <- cmdDisconnect{}:
 	default:
@@ -455,8 +492,7 @@ func (c *Connection) SendMessage(message network.Message) (err error) {
 			// Sau khi retry, nếu vẫn nil thì thực sự chưa connect
 			logger.Error("SendMessage: sendChan vẫn nil sau %d retries, connection chưa ready", maxRetries)
 			c.metaMu.Lock()
-			c.cachedConnected = false
-			c.metaLastUpdate = time.Now()
+			c.clearConnectionCacheLocked()
 			c.metaMu.Unlock()
 			return ErrDisconnected
 		}
@@ -484,11 +520,10 @@ func (c *Connection) SendMessage(message network.Message) (err error) {
 				maxRetries,
 			)
 			c.metaMu.Lock()
-			c.cachedConnected = false
-			c.metaLastUpdate = time.Now()
+			c.clearConnectionCacheLocked()
 			c.metaMu.Unlock()
 			// Trigger disconnect nếu sendChan đầy quá lâu
-			go func() { c.cmdChan <- cmdDisconnect{} }()
+			_ = c.Disconnect()
 			return errors.New("timeout khi gửi vào sendChan")
 		}
 	}
@@ -644,6 +679,13 @@ func (c *Connection) Type() string {
 	}
 }
 
+func (c *Connection) clearConnectionCacheLocked() {
+	c.cachedConnected = false
+	c.cachedTcpRemoteAddr = nil
+	c.cachedTcpLocalAddr = nil
+	c.metaLastUpdate = time.Now()
+}
+
 func (c *Connection) TcpLocalAddr() net.Addr {
 	// Đọc từ cache trước (non-blocking)
 	c.metaMu.RLock()
@@ -651,7 +693,10 @@ func (c *Connection) TcpLocalAddr() net.Addr {
 	connected := c.cachedConnected
 	c.metaMu.RUnlock()
 
-	if !connected || addr != nil {
+	if !connected {
+		return nil
+	}
+	if addr != nil {
 		return addr
 	}
 
@@ -663,7 +708,11 @@ func (c *Connection) TcpLocalAddr() net.Addr {
 		case newAddr := <-req.resp:
 			// Update cache
 			c.metaMu.Lock()
-			c.cachedTcpLocalAddr = newAddr
+			if c.cachedConnected {
+				c.cachedTcpLocalAddr = newAddr
+			} else {
+				newAddr = nil
+			}
 			c.metaMu.Unlock()
 			return newAddr
 		case <-time.After(100 * time.Millisecond):
@@ -683,7 +732,10 @@ func (c *Connection) TcpRemoteAddr() net.Addr {
 	connected := c.cachedConnected
 	c.metaMu.RUnlock()
 
-	if !connected || addr != nil {
+	if !connected {
+		return nil
+	}
+	if addr != nil {
 		return addr
 	}
 
@@ -791,8 +843,7 @@ func (c *Connection) writeLoop(tcpConn net.Conn, sendChan chan network.Message, 
 		}
 		logger.Error("writeLoop %s: %v. Signaling for disconnect.", remoteAddr, err)
 		c.metaMu.Lock()
-		c.cachedConnected = false
-		c.metaLastUpdate = time.Now()
+		c.clearConnectionCacheLocked()
 		c.metaMu.Unlock()
 
 		select {

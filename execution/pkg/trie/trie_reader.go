@@ -7,6 +7,7 @@ import (
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	trie_db "github.com/meta-node-blockchain/meta-node/pkg/trie/db"
 )
 
@@ -30,14 +31,24 @@ var (
 	globalTrieNodeCache     *lru.Cache[e_common.Hash, []byte]
 )
 
+// EffectiveTrieNodeCacheEntries returns the LRU entry budget for the active node profile.
+func EffectiveTrieNodeCacheEntries() int {
+	n := utils.ActiveResourceDefaults().TrieNodeCacheEntries
+	if n <= 0 {
+		return 100_000
+	}
+	return n
+}
+
 func getGlobalTrieNodeCache() *lru.Cache[e_common.Hash, []byte] {
 	globalTrieNodeCacheOnce.Do(func() {
-		cache, err := lru.New[e_common.Hash, []byte](2_000_000)
+		entries := EffectiveTrieNodeCacheEntries()
+		cache, err := lru.New[e_common.Hash, []byte](entries)
 		if err != nil {
 			logger.Error("Failed to create global trie node cache: %v", err)
 			return
 		}
-		logger.Info("✅ [TRIE] Created global trie node cache (2M entries)")
+		logger.Info("✅ [TRIE] Created global trie node cache (%d entries, profile=%s)", entries, utils.ActiveResourceDefaults().Profile)
 		globalTrieNodeCache = cache
 	})
 	return globalTrieNodeCache
