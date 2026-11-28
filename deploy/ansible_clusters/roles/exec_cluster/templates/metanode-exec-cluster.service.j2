@@ -26,6 +26,10 @@ MemoryHigh={{ systemd_memory_high }}
 {% if systemd_memory_max is defined %}
 MemoryMax={{ systemd_memory_max }}
 {% endif %}
+{# Cap glibc malloc arenas used by cgo/C++/Rust so freed native memory is reused instead of fragmenting across per-thread arenas. #}
+{% if malloc_arena_max is defined %}
+Environment="MALLOC_ARENA_MAX={{ malloc_arena_max }}"
+{% endif %}
 {% if not (standalone_chain | default(false) | bool) %}
 Environment="PARENT_CHAIN_URL={{ parent_chain_url | default('http://' ~ (parent_chain_host | default('127.0.0.1')) ~ ':' ~ (parent_chain_rpc_port | default(8547))) }}"
 Environment="PARENT_CHAIN_URLS={{ parent_chain_urls | default(parent_chain_urls_csv | default('')) }}"

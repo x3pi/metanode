@@ -6,10 +6,12 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/pathdetector"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 )
 
 // Xóa cấu hình NodeType do hệ thống chỉ còn hỗ trợ lưu trữ cục bộ.
@@ -304,8 +306,10 @@ type SimpleChainConfig struct {
 	SkipSignatureVerification bool `json:"skip_signature_verification,omitempty"`
 
 	// Runtime memory tuning (per-node configurable, prevents OOM kill)
-	GoMemLimitGB int `json:"go_mem_limit_gb,omitempty"` // Go soft memory limit in GB (default: 8). Set per-node to prevent OOM when running multiple nodes on same server.
-	GoGCPercent  int `json:"go_gc_percent,omitempty"`   // GC target percentage (default: 800). Lower = more frequent GC = less memory but more CPU.
+	ResourceProfile string `json:"resource_profile,omitempty"` // Optional override: tiny, small, medium, large (empty = auto-detect from cgroup/RAM)
+	GoMemLimitGB    int    `json:"go_mem_limit_gb,omitempty"`  // Go soft memory limit in GB (0 = auto-detect from resource_profile/RAM)
+	GoMemLimitMB    int    `json:"go_mem_limit_mb,omitempty"`  // Go soft memory limit in MiB (optional precise limit; takes precedence over 0 GoMemLimitGB)
+	GoGCPercent     int    `json:"go_gc_percent,omitempty"`    // GC target percentage (0 = auto-detect from resource_profile/RAM)
 
 	// XapianPruneRetentionBlocks: nếu > 0, XapianManager sẽ dọn (xoá vĩnh viễn)
 	// các document Xapian đã bị supersede — đánh dấu ở slot value 254 — quá N
@@ -432,12 +436,46 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		if err = ConfigApp.validateAccountGate(); err != nil {
 			return
 		}
+		if v := os.Getenv("META_RESOURCE_PROFILE"); v != "" {
+			ConfigApp.ResourceProfile = v
+		}
+		parsedProfile, profErr := utils.ParseResourceProfile(ConfigApp.ResourceProfile)
+		if profErr != nil {
+			err = profErr
+			return
+		}
+		ConfigApp.ResourceProfile = string(parsedProfile)
+		utils.SetConfiguredResourceProfile(ConfigApp.ResourceProfile)
+		resDefaults := utils.ResolveResourceDefaults(utils.EffectiveMemoryMB(), runtime.NumCPU(), ConfigApp.ResourceProfile)
 
 		if ConfigApp.ExplorerQueueSize == 0 {
-			ConfigApp.ExplorerQueueSize = 65536
+			ConfigApp.ExplorerQueueSize = resDefaults.ExplorerQueueSize
 		}
 		if ConfigApp.ExplorerWorkerCount == 0 {
-			ConfigApp.ExplorerWorkerCount = 32
+			ConfigApp.ExplorerWorkerCount = resDefaults.ExplorerWorkerCount
+		}
+		if ConfigApp.NomtPageCacheMB == 0 {
+			ConfigApp.NomtPageCacheMB = resDefaults.NomtPageCacheMB
+		}
+		if ConfigApp.NomtLeafCacheMB == 0 {
+			ConfigApp.NomtLeafCacheMB = resDefaults.NomtLeafCacheMB
+		}
+		if ConfigApp.GoMemLimitMB == 0 {
+			if ConfigApp.GoMemLimitGB > 0 {
+				ConfigApp.GoMemLimitMB = ConfigApp.GoMemLimitGB * 1024
+			} else {
+				ConfigApp.GoMemLimitMB = resDefaults.GoMemLimitMB
+				ConfigApp.GoMemLimitGB = resDefaults.GoMemLimitGB
+			}
+		} else if ConfigApp.GoMemLimitGB == 0 {
+			gb := ConfigApp.GoMemLimitMB / 1024
+			if gb < 1 {
+				gb = 1
+			}
+			ConfigApp.GoMemLimitGB = gb
+		}
+		if ConfigApp.GoGCPercent == 0 {
+			ConfigApp.GoGCPercent = resDefaults.GoGCPercent
 		}
 		if ConfigApp.MaxCachedEpochs == 0 {
 			ConfigApp.MaxCachedEpochs = 10 // Default: keep 10 epochs of boundary data
@@ -480,10 +518,10 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 			ConfigApp.Databases.Parallelism = 2 // TUNED: Restore to 2 to match previous behavior
 		}
 		if ConfigApp.Databases.PebbleCacheSizeMB == 0 {
-			ConfigApp.Databases.PebbleCacheSizeMB = 4096
+			ConfigApp.Databases.PebbleCacheSizeMB = resDefaults.PebbleCacheSizeMB
 		}
 		if ConfigApp.Databases.PebbleMemTableSizeMB == 0 {
-			ConfigApp.Databases.PebbleMemTableSizeMB = 256
+			ConfigApp.Databases.PebbleMemTableSizeMB = resDefaults.PebbleMemTableSizeMB
 		}
 
 		// Default log configuration if not specified
@@ -555,8 +593,22 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 	return ConfigApp, err
 }
 
+// EffectiveGoMemLimitMB returns the resolved Go soft memory limit in MiB.
+func (c *SimpleChainConfig) EffectiveGoMemLimitMB() int {
+	if c != nil {
+		if c.GoMemLimitMB > 0 {
+			return c.GoMemLimitMB
+		}
+		if c.GoMemLimitGB > 0 {
+			return c.GoMemLimitGB * 1024
+		}
+	}
+	return utils.ActiveResourceDefaults().GoMemLimitMB
+}
+
 // ResetConfigForTesting resets the once guard and ConfigApp so tests can load different configs.
 func ResetConfigForTesting() {
 	loadConfig = sync.Once{}
 	ConfigApp = nil
+	utils.SetConfiguredResourceProfile("")
 }

@@ -164,7 +164,7 @@ metanode/
 | `config/`, `metrics/`, `logger/`, `loggerfile/`, `tracing/`, `monitor_service/`, `fatal/`, `failpoint/` | Config, Prometheus, logging, tracing, fail-stop, crash injection | 🟢 |
 | `helppay/` | Sponsor wallet pool management and automated gas top-up service | 🟢 isolated / 🟡 ingress |
 | `proto/` | Protobuf definitions + generated code (+ vtproto) | 🟡 wire format |
-| `bls/`, `common/`, `utils/`, `abi_file/`, `script/`, `pathdetector/`, `proxy_tx/`, `shared_memory/`, `remotestorage/`, `important_data_logger/`, `models/` | Helpers | 🟢 |
+| `bls/`, `common/`, `utils/` (`sysres.go` for cgroup/RAM auto-tuning), `abi_file/`, `script/`, `pathdetector/`, `proxy_tx/`, `shared_memory/`, `remotestorage/`, `important_data_logger/`, `models/` | Helpers | 🟢 |
 
 > **State backend: NOMT only.** Production and every shipped config run `state_backend = "nomt"`
 > (code default `globalStateBackend = BackendNOMT` in `pkg/trie/trie_factory.go`; unknown/empty values

@@ -717,3 +717,86 @@ func TestPartA_LiveUpgradeAndHeterogeneousCluster_ZeroForkZeroCorruption(t *test
 			"ZERO-FORK VIOLATION at Block #%d: Contract StorageRoot differs between Low-RAM upgraded VPS and High-RAM server", bn)
 	}
 }
+
+// TestPartA_TinyVsLargeResourceProfile_BitIdenticalConsensusRoots loads two complete
+// configs resolved via config.LoadConfig() under resource_profile="tiny" vs "large",
+// executes the identical deterministic block workload, and asserts bit-for-bit identical
+// consensus roots across every block.
+func TestPartA_TinyVsLargeResourceProfile_BitIdenticalConsensusRoots(t *testing.T) {
+	origBackend := mt_trie.GetStateBackend()
+	t.Cleanup(func() {
+		mt_trie.SetStateBackend(origBackend)
+		config.ResetConfigForTesting()
+		mt_trie.CloseNomtDB()
+	})
+
+	loadProfileCfg := func(profile string, dir string) *config.SimpleChainConfig {
+		config.ResetConfigForTesting()
+		cfgPath := filepath.Join(dir, "config_"+profile+".json")
+		raw := fmt.Sprintf(`{
+			"state_backend": "nomt",
+			"resource_profile": %q,
+			"backup_path": %q,
+			"db_type": 2,
+			"Databases": {
+				"RootPath": %q
+			}
+		}`, profile, filepath.Join(dir, "backup"), filepath.Join(dir, "data"))
+		require.NoError(t, os.WriteFile(cfgPath, []byte(raw), 0o600))
+		cfg, err := config.LoadConfig(cfgPath)
+		require.NoError(t, err)
+		return cfg
+	}
+
+	runProfileChain := func(profile string) []blockRootsSnapshot {
+		dir := t.TempDir()
+		cfg := loadProfileCfg(profile, dir)
+		nomtDir := filepath.Join(dir, "data", "consensus", "nomt_db")
+		mt_trie.SetStateBackend(mt_trie.BackendNOMT)
+		require.NoError(t, mt_trie.InitNomtDB(nomtDir, 2, cfg.NomtPageCacheMB, cfg.NomtLeafCacheMB))
+
+		app := &App{
+			config:         cfg,
+			storageManager: storage.NewStorageManager(),
+		}
+		require.NoError(t, app.initBackupDB())
+		require.NoError(t, app.initStorage())
+		defer func() {
+			mt_trie.CloseNomtDB()
+			app.storageManager.CloseAll()
+		}()
+
+		accTrie, err := mt_trie.NewStateTrie(common.Hash{}, app.storageManager.GetStorageAccount(), true)
+		require.NoError(t, err)
+		stakeTrie, err := mt_trie.NewStateTrie(common.Hash{}, app.storageManager.GetStorageStake(), true)
+		require.NoError(t, err)
+		asDB := account_state_db.NewAccountStateDB(accTrie, app.storageManager.GetStorageAccount())
+		stakeDB := stake_state_db.NewStakeStateDB(stakeTrie, app.storageManager.GetStorageStake())
+		scDB := smart_contract_db.NewSmartContractDB(
+			app.storageManager.GetStorageCode(),
+			app.storageManager.GetStorageSmartContract(),
+			asDB,
+			nil,
+		)
+
+		roots := make([]blockRootsSnapshot, 0, 5)
+		for bn := uint64(1); bn <= 5; bn++ {
+			roots = append(roots, applyDeterministicBlockWorkload(t, bn, asDB, scDB, stakeDB))
+		}
+		return roots
+	}
+
+	tinyRoots := runProfileChain("tiny")
+	largeRoots := runProfileChain("large")
+	require.Len(t, tinyRoots, 5)
+	require.Len(t, largeRoots, 5)
+
+	for i := range tinyRoots {
+		require.Equal(t, tinyRoots[i].accountRoot, largeRoots[i].accountRoot,
+			"tiny vs large profile diverged at block %d (accountRoot)", i+1)
+		require.Equal(t, tinyRoots[i].stakeRoot, largeRoots[i].stakeRoot,
+			"tiny vs large profile diverged at block %d (stakeRoot)", i+1)
+		require.Equal(t, tinyRoots[i].contractRoot, largeRoots[i].contractRoot,
+			"tiny vs large profile diverged at block %d (contractRoot)", i+1)
+	}
+}

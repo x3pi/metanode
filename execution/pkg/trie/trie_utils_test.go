@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	e_common "github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -123,4 +124,19 @@ func TestMPT_ExportImport_RoundTrip(t *testing.T) {
 	importedData, err := imported.GetAll()
 	require.NoError(t, err)
 	assert.Len(t, importedData, len(origData), "imported trie should have same number of entries")
+}
+
+func TestEffectiveTrieNodeCacheEntries_FollowsResourceProfile(t *testing.T) {
+	t.Cleanup(func() { utils.SetConfiguredResourceProfile("") })
+
+	cases := map[string]int{
+		"tiny":   100_000,
+		"small":  500_000,
+		"medium": 1_000_000,
+		"large":  2_000_000,
+	}
+	for prof, want := range cases {
+		utils.SetConfiguredResourceProfile(prof)
+		assert.Equal(t, want, EffectiveTrieNodeCacheEntries(), "profile=%s", prof)
+	}
 }

@@ -118,9 +118,19 @@ func rotateVerifiedSignatures() {
 	}
 }
 
+// MaxVerifiedSignaturesCacheSize returns the signature verification cache entry cap
+// for the active node resource profile.
+func MaxVerifiedSignaturesCacheSize() int64 {
+	n := utils.ActiveResourceDefaults().SignatureCacheEntries
+	if n <= 0 {
+		return 200_000
+	}
+	return int64(n)
+}
+
 func bumpVerifiedSignatureCacheCount() {
 	count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
-	if count >= maxVerifiedSignaturesCacheSize {
+	if count >= MaxVerifiedSignaturesCacheSize() {
 		if atomic.CompareAndSwapInt64(&verifiedSignaturesCacheCount, count, 0) {
 			rotateVerifiedSignatures()
 		}
@@ -128,8 +138,6 @@ func bumpVerifiedSignatureCacheCount() {
 }
 
 const (
-	// Maximum cache entries before forced reset (safety valve)
-	maxVerifiedSignaturesCacheSize = 2_500_000
 	// Periodic cleanup interval
 	signatureCacheCleanupInterval = 10 * time.Minute
 )

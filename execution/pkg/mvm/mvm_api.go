@@ -54,7 +54,9 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -73,12 +75,32 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
+// DefaultEthCallConcurrency returns the bounded concurrency limit for off-chain
+// EVM calls (eth_call / estimateGas), defaulting to 2*NumCPU clamped to [4, 64]
+// unless overridden by META_MAX_CONCURRENT_ETH_CALL. Keeping this small prevents
+// transient Go state + C++ MVM allocations from spiking memory on low-RAM nodes.
+func DefaultEthCallConcurrency() int {
+	if raw := os.Getenv("META_MAX_CONCURRENT_ETH_CALL"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			return n
+		}
+	}
+	n := 2 * runtime.NumCPU()
+	if n < 4 {
+		return 4
+	}
+	if n > 64 {
+		return 64
+	}
+	return n
+}
+
 var (
 	apiInstances          sync.Map
 	protectedApiInstances sync.Map
 	apiInstanceCount      atomic.Int32
 	offChainCounter       uint64
-	ethCallSemaphore      = make(chan struct{}, 200)
+	ethCallSemaphore      = make(chan struct{}, DefaultEthCallConcurrency())
 )
 
 type AccountStateDB interface {

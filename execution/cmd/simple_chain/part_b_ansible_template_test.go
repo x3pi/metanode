@@ -189,12 +189,13 @@ func TestPartB_AnsibleTemplates_LowRamVPSAndHighRamServer_ValidAndSafe(t *testin
 		assert.NotContains(t, renderedLogrotate, "/logs/*.log")
 	})
 
-	t.Run("HighRamServer_pri_1d_DefaultProfile", func(t *testing.T) {
+	t.Run("HighRamServer_pri_1d_AutoAndExplicitLargeProfile", func(t *testing.T) {
 		config.ResetConfigForTesting()
 		t.Cleanup(config.ResetConfigForTesting)
 
-		// pri_1d defines NO memory/cache overrides in inventory.cloud.yml -> inherits template defaults
-		vars := map[string]interface{}{
+		// pri_1d with no memory/cache overrides in inventory.cloud.yml renders 0s so Go auto-detects
+		// from effective cgroup/host RAM (preventing silent 4096MB/8GB OOM if deployed onto a tiny host).
+		baseVars := map[string]interface{}{
 			"metanode_env":       "devnet",
 			"node_env":           "devnet",
 			"inventory_hostname": "pri_1d",
@@ -217,15 +218,37 @@ func TestPartB_AnsibleTemplates_LowRamVPSAndHighRamServer_ValidAndSafe(t *testin
 			"bls_priv":           "3c89b21f980145be702a0b7713d298ea547849b291a8e97f480371db68e64c23",
 		}
 
-		renderedJSON := renderAnsibleJinjaTemplate(t, execConfigTpl, vars)
-		cfgFile := filepath.Join(t.TempDir(), "config_pri_1d.json")
-		require.NoError(t, os.WriteFile(cfgFile, []byte(renderedJSON), 0o600))
+		renderedAutoJSON := renderAnsibleJinjaTemplate(t, execConfigTpl, baseVars)
+		var rawMap map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(renderedAutoJSON), &rawMap))
+		assert.Equal(t, float64(0), rawMap["go_mem_limit_gb"])
+		assert.Equal(t, float64(0), rawMap["go_gc_percent"])
+		assert.Equal(t, float64(0), rawMap["nomt_page_cache_mb"])
+		assert.Equal(t, float64(0), rawMap["nomt_leaf_cache_mb"])
+		assert.Equal(t, float64(0), rawMap["explorer_queue_size"])
+		assert.Equal(t, float64(0), rawMap["explorer_worker_count"])
+		dbMap := rawMap["Databases"].(map[string]interface{})
+		assert.Equal(t, float64(0), dbMap["pebble_cache_size_mb"])
+		assert.Equal(t, float64(0), dbMap["pebble_mem_table_size_mb"])
+
+		// With explicit resource_profile="large", LoadConfig resolves exact legacy high-RAM values
+		// deterministically regardless of which machine runs `go test`.
+		largeVars := make(map[string]interface{}, len(baseVars)+1)
+		for k, v := range baseVars {
+			largeVars[k] = v
+		}
+		largeVars["resource_profile"] = "large"
+
+		renderedLargeJSON := renderAnsibleJinjaTemplate(t, execConfigTpl, largeVars)
+		cfgFile := filepath.Join(t.TempDir(), "config_pri_1d_large.json")
+		require.NoError(t, os.WriteFile(cfgFile, []byte(renderedLargeJSON), 0o600))
 
 		cfg, lErr := config.LoadConfig(cfgFile)
-		require.NoError(t, lErr, "rendered pri_1d config.json must load cleanly:\n%s", renderedJSON)
+		require.NoError(t, lErr, "rendered pri_1d config.json must load cleanly:\n%s", renderedLargeJSON)
 		require.NoError(t, raftfeed.ValidateConfig(cfg))
 
 		assert.Equal(t, "nomt", cfg.StateBackend)
+		assert.Equal(t, "large", cfg.ResourceProfile)
 		assert.Equal(t, 8, cfg.GoMemLimitGB)
 		assert.Equal(t, 800, cfg.GoGCPercent)
 		assert.Equal(t, 4096, cfg.Databases.PebbleCacheSizeMB)
@@ -240,12 +263,33 @@ func TestPartB_AnsibleTemplates_LowRamVPSAndHighRamServer_ValidAndSafe(t *testin
 		assert.True(t, cfg.Log.ConsoleOutput)
 		assert.Equal(t, "archive", cfg.Pruning.Mode, "High-RAM server must also default to archive mode (zero DB pruning)")
 
-		renderedService := renderAnsibleJinjaTemplate(t, systemdTpl, vars)
+		// With resource_profile="tiny" and no explicit overrides, LoadConfig resolves safe 4GB defaults.
+		config.ResetConfigForTesting()
+		tinyVars := make(map[string]interface{}, len(baseVars)+1)
+		for k, v := range baseVars {
+			tinyVars[k] = v
+		}
+		tinyVars["resource_profile"] = "tiny"
+		renderedTinyJSON := renderAnsibleJinjaTemplate(t, execConfigTpl, tinyVars)
+		cfgTinyFile := filepath.Join(t.TempDir(), "config_pri_tiny.json")
+		require.NoError(t, os.WriteFile(cfgTinyFile, []byte(renderedTinyJSON), 0o600))
+		cfgTiny, lErr := config.LoadConfig(cfgTinyFile)
+		require.NoError(t, lErr)
+		assert.Equal(t, "tiny", cfgTiny.ResourceProfile)
+		assert.Equal(t, 100, cfgTiny.GoGCPercent)
+		assert.Equal(t, 128, cfgTiny.Databases.PebbleCacheSizeMB)
+		assert.Equal(t, 16, cfgTiny.Databases.PebbleMemTableSizeMB)
+		assert.Equal(t, 64, cfgTiny.NomtPageCacheMB)
+		assert.Equal(t, 64, cfgTiny.NomtLeafCacheMB)
+		assert.Equal(t, 2048, cfgTiny.ExplorerQueueSize)
+		assert.LessOrEqual(t, cfgTiny.ExplorerWorkerCount, 2)
+
+		renderedService := renderAnsibleJinjaTemplate(t, systemdTpl, baseVars)
 		assert.Contains(t, renderedService, "User=abc")
 		assert.NotContains(t, renderedService, "MemoryHigh=")
 		assert.NotContains(t, renderedService, "MemoryMax=")
 
-		renderedLogrotate := renderAnsibleJinjaTemplate(t, logrotateTpl, vars)
+		renderedLogrotate := renderAnsibleJinjaTemplate(t, logrotateTpl, baseVars)
 		assert.Contains(t, renderedLogrotate, "su abc abc", "omitted ansible_user must fallback to abc")
 	})
 }

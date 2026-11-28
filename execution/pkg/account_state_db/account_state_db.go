@@ -64,7 +64,7 @@ type AccountStateDB struct {
 	lockedFlag   atomic.Bool        // CHANGED: Use atomic.Bool
 	trieWarmed   atomic.Bool        // Tracks whether LevelDB cache is warm (skip PreWarm after first block)
 	isFlatTrie   bool               // TPS OPT: Cached flag — true if trie is *FlatStateTrie (thread-safe Get, skip muTrie lock)
-	accountLocks [65536]*sync.Mutex // Sharded locks for concurrent account mutations
+	accountLocks [65536]sync.Mutex // Sharded value locks for concurrent account mutations (noscan, zero per-lock heap allocs)
 
 	// and updating the live trie reference) happens atomically.
 	muCommit sync.Mutex
@@ -130,9 +130,6 @@ func NewAccountStateDB(
 		loadedAccounts: utils.NewShardedAddressMap[types.AccountState](),
 		persistReady:   initReady,
 		isFlatTrie:     isThreadSafeRead,
-	}
-	for i := 0; i < 65536; i++ {
-		db_instance.accountLocks[i] = &sync.Mutex{}
 	}
 	return db_instance
 }

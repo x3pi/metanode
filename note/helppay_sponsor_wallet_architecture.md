@@ -334,5 +334,10 @@ Trước khi phân bổ slot ví sponsor và spawn goroutine nạp gas, hệ th�
 - Xóa bỏ cơ chế quét fallback nhiều thư mục để tránh đọc nhầm file rác / file cũ.
 - Chỉ đọc từ biến môi trường chuẩn: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_THREAD_ID`.
 - Ansible (`security.env.j2`) tự động trích xuất cấu hình Telegram từ `inventory.yml` trên máy deploy và render vào `/opt/metanode/node-<id>/config/security.env`. Systemd tự nạp vào tiến trình khi khởi động.
+### 7.6. Tự Động Dọn Map Rate-Limit Theo Ngày (`ipUsage` & `recipientUsage`)
+- **Vấn đề**: `ipUsage` và `recipientUsage` trong `execution/pkg/helppay/manager.go` lưu thống kê `DayNumber` theo từng IP và ví nhận; trước đây chỉ ghi đè khi đúng IP/ví đó quay lại vào ngày hôm sau nên các entry cũ tích lũy dần nếu traffic trải rộng nhiều IP/ví qua nhiều ngày.
+- **Giải pháp**:
+  - `pruneExpiredRateLimitsLocked(today)` duyệt và xóa các entry có `DayNumber < today` dưới `rateMu`.
+  - Được gọi tự động trong `CheckAndTopUpWithClient` khi bước sang ngày mới (`lastRatePruneDay != today`), kết hợp goroutine `rateLimitCleanupLoop()` chạy mỗi **1 giờ** trong `Start()` (tự dừng qua `m.ctx.Done()` khi `Stop()`).
 - **Lọc Log Level**: Chỉ các cảnh báo quan trọng (`logger.Telegram` và `logger.Fatal`) mới được gửi về Telegram theo mặc định, tránh làm loãng kênh chat bởi các log lỗi mạng/client thông thường.
 

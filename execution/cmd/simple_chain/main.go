@@ -26,6 +26,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 )
 
 var (
@@ -135,15 +136,18 @@ func main() {
 	oldMaxProcs := runtime.GOMAXPROCS(maxProcs)
 	logger.Info("[PERF] Set GOMAXPROCS from %d to %d (NumCPU: %d)", oldMaxProcs, maxProcs, numCPU)
 
-	// PERFORMANCE OPTIMIZATION: Set default GC/memory limits.
+	// PERFORMANCE OPTIMIZATION: Set default GC/memory limits sized for this host/cgroup.
 	// These defaults may be overridden by config after NewApp() loads JSON config.
-	defaultGCPercent := 800
-	defaultMemLimitGB := 8
+	bootRes := utils.ActiveResourceDefaults()
+	defaultGCPercent := bootRes.GoGCPercent
+	defaultMemLimitMB := bootRes.GoMemLimitMB
 	oldGCPercent := runtime_debug.SetGCPercent(defaultGCPercent)
-	logger.Info("[PERF] Adjusted GC target from %d%% to %d%% heap growth (default, may be overridden by config)", oldGCPercent, defaultGCPercent)
+	logger.Info("[PERF] Adjusted GC target from %d%% to %d%% heap growth (initial profile=%s, may be overridden by config)",
+		oldGCPercent, defaultGCPercent, bootRes.Profile)
 
-	runtime_debug.SetMemoryLimit(int64(defaultMemLimitGB) << 30)
-	logger.Info("[PERF] Set GOMEMLIMIT=%dGB (default, may be overridden by config)", defaultMemLimitGB)
+	runtime_debug.SetMemoryLimit(int64(defaultMemLimitMB) << 20)
+	logger.Info("[PERF] Set GOMEMLIMIT=%dMB (initial profile=%s, may be overridden by config)",
+		defaultMemLimitMB, bootRes.Profile)
 
 	// Log resource limits
 	logResourceLimits()
@@ -183,34 +187,50 @@ func main() {
 	// 8GB limit per node is too high — total Sys memory (Go heap + CGo/mmap)
 	// can exceed physical RAM, causing OOM kills.
 	//
-	// Solution: Allow each node's JSON config to specify its own limits.
+	// Solution: Allow each node's JSON config (or resource_profile / cgroup RAM) to set limits.
 	// Also check META_GOMEMLIMIT env var for operator override without rebuild.
 	// ═══════════════════════════════════════════════════════════════════════════
-	actualMemLimitGB := defaultMemLimitGB
+	actualMemLimitMB := defaultMemLimitMB
 	actualGCPercent := defaultGCPercent
 
-	// Priority: env var > config > default
+	// Priority: env var > config > resource_profile/auto
 	if envLimit := os.Getenv("META_GOMEMLIMIT"); envLimit != "" {
 		if parsed, parseErr := strconv.Atoi(envLimit); parseErr == nil && parsed > 0 {
-			actualMemLimitGB = parsed
+			actualMemLimitMB = parsed * 1024
 		}
-	} else if app.config.GoMemLimitGB > 0 {
-		actualMemLimitGB = app.config.GoMemLimitGB
+	} else if cfgMemMB := app.config.EffectiveGoMemLimitMB(); cfgMemMB > 0 {
+		actualMemLimitMB = cfgMemMB
 	}
 
 	if app.config.GoGCPercent > 0 {
 		actualGCPercent = app.config.GoGCPercent
 	}
 
-	if actualMemLimitGB != defaultMemLimitGB {
-		runtime_debug.SetMemoryLimit(int64(actualMemLimitGB) << 30)
-		logger.Info("[PERF] ✅ GOMEMLIMIT overridden: %dGB → %dGB (from config/env)", defaultMemLimitGB, actualMemLimitGB)
+	if actualMemLimitMB != defaultMemLimitMB {
+		runtime_debug.SetMemoryLimit(int64(actualMemLimitMB) << 20)
+		logger.Info("[PERF] ✅ GOMEMLIMIT overridden: %dMB → %dMB (from config/env)", defaultMemLimitMB, actualMemLimitMB)
 	}
 	if actualGCPercent != defaultGCPercent {
 		runtime_debug.SetGCPercent(actualGCPercent)
 		logger.Info("[PERF] ✅ GOGC overridden: %d%% → %d%% (from config)", defaultGCPercent, actualGCPercent)
-
 	}
+
+	resolvedRes := utils.ActiveResourceDefaults()
+	logger.Info("[SYSRES] profile=%s mem=%dMB cpu=%d small=%v gomemlimit=%dMB gogc=%d pebble_cache=%dMB pebble_memtable=%dMB nomt=%d/%dMB explorer=%d/%d eth_call=%d",
+		resolvedRes.Profile,
+		resolvedRes.EffectiveMemMB,
+		resolvedRes.NumCPU,
+		resolvedRes.IsSmallHost,
+		actualMemLimitMB,
+		actualGCPercent,
+		app.config.Databases.PebbleCacheSizeMB,
+		app.config.Databases.PebbleMemTableSizeMB,
+		app.config.NomtPageCacheMB,
+		app.config.NomtLeafCacheMB,
+		app.config.ExplorerQueueSize,
+		app.config.ExplorerWorkerCount,
+		resolvedRes.EthCallConcurrency,
+	)
 
 	// Thêm panic recovery cho goroutine app.Run
 	go func() {
@@ -297,7 +317,7 @@ func main() {
 
 	// OOM PREVENTION: Proactive memory pressure relief goroutine.
 	// Monitors Sys memory and forces GC when approaching limits.
-	go memoryPressureRelief(int64(actualMemLimitGB) << 30)
+	go memoryPressureRelief(int64(actualMemLimitMB) << 20)
 
 	rpcServer := startRPCServer(app)
 	handleExitSignals(app, rpcServer)

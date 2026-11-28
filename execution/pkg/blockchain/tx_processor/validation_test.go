@@ -82,8 +82,8 @@ func TestGetValidatorHandler_HasEvents(t *testing.T) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 func TestSignatureCacheConstants(t *testing.T) {
-	if maxVerifiedSignaturesCacheSize <= 0 {
-		t.Errorf("maxVerifiedSignaturesCacheSize should be positive, got %d", maxVerifiedSignaturesCacheSize)
+	if MaxVerifiedSignaturesCacheSize() <= 0 {
+		t.Errorf("MaxVerifiedSignaturesCacheSize() should be positive, got %d", MaxVerifiedSignaturesCacheSize())
 	}
 	if signatureCacheCleanupInterval <= 0 {
 		t.Errorf("signatureCacheCleanupInterval should be positive, got %v", signatureCacheCleanupInterval)
@@ -118,14 +118,15 @@ func TestSignatureCache_AutoResetOnOverflow(t *testing.T) {
 		hashI := common.BytesToHash([]byte{byte(i)})
 		StoreVerifiedSignature(hashI)
 	}
-	atomic.StoreInt64(&verifiedSignaturesCacheCount, maxVerifiedSignaturesCacheSize)
+	maxCap := MaxVerifiedSignaturesCacheSize()
+	atomic.StoreInt64(&verifiedSignaturesCacheCount, maxCap)
 
 	// Next addition should trigger reset/rotation in VerifyTransaction
 	overflowHash := common.BytesToHash([]byte("overflow_trigger"))
 	StoreVerifiedSignature(overflowHash)
 	newCount := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
 
-	if newCount > maxVerifiedSignaturesCacheSize+1 {
+	if newCount > maxCap+1 {
 		t.Errorf("cache count should not exceed max+1 indefinitely, got %d", newCount)
 	}
 }
@@ -167,7 +168,7 @@ func TestStoreVerifiedBound_RotatesCacheAtCapacity(t *testing.T) {
 
 	oldGenHash := common.HexToHash("0xaaaa")
 	currentRotatingCache.Load().old.Store(oldGenHash)
-	atomic.StoreInt64(&verifiedSignaturesCacheCount, maxVerifiedSignaturesCacheSize-1)
+	atomic.StoreInt64(&verifiedSignaturesCacheCount, MaxVerifiedSignaturesCacheSize()-1)
 
 	triggerHash := common.HexToHash("0xbbbb")
 	storeVerifiedBound(triggerHash)
@@ -207,5 +208,22 @@ func TestFunctionSelectors_DifferentForDifferentFunctions(t *testing.T) {
 	sel2 := utils.GetFunctionSelector("setBlsPublicKey(bytes)")
 	if sel1[0] == sel2[0] && sel1[1] == sel2[1] && sel1[2] == sel2[2] && sel1[3] == sel2[3] {
 		t.Error("different functions should have different selectors")
+	}
+}
+
+func TestMaxVerifiedSignaturesCacheSize_FollowsResourceProfile(t *testing.T) {
+	t.Cleanup(func() { utils.SetConfiguredResourceProfile("") })
+
+	cases := map[string]int64{
+		"tiny":   200_000,
+		"small":  500_000,
+		"medium": 1_000_000,
+		"large":  2_500_000,
+	}
+	for prof, want := range cases {
+		utils.SetConfiguredResourceProfile(prof)
+		if got := MaxVerifiedSignaturesCacheSize(); got != want {
+			t.Fatalf("profile %s: got %d, want %d", prof, got, want)
+		}
 	}
 }

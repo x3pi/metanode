@@ -220,23 +220,23 @@ func (vp *TxValidatorPool) StartMemoryMonitor() {
 			if vp.chainState == nil || vp.chainState.GetConfig() == nil {
 				continue
 			}
-			limitGB := vp.chainState.GetConfig().GoMemLimitGB
-			if limitGB <= 0 {
+			limitMB := vp.chainState.GetConfig().EffectiveGoMemLimitMB()
+			if limitMB <= 0 {
 				continue
 			}
 
 			var memStats runtime.MemStats
 			runtime.ReadMemStats(&memStats)
 
-			limitBytes := uint64(limitGB) * 1024 * 1024 * 1024
+			limitBytes := uint64(limitMB) * 1024 * 1024
 			threshold := uint64(float64(limitBytes) * 0.90) // 90% threshold
 
 			if memStats.Alloc > threshold {
 				currentCount := vp.transactionPool.CountTransactions()
 				if currentCount > 1000 {
 					evictCount := currentCount / 2 // Evict 50% of mempool
-					logger.Error("🚨 [DDoS PROTECTION] Memory usage high (%d MB > 90%% of limit %d GB). Evicting %d lowest-fee transactions!",
-						memStats.Alloc/1024/1024, limitGB, evictCount)
+					logger.Error("🚨 [DDoS PROTECTION] Memory usage high (%d MB > 90%% of limit %d MB). Evicting %d lowest-fee transactions!",
+						memStats.Alloc/1024/1024, limitMB, evictCount)
 					vp.transactionPool.EvictLowestGasPrice(evictCount)
 				}
 			}
