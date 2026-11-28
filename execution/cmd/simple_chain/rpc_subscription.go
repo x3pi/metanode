@@ -121,17 +121,18 @@ func (api *MetaAPI) Syncing(ctx context.Context) (*rpc.Subscription, error) {
 	rpcSub := notifier.CreateSubscription()
 
 	go func() {
-		// statuses := make(chan interface{})
-		sub := api.events.SubscribeStatus()
-		// defer sub.Unsubscribe()
+		sub, unsub := api.events.SubscribeStatus()
+		defer unsub()
 
 		for {
 			select {
-			case status := <-sub:
+			case status, ok := <-sub:
+				if !ok {
+					return
+				}
 				notifier.Notify(rpcSub.ID, status)
 			case <-rpcSub.Err():
 				return
-
 			}
 		}
 	}()

@@ -37,3 +37,12 @@ func TestXapianExtensionCallbacks_MissingInstanceIsAnErrorNotAPanic(t *testing.T
 		}()
 	}
 }
+
+func TestWrapExtensionBlst_DoesNotPanicOnEmptyOrShortInput(t *testing.T) {
+	if got := WrapExtensionBlst(nil); got != nil {
+		t.Fatalf("expected nil for nil input, got len=%d", len(got))
+	}
+	if got := WrapExtensionBlst([]byte{1, 2}); got != nil {
+		t.Fatalf("expected nil for invalid short input, got len=%d", len(got))
+	}
+}

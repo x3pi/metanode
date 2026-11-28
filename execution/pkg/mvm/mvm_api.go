@@ -1735,10 +1735,9 @@ func GetStorageValue(
 	fAddress := common.BytesToAddress(bAddress)
 
 	bValue, retStatus, found := getStorageValueCore(fmvmId, fAddress, bKey)
-	if !found {
-		// Preserves the original nil-mvmApi short-circuit exactly: no
-		// C.CBytes call at all, a true nil pointer (not a CBytes(nil)
-		// pointer-to-zero-bytes, which is a different C-level value).
+	if !found || C.int(retStatus) != StorageStatusSuccess {
+		// No need to allocate a C buffer when MVMApi is absent, storage slot is not found,
+		// or Block-STM suspends execution: C++ ignores value unless status == STORAGE_SUCCESS.
 		return nil, C.int(retStatus)
 	}
 	cValue := C.CBytes(bValue)

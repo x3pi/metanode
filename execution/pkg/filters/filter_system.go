@@ -289,14 +289,15 @@ type EventSystem struct {
 	chainSub   event.Subscription // Subscription for new chain event
 
 	// Channels
-	install   chan *subscription         // install filter for event notification
-	uninstall chan *subscription         // remove filter for event notification
-	txsCh     chan NewTxsEvent           // Channel to receive new transactions event
-	logsCh    chan []*types.Log          // Channel to receive new log event
-	rmLogsCh  chan core.RemovedLogsEvent // Channel to receive removed log event
-	chainCh   chan ChainEvent            // Channel to receive new chain event
-	statusCh  chan interface{}           // Channel to receive status updates
-
+	install    chan *subscription         // install filter for event notification
+	uninstall  chan *subscription         // remove filter for event notification
+	txsCh      chan NewTxsEvent           // Channel to receive new transactions event
+	logsCh     chan []*types.Log          // Channel to receive new log event
+	rmLogsCh   chan core.RemovedLogsEvent // Channel to receive removed log event
+	chainCh    chan ChainEvent            // Channel to receive new chain event
+	statusCh   chan interface{}           // Channel to receive status updates
+	statusMu   sync.RWMutex
+	statusSubs map[chan interface{}]struct{}
 }
 
 // NewEventSystem creates a new manager that listens for event on the given mux,
@@ -318,7 +319,8 @@ func NewEventSystem() *EventSystem {
 		logsCh:     make(chan []*types.Log, logsChanSize),
 		rmLogsCh:   make(chan core.RemovedLogsEvent, rmLogsChanSize),
 		chainCh:    make(chan ChainEvent, chainEvChanSize),
-		statusCh:   make(chan interface{}), // Channel for status updates
+		statusCh:   make(chan interface{}, 16), // Buffered channel for status updates
+		statusSubs: make(map[chan interface{}]struct{}),
 
 	}
 	m.txsSub = m.TxsFeed.Subscribe(m.txsCh)
@@ -334,21 +336,42 @@ func NewEventSystem() *EventSystem {
 	return m
 }
 
-// SendStatus sends a status update to the status channel.
+// SendStatus sends a status update to active status subscribers (non-blocking).
 func (es *EventSystem) SendStatus(status interface{}) {
-	es.statusCh <- status
+	select {
+	case es.statusCh <- status:
+	default:
+	}
+	es.statusMu.RLock()
+	for ch := range es.statusSubs {
+		select {
+		case ch <- status:
+		default:
+		}
+	}
+	es.statusMu.RUnlock()
 }
 
-// SubscribeStatus subscribes to status updates.
-func (es *EventSystem) SubscribeStatus() <-chan interface{} {
-	ch := make(chan interface{})
-	go func() {
-		defer close(ch)
-		for status := range es.statusCh {
-			ch <- status
-		}
-	}()
-	return ch
+// SubscribeStatus subscribes to status updates and returns a channel plus an unsubscribe callback.
+func (es *EventSystem) SubscribeStatus() (<-chan interface{}, func()) {
+	ch := make(chan interface{}, 16)
+	es.statusMu.Lock()
+	if es.statusSubs == nil {
+		es.statusSubs = make(map[chan interface{}]struct{})
+	}
+	es.statusSubs[ch] = struct{}{}
+	es.statusMu.Unlock()
+
+	var once sync.Once
+	unsubscribe := func() {
+		once.Do(func() {
+			es.statusMu.Lock()
+			delete(es.statusSubs, ch)
+			close(ch)
+			es.statusMu.Unlock()
+		})
+	}
+	return ch, unsubscribe
 }
 
 // Subscription is created when the client registers itself for a particular event.

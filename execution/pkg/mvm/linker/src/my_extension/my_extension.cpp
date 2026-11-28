@@ -26,6 +26,7 @@
 #include <algorithm>   // Thêm thư viện này để dùng transform()
 #include <arpa/inet.h> // For ntohl
 #include <charconv>
+#include <cstdlib>
 #include <cstring> // Cần cho memcpy
 #include <ctime>
 #include <filesystem>
@@ -62,7 +63,13 @@ void printHex(const std::vector<uint8_t> &bytes) {
   std::cout << std::dec << std::endl;
 }
 mvm::Code convertToCode(Extension_return data) {
-  std::vector<uint8_t> vec(data.data_p, data.data_p + data.data_size);
+  std::vector<uint8_t> vec;
+  if (data.data_p != nullptr && data.data_size > 0) {
+    vec.assign(data.data_p, data.data_p + data.data_size);
+  }
+  if (data.data_p != nullptr) {
+    free(data.data_p);
+  }
   return vec;
 }
 
@@ -531,6 +538,9 @@ mvm::Code MyExtension::SimpleDatabase(mvm::Code input, mvm::Address address) {
       opCode == mvm::FunctionSelector::SINPLE_DB_DELETE ||
       opCode == mvm::FunctionSelector::SINPLE_GET_NEXT_KEYS) {
     return convertToCode(data);
+  }
+  if (data.data_p != nullptr) {
+    free(data.data_p);
   }
   return mvm::Code(32, 0);
 }

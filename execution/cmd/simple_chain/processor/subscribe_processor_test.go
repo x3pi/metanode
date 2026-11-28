@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
 
@@ -241,4 +242,61 @@ func TestSubscribeProcessor_ConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 	// If we got here without race/panic, the test passes
+}
+
+// ============================================================================
+// TestBroadcastLogToSubscriber_RemovesDisconnectedAcrossAllAddresses
+// ============================================================================
+func TestBroadcastLogToSubscriber_RemovesDisconnectedAcrossAllAddresses(t *testing.T) {
+	sender := NewMockMessageSender()
+	sp := &SubscribeProcessor{
+		subscribers:                    make(map[e_common.Address][]network.Connection),
+		mapConnectionSubcribeAddresses: make(map[network.Connection][]e_common.Address),
+		messageSender:                  sender,
+	}
+
+	deadConn := NewMockConnection(e_common.HexToAddress("0xaaaa000000000000000000000000000000000001"))
+	liveConn := NewMockConnection(e_common.HexToAddress("0xbbbb000000000000000000000000000000000002"))
+	addr1 := e_common.HexToAddress("0x1111000000000000000000000000000000000001")
+	addr2 := e_common.HexToAddress("0x2222000000000000000000000000000000000002")
+
+	require.NoError(t, sp.ProcessSubscribeToAddress(NewMockRequest(deadConn, NewMockMessage("subscribe", addr1.Bytes()))))
+	require.NoError(t, sp.ProcessSubscribeToAddress(NewMockRequest(deadConn, NewMockMessage("subscribe", addr2.Bytes()))))
+	require.NoError(t, sp.ProcessSubscribeToAddress(NewMockRequest(liveConn, NewMockMessage("subscribe", addr1.Bytes()))))
+
+	require.NoError(t, deadConn.Disconnect())
+
+	sp.BroadcastLogToSubscriber(addr1, []types.EventLog{})
+
+	assert.Equal(t, 1, sender.SentCount(), "only live subscriber should receive broadcast")
+	assert.Len(t, sp.subscribers[addr1], 1)
+	assert.Equal(t, liveConn, sp.subscribers[addr1][0])
+	_, okAddr2 := sp.subscribers[addr2]
+	assert.False(t, okAddr2, "dead subscriber should be cleaned from all subscribed addresses")
+	_, okRev := sp.mapConnectionSubcribeAddresses[deadConn]
+	assert.False(t, okRev, "dead subscriber reverse map should be cleaned")
+}
+
+// ============================================================================
+// TestCleanStaleSubscribers_RemovesDisconnected
+// ============================================================================
+func TestCleanStaleSubscribers_RemovesDisconnected(t *testing.T) {
+	sender := NewMockMessageSender()
+	sp := &SubscribeProcessor{
+		subscribers:                    make(map[e_common.Address][]network.Connection),
+		mapConnectionSubcribeAddresses: make(map[network.Connection][]e_common.Address),
+		messageSender:                  sender,
+	}
+
+	deadConn := NewMockConnection(e_common.HexToAddress("0xaaaa000000000000000000000000000000000001"))
+	subscribeAddr := e_common.HexToAddress("0x1111000000000000000000000000000000000001")
+	require.NoError(t, sp.ProcessSubscribeToAddress(NewMockRequest(deadConn, NewMockMessage("subscribe", subscribeAddr.Bytes()))))
+	require.NoError(t, deadConn.Disconnect())
+
+	removedConns, removedAddrs, subCount := sp.cleanStaleSubscribers()
+	assert.Equal(t, 1, removedConns)
+	assert.Equal(t, 0, removedAddrs) // RemoveSubcriber already deleted the empty address key
+	assert.Equal(t, 0, subCount)
+	assert.Empty(t, sp.subscribers)
+	assert.Empty(t, sp.mapConnectionSubcribeAddresses)
 }

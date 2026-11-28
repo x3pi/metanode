@@ -188,6 +188,9 @@ func (c *Connection) run() {
 			return
 		}
 		connect = false
+		c.metaMu.Lock()
+		c.clearConnectionCacheLocked()
+		c.metaMu.Unlock()
 
 		// BƯỚC 1: Gửi tín hiệu dừng cho các goroutine con.
 		if quitChan != nil {
@@ -328,10 +331,9 @@ func (c *Connection) run() {
 
 		case cmdDisconnect:
 			// Update cache ngay lập tức khi disconnect
-			// Đảm bảo IsConnect() sẽ return false ngay sau khi disconnect
+			// Đảm bảo IsConnect() sẽ return false và TcpRemoteAddr()/TcpLocalAddr() sẽ return nil ngay sau khi disconnect
 			c.metaMu.Lock()
-			c.cachedConnected = false
-			c.metaLastUpdate = time.Now() // Update timestamp để invalidate cache
+			c.clearConnectionCacheLocked()
 			c.metaMu.Unlock()
 
 			// Clear sendChan reference TRƯỚC khi cleanup để SendMessage() không gửi vào channel đã close
@@ -408,6 +410,9 @@ func (c *Connection) Connect() error {
 }
 
 func (c *Connection) Disconnect() error {
+	c.metaMu.Lock()
+	c.clearConnectionCacheLocked()
+	c.metaMu.Unlock()
 	select {
 	case c.cmdChan <- cmdDisconnect{}:
 	default:
@@ -455,8 +460,7 @@ func (c *Connection) SendMessage(message network.Message) (err error) {
 			// Sau khi retry, nếu vẫn nil thì thực sự chưa connect
 			logger.Error("SendMessage: sendChan vẫn nil sau %d retries, connection chưa ready", maxRetries)
 			c.metaMu.Lock()
-			c.cachedConnected = false
-			c.metaLastUpdate = time.Now()
+			c.clearConnectionCacheLocked()
 			c.metaMu.Unlock()
 			return ErrDisconnected
 		}
@@ -484,8 +488,7 @@ func (c *Connection) SendMessage(message network.Message) (err error) {
 				maxRetries,
 			)
 			c.metaMu.Lock()
-			c.cachedConnected = false
-			c.metaLastUpdate = time.Now()
+			c.clearConnectionCacheLocked()
 			c.metaMu.Unlock()
 			// Trigger disconnect nếu sendChan đầy quá lâu
 			go func() { c.cmdChan <- cmdDisconnect{} }()
@@ -644,6 +647,13 @@ func (c *Connection) Type() string {
 	}
 }
 
+func (c *Connection) clearConnectionCacheLocked() {
+	c.cachedConnected = false
+	c.cachedTcpRemoteAddr = nil
+	c.cachedTcpLocalAddr = nil
+	c.metaLastUpdate = time.Now()
+}
+
 func (c *Connection) TcpLocalAddr() net.Addr {
 	// Đọc từ cache trước (non-blocking)
 	c.metaMu.RLock()
@@ -651,7 +661,10 @@ func (c *Connection) TcpLocalAddr() net.Addr {
 	connected := c.cachedConnected
 	c.metaMu.RUnlock()
 
-	if !connected || addr != nil {
+	if !connected {
+		return nil
+	}
+	if addr != nil {
 		return addr
 	}
 
@@ -663,7 +676,11 @@ func (c *Connection) TcpLocalAddr() net.Addr {
 		case newAddr := <-req.resp:
 			// Update cache
 			c.metaMu.Lock()
-			c.cachedTcpLocalAddr = newAddr
+			if c.cachedConnected {
+				c.cachedTcpLocalAddr = newAddr
+			} else {
+				newAddr = nil
+			}
 			c.metaMu.Unlock()
 			return newAddr
 		case <-time.After(100 * time.Millisecond):
@@ -683,7 +700,10 @@ func (c *Connection) TcpRemoteAddr() net.Addr {
 	connected := c.cachedConnected
 	c.metaMu.RUnlock()
 
-	if !connected || addr != nil {
+	if !connected {
+		return nil
+	}
+	if addr != nil {
 		return addr
 	}
 
@@ -791,8 +811,7 @@ func (c *Connection) writeLoop(tcpConn net.Conn, sendChan chan network.Message, 
 		}
 		logger.Error("writeLoop %s: %v. Signaling for disconnect.", remoteAddr, err)
 		c.metaMu.Lock()
-		c.cachedConnected = false
-		c.metaLastUpdate = time.Now()
+		c.clearConnectionCacheLocked()
 		c.metaMu.Unlock()
 
 		select {

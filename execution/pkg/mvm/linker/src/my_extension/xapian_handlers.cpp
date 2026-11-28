@@ -16,6 +16,7 @@
 #include "my_global_state.h"
 #include "mvm/crypto/sha256.hpp"
 #include <cstddef>
+#include <cstdlib>
 #include "xapian/xapian_search.h"
 #include "abi/encoding_utils.h"
 #include <arpa/inet.h>
@@ -162,12 +163,15 @@ static uint256_t injectVirtualDependency(mvm::GlobalState* gs, const mvm::Addres
 
                 auto ret = GetStorageValue(const_cast<unsigned char*>(gs->get_block_context().mvmId), b_address + 12, b_key);
                 if (ret.status == STORAGE_SUSPEND) {
+                    if (ret.value != nullptr) free(ret.value);
                     MVM_THROW(Exception(Exception::Type::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)"));
                 }
                 if (ret.status == STORAGE_SUCCESS && ret.value != nullptr) {
                     uint256_t uncommitted_val = mvm::from_big_endian(ret.value, 32u);
                     free(ret.value);
                     prevWriter = uncommitted_val;
+                } else if (ret.value != nullptr) {
+                    free(ret.value);
                 }
             }
             if (prevWriter == 0) {
@@ -194,12 +198,16 @@ static uint256_t injectVirtualDependency(mvm::GlobalState* gs, const mvm::Addres
             
             auto ret = GetStorageValue(const_cast<unsigned char*>(gs->get_block_context().mvmId), b_address + 12, b_key);
             if (ret.status == STORAGE_SUSPEND) {
+                if (ret.value != nullptr) free(ret.value);
                 MVM_THROW(Exception(Exception::Type::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)"));
             }
             if (ret.status == STORAGE_SUCCESS && ret.value != nullptr) {
                 uint256_t uncommitted_val = mvm::from_big_endian(ret.value, 32u);
                 free(ret.value);
                 return uncommitted_val;
+            }
+            if (ret.value != nullptr) {
+                free(ret.value);
             }
         }
 

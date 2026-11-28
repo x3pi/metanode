@@ -465,7 +465,15 @@ func WrapExtensionBlst(
 	data []byte,
 ) []byte {
 	cData := C.CBytes(data)
+	defer C.free(cData)
 	cReturn := ExtensionBlst((*C.uchar)(cData), C.int(len(data)))
+	if cReturn.data_p == nil || cReturn.data_size <= 0 {
+		if cReturn.data_p != nil {
+			C.free(unsafe.Pointer(cReturn.data_p))
+		}
+		return nil
+	}
+	defer C.free(unsafe.Pointer(cReturn.data_p))
 	return C.GoBytes(unsafe.Pointer(cReturn.data_p), cReturn.data_size)
 }
 

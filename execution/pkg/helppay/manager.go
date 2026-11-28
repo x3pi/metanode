@@ -48,10 +48,11 @@ type Manager struct {
 	adminAddresses map[common.Address]struct{}
 
 	// Rate limiting & anti-drain protection
-	rateMu         sync.Mutex
-	maxDailyPerIP  *big.Int
-	ipUsage        map[string]*IPRateLimitRecord
-	recipientUsage map[common.Address]*RecipientRateLimitRecord
+	rateMu           sync.Mutex
+	maxDailyPerIP    *big.Int
+	ipUsage          map[string]*IPRateLimitRecord
+	recipientUsage   map[common.Address]*RecipientRateLimitRecord
+	lastRatePruneDay uint64
 
 	chainState  *blockchain.ChainState
 	txPoolAdder TxPoolAdder
@@ -202,6 +203,9 @@ func (m *Manager) Start() {
 
 	logger.Info("✅ [HelpPay] Manager started with %d sponsor wallets (enabled=%v, minBalance=%s, extraAmount=%s)",
 		len(m.wallets), m.enabled, m.minBalance.String(), m.extraAmount.String())
+
+	// Launch periodic stale rate-limit eviction loop so old days don't stay in memory indefinitely
+	go m.rateLimitCleanupLoop()
 
 	// Launch startup catch-up sync with peers in background if a state fetcher is configured
 	if m.stateFetcher != nil {
@@ -537,6 +541,39 @@ func (m *Manager) CheckAndTopUp(recipient common.Address) error {
 	return m.CheckAndTopUpWithClient(recipient, "")
 }
 
+// pruneExpiredRateLimitsLocked deletes rate-limit records whose DayNumber is older than today.
+// Caller must hold m.rateMu.
+func (m *Manager) pruneExpiredRateLimitsLocked(today uint64) {
+	for ip, rec := range m.ipUsage {
+		if rec == nil || rec.DayNumber < today {
+			delete(m.ipUsage, ip)
+		}
+	}
+	for addr, rec := range m.recipientUsage {
+		if rec == nil || rec.DayNumber < today {
+			delete(m.recipientUsage, addr)
+		}
+	}
+	m.lastRatePruneDay = today
+}
+
+func (m *Manager) rateLimitCleanupLoop() {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case now := <-ticker.C:
+			today := uint64(now.Unix() / 86400)
+			m.rateMu.Lock()
+			m.pruneExpiredRateLimitsLocked(today)
+			m.rateMu.Unlock()
+		}
+	}
+}
+
 // CheckAndTopUpWithClient inspects recipient balance, validates client IP rate limits (max 10 ETH/day),
 // enforces recipient cooldowns, and performs automated top-up.
 func (m *Manager) CheckAndTopUpWithClient(recipient common.Address, clientIP string) error {
@@ -549,6 +586,9 @@ func (m *Manager) CheckAndTopUpWithClient(recipient common.Address, clientIP str
 	today := uint64(now.Unix() / 86400)
 
 	m.rateMu.Lock()
+	if m.lastRatePruneDay != today {
+		m.pruneExpiredRateLimitsLocked(today)
+	}
 	// 1. IP Rate Limiting: enforce maximum 10 ETH per IP per day (configurable via maxDailyPerIP)
 	if cleanIP != "" && cleanIP != "127.0.0.1" && cleanIP != "::1" && cleanIP != "localhost" {
 		rec, exists := m.ipUsage[cleanIP]

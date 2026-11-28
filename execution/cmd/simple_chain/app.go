@@ -1085,6 +1085,9 @@ func (app *App) initRoutes() {
 		handler,
 		app.config.Version,
 	)
+	if app.socketServer != nil && app.subscribeProcessor != nil {
+		app.socketServer.AddOnDisconnectedCallBack(app.subscribeProcessor.RemoveSubcriber)
+	}
 }
 
 // Run starts the application and its components
