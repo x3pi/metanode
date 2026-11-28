@@ -2318,5 +2318,43 @@ TEST_SUITE("XapianManager") {
         SetXapianBasePath(".test_db_xapian");
         cleanup_test_db(base);
     }
+
+    TEST_CASE("HANDLE EVICTION RELEASES XAPIAN WRITABLE_DB INTERNALS AND ALLOWS SAFE REOPEN") {
+        std::string base = ".test_db_xapian_evict_mem_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+        cleanup_test_db(base);
+        XapianManager::destroyAllInstances();
+        SetXapianBasePath(base.c_str());
+
+        const int totalDbs = 120;
+        std::vector<std::string> docIds(totalDbs);
+        for (int i = 0; i < totalDbs; ++i) {
+            mvm::Address addr(800000 + i);
+            std::string dbName = "evict_mem_db_" + std::to_string(i);
+            auto mgr = create_test_manager(dbName, addr, false);
+            uint256_t tx(0xB00000ULL + i);
+            docIds[i] = commit_write(tx, [&]() {
+                return mgr->new_document("val_" + std::to_string(i), 1, nullptr, &tx);
+            });
+            REQUIRE(mgr->commit_changes(static_cast<uint64_t>(i + 1)));
+            if (auto* sdb = mgr->acquireSearchDb()) {
+                mgr->releaseSearchDb(sdb);
+            }
+            if (auto* rdb = mgr->acquireSimpleReadDb()) {
+                mgr->releaseSimpleReadDb(rdb);
+            }
+        }
+
+        // Verify all 120 DBs are still readable after handle eviction & lazy reopen
+        for (int i = 0; i < totalDbs; ++i) {
+            mvm::Address addr(800000 + i);
+            std::string dbName = "evict_mem_db_" + std::to_string(i);
+            auto mgr = XapianManager::getInstance(dbName, addr, false);
+            CHECK(mgr->get_data(docIds[i], static_cast<uint64_t>(i + 1)) == "val_" + std::to_string(i));
+        }
+
+        XapianManager::destroyAllInstances();
+        SetXapianBasePath(".test_db_xapian");
+        cleanup_test_db(base);
+    }
 }
 

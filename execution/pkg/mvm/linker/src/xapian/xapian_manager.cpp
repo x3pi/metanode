@@ -11,9 +11,13 @@
 #include "mvm_linker.hpp" // GetXapianPruneRetentionBlocks / GetCurrentBlockNumberForXapianPrune
 
 #include <chrono>
+#include <condition_variable>
 #include <filesystem> // Cần cho std::filesystem::path
 #include <functional>
 #include <iomanip>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <memory>     // Cần cho std::shared_ptr
 #include <mutex>      // Cần cho std::lock_guard
 #include <mvm/util.h> // Giả định chứa mvm::address_to_hex_string, mvm::uint256_to_double, mvm::keccak_256
@@ -30,6 +34,12 @@
 // Map lưu trữ các instance XapianManager, khóa là đường dẫn database
 std::unordered_map<std::string, std::shared_ptr<XapianManager>> XapianManager::instances;
 std::shared_mutex XapianManager::instances_mutex;
+
+namespace {
+std::atomic<bool> g_xapian_needs_malloc_trim{false};
+std::mutex g_cleaner_sleep_mu;
+std::condition_variable g_cleaner_sleep_cv;
+} // namespace
 
 // Tạo một UUID ngẫu nhiên và trả về dưới dạng chuỗi ký tự thường
 std::string XapianManager::generateUuidLogicalId() {
@@ -1761,6 +1771,8 @@ bool XapianManager::compactInPlace(size_t minSizeBytes, std::chrono::minutes min
   // db_generation/last_gen reopen() check on its *next* acquire (same
   // mechanism commit_changes() already relies on for busy slots).
   try { db.close(); } catch (...) {}
+  db = Xapian::WritableDatabase();
+  g_xapian_needs_malloc_trim.store(true, std::memory_order_release);
   {
     std::lock_guard<std::mutex> pool_lock(search_pool.pool_mutex);
     for (size_t i = 0; i < search_pool.pool.size(); ++i) {
@@ -2213,10 +2225,15 @@ namespace {
 std::atomic<bool> cleaner_running = true; // Cờ điều khiển luồng dọn dẹp
 // Luồng chạy nền để dọn dẹp các instance XapianManager không hoạt động
 std::thread cleaner_thread([] {
-  while (cleaner_running.load()) // Chạy tant khi cờ là true
+  while (cleaner_running.load(std::memory_order_acquire))
   {
-    std::this_thread::sleep_for(std::chrono::minutes(1)); // Ngủ 1 phút
-    if (!cleaner_running.load())
+    {
+      std::unique_lock<std::mutex> sleep_lk(g_cleaner_sleep_mu);
+      g_cleaner_sleep_cv.wait_for(sleep_lk, std::chrono::minutes(1), [] {
+        return !cleaner_running.load(std::memory_order_acquire);
+      });
+    }
+    if (!cleaner_running.load(std::memory_order_acquire))
       break; // Kiểm tra lại cờ sau khi ngủ
 
     std::vector<std::string>
@@ -2310,12 +2327,19 @@ std::thread cleaner_thread([] {
         free(retentionRet.data_p);
       }
     }
+
+#if defined(__GLIBC__)
+    if (g_xapian_needs_malloc_trim.exchange(false, std::memory_order_acq_rel)) {
+      malloc_trim(0);
+    }
+#endif
   }
 });
 
 // Hàm dừng luồng dọn dẹp (ví dụ khi chương trình kết thúc)
 void stopCleanerThread() {
-  cleaner_running.store(false); // Đặt cờ dừng
+  cleaner_running.store(false, std::memory_order_release); // Đặt cờ dừng
+  g_cleaner_sleep_cv.notify_all();
   if (cleaner_thread.joinable()) {
     cleaner_thread.join(); // Chờ luồng kết thúc
   }
@@ -2673,10 +2697,16 @@ bool XapianManager::destroyInstance(const std::string &db_path_str, bool onlyIfI
         } catch (const std::exception &) {
         } catch (...) {
         }
+        // Resetting to an empty WritableDatabase drops Xapian's internal Glass
+        // buffers immediately rather than pinning them until ~XapianManager().
+        instance_ptr->db = Xapian::WritableDatabase();
         instance_ptr->is_db_open = false;
     }
 
     instances.erase(it);
+    if (instance_ptr != nullptr) {
+        g_xapian_needs_malloc_trim.store(true, std::memory_order_release);
+    }
     return instance_ptr != nullptr;
 }
 
@@ -2725,11 +2755,16 @@ void XapianManager::evict_handles() {
     if (mvm::IsXapianBasePathEmpty()) return;
     std::unique_lock<ChangesMutex> ch_lock(changes_mutex);
     std::lock_guard<std::mutex> lock(db_mutex);
+    bool released_any = false;
     if (is_db_open) {
         try { db.close(); } catch (...) {}
+        // close() alone leaves Xapian's internal Glass table buffers allocated;
+        // reassigning an empty WritableDatabase drops them immediately.
+        db = Xapian::WritableDatabase();
         is_db_open = false;
+        released_any = true;
     }
-    
+
     {
         std::lock_guard<std::mutex> s_lock(search_pool.pool_mutex);
         for (size_t i = 0; i < search_pool.pool.size(); ++i) {
@@ -2737,10 +2772,12 @@ void XapianManager::evict_handles() {
                 try { search_pool.pool[i]->close(); } catch (...) {}
                 delete search_pool.pool[i];
                 search_pool.pool[i] = nullptr;
+                search_pool.last_gen[i] = 0;
+                released_any = true;
             }
         }
     }
-    
+
     {
         std::lock_guard<std::mutex> r_lock(simple_read_pool.pool_mutex);
         for (size_t i = 0; i < simple_read_pool.pool.size(); ++i) {
@@ -2748,7 +2785,13 @@ void XapianManager::evict_handles() {
                 try { simple_read_pool.pool[i]->close(); } catch (...) {}
                 delete simple_read_pool.pool[i];
                 simple_read_pool.pool[i] = nullptr;
+                simple_read_pool.last_gen[i] = 0;
+                released_any = true;
             }
         }
+    }
+
+    if (released_any) {
+        g_xapian_needs_malloc_trim.store(true, std::memory_order_release);
     }
 }
