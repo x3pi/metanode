@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	e_common "github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 )
 
 // The Xapian extension callbacks run inside cgo on behalf of one MVM instance. If that instance is already gone (an
@@ -50,8 +51,11 @@ func TestWrapExtensionBlst_DoesNotPanicOnEmptyOrShortInput(t *testing.T) {
 func TestDefaultEthCallConcurrency_BoundedAndOverridable(t *testing.T) {
 	t.Setenv("META_MAX_CONCURRENT_ETH_CALL", "")
 	def := DefaultEthCallConcurrency()
-	if def < 4 || def > 64 {
-		t.Fatalf("expected DefaultEthCallConcurrency in [4, 64], got %d", def)
+	if want := utils.ActiveResourceDefaults().EthCallConcurrency; def != want {
+		t.Fatalf("expected DefaultEthCallConcurrency to follow the active resource profile (%d), got %d", want, def)
+	}
+	if def < 4 || def > 100 {
+		t.Fatalf("expected DefaultEthCallConcurrency in [4, 100], got %d", def)
 	}
 
 	t.Setenv("META_MAX_CONCURRENT_ETH_CALL", "12")

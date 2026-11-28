@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/pathdetector"
@@ -459,6 +460,14 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		}
 		if ConfigApp.NomtLeafCacheMB == 0 {
 			ConfigApp.NomtLeafCacheMB = resDefaults.NomtLeafCacheMB
+		}
+		// META_GOMEMLIMIT (GB) is applied here, not only in main, so the runtime limit, the
+		// RESOURCE_MONITOR thresholds and the mempool evictor all read the same value.
+		if envLimit := os.Getenv("META_GOMEMLIMIT"); envLimit != "" {
+			if gb, convErr := strconv.Atoi(envLimit); convErr == nil && gb > 0 {
+				ConfigApp.GoMemLimitGB = gb
+				ConfigApp.GoMemLimitMB = gb * 1024
+			}
 		}
 		if ConfigApp.GoMemLimitMB == 0 {
 			if ConfigApp.GoMemLimitGB > 0 {

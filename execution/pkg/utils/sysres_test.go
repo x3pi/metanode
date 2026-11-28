@@ -92,14 +92,14 @@ func TestClassifyAndResolveResourceDefaults(t *testing.T) {
 		assert.Equal(t, 100_000, d.TrieNodeCacheEntries)
 		assert.Equal(t, 200_000, d.SignatureCacheEntries)
 		assert.Equal(t, 2048, d.ExplorerQueueSize)
-		assert.Equal(t, 2, d.ExplorerWorkerCount)
+		assert.Equal(t, 4, d.ExplorerWorkerCount)
 		assert.Equal(t, 4, d.EthCallConcurrency)
 	})
 
 	t.Run("TinyHost_1CPU_ExplorerWorkerAtLeast1", func(t *testing.T) {
 		d := ResolveResourceDefaults(3200, 1, "")
 		assert.Equal(t, ProfileTiny, d.Profile)
-		assert.Equal(t, 1, d.ExplorerWorkerCount)
+		assert.Equal(t, 2, d.ExplorerWorkerCount)
 		assert.Equal(t, 1024, d.GoMemLimitMB)
 	})
 
@@ -148,7 +148,7 @@ func TestClassifyAndResolveResourceDefaults(t *testing.T) {
 		assert.Equal(t, 2_500_000, d.SignatureCacheEntries)
 		assert.Equal(t, 65536, d.ExplorerQueueSize)
 		assert.Equal(t, 32, d.ExplorerWorkerCount)
-		assert.Equal(t, 64, d.EthCallConcurrency)
+		assert.Equal(t, 100, d.EthCallConcurrency) // legacy off-chain limiter on large hosts
 	})
 
 	t.Run("ExplicitProfileOverrideBeatsDetectedRAM", func(t *testing.T) {
@@ -157,7 +157,8 @@ func TestClassifyAndResolveResourceDefaults(t *testing.T) {
 		assert.Equal(t, 128, d.PebbleCacheSizeMB)
 		assert.Equal(t, 16, d.PebbleMemTableSizeMB)
 		assert.Equal(t, 2048, d.ExplorerQueueSize)
-		assert.Equal(t, 2, d.ExplorerWorkerCount)
+		assert.Equal(t, 4, d.ExplorerWorkerCount)
+		assert.Equal(t, 2048, d.GoMemLimitMB) // capped: 25% of 157 GB must not exceed the tiny ceiling
 
 		dLarge := ResolveResourceDefaults(3200, 2, "LARGE")
 		assert.Equal(t, ProfileLarge, dLarge.Profile)
@@ -173,4 +174,20 @@ func TestParseResourceProfile(t *testing.T) {
 	}
 	_, err := ParseResourceProfile("huge")
 	assert.Error(t, err)
+}
+
+func TestClassifyResourceProfile_BoundariesLeaveHeadroom(t *testing.T) {
+	// MemTotal reported by the kernel is a few percent below the nominal RAM size.
+	assert.Equal(t, ProfileLarge, ClassifyResourceProfile(62*1024, ""), "64 GB machine (~62 GiB MemTotal) must stay large")
+	assert.Equal(t, ProfileMedium, ClassifyResourceProfile(15*1024+600, ""), "16 GB machine (~15.6 GiB) must be medium")
+	assert.Equal(t, ProfileSmall, ClassifyResourceProfile(5800, ""), "6 GB machine (~5.8 GiB) must be small")
+	assert.Equal(t, ProfileTiny, ClassifyResourceProfile(3917, ""), "4 GB VPS must be tiny")
+	assert.Equal(t, ProfileTiny, ClassifyResourceProfile(3200, ""), "MemoryMax=3200M must be tiny")
+}
+
+func TestResolveResourceDefaults_SmallOverrideOnBigHostIsCapped(t *testing.T) {
+	d := ResolveResourceDefaults(193*1024, 72, "small")
+	assert.Equal(t, ProfileSmall, d.Profile)
+	assert.Equal(t, 4096, d.GoMemLimitMB)
+	assert.LessOrEqual(t, d.GoMemLimitMB, ResolveResourceDefaults(193*1024, 72, "large").GoMemLimitMB)
 }

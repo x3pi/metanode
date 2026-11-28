@@ -225,6 +225,29 @@ exec_clusters:
 ```
 Mỗi server sẽ tự động tạo systemd service riêng (`metanode-parentchain.service`, `metanode-cluster-1.service`, `metanode-cluster-2.service`) với cấu hình tự khởi động lại (`Restart=always`) và giới hạn file descriptors cao (`LimitNOFILE=65536`).
 
+## 🧮 Tự Động Chỉnh RAM/Cache Theo Máy (`resource_profile`)
+
+Node tự chọn một mức theo **RAM hiệu lực** = min(`MemTotal`, cgroup `memory.max`), nên `systemd_memory_max` cũng được tính.
+Các tham số này chỉ là cache/buffer/GC/số worker cục bộ, **không ảnh hưởng kết quả thực thi hay state root** (có test
+`TestPartA_TinyVsLargeResourceProfile_BitIdenticalConsensusRoots`), nên các node khác mức vẫn không fork.
+
+| Mức | RAM hiệu lực | GOMEMLIMIT | GOGC | Pebble cache / memtable | NOMT page/leaf | Explorer queue/worker | eth_call |
+|---|---|---|---|---|---|---|---|
+| `tiny` | < 5.5 GiB | 25% RAM, 1–2 GB | 100 | 128 / 16 MB | 64 / 64 | 2048 / min(4, 2×CPU) | 2×CPU, [4, 64] |
+| `small` | 5.5–15 GiB | 30% RAM, 1.5–4 GB | 200 | 512 / 64 MB | 128 / 128 | 8192 / 4 | 2×CPU, [4, 64] |
+| `medium` | 15–60 GiB | 35% RAM, 2–8 GB | 400 | 2048 / 128 MB | 128 / 128 | 32768 / 16 | 2×CPU, [4, 64] |
+| `large` | ≥ 60 GiB | 8 GB | 800 | 4096 / 256 MB | 128 / 128 | 65536 / 32 | 100 |
+
+`large` bằng đúng mặc định cũ. Thứ tự ưu tiên: biến môi trường (`META_GOMEMLIMIT`, `META_RESOURCE_PROFILE`,
+`META_MAX_CONCURRENT_ETH_CALL`) → biến khai báo theo host (`go_mem_limit_gb`, `pebble_*`, `nomt_*`, `explorer_*`) →
+`resource_profile` → tự đo. Log khởi động in dòng `[SYSRES] profile=... mem=...MB ...` để kiểm tra.
+
+**Khi nâng cấp:** `exec_config.json.j2` giờ ghi `0` (tự tính) cho các biến không khai báo, thay vì số cố định của
+máy 157 GB. Trước khi redeploy:
+- Máy chạy **nhiều node chung một host**: bắt buộc đặt `resource_profile` (hoặc `systemd_memory_max`) cho từng node,
+  nếu không mỗi node sẽ chọn mức theo toàn bộ RAM của máy.
+- Host đang chạy ổn mà muốn giữ nguyên tuning: đặt `resource_profile: "large"` hoặc ghim các giá trị hiện tại.
+
 ## Firewall (UFW) — opt-in và giới hạn nguồn
 
 Triển khai bình thường (`setup`, `deploy`, `restart`, `reset`) **không** thay đổi tường lửa. Chỉ khi chạy với `--open-ports`

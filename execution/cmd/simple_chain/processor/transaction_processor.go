@@ -171,7 +171,6 @@ func NewTransactionProcessor(
 
 	// Đặt giới hạn an toàn cho số request đọc đồng thời
 	const maxConcurrentReadTx = 10000
-	const maxConcurrentOffChainExecution = 100
 	const maxConcurrentDeviceKeySend = 100 // Giới hạn số goroutines đồng thời cho backupDeviceKey
 	tp := &TransactionProcessor{
 		messageSender:              messageSender,
