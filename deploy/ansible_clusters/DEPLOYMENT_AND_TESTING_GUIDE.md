@@ -145,10 +145,15 @@ Khi chạy `./deploy_clusters.sh --restart --rolling`:
 
 ### 📌 5 Cổng kiểm tra sức khỏe tự động (Health Gates G1 - G5):
 - **Gate G1 (Process):** `systemctl is-active` = `active`.
-- **Gate G2 (RPC Ready):** Cổng RPC phản hồi HTTP 200.
+- **Gate G2 (RPC Ready):** Cổng RPC phản hồi HTTP 200 (chờ tối đa `gate_rpc_timeout`, mặc định `180` giây, để kịp replay DB/WAL sau crash hoặc lag; trả về ngay khi cổng mở).
 - **Gate G3 (Height Check):** `eth_consensusReady == true` và `blockNumber >= pre_stop_height` (đảm bảo không bị lùi block hoặc mất dữ liệu).
 - **Gate G4 (Anti-Fork):** Kiểm tra hash block tại `min_height` giữa các peer trong cluster để loại bỏ nguy cơ chia nhánh mạng.
 - **Gate G5 (Binary Checksum):** Xác thực SHA-256 binary trên máy chủ khớp với bản build tại controller.
+
+#### Tùy chọn điều chỉnh / bỏ qua Health Gates (`-e`):
+- **`-e gate_rpc_timeout=<giây>`** *(mặc định `180`)*: Tăng hoặc giảm thời gian tối đa chờ cổng RPC mở ở Gate G2 (áp dụng cho cả Parent Chain và Child Chain). Tương tự có `gate_ready_retries` / `gate_ready_delay` cho Gate G3 và `gate_hash_retries` / `gate_hash_delay` cho Gate G4.
+- **`-e skip_health_gates=true`** *(chỉ áp dụng cho Child Chain / `exec_cluster`)*: Chỉ kiểm tra **Gate G1** rồi bỏ qua **Gates G2–G4** (vẫn in cảnh báo chưa kiểm tra fork/height) để node đang lag có thể tiếp tục sync ngầm.
+  > **Lưu ý an toàn:** Không được kết hợp `skip_health_gates=true` với `--rolling` (`rolling_exec=true`) vì service dùng `Type=simple`, G1 không chứng minh node đã sẵn sàng nên rolling tiếp sẽ làm mất quorum Raft. Biến này phải truyền toàn cục qua `-e`, không đặt riêng lẻ theo từng host.
 
 ---
 
