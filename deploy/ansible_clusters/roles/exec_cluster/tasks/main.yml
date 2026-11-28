@@ -13,15 +13,7 @@
 - name: Require skip_health_gates to be set uniformly across the cluster batch
   ansible.builtin.assert:
     that:
-      - >-
-        {% set my_skip = skip_health_gates | default(false) | bool -%}
-        {% set ns = namespace(mismatch=false) -%}
-        {% for h in ansible_play_batch -%}
-          {% if (hostvars[h].cluster_id | default('')) == cluster_id and ((hostvars[h].skip_health_gates | default(false) | bool) != my_skip) -%}
-            {% set ns.mismatch = true -%}
-          {% endif -%}
-        {% endfor -%}
-        {{ not ns.mismatch }}
+      - "(ansible_play_batch | map('extract', hostvars) | selectattr('cluster_id', 'defined') | selectattr('cluster_id', 'equalto', cluster_id) | map(attribute='skip_health_gates', default=false) | map('bool') | unique | list | length) <= 1"
     fail_msg: >-
       skip_health_gates must be passed globally (via -e skip_health_gates=true), not per-host,
       so Gate G4 height/fork checks have exec_post_start_height from every peer in cluster {{ cluster_id }}.
