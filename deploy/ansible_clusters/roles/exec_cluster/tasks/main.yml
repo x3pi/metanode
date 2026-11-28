@@ -1,4 +1,32 @@
 ---
+# Fail fast before stopping any node if unsafe or inconsistent gate flags are provided.
+- name: Disallow skip_health_gates when rolling_exec is enabled
+  ansible.builtin.assert:
+    that:
+      - not ((skip_health_gates | default(false) | bool) and (rolling_exec | default(false) | bool))
+    fail_msg: >-
+      Cannot combine skip_health_gates=true with --rolling (rolling_exec=true):
+      the systemd unit uses Type=simple, so Gate G1 alone cannot prove a replica is ready
+      before stopping the next replica, risking Raft quorum loss.
+  when: deploy_action in ['setup', 'deploy', 'start', 'restart', 'reset', 'rollback']
+
+- name: Require skip_health_gates to be set uniformly across the cluster batch
+  ansible.builtin.assert:
+    that:
+      - >-
+        {% set my_skip = skip_health_gates | default(false) | bool -%}
+        {% set ns = namespace(mismatch=false) -%}
+        {% for h in ansible_play_batch -%}
+          {% if (hostvars[h].cluster_id | default('')) == cluster_id and ((hostvars[h].skip_health_gates | default(false) | bool) != my_skip) -%}
+            {% set ns.mismatch = true -%}
+          {% endif -%}
+        {% endfor -%}
+        {{ not ns.mismatch }}
+    fail_msg: >-
+      skip_health_gates must be passed globally (via -e skip_health_gates=true), not per-host,
+      so Gate G4 height/fork checks have exec_post_start_height from every peer in cluster {{ cluster_id }}.
+  when: deploy_action in ['setup', 'deploy', 'start', 'restart', 'reset', 'rollback']
+
 - name: Build the parent chain endpoint list (all validators, for quorum reads and failover)
   ansible.builtin.set_fact:
     parent_chain_urls_csv: "{% for h in groups['parent_chain_nodes'] %}http://{{ hostvars[h].ansible_host | default('127.0.0.1') }}:{{ hostvars[h].parent_http_port | default(8547) }}{% if not loop.last %},{% endif %}{% endfor %}"
@@ -715,7 +743,14 @@
     # ── Gate G2–G4: RPC, Consensus Ready, Height & Anti-fork checks ──
     # Wait up to gate_rpc_timeout (default 180s) for slow DB/WAL replay after an unclean stop/lag;
     # wait_for still returns immediately as soon as the RPC port opens. Operators can also pass
-    # `-e skip_health_gates=true` to start the unit (Gate G1) and let a lagging node sync asynchronously.
+    # `-e skip_health_gates=true` (global, non-rolling only) to start the unit (Gate G1) and let a lagging node sync asynchronously.
+    - name: "Gates G2-G4: Warn that RPC, height, and fork checks are skipped"
+      ansible.builtin.debug:
+        msg: >-
+          ⚠️ WARNING on {{ inventory_hostname }}: Gates G2-G4 SKIPPED (skip_health_gates=true).
+          Only Gate G1 (systemctl is-active) ran; RPC readiness, block height, and fork safety were NOT verified!
+      when: skip_health_gates | default(false) | bool
+
     - name: "Gates G2-G4: Verify RPC, consensus readiness, height, and cluster fork safety"
       when: not (skip_health_gates | default(false) | bool)
       block:
@@ -852,7 +887,7 @@
               id: 1
             status_code: 200
           delegate_to: "{{ item }}"
-          loop: "{{ groups['exec_clusters'] | default([]) | map('extract', hostvars) | selectattr('cluster_id', 'defined') | selectattr('cluster_id', 'equalto', cluster_id) | map(attribute='inventory_hostname') | difference(cluster_peer_hosts) }}"
+          loop: "{{ groups['exec_clusters'] | default([]) | map('extract', hostvars) | selectattr('cluster_id', 'defined') | selectattr('cluster_id', 'equalto', cluster_id) | map(attribute='inventory_hostname') | difference(cluster_peer_hosts | default([])) }}"
           register: g4_rolling_peer_res
           retries: "{{ gate_hash_retries | default(15) }}"
           delay: "{{ gate_hash_delay | default(2) }}"
